@@ -118,7 +118,12 @@ public sealed class DhanApiClient
         document?.Dispose();
 
         if (statusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
-            _logger.LogWarning("Dhan authentication failed while {Context}: {Message}. The access token may have expired - generate a fresh one in the Dhan web portal.", context, message);
+        {
+            _logger.LogWarning("Dhan authentication failed while {Context}: {Message}. The access token may have expired.", context, message);
+            // Wakes DhanTotpAutoRenewalHostedService immediately instead of waiting for its next
+            // scheduled renewal - a no-op when TOTP auto-login isn't configured.
+            _session.ClearAccessToken();
+        }
 
         return new DhanApiResponse(false, statusCode, null, message ?? (isSuccess ? "Dhan returned an empty or unparseable body." : $"Dhan returned HTTP {(int)statusCode}."));
     }

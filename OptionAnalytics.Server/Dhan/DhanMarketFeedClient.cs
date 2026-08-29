@@ -197,6 +197,14 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
         {
             _lastDisconnectCode = packet.DisconnectCode;
             _logger.LogWarning("Dhan market feed sent a disconnect packet (code {Code}): {Reason}.", packet.DisconnectCode, DhanSymbology.DescribeFeedErrorCode(packet.DisconnectCode));
+
+            // Codes 807-810 mean this token/client-id will never work again - clear it so
+            // DhanTotpAutoRenewalHostedService mints a fresh one immediately instead of the feed
+            // retrying forever against dead credentials (a no-op when TOTP auto-login isn't
+            // configured).
+            if (DhanSymbology.IsSessionInvalidCode(packet.DisconnectCode))
+                _session.ClearAccessToken();
+
             return;
         }
 

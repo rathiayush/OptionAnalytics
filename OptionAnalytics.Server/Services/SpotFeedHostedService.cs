@@ -22,6 +22,7 @@ public sealed class SpotFeedHostedService : BackgroundService
     };
 
     private readonly DhanOptions _options;
+    private readonly DhanSession _session;
     private readonly DhanSpotInstrumentMaster _instrumentMaster;
     private readonly DhanHistoricalDataService _historicalData;
     private readonly DhanMarketFeedClient _feedClient;
@@ -32,6 +33,7 @@ public sealed class SpotFeedHostedService : BackgroundService
 
     public SpotFeedHostedService(
         IOptions<DhanOptions> options,
+        DhanSession session,
         DhanSpotInstrumentMaster instrumentMaster,
         DhanHistoricalDataService historicalData,
         DhanMarketFeedClient feedClient,
@@ -39,6 +41,7 @@ public sealed class SpotFeedHostedService : BackgroundService
         ILogger<SpotFeedHostedService> logger)
     {
         _options = options.Value;
+        _session = session;
         _instrumentMaster = instrumentMaster;
         _historicalData = historicalData;
         _feedClient = feedClient;
@@ -53,9 +56,20 @@ public sealed class SpotFeedHostedService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        if (!_options.HasSession)
+        if (!_options.HasSession && !_options.HasTotpCredentials)
         {
-            _logger.LogWarning("Dhan:ClientId / Dhan:AccessToken are not configured - the spot feed will not start until they are set in appsettings (or Dhan__ClientId / Dhan__AccessToken environment variables).");
+            _logger.LogWarning("Neither Dhan:AccessToken nor Dhan:Pin/Dhan:TotpSecret are configured - the spot feed will not authenticate until one of them is set.");
+        }
+        else if (_options.HasTotpCredentials)
+        {
+            // TOTP auto-login runs concurrently in its own hosted service (see
+            // DhanTotpAutoRenewalHostedService) - give it a short head start so the historical
+            // backfill below has a live token on its very first attempt instead of always losing
+            // that race on a fresh boot. Not fatal if it doesn't finish in time: the backfill just
+            // logs "not authenticated" and the live WS feed (which polls the session in a loop)
+            // still catches up moments later.
+            for (var i = 0; i < 20 && !_session.IsAuthenticated && !stoppingToken.IsCancellationRequested; i++)
+                await Task.Delay(500, stoppingToken);
         }
 
         await ResolveInstrumentsAsync(stoppingToken);
