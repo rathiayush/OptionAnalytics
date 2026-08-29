@@ -1,0 +1,95 @@
+using OptionAnalytics.Server.Dhan;
+using OptionAnalytics.Server.Models;
+
+namespace OptionAnalytics.Server.Services;
+
+/// <summary>In-memory candle series + latest price for one underlying (NIFTY or BANKNIFTY).
+/// Written by SpotFeedHostedService as ticks arrive, read by SpotController for the initial page
+/// load - a plain lock rather than anything fancier since updates are a few times a second at
+/// most for two instruments.</summary>
+public sealed class SpotUnderlyingState
+{
+    private readonly object _lock = new();
+    private readonly List<Candle> _closedCandles = new();
+    private Candle? _currentBar;
+
+    public SpotUnderlyingState(string underlying, int step)
+    {
+        Underlying = underlying;
+        Step = step;
+    }
+
+    public string Underlying { get; }
+    public int Step { get; }
+    public DhanSpotInstrument? Instrument { get; set; }
+    public decimal LastPrice { get; private set; }
+    public DateTimeOffset LastUpdateUtc { get; private set; }
+
+    /// <summary>Seeds the chart with already-closed bars from the historical backfill. Called once
+    /// before the live feed starts producing its own bars; a bar for "now" (still forming) is left
+    /// for the live feed to build, not backfilled.</summary>
+    public void SeedHistory(IEnumerable<Candle> candles)
+    {
+        lock (_lock)
+        {
+            _closedCandles.Clear();
+            _closedCandles.AddRange(candles.OrderBy(c => c.Time));
+        }
+    }
+
+    /// <summary>Folds one tick into the currently-forming 1-minute bar, closing the previous bar
+    /// when the tick lands in a new minute. Returns the (possibly just-started) current bar.</summary>
+    public Candle ApplyTick(SpotTick tick)
+    {
+        lock (_lock)
+        {
+            LastPrice = tick.LastPrice;
+            LastUpdateUtc = DateTimeOffset.UtcNow;
+
+            var minute = FloorToMinute(tick.ExchangeTimestamp);
+
+            if (_currentBar is not { } bar || bar.Time != minute)
+            {
+                if (_currentBar is { } previous) _closedCandles.Add(previous);
+                _currentBar = new Candle(minute, tick.LastPrice, tick.LastPrice, tick.LastPrice, tick.LastPrice);
+            }
+            else
+            {
+                _currentBar = bar with
+                {
+                    High = Math.Max(bar.High, tick.LastPrice),
+                    Low = Math.Min(bar.Low, tick.LastPrice),
+                    Close = tick.LastPrice,
+                };
+            }
+
+            return _currentBar.Value;
+        }
+    }
+
+    public IReadOnlyList<Candle> GetCandles()
+    {
+        lock (_lock)
+        {
+            var list = new List<Candle>(_closedCandles);
+            if (_currentBar is { } bar) list.Add(bar);
+            return list;
+        }
+    }
+
+    public Candle? GetCurrentBar()
+    {
+        lock (_lock) { return _currentBar; }
+    }
+
+    public decimal RoundedPrice => Step > 0 && LastPrice > 0 ? Math.Round(LastPrice / Step) * Step : LastPrice;
+
+    public SpotSnapshot ToSnapshot() => new(Underlying, Step, LastPrice, RoundedPrice, LastUpdateUtc, GetCurrentBar());
+
+    // IST is UTC+5:30, a whole number of minutes offset from UTC, so flooring a UTC instant to the
+    // minute lands on exactly the same boundary as flooring its IST wall-clock time would - no
+    // timezone conversion is actually needed for 1-minute bucketing, only for day boundaries
+    // (see SpotFeedHostedService.IstToday).
+    private static DateTimeOffset FloorToMinute(DateTimeOffset timestamp) =>
+        new(timestamp.Year, timestamp.Month, timestamp.Day, timestamp.Hour, timestamp.Minute, 0, timestamp.Offset);
+}

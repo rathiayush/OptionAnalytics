@@ -1,0 +1,21 @@
+# .NET
+bin/
+obj/
+*.user
+
+# Node / Vite
+node_modules/
+dist/
+*.local
+
+# Local secrets - see README for the recommended way to set Dhan:ClientId/Dhan:AccessToken
+# (environment variables) without committing them; these paths are ignored in case they're used
+# anyway.
+appsettings.Local.json
+appsettings.*.local.json
+
+# OS / editor
+.vs/
+.vscode/
+.idea/
+*.swp
