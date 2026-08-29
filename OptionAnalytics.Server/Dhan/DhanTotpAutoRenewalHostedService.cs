@@ -11,8 +11,9 @@ namespace OptionAnalytics.Server.Dhan;
 /// dashboard to push an "auth restored" notification to, so that step is dropped; the renewal
 /// schedule and reactive-invalidation behaviour are otherwise identical:
 ///
-///  1. STARTUP - authenticated within seconds of boot, retried with backoff (2s doubling to 30s)
-///     until it succeeds.
+///  1. STARTUP - authenticated within seconds of boot, retried with backoff (2s doubling to 30s,
+///     or ~130s specifically when Dhan reports its own "once every 2 minutes" cooldown - see
+///     RateLimitCooldown) until it succeeds.
 ///  2. PROACTIVELY, an hour before the current token's own expiry.
 ///  3. REACTIVELY, the instant DhanSession.SessionInvalidated fires (a 401 from the REST API, or
 ///     a session-invalid disconnect code from the WS feed - see DhanApiClient and
@@ -23,6 +24,14 @@ public sealed class DhanTotpAutoRenewalHostedService : BackgroundService
     private static readonly TimeSpan RetryBackoffInitial = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan RetryBackoffMax = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan RenewalMargin = TimeSpan.FromHours(1);
+
+    /// <summary>Dhan's own generateAccessToken endpoint refuses a repeat call for 2 minutes after
+    /// the last one (regardless of whether it succeeded) - see DhanTotpAuthService's RateLimited
+    /// detection. The plain exponential backoff above caps at 30s, which is too short to ever
+    /// clear that cooldown: every retry lands inside the window the previous attempt just started,
+    /// so without this the loop can retry forever without ever getting a real answer. A little
+    /// margin over Dhan's stated 2 minutes accounts for clock/latency slop.</summary>
+    private static readonly TimeSpan RateLimitCooldown = TimeSpan.FromSeconds(130);
 
     private readonly DhanOptions _options;
     private readonly DhanSession _session;
@@ -81,10 +90,11 @@ public sealed class DhanTotpAutoRenewalHostedService : BackgroundService
                 return result.ExpiresUtc ?? DateTimeOffset.UtcNow.AddHours(23);
             }
 
-            _logger.LogWarning("Dhan TOTP auto-login failed: {Error} - retrying in {Seconds}s.", result.Error, backoff.TotalSeconds);
+            var delay = result.RateLimited ? RateLimitCooldown : backoff;
+            _logger.LogWarning("Dhan TOTP auto-login failed: {Error} - retrying in {Seconds}s.", result.Error, delay.TotalSeconds);
 
-            if (!await DelayAsync(backoff, stoppingToken)) return null;
-            backoff = Min(backoff * 2, RetryBackoffMax);
+            if (!await DelayAsync(delay, stoppingToken)) return null;
+            backoff = result.RateLimited ? RetryBackoffInitial : Min(backoff * 2, RetryBackoffMax);
         }
 
         return null;

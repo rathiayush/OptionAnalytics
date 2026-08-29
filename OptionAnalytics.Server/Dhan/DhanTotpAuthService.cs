@@ -3,7 +3,7 @@ using Microsoft.Extensions.Options;
 
 namespace OptionAnalytics.Server.Dhan;
 
-public readonly record struct DhanTotpLoginResult(bool Success, DateTimeOffset? ExpiresUtc, string? Error);
+public readonly record struct DhanTotpLoginResult(bool Success, DateTimeOffset? ExpiresUtc, string? Error, bool RateLimited = false);
 
 /// <summary>
 /// Mints a fresh Dhan access token with no browser and no human involved: computes the current
@@ -71,7 +71,19 @@ public sealed class DhanTotpAuthService
 
             var accessToken = root.TryGetProperty("accessToken", out var at) ? at.GetString() : null;
             if (string.IsNullOrWhiteSpace(accessToken))
-                return new DhanTotpLoginResult(false, null, "Dhan's TOTP login response contained no accessToken.");
+            {
+                // Dhan answers a too-frequent generateAccessToken call with HTTP 200 and
+                // {"status":"error","message":"Token can be generated once every 2 minutes."} -
+                // no accessToken, but also no non-2xx status to distinguish it from a genuine
+                // credential failure. Detected by message text so the caller (see
+                // DhanTotpAutoRenewalHostedService) can wait out Dhan's own cooldown instead of
+                // retrying every few seconds and re-triggering the same limit forever.
+                var message = root.TryGetProperty("message", out var m) ? m.GetString() : null;
+                var rateLimited = message?.Contains("every", StringComparison.OrdinalIgnoreCase) == true
+                    && message.Contains("minute", StringComparison.OrdinalIgnoreCase);
+
+                return new DhanTotpLoginResult(false, null, message ?? "Dhan's TOTP login response contained no accessToken.", rateLimited);
+            }
 
             var clientId = root.TryGetProperty("dhanClientId", out var cid) ? cid.GetString() : null;
             if (string.IsNullOrWhiteSpace(clientId)) clientId = _options.ClientId;
