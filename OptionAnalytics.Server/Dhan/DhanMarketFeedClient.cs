@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net.WebSockets;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
@@ -5,33 +6,41 @@ using Microsoft.Extensions.Options;
 namespace OptionAnalytics.Server.Dhan;
 
 /// <summary>
-/// Owns the live connection to Dhan's market feed (wss://api-feed.dhan.co) for a small, fixed set
-/// of spot instruments, decodes the binary packets, and raises TickReceived for each update.
-/// Reconnects with exponential backoff and re-subscribes on every reconnect.
+/// Owns the single live connection to Dhan's market feed (wss://api-feed.dhan.co), decodes the
+/// binary packets, and raises TickReceived for each update. Reconnects with exponential backoff
+/// and re-subscribes everything on every reconnect. Run as its own hosted service
+/// (DhanMarketFeedHostedService owns the RunAsync loop); SpotFeedHostedService and
+/// CdvHostedService both subscribe/unsubscribe tokens on this same shared instance rather than
+/// each owning a connection - Dhan allows only a handful of concurrent connections per account.
 ///
-/// A much smaller cousin of LiveSpreadCalculator's DhanMarketFeedClient: this app only ever
-/// subscribes NIFTY's and BANKNIFTY's two index tokens (known up front, passed into RunAsync), so
-/// there is no instrument-master-driven segment lookup, no order-update socket, and no
-/// 100-instrument batching - just connect, subscribe two tokens, and stream. See that file for the
-/// full protocol writeup this is ported from.
+/// A smaller cousin of LiveSpreadCalculator's DhanMarketFeedClient: no order-update socket, no
+/// instrument-master-driven segment lookup (callers already know each token's segment), just
+/// connect, track a subscribed-token set that can change at runtime, and stream. See that file for
+/// the full protocol writeup this is ported from.
 /// </summary>
 public sealed class DhanMarketFeedClient : IAsyncDisposable
 {
     private const int RequestCodeFull = 21;
+    private const int RequestCodeUnsubscribeFull = 22;
     private const int RequestCodeDisconnect = 12;
+    private const int SubscriptionBatchSize = 100;
 
     // If the socket has been open this long with zero data, it is treated as silently dead and
     // reconnected - Dhan authorizes a connection asynchronously after the handshake, so a
     // subscription sent too early can simply be ignored with no error.
     private static readonly TimeSpan StallTimeout = TimeSpan.FromSeconds(45);
     private static readonly TimeSpan StallCheckInterval = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan InterBatchDelay = TimeSpan.FromMilliseconds(50);
 
     private readonly DhanOptions _options;
     private readonly DhanSession _session;
     private readonly ILogger<DhanMarketFeedClient> _logger;
 
+    private readonly ConcurrentDictionary<uint, string> _tokenSegments = new();
+    private readonly ConcurrentDictionary<uint, SpotTick> _lastTick = new();
+    private readonly SemaphoreSlim _sendLock = new(1, 1);
+
     private ClientWebSocket? _socket;
-    private IReadOnlyDictionary<uint, string> _tokenSegments = new Dictionary<uint, string>();
     private DateTimeOffset _lastMessageAt = DateTimeOffset.MinValue;
     private int _lastDisconnectCode;
 
@@ -44,11 +53,41 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
         _logger = logger;
     }
 
-    /// <summary>Runs until cancelled, connecting/reconnecting as needed. <paramref name="tokenSegments"/>
-    /// maps each security id to subscribe to its Dhan WS segment string (e.g. "IDX_I").</summary>
-    public async Task RunAsync(IReadOnlyDictionary<uint, string> tokenSegments, CancellationToken cancellationToken)
+    /// <summary>Adds tokens to the subscribed set (each mapped to its Dhan WS segment string, e.g.
+    /// "IDX_I" or "NSE_FNO") and, if already connected, sends a live subscribe message for the new
+    /// ones immediately. Safe to call before the connection exists - RunAsync subscribes the whole
+    /// set on every (re)connect regardless.</summary>
+    public async Task SubscribeAsync(IReadOnlyDictionary<uint, string> tokens, CancellationToken cancellationToken)
     {
-        _tokenSegments = tokenSegments;
+        var added = new List<KeyValuePair<uint, string>>();
+        foreach (var kv in tokens)
+        {
+            if (_tokenSegments.TryAdd(kv.Key, kv.Value)) added.Add(kv);
+        }
+
+        if (added.Count == 0 || _socket is not { State: WebSocketState.Open }) return;
+        await SendSubscriptionAsync(added.Select(kv => (kv.Key, kv.Value)), RequestCodeFull, cancellationToken);
+    }
+
+    /// <summary>Removes tokens from the subscribed set and, if connected, sends a live unsubscribe
+    /// message - used when the ATM window rolls and strikes fall out of range.</summary>
+    public async Task UnsubscribeAsync(IEnumerable<uint> tokens, CancellationToken cancellationToken)
+    {
+        var removed = new List<(uint Token, string Segment)>();
+        foreach (var token in tokens)
+        {
+            if (_tokenSegments.TryRemove(token, out var segment)) removed.Add((token, segment));
+            _lastTick.TryRemove(token, out _);
+        }
+
+        if (removed.Count == 0 || _socket is not { State: WebSocketState.Open }) return;
+        await SendSubscriptionAsync(removed.Select(r => (r.Token, r.Segment)), RequestCodeUnsubscribeFull, cancellationToken);
+    }
+
+    /// <summary>Runs until cancelled, connecting/reconnecting as needed and (re)subscribing
+    /// whatever is currently in the subscribed set on every connect.</summary>
+    public async Task RunAsync(CancellationToken cancellationToken)
+    {
         var backoff = TimeSpan.FromSeconds(1);
         var loggedAwaitingSession = false;
 
@@ -58,7 +97,7 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
             {
                 if (!loggedAwaitingSession)
                 {
-                    _logger.LogInformation("Dhan market feed is waiting for Dhan:ClientId/Dhan:AccessToken to be configured before connecting.");
+                    _logger.LogInformation("Dhan market feed is waiting for Dhan credentials before connecting.");
                     loggedAwaitingSession = true;
                 }
                 if (!await DelayAsync(TimeSpan.FromSeconds(3), cancellationToken)) break;
@@ -141,15 +180,27 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
         var uri = new Uri($"{_options.WsUrl}?version=2&token={Uri.EscapeDataString(accessToken)}&clientId={Uri.EscapeDataString(clientId)}&authType=2");
         await _socket.ConnectAsync(uri, cancellationToken);
 
-        _logger.LogInformation("Connected to Dhan market feed ({Count} instruments).", _tokenSegments.Count);
+        var tokens = _tokenSegments.ToArray();
+        _logger.LogInformation("Connected to Dhan market feed ({Count} instruments).", tokens.Length);
 
-        if (_tokenSegments.Count > 0)
+        if (tokens.Length > 0)
+            await SendSubscriptionAsync(tokens.Select(kv => (kv.Key, kv.Value)), RequestCodeFull, cancellationToken);
+    }
+
+    private async Task SendSubscriptionAsync(IEnumerable<(uint Token, string Segment)> entries, int requestCode, CancellationToken cancellationToken)
+    {
+        var isFirst = true;
+        foreach (var batch in entries.Chunk(SubscriptionBatchSize))
         {
+            if (batch.Length == 0) continue;
+            if (!isFirst && !await DelayAsync(InterBatchDelay, cancellationToken)) return;
+            isFirst = false;
+
             await SendAsync(new
             {
-                RequestCode = RequestCodeFull,
-                InstrumentCount = _tokenSegments.Count,
-                InstrumentList = _tokenSegments.Select(kv => new { ExchangeSegment = kv.Value, SecurityId = kv.Key.ToString() }).ToArray(),
+                RequestCode = requestCode,
+                InstrumentCount = batch.Length,
+                InstrumentList = batch.Select(e => new { ExchangeSegment = e.Segment, SecurityId = e.Token.ToString() }).ToArray(),
             }, cancellationToken);
         }
     }
@@ -189,8 +240,6 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
         return cancellationToken.IsCancellationRequested ? "shutting down" : $"the socket stopped being open (state {_socket!.State})";
     }
 
-    private readonly Dictionary<uint, SpotTick> _lastTick = new();
-
     private void HandlePacket(DhanPacket packet)
     {
         if (packet.Kind == DhanPacketKind.Disconnect)
@@ -211,6 +260,11 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
         if (packet.Kind is DhanPacketKind.MarketStatus or DhanPacketKind.Unknown or DhanPacketKind.OpenInterest)
             return;
 
+        // Only cache/report instruments we still want - a packet already in flight for an
+        // instrument UnsubscribeAsync just dropped must not resurrect a cache entry for it (same
+        // leak LiveSpreadCalculator's DhanMarketFeedClient guards against).
+        if (!_tokenSegments.ContainsKey(packet.SecurityId)) return;
+
         var previous = _lastTick.TryGetValue(packet.SecurityId, out var existing) ? existing : null;
         var tick = new SpotTick(
             SecurityId: packet.SecurityId,
@@ -219,6 +273,7 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
             High: packet.High > 0 ? packet.High : previous?.High ?? 0,
             Low: packet.Low > 0 ? packet.Low : previous?.Low ?? 0,
             Close: packet.Close > 0 ? packet.Close : previous?.Close ?? 0,
+            Volume: packet.Volume > 0 ? packet.Volume : previous?.Volume ?? 0,
             ExchangeTimestamp: packet.ExchangeTimestamp);
 
         _lastTick[packet.SecurityId] = tick;
@@ -229,7 +284,16 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
     {
         if (_socket is not { State: WebSocketState.Open }) return;
         var bytes = JsonSerializer.SerializeToUtf8Bytes(message);
-        await _socket.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, cancellationToken);
+
+        await _sendLock.WaitAsync(cancellationToken);
+        try
+        {
+            await _socket.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, cancellationToken);
+        }
+        finally
+        {
+            _sendLock.Release();
+        }
     }
 
     private static async Task<bool> DelayAsync(TimeSpan delay, CancellationToken cancellationToken)

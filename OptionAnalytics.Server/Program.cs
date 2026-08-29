@@ -18,16 +18,27 @@ builder.Services.AddHttpClient<DhanSpotInstrumentMaster>();
 builder.Services.AddHttpClient<DhanTotpAuthService>();
 builder.Services.AddSingleton<DhanHistoricalDataService>();
 builder.Services.AddSingleton<DhanMarketFeedClient>();
+builder.Services.AddHttpClient<DhanOptionChainMaster>();
 
 // No-op when Dhan:Pin/Dhan:TotpSecret aren't set (see DhanTotpAutoRenewalHostedService) - safe to
 // always register rather than branching on config here.
 builder.Services.AddHostedService<DhanTotpAutoRenewalHostedService>();
+
+// Owns the one shared WS connection's run loop - SpotFeedHostedService and CdvHostedService both
+// subscribe/unsubscribe tokens on the same DhanMarketFeedClient singleton rather than each
+// opening their own connection.
+builder.Services.AddHostedService<DhanMarketFeedHostedService>();
 
 // SpotFeedHostedService is both the hosted background loop AND the read model the REST
 // controller queries (its per-underlying candle/price state) - registered as a singleton and
 // then handed to AddHostedService so both consumers share the exact same instance.
 builder.Services.AddSingleton<SpotFeedHostedService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<SpotFeedHostedService>());
+
+// Same pattern as SpotFeedHostedService - CdvController reads CdvHostedService's per-underlying
+// state directly.
+builder.Services.AddSingleton<CdvHostedService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<CdvHostedService>());
 
 builder.Services.AddSignalR();
 builder.Services.AddControllers();

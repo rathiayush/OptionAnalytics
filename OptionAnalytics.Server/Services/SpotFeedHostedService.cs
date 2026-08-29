@@ -78,7 +78,7 @@ public sealed class SpotFeedHostedService : BackgroundService
         _feedClient.TickReceived += OnTick;
 
         var tokenSegments = _bySecurityId.ToDictionary(kv => kv.Key, kv => kv.Value.Instrument!.DhanSegment);
-        await _feedClient.RunAsync(tokenSegments, stoppingToken);
+        await _feedClient.SubscribeAsync(tokenSegments, stoppingToken);
     }
 
     private async Task ResolveInstrumentsAsync(CancellationToken cancellationToken)
@@ -157,10 +157,11 @@ public sealed class SpotFeedHostedService : BackgroundService
     /// <summary>Today's date in IST (UTC+5:30, a fixed offset - no DST, no tzdata lookup needed).</summary>
     private static DateOnly IstToday() => DateOnly.FromDateTime(DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(5.5)).DateTime);
 
-    public override async Task StopAsync(CancellationToken cancellationToken)
+    public override Task StopAsync(CancellationToken cancellationToken)
     {
+        // DhanMarketFeedClient's connection lifecycle (including disposal) is owned by
+        // DhanMarketFeedHostedService, which this service shares the client singleton with.
         _feedClient.TickReceived -= OnTick;
-        await _feedClient.DisposeAsync();
-        await base.StopAsync(cancellationToken);
+        return base.StopAsync(cancellationToken);
     }
 }

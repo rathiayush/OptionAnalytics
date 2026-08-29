@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Select, Space, Typography, Spin } from 'antd'
-import { createChart, CandlestickSeries, CrosshairMode } from 'lightweight-charts'
+import { Select, Space, Typography, Spin, Card } from 'antd'
+import { createChart, CandlestickSeries, LineSeries, CrosshairMode } from 'lightweight-charts'
 import * as signalR from '@microsoft/signalr'
 import './App.css'
 
@@ -8,6 +8,8 @@ const { Title, Text } = Typography
 
 const UP_COLOR = '#26a69a'
 const DOWN_COLOR = '#ef5350'
+const CE_COLOR = '#3ddc84'
+const PE_COLOR = '#ff5c5c'
 const AXIS_COLOR = '#9aa4b2'
 const GRID_COLOR = '#ffffff14'
 const BORDER_COLOR = '#ffffff22'
@@ -24,9 +26,17 @@ function fmtPrice(v) {
   return v == null ? '—' : Number(v).toLocaleString('en-IN', { maximumFractionDigits: 2 })
 }
 
-function useSpotHub(onSnapshot) {
-  const handlerRef = useRef(onSnapshot)
-  handlerRef.current = onSnapshot
+function fmtCdv(v) {
+  return v == null ? '—' : Number(v).toLocaleString('en-IN', { maximumFractionDigits: 0 })
+}
+
+// One SignalR connection shared by both the spot chart and the CDV chart - each just registers
+// its own handler for the event it cares about ("spotUpdate" / "cdvUpdate").
+function useHub(onSpotUpdate, onCdvUpdate) {
+  const spotHandlerRef = useRef(onSpotUpdate)
+  const cdvHandlerRef = useRef(onCdvUpdate)
+  spotHandlerRef.current = onSpotUpdate
+  cdvHandlerRef.current = onCdvUpdate
 
   useEffect(() => {
     const connection = new signalR.HubConnectionBuilder()
@@ -34,14 +44,15 @@ function useSpotHub(onSnapshot) {
       .withAutomaticReconnect()
       .build()
 
-    connection.on('spotUpdate', (snapshot) => handlerRef.current(snapshot))
+    connection.on('spotUpdate', (snapshot) => spotHandlerRef.current(snapshot))
+    connection.on('cdvUpdate', (snapshot) => cdvHandlerRef.current(snapshot))
     connection.start().catch((err) => console.error('SignalR connection failed:', err))
 
     return () => { connection.stop() }
   }, [])
 }
 
-function Chart({ candles, liveBar }) {
+function SpotChart({ candles, liveBar }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
@@ -96,11 +107,65 @@ function Chart({ candles, liveBar }) {
   return <div ref={containerRef} style={{ width: '100%', height: 440 }} />
 }
 
+function CdvChart({ series, liveBar }) {
+  const containerRef = useRef(null)
+  const chartRef = useRef(null)
+  const ceRef = useRef(null)
+  const peRef = useRef(null)
+
+  useEffect(() => {
+    if (!containerRef.current) return
+
+    const chart = createChart(containerRef.current, {
+      width: containerRef.current.clientWidth,
+      height: 320,
+      layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
+      grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
+      rightPriceScale: { borderColor: BORDER_COLOR },
+      timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false },
+      crosshair: { mode: CrosshairMode.Normal },
+    })
+    chartRef.current = chart
+    ceRef.current = chart.addSeries(LineSeries, { color: CE_COLOR, lineWidth: 2, title: 'CE', priceLineVisible: false })
+    peRef.current = chart.addSeries(LineSeries, { color: PE_COLOR, lineWidth: 2, title: 'PE', priceLineVisible: false })
+
+    const onResize = () => {
+      if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth })
+    }
+    window.addEventListener('resize', onResize)
+
+    return () => {
+      window.removeEventListener('resize', onResize)
+      chart.remove()
+      chartRef.current = null
+      ceRef.current = null
+      peRef.current = null
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!ceRef.current || !peRef.current) return
+    ceRef.current.setData(series.map((p) => ({ time: toChartTime(p.time), value: p.ceCdv })))
+    peRef.current.setData(series.map((p) => ({ time: toChartTime(p.time), value: p.peCdv })))
+    chartRef.current?.timeScale().fitContent()
+  }, [series])
+
+  useEffect(() => {
+    if (!ceRef.current || !peRef.current || !liveBar) return
+    ceRef.current.update({ time: toChartTime(liveBar.time), value: liveBar.ceCdv })
+    peRef.current.update({ time: toChartTime(liveBar.time), value: liveBar.peCdv })
+  }, [liveBar])
+
+  return <div ref={containerRef} style={{ width: '100%', height: 320 }} />
+}
+
 export default function App() {
   const [underlyings, setUnderlyings] = useState([])
   const [selected, setSelected] = useState(null)
   const [candles, setCandles] = useState([])
   const [snapshot, setSnapshot] = useState(null)
+  const [cdvSeries, setCdvSeries] = useState([])
+  const [cdvSnapshot, setCdvSnapshot] = useState(null)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -128,12 +193,23 @@ export default function App() {
       .then((data) => { if (!cancelled) setSnapshot(data) })
       .catch((err) => console.error('Failed to load snapshot:', err))
 
+    fetch(`/api/cdv/${selected}/series`)
+      .then((r) => r.json())
+      .then((data) => { if (!cancelled) setCdvSeries(data) })
+      .catch((err) => console.error('Failed to load CDV series:', err))
+
+    fetch(`/api/cdv/${selected}/snapshot`)
+      .then((r) => r.json())
+      .then((data) => { if (!cancelled) setCdvSnapshot(data) })
+      .catch((err) => console.error('Failed to load CDV snapshot:', err))
+
     return () => { cancelled = true }
   }, [selected])
 
-  useSpotHub((incoming) => {
-    if (incoming.underlying === selected) setSnapshot(incoming)
-  })
+  useHub(
+    (incoming) => { if (incoming.underlying === selected) setSnapshot(incoming) },
+    (incoming) => { if (incoming.underlying === selected) setCdvSnapshot(incoming) },
+  )
 
   const step = snapshot?.step
   const rounded = useMemo(() => snapshot?.roundedPrice ?? null, [snapshot])
@@ -161,7 +237,7 @@ export default function App() {
 
         <div style={{ border: `1px solid ${BORDER_COLOR}`, borderRadius: 8, padding: 12 }}>
           {candles.length > 0 ? (
-            <Chart candles={candles} liveBar={snapshot?.currentBar} />
+            <SpotChart candles={candles} liveBar={snapshot?.currentBar} />
           ) : (
             <div style={{ height: 440, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
               <Text type="secondary">Waiting for chart data - the Dhan feed may still be connecting.</Text>
@@ -174,6 +250,28 @@ export default function App() {
           <Text style={{ fontSize: 40, fontWeight: 600, lineHeight: 1.2 }}>{fmtPrice(rounded)}</Text>
           <Text type="secondary">Last traded: {fmtPrice(snapshot?.lastPrice)}</Text>
         </Space>
+
+        <Card
+          size="small"
+          title="CE / PE Cumulative Delta Volume"
+          extra={
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              ATM {cdvSnapshot?.atmStrike ?? '—'} · Expiry {cdvSnapshot?.expiry ?? '—'}
+            </Text>
+          }
+        >
+          {cdvSeries.length > 0 ? (
+            <CdvChart series={cdvSeries} liveBar={cdvSnapshot?.currentBar} />
+          ) : (
+            <div style={{ height: 320, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <Text type="secondary">Waiting for option-chain data - strikes resolve once the spot price is known.</Text>
+            </div>
+          )}
+          <Space size={24} style={{ marginTop: 8 }}>
+            <Text style={{ color: CE_COLOR }}>CE {fmtCdv(cdvSnapshot?.ceCdv)}</Text>
+            <Text style={{ color: PE_COLOR }}>PE {fmtCdv(cdvSnapshot?.peCdv)}</Text>
+          </Space>
+        </Card>
       </Space>
     </div>
   )
