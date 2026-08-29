@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Select, Space, Typography, Spin, Card } from 'antd'
-import { createChart, CandlestickSeries, LineSeries, CrosshairMode } from 'lightweight-charts'
+import { createChart, createSeriesMarkers, CandlestickSeries, LineSeries, CrosshairMode } from 'lightweight-charts'
 import * as signalR from '@microsoft/signalr'
 import './App.css'
 
@@ -10,6 +10,8 @@ const UP_COLOR = '#26a69a'
 const DOWN_COLOR = '#ef5350'
 const CE_COLOR = '#3ddc84'
 const PE_COLOR = '#ff5c5c'
+const EMA_FAST_COLOR = '#ffb100'
+const EMA_SLOW_COLOR = '#4dabf7'
 const AXIS_COLOR = '#9aa4b2'
 const GRID_COLOR = '#ffffff14'
 const BORDER_COLOR = '#ffffff22'
@@ -20,6 +22,60 @@ function toChartTime(isoOrDate) {
 
 function candleToBar(c) {
   return { time: toChartTime(c.time), open: c.open, high: c.high, low: c.low, close: c.close }
+}
+
+// Standard EMA: seeded with a plain average of the first `period` closes, then the usual
+// exponential recurrence. Returns one value per input bar, null before the seed window fills.
+function computeEma(closes, period) {
+  const result = new Array(closes.length).fill(null)
+  if (closes.length < period) return result
+
+  const k = 2 / (period + 1)
+  let sum = 0
+  for (let i = 0; i < period; i++) sum += closes[i]
+  let prev = sum / period
+  result[period - 1] = prev
+
+  for (let i = period; i < closes.length; i++) {
+    prev = closes[i] * k + prev * (1 - k)
+    result[i] = prev
+  }
+  return result
+}
+
+// EMA9/EMA21 line points plus crossover markers (bullish: 9 crosses above 21, bearish: below) -
+// the "TradingView-style EMA crossover" overlay for the spot chart.
+function useEmaCrossover(bars) {
+  return useMemo(() => {
+    const closes = bars.map((b) => b.close)
+    const ema9 = computeEma(closes, 9)
+    const ema21 = computeEma(closes, 21)
+
+    const ema9Points = []
+    const ema21Points = []
+    const markers = []
+    let prevDiff = null
+
+    for (let i = 0; i < bars.length; i++) {
+      const time = toChartTime(bars[i].time)
+      if (ema9[i] != null) ema9Points.push({ time, value: ema9[i] })
+      if (ema21[i] != null) ema21Points.push({ time, value: ema21[i] })
+
+      if (ema9[i] != null && ema21[i] != null) {
+        const diff = ema9[i] - ema21[i]
+        if (prevDiff != null) {
+          if (prevDiff <= 0 && diff > 0) {
+            markers.push({ time, position: 'belowBar', color: UP_COLOR, shape: 'arrowUp', text: 'EMA 9/21' })
+          } else if (prevDiff >= 0 && diff < 0) {
+            markers.push({ time, position: 'aboveBar', color: DOWN_COLOR, shape: 'arrowDown', text: 'EMA 9/21' })
+          }
+        }
+        prevDiff = diff
+      }
+    }
+
+    return { ema9Points, ema21Points, markers }
+  }, [bars])
 }
 
 function fmtPrice(v) {
@@ -56,6 +112,19 @@ function SpotChart({ candles, liveBar }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
+  const ema9Ref = useRef(null)
+  const ema21Ref = useRef(null)
+  const markersRef = useRef(null)
+
+  // The live-updating bar merged into the closed-bar list, so the EMA/crossover calculation
+  // always includes the current forming bar - the same combined series the candlestick itself
+  // effectively shows via setData + update().
+  const bars = useMemo(() => {
+    if (!liveBar) return candles
+    return [...candles.filter((c) => c.time !== liveBar.time), liveBar]
+  }, [candles, liveBar])
+
+  const { ema9Points, ema21Points, markers } = useEmaCrossover(bars)
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -77,6 +146,9 @@ function SpotChart({ candles, liveBar }) {
       wickUpColor: UP_COLOR,
       wickDownColor: DOWN_COLOR,
     })
+    ema9Ref.current = chart.addSeries(LineSeries, { color: EMA_FAST_COLOR, lineWidth: 1, title: 'EMA 9', priceLineVisible: false, crosshairMarkerVisible: false })
+    ema21Ref.current = chart.addSeries(LineSeries, { color: EMA_SLOW_COLOR, lineWidth: 1, title: 'EMA 21', priceLineVisible: false, crosshairMarkerVisible: false })
+    markersRef.current = createSeriesMarkers(seriesRef.current, [])
 
     const onResize = () => {
       if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth })
@@ -88,6 +160,9 @@ function SpotChart({ candles, liveBar }) {
       chart.remove()
       chartRef.current = null
       seriesRef.current = null
+      ema9Ref.current = null
+      ema21Ref.current = null
+      markersRef.current = null
     }
     // One chart instance per mount - series data is (re)populated by the effects below, not by
     // recreating the chart, so switching the underlying doesn't flicker a fresh empty chart in.
@@ -103,6 +178,16 @@ function SpotChart({ candles, liveBar }) {
     if (!seriesRef.current || !liveBar) return
     seriesRef.current.update(candleToBar(liveBar))
   }, [liveBar])
+
+  useEffect(() => {
+    if (!ema9Ref.current || !ema21Ref.current) return
+    ema9Ref.current.setData(ema9Points)
+    ema21Ref.current.setData(ema21Points)
+  }, [ema9Points, ema21Points])
+
+  useEffect(() => {
+    markersRef.current?.setMarkers(markers)
+  }, [markers])
 
   return <div ref={containerRef} style={{ width: '100%', height: 440 }} />
 }
@@ -236,6 +321,10 @@ export default function App() {
         </Space>
 
         <div style={{ border: `1px solid ${BORDER_COLOR}`, borderRadius: 8, padding: 12 }}>
+          <Space size={16} style={{ marginBottom: 4 }}>
+            <Text style={{ color: EMA_FAST_COLOR, fontSize: 12 }}>— EMA 9</Text>
+            <Text style={{ color: EMA_SLOW_COLOR, fontSize: 12 }}>— EMA 21</Text>
+          </Space>
           {candles.length > 0 ? (
             <SpotChart candles={candles} liveBar={snapshot?.currentBar} />
           ) : (

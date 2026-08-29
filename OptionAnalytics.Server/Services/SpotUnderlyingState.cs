@@ -27,13 +27,27 @@ public sealed class SpotUnderlyingState
 
     /// <summary>Seeds the chart with already-closed bars from the historical backfill. Called once
     /// before the live feed starts producing its own bars; a bar for "now" (still forming) is left
-    /// for the live feed to build, not backfilled.</summary>
+    /// for the live feed to build, not backfilled.
+    ///
+    /// Also seeds LastPrice from the most recent bar's close when nothing has arrived from the
+    /// live feed yet (LastPrice is still 0) - otherwise, whenever the market is closed (after
+    /// hours, weekends, a holiday) LastPrice stays stuck at 0 forever despite the chart itself
+    /// having real historical data, which left the price display and CDV's ATM resolution both
+    /// dead even though there is a perfectly good "last known price" (the previous close) to work
+    /// from. A live tick, whenever one does arrive, still always overwrites this immediately - see
+    /// ApplyTick.</summary>
     public void SeedHistory(IEnumerable<Candle> candles)
     {
         lock (_lock)
         {
             _closedCandles.Clear();
             _closedCandles.AddRange(candles.OrderBy(c => c.Time));
+
+            if (LastPrice <= 0 && _closedCandles.Count > 0)
+            {
+                LastPrice = _closedCandles[^1].Close;
+                LastUpdateUtc = DateTimeOffset.UtcNow;
+            }
         }
     }
 

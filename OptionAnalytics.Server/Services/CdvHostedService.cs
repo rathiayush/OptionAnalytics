@@ -69,11 +69,24 @@ public sealed class CdvHostedService : BackgroundService
 
         _feedClient.TickReceived += OnTick;
 
-        using var timer = new PeriodicTimer(AtmRecenterInterval);
-        do
+        // The very first recenter can easily lose the race with SpotFeedHostedService's own
+        // startup work (scrip master download, historical backfill) and find every underlying's
+        // spot price still 0 - which used to mean waiting a full 30 minutes for the next scheduled
+        // recenter before the CDV chart ever got a strike window. Retry on a short interval until
+        // every underlying has resolved an ATM at least once, then fall through to the normal
+        // 30-minute cadence.
+        for (var attempt = 0; attempt < 30 && !stoppingToken.IsCancellationRequested; attempt++)
         {
             await RecenterAllAsync(stoppingToken);
-        } while (await timer.WaitForNextTickAsync(stoppingToken));
+            if (States.Values.All(s => s.AtmStrike is not null)) break;
+            await Task.Delay(TimeSpan.FromSeconds(20), stoppingToken);
+        }
+
+        using var timer = new PeriodicTimer(AtmRecenterInterval);
+        while (await timer.WaitForNextTickAsync(stoppingToken))
+        {
+            await RecenterAllAsync(stoppingToken);
+        }
     }
 
     private async Task RecenterAllAsync(CancellationToken cancellationToken)
