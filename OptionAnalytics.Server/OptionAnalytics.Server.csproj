@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Swashbuckle.AspNetCore" Version="6.6.2" />
+  </ItemGroup>
+
+  <!-- Builds the React client and drops its output into wwwroot before Publish, so the
+       production app is self-contained (UseStaticFiles + MapFallbackToFile in Program.cs serve
+       it directly, no separate Node process needed). Dev keeps using the Vite dev server on its
+       own port (see optionanalytics.client/vite.config.js) - this target never runs for a plain
+       `dotnet build`/`dotnet run`, only for Publish. -->
+  <Target Name="BuildAndCopyClient" BeforeTargets="Publish">
+    <Exec Command="npm install" WorkingDirectory="../optionanalytics.client" />
+    <Exec Command="npm run build" WorkingDirectory="../optionanalytics.client" />
+    <ItemGroup>
+      <ClientDist Include="../optionanalytics.client/dist/**" />
+    </ItemGroup>
+    <Copy SourceFiles="@(ClientDist)" DestinationFolder="wwwroot/%(RecursiveDir)" SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>
