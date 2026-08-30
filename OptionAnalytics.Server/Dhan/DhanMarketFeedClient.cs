@@ -20,8 +20,14 @@ namespace OptionAnalytics.Server.Dhan;
 /// </summary>
 public sealed class DhanMarketFeedClient : IAsyncDisposable
 {
-    private const int RequestCodeFull = 21;
-    private const int RequestCodeUnsubscribeFull = 22;
+    // Quote (17), not Full (21): Full carries 5-level market depth (best bid/ask), which this app
+    // never reads - SpotTick only has LastPrice/OHLC/Volume, all of which Quote already carries.
+    // More importantly, an index (IDX_I - NIFTY/BANKNIFTY's spot tokens) has no order book at all,
+    // so Dhan may not stream Full-mode data for those tokens the way it does for a tradeable
+    // instrument - subscribing everything in Full mode risked spot ticks simply never arriving.
+    // Quote is the mode every instrument type here is expected to support.
+    private const int RequestCodeQuote = 17;
+    private const int RequestCodeUnsubscribeQuote = 18;
     private const int RequestCodeDisconnect = 12;
     private const int SubscriptionBatchSize = 100;
 
@@ -42,7 +48,15 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
 
     private ClientWebSocket? _socket;
     private DateTimeOffset _lastMessageAt = DateTimeOffset.MinValue;
+    private DateTimeOffset _connectedAt = DateTimeOffset.MinValue;
     private int _lastDisconnectCode;
+    private bool _loggedFirstMessage;
+
+    // Announced once per security id per connection, so it's obvious from the console alone
+    // which subscribed instruments are actually ticking and which are silent - the exact
+    // question "what is ATM and what strikes are you tracking, and are they actually live" needs
+    // answered together.
+    private readonly ConcurrentDictionary<uint, byte> _loggedFirstTick = new();
 
     public event Action<SpotTick>? TickReceived;
 
@@ -65,8 +79,13 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
             if (_tokenSegments.TryAdd(kv.Key, kv.Value)) added.Add(kv);
         }
 
-        if (added.Count == 0 || _socket is not { State: WebSocketState.Open }) return;
-        await SendSubscriptionAsync(added.Select(kv => (kv.Key, kv.Value)), RequestCodeFull, cancellationToken);
+        if (added.Count == 0) return;
+
+        _logger.LogInformation("Subscribing {Count} instrument(s) in Quote mode: {Instruments}.",
+            added.Count, string.Join(", ", added.Select(kv => $"{kv.Key}({kv.Value})")));
+
+        if (_socket is not { State: WebSocketState.Open }) return;
+        await SendSubscriptionAsync(added.Select(kv => (kv.Key, kv.Value)), RequestCodeQuote, cancellationToken);
     }
 
     /// <summary>Removes tokens from the subscribed set and, if connected, sends a live unsubscribe
@@ -81,7 +100,7 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
         }
 
         if (removed.Count == 0 || _socket is not { State: WebSocketState.Open }) return;
-        await SendSubscriptionAsync(removed.Select(r => (r.Token, r.Segment)), RequestCodeUnsubscribeFull, cancellationToken);
+        await SendSubscriptionAsync(removed.Select(r => (r.Token, r.Segment)), RequestCodeUnsubscribeQuote, cancellationToken);
     }
 
     /// <summary>Runs until cancelled, connecting/reconnecting as needed and (re)subscribing
@@ -173,6 +192,9 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
         _socket = new ClientWebSocket();
         _socket.Options.KeepAliveInterval = TimeSpan.FromSeconds(20);
         _lastMessageAt = DateTimeOffset.MinValue;
+        _connectedAt = DateTimeOffset.UtcNow;
+        _loggedFirstMessage = false;
+        _loggedFirstTick.Clear();
 
         var accessToken = _session.AccessToken ?? throw new InvalidOperationException("No Dhan access token configured.");
         var clientId = _session.ClientId ?? throw new InvalidOperationException("No Dhan client id configured.");
@@ -184,7 +206,7 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
         _logger.LogInformation("Connected to Dhan market feed ({Count} instruments).", tokens.Length);
 
         if (tokens.Length > 0)
-            await SendSubscriptionAsync(tokens.Select(kv => (kv.Key, kv.Value)), RequestCodeFull, cancellationToken);
+            await SendSubscriptionAsync(tokens.Select(kv => (kv.Key, kv.Value)), RequestCodeQuote, cancellationToken);
     }
 
     private async Task SendSubscriptionAsync(IEnumerable<(uint Token, string Segment)> entries, int requestCode, CancellationToken cancellationToken)
@@ -219,6 +241,16 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
             {
                 result = await _socket.ReceiveAsync(new ArraySegment<byte>(buffer), cancellationToken);
                 _lastMessageAt = DateTimeOffset.UtcNow;
+
+                if (!_loggedFirstMessage)
+                {
+                    _loggedFirstMessage = true;
+                    // Its ABSENCE is the most useful fact when nothing is ticking: if this line
+                    // never appears, the socket is connected but Dhan is sending literally
+                    // nothing back - the problem is upstream of parsing (auth, subscription
+                    // acceptance, or the market simply being closed), not this client's decoding.
+                    _logger.LogInformation("Dhan market feed delivered its first data {Seconds:F1}s after connecting.", (_lastMessageAt - _connectedAt).TotalSeconds);
+                }
 
                 if (result.MessageType == WebSocketMessageType.Close)
                 {
@@ -263,7 +295,10 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
         // Only cache/report instruments we still want - a packet already in flight for an
         // instrument UnsubscribeAsync just dropped must not resurrect a cache entry for it (same
         // leak LiveSpreadCalculator's DhanMarketFeedClient guards against).
-        if (!_tokenSegments.ContainsKey(packet.SecurityId)) return;
+        if (!_tokenSegments.TryGetValue(packet.SecurityId, out var segment)) return;
+
+        if (packet.LastPrice > 0 && _loggedFirstTick.TryAdd(packet.SecurityId, 0))
+            _logger.LogInformation("First tick for security {SecurityId} ({Segment}): price={Price}.", packet.SecurityId, segment, packet.LastPrice);
 
         var previous = _lastTick.TryGetValue(packet.SecurityId, out var existing) ? existing : null;
         var tick = new SpotTick(

@@ -57,10 +57,6 @@ public sealed class DhanOptions
     /// a per-contract trading symbol column.</summary>
     public string ScripMasterUrl { get; set; } = "https://images.dhan.co/api-data/api-scrip-master.csv";
 
-    /// <summary>ltp, quote, or full. "full" is used by default so OHLC is available for building
-    /// candles even before this app's own bar timer closes one.</summary>
-    public string TickerMode { get; set; } = "full";
-
     public bool HasSession => !string.IsNullOrWhiteSpace(ClientId) && !string.IsNullOrWhiteSpace(AccessToken);
 
     /// <summary>True when everything TOTP auto-login needs is configured. Checked before
