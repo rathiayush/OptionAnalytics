@@ -1,6 +1,7 @@
 using OptionAnalytics.Server.Dhan;
 using OptionAnalytics.Server.Hubs;
 using OptionAnalytics.Server.Services;
+using OptionAnalytics.Server.Telegram;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -11,6 +12,8 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Configuration.AddJsonFile("appsettings.Local.json", optional: true, reloadOnChange: true);
 
 builder.Services.Configure<DhanOptions>(builder.Configuration.GetSection(DhanOptions.SectionName));
+builder.Services.Configure<TelegramOptions>(builder.Configuration.GetSection(TelegramOptions.SectionName));
+builder.Services.AddHttpClient<TelegramAlertService>();
 
 builder.Services.AddSingleton<DhanSession>();
 builder.Services.AddHttpClient<DhanApiClient>();
@@ -39,6 +42,10 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<SpotFeedHostedServ
 // state directly.
 builder.Services.AddSingleton<CdvHostedService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<CdvHostedService>());
+
+// No-op (logs at Debug and returns) when Telegram:Enabled/BotToken/ChatId aren't set - see
+// TelegramAlertService.
+builder.Services.AddHostedService<EmaCrossoverAlertService>();
 
 builder.Services.AddSignalR();
 builder.Services.AddControllers();
