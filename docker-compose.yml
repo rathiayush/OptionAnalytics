@@ -1,0 +1,16 @@
+services:
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: optionanalytics-timescaledb
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: optionanalytics
+      POSTGRES_USER: optionanalytics
+      POSTGRES_PASSWORD: ${TIMESCALEDB_PASSWORD:-localdevpassword}
+    ports:
+      - "5432:5432"
+    volumes:
+      - timescaledb-data:/var/lib/postgresql/data
+
+volumes:
+  timescaledb-data:

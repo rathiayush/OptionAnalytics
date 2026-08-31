@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Options;
 using OptionAnalytics.Server.Dhan;
 using OptionAnalytics.Server.Hubs;
+using OptionAnalytics.Server.Storage;
 
 namespace OptionAnalytics.Server.Services;
 
@@ -26,6 +27,7 @@ public sealed class SpotFeedHostedService : BackgroundService
     private readonly DhanSpotInstrumentMaster _instrumentMaster;
     private readonly DhanHistoricalDataService _historicalData;
     private readonly DhanMarketFeedClient _feedClient;
+    private readonly CandleRepository _candleRepository;
     private readonly IHubContext<SpotHub> _hub;
     private readonly ILogger<SpotFeedHostedService> _logger;
 
@@ -37,6 +39,7 @@ public sealed class SpotFeedHostedService : BackgroundService
         DhanSpotInstrumentMaster instrumentMaster,
         DhanHistoricalDataService historicalData,
         DhanMarketFeedClient feedClient,
+        CandleRepository candleRepository,
         IHubContext<SpotHub> hub,
         ILogger<SpotFeedHostedService> logger)
     {
@@ -45,6 +48,7 @@ public sealed class SpotFeedHostedService : BackgroundService
         _instrumentMaster = instrumentMaster;
         _historicalData = historicalData;
         _feedClient = feedClient;
+        _candleRepository = candleRepository;
         _hub = hub;
         _logger = logger;
 
@@ -114,7 +118,24 @@ public sealed class SpotFeedHostedService : BackgroundService
         {
             if (state.Instrument is not { } instrument) continue;
 
-            var candles = await _historicalData.GetIntradayCandlesAsync(instrument.SecurityId, instrument.DhanSegment, today, 1, cancellationToken);
+            // Recovers today's already-seen bars from TimescaleDB first (near-instant, no Dhan
+            // call) - useful after a restart mid-day, when CandlePersistenceService has already
+            // written earlier bars this session. Empty on a fresh day/first-ever run (nothing
+            // persisted yet), which falls through to the Dhan REST backfill below exactly as
+            // before persistence existed - this is purely an optimization on top of it, not a
+            // replacement.
+            // Npgsql only accepts Offset=0 DateTimeOffset values for timestamptz - ToUniversalTime()
+            // converts this IST midnight to the equivalent UTC instant rather than just relabeling it.
+            var dayStartUtc = new DateTimeOffset(today.Year, today.Month, today.Day, 0, 0, 0, TimeSpan.FromHours(5.5)).ToUniversalTime();
+            var candles = await _candleRepository.GetCandlesAsync(state.Underlying, dayStartUtc, dayStartUtc.AddDays(1), cancellationToken);
+            if (candles.Count > 0)
+            {
+                state.SeedHistory(candles);
+                _logger.LogInformation("Restored {Count} candle(s) for {Underlying} from storage.", candles.Count, state.Underlying);
+                continue;
+            }
+
+            candles = await _historicalData.GetIntradayCandlesAsync(instrument.SecurityId, instrument.DhanSegment, today, 1, cancellationToken);
 
             if (candles.Count == 0)
             {

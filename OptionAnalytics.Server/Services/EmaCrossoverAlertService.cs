@@ -1,5 +1,6 @@
 using OptionAnalytics.Server.Models;
 using OptionAnalytics.Server.Telegram;
+using Skender.Stock.Indicators;
 
 namespace OptionAnalytics.Server.Services;
 
@@ -10,6 +11,12 @@ namespace OptionAnalytics.Server.Services;
 /// looking at the page. Reacts to SpotUnderlyingState.BarClosed rather than polling: an alert is
 /// only meaningful the instant a bar actually finishes, and computing off a still-forming bar
 /// would flip-flop as its price kept moving.
+///
+/// EMA itself is computed by Skender.Stock.Indicators rather than hand-rolled math - a
+/// well-tested, widely-used .NET technical-analysis library (the same "standard EMA" definition:
+/// seeded from a plain SMA of the first `period` closes, then the usual exponential recurrence -
+/// so results match the hand-rolled version this replaced), and it makes adding another indicator
+/// (RSI, MACD, ...) later a one-line call instead of another custom implementation.
 /// </summary>
 public sealed class EmaCrossoverAlertService : BackgroundService
 {
@@ -51,13 +58,22 @@ public sealed class EmaCrossoverAlertService : BackgroundService
         // previous EMA9/EMA21 pair to compare the new one against.
         if (closedBars.Count < SlowPeriod + 1) return;
 
-        var closes = closedBars.Select(c => c.Close).ToList();
-        var ema9 = ComputeEma(closes, FastPeriod);
-        var ema21 = ComputeEma(closes, SlowPeriod);
+        var quotes = closedBars.Select(c => new Quote
+        {
+            Date = c.Time.UtcDateTime,
+            Open = c.Open,
+            High = c.High,
+            Low = c.Low,
+            Close = c.Close,
+            Volume = 0,
+        }).ToList();
 
-        var last = closes.Count - 1;
-        if (ema9[last] is not { } fastNow || ema21[last] is not { } slowNow) return;
-        if (ema9[last - 1] is not { } fastPrev || ema21[last - 1] is not { } slowPrev) return;
+        var ema9 = quotes.GetEma(FastPeriod).ToList();
+        var ema21 = quotes.GetEma(SlowPeriod).ToList();
+
+        var last = quotes.Count - 1;
+        if (ema9[last].Ema is not { } fastNow || ema21[last].Ema is not { } slowNow) return;
+        if (ema9[last - 1].Ema is not { } fastPrev || ema21[last - 1].Ema is not { } slowPrev) return;
 
         var prevDiff = fastPrev - slowPrev;
         var currDiff = fastNow - slowNow;
@@ -74,27 +90,5 @@ public sealed class EmaCrossoverAlertService : BackgroundService
         var message = $"<b>{state.Underlying}</b> EMA 9/21 crossover\n{direction}\nClose: {closedBars[last].Close:N2}\nBar: {barTime:yyyy-MM-dd HH:mm} UTC";
         _logger.LogInformation("EMA 9/21 crossover for {Underlying}: {Direction} at close {Close}.", state.Underlying, direction, closedBars[last].Close);
         _ = _telegram.SendAsync(message, cancellationToken);
-    }
-
-    /// <summary>Same EMA algorithm as the frontend's computeEma (App.jsx) - seeded with a plain
-    /// average of the first `period` closes, then the usual exponential recurrence. One value per
-    /// input bar, null before the seed window fills.</summary>
-    private static decimal?[] ComputeEma(IReadOnlyList<decimal> closes, int period)
-    {
-        var result = new decimal?[closes.Count];
-        if (closes.Count < period) return result;
-
-        var k = 2m / (period + 1);
-        decimal sum = 0;
-        for (var i = 0; i < period; i++) sum += closes[i];
-        var prev = sum / period;
-        result[period - 1] = prev;
-
-        for (var i = period; i < closes.Count; i++)
-        {
-            prev = closes[i] * k + prev * (1 - k);
-            result[i] = prev;
-        }
-        return result;
     }
 }
