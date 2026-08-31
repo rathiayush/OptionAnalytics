@@ -6,7 +6,8 @@ namespace OptionAnalytics.Server.Models;
 public readonly record struct CdvBarPoint(DateTimeOffset Time, decimal CeCdv, decimal PeCdv);
 
 /// <summary>Latest CDV state for one underlying's option chain - pushed over SignalR and served by
-/// GET /api/cdv/{underlying}/snapshot.</summary>
+/// GET /api/cdv/{underlying}/snapshot. AtmCeCurrentBar/AtmPeCurrentBar are the live-forming premium
+/// bar for whichever contract is currently ATM on each side - null until ATM has resolved.</summary>
 public sealed record CdvSnapshot(
     string Underlying,
     int? AtmStrike,
@@ -14,4 +15,6 @@ public sealed record CdvSnapshot(
     decimal CeCdv,
     decimal PeCdv,
     DateTimeOffset TimestampUtc,
-    CdvBarPoint? CurrentBar);
+    CdvBarPoint? CurrentBar,
+    Candle? AtmCeCurrentBar,
+    Candle? AtmPeCurrentBar);

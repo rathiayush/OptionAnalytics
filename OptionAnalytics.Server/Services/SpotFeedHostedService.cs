@@ -2,15 +2,15 @@ using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Options;
 using OptionAnalytics.Server.Dhan;
 using OptionAnalytics.Server.Hubs;
-using OptionAnalytics.Server.Storage;
+using OptionAnalytics.Server.Models;
 
 namespace OptionAnalytics.Server.Services;
 
 /// <summary>
-/// The orchestrator: resolves NIFTY/BANKNIFTY's Dhan security ids, backfills today's (or the
-/// previous trading day's, before the market opens) candles so the chart isn't empty on load,
-/// then runs the live WS feed and folds every tick into the current 1-minute bar, pushing each
-/// update to the dashboard over SignalR.
+/// The orchestrator: resolves NIFTY/BANKNIFTY's Dhan security ids, backfills the last 5 trading
+/// days' 1-minute candles into memory (nothing is ever persisted to disk - a restart re-fetches
+/// from Dhan every time), then runs the live WS feed and folds every tick into the current bar,
+/// pushing each update to the dashboard over SignalR.
 /// </summary>
 public sealed class SpotFeedHostedService : BackgroundService
 {
@@ -22,12 +22,19 @@ public sealed class SpotFeedHostedService : BackgroundService
         ("BANKNIFTY", 100),
     };
 
+    /// <summary>How many distinct trading days of history to hold in memory.</summary>
+    private const int HistoryTradingDays = 5;
+
+    /// <summary>How far back (calendar days) to ask Dhan for in one range call - comfortably
+    /// covers HistoryTradingDays even across a long weekend or a holiday cluster; the result is
+    /// then trimmed down to the most recent HistoryTradingDays distinct days actually present.</summary>
+    private const int HistoryLookbackCalendarDays = 15;
+
     private readonly DhanOptions _options;
     private readonly DhanSession _session;
     private readonly DhanSpotInstrumentMaster _instrumentMaster;
     private readonly DhanHistoricalDataService _historicalData;
     private readonly DhanMarketFeedClient _feedClient;
-    private readonly CandleRepository _candleRepository;
     private readonly IHubContext<SpotHub> _hub;
     private readonly ILogger<SpotFeedHostedService> _logger;
 
@@ -39,7 +46,6 @@ public sealed class SpotFeedHostedService : BackgroundService
         DhanSpotInstrumentMaster instrumentMaster,
         DhanHistoricalDataService historicalData,
         DhanMarketFeedClient feedClient,
-        CandleRepository candleRepository,
         IHubContext<SpotHub> hub,
         ILogger<SpotFeedHostedService> logger)
     {
@@ -48,7 +54,6 @@ public sealed class SpotFeedHostedService : BackgroundService
         _instrumentMaster = instrumentMaster;
         _historicalData = historicalData;
         _feedClient = feedClient;
-        _candleRepository = candleRepository;
         _hub = hub;
         _logger = logger;
 
@@ -110,50 +115,49 @@ public sealed class SpotFeedHostedService : BackgroundService
         }
     }
 
+    /// <summary>Fetches the last HistoryLookbackCalendarDays' worth of candles in ONE range call
+    /// per underlying (far cheaper than one request per day), then trims to the most recent
+    /// HistoryTradingDays distinct trading days actually present in the response - everything held
+    /// in memory only, nothing persisted, so this runs fresh on every restart.</summary>
     private async Task BackfillAsync(CancellationToken cancellationToken)
     {
         var today = IstToday();
+        var fromDay = today.AddDays(-HistoryLookbackCalendarDays);
 
         foreach (var state in States.Values)
         {
             if (state.Instrument is not { } instrument) continue;
 
-            // Recovers today's already-seen bars from TimescaleDB first (near-instant, no Dhan
-            // call) - useful after a restart mid-day, when CandlePersistenceService has already
-            // written earlier bars this session. Empty on a fresh day/first-ever run (nothing
-            // persisted yet), which falls through to the Dhan REST backfill below exactly as
-            // before persistence existed - this is purely an optimization on top of it, not a
-            // replacement.
-            // Npgsql only accepts Offset=0 DateTimeOffset values for timestamptz - ToUniversalTime()
-            // converts this IST midnight to the equivalent UTC instant rather than just relabeling it.
-            var dayStartUtc = new DateTimeOffset(today.Year, today.Month, today.Day, 0, 0, 0, TimeSpan.FromHours(5.5)).ToUniversalTime();
-            var candles = await _candleRepository.GetCandlesAsync(state.Underlying, dayStartUtc, dayStartUtc.AddDays(1), cancellationToken);
-            if (candles.Count > 0)
-            {
-                state.SeedHistory(candles);
-                _logger.LogInformation("Restored {Count} candle(s) for {Underlying} from storage.", candles.Count, state.Underlying);
-                continue;
-            }
+            var candles = await _historicalData.GetIntradayCandlesAsync(instrument.SecurityId, instrument.DhanSegment, fromDay, today, 1, cancellationToken);
 
-            candles = await _historicalData.GetIntradayCandlesAsync(instrument.SecurityId, instrument.DhanSegment, today, 1, cancellationToken);
+            var trimmed = TrimToRecentTradingDays(candles, HistoryTradingDays);
+            state.SeedHistory(trimmed);
 
-            if (candles.Count == 0)
-            {
-                // Before the market opens (or on a holiday) there is nothing for "today" yet - fall
-                // back a few calendar days to the last day that actually has candles, so the chart
-                // still opens with something on the screen instead of a blank panel.
-                for (var back = 1; back <= 5 && candles.Count == 0; back++)
-                {
-                    var day = today.AddDays(-back);
-                    if (day.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday) continue;
-                    candles = await _historicalData.GetIntradayCandlesAsync(instrument.SecurityId, instrument.DhanSegment, day, 1, cancellationToken);
-                }
-            }
-
-            state.SeedHistory(candles);
-            _logger.LogInformation("Backfilled {Count} candle(s) for {Underlying}.", candles.Count, state.Underlying);
+            var dayCount = trimmed.Select(c => IstDate(c.Time)).Distinct().Count();
+            _logger.LogInformation("Backfilled {Count} candle(s) across {Days} trading day(s) for {Underlying}.", trimmed.Count, dayCount, state.Underlying);
         }
     }
+
+    /// <summary>Keeps only the candles from the most recent <paramref name="maxDays"/> distinct
+    /// IST calendar dates present in <paramref name="candles"/> - Dhan's range response may
+    /// legitimately span more days than that (the lookback window is intentionally generous to
+    /// survive holiday clusters), so this is what actually enforces "last 5 trading days".</summary>
+    private static List<Candle> TrimToRecentTradingDays(IReadOnlyList<Candle> candles, int maxDays)
+    {
+        var recentDays = candles
+            .Select(c => IstDate(c.Time))
+            .Distinct()
+            .OrderDescending()
+            .Take(maxDays)
+            .ToHashSet();
+
+        return candles
+            .Where(c => recentDays.Contains(IstDate(c.Time)))
+            .OrderBy(c => c.Time)
+            .ToList();
+    }
+
+    private static DateOnly IstDate(DateTimeOffset time) => DateOnly.FromDateTime(time.ToOffset(TimeSpan.FromHours(5.5)).DateTime);
 
     private void OnTick(SpotTick tick)
     {

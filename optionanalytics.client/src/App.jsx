@@ -16,12 +16,84 @@ const AXIS_COLOR = '#9aa4b2'
 const GRID_COLOR = '#ffffff14'
 const BORDER_COLOR = '#ffffff22'
 
+const TIMEFRAME_OPTIONS = [
+  { value: 1, label: '1 min' },
+  { value: 3, label: '3 min' },
+  { value: 5, label: '5 min' },
+]
+
 function toChartTime(isoOrDate) {
   return Math.floor(new Date(isoOrDate).getTime() / 1000)
 }
 
-function candleToBar(c) {
+// Every bar/point coming off the wire (ISO time strings) is converted to this one shape - epoch
+// seconds for `time`, exactly what lightweight-charts wants - the instant it's received, so every
+// downstream step (merging the live bar, timeframe aggregation, EMA/OBV math, charting) works on
+// plain numbers with no repeated re-parsing.
+function toBar(c) {
   return { time: toChartTime(c.time), open: c.open, high: c.high, low: c.low, close: c.close }
+}
+
+function toLinePoint(p, valueKeys) {
+  const point = { time: toChartTime(p.time) }
+  for (const key of valueKeys) point[key] = p[key]
+  return point
+}
+
+function mergeLiveBar(bars, liveBar) {
+  if (!liveBar) return bars
+  return [...bars.filter((b) => b.time !== liveBar.time), liveBar].sort((a, b) => a.time - b.time)
+}
+
+// Bucketing for the 1/3/5-minute timeframe switcher - everything server-side stays at native
+// 1-minute resolution (that's what the live feed naturally produces); coarser timeframes are just
+// a view over the same 1-minute bars, computed client-side so switching timeframe is instant and
+// needs no extra round trip.
+function aggregateCandles(bars, minutes) {
+  if (minutes <= 1 || bars.length === 0) return bars
+  const bucketSeconds = minutes * 60
+  const buckets = new Map()
+  for (const b of bars) {
+    const bucketTime = Math.floor(b.time / bucketSeconds) * bucketSeconds
+    const existing = buckets.get(bucketTime)
+    if (!existing) {
+      buckets.set(bucketTime, { time: bucketTime, open: b.open, high: b.high, low: b.low, close: b.close })
+    } else {
+      existing.high = Math.max(existing.high, b.high)
+      existing.low = Math.min(existing.low, b.low)
+      existing.close = b.close
+    }
+  }
+  return Array.from(buckets.values()).sort((a, b) => a.time - b.time)
+}
+
+// Same bucketing for a running-total line series (CDV/OBV) - the meaningful value for a coarser
+// bucket is the LAST sample in it (Map.set on a repeated key keeps overwriting, and points arrive
+// time-ascending, so this naturally ends up holding each bucket's latest value).
+function aggregateLine(points, minutes) {
+  if (minutes <= 1 || points.length === 0) return points
+  const bucketSeconds = minutes * 60
+  const buckets = new Map()
+  for (const p of points) {
+    const bucketTime = Math.floor(p.time / bucketSeconds) * bucketSeconds
+    buckets.set(bucketTime, { ...p, time: bucketTime })
+  }
+  return Array.from(buckets.values()).sort((a, b) => a.time - b.time)
+}
+
+function useAggregatedCandles(candles, liveBarRaw, timeframeMinutes) {
+  return useMemo(() => {
+    const bars = mergeLiveBar(candles.map(toBar), liveBarRaw ? toBar(liveBarRaw) : null)
+    return aggregateCandles(bars, timeframeMinutes)
+  }, [candles, liveBarRaw, timeframeMinutes])
+}
+
+function useAggregatedLine(points, liveBarRaw, timeframeMinutes, valueKeys) {
+  return useMemo(() => {
+    const mapped = points.map((p) => toLinePoint(p, valueKeys))
+    const merged = liveBarRaw ? mergeLiveBar(mapped, toLinePoint(liveBarRaw, valueKeys)) : mapped
+    return aggregateLine(merged, timeframeMinutes)
+  }, [points, liveBarRaw, timeframeMinutes])
 }
 
 // Standard EMA: seeded with a plain average of the first `period` closes, then the usual
@@ -44,7 +116,7 @@ function computeEma(closes, period) {
 }
 
 // EMA9/EMA21 line points plus crossover markers (bullish: 9 crosses above 21, bearish: below) -
-// the "TradingView-style EMA crossover" overlay for the spot chart.
+// the "TradingView-style EMA crossover" overlay used on every candlestick chart on this page.
 function useEmaCrossover(bars) {
   return useMemo(() => {
     const closes = bars.map((b) => b.close)
@@ -57,7 +129,7 @@ function useEmaCrossover(bars) {
     let prevDiff = null
 
     for (let i = 0; i < bars.length; i++) {
-      const time = toChartTime(bars[i].time)
+      const time = bars[i].time
       if (ema9[i] != null) ema9Points.push({ time, value: ema9[i] })
       if (ema21[i] != null) ema21Points.push({ time, value: ema21[i] })
 
@@ -82,12 +154,13 @@ function fmtPrice(v) {
   return v == null ? '—' : Number(v).toLocaleString('en-IN', { maximumFractionDigits: 2 })
 }
 
-function fmtCdv(v) {
+function fmtNum(v) {
   return v == null ? '—' : Number(v).toLocaleString('en-IN', { maximumFractionDigits: 0 })
 }
 
-// One SignalR connection shared by both the spot chart and the CDV chart - each just registers
-// its own handler for the event it cares about ("spotUpdate" / "cdvUpdate").
+// One SignalR connection shared by every chart on the page - each just registers its own handler
+// for the event it cares about ("spotUpdate" / "cdvUpdate", the latter also carrying the ATM
+// CE/PE premium bars).
 function useHub(onSpotUpdate, onCdvUpdate) {
   const spotHandlerRef = useRef(onSpotUpdate)
   const cdvHandlerRef = useRef(onCdvUpdate)
@@ -108,21 +181,15 @@ function useHub(onSpotUpdate, onCdvUpdate) {
   }, [])
 }
 
-function SpotChart({ candles, liveBar }) {
+// Candlestick + EMA9/EMA21 overlay + crossover markers - the one chart shape reused for the spot
+// price and both ATM option premium charts.
+function PriceChart({ bars, height = 360 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
   const ema9Ref = useRef(null)
   const ema21Ref = useRef(null)
   const markersRef = useRef(null)
-
-  // The live-updating bar merged into the closed-bar list, so the EMA/crossover calculation
-  // always includes the current forming bar - the same combined series the candlestick itself
-  // effectively shows via setData + update().
-  const bars = useMemo(() => {
-    if (!liveBar) return candles
-    return [...candles.filter((c) => c.time !== liveBar.time), liveBar]
-  }, [candles, liveBar])
 
   const { ema9Points, ema21Points, markers } = useEmaCrossover(bars)
 
@@ -131,7 +198,7 @@ function SpotChart({ candles, liveBar }) {
 
     const chart = createChart(containerRef.current, {
       width: containerRef.current.clientWidth,
-      height: 440,
+      height,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
       grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
       rightPriceScale: { borderColor: BORDER_COLOR },
@@ -165,19 +232,14 @@ function SpotChart({ candles, liveBar }) {
       markersRef.current = null
     }
     // One chart instance per mount - series data is (re)populated by the effects below, not by
-    // recreating the chart, so switching the underlying doesn't flicker a fresh empty chart in.
-  }, [])
+    // recreating the chart, so switching the underlying/timeframe doesn't flicker an empty chart in.
+  }, [height])
 
   useEffect(() => {
     if (!seriesRef.current) return
-    seriesRef.current.setData(candles.map(candleToBar))
+    seriesRef.current.setData(bars)
     chartRef.current?.timeScale().fitContent()
-  }, [candles])
-
-  useEffect(() => {
-    if (!seriesRef.current || !liveBar) return
-    seriesRef.current.update(candleToBar(liveBar))
-  }, [liveBar])
+  }, [bars])
 
   useEffect(() => {
     if (!ema9Ref.current || !ema21Ref.current) return
@@ -189,10 +251,12 @@ function SpotChart({ candles, liveBar }) {
     markersRef.current?.setMarkers(markers)
   }, [markers])
 
-  return <div ref={containerRef} style={{ width: '100%', height: 440 }} />
+  return <div ref={containerRef} style={{ width: '100%', height }} />
 }
 
-function CdvChart({ series, liveBar }) {
+// Two-line running-total chart shape reused for CDV (cumulative delta volume) and OBV
+// (on-balance volume, via Skender.Stock.Indicators) - a CE line and a PE line.
+function CeVsPeChart({ ceSeries, peSeries, height = 280 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const ceRef = useRef(null)
@@ -203,7 +267,7 @@ function CdvChart({ series, liveBar }) {
 
     const chart = createChart(containerRef.current, {
       width: containerRef.current.clientWidth,
-      height: 320,
+      height,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
       grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
       rightPriceScale: { borderColor: BORDER_COLOR },
@@ -226,32 +290,56 @@ function CdvChart({ series, liveBar }) {
       ceRef.current = null
       peRef.current = null
     }
-  }, [])
+  }, [height])
 
   useEffect(() => {
     if (!ceRef.current || !peRef.current) return
-    ceRef.current.setData(series.map((p) => ({ time: toChartTime(p.time), value: p.ceCdv })))
-    peRef.current.setData(series.map((p) => ({ time: toChartTime(p.time), value: p.peCdv })))
+    ceRef.current.setData(ceSeries)
+    peRef.current.setData(peSeries)
     chartRef.current?.timeScale().fitContent()
-  }, [series])
+  }, [ceSeries, peSeries])
 
-  useEffect(() => {
-    if (!ceRef.current || !peRef.current || !liveBar) return
-    ceRef.current.update({ time: toChartTime(liveBar.time), value: liveBar.ceCdv })
-    peRef.current.update({ time: toChartTime(liveBar.time), value: liveBar.peCdv })
-  }, [liveBar])
-
-  return <div ref={containerRef} style={{ width: '100%', height: 320 }} />
+  return <div ref={containerRef} style={{ width: '100%', height }} />
 }
+
+function ChartCard({ title, extra, children, empty }) {
+  return (
+    <Card size="small" title={title} extra={extra}>
+      {children ?? (
+        <div style={{ height: 280, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <Text type="secondary">{empty}</Text>
+        </div>
+      )}
+    </Card>
+  )
+}
+
+const EmaLegend = () => (
+  <Space size={16}>
+    <Text style={{ color: EMA_FAST_COLOR, fontSize: 12 }}>— EMA 9</Text>
+    <Text style={{ color: EMA_SLOW_COLOR, fontSize: 12 }}>— EMA 21</Text>
+  </Space>
+)
 
 export default function App() {
   const [underlyings, setUnderlyings] = useState([])
   const [selected, setSelected] = useState(null)
+  const [timeframe, setTimeframe] = useState(1)
+  const [loading, setLoading] = useState(true)
+
   const [candles, setCandles] = useState([])
   const [snapshot, setSnapshot] = useState(null)
+
   const [cdvSeries, setCdvSeries] = useState([])
   const [cdvSnapshot, setCdvSnapshot] = useState(null)
-  const [loading, setLoading] = useState(true)
+
+  const [atmCeCandles, setAtmCeCandles] = useState([])
+  const [atmPeCandles, setAtmPeCandles] = useState([])
+
+  const [obvCe, setObvCe] = useState([])
+  const [obvPe, setObvPe] = useState([])
+
+  const lastObvBarTimeRef = useRef({ ce: null, pe: null })
 
   useEffect(() => {
     fetch('/api/spot/underlyings')
@@ -264,40 +352,100 @@ export default function App() {
       .finally(() => setLoading(false))
   }, [])
 
+  const fetchAtmAndObv = (underlying, cancelledRef) => {
+    fetch(`/api/cdv/${underlying}/atm-ce/candles`)
+      .then((r) => r.json())
+      .then((data) => { if (!cancelledRef.cancelled) setAtmCeCandles(data) })
+      .catch((err) => console.error('Failed to load ATM CE candles:', err))
+
+    fetch(`/api/cdv/${underlying}/atm-pe/candles`)
+      .then((r) => r.json())
+      .then((data) => { if (!cancelledRef.cancelled) setAtmPeCandles(data) })
+      .catch((err) => console.error('Failed to load ATM PE candles:', err))
+
+    fetch(`/api/cdv/${underlying}/obv-series`)
+      .then((r) => r.json())
+      .then((data) => { if (!cancelledRef.cancelled) { setObvCe(data.ce ?? []); setObvPe(data.pe ?? []) } })
+      .catch((err) => console.error('Failed to load OBV series:', err))
+  }
+
   useEffect(() => {
     if (!selected) return
-    let cancelled = false
+    const cancelledRef = { cancelled: false }
 
     fetch(`/api/spot/${selected}/candles`)
       .then((r) => r.json())
-      .then((data) => { if (!cancelled) setCandles(data) })
+      .then((data) => { if (!cancelledRef.cancelled) setCandles(data) })
       .catch((err) => console.error('Failed to load candles:', err))
 
     fetch(`/api/spot/${selected}/snapshot`)
       .then((r) => r.json())
-      .then((data) => { if (!cancelled) setSnapshot(data) })
+      .then((data) => { if (!cancelledRef.cancelled) setSnapshot(data) })
       .catch((err) => console.error('Failed to load snapshot:', err))
 
     fetch(`/api/cdv/${selected}/series`)
       .then((r) => r.json())
-      .then((data) => { if (!cancelled) setCdvSeries(data) })
+      .then((data) => { if (!cancelledRef.cancelled) setCdvSeries(data) })
       .catch((err) => console.error('Failed to load CDV series:', err))
 
     fetch(`/api/cdv/${selected}/snapshot`)
       .then((r) => r.json())
-      .then((data) => { if (!cancelled) setCdvSnapshot(data) })
+      .then((data) => { if (!cancelledRef.cancelled) setCdvSnapshot(data) })
       .catch((err) => console.error('Failed to load CDV snapshot:', err))
 
-    return () => { cancelled = true }
+    fetchAtmAndObv(selected, cancelledRef)
+
+    return () => { cancelledRef.cancelled = true }
   }, [selected])
 
   useHub(
     (incoming) => { if (incoming.underlying === selected) setSnapshot(incoming) },
-    (incoming) => { if (incoming.underlying === selected) setCdvSnapshot(incoming) },
+    (incoming) => {
+      if (incoming.underlying !== selected) return
+      setCdvSnapshot(incoming)
+    },
   )
 
+  // ATM CE/PE bars only change value on every tick (the premium moves), but OBV is a per-bar
+  // indicator - only worth recomputing when a bar actually closes. Refetch the (small) OBV series
+  // whenever either side's current-bar time moves to a new minute, not on every tick.
+  useEffect(() => {
+    if (!selected || !cdvSnapshot) return
+    const ceTime = cdvSnapshot.atmCeCurrentBar?.time ?? null
+    const peTime = cdvSnapshot.atmPeCurrentBar?.time ?? null
+    const prev = lastObvBarTimeRef.current
+    if (ceTime === prev.ce && peTime === prev.pe) return
+    lastObvBarTimeRef.current = { ce: ceTime, pe: peTime }
+
+    fetch(`/api/cdv/${selected}/obv-series`)
+      .then((r) => r.json())
+      .then((data) => { setObvCe(data.ce ?? []); setObvPe(data.pe ?? []) })
+      .catch((err) => console.error('Failed to refresh OBV series:', err))
+  }, [selected, cdvSnapshot?.atmCeCurrentBar?.time, cdvSnapshot?.atmPeCurrentBar?.time])
+
+  // ATM strike rolling (every 30 minutes, or whenever spot crosses a strike-step boundary) means
+  // the ATM CE/PE contracts themselves changed identity - the previously-fetched candle history
+  // belongs to the old contract and must be replaced wholesale, not live-merged.
+  const lastAtmStrikeRef = useRef(null)
+  useEffect(() => {
+    if (!selected || cdvSnapshot?.atmStrike == null) return
+    if (lastAtmStrikeRef.current === cdvSnapshot.atmStrike) return
+    lastAtmStrikeRef.current = cdvSnapshot.atmStrike
+    fetchAtmAndObv(selected, { cancelled: false })
+  }, [selected, cdvSnapshot?.atmStrike])
+
   const step = snapshot?.step
-  const rounded = useMemo(() => snapshot?.roundedPrice ?? null, [snapshot])
+  const rounded = snapshot?.roundedPrice ?? null
+
+  const spotBars = useAggregatedCandles(candles, snapshot?.currentBar, timeframe)
+  const atmCeBars = useAggregatedCandles(atmCeCandles, cdvSnapshot?.atmCeCurrentBar, timeframe)
+  const atmPeBars = useAggregatedCandles(atmPeCandles, cdvSnapshot?.atmPeCurrentBar, timeframe)
+
+  const cdvCe = useAggregatedLine(cdvSeries, cdvSnapshot?.currentBar, timeframe, ['ceCdv']).map((p) => ({ time: p.time, value: p.ceCdv }))
+  const cdvPe = useAggregatedLine(cdvSeries, cdvSnapshot?.currentBar, timeframe, ['peCdv']).map((p) => ({ time: p.time, value: p.peCdv }))
+
+  const obvCePoints = useMemo(() => aggregateLine(obvCe.map((p) => toLinePoint(p, ['obv'])), timeframe).map((p) => ({ time: p.time, value: p.obv })), [obvCe, timeframe])
+  const obvPePoints = useMemo(() => aggregateLine(obvPe.map((p) => toLinePoint(p, ['obv'])), timeframe).map((p) => ({ time: p.time, value: p.obv })), [obvPe, timeframe])
 
   if (loading) {
     return (
@@ -308,31 +456,31 @@ export default function App() {
   }
 
   return (
-    <div style={{ maxWidth: 1080, margin: '0 auto', padding: '24px 16px' }}>
+    <div style={{ maxWidth: 1280, margin: '0 auto', padding: '24px 16px' }}>
       <Space direction="vertical" size={20} style={{ width: '100%' }}>
-        <Space align="center" size={16}>
+        <Space align="center" size={16} wrap>
           <Title level={3} style={{ margin: 0 }}>Option Analytics</Title>
           <Select
             value={selected}
             onChange={setSelected}
-            style={{ width: 180 }}
+            style={{ width: 160 }}
             options={underlyings.map((u) => ({ value: u.underlying, label: u.underlying }))}
+          />
+          <Select
+            value={timeframe}
+            onChange={setTimeframe}
+            style={{ width: 120 }}
+            options={TIMEFRAME_OPTIONS}
           />
         </Space>
 
-        <div style={{ border: `1px solid ${BORDER_COLOR}`, borderRadius: 8, padding: 12 }}>
-          <Space size={16} style={{ marginBottom: 4 }}>
-            <Text style={{ color: EMA_FAST_COLOR, fontSize: 12 }}>— EMA 9</Text>
-            <Text style={{ color: EMA_SLOW_COLOR, fontSize: 12 }}>— EMA 21</Text>
-          </Space>
-          {candles.length > 0 ? (
-            <SpotChart candles={candles} liveBar={snapshot?.currentBar} />
-          ) : (
-            <div style={{ height: 440, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <Text type="secondary">Waiting for chart data - the Dhan feed may still be connecting.</Text>
-            </div>
-          )}
-        </div>
+        <ChartCard
+          title={`${selected} spot`}
+          extra={<EmaLegend />}
+          empty="Waiting for chart data - the Dhan feed may still be connecting."
+        >
+          {spotBars.length > 0 && <PriceChart bars={spotBars} height={420} />}
+        </ChartCard>
 
         <Space direction="vertical" size={2} align="center" style={{ width: '100%' }}>
           <Text type="secondary">{selected} spot (rounded to nearest {step ?? '—'})</Text>
@@ -340,27 +488,50 @@ export default function App() {
           <Text type="secondary">Last traded: {fmtPrice(snapshot?.lastPrice)}</Text>
         </Space>
 
-        <Card
-          size="small"
+        <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+          <div style={{ flex: '1 1 400px', minWidth: 0 }}>
+            <ChartCard
+              title={`ATM CE ${cdvSnapshot?.atmStrike ?? ''}`}
+              extra={<EmaLegend />}
+              empty="Waiting for the ATM CE contract to resolve and tick."
+            >
+              {atmCeBars.length > 0 && <PriceChart bars={atmCeBars} height={320} />}
+            </ChartCard>
+          </div>
+          <div style={{ flex: '1 1 400px', minWidth: 0 }}>
+            <ChartCard
+              title={`ATM PE ${cdvSnapshot?.atmStrike ?? ''}`}
+              extra={<EmaLegend />}
+              empty="Waiting for the ATM PE contract to resolve and tick."
+            >
+              {atmPeBars.length > 0 && <PriceChart bars={atmPeBars} height={320} />}
+            </ChartCard>
+          </div>
+        </div>
+
+        <ChartCard
           title="CE / PE Cumulative Delta Volume"
-          extra={
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              ATM {cdvSnapshot?.atmStrike ?? '—'} · Expiry {cdvSnapshot?.expiry ?? '—'}
-            </Text>
-          }
+          extra={<Text type="secondary" style={{ fontSize: 12 }}>ATM {cdvSnapshot?.atmStrike ?? '—'} · Expiry {cdvSnapshot?.expiry ?? '—'}</Text>}
+          empty="Waiting for option-chain data - strikes resolve once the spot price is known."
         >
-          {cdvSeries.length > 0 ? (
-            <CdvChart series={cdvSeries} liveBar={cdvSnapshot?.currentBar} />
-          ) : (
-            <div style={{ height: 320, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <Text type="secondary">Waiting for option-chain data - strikes resolve once the spot price is known.</Text>
-            </div>
+          {cdvCe.length > 0 && (
+            <>
+              <CeVsPeChart ceSeries={cdvCe} peSeries={cdvPe} height={280} />
+              <Space size={24} style={{ marginTop: 8 }}>
+                <Text style={{ color: CE_COLOR }}>CE {fmtNum(cdvSnapshot?.ceCdv)}</Text>
+                <Text style={{ color: PE_COLOR }}>PE {fmtNum(cdvSnapshot?.peCdv)}</Text>
+              </Space>
+            </>
           )}
-          <Space size={24} style={{ marginTop: 8 }}>
-            <Text style={{ color: CE_COLOR }}>CE {fmtCdv(cdvSnapshot?.ceCdv)}</Text>
-            <Text style={{ color: PE_COLOR }}>PE {fmtCdv(cdvSnapshot?.peCdv)}</Text>
-          </Space>
-        </Card>
+        </ChartCard>
+
+        <ChartCard
+          title="CE / PE On-Balance Volume (ATM)"
+          extra={<Text type="secondary" style={{ fontSize: 12 }}>Skender.Stock.Indicators</Text>}
+          empty="Waiting for enough ATM CE/PE bars to compute OBV."
+        >
+          {(obvCePoints.length > 0 || obvPePoints.length > 0) && <CeVsPeChart ceSeries={obvCePoints} peSeries={obvPePoints} height={280} />}
+        </ChartCard>
       </Space>
     </div>
   )
