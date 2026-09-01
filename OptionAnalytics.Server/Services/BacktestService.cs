@@ -1,15 +1,29 @@
 using OptionAnalytics.Server.Models;
+using OptionAnalytics.Server.Services.Backtesting;
 
 namespace OptionAnalytics.Server.Services;
 
 /// <summary>
-/// The "backtrack" page's engine: replays ConfluenceAlertService's exact individual-leg-flip +
-/// three-way-confluence logic offline over whatever spot/ATM CE/PE candle history is currently
-/// held in memory (up to SpotFeedHostedService/CdvUnderlyingState's HistoryTradingDays), instead of
-/// reacting to live bar closes, and can go one step further and simulate a simple OTM-option trade
-/// off each Confluence signal (see SimulateTrades). Stateless and computed on demand per request -
-/// there's nothing to keep updated between requests, since it only ever reads the two hosted
-/// services' already-live in-memory state.
+/// The "backtrack" page's engine. Two independent things:
+///
+///   1. Replay: reproduces ConfluenceAlertService's exact individual-leg-flip + three-way-
+///      confluence logic offline over whatever spot/ATM CE/PE candle history is currently held in
+///      memory (up to SpotFeedHostedService/CdvUnderlyingState's HistoryTradingDays), instead of
+///      reacting to live bar closes.
+///
+///   2. RunStrategy: hands that same replay's Confluence signals (plus aggregated spot bars and a
+///      way to fetch any strike's own premium history) to a pluggable IBacktestStrategy - see that
+///      interface for how to add a new strategy. This class owns none of the trading logic itself
+///      any more; it only does the shared, strategy-agnostic setup work every strategy would
+///      otherwise have to repeat (timeframe aggregation, signal detection).
+///
+/// Both take a timeframeMinutes parameter - the underlying 1-minute bars are bucketed up front
+/// (BacktestUtil.AggregateCandles, the server-side counterpart to the dashboard's own client-side
+/// aggregateCandles) so a coarser timeframe genuinely recomputes EMA9/21 off fewer, smoother bars
+/// rather than just changing how the existing signals are displayed.
+///
+/// Stateless and computed on demand per request - there's nothing to keep updated between
+/// requests, since it only ever reads the two hosted services' already-live in-memory state.
 ///
 /// Replay is faithful to ConfluenceAlertService's live behavior:
 ///   - a leg's direction is tracked per closed bar (EmaCrossoverDetector.DirectionSeries, the
@@ -23,21 +37,18 @@ namespace OptionAnalytics.Server.Services;
 /// The three legs' bars are walked in one merged, time-ascending pass (rather than replaying each
 /// leg independently) so a Confluence check only ever runs after all bars closing at that instant
 /// have already updated their leg - the same ordering EvaluateConfluence relies on live.
-///
-/// Both Replay and SimulateTrades take a timeframeMinutes parameter - the underlying 1-minute bars
-/// are bucketed up front (AggregateCandles, the server-side counterpart to the dashboard's own
-/// client-side aggregateCandles) so a coarser timeframe genuinely recomputes EMA9/21 off fewer,
-/// smoother bars rather than just changing how the existing signals are displayed.
 /// </summary>
 public sealed class BacktestService
 {
     private readonly SpotFeedHostedService _spotFeed;
     private readonly CdvHostedService _cdv;
+    private readonly IReadOnlyDictionary<string, IBacktestStrategy> _strategies;
 
-    public BacktestService(SpotFeedHostedService spotFeed, CdvHostedService cdv)
+    public BacktestService(SpotFeedHostedService spotFeed, CdvHostedService cdv, IEnumerable<IBacktestStrategy> strategies)
     {
         _spotFeed = spotFeed;
         _cdv = cdv;
+        _strategies = strategies.ToDictionary(s => s.Key);
     }
 
     /// <summary>Every signal that would have fired across the underlying's currently-held history
@@ -51,119 +62,57 @@ public sealed class BacktestService
         return ReplayCore(underlying, spotState, cdvState, timeframeMinutes).Signals;
     }
 
-    /// <summary>Simulates one long-only option trade per Confluence signal: buy the CE (Bullish) or
-    /// PE (Bearish) that was <paramref name="otmSteps"/> strikes OTM from ATM at the moment of the
-    /// signal - not whatever is ATM right now, so an old signal is judged against the strike it
-    /// actually pointed at - entered at that contract's own NEXT bar's open (the signal bar's own
-    /// close is never tradeable in real time, so entering on it would be look-ahead bias), then
-    /// walked forward bar by bar against a stop-loss/take-profit given in absolute premium points
-    /// (not a percentage) until one hits or the trading day ends (index option intraday strategies
-    /// don't carry overnight - held past a day boundary they lose most of their remaining time
-    /// value to theta decay by next morning, so "still open at day close" exits at that last bar
-    /// rather than riding into the next day). At most one trade is open at a time - a signal that
-    /// arrives while an earlier trade is still open is skipped, same as a trader who can't take a
-    /// second position until the first is closed.
-    ///
-    /// A signal whose target strike was never tracked (fell outside the ATM+-8 window for this
-    /// underlying's whole in-memory history - only possible with a large otmSteps or a very wide
-    /// intraday move) produces a BacktestTrade.NoData entry instead of being silently dropped, so
-    /// the page can show it was skipped and why.</summary>
-    public IReadOnlyList<BacktestTrade> SimulateTrades(string underlying, int timeframeMinutes, int otmSteps, decimal slPoints, decimal tpPoints)
+    /// <summary>Every registered IBacktestStrategy's metadata (key/name/description/parameters) -
+    /// what the Backtrack page needs to populate its strategy dropdown and render each one's own
+    /// parameter controls generically. Ordered by Name for a stable, readable dropdown.</summary>
+    public IReadOnlyList<BacktestStrategyInfo> GetStrategies() =>
+        _strategies.Values
+            .Select(s => new BacktestStrategyInfo(s.Key, s.Name, s.Description, s.Parameters))
+            .OrderBy(s => s.Name)
+            .ToList();
+
+    /// <summary>Runs one registered strategy (by IBacktestStrategy.Key) over the underlying's
+    /// current in-memory history at the given timeframe. Any parameter the caller didn't supply is
+    /// filled from that strategy's own declared default, so a strategy implementation can always
+    /// assume <paramref name="parameters"/> is complete. Empty if the underlying or strategy key
+    /// isn't recognized, or there's no history backfilled yet.</summary>
+    public IReadOnlyList<BacktestTrade> RunStrategy(string underlying, string strategyKey, int timeframeMinutes, IReadOnlyDictionary<string, decimal> parameters)
     {
+        if (!_strategies.TryGetValue(strategyKey, out var strategy)) return Array.Empty<BacktestTrade>();
         if (!_spotFeed.States.TryGetValue(underlying, out var spotState) || !_cdv.States.TryGetValue(underlying, out var cdvState))
             return Array.Empty<BacktestTrade>();
 
-        var (_, spotBars, confluenceSignals) = ReplayCore(underlying, spotState, cdvState, timeframeMinutes);
-        if (confluenceSignals.Count == 0) return Array.Empty<BacktestTrade>();
+        var timeframe = Math.Max(1, timeframeMinutes);
+        var (_, spotBars, confluenceAscending) = ReplayCore(underlying, spotState, cdvState, timeframe);
 
-        var step = spotState.Step;
-        var spotByTime = spotBars.ToDictionary(b => b.Time, b => b);
-        var strikeCandleCache = new Dictionary<(decimal Strike, bool IsCall), List<Candle>>();
-
-        var trades = new List<BacktestTrade>();
-        DateTimeOffset? busyUntil = null;
-
-        foreach (var signal in confluenceSignals)
+        var context = new BacktestStrategyContext
         {
-            if (busyUntil is { } bu && signal.TimeUtc <= bu) continue; // still in an earlier trade
+            Underlying = underlying,
+            TimeframeMinutes = timeframe,
+            Step = spotState.Step,
+            SpotBars = spotBars,
+            ConfluenceSignalsAscending = confluenceAscending,
+            GetOptionBars = (strike, isCall) => BacktestUtil.AggregateCandles(cdvState.GetStrikeClosedCandles(strike, isCall), timeframe),
+        };
 
-            var isCall = signal.Direction == "Bullish";
-            var optionType = isCall ? "CE" : "PE";
+        var mergedParameters = strategy.Parameters.ToDictionary(p => p.Key, p => parameters.TryGetValue(p.Key, out var v) ? v : p.Default);
 
-            if (!spotByTime.TryGetValue(signal.TimeUtc, out var signalSpotBar))
-            {
-                trades.Add(BacktestTrade.NoData(underlying, signal.TimeUtc, signal.Direction, optionType, 0));
-                continue;
-            }
-
-            var atmAtSignal = step > 0 ? Math.Round(signalSpotBar.Close / step) * step : signalSpotBar.Close;
-            var strike = isCall ? atmAtSignal + otmSteps * step : atmAtSignal - otmSteps * step;
-
-            if (!strikeCandleCache.TryGetValue((strike, isCall), out var optionBars))
-            {
-                optionBars = AggregateCandles(cdvState.GetStrikeClosedCandles(strike, isCall), timeframeMinutes);
-                strikeCandleCache[(strike, isCall)] = optionBars;
-            }
-
-            var entryIndex = optionBars.FindIndex(b => b.Time > signal.TimeUtc);
-            if (entryIndex < 0)
-            {
-                trades.Add(BacktestTrade.NoData(underlying, signal.TimeUtc, signal.Direction, optionType, strike));
-                continue;
-            }
-
-            var entryBar = optionBars[entryIndex];
-            if (entryBar.Open <= 0)
-            {
-                trades.Add(BacktestTrade.NoData(underlying, signal.TimeUtc, signal.Direction, optionType, strike));
-                continue;
-            }
-
-            var entryPrice = entryBar.Open;
-            var takeProfitPrice = entryPrice + tpPoints;
-            var stopLossPrice = Math.Max(0, entryPrice - slPoints); // premium can't go negative
-            var entryDay = IstDate(entryBar.Time);
-
-            var exitTime = entryBar.Time;
-            var exitPrice = entryBar.Close;
-            var exitReason = "EndOfDay";
-
-            for (var i = entryIndex; i < optionBars.Count && IstDate(optionBars[i].Time) == entryDay; i++)
-            {
-                var bar = optionBars[i];
-                // Conservative when a single bar's range spans both thresholds (a volatile bar
-                // right after entry, most likely): assume the worse outcome for the trade rather
-                // than guessing which was actually touched first intra-bar.
-                if (bar.Low <= stopLossPrice) { exitTime = bar.Time; exitPrice = stopLossPrice; exitReason = "StopLoss"; break; }
-                if (bar.High >= takeProfitPrice) { exitTime = bar.Time; exitPrice = takeProfitPrice; exitReason = "TakeProfit"; break; }
-                exitTime = bar.Time;
-                exitPrice = bar.Close;
-            }
-
-            busyUntil = exitTime;
-            var pnlPoints = exitPrice - entryPrice;
-
-            trades.Add(new BacktestTrade(
-                underlying, signal.TimeUtc, signal.Direction, optionType, strike,
-                entryBar.Time, entryPrice, exitTime, exitPrice, exitReason, pnlPoints));
-        }
-
-        return trades.OrderByDescending(t => t.SignalTimeUtc).ToList();
+        return strategy.Simulate(context, mergedParameters);
     }
 
-    /// <summary>Shared by Replay and SimulateTrades - aggregates all three legs to the requested
+    /// <summary>Shared by Replay and RunStrategy - aggregates all three legs to the requested
     /// timeframe once and replays the same leg-flip/confluence state machine, returning both the
-    /// full signal list and (for SimulateTrades' strike-selection math) the aggregated spot bars
-    /// and the Confluence-only subset in time-ascending order.</summary>
+    /// full signal list and (for strategies' strike-selection math) the aggregated spot bars and
+    /// the Confluence-only subset in time-ascending order.</summary>
     private static (IReadOnlyList<BacktestSignal> Signals, List<Candle> SpotBars, List<BacktestSignal> ConfluenceAscending) ReplayCore(
         string underlying, SpotUnderlyingState spotState, CdvUnderlyingState cdvState, int timeframeMinutes)
     {
         var timeframe = Math.Max(1, timeframeMinutes);
         var confluenceWindow = TimeSpan.FromMinutes(Math.Max(5, timeframe));
 
-        var spotBars = AggregateCandles(spotState.GetClosedCandles(), timeframe);
-        var ceBars = AggregateCandles(cdvState.GetAtmClosedCandles(true), timeframe);
-        var peBars = AggregateCandles(cdvState.GetAtmClosedCandles(false), timeframe);
+        var spotBars = BacktestUtil.AggregateCandles(spotState.GetClosedCandles(), timeframe);
+        var ceBars = BacktestUtil.AggregateCandles(cdvState.GetAtmClosedCandles(true), timeframe);
+        var peBars = BacktestUtil.AggregateCandles(cdvState.GetAtmClosedCandles(false), timeframe);
 
         var spotSeries = EmaCrossoverDetector.DirectionSeries(spotBars);
         var ceSeries = EmaCrossoverDetector.DirectionSeries(ceBars);
@@ -210,29 +159,6 @@ public sealed class BacktestService
 
         return (signals.OrderByDescending(s => s.TimeUtc).ToList(), spotBars, confluenceAscending);
     }
-
-    /// <summary>Buckets native 1-minute closed bars into <paramref name="minutes"/>-minute OHLC
-    /// bars - the server-side counterpart to the dashboard's client-side aggregateCandles, needed
-    /// here because EMA9/21 has to be recomputed off the coarser bars themselves, not just
-    /// redrawn from the same 1-minute signals.</summary>
-    private static List<Candle> AggregateCandles(IReadOnlyList<Candle> bars, int minutes)
-    {
-        if (minutes <= 1 || bars.Count == 0) return bars.ToList();
-
-        var bucketSeconds = minutes * 60;
-        var buckets = new SortedDictionary<long, Candle>();
-        foreach (var bar in bars)
-        {
-            var bucketEpoch = bar.Time.ToUnixTimeSeconds() / bucketSeconds * bucketSeconds;
-            var bucketTime = DateTimeOffset.FromUnixTimeSeconds(bucketEpoch);
-            buckets[bucketEpoch] = buckets.TryGetValue(bucketEpoch, out var existing)
-                ? existing with { High = Math.Max(existing.High, bar.High), Low = Math.Min(existing.Low, bar.Low), Close = bar.Close }
-                : new Candle(bucketTime, bar.Open, bar.High, bar.Low, bar.Close);
-        }
-        return buckets.Values.ToList();
-    }
-
-    private static DateOnly IstDate(DateTimeOffset time) => DateOnly.FromDateTime(time.ToOffset(TimeSpan.FromHours(5.5)).DateTime);
 
     private static Dictionary<DateTimeOffset, string?> ToLookup(IReadOnlyList<(DateTimeOffset Time, string? Direction)> series)
     {

@@ -7,8 +7,9 @@ const { Title, Text } = Typography
 
 const TIMEFRAME_OPTIONS = [
   { value: 1, label: '1 min' },
-  { value: 2, label: '2 min' },
+  { value: 3, label: '3 min' },
   { value: 5, label: '5 min' },
+  { value: 15, label: '15 min' },
 ]
 
 const EXIT_REASON_COLOR = { TakeProfit: UP_COLOR, StopLoss: DOWN_COLOR, EndOfDay: undefined, NoData: undefined }
@@ -27,8 +28,10 @@ function renderPnl(v) {
 // Re-runs ConfluenceAlertService's exact leg-flip + confluence logic offline over whatever
 // spot/ATM CE/PE candle history the backend currently holds in memory (see BacktestService) - lets
 // you check what the live alert engine would have fired without waiting for it to happen live, and
-// simulate a simple OTM CE/PE trade (configurable strike offset + SL/TP in premium points) off
-// each Confluence signal to see how that strategy would have played out.
+// run any registered strategy (see the backend's Services/Backtesting/IBacktestStrategy) off those
+// Confluence signals to see how it would have played out. The strategy picker and its parameter
+// controls are both driven entirely by GET /api/backtest/strategies - a new backend strategy shows
+// up here with no frontend change needed.
 export default function BacktestPage() {
   const [underlyings, setUnderlyings] = useState([])
   const [selected, setSelected] = useState(null)
@@ -37,11 +40,13 @@ export default function BacktestPage() {
   const [signals, setSignals] = useState(null)
   const [signalsLoading, setSignalsLoading] = useState(false)
 
-  const [otmSteps, setOtmSteps] = useState(1)
-  const [slPoints, setSlPoints] = useState(10)
-  const [tpPoints, setTpPoints] = useState(20)
+  const [strategies, setStrategies] = useState([])
+  const [strategyKey, setStrategyKey] = useState(null)
+  const [paramValues, setParamValues] = useState({})
   const [trades, setTrades] = useState(null)
   const [tradesLoading, setTradesLoading] = useState(false)
+
+  const strategy = strategies.find((s) => s.key === strategyKey) ?? null
 
   useEffect(() => {
     fetch('/api/spot/underlyings')
@@ -51,7 +56,23 @@ export default function BacktestPage() {
         if (list.length > 0) setSelected(list[0].underlying)
       })
       .catch((err) => console.error('Failed to load underlyings:', err))
+
+    fetch('/api/backtest/strategies')
+      .then((r) => r.json())
+      .then((list) => {
+        setStrategies(list ?? [])
+        if (list?.length > 0) setStrategyKey(list[0].key)
+      })
+      .catch((err) => console.error('Failed to load backtest strategies:', err))
   }, [])
+
+  // Reset every parameter to the newly-picked strategy's own declared defaults - each strategy's
+  // parameters are independent (a different key set entirely), so values from the previous
+  // strategy would be meaningless carried over.
+  useEffect(() => {
+    if (!strategy) return
+    setParamValues(Object.fromEntries(strategy.parameters.map((p) => [p.key, p.default])))
+  }, [strategy])
 
   const loadSignals = (underlying, tf) => {
     if (!underlying) return
@@ -64,23 +85,31 @@ export default function BacktestPage() {
   }
 
   const runTrades = () => {
-    if (!selected) return
+    if (!selected || !strategyKey) return
     setTradesLoading(true)
-    fetch(`/api/backtest/${selected}/trades?timeframe=${timeframe}&otmSteps=${otmSteps}&slPoints=${slPoints}&tpPoints=${tpPoints}`)
+    const paramQuery = Object.entries(paramValues).map(([k, v]) => `${k}=${v}`).join('&')
+    fetch(`/api/backtest/${selected}/trades?strategy=${strategyKey}&timeframe=${timeframe}&${paramQuery}`)
       .then((r) => r.json())
       .then((data) => setTrades(data ?? []))
       .catch((err) => console.error('Failed to load backtest trades:', err))
       .finally(() => setTradesLoading(false))
   }
 
-  // Signals (and a first trade run) refresh automatically on underlying/timeframe - those are
-  // discrete dropdown choices, not something typed. otmSteps/SL/TP points only apply when "Run"
-  // is clicked, so adjusting them doesn't fire a request on every keystroke.
+  // Signals refresh automatically on underlying/timeframe - those are discrete dropdown choices,
+  // not something typed. Strategy parameters only apply when "Run" is clicked, so adjusting them
+  // doesn't fire a request on every keystroke.
   useEffect(() => {
     loadSignals(selected, timeframe)
-    runTrades()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected, timeframe])
+
+  // A first trade run once a strategy is actually selected (its default parameters are ready) -
+  // and again whenever underlying/timeframe/strategy change, same "discrete choice" reasoning.
+  useEffect(() => {
+    if (!strategy) return
+    runTrades()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected, timeframe, strategyKey, strategy])
 
   const summary = useMemo(() => {
     const closed = (trades ?? []).filter((t) => t.pnlPoints != null)
@@ -196,24 +225,34 @@ export default function BacktestPage() {
 
         <Card
           size="small"
-          title="Simulated OTM Trade — every Confluence signal"
-          extra={<Text type="secondary" style={{ fontSize: 12 }}>Buy CE/PE on Confluence, exit on SL/TP or day close</Text>}
+          title="Simulated Strategy Backtest — every Confluence signal"
+          extra={<Text type="secondary" style={{ fontSize: 12 }}>{strategy?.description ?? 'Loading strategies…'}</Text>}
         >
           <Space direction="vertical" size={16} style={{ width: '100%' }}>
             <Space align="end" size={16} wrap>
               <Space direction="vertical" size={2}>
-                <Text type="secondary" style={{ fontSize: 12 }}>OTM steps from ATM</Text>
-                <InputNumber min={0} max={8} value={otmSteps} onChange={(v) => setOtmSteps(v ?? 0)} style={{ width: 110 }} />
+                <Text type="secondary" style={{ fontSize: 12 }}>Strategy</Text>
+                <Select
+                  value={strategyKey}
+                  onChange={setStrategyKey}
+                  style={{ width: 200 }}
+                  options={strategies.map((s) => ({ value: s.key, label: s.name }))}
+                />
               </Space>
-              <Space direction="vertical" size={2}>
-                <Text type="secondary" style={{ fontSize: 12 }}>Stop loss (points)</Text>
-                <InputNumber min={0.05} max={1000} step={0.5} value={slPoints} onChange={(v) => setSlPoints(v ?? 10)} style={{ width: 110 }} />
-              </Space>
-              <Space direction="vertical" size={2}>
-                <Text type="secondary" style={{ fontSize: 12 }}>Take profit (points)</Text>
-                <InputNumber min={0.05} max={2000} step={0.5} value={tpPoints} onChange={(v) => setTpPoints(v ?? 20)} style={{ width: 110 }} />
-              </Space>
-              <Button type="primary" icon={<PlayCircleOutlined />} onClick={runTrades} loading={tradesLoading} disabled={!selected}>
+              {strategy?.parameters.map((p) => (
+                <Space direction="vertical" size={2} key={p.key}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>{p.label}</Text>
+                  <InputNumber
+                    min={p.min}
+                    max={p.max}
+                    step={p.step}
+                    value={paramValues[p.key] ?? p.default}
+                    onChange={(v) => setParamValues((prev) => ({ ...prev, [p.key]: v ?? p.default }))}
+                    style={{ width: 130 }}
+                  />
+                </Space>
+              ))}
+              <Button type="primary" icon={<PlayCircleOutlined />} onClick={runTrades} loading={tradesLoading} disabled={!selected || !strategyKey}>
                 Run
               </Button>
             </Space>

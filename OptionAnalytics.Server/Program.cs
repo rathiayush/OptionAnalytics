@@ -1,6 +1,7 @@
 using OptionAnalytics.Server.Dhan;
 using OptionAnalytics.Server.Hubs;
 using OptionAnalytics.Server.Services;
+using OptionAnalytics.Server.Services.Backtesting;
 using OptionAnalytics.Server.Telegram;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -51,6 +52,11 @@ builder.Services.AddHostedService<EmaCrossoverAlertService>();
 // its recent-alert history directly.
 builder.Services.AddSingleton<ConfluenceAlertService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<ConfluenceAlertService>());
+
+// Every registered IBacktestStrategy is picked up automatically by BacktestService's
+// IEnumerable<IBacktestStrategy> constructor param - add a new strategy by implementing the
+// interface and adding one more AddSingleton line here, nothing else needs to change.
+builder.Services.AddSingleton<IBacktestStrategy, OtmConfluenceStrategy>();
 
 // Stateless - reads SpotFeedHostedService/CdvHostedService's in-memory history fresh on every
 // request, nothing to run in the background. See BacktestController/BacktestService.

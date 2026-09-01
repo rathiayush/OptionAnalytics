@@ -3,7 +3,7 @@ using OptionAnalytics.Server.Services;
 
 namespace OptionAnalytics.Server.Controllers;
 
-/// <summary>Backtrack page endpoints - both compute fresh on every call (see BacktestService),
+/// <summary>Backtrack page endpoints - all compute fresh on every call (see BacktestService),
 /// nothing is cached, since the underlying source data itself only ever grows/rolls forward.</summary>
 [ApiController]
 [Route("api/backtest")]
@@ -23,16 +23,30 @@ public sealed class BacktestController : ControllerBase
     public IActionResult Get(string underlying, [FromQuery] int timeframe = 1) =>
         Ok(_backtest.Replay(underlying.ToUpperInvariant(), timeframe));
 
-    /// <summary>Simulates one long-only OTM CE/PE trade per Confluence signal at that timeframe -
-    /// see BacktestService.SimulateTrades for the entry/exit/SL-TP rules. otmSteps is how many
-    /// strike-steps OTM from ATM to trade (0 = ATM itself); slPoints/tpPoints are both absolute
-    /// premium points (not a percentage).</summary>
+    /// <summary>Every registered strategy's metadata - key, name, description, and the parameter
+    /// controls the Backtrack page should render for it. See Services.Backtesting.IBacktestStrategy
+    /// for how to add a new one; it shows up here automatically once registered in Program.cs.</summary>
+    [HttpGet("strategies")]
+    public IActionResult GetStrategies() => Ok(_backtest.GetStrategies());
+
+    /// <summary>Runs one registered strategy (?strategy=, defaulting to the original OTM/Confluence
+    /// one) over the underlying's current history at the given timeframe - see
+    /// Services.Backtesting.IBacktestStrategy.Simulate for what a strategy actually does with this.
+    /// Every query param other than "strategy"/"timeframe" that parses as a number is passed
+    /// through as that strategy's own parameter (keyed by name, e.g. ?otmSteps=1&amp;slPoints=10) -
+    /// generic on purpose, so a new strategy's parameters need no controller change to reach it.
+    /// Any parameter the strategy declares but the caller omits falls back to that parameter's own
+    /// default (see BacktestService.RunStrategy).</summary>
     [HttpGet("{underlying}/trades")]
-    public IActionResult GetTrades(
-        string underlying,
-        [FromQuery] int timeframe = 1,
-        [FromQuery] int otmSteps = 1,
-        [FromQuery] decimal slPoints = 10,
-        [FromQuery] decimal tpPoints = 20) =>
-        Ok(_backtest.SimulateTrades(underlying.ToUpperInvariant(), timeframe, Math.Max(0, otmSteps), Math.Max(0.05m, slPoints), Math.Max(0.05m, tpPoints)));
+    public IActionResult GetTrades(string underlying, [FromQuery] string strategy = "otm-confluence", [FromQuery] int timeframe = 1)
+    {
+        var parameters = new Dictionary<string, decimal>();
+        foreach (var (key, value) in Request.Query)
+        {
+            if (key is "strategy" or "timeframe") continue;
+            if (decimal.TryParse(value, out var parsed)) parameters[key] = parsed;
+        }
+
+        return Ok(_backtest.RunStrategy(underlying.ToUpperInvariant(), strategy, Math.Max(1, timeframe), parameters));
+    }
 }
