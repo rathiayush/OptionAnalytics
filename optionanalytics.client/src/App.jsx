@@ -137,9 +137,9 @@ function useEmaCrossover(bars) {
         const diff = ema9[i] - ema21[i]
         if (prevDiff != null) {
           if (prevDiff <= 0 && diff > 0) {
-            markers.push({ time, position: 'belowBar', color: UP_COLOR, shape: 'arrowUp', text: 'EMA 9/21' })
+            markers.push({ time, position: 'belowBar', color: UP_COLOR, shape: 'arrowUp', text: 'Breakup' })
           } else if (prevDiff >= 0 && diff < 0) {
-            markers.push({ time, position: 'aboveBar', color: DOWN_COLOR, shape: 'arrowDown', text: 'EMA 9/21' })
+            markers.push({ time, position: 'aboveBar', color: DOWN_COLOR, shape: 'arrowDown', text: 'Breakdown' })
           }
         }
         prevDiff = diff
@@ -147,6 +147,21 @@ function useEmaCrossover(bars) {
     }
 
     return { ema9Points, ema21Points, markers }
+  }, [bars])
+}
+
+// Just the CURRENT relationship between EMA9/EMA21 (not the crossover event history) - what the
+// chart card's header badge shows, so "is this bullish or bearish right now" reads at a glance
+// without hunting through the marker clutter on the chart body itself.
+function useCrossoverState(bars) {
+  return useMemo(() => {
+    const closes = bars.map((b) => b.close)
+    const ema9 = computeEma(closes, 9)
+    const ema21 = computeEma(closes, 21)
+    for (let i = closes.length - 1; i >= 0; i--) {
+      if (ema9[i] != null && ema21[i] != null) return ema9[i] >= ema21[i] ? 'up' : 'down'
+    }
+    return null
   }, [bars])
 }
 
@@ -314,10 +329,15 @@ function ChartCard({ title, extra, children, empty }) {
   )
 }
 
-const EmaLegend = () => (
+// state: 'up' (EMA9 currently above EMA21 - bullish) | 'down' (below - bearish) | null (not enough
+// bars yet) - see useCrossoverState. Shown as a colored "Crossover"/"Crossdown" badge next to the
+// EMA legend on every chart card, so the current bias reads at a glance.
+const EmaLegend = ({ state }) => (
   <Space size={16}>
     <Text style={{ color: EMA_FAST_COLOR, fontSize: 12 }}>— EMA 9</Text>
     <Text style={{ color: EMA_SLOW_COLOR, fontSize: 12 }}>— EMA 21</Text>
+    {state === 'up' && <Text style={{ color: UP_COLOR, fontSize: 12, fontWeight: 600 }}>▲ Crossover</Text>}
+    {state === 'down' && <Text style={{ color: DOWN_COLOR, fontSize: 12, fontWeight: 600 }}>▼ Crossdown</Text>}
   </Space>
 )
 
@@ -441,6 +461,10 @@ export default function App() {
   const atmCeBars = useAggregatedCandles(atmCeCandles, cdvSnapshot?.atmCeCurrentBar, timeframe)
   const atmPeBars = useAggregatedCandles(atmPeCandles, cdvSnapshot?.atmPeCurrentBar, timeframe)
 
+  const spotCrossState = useCrossoverState(spotBars)
+  const atmCeCrossState = useCrossoverState(atmCeBars)
+  const atmPeCrossState = useCrossoverState(atmPeBars)
+
   const cdvCe = useAggregatedLine(cdvSeries, cdvSnapshot?.currentBar, timeframe, ['ceCdv']).map((p) => ({ time: p.time, value: p.ceCdv }))
   const cdvPe = useAggregatedLine(cdvSeries, cdvSnapshot?.currentBar, timeframe, ['peCdv']).map((p) => ({ time: p.time, value: p.peCdv }))
 
@@ -476,7 +500,7 @@ export default function App() {
 
         <ChartCard
           title={`${selected} spot`}
-          extra={<EmaLegend />}
+          extra={<EmaLegend state={spotCrossState} />}
           empty="Waiting for chart data - the Dhan feed may still be connecting."
         >
           {spotBars.length > 0 && <PriceChart bars={spotBars} height={420} />}
@@ -492,7 +516,7 @@ export default function App() {
           <div style={{ flex: '1 1 400px', minWidth: 0 }}>
             <ChartCard
               title={`ATM CE ${cdvSnapshot?.atmStrike ?? ''}`}
-              extra={<EmaLegend />}
+              extra={<EmaLegend state={atmCeCrossState} />}
               empty="Waiting for the ATM CE contract to resolve and tick."
             >
               {atmCeBars.length > 0 && <PriceChart bars={atmCeBars} height={320} />}
@@ -501,7 +525,7 @@ export default function App() {
           <div style={{ flex: '1 1 400px', minWidth: 0 }}>
             <ChartCard
               title={`ATM PE ${cdvSnapshot?.atmStrike ?? ''}`}
-              extra={<EmaLegend />}
+              extra={<EmaLegend state={atmPeCrossState} />}
               empty="Waiting for the ATM PE contract to resolve and tick."
             >
               {atmPeBars.length > 0 && <PriceChart bars={atmPeBars} height={320} />}
