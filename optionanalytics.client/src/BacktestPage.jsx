@@ -30,6 +30,12 @@ function fmtOption(row) {
   return `${row.strike} ${row.optionType}`
 }
 
+function renderCrossState(v) {
+  if (!v) return <Text type="secondary">—</Text>
+  const isUp = v === 'Up'
+  return <Tag color={isUp ? UP_COLOR : DOWN_COLOR}>{isUp ? '▲ Up' : '▼ Down'}</Tag>
+}
+
 function renderPnl(v) {
   if (v == null) return <Text type="secondary">—</Text>
   const color = v > 0 ? UP_COLOR : v < 0 ? DOWN_COLOR : undefined
@@ -162,6 +168,10 @@ export default function BacktestPage() {
       },
     },
     { title: 'Direction', dataIndex: 'direction', key: 'direction', width: 130, render: (direction) => <DirectionTag direction={direction} /> },
+    // Where each OBV line sits relative to the other at that signal - CE above PE is the bullish
+    // arrangement, so the two are always mirrors of each other.
+    { title: 'CE OBV', dataIndex: 'ceObvCross', key: 'ceObvCross', width: 100, render: renderCrossState },
+    { title: 'PE OBV', dataIndex: 'peObvCross', key: 'peObvCross', width: 100, render: renderCrossState },
     { title: 'Summary', dataIndex: 'summary', key: 'summary' },
   ]
 

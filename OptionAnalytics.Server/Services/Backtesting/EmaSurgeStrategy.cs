@@ -43,8 +43,6 @@ public sealed class EmaSurgeStrategy : IBacktestStrategy
     public string Name => "EMA Crossover + Volume Surge";
     public string Description => "Spot EMA 9/21 must cross, the matching CE (up) or PE (down) leg must cross to confirm it, and - when their flags are on - the traded leg's OBV and/or CDV must have moved at least the threshold % across the 3/5/7-bar lookback windows (any one of them by default, or all three).";
 
-    private static readonly int[] LookbackWindows = { 3, 5, 7 };
-
     private const decimal FlagOff = 0;
     private const decimal FlagOn = 1;
 
@@ -58,6 +56,9 @@ public sealed class EmaSurgeStrategy : IBacktestStrategy
         OptionTradeSimulator.StopLossParameter(),
         OptionTradeSimulator.TakeProfitParameter(),
         new BacktestParameterSpec("confirmWithinBars", "Leg must confirm within (bars)", Default: 3, Min: 0, Max: 20, Step: 1),
+        new BacktestParameterSpec("lookbackBars1", "Lookback window 1 (bars)", Default: 3, Min: 1, Max: 500, Step: 1),
+        new BacktestParameterSpec("lookbackBars2", "Lookback window 2 (bars)", Default: 5, Min: 1, Max: 500, Step: 1),
+        new BacktestParameterSpec("lookbackBars3", "Lookback window 3 (bars)", Default: 7, Min: 1, Max: 500, Step: 1),
         new BacktestParameterSpec("lookbackPercent", "Lookback surge threshold (%)", Default: 75, Min: 0, Max: 1000, Step: 5),
         new BacktestParameterSpec("lookbackMode", "Lookback windows needed", Default: ModeAny, Min: ModeAny, Max: ModeAll, Step: 1, Options: new[]
         {
@@ -73,6 +74,16 @@ public sealed class EmaSurgeStrategy : IBacktestStrategy
         {
             new BacktestParameterOption(FlagOff, "No - ignore CDV"),
             new BacktestParameterOption(FlagOn, "Yes - CDV must confirm (today only)"),
+        }),
+        new BacktestParameterSpec("useObvCross", "Require CE/PE OBV crossover", Default: FlagOff, Min: FlagOff, Max: FlagOn, Step: 1, Options: new[]
+        {
+            new BacktestParameterOption(FlagOff, "No - ignore OBV crossover"),
+            new BacktestParameterOption(FlagOn, "Yes - CE/PE OBV must cross the same way"),
+        }),
+        new BacktestParameterSpec("useCdvCross", "Require CE/PE CDV crossover", Default: FlagOff, Min: FlagOff, Max: FlagOn, Step: 1, Options: new[]
+        {
+            new BacktestParameterOption(FlagOff, "No - ignore CDV crossover"),
+            new BacktestParameterOption(FlagOn, "Yes - CE/PE CDV must cross the same way (today only)"),
         }),
     };
 
@@ -91,9 +102,23 @@ public sealed class EmaSurgeStrategy : IBacktestStrategy
         var confirmWithinBars = (int)parameters["confirmWithinBars"];
         var lookbackPercent = parameters["lookbackPercent"];
         var requireAllWindows = parameters["lookbackMode"] >= (ModeAny + ModeAll) / 2;
-        var windowsLabel = requireAllWindows ? "all of 3/5/7" : "any of 3/5/7";
         var useObv = parameters["useObv"] >= (FlagOff + FlagOn) / 2;
         var useCdv = parameters["useCdv"] >= (FlagOff + FlagOn) / 2;
+        var useObvCross = parameters["useObvCross"] >= (FlagOff + FlagOn) / 2;
+        var useCdvCross = parameters["useCdvCross"] >= (FlagOff + FlagOn) / 2;
+
+        // The three lookback windows are chosen rather than fixed - the same lb1/lb2/lb3 the Pine
+        // indicator's own multi-lookback table exposes. Duplicates collapse, so setting all three
+        // the same is just a single-window test.
+        var lookbackWindows = new[] { parameters["lookbackBars1"], parameters["lookbackBars2"], parameters["lookbackBars3"] }
+            .Select(v => (int)v)
+            .Where(v => v > 0)
+            .Distinct()
+            .OrderBy(v => v)
+            .ToArray();
+
+        var windowsList = string.Join("/", lookbackWindows);
+        var windowsLabel = requireAllWindows ? $"all of {windowsList} bars" : $"any of {windowsList} bars";
 
         var entries = new List<(DateTimeOffset Time, string Direction)>();
         var signals = new List<BacktestSignal>();
@@ -107,17 +132,29 @@ public sealed class EmaSurgeStrategy : IBacktestStrategy
         var ceCrossings = CrossoverEvents(context.GetOptionBars(atmStrike, true));
         var peCrossings = CrossoverEvents(context.GetOptionBars(atmStrike, false));
 
+        // CE-vs-PE crossings on the volume lines themselves - the Pine indicator's crossUp/
+        // crossDown ("Green crossed Red"). CE crossing ABOVE PE is the bullish arrangement.
+        var obvCrossings = CeVsPeCrossEvents(context.ObvCeSeries, context.ObvPeSeries);
+        var cdvCrossings = CeVsPeCrossEvents(context.CdvCeSeries, context.CdvPeSeries);
+
         foreach (var (time, direction) in spotCrossings)
         {
             var isBullish = direction == "Bullish";
             var legLabel = isBullish ? "ATM CE" : "ATM PE";
+
+            // Where the CE/PE OBV lines stand at this signal - reported on every row below, so the
+            // table shows the volume picture even for the ones that were rejected.
+            var ceObv = LineStateAt(context.ObvCeSeries, context.ObvPeSeries, time);
+            var peObv = ceObv is null ? null : ceObv == "Up" ? "Down" : "Up";
+            BacktestSignal Signal(string kind, string summary) =>
+                new(context.Underlying, time, kind, direction, summary) { CeObvCross = ceObv, PeObvCross = peObv };
 
             // Step 2: the matching leg has to cross UP within the window - CE for a spot breakup,
             // PE for a spot breakdown.
             var legCrossings = isBullish ? ceCrossings : peCrossings;
             if (!ConfirmedWithin(legCrossings, time, confirmWithinBars, context.TimeframeMinutes))
             {
-                signals.Add(new BacktestSignal(context.Underlying, time, "Rejected", direction,
+                signals.Add(Signal("Rejected",
                     $"Spot crossed {(isBullish ? "up" : "down")} but {legLabel} did not confirm within {confirmWithinBars} bar(s)"));
                 continue;
             }
@@ -131,23 +168,45 @@ public sealed class EmaSurgeStrategy : IBacktestStrategy
             var surgeLegIsCall = isBullish;
             var tradedLegLabel = surgeLegIsCall ? "CE" : "PE";
 
-            if (useObv && !HasSurged(surgeLegIsCall ? context.ObvCeSeries : context.ObvPeSeries, time, lookbackPercent, requireAllWindows))
+            if (useObv && !HasSurged(surgeLegIsCall ? context.ObvCeSeries : context.ObvPeSeries, time, lookbackPercent, requireAllWindows, lookbackWindows))
             {
-                signals.Add(new BacktestSignal(context.Underlying, time, "Rejected", direction,
-                    $"Spot + {legLabel} confirmed, but {tradedLegLabel} OBV did not move {lookbackPercent:0.#}% across {windowsLabel} bars"));
+                signals.Add(Signal("Rejected",
+                    $"Spot + {legLabel} confirmed, but {tradedLegLabel} OBV did not move {lookbackPercent:0.#}% across {windowsLabel}"));
                 continue;
             }
 
-            if (useCdv && !HasSurged(surgeLegIsCall ? context.CdvCeSeries : context.CdvPeSeries, time, lookbackPercent, requireAllWindows))
+            if (useCdv && !HasSurged(surgeLegIsCall ? context.CdvCeSeries : context.CdvPeSeries, time, lookbackPercent, requireAllWindows, lookbackWindows))
             {
-                signals.Add(new BacktestSignal(context.Underlying, time, "Rejected", direction,
-                    $"Spot + {legLabel} confirmed, but {tradedLegLabel} CDV did not move {lookbackPercent:0.#}% across {windowsLabel} bars"));
+                signals.Add(Signal("Rejected",
+                    $"Spot + {legLabel} confirmed, but {tradedLegLabel} CDV did not move {lookbackPercent:0.#}% across {windowsLabel}"));
                 continue;
             }
 
-            var confirmedBy = useObv && useCdv ? "OBV + CDV" : useObv ? "OBV" : useCdv ? "CDV" : "no volume filter";
-            signals.Add(new BacktestSignal(context.Underlying, time, "Entry", direction,
-                $"Spot crossed {(isBullish ? "up" : "down")} + {legLabel} confirmed + {confirmedBy}"));
+            // Step 4: the CE/PE volume lines themselves must have crossed the same way - CE above
+            // PE for a breakup, PE above CE for a breakdown ("if 9/21 breaks down, consider the PE
+            // crossover"). This is the Pine indicator's own crossUp/crossDown, as a gate.
+            if (useObvCross && !ConfirmedWithin(obvCrossings, time, confirmWithinBars, context.TimeframeMinutes, direction))
+            {
+                signals.Add(Signal("Rejected",
+                    $"Spot + {legLabel} confirmed, but CE/PE OBV did not cross {(isBullish ? "bullish" : "bearish")} within {confirmWithinBars} bar(s)"));
+                continue;
+            }
+
+            if (useCdvCross && !ConfirmedWithin(cdvCrossings, time, confirmWithinBars, context.TimeframeMinutes, direction))
+            {
+                signals.Add(Signal("Rejected",
+                    $"Spot + {legLabel} confirmed, but CE/PE CDV did not cross {(isBullish ? "bullish" : "bearish")} within {confirmWithinBars} bar(s)"));
+                continue;
+            }
+
+            var confirmations = new List<string>();
+            if (useObv) confirmations.Add("OBV surge");
+            if (useCdv) confirmations.Add("CDV surge");
+            if (useObvCross) confirmations.Add("OBV cross");
+            if (useCdvCross) confirmations.Add("CDV cross");
+            var confirmedBy = confirmations.Count > 0 ? string.Join(" + ", confirmations) : "no volume filter";
+
+            signals.Add(Signal("Entry", $"Spot crossed {(isBullish ? "up" : "down")} + {legLabel} confirmed + {confirmedBy}"));
             entries.Add((time, direction));
         }
 
@@ -170,19 +229,63 @@ public sealed class EmaSurgeStrategy : IBacktestStrategy
         return events;
     }
 
-    /// <summary>Did the confirming leg cross UP close enough after the spot cross to count as
-    /// confirming it? "Bullish" on the leg means its own EMA9 crossed above EMA21 - which is what
-    /// confirms both a CE leading a rally and a PE leading a selloff.</summary>
+    /// <summary>Was there a crossing of <paramref name="requiredDirection"/> close enough to the
+    /// spot cross to count as confirming it? Defaults to "Bullish", which is what the leg check
+    /// wants: a confirming leg always crosses UP, whether it is a CE leading a rally or a PE
+    /// leading a selloff. The CE/PE volume-line checks pass the signal's own direction instead,
+    /// since there the bullish and bearish arrangements are genuinely opposite crossings.</summary>
     private static bool ConfirmedWithin(
-        List<(DateTimeOffset Time, string Direction)> legCrossings, DateTimeOffset spotTime, int withinBars, int timeframeMinutes)
+        List<(DateTimeOffset Time, string Direction)> crossings, DateTimeOffset spotTime, int withinBars,
+        int timeframeMinutes, string requiredDirection = "Bullish")
     {
         var window = TimeSpan.FromMinutes((withinBars + 1) * timeframeMinutes);
-        foreach (var (time, direction) in legCrossings)
+        foreach (var (time, direction) in crossings)
         {
-            if (direction != "Bullish") continue;
+            if (direction != requiredDirection) continue;
             if ((time - spotTime).Duration() <= window) return true;
         }
         return false;
+    }
+
+    /// <summary>Bars where the CE line crossed the PE line - "Bullish" where CE crossed ABOVE PE
+    /// (the Pine indicator's crossUp, "Green crossed Red"), "Bearish" where it crossed below. The
+    /// two series come off the same aggregation so they share a timeline, but they are matched by
+    /// timestamp rather than by index so a gap in either can't silently shift the comparison.</summary>
+    private static List<(DateTimeOffset Time, string Direction)> CeVsPeCrossEvents(
+        IReadOnlyList<ObvPoint> ce, IReadOnlyList<ObvPoint> pe)
+    {
+        var events = new List<(DateTimeOffset, string)>();
+        if (ce.Count == 0 || pe.Count == 0) return events;
+
+        var peByTime = pe.ToDictionary(p => p.Time, p => p.Obv);
+        int? previousSign = null;
+
+        foreach (var point in ce)
+        {
+            if (!peByTime.TryGetValue(point.Time, out var peValue)) continue;
+
+            var sign = Math.Sign(point.Obv - peValue);
+            if (sign == 0) continue; // exactly equal - no side to be on yet
+
+            if (previousSign is { } previous && sign != previous)
+                events.Add((point.Time, sign > 0 ? "Bullish" : "Bearish"));
+
+            previousSign = sign;
+        }
+        return events;
+    }
+
+    /// <summary>Which side of the PE line the CE line is on at <paramref name="asOf"/> - "Up" when
+    /// CE is above (the bullish arrangement), "Down" when below, null when neither series reaches
+    /// back that far. Reported on every signal row so the table shows the volume picture even for
+    /// the rejected ones.</summary>
+    private static string? LineStateAt(IReadOnlyList<ObvPoint> ce, IReadOnlyList<ObvPoint> pe, DateTimeOffset asOf)
+    {
+        var ceIndex = LastIndexAtOrBefore(ce, asOf);
+        var peIndex = LastIndexAtOrBefore(pe, asOf);
+        if (ceIndex < 0 || peIndex < 0) return null;
+
+        return ce[ceIndex].Obv >= pe[peIndex].Obv ? "Up" : "Down";
     }
 
     /// <summary>True when the series' %-change into <paramref name="asOf"/> clears
@@ -190,14 +293,15 @@ public sealed class EmaSurgeStrategy : IBacktestStrategy
     /// <paramref name="requireAllWindows"/>, or across any single one otherwise. The %-change is
     /// the same (current - previous) / |previous| * 100 the lookback tables report, so this asks
     /// exactly the question those tables answer.</summary>
-    private static bool HasSurged(IReadOnlyList<ObvPoint> series, DateTimeOffset asOf, decimal thresholdPercent, bool requireAllWindows)
+    private static bool HasSurged(
+        IReadOnlyList<ObvPoint> series, DateTimeOffset asOf, decimal thresholdPercent, bool requireAllWindows, IReadOnlyList<int> windows)
     {
         var index = LastIndexAtOrBefore(series, asOf);
-        if (index < 0) return false;
+        if (index < 0 || windows.Count == 0) return false;
 
         var anyCleared = false;
 
-        foreach (var window in LookbackWindows)
+        foreach (var window in windows)
         {
             var previousIndex = index - window;
             // A window reaching back before the series starts can't be judged: that is a failure
