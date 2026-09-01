@@ -228,35 +228,7 @@ export default function BacktestPage() {
 
         <Card
           size="small"
-          title="Backtrack — Signal Replay"
-          extra={<Text type="secondary" style={{ fontSize: 12 }}>Replays EMA 9/21 + confluence logic over in-memory history</Text>}
-        >
-          <Text type="secondary">
-            Every spot / ATM CE / ATM PE EMA 9/21 flip and three-way CONFLUENCE alignment that would have
-            fired across {selected ?? 'the selected underlying'}'s currently-backfilled candle history at
-            the {timeframe}-minute timeframe, computed fresh from scratch - not the live alert log, so it
-            also covers bars that closed before this session's alert engine started.
-          </Text>
-        </Card>
-
-        {signalsLoading && !signals ? (
-          <div style={{ display: 'flex', justifyContent: 'center', padding: 40 }}>
-            <Spin size="large" />
-          </div>
-        ) : (
-          <Table
-            size="small"
-            rowKey={(row) => `${row.timeUtc}-${row.kind}`}
-            dataSource={signals ?? []}
-            columns={signalColumns}
-            pagination={{ pageSize: 25, showSizeChanger: false }}
-            locale={{ emptyText: 'No signals - not enough closed-bar history yet, or the underlying has no backfilled candles.' }}
-          />
-        )}
-
-        <Card
-          size="small"
-          title="Simulated Strategy Backtest — every Confluence signal"
+          title="Strategy Backtest"
           extra={<Text type="secondary" style={{ fontSize: 12 }}>{strategy?.description ?? 'Loading strategies…'}</Text>}
         >
           <Space direction="vertical" size={16} style={{ width: '100%' }}>
@@ -326,6 +298,35 @@ export default function BacktestPage() {
             )}
           </Space>
         </Card>
+
+        <Card
+          size="small"
+          title={`Signals — ${strategy?.name ?? 'strategy'}`}
+          extra={<Text type="secondary" style={{ fontSize: 12 }}>What the strategy above saw, newest first</Text>}
+        >
+          <Text type="secondary">
+            Every signal the <b>{strategy?.name ?? 'selected strategy'}</b> rule examined across{' '}
+            {selected ?? 'the selected underlying'}'s currently-backfilled candle history at the{' '}
+            {timeframe}-minute timeframe, computed fresh from scratch - not the live alert log, so it also
+            covers bars that closed before this session's alert engine started. Rows it would actually have
+            traded are highlighted; the muted ones show what its filters rejected, and why.
+          </Text>
+        </Card>
+
+        {signalsLoading && !signals ? (
+          <div style={{ display: 'flex', justifyContent: 'center', padding: 40 }}>
+            <Spin size="large" />
+          </div>
+        ) : (
+          <Table
+            size="small"
+            rowKey={(row) => `${row.timeUtc}-${row.kind}`}
+            dataSource={signals ?? []}
+            columns={signalColumns}
+            pagination={{ pageSize: 25, showSizeChanger: false }}
+            locale={{ emptyText: 'No signals - not enough closed-bar history yet, or the underlying has no backfilled candles.' }}
+          />
+        )}
       </Space>
     </div>
   )

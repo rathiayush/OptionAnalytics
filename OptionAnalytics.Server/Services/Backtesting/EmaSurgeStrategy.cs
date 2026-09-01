@@ -16,11 +16,13 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 ///      convention - CE leads a rally, PE leads a selloff). A spot cross with no leg confirming it
 ///      is dropped.
 ///   3. OBV / CDV CONFIRM - each optional, controlled by its own flag. When a flag is on, the
-///      TRADED leg's own series must show a surge: its %-change over EVERY one of the lookback
-///      windows (3, 5 and 7 bars) must be at least LookbackPercent in magnitude. Magnitude, not
-///      direction - a violent move either way counts, matching what the Pine indicator's own
-///      threshold check does (it takes math.abs before comparing). All three windows must clear it,
-///      so a single-bar spike that hasn't held doesn't qualify.
+///      TRADED leg's own series must show a surge: a %-change of at least LookbackPercent in
+///      magnitude over the lookback windows (3, 5 and 7 bars). Magnitude, not direction - a
+///      violent move either way counts, matching what the Pine indicator's own threshold check
+///      does (it takes math.abs before comparing). LookbackMode decides how many windows have to
+///      agree: ANY of them clearing the threshold is enough by default (a surge usually shows up
+///      in one window before the others), or ALL of them can be required, which additionally
+///      demands the move has held rather than being a single-bar spike.
 ///
 /// Note on the CDV flag: CDV is day-scoped - it resets every trading day and only the current day's
 /// series is ever in memory (see BacktestStrategyContext.CdvSeries). So turning CDV confirmation on
@@ -34,12 +36,15 @@ public sealed class EmaSurgeStrategy : IBacktestStrategy
 {
     public string Key => "ema-surge";
     public string Name => "EMA Crossover + Volume Surge";
-    public string Description => "Spot EMA 9/21 must cross, the matching CE (up) or PE (down) leg must cross to confirm it, and - when their flags are on - the traded leg's OBV and/or CDV must have moved at least the threshold % across all of the 3/5/7-bar lookback windows.";
+    public string Description => "Spot EMA 9/21 must cross, the matching CE (up) or PE (down) leg must cross to confirm it, and - when their flags are on - the traded leg's OBV and/or CDV must have moved at least the threshold % across the 3/5/7-bar lookback windows (any one of them by default, or all three).";
 
     private static readonly int[] LookbackWindows = { 3, 5, 7 };
 
     private const decimal FlagOff = 0;
     private const decimal FlagOn = 1;
+
+    private const decimal ModeAny = 0;
+    private const decimal ModeAll = 1;
 
     public IReadOnlyList<BacktestParameterSpec> Parameters { get; } = new[]
     {
@@ -49,6 +54,11 @@ public sealed class EmaSurgeStrategy : IBacktestStrategy
         OptionTradeSimulator.TakeProfitParameter(),
         new BacktestParameterSpec("confirmWithinBars", "Leg must confirm within (bars)", Default: 3, Min: 0, Max: 20, Step: 1),
         new BacktestParameterSpec("lookbackPercent", "Lookback surge threshold (%)", Default: 75, Min: 0, Max: 1000, Step: 5),
+        new BacktestParameterSpec("lookbackMode", "Lookback windows needed", Default: ModeAny, Min: ModeAny, Max: ModeAll, Step: 1, Options: new[]
+        {
+            new BacktestParameterOption(ModeAny, "Any of 3/5/7 bars"),
+            new BacktestParameterOption(ModeAll, "All of 3/5/7 bars"),
+        }),
         new BacktestParameterSpec("useObv", "Require OBV confirmation", Default: FlagOn, Min: FlagOff, Max: FlagOn, Step: 1, Options: new[]
         {
             new BacktestParameterOption(FlagOn, "Yes - OBV must confirm"),
@@ -75,6 +85,8 @@ public sealed class EmaSurgeStrategy : IBacktestStrategy
     {
         var confirmWithinBars = (int)parameters["confirmWithinBars"];
         var lookbackPercent = parameters["lookbackPercent"];
+        var requireAllWindows = parameters["lookbackMode"] >= (ModeAny + ModeAll) / 2;
+        var windowsLabel = requireAllWindows ? "all of 3/5/7" : "any of 3/5/7";
         var useObv = parameters["useObv"] >= (FlagOff + FlagOn) / 2;
         var useCdv = parameters["useCdv"] >= (FlagOff + FlagOn) / 2;
         // Which leg the trade actually ends up in decides which leg's OBV/CDV has to confirm - a
@@ -113,17 +125,17 @@ public sealed class EmaSurgeStrategy : IBacktestStrategy
             var tradedLegIsCall = isSell ? !isBullish : isBullish;
             var tradedLegLabel = tradedLegIsCall ? "CE" : "PE";
 
-            if (useObv && !HasSurged(tradedLegIsCall ? context.ObvCeSeries : context.ObvPeSeries, time, lookbackPercent))
+            if (useObv && !HasSurged(tradedLegIsCall ? context.ObvCeSeries : context.ObvPeSeries, time, lookbackPercent, requireAllWindows))
             {
                 signals.Add(new BacktestSignal(context.Underlying, time, "Rejected", direction,
-                    $"Spot + {legLabel} confirmed, but {tradedLegLabel} OBV did not move {lookbackPercent:0.#}% across all of 3/5/7 bars"));
+                    $"Spot + {legLabel} confirmed, but {tradedLegLabel} OBV did not move {lookbackPercent:0.#}% across {windowsLabel} bars"));
                 continue;
             }
 
-            if (useCdv && !HasSurged(tradedLegIsCall ? context.CdvCeSeries : context.CdvPeSeries, time, lookbackPercent))
+            if (useCdv && !HasSurged(tradedLegIsCall ? context.CdvCeSeries : context.CdvPeSeries, time, lookbackPercent, requireAllWindows))
             {
                 signals.Add(new BacktestSignal(context.Underlying, time, "Rejected", direction,
-                    $"Spot + {legLabel} confirmed, but {tradedLegLabel} CDV did not move {lookbackPercent:0.#}% across all of 3/5/7 bars"));
+                    $"Spot + {legLabel} confirmed, but {tradedLegLabel} CDV did not move {lookbackPercent:0.#}% across {windowsLabel} bars"));
                 continue;
             }
 
@@ -168,26 +180,43 @@ public sealed class EmaSurgeStrategy : IBacktestStrategy
     }
 
     /// <summary>True when the series' %-change into <paramref name="asOf"/> clears
-    /// <paramref name="thresholdPercent"/> in magnitude across EVERY lookback window. The
-    /// %-change is the same (current - previous) / |previous| * 100 the lookback tables report, so
-    /// this asks exactly the question those tables answer.</summary>
-    private static bool HasSurged(IReadOnlyList<ObvPoint> series, DateTimeOffset asOf, decimal thresholdPercent)
+    /// <paramref name="thresholdPercent"/> in magnitude - across EVERY lookback window when
+    /// <paramref name="requireAllWindows"/>, or across any single one otherwise. The %-change is
+    /// the same (current - previous) / |previous| * 100 the lookback tables report, so this asks
+    /// exactly the question those tables answer.</summary>
+    private static bool HasSurged(IReadOnlyList<ObvPoint> series, DateTimeOffset asOf, decimal thresholdPercent, bool requireAllWindows)
     {
         var index = LastIndexAtOrBefore(series, asOf);
         if (index < 0) return false;
 
+        var anyCleared = false;
+
         foreach (var window in LookbackWindows)
         {
             var previousIndex = index - window;
-            if (previousIndex < 0) return false;
+            // A window reaching back before the series starts can't be judged: that is a failure
+            // when every window has to clear, and simply not a qualifying window when any will do.
+            if (previousIndex < 0)
+            {
+                if (requireAllWindows) return false;
+                continue;
+            }
 
             var previous = series[previousIndex].Obv;
-            if (previous == 0) return false;
+            if (previous == 0)
+            {
+                if (requireAllWindows) return false;
+                continue;
+            }
 
             var changePercent = (series[index].Obv - previous) / Math.Abs(previous) * 100m;
-            if (Math.Abs(changePercent) < thresholdPercent) return false;
+            var cleared = Math.Abs(changePercent) >= thresholdPercent;
+
+            if (requireAllWindows && !cleared) return false;
+            anyCleared |= cleared;
         }
-        return true;
+
+        return requireAllWindows || anyCleared;
     }
 
     private static int LastIndexAtOrBefore(IReadOnlyList<ObvPoint> series, DateTimeOffset time)
