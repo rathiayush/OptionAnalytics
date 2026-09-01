@@ -38,14 +38,18 @@ internal sealed class CdvStrikeRuntime
     /// the same per-tick incremental volume already computed for CDV - into that bar's total.
     /// Called for every tracked strike regardless of whether it's currently ATM, since which one
     /// is ATM changes every 30 minutes and each needs its own history ready when it becomes so.
-    /// </summary>
-    public void ApplyPriceTick(decimal price, long tickVolume, DateTimeOffset timestamp)
+    /// Returns the bar that just closed, if this tick landed in a new minute - null on every other
+    /// tick. CdvUnderlyingState.ApplyTick uses this to raise AtmBarClosed only for the side(s)
+    /// currently at ATM, the same "react to a real bar boundary, not a still-forming bar" pattern
+    /// SpotUnderlyingState.BarClosed already uses.</summary>
+    public Candle? ApplyPriceTick(decimal price, long tickVolume, DateTimeOffset timestamp)
     {
         var minute = new DateTimeOffset(timestamp.Year, timestamp.Month, timestamp.Day, timestamp.Hour, timestamp.Minute, 0, timestamp.Offset);
+        Candle? justClosed = null;
 
         if (_currentBar is not { } cur || cur.Bar.Time != minute)
         {
-            if (_currentBar is { } previous) _closedBars.Add(previous);
+            if (_currentBar is { } previous) { _closedBars.Add(previous); justClosed = previous.Bar; }
             _currentBar = (new Candle(minute, price, price, price, price), tickVolume);
         }
         else
@@ -58,6 +62,8 @@ internal sealed class CdvStrikeRuntime
             };
             _currentBar = (bar, cur.Volume + tickVolume);
         }
+
+        return justClosed;
     }
 
     /// <summary>Seeds this contract's own premium history from the historical backfill - see
@@ -75,6 +81,12 @@ internal sealed class CdvStrikeRuntime
         if (_currentBar is { } bar) list.Add(bar.Bar);
         return list;
     }
+
+    /// <summary>Just the fully-closed bars, no in-progress bar - what ConfluenceAlertService
+    /// computes EMA9/21 against for the ATM CE/PE crossover check, same reasoning as
+    /// SpotUnderlyingState.GetClosedCandles (a still-forming bar's EMA would flip-flop as its
+    /// price kept moving).</summary>
+    public IReadOnlyList<Candle> GetClosedCandles() => _closedBars.Select(b => b.Bar).ToList();
 
     public Candle? GetCurrentBar() => _currentBar?.Bar;
 
@@ -182,6 +194,12 @@ public sealed class CdvUnderlyingState
         }
     }
 
+    /// <summary>Raised when the strike currently at ATM on either side just closed a 1-minute
+    /// premium bar - ConfluenceAlertService's trigger for checking that side's EMA9/21 crossover.
+    /// Invoked outside _lock, same reasoning as SpotUnderlyingState.BarClosed (a subscriber calling
+    /// back into this instance must never deadlock against it).</summary>
+    public event Action<bool /* isCall */, Candle>? AtmBarClosed;
+
     /// <summary>Folds one option tick into its contract's running CDV using the tick rule (price
     /// up from the last trade = buy, down = sell, unchanged = carry the prior direction) weighted
     /// by a sigmoid approximation of the contract's delta given <paramref name="currentSpot"/> -
@@ -192,6 +210,9 @@ public sealed class CdvUnderlyingState
     /// CdvStrikeRuntime.ApplyPriceTick) regardless of whether it's currently ATM.</summary>
     public void ApplyTick(SpotTick tick, decimal currentSpot)
     {
+        bool? closedIsCall = null;
+        Candle closedBar = default;
+
         lock (_lock)
         {
             if (!_strikes.TryGetValue(tick.SecurityId, out var strike)) return;
@@ -215,11 +236,18 @@ public sealed class CdvUnderlyingState
                 strike.RunningCdv += strike.Direction * deltaVolume * weight;
             }
 
-            strike.ApplyPriceTick(tick.LastPrice, deltaVolume, tick.ExchangeTimestamp);
+            var justClosed = strike.ApplyPriceTick(tick.LastPrice, deltaVolume, tick.ExchangeTimestamp);
+            if (justClosed is { } bar && AtmStrike == strike.Strike)
+            {
+                closedIsCall = strike.IsCall;
+                closedBar = bar;
+            }
 
             LastUpdateUtc = DateTimeOffset.UtcNow;
             UpdateBar_NoLock(tick.ExchangeTimestamp);
         }
+
+        if (closedIsCall is { } isCall) AtmBarClosed?.Invoke(isCall, closedBar);
     }
 
     /// <summary>Sigmoid moneyness weighting - the same formula the Pine "delta auto" indicator
@@ -379,6 +407,14 @@ public sealed class CdvUnderlyingState
     public Candle? GetAtmCurrentBar(bool isCall)
     {
         lock (_lock) { return FindAtmStrikeNoLock(isCall)?.GetCurrentBar(); }
+    }
+
+    /// <summary>Closed-only counterpart to GetAtmCandles - what ConfluenceAlertService computes
+    /// EMA9/21 against on AtmBarClosed, same "never compute off a still-forming bar" reasoning as
+    /// SpotUnderlyingState.GetClosedCandles.</summary>
+    public IReadOnlyList<Candle> GetAtmClosedCandles(bool isCall)
+    {
+        lock (_lock) { return FindAtmStrikeNoLock(isCall)?.GetClosedCandles() ?? Array.Empty<Candle>(); }
     }
 
     /// <summary>On-Balance-Volume for the current ATM contract on this side, computed by

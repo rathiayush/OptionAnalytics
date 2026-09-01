@@ -175,12 +175,14 @@ function fmtNum(v) {
 
 // One SignalR connection shared by every chart on the page - each just registers its own handler
 // for the event it cares about ("spotUpdate" / "cdvUpdate", the latter also carrying the ATM
-// CE/PE premium bars).
-function useHub(onSpotUpdate, onCdvUpdate) {
+// CE/PE premium bars, and "confluenceAlert" for the notification engine's live pushes).
+function useHub(onSpotUpdate, onCdvUpdate, onConfluenceAlert) {
   const spotHandlerRef = useRef(onSpotUpdate)
   const cdvHandlerRef = useRef(onCdvUpdate)
+  const alertHandlerRef = useRef(onConfluenceAlert)
   spotHandlerRef.current = onSpotUpdate
   cdvHandlerRef.current = onCdvUpdate
+  alertHandlerRef.current = onConfluenceAlert
 
   useEffect(() => {
     const connection = new signalR.HubConnectionBuilder()
@@ -190,6 +192,7 @@ function useHub(onSpotUpdate, onCdvUpdate) {
 
     connection.on('spotUpdate', (snapshot) => spotHandlerRef.current(snapshot))
     connection.on('cdvUpdate', (snapshot) => cdvHandlerRef.current(snapshot))
+    connection.on('confluenceAlert', (alert) => alertHandlerRef.current(alert))
     connection.start().catch((err) => console.error('SignalR connection failed:', err))
 
     return () => { connection.stop() }
@@ -419,6 +422,40 @@ function StrikesButton({ underlying }) {
   )
 }
 
+const ALERT_DISPLAY_LIMIT = 20
+
+// The notification engine's live feed - fires when a spot EMA9/21 crossover is confirmed by a
+// matching ATM CE/PE crossover pair (see the backend's ConfluenceAlertService for the exact rule).
+// Kept visible on the page at all times (not a toast that disappears) since the whole point is
+// catching a signal even if nobody was looking at the moment it fired.
+function AlertsPanel({ alerts }) {
+  return (
+    <Card size="small" title="Confluence Alerts" extra={<Text type="secondary" style={{ fontSize: 12 }}>Spot + ATM CE/PE EMA 9/21</Text>}>
+      {alerts.length === 0 ? (
+        <Text type="secondary">
+          No alerts yet - fires when a spot crossover is confirmed by matching ATM CE/PE crossovers (spot up + CE up + PE down, or spot down + PE up + CE down).
+        </Text>
+      ) : (
+        <div style={{ maxHeight: 200, overflowY: 'auto' }}>
+          <Space direction="vertical" size={8} style={{ width: '100%' }}>
+            {alerts.slice(0, ALERT_DISPLAY_LIMIT).map((a, i) => (
+              <div key={`${a.underlying}-${a.timeUtc}-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                <Tag color={a.direction === 'Bullish' ? UP_COLOR : DOWN_COLOR} style={{ minWidth: 68, textAlign: 'center', fontWeight: 600 }}>
+                  {a.direction === 'Bullish' ? '▲ BULLISH' : '▼ BEARISH'}
+                </Tag>
+                <Text strong>{a.underlying}</Text>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  Spot {fmtPrice(a.spotPrice)} · ATM {a.atmStrike ?? '—'} · {new Date(a.timeUtc).toLocaleTimeString()}
+                </Text>
+              </div>
+            ))}
+          </Space>
+        </div>
+      )}
+    </Card>
+  )
+}
+
 export default function App() {
   const [underlyings, setUnderlyings] = useState([])
   const [selected, setSelected] = useState(null)
@@ -427,6 +464,17 @@ export default function App() {
 
   const [candles, setCandles] = useState([])
   const [snapshot, setSnapshot] = useState(null)
+
+  // Confluence alerts are a combined feed across every underlying, not scoped to `selected` -
+  // fetched once on load (so alerts that fired before this tab connected still show up) and then
+  // grown live via useHub's "confluenceAlert" push below.
+  const [alerts, setAlerts] = useState([])
+  useEffect(() => {
+    fetch('/api/alerts')
+      .then((r) => r.json())
+      .then((data) => setAlerts(data ?? []))
+      .catch((err) => console.error('Failed to load alerts:', err))
+  }, [])
 
   const [cdvSeries, setCdvSeries] = useState([])
   const [cdvSnapshot, setCdvSnapshot] = useState(null)
@@ -519,6 +567,7 @@ export default function App() {
       if (incoming.underlying !== selected) return
       setCdvSnapshot(incoming)
     },
+    (alert) => setAlerts((prev) => [alert, ...prev].slice(0, 50)),
   )
 
   // ATM CE/PE bars only change value on every tick (the premium moves), but OBV is a per-bar
@@ -593,6 +642,8 @@ export default function App() {
           />
           <Button onClick={handleRefresh} loading={refreshing} disabled={!selected}>Refresh</Button>
         </Space>
+
+        <AlertsPanel alerts={alerts} />
 
         <ChartCard
           title={`${selected} spot`}

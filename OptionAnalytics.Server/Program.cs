@@ -47,6 +47,11 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<CdvHostedService>(
 // TelegramAlertService.
 builder.Services.AddHostedService<EmaCrossoverAlertService>();
 
+// Same singleton+hosted pattern as SpotFeedHostedService/CdvHostedService - AlertsController reads
+// its recent-alert history directly.
+builder.Services.AddSingleton<ConfluenceAlertService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<ConfluenceAlertService>());
+
 builder.Services.AddSignalR();
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();

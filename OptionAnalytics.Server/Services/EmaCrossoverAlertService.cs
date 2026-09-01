@@ -1,6 +1,4 @@
-using OptionAnalytics.Server.Models;
 using OptionAnalytics.Server.Telegram;
-using Skender.Stock.Indicators;
 
 namespace OptionAnalytics.Server.Services;
 
@@ -12,17 +10,11 @@ namespace OptionAnalytics.Server.Services;
 /// only meaningful the instant a bar actually finishes, and computing off a still-forming bar
 /// would flip-flop as its price kept moving.
 ///
-/// EMA itself is computed by Skender.Stock.Indicators rather than hand-rolled math - a
-/// well-tested, widely-used .NET technical-analysis library (the same "standard EMA" definition:
-/// seeded from a plain SMA of the first `period` closes, then the usual exponential recurrence -
-/// so results match the hand-rolled version this replaced), and it makes adding another indicator
-/// (RSI, MACD, ...) later a one-line call instead of another custom implementation.
+/// The crossover check itself is EmaCrossoverDetector (Skender.Stock.Indicators under the hood,
+/// not hand-rolled math), shared with ConfluenceAlertService's ATM CE/PE side of the same check.
 /// </summary>
 public sealed class EmaCrossoverAlertService : BackgroundService
 {
-    private const int FastPeriod = 9;
-    private const int SlowPeriod = 21;
-
     private readonly SpotFeedHostedService _spotFeed;
     private readonly TelegramAlertService _telegram;
     private readonly ILogger<EmaCrossoverAlertService> _logger;
@@ -54,41 +46,16 @@ public sealed class EmaCrossoverAlertService : BackgroundService
     private void OnBarClosed(SpotUnderlyingState state, CancellationToken cancellationToken)
     {
         var closedBars = state.GetClosedCandles();
-        // Need at least one prior bar beyond the slow EMA's own seed window, so there is a
-        // previous EMA9/EMA21 pair to compare the new one against.
-        if (closedBars.Count < SlowPeriod + 1) return;
-
-        var quotes = closedBars.Select(c => new Quote
-        {
-            Date = c.Time.UtcDateTime,
-            Open = c.Open,
-            High = c.High,
-            Low = c.Low,
-            Close = c.Close,
-            Volume = 0,
-        }).ToList();
-
-        var ema9 = quotes.GetEma(FastPeriod).ToList();
-        var ema21 = quotes.GetEma(SlowPeriod).ToList();
-
-        var last = quotes.Count - 1;
-        if (ema9[last].Ema is not { } fastNow || ema21[last].Ema is not { } slowNow) return;
-        if (ema9[last - 1].Ema is not { } fastPrev || ema21[last - 1].Ema is not { } slowPrev) return;
-
-        var prevDiff = fastPrev - slowPrev;
-        var currDiff = fastNow - slowNow;
-
-        string? direction = prevDiff <= 0 && currDiff > 0 ? "Bullish - EMA9 crossed above EMA21"
-            : prevDiff >= 0 && currDiff < 0 ? "Bearish - EMA9 crossed below EMA21"
-            : null;
+        var direction = EmaCrossoverDetector.Detect(closedBars);
         if (direction is null) return;
 
-        var barTime = closedBars[last].Time;
-        if (_lastAlertedBarTime.TryGetValue(state.Underlying, out var alerted) && alerted == barTime) return;
-        _lastAlertedBarTime[state.Underlying] = barTime;
+        var last = closedBars[^1];
+        if (_lastAlertedBarTime.TryGetValue(state.Underlying, out var alerted) && alerted == last.Time) return;
+        _lastAlertedBarTime[state.Underlying] = last.Time;
 
-        var message = $"<b>{state.Underlying}</b> EMA 9/21 crossover\n{direction}\nClose: {closedBars[last].Close:N2}\nBar: {barTime:yyyy-MM-dd HH:mm} UTC";
-        _logger.LogInformation("EMA 9/21 crossover for {Underlying}: {Direction} at close {Close}.", state.Underlying, direction, closedBars[last].Close);
+        var detail = direction == "Bullish" ? "Bullish - EMA9 crossed above EMA21" : "Bearish - EMA9 crossed below EMA21";
+        var message = $"<b>{state.Underlying}</b> EMA 9/21 crossover\n{detail}\nClose: {last.Close:N2}\nBar: {last.Time:yyyy-MM-dd HH:mm} UTC";
+        _logger.LogInformation("EMA 9/21 crossover for {Underlying}: {Direction} at close {Close}.", state.Underlying, detail, last.Close);
         _ = _telegram.SendAsync(message, cancellationToken);
     }
 }
