@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Select, Space, Typography, Spin, Card, Button, Table, Tag, InputNumber, Statistic, Row, Col } from 'antd'
 import { ReloadOutlined, PlayCircleOutlined } from '@ant-design/icons'
-import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, NavBar, DirectionTag, ALERT_KIND_LABEL } from './shared.jsx'
+import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, NavBar, DirectionTag, ALERT_KIND_LABEL, fmtIstDateTime, fmtIstTime } from './shared.jsx'
 
 const { Title, Text } = Typography
 
@@ -127,7 +127,7 @@ export default function BacktestPage() {
   }, [trades])
 
   const signalColumns = [
-    { title: 'Time', dataIndex: 'timeUtc', key: 'timeUtc', width: 200, render: (t) => new Date(t).toLocaleString() },
+    { title: 'Time', dataIndex: 'timeUtc', key: 'timeUtc', width: 200, render: (t) => fmtIstDateTime(t) },
     {
       title: 'Signal',
       dataIndex: 'kind',
@@ -147,7 +147,7 @@ export default function BacktestPage() {
   ]
 
   const tradeColumns = [
-    { title: 'Signal Time', dataIndex: 'signalTimeUtc', key: 'signalTimeUtc', width: 180, render: (t) => new Date(t).toLocaleString() },
+    { title: 'Signal Time', dataIndex: 'signalTimeUtc', key: 'signalTimeUtc', width: 180, render: (t) => fmtIstDateTime(t) },
     { title: 'Direction', dataIndex: 'direction', key: 'direction', width: 110, render: (direction) => <DirectionTag direction={direction} /> },
     {
       title: 'Option',
@@ -159,13 +159,13 @@ export default function BacktestPage() {
       title: 'Entry',
       key: 'entry',
       width: 170,
-      render: (_, row) => row.entryTimeUtc ? <>{new Date(row.entryTimeUtc).toLocaleTimeString()} @ {row.entryPrice?.toFixed(2)}</> : <Text type="secondary">—</Text>,
+      render: (_, row) => row.entryTimeUtc ? <>{fmtIstTime(row.entryTimeUtc)} @ {row.entryPrice?.toFixed(2)}</> : <Text type="secondary">—</Text>,
     },
     {
       title: 'Exit',
       key: 'exit',
       width: 170,
-      render: (_, row) => row.exitTimeUtc ? <>{new Date(row.exitTimeUtc).toLocaleTimeString()} @ {row.exitPrice?.toFixed(2)}</> : <Text type="secondary">—</Text>,
+      render: (_, row) => row.exitTimeUtc ? <>{fmtIstTime(row.exitTimeUtc)} @ {row.exitPrice?.toFixed(2)}</> : <Text type="secondary">—</Text>,
     },
     {
       title: 'Reason',

@@ -1,10 +1,10 @@
 import { Component, useEffect, useMemo, useRef, useState } from 'react'
 import { Select, Space, Typography, Spin, Card, Button, Modal, Table, Tag } from 'antd'
-import { createChart, createSeriesMarkers, CandlestickSeries, LineSeries, CrosshairMode, LineStyle } from 'lightweight-charts'
+import { createChart, createSeriesMarkers, CandlestickSeries, LineSeries, CrosshairMode, LineStyle, TickMarkType } from 'lightweight-charts'
 import * as signalR from '@microsoft/signalr'
 import { Routes, Route } from 'react-router-dom'
 import BacktestPage from './BacktestPage.jsx'
-import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, fmtPrice, DirectionTag, NavBar } from './shared.jsx'
+import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, fmtPrice, fmtIstTime, DirectionTag, NavBar } from './shared.jsx'
 import './App.css'
 
 const { Title, Text } = Typography
@@ -21,8 +21,32 @@ const TIMEFRAME_OPTIONS = [
   { value: 5, label: '5 min' },
 ]
 
+// lightweight-charts has no built-in timezone support - every chart always formats its time axis
+// using the browser's own local timezone. To make every chart show true IST (India, fixed
+// UTC+5:30 - the market this whole app is about) regardless of which timezone the VIEWER's own
+// browser happens to be in, every timestamp fed to a chart is shifted forward by this fixed
+// offset up front, and istTimeFormatter/istTickMarkFormatter below then format that shifted value
+// AS IF it were UTC - which, because of the shift, is exactly its real IST wall-clock value.
+const IST_OFFSET_SECONDS = 5.5 * 3600
+
 function toChartTime(isoOrDate) {
-  return Math.floor(new Date(isoOrDate).getTime() / 1000)
+  return Math.floor(new Date(isoOrDate).getTime() / 1000) + IST_OFFSET_SECONDS
+}
+
+const IST_TIME_FORMAT = new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'UTC' })
+const IST_TICK_DATE_FORMAT = new Intl.DateTimeFormat('en-IN', { day: 'numeric', month: 'short', timeZone: 'UTC' })
+
+// The crosshair's time-axis label - see IST_OFFSET_SECONDS above for why timeZone: 'UTC' here is
+// correct despite this being IST.
+function istTimeFormatter(time) {
+  return IST_TIME_FORMAT.format(new Date(time * 1000))
+}
+
+// The time axis's own tick labels - a date ("27 Aug") at day/month/year granularity, a time
+// ("09:15 am") at the finer granularities the intraday charts here actually zoom to.
+function istTickMarkFormatter(time, tickMarkType) {
+  const date = new Date(time * 1000)
+  return tickMarkType >= TickMarkType.Time ? IST_TIME_FORMAT.format(date) : IST_TICK_DATE_FORMAT.format(date)
 }
 
 // Every bar/point coming off the wire (ISO time strings) is converted to this one shape - epoch
@@ -251,8 +275,9 @@ function PriceChart({ bars, height = 360 }) {
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
       grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
       rightPriceScale: { borderColor: BORDER_COLOR },
-      timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false },
+      timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter },
       crosshair: { mode: CrosshairMode.Normal },
+      localization: { timeFormatter: istTimeFormatter },
     })
     chartRef.current = chart
     seriesRef.current = chart.addSeries(CandlestickSeries, {
@@ -336,8 +361,9 @@ function CeVsPeChart({ ceSeries, peSeries, prevCeSeries = [], prevPeSeries = [],
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
       grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
       rightPriceScale: { borderColor: BORDER_COLOR },
-      timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false },
+      timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter },
       crosshair: { mode: CrosshairMode.Normal },
+      localization: { timeFormatter: istTimeFormatter },
     })
     chartRef.current = chart
     prevCeRef.current = chart.addSeries(LineSeries, { color: CE_COLOR, lineWidth: 1, lineStyle: LineStyle.Dashed, title: 'CE (prev day)', priceLineVisible: false, crosshairMarkerVisible: false })
@@ -544,7 +570,7 @@ function AlertsPanel({ alerts, states }) {
                     </Tag>
                     <Text strong>{a.underlying}</Text>
                     <Text type="secondary" style={{ fontSize: 12 }}>
-                      Spot {fmtPrice(a.spotPrice)} · ATM {a.atmStrike ?? '—'} · {new Date(a.timeUtc).toLocaleTimeString()}
+                      Spot {fmtPrice(a.spotPrice)} · ATM {a.atmStrike ?? '—'} · {fmtIstTime(a.timeUtc)}
                     </Text>
                   </div>
                 )

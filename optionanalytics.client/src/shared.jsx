@@ -18,6 +18,19 @@ export function fmtPrice(v) {
   return v == null ? '—' : Number(v).toLocaleString('en-IN', { maximumFractionDigits: 2 })
 }
 
+// Every plain-text timestamp on the page (alert feed entries, Backtrack's tables) renders in IST
+// (India, fixed UTC+5:30 - the market this app is about) regardless of the viewer's own browser
+// timezone, same reasoning as App.jsx's chart-axis IST formatters - just via Intl's timeZone
+// option directly here, since there's no lightweight-charts day-bucketing to work around for
+// plain text.
+export function fmtIstDateTime(isoOrDate) {
+  return new Date(isoOrDate).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true })
+}
+
+export function fmtIstTime(isoOrDate) {
+  return new Date(isoOrDate).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true })
+}
+
 export function DirectionTag({ direction }) {
   if (!direction) return <Tag>—</Tag>
   return <Tag color={direction === 'Bullish' ? UP_COLOR : DOWN_COLOR}>{direction === 'Bullish' ? '▲ Bullish' : '▼ Bearish'}</Tag>
