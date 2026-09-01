@@ -720,6 +720,28 @@ public sealed class CdvUnderlyingState
         return result;
     }
 
+    /// <summary>One leg's CDV series, EMA-smoothed exactly as GetLookbackTable smooths it before
+    /// measuring %-change - so a strategy asking "has CDV surged?" is reading the same numbers the
+    /// CDV lookback table shows. Note this is inherently DAY-SCOPED: CDV resets every trading day
+    /// (see Reset), so this only ever covers the current day, unlike the OBV series which carries
+    /// its full multi-day history.</summary>
+    public IReadOnlyList<ObvPoint> GetSmoothedCdvSeries(bool isCall)
+    {
+        lock (_lock)
+        {
+            var series = new List<CdvBarPoint>(_closedBars);
+            if (_currentBar is { } bar) series.Add(bar);
+            if (series.Count == 0) return Array.Empty<ObvPoint>();
+
+            var smoothed = SmoothEma(series.Select(p => isCall ? p.CeCdv : p.PeCdv).ToList());
+
+            var result = new List<ObvPoint>(series.Count);
+            for (var i = 0; i < series.Count; i++)
+                result.Add(new ObvPoint(series[i].Time, smoothed[i] ?? (isCall ? series[i].CeCdv : series[i].PeCdv)));
+            return result;
+        }
+    }
+
     /// <summary>CE/PE %-change over each of <paramref name="lookbackBars"/> bars on the OBV series -
     /// the OBV counterpart to GetLookbackTable, and Pine's own multi-lookback table. Computed
     /// straight off GetObvSeries, which is already EMA-smoothed (Pine measures its lookback against

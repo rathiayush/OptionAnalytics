@@ -38,4 +38,10 @@ public interface IBacktestStrategy
     /// (BacktestService has already filled in any parameter the caller omitted with that spec's
     /// own Default, so this is always complete - safe to index without a fallback).</summary>
     IReadOnlyList<BacktestTrade> Simulate(BacktestStrategyContext context, IReadOnlyDictionary<string, decimal> parameters);
+
+    /// <summary>The signals THIS strategy reasons about, newest first - what the Backtrack page's
+    /// signal table shows while this strategy is selected, so the table always explains the trades
+    /// listed under it rather than describing some other strategy's logic. Same parameters as
+    /// Simulate, since a strategy's signals usually depend on them.</summary>
+    IReadOnlyList<BacktestSignal> EntrySignals(BacktestStrategyContext context, IReadOnlyDictionary<string, decimal> parameters);
 }

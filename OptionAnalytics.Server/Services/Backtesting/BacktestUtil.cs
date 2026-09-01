@@ -32,4 +32,22 @@ public static class BacktestUtil
     /// intraday strategy uses to detect "the trading day ended, exit here" rather than riding a
     /// position into the next day.</summary>
     public static DateOnly IstDate(DateTimeOffset time) => DateOnly.FromDateTime(time.ToOffset(TimeSpan.FromHours(5.5)).DateTime);
+
+    /// <summary>Buckets a running-total line (CDV/OBV) to <paramref name="minutes"/>-minute
+    /// resolution. Unlike a candle, the meaningful value for a coarser bucket is simply the LAST
+    /// sample in it - a running total's bucket value is where it stood at the end of that bucket -
+    /// which is the same rule the dashboard's own client-side aggregateLine uses.</summary>
+    public static List<ObvPoint> AggregateLine(IReadOnlyList<ObvPoint> points, int minutes)
+    {
+        if (minutes <= 1 || points.Count == 0) return points.ToList();
+
+        var bucketSeconds = minutes * 60;
+        var buckets = new SortedDictionary<long, ObvPoint>();
+        foreach (var point in points)
+        {
+            var bucketEpoch = point.Time.ToUnixTimeSeconds() / bucketSeconds * bucketSeconds;
+            buckets[bucketEpoch] = new ObvPoint(DateTimeOffset.FromUnixTimeSeconds(bucketEpoch), point.Obv);
+        }
+        return buckets.Values.ToList();
+    }
 }
