@@ -11,18 +11,37 @@
     <PackageReference Include="Swashbuckle.AspNetCore" Version="6.6.2" />
   </ItemGroup>
 
-  <!-- Builds the React client and drops its output into wwwroot before Publish, so the
-       production app is self-contained (UseStaticFiles + MapFallbackToFile in Program.cs serve
-       it directly, no separate Node process needed). Dev keeps using the Vite dev server on its
-       own port (see optionanalytics.client/vite.config.js) - this target never runs for a plain
-       `dotnet build`/`dotnet run`, only for Publish. -->
-  <Target Name="BuildAndCopyClient" BeforeTargets="Publish">
-    <Exec Command="npm install" WorkingDirectory="../optionanalytics.client" />
+  <!-- appsettings.Local.json is a LOCAL credentials overlay (see Program.cs and .gitignore). It
+       must never travel with a build: `dotnet run` reads it from the project directory via the
+       content root, so nothing needs it in bin/ or in the publish output, and leaving it there
+       carries real Dhan credentials into wherever the publish folder gets copied. Production
+       supplies these as environment variables instead - see docker-compose.yml. -->
+  <ItemGroup>
+    <Content Update="appsettings.Local.json" CopyToOutputDirectory="Never" CopyToPublishDirectory="Never" />
+  </ItemGroup>
+
+  <!-- Builds the React client and publishes its output as the app's wwwroot, so the production app
+       is self-contained (UseStaticFiles + MapFallbackToFile in Program.cs serve it directly, no
+       separate Node process needed). Dev keeps using the Vite dev server on its own port (see
+       optionanalytics.client/vite.config.js) - this target never runs for a plain `dotnet build`/
+       `dotnet run`, only for Publish.
+
+       Hooked to ComputeFilesToPublish and adding ResolvedFileToPublish items, rather than copying
+       into wwwroot/ BeforeTargets="Publish": wwwroot is globbed into Content at EVALUATION time,
+       long before any target runs, so files written into it during the build are not in that list
+       and a copy there is never actually published. That was the previous behaviour - the client
+       built, its output landed in the source tree, and the published app shipped an empty wwwroot
+       and served no UI at all. -->
+  <Target Name="BuildAndCopyClient" BeforeTargets="ComputeFilesToPublish">
+    <Exec Command="npm ci" WorkingDirectory="../optionanalytics.client" />
     <Exec Command="npm run build" WorkingDirectory="../optionanalytics.client" />
     <ItemGroup>
       <ClientDist Include="../optionanalytics.client/dist/**" />
+      <ResolvedFileToPublish Include="@(ClientDist)">
+        <RelativePath>wwwroot/%(ClientDist.RecursiveDir)%(ClientDist.Filename)%(ClientDist.Extension)</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
     </ItemGroup>
-    <Copy SourceFiles="@(ClientDist)" DestinationFolder="wwwroot/%(RecursiveDir)" SkipUnchangedFiles="true" />
   </Target>
 
 </Project>
