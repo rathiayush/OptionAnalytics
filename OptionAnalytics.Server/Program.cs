@@ -109,6 +109,12 @@ app.UseStaticFiles();
 
 app.UseAuthorization();
 
+// Container liveness, for Docker's HEALTHCHECK and Dokploy/Traefik. Deliberately says nothing
+// about Dhan: the feed is legitimately unauthenticated outside market hours or while a token
+// renews, and a container killed for that would never finish starting - the 15-day backfill of ~68
+// option contracts alone takes minutes. This answers "is the web app up", nothing more.
+app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
+
 app.MapControllers();
 app.MapHub<SpotHub>("/hubs/spot");
 app.MapFallbackToFile("index.html");
