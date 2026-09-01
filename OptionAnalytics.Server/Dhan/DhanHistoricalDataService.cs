@@ -5,20 +5,27 @@ using OptionAnalytics.Server.Models;
 namespace OptionAnalytics.Server.Dhan;
 
 /// <summary>
-/// Dhan's Intraday Historical Data API (POST /v2/charts/intraday), used to backfill a chart with
-/// today's candles before the live feed has produced enough of its own. Ported from
-/// LiveSpreadCalculator's DhanHistoricalDataService, narrowed to the one instrument type this app
-/// ever asks for: index spot ("INDEX" / "IDX_I").
+/// Dhan's Intraday Historical Data API (POST /v2/charts/intraday), used to backfill a chart's
+/// in-memory history before the live feed has produced enough of its own - everything this app
+/// holds is in-memory only, so this range call (rather than one call per day) is what fills the
+/// last several trading days back into RAM on every restart. Ported from LiveSpreadCalculator's
+/// DhanHistoricalDataService, narrowed to the one instrument type this app ever asks for: index
+/// spot ("INDEX" / "IDX_I").
 ///
 /// Request/response shapes per Dhan's docs:
 ///   request:  {"securityId","exchangeSegment","instrument","interval","fromDate","toDate"}
-///             fromDate/toDate are "yyyy-MM-dd HH:mm:ss" IST wall-clock, not UTC.
+///             fromDate/toDate are "yyyy-MM-dd HH:mm:ss" IST wall-clock, not UTC. A single call
+///             can span multiple calendar days - Dhan just returns every 09:15-15:30 session in
+///             the window, which is what lets one request fill several trading days at once
+///             instead of one request per day.
 ///   response: {"open":[...],"high":[...],"low":[...],"close":[...],"volume":[...],"timestamp":[...]}
-///             - parallel arrays, one entry per candle; timestamp is Unix epoch seconds.
+///             - parallel arrays, one entry per candle across the whole range; timestamp is Unix
+///             epoch seconds.
 /// </summary>
 public sealed class DhanHistoricalDataService
 {
     private const string Instrument = "INDEX";
+    private const string OptionInstrument = "OPTIDX";
 
     private readonly DhanApiClient _api;
     private readonly ILogger<DhanHistoricalDataService> _logger;
@@ -29,8 +36,11 @@ public sealed class DhanHistoricalDataService
         _logger = logger;
     }
 
+    /// <summary>Every candle Dhan has for [fromDay, toDay] inclusive (both IST calendar dates) -
+    /// spans weekends/holidays fine, since Dhan simply has no data for those and they contribute
+    /// nothing to the result.</summary>
     public async Task<IReadOnlyList<Candle>> GetIntradayCandlesAsync(
-        uint securityId, string dhanSegment, DateOnly day, int intervalMinutes, CancellationToken cancellationToken)
+        uint securityId, string dhanSegment, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken)
     {
         if (!_api.HasSession)
         {
@@ -44,15 +54,16 @@ public sealed class DhanHistoricalDataService
             exchangeSegment = dhanSegment,
             instrument = Instrument,
             interval = intervalMinutes.ToString(CultureInfo.InvariantCulture),
-            fromDate = $"{day:yyyy-MM-dd} 09:15:00",
-            toDate = $"{day:yyyy-MM-dd} 15:30:00",
+            fromDate = $"{fromDay:yyyy-MM-dd} 09:15:00",
+            toDate = $"{toDay:yyyy-MM-dd} 15:30:00",
         };
 
-        using var response = await _api.SendAsync(HttpMethod.Post, "/charts/intraday", payload, $"intraday candles ({dhanSegment}:{securityId}, {day:yyyy-MM-dd})", cancellationToken);
+        using var response = await _api.SendAsync(HttpMethod.Post, "/charts/intraday", payload,
+            $"intraday candles ({dhanSegment}:{securityId}, {fromDay:yyyy-MM-dd}..{toDay:yyyy-MM-dd})", cancellationToken);
 
         if (!response.Success)
         {
-            _logger.LogWarning("Intraday candle request failed for {Segment}:{Id} on {Day} - {Error}", dhanSegment, securityId, day, response.ErrorMessage);
+            _logger.LogWarning("Intraday candle request failed for {Segment}:{Id} ({From}..{To}) - {Error}", dhanSegment, securityId, fromDay, toDay, response.ErrorMessage);
             return Array.Empty<Candle>();
         }
 
@@ -75,7 +86,14 @@ public sealed class DhanHistoricalDataService
         {
             try
             {
-                var epochSeconds = timestamps[i].GetInt64();
+                // Dhan sends timestamp as a JSON number, but not reliably as an integer literal -
+                // it comes back as e.g. 1786938360.0 (a float-formatted whole number), which
+                // JsonElement.GetInt64() rejects outright (it throws on any literal with a decimal
+                // point, even a trailing ".0"). Going through GetDouble() first tolerates both
+                // shapes; every one of the 4340-odd candles in a typical backfill was silently
+                // dropped by the old GetInt64() call, since the per-candle catch below swallowed
+                // that FormatException for each and every index.
+                var epochSeconds = (long)timestamps[i].GetDouble();
                 candles.Add(new Candle(
                     Time: DateTimeOffset.FromUnixTimeSeconds(epochSeconds),
                     Open: i < open.Count ? open[i] : 0m,
@@ -86,6 +104,80 @@ public sealed class DhanHistoricalDataService
             catch (Exception ex) when (ex is FormatException or InvalidOperationException or OverflowException)
             {
                 _logger.LogDebug(ex, "Skipped an unparsable candle at index {Index}", i);
+            }
+        }
+
+        return candles;
+    }
+
+    /// <summary>Same range-call shape as GetIntradayCandlesAsync, but for an option contract
+    /// (instrument "OPTIDX", not "INDEX" - CDV's underlying spot backfill uses that method, this
+    /// one is what CdvHostedService calls per strike) and carrying Volume too, since both OBV and
+    /// the CDV backfill's bar-proxy delta classification need it and the plain Candle shape
+    /// doesn't carry it.</summary>
+    public async Task<IReadOnlyList<CandleWithVolume>> GetIntradayOptionCandlesAsync(
+        uint securityId, string dhanSegment, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken)
+    {
+        if (!_api.HasSession)
+        {
+            _logger.LogWarning("Cannot fetch intraday option candles for {Segment}:{Id} - Dhan is not authenticated.", dhanSegment, securityId);
+            return Array.Empty<CandleWithVolume>();
+        }
+
+        var payload = new
+        {
+            securityId = securityId.ToString(CultureInfo.InvariantCulture),
+            exchangeSegment = dhanSegment,
+            instrument = OptionInstrument,
+            interval = intervalMinutes.ToString(CultureInfo.InvariantCulture),
+            fromDate = $"{fromDay:yyyy-MM-dd} 09:15:00",
+            toDate = $"{toDay:yyyy-MM-dd} 15:30:00",
+        };
+
+        using var response = await _api.SendAsync(HttpMethod.Post, "/charts/intraday", payload,
+            $"option intraday candles ({dhanSegment}:{securityId}, {fromDay:yyyy-MM-dd}..{toDay:yyyy-MM-dd})", cancellationToken);
+
+        if (!response.Success)
+        {
+            // Debug, not Warning - routine for a strike that simply didn't trade/exist for part of
+            // the lookback window (added to the chain partway through, or never traded some days),
+            // which CdvHostedService.RecenterAsync would otherwise log once per strike as noise.
+            _logger.LogDebug("Option intraday candle request failed for {Segment}:{Id} ({From}..{To}) - {Error}", dhanSegment, securityId, fromDay, toDay, response.ErrorMessage);
+            return Array.Empty<CandleWithVolume>();
+        }
+
+        return ParseCandlesWithVolume(response.Root);
+    }
+
+    private List<CandleWithVolume> ParseCandlesWithVolume(JsonElement root)
+    {
+        var candles = new List<CandleWithVolume>();
+        if (!root.TryGetProperty("timestamp", out var timestamps) || timestamps.ValueKind != JsonValueKind.Array)
+            return candles;
+
+        var open = GetArray(root, "open");
+        var high = GetArray(root, "high");
+        var low = GetArray(root, "low");
+        var close = GetArray(root, "close");
+        var volume = GetArray(root, "volume");
+
+        var count = timestamps.GetArrayLength();
+        for (var i = 0; i < count; i++)
+        {
+            try
+            {
+                var epochSeconds = (long)timestamps[i].GetDouble();
+                candles.Add(new CandleWithVolume(
+                    Time: DateTimeOffset.FromUnixTimeSeconds(epochSeconds),
+                    Open: i < open.Count ? open[i] : 0m,
+                    High: i < high.Count ? high[i] : 0m,
+                    Low: i < low.Count ? low[i] : 0m,
+                    Close: i < close.Count ? close[i] : 0m,
+                    Volume: i < volume.Count ? (long)volume[i] : 0));
+            }
+            catch (Exception ex) when (ex is FormatException or InvalidOperationException or OverflowException)
+            {
+                _logger.LogDebug(ex, "Skipped an unparsable option candle at index {Index}", i);
             }
         }
 

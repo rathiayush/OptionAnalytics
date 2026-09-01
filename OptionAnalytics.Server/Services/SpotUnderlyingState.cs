@@ -25,15 +25,35 @@ public sealed class SpotUnderlyingState
     public decimal LastPrice { get; private set; }
     public DateTimeOffset LastUpdateUtc { get; private set; }
 
+    /// <summary>Fired once a 1-minute bar finishes (the moment the NEXT bar starts, not on every
+    /// tick) - EmaCrossoverAlertService is the consumer, computing EMA9/21 only against stable,
+    /// fully-closed bars so a crossover alert never fires (or flip-flops) off a still-forming bar's
+    /// partial price. Invoked outside the lock - see ApplyTick.</summary>
+    public event Action<Candle>? BarClosed;
+
     /// <summary>Seeds the chart with already-closed bars from the historical backfill. Called once
     /// before the live feed starts producing its own bars; a bar for "now" (still forming) is left
-    /// for the live feed to build, not backfilled.</summary>
+    /// for the live feed to build, not backfilled.
+    ///
+    /// Also seeds LastPrice from the most recent bar's close when nothing has arrived from the
+    /// live feed yet (LastPrice is still 0) - otherwise, whenever the market is closed (after
+    /// hours, weekends, a holiday) LastPrice stays stuck at 0 forever despite the chart itself
+    /// having real historical data, which left the price display and CDV's ATM resolution both
+    /// dead even though there is a perfectly good "last known price" (the previous close) to work
+    /// from. A live tick, whenever one does arrive, still always overwrites this immediately - see
+    /// ApplyTick.</summary>
     public void SeedHistory(IEnumerable<Candle> candles)
     {
         lock (_lock)
         {
             _closedCandles.Clear();
             _closedCandles.AddRange(candles.OrderBy(c => c.Time));
+
+            if (LastPrice <= 0 && _closedCandles.Count > 0)
+            {
+                LastPrice = _closedCandles[^1].Close;
+                LastUpdateUtc = DateTimeOffset.UtcNow;
+            }
         }
     }
 
@@ -41,6 +61,9 @@ public sealed class SpotUnderlyingState
     /// when the tick lands in a new minute. Returns the (possibly just-started) current bar.</summary>
     public Candle ApplyTick(SpotTick tick)
     {
+        Candle? justClosed = null;
+        Candle result;
+
         lock (_lock)
         {
             LastPrice = tick.LastPrice;
@@ -50,7 +73,22 @@ public sealed class SpotUnderlyingState
 
             if (_currentBar is not { } bar || bar.Time != minute)
             {
-                if (_currentBar is { } previous) _closedCandles.Add(previous);
+                if (_currentBar is { } previous)
+                {
+                    // The historical backfill's last returned candle can be the still-forming
+                    // minute at the moment it was queried (Dhan includes the in-progress bar, not
+                    // just fully-closed ones) - the live feed then builds its OWN _currentBar for
+                    // that same minute, and closing it here would otherwise append a second entry
+                    // at a time _closedCandles already has one for, violating lightweight-charts'
+                    // strict-ascending requirement and crashing the chart. The live version, having
+                    // captured the rest of that minute's real ticks, replaces the partial
+                    // backfilled one instead of duplicating it.
+                    if (_closedCandles.Count > 0 && _closedCandles[^1].Time == previous.Time)
+                        _closedCandles[^1] = previous;
+                    else
+                        _closedCandles.Add(previous);
+                    justClosed = previous;
+                }
                 _currentBar = new Candle(minute, tick.LastPrice, tick.LastPrice, tick.LastPrice, tick.LastPrice);
             }
             else
@@ -63,8 +101,14 @@ public sealed class SpotUnderlyingState
                 };
             }
 
-            return _currentBar.Value;
+            result = _currentBar.Value;
         }
+
+        // Raised outside the lock - a subscriber (EmaCrossoverAlertService) calling back into
+        // this instance (e.g. GetClosedCandles) must never deadlock against it.
+        if (justClosed is { } closed) BarClosed?.Invoke(closed);
+
+        return result;
     }
 
     public IReadOnlyList<Candle> GetCandles()
@@ -75,6 +119,13 @@ public sealed class SpotUnderlyingState
             if (_currentBar is { } bar) list.Add(bar);
             return list;
         }
+    }
+
+    /// <summary>Just the fully-closed bars, no in-progress bar - what EmaCrossoverAlertService
+    /// computes EMA9/21 against (see BarClosed's doc comment for why the live bar is excluded).</summary>
+    public IReadOnlyList<Candle> GetClosedCandles()
+    {
+        lock (_lock) { return new List<Candle>(_closedCandles); }
     }
 
     public Candle? GetCurrentBar()

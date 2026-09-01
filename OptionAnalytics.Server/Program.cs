@@ -1,22 +1,66 @@
 using OptionAnalytics.Server.Dhan;
 using OptionAnalytics.Server.Hubs;
 using OptionAnalytics.Server.Services;
+using OptionAnalytics.Server.Services.Backtesting;
+using OptionAnalytics.Server.Telegram;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Local-only credentials overlay, gitignored (see .gitignore) - not one of ASP.NET Core's
+// automatically-loaded file names, so it needs adding explicitly. Lets a real Dhan:ClientId/
+// AccessToken pair live on disk for local runs without ever being committed; layered after
+// appsettings.{Environment}.json so it wins, and reloads if edited while the app is running.
+builder.Configuration.AddJsonFile("appsettings.Local.json", optional: true, reloadOnChange: true);
+
 builder.Services.Configure<DhanOptions>(builder.Configuration.GetSection(DhanOptions.SectionName));
+builder.Services.Configure<TelegramOptions>(builder.Configuration.GetSection(TelegramOptions.SectionName));
+builder.Services.AddHttpClient<TelegramAlertService>();
 
 builder.Services.AddSingleton<DhanSession>();
 builder.Services.AddHttpClient<DhanApiClient>();
 builder.Services.AddHttpClient<DhanSpotInstrumentMaster>();
+builder.Services.AddHttpClient<DhanTotpAuthService>();
 builder.Services.AddSingleton<DhanHistoricalDataService>();
 builder.Services.AddSingleton<DhanMarketFeedClient>();
+builder.Services.AddHttpClient<DhanOptionChainMaster>();
+
+// No-op when Dhan:Pin/Dhan:TotpSecret aren't set (see DhanTotpAutoRenewalHostedService) - safe to
+// always register rather than branching on config here.
+builder.Services.AddHostedService<DhanTotpAutoRenewalHostedService>();
+
+// Owns the one shared WS connection's run loop - SpotFeedHostedService and CdvHostedService both
+// subscribe/unsubscribe tokens on the same DhanMarketFeedClient singleton rather than each
+// opening their own connection.
+builder.Services.AddHostedService<DhanMarketFeedHostedService>();
 
 // SpotFeedHostedService is both the hosted background loop AND the read model the REST
 // controller queries (its per-underlying candle/price state) - registered as a singleton and
 // then handed to AddHostedService so both consumers share the exact same instance.
 builder.Services.AddSingleton<SpotFeedHostedService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<SpotFeedHostedService>());
+
+// Same pattern as SpotFeedHostedService - CdvController reads CdvHostedService's per-underlying
+// state directly.
+builder.Services.AddSingleton<CdvHostedService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<CdvHostedService>());
+
+// No-op (logs at Debug and returns) when Telegram:Enabled/BotToken/ChatId aren't set - see
+// TelegramAlertService.
+builder.Services.AddHostedService<EmaCrossoverAlertService>();
+
+// Same singleton+hosted pattern as SpotFeedHostedService/CdvHostedService - AlertsController reads
+// its recent-alert history directly.
+builder.Services.AddSingleton<ConfluenceAlertService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<ConfluenceAlertService>());
+
+// Every registered IBacktestStrategy is picked up automatically by BacktestService's
+// IEnumerable<IBacktestStrategy> constructor param - add a new strategy by implementing the
+// interface and adding one more AddSingleton line here, nothing else needs to change.
+builder.Services.AddSingleton<IBacktestStrategy, OtmConfluenceStrategy>();
+
+// Stateless - reads SpotFeedHostedService/CdvHostedService's in-memory history fresh on every
+// request, nothing to run in the background. See BacktestController/BacktestService.
+builder.Services.AddSingleton<BacktestService>();
 
 builder.Services.AddSignalR();
 builder.Services.AddControllers();

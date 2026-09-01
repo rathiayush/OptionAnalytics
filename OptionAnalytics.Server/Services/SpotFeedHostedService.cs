@@ -2,14 +2,15 @@ using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Options;
 using OptionAnalytics.Server.Dhan;
 using OptionAnalytics.Server.Hubs;
+using OptionAnalytics.Server.Models;
 
 namespace OptionAnalytics.Server.Services;
 
 /// <summary>
-/// The orchestrator: resolves NIFTY/BANKNIFTY's Dhan security ids, backfills today's (or the
-/// previous trading day's, before the market opens) candles so the chart isn't empty on load,
-/// then runs the live WS feed and folds every tick into the current 1-minute bar, pushing each
-/// update to the dashboard over SignalR.
+/// The orchestrator: resolves NIFTY/BANKNIFTY's Dhan security ids, backfills the last 5 trading
+/// days' 1-minute candles into memory (nothing is ever persisted to disk - a restart re-fetches
+/// from Dhan every time), then runs the live WS feed and folds every tick into the current bar,
+/// pushing each update to the dashboard over SignalR.
 /// </summary>
 public sealed class SpotFeedHostedService : BackgroundService
 {
@@ -21,7 +22,16 @@ public sealed class SpotFeedHostedService : BackgroundService
         ("BANKNIFTY", 100),
     };
 
+    /// <summary>How many distinct trading days of history to hold in memory.</summary>
+    private const int HistoryTradingDays = 5;
+
+    /// <summary>How far back (calendar days) to ask Dhan for in one range call - comfortably
+    /// covers HistoryTradingDays even across a long weekend or a holiday cluster; the result is
+    /// then trimmed down to the most recent HistoryTradingDays distinct days actually present.</summary>
+    private const int HistoryLookbackCalendarDays = 15;
+
     private readonly DhanOptions _options;
+    private readonly DhanSession _session;
     private readonly DhanSpotInstrumentMaster _instrumentMaster;
     private readonly DhanHistoricalDataService _historicalData;
     private readonly DhanMarketFeedClient _feedClient;
@@ -32,6 +42,7 @@ public sealed class SpotFeedHostedService : BackgroundService
 
     public SpotFeedHostedService(
         IOptions<DhanOptions> options,
+        DhanSession session,
         DhanSpotInstrumentMaster instrumentMaster,
         DhanHistoricalDataService historicalData,
         DhanMarketFeedClient feedClient,
@@ -39,6 +50,7 @@ public sealed class SpotFeedHostedService : BackgroundService
         ILogger<SpotFeedHostedService> logger)
     {
         _options = options.Value;
+        _session = session;
         _instrumentMaster = instrumentMaster;
         _historicalData = historicalData;
         _feedClient = feedClient;
@@ -51,11 +63,39 @@ public sealed class SpotFeedHostedService : BackgroundService
     /// <summary>Read by SpotController for the REST endpoints - keyed by underlying name.</summary>
     public IReadOnlyDictionary<string, SpotUnderlyingState> States { get; }
 
+    /// <summary>How long to wait for TOTP auto-login before backfilling anyway. Generous on
+    /// purpose: DhanTotpAutoRenewalHostedService's own retry can hit Dhan's real "once every 2
+    /// minutes" generateAccessToken cooldown (a confirmed real case, not just theoretical), which a
+    /// short wait would lose the race against every time - the historical endpoint would then
+    /// report "not authenticated" and this app would be stuck with zero history for the rest of the
+    /// run, since backfill previously never got a second attempt. 3 minutes comfortably covers that
+    /// worst case with room to spare.</summary>
+    private static readonly TimeSpan AuthWaitTimeout = TimeSpan.FromMinutes(3);
+
+    /// <summary>How long RetryBackfillIfNeededAsync waits between checking whether any underlying
+    /// still has zero history, and how many times it tries before giving up.</summary>
+    private static readonly TimeSpan BackfillRetryInterval = TimeSpan.FromSeconds(20);
+    private const int MaxBackfillRetries = 15;
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        if (!_options.HasSession)
+        if (!_options.HasSession && !_options.HasTotpCredentials)
         {
-            _logger.LogWarning("Dhan:ClientId / Dhan:AccessToken are not configured - the spot feed will not start until they are set in appsettings (or Dhan__ClientId / Dhan__AccessToken environment variables).");
+            _logger.LogWarning("Neither Dhan:AccessToken nor Dhan:Pin/Dhan:TotpSecret are configured - the spot feed will not authenticate until one of them is set.");
+        }
+        else if (_options.HasTotpCredentials)
+        {
+            // TOTP auto-login runs concurrently in its own hosted service (see
+            // DhanTotpAutoRenewalHostedService) - wait for it so the historical backfill below has
+            // a live token on its first attempt rather than routinely losing that race on a fresh
+            // boot. Not fatal if it still doesn't finish in time (network trouble, Dhan down) -
+            // RetryBackfillIfNeededAsync below is the real safety net for that.
+            var waited = TimeSpan.Zero;
+            while (!_session.IsAuthenticated && waited < AuthWaitTimeout && !stoppingToken.IsCancellationRequested)
+            {
+                await Task.Delay(500, stoppingToken);
+                waited += TimeSpan.FromMilliseconds(500);
+            }
         }
 
         await ResolveInstrumentsAsync(stoppingToken);
@@ -64,7 +104,30 @@ public sealed class SpotFeedHostedService : BackgroundService
         _feedClient.TickReceived += OnTick;
 
         var tokenSegments = _bySecurityId.ToDictionary(kv => kv.Key, kv => kv.Value.Instrument!.DhanSegment);
-        await _feedClient.RunAsync(tokenSegments, stoppingToken);
+        await _feedClient.SubscribeAsync(tokenSegments, stoppingToken);
+
+        // Live ticks are already flowing by now regardless of whether backfill above actually got
+        // any history - this runs alongside them, not blocking anything, so a slow/failed first
+        // backfill attempt (auth still not ready, a transient Dhan hiccup) still ends up with real
+        // history instead of being stuck at zero for the rest of the run.
+        _ = RetryBackfillIfNeededAsync(stoppingToken);
+    }
+
+    /// <summary>Keeps retrying BackfillAsync, on an interval, for as long as ANY underlying still
+    /// has zero candles - the actual fallback for "market's closed / Dhan was briefly unreachable /
+    /// auth wasn't ready yet" instead of a single one-shot attempt with no second chance.</summary>
+    private async Task RetryBackfillIfNeededAsync(CancellationToken stoppingToken)
+    {
+        for (var attempt = 0; attempt < MaxBackfillRetries && !stoppingToken.IsCancellationRequested; attempt++)
+        {
+            if (States.Values.All(s => s.GetCandles().Count > 0)) return;
+
+            await Task.Delay(BackfillRetryInterval, stoppingToken);
+            if (stoppingToken.IsCancellationRequested) return;
+
+            _logger.LogInformation("Spot backfill retry {Attempt}/{Max}: at least one underlying still has no history.", attempt + 1, MaxBackfillRetries);
+            await BackfillAsync(stoppingToken);
+        }
     }
 
     private async Task ResolveInstrumentsAsync(CancellationToken cancellationToken)
@@ -92,33 +155,49 @@ public sealed class SpotFeedHostedService : BackgroundService
         }
     }
 
+    /// <summary>Fetches the last HistoryLookbackCalendarDays' worth of candles in ONE range call
+    /// per underlying (far cheaper than one request per day), then trims to the most recent
+    /// HistoryTradingDays distinct trading days actually present in the response - everything held
+    /// in memory only, nothing persisted, so this runs fresh on every restart.</summary>
     private async Task BackfillAsync(CancellationToken cancellationToken)
     {
         var today = IstToday();
+        var fromDay = today.AddDays(-HistoryLookbackCalendarDays);
 
         foreach (var state in States.Values)
         {
             if (state.Instrument is not { } instrument) continue;
 
-            var candles = await _historicalData.GetIntradayCandlesAsync(instrument.SecurityId, instrument.DhanSegment, today, 1, cancellationToken);
+            var candles = await _historicalData.GetIntradayCandlesAsync(instrument.SecurityId, instrument.DhanSegment, fromDay, today, 1, cancellationToken);
 
-            if (candles.Count == 0)
-            {
-                // Before the market opens (or on a holiday) there is nothing for "today" yet - fall
-                // back a few calendar days to the last day that actually has candles, so the chart
-                // still opens with something on the screen instead of a blank panel.
-                for (var back = 1; back <= 5 && candles.Count == 0; back++)
-                {
-                    var day = today.AddDays(-back);
-                    if (day.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday) continue;
-                    candles = await _historicalData.GetIntradayCandlesAsync(instrument.SecurityId, instrument.DhanSegment, day, 1, cancellationToken);
-                }
-            }
+            var trimmed = TrimToRecentTradingDays(candles, HistoryTradingDays);
+            state.SeedHistory(trimmed);
 
-            state.SeedHistory(candles);
-            _logger.LogInformation("Backfilled {Count} candle(s) for {Underlying}.", candles.Count, state.Underlying);
+            var dayCount = trimmed.Select(c => IstDate(c.Time)).Distinct().Count();
+            _logger.LogInformation("Backfilled {Count} candle(s) across {Days} trading day(s) for {Underlying}.", trimmed.Count, dayCount, state.Underlying);
         }
     }
+
+    /// <summary>Keeps only the candles from the most recent <paramref name="maxDays"/> distinct
+    /// IST calendar dates present in <paramref name="candles"/> - Dhan's range response may
+    /// legitimately span more days than that (the lookback window is intentionally generous to
+    /// survive holiday clusters), so this is what actually enforces "last 5 trading days".</summary>
+    private static List<Candle> TrimToRecentTradingDays(IReadOnlyList<Candle> candles, int maxDays)
+    {
+        var recentDays = candles
+            .Select(c => IstDate(c.Time))
+            .Distinct()
+            .OrderDescending()
+            .Take(maxDays)
+            .ToHashSet();
+
+        return candles
+            .Where(c => recentDays.Contains(IstDate(c.Time)))
+            .OrderBy(c => c.Time)
+            .ToList();
+    }
+
+    private static DateOnly IstDate(DateTimeOffset time) => DateOnly.FromDateTime(time.ToOffset(TimeSpan.FromHours(5.5)).DateTime);
 
     private void OnTick(SpotTick tick)
     {
@@ -143,10 +222,11 @@ public sealed class SpotFeedHostedService : BackgroundService
     /// <summary>Today's date in IST (UTC+5:30, a fixed offset - no DST, no tzdata lookup needed).</summary>
     private static DateOnly IstToday() => DateOnly.FromDateTime(DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(5.5)).DateTime);
 
-    public override async Task StopAsync(CancellationToken cancellationToken)
+    public override Task StopAsync(CancellationToken cancellationToken)
     {
+        // DhanMarketFeedClient's connection lifecycle (including disposal) is owned by
+        // DhanMarketFeedHostedService, which this service shares the client singleton with.
         _feedClient.TickReceived -= OnTick;
-        await _feedClient.DisposeAsync();
-        await base.StopAsync(cancellationToken);
+        return base.StopAsync(cancellationToken);
     }
 }
