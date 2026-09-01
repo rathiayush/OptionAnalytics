@@ -1,6 +1,6 @@
 import { Component, useEffect, useMemo, useRef, useState } from 'react'
 import { Select, Space, Typography, Spin, Card, Button, Modal, Table, Tag } from 'antd'
-import { createChart, createSeriesMarkers, CandlestickSeries, LineSeries, CrosshairMode } from 'lightweight-charts'
+import { createChart, createSeriesMarkers, CandlestickSeries, LineSeries, CrosshairMode, LineStyle } from 'lightweight-charts'
 import * as signalR from '@microsoft/signalr'
 import './App.css'
 
@@ -313,16 +313,24 @@ function PriceChart({ bars, height = 360 }) {
 }
 
 // Two-line running-total chart shape reused for CDV (cumulative delta volume) and OBV
-// (on-balance volume, via Skender.Stock.Indicators) - a CE line and a PE line.
-function CeVsPeChart({ ceSeries, peSeries, height = 280 }) {
+// (on-balance volume, via Skender.Stock.Indicators) - a CE line and a PE line. prevCeSeries/
+// prevPeSeries are optional - CDV passes the previous trading day's reconstructed curve (dashed,
+// lighter) as a reference alongside today's live line, at its own real timestamps (so it shows up
+// as an earlier, visually distinct segment rather than overlaid on today's); OBV never passes
+// them, since it has no equivalent "previous day" concept.
+function CeVsPeChart({ ceSeries, peSeries, prevCeSeries = [], prevPeSeries = [], height = 280 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const ceRef = useRef(null)
   const peRef = useRef(null)
+  const prevCeRef = useRef(null)
+  const prevPeRef = useRef(null)
   // See PriceChart's identical hasFitRef for why this only fits once per mount, not on every live update.
   const hasFitRef = useRef(false)
   const sanitizedCe = useMemo(() => sanitizeSeries(ceSeries), [ceSeries])
   const sanitizedPe = useMemo(() => sanitizeSeries(peSeries), [peSeries])
+  const sanitizedPrevCe = useMemo(() => sanitizeSeries(prevCeSeries), [prevCeSeries])
+  const sanitizedPrevPe = useMemo(() => sanitizeSeries(prevPeSeries), [prevPeSeries])
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -337,6 +345,8 @@ function CeVsPeChart({ ceSeries, peSeries, height = 280 }) {
       crosshair: { mode: CrosshairMode.Normal },
     })
     chartRef.current = chart
+    prevCeRef.current = chart.addSeries(LineSeries, { color: CE_COLOR, lineWidth: 1, lineStyle: LineStyle.Dashed, title: 'CE (prev day)', priceLineVisible: false, crosshairMarkerVisible: false })
+    prevPeRef.current = chart.addSeries(LineSeries, { color: PE_COLOR, lineWidth: 1, lineStyle: LineStyle.Dashed, title: 'PE (prev day)', priceLineVisible: false, crosshairMarkerVisible: false })
     ceRef.current = chart.addSeries(LineSeries, { color: CE_COLOR, lineWidth: 2, title: 'CE', priceLineVisible: false })
     peRef.current = chart.addSeries(LineSeries, { color: PE_COLOR, lineWidth: 2, title: 'PE', priceLineVisible: false })
     hasFitRef.current = false
@@ -352,18 +362,23 @@ function CeVsPeChart({ ceSeries, peSeries, height = 280 }) {
       chartRef.current = null
       ceRef.current = null
       peRef.current = null
+      prevCeRef.current = null
+      prevPeRef.current = null
     }
   }, [height])
 
   useEffect(() => {
-    if (!ceRef.current || !peRef.current) return
+    if (!ceRef.current || !peRef.current || !prevCeRef.current || !prevPeRef.current) return
+    prevCeRef.current.setData(sanitizedPrevCe)
+    prevPeRef.current.setData(sanitizedPrevPe)
     ceRef.current.setData(sanitizedCe)
     peRef.current.setData(sanitizedPe)
-    if (!hasFitRef.current && (sanitizedCe.length > 0 || sanitizedPe.length > 0)) {
+    const hasAnyData = sanitizedCe.length > 0 || sanitizedPe.length > 0 || sanitizedPrevCe.length > 0 || sanitizedPrevPe.length > 0
+    if (!hasFitRef.current && hasAnyData) {
       chartRef.current?.timeScale().fitContent()
       hasFitRef.current = true
     }
-  }, [sanitizedCe, sanitizedPe])
+  }, [sanitizedCe, sanitizedPe, sanitizedPrevCe, sanitizedPrevPe])
 
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }
@@ -487,34 +502,142 @@ function StrikesButton({ underlying }) {
 }
 
 const ALERT_DISPLAY_LIMIT = 20
+const ALERT_KIND_LABEL = { Spot: 'Spot', AtmCe: 'ATM CE', AtmPe: 'ATM PE', Confluence: 'CONFLUENCE' }
 
-// The notification engine's live feed - fires when a spot EMA9/21 crossover is confirmed by a
-// matching ATM CE/PE crossover pair (see the backend's ConfluenceAlertService for the exact rule).
-// Kept visible on the page at all times (not a toast that disappears) since the whole point is
-// catching a signal even if nobody was looking at the moment it fired.
-function AlertsPanel({ alerts }) {
+function DirectionTag({ direction }) {
+  if (!direction) return <Tag>—</Tag>
+  return <Tag color={direction === 'Bullish' ? UP_COLOR : DOWN_COLOR}>{direction === 'Bullish' ? '▲ Bullish' : '▼ Bearish'}</Tag>
+}
+
+// The notification engine's live feed. Two tiers, both from the backend's ConfluenceAlertService:
+// a status board showing each underlying's CURRENT spot/ATM-CE/ATM-PE EMA9/21 bias (continuously
+// kept up to date, not just on a crossover), and below it every alert that's fired - a lightweight
+// one the moment any single leg's bias flips, plus a stronger CONFLUENCE alert when all three
+// confirm the same move at once. Kept visible on the page at all times (not a toast that
+// disappears) since the whole point is catching a signal even if nobody was looking when it fired.
+function AlertsPanel({ alerts, states }) {
   return (
     <Card size="small" title="Confluence Alerts" extra={<Text type="secondary" style={{ fontSize: 12 }}>Spot + ATM CE/PE EMA 9/21</Text>}>
-      {alerts.length === 0 ? (
-        <Text type="secondary">
-          No alerts yet - fires when a spot crossover is confirmed by matching ATM CE/PE crossovers (spot up + CE up + PE down, or spot down + PE up + CE down).
-        </Text>
-      ) : (
-        <div style={{ maxHeight: 200, overflowY: 'auto' }}>
-          <Space direction="vertical" size={8} style={{ width: '100%' }}>
-            {alerts.slice(0, ALERT_DISPLAY_LIMIT).map((a, i) => (
-              <div key={`${a.underlying}-${a.timeUtc}-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-                <Tag color={a.direction === 'Bullish' ? UP_COLOR : DOWN_COLOR} style={{ minWidth: 68, textAlign: 'center', fontWeight: 600 }}>
-                  {a.direction === 'Bullish' ? '▲ BULLISH' : '▼ BEARISH'}
-                </Tag>
-                <Text strong>{a.underlying}</Text>
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  Spot {fmtPrice(a.spotPrice)} · ATM {a.atmStrike ?? '—'} · {new Date(a.timeUtc).toLocaleTimeString()}
-                </Text>
-              </div>
+      <Space direction="vertical" size={12} style={{ width: '100%' }}>
+        {states.length > 0 && (
+          <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap' }}>
+            {states.map((s) => (
+              <Space key={s.underlying} size={6} wrap>
+                <Text strong>{s.underlying}</Text>
+                <Text type="secondary" style={{ fontSize: 12 }}>Spot</Text>
+                <DirectionTag direction={s.spot} />
+                <Text type="secondary" style={{ fontSize: 12 }}>ATM CE</Text>
+                <DirectionTag direction={s.atmCe} />
+                <Text type="secondary" style={{ fontSize: 12 }}>ATM PE</Text>
+                <DirectionTag direction={s.atmPe} />
+              </Space>
             ))}
-          </Space>
-        </div>
+          </div>
+        )}
+
+        {alerts.length === 0 ? (
+          <Text type="secondary">
+            No alerts yet - a leg flip (spot, ATM CE, or ATM PE turning bullish/bearish) shows here as it happens, plus a stronger CONFLUENCE alert when all three confirm the same move.
+          </Text>
+        ) : (
+          <div style={{ maxHeight: 200, overflowY: 'auto' }}>
+            <Space direction="vertical" size={8} style={{ width: '100%' }}>
+              {alerts.slice(0, ALERT_DISPLAY_LIMIT).map((a, i) => {
+                const isConfluence = a.kind === 'Confluence'
+                const arrow = a.direction === 'Bullish' ? '▲' : '▼'
+                return (
+                  <div key={`${a.underlying}-${a.kind}-${a.timeUtc}-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                    <Tag
+                      color={isConfluence ? (a.direction === 'Bullish' ? UP_COLOR : DOWN_COLOR) : undefined}
+                      style={{ minWidth: 110, textAlign: 'center', fontWeight: isConfluence ? 700 : 400 }}
+                    >
+                      {isConfluence ? `${arrow} CONFLUENCE` : `${ALERT_KIND_LABEL[a.kind] ?? a.kind} ${arrow}`}
+                    </Tag>
+                    <Text strong>{a.underlying}</Text>
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      Spot {fmtPrice(a.spotPrice)} · ATM {a.atmStrike ?? '—'} · {new Date(a.timeUtc).toLocaleTimeString()}
+                    </Text>
+                  </div>
+                )
+              })}
+            </Space>
+          </div>
+        )}
+      </Space>
+    </Card>
+  )
+}
+
+const DEFAULT_LOOKBACK_BARS = [3, 5, 7]
+
+function renderPercent(v) {
+  if (v == null) return <Text type="secondary">—</Text>
+  const color = v > 0 ? UP_COLOR : v < 0 ? DOWN_COLOR : undefined
+  return <Text style={{ color }}>{v > 0 ? '+' : ''}{v.toFixed(2)}%</Text>
+}
+
+// CE/PE %-change over configurable lookback windows (default 3/5/7 bars), off the backend's
+// EMA-smoothed CDV series - mirrors LiveSpreadCalculator's own "Multi-Lookback" table for the same
+// Pine indicator. The bars selector accepts free-form numbers (antd's tags mode), not just the
+// preset options, so "configurable" isn't limited to a fixed list.
+function LookbackTable({ underlying, cdvSnapshot }) {
+  const [bars, setBars] = useState(DEFAULT_LOOKBACK_BARS)
+  const [table, setTable] = useState(null)
+  const lastBarTimeRef = useRef(null)
+
+  const load = (barsToUse) => {
+    fetch(`/api/cdv/${underlying}/lookback?bars=${barsToUse.join(',')}`)
+      .then((r) => r.json())
+      .then(setTable)
+      .catch((err) => console.error('Failed to load lookback table:', err))
+  }
+
+  useEffect(() => { load(bars) }, [underlying, bars.join(',')])
+
+  // Refetch whenever the CDV bar closes - same "new minute" trigger the OBV refetch elsewhere uses.
+  useEffect(() => {
+    const barTime = cdvSnapshot?.currentBar?.time ?? null
+    if (barTime === lastBarTimeRef.current) return
+    lastBarTimeRef.current = barTime
+    load(bars)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cdvSnapshot?.currentBar?.time])
+
+  const rows = table
+    ? table.ce.map((c, i) => ({ key: c.bars, bars: c.bars, cePercent: c.percentChange, pePercent: table.pe[i]?.percentChange }))
+    : []
+
+  return (
+    <Card
+      size="small"
+      title="CE / PE Lookback % Change"
+      extra={
+        <Select
+          mode="tags"
+          size="small"
+          value={bars.map(String)}
+          onChange={(vals) => {
+            const parsed = [...new Set(vals.map((v) => parseInt(v, 10)).filter((n) => Number.isInteger(n) && n > 0))].sort((a, b) => a - b)
+            setBars(parsed.length > 0 ? parsed : DEFAULT_LOOKBACK_BARS)
+          }}
+          style={{ minWidth: 180 }}
+          options={[3, 5, 7, 10, 15, 20].map((n) => ({ value: String(n), label: `${n} bars` }))}
+        />
+      }
+    >
+      {!table ? (
+        <Text type="secondary">Loading…</Text>
+      ) : (
+        <Table
+          size="small"
+          pagination={false}
+          dataSource={rows}
+          columns={[
+            { title: 'Lookback', dataIndex: 'bars', key: 'bars', render: (b) => `${b} bars ago` },
+            { title: 'CE % Change', dataIndex: 'cePercent', key: 'cePercent', render: renderPercent },
+            { title: 'PE % Change', dataIndex: 'pePercent', key: 'pePercent', render: renderPercent },
+          ]}
+        />
       )}
     </Card>
   )
@@ -540,8 +663,21 @@ export default function App() {
       .catch((err) => console.error('Failed to load alerts:', err))
   }, [])
 
+  // Each underlying's CURRENT spot/ATM-CE/ATM-PE bias - fetched once (the backend seeds this from
+  // already-closed bars on its own startup, so it's meaningful immediately) and then kept live by
+  // folding in each individual leg alert as it arrives over the same SignalR stream, rather than
+  // re-fetching the whole snapshot on every update.
+  const [crossoverStates, setCrossoverStates] = useState([])
+  useEffect(() => {
+    fetch('/api/alerts/state')
+      .then((r) => r.json())
+      .then((data) => setCrossoverStates(data ?? []))
+      .catch((err) => console.error('Failed to load crossover state:', err))
+  }, [])
+
   const [cdvSeries, setCdvSeries] = useState([])
   const [cdvSnapshot, setCdvSnapshot] = useState(null)
+  const [cdvPrevDaySeries, setCdvPrevDaySeries] = useState([])
 
   const [atmCeCandles, setAtmCeCandles] = useState([])
   const [atmPeCandles, setAtmPeCandles] = useState([])
@@ -608,7 +744,12 @@ export default function App() {
       .then((data) => { if (!cancelledRef.cancelled) setCdvSnapshot(data) })
       .catch((err) => console.error('Failed to load CDV snapshot:', err))
 
-    return Promise.allSettled([candlesP, snapshotP, cdvSeriesP, cdvSnapshotP, fetchAtmAndObv(underlying, cancelledRef)])
+    const cdvPrevDayP = fetch(`/api/cdv/${underlying}/previous-day-series`)
+      .then((r) => r.json())
+      .then((data) => { if (!cancelledRef.cancelled) setCdvPrevDaySeries(data ?? []) })
+      .catch((err) => console.error('Failed to load CDV previous-day series:', err))
+
+    return Promise.allSettled([candlesP, snapshotP, cdvSeriesP, cdvSnapshotP, cdvPrevDayP, fetchAtmAndObv(underlying, cancelledRef)])
   }
 
   useEffect(() => {
@@ -631,7 +772,17 @@ export default function App() {
       if (incoming.underlying !== selected) return
       setCdvSnapshot(incoming)
     },
-    (alert) => setAlerts((prev) => [alert, ...prev].slice(0, 50)),
+    (alert) => {
+      setAlerts((prev) => [alert, ...prev].slice(0, 50))
+
+      const legKey = alert.kind === 'Spot' ? 'spot' : alert.kind === 'AtmCe' ? 'atmCe' : alert.kind === 'AtmPe' ? 'atmPe' : null
+      if (!legKey) return // Confluence alerts don't change any leg's own state, just confirm it
+      setCrossoverStates((prev) => {
+        const existing = prev.find((s) => s.underlying === alert.underlying)
+        if (existing) return prev.map((s) => (s.underlying === alert.underlying ? { ...s, [legKey]: alert.direction, updatedUtc: alert.timeUtc } : s))
+        return [...prev, { underlying: alert.underlying, spot: null, atmCe: null, atmPe: null, [legKey]: alert.direction, updatedUtc: alert.timeUtc }]
+      })
+    },
   )
 
   // ATM CE/PE bars only change value on every tick (the premium moves), but OBV is a per-bar
@@ -675,6 +826,9 @@ export default function App() {
 
   const cdvCe = useAggregatedLine(cdvSeries, cdvSnapshot?.currentBar, timeframe, ['ceCdv']).map((p) => ({ time: p.time, value: p.ceCdv }))
   const cdvPe = useAggregatedLine(cdvSeries, cdvSnapshot?.currentBar, timeframe, ['peCdv']).map((p) => ({ time: p.time, value: p.peCdv }))
+  // No live bar to merge - previous-day is a fixed historical reference, not something ticks update.
+  const cdvPrevCe = useAggregatedLine(cdvPrevDaySeries, null, timeframe, ['ceCdv']).map((p) => ({ time: p.time, value: p.ceCdv }))
+  const cdvPrevPe = useAggregatedLine(cdvPrevDaySeries, null, timeframe, ['peCdv']).map((p) => ({ time: p.time, value: p.peCdv }))
 
   const obvCePoints = useMemo(() => aggregateLine(obvCe.map((p) => toLinePoint(p, ['obv'])), timeframe).map((p) => ({ time: p.time, value: p.obv })), [obvCe, timeframe])
   const obvPePoints = useMemo(() => aggregateLine(obvPe.map((p) => toLinePoint(p, ['obv'])), timeframe).map((p) => ({ time: p.time, value: p.obv })), [obvPe, timeframe])
@@ -707,7 +861,13 @@ export default function App() {
           <Button onClick={handleRefresh} loading={refreshing} disabled={!selected}>Refresh</Button>
         </Space>
 
-        <AlertsPanel alerts={alerts} />
+        <Space direction="vertical" size={2} align="center" style={{ width: '100%' }}>
+          <Text type="secondary">{selected} spot (rounded to nearest {step ?? '—'})</Text>
+          <Text style={{ fontSize: 40, fontWeight: 600, lineHeight: 1.2 }}>{fmtPrice(rounded)}</Text>
+          <Text type="secondary">Last traded: {fmtPrice(snapshot?.lastPrice)}</Text>
+        </Space>
+
+        <AlertsPanel alerts={alerts} states={crossoverStates} />
 
         <ChartCard
           title={`${selected} spot`}
@@ -720,12 +880,6 @@ export default function App() {
             </ChartErrorBoundary>
           )}
         </ChartCard>
-
-        <Space direction="vertical" size={2} align="center" style={{ width: '100%' }}>
-          <Text type="secondary">{selected} spot (rounded to nearest {step ?? '—'})</Text>
-          <Text style={{ fontSize: 40, fontWeight: 600, lineHeight: 1.2 }}>{fmtPrice(rounded)}</Text>
-          <Text type="secondary">Last traded: {fmtPrice(snapshot?.lastPrice)}</Text>
-        </Space>
 
         <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
           <div style={{ flex: '1 1 400px', minWidth: 0 }}>
@@ -769,7 +923,7 @@ export default function App() {
           {cdvCe.length > 0 && (
             <>
               <ChartErrorBoundary key={`${selected}-${timeframe}`} height={280}>
-                <CeVsPeChart ceSeries={cdvCe} peSeries={cdvPe} height={280} />
+                <CeVsPeChart ceSeries={cdvCe} peSeries={cdvPe} prevCeSeries={cdvPrevCe} prevPeSeries={cdvPrevPe} height={280} />
               </ChartErrorBoundary>
               <Space size={24} style={{ marginTop: 8 }}>
                 <Text style={{ color: CE_COLOR }}>CE {fmtNum(cdvSnapshot?.ceCdv)}</Text>
@@ -778,6 +932,8 @@ export default function App() {
             </>
           )}
         </ChartCard>
+
+        {selected && <LookbackTable underlying={selected} cdvSnapshot={cdvSnapshot} />}
 
         <ChartCard
           title="CE / PE On-Balance Volume (ATM)"

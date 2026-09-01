@@ -129,6 +129,13 @@ public sealed class CdvUnderlyingState
     private readonly Dictionary<DateTimeOffset, decimal> _backfillCeIncrements = new();
     private readonly Dictionary<DateTimeOffset, decimal> _backfillPeIncrements = new();
 
+    // Same increments-then-finalize shape as the pair above, but for the previous trading day's
+    // reference curve (see SeedPreviousDayStrike/FinalizePreviousDay) - a completely separate
+    // series from _closedBars/_backfillCe/PeIncrements, never merged into today's running total.
+    private readonly Dictionary<DateTimeOffset, decimal> _previousDayCeIncrements = new();
+    private readonly Dictionary<DateTimeOffset, decimal> _previousDayPeIncrements = new();
+    private readonly List<CdvBarPoint> _previousDaySeries = new();
+
     public CdvUnderlyingState(string underlying)
     {
         Underlying = underlying;
@@ -161,6 +168,9 @@ public sealed class CdvUnderlyingState
             _currentBar = null;
             _backfillCeIncrements.Clear();
             _backfillPeIncrements.Clear();
+            _previousDayCeIncrements.Clear();
+            _previousDayPeIncrements.Clear();
+            _previousDaySeries.Clear();
             AtmStrike = null;
             Expiry = null;
         }
@@ -353,6 +363,63 @@ public sealed class CdvUnderlyingState
         }
     }
 
+    /// <summary>Contributes one strike's previous-trading-day bars to the reference curve (see
+    /// FinalizePreviousDay) - the same bar-proxy-delta math SeedStrikeHistory's CDV path uses,
+    /// weighted by delta at the CURRENT spot (today's - the same fixed-reference approximation),
+    /// but into a completely separate accumulator so it never touches today's RunningCdv or
+    /// _closedBars. Called once per strike, alongside SeedStrikeHistory, only for the underlying's
+    /// first backfill batch of the day (same restriction and reason as includeInCdvHistory: a
+    /// strike added on a later batch wasn't part of the window this reference curve covers).
+    /// </summary>
+    public void SeedPreviousDayStrike(uint securityId, IReadOnlyList<CandleWithVolume> previousDayBars, decimal currentSpot)
+    {
+        lock (_lock)
+        {
+            if (!_strikes.TryGetValue(securityId, out var strike) || previousDayBars.Count == 0) return;
+
+            var weight = currentSpot > 0 ? ComputeDeltaWeight(strike.Strike, currentSpot, strike.IsCall) : 0m;
+            var increments = strike.IsCall ? _previousDayCeIncrements : _previousDayPeIncrements;
+            foreach (var bar in previousDayBars.OrderBy(b => b.Time))
+            {
+                var delta = BarProxyDelta(bar) * weight;
+                increments[bar.Time] = increments.GetValueOrDefault(bar.Time) + delta;
+            }
+        }
+    }
+
+    /// <summary>Turns the previous day's per-strike increments into one chronological reference
+    /// series - what GetPreviousDaySeries serves, shown alongside (never merged into) today's live
+    /// CDV so the two trading days can be visually compared without today's total losing its own
+    /// "starts at zero" meaning. Safe to call with nothing pending - a no-op.</summary>
+    public void FinalizePreviousDay()
+    {
+        lock (_lock)
+        {
+            if (_previousDayCeIncrements.Count == 0 && _previousDayPeIncrements.Count == 0) return;
+
+            var minutes = _previousDayCeIncrements.Keys.Concat(_previousDayPeIncrements.Keys).Distinct().OrderBy(t => t).ToList();
+            decimal ce = 0, pe = 0;
+            _previousDaySeries.Clear();
+            foreach (var minute in minutes)
+            {
+                ce += _previousDayCeIncrements.GetValueOrDefault(minute);
+                pe += _previousDayPeIncrements.GetValueOrDefault(minute);
+                _previousDaySeries.Add(new CdvBarPoint(minute, ce, pe));
+            }
+
+            _previousDayCeIncrements.Clear();
+            _previousDayPeIncrements.Clear();
+        }
+    }
+
+    /// <summary>The previous trading day's reconstructed CDV curve - served by GET
+    /// /api/cdv/{underlying}/previous-day-series, empty until the first backfill batch of the day
+    /// has run.</summary>
+    public IReadOnlyList<CdvBarPoint> GetPreviousDaySeries()
+    {
+        lock (_lock) { return new List<CdvBarPoint>(_previousDaySeries); }
+    }
+
     /// <summary>Pine's own bar-proxy delta formula (close-in-range classification), the same
     /// fallback LiveSpreadCalculator's CDV backfill uses for historical candles - the only buy/sell
     /// split possible from OHLCV+volume alone, with no real trade-by-trade tagging.</summary>
@@ -411,6 +478,63 @@ public sealed class CdvUnderlyingState
             if (_currentBar is { } bar) list.Add(bar);
             return list;
         }
+    }
+
+    /// <summary>How many bars EMA-smooths the raw per-minute CDV series before lookback %-change is
+    /// computed - the same idea as LiveSpreadCalculator's Pine-ported "smoothLen" (default 9 there
+    /// too): comparing raw, noisy per-minute CDV N bars apart would mostly measure noise, not the
+    /// actual trend.</summary>
+    private const int LookbackSmoothLen = 9;
+
+    /// <summary>CE/PE %-change over each of <paramref name="lookbackBars"/> bars, computed off the
+    /// EMA(LookbackSmoothLen)-smoothed CDV series - LiveSpreadCalculator's own "Multi-Lookback"
+    /// table for this same Pine indicator, just with a caller-supplied (rather than fixed) set of
+    /// windows. Skender.Stock.Indicators needs IQuote-shaped input for GetEma, so each CDV value is
+    /// wrapped as a synthetic quote (Close = the value, the rest unused) - the same trick
+    /// EmaCrossoverDetector uses for real candles.</summary>
+    public LookbackTable GetLookbackTable(IReadOnlyList<int> lookbackBars)
+    {
+        lock (_lock)
+        {
+            var series = new List<CdvBarPoint>(_closedBars);
+            if (_currentBar is { } bar) series.Add(bar);
+
+            var ceEma = SmoothEma(series.Select(p => p.CeCdv).ToList());
+            var peEma = SmoothEma(series.Select(p => p.PeCdv).ToList());
+
+            var ceChanges = lookbackBars.Select(n => ComputeLookbackChange(ceEma, n)).ToList();
+            var peChanges = lookbackBars.Select(n => ComputeLookbackChange(peEma, n)).ToList();
+
+            return new LookbackTable(Underlying, ceChanges, peChanges);
+        }
+    }
+
+    private static List<decimal?> SmoothEma(IReadOnlyList<decimal> values)
+    {
+        var quotes = values.Select((v, i) => new Quote
+        {
+            Date = DateTime.UnixEpoch.AddMinutes(i),
+            Open = v,
+            High = v,
+            Low = v,
+            Close = v,
+            Volume = 0,
+        }).ToList();
+
+        return quotes.GetEma(LookbackSmoothLen).Select(r => r.Ema is { } e ? (decimal?)(decimal)e : null).ToList();
+    }
+
+    private static LookbackChange ComputeLookbackChange(IReadOnlyList<decimal?> emaSeries, int barsAgo)
+    {
+        var lastIndex = emaSeries.Count - 1;
+        if (lastIndex < 0 || emaSeries[lastIndex] is not { } current) return new LookbackChange(barsAgo, null, null, null);
+
+        var previousIndex = lastIndex - barsAgo;
+        if (previousIndex < 0 || emaSeries[previousIndex] is not { } previous) return new LookbackChange(barsAgo, current, null, null);
+        if (previous == 0) return new LookbackChange(barsAgo, current, previous, null);
+
+        var percentChange = (current - previous) / Math.Abs(previous) * 100m;
+        return new LookbackChange(barsAgo, current, previous, percentChange);
     }
 
     /// <summary>The premium candle series for whichever tracked contract is currently ATM on this

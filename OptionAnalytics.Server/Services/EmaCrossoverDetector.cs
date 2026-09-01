@@ -16,9 +16,30 @@ public static class EmaCrossoverDetector
     /// below), or null (no crossover on that bar, or not enough closed bars yet to know).</summary>
     public static string? Detect(IReadOnlyList<Candle> closedBars)
     {
+        var (prevDiff, currDiff) = EmaDiffs(closedBars);
+        if (prevDiff is not { } pd || currDiff is not { } cd) return null;
+
+        return pd <= 0 && cd > 0 ? "Bullish"
+            : pd >= 0 && cd < 0 ? "Bearish"
+            : null;
+    }
+
+    /// <summary>"Bullish" (EMA9 currently above EMA21) or "Bearish" (below) on the most recent bar
+    /// - the CURRENT bias, unlike Detect which only answers on the bar an actual cross happened.
+    /// ConfluenceAlertService uses this to keep a continuously up-to-date "where does each leg
+    /// stand right now" state, not just react to the moment of crossing.</summary>
+    public static string? CurrentDirection(IReadOnlyList<Candle> closedBars)
+    {
+        var (_, currDiff) = EmaDiffs(closedBars);
+        if (currDiff is not { } cd || cd == 0) return null;
+        return cd > 0 ? "Bullish" : "Bearish";
+    }
+
+    private static (decimal? Prev, decimal? Curr) EmaDiffs(IReadOnlyList<Candle> closedBars)
+    {
         // Need at least one prior bar beyond the slow EMA's own seed window, so there is a
         // previous EMA9/EMA21 pair to compare the newest one against.
-        if (closedBars.Count < SlowPeriod + 1) return null;
+        if (closedBars.Count < SlowPeriod + 1) return (null, null);
 
         var quotes = closedBars.Select(c => new Quote
         {
@@ -34,14 +55,9 @@ public static class EmaCrossoverDetector
         var ema21 = quotes.GetEma(SlowPeriod).ToList();
 
         var last = quotes.Count - 1;
-        if (ema9[last].Ema is not { } fastNow || ema21[last].Ema is not { } slowNow) return null;
-        if (ema9[last - 1].Ema is not { } fastPrev || ema21[last - 1].Ema is not { } slowPrev) return null;
+        if (ema9[last].Ema is not { } fastNow || ema21[last].Ema is not { } slowNow) return (null, null);
+        if (ema9[last - 1].Ema is not { } fastPrev || ema21[last - 1].Ema is not { } slowPrev) return (null, (decimal)(fastNow - slowNow));
 
-        var prevDiff = fastPrev - slowPrev;
-        var currDiff = fastNow - slowNow;
-
-        return prevDiff <= 0 && currDiff > 0 ? "Bullish"
-            : prevDiff >= 0 && currDiff < 0 ? "Bearish"
-            : null;
+        return ((decimal)(fastPrev - slowPrev), (decimal)(fastNow - slowNow));
     }
 }

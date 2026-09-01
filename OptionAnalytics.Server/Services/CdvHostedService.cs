@@ -251,6 +251,11 @@ public sealed class CdvHostedService : BackgroundService
     {
         var today = DateOnly.FromDateTime(DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(5.5)).DateTime);
         var fromDay = today.AddDays(-HistoryLookbackCalendarDays);
+        // The previous-day reference line's target date - a plain weekday-skip, same "accepted
+        // approximation" LiveSpreadCalculator's own CDV backfill uses (not exchange-holiday aware;
+        // a strike simply contributes nothing for a day it has no bars for, same graceful
+        // degradation as everywhere else in this backfill).
+        var previousDay = PreviousWeekday(today);
         var seededCount = 0;
 
         // Only the underlying's very first backfill batch feeds the combined CDV reconstruction -
@@ -286,12 +291,30 @@ public sealed class CdvHostedService : BackgroundService
             // Reset) - only today's own slice of that same fetch feeds the CDV reconstruction.
             var todayBars = trimmed.Where(b => IstDate(b.Time) == today).ToList();
             state.SeedStrikeHistory(securityId, trimmed, todayBars, currentSpot, includeInCdvHistory);
+
+            if (includeInCdvHistory)
+            {
+                var previousDayBars = trimmed.Where(b => IstDate(b.Time) == previousDay).ToList();
+                state.SeedPreviousDayStrike(securityId, previousDayBars, currentSpot);
+            }
+
             seededCount++;
         }
 
-        if (includeInCdvHistory) state.FinalizeCdvBackfill();
+        if (includeInCdvHistory)
+        {
+            state.FinalizeCdvBackfill();
+            state.FinalizePreviousDay();
+        }
         _logger.LogInformation("CDV: backfilled {Seeded}/{Total} newly-tracked contract(s) for {Underlying} (CDV history {Included}).",
             seededCount, securityIds.Count, underlying, includeInCdvHistory ? "included" : "not included - later batch");
+    }
+
+    private static DateOnly PreviousWeekday(DateOnly day)
+    {
+        var prev = day.AddDays(-1);
+        while (prev.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday) prev = prev.AddDays(-1);
+        return prev;
     }
 
     /// <summary>Same trimming SpotFeedHostedService.TrimToRecentTradingDays does for the spot chart -

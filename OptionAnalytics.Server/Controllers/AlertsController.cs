@@ -21,4 +21,9 @@ public sealed class AlertsController : ControllerBase
 
     [HttpGet]
     public IActionResult GetRecent() => Ok(_alerts.GetRecentAlerts());
+
+    /// <summary>Every underlying's CURRENT spot/ATM-CE/ATM-PE bias right now (see
+    /// ConfluenceAlertService.GetCurrentStates) - a live snapshot, not history.</summary>
+    [HttpGet("state")]
+    public IActionResult GetState() => Ok(_alerts.GetCurrentStates());
 }

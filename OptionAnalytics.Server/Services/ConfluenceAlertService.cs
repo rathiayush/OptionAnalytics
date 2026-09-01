@@ -6,29 +6,41 @@ using OptionAnalytics.Server.Telegram;
 namespace OptionAnalytics.Server.Services;
 
 /// <summary>
-/// The notification engine: correlates each underlying's spot EMA9/21 crossover with its ATM
-/// CE/PE premium crossovers and fires an alert only when all three line up, per the confirmation
-/// rule a real directional move should show across spot and both option sides:
+/// The notification engine. Keeps each underlying's CURRENT EMA9/21 bias for three legs - spot,
+/// ATM CE, ATM PE - continuously up to date (EmaCrossoverDetector.CurrentDirection, recomputed on
+/// every closed bar regardless of whether that bar was an actual crossover), and fires two kinds
+/// of alert off that live state:
 ///
-///   BULLISH  - spot breaks UP, ATM CE breaks UP, ATM PE breaks DOWN
-///   BEARISH  - spot breaks DOWN, ATM PE breaks UP, ATM CE breaks DOWN
+///   1. An individual alert the moment any ONE leg's bias flips (Kind: "Spot"/"AtmCe"/"AtmPe") -
+///      the lightweight "something just changed" signal.
+///   2. A stronger "Confluence" alert only when all three confirm the same move at once:
 ///
-/// (CE and PE premiums move opposite to each other on a real directional move - spot up pushes CE
-/// up and PE down, so a "CE breaks up but PE doesn't break down" case is exactly the kind of
-/// unconfirmed/noisy move this is meant to filter out, not just "spot crossed").
+///        BULLISH  - spot is UP, ATM CE is UP, ATM PE is DOWN
+///        BEARISH  - spot is DOWN, ATM PE is UP, ATM CE is DOWN
 ///
-/// Reacts to SpotUnderlyingState.BarClosed and CdvUnderlyingState.AtmBarClosed - never polls, and
-/// never computes off a still-forming bar (see EmaCrossoverDetector). Each underlying keeps only
-/// its most recent spot/CE/PE crossover (direction + the bar it closed on); every time any one of
-/// the three updates, the combination is re-checked. The three don't necessarily close in the same
-/// instant (spot and option ticks arrive independently), so a crossover only counts toward the
-/// combination while its bar is within ConfluenceWindow of the others - a crossover from ten
-/// minutes ago doesn't retroactively confirm a fresh one now.
+///      (CE and PE premiums move opposite to each other on a real directional move - spot up
+///      pushes CE up and PE down, so "CE up but PE not down" is exactly the kind of unconfirmed
+///      move this is meant to filter out). Fires once per alignment episode - re-evaluated on
+///      every leg update, but only actually alerts the moment the three-way match first becomes
+///      true, staying quiet on every subsequent bar where it's still true, and re-arming itself
+///      the moment the alignment breaks (see ConfluenceAlerted).
 ///
-/// Alerts are pushed three ways: Telegram (reusing TelegramAlertService, same as the plain spot
-/// EMA alert), SignalR ("confluenceAlert" on SpotHub, for live display), and a bounded in-memory
-/// history (GetRecentAlerts / GET /api/alerts) so a page load or refresh still shows recent alerts
-/// rather than only ones that happen to arrive while the tab is open.
+/// The three legs' bars don't necessarily close in the same instant (spot and option ticks arrive
+/// independently), so the confluence check only counts a leg while its bar is within
+/// ConfluenceWindow of the spot bar that triggered the check - a leg's bias from ten minutes ago
+/// doesn't retroactively confirm a fresh spot flip now.
+///
+/// GetCurrentStates() serves the live per-leg snapshot (GET /api/alerts/state) - filled from
+/// whatever closed-bar history already exists the moment this service starts (ExecuteAsync's
+/// initial seed pass), not just from bars that close after that, so a page load right after a
+/// restart still shows a real "where do things stand" rather than three blanks waiting for the
+/// next bar.
+///
+/// Both alert kinds go out over SignalR ("confluenceAlert" on SpotHub, for live display) and a
+/// bounded in-memory history (GetRecentAlerts / GET /api/alerts). Only the stronger Confluence
+/// alert goes to Telegram - individual leg flips would otherwise double up with
+/// EmaCrossoverAlertService's own existing spot-crossover Telegram alert and turn the channel into
+/// noise for a signal that isn't yet confirmed.
 /// </summary>
 public sealed class ConfluenceAlertService : BackgroundService
 {
@@ -56,10 +68,27 @@ public sealed class ConfluenceAlertService : BackgroundService
         _logger = logger;
     }
 
-    /// <summary>Read by AlertsController for GET /api/alerts - most recent first.</summary>
+    /// <summary>Read by AlertsController for GET /api/alerts - most recent first, every kind mixed
+    /// together (individual leg flips and confirmed confluences alike).</summary>
     public IReadOnlyList<ConfluenceAlert> GetRecentAlerts()
     {
         lock (_historyLock) { return _history.ToList(); }
+    }
+
+    /// <summary>Read by AlertsController for GET /api/alerts/state - every underlying's current
+    /// spot/ATM-CE/ATM-PE bias right now.</summary>
+    public IReadOnlyList<CrossoverState> GetCurrentStates()
+    {
+        lock (_states)
+        {
+            return _states.Select(kv =>
+            {
+                lock (kv.Value)
+                {
+                    return new CrossoverState(kv.Key, kv.Value.Spot?.Direction, kv.Value.Ce?.Direction, kv.Value.Pe?.Direction, kv.Value.LastUpdatedUtc);
+                }
+            }).ToList();
+        }
     }
 
     protected override Task ExecuteAsync(CancellationToken stoppingToken)
@@ -68,65 +97,108 @@ public sealed class ConfluenceAlertService : BackgroundService
         {
             var capturedUnderlying = underlying;
             var capturedSpotState = spotState;
-            spotState.BarClosed += _ => OnSpotBarClosed(capturedUnderlying, capturedSpotState, stoppingToken);
+            // Seed the current bias from whatever backfilled/already-closed bars exist right now -
+            // silent (announce: false), since this is catching up to already-known history on
+            // startup, not a live change worth alerting on.
+            UpdateSpotLeg(capturedUnderlying, capturedSpotState, announce: false, stoppingToken);
+            spotState.BarClosed += _ => UpdateSpotLeg(capturedUnderlying, capturedSpotState, announce: true, stoppingToken);
         }
 
         foreach (var (underlying, cdvState) in _cdv.States)
         {
             var capturedUnderlying = underlying;
             var capturedCdvState = cdvState;
-            cdvState.AtmBarClosed += (isCall, _) => OnAtmBarClosed(capturedUnderlying, capturedCdvState, isCall, stoppingToken);
+            UpdateAtmLeg(capturedUnderlying, capturedCdvState, isCall: true, announce: false, stoppingToken);
+            UpdateAtmLeg(capturedUnderlying, capturedCdvState, isCall: false, announce: false, stoppingToken);
+            cdvState.AtmBarClosed += (isCall, _) => UpdateAtmLeg(capturedUnderlying, capturedCdvState, isCall, announce: true, stoppingToken);
         }
 
         return Task.CompletedTask;
     }
 
-    private void OnSpotBarClosed(string underlying, SpotUnderlyingState spotState, CancellationToken cancellationToken)
+    private void UpdateSpotLeg(string underlying, SpotUnderlyingState spotState, bool announce, CancellationToken cancellationToken)
     {
-        var direction = EmaCrossoverDetector.Detect(spotState.GetClosedCandles());
-        if (direction is null) return;
+        var closedBars = spotState.GetClosedCandles();
+        var direction = EmaCrossoverDetector.CurrentDirection(closedBars);
+        if (direction is null || closedBars.Count == 0) return;
 
-        var barTime = spotState.GetClosedCandles()[^1].Time;
-        var state = GetOrCreateState(underlying);
-        lock (state) { state.Spot = (direction, barTime); }
-        Evaluate(underlying, state, cancellationToken);
+        UpdateLeg(underlying, "Spot", direction, closedBars[^1].Time, announce, s => s.Spot, (s, v) => s.Spot = v, cancellationToken);
     }
 
-    private void OnAtmBarClosed(string underlying, CdvUnderlyingState cdvState, bool isCall, CancellationToken cancellationToken)
+    private void UpdateAtmLeg(string underlying, CdvUnderlyingState cdvState, bool isCall, bool announce, CancellationToken cancellationToken)
     {
         var closedBars = cdvState.GetAtmClosedCandles(isCall);
-        var direction = EmaCrossoverDetector.Detect(closedBars);
-        if (direction is null) return;
+        var direction = EmaCrossoverDetector.CurrentDirection(closedBars);
+        if (direction is null || closedBars.Count == 0) return;
 
-        var barTime = closedBars[^1].Time;
-        var state = GetOrCreateState(underlying);
-        lock (state)
-        {
-            if (isCall) state.Ce = (direction, barTime); else state.Pe = (direction, barTime);
-        }
-        Evaluate(underlying, state, cancellationToken);
+        var kind = isCall ? "AtmCe" : "AtmPe";
+        if (isCall)
+            UpdateLeg(underlying, kind, direction, closedBars[^1].Time, announce, s => s.Ce, (s, v) => s.Ce = v, cancellationToken);
+        else
+            UpdateLeg(underlying, kind, direction, closedBars[^1].Time, announce, s => s.Pe, (s, v) => s.Pe = v, cancellationToken);
     }
 
-    private void Evaluate(string underlying, UnderlyingConfluenceState state, CancellationToken cancellationToken)
+    private void UpdateLeg(
+        string underlying, string kind, string direction, DateTimeOffset barTime, bool announce,
+        Func<UnderlyingConfluenceState, (string Direction, DateTimeOffset BarTime)?> getLeg,
+        Action<UnderlyingConfluenceState, (string Direction, DateTimeOffset BarTime)?> setLeg,
+        CancellationToken cancellationToken)
+    {
+        var state = GetOrCreateState(underlying);
+        bool changed;
+        lock (state)
+        {
+            var previous = getLeg(state);
+            changed = previous is not { } prev || prev.Direction != direction;
+            setLeg(state, (direction, barTime));
+            state.LastUpdatedUtc = DateTimeOffset.UtcNow;
+            if (changed) state.ConfluenceAlerted = false; // a leg just moved - allow a fresh confluence alert if the new combination aligns
+        }
+
+        if (announce && changed) RaiseIndividualAlert(underlying, kind, direction, barTime, cancellationToken);
+        EvaluateConfluence(underlying, state, cancellationToken);
+    }
+
+    private void RaiseIndividualAlert(string underlying, string kind, string direction, DateTimeOffset barTime, CancellationToken cancellationToken)
+    {
+        var spotPrice = _spotFeed.States.TryGetValue(underlying, out var spotState) ? spotState.LastPrice : 0;
+        var atmStrike = _cdv.States.TryGetValue(underlying, out var cdvState) ? cdvState.AtmStrike : null;
+        var legLabel = kind switch { "Spot" => "Spot", "AtmCe" => "ATM CE", "AtmPe" => "ATM PE", _ => kind };
+
+        var message = $"<b>{underlying}</b> {legLabel} EMA 9/21 turned {direction}\nSpot: {spotPrice:N2} · ATM {atmStrike}\nBar: {barTime:yyyy-MM-dd HH:mm} UTC";
+        var alert = new ConfluenceAlert(underlying, DateTimeOffset.UtcNow, kind, direction, spotPrice, atmStrike, message);
+        _logger.LogInformation("{Kind} bias change for {Underlying}: {Direction} at spot {Spot}.", kind, underlying, direction, spotPrice);
+
+        RecordAndBroadcast(alert, sendTelegram: false, cancellationToken);
+    }
+
+    private void EvaluateConfluence(string underlying, UnderlyingConfluenceState state, CancellationToken cancellationToken)
     {
         string direction;
         DateTimeOffset spotBarTime;
 
         lock (state)
         {
-            if (state.Spot is not { } spot || state.Ce is not { } ce || state.Pe is not { } pe) return;
-            if ((spot.BarTime - ce.BarTime).Duration() > ConfluenceWindow) return;
-            if ((spot.BarTime - pe.BarTime).Duration() > ConfluenceWindow) return;
+            if (state.Spot is not { } spot || state.Ce is not { } ce || state.Pe is not { } pe)
+            {
+                state.ConfluenceAlerted = false;
+                return;
+            }
 
-            var isBullish = spot.Direction == "Bullish" && ce.Direction == "Bullish" && pe.Direction == "Bearish";
-            var isBearish = spot.Direction == "Bearish" && pe.Direction == "Bullish" && ce.Direction == "Bearish";
-            if (!isBullish && !isBearish) return;
+            var withinWindow = (spot.BarTime - ce.BarTime).Duration() <= ConfluenceWindow && (spot.BarTime - pe.BarTime).Duration() <= ConfluenceWindow;
+            var isBullish = withinWindow && spot.Direction == "Bullish" && ce.Direction == "Bullish" && pe.Direction == "Bearish";
+            var isBearish = withinWindow && spot.Direction == "Bearish" && pe.Direction == "Bullish" && ce.Direction == "Bearish";
 
-            // One alert per spot crossover, not one per contributing update - CE/PE settling into
-            // place after spot already re-confirms the same combination and must not re-fire it.
-            if (state.LastAlertedSpotBarTime == spot.BarTime) return;
-            state.LastAlertedSpotBarTime = spot.BarTime;
+            if (!isBullish && !isBearish)
+            {
+                state.ConfluenceAlerted = false;
+                return;
+            }
+            // Already alerted for this exact alignment - stays quiet until it breaks (a leg flips,
+            // handled by UpdateLeg resetting this flag) and a fresh one forms.
+            if (state.ConfluenceAlerted) return;
 
+            state.ConfluenceAlerted = true;
             direction = isBullish ? "Bullish" : "Bearish";
             spotBarTime = spot.BarTime;
         }
@@ -139,16 +211,21 @@ public sealed class ConfluenceAlertService : BackgroundService
             : "Spot breakdown + ATM PE breakup + ATM CE breakdown";
         var message = $"<b>{underlying}</b> {direction.ToUpperInvariant()} confluence\n{summary}\nSpot: {spotPrice:N2} · ATM {atmStrike}\nBar: {spotBarTime:yyyy-MM-dd HH:mm} UTC";
 
-        var alert = new ConfluenceAlert(underlying, DateTimeOffset.UtcNow, direction, spotPrice, atmStrike, message);
+        var alert = new ConfluenceAlert(underlying, DateTimeOffset.UtcNow, "Confluence", direction, spotPrice, atmStrike, message);
         _logger.LogInformation("Confluence alert for {Underlying}: {Direction} at spot {Spot}, ATM {Atm}.", underlying, direction, spotPrice, atmStrike);
 
+        RecordAndBroadcast(alert, sendTelegram: true, cancellationToken);
+    }
+
+    private void RecordAndBroadcast(ConfluenceAlert alert, bool sendTelegram, CancellationToken cancellationToken)
+    {
         lock (_historyLock)
         {
             _history.AddFirst(alert);
             while (_history.Count > MaxHistory) _history.RemoveLast();
         }
 
-        _ = _telegram.SendAsync(message, cancellationToken);
+        if (sendTelegram) _ = _telegram.SendAsync(alert.Message, cancellationToken);
         _ = BroadcastAsync(alert);
     }
 
@@ -177,14 +254,18 @@ public sealed class ConfluenceAlertService : BackgroundService
         }
     }
 
-    /// <summary>One underlying's most recent spot/ATM-CE/ATM-PE crossover, each just a direction +
-    /// the bar it closed on - locked on itself (not a shared lock) since spot and option bar
-    /// closes for different underlyings never contend with each other.</summary>
+    /// <summary>One underlying's current spot/ATM-CE/ATM-PE bias, each a direction + the bar it was
+    /// last confirmed on - locked on itself (not a shared lock) since spot and option bar closes
+    /// for different underlyings never contend with each other.</summary>
     private sealed class UnderlyingConfluenceState
     {
         public (string Direction, DateTimeOffset BarTime)? Spot;
         public (string Direction, DateTimeOffset BarTime)? Ce;
         public (string Direction, DateTimeOffset BarTime)? Pe;
-        public DateTimeOffset? LastAlertedSpotBarTime;
+        public DateTimeOffset LastUpdatedUtc;
+        /// <summary>True once the Confluence alert has fired for the CURRENT three-way alignment -
+        /// reset the moment any leg flips (see UpdateLeg), so the next genuine alignment can alert
+        /// again instead of this staying stuck true forever.</summary>
+        public bool ConfluenceAlerted;
     }
 }
