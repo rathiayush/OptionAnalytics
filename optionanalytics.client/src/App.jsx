@@ -450,51 +450,68 @@ export default function App() {
       .finally(() => setLoading(false))
   }, [])
 
+  // Fetches ATM CE/PE candles + OBV - shared by the main [selected] load, the ATM-rollover effect
+  // below, and the manual Refresh button, all of which need the exact same "wholesale replace"
+  // fetch. Returns a settled-promise so callers that care when it's done (the Refresh button) can
+  // await it; callers that don't (the effects) just fire it.
   const fetchAtmAndObv = (underlying, cancelledRef) => {
-    fetch(`/api/cdv/${underlying}/atm-ce/candles`)
+    const ce = fetch(`/api/cdv/${underlying}/atm-ce/candles`)
       .then((r) => r.json())
       .then((data) => { if (!cancelledRef.cancelled) setAtmCeCandles(data) })
       .catch((err) => console.error('Failed to load ATM CE candles:', err))
 
-    fetch(`/api/cdv/${underlying}/atm-pe/candles`)
+    const pe = fetch(`/api/cdv/${underlying}/atm-pe/candles`)
       .then((r) => r.json())
       .then((data) => { if (!cancelledRef.cancelled) setAtmPeCandles(data) })
       .catch((err) => console.error('Failed to load ATM PE candles:', err))
 
-    fetch(`/api/cdv/${underlying}/obv-series`)
+    const obv = fetch(`/api/cdv/${underlying}/obv-series`)
       .then((r) => r.json())
       .then((data) => { if (!cancelledRef.cancelled) { setObvCe(data.ce ?? []); setObvPe(data.pe ?? []) } })
       .catch((err) => console.error('Failed to load OBV series:', err))
+
+    return Promise.allSettled([ce, pe, obv])
+  }
+
+  // Everything the page shows for one underlying, fetched fresh - the initial [selected] load and
+  // the manual Refresh button both just call this with a no-op-on-unmount cancelledRef.
+  const fetchAllData = (underlying, cancelledRef) => {
+    const candlesP = fetch(`/api/spot/${underlying}/candles`)
+      .then((r) => r.json())
+      .then((data) => { if (!cancelledRef.cancelled) setCandles(data) })
+      .catch((err) => console.error('Failed to load candles:', err))
+
+    const snapshotP = fetch(`/api/spot/${underlying}/snapshot`)
+      .then((r) => r.json())
+      .then((data) => { if (!cancelledRef.cancelled) setSnapshot(data) })
+      .catch((err) => console.error('Failed to load snapshot:', err))
+
+    const cdvSeriesP = fetch(`/api/cdv/${underlying}/series`)
+      .then((r) => r.json())
+      .then((data) => { if (!cancelledRef.cancelled) setCdvSeries(data) })
+      .catch((err) => console.error('Failed to load CDV series:', err))
+
+    const cdvSnapshotP = fetch(`/api/cdv/${underlying}/snapshot`)
+      .then((r) => r.json())
+      .then((data) => { if (!cancelledRef.cancelled) setCdvSnapshot(data) })
+      .catch((err) => console.error('Failed to load CDV snapshot:', err))
+
+    return Promise.allSettled([candlesP, snapshotP, cdvSeriesP, cdvSnapshotP, fetchAtmAndObv(underlying, cancelledRef)])
   }
 
   useEffect(() => {
     if (!selected) return
     const cancelledRef = { cancelled: false }
-
-    fetch(`/api/spot/${selected}/candles`)
-      .then((r) => r.json())
-      .then((data) => { if (!cancelledRef.cancelled) setCandles(data) })
-      .catch((err) => console.error('Failed to load candles:', err))
-
-    fetch(`/api/spot/${selected}/snapshot`)
-      .then((r) => r.json())
-      .then((data) => { if (!cancelledRef.cancelled) setSnapshot(data) })
-      .catch((err) => console.error('Failed to load snapshot:', err))
-
-    fetch(`/api/cdv/${selected}/series`)
-      .then((r) => r.json())
-      .then((data) => { if (!cancelledRef.cancelled) setCdvSeries(data) })
-      .catch((err) => console.error('Failed to load CDV series:', err))
-
-    fetch(`/api/cdv/${selected}/snapshot`)
-      .then((r) => r.json())
-      .then((data) => { if (!cancelledRef.cancelled) setCdvSnapshot(data) })
-      .catch((err) => console.error('Failed to load CDV snapshot:', err))
-
-    fetchAtmAndObv(selected, cancelledRef)
-
+    fetchAllData(selected, cancelledRef)
     return () => { cancelledRef.cancelled = true }
   }, [selected])
+
+  const [refreshing, setRefreshing] = useState(false)
+  const handleRefresh = () => {
+    if (!selected || refreshing) return
+    setRefreshing(true)
+    fetchAllData(selected, { cancelled: false }).finally(() => setRefreshing(false))
+  }
 
   useHub(
     (incoming) => { if (incoming.underlying === selected) setSnapshot(incoming) },
@@ -574,6 +591,7 @@ export default function App() {
             style={{ width: 120 }}
             options={TIMEFRAME_OPTIONS}
           />
+          <Button onClick={handleRefresh} loading={refreshing} disabled={!selected}>Refresh</Button>
         </Space>
 
         <ChartCard
