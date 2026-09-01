@@ -600,6 +600,29 @@ public sealed class CdvUnderlyingState
         }
     }
 
+    /// <summary>The same history INCLUDING the still-forming bar - what a chart wants (the ATM
+    /// charts get this via GetAtmCandles), as opposed to the closed-only view the indicators want.
+    /// Null, not empty, when this strike isn't tracked at all, so the caller can tell "tracked but
+    /// nothing yet today" apart from "not tracked, go and fetch it from Dhan".</summary>
+    public IReadOnlyList<Candle>? GetStrikeCandles(decimal strike, bool isCall)
+    {
+        lock (_lock)
+        {
+            var runtime = _strikes.Values.FirstOrDefault(s => s.IsCall == isCall && s.Strike == strike);
+            return runtime?.GetCandles();
+        }
+    }
+
+    /// <summary>Every strike this underlying is tracking on one side, ascending - the set whose
+    /// charts are already in memory and updating live.</summary>
+    public IReadOnlyList<decimal> GetTrackedStrikePrices(bool isCall)
+    {
+        lock (_lock)
+        {
+            return _strikes.Values.Where(s => s.IsCall == isCall).Select(s => s.Strike).Distinct().OrderBy(s => s).ToList();
+        }
+    }
+
     /// <summary>
     /// Delta-weighted On-Balance Volume for one side, summed across every tracked strike - a direct
     /// port of the Pine "OBV Auto with Delta Weighting" indicator, in the same three stages it uses:

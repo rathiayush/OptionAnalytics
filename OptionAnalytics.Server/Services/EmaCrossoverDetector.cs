@@ -72,6 +72,27 @@ public static class EmaCrossoverDetector
         return result;
     }
 
+    /// <summary>One EMA's value at every bar, null until the period's seed window has filled -
+    /// what a strategy reasoning about where price sits RELATIVE to a single moving average needs
+    /// (FiveEmaStrategy's "is this candle entirely clear of the 5 EMA?"), as opposed to the
+    /// fast-vs-slow comparison the rest of this class is about.</summary>
+    public static IReadOnlyList<decimal?> EmaSeries(IReadOnlyList<Candle> bars, int period)
+    {
+        if (period < 1 || bars.Count == 0) return bars.Select(_ => (decimal?)null).ToList();
+
+        var quotes = bars.Select(c => new Quote
+        {
+            Date = c.Time.UtcDateTime,
+            Open = c.Open,
+            High = c.High,
+            Low = c.Low,
+            Close = c.Close,
+            Volume = 0,
+        }).ToList();
+
+        return quotes.GetEma(period).Select(e => (decimal?)e.Ema).ToList();
+    }
+
     private static (decimal? Prev, decimal? Curr) EmaDiffs(IReadOnlyList<Candle> closedBars)
     {
         // Need at least one prior bar beyond the slow EMA's own seed window, so there is a

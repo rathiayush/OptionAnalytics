@@ -569,6 +569,69 @@ class ChartErrorBoundary extends Component {
   }
 }
 
+// The picker's "follow the ATM" choice. A sentinel rather than null so it survives antd's Select
+// round-trip cleanly and reads as a deliberate choice everywhere it is compared against.
+const ATM_STRIKE = 'atm'
+
+// Chooses which strike the two option charts show. Defaults to following the ATM, which is what
+// this page has always done; picking a strike pins both charts to it.
+//
+// Strikes the app tracks live (the CDV ATM+-8 window) are labelled as such: those charts update as
+// ticks arrive, while any other strike is served from Dhan's intraday history and only advances
+// when the page refetches it - a minute-by-minute beat rather than tick-by-tick. Premium and open
+// interest come from Dhan's Option Chain API and are simply absent when that call isn't available,
+// which is why they are only ever suffixes on a label that stands on its own without them.
+function StrikePicker({ chain, value, onChange, live }) {
+  const strikes = chain?.strikes ?? []
+
+  const describe = (row) => {
+    const parts = []
+    if (row.ceLastPrice != null) parts.push(`CE ${fmtPrice(row.ceLastPrice)}`)
+    if (row.peLastPrice != null) parts.push(`PE ${fmtPrice(row.peLastPrice)}`)
+    return parts.join(' · ')
+  }
+
+  const options = [
+    { value: ATM_STRIKE, label: 'ATM (follows spot)' },
+    ...strikes.map((row) => ({
+      value: row.strike,
+      label: (
+        <Space size={8}>
+          <span>{row.strike}</span>
+          {row.isAtm && <Tag color={UP_COLOR} style={{ marginInlineEnd: 0 }}>ATM</Tag>}
+          {describe(row) && <Text type="secondary" style={{ fontSize: 12 }}>{describe(row)}</Text>}
+        </Space>
+      ),
+    })),
+  ]
+
+  return (
+    <Card size="small">
+      <Space size={16} wrap align="center">
+        <Text type="secondary" style={{ fontSize: 12 }}>Option charts</Text>
+        <Select
+          value={value}
+          onChange={onChange}
+          style={{ width: 280 }}
+          options={options}
+          disabled={strikes.length === 0}
+          optionLabelProp="label"
+          showSearch
+          filterOption={(input, option) => String(option.value).includes(input)}
+        />
+        {live
+          ? <Tag color={UP_COLOR}>Live - updates on every tick</Tag>
+          : <Tag>History - refreshes each minute</Tag>}
+        {chain && !chain.quotesAvailable && (
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            Premiums unavailable - Dhan&apos;s option chain quote is rate-limited to one call every 3 seconds and returns nothing outside market hours.
+          </Text>
+        )}
+      </Space>
+    </Card>
+  )
+}
+
 function ChartCard({ title, extra, children, empty }) {
   return (
     <Card size="small" title={title} extra={extra}>
@@ -836,6 +899,12 @@ function DashboardPage() {
   const [atmCeCandles, setAtmCeCandles] = useState([])
   const [atmPeCandles, setAtmPeCandles] = useState([])
 
+  // Which strike the two option charts show. ATM_STRIKE means "whichever is ATM right now", which
+  // is what this page did before the picker existed and stays the default - the charts then follow
+  // the ATM as it rolls. Any other value pins them to that strike.
+  const [strikeChain, setStrikeChain] = useState(null)
+  const [selectedStrike, setSelectedStrike] = useState(ATM_STRIKE)
+
   const [obvCe, setObvCe] = useState([])
   const [obvPe, setObvPe] = useState([])
 
@@ -852,20 +921,28 @@ function DashboardPage() {
       .finally(() => setLoading(false))
   }, [])
 
-  // Fetches ATM CE/PE candles + OBV - shared by the main [selected] load, the ATM-rollover effect
-  // below, and the manual Refresh button, all of which need the exact same "wholesale replace"
-  // fetch. Returns a settled-promise so callers that care when it's done (the Refresh button) can
-  // await it; callers that don't (the effects) just fire it.
-  const fetchAtmAndObv = (underlying, cancelledRef) => {
-    const ce = fetch(`/api/cdv/${underlying}/atm-ce/candles`)
-      .then((r) => r.json())
-      .then((data) => { if (!cancelledRef.cancelled) setAtmCeCandles(data) })
-      .catch((err) => console.error('Failed to load ATM CE candles:', err))
+  // Fetches the two option charts' candles + OBV - shared by the main [selected] load, the
+  // ATM-rollover effect below, the strike picker, and the manual Refresh button, all of which need
+  // the exact same "wholesale replace" fetch. Returns a settled-promise so callers that care when
+  // it's done (the Refresh button) can await it; callers that don't (the effects) just fire it.
+  //
+  // On ATM_STRIKE this hits the atm-ce/atm-pe endpoints, which resolve the ATM contract server-side;
+  // a pinned strike goes to the per-strike endpoint instead, which also covers strikes this app
+  // never subscribed to (it fetches their history from Dhan on demand).
+  const fetchAtmAndObv = (underlying, cancelledRef, strike = selectedStrike) => {
+    const url = (type) => (strike === ATM_STRIKE
+      ? `/api/cdv/${underlying}/atm-${type.toLowerCase()}/candles`
+      : `/api/cdv/${underlying}/option/candles?strike=${strike}&type=${type}`)
 
-    const pe = fetch(`/api/cdv/${underlying}/atm-pe/candles`)
+    const ce = fetch(url('CE'))
       .then((r) => r.json())
-      .then((data) => { if (!cancelledRef.cancelled) setAtmPeCandles(data) })
-      .catch((err) => console.error('Failed to load ATM PE candles:', err))
+      .then((data) => { if (!cancelledRef.cancelled) setAtmCeCandles(data ?? []) })
+      .catch((err) => console.error('Failed to load CE candles:', err))
+
+    const pe = fetch(url('PE'))
+      .then((r) => r.json())
+      .then((data) => { if (!cancelledRef.cancelled) setAtmPeCandles(data ?? []) })
+      .catch((err) => console.error('Failed to load PE candles:', err))
 
     const obv = fetch(`/api/cdv/${underlying}/obv-series`)
       .then((r) => r.json())
@@ -877,7 +954,7 @@ function DashboardPage() {
 
   // Everything the page shows for one underlying, fetched fresh - the initial [selected] load and
   // the manual Refresh button both just call this with a no-op-on-unmount cancelledRef.
-  const fetchAllData = (underlying, cancelledRef) => {
+  const fetchAllData = (underlying, cancelledRef, strike = selectedStrike) => {
     const candlesP = fetch(`/api/spot/${underlying}/candles`)
       .then((r) => r.json())
       .then((data) => { if (!cancelledRef.cancelled) setCandles(data) })
@@ -909,9 +986,40 @@ function DashboardPage() {
   useEffect(() => {
     if (!selected) return
     const cancelledRef = { cancelled: false }
-    fetchAllData(selected, cancelledRef)
+    // Explicitly ATM rather than whatever strike is pinned: the reset effect below is about to drop
+    // back to ATM anyway, and a pinned NIFTY strike requested against BANKNIFTY is a wasted call.
+    previousStrikeRef.current = ATM_STRIKE
+    fetchAllData(selected, cancelledRef, ATM_STRIKE)
     return () => { cancelledRef.cancelled = true }
   }, [selected])
+
+  // The strike picker's own list. Refreshed when the ATM rolls too, since it is centred on ATM and
+  // carries live premium/OI that goes stale.
+  useEffect(() => {
+    if (!selected) return
+    const cancelledRef = { cancelled: false }
+    fetch(`/api/cdv/${selected}/chain`)
+      .then((r) => r.json())
+      .then((data) => { if (!cancelledRef.cancelled) setStrikeChain(data) })
+      .catch((err) => console.error('Failed to load the option chain:', err))
+    return () => { cancelledRef.cancelled = true }
+  }, [selected, cdvSnapshot?.atmStrike])
+
+  // A strike number means nothing across underlyings (a NIFTY strike is not a BANKNIFTY one), so
+  // switching underlying always drops back to following the ATM.
+  useEffect(() => { setSelectedStrike(ATM_STRIKE) }, [selected])
+
+  // Re-fetch when the pinned strike changes. ATM_STRIKE is left to the ATM-rollover effect below,
+  // which already refetches on exactly the event that changes what "ATM" means.
+  const previousStrikeRef = useRef(ATM_STRIKE)
+  useEffect(() => {
+    if (!selected) return
+    if (previousStrikeRef.current === selectedStrike) return
+    previousStrikeRef.current = selectedStrike
+    const cancelledRef = { cancelled: false }
+    fetchAtmAndObv(selected, cancelledRef, selectedStrike)
+    return () => { cancelledRef.cancelled = true }
+  }, [selected, selectedStrike])
 
   const [refreshing, setRefreshing] = useState(false)
   const handleRefresh = () => {
@@ -942,6 +1050,10 @@ function DashboardPage() {
   // ATM CE/PE bars only change value on every tick (the premium moves), but OBV is a per-bar
   // indicator - only worth recomputing when a bar actually closes. Refetch the (small) OBV series
   // whenever either side's current-bar time moves to a new minute, not on every tick.
+  //
+  // A PINNED strike has no live current bar of its own coming down the SignalR snapshot (only the
+  // ATM contracts do), so this same once-a-minute beat is what keeps its chart moving - it refetches
+  // the strike's candles too rather than just the OBV series.
   useEffect(() => {
     if (!selected || !cdvSnapshot) return
     const ceTime = cdvSnapshot.atmCeCurrentBar?.time ?? null
@@ -950,11 +1062,16 @@ function DashboardPage() {
     if (ceTime === prev.ce && peTime === prev.pe) return
     lastObvBarTimeRef.current = { ce: ceTime, pe: peTime }
 
+    if (selectedStrike !== ATM_STRIKE) {
+      fetchAtmAndObv(selected, { cancelled: false }, selectedStrike)
+      return
+    }
+
     fetch(`/api/cdv/${selected}/obv-series`)
       .then((r) => r.json())
       .then((data) => { setObvCe(data.ce ?? []); setObvPe(data.pe ?? []) })
       .catch((err) => console.error('Failed to refresh OBV series:', err))
-  }, [selected, cdvSnapshot?.atmCeCurrentBar?.time, cdvSnapshot?.atmPeCurrentBar?.time])
+  }, [selected, selectedStrike, cdvSnapshot?.atmCeCurrentBar?.time, cdvSnapshot?.atmPeCurrentBar?.time])
 
   // ATM strike rolling (every 30 minutes, or whenever spot crosses a strike-step boundary) means
   // the ATM CE/PE contracts themselves changed identity - the previously-fetched candle history
@@ -970,9 +1087,15 @@ function DashboardPage() {
   const step = snapshot?.step
   const rounded = snapshot?.roundedPrice ?? null
 
+  // The live current bar in the CDV snapshot belongs to the ATM contract specifically, so it may
+  // only be spliced onto these charts while they ARE the ATM contract - splicing it onto a pinned
+  // strike would graft one contract's forming bar onto another contract's series.
+  const chartedStrike = selectedStrike === ATM_STRIKE ? (cdvSnapshot?.atmStrike ?? null) : selectedStrike
+  const showsAtmContract = chartedStrike != null && chartedStrike === cdvSnapshot?.atmStrike
+
   const spotBars = useAggregatedCandles(candles, snapshot?.currentBar, timeframe)
-  const atmCeBars = useAggregatedCandles(atmCeCandles, cdvSnapshot?.atmCeCurrentBar, timeframe)
-  const atmPeBars = useAggregatedCandles(atmPeCandles, cdvSnapshot?.atmPeCurrentBar, timeframe)
+  const atmCeBars = useAggregatedCandles(atmCeCandles, showsAtmContract ? cdvSnapshot?.atmCeCurrentBar : null, timeframe)
+  const atmPeBars = useAggregatedCandles(atmPeCandles, showsAtmContract ? cdvSnapshot?.atmPeCurrentBar : null, timeframe)
 
   const spotCrossState = useCrossoverState(spotBars)
   const atmCeCrossState = useCrossoverState(atmCeBars)
@@ -1047,15 +1170,17 @@ function DashboardPage() {
           )}
         </ChartCard>
 
+        <StrikePicker chain={strikeChain} value={selectedStrike} onChange={setSelectedStrike} live={showsAtmContract} />
+
         <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
           <div style={{ flex: '1 1 400px', minWidth: 0 }}>
             <ChartCard
-              title={`ATM CE ${cdvSnapshot?.atmStrike ?? ''}`}
+              title={`${showsAtmContract ? 'ATM ' : ''}CE ${chartedStrike ?? ''}`}
               extra={<EmaLegend state={atmCeCrossState} />}
-              empty="Waiting for the ATM CE contract to resolve and tick."
+              empty="Waiting for the CE contract to resolve and tick."
             >
               {atmCeBars.length > 0 && (
-                <ChartErrorBoundary key={`${selected}-${timeframe}-${cdvSnapshot?.atmStrike}`} height={320}>
+                <ChartErrorBoundary key={`${selected}-${timeframe}-${chartedStrike}`} height={320}>
                   <PriceChart bars={atmCeBars} height={320} />
                 </ChartErrorBoundary>
               )}
@@ -1063,12 +1188,12 @@ function DashboardPage() {
           </div>
           <div style={{ flex: '1 1 400px', minWidth: 0 }}>
             <ChartCard
-              title={`ATM PE ${cdvSnapshot?.atmStrike ?? ''}`}
+              title={`${showsAtmContract ? 'ATM ' : ''}PE ${chartedStrike ?? ''}`}
               extra={<EmaLegend state={atmPeCrossState} />}
-              empty="Waiting for the ATM PE contract to resolve and tick."
+              empty="Waiting for the PE contract to resolve and tick."
             >
               {atmPeBars.length > 0 && (
-                <ChartErrorBoundary key={`${selected}-${timeframe}-${cdvSnapshot?.atmStrike}`} height={320}>
+                <ChartErrorBoundary key={`${selected}-${timeframe}-${chartedStrike}`} height={320}>
                   <PriceChart bars={atmPeBars} height={320} />
                 </ChartErrorBoundary>
               )}

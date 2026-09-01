@@ -52,11 +52,20 @@ public static class OptionTradeSimulator
         new("tpPoints", "Take profit (points)", Default: 20, Min: 0.05m, Max: 2000, Step: 0.5m);
 
     /// <summary>Runs <paramref name="entrySignals"/> (time-ascending; Direction "Bullish"/"Bearish")
-    /// through the rules above and returns the resulting trades, most recent first.</summary>
+    /// through the rules above and returns the resulting trades, most recent first.
+    ///
+    /// <paramref name="forcedExitTimes"/> (ascending, optional) is for strategies whose exit rule
+    /// lives in the UNDERLYING rather than in the option's premium - FiveEmaStrategy's "get out when
+    /// spot comes back and touches the 5 EMA" being the case it was added for. An open position
+    /// closes at the close of the first bar at or after such a time, after the stop and target have
+    /// been checked on that same bar (they are intra-bar price levels; this is an end-of-bar
+    /// decision, so it cannot pre-empt them). Strategies without one pass nothing and behave exactly
+    /// as before.</summary>
     public static IReadOnlyList<BacktestTrade> Run(
         BacktestStrategyContext context,
         IReadOnlyList<(DateTimeOffset Time, string Direction)> entrySignals,
-        IReadOnlyDictionary<string, decimal> parameters)
+        IReadOnlyDictionary<string, decimal> parameters,
+        IReadOnlyList<DateTimeOffset>? forcedExitTimes = null)
     {
         if (entrySignals.Count == 0) return Array.Empty<BacktestTrade>();
 
@@ -113,6 +122,7 @@ public static class OptionTradeSimulator
             var exitTime = entryBar.Time;
             var exitPrice = entryBar.Close;
             var exitReason = "EndOfDay";
+            var forcedExit = FirstAtOrAfter(forcedExitTimes, entryBar.Time);
 
             for (var i = entryIndex; i < optionBars.Count && BacktestUtil.IstDate(optionBars[i].Time) == entryDay; i++)
             {
@@ -125,6 +135,11 @@ public static class OptionTradeSimulator
 
                 var targetHit = isSell ? bar.Low <= takeProfitPrice : bar.High >= takeProfitPrice;
                 if (targetHit) { exitTime = bar.Time; exitPrice = takeProfitPrice; exitReason = "TakeProfit"; break; }
+
+                if (forcedExit is { } fx && bar.Time >= fx)
+                {
+                    exitTime = bar.Time; exitPrice = bar.Close; exitReason = "SignalExit"; break;
+                }
 
                 exitTime = bar.Time;
                 exitPrice = bar.Close;
@@ -140,6 +155,16 @@ public static class OptionTradeSimulator
         }
 
         return trades.OrderByDescending(t => t.SignalTimeUtc).ToList();
+    }
+
+    /// <summary>The earliest forced-exit time not before <paramref name="time"/> - null when the
+    /// strategy supplied none, or when none of them fall after this entry.</summary>
+    private static DateTimeOffset? FirstAtOrAfter(IReadOnlyList<DateTimeOffset>? times, DateTimeOffset time)
+    {
+        if (times is null) return null;
+        foreach (var candidate in times)
+            if (candidate >= time) return candidate;
+        return null;
     }
 
     private static int FindFirstAfter(IReadOnlyList<Candle> bars, DateTimeOffset time)

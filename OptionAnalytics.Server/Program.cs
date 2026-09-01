@@ -23,6 +23,9 @@ builder.Services.AddHttpClient<DhanTotpAuthService>();
 builder.Services.AddSingleton<DhanHistoricalDataService>();
 builder.Services.AddSingleton<DhanMarketFeedClient>();
 builder.Services.AddHttpClient<DhanOptionChainMaster>();
+// Goes through DhanApiClient like every other REST call, so it needs no HttpClient of its own -
+// it only decorates the dashboard's strike picker with live premium/OI (see DhanOptionChainQuotes).
+builder.Services.AddSingleton<DhanOptionChainQuotes>();
 
 // No-op when Dhan:Pin/Dhan:TotpSecret aren't set (see DhanTotpAutoRenewalHostedService) - safe to
 // always register rather than branching on config here.
@@ -58,6 +61,7 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<ConfluenceAlertSer
 // interface and adding one more AddSingleton line here, nothing else needs to change.
 builder.Services.AddSingleton<IBacktestStrategy, OtmConfluenceStrategy>();
 builder.Services.AddSingleton<IBacktestStrategy, EmaSurgeStrategy>();
+builder.Services.AddSingleton<IBacktestStrategy, FiveEmaStrategy>();
 
 // Stateless - reads SpotFeedHostedService/CdvHostedService's in-memory history fresh on every
 // request, nothing to run in the background. See BacktestController/BacktestService.
