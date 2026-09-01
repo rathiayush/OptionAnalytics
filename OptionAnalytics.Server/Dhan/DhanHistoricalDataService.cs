@@ -85,7 +85,14 @@ public sealed class DhanHistoricalDataService
         {
             try
             {
-                var epochSeconds = timestamps[i].GetInt64();
+                // Dhan sends timestamp as a JSON number, but not reliably as an integer literal -
+                // it comes back as e.g. 1786938360.0 (a float-formatted whole number), which
+                // JsonElement.GetInt64() rejects outright (it throws on any literal with a decimal
+                // point, even a trailing ".0"). Going through GetDouble() first tolerates both
+                // shapes; every one of the 4340-odd candles in a typical backfill was silently
+                // dropped by the old GetInt64() call, since the per-candle catch below swallowed
+                // that FormatException for each and every index.
+                var epochSeconds = (long)timestamps[i].GetDouble();
                 candles.Add(new Candle(
                     Time: DateTimeOffset.FromUnixTimeSeconds(epochSeconds),
                     Open: i < open.Count ? open[i] : 0m,
