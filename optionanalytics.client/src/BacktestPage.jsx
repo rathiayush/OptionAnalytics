@@ -21,14 +21,14 @@ function fmtOption(row) {
 function renderPnl(v) {
   if (v == null) return <Text type="secondary">—</Text>
   const color = v > 0 ? UP_COLOR : v < 0 ? DOWN_COLOR : undefined
-  return <Text strong style={{ color }}>{v > 0 ? '+' : ''}{v.toFixed(2)}%</Text>
+  return <Text strong style={{ color }}>{v > 0 ? '+' : ''}{v.toFixed(2)} pts</Text>
 }
 
 // Re-runs ConfluenceAlertService's exact leg-flip + confluence logic offline over whatever
 // spot/ATM CE/PE candle history the backend currently holds in memory (see BacktestService) - lets
 // you check what the live alert engine would have fired without waiting for it to happen live, and
-// simulate a simple OTM CE/PE trade (configurable strike offset + SL/TP%) off each Confluence
-// signal to see how that strategy would have played out.
+// simulate a simple OTM CE/PE trade (configurable strike offset + SL/TP in premium points) off
+// each Confluence signal to see how that strategy would have played out.
 export default function BacktestPage() {
   const [underlyings, setUnderlyings] = useState([])
   const [selected, setSelected] = useState(null)
@@ -38,8 +38,8 @@ export default function BacktestPage() {
   const [signalsLoading, setSignalsLoading] = useState(false)
 
   const [otmSteps, setOtmSteps] = useState(1)
-  const [slPercent, setSlPercent] = useState(20)
-  const [tpPercent, setTpPercent] = useState(40)
+  const [slPoints, setSlPoints] = useState(10)
+  const [tpPoints, setTpPoints] = useState(20)
   const [trades, setTrades] = useState(null)
   const [tradesLoading, setTradesLoading] = useState(false)
 
@@ -66,7 +66,7 @@ export default function BacktestPage() {
   const runTrades = () => {
     if (!selected) return
     setTradesLoading(true)
-    fetch(`/api/backtest/${selected}/trades?timeframe=${timeframe}&otmSteps=${otmSteps}&slPercent=${slPercent}&tpPercent=${tpPercent}`)
+    fetch(`/api/backtest/${selected}/trades?timeframe=${timeframe}&otmSteps=${otmSteps}&slPoints=${slPoints}&tpPoints=${tpPoints}`)
       .then((r) => r.json())
       .then((data) => setTrades(data ?? []))
       .catch((err) => console.error('Failed to load backtest trades:', err))
@@ -74,8 +74,8 @@ export default function BacktestPage() {
   }
 
   // Signals (and a first trade run) refresh automatically on underlying/timeframe - those are
-  // discrete dropdown choices, not something typed. otmSteps/SL%/TP% only apply when "Run" is
-  // clicked, so adjusting them doesn't fire a request on every keystroke.
+  // discrete dropdown choices, not something typed. otmSteps/SL/TP points only apply when "Run"
+  // is clicked, so adjusting them doesn't fire a request on every keystroke.
   useEffect(() => {
     loadSignals(selected, timeframe)
     runTrades()
@@ -83,10 +83,10 @@ export default function BacktestPage() {
   }, [selected, timeframe])
 
   const summary = useMemo(() => {
-    const closed = (trades ?? []).filter((t) => t.pnlPercent != null)
+    const closed = (trades ?? []).filter((t) => t.pnlPoints != null)
     if (closed.length === 0) return null
-    const wins = closed.filter((t) => t.pnlPercent > 0).length
-    const totalPnl = closed.reduce((sum, t) => sum + t.pnlPercent, 0)
+    const wins = closed.filter((t) => t.pnlPoints > 0).length
+    const totalPnl = closed.reduce((sum, t) => sum + t.pnlPoints, 0)
     return {
       count: closed.length,
       wins,
@@ -145,7 +145,7 @@ export default function BacktestPage() {
       width: 120,
       render: (reason) => <Tag color={EXIT_REASON_COLOR[reason]}>{EXIT_REASON_LABEL[reason] ?? reason}</Tag>,
     },
-    { title: 'P&L', dataIndex: 'pnlPercent', key: 'pnlPercent', width: 100, render: renderPnl },
+    { title: 'P&L', dataIndex: 'pnlPoints', key: 'pnlPoints', width: 100, render: renderPnl },
   ]
 
   return (
@@ -206,12 +206,12 @@ export default function BacktestPage() {
                 <InputNumber min={0} max={8} value={otmSteps} onChange={(v) => setOtmSteps(v ?? 0)} style={{ width: 110 }} />
               </Space>
               <Space direction="vertical" size={2}>
-                <Text type="secondary" style={{ fontSize: 12 }}>Stop loss %</Text>
-                <InputNumber min={0.1} max={100} value={slPercent} onChange={(v) => setSlPercent(v ?? 20)} style={{ width: 110 }} />
+                <Text type="secondary" style={{ fontSize: 12 }}>Stop loss (points)</Text>
+                <InputNumber min={0.05} max={1000} step={0.5} value={slPoints} onChange={(v) => setSlPoints(v ?? 10)} style={{ width: 110 }} />
               </Space>
               <Space direction="vertical" size={2}>
-                <Text type="secondary" style={{ fontSize: 12 }}>Take profit %</Text>
-                <InputNumber min={0.1} max={500} value={tpPercent} onChange={(v) => setTpPercent(v ?? 40)} style={{ width: 110 }} />
+                <Text type="secondary" style={{ fontSize: 12 }}>Take profit (points)</Text>
+                <InputNumber min={0.05} max={2000} step={0.5} value={tpPoints} onChange={(v) => setTpPoints(v ?? 20)} style={{ width: 110 }} />
               </Space>
               <Button type="primary" icon={<PlayCircleOutlined />} onClick={runTrades} loading={tradesLoading} disabled={!selected}>
                 Run
@@ -223,8 +223,8 @@ export default function BacktestPage() {
                 <Col><Statistic title="Trades" value={summary.count} /></Col>
                 <Col><Statistic title="Wins / Losses" value={`${summary.wins} / ${summary.losses}`} /></Col>
                 <Col><Statistic title="Win rate" value={summary.winRate} precision={1} suffix="%" /></Col>
-                <Col><Statistic title="Total P&L" value={summary.totalPnl} precision={2} suffix="%" styles={{ content: { color: summary.totalPnl >= 0 ? UP_COLOR : DOWN_COLOR } }} /></Col>
-                <Col><Statistic title="Avg P&L / trade" value={summary.avgPnl} precision={2} suffix="%" styles={{ content: { color: summary.avgPnl >= 0 ? UP_COLOR : DOWN_COLOR } }} /></Col>
+                <Col><Statistic title="Total P&L" value={summary.totalPnl} precision={2} suffix="pts" styles={{ content: { color: summary.totalPnl >= 0 ? UP_COLOR : DOWN_COLOR } }} /></Col>
+                <Col><Statistic title="Avg P&L / trade" value={summary.avgPnl} precision={2} suffix="pts" styles={{ content: { color: summary.avgPnl >= 0 ? UP_COLOR : DOWN_COLOR } }} /></Col>
               </Row>
             )}
 

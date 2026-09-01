@@ -56,19 +56,19 @@ public sealed class BacktestService
     /// signal - not whatever is ATM right now, so an old signal is judged against the strike it
     /// actually pointed at - entered at that contract's own NEXT bar's open (the signal bar's own
     /// close is never tradeable in real time, so entering on it would be look-ahead bias), then
-    /// walked forward bar by bar against a percentage stop-loss/take-profit off the entry premium
-    /// until one hits or the trading day ends (index option intraday strategies don't carry
-    /// overnight - held past a day boundary they lose most of their remaining time value to theta
-    /// decay by next morning, so "still open at day close" exits at that last bar rather than
-    /// riding into the next day). At most one trade is open at a time - a signal that arrives while
-    /// an earlier trade is still open is skipped, same as a trader who can't take a second position
-    /// until the first is closed.
+    /// walked forward bar by bar against a stop-loss/take-profit given in absolute premium points
+    /// (not a percentage) until one hits or the trading day ends (index option intraday strategies
+    /// don't carry overnight - held past a day boundary they lose most of their remaining time
+    /// value to theta decay by next morning, so "still open at day close" exits at that last bar
+    /// rather than riding into the next day). At most one trade is open at a time - a signal that
+    /// arrives while an earlier trade is still open is skipped, same as a trader who can't take a
+    /// second position until the first is closed.
     ///
     /// A signal whose target strike was never tracked (fell outside the ATM+-8 window for this
     /// underlying's whole in-memory history - only possible with a large otmSteps or a very wide
     /// intraday move) produces a BacktestTrade.NoData entry instead of being silently dropped, so
     /// the page can show it was skipped and why.</summary>
-    public IReadOnlyList<BacktestTrade> SimulateTrades(string underlying, int timeframeMinutes, int otmSteps, decimal slPercent, decimal tpPercent)
+    public IReadOnlyList<BacktestTrade> SimulateTrades(string underlying, int timeframeMinutes, int otmSteps, decimal slPoints, decimal tpPoints)
     {
         if (!_spotFeed.States.TryGetValue(underlying, out var spotState) || !_cdv.States.TryGetValue(underlying, out var cdvState))
             return Array.Empty<BacktestTrade>();
@@ -120,8 +120,8 @@ public sealed class BacktestService
             }
 
             var entryPrice = entryBar.Open;
-            var takeProfitPrice = entryPrice * (1 + tpPercent / 100m);
-            var stopLossPrice = entryPrice * (1 - slPercent / 100m);
+            var takeProfitPrice = entryPrice + tpPoints;
+            var stopLossPrice = Math.Max(0, entryPrice - slPoints); // premium can't go negative
             var entryDay = IstDate(entryBar.Time);
 
             var exitTime = entryBar.Time;
@@ -142,11 +142,10 @@ public sealed class BacktestService
 
             busyUntil = exitTime;
             var pnlPoints = exitPrice - entryPrice;
-            var pnlPercent = entryPrice != 0 ? pnlPoints / entryPrice * 100m : 0;
 
             trades.Add(new BacktestTrade(
                 underlying, signal.TimeUtc, signal.Direction, optionType, strike,
-                entryBar.Time, entryPrice, exitTime, exitPrice, exitReason, pnlPercent, pnlPoints));
+                entryBar.Time, entryPrice, exitTime, exitPrice, exitReason, pnlPoints));
         }
 
         return trades.OrderByDescending(t => t.SignalTimeUtc).ToList();

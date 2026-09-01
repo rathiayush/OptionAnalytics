@@ -25,14 +25,14 @@ public sealed class BacktestController : ControllerBase
 
     /// <summary>Simulates one long-only OTM CE/PE trade per Confluence signal at that timeframe -
     /// see BacktestService.SimulateTrades for the entry/exit/SL-TP rules. otmSteps is how many
-    /// strike-steps OTM from ATM to trade (0 = ATM itself); slPercent/tpPercent are both a
-    /// percentage of the entry premium.</summary>
+    /// strike-steps OTM from ATM to trade (0 = ATM itself); slPoints/tpPoints are both absolute
+    /// premium points (not a percentage).</summary>
     [HttpGet("{underlying}/trades")]
     public IActionResult GetTrades(
         string underlying,
         [FromQuery] int timeframe = 1,
         [FromQuery] int otmSteps = 1,
-        [FromQuery] decimal slPercent = 20,
-        [FromQuery] decimal tpPercent = 40) =>
-        Ok(_backtest.SimulateTrades(underlying.ToUpperInvariant(), timeframe, Math.Max(0, otmSteps), Math.Max(0.1m, slPercent), Math.Max(0.1m, tpPercent)));
+        [FromQuery] decimal slPoints = 10,
+        [FromQuery] decimal tpPoints = 20) =>
+        Ok(_backtest.SimulateTrades(underlying.ToUpperInvariant(), timeframe, Math.Max(0, otmSteps), Math.Max(0.05m, slPoints), Math.Max(0.05m, tpPoints)));
 }
