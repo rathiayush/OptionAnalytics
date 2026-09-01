@@ -2,16 +2,13 @@ import { Component, useEffect, useMemo, useRef, useState } from 'react'
 import { Select, Space, Typography, Spin, Card, Button, Modal, Table, Tag } from 'antd'
 import { createChart, createSeriesMarkers, CandlestickSeries, LineSeries, CrosshairMode, LineStyle } from 'lightweight-charts'
 import * as signalR from '@microsoft/signalr'
-import { Routes, Route, NavLink } from 'react-router-dom'
+import { Routes, Route } from 'react-router-dom'
 import BacktestPage from './BacktestPage.jsx'
+import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, fmtPrice, DirectionTag, NavBar } from './shared.jsx'
 import './App.css'
 
 const { Title, Text } = Typography
 
-const UP_COLOR = '#26a69a'
-const DOWN_COLOR = '#ef5350'
-const CE_COLOR = '#3ddc84'
-const PE_COLOR = '#ff5c5c'
 const EMA_FAST_COLOR = '#ffb100'
 const EMA_SLOW_COLOR = '#4dabf7'
 const AXIS_COLOR = '#9aa4b2'
@@ -186,10 +183,6 @@ function useCrossoverState(bars) {
     }
     return null
   }, [bars])
-}
-
-function fmtPrice(v) {
-  return v == null ? '—' : Number(v).toLocaleString('en-IN', { maximumFractionDigits: 2 })
 }
 
 function fmtNum(v) {
@@ -504,24 +497,6 @@ function StrikesButton({ underlying }) {
 }
 
 const ALERT_DISPLAY_LIMIT = 20
-const ALERT_KIND_LABEL = { Spot: 'Spot', AtmCe: 'ATM CE', AtmPe: 'ATM PE', Confluence: 'CONFLUENCE' }
-
-function DirectionTag({ direction }) {
-  if (!direction) return <Tag>—</Tag>
-  return <Tag color={direction === 'Bullish' ? UP_COLOR : DOWN_COLOR}>{direction === 'Bullish' ? '▲ Bullish' : '▼ Bearish'}</Tag>
-}
-
-// Shared between DashboardPage and BacktestPage - just two links, styled to blend into each
-// page's own header Space rather than looking like a separate site-wide bar.
-function NavBar() {
-  const linkStyle = ({ isActive }) => ({ color: isActive ? '#fff' : '#9aa4b2', fontWeight: isActive ? 600 : 400 })
-  return (
-    <Space size={16}>
-      <NavLink to="/" style={linkStyle}>Dashboard</NavLink>
-      <NavLink to="/backtest" style={linkStyle}>Backtrack</NavLink>
-    </Space>
-  )
-}
 
 // The notification engine's live feed. Two tiers, both from the backend's ConfluenceAlertService:
 // a status board showing each underlying's CURRENT spot/ATM-CE/ATM-PE EMA9/21 bias (continuously
@@ -974,5 +949,3 @@ export default function App() {
     </Routes>
   )
 }
-
-export { UP_COLOR, DOWN_COLOR, fmtPrice, NavBar, DirectionTag, ALERT_KIND_LABEL }

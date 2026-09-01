@@ -578,6 +578,21 @@ public sealed class CdvUnderlyingState
         lock (_lock) { return FindAtmStrikeNoLock(isCall)?.GetClosedCandles() ?? Array.Empty<Candle>(); }
     }
 
+    /// <summary>Closed-bar premium history for one SPECIFIC strike (not necessarily the current
+    /// ATM one) - what BacktestService needs to simulate an OTM CE/PE trade against the strike
+    /// that was actually N steps OTM at a past signal's time, not just whatever happens to be ATM
+    /// right now. Empty if that exact strike was never tracked (fell outside the ATM+-8 window for
+    /// this underlying's whole in-memory history) - same "no data" tolerance as everywhere else in
+    /// this backfill, not an error.</summary>
+    public IReadOnlyList<Candle> GetStrikeClosedCandles(decimal strike, bool isCall)
+    {
+        lock (_lock)
+        {
+            var runtime = _strikes.Values.FirstOrDefault(s => s.IsCall == isCall && s.Strike == strike);
+            return runtime?.GetClosedCandles() ?? Array.Empty<Candle>();
+        }
+    }
+
     /// <summary>On-Balance-Volume for the current ATM contract on this side, computed by
     /// Skender.Stock.Indicators over that contract's own OHLC+volume bars (see
     /// CdvStrikeRuntime.GetVolumeBars) - a standard-library indicator, deliberately not another
