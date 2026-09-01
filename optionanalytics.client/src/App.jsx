@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Component, useEffect, useMemo, useRef, useState } from 'react'
 import { Select, Space, Typography, Spin, Card, Button, Modal, Table, Tag } from 'antd'
 import { createChart, createSeriesMarkers, CandlestickSeries, LineSeries, CrosshairMode } from 'lightweight-charts'
 import * as signalR from '@microsoft/signalr'
@@ -79,6 +79,27 @@ function aggregateLine(points, minutes) {
     buckets.set(bucketTime, { ...p, time: bucketTime })
   }
   return Array.from(buckets.values()).sort((a, b) => a.time - b.time)
+}
+
+// Last line of defense before handing data to lightweight-charts, which throws an UNCAUGHT error
+// (no recoverable state - see ChartErrorBoundary below for why that matters) if two consecutive
+// points share a time or aren't strictly ascending. The backend already dedupes its series at the
+// source (see SpotUnderlyingState.ApplyTick and friends), but this makes any future stray
+// duplicate/out-of-order point - a backend edge case not yet found, a network replay, anything - a
+// silent no-op here instead of a chart-breaking crash. Sorts ascending; for a duplicate time, keeps
+// the LAST occurrence (the more complete/recent value, same preference the backend fix uses).
+function sanitizeSeries(points) {
+  if (points.length === 0) return points
+  const sorted = [...points].sort((a, b) => a.time - b.time)
+  const result = []
+  for (const p of sorted) {
+    if (result.length > 0 && result[result.length - 1].time === p.time) {
+      result[result.length - 1] = p
+    } else {
+      result.push(p)
+    }
+  }
+  return result
 }
 
 function useAggregatedCandles(candles, liveBarRaw, timeframeMinutes) {
@@ -223,7 +244,8 @@ function PriceChart({ bars, height = 360 }) {
   // than silently reusing the old pan/zoom position for a completely different dataset.
   const hasFitRef = useRef(false)
 
-  const { ema9Points, ema21Points, markers } = useEmaCrossover(bars)
+  const sanitizedBars = useMemo(() => sanitizeSeries(bars), [bars])
+  const { ema9Points, ema21Points, markers } = useEmaCrossover(sanitizedBars)
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -270,12 +292,12 @@ function PriceChart({ bars, height = 360 }) {
 
   useEffect(() => {
     if (!seriesRef.current) return
-    seriesRef.current.setData(bars)
-    if (!hasFitRef.current && bars.length > 0) {
+    seriesRef.current.setData(sanitizedBars)
+    if (!hasFitRef.current && sanitizedBars.length > 0) {
       chartRef.current?.timeScale().fitContent()
       hasFitRef.current = true
     }
-  }, [bars])
+  }, [sanitizedBars])
 
   useEffect(() => {
     if (!ema9Ref.current || !ema21Ref.current) return
@@ -299,6 +321,8 @@ function CeVsPeChart({ ceSeries, peSeries, height = 280 }) {
   const peRef = useRef(null)
   // See PriceChart's identical hasFitRef for why this only fits once per mount, not on every live update.
   const hasFitRef = useRef(false)
+  const sanitizedCe = useMemo(() => sanitizeSeries(ceSeries), [ceSeries])
+  const sanitizedPe = useMemo(() => sanitizeSeries(peSeries), [peSeries])
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -333,15 +357,48 @@ function CeVsPeChart({ ceSeries, peSeries, height = 280 }) {
 
   useEffect(() => {
     if (!ceRef.current || !peRef.current) return
-    ceRef.current.setData(ceSeries)
-    peRef.current.setData(peSeries)
-    if (!hasFitRef.current && (ceSeries.length > 0 || peSeries.length > 0)) {
+    ceRef.current.setData(sanitizedCe)
+    peRef.current.setData(sanitizedPe)
+    if (!hasFitRef.current && (sanitizedCe.length > 0 || sanitizedPe.length > 0)) {
       chartRef.current?.timeScale().fitContent()
       hasFitRef.current = true
     }
-  }, [ceSeries, peSeries])
+  }, [sanitizedCe, sanitizedPe])
 
   return <div ref={containerRef} style={{ width: '100%', height }} />
+}
+
+// Catches a render/lifecycle error anywhere in its subtree and shows a small fallback instead of
+// letting it propagate up and unmount the WHOLE page - a bug in one chart (bad data, a
+// charting-library assertion, anything neither sanitizeSeries nor the backend caught) must never
+// take every other chart, the alerts panel, and the dropdowns down with it. Must be a class
+// component - React has no hook equivalent for getDerivedStateFromError/componentDidCatch. App.jsx
+// keys each usage on the same underlying+timeframe (+ATM strike where relevant) the chart itself
+// is keyed on, so switching either also clears a previously-caught error, not just stale data.
+class ChartErrorBoundary extends Component {
+  constructor(props) {
+    super(props)
+    this.state = { error: null }
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error }
+  }
+
+  componentDidCatch(error, info) {
+    console.error('Chart failed to render:', error, info.componentStack)
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ height: this.props.height ?? 280, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <Text type="secondary">This chart hit an error and couldn't render. The rest of the page is unaffected.</Text>
+        </div>
+      )
+    }
+    return this.props.children
+  }
 }
 
 function ChartCard({ title, extra, children, empty }) {
@@ -657,7 +714,11 @@ export default function App() {
           extra={<EmaLegend state={spotCrossState} />}
           empty="Waiting for chart data - the Dhan feed may still be connecting."
         >
-          {spotBars.length > 0 && <PriceChart key={`${selected}-${timeframe}`} bars={spotBars} height={420} />}
+          {spotBars.length > 0 && (
+            <ChartErrorBoundary key={`${selected}-${timeframe}`} height={420}>
+              <PriceChart bars={spotBars} height={420} />
+            </ChartErrorBoundary>
+          )}
         </ChartCard>
 
         <Space direction="vertical" size={2} align="center" style={{ width: '100%' }}>
@@ -673,7 +734,11 @@ export default function App() {
               extra={<EmaLegend state={atmCeCrossState} />}
               empty="Waiting for the ATM CE contract to resolve and tick."
             >
-              {atmCeBars.length > 0 && <PriceChart key={`${selected}-${timeframe}-${cdvSnapshot?.atmStrike}`} bars={atmCeBars} height={320} />}
+              {atmCeBars.length > 0 && (
+                <ChartErrorBoundary key={`${selected}-${timeframe}-${cdvSnapshot?.atmStrike}`} height={320}>
+                  <PriceChart bars={atmCeBars} height={320} />
+                </ChartErrorBoundary>
+              )}
             </ChartCard>
           </div>
           <div style={{ flex: '1 1 400px', minWidth: 0 }}>
@@ -682,7 +747,11 @@ export default function App() {
               extra={<EmaLegend state={atmPeCrossState} />}
               empty="Waiting for the ATM PE contract to resolve and tick."
             >
-              {atmPeBars.length > 0 && <PriceChart key={`${selected}-${timeframe}-${cdvSnapshot?.atmStrike}`} bars={atmPeBars} height={320} />}
+              {atmPeBars.length > 0 && (
+                <ChartErrorBoundary key={`${selected}-${timeframe}-${cdvSnapshot?.atmStrike}`} height={320}>
+                  <PriceChart bars={atmPeBars} height={320} />
+                </ChartErrorBoundary>
+              )}
             </ChartCard>
           </div>
         </div>
@@ -699,7 +768,9 @@ export default function App() {
         >
           {cdvCe.length > 0 && (
             <>
-              <CeVsPeChart key={`${selected}-${timeframe}`} ceSeries={cdvCe} peSeries={cdvPe} height={280} />
+              <ChartErrorBoundary key={`${selected}-${timeframe}`} height={280}>
+                <CeVsPeChart ceSeries={cdvCe} peSeries={cdvPe} height={280} />
+              </ChartErrorBoundary>
               <Space size={24} style={{ marginTop: 8 }}>
                 <Text style={{ color: CE_COLOR }}>CE {fmtNum(cdvSnapshot?.ceCdv)}</Text>
                 <Text style={{ color: PE_COLOR }}>PE {fmtNum(cdvSnapshot?.peCdv)}</Text>
@@ -713,7 +784,11 @@ export default function App() {
           extra={<Text type="secondary" style={{ fontSize: 12 }}>Skender.Stock.Indicators</Text>}
           empty="Waiting for enough ATM CE/PE bars to compute OBV."
         >
-          {(obvCePoints.length > 0 || obvPePoints.length > 0) && <CeVsPeChart key={`${selected}-${timeframe}-${cdvSnapshot?.atmStrike}`} ceSeries={obvCePoints} peSeries={obvPePoints} height={280} />}
+          {(obvCePoints.length > 0 || obvPePoints.length > 0) && (
+            <ChartErrorBoundary key={`${selected}-${timeframe}-${cdvSnapshot?.atmStrike}`} height={280}>
+              <CeVsPeChart ceSeries={obvCePoints} peSeries={obvPePoints} height={280} />
+            </ChartErrorBoundary>
+          )}
         </ChartCard>
       </Space>
     </div>
