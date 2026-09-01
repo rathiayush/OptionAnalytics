@@ -5,7 +5,7 @@ import * as signalR from '@microsoft/signalr'
 import { Routes, Route } from 'react-router-dom'
 import BacktestPage from './BacktestPage.jsx'
 import TriggersPage from './TriggersPage.jsx'
-import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, fmtPrice, fmtIstTime, DirectionTag, NavBar } from './shared.jsx'
+import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, fmtPrice, fmtIstTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying } from './shared.jsx'
 import './App.css'
 
 const { Title, Text } = Typography
@@ -16,12 +16,6 @@ const AXIS_COLOR = '#9aa4b2'
 const GRID_COLOR = '#ffffff14'
 const BORDER_COLOR = '#ffffff22'
 const RESET_MARKER_COLOR = '#ffd54f'
-
-const TIMEFRAME_OPTIONS = [
-  { value: 1, label: '1 min' },
-  { value: 3, label: '3 min' },
-  { value: 5, label: '5 min' },
-]
 
 // CDV and OBV are raw traded-quantity running totals, so they reach into the hundreds of millions
 // - at full precision the axis labels are an unreadable wall of digits. Both charts divide their
@@ -800,8 +794,9 @@ function LookbackTable({ underlying, cdvSnapshot, endpoint = 'lookback', title =
 
 function DashboardPage() {
   const [underlyings, setUnderlyings] = useState([])
-  const [selected, setSelected] = useState(null)
-  const [timeframe, setTimeframe] = useState(1)
+  // Shared with every other page and remembered across reloads - see usePersistedState.
+  const [selected, setSelected] = usePersistedState(STORED_UNDERLYING, null)
+  const [timeframe, setTimeframe] = usePersistedState(STORED_TIMEFRAME, 1)
   // Per-chart so either can be read at its own natural magnitude - CDV and OBV don't always sit
   // in the same range as each other.
   const [cdvUnit, setCdvUnit] = useState('M')
@@ -851,7 +846,7 @@ function DashboardPage() {
       .then((r) => r.json())
       .then((list) => {
         setUnderlyings(list)
-        if (list.length > 0) setSelected(list[0].underlying)
+        setSelected((current) => pickUnderlying(list, current))
       })
       .catch((err) => console.error('Failed to load underlyings:', err))
       .finally(() => setLoading(false))

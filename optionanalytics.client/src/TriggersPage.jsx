@@ -1,16 +1,9 @@
 import { useEffect, useState } from 'react'
 import { Select, Space, Typography, Card, Button, Table, Tag, InputNumber, Input, Switch, Popconfirm, message } from 'antd'
 import { PlusOutlined, DeleteOutlined } from '@ant-design/icons'
-import { UP_COLOR, DOWN_COLOR, NavBar, fmtIstDateTime } from './shared.jsx'
+import { UP_COLOR, DOWN_COLOR, NavBar, fmtIstDateTime, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying } from './shared.jsx'
 
 const { Title, Text } = Typography
-
-const TIMEFRAME_OPTIONS = [
-  { value: 1, label: '1 min' },
-  { value: 3, label: '3 min' },
-  { value: 5, label: '5 min' },
-  { value: 15, label: '15 min' },
-]
 
 // Arm a strategy to notify over Telegram when it fires. A trigger takes exactly the inputs a
 // Backtrack run takes - underlying, strategy, timeframe and that strategy's own parameters - and
@@ -25,9 +18,10 @@ export default function TriggersPage() {
   const [saving, setSaving] = useState(false)
 
   const [name, setName] = useState('')
-  const [underlying, setUnderlying] = useState(null)
+  // Shared with every other page and remembered across reloads - see usePersistedState.
+  const [underlying, setUnderlying] = usePersistedState(STORED_UNDERLYING, null)
+  const [timeframe, setTimeframe] = usePersistedState(STORED_TIMEFRAME, 1)
   const [strategyKey, setStrategyKey] = useState(null)
-  const [timeframe, setTimeframe] = useState(3)
   const [paramValues, setParamValues] = useState({})
 
   const strategy = strategies.find((s) => s.key === strategyKey) ?? null
@@ -46,7 +40,7 @@ export default function TriggersPage() {
       .then((r) => r.json())
       .then((list) => {
         setUnderlyings(list ?? [])
-        if (list?.length > 0) setUnderlying(list[0].underlying)
+        setUnderlying((current) => pickUnderlying(list, current))
       })
       .catch((err) => console.error('Failed to load underlyings:', err))
 

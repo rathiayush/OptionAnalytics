@@ -6,7 +6,7 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 /// A confirmation-chain strategy: each step must confirm the one before it, in order, before an
 /// entry is taken.
 ///
-///   1. SPOT leads - its EMA9/21 must actually CROSS on this bar. Not "the bias is up", but the
+///   1. SPOT leads - its fast/slow EMA (9/21 by default, both tunable) must actually CROSS. Not "the bias is up", but the
 ///      crossing itself, which is the key difference from OtmConfluenceStrategy: that one fires
 ///      whenever the three biases happen to line up, which can be because a single leg flipped
 ///      while the others had been sitting that way for hours. Here the move has to be starting.
@@ -41,7 +41,7 @@ public sealed class EmaSurgeStrategy : IBacktestStrategy
 {
     public string Key => "ema-surge";
     public string Name => "EMA Crossover + Volume Surge";
-    public string Description => "Spot EMA 9/21 must cross, the matching CE (up) or PE (down) leg must cross to confirm it, and - when their flags are on - the traded leg's OBV and/or CDV must have moved at least the threshold % across the 3/5/7-bar lookback windows (any one of them by default, or all three).";
+    public string Description => "Spot's fast/slow EMA (9/21 by default, both tunable) must cross, the matching CE (up) or PE (down) leg must cross to confirm it, and - when their flags are on - the traded leg's OBV and/or CDV must have moved at least the threshold % across the 3/5/7-bar lookback windows (any one of them by default, or all three).";
 
     private const decimal FlagOff = 0;
     private const decimal FlagOn = 1;
@@ -55,6 +55,8 @@ public sealed class EmaSurgeStrategy : IBacktestStrategy
         OptionTradeSimulator.StrikeOffsetParameter(),
         OptionTradeSimulator.StopLossParameter(),
         OptionTradeSimulator.TakeProfitParameter(),
+        new BacktestParameterSpec("emaFast", "Fast EMA (bars)", Default: 9, Min: 1, Max: 200, Step: 1),
+        new BacktestParameterSpec("emaSlow", "Slow EMA (bars)", Default: 21, Min: 2, Max: 400, Step: 1),
         new BacktestParameterSpec("confirmWithinBars", "Leg must confirm within (bars)", Default: 3, Min: 0, Max: 20, Step: 1),
         new BacktestParameterSpec("lookbackBars1", "Lookback window 1 (bars)", Default: 3, Min: 1, Max: 500, Step: 1),
         new BacktestParameterSpec("lookbackBars2", "Lookback window 2 (bars)", Default: 5, Min: 1, Max: 500, Step: 1),
@@ -99,6 +101,8 @@ public sealed class EmaSurgeStrategy : IBacktestStrategy
     private (List<(DateTimeOffset Time, string Direction)> Entries, List<BacktestSignal> Signals) Evaluate(
         BacktestStrategyContext context, IReadOnlyDictionary<string, decimal> parameters)
     {
+        var emaFast = (int)parameters["emaFast"];
+        var emaSlow = (int)parameters["emaSlow"];
         var confirmWithinBars = (int)parameters["confirmWithinBars"];
         var lookbackPercent = parameters["lookbackPercent"];
         var requireAllWindows = parameters["lookbackMode"] >= (ModeAny + ModeAll) / 2;
@@ -123,14 +127,14 @@ public sealed class EmaSurgeStrategy : IBacktestStrategy
         var entries = new List<(DateTimeOffset Time, string Direction)>();
         var signals = new List<BacktestSignal>();
 
-        var spotCrossings = CrossoverEvents(context.SpotBars);
+        var spotCrossings = CrossoverEvents(context.SpotBars, emaFast, emaSlow);
         if (spotCrossings.Count == 0) return (entries, signals);
 
         // The confirming leg is the ATM contract on the side the spot move points at, taken at the
         // ATM as it stands now - the same series the dashboard's ATM CE/PE charts plot.
         var atmStrike = CurrentAtmStrike(context);
-        var ceCrossings = CrossoverEvents(context.GetOptionBars(atmStrike, true));
-        var peCrossings = CrossoverEvents(context.GetOptionBars(atmStrike, false));
+        var ceCrossings = CrossoverEvents(context.GetOptionBars(atmStrike, true), emaFast, emaSlow);
+        var peCrossings = CrossoverEvents(context.GetOptionBars(atmStrike, false), emaFast, emaSlow);
 
         // CE-vs-PE crossings on the volume lines themselves - the Pine indicator's crossUp/
         // crossDown ("Green crossed Red"). CE crossing ABOVE PE is the bullish arrangement.
@@ -213,14 +217,15 @@ public sealed class EmaSurgeStrategy : IBacktestStrategy
         return (entries, signals.OrderByDescending(s => s.TimeUtc).ToList());
     }
 
-    /// <summary>Every bar where EMA9 actually crossed EMA21, as opposed to every bar where it
-    /// merely sits on one side of it - a direction change from the previous bar's direction.</summary>
-    private static List<(DateTimeOffset Time, string Direction)> CrossoverEvents(IReadOnlyList<Candle> bars)
+    /// <summary>Every bar where the fast EMA actually crossed the slow one, as opposed to every bar
+    /// where it merely sits on one side of it - a direction change from the previous bar's
+    /// direction.</summary>
+    private static List<(DateTimeOffset Time, string Direction)> CrossoverEvents(IReadOnlyList<Candle> bars, int fastPeriod, int slowPeriod)
     {
         var events = new List<(DateTimeOffset, string)>();
         string? previous = null;
 
-        foreach (var (time, direction) in EmaCrossoverDetector.DirectionSeries(bars))
+        foreach (var (time, direction) in EmaCrossoverDetector.DirectionSeries(bars, fastPeriod, slowPeriod))
         {
             if (direction is null) continue;
             if (previous is not null && direction != previous) events.Add((time, direction));

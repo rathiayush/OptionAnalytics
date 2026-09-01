@@ -1,16 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Select, Space, Typography, Spin, Card, Button, Table, Tag, InputNumber, Statistic, Row, Col } from 'antd'
 import { ReloadOutlined, PlayCircleOutlined } from '@ant-design/icons'
-import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, NavBar, DirectionTag, ALERT_KIND_LABEL, fmtIstDateTime, fmtIstTime, fmtPrice } from './shared.jsx'
+import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, NavBar, DirectionTag, ALERT_KIND_LABEL, fmtIstDateTime, fmtIstTime, fmtPrice, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying } from './shared.jsx'
 
 const { Title, Text } = Typography
-
-const TIMEFRAME_OPTIONS = [
-  { value: 1, label: '1 min' },
-  { value: 3, label: '3 min' },
-  { value: 5, label: '5 min' },
-  { value: 15, label: '15 min' },
-]
 
 // Buy/Sell deliberately aren't the up/down colors - a SOLD position is neither bullish nor
 // bearish on its own leg's premium, and reusing green/red here would read as "profitable".
@@ -51,8 +44,9 @@ function renderPnl(v) {
 // up here with no frontend change needed.
 export default function BacktestPage() {
   const [underlyings, setUnderlyings] = useState([])
-  const [selected, setSelected] = useState(null)
-  const [timeframe, setTimeframe] = useState(1)
+  // Shared with every other page and remembered across reloads - see usePersistedState.
+  const [selected, setSelected] = usePersistedState(STORED_UNDERLYING, null)
+  const [timeframe, setTimeframe] = usePersistedState(STORED_TIMEFRAME, 1)
 
   const [signals, setSignals] = useState(null)
   const [signalsLoading, setSignalsLoading] = useState(false)
@@ -70,7 +64,7 @@ export default function BacktestPage() {
       .then((r) => r.json())
       .then((list) => {
         setUnderlyings(list)
-        if (list.length > 0) setSelected(list[0].underlying)
+        setSelected((current) => pickUnderlying(list, current))
       })
       .catch((err) => console.error('Failed to load underlyings:', err))
 
