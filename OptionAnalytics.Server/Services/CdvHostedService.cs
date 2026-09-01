@@ -77,6 +77,17 @@ public sealed class CdvHostedService : BackgroundService
     /// <summary>Read by CdvController - keyed by underlying name.</summary>
     public IReadOnlyDictionary<string, CdvUnderlyingState> States { get; }
 
+    /// <summary>The strike/side verification list for GET /api/cdv/{underlying}/strikes - see
+    /// CdvUnderlyingState.GetTrackedStrikes. _subscribedTokens (this service's own bookkeeping, not
+    /// the state's) is what tells that method which strikes are the CURRENTLY active ATM+-8 window
+    /// versus ones that rolled out earlier today.</summary>
+    public IReadOnlyList<CdvStrikeInfo> GetTrackedStrikes(string underlying)
+    {
+        if (!States.TryGetValue(underlying, out var state)) return Array.Empty<CdvStrikeInfo>();
+        var active = _subscribedTokens.TryGetValue(underlying, out var tokens) ? tokens : new HashSet<uint>();
+        return state.GetTrackedStrikes(active);
+    }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         try

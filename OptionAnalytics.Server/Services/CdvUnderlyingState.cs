@@ -165,6 +165,23 @@ public sealed class CdvUnderlyingState
         lock (_lock) { return _strikes.ContainsKey(securityId); }
     }
 
+    /// <summary>Every strike/side CDV has tracked today, for GET /api/cdv/{underlying}/strikes - a
+    /// verification view so the exact contracts summed into the displayed CE/PE total are checkable,
+    /// not just trusted. <paramref name="activeSecurityIds"/> (CdvHostedService's own subscribed-set
+    /// bookkeeping) marks which are currently inside the live ATM+-8 window versus ones that rolled
+    /// out earlier today but still contribute their RunningCdv to the total.</summary>
+    public IReadOnlyList<CdvStrikeInfo> GetTrackedStrikes(IReadOnlySet<uint> activeSecurityIds)
+    {
+        lock (_lock)
+        {
+            return _strikes.Values
+                .Select(s => new CdvStrikeInfo(s.SecurityId, s.Strike, s.IsCall, activeSecurityIds.Contains(s.SecurityId), s.RunningCdv))
+                .OrderBy(s => s.Strike)
+                .ThenByDescending(s => s.IsCall)
+                .ToList();
+        }
+    }
+
     /// <summary>Folds one option tick into its contract's running CDV using the tick rule (price
     /// up from the last trade = buy, down = sell, unchanged = carry the prior direction) weighted
     /// by a sigmoid approximation of the contract's delta given <paramref name="currentSpot"/> -

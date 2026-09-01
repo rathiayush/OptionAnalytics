@@ -50,6 +50,15 @@ public sealed class CdvController : ControllerBase
         return Ok(new ObvSeriesResponse(state.GetObvSeries(isCall: true), state.GetObvSeries(isCall: false)));
     }
 
+    /// <summary>Verification endpoint: every strike/side actually summed into the CDV total today,
+    /// active or not - see CdvHostedService.GetTrackedStrikes / CdvUnderlyingState.GetTrackedStrikes.</summary>
+    [HttpGet("{underlying}/strikes")]
+    public IActionResult GetStrikes(string underlying)
+    {
+        if (!TryGetState(underlying, out _)) return NotFoundResult(underlying);
+        return Ok(_cdv.GetTrackedStrikes(underlying.ToUpperInvariant()));
+    }
+
     private bool TryGetState(string underlying, out CdvUnderlyingState state) =>
         _cdv.States.TryGetValue(underlying.ToUpperInvariant(), out state!);
 

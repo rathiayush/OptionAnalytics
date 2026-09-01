@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Select, Space, Typography, Spin, Card } from 'antd'
+import { Select, Space, Typography, Spin, Card, Button, Modal, Table, Tag } from 'antd'
 import { createChart, createSeriesMarkers, CandlestickSeries, LineSeries, CrosshairMode } from 'lightweight-charts'
 import * as signalR from '@microsoft/signalr'
 import './App.css'
@@ -358,6 +358,67 @@ const EmaLegend = ({ state }) => (
   </Space>
 )
 
+const STRIKE_COLUMNS = [
+  { title: 'Strike', dataIndex: 'strike', key: 'strike', sorter: (a, b) => a.strike - b.strike },
+  {
+    title: 'Side', dataIndex: 'isCall', key: 'isCall', width: 70,
+    filters: [{ text: 'CE', value: true }, { text: 'PE', value: false }],
+    onFilter: (value, record) => record.isCall === value,
+    render: (isCall) => <Tag color={isCall ? CE_COLOR : PE_COLOR}>{isCall ? 'CE' : 'PE'}</Tag>,
+  },
+  {
+    title: 'Status', dataIndex: 'isActive', key: 'isActive', width: 140,
+    render: (isActive) => (isActive
+      ? <Tag color="blue">In ATM ±8 window</Tag>
+      : <Tag>Rolled out today</Tag>),
+  },
+  {
+    title: 'Running CDV contribution', dataIndex: 'runningCdv', key: 'runningCdv',
+    sorter: (a, b) => a.runningCdv - b.runningCdv,
+    render: (v) => fmtNum(v),
+  },
+]
+
+// "For verification purposes" per-strike breakdown of what the CDV chart actually sums - a plain
+// GET on demand (not wired to SignalR) since this is a one-off check, not something that needs to
+// track every tick live.
+function StrikesButton({ underlying }) {
+  const [open, setOpen] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [rows, setRows] = useState([])
+
+  const load = () => {
+    setLoading(true)
+    fetch(`/api/cdv/${underlying}/strikes`)
+      .then((r) => r.json())
+      .then((data) => setRows((data ?? []).map((s, i) => ({ ...s, key: `${s.securityId}-${i}` }))))
+      .catch((err) => console.error('Failed to load CDV strikes:', err))
+      .finally(() => setLoading(false))
+  }
+
+  return (
+    <>
+      <Button size="small" onClick={() => { setOpen(true); load() }}>Strikes</Button>
+      <Modal
+        title={`${underlying} - strikes summed into CDV`}
+        open={open}
+        onCancel={() => setOpen(false)}
+        footer={null}
+        width={640}
+      >
+        <Table
+          size="small"
+          loading={loading}
+          columns={STRIKE_COLUMNS}
+          dataSource={rows}
+          pagination={false}
+          scroll={{ y: 420 }}
+        />
+      </Modal>
+    </>
+  )
+}
+
 export default function App() {
   const [underlyings, setUnderlyings] = useState([])
   const [selected, setSelected] = useState(null)
@@ -552,7 +613,12 @@ export default function App() {
 
         <ChartCard
           title="CE / PE Cumulative Delta Volume"
-          extra={<Text type="secondary" style={{ fontSize: 12 }}>ATM {cdvSnapshot?.atmStrike ?? '—'} · Expiry {cdvSnapshot?.expiry ?? '—'}</Text>}
+          extra={
+            <Space size={12}>
+              <Text type="secondary" style={{ fontSize: 12 }}>ATM {cdvSnapshot?.atmStrike ?? '—'} · Expiry {cdvSnapshot?.expiry ?? '—'}</Text>
+              <StrikesButton underlying={selected} />
+            </Space>
+          }
           empty="Waiting for option-chain data - strikes resolve once the spot price is known."
         >
           {cdvCe.length > 0 && (
