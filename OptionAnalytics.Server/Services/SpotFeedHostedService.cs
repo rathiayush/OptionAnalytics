@@ -22,13 +22,10 @@ public sealed class SpotFeedHostedService : BackgroundService
         ("BANKNIFTY", 100),
     };
 
-    /// <summary>How many distinct trading days of history to hold in memory.</summary>
-    private const int HistoryTradingDays = 5;
-
-    /// <summary>How far back (calendar days) to ask Dhan for in one range call - comfortably
-    /// covers HistoryTradingDays even across a long weekend or a holiday cluster; the result is
-    /// then trimmed down to the most recent HistoryTradingDays distinct days actually present.</summary>
-    private const int HistoryLookbackCalendarDays = 15;
+    /// <summary>Shared with CdvHostedService's own backfill - see HistoryWindow for why the spot
+    /// chart and the option charts must reach back exactly as far as each other.</summary>
+    private const int HistoryTradingDays = HistoryWindow.TradingDays;
+    private const int HistoryLookbackCalendarDays = HistoryWindow.LookbackCalendarDays;
 
     private readonly DhanOptions _options;
     private readonly DhanSession _session;

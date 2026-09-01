@@ -28,11 +28,12 @@ public sealed class CdvHostedService : BackgroundService
 
     private static readonly TimeSpan AtmRecenterInterval = TimeSpan.FromMinutes(30);
 
-    /// <summary>Matches SpotFeedHostedService's own backfill window exactly - the ATM CE/PE premium
-    /// chart and CDV's reconstructed history need to cover the same trading days the spot chart
-    /// does, or the charts would visibly disagree on how far back "history" goes.</summary>
-    private const int HistoryTradingDays = 5;
-    private const int HistoryLookbackCalendarDays = 15;
+    /// <summary>Matches SpotFeedHostedService's own backfill window exactly - the option premium
+    /// charts and CDV's reconstructed history need to cover the same trading days the spot chart
+    /// does, or the charts would visibly disagree on how far back "history" goes. Both read the
+    /// same HistoryWindow constants so they cannot drift apart.</summary>
+    private const int HistoryTradingDays = HistoryWindow.TradingDays;
+    private const int HistoryLookbackCalendarDays = HistoryWindow.LookbackCalendarDays;
 
     /// <summary>Dhan gives no documented rate limit for this endpoint, but a recenter can mean
     /// backfilling up to ~34 contracts (17 strikes x CE/PE) back to back on first startup - a small
