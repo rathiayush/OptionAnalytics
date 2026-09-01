@@ -1,0 +1,28 @@
+# Build outputs - rebuilt inside the image, and copying host artifacts in would mix a host-built
+# binary with a container-built one.
+**/bin/
+**/obj/
+**/dist/
+**/node_modules/
+**/wwwroot/
+
+# Secrets must never enter the image. Dhan credentials and the Telegram token are supplied as
+# environment variables at runtime (see README) - appsettings.Local.json is for local runs only.
+**/appsettings.Local.json
+**/appsettings.*.local.json
+**/*.pem
+**/*.key
+**/id_rsa*
+.env
+.env.*
+
+# Runtime state, not source - see StrategyTriggerStore.
+**/strategy-triggers.json
+
+.git/
+.github/
+.vs/
+.vscode/
+.idea/
+**/*.user
+**/*.swp

@@ -1,0 +1,43 @@
+# For Dokploy's Compose deployment type (or a plain `docker compose up -d` on any host).
+#
+# Every value below comes from the environment - nothing secret is written in this file, because
+# this file is committed. Set the Dhan and Telegram values in Dokploy's own Environment tab, or in
+# a .env file beside this one on the host (.env is gitignored and .dockerignored).
+#
+# ASP.NET Core maps a double underscore in an environment variable name to a configuration section
+# separator, so Dhan__ClientId sets the Dhan:ClientId that appsettings.json declares.
+
+services:
+  optionanalytics:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_URLS: http://+:8080
+
+      # Onto the mounted volume below - the container's content root is not persistent.
+      Storage__TriggersPath: /app/data/strategy-triggers.json
+
+      # Dhan. Either supply a long-lived AccessToken, or leave it empty and set Pin + TotpSecret so
+      # DhanTotpAutoRenewalHostedService logs in on its own and keeps the token fresh.
+      Dhan__ClientId: ${DHAN_CLIENT_ID:?set DHAN_CLIENT_ID}
+      Dhan__AccessToken: ${DHAN_ACCESS_TOKEN:-}
+      Dhan__Pin: ${DHAN_PIN:-}
+      Dhan__TotpSecret: ${DHAN_TOTP_SECRET:-}
+
+      # Telegram alerting for armed strategy triggers - leave Enabled false to run without it.
+      Telegram__Enabled: ${TELEGRAM_ENABLED:-false}
+      Telegram__BotToken: ${TELEGRAM_BOT_TOKEN:-}
+      Telegram__ChatId: ${TELEGRAM_CHAT_ID:-}
+    volumes:
+      # Armed triggers are the only thing this app persists; without this they reset on redeploy.
+      - optionanalytics-data:/app/data
+    ports:
+      # Dokploy fronts this with Traefik and its own domain, in which case this mapping is
+      # unnecessary - it is here so a plain `docker compose up` on a VPS is immediately reachable.
+      - "${HTTP_PORT:-8080}:8080"
+
+volumes:
+  optionanalytics-data:

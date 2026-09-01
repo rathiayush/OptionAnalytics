@@ -22,3 +22,13 @@ appsettings.*.local.json
 
 # Saved strategy triggers are local runtime config (see StrategyTriggerStore), not source.
 strategy-triggers.json
+
+# Local deployment env (never commit)
+.env
+.env.*
+
+# The client's build output. It is published straight from optionanalytics.client/dist by the
+# csproj's BuildAndCopyClient target and is never copied into the source tree, so anything here
+# other than .gitkeep is a leftover from a local build.
+OptionAnalytics.Server/wwwroot/*
+!OptionAnalytics.Server/wwwroot/.gitkeep

@@ -107,6 +107,55 @@ port).
 
 ## Production build
 
-`dotnet publish` on `OptionAnalytics.Server` runs `npm install && npm run build` in the client
-project and copies its output into `wwwroot`, so the published app serves the frontend itself -
+`dotnet publish` on `OptionAnalytics.Server` runs `npm ci && npm run build` in the client project
+and publishes its output as the app's `wwwroot`, so the published app serves the frontend itself -
 no separate Node process needed in production.
+
+`appsettings.Local.json` is deliberately excluded from both the build output and the publish output
+(see the csproj), so a publish folder never carries local Dhan credentials. Production reads them
+from environment variables instead - see below.
+
+## Deploying
+
+`Dockerfile` builds a single self-contained image (client + server), and `docker-compose.yml` runs
+it. Nothing secret is committed: every credential comes from the environment.
+
+```bash
+docker compose up -d --build
+```
+
+Configuration, using ASP.NET Core's `__` section separator (`Dhan__ClientId` sets `Dhan:ClientId`):
+
+| Variable | Required | Notes |
+| --- | --- | --- |
+| `DHAN_CLIENT_ID` | yes | Dhan client id |
+| `DHAN_ACCESS_TOKEN` | either this... | A long-lived access token |
+| `DHAN_PIN` + `DHAN_TOTP_SECRET` | ...or these | TOTP auto-login; the app then renews its own token |
+| `TELEGRAM_ENABLED` | no | `true` to send trigger alerts |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | if enabled | |
+| `HTTP_PORT` | no | Host port, default `8080` |
+
+The app listens on `8080` inside the container.
+
+### Persistence
+
+All market data is in memory and refetched from Dhan on every start, so the container is
+effectively stateless - **except** for armed strategy triggers, which are configuration rather than
+market data (see `StrategyTriggerStore`). Those live in a JSON file whose location is set by
+`Storage__TriggersPath`; compose points it at the `optionanalytics-data` volume, so triggers survive
+a redeploy. Without that volume they reset every deploy.
+
+### Dokploy
+
+Create an application pointed at this repository, choose the branch to deploy, and pick either
+build type:
+
+- **Dockerfile** - path `Dockerfile`, port `8080`.
+- **Compose** - path `docker-compose.yml`.
+
+Set the variables above in Dokploy's Environment tab (not in a committed file), attach a domain,
+and deploy. Note the first start fetches 15 trading days of history for ~68 option contracts, so
+give it a couple of minutes before the option charts fill in.
+
+Startup is slower than a typical web app and the Dhan token endpoint is rate-limited to one call
+every two minutes, so avoid redeploy loops that restart the container repeatedly.

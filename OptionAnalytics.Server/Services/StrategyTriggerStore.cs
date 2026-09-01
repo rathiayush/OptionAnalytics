@@ -21,10 +21,21 @@ public sealed class StrategyTriggerStore
     private readonly object _lock = new();
     private readonly Dictionary<string, StrategyTrigger> _triggers = new();
 
-    public StrategyTriggerStore(IHostEnvironment environment, ILogger<StrategyTriggerStore> logger)
+    public StrategyTriggerStore(IHostEnvironment environment, IConfiguration configuration, ILogger<StrategyTriggerStore> logger)
     {
-        _path = Path.Combine(environment.ContentRootPath, "strategy-triggers.json");
+        // Next to the app by default, which is what a local run wants. In a container the content
+        // root is the image's own read-only-ish app directory, so Storage:TriggersPath (env var
+        // Storage__TriggersPath) points this at a mounted volume instead - otherwise every redeploy
+        // would silently discard the armed triggers. See docker-compose.yml.
+        var configured = configuration["Storage:TriggersPath"];
+        _path = string.IsNullOrWhiteSpace(configured)
+            ? Path.Combine(environment.ContentRootPath, "strategy-triggers.json")
+            : configured;
         _logger = logger;
+
+        var directory = Path.GetDirectoryName(_path);
+        if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
+
         Load();
     }
 
