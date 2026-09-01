@@ -25,6 +25,7 @@ namespace OptionAnalytics.Server.Dhan;
 public sealed class DhanHistoricalDataService
 {
     private const string Instrument = "INDEX";
+    private const string OptionInstrument = "OPTIDX";
 
     private readonly DhanApiClient _api;
     private readonly ILogger<DhanHistoricalDataService> _logger;
@@ -103,6 +104,80 @@ public sealed class DhanHistoricalDataService
             catch (Exception ex) when (ex is FormatException or InvalidOperationException or OverflowException)
             {
                 _logger.LogDebug(ex, "Skipped an unparsable candle at index {Index}", i);
+            }
+        }
+
+        return candles;
+    }
+
+    /// <summary>Same range-call shape as GetIntradayCandlesAsync, but for an option contract
+    /// (instrument "OPTIDX", not "INDEX" - CDV's underlying spot backfill uses that method, this
+    /// one is what CdvHostedService calls per strike) and carrying Volume too, since both OBV and
+    /// the CDV backfill's bar-proxy delta classification need it and the plain Candle shape
+    /// doesn't carry it.</summary>
+    public async Task<IReadOnlyList<CandleWithVolume>> GetIntradayOptionCandlesAsync(
+        uint securityId, string dhanSegment, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken)
+    {
+        if (!_api.HasSession)
+        {
+            _logger.LogWarning("Cannot fetch intraday option candles for {Segment}:{Id} - Dhan is not authenticated.", dhanSegment, securityId);
+            return Array.Empty<CandleWithVolume>();
+        }
+
+        var payload = new
+        {
+            securityId = securityId.ToString(CultureInfo.InvariantCulture),
+            exchangeSegment = dhanSegment,
+            instrument = OptionInstrument,
+            interval = intervalMinutes.ToString(CultureInfo.InvariantCulture),
+            fromDate = $"{fromDay:yyyy-MM-dd} 09:15:00",
+            toDate = $"{toDay:yyyy-MM-dd} 15:30:00",
+        };
+
+        using var response = await _api.SendAsync(HttpMethod.Post, "/charts/intraday", payload,
+            $"option intraday candles ({dhanSegment}:{securityId}, {fromDay:yyyy-MM-dd}..{toDay:yyyy-MM-dd})", cancellationToken);
+
+        if (!response.Success)
+        {
+            // Debug, not Warning - routine for a strike that simply didn't trade/exist for part of
+            // the lookback window (added to the chain partway through, or never traded some days),
+            // which CdvHostedService.RecenterAsync would otherwise log once per strike as noise.
+            _logger.LogDebug("Option intraday candle request failed for {Segment}:{Id} ({From}..{To}) - {Error}", dhanSegment, securityId, fromDay, toDay, response.ErrorMessage);
+            return Array.Empty<CandleWithVolume>();
+        }
+
+        return ParseCandlesWithVolume(response.Root);
+    }
+
+    private List<CandleWithVolume> ParseCandlesWithVolume(JsonElement root)
+    {
+        var candles = new List<CandleWithVolume>();
+        if (!root.TryGetProperty("timestamp", out var timestamps) || timestamps.ValueKind != JsonValueKind.Array)
+            return candles;
+
+        var open = GetArray(root, "open");
+        var high = GetArray(root, "high");
+        var low = GetArray(root, "low");
+        var close = GetArray(root, "close");
+        var volume = GetArray(root, "volume");
+
+        var count = timestamps.GetArrayLength();
+        for (var i = 0; i < count; i++)
+        {
+            try
+            {
+                var epochSeconds = (long)timestamps[i].GetDouble();
+                candles.Add(new CandleWithVolume(
+                    Time: DateTimeOffset.FromUnixTimeSeconds(epochSeconds),
+                    Open: i < open.Count ? open[i] : 0m,
+                    High: i < high.Count ? high[i] : 0m,
+                    Low: i < low.Count ? low[i] : 0m,
+                    Close: i < close.Count ? close[i] : 0m,
+                    Volume: i < volume.Count ? (long)volume[i] : 0));
+            }
+            catch (Exception ex) when (ex is FormatException or InvalidOperationException or OverflowException)
+            {
+                _logger.LogDebug(ex, "Skipped an unparsable option candle at index {Index}", i);
             }
         }
 

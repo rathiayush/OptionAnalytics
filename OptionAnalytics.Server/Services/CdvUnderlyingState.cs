@@ -60,6 +60,15 @@ internal sealed class CdvStrikeRuntime
         }
     }
 
+    /// <summary>Seeds this contract's own premium history from the historical backfill - see
+    /// CdvUnderlyingState.SeedStrikeHistory, which calls this once per strike before any live tick
+    /// has arrived for it (mirrors SpotUnderlyingState.SeedHistory's ordering).</summary>
+    public void SeedHistory(IEnumerable<(Candle Bar, long Volume)> bars)
+    {
+        _closedBars.Clear();
+        _closedBars.AddRange(bars.OrderBy(b => b.Bar.Time));
+    }
+
     public IReadOnlyList<Candle> GetCandles()
     {
         var list = _closedBars.Select(b => b.Bar).ToList();
@@ -93,6 +102,12 @@ public sealed class CdvUnderlyingState
     private readonly List<CdvBarPoint> _closedBars = new();
     private CdvBarPoint? _currentBar;
 
+    // Per-minute CE/PE bar-proxy delta INCREMENTS (not running totals) contributed by
+    // SeedStrikeHistory as each newly-tracked strike's own history comes back - see that method
+    // and FinalizeCdvBackfill for why increments, not totals, are what gets accumulated here.
+    private readonly Dictionary<DateTimeOffset, decimal> _backfillCeIncrements = new();
+    private readonly Dictionary<DateTimeOffset, decimal> _backfillPeIncrements = new();
+
     public CdvUnderlyingState(string underlying)
     {
         Underlying = underlying;
@@ -105,13 +120,16 @@ public sealed class CdvUnderlyingState
 
     /// <summary>Registers a strike/side this underlying has never seen today, starting its
     /// RunningCdv at zero. A no-op if already tracked (re-entering the window after rolling back
-    /// out must not reset its accumulated total).</summary>
-    public void EnsureTracked(uint securityId, decimal strike, bool isCall)
+    /// out must not reset its accumulated total). Returns true only the first time - the caller
+    /// (CdvHostedService.RecenterAsync) uses that to know which strikes are new enough to need a
+    /// historical backfill via SeedStrikeHistory.</summary>
+    public bool EnsureTracked(uint securityId, decimal strike, bool isCall)
     {
         lock (_lock)
         {
-            if (!_strikes.ContainsKey(securityId))
-                _strikes[securityId] = new CdvStrikeRuntime { SecurityId = securityId, Strike = strike, IsCall = isCall };
+            if (_strikes.ContainsKey(securityId)) return false;
+            _strikes[securityId] = new CdvStrikeRuntime { SecurityId = securityId, Strike = strike, IsCall = isCall };
+            return true;
         }
     }
 
@@ -172,6 +190,93 @@ public sealed class CdvUnderlyingState
             ? 1.0 / (1.0 + Math.Exp(8.5 * moneyness))
             : -1.0 / (1.0 + Math.Exp(-8.5 * moneyness));
         return (decimal)Math.Abs(delta);
+    }
+
+    /// <summary>Seeds one strike's own historical premium+volume bars, called once per strike by
+    /// CdvHostedService.RecenterAsync right after EnsureTracked reports it as newly tracked (so
+    /// this always runs before that strike's first live tick). Does two things with the same
+    /// history: (1) seeds the strike's own candle series (CdvStrikeRuntime.SeedHistory) - what
+    /// backs the ATM CE/PE premium chart and its OBV once this strike becomes ATM; (2) reconstructs
+    /// this strike's own contribution to the CDV running total via the bar-proxy delta formula
+    /// (BarProxyDelta below - the same close-in-range approximation LiveSpreadCalculator's own CDV
+    /// backfill uses, since historical OHLCV candles carry no real trade-by-trade buy/sell tagging
+    /// the way live ticks do), weighted by delta at the CURRENT spot as a fixed reference for the
+    /// whole backfilled window (an accepted approximation - a full per-minute historical spot
+    /// series isn't available). The strike's own RunningCdv is left seeded at its final backfilled
+    /// value so today's live ticks continue accumulating from there instead of restarting at zero -
+    /// the visible CDV line stays continuous across the backfill/live boundary.</summary>
+    /// <param name="includeInCdvHistory">Only true for the very first backfill batch of this
+    /// underlying's day (see CdvHostedService's own "already seeded" guard) - a strike whose window
+    /// entry comes later (a subsequent 30-minute re-center after ATM has moved) still gets its own
+    /// price history seeded above, but is deliberately left OUT of the CDV reconstruction: its
+    /// backfilled window overlaps in time with strikes already folded into _closedBars, and
+    /// FinalizeCdvBackfill has no way to retroactively re-merge an already-flattened chronological
+    /// series - the same limitation LiveSpreadCalculator's own CDV backfill accepts (it backfills
+    /// only once, at the day's first recenter, and pads any later-added strike's contribution with
+    /// zero instead of reconstructing it).</param>
+    public void SeedStrikeHistory(uint securityId, IReadOnlyList<CandleWithVolume> bars, decimal currentSpot, bool includeInCdvHistory)
+    {
+        lock (_lock)
+        {
+            if (!_strikes.TryGetValue(securityId, out var strike) || bars.Count == 0) return;
+
+            strike.SeedHistory(bars.Select(b => (b.ToCandle(), b.Volume)));
+            if (!includeInCdvHistory) return;
+
+            var weight = currentSpot > 0 ? ComputeDeltaWeight(strike.Strike, currentSpot, strike.IsCall) : 0m;
+            var increments = strike.IsCall ? _backfillCeIncrements : _backfillPeIncrements;
+            decimal running = 0;
+            foreach (var bar in bars.OrderBy(b => b.Time))
+            {
+                var delta = BarProxyDelta(bar) * weight;
+                increments[bar.Time] = increments.GetValueOrDefault(bar.Time) + delta;
+                running += delta;
+            }
+            strike.RunningCdv = running;
+        }
+    }
+
+    /// <summary>Turns every strike's backfilled per-minute increments (see SeedStrikeHistory) into
+    /// one chronological CE/PE running-total series and prepends it to _closedBars - called once by
+    /// CdvHostedService.RecenterAsync after a whole batch of newly-tracked strikes has been seeded,
+    /// not per-strike, since the combined total needs every contributing strike's increments first.
+    /// Safe to call with nothing pending (a recenter with no newly-tracked strikes) - a no-op.</summary>
+    public void FinalizeCdvBackfill()
+    {
+        lock (_lock)
+        {
+            if (_backfillCeIncrements.Count == 0 && _backfillPeIncrements.Count == 0) return;
+
+            var minutes = _backfillCeIncrements.Keys.Concat(_backfillPeIncrements.Keys).Distinct().OrderBy(t => t).ToList();
+            decimal ce = 0, pe = 0;
+            var seeded = new List<CdvBarPoint>(minutes.Count);
+            foreach (var minute in minutes)
+            {
+                ce += _backfillCeIncrements.GetValueOrDefault(minute);
+                pe += _backfillPeIncrements.GetValueOrDefault(minute);
+                seeded.Add(new CdvBarPoint(minute, ce, pe));
+            }
+
+            // Backfilled minutes are always earlier than anything a live tick could have produced
+            // (RecenterAsync backfills before subscribing new strikes), so this always belongs at
+            // the front - InsertRange rather than a full re-sort of what could already be a large
+            // live series.
+            _closedBars.InsertRange(0, seeded);
+            _backfillCeIncrements.Clear();
+            _backfillPeIncrements.Clear();
+        }
+    }
+
+    /// <summary>Pine's own bar-proxy delta formula (close-in-range classification), the same
+    /// fallback LiveSpreadCalculator's CDV backfill uses for historical candles - the only buy/sell
+    /// split possible from OHLCV+volume alone, with no real trade-by-trade tagging.</summary>
+    private static decimal BarProxyDelta(CandleWithVolume bar)
+    {
+        var hl = bar.High - bar.Low;
+        if (hl <= 0.0001m) return 0m;
+        var buyVol = (bar.Close - bar.Low) / hl * bar.Volume;
+        var sellVol = (bar.High - bar.Close) / hl * bar.Volume;
+        return buyVol - sellVol;
     }
 
     private void UpdateBar_NoLock(DateTimeOffset timestamp)

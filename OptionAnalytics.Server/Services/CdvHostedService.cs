@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.SignalR;
 using OptionAnalytics.Server.Dhan;
 using OptionAnalytics.Server.Hubs;
+using OptionAnalytics.Server.Models;
 
 namespace OptionAnalytics.Server.Services;
 
@@ -27,25 +28,45 @@ public sealed class CdvHostedService : BackgroundService
 
     private static readonly TimeSpan AtmRecenterInterval = TimeSpan.FromMinutes(30);
 
+    /// <summary>Matches SpotFeedHostedService's own backfill window exactly - the ATM CE/PE premium
+    /// chart and CDV's reconstructed history need to cover the same trading days the spot chart
+    /// does, or the charts would visibly disagree on how far back "history" goes.</summary>
+    private const int HistoryTradingDays = 5;
+    private const int HistoryLookbackCalendarDays = 15;
+
+    /// <summary>Dhan gives no documented rate limit for this endpoint, but a recenter can mean
+    /// backfilling up to ~34 contracts (17 strikes x CE/PE) back to back on first startup - a small
+    /// gap between calls is cheap insurance against tripping one anyway.</summary>
+    private static readonly TimeSpan BackfillCallDelay = TimeSpan.FromMilliseconds(200);
+
     private readonly DhanOptionChainMaster _optionChainMaster;
     private readonly DhanMarketFeedClient _feedClient;
     private readonly SpotFeedHostedService _spotFeed;
+    private readonly DhanHistoricalDataService _historicalData;
     private readonly IHubContext<SpotHub> _hub;
     private readonly ILogger<CdvHostedService> _logger;
 
     private readonly Dictionary<uint, CdvUnderlyingState> _bySecurityId = new();
     private readonly Dictionary<string, HashSet<uint>> _subscribedTokens = new();
 
+    /// <summary>Sees each underlying exactly once - HashSet.Add's return value doubles as the "is
+    /// this the first backfill batch" flag BackfillNewStrikesAsync needs (see
+    /// CdvUnderlyingState.SeedStrikeHistory's includeInCdvHistory parameter for why only the first
+    /// batch feeds the CDV reconstruction).</summary>
+    private readonly HashSet<string> _cdvHistorySeeded = new();
+
     public CdvHostedService(
         DhanOptionChainMaster optionChainMaster,
         DhanMarketFeedClient feedClient,
         SpotFeedHostedService spotFeed,
+        DhanHistoricalDataService historicalData,
         IHubContext<SpotHub> hub,
         ILogger<CdvHostedService> logger)
     {
         _optionChainMaster = optionChainMaster;
         _feedClient = feedClient;
         _spotFeed = spotFeed;
+        _historicalData = historicalData;
         _hub = hub;
         _logger = logger;
 
@@ -131,6 +152,7 @@ public sealed class CdvHostedService : BackgroundService
         var desiredTokens = new HashSet<uint>();
         var ceList = new List<int>();
         var peList = new List<int>();
+        var newlyTracked = new List<uint>();
 
         foreach (var strike in strikes)
         {
@@ -139,12 +161,23 @@ public sealed class CdvHostedService : BackgroundService
                 var contract = _optionChainMaster.Find(underlying, expiry.Value, strike, isCall);
                 if (contract is null) continue;
 
-                state.EnsureTracked(contract.SecurityId, strike, isCall);
+                if (state.EnsureTracked(contract.SecurityId, strike, isCall))
+                    newlyTracked.Add(contract.SecurityId);
                 _bySecurityId[contract.SecurityId] = state;
                 desiredTokens.Add(contract.SecurityId);
                 (isCall ? ceList : peList).Add(strike);
             }
         }
+
+        // Backfill every newly-tracked strike's own history BEFORE subscribing it live - otherwise
+        // a live tick could arrive and start building a bar while the backfill for that same strike
+        // is still in flight, corrupting SeedHistory's "nothing live yet" assumption. Cheap for a
+        // routine 30-minute recenter (usually a handful of strikes as the window shifts by one
+        // step); the one expensive case is the very first recenter after startup, where the whole
+        // ATM+-8 window (up to 34 contracts) is newly tracked at once - a one-time cost, not
+        // repeated on every recenter.
+        if (newlyTracked.Count > 0)
+            await BackfillNewStrikesAsync(underlying, state, newlyTracked, spot, cancellationToken);
 
         var currentlySubscribed = _subscribedTokens[underlying];
         var toSubscribe = desiredTokens.Where(t => !currentlySubscribed.Contains(t)).ToArray();
@@ -167,6 +200,78 @@ public sealed class CdvHostedService : BackgroundService
             "CDV: {Underlying} spot={Spot} -> ATM={Atm}, expiry={Expiry}. Tracking CE strikes [{Ce}] and PE strikes [{Pe}].",
             underlying, spot, atm, expiry.Value, string.Join(", ", ceList.OrderBy(v => v)), string.Join(", ", peList.OrderBy(v => v)));
     }
+
+    /// <summary>Fetches and seeds each newly-tracked strike's own last HistoryTradingDays of
+    /// premium+volume history - see CdvUnderlyingState.SeedStrikeHistory for what that seeds (the
+    /// strike's own candle series plus its contribution to the CDV backfill) and FinalizeCdvBackfill
+    /// for how those per-strike contributions get combined into one series afterward. A contract
+    /// that fails or comes back empty (didn't trade the whole window, a transient Dhan error) just
+    /// contributes nothing rather than failing the batch - same tolerance SpotFeedHostedService's
+    /// own backfill has.</summary>
+    private async Task BackfillNewStrikesAsync(string underlying, CdvUnderlyingState state, IReadOnlyList<uint> securityIds, decimal currentSpot, CancellationToken cancellationToken)
+    {
+        var today = DateOnly.FromDateTime(DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(5.5)).DateTime);
+        var fromDay = today.AddDays(-HistoryLookbackCalendarDays);
+        var seededCount = 0;
+
+        // Only the underlying's very first backfill batch feeds the combined CDV reconstruction -
+        // see CdvUnderlyingState.SeedStrikeHistory's includeInCdvHistory doc comment for why a later
+        // batch (ATM rolled onto a strike never tracked before) can't retroactively merge into it.
+        // Every batch still seeds each strike's own price/volume history regardless, which is what
+        // backs that strike's ATM CE/PE chart once it becomes the ATM contract.
+        var includeInCdvHistory = _cdvHistorySeeded.Add(underlying);
+
+        for (var i = 0; i < securityIds.Count; i++)
+        {
+            if (i > 0) await Task.Delay(BackfillCallDelay, cancellationToken);
+
+            var securityId = securityIds[i];
+            IReadOnlyList<CandleWithVolume> bars;
+            try
+            {
+                bars = await _historicalData.GetIntradayOptionCandlesAsync(securityId, "NSE_FNO", fromDay, today, 1, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogDebug(ex, "CDV backfill: request threw for {Underlying} security {SecurityId}", underlying, securityId);
+                continue;
+            }
+
+            if (bars.Count == 0) continue;
+
+            var trimmed = TrimToRecentTradingDays(bars, HistoryTradingDays);
+            if (trimmed.Count == 0) continue;
+
+            state.SeedStrikeHistory(securityId, trimmed, currentSpot, includeInCdvHistory);
+            seededCount++;
+        }
+
+        if (includeInCdvHistory) state.FinalizeCdvBackfill();
+        _logger.LogInformation("CDV: backfilled {Seeded}/{Total} newly-tracked contract(s) for {Underlying} (CDV history {Included}).",
+            seededCount, securityIds.Count, underlying, includeInCdvHistory ? "included" : "not included - later batch");
+    }
+
+    /// <summary>Same trimming SpotFeedHostedService.TrimToRecentTradingDays does for the spot chart -
+    /// keeps only the most recent HistoryTradingDays distinct IST calendar dates actually present,
+    /// so an option contract's backfill covers exactly the same trading days the spot chart does
+    /// even though the lookback window asked Dhan for is intentionally wider (to survive holiday
+    /// clusters).</summary>
+    private static List<CandleWithVolume> TrimToRecentTradingDays(IReadOnlyList<CandleWithVolume> bars, int maxDays)
+    {
+        var recentDays = bars
+            .Select(b => IstDate(b.Time))
+            .Distinct()
+            .OrderDescending()
+            .Take(maxDays)
+            .ToHashSet();
+
+        return bars
+            .Where(b => recentDays.Contains(IstDate(b.Time)))
+            .OrderBy(b => b.Time)
+            .ToList();
+    }
+
+    private static DateOnly IstDate(DateTimeOffset time) => DateOnly.FromDateTime(time.ToOffset(TimeSpan.FromHours(5.5)).DateTime);
 
     private void OnTick(SpotTick tick)
     {
