@@ -16,7 +16,7 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 ///      convention - CE leads a rally, PE leads a selloff). A spot cross with no leg confirming it
 ///      is dropped.
 ///   3. OBV / CDV CONFIRM - each optional, controlled by its own flag. When a flag is on, the
-///      TRADED leg's own series must show a surge: a %-change of at least LookbackPercent in
+///      DIRECTION leg's series (the same CE/PE that confirmed in step 2) must show a surge: a %-change of at least LookbackPercent in
 ///      magnitude over the lookback windows (3, 5 and 7 bars). Magnitude, not direction - a
 ///      violent move either way counts, matching what the Pine indicator's own threshold check
 ///      does (it takes math.abs before comparing). LookbackMode decides how many windows have to
@@ -29,6 +29,11 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 /// necessarily restricts this backtest to signals inside TODAY's session, however many days of spot
 /// and OBV history the rest of the run has. OBV carries its full multi-day history and has no such
 /// limit, which is why it is the one defaulted on.
+///
+/// Every step above is about the DIRECTION of the move, so the signals this produces are identical
+/// whether the Position is Buy or Sell - only what gets traded off them differs (a bullish view is
+/// a bought CE or a sold PE). That is deliberate: it is what makes "is this signal better bought or
+/// sold?" an answerable question, since both sides are then measured on the same set of signals.
 ///
 /// Everything after the entry decision is OptionTradeSimulator's, shared with the other strategies.
 /// </summary>
@@ -89,10 +94,6 @@ public sealed class EmaSurgeStrategy : IBacktestStrategy
         var windowsLabel = requireAllWindows ? "all of 3/5/7" : "any of 3/5/7";
         var useObv = parameters["useObv"] >= (FlagOff + FlagOn) / 2;
         var useCdv = parameters["useCdv"] >= (FlagOff + FlagOn) / 2;
-        // Which leg the trade actually ends up in decides which leg's OBV/CDV has to confirm - a
-        // sold position takes the opposite leg (see OptionTradeSimulator), so its confirmation has
-        // to follow it there rather than staying on the side the view points at.
-        var isSell = parameters["side"] >= (OptionTradeSimulator.SideBuy + OptionTradeSimulator.SideSell) / 2;
 
         var entries = new List<(DateTimeOffset Time, string Direction)>();
         var signals = new List<BacktestSignal>();
@@ -121,18 +122,23 @@ public sealed class EmaSurgeStrategy : IBacktestStrategy
                 continue;
             }
 
-            // Step 3: whichever leg the trade will actually sit in must show the surge.
-            var tradedLegIsCall = isSell ? !isBullish : isBullish;
-            var tradedLegLabel = tradedLegIsCall ? "CE" : "PE";
+            // Step 3: the surge is measured on the same leg that confirmed the direction in step 2
+            // - CE for a breakup, PE for a breakdown - NOT on whichever leg the trade happens to be
+            // expressed in. The signal is a view on the market; Buy/Sell is only how that view gets
+            // traded (a bullish view is a bought CE or a sold PE). Keying the confirmation off the
+            // traded leg instead would make the two sides fire on different signals entirely and so
+            // impossible to compare, which is the whole reason for having the toggle.
+            var surgeLegIsCall = isBullish;
+            var tradedLegLabel = surgeLegIsCall ? "CE" : "PE";
 
-            if (useObv && !HasSurged(tradedLegIsCall ? context.ObvCeSeries : context.ObvPeSeries, time, lookbackPercent, requireAllWindows))
+            if (useObv && !HasSurged(surgeLegIsCall ? context.ObvCeSeries : context.ObvPeSeries, time, lookbackPercent, requireAllWindows))
             {
                 signals.Add(new BacktestSignal(context.Underlying, time, "Rejected", direction,
                     $"Spot + {legLabel} confirmed, but {tradedLegLabel} OBV did not move {lookbackPercent:0.#}% across {windowsLabel} bars"));
                 continue;
             }
 
-            if (useCdv && !HasSurged(tradedLegIsCall ? context.CdvCeSeries : context.CdvPeSeries, time, lookbackPercent, requireAllWindows))
+            if (useCdv && !HasSurged(surgeLegIsCall ? context.CdvCeSeries : context.CdvPeSeries, time, lookbackPercent, requireAllWindows))
             {
                 signals.Add(new BacktestSignal(context.Underlying, time, "Rejected", direction,
                     $"Spot + {legLabel} confirmed, but {tradedLegLabel} CDV did not move {lookbackPercent:0.#}% across {windowsLabel} bars"));

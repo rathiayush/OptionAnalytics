@@ -19,3 +19,6 @@ appsettings.*.local.json
 .vscode/
 .idea/
 *.swp
+
+# Saved strategy triggers are local runtime config (see StrategyTriggerStore), not source.
+strategy-triggers.json

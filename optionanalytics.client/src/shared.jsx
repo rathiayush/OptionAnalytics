@@ -39,6 +39,7 @@ export function DirectionTag({ direction }) {
 const NAV_ITEMS = [
   { key: '/', label: 'Dashboard' },
   { key: '/backtest', label: 'Backtrack' },
+  { key: '/triggers', label: 'Triggers' },
 ]
 
 // Shared between DashboardPage and BacktestPage - a proper horizontal menu (not just plain text
@@ -54,7 +55,7 @@ export function NavBar() {
       selectedKeys={[location.pathname]}
       items={NAV_ITEMS}
       onClick={({ key }) => navigate(key)}
-      style={{ minWidth: 260, background: 'transparent', borderBottom: 'none', lineHeight: '32px' }}
+      style={{ minWidth: 340, background: 'transparent', borderBottom: 'none', lineHeight: '32px' }}
     />
   )
 }

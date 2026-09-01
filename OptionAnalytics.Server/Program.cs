@@ -63,6 +63,12 @@ builder.Services.AddSingleton<IBacktestStrategy, EmaSurgeStrategy>();
 // request, nothing to run in the background. See BacktestController/BacktestService.
 builder.Services.AddSingleton<BacktestService>();
 
+// Saved strategy triggers: the store persists them to a small JSON file (they are configuration,
+// not market data - see StrategyTriggerStore), and the hosted service watches each enabled one and
+// sends Telegram when its strategy produces a new entry signal.
+builder.Services.AddSingleton<StrategyTriggerStore>();
+builder.Services.AddHostedService<StrategyTriggerHostedService>();
+
 builder.Services.AddSignalR();
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
