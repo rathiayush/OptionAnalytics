@@ -31,6 +31,14 @@ services:
       Telegram__Enabled: ${TELEGRAM_ENABLED:-false}
       Telegram__BotToken: ${TELEGRAM_BOT_TOKEN:-}
       Telegram__ChatId: ${TELEGRAM_CHAT_ID:-}
+    healthcheck:
+      # Matches the Dockerfile's HEALTHCHECK; the long start_period covers the first-run backfill of
+      # 15 trading days across ~68 option contracts, which takes minutes before the app is useful.
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 180s
     volumes:
       # Armed triggers are the only thing this app persists; without this they reset on redeploy.
       - optionanalytics-data:/app/data

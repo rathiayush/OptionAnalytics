@@ -35,6 +35,14 @@ COPY . .
 RUN dotnet publish OptionAnalytics.Server/OptionAnalytics.Server.csproj -c Release -o /app/publish
 
 FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime
+
+# The aspnet runtime image ships no HTTP client at all, and the HEALTHCHECK below needs one to
+# actually hit the app - without this it could only test that the dotnet binary exists, which tells
+# you nothing about whether the app is serving.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl \
+ && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 COPY --from=build /app/publish .
 
@@ -43,15 +51,26 @@ ENV ASPNETCORE_URLS=http://+:8080
 ENV ASPNETCORE_ENVIRONMENT=Production
 EXPOSE 8080
 
-# StrategyTriggerStore writes strategy-triggers.json into the content root - the ONLY thing this app
-# persists (market data is all in memory and refetched from Dhan on every start). Mount a volume
-# here or armed triggers are lost on redeploy.
-VOLUME ["/app/data"]
-
-# Runs as a non-root user; the trigger file lives in the content root, so that has to be writable.
+# Create and chown the data directory BEFORE declaring it a volume. Docker discards changes made
+# to a volume path by instructions that come after its VOLUME declaration, so doing this the other
+# way round leaves the directory root-owned, the non-root user below unable to write to it, and
+# StrategyTriggerStore silently failing to save the very triggers the volume exists to keep.
 RUN useradd -m -u 1001 optionanalytics \
  && mkdir -p /app/data \
  && chown -R optionanalytics:optionanalytics /app
+
+# Armed strategy triggers are the ONLY thing this app persists - market data is all in memory and
+# refetched from Dhan on every start. Point Storage__TriggersPath at this and mount it, or they are
+# lost on every redeploy.
+VOLUME ["/app/data"]
+
 USER optionanalytics
+
+# Dokploy/Traefik and `docker ps` both read this. /health is deliberately independent of Dhan: the
+# feed is legitimately unauthenticated outside market hours or while a token renews, and a container
+# killed for that would never finish starting. The generous start-period covers the first-run
+# backfill (15 trading days across ~68 option contracts), which takes minutes.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=180s --retries=3 \
+  CMD curl -fsS http://127.0.0.1:8080/health || exit 1
 
 ENTRYPOINT ["dotnet", "OptionAnalytics.Server.dll"]
