@@ -75,7 +75,18 @@ public sealed class SpotUnderlyingState
             {
                 if (_currentBar is { } previous)
                 {
-                    _closedCandles.Add(previous);
+                    // The historical backfill's last returned candle can be the still-forming
+                    // minute at the moment it was queried (Dhan includes the in-progress bar, not
+                    // just fully-closed ones) - the live feed then builds its OWN _currentBar for
+                    // that same minute, and closing it here would otherwise append a second entry
+                    // at a time _closedCandles already has one for, violating lightweight-charts'
+                    // strict-ascending requirement and crashing the chart. The live version, having
+                    // captured the rest of that minute's real ticks, replaces the partial
+                    // backfilled one instead of duplicating it.
+                    if (_closedCandles.Count > 0 && _closedCandles[^1].Time == previous.Time)
+                        _closedCandles[^1] = previous;
+                    else
+                        _closedCandles.Add(previous);
                     justClosed = previous;
                 }
                 _currentBar = new Candle(minute, tick.LastPrice, tick.LastPrice, tick.LastPrice, tick.LastPrice);

@@ -49,7 +49,16 @@ internal sealed class CdvStrikeRuntime
 
         if (_currentBar is not { } cur || cur.Bar.Time != minute)
         {
-            if (_currentBar is { } previous) { _closedBars.Add(previous); justClosed = previous.Bar; }
+            if (_currentBar is { } previous)
+            {
+                // Same still-forming-minute overlap as SpotUnderlyingState.ApplyTick can hit -
+                // replace rather than duplicate a backfilled entry at the same minute.
+                if (_closedBars.Count > 0 && _closedBars[^1].Bar.Time == previous.Bar.Time)
+                    _closedBars[^1] = previous;
+                else
+                    _closedBars.Add(previous);
+                justClosed = previous.Bar;
+            }
             _currentBar = (new Candle(minute, price, price, price, price), tickVolume);
         }
         else
@@ -363,7 +372,16 @@ public sealed class CdvUnderlyingState
 
         if (_currentBar is not { } bar || bar.Time != minute)
         {
-            if (_currentBar is { } previous) _closedBars.Add(previous);
+            if (_currentBar is { } previous)
+            {
+                // Same still-forming-minute overlap FinalizeCdvBackfill's reconstructed history can
+                // hit (its source option candles can include Dhan's in-progress minute too) -
+                // replace rather than duplicate the backfilled entry at that minute.
+                if (_closedBars.Count > 0 && _closedBars[^1].Time == previous.Time)
+                    _closedBars[^1] = previous;
+                else
+                    _closedBars.Add(previous);
+            }
             _currentBar = new CdvBarPoint(minute, ceCdv, peCdv);
         }
         else

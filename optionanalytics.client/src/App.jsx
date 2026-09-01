@@ -193,7 +193,14 @@ function useHub(onSpotUpdate, onCdvUpdate, onConfluenceAlert) {
     connection.on('spotUpdate', (snapshot) => spotHandlerRef.current(snapshot))
     connection.on('cdvUpdate', (snapshot) => cdvHandlerRef.current(snapshot))
     connection.on('confluenceAlert', (alert) => alertHandlerRef.current(alert))
-    connection.start().catch((err) => console.error('SignalR connection failed:', err))
+    connection.start().catch((err) => {
+      // React StrictMode mounts this effect, runs its cleanup, then mounts it again - the first
+      // connection's start() gets aborted by that cleanup's stop() before negotiation finishes,
+      // which is expected and harmless (the second mount's connection succeeds normally), not a
+      // real connection failure worth alarming about.
+      if (err?.name === 'AbortError') return
+      console.error('SignalR connection failed:', err)
+    })
 
     return () => { connection.stop() }
   }, [])
