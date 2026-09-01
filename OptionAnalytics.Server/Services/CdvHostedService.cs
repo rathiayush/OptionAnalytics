@@ -170,6 +170,7 @@ public sealed class CdvHostedService : BackgroundService
 
         state.AtmStrike = atm;
         state.Expiry = expiry;
+        state.LastSpot = spot;
 
         var strikes = Enumerable.Range(-StrikeRange, StrikeRange * 2 + 1).Select(i => atm + i * step).ToArray();
 

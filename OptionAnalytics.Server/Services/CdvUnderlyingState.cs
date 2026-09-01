@@ -154,6 +154,11 @@ public sealed class CdvUnderlyingState
     public DateOnly? Expiry { get; set; }
     public DateTimeOffset LastUpdateUtc { get; private set; }
 
+    /// <summary>Last underlying spot price seen - kept because the delta weighting needs a spot to
+    /// measure moneyness against, and the historical OBV aggregation (GetObvSeries) runs long after
+    /// the ticks that carried it. Updated on every tick and on every recenter.</summary>
+    public decimal LastSpot { get; set; }
+
     /// <summary>The IST calendar date this state's accumulated CDV belongs to - null until the
     /// first successful recenter. CdvHostedService compares this against "today" on every recenter
     /// and calls Reset() the moment they differ, mirroring LiveSpreadCalculator's own CDV port
@@ -266,6 +271,8 @@ public sealed class CdvUnderlyingState
             if (strike.PrevVolume is { } prevVolume && tick.Volume >= prevVolume)
                 deltaVolume = tick.Volume - prevVolume;
             strike.PrevVolume = tick.Volume;
+
+            if (currentSpot > 0) LastSpot = currentSpot;
 
             if (deltaVolume > 0 && currentSpot > 0)
             {
@@ -593,36 +600,139 @@ public sealed class CdvUnderlyingState
         }
     }
 
-    /// <summary>On-Balance-Volume for the current ATM contract on this side, computed by
-    /// Skender.Stock.Indicators over that contract's own OHLC+volume bars (see
-    /// CdvStrikeRuntime.GetVolumeBars) - a standard-library indicator, deliberately not another
-    /// hand-rolled formula like CDV's tick-rule/sigmoid weighting.</summary>
+    /// <summary>
+    /// Delta-weighted On-Balance Volume for one side, summed across every tracked strike - a direct
+    /// port of the Pine "OBV Auto with Delta Weighting" indicator, in the same three stages it uses:
+    ///
+    ///   1. Per strike, a running cumulative sum of sign(close - previous close) * volume * |delta|,
+    ///      where |delta| is the same sigmoid moneyness weight CDV uses (ComputeDeltaWeight) - so a
+    ///      near-ATM contract counts for close to its full volume and a far-OTM one barely counts.
+    ///      Pine's per-strike `ta.cum(math.sign(ta.change(close)) * volume * delta)`.
+    ///   2. Those per-strike running totals summed across the side at each bar. Strikes start being
+    ///      tracked at different times, so a strike with no bar at a given instant contributes its
+    ///      last known running total (0 before its first bar) rather than dropping out of the sum -
+    ///      the same carry-forward Pine's request.security + nz() ends up with.
+    ///   3. Day-baselined then EMA-smoothed: each IST trading day subtracts its own first bar's
+    ///      value (Pine's ceBase/`ceRawObv - ceBase`, which is what makes this a per-day measure
+    ///      rather than an ever-growing total), and the result is EMA(LookbackSmoothLen)-smoothed
+    ///      (Pine's smoothLen, 9 in both). The EMA deliberately runs continuously across days, as
+    ///      Pine's does - only its input resets at the day boundary.
+    ///
+    /// The delta weight uses LastSpot for every bar rather than each bar's own historical spot -
+    /// the same approximation the live CDV path makes (it weights each tick by the spot at that
+    /// moment and never revisits it), and the reason both are "auto delta" approximations rather
+    /// than a full Black-Scholes reconstruction.
+    /// </summary>
     public IReadOnlyList<ObvPoint> GetObvSeries(bool isCall)
     {
         lock (_lock)
         {
-            var strike = FindAtmStrikeNoLock(isCall);
-            if (strike is null) return Array.Empty<ObvPoint>();
+            var aggregate = BuildAggregateObvNoLock(isCall);
+            if (aggregate.Count == 0) return Array.Empty<ObvPoint>();
 
-            var bars = strike.GetVolumeBars();
-            if (bars.Count == 0) return Array.Empty<ObvPoint>();
+            var baselined = ApplyDailyBaseline(aggregate);
+            var smoothed = SmoothEma(baselined.Select(p => p.Obv).ToList());
 
-            var quotes = bars.Select(b => new Quote
-            {
-                Date = b.Bar.Time.UtcDateTime,
-                Open = b.Bar.Open,
-                High = b.Bar.High,
-                Low = b.Bar.Low,
-                Close = b.Bar.Close,
-                Volume = b.Volume,
-            }).ToList();
-
-            var obv = quotes.GetObv().ToList();
-            var result = new List<ObvPoint>(obv.Count);
-            for (var i = 0; i < obv.Count; i++)
-                result.Add(new ObvPoint(bars[i].Bar.Time, obv[i].Obv is { } value ? (decimal)value : 0m));
+            var result = new List<ObvPoint>(baselined.Count);
+            for (var i = 0; i < baselined.Count; i++)
+                result.Add(new ObvPoint(baselined[i].Time, smoothed[i] ?? baselined[i].Obv));
             return result;
         }
+    }
+
+    /// <summary>Stages 1 and 2 above - every tracked strike's own cumulative delta-weighted OBV,
+    /// merged onto one timeline and summed.</summary>
+    private List<ObvPoint> BuildAggregateObvNoLock(bool isCall)
+    {
+        var spot = LastSpot;
+        var perStrike = new List<List<ObvPoint>>();
+
+        foreach (var strike in _strikes.Values.Where(s => s.IsCall == isCall))
+        {
+            var bars = strike.GetVolumeBars();
+            if (bars.Count == 0) continue;
+
+            var weight = spot > 0 ? ComputeDeltaWeight(strike.Strike, spot, strike.IsCall) : 1m;
+            var series = new List<ObvPoint>(bars.Count);
+            decimal running = 0;
+            decimal? previousClose = null;
+
+            foreach (var (bar, volume) in bars)
+            {
+                // The first bar has no previous close to compare against, so it contributes
+                // nothing but establishes the baseline - Pine's ta.change(close) is na there too.
+                if (previousClose is { } prev)
+                {
+                    var sign = bar.Close > prev ? 1 : bar.Close < prev ? -1 : 0;
+                    running += sign * volume * weight;
+                }
+                previousClose = bar.Close;
+                series.Add(new ObvPoint(bar.Time, running));
+            }
+            perStrike.Add(series);
+        }
+
+        if (perStrike.Count == 0) return new List<ObvPoint>();
+
+        var timeline = perStrike.SelectMany(s => s.Select(p => p.Time)).Distinct().OrderBy(t => t).ToList();
+        var cursors = new int[perStrike.Count];
+        var lastKnown = new decimal[perStrike.Count];
+        var aggregate = new List<ObvPoint>(timeline.Count);
+
+        foreach (var time in timeline)
+        {
+            decimal total = 0;
+            for (var i = 0; i < perStrike.Count; i++)
+            {
+                var series = perStrike[i];
+                while (cursors[i] < series.Count && series[cursors[i]].Time <= time)
+                {
+                    lastKnown[i] = series[cursors[i]].Obv;
+                    cursors[i]++;
+                }
+                total += lastKnown[i];
+            }
+            aggregate.Add(new ObvPoint(time, total));
+        }
+
+        return aggregate;
+    }
+
+    /// <summary>Stage 3's first half - each IST trading day restated relative to its own first bar,
+    /// so the series measures "how far has this day moved" instead of an ever-growing total.</summary>
+    private static List<ObvPoint> ApplyDailyBaseline(List<ObvPoint> series)
+    {
+        var result = new List<ObvPoint>(series.Count);
+        DateOnly? currentDay = null;
+        decimal dayBase = 0;
+
+        foreach (var point in series)
+        {
+            var day = DateOnly.FromDateTime(point.Time.ToOffset(TimeSpan.FromHours(5.5)).DateTime);
+            if (currentDay != day)
+            {
+                currentDay = day;
+                dayBase = point.Obv;
+            }
+            result.Add(new ObvPoint(point.Time, point.Obv - dayBase));
+        }
+
+        return result;
+    }
+
+    /// <summary>CE/PE %-change over each of <paramref name="lookbackBars"/> bars on the OBV series -
+    /// the OBV counterpart to GetLookbackTable, and Pine's own multi-lookback table. Computed
+    /// straight off GetObvSeries, which is already EMA-smoothed (Pine measures its lookback against
+    /// the same smoothed `ceActive`/`peActive` it plots, not the raw sum).</summary>
+    public LookbackTable GetObvLookbackTable(IReadOnlyList<int> lookbackBars)
+    {
+        var ce = GetObvSeries(true).Select(p => (decimal?)p.Obv).ToList();
+        var pe = GetObvSeries(false).Select(p => (decimal?)p.Obv).ToList();
+
+        var ceChanges = lookbackBars.Select(n => ComputeLookbackChange(ce, n)).ToList();
+        var peChanges = lookbackBars.Select(n => ComputeLookbackChange(pe, n)).ToList();
+
+        return new LookbackTable(Underlying, ceChanges, peChanges);
     }
 
     public CdvSnapshot ToSnapshot()

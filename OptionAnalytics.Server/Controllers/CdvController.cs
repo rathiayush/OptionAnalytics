@@ -72,6 +72,16 @@ public sealed class CdvController : ControllerBase
         return Ok(state.GetLookbackTable(ParseBars(bars)));
     }
 
+    /// <summary>The OBV counterpart of the lookback table - same windows, same %-change formula,
+    /// measured against the delta-weighted OBV series instead of CDV (see
+    /// CdvUnderlyingState.GetObvLookbackTable).</summary>
+    [HttpGet("{underlying}/obv-lookback")]
+    public IActionResult GetObvLookback(string underlying, [FromQuery] string? bars)
+    {
+        if (!TryGetState(underlying, out var state)) return NotFoundResult(underlying);
+        return Ok(state.GetObvLookbackTable(ParseBars(bars)));
+    }
+
     private static IReadOnlyList<int> ParseBars(string? bars)
     {
         if (string.IsNullOrWhiteSpace(bars)) return DefaultLookbackBars;

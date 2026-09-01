@@ -655,6 +655,8 @@ function AlertsPanel({ alerts, states }) {
 }
 
 const DEFAULT_LOOKBACK_BARS = [3, 5, 7]
+// Pine's own OBV multi-lookback table defaults (lb1Bars/lb2Bars/lb3Bars).
+const DEFAULT_OBV_LOOKBACK_BARS = [20, 25, 30]
 
 function renderPercent(v) {
   if (v == null) return <Text type="secondary">—</Text>
@@ -662,20 +664,22 @@ function renderPercent(v) {
   return <Text style={{ color }}>{v > 0 ? '+' : ''}{v.toFixed(2)}%</Text>
 }
 
-// CE/PE %-change over configurable lookback windows (default 3/5/7 bars), off the backend's
-// EMA-smoothed CDV series - mirrors LiveSpreadCalculator's own "Multi-Lookback" table for the same
-// Pine indicator. The bars selector accepts free-form numbers (antd's tags mode), not just the
-// preset options, so "configurable" isn't limited to a fixed list.
-function LookbackTable({ underlying, cdvSnapshot }) {
-  const [bars, setBars] = useState(DEFAULT_LOOKBACK_BARS)
+// CE/PE %-change over configurable lookback windows, off the backend's EMA-smoothed series -
+// mirrors the "Multi-Lookback" table in the Pine indicators these are ported from, and is used for
+// both CDV (endpoint "lookback", default 3/5/7 bars) and OBV (endpoint "obv-lookback", default
+// 20/25/30 - the periods that Pine's own OBV multi-lookback table defaults to). The bars selector
+// accepts free-form numbers (antd's tags mode), not just the preset options, so "configurable"
+// isn't limited to a fixed list.
+function LookbackTable({ underlying, cdvSnapshot, endpoint = 'lookback', title = 'CE / PE Lookback % Change', defaultBars = DEFAULT_LOOKBACK_BARS }) {
+  const [bars, setBars] = useState(defaultBars)
   const [table, setTable] = useState(null)
   const lastBarTimeRef = useRef(null)
 
   const load = (barsToUse) => {
-    fetch(`/api/cdv/${underlying}/lookback?bars=${barsToUse.join(',')}`)
+    fetch(`/api/cdv/${underlying}/${endpoint}?bars=${barsToUse.join(',')}`)
       .then((r) => r.json())
       .then(setTable)
-      .catch((err) => console.error('Failed to load lookback table:', err))
+      .catch((err) => console.error(`Failed to load ${endpoint} table:`, err))
   }
 
   useEffect(() => { load(bars) }, [underlying, bars.join(',')])
@@ -696,7 +700,7 @@ function LookbackTable({ underlying, cdvSnapshot }) {
   return (
     <Card
       size="small"
-      title="CE / PE Lookback % Change"
+      title={title}
       extra={
         <Select
           mode="tags"
@@ -704,10 +708,10 @@ function LookbackTable({ underlying, cdvSnapshot }) {
           value={bars.map(String)}
           onChange={(vals) => {
             const parsed = [...new Set(vals.map((v) => parseInt(v, 10)).filter((n) => Number.isInteger(n) && n > 0))].sort((a, b) => a - b)
-            setBars(parsed.length > 0 ? parsed : DEFAULT_LOOKBACK_BARS)
+            setBars(parsed.length > 0 ? parsed : defaultBars)
           }}
           style={{ minWidth: 180 }}
-          options={[3, 5, 7, 10, 15, 20].map((n) => ({ value: String(n), label: `${n} bars` }))}
+          options={[3, 5, 7, 10, 15, 20, 25, 30].map((n) => ({ value: String(n), label: `${n} bars` }))}
         />
       }
     >
@@ -1037,14 +1041,14 @@ function DashboardPage() {
         {selected && <LookbackTable underlying={selected} cdvSnapshot={cdvSnapshot} />}
 
         <ChartCard
-          title="CE / PE On-Balance Volume (ATM)"
+          title="CE / PE On-Balance Volume (delta-weighted, all tracked strikes)"
           extra={
             <Space size={12}>
               <Text type="secondary" style={{ fontSize: 12 }}>Skender.Stock.Indicators</Text>
               <Select value={obvUnit} onChange={setObvUnit} size="small" style={{ width: 140 }} options={VALUE_UNIT_OPTIONS} />
             </Space>
           }
-          empty="Waiting for enough ATM CE/PE bars to compute OBV."
+          empty="Waiting for enough CE/PE bars to compute OBV."
         >
           {(obvCePoints.length > 0 || obvPePoints.length > 0) && (
             <ChartErrorBoundary key={`${selected}-${timeframe}-${cdvSnapshot?.atmStrike}`} height={280}>
@@ -1052,6 +1056,16 @@ function DashboardPage() {
             </ChartErrorBoundary>
           )}
         </ChartCard>
+
+        {selected && (
+          <LookbackTable
+            underlying={selected}
+            cdvSnapshot={cdvSnapshot}
+            endpoint="obv-lookback"
+            title="OBV Multi-Lookback % Change"
+            defaultBars={DEFAULT_OBV_LOOKBACK_BARS}
+          />
+        )}
       </Space>
     </div>
   )

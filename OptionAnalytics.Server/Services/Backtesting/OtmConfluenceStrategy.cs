@@ -87,7 +87,7 @@ public sealed class OtmConfluenceStrategy : IBacktestStrategy
 
             if (!spotByTime.TryGetValue(signal.TimeUtc, out var signalSpotBar))
             {
-                trades.Add(BacktestTrade.NoData(underlying, signal.TimeUtc, signal.Direction, side, optionType, 0));
+                trades.Add(BacktestTrade.NoData(underlying, signal.TimeUtc, signal.Direction, side, optionType, 0, null));
                 continue;
             }
 
@@ -103,14 +103,14 @@ public sealed class OtmConfluenceStrategy : IBacktestStrategy
             var entryIndex = FindFirstAfter(optionBars, signal.TimeUtc);
             if (entryIndex < 0)
             {
-                trades.Add(BacktestTrade.NoData(underlying, signal.TimeUtc, signal.Direction, side, optionType, strike));
+                trades.Add(BacktestTrade.NoData(underlying, signal.TimeUtc, signal.Direction, side, optionType, strike, signalSpotBar.Close));
                 continue;
             }
 
             var entryBar = optionBars[entryIndex];
             if (entryBar.Open <= 0)
             {
-                trades.Add(BacktestTrade.NoData(underlying, signal.TimeUtc, signal.Direction, side, optionType, strike));
+                trades.Add(BacktestTrade.NoData(underlying, signal.TimeUtc, signal.Direction, side, optionType, strike, signalSpotBar.Close));
                 continue;
             }
 
@@ -148,7 +148,7 @@ public sealed class OtmConfluenceStrategy : IBacktestStrategy
             var pnlPoints = isSell ? entryPrice - exitPrice : exitPrice - entryPrice;
 
             trades.Add(new BacktestTrade(
-                underlying, signal.TimeUtc, signal.Direction, side, optionType, strike,
+                underlying, signal.TimeUtc, signal.Direction, side, optionType, strike, signalSpotBar.Close,
                 entryBar.Time, entryPrice, exitTime, exitPrice, exitReason, pnlPoints));
         }
 

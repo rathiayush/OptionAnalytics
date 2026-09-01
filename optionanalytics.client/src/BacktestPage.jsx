@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Select, Space, Typography, Spin, Card, Button, Table, Tag, InputNumber, Statistic, Row, Col } from 'antd'
 import { ReloadOutlined, PlayCircleOutlined } from '@ant-design/icons'
-import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, NavBar, DirectionTag, ALERT_KIND_LABEL, fmtIstDateTime, fmtIstTime } from './shared.jsx'
+import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, NavBar, DirectionTag, ALERT_KIND_LABEL, fmtIstDateTime, fmtIstTime, fmtPrice } from './shared.jsx'
 
 const { Title, Text } = Typography
 
@@ -164,6 +164,13 @@ export default function BacktestPage() {
           <Text style={{ color: row.optionType === 'CE' ? CE_COLOR : PE_COLOR }}>{fmtOption(row)}</Text>
         </Space>
       ),
+    },
+    {
+      title: 'Spot',
+      dataIndex: 'spotPrice',
+      key: 'spotPrice',
+      width: 100,
+      render: (v) => (v == null ? <Text type="secondary">—</Text> : fmtPrice(v)),
     },
     {
       title: 'Entry',
