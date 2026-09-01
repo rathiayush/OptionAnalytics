@@ -134,8 +134,18 @@ public sealed class CdvHostedService : BackgroundService
             return;
         }
 
-        var atm = (int)(Math.Round(spot / step) * step);
         var today = DateOnly.FromDateTime(DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(5.5)).DateTime);
+        var state = States[underlying];
+
+        // CDV is a SESSION indicator (see CdvUnderlyingState.TradingDay's doc comment) - the moment
+        // the IST calendar date rolls over, yesterday's whole strike chain and running totals are no
+        // longer meaningful and must start clean, exactly like LiveSpreadCalculator's own CDV port
+        // does on its "freshDay" check.
+        if (state.TradingDay is { } lastTradingDay && lastTradingDay != today)
+            await ResetForNewDayAsync(underlying, state, cancellationToken);
+        state.TradingDay = today;
+
+        var atm = (int)(Math.Round(spot / step) * step);
         var expiry = _optionChainMaster.GetNearestExpiry(underlying, today);
         if (expiry is null)
         {
@@ -143,7 +153,6 @@ public sealed class CdvHostedService : BackgroundService
             return;
         }
 
-        var state = States[underlying];
         state.AtmStrike = atm;
         state.Expiry = expiry;
 
@@ -201,6 +210,25 @@ public sealed class CdvHostedService : BackgroundService
             underlying, spot, atm, expiry.Value, string.Join(", ", ceList.OrderBy(v => v)), string.Join(", ", peList.OrderBy(v => v)));
     }
 
+    /// <summary>Unsubscribes every currently-live token for this underlying, drops all the
+    /// bookkeeping that points at its (about-to-be-wiped) CdvUnderlyingState, and calls Reset() -
+    /// called once by RecenterAsync the moment TradingDay shows yesterday's date. After this
+    /// returns, the rest of RecenterAsync's normal EnsureTracked/backfill/subscribe flow runs
+    /// exactly as it would for a brand-new CdvUnderlyingState.</summary>
+    private async Task ResetForNewDayAsync(string underlying, CdvUnderlyingState state, CancellationToken cancellationToken)
+    {
+        var tokens = _subscribedTokens[underlying];
+        if (tokens.Count > 0)
+        {
+            await _feedClient.UnsubscribeAsync(tokens, cancellationToken);
+            foreach (var token in tokens) _bySecurityId.Remove(token);
+        }
+        _subscribedTokens[underlying] = new HashSet<uint>();
+        _cdvHistorySeeded.Remove(underlying);
+        state.Reset();
+        _logger.LogInformation("CDV: {Underlying} - new trading day, resetting CDV state.", underlying);
+    }
+
     /// <summary>Fetches and seeds each newly-tracked strike's own last HistoryTradingDays of
     /// premium+volume history - see CdvUnderlyingState.SeedStrikeHistory for what that seeds (the
     /// strike's own candle series plus its contribution to the CDV backfill) and FinalizeCdvBackfill
@@ -242,7 +270,11 @@ public sealed class CdvHostedService : BackgroundService
             var trimmed = TrimToRecentTradingDays(bars, HistoryTradingDays);
             if (trimmed.Count == 0) continue;
 
-            state.SeedStrikeHistory(securityId, trimmed, currentSpot, includeInCdvHistory);
+            // trimmed spans up to HistoryTradingDays for the ATM CE/PE candle+OBV chart (a
+            // legitimate multi-day price series), but CDV is day-scoped (see CdvUnderlyingState.
+            // Reset) - only today's own slice of that same fetch feeds the CDV reconstruction.
+            var todayBars = trimmed.Where(b => IstDate(b.Time) == today).ToList();
+            state.SeedStrikeHistory(securityId, trimmed, todayBars, currentSpot, includeInCdvHistory);
             seededCount++;
         }
 

@@ -118,6 +118,33 @@ public sealed class CdvUnderlyingState
     public DateOnly? Expiry { get; set; }
     public DateTimeOffset LastUpdateUtc { get; private set; }
 
+    /// <summary>The IST calendar date this state's accumulated CDV belongs to - null until the
+    /// first successful recenter. CdvHostedService compares this against "today" on every recenter
+    /// and calls Reset() the moment they differ, mirroring LiveSpreadCalculator's own CDV port
+    /// (UnderlyingState.TradingDay / "freshDay"): CDV is a SESSION indicator in the source Pine
+    /// script - it resets to zero at the start of every trading day - not an all-time-since-inception
+    /// accumulator. Getting this wrong is exactly what made the chart's magnitude explode across
+    /// days instead of oscillating within one.</summary>
+    public DateOnly? TradingDay { get; set; }
+
+    /// <summary>Wipes every strike and the whole CDV series - called by CdvHostedService the moment
+    /// a new IST trading day is detected (see TradingDay). Does NOT touch Underlying itself; AtmStrike
+    /// and Expiry are cleared too since RecenterAsync re-establishes them immediately after calling
+    /// this, same as a fresh CdvUnderlyingState would start.</summary>
+    public void Reset()
+    {
+        lock (_lock)
+        {
+            _strikes.Clear();
+            _closedBars.Clear();
+            _currentBar = null;
+            _backfillCeIncrements.Clear();
+            _backfillPeIncrements.Clear();
+            AtmStrike = null;
+            Expiry = null;
+        }
+    }
+
     /// <summary>Registers a strike/side this underlying has never seen today, starting its
     /// RunningCdv at zero. A no-op if already tracked (re-entering the window after rolling back
     /// out must not reset its accumulated total). Returns true only the first time - the caller
@@ -194,17 +221,22 @@ public sealed class CdvUnderlyingState
 
     /// <summary>Seeds one strike's own historical premium+volume bars, called once per strike by
     /// CdvHostedService.RecenterAsync right after EnsureTracked reports it as newly tracked (so
-    /// this always runs before that strike's first live tick). Does two things with the same
-    /// history: (1) seeds the strike's own candle series (CdvStrikeRuntime.SeedHistory) - what
-    /// backs the ATM CE/PE premium chart and its OBV once this strike becomes ATM; (2) reconstructs
-    /// this strike's own contribution to the CDV running total via the bar-proxy delta formula
-    /// (BarProxyDelta below - the same close-in-range approximation LiveSpreadCalculator's own CDV
-    /// backfill uses, since historical OHLCV candles carry no real trade-by-trade buy/sell tagging
-    /// the way live ticks do), weighted by delta at the CURRENT spot as a fixed reference for the
-    /// whole backfilled window (an accepted approximation - a full per-minute historical spot
-    /// series isn't available). The strike's own RunningCdv is left seeded at its final backfilled
-    /// value so today's live ticks continue accumulating from there instead of restarting at zero -
-    /// the visible CDV line stays continuous across the backfill/live boundary.</summary>
+    /// this always runs before that strike's first live tick). Does two things with two DIFFERENT
+    /// slices of the same fetch: (1) seeds the strike's own FULL multi-day candle series
+    /// (<paramref name="allBars"/>, via CdvStrikeRuntime.SeedHistory) - what backs the ATM CE/PE
+    /// premium chart and its OBV once this strike becomes ATM, legitimately spanning several
+    /// trading days like any price chart; (2) reconstructs this strike's own contribution to
+    /// TODAY's CDV running total from <paramref name="todayBars"/> ONLY, via the bar-proxy delta
+    /// formula (BarProxyDelta below - the same close-in-range approximation LiveSpreadCalculator's
+    /// own CDV backfill uses, since historical OHLCV candles carry no real trade-by-trade buy/sell
+    /// tagging the way live ticks do), weighted by delta at the CURRENT spot as a fixed reference
+    /// for the day (an accepted approximation - a full per-minute historical spot series isn't
+    /// available). CDV is a SESSION indicator in the source Pine script (see TradingDay/Reset) -
+    /// summing bar-proxy deltas across multiple days here, like an early version of this method
+    /// did, made the total compound without bound day over day instead of the source indicator's
+    /// bounded, day-scoped oscillation. The strike's own RunningCdv is left seeded at its final
+    /// TODAY-only backfilled value so today's live ticks continue accumulating from there instead
+    /// of restarting at zero.</summary>
     /// <param name="includeInCdvHistory">Only true for the very first backfill batch of this
     /// underlying's day (see CdvHostedService's own "already seeded" guard) - a strike whose window
     /// entry comes later (a subsequent 30-minute re-center after ATM has moved) still gets its own
@@ -214,19 +246,19 @@ public sealed class CdvUnderlyingState
     /// series - the same limitation LiveSpreadCalculator's own CDV backfill accepts (it backfills
     /// only once, at the day's first recenter, and pads any later-added strike's contribution with
     /// zero instead of reconstructing it).</param>
-    public void SeedStrikeHistory(uint securityId, IReadOnlyList<CandleWithVolume> bars, decimal currentSpot, bool includeInCdvHistory)
+    public void SeedStrikeHistory(uint securityId, IReadOnlyList<CandleWithVolume> allBars, IReadOnlyList<CandleWithVolume> todayBars, decimal currentSpot, bool includeInCdvHistory)
     {
         lock (_lock)
         {
-            if (!_strikes.TryGetValue(securityId, out var strike) || bars.Count == 0) return;
+            if (!_strikes.TryGetValue(securityId, out var strike) || allBars.Count == 0) return;
 
-            strike.SeedHistory(bars.Select(b => (b.ToCandle(), b.Volume)));
-            if (!includeInCdvHistory) return;
+            strike.SeedHistory(allBars.Select(b => (b.ToCandle(), b.Volume)));
+            if (!includeInCdvHistory || todayBars.Count == 0) return;
 
             var weight = currentSpot > 0 ? ComputeDeltaWeight(strike.Strike, currentSpot, strike.IsCall) : 0m;
             var increments = strike.IsCall ? _backfillCeIncrements : _backfillPeIncrements;
             decimal running = 0;
-            foreach (var bar in bars.OrderBy(b => b.Time))
+            foreach (var bar in todayBars.OrderBy(b => b.Time))
             {
                 var delta = BarProxyDelta(bar) * weight;
                 increments[bar.Time] = increments.GetValueOrDefault(bar.Time) + delta;
