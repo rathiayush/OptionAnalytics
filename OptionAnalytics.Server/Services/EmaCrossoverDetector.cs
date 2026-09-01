@@ -35,6 +35,39 @@ public static class EmaCrossoverDetector
         return cd > 0 ? "Bullish" : "Bearish";
     }
 
+    /// <summary>Every bar's EMA9/21 bias computed in one pass (Bullish/Bearish once there are
+    /// enough bars, null before that or on an exact tie) - what BacktestService needs to replay a
+    /// leg's whole history without CurrentDirection's per-call recomputation, which would be
+    /// quadratic if called once per bar over a multi-day series.</summary>
+    public static IReadOnlyList<(DateTimeOffset Time, string? Direction)> DirectionSeries(IReadOnlyList<Candle> closedBars)
+    {
+        if (closedBars.Count < SlowPeriod + 1)
+            return closedBars.Select(c => (c.Time, (string?)null)).ToList();
+
+        var quotes = closedBars.Select(c => new Quote
+        {
+            Date = c.Time.UtcDateTime,
+            Open = c.Open,
+            High = c.High,
+            Low = c.Low,
+            Close = c.Close,
+            Volume = 0,
+        }).ToList();
+
+        var ema9 = quotes.GetEma(FastPeriod).ToList();
+        var ema21 = quotes.GetEma(SlowPeriod).ToList();
+
+        var result = new List<(DateTimeOffset, string?)>(closedBars.Count);
+        for (var i = 0; i < closedBars.Count; i++)
+        {
+            string? direction = null;
+            if (ema9[i].Ema is { } fast && ema21[i].Ema is { } slow && fast != slow)
+                direction = fast > slow ? "Bullish" : "Bearish";
+            result.Add((closedBars[i].Time, direction));
+        }
+        return result;
+    }
+
     private static (decimal? Prev, decimal? Curr) EmaDiffs(IReadOnlyList<Candle> closedBars)
     {
         // Need at least one prior bar beyond the slow EMA's own seed window, so there is a

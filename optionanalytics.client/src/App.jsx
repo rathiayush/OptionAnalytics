@@ -2,6 +2,8 @@ import { Component, useEffect, useMemo, useRef, useState } from 'react'
 import { Select, Space, Typography, Spin, Card, Button, Modal, Table, Tag } from 'antd'
 import { createChart, createSeriesMarkers, CandlestickSeries, LineSeries, CrosshairMode, LineStyle } from 'lightweight-charts'
 import * as signalR from '@microsoft/signalr'
+import { Routes, Route, NavLink } from 'react-router-dom'
+import BacktestPage from './BacktestPage.jsx'
 import './App.css'
 
 const { Title, Text } = Typography
@@ -509,6 +511,18 @@ function DirectionTag({ direction }) {
   return <Tag color={direction === 'Bullish' ? UP_COLOR : DOWN_COLOR}>{direction === 'Bullish' ? '▲ Bullish' : '▼ Bearish'}</Tag>
 }
 
+// Shared between DashboardPage and BacktestPage - just two links, styled to blend into each
+// page's own header Space rather than looking like a separate site-wide bar.
+function NavBar() {
+  const linkStyle = ({ isActive }) => ({ color: isActive ? '#fff' : '#9aa4b2', fontWeight: isActive ? 600 : 400 })
+  return (
+    <Space size={16}>
+      <NavLink to="/" style={linkStyle}>Dashboard</NavLink>
+      <NavLink to="/backtest" style={linkStyle}>Backtrack</NavLink>
+    </Space>
+  )
+}
+
 // The notification engine's live feed. Two tiers, both from the backend's ConfluenceAlertService:
 // a status board showing each underlying's CURRENT spot/ATM-CE/ATM-PE EMA9/21 bias (continuously
 // kept up to date, not just on a crossover), and below it every alert that's fired - a lightweight
@@ -643,7 +657,7 @@ function LookbackTable({ underlying, cdvSnapshot }) {
   )
 }
 
-export default function App() {
+function DashboardPage() {
   const [underlyings, setUnderlyings] = useState([])
   const [selected, setSelected] = useState(null)
   const [timeframe, setTimeframe] = useState(1)
@@ -846,6 +860,7 @@ export default function App() {
       <Space direction="vertical" size={20} style={{ width: '100%' }}>
         <Space align="center" size={16} wrap>
           <Title level={3} style={{ margin: 0 }}>Option Analytics</Title>
+          <NavBar />
           <Select
             value={selected}
             onChange={setSelected}
@@ -950,3 +965,14 @@ export default function App() {
     </div>
   )
 }
+
+export default function App() {
+  return (
+    <Routes>
+      <Route path="/" element={<DashboardPage />} />
+      <Route path="/backtest" element={<BacktestPage />} />
+    </Routes>
+  )
+}
+
+export { UP_COLOR, DOWN_COLOR, fmtPrice, NavBar, DirectionTag, ALERT_KIND_LABEL }

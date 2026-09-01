@@ -52,6 +52,10 @@ builder.Services.AddHostedService<EmaCrossoverAlertService>();
 builder.Services.AddSingleton<ConfluenceAlertService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<ConfluenceAlertService>());
 
+// Stateless - reads SpotFeedHostedService/CdvHostedService's in-memory history fresh on every
+// request, nothing to run in the background. See BacktestController/BacktestService.
+builder.Services.AddSingleton<BacktestService>();
+
 builder.Services.AddSignalR();
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
