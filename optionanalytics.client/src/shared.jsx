@@ -1,5 +1,5 @@
-import { Space, Tag } from 'antd'
-import { NavLink } from 'react-router-dom'
+import { Menu, Tag } from 'antd'
+import { useLocation, useNavigate } from 'react-router-dom'
 
 // Constants/components shared between App.jsx's DashboardPage and BacktestPage.jsx - kept in
 // their own module (not exported from App.jsx) specifically to avoid a circular import: App.jsx
@@ -23,14 +23,25 @@ export function DirectionTag({ direction }) {
   return <Tag color={direction === 'Bullish' ? UP_COLOR : DOWN_COLOR}>{direction === 'Bullish' ? '▲ Bullish' : '▼ Bearish'}</Tag>
 }
 
-// Shared between DashboardPage and BacktestPage - just two links, styled to blend into each
-// page's own header Space rather than looking like a separate site-wide bar.
+const NAV_ITEMS = [
+  { key: '/', label: 'Dashboard' },
+  { key: '/backtest', label: 'Backtrack' },
+]
+
+// Shared between DashboardPage and BacktestPage - a proper horizontal menu (not just plain text
+// links) so it reads as real site navigation, sitting inline in each page's own header row with a
+// transparent background so it blends into the page rather than looking like a separate bar.
 export function NavBar() {
-  const linkStyle = ({ isActive }) => ({ color: isActive ? '#fff' : '#9aa4b2', fontWeight: isActive ? 600 : 400 })
+  const location = useLocation()
+  const navigate = useNavigate()
   return (
-    <Space size={16}>
-      <NavLink to="/" style={linkStyle}>Dashboard</NavLink>
-      <NavLink to="/backtest" style={linkStyle}>Backtrack</NavLink>
-    </Space>
+    <Menu
+      mode="horizontal"
+      theme="dark"
+      selectedKeys={[location.pathname]}
+      items={NAV_ITEMS}
+      onClick={({ key }) => navigate(key)}
+      style={{ minWidth: 260, background: 'transparent', borderBottom: 'none', lineHeight: '32px' }}
+    />
   )
 }
