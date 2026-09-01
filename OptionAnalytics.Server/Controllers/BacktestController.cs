@@ -20,8 +20,8 @@ public sealed class BacktestController : ControllerBase
     /// the given timeframe (1/2/5-minute bars, aggregated from the native 1-minute series), most
     /// recent first.</summary>
     [HttpGet("{underlying}")]
-    public IActionResult Get(string underlying, [FromQuery] int timeframe = 1) =>
-        Ok(_backtest.Replay(underlying.ToUpperInvariant(), timeframe));
+    public IActionResult Get(string underlying, [FromQuery] string strategy = "otm-confluence", [FromQuery] int timeframe = 1) =>
+        Ok(_backtest.ReplayForStrategy(underlying.ToUpperInvariant(), strategy, Math.Max(1, timeframe), ReadParameters()));
 
     /// <summary>Every registered strategy's metadata - key, name, description, and the parameter
     /// controls the Backtrack page should render for it. See Services.Backtesting.IBacktestStrategy
@@ -38,7 +38,13 @@ public sealed class BacktestController : ControllerBase
     /// Any parameter the strategy declares but the caller omits falls back to that parameter's own
     /// default (see BacktestService.RunStrategy).</summary>
     [HttpGet("{underlying}/trades")]
-    public IActionResult GetTrades(string underlying, [FromQuery] string strategy = "otm-confluence", [FromQuery] int timeframe = 1)
+    public IActionResult GetTrades(string underlying, [FromQuery] string strategy = "otm-confluence", [FromQuery] int timeframe = 1) =>
+        Ok(_backtest.RunStrategy(underlying.ToUpperInvariant(), strategy, Math.Max(1, timeframe), ReadParameters()));
+
+    /// <summary>Every query param other than "strategy"/"timeframe" that parses as a number,
+    /// passed through as the selected strategy's own parameter - generic on purpose, so a new
+    /// strategy's parameters reach it with no controller change.</summary>
+    private Dictionary<string, decimal> ReadParameters()
     {
         var parameters = new Dictionary<string, decimal>();
         foreach (var (key, value) in Request.Query)
@@ -46,7 +52,6 @@ public sealed class BacktestController : ControllerBase
             if (key is "strategy" or "timeframe") continue;
             if (decimal.TryParse(value, out var parsed)) parameters[key] = parsed;
         }
-
-        return Ok(_backtest.RunStrategy(underlying.ToUpperInvariant(), strategy, Math.Max(1, timeframe), parameters));
+        return parameters;
     }
 }

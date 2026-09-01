@@ -78,12 +78,33 @@ public sealed class BacktestService
     /// isn't recognized, or there's no history backfilled yet.</summary>
     public IReadOnlyList<BacktestTrade> RunStrategy(string underlying, string strategyKey, int timeframeMinutes, IReadOnlyDictionary<string, decimal> parameters)
     {
-        if (!_strategies.TryGetValue(strategyKey, out var strategy)) return Array.Empty<BacktestTrade>();
+        var prepared = Prepare(underlying, strategyKey, timeframeMinutes, parameters);
+        return prepared is not { } p ? Array.Empty<BacktestTrade>() : p.Strategy.Simulate(p.Context, p.Parameters);
+    }
+
+    /// <summary>The signals the given strategy itself reasons about (see
+    /// IBacktestStrategy.EntrySignals) - so the Backtrack page's signal table always describes the
+    /// strategy currently selected rather than one fixed rule. Falls back to the plain confluence
+    /// replay when the strategy key isn't recognized, which is what the page shows before a
+    /// strategy has loaded.</summary>
+    public IReadOnlyList<BacktestSignal> ReplayForStrategy(string underlying, string strategyKey, int timeframeMinutes, IReadOnlyDictionary<string, decimal> parameters)
+    {
+        var prepared = Prepare(underlying, strategyKey, timeframeMinutes, parameters);
+        return prepared is not { } p ? Replay(underlying, timeframeMinutes) : p.Strategy.EntrySignals(p.Context, p.Parameters);
+    }
+
+    /// <summary>Resolves the strategy, does the shared replay/aggregation work once and merges the
+    /// caller's parameters over that strategy's declared defaults - everything both RunStrategy and
+    /// ReplayForStrategy need, so neither can drift from the other.</summary>
+    private (IBacktestStrategy Strategy, BacktestStrategyContext Context, IReadOnlyDictionary<string, decimal> Parameters)? Prepare(
+        string underlying, string strategyKey, int timeframeMinutes, IReadOnlyDictionary<string, decimal> parameters)
+    {
+        if (!_strategies.TryGetValue(strategyKey, out var strategy)) return null;
         if (!_spotFeed.States.TryGetValue(underlying, out var spotState) || !_cdv.States.TryGetValue(underlying, out var cdvState))
-            return Array.Empty<BacktestTrade>();
+            return null;
 
         var timeframe = Math.Max(1, timeframeMinutes);
-        var (_, spotBars, confluenceAscending) = ReplayCore(underlying, spotState, cdvState, timeframe);
+        var (allSignals, spotBars, confluenceAscending) = ReplayCore(underlying, spotState, cdvState, timeframe);
 
         var context = new BacktestStrategyContext
         {
@@ -92,12 +113,17 @@ public sealed class BacktestService
             Step = spotState.Step,
             SpotBars = spotBars,
             ConfluenceSignalsAscending = confluenceAscending,
+            AllSignals = allSignals,
+            ObvCeSeries = BacktestUtil.AggregateLine(cdvState.GetObvSeries(true), timeframe),
+            ObvPeSeries = BacktestUtil.AggregateLine(cdvState.GetObvSeries(false), timeframe),
+            CdvCeSeries = BacktestUtil.AggregateLine(cdvState.GetSmoothedCdvSeries(true), timeframe),
+            CdvPeSeries = BacktestUtil.AggregateLine(cdvState.GetSmoothedCdvSeries(false), timeframe),
             GetOptionBars = (strike, isCall) => BacktestUtil.AggregateCandles(cdvState.GetStrikeClosedCandles(strike, isCall), timeframe),
         };
 
         var mergedParameters = strategy.Parameters.ToDictionary(p => p.Key, p => parameters.TryGetValue(p.Key, out var v) ? v : p.Default);
 
-        return strategy.Simulate(context, mergedParameters);
+        return (strategy, context, mergedParameters);
     }
 
     /// <summary>Shared by Replay and RunStrategy - aggregates all three legs to the requested

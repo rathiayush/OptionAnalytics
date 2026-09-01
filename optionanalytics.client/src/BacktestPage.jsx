@@ -1,27 +1,34 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Select, Space, Typography, Spin, Card, Button, Table, Tag, InputNumber, Statistic, Row, Col } from 'antd'
 import { ReloadOutlined, PlayCircleOutlined } from '@ant-design/icons'
-import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, NavBar, DirectionTag, ALERT_KIND_LABEL, fmtIstDateTime, fmtIstTime } from './shared.jsx'
+import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, NavBar, DirectionTag, ALERT_KIND_LABEL, fmtIstDateTime, fmtIstTime, fmtPrice, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying } from './shared.jsx'
 
 const { Title, Text } = Typography
-
-const TIMEFRAME_OPTIONS = [
-  { value: 1, label: '1 min' },
-  { value: 3, label: '3 min' },
-  { value: 5, label: '5 min' },
-  { value: 15, label: '15 min' },
-]
 
 // Buy/Sell deliberately aren't the up/down colors - a SOLD position is neither bullish nor
 // bearish on its own leg's premium, and reusing green/red here would read as "profitable".
 const BUY_COLOR = '#4dabf7'
 const SELL_COLOR = '#c084fc'
 
-const EXIT_REASON_COLOR = { TakeProfit: UP_COLOR, StopLoss: DOWN_COLOR, EndOfDay: undefined, NoData: undefined }
-const EXIT_REASON_LABEL = { TakeProfit: 'Take Profit', StopLoss: 'Stop Loss', EndOfDay: 'End of Day', NoData: 'No Data' }
+const SIGNAL_KIND_LABEL = { ...ALERT_KIND_LABEL, Entry: 'ENTRY', Rejected: 'rejected' }
+
+const EXIT_REASON_COLOR = { TakeProfit: UP_COLOR, StopLoss: DOWN_COLOR, EndOfDay: undefined, NoData: undefined, SignalExit: undefined }
+// SignalExit is a strategy's own exit rule firing rather than a price level being hit - the 5 EMA
+// strategy's "get out when spot comes back and touches the EMA" is the one that uses it today.
+const EXIT_REASON_LABEL = { TakeProfit: 'Take Profit', StopLoss: 'Stop Loss', EndOfDay: 'End of Day', NoData: 'No Data', SignalExit: 'Strategy Exit' }
+
+function isConfluenceLabel(kind) {
+  return kind === 'Confluence' ? 'CONFLUENCE' : (SIGNAL_KIND_LABEL[kind] ?? kind)
+}
 
 function fmtOption(row) {
   return `${row.strike} ${row.optionType}`
+}
+
+function renderCrossState(v) {
+  if (!v) return <Text type="secondary">—</Text>
+  const isUp = v === 'Up'
+  return <Tag color={isUp ? UP_COLOR : DOWN_COLOR}>{isUp ? '▲ Up' : '▼ Down'}</Tag>
 }
 
 function renderPnl(v) {
@@ -39,8 +46,9 @@ function renderPnl(v) {
 // up here with no frontend change needed.
 export default function BacktestPage() {
   const [underlyings, setUnderlyings] = useState([])
-  const [selected, setSelected] = useState(null)
-  const [timeframe, setTimeframe] = useState(1)
+  // Shared with every other page and remembered across reloads - see usePersistedState.
+  const [selected, setSelected] = usePersistedState(STORED_UNDERLYING, null)
+  const [timeframe, setTimeframe] = usePersistedState(STORED_TIMEFRAME, 1)
 
   const [signals, setSignals] = useState(null)
   const [signalsLoading, setSignalsLoading] = useState(false)
@@ -58,7 +66,7 @@ export default function BacktestPage() {
       .then((r) => r.json())
       .then((list) => {
         setUnderlyings(list)
-        if (list.length > 0) setSelected(list[0].underlying)
+        setSelected((current) => pickUnderlying(list, current))
       })
       .catch((err) => console.error('Failed to load underlyings:', err))
 
@@ -79,10 +87,14 @@ export default function BacktestPage() {
     setParamValues(Object.fromEntries(strategy.parameters.map((p) => [p.key, p.default])))
   }, [strategy])
 
-  const loadSignals = (underlying, tf) => {
-    if (!underlying) return
+  // The signal table describes whichever strategy is selected - each strategy reports the signals
+  // IT reasons about (see the backend's IBacktestStrategy.EntrySignals), so the table always
+  // explains the trades listed under it instead of always describing the confluence rule.
+  const loadSignals = () => {
+    if (!selected || !strategyKey) return
     setSignalsLoading(true)
-    fetch(`/api/backtest/${underlying}?timeframe=${tf}`)
+    const paramQuery = Object.entries(paramValues).map(([k, v]) => `${k}=${v}`).join('&')
+    fetch(`/api/backtest/${selected}?strategy=${strategyKey}&timeframe=${timeframe}&${paramQuery}`)
       .then((r) => r.json())
       .then((data) => setSignals(data ?? []))
       .catch((err) => console.error('Failed to load backtest signals:', err))
@@ -103,15 +115,12 @@ export default function BacktestPage() {
   // Signals refresh automatically on underlying/timeframe - those are discrete dropdown choices,
   // not something typed. Strategy parameters only apply when "Run" is clicked, so adjusting them
   // doesn't fire a request on every keystroke.
-  useEffect(() => {
-    loadSignals(selected, timeframe)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected, timeframe])
-
-  // A first trade run once a strategy is actually selected (its default parameters are ready) -
-  // and again whenever underlying/timeframe/strategy change, same "discrete choice" reasoning.
+  // Signals and trades both refresh together on underlying/timeframe/strategy - all discrete
+  // dropdown choices. Strategy parameters only apply when "Run" is clicked, so adjusting them
+  // doesn't fire a request on every keystroke.
   useEffect(() => {
     if (!strategy) return
+    loadSignals()
     runTrades()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected, timeframe, strategyKey, strategy])
@@ -139,15 +148,26 @@ export default function BacktestPage() {
       key: 'kind',
       width: 160,
       render: (kind, row) => {
-        const isConfluence = kind === 'Confluence'
+        // A Confluence or an Entry is a signal that would actually be traded, so both get the
+        // directional colour and bold; a Rejected one is deliberately muted - it is there to show
+        // what the filters threw out and why, not to compete with the real signals.
+        const isActionable = kind === 'Confluence' || kind === 'Entry'
+        const isRejected = kind === 'Rejected'
         return (
-          <Tag color={isConfluence ? (row.direction === 'Bullish' ? UP_COLOR : DOWN_COLOR) : undefined} style={{ fontWeight: isConfluence ? 700 : 400 }}>
-            {isConfluence ? 'CONFLUENCE' : (ALERT_KIND_LABEL[kind] ?? kind)}
+          <Tag
+            color={isActionable ? (row.direction === 'Bullish' ? UP_COLOR : DOWN_COLOR) : undefined}
+            style={{ fontWeight: isActionable ? 700 : 400, opacity: isRejected ? 0.6 : 1 }}
+          >
+            {isConfluenceLabel(kind)}
           </Tag>
         )
       },
     },
     { title: 'Direction', dataIndex: 'direction', key: 'direction', width: 130, render: (direction) => <DirectionTag direction={direction} /> },
+    // Where each OBV line sits relative to the other at that signal - CE above PE is the bullish
+    // arrangement, so the two are always mirrors of each other.
+    { title: 'CE OBV', dataIndex: 'ceObvCross', key: 'ceObvCross', width: 100, render: renderCrossState },
+    { title: 'PE OBV', dataIndex: 'peObvCross', key: 'peObvCross', width: 100, render: renderCrossState },
     { title: 'Summary', dataIndex: 'summary', key: 'summary' },
   ]
 
@@ -164,6 +184,13 @@ export default function BacktestPage() {
           <Text style={{ color: row.optionType === 'CE' ? CE_COLOR : PE_COLOR }}>{fmtOption(row)}</Text>
         </Space>
       ),
+    },
+    {
+      title: 'Spot',
+      dataIndex: 'spotPrice',
+      key: 'spotPrice',
+      width: 100,
+      render: (v) => (v == null ? <Text type="secondary">—</Text> : fmtPrice(v)),
     },
     {
       title: 'Entry',
@@ -200,42 +227,14 @@ export default function BacktestPage() {
             options={underlyings.map((u) => ({ value: u.underlying, label: u.underlying }))}
           />
           <Select value={timeframe} onChange={setTimeframe} style={{ width: 120 }} options={TIMEFRAME_OPTIONS} />
-          <Button icon={<ReloadOutlined />} onClick={() => loadSignals(selected, timeframe)} loading={signalsLoading} disabled={!selected}>
+          <Button icon={<ReloadOutlined />} onClick={loadSignals} loading={signalsLoading} disabled={!selected}>
             Re-run signals
           </Button>
         </Space>
 
         <Card
           size="small"
-          title="Backtrack — Signal Replay"
-          extra={<Text type="secondary" style={{ fontSize: 12 }}>Replays EMA 9/21 + confluence logic over in-memory history</Text>}
-        >
-          <Text type="secondary">
-            Every spot / ATM CE / ATM PE EMA 9/21 flip and three-way CONFLUENCE alignment that would have
-            fired across {selected ?? 'the selected underlying'}'s currently-backfilled candle history at
-            the {timeframe}-minute timeframe, computed fresh from scratch - not the live alert log, so it
-            also covers bars that closed before this session's alert engine started.
-          </Text>
-        </Card>
-
-        {signalsLoading && !signals ? (
-          <div style={{ display: 'flex', justifyContent: 'center', padding: 40 }}>
-            <Spin size="large" />
-          </div>
-        ) : (
-          <Table
-            size="small"
-            rowKey={(row) => `${row.timeUtc}-${row.kind}`}
-            dataSource={signals ?? []}
-            columns={signalColumns}
-            pagination={{ pageSize: 25, showSizeChanger: false }}
-            locale={{ emptyText: 'No signals - not enough closed-bar history yet, or the underlying has no backfilled candles.' }}
-          />
-        )}
-
-        <Card
-          size="small"
-          title="Simulated Strategy Backtest — every Confluence signal"
+          title="Strategy Backtest"
           extra={<Text type="secondary" style={{ fontSize: 12 }}>{strategy?.description ?? 'Loading strategies…'}</Text>}
         >
           <Space direction="vertical" size={16} style={{ width: '100%' }}>
@@ -274,7 +273,7 @@ export default function BacktestPage() {
                   )}
                 </Space>
               ))}
-              <Button type="primary" icon={<PlayCircleOutlined />} onClick={runTrades} loading={tradesLoading} disabled={!selected || !strategyKey}>
+              <Button type="primary" icon={<PlayCircleOutlined />} onClick={() => { loadSignals(); runTrades() }} loading={tradesLoading} disabled={!selected || !strategyKey}>
                 Run
               </Button>
             </Space>
@@ -305,6 +304,35 @@ export default function BacktestPage() {
             )}
           </Space>
         </Card>
+
+        <Card
+          size="small"
+          title={`Signals — ${strategy?.name ?? 'strategy'}`}
+          extra={<Text type="secondary" style={{ fontSize: 12 }}>What the strategy above saw, newest first</Text>}
+        >
+          <Text type="secondary">
+            Every signal the <b>{strategy?.name ?? 'selected strategy'}</b> rule examined across{' '}
+            {selected ?? 'the selected underlying'}'s currently-backfilled candle history at the{' '}
+            {timeframe}-minute timeframe, computed fresh from scratch - not the live alert log, so it also
+            covers bars that closed before this session's alert engine started. Rows it would actually have
+            traded are highlighted; the muted ones show what its filters rejected, and why.
+          </Text>
+        </Card>
+
+        {signalsLoading && !signals ? (
+          <div style={{ display: 'flex', justifyContent: 'center', padding: 40 }}>
+            <Spin size="large" />
+          </div>
+        ) : (
+          <Table
+            size="small"
+            rowKey={(row) => `${row.timeUtc}-${row.kind}`}
+            dataSource={signals ?? []}
+            columns={signalColumns}
+            pagination={{ pageSize: 25, showSizeChanger: false }}
+            locale={{ emptyText: 'No signals - not enough closed-bar history yet, or the underlying has no backfilled candles.' }}
+          />
+        )}
       </Space>
     </div>
   )

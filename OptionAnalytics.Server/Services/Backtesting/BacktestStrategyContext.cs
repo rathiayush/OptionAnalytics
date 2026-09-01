@@ -28,6 +28,28 @@ public sealed class BacktestStrategyContext
     /// ascending (oldest first) - the natural order to walk when simulating trades one at a time.</summary>
     public required IReadOnlyList<BacktestSignal> ConfluenceSignalsAscending { get; init; }
 
+    /// <summary>Every signal the shared replay produced - individual leg flips as well as
+    /// Confluences - newest first. A strategy that works off these can hand them straight back as
+    /// its own EntrySignals view; one with its own entry rule ignores them and reports its own.</summary>
+    public required IReadOnlyList<BacktestSignal> AllSignals { get; init; }
+
+    /// <summary>The delta-weighted CE/PE OBV series (see CdvUnderlyingState.GetObvSeries), already
+    /// aggregated to TimeframeMinutes - day-baselined and EMA-smoothed exactly as the dashboard's
+    /// OBV chart plots it, so a strategy measuring an OBV surge measures the same numbers the chart
+    /// shows. CDV deliberately isn't here: it is day-scoped (it resets every trading day and only
+    /// today's series exists in memory), so it cannot answer a lookback question across the
+    /// multi-day window a backtest runs over, while OBV carries its full history.</summary>
+    public required IReadOnlyList<ObvPoint> ObvCeSeries { get; init; }
+    public required IReadOnlyList<ObvPoint> ObvPeSeries { get; init; }
+
+    /// <summary>The EMA-smoothed CE/PE CDV series (see CdvUnderlyingState.GetSmoothedCdvSeries),
+    /// aggregated to TimeframeMinutes - the same numbers the CDV lookback table reports on. Unlike
+    /// OBV this is DAY-SCOPED: CDV resets every trading day, so only the current day is ever
+    /// present, and a strategy that requires CDV confirmation can therefore only ever produce
+    /// signals within today's session however far back the rest of the backtest reaches.</summary>
+    public required IReadOnlyList<ObvPoint> CdvCeSeries { get; init; }
+    public required IReadOnlyList<ObvPoint> CdvPeSeries { get; init; }
+
     /// <summary>Closed premium candles (already aggregated to TimeframeMinutes) for one specific
     /// CE/PE strike - not necessarily the current ATM one. Returns empty if that strike was never
     /// tracked (fell outside the underlying's ATM+-8 window for its whole in-memory history).

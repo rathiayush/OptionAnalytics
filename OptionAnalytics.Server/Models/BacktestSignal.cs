@@ -9,4 +9,13 @@ public sealed record BacktestSignal(
     DateTimeOffset TimeUtc,
     string Kind,
     string Direction,
-    string Summary);
+    string Summary)
+{
+    /// <summary>Where the CE and PE OBV lines stood relative to each other at this signal - "Up"
+    /// for the line that is on top, "Down" for the one underneath, so the two are always mirrors.
+    /// CE above PE is the bullish arrangement (the Pine indicator's "Green crossed Red") and CE
+    /// below PE the bearish one. Null when the strategy doesn't measure OBV at all, which is why
+    /// these are init-only extras rather than part of the record's positional shape.</summary>
+    public string? CeObvCross { get; init; }
+    public string? PeObvCross { get; init; }
+}

@@ -4,7 +4,8 @@ import { createChart, createSeriesMarkers, CandlestickSeries, LineSeries, Crossh
 import * as signalR from '@microsoft/signalr'
 import { Routes, Route } from 'react-router-dom'
 import BacktestPage from './BacktestPage.jsx'
-import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, fmtPrice, fmtIstTime, DirectionTag, NavBar } from './shared.jsx'
+import TriggersPage from './TriggersPage.jsx'
+import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, fmtPrice, fmtIstTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying } from './shared.jsx'
 import './App.css'
 
 const { Title, Text } = Typography
@@ -14,12 +15,7 @@ const EMA_SLOW_COLOR = '#4dabf7'
 const AXIS_COLOR = '#9aa4b2'
 const GRID_COLOR = '#ffffff14'
 const BORDER_COLOR = '#ffffff22'
-
-const TIMEFRAME_OPTIONS = [
-  { value: 1, label: '1 min' },
-  { value: 3, label: '3 min' },
-  { value: 5, label: '5 min' },
-]
+const RESET_MARKER_COLOR = '#ffd54f'
 
 // CDV and OBV are raw traded-quantity running totals, so they reach into the hundreds of millions
 // - at full precision the axis labels are an unreadable wall of digits. Both charts divide their
@@ -38,6 +34,50 @@ const VALUE_UNIT_OPTIONS = [
 function useScaledLine(points, unitKey) {
   const { divisor } = VALUE_UNITS[unitKey]
   return useMemo(() => points.map((p) => ({ ...p, value: p.value / divisor })), [points, divisor])
+}
+
+// Chart times are already IST-shifted (see IST_OFFSET_SECONDS), so reading the shifted value AS
+// UTC gives the IST calendar day directly - the same trick the axis formatters use.
+function istDayKey(chartTime) {
+  return new Date(chartTime * 1000).toISOString().slice(0, 10)
+}
+
+// A "RESET" marker on the first bar of each new IST trading day - the point where CDV resets
+// outright and OBV re-baselines, so a level after it is not comparable with one before it. Mirrors
+// the Pine indicators' own daily-reset marker. The very first day in view gets no marker: there is
+// no transition to see there, just the left edge of the loaded history.
+function dayResetMarkers(points) {
+  const markers = []
+  let previousDay = null
+
+  for (const point of points) {
+    const day = istDayKey(point.time)
+    if (previousDay !== null && day !== previousDay) {
+      markers.push({ time: point.time, position: 'aboveBar', color: RESET_MARKER_COLOR, shape: 'square', text: 'RESET' })
+    }
+    previousDay = day
+  }
+  return markers
+}
+
+// CDV gets today's line solid and the previous trading day dashed underneath it, because the
+// backend serves those as two separate series. OBV comes back as ONE continuous multi-day series
+// instead, so it was drawing every day as one solid line with no way to tell them apart - this
+// splits it the same way so both charts read identically: the most recent IST day solid, the day
+// before it dashed, anything older dropped (CDV never showed more than those two either).
+function useTodayAndPreviousDay(points) {
+  return useMemo(() => {
+    if (points.length === 0) return { today: [], previous: [] }
+
+    const days = [...new Set(points.map((p) => istDayKey(p.time)))].sort()
+    const todayKey = days[days.length - 1]
+    const previousKey = days.length > 1 ? days[days.length - 2] : null
+
+    return {
+      today: points.filter((p) => istDayKey(p.time) === todayKey),
+      previous: previousKey ? points.filter((p) => istDayKey(p.time) === previousKey) : [],
+    }
+  }, [points])
 }
 
 // The running CE/PE totals printed under the CDV chart, in whatever unit that chart is showing.
@@ -332,6 +372,12 @@ function PriceChart({ bars, height = 360 }) {
 
   const sanitizedBars = useMemo(() => sanitizeSeries(bars), [bars])
   const { ema9Points, ema21Points, markers } = useEmaCrossover(sanitizedBars)
+  // EMA crossover markers plus a RESET marker at each new trading day, merged into the one
+  // marker list this series can hold - lightweight-charts wants them time-ascending.
+  const allMarkers = useMemo(
+    () => [...markers, ...dayResetMarkers(sanitizedBars)].sort((a, b) => a.time - b.time),
+    [markers, sanitizedBars],
+  )
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -395,8 +441,8 @@ function PriceChart({ bars, height = 360 }) {
   }, [ema9Points, ema21Points])
 
   useEffect(() => {
-    markersRef.current?.setMarkers(markers)
-  }, [markers])
+    markersRef.current?.setMarkers(allMarkers)
+  }, [allMarkers])
 
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }
@@ -414,6 +460,7 @@ function CeVsPeChart({ ceSeries, peSeries, prevCeSeries = [], prevPeSeries = [],
   const peRef = useRef(null)
   const prevCeRef = useRef(null)
   const prevPeRef = useRef(null)
+  const markersRef = useRef(null)
   // See PriceChart's identical hasFitRef for why this only fits once per mount, not on every live update.
   const hasFitRef = useRef(false)
   const sanitizedCe = useMemo(() => sanitizeSeries(ceSeries), [ceSeries])
@@ -439,6 +486,7 @@ function CeVsPeChart({ ceSeries, peSeries, prevCeSeries = [], prevPeSeries = [],
     prevPeRef.current = chart.addSeries(LineSeries, { color: PE_COLOR, lineWidth: 1, lineStyle: LineStyle.Dashed, title: 'PE (prev day)', priceLineVisible: false, crosshairMarkerVisible: false })
     ceRef.current = chart.addSeries(LineSeries, { color: CE_COLOR, lineWidth: 2, title: 'CE', priceLineVisible: false })
     peRef.current = chart.addSeries(LineSeries, { color: PE_COLOR, lineWidth: 2, title: 'PE', priceLineVisible: false })
+    markersRef.current = createSeriesMarkers(ceRef.current, [])
     hasFitRef.current = false
 
     const onResize = () => {
@@ -456,6 +504,7 @@ function CeVsPeChart({ ceSeries, peSeries, prevCeSeries = [], prevPeSeries = [],
       peRef.current = null
       prevCeRef.current = null
       prevPeRef.current = null
+      markersRef.current = null
     }
   }, [height])
 
@@ -471,6 +520,18 @@ function CeVsPeChart({ ceSeries, peSeries, prevCeSeries = [], prevPeSeries = [],
       hasFitRef.current = true
     }
   }, [sanitizedCe, sanitizedPe, sanitizedPrevCe, sanitizedPrevPe])
+
+  // The day boundary is the seam between the previous-day series and today's, so the markers come
+  // off the two concatenated - and they hang on the CE series, which is the one that has a point
+  // at that instant.
+  const resetMarkers = useMemo(
+    () => dayResetMarkers([...sanitizedPrevCe, ...sanitizedCe]),
+    [sanitizedPrevCe, sanitizedCe],
+  )
+
+  useEffect(() => {
+    markersRef.current?.setMarkers(resetMarkers)
+  }, [resetMarkers])
 
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }
@@ -506,6 +567,69 @@ class ChartErrorBoundary extends Component {
     }
     return this.props.children
   }
+}
+
+// The picker's "follow the ATM" choice. A sentinel rather than null so it survives antd's Select
+// round-trip cleanly and reads as a deliberate choice everywhere it is compared against.
+const ATM_STRIKE = 'atm'
+
+// Chooses which strike the two option charts show. Defaults to following the ATM, which is what
+// this page has always done; picking a strike pins both charts to it.
+//
+// Strikes the app tracks live (the CDV ATM+-8 window) are labelled as such: those charts update as
+// ticks arrive, while any other strike is served from Dhan's intraday history and only advances
+// when the page refetches it - a minute-by-minute beat rather than tick-by-tick. Premium and open
+// interest come from Dhan's Option Chain API and are simply absent when that call isn't available,
+// which is why they are only ever suffixes on a label that stands on its own without them.
+function StrikePicker({ chain, value, onChange, live }) {
+  const strikes = chain?.strikes ?? []
+
+  const describe = (row) => {
+    const parts = []
+    if (row.ceLastPrice != null) parts.push(`CE ${fmtPrice(row.ceLastPrice)}`)
+    if (row.peLastPrice != null) parts.push(`PE ${fmtPrice(row.peLastPrice)}`)
+    return parts.join(' · ')
+  }
+
+  const options = [
+    { value: ATM_STRIKE, label: 'ATM (follows spot)' },
+    ...strikes.map((row) => ({
+      value: row.strike,
+      label: (
+        <Space size={8}>
+          <span>{row.strike}</span>
+          {row.isAtm && <Tag color={UP_COLOR} style={{ marginInlineEnd: 0 }}>ATM</Tag>}
+          {describe(row) && <Text type="secondary" style={{ fontSize: 12 }}>{describe(row)}</Text>}
+        </Space>
+      ),
+    })),
+  ]
+
+  return (
+    <Card size="small">
+      <Space size={16} wrap align="center">
+        <Text type="secondary" style={{ fontSize: 12 }}>Option charts</Text>
+        <Select
+          value={value}
+          onChange={onChange}
+          style={{ width: 280 }}
+          options={options}
+          disabled={strikes.length === 0}
+          optionLabelProp="label"
+          showSearch
+          filterOption={(input, option) => String(option.value).includes(input)}
+        />
+        {live
+          ? <Tag color={UP_COLOR}>Live - updates on every tick</Tag>
+          : <Tag>History - refreshes each minute</Tag>}
+        {chain && !chain.quotesAvailable && (
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            Premiums unavailable - Dhan&apos;s option chain quote is rate-limited to one call every 3 seconds and returns nothing outside market hours.
+          </Text>
+        )}
+      </Space>
+    </Card>
+  )
 }
 
 function ChartCard({ title, extra, children, empty }) {
@@ -662,20 +786,22 @@ function renderPercent(v) {
   return <Text style={{ color }}>{v > 0 ? '+' : ''}{v.toFixed(2)}%</Text>
 }
 
-// CE/PE %-change over configurable lookback windows (default 3/5/7 bars), off the backend's
-// EMA-smoothed CDV series - mirrors LiveSpreadCalculator's own "Multi-Lookback" table for the same
-// Pine indicator. The bars selector accepts free-form numbers (antd's tags mode), not just the
-// preset options, so "configurable" isn't limited to a fixed list.
-function LookbackTable({ underlying, cdvSnapshot }) {
-  const [bars, setBars] = useState(DEFAULT_LOOKBACK_BARS)
+// CE/PE %-change over configurable lookback windows, off the backend's EMA-smoothed series -
+// mirrors the "Multi-Lookback" table in the Pine indicators these are ported from, and is used for
+// both CDV (endpoint "lookback", default 3/5/7 bars) and OBV (endpoint "obv-lookback", default
+// 20/25/30 - the periods that Pine's own OBV multi-lookback table defaults to). The bars selector
+// accepts free-form numbers (antd's tags mode), not just the preset options, so "configurable"
+// isn't limited to a fixed list.
+function LookbackTable({ underlying, cdvSnapshot, endpoint = 'lookback', title = 'CE / PE Lookback % Change', defaultBars = DEFAULT_LOOKBACK_BARS }) {
+  const [bars, setBars] = useState(defaultBars)
   const [table, setTable] = useState(null)
   const lastBarTimeRef = useRef(null)
 
   const load = (barsToUse) => {
-    fetch(`/api/cdv/${underlying}/lookback?bars=${barsToUse.join(',')}`)
+    fetch(`/api/cdv/${underlying}/${endpoint}?bars=${barsToUse.join(',')}`)
       .then((r) => r.json())
       .then(setTable)
-      .catch((err) => console.error('Failed to load lookback table:', err))
+      .catch((err) => console.error(`Failed to load ${endpoint} table:`, err))
   }
 
   useEffect(() => { load(bars) }, [underlying, bars.join(',')])
@@ -696,7 +822,7 @@ function LookbackTable({ underlying, cdvSnapshot }) {
   return (
     <Card
       size="small"
-      title="CE / PE Lookback % Change"
+      title={title}
       extra={
         <Select
           mode="tags"
@@ -704,10 +830,10 @@ function LookbackTable({ underlying, cdvSnapshot }) {
           value={bars.map(String)}
           onChange={(vals) => {
             const parsed = [...new Set(vals.map((v) => parseInt(v, 10)).filter((n) => Number.isInteger(n) && n > 0))].sort((a, b) => a - b)
-            setBars(parsed.length > 0 ? parsed : DEFAULT_LOOKBACK_BARS)
+            setBars(parsed.length > 0 ? parsed : defaultBars)
           }}
           style={{ minWidth: 180 }}
-          options={[3, 5, 7, 10, 15, 20].map((n) => ({ value: String(n), label: `${n} bars` }))}
+          options={[3, 5, 7, 10, 15, 20, 25, 30].map((n) => ({ value: String(n), label: `${n} bars` }))}
         />
       }
     >
@@ -731,8 +857,9 @@ function LookbackTable({ underlying, cdvSnapshot }) {
 
 function DashboardPage() {
   const [underlyings, setUnderlyings] = useState([])
-  const [selected, setSelected] = useState(null)
-  const [timeframe, setTimeframe] = useState(1)
+  // Shared with every other page and remembered across reloads - see usePersistedState.
+  const [selected, setSelected] = usePersistedState(STORED_UNDERLYING, null)
+  const [timeframe, setTimeframe] = usePersistedState(STORED_TIMEFRAME, 1)
   // Per-chart so either can be read at its own natural magnitude - CDV and OBV don't always sit
   // in the same range as each other.
   const [cdvUnit, setCdvUnit] = useState('M')
@@ -772,6 +899,12 @@ function DashboardPage() {
   const [atmCeCandles, setAtmCeCandles] = useState([])
   const [atmPeCandles, setAtmPeCandles] = useState([])
 
+  // Which strike the two option charts show. ATM_STRIKE means "whichever is ATM right now", which
+  // is what this page did before the picker existed and stays the default - the charts then follow
+  // the ATM as it rolls. Any other value pins them to that strike.
+  const [strikeChain, setStrikeChain] = useState(null)
+  const [selectedStrike, setSelectedStrike] = useState(ATM_STRIKE)
+
   const [obvCe, setObvCe] = useState([])
   const [obvPe, setObvPe] = useState([])
 
@@ -782,26 +915,34 @@ function DashboardPage() {
       .then((r) => r.json())
       .then((list) => {
         setUnderlyings(list)
-        if (list.length > 0) setSelected(list[0].underlying)
+        setSelected((current) => pickUnderlying(list, current))
       })
       .catch((err) => console.error('Failed to load underlyings:', err))
       .finally(() => setLoading(false))
   }, [])
 
-  // Fetches ATM CE/PE candles + OBV - shared by the main [selected] load, the ATM-rollover effect
-  // below, and the manual Refresh button, all of which need the exact same "wholesale replace"
-  // fetch. Returns a settled-promise so callers that care when it's done (the Refresh button) can
-  // await it; callers that don't (the effects) just fire it.
-  const fetchAtmAndObv = (underlying, cancelledRef) => {
-    const ce = fetch(`/api/cdv/${underlying}/atm-ce/candles`)
-      .then((r) => r.json())
-      .then((data) => { if (!cancelledRef.cancelled) setAtmCeCandles(data) })
-      .catch((err) => console.error('Failed to load ATM CE candles:', err))
+  // Fetches the two option charts' candles + OBV - shared by the main [selected] load, the
+  // ATM-rollover effect below, the strike picker, and the manual Refresh button, all of which need
+  // the exact same "wholesale replace" fetch. Returns a settled-promise so callers that care when
+  // it's done (the Refresh button) can await it; callers that don't (the effects) just fire it.
+  //
+  // On ATM_STRIKE this hits the atm-ce/atm-pe endpoints, which resolve the ATM contract server-side;
+  // a pinned strike goes to the per-strike endpoint instead, which also covers strikes this app
+  // never subscribed to (it fetches their history from Dhan on demand).
+  const fetchAtmAndObv = (underlying, cancelledRef, strike = selectedStrike) => {
+    const url = (type) => (strike === ATM_STRIKE
+      ? `/api/cdv/${underlying}/atm-${type.toLowerCase()}/candles`
+      : `/api/cdv/${underlying}/option/candles?strike=${strike}&type=${type}`)
 
-    const pe = fetch(`/api/cdv/${underlying}/atm-pe/candles`)
+    const ce = fetch(url('CE'))
       .then((r) => r.json())
-      .then((data) => { if (!cancelledRef.cancelled) setAtmPeCandles(data) })
-      .catch((err) => console.error('Failed to load ATM PE candles:', err))
+      .then((data) => { if (!cancelledRef.cancelled) setAtmCeCandles(data ?? []) })
+      .catch((err) => console.error('Failed to load CE candles:', err))
+
+    const pe = fetch(url('PE'))
+      .then((r) => r.json())
+      .then((data) => { if (!cancelledRef.cancelled) setAtmPeCandles(data ?? []) })
+      .catch((err) => console.error('Failed to load PE candles:', err))
 
     const obv = fetch(`/api/cdv/${underlying}/obv-series`)
       .then((r) => r.json())
@@ -813,7 +954,7 @@ function DashboardPage() {
 
   // Everything the page shows for one underlying, fetched fresh - the initial [selected] load and
   // the manual Refresh button both just call this with a no-op-on-unmount cancelledRef.
-  const fetchAllData = (underlying, cancelledRef) => {
+  const fetchAllData = (underlying, cancelledRef, strike = selectedStrike) => {
     const candlesP = fetch(`/api/spot/${underlying}/candles`)
       .then((r) => r.json())
       .then((data) => { if (!cancelledRef.cancelled) setCandles(data) })
@@ -845,9 +986,40 @@ function DashboardPage() {
   useEffect(() => {
     if (!selected) return
     const cancelledRef = { cancelled: false }
-    fetchAllData(selected, cancelledRef)
+    // Explicitly ATM rather than whatever strike is pinned: the reset effect below is about to drop
+    // back to ATM anyway, and a pinned NIFTY strike requested against BANKNIFTY is a wasted call.
+    previousStrikeRef.current = ATM_STRIKE
+    fetchAllData(selected, cancelledRef, ATM_STRIKE)
     return () => { cancelledRef.cancelled = true }
   }, [selected])
+
+  // The strike picker's own list. Refreshed when the ATM rolls too, since it is centred on ATM and
+  // carries live premium/OI that goes stale.
+  useEffect(() => {
+    if (!selected) return
+    const cancelledRef = { cancelled: false }
+    fetch(`/api/cdv/${selected}/chain`)
+      .then((r) => r.json())
+      .then((data) => { if (!cancelledRef.cancelled) setStrikeChain(data) })
+      .catch((err) => console.error('Failed to load the option chain:', err))
+    return () => { cancelledRef.cancelled = true }
+  }, [selected, cdvSnapshot?.atmStrike])
+
+  // A strike number means nothing across underlyings (a NIFTY strike is not a BANKNIFTY one), so
+  // switching underlying always drops back to following the ATM.
+  useEffect(() => { setSelectedStrike(ATM_STRIKE) }, [selected])
+
+  // Re-fetch when the pinned strike changes. ATM_STRIKE is left to the ATM-rollover effect below,
+  // which already refetches on exactly the event that changes what "ATM" means.
+  const previousStrikeRef = useRef(ATM_STRIKE)
+  useEffect(() => {
+    if (!selected) return
+    if (previousStrikeRef.current === selectedStrike) return
+    previousStrikeRef.current = selectedStrike
+    const cancelledRef = { cancelled: false }
+    fetchAtmAndObv(selected, cancelledRef, selectedStrike)
+    return () => { cancelledRef.cancelled = true }
+  }, [selected, selectedStrike])
 
   const [refreshing, setRefreshing] = useState(false)
   const handleRefresh = () => {
@@ -878,6 +1050,10 @@ function DashboardPage() {
   // ATM CE/PE bars only change value on every tick (the premium moves), but OBV is a per-bar
   // indicator - only worth recomputing when a bar actually closes. Refetch the (small) OBV series
   // whenever either side's current-bar time moves to a new minute, not on every tick.
+  //
+  // A PINNED strike has no live current bar of its own coming down the SignalR snapshot (only the
+  // ATM contracts do), so this same once-a-minute beat is what keeps its chart moving - it refetches
+  // the strike's candles too rather than just the OBV series.
   useEffect(() => {
     if (!selected || !cdvSnapshot) return
     const ceTime = cdvSnapshot.atmCeCurrentBar?.time ?? null
@@ -886,11 +1062,16 @@ function DashboardPage() {
     if (ceTime === prev.ce && peTime === prev.pe) return
     lastObvBarTimeRef.current = { ce: ceTime, pe: peTime }
 
+    if (selectedStrike !== ATM_STRIKE) {
+      fetchAtmAndObv(selected, { cancelled: false }, selectedStrike)
+      return
+    }
+
     fetch(`/api/cdv/${selected}/obv-series`)
       .then((r) => r.json())
       .then((data) => { setObvCe(data.ce ?? []); setObvPe(data.pe ?? []) })
       .catch((err) => console.error('Failed to refresh OBV series:', err))
-  }, [selected, cdvSnapshot?.atmCeCurrentBar?.time, cdvSnapshot?.atmPeCurrentBar?.time])
+  }, [selected, selectedStrike, cdvSnapshot?.atmCeCurrentBar?.time, cdvSnapshot?.atmPeCurrentBar?.time])
 
   // ATM strike rolling (every 30 minutes, or whenever spot crosses a strike-step boundary) means
   // the ATM CE/PE contracts themselves changed identity - the previously-fetched candle history
@@ -906,9 +1087,15 @@ function DashboardPage() {
   const step = snapshot?.step
   const rounded = snapshot?.roundedPrice ?? null
 
+  // The live current bar in the CDV snapshot belongs to the ATM contract specifically, so it may
+  // only be spliced onto these charts while they ARE the ATM contract - splicing it onto a pinned
+  // strike would graft one contract's forming bar onto another contract's series.
+  const chartedStrike = selectedStrike === ATM_STRIKE ? (cdvSnapshot?.atmStrike ?? null) : selectedStrike
+  const showsAtmContract = chartedStrike != null && chartedStrike === cdvSnapshot?.atmStrike
+
   const spotBars = useAggregatedCandles(candles, snapshot?.currentBar, timeframe)
-  const atmCeBars = useAggregatedCandles(atmCeCandles, cdvSnapshot?.atmCeCurrentBar, timeframe)
-  const atmPeBars = useAggregatedCandles(atmPeCandles, cdvSnapshot?.atmPeCurrentBar, timeframe)
+  const atmCeBars = useAggregatedCandles(atmCeCandles, showsAtmContract ? cdvSnapshot?.atmCeCurrentBar : null, timeframe)
+  const atmPeBars = useAggregatedCandles(atmPeCandles, showsAtmContract ? cdvSnapshot?.atmPeCurrentBar : null, timeframe)
 
   const spotCrossState = useCrossoverState(spotBars)
   const atmCeCrossState = useCrossoverState(atmCeBars)
@@ -931,6 +1118,8 @@ function DashboardPage() {
   const cdvPrevPeScaled = useScaledLine(cdvPrevPe, cdvUnit)
   const obvCeScaled = useScaledLine(obvCePoints, obvUnit)
   const obvPeScaled = useScaledLine(obvPePoints, obvUnit)
+  const obvCeSplit = useTodayAndPreviousDay(obvCeScaled)
+  const obvPeSplit = useTodayAndPreviousDay(obvPeScaled)
 
   if (loading) {
     return (
@@ -981,15 +1170,17 @@ function DashboardPage() {
           )}
         </ChartCard>
 
+        <StrikePicker chain={strikeChain} value={selectedStrike} onChange={setSelectedStrike} live={showsAtmContract} />
+
         <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
           <div style={{ flex: '1 1 400px', minWidth: 0 }}>
             <ChartCard
-              title={`ATM CE ${cdvSnapshot?.atmStrike ?? ''}`}
+              title={`${showsAtmContract ? 'ATM ' : ''}CE ${chartedStrike ?? ''}`}
               extra={<EmaLegend state={atmCeCrossState} />}
-              empty="Waiting for the ATM CE contract to resolve and tick."
+              empty="Waiting for the CE contract to resolve and tick."
             >
               {atmCeBars.length > 0 && (
-                <ChartErrorBoundary key={`${selected}-${timeframe}-${cdvSnapshot?.atmStrike}`} height={320}>
+                <ChartErrorBoundary key={`${selected}-${timeframe}-${chartedStrike}`} height={320}>
                   <PriceChart bars={atmCeBars} height={320} />
                 </ChartErrorBoundary>
               )}
@@ -997,12 +1188,12 @@ function DashboardPage() {
           </div>
           <div style={{ flex: '1 1 400px', minWidth: 0 }}>
             <ChartCard
-              title={`ATM PE ${cdvSnapshot?.atmStrike ?? ''}`}
+              title={`${showsAtmContract ? 'ATM ' : ''}PE ${chartedStrike ?? ''}`}
               extra={<EmaLegend state={atmPeCrossState} />}
-              empty="Waiting for the ATM PE contract to resolve and tick."
+              empty="Waiting for the PE contract to resolve and tick."
             >
               {atmPeBars.length > 0 && (
-                <ChartErrorBoundary key={`${selected}-${timeframe}-${cdvSnapshot?.atmStrike}`} height={320}>
+                <ChartErrorBoundary key={`${selected}-${timeframe}-${chartedStrike}`} height={320}>
                   <PriceChart bars={atmPeBars} height={320} />
                 </ChartErrorBoundary>
               )}
@@ -1037,21 +1228,31 @@ function DashboardPage() {
         {selected && <LookbackTable underlying={selected} cdvSnapshot={cdvSnapshot} />}
 
         <ChartCard
-          title="CE / PE On-Balance Volume (ATM)"
+          title="CE / PE On-Balance Volume (delta-weighted, all tracked strikes)"
           extra={
             <Space size={12}>
               <Text type="secondary" style={{ fontSize: 12 }}>Skender.Stock.Indicators</Text>
               <Select value={obvUnit} onChange={setObvUnit} size="small" style={{ width: 140 }} options={VALUE_UNIT_OPTIONS} />
             </Space>
           }
-          empty="Waiting for enough ATM CE/PE bars to compute OBV."
+          empty="Waiting for enough CE/PE bars to compute OBV."
         >
           {(obvCePoints.length > 0 || obvPePoints.length > 0) && (
             <ChartErrorBoundary key={`${selected}-${timeframe}-${cdvSnapshot?.atmStrike}`} height={280}>
-              <CeVsPeChart ceSeries={obvCeScaled} peSeries={obvPeScaled} height={280} />
+              <CeVsPeChart ceSeries={obvCeSplit.today} peSeries={obvPeSplit.today} prevCeSeries={obvCeSplit.previous} prevPeSeries={obvPeSplit.previous} height={280} />
             </ChartErrorBoundary>
           )}
         </ChartCard>
+
+        {selected && (
+          <LookbackTable
+            underlying={selected}
+            cdvSnapshot={cdvSnapshot}
+            endpoint="obv-lookback"
+            title="OBV Multi-Lookback % Change"
+            defaultBars={DEFAULT_LOOKBACK_BARS}
+          />
+        )}
       </Space>
     </div>
   )
@@ -1062,6 +1263,7 @@ export default function App() {
     <Routes>
       <Route path="/" element={<DashboardPage />} />
       <Route path="/backtest" element={<BacktestPage />} />
+      <Route path="/triggers" element={<TriggersPage />} />
     </Routes>
   )
 }

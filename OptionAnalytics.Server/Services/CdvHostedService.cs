@@ -28,18 +28,25 @@ public sealed class CdvHostedService : BackgroundService
 
     private static readonly TimeSpan AtmRecenterInterval = TimeSpan.FromMinutes(30);
 
-    /// <summary>Matches SpotFeedHostedService's own backfill window exactly - the ATM CE/PE premium
-    /// chart and CDV's reconstructed history need to cover the same trading days the spot chart
-    /// does, or the charts would visibly disagree on how far back "history" goes.</summary>
-    private const int HistoryTradingDays = 5;
-    private const int HistoryLookbackCalendarDays = 15;
+    /// <summary>Matches SpotFeedHostedService's own backfill window exactly - the option premium
+    /// charts and CDV's reconstructed history need to cover the same trading days the spot chart
+    /// does, or the charts would visibly disagree on how far back "history" goes. Both read the
+    /// same HistoryWindow constants so they cannot drift apart.</summary>
+    private const int HistoryTradingDays = HistoryWindow.TradingDays;
+    private const int HistoryLookbackCalendarDays = HistoryWindow.LookbackCalendarDays;
 
     /// <summary>Dhan gives no documented rate limit for this endpoint, but a recenter can mean
     /// backfilling up to ~34 contracts (17 strikes x CE/PE) back to back on first startup - a small
     /// gap between calls is cheap insurance against tripping one anyway.</summary>
     private static readonly TimeSpan BackfillCallDelay = TimeSpan.FromMilliseconds(200);
 
+    /// <summary>How long an on-demand (untracked) strike's fetched candles are reused before going
+    /// back to Dhan - long enough that flipping between strikes in the picker doesn't re-fetch, short
+    /// enough that a chart left open during the session still catches up on a refresh.</summary>
+    private static readonly TimeSpan OnDemandCandleLifetime = TimeSpan.FromMinutes(2);
+
     private readonly DhanOptionChainMaster _optionChainMaster;
+    private readonly DhanOptionChainQuotes _chainQuotes;
     private readonly DhanMarketFeedClient _feedClient;
     private readonly SpotFeedHostedService _spotFeed;
     private readonly DhanHistoricalDataService _historicalData;
@@ -48,6 +55,12 @@ public sealed class CdvHostedService : BackgroundService
 
     private readonly Dictionary<uint, CdvUnderlyingState> _bySecurityId = new();
     private readonly Dictionary<string, HashSet<uint>> _subscribedTokens = new();
+
+    /// <summary>Fetched-on-demand candles for strikes this app doesn't track, keyed by contract and
+    /// IST trading day (so yesterday's entry can never be served today). Guarded by its own lock -
+    /// unlike the rest of this service's state it is touched from request threads, not just the
+    /// background recenter loop.</summary>
+    private readonly Dictionary<(uint SecurityId, DateOnly Day), (DateTimeOffset FetchedAt, IReadOnlyList<Candle> Candles)> _onDemandCandles = new();
 
     /// <summary>Marks an underlying once its first backfill batch has actually fed the CDV
     /// reconstruction (not just been attempted) - HashSet.Add's return value doubles as the "is
@@ -61,6 +74,7 @@ public sealed class CdvHostedService : BackgroundService
 
     public CdvHostedService(
         DhanOptionChainMaster optionChainMaster,
+        DhanOptionChainQuotes chainQuotes,
         DhanMarketFeedClient feedClient,
         SpotFeedHostedService spotFeed,
         DhanHistoricalDataService historicalData,
@@ -68,6 +82,7 @@ public sealed class CdvHostedService : BackgroundService
         ILogger<CdvHostedService> logger)
     {
         _optionChainMaster = optionChainMaster;
+        _chainQuotes = chainQuotes;
         _feedClient = feedClient;
         _spotFeed = spotFeed;
         _historicalData = historicalData;
@@ -90,6 +105,134 @@ public sealed class CdvHostedService : BackgroundService
         if (!States.TryGetValue(underlying, out var state)) return Array.Empty<CdvStrikeInfo>();
         var active = _subscribedTokens.TryGetValue(underlying, out var tokens) ? tokens : new HashSet<uint>();
         return state.GetTrackedStrikes(active);
+    }
+
+    /// <summary>This underlying's strike step (50 for NIFTY, 100 for BANKNIFTY), or 0 if unknown.</summary>
+    public int StepFor(string underlying) =>
+        Underlyings.FirstOrDefault(u => string.Equals(u.Underlying, underlying, StringComparison.OrdinalIgnoreCase)).Step;
+
+    /// <summary>
+    /// The strikes the dashboard's option-chart picker offers: <paramref name="spanSteps"/> steps
+    /// either side of the current ATM, on the nearest expiry, filtered to the ones actually listed
+    /// in the scrip master. Wider than the ATM+-8 window CDV subscribes to, deliberately - a chart
+    /// only needs history, and GetStrikeCandlesAsync can fetch that for any listed strike, so the
+    /// picker is not limited to the strikes this app happens to be tracking live. Each entry says
+    /// which it is.
+    ///
+    /// Live premium and open interest are then merged in from Dhan's Option Chain API when that call
+    /// is available - see DhanOptionChainQuotes for why that is decoration only and never the source
+    /// of the strike list itself.
+    /// </summary>
+    public async Task<OptionChainResponse?> GetChainAsync(string underlying, int spanSteps, CancellationToken cancellationToken)
+    {
+        if (!States.TryGetValue(underlying, out var state)) return null;
+
+        var step = StepFor(underlying);
+        var atm = state.AtmStrike;
+        var expiry = state.Expiry;
+
+        if (atm is null || expiry is null || step <= 0)
+            return new OptionChainResponse(underlying, expiry, atm, step, false, Array.Empty<OptionChainStrike>());
+
+        try
+        {
+            await _optionChainMaster.EnsureLoadedAsync(cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogDebug(ex, "Could not refresh the option chain master for {Underlying}'s strike picker.", underlying);
+        }
+
+        var trackedCe = state.GetTrackedStrikePrices(true).ToHashSet();
+        var trackedPe = state.GetTrackedStrikePrices(false).ToHashSet();
+
+        var quotes = await GetChainQuotesAsync(underlying, expiry.Value, cancellationToken);
+        var quotesByStrike = quotes.ToDictionary(q => q.Strike);
+
+        var strikes = new List<OptionChainStrike>();
+        for (var i = -spanSteps; i <= spanSteps; i++)
+        {
+            var strike = atm.Value + i * step;
+
+            // A strike is offered only if BOTH legs are listed - the picker drives a CE chart and a
+            // PE chart side by side, so a strike with only one of them would leave half the page
+            // permanently empty.
+            if (_optionChainMaster.Find(underlying, expiry.Value, strike, true) is null) continue;
+            if (_optionChainMaster.Find(underlying, expiry.Value, strike, false) is null) continue;
+
+            quotesByStrike.TryGetValue(strike, out var quote);
+            strikes.Add(new OptionChainStrike(
+                strike,
+                Tracked: trackedCe.Contains(strike) && trackedPe.Contains(strike),
+                IsAtm: strike == atm.Value,
+                CeLastPrice: quote?.CeLastPrice,
+                CeOpenInterest: quote?.CeOpenInterest,
+                PeLastPrice: quote?.PeLastPrice,
+                PeOpenInterest: quote?.PeOpenInterest));
+        }
+
+        return new OptionChainResponse(underlying, expiry, atm, step, quotes.Count > 0, strikes);
+    }
+
+    private async Task<IReadOnlyList<DhanOptionChainQuote>> GetChainQuotesAsync(string underlying, DateOnly expiry, CancellationToken cancellationToken)
+    {
+        var instrument = _spotFeed.States.TryGetValue(underlying, out var spotState) ? spotState.Instrument : null;
+        if (instrument is null) return Array.Empty<DhanOptionChainQuote>();
+
+        return await _chainQuotes.GetQuotesAsync(instrument.SecurityId, instrument.DhanSegment, expiry, cancellationToken);
+    }
+
+    /// <summary>
+    /// One strike's premium candles for the dashboard chart. Tracked strikes (inside, or previously
+    /// inside today, the CDV ATM+-8 window) answer straight from memory including the still-forming
+    /// bar, exactly as the ATM charts do. Any other listed strike is fetched from Dhan's intraday
+    /// history on demand and cached briefly - that history is complete but static, so such a chart
+    /// shows the same days as the tracked ones but only advances when re-fetched, which is the
+    /// trade-off for being able to look at a strike this app never subscribed to.
+    /// </summary>
+    public async Task<IReadOnlyList<Candle>> GetStrikeCandlesAsync(string underlying, decimal strike, bool isCall, CancellationToken cancellationToken)
+    {
+        if (!States.TryGetValue(underlying, out var state)) return Array.Empty<Candle>();
+
+        // A tracked strike with a genuinely empty series (tracked seconds ago, nothing seeded yet)
+        // still counts as tracked - GetStrikeCandles returns null only when it isn't tracked at all.
+        if (state.GetStrikeCandles(strike, isCall) is { } tracked && tracked.Count > 0) return tracked;
+
+        var expiry = state.Expiry;
+        if (expiry is null) return Array.Empty<Candle>();
+
+        var contract = _optionChainMaster.Find(underlying, expiry.Value, strike, isCall);
+        if (contract is null) return Array.Empty<Candle>();
+
+        var cacheKey = (contract.SecurityId, DateOnly.FromDateTime(DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(5.5)).DateTime));
+        lock (_onDemandCandles)
+        {
+            if (_onDemandCandles.TryGetValue(cacheKey, out var cached) && DateTimeOffset.UtcNow - cached.FetchedAt < OnDemandCandleLifetime)
+                return cached.Candles;
+        }
+
+        var today = cacheKey.Item2;
+        var fromDay = today.AddDays(-HistoryLookbackCalendarDays);
+
+        IReadOnlyList<CandleWithVolume> bars;
+        try
+        {
+            bars = await _historicalData.GetIntradayOptionCandlesAsync(contract.SecurityId, "NSE_FNO", fromDay, today, 1, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogDebug(ex, "On-demand candle fetch threw for {Underlying} {Strike}{Type}", underlying, strike, isCall ? "CE" : "PE");
+            return Array.Empty<Candle>();
+        }
+
+        // Same trading-day trim the tracked strikes get, so an on-demand chart covers exactly the
+        // same span as a tracked one rather than a wider one just because it was fetched differently.
+        var candles = TrimToRecentTradingDays(bars, HistoryTradingDays)
+            .Select(b => new Candle(b.Time, b.Open, b.High, b.Low, b.Close))
+            .ToList();
+
+        lock (_onDemandCandles) { _onDemandCandles[cacheKey] = (DateTimeOffset.UtcNow, candles); }
+        return candles;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -170,6 +313,7 @@ public sealed class CdvHostedService : BackgroundService
 
         state.AtmStrike = atm;
         state.Expiry = expiry;
+        state.LastSpot = spot;
 
         var strikes = Enumerable.Range(-StrikeRange, StrikeRange * 2 + 1).Select(i => atm + i * step).ToArray();
 

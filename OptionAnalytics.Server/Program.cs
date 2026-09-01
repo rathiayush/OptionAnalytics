@@ -23,6 +23,9 @@ builder.Services.AddHttpClient<DhanTotpAuthService>();
 builder.Services.AddSingleton<DhanHistoricalDataService>();
 builder.Services.AddSingleton<DhanMarketFeedClient>();
 builder.Services.AddHttpClient<DhanOptionChainMaster>();
+// Goes through DhanApiClient like every other REST call, so it needs no HttpClient of its own -
+// it only decorates the dashboard's strike picker with live premium/OI (see DhanOptionChainQuotes).
+builder.Services.AddSingleton<DhanOptionChainQuotes>();
 
 // No-op when Dhan:Pin/Dhan:TotpSecret aren't set (see DhanTotpAutoRenewalHostedService) - safe to
 // always register rather than branching on config here.
@@ -57,10 +60,18 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<ConfluenceAlertSer
 // IEnumerable<IBacktestStrategy> constructor param - add a new strategy by implementing the
 // interface and adding one more AddSingleton line here, nothing else needs to change.
 builder.Services.AddSingleton<IBacktestStrategy, OtmConfluenceStrategy>();
+builder.Services.AddSingleton<IBacktestStrategy, EmaSurgeStrategy>();
+builder.Services.AddSingleton<IBacktestStrategy, FiveEmaStrategy>();
 
 // Stateless - reads SpotFeedHostedService/CdvHostedService's in-memory history fresh on every
 // request, nothing to run in the background. See BacktestController/BacktestService.
 builder.Services.AddSingleton<BacktestService>();
+
+// Saved strategy triggers: the store persists them to a small JSON file (they are configuration,
+// not market data - see StrategyTriggerStore), and the hosted service watches each enabled one and
+// sends Telegram when its strategy produces a new entry signal.
+builder.Services.AddSingleton<StrategyTriggerStore>();
+builder.Services.AddHostedService<StrategyTriggerHostedService>();
 
 builder.Services.AddSignalR();
 builder.Services.AddControllers();
