@@ -49,10 +49,14 @@ public sealed class CdvHostedService : BackgroundService
     private readonly Dictionary<uint, CdvUnderlyingState> _bySecurityId = new();
     private readonly Dictionary<string, HashSet<uint>> _subscribedTokens = new();
 
-    /// <summary>Sees each underlying exactly once - HashSet.Add's return value doubles as the "is
-    /// this the first backfill batch" flag BackfillNewStrikesAsync needs (see
+    /// <summary>Marks an underlying once its first backfill batch has actually fed the CDV
+    /// reconstruction (not just been attempted) - HashSet.Add's return value doubles as the "is
+    /// this the first backfill batch" flag BackfillStrikesAsync needs (see
     /// CdvUnderlyingState.SeedStrikeHistory's includeInCdvHistory parameter for why only the first
-    /// batch feeds the CDV reconstruction).</summary>
+    /// batch feeds the CDV reconstruction). If that first batch seeds zero strikes (e.g. it raced
+    /// TOTP auth and every fetch failed), BackfillStrikesAsync removes the mark again so a later
+    /// recenter cycle gets a clean second attempt instead of being permanently locked out of CDV
+    /// history for the rest of the session.</summary>
     private readonly HashSet<string> _cdvHistorySeeded = new();
 
     public CdvHostedService(
@@ -172,7 +176,7 @@ public sealed class CdvHostedService : BackgroundService
         var desiredTokens = new HashSet<uint>();
         var ceList = new List<int>();
         var peList = new List<int>();
-        var newlyTracked = new List<uint>();
+        var needsBackfill = new List<uint>();
 
         foreach (var strike in strikes)
         {
@@ -181,23 +185,28 @@ public sealed class CdvHostedService : BackgroundService
                 var contract = _optionChainMaster.Find(underlying, expiry.Value, strike, isCall);
                 if (contract is null) continue;
 
-                if (state.EnsureTracked(contract.SecurityId, strike, isCall))
-                    newlyTracked.Add(contract.SecurityId);
+                var isNewlyTracked = state.EnsureTracked(contract.SecurityId, strike, isCall);
+                // A strike whose OWN first backfill attempt found nothing (auth not ready yet,
+                // a transient Dhan error) is still "tracked" from EnsureTracked's point of view, so
+                // it would never show up as newly-tracked again - NeedsBackfill catches that case
+                // and retries it right alongside genuinely new strikes on this recenter.
+                if (isNewlyTracked || state.NeedsBackfill(contract.SecurityId))
+                    needsBackfill.Add(contract.SecurityId);
                 _bySecurityId[contract.SecurityId] = state;
                 desiredTokens.Add(contract.SecurityId);
                 (isCall ? ceList : peList).Add(strike);
             }
         }
 
-        // Backfill every newly-tracked strike's own history BEFORE subscribing it live - otherwise
-        // a live tick could arrive and start building a bar while the backfill for that same strike
-        // is still in flight, corrupting SeedHistory's "nothing live yet" assumption. Cheap for a
-        // routine 30-minute recenter (usually a handful of strikes as the window shifts by one
-        // step); the one expensive case is the very first recenter after startup, where the whole
-        // ATM+-8 window (up to 34 contracts) is newly tracked at once - a one-time cost, not
-        // repeated on every recenter.
-        if (newlyTracked.Count > 0)
-            await BackfillNewStrikesAsync(underlying, state, newlyTracked, spot, cancellationToken);
+        // Backfill every strike that needs it BEFORE subscribing it live - otherwise a live tick
+        // could arrive and start building a bar while the backfill for that same strike is still in
+        // flight, corrupting SeedHistory's "nothing live yet" assumption. Cheap for a routine
+        // 30-minute recenter (usually just a handful of strikes as the window shifts by one step,
+        // plus any earlier failures still needing a retry); the one expensive case is the very
+        // first recenter after startup, where the whole ATM+-8 window (up to 34 contracts) needs it
+        // at once - a one-time cost, not repeated on every recenter once everything has succeeded.
+        if (needsBackfill.Count > 0)
+            await BackfillStrikesAsync(underlying, state, needsBackfill, spot, cancellationToken);
 
         var currentlySubscribed = _subscribedTokens[underlying];
         var toSubscribe = desiredTokens.Where(t => !currentlySubscribed.Contains(t)).ToArray();
@@ -240,14 +249,18 @@ public sealed class CdvHostedService : BackgroundService
         _logger.LogInformation("CDV: {Underlying} - new trading day, resetting CDV state.", underlying);
     }
 
-    /// <summary>Fetches and seeds each newly-tracked strike's own last HistoryTradingDays of
-    /// premium+volume history - see CdvUnderlyingState.SeedStrikeHistory for what that seeds (the
-    /// strike's own candle series plus its contribution to the CDV backfill) and FinalizeCdvBackfill
-    /// for how those per-strike contributions get combined into one series afterward. A contract
-    /// that fails or comes back empty (didn't trade the whole window, a transient Dhan error) just
-    /// contributes nothing rather than failing the batch - same tolerance SpotFeedHostedService's
-    /// own backfill has.</summary>
-    private async Task BackfillNewStrikesAsync(string underlying, CdvUnderlyingState state, IReadOnlyList<uint> securityIds, decimal currentSpot, CancellationToken cancellationToken)
+    /// <summary>Fetches and seeds each strike's own last HistoryTradingDays of premium+volume
+    /// history - covers both newly-tracked strikes and previously-tracked ones whose earlier
+    /// backfill attempt came back empty (see CdvUnderlyingState.NeedsBackfill). See
+    /// CdvUnderlyingState.SeedStrikeHistory for what gets seeded (the strike's own candle series
+    /// plus its contribution to the CDV backfill) and FinalizeCdvBackfill for how those per-strike
+    /// contributions get combined into one series afterward. A contract that fails or comes back
+    /// empty (didn't trade the whole window, a transient Dhan error, or Dhan wasn't authenticated
+    /// yet) just contributes nothing rather than failing the batch - same tolerance
+    /// SpotFeedHostedService's own backfill has. If this was the underlying's first CDV-history
+    /// batch and every single strike in it failed, the batch un-marks itself so RecenterAsync's
+    /// next cycle retries cleanly instead of leaving CDV history permanently empty.</summary>
+    private async Task BackfillStrikesAsync(string underlying, CdvUnderlyingState state, IReadOnlyList<uint> securityIds, decimal currentSpot, CancellationToken cancellationToken)
     {
         var today = DateOnly.FromDateTime(DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(5.5)).DateTime);
         var fromDay = today.AddDays(-HistoryLookbackCalendarDays);
@@ -303,11 +316,27 @@ public sealed class CdvHostedService : BackgroundService
 
         if (includeInCdvHistory)
         {
-            state.FinalizeCdvBackfill();
-            state.FinalizePreviousDay();
+            if (seededCount == 0)
+            {
+                // Every strike in the underlying's first CDV-history batch failed - most likely
+                // this raced Dhan TOTP auth the same way SpotFeedHostedService's backfill can (see
+                // its AuthWaitTimeout doc comment). FinalizeCdvBackfill/FinalizePreviousDay are
+                // no-ops with nothing seeded, so there is no partial state to unwind - just undo
+                // the mark so the next RecenterAsync cycle (state.NeedsBackfill still true for
+                // every strike here, since SeedStrikeHistory never got to set Backfilled) retries
+                // this batch as a fresh "first batch" instead of being locked out of CDV history
+                // for the rest of the trading day.
+                _cdvHistorySeeded.Remove(underlying);
+            }
+            else
+            {
+                state.FinalizeCdvBackfill();
+                state.FinalizePreviousDay();
+            }
         }
-        _logger.LogInformation("CDV: backfilled {Seeded}/{Total} newly-tracked contract(s) for {Underlying} (CDV history {Included}).",
-            seededCount, securityIds.Count, underlying, includeInCdvHistory ? "included" : "not included - later batch");
+        _logger.LogInformation("CDV: backfilled {Seeded}/{Total} contract(s) for {Underlying} (CDV history {Included}).",
+            seededCount, securityIds.Count, underlying,
+            includeInCdvHistory ? (seededCount > 0 ? "included" : "failed - will retry") : "not included - later batch");
     }
 
     private static DateOnly PreviousWeekday(DateOnly day)

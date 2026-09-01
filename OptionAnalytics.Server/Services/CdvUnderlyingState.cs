@@ -30,6 +30,14 @@ internal sealed class CdvStrikeRuntime
     /// because the ATM window moved.</summary>
     public decimal RunningCdv { get; set; }
 
+    /// <summary>True once SeedStrikeHistory has actually gotten real bars for this strike - NOT
+    /// the same thing as "is tracked" (EnsureTracked marks that permanently the moment a strike
+    /// first enters the ATM+-8 window, regardless of whether its backfill succeeded). Lets
+    /// CdvHostedService.RecenterAsync tell "genuinely new" apart from "tracked earlier but its
+    /// backfill failed" - both need the same treatment (fetch and seed its history), but only the
+    /// first would show up as newly-tracked from EnsureTracked's return value alone.</summary>
+    public bool Backfilled { get; set; }
+
     private readonly List<(Candle Bar, long Volume)> _closedBars = new();
     private (Candle Bar, long Volume)? _currentBar;
 
@@ -196,6 +204,16 @@ public sealed class CdvUnderlyingState
         lock (_lock) { return _strikes.ContainsKey(securityId); }
     }
 
+    /// <summary>True for a strike that's tracked but never got a successful SeedStrikeHistory call
+    /// (its own first backfill attempt found nothing - a transient Dhan error, or authentication
+    /// not ready yet at that moment) - CdvHostedService.RecenterAsync retries these alongside
+    /// genuinely newly-tracked strikes on every recenter until one actually succeeds. False for an
+    /// untracked securityId too (nothing to retry there - EnsureTracked handles that case).</summary>
+    public bool NeedsBackfill(uint securityId)
+    {
+        lock (_lock) { return _strikes.TryGetValue(securityId, out var strike) && !strike.Backfilled; }
+    }
+
     /// <summary>Every strike/side CDV has tracked today, for GET /api/cdv/{underlying}/strikes - a
     /// verification view so the exact contracts summed into the displayed CE/PE total are checkable,
     /// not just trusted. <paramref name="activeSecurityIds"/> (CdvHostedService's own subscribed-set
@@ -317,6 +335,7 @@ public sealed class CdvUnderlyingState
             if (!_strikes.TryGetValue(securityId, out var strike) || allBars.Count == 0) return;
 
             strike.SeedHistory(allBars.Select(b => (b.ToCandle(), b.Volume)));
+            strike.Backfilled = true;
             if (!includeInCdvHistory || todayBars.Count == 0) return;
 
             var weight = currentSpot > 0 ? ComputeDeltaWeight(strike.Strike, currentSpot, strike.IsCall) : 0m;

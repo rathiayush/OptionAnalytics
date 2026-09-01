@@ -63,6 +63,20 @@ public sealed class SpotFeedHostedService : BackgroundService
     /// <summary>Read by SpotController for the REST endpoints - keyed by underlying name.</summary>
     public IReadOnlyDictionary<string, SpotUnderlyingState> States { get; }
 
+    /// <summary>How long to wait for TOTP auto-login before backfilling anyway. Generous on
+    /// purpose: DhanTotpAutoRenewalHostedService's own retry can hit Dhan's real "once every 2
+    /// minutes" generateAccessToken cooldown (a confirmed real case, not just theoretical), which a
+    /// short wait would lose the race against every time - the historical endpoint would then
+    /// report "not authenticated" and this app would be stuck with zero history for the rest of the
+    /// run, since backfill previously never got a second attempt. 3 minutes comfortably covers that
+    /// worst case with room to spare.</summary>
+    private static readonly TimeSpan AuthWaitTimeout = TimeSpan.FromMinutes(3);
+
+    /// <summary>How long RetryBackfillIfNeededAsync waits between checking whether any underlying
+    /// still has zero history, and how many times it tries before giving up.</summary>
+    private static readonly TimeSpan BackfillRetryInterval = TimeSpan.FromSeconds(20);
+    private const int MaxBackfillRetries = 15;
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         if (!_options.HasSession && !_options.HasTotpCredentials)
@@ -72,13 +86,16 @@ public sealed class SpotFeedHostedService : BackgroundService
         else if (_options.HasTotpCredentials)
         {
             // TOTP auto-login runs concurrently in its own hosted service (see
-            // DhanTotpAutoRenewalHostedService) - give it a short head start so the historical
-            // backfill below has a live token on its very first attempt instead of always losing
-            // that race on a fresh boot. Not fatal if it doesn't finish in time: the backfill just
-            // logs "not authenticated" and the live WS feed (which polls the session in a loop)
-            // still catches up moments later.
-            for (var i = 0; i < 20 && !_session.IsAuthenticated && !stoppingToken.IsCancellationRequested; i++)
+            // DhanTotpAutoRenewalHostedService) - wait for it so the historical backfill below has
+            // a live token on its first attempt rather than routinely losing that race on a fresh
+            // boot. Not fatal if it still doesn't finish in time (network trouble, Dhan down) -
+            // RetryBackfillIfNeededAsync below is the real safety net for that.
+            var waited = TimeSpan.Zero;
+            while (!_session.IsAuthenticated && waited < AuthWaitTimeout && !stoppingToken.IsCancellationRequested)
+            {
                 await Task.Delay(500, stoppingToken);
+                waited += TimeSpan.FromMilliseconds(500);
+            }
         }
 
         await ResolveInstrumentsAsync(stoppingToken);
@@ -88,6 +105,29 @@ public sealed class SpotFeedHostedService : BackgroundService
 
         var tokenSegments = _bySecurityId.ToDictionary(kv => kv.Key, kv => kv.Value.Instrument!.DhanSegment);
         await _feedClient.SubscribeAsync(tokenSegments, stoppingToken);
+
+        // Live ticks are already flowing by now regardless of whether backfill above actually got
+        // any history - this runs alongside them, not blocking anything, so a slow/failed first
+        // backfill attempt (auth still not ready, a transient Dhan hiccup) still ends up with real
+        // history instead of being stuck at zero for the rest of the run.
+        _ = RetryBackfillIfNeededAsync(stoppingToken);
+    }
+
+    /// <summary>Keeps retrying BackfillAsync, on an interval, for as long as ANY underlying still
+    /// has zero candles - the actual fallback for "market's closed / Dhan was briefly unreachable /
+    /// auth wasn't ready yet" instead of a single one-shot attempt with no second chance.</summary>
+    private async Task RetryBackfillIfNeededAsync(CancellationToken stoppingToken)
+    {
+        for (var attempt = 0; attempt < MaxBackfillRetries && !stoppingToken.IsCancellationRequested; attempt++)
+        {
+            if (States.Values.All(s => s.GetCandles().Count > 0)) return;
+
+            await Task.Delay(BackfillRetryInterval, stoppingToken);
+            if (stoppingToken.IsCancellationRequested) return;
+
+            _logger.LogInformation("Spot backfill retry {Attempt}/{Max}: at least one underlying still has no history.", attempt + 1, MaxBackfillRetries);
+            await BackfillAsync(stoppingToken);
+        }
     }
 
     private async Task ResolveInstrumentsAsync(CancellationToken cancellationToken)
