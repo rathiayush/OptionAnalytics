@@ -14,6 +14,7 @@ const EMA_SLOW_COLOR = '#4dabf7'
 const AXIS_COLOR = '#9aa4b2'
 const GRID_COLOR = '#ffffff14'
 const BORDER_COLOR = '#ffffff22'
+const RESET_MARKER_COLOR = '#ffd54f'
 
 const TIMEFRAME_OPTIONS = [
   { value: 1, label: '1 min' },
@@ -38,6 +39,50 @@ const VALUE_UNIT_OPTIONS = [
 function useScaledLine(points, unitKey) {
   const { divisor } = VALUE_UNITS[unitKey]
   return useMemo(() => points.map((p) => ({ ...p, value: p.value / divisor })), [points, divisor])
+}
+
+// Chart times are already IST-shifted (see IST_OFFSET_SECONDS), so reading the shifted value AS
+// UTC gives the IST calendar day directly - the same trick the axis formatters use.
+function istDayKey(chartTime) {
+  return new Date(chartTime * 1000).toISOString().slice(0, 10)
+}
+
+// A "RESET" marker on the first bar of each new IST trading day - the point where CDV resets
+// outright and OBV re-baselines, so a level after it is not comparable with one before it. Mirrors
+// the Pine indicators' own daily-reset marker. The very first day in view gets no marker: there is
+// no transition to see there, just the left edge of the loaded history.
+function dayResetMarkers(points) {
+  const markers = []
+  let previousDay = null
+
+  for (const point of points) {
+    const day = istDayKey(point.time)
+    if (previousDay !== null && day !== previousDay) {
+      markers.push({ time: point.time, position: 'aboveBar', color: RESET_MARKER_COLOR, shape: 'square', text: 'RESET' })
+    }
+    previousDay = day
+  }
+  return markers
+}
+
+// CDV gets today's line solid and the previous trading day dashed underneath it, because the
+// backend serves those as two separate series. OBV comes back as ONE continuous multi-day series
+// instead, so it was drawing every day as one solid line with no way to tell them apart - this
+// splits it the same way so both charts read identically: the most recent IST day solid, the day
+// before it dashed, anything older dropped (CDV never showed more than those two either).
+function useTodayAndPreviousDay(points) {
+  return useMemo(() => {
+    if (points.length === 0) return { today: [], previous: [] }
+
+    const days = [...new Set(points.map((p) => istDayKey(p.time)))].sort()
+    const todayKey = days[days.length - 1]
+    const previousKey = days.length > 1 ? days[days.length - 2] : null
+
+    return {
+      today: points.filter((p) => istDayKey(p.time) === todayKey),
+      previous: previousKey ? points.filter((p) => istDayKey(p.time) === previousKey) : [],
+    }
+  }, [points])
 }
 
 // The running CE/PE totals printed under the CDV chart, in whatever unit that chart is showing.
@@ -332,6 +377,12 @@ function PriceChart({ bars, height = 360 }) {
 
   const sanitizedBars = useMemo(() => sanitizeSeries(bars), [bars])
   const { ema9Points, ema21Points, markers } = useEmaCrossover(sanitizedBars)
+  // EMA crossover markers plus a RESET marker at each new trading day, merged into the one
+  // marker list this series can hold - lightweight-charts wants them time-ascending.
+  const allMarkers = useMemo(
+    () => [...markers, ...dayResetMarkers(sanitizedBars)].sort((a, b) => a.time - b.time),
+    [markers, sanitizedBars],
+  )
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -395,8 +446,8 @@ function PriceChart({ bars, height = 360 }) {
   }, [ema9Points, ema21Points])
 
   useEffect(() => {
-    markersRef.current?.setMarkers(markers)
-  }, [markers])
+    markersRef.current?.setMarkers(allMarkers)
+  }, [allMarkers])
 
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }
@@ -414,6 +465,7 @@ function CeVsPeChart({ ceSeries, peSeries, prevCeSeries = [], prevPeSeries = [],
   const peRef = useRef(null)
   const prevCeRef = useRef(null)
   const prevPeRef = useRef(null)
+  const markersRef = useRef(null)
   // See PriceChart's identical hasFitRef for why this only fits once per mount, not on every live update.
   const hasFitRef = useRef(false)
   const sanitizedCe = useMemo(() => sanitizeSeries(ceSeries), [ceSeries])
@@ -439,6 +491,7 @@ function CeVsPeChart({ ceSeries, peSeries, prevCeSeries = [], prevPeSeries = [],
     prevPeRef.current = chart.addSeries(LineSeries, { color: PE_COLOR, lineWidth: 1, lineStyle: LineStyle.Dashed, title: 'PE (prev day)', priceLineVisible: false, crosshairMarkerVisible: false })
     ceRef.current = chart.addSeries(LineSeries, { color: CE_COLOR, lineWidth: 2, title: 'CE', priceLineVisible: false })
     peRef.current = chart.addSeries(LineSeries, { color: PE_COLOR, lineWidth: 2, title: 'PE', priceLineVisible: false })
+    markersRef.current = createSeriesMarkers(ceRef.current, [])
     hasFitRef.current = false
 
     const onResize = () => {
@@ -456,6 +509,7 @@ function CeVsPeChart({ ceSeries, peSeries, prevCeSeries = [], prevPeSeries = [],
       peRef.current = null
       prevCeRef.current = null
       prevPeRef.current = null
+      markersRef.current = null
     }
   }, [height])
 
@@ -471,6 +525,18 @@ function CeVsPeChart({ ceSeries, peSeries, prevCeSeries = [], prevPeSeries = [],
       hasFitRef.current = true
     }
   }, [sanitizedCe, sanitizedPe, sanitizedPrevCe, sanitizedPrevPe])
+
+  // The day boundary is the seam between the previous-day series and today's, so the markers come
+  // off the two concatenated - and they hang on the CE series, which is the one that has a point
+  // at that instant.
+  const resetMarkers = useMemo(
+    () => dayResetMarkers([...sanitizedPrevCe, ...sanitizedCe]),
+    [sanitizedPrevCe, sanitizedCe],
+  )
+
+  useEffect(() => {
+    markersRef.current?.setMarkers(resetMarkers)
+  }, [resetMarkers])
 
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }
@@ -655,8 +721,6 @@ function AlertsPanel({ alerts, states }) {
 }
 
 const DEFAULT_LOOKBACK_BARS = [3, 5, 7]
-// Pine's own OBV multi-lookback table defaults (lb1Bars/lb2Bars/lb3Bars).
-const DEFAULT_OBV_LOOKBACK_BARS = [20, 25, 30]
 
 function renderPercent(v) {
   if (v == null) return <Text type="secondary">—</Text>
@@ -935,6 +999,8 @@ function DashboardPage() {
   const cdvPrevPeScaled = useScaledLine(cdvPrevPe, cdvUnit)
   const obvCeScaled = useScaledLine(obvCePoints, obvUnit)
   const obvPeScaled = useScaledLine(obvPePoints, obvUnit)
+  const obvCeSplit = useTodayAndPreviousDay(obvCeScaled)
+  const obvPeSplit = useTodayAndPreviousDay(obvPeScaled)
 
   if (loading) {
     return (
@@ -1052,7 +1118,7 @@ function DashboardPage() {
         >
           {(obvCePoints.length > 0 || obvPePoints.length > 0) && (
             <ChartErrorBoundary key={`${selected}-${timeframe}-${cdvSnapshot?.atmStrike}`} height={280}>
-              <CeVsPeChart ceSeries={obvCeScaled} peSeries={obvPeScaled} height={280} />
+              <CeVsPeChart ceSeries={obvCeSplit.today} peSeries={obvPeSplit.today} prevCeSeries={obvCeSplit.previous} prevPeSeries={obvPeSplit.previous} height={280} />
             </ChartErrorBoundary>
           )}
         </ChartCard>
@@ -1063,7 +1129,7 @@ function DashboardPage() {
             cdvSnapshot={cdvSnapshot}
             endpoint="obv-lookback"
             title="OBV Multi-Lookback % Change"
-            defaultBars={DEFAULT_OBV_LOOKBACK_BARS}
+            defaultBars={DEFAULT_LOOKBACK_BARS}
           />
         )}
       </Space>
