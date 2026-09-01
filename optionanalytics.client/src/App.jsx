@@ -205,6 +205,13 @@ function PriceChart({ bars, height = 360 }) {
   const ema9Ref = useRef(null)
   const ema21Ref = useRef(null)
   const markersRef = useRef(null)
+  // Only auto-fit the visible range once, the first time this chart instance gets data - a live
+  // tick updates `bars` (a new array reference) many times a minute, and calling fitContent() on
+  // every one of those updates was yanking the view back to "fit everything" mid-drag/zoom, undoing
+  // any panning or zooming the moment new data arrived. App.jsx also keys this component on
+  // underlying+timeframe, so switching either remounts it fresh (this flag resets to false) rather
+  // than silently reusing the old pan/zoom position for a completely different dataset.
+  const hasFitRef = useRef(false)
 
   const { ema9Points, ema21Points, markers } = useEmaCrossover(bars)
 
@@ -231,6 +238,7 @@ function PriceChart({ bars, height = 360 }) {
     ema9Ref.current = chart.addSeries(LineSeries, { color: EMA_FAST_COLOR, lineWidth: 1, title: 'EMA 9', priceLineVisible: false, crosshairMarkerVisible: false })
     ema21Ref.current = chart.addSeries(LineSeries, { color: EMA_SLOW_COLOR, lineWidth: 1, title: 'EMA 21', priceLineVisible: false, crosshairMarkerVisible: false })
     markersRef.current = createSeriesMarkers(seriesRef.current, [])
+    hasFitRef.current = false
 
     const onResize = () => {
       if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth })
@@ -253,7 +261,10 @@ function PriceChart({ bars, height = 360 }) {
   useEffect(() => {
     if (!seriesRef.current) return
     seriesRef.current.setData(bars)
-    chartRef.current?.timeScale().fitContent()
+    if (!hasFitRef.current && bars.length > 0) {
+      chartRef.current?.timeScale().fitContent()
+      hasFitRef.current = true
+    }
   }, [bars])
 
   useEffect(() => {
@@ -276,6 +287,8 @@ function CeVsPeChart({ ceSeries, peSeries, height = 280 }) {
   const chartRef = useRef(null)
   const ceRef = useRef(null)
   const peRef = useRef(null)
+  // See PriceChart's identical hasFitRef for why this only fits once per mount, not on every live update.
+  const hasFitRef = useRef(false)
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -292,6 +305,7 @@ function CeVsPeChart({ ceSeries, peSeries, height = 280 }) {
     chartRef.current = chart
     ceRef.current = chart.addSeries(LineSeries, { color: CE_COLOR, lineWidth: 2, title: 'CE', priceLineVisible: false })
     peRef.current = chart.addSeries(LineSeries, { color: PE_COLOR, lineWidth: 2, title: 'PE', priceLineVisible: false })
+    hasFitRef.current = false
 
     const onResize = () => {
       if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth })
@@ -311,7 +325,10 @@ function CeVsPeChart({ ceSeries, peSeries, height = 280 }) {
     if (!ceRef.current || !peRef.current) return
     ceRef.current.setData(ceSeries)
     peRef.current.setData(peSeries)
-    chartRef.current?.timeScale().fitContent()
+    if (!hasFitRef.current && (ceSeries.length > 0 || peSeries.length > 0)) {
+      chartRef.current?.timeScale().fitContent()
+      hasFitRef.current = true
+    }
   }, [ceSeries, peSeries])
 
   return <div ref={containerRef} style={{ width: '100%', height }} />
@@ -503,7 +520,7 @@ export default function App() {
           extra={<EmaLegend state={spotCrossState} />}
           empty="Waiting for chart data - the Dhan feed may still be connecting."
         >
-          {spotBars.length > 0 && <PriceChart bars={spotBars} height={420} />}
+          {spotBars.length > 0 && <PriceChart key={`${selected}-${timeframe}`} bars={spotBars} height={420} />}
         </ChartCard>
 
         <Space direction="vertical" size={2} align="center" style={{ width: '100%' }}>
@@ -519,7 +536,7 @@ export default function App() {
               extra={<EmaLegend state={atmCeCrossState} />}
               empty="Waiting for the ATM CE contract to resolve and tick."
             >
-              {atmCeBars.length > 0 && <PriceChart bars={atmCeBars} height={320} />}
+              {atmCeBars.length > 0 && <PriceChart key={`${selected}-${timeframe}-${cdvSnapshot?.atmStrike}`} bars={atmCeBars} height={320} />}
             </ChartCard>
           </div>
           <div style={{ flex: '1 1 400px', minWidth: 0 }}>
@@ -528,7 +545,7 @@ export default function App() {
               extra={<EmaLegend state={atmPeCrossState} />}
               empty="Waiting for the ATM PE contract to resolve and tick."
             >
-              {atmPeBars.length > 0 && <PriceChart bars={atmPeBars} height={320} />}
+              {atmPeBars.length > 0 && <PriceChart key={`${selected}-${timeframe}-${cdvSnapshot?.atmStrike}`} bars={atmPeBars} height={320} />}
             </ChartCard>
           </div>
         </div>
@@ -540,7 +557,7 @@ export default function App() {
         >
           {cdvCe.length > 0 && (
             <>
-              <CeVsPeChart ceSeries={cdvCe} peSeries={cdvPe} height={280} />
+              <CeVsPeChart key={`${selected}-${timeframe}`} ceSeries={cdvCe} peSeries={cdvPe} height={280} />
               <Space size={24} style={{ marginTop: 8 }}>
                 <Text style={{ color: CE_COLOR }}>CE {fmtNum(cdvSnapshot?.ceCdv)}</Text>
                 <Text style={{ color: PE_COLOR }}>PE {fmtNum(cdvSnapshot?.peCdv)}</Text>
@@ -554,7 +571,7 @@ export default function App() {
           extra={<Text type="secondary" style={{ fontSize: 12 }}>Skender.Stock.Indicators</Text>}
           empty="Waiting for enough ATM CE/PE bars to compute OBV."
         >
-          {(obvCePoints.length > 0 || obvPePoints.length > 0) && <CeVsPeChart ceSeries={obvCePoints} peSeries={obvPePoints} height={280} />}
+          {(obvCePoints.length > 0 || obvPePoints.length > 0) && <CeVsPeChart key={`${selected}-${timeframe}-${cdvSnapshot?.atmStrike}`} ceSeries={obvCePoints} peSeries={obvPePoints} height={280} />}
         </ChartCard>
       </Space>
     </div>
