@@ -21,6 +21,32 @@ const TIMEFRAME_OPTIONS = [
   { value: 5, label: '5 min' },
 ]
 
+// CDV and OBV are raw traded-quantity running totals, so they reach into the hundreds of millions
+// - at full precision the axis labels are an unreadable wall of digits. Both charts divide their
+// values by one of these first; millions is the default since that's the magnitude these two
+// actually sit at for NIFTY/BANKNIFTY.
+const VALUE_UNITS = {
+  M: { divisor: 1_000_000, suffix: 'M' },
+  K: { divisor: 1_000, suffix: 'K' },
+}
+
+const VALUE_UNIT_OPTIONS = [
+  { value: 'M', label: 'Millions (M)' },
+  { value: 'K', label: 'Thousands (K)' },
+]
+
+function useScaledLine(points, unitKey) {
+  const { divisor } = VALUE_UNITS[unitKey]
+  return useMemo(() => points.map((p) => ({ ...p, value: p.value / divisor })), [points, divisor])
+}
+
+// The running CE/PE totals printed under the CDV chart, in whatever unit that chart is showing.
+function fmtScaled(v, unitKey) {
+  if (v == null) return '—'
+  const { divisor, suffix } = VALUE_UNITS[unitKey]
+  return `${(v / divisor).toLocaleString('en-IN', { maximumFractionDigits: 2 })} ${suffix}`
+}
+
 // lightweight-charts has no built-in timezone support - every chart always formats its time axis
 // using the browser's own local timezone. To make every chart show true IST (India, fixed
 // UTC+5:30 - the market this whole app is about) regardless of which timezone the VIEWER's own
@@ -123,6 +149,47 @@ function sanitizeSeries(points) {
     }
   }
   return result
+}
+
+// Every chart on the dashboard pans/zooms as one: each registers itself here on mount, and
+// dragging or zooming any of them pushes the same window to all the others.
+//
+// The window is synced as a TIME range, not lightweight-charts' logical (bar-index) range - the
+// charts hold completely different series (spot has every 1-minute bar of 5 days, an ATM CE
+// contract only has bars from whenever that strike started being tracked, CDV/OBV have their own
+// counts again), so index N is a different instant on each one and only real timestamps line up.
+//
+// isApplyingSync is the guard for the obvious feedback loop: applying a range to another chart
+// fires that chart's own range-change handler, which would otherwise bounce straight back.
+const chartSyncRegistry = new Set()
+let isApplyingSync = false
+
+function registerChartForSync(chart) {
+  const onVisibleRangeChange = () => {
+    if (isApplyingSync) return
+    const range = chart.timeScale().getVisibleRange()
+    if (!range) return
+
+    isApplyingSync = true
+    try {
+      for (const other of chartSyncRegistry) {
+        if (other === chart) continue
+        // A chart whose own data doesn't reach into this window can reject the range - that's a
+        // "nothing to show there", not an error worth breaking the drag over.
+        try { other.timeScale().setVisibleRange(range) } catch { /* empty */ }
+      }
+    } finally {
+      isApplyingSync = false
+    }
+  }
+
+  chartSyncRegistry.add(chart)
+  chart.timeScale().subscribeVisibleTimeRangeChange(onVisibleRangeChange)
+
+  return () => {
+    chart.timeScale().unsubscribeVisibleTimeRangeChange(onVisibleRangeChange)
+    chartSyncRegistry.delete(chart)
+  }
 }
 
 function useAggregatedCandles(candles, liveBarRaw, timeframeMinutes) {
@@ -296,9 +363,11 @@ function PriceChart({ bars, height = 360 }) {
       if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth })
     }
     window.addEventListener('resize', onResize)
+    const unregisterSync = registerChartForSync(chart)
 
     return () => {
       window.removeEventListener('resize', onResize)
+      unregisterSync()
       chart.remove()
       chartRef.current = null
       seriesRef.current = null
@@ -376,9 +445,11 @@ function CeVsPeChart({ ceSeries, peSeries, prevCeSeries = [], prevPeSeries = [],
       if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth })
     }
     window.addEventListener('resize', onResize)
+    const unregisterSync = registerChartForSync(chart)
 
     return () => {
       window.removeEventListener('resize', onResize)
+      unregisterSync()
       chart.remove()
       chartRef.current = null
       ceRef.current = null
@@ -662,6 +733,10 @@ function DashboardPage() {
   const [underlyings, setUnderlyings] = useState([])
   const [selected, setSelected] = useState(null)
   const [timeframe, setTimeframe] = useState(1)
+  // Per-chart so either can be read at its own natural magnitude - CDV and OBV don't always sit
+  // in the same range as each other.
+  const [cdvUnit, setCdvUnit] = useState('M')
+  const [obvUnit, setObvUnit] = useState('M')
   const [loading, setLoading] = useState(true)
 
   const [candles, setCandles] = useState([])
@@ -848,6 +923,15 @@ function DashboardPage() {
   const obvCePoints = useMemo(() => aggregateLine(obvCe.map((p) => toLinePoint(p, ['obv'])), timeframe).map((p) => ({ time: p.time, value: p.obv })), [obvCe, timeframe])
   const obvPePoints = useMemo(() => aggregateLine(obvPe.map((p) => toLinePoint(p, ['obv'])), timeframe).map((p) => ({ time: p.time, value: p.obv })), [obvPe, timeframe])
 
+  // Scaled to the unit each chart is set to, right before charting - everything upstream (and the
+  // snapshot totals printed under the CDV chart) stays in raw units.
+  const cdvCeScaled = useScaledLine(cdvCe, cdvUnit)
+  const cdvPeScaled = useScaledLine(cdvPe, cdvUnit)
+  const cdvPrevCeScaled = useScaledLine(cdvPrevCe, cdvUnit)
+  const cdvPrevPeScaled = useScaledLine(cdvPrevPe, cdvUnit)
+  const obvCeScaled = useScaledLine(obvCePoints, obvUnit)
+  const obvPeScaled = useScaledLine(obvPePoints, obvUnit)
+
   if (loading) {
     return (
       <div style={{ display: 'flex', justifyContent: 'center', padding: 80 }}>
@@ -931,6 +1015,7 @@ function DashboardPage() {
           extra={
             <Space size={12}>
               <Text type="secondary" style={{ fontSize: 12 }}>ATM {cdvSnapshot?.atmStrike ?? '—'} · Expiry {cdvSnapshot?.expiry ?? '—'}</Text>
+              <Select value={cdvUnit} onChange={setCdvUnit} size="small" style={{ width: 140 }} options={VALUE_UNIT_OPTIONS} />
               <StrikesButton underlying={selected} />
             </Space>
           }
@@ -939,11 +1024,11 @@ function DashboardPage() {
           {cdvCe.length > 0 && (
             <>
               <ChartErrorBoundary key={`${selected}-${timeframe}`} height={280}>
-                <CeVsPeChart ceSeries={cdvCe} peSeries={cdvPe} prevCeSeries={cdvPrevCe} prevPeSeries={cdvPrevPe} height={280} />
+                <CeVsPeChart ceSeries={cdvCeScaled} peSeries={cdvPeScaled} prevCeSeries={cdvPrevCeScaled} prevPeSeries={cdvPrevPeScaled} height={280} />
               </ChartErrorBoundary>
               <Space size={24} style={{ marginTop: 8 }}>
-                <Text style={{ color: CE_COLOR }}>CE {fmtNum(cdvSnapshot?.ceCdv)}</Text>
-                <Text style={{ color: PE_COLOR }}>PE {fmtNum(cdvSnapshot?.peCdv)}</Text>
+                <Text style={{ color: CE_COLOR }}>CE {fmtScaled(cdvSnapshot?.ceCdv, cdvUnit)}</Text>
+                <Text style={{ color: PE_COLOR }}>PE {fmtScaled(cdvSnapshot?.peCdv, cdvUnit)}</Text>
               </Space>
             </>
           )}
@@ -953,12 +1038,17 @@ function DashboardPage() {
 
         <ChartCard
           title="CE / PE On-Balance Volume (ATM)"
-          extra={<Text type="secondary" style={{ fontSize: 12 }}>Skender.Stock.Indicators</Text>}
+          extra={
+            <Space size={12}>
+              <Text type="secondary" style={{ fontSize: 12 }}>Skender.Stock.Indicators</Text>
+              <Select value={obvUnit} onChange={setObvUnit} size="small" style={{ width: 140 }} options={VALUE_UNIT_OPTIONS} />
+            </Space>
+          }
           empty="Waiting for enough ATM CE/PE bars to compute OBV."
         >
           {(obvCePoints.length > 0 || obvPePoints.length > 0) && (
             <ChartErrorBoundary key={`${selected}-${timeframe}-${cdvSnapshot?.atmStrike}`} height={280}>
-              <CeVsPeChart ceSeries={obvCePoints} peSeries={obvPePoints} height={280} />
+              <CeVsPeChart ceSeries={obvCeScaled} peSeries={obvPeScaled} height={280} />
             </ChartErrorBoundary>
           )}
         </ChartCard>

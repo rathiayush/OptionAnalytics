@@ -12,6 +12,11 @@ const TIMEFRAME_OPTIONS = [
   { value: 15, label: '15 min' },
 ]
 
+// Buy/Sell deliberately aren't the up/down colors - a SOLD position is neither bullish nor
+// bearish on its own leg's premium, and reusing green/red here would read as "profitable".
+const BUY_COLOR = '#4dabf7'
+const SELL_COLOR = '#c084fc'
+
 const EXIT_REASON_COLOR = { TakeProfit: UP_COLOR, StopLoss: DOWN_COLOR, EndOfDay: undefined, NoData: undefined }
 const EXIT_REASON_LABEL = { TakeProfit: 'Take Profit', StopLoss: 'Stop Loss', EndOfDay: 'End of Day', NoData: 'No Data' }
 
@@ -150,10 +155,15 @@ export default function BacktestPage() {
     { title: 'Signal Time', dataIndex: 'signalTimeUtc', key: 'signalTimeUtc', width: 180, render: (t) => fmtIstDateTime(t) },
     { title: 'Direction', dataIndex: 'direction', key: 'direction', width: 110, render: (direction) => <DirectionTag direction={direction} /> },
     {
-      title: 'Option',
-      key: 'option',
-      width: 110,
-      render: (_, row) => <Text style={{ color: row.optionType === 'CE' ? CE_COLOR : PE_COLOR }}>{fmtOption(row)}</Text>,
+      title: 'Position',
+      key: 'position',
+      width: 170,
+      render: (_, row) => (
+        <Space size={6}>
+          <Tag color={row.side === 'Sell' ? SELL_COLOR : BUY_COLOR}>{row.side === 'Sell' ? 'SELL' : 'BUY'}</Tag>
+          <Text style={{ color: row.optionType === 'CE' ? CE_COLOR : PE_COLOR }}>{fmtOption(row)}</Text>
+        </Space>
+      ),
     },
     {
       title: 'Entry',
@@ -239,17 +249,29 @@ export default function BacktestPage() {
                   options={strategies.map((s) => ({ value: s.key, label: s.name }))}
                 />
               </Space>
+              {/* A parameter that declares Options is a pick-one (rendered as a dropdown); one
+                  that doesn't is a free number. Both still carry a plain numeric value, so the
+                  request below is built the same way either way. */}
               {strategy?.parameters.map((p) => (
                 <Space direction="vertical" size={2} key={p.key}>
                   <Text type="secondary" style={{ fontSize: 12 }}>{p.label}</Text>
-                  <InputNumber
-                    min={p.min}
-                    max={p.max}
-                    step={p.step}
-                    value={paramValues[p.key] ?? p.default}
-                    onChange={(v) => setParamValues((prev) => ({ ...prev, [p.key]: v ?? p.default }))}
-                    style={{ width: 130 }}
-                  />
+                  {p.options?.length > 0 ? (
+                    <Select
+                      value={paramValues[p.key] ?? p.default}
+                      onChange={(v) => setParamValues((prev) => ({ ...prev, [p.key]: v }))}
+                      style={{ width: 200 }}
+                      options={p.options.map((o) => ({ value: o.value, label: o.label }))}
+                    />
+                  ) : (
+                    <InputNumber
+                      min={p.min}
+                      max={p.max}
+                      step={p.step}
+                      value={paramValues[p.key] ?? p.default}
+                      onChange={(v) => setParamValues((prev) => ({ ...prev, [p.key]: v ?? p.default }))}
+                      style={{ width: 130 }}
+                    />
+                  )}
                 </Space>
               ))}
               <Button type="primary" icon={<PlayCircleOutlined />} onClick={runTrades} loading={tradesLoading} disabled={!selected || !strategyKey}>
