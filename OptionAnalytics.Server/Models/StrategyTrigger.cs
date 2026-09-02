@@ -14,8 +14,7 @@ public sealed record StrategyTrigger(
     bool Enabled,
     DateTimeOffset CreatedUtc)
 {
-    /// <summary>Whether a fired trade also gets a Dhan Super Order built and (once dry-run
-    /// verification is done and this app is told to actually send them) placed - see
+    /// <summary>Whether a fired trade also gets a real Dhan Super Order PLACED - see
     /// StrategyTriggerHostedService's own doc comment for why this is a SEPARATE opt-in from
     /// Enabled, defaulting to false even for triggers created before this existed: Enabled only
     /// ever meant "watch and alert", and a config load must never silently upgrade an existing
@@ -30,9 +29,19 @@ public sealed record StrategyTrigger(
 
     /// <summary>Points added to (a buy) or subtracted from (a sell) the entry price to form a
     /// marketable LIMIT order - Dhan's Super Order does not support orderType MARKET for this
-    /// instrument type, so every entry is a LIMIT order priced to fill immediately in practice.
-    /// Only meaningful when LiveTradingEnabled.</summary>
+    /// instrument type, so every entry (and every re-priced retry - see MaxDeviationPercent) is a
+    /// LIMIT order priced to fill immediately in practice. Only meaningful when LiveTradingEnabled.</summary>
     public decimal SlippagePoints { get; init; } = 1;
+
+    /// <summary>How far (in percent) the live premium may drift from the price the alert actually
+    /// reported (BacktestTrade.EntryPrice - the SAME fixed reference every retry checks against,
+    /// never the previous retry's own price, so a string of small steps can never add up to
+    /// accepting a wildly different fill) before StrategyTriggerHostedService gives up re-pricing
+    /// an unfilled LIMIT order and cancels it instead. Options can move very fast in the couple of
+    /// minutes an order sits unfilled - this is what stops the retry loop from chasing a price that
+    /// has moved for a real reason (a spike, not just a quiet resting order not being hit) into a
+    /// fill nobody would actually want. Only meaningful when LiveTradingEnabled.</summary>
+    public decimal MaxDeviationPercent { get; init; } = 10;
 
     /// <summary>The last entry signal this trigger has already alerted on. A newly-armed trigger is
     /// primed with whatever the latest signal is at that moment WITHOUT alerting, so arming it
@@ -56,4 +65,5 @@ public sealed record StrategyTriggerRequest(
     bool Enabled,
     bool LiveTradingEnabled,
     int QuantityLots,
-    decimal SlippagePoints);
+    decimal SlippagePoints,
+    decimal MaxDeviationPercent);

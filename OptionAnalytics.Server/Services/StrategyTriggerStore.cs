@@ -64,6 +64,7 @@ public sealed class StrategyTriggerStore
             LiveTradingEnabled = request.LiveTradingEnabled,
             QuantityLots = Math.Max(1, request.QuantityLots),
             SlippagePoints = Math.Max(0, request.SlippagePoints),
+            MaxDeviationPercent = request.MaxDeviationPercent > 0 ? request.MaxDeviationPercent : 10,
         };
 
         lock (_lock)
@@ -99,6 +100,7 @@ public sealed class StrategyTriggerStore
                 LiveTradingEnabled = request.LiveTradingEnabled,
                 QuantityLots = Math.Max(1, request.QuantityLots),
                 SlippagePoints = Math.Max(0, request.SlippagePoints),
+                MaxDeviationPercent = request.MaxDeviationPercent > 0 ? request.MaxDeviationPercent : 10,
                 LastSignalUtc = watchChanged ? null : existing.LastSignalUtc,
             };
 

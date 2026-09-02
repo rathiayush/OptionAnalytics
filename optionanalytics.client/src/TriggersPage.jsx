@@ -24,13 +24,14 @@ export default function TriggersPage() {
   const [strategyKey, setStrategyKey] = useState(null)
   const [paramValues, setParamValues] = useState({})
 
-  // Whether an armed trigger also builds a Dhan Super Order from its fired trade - a separate
-  // opt-in from "On" above, which only ever means "watch and alert". DRY RUN ONLY right now: the
-  // backend computes and logs the order (and shows it in the Telegram message) but never actually
-  // places it - see StrategyTriggerHostedService's own doc comment.
+  // Whether an armed trigger also PLACES a real Dhan Super Order (LIMIT entry + target + stop-loss)
+  // from its fired trade - a separate opt-in from "On" above, which only ever means "watch and
+  // alert". This places real orders with real money - see StrategyTriggerHostedService's own doc
+  // comment for exactly how the strategy's points-based SL/TP and these fields become the order.
   const [liveTradingEnabled, setLiveTradingEnabled] = useState(false)
   const [quantityLots, setQuantityLots] = useState(1)
   const [slippagePoints, setSlippagePoints] = useState(1)
+  const [maxDeviationPercent, setMaxDeviationPercent] = useState(10)
 
   const strategy = strategies.find((s) => s.key === strategyKey) ?? null
 
@@ -86,12 +87,13 @@ export default function TriggersPage() {
         liveTradingEnabled,
         quantityLots,
         slippagePoints,
+        maxDeviationPercent,
       }),
     })
       .then((r) => r.json())
       .then(() => {
         message.success(liveTradingEnabled
-          ? 'Trigger armed - Super Order preview will be logged (dry run) on the next new signal'
+          ? 'Trigger armed - a real Super Order will be placed on the next new signal'
           : 'Trigger armed - it will notify on the next new signal')
         setName('')
         loadTriggers()
@@ -120,6 +122,7 @@ export default function TriggersPage() {
         liveTradingEnabled: row.liveTradingEnabled,
         quantityLots: row.quantityLots,
         slippagePoints: row.slippagePoints,
+        maxDeviationPercent: row.maxDeviationPercent,
         ...changes,
       }),
     })
@@ -166,14 +169,16 @@ export default function TriggersPage() {
         : <Text type="secondary">{row.lastSignalUtc ? 'Armed - waiting for a new signal' : 'Arming…'}</Text>),
     },
     {
-      title: 'Live (dry run)',
+      title: 'Live trading',
       key: 'liveTrading',
-      width: 170,
+      width: 220,
       render: (_, row) => (
         <Space size={8}>
           <Switch size="small" checked={row.liveTradingEnabled} onChange={(v) => setLiveTrading(row, v)} />
           {row.liveTradingEnabled && (
-            <Text type="secondary" style={{ fontSize: 12 }}>{row.quantityLots} lot(s) · {row.slippagePoints}pt slip</Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              {row.quantityLots} lot(s) · {row.slippagePoints}pt slip · {row.maxDeviationPercent}% max deviation
+            </Text>
           )}
         </Space>
       ),
@@ -269,7 +274,7 @@ export default function TriggersPage() {
 
             <Space align="end" size={16} wrap style={{ borderTop: '1px solid #ffffff1a', paddingTop: 16 }}>
               <Space direction="vertical" size={2}>
-                <Text type="secondary" style={{ fontSize: 12 }}>Live trading (dry run)</Text>
+                <Text type="secondary" style={{ fontSize: 12 }}>Live trading</Text>
                 <Switch checked={liveTradingEnabled} onChange={setLiveTradingEnabled} />
               </Space>
               {liveTradingEnabled && (
@@ -284,10 +289,17 @@ export default function TriggersPage() {
                     <InputNumber controls={false} min={0} step={0.5} value={slippagePoints}
                       onChange={(v) => setSlippagePoints(v ?? 0)} style={{ width: 130 }} />
                   </Space>
-                  <Text type="secondary" style={{ fontSize: 12, maxWidth: 420 }}>
-                    Builds a Dhan Super Order (LIMIT entry + target + stop-loss) from every fired trade and
-                    logs it - it is not placed yet. Slippage is added to (a buy) or subtracted from (a sell)
-                    the entry price to keep the LIMIT order fillable.
+                  <Space direction="vertical" size={2}>
+                    <Text type="secondary" style={{ fontSize: 12 }}>Max deviation (%)</Text>
+                    <InputNumber controls={false} min={0} step={1} value={maxDeviationPercent}
+                      onChange={(v) => setMaxDeviationPercent(v ?? 10)} style={{ width: 130 }} />
+                  </Space>
+                  <Text type="secondary" style={{ fontSize: 12, maxWidth: 460 }}>
+                    Places a real Dhan Super Order (LIMIT entry + target + stop-loss) from every fired
+                    trade. Slippage keeps the entry marketable. If it doesn't fill, it re-prices off the
+                    latest live premium up to 3 times - but never if that premium has drifted more than
+                    Max deviation from the signal's own price, and it cancels rather than fill at a bad
+                    price if it runs out of attempts.
                   </Text>
                 </>
               )}

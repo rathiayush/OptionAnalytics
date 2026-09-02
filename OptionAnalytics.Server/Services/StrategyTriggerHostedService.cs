@@ -40,13 +40,15 @@ namespace OptionAnalytics.Server.Services;
 /// trigger has been disabled for a while and is switched back on, so a re-enabled trigger doesn't
 /// replay everything it missed.
 ///
-/// LiveTradingEnabled triggers ALSO get a Dhan Super Order built from the fired trade - see
-/// BuildOrderPreview for exactly how the strategy's points-based SL/TP and this trigger's own
-/// quantity/slippage become the absolute prices and lot-multiplied quantity Dhan's API wants.
-/// DRY RUN ONLY for now, deliberately: the order is computed and logged (and shown in the Telegram
-/// message, tagged [DRY RUN]) but DhanSuperOrderClient.PlaceAsync is never called. Nothing in this
-/// class currently sends a real order - that wiring is a separate, explicit step once dry-run
-/// output has been checked against enough real trigger firings to trust the numbers.
+/// LiveTradingEnabled triggers ALSO get a real Dhan Super Order PLACED from the fired trade - see
+/// BuildOrderPlan for exactly how the strategy's points-based SL/TP and this trigger's own
+/// quantity/slippage become the absolute prices and lot-multiplied quantity Dhan's API wants. This
+/// is a SEPARATE opt-in from Enabled (which only ever means "watch and alert over Telegram") and
+/// defaults to off - including for every trigger that existed before this capability did, since a
+/// config load must never silently upgrade a watch-only trigger into one placing real orders. A
+/// placement failure (a rejected order, Dhan unreachable, IP not whitelisted) is reported in both
+/// the server log and the Telegram message, never swallowed silently - the Telegram/dashboard
+/// alert for the underlying signal still goes out regardless of whether the order succeeded.
 /// </summary>
 public sealed class StrategyTriggerHostedService : BackgroundService
 {
@@ -65,20 +67,33 @@ public sealed class StrategyTriggerHostedService : BackgroundService
 
     /// <summary>Dhan's Super Order does not support orderType MARKET for this instrument type -
     /// every entry is a LIMIT order priced with StrategyTrigger.SlippagePoints of headroom so it
-    /// fills immediately in practice (see BuildOrderPreview).</summary>
+    /// fills immediately in practice (see BuildOrderPlan).</summary>
     private const string OrderType = "LIMIT";
+
+    /// <summary>Total price attempts for an unfilled entry leg - the initial placement plus up to
+    /// this many minus one re-priced retries (so 4 total = 1 placement + 3 retries). Each retry
+    /// waits FillCheckInterval, then either finds the entry TRADED (done) or re-prices off the
+    /// latest live premium and MODIFYs the same order - see MonitorFillAsync.</summary>
+    private const int MaxFillAttempts = 4;
+
+    /// <summary>How long to let a placed or just-repriced LIMIT order rest before checking whether
+    /// it filled. Short on purpose - StrategyTrigger.MaxDeviationPercent's own doc comment explains
+    /// why this whole loop exists: an option's premium can move fast enough in a couple of minutes
+    /// that a slow poll would burn through the deviation budget before ever re-pricing.</summary>
+    private static readonly TimeSpan FillCheckInterval = TimeSpan.FromSeconds(5);
 
     private readonly StrategyTriggerStore _store;
     private readonly BacktestService _backtest;
     private readonly TelegramAlertService _telegram;
     private readonly CdvHostedService _cdv;
     private readonly DhanOptionChainMaster _optionChainMaster;
+    private readonly DhanSuperOrderClient _superOrders;
     private readonly IHubContext<SpotHub> _hub;
     private readonly ILogger<StrategyTriggerHostedService> _logger;
 
     public StrategyTriggerHostedService(
         StrategyTriggerStore store, BacktestService backtest, TelegramAlertService telegram,
-        CdvHostedService cdv, DhanOptionChainMaster optionChainMaster,
+        CdvHostedService cdv, DhanOptionChainMaster optionChainMaster, DhanSuperOrderClient superOrders,
         IHubContext<SpotHub> hub, ILogger<StrategyTriggerHostedService> logger)
     {
         _store = store;
@@ -86,6 +101,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         _telegram = telegram;
         _cdv = cdv;
         _optionChainMaster = optionChainMaster;
+        _superOrders = superOrders;
         _hub = hub;
         _logger = logger;
     }
@@ -171,8 +187,12 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         var reasonLine = reason is null ? "" : $"\n{reason}";
         var ist = TimeSpan.FromHours(5.5);
 
-        var orderPreview = trigger.LiveTradingEnabled ? BuildOrderPreview(trigger, trade) : null;
-        var orderLine = orderPreview is null ? "" : $"\n\n{orderPreview.TelegramLine}";
+        var orderLine = "";
+        if (trigger.LiveTradingEnabled)
+        {
+            var plan = BuildOrderPlan(trigger, trade);
+            orderLine = plan is null ? "" : $"\n\n{await PlaceOrderAsync(trigger, trade, plan, cancellationToken)}";
+        }
 
         // Entry time/price here are exactly BacktestTrade.EntryTimeUtc/EntryPrice - the same fields
         // the Backtrack trade table's own "Entry" column renders - not the signal bar. The signal
@@ -191,13 +211,6 @@ public sealed class StrategyTriggerHostedService : BackgroundService
             orderLine;
 
         _logger.LogInformation("Trigger {Name} fired: {Direction} {Side} {OptionType} {Strike}", trigger.Name, trade.Direction, trade.Side, trade.OptionType, trade.Strike);
-        if (orderPreview is not null)
-        {
-            _logger.LogInformation(
-                "Trigger {Name} [DRY RUN] would place: {Transaction} {Segment}:{SecurityId} qty={Qty} LIMIT={Price} target={Target} stopLoss={StopLoss} correlationId={CorrelationId}",
-                trigger.Name, orderPreview.TransactionType, "NSE_FNO", orderPreview.SecurityId, orderPreview.Quantity,
-                orderPreview.Price, orderPreview.TargetPrice, orderPreview.StopLossPrice, orderPreview.CorrelationId);
-        }
 
         await _telegram.SendAsync(message, cancellationToken);
 
@@ -213,11 +226,11 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         }
     }
 
-    /// <summary>Turns a fired trade into the exact Dhan Super Order it would produce - DRY RUN only
-    /// (see this class's own doc comment); nothing here calls DhanSuperOrderClient. Null when the
+    /// <summary>Turns a fired trade into the exact Dhan Super Order it should place. Null when the
     /// contract can't be resolved (no expiry currently tracked for this underlying, or that exact
-    /// strike/side isn't in the scrip master), which is logged and simply skips the preview rather
-    /// than failing the whole notification - the Telegram/dashboard alert still goes out either way.
+    /// strike/side isn't in the scrip master), which is logged and simply skips placement rather
+    /// than failing the whole notification - the Telegram/dashboard alert for the signal itself
+    /// still goes out either way.
     ///
     /// The conversions from what OptionTradeSimulator already computed to what Dhan's API wants:
     ///   - Contract: resolved from CdvHostedService's CURRENTLY tracked expiry for this underlying
@@ -237,14 +250,14 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     ///   - Every price is rounded to the contract's own tick size (DhanOptionInstrument.TickSize) -
     ///     Dhan rejects a price that isn't a whole multiple of it.
     /// </summary>
-    private SuperOrderPreview? BuildOrderPreview(StrategyTrigger trigger, BacktestTrade trade)
+    private SuperOrderPlan? BuildOrderPlan(StrategyTrigger trigger, BacktestTrade trade)
     {
         if (trade.EntryPrice is not { } entryPrice) return null; // shouldn't happen - EvaluateAsync only calls this for trades with a resolved entry
 
         var expiry = _cdv.States.TryGetValue(trade.Underlying, out var cdvState) ? cdvState.Expiry : null;
         if (expiry is null)
         {
-            _logger.LogWarning("Trigger {Name}: no currently-tracked expiry for {Underlying} - skipping order preview.", trigger.Name, trade.Underlying);
+            _logger.LogWarning("Trigger {Name}: no currently-tracked expiry for {Underlying} - cannot place order.", trigger.Name, trade.Underlying);
             return null;
         }
 
@@ -252,7 +265,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         var contract = _optionChainMaster.Find(trade.Underlying, expiry.Value, trade.Strike, isCall);
         if (contract is null)
         {
-            _logger.LogWarning("Trigger {Name}: {Underlying} {Strike}{Type} not found on expiry {Expiry} - skipping order preview.",
+            _logger.LogWarning("Trigger {Name}: {Underlying} {Strike}{Type} not found on expiry {Expiry} - cannot place order.",
                 trigger.Name, trade.Underlying, trade.Strike, trade.OptionType, expiry.Value);
             return null;
         }
@@ -275,18 +288,222 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         var transactionType = isSell ? "SELL" : "BUY";
         var correlationId = $"{trigger.Id}-{trade.SignalTimeUtc:yyyyMMddHHmm}";
 
-        var telegramLine =
-            $"[DRY RUN] Super Order: {transactionType} {contract.TradingSymbol} x{quantity} (SecurityId {contract.SecurityId})\n" +
+        var summary = $"{transactionType} {contract.TradingSymbol} x{quantity} (SecurityId {contract.SecurityId})\n" +
             $"LIMIT {limitPrice:0.##} · Target {targetPrice:0.##} · SL {stopLossPrice:0.##}";
 
-        return new SuperOrderPreview(transactionType, contract.SecurityId.ToString(), quantity, limitPrice, targetPrice, stopLossPrice, correlationId, telegramLine);
+        return new SuperOrderPlan(transactionType, contract.SecurityId.ToString(), quantity, limitPrice, targetPrice, stopLossPrice, tick, correlationId, summary);
+    }
+
+    /// <summary>Places the order and, on success, hands the fill-monitoring off to MonitorFillAsync
+    /// as a background task rather than awaiting it here - a resting LIMIT order can take up to
+    /// MaxFillAttempts x FillCheckInterval to resolve, and blocking on that would stall every OTHER
+    /// trigger's evaluation behind this one order (EvaluateAsync/ExecuteAsync call this once per
+    /// fired trade, in a loop over all enabled triggers). Returns only the line for the IMMEDIATE
+    /// Telegram message - [ORDER PLACED] with Dhan's own order id/status on success (fill/cancel
+    /// outcome follows later as its own message via NotifyFollowUpAsync), or [ORDER FAILED] with
+    /// the reason on failure. Never throws: PlaceAsync already logs and returns null on any error
+    /// (network, rejection, missing IP whitelisting), so a failed placement never stops the
+    /// underlying signal alert from going out.</summary>
+    private async Task<string> PlaceOrderAsync(StrategyTrigger trigger, BacktestTrade trade, SuperOrderPlan plan, CancellationToken cancellationToken)
+    {
+        var result = await _superOrders.PlaceAsync(
+            plan.TransactionType, "NSE_FNO", ProductType, OrderType,
+            plan.SecurityId, plan.Quantity, plan.Price, plan.TargetPrice, plan.StopLossPrice,
+            plan.CorrelationId, trailingJump: 0, cancellationToken);
+
+        if (result is null)
+        {
+            _logger.LogError("Trigger {Name}: Super Order placement FAILED for {Summary}", trigger.Name, plan.Summary);
+            return $"[ORDER FAILED]\n{plan.Summary}\nCheck server logs - a common cause is the account's static IP whitelisting not covering this server.";
+        }
+
+        _logger.LogInformation("Trigger {Name}: Super Order placed - orderId={OrderId} status={Status} for {Summary}",
+            trigger.Name, result.OrderId, result.OrderStatus, plan.Summary);
+
+        // Fire-and-forget: runs against the hosted service's own stoppingToken (so it stops
+        // cleanly on shutdown) rather than any per-evaluation token, and its own try/catch is just
+        // a backstop - MonitorFillAsync already handles its expected failure modes internally, this
+        // only stops an unexpected bug there from going unlogged.
+        _ = Task.Run(async () =>
+        {
+            try { await MonitorFillAsync(trigger, trade, plan, result.OrderId, cancellationToken); }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogError(ex, "Trigger {Name}: fill-monitoring crashed for order {OrderId}.", trigger.Name, result.OrderId);
+            }
+        }, CancellationToken.None);
+
+        return $"[ORDER PLACED] Dhan order {result.OrderId} ({result.OrderStatus})\n{plan.Summary}\nMonitoring fill (up to {MaxFillAttempts} attempts)...";
+    }
+
+    /// <summary>The retry loop: waits FillCheckInterval, checks whether the entry leg has filled,
+    /// and if not either re-prices it off the LATEST live premium and MODIFYs the same order, or -
+    /// once the live premium has drifted too far from the ORIGINAL signal price, or attempts run
+    /// out - CANCELs it instead of leaving a stale LIMIT order resting unmonitored.
+    ///
+    /// The deviation check ALWAYS compares against <paramref name="trade"/>.EntryPrice, the fixed
+    /// price the alert actually reported - never the previous retry's own price. That is the whole
+    /// point of MaxDeviationPercent (see its own doc comment): a string of small re-prices could
+    /// otherwise walk an order arbitrarily far from what the signal actually called for, each step
+    /// individually small, without ever tripping a limit that only ever looks one step back. An
+    /// option that has genuinely spiked (the 100 -> 80 example) must abort on the very FIRST retry,
+    /// not be chased down.
+    ///
+    /// Runs entirely off DhanSuperOrderClient.ListAsync/ModifyAsync/CancelAsync, none of which
+    /// throw on failure (they log and return null/empty) - an inconclusive read (a transient list
+    /// failure, or the order not yet visible) just costs one of the MaxFillAttempts checks rather
+    /// than aborting monitoring outright, so a flaky poll can never leave an order both unfilled and
+    /// unwatched.</summary>
+    private async Task MonitorFillAsync(StrategyTrigger trigger, BacktestTrade trade, SuperOrderPlan plan, string orderId, CancellationToken cancellationToken)
+    {
+        var isCall = trade.OptionType == "CE";
+        var isSell = trade.Side == "Sell";
+        var referencePrice = trade.EntryPrice!.Value; // fixed for every attempt - see this method's own doc comment
+        var currentPrice = plan.Price;
+
+        for (var attempt = 1; attempt <= MaxFillAttempts; attempt++)
+        {
+            try
+            {
+                await Task.Delay(FillCheckInterval, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                return; // shutting down - leave the order exactly as it is, nothing more to do
+            }
+
+            var orders = await _superOrders.ListAsync(cancellationToken);
+            var order = orders.FirstOrDefault(o => o.OrderId == orderId);
+            if (order is null)
+            {
+                _logger.LogWarning("Trigger {Name}: order {OrderId} not visible on attempt {Attempt}/{Max} - will check again.",
+                    trigger.Name, orderId, attempt, MaxFillAttempts);
+                continue;
+            }
+
+            var entryLeg = order.LegDetails.FirstOrDefault(l => l.LegName == "ENTRY_LEG");
+            var entryStatus = entryLeg?.OrderStatus ?? order.OrderStatus;
+
+            if (string.Equals(entryStatus, "TRADED", StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogInformation("Trigger {Name}: order {OrderId} filled on attempt {Attempt}/{Max}.", trigger.Name, orderId, attempt, MaxFillAttempts);
+                await NotifyFollowUpAsync(trigger, $"[ORDER FILLED] {plan.Summary}\nFilled on attempt {attempt}/{MaxFillAttempts} at ~{currentPrice:0.##}.", cancellationToken);
+                return;
+            }
+
+            if (entryStatus is "CANCELLED" or "REJECTED" or "CLOSED")
+            {
+                // Already off the book by some other means (manual cancel, Dhan-side rejection
+                // discovered late) - nothing for this loop to do, and nothing to cancel.
+                _logger.LogWarning("Trigger {Name}: order {OrderId} is {Status} - stopping fill monitoring.", trigger.Name, orderId, entryStatus);
+                await NotifyFollowUpAsync(trigger, $"[ORDER {entryStatus}] {plan.Summary}", cancellationToken);
+                return;
+            }
+
+            if (entryStatus == "PART_TRADED")
+            {
+                // Partially filled - re-pricing or cancelling the remainder risks the filled portion
+                // ending up without its own SL/target tracking correctly, so this stops chasing it
+                // and leaves the resting remainder for the user to handle manually rather than
+                // guessing.
+                _logger.LogWarning("Trigger {Name}: order {OrderId} is PART_TRADED - stopping automatic retries, leaving remainder as-is.", trigger.Name, orderId);
+                await NotifyFollowUpAsync(trigger, $"[ORDER PARTIALLY FILLED] {plan.Summary}\nPart of the quantity filled - the rest is left resting; check Dhan directly.", cancellationToken);
+                return;
+            }
+
+            // Still PENDING/TRANSIT - this was the last allowed check, so no more re-pricing: fall
+            // through to the cancel below instead of placing yet another attempt.
+            if (attempt == MaxFillAttempts) break;
+
+            var latestPrice = GetLatestPremium(trade.Underlying, trade.Strike, isCall);
+            if (latestPrice is null)
+            {
+                _logger.LogWarning("Trigger {Name}: no live premium available for {Strike}{Type} - cannot re-price order {OrderId} on attempt {Attempt}/{Max}.",
+                    trigger.Name, trade.Strike, trade.OptionType, orderId, attempt, MaxFillAttempts);
+                continue;
+            }
+
+            var deviationPercent = referencePrice == 0 ? 0 : Math.Abs(latestPrice.Value - referencePrice) / referencePrice * 100;
+            if (deviationPercent > trigger.MaxDeviationPercent)
+            {
+                _logger.LogWarning(
+                    "Trigger {Name}: live premium {Latest:0.##} has moved {Deviation:0.#}% from the signal price {Reference:0.##} (limit {Limit:0.#}%) - cancelling order {OrderId} instead of chasing it.",
+                    trigger.Name, latestPrice, deviationPercent, referencePrice, trigger.MaxDeviationPercent, orderId);
+                await CancelOrderAsync(trigger, orderId, plan,
+                    $"price moved {deviationPercent:0.#}% from the signal price ({referencePrice:0.##} -> {latestPrice:0.##}), past the {trigger.MaxDeviationPercent:0.#}% limit",
+                    cancellationToken);
+                return;
+            }
+
+            var rawPrice = Math.Max(0, isSell ? latestPrice.Value - trigger.SlippagePoints : latestPrice.Value + trigger.SlippagePoints);
+            var newPrice = RoundToTick(rawPrice, plan.TickSize);
+
+            var modifyResult = await _superOrders.ModifyAsync(orderId, "ENTRY_LEG", orderType: null, quantity: null,
+                price: newPrice, targetPrice: null, stopLossPrice: null, trailingJump: null, cancellationToken);
+            if (modifyResult is null)
+            {
+                _logger.LogWarning("Trigger {Name}: re-price MODIFY failed for order {OrderId} on attempt {Attempt}/{Max} - will check again.",
+                    trigger.Name, orderId, attempt, MaxFillAttempts);
+                continue;
+            }
+
+            currentPrice = newPrice;
+            _logger.LogInformation("Trigger {Name}: re-priced order {OrderId} to {Price:0.##} (attempt {Attempt}/{Max}, live premium {Live:0.##}).",
+                trigger.Name, orderId, newPrice, attempt + 1, MaxFillAttempts, latestPrice);
+        }
+
+        _logger.LogWarning("Trigger {Name}: order {OrderId} still unfilled after {Max} attempts - cancelling.", trigger.Name, orderId, MaxFillAttempts);
+        await CancelOrderAsync(trigger, orderId, plan, $"did not fill after {MaxFillAttempts} attempts", cancellationToken);
+    }
+
+    /// <summary>The latest known premium for one strike, INCLUDING the still-forming bar
+    /// (CdvUnderlyingState.GetStrikeCandles, not the closed-only view) - a retry re-pricing off a
+    /// stale closed-bar price could lag the live market by up to a full bar. Null if the underlying
+    /// isn't tracked at all or the strike has no candles yet.</summary>
+    private decimal? GetLatestPremium(string underlying, decimal strike, bool isCall)
+    {
+        if (!_cdv.States.TryGetValue(underlying, out var state)) return null;
+        var candles = state.GetStrikeCandles(strike, isCall);
+        return candles is { Count: > 0 } ? candles[^1].Close : null;
+    }
+
+    private async Task CancelOrderAsync(StrategyTrigger trigger, string orderId, SuperOrderPlan plan, string reason, CancellationToken cancellationToken)
+    {
+        var result = await _superOrders.CancelAsync(orderId, "ENTRY_LEG", cancellationToken);
+        if (result is null)
+        {
+            _logger.LogError("Trigger {Name}: failed to cancel unfilled order {OrderId} ({Reason}) - it may still be resting live, check Dhan directly.",
+                trigger.Name, orderId, reason);
+            await NotifyFollowUpAsync(trigger,
+                $"[ORDER CANCEL FAILED] {plan.Summary}\nReason: {reason}\nCould not confirm the cancel with Dhan - check the account directly, the order may still be live.",
+                cancellationToken);
+            return;
+        }
+
+        _logger.LogInformation("Trigger {Name}: cancelled unfilled order {OrderId} - {Reason}.", trigger.Name, orderId, reason);
+        await NotifyFollowUpAsync(trigger, $"[ORDER CANCELLED] {plan.Summary}\nReason: {reason}", cancellationToken);
+    }
+
+    /// <summary>Sends a standalone Telegram message for something MonitorFillAsync/CancelOrderAsync
+    /// discovered well after the trigger's own initial alert already went out - a fill, a cancel, or
+    /// a give-up - so the outcome doesn't wait on (or get lost inside) that earlier message.</summary>
+    private async Task NotifyFollowUpAsync(StrategyTrigger trigger, string body, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _telegram.SendAsync($"[Trigger] <b>{trigger.Name}</b>\n{body}", cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogError(ex, "Trigger {Name}: could not send follow-up Telegram message.", trigger.Name);
+        }
     }
 
     private static decimal RoundToTick(decimal price, decimal tick) =>
         tick > 0 ? Math.Round(price / tick, MidpointRounding.AwayFromZero) * tick : price;
 
-    private sealed record SuperOrderPreview(
+    private sealed record SuperOrderPlan(
         string TransactionType, string SecurityId, int Quantity,
-        decimal Price, decimal TargetPrice, decimal StopLossPrice,
-        string CorrelationId, string TelegramLine);
+        decimal Price, decimal TargetPrice, decimal StopLossPrice, decimal TickSize,
+        string CorrelationId, string Summary);
 }
