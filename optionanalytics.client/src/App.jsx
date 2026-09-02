@@ -31,11 +31,11 @@ const VALUE_UNIT_OPTIONS = [
   { value: 'K', label: 'Thousands (K)' },
 ]
 
-// What the Spot/ATM CE/ATM PE crossover badge reads - see the candleMode state in DashboardPage
-// and useConfirmedCrossoverState's own doc comment.
+// Whether Telegram alerts (and the crossover badge, which mirrors them) react to the still-forming
+// candle or only a closed, confirmed one - see the candleMode state in DashboardPage.
 const CANDLE_MODE_OPTIONS = [
-  { value: 'live', label: 'Badge: Live candle' },
-  { value: 'closed', label: 'Badge: Closed & confirmed' },
+  { value: 'live', label: 'Alerts: Live candle' },
+  { value: 'closed', label: 'Alerts: Closed & confirmed' },
 ]
 
 function useScaledLine(points, unitKey) {
@@ -1176,12 +1176,38 @@ function DashboardPage() {
   const atmCeBarsClosed = useAggregatedCandles(atmCeCandles, null, timeframe)
   const atmPeBarsClosed = useAggregatedCandles(atmPeCandles, null, timeframe)
 
-  // Whether the crossover badge below reads the still-forming candle live (ticks with every
-  // price update) or only once a candle has closed AND been confirmed the same way the Telegram
-  // alerts now are (EmaCrossoverDetector.ConfirmedDirection) - see useConfirmedCrossoverState.
-  // Persisted for 5 days only, at the user's own request, rather than indefinitely.
-  const [candleMode, setCandleMode] = usePersistedStateWithTtl(STORED_CANDLE_MODE, 'live', CANDLE_MODE_TTL_MS)
+  // Whether Telegram alerts (and this badge, which mirrors whatever they're currently doing) also
+  // react to the still-forming candle ("live", re-checked every ~10s server-side) or only ever to
+  // a closed, close-confirmed one ("closed" - the default, unchanged from before this toggle
+  // existed). This is a SHARED, server-side setting (AlertModeStore/api/alerts/mode) - both
+  // underlyings' Telegram alerts go to the one chat regardless of who set it, so changing it here
+  // changes what fires for everyone, not just this browser. The localStorage copy (5-day TTL, at
+  // the user's own request) is only a fast, optimistic starting value shown before the mount-time
+  // GET below confirms - or corrects - it against the real server state.
+  const [candleMode, setCandleMode] = usePersistedStateWithTtl(STORED_CANDLE_MODE, 'closed', CANDLE_MODE_TTL_MS)
   const closedOnlyMode = candleMode === 'closed'
+
+  useEffect(() => {
+    fetch('/api/alerts/mode')
+      .then((r) => r.json())
+      .then((data) => setCandleMode(data?.mode === 'Live' ? 'live' : 'closed'))
+      .catch((err) => console.error('Failed to load the alert mode:', err))
+  }, [])
+
+  // Flips the SERVER's alert mode (see the comment above) - optimistic locally, so the toggle
+  // itself never waits on the network, but reverts to whatever the server actually accepted if the
+  // request fails rather than silently trusting an unconfirmed local flip.
+  const handleCandleModeChange = (mode) => {
+    const previous = candleMode
+    setCandleMode(mode)
+    fetch('/api/alerts/mode', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: mode === 'live' ? 'Live' : 'ClosedConfirmed' }),
+    })
+      .then((r) => { if (!r.ok) throw new Error('rejected') })
+      .catch((err) => { console.error('Failed to switch the alert mode:', err); setCandleMode(previous) })
+  }
 
   const spotCrossStateLive = useCrossoverState(spotBars)
   const atmCeCrossStateLive = useCrossoverState(atmCeBars)
@@ -1243,10 +1269,10 @@ function DashboardPage() {
           />
           <Select
             value={candleMode}
-            onChange={setCandleMode}
+            onChange={handleCandleModeChange}
             style={{ width: 190 }}
             options={CANDLE_MODE_OPTIONS}
-            title="Whether the crossover badge below each chart reads the still-forming candle live, or only once a candle closes and confirms - saved for 5 days"
+            title="Whether Telegram alerts (and this dashboard) also react to the still-forming candle, or only once a candle closes and confirms - shared by every viewer, remembered here for 5 days"
           />
           <Button onClick={handleRefresh} loading={refreshing} disabled={!selected}>Refresh</Button>
         </Space>
