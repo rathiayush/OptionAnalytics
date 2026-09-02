@@ -5,7 +5,7 @@ import * as signalR from '@microsoft/signalr'
 import { Routes, Route } from 'react-router-dom'
 import BacktestPage from './BacktestPage.jsx'
 import TriggersPage from './TriggersPage.jsx'
-import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, fmtPrice, fmtIstTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect } from './shared.jsx'
+import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, fmtPrice, fmtIstTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_CANDLE_MODE, CANDLE_MODE_TTL_MS, usePersistedState, usePersistedStateWithTtl, pickUnderlying, useExpirySelector, ExpirySelect } from './shared.jsx'
 import './App.css'
 
 const { Title, Text } = Typography
@@ -29,6 +29,13 @@ const VALUE_UNITS = {
 const VALUE_UNIT_OPTIONS = [
   { value: 'M', label: 'Millions (M)' },
   { value: 'K', label: 'Thousands (K)' },
+]
+
+// What the Spot/ATM CE/ATM PE crossover badge reads - see the candleMode state in DashboardPage
+// and useConfirmedCrossoverState's own doc comment.
+const CANDLE_MODE_OPTIONS = [
+  { value: 'live', label: 'Badge: Live candle' },
+  { value: 'closed', label: 'Badge: Closed & confirmed' },
 ]
 
 function useScaledLine(points, unitKey) {
@@ -314,6 +321,27 @@ function useCrossoverState(bars) {
     }
     return null
   }, [bars])
+}
+
+// The "Closed & confirmed" counterpart to useCrossoverState - mirrors the backend's
+// EmaCrossoverDetector.ConfirmedDirection exactly: only the MOST RECENT bar in `closedBars` (which
+// must not include the still-forming candle - callers pass bars aggregated with no live bar
+// merged in) counts, and only if its own CLOSE finished beyond BOTH EMA9 and EMA21, not just their
+// relationship flipping. No backward search for an older confirmed bar, same as the backend - a
+// bar that hasn't confirmed yet reads as null ("not yet"), not as whatever last did.
+function useConfirmedCrossoverState(closedBars) {
+  return useMemo(() => {
+    if (closedBars.length === 0) return null
+    const closes = closedBars.map((b) => b.close)
+    const ema9 = computeEma(closes, 9)
+    const ema21 = computeEma(closes, 21)
+    const last = closedBars.length - 1
+    if (ema9[last] == null || ema21[last] == null || ema9[last] === ema21[last]) return null
+
+    const close = closedBars[last].close
+    if (ema9[last] > ema21[last]) return close > ema9[last] && close > ema21[last] ? 'up' : null
+    return close < ema9[last] && close < ema21[last] ? 'down' : null
+  }, [closedBars])
 }
 
 function fmtNum(v) {
@@ -1141,9 +1169,30 @@ function DashboardPage() {
   const atmCeBars = useAggregatedCandles(atmCeCandles, showsAtmContract ? cdvSnapshot?.atmCeCurrentBar : null, timeframe)
   const atmPeBars = useAggregatedCandles(atmPeCandles, showsAtmContract ? cdvSnapshot?.atmPeCurrentBar : null, timeframe)
 
-  const spotCrossState = useCrossoverState(spotBars)
-  const atmCeCrossState = useCrossoverState(atmCeBars)
-  const atmPeCrossState = useCrossoverState(atmPeBars)
+  // Same three series with no live bar merged in - what "Closed & confirmed" badge mode reads,
+  // since a still-forming candle can never be confirmed. The chart itself still renders spotBars/
+  // atmCeBars/atmPeBars (with the live candle) regardless of this toggle - only the badge switches.
+  const spotBarsClosed = useAggregatedCandles(candles, null, timeframe)
+  const atmCeBarsClosed = useAggregatedCandles(atmCeCandles, null, timeframe)
+  const atmPeBarsClosed = useAggregatedCandles(atmPeCandles, null, timeframe)
+
+  // Whether the crossover badge below reads the still-forming candle live (ticks with every
+  // price update) or only once a candle has closed AND been confirmed the same way the Telegram
+  // alerts now are (EmaCrossoverDetector.ConfirmedDirection) - see useConfirmedCrossoverState.
+  // Persisted for 5 days only, at the user's own request, rather than indefinitely.
+  const [candleMode, setCandleMode] = usePersistedStateWithTtl(STORED_CANDLE_MODE, 'live', CANDLE_MODE_TTL_MS)
+  const closedOnlyMode = candleMode === 'closed'
+
+  const spotCrossStateLive = useCrossoverState(spotBars)
+  const atmCeCrossStateLive = useCrossoverState(atmCeBars)
+  const atmPeCrossStateLive = useCrossoverState(atmPeBars)
+  const spotCrossStateClosed = useConfirmedCrossoverState(spotBarsClosed)
+  const atmCeCrossStateClosed = useConfirmedCrossoverState(atmCeBarsClosed)
+  const atmPeCrossStateClosed = useConfirmedCrossoverState(atmPeBarsClosed)
+
+  const spotCrossState = closedOnlyMode ? spotCrossStateClosed : spotCrossStateLive
+  const atmCeCrossState = closedOnlyMode ? atmCeCrossStateClosed : atmCeCrossStateLive
+  const atmPeCrossState = closedOnlyMode ? atmPeCrossStateClosed : atmPeCrossStateLive
 
   const cdvCe = useAggregatedLine(cdvSeries, cdvSnapshot?.currentBar, timeframe, ['ceCdv']).map((p) => ({ time: p.time, value: p.ceCdv }))
   const cdvPe = useAggregatedLine(cdvSeries, cdvSnapshot?.currentBar, timeframe, ['peCdv']).map((p) => ({ time: p.time, value: p.peCdv }))
@@ -1191,6 +1240,13 @@ function DashboardPage() {
             onChange={setTimeframe}
             style={{ width: 120 }}
             options={TIMEFRAME_OPTIONS}
+          />
+          <Select
+            value={candleMode}
+            onChange={setCandleMode}
+            style={{ width: 190 }}
+            options={CANDLE_MODE_OPTIONS}
+            title="Whether the crossover badge below each chart reads the still-forming candle live, or only once a candle closes and confirms - saved for 5 days"
           />
           <Button onClick={handleRefresh} loading={refreshing} disabled={!selected}>Refresh</Button>
         </Space>

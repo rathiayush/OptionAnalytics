@@ -30,6 +30,15 @@ export const TIMEFRAME_OPTIONS = [
 export const STORED_UNDERLYING = 'optionanalytics.underlying'
 export const STORED_TIMEFRAME = 'optionanalytics.timeframe'
 
+// The Dashboard's crossover-badge basis: 'live' (today's default - reads the still-forming candle,
+// updates tick by tick) or 'closed' (only a fully closed AND close-confirmed candle - mirrors
+// EmaCrossoverDetector.ConfirmedDirection server-side, so the badge shows exactly what would
+// actually alert). Kept for only CANDLE_MODE_TTL_MS via usePersistedStateWithTtl rather than
+// forever, at the user's own request - a stale "closed" pin from days ago silently shaping how
+// today's badge reads would be easy to forget about.
+export const STORED_CANDLE_MODE = 'optionanalytics.candleMode'
+export const CANDLE_MODE_TTL_MS = 5 * 24 * 60 * 60 * 1000
+
 function readStored(key, fallback) {
   try {
     const raw = window.localStorage.getItem(key)
@@ -49,6 +58,37 @@ export function usePersistedState(key, fallback) {
       window.localStorage.setItem(key, JSON.stringify(value))
     } catch {
       // Same as above - remembering is a convenience, never a requirement.
+    }
+  }, [key, value])
+
+  return [value, setValue]
+}
+
+// Same as usePersistedState, but the stored value expires after ttlMs - once it's older than
+// that, readStoredWithTtl treats it as never having been saved and falls back to `fallback`
+// (which also re-stamps a fresh savedAt the next time this value is written, so picking the same
+// choice again resets its own clock rather than expiring on the ORIGINAL save time forever).
+function readStoredWithTtl(key, fallback, ttlMs) {
+  try {
+    const raw = window.localStorage.getItem(key)
+    if (raw === null) return fallback
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed.savedAt !== 'number') return fallback
+    if (Date.now() - parsed.savedAt > ttlMs) return fallback
+    return parsed.value
+  } catch {
+    return fallback
+  }
+}
+
+export function usePersistedStateWithTtl(key, fallback, ttlMs) {
+  const [value, setValue] = useState(() => readStoredWithTtl(key, fallback, ttlMs))
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(key, JSON.stringify({ value, savedAt: Date.now() }))
+    } catch {
+      // Same as usePersistedState - remembering is a convenience, never a requirement.
     }
   }, [key, value])
 
