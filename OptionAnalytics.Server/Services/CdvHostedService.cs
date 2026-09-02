@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Microsoft.AspNetCore.SignalR;
 using OptionAnalytics.Server.Dhan;
 using OptionAnalytics.Server.Hubs;
@@ -56,6 +57,22 @@ public sealed class CdvHostedService : BackgroundService
     private readonly Dictionary<uint, CdvUnderlyingState> _bySecurityId = new();
     private readonly Dictionary<string, HashSet<uint>> _subscribedTokens = new();
 
+    /// <summary>A manually-picked expiry per underlying, set via SelectExpiryAsync (the dashboard/
+    /// Backtrack expiry selector) - overrides RecenterAsync's default "nearest unexpired listed
+    /// expiry" pick. Absent (or holding a now-past date, cleared lazily by RecenterAsync) means
+    /// "auto: track the nearest expiry", the behavior this app always had before the selector
+    /// existed. Concurrent because SelectExpiryAsync runs on an HTTP request thread while
+    /// RecenterAsync reads it from the background recenter loop - a plain Dictionary is not safe to
+    /// read on one thread while another resizes it.</summary>
+    private readonly ConcurrentDictionary<string, DateOnly> _expiryOverride = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Serializes every full recenter/reset sequence - the scheduled 30-minute recenter,
+    /// the startup catch-up loop, and an on-demand SelectExpiryAsync call - so two of them can never
+    /// interleave their subscribe/unsubscribe/backfill bookkeeping for the same underlying. Without
+    /// this, a manual expiry switch racing the scheduled timer could unsubscribe a token the other
+    /// had just resubscribed, or backfill a strike the other was mid-reset on.</summary>
+    private readonly SemaphoreSlim _recenterLock = new(1, 1);
+
     /// <summary>Fetched-on-demand candles for strikes this app doesn't track, keyed by contract and
     /// IST trading day (so yesterday's entry can never be served today). Guarded by its own lock -
     /// unlike the rest of this service's state it is touched from request threads, not just the
@@ -110,6 +127,76 @@ public sealed class CdvHostedService : BackgroundService
     /// <summary>This underlying's strike step (50 for NIFTY, 100 for BANKNIFTY), or 0 if unknown.</summary>
     public int StepFor(string underlying) =>
         Underlyings.FirstOrDefault(u => string.Equals(u.Underlying, underlying, StringComparison.OrdinalIgnoreCase)).Step;
+
+    /// <summary>Every expiry the scrip master lists for this underlying, plus whichever one CDV is
+    /// currently tracking - the dashboard/Backtrack expiry selector's payload. "Currently tracking"
+    /// mirrors RecenterAsync's own resolution exactly (a manual override if one is set and hasn't
+    /// lapsed, otherwise the nearest unexpired expiry), so the selector never shows a value that
+    /// disagrees with what CdvUnderlyingState.Expiry will read on the next tick.</summary>
+    public ExpiryOptions GetExpiryOptions(string underlying)
+    {
+        underlying = underlying.ToUpperInvariant();
+        var expiries = _optionChainMaster.GetExpiries(underlying);
+        var today = DateOnly.FromDateTime(DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(5.5)).DateTime);
+
+        var isManual = _expiryOverride.TryGetValue(underlying, out var overrideExpiry) && overrideExpiry >= today;
+        var selected = isManual ? overrideExpiry : _optionChainMaster.GetNearestExpiry(underlying, today);
+
+        return new ExpiryOptions(underlying, expiries, selected, isManual);
+    }
+
+    /// <summary>Switches this underlying onto a different listed expiry - what the dashboard/
+    /// Backtrack expiry selector calls. Unsubscribes every contract from the CURRENT expiry on the
+    /// live Dhan feed, wipes the underlying's whole CdvUnderlyingState (strike history, CDV/OBV
+    /// totals, ATM/expiry), and immediately re-centers onto the new expiry's ATM+-8 window -
+    /// exactly ResetForNewDayAsync's day-rollover sequence, just triggered by a user pick instead of
+    /// the IST calendar rolling over. The reset is required, not optional: CdvUnderlyingState keys
+    /// its strikes by Dhan securityId, but looks them up by (strike, isCall) price pair
+    /// (GetStrikeClosedCandles etc.) - carrying the old expiry's contracts forward would leave two
+    /// different securityIds answering to the same strike price, and every by-strike lookup
+    /// (including BacktestService's, which reads this same state) would become ambiguous. Both the
+    /// live dashboard's CDV/OBV/option charts and the Backtrack page's replay/strategy engine read
+    /// straight off CdvUnderlyingState, so this one call is what makes "all data updated" (the
+    /// user's own words asking for this feature) true of both pages at once - neither has its own
+    /// separate expiry concept to keep in sync.
+    ///
+    /// Returns null on success, or a user-facing reason it was refused (unknown underlying, or an
+    /// expiry the scrip master doesn't list for it).</summary>
+    public async Task<string?> SelectExpiryAsync(string underlying, DateOnly expiry, CancellationToken cancellationToken)
+    {
+        underlying = underlying.ToUpperInvariant();
+        if (!States.TryGetValue(underlying, out var state)) return $"Unknown underlying '{underlying}'.";
+
+        var step = StepFor(underlying);
+        if (step <= 0) return $"Unknown underlying '{underlying}'.";
+
+        try
+        {
+            await _optionChainMaster.EnsureLoadedAsync(cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Could not refresh the option chain master while selecting an expiry for {Underlying}.", underlying);
+        }
+
+        if (!_optionChainMaster.GetExpiries(underlying).Contains(expiry))
+            return $"{expiry:yyyy-MM-dd} is not a listed expiry for {underlying}.";
+
+        await _recenterLock.WaitAsync(cancellationToken);
+        try
+        {
+            _expiryOverride[underlying] = expiry;
+            await ResetForNewDayAsync(underlying, state, cancellationToken);
+            await RecenterAsync(underlying, step, cancellationToken);
+        }
+        finally
+        {
+            _recenterLock.Release();
+        }
+
+        _logger.LogInformation("CDV: {Underlying} expiry manually switched to {Expiry}.", underlying, expiry);
+        return null;
+    }
 
     /// <summary>
     /// The strikes the dashboard's option-chart picker offers: <paramref name="spanSteps"/> steps
@@ -280,9 +367,22 @@ public sealed class CdvHostedService : BackgroundService
         }
 
         foreach (var (underlying, step) in Underlyings)
-            await RecenterAsync(underlying, step, cancellationToken);
+        {
+            await _recenterLock.WaitAsync(cancellationToken);
+            try
+            {
+                await RecenterAsync(underlying, step, cancellationToken);
+            }
+            finally
+            {
+                _recenterLock.Release();
+            }
+        }
     }
 
+    /// <summary>Caller must hold _recenterLock for this underlying's whole reset/recenter sequence -
+    /// see that field's doc comment. Both call sites (RecenterAllAsync's loop and
+    /// SelectExpiryAsync) already do.</summary>
     private async Task RecenterAsync(string underlying, int step, CancellationToken cancellationToken)
     {
         var spot = _spotFeed.States.TryGetValue(underlying, out var spotState) ? spotState.LastPrice : 0;
@@ -304,7 +404,7 @@ public sealed class CdvHostedService : BackgroundService
         state.TradingDay = today;
 
         var atm = (int)(Math.Round(spot / step) * step);
-        var expiry = _optionChainMaster.GetNearestExpiry(underlying, today);
+        var expiry = ResolveExpiry(underlying, today);
         if (expiry is null)
         {
             _logger.LogWarning("CDV: {Underlying} - no listed option expiry found. Skipping.", underlying);
@@ -374,11 +474,28 @@ public sealed class CdvHostedService : BackgroundService
             underlying, spot, atm, expiry.Value, string.Join(", ", ceList.OrderBy(v => v)), string.Join(", ", peList.OrderBy(v => v)));
     }
 
+    /// <summary>The expiry RecenterAsync should track today: a manual SelectExpiryAsync pick if one
+    /// is set and hasn't lapsed, otherwise the auto nearest-unexpired-expiry default. A lapsed
+    /// override (its date is before <paramref name="today"/> - the user picked an expiry that has
+    /// since gone off the board) is dropped here rather than kept forever, so the underlying quietly
+    /// falls back to auto instead of tracking a dead contract indefinitely.</summary>
+    private DateOnly? ResolveExpiry(string underlying, DateOnly today)
+    {
+        if (_expiryOverride.TryGetValue(underlying, out var overrideExpiry))
+        {
+            if (overrideExpiry >= today) return overrideExpiry;
+            _expiryOverride.TryRemove(underlying, out _);
+        }
+        return _optionChainMaster.GetNearestExpiry(underlying, today);
+    }
+
     /// <summary>Unsubscribes every currently-live token for this underlying, drops all the
-    /// bookkeeping that points at its (about-to-be-wiped) CdvUnderlyingState, and calls Reset() -
-    /// called once by RecenterAsync the moment TradingDay shows yesterday's date. After this
-    /// returns, the rest of RecenterAsync's normal EnsureTracked/backfill/subscribe flow runs
-    /// exactly as it would for a brand-new CdvUnderlyingState.</summary>
+    /// bookkeeping that points at its (about-to-be-wiped) CdvUnderlyingState, and calls Reset(). Two
+    /// callers, both under _recenterLock: RecenterAsync itself the moment TradingDay shows
+    /// yesterday's date, and SelectExpiryAsync when a user manually switches expiry mid-day (same
+    /// full wipe is needed there too - see that method's doc comment for why). After this returns,
+    /// the rest of RecenterAsync's normal EnsureTracked/backfill/subscribe flow runs exactly as it
+    /// would for a brand-new CdvUnderlyingState.</summary>
     private async Task ResetForNewDayAsync(string underlying, CdvUnderlyingState state, CancellationToken cancellationToken)
     {
         var tokens = _subscribedTokens[underlying];
