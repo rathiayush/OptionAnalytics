@@ -62,16 +62,21 @@ export function pickUnderlying(list, current) {
   return list?.[0]?.underlying ?? null
 }
 
-// Dashboard and Backtrack both need to pick which expiry CDV is tracking for the selected
-// underlying - one server-side setting (CdvHostedService.SelectExpiryAsync via the /api/cdv/
-// {underlying}/expiries GET and /expiry POST endpoints), not a per-page concept, since both pages
-// read the same in-memory CdvUnderlyingState. Centralized here so the fetch/POST wiring can't
-// drift between the two pages the way two hand-rolled copies eventually would.
+// Which expiry a PAGE is looking at. The app now tracks several expiries at once per underlying
+// (NIFTY's nearest 3, BANKNIFTY's nearest 2 - see CdvHostedService), each with its own live state,
+// so this is a per-page read: the page appends ?expiry= to its own requests and nothing about that
+// choice reaches any other page, or any armed trigger. It used to POST a server-side switch that
+// unsubscribed and rebuilt everything, which is why changing expiry used to blank all three pages
+// for a minute or two.
+//
+// `expiries` is the TRACKED set, not every listed one - those are the expiries with live data
+// behind them. `selectedExpiry` is what to display; `expiryParam` is what to put in a URL, and is
+// null while the page is following the server's own selection (so the request stays identical to
+// what it was before this existed).
 export function useExpirySelector(underlying) {
   const [expiries, setExpiries] = useState([])
-  const [selectedExpiry, setSelectedExpiry] = useState(null)
-  const [isManual, setIsManual] = useState(false)
-  const [loading, setLoading] = useState(false)
+  const [defaultExpiry, setDefaultExpiry] = useState(null)
+  const [pinned, setPinned] = useState(null)
 
   useEffect(() => {
     if (!underlying) return
@@ -81,44 +86,37 @@ export function useExpirySelector(underlying) {
       .then((data) => {
         if (cancelledRef.cancelled) return
         setExpiries(data?.expiries ?? [])
-        setSelectedExpiry(data?.selected ?? null)
-        setIsManual(!!data?.isManualSelection)
+        setDefaultExpiry(data?.selected ?? null)
+        // A pin from a previous underlying cannot survive the switch - the new underlying tracks a
+        // different set of expiries entirely.
+        setPinned((current) => ((data?.expiries ?? []).includes(current) ? current : null))
       })
       .catch((err) => console.error('Failed to load expiries:', err))
     return () => { cancelledRef.cancelled = true }
   }, [underlying])
 
-  // Switches the underlying onto a different expiry server-side - unsubscribes the old expiry's
-  // contracts from the Dhan feed and rebuilds CDV/OBV/option-chain state onto the new one (see
-  // CdvHostedService.SelectExpiryAsync). Pass null to clear a manual pick and revert to auto
-  // (nearest-expiry) tracking - that's a real, server-applied switch too, not a local-only reset,
-  // so it goes through the same POST rather than being special-cased away. Returns the request's
-  // promise so a caller can refetch its own page's data once the switch has actually landed
-  // server-side, rather than racing it.
+  // Local only, and resolved so callers that refetch in a .then() keep working unchanged.
   const selectExpiry = (expiry) => {
-    if (!underlying) return Promise.resolve()
-    if (expiry === undefined) return Promise.resolve() // not a real choice, just a guard misuse
-    // Already in the requested state server-side? Nothing to do. "expiry === null" (wants auto) is
-    // already true the moment isManual is false, regardless of what selectedExpiry currently reads.
-    const alreadyThere = expiry === null ? !isManual : isManual && expiry === selectedExpiry
-    if (alreadyThere) return Promise.resolve()
-    setLoading(true)
-    return fetch(`/api/cdv/${underlying}/expiry`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ expiry: expiry ?? null }),
-    })
-      .then((r) => r.json())
-      .then((data) => {
-        setSelectedExpiry(data?.selected ?? expiry)
-        setIsManual(!!data?.isManualSelection)
-        if (data?.expiries) setExpiries(data.expiries)
-      })
-      .catch((err) => console.error('Failed to switch expiry:', err))
-      .finally(() => setLoading(false))
+    if (expiry !== undefined) setPinned(expiry ?? null)
+    return Promise.resolve()
   }
 
-  return { expiries, selectedExpiry, isManual, loading, selectExpiry }
+  return {
+    expiries,
+    selectedExpiry: pinned ?? defaultExpiry,
+    expiryParam: pinned,
+    isManual: pinned !== null,
+    loading: false,
+    selectExpiry,
+  }
+}
+
+// Appends ?expiry= to a request when the page has pinned one. Null/undefined leaves the URL
+// untouched, so a page following the server's own selection sends exactly the request it always
+// did.
+export function withExpiry(url, expiry) {
+  if (!expiry) return url
+  return `${url}${url.includes('?') ? '&' : '?'}expiry=${encodeURIComponent(expiry)}`
 }
 
 // Sentinel antd Select value for "Auto (nearest)" - real expiries are ISO date strings, so this

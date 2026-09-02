@@ -79,9 +79,10 @@ public sealed class BacktestService
     /// <summary>Every signal that would have fired across the underlying's currently-held history
     /// at the given timeframe, most recent first. Empty if the underlying isn't recognized or has
     /// no history backfilled yet.</summary>
-    public IReadOnlyList<BacktestSignal> Replay(string underlying, int timeframeMinutes = 1)
+    public IReadOnlyList<BacktestSignal> Replay(string underlying, int timeframeMinutes = 1, DateOnly? expiry = null)
     {
-        if (!_spotFeed.States.TryGetValue(underlying, out var spotState) || !_cdv.States.TryGetValue(underlying, out var cdvState))
+        var cdvState = _cdv.StateFor(underlying, expiry);
+        if (!_spotFeed.States.TryGetValue(underlying, out var spotState) || cdvState is null)
             return Array.Empty<BacktestSignal>();
 
         return ReplayCore(underlying, spotState, cdvState, timeframeMinutes).Signals;
@@ -101,9 +102,9 @@ public sealed class BacktestService
     /// filled from that strategy's own declared default, so a strategy implementation can always
     /// assume <paramref name="parameters"/> is complete. Empty if the underlying or strategy key
     /// isn't recognized, or there's no history backfilled yet.</summary>
-    public IReadOnlyList<BacktestTrade> RunStrategy(string underlying, string strategyKey, int timeframeMinutes, IReadOnlyDictionary<string, decimal> parameters)
+    public IReadOnlyList<BacktestTrade> RunStrategy(string underlying, string strategyKey, int timeframeMinutes, IReadOnlyDictionary<string, decimal> parameters, DateOnly? expiry = null)
     {
-        var prepared = Prepare(underlying, strategyKey, timeframeMinutes, parameters);
+        var prepared = Prepare(underlying, strategyKey, timeframeMinutes, parameters, expiry);
         return prepared is not { } p ? Array.Empty<BacktestTrade>() : p.Strategy.Simulate(p.Context, p.Parameters);
     }
 
@@ -129,9 +130,9 @@ public sealed class BacktestService
     /// side effect of a Backtrack-page improvement.</summary>
     public async Task<IReadOnlyList<BacktestTrade>> RunStrategyAsync(
         string underlying, string strategyKey, int timeframeMinutes,
-        IReadOnlyDictionary<string, decimal> parameters, CancellationToken cancellationToken)
+        IReadOnlyDictionary<string, decimal> parameters, CancellationToken cancellationToken, DateOnly? expiry = null)
     {
-        var prepared = Prepare(underlying, strategyKey, timeframeMinutes, parameters);
+        var prepared = Prepare(underlying, strategyKey, timeframeMinutes, parameters, expiry);
         if (prepared is not { } p) return Array.Empty<BacktestTrade>();
 
         var trades = p.Strategy.Simulate(p.Context, p.Parameters);
@@ -143,7 +144,7 @@ public sealed class BacktestService
         var budget = MaxOnDemandStrikesPerRun;
         for (var round = 0; round < MaxOnDemandRounds && budget > 0; round++)
         {
-            var attempted = await FillMissingStrikesAsync(underlying, p.OnDemand, budget, cancellationToken);
+            var attempted = await FillMissingStrikesAsync(underlying, p.OnDemand, budget, expiry, cancellationToken);
             if (attempted == 0) break; // nothing was missing - the table is as full as it can get
 
             budget -= attempted;
@@ -162,7 +163,7 @@ public sealed class BacktestService
     /// <paramref name="budget"/> of them. Returns HOW MANY it attempted - zero means nothing was
     /// missing, which is the signal to stop rounds; any other number means the strategy should be
     /// re-run, whether or not the fetches found candles.</summary>
-    private async Task<int> FillMissingStrikesAsync(string underlying, OnDemandStrikes onDemand, int budget, CancellationToken cancellationToken)
+    private async Task<int> FillMissingStrikesAsync(string underlying, OnDemandStrikes onDemand, int budget, DateOnly? expiry, CancellationToken cancellationToken)
     {
         var missing = onDemand.DrainMisses();
         if (missing.Count == 0) return 0;
@@ -172,7 +173,7 @@ public sealed class BacktestService
         {
             if (attempted > 0) await Task.Delay(OnDemandCallDelay, cancellationToken);
 
-            var bars = await _cdv.GetStrikeCandlesAsync(underlying, strike, isCall, cancellationToken);
+            var bars = await _cdv.GetStrikeCandlesAsync(underlying, strike, isCall, cancellationToken, expiry);
             var closed = DropFormingBar(bars);
 
             // Recorded even when empty (an unlisted strike, or Dhan simply having nothing) so the
@@ -208,20 +209,25 @@ public sealed class BacktestService
     /// strategy currently selected rather than one fixed rule. Falls back to the plain confluence
     /// replay when the strategy key isn't recognized, which is what the page shows before a
     /// strategy has loaded.</summary>
-    public IReadOnlyList<BacktestSignal> ReplayForStrategy(string underlying, string strategyKey, int timeframeMinutes, IReadOnlyDictionary<string, decimal> parameters)
+    public IReadOnlyList<BacktestSignal> ReplayForStrategy(string underlying, string strategyKey, int timeframeMinutes, IReadOnlyDictionary<string, decimal> parameters, DateOnly? expiry = null)
     {
-        var prepared = Prepare(underlying, strategyKey, timeframeMinutes, parameters);
-        return prepared is not { } p ? Replay(underlying, timeframeMinutes) : p.Strategy.EntrySignals(p.Context, p.Parameters);
+        var prepared = Prepare(underlying, strategyKey, timeframeMinutes, parameters, expiry);
+        return prepared is not { } p ? Replay(underlying, timeframeMinutes, expiry) : p.Strategy.EntrySignals(p.Context, p.Parameters);
     }
 
     /// <summary>Resolves the strategy, does the shared replay/aggregation work once and merges the
     /// caller's parameters over that strategy's declared defaults - everything both RunStrategy and
     /// ReplayForStrategy need, so neither can drift from the other.</summary>
     private (IBacktestStrategy Strategy, BacktestStrategyContext Context, IReadOnlyDictionary<string, decimal> Parameters, OnDemandStrikes OnDemand)? Prepare(
-        string underlying, string strategyKey, int timeframeMinutes, IReadOnlyDictionary<string, decimal> parameters)
+        string underlying, string strategyKey, int timeframeMinutes, IReadOnlyDictionary<string, decimal> parameters, DateOnly? expiry)
     {
         if (!_strategies.TryGetValue(strategyKey, out var strategy)) return null;
-        if (!_spotFeed.States.TryGetValue(underlying, out var spotState) || !_cdv.States.TryGetValue(underlying, out var cdvState))
+
+        // A named expiry reads THAT expiry's own tracked state; null reads the selected one, which
+        // is what every caller did before expiries could be held several at a time. An expiry that
+        // is not tracked returns nothing rather than quietly answering from a different chain.
+        var cdvState = _cdv.StateFor(underlying, expiry);
+        if (!_spotFeed.States.TryGetValue(underlying, out var spotState) || cdvState is null)
             return null;
 
         var timeframe = Math.Max(1, timeframeMinutes);

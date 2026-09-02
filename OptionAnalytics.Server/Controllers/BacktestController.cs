@@ -20,8 +20,8 @@ public sealed class BacktestController : ControllerBase
     /// the given timeframe (1/2/5-minute bars, aggregated from the native 1-minute series), most
     /// recent first.</summary>
     [HttpGet("{underlying}")]
-    public IActionResult Get(string underlying, [FromQuery] string strategy = "five-ema", [FromQuery] int timeframe = 1) =>
-        Ok(_backtest.ReplayForStrategy(underlying.ToUpperInvariant(), strategy, Math.Max(1, timeframe), ReadParameters()));
+    public IActionResult Get(string underlying, [FromQuery] string strategy = "five-ema", [FromQuery] int timeframe = 1, [FromQuery] string? expiry = null) =>
+        Ok(_backtest.ReplayForStrategy(underlying.ToUpperInvariant(), strategy, Math.Max(1, timeframe), ReadParameters(), ParseExpiry(expiry)));
 
     /// <summary>Every registered strategy's metadata - key, name, description, and the parameter
     /// controls the Backtrack page should render for it. See Services.Backtesting.IBacktestStrategy
@@ -42,19 +42,27 @@ public sealed class BacktestController : ControllerBase
     /// therefore has no in-memory candles) gets its history fetched from Dhan on demand rather than
     /// showing as a "No Data" row - see that method for why it is a two-pass fetch.</summary>
     [HttpGet("{underlying}/trades")]
-    public async Task<IActionResult> GetTrades(string underlying, [FromQuery] string strategy = "five-ema", [FromQuery] int timeframe = 1) =>
+    public async Task<IActionResult> GetTrades(string underlying, [FromQuery] string strategy = "five-ema", [FromQuery] int timeframe = 1, [FromQuery] string? expiry = null) =>
         Ok(await _backtest.RunStrategyAsync(
-            underlying.ToUpperInvariant(), strategy, Math.Max(1, timeframe), ReadParameters(), HttpContext.RequestAborted));
+            underlying.ToUpperInvariant(), strategy, Math.Max(1, timeframe), ReadParameters(), HttpContext.RequestAborted, ParseExpiry(expiry)));
 
-    /// <summary>Every query param other than "strategy"/"timeframe" that parses as a number,
-    /// passed through as the selected strategy's own parameter - generic on purpose, so a new
-    /// strategy's parameters reach it with no controller change.</summary>
+    /// <summary>?expiry=yyyy-MM-dd - which tracked expiry to run against, or the selected one when
+    /// absent. Every tracked expiry is held live at once, so this is a read: running Backtrack on
+    /// next month does not change what the dashboard or an armed trigger sees.</summary>
+    private static DateOnly? ParseExpiry(string? expiry) =>
+        DateOnly.TryParse(expiry, System.Globalization.CultureInfo.InvariantCulture, out var parsed) ? parsed : null;
+
+    /// <summary>Every query param other than "strategy"/"timeframe"/"expiry" that parses as a
+    /// number, passed through as the selected strategy's own parameter - generic on purpose, so a
+    /// new strategy's parameters reach it with no controller change. "expiry" is skipped
+    /// explicitly rather than relying on a date failing to parse as a decimal: a bare year would
+    /// parse, and would then be handed to a strategy as a parameter named "expiry".</summary>
     private Dictionary<string, decimal> ReadParameters()
     {
         var parameters = new Dictionary<string, decimal>();
         foreach (var (key, value) in Request.Query)
         {
-            if (key is "strategy" or "timeframe") continue;
+            if (key is "strategy" or "timeframe" or "expiry") continue;
             if (decimal.TryParse(value, out var parsed)) parameters[key] = parsed;
         }
         return parameters;

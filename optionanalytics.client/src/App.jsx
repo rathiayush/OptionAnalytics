@@ -5,7 +5,7 @@ import * as signalR from '@microsoft/signalr'
 import { Routes, Route } from 'react-router-dom'
 import BacktestPage from './BacktestPage.jsx'
 import TriggersPage from './TriggersPage.jsx'
-import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, fmtPrice, fmtIstTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect } from './shared.jsx'
+import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, fmtPrice, fmtIstTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry } from './shared.jsx'
 import './App.css'
 
 const { Title, Text } = Typography
@@ -719,14 +719,14 @@ const STRIKE_COLUMNS = [
 // "For verification purposes" per-strike breakdown of what the CDV chart actually sums - a plain
 // GET on demand (not wired to SignalR) since this is a one-off check, not something that needs to
 // track every tick live.
-function StrikesButton({ underlying }) {
+function StrikesButton({ underlying, expiry }) {
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
   const [rows, setRows] = useState([])
 
   const load = () => {
     setLoading(true)
-    fetch(`/api/cdv/${underlying}/strikes`)
+    fetch(withExpiry(`/api/cdv/${underlying}/strikes`, expiry))
       .then((r) => r.json())
       .then((data) => setRows((data ?? []).map((s, i) => ({ ...s, key: `${s.securityId}-${i}` }))))
       .catch((err) => console.error('Failed to load CDV strikes:', err))
@@ -833,13 +833,13 @@ function renderPercent(v) {
 // isn't limited to a fixed list. The chosen bars are remembered under `storageKey` (a distinct key
 // per instance - the CDV and OBV tables' choices are independent) so a reload doesn't reset back
 // to the default.
-function LookbackTable({ underlying, cdvSnapshot, endpoint = 'lookback', title = 'CE / PE Lookback % Change', defaultBars = DEFAULT_LOOKBACK_BARS, storageKey }) {
+function LookbackTable({ underlying, expiry, cdvSnapshot, endpoint = 'lookback', title = 'CE / PE Lookback % Change', defaultBars = DEFAULT_LOOKBACK_BARS, storageKey }) {
   const [bars, setBars] = usePersistedState(storageKey, defaultBars)
   const [table, setTable] = useState(null)
   const lastBarTimeRef = useRef(null)
 
   const load = (barsToUse) => {
-    fetch(`/api/cdv/${underlying}/${endpoint}?bars=${barsToUse.join(',')}`)
+    fetch(withExpiry(`/api/cdv/${underlying}/${endpoint}?bars=${barsToUse.join(',')}`, expiry))
       .then((r) => r.json())
       .then(setTable)
       .catch((err) => console.error(`Failed to load ${endpoint} table:`, err))
@@ -954,10 +954,10 @@ function DashboardPage() {
 
   const lastObvBarTimeRef = useRef({ ce: null, pe: null })
 
-  // Which expiry CDV is tracking for `selected` - see useExpirySelector's own doc comment. Changing
-  // it rebuilds the whole underlying's CDV/OBV/option-chain state server-side, so a successful
-  // switch refetches this page exactly like switching underlying does.
-  const { expiries, selectedExpiry, isManual: expiryIsManual, loading: expiryLoading, selectExpiry } = useExpirySelector(selected)
+  // Which expiry THIS PAGE is looking at - see useExpirySelector. Every tracked expiry is held live
+  // server-side, so switching is just a different ?expiry= on this page's own requests: instant,
+  // and it changes nothing for Backtrack, the Triggers page or an armed trigger.
+  const { expiries, selectedExpiry, expiryParam, isManual: expiryIsManual, loading: expiryLoading, selectExpiry } = useExpirySelector(selected)
   const handleExpiryChange = (expiry) => {
     selectExpiry(expiry).then(() => {
       previousStrikeRef.current = ATM_STRIKE
@@ -965,6 +965,17 @@ function DashboardPage() {
       fetchAllData(selected, { cancelled: false }, ATM_STRIKE)
     })
   }
+
+  // A pinned expiry gets no live SignalR push (see the cdvUpdate handler), so it is polled on the
+  // same once-a-minute beat the rest of the page already runs on. The selected expiry is untouched
+  // by this - it keeps streaming.
+  useEffect(() => {
+    if (!selected || !expiryParam) return
+    const cancelledRef = { cancelled: false }
+    const id = setInterval(() => fetchAllData(selected, cancelledRef), 60_000)
+    return () => { cancelledRef.cancelled = true; clearInterval(id) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected, expiryParam])
 
   useEffect(() => {
     fetch('/api/spot/underlyings')
@@ -987,8 +998,8 @@ function DashboardPage() {
   // never subscribed to (it fetches their history from Dhan on demand).
   const fetchAtmAndObv = (underlying, cancelledRef, strike = selectedStrike) => {
     const url = (type) => (strike === ATM_STRIKE
-      ? `/api/cdv/${underlying}/atm-${type.toLowerCase()}/candles`
-      : `/api/cdv/${underlying}/option/candles?strike=${strike}&type=${type}`)
+      ? withExpiry(`/api/cdv/${underlying}/atm-${type.toLowerCase()}/candles`, expiryParam)
+      : withExpiry(`/api/cdv/${underlying}/option/candles?strike=${strike}&type=${type}`, expiryParam))
 
     const ce = fetch(url('CE'))
       .then((r) => r.json())
@@ -1000,7 +1011,7 @@ function DashboardPage() {
       .then((data) => { if (!cancelledRef.cancelled) setAtmPeCandles(data ?? []) })
       .catch((err) => console.error('Failed to load PE candles:', err))
 
-    const obv = fetch(`/api/cdv/${underlying}/obv-series`)
+    const obv = fetch(withExpiry(`/api/cdv/${underlying}/obv-series`, expiryParam))
       .then((r) => r.json())
       .then((data) => { if (!cancelledRef.cancelled) { setObvCe(data.ce ?? []); setObvPe(data.pe ?? []) } })
       .catch((err) => console.error('Failed to load OBV series:', err))
@@ -1021,17 +1032,17 @@ function DashboardPage() {
       .then((data) => { if (!cancelledRef.cancelled) setSnapshot(data) })
       .catch((err) => console.error('Failed to load snapshot:', err))
 
-    const cdvSeriesP = fetch(`/api/cdv/${underlying}/series`)
+    const cdvSeriesP = fetch(withExpiry(`/api/cdv/${underlying}/series`, expiryParam))
       .then((r) => r.json())
       .then((data) => { if (!cancelledRef.cancelled) setCdvSeries(data) })
       .catch((err) => console.error('Failed to load CDV series:', err))
 
-    const cdvSnapshotP = fetch(`/api/cdv/${underlying}/snapshot`)
+    const cdvSnapshotP = fetch(withExpiry(`/api/cdv/${underlying}/snapshot`, expiryParam))
       .then((r) => r.json())
       .then((data) => { if (!cancelledRef.cancelled) setCdvSnapshot(data) })
       .catch((err) => console.error('Failed to load CDV snapshot:', err))
 
-    const cdvPrevDayP = fetch(`/api/cdv/${underlying}/previous-day-series`)
+    const cdvPrevDayP = fetch(withExpiry(`/api/cdv/${underlying}/previous-day-series`, expiryParam))
       .then((r) => r.json())
       .then((data) => { if (!cancelledRef.cancelled) setCdvPrevDaySeries(data ?? []) })
       .catch((err) => console.error('Failed to load CDV previous-day series:', err))
@@ -1054,12 +1065,12 @@ function DashboardPage() {
   useEffect(() => {
     if (!selected) return
     const cancelledRef = { cancelled: false }
-    fetch(`/api/cdv/${selected}/chain`)
+    fetch(withExpiry(`/api/cdv/${selected}/chain`, expiryParam))
       .then((r) => r.json())
       .then((data) => { if (!cancelledRef.cancelled) setStrikeChain(data) })
       .catch((err) => console.error('Failed to load the option chain:', err))
     return () => { cancelledRef.cancelled = true }
-  }, [selected, cdvSnapshot?.atmStrike])
+  }, [selected, expiryParam, cdvSnapshot?.atmStrike])
 
   // A strike number means nothing across underlyings (a NIFTY strike is not a BANKNIFTY one), so
   // switching underlying always drops back to following the ATM.
@@ -1088,6 +1099,11 @@ function DashboardPage() {
     (incoming) => { if (incoming.underlying === selected) setSnapshot(incoming) },
     (incoming) => {
       if (incoming.underlying !== selected) return
+      // Only the server's SELECTED expiry is broadcast, and the snapshot does not name which expiry
+      // it is. While this page is pinned to a different one, that push describes a different option
+      // chain entirely - taking it would paint next month's CDV onto this month's chart. The polling
+      // effects below keep a pinned view current instead.
+      if (expiryParam) return
       setCdvSnapshot(incoming)
     },
     (alert) => {
@@ -1131,11 +1147,11 @@ function DashboardPage() {
       return
     }
 
-    fetch(`/api/cdv/${selected}/obv-series`)
+    fetch(withExpiry(`/api/cdv/${selected}/obv-series`, expiryParam))
       .then((r) => r.json())
       .then((data) => { setObvCe(data.ce ?? []); setObvPe(data.pe ?? []) })
       .catch((err) => console.error('Failed to refresh OBV series:', err))
-  }, [selected, selectedStrike, cdvSnapshot?.atmCeCurrentBar?.time, cdvSnapshot?.atmPeCurrentBar?.time])
+  }, [selected, expiryParam, selectedStrike, cdvSnapshot?.atmCeCurrentBar?.time, cdvSnapshot?.atmPeCurrentBar?.time])
 
   // ATM strike rolling (every 30 minutes, or whenever spot crosses a strike-step boundary) means
   // the ATM CE/PE contracts themselves changed identity - the previously-fetched candle history
@@ -1280,7 +1296,7 @@ function DashboardPage() {
             <Space size={12}>
               <Text type="secondary" style={{ fontSize: 12 }}>ATM {cdvSnapshot?.atmStrike ?? '—'} · Expiry {cdvSnapshot?.expiry ?? '—'}</Text>
               <Select value={cdvUnit} onChange={setCdvUnit} size="small" style={{ width: 140 }} options={VALUE_UNIT_OPTIONS} />
-              <StrikesButton underlying={selected} />
+              <StrikesButton underlying={selected} expiry={expiryParam} />
             </Space>
           }
           empty="Waiting for option-chain data - strikes resolve once the spot price is known."
@@ -1298,7 +1314,7 @@ function DashboardPage() {
           )}
         </ChartCard>
 
-        {selected && <LookbackTable underlying={selected} cdvSnapshot={cdvSnapshot} storageKey={STORED_CDV_LOOKBACK_BARS} />}
+        {selected && <LookbackTable underlying={selected} expiry={expiryParam} cdvSnapshot={cdvSnapshot} storageKey={STORED_CDV_LOOKBACK_BARS} />}
 
         <ChartCard
           title="CE / PE On-Balance Volume (delta-weighted, all tracked strikes)"
@@ -1320,6 +1336,7 @@ function DashboardPage() {
         {selected && (
           <LookbackTable
             underlying={selected}
+            expiry={expiryParam}
             cdvSnapshot={cdvSnapshot}
             endpoint="obv-lookback"
             title="OBV Multi-Lookback % Change"

@@ -38,9 +38,9 @@ export default function TriggersPage() {
   // signals keep coming off the tracked expiry's chart. See StrategyTrigger.OrderExpiry.
   const [orderExpiry, setOrderExpiry] = useState(null)
 
-  // Read-only here: this page only needs the LIST of listed expiries to choose from, and the one
-  // being tracked so the default option can name it. Nothing calls selectExpiry, so opening this
-  // page never switches what the dashboard is tracking.
+  // Read-only here: this page needs the list of TRACKED expiries to choose from, and the default so
+  // the fallback option can name it. Every one of these is subscribed live, so a trigger pinned to
+  // any of them is priced off the real feed rather than an option-chain snapshot.
   const { expiries, selectedExpiry } = useExpirySelector(underlying)
 
   const strategy = strategies.find((s) => s.key === strategyKey) ?? null
@@ -329,7 +329,7 @@ export default function TriggersPage() {
                       onChange={(v) => setOrderExpiry(v === '' ? null : v)}
                       style={{ width: 230 }}
                       options={[
-                        { value: '', label: `Tracked expiry${selectedExpiry ? ` (${selectedExpiry})` : ''}` },
+                        { value: '', label: `Default expiry${selectedExpiry ? ` (${selectedExpiry})` : ''}` },
                         ...expiries.map((e) => ({ value: e, label: e })),
                       ]}
                     />
@@ -344,7 +344,7 @@ export default function TriggersPage() {
                       ? ' Live-premium entry fires the moment the signal bar closes, priced off the premium right then - no waiting for the next bar, but the fill will not match what Backtrack modelled for the same signal.'
                       : ' The order waits for the option’s next bar to close so it is priced off exactly what the backtest measured - which is why a 5-minute strategy alerts about five minutes after the price it quotes.'}
                     {orderExpiry
-                      ? ` The order is pinned to the ${orderExpiry} expiry while the signals still come off the tracked expiry's chart, so it is priced off that contract's own live option-chain quote rather than the backtest's entry - and the strategy's SL/target points apply to that premium, which is a different risk from the near month.`
+                      ? ` This trigger runs entirely on the ${orderExpiry} expiry - its signals, its entry price and its order all come from that chain, independently of what any page is looking at. The strategy's SL/target points apply to that expiry's premium, which is a different risk from the near month.`
                       : ''}
                   </Text>
                 </>
