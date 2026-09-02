@@ -59,7 +59,12 @@ public sealed class StrategyTriggerStore
             Math.Max(1, request.TimeframeMinutes),
             request.Parameters ?? new Dictionary<string, decimal>(),
             request.Enabled,
-            DateTimeOffset.UtcNow);
+            DateTimeOffset.UtcNow)
+        {
+            LiveTradingEnabled = request.LiveTradingEnabled,
+            QuantityLots = Math.Max(1, request.QuantityLots),
+            SlippagePoints = Math.Max(0, request.SlippagePoints),
+        };
 
         lock (_lock)
         {
@@ -91,6 +96,9 @@ public sealed class StrategyTriggerStore
                 TimeframeMinutes = Math.Max(1, request.TimeframeMinutes),
                 Parameters = request.Parameters ?? new Dictionary<string, decimal>(),
                 Enabled = request.Enabled,
+                LiveTradingEnabled = request.LiveTradingEnabled,
+                QuantityLots = Math.Max(1, request.QuantityLots),
+                SlippagePoints = Math.Max(0, request.SlippagePoints),
                 LastSignalUtc = watchChanged ? null : existing.LastSignalUtc,
             };
 

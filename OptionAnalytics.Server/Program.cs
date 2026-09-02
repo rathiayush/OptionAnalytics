@@ -26,6 +26,10 @@ builder.Services.AddHttpClient<DhanOptionChainMaster>();
 // Goes through DhanApiClient like every other REST call, so it needs no HttpClient of its own -
 // it only decorates the dashboard's strike picker with live premium/OI (see DhanOptionChainQuotes).
 builder.Services.AddSingleton<DhanOptionChainQuotes>();
+// Also goes through DhanApiClient, no HttpClient of its own - see DhanSuperOrderClient's own doc
+// comment. Registered now as scaffolding; nothing calls it yet until the Strategy Trigger
+// integration (quantity/order-type/dry-run design) is settled.
+builder.Services.AddSingleton<DhanSuperOrderClient>();
 
 // No-op when Dhan:Pin/Dhan:TotpSecret aren't set (see DhanTotpAutoRenewalHostedService) - safe to
 // always register rather than branching on config here.

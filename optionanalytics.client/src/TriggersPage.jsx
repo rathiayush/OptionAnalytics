@@ -24,6 +24,14 @@ export default function TriggersPage() {
   const [strategyKey, setStrategyKey] = useState(null)
   const [paramValues, setParamValues] = useState({})
 
+  // Whether an armed trigger also builds a Dhan Super Order from its fired trade - a separate
+  // opt-in from "On" above, which only ever means "watch and alert". DRY RUN ONLY right now: the
+  // backend computes and logs the order (and shows it in the Telegram message) but never actually
+  // places it - see StrategyTriggerHostedService's own doc comment.
+  const [liveTradingEnabled, setLiveTradingEnabled] = useState(false)
+  const [quantityLots, setQuantityLots] = useState(1)
+  const [slippagePoints, setSlippagePoints] = useState(1)
+
   const strategy = strategies.find((s) => s.key === strategyKey) ?? null
 
   const loadTriggers = () => {
@@ -75,11 +83,16 @@ export default function TriggersPage() {
         timeframeMinutes: timeframe,
         parameters: paramValues,
         enabled: true,
+        liveTradingEnabled,
+        quantityLots,
+        slippagePoints,
       }),
     })
       .then((r) => r.json())
       .then(() => {
-        message.success('Trigger armed - it will notify on the next new signal')
+        message.success(liveTradingEnabled
+          ? 'Trigger armed - Super Order preview will be logged (dry run) on the next new signal'
+          : 'Trigger armed - it will notify on the next new signal')
         setName('')
         loadTriggers()
       })
@@ -90,7 +103,10 @@ export default function TriggersPage() {
       .finally(() => setSaving(false))
   }
 
-  const setEnabled = (row, enabled) => {
+  // Used for both the "On" switch and the "Live" switch - either one PUTs the whole trigger back,
+  // so every field row already holds (parameters, live-trading settings included) must be carried
+  // through unchanged or this would silently reset whichever one isn't being toggled right now.
+  const updateTrigger = (row, changes) => {
     fetch(`/api/triggers/${row.id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -100,12 +116,19 @@ export default function TriggersPage() {
         strategyKey: row.strategyKey,
         timeframeMinutes: row.timeframeMinutes,
         parameters: row.parameters,
-        enabled,
+        enabled: row.enabled,
+        liveTradingEnabled: row.liveTradingEnabled,
+        quantityLots: row.quantityLots,
+        slippagePoints: row.slippagePoints,
+        ...changes,
       }),
     })
       .then(() => loadTriggers())
       .catch((err) => console.error('Failed to update trigger:', err))
   }
+
+  const setEnabled = (row, enabled) => updateTrigger(row, { enabled })
+  const setLiveTrading = (row, liveTradingEnabled) => updateTrigger(row, { liveTradingEnabled })
 
   const deleteTrigger = (id) => {
     fetch(`/api/triggers/${id}`, { method: 'DELETE' })
@@ -141,6 +164,19 @@ export default function TriggersPage() {
           </Space>
         )
         : <Text type="secondary">{row.lastSignalUtc ? 'Armed - waiting for a new signal' : 'Arming…'}</Text>),
+    },
+    {
+      title: 'Live (dry run)',
+      key: 'liveTrading',
+      width: 170,
+      render: (_, row) => (
+        <Space size={8}>
+          <Switch size="small" checked={row.liveTradingEnabled} onChange={(v) => setLiveTrading(row, v)} />
+          {row.liveTradingEnabled && (
+            <Text type="secondary" style={{ fontSize: 12 }}>{row.quantityLots} lot(s) · {row.slippagePoints}pt slip</Text>
+          )}
+        </Space>
+      ),
     },
     {
       title: 'On',
@@ -215,6 +251,7 @@ export default function TriggersPage() {
                     />
                   ) : (
                     <InputNumber
+                      controls={false}
                       min={p.min}
                       max={p.max}
                       step={p.step}
@@ -228,6 +265,32 @@ export default function TriggersPage() {
               <Button type="primary" icon={<PlusOutlined />} onClick={createTrigger} loading={saving} disabled={!underlying || !strategyKey}>
                 Arm trigger
               </Button>
+            </Space>
+
+            <Space align="end" size={16} wrap style={{ borderTop: '1px solid #ffffff1a', paddingTop: 16 }}>
+              <Space direction="vertical" size={2}>
+                <Text type="secondary" style={{ fontSize: 12 }}>Live trading (dry run)</Text>
+                <Switch checked={liveTradingEnabled} onChange={setLiveTradingEnabled} />
+              </Space>
+              {liveTradingEnabled && (
+                <>
+                  <Space direction="vertical" size={2}>
+                    <Text type="secondary" style={{ fontSize: 12 }}>Quantity (lots)</Text>
+                    <InputNumber controls={false} min={1} step={1} value={quantityLots}
+                      onChange={(v) => setQuantityLots(v ?? 1)} style={{ width: 110 }} />
+                  </Space>
+                  <Space direction="vertical" size={2}>
+                    <Text type="secondary" style={{ fontSize: 12 }}>Slippage (points)</Text>
+                    <InputNumber controls={false} min={0} step={0.5} value={slippagePoints}
+                      onChange={(v) => setSlippagePoints(v ?? 0)} style={{ width: 130 }} />
+                  </Space>
+                  <Text type="secondary" style={{ fontSize: 12, maxWidth: 420 }}>
+                    Builds a Dhan Super Order (LIMIT entry + target + stop-loss) from every fired trade and
+                    logs it - it is not placed yet. Slippage is added to (a buy) or subtracted from (a sell)
+                    the entry price to keep the LIMIT order fillable.
+                  </Text>
+                </>
+              )}
             </Space>
           </Space>
         </Card>

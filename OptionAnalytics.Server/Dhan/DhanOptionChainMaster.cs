@@ -108,6 +108,8 @@ public sealed class DhanOptionChainMaster
         public static readonly string[] Expiry = { "SEM_EXPIRY_DATE", "SM_EXPIRY_DATE", "EXPIRY_DATE" };
         public static readonly string[] Strike = { "SEM_STRIKE_PRICE", "STRIKE_PRICE" };
         public static readonly string[] OptionType = { "SEM_OPTION_TYPE", "OPTION_TYPE" };
+        public static readonly string[] LotSize = { "SEM_LOT_UNITS", "LOT_SIZE" };
+        public static readonly string[] TickSize = { "SEM_TICK_SIZE", "TICK_SIZE" };
     }
 
     private List<DhanOptionInstrument> ParseOptionRows(Stream stream)
@@ -127,6 +129,8 @@ public sealed class DhanOptionChainMaster
         var expiryIndex = Resolve(header, Columns.Expiry);
         var strikeIndex = Resolve(header, Columns.Strike);
         var optionTypeIndex = Resolve(header, Columns.OptionType);
+        var lotSizeIndex = Resolve(header, Columns.LotSize);
+        var tickSizeIndex = Resolve(header, Columns.TickSize);
 
         if (securityIdIndex < 0 || exchangeIndex < 0 || instrumentNameIndex < 0 || tradingSymbolIndex < 0)
         {
@@ -169,7 +173,14 @@ public sealed class DhanOptionChainMaster
             var strike = ParseDecimal(Get(fields, strikeIndex));
             if (strike <= 0) continue;
 
-            options.Add(new DhanOptionInstrument(securityId, tradingSymbol, underlying, expiry.Value, strike, optionType == "CE", "NSE_FNO"));
+            // A lot size that fails to parse would silently place an order in raw units instead
+            // of lots - too dangerous to default; skip the row instead (same "no data" tolerance
+            // as everywhere else in this backfill, just applied to a column not read before).
+            var lotSize = (int)ParseDecimal(Get(fields, lotSizeIndex));
+            if (lotSize <= 0) continue;
+            var tickSize = ParseDecimal(Get(fields, tickSizeIndex));
+
+            options.Add(new DhanOptionInstrument(securityId, tradingSymbol, underlying, expiry.Value, strike, optionType == "CE", "NSE_FNO", lotSize, tickSize));
         }
 
         return options;

@@ -14,6 +14,26 @@ public sealed record StrategyTrigger(
     bool Enabled,
     DateTimeOffset CreatedUtc)
 {
+    /// <summary>Whether a fired trade also gets a Dhan Super Order built and (once dry-run
+    /// verification is done and this app is told to actually send them) placed - see
+    /// StrategyTriggerHostedService's own doc comment for why this is a SEPARATE opt-in from
+    /// Enabled, defaulting to false even for triggers created before this existed: Enabled only
+    /// ever meant "watch and alert", and a config load must never silently upgrade an existing
+    /// trigger into one that also places real orders.</summary>
+    public bool LiveTradingEnabled { get; init; }
+
+    /// <summary>Lots per order - Dhan's quantity is raw units, so this gets multiplied by the
+    /// contract's own lot size (DhanOptionInstrument.LotSize, read from the scrip master since
+    /// SEBI revises it periodically) when an order is actually built. Only meaningful when
+    /// LiveTradingEnabled.</summary>
+    public int QuantityLots { get; init; } = 1;
+
+    /// <summary>Points added to (a buy) or subtracted from (a sell) the entry price to form a
+    /// marketable LIMIT order - Dhan's Super Order does not support orderType MARKET for this
+    /// instrument type, so every entry is a LIMIT order priced to fill immediately in practice.
+    /// Only meaningful when LiveTradingEnabled.</summary>
+    public decimal SlippagePoints { get; init; } = 1;
+
     /// <summary>The last entry signal this trigger has already alerted on. A newly-armed trigger is
     /// primed with whatever the latest signal is at that moment WITHOUT alerting, so arming it
     /// doesn't immediately dump every historical signal into Telegram; only genuinely new ones
@@ -33,4 +53,7 @@ public sealed record StrategyTriggerRequest(
     string StrategyKey,
     int TimeframeMinutes,
     IReadOnlyDictionary<string, decimal> Parameters,
-    bool Enabled);
+    bool Enabled,
+    bool LiveTradingEnabled,
+    int QuantityLots,
+    decimal SlippagePoints);
