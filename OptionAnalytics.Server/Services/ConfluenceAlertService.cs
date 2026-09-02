@@ -111,6 +111,11 @@ public sealed class ConfluenceAlertService : BackgroundService
             UpdateAtmLeg(capturedUnderlying, capturedCdvState, isCall: true, announce: false, stoppingToken);
             UpdateAtmLeg(capturedUnderlying, capturedCdvState, isCall: false, announce: false, stoppingToken);
             cdvState.AtmBarClosed += (isCall, _) => UpdateAtmLeg(capturedUnderlying, capturedCdvState, isCall, announce: true, stoppingToken);
+            // A day rollover or a manual expiry switch (CdvHostedService.SelectExpiryAsync) wipes
+            // this underlying's whole strike window - see ClearAtmLegs for why the CE/PE bias
+            // cached here must be dropped too, not left showing a reading from a contract that no
+            // longer exists.
+            cdvState.StrikesReset += () => ClearAtmLegs(capturedUnderlying);
         }
 
         return Task.CompletedTask;
@@ -241,6 +246,26 @@ public sealed class ConfluenceAlertService : BackgroundService
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "Failed to broadcast a confluence alert for {Underlying}.", alert.Underlying);
+        }
+    }
+
+    /// <summary>Drops the cached ATM CE/PE bias for one underlying - called on CdvUnderlyingState.
+    /// StrikesReset (day rollover or a manual expiry switch). Without this, the CE/PE readings held
+    /// here would keep reporting the OLD contract's last-known direction until its replacement's
+    /// first live bar closes and overwrites them - a window in which EvaluateConfluence could
+    /// combine a fresh SPOT reading with a stale, now-nonexistent-contract CE/PE bias and produce a
+    /// Confluence alert that mixes two different instruments' data. Spot is left untouched - it has
+    /// no relationship to option expiry. EvaluateConfluence's own null checks already treat "no CE/
+    /// PE reading yet" as "nothing to evaluate", so clearing to null is enough to close the gap; the
+    /// real reading comes back the moment the new expiry's first ATM bar closes.</summary>
+    private void ClearAtmLegs(string underlying)
+    {
+        var state = GetOrCreateState(underlying);
+        lock (state)
+        {
+            state.Ce = null;
+            state.Pe = null;
+            state.ConfluenceAlerted = false;
         }
     }
 

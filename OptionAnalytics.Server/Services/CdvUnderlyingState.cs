@@ -168,10 +168,11 @@ public sealed class CdvUnderlyingState
     /// days instead of oscillating within one.</summary>
     public DateOnly? TradingDay { get; set; }
 
-    /// <summary>Wipes every strike and the whole CDV series - called by CdvHostedService the moment
-    /// a new IST trading day is detected (see TradingDay). Does NOT touch Underlying itself; AtmStrike
-    /// and Expiry are cleared too since RecenterAsync re-establishes them immediately after calling
-    /// this, same as a fresh CdvUnderlyingState would start.</summary>
+    /// <summary>Wipes every strike and the whole CDV series - called by CdvHostedService both at
+    /// the nightly IST day rollover (see TradingDay) and on a manual expiry switch
+    /// (CdvHostedService.SelectExpiryAsync). Does NOT touch Underlying itself; AtmStrike and Expiry
+    /// are cleared too since RecenterAsync re-establishes them immediately after calling this, same
+    /// as a fresh CdvUnderlyingState would start.</summary>
     public void Reset()
     {
         lock (_lock)
@@ -187,7 +188,16 @@ public sealed class CdvUnderlyingState
             AtmStrike = null;
             Expiry = null;
         }
+
+        StrikesReset?.Invoke();
     }
+
+    /// <summary>Raised at the end of Reset() - every tracked strike's history (and RunningCdv) is
+    /// gone, so any subscriber caching per-strike derived state (ConfluenceAlertService's ATM CE/PE
+    /// bias, notably) must drop it too rather than keep showing a reading computed off a contract
+    /// that no longer exists. Invoked outside _lock, same reasoning as AtmBarClosed - a subscriber
+    /// calling back into this instance must never deadlock against it.</summary>
+    public event Action? StrikesReset;
 
     /// <summary>Registers a strike/side this underlying has never seen today, starting its
     /// RunningCdv at zero. A no-op if already tracked (re-entering the window after rolling back
