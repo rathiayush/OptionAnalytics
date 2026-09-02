@@ -232,7 +232,10 @@ public sealed class StrategyTriggerHostedService : BackgroundService
 
     private async Task EvaluateAsync(StrategyTrigger trigger, CancellationToken cancellationToken)
     {
-        var trades = _backtest.RunStrategy(trigger.Underlying, trigger.StrategyKey, trigger.TimeframeMinutes, trigger.Parameters)
+        // Evaluated against the trigger's OWN expiry when it pins one, so an armed trigger is
+        // unaffected by which expiry any page happens to be looking at - each trigger runs
+        // independently, on its own expiry, with its own strategy.
+        var trades = _backtest.RunStrategy(trigger.Underlying, trigger.StrategyKey, trigger.TimeframeMinutes, trigger.Parameters, trigger.OrderExpiry)
             .OrderBy(t => t.SignalTimeUtc)
             .ToList();
 
@@ -267,7 +270,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         // The strategy's own EntrySignals carries the human-readable WHY ("Spot crossed down +
         // ATM PE confirmed + ...") that BacktestTrade doesn't - matched back by time+direction so
         // the alert explains the reasoning, not just the fill RunStrategy decided on.
-        var reasons = _backtest.ReplayForStrategy(trigger.Underlying, trigger.StrategyKey, trigger.TimeframeMinutes, trigger.Parameters)
+        var reasons = _backtest.ReplayForStrategy(trigger.Underlying, trigger.StrategyKey, trigger.TimeframeMinutes, trigger.Parameters, trigger.OrderExpiry)
             .Where(s => s.Kind is "Entry" or "Confluence")
             .ToDictionary(s => (s.TimeUtc, s.Direction), s => s.Summary);
 
@@ -391,7 +394,8 @@ public sealed class StrategyTriggerHostedService : BackgroundService
 
         // Which expiry this order goes in: the trigger's own pinned one if it has one, otherwise
         // whatever is being tracked (see StrategyTrigger.OrderExpiry).
-        var trackedExpiry = _cdv.States.TryGetValue(trade.Underlying, out var cdvState) ? cdvState.Expiry : null;
+        var trackedExpiry = _cdv.StateFor(trade.Underlying, trigger.OrderExpiry)?.Expiry
+            ?? (_cdv.States.TryGetValue(trade.Underlying, out var cdvState) ? cdvState.Expiry : null);
         var expiry = trigger.OrderExpiry ?? trackedExpiry;
         if (expiry is null)
         {
@@ -411,7 +415,10 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         // strategy simulated, so the simulator's entry price cannot price it - that number belongs
         // to the near month. Such an order is always priced off its own contract's live quote,
         // whatever UseLivePremiumEntry says.
-        var isForeignExpiry = expiry != trackedExpiry;
+        // "Foreign" now means NOT TRACKED, rather than "not the selected one": a pinned expiry the
+        // app subscribes to has real premium candles behind it and prices exactly like the selected
+        // one. Only an untracked expiry needs the rate-limited Option Chain snapshot.
+        var isForeignExpiry = _cdv.StateFor(trade.Underlying, expiry) is null;
 
         // The entry reference every other price here is derived from. Normally the simulator's own
         // resolved fill (the next bar's open), so a live order is built from exactly the number the
@@ -636,8 +643,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
                 return;
             }
 
-            var trackedExpiry = _cdv.States.TryGetValue(trade.Underlying, out var monitorState) ? monitorState.Expiry : null;
-            var latestPrice = await GetOrderPremiumAsync(trade.Underlying, plan.Expiry, trackedExpiry, trade.Strike, isCall, cancellationToken);
+            var latestPrice = await GetOrderPremiumAsync(trade.Underlying, plan.Expiry, plan.Expiry, trade.Strike, isCall, cancellationToken);
             if (latestPrice is null)
             {
                 _logger.LogWarning("Trigger {Name}: no live premium available for {Strike}{Type} - cannot re-price order {OrderId} on attempt {Attempt}/{Max}.",
@@ -706,7 +712,12 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     private async Task<decimal?> GetOrderPremiumAsync(
         string underlying, DateOnly expiry, DateOnly? trackedExpiry, decimal strike, bool isCall, CancellationToken cancellationToken)
     {
-        if (trackedExpiry == expiry) return GetLatestPremium(underlying, strike, isCall);
+        // Any TRACKED expiry answers from its own live feed - including a pinned one, now that
+        // several expiries are subscribed at once. GetChainPremiumAsync makes the same check and
+        // only calls Dhan for an expiry with no subscription behind it.
+        if (_cdv.StateFor(underlying, expiry) is { } tracked && tracked.GetStrikeCandles(strike, isCall) is { Count: > 0 } bars)
+            return bars[^1].Close;
+
         return await _cdv.GetChainPremiumAsync(underlying, expiry, strike, isCall, cancellationToken, ForeignExpiryQuoteMaxAge);
     }
 
