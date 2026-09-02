@@ -303,6 +303,7 @@ export default function BacktestPage() {
                     />
                   ) : (
                     <InputNumber
+                      controls={false}
                       min={p.min}
                       max={p.max}
                       step={p.step}
