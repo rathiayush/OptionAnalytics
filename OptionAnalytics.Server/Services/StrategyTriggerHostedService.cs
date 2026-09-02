@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Microsoft.AspNetCore.SignalR;
 using OptionAnalytics.Server.Dhan;
 using OptionAnalytics.Server.Hubs;
@@ -52,9 +53,13 @@ namespace OptionAnalytics.Server.Services;
 /// </summary>
 public sealed class StrategyTriggerHostedService : BackgroundService
 {
-    /// <summary>How often to re-evaluate. Signals only change when a bar closes (a minute at the
-    /// finest timeframe), so polling faster than this would just repeat identical work.</summary>
-    private static readonly TimeSpan EvaluationInterval = TimeSpan.FromSeconds(30);
+    /// <summary>A slow BACKSTOP sweep, not the trigger mechanism. Evaluation is driven by
+    /// SpotUnderlyingState.BarClosed (see ExecuteAsync/OnBarClosed) so a signal is acted on the
+    /// instant the bar that creates it closes, rather than up to a poll-interval later. This sweep
+    /// only covers the cases no bar close will: a trigger armed while the market is shut still gets
+    /// primed, and a missed event (a feed reconnect straddling a bar boundary) cannot strand a
+    /// trigger until the next close. It normally finds nothing, because BarClosed already did.</summary>
+    private static readonly TimeSpan BackstopInterval = TimeSpan.FromMinutes(1);
 
     /// <summary>Let the feeds backfill and the first bars close before the first evaluation -
     /// evaluating against a half-loaded history would prime triggers at the wrong point.</summary>
@@ -85,20 +90,34 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     private readonly StrategyTriggerStore _store;
     private readonly BacktestService _backtest;
     private readonly TelegramAlertService _telegram;
+    private readonly SpotFeedHostedService _spotFeed;
     private readonly CdvHostedService _cdv;
     private readonly DhanOptionChainMaster _optionChainMaster;
     private readonly DhanSuperOrderClient _superOrders;
     private readonly IHubContext<SpotHub> _hub;
     private readonly ILogger<StrategyTriggerHostedService> _logger;
 
+    /// <summary>Underlyings with an evaluation already in flight. A bar close arriving while the
+    /// previous evaluation is still running is COALESCED rather than queued: the running one reads
+    /// whatever bars have closed by the time it gets there, so queueing a second would only repeat
+    /// identical work - and on a single-core box a backlog of them would keep falling further
+    /// behind exactly when the market is busiest.</summary>
+    private readonly ConcurrentDictionary<string, byte> _inFlight = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The BarClosed handlers this service attached, kept so StopAsync can detach them -
+    /// SpotUnderlyingState outlives this service (it belongs to SpotFeedHostedService), so a
+    /// handler left attached would keep firing into a stopped service.</summary>
+    private readonly List<(SpotUnderlyingState State, Action<Candle> Handler)> _barClosedHandlers = new();
+
     public StrategyTriggerHostedService(
         StrategyTriggerStore store, BacktestService backtest, TelegramAlertService telegram,
-        CdvHostedService cdv, DhanOptionChainMaster optionChainMaster, DhanSuperOrderClient superOrders,
-        IHubContext<SpotHub> hub, ILogger<StrategyTriggerHostedService> logger)
+        SpotFeedHostedService spotFeed, CdvHostedService cdv, DhanOptionChainMaster optionChainMaster,
+        DhanSuperOrderClient superOrders, IHubContext<SpotHub> hub, ILogger<StrategyTriggerHostedService> logger)
     {
         _store = store;
         _backtest = backtest;
         _telegram = telegram;
+        _spotFeed = spotFeed;
         _cdv = cdv;
         _optionChainMaster = optionChainMaster;
         _superOrders = superOrders;
@@ -112,29 +131,95 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         {
             await Task.Delay(StartupDelay, stoppingToken);
 
+            // Evaluate the moment a bar CLOSES, not on a timer. Every strategy's entry condition is
+            // defined on closed bars (see this class's doc comment), so a bar close is precisely the
+            // event that can change the answer - and between two closes there is nothing new to
+            // read, however often you look. Reacting to the event instead of polling removes the
+            // dead time a poll leaves between the bar closing and anyone noticing.
+            //
+            // Same event ConfluenceAlertService already reacts to, for the same reason.
+            foreach (var (underlying, spotState) in _spotFeed.States)
+            {
+                var capturedUnderlying = underlying;
+                void Handler(Candle _) => OnBarClosed(capturedUnderlying, stoppingToken);
+
+                spotState.BarClosed += Handler;
+                _barClosedHandlers.Add((spotState, Handler));
+            }
+
             while (!stoppingToken.IsCancellationRequested)
             {
-                foreach (var trigger in _store.GetAll().Where(t => t.Enabled))
+                await Task.Delay(BackstopInterval, stoppingToken);
+
+                // See BackstopInterval: this is the safety net, not the mechanism.
+                foreach (var underlying in _spotFeed.States.Keys)
                 {
                     if (stoppingToken.IsCancellationRequested) break;
-                    try
-                    {
-                        await EvaluateAsync(trigger, stoppingToken);
-                    }
-                    catch (Exception ex) when (ex is not OperationCanceledException)
-                    {
-                        // One bad trigger (a strategy key that no longer exists, say) must not stop
-                        // the others from being watched.
-                        _logger.LogError(ex, "Trigger {Name} ({Id}) failed to evaluate.", trigger.Name, trigger.Id);
-                    }
+                    OnBarClosed(underlying, stoppingToken);
                 }
-
-                await Task.Delay(EvaluationInterval, stoppingToken);
             }
         }
         catch (OperationCanceledException)
         {
             // Shutting down.
+        }
+    }
+
+    public override Task StopAsync(CancellationToken cancellationToken)
+    {
+        foreach (var (state, handler) in _barClosedHandlers) state.BarClosed -= handler;
+        _barClosedHandlers.Clear();
+        return base.StopAsync(cancellationToken);
+    }
+
+    /// <summary>Dispatches an evaluation for one underlying. Deliberately NOT awaited on the calling
+    /// thread: BarClosed is raised from the WebSocket tick path (SpotUnderlyingState.ApplyTick), and
+    /// an evaluation is a full strategy replay taking a hundred milliseconds or more - doing that
+    /// inline would stall tick processing for EVERY instrument on the feed, which is a far worse
+    /// problem than the latency it was trying to remove.</summary>
+    private void OnBarClosed(string underlying, CancellationToken stoppingToken)
+    {
+        if (stoppingToken.IsCancellationRequested) return;
+        if (!_inFlight.TryAdd(underlying, 0)) return; // already evaluating this underlying - see _inFlight
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await EvaluateUnderlyingAsync(underlying, stoppingToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogError(ex, "Trigger evaluation for {Underlying} failed.", underlying);
+            }
+            finally
+            {
+                _inFlight.TryRemove(underlying, out _);
+            }
+        }, CancellationToken.None);
+    }
+
+    /// <summary>Every enabled trigger watching this one underlying. Scoped per-underlying because
+    /// that is what a bar close is about - a NIFTY bar closing tells you nothing new about a
+    /// BANKNIFTY trigger, and re-running it would be wasted work on every close.</summary>
+    private async Task EvaluateUnderlyingAsync(string underlying, CancellationToken cancellationToken)
+    {
+        var triggers = _store.GetAll()
+            .Where(t => t.Enabled && string.Equals(t.Underlying, underlying, StringComparison.OrdinalIgnoreCase));
+
+        foreach (var trigger in triggers)
+        {
+            if (cancellationToken.IsCancellationRequested) break;
+            try
+            {
+                await EvaluateAsync(trigger, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // One bad trigger (a strategy key that no longer exists, say) must not stop the
+                // others from being watched.
+                _logger.LogError(ex, "Trigger {Name} ({Id}) failed to evaluate.", trigger.Name, trigger.Id);
+            }
         }
     }
 
