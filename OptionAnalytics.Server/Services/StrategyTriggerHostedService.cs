@@ -85,6 +85,13 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     /// it filled. Short on purpose - StrategyTrigger.MaxDeviationPercent's own doc comment explains
     /// why this whole loop exists: an option's premium can move fast enough in a couple of minutes
     /// that a slow poll would burn through the deviation budget before ever re-pricing.</summary>
+    /// <summary>How stale an Option Chain snapshot may be when it is pricing an order in an expiry
+    /// this app does not track (see StrategyTrigger.OrderExpiry). Shorter than that API's own 30s
+    /// cache because a fill-retry re-prices every FillCheckInterval and a stale number would make
+    /// both the re-price and the deviation guard meaningless; still well outside Dhan's one-call-
+    /// every-3-seconds limit, which DhanOptionChainQuotes enforces separately either way.</summary>
+    private static readonly TimeSpan ForeignExpiryQuoteMaxAge = TimeSpan.FromSeconds(4);
+
     private static readonly TimeSpan FillCheckInterval = TimeSpan.FromSeconds(5);
 
     private readonly StrategyTriggerStore _store;
@@ -283,9 +290,10 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         var ist = TimeSpan.FromHours(5.5);
 
         var orderLine = "";
+        SuperOrderPlan? plan = null;
         if (trigger.LiveTradingEnabled)
         {
-            var plan = BuildOrderPlan(trigger, trade);
+            plan = await BuildOrderPlanAsync(trigger, trade, cancellationToken);
             orderLine = plan is null ? "" : $"\n\n{await PlaceOrderAsync(trigger, trade, plan, cancellationToken)}";
         }
 
@@ -301,9 +309,14 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         // mode removes - so the line reports the live premium the order was actually priced from
         // instead, and says so. Dereferencing EntryTimeUtc unconditionally here would be a null
         // reference the moment that mode is switched on.
-        var entryLine = trade.EntryTimeUtc is { } entryTime
-            ? $"Entry: {entryTime.ToOffset(ist):HH:mm} IST @ {trade.EntryPrice:0.##}"
-            : $"Entry: live premium @ {GetLatestPremium(trade.Underlying, trade.Strike, trade.OptionType == "CE"):0.##} (as of the signal bar's close)";
+        // The plan's ReferencePrice is the number the order was actually built from - which is not
+        // the tracked expiry's premium when the trigger pins a different expiry, so reading the
+        // premium again here would quote a contract the order has nothing to do with.
+        var entryLine = plan is { } priced && (trade.EntryTimeUtc is null || trigger.UseLivePremiumEntry || trigger.OrderExpiry is not null)
+            ? $"Entry: live premium @ {priced.ReferencePrice:0.##} on the {priced.Expiry:dd MMM yyyy} expiry"
+            : trade.EntryTimeUtc is { } entryTime
+                ? $"Entry: {entryTime.ToOffset(ist):HH:mm} IST @ {trade.EntryPrice:0.##}"
+                : $"Entry: live premium @ {GetLatestPremium(trade.Underlying, trade.Strike, trade.OptionType == "CE"):0.##} (as of the signal bar's close)";
 
         var message =
             $"[Trigger] <b>{arrow} {trigger.Name}</b>\n" +
@@ -336,11 +349,15 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     /// still goes out either way.
     ///
     /// The conversions from what OptionTradeSimulator already computed to what Dhan's API wants:
-    ///   - Contract: resolved from CdvHostedService's CURRENTLY tracked expiry for this underlying
-    ///     (CdvUnderlyingState.Expiry - whatever the dashboard/Backtrack expiry selector has it on
-    ///     right now) plus the trade's own strike/side - not the expiry that happened to be nearest
-    ///     when some earlier signal fired, since a live order has to name a real, currently-listed
-    ///     contract.
+    ///   - Contract: StrategyTrigger.OrderExpiry when the trigger pins one, otherwise
+    ///     CdvHostedService's CURRENTLY tracked expiry for this underlying (CdvUnderlyingState.Expiry
+    ///     - whatever the dashboard/Backtrack expiry selector has it on right now), plus the trade's
+    ///     own strike/side. Never the expiry that happened to be nearest when some earlier signal
+    ///     fired, since a live order has to name a real, currently-listed contract.
+    ///   - A pinned expiry that is NOT the tracked one is priced off that contract's own live
+    ///     Option Chain quote, regardless of UseLivePremiumEntry: the simulator's entry price is a
+    ///     different contract's number and would build the order around a premium this one never
+    ///     traded at. No quote means no order, rather than an order at the wrong price.
     ///   - Quantity: StrategyTrigger.QuantityLots x DhanOptionInstrument.LotSize (raw units Dhan's
     ///     API wants, not lots).
     ///   - Price: a LIMIT order (Dhan's Super Order has no MARKET support for this instrument type)
@@ -353,21 +370,46 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     ///   - Every price is rounded to the contract's own tick size (DhanOptionInstrument.TickSize) -
     ///     Dhan rejects a price that isn't a whole multiple of it.
     /// </summary>
-    private SuperOrderPlan? BuildOrderPlan(StrategyTrigger trigger, BacktestTrade trade)
+    private async Task<SuperOrderPlan?> BuildOrderPlanAsync(StrategyTrigger trigger, BacktestTrade trade, CancellationToken cancellationToken)
     {
-        var isCallLeg = trade.OptionType == "CE";
+        var isCall = trade.OptionType == "CE";
+
+        // Which expiry this order goes in: the trigger's own pinned one if it has one, otherwise
+        // whatever is being tracked (see StrategyTrigger.OrderExpiry).
+        var trackedExpiry = _cdv.States.TryGetValue(trade.Underlying, out var cdvState) ? cdvState.Expiry : null;
+        var expiry = trigger.OrderExpiry ?? trackedExpiry;
+        if (expiry is null)
+        {
+            _logger.LogWarning("Trigger {Name}: no currently-tracked expiry for {Underlying} - cannot place order.", trigger.Name, trade.Underlying);
+            return null;
+        }
+
+        var contract = _optionChainMaster.Find(trade.Underlying, expiry.Value, trade.Strike, isCall);
+        if (contract is null)
+        {
+            _logger.LogWarning("Trigger {Name}: {Underlying} {Strike}{Type} not found on expiry {Expiry} - cannot place order.",
+                trigger.Name, trade.Underlying, trade.Strike, trade.OptionType, expiry.Value);
+            return null;
+        }
+
+        // A pinned expiry that isn't the tracked one is a DIFFERENT contract from the one the
+        // strategy simulated, so the simulator's entry price cannot price it - that number belongs
+        // to the near month. Such an order is always priced off its own contract's live quote,
+        // whatever UseLivePremiumEntry says.
+        var isForeignExpiry = expiry != trackedExpiry;
 
         // The entry reference every other price here is derived from. Normally the simulator's own
         // resolved fill (the next bar's open), so a live order is built from exactly the number the
         // backtest measured. With UseLivePremiumEntry it is instead what the strike is trading at
         // RIGHT NOW - see that property's doc comment for the trade-off.
         decimal entryPrice;
-        if (trigger.UseLivePremiumEntry)
+        if (trigger.UseLivePremiumEntry || isForeignExpiry)
         {
-            if (GetLatestPremium(trade.Underlying, trade.Strike, isCallLeg) is not { } livePremium || livePremium <= 0)
+            var live = await GetOrderPremiumAsync(trade.Underlying, expiry.Value, trackedExpiry, trade.Strike, isCall, cancellationToken);
+            if (live is not { } livePremium || livePremium <= 0)
             {
-                _logger.LogWarning("Trigger {Name}: no live premium for {Underlying} {Strike}{Type} - cannot price a live-premium entry.",
-                    trigger.Name, trade.Underlying, trade.Strike, trade.OptionType);
+                _logger.LogWarning("Trigger {Name}: no live premium for {Underlying} {Strike}{Type} on expiry {Expiry} - cannot price the order.",
+                    trigger.Name, trade.Underlying, trade.Strike, trade.OptionType, expiry.Value);
                 return null;
             }
             entryPrice = livePremium;
@@ -379,22 +421,6 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         else
         {
             return null; // shouldn't happen - EvaluateAsync only reaches here with a resolved entry unless live-premium mode is on
-        }
-
-        var expiry = _cdv.States.TryGetValue(trade.Underlying, out var cdvState) ? cdvState.Expiry : null;
-        if (expiry is null)
-        {
-            _logger.LogWarning("Trigger {Name}: no currently-tracked expiry for {Underlying} - cannot place order.", trigger.Name, trade.Underlying);
-            return null;
-        }
-
-        var isCall = trade.OptionType == "CE";
-        var contract = _optionChainMaster.Find(trade.Underlying, expiry.Value, trade.Strike, isCall);
-        if (contract is null)
-        {
-            _logger.LogWarning("Trigger {Name}: {Underlying} {Strike}{Type} not found on expiry {Expiry} - cannot place order.",
-                trigger.Name, trade.Underlying, trade.Strike, trade.OptionType, expiry.Value);
-            return null;
         }
 
         var isSell = trade.Side == "Sell";
@@ -415,10 +441,11 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         var transactionType = isSell ? "SELL" : "BUY";
         var correlationId = $"{trigger.Id}-{trade.SignalTimeUtc:yyyyMMddHHmm}";
 
+        var expiryNote = isForeignExpiry ? $"\nExpiry {expiry.Value:dd MMM yyyy} (pinned - NOT the tracked expiry; priced off its own live quote)" : "";
         var summary = $"{transactionType} {contract.TradingSymbol} x{quantity} (SecurityId {contract.SecurityId})\n" +
-            $"LIMIT {limitPrice:0.##} · Target {targetPrice:0.##} · SL {stopLossPrice:0.##}";
+            $"LIMIT {limitPrice:0.##} · Target {targetPrice:0.##} · SL {stopLossPrice:0.##}" + expiryNote;
 
-        return new SuperOrderPlan(transactionType, contract.SecurityId.ToString(), quantity, limitPrice, targetPrice, stopLossPrice, tick, entryPrice, correlationId, summary);
+        return new SuperOrderPlan(transactionType, contract.SecurityId.ToString(), quantity, limitPrice, targetPrice, stopLossPrice, tick, entryPrice, correlationId, summary, expiry.Value);
     }
 
     /// <summary>Places the order and, on success, hands the fill-monitoring off to MonitorFillAsync
@@ -577,7 +604,8 @@ public sealed class StrategyTriggerHostedService : BackgroundService
                 return;
             }
 
-            var latestPrice = GetLatestPremium(trade.Underlying, trade.Strike, isCall);
+            var trackedExpiry = _cdv.States.TryGetValue(trade.Underlying, out var monitorState) ? monitorState.Expiry : null;
+            var latestPrice = await GetOrderPremiumAsync(trade.Underlying, plan.Expiry, trackedExpiry, trade.Strike, isCall, cancellationToken);
             if (latestPrice is null)
             {
                 _logger.LogWarning("Trigger {Name}: no live premium available for {Strike}{Type} - cannot re-price order {OrderId} on attempt {Attempt}/{Max}.",
@@ -638,6 +666,18 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     /// (CdvUnderlyingState.GetStrikeCandles, not the closed-only view) - a retry re-pricing off a
     /// stale closed-bar price could lag the live market by up to a full bar. Null if the underlying
     /// isn't tracked at all or the strike has no candles yet.</summary>
+    /// <summary>The premium to price an order (or a re-priced retry) off, for whichever expiry that
+    /// order is in. The tracked expiry answers from the live websocket feed, same as it always has.
+    /// Any other expiry has no subscribed contracts, so it falls back to Dhan's Option Chain API -
+    /// a rate-limited snapshot rather than a tick feed, asked for with a short max-age so a retry
+    /// loop is not re-pricing off a half-minute-old number. See StrategyTrigger.OrderExpiry.</summary>
+    private async Task<decimal?> GetOrderPremiumAsync(
+        string underlying, DateOnly expiry, DateOnly? trackedExpiry, decimal strike, bool isCall, CancellationToken cancellationToken)
+    {
+        if (trackedExpiry == expiry) return GetLatestPremium(underlying, strike, isCall);
+        return await _cdv.GetChainPremiumAsync(underlying, expiry, strike, isCall, cancellationToken, ForeignExpiryQuoteMaxAge);
+    }
+
     private decimal? GetLatestPremium(string underlying, decimal strike, bool isCall)
     {
         if (!_cdv.States.TryGetValue(underlying, out var state)) return null;
@@ -687,5 +727,5 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     private sealed record SuperOrderPlan(
         string TransactionType, string SecurityId, int Quantity,
         decimal Price, decimal TargetPrice, decimal StopLossPrice, decimal TickSize,
-        decimal ReferencePrice, string CorrelationId, string Summary);
+        decimal ReferencePrice, string CorrelationId, string Summary, DateOnly Expiry);
 }

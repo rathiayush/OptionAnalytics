@@ -66,6 +66,7 @@ public sealed class StrategyTriggerStore
             SlippagePoints = Math.Max(0, request.SlippagePoints),
             MaxDeviationPercent = request.MaxDeviationPercent > 0 ? request.MaxDeviationPercent : 10,
             UseLivePremiumEntry = request.UseLivePremiumEntry,
+            OrderExpiry = request.OrderExpiry,
         };
 
         lock (_lock)
@@ -103,6 +104,10 @@ public sealed class StrategyTriggerStore
                 SlippagePoints = Math.Max(0, request.SlippagePoints),
                 MaxDeviationPercent = request.MaxDeviationPercent > 0 ? request.MaxDeviationPercent : 10,
                 UseLivePremiumEntry = request.UseLivePremiumEntry,
+                // Deliberately NOT part of watchChanged: this only decides which contract an order
+                // is placed in, never which signals the trigger watches, so re-pointing it must not
+                // throw away where the trigger had got to and re-prime it.
+                OrderExpiry = request.OrderExpiry,
                 LastSignalUtc = watchChanged ? null : existing.LastSignalUtc,
             };
 

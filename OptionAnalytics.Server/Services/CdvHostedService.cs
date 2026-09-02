@@ -279,6 +279,31 @@ public sealed class CdvHostedService : BackgroundService
         return await _chainQuotes.GetQuotesAsync(instrument.SecurityId, instrument.DhanSegment, expiry, cancellationToken);
     }
 
+    /// <summary>One strike's LIVE premium on any listed expiry, from Dhan's Option Chain API -
+    /// what a live order needs when it is being placed in an expiry this app is not tracking (see
+    /// StrategyTrigger.OrderExpiry). The websocket feed only carries the tracked expiry's ATM+-8
+    /// contracts, so for anything else this snapshot is the only live price available.
+    ///
+    /// Null when there is no quote: no session, the rate limiter refusing, outside market hours, or
+    /// that strike simply not being in the chain. A caller pricing an order must treat that as "do
+    /// not place" rather than falling back to some other contract's price.
+    ///
+    /// <paramref name="maxAge"/> is passed straight through to DhanOptionChainQuotes - order
+    /// pricing wants a fresher snapshot than the strike picker does.</summary>
+    public async Task<decimal?> GetChainPremiumAsync(
+        string underlying, DateOnly expiry, decimal strike, bool isCall, CancellationToken cancellationToken, TimeSpan? maxAge = null)
+    {
+        var instrument = _spotFeed.States.TryGetValue(underlying, out var spotState) ? spotState.Instrument : null;
+        if (instrument is null) return null;
+
+        var quotes = await _chainQuotes.GetQuotesAsync(instrument.SecurityId, instrument.DhanSegment, expiry, cancellationToken, maxAge);
+        var quote = quotes.FirstOrDefault(q => q.Strike == strike);
+        if (quote is null) return null;
+
+        var price = isCall ? quote.CeLastPrice : quote.PeLastPrice;
+        return price > 0 ? price : null;
+    }
+
     /// <summary>
     /// One strike's premium candles for the dashboard chart. Tracked strikes (inside, or previously
     /// inside today, the CDV ATM+-8 window) answer straight from memory including the still-forming

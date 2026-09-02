@@ -52,15 +52,23 @@ public sealed class DhanOptionChainQuotes
 
     /// <summary>Every strike's CE/PE quote for one underlying/expiry, or an EMPTY list whenever the
     /// call isn't available - never an exception, and never a partial failure the caller has to
-    /// handle: an empty result simply means the picker shows strikes without prices.</summary>
+    /// handle: an empty result simply means the picker shows strikes without prices.
+    ///
+    /// <paramref name="maxAge"/> overrides how stale a cached snapshot may be for THIS caller. The
+    /// picker is happy with the default 30 seconds; pricing a live order is not, so it asks for a
+    /// few seconds instead. It only ever loosens the cache, never the rate limit: MinimumCallSpacing
+    /// still governs real outbound calls, so a tighter maxAge just means waiting for the next
+    /// allowed one rather than making more of them.</summary>
     public async Task<IReadOnlyList<DhanOptionChainQuote>> GetQuotesAsync(
-        uint underlyingSecurityId, string underlyingSegment, DateOnly expiry, CancellationToken cancellationToken)
+        uint underlyingSecurityId, string underlyingSegment, DateOnly expiry, CancellationToken cancellationToken,
+        TimeSpan? maxAge = null)
     {
         var key = $"{underlyingSegment}:{underlyingSecurityId}:{expiry:yyyy-MM-dd}";
+        var lifetime = maxAge ?? CacheLifetime;
 
         lock (_cache)
         {
-            if (_cache.TryGetValue(key, out var cached) && DateTimeOffset.UtcNow - cached.FetchedAt < CacheLifetime)
+            if (_cache.TryGetValue(key, out var cached) && DateTimeOffset.UtcNow - cached.FetchedAt < lifetime)
                 return cached.Quotes;
         }
 
@@ -72,7 +80,7 @@ public sealed class DhanOptionChainQuotes
             // Another caller may have filled the cache while this one waited for the lock.
             lock (_cache)
             {
-                if (_cache.TryGetValue(key, out var cached) && DateTimeOffset.UtcNow - cached.FetchedAt < CacheLifetime)
+                if (_cache.TryGetValue(key, out var cached) && DateTimeOffset.UtcNow - cached.FetchedAt < lifetime)
                     return cached.Quotes;
             }
 

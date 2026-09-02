@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Select, Space, Typography, Card, Button, Table, Tag, InputNumber, Input, Switch, Popconfirm, message } from 'antd'
 import { PlusOutlined, DeleteOutlined } from '@ant-design/icons'
-import { UP_COLOR, DOWN_COLOR, NavBar, fmtIstDateTime, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying } from './shared.jsx'
+import { UP_COLOR, DOWN_COLOR, NavBar, fmtIstDateTime, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying, useExpirySelector } from './shared.jsx'
 
 const { Title, Text } = Typography
 
@@ -33,6 +33,15 @@ export default function TriggersPage() {
   const [slippagePoints, setSlippagePoints] = useState(1)
   const [maxDeviationPercent, setMaxDeviationPercent] = useState(10)
   const [useLivePremiumEntry, setUseLivePremiumEntry] = useState(false)
+  // Which expiry the ORDER goes in. null (the default) follows whatever expiry the app is tracking,
+  // exactly as before; a date pins the order to that contract - a next-month one, say - while the
+  // signals keep coming off the tracked expiry's chart. See StrategyTrigger.OrderExpiry.
+  const [orderExpiry, setOrderExpiry] = useState(null)
+
+  // Read-only here: this page only needs the LIST of listed expiries to choose from, and the one
+  // being tracked so the default option can name it. Nothing calls selectExpiry, so opening this
+  // page never switches what the dashboard is tracking.
+  const { expiries, selectedExpiry } = useExpirySelector(underlying)
 
   const strategy = strategies.find((s) => s.key === strategyKey) ?? null
 
@@ -90,6 +99,7 @@ export default function TriggersPage() {
         slippagePoints,
         maxDeviationPercent,
         useLivePremiumEntry,
+        orderExpiry,
       }),
     })
       .then((r) => r.json())
@@ -126,6 +136,7 @@ export default function TriggersPage() {
         slippagePoints: row.slippagePoints,
         maxDeviationPercent: row.maxDeviationPercent,
         useLivePremiumEntry: row.useLivePremiumEntry,
+        orderExpiry: row.orderExpiry,
         ...changes,
       }),
     })
@@ -182,6 +193,7 @@ export default function TriggersPage() {
             <Text type="secondary" style={{ fontSize: 12 }}>
               {row.quantityLots} lot(s) · {row.slippagePoints}pt slip · {row.maxDeviationPercent}% max deviation
               {row.useLivePremiumEntry ? ' · live-premium entry' : ''}
+              {row.orderExpiry ? ` · ${row.orderExpiry} expiry` : ''}
             </Text>
           )}
         </Space>
@@ -310,6 +322,18 @@ export default function TriggersPage() {
                       ]}
                     />
                   </Space>
+                  <Space direction="vertical" size={2}>
+                    <Text type="secondary" style={{ fontSize: 12 }}>Order expiry</Text>
+                    <Select
+                      value={orderExpiry ?? ''}
+                      onChange={(v) => setOrderExpiry(v === '' ? null : v)}
+                      style={{ width: 230 }}
+                      options={[
+                        { value: '', label: `Tracked expiry${selectedExpiry ? ` (${selectedExpiry})` : ''}` },
+                        ...expiries.map((e) => ({ value: e, label: e })),
+                      ]}
+                    />
+                  </Space>
                   <Text type="secondary" style={{ fontSize: 12, maxWidth: 460 }}>
                     Places a real Dhan Super Order (LIMIT entry + target + stop-loss) from every fired
                     trade. Slippage keeps the entry marketable. If it doesn&apos;t fill, it re-prices off the
@@ -319,6 +343,9 @@ export default function TriggersPage() {
                     {useLivePremiumEntry
                       ? ' Live-premium entry fires the moment the signal bar closes, priced off the premium right then - no waiting for the next bar, but the fill will not match what Backtrack modelled for the same signal.'
                       : ' The order waits for the option’s next bar to close so it is priced off exactly what the backtest measured - which is why a 5-minute strategy alerts about five minutes after the price it quotes.'}
+                    {orderExpiry
+                      ? ` The order is pinned to the ${orderExpiry} expiry while the signals still come off the tracked expiry's chart, so it is priced off that contract's own live option-chain quote rather than the backtest's entry - and the strategy's SL/target points apply to that premium, which is a different risk from the near month.`
+                      : ''}
                   </Text>
                 </>
               )}

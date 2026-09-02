@@ -62,6 +62,30 @@ public sealed record StrategyTrigger(
     /// live order is built from must never change underneath an already-armed trigger.</summary>
     public bool UseLivePremiumEntry { get; init; }
 
+    /// <summary>The expiry the ORDER is placed in, when it should not simply follow whatever expiry
+    /// the app is currently tracking.
+    ///
+    /// Null (the default, and what every trigger created before this existed keeps) means "use the
+    /// tracked expiry" - CdvUnderlyingState.Expiry, whatever the dashboard/Backtrack selector has
+    /// this underlying on right now, which is the behaviour this had all along.
+    ///
+    /// Set, it pins the order to that expiry regardless of what is being tracked - a next-month
+    /// contract, say, while the signals keep coming off the near expiry's chart. Two consequences
+    /// that follow from that and are handled in StrategyTriggerHostedService.BuildOrderPlan rather
+    /// than left to surprise anyone:
+    ///
+    ///   - The simulator's own entry price belongs to a DIFFERENT contract, so it cannot price this
+    ///     order. A pinned expiry that isn't the tracked one is always priced off that contract's
+    ///     own live quote, whatever UseLivePremiumEntry says.
+    ///   - That quote comes from Dhan's Option Chain API rather than the live websocket feed (only
+    ///     the tracked expiry's contracts are subscribed), so it is a snapshot a few seconds old
+    ///     and rate-limited. Fine for pricing an order; it is not a tick feed.
+    ///
+    /// The strategy's slPoints/tpPoints are still applied as ABSOLUTE POINTS off that entry. A far
+    /// expiry trades at a different premium and a different vol, so a stop that was tuned on the
+    /// near month is not the same risk there - re-tune it rather than assuming it carries over.</summary>
+    public DateOnly? OrderExpiry { get; init; }
+
     /// <summary>The last entry signal this trigger has already alerted on. A newly-armed trigger is
     /// primed with whatever the latest signal is at that moment WITHOUT alerting, so arming it
     /// doesn't immediately dump every historical signal into Telegram; only genuinely new ones
@@ -86,4 +110,5 @@ public sealed record StrategyTriggerRequest(
     int QuantityLots,
     decimal SlippagePoints,
     decimal MaxDeviationPercent,
-    bool UseLivePremiumEntry);
+    bool UseLivePremiumEntry,
+    DateOnly? OrderExpiry = null);
