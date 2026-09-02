@@ -21,6 +21,11 @@ public sealed class TelegramAlertService
         _logger = logger;
     }
 
+    /// <summary>Whether a send would actually reach Telegram. Callers that do something
+    /// IRREVERSIBLE and then report it (placing a real order, say) use this to log loudly rather
+    /// than let SendAsync no-op quietly - everything else can just call SendAsync and not care.</summary>
+    public bool IsConfigured => _options.IsConfigured;
+
     public async Task SendAsync(string message, CancellationToken cancellationToken)
     {
         if (!_options.IsConfigured)

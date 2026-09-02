@@ -293,8 +293,23 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         SuperOrderPlan? plan = null;
         if (trigger.LiveTradingEnabled)
         {
-            plan = await BuildOrderPlanAsync(trigger, trade, cancellationToken);
-            orderLine = plan is null ? "" : $"\n\n{await PlaceOrderAsync(trigger, trade, plan, cancellationToken)}";
+            // Live trading being ON and no order going out is exactly the case that must never be
+            // silent: an alert that looks like every other one would read as "an order is working"
+            // when nothing was placed. Both outcomes get a line.
+            var (built, skipReason) = await BuildOrderPlanAsync(trigger, trade, cancellationToken);
+            plan = built;
+            orderLine = plan is null
+                ? $"\n\n[NO ORDER PLACED] Live trading is on, but this signal could not be turned into an order - {skipReason}. Nothing is working at the broker for it."
+                : $"\n\n{await PlaceOrderAsync(trigger, trade, plan, cancellationToken)}";
+
+            // A placed order with no way to tell anyone about it is worth a loud log line, since the
+            // Telegram send below will simply no-op.
+            if (plan is not null && !_telegram.IsConfigured)
+            {
+                _logger.LogWarning(
+                    "Trigger {Name}: a REAL order was placed but Telegram is not configured (Telegram:Enabled/BotToken/ChatId) - no notification will be sent for it or for its fill.",
+                    trigger.Name);
+            }
         }
 
         // Entry time/price here are exactly BacktestTrade.EntryTimeUtc/EntryPrice - the same fields
@@ -370,7 +385,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     ///   - Every price is rounded to the contract's own tick size (DhanOptionInstrument.TickSize) -
     ///     Dhan rejects a price that isn't a whole multiple of it.
     /// </summary>
-    private async Task<SuperOrderPlan?> BuildOrderPlanAsync(StrategyTrigger trigger, BacktestTrade trade, CancellationToken cancellationToken)
+    private async Task<(SuperOrderPlan? Plan, string? SkipReason)> BuildOrderPlanAsync(StrategyTrigger trigger, BacktestTrade trade, CancellationToken cancellationToken)
     {
         var isCall = trade.OptionType == "CE";
 
@@ -381,7 +396,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         if (expiry is null)
         {
             _logger.LogWarning("Trigger {Name}: no currently-tracked expiry for {Underlying} - cannot place order.", trigger.Name, trade.Underlying);
-            return null;
+            return (null, $"no expiry is currently tracked for {trade.Underlying}");
         }
 
         var contract = _optionChainMaster.Find(trade.Underlying, expiry.Value, trade.Strike, isCall);
@@ -389,7 +404,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         {
             _logger.LogWarning("Trigger {Name}: {Underlying} {Strike}{Type} not found on expiry {Expiry} - cannot place order.",
                 trigger.Name, trade.Underlying, trade.Strike, trade.OptionType, expiry.Value);
-            return null;
+            return (null, $"{trade.Strike:0.##}{trade.OptionType} is not listed on the {expiry.Value:dd MMM yyyy} expiry");
         }
 
         // A pinned expiry that isn't the tracked one is a DIFFERENT contract from the one the
@@ -410,7 +425,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
             {
                 _logger.LogWarning("Trigger {Name}: no live premium for {Underlying} {Strike}{Type} on expiry {Expiry} - cannot price the order.",
                     trigger.Name, trade.Underlying, trade.Strike, trade.OptionType, expiry.Value);
-                return null;
+                return (null, $"no live premium available for {trade.Strike:0.##}{trade.OptionType} on the {expiry.Value:dd MMM yyyy} expiry");
             }
             entryPrice = livePremium;
         }
@@ -420,7 +435,9 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         }
         else
         {
-            return null; // shouldn't happen - EvaluateAsync only reaches here with a resolved entry unless live-premium mode is on
+            // Shouldn't happen - EvaluateAsync only reaches here with a resolved entry unless
+            // live-premium mode is on - but it is still reported rather than swallowed.
+            return (null, "the trade has no resolved entry price yet");
         }
 
         var isSell = trade.Side == "Sell";
@@ -445,7 +462,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         var summary = $"{transactionType} {contract.TradingSymbol} x{quantity} (SecurityId {contract.SecurityId})\n" +
             $"LIMIT {limitPrice:0.##} · Target {targetPrice:0.##} · SL {stopLossPrice:0.##}" + expiryNote;
 
-        return new SuperOrderPlan(transactionType, contract.SecurityId.ToString(), quantity, limitPrice, targetPrice, stopLossPrice, tick, entryPrice, correlationId, summary, expiry.Value);
+        return (new SuperOrderPlan(transactionType, contract.SecurityId.ToString(), quantity, limitPrice, targetPrice, stopLossPrice, tick, entryPrice, correlationId, summary, expiry.Value), null);
     }
 
     /// <summary>Places the order and, on success, hands the fill-monitoring off to MonitorFillAsync
@@ -484,6 +501,14 @@ public sealed class StrategyTriggerHostedService : BackgroundService
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 _logger.LogError(ex, "Trigger {Name}: fill-monitoring crashed for order {OrderId}.", trigger.Name, result.OrderId);
+
+                // A real order is live and nothing is watching it any more. That has to reach the
+                // phone, not just the log - it is the one state this whole retry loop exists to
+                // prevent. CancellationToken.None so a shutdown-time crash still gets the message
+                // out rather than cancelling the very notification about it.
+                await NotifyFollowUpAsync(trigger,
+                    $"[ORDER UNMONITORED] {plan.Summary}\nDhan order {result.OrderId}\nFill-monitoring crashed - the order may still be resting or filled. CHECK DHAN DIRECTLY.",
+                    CancellationToken.None);
             }
         }, CancellationToken.None);
 
@@ -536,7 +561,14 @@ public sealed class StrategyTriggerHostedService : BackgroundService
             }
             catch (OperationCanceledException)
             {
-                return; // shutting down - leave the order exactly as it is, nothing more to do
+                // Shutting down. The order is left exactly as it is (cancelling it here could strip
+                // the SL/target off a partial fill), but "left as it is" must not also mean "left
+                // unsaid": nothing will be watching it after this process exits.
+                _logger.LogWarning("Trigger {Name}: shutting down while order {OrderId} was still being monitored - leaving it as-is.", trigger.Name, orderId);
+                await NotifyFollowUpAsync(trigger,
+                    $"[ORDER UNMONITORED] {plan.Summary}\nDhan order {orderId}\nThe app is shutting down before this order resolved - it is left exactly as it was, unfilled or partially filled, and nothing is watching it now. CHECK DHAN DIRECTLY.",
+                    CancellationToken.None);
+                return;
             }
 
             var orders = await _superOrders.ListAsync(cancellationToken);
