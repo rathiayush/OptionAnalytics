@@ -304,6 +304,18 @@ public sealed class CdvHostedService : BackgroundService
         var cacheKey = (contract.SecurityId, DateOnly.FromDateTime(DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(5.5)).DateTime));
         lock (_onDemandCandles)
         {
+            // cacheKey.Day is always TODAY (built fresh above), so any entry under a different day
+            // can never be looked up again - it just sits there forever otherwise, one leaked entry
+            // per distinct strike ever viewed through the picker for the lifetime of the process.
+            // Sweeping them out here (rather than on a timer) means the dictionary self-cleans the
+            // moment anyone actually uses this endpoint again, with no extra background work needed
+            // on a quiet day.
+            if (_onDemandCandles.Count > 0)
+            {
+                foreach (var key in _onDemandCandles.Keys.Where(k => k.Day != cacheKey.Item2).ToList())
+                    _onDemandCandles.Remove(key);
+            }
+
             if (_onDemandCandles.TryGetValue(cacheKey, out var cached) && DateTimeOffset.UtcNow - cached.FetchedAt < OnDemandCandleLifetime)
                 return cached.Candles;
         }

@@ -37,6 +37,10 @@ public sealed class SpotFeedHostedService : BackgroundService
 
     private readonly Dictionary<uint, SpotUnderlyingState> _bySecurityId = new();
 
+    // Tracks the last IST calendar day OnTick trimmed each state's candle history on - see OnTick's
+    // own comment for why this exists at all.
+    private DateOnly? _lastTrimmedDay;
+
     public SpotFeedHostedService(
         IOptions<DhanOptions> options,
         DhanSession session,
@@ -201,7 +205,28 @@ public sealed class SpotFeedHostedService : BackgroundService
         if (!_bySecurityId.TryGetValue(tick.SecurityId, out var state)) return;
 
         state.ApplyTick(tick);
+        TrimHistoryOnceDaily();
         _ = BroadcastAsync(state);
+    }
+
+    /// <summary>SpotUnderlyingState.ApplyTick only ever APPENDS a closed candle - BackfillAsync's
+    /// "last HistoryTradingDays trading days" trim only ever runs once, at startup (and a few times
+    /// more if RetryBackfillIfNeededAsync is still catching up on a slow first attempt). Without
+    /// this, a process left running for weeks would keep every candle it had ever seen in memory
+    /// forever, unbounded, and GetCandles() would silently drift from the "last N trading days" the
+    /// dashboard chart is documented to show into "everything since the container last restarted".
+    /// Re-trims once per IST calendar day (checked cheaply on every tick, so a quiet weekend/holiday
+    /// with no ticks just delays the next trim rather than needing its own timer) using the exact
+    /// same TrimToRecentTradingDays + SeedHistory reuse BackfillAsync itself already relies on -
+    /// SeedHistory's clear-then-replace is exactly "trim in place", no new mutator needed.</summary>
+    private void TrimHistoryOnceDaily()
+    {
+        var today = IstToday();
+        if (_lastTrimmedDay == today) return;
+        _lastTrimmedDay = today;
+
+        foreach (var state in States.Values)
+            state.SeedHistory(TrimToRecentTradingDays(state.GetClosedCandles(), HistoryTradingDays));
     }
 
     private async Task BroadcastAsync(SpotUnderlyingState state)
