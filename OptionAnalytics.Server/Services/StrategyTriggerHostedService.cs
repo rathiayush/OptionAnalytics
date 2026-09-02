@@ -21,17 +21,13 @@ namespace OptionAnalytics.Server.Services;
 /// opportunity restated. RunStrategy already collapses that, so reusing it is what makes "tuned on
 /// Backtrack, fires live off identical code" true of the ALERT CADENCE too, not just the entry rule.
 ///
-/// A trade only carries a real EntryTimeUtc/EntryPrice once TWO of the option's bars have fully
-/// CLOSED past the signal (BacktestStrategyContext.GetOptionBars is closed-bars-only, same as
-/// everywhere else in this app's replay, and OptionTradeSimulator.Run's entry is deliberately the
-/// bar AFTER the one that closes to confirm the signal fired - see its own doc comment for why one
-/// bar's worth of confirmation isn't enough) - so a signal that fired only moments ago routinely
-/// comes back as BacktestTrade.NoData for a few cycles, not because its strike was never tracked
-/// but because the fill it needs isn't known yet. THE WATERMARK MUST NOT ADVANCE PAST SUCH A
-/// SIGNAL: it needs to be re-examined on a later cycle once the entry bar has closed, at which
-/// point the SAME signal - same SignalTimeUtc - resolves into a real, alertable trade. Advancing
-/// past it early
-/// (treating "not yet known" the same as "genuinely unfillable") would mark it seen and the trade
+/// A trade only carries a real EntryTimeUtc/EntryPrice once the option's NEXT bar has fully CLOSED
+/// (BacktestStrategyContext.GetOptionBars is closed-bars-only, same as everywhere else in this
+/// app's replay) - so a signal that fired only moments ago routinely comes back as
+/// BacktestTrade.NoData for a cycle or two, not because its strike was never tracked but because
+/// the fill it needs isn't known yet. THE WATERMARK MUST NOT ADVANCE PAST SUCH A SIGNAL: it needs
+/// to be re-examined on a later cycle once the entry bar has closed, at which point the SAME
+/// signal - same SignalTimeUtc - resolves into a real, alertable trade. Advancing past it early
 /// would never be alerted at all once it did resolve, which is why the watermark below only ever
 /// moves to the newest signal that was ACTUALLY alerted, never to the newest signal RunStrategy
 /// merely returned. A strike that truly never gets tracked just stays NoData forever and parks the

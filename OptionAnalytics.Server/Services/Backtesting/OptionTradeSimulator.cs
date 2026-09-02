@@ -15,17 +15,20 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 ///   - The strike is StrikeOffset steps from the ATM AS IT WAS AT THE SIGNAL - not whatever is ATM
 ///     now - so an old signal is judged against the strike it actually pointed at. The offset is
 ///     signed: positive is OTM for the traded leg, negative ITM, 0 is ATM itself.
-///   - Entry is the OPEN of the bar AFTER the one immediately following the signal - not that very
-///     next bar's own open. The signal bar's own close is never tradeable in real time (using ITS
-///     open would be look-ahead bias), but the bar right after it isn't genuinely tradeable either:
-///     this whole app only ever trusts a CLOSED bar (BacktestStrategyContext.GetOptionBars, every
-///     state class's GetClosedCandles), so nothing - a live Strategy Trigger or this same replay -
-///     can actually confirm "the signal fired" until that immediately-following bar has ALSO
-///     closed, one full bar-length later. By the moment that confirmation exists and a live
-///     Telegram alert can go out, that bar's own open is already stale; the first price still
-///     genuinely open to act on is the one after THAT. Using the earlier, immediately-following
-///     bar's open (as this used to) made every alert's own "Entry" price and time something nobody
-///     receiving it could actually have gotten - in Backtrack's numbers as much as live.
+///   - Entry is that contract's NEXT bar's open. The signal bar's own close is never tradeable in
+///     real time, so entering on it would be look-ahead bias.
+///
+///     A signal at bar [s, s+timeframe) confirms the instant that bar closes, at s+timeframe -
+///     entry is the OPEN of the very next bar, priced at s+timeframe too (a bar's open is set the
+///     moment it begins). That price is real and standard for a backtest to use - what's NOT free
+///     is when anyone actually finds out about it: this whole app only ever trusts a CLOSED bar
+///     (BacktestStrategyContext.GetOptionBars, every state class's GetClosedCandles), so the entry
+///     bar's own open isn't READABLE until IT ALSO closes, one full bar-length later - which is
+///     also the earliest a live Strategy Trigger's Telegram alert can go out. That gap (one bar,
+///     e.g. a 5-minute strategy alerting ~5 minutes after the price it quotes) is real but
+///     irreducible at this reading discipline: pushing entry even LATER doesn't shrink it, since
+///     the next bar's open is exactly as stale relative to ITS OWN close-and-become-readable
+///     moment. It's a latency to understand, not a bug to keep chasing bar by bar.
 ///   - Stop-loss/take-profit are absolute premium points, and mirror for a seller (target below
 ///     entry, stop above) since a seller profits as the premium falls. Both are floored at 0 -
 ///     a premium cannot go negative.
@@ -115,14 +118,8 @@ public static class OptionTradeSimulator
                 strikeCandleCache[(strike, isCall)] = optionBars;
             }
 
-            // The bar immediately after the signal is the one whose CLOSE confirms the signal even
-            // fired (this whole app only ever trusts closed bars) - not itself tradeable, since
-            // that confirmation doesn't exist until it's done. The real entry is the bar AFTER
-            // that: the first open still genuinely available once the trade is knowable at all -
-            // see this method's own doc comment for why.
-            var confirmIndex = FindFirstAfter(optionBars, signal.Time);
-            var entryIndex = confirmIndex < 0 ? -1 : confirmIndex + 1;
-            if (entryIndex < 0 || entryIndex >= optionBars.Count || optionBars[entryIndex].Open <= 0)
+            var entryIndex = FindFirstAfter(optionBars, signal.Time);
+            if (entryIndex < 0 || optionBars[entryIndex].Open <= 0)
             {
                 trades.Add(BacktestTrade.NoData(underlying, signal.Time, signal.Direction, side, optionType, strike, signalSpotBar.Close));
                 continue;
