@@ -21,9 +21,19 @@ namespace OptionAnalytics.Server.Services;
 /// opportunity restated. RunStrategy already collapses that, so reusing it is what makes "tuned on
 /// Backtrack, fires live off identical code" true of the ALERT CADENCE too, not just the entry rule.
 ///
-/// A signal whose strike was never tracked (BacktestTrade.NoData) advances the watermark like any
-/// other event - re-alerting on the same unfillable signal forever would be its own kind of noise -
-/// but is never sent to Telegram, since there is nothing a user could actually act on.
+/// A trade only carries a real EntryTimeUtc/EntryPrice once the option's NEXT bar has fully CLOSED
+/// (BacktestStrategyContext.GetOptionBars is closed-bars-only, same as everywhere else in this
+/// app's replay) - so a signal that fired only moments ago routinely comes back as
+/// BacktestTrade.NoData for a cycle or two, not because its strike was never tracked but because
+/// the fill it needs isn't known yet. THE WATERMARK MUST NOT ADVANCE PAST SUCH A SIGNAL: it needs
+/// to be re-examined on a later cycle once the entry bar has closed, at which point the SAME
+/// signal - same SignalTimeUtc - resolves into a real, alertable trade. Advancing past it early
+/// (treating "not yet known" the same as "genuinely unfillable") would mark it seen and the trade
+/// would never be alerted at all once it did resolve, which is why the watermark below only ever
+/// moves to the newest signal that was ACTUALLY alerted, never to the newest signal RunStrategy
+/// merely returned. A strike that truly never gets tracked just stays NoData forever and parks the
+/// watermark harmlessly behind it - later, unrelated signals are unaffected, since they are still
+/// newer than that stuck point.
 ///
 /// Arming a trigger never floods: the first evaluation only records where the strategy currently
 /// stands, without alerting. Only trades opening after that notify. The same priming happens if a
@@ -97,54 +107,57 @@ public sealed class StrategyTriggerHostedService : BackgroundService
 
         if (trades.Count == 0) return;
 
-        var latest = trades[^1];
-
         if (trigger.LastSignalUtc is not { } lastSeen)
         {
-            // First look at this trigger - remember where things stand, alert on nothing.
+            // First look at this trigger - remember where things stand, alert on nothing. Priming
+            // off the newest signal overall (even a still-pending/NoData one) is fine here: nothing
+            // before "now" should ever alert regardless of how it eventually resolves.
+            var latest = trades[^1];
             _store.MarkEvaluated(trigger.Id, latest.SignalTimeUtc, firedSummary: null);
             _logger.LogInformation("Trigger {Name} armed at {Time:u} - future trades will notify.", trigger.Name, latest.SignalTimeUtc);
             return;
         }
 
-        var fresh = trades.Where(t => t.SignalTimeUtc > lastSeen).ToList();
-        if (fresh.Count == 0) return;
+        // Only trades whose entry bar has actually closed - see this class's own doc comment for
+        // why the watermark must never advance past one that hasn't (EntryTimeUtc null) yet.
+        var tradable = trades.Where(t => t.SignalTimeUtc > lastSeen && t.EntryTimeUtc is not null).ToList();
+        if (tradable.Count == 0) return;
 
-        // NoData rows (the signal's strike was never tracked) still move the watermark past - see
-        // this class's own doc comment - but there is no fillable trade to tell the user about.
-        var tradable = fresh.Where(t => t.EntryTimeUtc is not null).ToList();
+        // The strategy's own EntrySignals carries the human-readable WHY ("Spot crossed down +
+        // ATM PE confirmed + ...") that BacktestTrade doesn't - matched back by time+direction so
+        // the alert explains the reasoning, not just the fill RunStrategy decided on.
+        var reasons = _backtest.ReplayForStrategy(trigger.Underlying, trigger.StrategyKey, trigger.TimeframeMinutes, trigger.Parameters)
+            .Where(s => s.Kind is "Entry" or "Confluence")
+            .ToDictionary(s => (s.TimeUtc, s.Direction), s => s.Summary);
 
-        if (tradable.Count > 0)
+        foreach (var trade in tradable)
         {
-            // The strategy's own EntrySignals carries the human-readable WHY ("Spot crossed down +
-            // ATM PE confirmed + ...") that BacktestTrade doesn't - matched back by time+direction
-            // so the alert explains the reasoning, not just the strike/side RunStrategy decided on.
-            var reasons = _backtest.ReplayForStrategy(trigger.Underlying, trigger.StrategyKey, trigger.TimeframeMinutes, trigger.Parameters)
-                .Where(s => s.Kind is "Entry" or "Confluence")
-                .ToDictionary(s => (s.TimeUtc, s.Direction), s => s.Summary);
-
-            foreach (var trade in tradable)
-            {
-                reasons.TryGetValue((trade.SignalTimeUtc, trade.Direction), out var reason);
-                await NotifyAsync(trigger, trade, reason, cancellationToken);
-            }
+            reasons.TryGetValue((trade.SignalTimeUtc, trade.Direction), out var reason);
+            await NotifyAsync(trigger, trade, reason, cancellationToken);
         }
 
-        _store.MarkEvaluated(trigger.Id, latest.SignalTimeUtc, firedSummary: tradable.Count > 0 ? Describe(tradable[^1]) : null);
+        _store.MarkEvaluated(trigger.Id, tradable[^1].SignalTimeUtc, firedSummary: Describe(tradable[^1]));
     }
 
     private static string Describe(BacktestTrade trade) =>
-        $"{trade.Side} {trade.OptionType} {trade.Strike:0.##}";
+        $"{trade.Side} {trade.OptionType} {trade.Strike:0.##} @ {trade.EntryPrice:0.##}";
 
     private async Task NotifyAsync(StrategyTrigger trigger, BacktestTrade trade, string? reason, CancellationToken cancellationToken)
     {
         var arrow = trade.Direction == "Bullish" ? "▲" : "▼";
         var reasonLine = reason is null ? "" : $"\n{reason}";
+        var ist = TimeSpan.FromHours(5.5);
+
+        // Entry time/price here are exactly BacktestTrade.EntryTimeUtc/EntryPrice - the same fields
+        // the Backtrack trade table's own "Entry" column renders - not the signal bar. The signal
+        // is WHEN the strategy decided to act; the entry is WHAT you would actually have punched
+        // into the order, at the next bar's open, which is what this alert is for.
         var message =
             $"<b>{arrow} {trigger.Name}</b>\n" +
             $"<b>{trade.Underlying}</b> · {trigger.TimeframeMinutes}m · {trigger.StrategyKey}\n" +
             $"<b>{trade.Direction}</b> — {trade.Side} {trade.OptionType} {trade.Strike:0.##}{reasonLine}\n" +
-            $"Bar: {trade.SignalTimeUtc.ToOffset(TimeSpan.FromHours(5.5)):yyyy-MM-dd HH:mm} IST";
+            $"Entry: {trade.EntryTimeUtc!.Value.ToOffset(ist):HH:mm} IST @ {trade.EntryPrice:0.##}\n" +
+            $"Signal bar: {trade.SignalTimeUtc.ToOffset(ist):yyyy-MM-dd HH:mm} IST";
 
         _logger.LogInformation("Trigger {Name} fired: {Direction} {Side} {OptionType} {Strike}", trigger.Name, trade.Direction, trade.Side, trade.OptionType, trade.Strike);
 
