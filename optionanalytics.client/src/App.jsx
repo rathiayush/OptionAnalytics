@@ -937,7 +937,7 @@ function DashboardPage() {
   // Which expiry CDV is tracking for `selected` - see useExpirySelector's own doc comment. Changing
   // it rebuilds the whole underlying's CDV/OBV/option-chain state server-side, so a successful
   // switch refetches this page exactly like switching underlying does.
-  const { expiries, selectedExpiry, loading: expiryLoading, selectExpiry } = useExpirySelector(selected)
+  const { expiries, selectedExpiry, isManual: expiryIsManual, loading: expiryLoading, selectExpiry } = useExpirySelector(selected)
   const handleExpiryChange = (expiry) => {
     selectExpiry(expiry).then(() => {
       previousStrikeRef.current = ATM_STRIKE
@@ -1185,7 +1185,7 @@ function DashboardPage() {
             style={{ width: 160 }}
             options={underlyings.map((u) => ({ value: u.underlying, label: u.underlying }))}
           />
-          <ExpirySelect expiries={expiries} value={selectedExpiry} loading={expiryLoading} onChange={handleExpiryChange} />
+          <ExpirySelect expiries={expiries} value={selectedExpiry} isManual={expiryIsManual} loading={expiryLoading} onChange={handleExpiryChange} />
           <Select
             value={timeframe}
             onChange={setTimeframe}

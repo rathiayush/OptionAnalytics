@@ -160,9 +160,13 @@ public sealed class CdvHostedService : BackgroundService
     /// user's own words asking for this feature) true of both pages at once - neither has its own
     /// separate expiry concept to keep in sync.
     ///
+    /// A null <paramref name="expiry"/> clears any manual pick and reverts the underlying to auto
+    /// (nearest-expiry) tracking, applied with the same immediate reset - not just left to resolve
+    /// itself whenever the picked expiry eventually lapses.
+    ///
     /// Returns null on success, or a user-facing reason it was refused (unknown underlying, or an
     /// expiry the scrip master doesn't list for it).</summary>
-    public async Task<string?> SelectExpiryAsync(string underlying, DateOnly expiry, CancellationToken cancellationToken)
+    public async Task<string?> SelectExpiryAsync(string underlying, DateOnly? expiry, CancellationToken cancellationToken)
     {
         underlying = underlying.ToUpperInvariant();
         if (!States.TryGetValue(underlying, out var state)) return $"Unknown underlying '{underlying}'.";
@@ -170,22 +174,27 @@ public sealed class CdvHostedService : BackgroundService
         var step = StepFor(underlying);
         if (step <= 0) return $"Unknown underlying '{underlying}'.";
 
-        try
+        if (expiry is { } picked)
         {
-            await _optionChainMaster.EnsureLoadedAsync(cancellationToken);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            _logger.LogWarning(ex, "Could not refresh the option chain master while selecting an expiry for {Underlying}.", underlying);
-        }
+            try
+            {
+                await _optionChainMaster.EnsureLoadedAsync(cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex, "Could not refresh the option chain master while selecting an expiry for {Underlying}.", underlying);
+            }
 
-        if (!_optionChainMaster.GetExpiries(underlying).Contains(expiry))
-            return $"{expiry:yyyy-MM-dd} is not a listed expiry for {underlying}.";
+            if (!_optionChainMaster.GetExpiries(underlying).Contains(picked))
+                return $"{picked:yyyy-MM-dd} is not a listed expiry for {underlying}.";
+        }
 
         await _recenterLock.WaitAsync(cancellationToken);
         try
         {
-            _expiryOverride[underlying] = expiry;
+            if (expiry is { } value) _expiryOverride[underlying] = value;
+            else _expiryOverride.TryRemove(underlying, out _);
+
             await ResetForNewDayAsync(underlying, state, cancellationToken);
             await RecenterAsync(underlying, step, cancellationToken);
         }
@@ -194,7 +203,8 @@ public sealed class CdvHostedService : BackgroundService
             _recenterLock.Release();
         }
 
-        _logger.LogInformation("CDV: {Underlying} expiry manually switched to {Expiry}.", underlying, expiry);
+        _logger.LogInformation("CDV: {Underlying} expiry manually switched to {Expiry}.",
+            underlying, expiry is { } e ? e.ToString("yyyy-MM-dd") : "auto (nearest)");
         return null;
     }
 

@@ -90,15 +90,23 @@ export function useExpirySelector(underlying) {
 
   // Switches the underlying onto a different expiry server-side - unsubscribes the old expiry's
   // contracts from the Dhan feed and rebuilds CDV/OBV/option-chain state onto the new one (see
-  // CdvHostedService.SelectExpiryAsync). Returns the request's promise so a caller can refetch its
-  // own page's data once the switch has actually landed server-side, rather than racing it.
+  // CdvHostedService.SelectExpiryAsync). Pass null to clear a manual pick and revert to auto
+  // (nearest-expiry) tracking - that's a real, server-applied switch too, not a local-only reset,
+  // so it goes through the same POST rather than being special-cased away. Returns the request's
+  // promise so a caller can refetch its own page's data once the switch has actually landed
+  // server-side, rather than racing it.
   const selectExpiry = (expiry) => {
-    if (!underlying || !expiry || expiry === selectedExpiry) return Promise.resolve()
+    if (!underlying) return Promise.resolve()
+    if (expiry === undefined) return Promise.resolve() // not a real choice, just a guard misuse
+    // Already in the requested state server-side? Nothing to do. "expiry === null" (wants auto) is
+    // already true the moment isManual is false, regardless of what selectedExpiry currently reads.
+    const alreadyThere = expiry === null ? !isManual : isManual && expiry === selectedExpiry
+    if (alreadyThere) return Promise.resolve()
     setLoading(true)
     return fetch(`/api/cdv/${underlying}/expiry`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ expiry }),
+      body: JSON.stringify({ expiry: expiry ?? null }),
     })
       .then((r) => r.json())
       .then((data) => {
@@ -113,15 +121,22 @@ export function useExpirySelector(underlying) {
   return { expiries, selectedExpiry, isManual, loading, selectExpiry }
 }
 
-export function ExpirySelect({ expiries, value, loading, onChange, style }) {
+// Sentinel antd Select value for "Auto (nearest)" - real expiries are ISO date strings, so this
+// can never collide with one.
+const AUTO_EXPIRY = '__auto__'
+
+export function ExpirySelect({ expiries, value, isManual, loading, onChange, style }) {
+  const options = [
+    { value: AUTO_EXPIRY, label: 'Auto (nearest)' },
+    ...(expiries ?? []).map((e) => ({ value: e, label: e })),
+  ]
   return (
     <Select
-      value={value}
+      value={isManual ? value : AUTO_EXPIRY}
       loading={loading}
-      onChange={onChange}
-      style={style ?? { width: 150 }}
-      placeholder="Expiry"
-      options={(expiries ?? []).map((e) => ({ value: e, label: e }))}
+      onChange={(picked) => onChange(picked === AUTO_EXPIRY ? null : picked)}
+      style={style ?? { width: 170 }}
+      options={options}
     />
   )
 }
