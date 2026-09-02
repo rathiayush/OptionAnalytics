@@ -12,7 +12,8 @@ public sealed record SuperOrderLeg(
     int? TriggeredQuantity);
 
 /// <summary>One Super Order (its entry leg plus whatever target/stop-loss legs Dhan has attached),
-/// as returned by GET /super/orders.</summary>
+/// as returned by GET /super/orders. OmsErrorDescription is Dhan's own explanation for WHY an
+/// order is REJECTED (or otherwise failed) - null/empty whenever there is nothing to explain.</summary>
 public sealed record SuperOrderSummary(
     string OrderId,
     string OrderStatus,
@@ -23,6 +24,7 @@ public sealed record SuperOrderSummary(
     decimal Price,
     decimal? TargetPrice,
     decimal? StopLossPrice,
+    string? OmsErrorDescription,
     IReadOnlyList<SuperOrderLeg> LegDetails);
 
 /// <summary>Result of a place/modify/cancel call - just what Dhan's own response bodies carry for
@@ -195,6 +197,7 @@ public sealed class DhanSuperOrderClient
                 GetDecimal(element, "price") ?? 0,
                 GetDecimal(element, "targetPrice"),
                 GetDecimal(element, "stopLossPrice"),
+                GetString(element, "omsErrorDescription"),
                 legs));
         }
 

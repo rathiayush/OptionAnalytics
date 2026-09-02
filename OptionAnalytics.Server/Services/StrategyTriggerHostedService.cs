@@ -349,6 +349,18 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     /// option that has genuinely spiked (the 100 -> 80 example) must abort on the very FIRST retry,
     /// not be chased down.
     ///
+    /// A PART_TRADED order (part of the quantity already filled, with its own live SL/target legs)
+    /// is treated differently from a fully-unfilled one: it is RE-PRICED for just the remaining
+    /// quantity, with escalating slippage each attempt so it does not just repeat a price that
+    /// already failed to clear - but it is NEVER cancelled, since cancelling ENTRY_LEG cancels the
+    /// WHOLE order including the legs protecting the quantity already filled (see
+    /// DhanSuperOrderClient's own doc comment). If it is still partial once attempts run out, or the
+    /// live premium trips MaxDeviationPercent while still partial, this stops chasing the remainder
+    /// and leaves it resting - a plain working LIMIT order, not a naked position - rather than risk
+    /// stripping that protection. Only a FULLY unfilled order is ever actually cancelled, which is
+    /// what "no open order left" safely means here: nothing is EVER left both unfilled with no plan
+    /// for it AND unmonitored.
+    ///
     /// Runs entirely off DhanSuperOrderClient.ListAsync/ModifyAsync/CancelAsync, none of which
     /// throw on failure (they log and return null/empty) - an inconclusive read (a transient list
     /// failure, or the order not yet visible) just costs one of the MaxFillAttempts checks rather
@@ -360,6 +372,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         var isSell = trade.Side == "Sell";
         var referencePrice = trade.EntryPrice!.Value; // fixed for every attempt - see this method's own doc comment
         var currentPrice = plan.Price;
+        var partialFillRetries = 0; // how many re-price attempts have happened SINCE a partial fill was first seen - escalates slippage, see the re-price step below
 
         for (var attempt = 1; attempt <= MaxFillAttempts; attempt++)
         {
@@ -384,10 +397,14 @@ public sealed class StrategyTriggerHostedService : BackgroundService
             var entryLeg = order.LegDetails.FirstOrDefault(l => l.LegName == "ENTRY_LEG");
             var entryStatus = entryLeg?.OrderStatus ?? order.OrderStatus;
 
+            var filledQuantity = entryLeg?.TriggeredQuantity ?? 0;
+
             if (string.Equals(entryStatus, "TRADED", StringComparison.OrdinalIgnoreCase))
             {
                 _logger.LogInformation("Trigger {Name}: order {OrderId} filled on attempt {Attempt}/{Max}.", trigger.Name, orderId, attempt, MaxFillAttempts);
-                await NotifyFollowUpAsync(trigger, $"[ORDER FILLED] {plan.Summary}\nFilled on attempt {attempt}/{MaxFillAttempts} at ~{currentPrice:0.##}.", cancellationToken);
+                await NotifyFollowUpAsync(trigger,
+                    $"[ORDER FILLED] {plan.Summary}\nFilled {plan.Quantity}/{plan.Quantity} on attempt {attempt}/{MaxFillAttempts} at ~{currentPrice:0.##}.",
+                    cancellationToken);
                 return;
             }
 
@@ -395,25 +412,43 @@ public sealed class StrategyTriggerHostedService : BackgroundService
             {
                 // Already off the book by some other means (manual cancel, Dhan-side rejection
                 // discovered late) - nothing for this loop to do, and nothing to cancel.
-                _logger.LogWarning("Trigger {Name}: order {OrderId} is {Status} - stopping fill monitoring.", trigger.Name, orderId, entryStatus);
-                await NotifyFollowUpAsync(trigger, $"[ORDER {entryStatus}] {plan.Summary}", cancellationToken);
+                var reasonLine = string.IsNullOrWhiteSpace(order.OmsErrorDescription) ? "" : $"\nReason: {order.OmsErrorDescription}";
+                _logger.LogWarning("Trigger {Name}: order {OrderId} is {Status} ({Reason}) - stopping fill monitoring.",
+                    trigger.Name, orderId, entryStatus, order.OmsErrorDescription ?? "no reason given");
+                await NotifyFollowUpAsync(trigger, $"[ORDER {entryStatus}] {plan.Summary}{reasonLine}", cancellationToken);
                 return;
             }
 
-            if (entryStatus == "PART_TRADED")
+            // PART_TRADED means part of the quantity is already a real, live position with its own
+            // SL/target legs attached - cancelling ENTRY_LEG to clear the unfilled remainder would
+            // cancel the WHOLE order (see DhanSuperOrderClient's own doc comment), stripping that
+            // protection off the position that already exists. So a partial fill is NEVER cancelled
+            // here, only re-priced for just the remaining quantity - and if attempts run out or
+            // deviation trips while still partial, this stops chasing and leaves the remainder
+            // resting (still a normal, harmless working LIMIT order) rather than risk a naked
+            // position by cancelling.
+            var isPartial = entryStatus == "PART_TRADED";
+            if (isPartial) partialFillRetries++;
+            var remainingQuantity = plan.Quantity - filledQuantity;
+
+            if (attempt == MaxFillAttempts)
             {
-                // Partially filled - re-pricing or cancelling the remainder risks the filled portion
-                // ending up without its own SL/target tracking correctly, so this stops chasing it
-                // and leaves the resting remainder for the user to handle manually rather than
-                // guessing.
-                _logger.LogWarning("Trigger {Name}: order {OrderId} is PART_TRADED - stopping automatic retries, leaving remainder as-is.", trigger.Name, orderId);
-                await NotifyFollowUpAsync(trigger, $"[ORDER PARTIALLY FILLED] {plan.Summary}\nPart of the quantity filled - the rest is left resting; check Dhan directly.", cancellationToken);
+                // Last allowed check - no more re-pricing regardless of status.
+                if (isPartial)
+                {
+                    _logger.LogWarning("Trigger {Name}: order {OrderId} still PART_TRADED ({Filled}/{Total}) after {Max} attempts - leaving the resting remainder as-is.",
+                        trigger.Name, orderId, filledQuantity, plan.Quantity, MaxFillAttempts);
+                    await NotifyFollowUpAsync(trigger,
+                        $"[ORDER PARTIALLY FILLED] {plan.Summary}\nFilled {filledQuantity}/{plan.Quantity} after {MaxFillAttempts} attempts. The remaining {remainingQuantity} is left resting (NOT cancelled - cancelling would remove the SL/target protecting the {filledQuantity} already filled). Cancel it manually in Dhan if you don't want it to fill later.",
+                        cancellationToken);
+                }
+                else
+                {
+                    _logger.LogWarning("Trigger {Name}: order {OrderId} still unfilled after {Max} attempts - cancelling.", trigger.Name, orderId, MaxFillAttempts);
+                    await CancelOrderAsync(trigger, orderId, plan, $"did not fill after {MaxFillAttempts} attempts", cancellationToken);
+                }
                 return;
             }
-
-            // Still PENDING/TRANSIT - this was the last allowed check, so no more re-pricing: fall
-            // through to the cancel below instead of placing yet another attempt.
-            if (attempt == MaxFillAttempts) break;
 
             var latestPrice = GetLatestPremium(trade.Underlying, trade.Strike, isCall);
             if (latestPrice is null)
@@ -427,18 +462,37 @@ public sealed class StrategyTriggerHostedService : BackgroundService
             if (deviationPercent > trigger.MaxDeviationPercent)
             {
                 _logger.LogWarning(
-                    "Trigger {Name}: live premium {Latest:0.##} has moved {Deviation:0.#}% from the signal price {Reference:0.##} (limit {Limit:0.#}%) - cancelling order {OrderId} instead of chasing it.",
+                    "Trigger {Name}: live premium {Latest:0.##} has moved {Deviation:0.#}% from the signal price {Reference:0.##} (limit {Limit:0.#}%) - stopping re-price attempts for order {OrderId}.",
                     trigger.Name, latestPrice, deviationPercent, referencePrice, trigger.MaxDeviationPercent, orderId);
-                await CancelOrderAsync(trigger, orderId, plan,
-                    $"price moved {deviationPercent:0.#}% from the signal price ({referencePrice:0.##} -> {latestPrice:0.##}), past the {trigger.MaxDeviationPercent:0.#}% limit",
-                    cancellationToken);
+
+                if (isPartial)
+                {
+                    await NotifyFollowUpAsync(trigger,
+                        $"[ORDER PARTIALLY FILLED] {plan.Summary}\nFilled {filledQuantity}/{plan.Quantity}; live premium moved {deviationPercent:0.#}% from the signal price, past the {trigger.MaxDeviationPercent:0.#}% limit. Stopped chasing the remaining {remainingQuantity} rather than cancel (that would strip the SL/target off the {filledQuantity} already filled) - check Dhan.",
+                        cancellationToken);
+                }
+                else
+                {
+                    await CancelOrderAsync(trigger, orderId, plan,
+                        $"price moved {deviationPercent:0.#}% from the signal price ({referencePrice:0.##} -> {latestPrice:0.##}), past the {trigger.MaxDeviationPercent:0.#}% limit",
+                        cancellationToken);
+                }
                 return;
             }
 
-            var rawPrice = Math.Max(0, isSell ? latestPrice.Value - trigger.SlippagePoints : latestPrice.Value + trigger.SlippagePoints);
+            // A partial fill re-prices with escalating slippage - the base price already failed to
+            // clear the remainder, so repeating it attempt after attempt would just keep failing the
+            // same way. A fully-unfilled order keeps the trigger's own configured slippage unchanged.
+            var slippage = isPartial ? trigger.SlippagePoints * (1 + partialFillRetries) : trigger.SlippagePoints;
+            var rawPrice = Math.Max(0, isSell ? latestPrice.Value - slippage : latestPrice.Value + slippage);
             var newPrice = RoundToTick(rawPrice, plan.TickSize);
+            // ENTRY_LEG's own quantity field is the order's remaining WORKING quantity, not a delta -
+            // see DhanSuperOrderClient's own doc comment on ModifyAsync. Re-quoting it down to just
+            // what's left to fill (rather than leaving it at the original total) is what stops this
+            // from silently trying to buy/sell MORE than the trigger was ever configured for.
+            var newQuantity = isPartial ? remainingQuantity : (int?)null;
 
-            var modifyResult = await _superOrders.ModifyAsync(orderId, "ENTRY_LEG", orderType: null, quantity: null,
+            var modifyResult = await _superOrders.ModifyAsync(orderId, "ENTRY_LEG", orderType: null, quantity: newQuantity,
                 price: newPrice, targetPrice: null, stopLossPrice: null, trailingJump: null, cancellationToken);
             if (modifyResult is null)
             {
@@ -448,12 +502,9 @@ public sealed class StrategyTriggerHostedService : BackgroundService
             }
 
             currentPrice = newPrice;
-            _logger.LogInformation("Trigger {Name}: re-priced order {OrderId} to {Price:0.##} (attempt {Attempt}/{Max}, live premium {Live:0.##}).",
-                trigger.Name, orderId, newPrice, attempt + 1, MaxFillAttempts, latestPrice);
+            _logger.LogInformation("Trigger {Name}: re-priced order {OrderId} to {Price:0.##} for {Quantity} (attempt {Attempt}/{Max}, live premium {Live:0.##}, slippage {Slippage:0.##}).",
+                trigger.Name, orderId, newPrice, remainingQuantity == 0 ? plan.Quantity : remainingQuantity, attempt + 1, MaxFillAttempts, latestPrice, slippage);
         }
-
-        _logger.LogWarning("Trigger {Name}: order {OrderId} still unfilled after {Max} attempts - cancelling.", trigger.Name, orderId, MaxFillAttempts);
-        await CancelOrderAsync(trigger, orderId, plan, $"did not fill after {MaxFillAttempts} attempts", cancellationToken);
     }
 
     /// <summary>The latest known premium for one strike, INCLUDING the still-forming bar
