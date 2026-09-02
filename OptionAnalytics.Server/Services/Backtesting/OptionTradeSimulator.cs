@@ -72,12 +72,25 @@ public static class OptionTradeSimulator
     /// closes at the close of the first bar at or after such a time, after the stop and target have
     /// been checked on that same bar (they are intra-bar price levels; this is an end-of-bar
     /// decision, so it cannot pre-empt them). Strategies without one pass nothing and behave exactly
-    /// as before.</summary>
+    /// as before.
+    ///
+    /// <paramref name="signalExits"/> (optional, keyed by the SIGNAL's own time) is the per-trade
+    /// counterpart, for a strategy whose exit level differs from trade to trade - FiveEmaV2Strategy's
+    /// taught stop at the alert candle's own high/low and its 1:3 target being the case it was added
+    /// for. Keying by signal rather than sharing one ascending list matters: those levels belong to
+    /// one specific trade, and a global list would let one trade's stop close a completely different
+    /// one. It carries its own reason string too, so a row says WHICH of the two hit rather than a
+    /// generic "SignalExit".
+    ///
+    /// slPoints/tpPoints of 0 disable the premium stop/target entirely - for a strategy exiting on
+    /// an underlying condition instead, a premium stop is an optional safety net rather than the
+    /// mechanism, and 0 is how it says "no net".</summary>
     public static IReadOnlyList<BacktestTrade> Run(
         BacktestStrategyContext context,
         IReadOnlyList<(DateTimeOffset Time, string Direction)> entrySignals,
         IReadOnlyDictionary<string, decimal> parameters,
-        IReadOnlyList<DateTimeOffset>? forcedExitTimes = null)
+        IReadOnlyList<DateTimeOffset>? forcedExitTimes = null,
+        IReadOnlyDictionary<DateTimeOffset, (DateTimeOffset Time, string Reason)>? signalExits = null)
     {
         if (entrySignals.Count == 0) return Array.Empty<BacktestTrade>();
 
@@ -135,6 +148,7 @@ public static class OptionTradeSimulator
             var exitPrice = entryBar.Close;
             string? exitReason = null;
             var forcedExit = FirstAtOrAfter(forcedExitTimes, entryBar.Time);
+            var signalExit = signalExits is not null && signalExits.TryGetValue(signal.Time, out var se) ? se : ((DateTimeOffset Time, string Reason)?)null;
 
             for (var i = entryIndex; i < optionBars.Count && BacktestUtil.IstDate(optionBars[i].Time) == entryDay; i++)
             {
@@ -142,15 +156,20 @@ public static class OptionTradeSimulator
                 // Conservative when a single bar's range spans both thresholds (a volatile bar
                 // right after entry, most likely): check the stop first either way, so the worse
                 // outcome for the trade wins rather than guessing which was touched first intra-bar.
-                var stopHit = isSell ? bar.High >= stopLossPrice : bar.Low <= stopLossPrice;
+                var stopHit = slPoints > 0 && (isSell ? bar.High >= stopLossPrice : bar.Low <= stopLossPrice);
                 if (stopHit) { exitTime = bar.Time; exitPrice = stopLossPrice; exitReason = "StopLoss"; break; }
 
-                var targetHit = isSell ? bar.Low <= takeProfitPrice : bar.High >= takeProfitPrice;
+                var targetHit = tpPoints > 0 && (isSell ? bar.Low <= takeProfitPrice : bar.High >= takeProfitPrice);
                 if (targetHit) { exitTime = bar.Time; exitPrice = takeProfitPrice; exitReason = "TakeProfit"; break; }
 
                 if (forcedExit is { } fx && bar.Time >= fx)
                 {
                     exitTime = bar.Time; exitPrice = bar.Close; exitReason = "SignalExit"; break;
+                }
+
+                if (signalExit is { } sx && bar.Time >= sx.Time)
+                {
+                    exitTime = bar.Time; exitPrice = bar.Close; exitReason = sx.Reason; break;
                 }
 
                 exitTime = bar.Time;

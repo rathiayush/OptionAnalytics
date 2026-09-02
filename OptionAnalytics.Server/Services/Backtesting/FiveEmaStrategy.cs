@@ -97,92 +97,28 @@ public sealed class FiveEmaStrategy : IBacktestStrategy
 
         var entries = new List<(DateTimeOffset Time, string Direction)>();
         var signals = new List<BacktestSignal>();
-        var touchTimes = new List<DateTimeOffset>();
 
-        var bars = context.SpotBars;
-        var ema = EmaCrossoverDetector.EmaSeries(bars, emaPeriod);
+        // The alert-candle scan itself lives in FiveEmaAlertScanner, shared with FiveEmaV2Strategy -
+        // the two versions must agree exactly on WHEN the setup fires and differ only in how they
+        // exit. All this adds is the direction filter and the human-readable summaries.
+        var (breaks, touchTimes) = FiveEmaAlertScanner.Scan(context.SpotBars, emaPeriod, maxAgeBars);
 
-        // The pending alert candle on each side, with the bar index it formed at so its age can be
-        // checked. Only one of the two can ever be set: a candle entirely above the EMA is a short
-        // alert AND proof that any long alert (which needed price below the EMA) is dead.
-        (Candle Bar, int Index)? shortAlert = null;
-        (Candle Bar, int Index)? longAlert = null;
-        DateOnly? currentDay = null;
-
-        for (var i = 0; i < bars.Count; i++)
+        foreach (var fired in breaks)
         {
-            var bar = bars[i];
+            var isShort = fired.Direction == "Bearish";
+            var summary = isShort
+                ? $"Alert candle at {BacktestUtil.IstDate(fired.AlertCandle.Time):dd MMM} low {fired.AlertCandle.Low:0.##} formed clear above the {emaPeriod} EMA and broke down"
+                : $"Alert candle at {BacktestUtil.IstDate(fired.AlertCandle.Time):dd MMM} high {fired.AlertCandle.High:0.##} formed clear below the {emaPeriod} EMA and broke up";
 
-            // Nothing carries overnight - the first bars of a session gap away from the previous
-            // close often enough that yesterday's alert candle is meaningless against today's price.
-            var day = BacktestUtil.IstDate(bar.Time);
-            if (currentDay != day)
+            if (isShort ? takeShorts : takeLongs)
             {
-                currentDay = day;
-                shortAlert = null;
-                longAlert = null;
-            }
-
-            if (ema[i] is not { } emaValue) continue;
-
-            if (bar.Low <= emaValue && bar.High >= emaValue) touchTimes.Add(bar.Time);
-
-            // An alert candle that has sat unbroken for too long is stale - opt-in, since the setup
-            // as taught puts no limit on it.
-            if (maxAgeBars > 0)
-            {
-                if (shortAlert is { } s && i - s.Index > maxAgeBars) shortAlert = null;
-                if (longAlert is { } l && i - l.Index > maxAgeBars) longAlert = null;
-            }
-
-            // Step 1: does THIS bar break a PREVIOUS bar's alert candle? Checked before the alert
-            // candle is updated below, so a candle can never trigger against itself.
-            if (shortAlert is { } shortCandle && bar.Low < shortCandle.Bar.Low)
-            {
-                var summary = $"Alert candle at {BacktestUtil.IstDate(shortCandle.Bar.Time):dd MMM} low {shortCandle.Bar.Low:0.##} formed clear above the {emaPeriod} EMA and broke down";
-                if (takeShorts)
-                {
-                    signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Entry", "Bearish", summary));
-                    entries.Add((bar.Time, "Bearish"));
-                }
-                else
-                {
-                    signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", "Bearish", $"{summary} - skipped, longs only"));
-                }
-                shortAlert = null;
-            }
-            else if (longAlert is { } longCandle && bar.High > longCandle.Bar.High)
-            {
-                var summary = $"Alert candle at {BacktestUtil.IstDate(longCandle.Bar.Time):dd MMM} high {longCandle.Bar.High:0.##} formed clear below the {emaPeriod} EMA and broke up";
-                if (takeLongs)
-                {
-                    signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Entry", "Bullish", summary));
-                    entries.Add((bar.Time, "Bullish"));
-                }
-                else
-                {
-                    signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", "Bullish", $"{summary} - skipped, shorts only"));
-                }
-                longAlert = null;
-            }
-
-            // Step 2: this bar becomes the new alert candle if it is itself entirely clear of the
-            // EMA - strictly, so a bar merely grazing the line does not qualify. A bar that does
-            // touch cancels both sides: price is back at the average.
-            if (bar.Low > emaValue)
-            {
-                shortAlert = (bar, i);
-                longAlert = null;
-            }
-            else if (bar.High < emaValue)
-            {
-                longAlert = (bar, i);
-                shortAlert = null;
+                signals.Add(new BacktestSignal(context.Underlying, fired.Time, "Entry", fired.Direction, summary));
+                entries.Add((fired.Time, fired.Direction));
             }
             else
             {
-                shortAlert = null;
-                longAlert = null;
+                signals.Add(new BacktestSignal(context.Underlying, fired.Time, "Rejected", fired.Direction,
+                    $"{summary} - skipped, {(isShort ? "longs" : "shorts")} only"));
             }
         }
 
