@@ -2,16 +2,6 @@ using Microsoft.Extensions.Options;
 
 namespace OptionAnalytics.Server.Dhan;
 
-/// <summary>The outcome of one TOTP login attempt - what DiagnosticsController reports so an
-/// unauthenticated deployment can be diagnosed without reaching its container logs. Carries only
-/// the OUTCOME, never any credential.</summary>
-public sealed record DhanAuthAttempt(
-    DateTimeOffset AtUtc,
-    bool Success,
-    string? Error,
-    bool RateLimited,
-    int ConsecutiveFailures);
-
 /// <summary>
 /// In-memory holder for the live Dhan access token, seeded from DhanOptions.AccessToken at
 /// construction (static-token mode). When TOTP auto-login is configured
@@ -33,23 +23,6 @@ public sealed class DhanSession
     public string? ClientId { get; set; }
 
     public bool IsAuthenticated => !string.IsNullOrEmpty(AccessToken) && !string.IsNullOrEmpty(ClientId);
-
-    /// <summary>The outcome of the most recent TOTP login attempt, recorded by DhanTotpAuthService
-    /// on every path (success, credential rejection, rate limit, malformed secret, network error).
-    /// Exists so DiagnosticsController can answer "why is this not authenticated?" over the REST
-    /// API - when this app runs somewhere its container logs aren't readily reachable, the only
-    /// alternative is guessing. Never holds a secret, only the outcome.</summary>
-    public DhanAuthAttempt? LastAuthAttempt { get; private set; }
-
-    /// <summary>Records one login attempt's outcome, keeping a running count of consecutive
-    /// failures so the diagnostic can distinguish "one transient blip" from "failing forever".</summary>
-    public void RecordAuthAttempt(bool success, string? error, bool rateLimited)
-    {
-        var previousFailures = LastAuthAttempt?.ConsecutiveFailures ?? 0;
-        LastAuthAttempt = new DhanAuthAttempt(
-            DateTimeOffset.UtcNow, success, error, rateLimited,
-            success ? 0 : previousFailures + 1);
-    }
 
     /// <summary>Raised by <see cref="ClearAccessToken"/> - lets DhanTotpAutoRenewalHostedService
     /// react to a dead session immediately (a 401 from the REST API, or a session-invalid

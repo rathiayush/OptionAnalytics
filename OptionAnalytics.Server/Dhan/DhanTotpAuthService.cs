@@ -35,17 +35,7 @@ public sealed class DhanTotpAuthService
         _logger = logger;
     }
 
-    /// <summary>Wraps AttemptAsync so EVERY outcome - including the early "not configured" and
-    /// malformed-secret returns - lands in DhanSession.LastAuthAttempt for DiagnosticsController to
-    /// report. See that property's own doc comment for why that matters.</summary>
     public async Task<DhanTotpLoginResult> GenerateAccessTokenAsync(CancellationToken cancellationToken)
-    {
-        var result = await AttemptAsync(cancellationToken);
-        _session.RecordAuthAttempt(result.Success, result.Error, result.RateLimited);
-        return result;
-    }
-
-    private async Task<DhanTotpLoginResult> AttemptAsync(CancellationToken cancellationToken)
     {
         if (!_options.HasTotpCredentials)
             return new DhanTotpLoginResult(false, null, "Dhan:ClientId / Dhan:Pin / Dhan:TotpSecret are not fully configured for TOTP auto-login.");
