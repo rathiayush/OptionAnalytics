@@ -6,10 +6,11 @@ using OptionAnalytics.Server.Telegram;
 namespace OptionAnalytics.Server.Services;
 
 /// <summary>
-/// The notification engine. Keeps each underlying's CURRENT EMA9/21 bias for three legs - spot,
-/// ATM CE, ATM PE - continuously up to date (EmaCrossoverDetector.CurrentDirection, recomputed on
-/// every closed bar regardless of whether that bar was an actual crossover), and fires two kinds
-/// of alert off that live state:
+/// The notification engine. Keeps each underlying's CURRENT, close-CONFIRMED EMA9/21 bias for
+/// three legs - spot, ATM CE, ATM PE - continuously up to date (EmaCrossoverDetector.
+/// ConfirmedDirection, recomputed on every closed bar - see its own doc comment for why "confirmed"
+/// means the bar's close actually finished beyond both EMAs, not just their relationship flipping),
+/// and fires two kinds of alert off that live state:
 ///
 ///   1. An individual alert the moment any ONE leg's bias flips (Kind: "Spot"/"AtmCe"/"AtmPe") -
 ///      the lightweight "something just changed" signal.
@@ -124,7 +125,12 @@ public sealed class ConfluenceAlertService : BackgroundService
     private void UpdateSpotLeg(string underlying, SpotUnderlyingState spotState, bool announce, CancellationToken cancellationToken)
     {
         var closedBars = spotState.GetClosedCandles();
-        var direction = EmaCrossoverDetector.CurrentDirection(closedBars);
+        // ConfirmedDirection, not the plain EMA9-vs-EMA21 relationship - see its own doc comment.
+        // In a flat/choppy stretch the two EMAs can sit almost on top of each other and swap order
+        // on a single noisy tick with price never really leaving their neighborhood; requiring the
+        // close to have actually finished beyond both lines is what keeps a leg (and therefore
+        // Confluence, which needs all three to agree) from "confirming" on that noise.
+        var direction = EmaCrossoverDetector.ConfirmedDirection(closedBars);
         if (direction is null || closedBars.Count == 0) return;
 
         UpdateLeg(underlying, "Spot", direction, closedBars[^1].Time, announce, s => s.Spot, (s, v) => s.Spot = v, cancellationToken);
@@ -133,7 +139,7 @@ public sealed class ConfluenceAlertService : BackgroundService
     private void UpdateAtmLeg(string underlying, CdvUnderlyingState cdvState, bool isCall, bool announce, CancellationToken cancellationToken)
     {
         var closedBars = cdvState.GetAtmClosedCandles(isCall);
-        var direction = EmaCrossoverDetector.CurrentDirection(closedBars);
+        var direction = EmaCrossoverDetector.ConfirmedDirection(closedBars);
         if (direction is null || closedBars.Count == 0) return;
 
         var kind = isCall ? "AtmCe" : "AtmPe";

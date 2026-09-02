@@ -12,27 +12,22 @@ public static class EmaCrossoverDetector
     public const int FastPeriod = 9;
     public const int SlowPeriod = 21;
 
-    /// <summary>"Bullish" (EMA9 crossed above EMA21 on the most recent bar), "Bearish" (crossed
-    /// below), or null (no crossover on that bar, or not enough closed bars yet to know).</summary>
-    public static string? Detect(IReadOnlyList<Candle> closedBars)
+    /// <summary>The CURRENT bias on the most recent bar, but only once price has actually confirmed
+    /// it: the bar's own CLOSE must have finished beyond BOTH the fast and slow EMA in that
+    /// direction, not just have the EMA9-vs-EMA21 relationship flip. In a flat/choppy stretch the
+    /// two EMAs can sit almost on top of each other (a few points apart on a 50,000+ index, or well
+    /// under 1% apart on an option premium) and swap order on a single noisy tick while price never
+    /// really leaves their neighborhood - every alert this app sends off a bare EMA9/21 relationship
+    /// would then fire on that noise even though nothing directional actually happened. Requiring
+    /// the close to clear both lines is what filters that out: EmaCrossoverAlertService (the spot
+    /// leg) and ConfluenceAlertService (all three legs) both alert off this rather than the raw
+    /// relationship. Null under the same conditions as before (not enough closed bars, or an exact
+    /// EMA tie) plus one more: the relationship has a bias but price hasn't closed clear of both
+    /// lines yet - not "no direction", just "not confirmed on this bar".</summary>
+    public static string? ConfirmedDirection(IReadOnlyList<Candle> closedBars)
     {
-        var (prevDiff, currDiff) = EmaDiffs(closedBars);
-        if (prevDiff is not { } pd || currDiff is not { } cd) return null;
-
-        return pd <= 0 && cd > 0 ? "Bullish"
-            : pd >= 0 && cd < 0 ? "Bearish"
-            : null;
-    }
-
-    /// <summary>"Bullish" (EMA9 currently above EMA21) or "Bearish" (below) on the most recent bar
-    /// - the CURRENT bias, unlike Detect which only answers on the bar an actual cross happened.
-    /// ConfluenceAlertService uses this to keep a continuously up-to-date "where does each leg
-    /// stand right now" state, not just react to the moment of crossing.</summary>
-    public static string? CurrentDirection(IReadOnlyList<Candle> closedBars)
-    {
-        var (_, currDiff) = EmaDiffs(closedBars);
-        if (currDiff is not { } cd || cd == 0) return null;
-        return cd > 0 ? "Bullish" : "Bearish";
+        var series = ConfirmedDirectionSeries(closedBars);
+        return series.Count > 0 ? series[^1].Direction : null;
     }
 
     /// <summary>Every bar's fast/slow EMA bias computed in one pass (Bullish/Bearish once there are
@@ -93,11 +88,22 @@ public static class EmaCrossoverDetector
         return quotes.GetEma(period).Select(e => (decimal?)e.Ema).ToList();
     }
 
-    private static (decimal? Prev, decimal? Curr) EmaDiffs(IReadOnlyList<Candle> closedBars)
+    /// <summary>Batch counterpart to ConfirmedDirection - every bar's confirmed bias in one pass,
+    /// same "not quadratic over a multi-day series" reasoning as DirectionSeries. BacktestService's
+    /// Confluence replay uses this (not the plain DirectionSeries) so the Backtrack page and every
+    /// Strategy Trigger built off a Confluence/Entry signal reproduce EXACTLY what
+    /// EmaCrossoverAlertService/ConfluenceAlertService would have alerted live - see
+    /// ConfirmedDirection's own doc comment for why requiring the close to have actually finished
+    /// beyond both EMAs (not just their relationship flipping) matters. EmaSurgeStrategy
+    /// deliberately keeps using the plain DirectionSeries instead: it already has its own,
+    /// separately-tuned volume-alignment noise filter, and folding this confirmation into its
+    /// crossover math too would be a second, unreviewed change to a strategy this app tunes
+    /// independently.</summary>
+    public static IReadOnlyList<(DateTimeOffset Time, string? Direction)> ConfirmedDirectionSeries(
+        IReadOnlyList<Candle> closedBars, int fastPeriod = FastPeriod, int slowPeriod = SlowPeriod)
     {
-        // Need at least one prior bar beyond the slow EMA's own seed window, so there is a
-        // previous EMA9/EMA21 pair to compare the newest one against.
-        if (closedBars.Count < SlowPeriod + 1) return (null, null);
+        if (fastPeriod < 1 || slowPeriod < 1 || fastPeriod >= slowPeriod || closedBars.Count < slowPeriod + 1)
+            return closedBars.Select(c => (c.Time, (string?)null)).ToList();
 
         var quotes = closedBars.Select(c => new Quote
         {
@@ -109,13 +115,23 @@ public static class EmaCrossoverDetector
             Volume = 0,
         }).ToList();
 
-        var ema9 = quotes.GetEma(FastPeriod).ToList();
-        var ema21 = quotes.GetEma(SlowPeriod).ToList();
+        var fastEma = quotes.GetEma(fastPeriod).ToList();
+        var slowEma = quotes.GetEma(slowPeriod).ToList();
 
-        var last = quotes.Count - 1;
-        if (ema9[last].Ema is not { } fastNow || ema21[last].Ema is not { } slowNow) return (null, null);
-        if (ema9[last - 1].Ema is not { } fastPrev || ema21[last - 1].Ema is not { } slowPrev) return (null, (decimal)(fastNow - slowNow));
-
-        return ((decimal)(fastPrev - slowPrev), (decimal)(fastNow - slowNow));
+        var result = new List<(DateTimeOffset, string?)>(closedBars.Count);
+        for (var i = 0; i < closedBars.Count; i++)
+        {
+            string? direction = null;
+            if (fastEma[i].Ema is { } fastRaw && slowEma[i].Ema is { } slowRaw && fastRaw != slowRaw)
+            {
+                var fast = (decimal)fastRaw;
+                var slow = (decimal)slowRaw;
+                var close = closedBars[i].Close;
+                if (fast > slow) { if (close > fast && close > slow) direction = "Bullish"; }
+                else { if (close < fast && close < slow) direction = "Bearish"; }
+            }
+            result.Add((closedBars[i].Time, direction));
+        }
+        return result;
     }
 }

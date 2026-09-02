@@ -26,9 +26,11 @@ namespace OptionAnalytics.Server.Services;
 /// requests, since it only ever reads the two hosted services' already-live in-memory state.
 ///
 /// Replay is faithful to ConfluenceAlertService's live behavior:
-///   - a leg's direction is tracked per closed bar (EmaCrossoverDetector.DirectionSeries, the
-///     whole-series counterpart to CurrentDirection), and an individual signal fires the instant a
-///     leg's direction changes from what it was on its own previous bar.
+///   - a leg's direction is tracked per closed bar (EmaCrossoverDetector.ConfirmedDirectionSeries,
+///     the whole-series counterpart to ConfirmedDirection - requiring the bar's close to have
+///     actually finished beyond both EMAs, not just their relationship flipping, so a flat/choppy
+///     stretch doesn't replay signals live alerts would never have sent), and an individual signal
+///     fires the instant a leg's direction changes from what it was on its own previous bar.
 ///   - a Confluence signal fires the instant all three legs align (spot+ATM CE both Bullish and ATM
 ///     PE Bearish, or the bearish mirror) within ConfluenceWindow of each other, staying quiet on
 ///     every later bar where the same alignment still holds, and re-arming the moment any leg
@@ -140,9 +142,15 @@ public sealed class BacktestService
         var ceBars = BacktestUtil.AggregateCandles(cdvState.GetAtmClosedCandles(true), timeframe);
         var peBars = BacktestUtil.AggregateCandles(cdvState.GetAtmClosedCandles(false), timeframe);
 
-        var spotSeries = EmaCrossoverDetector.DirectionSeries(spotBars);
-        var ceSeries = EmaCrossoverDetector.DirectionSeries(ceBars);
-        var peSeries = EmaCrossoverDetector.DirectionSeries(peBars);
+        // ConfirmedDirectionSeries, not the plain DirectionSeries - see its own doc comment. This
+        // replay exists to reproduce EXACTLY what EmaCrossoverAlertService/ConfluenceAlertService
+        // would alert on live (both use ConfirmedDirection), so Backtrack and every Strategy
+        // Trigger built off a Confluence/Entry signal need the same close-confirmation rule, not
+        // the raw EMA9-vs-EMA21 relationship - otherwise a backtest could show signals live alerts
+        // would never have sent.
+        var spotSeries = EmaCrossoverDetector.ConfirmedDirectionSeries(spotBars);
+        var ceSeries = EmaCrossoverDetector.ConfirmedDirectionSeries(ceBars);
+        var peSeries = EmaCrossoverDetector.ConfirmedDirectionSeries(peBars);
 
         var spotByTime = ToLookup(spotSeries);
         var ceByTime = ToLookup(ceSeries);
