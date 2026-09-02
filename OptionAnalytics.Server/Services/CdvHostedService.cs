@@ -46,6 +46,18 @@ public sealed class CdvHostedService : BackgroundService
     /// enough that a chart left open during the session still catches up on a refresh.</summary>
     private static readonly TimeSpan OnDemandCandleLifetime = TimeSpan.FromMinutes(2);
 
+    /// <summary>The same, once the session has closed for the day: today's candles are then FINAL,
+    /// so re-fetching them can only ever return the identical series. A Backtrack run can reference
+    /// dozens of untracked strikes (see BacktestService.FillMissingStrikesAsync) and every one is a
+    /// Dhan call, so an evening of re-running the same window would otherwise pay for the same data
+    /// over and over. Safe to hold this long precisely BECAUSE nothing can change until the next
+    /// session, and the day-keyed sweep below drops the whole lot the moment the IST date rolls
+    /// over - a stale entry can never survive into a day whose bars are still forming.</summary>
+    private static readonly TimeSpan OnDemandCandleLifetimeAfterClose = TimeSpan.FromHours(2);
+
+    /// <summary>IST time the session ends. After this, the day's candles cannot change.</summary>
+    private static readonly TimeOnly SessionClose = new(15, 30);
+
     private readonly DhanOptionChainMaster _optionChainMaster;
     private readonly DhanOptionChainQuotes _chainQuotes;
     private readonly DhanMarketFeedClient _feedClient;
@@ -341,7 +353,16 @@ public sealed class CdvHostedService : BackgroundService
                     _onDemandCandles.Remove(key);
             }
 
-            if (_onDemandCandles.TryGetValue(cacheKey, out var cached) && DateTimeOffset.UtcNow - cached.FetchedAt < OnDemandCandleLifetime)
+            // Deliberately keyed off the CURRENT time rather than when the entry was fetched: an
+            // entry cached at 15:29 becomes reusable-for-hours at 15:31, because what makes it safe
+            // is that the session is over now, not when the fetch happened. The reverse case (an
+            // entry cached after close, read the next morning) cannot arise - the sweep above
+            // removes it the moment the IST date changes.
+            var lifetime = TimeOnly.FromDateTime(DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(5.5)).DateTime) >= SessionClose
+                ? OnDemandCandleLifetimeAfterClose
+                : OnDemandCandleLifetime;
+
+            if (_onDemandCandles.TryGetValue(cacheKey, out var cached) && DateTimeOffset.UtcNow - cached.FetchedAt < lifetime)
                 return cached.Candles;
         }
 
