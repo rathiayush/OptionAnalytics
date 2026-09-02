@@ -152,8 +152,12 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         // the Backtrack trade table's own "Entry" column renders - not the signal bar. The signal
         // is WHEN the strategy decided to act; the entry is WHAT you would actually have punched
         // into the order, at the next bar's open, which is what this alert is for.
+        //
+        // [Trigger] up front for the same reason EmaCrossoverAlertService/ConfluenceAlertService
+        // tag their own messages - this is the confirmed, strategy-driven alert, distinct from the
+        // raw always-on EMA/Confluence feed that shares the same Telegram chat.
         var message =
-            $"<b>{arrow} {trigger.Name}</b>\n" +
+            $"[Trigger] <b>{arrow} {trigger.Name}</b>\n" +
             $"<b>{trade.Underlying}</b> · {trigger.TimeframeMinutes}m · {trigger.StrategyKey}\n" +
             $"<b>{trade.Direction}</b> — {trade.Side} {trade.OptionType} {trade.Strike:0.##}{reasonLine}\n" +
             $"Entry: {trade.EntryTimeUtc!.Value.ToOffset(ist):HH:mm} IST @ {trade.EntryPrice:0.##}\n" +

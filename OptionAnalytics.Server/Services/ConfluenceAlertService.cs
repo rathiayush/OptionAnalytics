@@ -209,7 +209,10 @@ public sealed class ConfluenceAlertService : BackgroundService
         var summary = direction == "Bullish"
             ? "Spot breakup + ATM CE breakup + ATM PE breakdown"
             : "Spot breakdown + ATM PE breakup + ATM CE breakdown";
-        var message = $"<b>{underlying}</b> {direction.ToUpperInvariant()} confluence\n{summary}\nSpot: {spotPrice:N2} · ATM {atmStrike}\nBar: {spotBarTime:yyyy-MM-dd HH:mm} UTC";
+        // [Confluence] up front - same reasoning as EmaCrossoverAlertService's [Spot EMA] tag: this
+        // channel also carries armed Strategy Trigger alerts and the spot-only EMA crossover feed,
+        // and a Telegram push notification preview only shows the first line.
+        var message = $"[Confluence] <b>{underlying}</b> {direction.ToUpperInvariant()} confluence\n{summary}\nSpot: {spotPrice:N2} · ATM {atmStrike}\nBar: {spotBarTime:yyyy-MM-dd HH:mm} UTC";
 
         var alert = new ConfluenceAlert(underlying, DateTimeOffset.UtcNow, "Confluence", direction, spotPrice, atmStrike, message);
         _logger.LogInformation("Confluence alert for {Underlying}: {Direction} at spot {Spot}, ATM {Atm}.", underlying, direction, spotPrice, atmStrike);
