@@ -8,7 +8,7 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 /// a CDV-divergence strategy, ...) is free to ignore ConfluenceSignalsAscending and derive its own
 /// timing from SpotBars, or a future BacktestService revision can grow this context with more
 /// series as strategies that need them show up - it is intentionally not closed off to only what
-/// OtmConfluenceStrategy happens to use today.</summary>
+/// the strategies registered today happen to use.</summary>
 public sealed class BacktestStrategyContext
 {
     public required string Underlying { get; init; }

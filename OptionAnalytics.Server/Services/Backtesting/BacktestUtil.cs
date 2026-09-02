@@ -3,8 +3,8 @@ using OptionAnalytics.Server.Models;
 namespace OptionAnalytics.Server.Services.Backtesting;
 
 /// <summary>Small helpers shared between BacktestService's own replay and any IBacktestStrategy
-/// that needs the same day-boundary/aggregation logic (an intraday strategy walking forward bar by
-/// bar needs to know when its own trading day ends, same as OtmConfluenceStrategy does).</summary>
+/// that needs the same day-boundary/aggregation logic - an intraday strategy walking forward bar
+/// by bar needs to know when its own trading day ends.</summary>
 public static class BacktestUtil
 {
     /// <summary>Buckets native 1-minute closed bars into <paramref name="minutes"/>-minute OHLC

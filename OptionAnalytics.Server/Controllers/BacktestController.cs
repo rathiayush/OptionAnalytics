@@ -20,7 +20,7 @@ public sealed class BacktestController : ControllerBase
     /// the given timeframe (1/2/5-minute bars, aggregated from the native 1-minute series), most
     /// recent first.</summary>
     [HttpGet("{underlying}")]
-    public IActionResult Get(string underlying, [FromQuery] string strategy = "otm-confluence", [FromQuery] int timeframe = 1) =>
+    public IActionResult Get(string underlying, [FromQuery] string strategy = "five-ema", [FromQuery] int timeframe = 1) =>
         Ok(_backtest.ReplayForStrategy(underlying.ToUpperInvariant(), strategy, Math.Max(1, timeframe), ReadParameters()));
 
     /// <summary>Every registered strategy's metadata - key, name, description, and the parameter
@@ -29,8 +29,8 @@ public sealed class BacktestController : ControllerBase
     [HttpGet("strategies")]
     public IActionResult GetStrategies() => Ok(_backtest.GetStrategies());
 
-    /// <summary>Runs one registered strategy (?strategy=, defaulting to the original OTM/Confluence
-    /// one) over the underlying's current history at the given timeframe - see
+    /// <summary>Runs one registered strategy (?strategy=, defaulting to the 5 EMA one) over the
+    /// underlying's current history at the given timeframe - see
     /// Services.Backtesting.IBacktestStrategy.Simulate for what a strategy actually does with this.
     /// Every query param other than "strategy"/"timeframe" that parses as a number is passed
     /// through as that strategy's own parameter (keyed by name, e.g. ?otmSteps=1&amp;slPoints=10) -
@@ -42,7 +42,7 @@ public sealed class BacktestController : ControllerBase
     /// therefore has no in-memory candles) gets its history fetched from Dhan on demand rather than
     /// showing as a "No Data" row - see that method for why it is a two-pass fetch.</summary>
     [HttpGet("{underlying}/trades")]
-    public async Task<IActionResult> GetTrades(string underlying, [FromQuery] string strategy = "otm-confluence", [FromQuery] int timeframe = 1) =>
+    public async Task<IActionResult> GetTrades(string underlying, [FromQuery] string strategy = "five-ema", [FromQuery] int timeframe = 1) =>
         Ok(await _backtest.RunStrategyAsync(
             underlying.ToUpperInvariant(), strategy, Math.Max(1, timeframe), ReadParameters(), HttpContext.RequestAborted));
 

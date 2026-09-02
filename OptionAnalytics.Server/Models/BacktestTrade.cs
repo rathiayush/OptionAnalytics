@@ -6,7 +6,7 @@ namespace OptionAnalytics.Server.Models;
 /// in absolute premium points until one hits or the trading day ends.
 ///
 /// <paramref name="Side"/> is "Buy" or "Sell". It decides both which leg the trade is in (a bullish
-/// view is a bought CE but a SOLD PE - see OtmConfluenceStrategy) and which way P&amp;L runs: a
+/// view is a bought CE but a SOLD PE) and which way P&amp;L runs: a
 /// buyer's PnlPoints is exit - entry, a seller's is entry - exit, since a seller collects the
 /// premium up front and profits as it decays.
 ///

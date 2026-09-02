@@ -94,11 +94,8 @@ public static class EmaCrossoverDetector
     /// Strategy Trigger built off a Confluence/Entry signal reproduce EXACTLY what
     /// EmaCrossoverAlertService/ConfluenceAlertService would have alerted live - see
     /// ConfirmedDirection's own doc comment for why requiring the close to have actually finished
-    /// beyond both EMAs (not just their relationship flipping) matters. EmaSurgeStrategy
-    /// deliberately keeps using the plain DirectionSeries instead: it already has its own,
-    /// separately-tuned volume-alignment noise filter, and folding this confirmation into its
-    /// crossover math too would be a second, unreviewed change to a strategy this app tunes
-    /// independently.</summary>
+    /// beyond both EMAs (not just their relationship flipping) matters. A strategy with its own
+    /// noise filter is free to read the plain DirectionSeries instead.</summary>
     public static IReadOnlyList<(DateTimeOffset Time, string? Direction)> ConfirmedDirectionSeries(
         IReadOnlyList<Candle> closedBars, int fastPeriod = FastPeriod, int slowPeriod = SlowPeriod)
     {
