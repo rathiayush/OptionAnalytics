@@ -35,7 +35,17 @@ public sealed class DhanTotpAuthService
         _logger = logger;
     }
 
+    /// <summary>Wraps AttemptAsync so EVERY outcome - including the early "not configured" and
+    /// malformed-secret returns - lands in DhanSession.LastAuthAttempt for DiagnosticsController to
+    /// report. See that property's own doc comment for why that matters.</summary>
     public async Task<DhanTotpLoginResult> GenerateAccessTokenAsync(CancellationToken cancellationToken)
+    {
+        var result = await AttemptAsync(cancellationToken);
+        _session.RecordAuthAttempt(result.Success, result.Error, result.RateLimited);
+        return result;
+    }
+
+    private async Task<DhanTotpLoginResult> AttemptAsync(CancellationToken cancellationToken)
     {
         if (!_options.HasTotpCredentials)
             return new DhanTotpLoginResult(false, null, "Dhan:ClientId / Dhan:Pin / Dhan:TotpSecret are not fully configured for TOTP auto-login.");
@@ -63,7 +73,13 @@ public sealed class DhanTotpAuthService
             if (!response.IsSuccessStatusCode)
             {
                 _logger.LogWarning("Dhan TOTP login failed (HTTP {Status}): {Body}", (int)response.StatusCode, Truncate(body));
-                return new DhanTotpLoginResult(false, null, $"Dhan rejected the TOTP login (HTTP {(int)response.StatusCode}).");
+                // Dhan's own body text is the only thing that distinguishes a wrong PIN from a wrong
+                // TOTP from an account without API access, so it is carried into the result (and
+                // therefore DiagnosticsController) rather than flattened to the status code alone -
+                // redacted first, since the request URL carried the pin/totp as query parameters and
+                // an error body that echoes the request back would otherwise leak them.
+                return new DhanTotpLoginResult(false, null,
+                    $"Dhan rejected the TOTP login (HTTP {(int)response.StatusCode}): {Redact(Truncate(body), _options.Pin, totp)}");
             }
 
             using var document = JsonDocument.Parse(body);
@@ -114,4 +130,16 @@ public sealed class DhanTotpAuthService
     }
 
     private static string Truncate(string value) => value.Length <= 300 ? value : value[..300] + "...";
+
+    /// <summary>Blanks the PIN and the just-computed TOTP code out of text that is about to travel
+    /// somewhere less private than a log line (see the caller) - Dhan sends both as query
+    /// parameters, so any error body that echoes the request would otherwise carry them.</summary>
+    private static string Redact(string value, params string?[] secrets)
+    {
+        foreach (var secret in secrets)
+        {
+            if (!string.IsNullOrWhiteSpace(secret)) value = value.Replace(secret, "***", StringComparison.Ordinal);
+        }
+        return value;
+    }
 }
