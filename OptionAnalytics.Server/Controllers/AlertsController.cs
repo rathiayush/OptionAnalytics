@@ -13,12 +13,10 @@ namespace OptionAnalytics.Server.Controllers;
 public sealed class AlertsController : ControllerBase
 {
     private readonly ConfluenceAlertService _alerts;
-    private readonly AlertModeStore _alertMode;
 
-    public AlertsController(ConfluenceAlertService alerts, AlertModeStore alertMode)
+    public AlertsController(ConfluenceAlertService alerts)
     {
         _alerts = alerts;
-        _alertMode = alertMode;
     }
 
     [HttpGet]
@@ -28,25 +26,4 @@ public sealed class AlertsController : ControllerBase
     /// ConfluenceAlertService.GetCurrentStates) - a live snapshot, not history.</summary>
     [HttpGet("state")]
     public IActionResult GetState() => Ok(_alerts.GetCurrentStates());
-
-    /// <summary>Whether EmaCrossoverAlertService/ConfluenceAlertService also re-check the still-
-    /// forming candle ("Live") or only ever react to a closed, close-confirmed one
-    /// ("ClosedConfirmed") - see AlertModeStore's own doc comment. One shared, app-wide setting,
-    /// not per-browser: every viewer's dashboard toggle reads and writes this same value, since
-    /// both underlyings' Telegram alerts go to the one shared chat regardless of who set it.</summary>
-    [HttpGet("mode")]
-    public IActionResult GetMode() => Ok(new { mode = _alertMode.Mode });
-
-    /// <summary>Sets the shared alert mode. 400 if 'mode' isn't one of AlertModeStore.Live/
-    /// ClosedConfirmed.</summary>
-    [HttpPost("mode")]
-    public IActionResult SetMode([FromBody] SetAlertModeRequest? request)
-    {
-        if (!_alertMode.TrySet(request?.Mode))
-            return BadRequest(new { error = $"'mode' must be '{AlertModeStore.Live}' or '{AlertModeStore.ClosedConfirmed}'." });
-
-        return Ok(new { mode = _alertMode.Mode });
-    }
-
-    public sealed record SetAlertModeRequest(string? Mode);
 }

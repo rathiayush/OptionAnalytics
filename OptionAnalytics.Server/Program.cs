@@ -47,11 +47,6 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<SpotFeedHostedServ
 builder.Services.AddSingleton<CdvHostedService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<CdvHostedService>());
 
-// Shared by EmaCrossoverAlertService/ConfluenceAlertService (whether to also check the still-
-// forming candle) and AlertsController (GET/POST /api/alerts/mode) - see AlertModeStore's own doc
-// comment.
-builder.Services.AddSingleton<AlertModeStore>();
-
 // No-op (logs at Debug and returns) when Telegram:Enabled/BotToken/ChatId aren't set - see
 // TelegramAlertService.
 builder.Services.AddHostedService<EmaCrossoverAlertService>();

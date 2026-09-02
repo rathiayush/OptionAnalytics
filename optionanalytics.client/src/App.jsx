@@ -5,7 +5,7 @@ import * as signalR from '@microsoft/signalr'
 import { Routes, Route } from 'react-router-dom'
 import BacktestPage from './BacktestPage.jsx'
 import TriggersPage from './TriggersPage.jsx'
-import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, fmtPrice, fmtIstTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_CANDLE_MODE, CANDLE_MODE_TTL_MS, usePersistedState, usePersistedStateWithTtl, pickUnderlying, useExpirySelector, ExpirySelect } from './shared.jsx'
+import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, fmtPrice, fmtIstTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect } from './shared.jsx'
 import './App.css'
 
 const { Title, Text } = Typography
@@ -38,13 +38,6 @@ const STORED_CDV_UNIT = 'optionanalytics.cdvUnit'
 const STORED_OBV_UNIT = 'optionanalytics.obvUnit'
 const STORED_CDV_LOOKBACK_BARS = 'optionanalytics.lookbackBars.cdv'
 const STORED_OBV_LOOKBACK_BARS = 'optionanalytics.lookbackBars.obv'
-
-// Whether Telegram alerts (and the crossover badge, which mirrors them) react to the still-forming
-// candle or only a closed, confirmed one - see the candleMode state in DashboardPage.
-const CANDLE_MODE_OPTIONS = [
-  { value: 'live', label: 'Alerts: Live candle' },
-  { value: 'closed', label: 'Alerts: Closed & confirmed' },
-]
 
 function useScaledLine(points, unitKey) {
   const { divisor } = VALUE_UNITS[unitKey]
@@ -316,27 +309,16 @@ function useEmaCrossover(bars) {
   }, [bars])
 }
 
-// Just the CURRENT relationship between EMA9/EMA21 (not the crossover event history) - what the
-// chart card's header badge shows, so "is this bullish or bearish right now" reads at a glance
-// without hunting through the marker clutter on the chart body itself.
-function useCrossoverState(bars) {
-  return useMemo(() => {
-    const closes = bars.map((b) => b.close)
-    const ema9 = computeEma(closes, 9)
-    const ema21 = computeEma(closes, 21)
-    for (let i = closes.length - 1; i >= 0; i--) {
-      if (ema9[i] != null && ema21[i] != null) return ema9[i] >= ema21[i] ? 'up' : 'down'
-    }
-    return null
-  }, [bars])
-}
-
-// The "Closed & confirmed" counterpart to useCrossoverState - mirrors the backend's
+// The CURRENT relationship between EMA9/EMA21 (not the crossover event history) - what the chart
+// card's header badge shows, so "is this bullish or bearish right now" reads at a glance without
+// hunting through the marker clutter on the chart body itself. Mirrors the backend's
 // EmaCrossoverDetector.ConfirmedDirection exactly: only the MOST RECENT bar in `closedBars` (which
 // must not include the still-forming candle - callers pass bars aggregated with no live bar
 // merged in) counts, and only if its own CLOSE finished beyond BOTH EMA9 and EMA21, not just their
-// relationship flipping. No backward search for an older confirmed bar, same as the backend - a
-// bar that hasn't confirmed yet reads as null ("not yet"), not as whatever last did.
+// relationship flipping - there's no earlier point at which a still-forming candle's reading is
+// something you could actually act on, so the badge never shows one. No backward search for an
+// older confirmed bar, same as the backend - a bar that hasn't confirmed yet reads as null ("not
+// yet"), not as whatever last did.
 function useConfirmedCrossoverState(closedBars) {
   return useMemo(() => {
     if (closedBars.length === 0) return null
@@ -1179,56 +1161,17 @@ function DashboardPage() {
   const atmCeBars = useAggregatedCandles(atmCeCandles, showsAtmContract ? cdvSnapshot?.atmCeCurrentBar : null, timeframe)
   const atmPeBars = useAggregatedCandles(atmPeCandles, showsAtmContract ? cdvSnapshot?.atmPeCurrentBar : null, timeframe)
 
-  // Same three series with no live bar merged in - what "Closed & confirmed" badge mode reads,
-  // since a still-forming candle can never be confirmed. The chart itself still renders spotBars/
-  // atmCeBars/atmPeBars (with the live candle) regardless of this toggle - only the badge switches.
+  // Same three series with no live bar merged in - the badge (unlike the chart itself, which
+  // still renders spotBars/atmCeBars/atmPeBars with the live candle) only ever reads a closed,
+  // close-confirmed candle, matching exactly what the Telegram alerts require: there's no earlier
+  // point at which a still-forming candle's reading is something you could actually act on.
   const spotBarsClosed = useAggregatedCandles(candles, null, timeframe)
   const atmCeBarsClosed = useAggregatedCandles(atmCeCandles, null, timeframe)
   const atmPeBarsClosed = useAggregatedCandles(atmPeCandles, null, timeframe)
 
-  // Whether Telegram alerts (and this badge, which mirrors whatever they're currently doing) also
-  // react to the still-forming candle ("live", re-checked every ~10s server-side) or only ever to
-  // a closed, close-confirmed one ("closed" - the default, unchanged from before this toggle
-  // existed). This is a SHARED, server-side setting (AlertModeStore/api/alerts/mode) - both
-  // underlyings' Telegram alerts go to the one chat regardless of who set it, so changing it here
-  // changes what fires for everyone, not just this browser. The localStorage copy (5-day TTL, at
-  // the user's own request) is only a fast, optimistic starting value shown before the mount-time
-  // GET below confirms - or corrects - it against the real server state.
-  const [candleMode, setCandleMode] = usePersistedStateWithTtl(STORED_CANDLE_MODE, 'closed', CANDLE_MODE_TTL_MS)
-  const closedOnlyMode = candleMode === 'closed'
-
-  useEffect(() => {
-    fetch('/api/alerts/mode')
-      .then((r) => r.json())
-      .then((data) => setCandleMode(data?.mode === 'Live' ? 'live' : 'closed'))
-      .catch((err) => console.error('Failed to load the alert mode:', err))
-  }, [])
-
-  // Flips the SERVER's alert mode (see the comment above) - optimistic locally, so the toggle
-  // itself never waits on the network, but reverts to whatever the server actually accepted if the
-  // request fails rather than silently trusting an unconfirmed local flip.
-  const handleCandleModeChange = (mode) => {
-    const previous = candleMode
-    setCandleMode(mode)
-    fetch('/api/alerts/mode', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode: mode === 'live' ? 'Live' : 'ClosedConfirmed' }),
-    })
-      .then((r) => { if (!r.ok) throw new Error('rejected') })
-      .catch((err) => { console.error('Failed to switch the alert mode:', err); setCandleMode(previous) })
-  }
-
-  const spotCrossStateLive = useCrossoverState(spotBars)
-  const atmCeCrossStateLive = useCrossoverState(atmCeBars)
-  const atmPeCrossStateLive = useCrossoverState(atmPeBars)
-  const spotCrossStateClosed = useConfirmedCrossoverState(spotBarsClosed)
-  const atmCeCrossStateClosed = useConfirmedCrossoverState(atmCeBarsClosed)
-  const atmPeCrossStateClosed = useConfirmedCrossoverState(atmPeBarsClosed)
-
-  const spotCrossState = closedOnlyMode ? spotCrossStateClosed : spotCrossStateLive
-  const atmCeCrossState = closedOnlyMode ? atmCeCrossStateClosed : atmCeCrossStateLive
-  const atmPeCrossState = closedOnlyMode ? atmPeCrossStateClosed : atmPeCrossStateLive
+  const spotCrossState = useConfirmedCrossoverState(spotBarsClosed)
+  const atmCeCrossState = useConfirmedCrossoverState(atmCeBarsClosed)
+  const atmPeCrossState = useConfirmedCrossoverState(atmPeBarsClosed)
 
   const cdvCe = useAggregatedLine(cdvSeries, cdvSnapshot?.currentBar, timeframe, ['ceCdv']).map((p) => ({ time: p.time, value: p.ceCdv }))
   const cdvPe = useAggregatedLine(cdvSeries, cdvSnapshot?.currentBar, timeframe, ['peCdv']).map((p) => ({ time: p.time, value: p.peCdv }))
@@ -1276,13 +1219,6 @@ function DashboardPage() {
             onChange={setTimeframe}
             style={{ width: 120 }}
             options={TIMEFRAME_OPTIONS}
-          />
-          <Select
-            value={candleMode}
-            onChange={handleCandleModeChange}
-            style={{ width: 190 }}
-            options={CANDLE_MODE_OPTIONS}
-            title="Whether Telegram alerts (and this dashboard) also react to the still-forming candle, or only once a candle closes and confirms - shared by every viewer, remembered here for 5 days"
           />
           <Button onClick={handleRefresh} loading={refreshing} disabled={!selected}>Refresh</Button>
         </Space>

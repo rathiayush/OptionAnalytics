@@ -31,13 +31,10 @@ namespace OptionAnalytics.Server.Services;
 /// ConfluenceWindow of the spot bar that triggered the check - a leg's bias from ten minutes ago
 /// doesn't retroactively confirm a fresh spot flip now.
 ///
-/// Each leg updates on two paths, BOTH always wired up - see AlertModeStore's own doc comment for
-/// why Live is additive, never a replacement, and shares its dedup (ConfluenceAlerted / each leg's
-/// last-known direction) with the closed path:
-///   - Closed-and-confirmed (unconditional): BarClosed/AtmBarClosed, off GetClosedCandles()/
-///     GetAtmClosedCandles(isCall).
-///   - Live (only when AlertModeStore.IsLive): a short periodic re-check off GetCandles()/
-///     GetAtmCandles(isCall) - the still-forming candle included.
+/// Each leg updates strictly off CLOSED bars - BarClosed/AtmBarClosed, GetClosedCandles()/
+/// GetAtmClosedCandles(isCall) - never a still-forming one. There is no earlier point at which
+/// reacting gets you a real, achievable price instead of a stale one: a candle's EMA relationship
+/// only becomes trustworthy once it's done, and there's nothing to trade on before then anyway.
 ///
 /// GetCurrentStates() serves the live per-leg snapshot (GET /api/alerts/state) - filled from
 /// whatever closed-bar history already exists the moment this service starts (ExecuteAsync's
@@ -54,16 +51,11 @@ namespace OptionAnalytics.Server.Services;
 public sealed class ConfluenceAlertService : BackgroundService
 {
     private static readonly TimeSpan ConfluenceWindow = TimeSpan.FromMinutes(5);
-    /// <summary>Same reasoning as EmaCrossoverAlertService.LiveCheckInterval - frequent enough to
-    /// feel live, infrequent enough not to burn CPU recomputing EMA9/21 for six legs (two
-    /// underlyings x spot/CE/PE) on every tick for no real benefit.</summary>
-    private static readonly TimeSpan LiveCheckInterval = TimeSpan.FromSeconds(10);
     private const int MaxHistory = 50;
 
     private readonly SpotFeedHostedService _spotFeed;
     private readonly CdvHostedService _cdv;
     private readonly TelegramAlertService _telegram;
-    private readonly AlertModeStore _alertMode;
     private readonly IHubContext<SpotHub> _hub;
     private readonly ILogger<ConfluenceAlertService> _logger;
 
@@ -72,13 +64,12 @@ public sealed class ConfluenceAlertService : BackgroundService
     private readonly object _historyLock = new();
 
     public ConfluenceAlertService(
-        SpotFeedHostedService spotFeed, CdvHostedService cdv, TelegramAlertService telegram, AlertModeStore alertMode,
+        SpotFeedHostedService spotFeed, CdvHostedService cdv, TelegramAlertService telegram,
         IHubContext<SpotHub> hub, ILogger<ConfluenceAlertService> logger)
     {
         _spotFeed = spotFeed;
         _cdv = cdv;
         _telegram = telegram;
-        _alertMode = alertMode;
         _hub = hub;
         _logger = logger;
     }
@@ -106,7 +97,7 @@ public sealed class ConfluenceAlertService : BackgroundService
         }
     }
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    protected override Task ExecuteAsync(CancellationToken stoppingToken)
     {
         foreach (var (underlying, spotState) in _spotFeed.States)
         {
@@ -115,17 +106,17 @@ public sealed class ConfluenceAlertService : BackgroundService
             // Seed the current bias from whatever backfilled/already-closed bars exist right now -
             // silent (announce: false), since this is catching up to already-known history on
             // startup, not a live change worth alerting on.
-            UpdateSpotLeg(capturedUnderlying, capturedSpotState.GetClosedCandles(), announce: false, stoppingToken);
-            spotState.BarClosed += _ => UpdateSpotLeg(capturedUnderlying, capturedSpotState.GetClosedCandles(), announce: true, stoppingToken);
+            UpdateSpotLeg(capturedUnderlying, capturedSpotState, announce: false, stoppingToken);
+            spotState.BarClosed += _ => UpdateSpotLeg(capturedUnderlying, capturedSpotState, announce: true, stoppingToken);
         }
 
         foreach (var (underlying, cdvState) in _cdv.States)
         {
             var capturedUnderlying = underlying;
             var capturedCdvState = cdvState;
-            UpdateAtmLeg(capturedUnderlying, isCall: true, capturedCdvState.GetAtmClosedCandles(true), announce: false, stoppingToken);
-            UpdateAtmLeg(capturedUnderlying, isCall: false, capturedCdvState.GetAtmClosedCandles(false), announce: false, stoppingToken);
-            cdvState.AtmBarClosed += (isCall, _) => UpdateAtmLeg(capturedUnderlying, isCall, capturedCdvState.GetAtmClosedCandles(isCall), announce: true, stoppingToken);
+            UpdateAtmLeg(capturedUnderlying, capturedCdvState, isCall: true, announce: false, stoppingToken);
+            UpdateAtmLeg(capturedUnderlying, capturedCdvState, isCall: false, announce: false, stoppingToken);
+            cdvState.AtmBarClosed += (isCall, _) => UpdateAtmLeg(capturedUnderlying, capturedCdvState, isCall, announce: true, stoppingToken);
             // A day rollover or a manual expiry switch (CdvHostedService.SelectExpiryAsync) wipes
             // this underlying's whole strike window - see ClearAtmLegs for why the CE/PE bias
             // cached here must be dropped too, not left showing a reading from a contract that no
@@ -133,56 +124,34 @@ public sealed class ConfluenceAlertService : BackgroundService
             cdvState.StrikesReset += () => ClearAtmLegs(capturedUnderlying);
         }
 
-        // Extra, faster path: only active in Live mode (AlertModeStore) - re-checks every leg's
-        // STILL-FORMING candle on a short interval, in ADDITION to (never instead of) the
-        // BarClosed/AtmBarClosed-driven closed-and-confirmed checks above, which keep running
-        // regardless of mode as the reliable baseline.
-        try
-        {
-            using var timer = new PeriodicTimer(LiveCheckInterval);
-            while (await timer.WaitForNextTickAsync(stoppingToken))
-            {
-                if (!_alertMode.IsLive) continue;
-
-                foreach (var (underlying, spotState) in _spotFeed.States)
-                    UpdateSpotLeg(underlying, spotState.GetCandles(), announce: true, stoppingToken);
-
-                foreach (var (underlying, cdvState) in _cdv.States)
-                {
-                    UpdateAtmLeg(underlying, isCall: true, cdvState.GetAtmCandles(true), announce: true, stoppingToken);
-                    UpdateAtmLeg(underlying, isCall: false, cdvState.GetAtmCandles(false), announce: true, stoppingToken);
-                }
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            // Shutting down.
-        }
+        return Task.CompletedTask;
     }
 
-    private void UpdateSpotLeg(string underlying, IReadOnlyList<Candle> bars, bool announce, CancellationToken cancellationToken)
+    private void UpdateSpotLeg(string underlying, SpotUnderlyingState spotState, bool announce, CancellationToken cancellationToken)
     {
+        var closedBars = spotState.GetClosedCandles();
         // ConfirmedDirection, not the plain EMA9-vs-EMA21 relationship - see its own doc comment.
         // In a flat/choppy stretch the two EMAs can sit almost on top of each other and swap order
         // on a single noisy tick with price never really leaving their neighborhood; requiring the
         // close to have actually finished beyond both lines is what keeps a leg (and therefore
         // Confluence, which needs all three to agree) from "confirming" on that noise.
-        var direction = EmaCrossoverDetector.ConfirmedDirection(bars);
-        if (direction is null || bars.Count == 0) return;
+        var direction = EmaCrossoverDetector.ConfirmedDirection(closedBars);
+        if (direction is null || closedBars.Count == 0) return;
 
-        UpdateLeg(underlying, "Spot", direction, bars[^1].Time, announce, s => s.Spot, (s, v) => s.Spot = v, cancellationToken);
+        UpdateLeg(underlying, "Spot", direction, closedBars[^1].Time, announce, s => s.Spot, (s, v) => s.Spot = v, cancellationToken);
     }
 
-    private void UpdateAtmLeg(string underlying, bool isCall, IReadOnlyList<Candle> bars, bool announce, CancellationToken cancellationToken)
+    private void UpdateAtmLeg(string underlying, CdvUnderlyingState cdvState, bool isCall, bool announce, CancellationToken cancellationToken)
     {
-        var direction = EmaCrossoverDetector.ConfirmedDirection(bars);
-        if (direction is null || bars.Count == 0) return;
+        var closedBars = cdvState.GetAtmClosedCandles(isCall);
+        var direction = EmaCrossoverDetector.ConfirmedDirection(closedBars);
+        if (direction is null || closedBars.Count == 0) return;
 
         var kind = isCall ? "AtmCe" : "AtmPe";
         if (isCall)
-            UpdateLeg(underlying, kind, direction, bars[^1].Time, announce, s => s.Ce, (s, v) => s.Ce = v, cancellationToken);
+            UpdateLeg(underlying, kind, direction, closedBars[^1].Time, announce, s => s.Ce, (s, v) => s.Ce = v, cancellationToken);
         else
-            UpdateLeg(underlying, kind, direction, bars[^1].Time, announce, s => s.Pe, (s, v) => s.Pe = v, cancellationToken);
+            UpdateLeg(underlying, kind, direction, closedBars[^1].Time, announce, s => s.Pe, (s, v) => s.Pe = v, cancellationToken);
     }
 
     private void UpdateLeg(
