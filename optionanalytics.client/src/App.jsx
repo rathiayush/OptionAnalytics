@@ -323,13 +323,29 @@ function fmtNum(v) {
 // One SignalR connection shared by every chart on the page - each just registers its own handler
 // for the event it cares about ("spotUpdate" / "cdvUpdate", the latter also carrying the ATM
 // CE/PE premium bars, and "confluenceAlert" for the notification engine's live pushes).
-function useHub(onSpotUpdate, onCdvUpdate, onConfluenceAlert) {
+//
+// onReconnected exists because withAutomaticReconnect() only repairs the SOCKET, not the state
+// built from it. Every piece of state this page holds - crossoverStates (the Confluence Alerts
+// panel's Bullish/Bearish tags) especially - is either fetched once on mount or updated purely by
+// incrementally folding in live events; neither self-heals across a connection gap. A server
+// restart (a redeploy, most concretely) resets its own EMA-direction memory too, so the NEXT
+// confluenceAlert it sends only fires on a fresh CHANGE from a state it no longer remembers, which
+// can take several bars to arrive - meanwhile crossoverStates keeps showing whatever was true
+// before the gap, silently disagreeing with the live chart underneath it (which stays roughly
+// current because it's fed by frequent tick-level spotUpdate/cdvUpdate pushes, not the rarer
+// confluenceAlert ones). On a page showing live trading signals, a stale Bullish/Bearish tag next
+// to a fresh candle showing the opposite is a correctness bug, not a cosmetic one - onReconnected
+// is the hook a caller uses to fully re-fetch from REST (the source of truth) rather than trust
+// whatever incremental state survived the gap.
+function useHub(onSpotUpdate, onCdvUpdate, onConfluenceAlert, onReconnected) {
   const spotHandlerRef = useRef(onSpotUpdate)
   const cdvHandlerRef = useRef(onCdvUpdate)
   const alertHandlerRef = useRef(onConfluenceAlert)
+  const reconnectedHandlerRef = useRef(onReconnected)
   spotHandlerRef.current = onSpotUpdate
   cdvHandlerRef.current = onCdvUpdate
   alertHandlerRef.current = onConfluenceAlert
+  reconnectedHandlerRef.current = onReconnected
 
   useEffect(() => {
     const connection = new signalR.HubConnectionBuilder()
@@ -340,6 +356,11 @@ function useHub(onSpotUpdate, onCdvUpdate, onConfluenceAlert) {
     connection.on('spotUpdate', (snapshot) => spotHandlerRef.current(snapshot))
     connection.on('cdvUpdate', (snapshot) => cdvHandlerRef.current(snapshot))
     connection.on('confluenceAlert', (alert) => alertHandlerRef.current(alert))
+    // Fires after automatic reconnect actually succeeds (not on the initial connect, which the
+    // page's own mount-time fetches already cover) - see this function's own doc comment for why
+    // a resync here, not just letting new events trickle in, is what a correctness-sensitive page
+    // needs.
+    connection.onreconnected(() => reconnectedHandlerRef.current?.())
     connection.start().catch((err) => {
       // React StrictMode mounts this effect, runs its cleanup, then mounts it again - the first
       // connection's start() gets aborted by that cleanup's stop() before negotiation finishes,
@@ -885,12 +906,15 @@ function DashboardPage() {
   // folding in each individual leg alert as it arrives over the same SignalR stream, rather than
   // re-fetching the whole snapshot on every update.
   const [crossoverStates, setCrossoverStates] = useState([])
-  useEffect(() => {
+  // Shared by the mount-time fetch below and useHub's reconnect resync further down (see useHub's
+  // own doc comment for why a reconnect needs this re-run rather than trusting incremental state).
+  const refetchCrossoverStates = () => {
     fetch('/api/alerts/state')
       .then((r) => r.json())
       .then((data) => setCrossoverStates(data ?? []))
       .catch((err) => console.error('Failed to load crossover state:', err))
-  }, [])
+  }
+  useEffect(refetchCrossoverStates, [])
 
   const [cdvSeries, setCdvSeries] = useState([])
   const [cdvSnapshot, setCdvSnapshot] = useState(null)
@@ -1044,6 +1068,14 @@ function DashboardPage() {
         if (existing) return prev.map((s) => (s.underlying === alert.underlying ? { ...s, [legKey]: alert.direction, updatedUtc: alert.timeUtc } : s))
         return [...prev, { underlying: alert.underlying, spot: null, atmCe: null, atmPe: null, [legKey]: alert.direction, updatedUtc: alert.timeUtc }]
       })
+    },
+    // The reconnect resync - see useHub's doc comment. Re-fetches everything this page shows from
+    // REST rather than trusting whatever the incremental SignalR handlers above accumulated across
+    // the gap, since a server restart resets the state those handlers were incrementally patching.
+    () => {
+      if (!selected) return
+      refetchCrossoverStates()
+      fetchAllData(selected, { cancelled: false })
     },
   )
 

@@ -176,9 +176,36 @@ public static class DhanTickPacketParser
         return value > 1e12f ? 0m : (decimal)value;
     }
 
+    /// <summary>Dhan's own docs (Ticker "Bytes 13-16"/Quote+Full "Bytes 15-18", both "Last Trade
+    /// Time - EPOCH") just say EPOCH, and the values this reads ARE Unix epoch seconds - but
+    /// verified empirically against a live feed, they measure IST WALL-CLOCK time run through a
+    /// Unix-epoch formula, not true UTC. Cross-checked against ground truth: Dhan's REST intraday-
+    /// history API (DhanHistoricalDataService, a completely separate endpoint) correctly reports
+    /// NSE's 09:15 IST session open as 03:45 UTC, while THIS field's value at the exact same live
+    /// instant reads a value that is 5 hours 30 minutes - IST's own UTC offset, to the second -
+    /// ahead of the process's own DateTimeOffset.UtcNow. So Dhan appears to compute this field from
+    /// a clock reading IST without first converting it to UTC. Subtracting IST's offset here is
+    /// what makes ExchangeTimestamp agree with every other clock in this app (UtcNow, the REST
+    /// backfill, the exchange's actual opening bell) rather than running a session ahead of them.
+    ///
+    /// The stakes: this timestamp becomes a live tick's bucketed 1-minute bar time
+    /// (SpotUnderlyingState/CdvStrikeRuntime.ApplyPriceTick), which - left uncorrected - misplaces
+    /// every live-ticked bar 5.5 hours from where the correctly-UTC REST-backfilled bars around it
+    /// sit. On an index-based candlestick axis that renders as an apparently instantaneous,
+    /// discontinuous price jump exactly where live data picks up after a backfill (a restart, most
+    /// concretely), and it corrupts the IST trading-day boundary (BacktestUtil.IstDate and
+    /// CdvUnderlyingState.ApplyDailyBaseline both derive "which day is this bar in" from this exact
+    /// timestamp) closely enough to the real day boundary that it can misclassify a live tick into
+    /// the wrong trading day - which is what a stray RESET marker or an EMA/Confluence state that
+    /// contradicts the chart right next to it, both reported live against this app, looked like.
+    /// Every consumer of live ticks shares this one parser (spot AND every option strike, since CDV
+    /// and OBV tick through the identical path), so the fix is here once rather than needing to be
+    /// applied at each call site.</summary>
+    private static readonly TimeSpan IstOffset = TimeSpan.FromHours(5.5);
+
     private static DateTimeOffset ReadEpoch(ReadOnlySpan<byte> bytes, DateTimeOffset fallback)
     {
         var epoch = BinaryPrimitives.ReadUInt32LittleEndian(bytes);
-        return epoch > 0 ? DateTimeOffset.FromUnixTimeSeconds(epoch) : fallback;
+        return epoch > 0 ? DateTimeOffset.FromUnixTimeSeconds(epoch) - IstOffset : fallback;
     }
 }
