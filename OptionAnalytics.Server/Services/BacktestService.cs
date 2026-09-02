@@ -42,6 +42,13 @@ namespace OptionAnalytics.Server.Services;
 /// </summary>
 public sealed class BacktestService
 {
+    /// <summary>How many DISTINCT strikes one RunStrategyAsync call will fetch from Dhan on demand
+    /// (see FillMissingStrikesAsync). A backtest reaching back HistoryTradingDays over a session
+    /// where spot trended hard can legitimately reference dozens of strikes that never entered the
+    /// ATM+-8 window - fetching every one would turn a page load into a long series of Dhan calls.
+    /// Whatever is left over stays "No Data", exactly as it was before on-demand fetching existed.</summary>
+    private const int MaxOnDemandStrikesPerRun = 12;
+
     private readonly SpotFeedHostedService _spotFeed;
     private readonly CdvHostedService _cdv;
     private readonly IReadOnlyDictionary<string, IBacktestStrategy> _strategies;
@@ -84,6 +91,76 @@ public sealed class BacktestService
         return prepared is not { } p ? Array.Empty<BacktestTrade>() : p.Strategy.Simulate(p.Context, p.Parameters);
     }
 
+    /// <summary>RunStrategy, plus a second pass that fills in the strikes the first pass found no
+    /// history for. A strike only has in-memory candles if it was inside the ATM+-8 window at some
+    /// point today (see CdvUnderlyingState.GetStrikeClosedCandles) - a signal on any other strike
+    /// otherwise resolves to BacktestTrade.NoData purely because nothing was ever subscribed to it,
+    /// which reads as a broken row rather than the "this strike was never tracked" it actually is.
+    ///
+    /// So: run once, note which strikes came back empty, fetch exactly those from Dhan's intraday
+    /// history (CdvHostedService.GetStrikeCandlesAsync - the same on-demand path the dashboard's
+    /// strike picker already uses for untracked strikes, with the same short-lived cache behind it),
+    /// then run again with them available. The strategy code itself is untouched and still fully
+    /// synchronous; it simply sees a richer GetOptionBars on the second pass.
+    ///
+    /// Two passes rather than pre-fetching because which strikes a strategy asks for is its own
+    /// business (it depends on its signals and its otmSteps), and only running it reveals them.
+    /// Simulation is pure in-memory arithmetic, so the repeat costs far less than the fetches do.
+    ///
+    /// Deliberately NOT used by StrategyTriggerHostedService, which stays on the synchronous
+    /// in-memory RunStrategy: this changes which signals resolve into trades, and a live trigger
+    /// placing REAL orders should not start firing on strikes it never had price history for as a
+    /// side effect of a Backtrack-page improvement.</summary>
+    public async Task<IReadOnlyList<BacktestTrade>> RunStrategyAsync(
+        string underlying, string strategyKey, int timeframeMinutes,
+        IReadOnlyDictionary<string, decimal> parameters, CancellationToken cancellationToken)
+    {
+        var prepared = Prepare(underlying, strategyKey, timeframeMinutes, parameters);
+        if (prepared is not { } p) return Array.Empty<BacktestTrade>();
+
+        var trades = p.Strategy.Simulate(p.Context, p.Parameters);
+        if (!await FillMissingStrikesAsync(underlying, p.OnDemand, cancellationToken)) return trades;
+
+        return p.Strategy.Simulate(p.Context, p.Parameters);
+    }
+
+    /// <summary>Fetches every strike the just-completed pass found nothing for, up to
+    /// MaxOnDemandStrikesPerRun. Returns true only if at least one fetch actually produced candles -
+    /// i.e. only if re-running the strategy could now produce a different answer.</summary>
+    private async Task<bool> FillMissingStrikesAsync(string underlying, OnDemandStrikes onDemand, CancellationToken cancellationToken)
+    {
+        var missing = onDemand.DrainMisses();
+        if (missing.Count == 0) return false;
+
+        var gotAnything = false;
+        foreach (var (strike, isCall) in missing.Take(MaxOnDemandStrikesPerRun))
+        {
+            var bars = await _cdv.GetStrikeCandlesAsync(underlying, strike, isCall, cancellationToken);
+            var closed = DropFormingBar(bars);
+
+            // Recorded even when empty (an unlisted strike, or Dhan simply having nothing) so the
+            // second pass treats it as answered rather than recording the same miss all over again.
+            onDemand.Add(strike, isCall, closed);
+            if (closed.Count > 0) gotAnything = true;
+        }
+
+        return gotAnything;
+    }
+
+    /// <summary>Drops a still-forming final bar. GetStrikeCandlesAsync deliberately includes the
+    /// in-progress minute (a chart wants it), but every backtest in this app runs strictly on CLOSED
+    /// bars - letting a partial bar through here would let a strategy "fill" at a price the minute
+    /// had not finished printing, which is exactly the staleness the close-confirmation rule exists
+    /// to prevent.</summary>
+    private static IReadOnlyList<Candle> DropFormingBar(IReadOnlyList<Candle> bars)
+    {
+        if (bars.Count == 0) return bars;
+
+        var now = DateTimeOffset.UtcNow;
+        var currentMinute = new DateTimeOffset(now.Year, now.Month, now.Day, now.Hour, now.Minute, 0, now.Offset);
+        return bars[^1].Time >= currentMinute ? bars.Take(bars.Count - 1).ToList() : bars;
+    }
+
     /// <summary>The signals the given strategy itself reasons about (see
     /// IBacktestStrategy.EntrySignals) - so the Backtrack page's signal table always describes the
     /// strategy currently selected rather than one fixed rule. Falls back to the plain confluence
@@ -98,7 +175,7 @@ public sealed class BacktestService
     /// <summary>Resolves the strategy, does the shared replay/aggregation work once and merges the
     /// caller's parameters over that strategy's declared defaults - everything both RunStrategy and
     /// ReplayForStrategy need, so neither can drift from the other.</summary>
-    private (IBacktestStrategy Strategy, BacktestStrategyContext Context, IReadOnlyDictionary<string, decimal> Parameters)? Prepare(
+    private (IBacktestStrategy Strategy, BacktestStrategyContext Context, IReadOnlyDictionary<string, decimal> Parameters, OnDemandStrikes OnDemand)? Prepare(
         string underlying, string strategyKey, int timeframeMinutes, IReadOnlyDictionary<string, decimal> parameters)
     {
         if (!_strategies.TryGetValue(strategyKey, out var strategy)) return null;
@@ -106,6 +183,7 @@ public sealed class BacktestService
             return null;
 
         var timeframe = Math.Max(1, timeframeMinutes);
+        var onDemand = new OnDemandStrikes();
         var (allSignals, spotBars, confluenceAscending) = ReplayCore(underlying, spotState, cdvState, timeframe);
 
         var context = new BacktestStrategyContext
@@ -120,12 +198,55 @@ public sealed class BacktestService
             ObvPeSeries = BacktestUtil.AggregateLine(cdvState.GetObvSeries(false), timeframe),
             CdvCeSeries = BacktestUtil.AggregateLine(cdvState.GetSmoothedCdvSeries(true), timeframe),
             CdvPeSeries = BacktestUtil.AggregateLine(cdvState.GetSmoothedCdvSeries(false), timeframe),
-            GetOptionBars = (strike, isCall) => BacktestUtil.AggregateCandles(cdvState.GetStrikeClosedCandles(strike, isCall), timeframe),
+            // Tracked strikes answer from memory. Anything else falls through to whatever a previous
+            // on-demand fetch produced, and failing that records the miss so RunStrategyAsync can go
+            // and get it - see that method. The synchronous callers (RunStrategy, and through it
+            // StrategyTriggerHostedService) simply never drain those misses, so for them this
+            // behaves exactly as it always did: in-memory or empty.
+            GetOptionBars = (strike, isCall) =>
+            {
+                var tracked = cdvState.GetStrikeClosedCandles(strike, isCall);
+                if (tracked.Count > 0) return BacktestUtil.AggregateCandles(tracked, timeframe);
+
+                if (onDemand.TryGet(strike, isCall) is { } fetched)
+                    return BacktestUtil.AggregateCandles(fetched, timeframe);
+
+                onDemand.RecordMiss(strike, isCall);
+                return Array.Empty<Candle>();
+            },
         };
 
         var mergedParameters = strategy.Parameters.ToDictionary(p => p.Key, p => parameters.TryGetValue(p.Key, out var v) ? v : p.Default);
 
-        return (strategy, context, mergedParameters);
+        return (strategy, context, mergedParameters, onDemand);
+    }
+
+    /// <summary>Per-run scratch space for strikes that had no in-memory history: which ones a pass
+    /// asked for and found nothing for, and what a subsequent fetch turned up for them. Lives for
+    /// one RunStrategyAsync call only - the durable caching sits behind
+    /// CdvHostedService.GetStrikeCandlesAsync.</summary>
+    private sealed class OnDemandStrikes
+    {
+        private readonly Dictionary<(decimal Strike, bool IsCall), IReadOnlyList<Candle>> _fetched = new();
+        private readonly HashSet<(decimal Strike, bool IsCall)> _misses = new();
+
+        public IReadOnlyList<Candle>? TryGet(decimal strike, bool isCall) =>
+            _fetched.TryGetValue((strike, isCall), out var bars) ? bars : null;
+
+        public void RecordMiss(decimal strike, bool isCall) => _misses.Add((strike, isCall));
+
+        public void Add(decimal strike, bool isCall, IReadOnlyList<Candle> bars)
+        {
+            _fetched[(strike, isCall)] = bars;
+            _misses.Remove((strike, isCall));
+        }
+
+        public IReadOnlyList<(decimal Strike, bool IsCall)> DrainMisses()
+        {
+            var drained = _misses.ToList();
+            _misses.Clear();
+            return drained;
+        }
     }
 
     /// <summary>Shared by Replay and RunStrategy - aggregates all three legs to the requested

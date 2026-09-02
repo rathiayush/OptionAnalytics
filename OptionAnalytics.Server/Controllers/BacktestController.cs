@@ -36,10 +36,15 @@ public sealed class BacktestController : ControllerBase
     /// through as that strategy's own parameter (keyed by name, e.g. ?otmSteps=1&amp;slPoints=10) -
     /// generic on purpose, so a new strategy's parameters need no controller change to reach it.
     /// Any parameter the strategy declares but the caller omits falls back to that parameter's own
-    /// default (see BacktestService.RunStrategy).</summary>
+    /// default (see BacktestService.RunStrategy).
+    ///
+    /// Uses RunStrategyAsync, so a signal on a strike that never entered the ATM+-8 window (and
+    /// therefore has no in-memory candles) gets its history fetched from Dhan on demand rather than
+    /// showing as a "No Data" row - see that method for why it is a two-pass fetch.</summary>
     [HttpGet("{underlying}/trades")]
-    public IActionResult GetTrades(string underlying, [FromQuery] string strategy = "otm-confluence", [FromQuery] int timeframe = 1) =>
-        Ok(_backtest.RunStrategy(underlying.ToUpperInvariant(), strategy, Math.Max(1, timeframe), ReadParameters()));
+    public async Task<IActionResult> GetTrades(string underlying, [FromQuery] string strategy = "otm-confluence", [FromQuery] int timeframe = 1) =>
+        Ok(await _backtest.RunStrategyAsync(
+            underlying.ToUpperInvariant(), strategy, Math.Max(1, timeframe), ReadParameters(), HttpContext.RequestAborted));
 
     /// <summary>Every query param other than "strategy"/"timeframe" that parses as a number,
     /// passed through as the selected strategy's own parameter - generic on purpose, so a new
