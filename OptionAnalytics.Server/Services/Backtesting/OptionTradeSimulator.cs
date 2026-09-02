@@ -75,11 +75,10 @@ public static class OptionTradeSimulator
     /// as before.
     ///
     /// <paramref name="signalExits"/> (optional, keyed by the SIGNAL's own time) is the per-trade
-    /// counterpart, for a strategy whose exit level differs from trade to trade - FiveEmaV2Strategy's
-    /// taught stop at the alert candle's own high/low and its 1:3 target being the case it was added
-    /// for. Keying by signal rather than sharing one ascending list matters: those levels belong to
-    /// one specific trade, and a global list would let one trade's stop close a completely different
-    /// one. It carries its own reason string too, so a row says WHICH of the two hit rather than a
+    /// counterpart, for a strategy whose exit level differs from trade to trade - a stop at each
+    /// alert candle's own high/low, say, with a target a fixed multiple away. Keying by signal
+    /// rather than sharing one ascending list matters: those levels belong to one specific trade,
+    /// and a global list would let one trade's stop close a completely different one. It carries its own reason string too, so a row says WHICH of the two hit rather than a
     /// generic "SignalExit".
     ///
     /// slPoints/tpPoints of 0 disable the premium stop/target entirely - for a strategy exiting on
