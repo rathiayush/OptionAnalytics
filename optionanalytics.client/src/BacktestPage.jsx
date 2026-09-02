@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Select, Space, Typography, Spin, Card, Button, Table, Tag, InputNumber, Statistic, Row, Col } from 'antd'
+import { Select, Space, Typography, Spin, Card, Button, Table, Tag, InputNumber, Statistic, Row, Col, DatePicker } from 'antd'
 import { ReloadOutlined, PlayCircleOutlined } from '@ant-design/icons'
-import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, NavBar, DirectionTag, ALERT_KIND_LABEL, fmtIstDateTime, fmtIstTime, fmtPrice, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect } from './shared.jsx'
+import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, NavBar, DirectionTag, ALERT_KIND_LABEL, fmtIstDateTime, fmtIstTime, fmtPrice, istDateKey, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect } from './shared.jsx'
 
 const { Title, Text } = Typography
+const { RangePicker } = DatePicker
 
 // Buy/Sell deliberately aren't the up/down colors - a SOLD position is neither bullish nor
 // bearish on its own leg's premium, and reusing green/red here would read as "profitable".
@@ -72,6 +73,12 @@ export default function BacktestPage() {
   const [paramValues, setParamValues] = useState({})
   const [trades, setTrades] = useState(null)
   const [tradesLoading, setTradesLoading] = useState(false)
+
+  // Which IST days to show. Purely a VIEW filter applied after the run - the backtest itself always
+  // runs over the whole backfilled window, because a strategy needs the bars before a day to have
+  // its EMAs (and the simulator its one-position-at-a-time state) right on that day. Narrowing what
+  // is fed to the strategy would change the answers rather than just the rows on screen.
+  const [dateRange, setDateRange] = useState(null)
 
   const strategy = strategies.find((s) => s.key === strategyKey) ?? null
 
@@ -151,13 +158,38 @@ export default function BacktestPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected, timeframe, strategyKey, strategy])
 
+  const [fromDay, toDay] = useMemo(() => {
+    const from = dateRange?.[0] ? dateRange[0].format('YYYY-MM-DD') : null
+    const to = dateRange?.[1] ? dateRange[1].format('YYYY-MM-DD') : null
+    return [from, to]
+  }, [dateRange])
+
+  // Both tables filter on the SIGNAL's own IST day - the day the strategy decided to act. A trade
+  // entered late and exited the next morning therefore stays under the day that produced it, which
+  // is the day you are looking at when you filter.
+  const inRange = (iso) => {
+    if (!fromDay && !toDay) return true
+    const day = istDateKey(iso)
+    return (!fromDay || day >= fromDay) && (!toDay || day <= toDay)
+  }
+
+  const visibleTrades = useMemo(
+    () => (trades ?? []).filter((t) => inRange(t.signalTimeUtc)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [trades, fromDay, toDay])
+
+  const visibleSignals = useMemo(
+    () => (signals ?? []).filter((sig) => inRange(sig.timeUtc)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [signals, fromDay, toDay])
+
   const summary = useMemo(() => {
     // Open positions are excluded from every stat below - they haven't actually closed, so folding
     // their unrealized P&L into Win rate/Total P&L would overstate a backtest whose most recent
     // position simply hasn't finished yet. openCount surfaces them separately instead of silently
     // dropping them from the summary entirely.
-    const openCount = (trades ?? []).filter((t) => t.exitReason === 'Open').length
-    const closed = (trades ?? []).filter((t) => t.pnlPoints != null && t.exitReason !== 'Open')
+    const openCount = visibleTrades.filter((t) => t.exitReason === 'Open').length
+    const closed = visibleTrades.filter((t) => t.pnlPoints != null && t.exitReason !== 'Open')
     if (closed.length === 0) return openCount > 0 ? { count: 0, openCount } : null
     const wins = closed.filter((t) => t.pnlPoints > 0).length
     const totalPnl = closed.reduce((sum, t) => sum + t.pnlPoints, 0)
@@ -170,7 +202,7 @@ export default function BacktestPage() {
       totalPnl,
       avgPnl: totalPnl / closed.length,
     }
-  }, [trades])
+  }, [visibleTrades])
 
   const signalColumns = [
     { title: 'Time', dataIndex: 'timeUtc', key: 'timeUtc', width: 200, render: (t) => fmtIstDateTime(t) },
@@ -267,6 +299,14 @@ export default function BacktestPage() {
           />
           <ExpirySelect expiries={expiries} value={selectedExpiry} isManual={expiryIsManual} loading={expiryLoading} onChange={handleExpiryChange} />
           <Select value={timeframe} onChange={setTimeframe} style={{ width: 120 }} options={TIMEFRAME_OPTIONS} />
+          <RangePicker
+            value={dateRange}
+            onChange={setDateRange}
+            allowEmpty={[true, true]}
+            format="DD MMM YYYY"
+            placeholder={['From date', 'To date']}
+            style={{ width: 280 }}
+          />
           <Button icon={<ReloadOutlined />} onClick={loadSignals} loading={signalsLoading} disabled={!selected}>
             Re-run signals
           </Button>
@@ -336,6 +376,14 @@ export default function BacktestPage() {
               </Row>
             )}
 
+            {(fromDay || toDay) && (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                Showing {visibleTrades.length} of {(trades ?? []).length} trades, filtered to{' '}
+                {fromDay ?? 'the start'} – {toDay ?? 'the end'} (IST). The backtest still ran over the
+                whole window; the stats above cover the filtered rows only.
+              </Text>
+            )}
+
             {tradesLoading && !trades ? (
               <div style={{ display: 'flex', justifyContent: 'center', padding: 40 }}>
                 <Spin size="large" />
@@ -344,10 +392,12 @@ export default function BacktestPage() {
               <Table
                 size="small"
                 rowKey={(row) => `${row.signalTimeUtc}-${row.optionType}`}
-                dataSource={trades ?? []}
+                dataSource={visibleTrades}
                 columns={tradeColumns}
                 pagination={{ pageSize: 25, showSizeChanger: false }}
-                locale={{ emptyText: 'No trades - no Confluence signals yet, or click Run to simulate with the current settings.' }}
+                locale={{ emptyText: (fromDay || toDay)
+                  ? 'No trades on the selected dates - widen or clear the date filter.'
+                  : 'No trades - no Confluence signals yet, or click Run to simulate with the current settings.' }}
               />
             )}
           </Space>
@@ -367,6 +417,13 @@ export default function BacktestPage() {
           </Text>
         </Card>
 
+        {(fromDay || toDay) && (
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            Showing {visibleSignals.length} of {(signals ?? []).length} signals, filtered to{' '}
+            {fromDay ?? 'the start'} – {toDay ?? 'the end'} (IST).
+          </Text>
+        )}
+
         {signalsLoading && !signals ? (
           <div style={{ display: 'flex', justifyContent: 'center', padding: 40 }}>
             <Spin size="large" />
@@ -375,10 +432,12 @@ export default function BacktestPage() {
           <Table
             size="small"
             rowKey={(row) => `${row.timeUtc}-${row.kind}`}
-            dataSource={signals ?? []}
+            dataSource={visibleSignals}
             columns={signalColumns}
             pagination={{ pageSize: 25, showSizeChanger: false }}
-            locale={{ emptyText: 'No signals - not enough closed-bar history yet, or the underlying has no backfilled candles.' }}
+            locale={{ emptyText: (fromDay || toDay)
+              ? 'No signals on the selected dates - widen or clear the date filter.'
+              : 'No signals - not enough closed-bar history yet, or the underlying has no backfilled candles.' }}
           />
         )}
       </Space>

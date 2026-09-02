@@ -154,6 +154,15 @@ export function fmtIstDateTime(isoOrDate) {
   return new Date(isoOrDate).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true })
 }
 
+// The IST calendar day a UTC timestamp falls on, as 'YYYY-MM-DD'. Sortable and directly
+// comparable to what antd's date pickers format to, which is what makes a date filter possible
+// without pulling timezone maths into every page: 'en-CA' is the locale that renders a date in
+// exactly that order. A signal at 20:00 UTC belongs to the NEXT IST day, so filtering on the raw
+// UTC date would put it under the wrong session.
+export function istDateKey(isoOrDate) {
+  return new Date(isoOrDate).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' })
+}
+
 export function fmtIstTime(isoOrDate) {
   return new Date(isoOrDate).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true })
 }
