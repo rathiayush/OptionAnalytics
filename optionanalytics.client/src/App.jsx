@@ -31,6 +31,14 @@ const VALUE_UNIT_OPTIONS = [
   { value: 'K', label: 'Thousands (K)' },
 ]
 
+// Display-only chart preferences, remembered like the underlying/timeframe are - no correctness
+// implication either way (unlike the alert-mode toggle), so these persist indefinitely rather than
+// with a TTL. Dashboard-only, so kept local to this file rather than shared.jsx.
+const STORED_CDV_UNIT = 'optionanalytics.cdvUnit'
+const STORED_OBV_UNIT = 'optionanalytics.obvUnit'
+const STORED_CDV_LOOKBACK_BARS = 'optionanalytics.lookbackBars.cdv'
+const STORED_OBV_LOOKBACK_BARS = 'optionanalytics.lookbackBars.obv'
+
 // Whether Telegram alerts (and the crossover badge, which mirrors them) react to the still-forming
 // candle or only a closed, confirmed one - see the candleMode state in DashboardPage.
 const CANDLE_MODE_OPTIONS = [
@@ -840,9 +848,11 @@ function renderPercent(v) {
 // both CDV (endpoint "lookback", default 3/5/7 bars) and OBV (endpoint "obv-lookback", default
 // 20/25/30 - the periods that Pine's own OBV multi-lookback table defaults to). The bars selector
 // accepts free-form numbers (antd's tags mode), not just the preset options, so "configurable"
-// isn't limited to a fixed list.
-function LookbackTable({ underlying, cdvSnapshot, endpoint = 'lookback', title = 'CE / PE Lookback % Change', defaultBars = DEFAULT_LOOKBACK_BARS }) {
-  const [bars, setBars] = useState(defaultBars)
+// isn't limited to a fixed list. The chosen bars are remembered under `storageKey` (a distinct key
+// per instance - the CDV and OBV tables' choices are independent) so a reload doesn't reset back
+// to the default.
+function LookbackTable({ underlying, cdvSnapshot, endpoint = 'lookback', title = 'CE / PE Lookback % Change', defaultBars = DEFAULT_LOOKBACK_BARS, storageKey }) {
+  const [bars, setBars] = usePersistedState(storageKey, defaultBars)
   const [table, setTable] = useState(null)
   const lastBarTimeRef = useRef(null)
 
@@ -911,8 +921,8 @@ function DashboardPage() {
   const [timeframe, setTimeframe] = usePersistedState(STORED_TIMEFRAME, 1)
   // Per-chart so either can be read at its own natural magnitude - CDV and OBV don't always sit
   // in the same range as each other.
-  const [cdvUnit, setCdvUnit] = useState('M')
-  const [obvUnit, setObvUnit] = useState('M')
+  const [cdvUnit, setCdvUnit] = usePersistedState(STORED_CDV_UNIT, 'M')
+  const [obvUnit, setObvUnit] = usePersistedState(STORED_OBV_UNIT, 'M')
   const [loading, setLoading] = useState(true)
 
   const [candles, setCandles] = useState([])
@@ -1352,7 +1362,7 @@ function DashboardPage() {
           )}
         </ChartCard>
 
-        {selected && <LookbackTable underlying={selected} cdvSnapshot={cdvSnapshot} />}
+        {selected && <LookbackTable underlying={selected} cdvSnapshot={cdvSnapshot} storageKey={STORED_CDV_LOOKBACK_BARS} />}
 
         <ChartCard
           title="CE / PE On-Balance Volume (delta-weighted, all tracked strikes)"
@@ -1378,6 +1388,7 @@ function DashboardPage() {
             endpoint="obv-lookback"
             title="OBV Multi-Lookback % Change"
             defaultBars={DEFAULT_LOOKBACK_BARS}
+            storageKey={STORED_OBV_LOOKBACK_BARS}
           />
         )}
       </Space>
