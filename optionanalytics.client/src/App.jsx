@@ -5,7 +5,7 @@ import * as signalR from '@microsoft/signalr'
 import { Routes, Route } from 'react-router-dom'
 import BacktestPage from './BacktestPage.jsx'
 import TriggersPage from './TriggersPage.jsx'
-import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, fmtPrice, fmtIstTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying } from './shared.jsx'
+import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, fmtPrice, fmtIstTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect } from './shared.jsx'
 import './App.css'
 
 const { Title, Text } = Typography
@@ -934,6 +934,18 @@ function DashboardPage() {
 
   const lastObvBarTimeRef = useRef({ ce: null, pe: null })
 
+  // Which expiry CDV is tracking for `selected` - see useExpirySelector's own doc comment. Changing
+  // it rebuilds the whole underlying's CDV/OBV/option-chain state server-side, so a successful
+  // switch refetches this page exactly like switching underlying does.
+  const { expiries, selectedExpiry, loading: expiryLoading, selectExpiry } = useExpirySelector(selected)
+  const handleExpiryChange = (expiry) => {
+    selectExpiry(expiry).then(() => {
+      previousStrikeRef.current = ATM_STRIKE
+      setSelectedStrike(ATM_STRIKE)
+      fetchAllData(selected, { cancelled: false }, ATM_STRIKE)
+    })
+  }
+
   useEffect(() => {
     fetch('/api/spot/underlyings')
       .then((r) => r.json())
@@ -1173,6 +1185,7 @@ function DashboardPage() {
             style={{ width: 160 }}
             options={underlyings.map((u) => ({ value: u.underlying, label: u.underlying }))}
           />
+          <ExpirySelect expiries={expiries} value={selectedExpiry} loading={expiryLoading} onChange={handleExpiryChange} />
           <Select
             value={timeframe}
             onChange={setTimeframe}

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Menu, Tag } from 'antd'
+import { Menu, Select, Tag } from 'antd'
 import { useLocation, useNavigate } from 'react-router-dom'
 
 // Constants/components shared between App.jsx's DashboardPage and BacktestPage.jsx - kept in
@@ -60,6 +60,70 @@ export function usePersistedState(key, fallback) {
 export function pickUnderlying(list, current) {
   if (list?.some((u) => u.underlying === current)) return current
   return list?.[0]?.underlying ?? null
+}
+
+// Dashboard and Backtrack both need to pick which expiry CDV is tracking for the selected
+// underlying - one server-side setting (CdvHostedService.SelectExpiryAsync via the /api/cdv/
+// {underlying}/expiries GET and /expiry POST endpoints), not a per-page concept, since both pages
+// read the same in-memory CdvUnderlyingState. Centralized here so the fetch/POST wiring can't
+// drift between the two pages the way two hand-rolled copies eventually would.
+export function useExpirySelector(underlying) {
+  const [expiries, setExpiries] = useState([])
+  const [selectedExpiry, setSelectedExpiry] = useState(null)
+  const [isManual, setIsManual] = useState(false)
+  const [loading, setLoading] = useState(false)
+
+  useEffect(() => {
+    if (!underlying) return
+    const cancelledRef = { cancelled: false }
+    fetch(`/api/cdv/${underlying}/expiries`)
+      .then((r) => r.json())
+      .then((data) => {
+        if (cancelledRef.cancelled) return
+        setExpiries(data?.expiries ?? [])
+        setSelectedExpiry(data?.selected ?? null)
+        setIsManual(!!data?.isManualSelection)
+      })
+      .catch((err) => console.error('Failed to load expiries:', err))
+    return () => { cancelledRef.cancelled = true }
+  }, [underlying])
+
+  // Switches the underlying onto a different expiry server-side - unsubscribes the old expiry's
+  // contracts from the Dhan feed and rebuilds CDV/OBV/option-chain state onto the new one (see
+  // CdvHostedService.SelectExpiryAsync). Returns the request's promise so a caller can refetch its
+  // own page's data once the switch has actually landed server-side, rather than racing it.
+  const selectExpiry = (expiry) => {
+    if (!underlying || !expiry || expiry === selectedExpiry) return Promise.resolve()
+    setLoading(true)
+    return fetch(`/api/cdv/${underlying}/expiry`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expiry }),
+    })
+      .then((r) => r.json())
+      .then((data) => {
+        setSelectedExpiry(data?.selected ?? expiry)
+        setIsManual(!!data?.isManualSelection)
+        if (data?.expiries) setExpiries(data.expiries)
+      })
+      .catch((err) => console.error('Failed to switch expiry:', err))
+      .finally(() => setLoading(false))
+  }
+
+  return { expiries, selectedExpiry, isManual, loading, selectExpiry }
+}
+
+export function ExpirySelect({ expiries, value, loading, onChange, style }) {
+  return (
+    <Select
+      value={value}
+      loading={loading}
+      onChange={onChange}
+      style={style ?? { width: 150 }}
+      placeholder="Expiry"
+      options={(expiries ?? []).map((e) => ({ value: e, label: e }))}
+    />
+  )
 }
 
 export function fmtPrice(v) {

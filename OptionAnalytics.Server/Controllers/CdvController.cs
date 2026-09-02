@@ -123,6 +123,33 @@ public sealed class CdvController : ControllerBase
         return parsed.Count > 0 ? parsed : DefaultLookbackBars;
     }
 
+    /// <summary>Every expiry listed for this underlying plus which one CDV is currently tracking -
+    /// the dashboard/Backtrack expiry selector's payload. See CdvHostedService.GetExpiryOptions.</summary>
+    [HttpGet("{underlying}/expiries")]
+    public IActionResult GetExpiries(string underlying)
+    {
+        if (!TryGetState(underlying, out _)) return NotFoundResult(underlying);
+        return Ok(_cdv.GetExpiryOptions(underlying.ToUpperInvariant()));
+    }
+
+    /// <summary>Switches this underlying onto a different listed expiry - unsubscribes the current
+    /// expiry's contracts from the Dhan feed and re-centers onto the new one, wiping and rebuilding
+    /// the CDV/OBV/option-chain state both the dashboard and the Backtrack page read (see
+    /// CdvHostedService.SelectExpiryAsync for exactly what that entails and why the reset is
+    /// required). 400 with a reason when the underlying or expiry isn't recognized.</summary>
+    [HttpPost("{underlying}/expiry")]
+    public async Task<IActionResult> SelectExpiry(string underlying, [FromBody] SelectExpiryRequest request, CancellationToken cancellationToken)
+    {
+        if (request?.Expiry is not { } expiry) return BadRequest(new { error = "An 'expiry' date is required." });
+
+        var error = await _cdv.SelectExpiryAsync(underlying.ToUpperInvariant(), expiry, cancellationToken);
+        if (error is not null) return BadRequest(new { error });
+
+        return Ok(_cdv.GetExpiryOptions(underlying.ToUpperInvariant()));
+    }
+
+    public sealed record SelectExpiryRequest(DateOnly? Expiry);
+
     /// <summary>Verification endpoint: every strike/side actually summed into the CDV total today,
     /// active or not - see CdvHostedService.GetTrackedStrikes / CdvUnderlyingState.GetTrackedStrikes.</summary>
     [HttpGet("{underlying}/strikes")]

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Select, Space, Typography, Spin, Card, Button, Table, Tag, InputNumber, Statistic, Row, Col } from 'antd'
 import { ReloadOutlined, PlayCircleOutlined } from '@ant-design/icons'
-import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, NavBar, DirectionTag, ALERT_KIND_LABEL, fmtIstDateTime, fmtIstTime, fmtPrice, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying } from './shared.jsx'
+import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, NavBar, DirectionTag, ALERT_KIND_LABEL, fmtIstDateTime, fmtIstTime, fmtPrice, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect } from './shared.jsx'
 
 const { Title, Text } = Typography
 
@@ -74,6 +74,18 @@ export default function BacktestPage() {
   const [tradesLoading, setTradesLoading] = useState(false)
 
   const strategy = strategies.find((s) => s.key === strategyKey) ?? null
+
+  // Which expiry CDV is tracking for `selected` - shared with the Dashboard page (see
+  // useExpirySelector's own doc comment); this page reads the same server-side CdvUnderlyingState
+  // the Dashboard does, so switching expiry here rebuilds it exactly the same way. Re-runs signals
+  // and trades once the switch has actually landed, same as the underlying/timeframe effect below.
+  const { expiries, selectedExpiry, loading: expiryLoading, selectExpiry } = useExpirySelector(selected)
+  const handleExpiryChange = (expiry) => {
+    selectExpiry(expiry).then(() => {
+      loadSignals()
+      runTrades()
+    })
+  }
 
   useEffect(() => {
     fetch('/api/spot/underlyings')
@@ -253,6 +265,7 @@ export default function BacktestPage() {
             style={{ width: 160 }}
             options={underlyings.map((u) => ({ value: u.underlying, label: u.underlying }))}
           />
+          <ExpirySelect expiries={expiries} value={selectedExpiry} loading={expiryLoading} onChange={handleExpiryChange} />
           <Select value={timeframe} onChange={setTimeframe} style={{ width: 120 }} options={TIMEFRAME_OPTIONS} />
           <Button icon={<ReloadOutlined />} onClick={loadSignals} loading={signalsLoading} disabled={!selected}>
             Re-run signals
