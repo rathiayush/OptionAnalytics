@@ -32,6 +32,7 @@ export default function TriggersPage() {
   const [quantityLots, setQuantityLots] = useState(1)
   const [slippagePoints, setSlippagePoints] = useState(1)
   const [maxDeviationPercent, setMaxDeviationPercent] = useState(10)
+  const [useLivePremiumEntry, setUseLivePremiumEntry] = useState(false)
 
   const strategy = strategies.find((s) => s.key === strategyKey) ?? null
 
@@ -88,6 +89,7 @@ export default function TriggersPage() {
         quantityLots,
         slippagePoints,
         maxDeviationPercent,
+        useLivePremiumEntry,
       }),
     })
       .then((r) => r.json())
@@ -123,6 +125,7 @@ export default function TriggersPage() {
         quantityLots: row.quantityLots,
         slippagePoints: row.slippagePoints,
         maxDeviationPercent: row.maxDeviationPercent,
+        useLivePremiumEntry: row.useLivePremiumEntry,
         ...changes,
       }),
     })
@@ -178,6 +181,7 @@ export default function TriggersPage() {
           {row.liveTradingEnabled && (
             <Text type="secondary" style={{ fontSize: 12 }}>
               {row.quantityLots} lot(s) · {row.slippagePoints}pt slip · {row.maxDeviationPercent}% max deviation
+              {row.useLivePremiumEntry ? ' · live-premium entry' : ''}
             </Text>
           )}
         </Space>
@@ -294,12 +298,27 @@ export default function TriggersPage() {
                     <InputNumber controls={false} min={0} step={1} value={maxDeviationPercent}
                       onChange={(v) => setMaxDeviationPercent(v ?? 10)} style={{ width: 130 }} />
                   </Space>
+                  <Space direction="vertical" size={2}>
+                    <Text type="secondary" style={{ fontSize: 12 }}>Entry price</Text>
+                    <Select
+                      value={useLivePremiumEntry}
+                      onChange={setUseLivePremiumEntry}
+                      style={{ width: 230 }}
+                      options={[
+                        { value: false, label: "Next bar's open (matches backtest)" },
+                        { value: true, label: 'Live premium when it fires' },
+                      ]}
+                    />
+                  </Space>
                   <Text type="secondary" style={{ fontSize: 12, maxWidth: 460 }}>
                     Places a real Dhan Super Order (LIMIT entry + target + stop-loss) from every fired
-                    trade. Slippage keeps the entry marketable. If it doesn't fill, it re-prices off the
+                    trade. Slippage keeps the entry marketable. If it doesn&apos;t fill, it re-prices off the
                     latest live premium up to 3 times - but never if that premium has drifted more than
-                    Max deviation from the signal's own price, and it cancels rather than fill at a bad
+                    Max deviation from the signal&apos;s own price, and it cancels rather than fill at a bad
                     price if it runs out of attempts.
+                    {useLivePremiumEntry
+                      ? ' Live-premium entry fires the moment the signal bar closes, priced off the premium right then - no waiting for the next bar, but the fill will not match what Backtrack modelled for the same signal.'
+                      : ' The order waits for the option’s next bar to close so it is priced off exactly what the backtest measured - which is why a 5-minute strategy alerts about five minutes after the price it quotes.'}
                   </Text>
                 </>
               )}

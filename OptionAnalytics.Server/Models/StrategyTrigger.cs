@@ -43,6 +43,25 @@ public sealed record StrategyTrigger(
     /// fill nobody would actually want. Only meaningful when LiveTradingEnabled.</summary>
     public decimal MaxDeviationPercent { get; init; } = 10;
 
+    /// <summary>Price the order off the LIVE premium at the moment the alert fires, instead of the
+    /// simulator's next-bar-open.
+    ///
+    /// Off (the default), the trigger waits for the option's NEXT bar to close so the backtest can
+    /// resolve a real fill price, then prices the order off that - faithful to what Backtrack
+    /// measured, but it means a 5-minute strategy alerts about five minutes after the price it
+    /// quotes, because that bar is not readable until it has closed.
+    ///
+    /// On, the signal is actionable the instant the SIGNAL bar closes: the entry reference becomes
+    /// whatever the strike is trading at right then (CdvUnderlyingState's latest bar, still-forming
+    /// one included), and the limit/SL/target are derived from that. That removes the stale bar, at
+    /// the cost of the live entry no longer matching what the BACKTEST modelled for the same signal
+    /// - a backtest has no tick history, so it cannot reproduce "the premium at that instant" and
+    /// keeps using the next bar's open. Tune on Backtrack, but expect the live fill to differ.
+    ///
+    /// Defaults to false, including for every trigger created before this existed - the price a
+    /// live order is built from must never change underneath an already-armed trigger.</summary>
+    public bool UseLivePremiumEntry { get; init; }
+
     /// <summary>The last entry signal this trigger has already alerted on. A newly-armed trigger is
     /// primed with whatever the latest signal is at that moment WITHOUT alerting, so arming it
     /// doesn't immediately dump every historical signal into Telegram; only genuinely new ones
@@ -66,4 +85,5 @@ public sealed record StrategyTriggerRequest(
     bool LiveTradingEnabled,
     int QuantityLots,
     decimal SlippagePoints,
-    decimal MaxDeviationPercent);
+    decimal MaxDeviationPercent,
+    bool UseLivePremiumEntry);

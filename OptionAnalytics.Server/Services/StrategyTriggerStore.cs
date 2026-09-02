@@ -65,6 +65,7 @@ public sealed class StrategyTriggerStore
             QuantityLots = Math.Max(1, request.QuantityLots),
             SlippagePoints = Math.Max(0, request.SlippagePoints),
             MaxDeviationPercent = request.MaxDeviationPercent > 0 ? request.MaxDeviationPercent : 10,
+            UseLivePremiumEntry = request.UseLivePremiumEntry,
         };
 
         lock (_lock)
@@ -101,6 +102,7 @@ public sealed class StrategyTriggerStore
                 QuantityLots = Math.Max(1, request.QuantityLots),
                 SlippagePoints = Math.Max(0, request.SlippagePoints),
                 MaxDeviationPercent = request.MaxDeviationPercent > 0 ? request.MaxDeviationPercent : 10,
+                UseLivePremiumEntry = request.UseLivePremiumEntry,
                 LastSignalUtc = watchChanged ? null : existing.LastSignalUtc,
             };
 

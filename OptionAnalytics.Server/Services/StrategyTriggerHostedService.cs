@@ -242,9 +242,19 @@ public sealed class StrategyTriggerHostedService : BackgroundService
             return;
         }
 
-        // Only trades whose entry bar has actually closed - see this class's own doc comment for
-        // why the watermark must never advance past one that hasn't (EntryTimeUtc null) yet.
-        var tradable = trades.Where(t => t.SignalTimeUtc > lastSeen && t.EntryTimeUtc is not null).ToList();
+        // Normally: only trades whose entry bar has actually closed - see this class's own doc
+        // comment for why the watermark must never advance past one that hasn't (EntryTimeUtc null)
+        // yet.
+        //
+        // With StrategyTrigger.UseLivePremiumEntry the wait is the very thing being removed: the
+        // signal is actionable the instant the SIGNAL bar closes, priced off the live premium (see
+        // BuildOrderPlan), so a trade with no resolved entry bar still counts. A NoData trade is
+        // still excluded either way - that means the strike was never tracked, so there is no live
+        // premium to read for it and nothing to price an order from.
+        var tradable = trades
+            .Where(t => t.SignalTimeUtc > lastSeen
+                && (t.EntryTimeUtc is not null || (trigger.UseLivePremiumEntry && t.ExitReason != "NoData")))
+            .ToList();
         if (tradable.Count == 0) return;
 
         // The strategy's own EntrySignals carries the human-readable WHY ("Spot crossed down +
@@ -287,11 +297,19 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         // [Trigger] up front for the same reason EmaCrossoverAlertService/ConfluenceAlertService
         // tag their own messages - this is the confirmed, strategy-driven alert, distinct from the
         // raw always-on EMA/Confluence feed that shares the same Telegram chat.
+        // In live-premium mode there IS no resolved entry bar yet - that wait is exactly what the
+        // mode removes - so the line reports the live premium the order was actually priced from
+        // instead, and says so. Dereferencing EntryTimeUtc unconditionally here would be a null
+        // reference the moment that mode is switched on.
+        var entryLine = trade.EntryTimeUtc is { } entryTime
+            ? $"Entry: {entryTime.ToOffset(ist):HH:mm} IST @ {trade.EntryPrice:0.##}"
+            : $"Entry: live premium @ {GetLatestPremium(trade.Underlying, trade.Strike, trade.OptionType == "CE"):0.##} (as of the signal bar's close)";
+
         var message =
             $"[Trigger] <b>{arrow} {trigger.Name}</b>\n" +
             $"<b>{trade.Underlying}</b> · {trigger.TimeframeMinutes}m · {trigger.StrategyKey}\n" +
             $"<b>{trade.Direction}</b> — {trade.Side} {trade.OptionType} {trade.Strike:0.##}{reasonLine}\n" +
-            $"Entry: {trade.EntryTimeUtc!.Value.ToOffset(ist):HH:mm} IST @ {trade.EntryPrice:0.##}\n" +
+            $"{entryLine}\n" +
             $"Signal bar: {trade.SignalTimeUtc.ToOffset(ist):yyyy-MM-dd HH:mm} IST" +
             orderLine;
 
@@ -337,7 +355,31 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     /// </summary>
     private SuperOrderPlan? BuildOrderPlan(StrategyTrigger trigger, BacktestTrade trade)
     {
-        if (trade.EntryPrice is not { } entryPrice) return null; // shouldn't happen - EvaluateAsync only calls this for trades with a resolved entry
+        var isCallLeg = trade.OptionType == "CE";
+
+        // The entry reference every other price here is derived from. Normally the simulator's own
+        // resolved fill (the next bar's open), so a live order is built from exactly the number the
+        // backtest measured. With UseLivePremiumEntry it is instead what the strike is trading at
+        // RIGHT NOW - see that property's doc comment for the trade-off.
+        decimal entryPrice;
+        if (trigger.UseLivePremiumEntry)
+        {
+            if (GetLatestPremium(trade.Underlying, trade.Strike, isCallLeg) is not { } livePremium || livePremium <= 0)
+            {
+                _logger.LogWarning("Trigger {Name}: no live premium for {Underlying} {Strike}{Type} - cannot price a live-premium entry.",
+                    trigger.Name, trade.Underlying, trade.Strike, trade.OptionType);
+                return null;
+            }
+            entryPrice = livePremium;
+        }
+        else if (trade.EntryPrice is { } resolved)
+        {
+            entryPrice = resolved;
+        }
+        else
+        {
+            return null; // shouldn't happen - EvaluateAsync only reaches here with a resolved entry unless live-premium mode is on
+        }
 
         var expiry = _cdv.States.TryGetValue(trade.Underlying, out var cdvState) ? cdvState.Expiry : null;
         if (expiry is null)
@@ -376,7 +418,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         var summary = $"{transactionType} {contract.TradingSymbol} x{quantity} (SecurityId {contract.SecurityId})\n" +
             $"LIMIT {limitPrice:0.##} · Target {targetPrice:0.##} · SL {stopLossPrice:0.##}";
 
-        return new SuperOrderPlan(transactionType, contract.SecurityId.ToString(), quantity, limitPrice, targetPrice, stopLossPrice, tick, correlationId, summary);
+        return new SuperOrderPlan(transactionType, contract.SecurityId.ToString(), quantity, limitPrice, targetPrice, stopLossPrice, tick, entryPrice, correlationId, summary);
     }
 
     /// <summary>Places the order and, on success, hands the fill-monitoring off to MonitorFillAsync
@@ -455,7 +497,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     {
         var isCall = trade.OptionType == "CE";
         var isSell = trade.Side == "Sell";
-        var referencePrice = trade.EntryPrice!.Value; // fixed for every attempt - see this method's own doc comment
+        var referencePrice = plan.ReferencePrice; // fixed for every attempt - see this method's own doc comment, and SuperOrderPlan.ReferencePrice
         var currentPrice = plan.Price;
         var partialFillRetries = 0; // how many re-price attempts have happened SINCE a partial fill was first seen - escalates slippage, see the re-price step below
 
@@ -638,8 +680,12 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     private static decimal RoundToTick(decimal price, decimal tick) =>
         tick > 0 ? Math.Round(price / tick, MidpointRounding.AwayFromZero) * tick : price;
 
+    /// <summary>ReferencePrice is the entry price every other number here was derived from - the
+    /// simulator's resolved fill, or the live premium when StrategyTrigger.UseLivePremiumEntry is
+    /// on. MonitorFillAsync measures its deviation guard against THIS rather than the trade's own
+    /// EntryPrice, which is null in live-premium mode.</summary>
     private sealed record SuperOrderPlan(
         string TransactionType, string SecurityId, int Quantity,
         decimal Price, decimal TargetPrice, decimal StopLossPrice, decimal TickSize,
-        string CorrelationId, string Summary);
+        decimal ReferencePrice, string CorrelationId, string Summary);
 }
