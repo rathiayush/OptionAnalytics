@@ -45,9 +45,25 @@ public sealed class BacktestService
     /// <summary>How many DISTINCT strikes one RunStrategyAsync call will fetch from Dhan on demand
     /// (see FillMissingStrikesAsync). A backtest reaching back HistoryTradingDays over a session
     /// where spot trended hard can legitimately reference dozens of strikes that never entered the
-    /// ATM+-8 window - fetching every one would turn a page load into a long series of Dhan calls.
-    /// Whatever is left over stays "No Data", exactly as it was before on-demand fetching existed.</summary>
-    private const int MaxOnDemandStrikesPerRun = 12;
+    /// ATM+-8 window, and every one of them is a separate Dhan call - so this is a budget on how
+    /// long one page load may take, not a judgement about which strikes matter. Anything past it
+    /// stays "No Data" and the NEXT run picks up where this one stopped, since everything fetched
+    /// meanwhile is still in CdvHostedService's own cache.</summary>
+    private const int MaxOnDemandStrikesPerRun = 60;
+
+    /// <summary>How many fill-then-re-run rounds one call will do. Filling a strike can change
+    /// which trades happen (a trade that used to be "No Data" now occupies the simulator's
+    /// one-position-at-a-time window, so LATER signals resolve differently and can reference
+    /// strikes the first pass never asked about) - which is why one pass was never enough to clear
+    /// the table. Each round only asks for what the round before it revealed, so this converges
+    /// quickly; the cap is a backstop, not the expected exit.</summary>
+    private const int MaxOnDemandRounds = 8;
+
+    /// <summary>Spacing between on-demand fetches, same as CdvHostedService's own backfill uses.
+    /// With a 60-strike budget these are no longer a handful of calls, and Dhan's data API is rate
+    /// limited - pacing them costs a few seconds and avoids being throttled into empty results,
+    /// which would look exactly like the "No Data" this is trying to remove.</summary>
+    private static readonly TimeSpan OnDemandCallDelay = TimeSpan.FromMilliseconds(200);
 
     private readonly SpotFeedHostedService _spotFeed;
     private readonly CdvHostedService _cdv;
@@ -119,32 +135,58 @@ public sealed class BacktestService
         if (prepared is not { } p) return Array.Empty<BacktestTrade>();
 
         var trades = p.Strategy.Simulate(p.Context, p.Parameters);
-        if (!await FillMissingStrikesAsync(underlying, p.OnDemand, cancellationToken)) return trades;
 
-        return p.Strategy.Simulate(p.Context, p.Parameters);
+        // Keep filling and re-running until the strategy stops asking for strikes it has no history
+        // for - one round only clears the misses that round happened to reveal (see
+        // MaxOnDemandRounds). Bounded by the strike budget and the round cap so a pathological run
+        // still returns rather than fetching forever.
+        var budget = MaxOnDemandStrikesPerRun;
+        for (var round = 0; round < MaxOnDemandRounds && budget > 0; round++)
+        {
+            var attempted = await FillMissingStrikesAsync(underlying, p.OnDemand, budget, cancellationToken);
+            if (attempted == 0) break; // nothing was missing - the table is as full as it can get
+
+            budget -= attempted;
+
+            // Re-run even when every fetch came back empty: those strikes are now ANSWERED (an
+            // empty answer is still an answer - see OnDemandStrikes.Add), so this pass is what
+            // stops them being asked for again, and it is also what surfaces the next round's
+            // misses.
+            trades = p.Strategy.Simulate(p.Context, p.Parameters);
+        }
+
+        return trades;
     }
 
     /// <summary>Fetches every strike the just-completed pass found nothing for, up to
-    /// MaxOnDemandStrikesPerRun. Returns true only if at least one fetch actually produced candles -
-    /// i.e. only if re-running the strategy could now produce a different answer.</summary>
-    private async Task<bool> FillMissingStrikesAsync(string underlying, OnDemandStrikes onDemand, CancellationToken cancellationToken)
+    /// <paramref name="budget"/> of them. Returns HOW MANY it attempted - zero means nothing was
+    /// missing, which is the signal to stop rounds; any other number means the strategy should be
+    /// re-run, whether or not the fetches found candles.</summary>
+    private async Task<int> FillMissingStrikesAsync(string underlying, OnDemandStrikes onDemand, int budget, CancellationToken cancellationToken)
     {
         var missing = onDemand.DrainMisses();
-        if (missing.Count == 0) return false;
+        if (missing.Count == 0) return 0;
 
-        var gotAnything = false;
-        foreach (var (strike, isCall) in missing.Take(MaxOnDemandStrikesPerRun))
+        var attempted = 0;
+        foreach (var (strike, isCall) in missing.Take(budget))
         {
+            if (attempted > 0) await Task.Delay(OnDemandCallDelay, cancellationToken);
+
             var bars = await _cdv.GetStrikeCandlesAsync(underlying, strike, isCall, cancellationToken);
             var closed = DropFormingBar(bars);
 
             // Recorded even when empty (an unlisted strike, or Dhan simply having nothing) so the
-            // second pass treats it as answered rather than recording the same miss all over again.
+            // next pass treats it as answered rather than recording the same miss all over again.
             onDemand.Add(strike, isCall, closed);
-            if (closed.Count > 0) gotAnything = true;
+            attempted++;
         }
 
-        return gotAnything;
+        // Anything the budget could not cover goes back on the miss list, so it is not silently
+        // forgotten: the next pass records it again and the NEXT request picks it up, by which time
+        // this run's fetches are all cached.
+        foreach (var (strike, isCall) in missing.Skip(budget)) onDemand.RecordMiss(strike, isCall);
+
+        return attempted;
     }
 
     /// <summary>Drops a still-forming final bar. GetStrikeCandlesAsync deliberately includes the
