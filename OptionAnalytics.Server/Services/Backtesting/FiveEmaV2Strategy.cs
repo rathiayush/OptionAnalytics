@@ -3,12 +3,17 @@ using OptionAnalytics.Server.Models;
 namespace OptionAnalytics.Server.Services.Backtesting;
 
 /// <summary>
-/// The Subhasish Pani 5 EMA setup with the TAUGHT exits - the difference from FiveEmaStrategy (v1),
-/// which is otherwise the identical entry (both share FiveEmaAlertScanner).
+/// The Subhasish Pani 5 EMA setup with the TAUGHT exits. Entry is the same idea as FiveEmaStrategy
+/// (v1); what differs is where the trade gets out:
 ///
 ///   v1: stop and target are absolute points on the OPTION PREMIUM (slPoints/tpPoints).
 ///   v2: stop is the ALERT CANDLE's own high (short) or low (long), and the target is a
 ///       risk-multiple of that distance - the taught minimum 1:3 - both measured on SPOT.
+///
+/// This class is DELIBERATELY SELF-CONTAINED: the alert-candle scan below is v2's own copy, not
+/// shared with v1. v1 is armed and trading live, and the two must be free to evolve separately
+/// without a change to one ever being able to alter the other. The duplication is the point, not an
+/// oversight - do not "tidy" it into a shared helper.
 ///
 /// Measuring on spot is what makes the taught rule expressible at all. The stop "high of the alert
 /// candle" is a level on the underlying; it has no fixed premium equivalent, because the rate at
@@ -30,11 +35,16 @@ public sealed class FiveEmaV2Strategy : IBacktestStrategy
 {
     public string Key => "five-ema-v2";
     public string Name => "5 EMA v2 - taught SL/target (Subhasish Pani)";
-    public string Description => "The 5 EMA alert-candle entry exactly as v1, but with the setup's own exits: stop at the alert candle's high (short) or low (long), and a target at the taught risk-multiple of that distance - both measured on spot, since neither converts to a fixed number of premium points. Premium stop/target are optional safety nets here rather than the mechanism.";
+    public string Description => "The 5 EMA alert-candle entry, with the setup's own exits: stop at the alert candle's high (short) or low (long), and a target at the taught risk-multiple of that distance - both measured on spot, since neither converts to a fixed number of premium points. Premium stop/target stay available as optional safety nets rather than the mechanism. EMA period is configurable.";
 
     private const decimal DirectionBoth = 0;
     private const decimal DirectionLongOnly = 1;
     private const decimal DirectionShortOnly = 2;
+
+    /// <summary>One alert candle that was actually broken - the moment the setup fires. AlertCandle
+    /// is the exhaustion bar itself (not the bar that broke it), which is what the taught stop is
+    /// placed against: its High for a short, its Low for a long.</summary>
+    private sealed record Break(DateTimeOffset Time, string Direction, Candle AlertCandle);
 
     public IReadOnlyList<BacktestParameterSpec> Parameters { get; } = new[]
     {
@@ -43,8 +53,10 @@ public sealed class FiveEmaV2Strategy : IBacktestStrategy
 
         new BacktestParameterSpec("rewardMultiple", "Target (x risk, taught minimum 3)", Default: 3, Min: 0.5m, Max: 20, Step: 0.5m),
 
-        // Deliberately 0-by-default and 0-allowed, unlike v1's shared specs: here the real stop is
-        // the alert candle, and these exist only to cap a premium gap the spot level cannot see.
+        // Present and fully usable, but 0-by-default and 0-allowed, unlike v1's shared specs: here
+        // the real stop is the alert candle, and these exist to cap a premium gap the spot level
+        // cannot see. Set them to a non-zero value to run both stops at once - whichever hits first
+        // closes the trade.
         new BacktestParameterSpec("slPoints", "Premium safety stop (points, 0 = off)", Default: 0, Min: 0, Max: 1000, Step: 0.5m),
         new BacktestParameterSpec("tpPoints", "Premium safety target (points, 0 = off)", Default: 0, Min: 0, Max: 2000, Step: 0.5m),
 
@@ -85,7 +97,7 @@ public sealed class FiveEmaV2Strategy : IBacktestStrategy
         var exits = new Dictionary<DateTimeOffset, (DateTimeOffset Time, string Reason)>();
 
         var bars = context.SpotBars;
-        var (breaks, _) = FiveEmaAlertScanner.Scan(bars, emaPeriod, maxAgeBars);
+        var breaks = ScanForBreaks(bars, emaPeriod, maxAgeBars);
 
         // Index by time so each break can walk forward from its own bar without rescanning.
         var indexByTime = new Dictionary<DateTimeOffset, int>(bars.Count);
@@ -121,7 +133,6 @@ public sealed class FiveEmaV2Strategy : IBacktestStrategy
             }
 
             var targetLevel = isShort ? entrySpot - rewardMultiple * risk : entrySpot + rewardMultiple * risk;
-            var exit = FindSpotExit(bars, breakIndex, isShort, stopLevel, targetLevel);
 
             signals.Add(new BacktestSignal(context.Underlying, fired.Time, "Entry", fired.Direction,
                 $"{DescribeAlert(fired, emaPeriod, isShort)}. Stop {stopLevel:0.##} (risk {risk:0.##}), target {targetLevel:0.##} at 1:{rewardMultiple:0.##}"));
@@ -130,10 +141,87 @@ public sealed class FiveEmaV2Strategy : IBacktestStrategy
             // No exit found means neither level was reached before the day ended - the simulator's
             // own end-of-day close then handles it, which is the right answer rather than inventing
             // one here.
-            if (exit is { } found) exits[fired.Time] = found;
+            if (FindSpotExit(bars, breakIndex, isShort, stopLevel, targetLevel) is { } found)
+                exits[fired.Time] = found;
         }
 
         return (entries, signals.OrderByDescending(s => s.TimeUtc).ToList(), exits);
+    }
+
+    /// <summary>v2's OWN alert-candle scan - see this class's doc comment for why it is not shared
+    /// with v1. The rules, all on the underlying's own bars:
+    ///   - A candle entirely ABOVE the EMA (its LOW does not touch the line) is a SHORT alert
+    ///     candle; entirely BELOW (its HIGH does not touch) is a LONG one.
+    ///   - It fires when a later candle breaks that candle's low (short) or high (long).
+    ///   - It ROLLS FORWARD: while unbroken, any newer candle itself entirely clear of the EMA on
+    ///     the same side replaces it, so the reference is always the most recent exhaustion bar.
+    ///   - Any candle that TOUCHES the EMA cancels both sides - price is back at the average.
+    ///   - Nothing carries across a trading day.</summary>
+    private static List<Break> ScanForBreaks(IReadOnlyList<Candle> bars, int emaPeriod, int maxAgeBars)
+    {
+        var breaks = new List<Break>();
+        var ema = EmaCrossoverDetector.EmaSeries(bars, emaPeriod);
+
+        // Only one side can ever be pending: a candle entirely above the EMA is a short alert AND
+        // proof that any long alert (which needed price below the EMA) is dead.
+        (Candle Bar, int Index)? shortAlert = null;
+        (Candle Bar, int Index)? longAlert = null;
+        DateOnly? currentDay = null;
+
+        for (var i = 0; i < bars.Count; i++)
+        {
+            var bar = bars[i];
+
+            var day = BacktestUtil.IstDate(bar.Time);
+            if (currentDay != day)
+            {
+                currentDay = day;
+                shortAlert = null;
+                longAlert = null;
+            }
+
+            if (ema[i] is not { } emaValue) continue;
+
+            if (maxAgeBars > 0)
+            {
+                if (shortAlert is { } s && i - s.Index > maxAgeBars) shortAlert = null;
+                if (longAlert is { } l && i - l.Index > maxAgeBars) longAlert = null;
+            }
+
+            // Step 1: does THIS bar break a PREVIOUS bar's alert candle? Checked before the alert
+            // candle is updated below, so a candle can never trigger against itself.
+            if (shortAlert is { } shortCandle && bar.Low < shortCandle.Bar.Low)
+            {
+                breaks.Add(new Break(bar.Time, "Bearish", shortCandle.Bar));
+                shortAlert = null;
+            }
+            else if (longAlert is { } longCandle && bar.High > longCandle.Bar.High)
+            {
+                breaks.Add(new Break(bar.Time, "Bullish", longCandle.Bar));
+                longAlert = null;
+            }
+
+            // Step 2: this bar becomes the new alert candle if it is itself entirely clear of the
+            // EMA - strictly, so a bar merely grazing the line does not qualify. A bar that does
+            // touch cancels both sides: price is back at the average.
+            if (bar.Low > emaValue)
+            {
+                shortAlert = (bar, i);
+                longAlert = null;
+            }
+            else if (bar.High < emaValue)
+            {
+                longAlert = (bar, i);
+                shortAlert = null;
+            }
+            else
+            {
+                shortAlert = null;
+                longAlert = null;
+            }
+        }
+
+        return breaks;
     }
 
     /// <summary>Walks spot forward from the bar AFTER the break (entry is the next bar, so the
@@ -160,7 +248,7 @@ public sealed class FiveEmaV2Strategy : IBacktestStrategy
         return null;
     }
 
-    private static string DescribeAlert(FiveEmaBreak fired, int emaPeriod, bool isShort) => isShort
+    private static string DescribeAlert(Break fired, int emaPeriod, bool isShort) => isShort
         ? $"Alert candle at {BacktestUtil.IstDate(fired.AlertCandle.Time):dd MMM} low {fired.AlertCandle.Low:0.##} formed clear above the {emaPeriod} EMA and broke down"
         : $"Alert candle at {BacktestUtil.IstDate(fired.AlertCandle.Time):dd MMM} high {fired.AlertCandle.High:0.##} formed clear below the {emaPeriod} EMA and broke up";
 }
