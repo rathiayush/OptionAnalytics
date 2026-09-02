@@ -121,7 +121,7 @@ public static class OptionTradeSimulator
 
             var exitTime = entryBar.Time;
             var exitPrice = entryBar.Close;
-            var exitReason = "EndOfDay";
+            string? exitReason = null;
             var forcedExit = FirstAtOrAfter(forcedExitTimes, entryBar.Time);
 
             for (var i = entryIndex; i < optionBars.Count && BacktestUtil.IstDate(optionBars[i].Time) == entryDay; i++)
@@ -144,6 +144,21 @@ public static class OptionTradeSimulator
                 exitTime = bar.Time;
                 exitPrice = bar.Close;
             }
+
+            // The loop above falls through (no break) in two genuinely different situations that
+            // must not be reported the same way: entryDay itself ended (its bars ran out because
+            // the NEXT day's bars start instead, or - for the very last, still-in-progress trading
+            // day - there simply is no next day yet) versus entryDay IS today and we only ran out
+            // of bars because the session has not finished yet. The distinction is entryDay's own
+            // date, not "did we hit optionBars.Count" - the array shape looks identical either way,
+            // only how much more of today has yet to happen differs. A position opened on any
+            // earlier day has unambiguously seen its whole session close out (today already exists
+            // as a later date, so entryDay's own day is done regardless of exactly why its own bars
+            // stopped); a position opened TODAY has not, and reporting it as an "End of Day" exit -
+            // with a fixed exit time/price that reads as a completed, realized trade - would be
+            // straightforwardly wrong: the position is still open, its P&L is unrealized, and the
+            // next evaluation cycle (or day) can still move it before it actually closes.
+            exitReason ??= entryDay < BacktestUtil.IstDate(DateTimeOffset.UtcNow) ? "EndOfDay" : "Open";
 
             busyUntil = exitTime;
             // The seller's P&L is the buyer's inverted: they sold at entry and buy back at exit.

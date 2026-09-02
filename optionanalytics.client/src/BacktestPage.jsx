@@ -12,10 +12,18 @@ const SELL_COLOR = '#c084fc'
 
 const SIGNAL_KIND_LABEL = { ...ALERT_KIND_LABEL, Entry: 'ENTRY', Rejected: 'rejected' }
 
-const EXIT_REASON_COLOR = { TakeProfit: UP_COLOR, StopLoss: DOWN_COLOR, EndOfDay: undefined, NoData: undefined, SignalExit: undefined }
+// Amber, not green/red/neutral - Open is neither a win nor a loss yet, and reusing a settled
+// color would misread as a finished result on a row that can still move.
+const OPEN_COLOR = '#ffb100'
+const EXIT_REASON_COLOR = { TakeProfit: UP_COLOR, StopLoss: DOWN_COLOR, EndOfDay: undefined, NoData: undefined, SignalExit: undefined, Open: OPEN_COLOR }
 // SignalExit is a strategy's own exit rule firing rather than a price level being hit - the 5 EMA
 // strategy's "get out when spot comes back and touches the EMA" is the one that uses it today.
-const EXIT_REASON_LABEL = { TakeProfit: 'Take Profit', StopLoss: 'Stop Loss', EndOfDay: 'End of Day', NoData: 'No Data', SignalExit: 'Strategy Exit' }
+//
+// Open is NOT a completed trade: it is a position opened TODAY that has not yet hit its stop,
+// target, or a strategy exit rule, and today's session has not finished - so there is no real exit
+// to report. Its Exit column shows the last known price, not a fill, and its P&L is unrealized (see
+// renderPnl) - both can still change before this row would ever legitimately read "End of Day".
+const EXIT_REASON_LABEL = { TakeProfit: 'Take Profit', StopLoss: 'Stop Loss', EndOfDay: 'End of Day', NoData: 'No Data', SignalExit: 'Strategy Exit', Open: 'Open' }
 
 function isConfluenceLabel(kind) {
   return kind === 'Confluence' ? 'CONFLUENCE' : (SIGNAL_KIND_LABEL[kind] ?? kind)
@@ -31,10 +39,16 @@ function renderCrossState(v) {
   return <Tag color={isUp ? UP_COLOR : DOWN_COLOR}>{isUp ? '▲ Up' : '▼ Down'}</Tag>
 }
 
-function renderPnl(v) {
+// isOpen marks the figure as unrealized - a still-running position's P&L is marked to the last
+// known price, not a real fill, and can still move before the position actually closes.
+function renderPnl(v, isOpen) {
   if (v == null) return <Text type="secondary">—</Text>
   const color = v > 0 ? UP_COLOR : v < 0 ? DOWN_COLOR : undefined
-  return <Text strong style={{ color }}>{v > 0 ? '+' : ''}{v.toFixed(2)} pts</Text>
+  return (
+    <Text strong style={{ color }}>
+      {v > 0 ? '+' : ''}{v.toFixed(2)} pts{isOpen && <Text type="secondary" style={{ fontWeight: 400 }}> (unrealized)</Text>}
+    </Text>
+  )
 }
 
 // Re-runs ConfluenceAlertService's exact leg-flip + confluence logic offline over whatever
@@ -126,12 +140,18 @@ export default function BacktestPage() {
   }, [selected, timeframe, strategyKey, strategy])
 
   const summary = useMemo(() => {
-    const closed = (trades ?? []).filter((t) => t.pnlPoints != null)
-    if (closed.length === 0) return null
+    // Open positions are excluded from every stat below - they haven't actually closed, so folding
+    // their unrealized P&L into Win rate/Total P&L would overstate a backtest whose most recent
+    // position simply hasn't finished yet. openCount surfaces them separately instead of silently
+    // dropping them from the summary entirely.
+    const openCount = (trades ?? []).filter((t) => t.exitReason === 'Open').length
+    const closed = (trades ?? []).filter((t) => t.pnlPoints != null && t.exitReason !== 'Open')
+    if (closed.length === 0) return openCount > 0 ? { count: 0, openCount } : null
     const wins = closed.filter((t) => t.pnlPoints > 0).length
     const totalPnl = closed.reduce((sum, t) => sum + t.pnlPoints, 0)
     return {
       count: closed.length,
+      openCount,
       wins,
       losses: closed.length - wins,
       winRate: (wins / closed.length) * 100,
@@ -202,7 +222,14 @@ export default function BacktestPage() {
       title: 'Exit',
       key: 'exit',
       width: 170,
-      render: (_, row) => row.exitTimeUtc ? <>{fmtIstTime(row.exitTimeUtc)} @ {row.exitPrice?.toFixed(2)}</> : <Text type="secondary">—</Text>,
+      render: (_, row) => {
+        if (!row.exitTimeUtc) return <Text type="secondary">—</Text>
+        const price = row.exitPrice?.toFixed(2)
+        // Open has no real fill yet - this is where the position currently marks, not an exit.
+        return row.exitReason === 'Open'
+          ? <><Text type="secondary" style={{ fontSize: 11 }}>as of </Text>{fmtIstTime(row.exitTimeUtc)} @ {price}</>
+          : <>{fmtIstTime(row.exitTimeUtc)} @ {price}</>
+      },
     },
     {
       title: 'Reason',
@@ -211,7 +238,7 @@ export default function BacktestPage() {
       width: 120,
       render: (reason) => <Tag color={EXIT_REASON_COLOR[reason]}>{EXIT_REASON_LABEL[reason] ?? reason}</Tag>,
     },
-    { title: 'P&L', dataIndex: 'pnlPoints', key: 'pnlPoints', width: 100, render: renderPnl },
+    { title: 'P&L', dataIndex: 'pnlPoints', key: 'pnlPoints', width: 130, render: (v, row) => renderPnl(v, row.exitReason === 'Open') },
   ]
 
   return (
@@ -281,10 +308,17 @@ export default function BacktestPage() {
             {summary && (
               <Row gutter={24}>
                 <Col><Statistic title="Trades" value={summary.count} /></Col>
-                <Col><Statistic title="Wins / Losses" value={`${summary.wins} / ${summary.losses}`} /></Col>
-                <Col><Statistic title="Win rate" value={summary.winRate} precision={1} suffix="%" /></Col>
-                <Col><Statistic title="Total P&L" value={summary.totalPnl} precision={2} suffix="pts" styles={{ content: { color: summary.totalPnl >= 0 ? UP_COLOR : DOWN_COLOR } }} /></Col>
-                <Col><Statistic title="Avg P&L / trade" value={summary.avgPnl} precision={2} suffix="pts" styles={{ content: { color: summary.avgPnl >= 0 ? UP_COLOR : DOWN_COLOR } }} /></Col>
+                {/* Open positions are shown separately, not folded into the stats to their left -
+                    see the summary computation for why (they have no realized P&L yet). */}
+                {summary.openCount > 0 && (
+                  <Col><Statistic title="Open" value={summary.openCount} styles={{ content: { color: OPEN_COLOR } }} /></Col>
+                )}
+                {summary.count > 0 && <>
+                  <Col><Statistic title="Wins / Losses" value={`${summary.wins} / ${summary.losses}`} /></Col>
+                  <Col><Statistic title="Win rate" value={summary.winRate} precision={1} suffix="%" /></Col>
+                  <Col><Statistic title="Total P&L" value={summary.totalPnl} precision={2} suffix="pts" styles={{ content: { color: summary.totalPnl >= 0 ? UP_COLOR : DOWN_COLOR } }} /></Col>
+                  <Col><Statistic title="Avg P&L / trade" value={summary.avgPnl} precision={2} suffix="pts" styles={{ content: { color: summary.avgPnl >= 0 ? UP_COLOR : DOWN_COLOR } }} /></Col>
+                </>}
               </Row>
             )}
 
