@@ -232,10 +232,28 @@ public sealed class StrategyTriggerHostedService : BackgroundService
 
     private async Task EvaluateAsync(StrategyTrigger trigger, CancellationToken cancellationToken)
     {
-        // Evaluated against the trigger's OWN expiry when it pins one, so an armed trigger is
-        // unaffected by which expiry any page happens to be looking at - each trigger runs
-        // independently, on its own expiry, with its own strategy.
-        var trades = _backtest.RunStrategy(trigger.Underlying, trigger.StrategyKey, trigger.TimeframeMinutes, trigger.Parameters, trigger.OrderExpiry)
+        // Which expiry's premium data this trigger reasons about: its OWN pinned one, so an armed
+        // trigger is unaffected by whatever expiry any page happens to be looking at. Each trigger
+        // runs independently - its own strategy, its own timeframe, its own expiry.
+        //
+        // The fallback matters as much as the pin. A pinned expiry that is NOT tracked (it rolled
+        // off the tracked set, or was pinned before this app tracked several at once) would resolve
+        // to no state at all, and the trigger would quietly stop producing signals - the exact
+        // silent-failure this whole change exists to remove. It falls back to the default expiry's
+        // data instead: this strategy's signals come from SPOT, which is the same whatever expiry is
+        // traded, and the ORDER is still built and priced on the pinned contract (see
+        // BuildOrderPlanAsync). Degrading to that is what the trigger did before it could pin data
+        // at all, and it says so once per evaluation rather than going dark.
+        var dataExpiry = trigger.OrderExpiry;
+        if (dataExpiry is { } pinned && _cdv.StateFor(trigger.Underlying, pinned) is null)
+        {
+            _logger.LogWarning(
+                "Trigger {Name}: expiry {Expiry} is not tracked - reading signals from the default expiry's data. The order is still placed on {Expiry}.",
+                trigger.Name, pinned, pinned);
+            dataExpiry = null;
+        }
+
+        var trades = _backtest.RunStrategy(trigger.Underlying, trigger.StrategyKey, trigger.TimeframeMinutes, trigger.Parameters, dataExpiry)
             .OrderBy(t => t.SignalTimeUtc)
             .ToList();
 
@@ -270,7 +288,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         // The strategy's own EntrySignals carries the human-readable WHY ("Spot crossed down +
         // ATM PE confirmed + ...") that BacktestTrade doesn't - matched back by time+direction so
         // the alert explains the reasoning, not just the fill RunStrategy decided on.
-        var reasons = _backtest.ReplayForStrategy(trigger.Underlying, trigger.StrategyKey, trigger.TimeframeMinutes, trigger.Parameters, trigger.OrderExpiry)
+        var reasons = _backtest.ReplayForStrategy(trigger.Underlying, trigger.StrategyKey, trigger.TimeframeMinutes, trigger.Parameters, dataExpiry)
             .Where(s => s.Kind is "Entry" or "Confluence")
             .ToDictionary(s => (s.TimeUtc, s.Direction), s => s.Summary);
 
