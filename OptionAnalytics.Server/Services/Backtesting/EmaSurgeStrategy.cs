@@ -19,12 +19,11 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 ///   3. THE VOLUME MUST BE IN LINE - the CE and PE curves have to agree with the direction. See
 ///      VolumeAlignment below for what "in line" means and why it replaced the old surge-only test.
 ///
-/// Note on the CDV option: CDV is day-scoped - it resets every trading day and only the current
-/// day's series is ever in memory (see BacktestStrategyContext.CdvSeries). Requiring CDV
-/// (VolumeCdvOnly / VolumeBoth) therefore restricts this backtest to signals inside TODAY's session,
-/// however many days of spot and OBV history the rest of the run has. The default
-/// (VolumeEitherSource) is immune to that: CDV having no data that far back simply means OBV is the
-/// one that answers, rather than the whole signal being dropped.
+/// Note on the CDV option: CDV now covers the whole backfill window, not just today, so requiring
+/// it (VolumeCdvOnly / VolumeBoth) no longer confines this backtest to today's session the way it
+/// once did. Reading it still differs from OBV in one way that matters: CDV is a session indicator,
+/// so every trading day restarts at zero - a value means "how far this DAY has moved", never a
+/// level carried across days.
 ///
 /// Every step above is about the DIRECTION of the move, so the signals this produces are identical
 /// whether the Position is Buy or Sell - only what gets traded off them differs (a bullish view is
@@ -208,8 +207,8 @@ public sealed class EmaSurgeStrategy : IBacktestStrategy
 
     /// <summary>Is this CE/PE pair in line with the direction at <paramref name="asOf"/>? Both
     /// series are read at their last point at or before that time, so a source that doesn't reach
-    /// back that far (CDV on any day but today) reports "no data" rather than a false verdict - and
-    /// with the default OBV-or-CDV setting that costs nothing, since OBV answers instead.</summary>
+    /// back that far reports "no data" rather than a false verdict - and with the default
+    /// OBV-or-CDV setting that costs nothing, since OBV answers instead.</summary>
     private static VolumeAlignment Align(
         IReadOnlyList<ObvPoint> ce, IReadOnlyList<ObvPoint> pe, DateTimeOffset asOf, bool isBullish,
         decimal alignmentMode, SurgeSettings surge)

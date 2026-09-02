@@ -137,12 +137,18 @@ public sealed class CdvUnderlyingState
     private readonly Dictionary<DateTimeOffset, decimal> _backfillCeIncrements = new();
     private readonly Dictionary<DateTimeOffset, decimal> _backfillPeIncrements = new();
 
-    // Same increments-then-finalize shape as the pair above, but for the previous trading day's
-    // reference curve (see SeedPreviousDayStrike/FinalizePreviousDay) - a completely separate
-    // series from _closedBars/_backfillCe/PeIncrements, never merged into today's running total.
-    private readonly Dictionary<DateTimeOffset, decimal> _previousDayCeIncrements = new();
-    private readonly Dictionary<DateTimeOffset, decimal> _previousDayPeIncrements = new();
-    private readonly List<CdvBarPoint> _previousDaySeries = new();
+    // Same increments-then-finalize shape as the pair above, but for EVERY PAST trading day in the
+    // backfill window rather than today (see SeedHistoricalDayStrike/FinalizeHistory) - a
+    // completely separate series from _closedBars/_backfillCe/PeIncrements, never merged into
+    // today's running total. Keyed by IST trading day, because each day's curve has to be
+    // accumulated independently: CDV is a SESSION indicator, so every day restarts at zero.
+    private readonly Dictionary<DateOnly, Dictionary<DateTimeOffset, decimal>> _historyCeIncrements = new();
+    private readonly Dictionary<DateOnly, Dictionary<DateTimeOffset, decimal>> _historyPeIncrements = new();
+
+    // Every past day's finished curve, chronological, days laid end to end - each one starting at
+    // its own zero. This is what makes CDV answerable across the whole backfill window instead of
+    // only for today.
+    private readonly List<CdvBarPoint> _historySeries = new();
 
     public CdvUnderlyingState(string underlying)
     {
@@ -182,9 +188,9 @@ public sealed class CdvUnderlyingState
             _currentBar = null;
             _backfillCeIncrements.Clear();
             _backfillPeIncrements.Clear();
-            _previousDayCeIncrements.Clear();
-            _previousDayPeIncrements.Clear();
-            _previousDaySeries.Clear();
+            _historyCeIncrements.Clear();
+            _historyPeIncrements.Clear();
+            _historySeries.Clear();
             AtmStrike = null;
             Expiry = null;
         }
@@ -399,61 +405,103 @@ public sealed class CdvUnderlyingState
         }
     }
 
-    /// <summary>Contributes one strike's previous-trading-day bars to the reference curve (see
-    /// FinalizePreviousDay) - the same bar-proxy-delta math SeedStrikeHistory's CDV path uses,
-    /// weighted by delta at the CURRENT spot (today's - the same fixed-reference approximation),
-    /// but into a completely separate accumulator so it never touches today's RunningCdv or
-    /// _closedBars. Called once per strike, alongside SeedStrikeHistory, only for the underlying's
-    /// first backfill batch of the day (same restriction and reason as includeInCdvHistory: a
-    /// strike added on a later batch wasn't part of the window this reference curve covers).
-    /// </summary>
-    public void SeedPreviousDayStrike(uint securityId, IReadOnlyList<CandleWithVolume> previousDayBars, decimal currentSpot)
+    /// <summary>Contributes one strike's PAST-day bars - every past trading day in the backfill
+    /// window, not just yesterday - to the historical CDV reconstruction, using the same
+    /// bar-proxy-delta math SeedStrikeHistory's CDV path uses. Accumulated per IST trading day, so
+    /// FinalizeHistory can run each day's total from its own zero: CDV is a session indicator, and
+    /// carrying one day's total into the next is exactly the compounding this app had to fix once
+    /// already (see TradingDay).
+    ///
+    /// <paramref name="spotByTime"/> is the underlying's own 1-minute spot history, used to weight
+    /// each bar by the moneyness that ACTUALLY applied when it traded. That matters much more here
+    /// than it does for today: a strike sitting at ATM two weeks ago can be far OTM now, and
+    /// weighting it by today's spot (as the previous-day-only version did) would score its volume
+    /// at near zero. Bars with no matching spot fall back to <paramref name="fallbackSpot"/>.
+    ///
+    /// Called once per strike, alongside SeedStrikeHistory, only for the underlying's first
+    /// backfill batch of the day (same restriction and reason as includeInCdvHistory).</summary>
+    public void SeedHistoricalDayStrike(
+        uint securityId, IReadOnlyList<CandleWithVolume> pastBars,
+        IReadOnlyDictionary<DateTimeOffset, decimal> spotByTime, decimal fallbackSpot)
     {
         lock (_lock)
         {
-            if (!_strikes.TryGetValue(securityId, out var strike) || previousDayBars.Count == 0) return;
+            if (!_strikes.TryGetValue(securityId, out var strike) || pastBars.Count == 0) return;
 
-            var weight = currentSpot > 0 ? ComputeDeltaWeight(strike.Strike, currentSpot, strike.IsCall) : 0m;
-            var increments = strike.IsCall ? _previousDayCeIncrements : _previousDayPeIncrements;
-            foreach (var bar in previousDayBars.OrderBy(b => b.Time))
+            foreach (var bar in pastBars.OrderBy(b => b.Time))
             {
-                var delta = BarProxyDelta(bar) * weight;
+                var spot = spotByTime.TryGetValue(bar.Time, out var atBar) && atBar > 0 ? atBar : fallbackSpot;
+                if (spot <= 0) continue;
+
+                var day = DateOnly.FromDateTime(bar.Time.ToOffset(TimeSpan.FromHours(5.5)).DateTime);
+                var byDay = strike.IsCall ? _historyCeIncrements : _historyPeIncrements;
+                if (!byDay.TryGetValue(day, out var increments))
+                    byDay[day] = increments = new Dictionary<DateTimeOffset, decimal>();
+
+                var delta = BarProxyDelta(bar) * ComputeDeltaWeight(strike.Strike, spot, strike.IsCall);
                 increments[bar.Time] = increments.GetValueOrDefault(bar.Time) + delta;
             }
         }
     }
 
-    /// <summary>Turns the previous day's per-strike increments into one chronological reference
-    /// series - what GetPreviousDaySeries serves, shown alongside (never merged into) today's live
-    /// CDV so the two trading days can be visually compared without today's total losing its own
-    /// "starts at zero" meaning. Safe to call with nothing pending - a no-op.</summary>
-    public void FinalizePreviousDay()
+    /// <summary>Turns every past day's per-strike increments into one chronological series, each
+    /// day accumulated from its OWN zero and the days laid end to end. Safe to call with nothing
+    /// pending - a no-op.</summary>
+    public void FinalizeHistory()
     {
         lock (_lock)
         {
-            if (_previousDayCeIncrements.Count == 0 && _previousDayPeIncrements.Count == 0) return;
+            if (_historyCeIncrements.Count == 0 && _historyPeIncrements.Count == 0) return;
 
-            var minutes = _previousDayCeIncrements.Keys.Concat(_previousDayPeIncrements.Keys).Distinct().OrderBy(t => t).ToList();
-            decimal ce = 0, pe = 0;
-            _previousDaySeries.Clear();
-            foreach (var minute in minutes)
+            _historySeries.Clear();
+            var days = _historyCeIncrements.Keys.Concat(_historyPeIncrements.Keys).Distinct().OrderBy(d => d);
+
+            foreach (var day in days)
             {
-                ce += _previousDayCeIncrements.GetValueOrDefault(minute);
-                pe += _previousDayPeIncrements.GetValueOrDefault(minute);
-                _previousDaySeries.Add(new CdvBarPoint(minute, ce, pe));
+                var ceIncrements = _historyCeIncrements.GetValueOrDefault(day) ?? new Dictionary<DateTimeOffset, decimal>();
+                var peIncrements = _historyPeIncrements.GetValueOrDefault(day) ?? new Dictionary<DateTimeOffset, decimal>();
+
+                var minutes = ceIncrements.Keys.Concat(peIncrements.Keys).Distinct().OrderBy(t => t);
+
+                // Back to zero for every day - the session-indicator rule, applied per day rather
+                // than only to today.
+                decimal ce = 0, pe = 0;
+                foreach (var minute in minutes)
+                {
+                    ce += ceIncrements.GetValueOrDefault(minute);
+                    pe += peIncrements.GetValueOrDefault(minute);
+                    _historySeries.Add(new CdvBarPoint(minute, ce, pe));
+                }
             }
 
-            _previousDayCeIncrements.Clear();
-            _previousDayPeIncrements.Clear();
+            _historyCeIncrements.Clear();
+            _historyPeIncrements.Clear();
         }
     }
 
-    /// <summary>The previous trading day's reconstructed CDV curve - served by GET
-    /// /api/cdv/{underlying}/previous-day-series, empty until the first backfill batch of the day
-    /// has run.</summary>
+    /// <summary>The most recent PAST trading day's reconstructed CDV curve - served by GET
+    /// /api/cdv/{underlying}/previous-day-series as the dashboard's reference line, unchanged in
+    /// meaning now that the whole window is reconstructed rather than just this one day: it is
+    /// simply the last day's slice of it.</summary>
     public IReadOnlyList<CdvBarPoint> GetPreviousDaySeries()
     {
-        lock (_lock) { return new List<CdvBarPoint>(_previousDaySeries); }
+        lock (_lock)
+        {
+            if (_historySeries.Count == 0) return Array.Empty<CdvBarPoint>();
+
+            var lastDay = DateOnly.FromDateTime(_historySeries[^1].Time.ToOffset(TimeSpan.FromHours(5.5)).DateTime);
+            return _historySeries
+                .Where(p => DateOnly.FromDateTime(p.Time.ToOffset(TimeSpan.FromHours(5.5)).DateTime) == lastDay)
+                .ToList();
+        }
+    }
+
+    /// <summary>Every past trading day's reconstructed CDV, chronological - the multi-day history
+    /// GetSmoothedCdvSeries prepends to today so a backtest can ask a CDV question about any day in
+    /// the window, not only the current one.</summary>
+    public IReadOnlyList<CdvBarPoint> GetHistorySeries()
+    {
+        lock (_lock) { return new List<CdvBarPoint>(_historySeries); }
     }
 
     /// <summary>Pine's own bar-proxy delta formula (close-in-range classification), the same
@@ -762,7 +810,14 @@ public sealed class CdvUnderlyingState
     {
         lock (_lock)
         {
-            var series = new List<CdvBarPoint>(_closedBars);
+            // Every past day's reconstructed curve first, then today's - so a backtest can ask a CDV
+            // question about any day in the backfill window. Each day still starts at its own zero
+            // (see FinalizeHistory): this concatenates day-scoped curves, it does not accumulate one
+            // running total across days, which is the compounding TradingDay's doc comment warns
+            // about. The EMA below deliberately runs continuously across the joins, exactly as it
+            // does for OBV - only the input resets per day.
+            var series = new List<CdvBarPoint>(_historySeries);
+            series.AddRange(_closedBars);
             if (_currentBar is { } bar) series.Add(bar);
             if (series.Count == 0) return Array.Empty<ObvPoint>();
 

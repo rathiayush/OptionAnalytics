@@ -36,17 +36,16 @@ public sealed class BacktestStrategyContext
     /// <summary>The delta-weighted CE/PE OBV series (see CdvUnderlyingState.GetObvSeries), already
     /// aggregated to TimeframeMinutes - day-baselined and EMA-smoothed exactly as the dashboard's
     /// OBV chart plots it, so a strategy measuring an OBV surge measures the same numbers the chart
-    /// shows. CDV deliberately isn't here: it is day-scoped (it resets every trading day and only
-    /// today's series exists in memory), so it cannot answer a lookback question across the
-    /// multi-day window a backtest runs over, while OBV carries its full history.</summary>
+    /// shows. CDV is carried separately below - the two measure different things and a strategy
+    /// may want either or both.</summary>
     public required IReadOnlyList<ObvPoint> ObvCeSeries { get; init; }
     public required IReadOnlyList<ObvPoint> ObvPeSeries { get; init; }
 
     /// <summary>The EMA-smoothed CE/PE CDV series (see CdvUnderlyingState.GetSmoothedCdvSeries),
-    /// aggregated to TimeframeMinutes - the same numbers the CDV lookback table reports on. Unlike
-    /// OBV this is DAY-SCOPED: CDV resets every trading day, so only the current day is ever
-    /// present, and a strategy that requires CDV confirmation can therefore only ever produce
-    /// signals within today's session however far back the rest of the backtest reaches.</summary>
+    /// aggregated to TimeframeMinutes - the same numbers the CDV lookback table reports on. Covers
+    /// the whole backfill window, same as OBV, with one difference in SHAPE that matters when
+    /// reading it: CDV is a session indicator, so every trading day restarts at zero rather than
+    /// carrying forward. Compare a value to that DAY's own open, never to a previous day's level.</summary>
     public required IReadOnlyList<ObvPoint> CdvCeSeries { get; init; }
     public required IReadOnlyList<ObvPoint> CdvPeSeries { get; init; }
 

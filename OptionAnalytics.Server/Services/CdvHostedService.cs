@@ -547,12 +547,17 @@ public sealed class CdvHostedService : BackgroundService
     {
         var today = DateOnly.FromDateTime(DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(5.5)).DateTime);
         var fromDay = today.AddDays(-HistoryLookbackCalendarDays);
-        // The previous-day reference line's target date - a plain weekday-skip, same "accepted
-        // approximation" LiveSpreadCalculator's own CDV backfill uses (not exchange-holiday aware;
-        // a strike simply contributes nothing for a day it has no bars for, same graceful
-        // degradation as everywhere else in this backfill).
-        var previousDay = PreviousWeekday(today);
         var seededCount = 0;
+
+        // The underlying's own 1-minute spot history, so each historical option bar can be weighted
+        // by the moneyness that ACTUALLY applied when it traded rather than by today's spot. Over a
+        // 15-day window that difference is large: a strike at ATM two weeks ago can be far OTM now,
+        // and today's spot would score its volume at nearly nothing. Empty (a spot backfill that
+        // hasn't landed yet) simply falls back to currentSpot per bar, which is the behaviour this
+        // replaces.
+        var spotByTime = _spotFeed.States.TryGetValue(underlying, out var spotState)
+            ? spotState.GetClosedCandles().GroupBy(c => c.Time).ToDictionary(g => g.Key, g => g.Last().Close)
+            : new Dictionary<DateTimeOffset, decimal>();
 
         // Only the underlying's very first backfill batch feeds the combined CDV reconstruction -
         // see CdvUnderlyingState.SeedStrikeHistory's includeInCdvHistory doc comment for why a later
@@ -582,16 +587,20 @@ public sealed class CdvHostedService : BackgroundService
             var trimmed = TrimToRecentTradingDays(bars, HistoryTradingDays);
             if (trimmed.Count == 0) continue;
 
-            // trimmed spans up to HistoryTradingDays for the ATM CE/PE candle+OBV chart (a
-            // legitimate multi-day price series), but CDV is day-scoped (see CdvUnderlyingState.
-            // Reset) - only today's own slice of that same fetch feeds the CDV reconstruction.
+            // trimmed spans up to HistoryTradingDays. Today's own slice feeds the LIVE running
+            // total that ticks then continue from; the earlier days are reconstructed separately
+            // just below, each restarting at its own zero (CDV is a session indicator - see
+            // CdvUnderlyingState.TradingDay).
             var todayBars = trimmed.Where(b => IstDate(b.Time) == today).ToList();
             state.SeedStrikeHistory(securityId, trimmed, todayBars, currentSpot, includeInCdvHistory);
 
             if (includeInCdvHistory)
             {
-                var previousDayBars = trimmed.Where(b => IstDate(b.Time) == previousDay).ToList();
-                state.SeedPreviousDayStrike(securityId, previousDayBars, currentSpot);
+                // EVERY past day in the window, not just yesterday - CDV still restarts at zero for
+                // each of them (see CdvUnderlyingState.FinalizeHistory), it is simply retained now
+                // rather than discarded, so a backtest can ask a CDV question about any day.
+                var pastBars = trimmed.Where(b => IstDate(b.Time) != today).ToList();
+                state.SeedHistoricalDayStrike(securityId, pastBars, spotByTime, currentSpot);
             }
 
             seededCount++;
@@ -614,7 +623,7 @@ public sealed class CdvHostedService : BackgroundService
             else
             {
                 state.FinalizeCdvBackfill();
-                state.FinalizePreviousDay();
+                state.FinalizeHistory();
             }
         }
         _logger.LogInformation("CDV: backfilled {Seeded}/{Total} contract(s) for {Underlying} (CDV history {Included}).",
@@ -622,12 +631,6 @@ public sealed class CdvHostedService : BackgroundService
             includeInCdvHistory ? (seededCount > 0 ? "included" : "failed - will retry") : "not included - later batch");
     }
 
-    private static DateOnly PreviousWeekday(DateOnly day)
-    {
-        var prev = day.AddDays(-1);
-        while (prev.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday) prev = prev.AddDays(-1);
-        return prev;
-    }
 
     /// <summary>Same trimming SpotFeedHostedService.TrimToRecentTradingDays does for the spot chart -
     /// keeps only the most recent HistoryTradingDays distinct IST calendar dates actually present,
