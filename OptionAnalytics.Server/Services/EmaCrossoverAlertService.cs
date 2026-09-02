@@ -54,7 +54,11 @@ public sealed class EmaCrossoverAlertService : BackgroundService
         _lastAlertedBarTime[state.Underlying] = last.Time;
 
         var detail = direction == "Bullish" ? "Bullish - EMA9 crossed above EMA21" : "Bearish - EMA9 crossed below EMA21";
-        var message = $"<b>{state.Underlying}</b> EMA 9/21 crossover\n{detail}\nClose: {last.Close:N2}\nBar: {last.Time:yyyy-MM-dd HH:mm} UTC";
+        // [Spot EMA] up front - this fires on the SPOT leg alone, every time it crosses, for both
+        // underlyings, with no strategy logic behind it. In the same Telegram chat as Confluence
+        // alerts and armed Strategy Triggers, a message needs to say which of the three it is
+        // before you read past the first line, since a push notification preview only shows that.
+        var message = $"[Spot EMA] <b>{state.Underlying}</b> EMA 9/21 crossover\n{detail}\nClose: {last.Close:N2}\nBar: {last.Time:yyyy-MM-dd HH:mm} UTC";
         _logger.LogInformation("EMA 9/21 crossover for {Underlying}: {Direction} at close {Close}.", state.Underlying, detail, last.Close);
         _ = _telegram.SendAsync(message, cancellationToken);
     }
