@@ -132,12 +132,14 @@ public sealed class CdvController : ControllerBase
         return Ok(_cdv.GetExpiryOptions(underlying.ToUpperInvariant()));
     }
 
-    /// <summary>Switches this underlying onto a different listed expiry - unsubscribes the current
-    /// expiry's contracts from the Dhan feed and re-centers onto the new one, wiping and rebuilding
-    /// the CDV/OBV/option-chain state both the dashboard and the Backtrack page read (see
-    /// CdvHostedService.SelectExpiryAsync for exactly what that entails and why the reset is
-    /// required). A null (or omitted) 'expiry' clears back to auto (nearest-expiry) tracking - it is
-    /// not an error. 400 with a reason when the underlying or a non-null expiry isn't recognized.</summary>
+    /// <summary>Points this underlying's ALWAYS-ON consumers - the SignalR broadcast and the live
+    /// alert services, which have no page to ask - at a different tracked expiry. Every tracked
+    /// expiry is held live at once now, so this is a pointer move rather than the unsubscribe-wipe-
+    /// re-backfill it used to be (see CdvHostedService.SelectExpiryAsync).
+    ///
+    /// Pages do NOT need this: they pass ?expiry= on their own read requests and never disturb each
+    /// other. A null (or omitted) 'expiry' reverts to the nearest tracked expiry. 400 with a reason
+    /// when the underlying is unknown or that expiry is not currently tracked.</summary>
     [HttpPost("{underlying}/expiry")]
     public async Task<IActionResult> SelectExpiry(string underlying, [FromBody] SelectExpiryRequest? request, CancellationToken cancellationToken)
     {

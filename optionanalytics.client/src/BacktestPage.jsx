@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Select, Space, Typography, Spin, Card, Button, Table, Tag, InputNumber, Statistic, Row, Col, DatePicker } from 'antd'
 import { ReloadOutlined, PlayCircleOutlined } from '@ant-design/icons'
-import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, NavBar, DirectionTag, ALERT_KIND_LABEL, fmtIstDateTime, fmtIstTime, fmtPrice, istDateKey, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect } from './shared.jsx'
+import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, NavBar, DirectionTag, ALERT_KIND_LABEL, fmtIstDateTime, fmtIstTime, fmtPrice, istDateKey, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry } from './shared.jsx'
 
 const { Title, Text } = Typography
 const { RangePicker } = DatePicker
@@ -82,11 +82,10 @@ export default function BacktestPage() {
 
   const strategy = strategies.find((s) => s.key === strategyKey) ?? null
 
-  // Which expiry CDV is tracking for `selected` - shared with the Dashboard page (see
-  // useExpirySelector's own doc comment); this page reads the same server-side CdvUnderlyingState
-  // the Dashboard does, so switching expiry here rebuilds it exactly the same way. Re-runs signals
-  // and trades once the switch has actually landed, same as the underlying/timeframe effect below.
-  const { expiries, selectedExpiry, isManual: expiryIsManual, loading: expiryLoading, selectExpiry } = useExpirySelector(selected)
+  // Which expiry THIS PAGE backtests against - see useExpirySelector. Every tracked expiry is held
+  // live server-side, so this is just a different ?expiry= on this page's own requests: backtesting
+  // next month here leaves the Dashboard and every armed trigger exactly where they were.
+  const { expiries, selectedExpiry, expiryParam, isManual: expiryIsManual, loading: expiryLoading, selectExpiry } = useExpirySelector(selected)
   const handleExpiryChange = (expiry) => {
     selectExpiry(expiry).then(() => {
       loadSignals()
@@ -127,7 +126,7 @@ export default function BacktestPage() {
     if (!selected || !strategyKey) return
     setSignalsLoading(true)
     const paramQuery = Object.entries(paramValues).map(([k, v]) => `${k}=${v}`).join('&')
-    fetch(`/api/backtest/${selected}?strategy=${strategyKey}&timeframe=${timeframe}&${paramQuery}`)
+    fetch(withExpiry(`/api/backtest/${selected}?strategy=${strategyKey}&timeframe=${timeframe}&${paramQuery}`, expiryParam))
       .then((r) => r.json())
       .then((data) => setSignals(data ?? []))
       .catch((err) => console.error('Failed to load backtest signals:', err))
@@ -138,7 +137,7 @@ export default function BacktestPage() {
     if (!selected || !strategyKey) return
     setTradesLoading(true)
     const paramQuery = Object.entries(paramValues).map(([k, v]) => `${k}=${v}`).join('&')
-    fetch(`/api/backtest/${selected}/trades?strategy=${strategyKey}&timeframe=${timeframe}&${paramQuery}`)
+    fetch(withExpiry(`/api/backtest/${selected}/trades?strategy=${strategyKey}&timeframe=${timeframe}&${paramQuery}`, expiryParam))
       .then((r) => r.json())
       .then((data) => setTrades(data ?? []))
       .catch((err) => console.error('Failed to load backtest trades:', err))
@@ -156,7 +155,7 @@ export default function BacktestPage() {
     loadSignals()
     runTrades()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected, timeframe, strategyKey, strategy])
+  }, [selected, timeframe, strategyKey, strategy, expiryParam])
 
   const [fromDay, toDay] = useMemo(() => {
     const from = dateRange?.[0] ? dateRange[0].format('YYYY-MM-DD') : null
