@@ -475,6 +475,16 @@ public sealed class StrategyTriggerHostedService : BackgroundService
             return (null, $"no expiry is currently tracked for {trade.Underlying}");
         }
 
+        // Belt and braces alongside the DhanOptionChainMaster singleton fix: this service never
+        // otherwise calls EnsureLoadedAsync itself, so it was passively relying on CdvHostedService's
+        // OWN background loop to keep the (now shared) instance warm. That is fine in steady state,
+        // but for roughly the first minute after ANY restart - before CdvHostedService's own
+        // StartupDelay elapses and its first RecenterAsync runs - the shared master genuinely has
+        // nothing loaded yet, and a signal firing in that narrow window would still see "0 contracts"
+        // even with the DI fix. EnsureLoadedAsync is a no-op once fresh (IsFresh), so this costs
+        // nothing on every other call - it only matters the one time it is actually still empty.
+        await _optionChainMaster.EnsureLoadedAsync(cancellationToken);
+
         var contract = _optionChainMaster.Find(trade.Underlying, expiry.Value, trade.Strike, isCall);
         if (contract is null)
         {
