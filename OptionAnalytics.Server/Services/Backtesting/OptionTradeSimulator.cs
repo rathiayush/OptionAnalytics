@@ -4,10 +4,10 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 
 /// <summary>
 /// The shared "given entry signals, what trades result?" engine. Every strategy so far differs only
-/// in WHEN it wants to enter - the mechanics after that (which leg to trade, entry at the next
-/// bar's open, the points-based stop/target, the day-close exit, one position at a time) are
-/// identical, so they live here once instead of being copy-pasted per strategy. A new strategy
-/// supplies its own entry signals and gets all of this for free.
+/// in WHEN it wants to enter - the mechanics after that (which leg to trade, entry pricing, the
+/// points-based stop/target, the day-close exit, one position at a time) are identical, so they
+/// live here once instead of being copy-pasted per strategy. A new strategy supplies its own entry
+/// signals and gets all of this for free.
 ///
 /// The rules, in one place:
 ///   - A buyer trades the leg matching the view (bullish -> CE); a seller trades the OPPOSITE leg
@@ -15,20 +15,20 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 ///   - The strike is StrikeOffset steps from the ATM AS IT WAS AT THE SIGNAL - not whatever is ATM
 ///     now - so an old signal is judged against the strike it actually pointed at. The offset is
 ///     signed: positive is OTM for the traded leg, negative ITM, 0 is ATM itself.
-///   - Entry is that contract's NEXT bar's open. The signal bar's own close is never tradeable in
-///     real time, so entering on it would be look-ahead bias.
-///
-///     A signal at bar [s, s+timeframe) confirms the instant that bar closes, at s+timeframe -
-///     entry is the OPEN of the very next bar, priced at s+timeframe too (a bar's open is set the
-///     moment it begins). That price is real and standard for a backtest to use - what's NOT free
-///     is when anyone actually finds out about it: this whole app only ever trusts a CLOSED bar
-///     (BacktestStrategyContext.GetOptionBars, every state class's GetClosedCandles), so the entry
-///     bar's own open isn't READABLE until IT ALSO closes, one full bar-length later - which is
-///     also the earliest a live Strategy Trigger's Telegram alert can go out. That gap (one bar,
-///     e.g. a 5-minute strategy alerting ~5 minutes after the price it quotes) is real but
-///     irreducible at this reading discipline: pushing entry even LATER doesn't shrink it, since
-///     the next bar's open is exactly as stale relative to ITS OWN close-and-become-readable
-///     moment. It's a latency to understand, not a bug to keep chasing bar by bar.
+///   - Entry is that contract's OWN close on the SAME bar the signal confirmed on - not a further
+///     bar afterward. A signal at bar [s, s+timeframe) confirms the instant that bar closes, at
+///     s+timeframe; that bar's Close is a real, already-traded price at that exact same instant
+///     (the print that confirmed the signal in the first place), so entering there is not
+///     look-ahead - the trader is not seeing anything that has not already happened. Waiting for a
+///     FURTHER bar to open (this app's previous rule) added a full extra bar-length of pure latency
+///     without removing any actual look-ahead risk, since a bar's open is exactly as unknowable as
+///     its own close until wall-clock time reaches that same instant either way - it just measured
+///     "the same instant" one bar later than it needed to. Real fill slippage away from this close
+///     is what StrategyTrigger.SlippagePoints (the live LIMIT order's own marketable buffer) already
+///     exists to absorb, not something an extra idle bar of waiting approximates any better.
+///   - Only price action AFTER entry is checked for stop/target - the walk starts at the bar AFTER
+///     the signal bar, never the signal bar's own High/Low, since that range happened before the
+///     position existed.
 ///   - Stop-loss/take-profit are absolute premium points, and mirror for a seller (target below
 ///     entry, stop above) since a seller profits as the premium falls. Both are floored at 0 -
 ///     a premium cannot go negative.
@@ -130,26 +130,32 @@ public static class OptionTradeSimulator
                 strikeCandleCache[(strike, isCall)] = optionBars;
             }
 
-            var entryIndex = FindFirstAfter(optionBars, signal.Time);
-            if (entryIndex < 0 || optionBars[entryIndex].Open <= 0)
+            // The signal's OWN bar, not the next one - see this class's own doc comment for why
+            // that bar's Close is the entry price rather than look-ahead.
+            var signalIndex = FindAt(optionBars, signal.Time);
+            if (signalIndex < 0 || optionBars[signalIndex].Close <= 0)
             {
                 trades.Add(BacktestTrade.NoData(underlying, signal.Time, signal.Direction, side, optionType, strike, signalSpotBar.Close));
                 continue;
             }
 
-            var entryBar = optionBars[entryIndex];
-            var entryPrice = entryBar.Open;
+            var signalBar = optionBars[signalIndex];
+            var entryTime = signalBar.Time + TimeSpan.FromMinutes(context.TimeframeMinutes); // the instant the signal bar - and so the signal itself - actually closed
+            var entryPrice = signalBar.Close;
             var takeProfitPrice = isSell ? Math.Max(0, entryPrice - tpPoints) : entryPrice + tpPoints;
             var stopLossPrice = isSell ? entryPrice + slPoints : Math.Max(0, entryPrice - slPoints);
-            var entryDay = BacktestUtil.IstDate(entryBar.Time);
+            var entryDay = BacktestUtil.IstDate(entryTime);
 
-            var exitTime = entryBar.Time;
-            var exitPrice = entryBar.Close;
+            var exitTime = entryTime;
+            var exitPrice = entryPrice;
             string? exitReason = null;
-            var forcedExit = FirstAtOrAfter(forcedExitTimes, entryBar.Time);
+            var forcedExit = FirstAtOrAfter(forcedExitTimes, entryTime);
             var signalExit = signalExits is not null && signalExits.TryGetValue(signal.Time, out var se) ? se : ((DateTimeOffset Time, string Reason)?)null;
 
-            for (var i = entryIndex; i < optionBars.Count && BacktestUtil.IstDate(optionBars[i].Time) == entryDay; i++)
+            // Starts AFTER the signal bar, never at it - its own High/Low happened BEFORE entry
+            // (which is at its very last instant, the close), so checking stop/target against that
+            // range would be judging the trade against price action it was never exposed to.
+            for (var i = signalIndex + 1; i < optionBars.Count && BacktestUtil.IstDate(optionBars[i].Time) == entryDay; i++)
             {
                 var bar = optionBars[i];
                 // Conservative when a single bar's range spans both thresholds (a volatile bar
@@ -196,7 +202,7 @@ public static class OptionTradeSimulator
 
             trades.Add(new BacktestTrade(
                 underlying, signal.Time, signal.Direction, side, optionType, strike, signalSpotBar.Close,
-                entryBar.Time, entryPrice, exitTime, exitPrice, exitReason, pnlPoints));
+                entryTime, entryPrice, exitTime, exitPrice, exitReason, pnlPoints));
         }
 
         return trades.OrderByDescending(t => t.SignalTimeUtc).ToList();
@@ -212,11 +218,16 @@ public static class OptionTradeSimulator
         return null;
     }
 
-    private static int FindFirstAfter(IReadOnlyList<Candle> bars, DateTimeOffset time)
+    /// <summary>The bar whose own bucket starts exactly at <paramref name="time"/> - the signal
+    /// bar itself, since a signal's Time is always its own confirming bucket's start (see
+    /// BacktestUtil.AggregateCandles). -1 if that bucket has no data yet for this contract (either
+    /// genuinely never tracked, or - for a signal from this exact instant - not even one native
+    /// minute of it has closed yet; self-corrects on the next evaluation).</summary>
+    private static int FindAt(IReadOnlyList<Candle> bars, DateTimeOffset time)
     {
         for (var i = 0; i < bars.Count; i++)
         {
-            if (bars[i].Time > time) return i;
+            if (bars[i].Time == time) return i;
         }
         return -1;
     }

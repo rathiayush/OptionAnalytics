@@ -43,20 +43,21 @@ public sealed record StrategyTrigger(
     /// fill nobody would actually want. Only meaningful when LiveTradingEnabled.</summary>
     public decimal MaxDeviationPercent { get; init; } = 10;
 
-    /// <summary>Price the order off the LIVE premium at the moment the alert fires, instead of the
-    /// simulator's next-bar-open.
+    /// <summary>Price the order off the strike's LIVE tick right now, instead of the signal bar's
+    /// own already-closed close (OptionTradeSimulator's own entry price - see its doc comment).
     ///
-    /// Off (the default), the trigger waits for the option's NEXT bar to close so the backtest can
-    /// resolve a real fill price, then prices the order off that - faithful to what Backtrack
-    /// measured, but it means a 5-minute strategy alerts about five minutes after the price it
-    /// quotes, because that bar is not readable until it has closed.
+    /// Off (the default, and the one that matches what Backtrack itself shows for the same signal):
+    /// the entry is that signal bar's Close, which is already a real, fixed, past price the instant
+    /// the signal exists - no further bar has to close first, and the same code path Backtrack runs
+    /// resolves it, so the live fill and the backtested one price identically.
     ///
-    /// On, the signal is actionable the instant the SIGNAL bar closes: the entry reference becomes
-    /// whatever the strike is trading at right then (CdvUnderlyingState's latest bar, still-forming
-    /// one included), and the limit/SL/target are derived from that. That removes the stale bar, at
-    /// the cost of the live entry no longer matching what the BACKTEST modelled for the same signal
-    /// - a backtest has no tick history, so it cannot reproduce "the premium at that instant" and
-    /// keeps using the next bar's open. Tune on Backtrack, but expect the live fill to differ.
+    /// On: the entry reference is instead whatever the strike is trading at RIGHT NOW
+    /// (CdvUnderlyingState's latest bar, still-forming one included) rather than the signal bar's
+    /// fixed Close - a different, later-in-time price that a backtest has no tick history to
+    /// reproduce, so the live fill will not match what Backtrack modelled for the same signal. Only
+    /// useful for a strategy that wants to react to price movement AFTER the signal bar closed
+    /// rather than trade the print that confirmed the signal; not a "faster" mode any more, since
+    /// the default path no longer waits on anything either.
     ///
     /// Defaults to false, including for every trigger created before this existed - the price a
     /// live order is built from must never change underneath an already-armed trigger.</summary>
