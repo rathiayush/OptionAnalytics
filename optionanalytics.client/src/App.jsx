@@ -951,6 +951,11 @@ function DashboardPage() {
   const [cdvSeries, setCdvSeries] = useState([])
   const [cdvSnapshot, setCdvSnapshot] = useState(null)
   const [cdvPrevDaySeries, setCdvPrevDaySeries] = useState([])
+  // Every PAST trading day in the backfill window (today excluded), each day's own curve reset to
+  // zero and laid end to end - see CdvController.GetHistorySeries. Concatenated with today's own
+  // cdvSeries below for one continuous multi-day CDV line, the same span the OBV chart already
+  // shows in a single request (OBV never resets, so it never needed a second call for this).
+  const [cdvHistorySeries, setCdvHistorySeries] = useState([])
 
   const [atmCeCandles, setAtmCeCandles] = useState([])
   const [atmPeCandles, setAtmPeCandles] = useState([])
@@ -1059,7 +1064,12 @@ function DashboardPage() {
       .then((data) => { if (!cancelledRef.cancelled) setCdvPrevDaySeries(data ?? []) })
       .catch((err) => console.error('Failed to load CDV previous-day series:', err))
 
-    return Promise.allSettled([candlesP, snapshotP, cdvSeriesP, cdvSnapshotP, cdvPrevDayP, fetchAtmAndObv(underlying, cancelledRef)])
+    const cdvHistoryP = fetch(withExpiry(`/api/cdv/${underlying}/history-series`, expiryParam))
+      .then((r) => r.json())
+      .then((data) => { if (!cancelledRef.cancelled) setCdvHistorySeries(data ?? []) })
+      .catch((err) => console.error('Failed to load CDV history series:', err))
+
+    return Promise.allSettled([candlesP, snapshotP, cdvSeriesP, cdvSnapshotP, cdvPrevDayP, cdvHistoryP, fetchAtmAndObv(underlying, cancelledRef)])
   }
 
   useEffect(() => {
@@ -1201,8 +1211,12 @@ function DashboardPage() {
   const atmCeCrossState = useConfirmedCrossoverState(atmCeBarsClosed)
   const atmPeCrossState = useConfirmedCrossoverState(atmPeBarsClosed)
 
-  const cdvCe = useAggregatedLine(cdvSeries, cdvSnapshot?.currentBar, timeframe, ['ceCdv']).map((p) => ({ time: p.time, value: p.ceCdv }))
-  const cdvPe = useAggregatedLine(cdvSeries, cdvSnapshot?.currentBar, timeframe, ['peCdv']).map((p) => ({ time: p.time, value: p.peCdv }))
+  // Every past trading day's own curve (each reset to zero, laid end to end) followed by today's
+  // still-live one - the same continuous multi-day span the OBV chart already gets from one
+  // request, just assembled from CDV's two separate endpoints (see cdvHistorySeries above for why).
+  const cdvFullSeries = useMemo(() => [...cdvHistorySeries, ...cdvSeries], [cdvHistorySeries, cdvSeries])
+  const cdvCe = useAggregatedLine(cdvFullSeries, cdvSnapshot?.currentBar, timeframe, ['ceCdv']).map((p) => ({ time: p.time, value: p.ceCdv }))
+  const cdvPe = useAggregatedLine(cdvFullSeries, cdvSnapshot?.currentBar, timeframe, ['peCdv']).map((p) => ({ time: p.time, value: p.peCdv }))
   // No live bar to merge - previous-day is a fixed historical reference, not something ticks update.
   const cdvPrevCe = useAggregatedLine(cdvPrevDaySeries, null, timeframe, ['ceCdv']).map((p) => ({ time: p.time, value: p.ceCdv }))
   const cdvPrevPe = useAggregatedLine(cdvPrevDaySeries, null, timeframe, ['peCdv']).map((p) => ({ time: p.time, value: p.peCdv }))
