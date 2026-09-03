@@ -826,7 +826,11 @@ public sealed class CdvHostedService : BackgroundService
         if (toSubscribe.Length > 0)
         {
             var segments = toSubscribe.ToDictionary(t => t, _ => "NSE_FNO");
-            await _feedClient.SubscribeAsync(segments, cancellationToken);
+            // Full mode, not the default Quote - option strikes have a real order book, and this is
+            // what gives StrategyTriggerHostedService a live best bid/ask to re-price an unfilled
+            // order retry against instead of only the last traded price (see DhanMarketFeedClient's
+            // own doc comment on the two modes).
+            await _feedClient.SubscribeAsync(segments, cancellationToken, full: true);
         }
         if (toUnsubscribe.Length > 0)
         {

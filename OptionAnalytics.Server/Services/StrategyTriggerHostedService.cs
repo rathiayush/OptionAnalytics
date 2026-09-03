@@ -113,6 +113,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     private readonly CdvHostedService _cdv;
     private readonly DhanOptionChainMaster _optionChainMaster;
     private readonly DhanSuperOrderClient _superOrders;
+    private readonly DhanMarketFeedClient _feedClient;
     private readonly TriggerOrderHistoryStore _orderHistory;
     private readonly IHubContext<SpotHub> _hub;
     private readonly ILogger<StrategyTriggerHostedService> _logger;
@@ -132,8 +133,8 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     public StrategyTriggerHostedService(
         StrategyTriggerStore store, BacktestService backtest, TelegramAlertService telegram,
         SpotFeedHostedService spotFeed, CdvHostedService cdv, DhanOptionChainMaster optionChainMaster,
-        DhanSuperOrderClient superOrders, TriggerOrderHistoryStore orderHistory, IHubContext<SpotHub> hub,
-        ILogger<StrategyTriggerHostedService> logger)
+        DhanSuperOrderClient superOrders, DhanMarketFeedClient feedClient, TriggerOrderHistoryStore orderHistory,
+        IHubContext<SpotHub> hub, ILogger<StrategyTriggerHostedService> logger)
     {
         _store = store;
         _backtest = backtest;
@@ -142,6 +143,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         _cdv = cdv;
         _optionChainMaster = optionChainMaster;
         _superOrders = superOrders;
+        _feedClient = feedClient;
         _orderHistory = orderHistory;
         _hub = hub;
         _logger = logger;
@@ -565,7 +567,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         var summary = $"{transactionType} {contract.TradingSymbol} x{quantity} (SecurityId {contract.SecurityId})\n" +
             $"LIMIT {limitPrice:0.##} · Target {targetPrice:0.##} · SL {stopLossPrice:0.##}" + expiryNote;
 
-        return (new SuperOrderPlan(transactionType, contract.SecurityId.ToString(), quantity, limitPrice, targetPrice, stopLossPrice, tick, entryPrice, correlationId, summary, expiry.Value), null);
+        return (new SuperOrderPlan(transactionType, contract.SecurityId.ToString(), contract.SecurityId, quantity, limitPrice, targetPrice, stopLossPrice, tick, entryPrice, correlationId, summary, expiry.Value), null);
     }
 
     /// <summary>Places the order and, on success, hands the fill-monitoring off to MonitorFillAsync
@@ -740,7 +742,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
                 return;
             }
 
-            var latestPrice = await GetOrderPremiumAsync(trade.Underlying, plan.Expiry, plan.Expiry, trade.Strike, isCall, cancellationToken);
+            var latestPrice = await GetRepricingReferenceAsync(trade, plan, isCall, isSell, cancellationToken);
             if (latestPrice is null)
             {
                 _logger.LogWarning("Trigger {Name}: no live premium available for {Strike}{Type} - cannot re-price order {OrderId} on attempt {Attempt}/{Max}.",
@@ -798,6 +800,25 @@ public sealed class StrategyTriggerHostedService : BackgroundService
             _logger.LogInformation("Trigger {Name}: re-priced order {OrderId} to {Price:0.##} for {Quantity} (attempt {Attempt}/{Max}, live premium {Live:0.##}, slippage {Slippage:0.##}).",
                 trigger.Name, orderId, newPrice, remainingQuantity == 0 ? plan.Quantity : remainingQuantity, attempt + 1, MaxFillAttempts, latestPrice, slippage);
         }
+    }
+
+    /// <summary>What MonitorFillAsync's retry loop re-prices an unfilled/partially-filled entry
+    /// off: the live best bid (for a SELL) or best ask (for a BUY) straight from the option
+    /// strike's own Full-mode feed subscription (see DhanMarketFeedClient/CdvHostedService) when
+    /// one has arrived, since that is the actual tradeable side of the book right now - a closer
+    /// number to chase than the last traded price, which can be stale on a thinly-traded strike or
+    /// simply be the OTHER side's last print. Falls back to GetOrderPremiumAsync's last-traded-price
+    /// behaviour (unchanged) when no live depth is available yet - a strike whose Full subscription
+    /// hasn't delivered a packet since it was picked up, or one with a genuinely empty book.</summary>
+    private async Task<decimal?> GetRepricingReferenceAsync(BacktestTrade trade, SuperOrderPlan plan, bool isCall, bool isSell, CancellationToken cancellationToken)
+    {
+        if (_feedClient.LastTickFor(plan.InstrumentSecurityId) is { } tick)
+        {
+            var sideDepth = isSell ? tick.BestBidPrice : tick.BestAskPrice;
+            if (sideDepth > 0) return sideDepth;
+        }
+
+        return await GetOrderPremiumAsync(trade.Underlying, plan.Expiry, plan.Expiry, trade.Strike, isCall, cancellationToken);
     }
 
     /// <summary>The latest known premium for one strike, INCLUDING the still-forming bar
@@ -877,9 +898,12 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     /// <summary>ReferencePrice is the entry price every other number here was derived from - the
     /// simulator's resolved fill, or the live premium when StrategyTrigger.UseLivePremiumEntry is
     /// on. MonitorFillAsync measures its deviation guard against THIS rather than the trade's own
-    /// EntryPrice, which is null in live-premium mode.</summary>
+    /// EntryPrice, which is null in live-premium mode. InstrumentSecurityId is the SAME contract as
+    /// SecurityId, just as the uint DhanMarketFeedClient.LastTickFor wants rather than the string
+    /// Dhan's REST order API wants - MonitorFillAsync uses it to read this contract's live best
+    /// bid/ask off the feed when re-pricing an unfilled retry.</summary>
     private sealed record SuperOrderPlan(
-        string TransactionType, string SecurityId, int Quantity,
+        string TransactionType, string SecurityId, uint InstrumentSecurityId, int Quantity,
         decimal Price, decimal TargetPrice, decimal StopLossPrice, decimal TickSize,
         decimal ReferencePrice, string CorrelationId, string Summary, DateOnly Expiry);
 }

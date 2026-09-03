@@ -20,14 +20,19 @@ namespace OptionAnalytics.Server.Dhan;
 /// </summary>
 public sealed class DhanMarketFeedClient : IAsyncDisposable
 {
-    // Quote (17), not Full (21): Full carries 5-level market depth (best bid/ask), which this app
-    // never reads - SpotTick only has LastPrice/OHLC/Volume, all of which Quote already carries.
-    // More importantly, an index (IDX_I - NIFTY/BANKNIFTY's spot tokens) has no order book at all,
-    // so Dhan may not stream Full-mode data for those tokens the way it does for a tradeable
-    // instrument - subscribing everything in Full mode risked spot ticks simply never arriving.
-    // Quote is the mode every instrument type here is expected to support.
+    // Quote (17) is the default - an index (IDX_I - NIFTY/BANKNIFTY's spot tokens) has no order
+    // book at all, so Dhan may not stream Full-mode data for those tokens the way it does for a
+    // tradeable instrument, and subscribing everything in Full mode risked spot ticks simply never
+    // arriving. Full (21) IS used for option strikes specifically (see SubscribeAsync's `full`
+    // parameter and CdvHostedService, the only caller that passes it) - those have a real order
+    // book, and StrategyTriggerHostedService re-prices a live order retry off the best bid/ask Full
+    // carries (see DhanTickPacketParser), which Quote does not. Each token remembers which mode it
+    // was subscribed in (see _tokenSegments) so a reconnect/re-subscribe always asks Dhan for
+    // exactly the same mode per instrument rather than silently downgrading everything to Quote.
     private const int RequestCodeQuote = 17;
     private const int RequestCodeUnsubscribeQuote = 18;
+    private const int RequestCodeFull = 21;
+    private const int RequestCodeUnsubscribeFull = 22;
     private const int RequestCodeDisconnect = 12;
     private const int SubscriptionBatchSize = 100;
 
@@ -44,7 +49,7 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
     private readonly DhanSession _session;
     private readonly ILogger<DhanMarketFeedClient> _logger;
 
-    private readonly ConcurrentDictionary<uint, string> _tokenSegments = new();
+    private readonly ConcurrentDictionary<uint, (string Segment, int SubscribeCode)> _tokenSegments = new();
     private readonly ConcurrentDictionary<uint, SpotTick> _lastTick = new();
     private readonly SemaphoreSlim _sendLock = new(1, 1);
 
@@ -95,18 +100,24 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
     /// colliding, and one expiry's window rolling never unsubscribes another's. Everything in here
     /// is re-sent on every reconnect and by the stall watchdog's re-subscribe, so a subscribe that
     /// failed mid-flight repairs itself rather than leaving that expiry permanently silent.</summary>
-    public async Task SubscribeAsync(IReadOnlyDictionary<uint, string> tokens, CancellationToken cancellationToken)
+    /// <summary><paramref name="full"/> selects Full mode (best bid/ask depth included - see
+    /// DhanTickPacketParser) instead of the default Quote mode. Pass true only for instruments with
+    /// a real order book (option strikes - see CdvHostedService, the only caller that does); the
+    /// spot/index token must stay on the default Quote, per this class's own doc comment.</summary>
+    public async Task SubscribeAsync(IReadOnlyDictionary<uint, string> tokens, CancellationToken cancellationToken, bool full = false)
     {
+        var subscribeCode = full ? RequestCodeFull : RequestCodeQuote;
+
         var added = new List<KeyValuePair<uint, string>>();
         foreach (var kv in tokens)
         {
-            if (_tokenSegments.TryAdd(kv.Key, kv.Value)) added.Add(kv);
+            if (_tokenSegments.TryAdd(kv.Key, (kv.Value, subscribeCode))) added.Add(kv);
         }
 
         if (added.Count == 0) return;
 
-        _logger.LogInformation("Subscribing {Count} instrument(s) in Quote mode ({Total} subscribed in total): {Instruments}.",
-            added.Count, _tokenSegments.Count, string.Join(", ", added.Select(kv => $"{kv.Key}({kv.Value})")));
+        _logger.LogInformation("Subscribing {Count} instrument(s) in {Mode} mode ({Total} subscribed in total): {Instruments}.",
+            added.Count, full ? "Full" : "Quote", _tokenSegments.Count, string.Join(", ", added.Select(kv => $"{kv.Key}({kv.Value})")));
 
         if (_tokenSegments.Count > MaxInstrumentsPerConnection)
         {
@@ -117,22 +128,29 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
         }
 
         if (_socket is not { State: WebSocketState.Open }) return;
-        await SendSubscriptionAsync(added.Select(kv => (kv.Key, kv.Value)), RequestCodeQuote, cancellationToken);
+        await SendSubscriptionAsync(added.Select(kv => (kv.Key, kv.Value)), subscribeCode, cancellationToken);
     }
 
     /// <summary>Removes tokens from the subscribed set and, if connected, sends a live unsubscribe
-    /// message - used when the ATM window rolls and strikes fall out of range.</summary>
+    /// message - used when the ATM window rolls and strikes fall out of range. Grouped by however
+    /// each token was originally subscribed (Quote vs Full - see SubscribeAsync) since Dhan's
+    /// unsubscribe request code has to match the subscribe mode it is undoing.</summary>
     public async Task UnsubscribeAsync(IEnumerable<uint> tokens, CancellationToken cancellationToken)
     {
-        var removed = new List<(uint Token, string Segment)>();
+        var removed = new List<(uint Token, string Segment, int SubscribeCode)>();
         foreach (var token in tokens)
         {
-            if (_tokenSegments.TryRemove(token, out var segment)) removed.Add((token, segment));
+            if (_tokenSegments.TryRemove(token, out var entry)) removed.Add((token, entry.Segment, entry.SubscribeCode));
             _lastTick.TryRemove(token, out _);
         }
 
         if (removed.Count == 0 || _socket is not { State: WebSocketState.Open }) return;
-        await SendSubscriptionAsync(removed.Select(r => (r.Token, r.Segment)), RequestCodeUnsubscribeQuote, cancellationToken);
+
+        foreach (var group in removed.GroupBy(r => r.SubscribeCode))
+        {
+            var unsubscribeCode = group.Key == RequestCodeFull ? RequestCodeUnsubscribeFull : RequestCodeUnsubscribeQuote;
+            await SendSubscriptionAsync(group.Select(r => (r.Token, r.Segment)), unsubscribeCode, cancellationToken);
+        }
     }
 
     /// <summary>Runs until cancelled, connecting/reconnecting as needed and (re)subscribing
@@ -231,7 +249,11 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
                         tokens.Length);
                     try
                     {
-                        await SendSubscriptionAsync(tokens, RequestCodeQuote, cancellationToken);
+                        // Grouped by mode - a re-subscribe must ask for the SAME mode each token was
+                        // originally subscribed in, or an option strike re-subscribed as Quote would
+                        // silently stop delivering the depth its order retries price off.
+                        foreach (var group in tokens.GroupBy(t => t.Value.SubscribeCode))
+                            await SendSubscriptionAsync(group.Select(t => (t.Key, t.Value.Segment)), group.Key, cancellationToken);
                     }
                     catch (Exception ex)
                     {
@@ -269,8 +291,9 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
         var tokens = _tokenSegments.ToArray();
         _logger.LogInformation("Connected to Dhan market feed ({Count} instruments).", tokens.Length);
 
-        if (tokens.Length > 0)
-            await SendSubscriptionAsync(tokens.Select(kv => (kv.Key, kv.Value)), RequestCodeQuote, cancellationToken);
+        // Grouped by mode - see the same note on the stall-watchdog re-subscribe above.
+        foreach (var group in tokens.GroupBy(kv => kv.Value.SubscribeCode))
+            await SendSubscriptionAsync(group.Select(kv => (kv.Key, kv.Value.Segment)), group.Key, cancellationToken);
     }
 
     private async Task SendSubscriptionAsync(IEnumerable<(uint Token, string Segment)> entries, int requestCode, CancellationToken cancellationToken)
@@ -358,10 +381,10 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
         // Only cache/report instruments we still want - a packet already in flight for an
         // instrument UnsubscribeAsync just dropped must not resurrect a cache entry for it (same
         // leak LiveSpreadCalculator's DhanMarketFeedClient guards against).
-        if (!_tokenSegments.TryGetValue(packet.SecurityId, out var segment)) return;
+        if (!_tokenSegments.TryGetValue(packet.SecurityId, out var entry)) return;
 
         if (packet.LastPrice > 0 && _loggedFirstTick.TryAdd(packet.SecurityId, 0))
-            _logger.LogInformation("First tick for security {SecurityId} ({Segment}): price={Price}.", packet.SecurityId, segment, packet.LastPrice);
+            _logger.LogInformation("First tick for security {SecurityId} ({Segment}): price={Price}.", packet.SecurityId, entry.Segment, packet.LastPrice);
 
         var previous = _lastTick.TryGetValue(packet.SecurityId, out var existing) ? existing : null;
         var tick = new SpotTick(
@@ -372,6 +395,11 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
             Low: packet.Low > 0 ? packet.Low : previous?.Low ?? 0,
             Close: packet.Close > 0 ? packet.Close : previous?.Close ?? 0,
             Volume: packet.Volume > 0 ? packet.Volume : previous?.Volume ?? 0,
+            // Only Full-mode packets (option strikes) ever carry these - a Quote-mode instrument
+            // (the spot/index token) keeps them at 0 forever, which callers must treat as "no live
+            // depth" rather than a real zero price.
+            BestBidPrice: packet.BestBidPrice > 0 ? packet.BestBidPrice : previous?.BestBidPrice ?? 0,
+            BestAskPrice: packet.BestAskPrice > 0 ? packet.BestAskPrice : previous?.BestAskPrice ?? 0,
             ExchangeTimestamp: packet.ExchangeTimestamp);
 
         _lastTick[packet.SecurityId] = tick;

@@ -26,20 +26,29 @@ public readonly record struct DhanPacket(
     decimal High,
     decimal Low,
     decimal Close,
+    decimal BestBidPrice,
+    decimal BestAskPrice,
     DateTimeOffset ExchangeTimestamp,
     int DisconnectCode);
 
 /// <summary>
-/// Parses DhanHQ v2's binary market-data protocol. Ported verbatim from LiveSpreadCalculator's
-/// SpreadTrader.DhanIntegration.Ticker.DhanTickPacketParser (this app only reads
-/// price/volume/OHLC, so the depth and open-interest fields that parser also carries are
-/// dropped here - see that file's doc comment for the full protocol writeup: little-endian,
-/// float32 prices already in rupees, and a message that may carry several length-prefixed
-/// packets back to back).
+/// Parses DhanHQ v2's binary market-data protocol. Ported from LiveSpreadCalculator's
+/// SpreadTrader.DhanIntegration.Ticker.DhanTickPacketParser (see that file's doc comment for the
+/// full protocol writeup: little-endian, float32 prices already in rupees, and a message that may
+/// carry several length-prefixed packets back to back) - this app also reads best bid/ask now
+/// (see the Full case and ReadBestBidAsk below), for pricing/re-pricing live option orders off the
+/// real tradeable side of the book rather than only the last traded price; open-interest is still
+/// dropped, since nothing here reads it.
 /// </summary>
 public static class DhanTickPacketParser
 {
     private const int HeaderLength = 8;
+
+    // Offset of the depth block within the Full packet (the only kind that carries one), and the
+    // size of each of its 5 depth entries - see the Full case's own layout notes below. The best
+    // bid/ask are the price fields of the FIRST entry.
+    private const int FullDepthOffset = 62;
+    private const int DepthEntryLength = 20;
 
     private static int KnownLength(DhanPacketKind kind) => kind switch
     {
@@ -125,7 +134,13 @@ public static class DhanTickPacketParser
 
             case DhanPacketKind.Full:
             {
+                // Bytes 62-162 are 5 depth entries x 20 bytes (bidQty uint32, askQty uint32,
+                // bidOrders uint16, askOrders uint16, bidPrice float32, askPrice float32) - the
+                // best bid/ask are the first entry's price fields, at offsets 74/78. This is the
+                // only packet kind carrying depth at all, which is why option strikes are
+                // subscribed in Full mode (see DhanMarketFeedClient) rather than Quote.
                 if (packet.Length < 162) return false;
+                var (bid, ask) = ReadBestBidAsk(packet, FullDepthOffset);
                 result = New(kind, securityId, exchangeSegment) with
                 {
                     LastPrice = ReadPrice(packet.Slice(8, 4)),
@@ -135,6 +150,8 @@ public static class DhanTickPacketParser
                     Close = ReadPrice(packet.Slice(50, 4)),
                     High = ReadPrice(packet.Slice(54, 4)),
                     Low = ReadPrice(packet.Slice(58, 4)),
+                    BestBidPrice = bid,
+                    BestAskPrice = ask,
                 };
                 return true;
             }
@@ -167,7 +184,16 @@ public static class DhanTickPacketParser
     }
 
     private static DhanPacket New(DhanPacketKind kind, uint securityId, byte exchangeSegment) =>
-        new(kind, securityId, exchangeSegment, 0, 0, 0, 0, 0, 0, DateTimeOffset.UtcNow, 0);
+        new(kind, securityId, exchangeSegment, 0, 0, 0, 0, 0, 0, 0, 0, DateTimeOffset.UtcNow, 0);
+
+    /// <summary>Best bid/ask are the price fields of the FIRST of the five depth entries.</summary>
+    private static (decimal Bid, decimal Ask) ReadBestBidAsk(ReadOnlySpan<byte> packet, int depthOffset)
+    {
+        if (packet.Length < depthOffset + DepthEntryLength) return (0m, 0m);
+        var bid = ReadPrice(packet.Slice(depthOffset + 12, 4));
+        var ask = ReadPrice(packet.Slice(depthOffset + 16, 4));
+        return (bid, ask);
+    }
 
     private static decimal ReadPrice(ReadOnlySpan<byte> bytes)
     {
