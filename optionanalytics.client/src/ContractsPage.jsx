@@ -10,6 +10,16 @@ const { Title, Text } = Typography
 // shows up as a screen of grey rather than one or two odd rows.
 const LIVE_TICK_MAX_AGE_MS = 5 * 60 * 1000
 
+// Single source of truth for a row's state, shared by the State column and the Live-only filter -
+// so filtering and what the column displays can never disagree with each other.
+function rowState(row, now) {
+  if (!row.subscribed) return 'listed'
+  const age = row.lastTickUtc ? now - new Date(row.lastTickUtc).getTime() : null
+  if (age === null) return 'no-tick'
+  if (age > LIVE_TICK_MAX_AGE_MS) return 'stale'
+  return 'live'
+}
+
 // "What does this app actually know about the option chain, right now?"
 //
 // Every other page shows what the app CONCLUDED - candles, CDV, signals, trades. When something is
@@ -35,6 +45,11 @@ export default function ContractsPage() {
   const [search, setSearch] = useState('')
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [now, setNow] = useState(Date.now())
+  // Defaults to on: the question this page answers is almost always "is this actually ticking
+  // right now", and a full listing of every strike Dhan lists (hundreds, mostly irrelevant) buries
+  // that. Off switches back to the full diagnostic view - every listed contract, live or not -
+  // which is what distinguishing "not subscribed" from "no tick" needs.
+  const [liveOnly, setLiveOnly] = useState(true)
 
   useEffect(() => {
     fetch('/api/spot/underlyings')
@@ -78,9 +93,10 @@ export default function ContractsPage() {
   const rows = useMemo(() => {
     const all = data?.contracts ?? []
     const term = search.trim()
-    const filtered = term ? all.filter((c) => String(c.strike).includes(term) || c.tradingSymbol?.includes(term.toUpperCase())) : all
+    let filtered = term ? all.filter((c) => String(c.strike).includes(term) || c.tradingSymbol?.includes(term.toUpperCase())) : all
+    if (liveOnly) filtered = filtered.filter((c) => rowState(c, now) === 'live')
     return filtered.map((c) => ({ ...c, key: c.securityId }))
-  }, [data, search])
+  }, [data, search, liveOnly, now])
 
   const stats = useMemo(() => {
     const all = data?.contracts ?? []
@@ -119,10 +135,10 @@ export default function ContractsPage() {
       key: 'state',
       width: 150,
       render: (_, row) => {
-        if (!row.subscribed) return <Tag>Listed only</Tag>
-        const age = row.lastTickUtc ? now - new Date(row.lastTickUtc).getTime() : null
-        if (age === null) return <Tag color={DOWN_COLOR}>No tick</Tag>
-        if (age > LIVE_TICK_MAX_AGE_MS) return <Tag color="orange">Stale</Tag>
+        const state = rowState(row, now)
+        if (state === 'listed') return <Tag>Listed only</Tag>
+        if (state === 'no-tick') return <Tag color={DOWN_COLOR}>No tick</Tag>
+        if (state === 'stale') return <Tag color="orange">Stale</Tag>
         return <Tag color={UP_COLOR}>Live</Tag>
       },
     },
@@ -193,7 +209,15 @@ export default function ContractsPage() {
         <Card
           size="small"
           title={`Contracts — ${underlying ?? ''} ${data?.expiry ?? ''}`}
-          extra={<Input.Search allowClear placeholder="Filter by strike or symbol" value={search} onChange={(e) => setSearch(e.target.value)} style={{ width: 260 }} />}
+          extra={
+            <Space size={16}>
+              <Space size={6}>
+                <Switch size="small" checked={liveOnly} onChange={setLiveOnly} />
+                <Text type="secondary" style={{ fontSize: 12 }}>Live only</Text>
+              </Space>
+              <Input.Search allowClear placeholder="Filter by strike or symbol" value={search} onChange={(e) => setSearch(e.target.value)} style={{ width: 260 }} />
+            </Space>
+          }
         >
           <Table
             size="small"
@@ -204,7 +228,9 @@ export default function ContractsPage() {
             pagination={{ pageSize: 50, showSizeChanger: false }}
             locale={{ emptyText: masterBroken
               ? 'The scrip master holds no contracts at all - nothing can be listed.'
-              : 'No contracts listed for this expiry.' }}
+              : liveOnly
+                ? 'Nothing is ticking right now for this expiry - switch off Live only to see the full listing and check subscription state.'
+                : 'No contracts listed for this expiry.' }}
           />
         </Card>
       </Space>
