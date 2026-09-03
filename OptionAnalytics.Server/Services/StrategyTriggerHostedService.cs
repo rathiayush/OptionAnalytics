@@ -424,9 +424,12 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         var contract = _optionChainMaster.Find(trade.Underlying, expiry.Value, trade.Strike, isCall);
         if (contract is null)
         {
-            _logger.LogWarning("Trigger {Name}: {Underlying} {Strike}{Type} not found on expiry {Expiry} - cannot place order.",
-                trigger.Name, trade.Underlying, trade.Strike, trade.OptionType, expiry.Value);
-            return (null, $"{trade.Strike:0.##}{trade.OptionType} is not listed on the {expiry.Value:dd MMM yyyy} expiry");
+            // "Not listed" is the one skip reason that is usually a symptom rather than a fact -
+            // a stale scrip master, or a row the parser dropped - so it logs what IS listed nearby.
+            var nearby = _optionChainMaster.DescribeNearestListed(trade.Underlying, expiry.Value, trade.Strike, isCall);
+            _logger.LogWarning("Trigger {Name}: {Underlying} {Strike}{Type} not found on expiry {Expiry} - cannot place order. {Nearby}",
+                trigger.Name, trade.Underlying, trade.Strike, trade.OptionType, expiry.Value, nearby);
+            return (null, $"{trade.Strike:0.##}{trade.OptionType} is not listed on the {expiry.Value:dd MMM yyyy} expiry ({nearby})");
         }
 
         // A pinned expiry that isn't the tracked one is a DIFFERENT contract from the one the

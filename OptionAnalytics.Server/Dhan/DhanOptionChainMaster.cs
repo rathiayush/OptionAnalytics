@@ -93,6 +93,33 @@ public sealed class DhanOptionChainMaster
     public DhanOptionInstrument? Find(string underlying, DateOnly expiry, decimal strike, bool isCall) =>
         _byKey.TryGetValue(Key(underlying, expiry, strike, isCall), out var match) ? match : null;
 
+    /// <summary>What IS listed near a strike that Find could not resolve, as one log-ready line.
+    /// A "not listed" answer is otherwise unfalsifiable from the outside: it cannot distinguish a
+    /// genuinely absent contract from a stale scrip master, a wrong expiry, or rows this parser
+    /// dropped (it skips any row whose lot size will not parse - see ParseOptionRows). Naming the
+    /// nearest strikes it DOES have, and how many contracts that expiry holds at all, turns the
+    /// next occurrence into a diagnosis instead of a guess.</summary>
+    public string DescribeNearestListed(string underlying, DateOnly expiry, decimal strike, bool isCall)
+    {
+        var side = isCall ? "CE" : "PE";
+        var onExpiry = _byKey.Values
+            .Where(o => string.Equals(o.Underlying, underlying, StringComparison.OrdinalIgnoreCase)
+                && o.Expiry == expiry && o.IsCall == isCall)
+            .Select(o => o.Strike)
+            .ToList();
+
+        if (onExpiry.Count == 0)
+        {
+            var expiries = GetExpiries(underlying);
+            return $"no {side} contracts at all are loaded for {underlying} on {expiry:yyyy-MM-dd}; " +
+                $"the master holds {_byKey.Count} contract(s) and lists expiries [{string.Join(", ", expiries.Take(6).Select(e => e.ToString("yyyy-MM-dd")))}]";
+        }
+
+        var nearest = onExpiry.OrderBy(s => Math.Abs(s - strike)).Take(5).OrderBy(s => s);
+        return $"{onExpiry.Count} {side} strike(s) are loaded for {underlying} {expiry:yyyy-MM-dd}, " +
+            $"nearest to {strike:0.##}: [{string.Join(", ", nearest.Select(v => v.ToString("0.##")))}]";
+    }
+
     private static string Key(string underlying, DateOnly expiry, decimal strike, bool isCall) =>
         $"{underlying}|{expiry:yyyy-MM-dd}|{strike:0.####}|{(isCall ? "CE" : "PE")}";
 
