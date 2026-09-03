@@ -87,6 +87,20 @@ public sealed class CdvController : ControllerBase
         return Ok(state.GetPreviousDaySeries());
     }
 
+    /// <summary>Every PAST trading day in the backfill window (up to HistoryWindow.TradingDays,
+    /// today excluded), chronological, each day's own curve reset to zero and laid end to end -
+    /// CdvUnderlyingState.GetHistorySeries, the same series GetSmoothedCdvSeries/backtesting already
+    /// reads, exposed here for the first time so a chart can show it too. Concatenate this with
+    /// GET .../series (today) for one continuous multi-day line, the same way the OBV chart already
+    /// gets its own multi-day span from a single request - CDV needs two calls only because it is a
+    /// SESSION indicator with a genuinely separate "today" (GetSeries) from its own history.</summary>
+    [HttpGet("{underlying}/history-series")]
+    public IActionResult GetHistorySeries(string underlying, [FromQuery] string? expiry)
+    {
+        if (!TryGetState(underlying, ParseExpiry(expiry), out var state)) return NotFoundResult(underlying);
+        return Ok(state.GetHistorySeries());
+    }
+
     private static readonly int[] DefaultLookbackBars = { 3, 5, 7 };
 
     /// <summary>CE/PE %-change over a caller-configurable set of lookback windows - see
