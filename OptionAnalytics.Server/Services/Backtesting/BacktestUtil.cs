@@ -21,8 +21,21 @@ public static class BacktestUtil
     /// exactly "the signal fired off a candle that had not finished forming." A live evaluation
     /// simply sees one fewer (genuinely closed) bar until the window completes; nothing about a
     /// true backtest over old history changes, since every bucket there is long since complete
-    /// regardless.</summary>
-    public static List<Candle> AggregateCandles(IReadOnlyList<Candle> bars, int minutes)
+    /// regardless.
+    ///
+    /// <paramref name="includeTrailingPartial"/> keeps that last, still-forming bucket instead of
+    /// dropping it - ONLY safe for a caller that reads nothing but its Open. A bucket's Open is set
+    /// once, from its first constituent (closed) 1-minute bar, and never changes afterward - so it
+    /// is exactly the same number this method would eventually return once the whole bucket
+    /// finishes, just readable as soon as that first native minute closes instead of after all of
+    /// them do. OptionTradeSimulator is the one user of this: entry price is that Open, and nothing
+    /// else in this app depends on GetOptionBars for signal detection (every strategy's own EMA/
+    /// crossover logic reads SpotBars/CeSeries/PeSeries instead, which stay closed-bucket-only) -
+    /// so there is no flip-flopping-signal risk here, only a High/Low/Close that is still catching
+    /// up, exactly like every other "current bar" this app already shows for live display
+    /// (CdvUnderlyingState.GetCandles, SpotUnderlyingState's own current bar) and self-corrects the
+    /// same way as more real ticks arrive.</summary>
+    public static List<Candle> AggregateCandles(IReadOnlyList<Candle> bars, int minutes, bool includeTrailingPartial = false)
     {
         if (minutes <= 1 || bars.Count == 0) return bars.ToList();
 
@@ -38,7 +51,8 @@ public static class BacktestUtil
         }
 
         var result = buckets.Values.ToList();
-        DropTrailingBucketIfIncomplete(result, r => r.Time, LatestCoveredSecond(bars, b => b.Time), bucketSeconds);
+        if (!includeTrailingPartial)
+            DropTrailingBucketIfIncomplete(result, r => r.Time, LatestCoveredSecond(bars, b => b.Time), bucketSeconds);
         return result;
     }
 
