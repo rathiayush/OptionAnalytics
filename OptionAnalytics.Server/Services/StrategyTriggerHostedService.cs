@@ -552,7 +552,24 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         // Same mirror-for-a-seller formula as OptionTradeSimulator.Run.
         var rawStopLoss = isSell ? entryPrice + slPoints : Math.Max(0, entryPrice - slPoints);
         var rawTarget = isSell ? Math.Max(0, entryPrice - tpPoints) : entryPrice + tpPoints;
-        var rawLimit = Math.Max(0, isSell ? entryPrice - trigger.SlippagePoints : entryPrice + trigger.SlippagePoints);
+
+        // The LIMIT price itself is priced off the contract's live best bid/ask (SELL off the
+        // bid, BUY off the ask) when the Full-mode feed already has one - CdvHostedService
+        // subscribes every strike in the tracked ATM+-16 window in Full mode as soon as it enters
+        // that window (see its own doc comment), well before any signal on it can fire, so this is
+        // normally already live the instant a trade picks this contract. That is the real
+        // tradeable side of the book right now, a closer number to actually clear than entryPrice
+        // (the signal/backtest reference, which can be a few seconds old by the time the order goes
+        // out) - target/stop-loss/the deviation check below all stay anchored to entryPrice
+        // unchanged, only the price actually SENT to Dhan moves to the live quote when one exists.
+        // Falls back to entryPrice when no live depth has arrived yet for this contract.
+        var limitReference = entryPrice;
+        if (_feedClient.LastTickFor(contract.SecurityId) is { } liveQuote)
+        {
+            var sideDepth = isSell ? liveQuote.BestBidPrice : liveQuote.BestAskPrice;
+            if (sideDepth > 0) limitReference = sideDepth;
+        }
+        var rawLimit = Math.Max(0, isSell ? limitReference - trigger.SlippagePoints : limitReference + trigger.SlippagePoints);
 
         var tick = contract.TickSize;
         var limitPrice = RoundToTick(rawLimit, tick);
