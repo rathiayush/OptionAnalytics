@@ -833,10 +833,7 @@ public sealed class CdvHostedService : BackgroundService
             await _feedClient.SubscribeAsync(segments, cancellationToken, full: true);
         }
         if (toUnsubscribe.Length > 0)
-        {
-            await _feedClient.UnsubscribeAsync(toUnsubscribe, cancellationToken);
-            foreach (var token in toUnsubscribe) _bySecurityId.TryRemove(token, out _);
-        }
+            await UnsubscribeAndForgetAsync(toUnsubscribe, cancellationToken);
 
         _subscribedTokens[key] = desiredTokens;
 
@@ -858,10 +855,8 @@ public sealed class CdvHostedService : BackgroundService
         foreach (var key in stale)
         {
             if (_subscribedTokens.TryGetValue(key, out var tokens) && tokens.Count > 0)
-            {
-                await _feedClient.UnsubscribeAsync(tokens, cancellationToken);
-                foreach (var token in tokens) _bySecurityId.TryRemove(token, out _);
-            }
+                await UnsubscribeAndForgetAsync(tokens, cancellationToken);
+
             _subscribedTokens.TryRemove(key, out _);
             _cdvHistorySeeded.Remove(key);
             _byExpiry.TryRemove(key, out _);
@@ -878,14 +873,24 @@ public sealed class CdvHostedService : BackgroundService
     {
         var key = (underlying, expiry);
         if (_subscribedTokens.TryGetValue(key, out var tokens) && tokens.Count > 0)
-        {
-            await _feedClient.UnsubscribeAsync(tokens, cancellationToken);
-            foreach (var token in tokens) _bySecurityId.TryRemove(token, out _);
-        }
+            await UnsubscribeAndForgetAsync(tokens, cancellationToken);
+
         _subscribedTokens[key] = new HashSet<uint>();
         _cdvHistorySeeded.Remove(key);
         state.Reset();
         _logger.LogInformation("CDV: {Underlying} {Expiry} - new trading day, resetting CDV state.", underlying, expiry);
+    }
+
+    /// <summary>Unsubscribes the given tokens from the shared feed and drops their SecurityId-&gt;
+    /// state routing (_bySecurityId) together - a token left in one without the other is either a
+    /// leak (still routed to a state but no longer actually subscribed) or a live tick with nowhere
+    /// to go (subscribed but not routed), so the two must always change as one unit. Shared by every
+    /// place that stops tracking a set of contracts: the routine ATM-window diff, dropping a whole
+    /// stale expiry, and a day-rollover reset.</summary>
+    private async Task UnsubscribeAndForgetAsync(IEnumerable<uint> tokens, CancellationToken cancellationToken)
+    {
+        await _feedClient.UnsubscribeAsync(tokens, cancellationToken);
+        foreach (var token in tokens) _bySecurityId.TryRemove(token, out _);
     }
 
     /// <summary>Fetches and seeds each strike's own last HistoryTradingDays of premium+volume
