@@ -68,9 +68,11 @@ public sealed class DhanSuperOrderClient
     /// (no trailing stop) - pass a positive value to have Dhan trail the stop-loss as the position
     /// moves favorably.
     ///
-    /// Returns null (after logging) on any failure - a rejected or errored order is never worth
-    /// throwing for, since the caller needs to keep evaluating other triggers regardless.</summary>
-    public async Task<SuperOrderResult?> PlaceAsync(
+    /// Returns (null, the reason) on any failure - a rejected or errored order is never worth
+    /// throwing for, since the caller needs to keep evaluating other triggers regardless. The
+    /// reason is Dhan's own error text (already logged here) - the caller's job, not this
+    /// client's, to decide where a human sees it (Telegram, order history, both).</summary>
+    public async Task<(SuperOrderResult? Result, string? Error)> PlaceAsync(
         string transactionType, string exchangeSegment, string productType, string orderType,
         string securityId, int quantity, decimal price, decimal targetPrice, decimal stopLossPrice,
         string correlationId, decimal trailingJump, CancellationToken cancellationToken)
@@ -97,10 +99,10 @@ public sealed class DhanSuperOrderClient
         {
             _logger.LogWarning("Super order placement failed for {Security} ({Transaction} x{Qty}): {Error}",
                 securityId, transactionType, quantity, response.ErrorMessage);
-            return null;
+            return (null, response.ErrorMessage);
         }
 
-        return ParseResult(response.Root);
+        return (ParseResult(response.Root), null);
     }
 
     /// <summary>Modifies one leg of an existing Super Order. Which fields are meaningful depends
@@ -109,7 +111,7 @@ public sealed class DhanSuperOrderClient
     /// is still PENDING or PART_TRADED); TARGET_LEG accepts targetPrice only; STOP_LOSS_LEG
     /// accepts stopLossPrice/trailingJump only. Pass null for anything not being changed on this
     /// call - this method sends only the fields given a value.</summary>
-    public async Task<SuperOrderResult?> ModifyAsync(
+    public async Task<(SuperOrderResult? Result, string? Error)> ModifyAsync(
         string orderId, string legName, string? orderType, int? quantity, decimal? price,
         decimal? targetPrice, decimal? stopLossPrice, decimal? trailingJump, CancellationToken cancellationToken)
     {
@@ -131,16 +133,16 @@ public sealed class DhanSuperOrderClient
         if (!response.Success)
         {
             _logger.LogWarning("Super order modify failed for {OrderId} ({Leg}): {Error}", orderId, legName, response.ErrorMessage);
-            return null;
+            return (null, response.ErrorMessage);
         }
 
-        return ParseResult(response.Root);
+        return (ParseResult(response.Root), null);
     }
 
     /// <summary>Cancels one leg. Cancelling ENTRY_LEG cancels the whole order (all its legs);
     /// cancelling TARGET_LEG or STOP_LOSS_LEG specifically removes just that exit and - per Dhan's
     /// own docs - it cannot be re-added afterward, only a fresh order placed.</summary>
-    public async Task<SuperOrderResult?> CancelAsync(string orderId, string legName, CancellationToken cancellationToken)
+    public async Task<(SuperOrderResult? Result, string? Error)> CancelAsync(string orderId, string legName, CancellationToken cancellationToken)
     {
         using var response = await _api.SendAsync(HttpMethod.Delete, $"/super/orders/{orderId}/{legName}", null,
             $"cancelling super order {orderId} ({legName})", cancellationToken);
@@ -148,10 +150,10 @@ public sealed class DhanSuperOrderClient
         if (!response.Success)
         {
             _logger.LogWarning("Super order cancel failed for {OrderId} ({Leg}): {Error}", orderId, legName, response.ErrorMessage);
-            return null;
+            return (null, response.ErrorMessage);
         }
 
-        return ParseResult(response.Root);
+        return (ParseResult(response.Root), null);
     }
 
     /// <summary>Every Super Order on the account today, entry legs and their attached target/stop-

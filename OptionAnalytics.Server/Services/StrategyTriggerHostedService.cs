@@ -600,15 +600,16 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     /// out - that alert is sent independently and earlier by NotifyAsync regardless.</summary>
     private async Task<string> PlaceOrderAsync(StrategyTrigger trigger, BacktestTrade trade, SuperOrderPlan plan, CancellationToken cancellationToken)
     {
-        var result = await _superOrders.PlaceAsync(
+        var (result, error) = await _superOrders.PlaceAsync(
             plan.TransactionType, "NSE_FNO", ProductType, OrderType,
             plan.SecurityId, plan.Quantity, plan.Price, plan.TargetPrice, plan.StopLossPrice,
             plan.CorrelationId, trailingJump: 0, cancellationToken);
 
         if (result is null)
         {
-            _logger.LogError("Trigger {Name}: Super Order placement FAILED for {Summary}", trigger.Name, plan.Summary);
-            return $"[ORDER FAILED]\n{plan.Summary}\nCheck server logs - a common cause is the account's static IP whitelisting not covering this server.";
+            var reason = string.IsNullOrWhiteSpace(error) ? "no reason given by Dhan" : error;
+            _logger.LogError("Trigger {Name}: Super Order placement FAILED for {Summary} - {Error}", trigger.Name, plan.Summary, reason);
+            return $"[ORDER FAILED]\n{plan.Summary}\nDhan error: {reason}\nIf that doesn't explain it, a common secondary cause is the account's static IP whitelisting not covering this server.";
         }
 
         _logger.LogInformation("Trigger {Name}: Super Order placed - orderId={OrderId} status={Status} for {Summary}",
@@ -804,12 +805,12 @@ public sealed class StrategyTriggerHostedService : BackgroundService
             // from silently trying to buy/sell MORE than the trigger was ever configured for.
             var newQuantity = isPartial ? remainingQuantity : (int?)null;
 
-            var modifyResult = await _superOrders.ModifyAsync(orderId, "ENTRY_LEG", orderType: null, quantity: newQuantity,
+            var (modifyResult, modifyError) = await _superOrders.ModifyAsync(orderId, "ENTRY_LEG", orderType: null, quantity: newQuantity,
                 price: newPrice, targetPrice: null, stopLossPrice: null, trailingJump: null, cancellationToken);
             if (modifyResult is null)
             {
-                _logger.LogWarning("Trigger {Name}: re-price MODIFY failed for order {OrderId} on attempt {Attempt}/{Max} - will check again.",
-                    trigger.Name, orderId, attempt, MaxFillAttempts);
+                _logger.LogWarning("Trigger {Name}: re-price MODIFY failed for order {OrderId} on attempt {Attempt}/{Max} - {Error} - will check again.",
+                    trigger.Name, orderId, attempt, MaxFillAttempts, string.IsNullOrWhiteSpace(modifyError) ? "no reason given by Dhan" : modifyError);
                 continue;
             }
 
@@ -868,13 +869,14 @@ public sealed class StrategyTriggerHostedService : BackgroundService
 
     private async Task CancelOrderAsync(StrategyTrigger trigger, string orderId, SuperOrderPlan plan, string reason, CancellationToken cancellationToken)
     {
-        var result = await _superOrders.CancelAsync(orderId, "ENTRY_LEG", cancellationToken);
+        var (result, cancelError) = await _superOrders.CancelAsync(orderId, "ENTRY_LEG", cancellationToken);
         if (result is null)
         {
-            _logger.LogError("Trigger {Name}: failed to cancel unfilled order {OrderId} ({Reason}) - it may still be resting live, check Dhan directly.",
-                trigger.Name, orderId, reason);
+            var cancelReason = string.IsNullOrWhiteSpace(cancelError) ? "no reason given by Dhan" : cancelError;
+            _logger.LogError("Trigger {Name}: failed to cancel unfilled order {OrderId} ({Reason}) - {CancelError} - it may still be resting live, check Dhan directly.",
+                trigger.Name, orderId, reason, cancelReason);
             await NotifyFollowUpAsync(trigger,
-                $"[ORDER CANCEL FAILED] {plan.Summary}\nReason: {reason}\nCould not confirm the cancel with Dhan - check the account directly, the order may still be live.",
+                $"[ORDER CANCEL FAILED] {plan.Summary}\nReason: {reason}\nDhan error: {cancelReason}\nCould not confirm the cancel with Dhan - check the account directly, the order may still be live.",
                 cancellationToken);
             return;
         }
