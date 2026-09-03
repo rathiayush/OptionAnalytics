@@ -73,6 +73,10 @@ builder.Services.AddSingleton<BacktestService>();
 // not market data - see StrategyTriggerStore), and the hosted service watches each enabled one and
 // sends Telegram when its strategy produces a new entry signal.
 builder.Services.AddSingleton<StrategyTriggerStore>();
+// Every order-pipeline outcome a live trigger produces (placed/filled/failed/cancelled/skipped),
+// persisted alongside the trigger itself - see TriggerOrderHistoryStore for why this exists
+// separately from the Telegram message that also reports each one.
+builder.Services.AddSingleton<TriggerOrderHistoryStore>();
 builder.Services.AddHostedService<StrategyTriggerHostedService>();
 
 builder.Services.AddSignalR();

@@ -13,14 +13,26 @@ namespace OptionAnalytics.Server.Controllers;
 public sealed class TriggersController : ControllerBase
 {
     private readonly StrategyTriggerStore _store;
+    private readonly TriggerOrderHistoryStore _orderHistory;
 
-    public TriggersController(StrategyTriggerStore store)
+    public TriggersController(StrategyTriggerStore store, TriggerOrderHistoryStore orderHistory)
     {
         _store = store;
+        _orderHistory = orderHistory;
     }
 
     [HttpGet]
     public IActionResult GetAll() => Ok(_store.GetAll());
+
+    /// <summary>Every order-pipeline outcome (placed/filled/failed/cancelled/skipped/...) any trigger
+    /// has produced, most recent first - the same text each one already sent to Telegram via
+    /// StrategyTriggerHostedService.NotifyFollowUpAsync, kept here so the page can show "what
+    /// actually happened" without depending on catching that message. ?triggerId= filters to one
+    /// trigger; ?limit= caps how many rows come back (default 100, capped at 500 - this is a recent-
+    /// activity feed, not an export).</summary>
+    [HttpGet("orders")]
+    public IActionResult GetOrderHistory([FromQuery] string? triggerId, [FromQuery] int limit = 100) =>
+        Ok(_orderHistory.GetRecent(triggerId, Math.Clamp(limit <= 0 ? 100 : limit, 1, 500)));
 
     [HttpPost]
     public IActionResult Create([FromBody] StrategyTriggerRequest request)

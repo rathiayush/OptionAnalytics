@@ -101,6 +101,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     private readonly CdvHostedService _cdv;
     private readonly DhanOptionChainMaster _optionChainMaster;
     private readonly DhanSuperOrderClient _superOrders;
+    private readonly TriggerOrderHistoryStore _orderHistory;
     private readonly IHubContext<SpotHub> _hub;
     private readonly ILogger<StrategyTriggerHostedService> _logger;
 
@@ -119,7 +120,8 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     public StrategyTriggerHostedService(
         StrategyTriggerStore store, BacktestService backtest, TelegramAlertService telegram,
         SpotFeedHostedService spotFeed, CdvHostedService cdv, DhanOptionChainMaster optionChainMaster,
-        DhanSuperOrderClient superOrders, IHubContext<SpotHub> hub, ILogger<StrategyTriggerHostedService> logger)
+        DhanSuperOrderClient superOrders, TriggerOrderHistoryStore orderHistory, IHubContext<SpotHub> hub,
+        ILogger<StrategyTriggerHostedService> logger)
     {
         _store = store;
         _backtest = backtest;
@@ -128,6 +130,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         _cdv = cdv;
         _optionChainMaster = optionChainMaster;
         _superOrders = superOrders;
+        _orderHistory = orderHistory;
         _hub = hub;
         _logger = logger;
     }
@@ -819,9 +822,20 @@ public sealed class StrategyTriggerHostedService : BackgroundService
 
     /// <summary>Sends a standalone Telegram message for something MonitorFillAsync/CancelOrderAsync
     /// discovered well after the trigger's own initial alert already went out - a fill, a cancel, or
-    /// a give-up - so the outcome doesn't wait on (or get lost inside) that earlier message.</summary>
+    /// a give-up - so the outcome doesn't wait on (or get lost inside) that earlier message.
+    ///
+    /// This is the ONE place every order-pipeline outcome passes through - [NO ORDER PLACED],
+    /// [ORDER PLACED/FAILED/PIPELINE CRASHED] from PlaceOrderInBackgroundAsync, and every
+    /// [ORDER FILLED/CANCELLED/PARTIALLY FILLED/UNMONITORED/...] MonitorFillAsync/CancelOrderAsync
+    /// can produce - so it is also the one place that records it to _orderHistory, rather than
+    /// threading a second call through every individual call site. Recorded BEFORE the Telegram
+    /// send (and regardless of whether that send succeeds) so the Triggers page's order history
+    /// never depends on Telegram actually being configured or reachable - the whole point of
+    /// persisting this at all is to have an answer even when that message was never seen.</summary>
     private async Task NotifyFollowUpAsync(StrategyTrigger trigger, string body, CancellationToken cancellationToken)
     {
+        _orderHistory.Record(trigger.Id, trigger.Name, body);
+
         try
         {
             await _telegram.SendAsync($"[Trigger] <b>{trigger.Name}</b>\n{body}", cancellationToken);

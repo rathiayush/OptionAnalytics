@@ -19,6 +19,7 @@ services:
 
       # Onto the mounted volume below - the container's content root is not persistent.
       Storage__TriggersPath: /app/data/strategy-triggers.json
+      Storage__OrderHistoryPath: /app/data/trigger-order-history.json
 
       # Dhan. Either supply a long-lived AccessToken, or leave it empty and set Pin + TotpSecret so
       # DhanTotpAutoRenewalHostedService logs in on its own and keeps the token fresh.
