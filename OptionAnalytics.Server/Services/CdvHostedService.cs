@@ -40,6 +40,12 @@ public sealed class CdvHostedService : BackgroundService
 
     private static readonly TimeSpan AtmRecenterInterval = TimeSpan.FromMinutes(30);
 
+    /// <summary>How soon to retry when a recenter left something without data - no ATM resolved, or
+    /// a tracked expiry with nothing subscribed. Short, because that state means a page or a trigger
+    /// is looking at an empty chain RIGHT NOW; the full 30-minute cadence resumes as soon as
+    /// everything is live again.</summary>
+    private static readonly TimeSpan IncompleteRetryInterval = TimeSpan.FromSeconds(30);
+
     /// <summary>Matches SpotFeedHostedService's own backfill window exactly - the option premium
     /// charts and CDV's reconstructed history need to cover the same trading days the spot chart
     /// does, or the charts would visibly disagree on how far back "history" goes. Both read the
@@ -541,27 +547,41 @@ public sealed class CdvHostedService : BackgroundService
 
         _feedClient.TickReceived += OnTick;
 
-        // The very first recenter can easily lose the race with SpotFeedHostedService's own
-        // startup work (scrip master download, historical backfill) and find every underlying's
-        // spot price still 0 - which used to mean waiting a full 30 minutes for the next scheduled
-        // recenter before the CDV chart ever got a strike window. Retry on a short interval until
-        // every underlying has resolved an ATM at least once, then fall through to the normal
-        // 30-minute cadence.
-        for (var attempt = 0; attempt < 30 && !stoppingToken.IsCancellationRequested; attempt++)
+        // One loop rather than a startup phase and then a steady phase, because they want the same
+        // thing: recenter, and come back SOON if anything is still missing.
+        //
+        // "Missing" means an underlying with no ATM resolved, or a tracked expiry with nothing
+        // subscribed. Both are ordinary startup states - the first recenter routinely loses the race
+        // with SpotFeedHostedService's own scrip-master download and backfill - and both are also
+        // what a transient failure looks like afterwards (a scrip master that briefly parsed to
+        // nothing, a Dhan call that failed). Retrying those in 30 seconds rather than waiting out
+        // the full 30-minute cadence is the difference between a gap and an outage: an underlying
+        // that failed its recenter used to have no strikes, no CDV and no option candles for half an
+        // hour, and every trigger on it went quiet for that whole time.
+        while (!stoppingToken.IsCancellationRequested)
         {
-            await RecenterAllAsync(stoppingToken);
-            if (States.Values.All(s => s.AtmStrike is not null)) break;
-            await Task.Delay(TimeSpan.FromSeconds(20), stoppingToken);
-        }
+            var complete = await RecenterAllAsync(stoppingToken);
 
-        using var timer = new PeriodicTimer(AtmRecenterInterval);
-        while (await timer.WaitForNextTickAsync(stoppingToken))
-        {
-            await RecenterAllAsync(stoppingToken);
+            try
+            {
+                await Task.Delay(complete ? AtmRecenterInterval : IncompleteRetryInterval, stoppingToken);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
         }
     }
 
-    private async Task RecenterAllAsync(CancellationToken cancellationToken)
+    /// <summary>Recenters every underlying - NIFTY and BANKNIFTY alike, each on every expiry it
+    /// tracks. Returns true only when every underlying has an ATM and every tracked expiry has at
+    /// least one live subscription, i.e. when there is nothing to come back early for.
+    ///
+    /// Deliberately swallows a per-underlying failure. This loop is the ONLY thing keeping the
+    /// strike windows current, so letting one underlying's exception escape would end it for good
+    /// and freeze both: NIFTY and BANKNIFTY share this loop, and a BANKNIFTY-only fault must never
+    /// take NIFTY's data down with it.</summary>
+    private async Task<bool> RecenterAllAsync(CancellationToken cancellationToken)
     {
         try
         {
@@ -572,18 +592,48 @@ public sealed class CdvHostedService : BackgroundService
             _logger.LogWarning(ex, "Could not refresh the Dhan option chain for this re-center - keeping the previous strike window.");
         }
 
+        var complete = true;
+
         foreach (var (underlying, step, _) in Underlyings)
         {
+            if (cancellationToken.IsCancellationRequested) return false;
+
             await _recenterLock.WaitAsync(cancellationToken);
             try
             {
                 await RecenterAsync(underlying, step, cancellationToken);
             }
+            catch (OperationCanceledException)
+            {
+                return false;
+            }
+            catch (Exception ex)
+            {
+                complete = false;
+                _logger.LogError(ex, "CDV: {Underlying} re-center failed - retrying shortly. Its existing strike window is left exactly as it was.", underlying);
+            }
             finally
             {
                 _recenterLock.Release();
             }
+
+            complete &= IsUnderlyingLive(underlying);
         }
+
+        return complete;
+    }
+
+    /// <summary>Whether this underlying has everything it needs to be producing data right now: an
+    /// ATM resolved, at least one tracked expiry, and a live subscription on every one of them.
+    /// Anything else means some page or trigger is looking at an empty chain.</summary>
+    private bool IsUnderlyingLive(string underlying)
+    {
+        if (!_selected.TryGetValue(underlying, out var selected) || selected.AtmStrike is null) return false;
+
+        var tracked = TrackedExpiries(underlying);
+        if (tracked.Count == 0) return false;
+
+        return tracked.All(e => _subscribedTokens.TryGetValue((underlying, e), out var tokens) && tokens.Count > 0);
     }
 
     /// <summary>Caller must hold _recenterLock for this underlying's whole reset/recenter sequence -
@@ -611,8 +661,20 @@ public sealed class CdvHostedService : BackgroundService
             return;
         }
 
+        // Per expiry, because they are independent: one expiry failing (a contract the master
+        // cannot resolve, a backfill call that threw) must not cost the others their recenter, nor
+        // skip the bookkeeping below that keeps the tracked set and the selection honest.
         foreach (var expiry in wanted)
-            await RecenterExpiryAsync(underlying, step, expiry, spot, today, cancellationToken);
+        {
+            try
+            {
+                await RecenterExpiryAsync(underlying, step, expiry, spot, today, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogError(ex, "CDV: {Underlying} {Expiry} re-center failed - its window is left as it was, the other expiries continue.", underlying, expiry);
+            }
+        }
 
         await DropUntrackedExpiriesAsync(underlying, wanted, cancellationToken);
         _trackedExpiries[underlying] = wanted;
