@@ -273,12 +273,13 @@ public sealed class DhanOptionChainMaster
         public int DroppedOptionType;
         public int DroppedStrike;
         public int DroppedLotSize;
+        public int DroppedTickSize;
         public int Kept;
 
         public override string ToString() =>
             $"Read {DataRows} data row(s): {OptIdxRows} OPTIDX, {MatchedUnderlying} on NIFTY/BANKNIFTY, kept {Kept}. " +
             $"Dropped - securityId {DroppedSecurityId}, expiry {DroppedExpiry}, optionType {DroppedOptionType}, " +
-            $"strike {DroppedStrike}, lotSize {DroppedLotSize}.";
+            $"strike {DroppedStrike}, lotSize {DroppedLotSize}, tickSize {DroppedTickSize}.";
     }
 
     private (List<DhanOptionInstrument> Options, ParseStats Stats) ParseOptionRows(Stream stream)
@@ -374,7 +375,18 @@ public sealed class DhanOptionChainMaster
                 stats.DroppedLotSize++;
                 continue;
             }
+
+            // Same reasoning as lot size, for the same reason: RoundToTick (StrategyTriggerHostedService)
+            // treats a tick size <= 0 as "don't round at all" and sends the raw price through unchanged -
+            // Dhan then rejects it outright for not being a multiple of the contract's real tick size,
+            // with nothing in this app's own logs to say why. Drop the row instead of building an
+            // order plan around a tick size that was never real.
             var tickSize = ParseDecimal(Get(fields, tickSizeIndex));
+            if (tickSize <= 0)
+            {
+                stats.DroppedTickSize++;
+                continue;
+            }
 
             options.Add(new DhanOptionInstrument(securityId, tradingSymbol, underlying, expiry.Value, strike, optionType == "CE", "NSE_FNO", lotSize, tickSize));
             stats.Kept++;
