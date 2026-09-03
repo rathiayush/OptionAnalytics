@@ -78,6 +78,12 @@ public sealed class CdvHostedService : BackgroundService
     /// <summary>IST time the session ends. After this, the day's candles cannot change.</summary>
     private static readonly TimeOnly SessionClose = new(15, 30);
 
+    /// <summary>IST time a forced scrip-master re-download happens once per day, ahead of the
+    /// 09:15 open - independent of EnsureLoadedAsync's own 12-hour cache (a process that has been
+    /// running continuously since yesterday would otherwise still read as "fresh" going into a new
+    /// trading day on data that is up to a day old). See _lastDailyMasterRefreshIstDate.</summary>
+    private static readonly TimeOnly DailyMasterRefreshTime = new(6, 0);
+
     private readonly DhanOptionChainMaster _optionChainMaster;
     private readonly DhanOptionChainQuotes _chainQuotes;
     private readonly DhanMarketFeedClient _feedClient;
@@ -134,6 +140,11 @@ public sealed class CdvHostedService : BackgroundService
     /// this, a manual expiry switch racing the scheduled timer could unsubscribe a token the other
     /// had just resubscribed, or backfill a strike the other was mid-reset on.</summary>
     private readonly SemaphoreSlim _recenterLock = new(1, 1);
+
+    /// <summary>The IST date the daily 06:00 forced scrip-master refresh last ran, so
+    /// RecenterAllAsync fires it once per day rather than on every recenter after 06:00. Only
+    /// written from that loop, so no lock needed.</summary>
+    private DateOnly? _lastDailyMasterRefreshIstDate;
 
     /// <summary>Fetched-on-demand candles for strikes this app doesn't track, keyed by contract and
     /// IST trading day (so yesterday's entry can never be served today). Guarded by its own lock -
@@ -606,14 +617,7 @@ public sealed class CdvHostedService : BackgroundService
     /// take NIFTY's data down with it.</summary>
     private async Task<bool> RecenterAllAsync(CancellationToken cancellationToken)
     {
-        try
-        {
-            await _optionChainMaster.EnsureLoadedAsync(cancellationToken);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            _logger.LogWarning(ex, "Could not refresh the Dhan option chain for this re-center - keeping the previous strike window.");
-        }
+        await RefreshMasterForThisRecenterAsync(cancellationToken);
 
         var complete = true;
 
@@ -644,6 +648,42 @@ public sealed class CdvHostedService : BackgroundService
         }
 
         return complete;
+    }
+
+    /// <summary>The scrip master refresh this recenter opens with: a normal EnsureLoadedAsync
+    /// (no-op once fresh) every time, plus - once per IST calendar day, the first recenter at or
+    /// after 06:00 - a FORCED re-download regardless of the 12-hour cache. That cache alone would
+    /// let a process that has been running continuously since yesterday go into a brand new trading
+    /// day still reading as "fresh" on data that is, in the worst case, nearly a day old (new
+    /// contracts listed overnight, lot-size revisions, whatever else Dhan's own file picked up
+    /// before today's open). A restart already forces a fresh download on its own (a cold-started
+    /// master always starts empty, so EnsureLoadedAsync's very first call downloads unconditionally)
+    /// - this is for the case where the process ISN'T restarted across a day boundary.</summary>
+    private async Task RefreshMasterForThisRecenterAsync(CancellationToken cancellationToken)
+    {
+        var nowIst = DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(5.5));
+        var todayIst = DateOnly.FromDateTime(nowIst.DateTime);
+        var dueForDailyRefresh = TimeOnly.FromDateTime(nowIst.DateTime) >= DailyMasterRefreshTime && _lastDailyMasterRefreshIstDate != todayIst;
+
+        if (dueForDailyRefresh)
+        {
+            var (count, _, error) = await _optionChainMaster.ForceRefreshAsync(cancellationToken);
+            _lastDailyMasterRefreshIstDate = todayIst; // once attempted, not retried again today even on failure - EnsureLoadedAsync's own retry/backoff covers a failed download from here
+            if (error is not null)
+                _logger.LogError("Daily 06:00 IST scrip-master refresh failed: {Error}. Falling back to whatever was already loaded ({Count} contract(s)).", error, count);
+            else
+                _logger.LogInformation("Daily 06:00 IST scrip-master refresh: {Count} contract(s) loaded.", count);
+            return;
+        }
+
+        try
+        {
+            await _optionChainMaster.EnsureLoadedAsync(cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Could not refresh the Dhan option chain for this re-center - keeping the previous strike window.");
+        }
     }
 
     /// <summary>Whether this underlying has everything it needs to be producing data right now: an
