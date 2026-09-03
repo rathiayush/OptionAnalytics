@@ -365,6 +365,62 @@ public sealed class CdvHostedService : BackgroundService
         return await _chainQuotes.GetQuotesAsync(instrument.SecurityId, instrument.DhanSegment, expiry, cancellationToken);
     }
 
+    /// <summary>Every contract the scrip master lists for one underlying/expiry, with what this app
+    /// currently knows about each: whether the feed is subscribed to it, whether CDV tracks it, and
+    /// its latest tick. Powers the Contracts page.
+    ///
+    /// The point of it is to separate three failures that all used to surface as one unhelpful "no
+    /// data", each with a different fix:
+    ///   - the master lists NOTHING (a bad scrip-master refresh - the failure that silently stopped
+    ///     every order being placed);
+    ///   - listed but not subscribed (outside the ATM+-8 window, or an expiry not tracked);
+    ///   - subscribed but never ticked (a feed or authorisation problem).
+    /// A null expiry means the nearest tracked one.</summary>
+    public ContractsResponse GetContracts(string underlying, DateOnly? expiry)
+    {
+        underlying = underlying.ToUpperInvariant();
+
+        var listed = _optionChainMaster.GetExpiries(underlying);
+        var tracked = TrackedExpiries(underlying);
+        var status = _optionChainMaster.Status();
+
+        var resolved = expiry ?? (tracked.Count > 0 ? tracked[0] : listed.FirstOrDefault(e => e >= IstToday()));
+        var state = resolved == default ? null : StateFor(underlying, tracked.Contains(resolved) ? resolved : null);
+
+        var rows = new List<ContractRow>();
+        if (resolved != default)
+        {
+            foreach (var contract in _optionChainMaster.GetContracts(underlying, resolved))
+            {
+                var tick = _feedClient.LastTickFor(contract.SecurityId);
+                rows.Add(new ContractRow(
+                    contract.SecurityId,
+                    contract.TradingSymbol,
+                    contract.Strike,
+                    contract.IsCall ? "CE" : "PE",
+                    contract.LotSize,
+                    contract.TickSize,
+                    Subscribed: _feedClient.IsSubscribed(contract.SecurityId),
+                    // Tracked means THIS expiry's own state holds it - only meaningful when the
+                    // expiry being viewed is one the app tracks.
+                    Tracked: state is not null && state.Expiry == resolved && state.IsTracked(contract.SecurityId),
+                    LastPrice: tick?.LastPrice,
+                    Volume: tick?.Volume,
+                    LastTickUtc: tick?.ExchangeTimestamp));
+            }
+        }
+
+        return new ContractsResponse(
+            underlying,
+            resolved == default ? null : resolved,
+            listed,
+            tracked,
+            status.ContractCount,
+            status.LoadedAt,
+            _feedClient.SubscribedCount,
+            rows);
+    }
+
     /// <summary>One strike's LIVE premium on any listed expiry, from Dhan's Option Chain API -
     /// what a live order needs when it is being placed in an expiry this app is not tracking (see
     /// StrategyTrigger.OrderExpiry). The websocket feed only carries the tracked expiry's ATM+-8

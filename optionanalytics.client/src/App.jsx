@@ -5,6 +5,7 @@ import * as signalR from '@microsoft/signalr'
 import { Routes, Route } from 'react-router-dom'
 import BacktestPage from './BacktestPage.jsx'
 import TriggersPage from './TriggersPage.jsx'
+import ContractsPage from './ContractsPage.jsx'
 import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, fmtPrice, fmtIstTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry } from './shared.jsx'
 import './App.css'
 
@@ -1355,6 +1356,7 @@ export default function App() {
       <Route path="/" element={<DashboardPage />} />
       <Route path="/backtest" element={<BacktestPage />} />
       <Route path="/triggers" element={<TriggersPage />} />
+      <Route path="/contracts" element={<ContractsPage />} />
     </Routes>
   )
 }

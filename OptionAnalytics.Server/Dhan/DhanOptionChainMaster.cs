@@ -127,6 +127,25 @@ public sealed class DhanOptionChainMaster
     public DateOnly? GetNearestExpiry(string underlying, DateOnly asOf) =>
         GetExpiries(underlying).Where(e => e >= asOf).Cast<DateOnly?>().FirstOrDefault();
 
+    /// <summary>Every contract this master holds for one underlying and expiry, strike order. What
+    /// the contracts page lists - deliberately the MASTER's view rather than what CDV happens to
+    /// track, because the question it answers is "does this app know these contracts exist at
+    /// all", which is what silently stopped being true when a refresh wiped the master.</summary>
+    public IReadOnlyList<DhanOptionInstrument> GetContracts(string underlying, DateOnly expiry) =>
+        _byKey.Values
+            .Where(o => string.Equals(o.Underlying, underlying, StringComparison.OrdinalIgnoreCase) && o.Expiry == expiry)
+            .OrderBy(o => o.Strike)
+            .ToList();
+
+    /// <summary>The master's own health: how many contracts it holds, when it last loaded, and
+    /// every expiry it lists. Zero contracts here is the failure that reads downstream as every
+    /// strike being "not listed" - see RefreshFromDhanAsync.</summary>
+    public (int ContractCount, DateTimeOffset? LoadedAt, IReadOnlyList<string> Underlyings) Status()
+    {
+        var loaded = _loadedAt == DateTimeOffset.MinValue ? (DateTimeOffset?)null : _loadedAt;
+        return (_byKey.Count, loaded, _expiriesByUnderlying.Keys.OrderBy(k => k).ToList());
+    }
+
     public DhanOptionInstrument? Find(string underlying, DateOnly expiry, decimal strike, bool isCall) =>
         _byKey.TryGetValue(Key(underlying, expiry, strike, isCall), out var match) ? match : null;
 
