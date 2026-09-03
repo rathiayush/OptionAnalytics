@@ -5,6 +5,23 @@ import { UP_COLOR, DOWN_COLOR, NavBar, fmtIstDateTime, TIMEFRAME_OPTIONS, STORED
 
 const { Title, Text } = Typography
 
+// Colours the order-history status Tag by outcome, grouped the same way a person reading it would:
+// green once money has actually moved (placed, filled), amber for a partial/still-unresolved state,
+// red for anything that means the order did NOT do what the trigger wanted, grey for a plain skip.
+const ORDER_STATUS_COLOR = {
+  'ORDER PLACED': UP_COLOR,
+  'ORDER FILLED': UP_COLOR,
+  'ORDER CANCELLED': 'default',
+  'ORDER PARTIALLY FILLED': 'gold',
+  'ORDER FAILED': DOWN_COLOR,
+  'ORDER PIPELINE CRASHED': DOWN_COLOR,
+  'ORDER REJECTED': DOWN_COLOR,
+  'ORDER CANCEL FAILED': DOWN_COLOR,
+  'ORDER UNMONITORED': DOWN_COLOR,
+  'NO ORDER PLACED': 'default',
+}
+const orderStatusColor = (status) => ORDER_STATUS_COLOR[status] ?? (status?.includes('FAIL') || status?.includes('CRASH') ? DOWN_COLOR : 'default')
+
 // Arm a strategy to notify over Telegram when it fires. A trigger takes exactly the inputs a
 // Backtrack run takes - underlying, strategy, timeframe and that strategy's own parameters - and
 // the backend evaluates it with the same code the backtest uses, so a rule tuned on that page
@@ -16,6 +33,12 @@ export default function TriggersPage() {
   const [triggers, setTriggers] = useState([])
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
+
+  // What actually happened to every order a trigger's tried to place - see TriggerOrderHistoryStore.
+  // Polled rather than pushed: this is a look-it-up-when-you-want-it log, not a live feed, and every
+  // other page-level list here already works the same way (loadTriggers below included).
+  const [orderEvents, setOrderEvents] = useState([])
+  const [orderHistoryTriggerId, setOrderHistoryTriggerId] = useState(null)
 
   const [name, setName] = useState('')
   // Shared with every other page and remembered across reloads - see usePersistedState.
@@ -53,6 +76,23 @@ export default function TriggersPage() {
       .catch((err) => console.error('Failed to load triggers:', err))
       .finally(() => setLoading(false))
   }
+
+  const loadOrderHistory = () => {
+    const url = orderHistoryTriggerId ? `/api/triggers/orders?triggerId=${orderHistoryTriggerId}&limit=200` : '/api/triggers/orders?limit=200'
+    fetch(url)
+      .then((r) => r.json())
+      .then((data) => setOrderEvents(data ?? []))
+      .catch((err) => console.error('Failed to load trigger order history:', err))
+  }
+
+  // Polled every 5s, same cadence ContractsPage uses for its own live-state table - this is an
+  // activity log a person checks after wondering "did that fire", not something worth a SignalR
+  // channel of its own.
+  useEffect(() => {
+    loadOrderHistory()
+    const id = setInterval(loadOrderHistory, 5000)
+    return () => clearInterval(id)
+  }, [orderHistoryTriggerId])
 
   useEffect(() => {
     fetch('/api/spot/underlyings')
@@ -217,6 +257,21 @@ export default function TriggersPage() {
     },
   ]
 
+  // "did the order fire" answered by looking, not by hunting through Telegram - see
+  // TriggerOrderHistoryStore. Message carries the full multi-line detail (contract, price, target/SL,
+  // reason) NotifyFollowUpAsync already composes for Telegram; Status is just its own leading [TAG].
+  const orderHistoryColumns = [
+    { title: 'Time', dataIndex: 'timestampUtc', key: 'timestampUtc', width: 150, render: (v) => <Text style={{ fontSize: 12 }}>{fmtIstDateTime(v)}</Text> },
+    { title: 'Trigger', dataIndex: 'triggerName', key: 'triggerName', width: 160 },
+    { title: 'Status', dataIndex: 'status', key: 'status', width: 170, render: (v) => <Tag color={orderStatusColor(v)}>{v}</Tag> },
+    {
+      title: 'Detail',
+      dataIndex: 'message',
+      key: 'message',
+      render: (v) => <Text style={{ fontSize: 12, whiteSpace: 'pre-wrap' }}>{v}</Text>,
+    },
+  ]
+
   return (
     <div style={{ maxWidth: 1280, margin: '0 auto', padding: '24px 16px' }}>
       <Space direction="vertical" size={20} style={{ width: '100%' }}>
@@ -370,6 +425,34 @@ export default function TriggersPage() {
             columns={columns}
             pagination={false}
             locale={{ emptyText: 'No triggers yet - arm one above and it will notify over Telegram when its strategy fires.' }}
+          />
+        </Card>
+
+        <Card
+          size="small"
+          title="Order history"
+          extra={
+            <Select
+              value={orderHistoryTriggerId}
+              onChange={setOrderHistoryTriggerId}
+              style={{ width: 220 }}
+              options={[{ value: null, label: 'All triggers' }, ...triggers.map((t) => ({ value: t.id, label: t.name }))]}
+            />
+          }
+        >
+          <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 12 }}>
+            Every outcome a live-trading trigger's order pipeline has produced - placed, filled,
+            re-priced, cancelled, failed, or skipped - the same detail each one sends to Telegram,
+            kept here so you can check what actually happened without depending on catching that
+            message. Refreshes every 5s.
+          </Text>
+          <Table
+            size="small"
+            rowKey="id"
+            dataSource={orderEvents}
+            columns={orderHistoryColumns}
+            pagination={{ pageSize: 10, size: 'small' }}
+            locale={{ emptyText: 'No order activity yet - this fills in once a live-trading trigger fires.' }}
           />
         </Card>
       </Space>
