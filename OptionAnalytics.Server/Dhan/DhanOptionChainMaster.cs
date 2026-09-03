@@ -141,6 +141,29 @@ public sealed class DhanOptionChainMaster
             return;
         }
 
+        // The guard above only catches a WHOLE-master wipe. It does nothing for a PARTIAL one: a
+        // download that has plenty of rows for one underlying but happens to have zero for the
+        // other still passes options.Count == 0 and would otherwise swap in a dictionary missing
+        // that underlying entirely - the exact same "not listed, no order placed" failure, just
+        // scoped to one underlying instead of all of them. This carries the PREVIOUS load's rows
+        // forward for any underlying that dropped to zero here while at least one other underlying
+        // came back with data, so one underlying's bad download can never silently blank another
+        // underlying that was working fine.
+        var underlyingsInThisRefresh = new HashSet<string>(options.Select(o => o.Underlying), StringComparer.OrdinalIgnoreCase);
+        foreach (var underlying in Underlyings)
+        {
+            if (underlyingsInThisRefresh.Contains(underlying)) continue;
+
+            var stale = _byKey.Values.Where(o => string.Equals(o.Underlying, underlying, StringComparison.OrdinalIgnoreCase)).ToList();
+            if (stale.Count == 0) continue; // never had data for it either - nothing to carry forward
+
+            _logger.LogError(
+                "Dhan scrip master refresh returned rows for other underlyings but ZERO for {Underlying} - " +
+                "KEEPING the {Count} {Underlying} contract(s) already loaded rather than dropping them. {Stats}",
+                underlying, stale.Count, underlying, stats);
+            options.AddRange(stale);
+        }
+
         var byKey = new Dictionary<string, DhanOptionInstrument>(StringComparer.OrdinalIgnoreCase);
         var expiries = new Dictionary<string, SortedSet<DateOnly>>(StringComparer.OrdinalIgnoreCase);
 
