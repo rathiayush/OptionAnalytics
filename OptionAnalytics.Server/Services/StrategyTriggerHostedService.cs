@@ -276,12 +276,23 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         //
         // With StrategyTrigger.UseLivePremiumEntry the wait is the very thing being removed: the
         // signal is actionable the instant the SIGNAL bar closes, priced off the live premium (see
-        // BuildOrderPlan), so a trade with no resolved entry bar still counts. A NoData trade is
-        // still excluded either way - that means the strike was never tracked, so there is no live
-        // premium to read for it and nothing to price an order from.
+        // BuildOrderPlan, which has its own GetOrderPremiumAsync fallback to a live Option Chain
+        // quote for exactly a strike with no tracked candle history) - so a trade with no resolved
+        // entry bar still counts, AS LONG AS the signal itself resolved a real strike (t.Strike > 0
+        // - the only case that stays excluded, since that means the signal's own spot bar was
+        // missing and there is no contract to price at all).
+        //
+        // This used to read "t.ExitReason != "NoData"" instead of "t.Strike > 0", which was dead
+        // code: OptionTradeSimulator only ever leaves EntryTimeUtc null on a NoData trade (the two
+        // are set together), so whenever the first half of this OR was false, ExitReason was ALWAYS
+        // "NoData" too - the second half could never be true, and UseLivePremiumEntry silently made
+        // no difference to this filter at all. That is exactly why a signal on a strike whose next
+        // option bar hadn't closed yet (or had never been tracked) sat here forever with no alert
+        // and no order, even on a trigger explicitly configured to skip that wait - the live-quote
+        // fallback in BuildOrderPlanAsync was reachable in theory but never reached in practice.
         var tradable = trades
             .Where(t => t.SignalTimeUtc > lastSeen
-                && (t.EntryTimeUtc is not null || (trigger.UseLivePremiumEntry && t.ExitReason != "NoData")))
+                && (t.EntryTimeUtc is not null || (trigger.UseLivePremiumEntry && t.Strike > 0)))
             .ToList();
         if (tradable.Count == 0) return;
 
