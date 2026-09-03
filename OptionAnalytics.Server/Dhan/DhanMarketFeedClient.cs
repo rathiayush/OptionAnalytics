@@ -31,11 +31,13 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
     private const int RequestCodeDisconnect = 12;
     private const int SubscriptionBatchSize = 100;
 
-    // If the socket has been open this long with zero data, it is treated as silently dead and
-    // reconnected - Dhan authorizes a connection asynchronously after the handshake, so a
-    // subscription sent too early can simply be ignored with no error.
-    private static readonly TimeSpan StallTimeout = TimeSpan.FromSeconds(45);
-    private static readonly TimeSpan StallCheckInterval = TimeSpan.FromSeconds(10);
+    /// <summary>Dhan's documented per-connection instrument limit. Nowhere near it today (~170 with
+    /// every tracked expiry subscribed), but the count is no longer fixed - it scales with how many
+    /// expiries are tracked - so crossing it should say so rather than show up as a handful of
+    /// strikes that mysteriously never tick. Dhan rejects the surplus with error 804 and the
+    /// instruments simply stay silent.</summary>
+    private const int MaxInstrumentsPerConnection = 5000;
+
     private static readonly TimeSpan InterBatchDelay = TimeSpan.FromMilliseconds(50);
 
     private readonly DhanOptions _options;
@@ -47,10 +49,13 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
     private readonly SemaphoreSlim _sendLock = new(1, 1);
 
     private ClientWebSocket? _socket;
-    private DateTimeOffset _lastMessageAt = DateTimeOffset.MinValue;
-    private DateTimeOffset _connectedAt = DateTimeOffset.MinValue;
+
+    /// <summary>Decides whether a quiet feed needs a re-subscribe or a reconnect - see
+    /// FeedStallDetector for why those are different answers, and why always reconnecting (what
+    /// this used to do) manufactures Dhan's own 805 connection-limit failure.</summary>
+    private readonly FeedStallDetector _stall = new();
+
     private int _lastDisconnectCode;
-    private bool _loggedFirstMessage;
 
     // Announced once per security id per connection, so it's obvious from the console alone
     // which subscribed instruments are actually ticking and which are silent - the exact
@@ -70,7 +75,13 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
     /// <summary>Adds tokens to the subscribed set (each mapped to its Dhan WS segment string, e.g.
     /// "IDX_I" or "NSE_FNO") and, if already connected, sends a live subscribe message for the new
     /// ones immediately. Safe to call before the connection exists - RunAsync subscribes the whole
-    /// set on every (re)connect regardless.</summary>
+    /// set on every (re)connect regardless.
+    ///
+    /// The set is FLAT across every underlying and every tracked expiry: a contract's token is
+    /// unique per (strike, side, expiry), so several expiries' ATM+-8 windows coexist here without
+    /// colliding, and one expiry's window rolling never unsubscribes another's. Everything in here
+    /// is re-sent on every reconnect and by the stall watchdog's re-subscribe, so a subscribe that
+    /// failed mid-flight repairs itself rather than leaving that expiry permanently silent.</summary>
     public async Task SubscribeAsync(IReadOnlyDictionary<uint, string> tokens, CancellationToken cancellationToken)
     {
         var added = new List<KeyValuePair<uint, string>>();
@@ -81,8 +92,16 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
 
         if (added.Count == 0) return;
 
-        _logger.LogInformation("Subscribing {Count} instrument(s) in Quote mode: {Instruments}.",
-            added.Count, string.Join(", ", added.Select(kv => $"{kv.Key}({kv.Value})")));
+        _logger.LogInformation("Subscribing {Count} instrument(s) in Quote mode ({Total} subscribed in total): {Instruments}.",
+            added.Count, _tokenSegments.Count, string.Join(", ", added.Select(kv => $"{kv.Key}({kv.Value})")));
+
+        if (_tokenSegments.Count > MaxInstrumentsPerConnection)
+        {
+            _logger.LogError(
+                "Dhan market feed now has {Count} instruments subscribed, past the {Limit} this connection allows. " +
+                "Dhan will reject the surplus (error 804) and those instruments will never tick - reduce the tracked expiries or the strike window.",
+                _tokenSegments.Count, MaxInstrumentsPerConnection);
+        }
 
         if (_socket is not { State: WebSocketState.Open }) return;
         await SendSubscriptionAsync(added.Select(kv => (kv.Key, kv.Value)), RequestCodeQuote, cancellationToken);
@@ -145,7 +164,11 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
                 var uptime = DateTimeOffset.UtcNow - connectedAt;
                 var cooldown = CooldownFor(_lastDisconnectCode);
                 _lastDisconnectCode = 0;
-                backoff = cooldown ?? (uptime >= TimeSpan.FromSeconds(30) ? TimeSpan.FromSeconds(1) : TimeSpan.FromSeconds(Math.Min(backoff.TotalSeconds * 2, 30)));
+                // Reset to the floor only for a connection that actually HELD - see
+                // FeedStallDetector.StableConnectionThreshold for why "it connected" is not enough.
+                backoff = cooldown ?? (uptime >= FeedStallDetector.StableConnectionThreshold
+                    ? TimeSpan.FromSeconds(1)
+                    : TimeSpan.FromSeconds(Math.Min(backoff.TotalSeconds * 2, 30)));
 
                 _logger.LogWarning("Dhan market feed disconnected after {Uptime:F0}s - {Reason}. Reconnecting in {Seconds}s.", uptime.TotalSeconds, endedReason, backoff.TotalSeconds);
                 if (!await DelayAsync(backoff, cancellationToken)) break;
@@ -170,18 +193,48 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
         _ => null,
     };
 
+    /// <summary>Watches a live connection and applies FeedStallDetector's verdict. The important
+    /// change from what this did before: a silent connection is RE-SUBSCRIBED, not aborted. Only a
+    /// connection that had been delivering and stayed silent through a re-subscribe is torn down.
+    /// Aborting a quiet socket opens a fresh one every time, and Dhan drops the oldest with 805
+    /// once five are open - so the old watchdog turned "the market is quiet" into "the feed keeps
+    /// getting disconnected".</summary>
     private async Task WatchForStallAsync(ClientWebSocket socket, CancellationToken cancellationToken)
     {
         while (!cancellationToken.IsCancellationRequested)
         {
-            if (!await DelayAsync(StallCheckInterval, cancellationToken)) return;
+            if (!await DelayAsync(FeedStallDetector.CheckInterval, cancellationToken)) return;
             if (socket.State != WebSocketState.Open) return;
 
-            if (_lastMessageAt != DateTimeOffset.MinValue && DateTimeOffset.UtcNow - _lastMessageAt > StallTimeout)
+            var tokens = _tokenSegments.Select(kv => (kv.Key, kv.Value)).ToArray();
+            switch (_stall.Decide(DateTimeOffset.UtcNow, tokens.Length > 0))
             {
-                _logger.LogWarning("Dhan market feed has sent nothing for over {Seconds}s - reconnecting.", StallTimeout.TotalSeconds);
-                try { socket.Abort(); } catch { /* the receive loop's exception is what matters */ }
-                return;
+                case FeedRecoveryAction.None:
+                    break;
+
+                case FeedRecoveryAction.Resubscribe:
+                    _logger.LogWarning(
+                        "Dhan market feed has sent nothing with {Count} instrument(s) subscribed - re-sending the subscriptions on the same connection.",
+                        tokens.Length);
+                    try
+                    {
+                        await SendSubscriptionAsync(tokens, RequestCodeQuote, cancellationToken);
+                    }
+                    catch (Exception ex)
+                    {
+                        // A send failure here IS the diagnosis - the socket is gone. Let the receive
+                        // loop notice rather than tearing things down from this task.
+                        _logger.LogWarning(ex, "Dhan market feed re-subscribe failed - the connection is no longer usable.");
+                        try { socket.Abort(); } catch { /* the receive loop's exception is what matters */ }
+                        return;
+                    }
+                    break;
+
+                case FeedRecoveryAction.Reconnect:
+                    _logger.LogWarning(
+                        "Dhan market feed still silent after a re-subscribe, having previously been live - treating it as a silently dropped connection and reconnecting.");
+                    try { socket.Abort(); } catch { /* the receive loop's exception is what matters */ }
+                    return;
             }
         }
     }
@@ -191,9 +244,7 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
         _socket?.Dispose();
         _socket = new ClientWebSocket();
         _socket.Options.KeepAliveInterval = TimeSpan.FromSeconds(20);
-        _lastMessageAt = DateTimeOffset.MinValue;
-        _connectedAt = DateTimeOffset.UtcNow;
-        _loggedFirstMessage = false;
+        _stall.OnConnected(DateTimeOffset.UtcNow);
         _loggedFirstTick.Clear();
 
         var accessToken = _session.AccessToken ?? throw new InvalidOperationException("No Dhan access token configured.");
@@ -240,16 +291,15 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
             do
             {
                 result = await _socket.ReceiveAsync(new ArraySegment<byte>(buffer), cancellationToken);
-                _lastMessageAt = DateTimeOffset.UtcNow;
 
-                if (!_loggedFirstMessage)
+                var now = DateTimeOffset.UtcNow;
+                if (_stall.OnMessage(now))
                 {
-                    _loggedFirstMessage = true;
                     // Its ABSENCE is the most useful fact when nothing is ticking: if this line
                     // never appears, the socket is connected but Dhan is sending literally
                     // nothing back - the problem is upstream of parsing (auth, subscription
                     // acceptance, or the market simply being closed), not this client's decoding.
-                    _logger.LogInformation("Dhan market feed delivered its first data {Seconds:F1}s after connecting.", (_lastMessageAt - _connectedAt).TotalSeconds);
+                    _logger.LogInformation("Dhan market feed delivered its first data {Seconds:F1}s after connecting.", _stall.TimeSinceConnected(now).TotalSeconds);
                 }
 
                 if (result.MessageType == WebSocketMessageType.Close)
