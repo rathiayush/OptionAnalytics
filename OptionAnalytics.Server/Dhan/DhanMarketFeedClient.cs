@@ -237,7 +237,7 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
             if (!await DelayAsync(FeedStallDetector.CheckInterval, cancellationToken)) return;
             if (socket.State != WebSocketState.Open) return;
 
-            var tokens = _tokenSegments.Select(kv => (kv.Key, kv.Value)).ToArray();
+            var tokens = _tokenSegments.ToArray();
             switch (_stall.Decide(DateTimeOffset.UtcNow, tokens.Length > 0))
             {
                 case FeedRecoveryAction.None:
@@ -249,11 +249,7 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
                         tokens.Length);
                     try
                     {
-                        // Grouped by mode - a re-subscribe must ask for the SAME mode each token was
-                        // originally subscribed in, or an option strike re-subscribed as Quote would
-                        // silently stop delivering the depth its order retries price off.
-                        foreach (var group in tokens.GroupBy(t => t.Value.SubscribeCode))
-                            await SendSubscriptionAsync(group.Select(t => (t.Key, t.Value.Segment)), group.Key, cancellationToken);
+                        await ResendSubscriptionsAsync(tokens, cancellationToken);
                     }
                     catch (Exception ex)
                     {
@@ -291,7 +287,19 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
         var tokens = _tokenSegments.ToArray();
         _logger.LogInformation("Connected to Dhan market feed ({Count} instruments).", tokens.Length);
 
-        // Grouped by mode - see the same note on the stall-watchdog re-subscribe above.
+        await ResendSubscriptionsAsync(tokens, cancellationToken);
+    }
+
+    /// <summary>Re-sends a subscribe message for every currently-tracked token, one message per
+    /// distinct mode present - each token asks for exactly the mode it is already recorded under
+    /// (SubscribeCode), never downgraded to Quote just because it's being grouped with others.
+    /// Shared by the reconnect path (ConnectAndSubscribeAsync) and the stall-watchdog's re-subscribe
+    /// (WatchForStallAsync), which both need to ask Dhan for the identical current subscribed set on
+    /// the same connection - nothing about who wants which mode has changed in either case, only
+    /// that Dhan needs telling again.</summary>
+    private async Task ResendSubscriptionsAsync(
+        IEnumerable<KeyValuePair<uint, (string Segment, int SubscribeCode)>> tokens, CancellationToken cancellationToken)
+    {
         foreach (var group in tokens.GroupBy(kv => kv.Value.SubscribeCode))
             await SendSubscriptionAsync(group.Select(kv => (kv.Key, kv.Value.Segment)), group.Key, cancellationToken);
     }
