@@ -434,7 +434,7 @@ public sealed class CdvUnderlyingState
                 var spot = spotByTime.TryGetValue(bar.Time, out var atBar) && atBar > 0 ? atBar : fallbackSpot;
                 if (spot <= 0) continue;
 
-                var day = DateOnly.FromDateTime(bar.Time.ToOffset(TimeSpan.FromHours(5.5)).DateTime);
+                var day = IstClock.IstDate(bar.Time);
                 var byDay = strike.IsCall ? _historyCeIncrements : _historyPeIncrements;
                 if (!byDay.TryGetValue(day, out var increments))
                     byDay[day] = increments = new Dictionary<DateTimeOffset, decimal>();
@@ -490,9 +490,9 @@ public sealed class CdvUnderlyingState
         {
             if (_historySeries.Count == 0) return Array.Empty<CdvBarPoint>();
 
-            var lastDay = DateOnly.FromDateTime(_historySeries[^1].Time.ToOffset(TimeSpan.FromHours(5.5)).DateTime);
+            var lastDay = IstClock.IstDate(_historySeries[^1].Time);
             return _historySeries
-                .Where(p => DateOnly.FromDateTime(p.Time.ToOffset(TimeSpan.FromHours(5.5)).DateTime) == lastDay)
+                .Where(p => IstClock.IstDate(p.Time) == lastDay)
                 .ToList();
         }
     }
@@ -803,7 +803,7 @@ public sealed class CdvUnderlyingState
 
         foreach (var point in series)
         {
-            var day = DateOnly.FromDateTime(point.Time.ToOffset(TimeSpan.FromHours(5.5)).DateTime);
+            var day = IstClock.IstDate(point.Time);
             if (currentDay != day)
             {
                 currentDay = day;

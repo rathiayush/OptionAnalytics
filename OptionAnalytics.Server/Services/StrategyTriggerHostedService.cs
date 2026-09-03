@@ -336,7 +336,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     {
         var arrow = trade.Direction == "Bullish" ? "▲" : "▼";
         var reasonLine = reason is null ? "" : $"\n{reason}";
-        var ist = TimeSpan.FromHours(5.5);
+        var ist = IstClock.Offset;
 
         // Fired and left running BEFORE the alert below is even composed, let alone sent - see
         // PlaceOrderInBackgroundAsync's own doc comment for why. The order no longer waits its turn

@@ -261,7 +261,7 @@ public sealed class CdvHostedService : BackgroundService
             .Take(TrackedExpiryCountFor(underlying))
             .ToList();
 
-    private static DateOnly IstToday() => DateOnly.FromDateTime(DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(5.5)).DateTime);
+    private static DateOnly IstToday() => IstClock.Today();
 
     /// <summary>Points this underlying's always-on consumers - the SignalR broadcast and the live
     /// alert services, which have no page to ask - at a different tracked expiry.
@@ -516,7 +516,7 @@ public sealed class CdvHostedService : BackgroundService
         var contract = _optionChainMaster.Find(underlying, expiry.Value, strike, isCall);
         if (contract is null) return Array.Empty<Candle>();
 
-        var cacheKey = (contract.SecurityId, DateOnly.FromDateTime(DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(5.5)).DateTime));
+        var cacheKey = (contract.SecurityId, IstClock.Today());
         lock (_onDemandCandles)
         {
             // cacheKey.Day is always TODAY (built fresh above), so any entry under a different day
@@ -536,7 +536,7 @@ public sealed class CdvHostedService : BackgroundService
             // is that the session is over now, not when the fetch happened. The reverse case (an
             // entry cached after close, read the next morning) cannot arise - the sweep above
             // removes it the moment the IST date changes.
-            var lifetime = TimeOnly.FromDateTime(DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(5.5)).DateTime) >= SessionClose
+            var lifetime = TimeOnly.FromDateTime(DateTimeOffset.UtcNow.ToOffset(IstClock.Offset).DateTime) >= SessionClose
                 ? OnDemandCandleLifetimeAfterClose
                 : OnDemandCandleLifetime;
 
@@ -661,7 +661,7 @@ public sealed class CdvHostedService : BackgroundService
     /// - this is for the case where the process ISN'T restarted across a day boundary.</summary>
     private async Task RefreshMasterForThisRecenterAsync(CancellationToken cancellationToken)
     {
-        var nowIst = DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(5.5));
+        var nowIst = DateTimeOffset.UtcNow.ToOffset(IstClock.Offset);
         var todayIst = DateOnly.FromDateTime(nowIst.DateTime);
         var dueForDailyRefresh = TimeOnly.FromDateTime(nowIst.DateTime) >= DailyMasterRefreshTime && _lastDailyMasterRefreshIstDate != todayIst;
 
@@ -906,7 +906,7 @@ public sealed class CdvHostedService : BackgroundService
     /// next cycle retries cleanly instead of leaving CDV history permanently empty.</summary>
     private async Task BackfillStrikesAsync(string underlying, DateOnly expiry, CdvUnderlyingState state, IReadOnlyList<uint> securityIds, decimal currentSpot, CancellationToken cancellationToken)
     {
-        var today = DateOnly.FromDateTime(DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(5.5)).DateTime);
+        var today = IstClock.Today();
         var fromDay = today.AddDays(-HistoryLookbackCalendarDays);
         var seededCount = 0;
 
@@ -1013,7 +1013,7 @@ public sealed class CdvHostedService : BackgroundService
             .ToList();
     }
 
-    private static DateOnly IstDate(DateTimeOffset time) => DateOnly.FromDateTime(time.ToOffset(TimeSpan.FromHours(5.5)).DateTime);
+    private static DateOnly IstDate(DateTimeOffset time) => IstClock.IstDate(time);
 
     private void OnTick(SpotTick tick)
     {

@@ -227,7 +227,7 @@ public static class DhanTickPacketParser
     /// Every consumer of live ticks shares this one parser (spot AND every option strike, since CDV
     /// and OBV tick through the identical path), so the fix is here once rather than needing to be
     /// applied at each call site.</summary>
-    private static readonly TimeSpan IstOffset = TimeSpan.FromHours(5.5);
+    private static readonly TimeSpan IstOffset = IstClock.Offset;
 
     private static DateTimeOffset ReadEpoch(ReadOnlySpan<byte> bytes, DateTimeOffset fallback)
     {
