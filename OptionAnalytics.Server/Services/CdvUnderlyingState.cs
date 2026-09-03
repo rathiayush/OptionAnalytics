@@ -1,5 +1,6 @@
 using OptionAnalytics.Server.Dhan;
 using OptionAnalytics.Server.Models;
+using OptionAnalytics.Server.Services.Backtesting;
 using Skender.Stock.Indicators;
 
 namespace OptionAnalytics.Server.Services;
@@ -570,24 +571,35 @@ public sealed class CdvUnderlyingState
     /// actual trend.</summary>
     private const int LookbackSmoothLen = 9;
 
-    /// <summary>CE/PE %-change over each of <paramref name="lookbackBars"/> bars, computed off
-    /// GetSmoothedCdvSeries - the OBV counterpart's own GetObvLookbackTable does the exact same
-    /// thing off GetObvSeries, and this now genuinely matches it rather than only claiming to.
+    /// <summary>CE/PE %-change over each of <paramref name="lookbackBars"/> bars AT
+    /// <paramref name="timeframeMinutes"/>, computed off GetSmoothedCdvSeries aggregated to that
+    /// timeframe - the OBV counterpart's own GetObvLookbackTable does the exact same thing off
+    /// GetObvSeries, and this now genuinely matches it rather than only claiming to.
     ///
-    /// This used to re-smooth CE/PE from scratch, restricted to just today's bars
-    /// (_closedBars/_currentBar), instead of calling GetSmoothedCdvSeries - which prepends the
-    /// prior days' history so the EMA runs continuously across the day boundary, same as OBV's.
-    /// The result was a real bug, not a display quirk: CDV resets to zero every trading day, so
-    /// early in a session (or right after the running total crosses back near zero, which it does
-    /// often) the OLD table's from-scratch EMA was still warming up from that fresh zero - both the
-    /// current and N-bars-ago readings it compared were still small, so the %-change came out small
-    /// too, even while the chart (which plots the raw, unsmoothed total) showed the total swinging
-    /// hard. OBV never had this because GetObvSeries already carries its EMA across day boundaries;
-    /// CDV's table just wasn't using the series that does the same thing for CDV.</summary>
-    public LookbackTable GetLookbackTable(IReadOnlyList<int> lookbackBars)
+    /// The timeframe argument is what makes "N bars ago" mean the same thing here as it does on the
+    /// dashboard's own CDV/OBV chart, which the caller aggregates client-side to whatever timeframe
+    /// is selected (1/3/5 minutes). Before this, the table always read native 1-MINUTE bars no
+    /// matter what the chart was showing - on a 3-minute chart, "30 bars ago" here meant 30 minutes
+    /// back, not 30 of the chart's own bars (90 minutes), so the table's longest window silently
+    /// reached only a third as far as it looked like it should next to that chart. A move that
+    /// unfolded over the morning could then read as a few percent on every row while the chart
+    /// showed it swinging far more, with no bug in the %-math at all - the window just could not see
+    /// that far back. BacktestUtil.AggregateLine is the same bucketing BacktestStrategyContext
+    /// already uses to hand strategies timeframe-aware OBV/CDV series, applied here for the same
+    /// reason: bucket AFTER smoothing, matching exactly how the OBV chart on the dashboard buckets
+    /// its own already-smoothed series for display.
+    ///
+    /// This ALSO used to re-smooth CE/PE from scratch, restricted to just today's bars, instead of
+    /// calling GetSmoothedCdvSeries - which prepends the prior days' history so the EMA runs
+    /// continuously across the day boundary, same as OBV's. That was a real bug too (early in a
+    /// session, or right after CDV crossed back near zero, both readings a window compared were
+    /// still warming up from a fresh zero, so the %-change came out small no matter how far the raw
+    /// total had actually moved) - fixed separately, and this call already reflects that fix.</summary>
+    public LookbackTable GetLookbackTable(IReadOnlyList<int> lookbackBars, int timeframeMinutes)
     {
-        var ce = GetSmoothedCdvSeries(true).Select(p => (decimal?)p.Obv).ToList();
-        var pe = GetSmoothedCdvSeries(false).Select(p => (decimal?)p.Obv).ToList();
+        var timeframe = Math.Max(1, timeframeMinutes);
+        var ce = BacktestUtil.AggregateLine(GetSmoothedCdvSeries(true), timeframe).Select(p => (decimal?)p.Obv).ToList();
+        var pe = BacktestUtil.AggregateLine(GetSmoothedCdvSeries(false), timeframe).Select(p => (decimal?)p.Obv).ToList();
 
         var ceChanges = lookbackBars.Select(n => ComputeLookbackChange(ce, n)).ToList();
         var peChanges = lookbackBars.Select(n => ComputeLookbackChange(pe, n)).ToList();
@@ -832,14 +844,19 @@ public sealed class CdvUnderlyingState
         }
     }
 
-    /// <summary>CE/PE %-change over each of <paramref name="lookbackBars"/> bars on the OBV series -
-    /// the OBV counterpart to GetLookbackTable, and Pine's own multi-lookback table. Computed
-    /// straight off GetObvSeries, which is already EMA-smoothed (Pine measures its lookback against
-    /// the same smoothed `ceActive`/`peActive` it plots, not the raw sum).</summary>
-    public LookbackTable GetObvLookbackTable(IReadOnlyList<int> lookbackBars)
+    /// <summary>CE/PE %-change over each of <paramref name="lookbackBars"/> bars AT
+    /// <paramref name="timeframeMinutes"/> on the OBV series - the OBV counterpart to
+    /// GetLookbackTable, and Pine's own multi-lookback table. Computed off GetObvSeries (already
+    /// EMA-smoothed - Pine measures its lookback against the same smoothed `ceActive`/`peActive` it
+    /// plots, not the raw sum), aggregated to the caller's timeframe exactly as the dashboard's own
+    /// OBV chart buckets that same series for display - see GetLookbackTable's doc comment for why
+    /// this argument exists at all (it didn't before, and every "N bars ago" silently meant N
+    /// 1-minute bars regardless of what timeframe the chart next to this table was showing).</summary>
+    public LookbackTable GetObvLookbackTable(IReadOnlyList<int> lookbackBars, int timeframeMinutes)
     {
-        var ce = GetObvSeries(true).Select(p => (decimal?)p.Obv).ToList();
-        var pe = GetObvSeries(false).Select(p => (decimal?)p.Obv).ToList();
+        var timeframe = Math.Max(1, timeframeMinutes);
+        var ce = BacktestUtil.AggregateLine(GetObvSeries(true), timeframe).Select(p => (decimal?)p.Obv).ToList();
+        var pe = BacktestUtil.AggregateLine(GetObvSeries(false), timeframe).Select(p => (decimal?)p.Obv).ToList();
 
         var ceChanges = lookbackBars.Select(n => ComputeLookbackChange(ce, n)).ToList();
         var peChanges = lookbackBars.Select(n => ComputeLookbackChange(pe, n)).ToList();
