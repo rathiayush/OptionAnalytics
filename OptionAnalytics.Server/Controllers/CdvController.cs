@@ -173,6 +173,20 @@ public sealed class CdvController : ControllerBase
         return Ok(_cdv.GetContracts(underlying, ParseExpiry(expiry)));
     }
 
+    /// <summary>Forces the scrip master to re-download right now and re-centers every underlying so
+    /// anything newly resolvable is subscribed and backfilled immediately - the Contracts page's
+    /// "Refresh master" button. See CdvHostedService.ForceRefreshMasterAsync. Takes a few seconds to
+    /// tens of seconds depending on how much backfilling the recenter ends up doing, so the caller
+    /// should show its own loading state rather than assume this returns instantly. Always 200 -
+    /// a download/parse failure comes back as a non-null "error" field, not an HTTP error, so the
+    /// page can show it inline next to the (possibly unchanged) contract count.</summary>
+    [HttpPost("master/refresh")]
+    public async Task<IActionResult> RefreshMaster(CancellationToken cancellationToken)
+    {
+        var (count, loadedAt, error) = await _cdv.ForceRefreshMasterAsync(cancellationToken);
+        return Ok(new { contractCount = count, loadedUtc = loadedAt, error });
+    }
+
     /// <summary>The state for the requested expiry, or the selected one when ?expiry= is omitted.
     /// Every tracked expiry is held at once (see CdvHostedService), so naming one here is just a
     /// read - it never switches what any other page sees.</summary>

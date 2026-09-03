@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Select, Space, Typography, Card, Table, Tag, Button, Statistic, Row, Col, Alert, Input, Switch } from 'antd'
-import { ReloadOutlined } from '@ant-design/icons'
+import { Select, Space, Typography, Card, Table, Tag, Button, Statistic, Row, Col, Alert, Input, Switch, message } from 'antd'
+import { ReloadOutlined, ThunderboltOutlined } from '@ant-design/icons'
 import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, NavBar, fmtPrice, fmtIstTime, STORED_UNDERLYING, usePersistedState, pickUnderlying } from './shared.jsx'
 
 const { Title, Text } = Typography
@@ -45,6 +45,7 @@ export default function ContractsPage() {
   const [search, setSearch] = useState('')
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [now, setNow] = useState(Date.now())
+  const [refreshingMaster, setRefreshingMaster] = useState(false)
   // Defaults to on: the question this page answers is almost always "is this actually ticking
   // right now", and a full listing of every strike Dhan lists (hundreds, mostly irrelevant) buries
   // that. Off switches back to the full diagnostic view - every listed contract, live or not -
@@ -76,6 +77,31 @@ export default function ContractsPage() {
       })
       .catch((err) => console.error('Failed to load contracts:', err))
       .finally(() => setLoading(false))
+  }
+
+  // Forces the scrip master to re-download right now (bypassing its normal 12-hour cache and the
+  // automatic 1-minute empty-retry throttle) and re-centers every underlying, so any contract that
+  // could not be resolved before is subscribed and backfilled straight away - see
+  // CdvHostedService.ForceRefreshMasterAsync. This is the self-serve fix for "the master is empty":
+  // it can take a genuine while (re-centering may re-backfill everything if the master was truly
+  // empty before), so it gets its own loading state rather than piggybacking on the table's.
+  const refreshMaster = () => {
+    setRefreshingMaster(true)
+    fetch('/api/cdv/master/refresh', { method: 'POST' })
+      .then((r) => r.json())
+      .then((result) => {
+        if (result?.error) {
+          message.error(`Master refresh: ${result.error}`, 8)
+        } else {
+          message.success(`Master refreshed - ${result?.contractCount ?? 0} contracts loaded.`)
+        }
+        load(expiry)
+      })
+      .catch((err) => {
+        console.error('Failed to refresh the scrip master:', err)
+        message.error('Master refresh failed - see console/server logs.')
+      })
+      .finally(() => setRefreshingMaster(false))
   }
 
   // Reload on underlying/expiry change.
@@ -186,11 +212,30 @@ export default function ContractsPage() {
             type="error"
             showIcon
             message="The scrip master is empty - no contract can be resolved and no live order can be placed."
-            description="Nothing here will work until it reloads: every strike will read as 'not listed', and armed triggers will alert but place nothing. This is the failure that used to be invisible. Check the server log for the scrip-master parse line, which now reports which parse step dropped the rows."
+            description="Nothing here will work until it reloads: every strike will read as 'not listed', and armed triggers will alert but place nothing. Click Refresh master to force it right now instead of waiting for the automatic retry."
+            action={
+              <Button size="small" danger loading={refreshingMaster} onClick={refreshMaster}>
+                Refresh master
+              </Button>
+            }
           />
         )}
 
-        <Card size="small" title="Feed and scrip master">
+        <Card
+          size="small"
+          title="Feed and scrip master"
+          extra={
+            <Button
+              size="small"
+              icon={<ThunderboltOutlined />}
+              danger={masterBroken}
+              loading={refreshingMaster}
+              onClick={refreshMaster}
+            >
+              Refresh master
+            </Button>
+          }
+        >
           <Row gutter={24}>
             <Col><Statistic title="Master contracts" value={data?.masterContractCount ?? 0} styles={{ content: { color: masterBroken ? DOWN_COLOR : UP_COLOR } }} /></Col>
             <Col><Statistic title="Subscribed (all expiries)" value={data?.subscribedCount ?? 0} /></Col>
