@@ -76,7 +76,25 @@ public sealed class DhanSpotInstrumentMaster
         response.EnsureSuccessStatusCode();
 
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-        _spotInstruments = ParseSpotRows(stream);
+        var parsed = ParseSpotRows(stream);
+
+        // Same rule as DhanOptionChainMaster: a refresh that parses to NOTHING must never replace a
+        // master that works. A 200 response that yields zero rows (a renamed column, an error page
+        // served with a success status, a truncated body) throws nothing, so the catch above -
+        // which DOES preserve the old data - never sees it, and the previous good copy would be
+        // silently wiped. Everything downstream then fails to resolve an instrument at all.
+        if (parsed.Count == 0)
+        {
+            _logger.LogError(
+                "Dhan scrip master parsed to ZERO cash/index rows. {Action} Check whether {Url} still serves the expected CSV columns.",
+                _spotInstruments.Count > 0
+                    ? $"KEEPING the {_spotInstruments.Count} row(s) already loaded rather than wiping them."
+                    : "Nothing was loaded before either, so no spot instrument can be resolved.",
+                _options.ScripMasterUrl);
+            return;
+        }
+
+        _spotInstruments = parsed;
         _loadedAt = DateTimeOffset.UtcNow;
 
         _logger.LogInformation("Dhan spot instrument master ready: {Count} cash/index rows loaded.", _spotInstruments.Count);
