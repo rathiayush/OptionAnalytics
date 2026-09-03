@@ -91,22 +91,26 @@ public sealed class CdvController : ControllerBase
 
     /// <summary>CE/PE %-change over a caller-configurable set of lookback windows - see
     /// CdvUnderlyingState.GetLookbackTable. ?bars=3,5,7 (the default); any positive, comma-separated
-    /// list of bar counts works, e.g. ?bars=10,20,30.</summary>
+    /// list of bar counts works, e.g. ?bars=10,20,30. ?timeframe=1 (the default) is which timeframe
+    /// "N bars ago" is measured in - pass the SAME value the dashboard's own chart is currently
+    /// showing, or "N bars ago" silently means N 1-minute bars while the chart next to it is
+    /// aggregated to something coarser, reaching a fraction as far back as it looks like it
+    /// should.</summary>
     [HttpGet("{underlying}/lookback")]
-    public IActionResult GetLookback(string underlying, [FromQuery] string? bars, [FromQuery] string? expiry)
+    public IActionResult GetLookback(string underlying, [FromQuery] string? bars, [FromQuery] string? expiry, [FromQuery] int timeframe = 1)
     {
         if (!TryGetState(underlying, ParseExpiry(expiry), out var state)) return NotFoundResult(underlying);
-        return Ok(state.GetLookbackTable(ParseBars(bars)));
+        return Ok(state.GetLookbackTable(ParseBars(bars), timeframe));
     }
 
     /// <summary>The OBV counterpart of the lookback table - same windows, same %-change formula,
-    /// measured against the delta-weighted OBV series instead of CDV (see
+    /// same ?timeframe= meaning, measured against the delta-weighted OBV series instead of CDV (see
     /// CdvUnderlyingState.GetObvLookbackTable).</summary>
     [HttpGet("{underlying}/obv-lookback")]
-    public IActionResult GetObvLookback(string underlying, [FromQuery] string? bars, [FromQuery] string? expiry)
+    public IActionResult GetObvLookback(string underlying, [FromQuery] string? bars, [FromQuery] string? expiry, [FromQuery] int timeframe = 1)
     {
         if (!TryGetState(underlying, ParseExpiry(expiry), out var state)) return NotFoundResult(underlying);
-        return Ok(state.GetObvLookbackTable(ParseBars(bars)));
+        return Ok(state.GetObvLookbackTable(ParseBars(bars), timeframe));
     }
 
     private static IReadOnlyList<int> ParseBars(string? bars)

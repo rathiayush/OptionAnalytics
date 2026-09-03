@@ -834,19 +834,24 @@ function renderPercent(v) {
 // isn't limited to a fixed list. The chosen bars are remembered under `storageKey` (a distinct key
 // per instance - the CDV and OBV tables' choices are independent) so a reload doesn't reset back
 // to the default.
-function LookbackTable({ underlying, expiry, cdvSnapshot, endpoint = 'lookback', title = 'CE / PE Lookback % Change', defaultBars = DEFAULT_LOOKBACK_BARS, storageKey }) {
+function LookbackTable({ underlying, expiry, timeframe, cdvSnapshot, endpoint = 'lookback', title = 'CE / PE Lookback % Change', defaultBars = DEFAULT_LOOKBACK_BARS, storageKey }) {
   const [bars, setBars] = usePersistedState(storageKey, defaultBars)
   const [table, setTable] = useState(null)
   const lastBarTimeRef = useRef(null)
 
+  // Without &timeframe=, "N bars ago" silently meant N native 1-minute bars no matter what
+  // timeframe the chart next to this table was showing - on a 3-minute chart, the table's own
+  // longest window (30 bars) reached only 30 minutes back, a third as far as it looked like it
+  // should sitting beside 3-minute candles. Passing the SAME timeframe the rest of the dashboard
+  // is on is what makes "30 bars ago" here mean the same thing it means on that chart.
   const load = (barsToUse) => {
-    fetch(withExpiry(`/api/cdv/${underlying}/${endpoint}?bars=${barsToUse.join(',')}`, expiry))
+    fetch(withExpiry(`/api/cdv/${underlying}/${endpoint}?bars=${barsToUse.join(',')}&timeframe=${timeframe}`, expiry))
       .then((r) => r.json())
       .then(setTable)
       .catch((err) => console.error(`Failed to load ${endpoint} table:`, err))
   }
 
-  useEffect(() => { load(bars) }, [underlying, bars.join(',')])
+  useEffect(() => { load(bars) }, [underlying, timeframe, bars.join(',')])
 
   // Refetch whenever the CDV bar closes - same "new minute" trigger the OBV refetch elsewhere uses.
   useEffect(() => {
@@ -866,17 +871,23 @@ function LookbackTable({ underlying, expiry, cdvSnapshot, endpoint = 'lookback',
       size="small"
       title={title}
       extra={
-        <Select
-          mode="tags"
-          size="small"
-          value={bars.map(String)}
-          onChange={(vals) => {
-            const parsed = [...new Set(vals.map((v) => parseInt(v, 10)).filter((n) => Number.isInteger(n) && n > 0))].sort((a, b) => a - b)
-            setBars(parsed.length > 0 ? parsed : defaultBars)
-          }}
-          style={{ minWidth: 180 }}
-          options={[3, 5, 7, 10, 15, 20, 25, 30].map((n) => ({ value: String(n), label: `${n} bars` }))}
-        />
+        <Space size={12}>
+          {/* Which timeframe "bars" are counted in isn't obvious from the numbers alone - stated
+              here so "30 bars ago" is never silently a different span than the chart beside it
+              implies. */}
+          <Text type="secondary" style={{ fontSize: 12 }}>at {timeframe}m bars</Text>
+          <Select
+            mode="tags"
+            size="small"
+            value={bars.map(String)}
+            onChange={(vals) => {
+              const parsed = [...new Set(vals.map((v) => parseInt(v, 10)).filter((n) => Number.isInteger(n) && n > 0))].sort((a, b) => a - b)
+              setBars(parsed.length > 0 ? parsed : defaultBars)
+            }}
+            style={{ minWidth: 180 }}
+            options={[3, 5, 7, 10, 15, 20, 25, 30].map((n) => ({ value: String(n), label: `${n} bars` }))}
+          />
+        </Space>
       }
     >
       {!table ? (
@@ -1315,7 +1326,7 @@ function DashboardPage() {
           )}
         </ChartCard>
 
-        {selected && <LookbackTable underlying={selected} expiry={expiryParam} cdvSnapshot={cdvSnapshot} storageKey={STORED_CDV_LOOKBACK_BARS} />}
+        {selected && <LookbackTable underlying={selected} expiry={expiryParam} timeframe={timeframe} cdvSnapshot={cdvSnapshot} storageKey={STORED_CDV_LOOKBACK_BARS} />}
 
         <ChartCard
           title="CE / PE On-Balance Volume (delta-weighted, all tracked strikes)"
@@ -1338,6 +1349,7 @@ function DashboardPage() {
           <LookbackTable
             underlying={selected}
             expiry={expiryParam}
+            timeframe={timeframe}
             cdvSnapshot={cdvSnapshot}
             endpoint="obv-lookback"
             title="OBV Multi-Lookback % Change"
