@@ -251,13 +251,21 @@ public sealed class BacktestService
             // and get it - see that method. The synchronous callers (RunStrategy, and through it
             // StrategyTriggerHostedService) simply never drain those misses, so for them this
             // behaves exactly as it always did: in-memory or empty.
+            //
+            // includeTrailingPartial: true - see AggregateCandles' own doc comment. OptionTradeSimulator
+            // is the only consumer of GetOptionBars, and only ever reads an entry bar's Open, so the
+            // still-forming trailing bucket is safe here specifically: its Open is already final the
+            // moment its first native minute closes, letting a signal's entry resolve up to
+            // (timeframe - 1) minutes sooner than waiting for the whole bucket, with the EXACT same
+            // number either way. This is what makes a live-trading trigger's entry match what
+            // Backtrack itself would show for the same signal, without the extra wait.
             GetOptionBars = (strike, isCall) =>
             {
                 var tracked = cdvState.GetStrikeClosedCandles(strike, isCall);
-                if (tracked.Count > 0) return BacktestUtil.AggregateCandles(tracked, timeframe);
+                if (tracked.Count > 0) return BacktestUtil.AggregateCandles(tracked, timeframe, includeTrailingPartial: true);
 
                 if (onDemand.TryGet(strike, isCall) is { } fetched)
-                    return BacktestUtil.AggregateCandles(fetched, timeframe);
+                    return BacktestUtil.AggregateCandles(fetched, timeframe, includeTrailingPartial: true);
 
                 onDemand.RecordMiss(strike, isCall);
                 return Array.Empty<Candle>();

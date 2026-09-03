@@ -23,18 +23,19 @@ namespace OptionAnalytics.Server.Services;
 /// opportunity restated. RunStrategy already collapses that, so reusing it is what makes "tuned on
 /// Backtrack, fires live off identical code" true of the ALERT CADENCE too, not just the entry rule.
 ///
-/// A trade only carries a real EntryTimeUtc/EntryPrice once the option's NEXT bar has fully CLOSED
-/// (BacktestStrategyContext.GetOptionBars is closed-bars-only, same as everywhere else in this
-/// app's replay) - so a signal that fired only moments ago routinely comes back as
-/// BacktestTrade.NoData for a cycle or two, not because its strike was never tracked but because
-/// the fill it needs isn't known yet. THE WATERMARK MUST NOT ADVANCE PAST SUCH A SIGNAL: it needs
-/// to be re-examined on a later cycle once the entry bar has closed, at which point the SAME
-/// signal - same SignalTimeUtc - resolves into a real, alertable trade. Advancing past it early
-/// would never be alerted at all once it did resolve, which is why the watermark below only ever
-/// moves to the newest signal that was ACTUALLY alerted, never to the newest signal RunStrategy
-/// merely returned. A strike that truly never gets tracked just stays NoData forever and parks the
-/// watermark harmlessly behind it - later, unrelated signals are unaffected, since they are still
-/// newer than that stuck point.
+/// A trade carries a real EntryTimeUtc/EntryPrice as soon as the SIGNAL bar itself has closed -
+/// entry is that same bar's own Close (see OptionTradeSimulator's own doc comment for why that is
+/// not look-ahead), so there is no further bar to wait on. The one remaining way a fresh signal
+/// still comes back as BacktestTrade.NoData for a cycle is a genuine data gap: this exact strike's
+/// own tick coverage for that bucket has not landed yet (feed lag of a few seconds, not a whole bar)
+/// or it was never tracked at all. THE WATERMARK MUST NOT ADVANCE PAST SUCH A SIGNAL: it needs to be
+/// re-examined on a later cycle once that data lands, at which point the SAME signal - same
+/// SignalTimeUtc - resolves into a real, alertable trade. Advancing past it early would never be
+/// alerted at all once it did resolve, which is why the watermark below only ever moves to the
+/// newest signal that was ACTUALLY alerted, never to the newest signal RunStrategy merely returned.
+/// A strike that truly never gets tracked just stays NoData forever and parks the watermark
+/// harmlessly behind it - later, unrelated signals are unaffected, since they are still newer than
+/// that stuck point.
 ///
 /// Arming a trigger never floods: the first evaluation only records where the strategy currently
 /// stands, without alerting. Only trades opening after that notify. The same priming happens if a
@@ -334,9 +335,9 @@ public sealed class StrategyTriggerHostedService : BackgroundService
             _ = PlaceOrderInBackgroundAsync(trigger, trade, cancellationToken);
 
         // Entry time/price here are exactly BacktestTrade.EntryTimeUtc/EntryPrice - the same fields
-        // the Backtrack trade table's own "Entry" column renders - not the signal bar. The signal
-        // is WHEN the strategy decided to act; the entry is WHAT you would actually have punched
-        // into the order, at the next bar's open, which is what this alert is for.
+        // the Backtrack trade table's own "Entry" column renders. The signal is WHEN the strategy
+        // decided to act; the entry is WHAT you would actually have punched into the order - the
+        // signal bar's own close, which is why the two are usually the same instant now.
         //
         // [Trigger] up front for the same reason EmaCrossoverAlertService/ConfluenceAlertService
         // tag their own messages - this is the confirmed, strategy-driven alert, distinct from the
@@ -495,9 +496,9 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         var isForeignExpiry = _cdv.StateFor(trade.Underlying, expiry) is null;
 
         // The entry reference every other price here is derived from. Normally the simulator's own
-        // resolved fill (the next bar's open), so a live order is built from exactly the number the
-        // backtest measured. With UseLivePremiumEntry it is instead what the strike is trading at
-        // RIGHT NOW - see that property's doc comment for the trade-off.
+        // resolved fill (the signal bar's own close), so a live order is built from exactly the
+        // number the backtest measured. With UseLivePremiumEntry it is instead what the strike is
+        // trading at RIGHT NOW - see that property's doc comment for the trade-off.
         decimal entryPrice;
         if (trigger.UseLivePremiumEntry || isForeignExpiry)
         {

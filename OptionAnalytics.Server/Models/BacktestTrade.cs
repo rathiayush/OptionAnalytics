@@ -2,8 +2,9 @@ namespace OptionAnalytics.Server.Models;
 
 /// <summary>One simulated trade from a strategy run: on a past Confluence signal, take a position
 /// in the CE or PE that was <c>otmSteps</c> strikes from ATM at the signal's own time, entered at
-/// the next bar's open (no look-ahead), then walked forward against a stop-loss/take-profit given
-/// in absolute premium points until one hits or the trading day ends.
+/// that same signal bar's own close (see OptionTradeSimulator's own doc comment for why that is not
+/// look-ahead), then walked forward against a stop-loss/take-profit given in absolute premium points
+/// until one hits or the trading day ends.
 ///
 /// <paramref name="Side"/> is "Buy" or "Sell". It decides both which leg the trade is in (a bullish
 /// view is a bought CE but a SOLD PE) and which way P&amp;L runs: a
