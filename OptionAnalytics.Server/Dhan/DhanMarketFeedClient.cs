@@ -31,6 +31,13 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
     private const int RequestCodeDisconnect = 12;
     private const int SubscriptionBatchSize = 100;
 
+    /// <summary>Dhan's documented per-connection instrument limit. Nowhere near it today (~170 with
+    /// every tracked expiry subscribed), but the count is no longer fixed - it scales with how many
+    /// expiries are tracked - so crossing it should say so rather than show up as a handful of
+    /// strikes that mysteriously never tick. Dhan rejects the surplus with error 804 and the
+    /// instruments simply stay silent.</summary>
+    private const int MaxInstrumentsPerConnection = 5000;
+
     private static readonly TimeSpan InterBatchDelay = TimeSpan.FromMilliseconds(50);
 
     private readonly DhanOptions _options;
@@ -68,7 +75,13 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
     /// <summary>Adds tokens to the subscribed set (each mapped to its Dhan WS segment string, e.g.
     /// "IDX_I" or "NSE_FNO") and, if already connected, sends a live subscribe message for the new
     /// ones immediately. Safe to call before the connection exists - RunAsync subscribes the whole
-    /// set on every (re)connect regardless.</summary>
+    /// set on every (re)connect regardless.
+    ///
+    /// The set is FLAT across every underlying and every tracked expiry: a contract's token is
+    /// unique per (strike, side, expiry), so several expiries' ATM+-8 windows coexist here without
+    /// colliding, and one expiry's window rolling never unsubscribes another's. Everything in here
+    /// is re-sent on every reconnect and by the stall watchdog's re-subscribe, so a subscribe that
+    /// failed mid-flight repairs itself rather than leaving that expiry permanently silent.</summary>
     public async Task SubscribeAsync(IReadOnlyDictionary<uint, string> tokens, CancellationToken cancellationToken)
     {
         var added = new List<KeyValuePair<uint, string>>();
@@ -79,8 +92,16 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
 
         if (added.Count == 0) return;
 
-        _logger.LogInformation("Subscribing {Count} instrument(s) in Quote mode: {Instruments}.",
-            added.Count, string.Join(", ", added.Select(kv => $"{kv.Key}({kv.Value})")));
+        _logger.LogInformation("Subscribing {Count} instrument(s) in Quote mode ({Total} subscribed in total): {Instruments}.",
+            added.Count, _tokenSegments.Count, string.Join(", ", added.Select(kv => $"{kv.Key}({kv.Value})")));
+
+        if (_tokenSegments.Count > MaxInstrumentsPerConnection)
+        {
+            _logger.LogError(
+                "Dhan market feed now has {Count} instruments subscribed, past the {Limit} this connection allows. " +
+                "Dhan will reject the surplus (error 804) and those instruments will never tick - reduce the tracked expiries or the strike window.",
+                _tokenSegments.Count, MaxInstrumentsPerConnection);
+        }
 
         if (_socket is not { State: WebSocketState.Open }) return;
         await SendSubscriptionAsync(added.Select(kv => (kv.Key, kv.Value)), RequestCodeQuote, cancellationToken);

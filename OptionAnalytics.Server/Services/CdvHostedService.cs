@@ -561,6 +561,15 @@ public sealed class CdvHostedService : BackgroundService
         await DropUntrackedExpiriesAsync(underlying, wanted, cancellationToken);
         _trackedExpiries[underlying] = wanted;
 
+        // One line saying what is live per expiry, so "is every expiry actually subscribed?" is a
+        // thing to READ rather than assume. Each expiry carries its own full ATM+-8 window (17
+        // strikes x CE/PE), so a number well below ~34 here means contracts the scrip master could
+        // not resolve - which is exactly the failure that reads as a strike "not listed" later.
+        _logger.LogInformation("CDV: {Underlying} tracking {Count} expiry/expiries - {Detail}.",
+            underlying, wanted.Count,
+            string.Join(", ", wanted.Select(e =>
+                $"{e:yyyy-MM-dd}: {(_subscribedTokens.TryGetValue((underlying, e), out var t) ? t.Count : 0)} contract(s)")));
+
         // Keep the always-on consumers pointed at something real: the manual pick while it is still
         // tracked, otherwise the nearest. A manual pick that has rolled off the list is dropped here
         // rather than left pointing at a state that no longer exists.
