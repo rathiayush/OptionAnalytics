@@ -13,6 +13,12 @@ namespace OptionAnalytics.Server.Dhan;
 public sealed class DhanOptionChainMaster
 {
     private static readonly TimeSpan CacheLifetime = TimeSpan.FromHours(12);
+
+    /// <summary>Minimum gap between download attempts while the master is EMPTY. Without it, every
+    /// caller of EnsureLoadedAsync re-downloads a multi-megabyte CSV on every call the moment the
+    /// master has nothing in it (IsFresh is false with zero contracts by design), which turns a
+    /// broken master into a download on every recenter AND every order attempt.</summary>
+    private static readonly TimeSpan EmptyRetryInterval = TimeSpan.FromMinutes(1);
     private static readonly string[] Underlyings = { "NIFTY", "BANKNIFTY" };
 
     private readonly HttpClient _httpClient;
@@ -23,6 +29,7 @@ public sealed class DhanOptionChainMaster
     private Dictionary<string, DhanOptionInstrument> _byKey = new(StringComparer.OrdinalIgnoreCase);
     private Dictionary<string, List<DateOnly>> _expiriesByUnderlying = new(StringComparer.OrdinalIgnoreCase);
     private DateTimeOffset _loadedAt = DateTimeOffset.MinValue;
+    private DateTimeOffset _lastAttemptAt = DateTimeOffset.MinValue;
 
     public DhanOptionChainMaster(HttpClient httpClient, IOptions<DhanOptions> options, ILogger<DhanOptionChainMaster> logger)
     {
@@ -39,6 +46,8 @@ public sealed class DhanOptionChainMaster
         try
         {
             if (IsFresh()) return;
+            if (_byKey.Count == 0 && DateTimeOffset.UtcNow - _lastAttemptAt < EmptyRetryInterval) return;
+            _lastAttemptAt = DateTimeOffset.UtcNow;
 
             try
             {
@@ -64,23 +73,51 @@ public sealed class DhanOptionChainMaster
         response.EnsureSuccessStatusCode();
 
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-        var options = ParseOptionRows(stream);
+        var (options, stats) = ParseOptionRows(stream);
 
-        _byKey = new Dictionary<string, DhanOptionInstrument>(StringComparer.OrdinalIgnoreCase);
+        // A refresh that parses to NOTHING must never replace a master that works.
+        //
+        // This is the bug that took live trading down: the old code built the new dictionary FIRST
+        // and assigned it unconditionally, so a 200 response that parsed to zero rows - Dhan
+        // changing a column name, an error page served with a success status, a truncated body -
+        // silently wiped a perfectly good in-memory chain. Nothing threw, so the catch in
+        // EnsureLoadedAsync (which does preserve the old data) never ran. Every strike then read as
+        // "not listed", every order was skipped, and the only visible symptom was orders quietly
+        // not being placed.
+        //
+        // Keeping the previous copy is strictly better than an empty one: option contracts change
+        // slowly, so yesterday's chain is nearly always right, whereas an empty one is certainly
+        // wrong about everything.
+        if (options.Count == 0)
+        {
+            _logger.LogError(
+                "Dhan scrip master parsed to ZERO NIFTY/BANKNIFTY option contracts. {Stats} " +
+                "{Action} Check whether {Url} still serves the expected CSV columns.",
+                stats,
+                _byKey.Count > 0
+                    ? $"KEEPING the {_byKey.Count} contract(s) already loaded rather than wiping them."
+                    : "Nothing was loaded before either, so no contract can be resolved and no order can be placed.",
+                _options.ScripMasterUrl);
+            return;
+        }
+
+        var byKey = new Dictionary<string, DhanOptionInstrument>(StringComparer.OrdinalIgnoreCase);
         var expiries = new Dictionary<string, SortedSet<DateOnly>>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var option in options)
         {
-            _byKey[Key(option.Underlying, option.Expiry, option.Strike, option.IsCall)] = option;
+            byKey[Key(option.Underlying, option.Expiry, option.Strike, option.IsCall)] = option;
             if (!expiries.TryGetValue(option.Underlying, out var set))
                 expiries[option.Underlying] = set = new SortedSet<DateOnly>();
             set.Add(option.Expiry);
         }
 
+        // Swapped in only once both are fully built, so a reader never sees a half-filled master.
+        _byKey = byKey;
         _expiriesByUnderlying = expiries.ToDictionary(kv => kv.Key, kv => kv.Value.ToList(), StringComparer.OrdinalIgnoreCase);
         _loadedAt = DateTimeOffset.UtcNow;
 
-        _logger.LogInformation("Option chain master ready: {Count} NIFTY/BANKNIFTY option contracts loaded.", _byKey.Count);
+        _logger.LogInformation("Option chain master ready: {Count} NIFTY/BANKNIFTY option contracts loaded. {Stats}", _byKey.Count, stats);
     }
 
     public IReadOnlyList<DateOnly> GetExpiries(string underlying) =>
@@ -89,6 +126,25 @@ public sealed class DhanOptionChainMaster
     /// <summary>The nearest (soonest) expiry that hasn't already passed <paramref name="asOf"/>.</summary>
     public DateOnly? GetNearestExpiry(string underlying, DateOnly asOf) =>
         GetExpiries(underlying).Where(e => e >= asOf).Cast<DateOnly?>().FirstOrDefault();
+
+    /// <summary>Every contract this master holds for one underlying and expiry, strike order. What
+    /// the contracts page lists - deliberately the MASTER's view rather than what CDV happens to
+    /// track, because the question it answers is "does this app know these contracts exist at
+    /// all", which is what silently stopped being true when a refresh wiped the master.</summary>
+    public IReadOnlyList<DhanOptionInstrument> GetContracts(string underlying, DateOnly expiry) =>
+        _byKey.Values
+            .Where(o => string.Equals(o.Underlying, underlying, StringComparison.OrdinalIgnoreCase) && o.Expiry == expiry)
+            .OrderBy(o => o.Strike)
+            .ToList();
+
+    /// <summary>The master's own health: how many contracts it holds, when it last loaded, and
+    /// every expiry it lists. Zero contracts here is the failure that reads downstream as every
+    /// strike being "not listed" - see RefreshFromDhanAsync.</summary>
+    public (int ContractCount, DateTimeOffset? LoadedAt, IReadOnlyList<string> Underlyings) Status()
+    {
+        var loaded = _loadedAt == DateTimeOffset.MinValue ? (DateTimeOffset?)null : _loadedAt;
+        return (_byKey.Count, loaded, _expiriesByUnderlying.Keys.OrderBy(k => k).ToList());
+    }
 
     public DhanOptionInstrument? Find(string underlying, DateOnly expiry, decimal strike, bool isCall) =>
         _byKey.TryGetValue(Key(underlying, expiry, strike, isCall), out var match) ? match : null;
@@ -139,13 +195,41 @@ public sealed class DhanOptionChainMaster
         public static readonly string[] TickSize = { "SEM_TICK_SIZE", "TICK_SIZE" };
     }
 
-    private List<DhanOptionInstrument> ParseOptionRows(Stream stream)
+    /// <summary>Why rows did not survive the parse. Every filter below is a legitimate reason to
+    /// drop a row on a healthy download (most rows are not NIFTY/BANKNIFTY index options at all),
+    /// so these numbers mean nothing in the happy path - but when the parse yields ZERO they say
+    /// exactly WHICH step ate everything, which is the difference between "Dhan renamed a column"
+    /// and "we downloaded an error page".</summary>
+    private sealed class ParseStats
+    {
+        public int DataRows;
+        public int OptIdxRows;
+        public int MatchedUnderlying;
+        public int DroppedSecurityId;
+        public int DroppedExpiry;
+        public int DroppedOptionType;
+        public int DroppedStrike;
+        public int DroppedLotSize;
+        public int Kept;
+
+        public override string ToString() =>
+            $"Read {DataRows} data row(s): {OptIdxRows} OPTIDX, {MatchedUnderlying} on NIFTY/BANKNIFTY, kept {Kept}. " +
+            $"Dropped - securityId {DroppedSecurityId}, expiry {DroppedExpiry}, optionType {DroppedOptionType}, " +
+            $"strike {DroppedStrike}, lotSize {DroppedLotSize}.";
+    }
+
+    private (List<DhanOptionInstrument> Options, ParseStats Stats) ParseOptionRows(Stream stream)
     {
         var options = new List<DhanOptionInstrument>();
+        var stats = new ParseStats();
         using var reader = new StreamReader(stream);
 
         var headerLine = reader.ReadLine();
-        if (headerLine is null) return options;
+        if (headerLine is null)
+        {
+            _logger.LogError("Dhan scrip master at {Url} returned an empty body - no header row.", _options.ScripMasterUrl);
+            return (options, stats);
+        }
 
         var header = BuildHeaderMap(SplitCsvLine(headerLine));
         var securityIdIndex = Resolve(header, Columns.SecurityId);
@@ -162,17 +246,19 @@ public sealed class DhanOptionChainMaster
         if (securityIdIndex < 0 || exchangeIndex < 0 || instrumentNameIndex < 0 || tradingSymbolIndex < 0)
         {
             _logger.LogError("Dhan scrip master at {Url} is missing required columns. Header was: {Header}", _options.ScripMasterUrl, headerLine);
-            return options;
+            return (options, stats);
         }
 
         string? line;
         while ((line = reader.ReadLine()) is not null)
         {
             if (line.Length == 0) continue;
+            stats.DataRows++;
             var fields = SplitCsvLine(line);
 
             var instrumentName = Get(fields, instrumentNameIndex)?.Trim();
             if (!string.Equals(instrumentName, "OPTIDX", StringComparison.OrdinalIgnoreCase)) continue;
+            stats.OptIdxRows++;
 
             var tradingSymbol = Get(fields, tradingSymbolIndex);
             if (string.IsNullOrWhiteSpace(tradingSymbol)) continue;
@@ -187,30 +273,51 @@ public sealed class DhanOptionChainMaster
                 underlying = DeriveUnderlying(tradingSymbol);
             if (string.IsNullOrWhiteSpace(underlying) || !Underlyings.Contains(underlying, StringComparer.OrdinalIgnoreCase))
                 continue;
+            stats.MatchedUnderlying++;
 
             if (!uint.TryParse(Get(fields, securityIdIndex), NumberStyles.Integer, CultureInfo.InvariantCulture, out var securityId))
+            {
+                stats.DroppedSecurityId++;
                 continue;
+            }
 
             var expiry = ParseExpiry(Get(fields, expiryIndex));
-            if (expiry is null) continue;
+            if (expiry is null)
+            {
+                stats.DroppedExpiry++;
+                continue;
+            }
 
             var optionType = Get(fields, optionTypeIndex)?.Trim().ToUpperInvariant();
-            if (optionType is not ("CE" or "PE")) continue;
+            if (optionType is not ("CE" or "PE"))
+            {
+                stats.DroppedOptionType++;
+                continue;
+            }
 
             var strike = ParseDecimal(Get(fields, strikeIndex));
-            if (strike <= 0) continue;
+            if (strike <= 0)
+            {
+                stats.DroppedStrike++;
+                continue;
+            }
 
             // A lot size that fails to parse would silently place an order in raw units instead
             // of lots - too dangerous to default; skip the row instead (same "no data" tolerance
             // as everywhere else in this backfill, just applied to a column not read before).
             var lotSize = (int)ParseDecimal(Get(fields, lotSizeIndex));
-            if (lotSize <= 0) continue;
+            if (lotSize <= 0)
+            {
+                stats.DroppedLotSize++;
+                continue;
+            }
             var tickSize = ParseDecimal(Get(fields, tickSizeIndex));
 
             options.Add(new DhanOptionInstrument(securityId, tradingSymbol, underlying, expiry.Value, strike, optionType == "CE", "NSE_FNO", lotSize, tickSize));
+            stats.Kept++;
         }
 
-        return options;
+        return (options, stats);
     }
 
     private static string DeriveUnderlying(string tradingSymbol)

@@ -72,6 +72,19 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
         _logger = logger;
     }
 
+    /// <summary>The most recent tick this client holds for one instrument, or null if it has never
+    /// ticked on this connection. Read by the contracts page: "subscribed but no tick" is the exact
+    /// state that used to be invisible, and it is what distinguishes a feed problem from a scrip
+    /// master problem.</summary>
+    public SpotTick? LastTickFor(uint securityId) => _lastTick.TryGetValue(securityId, out var tick) ? tick : null;
+
+    /// <summary>Whether this token is in the subscribed set right now.</summary>
+    public bool IsSubscribed(uint securityId) => _tokenSegments.ContainsKey(securityId);
+
+    /// <summary>How many instruments are subscribed in total, across every underlying and
+    /// expiry.</summary>
+    public int SubscribedCount => _tokenSegments.Count;
+
     /// <summary>Adds tokens to the subscribed set (each mapped to its Dhan WS segment string, e.g.
     /// "IDX_I" or "NSE_FNO") and, if already connected, sends a live subscribe message for the new
     /// ones immediately. Safe to call before the connection exists - RunAsync subscribes the whole

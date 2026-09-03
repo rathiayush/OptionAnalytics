@@ -174,6 +174,7 @@ const NAV_ITEMS = [
   { key: '/', label: 'Dashboard' },
   { key: '/backtest', label: 'Backtrack' },
   { key: '/triggers', label: 'Triggers' },
+  { key: '/contracts', label: 'Contracts' },
 ]
 
 // Shared between DashboardPage and BacktestPage - a proper horizontal menu (not just plain text

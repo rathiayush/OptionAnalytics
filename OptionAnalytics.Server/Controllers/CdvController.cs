@@ -161,6 +161,18 @@ public sealed class CdvController : ControllerBase
         return Ok(_cdv.GetTrackedStrikes(underlying.ToUpperInvariant(), parsed));
     }
 
+    /// <summary>Every contract the scrip master lists for one underlying/expiry, with each one's
+    /// subscription and live-tick state, plus the health of the scrip master and the feed - see
+    /// CdvHostedService.GetContracts. ?expiry=yyyy-MM-dd, defaulting to the nearest tracked one.
+    /// This is the page to open when something "has no data": it says which of the three possible
+    /// causes it actually is.</summary>
+    [HttpGet("{underlying}/contracts")]
+    public IActionResult GetContracts(string underlying, [FromQuery] string? expiry)
+    {
+        if (_cdv.StepFor(underlying) <= 0) return NotFoundResult(underlying);
+        return Ok(_cdv.GetContracts(underlying, ParseExpiry(expiry)));
+    }
+
     /// <summary>The state for the requested expiry, or the selected one when ?expiry= is omitted.
     /// Every tracked expiry is held at once (see CdvHostedService), so naming one here is just a
     /// read - it never switches what any other page sees.</summary>
