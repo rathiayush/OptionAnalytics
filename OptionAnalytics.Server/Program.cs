@@ -22,7 +22,22 @@ builder.Services.AddHttpClient<DhanSpotInstrumentMaster>();
 builder.Services.AddHttpClient<DhanTotpAuthService>();
 builder.Services.AddSingleton<DhanHistoricalDataService>();
 builder.Services.AddSingleton<DhanMarketFeedClient>();
-builder.Services.AddHttpClient<DhanOptionChainMaster>();
+// AddHttpClient<DhanOptionChainMaster>() (the pattern every other typed client here uses) registers
+// it TRANSIENT - a brand new instance, with its own empty in-memory dictionary, for every distinct
+// injection site. That is invisible for a stateless client, but DhanOptionChainMaster holds the
+// loaded scrip master itself as instance state (_byKey), and only CdvHostedService ever calls
+// EnsureLoadedAsync on the copy it was given. StrategyTriggerHostedService's OWN separately-injected
+// copy was therefore NEVER loaded - every live order's contract lookup (BuildOrderPlanAsync's
+// _optionChainMaster.Find) was reading an empty dictionary for the app's entire lifetime, not
+// intermittently: this is the actual cause of "not listed... the master holds 0 contract(s)" on
+// every live trigger, always, regardless of what CdvHostedService's own copy (and so the
+// dashboard/Contracts page, which reads through it) was showing. Registered as an explicit
+// singleton instead, built from IHttpClientFactory so it still gets a pooled, properly-configured
+// HttpClient - now there is exactly one shared, actually-loaded instance for every consumer.
+builder.Services.AddSingleton<DhanOptionChainMaster>(sp => new DhanOptionChainMaster(
+    sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(DhanOptionChainMaster)),
+    sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<DhanOptions>>(),
+    sp.GetRequiredService<ILogger<DhanOptionChainMaster>>()));
 // Goes through DhanApiClient like every other REST call, so it needs no HttpClient of its own -
 // it only decorates the dashboard's strike picker with live premium/OI (see DhanOptionChainQuotes).
 builder.Services.AddSingleton<DhanOptionChainQuotes>();
