@@ -198,7 +198,7 @@ public sealed class SpotFeedHostedService : BackgroundService
             .ToList();
     }
 
-    private static DateOnly IstDate(DateTimeOffset time) => DateOnly.FromDateTime(time.ToOffset(TimeSpan.FromHours(5.5)).DateTime);
+    private static DateOnly IstDate(DateTimeOffset time) => IstClock.IstDate(time);
 
     private void OnTick(SpotTick tick)
     {
@@ -242,7 +242,7 @@ public sealed class SpotFeedHostedService : BackgroundService
     }
 
     /// <summary>Today's date in IST (UTC+5:30, a fixed offset - no DST, no tzdata lookup needed).</summary>
-    private static DateOnly IstToday() => DateOnly.FromDateTime(DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(5.5)).DateTime);
+    private static DateOnly IstToday() => IstClock.Today();
 
     public override Task StopAsync(CancellationToken cancellationToken)
     {

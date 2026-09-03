@@ -59,7 +59,7 @@ public static class BacktestUtil
     /// <summary>The IST (UTC+5:30, fixed offset) calendar date a bar's time falls on - what any
     /// intraday strategy uses to detect "the trading day ended, exit here" rather than riding a
     /// position into the next day.</summary>
-    public static DateOnly IstDate(DateTimeOffset time) => DateOnly.FromDateTime(time.ToOffset(TimeSpan.FromHours(5.5)).DateTime);
+    public static DateOnly IstDate(DateTimeOffset time) => IstClock.IstDate(time);
 
     /// <summary>Buckets a running-total line (CDV/OBV) to <paramref name="minutes"/>-minute
     /// resolution. Unlike a candle, the meaningful value for a coarser bucket is simply the LAST

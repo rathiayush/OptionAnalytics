@@ -261,7 +261,7 @@ public sealed class CdvHostedService : BackgroundService
             .Take(TrackedExpiryCountFor(underlying))
             .ToList();
 
-    private static DateOnly IstToday() => DateOnly.FromDateTime(DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(5.5)).DateTime);
+    private static DateOnly IstToday() => IstClock.Today();
 
     /// <summary>Points this underlying's always-on consumers - the SignalR broadcast and the live
     /// alert services, which have no page to ask - at a different tracked expiry.
@@ -516,7 +516,7 @@ public sealed class CdvHostedService : BackgroundService
         var contract = _optionChainMaster.Find(underlying, expiry.Value, strike, isCall);
         if (contract is null) return Array.Empty<Candle>();
 
-        var cacheKey = (contract.SecurityId, DateOnly.FromDateTime(DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(5.5)).DateTime));
+        var cacheKey = (contract.SecurityId, IstClock.Today());
         lock (_onDemandCandles)
         {
             // cacheKey.Day is always TODAY (built fresh above), so any entry under a different day
@@ -536,7 +536,7 @@ public sealed class CdvHostedService : BackgroundService
             // is that the session is over now, not when the fetch happened. The reverse case (an
             // entry cached after close, read the next morning) cannot arise - the sweep above
             // removes it the moment the IST date changes.
-            var lifetime = TimeOnly.FromDateTime(DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(5.5)).DateTime) >= SessionClose
+            var lifetime = TimeOnly.FromDateTime(DateTimeOffset.UtcNow.ToOffset(IstClock.Offset).DateTime) >= SessionClose
                 ? OnDemandCandleLifetimeAfterClose
                 : OnDemandCandleLifetime;
 
@@ -661,7 +661,7 @@ public sealed class CdvHostedService : BackgroundService
     /// - this is for the case where the process ISN'T restarted across a day boundary.</summary>
     private async Task RefreshMasterForThisRecenterAsync(CancellationToken cancellationToken)
     {
-        var nowIst = DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(5.5));
+        var nowIst = DateTimeOffset.UtcNow.ToOffset(IstClock.Offset);
         var todayIst = DateOnly.FromDateTime(nowIst.DateTime);
         var dueForDailyRefresh = TimeOnly.FromDateTime(nowIst.DateTime) >= DailyMasterRefreshTime && _lastDailyMasterRefreshIstDate != todayIst;
 
@@ -826,13 +826,14 @@ public sealed class CdvHostedService : BackgroundService
         if (toSubscribe.Length > 0)
         {
             var segments = toSubscribe.ToDictionary(t => t, _ => "NSE_FNO");
-            await _feedClient.SubscribeAsync(segments, cancellationToken);
+            // Full mode, not the default Quote - option strikes have a real order book, and this is
+            // what gives StrategyTriggerHostedService a live best bid/ask to re-price an unfilled
+            // order retry against instead of only the last traded price (see DhanMarketFeedClient's
+            // own doc comment on the two modes).
+            await _feedClient.SubscribeAsync(segments, cancellationToken, full: true);
         }
         if (toUnsubscribe.Length > 0)
-        {
-            await _feedClient.UnsubscribeAsync(toUnsubscribe, cancellationToken);
-            foreach (var token in toUnsubscribe) _bySecurityId.TryRemove(token, out _);
-        }
+            await UnsubscribeAndForgetAsync(toUnsubscribe, cancellationToken);
 
         _subscribedTokens[key] = desiredTokens;
 
@@ -854,10 +855,8 @@ public sealed class CdvHostedService : BackgroundService
         foreach (var key in stale)
         {
             if (_subscribedTokens.TryGetValue(key, out var tokens) && tokens.Count > 0)
-            {
-                await _feedClient.UnsubscribeAsync(tokens, cancellationToken);
-                foreach (var token in tokens) _bySecurityId.TryRemove(token, out _);
-            }
+                await UnsubscribeAndForgetAsync(tokens, cancellationToken);
+
             _subscribedTokens.TryRemove(key, out _);
             _cdvHistorySeeded.Remove(key);
             _byExpiry.TryRemove(key, out _);
@@ -874,14 +873,24 @@ public sealed class CdvHostedService : BackgroundService
     {
         var key = (underlying, expiry);
         if (_subscribedTokens.TryGetValue(key, out var tokens) && tokens.Count > 0)
-        {
-            await _feedClient.UnsubscribeAsync(tokens, cancellationToken);
-            foreach (var token in tokens) _bySecurityId.TryRemove(token, out _);
-        }
+            await UnsubscribeAndForgetAsync(tokens, cancellationToken);
+
         _subscribedTokens[key] = new HashSet<uint>();
         _cdvHistorySeeded.Remove(key);
         state.Reset();
         _logger.LogInformation("CDV: {Underlying} {Expiry} - new trading day, resetting CDV state.", underlying, expiry);
+    }
+
+    /// <summary>Unsubscribes the given tokens from the shared feed and drops their SecurityId-&gt;
+    /// state routing (_bySecurityId) together - a token left in one without the other is either a
+    /// leak (still routed to a state but no longer actually subscribed) or a live tick with nowhere
+    /// to go (subscribed but not routed), so the two must always change as one unit. Shared by every
+    /// place that stops tracking a set of contracts: the routine ATM-window diff, dropping a whole
+    /// stale expiry, and a day-rollover reset.</summary>
+    private async Task UnsubscribeAndForgetAsync(IEnumerable<uint> tokens, CancellationToken cancellationToken)
+    {
+        await _feedClient.UnsubscribeAsync(tokens, cancellationToken);
+        foreach (var token in tokens) _bySecurityId.TryRemove(token, out _);
     }
 
     /// <summary>Fetches and seeds each strike's own last HistoryTradingDays of premium+volume
@@ -897,7 +906,7 @@ public sealed class CdvHostedService : BackgroundService
     /// next cycle retries cleanly instead of leaving CDV history permanently empty.</summary>
     private async Task BackfillStrikesAsync(string underlying, DateOnly expiry, CdvUnderlyingState state, IReadOnlyList<uint> securityIds, decimal currentSpot, CancellationToken cancellationToken)
     {
-        var today = DateOnly.FromDateTime(DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(5.5)).DateTime);
+        var today = IstClock.Today();
         var fromDay = today.AddDays(-HistoryLookbackCalendarDays);
         var seededCount = 0;
 
@@ -1004,7 +1013,7 @@ public sealed class CdvHostedService : BackgroundService
             .ToList();
     }
 
-    private static DateOnly IstDate(DateTimeOffset time) => DateOnly.FromDateTime(time.ToOffset(TimeSpan.FromHours(5.5)).DateTime);
+    private static DateOnly IstDate(DateTimeOffset time) => IstClock.IstDate(time);
 
     private void OnTick(SpotTick tick)
     {
