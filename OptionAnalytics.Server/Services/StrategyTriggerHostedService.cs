@@ -82,6 +82,17 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     /// latest live premium and MODIFYs the same order - see MonitorFillAsync.</summary>
     private const int MaxFillAttempts = 4;
 
+    /// <summary>How much wider than the trigger's own SlippagePoints a retry for a FULLY unfilled
+    /// entry (no quantity traded at all yet - as opposed to a PART_TRADED one, which already
+    /// escalates round over round on its own, see the re-price step in MonitorFillAsync) is allowed
+    /// to price through, e.g. SlippagePoints=1 retries an unfilled entry at 3 points of slippage.
+    /// The original price already failed to clear once; repeating that same price attempt after
+    /// attempt would just fail the same way again, so every retry re-prices at this SAME wider band
+    /// (not progressively wider each round) until it fills, MaxDeviationPercent trips, or attempts
+    /// run out - same fixed-multiplier pattern LiveSpreadCalculator's own
+    /// EngineOptions.RetryUnfilledLegSlippageMultiplier uses for its unfilled-leg retries.</summary>
+    private const decimal UnfilledRetrySlippageMultiplier = 3m;
+
     /// <summary>How long to let a placed or just-repriced LIMIT order rest before checking whether
     /// it filled. Short on purpose - StrategyTrigger.MaxDeviationPercent's own doc comment explains
     /// why this whole loop exists: an option's premium can move fast enough in a couple of minutes
@@ -761,8 +772,11 @@ public sealed class StrategyTriggerHostedService : BackgroundService
 
             // A partial fill re-prices with escalating slippage - the base price already failed to
             // clear the remainder, so repeating it attempt after attempt would just keep failing the
-            // same way. A fully-unfilled order keeps the trigger's own configured slippage unchanged.
-            var slippage = isPartial ? trigger.SlippagePoints * (1 + partialFillRetries) : trigger.SlippagePoints;
+            // same way. A fully-unfilled order retries at UnfilledRetrySlippageMultiplier x the
+            // trigger's own configured slippage (e.g. 1 point becomes 3) for the same reason - the
+            // original, tighter price already failed to clear once, so simply re-quoting it again at
+            // the current live premium would just fail the same way again.
+            var slippage = isPartial ? trigger.SlippagePoints * (1 + partialFillRetries) : trigger.SlippagePoints * UnfilledRetrySlippageMultiplier;
             var rawPrice = Math.Max(0, isSell ? latestPrice.Value - slippage : latestPrice.Value + slippage);
             var newPrice = RoundToTick(rawPrice, plan.TickSize);
             // ENTRY_LEG's own quantity field is the order's remaining WORKING quantity, not a delta -
