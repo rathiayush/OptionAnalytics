@@ -9,8 +9,8 @@ namespace OptionAnalytics.Server.Services;
 /// <summary>
 /// Computes CE/PE cumulative delta volume (CDV) for NIFTY/BANKNIFTY's near-the-money option
 /// chain: every 30 minutes, re-centers on the current ATM strike (spot rounded to the nearest
-/// strike step) and tracks the 8-ITM + 8-OTM window around it for both CE and PE (17 strikes x 2
-/// sides = up to 34 contracts), subscribing/unsubscribing on the shared DhanMarketFeedClient as
+/// strike step) and tracks the 16-ITM + 16-OTM window around it for both CE and PE (33 strikes x 2
+/// sides = up to 66 contracts), subscribing/unsubscribing on the shared DhanMarketFeedClient as
 /// the window moves. Every option tick is folded into its underlying's CdvUnderlyingState (tick
 /// rule + sigmoid moneyness delta-weighting - see that class) and the resulting CE/PE totals are
 /// pushed to the dashboard over the same SpotHub the spot chart uses.
@@ -24,19 +24,22 @@ public sealed class CdvHostedService : BackgroundService
     /// roll, is what "current + next two" has to mean to include the month itself. BANKNIFTY lists
     /// monthlies only, so 2 is the current month plus the next.
     ///
-    /// Every tracked expiry costs its own ATM+-8 window: 17 strikes x CE/PE = up to 34 live
-    /// contracts and 34 backfill calls each. That is the whole price of this - 102 contracts for
-    /// NIFTY and 68 for BANKNIFTY rather than 34 apiece - and the reason this is a small fixed
-    /// number per underlying rather than "every listed expiry".</summary>
+    /// Every tracked expiry costs its own ATM+-16 window: 33 strikes x CE/PE = up to 66 live
+    /// contracts and 66 backfill calls each. That is the whole price of this - 198 contracts for
+    /// NIFTY and 132 for BANKNIFTY rather than 66 apiece - and the reason this is a small fixed
+    /// number per underlying rather than "every listed expiry". Comfortably inside Dhan's own feed
+    /// limit (DhanMarketFeedClient.MaxInstrumentsPerConnection, 5000) with room to spare for spot
+    /// and every other underlying's own window.</summary>
     private static readonly (string Underlying, int Step, int TrackedExpiries)[] Underlyings =
     {
         ("NIFTY", 50, 3),
         ("BANKNIFTY", 100, 2),
     };
 
-    /// <summary>8 ITM + 8 OTM strikes around ATM (so 17 strikes total, ATM included), for both CE
-    /// and PE.</summary>
-    private const int StrikeRange = 8;
+    /// <summary>16 ITM + 16 OTM strikes around ATM (so 33 strikes total, ATM included), for both CE
+    /// and PE - wide enough that a strategy's own otmSteps (up to +-8 today) never comes close to
+    /// the edge of what is actually tracked, live, and backfilled.</summary>
+    private const int StrikeRange = 16;
 
     private static readonly TimeSpan AtmRecenterInterval = TimeSpan.FromMinutes(30);
 
@@ -54,7 +57,7 @@ public sealed class CdvHostedService : BackgroundService
     private const int HistoryLookbackCalendarDays = HistoryWindow.LookbackCalendarDays;
 
     /// <summary>Dhan gives no documented rate limit for this endpoint, but a recenter can mean
-    /// backfilling up to ~34 contracts (17 strikes x CE/PE) back to back on first startup - a small
+    /// backfilling up to ~66 contracts (33 strikes x CE/PE) back to back on first startup - a small
     /// gap between calls is cheap insurance against tripping one anyway.</summary>
     private static readonly TimeSpan BackfillCallDelay = TimeSpan.FromMilliseconds(200);
 
@@ -93,7 +96,7 @@ public sealed class CdvHostedService : BackgroundService
     private readonly ConcurrentDictionary<uint, CdvUnderlyingState> _bySecurityId = new();
 
     /// <summary>The live subscription set per (underlying, expiry) - each tracked expiry has its own
-    /// ATM+-8 window that moves independently, so the subscribe/unsubscribe diff has to be computed
+    /// ATM+-16 window that moves independently, so the subscribe/unsubscribe diff has to be computed
     /// per expiry or one expiry's recenter would unsubscribe another's contracts.</summary>
     /// Concurrent for the same reason: keys now come and go as expiries roll on and off the tracked
     /// set, and GET /strikes reads this from a request thread while a recenter may be rewriting it.
@@ -193,7 +196,7 @@ public sealed class CdvHostedService : BackgroundService
 
     /// <summary>The strike/side verification list for GET /api/cdv/{underlying}/strikes - see
     /// CdvUnderlyingState.GetTrackedStrikes. _subscribedTokens (this service's own bookkeeping, not
-    /// the state's) is what tells that method which strikes are the CURRENTLY active ATM+-8 window
+    /// the state's) is what tells that method which strikes are the CURRENTLY active ATM+-16 window
     /// versus ones that rolled out earlier today.</summary>
     public IReadOnlyList<CdvStrikeInfo> GetTrackedStrikes(string underlying, DateOnly? expiry = null)
     {
@@ -302,7 +305,7 @@ public sealed class CdvHostedService : BackgroundService
     /// <summary>
     /// The strikes the dashboard's option-chart picker offers: <paramref name="spanSteps"/> steps
     /// either side of the current ATM, on the nearest expiry, filtered to the ones actually listed
-    /// in the scrip master. Wider than the ATM+-8 window CDV subscribes to, deliberately - a chart
+    /// in the scrip master. Wider than the ATM+-16 window CDV subscribes to, deliberately - a chart
     /// only needs history, and GetStrikeCandlesAsync can fetch that for any listed strike, so the
     /// picker is not limited to the strikes this app happens to be tracking live. Each entry says
     /// which it is.
@@ -379,7 +382,7 @@ public sealed class CdvHostedService : BackgroundService
     /// data", each with a different fix:
     ///   - the master lists NOTHING (a bad scrip-master refresh - the failure that silently stopped
     ///     every order being placed);
-    ///   - listed but not subscribed (outside the ATM+-8 window, or an expiry not tracked);
+    ///   - listed but not subscribed (outside the ATM+-16 window, or an expiry not tracked);
     ///   - subscribed but never ticked (a feed or authorisation problem).
     /// A null expiry means the nearest tracked one.</summary>
     public ContractsResponse GetContracts(string underlying, DateOnly? expiry)
@@ -449,7 +452,7 @@ public sealed class CdvHostedService : BackgroundService
 
     /// <summary>One strike's LIVE premium on any listed expiry, from Dhan's Option Chain API -
     /// what a live order needs when it is being placed in an expiry this app is not tracking (see
-    /// StrategyTrigger.OrderExpiry). The websocket feed only carries the tracked expiry's ATM+-8
+    /// StrategyTrigger.OrderExpiry). The websocket feed only carries the tracked expiry's ATM+-16
     /// contracts, so for anything else this snapshot is the only live price available.
     ///
     /// Null when there is no quote: no session, the rate limiter refusing, outside market hours, or
@@ -480,7 +483,7 @@ public sealed class CdvHostedService : BackgroundService
 
     /// <summary>
     /// One strike's premium candles for the dashboard chart. Tracked strikes (inside, or previously
-    /// inside today, the CDV ATM+-8 window) answer straight from memory including the still-forming
+    /// inside today, the CDV ATM+-16 window) answer straight from memory including the still-forming
     /// bar, exactly as the ATM charts do. Any other listed strike is fetched from Dhan's intraday
     /// history on demand and cached briefly - that history is complete but static, so such a chart
     /// shows the same days as the tracked ones but only advances when re-fetched, which is the
@@ -661,7 +664,7 @@ public sealed class CdvHostedService : BackgroundService
     /// already do.
     ///
     /// Resolves which expiries this underlying should be tracking right now, recenters EACH of them
-    /// onto its own ATM+-8 window, and drops any expiry that has rolled off the list (it expired, or
+    /// onto its own ATM+-16 window, and drops any expiry that has rolled off the list (it expired, or
     /// a nearer one appeared) - unsubscribing its contracts and forgetting its state, since nothing
     /// can read it any more.</summary>
     private async Task RecenterAsync(string underlying, int step, CancellationToken cancellationToken)
@@ -700,8 +703,8 @@ public sealed class CdvHostedService : BackgroundService
         _trackedExpiries[underlying] = wanted;
 
         // One line saying what is live per expiry, so "is every expiry actually subscribed?" is a
-        // thing to READ rather than assume. Each expiry carries its own full ATM+-8 window (17
-        // strikes x CE/PE), so a number well below ~34 here means contracts the scrip master could
+        // thing to READ rather than assume. Each expiry carries its own full ATM+-16 window (33
+        // strikes x CE/PE), so a number well below ~66 here means contracts the scrip master could
         // not resolve - which is exactly the failure that reads as a strike "not listed" later.
         _logger.LogInformation("CDV: {Underlying} tracking {Count} expiry/expiries - {Detail}.",
             underlying, wanted.Count,
@@ -771,7 +774,7 @@ public sealed class CdvHostedService : BackgroundService
         // flight, corrupting SeedHistory's "nothing live yet" assumption. Cheap for a routine
         // 30-minute recenter (usually just a handful of strikes as the window shifts by one step,
         // plus any earlier failures still needing a retry); the one expensive case is the very
-        // first recenter after startup, where the whole ATM+-8 window (up to 34 contracts) needs it
+        // first recenter after startup, where the whole ATM+-16 window (up to 66 contracts) needs it
         // at once, per tracked expiry - a one-time cost, not repeated once everything has succeeded.
         if (needsBackfill.Count > 0)
             await BackfillStrikesAsync(underlying, expiry, state, needsBackfill, spot, cancellationToken);
