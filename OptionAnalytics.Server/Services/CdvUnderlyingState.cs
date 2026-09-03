@@ -570,27 +570,29 @@ public sealed class CdvUnderlyingState
     /// actual trend.</summary>
     private const int LookbackSmoothLen = 9;
 
-    /// <summary>CE/PE %-change over each of <paramref name="lookbackBars"/> bars, computed off the
-    /// EMA(LookbackSmoothLen)-smoothed CDV series - LiveSpreadCalculator's own "Multi-Lookback"
-    /// table for this same Pine indicator, just with a caller-supplied (rather than fixed) set of
-    /// windows. Skender.Stock.Indicators needs IQuote-shaped input for GetEma, so each CDV value is
-    /// wrapped as a synthetic quote (Close = the value, the rest unused) - the same trick
-    /// EmaCrossoverDetector uses for real candles.</summary>
+    /// <summary>CE/PE %-change over each of <paramref name="lookbackBars"/> bars, computed off
+    /// GetSmoothedCdvSeries - the OBV counterpart's own GetObvLookbackTable does the exact same
+    /// thing off GetObvSeries, and this now genuinely matches it rather than only claiming to.
+    ///
+    /// This used to re-smooth CE/PE from scratch, restricted to just today's bars
+    /// (_closedBars/_currentBar), instead of calling GetSmoothedCdvSeries - which prepends the
+    /// prior days' history so the EMA runs continuously across the day boundary, same as OBV's.
+    /// The result was a real bug, not a display quirk: CDV resets to zero every trading day, so
+    /// early in a session (or right after the running total crosses back near zero, which it does
+    /// often) the OLD table's from-scratch EMA was still warming up from that fresh zero - both the
+    /// current and N-bars-ago readings it compared were still small, so the %-change came out small
+    /// too, even while the chart (which plots the raw, unsmoothed total) showed the total swinging
+    /// hard. OBV never had this because GetObvSeries already carries its EMA across day boundaries;
+    /// CDV's table just wasn't using the series that does the same thing for CDV.</summary>
     public LookbackTable GetLookbackTable(IReadOnlyList<int> lookbackBars)
     {
-        lock (_lock)
-        {
-            var series = new List<CdvBarPoint>(_closedBars);
-            if (_currentBar is { } bar) series.Add(bar);
+        var ce = GetSmoothedCdvSeries(true).Select(p => (decimal?)p.Obv).ToList();
+        var pe = GetSmoothedCdvSeries(false).Select(p => (decimal?)p.Obv).ToList();
 
-            var ceEma = SmoothEma(series.Select(p => p.CeCdv).ToList());
-            var peEma = SmoothEma(series.Select(p => p.PeCdv).ToList());
+        var ceChanges = lookbackBars.Select(n => ComputeLookbackChange(ce, n)).ToList();
+        var peChanges = lookbackBars.Select(n => ComputeLookbackChange(pe, n)).ToList();
 
-            var ceChanges = lookbackBars.Select(n => ComputeLookbackChange(ceEma, n)).ToList();
-            var peChanges = lookbackBars.Select(n => ComputeLookbackChange(peEma, n)).ToList();
-
-            return new LookbackTable(Underlying, ceChanges, peChanges);
-        }
+        return new LookbackTable(Underlying, ceChanges, peChanges);
     }
 
     private static List<decimal?> SmoothEma(IReadOnlyList<decimal> values)
