@@ -815,38 +815,31 @@ public sealed class CdvUnderlyingState
         return result;
     }
 
-    /// <summary>One leg's CDV series, day-baselined then EMA-smoothed exactly as GetObvSeries does
-    /// its own raw aggregate (stage 3 of that method's doc comment) - so a strategy asking "has CDV
-    /// surged?" is reading numbers built the same way the CDV lookback table (and OBV's) shows.
-    /// Note this is inherently DAY-SCOPED: CDV resets every trading day (see Reset), so this only
-    /// ever covers the current day, unlike the OBV series which carries its full multi-day history.
-    /// </summary>
+    /// <summary>One leg's CDV series, EMA-smoothed exactly as GetLookbackTable smooths it before
+    /// measuring %-change - so a strategy asking "has CDV surged?" is reading the same numbers the
+    /// CDV lookback table shows. Note this is inherently DAY-SCOPED: CDV resets every trading day
+    /// (see Reset), so this only ever covers the current day, unlike the OBV series which carries
+    /// its full multi-day history.</summary>
     public IReadOnlyList<ObvPoint> GetSmoothedCdvSeries(bool isCall)
     {
         lock (_lock)
         {
             // Every past day's reconstructed curve first, then today's - so a backtest can ask a CDV
-            // question about any day in the backfill window. The EMA below deliberately runs
-            // continuously across the joins, exactly as it does for OBV - only the input resets per
-            // day, via the same ApplyDailyBaseline call GetObvSeries makes rather than a second,
-            // implicit day-zeroing of its own: FinalizeHistory/Reset already start each day's raw
-            // CeCdv/PeCdv near zero, but "near" is not "exactly" - a day's first recorded bar already
-            // carries that bar's own delta rather than reading as literal 0 the way OBV's day-start
-            // always does. ComputeLookbackChange divides by the "N bars ago" reading's own magnitude,
-            // so that small, day-to-day-varying offset shifts %-change results by more than it looks
-            // like it should. Rebasing here, the same way and with the same function OBV uses, removes
-            // that discrepancy rather than just shrinking it.
-            var raw = new List<CdvBarPoint>(_historySeries);
-            raw.AddRange(_closedBars);
-            if (_currentBar is { } bar) raw.Add(bar);
-            if (raw.Count == 0) return Array.Empty<ObvPoint>();
+            // question about any day in the backfill window. Each day still starts at its own zero
+            // (see FinalizeHistory): this concatenates day-scoped curves, it does not accumulate one
+            // running total across days, which is the compounding TradingDay's doc comment warns
+            // about. The EMA below deliberately runs continuously across the joins, exactly as it
+            // does for OBV - only the input resets per day.
+            var series = new List<CdvBarPoint>(_historySeries);
+            series.AddRange(_closedBars);
+            if (_currentBar is { } bar) series.Add(bar);
+            if (series.Count == 0) return Array.Empty<ObvPoint>();
 
-            var series = ApplyDailyBaseline(raw.Select(p => new ObvPoint(p.Time, isCall ? p.CeCdv : p.PeCdv)).ToList());
-            var smoothed = SmoothEma(series.Select(p => p.Obv).ToList());
+            var smoothed = SmoothEma(series.Select(p => isCall ? p.CeCdv : p.PeCdv).ToList());
 
             var result = new List<ObvPoint>(series.Count);
             for (var i = 0; i < series.Count; i++)
-                result.Add(new ObvPoint(series[i].Time, smoothed[i] ?? series[i].Obv));
+                result.Add(new ObvPoint(series[i].Time, smoothed[i] ?? (isCall ? series[i].CeCdv : series[i].PeCdv)));
             return result;
         }
     }
