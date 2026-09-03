@@ -310,28 +310,14 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         var reasonLine = reason is null ? "" : $"\n{reason}";
         var ist = TimeSpan.FromHours(5.5);
 
-        var orderLine = "";
-        SuperOrderPlan? plan = null;
+        // Fired and left running BEFORE the alert below is even composed, let alone sent - see
+        // PlaceOrderInBackgroundAsync's own doc comment for why. The order no longer waits its turn
+        // behind the alert (or the alert behind the order): both start at essentially the same
+        // instant. The order's own outcome still always reaches Telegram, just as its own follow-up
+        // message a moment later rather than embedded in this one - the "never place or leave an
+        // order unsaid" guarantee is unchanged, only WHEN relative to the signal alert it lands.
         if (trigger.LiveTradingEnabled)
-        {
-            // Live trading being ON and no order going out is exactly the case that must never be
-            // silent: an alert that looks like every other one would read as "an order is working"
-            // when nothing was placed. Both outcomes get a line.
-            var (built, skipReason) = await BuildOrderPlanAsync(trigger, trade, cancellationToken);
-            plan = built;
-            orderLine = plan is null
-                ? $"\n\n[NO ORDER PLACED] Live trading is on, but this signal could not be turned into an order - {skipReason}. Nothing is working at the broker for it."
-                : $"\n\n{await PlaceOrderAsync(trigger, trade, plan, cancellationToken)}";
-
-            // A placed order with no way to tell anyone about it is worth a loud log line, since the
-            // Telegram send below will simply no-op.
-            if (plan is not null && !_telegram.IsConfigured)
-            {
-                _logger.LogWarning(
-                    "Trigger {Name}: a REAL order was placed but Telegram is not configured (Telegram:Enabled/BotToken/ChatId) - no notification will be sent for it or for its fill.",
-                    trigger.Name);
-            }
-        }
+            _ = PlaceOrderInBackgroundAsync(trigger, trade, cancellationToken);
 
         // Entry time/price here are exactly BacktestTrade.EntryTimeUtc/EntryPrice - the same fields
         // the Backtrack trade table's own "Entry" column renders - not the signal bar. The signal
@@ -342,17 +328,16 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         // tag their own messages - this is the confirmed, strategy-driven alert, distinct from the
         // raw always-on EMA/Confluence feed that shares the same Telegram chat.
         // In live-premium mode there IS no resolved entry bar yet - that wait is exactly what the
-        // mode removes - so the line reports the live premium the order was actually priced from
-        // instead, and says so. Dereferencing EntryTimeUtc unconditionally here would be a null
-        // reference the moment that mode is switched on.
-        // The plan's ReferencePrice is the number the order was actually built from - which is not
-        // the tracked expiry's premium when the trigger pins a different expiry, so reading the
-        // premium again here would quote a contract the order has nothing to do with.
-        var entryLine = plan is { } priced && (trade.EntryTimeUtc is null || trigger.UseLivePremiumEntry || trigger.OrderExpiry is not null)
-            ? $"Entry: live premium @ {priced.ReferencePrice:0.##} on the {priced.Expiry:dd MMM yyyy} expiry"
-            : trade.EntryTimeUtc is { } entryTime
-                ? $"Entry: {entryTime.ToOffset(ist):HH:mm} IST @ {trade.EntryPrice:0.##}"
-                : $"Entry: live premium @ {GetLatestPremium(trade.Underlying, trade.Strike, trade.OptionType == "CE"):0.##} (as of the signal bar's close)";
+        // mode removes - so the line reports the live premium as of the signal bar's close instead,
+        // read straight from CDV's own tracked state (no network call, so this never waits on the
+        // order pipeline above). Dereferencing EntryTimeUtc unconditionally here would be a null
+        // reference the moment that mode is switched on. A trigger pinned to a different expiry
+        // reports the exact contract/price the order used in ITS OWN follow-up message instead
+        // (see BuildOrderPlanAsync) - deliberately not duplicated here, since re-deriving it would
+        // either block this alert on the same lookup or risk the two messages disagreeing.
+        var entryLine = trade.EntryTimeUtc is { } entryTime
+            ? $"Entry: {entryTime.ToOffset(ist):HH:mm} IST @ {trade.EntryPrice:0.##}"
+            : $"Entry: live premium @ {GetLatestPremium(trade.Underlying, trade.Strike, trade.OptionType == "CE"):0.##} (as of the signal bar's close)";
 
         var message =
             $"[Trigger] <b>{arrow} {trigger.Name}</b>\n" +
@@ -360,7 +345,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
             $"<b>{trade.Direction}</b> — {trade.Side} {trade.OptionType} {trade.Strike:0.##}{reasonLine}\n" +
             $"{entryLine}\n" +
             $"Signal bar: {trade.SignalTimeUtc.ToOffset(ist):yyyy-MM-dd HH:mm} IST" +
-            orderLine;
+            (trigger.LiveTradingEnabled ? "\n\nLive trading is on - order status follows separately." : "");
 
         _logger.LogInformation("Trigger {Name} fired: {Direction} {Side} {OptionType} {Strike}", trigger.Name, trade.Direction, trade.Side, trade.OptionType, trade.Strike);
 
@@ -376,6 +361,60 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         {
             _logger.LogDebug(ex, "Could not broadcast trigger {Name} to the dashboard.", trigger.Name);
         }
+    }
+
+    /// <summary>Builds and places the real order for one fired signal, entirely off to the side of
+    /// NotifyAsync's own signal alert - see that method's doc comment for why. Runs as its own
+    /// background task (CancellationToken.None on the enclosing Task.Run, same reasoning
+    /// PlaceOrderAsync's own MonitorFillAsync dispatch uses: a shutdown mid-flight must not silently
+    /// drop whatever this was about to report, only the individual awaited calls inside still honour
+    /// <paramref name="cancellationToken"/>), so a slow contract lookup or a slow Dhan round trip
+    /// never delays the Telegram message that a signal fired.
+    ///
+    /// Every outcome still reaches Telegram, exactly as it always did - just as its own follow-up
+    /// message via NotifyFollowUpAsync (the same mechanism FILLED/CANCELLED/etc. already use)
+    /// instead of a line appended to the signal alert:
+    ///   - BuildOrderPlanAsync returning null -> [NO ORDER PLACED] with the reason.
+    ///   - Telegram not configured while a real order is about to be placed -> a loud log line,
+    ///     since the follow-up send below will simply no-op.
+    ///   - PlaceOrderAsync's own [ORDER PLACED]/[ORDER FAILED] line, sent as-is.
+    ///   - Anything unexpected throwing -> [ORDER PIPELINE CRASHED], logged, and CHECK DHAN
+    ///     DIRECTLY - the one case that must never be silent even when the code itself misbehaves.
+    /// </summary>
+    private Task PlaceOrderInBackgroundAsync(StrategyTrigger trigger, BacktestTrade trade, CancellationToken cancellationToken)
+    {
+        return Task.Run(async () =>
+        {
+            try
+            {
+                var (plan, skipReason) = await BuildOrderPlanAsync(trigger, trade, cancellationToken);
+                if (plan is null)
+                {
+                    await NotifyFollowUpAsync(trigger,
+                        $"[NO ORDER PLACED] Live trading is on, but this signal could not be turned into an order - {skipReason}. Nothing is working at the broker for it.",
+                        cancellationToken);
+                    return;
+                }
+
+                if (!_telegram.IsConfigured)
+                {
+                    _logger.LogWarning(
+                        "Trigger {Name}: a REAL order was placed but Telegram is not configured (Telegram:Enabled/BotToken/ChatId) - no notification will be sent for it or for its fill.",
+                        trigger.Name);
+                }
+
+                var statusLine = await PlaceOrderAsync(trigger, trade, plan, cancellationToken);
+                await NotifyFollowUpAsync(trigger, statusLine, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogError(ex, "Trigger {Name}: order placement crashed for a fired signal ({Underlying} {Strike}{Type}).",
+                    trigger.Name, trade.Underlying, trade.Strike, trade.OptionType);
+                await NotifyFollowUpAsync(trigger,
+                    $"[ORDER PIPELINE CRASHED] {trade.Underlying} {trade.Strike:0.##}{trade.OptionType} - an unexpected error stopped this signal's order from being built or placed. Check server logs, and CHECK DHAN DIRECTLY in case an order reached the broker before the crash.",
+                    CancellationToken.None);
+            }
+        }, CancellationToken.None);
     }
 
     /// <summary>Turns a fired trade into the exact Dhan Super Order it should place. Null when the
@@ -497,12 +536,13 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     /// as a background task rather than awaiting it here - a resting LIMIT order can take up to
     /// MaxFillAttempts x FillCheckInterval to resolve, and blocking on that would stall every OTHER
     /// trigger's evaluation behind this one order (EvaluateAsync/ExecuteAsync call this once per
-    /// fired trade, in a loop over all enabled triggers). Returns only the line for the IMMEDIATE
-    /// Telegram message - [ORDER PLACED] with Dhan's own order id/status on success (fill/cancel
-    /// outcome follows later as its own message via NotifyFollowUpAsync), or [ORDER FAILED] with
-    /// the reason on failure. Never throws: PlaceAsync already logs and returns null on any error
-    /// (network, rejection, missing IP whitelisting), so a failed placement never stops the
-    /// underlying signal alert from going out.</summary>
+    /// fired trade, in a loop over all enabled triggers). Returns the status line - [ORDER PLACED]
+    /// with Dhan's own order id/status on success (fill/cancel outcome follows later as its own
+    /// message via NotifyFollowUpAsync), or [ORDER FAILED] with the reason on failure - for the
+    /// caller (PlaceOrderInBackgroundAsync) to send as its own follow-up Telegram message. Never
+    /// throws: PlaceAsync already logs and returns null on any error (network, rejection, missing IP
+    /// whitelisting), so a failed placement never stops the underlying signal alert from going
+    /// out - that alert is sent independently and earlier by NotifyAsync regardless.</summary>
     private async Task<string> PlaceOrderAsync(StrategyTrigger trigger, BacktestTrade trade, SuperOrderPlan plan, CancellationToken cancellationToken)
     {
         var result = await _superOrders.PlaceAsync(
