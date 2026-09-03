@@ -65,6 +65,46 @@ public sealed class DhanOptionChainMaster
         }
     }
 
+    /// <summary>Forces an immediate re-download and re-parse, bypassing both the normal 12-hour
+    /// cache (IsFresh) and the 1-minute empty-retry throttle - the Contracts page's manual "Refresh
+    /// master" button, for exactly the situation that button exists to fix: the master reads as
+    /// empty right now and the automatic retry hasn't caught up yet. Unlike EnsureLoadedAsync, this
+    /// never rethrows - a download/parse failure is reported back to the caller as a plain string
+    /// instead, since it is answering an HTTP request, not running unattended in a background
+    /// loop.
+    ///
+    /// RefreshFromDhanAsync's own zero-row guard still applies underneath this - a parse that
+    /// yields nothing still keeps whatever was loaded before rather than wiping it, this call just
+    /// forces the ATTEMPT to happen right now instead of waiting.</summary>
+    public async Task<(int ContractCount, DateTimeOffset? LoadedAt, string? Error)> ForceRefreshAsync(CancellationToken cancellationToken)
+    {
+        await _loadLock.WaitAsync(cancellationToken);
+        try
+        {
+            string? error = null;
+            try
+            {
+                await RefreshFromDhanAsync(cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogError(ex, "Manual scrip-master refresh failed.");
+                error = ex.Message;
+            }
+            _lastAttemptAt = DateTimeOffset.UtcNow;
+
+            if (error is null && _byKey.Count == 0)
+                error = "Download succeeded but parsed to zero contracts - check the server log for \"Dhan scrip master parsed to ZERO\" to see which parse step dropped them.";
+
+            var loadedAt = _loadedAt == DateTimeOffset.MinValue ? (DateTimeOffset?)null : _loadedAt;
+            return (_byKey.Count, loadedAt, error);
+        }
+        finally
+        {
+            _loadLock.Release();
+        }
+    }
+
     private bool IsFresh() => _byKey.Count > 0 && DateTimeOffset.UtcNow - _loadedAt < CacheLifetime;
 
     private async Task RefreshFromDhanAsync(CancellationToken cancellationToken)

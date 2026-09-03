@@ -427,6 +427,26 @@ public sealed class CdvHostedService : BackgroundService
             rows);
     }
 
+    /// <summary>Forces the scrip master to re-download right now (see
+    /// DhanOptionChainMaster.ForceRefreshAsync) and then immediately re-centers every underlying, so
+    /// any contract the master could not resolve before is subscribed and backfilled straight away
+    /// rather than waiting for the next scheduled recenter (up to 30 minutes) or the automatic
+    /// empty-retry cadence (up to a minute) to get there. This is what the Contracts page's
+    /// "Refresh master" button calls - the self-serve fix for exactly the failure that page exists
+    /// to surface: the master reads as empty right now.
+    ///
+    /// Recenter runs even when the master refresh itself failed or came back empty - if the
+    /// download genuinely failed, recenter will find the same 0 contracts and change nothing, which
+    /// is harmless; if it succeeded, this is what turns "the master has contracts again" into
+    /// "these contracts are actually subscribed and backfilled" without the caller needing a second
+    /// step.</summary>
+    public async Task<(int ContractCount, DateTimeOffset? LoadedAt, string? Error)> ForceRefreshMasterAsync(CancellationToken cancellationToken)
+    {
+        var result = await _optionChainMaster.ForceRefreshAsync(cancellationToken);
+        await RecenterAllAsync(cancellationToken);
+        return result;
+    }
+
     /// <summary>One strike's LIVE premium on any listed expiry, from Dhan's Option Chain API -
     /// what a live order needs when it is being placed in an expiry this app is not tracking (see
     /// StrategyTrigger.OrderExpiry). The websocket feed only carries the tracked expiry's ATM+-8
