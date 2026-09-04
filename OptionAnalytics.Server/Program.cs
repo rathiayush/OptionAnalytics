@@ -45,6 +45,9 @@ builder.Services.AddSingleton<DhanOptionChainQuotes>();
 // comment. Registered now as scaffolding; nothing calls it yet until the Strategy Trigger
 // integration (quantity/order-type/dry-run design) is settled.
 builder.Services.AddSingleton<DhanSuperOrderClient>();
+// Same pattern - the account's actual position book, which StrategyTriggerHostedService checks
+// before placing a live order so a trigger never doubles up on a contract it already holds.
+builder.Services.AddSingleton<DhanPositionsClient>();
 
 // No-op when Dhan:Pin/Dhan:TotpSecret aren't set (see DhanTotpAutoRenewalHostedService) - safe to
 // always register rather than branching on config here.
