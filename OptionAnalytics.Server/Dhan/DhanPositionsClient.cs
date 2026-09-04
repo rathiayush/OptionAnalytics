@@ -1,0 +1,74 @@
+using System.Text.Json;
+
+namespace OptionAnalytics.Server.Dhan;
+
+/// <summary>One entry from GET /positions - Dhan's own record of what the account currently
+/// holds, not this app's inference about it. NetQty (BuyQty - SellQty) and PositionType
+/// (LONG/SHORT/CLOSED) are Dhan's own two ways of saying the same thing - a closed position nets
+/// to 0 and PositionType flips to CLOSED the instant that happens, whether the exit was this
+/// app's own target/stop-loss leg, a manual square-off, or anything else. That makes this the one
+/// ground truth for "is there still an open position in this contract" - see IsOpen below.</summary>
+public sealed record DhanPosition(
+    string SecurityId,
+    string TradingSymbol,
+    string ExchangeSegment,
+    string ProductType,
+    string PositionType,
+    int NetQty)
+{
+    public bool IsOpen => PositionType != "CLOSED" && NetQty != 0;
+}
+
+/// <summary>Thin wrapper for Dhan's GET /positions (https://dhanhq.co/docs/v2/portfolio/) - the
+/// account's actual current holdings, as opposed to DhanSuperOrderClient's view of the order
+/// book. Read-only, so - like DhanSuperOrderClient.ListAsync - not subject to the static-IP-
+/// whitelisting requirement Dhan's write endpoints have.</summary>
+public sealed class DhanPositionsClient
+{
+    private readonly DhanApiClient _api;
+    private readonly ILogger<DhanPositionsClient> _logger;
+
+    public DhanPositionsClient(DhanApiClient api, ILogger<DhanPositionsClient> logger)
+    {
+        _api = api;
+        _logger = logger;
+    }
+
+    /// <summary>Every position Dhan reports for today, open and closed alike - callers filter
+    /// with DhanPosition.IsOpen for whatever they actually need. Empty (not thrown) on any
+    /// failure, same as DhanSuperOrderClient.ListAsync - already logged here, and a caller using
+    /// this as a safety gate would rather fail open (place the order, same as before this check
+    /// existed) than fail the whole evaluation over a transient read error.</summary>
+    public async Task<IReadOnlyList<DhanPosition>> ListAsync(CancellationToken cancellationToken)
+    {
+        using var response = await _api.SendAsync(HttpMethod.Get, "/positions", null, "listing positions", cancellationToken);
+
+        if (!response.Success)
+        {
+            _logger.LogWarning("Position list failed: {Error}", response.ErrorMessage);
+            return Array.Empty<DhanPosition>();
+        }
+
+        if (response.Root.ValueKind != JsonValueKind.Array) return Array.Empty<DhanPosition>();
+
+        var result = new List<DhanPosition>(response.Root.GetArrayLength());
+        foreach (var element in response.Root.EnumerateArray())
+        {
+            result.Add(new DhanPosition(
+                GetString(element, "securityId") ?? "",
+                GetString(element, "tradingSymbol") ?? "",
+                GetString(element, "exchangeSegment") ?? "",
+                GetString(element, "productType") ?? "",
+                GetString(element, "positionType") ?? "",
+                GetInt(element, "netQty") ?? 0));
+        }
+
+        return result;
+    }
+
+    private static string? GetString(JsonElement element, string property) =>
+        element.TryGetProperty(property, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+
+    private static int? GetInt(JsonElement element, string property) =>
+        element.TryGetProperty(property, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetInt32() : null;
+}

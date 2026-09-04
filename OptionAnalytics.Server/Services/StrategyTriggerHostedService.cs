@@ -113,6 +113,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     private readonly CdvHostedService _cdv;
     private readonly DhanOptionChainMaster _optionChainMaster;
     private readonly DhanSuperOrderClient _superOrders;
+    private readonly DhanPositionsClient _positions;
     private readonly DhanMarketFeedClient _feedClient;
     private readonly TriggerOrderHistoryStore _orderHistory;
     private readonly IHubContext<SpotHub> _hub;
@@ -133,8 +134,8 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     public StrategyTriggerHostedService(
         StrategyTriggerStore store, BacktestService backtest, TelegramAlertService telegram,
         SpotFeedHostedService spotFeed, CdvHostedService cdv, DhanOptionChainMaster optionChainMaster,
-        DhanSuperOrderClient superOrders, DhanMarketFeedClient feedClient, TriggerOrderHistoryStore orderHistory,
-        IHubContext<SpotHub> hub, ILogger<StrategyTriggerHostedService> logger)
+        DhanSuperOrderClient superOrders, DhanPositionsClient positions, DhanMarketFeedClient feedClient,
+        TriggerOrderHistoryStore orderHistory, IHubContext<SpotHub> hub, ILogger<StrategyTriggerHostedService> logger)
     {
         _store = store;
         _backtest = backtest;
@@ -143,6 +144,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         _cdv = cdv;
         _optionChainMaster = optionChainMaster;
         _superOrders = superOrders;
+        _positions = positions;
         _feedClient = feedClient;
         _orderHistory = orderHistory;
         _hub = hub;
@@ -507,6 +509,22 @@ public sealed class StrategyTriggerHostedService : BackgroundService
             _logger.LogWarning("Trigger {Name}: {Underlying} {Strike}{Type} not found on expiry {Expiry} - cannot place order. {Nearby}",
                 trigger.Name, trade.Underlying, trade.Strike, trade.OptionType, expiry.Value, nearby);
             return (null, $"{trade.Strike:0.##}{trade.OptionType} is not listed on the {expiry.Value:dd MMM yyyy} expiry ({nearby})");
+        }
+
+        // Ground truth from Dhan's own position book, not an inference from a Super Order's own
+        // leg statuses: whether an earlier order's target or stop-loss leg has actually fired is
+        // exactly the kind of thing this app should not be guessing about with live money on the
+        // line. A position that is still open (PositionType != CLOSED, NetQty != 0 - see
+        // DhanPosition.IsOpen) for this EXACT contract means Dhan itself has not closed it out
+        // yet, regardless of which trigger opened it - two live positions in the same contract at
+        // once is never wanted, whatever produced either of them.
+        var openPosition = (await _positions.ListAsync(cancellationToken))
+            .FirstOrDefault(p => p.SecurityId == contract.SecurityId.ToString() && p.IsOpen);
+        if (openPosition is not null)
+        {
+            _logger.LogWarning("Trigger {Name}: {Underlying} {Strike}{Type} already has an open Dhan position ({PositionType}, netQty {NetQty}) - skipping this signal rather than doubling exposure.",
+                trigger.Name, trade.Underlying, trade.Strike, trade.OptionType, openPosition.PositionType, openPosition.NetQty);
+            return (null, $"{trade.Strike:0.##}{trade.OptionType} already has an open Dhan position ({openPosition.PositionType}, netQty {openPosition.NetQty}) - skipping this signal rather than doubling exposure");
         }
 
         // A pinned expiry that isn't the tracked one is a DIFFERENT contract from the one the
