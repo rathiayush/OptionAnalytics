@@ -13,7 +13,10 @@ public sealed record SuperOrderLeg(
 
 /// <summary>One Super Order (its entry leg plus whatever target/stop-loss legs Dhan has attached),
 /// as returned by GET /super/orders. OmsErrorDescription is Dhan's own explanation for WHY an
-/// order is REJECTED (or otherwise failed) - null/empty whenever there is nothing to explain.</summary>
+/// order is REJECTED (or otherwise failed) - null/empty whenever there is nothing to explain.
+/// CorrelationId is the caller-supplied tag from PlaceAsync ("{trigger.Id}-{signal time}") -
+/// StrategyTriggerHostedService's own ground truth for "does this trigger already have a live
+/// order/position at Dhan", via IsStillOpen below.</summary>
 public sealed record SuperOrderSummary(
     string OrderId,
     string OrderStatus,
@@ -25,7 +28,27 @@ public sealed record SuperOrderSummary(
     decimal? TargetPrice,
     decimal? StopLossPrice,
     string? OmsErrorDescription,
-    IReadOnlyList<SuperOrderLeg> LegDetails);
+    IReadOnlyList<SuperOrderLeg> LegDetails,
+    string? CorrelationId)
+{
+    /// <summary>False only once this order can no longer turn into (or keep being) a live
+    /// position: its entry leg never traded and is now CANCELLED/REJECTED/CLOSED/EXPIRED, or one
+    /// of its own TARGET_LEG/STOP_LOSS_LEG legs has already TRADED - Dhan's bracket closing the
+    /// position out. Anything else - PENDING/TRANSIT (still working), TRADED or PART_TRADED with
+    /// neither exit leg fired yet - counts as open: a working, unfilled entry is still being
+    /// actively managed by MonitorFillAsync (re-priced, escalated, eventually cancelled), so a
+    /// second independent order for the same trigger must not race it either.</summary>
+    public bool IsStillOpen()
+    {
+        var entryLeg = LegDetails.FirstOrDefault(l => l.LegName == "ENTRY_LEG");
+        var entryStatus = entryLeg?.OrderStatus ?? OrderStatus;
+        if (entryStatus is "CANCELLED" or "REJECTED" or "CLOSED" or "EXPIRED") return false;
+
+        return !LegDetails.Any(l =>
+            l.LegName is "TARGET_LEG" or "STOP_LOSS_LEG" &&
+            string.Equals(l.OrderStatus, "TRADED", StringComparison.OrdinalIgnoreCase));
+    }
+}
 
 /// <summary>Result of a place/modify/cancel call - just what Dhan's own response bodies carry for
 /// those three (an order id and its current status), never a full SuperOrderSummary.</summary>
@@ -200,7 +223,8 @@ public sealed class DhanSuperOrderClient
                 GetDecimal(element, "targetPrice"),
                 GetDecimal(element, "stopLossPrice"),
                 GetString(element, "omsErrorDescription"),
-                legs));
+                legs,
+                GetString(element, "correlationId")));
         }
 
         return result;

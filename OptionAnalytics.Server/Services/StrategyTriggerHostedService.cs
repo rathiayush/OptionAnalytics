@@ -475,6 +475,28 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     /// </summary>
     private async Task<(SuperOrderPlan? Plan, string? SkipReason)> BuildOrderPlanAsync(StrategyTrigger trigger, BacktestTrade trade, CancellationToken cancellationToken)
     {
+        // Ground truth from Dhan itself, not OptionTradeSimulator's own simulated one-position-at-
+        // a-time rule (this class's doc comment explains why RunStrategy is normally enough for
+        // that). That simulated rule is only as fresh as the open position's own option premium
+        // candles - and a live evaluation can run in the narrow window where those candles have not
+        // fully caught up yet, letting a second, genuinely independent signal for the same trigger
+        // read as if nothing were open. That is exactly what let one trigger place two real orders
+        // for the same contract twelve minutes apart on 4 Sep 2026, even though a fresh backtest
+        // replay moments later correctly showed only one (its own busyUntil had since caught up).
+        // Every order this service places is stamped with correlationId "{trigger.Id}-..."
+        // (PlaceOrderAsync below), so a live GET /super/orders lookup can answer "does THIS trigger
+        // already have something working" directly from the broker, independent of candle
+        // freshness - see SuperOrderSummary.IsStillOpen for exactly what counts as still open.
+        var openOrders = await _superOrders.ListAsync(cancellationToken);
+        var openOrder = openOrders.FirstOrDefault(o =>
+            o.CorrelationId is { } id && id.StartsWith($"{trigger.Id}-", StringComparison.Ordinal) && o.IsStillOpen());
+        if (openOrder is not null)
+        {
+            _logger.LogWarning("Trigger {Name}: order {OrderId} ({Status}) from this trigger is still open at Dhan - skipping this signal rather than doubling the position.",
+                trigger.Name, openOrder.OrderId, openOrder.OrderStatus);
+            return (null, $"an earlier order from this trigger (Dhan order {openOrder.OrderId}, {openOrder.OrderStatus}) is still open - skipping this signal rather than doubling exposure on the same trigger");
+        }
+
         var isCall = trade.OptionType == "CE";
 
         // Which expiry this order goes in: the trigger's own pinned one if it has one, otherwise
