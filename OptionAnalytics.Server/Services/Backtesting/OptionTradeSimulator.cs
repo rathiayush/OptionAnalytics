@@ -35,6 +35,10 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 ///   - Positions never carry overnight: index option intraday strategies lose most of their
 ///     remaining time value to theta by the next morning, so anything still open at the day's last
 ///     bar exits there.
+///   - SquareOffTimeParameter (0 = off, the default) forces every position closed by a fixed IST
+///     time of day, every day, rather than riding all the way to the day's last bar - useful for a
+///     strategy that should never hold into the volatile last few minutes of a session, or a rule
+///     tuned to only ever be in the market during a specific window.
 ///   - One position at a time: a signal arriving while an earlier trade is still open is skipped,
 ///     same as a trader who cannot take a second position until the first closes.
 ///   - A signal whose target strike was never tracked produces a BacktestTrade.NoData row rather
@@ -62,6 +66,15 @@ public static class OptionTradeSimulator
 
     public static BacktestParameterSpec TakeProfitParameter() =>
         new("tpPoints", "Take profit (points)", Default: 20, Min: 0.05m, Max: 2000, Step: 0.5m);
+
+    /// <summary>Minutes past midnight IST, e.g. 915 = 15:15 (see IstClock.AtIstTime) - a plain
+    /// number rather than a time value because the whole parameter pipeline (query string,
+    /// controller parsing, IBacktestStrategy.Simulate's decimal dictionary) only ever carries
+    /// decimals; the frontend renders this one specific key with a time-of-day picker instead of a
+    /// bare number spinner. 0 (the default) disables it entirely - a position rides to the day's
+    /// last bar exactly as before this parameter existed.</summary>
+    public static BacktestParameterSpec SquareOffTimeParameter() =>
+        new("squareOffMinutes", "Square off by (IST time, 0 = off)", Default: 0, Min: 0, Max: 1439, Step: 1);
 
     /// <summary>Runs <paramref name="entrySignals"/> (time-ascending; Direction "Bullish"/"Bearish")
     /// through the rules above and returns the resulting trades, most recent first.
@@ -97,6 +110,9 @@ public static class OptionTradeSimulator
         var otmSteps = (int)parameters["otmSteps"];
         var slPoints = parameters["slPoints"];
         var tpPoints = parameters["tpPoints"];
+        // Optional and defaulted here rather than indexed, so a caller (existing tests included)
+        // built before this parameter existed keeps working unchanged with it simply off.
+        var squareOffMinutes = (int)parameters.GetValueOrDefault("squareOffMinutes", 0);
 
         var side = isSell ? "Sell" : "Buy";
         var underlying = context.Underlying;
@@ -151,6 +167,12 @@ public static class OptionTradeSimulator
             string? exitReason = null;
             var forcedExit = FirstAtOrAfter(forcedExitTimes, entryTime);
             var signalExit = signalExits is not null && signalExits.TryGetValue(signal.Time, out var se) ? se : ((DateTimeOffset Time, string Reason)?)null;
+            // Recomputed fresh per trade off THIS entry's own day, not a caller-supplied list like
+            // forcedExitTimes/signalExits above - every day gets the identical cutoff, so there is
+            // nothing to look up. Still applies even when it falls before entryTime itself (a cutoff
+            // earlier than an already-open position's own entry) - the position exits at the very
+            // next bar rather than silently ignoring a square-off time the trade never respected.
+            var squareOffTime = squareOffMinutes > 0 ? IstClock.AtIstTime(entryDay, squareOffMinutes) : (DateTimeOffset?)null;
 
             // Starts AFTER the signal bar, never at it - its own High/Low happened BEFORE entry
             // (which is at its very last instant, the close), so checking stop/target against that
@@ -175,6 +197,11 @@ public static class OptionTradeSimulator
                 if (signalExit is { } sx && bar.Time >= sx.Time)
                 {
                     exitTime = bar.Time; exitPrice = bar.Close; exitReason = sx.Reason; break;
+                }
+
+                if (squareOffTime is { } cutoff && bar.Time >= cutoff)
+                {
+                    exitTime = bar.Time; exitPrice = bar.Close; exitReason = "SquareOff"; break;
                 }
 
                 exitTime = bar.Time;

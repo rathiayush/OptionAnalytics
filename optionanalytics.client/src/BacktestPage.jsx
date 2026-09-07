@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Select, Space, Typography, Spin, Card, Button, Table, Tag, InputNumber, Statistic, Row, Col, DatePicker } from 'antd'
+import { Select, Space, Typography, Spin, Card, Button, Table, Tag, InputNumber, Statistic, Row, Col, DatePicker, TimePicker } from 'antd'
 import dayjs from 'dayjs'
 import { ReloadOutlined, PlayCircleOutlined } from '@ant-design/icons'
 import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, NavBar, DirectionTag, ALERT_KIND_LABEL, fmtIstDateTime, fmtIstTime, fmtPrice, istDateKey, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry } from './shared.jsx'
@@ -24,15 +24,17 @@ const SIGNAL_KIND_LABEL = { ...ALERT_KIND_LABEL, Entry: 'ENTRY', Rejected: 'reje
 // Amber, not green/red/neutral - Open is neither a win nor a loss yet, and reusing a settled
 // color would misread as a finished result on a row that can still move.
 const OPEN_COLOR = '#ffb100'
-const EXIT_REASON_COLOR = { TakeProfit: UP_COLOR, StopLoss: DOWN_COLOR, EndOfDay: undefined, NoData: undefined, SignalExit: undefined, Open: OPEN_COLOR }
+const EXIT_REASON_COLOR = { TakeProfit: UP_COLOR, StopLoss: DOWN_COLOR, EndOfDay: undefined, NoData: undefined, SignalExit: undefined, SquareOff: undefined, Open: OPEN_COLOR }
 // SignalExit is a strategy's own exit rule firing rather than a price level being hit - the 5 EMA
 // strategy's "get out when spot comes back and touches the EMA" is the one that uses it today.
+// SquareOff is the user-configured daily cutoff (OptionTradeSimulator.SquareOffTimeParameter) -
+// also rule-based rather than a price level, so it shares SignalExit's neutral, undefined color.
 //
 // Open is NOT a completed trade: it is a position opened TODAY that has not yet hit its stop,
 // target, or a strategy exit rule, and today's session has not finished - so there is no real exit
 // to report. Its Exit column shows the last known price, not a fill, and its P&L is unrealized (see
 // renderPnl) - both can still change before this row would ever legitimately read "End of Day".
-const EXIT_REASON_LABEL = { TakeProfit: 'Take Profit', StopLoss: 'Stop Loss', EndOfDay: 'End of Day', NoData: 'No Data', SignalExit: 'Strategy Exit', Open: 'Open' }
+const EXIT_REASON_LABEL = { TakeProfit: 'Take Profit', StopLoss: 'Stop Loss', EndOfDay: 'End of Day', NoData: 'No Data', SignalExit: 'Strategy Exit', SquareOff: 'Square Off', Open: 'Open' }
 
 function isConfluenceLabel(kind) {
   return kind === 'Confluence' ? 'CONFLUENCE' : (SIGNAL_KIND_LABEL[kind] ?? kind)
@@ -376,11 +378,24 @@ export default function BacktestPage() {
               </Space>
               {/* A parameter that declares Options is a pick-one (rendered as a dropdown); one
                   that doesn't is a free number. Both still carry a plain numeric value, so the
-                  request below is built the same way either way. */}
+                  request below is built the same way either way. squareOffMinutes is the one
+                  exception - still a plain minutes-past-midnight-IST number on the wire (see
+                  OptionTradeSimulator.SquareOffTimeParameter), but picking an exact minute on a
+                  bare number spinner is painful, so this one key renders a time-of-day picker
+                  instead and does the minutes<->time conversion itself. */}
               {strategy?.parameters.map((p) => (
                 <Space direction="vertical" size={2} key={p.key}>
                   <Text type="secondary" style={{ fontSize: 12 }}>{p.label}</Text>
-                  {p.options?.length > 0 ? (
+                  {p.key === 'squareOffMinutes' ? (
+                    <TimePicker
+                      value={paramValues[p.key] ? dayjs().startOf('day').add(paramValues[p.key], 'minute') : null}
+                      onChange={(v) => setParamValues((prev) => ({ ...prev, [p.key]: v ? v.hour() * 60 + v.minute() : 0 }))}
+                      format="HH:mm"
+                      allowClear
+                      placeholder="No cutoff"
+                      style={{ width: 130 }}
+                    />
+                  ) : p.options?.length > 0 ? (
                     <Select
                       value={paramValues[p.key] ?? p.default}
                       onChange={(v) => setParamValues((prev) => ({ ...prev, [p.key]: v }))}

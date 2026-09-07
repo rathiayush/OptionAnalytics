@@ -19,4 +19,13 @@ public static class IstClock
 
     /// <summary>Today's date in IST, right now.</summary>
     public static DateOnly Today() => IstDate(DateTimeOffset.UtcNow);
+
+    /// <summary>The instant <paramref name="minutesOfDay"/> minutes past midnight IST falls on,
+    /// for the given IST calendar date - e.g. AtIstTime(date, 915) is that day's 15:15 IST. Used
+    /// for a daily square-off cutoff (OptionTradeSimulator.SquareOffTimeParameter): a plain
+    /// minutes-of-day number is what the whole parameter pipeline already carries (query string,
+    /// controller parsing, IBacktestStrategy.Simulate's decimal dictionary), so the actual
+    /// DateTimeOffset only gets built here, once, from that number and the day being walked.</summary>
+    public static DateTimeOffset AtIstTime(DateOnly date, int minutesOfDay) =>
+        new(date.Year, date.Month, date.Day, minutesOfDay / 60, minutesOfDay % 60, 0, Offset);
 }
