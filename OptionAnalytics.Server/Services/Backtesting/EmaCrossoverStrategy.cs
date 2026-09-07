@@ -47,6 +47,7 @@ public sealed class EmaCrossoverStrategy : IBacktestStrategy
         OptionTradeSimulator.StrikeOffsetParameter(),
         OptionTradeSimulator.StopLossParameter(),
         OptionTradeSimulator.TakeProfitParameter(),
+        OptionTradeSimulator.SquareOffTimeParameter(),
         new BacktestParameterSpec("fastPeriod", "Fast EMA (bars)", Default: EmaCrossoverDetector.FastPeriod, Min: 1, Max: 100, Step: 1),
         new BacktestParameterSpec("slowPeriod", "Slow EMA (bars)", Default: EmaCrossoverDetector.SlowPeriod, Min: 2, Max: 200, Step: 1),
         new BacktestParameterSpec("minSlopePercent", "Min fast-EMA slope at crossover, % (0 = off)", Default: 0, Min: 0, Max: 10, Step: 0.05m),
