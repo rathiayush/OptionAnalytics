@@ -1,7 +1,15 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Select, Space, Typography, Spin, Card, Button, Table, Tag, InputNumber, Statistic, Row, Col, DatePicker } from 'antd'
+import dayjs from 'dayjs'
 import { ReloadOutlined, PlayCircleOutlined } from '@ant-design/icons'
 import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, NavBar, DirectionTag, ALERT_KIND_LABEL, fmtIstDateTime, fmtIstTime, fmtPrice, istDateKey, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry } from './shared.jsx'
+
+// This page's own persisted keys - underlying/timeframe are shared across every page (see
+// STORED_UNDERLYING/STORED_TIMEFRAME above), but strategy/parameters/date-range only mean
+// anything here, so they get their own Backtrack-specific storage keys instead.
+const STORED_STRATEGY_KEY = 'optionanalytics.backtest.strategyKey'
+const STORED_PARAM_VALUES = 'optionanalytics.backtest.paramValues'
+const STORED_DATE_RANGE = 'optionanalytics.backtest.dateRange'
 
 const { Title, Text } = Typography
 const { RangePicker } = DatePicker
@@ -69,16 +77,47 @@ export default function BacktestPage() {
   const [signalsLoading, setSignalsLoading] = useState(false)
 
   const [strategies, setStrategies] = useState([])
-  const [strategyKey, setStrategyKey] = useState(null)
-  const [paramValues, setParamValues] = useState({})
+  // Persisted like underlying/timeframe, so a refresh comes back to the same strategy and the same
+  // tuned parameters rather than resetting to the first strategy's defaults every time.
+  const [strategyKey, setStrategyKey] = usePersistedState(STORED_STRATEGY_KEY, null)
+  const [paramValues, setParamValues] = usePersistedState(STORED_PARAM_VALUES, {})
   const [trades, setTrades] = useState(null)
   const [tradesLoading, setTradesLoading] = useState(false)
+
+  // Which strategy key paramValues currently reflects - seeded from the RESTORED strategyKey so a
+  // page load that finds matching stored parameters keeps them, rather than the defaults-reset
+  // effect below immediately overwriting them before the user ever sees them. Only a genuine
+  // strategy SWITCH (this ref no longer matching strategy.key) resets to that strategy's own
+  // declared defaults.
+  const paramsForStrategyRef = useRef(strategyKey)
 
   // Which IST days to show. Purely a VIEW filter applied after the run - the backtest itself always
   // runs over the whole backfilled window, because a strategy needs the bars before a day to have
   // its EMAs (and the simulator its one-position-at-a-time state) right on that day. Narrowing what
   // is fed to the strategy would change the answers rather than just the rows on screen.
-  const [dateRange, setDateRange] = useState(null)
+  // Persisted as plain ISO date strings (dayjs instances themselves are not JSON-safe - see
+  // usePersistedState) rather than through that hook directly.
+  const [dateRange, setDateRangeState] = useState(() => {
+    try {
+      const raw = window.localStorage.getItem(STORED_DATE_RANGE)
+      if (!raw) return null
+      const [from, to] = JSON.parse(raw)
+      return [from ? dayjs(from) : null, to ? dayjs(to) : null]
+    } catch {
+      return null
+    }
+  })
+  const setDateRange = (range) => {
+    setDateRangeState(range)
+    try {
+      window.localStorage.setItem(STORED_DATE_RANGE, JSON.stringify([
+        range?.[0] ? range[0].format('YYYY-MM-DD') : null,
+        range?.[1] ? range[1].format('YYYY-MM-DD') : null,
+      ]))
+    } catch {
+      // Remembering the date filter is a convenience, never a requirement - see usePersistedState.
+    }
+  }
 
   const strategy = strategies.find((s) => s.key === strategyKey) ?? null
 
@@ -106,17 +145,25 @@ export default function BacktestPage() {
       .then((r) => r.json())
       .then((list) => {
         setStrategies(list ?? [])
-        if (list?.length > 0) setStrategyKey(list[0].key)
+        // Keep a restored strategyKey if the backend still offers it (same stale-value protection
+        // pickUnderlying gives the underlying selector); only fall back to the first strategy when
+        // there is nothing valid already selected.
+        setStrategyKey((current) => (list?.some((s) => s.key === current) ? current : list?.[0]?.key ?? null))
       })
       .catch((err) => console.error('Failed to load backtest strategies:', err))
   }, [])
 
   // Reset every parameter to the newly-picked strategy's own declared defaults - each strategy's
   // parameters are independent (a different key set entirely), so values from the previous
-  // strategy would be meaningless carried over.
+  // strategy would be meaningless carried over. Skipped when paramValues already belongs to this
+  // exact strategy (paramsForStrategyRef) - the case right after a page load that restored both a
+  // strategyKey and matching paramValues from storage, which must survive this effect's first run
+  // rather than being immediately overwritten by fresh defaults.
   useEffect(() => {
     if (!strategy) return
+    if (paramsForStrategyRef.current === strategy.key) return
     setParamValues(Object.fromEntries(strategy.parameters.map((p) => [p.key, p.default])))
+    paramsForStrategyRef.current = strategy.key
   }, [strategy])
 
   // The signal table describes whichever strategy is selected - each strategy reports the signals
