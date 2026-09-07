@@ -67,6 +67,7 @@ public sealed class StrategyTriggerStore
             MaxDeviationPercent = request.MaxDeviationPercent > 0 ? request.MaxDeviationPercent : 10,
             UseLivePremiumEntry = request.UseLivePremiumEntry,
             OrderExpiry = request.OrderExpiry,
+            AdjustStopLossOnOpenPosition = request.AdjustStopLossOnOpenPosition,
         };
 
         lock (_lock)
@@ -108,6 +109,7 @@ public sealed class StrategyTriggerStore
                 // is placed in, never which signals the trigger watches, so re-pointing it must not
                 // throw away where the trigger had got to and re-prime it.
                 OrderExpiry = request.OrderExpiry,
+                AdjustStopLossOnOpenPosition = request.AdjustStopLossOnOpenPosition,
                 LastSignalUtc = watchChanged ? null : existing.LastSignalUtc,
             };
 

@@ -420,9 +420,15 @@ public sealed class StrategyTriggerHostedService : BackgroundService
                 var (plan, skipReason) = await BuildOrderPlanAsync(trigger, trade, cancellationToken);
                 if (plan is null)
                 {
-                    await NotifyFollowUpAsync(trigger,
-                        $"[NO ORDER PLACED] Live trading is on, but this signal could not be turned into an order - {skipReason}. Nothing is working at the broker for it.",
-                        cancellationToken);
+                    // A null SkipReason means AdjustStopLossForOpenPositionAsync already sent its
+                    // own, more specific Telegram message (or the update failed and it reported
+                    // that too) - nothing more to say here.
+                    if (skipReason is not null)
+                    {
+                        await NotifyFollowUpAsync(trigger,
+                            $"[NO ORDER PLACED] Live trading is on, but this signal could not be turned into an order - {skipReason}. Nothing is working at the broker for it.",
+                            cancellationToken);
+                    }
                     return;
                 }
 
@@ -511,22 +517,6 @@ public sealed class StrategyTriggerHostedService : BackgroundService
             return (null, $"{trade.Strike:0.##}{trade.OptionType} is not listed on the {expiry.Value:dd MMM yyyy} expiry ({nearby})");
         }
 
-        // Ground truth from Dhan's own position book, not an inference from a Super Order's own
-        // leg statuses: whether an earlier order's target or stop-loss leg has actually fired is
-        // exactly the kind of thing this app should not be guessing about with live money on the
-        // line. A position that is still open (PositionType != CLOSED, NetQty != 0 - see
-        // DhanPosition.IsOpen) for this EXACT contract means Dhan itself has not closed it out
-        // yet, regardless of which trigger opened it - two live positions in the same contract at
-        // once is never wanted, whatever produced either of them.
-        var openPosition = (await _positions.ListAsync(cancellationToken))
-            .FirstOrDefault(p => p.SecurityId == contract.SecurityId.ToString() && p.IsOpen);
-        if (openPosition is not null)
-        {
-            _logger.LogWarning("Trigger {Name}: {Underlying} {Strike}{Type} already has an open Dhan position ({PositionType}, netQty {NetQty}) - skipping this signal rather than doubling exposure.",
-                trigger.Name, trade.Underlying, trade.Strike, trade.OptionType, openPosition.PositionType, openPosition.NetQty);
-            return (null, $"{trade.Strike:0.##}{trade.OptionType} already has an open Dhan position ({openPosition.PositionType}, netQty {openPosition.NetQty}) - skipping this signal rather than doubling exposure");
-        }
-
         // A pinned expiry that isn't the tracked one is a DIFFERENT contract from the one the
         // strategy simulated, so the simulator's entry price cannot price it - that number belongs
         // to the near month. Such an order is always priced off its own contract's live quote,
@@ -594,6 +584,30 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         var targetPrice = RoundToTick(rawTarget, tick);
         var stopLossPrice = RoundToTick(rawStopLoss, tick);
 
+        // Ground truth from Dhan's own position book, not an inference from a Super Order's own
+        // leg statuses: whether an earlier order's target or stop-loss leg has actually fired is
+        // exactly the kind of thing this app should not be guessing about with live money on the
+        // line. A position that is still open (PositionType != CLOSED, NetQty != 0 - see
+        // DhanPosition.IsOpen) for this EXACT contract means Dhan itself has not closed it out
+        // yet, regardless of which trigger opened it - two live positions in the same contract at
+        // once is never wanted, whatever produced either of them.
+        var openPosition = (await _positions.ListAsync(cancellationToken))
+            .FirstOrDefault(p => p.SecurityId == contract.SecurityId.ToString() && p.IsOpen);
+        if (openPosition is not null)
+        {
+            if (!trigger.AdjustStopLossOnOpenPosition)
+            {
+                _logger.LogWarning("Trigger {Name}: {Underlying} {Strike}{Type} already has an open Dhan position ({PositionType}, netQty {NetQty}) - skipping this signal rather than doubling exposure.",
+                    trigger.Name, trade.Underlying, trade.Strike, trade.OptionType, openPosition.PositionType, openPosition.NetQty);
+                return (null, $"{trade.Strike:0.##}{trade.OptionType} already has an open Dhan position ({openPosition.PositionType}, netQty {openPosition.NetQty}) - skipping this signal rather than doubling exposure");
+            }
+
+            // Opted in: rather than skip the new signal outright, re-base the EXISTING position's
+            // stop-loss off it - stopLossPrice above, computed from THIS signal's own entryPrice,
+            // same formula a fresh entry would use. Still never places a second order.
+            return await AdjustStopLossForOpenPositionAsync(trigger, trade, contract, openPosition, stopLossPrice, cancellationToken);
+        }
+
         var quantity = trigger.QuantityLots * contract.LotSize;
         var transactionType = isSell ? "SELL" : "BUY";
         var correlationId = $"{trigger.Id}-{trade.SignalTimeUtc:yyyyMMddHHmm}";
@@ -603,6 +617,57 @@ public sealed class StrategyTriggerHostedService : BackgroundService
             $"LIMIT {limitPrice:0.##} · Target {targetPrice:0.##} · SL {stopLossPrice:0.##}" + expiryNote;
 
         return (new SuperOrderPlan(transactionType, contract.SecurityId.ToString(), contract.SecurityId, quantity, limitPrice, targetPrice, stopLossPrice, tick, entryPrice, correlationId, summary, expiry.Value), null);
+    }
+
+    /// <summary>StrategyTrigger.AdjustStopLossOnOpenPosition's actual effect: MODIFY the existing
+    /// Super Order's STOP_LOSS_LEG to <paramref name="newStopLoss"/> (the new signal's own
+    /// entryPrice +/- slPoints, tick-rounded by the caller) rather than place a second order on
+    /// top of an already-open position. Always returns a null Plan - there is never a fresh order
+    /// to place here, whatever happens - but with a null SkipReason on success/failure-already-
+    /// reported, so PlaceOrderInBackgroundAsync's own [NO ORDER PLACED] fallback message stays
+    /// silent; this method sends its own, more specific Telegram message either way.</summary>
+    private async Task<(SuperOrderPlan? Plan, string? SkipReason)> AdjustStopLossForOpenPositionAsync(
+        StrategyTrigger trigger, BacktestTrade trade, DhanOptionInstrument contract, DhanPosition openPosition,
+        decimal newStopLoss, CancellationToken cancellationToken)
+    {
+        // The position book (just checked) says a position exists; the order book is where its
+        // STOP_LOSS_LEG actually lives, so it still has to be found there by security id - matched
+        // on an entry that has actually filled, since a PENDING/TRANSIT entry has no position (and
+        // so no stop-loss leg) to modify yet regardless of what triggered this call.
+        var orders = await _superOrders.ListAsync(cancellationToken);
+        var order = orders.FirstOrDefault(o =>
+            o.SecurityId == contract.SecurityId.ToString() &&
+            (o.LegDetails.FirstOrDefault(l => l.LegName == "ENTRY_LEG")?.OrderStatus ?? o.OrderStatus) is "TRADED" or "PART_TRADED");
+
+        if (order is null)
+        {
+            _logger.LogWarning("Trigger {Name}: {Underlying} {Strike}{Type} has an open Dhan position ({PositionType}, netQty {NetQty}) but no matching filled Super Order was found - cannot update its stop-loss.",
+                trigger.Name, trade.Underlying, trade.Strike, trade.OptionType, openPosition.PositionType, openPosition.NetQty);
+            return (null, $"{trade.Strike:0.##}{trade.OptionType} has an open position ({openPosition.PositionType}, netQty {openPosition.NetQty}) but no matching order was found to update its stop-loss - skipping this signal");
+        }
+
+        var previousStopLoss = order.StopLossPrice;
+        var ist = IstClock.Offset;
+        var (result, error) = await _superOrders.ModifyAsync(order.OrderId, "STOP_LOSS_LEG",
+            orderType: null, quantity: null, price: null, targetPrice: null, stopLossPrice: newStopLoss, trailingJump: null, cancellationToken);
+
+        if (result is null)
+        {
+            var reason = string.IsNullOrWhiteSpace(error) ? "no reason given by Dhan" : error;
+            _logger.LogError("Trigger {Name}: stop-loss update FAILED for order {OrderId} ({Underlying} {Strike}{Type}) - {Error}",
+                trigger.Name, order.OrderId, trade.Underlying, trade.Strike, trade.OptionType, reason);
+            await NotifyFollowUpAsync(trigger,
+                $"[STOP LOSS UPDATE FAILED] {trade.Underlying} {trade.Strike:0.##}{trade.OptionType}\nDhan order {order.OrderId}\nTried to move SL from {previousStopLoss:0.##} to {newStopLoss:0.##} off a new {trade.Direction} signal at {trade.SignalTimeUtc.ToOffset(ist):HH:mm} IST (still open at the old SL) - {reason}",
+                cancellationToken);
+            return (null, null);
+        }
+
+        _logger.LogInformation("Trigger {Name}: stop-loss updated for order {OrderId} from {Previous:0.##} to {New:0.##} off a new signal instead of opening a second position.",
+            trigger.Name, order.OrderId, previousStopLoss, newStopLoss);
+        await NotifyFollowUpAsync(trigger,
+            $"[STOP LOSS UPDATED] {trade.Underlying} {trade.Strike:0.##}{trade.OptionType}\nDhan order {order.OrderId}\nSL moved from {previousStopLoss:0.##} to {newStopLoss:0.##}, re-based off a new {trade.Direction} signal at {trade.SignalTimeUtc.ToOffset(ist):HH:mm} IST - no second position opened.",
+            cancellationToken);
+        return (null, null);
     }
 
     /// <summary>Places the order and, on success, hands the fill-monitoring off to MonitorFillAsync
