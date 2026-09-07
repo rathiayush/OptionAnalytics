@@ -87,6 +87,21 @@ public sealed record StrategyTrigger(
     /// near month is not the same risk there - re-tune it rather than assuming it carries over.</summary>
     public DateOnly? OrderExpiry { get; init; }
 
+    /// <summary>Feature flag: what to do when a fresh signal fires for this trigger while its
+    /// earlier position is still open at Dhan (see StrategyTriggerHostedService.BuildOrderPlan's
+    /// DhanPositionsClient check).
+    ///
+    /// Off (the default, and what every trigger created before this existed keeps): the new
+    /// signal is skipped outright and reported as [NO ORDER PLACED] - the original behaviour,
+    /// never silently changed under an already-armed trigger.
+    ///
+    /// On: instead of skipping, the existing Super Order's STOP_LOSS_LEG is MODIFIED to the new
+    /// signal's own entry price +/- slPoints (the same formula a fresh entry would use, re-based
+    /// off the latest confirmation rather than the original one) - a Telegram [STOP LOSS UPDATED]
+    /// message reports the move. No second order is ever placed either way; this only changes
+    /// what happens to the FIRST one's protective stop.</summary>
+    public bool AdjustStopLossOnOpenPosition { get; init; }
+
     /// <summary>The last entry signal this trigger has already alerted on. A newly-armed trigger is
     /// primed with whatever the latest signal is at that moment WITHOUT alerting, so arming it
     /// doesn't immediately dump every historical signal into Telegram; only genuinely new ones
@@ -112,4 +127,5 @@ public sealed record StrategyTriggerRequest(
     decimal SlippagePoints,
     decimal MaxDeviationPercent,
     bool UseLivePremiumEntry,
-    DateOnly? OrderExpiry = null);
+    DateOnly? OrderExpiry = null,
+    bool AdjustStopLossOnOpenPosition = false);

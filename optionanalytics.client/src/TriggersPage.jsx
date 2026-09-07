@@ -60,6 +60,12 @@ export default function TriggersPage() {
   // exactly as before; a date pins the order to that contract - a next-month one, say - while the
   // signals keep coming off the tracked expiry's chart. See StrategyTrigger.OrderExpiry.
   const [orderExpiry, setOrderExpiry] = useState(null)
+  // Off (the default): a fresh signal while this trigger's earlier position is still open is
+  // skipped outright, reported as [NO ORDER PLACED] - never a second order. On: instead of
+  // skipping, the existing position's stop-loss is MODIFIED to the new signal's own entry price,
+  // reported as [STOP LOSS UPDATED] - still never a second position. See
+  // StrategyTrigger.AdjustStopLossOnOpenPosition.
+  const [adjustStopLossOnOpenPosition, setAdjustStopLossOnOpenPosition] = useState(false)
 
   // Read-only here: this page needs the list of TRACKED expiries to choose from, and the default so
   // the fallback option can name it. Every one of these is subscribed live, so a trigger pinned to
@@ -140,6 +146,7 @@ export default function TriggersPage() {
         maxDeviationPercent,
         useLivePremiumEntry,
         orderExpiry,
+        adjustStopLossOnOpenPosition,
       }),
     })
       .then((r) => r.json())
@@ -177,6 +184,7 @@ export default function TriggersPage() {
         maxDeviationPercent: row.maxDeviationPercent,
         useLivePremiumEntry: row.useLivePremiumEntry,
         orderExpiry: row.orderExpiry,
+        adjustStopLossOnOpenPosition: row.adjustStopLossOnOpenPosition,
         ...changes,
       }),
     })
@@ -233,6 +241,7 @@ export default function TriggersPage() {
             <Text type="secondary" style={{ fontSize: 12 }}>
               {row.quantityLots} lot(s) · {row.slippagePoints}pt slip · {row.maxDeviationPercent}% max deviation
               {row.useLivePremiumEntry ? ' · live-premium entry' : ''}
+              {row.adjustStopLossOnOpenPosition ? ' · SL update on re-signal' : ''}
               {row.orderExpiry ? ` · ${row.orderExpiry} expiry` : ''}
             </Text>
           )}
@@ -378,6 +387,18 @@ export default function TriggersPage() {
                     />
                   </Space>
                   <Space direction="vertical" size={2}>
+                    <Text type="secondary" style={{ fontSize: 12 }}>On re-signal while a position is open</Text>
+                    <Select
+                      value={adjustStopLossOnOpenPosition}
+                      onChange={setAdjustStopLossOnOpenPosition}
+                      style={{ width: 230 }}
+                      options={[
+                        { value: false, label: 'Skip it (no second order)' },
+                        { value: true, label: 'Update the open SL instead' },
+                      ]}
+                    />
+                  </Space>
+                  <Space direction="vertical" size={2}>
                     <Text type="secondary" style={{ fontSize: 12 }}>Order expiry</Text>
                     <Select
                       value={orderExpiry ?? ''}
@@ -401,6 +422,10 @@ export default function TriggersPage() {
                     {orderExpiry
                       ? ` This trigger runs entirely on the ${orderExpiry} expiry - its signals, its entry price and its order all come from that chain, independently of what any page is looking at. The strategy's SL/target points apply to that expiry's premium, which is a different risk from the near month.`
                       : ''}
+                    {' '}A signal that fires while this trigger's earlier position is still open at Dhan never opens a second one -
+                    {adjustStopLossOnOpenPosition
+                      ? ' this trigger instead moves that position’s stop-loss to the new signal’s own entry price, reported as [STOP LOSS UPDATED].'
+                      : ' it is skipped instead, reported as [NO ORDER PLACED].'}
                   </Text>
                 </>
               )}
