@@ -28,4 +28,20 @@ public static class IstClock
     /// DateTimeOffset only gets built here, once, from that number and the day being walked.</summary>
     public static DateTimeOffset AtIstTime(DateOnly date, int minutesOfDay) =>
         new(date.Year, date.Month, date.Day, minutesOfDay / 60, minutesOfDay % 60, 0, Offset);
+
+    /// <summary>AtIstTime's own inverse for the TIME half - minutes past midnight IST that
+    /// <paramref name="time"/> falls at on its own IST calendar day, e.g. an instant at 09:07 IST
+    /// returns 547. Used for OptionTradeSimulator.SignalStartTimeParameter: NSE's pre-open session
+    /// (roughly 09:00-09:15) is a call auction, not continuous trading, so a bar timestamped inside
+    /// it is not a real signal to act on regardless of what its own price momentarily prints.</summary>
+    public static int MinutesOfDay(DateTimeOffset time)
+    {
+        var ist = time.ToOffset(Offset);
+        return ist.Hour * 60 + ist.Minute;
+    }
+
+    /// <summary>"HH:mm" for a minutes-since-midnight value (AtIstTime/MinutesOfDay's own unit) -
+    /// shared formatting so a square-off or signal-start cutoff reads identically everywhere it is
+    /// echoed back to a person (a Rejected signal's own summary, a Telegram square-off message).</summary>
+    public static string FormatMinutesOfDay(int minutesOfDay) => $"{minutesOfDay / 60:00}:{minutesOfDay % 60:00}";
 }

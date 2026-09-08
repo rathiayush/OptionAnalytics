@@ -27,10 +27,10 @@ public sealed class EmaCrossoverStrategyTests
     /// exact same "previously unset counts as changed" rule BacktestService.TryUpdateLeg already
     /// applies to its own leg-tracking, applied here consistently. Tests key off Direction, not
     /// "the only signal", to stay correct regardless of that first one.</summary>
-    private static IReadOnlyList<Candle> BuildReversalBars()
+    private static IReadOnlyList<Candle> BuildReversalBars(DateTimeOffset? start = null)
     {
         var bars = new List<Candle>();
-        var time = T0;
+        var time = start ?? T0;
         var price = 100m;
 
         for (var i = 0; i < 30; i++)
@@ -64,7 +64,7 @@ public sealed class EmaCrossoverStrategyTests
         GetOptionBars = getOptionBars ?? ((_, _) => Array.Empty<Candle>()),
     };
 
-    private static Dictionary<string, decimal> Parameters(decimal minSlopePercent = 0, decimal direction = 0) => new()
+    private static Dictionary<string, decimal> Parameters(decimal minSlopePercent = 0, decimal direction = 0, decimal signalStartMinutes = 555) => new()
     {
         ["side"] = OptionTradeSimulator.SideBuy,
         ["otmSteps"] = 1,
@@ -75,6 +75,7 @@ public sealed class EmaCrossoverStrategyTests
         ["minSlopePercent"] = minSlopePercent,
         ["slopeLookbackBars"] = 3,
         ["direction"] = direction,
+        ["signalStartMinutes"] = signalStartMinutes,
     };
 
     [Fact]
@@ -137,5 +138,36 @@ public sealed class EmaCrossoverStrategyTests
         Assert.Contains(signals, s => s.Kind == "Entry" && s.Direction == "Bearish");
         Assert.DoesNotContain(signals, s => s.Kind == "Entry" && s.Direction == "Bullish");
         Assert.Contains(signals, s => s.Kind == "Rejected" && s.Direction == "Bullish");
+    }
+
+    // 08:30 IST - early enough that the reversal (bar 33, see BuildReversalBars) lands at
+    // 09:03 IST, before the default 09:15 signal-start cutoff, unlike every other test in this
+    // file (T0 = 09:30 IST, already past it).
+    private static readonly DateTimeOffset EarlyStart = new(2026, 1, 5, 3, 0, 0, TimeSpan.Zero);
+
+    [Fact]
+    public void EntrySignals_ReversalBeforeSignalStartTime_RejectsInsteadOfEntering()
+    {
+        var context = Context(BuildReversalBars(EarlyStart));
+        var strategy = new EmaCrossoverStrategy();
+
+        var signals = strategy.EntrySignals(context, Parameters());
+
+        Assert.DoesNotContain(signals, s => s.Kind == "Entry");
+        Assert.Contains(signals, s => s.Kind == "Rejected" && s.Summary.Contains("pre-open"));
+    }
+
+    [Fact]
+    public void EntrySignals_SignalStartTimeDisabled_FiresEvenBeforeDefaultCutoff()
+    {
+        var context = Context(BuildReversalBars(EarlyStart));
+        var strategy = new EmaCrossoverStrategy();
+
+        // 0 explicitly turns the cutoff off - the same reversal that PreDefaultCutoff rejects
+        // must fire normally here.
+        var signals = strategy.EntrySignals(context, Parameters(signalStartMinutes: 0));
+
+        Assert.Contains(signals, s => s.Kind == "Entry" && s.Direction == "Bullish");
+        Assert.DoesNotContain(signals, s => s.Summary.Contains("pre-open"));
     }
 }

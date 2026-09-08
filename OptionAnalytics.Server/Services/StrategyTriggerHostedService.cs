@@ -460,7 +460,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         var rawPrice = Math.Max(0, closingIsSell ? reference.Value - trigger.SlippagePoints : reference.Value + trigger.SlippagePoints);
         var price = RoundToTick(rawPrice, contract.TickSize);
         var correlationId = $"{prefix}{DateTimeOffset.UtcNow:yyyyMMddHHmmss}";
-        var summary = $"{(closingIsSell ? "SELL" : "BUY")} {contract.TradingSymbol} x{quantity} (SecurityId {contract.SecurityId})\nLIMIT {price:0.##} - squaring off by {squareOffMinutes / 60:00}:{squareOffMinutes % 60:00} IST";
+        var summary = $"{(closingIsSell ? "SELL" : "BUY")} {contract.TradingSymbol} x{quantity} (SecurityId {contract.SecurityId})\nLIMIT {price:0.##} - squaring off by {IstClock.FormatMinutesOfDay(squareOffMinutes)} IST";
 
         var (result, error) = await _orders.PlaceAsync(
             closingIsSell ? "SELL" : "BUY", "NSE_FNO", ProductType, "LIMIT", "DAY",

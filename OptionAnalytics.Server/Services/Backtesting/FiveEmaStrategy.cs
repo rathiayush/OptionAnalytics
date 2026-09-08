@@ -61,6 +61,7 @@ public sealed class FiveEmaStrategy : IBacktestStrategy
         OptionTradeSimulator.StopLossParameter(),
         OptionTradeSimulator.TakeProfitParameter(),
         OptionTradeSimulator.SquareOffTimeParameter(),
+        OptionTradeSimulator.SignalStartTimeParameter(),
         new BacktestParameterSpec("emaPeriod", "EMA (bars)", Default: 5, Min: 1, Max: 200, Step: 1),
         new BacktestParameterSpec("direction", "Take", Default: DirectionBoth, Min: DirectionBoth, Max: DirectionShortOnly, Step: 1, Options: new[]
         {
@@ -92,6 +93,7 @@ public sealed class FiveEmaStrategy : IBacktestStrategy
         var emaPeriod = (int)parameters["emaPeriod"];
         var direction = parameters["direction"];
         var maxAgeBars = (int)parameters["alertMaxAgeBars"];
+        var signalStartMinutes = (int)parameters.GetValueOrDefault("signalStartMinutes", 555);
 
         var takeLongs = direction != DirectionShortOnly;
         var takeShorts = direction != DirectionLongOnly;
@@ -138,10 +140,19 @@ public sealed class FiveEmaStrategy : IBacktestStrategy
 
             // Step 1: does THIS bar break a PREVIOUS bar's alert candle? Checked before the alert
             // candle is updated below, so a candle can never trigger against itself.
+            // Before anything else: a bar timestamped inside the pre-open call auction can never
+            // produce a real signal, regardless of direction filters or alert-candle state - see
+            // SignalStartTimeParameter's own doc comment.
+            var beforeSignalStart = signalStartMinutes > 0 && IstClock.MinutesOfDay(bar.Time) < signalStartMinutes;
+
             if (shortAlert is { } shortCandle && bar.Low < shortCandle.Bar.Low)
             {
                 var summary = $"Alert candle at {BacktestUtil.IstDate(shortCandle.Bar.Time):dd MMM} low {shortCandle.Bar.Low:0.##} formed clear above the {emaPeriod} EMA and broke down";
-                if (takeShorts)
+                if (beforeSignalStart)
+                {
+                    signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", "Bearish", $"{summary} - skipped, before {IstClock.FormatMinutesOfDay(signalStartMinutes)} IST (pre-open)"));
+                }
+                else if (takeShorts)
                 {
                     signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Entry", "Bearish", summary));
                     entries.Add((bar.Time, "Bearish"));
@@ -155,7 +166,11 @@ public sealed class FiveEmaStrategy : IBacktestStrategy
             else if (longAlert is { } longCandle && bar.High > longCandle.Bar.High)
             {
                 var summary = $"Alert candle at {BacktestUtil.IstDate(longCandle.Bar.Time):dd MMM} high {longCandle.Bar.High:0.##} formed clear below the {emaPeriod} EMA and broke up";
-                if (takeLongs)
+                if (beforeSignalStart)
+                {
+                    signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", "Bullish", $"{summary} - skipped, before {IstClock.FormatMinutesOfDay(signalStartMinutes)} IST (pre-open)"));
+                }
+                else if (takeLongs)
                 {
                     signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Entry", "Bullish", summary));
                     entries.Add((bar.Time, "Bullish"));

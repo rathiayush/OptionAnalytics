@@ -81,4 +81,31 @@ public sealed class IstClockTests
 
         Assert.Equal(date, IstClock.IstDate(cutoff));
     }
+
+    [Fact]
+    public void MinutesOfDay_IsAtIstTimesOwnInverse()
+    {
+        // The exact pairing OptionTradeSimulator's signalStartMinutes/squareOffMinutes rely on:
+        // building a cutoff from a minutes value and reading the minutes back off it must agree.
+        var cutoff = IstClock.AtIstTime(new DateOnly(2026, 1, 5), 555); // 09:15 IST
+
+        Assert.Equal(555, IstClock.MinutesOfDay(cutoff));
+    }
+
+    [Fact]
+    public void MinutesOfDay_IsIndependentOfTheInputOffsetItself()
+    {
+        var asUtc = DateTimeOffset.Parse("2026-01-05T09:20:00Z", CultureInfo.InvariantCulture);
+        var asIst = DateTimeOffset.Parse("2026-01-05T14:50:00+05:30", CultureInfo.InvariantCulture);
+
+        Assert.Equal(IstClock.MinutesOfDay(asUtc), IstClock.MinutesOfDay(asIst));
+    }
+
+    [Fact]
+    public void FormatMinutesOfDay_PadsHoursAndMinutes()
+    {
+        Assert.Equal("09:15", IstClock.FormatMinutesOfDay(555));
+        Assert.Equal("00:05", IstClock.FormatMinutesOfDay(5));
+        Assert.Equal("23:59", IstClock.FormatMinutesOfDay(1439));
+    }
 }
