@@ -26,6 +26,13 @@ namespace OptionAnalytics.Server.Services;
 ///      true, staying quiet on every subsequent bar where it's still true, and re-arming itself
 ///      the moment the alignment breaks (see ConfluenceAlerted).
 ///
+///      That bookkeeping is updated on EVERY evaluation, including ExecuteAsync's own silent
+///      startup catch-up pass over already-closed history - but only a call from a genuinely NEW
+///      closed bar (announce: true) ever actually broadcasts/Telegrams (see EvaluateConfluence).
+///      Without that split, a restart would risk re-announcing an alignment that had already been
+///      sitting there for the last hour as if it just happened, purely because this process forgot
+///      it was already true.
+///
 /// The three legs' bars don't necessarily close in the same instant (spot and option ticks arrive
 /// independently), so the confluence check only counts a leg while its bar is within
 /// ConfluenceWindow of the spot bar that triggered the check - a leg's bias from ten minutes ago
@@ -172,7 +179,7 @@ public sealed class ConfluenceAlertService : BackgroundService
         }
 
         if (announce && changed) RaiseIndividualAlert(underlying, kind, direction, barTime, cancellationToken);
-        EvaluateConfluence(underlying, state, cancellationToken);
+        EvaluateConfluence(underlying, state, announce, cancellationToken);
     }
 
     private void RaiseIndividualAlert(string underlying, string kind, string direction, DateTimeOffset barTime, CancellationToken cancellationToken)
@@ -188,7 +195,7 @@ public sealed class ConfluenceAlertService : BackgroundService
         RecordAndBroadcast(alert, sendTelegram: false, cancellationToken);
     }
 
-    private void EvaluateConfluence(string underlying, UnderlyingConfluenceState state, CancellationToken cancellationToken)
+    private void EvaluateConfluence(string underlying, UnderlyingConfluenceState state, bool announce, CancellationToken cancellationToken)
     {
         string direction;
         DateTimeOffset spotBarTime;
@@ -218,6 +225,17 @@ public sealed class ConfluenceAlertService : BackgroundService
             direction = isBullish ? "Bullish" : "Bearish";
             spotBarTime = spot.BarTime;
         }
+
+        // Marked ConfluenceAlerted above regardless - that bookkeeping has to reflect reality
+        // whether this call came from a real bar close or the startup catch-up pass - but only a
+        // real one (announce: true) is actually worth telling anyone about. Without this check, a
+        // restart's silent seed pass (ExecuteAsync's own initial UpdateSpotLeg/UpdateAtmLeg calls,
+        // announce: false) could discover three legs that were ALREADY aligned before this process
+        // even started watching - an alignment that has been sitting there for the last hour, not
+        // something that just happened - and broadcast/Telegram it as if it were a fresh signal.
+        // Every redeploy would then risk paging a stale "confluence" that is really just this
+        // service re-learning history it forgot on restart.
+        if (!announce) return;
 
         var spotPrice = _spotFeed.States.TryGetValue(underlying, out var spotState) ? spotState.LastPrice : 0;
         var atmStrike = _cdv.States.TryGetValue(underlying, out var cdvState) ? cdvState.AtmStrike : null;
