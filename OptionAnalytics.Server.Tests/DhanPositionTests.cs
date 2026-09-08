@@ -37,4 +37,16 @@ public sealed class DhanPositionTests
         // Belt and braces: PositionType is Dhan's own authoritative call, even if NetQty lags it.
         Assert.False(Position("CLOSED", 90).IsOpen);
     }
+
+    [Fact]
+    public void ClosesBySelling_Long_ClosesBySelling()
+    {
+        Assert.True(Position("LONG", 90).ClosesBySelling);
+    }
+
+    [Fact]
+    public void ClosesBySelling_Short_ClosesByBuying()
+    {
+        Assert.False(Position("SHORT", -90).ClosesBySelling);
+    }
 }

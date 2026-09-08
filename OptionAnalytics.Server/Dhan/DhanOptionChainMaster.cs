@@ -212,6 +212,14 @@ public sealed class DhanOptionChainMaster
     public DhanOptionInstrument? Find(string underlying, DateOnly expiry, decimal strike, bool isCall) =>
         _byKey.TryGetValue(Key(underlying, expiry, strike, isCall), out var match) ? match : null;
 
+    /// <summary>The reverse of Find - given only a security id (all a Dhan order/position summary
+    /// itself carries), the contract it names. Used to recover a contract's own tick size when
+    /// squaring off a position the trigger holds, where all that's known going in is the security
+    /// id the earlier order was placed against. A linear scan over ~68 contracts, not a hot path -
+    /// nothing here runs more than once a minute.</summary>
+    public DhanOptionInstrument? FindBySecurityId(uint securityId) =>
+        _byKey.Values.FirstOrDefault(o => o.SecurityId == securityId);
+
     /// <summary>What IS listed near a strike that Find could not resolve, as one log-ready line.
     /// A "not listed" answer is otherwise unfalsifiable from the outside: it cannot distinguish a
     /// genuinely absent contract from a stale scrip master, a wrong expiry, or rows this parser

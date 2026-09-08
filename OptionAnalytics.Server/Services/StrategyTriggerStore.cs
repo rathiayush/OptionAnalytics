@@ -147,6 +147,20 @@ public sealed class StrategyTriggerStore
         }
     }
 
+    /// <summary>Records (or clears, passing null) which Dhan order this trigger is currently
+    /// responsible for - see StrategyTrigger.LastOrderId's own doc comment for who reads this and
+    /// why.</summary>
+    public void SetLastOrderId(string id, string? orderId)
+    {
+        lock (_lock)
+        {
+            if (!_triggers.TryGetValue(id, out var existing)) return;
+
+            _triggers[id] = existing with { LastOrderId = orderId };
+            SaveNoLock();
+        }
+    }
+
     private static bool ParametersEqual(IReadOnlyDictionary<string, decimal> a, IReadOnlyDictionary<string, decimal>? b)
     {
         if (b is null) return a.Count == 0;

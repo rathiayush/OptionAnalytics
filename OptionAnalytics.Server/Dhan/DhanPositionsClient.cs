@@ -17,6 +17,13 @@ public sealed record DhanPosition(
     int NetQty)
 {
     public bool IsOpen => PositionType != "CLOSED" && NetQty != 0;
+
+    /// <summary>Which side closes this position - a LONG position was bought, so it closes by
+    /// selling; anything else (SHORT; CLOSED is moot since IsOpen would already be false) was
+    /// sold, so it closes by buying back. Used to square off an open position early
+    /// (StrategyTriggerHostedService.SquareOffIfDueAsync) without a fresh signal's own
+    /// Side/Direction to read the transaction type off of.</summary>
+    public bool ClosesBySelling => PositionType != "SHORT";
 }
 
 /// <summary>Thin wrapper for Dhan's GET /positions (https://dhanhq.co/docs/v2/portfolio/) - the

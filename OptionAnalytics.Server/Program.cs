@@ -48,6 +48,10 @@ builder.Services.AddSingleton<DhanSuperOrderClient>();
 // Same pattern - the account's actual position book, which StrategyTriggerHostedService checks
 // before placing a live order so a trigger never doubles up on a contract it already holds.
 builder.Services.AddSingleton<DhanPositionsClient>();
+// Same pattern again - a PLAIN order (no attached target/stop-loss legs), the one thing a Super
+// Order can't do: close an existing position early at a configured square-off time. See
+// DhanOrderClient's own doc comment and StrategyTriggerHostedService.SquareOffIfDueAsync.
+builder.Services.AddSingleton<DhanOrderClient>();
 
 // No-op when Dhan:Pin/Dhan:TotpSecret aren't set (see DhanTotpAutoRenewalHostedService) - safe to
 // always register rather than branching on config here.
