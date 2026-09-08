@@ -114,6 +114,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     private readonly DhanOptionChainMaster _optionChainMaster;
     private readonly DhanSuperOrderClient _superOrders;
     private readonly DhanPositionsClient _positions;
+    private readonly DhanOrderClient _orders;
     private readonly DhanMarketFeedClient _feedClient;
     private readonly TriggerOrderHistoryStore _orderHistory;
     private readonly IHubContext<SpotHub> _hub;
@@ -134,8 +135,9 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     public StrategyTriggerHostedService(
         StrategyTriggerStore store, BacktestService backtest, TelegramAlertService telegram,
         SpotFeedHostedService spotFeed, CdvHostedService cdv, DhanOptionChainMaster optionChainMaster,
-        DhanSuperOrderClient superOrders, DhanPositionsClient positions, DhanMarketFeedClient feedClient,
-        TriggerOrderHistoryStore orderHistory, IHubContext<SpotHub> hub, ILogger<StrategyTriggerHostedService> logger)
+        DhanSuperOrderClient superOrders, DhanPositionsClient positions, DhanOrderClient orders,
+        DhanMarketFeedClient feedClient, TriggerOrderHistoryStore orderHistory,
+        IHubContext<SpotHub> hub, ILogger<StrategyTriggerHostedService> logger)
     {
         _store = store;
         _backtest = backtest;
@@ -145,6 +147,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         _optionChainMaster = optionChainMaster;
         _superOrders = superOrders;
         _positions = positions;
+        _orders = orders;
         _feedClient = feedClient;
         _orderHistory = orderHistory;
         _hub = hub;
@@ -183,6 +186,11 @@ public sealed class StrategyTriggerHostedService : BackgroundService
                     if (stoppingToken.IsCancellationRequested) break;
                     OnBarClosed(underlying, stoppingToken);
                 }
+
+                // Square-off is time-driven, not signal-driven - a position can need closing at
+                // 15:10 with no fresh bar/signal anywhere near that instant, so it rides on this
+                // same once-a-minute timer rather than OnBarClosed.
+                await SquareOffAllDueAsync(stoppingToken);
             }
         }
         catch (OperationCanceledException)
@@ -333,6 +341,258 @@ public sealed class StrategyTriggerHostedService : BackgroundService
 
     private static string Describe(BacktestTrade trade) =>
         $"{trade.Side} {trade.OptionType} {trade.Strike:0.##} @ {trade.EntryPrice:0.##}";
+
+    /// <summary>The correlationId prefix a square-off order carries - distinguishes it from an
+    /// entry order's own "{trigger.Id}-{signal time}" scheme (see PlaceOrderAsync) so
+    /// SquareOffIfDueAsync can tell "is a square-off already working for this trigger" apart from
+    /// "is a fresh entry working".</summary>
+    private static string SquareOffCorrelationPrefix(string triggerId) => $"{triggerId}-squareoff-";
+
+    /// <summary>One sweep across every live-trading trigger with a configured square-off time -
+    /// see SquareOffIfDueAsync for what each one actually does. Runs off ExecuteAsync's own
+    /// once-a-minute backstop timer (square-off is time-driven, not signal-driven, so there is no
+    /// bar-close event to react to instead) and, like EvaluateUnderlyingAsync, never lets one bad
+    /// trigger stop the rest from being checked.</summary>
+    private async Task SquareOffAllDueAsync(CancellationToken cancellationToken)
+    {
+        var triggers = _store.GetAll().Where(t => t is { Enabled: true, LiveTradingEnabled: true, LastOrderId: not null });
+
+        foreach (var trigger in triggers)
+        {
+            if (cancellationToken.IsCancellationRequested) break;
+            try
+            {
+                await SquareOffIfDueAsync(trigger, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogError(ex, "Trigger {Name} ({Id}): square-off check crashed.", trigger.Name, trigger.Id);
+            }
+        }
+    }
+
+    /// <summary>Closes out one trigger's currently-open position early if it has a configured
+    /// square-off time (StrategyTrigger.Parameters["squareOffMinutes"] - OptionTradeSimulator's
+    /// same shared parameter, applied here to the real position rather than a simulated one) and
+    /// that time has passed for today.
+    ///
+    /// Ground truth throughout, exactly like BuildOrderPlanAsync's own open-position check:
+    /// trigger.LastOrderId only says which Super Order this trigger is watching, never assumed
+    /// still open - GET /super/orders and GET /positions are asked fresh every sweep. That is what
+    /// makes this self-healing across restarts and across a square-off that only partially fills:
+    /// LastOrderId is cleared the moment Dhan's own position book shows nothing open for that
+    /// contract, from WHATEVER closed it (its own bracket, an earlier square-off attempt, a manual
+    /// trade) - and if a square-off order is still resting from the previous sweep, this returns
+    /// without placing a second one rather than risk closing the same position twice over.
+    ///
+    /// Dhan's Super Order has no "flatten now" order type (only entry+target+stop-loss brackets),
+    /// so closing early means: cancel the resting TARGET_LEG/STOP_LOSS_LEG (best-effort - they may
+    /// already be gone) so they cannot race the close, then place a brand new plain LIMIT order
+    /// (DhanOrderClient, not DhanSuperOrderClient) for the opposite side and the position's own
+    /// live quantity, handed off to MonitorSquareOffFillAsync for the same retry-until-filled
+    /// treatment a fresh entry gets.</summary>
+    private async Task SquareOffIfDueAsync(StrategyTrigger trigger, CancellationToken cancellationToken)
+    {
+        var squareOffMinutes = (int)trigger.Parameters.GetValueOrDefault("squareOffMinutes", 0);
+        if (squareOffMinutes <= 0 || trigger.LastOrderId is not { } orderId) return;
+
+        var entryOrder = (await _superOrders.ListAsync(cancellationToken)).FirstOrDefault(o => o.OrderId == orderId);
+        if (entryOrder is null)
+        {
+            // No longer visible at all (a very old order Dhan has rolled off) - nothing left to
+            // track for this trigger.
+            _store.SetLastOrderId(trigger.Id, null);
+            return;
+        }
+
+        if (!uint.TryParse(entryOrder.SecurityId, out var securityId))
+        {
+            _logger.LogWarning("Trigger {Name}: order {OrderId} has an unparseable security id {SecurityId} - cannot square off.", trigger.Name, orderId, entryOrder.SecurityId);
+            return;
+        }
+
+        var position = (await _positions.ListAsync(cancellationToken)).FirstOrDefault(p => p.SecurityId == entryOrder.SecurityId);
+        if (position is not { IsOpen: true })
+        {
+            // Already closed - its own bracket, a previous square-off attempt finishing since the
+            // last sweep, or something else entirely. Either way, nothing left for THIS trigger to
+            // watch.
+            _store.SetLastOrderId(trigger.Id, null);
+            return;
+        }
+
+        var cutoff = IstClock.AtIstTime(IstClock.Today(), squareOffMinutes);
+        if (DateTimeOffset.UtcNow < cutoff) return; // not due yet - leave LastOrderId as-is for a later sweep
+
+        var prefix = SquareOffCorrelationPrefix(trigger.Id);
+        var alreadyWorking = (await _orders.ListAsync(cancellationToken)).Any(o =>
+            o.SecurityId == entryOrder.SecurityId && o.CorrelationId is { } id && id.StartsWith(prefix, StringComparison.Ordinal)
+            && o.OrderStatus is "PENDING" or "TRANSIT" or "PART_TRADED");
+        if (alreadyWorking) return; // a previous sweep's square-off order is still being monitored - see MonitorSquareOffFillAsync
+
+        var contract = _optionChainMaster.FindBySecurityId(securityId);
+        if (contract is null)
+        {
+            _logger.LogWarning("Trigger {Name}: security id {SecurityId} is not in the option chain master - cannot price a square-off order.", trigger.Name, securityId);
+            return;
+        }
+
+        // Best-effort: cancelling a leg that already fired or was already removed just fails
+        // harmlessly here (logged, not thrown) - the point is making sure neither is still resting
+        // to race the closing order below, not treating an already-gone leg as an error.
+        var (targetCancel, targetError) = await _superOrders.CancelAsync(entryOrder.OrderId, "TARGET_LEG", cancellationToken);
+        if (targetCancel is null) _logger.LogWarning("Trigger {Name}: could not cancel TARGET_LEG for order {OrderId} before squaring off - {Error}", trigger.Name, entryOrder.OrderId, targetError ?? "no reason given");
+        var (slCancel, slError) = await _superOrders.CancelAsync(entryOrder.OrderId, "STOP_LOSS_LEG", cancellationToken);
+        if (slCancel is null) _logger.LogWarning("Trigger {Name}: could not cancel STOP_LOSS_LEG for order {OrderId} before squaring off - {Error}", trigger.Name, entryOrder.OrderId, slError ?? "no reason given");
+
+        var isCall = contract.IsCall;
+        var closingIsSell = position.ClosesBySelling;
+        var quantity = Math.Abs(position.NetQty);
+
+        var reference = await GetRepricingReferenceForSquareOffAsync(trigger.Underlying, contract.Expiry, contract.Strike, isCall, closingIsSell, cancellationToken);
+        if (reference is null)
+        {
+            _logger.LogWarning("Trigger {Name}: no live premium for {Strike}{Type} - cannot price the square-off order this sweep, will retry next minute.",
+                trigger.Name, contract.Strike, isCall ? "CE" : "PE");
+            return;
+        }
+
+        var rawPrice = Math.Max(0, closingIsSell ? reference.Value - trigger.SlippagePoints : reference.Value + trigger.SlippagePoints);
+        var price = RoundToTick(rawPrice, contract.TickSize);
+        var correlationId = $"{prefix}{DateTimeOffset.UtcNow:yyyyMMddHHmmss}";
+        var summary = $"{(closingIsSell ? "SELL" : "BUY")} {contract.TradingSymbol} x{quantity} (SecurityId {contract.SecurityId})\nLIMIT {price:0.##} - squaring off by {squareOffMinutes / 60:00}:{squareOffMinutes % 60:00} IST";
+
+        var (result, error) = await _orders.PlaceAsync(
+            closingIsSell ? "SELL" : "BUY", "NSE_FNO", ProductType, "LIMIT", "DAY",
+            entryOrder.SecurityId, quantity, price, correlationId, cancellationToken);
+
+        if (result is null)
+        {
+            var reason = string.IsNullOrWhiteSpace(error) ? "no reason given by Dhan" : error;
+            _logger.LogError("Trigger {Name}: square-off order placement FAILED for {Summary} - {Error}", trigger.Name, summary, reason);
+            await NotifyFollowUpAsync(trigger, $"[SQUARE OFF FAILED] {summary}\nDhan error: {reason}\nStill open past the square-off time - will retry next minute.", cancellationToken);
+            return; // LastOrderId stays set so the position keeps being checked on the next sweep
+        }
+
+        _logger.LogInformation("Trigger {Name}: square-off order placed - orderId={OrderId} status={Status} for {Summary}", trigger.Name, result.OrderId, result.OrderStatus, summary);
+        await NotifyFollowUpAsync(trigger, $"[SQUARE OFF ORDER PLACED] {summary}\nDhan order {result.OrderId} ({result.OrderStatus})\nMonitoring fill (up to {MaxFillAttempts} attempts)...", cancellationToken);
+
+        _ = Task.Run(async () =>
+        {
+            try { await MonitorSquareOffFillAsync(trigger, contract, closingIsSell, quantity, result.OrderId, cancellationToken); }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogError(ex, "Trigger {Name}: square-off fill-monitoring crashed for order {OrderId}.", trigger.Name, result.OrderId);
+                await NotifyFollowUpAsync(trigger,
+                    $"[SQUARE OFF PIPELINE CRASHED] {contract.TradingSymbol} - an unexpected error stopped this square-off order from being monitored. CHECK DHAN DIRECTLY - the position may still be open or the order may still be resting.",
+                    CancellationToken.None);
+            }
+        }, CancellationToken.None);
+    }
+
+    /// <summary>MonitorFillAsync's own retry-until-filled loop, adapted for a plain square-off
+    /// order rather than a Super Order's ENTRY_LEG: same MaxFillAttempts x FillCheckInterval
+    /// cadence and the same escalating-slippage re-price, but with no "signal price" to bound a
+    /// MaxDeviationPercent check against (a square-off is not chasing a specific reference price,
+    /// it is trying to get flat as soon as possible) and no cancel-on-timeout (an unfilled or
+    /// partially-filled square-off is left resting - a working marketable LIMIT order is still the
+    /// best available outcome for "still needs to close", and the next sweep's already-working
+    /// check leaves it be rather than stacking a second one on top).
+    ///
+    /// Clears StrategyTrigger.LastOrderId the moment the position is confirmed flat - checked
+    /// directly against DhanPositionsClient rather than assumed from the order's own fill status,
+    /// same ground-truth preference as everywhere else in this pipeline.</summary>
+    private async Task MonitorSquareOffFillAsync(StrategyTrigger trigger, DhanOptionInstrument contract, bool isSell, int quantity, string orderId, CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; attempt <= MaxFillAttempts; attempt++)
+        {
+            try
+            {
+                await Task.Delay(FillCheckInterval, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning("Trigger {Name}: shutting down while square-off order {OrderId} was still being monitored - leaving it as-is.", trigger.Name, orderId);
+                await NotifyFollowUpAsync(trigger,
+                    $"[SQUARE OFF UNMONITORED] {contract.TradingSymbol}\nDhan order {orderId}\nThe app is shutting down before this order resolved - it is left exactly as it was. CHECK DHAN DIRECTLY.",
+                    CancellationToken.None);
+                return;
+            }
+
+            var order = (await _orders.ListAsync(cancellationToken)).FirstOrDefault(o => o.OrderId == orderId);
+            if (order is null)
+            {
+                _logger.LogWarning("Trigger {Name}: square-off order {OrderId} not visible on attempt {Attempt}/{Max} - will check again.", trigger.Name, orderId, attempt, MaxFillAttempts);
+                continue;
+            }
+
+            if (string.Equals(order.OrderStatus, "TRADED", StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogInformation("Trigger {Name}: square-off order {OrderId} filled on attempt {Attempt}/{Max}.", trigger.Name, orderId, attempt, MaxFillAttempts);
+                await NotifyFollowUpAsync(trigger, $"[SQUARED OFF] {contract.TradingSymbol}\nFilled {order.FilledQty}/{order.Quantity} at ~{order.Price:0.##} on attempt {attempt}/{MaxFillAttempts}.", cancellationToken);
+                _store.SetLastOrderId(trigger.Id, null);
+                return;
+            }
+
+            if (order.OrderStatus is "CANCELLED" or "REJECTED")
+            {
+                var reasonLine = string.IsNullOrWhiteSpace(order.OmsErrorDescription) ? "" : $"\nReason: {order.OmsErrorDescription}";
+                _logger.LogWarning("Trigger {Name}: square-off order {OrderId} is {Status} - the position may still be open. CHECK DHAN DIRECTLY.", trigger.Name, orderId, order.OrderStatus);
+                await NotifyFollowUpAsync(trigger, $"[SQUARE OFF {order.OrderStatus}] {contract.TradingSymbol}{reasonLine}\nThe position may still be open - the next sweep will retry if so.", cancellationToken);
+                return; // LastOrderId deliberately left set: the next sweep re-checks the real position and tries again if it is still open
+            }
+
+            if (attempt == MaxFillAttempts)
+            {
+                _logger.LogWarning("Trigger {Name}: square-off order {OrderId} still {Status} ({Filled}/{Total}) after {Max} attempts - leaving it resting.",
+                    trigger.Name, orderId, order.OrderStatus, order.FilledQty, order.Quantity, MaxFillAttempts);
+                await NotifyFollowUpAsync(trigger,
+                    $"[SQUARE OFF PARTIALLY FILLED] {contract.TradingSymbol}\nFilled {order.FilledQty}/{order.Quantity} after {MaxFillAttempts} attempts. The remainder is left resting - check Dhan if you want to close it manually.",
+                    cancellationToken);
+                return;
+            }
+
+            var latestPrice = await GetRepricingReferenceForSquareOffAsync(trigger.Underlying, contract.Expiry, contract.Strike, contract.IsCall, isSell, cancellationToken);
+            if (latestPrice is null)
+            {
+                _logger.LogWarning("Trigger {Name}: no live premium available for {Strike}{Type} - cannot re-price square-off order {OrderId} on attempt {Attempt}/{Max}.",
+                    trigger.Name, contract.Strike, contract.IsCall ? "CE" : "PE", orderId, attempt, MaxFillAttempts);
+                continue;
+            }
+
+            var remaining = quantity - order.FilledQty;
+            var slippage = trigger.SlippagePoints * UnfilledRetrySlippageMultiplier;
+            var rawPrice = Math.Max(0, isSell ? latestPrice.Value - slippage : latestPrice.Value + slippage);
+            var newPrice = RoundToTick(rawPrice, contract.TickSize);
+
+            var (modifyResult, modifyError) = await _orders.ModifyAsync(orderId, "LIMIT", "DAY", remaining, newPrice, cancellationToken);
+            if (modifyResult is null)
+            {
+                _logger.LogWarning("Trigger {Name}: re-price MODIFY failed for square-off order {OrderId} on attempt {Attempt}/{Max} - {Error} - will check again.",
+                    trigger.Name, orderId, attempt, MaxFillAttempts, string.IsNullOrWhiteSpace(modifyError) ? "no reason given by Dhan" : modifyError);
+                continue;
+            }
+
+            _logger.LogInformation("Trigger {Name}: re-priced square-off order {OrderId} to {Price:0.##} for {Quantity} (attempt {Attempt}/{Max}, live premium {Live:0.##}).",
+                trigger.Name, orderId, newPrice, remaining, attempt + 1, MaxFillAttempts, latestPrice);
+        }
+    }
+
+    /// <summary>GetRepricingReferenceAsync's own logic (live bid/ask first, last-traded-price
+    /// fallback), just addressed by contract fields directly rather than through a SuperOrderPlan
+    /// - a square-off has no BacktestTrade/SuperOrderPlan behind it, only the contract it is
+    /// closing.</summary>
+    private async Task<decimal?> GetRepricingReferenceForSquareOffAsync(string underlying, DateOnly expiry, decimal strike, bool isCall, bool isSell, CancellationToken cancellationToken)
+    {
+        var contract = _optionChainMaster.Find(underlying, expiry, strike, isCall);
+        if (contract is not null && _feedClient.LastTickFor(contract.SecurityId) is { } tick)
+        {
+            var sideDepth = isSell ? tick.BestBidPrice : tick.BestAskPrice;
+            if (sideDepth > 0) return sideDepth;
+        }
+
+        return await GetOrderPremiumAsync(underlying, expiry, expiry, strike, isCall, cancellationToken);
+    }
 
     private async Task NotifyAsync(StrategyTrigger trigger, BacktestTrade trade, string? reason, CancellationToken cancellationToken)
     {
@@ -697,6 +957,10 @@ public sealed class StrategyTriggerHostedService : BackgroundService
 
         _logger.LogInformation("Trigger {Name}: Super Order placed - orderId={OrderId} status={Status} for {Summary}",
             trigger.Name, result.OrderId, result.OrderStatus, plan.Summary);
+
+        // Recorded the instant an order id exists, regardless of fill state - see
+        // StrategyTrigger.LastOrderId's own doc comment for why SquareOffIfDueAsync needs this.
+        _store.SetLastOrderId(trigger.Id, result.OrderId);
 
         // Fire-and-forget: runs against the hosted service's own stoppingToken (so it stops
         // cleanly on shutdown) rather than any per-evaluation token, and its own try/catch is just

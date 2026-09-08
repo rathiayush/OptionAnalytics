@@ -58,4 +58,27 @@ public sealed class IstClockTests
         // rather than the literal value, since the literal value depends on when the test runs.
         Assert.Equal(IstClock.IstDate(DateTimeOffset.UtcNow), IstClock.Today());
     }
+
+    [Fact]
+    public void AtIstTime_AfternoonMinutes_ResolvesToThatIstWallClockTime()
+    {
+        // 915 = 15*60+15 -> 15:15 IST, per the method's own doc comment.
+        var cutoff = IstClock.AtIstTime(new DateOnly(2026, 1, 5), 915);
+
+        Assert.Equal(DateTimeOffset.Parse("2026-01-05T15:15:00+05:30", CultureInfo.InvariantCulture), cutoff);
+        // Same instant as 09:45 UTC that day - the actual absolute time this cutoff compares
+        // bar-by-bar against in OptionTradeSimulator.Run/SquareOffIfDueAsync.
+        Assert.Equal(DateTimeOffset.Parse("2026-01-05T09:45:00Z", CultureInfo.InvariantCulture), cutoff);
+    }
+
+    [Fact]
+    public void AtIstTime_RoundTripsThroughIstDate()
+    {
+        // The exact pairing OptionTradeSimulator.Run/SquareOffIfDueAsync rely on: the date a
+        // cutoff is built FOR must itself report back as that same date.
+        var date = new DateOnly(2026, 3, 17);
+        var cutoff = IstClock.AtIstTime(date, 570); // 09:30 IST
+
+        Assert.Equal(date, IstClock.IstDate(cutoff));
+    }
 }

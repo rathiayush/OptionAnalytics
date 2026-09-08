@@ -102,6 +102,17 @@ public sealed record StrategyTrigger(
     /// what happens to the FIRST one's protective stop.</summary>
     public bool AdjustStopLossOnOpenPosition { get; init; }
 
+    /// <summary>The Dhan Super Order id from this trigger's most recent successful placement -
+    /// set the instant PlaceOrderAsync gets an order id back, regardless of whether it has filled
+    /// yet. SquareOffIfDueAsync is the one reader: it is how a square-off sweep, running on its
+    /// own on a timer rather than off a fresh signal, finds which order (and so which contract and
+    /// live position) THIS trigger is responsible for, since Dhan's own position book carries no
+    /// per-trigger tag of its own. Cleared back to null once that order/position is confirmed no
+    /// longer open (whichever closed it - its own bracket, or a square-off), so a sweep does no
+    /// work for a trigger with nothing open. Survives a restart (persisted like LastSignalUtc)
+    /// since a position can still be open when the app comes back up.</summary>
+    public string? LastOrderId { get; init; }
+
     /// <summary>The last entry signal this trigger has already alerted on. A newly-armed trigger is
     /// primed with whatever the latest signal is at that moment WITHOUT alerting, so arming it
     /// doesn't immediately dump every historical signal into Telegram; only genuinely new ones
