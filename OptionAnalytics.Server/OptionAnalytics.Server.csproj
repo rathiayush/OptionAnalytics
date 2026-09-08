@@ -6,6 +6,17 @@
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
 
+  <!-- Stamped fresh on every `dotnet publish` (Docker's own build stage runs one - see the
+       Dockerfile), read back at runtime by GET /api/version. Answers "did my last redeploy
+       actually pick up the latest code" directly, from the running process itself, rather than by
+       inferring it from behavior - the recurring source of confusion this session kept running
+       into (a merged fix that LOOKED unapplied because the server simply hadn't been redeployed
+       yet). 'o' (round-trip) rather than a custom format string, purely to dodge escaping a
+       literal ':'/'-' inside this already-double-quoted XML attribute. -->
+  <ItemGroup>
+    <AssemblyMetadata Include="BuildTimeUtc" Value="$([System.DateTime]::UtcNow.ToString('o'))" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Skender.Stock.Indicators" Version="2.7.3" />
     <PackageReference Include="Swashbuckle.AspNetCore" Version="6.6.2" />
