@@ -387,13 +387,19 @@ export default function BacktestPage() {
                 <Space direction="vertical" size={2} key={p.key}>
                   <Text type="secondary" style={{ fontSize: 12 }}>{p.label}</Text>
                   {p.key === 'squareOffMinutes' ? (
+                    // 12-hour with an explicit AM/PM selector, not 24-hour - a 24-hour-only field
+                    // silently reads "03:10" as 3:10 AM when the trader meant 3:10 PM near market
+                    // close, and a cutoff that early is always in the past relative to any
+                    // intraday entry, squaring every trade off on its very next bar. AM/PM makes
+                    // that ambiguity impossible to enter by accident.
                     <TimePicker
                       value={paramValues[p.key] ? dayjs().startOf('day').add(paramValues[p.key], 'minute') : null}
                       onChange={(v) => setParamValues((prev) => ({ ...prev, [p.key]: v ? v.hour() * 60 + v.minute() : 0 }))}
-                      format="HH:mm"
+                      format="hh:mm A"
+                      use12Hours
                       allowClear
                       placeholder="No cutoff"
-                      style={{ width: 130 }}
+                      style={{ width: 150 }}
                     />
                   ) : p.options?.length > 0 ? (
                     <Select
