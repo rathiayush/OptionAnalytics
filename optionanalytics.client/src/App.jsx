@@ -6,7 +6,7 @@ import { Routes, Route } from 'react-router-dom'
 import BacktestPage from './BacktestPage.jsx'
 import TriggersPage from './TriggersPage.jsx'
 import ContractsPage from './ContractsPage.jsx'
-import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, fmtPrice, fmtIstTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry } from './shared.jsx'
+import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, fmtPrice, fmtIstTime, fmtIstDateTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry } from './shared.jsx'
 import './App.css'
 
 const { Title, Text } = Typography
@@ -908,6 +908,30 @@ function LookbackTable({ underlying, expiry, timeframe, cdvSnapshot, endpoint = 
   )
 }
 
+// Answers "did my last redeploy actually pick up the latest code" directly from the running
+// server, rather than by inferring it from behavior - GET /api/version's buildTimeUtc is stamped
+// fresh on every `dotnet publish` (see the csproj), so a redeploy that hasn't landed yet shows the
+// same OLD timestamp here even after a page refresh, and a redeploy that DID land shows a fresh
+// one. Fetched once per page load, not polled - this only ever changes when the whole app restarts.
+function BuildInfoFooter() {
+  const [buildTimeUtc, setBuildTimeUtc] = useState(null)
+
+  useEffect(() => {
+    fetch('/api/version')
+      .then((r) => r.json())
+      .then((data) => setBuildTimeUtc(data?.buildTimeUtc ?? null))
+      .catch((err) => console.error('Failed to load build info:', err))
+  }, [])
+
+  if (!buildTimeUtc) return null
+
+  return (
+    <Text type="secondary" style={{ fontSize: 11, textAlign: 'center', display: 'block' }}>
+      Last deployed build: {fmtIstDateTime(buildTimeUtc)} IST
+    </Text>
+  )
+}
+
 function DashboardPage() {
   const [underlyings, setUnderlyings] = useState([])
   // Shared with every other page and remembered across reloads - see usePersistedState.
@@ -1371,6 +1395,8 @@ function DashboardPage() {
             storageKey={STORED_OBV_LOOKBACK_BARS}
           />
         )}
+
+        <BuildInfoFooter />
       </Space>
     </div>
   )

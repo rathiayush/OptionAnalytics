@@ -1,3 +1,4 @@
+using System.Reflection;
 using OptionAnalytics.Server.Dhan;
 using OptionAnalytics.Server.Hubs;
 using OptionAnalytics.Server.Services;
@@ -143,6 +144,19 @@ app.UseAuthorization();
 // renews, and a container killed for that would never finish starting - the 15-day backfill of ~68
 // option contracts alone takes minutes. This answers "is the web app up", nothing more.
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
+
+// Answers "what am I actually running right now" - the AssemblyMetadata stamp the csproj writes
+// fresh on every `dotnet publish` (see its own comment there), read back via reflection. The
+// dashboard's own footer surfaces this so a redeploy can be CONFIRMED from the running app itself
+// rather than inferred from behavior, which is what repeatedly caused confusion this session: a
+// merged fix that looked unapplied because the server simply hadn't been redeployed yet.
+app.MapGet("/api/version", () =>
+{
+    var buildTimeUtc = Assembly.GetExecutingAssembly()
+        .GetCustomAttributes<AssemblyMetadataAttribute>()
+        .FirstOrDefault(a => a.Key == "BuildTimeUtc")?.Value;
+    return Results.Ok(new { buildTimeUtc });
+});
 
 app.MapControllers();
 app.MapHub<SpotHub>("/hubs/spot");
