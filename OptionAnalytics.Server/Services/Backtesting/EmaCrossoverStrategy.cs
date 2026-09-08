@@ -48,6 +48,7 @@ public sealed class EmaCrossoverStrategy : IBacktestStrategy
         OptionTradeSimulator.StopLossParameter(),
         OptionTradeSimulator.TakeProfitParameter(),
         OptionTradeSimulator.SquareOffTimeParameter(),
+        OptionTradeSimulator.SignalStartTimeParameter(),
         new BacktestParameterSpec("fastPeriod", "Fast EMA (bars)", Default: EmaCrossoverDetector.FastPeriod, Min: 1, Max: 100, Step: 1),
         new BacktestParameterSpec("slowPeriod", "Slow EMA (bars)", Default: EmaCrossoverDetector.SlowPeriod, Min: 2, Max: 200, Step: 1),
         new BacktestParameterSpec("minSlopePercent", "Min fast-EMA slope at crossover, % (0 = off)", Default: 0, Min: 0, Max: 10, Step: 0.05m),
@@ -74,6 +75,7 @@ public sealed class EmaCrossoverStrategy : IBacktestStrategy
         var minSlopePercent = parameters["minSlopePercent"];
         var slopeLookback = Math.Max(1, (int)parameters["slopeLookbackBars"]);
         var direction = parameters["direction"];
+        var signalStartMinutes = (int)parameters.GetValueOrDefault("signalStartMinutes", 555);
 
         var takeLongs = direction != DirectionShortOnly;
         var takeShorts = direction != DirectionLongOnly;
@@ -119,7 +121,15 @@ public sealed class EmaCrossoverStrategy : IBacktestStrategy
                 }
             }
 
-            if (!passesSlope)
+            // Before slope/direction filters: a bar timestamped inside the pre-open call auction
+            // can never be a real signal, whatever it prints - see SignalStartTimeParameter's own
+            // doc comment.
+            if (signalStartMinutes > 0 && IstClock.MinutesOfDay(bar.Time) < signalStartMinutes)
+            {
+                signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", current,
+                    $"{crossLabel} - skipped, before {IstClock.FormatMinutesOfDay(signalStartMinutes)} IST (pre-open)"));
+            }
+            else if (!passesSlope)
             {
                 var slopeText = slopePercent is { } sp ? $"{sp:0.###}%" : "not enough history yet";
                 signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", current,

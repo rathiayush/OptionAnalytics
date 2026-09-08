@@ -378,20 +378,21 @@ export default function BacktestPage() {
               </Space>
               {/* A parameter that declares Options is a pick-one (rendered as a dropdown); one
                   that doesn't is a free number. Both still carry a plain numeric value, so the
-                  request below is built the same way either way. squareOffMinutes is the one
-                  exception - still a plain minutes-past-midnight-IST number on the wire (see
-                  OptionTradeSimulator.SquareOffTimeParameter), but picking an exact minute on a
-                  bare number spinner is painful, so this one key renders a time-of-day picker
-                  instead and does the minutes<->time conversion itself. */}
+                  request below is built the same way either way. squareOffMinutes/
+                  signalStartMinutes are the exception - still plain minutes-past-midnight-IST
+                  numbers on the wire (see OptionTradeSimulator's own parameter builders), but
+                  picking an exact minute on a bare number spinner is painful, so these two keys
+                  render a time-of-day picker instead and do the minutes<->time conversion
+                  themselves. */}
               {strategy?.parameters.map((p) => (
                 <Space direction="vertical" size={2} key={p.key}>
                   <Text type="secondary" style={{ fontSize: 12 }}>{p.label}</Text>
-                  {p.key === 'squareOffMinutes' ? (
+                  {p.key === 'squareOffMinutes' || p.key === 'signalStartMinutes' ? (
                     // 12-hour with an explicit AM/PM selector, not 24-hour - a 24-hour-only field
                     // silently reads "03:10" as 3:10 AM when the trader meant 3:10 PM near market
-                    // close, and a cutoff that early is always in the past relative to any
-                    // intraday entry, squaring every trade off on its very next bar. AM/PM makes
-                    // that ambiguity impossible to enter by accident.
+                    // close, and (for squareOffMinutes) a cutoff that early is always in the past
+                    // relative to any intraday entry, squaring every trade off on its very next
+                    // bar. AM/PM makes that ambiguity impossible to enter by accident.
                     <TimePicker
                       value={paramValues[p.key] ? dayjs().startOf('day').add(paramValues[p.key], 'minute') : null}
                       onChange={(v) => setParamValues((prev) => ({ ...prev, [p.key]: v ? v.hour() * 60 + v.minute() : 0 }))}

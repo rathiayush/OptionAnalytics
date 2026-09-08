@@ -76,6 +76,20 @@ public static class OptionTradeSimulator
     public static BacktestParameterSpec SquareOffTimeParameter() =>
         new("squareOffMinutes", "Square off by (IST time, 0 = off)", Default: 0, Min: 0, Max: 1439, Step: 1);
 
+    /// <summary>Minutes past midnight IST (see SquareOffTimeParameter's own doc comment for why
+    /// this is a plain number, not IstClock.MinutesOfDay/FormatMinutesOfDay). Defaults to 555 =
+    /// 09:15 IST - NSE's actual continuous-trading open, not the exchange's own displayed "market
+    /// hours" start. The roughly 09:00-09:15 pre-open session is a call auction (a single matched
+    /// price from collected orders, not tick-by-tick trading), so a bar timestamped inside it can
+    /// print sharp, one-off moves that mean nothing about the continuous session about to start -
+    /// no strategy here should ever read one as a real signal. Unlike SquareOffTimeParameter this
+    /// is ON by default rather than requiring opt-in: excluding pre-open bars from ever producing a
+    /// signal is a correctness fix each strategy's own logic should always apply, not a preference
+    /// some triggers might want and others not. 0 still means off, for a strategy or a backtest
+    /// that genuinely wants every bar considered regardless.</summary>
+    public static BacktestParameterSpec SignalStartTimeParameter() =>
+        new("signalStartMinutes", "No signals before (IST time, 0 = off)", Default: 555, Min: 0, Max: 1439, Step: 1);
+
     /// <summary>Runs <paramref name="entrySignals"/> (time-ascending; Direction "Bullish"/"Bearish")
     /// through the rules above and returns the resulting trades, most recent first.
     ///
