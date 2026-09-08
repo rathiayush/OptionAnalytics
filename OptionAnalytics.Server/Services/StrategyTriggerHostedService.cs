@@ -355,7 +355,11 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     /// trigger stop the rest from being checked.</summary>
     private async Task SquareOffAllDueAsync(CancellationToken cancellationToken)
     {
-        var triggers = _store.GetAll().Where(t => t is { Enabled: true, LiveTradingEnabled: true, LastOrderId: not null });
+        // Deliberately NOT filtered to Enabled/LiveTradingEnabled - a real open position at Dhan
+        // does not stop mattering just because someone toggled the trigger off afterward. Anything
+        // with a LastOrderId placed an order at some point and needs watching until it is
+        // confirmed flat, whatever the trigger's current settings say.
+        var triggers = _store.GetAll().Where(t => t.LastOrderId is not null);
 
         foreach (var trigger in triggers)
         {
@@ -366,24 +370,27 @@ public sealed class StrategyTriggerHostedService : BackgroundService
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                _logger.LogError(ex, "Trigger {Name} ({Id}): square-off check crashed.", trigger.Name, trigger.Id);
+                _logger.LogError(ex, "Trigger {Name} ({Id}): open-position check crashed.", trigger.Name, trigger.Id);
             }
         }
     }
 
-    /// <summary>Closes out one trigger's currently-open position early if it has a configured
-    /// square-off time (StrategyTrigger.Parameters["squareOffMinutes"] - OptionTradeSimulator's
-    /// same shared parameter, applied here to the real position rather than a simulated one) and
-    /// that time has passed for today.
+    /// <summary>The per-trigger check SquareOffAllDueAsync's sweep runs every minute for as long as
+    /// StrategyTrigger.LastOrderId is set: first, has the position this trigger opened actually
+    /// closed since the last sweep - via its own stop-loss, its own target, or anything else - and
+    /// if so, is that something worth telling a person about (see NotifyPositionClosedIfKnownAsync)
+    /// rather than just going quiet? Only once that's settled, and only while the position is STILL
+    /// open, does a configured square-off time (StrategyTrigger.Parameters["squareOffMinutes"] -
+    /// OptionTradeSimulator's same shared parameter, applied here to the real position rather than
+    /// a simulated one) get a chance to actually close it out early.
     ///
     /// Ground truth throughout, exactly like BuildOrderPlanAsync's own open-position check:
-    /// trigger.LastOrderId only says which Super Order this trigger is watching, never assumed
-    /// still open - GET /super/orders and GET /positions are asked fresh every sweep. That is what
-    /// makes this self-healing across restarts and across a square-off that only partially fills:
-    /// LastOrderId is cleared the moment Dhan's own position book shows nothing open for that
-    /// contract, from WHATEVER closed it (its own bracket, an earlier square-off attempt, a manual
-    /// trade) - and if a square-off order is still resting from the previous sweep, this returns
-    /// without placing a second one rather than risk closing the same position twice over.
+    /// LastOrderId only says which Super Order this trigger is watching, never assumed still open -
+    /// GET /super/orders and GET /positions are asked fresh every sweep. That is what makes this
+    /// self-healing across restarts and across a square-off that only partially fills: LastOrderId
+    /// is cleared the moment Dhan's own position book shows nothing open for that contract, from
+    /// WHATEVER closed it - and if a square-off order is still resting from the previous sweep,
+    /// this returns without placing a second one rather than risk closing the same position twice.
     ///
     /// Dhan's Super Order has no "flatten now" order type (only entry+target+stop-loss brackets),
     /// so closing early means: cancel the resting TARGET_LEG/STOP_LOSS_LEG (best-effort - they may
@@ -393,8 +400,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     /// treatment a fresh entry gets.</summary>
     private async Task SquareOffIfDueAsync(StrategyTrigger trigger, CancellationToken cancellationToken)
     {
-        var squareOffMinutes = (int)trigger.Parameters.GetValueOrDefault("squareOffMinutes", 0);
-        if (squareOffMinutes <= 0 || trigger.LastOrderId is not { } orderId) return;
+        if (trigger.LastOrderId is not { } orderId) return;
 
         var entryOrder = (await _superOrders.ListAsync(cancellationToken)).FirstOrDefault(o => o.OrderId == orderId);
         if (entryOrder is null)
@@ -407,19 +413,24 @@ public sealed class StrategyTriggerHostedService : BackgroundService
 
         if (!uint.TryParse(entryOrder.SecurityId, out var securityId))
         {
-            _logger.LogWarning("Trigger {Name}: order {OrderId} has an unparseable security id {SecurityId} - cannot square off.", trigger.Name, orderId, entryOrder.SecurityId);
+            _logger.LogWarning("Trigger {Name}: order {OrderId} has an unparseable security id {SecurityId} - cannot monitor it.", trigger.Name, orderId, entryOrder.SecurityId);
             return;
         }
 
         var position = (await _positions.ListAsync(cancellationToken)).FirstOrDefault(p => p.SecurityId == entryOrder.SecurityId);
         if (position is not { IsOpen: true })
         {
-            // Already closed - its own bracket, a previous square-off attempt finishing since the
-            // last sweep, or something else entirely. Either way, nothing left for THIS trigger to
-            // watch.
+            // Already closed - its own stop-loss, its own target, an earlier square-off attempt
+            // finishing since the last sweep, or a manual trade at the broker. Either way, nothing
+            // left for THIS trigger to watch - tell someone if the reason is one this app actually
+            // knows (see the method's own doc comment for what "known" means here).
+            await NotifyPositionClosedIfKnownAsync(trigger, entryOrder, cancellationToken);
             _store.SetLastOrderId(trigger.Id, null);
             return;
         }
+
+        var squareOffMinutes = (int)trigger.Parameters.GetValueOrDefault("squareOffMinutes", 0);
+        if (squareOffMinutes <= 0) return;
 
         var cutoff = IstClock.AtIstTime(IstClock.Today(), squareOffMinutes);
         if (DateTimeOffset.UtcNow < cutoff) return; // not due yet - leave LastOrderId as-is for a later sweep
@@ -488,6 +499,30 @@ public sealed class StrategyTriggerHostedService : BackgroundService
                     CancellationToken.None);
             }
         }, CancellationToken.None);
+    }
+
+    /// <summary>Tells a person WHY a position just closed, for the two reasons this app can
+    /// actually name with certainty by reading the entry Super Order's own legs: TARGET_LEG TRADED
+    /// means the target hit, STOP_LOSS_LEG TRADED means the stop-loss hit. Neither leg TRADED means
+    /// it closed some OTHER way - this app's own square-off order (which already sent its own
+    /// [SQUARED OFF] message via MonitorSquareOffFillAsync the moment IT confirmed flat, so saying
+    /// anything more here would just double up), a manual trade at the broker, or anything else
+    /// this service has no way to describe - and stays silent rather than guess.</summary>
+    private async Task NotifyPositionClosedIfKnownAsync(StrategyTrigger trigger, SuperOrderSummary entryOrder, CancellationToken cancellationToken)
+    {
+        var targetStatus = entryOrder.LegDetails.FirstOrDefault(l => l.LegName == "TARGET_LEG")?.OrderStatus;
+        var stopLossStatus = entryOrder.LegDetails.FirstOrDefault(l => l.LegName == "STOP_LOSS_LEG")?.OrderStatus;
+
+        if (string.Equals(stopLossStatus, "TRADED", StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogInformation("Trigger {Name}: order {OrderId} closed via its stop-loss.", trigger.Name, entryOrder.OrderId);
+            await NotifyFollowUpAsync(trigger, $"[STOP LOSS HIT] Dhan order {entryOrder.OrderId} ({entryOrder.SecurityId})\nThe position closed via its stop-loss.", cancellationToken);
+        }
+        else if (string.Equals(targetStatus, "TRADED", StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogInformation("Trigger {Name}: order {OrderId} closed via its target.", trigger.Name, entryOrder.OrderId);
+            await NotifyFollowUpAsync(trigger, $"[TARGET HIT] Dhan order {entryOrder.OrderId} ({entryOrder.SecurityId})\nThe position closed via its target.", cancellationToken);
+        }
     }
 
     /// <summary>MonitorFillAsync's own retry-until-filled loop, adapted for a plain square-off
