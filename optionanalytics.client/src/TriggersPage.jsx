@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { Select, Space, Typography, Card, Button, Table, Tag, InputNumber, Input, Switch, Popconfirm, message } from 'antd'
+import { Select, Space, Typography, Card, Button, Table, Tag, InputNumber, Input, Switch, Popconfirm, message, TimePicker } from 'antd'
+import dayjs from 'dayjs'
 import { PlusOutlined, DeleteOutlined } from '@ant-design/icons'
 import { UP_COLOR, DOWN_COLOR, NavBar, fmtIstDateTime, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying, useExpirySelector } from './shared.jsx'
 
@@ -327,7 +328,25 @@ export default function TriggersPage() {
               {strategy?.parameters.map((p) => (
                 <Space direction="vertical" size={2} key={p.key}>
                   <Text type="secondary" style={{ fontSize: 12 }}>{p.label}</Text>
-                  {p.options?.length > 0 ? (
+                  {p.key === 'squareOffMinutes' || p.key === 'signalStartMinutes' ? (
+                    // Same time-of-day picker as the Backtrack page - these two keys are still
+                    // plain minutes-past-midnight-IST numbers on the wire (see
+                    // OptionTradeSimulator's own parameter builders), just picked as a time here
+                    // instead of typed as a raw number. 12-hour with an explicit AM/PM selector,
+                    // not 24-hour - a 24-hour-only field silently reads "03:10" as 3:10 AM when a
+                    // trader means 3:10 PM, and for squareOffMinutes a cutoff that early is always
+                    // in the past relative to any intraday entry, squaring every trade off on its
+                    // very next bar.
+                    <TimePicker
+                      value={paramValues[p.key] ? dayjs().startOf('day').add(paramValues[p.key], 'minute') : null}
+                      onChange={(v) => setParamValues((prev) => ({ ...prev, [p.key]: v ? v.hour() * 60 + v.minute() : 0 }))}
+                      format="hh:mm A"
+                      use12Hours
+                      allowClear
+                      placeholder="No cutoff"
+                      style={{ width: 150 }}
+                    />
+                  ) : p.options?.length > 0 ? (
                     <Select
                       value={paramValues[p.key] ?? p.default}
                       onChange={(v) => setParamValues((prev) => ({ ...prev, [p.key]: v }))}
