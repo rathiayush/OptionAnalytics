@@ -2,11 +2,12 @@ import { Component, useEffect, useMemo, useRef, useState } from 'react'
 import { Select, Space, Typography, Spin, Card, Button, Modal, Table, Tag } from 'antd'
 import { createChart, createSeriesMarkers, CandlestickSeries, LineSeries, CrosshairMode, LineStyle, TickMarkType } from 'lightweight-charts'
 import * as signalR from '@microsoft/signalr'
-import { Routes, Route } from 'react-router-dom'
+import { Routes, Route, Navigate } from 'react-router-dom'
 import BacktestPage from './BacktestPage.jsx'
 import TriggersPage from './TriggersPage.jsx'
 import ContractsPage from './ContractsPage.jsx'
-import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, fmtPrice, fmtIstTime, fmtIstDateTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry } from './shared.jsx'
+import LoginPage from './LoginPage.jsx'
+import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, fmtPrice, fmtIstTime, fmtIstDateTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry, AuthContext, useAuth } from './shared.jsx'
 import './App.css'
 
 const { Title, Text } = Typography
@@ -1402,13 +1403,70 @@ function DashboardPage() {
   )
 }
 
+// Blocks a non-Admin (or, before /api/auth/me resolves, an unauthenticated request that got this
+// far) from reaching an admin-only route by typing its URL directly - the UX-level counterpart to
+// NavBar hiding the link. The actual security boundary is server-side (TriggersController/
+// CdvController's own [Authorize(Roles = "Admin")]); this only stops a logged-in non-admin from
+// looking at a page that would otherwise just show empty tables and failed requests.
+function RequireAdmin({ children }) {
+  const auth = useAuth()
+  if (auth?.user?.role !== 'Admin') return <Navigate to="/" replace />
+  return children
+}
+
 export default function App() {
+  // undefined = still checking (GET /api/auth/me in flight); null = not signed in; an
+  // {email, role} object = signed in. Kept as one value rather than a separate isLoading flag so
+  // there is no window where both "loading" and "no user yet" could disagree with each other.
+  const [user, setUser] = useState(undefined)
+
+  useEffect(() => {
+    fetch('/api/auth/me')
+      .then((r) => (r.ok ? r.json() : null))
+      .then(setUser)
+      .catch(() => setUser(null))
+  }, [])
+
+  const login = (email, password) =>
+    fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    }).then(async (r) => {
+      const body = await r.json().catch(() => null)
+      if (!r.ok) throw new Error(body?.error || 'Login failed')
+      setUser(body)
+      return body
+    })
+
+  const logout = () => {
+    // Optimistic: the session is cleared locally (back to the login screen) the instant the
+    // request is sent, rather than waiting on the response - there is nothing useful to show if
+    // the logout call itself fails, and the cookie is gone either way once SignOutAsync runs.
+    setUser(null)
+    fetch('/api/auth/logout', { method: 'POST' }).catch(() => {})
+  }
+
+  if (user === undefined) {
+    return (
+      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh' }}>
+        <Spin size="large" />
+      </div>
+    )
+  }
+
+  if (!user) {
+    return <LoginPage onLogin={login} />
+  }
+
   return (
-    <Routes>
-      <Route path="/" element={<DashboardPage />} />
-      <Route path="/backtest" element={<BacktestPage />} />
-      <Route path="/triggers" element={<TriggersPage />} />
-      <Route path="/contracts" element={<ContractsPage />} />
-    </Routes>
+    <AuthContext.Provider value={{ user, logout }}>
+      <Routes>
+        <Route path="/" element={<DashboardPage />} />
+        <Route path="/backtest" element={<BacktestPage />} />
+        <Route path="/triggers" element={<RequireAdmin><TriggersPage /></RequireAdmin>} />
+        <Route path="/contracts" element={<RequireAdmin><ContractsPage /></RequireAdmin>} />
+      </Routes>
+    </AuthContext.Provider>
   )
 }

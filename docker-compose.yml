@@ -32,6 +32,16 @@ services:
       Telegram__Enabled: ${TELEGRAM_ENABLED:-false}
       Telegram__BotToken: ${TELEGRAM_BOT_TOKEN:-}
       Telegram__ChatId: ${TELEGRAM_CHAT_ID:-}
+
+      # Login - the whole app requires one of these two accounts (see AuthOptions/AuthController).
+      # Both passwords are REQUIRED, not defaulted blank like Telegram above: a blank password never
+      # matches anything (AuthService.MatchesPassword fails closed), so deploying without these set
+      # would lock EVERYONE out, including you - `docker compose up` refuses to start at all until
+      # both are actually set, rather than silently shipping an unusable app.
+      Auth__AdminEmail: ${AUTH_ADMIN_EMAIL:-admin@backtest.com}
+      Auth__AdminPassword: ${AUTH_ADMIN_PASSWORD:?set AUTH_ADMIN_PASSWORD}
+      Auth__UserEmail: ${AUTH_USER_EMAIL:-user@backtest.com}
+      Auth__UserPassword: ${AUTH_USER_PASSWORD:?set AUTH_USER_PASSWORD}
     healthcheck:
       # Matches the Dockerfile's HEALTHCHECK; the long start_period covers the first-run backfill of
       # 15 trading days across ~68 option contracts, which takes minutes before the app is useful.

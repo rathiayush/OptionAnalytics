@@ -1,4 +1,7 @@
 using System.Reflection;
+using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.Authorization;
+using OptionAnalytics.Server.Auth;
 using OptionAnalytics.Server.Dhan;
 using OptionAnalytics.Server.Hubs;
 using OptionAnalytics.Server.Services;
@@ -15,7 +18,54 @@ builder.Configuration.AddJsonFile("appsettings.Local.json", optional: true, relo
 
 builder.Services.Configure<DhanOptions>(builder.Configuration.GetSection(DhanOptions.SectionName));
 builder.Services.Configure<TelegramOptions>(builder.Configuration.GetSection(TelegramOptions.SectionName));
+builder.Services.Configure<AuthOptions>(builder.Configuration.GetSection(AuthOptions.SectionName));
 builder.Services.AddHttpClient<TelegramAlertService>();
+
+builder.Services.AddSingleton<AuthService>();
+
+// Cookie sign-in for the app's two fixed accounts (AuthController/AuthService) - this app has no
+// user database, so no need for anything heavier. OnRedirectToLogin/OnRedirectToAccessDenied are
+// overridden to plain 401/403 status codes: the framework's own default behaviour for both is a
+// 302 redirect to a login PAGE, which is wrong for a pure API + SPA - a fetch() would just follow
+// the redirect and read back index.html as if the call had succeeded.
+builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
+    .AddCookie(options =>
+    {
+        options.Cookie.Name = "oa_session";
+        options.Cookie.HttpOnly = true;
+        options.Cookie.SameSite = SameSiteMode.Lax;
+        // SameAsRequest, not Always: Dokploy/Traefik terminates TLS and proxies plain HTTP to this
+        // container (see docker-compose.yml - Kestrel binds http://+:8080), and without forwarded-
+        // header handling in front of this app, ASP.NET Core has no way to know the ORIGINAL
+        // request was HTTPS. CookieSecurePolicy.Always would refuse to set the cookie at all in
+        // that case, since it only ever sees a plain HTTP request - silently breaking login in
+        // production. SameAsRequest matches whatever scheme the request actually arrived on.
+        options.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
+        options.ExpireTimeSpan = TimeSpan.FromDays(14);
+        options.SlidingExpiration = true;
+        options.Events.OnRedirectToLogin = context =>
+        {
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            return Task.CompletedTask;
+        };
+        options.Events.OnRedirectToAccessDenied = context =>
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            return Task.CompletedTask;
+        };
+    });
+
+// Fallback policy: every endpoint requires SOME signed-in account by default, unless it opts out
+// with [AllowAnonymous] (AuthController's own login/logout/me, plus /health and /api/version below
+// - both hit by Docker's HEALTHCHECK/redeploy checks with no session at all). AdminOnly is the
+// extra bar TriggersController and CdvController's two Contracts-page endpoints add on top - see
+// each controller's own doc comment for why those specifically are gated.
+builder.Services.AddAuthorization(options =>
+{
+    options.FallbackPolicy = new AuthorizationPolicyBuilder()
+        .RequireAuthenticatedUser()
+        .Build();
+});
 
 builder.Services.AddSingleton<DhanSession>();
 builder.Services.AddHttpClient<DhanApiClient>();
@@ -137,13 +187,16 @@ if (app.Environment.IsDevelopment())
 app.UseDefaultFiles();
 app.UseStaticFiles();
 
+app.UseAuthentication();
 app.UseAuthorization();
 
 // Container liveness, for Docker's HEALTHCHECK and Dokploy/Traefik. Deliberately says nothing
 // about Dhan: the feed is legitimately unauthenticated outside market hours or while a token
 // renews, and a container killed for that would never finish starting - the 15-day backfill of ~68
 // option contracts alone takes minutes. This answers "is the web app up", nothing more.
-app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
+// AllowAnonymous: HEALTHCHECK never carries a session cookie, and the authorization fallback
+// policy below requires one on every endpoint by default.
+app.MapGet("/health", () => Results.Ok(new { status = "ok" })).AllowAnonymous();
 
 // Answers "what am I actually running right now" - the AssemblyMetadata stamp the csproj writes
 // fresh on every `dotnet publish` (see its own comment there), read back via reflection. The
@@ -156,7 +209,10 @@ app.MapGet("/api/version", () =>
         .GetCustomAttributes<AssemblyMetadataAttribute>()
         .FirstOrDefault(a => a.Key == "BuildTimeUtc")?.Value;
     return Results.Ok(new { buildTimeUtc });
-});
+})
+    // AllowAnonymous: reveals nothing but a build timestamp, and letting it be curled directly
+    // (no session needed) matches /health's own "check this from the outside" purpose.
+    .AllowAnonymous();
 
 app.MapControllers();
 app.MapHub<SpotHub>("/hubs/spot");

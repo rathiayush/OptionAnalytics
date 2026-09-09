@@ -92,7 +92,9 @@ Backend (from `OptionAnalytics.Server/`):
 dotnet run
 ```
 
-Listens on `http://localhost:5080` by default (see `Properties/launchSettings.json`).
+Listens on `http://localhost:5080` by default (see `Properties/launchSettings.json`). Also needs
+`Auth:AdminPassword`/`Auth:UserPassword` set (in `appsettings.Local.json`, or `Auth__AdminPassword`/
+`Auth__UserPassword` environment variables) before you can log in at all - see [Login](#login).
 
 Frontend (from `optionanalytics.client/`, in a separate terminal):
 
@@ -133,9 +135,27 @@ Configuration, using ASP.NET Core's `__` section separator (`Dhan__ClientId` set
 | `DHAN_PIN` + `DHAN_TOTP_SECRET` | ...or these | TOTP auto-login; the app then renews its own token |
 | `TELEGRAM_ENABLED` | no | `true` to send trigger alerts |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | if enabled | |
+| `AUTH_ADMIN_PASSWORD` | yes | Password for `admin@backtest.com` (email overridable via `AUTH_ADMIN_EMAIL`) |
+| `AUTH_USER_PASSWORD` | yes | Password for `user@backtest.com` (email overridable via `AUTH_USER_EMAIL`) |
 | `HTTP_PORT` | no | Host port, default `8080` |
 
 The app listens on `8080` inside the container.
+
+### Login
+
+The whole app requires signing in - there is no anonymous access, and no self-service signup.
+Exactly two accounts exist, both fixed by configuration (see `AuthOptions`/`AuthService`):
+
+- **Admin** (`admin@backtest.com` by default) - sees every page, including Triggers (arms real
+  Dhan orders) and Contracts (the raw scrip-master/subscription diagnostic).
+- **User** (`user@backtest.com` by default) - sees Dashboard and Backtrack only; Triggers and
+  Contracts are both hidden in the nav and rejected server-side (`403`) if requested directly.
+
+Both passwords are **required** environment variables (`docker-compose.yml` refuses to start
+without them) - there is no default password, since a blank one can never log in. Set
+`AUTH_ADMIN_PASSWORD`/`AUTH_USER_PASSWORD` (and optionally `AUTH_ADMIN_EMAIL`/`AUTH_USER_EMAIL` to
+change the emails) in Dokploy's Environment tab or a `.env` file next to `docker-compose.yml` -
+never commit real passwords.
 
 ### Persistence
 
