@@ -217,6 +217,15 @@ app.MapGet("/api/version", () =>
 
 app.MapControllers();
 app.MapHub<SpotHub>("/hubs/spot");
-app.MapFallbackToFile("index.html");
+// AllowAnonymous: this is the SPA shell itself, not a piece of app data - React Router paths like
+// /backtest or /triggers don't exist as physical files, so a direct visit or refresh on one of them
+// falls through to here rather than being served by UseStaticFiles above (which already bypasses
+// auth entirely for "/" and every real asset, since it runs before UseAuthentication/
+// UseAuthorization and is terminal for a match). Without this, that fallback request hit the
+// authorization fallback policy's RequireAuthenticatedUser() and an unauthenticated visitor got a
+// bare 401 instead of index.html - a blank page instead of App.jsx's own LoginPage, which is what's
+// supposed to handle "not signed in" client-side. The real access control is unaffected: this only
+// hands out the empty shell, and every API call the shell then makes is still gated normally.
+app.MapFallbackToFile("index.html").AllowAnonymous();
 
 app.Run();
