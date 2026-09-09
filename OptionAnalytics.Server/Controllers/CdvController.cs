@@ -1,9 +1,15 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using OptionAnalytics.Server.Auth;
 using OptionAnalytics.Server.Models;
 using OptionAnalytics.Server.Services;
 
 namespace OptionAnalytics.Server.Controllers;
 
+// Most of this controller backs the Dashboard, which every signed-in account can see - only
+// GetContracts/RefreshMaster (the Contracts page's own two endpoints, admin-only) carry their own
+// [Authorize(Roles = AuthRoles.Admin)] below; everything else stays at the controller's own
+// baseline (Program.cs's fallback policy: signed in, any role).
 [ApiController]
 [Route("api/cdv")]
 public sealed class CdvController : ControllerBase
@@ -185,6 +191,7 @@ public sealed class CdvController : ControllerBase
     /// This is the page to open when something "has no data": it says which of the three possible
     /// causes it actually is.</summary>
     [HttpGet("{underlying}/contracts")]
+    [Authorize(Roles = AuthRoles.Admin)]
     public IActionResult GetContracts(string underlying, [FromQuery] string? expiry)
     {
         if (_cdv.StepFor(underlying) <= 0) return NotFoundResult(underlying);
@@ -199,6 +206,7 @@ public sealed class CdvController : ControllerBase
     /// a download/parse failure comes back as a non-null "error" field, not an HTTP error, so the
     /// page can show it inline next to the (possibly unchanged) contract count.</summary>
     [HttpPost("master/refresh")]
+    [Authorize(Roles = AuthRoles.Admin)]
     public async Task<IActionResult> RefreshMaster(CancellationToken cancellationToken)
     {
         var (count, loadedAt, error) = await _cdv.ForceRefreshMasterAsync(cancellationToken);

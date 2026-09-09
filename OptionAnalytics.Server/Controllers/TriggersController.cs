@@ -1,4 +1,6 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using OptionAnalytics.Server.Auth;
 using OptionAnalytics.Server.Models;
 using OptionAnalytics.Server.Services;
 
@@ -7,9 +9,14 @@ namespace OptionAnalytics.Server.Controllers;
 /// <summary>CRUD for the saved strategy triggers the Triggers page manages - see
 /// StrategyTriggerStore for what a trigger is and StrategyTriggerHostedService for what watches
 /// them. A trigger takes the same inputs a Backtrack run does, so a rule tuned there can be armed
-/// here unchanged.</summary>
+/// here unchanged.
+///
+/// Admin-only: this is where live trading gets armed/disarmed and real orders get a quantity and a
+/// SlippagePoints, so the whole controller is gated rather than picking individual actions -
+/// unlike CdvController, nothing here is also needed by a non-admin page.</summary>
 [ApiController]
 [Route("api/triggers")]
+[Authorize(Roles = AuthRoles.Admin)]
 public sealed class TriggersController : ControllerBase
 {
     private readonly StrategyTriggerStore _store;

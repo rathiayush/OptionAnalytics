@@ -1,6 +1,19 @@
-import { useEffect, useState } from 'react'
-import { Menu, Select, Tag } from 'antd'
+import { createContext, useContext, useEffect, useState } from 'react'
+import { Button, Menu, Select, Space, Tag, Typography } from 'antd'
 import { useLocation, useNavigate } from 'react-router-dom'
+
+// Provided once, at the app root (App.jsx), after GET /api/auth/me resolves - {email, role} or
+// null. NavBar (rendered independently from four different pages) reads this via useAuth() rather
+// than each page threading it through as a prop.
+export const AuthContext = createContext(null)
+export function useAuth() {
+  return useContext(AuthContext)
+}
+
+// Path keys from NAV_ITEMS below that only an Admin account may see or use - Triggers arms real
+// money, Contracts exposes the raw scrip-master/subscription diagnostic. Kept as one list so
+// NavBar's own filtering and App.jsx's route guards can never drift apart on which paths these are.
+export const ADMIN_ONLY_PATHS = ['/triggers', '/contracts']
 
 // Constants/components shared between App.jsx's DashboardPage and BacktestPage.jsx - kept in
 // their own module (not exported from App.jsx) specifically to avoid a circular import: App.jsx
@@ -177,20 +190,39 @@ const NAV_ITEMS = [
   { key: '/contracts', label: 'Contracts' },
 ]
 
-// Shared between DashboardPage and BacktestPage - a proper horizontal menu (not just plain text
-// links) so it reads as real site navigation, sitting inline in each page's own header row with a
-// transparent background so it blends into the page rather than looking like a separate bar.
+// Shared between DashboardPage/BacktestPage/TriggersPage/ContractsPage - a proper horizontal menu
+// (not just plain text links) so it reads as real site navigation, sitting inline in each page's
+// own header row with a transparent background so it blends into the page rather than looking
+// like a separate bar. Also carries the signed-in email and a log-out button - the one place
+// that's shown regardless of which page rendered this.
+//
+// Triggers/Contracts are hidden here for a non-Admin account, but that is a convenience, not the
+// actual security boundary - App.jsx's own route guard covers someone typing the URL directly, and
+// the real enforcement is server-side (TriggersController/CdvController's [Authorize(Roles =
+// "Admin")]), since hiding a link never stops a direct API call.
 export function NavBar() {
   const location = useLocation()
   const navigate = useNavigate()
+  const auth = useAuth()
+  const isAdmin = auth?.user?.role === 'Admin'
+  const items = isAdmin ? NAV_ITEMS : NAV_ITEMS.filter((item) => !ADMIN_ONLY_PATHS.includes(item.key))
+
   return (
-    <Menu
-      mode="horizontal"
-      theme="dark"
-      selectedKeys={[location.pathname]}
-      items={NAV_ITEMS}
-      onClick={({ key }) => navigate(key)}
-      style={{ minWidth: 340, background: 'transparent', borderBottom: 'none', lineHeight: '32px' }}
-    />
+    <Space align="center" size={16} wrap>
+      <Menu
+        mode="horizontal"
+        theme="dark"
+        selectedKeys={[location.pathname]}
+        items={items}
+        onClick={({ key }) => navigate(key)}
+        style={{ minWidth: 340, background: 'transparent', borderBottom: 'none', lineHeight: '32px' }}
+      />
+      {auth?.user && (
+        <Space size={8}>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>{auth.user.email}</Typography.Text>
+          <Button size="small" onClick={auth.logout}>Log out</Button>
+        </Space>
+      )}
+    </Space>
   )
 }
