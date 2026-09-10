@@ -44,7 +44,7 @@ public sealed class CdvObvCrossoverStrategyTests
         GetOptionBars = getOptionBars ?? ((_, _) => Array.Empty<Candle>()),
     };
 
-    private static Dictionary<string, decimal> Parameters(decimal barsThreshold = 3, decimal direction = 0, decimal signalStartMinutes = 555, decimal confirmSource = 0) => new()
+    private static Dictionary<string, decimal> Parameters(decimal barsThreshold = 3, decimal direction = 0, decimal signalStartMinutes = 555, decimal confirmSource = 0, decimal thresholdPercent = 0) => new()
     {
         ["side"] = OptionTradeSimulator.SideBuy,
         ["otmSteps"] = 1,
@@ -53,6 +53,7 @@ public sealed class CdvObvCrossoverStrategyTests
         ["squareOffMinutes"] = 0,
         ["signalStartMinutes"] = signalStartMinutes,
         ["barsThreshold"] = barsThreshold,
+        ["thresholdPercent"] = thresholdPercent,
         ["confirmSource"] = confirmSource,
         ["direction"] = direction,
     };
@@ -137,6 +138,37 @@ public sealed class CdvObvCrossoverStrategyTests
         var entry = Assert.Single(signals, s => s.Kind == "Entry");
         Assert.Equal("Bullish", entry.Direction);
         Assert.Contains("OBV", entry.Summary);
+    }
+
+    [Fact]
+    public void EntrySignals_LeadBelowThresholdPercent_NeverFires()
+    {
+        var bars = Bars(5);
+        // (510-490)/(510+490)*100 = 2% lead - real, but thin.
+        var (cdvCe, cdvPe) = PointsFor(bars, 510, 490);
+        var (obvCe, obvPe) = PointsFor(bars, 510, 490);
+        var context = Context(bars, cdvCe, cdvPe, obvCe, obvPe);
+        var strategy = new CdvObvCrossoverStrategy();
+
+        var signals = strategy.EntrySignals(context, Parameters(barsThreshold: 3, thresholdPercent: 10));
+
+        Assert.Empty(signals);
+    }
+
+    [Fact]
+    public void EntrySignals_LeadAtOrAboveThresholdPercent_Fires()
+    {
+        var bars = Bars(5);
+        // Same 2% lead as above, but the threshold is now low enough to accept it.
+        var (cdvCe, cdvPe) = PointsFor(bars, 510, 490);
+        var (obvCe, obvPe) = PointsFor(bars, 510, 490);
+        var context = Context(bars, cdvCe, cdvPe, obvCe, obvPe);
+        var strategy = new CdvObvCrossoverStrategy();
+
+        var signals = strategy.EntrySignals(context, Parameters(barsThreshold: 3, thresholdPercent: 1));
+
+        var entry = Assert.Single(signals, s => s.Kind == "Entry");
+        Assert.Equal("Bullish", entry.Direction);
     }
 
     [Fact]

@@ -27,12 +27,20 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 /// every bar the lead continues to hold afterward. A streak resets - and nothing carries overnight -
 /// the moment the selected series stop agreeing (in Both mode), the lead flips outright, or the
 /// trading day changes.
+///
+/// ThresholdPercent is a MAGNITUDE filter alongside that PERSISTENCE one: CE merely being a rupee
+/// ahead of PE is not a lead worth trading on its own scale, so a bar only counts as favoring a side
+/// once that side is ahead by at least this percentage. The percentage is measured as
+/// (CE - PE) / (|CE| + |PE|) - the same bounded, sign-safe "imbalance ratio" order-flow measures
+/// commonly use (a plain CE/PE ratio breaks the moment either total goes negative, which CDV/OBV
+/// both do routinely) - so 0 (the default) means any nonzero lead counts, exactly as before this
+/// parameter existed, and larger values demand a progressively more decisive imbalance.
 /// </summary>
 public sealed class CdvObvCrossoverStrategy : IBacktestStrategy
 {
     public string Key => "cdv-obv-crossover";
     public string Name => "CDV + OBV CE/PE Crossover";
-    public string Description => "Enters Bullish when CE leads PE for a run of consecutive bars (the bars threshold), or Bearish when PE leads CE for the same span. ConfirmSource picks whether that lead is judged on CDV alone, OBV alone, or both agreeing at once (the default, which filters out a lead that is only a one-metric blip).";
+    public string Description => "Enters Bullish when CE leads PE by at least the threshold percentage for a run of consecutive bars (the bars threshold), or Bearish when PE leads CE the same way. ConfirmSource picks whether that lead is judged on CDV alone, OBV alone, or both agreeing at once (the default, which filters out a lead that is only a one-metric blip).";
 
     private const decimal DirectionBoth = 0;
     private const decimal DirectionLongOnly = 1;
@@ -51,6 +59,7 @@ public sealed class CdvObvCrossoverStrategy : IBacktestStrategy
         OptionTradeSimulator.SquareOffTimeParameter(),
         OptionTradeSimulator.SignalStartTimeParameter(),
         new BacktestParameterSpec("barsThreshold", "CE/PE lead confirmed for (bars)", Default: 3, Min: 1, Max: 50, Step: 1),
+        new BacktestParameterSpec("thresholdPercent", "Minimum CE/PE lead (%, 0 = off)", Default: 0, Min: 0, Max: 100, Step: 0.5m),
         new BacktestParameterSpec("confirmSource", "Confirm using", Default: ConfirmBoth, Min: ConfirmBoth, Max: ConfirmObvOnly, Step: 1, Options: new[]
         {
             new BacktestParameterOption(ConfirmBoth, "CDV + OBV (both must agree)"),
@@ -75,10 +84,12 @@ public sealed class CdvObvCrossoverStrategy : IBacktestStrategy
         BacktestStrategyContext context, IReadOnlyDictionary<string, decimal> parameters)
     {
         var barsThreshold = Math.Max(1, (int)parameters["barsThreshold"]);
+        var thresholdPercent = parameters.GetValueOrDefault("thresholdPercent", 0m);
         var confirmSource = parameters.GetValueOrDefault("confirmSource", ConfirmBoth);
         var direction = parameters["direction"];
         var signalStartMinutes = (int)parameters.GetValueOrDefault("signalStartMinutes", 555);
         var metricLabel = confirmSource switch { ConfirmCdvOnly => "CDV", ConfirmObvOnly => "OBV", _ => "CDV and OBV" };
+        var thresholdSuffix = thresholdPercent > 0 ? $" (>= {thresholdPercent}% lead)" : "";
 
         var takeLongs = direction != DirectionShortOnly;
         var takeShorts = direction != DirectionLongOnly;
@@ -114,10 +125,10 @@ public sealed class CdvObvCrossoverStrategy : IBacktestStrategy
             }
 
             string? cdvBias = cdvCeByTime.TryGetValue(bar.Time, out var cdvCe) && cdvPeByTime.TryGetValue(bar.Time, out var cdvPe)
-                ? (cdvCe > cdvPe ? "Bullish" : cdvPe > cdvCe ? "Bearish" : null)
+                ? ComputeBias(cdvCe, cdvPe, thresholdPercent)
                 : null;
             string? obvBias = obvCeByTime.TryGetValue(bar.Time, out var obvCe) && obvPeByTime.TryGetValue(bar.Time, out var obvPe)
-                ? (obvCe > obvPe ? "Bullish" : obvPe > obvCe ? "Bearish" : null)
+                ? ComputeBias(obvCe, obvPe, thresholdPercent)
                 : null;
 
             var bias = confirmSource switch
@@ -144,7 +155,7 @@ public sealed class CdvObvCrossoverStrategy : IBacktestStrategy
             // reached, not on every later bar the lead keeps holding.
             firedForStreak = true;
 
-            var summary = $"CE {(bias == "Bullish" ? "ahead of" : "behind")} PE on {metricLabel} for {streakLength} straight bar(s)";
+            var summary = $"CE {(bias == "Bullish" ? "ahead of" : "behind")} PE on {metricLabel} for {streakLength} straight bar(s){thresholdSuffix}";
             var beforeSignalStart = signalStartMinutes > 0 && IstClock.MinutesOfDay(bar.Time) < signalStartMinutes;
 
             if (beforeSignalStart)
@@ -167,5 +178,23 @@ public sealed class CdvObvCrossoverStrategy : IBacktestStrategy
         }
 
         return (entries, signals.OrderByDescending(s => s.TimeUtc).ToList());
+    }
+
+    /// <summary>"Bullish" if CE leads PE by at least <paramref name="thresholdPercent"/>, "Bearish"
+    /// if PE leads CE the same way, null otherwise (including the both-zero case, where no lead is
+    /// even meaningful). The lead is measured as (CE - PE) / (|CE| + |PE|) - bounded to [-100, 100]
+    /// and well-defined regardless of sign, unlike a plain CE/PE ratio which breaks the moment
+    /// either running total goes negative (which CDV/OBV both do routinely). thresholdPercent=0
+    /// reduces to "whichever side is simply bigger", exactly the comparison this strategy used
+    /// before this parameter existed.</summary>
+    private static string? ComputeBias(decimal ce, decimal pe, decimal thresholdPercent)
+    {
+        var denominator = Math.Abs(ce) + Math.Abs(pe);
+        if (denominator == 0) return null;
+
+        var leadPercent = (ce - pe) / denominator * 100;
+        if (leadPercent > 0 && leadPercent >= thresholdPercent) return "Bullish";
+        if (leadPercent < 0 && -leadPercent >= thresholdPercent) return "Bearish";
+        return null;
     }
 }
