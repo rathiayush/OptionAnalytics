@@ -4,38 +4,43 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 
 /// <summary>
 /// A pure order-flow strategy: no spot price action at all, just which side (CE or PE) the option
-/// buyers are actually piling into, measured two different ways at once.
+/// buyers are actually piling into.
 ///
-///   BULLISH: CDV(CE) is above CDV(PE) AND OBV(CE) is above OBV(PE), both holding for at least
-///            BarsThreshold straight bars - call buying outpacing put buying, confirmed by both the
-///            tick-rule delta-volume total and the by-bar-direction volume total agreeing, not just
-///            one of them.
-///   BEARISH: the mirror - CDV(PE) above CDV(CE) AND OBV(PE) above OBV(CE), for the same span.
+///   BULLISH: CE leads PE for at least BarsThreshold straight bars, on whichever series(es)
+///            ConfirmSource selects - call buying outpacing put buying.
+///   BEARISH: the mirror - PE leads CE for the same span.
 ///
-/// Requiring BOTH series to agree (not just one) is deliberate: CDV and OBV are computed from the
-/// same tick stream but weighted differently (CdvUnderlyingState's sigmoid-moneyness-delta weighting
-/// vs OBV's plain by-bar-direction sum - see BacktestStrategyContext's own doc comment on both
-/// series), so one crossing without the other is exactly the kind of single-metric noise a
-/// confirmation-based entry exists to filter out, the same reasoning FiveEmaObvCrossoverStrategy
-/// already applies to a spot breakout.
+/// ConfirmSource picks how strict that lead has to be:
+///   - Both (the default): CDV(CE) above CDV(PE) AND OBV(CE) above OBV(PE) at the same time - CDV
+///     and OBV are computed from the same tick stream but weighted differently
+///     (CdvUnderlyingState's sigmoid-moneyness-delta weighting vs OBV's plain by-bar-direction sum -
+///     see BacktestStrategyContext's own doc comment on both series), so requiring them to agree
+///     filters out a lead that is only a one-metric blip, the same reasoning
+///     FiveEmaObvCrossoverStrategy already applies to a spot breakout.
+///   - CDV only / OBV only: judged off that one series alone, for anyone who wants to test (or
+///     trusts) one metric on its own rather than requiring agreement.
 ///
 /// The bars-threshold requirement exists because a CE/PE lead can flip for one or two bars on
 /// nothing more than a single large order before reverting - BarsThreshold is how many CONSECUTIVE
-/// bars the same side has to stay ahead on both series before this counts as a real move rather
-/// than a blip. Only one signal fires per qualifying streak (right at the bar the threshold is
-/// first reached), not on every bar the lead continues to hold afterward. A streak resets - and
-/// nothing carries overnight - the moment either series stops agreeing, the lead flips outright, or
-/// the trading day changes.
+/// bars the same side has to stay ahead before this counts as a real move rather than a blip. Only
+/// one signal fires per qualifying streak (right at the bar the threshold is first reached), not on
+/// every bar the lead continues to hold afterward. A streak resets - and nothing carries overnight -
+/// the moment the selected series stop agreeing (in Both mode), the lead flips outright, or the
+/// trading day changes.
 /// </summary>
 public sealed class CdvObvCrossoverStrategy : IBacktestStrategy
 {
     public string Key => "cdv-obv-crossover";
     public string Name => "CDV + OBV CE/PE Crossover";
-    public string Description => "Enters Bullish when CE leads PE on BOTH cumulative delta volume (CDV) and on-balance volume (OBV) for a run of consecutive bars (the bars threshold), or Bearish when PE leads CE on both for the same span. Requiring both series to agree filters out a lead that is only a one-metric blip.";
+    public string Description => "Enters Bullish when CE leads PE for a run of consecutive bars (the bars threshold), or Bearish when PE leads CE for the same span. ConfirmSource picks whether that lead is judged on CDV alone, OBV alone, or both agreeing at once (the default, which filters out a lead that is only a one-metric blip).";
 
     private const decimal DirectionBoth = 0;
     private const decimal DirectionLongOnly = 1;
     private const decimal DirectionShortOnly = 2;
+
+    private const decimal ConfirmBoth = 0;
+    private const decimal ConfirmCdvOnly = 1;
+    private const decimal ConfirmObvOnly = 2;
 
     public IReadOnlyList<BacktestParameterSpec> Parameters { get; } = new[]
     {
@@ -46,6 +51,12 @@ public sealed class CdvObvCrossoverStrategy : IBacktestStrategy
         OptionTradeSimulator.SquareOffTimeParameter(),
         OptionTradeSimulator.SignalStartTimeParameter(),
         new BacktestParameterSpec("barsThreshold", "CE/PE lead confirmed for (bars)", Default: 3, Min: 1, Max: 50, Step: 1),
+        new BacktestParameterSpec("confirmSource", "Confirm using", Default: ConfirmBoth, Min: ConfirmBoth, Max: ConfirmObvOnly, Step: 1, Options: new[]
+        {
+            new BacktestParameterOption(ConfirmBoth, "CDV + OBV (both must agree)"),
+            new BacktestParameterOption(ConfirmCdvOnly, "CDV only"),
+            new BacktestParameterOption(ConfirmObvOnly, "OBV only"),
+        }),
         new BacktestParameterSpec("direction", "Take", Default: DirectionBoth, Min: DirectionBoth, Max: DirectionShortOnly, Step: 1, Options: new[]
         {
             new BacktestParameterOption(DirectionBoth, "Both sides"),
@@ -64,8 +75,10 @@ public sealed class CdvObvCrossoverStrategy : IBacktestStrategy
         BacktestStrategyContext context, IReadOnlyDictionary<string, decimal> parameters)
     {
         var barsThreshold = Math.Max(1, (int)parameters["barsThreshold"]);
+        var confirmSource = parameters.GetValueOrDefault("confirmSource", ConfirmBoth);
         var direction = parameters["direction"];
         var signalStartMinutes = (int)parameters.GetValueOrDefault("signalStartMinutes", 555);
+        var metricLabel = confirmSource switch { ConfirmCdvOnly => "CDV", ConfirmObvOnly => "OBV", _ => "CDV and OBV" };
 
         var takeLongs = direction != DirectionShortOnly;
         var takeShorts = direction != DirectionLongOnly;
@@ -100,13 +113,19 @@ public sealed class CdvObvCrossoverStrategy : IBacktestStrategy
                 firedForStreak = false;
             }
 
-            string? bias = null;
-            if (cdvCeByTime.TryGetValue(bar.Time, out var cdvCe) && cdvPeByTime.TryGetValue(bar.Time, out var cdvPe) &&
-                obvCeByTime.TryGetValue(bar.Time, out var obvCe) && obvPeByTime.TryGetValue(bar.Time, out var obvPe))
+            string? cdvBias = cdvCeByTime.TryGetValue(bar.Time, out var cdvCe) && cdvPeByTime.TryGetValue(bar.Time, out var cdvPe)
+                ? (cdvCe > cdvPe ? "Bullish" : cdvPe > cdvCe ? "Bearish" : null)
+                : null;
+            string? obvBias = obvCeByTime.TryGetValue(bar.Time, out var obvCe) && obvPeByTime.TryGetValue(bar.Time, out var obvPe)
+                ? (obvCe > obvPe ? "Bullish" : obvPe > obvCe ? "Bearish" : null)
+                : null;
+
+            var bias = confirmSource switch
             {
-                if (cdvCe > cdvPe && obvCe > obvPe) bias = "Bullish";
-                else if (cdvPe > cdvCe && obvPe > obvCe) bias = "Bearish";
-            }
+                ConfirmCdvOnly => cdvBias,
+                ConfirmObvOnly => obvBias,
+                _ => cdvBias is not null && cdvBias == obvBias ? cdvBias : null,
+            };
 
             if (bias is not null && bias == streakDirection)
             {
@@ -125,7 +144,7 @@ public sealed class CdvObvCrossoverStrategy : IBacktestStrategy
             // reached, not on every later bar the lead keeps holding.
             firedForStreak = true;
 
-            var summary = $"CE {(bias == "Bullish" ? "ahead of" : "behind")} PE on both CDV and OBV for {streakLength} straight bar(s)";
+            var summary = $"CE {(bias == "Bullish" ? "ahead of" : "behind")} PE on {metricLabel} for {streakLength} straight bar(s)";
             var beforeSignalStart = signalStartMinutes > 0 && IstClock.MinutesOfDay(bar.Time) < signalStartMinutes;
 
             if (beforeSignalStart)
