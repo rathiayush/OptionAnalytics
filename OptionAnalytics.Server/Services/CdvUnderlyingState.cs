@@ -316,7 +316,7 @@ public sealed class CdvUnderlyingState
     /// a call's weight rises toward 1 as it goes deep ITM (strike well below spot) and falls
     /// toward 0 deep OTM; a put mirrors this on the other side of ATM. moneyness = (strike-spot)/spot.
     /// </summary>
-    private static decimal ComputeDeltaWeight(decimal strike, decimal spot, bool isCall)
+    internal static decimal ComputeDeltaWeight(decimal strike, decimal spot, bool isCall)
     {
         var moneyness = (double)((strike - spot) / spot);
         var delta = isCall
@@ -508,7 +508,7 @@ public sealed class CdvUnderlyingState
     /// <summary>Pine's own bar-proxy delta formula (close-in-range classification), the same
     /// fallback LiveSpreadCalculator's CDV backfill uses for historical candles - the only buy/sell
     /// split possible from OHLCV+volume alone, with no real trade-by-trade tagging.</summary>
-    private static decimal BarProxyDelta(CandleWithVolume bar)
+    internal static decimal BarProxyDelta(CandleWithVolume bar)
     {
         var hl = bar.High - bar.Low;
         if (hl <= 0.0001m) return 0m;

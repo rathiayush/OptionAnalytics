@@ -48,8 +48,15 @@ public sealed class BacktestService
     /// ATM+-8 window, and every one of them is a separate Dhan call - so this is a budget on how
     /// long one page load may take, not a judgement about which strikes matter. Anything past it
     /// stays "No Data" and the NEXT run picks up where this one stopped, since everything fetched
-    /// meanwhile is still in CdvHostedService's own cache.</summary>
-    private const int MaxOnDemandStrikesPerRun = 60;
+    /// meanwhile is still in CdvHostedService's own cache.
+    ///
+    /// 60 -> 120 when HistoryWindow.TradingDays doubled from 15 to 30 - a wider window gives a
+    /// trending session twice as much time to wander across strikes that never entered the ATM+-8
+    /// window, so the old budget started leaving noticeably more "No Data" rows on a single page
+    /// load than before, purely because there was now more history to reach into. Kept proportional
+    /// to TradingDays for the same reason LookbackCalendarDays is: this budget exists BECAUSE of how
+    /// much history is held, so it should scale when that does.</summary>
+    private const int MaxOnDemandStrikesPerRun = 120;
 
     /// <summary>How many fill-then-re-run rounds one call will do. Filling a strike can change
     /// which trades happen (a trade that used to be "No Data" now occupies the simulator's
