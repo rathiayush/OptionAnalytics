@@ -282,6 +282,16 @@ public sealed class CdvUnderlyingState
         {
             if (!_strikes.TryGetValue(tick.SecurityId, out var strike)) return;
 
+            // A malformed tick (a corrupt feed packet, same failure mode OptionPriceSanity's own
+            // doc comment was written for) must never update PrevPrice, feed a premium candle, or
+            // move RunningCdv - treated exactly as if the tick never arrived, rather than let one
+            // garbage print corrupt this contract's own running state for every tick after it. No
+            // logger reaches this state object (it is plain per-underlying data, not a DI service),
+            // so this stays a silent drop - CdvHostedService is where a caller with logging could
+            // notice this happening repeatedly, via GetStrikeCandles/GetAtmClosedVolumeBars simply
+            // never advancing for the affected strike.
+            if (!OptionPriceSanity.IsPlausiblePrice(tick.LastPrice)) return;
+
             if (strike.PrevPrice is { } prevPrice)
             {
                 if (tick.LastPrice > prevPrice) strike.Direction = 1;

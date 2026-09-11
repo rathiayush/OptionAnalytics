@@ -175,7 +175,19 @@ export default function StrikeDataPage() {
   // Chart-ready shape (IST-shifted epoch seconds, ascending) - a separate conversion from `rows`
   // above rather than reusing it, since the chart wants chronological order and shifted time
   // while the tables want the reverse and a plain ISO string to format for display.
-  const chartBars = useMemo(() => (candles ?? []).map(toBar), [candles])
+  //
+  // Also filtered to a plausible premium range - the backend now rejects a candle this implausible
+  // at the source (OptionPriceSanity), but this page exists specifically to inspect raw history
+  // that may have been cached in memory since before that existed, so a stray leftover bar could
+  // still reach here. The RAW table above is deliberately NOT filtered the same way - "see literally
+  // every candle" is the whole point of that one, corrupt or not - only the chart's own axis scale
+  // needs protecting from a single outlier making every real candle unreadably flat by comparison.
+  const chartBars = useMemo(
+    () => (candles ?? [])
+      .filter((c) => c.open > 0 && c.open < 100000 && c.high > 0 && c.high < 100000 && c.low > 0 && c.low < 100000 && c.close > 0 && c.close < 100000)
+      .map(toBar),
+    [candles],
+  )
 
   const trackedInfo = useMemo(
     () => trackedStrikes.find((s) => s.strike === strike && s.isCall === (optionType === 'CE')) ?? null,
