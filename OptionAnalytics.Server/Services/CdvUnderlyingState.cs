@@ -39,6 +39,17 @@ internal sealed class CdvStrikeRuntime
     /// first would show up as newly-tracked from EnsureTracked's return value alone.</summary>
     public bool Backfilled { get; set; }
 
+    /// <summary>When this strike's backfill was last ATTEMPTED, succeeded or not - the thing that
+    /// stops a strike Dhan has no history for from being re-fetched on every single recenter. Not
+    /// every failure is transient: a contract that simply has not traded, or a whole exchange this
+    /// account holds no data entitlement for, returns empty every time, and Backfilled therefore
+    /// never gets set. Without this timestamp such a strike is retried forever at whatever cadence
+    /// the recenter loop happens to be running - which is 30 SECONDS, not 30 minutes, whenever any
+    /// underlying is not fully live (see CdvHostedService.RecenterAllAsync), so one dead exchange
+    /// could issue hundreds of history calls a minute indefinitely and starve the underlyings that
+    /// do work of their own rate limit.</summary>
+    public DateTimeOffset? LastBackfillAttemptUtc { get; set; }
+
     private readonly List<(Candle Bar, long Volume)> _closedBars = new();
     private (Candle Bar, long Volume)? _currentBar;
 
@@ -240,6 +251,30 @@ public sealed class CdvUnderlyingState
     public bool NeedsBackfill(uint securityId)
     {
         lock (_lock) { return _strikes.TryGetValue(securityId, out var strike) && !strike.Backfilled; }
+    }
+
+    /// <summary>NeedsBackfill, but ignoring a strike whose last attempt was under
+    /// <paramref name="minRetryInterval"/> ago - so a strike Dhan has no history for costs one call
+    /// per interval rather than one per recenter. See CdvStrikeState.LastBackfillAttemptUtc.</summary>
+    public bool NeedsBackfill(uint securityId, TimeSpan minRetryInterval)
+    {
+        lock (_lock)
+        {
+            if (!_strikes.TryGetValue(securityId, out var strike) || strike.Backfilled) return false;
+            return strike.LastBackfillAttemptUtc is not { } attempted
+                || DateTimeOffset.UtcNow - attempted >= minRetryInterval;
+        }
+    }
+
+    /// <summary>Records that a backfill was attempted for this strike, whatever the outcome. Called
+    /// for every attempt rather than only failures - a success sets Backfilled and never consults
+    /// this again, so the two do not need to be distinguished here.</summary>
+    public void MarkBackfillAttempted(uint securityId)
+    {
+        lock (_lock)
+        {
+            if (_strikes.TryGetValue(securityId, out var strike)) strike.LastBackfillAttemptUtc = DateTimeOffset.UtcNow;
+        }
     }
 
     /// <summary>Every strike/side CDV has tracked today, for GET /api/cdv/{underlying}/strikes - a
