@@ -622,14 +622,23 @@ public sealed class CdvUnderlyingState
         return quotes.GetEma(LookbackSmoothLen).Select(r => r.Ema is { } e ? (decimal?)(decimal)e : null).ToList();
     }
 
-    private static LookbackChange ComputeLookbackChange(IReadOnlyList<decimal?> emaSeries, int barsAgo)
+    internal static LookbackChange ComputeLookbackChange(IReadOnlyList<decimal?> emaSeries, int barsAgo)
     {
         var lastIndex = emaSeries.Count - 1;
         if (lastIndex < 0 || emaSeries[lastIndex] is not { } current) return new LookbackChange(barsAgo, null, null, null);
 
         var previousIndex = lastIndex - barsAgo;
         if (previousIndex < 0 || emaSeries[previousIndex] is not { } previous) return new LookbackChange(barsAgo, current, null, null);
-        if (previous == 0) return new LookbackChange(barsAgo, current, previous, null);
+
+        // Previous exactly zero is the obvious divide-by-zero case; a SIGN FLIP between current and
+        // previous (CDV crossed zero somewhere in this window, including either endpoint sitting
+        // exactly on it) is the same problem in disguise - previous can be small-but-nonzero (say
+        // +1.8M) right before a move to -15M, and (current-previous)/|previous|*100 then reports a
+        // "-923%" that is technically arithmetic-correct but tells a trader nothing: percent change
+        // only means something when both readings are on the same side of zero. Math.Sign(0) is 0,
+        // so this also catches current landing exactly on zero without a separate check.
+        if (previous == 0 || Math.Sign(current) != Math.Sign(previous))
+            return new LookbackChange(barsAgo, current, previous, null);
 
         var percentChange = (current - previous) / Math.Abs(previous) * 100m;
         return new LookbackChange(barsAgo, current, previous, percentChange);
