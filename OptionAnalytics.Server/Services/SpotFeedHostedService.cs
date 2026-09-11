@@ -77,9 +77,12 @@ public sealed class SpotFeedHostedService : BackgroundService
     /// worst case with room to spare.</summary>
     private static readonly TimeSpan AuthWaitTimeout = TimeSpan.FromMinutes(3);
 
-    /// <summary>How long RetryBackfillIfNeededAsync waits between checking whether any underlying
-    /// still has zero history, and how many times it tries before giving up.</summary>
+    /// <summary>How long RetryBackfillIfNeededAsync waits before its FIRST re-check, doubling from
+    /// there up to RetryBackfillMaxInterval. That retry never gives up (see its own doc comment);
+    /// MaxBackfillRetries now only decides how many attempts are logged at Information before the
+    /// rest drop to Debug.</summary>
     private static readonly TimeSpan BackfillRetryInterval = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan RetryBackfillMaxInterval = TimeSpan.FromMinutes(5);
     private const int MaxBackfillRetries = 15;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -142,20 +145,65 @@ public sealed class SpotFeedHostedService : BackgroundService
         _ = RetryBackfillIfNeededAsync(stoppingToken);
     }
 
-    /// <summary>Keeps retrying BackfillAsync, on an interval, for as long as ANY underlying still
-    /// has zero candles - the actual fallback for "market's closed / Dhan was briefly unreachable /
-    /// auth wasn't ready yet" instead of a single one-shot attempt with no second chance.</summary>
+    /// <summary>Keeps retrying BackfillAsync for as long as ANY underlying still has zero candles -
+    /// the fallback for "market's closed / Dhan was briefly unreachable / auth wasn't ready yet".
+    ///
+    /// Deliberately UNBOUNDED, retrying slowly forever rather than giving up. It used to stop after
+    /// MaxBackfillRetries (15 x 20s, about five minutes), and that cap was the difference between an
+    /// underlying with history and one permanently without: spot is backfilled ONCE at startup, so
+    /// when those five minutes ran out before Dhan auth was usable - a token that expired overnight
+    /// and is waiting on TOTP renewal, a restart before the market opens - the spot series stayed
+    /// empty for the entire life of the process, and every backtest reading it found no signals at
+    /// all. CdvHostedService never had this problem because its own recenter loop re-backfills
+    /// option strikes every cycle, indefinitely. That asymmetry is exactly why option data could be
+    /// flowing on the dashboard while spot sat null underneath it.
+    ///
+    /// Instruments are re-resolved whenever any underlying still has none, for the same reason: a
+    /// scrip master that hadn't downloaded yet on the first pass leaves Instrument null, and
+    /// BackfillAsync skips an underlying in that state - so retrying the backfill alone would never
+    /// have recovered it however many attempts it was given.
+    ///
+    /// The interval backs off to RetryBackfillMaxInterval so an underlying that legitimately has no
+    /// data (an exchange this account holds no entitlement for) costs one quiet call every few
+    /// minutes rather than a tight loop - while still meaning spot recovers on its own once a token
+    /// is renewed or the market opens, with no restart needed.</summary>
     private async Task RetryBackfillIfNeededAsync(CancellationToken stoppingToken)
     {
-        for (var attempt = 0; attempt < MaxBackfillRetries && !stoppingToken.IsCancellationRequested; attempt++)
+        var delay = BackfillRetryInterval;
+
+        for (var attempt = 1; !stoppingToken.IsCancellationRequested; attempt++)
         {
             if (States.Values.All(s => s.GetCandles().Count > 0)) return;
 
-            await Task.Delay(BackfillRetryInterval, stoppingToken);
-            if (stoppingToken.IsCancellationRequested) return;
+            try
+            {
+                await Task.Delay(delay, stoppingToken);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
 
-            _logger.LogInformation("Spot backfill retry {Attempt}/{Max}: at least one underlying still has no history.", attempt + 1, MaxBackfillRetries);
+            var empty = States.Values.Where(s => s.GetCandles().Count == 0).Select(s => s.Underlying).ToArray();
+            if (empty.Length == 0) return;
+
+            // Log the first few attempts at Information and everything after that at Debug: the
+            // early ones are the ordinary startup race and worth seeing, while a permanently empty
+            // underlying must not spend the rest of the run writing a warning every few minutes.
+            if (attempt <= MaxBackfillRetries)
+                _logger.LogInformation("Spot backfill retry {Attempt}: still no history for {Underlyings}.", attempt, string.Join(", ", empty));
+            else
+                _logger.LogDebug("Spot backfill retry {Attempt}: still no history for {Underlyings}.", attempt, string.Join(", ", empty));
+
+            // A late scrip master leaves Instrument null, which BackfillAsync skips outright - so
+            // re-resolve before retrying rather than retrying a fetch that cannot run.
+            if (States.Values.Any(s => s.Instrument is null))
+                await ResolveInstrumentsAsync(stoppingToken);
+
             await BackfillAsync(stoppingToken, onlyIfEmpty: true);
+
+            if (delay < RetryBackfillMaxInterval)
+                delay = TimeSpan.FromTicks(Math.Min(delay.Ticks * 2, RetryBackfillMaxInterval.Ticks));
         }
     }
 
