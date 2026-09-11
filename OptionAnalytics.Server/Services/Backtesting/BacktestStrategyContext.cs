@@ -75,6 +75,15 @@ public sealed class BacktestStrategyContext
     public required IReadOnlyList<Candle> AtmCeBars { get; init; }
     public required IReadOnlyList<Candle> AtmPeBars { get; init; }
 
+    /// <summary>Volume counterpart to AtmCeBars/AtmPeBars - same snapshot-in-time caveat, same
+    /// TimeframeMinutes bucketing, just carrying each bucket's own TOTAL traded volume alongside its
+    /// OHLC (AtmCeBars/AtmPeBars' plain Candle carries no volume at all). What a volume-based
+    /// strategy (a volume moving average, notably) needs; every other strategy here that cares about
+    /// volume flow already gets it pre-processed into ObvCeSeries/ObvPeSeries (a running total, not
+    /// a per-bar amount) instead.</summary>
+    public required IReadOnlyList<CandleWithVolume> AtmCeVolumeBars { get; init; }
+    public required IReadOnlyList<CandleWithVolume> AtmPeVolumeBars { get; init; }
+
     /// <summary>The underlying's CURRENT ATM strike (same snapshot-in-time caveat as AtmCeBars/
     /// AtmPeBars above) - what a strategy computes an ATM-relative strike from, e.g. "ATM shifted
     /// by N steps" via GetOptionBars(AtmStrike + n * Step, isCall). Null until CDV has resolved an

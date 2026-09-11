@@ -61,6 +61,33 @@ public static class BacktestUtil
     /// position into the next day.</summary>
     public static DateOnly IstDate(DateTimeOffset time) => IstClock.IstDate(time);
 
+    /// <summary>Same OHLC bucketing as AggregateCandles, plus summing Volume within each bucket -
+    /// a coarser bar's volume is the TOTAL traded across the native 1-minute bars that make it up,
+    /// not just the last one's (the rule AggregateLine's running-total buckets use, which volume is
+    /// not: it is a per-bucket flow, not a running total). Always closed-bucket-only - a strategy
+    /// averaging volume (a volume moving average, notably) needs a finished bucket's TOTAL volume to
+    /// compare against a prior finished bucket's, the same reasoning AggregateCandles' own trailing-
+    /// bucket drop exists for.</summary>
+    public static List<CandleWithVolume> AggregateCandlesWithVolume(IReadOnlyList<CandleWithVolume> bars, int minutes)
+    {
+        if (minutes <= 1 || bars.Count == 0) return bars.ToList();
+
+        var bucketSeconds = minutes * 60;
+        var buckets = new SortedDictionary<long, CandleWithVolume>();
+        foreach (var bar in bars)
+        {
+            var bucketEpoch = bar.Time.ToUnixTimeSeconds() / bucketSeconds * bucketSeconds;
+            var bucketTime = DateTimeOffset.FromUnixTimeSeconds(bucketEpoch);
+            buckets[bucketEpoch] = buckets.TryGetValue(bucketEpoch, out var existing)
+                ? existing with { High = Math.Max(existing.High, bar.High), Low = Math.Min(existing.Low, bar.Low), Close = bar.Close, Volume = existing.Volume + bar.Volume }
+                : new CandleWithVolume(bucketTime, bar.Open, bar.High, bar.Low, bar.Close, bar.Volume);
+        }
+
+        var result = buckets.Values.ToList();
+        DropTrailingBucketIfIncomplete(result, r => r.Time, LatestCoveredSecond(bars, b => b.Time), bucketSeconds);
+        return result;
+    }
+
     /// <summary>Buckets a running-total line (CDV/OBV) to <paramref name="minutes"/>-minute
     /// resolution. Unlike a candle, the meaningful value for a coarser bucket is simply the LAST
     /// sample in it - a running total's bucket value is where it stood at the end of that bucket -

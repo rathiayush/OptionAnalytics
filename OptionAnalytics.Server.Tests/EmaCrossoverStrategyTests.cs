@@ -96,6 +96,8 @@ public sealed class EmaCrossoverStrategyTests
         GetOptionBars = getOptionBars ?? ((_, _) => Array.Empty<Candle>()),
         AtmCeBars = atmCeBars ?? Array.Empty<Candle>(),
         AtmPeBars = atmPeBars ?? Array.Empty<Candle>(),
+        AtmCeVolumeBars = Array.Empty<CandleWithVolume>(),
+        AtmPeVolumeBars = Array.Empty<CandleWithVolume>(),
         AtmStrike = atmStrike,
     };
 
