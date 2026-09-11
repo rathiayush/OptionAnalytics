@@ -57,6 +57,8 @@ public sealed class AdxDirectionalCrossoverStrategyTests
         GetOptionBars = getOptionBars ?? ((_, _) => Array.Empty<Candle>()),
         AtmCeBars = Array.Empty<Candle>(),
         AtmPeBars = Array.Empty<Candle>(),
+        AtmCeVolumeBars = Array.Empty<CandleWithVolume>(),
+        AtmPeVolumeBars = Array.Empty<CandleWithVolume>(),
         AtmStrike = null,
     };
 

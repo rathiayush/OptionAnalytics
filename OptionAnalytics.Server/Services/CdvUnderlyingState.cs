@@ -108,6 +108,12 @@ internal sealed class CdvStrikeRuntime
 
     public Candle? GetCurrentBar() => _currentBar?.Bar;
 
+    /// <summary>Closed-only counterpart to GetVolumeBars, same "never compute off a still-forming
+    /// bar" reasoning as GetClosedCandles - what a strategy averaging this contract's own volume
+    /// (a volume moving average, notably) needs, since a still-forming bar's volume-so-far is not
+    /// comparable to a prior bar's final total.</summary>
+    public IReadOnlyList<(Candle Bar, long Volume)> GetClosedVolumeBars() => new List<(Candle, long)>(_closedBars);
+
     /// <summary>OHLC + volume together - what OBV needs and Candle alone doesn't carry.</summary>
     public IReadOnlyList<(Candle Bar, long Volume)> GetVolumeBars()
     {
@@ -664,6 +670,15 @@ public sealed class CdvUnderlyingState
     public IReadOnlyList<Candle> GetAtmClosedCandles(bool isCall)
     {
         lock (_lock) { return FindAtmStrikeNoLock(isCall)?.GetClosedCandles() ?? Array.Empty<Candle>(); }
+    }
+
+    /// <summary>Volume counterpart to GetAtmClosedCandles - same snapshot-in-time caveat (whichever
+    /// strike is ATM right now, its own full stored history) - what a volume-based strategy (a
+    /// volume moving average, notably) needs, since GetAtmClosedCandles' plain Candle carries no
+    /// volume at all.</summary>
+    public IReadOnlyList<(Candle Bar, long Volume)> GetAtmClosedVolumeBars(bool isCall)
+    {
+        lock (_lock) { return FindAtmStrikeNoLock(isCall)?.GetClosedVolumeBars() ?? Array.Empty<(Candle, long)>(); }
     }
 
     /// <summary>Closed-bar premium history for one SPECIFIC strike (not necessarily the current

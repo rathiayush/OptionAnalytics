@@ -197,6 +197,11 @@ public sealed class BacktestService
         return attempted;
     }
 
+    /// <summary>CdvUnderlyingState.GetAtmClosedVolumeBars' own (Candle, long) tuple shape, converted
+    /// to the CandleWithVolume record BacktestUtil.AggregateCandlesWithVolume actually takes.</summary>
+    private static List<CandleWithVolume> ToCandlesWithVolume(IReadOnlyList<(Candle Bar, long Volume)> bars) =>
+        bars.Select(b => new CandleWithVolume(b.Bar.Time, b.Bar.Open, b.Bar.High, b.Bar.Low, b.Bar.Close, b.Volume)).ToList();
+
     /// <summary>Drops a still-forming final bar. GetStrikeCandlesAsync deliberately includes the
     /// in-progress minute (a chart wants it), but every backtest in this app runs strictly on CLOSED
     /// bars - letting a partial bar through here would let a strategy "fill" at a price the minute
@@ -251,6 +256,8 @@ public sealed class BacktestService
             AllSignals = allSignals,
             AtmCeBars = ceBars,
             AtmPeBars = peBars,
+            AtmCeVolumeBars = BacktestUtil.AggregateCandlesWithVolume(ToCandlesWithVolume(cdvState.GetAtmClosedVolumeBars(true)), timeframe),
+            AtmPeVolumeBars = BacktestUtil.AggregateCandlesWithVolume(ToCandlesWithVolume(cdvState.GetAtmClosedVolumeBars(false)), timeframe),
             AtmStrike = cdvState.AtmStrike,
             ObvCeSeries = BacktestUtil.AggregateLine(cdvState.GetObvSeries(true), timeframe),
             ObvPeSeries = BacktestUtil.AggregateLine(cdvState.GetObvSeries(false), timeframe),
