@@ -39,6 +39,8 @@ public sealed class OptionTradeSimulatorSquareOffTests
         CdvCeSeries = Array.Empty<ObvPoint>(),
         CdvPeSeries = Array.Empty<ObvPoint>(),
         GetOptionBars = (_, _) => optionBars,
+        AtmCeBars = Array.Empty<Candle>(),
+        AtmPeBars = Array.Empty<Candle>(),
     };
 
     private static Dictionary<string, decimal> Parameters(decimal squareOffMinutes) => new()

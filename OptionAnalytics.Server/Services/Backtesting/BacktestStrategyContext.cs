@@ -56,4 +56,14 @@ public sealed class BacktestStrategyContext
     /// state object itself so a strategy only ever depends on this narrow contract, not the whole
     /// CDV subsystem.</summary>
     public required Func<decimal, bool, IReadOnlyList<Candle>> GetOptionBars { get; init; }
+
+    /// <summary>The ATM CE/PE candles (already aggregated to TimeframeMinutes) exactly as
+    /// ConfluenceAlertService's own ATM legs track them - the SAME series BacktestService's replay
+    /// already builds internally for its own Confluence detection, exposed here so a strategy that
+    /// wants "did the option side agree" (EmaCrossoverStrategy's optional ATM confirmation, for one)
+    /// can compute its own EMA/crossover check directly off these rather than needing a second
+    /// CDV-aware code path. Unlike GetOptionBars above, this ALWAYS tracks whatever is currently
+    /// ATM at each point in time (rolling as spot moves), not one fixed strike.</summary>
+    public required IReadOnlyList<Candle> AtmCeBars { get; init; }
+    public required IReadOnlyList<Candle> AtmPeBars { get; init; }
 }

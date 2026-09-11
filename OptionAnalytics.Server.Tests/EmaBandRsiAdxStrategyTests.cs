@@ -77,6 +77,8 @@ public sealed class EmaBandRsiAdxStrategyTests
         CdvCeSeries = Array.Empty<ObvPoint>(),
         CdvPeSeries = Array.Empty<ObvPoint>(),
         GetOptionBars = getOptionBars ?? ((_, _) => Array.Empty<Candle>()),
+        AtmCeBars = Array.Empty<Candle>(),
+        AtmPeBars = Array.Empty<Candle>(),
     };
 
     private static Dictionary<string, decimal> Parameters(

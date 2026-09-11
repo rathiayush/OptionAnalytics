@@ -30,16 +30,31 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 /// option-premium points, so it needs no special-cased execution loop and no
 /// ILiveOrderPricingStrategy implementation; the existing live-order pipeline already prices it
 /// correctly exactly like FiveEmaStrategy.
+///
+/// RequireAtmConfirmation (off by default) is a second, optional filter alongside the slope one:
+/// the SAME fast/slow EMA crossover, computed the SAME way, must ALSO be confirmed on the ATM
+/// CE/PE legs at that instant - CE crossing up AND PE crossing down for a Bullish spot signal, the
+/// mirror for Bearish. This is exactly ConfluenceAlertService's own three-leg alignment (spot
+/// direction, ATM CE up, ATM PE down, or the bearish mirror), just applied at whatever fastPeriod/
+/// slowPeriod this strategy is configured with rather than the fixed 9/21 Confluence always uses -
+/// one shared pair of periods governing all three legs, so tuning the crossover speed for spot
+/// automatically retunes the option-side confirmation the same way instead of the two silently
+/// drifting apart. BacktestStrategyContext.AtmCeBars/AtmPeBars are the same aggregated ATM series
+/// BacktestService's own Confluence replay uses, so "ATM CE" and "ATM PE" here mean the exact same
+/// contracts as everywhere else in this app - reused directly rather than re-deriving ATM tracking.
 /// </summary>
 public sealed class EmaCrossoverStrategy : IBacktestStrategy
 {
     public string Key => "ema-9-21-crossover";
     public string Name => "9/21 EMA Crossover";
-    public string Description => "Enters the instant the fast EMA crosses the slow EMA (9/21 by default, both tunable) - fast above slow is Bullish, fast below slow is Bearish. An optional slope filter requires the fast EMA to actually be trending at the crossover (a minimum percentage move over the last few bars) rather than firing on a flat, choppy drift.";
+    public string Description => "Enters the instant the fast EMA crosses the slow EMA (9/21 by default, both tunable) - fast above slow is Bullish, fast below slow is Bearish. An optional slope filter requires the fast EMA to actually be trending at the crossover. A second optional filter requires the SAME crossover to also be confirmed on the ATM CE/PE legs (CE up + PE down for Bullish, or the bearish mirror) - ConfluenceAlertService's own alignment, at this strategy's own periods.";
 
     private const decimal DirectionBoth = 0;
     private const decimal DirectionLongOnly = 1;
     private const decimal DirectionShortOnly = 2;
+
+    private const decimal FlagOff = 0;
+    private const decimal FlagOn = 1;
 
     public IReadOnlyList<BacktestParameterSpec> Parameters { get; } = new[]
     {
@@ -53,6 +68,11 @@ public sealed class EmaCrossoverStrategy : IBacktestStrategy
         new BacktestParameterSpec("slowPeriod", "Slow EMA (bars)", Default: EmaCrossoverDetector.SlowPeriod, Min: 2, Max: 200, Step: 1),
         new BacktestParameterSpec("minSlopePercent", "Min fast-EMA slope at crossover, % (0 = off)", Default: 0, Min: 0, Max: 10, Step: 0.05m),
         new BacktestParameterSpec("slopeLookbackBars", "Slope measured over (bars)", Default: 3, Min: 1, Max: 50, Step: 1),
+        new BacktestParameterSpec("requireAtmConfirmation", "Also require ATM CE/PE to confirm (CE up + PE down, or the mirror)", Default: FlagOff, Min: FlagOff, Max: FlagOn, Step: 1, Options: new[]
+        {
+            new BacktestParameterOption(FlagOff, "No - spot crossover alone"),
+            new BacktestParameterOption(FlagOn, "Yes - ATM CE/PE must confirm too"),
+        }),
         new BacktestParameterSpec("direction", "Take", Default: DirectionBoth, Min: DirectionBoth, Max: DirectionShortOnly, Step: 1, Options: new[]
         {
             new BacktestParameterOption(DirectionBoth, "Both sides"),
@@ -74,6 +94,7 @@ public sealed class EmaCrossoverStrategy : IBacktestStrategy
         var slowPeriod = (int)parameters["slowPeriod"];
         var minSlopePercent = parameters["minSlopePercent"];
         var slopeLookback = Math.Max(1, (int)parameters["slopeLookbackBars"]);
+        var requireAtmConfirmation = parameters.GetValueOrDefault("requireAtmConfirmation", FlagOff) >= (FlagOff + FlagOn) / 2;
         var direction = parameters["direction"];
         var signalStartMinutes = (int)parameters.GetValueOrDefault("signalStartMinutes", 555);
 
@@ -89,6 +110,16 @@ public sealed class EmaCrossoverStrategy : IBacktestStrategy
 
         var directionSeries = EmaCrossoverDetector.DirectionSeries(bars, fastPeriod, slowPeriod);
         var fastEma = EmaCrossoverDetector.EmaSeries(bars, fastPeriod);
+
+        // Same fast/slow relationship, same periods, just computed off the ATM CE/PE legs instead
+        // of spot - built once here (not per-bar) and looked up by time, same "keyed by bucket-start
+        // Time" alignment every other strategy's cross-series lookup already relies on.
+        var ceDirectionByTime = requireAtmConfirmation
+            ? EmaCrossoverDetector.DirectionSeries(context.AtmCeBars, fastPeriod, slowPeriod).ToDictionary(d => d.Time, d => d.Direction)
+            : null;
+        var peDirectionByTime = requireAtmConfirmation
+            ? EmaCrossoverDetector.DirectionSeries(context.AtmPeBars, fastPeriod, slowPeriod).ToDictionary(d => d.Time, d => d.Direction)
+            : null;
 
         string? previousDirection = null;
 
@@ -121,6 +152,26 @@ public sealed class EmaCrossoverStrategy : IBacktestStrategy
                 }
             }
 
+            var passesAtm = true;
+            string? atmRejectReason = null;
+            if (requireAtmConfirmation)
+            {
+                var hasCe = ceDirectionByTime!.TryGetValue(bar.Time, out var ceDirection);
+                var hasPe = peDirectionByTime!.TryGetValue(bar.Time, out var peDirection);
+                if (!hasCe || !hasPe || ceDirection is null || peDirection is null)
+                {
+                    passesAtm = false;
+                    atmRejectReason = "not enough ATM CE/PE history yet";
+                }
+                else if (isBullish ? !(ceDirection == "Bullish" && peDirection == "Bearish") : !(peDirection == "Bullish" && ceDirection == "Bearish"))
+                {
+                    passesAtm = false;
+                    atmRejectReason = isBullish
+                        ? $"ATM CE/PE did not confirm (CE {ceDirection}, PE {peDirection}) - needed CE up + PE down"
+                        : $"ATM CE/PE did not confirm (CE {ceDirection}, PE {peDirection}) - needed PE up + CE down";
+                }
+            }
+
             // Before slope/direction filters: a bar timestamped inside the pre-open call auction
             // can never be a real signal, whatever it prints - see SignalStartTimeParameter's own
             // doc comment.
@@ -134,6 +185,10 @@ public sealed class EmaCrossoverStrategy : IBacktestStrategy
                 var slopeText = slopePercent is { } sp ? $"{sp:0.###}%" : "not enough history yet";
                 signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", current,
                     $"{crossLabel}, but fast-EMA slope ({slopeText}) is under the {minSlopePercent:0.###}% minimum - skipped"));
+            }
+            else if (!passesAtm)
+            {
+                signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", current, $"{crossLabel}, but {atmRejectReason} - skipped"));
             }
             else if (isBullish && !takeLongs)
             {

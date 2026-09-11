@@ -232,7 +232,7 @@ public sealed class BacktestService
 
         var timeframe = Math.Max(1, timeframeMinutes);
         var onDemand = new OnDemandStrikes();
-        var (allSignals, spotBars, confluenceAscending) = ReplayCore(underlying, spotState, cdvState, timeframe);
+        var (allSignals, spotBars, confluenceAscending, ceBars, peBars) = ReplayCore(underlying, spotState, cdvState, timeframe);
 
         var context = new BacktestStrategyContext
         {
@@ -242,6 +242,8 @@ public sealed class BacktestService
             SpotBars = spotBars,
             ConfluenceSignalsAscending = confluenceAscending,
             AllSignals = allSignals,
+            AtmCeBars = ceBars,
+            AtmPeBars = peBars,
             ObvCeSeries = BacktestUtil.AggregateLine(cdvState.GetObvSeries(true), timeframe),
             ObvPeSeries = BacktestUtil.AggregateLine(cdvState.GetObvSeries(false), timeframe),
             CdvCeSeries = BacktestUtil.AggregateLine(cdvState.GetSmoothedCdvSeries(true), timeframe),
@@ -307,9 +309,11 @@ public sealed class BacktestService
 
     /// <summary>Shared by Replay and RunStrategy - aggregates all three legs to the requested
     /// timeframe once and replays the same leg-flip/confluence state machine, returning both the
-    /// full signal list and (for strategies' strike-selection math) the aggregated spot bars and
-    /// the Confluence-only subset in time-ascending order.</summary>
-    private static (IReadOnlyList<BacktestSignal> Signals, List<Candle> SpotBars, List<BacktestSignal> ConfluenceAscending) ReplayCore(
+    /// full signal list and (for strategies' strike-selection math) the aggregated spot bars, the
+    /// Confluence-only subset in time-ascending order, and the same aggregated ATM CE/PE bars (so a
+    /// strategy that wants its own ATM CE/PE crossover check doesn't need a second CDV-aware code
+    /// path - see BacktestStrategyContext.AtmCeBars/AtmPeBars).</summary>
+    private static (IReadOnlyList<BacktestSignal> Signals, List<Candle> SpotBars, List<BacktestSignal> ConfluenceAscending, List<Candle> CeBars, List<Candle> PeBars) ReplayCore(
         string underlying, SpotUnderlyingState spotState, CdvUnderlyingState cdvState, int timeframeMinutes)
     {
         var timeframe = Math.Max(1, timeframeMinutes);
@@ -368,7 +372,7 @@ public sealed class BacktestService
             confluenceAscending.Add(confluenceSignal);
         }
 
-        return (signals.OrderByDescending(s => s.TimeUtc).ToList(), spotBars, confluenceAscending);
+        return (signals.OrderByDescending(s => s.TimeUtc).ToList(), spotBars, confluenceAscending, ceBars, peBars);
     }
 
     private static Dictionary<DateTimeOffset, string?> ToLookup(IReadOnlyList<(DateTimeOffset Time, string? Direction)> series)
