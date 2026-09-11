@@ -69,8 +69,9 @@ USER optionanalytics
 # Dokploy/Traefik and `docker ps` both read this. /health is deliberately independent of Dhan: the
 # feed is legitimately unauthenticated outside market hours or while a token renews, and a container
 # killed for that would never finish starting. The generous start-period covers the first-run
-# backfill (15 trading days across ~68 option contracts), which takes minutes.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=180s --retries=3 \
+# backfill (HistoryWindow.TradingDays trading days, 30 as of this writing, across ~68 option
+# contracts), which takes minutes.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=240s --retries=3 \
   CMD curl -fsS http://127.0.0.1:8080/health || exit 1
 
 ENTRYPOINT ["dotnet", "OptionAnalytics.Server.dll"]
