@@ -204,6 +204,27 @@ public sealed class BacktestService
     private static List<CandleWithVolume> ToCandlesWithVolume(IReadOnlyList<(Candle Bar, long Volume)> bars) =>
         bars.Select(b => new CandleWithVolume(b.Bar.Time, b.Bar.Open, b.Bar.High, b.Bar.Low, b.Bar.Close, b.Volume)).ToList();
 
+    /// <summary>Whether a strike's own tracked (live-fed) candle series can be trusted outright, or
+    /// needs a real Dhan fetch to see if there is more. A strike still INSIDE the ATM+-16 window
+    /// right now has a complete series - nothing more to ask Dhan for. But once a strike falls OUT
+    /// of that window it stops receiving ticks altogether (CdvStrikeRuntime's own doc comment on
+    /// RunningCdv) and is never re-backfilled even if it later re-enters - EnsureTracked is a no-op
+    /// on an already-tracked strike, by design - so its own ticks-derived candles simply stop
+    /// advancing on whatever day/time it dropped out and never resume. From the caller's side,
+    /// "has some candles" and "has every candle a signal might need" then look identical: a strike
+    /// that stopped tracking a month before a large spot move would otherwise keep returning that
+    /// same frozen, incomplete series to every later signal as if it were the whole story, reading
+    /// as "No Data" forever for anything after the drop-out point - no matter how large
+    /// MaxOnDemandStrikesPerRun/MaxOnDemandDuration get, because a miss is never even recorded for
+    /// it. Comparing the tracked series' own last bar's day against <paramref name="latestHeldBars"/>
+    /// own last bar's day (this backtest's SpotBars - the latest trading day this run holds ANY
+    /// data through) catches exactly that: a series that stops short of "as recent as this app's
+    /// data gets" is presumed incomplete and gets a real Dhan fetch instead of being trusted
+    /// outright.</summary>
+    internal static bool IsTrackedSeriesComplete(IReadOnlyList<Candle> tracked, IReadOnlyList<Candle> latestHeldBars) =>
+        tracked.Count > 0 && latestHeldBars.Count > 0
+        && BacktestUtil.IstDate(tracked[^1].Time) >= BacktestUtil.IstDate(latestHeldBars[^1].Time);
+
     /// <summary>Drops a still-forming final bar. GetStrikeCandlesAsync deliberately includes the
     /// in-progress minute (a chart wants it), but every backtest in this app runs strictly on CLOSED
     /// bars - letting a partial bar through here would let a strategy "fill" at a price the minute
@@ -265,11 +286,13 @@ public sealed class BacktestService
             ObvPeSeries = BacktestUtil.AggregateLine(cdvState.GetObvSeries(false), timeframe),
             CdvCeSeries = BacktestUtil.AggregateLine(cdvState.GetSmoothedCdvSeries(true), timeframe),
             CdvPeSeries = BacktestUtil.AggregateLine(cdvState.GetSmoothedCdvSeries(false), timeframe),
-            // Tracked strikes answer from memory. Anything else falls through to whatever a previous
-            // on-demand fetch produced, and failing that records the miss so RunStrategyAsync can go
-            // and get it - see that method. The synchronous callers (RunStrategy, and through it
-            // StrategyTriggerHostedService) simply never drain those misses, so for them this
-            // behaves exactly as it always did: in-memory or empty.
+            // A previous on-demand fetch this run always wins (it is the authoritative, complete
+            // series - see the closure body). Otherwise a tracked strike answers from memory only
+            // if that memory is actually complete through this backtest's latest held day; anything
+            // short of that records the miss so RunStrategyAsync can go and get it - see that
+            // method. The synchronous callers (RunStrategy, and through it StrategyTriggerHostedService)
+            // simply never drain those misses, so for them this behaves exactly as it always did:
+            // in-memory (however complete that happens to be) or empty.
             //
             // includeTrailingPartial: true - see AggregateCandles' own doc comment. OptionTradeSimulator
             // is the only consumer of GetOptionBars, and only ever reads an entry bar's Open, so the
@@ -280,14 +303,19 @@ public sealed class BacktestService
             // Backtrack itself would show for the same signal, without the extra wait.
             GetOptionBars = (strike, isCall) =>
             {
-                var tracked = cdvState.GetStrikeClosedCandles(strike, isCall);
-                if (tracked.Count > 0) return BacktestUtil.AggregateCandles(tracked, timeframe, includeTrailingPartial: true);
-
                 if (onDemand.TryGet(strike, isCall) is { } fetched)
                     return BacktestUtil.AggregateCandles(fetched, timeframe, includeTrailingPartial: true);
 
+                var tracked = cdvState.GetStrikeClosedCandles(strike, isCall);
+                if (IsTrackedSeriesComplete(tracked, spotBars))
+                    return BacktestUtil.AggregateCandles(tracked, timeframe, includeTrailingPartial: true);
+
                 onDemand.RecordMiss(strike, isCall);
-                return Array.Empty<Candle>();
+                // Still returned as an interim value while the fetch is pending (this round) or if
+                // it never lands (budget/deadline exhausted) - a possibly-incomplete series is
+                // strictly better than none, and RunStrategyAsync's re-run after a successful fetch
+                // replaces it with the authoritative one via the onDemand.TryGet check above.
+                return tracked.Count > 0 ? BacktestUtil.AggregateCandles(tracked, timeframe, includeTrailingPartial: true) : Array.Empty<Candle>();
             },
         };
 
