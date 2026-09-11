@@ -179,7 +179,9 @@ public static class OptionTradeSimulator
             }
 
             // The signal's OWN bar, not the next one - see this class's own doc comment for why
-            // that bar's Close is the entry price rather than look-ahead.
+            // that bar's Close is the entry price rather than look-ahead. Falls back to the last
+            // PRINTED bar earlier the same day when this exact bucket has no trade at all - see
+            // FindAt's own doc comment.
             var signalIndex = FindAt(optionBars, signal.Time);
             if (signalIndex < 0 || optionBars[signalIndex].Close <= 0)
             {
@@ -188,7 +190,11 @@ public static class OptionTradeSimulator
             }
 
             var signalBar = optionBars[signalIndex];
-            var entryTime = signalBar.Time + TimeSpan.FromMinutes(context.TimeframeMinutes); // the instant the signal bar - and so the signal itself - actually closed
+            // signal.Time, not signalBar.Time - they differ exactly when FindAt fell back to an
+            // earlier bucket (thin liquidity, nothing printed at the signal's own instant), and the
+            // entry itself still happens at the moment the signal fired, only PRICED off the last
+            // real print rather than a fresher one that never happened.
+            var entryTime = signal.Time + TimeSpan.FromMinutes(context.TimeframeMinutes);
             var entryPrice = signalBar.Close;
             var takeProfitPrice = isSell ? Math.Max(0, entryPrice - tpPoints) : entryPrice + tpPoints;
             var stopLossPrice = isSell ? entryPrice + slPoints : Math.Max(0, entryPrice - slPoints);
@@ -279,15 +285,29 @@ public static class OptionTradeSimulator
 
     /// <summary>The bar whose own bucket starts exactly at <paramref name="time"/> - the signal
     /// bar itself, since a signal's Time is always its own confirming bucket's start (see
-    /// BacktestUtil.AggregateCandles). -1 if that bucket has no data yet for this contract (either
-    /// genuinely never tracked, or - for a signal from this exact instant - not even one native
-    /// minute of it has closed yet; self-corrects on the next evaluation).</summary>
+    /// BacktestUtil.AggregateCandles). Falls back to the most recent EARLIER bucket still on the
+    /// SAME trading day when this exact one has no trade at all: AggregateCandles only ever
+    /// produces a bucket where the contract actually printed, so a thinly-traded strike (an OTM
+    /// leg sitting quiet for a few minutes, most often the lunch lull) can have no bucket at the
+    /// signal's own instant even though it traded shortly before and after - the same "No Data" a
+    /// contract that genuinely has nothing would show, but for a different reason: here, the
+    /// market's own last real print IS the answer to "what is this worth right now", the standard
+    /// forward-fill convention for an instrument that simply didn't trade this instant. Bounded to
+    /// the SAME day on purpose - a gap is bridged this way only within a single session; an
+    /// overnight/weekend one never is, since a premium is not "unchanged" after a full session of
+    /// theta decay and the next day's re-open, it is genuinely unknown until a real print returns.
+    /// -1 when there is truly nothing yet on this bucket's own day (a strike with no data at all
+    /// on the signal's day, or - for a signal from this exact instant - not even one native minute
+    /// of it has closed yet; self-corrects on the next evaluation).</summary>
     private static int FindAt(IReadOnlyList<Candle> bars, DateTimeOffset time)
     {
+        var fallback = -1;
         for (var i = 0; i < bars.Count; i++)
         {
             if (bars[i].Time == time) return i;
+            if (bars[i].Time > time) break; // bars are time-ascending - nothing earlier remains after this
+            if (BacktestUtil.IstDate(bars[i].Time) == BacktestUtil.IstDate(time)) fallback = i;
         }
-        return -1;
+        return fallback;
     }
 }
