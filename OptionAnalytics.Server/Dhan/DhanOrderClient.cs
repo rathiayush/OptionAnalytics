@@ -21,11 +21,15 @@ public sealed record PlainOrderResult(string OrderId, string OrderStatus);
 
 /// <summary>
 /// Dhan's plain Order API (https://dhanhq.co/docs/v2/orders/) - a single LIMIT/MARKET order with
-/// no attached target/stop-loss legs, unlike DhanSuperOrderClient's bracket orders. Every entry
-/// this app places is a Super Order (it wants the bracket); this client exists only for the one
-/// case a bracket can't do - closing an EXISTING position early, at a configured square-off time,
-/// independent of wherever its own target/stop-loss happen to sit. See
-/// StrategyTriggerHostedService.SquareOffIfDueAsync.
+/// no attached target/stop-loss legs, unlike DhanSuperOrderClient's bracket orders. A strategy's
+/// own naked entry is always a Super Order (it wants the bracket); this client covers everywhere a
+/// bracket can't apply instead:
+///   - closing an EXISTING position early, at a configured square-off time, independent of
+///     wherever its own target/stop-loss happen to sit (StrategyTriggerHostedService.
+///     SquareOffIfDueAsync);
+///   - a PROTECTIVE hedge leg (StrategyTrigger.HedgeOtmSteps) - bought plain, with no SL/target of
+///     its own, and later closed the same plain way once the main leg it protects closes
+///     (StrategyTriggerHostedService.BuildOrderPlanAsync/CloseHedgeIfOpenAsync).
 ///
 /// Same auth/error-shape plumbing as DhanSuperOrderClient - both go through the shared
 /// DhanApiClient.

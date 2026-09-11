@@ -426,6 +426,10 @@ public sealed class StrategyTriggerHostedService : BackgroundService
             // knows (see the method's own doc comment for what "known" means here).
             await NotifyPositionClosedIfKnownAsync(trigger, entryOrder, cancellationToken);
             _store.SetLastOrderId(trigger.Id, null);
+            // The main leg this hedge was protecting is gone - a hedge with nothing left to hedge
+            // is just an unrelated naked long nobody asked for, so it is always closed right here
+            // too rather than left to ride. See CloseHedgeIfOpenAsync.
+            await CloseHedgeIfOpenAsync(trigger, cancellationToken);
             return;
         }
 
@@ -566,6 +570,9 @@ public sealed class StrategyTriggerHostedService : BackgroundService
                 _logger.LogInformation("Trigger {Name}: square-off order {OrderId} filled on attempt {Attempt}/{Max}.", trigger.Name, orderId, attempt, MaxFillAttempts);
                 await NotifyFollowUpAsync(trigger, $"[SQUARED OFF] {contract.TradingSymbol}\nFilled {order.FilledQty}/{order.Quantity} at ~{order.Price:0.##} on attempt {attempt}/{MaxFillAttempts}.", cancellationToken);
                 _store.SetLastOrderId(trigger.Id, null);
+                // Same reasoning as SquareOffIfDueAsync's own natural-closure branch: the main leg
+                // is confirmed flat, so anything hedging it is closed right along with it.
+                await CloseHedgeIfOpenAsync(trigger, cancellationToken);
                 return;
             }
 
@@ -609,6 +616,191 @@ public sealed class StrategyTriggerHostedService : BackgroundService
             }
 
             _logger.LogInformation("Trigger {Name}: re-priced square-off order {OrderId} to {Price:0.##} for {Quantity} (attempt {Attempt}/{Max}, live premium {Live:0.##}).",
+                trigger.Name, orderId, newPrice, remaining, attempt + 1, MaxFillAttempts, latestPrice);
+        }
+    }
+
+    /// <summary>The correlationId prefix a hedge-closing order carries - HedgeCloseCorrelationPrefix's
+    /// own counterpart to SquareOffCorrelationPrefix, so CloseHedgeIfOpenAsync can tell "is a hedge
+    /// close already working" apart from every other correlationId scheme this file uses.</summary>
+    private static string HedgeCloseCorrelationPrefix(string triggerId) => $"{triggerId}-hedgeclose-";
+
+    /// <summary>Closes StrategyTrigger.LastHedgeOrderId's own position - a plain SELL to close the
+    /// protective BUY (see StrategyTrigger.HedgeOtmSteps) - the moment the main leg it was
+    /// protecting is confirmed no longer open. Called from both places that ever clear LastOrderId:
+    /// SquareOffIfDueAsync's own "already closed" branch (the main leg hit its own stop-loss/target/
+    /// a manual trade), and MonitorSquareOffFillAsync once ITS square-off order confirms flat (the
+    /// main leg was closed early on a schedule). A hedge with nothing left protecting it is not
+    /// "still hedging" anything - keeping it open past that point would just be an unrelated naked
+    /// long nobody asked for, so it is always closed here rather than left to ride.
+    ///
+    /// Ground truth throughout, same preference as everywhere else in this pipeline: LastHedgeOrderId
+    /// only says which plain order this trigger is watching, never assumed still open - the order
+    /// and position books are asked fresh every call. A no-op (and self-healing) when there is
+    /// nothing to close: no LastHedgeOrderId, the order itself no longer visible, the position
+    /// already flat, or a previous sweep's close order still working.</summary>
+    private async Task CloseHedgeIfOpenAsync(StrategyTrigger trigger, CancellationToken cancellationToken)
+    {
+        if (trigger.LastHedgeOrderId is not { } hedgeOrderId) return;
+
+        var hedgeOrder = (await _orders.ListAsync(cancellationToken)).FirstOrDefault(o => o.OrderId == hedgeOrderId);
+        if (hedgeOrder is null)
+        {
+            // No longer visible at all (a very old order Dhan has rolled off) - nothing left to
+            // track for this hedge.
+            _store.SetLastHedgeOrderId(trigger.Id, null);
+            return;
+        }
+
+        var hedgePosition = (await _positions.ListAsync(cancellationToken)).FirstOrDefault(p => p.SecurityId == hedgeOrder.SecurityId);
+        if (hedgePosition is not { IsOpen: true })
+        {
+            // Already closed - a previous close attempt finishing since the last sweep, or a
+            // manual trade at the broker. Nothing left for this trigger to watch.
+            _store.SetLastHedgeOrderId(trigger.Id, null);
+            return;
+        }
+
+        if (!uint.TryParse(hedgeOrder.SecurityId, out var securityId))
+        {
+            _logger.LogWarning("Trigger {Name}: hedge order {OrderId} has an unparseable security id {SecurityId} - cannot close it automatically. CHECK DHAN DIRECTLY.",
+                trigger.Name, hedgeOrderId, hedgeOrder.SecurityId);
+            return;
+        }
+
+        var contract = _optionChainMaster.FindBySecurityId(securityId);
+        if (contract is null)
+        {
+            _logger.LogWarning("Trigger {Name}: hedge security id {SecurityId} is not in the option chain master - cannot price closing it. CHECK DHAN DIRECTLY.", trigger.Name, securityId);
+            return;
+        }
+
+        var prefix = HedgeCloseCorrelationPrefix(trigger.Id);
+        var alreadyWorking = (await _orders.ListAsync(cancellationToken)).Any(o =>
+            o.SecurityId == hedgeOrder.SecurityId && o.CorrelationId is { } id && id.StartsWith(prefix, StringComparison.Ordinal)
+            && o.OrderStatus is "PENDING" or "TRANSIT" or "PART_TRADED");
+        if (alreadyWorking) return; // a previous sweep's hedge-close order is still being monitored - see MonitorHedgeCloseFillAsync
+
+        var quantity = Math.Abs(hedgePosition.NetQty);
+        var reference = await GetRepricingReferenceForSquareOffAsync(trigger.Underlying, contract.Expiry, contract.Strike, contract.IsCall, isSell: true, cancellationToken);
+        if (reference is null)
+        {
+            _logger.LogWarning("Trigger {Name}: no live premium for hedge leg {Strike}{Type} - cannot close it this sweep, will retry next minute.",
+                trigger.Name, contract.Strike, contract.IsCall ? "CE" : "PE");
+            return;
+        }
+
+        var rawPrice = Math.Max(0, reference.Value - trigger.SlippagePoints);
+        var price = RoundToTick(rawPrice, contract.TickSize);
+        var correlationId = $"{prefix}{DateTimeOffset.UtcNow:yyyyMMddHHmmss}";
+        var summary = $"SELL {contract.TradingSymbol} x{quantity} (SecurityId {contract.SecurityId})\nLIMIT {price:0.##} - closing the protective hedge now that the main leg is no longer open";
+
+        var (result, error) = await _orders.PlaceAsync("SELL", "NSE_FNO", ProductType, "LIMIT", "DAY", hedgeOrder.SecurityId, quantity, price, correlationId, cancellationToken);
+
+        if (result is null)
+        {
+            var reason = string.IsNullOrWhiteSpace(error) ? "no reason given by Dhan" : error;
+            _logger.LogError("Trigger {Name}: hedge close order placement FAILED for {Summary} - {Error}", trigger.Name, summary, reason);
+            await NotifyFollowUpAsync(trigger, $"[HEDGE CLOSE FAILED] {summary}\nDhan error: {reason}\nThe hedge is still open - will retry next minute.", cancellationToken);
+            return; // LastHedgeOrderId stays set so the hedge keeps being checked on the next sweep
+        }
+
+        _logger.LogInformation("Trigger {Name}: hedge close order placed - orderId={OrderId} status={Status} for {Summary}", trigger.Name, result.OrderId, result.OrderStatus, summary);
+        await NotifyFollowUpAsync(trigger, $"[HEDGE CLOSE ORDER PLACED] {summary}\nDhan order {result.OrderId} ({result.OrderStatus})\nMonitoring fill (up to {MaxFillAttempts} attempts)...", cancellationToken);
+
+        _ = Task.Run(async () =>
+        {
+            try { await MonitorHedgeCloseFillAsync(trigger, contract, quantity, result.OrderId, cancellationToken); }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogError(ex, "Trigger {Name}: hedge-close fill-monitoring crashed for order {OrderId}.", trigger.Name, result.OrderId);
+                await NotifyFollowUpAsync(trigger,
+                    $"[HEDGE CLOSE PIPELINE CRASHED] {contract.TradingSymbol} - an unexpected error stopped this hedge-close order from being monitored. CHECK DHAN DIRECTLY - the hedge may still be open or the order may still be resting.",
+                    CancellationToken.None);
+            }
+        }, CancellationToken.None);
+    }
+
+    /// <summary>MonitorSquareOffFillAsync's own retry-until-filled loop, adapted for closing a
+    /// PROTECTIVE hedge leg instead of the main position: same MaxFillAttempts x FillCheckInterval
+    /// cadence and the same escalating-slippage re-price, always selling (a hedge is only ever a
+    /// BUY to open, so closing it is only ever a SELL - no isSell parameter needed here unlike
+    /// MonitorSquareOffFillAsync, which closes either side depending on the main position it
+    /// found). Clears StrategyTrigger.LastHedgeOrderId the moment the hedge position is confirmed
+    /// flat, checked directly against DhanPositionsClient - same ground-truth preference as
+    /// everywhere else in this pipeline.</summary>
+    private async Task MonitorHedgeCloseFillAsync(StrategyTrigger trigger, DhanOptionInstrument contract, int quantity, string orderId, CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; attempt <= MaxFillAttempts; attempt++)
+        {
+            try
+            {
+                await Task.Delay(FillCheckInterval, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning("Trigger {Name}: shutting down while hedge close order {OrderId} was still being monitored - leaving it as-is.", trigger.Name, orderId);
+                await NotifyFollowUpAsync(trigger,
+                    $"[HEDGE CLOSE UNMONITORED] {contract.TradingSymbol}\nDhan order {orderId}\nThe app is shutting down before this order resolved - it is left exactly as it was. CHECK DHAN DIRECTLY.",
+                    CancellationToken.None);
+                return;
+            }
+
+            var order = (await _orders.ListAsync(cancellationToken)).FirstOrDefault(o => o.OrderId == orderId);
+            if (order is null)
+            {
+                _logger.LogWarning("Trigger {Name}: hedge close order {OrderId} not visible on attempt {Attempt}/{Max} - will check again.", trigger.Name, orderId, attempt, MaxFillAttempts);
+                continue;
+            }
+
+            if (string.Equals(order.OrderStatus, "TRADED", StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogInformation("Trigger {Name}: hedge close order {OrderId} filled on attempt {Attempt}/{Max}.", trigger.Name, orderId, attempt, MaxFillAttempts);
+                await NotifyFollowUpAsync(trigger, $"[HEDGE CLOSED] {contract.TradingSymbol}\nFilled {order.FilledQty}/{order.Quantity} at ~{order.Price:0.##} on attempt {attempt}/{MaxFillAttempts}.", cancellationToken);
+                _store.SetLastHedgeOrderId(trigger.Id, null);
+                return;
+            }
+
+            if (order.OrderStatus is "CANCELLED" or "REJECTED")
+            {
+                var reasonLine = string.IsNullOrWhiteSpace(order.OmsErrorDescription) ? "" : $"\nReason: {order.OmsErrorDescription}";
+                _logger.LogWarning("Trigger {Name}: hedge close order {OrderId} is {Status} - the hedge may still be open. CHECK DHAN DIRECTLY.", trigger.Name, orderId, order.OrderStatus);
+                await NotifyFollowUpAsync(trigger, $"[HEDGE CLOSE {order.OrderStatus}] {contract.TradingSymbol}{reasonLine}\nThe hedge may still be open - the next sweep will retry if so.", cancellationToken);
+                return; // LastHedgeOrderId deliberately left set: the next sweep re-checks the real position and tries again if it is still open
+            }
+
+            if (attempt == MaxFillAttempts)
+            {
+                _logger.LogWarning("Trigger {Name}: hedge close order {OrderId} still {Status} ({Filled}/{Total}) after {Max} attempts - leaving it resting.",
+                    trigger.Name, orderId, order.OrderStatus, order.FilledQty, order.Quantity, MaxFillAttempts);
+                await NotifyFollowUpAsync(trigger,
+                    $"[HEDGE PARTIALLY CLOSED] {contract.TradingSymbol}\nFilled {order.FilledQty}/{order.Quantity} after {MaxFillAttempts} attempts. The remainder is left resting - check Dhan if you want to close it manually.",
+                    cancellationToken);
+                return;
+            }
+
+            var latestPrice = await GetRepricingReferenceForSquareOffAsync(trigger.Underlying, contract.Expiry, contract.Strike, contract.IsCall, isSell: true, cancellationToken);
+            if (latestPrice is null)
+            {
+                _logger.LogWarning("Trigger {Name}: no live premium available for hedge {Strike}{Type} - cannot re-price hedge close order {OrderId} on attempt {Attempt}/{Max}.",
+                    trigger.Name, contract.Strike, contract.IsCall ? "CE" : "PE", orderId, attempt, MaxFillAttempts);
+                continue;
+            }
+
+            var remaining = quantity - order.FilledQty;
+            var slippage = trigger.SlippagePoints * UnfilledRetrySlippageMultiplier;
+            var rawPrice = Math.Max(0, latestPrice.Value - slippage);
+            var newPrice = RoundToTick(rawPrice, contract.TickSize);
+
+            var (modifyResult, modifyError) = await _orders.ModifyAsync(orderId, "LIMIT", "DAY", remaining, newPrice, cancellationToken);
+            if (modifyResult is null)
+            {
+                _logger.LogWarning("Trigger {Name}: re-price MODIFY failed for hedge close order {OrderId} on attempt {Attempt}/{Max} - {Error} - will check again.",
+                    trigger.Name, orderId, attempt, MaxFillAttempts, string.IsNullOrWhiteSpace(modifyError) ? "no reason given by Dhan" : modifyError);
+                continue;
+            }
+
+            _logger.LogInformation("Trigger {Name}: re-priced hedge close order {OrderId} to {Price:0.##} for {Quantity} (attempt {Attempt}/{Max}, live premium {Live:0.##}).",
                 trigger.Name, orderId, newPrice, remaining, attempt + 1, MaxFillAttempts, latestPrice);
         }
     }
@@ -712,7 +904,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         {
             try
             {
-                var (plan, skipReason) = await BuildOrderPlanAsync(trigger, trade, cancellationToken);
+                var (plan, hedge, skipReason) = await BuildOrderPlanAsync(trigger, trade, cancellationToken);
                 if (plan is null)
                 {
                     // A null SkipReason means AdjustStopLossForOpenPositionAsync already sent its
@@ -734,7 +926,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
                         trigger.Name);
                 }
 
-                var statusLine = await PlaceOrderAsync(trigger, trade, plan, cancellationToken);
+                var statusLine = await PlaceOrderAsync(trigger, trade, plan, hedge, cancellationToken);
                 await NotifyFollowUpAsync(trigger, statusLine, cancellationToken);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -776,7 +968,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     ///   - Every price is rounded to the contract's own tick size (DhanOptionInstrument.TickSize) -
     ///     Dhan rejects a price that isn't a whole multiple of it.
     /// </summary>
-    private async Task<(SuperOrderPlan? Plan, string? SkipReason)> BuildOrderPlanAsync(StrategyTrigger trigger, BacktestTrade trade, CancellationToken cancellationToken)
+    private async Task<(SuperOrderPlan? Plan, HedgePlan? Hedge, string? SkipReason)> BuildOrderPlanAsync(StrategyTrigger trigger, BacktestTrade trade, CancellationToken cancellationToken)
     {
         var isCall = trade.OptionType == "CE";
 
@@ -788,7 +980,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         if (expiry is null)
         {
             _logger.LogWarning("Trigger {Name}: no currently-tracked expiry for {Underlying} - cannot place order.", trigger.Name, trade.Underlying);
-            return (null, $"no expiry is currently tracked for {trade.Underlying}");
+            return (null, null, $"no expiry is currently tracked for {trade.Underlying}");
         }
 
         // Belt and braces alongside the DhanOptionChainMaster singleton fix: this service never
@@ -809,7 +1001,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
             var nearby = _optionChainMaster.DescribeNearestListed(trade.Underlying, expiry.Value, trade.Strike, isCall);
             _logger.LogWarning("Trigger {Name}: {Underlying} {Strike}{Type} not found on expiry {Expiry} - cannot place order. {Nearby}",
                 trigger.Name, trade.Underlying, trade.Strike, trade.OptionType, expiry.Value, nearby);
-            return (null, $"{trade.Strike:0.##}{trade.OptionType} is not listed on the {expiry.Value:dd MMM yyyy} expiry ({nearby})");
+            return (null, null, $"{trade.Strike:0.##}{trade.OptionType} is not listed on the {expiry.Value:dd MMM yyyy} expiry ({nearby})");
         }
 
         // A pinned expiry that isn't the tracked one is a DIFFERENT contract from the one the
@@ -833,7 +1025,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
             {
                 _logger.LogWarning("Trigger {Name}: no live premium for {Underlying} {Strike}{Type} on expiry {Expiry} - cannot price the order.",
                     trigger.Name, trade.Underlying, trade.Strike, trade.OptionType, expiry.Value);
-                return (null, $"no live premium available for {trade.Strike:0.##}{trade.OptionType} on the {expiry.Value:dd MMM yyyy} expiry");
+                return (null, null, $"no live premium available for {trade.Strike:0.##}{trade.OptionType} on the {expiry.Value:dd MMM yyyy} expiry");
             }
             entryPrice = livePremium;
         }
@@ -845,7 +1037,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         {
             // Shouldn't happen - EvaluateAsync only reaches here with a resolved entry unless
             // live-premium mode is on - but it is still reported rather than swallowed.
-            return (null, "the trade has no resolved entry price yet");
+            return (null, null, "the trade has no resolved entry price yet");
         }
 
         var isSell = trade.Side == "Sell";
@@ -894,7 +1086,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
             {
                 _logger.LogWarning("Trigger {Name}: {Underlying} {Strike}{Type} already has an open Dhan position ({PositionType}, netQty {NetQty}) - skipping this signal rather than doubling exposure.",
                     trigger.Name, trade.Underlying, trade.Strike, trade.OptionType, openPosition.PositionType, openPosition.NetQty);
-                return (null, $"{trade.Strike:0.##}{trade.OptionType} already has an open Dhan position ({openPosition.PositionType}, netQty {openPosition.NetQty}) - skipping this signal rather than doubling exposure");
+                return (null, null, $"{trade.Strike:0.##}{trade.OptionType} already has an open Dhan position ({openPosition.PositionType}, netQty {openPosition.NetQty}) - skipping this signal rather than doubling exposure");
             }
 
             // Opted in: rather than skip the new signal outright, re-base the EXISTING position's
@@ -911,8 +1103,61 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         var summary = $"{transactionType} {contract.TradingSymbol} x{quantity} (SecurityId {contract.SecurityId})\n" +
             $"LIMIT {limitPrice:0.##} · Target {targetPrice:0.##} · SL {stopLossPrice:0.##}" + expiryNote;
 
-        return (new SuperOrderPlan(transactionType, contract.SecurityId.ToString(), contract.SecurityId, quantity, limitPrice, targetPrice, stopLossPrice, tick, entryPrice, correlationId, summary, expiry.Value), null);
+        // A PROTECTIVE hedge leg only ever applies to a fresh sell - see StrategyTrigger.
+        // HedgeOtmSteps' own doc comment. Resolved and priced here, alongside the main leg, but not
+        // yet placed - PlaceOrderAsync places it FIRST and aborts the whole order if it fails,
+        // since a sell this trigger was configured to hedge must never go out naked just because
+        // the hedge leg itself could not be built.
+        HedgePlan? hedgePlan = null;
+        if (isSell && trigger.HedgeOtmSteps > 0)
+        {
+            var step = _spotFeed.States.TryGetValue(trade.Underlying, out var spotState) ? spotState.Step : 0;
+            var hedgeStrike = HedgeStrike(trade.Strike, isCall, trigger.HedgeOtmSteps, step);
+
+            var hedgeContract = _optionChainMaster.Find(trade.Underlying, expiry.Value, hedgeStrike, isCall);
+            if (hedgeContract is null)
+            {
+                var nearby = _optionChainMaster.DescribeNearestListed(trade.Underlying, expiry.Value, hedgeStrike, isCall);
+                _logger.LogWarning("Trigger {Name}: hedge leg {Strike}{Type} not found on expiry {Expiry} - aborting the whole order rather than sell naked. {Nearby}",
+                    trigger.Name, hedgeStrike, trade.OptionType, expiry.Value, nearby);
+                return (null, null, $"the protective hedge leg {hedgeStrike:0.##}{trade.OptionType} is not listed on the {expiry.Value:dd MMM yyyy} expiry ({nearby}) - refusing to sell {trade.Strike:0.##}{trade.OptionType} naked instead");
+            }
+
+            var hedgeLive = await GetOrderPremiumAsync(trade.Underlying, expiry.Value, trackedExpiry, hedgeStrike, isCall, cancellationToken);
+            if (hedgeLive is not { } hedgeReference || hedgeReference <= 0)
+            {
+                _logger.LogWarning("Trigger {Name}: no live premium for hedge leg {Strike}{Type} on expiry {Expiry} - aborting the whole order rather than sell naked.",
+                    trigger.Name, hedgeStrike, trade.OptionType, expiry.Value);
+                return (null, null, $"no live premium available for the protective hedge leg {hedgeStrike:0.##}{trade.OptionType} - refusing to sell {trade.Strike:0.##}{trade.OptionType} naked instead");
+            }
+
+            // Buying, so pay a little ABOVE the reference to stay marketable - the mirror of how
+            // limitReference/rawLimit above prices a SELL a little below it.
+            var hedgeRawPrice = hedgeReference + trigger.SlippagePoints;
+            var hedgePrice = RoundToTick(hedgeRawPrice, hedgeContract.TickSize);
+            var hedgeSummary = $"BUY {hedgeContract.TradingSymbol} x{quantity} (SecurityId {hedgeContract.SecurityId}) - protective hedge, {trigger.HedgeOtmSteps} step(s) further OTM than the sold leg\nLIMIT {hedgePrice:0.##}";
+
+            hedgePlan = new HedgePlan(hedgeContract.SecurityId.ToString(), hedgeContract.SecurityId, quantity, hedgePrice, hedgeSummary);
+        }
+
+        return (new SuperOrderPlan(transactionType, contract.SecurityId.ToString(), contract.SecurityId, quantity, limitPrice, targetPrice, stopLossPrice, tick, entryPrice, correlationId, summary, expiry.Value), hedgePlan, null);
     }
+
+    /// <summary>The PROTECTIVE hedge leg's own order shape - see StrategyTrigger.HedgeOtmSteps. A
+    /// plain marketable BUY (DhanOrderClient, not DhanSuperOrderClient - it carries no SL/target of
+    /// its own; it is only ever closed once the main leg it protects closes, see
+    /// CloseHedgeIfOpenAsync), priced the same "SlippagePoints beyond the live reference" way every
+    /// other entry in this file already is.</summary>
+    private sealed record HedgePlan(string SecurityId, uint InstrumentSecurityId, int Quantity, decimal Price, string Summary);
+
+    /// <summary>StrategyTrigger.HedgeOtmSteps' own distance rule: further OTM in the SAME direction
+    /// the sold leg already is, measured from the SOLD strike itself rather than from ATM again -
+    /// a higher strike for a sold CE (calls get cheaper as the strike rises), a lower strike for a
+    /// sold PE (puts get cheaper as the strike falls). Pure arithmetic, pulled out of
+    /// BuildOrderPlanAsync for direct unit test coverage the way that method's own live Dhan/CDV
+    /// dependencies otherwise make impossible to exercise.</summary>
+    internal static decimal HedgeStrike(decimal soldStrike, bool isCall, int hedgeOtmSteps, int step) =>
+        isCall ? soldStrike + hedgeOtmSteps * step : soldStrike - hedgeOtmSteps * step;
 
     /// <summary>StrategyTrigger.AdjustStopLossOnOpenPosition's actual effect: MODIFY the existing
     /// Super Order's STOP_LOSS_LEG to <paramref name="newStopLoss"/> (the new signal's own
@@ -921,7 +1166,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     /// to place here, whatever happens - but with a null SkipReason on success/failure-already-
     /// reported, so PlaceOrderInBackgroundAsync's own [NO ORDER PLACED] fallback message stays
     /// silent; this method sends its own, more specific Telegram message either way.</summary>
-    private async Task<(SuperOrderPlan? Plan, string? SkipReason)> AdjustStopLossForOpenPositionAsync(
+    private async Task<(SuperOrderPlan? Plan, HedgePlan? Hedge, string? SkipReason)> AdjustStopLossForOpenPositionAsync(
         StrategyTrigger trigger, BacktestTrade trade, DhanOptionInstrument contract, DhanPosition openPosition,
         decimal newStopLoss, CancellationToken cancellationToken)
     {
@@ -938,7 +1183,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         {
             _logger.LogWarning("Trigger {Name}: {Underlying} {Strike}{Type} has an open Dhan position ({PositionType}, netQty {NetQty}) but no matching filled Super Order was found - cannot update its stop-loss.",
                 trigger.Name, trade.Underlying, trade.Strike, trade.OptionType, openPosition.PositionType, openPosition.NetQty);
-            return (null, $"{trade.Strike:0.##}{trade.OptionType} has an open position ({openPosition.PositionType}, netQty {openPosition.NetQty}) but no matching order was found to update its stop-loss - skipping this signal");
+            return (null, null, $"{trade.Strike:0.##}{trade.OptionType} has an open position ({openPosition.PositionType}, netQty {openPosition.NetQty}) but no matching order was found to update its stop-loss - skipping this signal");
         }
 
         var previousStopLoss = order.StopLossPrice;
@@ -954,7 +1199,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
             await NotifyFollowUpAsync(trigger,
                 $"[STOP LOSS UPDATE FAILED] {trade.Underlying} {trade.Strike:0.##}{trade.OptionType}\nDhan order {order.OrderId}\nTried to move SL from {previousStopLoss:0.##} to {newStopLoss:0.##} off a new {trade.Direction} signal at {trade.SignalTimeUtc.ToOffset(ist):HH:mm} IST (still open at the old SL) - {reason}",
                 cancellationToken);
-            return (null, null);
+            return (null, null, null);
         }
 
         _logger.LogInformation("Trigger {Name}: stop-loss updated for order {OrderId} from {Previous:0.##} to {New:0.##} off a new signal instead of opening a second position.",
@@ -962,7 +1207,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         await NotifyFollowUpAsync(trigger,
             $"[STOP LOSS UPDATED] {trade.Underlying} {trade.Strike:0.##}{trade.OptionType}\nDhan order {order.OrderId}\nSL moved from {previousStopLoss:0.##} to {newStopLoss:0.##}, re-based off a new {trade.Direction} signal at {trade.SignalTimeUtc.ToOffset(ist):HH:mm} IST - no second position opened.",
             cancellationToken);
-        return (null, null);
+        return (null, null, null);
     }
 
     /// <summary>Places the order and, on success, hands the fill-monitoring off to MonitorFillAsync
@@ -975,9 +1220,38 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     /// caller (PlaceOrderInBackgroundAsync) to send as its own follow-up Telegram message. Never
     /// throws: PlaceAsync already logs and returns null on any error (network, rejection, missing IP
     /// whitelisting), so a failed placement never stops the underlying signal alert from going
-    /// out - that alert is sent independently and earlier by NotifyAsync regardless.</summary>
-    private async Task<string> PlaceOrderAsync(StrategyTrigger trigger, BacktestTrade trade, SuperOrderPlan plan, CancellationToken cancellationToken)
+    /// out - that alert is sent independently and earlier by NotifyAsync regardless.
+    ///
+    /// <paramref name="hedge"/>, when BuildOrderPlanAsync built one, is placed FIRST - a plain BUY
+    /// via DhanOrderClient, not a Super Order (see HedgePlan's own doc comment) - and if IT fails,
+    /// the whole thing aborts right here: the main Super Order below is never placed. A trigger
+    /// configured with HedgeOtmSteps asked for a hedged spread, not "a spread when convenient, a
+    /// naked sell otherwise" - the one substitution real money can never make silently.</summary>
+    private async Task<string> PlaceOrderAsync(StrategyTrigger trigger, BacktestTrade trade, SuperOrderPlan plan, HedgePlan? hedge, CancellationToken cancellationToken)
     {
+        if (hedge is not null)
+        {
+            var hedgeCorrelationId = $"{trigger.Id}-hedge-{trade.SignalTimeUtc:yyyyMMddHHmm}";
+            var (hedgeResult, hedgeError) = await _orders.PlaceAsync(
+                "BUY", "NSE_FNO", ProductType, OrderType, "DAY",
+                hedge.SecurityId, hedge.Quantity, hedge.Price, hedgeCorrelationId, cancellationToken);
+
+            if (hedgeResult is null)
+            {
+                var hedgeReason = string.IsNullOrWhiteSpace(hedgeError) ? "no reason given by Dhan" : hedgeError;
+                _logger.LogError("Trigger {Name}: hedge leg placement FAILED for {Summary} - {Error} - main order ABORTED, refusing to sell naked.",
+                    trigger.Name, hedge.Summary, hedgeReason);
+                return $"[HEDGE FAILED - MAIN ORDER ABORTED]\n{hedge.Summary}\nDhan error: {hedgeReason}\nRefusing to place the main {plan.TransactionType} leg naked - nothing was placed for this signal. If that doesn't explain it, a common secondary cause is the account's static IP whitelisting not covering this server.";
+            }
+
+            _logger.LogInformation("Trigger {Name}: hedge leg placed - orderId={OrderId} status={Status} for {Summary}",
+                trigger.Name, hedgeResult.OrderId, hedgeResult.OrderStatus, hedge.Summary);
+
+            // Recorded the instant an order id exists, regardless of fill state - same reasoning as
+            // LastOrderId below, so CloseHedgeIfOpenAsync can find it later even across a restart.
+            _store.SetLastHedgeOrderId(trigger.Id, hedgeResult.OrderId);
+        }
+
         var (result, error) = await _superOrders.PlaceAsync(
             plan.TransactionType, "NSE_FNO", ProductType, OrderType,
             plan.SecurityId, plan.Quantity, plan.Price, plan.TargetPrice, plan.StopLossPrice,
@@ -987,7 +1261,8 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         {
             var reason = string.IsNullOrWhiteSpace(error) ? "no reason given by Dhan" : error;
             _logger.LogError("Trigger {Name}: Super Order placement FAILED for {Summary} - {Error}", trigger.Name, plan.Summary, reason);
-            return $"[ORDER FAILED]\n{plan.Summary}\nDhan error: {reason}\nIf that doesn't explain it, a common secondary cause is the account's static IP whitelisting not covering this server.";
+            var hedgeNote = hedge is not null ? "\n\nNOTE: the protective hedge leg above WAS already placed - CHECK DHAN, you may now be holding just the hedge with nothing to protect." : "";
+            return $"[ORDER FAILED]\n{plan.Summary}\nDhan error: {reason}\nIf that doesn't explain it, a common secondary cause is the account's static IP whitelisting not covering this server.{hedgeNote}";
         }
 
         _logger.LogInformation("Trigger {Name}: Super Order placed - orderId={OrderId} status={Status} for {Summary}",
@@ -1018,7 +1293,8 @@ public sealed class StrategyTriggerHostedService : BackgroundService
             }
         }, CancellationToken.None);
 
-        return $"[ORDER PLACED] Dhan order {result.OrderId} ({result.OrderStatus})\n{plan.Summary}\nMonitoring fill (up to {MaxFillAttempts} attempts)...";
+        var hedgePlacedNote = hedge is not null ? $"\n\n[HEDGE PLACED] {hedge.Summary}" : "";
+        return $"[ORDER PLACED] Dhan order {result.OrderId} ({result.OrderStatus})\n{plan.Summary}\nMonitoring fill (up to {MaxFillAttempts} attempts)...{hedgePlacedNote}";
     }
 
     /// <summary>The retry loop: waits FillCheckInterval, checks whether the entry leg has filled,
