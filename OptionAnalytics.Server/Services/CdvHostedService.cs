@@ -493,12 +493,17 @@ public sealed class CdvHostedService : BackgroundService
     }
 
     /// <summary>
-    /// One strike's premium candles for the dashboard chart. Tracked strikes (inside, or previously
-    /// inside today, the CDV ATM+-16 window) answer straight from memory including the still-forming
-    /// bar, exactly as the ATM charts do. Any other listed strike is fetched from Dhan's intraday
-    /// history on demand and cached briefly - that history is complete but static, so such a chart
-    /// shows the same days as the tracked ones but only advances when re-fetched, which is the
-    /// trade-off for being able to look at a strike this app never subscribed to.
+    /// One strike's premium candles for the dashboard chart. A strike still INSIDE the CDV ATM+-16
+    /// window right now answers straight from memory including the still-forming bar, exactly as
+    /// the ATM charts do. Any other strike - never tracked, or one that WAS tracked earlier but has
+    /// since fallen out of the window - is fetched from Dhan's intraday history on demand and
+    /// cached briefly: a strike that dropped out stops receiving ticks altogether and is never
+    /// re-backfilled even if it later re-enters (EnsureTracked is a no-op on an already-tracked
+    /// strike), so its own in-memory series would otherwise sit frozen at whatever day it dropped
+    /// out on FOREVER rather than merely being a bit stale - "tracked" alone does not mean
+    /// "current". The on-demand history is complete but static, so such a chart shows the same days
+    /// as a currently-tracked one but only advances when re-fetched, which is the trade-off for
+    /// being able to look at a strike this app isn't (or is no longer) live-subscribed to.
     /// </summary>
     public async Task<IReadOnlyList<Candle>> GetStrikeCandlesAsync(
         string underlying, decimal strike, bool isCall, CancellationToken cancellationToken, DateOnly? expiryFilter = null)
@@ -506,9 +511,12 @@ public sealed class CdvHostedService : BackgroundService
         var state = StateFor(underlying, expiryFilter);
         if (state is null) return Array.Empty<Candle>();
 
-        // A tracked strike with a genuinely empty series (tracked seconds ago, nothing seeded yet)
-        // still counts as tracked - GetStrikeCandles returns null only when it isn't tracked at all.
-        if (state.GetStrikeCandles(strike, isCall) is { } tracked && tracked.Count > 0) return tracked;
+        // Trusted outright only while it actually reaches today - a series that stops short of
+        // that has fallen out of the live window (see this method's own doc comment) rather than
+        // merely being "tracked seconds ago, nothing seeded yet" (which is also Count == 0, so it
+        // falls through to the same on-demand fetch below, exactly as it always did).
+        var tracked = state.GetStrikeCandles(strike, isCall);
+        if (tracked is { Count: > 0 } && IstClock.IstDate(tracked[^1].Time) >= IstClock.Today()) return tracked;
 
         var expiry = state.Expiry;
         if (expiry is null) return Array.Empty<Candle>();
