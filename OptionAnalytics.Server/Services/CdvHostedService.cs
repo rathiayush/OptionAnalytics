@@ -52,6 +52,13 @@ public sealed class CdvHostedService : BackgroundService
     /// everything is live again.</summary>
     private static readonly TimeSpan IncompleteRetryInterval = TimeSpan.FromSeconds(30);
 
+    /// <summary>How long before a strike whose backfill came back EMPTY is asked for again. Matches
+    /// the normal AtmRecenterInterval rather than IncompleteRetryInterval on purpose: the 30-second
+    /// cadence exists to get a not-yet-live underlying subscribed quickly, which is cheap and local,
+    /// not to re-request history Dhan has already said it does not have - that is a rate-limited
+    /// call, and there are up to 66 of them per expiry.</summary>
+    private static readonly TimeSpan EmptyStrikeRetryInterval = TimeSpan.FromMinutes(30);
+
     /// <summary>Matches SpotFeedHostedService's own backfill window exactly - the option premium
     /// charts and CDV's reconstructed history need to cover the same trading days the spot chart
     /// does, or the charts would visibly disagree on how far back "history" goes. Both read the
@@ -874,7 +881,16 @@ public sealed class CdvHostedService : BackgroundService
                 // a transient Dhan error) is still "tracked" from EnsureTracked's point of view, so
                 // it would never show up as newly-tracked again - NeedsBackfill catches that case
                 // and retries it right alongside genuinely new strikes on this recenter.
-                if (isNewlyTracked || state.NeedsBackfill(contract.SecurityId))
+                //
+                // Rate-limited, because not every failure is transient. A contract that has simply
+                // never traded - or every contract on an exchange this account has no data
+                // entitlement for - comes back empty every single time and so never sets Backfilled.
+                // This loop runs every 30 SECONDS rather than 30 minutes whenever any underlying is
+                // not fully live (see RecenterAllAsync), so without a floor on retries one dead
+                // exchange re-requests its entire strike window a hundred-odd times an hour,
+                // spending the shared Dhan history rate limit that the underlyings which DO work
+                // need for their own backfills.
+                if (isNewlyTracked || state.NeedsBackfill(contract.SecurityId, EmptyStrikeRetryInterval))
                     needsBackfill.Add(contract.SecurityId);
                 _bySecurityId[contract.SecurityId] = state;
                 desiredTokens.Add(contract.SecurityId);
@@ -1017,6 +1033,12 @@ public sealed class CdvHostedService : BackgroundService
 
             var securityId = securityIds[i];
             var dhanSegment = _optionChainMaster.FindBySecurityId(securityId)?.DhanSegment ?? "NSE_FNO";
+
+            // Stamped BEFORE the call, so a request that throws or is cancelled still counts as an
+            // attempt - otherwise exactly the strikes that fail hardest would be the ones retried
+            // most often, which is backwards.
+            state.MarkBackfillAttempted(securityId);
+
             IReadOnlyList<CandleWithVolume> bars;
             try
             {
