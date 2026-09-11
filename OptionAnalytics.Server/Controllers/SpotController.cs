@@ -11,12 +11,14 @@ public sealed class SpotController : ControllerBase
     private readonly SpotFeedHostedService _feed;
     private readonly DhanSession _session;
     private readonly DhanOptionChainMaster _optionChainMaster;
+    private readonly CdvHostedService _cdv;
 
-    public SpotController(SpotFeedHostedService feed, DhanSession session, DhanOptionChainMaster optionChainMaster)
+    public SpotController(SpotFeedHostedService feed, DhanSession session, DhanOptionChainMaster optionChainMaster, CdvHostedService cdv)
     {
         _feed = feed;
         _session = session;
         _optionChainMaster = optionChainMaster;
+        _cdv = cdv;
     }
 
     /// <summary>Why there is no data, in one call. "Nothing is showing" has several very different
@@ -58,6 +60,15 @@ public sealed class SpotController : ControllerBase
                     lastCandle = candles.Count > 0 ? candles[^1].Time : (DateTimeOffset?)null,
                     lastPrice = s.LastPrice,
                 };
+            }),
+            // A tracked strike with no candles got no backfill - a whole expiry of them means the
+            // option history fetch is failing for that underlying, not that the market was quiet.
+            options = _cdv.GetOptionCoverage().Select(c => new
+            {
+                underlying = c.Underlying,
+                expiry = c.Expiry,
+                trackedStrikes = c.TrackedStrikes,
+                strikesWithCandles = c.StrikesWithCandles,
             }),
         });
     }

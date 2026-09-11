@@ -115,13 +115,19 @@ public sealed class DhanHistoricalDataService
     /// one is what CdvHostedService calls per strike) and carrying Volume too, since both OBV and
     /// the CDV backfill's bar-proxy delta classification need it and the plain Candle shape
     /// doesn't carry it.</summary>
-    public async Task<IReadOnlyList<CandleWithVolume>> GetIntradayOptionCandlesAsync(
+    /// <summary>Returns the candles plus, when the call did not succeed, Dhan's own reason for it.
+    /// The reason is surfaced rather than swallowed because a per-strike failure is logged at Debug
+    /// (see below) and so is invisible at normal log level - which made "an entire underlying's
+    /// option history is missing" indistinguishable from "those strikes simply didn't trade", with
+    /// no way to tell which without turning on Debug logging in production. The caller aggregates
+    /// these into one line per backfill batch.</summary>
+    public async Task<(IReadOnlyList<CandleWithVolume> Candles, string? Error)> GetIntradayOptionCandlesAsync(
         uint securityId, string dhanSegment, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken)
     {
         if (!_api.HasSession)
         {
             _logger.LogWarning("Cannot fetch intraday option candles for {Segment}:{Id} - Dhan is not authenticated.", dhanSegment, securityId);
-            return Array.Empty<CandleWithVolume>();
+            return (Array.Empty<CandleWithVolume>(), "Dhan is not authenticated");
         }
 
         var payload = new
@@ -143,10 +149,10 @@ public sealed class DhanHistoricalDataService
             // the lookback window (added to the chain partway through, or never traded some days),
             // which CdvHostedService.RecenterAsync would otherwise log once per strike as noise.
             _logger.LogDebug("Option intraday candle request failed for {Segment}:{Id} ({From}..{To}) - {Error}", dhanSegment, securityId, fromDay, toDay, response.ErrorMessage);
-            return Array.Empty<CandleWithVolume>();
+            return (Array.Empty<CandleWithVolume>(), string.IsNullOrWhiteSpace(response.ErrorMessage) ? $"HTTP {(int)response.StatusCode}" : response.ErrorMessage);
         }
 
-        return ParseCandlesWithVolume(response.Root);
+        return (ParseCandlesWithVolume(response.Root), null);
     }
 
     private List<CandleWithVolume> ParseCandlesWithVolume(JsonElement root)
