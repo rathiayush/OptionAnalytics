@@ -5,10 +5,9 @@ namespace OptionAnalytics.Server.Tests;
 
 /// <summary>Covers OptionTradeSimulator.Run's squareOffMinutes handling - the daily IST cutoff
 /// that forces an open position closed at a fixed time of day, every day, instead of riding to
-/// whatever the day's own last bar happens to be. Every other exit path (stop/target/forced/
-/// signal exit/end-of-day) is already exercised via the individual strategies' own tests; these
-/// isolate the new cutoff by disabling stop/target (slPoints/tpPoints = 0) so it is the only
-/// thing that can end the trade.</summary>
+/// whatever the day's own last bar happens to be. Stop/target has its own dedicated coverage in
+/// OptionTradeSimulatorStopTargetTests; these isolate the square-off cutoff by disabling stop/
+/// target (slPoints/tpPoints = 0) so it is the only thing that can end the trade.</summary>
 public sealed class OptionTradeSimulatorSquareOffTests
 {
     // 04:00 UTC == 09:30 IST - matches the T0 convention EmaCrossoverStrategyTests already uses.
