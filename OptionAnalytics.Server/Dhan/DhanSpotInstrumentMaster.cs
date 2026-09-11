@@ -6,11 +6,11 @@ namespace OptionAnalytics.Server.Dhan;
 
 /// <summary>
 /// Downloads Dhan's scrip master CSV and keeps only the cash/index rows this app needs to
-/// resolve NIFTY 50 and NIFTY BANK to their IDX_I security ids. A deliberately narrow cousin of
-/// LiveSpreadCalculator's DhanInstrumentMasterService: that one indexes the whole futures/options
-/// universe for a trading engine; this app only ever needs two spot instruments, so it keeps just
-/// the INDEX/EQUITY rows and discards everything else (futures, options, currency, commodity -
-/// the bulk of Dhan's ~200k-row file) as it streams past.
+/// resolve NIFTY 50, NIFTY BANK and SENSEX to their IDX_I security ids. A deliberately narrow
+/// cousin of LiveSpreadCalculator's DhanInstrumentMasterService: that one indexes the whole
+/// futures/options universe for a trading engine; this app only ever needs a few spot instruments,
+/// so it keeps just the INDEX/EQUITY rows and discards everything else (futures, options,
+/// currency, commodity - the bulk of Dhan's ~200k-row file) as it streams past.
 /// </summary>
 public sealed class DhanSpotInstrumentMaster
 {
@@ -18,11 +18,15 @@ public sealed class DhanSpotInstrumentMaster
 
     /// <summary>Underlying -> the display name(s) its index spot is listed under, tried in order.
     /// Same aliasing problem LiveSpreadCalculator's SpotSymbology solves for the trading app's
-    /// full underlying list, narrowed here to the two indices this app charts.</summary>
+    /// full underlying list, narrowed here to the indices this app charts. NIFTY/BANKNIFTY are
+    /// NSE-listed; SENSEX is BSE-listed - both exchanges are kept below (see ParseSpotRows), so
+    /// which one a name actually resolves against is left entirely to this table, not a hardcoded
+    /// exchange filter that would only ever admit one of the two.</summary>
     private static readonly Dictionary<string, string[]> IndexAliases = new(StringComparer.OrdinalIgnoreCase)
     {
         ["NIFTY"] = new[] { "NIFTY 50", "NIFTY50", "NIFTY" },
         ["BANKNIFTY"] = new[] { "NIFTY BANK", "BANKNIFTY" },
+        ["SENSEX"] = new[] { "SENSEX" },
     };
 
     private readonly HttpClient _httpClient;
@@ -101,10 +105,13 @@ public sealed class DhanSpotInstrumentMaster
 
         var nifty = FindSpot("NIFTY");
         var bankNifty = FindSpot("BANKNIFTY");
+        var sensex = FindSpot("SENSEX");
         if (nifty is null) _logger.LogWarning("Could not find a NIFTY spot/index row in the Dhan scrip master.");
         if (bankNifty is null) _logger.LogWarning("Could not find a BANKNIFTY spot/index row in the Dhan scrip master.");
+        if (sensex is null) _logger.LogWarning("Could not find a SENSEX spot/index row in the Dhan scrip master.");
         if (nifty is not null) _logger.LogInformation("Resolved NIFTY spot -> securityId={Id} ({Symbol}, segment={Segment})", nifty.SecurityId, nifty.TradingSymbol, nifty.DhanSegment);
         if (bankNifty is not null) _logger.LogInformation("Resolved BANKNIFTY spot -> securityId={Id} ({Symbol}, segment={Segment})", bankNifty.SecurityId, bankNifty.TradingSymbol, bankNifty.DhanSegment);
+        if (sensex is not null) _logger.LogInformation("Resolved SENSEX spot -> securityId={Id} ({Symbol}, segment={Segment})", sensex.SecurityId, sensex.TradingSymbol, sensex.DhanSegment);
     }
 
     /// <summary>Matches an underlying (NIFTY/BANKNIFTY) to its cash/index row, trying the
@@ -171,7 +178,13 @@ public sealed class DhanSpotInstrumentMaster
             var isEquity = string.Equals(instrumentName, "EQUITY", StringComparison.OrdinalIgnoreCase);
             if (!isIndex && !isEquity) continue;
 
-            if (!string.Equals(Get(fields, exchangeIndex)?.Trim(), "NSE", StringComparison.OrdinalIgnoreCase)) continue;
+            // NIFTY/BANKNIFTY are NSE-listed, SENSEX is BSE-listed - both are kept here and left to
+            // IndexAliases/FindSpot's own name matching to tell apart, rather than a single hardcoded
+            // exchange that would only ever admit one of the two.
+            var exchange = Get(fields, exchangeIndex)?.Trim();
+            if (!string.Equals(exchange, "NSE", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(exchange, "BSE", StringComparison.OrdinalIgnoreCase))
+                continue;
 
             if (!uint.TryParse(Get(fields, securityIdIndex), NumberStyles.Integer, CultureInfo.InvariantCulture, out var securityId))
                 continue;

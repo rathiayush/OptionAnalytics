@@ -7,19 +7,23 @@ using OptionAnalytics.Server.Models;
 namespace OptionAnalytics.Server.Services;
 
 /// <summary>
-/// The orchestrator: resolves NIFTY/BANKNIFTY's Dhan security ids, backfills the last
+/// The orchestrator: resolves NIFTY/BANKNIFTY/SENSEX's Dhan security ids, backfills the last
 /// HistoryWindow.TradingDays trading days' 1-minute candles into memory (nothing is ever persisted
 /// to disk - a restart re-fetches from Dhan every time), then runs the live WS feed and folds every
 /// tick into the current bar, pushing each update to the dashboard over SignalR.
 /// </summary>
 public sealed class SpotFeedHostedService : BackgroundService
 {
-    /// <summary>Strike-step rounding used for the "round figure" price shown under the chart -
-    /// the same step NSE index option chains use (50 for NIFTY, 100 for BANKNIFTY).</summary>
+    /// <summary>Strike-step rounding used for the "round figure" price shown under the chart - the
+    /// same step each index's own option chain uses (50 for NIFTY, 100 for BANKNIFTY and SENSEX).
+    /// NIFTY/BANKNIFTY are NSE-listed, SENSEX is BSE-listed - a different exchange, not just
+    /// another symbol - but DhanSpotInstrumentMaster.FindSpot resolves either one identically by
+    /// name, so nothing else here needs to know which exchange a given underlying is actually on.</summary>
     private static readonly (string Underlying, int Step)[] Underlyings =
     {
         ("NIFTY", 50),
         ("BANKNIFTY", 100),
+        ("SENSEX", 100),
     };
 
     /// <summary>Shared with CdvHostedService's own backfill - see HistoryWindow for why the spot

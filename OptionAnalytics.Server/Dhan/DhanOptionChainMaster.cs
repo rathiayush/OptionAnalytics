@@ -5,9 +5,9 @@ using Microsoft.Extensions.Options;
 namespace OptionAnalytics.Server.Dhan;
 
 /// <summary>
-/// Downloads Dhan's scrip master CSV and keeps only NIFTY/BANKNIFTY index option (OPTIDX) rows -
-/// the CDV feature's option-chain source. A cousin of DhanSpotInstrumentMaster (same download,
-/// different rows kept) and a narrowed port of LiveSpreadCalculator's
+/// Downloads Dhan's scrip master CSV and keeps only NIFTY/BANKNIFTY/SENSEX index option (OPTIDX)
+/// rows - the CDV feature's option-chain source. A cousin of DhanSpotInstrumentMaster (same
+/// download, different rows kept) and a narrowed port of LiveSpreadCalculator's
 /// DhanInstrumentMasterService.BuildOptionIndex/FindOption/TryReadOptionRow.
 /// </summary>
 public sealed class DhanOptionChainMaster
@@ -19,7 +19,12 @@ public sealed class DhanOptionChainMaster
     /// master has nothing in it (IsFresh is false with zero contracts by design), which turns a
     /// broken master into a download on every recenter AND every order attempt.</summary>
     private static readonly TimeSpan EmptyRetryInterval = TimeSpan.FromMinutes(1);
-    private static readonly string[] Underlyings = { "NIFTY", "BANKNIFTY" };
+
+    /// <summary>NIFTY/BANKNIFTY trade on NSE (ExchangeSegment NSE_FNO); SENSEX trades on BSE
+    /// (BSE_FNO) - a genuinely different exchange, not just another symbol, which is why every
+    /// contract now carries its OWN ExchangeSegment (see ParseOptionRows) rather than the single
+    /// hardcoded "NSE_FNO" every row got before SENSEX existed here.</summary>
+    private static readonly string[] Underlyings = { "NIFTY", "BANKNIFTY", "SENSEX" };
 
     private readonly HttpClient _httpClient;
     private readonly DhanOptions _options;
@@ -258,7 +263,6 @@ public sealed class DhanOptionChainMaster
         public static readonly string[] Exchange = { "SEM_EXM_EXCH_ID", "EXCH_ID" };
         public static readonly string[] InstrumentName = { "SEM_INSTRUMENT_NAME", "INSTRUMENT" };
         public static readonly string[] TradingSymbol = { "SEM_TRADING_SYMBOL", "TRADING_SYMBOL" };
-        public static readonly string[] UnderlyingName = { "SM_SYMBOL_NAME", "UNDERLYING_SYMBOL", "SYMBOL_NAME" };
         public static readonly string[] Expiry = { "SEM_EXPIRY_DATE", "SM_EXPIRY_DATE", "EXPIRY_DATE" };
         public static readonly string[] Strike = { "SEM_STRIKE_PRICE", "STRIKE_PRICE" };
         public static readonly string[] OptionType = { "SEM_OPTION_TYPE", "OPTION_TYPE" };
@@ -267,16 +271,17 @@ public sealed class DhanOptionChainMaster
     }
 
     /// <summary>Why rows did not survive the parse. Every filter below is a legitimate reason to
-    /// drop a row on a healthy download (most rows are not NIFTY/BANKNIFTY index options at all),
-    /// so these numbers mean nothing in the happy path - but when the parse yields ZERO they say
-    /// exactly WHICH step ate everything, which is the difference between "Dhan renamed a column"
-    /// and "we downloaded an error page".</summary>
+    /// drop a row on a healthy download (most rows are not NIFTY/BANKNIFTY/SENSEX index options at
+    /// all), so these numbers mean nothing in the happy path - but when the parse yields ZERO they
+    /// say exactly WHICH step ate everything, which is the difference between "Dhan renamed a
+    /// column" and "we downloaded an error page".</summary>
     private sealed class ParseStats
     {
         public int DataRows;
         public int OptIdxRows;
         public int MatchedUnderlying;
         public int DroppedSecurityId;
+        public int DroppedExchange;
         public int DroppedExpiry;
         public int DroppedOptionType;
         public int DroppedStrike;
@@ -285,8 +290,8 @@ public sealed class DhanOptionChainMaster
         public int Kept;
 
         public override string ToString() =>
-            $"Read {DataRows} data row(s): {OptIdxRows} OPTIDX, {MatchedUnderlying} on NIFTY/BANKNIFTY, kept {Kept}. " +
-            $"Dropped - securityId {DroppedSecurityId}, expiry {DroppedExpiry}, optionType {DroppedOptionType}, " +
+            $"Read {DataRows} data row(s): {OptIdxRows} OPTIDX, {MatchedUnderlying} on NIFTY/BANKNIFTY/SENSEX, kept {Kept}. " +
+            $"Dropped - securityId {DroppedSecurityId}, exchange {DroppedExchange}, expiry {DroppedExpiry}, optionType {DroppedOptionType}, " +
             $"strike {DroppedStrike}, lotSize {DroppedLotSize}, tickSize {DroppedTickSize}.";
     }
 
@@ -308,7 +313,6 @@ public sealed class DhanOptionChainMaster
         var exchangeIndex = Resolve(header, Columns.Exchange);
         var instrumentNameIndex = Resolve(header, Columns.InstrumentName);
         var tradingSymbolIndex = Resolve(header, Columns.TradingSymbol);
-        var underlyingIndex = Resolve(header, Columns.UnderlyingName);
         var expiryIndex = Resolve(header, Columns.Expiry);
         var strikeIndex = Resolve(header, Columns.Strike);
         var optionTypeIndex = Resolve(header, Columns.OptionType);
@@ -335,17 +339,32 @@ public sealed class DhanOptionChainMaster
             var tradingSymbol = Get(fields, tradingSymbolIndex);
             if (string.IsNullOrWhiteSpace(tradingSymbol)) continue;
 
-            // Confirmed against a real download: Dhan leaves SM_SYMBOL_NAME BLANK on every NSE
-            // index option row (unlike futures rows, which populate it), so this column alone
-            // silently drops every NIFTY/BANKNIFTY option. Fallback: Dhan's option trading symbols
-            // are "UNDERLYING-MonYYYY-STRIKE-CE/PE", so the leading segment before the first dash
-            // is the underlying either way.
-            var underlying = Get(fields, underlyingIndex);
-            if (string.IsNullOrWhiteSpace(underlying))
-                underlying = DeriveUnderlying(tradingSymbol);
+            // Always derived from the trading symbol - "UNDERLYING-MonYYYY-STRIKE-CE/PE" - rather
+            // than read off a dedicated column. Confirmed against a real download: Dhan leaves
+            // SM_SYMBOL_NAME BLANK on every NSE index option row, and on a BSE one (SENSEX,
+            // SENSEX50) it holds the PRODUCT code instead ("BSXOPT"/"SX50OPT"), never the
+            // underlying's own name - so that column is never actually usable here on either
+            // exchange, only the trading symbol's own leading segment is.
+            var underlying = DeriveUnderlying(tradingSymbol);
             if (string.IsNullOrWhiteSpace(underlying) || !Underlyings.Contains(underlying, StringComparer.OrdinalIgnoreCase))
                 continue;
             stats.MatchedUnderlying++;
+
+            // NIFTY/BANKNIFTY trade on NSE, SENSEX on BSE - two different exchanges, so the
+            // contract's own row says which rather than assuming NSE_FNO for everything the way
+            // this did before SENSEX existed here.
+            var exchange = Get(fields, exchangeIndex)?.Trim().ToUpperInvariant();
+            var exchangeSegment = exchange switch
+            {
+                "NSE" => "NSE_FNO",
+                "BSE" => "BSE_FNO",
+                _ => null,
+            };
+            if (exchangeSegment is null)
+            {
+                stats.DroppedExchange++;
+                continue;
+            }
 
             if (!uint.TryParse(Get(fields, securityIdIndex), NumberStyles.Integer, CultureInfo.InvariantCulture, out var securityId))
             {
@@ -396,7 +415,7 @@ public sealed class DhanOptionChainMaster
                 continue;
             }
 
-            options.Add(new DhanOptionInstrument(securityId, tradingSymbol, underlying, expiry.Value, strike, optionType == "CE", "NSE_FNO", lotSize, tickSize));
+            options.Add(new DhanOptionInstrument(securityId, tradingSymbol, underlying, expiry.Value, strike, optionType == "CE", exchangeSegment, lotSize, tickSize));
             stats.Kept++;
         }
 
