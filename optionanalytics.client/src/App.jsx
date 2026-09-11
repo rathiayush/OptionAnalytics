@@ -42,7 +42,7 @@ const STORED_CDV_LOOKBACK_BARS = 'optionanalytics.lookbackBars.cdv'
 const STORED_OBV_LOOKBACK_BARS = 'optionanalytics.lookbackBars.obv'
 const STORED_DAYS_TO_SHOW = 'optionanalytics.daysToShow'
 
-// How many of the server's already-held trading days (HistoryWindow.TradingDays - 30 as of this
+// How many of the server's already-held trading days (HistoryWindow.TradingDays - 45 as of this
 // writing) the charts actually display - a client-side view over data that's all already sitting
 // in memory after the page's own load, same "instant, no round trip" idea as the timeframe
 // switcher. 0 means "All" - deliberately not hardcoded to the server's current window size, so this
@@ -54,8 +54,15 @@ const DAYS_OPTIONS = [
   { value: 10, label: '10 days' },
   { value: 15, label: '15 days' },
   { value: 30, label: '30 days' },
+  { value: 45, label: '45 days' },
   { value: 0, label: 'All' },
 ]
+
+// Default "days to show" - 45 matches HistoryWindow.TradingDays exactly, so a fresh page load (or
+// anyone who has never touched the picker) shows the server's FULL held window rather than an
+// arbitrary narrower slice, while still landing on one of the picker's own labeled values instead
+// of silently behaving like "All" for a reason nobody chose.
+const DEFAULT_DAYS_TO_SHOW = 45
 
 function useScaledLine(points, unitKey) {
   const { divisor } = VALUE_UNITS[unitKey]
@@ -1047,9 +1054,8 @@ function DashboardPage() {
   const [selected, setSelected] = usePersistedState(STORED_UNDERLYING, null)
   const [timeframe, setTimeframe] = usePersistedState(STORED_TIMEFRAME, 1)
   // How many of the server's held trading days the charts show - see DAYS_OPTIONS/
-  // trimToRecentDays. Defaults to 0 ("All") so nobody who hasn't touched this control sees any
-  // change from before it existed.
-  const [daysToShow, setDaysToShow] = usePersistedState(STORED_DAYS_TO_SHOW, 0)
+  // trimToRecentDays/DEFAULT_DAYS_TO_SHOW.
+  const [daysToShow, setDaysToShow] = usePersistedState(STORED_DAYS_TO_SHOW, DEFAULT_DAYS_TO_SHOW)
   // Per-chart so either can be read at its own natural magnitude - CDV and OBV don't always sit
   // in the same range as each other.
   const [cdvUnit, setCdvUnit] = usePersistedState(STORED_CDV_UNIT, 'M')
