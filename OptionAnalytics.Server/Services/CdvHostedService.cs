@@ -223,6 +223,30 @@ public sealed class CdvHostedService : BackgroundService
     }
 
     /// <summary>This underlying's strike step (50 for NIFTY, 100 for BANKNIFTY), or 0 if unknown.</summary>
+    /// <summary>Per underlying/expiry: how many strikes are tracked, and how many of them actually
+    /// hold candles. The one number that separates "this underlying's option history is missing"
+    /// from "these particular strikes didn't trade" - a tracked strike with zero candles got no
+    /// backfill, and a whole expiry of them means the fetch is failing rather than the market being
+    /// quiet. Read by SpotController's diagnostics endpoint.</summary>
+    public IReadOnlyList<(string Underlying, DateOnly Expiry, int TrackedStrikes, int StrikesWithCandles)> GetOptionCoverage()
+    {
+        var coverage = new List<(string, DateOnly, int, int)>();
+
+        foreach (var (underlying, _, _) in Underlyings)
+        {
+            foreach (var expiry in TrackedExpiries(underlying))
+            {
+                if (StateFor(underlying, expiry) is not { } state) continue;
+
+                var strikes = GetTrackedStrikes(underlying, expiry);
+                var withCandles = strikes.Count(s => state.GetStrikeCandles(s.Strike, s.IsCall) is { Count: > 0 });
+                coverage.Add((underlying, expiry, strikes.Count, withCandles));
+            }
+        }
+
+        return coverage;
+    }
+
     public int StepFor(string underlying) =>
         Underlyings.FirstOrDefault(u => string.Equals(u.Underlying, underlying, StringComparison.OrdinalIgnoreCase)).Step;
 
@@ -591,7 +615,11 @@ public sealed class CdvHostedService : BackgroundService
         IReadOnlyList<CandleWithVolume> bars;
         try
         {
-            bars = await _historicalData.GetIntradayOptionCandlesAsync(contract.SecurityId, contract.DhanSegment, fromDay, today, 1, cancellationToken);
+            var (fetched, error) = await _historicalData.GetIntradayOptionCandlesAsync(contract.SecurityId, contract.DhanSegment, fromDay, today, 1, cancellationToken);
+            bars = fetched;
+            if (error is not null)
+                _logger.LogWarning("On-demand candle fetch failed for {Underlying} {Strike}{Type} ({Segment}:{Id}) - {Error}",
+                    underlying, strike, isCall ? "CE" : "PE", contract.DhanSegment, contract.SecurityId, error);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -973,6 +1001,16 @@ public sealed class CdvHostedService : BackgroundService
         // backs that strike's ATM CE/PE chart once it becomes the ATM contract.
         var includeInCdvHistory = _cdvHistorySeeded.Add((underlying, expiry));
 
+        // Counted so a batch that returns NOTHING can say so once, with Dhan's own reason, instead
+        // of disappearing into per-strike Debug lines. "No option history for this underlying at
+        // all" and "these particular strikes didn't trade" look identical from the dashboard and
+        // from the logs, but the first is a broken exchange/entitlement/segment and the second is
+        // ordinary - and only the aggregate can tell them apart.
+        var withData = 0;
+        var failed = 0;
+        string? lastError = null;
+        string? failedSegment = null;
+
         for (var i = 0; i < securityIds.Count; i++)
         {
             if (i > 0) await Task.Delay(BackfillCallDelay, cancellationToken);
@@ -982,15 +1020,26 @@ public sealed class CdvHostedService : BackgroundService
             IReadOnlyList<CandleWithVolume> bars;
             try
             {
-                bars = await _historicalData.GetIntradayOptionCandlesAsync(securityId, dhanSegment, fromDay, today, 1, cancellationToken);
+                var (fetched, error) = await _historicalData.GetIntradayOptionCandlesAsync(securityId, dhanSegment, fromDay, today, 1, cancellationToken);
+                bars = fetched;
+                if (error is not null)
+                {
+                    failed++;
+                    lastError = error;
+                    failedSegment = dhanSegment;
+                }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 _logger.LogDebug(ex, "CDV backfill: request threw for {Underlying} security {SecurityId}", underlying, securityId);
+                failed++;
+                lastError = ex.Message;
+                failedSegment = dhanSegment;
                 continue;
             }
 
             if (bars.Count == 0) continue;
+            withData++;
 
             var trimmed = TrimToRecentTradingDays(bars, HistoryTradingDays);
             if (trimmed.Count == 0) continue;
@@ -1012,6 +1061,20 @@ public sealed class CdvHostedService : BackgroundService
             }
 
             seededCount++;
+        }
+
+        // One line, once per batch, and only when the whole batch came back with nothing - loud
+        // enough to find a broken exchange/entitlement, quiet enough not to fire on the ordinary
+        // case of some strikes not having traded.
+        if (withData == 0 && securityIds.Count > 0)
+        {
+            _logger.LogWarning(
+                "CDV backfill got NO option history for {Underlying} {Expiry} on segment {Segment}: {Failed} of {Total} request(s) failed. {Reason} " +
+                "Backtests on this underlying will find no option premiums until this resolves.",
+                underlying, expiry, failedSegment ?? "?", failed, securityIds.Count,
+                lastError is null
+                    ? "Dhan returned no candles rather than an error, so these contracts exist but have no intraday history in the requested window."
+                    : $"Last error from Dhan: {lastError}.");
         }
 
         if (includeInCdvHistory)
