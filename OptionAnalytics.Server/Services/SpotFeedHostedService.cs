@@ -103,13 +103,37 @@ public sealed class SpotFeedHostedService : BackgroundService
             }
         }
 
-        await ResolveInstrumentsAsync(stoppingToken);
+        try
+        {
+            await ResolveInstrumentsAsync(stoppingToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Never fatal. An unhandled exception out of ExecuteAsync does not just stop THIS
+            // service - .NET's default BackgroundServiceExceptionBehavior stops the whole host, so
+            // the container dies and (restart: unless-stopped) comes back to do it again. One
+            // underlying's resolve failing must not be able to do that.
+            _logger.LogError(ex, "Resolving spot instruments failed - continuing with whatever resolved, the retry loop below re-attempts backfill.");
+        }
+
         await BackfillAsync(stoppingToken);
 
         _feedClient.TickReceived += OnTick;
 
         var tokenSegments = _bySecurityId.ToDictionary(kv => kv.Key, kv => kv.Value.Instrument!.DhanSegment);
-        await _feedClient.SubscribeAsync(tokenSegments, stoppingToken);
+        try
+        {
+            await _feedClient.SubscribeAsync(tokenSegments, stoppingToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // The whole subscription goes up in ONE batched message covering every underlying, and
+            // they no longer share an exchange - so a token Dhan won't accept (a BSE index on an
+            // account entitled to NSE only) is a plausible way for this single call to fail. Losing
+            // the live feed is bad; taking the host down with it, and with it the backfilled history
+            // and every backtest that reads it, is far worse.
+            _logger.LogError(ex, "Subscribing the spot feed failed for {Count} instrument(s) - backfilled history is still served, but live ticks will not flow until the feed reconnects.", tokenSegments.Count);
+        }
 
         // Live ticks are already flowing by now regardless of whether backfill above actually got
         // any history - this runs alongside them, not blocking anything, so a slow/failed first
@@ -188,13 +212,33 @@ public sealed class SpotFeedHostedService : BackgroundService
             if (state.Instrument is not { } instrument) continue;
             if (onlyIfEmpty && state.GetCandles().Count > 0) continue;
 
-            var candles = await _historicalData.GetIntradayCandlesAsync(instrument.SecurityId, instrument.DhanSegment, fromDay, today, 1, cancellationToken);
+            // Per-underlying, for the same reason CdvHostedService.RecenterAllAsync isolates its own
+            // loop: these underlyings no longer even share an exchange (NIFTY/BANKNIFTY are NSE,
+            // SENSEX is BSE), so one of them can fail for reasons that say nothing about the others -
+            // a data entitlement the account doesn't have, an instrument Dhan won't serve history
+            // for. Without this, the FIRST such failure aborts the whole loop and every underlying
+            // after it in the dictionary silently gets no history at all; and since this is awaited
+            // straight from ExecuteAsync, before the tick handler and the feed subscription are even
+            // wired up, it would take the entire spot feed - live ticks included - down with it.
+            try
+            {
+                var candles = await _historicalData.GetIntradayCandlesAsync(instrument.SecurityId, instrument.DhanSegment, fromDay, today, 1, cancellationToken);
 
-            var trimmed = TrimToRecentTradingDays(candles, HistoryTradingDays);
-            state.SeedHistory(trimmed);
+                var trimmed = TrimToRecentTradingDays(candles, HistoryTradingDays);
+                state.SeedHistory(trimmed);
 
-            var dayCount = trimmed.Select(c => IstDate(c.Time)).Distinct().Count();
-            _logger.LogInformation("Backfilled {Count} candle(s) across {Days} trading day(s) for {Underlying}.", trimmed.Count, dayCount, state.Underlying);
+                var dayCount = trimmed.Select(c => IstDate(c.Time)).Distinct().Count();
+                _logger.LogInformation("Backfilled {Count} candle(s) across {Days} trading day(s) for {Underlying}.", trimmed.Count, dayCount, state.Underlying);
+
+                if (trimmed.Count == 0)
+                    _logger.LogWarning("Backfill returned NO candles for {Underlying} ({Segment}:{Id}) - it will chart nothing and any backtest on it finds no signals. Check whether this account is entitled to that exchange's data.",
+                        state.Underlying, instrument.DhanSegment, instrument.SecurityId);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogError(ex, "Backfill FAILED for {Underlying} ({Segment}:{Id}) - leaving it empty and continuing with the other underlyings.",
+                    state.Underlying, instrument.DhanSegment, instrument.SecurityId);
+            }
         }
     }
 
