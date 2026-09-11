@@ -20,13 +20,15 @@ public static class HistoryWindow
     /// <summary>Distinct IST trading days of 1-minute history kept per instrument, counted in days
     /// that actually traded rather than calendar days - a weekend or a holiday cluster shortens a
     /// calendar window but must not shorten the chart.</summary>
-    public const int TradingDays = 30;
+    public const int TradingDays = 45;
 
     /// <summary>How far back the single range request to Dhan asks, in calendar days. Deliberately
-    /// wider than TradingDays needs (30 trading days is about 42 calendar days) so a long weekend
-    /// plus a festival cluster still leaves 30 days that traded inside the window; the response is
-    /// then trimmed to the most recent TradingDays distinct dates actually present. Kept at the same
-    /// 2x-of-TradingDays margin the original 15/30 pair used, and still nowhere near Dhan's
-    /// documented 90-day-per-request cap (see the class doc above).</summary>
-    public const int LookbackCalendarDays = 60;
+    /// wider than TradingDays needs (45 trading days is about 63 calendar days at 5 trading days a
+    /// week) so a long weekend plus a festival cluster still leaves 45 days that traded inside the
+    /// window; the response is then trimmed to the most recent TradingDays distinct dates actually
+    /// present. 80 keeps the same ~17-day holiday/weekend-slop buffer the original 30/60 pair had
+    /// (60 - 42 = 18) over the new 63-day base, while staying comfortably under - not flirting with -
+    /// Dhan's documented 90-day-per-request cap (see the class doc above): doubling straight to 90
+    /// the way 30->60 once did would land exactly ON that cap instead of nowhere near it.</summary>
+    public const int LookbackCalendarDays = 80;
 }
