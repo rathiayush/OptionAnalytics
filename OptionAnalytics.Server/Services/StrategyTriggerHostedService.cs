@@ -1112,7 +1112,34 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         if (isSell && trigger.HedgeOtmSteps > 0)
         {
             var step = _spotFeed.States.TryGetValue(trade.Underlying, out var spotState) ? spotState.Step : 0;
-            var hedgeStrike = HedgeStrike(trade.Strike, isCall, trigger.HedgeOtmSteps, step);
+            var requestedHedgeStrike = HedgeStrike(trade.Strike, isCall, trigger.HedgeOtmSteps, step);
+
+            // A distance alone does not make a tradeable strike - see StrategyTrigger.
+            // HedgeMinOpenInterestPercent. An empty snapshot (rate limiter, no session, outside
+            // market hours) leaves the requested strike exactly as it was: this check can only ever
+            // move the hedge CLOSER, so losing it costs protection that the listed/premium guards
+            // below still backstop, whereas refusing to trade on a missing decoration would take
+            // this trigger offline every time Dhan's 3-second limiter said no.
+            // Deliberately NOT ForeignExpiryQuoteMaxAge: that 4-second freshness exists because a
+            // stale PRICE makes re-pricing and the deviation guard meaningless. Open interest is a
+            // slow-moving number being used only to tell a live strike from a dead one, so the
+            // chain API's own 30-second cache is ample - and asking for fresher would push a real
+            // outbound call through a limiter that spaces them 3.5s apart, which would sit and WAIT
+            // inside the order path. Latency here delays a live order; a half-minute-old OI reading
+            // costs nothing.
+            var minOiPercent = trigger.HedgeMinOpenInterestPercent ?? HedgeDefaultMinOpenInterestPercent;
+            var chainOi = await _cdv.GetChainOpenInterestAsync(trade.Underlying, expiry.Value, isCall, cancellationToken);
+            if (chainOi.Count == 0 && minOiPercent > 0)
+                _logger.LogWarning("Trigger {Name}: no option chain OI snapshot for {Underlying} {Expiry} - placing the hedge leg at the requested {Strike}{Type} WITHOUT a liquidity check.",
+                    trigger.Name, trade.Underlying, expiry.Value, requestedHedgeStrike, trade.OptionType);
+
+            var walked = HedgeStrikeWalkedInward(trade.Strike, isCall, trigger.HedgeOtmSteps, step, chainOi, minOiPercent);
+            if (walked is not { } hedgeStrike)
+            {
+                _logger.LogWarning("Trigger {Name}: no hedge strike between {Floor} and {Requested} steps OTM of {Sold}{Type} has at least {Percent}% of its open interest - aborting the whole order rather than sell naked.",
+                    trigger.Name, Math.Max(1, trigger.HedgeOtmSteps / 2), trigger.HedgeOtmSteps, trade.Strike, trade.OptionType, minOiPercent);
+                return (null, null, $"every candidate hedge strike from {requestedHedgeStrike:0.##}{trade.OptionType} inward is too illiquid (under {minOiPercent}% of {trade.Strike:0.##}{trade.OptionType}'s open interest) - refusing to sell {trade.Strike:0.##}{trade.OptionType} naked instead");
+            }
 
             var hedgeContract = _optionChainMaster.Find(trade.Underlying, expiry.Value, hedgeStrike, isCall);
             if (hedgeContract is null)
@@ -1135,7 +1162,15 @@ public sealed class StrategyTriggerHostedService : BackgroundService
             // limitReference/rawLimit above prices a SELL a little below it.
             var hedgeRawPrice = hedgeReference + trigger.SlippagePoints;
             var hedgePrice = RoundToTick(hedgeRawPrice, hedgeContract.TickSize);
-            var hedgeSummary = $"BUY {hedgeContract.TradingSymbol} x{quantity} (SecurityId {hedgeContract.SecurityId}) - protective hedge, {trigger.HedgeOtmSteps} step(s) further OTM than the sold leg\nLIMIT {hedgePrice:0.##}";
+
+            // Never a silent substitution: a hedge that moved is a different spread - tighter risk,
+            // more premium paid - and whoever set that distance is entitled to see that it moved
+            // and why, in the same message that reports the order.
+            var actualSteps = step > 0 ? (int)(Math.Abs(hedgeStrike - trade.Strike) / step) : trigger.HedgeOtmSteps;
+            var hedgeNote = hedgeStrike == requestedHedgeStrike
+                ? $"{trigger.HedgeOtmSteps} step(s) further OTM than the sold leg"
+                : $"{actualSteps} step(s) further OTM than the sold leg - moved in from the requested {requestedHedgeStrike:0.##} ({trigger.HedgeOtmSteps} steps), which had under {minOiPercent}% of the sold strike's open interest";
+            var hedgeSummary = $"BUY {hedgeContract.TradingSymbol} x{quantity} (SecurityId {hedgeContract.SecurityId}) - protective hedge, {hedgeNote}\nLIMIT {hedgePrice:0.##}";
 
             hedgePlan = new HedgePlan(hedgeContract.SecurityId.ToString(), hedgeContract.SecurityId, quantity, hedgePrice, hedgeSummary, hedgeContract.DhanSegment);
         }
@@ -1158,6 +1193,61 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     /// dependencies otherwise make impossible to exercise.</summary>
     internal static decimal HedgeStrike(decimal soldStrike, bool isCall, int hedgeOtmSteps, int step) =>
         isCall ? soldStrike + hedgeOtmSteps * step : soldStrike - hedgeOtmSteps * step;
+
+    /// <summary>What StrategyTrigger.HedgeMinOpenInterestPercent defaults to when a trigger leaves
+    /// it null. Deliberately LENIENT: the two failure directions are not symmetric. Too lax leaves
+    /// the thin strike the distance already landed on - exactly what happened before this check
+    /// existed - while too strict silently pulls the hedge closer to the money on every single
+    /// trade, paying more premium and quietly changing the spread's economics out from under
+    /// whoever configured that distance. The first is the status quo; the second is a new way to
+    /// lose money. So this errs toward accepting, and leaves tightening to someone who has watched
+    /// the real OI on their own chain.</summary>
+    internal const int HedgeDefaultMinOpenInterestPercent = 5;
+
+    /// <summary>StrategyTrigger.HedgeMinOpenInterestPercent's actual search: the requested hedge
+    /// strike if it is liquid enough, otherwise the first strike INWARD of it (back toward the sold
+    /// leg) that is, down to a floor of half the requested distance. Null when nothing in that band
+    /// qualifies - the caller abandons the whole order rather than selling naked.
+    ///
+    /// Inward is the only direction this may walk. Closer to ATM is both more liquid (which is the
+    /// point) and more protective - a narrower spread caps the loss tighter - so the substitution
+    /// can only ever cost premium, never widen tail risk. Walking further OUT would be cheaper and
+    /// find liquidity at round strikes, but it would silently hand back a worse hedge than the one
+    /// that was asked for, which is the one thing this must not do.
+    ///
+    /// The half-distance floor bounds that cost: a hedge can end up at most twice as close as
+    /// configured, never at the sold strike itself (which would not be a hedge at all). Beyond that
+    /// the trade is simply not the one the trigger describes, so it does not get placed.
+    ///
+    /// <paramref name="openInterestByStrike"/> is the live chain snapshot for THIS expiry and side.
+    /// A strike missing from it is treated as failing: the chain is what the market is actually
+    /// quoting, so absent there means there is nothing to buy, the same conclusion the caller's own
+    /// no-live-premium guard reaches by a different route. When the sold strike itself has no OI in
+    /// the snapshot the threshold is 0 and everything passes - that is the intended lenient
+    /// degradation, not an oversight: with no yardstick there is nothing to measure against, and
+    /// refusing to trade on a missing decoration would be far worse than the thin hedge this check
+    /// exists to avoid.</summary>
+    internal static decimal? HedgeStrikeWalkedInward(
+        decimal soldStrike, bool isCall, int requestedSteps, int step,
+        IReadOnlyDictionary<decimal, long> openInterestByStrike, int minOpenInterestPercent)
+    {
+        var requested = HedgeStrike(soldStrike, isCall, requestedSteps, step);
+        if (minOpenInterestPercent <= 0 || openInterestByStrike.Count == 0) return requested;
+
+        openInterestByStrike.TryGetValue(soldStrike, out var soldOpenInterest);
+        var required = soldOpenInterest * minOpenInterestPercent / 100m;
+
+        // Never below 1: a "hedge" at the sold strike itself is the same contract, not protection.
+        var floorSteps = Math.Max(1, requestedSteps / 2);
+
+        for (var steps = requestedSteps; steps >= floorSteps; steps--)
+        {
+            var strike = HedgeStrike(soldStrike, isCall, steps, step);
+            if (openInterestByStrike.TryGetValue(strike, out var oi) && oi >= required) return strike;
+        }
+
+        return null;
+    }
 
     /// <summary>StrategyTrigger.AdjustStopLossOnOpenPosition's actual effect: MODIFY the existing
     /// Super Order's STOP_LOSS_LEG to <paramref name="newStopLoss"/> (the new signal's own

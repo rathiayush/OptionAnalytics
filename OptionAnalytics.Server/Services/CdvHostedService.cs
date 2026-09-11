@@ -495,6 +495,36 @@ public sealed class CdvHostedService : BackgroundService
         return price > 0 ? price : null;
     }
 
+    /// <summary>Every strike's OPEN INTEREST on one expiry/side, from Dhan's Option Chain API -
+    /// what StrategyTriggerHostedService needs to tell a real hedge strike from a listed-but-dead
+    /// one (see StrategyTrigger.HedgeMinOpenInterestPercent).
+    ///
+    /// The chain snapshot, not the websocket feed, is the only possible source here: a hedge sits
+    /// HedgeOtmSteps beyond an already-OTM sold strike, which routinely puts it outside the ATM+-16
+    /// window this service actually subscribes, and SpotTick carries no OI field even for the
+    /// strikes it does cover. This one call answers for the whole chain at once, however far out
+    /// the hedge lands.
+    ///
+    /// EMPTY whenever the call isn't available - no session, the rate limiter refusing, outside
+    /// market hours - never an exception. The caller treats empty as "no liquidity opinion" and
+    /// falls back to its other guards rather than refusing to trade.</summary>
+    public async Task<IReadOnlyDictionary<decimal, long>> GetChainOpenInterestAsync(
+        string underlying, DateOnly expiry, bool isCall, CancellationToken cancellationToken, TimeSpan? maxAge = null)
+    {
+        var instrument = _spotFeed.States.TryGetValue(underlying, out var spotState) ? spotState.Instrument : null;
+        if (instrument is null) return new Dictionary<decimal, long>();
+
+        var quotes = await _chainQuotes.GetQuotesAsync(instrument.SecurityId, instrument.DhanSegment, expiry, cancellationToken, maxAge);
+
+        var byStrike = new Dictionary<decimal, long>();
+        foreach (var quote in quotes)
+        {
+            var oi = isCall ? quote.CeOpenInterest : quote.PeOpenInterest;
+            if (oi is { } value) byStrike[quote.Strike] = value;
+        }
+        return byStrike;
+    }
+
     /// <summary>
     /// One strike's premium candles for the dashboard chart. A strike still INSIDE the CDV ATM+-16
     /// window right now answers straight from memory including the still-forming bar, exactly as

@@ -69,6 +69,7 @@ public sealed class StrategyTriggerStore
             OrderExpiry = request.OrderExpiry,
             AdjustStopLossOnOpenPosition = request.AdjustStopLossOnOpenPosition,
             HedgeOtmSteps = Math.Max(0, request.HedgeOtmSteps),
+            HedgeMinOpenInterestPercent = ClampHedgeMinOpenInterestPercent(request.HedgeMinOpenInterestPercent),
         };
 
         lock (_lock)
@@ -112,6 +113,7 @@ public sealed class StrategyTriggerStore
                 OrderExpiry = request.OrderExpiry,
                 AdjustStopLossOnOpenPosition = request.AdjustStopLossOnOpenPosition,
                 HedgeOtmSteps = Math.Max(0, request.HedgeOtmSteps),
+                HedgeMinOpenInterestPercent = ClampHedgeMinOpenInterestPercent(request.HedgeMinOpenInterestPercent),
                 LastSignalUtc = watchChanged ? null : existing.LastSignalUtc,
             };
 
@@ -176,6 +178,14 @@ public sealed class StrategyTriggerStore
             SaveNoLock();
         }
     }
+
+    /// <summary>Keeps StrategyTrigger.HedgeMinOpenInterestPercent inside 0-100, preserving null
+    /// (= "use the default") rather than collapsing it to 0 (= "check disabled"), since those two
+    /// mean opposite things. A negative value is a nonsense threshold rather than a disable switch -
+    /// 0 already says that explicitly - so it clamps up to 0 the same way every other field here
+    /// clamps rather than being rejected.</summary>
+    private static int? ClampHedgeMinOpenInterestPercent(int? percent) =>
+        percent is null ? null : Math.Clamp(percent.Value, 0, 100);
 
     private static bool ParametersEqual(IReadOnlyDictionary<string, decimal> a, IReadOnlyDictionary<string, decimal>? b)
     {

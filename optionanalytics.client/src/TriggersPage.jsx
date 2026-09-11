@@ -74,6 +74,13 @@ export default function TriggersPage() {
   // Sell-side trade; a Buy-side one has nothing to hedge. See StrategyTrigger.HedgeOtmSteps.
   const [hedgeOtmSteps, setHedgeOtmSteps] = useState(0)
 
+  // How liquid the hedge strike has to be before it is bought, as a percentage of the SOLD strike's
+  // own open interest - a far-OTM strike can be listed and still have essentially no book behind it.
+  // Too thin and the hedge walks INWARD toward the sold leg to the first strike that qualifies
+  // (down to half the requested distance), rather than buying something that can't be exited. 0
+  // turns the check off. See StrategyTrigger.HedgeMinOpenInterestPercent.
+  const [hedgeMinOiPercent, setHedgeMinOiPercent] = useState(5)
+
   // Read-only here: this page needs the list of TRACKED expiries to choose from, and the default so
   // the fallback option can name it. Every one of these is subscribed live, so a trigger pinned to
   // any of them is priced off the real feed rather than an option-chain snapshot.
@@ -155,6 +162,7 @@ export default function TriggersPage() {
         orderExpiry,
         adjustStopLossOnOpenPosition,
         hedgeOtmSteps,
+        hedgeMinOpenInterestPercent: hedgeMinOiPercent,
       }),
     })
       .then((r) => r.json())
@@ -194,6 +202,7 @@ export default function TriggersPage() {
         orderExpiry: row.orderExpiry,
         adjustStopLossOnOpenPosition: row.adjustStopLossOnOpenPosition,
         hedgeOtmSteps: row.hedgeOtmSteps,
+        hedgeMinOpenInterestPercent: row.hedgeMinOpenInterestPercent,
         ...changes,
       }),
     })
@@ -253,6 +262,9 @@ export default function TriggersPage() {
               {row.adjustStopLossOnOpenPosition ? ' · SL update on re-signal' : ''}
               {row.orderExpiry ? ` · ${row.orderExpiry} expiry` : ''}
               {row.hedgeOtmSteps > 0 ? ` · hedged +${row.hedgeOtmSteps} OTM` : ''}
+              {row.hedgeOtmSteps > 0 && row.hedgeMinOpenInterestPercent !== 0
+                ? ` (min ${row.hedgeMinOpenInterestPercent ?? 5}% OI)`
+                : ''}
             </Text>
           )}
         </Space>
@@ -443,6 +455,13 @@ export default function TriggersPage() {
                     <InputNumber controls={false} min={0} step={1} value={hedgeOtmSteps}
                       onChange={(v) => setHedgeOtmSteps(v ?? 0)} style={{ width: 130 }} />
                   </Space>
+                  {hedgeOtmSteps > 0 && (
+                    <Space direction="vertical" size={2}>
+                      <Text type="secondary" style={{ fontSize: 12 }}>Hedge min OI (% of sold strike, 0 = off)</Text>
+                      <InputNumber controls={false} min={0} max={100} step={1} value={hedgeMinOiPercent}
+                        onChange={(v) => setHedgeMinOiPercent(v ?? 0)} style={{ width: 130 }} />
+                    </Space>
+                  )}
                   <Text type="secondary" style={{ fontSize: 12, maxWidth: 460 }}>
                     Places a real Dhan Super Order (LIMIT entry + target + stop-loss) from every fired
                     trade. Slippage keeps the entry marketable. If it doesn&apos;t fill, it re-prices off the
@@ -460,7 +479,11 @@ export default function TriggersPage() {
                       ? ' this trigger instead moves that position’s stop-loss to the new signal’s own entry price, reported as [STOP LOSS UPDATED].'
                       : ' it is skipped instead, reported as [NO ORDER PLACED].'}
                     {hedgeOtmSteps > 0
-                      ? ` Every Sell signal also buys a cheaper, further-OTM option ${hedgeOtmSteps} strike step(s) beyond the sold one first, as protection - a credit spread instead of a naked sell. If the hedge leg can't be placed or priced, the whole order is aborted rather than selling naked. The hedge is closed automatically the moment the sold leg's own position closes (its stop-loss, target, or a manual square-off) - it has no stop-loss/target of its own. Only ever applies to Sell; a Buy signal has nothing to hedge.`
+                      ? ` Every Sell signal also buys a cheaper, further-OTM option ${hedgeOtmSteps} strike step(s) beyond the sold one first, as protection - a credit spread instead of a naked sell. If the hedge leg can't be placed or priced, the whole order is aborted rather than selling naked. The hedge is closed automatically the moment the sold leg's own position closes (its stop-loss, target, or a manual square-off) - it has no stop-loss/target of its own. Only ever applies to Sell; a Buy signal has nothing to hedge.${
+                        hedgeMinOiPercent > 0
+                          ? ` That far strike is only bought if its open interest is at least ${hedgeMinOiPercent}% of the sold strike's - far-OTM strikes thin out, and one with no real book behind it means crossing a wide spread to buy something you may not be able to sell back. A strike that's too thin moves the hedge inward toward the sold leg to the first one that qualifies (never closer than ${Math.max(1, Math.floor(hedgeOtmSteps / 2))} step(s)), and the order is abandoned if none does. Any such move is reported in the order message.`
+                          : ' The liquidity check is off, so the hedge is bought at that distance however thin the strike is.'
+                      }`
                       : ''}
                   </Text>
                 </>
