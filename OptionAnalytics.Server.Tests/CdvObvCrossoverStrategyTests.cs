@@ -44,6 +44,7 @@ public sealed class CdvObvCrossoverStrategyTests
         GetOptionBars = getOptionBars ?? ((_, _) => Array.Empty<Candle>()),
         AtmCeBars = Array.Empty<Candle>(),
         AtmPeBars = Array.Empty<Candle>(),
+        AtmStrike = null,
     };
 
     private static Dictionary<string, decimal> Parameters(decimal barsThreshold = 3, decimal direction = 0, decimal signalStartMinutes = 555, decimal confirmSource = 0, decimal thresholdPercent = 0) => new()

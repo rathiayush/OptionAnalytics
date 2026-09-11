@@ -80,7 +80,8 @@ public sealed class EmaCrossoverStrategyTests
         IReadOnlyList<Candle> spotBars,
         Func<decimal, bool, IReadOnlyList<Candle>>? getOptionBars = null,
         IReadOnlyList<Candle>? atmCeBars = null,
-        IReadOnlyList<Candle>? atmPeBars = null) => new()
+        IReadOnlyList<Candle>? atmPeBars = null,
+        int? atmStrike = null) => new()
     {
         Underlying = "NIFTY",
         TimeframeMinutes = 1,
@@ -95,9 +96,10 @@ public sealed class EmaCrossoverStrategyTests
         GetOptionBars = getOptionBars ?? ((_, _) => Array.Empty<Candle>()),
         AtmCeBars = atmCeBars ?? Array.Empty<Candle>(),
         AtmPeBars = atmPeBars ?? Array.Empty<Candle>(),
+        AtmStrike = atmStrike,
     };
 
-    private static Dictionary<string, decimal> Parameters(decimal minSlopePercent = 0, decimal direction = 0, decimal signalStartMinutes = 555, decimal requireAtmConfirmation = 0) => new()
+    private static Dictionary<string, decimal> Parameters(decimal minSlopePercent = 0, decimal direction = 0, decimal signalStartMinutes = 555, decimal requireAtmConfirmation = 0, decimal atmShift = 0) => new()
     {
         ["side"] = OptionTradeSimulator.SideBuy,
         ["otmSteps"] = 1,
@@ -108,6 +110,7 @@ public sealed class EmaCrossoverStrategyTests
         ["minSlopePercent"] = minSlopePercent,
         ["slopeLookbackBars"] = 3,
         ["requireAtmConfirmation"] = requireAtmConfirmation,
+        ["atmShift"] = atmShift,
         ["direction"] = direction,
         ["signalStartMinutes"] = signalStartMinutes,
     };
@@ -256,6 +259,141 @@ public sealed class EmaCrossoverStrategyTests
         var strategy = new EmaCrossoverStrategy();
 
         var signals = strategy.EntrySignals(context, Parameters());
+
+        Assert.Contains(signals, s => s.Kind == "Entry" && s.Direction == "Bullish");
+    }
+
+    private const int AtmStrike = 20000;
+
+    [Fact]
+    public void EntrySignals_AtmConfirmationWithShift_ConfirmsOffTheShiftedStrikeViaGetOptionBars()
+    {
+        var bars = BuildReversalBars();
+        var ceBars = BuildReversalBars(); // CE flips Bullish at the same bar
+        var peBars = BuildMirroredReversalBars(); // PE flips Bearish at the same bar - confirms
+        const int shift = -1; // 1 ITM -> AtmStrike + shift*Step
+        var context = Context(bars, getOptionBars: (strike, isCall) =>
+            strike == AtmStrike + shift * 50 ? (isCall ? ceBars : peBars) : Array.Empty<Candle>(),
+            atmStrike: AtmStrike);
+        var strategy = new EmaCrossoverStrategy();
+
+        var signals = strategy.EntrySignals(context, Parameters(requireAtmConfirmation: 1, atmShift: shift));
+
+        Assert.Contains(signals, s => s.Kind == "Entry" && s.Direction == "Bullish");
+    }
+
+    [Fact]
+    public void EntrySignals_AtmConfirmationWithShift_DoesNotFallBackToTheExactAtmStrike()
+    {
+        var bars = BuildReversalBars();
+        var ceBars = BuildReversalBars();
+        var peBars = BuildMirroredReversalBars();
+        // Only the EXACT ATM strike (shift 0) confirms - a shift of -1 must ask GetOptionBars for
+        // AtmStrike-50, not silently fall back to the exact-ATM contract, so this must reject.
+        var context = Context(bars, getOptionBars: (strike, isCall) =>
+            strike == AtmStrike ? (isCall ? ceBars : peBars) : Array.Empty<Candle>(),
+            atmStrike: AtmStrike);
+        var strategy = new EmaCrossoverStrategy();
+
+        var signals = strategy.EntrySignals(context, Parameters(requireAtmConfirmation: 1, atmShift: -1));
+
+        Assert.DoesNotContain(signals, s => s.Kind == "Entry");
+        Assert.Contains(signals, s => s.Kind == "Rejected" && s.Direction == "Bullish" && s.Summary.Contains("ATM-50 (1 ITM)"));
+    }
+
+    [Fact]
+    public void EntrySignals_AtmConfirmationWithShift_NoAtmStrikeResolvedYet_FallsBackToPlainAtmBars()
+    {
+        // AtmStrike is null (CDV has never resolved one) - a nonzero shift has no strike to shift
+        // from, so it falls back to AtmCeBars/AtmPeBars directly, same as shift=0.
+        var bars = BuildReversalBars();
+        var ceBars = BuildReversalBars();
+        var peBars = BuildMirroredReversalBars();
+        var context = Context(bars, atmCeBars: ceBars, atmPeBars: peBars, atmStrike: null);
+        var strategy = new EmaCrossoverStrategy();
+
+        var signals = strategy.EntrySignals(context, Parameters(requireAtmConfirmation: 1, atmShift: -1));
+
+        Assert.Contains(signals, s => s.Kind == "Entry" && s.Direction == "Bullish");
+    }
+
+    [Fact]
+    public void EntrySignals_AtmConfirmationWithShift_RejectionReasonLabelsTheOtmStrike()
+    {
+        var bars = BuildReversalBars();
+        var ceBars = BuildReversalBars(); // CE flips Bullish - fine on its own
+        var peBars = BuildReversalBars(); // PE ALSO flips Bullish, not the required Bearish
+        const int shift = 1; // 1 OTM
+        var context = Context(bars, getOptionBars: (strike, isCall) =>
+            strike == AtmStrike + shift * 50 ? (isCall ? ceBars : peBars) : Array.Empty<Candle>(),
+            atmStrike: AtmStrike);
+        var strategy = new EmaCrossoverStrategy();
+
+        var signals = strategy.EntrySignals(context, Parameters(requireAtmConfirmation: 1, atmShift: shift));
+
+        Assert.DoesNotContain(signals, s => s.Kind == "Entry");
+        Assert.Contains(signals, s => s.Kind == "Rejected" && s.Direction == "Bullish" && s.Summary.Contains("ATM+50 (1 OTM)"));
+    }
+
+    private static List<Candle> FlatPremium(IReadOnlyList<Candle> bars, decimal price) =>
+        bars.Select(b => new Candle(b.Time, price, price, price, price)).ToList();
+
+    [Fact]
+    public void EntrySignals_CePePremiumConfirmation_CeAbovePe_FiresEntry()
+    {
+        var bars = BuildReversalBars();
+        var ceBars = FlatPremium(bars, 100); // CE consistently above PE - confirms Bullish
+        var peBars = FlatPremium(bars, 50);
+        var context = Context(bars, atmCeBars: ceBars, atmPeBars: peBars);
+        var strategy = new EmaCrossoverStrategy();
+
+        var signals = strategy.EntrySignals(context, Parameters(requireAtmConfirmation: 2));
+
+        Assert.Contains(signals, s => s.Kind == "Entry" && s.Direction == "Bullish");
+    }
+
+    [Fact]
+    public void EntrySignals_CePePremiumConfirmation_PeAboveCe_RejectsInsteadOfEntering()
+    {
+        var bars = BuildReversalBars();
+        var ceBars = FlatPremium(bars, 50); // PE above CE - disagrees with the Bullish spot cross
+        var peBars = FlatPremium(bars, 100);
+        var context = Context(bars, atmCeBars: ceBars, atmPeBars: peBars);
+        var strategy = new EmaCrossoverStrategy();
+
+        var signals = strategy.EntrySignals(context, Parameters(requireAtmConfirmation: 2));
+
+        // PE constantly above CE confirms the earlier Bearish crossover too (fires normally) - only
+        // the Bullish one this test cares about must be rejected instead of entering.
+        Assert.DoesNotContain(signals, s => s.Kind == "Entry" && s.Direction == "Bullish");
+        Assert.Contains(signals, s => s.Kind == "Rejected" && s.Direction == "Bullish" && s.Summary.Contains("CE/PE premium did not confirm"));
+    }
+
+    [Fact]
+    public void EntrySignals_CePePremiumConfirmation_NoAtmData_RejectsInsteadOfEntering()
+    {
+        var context = Context(BuildReversalBars()); // AtmCeBars/AtmPeBars default to empty
+        var strategy = new EmaCrossoverStrategy();
+
+        var signals = strategy.EntrySignals(context, Parameters(requireAtmConfirmation: 2));
+
+        Assert.DoesNotContain(signals, s => s.Kind == "Entry");
+        Assert.Contains(signals, s => s.Kind == "Rejected" && s.Summary.Contains("not enough ATM CE/PE premium history"));
+    }
+
+    [Fact]
+    public void EntrySignals_CePePremiumConfirmationWithShift_UsesShiftedStrikeViaGetOptionBars()
+    {
+        var bars = BuildReversalBars();
+        var ceBars = FlatPremium(bars, 100);
+        var peBars = FlatPremium(bars, 50);
+        const int shift = 1; // 1 OTM -> AtmStrike + shift*Step
+        var context = Context(bars, getOptionBars: (strike, isCall) =>
+            strike == AtmStrike + shift * 50 ? (isCall ? ceBars : peBars) : Array.Empty<Candle>(),
+            atmStrike: AtmStrike);
+        var strategy = new EmaCrossoverStrategy();
+
+        var signals = strategy.EntrySignals(context, Parameters(requireAtmConfirmation: 2, atmShift: shift));
 
         Assert.Contains(signals, s => s.Kind == "Entry" && s.Direction == "Bullish");
     }

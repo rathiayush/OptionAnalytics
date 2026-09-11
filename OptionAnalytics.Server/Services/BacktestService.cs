@@ -244,6 +244,7 @@ public sealed class BacktestService
             AllSignals = allSignals,
             AtmCeBars = ceBars,
             AtmPeBars = peBars,
+            AtmStrike = cdvState.AtmStrike,
             ObvCeSeries = BacktestUtil.AggregateLine(cdvState.GetObvSeries(true), timeframe),
             ObvPeSeries = BacktestUtil.AggregateLine(cdvState.GetObvSeries(false), timeframe),
             CdvCeSeries = BacktestUtil.AggregateLine(cdvState.GetSmoothedCdvSeries(true), timeframe),

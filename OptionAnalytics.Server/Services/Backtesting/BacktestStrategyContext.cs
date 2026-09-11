@@ -57,13 +57,27 @@ public sealed class BacktestStrategyContext
     /// CDV subsystem.</summary>
     public required Func<decimal, bool, IReadOnlyList<Candle>> GetOptionBars { get; init; }
 
-    /// <summary>The ATM CE/PE candles (already aggregated to TimeframeMinutes) exactly as
-    /// ConfluenceAlertService's own ATM legs track them - the SAME series BacktestService's replay
-    /// already builds internally for its own Confluence detection, exposed here so a strategy that
-    /// wants "did the option side agree" (EmaCrossoverStrategy's optional ATM confirmation, for one)
-    /// can compute its own EMA/crossover check directly off these rather than needing a second
-    /// CDV-aware code path. Unlike GetOptionBars above, this ALWAYS tracks whatever is currently
-    /// ATM at each point in time (rolling as spot moves), not one fixed strike.</summary>
+    /// <summary>The ATM CE/PE candles exactly as ConfluenceAlertService's own ATM legs track them -
+    /// the SAME series BacktestService's replay already builds internally for its own Confluence
+    /// detection, exposed here so a strategy that wants "did the option side agree"
+    /// (EmaCrossoverStrategy's optional ATM confirmation, for one) can compute its own EMA/crossover
+    /// check directly off these rather than needing a second CDV-aware code path.
+    ///
+    /// Like GetAtmClosedCandles live, this is a SNAPSHOT: whichever strike is ATM right now, its own
+    /// full stored history (from whenever it first entered the ATM+-8 window, not necessarily from
+    /// when it actually became ATM). Live, that is exactly correct - ConfluenceAlertService only ever
+    /// reacts to the currently-ATM contract's own bar closes, moment to moment, the same snapshot
+    /// this is. Replayed across a whole backtest day it is a known approximation (the same one CDV's
+    /// own historical reconstruction already accepts elsewhere in this app): a strike that only
+    /// became ATM at, say, 11am still contributes its 9:15am bars here as if it had been ATM then
+    /// too. Good enough for "did the option side broadly agree with spot," not something that
+    /// should be read as "the true historical ATM contract at every instant."</summary>
     public required IReadOnlyList<Candle> AtmCeBars { get; init; }
     public required IReadOnlyList<Candle> AtmPeBars { get; init; }
+
+    /// <summary>The underlying's CURRENT ATM strike (same snapshot-in-time caveat as AtmCeBars/
+    /// AtmPeBars above) - what a strategy computes an ATM-relative strike from, e.g. "ATM shifted
+    /// by N steps" via GetOptionBars(AtmStrike + n * Step, isCall). Null until CDV has resolved an
+    /// ATM at least once.</summary>
+    public required int? AtmStrike { get; init; }
 }
