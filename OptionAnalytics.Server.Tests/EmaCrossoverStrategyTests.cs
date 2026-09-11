@@ -49,7 +49,38 @@ public sealed class EmaCrossoverStrategyTests
         return bars;
     }
 
-    private static BacktestStrategyContext Context(IReadOnlyList<Candle> spotBars, Func<decimal, bool, IReadOnlyList<Candle>>? getOptionBars = null) => new()
+    /// <summary>The exact mirror of BuildReversalBars (every price step negated around the same
+    /// start) - a steady RISE 100 -> 129, then a sharp sustained DECLINE 129 -> 24. By the same EMA
+    /// symmetry, this flips to Bullish early (rising) and then to Bearish at the same bar index
+    /// (33) the original flips to Bullish - what a PE leg needs to CONFIRM a Bullish spot crossover
+    /// (put premiums falling as calls rise).</summary>
+    private static IReadOnlyList<Candle> BuildMirroredReversalBars(DateTimeOffset? start = null)
+    {
+        var bars = new List<Candle>();
+        var time = start ?? T0;
+        var price = 100m;
+
+        for (var i = 0; i < 30; i++)
+        {
+            bars.Add(new Candle(time, price, price, price, price));
+            time = time.AddMinutes(1);
+            price += 1;
+        }
+        for (var i = 0; i < 15; i++)
+        {
+            price -= 7;
+            bars.Add(new Candle(time, price, price, price, price));
+            time = time.AddMinutes(1);
+        }
+
+        return bars;
+    }
+
+    private static BacktestStrategyContext Context(
+        IReadOnlyList<Candle> spotBars,
+        Func<decimal, bool, IReadOnlyList<Candle>>? getOptionBars = null,
+        IReadOnlyList<Candle>? atmCeBars = null,
+        IReadOnlyList<Candle>? atmPeBars = null) => new()
     {
         Underlying = "NIFTY",
         TimeframeMinutes = 1,
@@ -62,9 +93,11 @@ public sealed class EmaCrossoverStrategyTests
         CdvCeSeries = Array.Empty<ObvPoint>(),
         CdvPeSeries = Array.Empty<ObvPoint>(),
         GetOptionBars = getOptionBars ?? ((_, _) => Array.Empty<Candle>()),
+        AtmCeBars = atmCeBars ?? Array.Empty<Candle>(),
+        AtmPeBars = atmPeBars ?? Array.Empty<Candle>(),
     };
 
-    private static Dictionary<string, decimal> Parameters(decimal minSlopePercent = 0, decimal direction = 0, decimal signalStartMinutes = 555) => new()
+    private static Dictionary<string, decimal> Parameters(decimal minSlopePercent = 0, decimal direction = 0, decimal signalStartMinutes = 555, decimal requireAtmConfirmation = 0) => new()
     {
         ["side"] = OptionTradeSimulator.SideBuy,
         ["otmSteps"] = 1,
@@ -74,6 +107,7 @@ public sealed class EmaCrossoverStrategyTests
         ["slowPeriod"] = EmaCrossoverDetector.SlowPeriod,
         ["minSlopePercent"] = minSlopePercent,
         ["slopeLookbackBars"] = 3,
+        ["requireAtmConfirmation"] = requireAtmConfirmation,
         ["direction"] = direction,
         ["signalStartMinutes"] = signalStartMinutes,
     };
@@ -169,5 +203,60 @@ public sealed class EmaCrossoverStrategyTests
 
         Assert.Contains(signals, s => s.Kind == "Entry" && s.Direction == "Bullish");
         Assert.DoesNotContain(signals, s => s.Summary.Contains("pre-open"));
+    }
+
+    [Fact]
+    public void EntrySignals_AtmConfirmationRequired_CeUpAndPeDown_FiresEntry()
+    {
+        var bars = BuildReversalBars();
+        var ceBars = BuildReversalBars(); // CE also flips Bullish at the same bar
+        var peBars = BuildMirroredReversalBars(); // PE flips Bearish at the same bar - confirms
+        var context = Context(bars, atmCeBars: ceBars, atmPeBars: peBars);
+        var strategy = new EmaCrossoverStrategy();
+
+        var signals = strategy.EntrySignals(context, Parameters(requireAtmConfirmation: 1));
+
+        Assert.Contains(signals, s => s.Kind == "Entry" && s.Direction == "Bullish");
+    }
+
+    [Fact]
+    public void EntrySignals_AtmConfirmationRequired_AtmDisagrees_RejectsInsteadOfEntering()
+    {
+        var bars = BuildReversalBars();
+        var ceBars = BuildReversalBars(); // CE flips Bullish - fine on its own
+        var peBars = BuildReversalBars(); // PE ALSO flips Bullish, not the required Bearish
+        var context = Context(bars, atmCeBars: ceBars, atmPeBars: peBars);
+        var strategy = new EmaCrossoverStrategy();
+
+        var signals = strategy.EntrySignals(context, Parameters(requireAtmConfirmation: 1));
+
+        Assert.DoesNotContain(signals, s => s.Kind == "Entry");
+        Assert.Contains(signals, s => s.Kind == "Rejected" && s.Direction == "Bullish" && s.Summary.Contains("ATM CE/PE did not confirm"));
+    }
+
+    [Fact]
+    public void EntrySignals_AtmConfirmationRequired_NoAtmHistory_RejectsInsteadOfEntering()
+    {
+        var context = Context(BuildReversalBars()); // AtmCeBars/AtmPeBars default to empty
+        var strategy = new EmaCrossoverStrategy();
+
+        var signals = strategy.EntrySignals(context, Parameters(requireAtmConfirmation: 1));
+
+        Assert.DoesNotContain(signals, s => s.Kind == "Entry");
+        Assert.Contains(signals, s => s.Kind == "Rejected" && s.Summary.Contains("not enough ATM CE/PE history"));
+    }
+
+    [Fact]
+    public void EntrySignals_AtmConfirmationOffByDefault_IgnoresMissingAtmData()
+    {
+        // requireAtmConfirmation defaults to off - the same reversal fires exactly as it always
+        // did even with no ATM CE/PE bars supplied at all, so the new filter never disturbs an
+        // existing backtest/trigger that doesn't opt into it.
+        var context = Context(BuildReversalBars());
+        var strategy = new EmaCrossoverStrategy();
+
+        var signals = strategy.EntrySignals(context, Parameters());
+
+        Assert.Contains(signals, s => s.Kind == "Entry" && s.Direction == "Bullish");
     }
 }
