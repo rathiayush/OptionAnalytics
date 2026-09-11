@@ -172,8 +172,8 @@ build type:
 - **Compose** - path `docker-compose.yml`.
 
 Set the variables above in Dokploy's Environment tab (not in a committed file), attach a domain,
-and deploy. Note the first start fetches 15 trading days of history for ~68 option contracts, so
-give it a couple of minutes before the option charts fill in.
+and deploy. Note the first start fetches 30 trading days of history for ~68 option contracts, so
+give it a few minutes before the option charts fill in.
 
 Startup is slower than a typical web app and the Dhan token endpoint is rate-limited to one call
 every two minutes, so avoid redeploy loops that restart the container repeatedly.

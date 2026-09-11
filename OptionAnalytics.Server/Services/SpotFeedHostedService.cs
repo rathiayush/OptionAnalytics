@@ -7,10 +7,10 @@ using OptionAnalytics.Server.Models;
 namespace OptionAnalytics.Server.Services;
 
 /// <summary>
-/// The orchestrator: resolves NIFTY/BANKNIFTY's Dhan security ids, backfills the last 5 trading
-/// days' 1-minute candles into memory (nothing is ever persisted to disk - a restart re-fetches
-/// from Dhan every time), then runs the live WS feed and folds every tick into the current bar,
-/// pushing each update to the dashboard over SignalR.
+/// The orchestrator: resolves NIFTY/BANKNIFTY's Dhan security ids, backfills the last
+/// HistoryWindow.TradingDays trading days' 1-minute candles into memory (nothing is ever persisted
+/// to disk - a restart re-fetches from Dhan every time), then runs the live WS feed and folds every
+/// tick into the current bar, pushing each update to the dashboard over SignalR.
 /// </summary>
 public sealed class SpotFeedHostedService : BackgroundService
 {
@@ -197,7 +197,8 @@ public sealed class SpotFeedHostedService : BackgroundService
     /// <summary>Keeps only the candles from the most recent <paramref name="maxDays"/> distinct
     /// IST calendar dates present in <paramref name="candles"/> - Dhan's range response may
     /// legitimately span more days than that (the lookback window is intentionally generous to
-    /// survive holiday clusters), so this is what actually enforces "last 5 trading days".</summary>
+    /// survive holiday clusters), so this is what actually enforces "last HistoryTradingDays trading
+    /// days".</summary>
     private static List<Candle> TrimToRecentTradingDays(IReadOnlyList<Candle> candles, int maxDays)
     {
         var recentDays = candles
