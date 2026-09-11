@@ -4,6 +4,7 @@ import { createChart, createSeriesMarkers, CandlestickSeries, LineSeries, Crossh
 import * as signalR from '@microsoft/signalr'
 import { Routes, Route, Navigate } from 'react-router-dom'
 import BacktestPage from './BacktestPage.jsx'
+import StrikeDataPage from './StrikeDataPage.jsx'
 import TriggersPage from './TriggersPage.jsx'
 import ContractsPage from './ContractsPage.jsx'
 import LoginPage from './LoginPage.jsx'
@@ -1604,6 +1605,7 @@ export default function App() {
       <Routes>
         <Route path="/" element={<DashboardPage />} />
         <Route path="/backtest" element={<BacktestPage />} />
+        <Route path="/strike-data" element={<StrikeDataPage />} />
         <Route path="/triggers" element={<RequireAdmin><TriggersPage /></RequireAdmin>} />
         <Route path="/contracts" element={<RequireAdmin><ContractsPage /></RequireAdmin>} />
       </Routes>
