@@ -167,12 +167,30 @@ public sealed class DhanHistoricalDataService
             try
             {
                 var epochSeconds = (long)timestamps[i].GetDouble();
+                var o = i < open.Count ? open[i] : 0m;
+                var h = i < high.Count ? high[i] : 0m;
+                var l = i < low.Count ? low[i] : 0m;
+                var c = i < close.Count ? close[i] : 0m;
+
+                // A corrupt bar from Dhan's own API - seen once as a premium chart whose price axis
+                // blew out to the tens of millions while its real candles sat in the hundreds - must
+                // never reach a chart, a backtest's entry/stop/target math, or a live order. Skipped
+                // like an unparsable one below, just for implausibility rather than a parse failure -
+                // see OptionPriceSanity's own doc comment for why this bound is safe against ever
+                // rejecting a real premium.
+                if (!OptionPriceSanity.IsPlausibleBar(o, h, l, c))
+                {
+                    _logger.LogWarning("Skipped an implausible option candle at index {Index} (O={Open} H={High} L={Low} C={Close}) - looks like corrupt upstream data, not a real premium.",
+                        i, o, h, l, c);
+                    continue;
+                }
+
                 candles.Add(new CandleWithVolume(
                     Time: DateTimeOffset.FromUnixTimeSeconds(epochSeconds),
-                    Open: i < open.Count ? open[i] : 0m,
-                    High: i < high.Count ? high[i] : 0m,
-                    Low: i < low.Count ? low[i] : 0m,
-                    Close: i < close.Count ? close[i] : 0m,
+                    Open: o,
+                    High: h,
+                    Low: l,
+                    Close: c,
                     Volume: i < volume.Count ? (long)volume[i] : 0));
             }
             catch (Exception ex) when (ex is FormatException or InvalidOperationException or OverflowException)
