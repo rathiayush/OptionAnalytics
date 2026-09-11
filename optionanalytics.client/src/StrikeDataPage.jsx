@@ -1,15 +1,114 @@
-import { useEffect, useMemo, useState } from 'react'
-import { Card, Select, InputNumber, Space, Typography, Table, Button, Statistic, Row, Col, Empty } from 'antd'
+import { Component, useEffect, useMemo, useRef, useState } from 'react'
+import { Card, Select, InputNumber, Space, Typography, Table, Button, Statistic, Row, Col, Empty, Alert } from 'antd'
 import { ReloadOutlined } from '@ant-design/icons'
+import { createChart, createSeriesMarkers, CandlestickSeries, CrosshairMode } from 'lightweight-charts'
 import {
   NavBar, STORED_UNDERLYING, usePersistedState, pickUnderlying,
   useExpirySelector, ExpirySelect, withExpiry, fmtPrice, fmtIstTime, fmtIstDateTime, istDateKey,
   CE_COLOR, PE_COLOR, UP_COLOR, DOWN_COLOR,
+  AXIS_COLOR, GRID_COLOR, BORDER_COLOR, istTimeFormatter, istTickMarkFormatter, toBar, dayResetMarkers,
 } from './shared.jsx'
 
 const { Title, Text } = Typography
 
 const STORED_STRIKE_TYPE = 'optionanalytics.strikeData.optionType'
+
+// A plain candlestick chart of one contract's own history, with a RESET marker at each new trading
+// day. Deliberately NOT App.jsx's own PriceChart: that one also plots EMA9/21 and joins a
+// cross-chart pan/zoom sync group meant for several charts on the SAME page moving together, live-
+// tick by live-tick - neither applies here (this page shows one static, already-complete series
+// for one chart), so this is the plain shape lightweight-charts needs without that complexity.
+function StrikeCandleChart({ bars, height = 420 }) {
+  const containerRef = useRef(null)
+  const chartRef = useRef(null)
+  const seriesRef = useRef(null)
+  const markersRef = useRef(null)
+  const hasFitRef = useRef(false)
+
+  useEffect(() => {
+    if (!containerRef.current) return
+
+    const chart = createChart(containerRef.current, {
+      width: containerRef.current.clientWidth,
+      height,
+      layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
+      grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
+      rightPriceScale: { borderColor: BORDER_COLOR },
+      timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter },
+      crosshair: { mode: CrosshairMode.Normal },
+      localization: { timeFormatter: istTimeFormatter },
+    })
+    chartRef.current = chart
+    seriesRef.current = chart.addSeries(CandlestickSeries, {
+      upColor: UP_COLOR,
+      downColor: DOWN_COLOR,
+      borderVisible: false,
+      wickUpColor: UP_COLOR,
+      wickDownColor: DOWN_COLOR,
+    })
+    markersRef.current = createSeriesMarkers(seriesRef.current, [])
+    hasFitRef.current = false
+
+    const onResize = () => {
+      if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth })
+    }
+    window.addEventListener('resize', onResize)
+
+    return () => {
+      window.removeEventListener('resize', onResize)
+      chart.remove()
+      chartRef.current = null
+      seriesRef.current = null
+      markersRef.current = null
+    }
+    // One chart instance per mount, same reasoning as PriceChart - series data is (re)populated by
+    // the effects below rather than by recreating the chart.
+  }, [height])
+
+  useEffect(() => {
+    if (!seriesRef.current) return
+    seriesRef.current.setData(bars)
+    // A fresh strike/expiry/type pick is a genuinely NEW series, not a live update to the same one
+    // - always re-fit, unlike PriceChart's "only the first time" rule (which exists to not fight a
+    // user's pan/zoom against a ticking feed; nothing here ever changes without a new selection).
+    if (bars.length > 0) chartRef.current?.timeScale().fitContent()
+    hasFitRef.current = bars.length > 0
+  }, [bars])
+
+  useEffect(() => {
+    markersRef.current?.setMarkers(dayResetMarkers(bars))
+  }, [bars])
+
+  return <div ref={containerRef} style={{ width: '100%', height }} />
+}
+
+// Same reasoning as App.jsx's own ChartErrorBoundary - a lightweight-charts assertion or bad data
+// shape must show a small fallback instead of unmounting the whole page (the tables below the
+// chart are still useful even if the chart itself can't render). Must be a class component; React
+// has no hook equivalent for getDerivedStateFromError. Keyed by the caller on the same
+// underlying/strike/type/expiry the chart itself is keyed on, so switching any of them also clears
+// a previously-caught error rather than freezing on it.
+class ChartErrorBoundary extends Component {
+  constructor(props) {
+    super(props)
+    this.state = { error: null }
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error }
+  }
+
+  componentDidCatch(error) {
+    console.error('Strike chart crashed:', error)
+  }
+
+  render() {
+    if (this.state.error) {
+      return <Alert type="warning" showIcon message="This chart could not be rendered - the data below is still available in the tables." />
+    }
+    return this.props.children
+  }
+}
 
 // One specific option contract's own raw history, laid out for INSPECTION rather than trading -
 // "does 24200PE actually have a candle at 1:30pm on 17 Aug, or is that a real gap" is a question
@@ -72,6 +171,11 @@ export default function StrikeDataPage() {
     () => (candles ?? []).map((c, i) => ({ ...c, key: i, day: istDateKey(c.time) })).reverse(),
     [candles],
   )
+
+  // Chart-ready shape (IST-shifted epoch seconds, ascending) - a separate conversion from `rows`
+  // above rather than reusing it, since the chart wants chronological order and shifted time
+  // while the tables want the reverse and a plain ISO string to format for display.
+  const chartBars = useMemo(() => (candles ?? []).map(toBar), [candles])
 
   const trackedInfo = useMemo(
     () => trackedStrikes.find((s) => s.strike === strike && s.isCall === (optionType === 'CE')) ?? null,
@@ -175,6 +279,16 @@ export default function StrikeDataPage() {
                   : "Not in today's tracked-strikes list - either never inside the live ATM+-16 window today, or this is a different expiry/day. Its candles above (if any) came from Dhan's on-demand intraday history instead of the live feed."}
                 {' '}A trading day below with far fewer candles than its neighbours, or one that stops well before market close, means this contract's own tracking was incomplete for that day.
               </Text>
+            </Card>
+
+            <Card size="small" title="Chart">
+              {chartBars.length > 0 ? (
+                <ChartErrorBoundary key={`${underlying}-${strike}-${optionType}-${selectedExpiry}`}>
+                  <StrikeCandleChart bars={chartBars} height={420} />
+                </ChartErrorBoundary>
+              ) : (
+                <Empty description={loading ? 'Loading…' : 'No candles to chart for this contract.'} />
+              )}
             </Card>
 
             <Card size="small" title="Candles by trading day">

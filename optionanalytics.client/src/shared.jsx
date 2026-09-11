@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useState } from 'react'
 import { Button, Menu, Select, Space, Tag, Typography } from 'antd'
 import { useLocation, useNavigate } from 'react-router-dom'
+import { TickMarkType } from 'lightweight-charts'
 
 // Provided once, at the app root (App.jsx), after GET /api/auth/me resolves - {email, role} or
 // null. NavBar (rendered independently from four different pages) reads this via useAuth() rather
@@ -176,6 +177,68 @@ export function istDateKey(isoOrDate) {
 
 export function fmtIstTime(isoOrDate) {
   return new Date(isoOrDate).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true })
+}
+
+// lightweight-charts styling/time-axis helpers, duplicated (not imported) from App.jsx's own
+// private copies rather than having App.jsx import them from here - App.jsx's charting code is
+// heavily tuned (cross-chart pan/zoom sync, EMA overlays, live-tick preservation of the visible
+// range) and any of it is deliberately left untouched by pages that don't need that complexity.
+// These are the small, stable, PURE pieces any simple read-only chart (StrikeDataPage's own) needs
+// without the rest: lightweight-charts has no timezone support, so every timestamp fed to a chart
+// is shifted forward by IST_OFFSET_SECONDS up front and then formatted AS IF it were UTC - which,
+// because of the shift, is exactly its real IST wall-clock value. See App.jsx's own identical
+// comment for the full reasoning; it is not repeated there to avoid the two drifting apart on
+// wording while staying identical in behavior (the offset is fixed and will never change).
+export const AXIS_COLOR = '#9aa4b2'
+export const GRID_COLOR = '#ffffff14'
+export const BORDER_COLOR = '#ffffff22'
+export const RESET_MARKER_COLOR = '#ffd54f'
+
+const IST_OFFSET_SECONDS = 5.5 * 3600
+
+export function toChartTime(isoOrDate) {
+  return Math.floor(new Date(isoOrDate).getTime() / 1000) + IST_OFFSET_SECONDS
+}
+
+const IST_TIME_FORMAT = new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'UTC' })
+const IST_TICK_DATE_FORMAT = new Intl.DateTimeFormat('en-IN', { day: 'numeric', month: 'short', timeZone: 'UTC' })
+
+export function istTimeFormatter(time) {
+  return IST_TIME_FORMAT.format(new Date(time * 1000))
+}
+
+export function istTickMarkFormatter(time, tickMarkType) {
+  const date = new Date(time * 1000)
+  return tickMarkType >= TickMarkType.Time ? IST_TIME_FORMAT.format(date) : IST_TICK_DATE_FORMAT.format(date)
+}
+
+export function toBar(c) {
+  return { time: toChartTime(c.time), open: c.open, high: c.high, low: c.low, close: c.close }
+}
+
+// Chart times are already IST-shifted (see IST_OFFSET_SECONDS), so reading the shifted value AS
+// UTC gives the IST calendar day directly - the chart-time counterpart to istDateKey above, which
+// takes a plain ISO string instead.
+function istDayKeyFromChartTime(chartTime) {
+  return new Date(chartTime * 1000).toISOString().slice(0, 10)
+}
+
+// A "RESET" marker on the first bar of each new IST trading day, so a chart spanning several days
+// reads as distinct sessions rather than one continuous, misleadingly smooth line/candle run
+// straight through each overnight gap. The very first day in view gets no marker - there is no
+// transition to see there, just the left edge of the loaded history.
+export function dayResetMarkers(bars) {
+  const markers = []
+  let previousDay = null
+
+  for (const bar of bars) {
+    const day = istDayKeyFromChartTime(bar.time)
+    if (previousDay !== null && day !== previousDay) {
+      markers.push({ time: bar.time, position: 'aboveBar', color: RESET_MARKER_COLOR, shape: 'square', text: 'RESET' })
+    }
+    previousDay = day
+  }
+  return markers
 }
 
 export function DirectionTag({ direction }) {
