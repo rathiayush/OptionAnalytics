@@ -127,7 +127,7 @@ public sealed class SpotFeedHostedService : BackgroundService
             if (stoppingToken.IsCancellationRequested) return;
 
             _logger.LogInformation("Spot backfill retry {Attempt}/{Max}: at least one underlying still has no history.", attempt + 1, MaxBackfillRetries);
-            await BackfillAsync(stoppingToken);
+            await BackfillAsync(stoppingToken, onlyIfEmpty: true);
         }
     }
 
@@ -159,8 +159,22 @@ public sealed class SpotFeedHostedService : BackgroundService
     /// <summary>Fetches the last HistoryLookbackCalendarDays' worth of candles in ONE range call
     /// per underlying (far cheaper than one request per day), then trims to the most recent
     /// HistoryTradingDays distinct trading days actually present in the response - everything held
-    /// in memory only, nothing persisted, so this runs fresh on every restart.</summary>
-    private async Task BackfillAsync(CancellationToken cancellationToken)
+    /// in memory only, nothing persisted, so this runs fresh on every restart.
+    ///
+    /// <paramref name="onlyIfEmpty"/> (set by RetryBackfillIfNeededAsync) skips an underlying that
+    /// already has candles instead of unconditionally re-fetching and reseeding it. Without this, a
+    /// retry fired because SOME OTHER underlying was still empty (a slow scrip-master resolve, a
+    /// transient Dhan hiccup) would ALSO silently replace an underlying that already had perfectly
+    /// good history - either from its own first backfill, or built up since purely from live ticks
+    /// (SeedHistory does a full clear-and-replace, with no BarClosed event to mark that this just
+    /// happened). Dhan's historical endpoint reconstructs a bar's OHLC independently of this app's
+    /// own live-tick folding, and the two need not agree to the last paisa for a bar still settling
+    /// intraday - close enough to matter nothing normally, but enough to occasionally flip which
+    /// side of a border-line EMA9/21 an already-alerted bar's close falls on, producing a spurious
+    /// "confirmed direction changed" a moment later that doesn't correspond to any real price move a
+    /// user watching the chart would ever see. An underlying that already has data needs no second
+    /// backfill at all - only ever the ones the retry loop exists for.</summary>
+    private async Task BackfillAsync(CancellationToken cancellationToken, bool onlyIfEmpty = false)
     {
         var today = IstToday();
         var fromDay = today.AddDays(-HistoryLookbackCalendarDays);
@@ -168,6 +182,7 @@ public sealed class SpotFeedHostedService : BackgroundService
         foreach (var state in States.Values)
         {
             if (state.Instrument is not { } instrument) continue;
+            if (onlyIfEmpty && state.GetCandles().Count > 0) continue;
 
             var candles = await _historicalData.GetIntradayCandlesAsync(instrument.SecurityId, instrument.DhanSegment, fromDay, today, 1, cancellationToken);
 
