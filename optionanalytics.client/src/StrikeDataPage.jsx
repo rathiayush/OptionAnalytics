@@ -1,5 +1,5 @@
 import { Component, useEffect, useMemo, useRef, useState } from 'react'
-import { Card, Select, InputNumber, Space, Typography, Table, Button, Statistic, Row, Col, Empty, Alert } from 'antd'
+import { Card, Select, InputNumber, Space, Typography, Table, Button, Statistic, Row, Col, Empty, Alert, DatePicker } from 'antd'
 import { ReloadOutlined } from '@ant-design/icons'
 import { createChart, createSeriesMarkers, CandlestickSeries, CrosshairMode } from 'lightweight-charts'
 import {
@@ -10,6 +10,7 @@ import {
 } from './shared.jsx'
 
 const { Title, Text } = Typography
+const { RangePicker } = DatePicker
 
 const STORED_STRIKE_TYPE = 'optionanalytics.strikeData.optionType'
 
@@ -127,6 +128,11 @@ export default function StrikeDataPage() {
   const [candles, setCandles] = useState(null) // null = never loaded yet, distinct from [] = loaded and empty
   const [trackedStrikes, setTrackedStrikes] = useState([])
   const [loading, setLoading] = useState(false)
+  // Purely a VIEW filter over whatever this contract's own history already came back with - never
+  // re-fetched on a date change, same "narrow what's on screen, not what was asked for" philosophy
+  // Backtrack's own date range already uses. Not persisted (unlike Backtrack's) - this page is a
+  // one-off inspection tool, not a lasting preference someone tunes once and keeps.
+  const [dateRange, setDateRange] = useState(null)
 
   const step = underlyings.find((u) => u.underlying === underlying)?.step || 50
 
@@ -164,12 +170,29 @@ export default function StrikeDataPage() {
   // separate click on Refresh.
   useEffect(() => { load() /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [underlying, strike, optionType, expiryParam])
 
+  const [fromDay, toDay] = useMemo(() => {
+    const from = dateRange?.[0] ? dateRange[0].format('YYYY-MM-DD') : null
+    const to = dateRange?.[1] ? dateRange[1].format('YYYY-MM-DD') : null
+    return [from, to]
+  }, [dateRange])
+
+  const inRange = (day) => (!fromDay || day >= fromDay) && (!toDay || day <= toDay)
+
+  // Every candle for this contract, narrowed to the picked date range - filtered once, up front, so
+  // the stats card, both tables and the chart all agree on "what's in view" instead of each
+  // re-deriving it slightly differently.
+  const visibleCandles = useMemo(() => {
+    if (!fromDay && !toDay) return candles ?? []
+    return (candles ?? []).filter((c) => inRange(istDateKey(c.time)))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [candles, fromDay, toDay])
+
   // Descending (newest first) - the convention every other table on this app already uses
   // (Backtrack's signals/trades), and the more useful default here too: "is today's data there"
   // is usually the first thing worth checking, not the oldest day in a 45-day window.
   const rows = useMemo(
-    () => (candles ?? []).map((c, i) => ({ ...c, key: i, day: istDateKey(c.time) })).reverse(),
-    [candles],
+    () => visibleCandles.map((c, i) => ({ ...c, key: i, day: istDateKey(c.time) })).reverse(),
+    [visibleCandles],
   )
 
   // Chart-ready shape (IST-shifted epoch seconds, ascending) - a separate conversion from `rows`
@@ -183,10 +206,10 @@ export default function StrikeDataPage() {
   // every candle" is the whole point of that one, corrupt or not - only the chart's own axis scale
   // needs protecting from a single outlier making every real candle unreadably flat by comparison.
   const chartBars = useMemo(
-    () => (candles ?? [])
+    () => visibleCandles
       .filter((c) => c.open > 0 && c.open < 100000 && c.high > 0 && c.high < 100000 && c.low > 0 && c.low < 100000 && c.close > 0 && c.close < 100000)
       .map(toBar),
-    [candles],
+    [visibleCandles],
   )
 
   const trackedInfo = useMemo(
@@ -263,6 +286,14 @@ export default function StrikeDataPage() {
             ]}
           />
           <Button icon={<ReloadOutlined />} onClick={load} loading={loading} disabled={!strike}>Refresh</Button>
+          <RangePicker
+            value={dateRange}
+            onChange={setDateRange}
+            allowEmpty={[true, true]}
+            format="DD MMM YYYY"
+            placeholder={['From date', 'To date']}
+            style={{ width: 260 }}
+          />
         </Space>
 
         {!strike ? (
@@ -303,7 +334,7 @@ export default function StrikeDataPage() {
               )}
             </Card>
 
-            <Card size="small" title="Candles by trading day">
+            <Card size="small" title={fromDay || toDay ? `Candles by trading day (${fromDay ?? 'the start'} – ${toDay ?? 'the end'})` : 'Candles by trading day'}>
               <Table
                 size="small"
                 rowKey="day"
@@ -311,11 +342,11 @@ export default function StrikeDataPage() {
                 columns={dayColumns}
                 pagination={false}
                 loading={loading && !hasLoaded}
-                locale={{ emptyText: 'No candles at all for this contract.' }}
+                locale={{ emptyText: fromDay || toDay ? 'No candles in this date range.' : 'No candles at all for this contract.' }}
               />
             </Card>
 
-            <Card size="small" title="Every candle">
+            <Card size="small" title={fromDay || toDay ? `Every candle (${fromDay ?? 'the start'} – ${toDay ?? 'the end'})` : 'Every candle'}>
               <Table
                 size="small"
                 rowKey="key"
@@ -323,7 +354,7 @@ export default function StrikeDataPage() {
                 columns={candleColumns}
                 loading={loading && !hasLoaded}
                 pagination={{ pageSize: 100, showSizeChanger: true, pageSizeOptions: [50, 100, 250, 500] }}
-                locale={{ emptyText: 'No candles at all for this contract.' }}
+                locale={{ emptyText: fromDay || toDay ? 'No candles in this date range.' : 'No candles at all for this contract.' }}
               />
             </Card>
           </>
