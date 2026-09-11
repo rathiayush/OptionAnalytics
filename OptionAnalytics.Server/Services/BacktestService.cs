@@ -43,28 +43,26 @@ namespace OptionAnalytics.Server.Services;
 public sealed class BacktestService
 {
     /// <summary>How many DISTINCT strikes one RunStrategyAsync call will fetch from Dhan on demand
-    /// (see FillMissingStrikesAsync). A backtest reaching back HistoryTradingDays over a session
-    /// where spot trended hard can legitimately reference dozens of strikes that never entered the
-    /// ATM+-8 window, and every one of them is a separate Dhan call - so this is a budget on how
-    /// long one page load may take, not a judgement about which strikes matter. Anything past it
-    /// stays "No Data" and the NEXT run picks up where this one stopped, since everything fetched
-    /// meanwhile is still in CdvHostedService's own cache.
-    ///
-    /// 60 -> 120 when HistoryWindow.TradingDays doubled from 15 to 30 - a wider window gives a
-    /// trending session twice as much time to wander across strikes that never entered the ATM+-8
-    /// window, so the old budget started leaving noticeably more "No Data" rows on a single page
-    /// load than before, purely because there was now more history to reach into. Kept proportional
-    /// to TradingDays for the same reason LookbackCalendarDays is: this budget exists BECAUSE of how
-    /// much history is held, so it should scale when that does.</summary>
-    private const int MaxOnDemandStrikesPerRun = 120;
+    /// (see FillMissingStrikesAsync), across ALL rounds combined. A backtest reaching back
+    /// HistoryTradingDays over a session where spot trended hard can legitimately reference dozens
+    /// of strikes that never entered the ATM+-8 window, and every one of them is a separate Dhan
+    /// call - this is now a sanity backstop rather than the thing that actually bounds one page
+    /// load's length (see MaxOnDemandDuration for that): high enough that a normal backtest, however
+    /// many strikes it touches, clears every "No Data" row in the SAME click that revealed them,
+    /// instead of needing the user to press Run again for each round the old fixed round-count cap
+    /// would have cut off early.</summary>
+    private const int MaxOnDemandStrikesPerRun = 600;
 
-    /// <summary>How many fill-then-re-run rounds one call will do. Filling a strike can change
-    /// which trades happen (a trade that used to be "No Data" now occupies the simulator's
-    /// one-position-at-a-time window, so LATER signals resolve differently and can reference
-    /// strikes the first pass never asked about) - which is why one pass was never enough to clear
-    /// the table. Each round only asks for what the round before it revealed, so this converges
-    /// quickly; the cap is a backstop, not the expected exit.</summary>
-    private const int MaxOnDemandRounds = 8;
+    /// <summary>Wall-clock ceiling on one RunStrategyAsync call's fill-then-re-run loop. Filling a
+    /// strike can change which trades happen (a trade that used to be "No Data" now occupies the
+    /// simulator's one-position-at-a-time window, so LATER signals resolve differently and can
+    /// reference strikes the first pass never asked about) - which is why one pass was never enough
+    /// to clear the table, and why a fixed round COUNT was the wrong backstop: however many rounds
+    /// convergence actually takes, the user asked for it done now, in this click, not spread across
+    /// as many "Re-run" clicks as there happen to be rounds. Bounding by time instead means the loop
+    /// keeps going, round after round, for as long as it is still making progress and there is time
+    /// left - it only gives up because the page load itself has to end somewhere.</summary>
+    private static readonly TimeSpan MaxOnDemandDuration = TimeSpan.FromSeconds(25);
 
     /// <summary>Spacing between on-demand fetches, same as CdvHostedService's own backfill uses.
     /// With a 60-strike budget these are no longer a handful of calls, and Dhan's data API is rate
@@ -145,11 +143,15 @@ public sealed class BacktestService
         var trades = p.Strategy.Simulate(p.Context, p.Parameters);
 
         // Keep filling and re-running until the strategy stops asking for strikes it has no history
-        // for - one round only clears the misses that round happened to reveal (see
-        // MaxOnDemandRounds). Bounded by the strike budget and the round cap so a pathological run
-        // still returns rather than fetching forever.
+        // for - one round only clears the misses that round happened to reveal, and filling a strike
+        // can reveal MORE of them (see the doc comments on MaxOnDemandDuration/MaxOnDemandStrikesPerRun),
+        // so this can take several rounds to fully converge. Bounded by wall-clock time rather than a
+        // round count, so the loop keeps going for as long as it is actually making progress within
+        // one click instead of stopping after an arbitrary number of rounds and leaving the rest for
+        // the user to trigger by clicking Run again.
         var budget = MaxOnDemandStrikesPerRun;
-        for (var round = 0; round < MaxOnDemandRounds && budget > 0; round++)
+        var deadline = DateTime.UtcNow + MaxOnDemandDuration;
+        while (budget > 0 && DateTime.UtcNow < deadline)
         {
             var attempted = await FillMissingStrikesAsync(underlying, p.OnDemand, budget, expiry, cancellationToken);
             if (attempted == 0) break; // nothing was missing - the table is as full as it can get
