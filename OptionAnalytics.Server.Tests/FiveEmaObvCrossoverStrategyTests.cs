@@ -70,6 +70,7 @@ public sealed class FiveEmaObvCrossoverStrategyTests
         GetOptionBars = getOptionBars ?? ((_, _) => Array.Empty<Candle>()),
         AtmCeBars = Array.Empty<Candle>(),
         AtmPeBars = Array.Empty<Candle>(),
+        AtmStrike = null,
     };
 
     private static Dictionary<string, decimal> Parameters() => new()
