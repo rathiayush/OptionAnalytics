@@ -52,12 +52,18 @@ public sealed class CdvHostedService : BackgroundService
     /// everything is live again.</summary>
     private static readonly TimeSpan IncompleteRetryInterval = TimeSpan.FromSeconds(30);
 
-    /// <summary>How long before a strike whose backfill came back EMPTY is asked for again. Matches
-    /// the normal AtmRecenterInterval rather than IncompleteRetryInterval on purpose: the 30-second
-    /// cadence exists to get a not-yet-live underlying subscribed quickly, which is cheap and local,
-    /// not to re-request history Dhan has already said it does not have - that is a rate-limited
-    /// call, and there are up to 66 of them per expiry.</summary>
-    private static readonly TimeSpan EmptyStrikeRetryInterval = TimeSpan.FromMinutes(30);
+    /// <summary>How long before a strike whose backfill came back EMPTY is asked for again: this
+    /// long after the first failure, doubling per failure up to EmptyStrikeMaxRetryInterval.
+    ///
+    /// Starts SHORT because the usual reason a fetch returns nothing is that the data is not there
+    /// yet rather than never - the app started before the open, or this underlying is simply last in
+    /// the backfill queue (three underlyings x up to three expiries x 66 contracts, paced by
+    /// BackfillCallDelay, is minutes of calls) and its turn came round before Dhan had anything to
+    /// give. Those fill as soon as they can. It grows because a strike still empty after a dozen
+    /// tries is not waiting on anything, and at 66 strikes per expiry those retries are what spends
+    /// the shared Dhan history rate limit the working underlyings need.</summary>
+    private static readonly TimeSpan EmptyStrikeRetryInterval = TimeSpan.FromSeconds(45);
+    private static readonly TimeSpan EmptyStrikeMaxRetryInterval = TimeSpan.FromMinutes(30);
 
     /// <summary>Matches SpotFeedHostedService's own backfill window exactly - the option premium
     /// charts and CDV's reconstructed history need to cover the same trading days the spot chart
@@ -890,7 +896,7 @@ public sealed class CdvHostedService : BackgroundService
                 // exchange re-requests its entire strike window a hundred-odd times an hour,
                 // spending the shared Dhan history rate limit that the underlyings which DO work
                 // need for their own backfills.
-                if (isNewlyTracked || state.NeedsBackfill(contract.SecurityId, EmptyStrikeRetryInterval))
+                if (isNewlyTracked || state.NeedsBackfill(contract.SecurityId, EmptyStrikeRetryInterval, EmptyStrikeMaxRetryInterval))
                     needsBackfill.Add(contract.SecurityId);
                 _bySecurityId[contract.SecurityId] = state;
                 desiredTokens.Add(contract.SecurityId);

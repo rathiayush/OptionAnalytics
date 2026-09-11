@@ -22,14 +22,17 @@ public sealed class CdvBackfillRetryTests
         return state;
     }
 
+    private static readonly TimeSpan Base = TimeSpan.FromSeconds(45);
+    private static readonly TimeSpan Max = TimeSpan.FromMinutes(30);
+
     [Fact]
     public void NeverAttempted_NeedsBackfillImmediately()
     {
-        // A brand new strike must not be held back by the retry floor - there is no earlier attempt
-        // for it to be "too soon" after.
+        // A brand new strike must not be held back - there is no earlier attempt for it to be "too
+        // soon" after.
         var state = TrackedState();
 
-        Assert.True(state.NeedsBackfill(SecurityId, TimeSpan.FromMinutes(30)));
+        Assert.True(state.NeedsBackfill(SecurityId, Base, Max));
     }
 
     [Fact]
@@ -40,18 +43,47 @@ public sealed class CdvBackfillRetryTests
         var state = TrackedState();
         state.MarkBackfillAttempted(SecurityId);
 
-        Assert.False(state.NeedsBackfill(SecurityId, TimeSpan.FromMinutes(30)));
+        Assert.False(state.NeedsBackfill(SecurityId, Base, Max));
     }
 
     [Fact]
     public void AttemptedLongerAgoThanTheInterval_IsRetried()
     {
-        // The floor delays retries, it must never cancel them - a transient failure (auth not ready,
-        // a brief Dhan outage) still has to recover on its own once the interval has passed.
+        // The floor delays retries, it must never cancel them - data that simply was not available
+        // yet (a pre-open start, or being last in the backfill queue) still has to fill on its own.
         var state = TrackedState();
         state.MarkBackfillAttempted(SecurityId);
 
-        Assert.True(state.NeedsBackfill(SecurityId, TimeSpan.Zero));
+        Assert.True(state.NeedsBackfill(SecurityId, TimeSpan.Zero, TimeSpan.Zero));
+    }
+
+    [Fact]
+    public void TheWaitDoublesWithEachFailure()
+    {
+        // One failure waits Base; two wait 2xBase; three wait 4xBase. A strike that is merely slow
+        // recovers on the first short wait, while one that keeps failing backs itself off.
+        var state = TrackedState();
+
+        state.MarkBackfillAttempted(SecurityId);
+        Assert.True(state.NeedsBackfill(SecurityId, TimeSpan.Zero, Max));
+
+        // Elapsed is ~0 in a unit test, so the assertions are framed as "is this wait already
+        // satisfied", with Base standing in for the elapsed time being compared against.
+        state.MarkBackfillAttempted(SecurityId);
+        state.MarkBackfillAttempted(SecurityId);
+        Assert.False(state.NeedsBackfill(SecurityId, Base, Max));
+    }
+
+    [Fact]
+    public void TheWaitIsCappedAtTheMaximum()
+    {
+        // Attempts climb all day on a permanently dead strike - the escalation must saturate rather
+        // than grow without bound (or overflow the shift).
+        var state = TrackedState();
+        for (var i = 0; i < 500; i++) state.MarkBackfillAttempted(SecurityId);
+
+        // Capped at Max, so a wait of exactly Max is satisfied however many failures have stacked up.
+        Assert.True(state.NeedsBackfill(SecurityId, Max, TimeSpan.Zero));
     }
 
     [Fact]
@@ -61,7 +93,7 @@ public sealed class CdvBackfillRetryTests
         // case, and claiming otherwise would queue a fetch for a contract with no state behind it.
         var state = TrackedState();
 
-        Assert.False(state.NeedsBackfill(999999, TimeSpan.Zero));
+        Assert.False(state.NeedsBackfill(999999, TimeSpan.Zero, TimeSpan.Zero));
         Assert.False(state.NeedsBackfill(999999));
     }
 
@@ -74,7 +106,7 @@ public sealed class CdvBackfillRetryTests
 
         state.MarkBackfillAttempted(999999);
 
-        Assert.False(state.NeedsBackfill(999999, TimeSpan.Zero));
+        Assert.False(state.NeedsBackfill(999999, TimeSpan.Zero, TimeSpan.Zero));
     }
 
     [Fact]
@@ -87,6 +119,6 @@ public sealed class CdvBackfillRetryTests
         state.MarkBackfillAttempted(SecurityId);
 
         Assert.True(state.NeedsBackfill(SecurityId));
-        Assert.False(state.NeedsBackfill(SecurityId, TimeSpan.FromMinutes(30)));
+        Assert.False(state.NeedsBackfill(SecurityId, Base, Max));
     }
 }
