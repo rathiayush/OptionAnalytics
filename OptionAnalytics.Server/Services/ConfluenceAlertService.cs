@@ -169,16 +169,23 @@ public sealed class ConfluenceAlertService : BackgroundService
     {
         var state = GetOrCreateState(underlying);
         bool changed;
+        bool hadPrevious;
         lock (state)
         {
             var previous = getLeg(state);
+            hadPrevious = previous is not null;
             changed = previous is not { } prev || prev.Direction != direction;
             setLeg(state, (direction, barTime));
             state.LastUpdatedUtc = DateTimeOffset.UtcNow;
             if (changed) state.ConfluenceAlerted = false; // a leg just moved - allow a fresh confluence alert if the new combination aligns
         }
 
-        if (announce && changed) RaiseIndividualAlert(underlying, kind, direction, barTime, cancellationToken);
+        // The first reading ever recorded for THIS leg is a baseline, not a flip worth alerting on
+        // - see EvaluateConfluence's EverComplete check for why this can legitimately still be the
+        // first reading even when announce is true (this call came from a real bar close, not the
+        // startup seed pass, because backfill for this leg hadn't finished by the time the seed
+        // pass ran).
+        if (announce && changed && hadPrevious) RaiseIndividualAlert(underlying, kind, direction, barTime, cancellationToken);
         EvaluateConfluence(underlying, state, announce, cancellationToken);
     }
 
@@ -206,6 +213,18 @@ public sealed class ConfluenceAlertService : BackgroundService
             {
                 state.ConfluenceAlerted = false;
                 return;
+            }
+
+            // The first instant all three legs have EVER been known at once is a baseline, not an
+            // event - whether that happens during ExecuteAsync's own silent seed pass or, because
+            // backfill for one or more legs hadn't finished by then (a real race: backfill is an
+            // async Dhan REST round trip, not instant), on whichever real bar close afterward
+            // happens to complete the trio. Without this, a restart could treat an alignment that
+            // was already sitting there before this process started as brand new and Telegram it.
+            if (!state.EverComplete)
+            {
+                state.EverComplete = true;
+                announce = false;
             }
 
             var withinWindow = (spot.BarTime - ce.BarTime).Duration() <= ConfluenceWindow && (spot.BarTime - pe.BarTime).Duration() <= ConfluenceWindow;
@@ -324,5 +343,9 @@ public sealed class ConfluenceAlertService : BackgroundService
         /// reset the moment any leg flips (see UpdateLeg), so the next genuine alignment can alert
         /// again instead of this staying stuck true forever.</summary>
         public bool ConfluenceAlerted;
+        /// <summary>True once all three legs have EVER been known at the same time - see
+        /// EvaluateConfluence's own use of this for why the first time that happens is never itself
+        /// worth alerting on, regardless of which call (seed pass or a real bar close) it happens on.</summary>
+        public bool EverComplete;
     }
 }

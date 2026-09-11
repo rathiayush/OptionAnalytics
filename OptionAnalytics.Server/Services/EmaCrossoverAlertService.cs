@@ -69,8 +69,19 @@ public sealed class EmaCrossoverAlertService : BackgroundService
         // Not enough bars, an exact EMA tie, or the bias hasn't been confirmed by a close beyond
         // both EMAs yet - stay quiet and keep whatever was last confirmed.
         if (direction is null) return;
-        if (_lastDirection.TryGetValue(state.Underlying, out var previous) && previous == direction) return;
+
+        var hadPrevious = _lastDirection.TryGetValue(state.Underlying, out var previous);
+        if (hadPrevious && previous == direction) return;
         _lastDirection[state.Underlying] = direction;
+
+        // The FIRST direction ever recorded for this underlying is a baseline, not a change worth
+        // alerting on - SeedDirection above is meant to establish that baseline silently at
+        // startup, but it races SpotFeedHostedService's own backfill (a real Dhan REST round trip,
+        // not instant): if this bar closes before that backfill finishes, SeedDirection saw zero
+        // history and seeded nothing, and this would otherwise be the first time ConfirmedDirection
+        // ever resolves - misreporting an already-established trend from before the restart as a
+        // brand new crossover. Only a genuine, previously-different direction is a real alert.
+        if (!hadPrevious) return;
 
         var last = closedBars[^1];
         var detail = direction == "Bullish" ? "Bullish - closed above EMA9/21" : "Bearish - closed below EMA9/21";
