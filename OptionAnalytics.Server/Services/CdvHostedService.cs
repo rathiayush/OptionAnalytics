@@ -7,7 +7,7 @@ using OptionAnalytics.Server.Models;
 namespace OptionAnalytics.Server.Services;
 
 /// <summary>
-/// Computes CE/PE cumulative delta volume (CDV) for NIFTY/BANKNIFTY's near-the-money option
+/// Computes CE/PE cumulative delta volume (CDV) for NIFTY/BANKNIFTY/SENSEX's near-the-money option
 /// chain: every 30 minutes, re-centers on the current ATM strike (spot rounded to the nearest
 /// strike step) and tracks the 16-ITM + 16-OTM window around it for both CE and PE (33 strikes x 2
 /// sides = up to 66 contracts), subscribing/unsubscribing on the shared DhanMarketFeedClient as
@@ -20,20 +20,23 @@ public sealed class CdvHostedService : BackgroundService
     /// <summary>Each underlying, its strike step, and HOW MANY of the nearest listed expiries this
     /// app tracks live at once.
     ///
-    /// NIFTY lists weeklies, so 3 covers the current week plus the next two - which, near a monthly
-    /// roll, is what "current + next two" has to mean to include the month itself. BANKNIFTY lists
-    /// monthlies only, so 2 is the current month plus the next.
+    /// NIFTY and SENSEX both list weeklies, so 3 covers the current week plus the next two - which,
+    /// near a monthly roll, is what "current + next two" has to mean to include the month itself.
+    /// BANKNIFTY lists monthlies only (SEBI's 2024 rule keeps a single weekly index derivative per
+    /// exchange - NIFTY holds that slot on NSE, SENSEX holds it on BSE), so 2 is the current month
+    /// plus the next.
     ///
     /// Every tracked expiry costs its own ATM+-16 window: 33 strikes x CE/PE = up to 66 live
     /// contracts and 66 backfill calls each. That is the whole price of this - 198 contracts for
-    /// NIFTY and 132 for BANKNIFTY rather than 66 apiece - and the reason this is a small fixed
-    /// number per underlying rather than "every listed expiry". Comfortably inside Dhan's own feed
-    /// limit (DhanMarketFeedClient.MaxInstrumentsPerConnection, 5000) with room to spare for spot
-    /// and every other underlying's own window.</summary>
+    /// NIFTY/SENSEX and 132 for BANKNIFTY rather than 66 apiece - and the reason this is a small
+    /// fixed number per underlying rather than "every listed expiry". Comfortably inside Dhan's own
+    /// feed limit (DhanMarketFeedClient.MaxInstrumentsPerConnection, 5000) with room to spare for
+    /// spot and every other underlying's own window.</summary>
     private static readonly (string Underlying, int Step, int TrackedExpiries)[] Underlyings =
     {
         ("NIFTY", 50, 3),
         ("BANKNIFTY", 100, 2),
+        ("SENSEX", 100, 3),
     };
 
     /// <summary>16 ITM + 16 OTM strikes around ATM (so 33 strikes total, ATM included), for both CE
@@ -558,7 +561,7 @@ public sealed class CdvHostedService : BackgroundService
         IReadOnlyList<CandleWithVolume> bars;
         try
         {
-            bars = await _historicalData.GetIntradayOptionCandlesAsync(contract.SecurityId, "NSE_FNO", fromDay, today, 1, cancellationToken);
+            bars = await _historicalData.GetIntradayOptionCandlesAsync(contract.SecurityId, contract.DhanSegment, fromDay, today, 1, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -793,6 +796,10 @@ public sealed class CdvHostedService : BackgroundService
         var strikes = Enumerable.Range(-StrikeRange, StrikeRange * 2 + 1).Select(i => atm + i * step).ToArray();
 
         var desiredTokens = new HashSet<uint>();
+        // Which Dhan segment each desired token actually subscribes under - NSE_FNO for NIFTY/
+        // BANKNIFTY, BSE_FNO for SENSEX (see DhanOptionInstrument.DhanSegment) - rather than one
+        // segment assumed for every token below, now that this app spans two exchanges.
+        var desiredSegments = new Dictionary<uint, string>();
         var ceList = new List<int>();
         var peList = new List<int>();
         var needsBackfill = new List<uint>();
@@ -813,6 +820,7 @@ public sealed class CdvHostedService : BackgroundService
                     needsBackfill.Add(contract.SecurityId);
                 _bySecurityId[contract.SecurityId] = state;
                 desiredTokens.Add(contract.SecurityId);
+                desiredSegments[contract.SecurityId] = contract.DhanSegment;
                 (isCall ? ceList : peList).Add(strike);
             }
         }
@@ -833,7 +841,7 @@ public sealed class CdvHostedService : BackgroundService
 
         if (toSubscribe.Length > 0)
         {
-            var segments = toSubscribe.ToDictionary(t => t, _ => "NSE_FNO");
+            var segments = toSubscribe.ToDictionary(t => t, t => desiredSegments[t]);
             // Full mode, not the default Quote - option strikes have a real order book, and this is
             // what gives StrategyTriggerHostedService a live best bid/ask to re-price an unfilled
             // order retry against instead of only the last traded price (see DhanMarketFeedClient's
@@ -940,10 +948,11 @@ public sealed class CdvHostedService : BackgroundService
             if (i > 0) await Task.Delay(BackfillCallDelay, cancellationToken);
 
             var securityId = securityIds[i];
+            var dhanSegment = _optionChainMaster.FindBySecurityId(securityId)?.DhanSegment ?? "NSE_FNO";
             IReadOnlyList<CandleWithVolume> bars;
             try
             {
-                bars = await _historicalData.GetIntradayOptionCandlesAsync(securityId, "NSE_FNO", fromDay, today, 1, cancellationToken);
+                bars = await _historicalData.GetIntradayOptionCandlesAsync(securityId, dhanSegment, fromDay, today, 1, cancellationToken);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {

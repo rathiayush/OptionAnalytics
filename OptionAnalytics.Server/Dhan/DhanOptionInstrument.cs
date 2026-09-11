@@ -8,7 +8,10 @@ public sealed record DhanOptionInstrument(
     DateOnly Expiry,
     decimal Strike,
     bool IsCall,
-    /// <summary>Dhan's WS subscription segment string - "NSE_FNO" for every index option.</summary>
+    /// <summary>Dhan's WS subscription segment string - "NSE_FNO" for a NIFTY/BANKNIFTY option,
+    /// "BSE_FNO" for a SENSEX one. Read per-contract from the scrip master's own exchange column
+    /// (see DhanOptionChainMaster.ParseOptionRows) rather than assumed, now that this app spans two
+    /// different exchanges instead of NSE alone.</summary>
     string DhanSegment,
     /// <summary>Shares per lot (SEM_LOT_UNITS) - an order's quantity must be a whole multiple of
     /// this. SEBI revises index option lot sizes periodically, so this is read fresh from the

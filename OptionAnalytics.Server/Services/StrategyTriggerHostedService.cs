@@ -478,7 +478,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         var summary = $"{(closingIsSell ? "SELL" : "BUY")} {contract.TradingSymbol} x{quantity} (SecurityId {contract.SecurityId})\nLIMIT {price:0.##} - squaring off by {IstClock.FormatMinutesOfDay(squareOffMinutes)} IST";
 
         var (result, error) = await _orders.PlaceAsync(
-            closingIsSell ? "SELL" : "BUY", "NSE_FNO", ProductType, "LIMIT", "DAY",
+            closingIsSell ? "SELL" : "BUY", contract.DhanSegment, ProductType, "LIMIT", "DAY",
             entryOrder.SecurityId, quantity, price, correlationId, cancellationToken);
 
         if (result is null)
@@ -695,7 +695,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         var correlationId = $"{prefix}{DateTimeOffset.UtcNow:yyyyMMddHHmmss}";
         var summary = $"SELL {contract.TradingSymbol} x{quantity} (SecurityId {contract.SecurityId})\nLIMIT {price:0.##} - closing the protective hedge now that the main leg is no longer open";
 
-        var (result, error) = await _orders.PlaceAsync("SELL", "NSE_FNO", ProductType, "LIMIT", "DAY", hedgeOrder.SecurityId, quantity, price, correlationId, cancellationToken);
+        var (result, error) = await _orders.PlaceAsync("SELL", contract.DhanSegment, ProductType, "LIMIT", "DAY", hedgeOrder.SecurityId, quantity, price, correlationId, cancellationToken);
 
         if (result is null)
         {
@@ -1137,10 +1137,10 @@ public sealed class StrategyTriggerHostedService : BackgroundService
             var hedgePrice = RoundToTick(hedgeRawPrice, hedgeContract.TickSize);
             var hedgeSummary = $"BUY {hedgeContract.TradingSymbol} x{quantity} (SecurityId {hedgeContract.SecurityId}) - protective hedge, {trigger.HedgeOtmSteps} step(s) further OTM than the sold leg\nLIMIT {hedgePrice:0.##}";
 
-            hedgePlan = new HedgePlan(hedgeContract.SecurityId.ToString(), hedgeContract.SecurityId, quantity, hedgePrice, hedgeSummary);
+            hedgePlan = new HedgePlan(hedgeContract.SecurityId.ToString(), hedgeContract.SecurityId, quantity, hedgePrice, hedgeSummary, hedgeContract.DhanSegment);
         }
 
-        return (new SuperOrderPlan(transactionType, contract.SecurityId.ToString(), contract.SecurityId, quantity, limitPrice, targetPrice, stopLossPrice, tick, entryPrice, correlationId, summary, expiry.Value), hedgePlan, null);
+        return (new SuperOrderPlan(transactionType, contract.SecurityId.ToString(), contract.SecurityId, quantity, limitPrice, targetPrice, stopLossPrice, tick, entryPrice, correlationId, summary, expiry.Value, contract.DhanSegment), hedgePlan, null);
     }
 
     /// <summary>The PROTECTIVE hedge leg's own order shape - see StrategyTrigger.HedgeOtmSteps. A
@@ -1148,7 +1148,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     /// its own; it is only ever closed once the main leg it protects closes, see
     /// CloseHedgeIfOpenAsync), priced the same "SlippagePoints beyond the live reference" way every
     /// other entry in this file already is.</summary>
-    private sealed record HedgePlan(string SecurityId, uint InstrumentSecurityId, int Quantity, decimal Price, string Summary);
+    private sealed record HedgePlan(string SecurityId, uint InstrumentSecurityId, int Quantity, decimal Price, string Summary, string DhanSegment);
 
     /// <summary>StrategyTrigger.HedgeOtmSteps' own distance rule: further OTM in the SAME direction
     /// the sold leg already is, measured from the SOLD strike itself rather than from ATM again -
@@ -1233,7 +1233,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         {
             var hedgeCorrelationId = $"{trigger.Id}-hedge-{trade.SignalTimeUtc:yyyyMMddHHmm}";
             var (hedgeResult, hedgeError) = await _orders.PlaceAsync(
-                "BUY", "NSE_FNO", ProductType, OrderType, "DAY",
+                "BUY", hedge.DhanSegment, ProductType, OrderType, "DAY",
                 hedge.SecurityId, hedge.Quantity, hedge.Price, hedgeCorrelationId, cancellationToken);
 
             if (hedgeResult is null)
@@ -1253,7 +1253,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         }
 
         var (result, error) = await _superOrders.PlaceAsync(
-            plan.TransactionType, "NSE_FNO", ProductType, OrderType,
+            plan.TransactionType, plan.DhanSegment, ProductType, OrderType,
             plan.SecurityId, plan.Quantity, plan.Price, plan.TargetPrice, plan.StopLossPrice,
             plan.CorrelationId, trailingJump: 0, cancellationToken);
 
@@ -1582,5 +1582,5 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     private sealed record SuperOrderPlan(
         string TransactionType, string SecurityId, uint InstrumentSecurityId, int Quantity,
         decimal Price, decimal TargetPrice, decimal StopLossPrice, decimal TickSize,
-        decimal ReferencePrice, string CorrelationId, string Summary, DateOnly Expiry);
+        decimal ReferencePrice, string CorrelationId, string Summary, DateOnly Expiry, string DhanSegment);
 }
