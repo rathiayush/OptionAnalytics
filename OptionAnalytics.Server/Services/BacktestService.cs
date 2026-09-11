@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using OptionAnalytics.Server.Models;
 using OptionAnalytics.Server.Services.Backtesting;
 
@@ -70,15 +71,29 @@ public sealed class BacktestService
     /// which would look exactly like the "No Data" this is trying to remove.</summary>
     private static readonly TimeSpan OnDemandCallDelay = TimeSpan.FromMilliseconds(200);
 
+    /// <summary>How long the BACKGROUND continuation gets after a request has already returned (see
+    /// ContinueFillingInBackground). Far longer than MaxOnDemandDuration because nobody is waiting
+    /// on it - the point is that the strikes this click could not reach are cached before the next
+    /// one asks, instead of the user having to press Run repeatedly to walk through them a
+    /// deadline's worth at a time.</summary>
+    private static readonly TimeSpan BackgroundFillDuration = TimeSpan.FromMinutes(3);
+
     private readonly SpotFeedHostedService _spotFeed;
     private readonly CdvHostedService _cdv;
     private readonly IReadOnlyDictionary<string, IBacktestStrategy> _strategies;
+    private readonly ILogger<BacktestService> _logger;
 
-    public BacktestService(SpotFeedHostedService spotFeed, CdvHostedService cdv, IEnumerable<IBacktestStrategy> strategies)
+    /// <summary>One background fill at a time per underlying/expiry. Without this, every Run click
+    /// while a fill is already running would start another one over the same strikes - multiplying
+    /// calls into a rate-limited Dhan endpoint to do work that is already in progress.</summary>
+    private readonly ConcurrentDictionary<(string Underlying, DateOnly? Expiry), byte> _backgroundFills = new();
+
+    public BacktestService(SpotFeedHostedService spotFeed, CdvHostedService cdv, IEnumerable<IBacktestStrategy> strategies, ILogger<BacktestService> logger)
     {
         _spotFeed = spotFeed;
         _cdv = cdv;
         _strategies = strategies.ToDictionary(s => s.Key);
+        _logger = logger;
     }
 
     /// <summary>Every signal that would have fired across the underlying's currently-held history
@@ -165,7 +180,64 @@ public sealed class BacktestService
             trades = p.Strategy.Simulate(p.Context, p.Parameters);
         }
 
+        // Whatever the deadline cut off is still on the miss list. Warming those into the on-demand
+        // cache now - after the response goes out, so it costs this click nothing - is what turns
+        // "press Run again for each deadline's worth of strikes" into "it fills itself". A backtest
+        // over 45 trading days of a trending underlying can reference far more distinct strikes than
+        // 25 seconds of paced calls covers, so without this the user is the retry loop.
+        ContinueFillingInBackground(underlying, p.OnDemand, expiry);
+
         return trades;
+    }
+
+    /// <summary>Fetches the strikes the foreground loop ran out of time for, after the response has
+    /// already been sent, so they are cached by the time anything asks again.
+    ///
+    /// Deliberately fire-and-forget with its OWN cancellation token: the token passed to
+    /// RunStrategyAsync is the request's, which is cancelled the moment the response completes - so
+    /// continuing on it would cancel this instantly, every time. Bounded by BackgroundFillDuration
+    /// and by one-at-a-time-per-underlying, and it only ever populates a cache - nothing waits on
+    /// its result, and a failure leaves exactly the "No Data" that was already there.</summary>
+    private void ContinueFillingInBackground(string underlying, OnDemandStrikes onDemand, DateOnly? expiry)
+    {
+        var remaining = onDemand.DrainMisses();
+        if (remaining.Count == 0) return;
+
+        var key = (underlying, expiry);
+        if (!_backgroundFills.TryAdd(key, 0)) return; // one already working through these strikes
+
+        _ = Task.Run(async () =>
+        {
+            using var cts = new CancellationTokenSource(BackgroundFillDuration);
+            var filled = 0;
+
+            try
+            {
+                foreach (var (strike, isCall) in remaining)
+                {
+                    if (cts.IsCancellationRequested) break;
+                    if (filled > 0) await Task.Delay(OnDemandCallDelay, cts.Token);
+
+                    await _cdv.GetStrikeCandlesAsync(underlying, strike, isCall, cts.Token, expiry);
+                    filled++;
+                }
+
+                _logger.LogInformation("Backtest background fill: cached {Filled} of {Total} remaining {Underlying} strike(s) for the next run.",
+                    filled, remaining.Count, underlying);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogDebug("Backtest background fill for {Underlying} stopped after {Filled} of {Total} strike(s).", underlying, filled, remaining.Count);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Backtest background fill for {Underlying} failed after {Filled} of {Total} strike(s).", underlying, filled, remaining.Count);
+            }
+            finally
+            {
+                _backgroundFills.TryRemove(key, out _);
+            }
+        });
     }
 
     /// <summary>Fetches every strike the just-completed pass found nothing for, up to
