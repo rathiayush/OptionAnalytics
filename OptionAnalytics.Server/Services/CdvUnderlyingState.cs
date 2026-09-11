@@ -50,6 +50,18 @@ internal sealed class CdvStrikeRuntime
     /// do work of their own rate limit.</summary>
     public DateTimeOffset? LastBackfillAttemptUtc { get; set; }
 
+    /// <summary>How many times this strike's backfill has been attempted without success - drives
+    /// the ESCALATING wait between retries (see NeedsBackfill's interval overload).
+    ///
+    /// A flat floor cannot serve both cases here. The wait has to be short at first, because the
+    /// common reason a fetch comes back empty is that the data is not there YET - the app started
+    /// before the market opened, or this is simply the third underlying in the backfill queue and
+    /// its turn came before Dhan had anything to give. Those recover on their own within a minute
+    /// or two and must not be made to sit out a long cooldown. But the wait has to grow, because a
+    /// strike that has failed a dozen times running is not waiting for anything, and at 66 strikes
+    /// per expiry those retries are what exhausts the shared Dhan history rate limit.</summary>
+    public int BackfillAttempts { get; set; }
+
     private readonly List<(Candle Bar, long Volume)> _closedBars = new();
     private (Candle Bar, long Volume)? _currentBar;
 
@@ -253,16 +265,27 @@ public sealed class CdvUnderlyingState
         lock (_lock) { return _strikes.TryGetValue(securityId, out var strike) && !strike.Backfilled; }
     }
 
-    /// <summary>NeedsBackfill, but ignoring a strike whose last attempt was under
-    /// <paramref name="minRetryInterval"/> ago - so a strike Dhan has no history for costs one call
-    /// per interval rather than one per recenter. See CdvStrikeState.LastBackfillAttemptUtc.</summary>
-    public bool NeedsBackfill(uint securityId, TimeSpan minRetryInterval)
+    /// <summary>NeedsBackfill, but holding back a strike that was attempted too recently - so a
+    /// strike Dhan has no history for costs a bounded number of calls rather than one per recenter.
+    ///
+    /// The wait ESCALATES from <paramref name="baseRetryInterval"/>, doubling per failed attempt up
+    /// to <paramref name="maxRetryInterval"/>. That is what lets the same rule serve both reasons a
+    /// fetch returns nothing: data that is merely not available yet (a pre-open start, or being
+    /// last in the backfill queue) retries within a minute or two and fills as soon as it can, while
+    /// a strike that keeps failing settles to one quiet call per max interval instead of hammering
+    /// the shared rate limit 66 strikes at a time. See CdvStrikeState.BackfillAttempts.</summary>
+    public bool NeedsBackfill(uint securityId, TimeSpan baseRetryInterval, TimeSpan maxRetryInterval)
     {
         lock (_lock)
         {
             if (!_strikes.TryGetValue(securityId, out var strike) || strike.Backfilled) return false;
-            return strike.LastBackfillAttemptUtc is not { } attempted
-                || DateTimeOffset.UtcNow - attempted >= minRetryInterval;
+            if (strike.LastBackfillAttemptUtc is not { } attempted) return true;
+
+            // Shift rather than Math.Pow, and clamped before shifting: attempts climb all day on a
+            // permanently dead strike, and shifting by 64+ is undefined rather than saturating.
+            var doublings = Math.Min(Math.Max(strike.BackfillAttempts - 1, 0), 16);
+            var ticks = Math.Min(baseRetryInterval.Ticks << doublings, maxRetryInterval.Ticks);
+            return DateTimeOffset.UtcNow - attempted >= TimeSpan.FromTicks(ticks);
         }
     }
 
@@ -273,7 +296,9 @@ public sealed class CdvUnderlyingState
     {
         lock (_lock)
         {
-            if (_strikes.TryGetValue(securityId, out var strike)) strike.LastBackfillAttemptUtc = DateTimeOffset.UtcNow;
+            if (!_strikes.TryGetValue(securityId, out var strike)) return;
+            strike.LastBackfillAttemptUtc = DateTimeOffset.UtcNow;
+            strike.BackfillAttempts++;
         }
     }
 
