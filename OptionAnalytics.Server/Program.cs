@@ -146,6 +146,11 @@ builder.Services.AddSingleton<IBacktestStrategy, BollingerBandsStrategy>();
 builder.Services.AddSingleton<IBacktestStrategy, MacdCrossoverStrategy>();
 builder.Services.AddSingleton<IBacktestStrategy, Rsi2MeanReversionStrategy>();
 builder.Services.AddSingleton<IBacktestStrategy, OpeningRangeBreakoutStrategy>();
+builder.Services.AddSingleton<IBacktestStrategy, TurtleDonchianBreakoutStrategy>();
+builder.Services.AddSingleton<IBacktestStrategy, SuperTrendStrategy>();
+builder.Services.AddSingleton<IBacktestStrategy, ParabolicSarStrategy>();
+builder.Services.AddSingleton<IBacktestStrategy, AdxDirectionalCrossoverStrategy>();
+builder.Services.AddSingleton<IBacktestStrategy, KeltnerChannelBreakoutStrategy>();
 
 // Stateless - reads SpotFeedHostedService/CdvHostedService's in-memory history fresh on every
 // request, nothing to run in the background. See BacktestController/BacktestService.

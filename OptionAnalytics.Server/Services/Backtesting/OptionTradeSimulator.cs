@@ -67,6 +67,24 @@ public static class OptionTradeSimulator
     public static BacktestParameterSpec TakeProfitParameter() =>
         new("tpPoints", "Take profit (points)", Default: 20, Min: 0.05m, Max: 2000, Step: 0.5m);
 
+    /// <summary>Same "slPoints" key and bounds as StopLossParameter, just a smaller default (8
+    /// instead of 10) - for a trend-following strategy built around cutting a wrong entry loose
+    /// quickly while a small minority of entries are left to capture a genuinely large move (see
+    /// LongRangeTakeProfitParameter's own large default) - the classic "cut losses short, let
+    /// winners run" asymmetry these strategies are designed around, rather than the roughly 1:2
+    /// risk:reward the rest of this app's strategies default to.</summary>
+    public static BacktestParameterSpec SmallStopLossParameter() =>
+        new("slPoints", "Stop loss (points) - kept small for a favorable risk:reward", Default: 8, Min: 0.05m, Max: 1000, Step: 0.5m);
+
+    /// <summary>Same "tpPoints" key and bounds as TakeProfitParameter, just a much larger default
+    /// (80 instead of 20) - paired with SmallStopLossParameter's small stop for roughly a 1:10
+    /// risk:reward, wide enough that it is rarely the reason a genuinely extended trend day's
+    /// position closes (the day's own EOD exit, or SquareOffTimeParameter, still bounds how long a
+    /// position can run - this is not a trailing stop, just a fixed target set far enough away not
+    /// to cap a big move prematurely).</summary>
+    public static BacktestParameterSpec LongRangeTakeProfitParameter() =>
+        new("tpPoints", "Take profit (points) - set wide to capture an extended trend", Default: 80, Min: 0.05m, Max: 2000, Step: 0.5m);
+
     /// <summary>Minutes past midnight IST, e.g. 915 = 15:15 (see IstClock.AtIstTime) - a plain
     /// number rather than a time value because the whole parameter pipeline (query string,
     /// controller parsing, IBacktestStrategy.Simulate's decimal dictionary) only ever carries
