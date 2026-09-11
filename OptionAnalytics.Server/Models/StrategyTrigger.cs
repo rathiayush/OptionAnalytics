@@ -123,6 +123,35 @@ public sealed record StrategyTrigger(
     /// money on the line.</summary>
     public int HedgeOtmSteps { get; init; }
 
+    /// <summary>How liquid a strike has to be before this trigger will BUY it as the protective
+    /// hedge leg (see HedgeOtmSteps), as a percentage of the SOLD strike's own open interest.
+    ///
+    /// The problem this solves: HedgeOtmSteps is a distance, and far-OTM strikes thin out fast. The
+    /// strike that distance lands on can be listed and still carry a last-traded price from hours
+    /// ago while having essentially no book behind it - so buying it means crossing a wide spread at
+    /// a price nobody is really quoting, and then owning something that may be hard to sell back
+    /// when CloseHedgeIfOpenAsync comes to close it.
+    ///
+    /// Measured RELATIVE to the sold strike rather than as an absolute contract count on purpose.
+    /// The sold leg is near ATM and liquid by construction (it is what the strategy just picked), so
+    /// it is a live, per-underlying, per-expiry yardstick - one that stays meaningful across
+    /// NIFTY/BANKNIFTY/SENSEX, across SEBI's periodic lot-size revisions, and whatever unit Dhan
+    /// happens to report OI in. An absolute threshold would have to be re-tuned for each of those
+    /// and would be silently wrong in between.
+    ///
+    /// A strike that fails this does NOT abort the order on its own: HedgeStrikeWalkedInward walks
+    /// INWARD toward the sold strike - the only safe direction, since closer to ATM is both more
+    /// liquid and more protective - and takes the first strike that passes, down to a floor of half
+    /// the requested distance. Only when nothing in that band qualifies is the whole order abandoned,
+    /// for the same reason every other hedge failure abandons it: a sell this trigger was configured
+    /// to hedge must never go out naked instead.
+    ///
+    /// null (what every trigger created before this existed deserializes to) means the default,
+    /// HedgeDefaultMinOpenInterestPercent - the guard is ON by default, since an unhedgeable strike
+    /// is exactly what someone enabling a hedge is trying to avoid. An explicit 0 disables the check
+    /// and takes whatever strike the distance lands on, liquid or not.</summary>
+    public int? HedgeMinOpenInterestPercent { get; init; }
+
     /// <summary>The Dhan plain-order id for this trigger's currently-open PROTECTIVE hedge leg
     /// (see HedgeOtmSteps) - LastOrderId's own counterpart, for the identical reason: a background
     /// sweep needs to know which order/position it is watching across restarts. Cleared once the
@@ -168,4 +197,5 @@ public sealed record StrategyTriggerRequest(
     bool UseLivePremiumEntry,
     DateOnly? OrderExpiry = null,
     bool AdjustStopLossOnOpenPosition = false,
-    int HedgeOtmSteps = 0);
+    int HedgeOtmSteps = 0,
+    int? HedgeMinOpenInterestPercent = null);
