@@ -102,6 +102,34 @@ public sealed record StrategyTrigger(
     /// what happens to the FIRST one's protective stop.</summary>
     public bool AdjustStopLossOnOpenPosition { get; init; }
 
+    /// <summary>How many strike-steps further OTM than the SOLD leg's own strike a PROTECTIVE
+    /// hedge leg is bought at, automatically, whenever this trigger's fired trade sells an option
+    /// (Side = Sell) with LiveTradingEnabled on - the classic "sell a closer premium, buy a
+    /// cheaper far one" credit spread a real option seller uses to cap tail risk (and often for
+    /// margin benefit) instead of going naked. Distance from the SOLD strike, not from ATM - same
+    /// idea as otmSteps, just walked further out from wherever this trade's own strike already
+    /// landed rather than from ATM again.
+    ///
+    /// 0 (the default, and what every trigger created before this existed keeps) means no hedge -
+    /// a naked sell, exactly the behavior this had all along. Never read on the Buy side: a bought
+    /// option's own downside is already capped at the premium paid, so there is nothing to hedge.
+    ///
+    /// Live trading only - see BuildOrderPlanAsync. The backtest keeps modeling the naked leg
+    /// exactly as it always did; OptionTradeSimulator has no concept of a second leg.
+    ///
+    /// If the hedge leg cannot be resolved or priced, the WHOLE order is aborted rather than
+    /// placing the sell naked - see BuildOrderPlanAsync's own doc comment for why "asked for a
+    /// spread, got a naked sell instead" is never an acceptable silent substitution with real
+    /// money on the line.</summary>
+    public int HedgeOtmSteps { get; init; }
+
+    /// <summary>The Dhan plain-order id for this trigger's currently-open PROTECTIVE hedge leg
+    /// (see HedgeOtmSteps) - LastOrderId's own counterpart, for the identical reason: a background
+    /// sweep needs to know which order/position it is watching across restarts. Cleared once the
+    /// hedge position is confirmed closed (CloseHedgeIfOpenAsync), same lifecycle LastOrderId has.
+    /// Always null for a trigger with HedgeOtmSteps == 0, or for a fired trade on the Buy side.</summary>
+    public string? LastHedgeOrderId { get; init; }
+
     /// <summary>The Dhan Super Order id from this trigger's most recent successful placement -
     /// set the instant PlaceOrderAsync gets an order id back, regardless of whether it has filled
     /// yet. SquareOffIfDueAsync is the one reader: it is how a square-off sweep, running on its
@@ -139,4 +167,5 @@ public sealed record StrategyTriggerRequest(
     decimal MaxDeviationPercent,
     bool UseLivePremiumEntry,
     DateOnly? OrderExpiry = null,
-    bool AdjustStopLossOnOpenPosition = false);
+    bool AdjustStopLossOnOpenPosition = false,
+    int HedgeOtmSteps = 0);

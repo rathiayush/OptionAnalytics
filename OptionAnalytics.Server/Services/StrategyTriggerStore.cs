@@ -68,6 +68,7 @@ public sealed class StrategyTriggerStore
             UseLivePremiumEntry = request.UseLivePremiumEntry,
             OrderExpiry = request.OrderExpiry,
             AdjustStopLossOnOpenPosition = request.AdjustStopLossOnOpenPosition,
+            HedgeOtmSteps = Math.Max(0, request.HedgeOtmSteps),
         };
 
         lock (_lock)
@@ -110,6 +111,7 @@ public sealed class StrategyTriggerStore
                 // throw away where the trigger had got to and re-prime it.
                 OrderExpiry = request.OrderExpiry,
                 AdjustStopLossOnOpenPosition = request.AdjustStopLossOnOpenPosition,
+                HedgeOtmSteps = Math.Max(0, request.HedgeOtmSteps),
                 LastSignalUtc = watchChanged ? null : existing.LastSignalUtc,
             };
 
@@ -157,6 +159,20 @@ public sealed class StrategyTriggerStore
             if (!_triggers.TryGetValue(id, out var existing)) return;
 
             _triggers[id] = existing with { LastOrderId = orderId };
+            SaveNoLock();
+        }
+    }
+
+    /// <summary>Records (or clears, passing null) which Dhan order this trigger's PROTECTIVE hedge
+    /// leg is currently open under - SetLastOrderId's own counterpart, for StrategyTrigger.
+    /// LastHedgeOrderId.</summary>
+    public void SetLastHedgeOrderId(string id, string? orderId)
+    {
+        lock (_lock)
+        {
+            if (!_triggers.TryGetValue(id, out var existing)) return;
+
+            _triggers[id] = existing with { LastHedgeOrderId = orderId };
             SaveNoLock();
         }
     }

@@ -67,6 +67,12 @@ export default function TriggersPage() {
   // reported as [STOP LOSS UPDATED] - still never a second position. See
   // StrategyTrigger.AdjustStopLossOnOpenPosition.
   const [adjustStopLossOnOpenPosition, setAdjustStopLossOnOpenPosition] = useState(false)
+  // 0 (the default): a fired Sell signal goes out naked, exactly as before this existed. > 0:
+  // automatically also buys a cheaper, further-OTM option this many strike-steps beyond the sold
+  // one - the classic "sell close, buy far" credit spread a real option seller uses to cap tail
+  // risk - closed together the moment the sold leg's own position closes. Only ever applies to a
+  // Sell-side trade; a Buy-side one has nothing to hedge. See StrategyTrigger.HedgeOtmSteps.
+  const [hedgeOtmSteps, setHedgeOtmSteps] = useState(0)
 
   // Read-only here: this page needs the list of TRACKED expiries to choose from, and the default so
   // the fallback option can name it. Every one of these is subscribed live, so a trigger pinned to
@@ -148,6 +154,7 @@ export default function TriggersPage() {
         useLivePremiumEntry,
         orderExpiry,
         adjustStopLossOnOpenPosition,
+        hedgeOtmSteps,
       }),
     })
       .then((r) => r.json())
@@ -186,6 +193,7 @@ export default function TriggersPage() {
         useLivePremiumEntry: row.useLivePremiumEntry,
         orderExpiry: row.orderExpiry,
         adjustStopLossOnOpenPosition: row.adjustStopLossOnOpenPosition,
+        hedgeOtmSteps: row.hedgeOtmSteps,
         ...changes,
       }),
     })
@@ -244,6 +252,7 @@ export default function TriggersPage() {
               {row.useLivePremiumEntry ? ' · live-premium entry' : ''}
               {row.adjustStopLossOnOpenPosition ? ' · SL update on re-signal' : ''}
               {row.orderExpiry ? ` · ${row.orderExpiry} expiry` : ''}
+              {row.hedgeOtmSteps > 0 ? ` · hedged +${row.hedgeOtmSteps} OTM` : ''}
             </Text>
           )}
         </Space>
@@ -429,6 +438,11 @@ export default function TriggersPage() {
                       ]}
                     />
                   </Space>
+                  <Space direction="vertical" size={2}>
+                    <Text type="secondary" style={{ fontSize: 12 }}>Hedge sold leg (OTM steps, 0 = off)</Text>
+                    <InputNumber controls={false} min={0} step={1} value={hedgeOtmSteps}
+                      onChange={(v) => setHedgeOtmSteps(v ?? 0)} style={{ width: 130 }} />
+                  </Space>
                   <Text type="secondary" style={{ fontSize: 12, maxWidth: 460 }}>
                     Places a real Dhan Super Order (LIMIT entry + target + stop-loss) from every fired
                     trade. Slippage keeps the entry marketable. If it doesn&apos;t fill, it re-prices off the
@@ -445,6 +459,9 @@ export default function TriggersPage() {
                     {adjustStopLossOnOpenPosition
                       ? ' this trigger instead moves that position’s stop-loss to the new signal’s own entry price, reported as [STOP LOSS UPDATED].'
                       : ' it is skipped instead, reported as [NO ORDER PLACED].'}
+                    {hedgeOtmSteps > 0
+                      ? ` Every Sell signal also buys a cheaper, further-OTM option ${hedgeOtmSteps} strike step(s) beyond the sold one first, as protection - a credit spread instead of a naked sell. If the hedge leg can't be placed or priced, the whole order is aborted rather than selling naked. The hedge is closed automatically the moment the sold leg's own position closes (its stop-loss, target, or a manual square-off) - it has no stop-loss/target of its own. Only ever applies to Sell; a Buy signal has nothing to hedge.`
+                      : ''}
                   </Text>
                 </>
               )}
