@@ -40,6 +40,22 @@ const STORED_CDV_UNIT = 'optionanalytics.cdvUnit'
 const STORED_OBV_UNIT = 'optionanalytics.obvUnit'
 const STORED_CDV_LOOKBACK_BARS = 'optionanalytics.lookbackBars.cdv'
 const STORED_OBV_LOOKBACK_BARS = 'optionanalytics.lookbackBars.obv'
+const STORED_DAYS_TO_SHOW = 'optionanalytics.daysToShow'
+
+// How many of the server's already-held trading days (HistoryWindow.TradingDays - 30 as of this
+// writing) the charts actually display - a client-side view over data that's all already sitting
+// in memory after the page's own load, same "instant, no round trip" idea as the timeframe
+// switcher. 0 means "All" - deliberately not hardcoded to the server's current window size, so this
+// never silently starts (or stops) trimming just because that number changes later.
+const DAYS_OPTIONS = [
+  { value: 1, label: '1 day' },
+  { value: 3, label: '3 days' },
+  { value: 5, label: '5 days' },
+  { value: 10, label: '10 days' },
+  { value: 15, label: '15 days' },
+  { value: 30, label: '30 days' },
+  { value: 0, label: 'All' },
+]
 
 function useScaledLine(points, unitKey) {
   const { divisor } = VALUE_UNITS[unitKey]
@@ -68,6 +84,23 @@ function dayResetMarkers(points) {
     previousDay = day
   }
   return markers
+}
+
+// Keeps only the entries from the most recent `days` distinct IST trading days present - the
+// client-side, instant-switch counterpart to the server's own SpotFeedHostedService/
+// CdvHostedService TrimToRecentTradingDays, letting the "days to show" picker narrow the view over
+// whatever HistoryWindow.TradingDays the server is currently holding without a second round trip:
+// everything up to that server-side window is already sitting in the state a normal page load
+// fetched. `days` falsy (the DAYS_OPTIONS "All" entry, 0) means no trim at all - same "0 disables
+// it" convention this app's other numeric filters (signalStartMinutes, squareOffMinutes,
+// minSlopePercent) already use. Runs on the RAW wire records (still ISO `.time` strings, same shape
+// toBar/toLinePoint take), so this belongs BEFORE those conversions and the timeframe aggregation
+// that follows them, not after.
+function trimToRecentDays(points, days) {
+  if (!days || points.length === 0) return points
+  const distinctDays = [...new Set(points.map((p) => istDayKey(toChartTime(p.time))))].sort()
+  const keep = new Set(distinctDays.slice(-days))
+  return points.filter((p) => keep.has(istDayKey(toChartTime(p.time))))
 }
 
 // CDV gets today's line solid and the previous trading day dashed underneath it, because the
@@ -1013,6 +1046,10 @@ function DashboardPage() {
   // Shared with every other page and remembered across reloads - see usePersistedState.
   const [selected, setSelected] = usePersistedState(STORED_UNDERLYING, null)
   const [timeframe, setTimeframe] = usePersistedState(STORED_TIMEFRAME, 1)
+  // How many of the server's held trading days the charts show - see DAYS_OPTIONS/
+  // trimToRecentDays. Defaults to 0 ("All") so nobody who hasn't touched this control sees any
+  // change from before it existed.
+  const [daysToShow, setDaysToShow] = usePersistedState(STORED_DAYS_TO_SHOW, 0)
   // Per-chart so either can be read at its own natural magnitude - CDV and OBV don't always sit
   // in the same range as each other.
   const [cdvUnit, setCdvUnit] = usePersistedState(STORED_CDV_UNIT, 'M')
@@ -1295,17 +1332,25 @@ function DashboardPage() {
   const chartedStrike = selectedStrike === ATM_STRIKE ? (cdvSnapshot?.atmStrike ?? null) : selectedStrike
   const showsAtmContract = chartedStrike != null && chartedStrike === cdvSnapshot?.atmStrike
 
-  const spotBars = useAggregatedCandles(candles, snapshot?.currentBar, timeframe)
-  const atmCeBars = useAggregatedCandles(atmCeCandles, showsAtmContract ? cdvSnapshot?.atmCeCurrentBar : null, timeframe)
-  const atmPeBars = useAggregatedCandles(atmPeCandles, showsAtmContract ? cdvSnapshot?.atmPeCurrentBar : null, timeframe)
+  // "Days to show" narrows every series down to its most recent N trading days BEFORE the
+  // timeframe aggregation below ever sees it - see trimToRecentDays. One memo per raw series,
+  // reused everywhere that series feeds a chart, so daysToShow is applied exactly once per series
+  // rather than once per chart.
+  const trimmedCandles = useMemo(() => trimToRecentDays(candles, daysToShow), [candles, daysToShow])
+  const trimmedAtmCeCandles = useMemo(() => trimToRecentDays(atmCeCandles, daysToShow), [atmCeCandles, daysToShow])
+  const trimmedAtmPeCandles = useMemo(() => trimToRecentDays(atmPeCandles, daysToShow), [atmPeCandles, daysToShow])
+
+  const spotBars = useAggregatedCandles(trimmedCandles, snapshot?.currentBar, timeframe)
+  const atmCeBars = useAggregatedCandles(trimmedAtmCeCandles, showsAtmContract ? cdvSnapshot?.atmCeCurrentBar : null, timeframe)
+  const atmPeBars = useAggregatedCandles(trimmedAtmPeCandles, showsAtmContract ? cdvSnapshot?.atmPeCurrentBar : null, timeframe)
 
   // Same three series with no live bar merged in - the badge (unlike the chart itself, which
   // still renders spotBars/atmCeBars/atmPeBars with the live candle) only ever reads a closed,
   // close-confirmed candle, matching exactly what the Telegram alerts require: there's no earlier
   // point at which a still-forming candle's reading is something you could actually act on.
-  const spotBarsClosed = useAggregatedCandles(candles, null, timeframe)
-  const atmCeBarsClosed = useAggregatedCandles(atmCeCandles, null, timeframe)
-  const atmPeBarsClosed = useAggregatedCandles(atmPeCandles, null, timeframe)
+  const spotBarsClosed = useAggregatedCandles(trimmedCandles, null, timeframe)
+  const atmCeBarsClosed = useAggregatedCandles(trimmedAtmCeCandles, null, timeframe)
+  const atmPeBarsClosed = useAggregatedCandles(trimmedAtmPeCandles, null, timeframe)
 
   const spotCrossState = useConfirmedCrossoverState(spotBarsClosed)
   const atmCeCrossState = useConfirmedCrossoverState(atmCeBarsClosed)
@@ -1314,15 +1359,23 @@ function DashboardPage() {
   // Every past trading day's own curve (each reset to zero, laid end to end) followed by today's
   // still-live one - the same continuous multi-day span the OBV chart already gets from one
   // request, just assembled from CDV's two separate endpoints (see cdvHistorySeries above for why).
-  const cdvFullSeries = useMemo(() => [...cdvHistorySeries, ...cdvSeries], [cdvHistorySeries, cdvSeries])
+  // Trimmed to daysToShow same as the other series above - today's own slice never drops out of
+  // this even at daysToShow=1, since it's always the most recent of the distinct days present.
+  const cdvFullSeries = useMemo(
+    () => trimToRecentDays([...cdvHistorySeries, ...cdvSeries], daysToShow),
+    [cdvHistorySeries, cdvSeries, daysToShow],
+  )
   const cdvCe = useAggregatedLine(cdvFullSeries, cdvSnapshot?.currentBar, timeframe, ['ceCdv']).map((p) => ({ time: p.time, value: p.ceCdv }))
   const cdvPe = useAggregatedLine(cdvFullSeries, cdvSnapshot?.currentBar, timeframe, ['peCdv']).map((p) => ({ time: p.time, value: p.peCdv }))
-  // No live bar to merge - previous-day is a fixed historical reference, not something ticks update.
+  // No live bar to merge - previous-day is a fixed historical reference, not something ticks
+  // update, and not something daysToShow narrows either: it is always exactly one day by definition.
   const cdvPrevCe = useAggregatedLine(cdvPrevDaySeries, null, timeframe, ['ceCdv']).map((p) => ({ time: p.time, value: p.ceCdv }))
   const cdvPrevPe = useAggregatedLine(cdvPrevDaySeries, null, timeframe, ['peCdv']).map((p) => ({ time: p.time, value: p.peCdv }))
 
-  const obvCePoints = useMemo(() => aggregateLine(obvCe.map((p) => toLinePoint(p, ['obv'])), timeframe).map((p) => ({ time: p.time, value: p.obv })), [obvCe, timeframe])
-  const obvPePoints = useMemo(() => aggregateLine(obvPe.map((p) => toLinePoint(p, ['obv'])), timeframe).map((p) => ({ time: p.time, value: p.obv })), [obvPe, timeframe])
+  const trimmedObvCe = useMemo(() => trimToRecentDays(obvCe, daysToShow), [obvCe, daysToShow])
+  const trimmedObvPe = useMemo(() => trimToRecentDays(obvPe, daysToShow), [obvPe, daysToShow])
+  const obvCePoints = useMemo(() => aggregateLine(trimmedObvCe.map((p) => toLinePoint(p, ['obv'])), timeframe).map((p) => ({ time: p.time, value: p.obv })), [trimmedObvCe, timeframe])
+  const obvPePoints = useMemo(() => aggregateLine(trimmedObvPe.map((p) => toLinePoint(p, ['obv'])), timeframe).map((p) => ({ time: p.time, value: p.obv })), [trimmedObvPe, timeframe])
 
   // Scaled to the unit each chart is set to, right before charting - everything upstream (and the
   // snapshot totals printed under the CDV chart) stays in raw units.
@@ -1362,6 +1415,12 @@ function DashboardPage() {
             style={{ width: 120 }}
             options={TIMEFRAME_OPTIONS}
           />
+          <Select
+            value={daysToShow}
+            onChange={setDaysToShow}
+            style={{ width: 120 }}
+            options={DAYS_OPTIONS}
+          />
           <Button onClick={handleRefresh} loading={refreshing} disabled={!selected}>Refresh</Button>
         </Space>
 
@@ -1379,7 +1438,7 @@ function DashboardPage() {
           empty="Waiting for chart data - the Dhan feed may still be connecting."
         >
           {spotBars.length > 0 && (
-            <ChartErrorBoundary key={`${selected}-${timeframe}`} height={420}>
+            <ChartErrorBoundary key={`${selected}-${timeframe}-${daysToShow}`} height={420}>
               <PriceChart bars={spotBars} height={420} />
             </ChartErrorBoundary>
           )}
@@ -1395,7 +1454,7 @@ function DashboardPage() {
               empty="Waiting for the CE contract to resolve and tick."
             >
               {atmCeBars.length > 0 && (
-                <ChartErrorBoundary key={`${selected}-${timeframe}-${chartedStrike}`} height={320}>
+                <ChartErrorBoundary key={`${selected}-${timeframe}-${daysToShow}-${chartedStrike}`} height={320}>
                   <PriceChart bars={atmCeBars} height={320} />
                 </ChartErrorBoundary>
               )}
@@ -1408,7 +1467,7 @@ function DashboardPage() {
               empty="Waiting for the PE contract to resolve and tick."
             >
               {atmPeBars.length > 0 && (
-                <ChartErrorBoundary key={`${selected}-${timeframe}-${chartedStrike}`} height={320}>
+                <ChartErrorBoundary key={`${selected}-${timeframe}-${daysToShow}-${chartedStrike}`} height={320}>
                   <PriceChart bars={atmPeBars} height={320} />
                 </ChartErrorBoundary>
               )}
@@ -1429,7 +1488,7 @@ function DashboardPage() {
         >
           {cdvCe.length > 0 && (
             <>
-              <ChartErrorBoundary key={`${selected}-${timeframe}`} height={280}>
+              <ChartErrorBoundary key={`${selected}-${timeframe}-${daysToShow}`} height={280}>
                 <CeVsPeChart ceSeries={cdvCeScaled} peSeries={cdvPeScaled} prevCeSeries={cdvPrevCeScaled} prevPeSeries={cdvPrevPeScaled} height={280} />
               </ChartErrorBoundary>
               <Space size={24} style={{ marginTop: 8 }}>
@@ -1453,7 +1512,7 @@ function DashboardPage() {
           empty="Waiting for enough CE/PE bars to compute OBV."
         >
           {(obvCePoints.length > 0 || obvPePoints.length > 0) && (
-            <ChartErrorBoundary key={`${selected}-${timeframe}-${cdvSnapshot?.atmStrike}`} height={280}>
+            <ChartErrorBoundary key={`${selected}-${timeframe}-${daysToShow}-${cdvSnapshot?.atmStrike}`} height={280}>
               <CeVsPeChart ceSeries={obvCeSplit.today} peSeries={obvPeSplit.today} prevCeSeries={obvCeSplit.previous} prevPeSeries={obvPeSplit.previous} height={280} />
             </ChartErrorBoundary>
           )}
