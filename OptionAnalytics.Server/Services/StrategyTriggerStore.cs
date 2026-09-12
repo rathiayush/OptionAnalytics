@@ -153,28 +153,32 @@ public sealed class StrategyTriggerStore
 
     /// <summary>Records (or clears, passing null) which Dhan order this trigger is currently
     /// responsible for - see StrategyTrigger.LastOrderId's own doc comment for who reads this and
-    /// why.</summary>
-    public void SetLastOrderId(string id, string? orderId)
+    /// why. <paramref name="additionalOrderIds"/> is the entry's OWN further slices when its
+    /// quantity had to be split across the exchange freeze limit (StrategyTrigger.
+    /// AdditionalOrderIds) - omitted (null) collapses to empty, which is correct both for the
+    /// ordinary unsliced case and for every existing call site that only ever meant "clear
+    /// everything".</summary>
+    public void SetLastOrderId(string id, string? orderId, IReadOnlyList<string>? additionalOrderIds = null)
     {
         lock (_lock)
         {
             if (!_triggers.TryGetValue(id, out var existing)) return;
 
-            _triggers[id] = existing with { LastOrderId = orderId };
+            _triggers[id] = existing with { LastOrderId = orderId, AdditionalOrderIds = additionalOrderIds ?? Array.Empty<string>() };
             SaveNoLock();
         }
     }
 
     /// <summary>Records (or clears, passing null) which Dhan order this trigger's PROTECTIVE hedge
     /// leg is currently open under - SetLastOrderId's own counterpart, for StrategyTrigger.
-    /// LastHedgeOrderId.</summary>
-    public void SetLastHedgeOrderId(string id, string? orderId)
+    /// LastHedgeOrderId/AdditionalHedgeOrderIds.</summary>
+    public void SetLastHedgeOrderId(string id, string? orderId, IReadOnlyList<string>? additionalOrderIds = null)
     {
         lock (_lock)
         {
             if (!_triggers.TryGetValue(id, out var existing)) return;
 
-            _triggers[id] = existing with { LastHedgeOrderId = orderId };
+            _triggers[id] = existing with { LastHedgeOrderId = orderId, AdditionalHedgeOrderIds = additionalOrderIds ?? Array.Empty<string>() };
             SaveNoLock();
         }
     }

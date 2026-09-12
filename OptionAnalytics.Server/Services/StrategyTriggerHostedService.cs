@@ -452,13 +452,23 @@ public sealed class StrategyTriggerHostedService : BackgroundService
             return;
         }
 
+        // Every tracked entry order, not just the first - a position whose entry quantity exceeded
+        // the exchange freeze limit is sliced across more than one Super Order (see
+        // StrategyTriggerHostedService.SliceQuantity), and every slice carries its OWN legs that
+        // must stop resting before the closing order below goes out, or a slice's own stale target/
+        // stop-loss could race it.
+        var allEntryOrderIds = new[] { orderId }.Concat(trigger.AdditionalOrderIds).ToList();
+
         // Best-effort: cancelling a leg that already fired or was already removed just fails
-        // harmlessly here (logged, not thrown) - the point is making sure neither is still resting
-        // to race the closing order below, not treating an already-gone leg as an error.
-        var (targetCancel, targetError) = await _superOrders.CancelAsync(entryOrder.OrderId, "TARGET_LEG", cancellationToken);
-        if (targetCancel is null) _logger.LogWarning("Trigger {Name}: could not cancel TARGET_LEG for order {OrderId} before squaring off - {Error}", trigger.Name, entryOrder.OrderId, targetError ?? "no reason given");
-        var (slCancel, slError) = await _superOrders.CancelAsync(entryOrder.OrderId, "STOP_LOSS_LEG", cancellationToken);
-        if (slCancel is null) _logger.LogWarning("Trigger {Name}: could not cancel STOP_LOSS_LEG for order {OrderId} before squaring off - {Error}", trigger.Name, entryOrder.OrderId, slError ?? "no reason given");
+        // harmlessly here (logged, not thrown) - the point is making sure none is still resting to
+        // race the closing order below, not treating an already-gone leg as an error.
+        foreach (var entryOrderId in allEntryOrderIds)
+        {
+            var (targetCancel, targetError) = await _superOrders.CancelAsync(entryOrderId, "TARGET_LEG", cancellationToken);
+            if (targetCancel is null) _logger.LogWarning("Trigger {Name}: could not cancel TARGET_LEG for order {OrderId} before squaring off - {Error}", trigger.Name, entryOrderId, targetError ?? "no reason given");
+            var (slCancel, slError) = await _superOrders.CancelAsync(entryOrderId, "STOP_LOSS_LEG", cancellationToken);
+            if (slCancel is null) _logger.LogWarning("Trigger {Name}: could not cancel STOP_LOSS_LEG for order {OrderId} before squaring off - {Error}", trigger.Name, entryOrderId, slError ?? "no reason given");
+        }
 
         var isCall = contract.IsCall;
         var closingIsSell = position.ClosesBySelling;
@@ -474,35 +484,55 @@ public sealed class StrategyTriggerHostedService : BackgroundService
 
         var rawPrice = Math.Max(0, closingIsSell ? reference.Value - trigger.SlippagePoints : reference.Value + trigger.SlippagePoints);
         var price = RoundToTick(rawPrice, contract.TickSize);
-        var correlationId = $"{prefix}{DateTimeOffset.UtcNow:yyyyMMddHHmmss}";
-        var summary = $"{(closingIsSell ? "SELL" : "BUY")} {contract.TradingSymbol} x{quantity} (SecurityId {contract.SecurityId})\nLIMIT {price:0.##} - squaring off by {IstClock.FormatMinutesOfDay(squareOffMinutes)} IST";
 
-        var (result, error) = await _orders.PlaceAsync(
-            closingIsSell ? "SELL" : "BUY", contract.DhanSegment, ProductType, "LIMIT", "DAY",
-            entryOrder.SecurityId, quantity, price, correlationId, cancellationToken);
+        // The position's own net quantity can itself exceed the exchange freeze limit (it is the
+        // SUM of however many entry slices filled), so the closing order needs the same slicing
+        // the entry did - one plain LIMIT order per slice, each independently monitored/re-priced.
+        var freezeLimit = FreezeQuantityFor(trigger.Underlying);
+        var quantitySlices = SliceQuantity(quantity, contract.LotSize, freezeLimit);
+        var placedOrderIds = new List<string>();
 
-        if (result is null)
+        for (var i = 0; i < quantitySlices.Count; i++)
         {
-            var reason = string.IsNullOrWhiteSpace(error) ? "no reason given by Dhan" : error;
-            _logger.LogError("Trigger {Name}: square-off order placement FAILED for {Summary} - {Error}", trigger.Name, summary, reason);
-            await NotifyFollowUpAsync(trigger, $"[SQUARE OFF FAILED] {summary}\nDhan error: {reason}\nStill open past the square-off time - will retry next minute.", cancellationToken);
-            return; // LastOrderId stays set so the position keeps being checked on the next sweep
-        }
+            if (i > 0) await Task.Delay(SliceCallDelay, cancellationToken);
 
-        _logger.LogInformation("Trigger {Name}: square-off order placed - orderId={OrderId} status={Status} for {Summary}", trigger.Name, result.OrderId, result.OrderStatus, summary);
-        await NotifyFollowUpAsync(trigger, $"[SQUARE OFF ORDER PLACED] {summary}\nDhan order {result.OrderId} ({result.OrderStatus})\nMonitoring fill (up to {MaxFillAttempts} attempts)...", cancellationToken);
+            var correlationId = quantitySlices.Count > 1
+                ? $"{prefix}{DateTimeOffset.UtcNow:yyyyMMddHHmmss}-{i + 1}"
+                : $"{prefix}{DateTimeOffset.UtcNow:yyyyMMddHHmmss}";
+            var sliceSummary = $"{(closingIsSell ? "SELL" : "BUY")} {contract.TradingSymbol} x{quantitySlices[i]} (SecurityId {contract.SecurityId})\nLIMIT {price:0.##} - squaring off by {IstClock.FormatMinutesOfDay(squareOffMinutes)} IST" +
+                (quantitySlices.Count > 1 ? $" (slice {i + 1}/{quantitySlices.Count}, freeze limit {freezeLimit})" : "");
 
-        _ = Task.Run(async () =>
-        {
-            try { await MonitorSquareOffFillAsync(trigger, contract, closingIsSell, quantity, result.OrderId, cancellationToken); }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            var (result, error) = await _orders.PlaceAsync(
+                closingIsSell ? "SELL" : "BUY", contract.DhanSegment, ProductType, "LIMIT", "DAY",
+                entryOrder.SecurityId, quantitySlices[i], price, correlationId, cancellationToken);
+
+            if (result is null)
             {
-                _logger.LogError(ex, "Trigger {Name}: square-off fill-monitoring crashed for order {OrderId}.", trigger.Name, result.OrderId);
-                await NotifyFollowUpAsync(trigger,
-                    $"[SQUARE OFF PIPELINE CRASHED] {contract.TradingSymbol} - an unexpected error stopped this square-off order from being monitored. CHECK DHAN DIRECTLY - the position may still be open or the order may still be resting.",
-                    CancellationToken.None);
+                var reason = string.IsNullOrWhiteSpace(error) ? "no reason given by Dhan" : error;
+                _logger.LogError("Trigger {Name}: square-off order placement FAILED for {Summary} - {Error}", trigger.Name, sliceSummary, reason);
+                var placedNote = placedOrderIds.Count > 0 ? $"\n\nNOTE: {placedOrderIds.Count}/{quantitySlices.Count} slice(s) WERE already placed (orders {string.Join(", ", placedOrderIds)}) - the position is only PARTIALLY squared off." : "";
+                await NotifyFollowUpAsync(trigger, $"[SQUARE OFF FAILED] {sliceSummary}\nDhan error: {reason}\nStill open past the square-off time - will retry next minute.{placedNote}", cancellationToken);
+                return; // LastOrderId stays set so the (partially closed) position keeps being checked on the next sweep
             }
-        }, CancellationToken.None);
+
+            _logger.LogInformation("Trigger {Name}: square-off order placed - orderId={OrderId} status={Status} for {Summary}", trigger.Name, result.OrderId, result.OrderStatus, sliceSummary);
+            await NotifyFollowUpAsync(trigger, $"[SQUARE OFF ORDER PLACED] {sliceSummary}\nDhan order {result.OrderId} ({result.OrderStatus})\nMonitoring fill (up to {MaxFillAttempts} attempts)...", cancellationToken);
+            placedOrderIds.Add(result.OrderId);
+
+            var sliceQuantity = quantitySlices[i];
+            var sliceOrderId = result.OrderId;
+            _ = Task.Run(async () =>
+            {
+                try { await MonitorSquareOffFillAsync(trigger, contract, closingIsSell, sliceQuantity, sliceOrderId, cancellationToken); }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogError(ex, "Trigger {Name}: square-off fill-monitoring crashed for order {OrderId}.", trigger.Name, sliceOrderId);
+                    await NotifyFollowUpAsync(trigger,
+                        $"[SQUARE OFF PIPELINE CRASHED] {contract.TradingSymbol} - an unexpected error stopped this square-off order from being monitored. CHECK DHAN DIRECTLY - the position may still be open or the order may still be resting.",
+                        CancellationToken.None);
+                }
+            }, CancellationToken.None);
+        }
     }
 
     /// <summary>Tells a person WHY a position just closed, for the two reasons this app can
@@ -569,6 +599,25 @@ public sealed class StrategyTriggerHostedService : BackgroundService
             {
                 _logger.LogInformation("Trigger {Name}: square-off order {OrderId} filled on attempt {Attempt}/{Max}.", trigger.Name, orderId, attempt, MaxFillAttempts);
                 await NotifyFollowUpAsync(trigger, $"[SQUARED OFF] {contract.TradingSymbol}\nFilled {order.FilledQty}/{order.Quantity} at ~{order.Price:0.##} on attempt {attempt}/{MaxFillAttempts}.", cancellationToken);
+
+                // THIS slice filled, but a square-off whose quantity exceeded the freeze limit is
+                // sliced into several closing orders (see SquareOffIfDueAsync), each monitored here
+                // independently - so this order's own TRADED status is not proof the position as a
+                // WHOLE is flat, only that this one slice is. Ground truth is Dhan's own position
+                // book, checked fresh: only once THAT shows nothing open for this contract is it
+                // safe to stop tracking the entry and cascade into closing the hedge. Clearing (or
+                // cascading) on a single slice's fill while siblings are still resting would drop
+                // LastOrderId/AdditionalOrderIds while a real, still-open remainder of the position
+                // is left with nothing watching it, and would close the hedge while part of what it
+                // protects is still open.
+                var remainingPosition = (await _positions.ListAsync(cancellationToken)).FirstOrDefault(p => p.SecurityId == order.SecurityId);
+                if (remainingPosition is { IsOpen: true })
+                {
+                    _logger.LogInformation("Trigger {Name}: square-off slice {OrderId} filled, but the position for {Symbol} is still open (netQty {NetQty}) - other slice(s) must still be resting. Leaving LastOrderId set for the next sweep.",
+                        trigger.Name, orderId, contract.TradingSymbol, remainingPosition.NetQty);
+                    return;
+                }
+
                 _store.SetLastOrderId(trigger.Id, null);
                 // Same reasoning as SquareOffIfDueAsync's own natural-closure branch: the main leg
                 // is confirmed flat, so anything hedging it is closed right along with it.
@@ -692,33 +741,53 @@ public sealed class StrategyTriggerHostedService : BackgroundService
 
         var rawPrice = Math.Max(0, reference.Value - trigger.SlippagePoints);
         var price = RoundToTick(rawPrice, contract.TickSize);
-        var correlationId = $"{prefix}{DateTimeOffset.UtcNow:yyyyMMddHHmmss}";
-        var summary = $"SELL {contract.TradingSymbol} x{quantity} (SecurityId {contract.SecurityId})\nLIMIT {price:0.##} - closing the protective hedge now that the main leg is no longer open";
 
-        var (result, error) = await _orders.PlaceAsync("SELL", contract.DhanSegment, ProductType, "LIMIT", "DAY", hedgeOrder.SecurityId, quantity, price, correlationId, cancellationToken);
+        // The hedge position's own net quantity is the SUM of however many opening slices filled
+        // (see PlaceOrderAsync), so it can itself exceed the exchange freeze limit even when each
+        // opening slice individually did not - the closing order needs the same slicing.
+        var freezeLimit = FreezeQuantityFor(trigger.Underlying);
+        var quantitySlices = SliceQuantity(quantity, contract.LotSize, freezeLimit);
+        var placedOrderIds = new List<string>();
 
-        if (result is null)
+        for (var i = 0; i < quantitySlices.Count; i++)
         {
-            var reason = string.IsNullOrWhiteSpace(error) ? "no reason given by Dhan" : error;
-            _logger.LogError("Trigger {Name}: hedge close order placement FAILED for {Summary} - {Error}", trigger.Name, summary, reason);
-            await NotifyFollowUpAsync(trigger, $"[HEDGE CLOSE FAILED] {summary}\nDhan error: {reason}\nThe hedge is still open - will retry next minute.", cancellationToken);
-            return; // LastHedgeOrderId stays set so the hedge keeps being checked on the next sweep
-        }
+            if (i > 0) await Task.Delay(SliceCallDelay, cancellationToken);
 
-        _logger.LogInformation("Trigger {Name}: hedge close order placed - orderId={OrderId} status={Status} for {Summary}", trigger.Name, result.OrderId, result.OrderStatus, summary);
-        await NotifyFollowUpAsync(trigger, $"[HEDGE CLOSE ORDER PLACED] {summary}\nDhan order {result.OrderId} ({result.OrderStatus})\nMonitoring fill (up to {MaxFillAttempts} attempts)...", cancellationToken);
+            var correlationId = quantitySlices.Count > 1
+                ? $"{prefix}{DateTimeOffset.UtcNow:yyyyMMddHHmmss}-{i + 1}"
+                : $"{prefix}{DateTimeOffset.UtcNow:yyyyMMddHHmmss}";
+            var sliceSummary = $"SELL {contract.TradingSymbol} x{quantitySlices[i]} (SecurityId {contract.SecurityId})\nLIMIT {price:0.##} - closing the protective hedge now that the main leg is no longer open" +
+                (quantitySlices.Count > 1 ? $" (slice {i + 1}/{quantitySlices.Count}, freeze limit {freezeLimit})" : "");
 
-        _ = Task.Run(async () =>
-        {
-            try { await MonitorHedgeCloseFillAsync(trigger, contract, quantity, result.OrderId, cancellationToken); }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            var (result, error) = await _orders.PlaceAsync("SELL", contract.DhanSegment, ProductType, "LIMIT", "DAY", hedgeOrder.SecurityId, quantitySlices[i], price, correlationId, cancellationToken);
+
+            if (result is null)
             {
-                _logger.LogError(ex, "Trigger {Name}: hedge-close fill-monitoring crashed for order {OrderId}.", trigger.Name, result.OrderId);
-                await NotifyFollowUpAsync(trigger,
-                    $"[HEDGE CLOSE PIPELINE CRASHED] {contract.TradingSymbol} - an unexpected error stopped this hedge-close order from being monitored. CHECK DHAN DIRECTLY - the hedge may still be open or the order may still be resting.",
-                    CancellationToken.None);
+                var reason = string.IsNullOrWhiteSpace(error) ? "no reason given by Dhan" : error;
+                _logger.LogError("Trigger {Name}: hedge close order placement FAILED for {Summary} - {Error}", trigger.Name, sliceSummary, reason);
+                var placedNote = placedOrderIds.Count > 0 ? $"\n\nNOTE: {placedOrderIds.Count}/{quantitySlices.Count} slice(s) WERE already placed (orders {string.Join(", ", placedOrderIds)}) - the hedge is only PARTIALLY closed." : "";
+                await NotifyFollowUpAsync(trigger, $"[HEDGE CLOSE FAILED] {sliceSummary}\nDhan error: {reason}\nThe hedge is still (partially) open - will retry next minute.{placedNote}", cancellationToken);
+                return; // LastHedgeOrderId stays set so the (partially closed) hedge keeps being checked on the next sweep
             }
-        }, CancellationToken.None);
+
+            _logger.LogInformation("Trigger {Name}: hedge close order placed - orderId={OrderId} status={Status} for {Summary}", trigger.Name, result.OrderId, result.OrderStatus, sliceSummary);
+            await NotifyFollowUpAsync(trigger, $"[HEDGE CLOSE ORDER PLACED] {sliceSummary}\nDhan order {result.OrderId} ({result.OrderStatus})\nMonitoring fill (up to {MaxFillAttempts} attempts)...", cancellationToken);
+            placedOrderIds.Add(result.OrderId);
+
+            var sliceQuantity = quantitySlices[i];
+            var sliceOrderId = result.OrderId;
+            _ = Task.Run(async () =>
+            {
+                try { await MonitorHedgeCloseFillAsync(trigger, contract, sliceQuantity, sliceOrderId, cancellationToken); }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogError(ex, "Trigger {Name}: hedge-close fill-monitoring crashed for order {OrderId}.", trigger.Name, sliceOrderId);
+                    await NotifyFollowUpAsync(trigger,
+                        $"[HEDGE CLOSE PIPELINE CRASHED] {contract.TradingSymbol} - an unexpected error stopped this hedge-close order from being monitored. CHECK DHAN DIRECTLY - the hedge may still be open or the order may still be resting.",
+                        CancellationToken.None);
+                }
+            }, CancellationToken.None);
+        }
     }
 
     /// <summary>MonitorSquareOffFillAsync's own retry-until-filled loop, adapted for closing a
@@ -757,6 +826,22 @@ public sealed class StrategyTriggerHostedService : BackgroundService
             {
                 _logger.LogInformation("Trigger {Name}: hedge close order {OrderId} filled on attempt {Attempt}/{Max}.", trigger.Name, orderId, attempt, MaxFillAttempts);
                 await NotifyFollowUpAsync(trigger, $"[HEDGE CLOSED] {contract.TradingSymbol}\nFilled {order.FilledQty}/{order.Quantity} at ~{order.Price:0.##} on attempt {attempt}/{MaxFillAttempts}.", cancellationToken);
+
+                // Same ground-truth requirement as MonitorSquareOffFillAsync's own identical check:
+                // a hedge close whose quantity exceeded the freeze limit is sliced into several
+                // orders, each monitored independently here, so THIS order's own TRADED status is
+                // not proof the hedge as a WHOLE is flat - only Dhan's own position book is.
+                // Clearing on one slice's fill while a sibling is still resting would drop
+                // LastHedgeOrderId/AdditionalHedgeOrderIds while real hedge quantity is still open
+                // with nothing watching it.
+                var remainingHedgePosition = (await _positions.ListAsync(cancellationToken)).FirstOrDefault(p => p.SecurityId == order.SecurityId);
+                if (remainingHedgePosition is { IsOpen: true })
+                {
+                    _logger.LogInformation("Trigger {Name}: hedge close slice {OrderId} filled, but the hedge position for {Symbol} is still open (netQty {NetQty}) - other slice(s) must still be resting. Leaving LastHedgeOrderId set for the next sweep.",
+                        trigger.Name, orderId, contract.TradingSymbol, remainingHedgePosition.NetQty);
+                    return;
+                }
+
                 _store.SetLastHedgeOrderId(trigger.Id, null);
                 return;
             }
@@ -1158,9 +1243,19 @@ public sealed class StrategyTriggerHostedService : BackgroundService
                 return (null, null, $"no live premium available for the protective hedge leg {hedgeStrike:0.##}{trade.OptionType} - refusing to sell {trade.Strike:0.##}{trade.OptionType} naked instead");
             }
 
+            // Same live-quote override the main leg's own limitReference applies just above -
+            // hedgeReference (GetOrderPremiumAsync) is the last TRADED price, which can already be
+            // stale the moment a real order is about to go out; the live best ASK (this is always a
+            // BUY) is the actual tradeable price right now when the strike's Full-mode feed has
+            // delivered one. Falls back to hedgeReference unchanged when no live depth has arrived
+            // yet, exactly like the main leg.
+            var hedgeLimitReference = hedgeReference;
+            if (_feedClient.LastTickFor(hedgeContract.SecurityId) is { } hedgeQuote && hedgeQuote.BestAskPrice > 0)
+                hedgeLimitReference = hedgeQuote.BestAskPrice;
+
             // Buying, so pay a little ABOVE the reference to stay marketable - the mirror of how
             // limitReference/rawLimit above prices a SELL a little below it.
-            var hedgeRawPrice = hedgeReference + trigger.SlippagePoints;
+            var hedgeRawPrice = hedgeLimitReference + trigger.SlippagePoints;
             var hedgePrice = RoundToTick(hedgeRawPrice, hedgeContract.TickSize);
 
             // Never a silent substitution: a hedge that moved is a different spread - tighter risk,
@@ -1172,10 +1267,10 @@ public sealed class StrategyTriggerHostedService : BackgroundService
                 : $"{actualSteps} step(s) further OTM than the sold leg - moved in from the requested {requestedHedgeStrike:0.##} ({trigger.HedgeOtmSteps} steps), which had under {minOiPercent}% of the sold strike's open interest";
             var hedgeSummary = $"BUY {hedgeContract.TradingSymbol} x{quantity} (SecurityId {hedgeContract.SecurityId}) - protective hedge, {hedgeNote}\nLIMIT {hedgePrice:0.##}";
 
-            hedgePlan = new HedgePlan(hedgeContract.SecurityId.ToString(), hedgeContract.SecurityId, quantity, hedgePrice, hedgeSummary, hedgeContract.DhanSegment);
+            hedgePlan = new HedgePlan(hedgeContract.SecurityId.ToString(), hedgeContract.SecurityId, quantity, hedgePrice, hedgeSummary, hedgeContract.DhanSegment, hedgeContract.LotSize);
         }
 
-        return (new SuperOrderPlan(transactionType, contract.SecurityId.ToString(), contract.SecurityId, quantity, limitPrice, targetPrice, stopLossPrice, tick, entryPrice, correlationId, summary, expiry.Value, contract.DhanSegment), hedgePlan, null);
+        return (new SuperOrderPlan(transactionType, contract.SecurityId.ToString(), contract.SecurityId, quantity, limitPrice, targetPrice, stopLossPrice, tick, entryPrice, correlationId, summary, expiry.Value, contract.DhanSegment, contract.LotSize), hedgePlan, null);
     }
 
     /// <summary>The PROTECTIVE hedge leg's own order shape - see StrategyTrigger.HedgeOtmSteps. A
@@ -1183,7 +1278,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     /// its own; it is only ever closed once the main leg it protects closes, see
     /// CloseHedgeIfOpenAsync), priced the same "SlippagePoints beyond the live reference" way every
     /// other entry in this file already is.</summary>
-    private sealed record HedgePlan(string SecurityId, uint InstrumentSecurityId, int Quantity, decimal Price, string Summary, string DhanSegment);
+    private sealed record HedgePlan(string SecurityId, uint InstrumentSecurityId, int Quantity, decimal Price, string Summary, string DhanSegment, int LotSize);
 
     /// <summary>StrategyTrigger.HedgeOtmSteps' own distance rule: further OTM in the SAME direction
     /// the sold leg already is, measured from the SOLD strike itself rather than from ATM again -
@@ -1261,42 +1356,67 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         decimal newStopLoss, CancellationToken cancellationToken)
     {
         // The position book (just checked) says a position exists; the order book is where its
-        // STOP_LOSS_LEG actually lives, so it still has to be found there by security id - matched
-        // on an entry that has actually filled, since a PENDING/TRANSIT entry has no position (and
-        // so no stop-loss leg) to modify yet regardless of what triggered this call.
+        // STOP_LOSS_LEG(s) actually live, so they still have to be found there by security id -
+        // matched on an entry that has actually filled, since a PENDING/TRANSIT entry has no
+        // position (and so no stop-loss leg) to modify yet regardless of what triggered this call.
+        //
+        // ALL matching orders, not just one: a position whose entry quantity exceeded the exchange
+        // freeze limit is sliced across more than one Super Order (see
+        // StrategyTriggerHostedService.SliceQuantity), and every slice carries its OWN
+        // STOP_LOSS_LEG - moving only the first would leave the rest of the position protected at
+        // the stale price, silently.
         var orders = await _superOrders.ListAsync(cancellationToken);
-        var order = orders.FirstOrDefault(o =>
+        var matchingOrders = orders.Where(o =>
             o.SecurityId == contract.SecurityId.ToString() &&
-            (o.LegDetails.FirstOrDefault(l => l.LegName == "ENTRY_LEG")?.OrderStatus ?? o.OrderStatus) is "TRADED" or "PART_TRADED");
+            (o.LegDetails.FirstOrDefault(l => l.LegName == "ENTRY_LEG")?.OrderStatus ?? o.OrderStatus) is "TRADED" or "PART_TRADED")
+            .ToList();
 
-        if (order is null)
+        if (matchingOrders.Count == 0)
         {
             _logger.LogWarning("Trigger {Name}: {Underlying} {Strike}{Type} has an open Dhan position ({PositionType}, netQty {NetQty}) but no matching filled Super Order was found - cannot update its stop-loss.",
                 trigger.Name, trade.Underlying, trade.Strike, trade.OptionType, openPosition.PositionType, openPosition.NetQty);
             return (null, null, $"{trade.Strike:0.##}{trade.OptionType} has an open position ({openPosition.PositionType}, netQty {openPosition.NetQty}) but no matching order was found to update its stop-loss - skipping this signal");
         }
 
-        var previousStopLoss = order.StopLossPrice;
         var ist = IstClock.Offset;
-        var (result, error) = await _superOrders.ModifyAsync(order.OrderId, "STOP_LOSS_LEG",
-            orderType: null, quantity: null, price: null, targetPrice: null, stopLossPrice: newStopLoss, trailingJump: null, cancellationToken);
+        var updated = new List<string>();
+        var failed = new List<(string OrderId, string Reason)>();
 
-        if (result is null)
+        foreach (var order in matchingOrders)
         {
-            var reason = string.IsNullOrWhiteSpace(error) ? "no reason given by Dhan" : error;
-            _logger.LogError("Trigger {Name}: stop-loss update FAILED for order {OrderId} ({Underlying} {Strike}{Type}) - {Error}",
-                trigger.Name, order.OrderId, trade.Underlying, trade.Strike, trade.OptionType, reason);
-            await NotifyFollowUpAsync(trigger,
-                $"[STOP LOSS UPDATE FAILED] {trade.Underlying} {trade.Strike:0.##}{trade.OptionType}\nDhan order {order.OrderId}\nTried to move SL from {previousStopLoss:0.##} to {newStopLoss:0.##} off a new {trade.Direction} signal at {trade.SignalTimeUtc.ToOffset(ist):HH:mm} IST (still open at the old SL) - {reason}",
-                cancellationToken);
-            return (null, null, null);
+            var previousStopLoss = order.StopLossPrice;
+            var (result, error) = await _superOrders.ModifyAsync(order.OrderId, "STOP_LOSS_LEG",
+                orderType: null, quantity: null, price: null, targetPrice: null, stopLossPrice: newStopLoss, trailingJump: null, cancellationToken);
+
+            if (result is null)
+            {
+                var reason = string.IsNullOrWhiteSpace(error) ? "no reason given by Dhan" : error;
+                _logger.LogError("Trigger {Name}: stop-loss update FAILED for order {OrderId} ({Underlying} {Strike}{Type}) - {Error}",
+                    trigger.Name, order.OrderId, trade.Underlying, trade.Strike, trade.OptionType, reason);
+                failed.Add((order.OrderId, reason));
+                continue;
+            }
+
+            _logger.LogInformation("Trigger {Name}: stop-loss updated for order {OrderId} from {Previous:0.##} to {New:0.##} off a new signal instead of opening a second position.",
+                trigger.Name, order.OrderId, previousStopLoss, newStopLoss);
+            updated.Add(order.OrderId);
         }
 
-        _logger.LogInformation("Trigger {Name}: stop-loss updated for order {OrderId} from {Previous:0.##} to {New:0.##} off a new signal instead of opening a second position.",
-            trigger.Name, order.OrderId, previousStopLoss, newStopLoss);
-        await NotifyFollowUpAsync(trigger,
-            $"[STOP LOSS UPDATED] {trade.Underlying} {trade.Strike:0.##}{trade.OptionType}\nDhan order {order.OrderId}\nSL moved from {previousStopLoss:0.##} to {newStopLoss:0.##}, re-based off a new {trade.Direction} signal at {trade.SignalTimeUtc.ToOffset(ist):HH:mm} IST - no second position opened.",
-            cancellationToken);
+        var sliceNote = matchingOrders.Count > 1 ? $" across {matchingOrders.Count} slices" : "";
+        if (failed.Count > 0)
+        {
+            var failedList = string.Join("; ", failed.Select(f => $"{f.OrderId}: {f.Reason}"));
+            await NotifyFollowUpAsync(trigger,
+                $"[STOP LOSS UPDATE {(updated.Count > 0 ? "PARTIALLY " : "")}FAILED] {trade.Underlying} {trade.Strike:0.##}{trade.OptionType}{sliceNote}\nTried to move SL to {newStopLoss:0.##} off a new {trade.Direction} signal at {trade.SignalTimeUtc.ToOffset(ist):HH:mm} IST.\nSucceeded: {(updated.Count > 0 ? string.Join(", ", updated) : "none")}\nFailed: {failedList}",
+                cancellationToken);
+        }
+        else
+        {
+            await NotifyFollowUpAsync(trigger,
+                $"[STOP LOSS UPDATED] {trade.Underlying} {trade.Strike:0.##}{trade.OptionType}{sliceNote}\nSL moved to {newStopLoss:0.##} on order(s) {string.Join(", ", updated)}, re-based off a new {trade.Direction} signal at {trade.SignalTimeUtc.ToOffset(ist):HH:mm} IST - no second position opened.",
+                cancellationToken);
+        }
+
         return (null, null, null);
     }
 
@@ -1319,72 +1439,141 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     /// naked sell otherwise" - the one substitution real money can never make silently.</summary>
     private async Task<string> PlaceOrderAsync(StrategyTrigger trigger, BacktestTrade trade, SuperOrderPlan plan, HedgePlan? hedge, CancellationToken cancellationToken)
     {
+        var freezeLimit = FreezeQuantityFor(trigger.Underlying);
+        string? hedgeNote = null;
+
         if (hedge is not null)
         {
-            var hedgeCorrelationId = $"{trigger.Id}-hedge-{trade.SignalTimeUtc:yyyyMMddHHmm}";
-            var (hedgeResult, hedgeError) = await _orders.PlaceAsync(
-                "BUY", hedge.DhanSegment, ProductType, OrderType, "DAY",
-                hedge.SecurityId, hedge.Quantity, hedge.Price, hedgeCorrelationId, cancellationToken);
+            var hedgeSlices = SliceQuantity(hedge.Quantity, hedge.LotSize, freezeLimit);
+            var hedgeOrderIds = new List<string>();
 
-            if (hedgeResult is null)
+            for (var i = 0; i < hedgeSlices.Count; i++)
             {
-                var hedgeReason = string.IsNullOrWhiteSpace(hedgeError) ? "no reason given by Dhan" : hedgeError;
-                _logger.LogError("Trigger {Name}: hedge leg placement FAILED for {Summary} - {Error} - main order ABORTED, refusing to sell naked.",
-                    trigger.Name, hedge.Summary, hedgeReason);
-                return $"[HEDGE FAILED - MAIN ORDER ABORTED]\n{hedge.Summary}\nDhan error: {hedgeReason}\nRefusing to place the main {plan.TransactionType} leg naked - nothing was placed for this signal. If that doesn't explain it, a common secondary cause is the account's static IP whitelisting not covering this server.";
+                if (i > 0) await Task.Delay(SliceCallDelay, cancellationToken);
+
+                // Distinguishable per slice only when there IS more than one - an unsliced hedge's
+                // correlationId is unchanged from before this existed.
+                var hedgeCorrelationId = hedgeSlices.Count > 1
+                    ? $"{trigger.Id}-hedge-{trade.SignalTimeUtc:yyyyMMddHHmm}-{i + 1}"
+                    : $"{trigger.Id}-hedge-{trade.SignalTimeUtc:yyyyMMddHHmm}";
+
+                var (hedgeResult, hedgeError) = await _orders.PlaceAsync(
+                    "BUY", hedge.DhanSegment, ProductType, OrderType, "DAY",
+                    hedge.SecurityId, hedgeSlices[i], hedge.Price, hedgeCorrelationId, cancellationToken);
+
+                if (hedgeResult is null)
+                {
+                    var hedgeReason = string.IsNullOrWhiteSpace(hedgeError) ? "no reason given by Dhan" : hedgeError;
+                    _logger.LogError("Trigger {Name}: hedge leg placement FAILED for {Summary} (slice {Slice}/{Total}) - {Error} - main order ABORTED, refusing to sell naked.",
+                        trigger.Name, hedge.Summary, i + 1, hedgeSlices.Count, hedgeReason);
+
+                    // Whatever slices DID place before this one failed are real, live orders - they
+                    // must still be recorded and watched (CloseHedgeIfOpenAsync reads this the same
+                    // way regardless of how it got only partially filled), and the operator must be
+                    // told the hedge is now partial rather than either whole or absent.
+                    if (hedgeOrderIds.Count > 0)
+                        _store.SetLastHedgeOrderId(trigger.Id, hedgeOrderIds[0], hedgeOrderIds.Skip(1).ToList());
+
+                    var partialNote = hedgeOrderIds.Count > 0
+                        ? $"\n\nNOTE: {hedgeOrderIds.Count}/{hedgeSlices.Count} hedge slice(s) WERE already placed (orders {string.Join(", ", hedgeOrderIds)}) - CHECK DHAN, the hedge is now PARTIAL, not absent."
+                        : "";
+                    return $"[HEDGE FAILED - MAIN ORDER ABORTED]\n{hedge.Summary}\nDhan error: {hedgeReason}\nRefusing to place the main {plan.TransactionType} leg naked - nothing new was placed for this signal.{partialNote} If that doesn't explain it, a common secondary cause is the account's static IP whitelisting not covering this server.";
+                }
+
+                _logger.LogInformation("Trigger {Name}: hedge leg placed - orderId={OrderId} status={Status} qty={Quantity} (slice {Slice}/{Total}) for {Summary}",
+                    trigger.Name, hedgeResult.OrderId, hedgeResult.OrderStatus, hedgeSlices[i], i + 1, hedgeSlices.Count, hedge.Summary);
+                hedgeOrderIds.Add(hedgeResult.OrderId);
             }
 
-            _logger.LogInformation("Trigger {Name}: hedge leg placed - orderId={OrderId} status={Status} for {Summary}",
-                trigger.Name, hedgeResult.OrderId, hedgeResult.OrderStatus, hedge.Summary);
-
-            // Recorded the instant an order id exists, regardless of fill state - same reasoning as
-            // LastOrderId below, so CloseHedgeIfOpenAsync can find it later even across a restart.
-            _store.SetLastHedgeOrderId(trigger.Id, hedgeResult.OrderId);
+            // Recorded the instant every order id exists, regardless of fill state - same reasoning
+            // as LastOrderId below, so CloseHedgeIfOpenAsync can find all of them later even across
+            // a restart.
+            _store.SetLastHedgeOrderId(trigger.Id, hedgeOrderIds[0], hedgeOrderIds.Skip(1).ToList());
+            hedgeNote = hedgeSlices.Count > 1
+                ? $"\n\n[HEDGE PLACED - {hedgeSlices.Count} slices, freeze limit {freezeLimit}] {hedge.Summary}\nOrders: {string.Join(", ", hedgeOrderIds)}"
+                : $"\n\n[HEDGE PLACED] {hedge.Summary}";
         }
 
-        var (result, error) = await _superOrders.PlaceAsync(
-            plan.TransactionType, plan.DhanSegment, ProductType, OrderType,
-            plan.SecurityId, plan.Quantity, plan.Price, plan.TargetPrice, plan.StopLossPrice,
-            plan.CorrelationId, trailingJump: 0, cancellationToken);
+        var entrySlices = SliceQuantity(plan.Quantity, plan.LotSize, freezeLimit);
+        var entryOrderIds = new List<string>();
+        SuperOrderResult? firstResult = null;
 
-        if (result is null)
+        for (var i = 0; i < entrySlices.Count; i++)
         {
-            var reason = string.IsNullOrWhiteSpace(error) ? "no reason given by Dhan" : error;
-            _logger.LogError("Trigger {Name}: Super Order placement FAILED for {Summary} - {Error}", trigger.Name, plan.Summary, reason);
-            var hedgeNote = hedge is not null ? "\n\nNOTE: the protective hedge leg above WAS already placed - CHECK DHAN, you may now be holding just the hedge with nothing to protect." : "";
-            return $"[ORDER FAILED]\n{plan.Summary}\nDhan error: {reason}\nIf that doesn't explain it, a common secondary cause is the account's static IP whitelisting not covering this server.{hedgeNote}";
+            if (i > 0) await Task.Delay(SliceCallDelay, cancellationToken);
+
+            var correlationId = entrySlices.Count > 1 ? $"{plan.CorrelationId}-{i + 1}" : plan.CorrelationId;
+            var (result, error) = await _superOrders.PlaceAsync(
+                plan.TransactionType, plan.DhanSegment, ProductType, OrderType,
+                plan.SecurityId, entrySlices[i], plan.Price, plan.TargetPrice, plan.StopLossPrice,
+                correlationId, trailingJump: 0, cancellationToken);
+
+            if (result is null)
+            {
+                var reason = string.IsNullOrWhiteSpace(error) ? "no reason given by Dhan" : error;
+                _logger.LogError("Trigger {Name}: Super Order placement FAILED for {Summary} (slice {Slice}/{Total}) - {Error}",
+                    trigger.Name, plan.Summary, i + 1, entrySlices.Count, reason);
+
+                // Same partial-fill honesty as the hedge loop above: any slice that DID place is a
+                // real position with its own attached SL/target and must be tracked - it was
+                // already handed to StartFillMonitoring the instant it was placed, inside the loop
+                // above, so nothing further is started here; this only records the order ids so
+                // SquareOffIfDueAsync/AdjustStopLossForOpenPositionAsync can find them too.
+                if (entryOrderIds.Count > 0)
+                    _store.SetLastOrderId(trigger.Id, entryOrderIds[0], entryOrderIds.Skip(1).ToList());
+
+                var partialNote = entryOrderIds.Count > 0
+                    ? $"\n\nNOTE: {entryOrderIds.Count}/{entrySlices.Count} slice(s) WERE already placed (orders {string.Join(", ", entryOrderIds)}) - CHECK DHAN, the position is PARTIAL, not absent."
+                    : "";
+                var abortedHedgeNote = hedge is not null ? "\n\nNOTE: the protective hedge leg above WAS already placed - CHECK DHAN, you may now be holding a hedge that is naked, partially, or wholly." : "";
+                return $"[ORDER FAILED]\n{plan.Summary}\nDhan error: {reason}{partialNote}\nIf that doesn't explain it, a common secondary cause is the account's static IP whitelisting not covering this server.{abortedHedgeNote}";
+            }
+
+            firstResult ??= result;
+            _logger.LogInformation("Trigger {Name}: Super Order placed - orderId={OrderId} status={Status} qty={Quantity} (slice {Slice}/{Total}) for {Summary}",
+                trigger.Name, result.OrderId, result.OrderStatus, entrySlices[i], i + 1, entrySlices.Count, plan.Summary);
+            entryOrderIds.Add(result.OrderId);
+
+            // Each slice is monitored/re-priced independently the instant it exists, exactly as the
+            // single unsliced order always was - not after the whole loop finishes, so an earlier
+            // slice's fill-monitoring is never delayed behind placing a later one.
+            StartFillMonitoring(trigger, trade, plan with { Quantity = entrySlices[i] }, result.OrderId, cancellationToken);
         }
 
-        _logger.LogInformation("Trigger {Name}: Super Order placed - orderId={OrderId} status={Status} for {Summary}",
-            trigger.Name, result.OrderId, result.OrderStatus, plan.Summary);
-
-        // Recorded the instant an order id exists, regardless of fill state - see
+        // Recorded the instant every order id exists, regardless of fill state - see
         // StrategyTrigger.LastOrderId's own doc comment for why SquareOffIfDueAsync needs this.
-        _store.SetLastOrderId(trigger.Id, result.OrderId);
+        _store.SetLastOrderId(trigger.Id, entryOrderIds[0], entryOrderIds.Skip(1).ToList());
 
-        // Fire-and-forget: runs against the hosted service's own stoppingToken (so it stops
-        // cleanly on shutdown) rather than any per-evaluation token, and its own try/catch is just
-        // a backstop - MonitorFillAsync already handles its expected failure modes internally, this
-        // only stops an unexpected bug there from going unlogged.
+        var sliceNote = entrySlices.Count > 1
+            ? $" split into {entrySlices.Count} slices (exchange freeze limit {freezeLimit}) - orders {string.Join(", ", entryOrderIds)}"
+            : "";
+        return $"[ORDER PLACED] Dhan order {firstResult!.OrderId} ({firstResult.OrderStatus}){sliceNote}\n{plan.Summary}\nMonitoring fill (up to {MaxFillAttempts} attempts)...{hedgeNote}";
+    }
+
+    /// <summary>Fire-and-forget wrapper around MonitorFillAsync for exactly ONE placed order -
+    /// pulled out of PlaceOrderAsync so a sliced entry can call it once per slice, each watching and
+    /// re-pricing its own order independently, without duplicating the crash-safety wrapper. Runs
+    /// against CancellationToken.None (like the single-order version always did) so it stops
+    /// cleanly on shutdown rather than the per-evaluation token, and its own try/catch is a
+    /// backstop only - MonitorFillAsync already handles its expected failure modes internally.</summary>
+    private void StartFillMonitoring(StrategyTrigger trigger, BacktestTrade trade, SuperOrderPlan slicePlan, string orderId, CancellationToken cancellationToken)
+    {
         _ = Task.Run(async () =>
         {
-            try { await MonitorFillAsync(trigger, trade, plan, result.OrderId, cancellationToken); }
+            try { await MonitorFillAsync(trigger, trade, slicePlan, orderId, cancellationToken); }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                _logger.LogError(ex, "Trigger {Name}: fill-monitoring crashed for order {OrderId}.", trigger.Name, result.OrderId);
+                _logger.LogError(ex, "Trigger {Name}: fill-monitoring crashed for order {OrderId}.", trigger.Name, orderId);
 
                 // A real order is live and nothing is watching it any more. That has to reach the
                 // phone, not just the log - it is the one state this whole retry loop exists to
                 // prevent. CancellationToken.None so a shutdown-time crash still gets the message
                 // out rather than cancelling the very notification about it.
                 await NotifyFollowUpAsync(trigger,
-                    $"[ORDER UNMONITORED] {plan.Summary}\nDhan order {result.OrderId}\nFill-monitoring crashed - the order may still be resting or filled. CHECK DHAN DIRECTLY.",
+                    $"[ORDER UNMONITORED] {slicePlan.Summary}\nDhan order {orderId}\nFill-monitoring crashed - the order may still be resting or filled. CHECK DHAN DIRECTLY.",
                     CancellationToken.None);
             }
         }, CancellationToken.None);
-
-        var hedgePlacedNote = hedge is not null ? $"\n\n[HEDGE PLACED] {hedge.Summary}" : "";
-        return $"[ORDER PLACED] Dhan order {result.OrderId} ({result.OrderStatus})\n{plan.Summary}\nMonitoring fill (up to {MaxFillAttempts} attempts)...{hedgePlacedNote}";
     }
 
     /// <summary>The retry loop: waits FillCheckInterval, checks whether the entry leg has filled,
@@ -1672,5 +1861,76 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     private sealed record SuperOrderPlan(
         string TransactionType, string SecurityId, uint InstrumentSecurityId, int Quantity,
         decimal Price, decimal TargetPrice, decimal StopLossPrice, decimal TickSize,
-        decimal ReferencePrice, string CorrelationId, string Summary, DateOnly Expiry, string DhanSegment);
+        decimal ReferencePrice, string CorrelationId, string Summary, DateOnly Expiry, string DhanSegment,
+        int LotSize);
+
+    // ---- Exchange freeze-limit slicing -----------------------------------------------------
+
+    /// <summary>NSE/BSE's exchange freeze quantity per underlying - the ceiling a SINGLE order's
+    /// own quantity may not exceed before the exchange rejects it outright. Anything above this
+    /// must be split into multiple orders - the same "auto-slice" every major broker's own API
+    /// already offers (Zerodha's Kite Connect calls it autoslice, capping at 10 slices and
+    /// returning a separate order id per slice; Dhan's own POST /orders/slicing does the identical
+    /// thing for a PLAIN order). Dhan's Super Order does NOT support this natively - confirmed
+    /// against its own API reference, which lists no disclosedQuantity or slicing parameter on
+    /// that endpoint - so every quantity this app ever sends to Dhan, Super Order or plain, is
+    /// sliced client-side against this table before being placed, mirroring what a broker's own
+    /// autoslice does rather than depending on an endpoint that does not cover the order type this
+    /// app actually places for its entries.
+    ///
+    /// Exchange-published, not account-specific, and revised occasionally by NSE/BSE circulars -
+    /// update the numbers here when they do rather than waiting for a rejected live order to
+    /// reveal it.</summary>
+    private static readonly Dictionary<string, int> FreezeQuantityByUnderlying = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["NIFTY"] = 1800,
+        ["BANKNIFTY"] = 600,
+        ["SENSEX"] = 1000,
+    };
+
+    /// <summary>The freeze ceiling for an underlying this app does not (yet) have a published
+    /// figure for. int.MaxValue rather than a guess - SliceQuantity then never slices, which is
+    /// the same "unsliced, single order" behaviour every quantity had before this existed, so an
+    /// underlying missing from the table fails exactly the way it always would have: at the
+    /// exchange, with Dhan's own rejection message, rather than this app silently mis-slicing it
+    /// against a made-up number.</summary>
+    private static int FreezeQuantityFor(string underlying) =>
+        FreezeQuantityByUnderlying.TryGetValue(underlying, out var limit) ? limit : int.MaxValue;
+
+    /// <summary>Splits <paramref name="totalQuantity"/> into the fewest slices that each stay at or
+    /// under <paramref name="freezeLimit"/> AND are a whole multiple of <paramref name="lotSize"/> -
+    /// an F&amp;O quantity is only ever valid in whole lots, so slicing at the raw-quantity level
+    /// could produce a slice that respects the ceiling but is itself an invalid order. Slicing is
+    /// therefore done in LOTS: at most floor(freezeLimit / lotSize) lots per slice, every slice but
+    /// the last carrying exactly that many, the last carrying whatever remains.
+    ///
+    /// A single slice - the original, entirely unchanged quantity - is returned whenever nothing
+    /// actually needs splitting: <paramref name="totalQuantity"/> already at or under the limit,
+    /// or a non-positive/invalid lot size or freeze limit (a misconfiguration this defers to Dhan's
+    /// own rejection to reveal, rather than looping forever or throwing here).
+    ///
+    /// Internal for direct unit testing: this is pure arithmetic with no live Dhan/CDV state behind
+    /// it, unlike almost everything else in this class.</summary>
+    internal static IReadOnlyList<int> SliceQuantity(int totalQuantity, int lotSize, int freezeLimit)
+    {
+        if (totalQuantity <= 0 || lotSize <= 0 || totalQuantity <= freezeLimit) return new[] { totalQuantity };
+
+        var maxLotsPerSlice = freezeLimit / lotSize;
+        if (maxLotsPerSlice <= 0) return new[] { totalQuantity };
+
+        var remainingLots = totalQuantity / lotSize;
+        var slices = new List<int>();
+        while (remainingLots > 0)
+        {
+            var lots = Math.Min(maxLotsPerSlice, remainingLots);
+            slices.Add(lots * lotSize);
+            remainingLots -= lots;
+        }
+        return slices;
+    }
+
+    /// <summary>Pacing between two slices of the SAME logical order - short, since these are not
+    /// rate-limited the way a history fetch is; just enough that a burst of otherwise-identical
+    /// placements does not land in the same instant.</summary>
+    private static readonly TimeSpan SliceCallDelay = TimeSpan.FromMilliseconds(300);
 }

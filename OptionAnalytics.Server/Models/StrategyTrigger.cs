@@ -159,6 +159,14 @@ public sealed record StrategyTrigger(
     /// Always null for a trigger with HedgeOtmSteps == 0, or for a fired trade on the Buy side.</summary>
     public string? LastHedgeOrderId { get; init; }
 
+    /// <summary>Any FURTHER hedge order ids beyond LastHedgeOrderId - populated only when the
+    /// hedge's own quantity exceeded the exchange freeze limit and had to be split into more than
+    /// one plain order (see StrategyTriggerHostedService.SliceQuantity). Empty for the overwhelming
+    /// majority of hedges, which fit in one order and need nothing here. Always cleared back to
+    /// empty in lockstep with LastHedgeOrderId - there is never a case where one is set without the
+    /// other being meaningful.</summary>
+    public IReadOnlyList<string> AdditionalHedgeOrderIds { get; init; } = Array.Empty<string>();
+
     /// <summary>The Dhan Super Order id from this trigger's most recent successful placement -
     /// set the instant PlaceOrderAsync gets an order id back, regardless of whether it has filled
     /// yet. SquareOffIfDueAsync is the one reader: it is how a square-off sweep, running on its
@@ -169,6 +177,16 @@ public sealed record StrategyTrigger(
     /// work for a trigger with nothing open. Survives a restart (persisted like LastSignalUtc)
     /// since a position can still be open when the app comes back up.</summary>
     public string? LastOrderId { get; init; }
+
+    /// <summary>Any FURTHER entry order ids beyond LastOrderId - LastHedgeOrderId's own
+    /// counterpart, for the entry leg. Populated only when the requested quantity exceeded the
+    /// exchange freeze limit and had to be sliced into more than one Super Order (see
+    /// StrategyTriggerHostedService.SliceQuantity); empty otherwise. SquareOffIfDueAsync and
+    /// AdjustStopLossForOpenPositionAsync both act on every id here alongside LastOrderId - a
+    /// sliced entry is still ONE logical position, just spread across more than one Dhan order,
+    /// and every slice's own TARGET_LEG/STOP_LOSS_LEG needs the same treatment as the first slice's.
+    /// Cleared back to empty in lockstep with LastOrderId.</summary>
+    public IReadOnlyList<string> AdditionalOrderIds { get; init; } = Array.Empty<string>();
 
     /// <summary>The last entry signal this trigger has already alerted on. A newly-armed trigger is
     /// primed with whatever the latest signal is at that moment WITHOUT alerting, so arming it
