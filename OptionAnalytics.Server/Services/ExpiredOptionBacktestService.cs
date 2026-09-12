@@ -81,6 +81,13 @@ public sealed class ExpiredOptionBacktestService
         if (!StrikeStepByUnderlying.TryGetValue(underlying, out var step))
             return ExpiredBacktestResult.Failed($"'{underlying}' is not supported - only NIFTY and BANKNIFTY (Dhan's rolling-option API only documents NSE_FNO index options).");
 
+        // NSE discontinued BANKNIFTY's own weekly options entirely - there is no such contract to
+        // resolve, so WEEK here would not just be a bad default, it would ask Dhan for something
+        // that never existed. Rejected outright rather than silently falling through to whatever
+        // Dhan happens to return for a request it cannot actually satisfy.
+        if (string.Equals(underlying, "BANKNIFTY", StringComparison.OrdinalIgnoreCase) && string.Equals(expiryFlag, "WEEK", StringComparison.OrdinalIgnoreCase))
+            return ExpiredBacktestResult.Failed("BANKNIFTY has no weekly expiry - NSE discontinued it. Use Monthly instead.");
+
         if (!_strategies.TryGetValue(strategyKey, out var strategy))
             return ExpiredBacktestResult.Failed(
                 $"'{strategyKey}' cannot run against expired-option history - it needs order-flow (OBV/CDV) across the whole surrounding strike chain, which Dhan's rolling-option endpoint does not provide (a single relative strike per call only). Supported here: {string.Join(", ", SupportedStrategyKeys)}.");
