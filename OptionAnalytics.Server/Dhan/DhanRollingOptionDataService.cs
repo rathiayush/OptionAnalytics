@@ -17,7 +17,9 @@ namespace OptionAnalytics.Server.Dhan;
 /// Request/response shapes per Dhan's docs:
 ///   request:  {"exchangeSegment":"NSE_FNO","interval","securityId" (the UNDERLYING's own spot
 ///             security id, e.g. 13 for NIFTY - NOT an expired contract's own id),"instrument":
-///             "OPTIDX","expiryFlag":"WEEK"|"MONTH","expiryCode" (0,1,2... - see
+///             "OPTIDX","expiryFlag":"WEEK"|"MONTH","expiryCode" (1,2,3... - NEVER 0, confirmed by
+///             a real call: Dhan rejected expiryCode=0 outright as "expiryCode is required", the
+///             same error a required-field check gives a value it treats as absent - see
 ///             ExpiredOptionBacktestService.ComputeExpiryCode for how this app derives it from an
 ///             actual calendar expiry date), "strike":"ATM"|"ATM+-1".."ATM+-10","drvOptionType":
 ///             "CALL"|"PUT","requiredData":[...],"fromDate","toDate"} (fromDate/toDate are plain
@@ -45,13 +47,15 @@ namespace OptionAnalytics.Server.Dhan;
 ///             - requesting drvOptionType CALL fills "ce" and leaves "pe" null (and vice versa for
 ///             PUT), so getting both sides costs two calls, not one.
 ///
-/// expiryCode's exact semantics are NOT spelled out in Dhan's docs beyond a single worked example
-/// (expiryCode 1, querying August 2021 - a small positive number for a multi-year-old date, which
-/// only makes sense if it counts forward from the query's OWN date range rather than from today).
-/// Confirmed independently against a real cached Dhan scrip master: SEM_EXPIRY_CODE is "0" for
-/// every single index-option row in it, an unrelated legacy futures column, not this parameter.
-/// Not verified against a live call from this sandbox - build defensively, and let Dhan's own error
-/// message surface immediately if this assumption is wrong.
+/// expiryCode's exact semantics are NOT fully spelled out in Dhan's docs beyond a single worked
+/// example (expiryCode 1, querying August 2021 - a small positive number for a multi-year-old date,
+/// which only makes sense if it counts forward from the query's OWN date range rather than from
+/// today). Confirmed independently against a real cached Dhan scrip master: SEM_EXPIRY_CODE is "0"
+/// for every single index-option row in it, an unrelated legacy futures column, not this parameter.
+/// One thing IS now confirmed against a live call, not just inferred: expiryCode is 1-indexed, and
+/// 0 is rejected outright (see above) rather than meaning "the nearest expiry" as this app first
+/// assumed - still build defensively for anything beyond that, and let Dhan's own error message
+/// surface immediately if some other assumption here turns out wrong too.
 /// </summary>
 public sealed class DhanRollingOptionDataService
 {

@@ -116,7 +116,9 @@ public sealed class ExpiredOptionBacktestService
 
         var ceStrike = StrikeToken(otmSteps);
         var peStrike = StrikeToken(-otmSteps);
-        var expiryCode = Math.Clamp(ComputeExpiryCode(expiryFlag, fromDay, toDay) + expiryCodeAdjust, 0, 10);
+        // Floored at 1, never 0 - see ComputeExpiryCode's own doc comment: a real call with
+        // expiryCode=0 was rejected outright by Dhan as "expiryCode is required".
+        var expiryCode = Math.Clamp(ComputeExpiryCode(expiryFlag, fromDay, toDay) + expiryCodeAdjust, 1, 10);
 
         // Sequential, not Task.WhenAll - each side's own fetch is already chunked (and paced) across
         // Dhan's 30-day-per-call cap (see DhanRollingOptionDataService), and Dhan's rate limit is
@@ -235,10 +237,17 @@ public sealed class ExpiredOptionBacktestService
         return splices;
     }
 
-    /// <summary>Derives Dhan's expiryCode (0,1,2... - see DhanRollingOptionDataService's own doc
-    /// comment for why it is neither negative nor relative to today) from an actual calendar expiry
-    /// date: how many expiry CYCLES of the chosen cadence fall between the query range's own start
-    /// and the requested expiry.
+    /// <summary>Derives Dhan's expiryCode from an actual calendar expiry date: how many expiry
+    /// CYCLES of the chosen cadence fall between the query range's own start and the requested
+    /// expiry - see DhanRollingOptionDataService's own doc comment for why it is neither negative
+    /// nor relative to today.
+    ///
+    /// CONFIRMED (not just inferred) to be 1-indexed, never 0: a real call with expiryCode=0 was
+    /// rejected outright by Dhan with "Input_Exception: expiryCode is required" - the exact error
+    /// a required-field check gives a value it treats as absent, meaning 0 and "omitted" are
+    /// indistinguishable to their own validation. Floored at 1 rather than 0 for that reason; every
+    /// other value this method could already produce is untouched, since 0 was the only one ever
+    /// observed to fail.
     ///
     /// WEEKLY expiries land on a fixed weekday (Thursday, historically, though NSE has moved this
     /// before and a holiday shifts any individual week's own expiry by a day) - but every week still
@@ -254,10 +263,10 @@ public sealed class ExpiredOptionBacktestService
         if (string.Equals(expiryFlag, "MONTH", StringComparison.OrdinalIgnoreCase))
         {
             var months = (toDay.Year * 12 + toDay.Month) - (fromDay.Year * 12 + fromDay.Month);
-            return Math.Clamp(months, 0, 10);
+            return Math.Clamp(months, 1, 10);
         }
 
         var weeks = (int)Math.Round((toDay.DayNumber - fromDay.DayNumber) / 7.0, MidpointRounding.AwayFromZero);
-        return Math.Clamp(weeks, 0, 10);
+        return Math.Clamp(weeks, 1, 10);
     }
 }

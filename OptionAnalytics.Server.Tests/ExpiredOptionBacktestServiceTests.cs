@@ -27,11 +27,14 @@ public sealed class ExpiredOptionBacktestServiceTests
     }
 
     [Fact]
-    public void Weekly_SameDay_IsZero()
+    public void Weekly_SameDay_FloorsToOne_NeverZero()
     {
+        // Confirmed against a real call: Dhan rejects expiryCode=0 outright as "expiryCode is
+        // required" - 0 and 1 (both "no whole week has passed yet") must both floor to 1, the
+        // nearest expiry, rather than 0 ever reaching the request.
         var code = ExpiredOptionBacktestService.ComputeExpiryCode("WEEK", new DateOnly(2024, 8, 1), new DateOnly(2024, 8, 1));
 
-        Assert.Equal(0, code);
+        Assert.Equal(1, code);
     }
 
     [Fact]
@@ -46,18 +49,18 @@ public sealed class ExpiredOptionBacktestServiceTests
     }
 
     [Fact]
-    public void Monthly_SameCalendarMonth_IsZero()
+    public void Monthly_SameCalendarMonth_FloorsToOne_NeverZero()
     {
         var code = ExpiredOptionBacktestService.ComputeExpiryCode("MONTH", new DateOnly(2024, 8, 1), new DateOnly(2024, 8, 29));
 
-        Assert.Equal(0, code);
+        Assert.Equal(1, code);
     }
 
     [Fact]
     public void ClampsToTheEndpointsSupportedRange()
     {
         // A very wide lookback must never ask Dhan for an expiryCode past what the endpoint
-        // documents (0-10), even though the raw cycle count would be far larger.
+        // documents (1-10), even though the raw cycle count would be far larger.
         var weekly = ExpiredOptionBacktestService.ComputeExpiryCode("WEEK", new DateOnly(2020, 1, 1), new DateOnly(2024, 8, 29));
         var monthly = ExpiredOptionBacktestService.ComputeExpiryCode("MONTH", new DateOnly(2020, 1, 1), new DateOnly(2024, 8, 29));
 
@@ -66,11 +69,13 @@ public sealed class ExpiredOptionBacktestServiceTests
     }
 
     [Fact]
-    public void NeverNegative_EvenIfCalledWithAnInvertedRange()
+    public void NeverBelowOne_EvenIfCalledWithAnInvertedRange()
     {
+        // Confirmed against a real call: Dhan rejects expiryCode=0 outright as "expiryCode is
+        // required" - never a legal value, regardless of how the raw cycle count comes out.
         var code = ExpiredOptionBacktestService.ComputeExpiryCode("WEEK", new DateOnly(2024, 8, 29), new DateOnly(2024, 8, 1));
 
-        Assert.Equal(0, code);
+        Assert.Equal(1, code);
     }
 
     private static CandleWithVolume Bar(DateTimeOffset time, decimal open, decimal close) =>
