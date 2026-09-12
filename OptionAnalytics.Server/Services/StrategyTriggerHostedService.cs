@@ -439,11 +439,20 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         var cutoff = IstClock.AtIstTime(IstClock.Today(), squareOffMinutes);
         if (DateTimeOffset.UtcNow < cutoff) return; // not due yet - leave LastOrderId as-is for a later sweep
 
+        // How much square-off quantity is already accounted for by an order still resting from an
+        // EARLIER sweep - summed, not just "is there any", because a square-off whose own quantity
+        // exceeded the freeze limit is itself sliced into several closing orders (see
+        // SliceQuantity). A crash or restart landing between two of THOSE slices being placed must
+        // not leave the remainder unplaced forever: a plain "is anything still working" check would
+        // see slice 1 resting, conclude the square-off is "being handled", and return - never
+        // placing slices 2+, which were never placed at all. Comparing quantities instead means
+        // only the genuine shortfall gets a fresh order; once every slice from an earlier sweep is
+        // actually accounted for, this is 0 and behaves exactly like the old boolean check did.
         var prefix = SquareOffCorrelationPrefix(trigger.Id);
-        var alreadyWorking = (await _orders.ListAsync(cancellationToken)).Any(o =>
-            o.SecurityId == entryOrder.SecurityId && o.CorrelationId is { } id && id.StartsWith(prefix, StringComparison.Ordinal)
-            && o.OrderStatus is "PENDING" or "TRANSIT" or "PART_TRADED");
-        if (alreadyWorking) return; // a previous sweep's square-off order is still being monitored - see MonitorSquareOffFillAsync
+        var alreadyWorkingQuantity = (await _orders.ListAsync(cancellationToken))
+            .Where(o => o.SecurityId == entryOrder.SecurityId && o.CorrelationId is { } id && id.StartsWith(prefix, StringComparison.Ordinal)
+                && o.OrderStatus is "PENDING" or "TRANSIT" or "PART_TRADED")
+            .Sum(o => o.Quantity - o.FilledQty);
 
         var contract = _optionChainMaster.FindBySecurityId(securityId);
         if (contract is null)
@@ -472,7 +481,13 @@ public sealed class StrategyTriggerHostedService : BackgroundService
 
         var isCall = contract.IsCall;
         var closingIsSell = position.ClosesBySelling;
-        var quantity = Math.Abs(position.NetQty);
+
+        // The shortfall, not the raw position size: subtract whatever an earlier sweep's slice(s)
+        // are already working on covering. Zero or negative means every slice from before is
+        // already accounted for and there is genuinely nothing left to place this sweep - the same
+        // early-return the old boolean check gave for the ordinary, unsliced case.
+        var quantity = Math.Abs(position.NetQty) - alreadyWorkingQuantity;
+        if (quantity <= 0) return; // a previous sweep's square-off slice(s) already cover the whole remaining position
 
         var reference = await GetRepricingReferenceForSquareOffAsync(trigger.Underlying, contract.Expiry, contract.Strike, isCall, closingIsSell, cancellationToken);
         if (reference is null)
@@ -724,13 +739,19 @@ public sealed class StrategyTriggerHostedService : BackgroundService
             return;
         }
 
+        // Same shortfall reasoning as SquareOffIfDueAsync's own identical check: a hedge close whose
+        // quantity exceeded the freeze limit is itself sliced into several orders, and a crash or
+        // restart between two of those slices must not leave the remainder unplaced forever - a
+        // plain "is anything still working" boolean would see one resting slice and conclude the
+        // close is "being handled", never placing the slices that were never placed at all.
         var prefix = HedgeCloseCorrelationPrefix(trigger.Id);
-        var alreadyWorking = (await _orders.ListAsync(cancellationToken)).Any(o =>
-            o.SecurityId == hedgeOrder.SecurityId && o.CorrelationId is { } id && id.StartsWith(prefix, StringComparison.Ordinal)
-            && o.OrderStatus is "PENDING" or "TRANSIT" or "PART_TRADED");
-        if (alreadyWorking) return; // a previous sweep's hedge-close order is still being monitored - see MonitorHedgeCloseFillAsync
+        var alreadyWorkingQuantity = (await _orders.ListAsync(cancellationToken))
+            .Where(o => o.SecurityId == hedgeOrder.SecurityId && o.CorrelationId is { } id && id.StartsWith(prefix, StringComparison.Ordinal)
+                && o.OrderStatus is "PENDING" or "TRANSIT" or "PART_TRADED")
+            .Sum(o => o.Quantity - o.FilledQty);
 
-        var quantity = Math.Abs(hedgePosition.NetQty);
+        var quantity = Math.Abs(hedgePosition.NetQty) - alreadyWorkingQuantity;
+        if (quantity <= 0) return; // a previous sweep's hedge-close slice(s) already cover the whole remaining hedge position
         var reference = await GetRepricingReferenceForSquareOffAsync(trigger.Underlying, contract.Expiry, contract.Strike, contract.IsCall, isSell: true, cancellationToken);
         if (reference is null)
         {
@@ -1467,13 +1488,11 @@ public sealed class StrategyTriggerHostedService : BackgroundService
                     _logger.LogError("Trigger {Name}: hedge leg placement FAILED for {Summary} (slice {Slice}/{Total}) - {Error} - main order ABORTED, refusing to sell naked.",
                         trigger.Name, hedge.Summary, i + 1, hedgeSlices.Count, hedgeReason);
 
-                    // Whatever slices DID place before this one failed are real, live orders - they
-                    // must still be recorded and watched (CloseHedgeIfOpenAsync reads this the same
-                    // way regardless of how it got only partially filled), and the operator must be
-                    // told the hedge is now partial rather than either whole or absent.
-                    if (hedgeOrderIds.Count > 0)
-                        _store.SetLastHedgeOrderId(trigger.Id, hedgeOrderIds[0], hedgeOrderIds.Skip(1).ToList());
-
+                    // Nothing further to record here: whatever slice(s) DID place before this one
+                    // failed already persisted themselves to the store the instant they existed (see
+                    // the success branch below), so CloseHedgeIfOpenAsync can already find them - a
+                    // mid-loop failure only means the operator must be told the hedge is partial
+                    // rather than either whole or absent.
                     var partialNote = hedgeOrderIds.Count > 0
                         ? $"\n\nNOTE: {hedgeOrderIds.Count}/{hedgeSlices.Count} hedge slice(s) WERE already placed (orders {string.Join(", ", hedgeOrderIds)}) - CHECK DHAN, the hedge is now PARTIAL, not absent."
                         : "";
@@ -1483,12 +1502,16 @@ public sealed class StrategyTriggerHostedService : BackgroundService
                 _logger.LogInformation("Trigger {Name}: hedge leg placed - orderId={OrderId} status={Status} qty={Quantity} (slice {Slice}/{Total}) for {Summary}",
                     trigger.Name, hedgeResult.OrderId, hedgeResult.OrderStatus, hedgeSlices[i], i + 1, hedgeSlices.Count, hedge.Summary);
                 hedgeOrderIds.Add(hedgeResult.OrderId);
+
+                // Persisted the instant EACH order id exists, not batched until the loop finishes -
+                // a real order is live at Dhan the moment this call returns, and a process crash or
+                // deploy landing between two slice placements must never leave an already-placed
+                // slice untracked. CloseHedgeIfOpenAsync (and a restart) can only find what the
+                // store actually holds, so the store has to be as current as reality after every
+                // single slice, not just the last one.
+                _store.SetLastHedgeOrderId(trigger.Id, hedgeOrderIds[0], hedgeOrderIds.Skip(1).ToList());
             }
 
-            // Recorded the instant every order id exists, regardless of fill state - same reasoning
-            // as LastOrderId below, so CloseHedgeIfOpenAsync can find all of them later even across
-            // a restart.
-            _store.SetLastHedgeOrderId(trigger.Id, hedgeOrderIds[0], hedgeOrderIds.Skip(1).ToList());
             hedgeNote = hedgeSlices.Count > 1
                 ? $"\n\n[HEDGE PLACED - {hedgeSlices.Count} slices, freeze limit {freezeLimit}] {hedge.Summary}\nOrders: {string.Join(", ", hedgeOrderIds)}"
                 : $"\n\n[HEDGE PLACED] {hedge.Summary}";
@@ -1514,18 +1537,22 @@ public sealed class StrategyTriggerHostedService : BackgroundService
                 _logger.LogError("Trigger {Name}: Super Order placement FAILED for {Summary} (slice {Slice}/{Total}) - {Error}",
                     trigger.Name, plan.Summary, i + 1, entrySlices.Count, reason);
 
-                // Same partial-fill honesty as the hedge loop above: any slice that DID place is a
-                // real position with its own attached SL/target and must be tracked - it was
-                // already handed to StartFillMonitoring the instant it was placed, inside the loop
-                // above, so nothing further is started here; this only records the order ids so
-                // SquareOffIfDueAsync/AdjustStopLossForOpenPositionAsync can find them too.
-                if (entryOrderIds.Count > 0)
-                    _store.SetLastOrderId(trigger.Id, entryOrderIds[0], entryOrderIds.Skip(1).ToList());
-
+                // Nothing further to record here: every slice that DID place already persisted
+                // itself to the store the instant it existed (see the success branch below) and was
+                // already handed to StartFillMonitoring right then too - a mid-loop failure changes
+                // nothing about slices that already succeeded, only stops any FURTHER ones from
+                // being attempted.
                 var partialNote = entryOrderIds.Count > 0
                     ? $"\n\nNOTE: {entryOrderIds.Count}/{entrySlices.Count} slice(s) WERE already placed (orders {string.Join(", ", entryOrderIds)}) - CHECK DHAN, the position is PARTIAL, not absent."
                     : "";
-                var abortedHedgeNote = hedge is not null ? "\n\nNOTE: the protective hedge leg above WAS already placed - CHECK DHAN, you may now be holding a hedge that is naked, partially, or wholly." : "";
+                // By this point the hedge (if requested) is definitely placed IN FULL - a hedge
+                // slice failing returns from the hedge loop above before the entry loop is ever
+                // reached, so there is no "partial hedge" case to describe here. What IS true, and
+                // worth saying precisely rather than hedging the wording: the hedge is now
+                // protecting a SMALLER (or entirely absent) main position than it was sized for.
+                var abortedHedgeNote = hedge is not null
+                    ? "\n\nNOTE: the protective hedge leg above WAS placed in full - CHECK DHAN, it is now protecting a smaller (or, if no entry slice placed at all, an entirely absent) main position than it was sized for."
+                    : "";
                 return $"[ORDER FAILED]\n{plan.Summary}\nDhan error: {reason}{partialNote}\nIf that doesn't explain it, a common secondary cause is the account's static IP whitelisting not covering this server.{abortedHedgeNote}";
             }
 
@@ -1534,15 +1561,17 @@ public sealed class StrategyTriggerHostedService : BackgroundService
                 trigger.Name, result.OrderId, result.OrderStatus, entrySlices[i], i + 1, entrySlices.Count, plan.Summary);
             entryOrderIds.Add(result.OrderId);
 
+            // Persisted the instant EACH order id exists, not batched until the loop finishes - see
+            // the identical reasoning on the hedge loop above. StrategyTrigger.LastOrderId's own doc
+            // comment is why SquareOffIfDueAsync needs this at all; a crash between two slices must
+            // never leave an already-placed one with nothing in the store pointing at it.
+            _store.SetLastOrderId(trigger.Id, entryOrderIds[0], entryOrderIds.Skip(1).ToList());
+
             // Each slice is monitored/re-priced independently the instant it exists, exactly as the
             // single unsliced order always was - not after the whole loop finishes, so an earlier
             // slice's fill-monitoring is never delayed behind placing a later one.
             StartFillMonitoring(trigger, trade, plan with { Quantity = entrySlices[i] }, result.OrderId, cancellationToken);
         }
-
-        // Recorded the instant every order id exists, regardless of fill state - see
-        // StrategyTrigger.LastOrderId's own doc comment for why SquareOffIfDueAsync needs this.
-        _store.SetLastOrderId(trigger.Id, entryOrderIds[0], entryOrderIds.Skip(1).ToList());
 
         var sliceNote = entrySlices.Count > 1
             ? $" split into {entrySlices.Count} slices (exchange freeze limit {freezeLimit}) - orders {string.Join(", ", entryOrderIds)}"
