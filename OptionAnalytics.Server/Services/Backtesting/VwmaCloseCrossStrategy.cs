@@ -30,11 +30,23 @@ public sealed class VwmaCloseCrossStrategy : IBacktestStrategy
 {
     public string Key => "vwma-close-cross";
     public string Name => "VWMA Close Cross (spot)";
-    public string Description => "Spot closing across its Volume Weighted Moving Average: a candle closing ABOVE the VWMA enters long at that close, a candle closing BELOW it enters short. Taken on the cross, not on every bar sitting the right side of the line. An index has no volume of its own, so the line weights each spot close by the ATM CE+PE option volume in the same bucket - the prices are purely spot, only the weights come from the option chain; a window with no volume falls back to an unweighted average.";
+    public string Description => "Spot closing across its Volume Weighted Moving Average - the same average TradingView's ta.vwma(source, length) computes, sum(source x volume) / sum(volume) over the window. A candle closing ABOVE the VWMA enters long at that close, a candle closing BELOW it enters short, taken on the cross rather than on every bar sitting the right side of the line. An index has no volume of its own, so the line weights each spot bar by the ATM CE+PE option volume in the same bucket - the prices are purely spot, only the weights come from the option chain; a window with no volume falls back to an unweighted average (where TradingView would show nothing at all).";
 
     private const decimal DirectionBoth = 0;
     private const decimal DirectionLongOnly = 1;
     private const decimal DirectionShortOnly = 2;
+
+    /// <summary>The "Source" input TradingView's own VWMA indicator exposes, same set and same
+    /// meaning, so a line tuned there reproduces here. Only the LINE is built from this - the cross
+    /// is always judged on the candle's CLOSE, since "the candle closed above it" is the rule and
+    /// an hl2-vs-hl2 comparison would signal on a bar whose close never got there.</summary>
+    private const decimal SourceClose = 0;
+    private const decimal SourceOpen = 1;
+    private const decimal SourceHigh = 2;
+    private const decimal SourceLow = 3;
+    private const decimal SourceHl2 = 4;
+    private const decimal SourceHlc3 = 5;
+    private const decimal SourceOhlc4 = 6;
 
     public IReadOnlyList<BacktestParameterSpec> Parameters { get; } = new[]
     {
@@ -45,6 +57,16 @@ public sealed class VwmaCloseCrossStrategy : IBacktestStrategy
         OptionTradeSimulator.SquareOffTimeParameter(),
         OptionTradeSimulator.SignalStartTimeParameter(),
         new BacktestParameterSpec("vwmaPeriod", "VWMA (bars)", Default: 20, Min: 2, Max: 200, Step: 1),
+        new BacktestParameterSpec("vwmaSource", "Source", Default: SourceClose, Min: SourceClose, Max: SourceOhlc4, Step: 1, Options: new[]
+        {
+            new BacktestParameterOption(SourceClose, "Close"),
+            new BacktestParameterOption(SourceOpen, "Open"),
+            new BacktestParameterOption(SourceHigh, "High"),
+            new BacktestParameterOption(SourceLow, "Low"),
+            new BacktestParameterOption(SourceHl2, "hl2 (median)"),
+            new BacktestParameterOption(SourceHlc3, "hlc3 (typical)"),
+            new BacktestParameterOption(SourceOhlc4, "ohlc4 (average)"),
+        }),
         new BacktestParameterSpec("direction", "Take", Default: DirectionBoth, Min: DirectionBoth, Max: DirectionShortOnly, Step: 1, Options: new[]
         {
             new BacktestParameterOption(DirectionBoth, "Both sides"),
@@ -63,6 +85,7 @@ public sealed class VwmaCloseCrossStrategy : IBacktestStrategy
         BacktestStrategyContext context, IReadOnlyDictionary<string, decimal> parameters)
     {
         var period = (int)parameters["vwmaPeriod"];
+        var source = parameters.GetValueOrDefault("vwmaSource", SourceClose);
         var direction = parameters["direction"];
         var signalStartMinutes = (int)parameters.GetValueOrDefault("signalStartMinutes", 555);
 
@@ -73,7 +96,7 @@ public sealed class VwmaCloseCrossStrategy : IBacktestStrategy
         var signals = new List<BacktestSignal>();
 
         var bars = context.SpotBars;
-        var vwma = VwmaSeries(bars, VolumeByTime(context), period);
+        var vwma = VwmaSeries(bars, VolumeByTime(context), period, source);
 
         DateOnly? currentDay = null;
         bool? wasAbove = null;
@@ -157,7 +180,8 @@ public sealed class VwmaCloseCrossStrategy : IBacktestStrategy
     ///
     /// Internal for direct unit testing: this is the whole strategy's arithmetic, and the live
     /// CDV/Dhan state the rest of it reads has no test harness.</summary>
-    internal static decimal?[] VwmaSeries(IReadOnlyList<Candle> bars, IReadOnlyDictionary<DateTimeOffset, long> volumeByTime, int period)
+    internal static decimal?[] VwmaSeries(
+        IReadOnlyList<Candle> bars, IReadOnlyDictionary<DateTimeOffset, long> volumeByTime, int period, decimal source = SourceClose)
     {
         var result = new decimal?[bars.Count];
         if (period <= 0) return result;
@@ -172,12 +196,12 @@ public sealed class VwmaCloseCrossStrategy : IBacktestStrategy
 
             for (var k = i - period + 1; k <= i; k++)
             {
-                var close = bars[k].Close;
+                var price = SourcePrice(bars[k], source);
                 var barVolume = volumeByTime.TryGetValue(bars[k].Time, out var v) && v > 0 ? v : 0;
 
-                weighted += close * barVolume;
+                weighted += price * barVolume;
                 volume += barVolume;
-                plain += close;
+                plain += price;
             }
 
             result[i] = volume > 0 ? weighted / volume : plain / period;
@@ -185,4 +209,17 @@ public sealed class VwmaCloseCrossStrategy : IBacktestStrategy
 
         return result;
     }
+
+    /// <summary>TradingView's own source options, computed the same way: hl2 = (H+L)/2,
+    /// hlc3 = (H+L+C)/3, ohlc4 = (O+H+L+C)/4.</summary>
+    internal static decimal SourcePrice(Candle bar, decimal source) => source switch
+    {
+        SourceOpen => bar.Open,
+        SourceHigh => bar.High,
+        SourceLow => bar.Low,
+        SourceHl2 => (bar.High + bar.Low) / 2m,
+        SourceHlc3 => (bar.High + bar.Low + bar.Close) / 3m,
+        SourceOhlc4 => (bar.Open + bar.High + bar.Low + bar.Close) / 4m,
+        _ => bar.Close,
+    };
 }

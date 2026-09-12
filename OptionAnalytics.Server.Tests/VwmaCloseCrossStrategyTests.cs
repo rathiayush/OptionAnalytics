@@ -84,6 +84,68 @@ public sealed class VwmaCloseCrossStrategyTests
     }
 
     [Fact]
+    public void MatchesTradingViewsTaVwma()
+    {
+        // ta.vwma(src, len) is sma(src*volume, len) / sma(volume, len); the len divisor cancels,
+        // leaving sum(src*vol)/sum(vol). Worked by hand over three bars:
+        // (10*1 + 20*2 + 30*3) / (1+2+3) = 140/6.
+        var bars = new[] { Bar(0, 10), Bar(1, 20), Bar(2, 30) };
+        var volume = new Dictionary<DateTimeOffset, long> { [At(0)] = 1, [At(1)] = 2, [At(2)] = 3 };
+
+        var series = VwmaCloseCrossStrategy.VwmaSeries(bars, volume, period: 3);
+
+        Assert.Equal(140m / 6m, series[2]);
+    }
+
+    [Theory]
+    // TradingView's own source set, computed its way - hl2 = (H+L)/2, hlc3 = (H+L+C)/3,
+    // ohlc4 = (O+H+L+C)/4 - on a bar of O=10 H=20 L=30 C=40 (deliberately not a real candle shape,
+    // so each formula lands on a distinct number rather than coinciding).
+    [InlineData(0, 40)]  // close
+    [InlineData(1, 10)]  // open
+    [InlineData(2, 20)]  // high
+    [InlineData(3, 30)]  // low
+    [InlineData(4, 25)]  // hl2   = (20+30)/2
+    [InlineData(5, 30)]  // hlc3  = (20+30+40)/3
+    [InlineData(6, 25)]  // ohlc4 = (10+20+30+40)/4
+    public void SourcePrice_MatchesTradingViewsFormulas(int source, decimal expected)
+    {
+        var bar = new Candle(At(0), Open: 10, High: 20, Low: 30, Close: 40);
+
+        Assert.Equal(expected, VwmaCloseCrossStrategy.SourcePrice(bar, source));
+    }
+
+    [Fact]
+    public void TheSourceChangesTheLineNotJustItsLabel()
+    {
+        // Same bars, same volume, different source - the hl2 line must differ from the close line,
+        // otherwise the input is decorative.
+        var bars = new[]
+        {
+            new Candle(At(0), Open: 10, High: 30, Low: 10, Close: 20),
+            new Candle(At(1), Open: 20, High: 60, Low: 20, Close: 40),
+        };
+        var volume = new Dictionary<DateTimeOffset, long> { [At(0)] = 1, [At(1)] = 1 };
+
+        var onClose = VwmaCloseCrossStrategy.VwmaSeries(bars, volume, period: 2, source: 0);
+        var onHl2 = VwmaCloseCrossStrategy.VwmaSeries(bars, volume, period: 2, source: 4);
+
+        Assert.Equal(30m, onClose[1]); // (20 + 40) / 2
+        Assert.Equal(30m, onHl2[1]);   // ((30+10)/2 + (60+20)/2) / 2 = (20 + 40) / 2
+        Assert.Equal(onClose[1], onHl2[1]); // coincide here by construction...
+
+        // ...so shift one bar's range to prove they genuinely track different inputs.
+        var skewed = new[]
+        {
+            bars[0],
+            new Candle(At(1), Open: 20, High: 100, Low: 20, Close: 40),
+        };
+        var skewedHl2 = VwmaCloseCrossStrategy.VwmaSeries(skewed, volume, period: 2, source: 4);
+
+        Assert.NotEqual(onClose[1], skewedHl2[1]);
+    }
+
+    [Fact]
     public void VolumeByTime_SumsBothLegsInTheSameBucket()
     {
         // The weight is meant to say "how much did the chain trade around this price", which is CE
