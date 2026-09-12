@@ -198,6 +198,23 @@ public sealed class ExpiredOptionBacktestServiceTests
     }
 
     [Fact]
+    public void DetectPossibleSplices_IgnoresAnOvernightGapEvenIfLarge()
+    {
+        // The most damaging bug this class had: a real option premium can genuinely move several-
+        // fold overnight (theta decay through the non-trading gap, or the underlying itself
+        // gapping) - normal, not a splice. Comparing this day's last bar to the NEXT day's first
+        // bar used to flag ordinary overnight gaps like this one on every single trading day in a
+        // multi-day window, and TrimToLargestSegment could then only ever keep ONE of those days.
+        var day1Close = new DateTimeOffset(2024, 8, 1, 15, 29, 0, TimeSpan.FromHours(5.5));
+        var day2Open = new DateTimeOffset(2024, 8, 2, 9, 15, 0, TimeSpan.FromHours(5.5));
+        var bars = new List<CandleWithVolume> { Bar(day1Close, 3m, 2m), Bar(day2Open, 40m, 38m) };
+
+        var splices = ExpiredOptionBacktestService.DetectPossibleSplices(bars);
+
+        Assert.Empty(splices);
+    }
+
+    [Fact]
     public void DetectPossibleSplices_IgnoresZeroOrNegativePrices()
     {
         // A genuinely worthless expired print (0) must never divide-by-zero or read as an infinite

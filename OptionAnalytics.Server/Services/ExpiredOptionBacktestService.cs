@@ -488,7 +488,21 @@ public sealed class ExpiredOptionBacktestService
     /// genuinely be the NEXT contract's opening data, not the target's. This is a real splice, not a
     /// detection bug - what needed fixing was TrimToLargestSegment's caller-side assumption that the
     /// segment nearest the requested expiry is always the correct one to keep (see its own doc
-    /// comment for why that is no longer true).</summary>
+    /// comment for why that is no longer true).
+    ///
+    /// A THIRD, much more damaging bug: this check never excluded the OVERNIGHT gap between one
+    /// trading day's own last bar and the NEXT day's own first bar. A real option's premium
+    /// genuinely CAN move several-fold overnight (theta decay through a non-trading gap, or the
+    /// underlying itself gapping) - completely normal, and nothing like a contract splice, but
+    /// indistinguishable from one by a check that only looks at consecutive ARRAY entries with no
+    /// notion of calendar days. Across a multi-day window this fired on ordinary overnight gaps
+    /// again and again, and since TrimToLargestSegment can only ever keep ONE contiguous run,
+    /// "splitting" the series into one segment per trading day left just whichever single day
+    /// happened to have the most bars - every OTHER day's signals finding no option data at all
+    /// (BacktestTrade.NoData), even though the underlying multi-day fetch itself was fine. A
+    /// consecutive-bar comparison is only ever meaningful WITHIN the same trading day - an overnight
+    /// gap is checked for nothing here, the same way this method already ignores a zero/negative
+    /// price rather than reading it as an infinite jump.</summary>
     internal static List<PossibleSplice> DetectPossibleSplices(IReadOnlyList<CandleWithVolume> bars)
     {
         const decimal SuspiciousRatio = 3m;
@@ -497,13 +511,17 @@ public sealed class ExpiredOptionBacktestService
 
         for (var i = 1; i < bars.Count && splices.Count < 10; i++)
         {
-            var previousClose = bars[i - 1].Close;
-            var thisOpen = bars[i].Open;
+            var previousBar = bars[i - 1];
+            var thisBar = bars[i];
+            if (IstClock.IstDate(previousBar.Time) != IstClock.IstDate(thisBar.Time)) continue;
+
+            var previousClose = previousBar.Close;
+            var thisOpen = thisBar.Open;
             if (previousClose <= 0 || thisOpen <= 0) continue;
             if (Math.Abs(thisOpen - previousClose) < MinimumAbsoluteJump) continue;
 
             var ratio = thisOpen >= previousClose ? thisOpen / previousClose : previousClose / thisOpen;
-            if (ratio >= SuspiciousRatio) splices.Add(new PossibleSplice(bars[i].Time, previousClose, thisOpen));
+            if (ratio >= SuspiciousRatio) splices.Add(new PossibleSplice(thisBar.Time, previousClose, thisOpen));
         }
 
         return splices;
