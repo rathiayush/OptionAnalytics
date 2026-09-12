@@ -42,7 +42,6 @@ public sealed class OptionTradeSimulatorSquareOffTests
         AtmPeBars = Array.Empty<Candle>(),
         AtmCeVolumeBars = Array.Empty<CandleWithVolume>(),
         AtmPeVolumeBars = Array.Empty<CandleWithVolume>(),
-        FuturesVolumeBars = Array.Empty<CandleWithVolume>(),
         AtmStrike = null,
     };
 

@@ -36,7 +36,7 @@ public sealed class EmaCrossoverAlertServiceTests
 
     private static SpotFeedHostedService CreateSpotFeed() => new(
         Options.Create(new DhanOptions()),
-        null!, null!, null!, null!, null!, null!,
+        null!, null!, null!, null!, null!,
         NullLogger<SpotFeedHostedService>.Instance);
 
     private static (EmaCrossoverAlertService Service, RecordingHandler Handler) CreateService(SpotFeedHostedService spotFeed)

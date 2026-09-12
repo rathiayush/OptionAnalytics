@@ -26,7 +26,6 @@ public sealed class DhanHistoricalDataService
 {
     private const string Instrument = "INDEX";
     private const string OptionInstrument = "OPTIDX";
-    private const string FuturesInstrument = "FUTIDX";
 
     private readonly DhanApiClient _api;
     private readonly ILogger<DhanHistoricalDataService> _logger;
@@ -125,13 +124,6 @@ public sealed class DhanHistoricalDataService
     public Task<(IReadOnlyList<CandleWithVolume> Candles, string? Error)> GetIntradayOptionCandlesAsync(
         uint securityId, string dhanSegment, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken) =>
         GetIntradayDerivativeCandlesAsync(securityId, dhanSegment, OptionInstrument, fromDay, toDay, intervalMinutes, cancellationToken);
-
-    /// <summary>The same call for an index FUTURE (instrument "FUTIDX") - what
-    /// DhanFuturesInstrument exists for. An index carries no volume of its own, so this is the only
-    /// route to a real traded-volume series for NIFTY/BANKNIFTY/SENSEX.</summary>
-    public Task<(IReadOnlyList<CandleWithVolume> Candles, string? Error)> GetIntradayFuturesCandlesAsync(
-        uint securityId, string dhanSegment, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken) =>
-        GetIntradayDerivativeCandlesAsync(securityId, dhanSegment, FuturesInstrument, fromDay, toDay, intervalMinutes, cancellationToken);
 
     private async Task<(IReadOnlyList<CandleWithVolume> Candles, string? Error)> GetIntradayDerivativeCandlesAsync(
         uint securityId, string dhanSegment, string instrumentType, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken)

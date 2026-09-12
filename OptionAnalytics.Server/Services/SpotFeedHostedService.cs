@@ -39,21 +39,6 @@ public sealed class SpotFeedHostedService : BackgroundService
     private readonly IHubContext<SpotHub> _hub;
     private readonly ILogger<SpotFeedHostedService> _logger;
 
-    private readonly DhanOptionChainMaster _optionChainMaster;
-
-    /// <summary>Per underlying, the front-month FUTURE's 1-minute traded volume by bar time - the
-    /// only real volume series this app has, since an index carries none of its own (see
-    /// DhanFuturesInstrument). Read by BacktestService to weight a volume-weighted average of SPOT
-    /// prices: the prices stay spot, only the weights come from the future, so no futures/spot basis
-    /// ever enters a price comparison.
-    ///
-    /// Backfilled once alongside spot and not updated live: the weights only need to say how heavily
-    /// each MINUTE traded relative to its neighbours, and a session's shape is set by the time a
-    /// backtest looks at it. Guarded by its own lock - written from the feed's startup path, read
-    /// from request threads.</summary>
-    private readonly Dictionary<string, IReadOnlyList<CandleWithVolume>> _futuresVolume = new(StringComparer.OrdinalIgnoreCase);
-    private readonly object _futuresVolumeLock = new();
-
     private readonly Dictionary<uint, SpotUnderlyingState> _bySecurityId = new();
 
     // Tracks the last IST calendar day OnTick trimmed each state's candle history on - see OnTick's
@@ -64,7 +49,6 @@ public sealed class SpotFeedHostedService : BackgroundService
         IOptions<DhanOptions> options,
         DhanSession session,
         DhanSpotInstrumentMaster instrumentMaster,
-        DhanOptionChainMaster optionChainMaster,
         DhanHistoricalDataService historicalData,
         DhanMarketFeedClient feedClient,
         IHubContext<SpotHub> hub,
@@ -73,7 +57,6 @@ public sealed class SpotFeedHostedService : BackgroundService
         _options = options.Value;
         _session = session;
         _instrumentMaster = instrumentMaster;
-        _optionChainMaster = optionChainMaster;
         _historicalData = historicalData;
         _feedClient = feedClient;
         _hub = hub;
@@ -137,7 +120,6 @@ public sealed class SpotFeedHostedService : BackgroundService
         }
 
         await BackfillAsync(stoppingToken);
-        await BackfillFuturesVolumeAsync(stoppingToken);
 
         _feedClient.TickReceived += OnTick;
 
@@ -268,92 +250,6 @@ public sealed class SpotFeedHostedService : BackgroundService
     /// "confirmed direction changed" a moment later that doesn't correspond to any real price move a
     /// user watching the chart would ever see. An underlying that already has data needs no second
     /// backfill at all - only ever the ones the retry loop exists for.</summary>
-    /// <summary>The front-month future's 1-minute traded volume for one underlying, bar-time order -
-    /// empty when no future resolved or Dhan served nothing. See _futuresVolume for why this exists
-    /// and what a caller may legitimately do with it (weights, never prices).</summary>
-    public IReadOnlyList<CandleWithVolume> GetFuturesVolumeBars(string underlying)
-    {
-        lock (_futuresVolumeLock)
-            return _futuresVolume.TryGetValue(underlying, out var bars) ? bars : Array.Empty<CandleWithVolume>();
-    }
-
-    /// <summary>Backfills each underlying's front-month future purely for its VOLUME. One extra Dhan
-    /// call per underlying, once, on the same window spot already uses.
-    ///
-    /// Isolated per underlying for the same reason BackfillAsync is: this runs before the tick
-    /// handler and feed subscription are wired up, so an exception escaping here would take the
-    /// whole spot feed down over a series that is, by design, optional - every consumer of it has a
-    /// documented fallback for having none.</summary>
-    private async Task BackfillFuturesVolumeAsync(CancellationToken cancellationToken)
-    {
-        var today = IstToday();
-        var fromDay = today.AddDays(-HistoryLookbackCalendarDays);
-
-        // The futures live in the option-chain master (same CSV, FUTIDX rows), and this runs during
-        // the spot feed's own startup - well before CdvHostedService gets round to loading that
-        // master itself. Without this every underlying resolves to "no future" on a cold boot and
-        // silently falls back to option-weighted volume for the rest of the run.
-        try
-        {
-            await _optionChainMaster.EnsureLoadedAsync(cancellationToken);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            _logger.LogWarning(ex, "Could not load the scrip master for futures volume - falling back to unweighted/option-weighted measures.");
-            return;
-        }
-
-        foreach (var (underlying, _) in Underlyings)
-        {
-            try
-            {
-                var future = _optionChainMaster.FindFrontFuture(underlying, today);
-                if (future is null)
-                {
-                    _logger.LogWarning("No front-month future found for {Underlying} - volume-weighted measures on it will fall back to unweighted.", underlying);
-                    continue;
-                }
-
-                var (bars, error) = await _historicalData.GetIntradayFuturesCandlesAsync(
-                    future.SecurityId, future.DhanSegment, fromDay, today, 1, cancellationToken);
-
-                if (error is not null)
-                {
-                    _logger.LogWarning("Futures volume backfill failed for {Underlying} ({Symbol}, {Segment}:{Id}) - {Error}",
-                        underlying, future.TradingSymbol, future.DhanSegment, future.SecurityId, error);
-                    continue;
-                }
-
-                var trimmed = TrimToRecentTradingDaysWithVolume(bars, HistoryTradingDays);
-                lock (_futuresVolumeLock) { _futuresVolume[underlying] = trimmed; }
-
-                _logger.LogInformation("Futures volume for {Underlying}: {Count} bar(s) from {Symbol}, total volume {Volume}.",
-                    underlying, trimmed.Count, future.TradingSymbol, trimmed.Sum(b => b.Volume));
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                _logger.LogError(ex, "Futures volume backfill threw for {Underlying} - continuing without it.", underlying);
-            }
-        }
-    }
-
-    /// <summary>TrimToRecentTradingDays' CandleWithVolume counterpart - same "most recent N distinct
-    /// IST dates" rule, kept separate because Candle and CandleWithVolume are distinct structs.</summary>
-    private static List<CandleWithVolume> TrimToRecentTradingDaysWithVolume(IReadOnlyList<CandleWithVolume> bars, int maxDays)
-    {
-        var recentDays = bars
-            .Select(b => IstDate(b.Time))
-            .Distinct()
-            .OrderDescending()
-            .Take(maxDays)
-            .ToHashSet();
-
-        return bars
-            .Where(b => recentDays.Contains(IstDate(b.Time)))
-            .OrderBy(b => b.Time)
-            .ToList();
-    }
-
     private async Task BackfillAsync(CancellationToken cancellationToken, bool onlyIfEmpty = false)
     {
         var today = IstToday();
