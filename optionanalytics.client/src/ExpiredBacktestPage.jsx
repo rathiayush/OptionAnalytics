@@ -67,6 +67,14 @@ export default function ExpiredBacktestPage() {
 
   const strategy = strategies.find((s) => s.key === strategyKey) ?? null
 
+  // BANKNIFTY's weekly options were discontinued by NSE - there is no such contract to backtest,
+  // so WEEK is not just a bad default for it, it is not a legal choice at all. Forced here (not
+  // just hidden below) so switching underlying can never leave a stale WEEK selection in place.
+  useEffect(() => {
+    if (underlying === 'BANKNIFTY' && expiryFlag === 'WEEK') setExpiryFlag('MONTH')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [underlying])
+
   useEffect(() => {
     if (underlying && !UNDERLYINGS.includes(underlying)) setUnderlying('NIFTY')
     fetch('/api/expired-backtest/strategies')
@@ -202,7 +210,17 @@ export default function ExpiredBacktestPage() {
               </Space>
               <Space direction="vertical" size={2}>
                 <Text type="secondary" style={{ fontSize: 12 }}>Expiry cadence</Text>
-                <Segmented value={expiryFlag} onChange={setExpiryFlag} options={[{ label: 'Weekly', value: 'WEEK' }, { label: 'Monthly', value: 'MONTH' }]} />
+                <Segmented
+                  value={expiryFlag}
+                  onChange={setExpiryFlag}
+                  options={[
+                    // BANKNIFTY has no weekly contract at all (NSE discontinued it) - disabled
+                    // rather than removed, so the control doesn't visibly jump around when
+                    // switching underlying.
+                    { label: 'Weekly', value: 'WEEK', disabled: underlying === 'BANKNIFTY' },
+                    { label: 'Monthly', value: 'MONTH' },
+                  ]}
+                />
               </Space>
               <Space direction="vertical" size={2}>
                 <Text type="secondary" style={{ fontSize: 12 }}>Expiry date</Text>
