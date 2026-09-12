@@ -432,10 +432,22 @@ public sealed class ExpiredOptionBacktestService
     /// exactly the shape that WOULD produce such a jump, so a handful of large consecutive-bar
     /// jumps is strong first-hand evidence the window crossed a contract boundary, even though its
     /// absence is not proof it didn't (a smooth-enough transition is not impossible, just unlikely
-    /// for a real premium).</summary>
+    /// for a real premium).
+    ///
+    /// A real run confirmed this ratio check ALONE has a false-positive mode: a deep-OTM strike in
+    /// its final hour before expiry can genuinely swing several-fold on an almost-zero base (e.g.
+    /// 0.50 -> 2.50 is a 5x "splice-looking" ratio on a real, tiny, single-contract premium as
+    /// gamma reacts to spot in the last few minutes) - trimming the ENTIRE rest of the series away
+    /// on a jump that was never a splice at all. A genuine splice, per the doc comment above, is a
+    /// near-worthless about-to-expire print landing next to a FRESH contract's own opening premium -
+    /// a fresh contract carries meaningfully more absolute time value than a few rupees, so an
+    /// ABSOLUTE floor on top of the ratio (both must hold) filters the OTM false-positive case
+    /// without weakening real-splice detection: every genuine splice this app has actually seen
+    /// (see the test suite's own worked examples) clears this floor by a wide margin.</summary>
     internal static List<DateTimeOffset> DetectPossibleSplices(IReadOnlyList<CandleWithVolume> bars)
     {
         const decimal SuspiciousRatio = 3m;
+        const decimal MinimumAbsoluteJump = 5m;
         var splices = new List<DateTimeOffset>();
 
         for (var i = 1; i < bars.Count && splices.Count < 10; i++)
@@ -443,6 +455,7 @@ public sealed class ExpiredOptionBacktestService
             var previousClose = bars[i - 1].Close;
             var thisOpen = bars[i].Open;
             if (previousClose <= 0 || thisOpen <= 0) continue;
+            if (Math.Abs(thisOpen - previousClose) < MinimumAbsoluteJump) continue;
 
             var ratio = thisOpen >= previousClose ? thisOpen / previousClose : previousClose / thisOpen;
             if (ratio >= SuspiciousRatio) splices.Add(bars[i].Time);
