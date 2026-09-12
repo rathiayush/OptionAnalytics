@@ -301,11 +301,15 @@ public sealed class ExpiredOptionBacktestService
 
     /// <summary>How many days back of the target contract's own life fromDay may safely reach,
     /// without risking crossing into the PREVIOUS contract's own expiry - see this class's own doc
-    /// comment for why that matters (it is what makes expiryCode=1 unambiguous). Set comfortably
-    /// under each cadence's real cycle length (7 days weekly, ~28-31 monthly) rather than right up
-    /// against it, since a holiday can shift an individual expiry by a day or two either way.</summary>
+    /// comment for why that matters (it is what makes expiryCode=1 unambiguous). Set under each
+    /// cadence's real cycle length (7 days weekly, ~28-31 monthly). The monthly cap in particular now
+    /// leaves only a day or two of margin (raised from 25 to 28 at the user's explicit request) - a
+    /// holiday can shift an individual expiry by that much either way, and a shorter calendar month
+    /// (28 days, e.g. February) leaves less margin still than a 31-day one, so a run this close to
+    /// the real cycle length is more exposed to DetectPossibleSplices actually needing to trim
+    /// something than the original 25-day cap was.</summary>
     internal static int MaxLookbackDays(string expiryFlag) =>
-        string.Equals(expiryFlag, "MONTH", StringComparison.OrdinalIgnoreCase) ? 25 : 5;
+        string.Equals(expiryFlag, "MONTH", StringComparison.OrdinalIgnoreCase) ? 28 : 5;
 
     /// <summary>Whether the returned series genuinely stays on ONE single contract for the whole
     /// requested window, or Dhan's own rolling resolution splices between several as the range
