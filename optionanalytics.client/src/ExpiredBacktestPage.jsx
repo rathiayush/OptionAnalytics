@@ -20,21 +20,20 @@ const UNDERLYINGS = ['NIFTY', 'BANKNIFTY']
 // than harmless rounding.
 const STRIKE_STEP_BY_UNDERLYING = { NIFTY: 50, BANKNIFTY: 100 }
 
-// WEEK matches ExpiredOptionBacktestService.MaxLookbackDays("WEEK") - under the real 7-day cycle
-// so the window can never reach back into the PREVIOUS contract's own life. MONTH no longer has a
-// single fixed backend cap at all (see ExpiredOptionBacktestService.BuildMonthlyFetchSegments) - a
-// lookback reaching past the immediately preceding real expiry now fetches an OLDER second segment
-// instead of just getting clamped away, up to 2 real monthly cycles back (roughly 56-70 days,
-// depending on the calendar). 65 here is just a generous UI max for that control, not an enforced
-// boundary; the backend computes and reports the ACTUAL usable window per request from
-// ExpiryCalendar's own real expiry dates regardless of what this sends.
-const MAX_LOOKBACK_DAYS = { WEEK: 5, MONTH: 65 }
+// Neither cadence has a single fixed backend cap any more (see
+// ExpiredOptionBacktestService.BuildFetchSegments) - a lookback reaching past the immediately
+// preceding real expiry (of the SAME cadence) now fetches an OLDER second segment instead of just
+// getting clamped away, up to 2 real cycles back for either one (roughly 14-20 days for Weekly,
+// 56-70 for Monthly, depending on the calendar). These are just generous UI maxes for the control,
+// not enforced boundaries; the backend computes and reports the ACTUAL usable window per request
+// from ExpiryCalendar's own real expiry dates regardless of what this sends.
+const MAX_LOOKBACK_DAYS = { WEEK: 20, MONTH: 65 }
 
 // The lookback each cadence resets to on its own (a fresh cadence pick, or the initial load) -
-// deliberately the single-segment mechanism's own natural range (WEEK's real cap, MONTH's
-// TYPICAL single-cycle length), not MAX_LOOKBACK_DAYS' wider ceiling: reaching into the older,
-// not-yet-confirmed far-month segment (see MAX_LOOKBACK_DAYS' own comment) should always be a
-// deliberate choice to type a bigger number, never a silent default.
+// deliberately the single-segment mechanism's own natural range (each cadence's TYPICAL single-
+// cycle length), not MAX_LOOKBACK_DAYS' wider ceiling: reaching into the older, not-yet-confirmed
+// second segment (see MAX_LOOKBACK_DAYS' own comment) should always be a deliberate choice to type
+// a bigger number, never a silent default.
 const DEFAULT_LOOKBACK_DAYS = { WEEK: 5, MONTH: 28 }
 
 const STORED_STRATEGY_KEY = 'optionanalytics.expiredBacktest.strategyKey'
@@ -409,7 +408,7 @@ export default function ExpiredBacktestPage() {
               <Space direction="vertical" size={2}>
                 <Text type="secondary" style={{ fontSize: 12 }}>
                   Lookback (days){' '}
-                  <Tooltip title="Weekly is capped under its real 7-day cycle so the window can never reach into the previous contract. Monthly can now reach past that same boundary into an OLDER, second fetch segment (e.g. selecting August's expiry with a 45-day lookback also reaches into July) - this older segment is a newer capability and hasn't been confirmed against real data the way the rest of this feature has, so check the diagnostics banner (splice warnings, resolved-vs-expected strike) below after running a lookback this long.">
+                  <Tooltip title="Reaching past the immediately preceding real expiry (Weekly or Monthly) now fetches an OLDER, second segment instead of getting clamped away (e.g. selecting August's monthly expiry with a 45-day lookback also reaches into July's own contract). This older segment is a newer capability and hasn't been confirmed against real data the way the rest of this feature has, so check the diagnostics banner (splice warnings, resolved-vs-expected strike) below after running a lookback this long.">
                     <InfoCircleOutlined />
                   </Tooltip>
                 </Text>
