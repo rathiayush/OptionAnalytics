@@ -111,11 +111,15 @@ public sealed class ExpiredOptionBacktestService
         var peStrike = StrikeToken(-otmSteps);
         var expiryCode = Math.Clamp(ComputeExpiryCode(expiryFlag, fromDay, toDay) + expiryCodeAdjust, 0, 10);
 
-        var ceTask = _rollingOption.GetRollingOptionCandlesAsync(instrument.SecurityId, expiryFlag, expiryCode, ceStrike, "CALL", fromDay, toDay, 1, cancellationToken);
-        var peTask = _rollingOption.GetRollingOptionCandlesAsync(instrument.SecurityId, expiryFlag, expiryCode, peStrike, "PUT", fromDay, toDay, 1, cancellationToken);
-        await Task.WhenAll(ceTask, peTask);
-        var (ceBars1m, ceError) = ceTask.Result;
-        var (peBars1m, peError) = peTask.Result;
+        // Sequential, not Task.WhenAll - each side's own fetch is already chunked (and paced) across
+        // Dhan's 30-day-per-call cap (see DhanRollingOptionDataService), and Dhan's rate limit is
+        // account-wide, not per-endpoint. Running both sides concurrently was exactly what a
+        // "Rate_Limit: Too many requests" error on the second side came from: two chunked loops
+        // bursting requests in parallel, each individually paced but with no coordination between
+        // them. One side fully finishing before the other starts keeps every request this method
+        // makes on the same, single, paced cadence.
+        var (ceBars1m, ceError) = await _rollingOption.GetRollingOptionCandlesAsync(instrument.SecurityId, expiryFlag, expiryCode, ceStrike, "CALL", fromDay, toDay, 1, cancellationToken);
+        var (peBars1m, peError) = await _rollingOption.GetRollingOptionCandlesAsync(instrument.SecurityId, expiryFlag, expiryCode, peStrike, "PUT", fromDay, toDay, 1, cancellationToken);
 
         var timeframe = Math.Max(1, timeframeMinutes);
         var ceCandles1m = ceBars1m.Select(c => c.ToCandle()).ToList();
