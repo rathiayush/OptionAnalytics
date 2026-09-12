@@ -46,6 +46,16 @@ public sealed class DhanRollingOptionDataService
     // can still ask for a range wider than one call supports, rather than needing to paginate it.
     private const int MaxChunkDays = 30;
 
+    // Spacing between successive chunk calls, and between a rate-limited chunk's own retries - a
+    // multi-month lookback can need several chunks per side, and CallerService (see
+    // ExpiredOptionBacktestService) fetches CE and PE back to back, so without any pacing at all a
+    // single Run click can burst 4-6+ requests at Dhan in well under a second. Same idea as
+    // BacktestService.OnDemandCallDelay, just a little more generous since a live-money order-flow
+    // call is not competing for the same budget here.
+    private static readonly TimeSpan ChunkDelay = TimeSpan.FromMilliseconds(350);
+    private const int MaxRateLimitRetries = 3;
+    private static readonly TimeSpan RateLimitRetryDelay = TimeSpan.FromSeconds(2);
+
     private readonly DhanApiClient _api;
     private readonly ILogger<DhanRollingOptionDataService> _logger;
 
@@ -71,11 +81,17 @@ public sealed class DhanRollingOptionDataService
 
         var all = new List<CandleWithVolume>();
         var chunkStart = fromDay;
+        var isFirstChunk = true;
 
         while (chunkStart <= toDay)
         {
             var chunkEnd = chunkStart.AddDays(MaxChunkDays - 1);
             if (chunkEnd > toDay) chunkEnd = toDay;
+
+            // Paced, not back to back - see ChunkDelay's own doc comment. Skipped before the very
+            // first chunk only; every chunk after that (including a retry below) waits first.
+            if (!isFirstChunk) await Task.Delay(ChunkDelay, cancellationToken);
+            isFirstChunk = false;
 
             var payload = new
             {
@@ -91,24 +107,58 @@ public sealed class DhanRollingOptionDataService
                 fromDate = chunkStart.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
                 toDate = chunkEnd.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
             };
+            var context = $"rolling option candles ({underlyingSecurityId}, {expiryFlag}+{expiryCode}, {strike} {drvOptionType}, {chunkStart:yyyy-MM-dd}..{chunkEnd:yyyy-MM-dd})";
 
-            using var response = await _api.SendAsync(HttpMethod.Post, "/charts/rollingoption", payload,
-                $"rolling option candles ({underlyingSecurityId}, {expiryFlag}+{expiryCode}, {strike} {drvOptionType}, {chunkStart:yyyy-MM-dd}..{chunkEnd:yyyy-MM-dd})",
-                cancellationToken);
-
-            if (!response.Success)
+            var (response, error) = await SendWithRateLimitRetryAsync(payload, context, cancellationToken);
+            if (response is null)
             {
                 _logger.LogWarning("Rolling option candle request failed for {Id} ({ExpiryFlag}+{ExpiryCode}, {Strike} {Side}, {From}..{To}) - {Error}",
-                    underlyingSecurityId, expiryFlag, expiryCode, strike, drvOptionType, chunkStart, chunkEnd, response.ErrorMessage);
-                return (all, response.ErrorMessage);
+                    underlyingSecurityId, expiryFlag, expiryCode, strike, drvOptionType, chunkStart, chunkEnd, error);
+                return (all, error);
             }
 
-            all.AddRange(ParseSide(response.Root, drvOptionType));
+            // Disposed here, right after ParseSide is done reading it - a JsonElement is only valid
+            // while the JsonDocument backing it is alive, so it cannot be read AFTER disposing (as
+            // the response's own successful branch below does) or handed back across this method's
+            // own return.
+            using (response) { all.AddRange(ParseSide(response.Root, drvOptionType)); }
 
             chunkStart = chunkEnd.AddDays(1);
         }
 
         return (all, null);
+    }
+
+    /// <summary>Sends one chunk, retrying with a backoff ONLY on Dhan's own rate-limit error - it
+    /// explicitly says "Try throttling API calls" (a transient condition ChunkDelay's own pacing
+    /// reduces but cannot fully rule out, since Dhan's limit is account-wide, not per-endpoint), so
+    /// retrying that one specific failure is honoring Dhan's own instruction rather than giving up
+    /// on a request that would very likely succeed a couple of seconds later. Any other failure -
+    /// auth, a bad parameter, a genuine server error - returns immediately, unretried.
+    ///
+    /// Returns the live DhanApiResponse (caller disposes) on success rather than an already-read
+    /// JsonElement, since a JsonElement stops being valid the instant its own JsonDocument is
+    /// disposed - handing one back across this method's own return, after disposing here, would be
+    /// use-after-dispose.</summary>
+    private async Task<(DhanApiResponse? Response, string? Error)> SendWithRateLimitRetryAsync(
+        object payload, string context, CancellationToken cancellationToken)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            var response = await _api.SendAsync(HttpMethod.Post, "/charts/rollingoption", payload, context, cancellationToken);
+            if (response.Success) return (response, null);
+
+            var isRateLimited = response.ErrorMessage?.Contains("rate", StringComparison.OrdinalIgnoreCase) == true
+                && response.ErrorMessage.Contains("limit", StringComparison.OrdinalIgnoreCase);
+            var error = response.ErrorMessage;
+            response.Dispose();
+
+            if (!isRateLimited || attempt >= MaxRateLimitRetries) return (null, error);
+
+            _logger.LogInformation("Rate-limited on {Context} (attempt {Attempt}/{Max}) - waiting {Delay} before retrying.",
+                context, attempt + 1, MaxRateLimitRetries, RateLimitRetryDelay);
+            await Task.Delay(RateLimitRetryDelay, cancellationToken);
+        }
     }
 
     private List<CandleWithVolume> ParseSide(JsonElement root, string drvOptionType)
