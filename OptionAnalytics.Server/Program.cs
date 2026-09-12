@@ -87,7 +87,6 @@ builder.Services.AddHttpClient<DhanApiClient>();
 builder.Services.AddHttpClient<DhanSpotInstrumentMaster>();
 builder.Services.AddHttpClient<DhanTotpAuthService>();
 builder.Services.AddSingleton<DhanHistoricalDataService>();
-builder.Services.AddSingleton<DhanRollingOptionDataService>();
 builder.Services.AddSingleton<DhanMarketFeedClient>();
 // AddHttpClient<DhanOptionChainMaster>() (the pattern every other typed client here uses) registers
 // it TRANSIENT - a brand new instance, with its own empty in-memory dictionary, for every distinct
