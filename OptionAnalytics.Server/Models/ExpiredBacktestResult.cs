@@ -1,20 +1,25 @@
 namespace OptionAnalytics.Server.Models;
 
 /// <summary>What ExpiredOptionBacktestService.RunAsync hands back - the trades/signals a strategy
-/// produced, plus enough of how the request was actually resolved (ExpiryCode - now always 1, see
-/// that class's own doc comment for why - the two relative strike tokens, each side's own Dhan
-/// error) that the page can show WHY a run came back empty rather than just an empty table.
+/// produced, plus enough of how the request was actually resolved (ExpiryCode - the NEAREST fetch
+/// segment's own code, always 1; see ExpiredOptionBacktestService.BuildMonthlyFetchSegments for why
+/// a monthly run's OLDER segment, if one was needed, uses a different code not reflected here - the
+/// two relative strike tokens, each side's own Dhan error) that the page can show WHY a run came
+/// back empty rather than just an empty table.
 ///
 /// EffectiveLookbackDays is how many days back of the target contract's own life the run actually
-/// used, after being clamped to ExpiredOptionBacktestService.MaxLookbackDays - lower than what was
-/// requested whenever that request exceeded the cadence's own safe cap, which the page should show
-/// so a smaller-than-asked-for window doesn't read as a bug.
+/// used - lower than what was requested whenever that request reached further back than this app
+/// could safely anchor a fetch segment against (weekly: a fixed cap; monthly: however far back real
+/// prior expiries actually reach - see BuildMonthlyFetchSegments), which the page should show so a
+/// smaller-than-asked-for window doesn't read as a bug.
 ///
 /// CeSpliceTimes/PeSpliceTimes (see ExpiredOptionBacktestService.DetectPossibleSplices) are the
-/// timestamps of any suspiciously large premium jump found in that side's own series - now a
-/// defensive backstop rather than an expected occurrence, since EffectiveLookbackDays' own clamping
-/// is what should normally prevent the window from ever reaching a second contract at all. Any
-/// splice found here is stronger evidence something is still off than it used to be.
+/// timestamps of any suspiciously large premium jump found in that side's own series - a defensive
+/// backstop against a wrong contract resolution rather than an expected occurrence for a SINGLE-
+/// segment run, but genuinely possible (not yet confirmed either way) at the boundary between a
+/// monthly run's two fetch segments, if it used two - see BuildMonthlyFetchSegments's own doc
+/// comment. A splice found anywhere else is stronger evidence something is still off than it used
+/// to be.
 ///
 /// Ce/PeResolvedStrike are the ACTUAL absolute strike Dhan itself reported resolving "ATM+-K" to
 /// (null if Dhan's response omitted the "strike" field entirely); Ce/PeExpectedStrike are what this

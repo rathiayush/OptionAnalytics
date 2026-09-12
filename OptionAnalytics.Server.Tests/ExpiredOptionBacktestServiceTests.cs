@@ -22,20 +22,6 @@ public sealed class ExpiredOptionBacktestServiceTests
     }
 
     [Fact]
-    public void Monthly_CapsAtOrUnderTheRealCalendarMonth()
-    {
-        // Raised to 28 (from a previously more conservative 25) at the user's explicit request -
-        // 28 days is the SHORTEST gap two consecutive real last-Tuesday-of-month expiries can ever
-        // be apart (always a multiple of 7, 28-35 days), so this is now flush against the worst
-        // case rather than comfortably under it: a holiday-shifted previous expiry in exactly a
-        // 28-day cycle has zero margin left. Must never exceed 28 - that would let fromDay reach
-        // AT OR PAST a real previous expiry even with no holiday shift at all.
-        var days = ExpiredOptionBacktestService.MaxLookbackDays("MONTH");
-
-        Assert.InRange(days, 1, 28);
-    }
-
-    [Fact]
     public void UnrecognizedFlag_FallsBackToTheWeeklyCap()
     {
         // Never the wider MONTH-sized cap for anything that isn't recognizably "MONTH" - the
@@ -44,6 +30,71 @@ public sealed class ExpiredOptionBacktestServiceTests
         var fallback = ExpiredOptionBacktestService.MaxLookbackDays("nonsense");
 
         Assert.Equal(days, fallback);
+    }
+
+    // 25 Aug 2026 - the same real monthly expiry ExpiryCalendarTests uses. Its own two preceding
+    // real monthly expiries (also last-Tuesdays, hand-verified the same way): 28 Jul 2026 and
+    // 30 Jun 2026.
+    private static readonly DateOnly TargetExpiry = new(2026, 8, 25);
+    private static readonly DateOnly PrevExpiry = new(2026, 7, 28);
+    private static readonly DateOnly PrevPrevExpiry = new(2026, 6, 30);
+
+    [Fact]
+    public void BuildMonthlyFetchSegments_ShortLookback_IsOneSegmentUnchangedFromBefore()
+    {
+        // Entirely within segment 1's own range (after PrevExpiry) - the original, single-segment
+        // mechanism, untouched by the multi-segment extension.
+        var segments = ExpiredOptionBacktestService.BuildMonthlyFetchSegments(TargetExpiry, new DateOnly(2026, 8, 10));
+
+        var segment = Assert.Single(segments);
+        Assert.Equal(new DateOnly(2026, 8, 10), segment.From);
+        Assert.Equal(TargetExpiry, segment.To);
+        Assert.Equal(1, segment.ExpiryCode);
+    }
+
+    [Fact]
+    public void BuildMonthlyFetchSegments_ExactlyAtTheSegment1Boundary_IsStillOneSegment()
+    {
+        // requestedFromDay == PrevExpiry+1 exactly - the boundary case, must not spuriously add a
+        // second, empty-ranged segment.
+        var segments = ExpiredOptionBacktestService.BuildMonthlyFetchSegments(TargetExpiry, PrevExpiry.AddDays(1));
+
+        var segment = Assert.Single(segments);
+        Assert.Equal(PrevExpiry.AddDays(1), segment.From);
+        Assert.Equal(1, segment.ExpiryCode);
+    }
+
+    [Fact]
+    public void BuildMonthlyFetchSegments_ReachingPastPrevExpiry_AddsAnOlderSegment()
+    {
+        // 45 days back from 25 Aug reaches into July - the exact case ("Aug traded in July too")
+        // this whole extension exists for. Two segments, oldest first: the older one covering
+        // [requestedFromDay, PrevExpiry] at code 2, the original one covering
+        // [PrevExpiry+1, TargetExpiry] at code 1 - no gap, no overlap between them.
+        var requestedFromDay = TargetExpiry.AddDays(-45);
+        var segments = ExpiredOptionBacktestService.BuildMonthlyFetchSegments(TargetExpiry, requestedFromDay);
+
+        Assert.Equal(2, segments.Count);
+        Assert.Equal(requestedFromDay, segments[0].From);
+        Assert.Equal(PrevExpiry, segments[0].To);
+        Assert.Equal(2, segments[0].ExpiryCode);
+        Assert.Equal(PrevExpiry.AddDays(1), segments[1].From);
+        Assert.Equal(TargetExpiry, segments[1].To);
+        Assert.Equal(1, segments[1].ExpiryCode);
+    }
+
+    [Fact]
+    public void BuildMonthlyFetchSegments_ReachingPastPrevPrevExpiryToo_ClampsToTheOlderSegmentsOwnStart()
+    {
+        // A lookback wide enough to want a THIRD real cycle back - clamped to what 2 segments can
+        // reach (PrevPrevExpiry+1), the same "clamped, not rejected" behavior the rest of this
+        // feature already uses for an over-long request, rather than adding a third segment this
+        // app has no expiryCode value ready for.
+        var segments = ExpiredOptionBacktestService.BuildMonthlyFetchSegments(TargetExpiry, TargetExpiry.AddDays(-90));
+
+        Assert.Equal(2, segments.Count);
+        Assert.Equal(PrevPrevExpiry.AddDays(1), segments[0].From);
+        Assert.Equal(2, segments[0].ExpiryCode);
     }
 
     private static CandleWithVolume Bar(DateTimeOffset time, decimal open, decimal close) =>
