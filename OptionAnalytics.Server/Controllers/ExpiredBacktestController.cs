@@ -36,8 +36,8 @@ public sealed class ExpiredBacktestController : ControllerBase
         if (normalizedFlag is not ("WEEK" or "MONTH"))
             return BadRequest(new { error = "'expiryFlag' must be WEEK or MONTH." });
 
-        var expiries = _service.GetAvailableExpiries(underlying.ToUpperInvariant(), normalizedFlag);
-        return Ok(expiries.Select(d => d.ToString("yyyy-MM-dd")));
+        var (expiries, liveBoundaryKnown) = _service.GetAvailableExpiries(underlying.ToUpperInvariant(), normalizedFlag);
+        return Ok(new { expiries = expiries.Select(d => d.ToString("yyyy-MM-dd")), liveBoundaryKnown });
     }
 
     /// <summary>Runs one supported strategy against the given underlying's contract expiring on
