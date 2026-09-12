@@ -87,6 +87,7 @@ builder.Services.AddHttpClient<DhanApiClient>();
 builder.Services.AddHttpClient<DhanSpotInstrumentMaster>();
 builder.Services.AddHttpClient<DhanTotpAuthService>();
 builder.Services.AddSingleton<DhanHistoricalDataService>();
+builder.Services.AddSingleton<DhanRollingOptionDataService>();
 builder.Services.AddSingleton<DhanMarketFeedClient>();
 // AddHttpClient<DhanOptionChainMaster>() (the pattern every other typed client here uses) registers
 // it TRANSIENT - a brand new instance, with its own empty in-memory dictionary, for every distinct
@@ -158,6 +159,7 @@ builder.Services.AddSingleton<IBacktestStrategy, EmaCrossAtmFlowStrategy>();
 // Stateless - reads SpotFeedHostedService/CdvHostedService's in-memory history fresh on every
 // request, nothing to run in the background. See BacktestController/BacktestService.
 builder.Services.AddSingleton<BacktestService>();
+builder.Services.AddSingleton<ExpiredOptionBacktestService>();
 
 // Saved strategy triggers: the store persists them to a small JSON file (they are configuration,
 // not market data - see StrategyTriggerStore), and the hosted service watches each enabled one and
