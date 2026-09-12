@@ -84,6 +84,17 @@ public sealed class BacktestStrategyContext
     public required IReadOnlyList<CandleWithVolume> AtmCeVolumeBars { get; init; }
     public required IReadOnlyList<CandleWithVolume> AtmPeVolumeBars { get; init; }
 
+    /// <summary>The front-month FUTURE's own traded volume, bucketed to TimeframeMinutes like
+    /// everything else here - the only REAL volume series available for an index, which carries none
+    /// of its own (see DhanFuturesInstrument).
+    ///
+    /// Provided for WEIGHTS, not prices. A future trades at a basis to spot, so mixing its prices
+    /// into a comparison against spot would bias the comparison by that basis; its volume carries no
+    /// such problem, because a weight only has to say how heavily one minute traded relative to
+    /// another. Empty when no future resolved or Dhan served nothing, which every consumer must
+    /// handle rather than assume away.</summary>
+    public required IReadOnlyList<CandleWithVolume> FuturesVolumeBars { get; init; }
+
     /// <summary>The underlying's CURRENT ATM strike (same snapshot-in-time caveat as AtmCeBars/
     /// AtmPeBars above) - what a strategy computes an ATM-relative strike from, e.g. "ATM shifted
     /// by N steps" via GetOptionBars(AtmStrike + n * Step, isCall). Null until CDV has resolved an

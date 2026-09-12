@@ -32,6 +32,7 @@ public sealed class DhanOptionChainMaster
     private readonly SemaphoreSlim _loadLock = new(1, 1);
 
     private Dictionary<string, DhanOptionInstrument> _byKey = new(StringComparer.OrdinalIgnoreCase);
+    private List<DhanFuturesInstrument> _futures = new();
     private Dictionary<string, List<DateOnly>> _expiriesByUnderlying = new(StringComparer.OrdinalIgnoreCase);
     private DateTimeOffset _loadedAt = DateTimeOffset.MinValue;
     private DateTimeOffset _lastAttemptAt = DateTimeOffset.MinValue;
@@ -118,7 +119,7 @@ public sealed class DhanOptionChainMaster
         response.EnsureSuccessStatusCode();
 
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-        var (options, stats) = ParseOptionRows(stream);
+        var (options, futures, stats) = ParseOptionRows(stream);
 
         // A refresh that parses to NOTHING must never replace a master that works.
         //
@@ -183,10 +184,27 @@ public sealed class DhanOptionChainMaster
         // Swapped in only once both are fully built, so a reader never sees a half-filled master.
         _byKey = byKey;
         _expiriesByUnderlying = expiries.ToDictionary(kv => kv.Key, kv => kv.Value.ToList(), StringComparer.OrdinalIgnoreCase);
+        // Same keep-what-works rule the options get: a refresh that found no futures at all leaves
+        // the previous list standing rather than blanking the only volume source this app has.
+        if (futures.Count > 0) _futures = futures;
         _loadedAt = DateTimeOffset.UtcNow;
 
         _logger.LogInformation("Option chain master ready: {Count} NIFTY/BANKNIFTY option contracts loaded. {Stats}", _byKey.Count, stats);
     }
+
+    /// <summary>The FRONT-MONTH future for an underlying - the nearest contract that has not
+    /// expired as of <paramref name="asOf"/>. That is the liquid one: volume collapses into the
+    /// front month and only rolls to the next in the final days before expiry, so the nearest
+    /// unexpired contract is the right single instrument to read volume from on any given day.
+    ///
+    /// Null when the master holds no future for that underlying, which a caller must treat as "no
+    /// volume available" rather than substituting a far month - a back-month future trades a tiny
+    /// fraction of the front's volume, so its weights would be noise dressed up as signal.</summary>
+    public DhanFuturesInstrument? FindFrontFuture(string underlying, DateOnly asOf) =>
+        _futures
+            .Where(f => string.Equals(f.Underlying, underlying, StringComparison.OrdinalIgnoreCase) && f.Expiry >= asOf)
+            .OrderBy(f => f.Expiry)
+            .FirstOrDefault();
 
     public IReadOnlyList<DateOnly> GetExpiries(string underlying) =>
         _expiriesByUnderlying.TryGetValue(underlying, out var list) ? list : Array.Empty<DateOnly>();
@@ -295,9 +313,10 @@ public sealed class DhanOptionChainMaster
             $"strike {DroppedStrike}, lotSize {DroppedLotSize}, tickSize {DroppedTickSize}.";
     }
 
-    private (List<DhanOptionInstrument> Options, ParseStats Stats) ParseOptionRows(Stream stream)
+    private (List<DhanOptionInstrument> Options, List<DhanFuturesInstrument> Futures, ParseStats Stats) ParseOptionRows(Stream stream)
     {
         var options = new List<DhanOptionInstrument>();
+        var futures = new List<DhanFuturesInstrument>();
         var stats = new ParseStats();
         using var reader = new StreamReader(stream);
 
@@ -305,7 +324,7 @@ public sealed class DhanOptionChainMaster
         if (headerLine is null)
         {
             _logger.LogError("Dhan scrip master at {Url} returned an empty body - no header row.", _options.ScripMasterUrl);
-            return (options, stats);
+            return (options, futures, stats);
         }
 
         var header = BuildHeaderMap(SplitCsvLine(headerLine));
@@ -322,7 +341,7 @@ public sealed class DhanOptionChainMaster
         if (securityIdIndex < 0 || exchangeIndex < 0 || instrumentNameIndex < 0 || tradingSymbolIndex < 0)
         {
             _logger.LogError("Dhan scrip master at {Url} is missing required columns. Header was: {Header}", _options.ScripMasterUrl, headerLine);
-            return (options, stats);
+            return (options, futures, stats);
         }
 
         string? line;
@@ -333,8 +352,13 @@ public sealed class DhanOptionChainMaster
             var fields = SplitCsvLine(line);
 
             var instrumentName = Get(fields, instrumentNameIndex)?.Trim();
-            if (!string.Equals(instrumentName, "OPTIDX", StringComparison.OrdinalIgnoreCase)) continue;
-            stats.OptIdxRows++;
+            var isOption = string.Equals(instrumentName, "OPTIDX", StringComparison.OrdinalIgnoreCase);
+            // FUTIDX rides along on the same pass purely for its VOLUME - see
+            // DhanFuturesInstrument. Parsed here rather than in a master of its own so the ~200k-row
+            // CSV is still read once, not a third time.
+            var isFuture = string.Equals(instrumentName, "FUTIDX", StringComparison.OrdinalIgnoreCase);
+            if (!isOption && !isFuture) continue;
+            if (isOption) stats.OptIdxRows++;
 
             var tradingSymbol = Get(fields, tradingSymbolIndex);
             if (string.IsNullOrWhiteSpace(tradingSymbol)) continue;
@@ -348,7 +372,7 @@ public sealed class DhanOptionChainMaster
             var underlying = DeriveUnderlying(tradingSymbol);
             if (string.IsNullOrWhiteSpace(underlying) || !Underlyings.Contains(underlying, StringComparer.OrdinalIgnoreCase))
                 continue;
-            stats.MatchedUnderlying++;
+            if (isOption) stats.MatchedUnderlying++;
 
             // NIFTY/BANKNIFTY trade on NSE, SENSEX on BSE - two different exchanges, so the
             // contract's own row says which rather than assuming NSE_FNO for everything the way
@@ -376,6 +400,18 @@ public sealed class DhanOptionChainMaster
             if (expiry is null)
             {
                 stats.DroppedExpiry++;
+                continue;
+            }
+
+            if (isFuture)
+            {
+                // Futures carry no strike or option type, so those checks are skipped rather than
+                // failed. Lot/tick are parsed with the same "never default a real trading number"
+                // rule the option branch uses below.
+                var futureLot = (int)ParseDecimal(Get(fields, lotSizeIndex));
+                var futureTick = ParseDecimal(Get(fields, tickSizeIndex));
+                if (futureLot > 0 && futureTick > 0)
+                    futures.Add(new DhanFuturesInstrument(securityId, tradingSymbol, underlying, expiry.Value, exchangeSegment, futureLot, futureTick));
                 continue;
             }
 
@@ -419,7 +455,7 @@ public sealed class DhanOptionChainMaster
             stats.Kept++;
         }
 
-        return (options, stats);
+        return (options, futures, stats);
     }
 
     private static string DeriveUnderlying(string tradingSymbol)

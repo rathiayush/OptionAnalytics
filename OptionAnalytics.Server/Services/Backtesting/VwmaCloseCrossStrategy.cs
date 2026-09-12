@@ -156,12 +156,31 @@ public sealed class VwmaCloseCrossStrategy : IBacktestStrategy
         return (entries, signals);
     }
 
-    /// <summary>Total ATM CE+PE traded volume per bar timestamp - the weights this VWMA uses, since
-    /// spot has none of its own. Summed rather than taken from one side because the weight is meant
-    /// to say "how much did the chain trade around this price", which is both legs.</summary>
+    /// <summary>The weights this VWMA uses, since spot has none of its own: the FRONT-MONTH FUTURE's
+    /// traded volume when it is available, and the ATM CE+PE option volume only when it is not.
+    ///
+    /// Futures first because they are the honest answer. The front month is the most liquid single
+    /// instrument on the underlying and tracks it within a small basis, so its per-minute volume is
+    /// as close as this app can get to "how heavily did NIFTY/SENSEX itself trade in this minute" -
+    /// which is exactly what TradingView's volume series shows when a VWMA is put on an index chart
+    /// there. Only the WEIGHTS are taken from it; the prices averaged remain spot, so the
+    /// futures/spot basis never enters the comparison the cross is judged on.
+    ///
+    /// Option volume is the fallback rather than the primary because it answers a subtly different
+    /// question - how much the CHAIN traded around this price, which moves with expiry proximity and
+    /// strike positioning as much as with the underlying's own activity. Better than nothing, and
+    /// better than an unweighted line, but not the same measure.</summary>
     internal static Dictionary<DateTimeOffset, long> VolumeByTime(BacktestStrategyContext context)
     {
         var byTime = new Dictionary<DateTimeOffset, long>();
+
+        if (context.FuturesVolumeBars.Count > 0)
+        {
+            foreach (var bar in context.FuturesVolumeBars)
+                byTime[bar.Time] = byTime.GetValueOrDefault(bar.Time) + bar.Volume;
+
+            return byTime;
+        }
 
         foreach (var bar in context.AtmCeVolumeBars)
             byTime[bar.Time] = byTime.GetValueOrDefault(bar.Time) + bar.Volume;
