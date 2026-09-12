@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Select, Space, Typography, Card, Button, Table, Tag, InputNumber, Input, Switch, Popconfirm, message, TimePicker } from 'antd'
 import dayjs from 'dayjs'
-import { PlusOutlined, DeleteOutlined } from '@ant-design/icons'
+import { PlusOutlined, DeleteOutlined, EditOutlined } from '@ant-design/icons'
 import { UP_COLOR, DOWN_COLOR, NavBar, fmtIstDateTime, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying, useExpirySelector } from './shared.jsx'
 
 const { Title, Text } = Typography
@@ -40,6 +40,11 @@ export default function TriggersPage() {
   // other page-level list here already works the same way (loadTriggers below included).
   const [orderEvents, setOrderEvents] = useState([])
   const [orderHistoryTriggerId, setOrderHistoryTriggerId] = useState(null)
+
+  // Which trigger the form is EDITING, or null when it is creating a new one. The same form serves
+  // both on purpose: a separate edit dialog would duplicate every control here and the two would
+  // drift the moment a field is added to one and not the other.
+  const [editingId, setEditingId] = useState(null)
 
   const [name, setName] = useState('')
   // Shared with every other page and remembered across reloads - see usePersistedState.
@@ -136,16 +141,49 @@ export default function TriggersPage() {
 
   // Each strategy has its own parameter set, so switching resets to that strategy's defaults
   // rather than carrying meaningless values across.
+  // Skipped while loading a trigger into the form: startEdit sets strategyKey and the saved
+  // parameters together, and this effect would otherwise fire on the strategy change and stomp
+  // those saved values back to the strategy's defaults - silently discarding the edit's whole point.
+  const loadingEditRef = useRef(false)
   useEffect(() => {
     if (!strategy) return
+    if (loadingEditRef.current) { loadingEditRef.current = false; return }
     setParamValues(Object.fromEntries(strategy.parameters.map((p) => [p.key, p.default])))
   }, [strategy])
 
-  const createTrigger = () => {
+  /// Loads an existing trigger back into the form.
+  const startEdit = (row) => {
+    loadingEditRef.current = true
+    setEditingId(row.id)
+    setName(row.name ?? '')
+    setUnderlying(row.underlying)
+    setTimeframe(row.timeframeMinutes)
+    setStrategyKey(row.strategyKey)
+    setParamValues(row.parameters ?? {})
+    setLiveTradingEnabled(row.liveTradingEnabled)
+    setQuantityLots(row.quantityLots)
+    setSlippagePoints(row.slippagePoints)
+    setMaxDeviationPercent(row.maxDeviationPercent)
+    setUseLivePremiumEntry(row.useLivePremiumEntry)
+    setOrderExpiry(row.orderExpiry ?? null)
+    setAdjustStopLossOnOpenPosition(row.adjustStopLossOnOpenPosition)
+    setHedgeOtmSteps(row.hedgeOtmSteps ?? 0)
+    setHedgeMinOiPercent(row.hedgeMinOpenInterestPercent ?? 5)
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+
+  const cancelEdit = () => {
+    setEditingId(null)
+    setName('')
+  }
+
+  const saveTrigger = () => {
     if (!underlying || !strategyKey) return
     setSaving(true)
-    fetch('/api/triggers', {
-      method: 'POST',
+    // The SAME body either way - the backend's PUT replaces every field, so an edit that omitted
+    // one would reset it to its default rather than leave it alone (see StrategyTriggerStore.Update).
+    fetch(editingId ? `/api/triggers/${editingId}` : '/api/triggers', {
+      method: editingId ? 'PUT' : 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         name: name.trim() || `${underlying} ${strategy?.name ?? strategyKey}`,
@@ -153,7 +191,10 @@ export default function TriggersPage() {
         strategyKey,
         timeframeMinutes: timeframe,
         parameters: paramValues,
-        enabled: true,
+        // A NEW trigger is armed on. An EDIT must keep whatever the row's own On switch is set to -
+        // the PUT replaces every field, so hardcoding true here would silently re-arm a trigger the
+        // user had deliberately paused, just because they corrected its quantity.
+        enabled: editingId ? (triggers.find((t) => t.id === editingId)?.enabled ?? true) : true,
         liveTradingEnabled,
         quantityLots,
         slippagePoints,
@@ -167,15 +208,20 @@ export default function TriggersPage() {
     })
       .then((r) => r.json())
       .then(() => {
-        message.success(liveTradingEnabled
-          ? 'Trigger armed - a real Super Order will be placed on the next new signal'
-          : 'Trigger armed - it will notify on the next new signal')
+        if (editingId) {
+          message.success('Trigger updated')
+          setEditingId(null)
+        } else {
+          message.success(liveTradingEnabled
+            ? 'Trigger armed - a real Super Order will be placed on the next new signal'
+            : 'Trigger armed - it will notify on the next new signal')
+        }
         setName('')
         loadTriggers()
       })
       .catch((err) => {
-        console.error('Failed to create trigger:', err)
-        message.error('Could not create the trigger')
+        console.error('Failed to save trigger:', err)
+        message.error(editingId ? 'Could not update the trigger' : 'Could not create the trigger')
       })
       .finally(() => setSaving(false))
   }
@@ -279,11 +325,20 @@ export default function TriggersPage() {
     {
       title: '',
       key: 'actions',
-      width: 60,
+      width: 90,
       render: (_, row) => (
-        <Popconfirm title="Delete this trigger?" onConfirm={() => deleteTrigger(row.id)} okText="Delete" cancelText="Cancel">
-          <Button size="small" type="text" danger icon={<DeleteOutlined />} />
-        </Popconfirm>
+        <Space size={0}>
+          <Button
+            size="small"
+            type="text"
+            icon={<EditOutlined />}
+            onClick={() => startEdit(row)}
+            title="Edit this trigger"
+          />
+          <Popconfirm title="Delete this trigger?" onConfirm={() => deleteTrigger(row.id)} okText="Delete" cancelText="Cancel">
+            <Button size="small" type="text" danger icon={<DeleteOutlined />} />
+          </Popconfirm>
+        </Space>
       ),
     },
   ]
@@ -313,7 +368,7 @@ export default function TriggersPage() {
 
         <Card
           size="small"
-          title="Arm a strategy"
+          title={editingId ? `Editing "${triggers.find((t) => t.id === editingId)?.name ?? editingId}"` : 'Arm a strategy'}
           extra={<Text type="secondary" style={{ fontSize: 12 }}>{strategy?.description ?? 'Loading strategies…'}</Text>}
         >
           <Space direction="vertical" size={16} style={{ width: '100%' }}>
@@ -387,9 +442,12 @@ export default function TriggersPage() {
                   )}
                 </Space>
               ))}
-              <Button type="primary" icon={<PlusOutlined />} onClick={createTrigger} loading={saving} disabled={!underlying || !strategyKey}>
-                Arm trigger
-              </Button>
+              <Space>
+                <Button type="primary" icon={editingId ? <EditOutlined /> : <PlusOutlined />} onClick={saveTrigger} loading={saving} disabled={!underlying || !strategyKey}>
+                  {editingId ? 'Save changes' : 'Arm trigger'}
+                </Button>
+                {editingId && <Button onClick={cancelEdit} disabled={saving}>Cancel</Button>}
+              </Space>
             </Space>
 
             <Space align="end" size={16} wrap style={{ borderTop: '1px solid #ffffff1a', paddingTop: 16 }}>
