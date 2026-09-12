@@ -18,6 +18,12 @@ const UNDERLYINGS = ['NIFTY', 'BANKNIFTY']
 // than harmless rounding.
 const STRIKE_STEP_BY_UNDERLYING = { NIFTY: 50, BANKNIFTY: 100 }
 
+// Matches ExpiredOptionBacktestService.MaxLookbackDays - comfortably under each cadence's real
+// cycle length (7 days weekly, ~28-31 monthly) so the window can never reach back into the
+// PREVIOUS contract's own life. Only used here to bound the "Lookback" control and default it to
+// "the whole contract's life"; the backend clamps independently regardless of what this sends.
+const MAX_LOOKBACK_DAYS = { WEEK: 5, MONTH: 25 }
+
 const STORED_STRATEGY_KEY = 'optionanalytics.expiredBacktest.strategyKey'
 const STORED_PARAM_VALUES = 'optionanalytics.expiredBacktest.paramValues'
 
@@ -53,8 +59,9 @@ export default function ExpiredBacktestPage() {
   const [timeframe, setTimeframe] = usePersistedState(STORED_TIMEFRAME, 5)
   const [expiryFlag, setExpiryFlag] = useState('WEEK')
   const [expiryDate, setExpiryDate] = useState(null)
-  const [lookbackDays, setLookbackDays] = useState(30)
-  const [expiryCodeAdjust, setExpiryCodeAdjust] = useState(0)
+  // Defaults to "the whole contract's life" (the cadence's own max) - reset whenever the cadence
+  // changes, since WEEK's and MONTH's safe caps are very different (see MAX_LOOKBACK_DAYS).
+  const [lookbackDays, setLookbackDays] = useState(MAX_LOOKBACK_DAYS.WEEK)
 
   const [strategies, setStrategies] = useState([])
   const [strategyKey, setStrategyKey] = usePersistedState(STORED_STRATEGY_KEY, null)
@@ -74,6 +81,13 @@ export default function ExpiredBacktestPage() {
     if (underlying === 'BANKNIFTY' && expiryFlag === 'WEEK') setExpiryFlag('MONTH')
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [underlying])
+
+  // Resets the lookback to the new cadence's own "whole contract life" default whenever the
+  // cadence changes - WEEK's and MONTH's safe maximums are very different (5 vs 25 days), so a
+  // value that made sense for one is usually meaningless (or silently clamped away) for the other.
+  useEffect(() => {
+    setLookbackDays(MAX_LOOKBACK_DAYS[expiryFlag] ?? MAX_LOOKBACK_DAYS.WEEK)
+  }, [expiryFlag])
 
   useEffect(() => {
     if (underlying && !UNDERLYINGS.includes(underlying)) setUnderlying('NIFTY')
@@ -110,7 +124,6 @@ export default function ExpiredBacktestPage() {
       lookbackDays: String(lookbackDays),
       strategy: strategyKey,
       timeframe: String(timeframe),
-      expiryCodeAdjust: String(expiryCodeAdjust),
     })
     for (const [k, v] of Object.entries(paramValues)) params.set(k, String(v))
 
@@ -227,8 +240,19 @@ export default function ExpiredBacktestPage() {
                 <DatePicker value={expiryDate} onChange={setExpiryDate} format="DD MMM YYYY" placeholder="Contract's expiry" style={{ width: 160 }} />
               </Space>
               <Space direction="vertical" size={2}>
-                <Text type="secondary" style={{ fontSize: 12 }}>Lookback (days)</Text>
-                <InputNumber min={5} max={180} value={lookbackDays} onChange={(v) => setLookbackDays(v ?? 30)} style={{ width: 110 }} />
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  Lookback (days){' '}
+                  <Tooltip title="Capped well under this cadence's own real cycle length so the window can never reach into the PREVIOUS contract - that's what lets this resolve to exactly the single contract expiring on your chosen date.">
+                    <InfoCircleOutlined />
+                  </Tooltip>
+                </Text>
+                <InputNumber
+                  min={1}
+                  max={MAX_LOOKBACK_DAYS[expiryFlag] ?? MAX_LOOKBACK_DAYS.WEEK}
+                  value={lookbackDays}
+                  onChange={(v) => setLookbackDays(v ?? MAX_LOOKBACK_DAYS[expiryFlag] ?? MAX_LOOKBACK_DAYS.WEEK)}
+                  style={{ width: 110 }}
+                />
               </Space>
               <Space direction="vertical" size={2}>
                 <Text type="secondary" style={{ fontSize: 12 }}>Timeframe</Text>
@@ -274,12 +298,6 @@ export default function ExpiredBacktestPage() {
                   )}
                 </Space>
               ))}
-              <Space direction="vertical" size={2}>
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  Expiry cycle nudge <Tooltip title="Which contract this resolves to is derived, not stated by Dhan directly - if the results below don't look like the right contract, nudge this up/down and re-run."><InfoCircleOutlined /></Tooltip>
-                </Text>
-                <InputNumber min={-5} max={5} value={expiryCodeAdjust} onChange={(v) => setExpiryCodeAdjust(v ?? 0)} style={{ width: 90 }} />
-              </Space>
               <Button type="primary" icon={<PlayCircleOutlined />} onClick={run} loading={loading} disabled={!canRun}>Run</Button>
             </Space>
           </Space>
@@ -304,8 +322,9 @@ export default function ExpiredBacktestPage() {
               message={
                 <Space direction="vertical" size={2}>
                   <Text>
-                    Resolved to expiryCode {result.expiryCode} ({expiryFlag === 'WEEK' ? 'weekly' : 'monthly'}) - CE at {result.ceStrike}, PE at {result.peStrike}.
+                    Used the last {result.effectiveLookbackDays} day(s) before expiry ({expiryFlag === 'WEEK' ? 'weekly' : 'monthly'}) - CE at {result.ceStrike}, PE at {result.peStrike}.
                     {' '}{result.spotBarCount} spot bar(s) fetched; {result.ceBarCount} CE bar(s), {result.peBarCount} PE bar(s) actually used for the backtest.
+                    {result.effectiveLookbackDays < lookbackDays && ` (your requested ${lookbackDays}-day lookback was capped to keep the window on this one contract)`}
                   </Text>
                   <Text type={ceMismatch ? 'warning' : 'secondary'} style={{ fontSize: 12 }}>
                     CE strike - Dhan resolved: {result.ceResolvedStrike != null ? fmtPrice(result.ceResolvedStrike) : 'not reported'}, this app expected: ~{fmtPrice(result.ceExpectedStrike)}
@@ -319,9 +338,9 @@ export default function ExpiredBacktestPage() {
                   {result.peError && <Text type="warning">PE: {result.peError}</Text>}
                   {spliceCount > 0 && (
                     <Text type="warning">
-                      A contract splice was detected at{' '}
+                      Unexpected: a contract splice was detected at{' '}
                       {[...(result.ceSpliceTimes ?? []).map((t) => `CE ${fmtIstDateTime(t)}`), ...(result.peSpliceTimes ?? []).map((t) => `PE ${fmtIstDateTime(t)}`)].join(', ')}
-                      {' '}(a large, sudden premium jump - the lookback window was wide enough to reach an earlier contract before this one). The data before that point has already been trimmed away automatically - only the bars after the last splice were used above, so the backtest still ran against just the single contract nearest your chosen expiry.
+                      {' '}(a large, sudden premium jump). The lookback is capped specifically so this should not happen - the data before that point has been trimmed away automatically, but seeing this at all is a stronger sign something is off than it used to be, not routine.
                     </Text>
                   )}
                 </Space>

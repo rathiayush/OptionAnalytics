@@ -25,12 +25,12 @@ public sealed class ExpiredBacktestController : ControllerBase
     public IActionResult GetStrategies() => Ok(_service.GetStrategies());
 
     /// <summary>Runs one supported strategy against the given underlying's contract expiring on
-    /// expiryDate (WEEK or MONTH cadence), over the lookbackDays before it. Every query param other
-    /// than the named ones below that parses as a number is passed through as the strategy's own
-    /// parameter (?otmSteps=1&amp;slPoints=10&amp;...), the same generic convention
-    /// BacktestController.GetTrades uses. expiryCodeAdjust (default 0) nudges the derived
-    /// expiryCode - see ExpiredOptionBacktestService.ComputeExpiryCode for why that derivation is a
-    /// documented guess rather than something Dhan states directly.</summary>
+    /// expiryDate (WEEK or MONTH cadence), over the lookbackDays before it (clamped to
+    /// ExpiredOptionBacktestService.MaxLookbackDays - see that class's own doc comment for why: it
+    /// is what keeps expiryCode=1 pointed unambiguously at this one contract). Every query param
+    /// other than the named ones below that parses as a number is passed through as the strategy's
+    /// own parameter (?otmSteps=1&amp;slPoints=10&amp;...), the same generic convention
+    /// BacktestController.GetTrades uses.</summary>
     [HttpGet("{underlying}/run")]
     public async Task<IActionResult> Run(
         string underlying,
@@ -39,7 +39,6 @@ public sealed class ExpiredBacktestController : ControllerBase
         [FromQuery] int lookbackDays,
         [FromQuery] string? strategy,
         [FromQuery] int timeframe,
-        [FromQuery] int expiryCodeAdjust,
         CancellationToken cancellationToken)
     {
         var normalizedFlag = expiryFlag?.Trim().ToUpperInvariant();
@@ -54,7 +53,7 @@ public sealed class ExpiredBacktestController : ControllerBase
 
         var result = await _service.RunAsync(
             underlying.ToUpperInvariant(), normalizedFlag, parsedExpiry, lookbackDays > 0 ? lookbackDays : 30,
-            strategy, Math.Max(1, timeframe), expiryCodeAdjust, ReadParameters(), cancellationToken);
+            strategy, Math.Max(1, timeframe), ReadParameters(), cancellationToken);
 
         return result.Success ? Ok(result) : BadRequest(new { error = result.Error });
     }
@@ -68,7 +67,7 @@ public sealed class ExpiredBacktestController : ControllerBase
         var parameters = new Dictionary<string, decimal>();
         foreach (var (key, value) in Request.Query)
         {
-            if (key is "expiryFlag" or "expiryDate" or "lookbackDays" or "strategy" or "timeframe" or "expiryCodeAdjust") continue;
+            if (key is "expiryFlag" or "expiryDate" or "lookbackDays" or "strategy" or "timeframe") continue;
             if (decimal.TryParse(value, out var parsed)) parameters[key] = parsed;
         }
         return parameters;

@@ -36,7 +36,19 @@ namespace OptionAnalytics.Server.Services;
 /// ("ATM+otmSteps" for the call leg, "ATM-otmSteps" for the put leg), re-resolved by Dhan itself as
 /// spot moves through the window. Different runs use different otmSteps, so a new run always
 /// re-fetches rather than serving stale strikes from a previous one.
-/// </summary>
+///
+/// HOW EXPIRYCODE IS CHOSEN (this is the part that took several real runs to get right):
+/// Dhan's own Annexure documents expiryCode as a tiny enum - 0 = current/near expiry, 1 = next,
+/// 2 = far - counted from the query's own fromDate, NOT an arbitrary "how many weeks out" number.
+/// A real call also confirmed 0 is rejected outright ("expiryCode is required", the same error a
+/// required-field check gives a value it treats as absent), so 0 is never sent.
+///
+/// This app never needs "far" or even "next" as Dhan's own docs frame them: it always sends 1, and
+/// gets the SPECIFIC contract the caller asked for by choosing fromDate instead - anchored to just
+/// after the PREVIOUS contract's own expiry (see MaxLookbackDays), so that whatever expiry comes
+/// "next" after fromDate can only be the one the caller actually wants. This is also what fixed the
+/// contract-splicing a wide, undifferentiated lookback used to cause: a window that can never reach
+/// past the prior contract's own expiry cannot roll onto it in the first place.</summary>
 public sealed class ExpiredOptionBacktestService
 {
     private static readonly HashSet<string> SupportedStrategyKeys = new() { "five-ema", "five-ema-v2" };
@@ -49,6 +61,12 @@ public sealed class ExpiredOptionBacktestService
         ["NIFTY"] = 50,
         ["BANKNIFTY"] = 100,
     };
+
+    /// <summary>Dhan's own "next expiry from fromDate" resolution (see this class's own doc
+    /// comment) - always 1, never a caller-supplied or derived value. There is no reason for this
+    /// app to ask for "far" (code 2): a run only ever wants one specific contract, and the exact
+    /// one is chosen through fromDate's own anchor point instead.</summary>
+    private const int ExpiryCode = 1;
 
     private readonly DhanSpotInstrumentMaster _instrumentMaster;
     private readonly DhanHistoricalDataService _historicalData;
@@ -75,7 +93,7 @@ public sealed class ExpiredOptionBacktestService
 
     public async Task<ExpiredBacktestResult> RunAsync(
         string underlying, string expiryFlag, DateOnly expiryDate, int lookbackDays, string strategyKey,
-        int timeframeMinutes, int expiryCodeAdjust, IReadOnlyDictionary<string, decimal> parameters,
+        int timeframeMinutes, IReadOnlyDictionary<string, decimal> parameters,
         CancellationToken cancellationToken)
     {
         if (!StrikeStepByUnderlying.TryGetValue(underlying, out var step))
@@ -101,8 +119,13 @@ public sealed class ExpiredOptionBacktestService
         if (instrument is null)
             return ExpiredBacktestResult.Failed($"Could not resolve {underlying}'s Dhan security id yet - the scrip master may still be loading. Try again shortly.");
 
+        // Clamped comfortably below the cadence's own real cycle length (see MaxLookbackDays) so
+        // fromDay can never reach back far enough to land inside the PREVIOUS contract's own life -
+        // that is what makes expiryCode=1 ("the next expiry from fromDay") resolve unambiguously to
+        // THIS contract, every time, regardless of how many days of it are actually requested.
+        var effectiveLookbackDays = Math.Clamp(lookbackDays, 1, MaxLookbackDays(expiryFlag));
         var toDay = expiryDate;
-        var fromDay = expiryDate.AddDays(-Math.Max(1, lookbackDays));
+        var fromDay = expiryDate.AddDays(-effectiveLookbackDays);
 
         var spotBars1m = await _historicalData.GetIntradayCandlesAsync(instrument.SecurityId, instrument.DhanSegment, fromDay, toDay, 1, cancellationToken);
         if (spotBars1m.Count == 0)
@@ -116,9 +139,6 @@ public sealed class ExpiredOptionBacktestService
 
         var ceStrike = StrikeToken(otmSteps);
         var peStrike = StrikeToken(-otmSteps);
-        // Floored at 1, never 0 - see ComputeExpiryCode's own doc comment: a real call with
-        // expiryCode=0 was rejected outright by Dhan as "expiryCode is required".
-        var expiryCode = Math.Clamp(ComputeExpiryCode(expiryFlag, fromDay, toDay) + expiryCodeAdjust, 1, 10);
 
         // Sequential, not Task.WhenAll - each side's own fetch is already chunked (and paced) across
         // Dhan's 30-day-per-call cap (see DhanRollingOptionDataService), and Dhan's rate limit is
@@ -127,8 +147,8 @@ public sealed class ExpiredOptionBacktestService
         // bursting requests in parallel, each individually paced but with no coordination between
         // them. One side fully finishing before the other starts keeps every request this method
         // makes on the same, single, paced cadence.
-        var (ceRaw, ceError) = await _rollingOption.GetRollingOptionCandlesAsync(instrument.SecurityId, expiryFlag, expiryCode, ceStrike, "CALL", fromDay, toDay, 1, cancellationToken);
-        var (peRaw, peError) = await _rollingOption.GetRollingOptionCandlesAsync(instrument.SecurityId, expiryFlag, expiryCode, peStrike, "PUT", fromDay, toDay, 1, cancellationToken);
+        var (ceRaw, ceError) = await _rollingOption.GetRollingOptionCandlesAsync(instrument.SecurityId, expiryFlag, ExpiryCode, ceStrike, "CALL", fromDay, toDay, 1, cancellationToken);
+        var (peRaw, peError) = await _rollingOption.GetRollingOptionCandlesAsync(instrument.SecurityId, expiryFlag, ExpiryCode, peStrike, "PUT", fromDay, toDay, 1, cancellationToken);
 
         var ceBars1m = ceRaw.Select(b => b.Bar).ToList();
         var peBars1m = peRaw.Select(b => b.Bar).ToList();
@@ -193,15 +213,23 @@ public sealed class ExpiredOptionBacktestService
         var signals = strategy.EntrySignals(context, mergedParameters);
 
         return new ExpiredBacktestResult(
-            true, null, trades, signals, expiryCode, ceStrike, peStrike, ceError, peError,
+            true, null, trades, signals, ExpiryCode, ceStrike, peStrike, ceError, peError,
             // The counts actually fed to the strategy after trimming, not the raw fetch - what the
             // page should show as "how much of the single target contract's own history this run
             // used."
             spotBars1m.Count, ceUsed.Count, peUsed.Count, ceSplices, peSplices,
-            ceResolvedStrike, peResolvedStrike, ceExpectedStrike, peExpectedStrike);
+            ceResolvedStrike, peResolvedStrike, ceExpectedStrike, peExpectedStrike, effectiveLookbackDays);
     }
 
     private static string StrikeToken(int steps) => steps == 0 ? "ATM" : $"ATM{(steps > 0 ? "+" : "")}{steps}";
+
+    /// <summary>How many days back of the target contract's own life fromDay may safely reach,
+    /// without risking crossing into the PREVIOUS contract's own expiry - see this class's own doc
+    /// comment for why that matters (it is what makes expiryCode=1 unambiguous). Set comfortably
+    /// under each cadence's real cycle length (7 days weekly, ~28-31 monthly) rather than right up
+    /// against it, since a holiday can shift an individual expiry by a day or two either way.</summary>
+    internal static int MaxLookbackDays(string expiryFlag) =>
+        string.Equals(expiryFlag, "MONTH", StringComparison.OrdinalIgnoreCase) ? 25 : 5;
 
     /// <summary>Whether the returned series genuinely stays on ONE single contract for the whole
     /// requested window, or Dhan's own rolling resolution splices between several as the range
@@ -235,38 +263,5 @@ public sealed class ExpiredOptionBacktestService
         }
 
         return splices;
-    }
-
-    /// <summary>Derives Dhan's expiryCode from an actual calendar expiry date: how many expiry
-    /// CYCLES of the chosen cadence fall between the query range's own start and the requested
-    /// expiry - see DhanRollingOptionDataService's own doc comment for why it is neither negative
-    /// nor relative to today.
-    ///
-    /// CONFIRMED (not just inferred) to be 1-indexed, never 0: a real call with expiryCode=0 was
-    /// rejected outright by Dhan with "Input_Exception: expiryCode is required" - the exact error
-    /// a required-field check gives a value it treats as absent, meaning 0 and "omitted" are
-    /// indistinguishable to their own validation. Floored at 1 rather than 0 for that reason; every
-    /// other value this method could already produce is untouched, since 0 was the only one ever
-    /// observed to fail.
-    ///
-    /// WEEKLY expiries land on a fixed weekday (Thursday, historically, though NSE has moved this
-    /// before and a holiday shifts any individual week's own expiry by a day) - but every week still
-    /// has exactly one, so counting whole 7-day cycles between the two dates is robust to exactly
-    /// WHICH day of the week it falls on, only to how many weeks have passed. MONTHLY expiries are
-    /// even more stable: exactly one per calendar month regardless of holidays, so counting calendar
-    /// months elapsed is exact rather than approximate.
-    ///
-    /// This is still a DERIVATION, not something Dhan confirms - RunAsync's caller can nudge it via
-    /// expiryCodeAdjust if a run's results don't look like they landed on the intended contract.</summary>
-    internal static int ComputeExpiryCode(string expiryFlag, DateOnly fromDay, DateOnly toDay)
-    {
-        if (string.Equals(expiryFlag, "MONTH", StringComparison.OrdinalIgnoreCase))
-        {
-            var months = (toDay.Year * 12 + toDay.Month) - (fromDay.Year * 12 + fromDay.Month);
-            return Math.Clamp(months, 1, 10);
-        }
-
-        var weeks = (int)Math.Round((toDay.DayNumber - fromDay.DayNumber) / 7.0, MidpointRounding.AwayFromZero);
-        return Math.Clamp(weeks, 1, 10);
     }
 }
