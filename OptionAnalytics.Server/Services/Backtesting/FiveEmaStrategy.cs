@@ -44,7 +44,7 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 public sealed class FiveEmaStrategy : IBacktestStrategy
 {
     public string Key => "five-ema";
-    public string Name => "5 EMA (Subhasish Pani)";
+    public string Name => "5 EMA (Subhasish Pani) v1 - candle close";
     public string Description => "An alert candle that forms entirely clear of the 5 EMA - low above it for a short, high below it for a long - and entry when a later candle breaks that candle's low (short) or high (long). The alert candle rolls forward to any newer qualifying candle and is cancelled outright by any candle that touches the EMA. Taught as 5-minute for shorts and 15-minute for longs.";
 
     private const decimal DirectionBoth = 0;
