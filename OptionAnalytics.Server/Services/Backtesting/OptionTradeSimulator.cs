@@ -108,6 +108,19 @@ public static class OptionTradeSimulator
     public static BacktestParameterSpec SignalStartTimeParameter() =>
         new("signalStartMinutes", "No signals before (IST time, 0 = off)", Default: 555, Min: 0, Max: 1439, Step: 1);
 
+    /// <summary>Skips any entry within N calendar day(s) of the window's own last day (see Run's
+    /// own use of it for exactly what "last day" means - for Expired Backtest, that IS the target
+    /// contract's real expiry date). Added specifically for option SELLING near a weekly/monthly
+    /// expiry: by the final day or two, there is often too little premium left to sell profitably,
+    /// and a stop-loss becomes disproportionately likely against what little time value remains
+    /// (a real backtest can otherwise look artificially loss-heavy purely from that last stretch).
+    /// Mechanically this applies to a BUY position too, not just a sell - 0 (off) is the default, so
+    /// nothing changes unless a run deliberately sets it. Skipped entries are dropped outright, not
+    /// reported as any kind of row (see Run's own doc comment on why that differs from
+    /// BacktestTrade.NoData).</summary>
+    public static BacktestParameterSpec ExcludeLastDaysParameter() =>
+        new("excludeLastDays", "Skip entries in the last N day(s) before expiry (0 = off)", Default: 0, Min: 0, Max: 10, Step: 1);
+
     /// <summary>Runs <paramref name="entrySignals"/> (time-ascending; Direction "Bullish"/"Bearish")
     /// through the rules above and returns the resulting trades, most recent first.
     ///
@@ -146,6 +159,7 @@ public static class OptionTradeSimulator
         // Optional and defaulted here rather than indexed, so a caller (existing tests included)
         // built before this parameter existed keeps working unchanged with it simply off.
         var squareOffMinutes = (int)parameters.GetValueOrDefault("squareOffMinutes", 0);
+        var excludeLastDays = (int)parameters.GetValueOrDefault("excludeLastDays", 0);
 
         var side = isSell ? "Sell" : "Buy";
         var underlying = context.Underlying;
@@ -161,12 +175,29 @@ public static class OptionTradeSimulator
         var spotByTime = spotSeries.ToDictionary(b => b.Time, b => b);
         var strikeCandleCache = new Dictionary<(decimal Strike, bool IsCall), IReadOnlyList<Candle>>();
 
+        // The window's own LAST calendar day - for an Expired Backtest run this IS the target
+        // contract's real expiry date (spot is always fetched through toDay=expiryDate), so
+        // "exclude the last N days" means exactly what it says: no new entry within N calendar
+        // days of that real expiry. Null (no exclusion at all) when the parameter is off or there
+        // is no spot data to anchor against.
+        var excludeFromDay = excludeLastDays > 0 && spotSeries.Count > 0
+            ? BacktestUtil.IstDate(spotSeries[^1].Time).AddDays(-(excludeLastDays - 1))
+            : (DateOnly?)null;
+
         var trades = new List<BacktestTrade>();
         DateTimeOffset? busyUntil = null;
 
         foreach (var signal in entrySignals)
         {
             if (busyUntil is { } bu && signal.Time <= bu) continue; // still in an earlier trade
+
+            // Skipped outright, not reported as any kind of row - ExcludeLastDaysParameter's own
+            // doc comment explains why: a seller especially has too little premium left this close
+            // to expiry to sell profitably, and a stop-loss becomes disproportionately likely
+            // against what little time value remains. This is a deliberate exclusion the caller
+            // asked for, not a data gap, so it does not belong in the trades table at all - unlike
+            // BacktestTrade.NoData, which specifically means "this app tried and found nothing".
+            if (excludeFromDay is { } excludeCutoff && BacktestUtil.IstDate(signal.Time) >= excludeCutoff) continue;
 
             var isBullish = signal.Direction == "Bullish";
             var isCall = isSell ? !isBullish : isBullish;

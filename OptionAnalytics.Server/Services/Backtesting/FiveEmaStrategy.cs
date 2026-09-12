@@ -62,6 +62,7 @@ public sealed class FiveEmaStrategy : IBacktestStrategy
         OptionTradeSimulator.TakeProfitParameter(),
         OptionTradeSimulator.SquareOffTimeParameter(),
         OptionTradeSimulator.SignalStartTimeParameter(),
+        OptionTradeSimulator.ExcludeLastDaysParameter(),
         new BacktestParameterSpec("emaPeriod", "EMA (bars)", Default: 5, Min: 1, Max: 200, Step: 1),
         new BacktestParameterSpec("direction", "Take", Default: DirectionBoth, Min: DirectionBoth, Max: DirectionShortOnly, Step: 1, Options: new[]
         {
