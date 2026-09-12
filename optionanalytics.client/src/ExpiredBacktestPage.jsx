@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Component, useEffect, useMemo, useRef, useState } from 'react'
 import { Select, Space, Typography, Card, Button, Table, Tag, InputNumber, Statistic, Row, Col, TimePicker, Segmented, Alert, Empty, Tooltip } from 'antd'
 import dayjs from 'dayjs'
 import { PlayCircleOutlined, InfoCircleOutlined } from '@ant-design/icons'
+import { createChart, createSeriesMarkers, CandlestickSeries, CrosshairMode } from 'lightweight-charts'
 import {
   UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, NavBar, DirectionTag, fmtIstDateTime, fmtIstTime, fmtPrice,
   TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState,
+  AXIS_COLOR, GRID_COLOR, BORDER_COLOR, istTimeFormatter, istTickMarkFormatter, toBar, toChartTime, dayResetMarkers,
 } from './shared.jsx'
 
 const { Title, Text } = Typography
@@ -45,6 +47,115 @@ function renderPnl(v, isOpen) {
       {v > 0 ? '+' : ''}{v.toFixed(2)} pts{isOpen && <Text type="secondary" style={{ fontWeight: 400 }}> (unrealized)</Text>}
     </Text>
   )
+}
+
+// One arrow per trade at its own entry (falling back to the signal time for a NoData trade, which
+// has no entry of its own) - direction decides the arrow's side/color/shape, the same convention
+// every other chart on this app uses for a bullish/bearish event. Sorted ascending: createSeriesMarkers
+// requires it, and trades already come back in that order but this stays correct even if that changes.
+function tradeEntryMarkers(trades) {
+  return trades
+    .map((t) => ({
+      time: toChartTime(t.entryTimeUtc ?? t.signalTimeUtc),
+      position: t.direction === 'Bullish' ? 'belowBar' : 'aboveBar',
+      color: t.direction === 'Bullish' ? UP_COLOR : DOWN_COLOR,
+      shape: t.direction === 'Bullish' ? 'arrowUp' : 'arrowDown',
+      text: `${t.direction === 'Bullish' ? 'BUY' : 'SELL'} ${t.strike}${t.optionType}`,
+    }))
+    .sort((a, b) => a.time - b.time)
+}
+
+// Plain candlestick chart of the spot history around the run's own lookback window (the backend
+// pads it a few days on each side purely for visual context - see ExpiredOptionBacktestService.
+// ChartPaddingDays), with the strategy's own trade entries marked on it so a signal can be checked
+// against the real price action rather than only read off the Trades table below. Same plain shape
+// as StrikeDataPage's own StrikeCandleChart (no live pan/zoom sync, no EMA overlay) - this is one
+// static, already-complete series for one run, not a live-ticking feed.
+function ExpiredSpotChart({ bars, trades, height = 420 }) {
+  const containerRef = useRef(null)
+  const chartRef = useRef(null)
+  const seriesRef = useRef(null)
+  const markersRef = useRef(null)
+
+  useEffect(() => {
+    if (!containerRef.current) return
+
+    const chart = createChart(containerRef.current, {
+      width: containerRef.current.clientWidth,
+      height,
+      layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
+      grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
+      rightPriceScale: { borderColor: BORDER_COLOR },
+      timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter },
+      crosshair: { mode: CrosshairMode.Normal },
+      localization: { timeFormatter: istTimeFormatter },
+    })
+    chartRef.current = chart
+    seriesRef.current = chart.addSeries(CandlestickSeries, {
+      upColor: UP_COLOR,
+      downColor: DOWN_COLOR,
+      borderVisible: false,
+      wickUpColor: UP_COLOR,
+      wickDownColor: DOWN_COLOR,
+    })
+    markersRef.current = createSeriesMarkers(seriesRef.current, [])
+
+    const onResize = () => {
+      if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth })
+    }
+    window.addEventListener('resize', onResize)
+
+    return () => {
+      window.removeEventListener('resize', onResize)
+      chart.remove()
+      chartRef.current = null
+      seriesRef.current = null
+      markersRef.current = null
+    }
+    // One chart instance per mount, same reasoning as every other page's own chart - series/marker
+    // data is (re)populated by the effects below rather than by recreating the chart.
+  }, [height])
+
+  useEffect(() => {
+    if (!seriesRef.current) return
+    seriesRef.current.setData(bars)
+    // A fresh run is a genuinely NEW series - always re-fit rather than preserve a stale pan/zoom
+    // from a previous run's very different date range.
+    if (bars.length > 0) chartRef.current?.timeScale().fitContent()
+  }, [bars])
+
+  useEffect(() => {
+    if (!markersRef.current) return
+    markersRef.current.setMarkers([...dayResetMarkers(bars), ...tradeEntryMarkers(trades)].sort((a, b) => a.time - b.time))
+  }, [bars, trades])
+
+  return <div ref={containerRef} style={{ width: '100%', height }} />
+}
+
+// Same reasoning as StrikeDataPage's own ChartErrorBoundary - a lightweight-charts assertion or bad
+// data shape must show a small fallback instead of unmounting the whole page (the tables below are
+// still useful even if the chart itself can't render). Must be a class component; React has no hook
+// equivalent for getDerivedStateFromError.
+class ChartErrorBoundary extends Component {
+  constructor(props) {
+    super(props)
+    this.state = { error: null }
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error }
+  }
+
+  componentDidCatch(error) {
+    console.error('Expired Backtest chart crashed:', error)
+  }
+
+  render() {
+    if (this.state.error) {
+      return <Alert type="warning" showIcon message="This chart could not be rendered - the data below is still available in the tables." />
+    }
+    return this.props.children
+  }
 }
 
 // Runs a real strategy (trades, P&L, signals - not just a chart) against an EXPIRED contract, given
@@ -174,6 +285,7 @@ export default function ExpiredBacktestPage() {
 
   const trades = result?.trades ?? []
   const signals = result?.signals ?? []
+  const chartBars = useMemo(() => (result?.spotChartBars ?? []).map(toBar), [result])
 
   const summary = useMemo(() => {
     const openCount = trades.filter((t) => t.exitReason === 'Open').length
@@ -413,6 +525,20 @@ export default function ExpiredBacktestPage() {
           </Card>
         ) : (
           <>
+            <Card
+              size="small"
+              title="Spot Chart"
+              extra={<Text type="secondary" style={{ fontSize: 12 }}>Lookback window, plus a couple of days of context on each side - arrows mark this run's own trade entries</Text>}
+            >
+              {chartBars.length > 0 ? (
+                <ChartErrorBoundary key={`${underlying}-${expiryDate}-${timeframe}`}>
+                  <ExpiredSpotChart bars={chartBars} trades={trades} height={420} />
+                </ChartErrorBoundary>
+              ) : (
+                <Empty description="No spot candles to chart for this run." />
+              )}
+            </Card>
+
             <Card size="small" title="Trades">
               <Table
                 size="small"
