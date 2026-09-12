@@ -13,6 +13,11 @@ const { Title, Text } = Typography
 // segment, never a BSE one, so SENSEX is left out (see ExpiredOptionBacktestService's own comment).
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY']
 
+// Matches ExpiredOptionBacktestService.StrikeStepByUnderlying - only used here to judge how far off
+// a "resolved vs expected strike" comparison has to be before it reads as a real mismatch rather
+// than harmless rounding.
+const STRIKE_STEP_BY_UNDERLYING = { NIFTY: 50, BANKNIFTY: 100 }
+
 const STORED_STRATEGY_KEY = 'optionanalytics.expiredBacktest.strategyKey'
 const STORED_PARAM_VALUES = 'optionanalytics.expiredBacktest.paramValues'
 
@@ -266,7 +271,14 @@ export default function ExpiredBacktestPage() {
 
         {result && (() => {
           const spliceCount = (result.ceSpliceTimes?.length ?? 0) + (result.peSpliceTimes?.length ?? 0)
-          const hasWarning = Boolean(result.ceError || result.peError || spliceCount > 0)
+          const step = STRIKE_STEP_BY_UNDERLYING[underlying] ?? 50
+          // Dhan's own resolved strike vs what this app expected from its own real spot - a gap
+          // wider than one strike step means the contract resolution itself landed somewhere this
+          // run did not ask for, which is the direct, checkable explanation for an implausible
+          // premium rather than that premium being genuine.
+          const ceMismatch = result.ceResolvedStrike != null && Math.abs(result.ceResolvedStrike - result.ceExpectedStrike) > step
+          const peMismatch = result.peResolvedStrike != null && Math.abs(result.peResolvedStrike - result.peExpectedStrike) > step
+          const hasWarning = Boolean(result.ceError || result.peError || spliceCount > 0 || ceMismatch || peMismatch)
           return (
             <Alert
               type={hasWarning ? 'warning' : 'info'}
@@ -276,6 +288,14 @@ export default function ExpiredBacktestPage() {
                   <Text>
                     Resolved to expiryCode {result.expiryCode} ({expiryFlag === 'WEEK' ? 'weekly' : 'monthly'}) - CE at {result.ceStrike}, PE at {result.peStrike}.
                     {' '}{result.spotBarCount} spot bar(s) fetched; {result.ceBarCount} CE bar(s), {result.peBarCount} PE bar(s) actually used for the backtest.
+                  </Text>
+                  <Text type={ceMismatch ? 'warning' : 'secondary'} style={{ fontSize: 12 }}>
+                    CE strike - Dhan resolved: {result.ceResolvedStrike != null ? fmtPrice(result.ceResolvedStrike) : 'not reported'}, this app expected: ~{fmtPrice(result.ceExpectedStrike)}
+                    {ceMismatch && ' — MISMATCH, do not trust these trades'}
+                  </Text>
+                  <Text type={peMismatch ? 'warning' : 'secondary'} style={{ fontSize: 12 }}>
+                    PE strike - Dhan resolved: {result.peResolvedStrike != null ? fmtPrice(result.peResolvedStrike) : 'not reported'}, this app expected: ~{fmtPrice(result.peExpectedStrike)}
+                    {peMismatch && ' — MISMATCH, do not trust these trades'}
                   </Text>
                   {result.ceError && <Text type="warning">CE: {result.ceError}</Text>}
                   {result.peError && <Text type="warning">PE: {result.peError}</Text>}
