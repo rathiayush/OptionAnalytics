@@ -137,22 +137,6 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<ConfluenceAlertSer
 // IEnumerable<IBacktestStrategy> constructor param - add a new strategy by implementing the
 // interface and adding one more AddSingleton line here, nothing else needs to change.
 builder.Services.AddSingleton<IBacktestStrategy, FiveEmaStrategy>();
-builder.Services.AddSingleton<IBacktestStrategy, FiveEmaObvCrossoverStrategy>();
-builder.Services.AddSingleton<IBacktestStrategy, EmaCrossoverStrategy>();
-builder.Services.AddSingleton<IBacktestStrategy, CdvObvCrossoverStrategy>();
-builder.Services.AddSingleton<IBacktestStrategy, EmaBandRsiAdxStrategy>();
-builder.Services.AddSingleton<IBacktestStrategy, GoldenCrossStrategy>();
-builder.Services.AddSingleton<IBacktestStrategy, BollingerBandsStrategy>();
-builder.Services.AddSingleton<IBacktestStrategy, MacdCrossoverStrategy>();
-builder.Services.AddSingleton<IBacktestStrategy, Rsi2MeanReversionStrategy>();
-builder.Services.AddSingleton<IBacktestStrategy, OpeningRangeBreakoutStrategy>();
-builder.Services.AddSingleton<IBacktestStrategy, TurtleDonchianBreakoutStrategy>();
-builder.Services.AddSingleton<IBacktestStrategy, SuperTrendStrategy>();
-builder.Services.AddSingleton<IBacktestStrategy, ParabolicSarStrategy>();
-builder.Services.AddSingleton<IBacktestStrategy, AdxDirectionalCrossoverStrategy>();
-builder.Services.AddSingleton<IBacktestStrategy, KeltnerChannelBreakoutStrategy>();
-builder.Services.AddSingleton<IBacktestStrategy, VmaStrategy>();
-builder.Services.AddSingleton<IBacktestStrategy, VolumeMovingAverageStrategy>();
 
 // Stateless - reads SpotFeedHostedService/CdvHostedService's in-memory history fresh on every
 // request, nothing to run in the background. See BacktestController/BacktestService.
