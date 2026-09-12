@@ -20,13 +20,22 @@ const UNDERLYINGS = ['NIFTY', 'BANKNIFTY']
 // than harmless rounding.
 const STRIKE_STEP_BY_UNDERLYING = { NIFTY: 50, BANKNIFTY: 100 }
 
-// Matches ExpiredOptionBacktestService.MaxLookbackDays - under each cadence's real cycle length
-// (7 days weekly, 28-35 monthly) so the window can never reach back into the PREVIOUS contract's
-// own life. MONTH is flush against the shortest possible real monthly cycle (28 days) rather than
-// comfortably under it, at the user's own explicit request. Only used here to bound the
-// "Lookback" control and default it to "the whole contract's life"; the backend clamps
-// independently regardless of what this sends.
-const MAX_LOOKBACK_DAYS = { WEEK: 5, MONTH: 28 }
+// WEEK matches ExpiredOptionBacktestService.MaxLookbackDays("WEEK") - under the real 7-day cycle
+// so the window can never reach back into the PREVIOUS contract's own life. MONTH no longer has a
+// single fixed backend cap at all (see ExpiredOptionBacktestService.BuildMonthlyFetchSegments) - a
+// lookback reaching past the immediately preceding real expiry now fetches an OLDER second segment
+// instead of just getting clamped away, up to 2 real monthly cycles back (roughly 56-70 days,
+// depending on the calendar). 65 here is just a generous UI max for that control, not an enforced
+// boundary; the backend computes and reports the ACTUAL usable window per request from
+// ExpiryCalendar's own real expiry dates regardless of what this sends.
+const MAX_LOOKBACK_DAYS = { WEEK: 5, MONTH: 65 }
+
+// The lookback each cadence resets to on its own (a fresh cadence pick, or the initial load) -
+// deliberately the single-segment mechanism's own natural range (WEEK's real cap, MONTH's
+// TYPICAL single-cycle length), not MAX_LOOKBACK_DAYS' wider ceiling: reaching into the older,
+// not-yet-confirmed far-month segment (see MAX_LOOKBACK_DAYS' own comment) should always be a
+// deliberate choice to type a bigger number, never a silent default.
+const DEFAULT_LOOKBACK_DAYS = { WEEK: 5, MONTH: 28 }
 
 const STORED_STRATEGY_KEY = 'optionanalytics.expiredBacktest.strategyKey'
 const STORED_PARAM_VALUES = 'optionanalytics.expiredBacktest.paramValues'
@@ -180,9 +189,9 @@ export default function ExpiredBacktestPage() {
   const [expiryDate, setExpiryDate] = useState(null)
   const [expiries, setExpiries] = useState([])
   const [expiriesLoading, setExpiriesLoading] = useState(false)
-  // Defaults to "the whole contract's life" (the cadence's own max) - reset whenever the cadence
-  // changes, since WEEK's and MONTH's safe caps are very different (see MAX_LOOKBACK_DAYS).
-  const [lookbackDays, setLookbackDays] = useState(MAX_LOOKBACK_DAYS.WEEK)
+  // Defaults to the single-segment mechanism's own natural range (see DEFAULT_LOOKBACK_DAYS) -
+  // reset whenever the cadence changes, since WEEK's and MONTH's are very different.
+  const [lookbackDays, setLookbackDays] = useState(DEFAULT_LOOKBACK_DAYS.WEEK)
 
   const [strategies, setStrategies] = useState([])
   const [strategyKey, setStrategyKey] = usePersistedState(STORED_STRATEGY_KEY, null)
@@ -203,11 +212,12 @@ export default function ExpiredBacktestPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [underlying])
 
-  // Resets the lookback to the new cadence's own "whole contract life" default whenever the
-  // cadence changes - WEEK's and MONTH's safe maximums are very different (5 vs 25 days), so a
-  // value that made sense for one is usually meaningless (or silently clamped away) for the other.
+  // Resets the lookback to the new cadence's own default whenever the cadence changes - WEEK's and
+  // MONTH's are very different, so a value that made sense for one is usually meaningless (or
+  // silently clamped away) for the other. See DEFAULT_LOOKBACK_DAYS for why this is deliberately
+  // NOT MAX_LOOKBACK_DAYS.
   useEffect(() => {
-    setLookbackDays(MAX_LOOKBACK_DAYS[expiryFlag] ?? MAX_LOOKBACK_DAYS.WEEK)
+    setLookbackDays(DEFAULT_LOOKBACK_DAYS[expiryFlag] ?? DEFAULT_LOOKBACK_DAYS.WEEK)
   }, [expiryFlag])
 
   // Reloads the list of real, actually-usable expiries whenever underlying/cadence changes -
@@ -399,7 +409,7 @@ export default function ExpiredBacktestPage() {
               <Space direction="vertical" size={2}>
                 <Text type="secondary" style={{ fontSize: 12 }}>
                   Lookback (days){' '}
-                  <Tooltip title="Capped at or under this cadence's own real cycle length so the window can never reach into the PREVIOUS contract - that's what lets this resolve to exactly the single contract expiring on your chosen date. Monthly's cap now has little to no safety margin left in a short (28-day) cycle - a holiday-shifted expiry could push it into ambiguity.">
+                  <Tooltip title="Weekly is capped under its real 7-day cycle so the window can never reach into the previous contract. Monthly can now reach past that same boundary into an OLDER, second fetch segment (e.g. selecting August's expiry with a 45-day lookback also reaches into July) - this older segment is a newer capability and hasn't been confirmed against real data the way the rest of this feature has, so check the diagnostics banner (splice warnings, resolved-vs-expected strike) below after running a lookback this long.">
                     <InfoCircleOutlined />
                   </Tooltip>
                 </Text>
@@ -407,7 +417,7 @@ export default function ExpiredBacktestPage() {
                   min={1}
                   max={MAX_LOOKBACK_DAYS[expiryFlag] ?? MAX_LOOKBACK_DAYS.WEEK}
                   value={lookbackDays}
-                  onChange={(v) => setLookbackDays(v ?? MAX_LOOKBACK_DAYS[expiryFlag] ?? MAX_LOOKBACK_DAYS.WEEK)}
+                  onChange={(v) => setLookbackDays(v ?? DEFAULT_LOOKBACK_DAYS[expiryFlag] ?? DEFAULT_LOOKBACK_DAYS.WEEK)}
                   style={{ width: 110 }}
                 />
               </Space>

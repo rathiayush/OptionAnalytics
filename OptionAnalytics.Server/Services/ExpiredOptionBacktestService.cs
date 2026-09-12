@@ -43,12 +43,29 @@ namespace OptionAnalytics.Server.Services;
 /// A real call also confirmed 0 is rejected outright ("expiryCode is required", the same error a
 /// required-field check gives a value it treats as absent), so 0 is never sent.
 ///
-/// This app never needs "far" or even "next" as Dhan's own docs frame them: it always sends 1, and
-/// gets the SPECIFIC contract the caller asked for by choosing fromDate instead - anchored to just
-/// after the PREVIOUS contract's own expiry (see MaxLookbackDays), so that whatever expiry comes
-/// "next" after fromDate can only be the one the caller actually wants. This is also what fixed the
-/// contract-splicing a wide, undifferentiated lookback used to cause: a window that can never reach
-/// past the prior contract's own expiry cannot roll onto it in the first place.</summary>
+/// Most runs get the SPECIFIC contract the caller asked for by sending code 1 and choosing fromDate
+/// instead - anchored to just after the PREVIOUS contract's own expiry, so that whatever expiry
+/// comes "1st" after fromDate can only be the one the caller actually wants. This is also what
+/// fixed the contract-splicing a wide, undifferentiated lookback used to cause: a window that can
+/// never reach past the prior contract's own expiry cannot roll onto it in the first place.
+///
+/// MULTI-SEGMENT FETCH (monthly only, added at the user's own explicit request to reach further
+/// back than one contract's own cycle - e.g. selecting 25 Aug's expiry with a 45-day lookback,
+/// deliberately reaching into July): a monthly lookback that reaches past the immediately preceding
+/// real expiry is split into more than one [From,To,ExpiryCode] segment (see
+/// BuildMonthlyFetchSegments) - the nearest segment still uses code 1 anchored after the
+/// immediately preceding expiry (the proven mechanism above, unchanged), and an older segment
+/// anchored one real expiry earlier still uses code 2 ("the 2nd expiry from fromDate", by the same
+/// 1-indexed counting-forward logic - see DhanRollingOptionDataService's own doc comment for why
+/// that reading, not an NSE-near/next/far-listing-depth one, is what this app's prior evidence
+/// actually supports). UNLIKE the single-segment mechanism, this multi-segment extension has NOT
+/// been confirmed against a real Dhan response - the existing splice-detection safety net
+/// (DetectPossibleSplices) is what makes shipping it before that confirmation reasonable: if the
+/// older segment's anchoring turns out wrong, it shows up as a splice at the segment boundary and
+/// gets trimmed away, degrading to exactly the single-segment result rather than silently
+/// mispricing anything. Weekly is deliberately left on the single-segment path unchanged - NSE's
+/// weekly listing depth was not something this exact same "count forward" mechanism was ever
+/// tested against, so extending it is a separate, not-yet-requested change.</summary>
 public sealed class ExpiredOptionBacktestService
 {
     private static readonly HashSet<string> SupportedStrategyKeys = new() { "five-ema", "five-ema-v2" };
@@ -62,10 +79,12 @@ public sealed class ExpiredOptionBacktestService
         ["BANKNIFTY"] = 100,
     };
 
-    /// <summary>Dhan's own "next expiry from fromDate" resolution (see this class's own doc
-    /// comment) - always 1, never a caller-supplied or derived value. There is no reason for this
-    /// app to ask for "far" (code 2): a run only ever wants one specific contract, and the exact
-    /// one is chosen through fromDate's own anchor point instead.</summary>
+    /// <summary>Dhan's own "the 1st expiry from fromDate" resolution (see this class's own doc
+    /// comment) - the code every SINGLE-segment fetch uses, which after PR history is every WEEKLY
+    /// run and most MONTHLY ones. A MONTHLY run whose lookback reaches further back than the
+    /// immediately preceding real expiry needs a SECOND, older segment anchored one real expiry
+    /// earlier still - see BuildMonthlyFetchSegments for why that older segment uses code 2, not
+    /// this constant.</summary>
     private const int ExpiryCode = 1;
 
     /// <summary>How far back GetAvailableExpiries offers dates for - see ExpiryCalendar's own doc
@@ -176,13 +195,21 @@ public sealed class ExpiredOptionBacktestService
         if (instrument is null)
             return ExpiredBacktestResult.Failed($"Could not resolve {underlying}'s Dhan security id yet - the scrip master may still be loading. Try again shortly.");
 
-        // Clamped comfortably below the cadence's own real cycle length (see MaxLookbackDays) so
-        // fromDay can never reach back far enough to land inside the PREVIOUS contract's own life -
-        // that is what makes expiryCode=1 ("the next expiry from fromDay") resolve unambiguously to
-        // THIS contract, every time, regardless of how many days of it are actually requested.
-        var effectiveLookbackDays = Math.Clamp(lookbackDays, 1, MaxLookbackDays(expiryFlag));
         var toDay = expiryDate;
-        var fromDay = expiryDate.AddDays(-effectiveLookbackDays);
+        var isMonthly = string.Equals(expiryFlag, "MONTH", StringComparison.OrdinalIgnoreCase);
+
+        // WEEKLY stays on the original single-segment mechanism, clamped comfortably below the
+        // real 7-day cycle. MONTHLY instead anchors directly against ExpiryCalendar's own real
+        // prior expiry dates (see BuildMonthlyFetchSegments) - and, when the requested lookback
+        // reaches past the immediately preceding one, builds a SECOND, older segment rather than
+        // just clamping the request away; MaxLookbackDays("MONTH") here is only the outer sanity
+        // bound on the raw input, not the real safety boundary.
+        var requestedFromDay = expiryDate.AddDays(-Math.Clamp(lookbackDays, 1, MaxLookbackDays(expiryFlag)));
+        var segments = isMonthly
+            ? BuildMonthlyFetchSegments(expiryDate, requestedFromDay)
+            : new List<FetchSegment> { new(requestedFromDay, toDay, ExpiryCode) };
+        var fromDay = segments[0].From;
+        var effectiveLookbackDays = toDay.DayNumber - fromDay.DayNumber;
 
         // The spot CHART shown alongside the trade table is fetched a few days wider than the
         // lookback window itself on both sides - purely for visual context around it, so a signal
@@ -217,9 +244,10 @@ public sealed class ExpiredOptionBacktestService
         // "Rate_Limit: Too many requests" error on the second side came from: two chunked loops
         // bursting requests in parallel, each individually paced but with no coordination between
         // them. One side fully finishing before the other starts keeps every request this method
-        // makes on the same, single, paced cadence.
-        var (ceRaw, ceError) = await _rollingOption.GetRollingOptionCandlesAsync(instrument.SecurityId, expiryFlag, ExpiryCode, ceStrike, "CALL", fromDay, toDay, 1, cancellationToken);
-        var (peRaw, peError) = await _rollingOption.GetRollingOptionCandlesAsync(instrument.SecurityId, expiryFlag, ExpiryCode, peStrike, "PUT", fromDay, toDay, 1, cancellationToken);
+        // makes on the same, single, paced cadence - including every SEGMENT of one side (see
+        // BuildMonthlyFetchSegments), not just each side as a whole.
+        var (ceRaw, ceError) = await FetchAcrossSegmentsAsync(instrument.SecurityId, expiryFlag, segments, ceStrike, "CALL", cancellationToken);
+        var (peRaw, peError) = await FetchAcrossSegmentsAsync(instrument.SecurityId, expiryFlag, segments, peStrike, "PUT", cancellationToken);
 
         var ceBars1m = ceRaw.Select(b => b.Bar).ToList();
         var peBars1m = peRaw.Select(b => b.Bar).ToList();
@@ -299,17 +327,95 @@ public sealed class ExpiredOptionBacktestService
 
     private static string StrikeToken(int steps) => steps == 0 ? "ATM" : $"ATM{(steps > 0 ? "+" : "")}{steps}";
 
-    /// <summary>How many days back of the target contract's own life fromDay may safely reach,
-    /// without risking crossing into the PREVIOUS contract's own expiry - see this class's own doc
-    /// comment for why that matters (it is what makes expiryCode=1 unambiguous). Set under each
-    /// cadence's real cycle length (7 days weekly, ~28-31 monthly). The monthly cap in particular now
-    /// leaves only a day or two of margin (raised from 25 to 28 at the user's explicit request) - a
-    /// holiday can shift an individual expiry by that much either way, and a shorter calendar month
-    /// (28 days, e.g. February) leaves less margin still than a 31-day one, so a run this close to
-    /// the real cycle length is more exposed to DetectPossibleSplices actually needing to trim
-    /// something than the original 25-day cap was.</summary>
+    /// <summary>WEEKLY's own single-segment cap - unchanged, still comfortably under the real 7-day
+    /// cycle (see this class's own doc comment for why that margin matters). MONTHLY no longer uses
+    /// a fixed cap at all: BuildMonthlyFetchSegments computes its own boundary directly from
+    /// ExpiryCalendar's real expiry dates instead of approximating one with a flat number - this is
+    /// still called for MONTHLY, but only to sanity-clamp an absurd raw input before it reaches
+    /// that method, not as the real safety boundary.</summary>
     internal static int MaxLookbackDays(string expiryFlag) =>
-        string.Equals(expiryFlag, "MONTH", StringComparison.OrdinalIgnoreCase) ? 28 : 5;
+        string.Equals(expiryFlag, "MONTH", StringComparison.OrdinalIgnoreCase) ? RawLookbackSanityCapDays : 5;
+
+    /// <summary>The outer sanity bound on a raw lookbackDays input for MONTHLY, applied BEFORE
+    /// BuildMonthlyFetchSegments ever sees it - not itself a safety boundary (that method's own
+    /// anchoring against real prior expiries is), just a guard against a wildly large typed number
+    /// doing something undefined. Generous enough to comfortably cover the 2 real monthly cycles
+    /// BuildMonthlyFetchSegments can ever actually use (see its own MaxPriorExpiries).</summary>
+    private const int RawLookbackSanityCapDays = 200;
+
+    /// <summary>One rolling-option fetch call's own [From,To] window and the expiryCode to send
+    /// with it - see BuildMonthlyFetchSegments's own doc comment for why a single monthly run can
+    /// need more than one of these.</summary>
+    internal readonly record struct FetchSegment(DateOnly From, DateOnly To, int ExpiryCode);
+
+    /// <summary>How many real prior monthly expiries BuildMonthlyFetchSegments will ever anchor a
+    /// segment against - 2 is every segment this app's own multi-segment design currently
+    /// supports (see this class's own top-of-file doc comment); a lookback that would need a THIRD
+    /// only ever gets clamped back to what 2 segments can reach, the same "clamped, not rejected"
+    /// behavior EffectiveLookbackDays already reports for any other over-long request.</summary>
+    private const int MaxPriorExpiries = 2;
+
+    /// <summary>Splits [requestedFromDay, targetExpiry] into one or more fetch segments, each
+    /// anchored so Dhan's own "Nth expiry from fromDate" resolution (see DhanRollingOptionDataService's
+    /// own doc comment on expiryCode) can only resolve to targetExpiry within it:
+    ///   - Segment 1 (nearest): code 1, anchored just after the real expiry immediately before
+    ///     targetExpiry - the original, single-segment mechanism, unchanged, confirmed correct
+    ///     across many real runs.
+    ///   - Segment 2 (older, only added when requestedFromDay reaches further back than segment 1's
+    ///     own start): code 2, anchored just after the real expiry BEFORE THAT - "the 2nd expiry
+    ///     from fromDate" resolving to targetExpiry by the same counting-forward logic segment 1
+    ///     already relies on. NOT yet confirmed against a real Dhan response - see this class's own
+    ///     top-of-file doc comment for why shipping it before that confirmation is still reasonable
+    ///     (DetectPossibleSplices is the safety net).
+    /// Returned oldest-first, so a caller can fetch each side across every segment in that order and
+    /// simply concatenate - the combined series is already time-ascending.</summary>
+    internal static List<FetchSegment> BuildMonthlyFetchSegments(DateOnly targetExpiry, DateOnly requestedFromDay)
+    {
+        var priorExpiries = ExpiryCalendar.MonthlyExpiries(targetExpiry.AddMonths(-6), targetExpiry.AddDays(-1))
+            .OrderByDescending(d => d).Take(MaxPriorExpiries).ToList();
+        var prevExpiry = priorExpiries.Count > 0 ? priorExpiries[0] : (DateOnly?)null;
+        var prevPrevExpiry = priorExpiries.Count > 1 ? priorExpiries[1] : (DateOnly?)null;
+
+        var segment1EarliestStart = prevExpiry is { } pe ? pe.AddDays(1) : requestedFromDay;
+        var segment1Start = Later(requestedFromDay, segment1EarliestStart);
+        var segments = new List<FetchSegment> { new(segment1Start, targetExpiry, 1) };
+
+        if (requestedFromDay < segment1EarliestStart && prevExpiry is { } segment2End)
+        {
+            var segment2EarliestStart = prevPrevExpiry is { } ppe ? ppe.AddDays(1) : requestedFromDay;
+            var segment2Start = Later(requestedFromDay, segment2EarliestStart);
+            if (segment2Start <= segment2End) segments.Insert(0, new FetchSegment(segment2Start, segment2End, 2));
+        }
+
+        return segments;
+    }
+
+    private static DateOnly Later(DateOnly a, DateOnly b) => a > b ? a : b;
+
+    /// <summary>Fetches one option side across every segment (see BuildMonthlyFetchSegments),
+    /// oldest first, and concatenates the results - segments are already ordered oldest-first and
+    /// each one's own bars are individually time-ascending (DhanRollingOptionDataService's own
+    /// chunking preserves that), so the combined series is time-ascending too with no extra
+    /// sorting needed. Per-segment errors are concatenated rather than only the first/last kept, so
+    /// a failure on the OLDER (less-tested, code-2) segment is never silently hidden by an older
+    /// segment's success or vice versa.</summary>
+    private async Task<(List<(CandleWithVolume Bar, decimal? Strike)> Bars, string? Error)> FetchAcrossSegmentsAsync(
+        uint underlyingSecurityId, string expiryFlag, IReadOnlyList<FetchSegment> segments, string strikeToken, string optionType,
+        CancellationToken cancellationToken)
+    {
+        var bars = new List<(CandleWithVolume Bar, decimal? Strike)>();
+        string? error = null;
+
+        foreach (var segment in segments)
+        {
+            var (segmentBars, segmentError) = await _rollingOption.GetRollingOptionCandlesAsync(
+                underlyingSecurityId, expiryFlag, segment.ExpiryCode, strikeToken, optionType, segment.From, segment.To, 1, cancellationToken);
+            bars.AddRange(segmentBars);
+            if (segmentError is not null) error = error is null ? segmentError : $"{error}; {segmentError}";
+        }
+
+        return (bars, error);
+    }
 
     /// <summary>Whether the returned series genuinely stays on ONE single contract for the whole
     /// requested window, or Dhan's own rolling resolution splices between several as the range
