@@ -53,6 +53,7 @@ public sealed class EmaCrossAtmFlowStrategy : IBacktestStrategy
         OptionTradeSimulator.TakeProfitParameter(),
         OptionTradeSimulator.SquareOffTimeParameter(),
         OptionTradeSimulator.SignalStartTimeParameter(),
+        OptionTradeSimulator.ExcludeLastDaysParameter(),
         new BacktestParameterSpec("fastEmaPeriod", "Fast EMA (bars)", Default: 9, Min: 1, Max: 200, Step: 1),
         new BacktestParameterSpec("slowEmaPeriod", "Slow EMA (bars)", Default: 21, Min: 2, Max: 400, Step: 1),
         new BacktestParameterSpec("atmConfirmWithinBars", "ATM cross must land within (bars, 0 = same bar)", Default: 3, Min: 0, Max: 50, Step: 1),
