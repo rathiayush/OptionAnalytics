@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Select, Space, Typography, Card, Button, Table, Tag, InputNumber, Statistic, Row, Col, DatePicker, TimePicker, Segmented, Alert, Empty, Tooltip } from 'antd'
+import { Select, Space, Typography, Card, Button, Table, Tag, InputNumber, Statistic, Row, Col, TimePicker, Segmented, Alert, Empty, Tooltip } from 'antd'
 import dayjs from 'dayjs'
 import { PlayCircleOutlined, InfoCircleOutlined } from '@ant-design/icons'
 import {
@@ -58,7 +58,15 @@ export default function ExpiredBacktestPage() {
   const [underlying, setUnderlying] = usePersistedState(STORED_UNDERLYING, 'NIFTY')
   const [timeframe, setTimeframe] = usePersistedState(STORED_TIMEFRAME, 5)
   const [expiryFlag, setExpiryFlag] = useState('WEEK')
+  // A plain "yyyy-MM-dd" string, not a dayjs object - this is now a closed choice from
+  // /api/expired-backtest/{underlying}/expiries (see the effect below), never freely typed. That
+  // endpoint only ever offers REAL listed expiries not already covered by Backtrack's own live
+  // history - the two things a real run breaking (a typed date that wasn't an actual expiry let the
+  // fetch window cross into a different contract and splice their premiums together) showed this
+  // page needed to enforce rather than leave to a free date picker.
   const [expiryDate, setExpiryDate] = useState(null)
+  const [expiries, setExpiries] = useState([])
+  const [expiriesLoading, setExpiriesLoading] = useState(false)
   // Defaults to "the whole contract's life" (the cadence's own max) - reset whenever the cadence
   // changes, since WEEK's and MONTH's safe caps are very different (see MAX_LOOKBACK_DAYS).
   const [lookbackDays, setLookbackDays] = useState(MAX_LOOKBACK_DAYS.WEEK)
@@ -88,6 +96,27 @@ export default function ExpiredBacktestPage() {
   useEffect(() => {
     setLookbackDays(MAX_LOOKBACK_DAYS[expiryFlag] ?? MAX_LOOKBACK_DAYS.WEEK)
   }, [expiryFlag])
+
+  // Reloads the list of real, actually-usable expiries whenever underlying/cadence changes -
+  // newest first (see the backend's own GetAvailableExpiries), so the most recent one still
+  // outside Backtrack's live window is the natural default. Clears the current selection first so
+  // a stale date from a different underlying/cadence can never briefly be submitted.
+  useEffect(() => {
+    if (!underlying) return
+    setExpiryDate(null)
+    setExpiriesLoading(true)
+    fetch(`/api/expired-backtest/${underlying}/expiries?expiryFlag=${expiryFlag}`)
+      .then((r) => r.json())
+      .then((list) => {
+        setExpiries(list ?? [])
+        setExpiryDate((list ?? [])[0] ?? null)
+      })
+      .catch((err) => {
+        console.error('Failed to load available expiries:', err)
+        setExpiries([])
+      })
+      .finally(() => setExpiriesLoading(false))
+  }, [underlying, expiryFlag])
 
   useEffect(() => {
     if (underlying && !UNDERLYINGS.includes(underlying)) setUnderlying('NIFTY')
@@ -120,7 +149,7 @@ export default function ExpiredBacktestPage() {
     setRunError(null)
     const params = new URLSearchParams({
       expiryFlag,
-      expiryDate: expiryDate.format('YYYY-MM-DD'),
+      expiryDate,
       lookbackDays: String(lookbackDays),
       strategy: strategyKey,
       timeframe: String(timeframe),
@@ -236,8 +265,21 @@ export default function ExpiredBacktestPage() {
                 />
               </Space>
               <Space direction="vertical" size={2}>
-                <Text type="secondary" style={{ fontSize: 12 }}>Expiry date</Text>
-                <DatePicker value={expiryDate} onChange={setExpiryDate} format="DD MMM YYYY" placeholder="Contract's expiry" style={{ width: 160 }} />
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  Expiry date{' '}
+                  <Tooltip title="Only real listed expiries are offered, and only ones not already covered by Backtrack's own live-tracked history - a typed date that wasn't a genuine expiry previously let the fetch window cross into a different contract and splice their premiums together.">
+                    <InfoCircleOutlined />
+                  </Tooltip>
+                </Text>
+                <Select
+                  value={expiryDate}
+                  onChange={setExpiryDate}
+                  loading={expiriesLoading}
+                  style={{ width: 160 }}
+                  placeholder={expiriesLoading ? 'Loading…' : 'No expiries available'}
+                  options={expiries.map((d) => ({ value: d, label: dayjs(d).format('DD MMM YYYY') }))}
+                  notFoundContent={expiriesLoading ? 'Loading…' : 'None available'}
+                />
               </Space>
               <Space direction="vertical" size={2}>
                 <Text type="secondary" style={{ fontSize: 12 }}>

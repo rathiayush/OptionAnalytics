@@ -24,6 +24,22 @@ public sealed class ExpiredBacktestController : ControllerBase
     [HttpGet("strategies")]
     public IActionResult GetStrategies() => Ok(_service.GetStrategies());
 
+    /// <summary>Every expiry date this page will actually accept for the given underlying/cadence -
+    /// see ExpiredOptionBacktestService.GetAvailableExpiries for what "accept" means (a genuine
+    /// listed expiry, and not already covered by Backtrack's own live-tracked history). The page's
+    /// own expiry picker is populated from this rather than a free date field, so a request that
+    /// reaches POST /run can only ever name a date this endpoint itself offered.</summary>
+    [HttpGet("{underlying}/expiries")]
+    public IActionResult GetExpiries(string underlying, [FromQuery] string? expiryFlag)
+    {
+        var normalizedFlag = expiryFlag?.Trim().ToUpperInvariant();
+        if (normalizedFlag is not ("WEEK" or "MONTH"))
+            return BadRequest(new { error = "'expiryFlag' must be WEEK or MONTH." });
+
+        var expiries = _service.GetAvailableExpiries(underlying.ToUpperInvariant(), normalizedFlag);
+        return Ok(expiries.Select(d => d.ToString("yyyy-MM-dd")));
+    }
+
     /// <summary>Runs one supported strategy against the given underlying's contract expiring on
     /// expiryDate (WEEK or MONTH cadence), over the lookbackDays before it (clamped to
     /// ExpiredOptionBacktestService.MaxLookbackDays - see that class's own doc comment for why: it

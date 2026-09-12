@@ -68,20 +68,28 @@ public sealed class ExpiredOptionBacktestService
     /// one is chosen through fromDate's own anchor point instead.</summary>
     private const int ExpiryCode = 1;
 
+    /// <summary>How far back GetAvailableExpiries offers dates for - see ExpiryCalendar's own doc
+    /// comment for why this app cannot defensibly claim accuracy further back than the current
+    /// Tuesday-expiry convention has been in effect (SEBI's November 2024 rule).</summary>
+    private const int CalendarMonthsBack = 12;
+
     private readonly DhanSpotInstrumentMaster _instrumentMaster;
     private readonly DhanHistoricalDataService _historicalData;
     private readonly DhanRollingOptionDataService _rollingOption;
+    private readonly SpotFeedHostedService _spotFeed;
     private readonly IReadOnlyDictionary<string, IBacktestStrategy> _strategies;
 
     public ExpiredOptionBacktestService(
         DhanSpotInstrumentMaster instrumentMaster,
         DhanHistoricalDataService historicalData,
         DhanRollingOptionDataService rollingOption,
+        SpotFeedHostedService spotFeed,
         IEnumerable<IBacktestStrategy> strategies)
     {
         _instrumentMaster = instrumentMaster;
         _historicalData = historicalData;
         _rollingOption = rollingOption;
+        _spotFeed = spotFeed;
         _strategies = strategies.Where(s => SupportedStrategyKeys.Contains(s.Key)).ToDictionary(s => s.Key);
     }
 
@@ -90,6 +98,49 @@ public sealed class ExpiredOptionBacktestService
     /// the frontend's existing generic parameter-rendering code works unchanged here.</summary>
     public IReadOnlyList<BacktestStrategyInfo> GetStrategies() =>
         _strategies.Values.Select(s => new BacktestStrategyInfo(s.Key, s.Name, s.Description, s.Parameters)).OrderBy(s => s.Name).ToList();
+
+    /// <summary>Every date this page will actually accept for expiryDate - the two things a real
+    /// run getting a wrong-contract splice turned out to require, both enforced here rather than
+    /// left to the free-form date picker that let it happen:
+    ///   1. A REAL listed expiry (see ExpiryCalendar) - not just any Tuesday-ish date a user might
+    ///      type, since the anchoring logic (see this class's own top-of-file doc comment) assumes
+    ///      fromDate sits just inside the ACTUAL target contract's own life, which only holds when
+    ///      expiryDate itself is genuine.
+    ///   2. Not already covered by Backtrack's own live-tracked history for this underlying, newest
+    ///      first - that data is already verified-correct and continuously updated; re-fetching the
+    ///      same days through the rolling-option endpoint adds risk (as the wrong-contract splice
+    ///      demonstrated) for zero benefit when Backtrack already answers it correctly.
+    /// Descending (most recent first), since a recent expiry is usually the more useful default.</summary>
+    public IReadOnlyList<DateOnly> GetAvailableExpiries(string underlying, string expiryFlag)
+    {
+        if (!StrikeStepByUnderlying.ContainsKey(underlying)) return Array.Empty<DateOnly>();
+        if (string.Equals(underlying, "BANKNIFTY", StringComparison.OrdinalIgnoreCase) && string.Equals(expiryFlag, "WEEK", StringComparison.OrdinalIgnoreCase))
+            return Array.Empty<DateOnly>();
+
+        var today = IstClock.Today();
+        var rangeStart = today.AddMonths(-CalendarMonthsBack);
+        var liveTrackedFrom = GetLiveTrackedBoundary(underlying);
+        // Strictly before whatever Backtrack itself already holds - if that boundary is unknown
+        // (nothing backfilled yet), fail closed and offer nothing rather than risk an overlap.
+        var candidateEnd = liveTrackedFrom is { } boundary ? boundary.AddDays(-1) : rangeStart.AddDays(-1);
+
+        var candidates = string.Equals(expiryFlag, "MONTH", StringComparison.OrdinalIgnoreCase)
+            ? ExpiryCalendar.MonthlyExpiries(rangeStart, today)
+            : ExpiryCalendar.WeeklyExpiries(rangeStart, today);
+
+        return candidates.Where(d => d <= candidateEnd).OrderByDescending(d => d).ToList();
+    }
+
+    /// <summary>The earliest IST calendar date Backtrack's own live-tracked history currently holds
+    /// for this underlying - null if nothing has backfilled yet. Real and continuously accurate
+    /// (unlike ExpiryCalendar's computed dates), since it reads SpotFeedHostedService's actual
+    /// in-memory candles rather than assuming anything about how far back that window reaches.</summary>
+    private DateOnly? GetLiveTrackedBoundary(string underlying)
+    {
+        if (!_spotFeed.States.TryGetValue(underlying, out var state)) return null;
+        var candles = state.GetClosedCandles();
+        return candles.Count == 0 ? null : candles.Min(c => IstClock.IstDate(c.Time));
+    }
 
     public async Task<ExpiredBacktestResult> RunAsync(
         string underlying, string expiryFlag, DateOnly expiryDate, int lookbackDays, string strategyKey,
@@ -109,6 +160,31 @@ public sealed class ExpiredOptionBacktestService
         if (!_strategies.TryGetValue(strategyKey, out var strategy))
             return ExpiredBacktestResult.Failed(
                 $"'{strategyKey}' cannot run against expired-option history - it needs order-flow (OBV/CDV) across the whole surrounding strike chain, which Dhan's rolling-option endpoint does not provide (a single relative strike per call only). Supported here: {string.Join(", ", SupportedStrategyKeys)}.");
+
+        // The bug this exists to prevent, confirmed by a real run: a typed expiryDate that was NOT
+        // an actual listed expiry broke the fromDate-anchoring this whole feature depends on (see
+        // this class's own top-of-file doc comment), letting the fetch window reach across a REAL
+        // contract boundary and splice two different contracts' premiums together. Validating
+        // against the same GetAvailableExpiries list the page's own dropdown is populated from
+        // means a request that reaches this point can only ever name a date that dropdown could
+        // have offered - distinguishing the two failure reasons since they have different remedies.
+        var cadence = string.Equals(expiryFlag, "MONTH", StringComparison.OrdinalIgnoreCase) ? "monthly" : "weekly";
+        var today = IstClock.Today();
+        var liveTrackedFrom = GetLiveTrackedBoundary(underlying);
+        if (liveTrackedFrom is { } boundary && expiryDate >= boundary)
+            return ExpiredBacktestResult.Failed(
+                $"{expiryDate:dd MMM yyyy} is already covered by Backtrack's own live-tracked history for {underlying} (from {boundary:dd MMM yyyy} onward) - use Backtrack for it instead. Expired Backtest is only for contracts that have genuinely already rolled out of that live window.");
+
+        var isRealExpiry = string.Equals(expiryFlag, "MONTH", StringComparison.OrdinalIgnoreCase)
+            ? ExpiryCalendar.MonthlyExpiries(expiryDate, expiryDate).Count > 0
+            : ExpiryCalendar.WeeklyExpiries(expiryDate, expiryDate).Count > 0;
+        if (!isRealExpiry)
+            return ExpiredBacktestResult.Failed(
+                $"{expiryDate:dd MMM yyyy} is not a real {cadence} expiry - NSE's current convention (since Nov 2024) is the last Tuesday of the month (monthly) or every Tuesday (weekly), possibly shifted a day earlier around a trading holiday. Pick a date from the list.");
+
+        if (expiryDate < today.AddMonths(-CalendarMonthsBack))
+            return ExpiredBacktestResult.Failed(
+                $"{expiryDate:dd MMM yyyy} is further back than this app can reliably validate ({CalendarMonthsBack} months) - NSE's expiry-weekday convention has changed more than once historically, so a date this old is not offered.");
 
         // A no-op once SpotFeedHostedService's own startup resolve has already loaded the shared
         // instance (see EnsureLoadedAsync's freshness check) - only actually downloads/parses
