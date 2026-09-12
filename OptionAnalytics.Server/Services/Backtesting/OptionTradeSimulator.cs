@@ -134,7 +134,8 @@ public static class OptionTradeSimulator
         IReadOnlyList<(DateTimeOffset Time, string Direction)> entrySignals,
         IReadOnlyDictionary<string, decimal> parameters,
         IReadOnlyList<DateTimeOffset>? forcedExitTimes = null,
-        IReadOnlyDictionary<DateTimeOffset, (DateTimeOffset Time, string Reason)>? signalExits = null)
+        IReadOnlyDictionary<DateTimeOffset, (DateTimeOffset Time, string Reason)>? signalExits = null,
+        bool oneMinuteFills = false)
     {
         if (entrySignals.Count == 0) return Array.Empty<BacktestTrade>();
 
@@ -149,7 +150,15 @@ public static class OptionTradeSimulator
         var side = isSell ? "Sell" : "Buy";
         var underlying = context.Underlying;
         var step = context.Step;
-        var spotByTime = context.SpotBars.ToDictionary(b => b.Time, b => b);
+        // In one-minute-fill mode every timestamp in play - the entry signals', the spot lookup's
+        // and the option series' - is a native 1-minute bar, so all three have to come from the
+        // un-aggregated series or they simply will not line up: an entry stamped 10:01 would find no
+        // 5-minute spot bucket and resolve to NoData. The bar STEP used to advance time changes with
+        // it, since exits are walked bar by bar.
+        var fillMinutes = oneMinuteFills ? 1 : context.TimeframeMinutes;
+        var spotSeries = oneMinuteFills ? context.SpotBarsOneMinute : context.SpotBars;
+        var optionBarsFor = oneMinuteFills ? context.GetOptionBarsOneMinute : context.GetOptionBars;
+        var spotByTime = spotSeries.ToDictionary(b => b.Time, b => b);
         var strikeCandleCache = new Dictionary<(decimal Strike, bool IsCall), IReadOnlyList<Candle>>();
 
         var trades = new List<BacktestTrade>();
@@ -174,7 +183,7 @@ public static class OptionTradeSimulator
 
             if (!strikeCandleCache.TryGetValue((strike, isCall), out var optionBars))
             {
-                optionBars = context.GetOptionBars(strike, isCall);
+                optionBars = optionBarsFor(strike, isCall);
                 strikeCandleCache[(strike, isCall)] = optionBars;
             }
 
@@ -194,7 +203,7 @@ public static class OptionTradeSimulator
             // earlier bucket (thin liquidity, nothing printed at the signal's own instant), and the
             // entry itself still happens at the moment the signal fired, only PRICED off the last
             // real print rather than a fresher one that never happened.
-            var entryTime = signal.Time + TimeSpan.FromMinutes(context.TimeframeMinutes);
+            var entryTime = signal.Time + TimeSpan.FromMinutes(fillMinutes);
             var entryPrice = signalBar.Close;
             var takeProfitPrice = isSell ? Math.Max(0, entryPrice - tpPoints) : entryPrice + tpPoints;
             var stopLossPrice = isSell ? entryPrice + slPoints : Math.Max(0, entryPrice - slPoints);

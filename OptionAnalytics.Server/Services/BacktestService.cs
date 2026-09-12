@@ -347,6 +347,7 @@ public sealed class BacktestService
             TimeframeMinutes = timeframe,
             Step = spotState.Step,
             SpotBars = spotBars,
+            SpotBarsOneMinute = spotState.GetClosedCandles(),
             ConfluenceSignalsAscending = confluenceAscending,
             AllSignals = allSignals,
             AtmCeBars = ceBars,
@@ -373,23 +374,28 @@ public sealed class BacktestService
             // (timeframe - 1) minutes sooner than waiting for the whole bucket, with the EXACT same
             // number either way. This is what makes a live-trading trigger's entry match what
             // Backtrack itself would show for the same signal, without the extra wait.
-            GetOptionBars = (strike, isCall) =>
-            {
-                if (onDemand.TryGet(strike, isCall) is { } fetched)
-                    return BacktestUtil.AggregateCandles(fetched, timeframe, includeTrailingPartial: true);
-
-                var tracked = cdvState.GetStrikeClosedCandles(strike, isCall);
-                if (IsTrackedSeriesComplete(tracked, spotBars))
-                    return BacktestUtil.AggregateCandles(tracked, timeframe, includeTrailingPartial: true);
-
-                onDemand.RecordMiss(strike, isCall);
-                // Still returned as an interim value while the fetch is pending (this round) or if
-                // it never lands (budget/deadline exhausted) - a possibly-incomplete series is
-                // strictly better than none, and RunStrategyAsync's re-run after a successful fetch
-                // replaces it with the authoritative one via the onDemand.TryGet check above.
-                return tracked.Count > 0 ? BacktestUtil.AggregateCandles(tracked, timeframe, includeTrailingPartial: true) : Array.Empty<Candle>();
-            },
+            GetOptionBars = (strike, isCall) => OptionBarsAt(strike, isCall, timeframe),
+            // Same series, same on-demand behaviour, just un-bucketed - see
+            // BacktestStrategyContext.GetOptionBarsOneMinute.
+            GetOptionBarsOneMinute = (strike, isCall) => OptionBarsAt(strike, isCall, 1),
         };
+
+        IReadOnlyList<Candle> OptionBarsAt(decimal strike, bool isCall, int bucketMinutes)
+        {
+            if (onDemand.TryGet(strike, isCall) is { } fetched)
+                return BacktestUtil.AggregateCandles(fetched, bucketMinutes, includeTrailingPartial: true);
+
+            var tracked = cdvState.GetStrikeClosedCandles(strike, isCall);
+            if (IsTrackedSeriesComplete(tracked, spotBars))
+                return BacktestUtil.AggregateCandles(tracked, bucketMinutes, includeTrailingPartial: true);
+
+            onDemand.RecordMiss(strike, isCall);
+            // Still returned as an interim value while the fetch is pending (this round) or if
+            // it never lands (budget/deadline exhausted) - a possibly-incomplete series is
+            // strictly better than none, and RunStrategyAsync's re-run after a successful fetch
+            // replaces it with the authoritative one via the onDemand.TryGet check above.
+            return tracked.Count > 0 ? BacktestUtil.AggregateCandles(tracked, bucketMinutes, includeTrailingPartial: true) : Array.Empty<Candle>();
+        }
 
         var mergedParameters = strategy.Parameters.ToDictionary(p => p.Key, p => parameters.TryGetValue(p.Key, out var v) ? v : p.Default);
 

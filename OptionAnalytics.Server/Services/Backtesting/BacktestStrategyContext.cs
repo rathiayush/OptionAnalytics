@@ -24,6 +24,21 @@ public sealed class BacktestStrategyContext
     /// <summary>The underlying's own closed spot bars, aggregated to TimeframeMinutes, ascending.</summary>
     public required IReadOnlyList<Candle> SpotBars { get; init; }
 
+    /// <summary>The SAME spot history at its native 1-minute resolution, un-aggregated - the finest
+    /// data this app has, and as close to "live price" as a backtest can honestly get.
+    ///
+    /// For a strategy whose entry is a LEVEL being broken rather than a bar closing. Detection on
+    /// SpotBars alone is correct about WHETHER the level broke (a bucket's High/Low covers every
+    /// minute inside it) but not about WHEN: a 5-minute bucket says the break happened somewhere in
+    /// those five minutes, and pricing the fill at that bucket's close can sit minutes and a lot of
+    /// points away from where a real stop order would have filled. Walking these instead narrows
+    /// that to one minute.
+    ///
+    /// It does NOT make the backtest tick-accurate - Dhan serves no finer than 1-minute, so a fill
+    /// inside the minute is still unmodelled. It is a smaller approximation, not the removal of
+    /// one.</summary>
+    public required IReadOnlyList<Candle> SpotBarsOneMinute { get; init; }
+
     /// <summary>Every Confluence signal BacktestService's shared replay produced at this timeframe,
     /// ascending (oldest first) - the natural order to walk when simulating trades one at a time.</summary>
     public required IReadOnlyList<BacktestSignal> ConfluenceSignalsAscending { get; init; }
@@ -56,6 +71,12 @@ public sealed class BacktestStrategyContext
     /// state object itself so a strategy only ever depends on this narrow contract, not the whole
     /// CDV subsystem.</summary>
     public required Func<decimal, bool, IReadOnlyList<Candle>> GetOptionBars { get; init; }
+
+    /// <summary>GetOptionBars at native 1-minute resolution - the pricing counterpart to
+    /// SpotBarsOneMinute. Same contract, same on-demand fetching, just un-bucketed, so an entry
+    /// timed off a 1-minute spot break can be priced on the option's own bar for that same minute
+    /// rather than the timeframe bucket it happens to fall in.</summary>
+    public required Func<decimal, bool, IReadOnlyList<Candle>> GetOptionBarsOneMinute { get; init; }
 
     /// <summary>The ATM CE/PE candles exactly as ConfluenceAlertService's own ATM legs track them -
     /// the SAME series BacktestService's replay already builds internally for its own Confluence
