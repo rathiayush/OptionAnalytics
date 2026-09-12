@@ -162,7 +162,31 @@ public sealed class DhanRollingOptionDataService
             chunkStart = chunkEnd.AddDays(1);
         }
 
-        return (all, null);
+        // Clip to exactly [fromDay,toDay] in OUR OWN code rather than trusting either
+        // interpretation of Dhan's toDate boundary - see ClipToRange's own doc comment for why.
+        return (ClipToRange(all, fromDay, toDay), null);
+    }
+
+    /// <summary>Keeps only bars whose own IST calendar date falls within [fromDay,toDay] - a
+    /// belt-and-suspenders guarantee of this method's own contract regardless of whatever Dhan's
+    /// toDate boundary actually does in practice. Their docs call toDate "non-inclusive" (which is
+    /// why the payload above sends chunkEnd+1), but a real run still came back with a bar dated ONE
+    /// DAY PAST an inclusive toDay even with that compensation applied - either the docs don't
+    /// match Dhan's actual behavior here, or the rolling resolution treats the boundary some other
+    /// way this app does not need to fully understand. What actually matters is that a caller
+    /// asking for data "through toDay" never silently receives a bar from the day after - which,
+    /// for a ROLLING series, can be the very first bar of the NEXT contract, exactly the kind of
+    /// contamination DetectPossibleSplices exists to catch but this stops from happening at all.</summary>
+    internal static List<(CandleWithVolume Bar, decimal? Strike)> ClipToRange(
+        List<(CandleWithVolume Bar, decimal? Strike)> bars, DateOnly fromDay, DateOnly toDay)
+    {
+        bool InRange((CandleWithVolume Bar, decimal? Strike) b)
+        {
+            var day = IstClock.IstDate(b.Bar.Time);
+            return day >= fromDay && day <= toDay;
+        }
+
+        return bars.Where(InRange).ToList();
     }
 
     /// <summary>Sends one chunk, retrying with a backoff ONLY on Dhan's own rate-limit error - it
