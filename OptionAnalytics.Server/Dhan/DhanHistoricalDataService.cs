@@ -38,14 +38,18 @@ public sealed class DhanHistoricalDataService
 
     /// <summary>Every candle Dhan has for [fromDay, toDay] inclusive (both IST calendar dates) -
     /// spans weekends/holidays fine, since Dhan simply has no data for those and they contribute
-    /// nothing to the result.</summary>
-    public async Task<IReadOnlyList<Candle>> GetIntradayCandlesAsync(
+    /// nothing to the result. Error carries Dhan's own reason when the call itself failed (auth,
+    /// rate limit, a window Dhan's intraday endpoint won't serve) - null when it succeeded, even if
+    /// that meant zero candles (a real closed market span). Surfaced so a caller with its own error
+    /// budget (ExpiredOptionBacktestService's own Failed() message, in particular) can report the
+    /// ACTUAL reason instead of guessing at one.</summary>
+    public async Task<(IReadOnlyList<Candle> Candles, string? Error)> GetIntradayCandlesAsync(
         uint securityId, string dhanSegment, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken)
     {
         if (!_api.HasSession)
         {
             _logger.LogWarning("Cannot fetch intraday candles for {Segment}:{Id} - Dhan is not authenticated (check Dhan:ClientId/Dhan:AccessToken).", dhanSegment, securityId);
-            return Array.Empty<Candle>();
+            return (Array.Empty<Candle>(), "Dhan is not authenticated");
         }
 
         var payload = new
@@ -64,10 +68,10 @@ public sealed class DhanHistoricalDataService
         if (!response.Success)
         {
             _logger.LogWarning("Intraday candle request failed for {Segment}:{Id} ({From}..{To}) - {Error}", dhanSegment, securityId, fromDay, toDay, response.ErrorMessage);
-            return Array.Empty<Candle>();
+            return (Array.Empty<Candle>(), string.IsNullOrWhiteSpace(response.ErrorMessage) ? $"HTTP {(int)response.StatusCode}" : response.ErrorMessage);
         }
 
-        return ParseCandles(response.Root);
+        return (ParseCandles(response.Root), null);
     }
 
     private List<Candle> ParseCandles(JsonElement root)

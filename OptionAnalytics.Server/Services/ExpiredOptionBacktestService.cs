@@ -179,9 +179,11 @@ public sealed class ExpiredOptionBacktestService
         var toDay = expiryDate;
         var fromDay = expiryDate.AddDays(-effectiveLookbackDays);
 
-        var spotBars1m = await _historicalData.GetIntradayCandlesAsync(instrument.SecurityId, instrument.DhanSegment, fromDay, toDay, 1, cancellationToken);
+        var (spotBars1m, spotError) = await _historicalData.GetIntradayCandlesAsync(instrument.SecurityId, instrument.DhanSegment, fromDay, toDay, 1, cancellationToken);
         if (spotBars1m.Count == 0)
-            return ExpiredBacktestResult.Failed($"No spot history for {underlying} between {fromDay:dd MMM yyyy} and {toDay:dd MMM yyyy} - Dhan's intraday history may not reach back that far for a window this old.");
+            return ExpiredBacktestResult.Failed(spotError is null
+                ? $"No spot history for {underlying} between {fromDay:dd MMM yyyy} and {toDay:dd MMM yyyy} - the market may simply have been closed the whole window, or Dhan's intraday history may not reach back that far for a window this old."
+                : $"No spot history for {underlying} between {fromDay:dd MMM yyyy} and {toDay:dd MMM yyyy} - Dhan: {spotError}");
 
         // Every parameter the strategy declares but the caller omitted falls back to its own
         // default - same rule BacktestService.Prepare uses, so a strategy implementation can always

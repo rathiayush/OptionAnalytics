@@ -270,7 +270,7 @@ public sealed class SpotFeedHostedService : BackgroundService
             // wired up, it would take the entire spot feed - live ticks included - down with it.
             try
             {
-                var candles = await _historicalData.GetIntradayCandlesAsync(instrument.SecurityId, instrument.DhanSegment, fromDay, today, 1, cancellationToken);
+                var (candles, error) = await _historicalData.GetIntradayCandlesAsync(instrument.SecurityId, instrument.DhanSegment, fromDay, today, 1, cancellationToken);
 
                 var trimmed = TrimToRecentTradingDays(candles, HistoryTradingDays);
                 state.SeedHistory(trimmed);
@@ -279,8 +279,8 @@ public sealed class SpotFeedHostedService : BackgroundService
                 _logger.LogInformation("Backfilled {Count} candle(s) across {Days} trading day(s) for {Underlying}.", trimmed.Count, dayCount, state.Underlying);
 
                 if (trimmed.Count == 0)
-                    _logger.LogWarning("Backfill returned NO candles for {Underlying} ({Segment}:{Id}) - it will chart nothing and any backtest on it finds no signals. Check whether this account is entitled to that exchange's data.",
-                        state.Underlying, instrument.DhanSegment, instrument.SecurityId);
+                    _logger.LogWarning("Backfill returned NO candles for {Underlying} ({Segment}:{Id}) - it will chart nothing and any backtest on it finds no signals. Check whether this account is entitled to that exchange's data. {Error}",
+                        state.Underlying, instrument.DhanSegment, instrument.SecurityId, error);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
