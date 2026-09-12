@@ -1,8 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { Select, Space, Typography, Spin, Card, Button, Table, Tag, InputNumber, Statistic, Row, Col, DatePicker, TimePicker } from 'antd'
+import { Component, useEffect, useMemo, useRef, useState } from 'react'
+import { Select, Space, Typography, Spin, Card, Button, Table, Tag, InputNumber, Statistic, Row, Col, DatePicker, TimePicker, Alert, Empty } from 'antd'
 import dayjs from 'dayjs'
 import { ReloadOutlined, PlayCircleOutlined } from '@ant-design/icons'
-import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, NavBar, DirectionTag, ALERT_KIND_LABEL, fmtIstDateTime, fmtIstTime, fmtPrice, istDateKey, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry } from './shared.jsx'
+import { createChart, createSeriesMarkers, CandlestickSeries, CrosshairMode } from 'lightweight-charts'
+import {
+  UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, NavBar, DirectionTag, ALERT_KIND_LABEL, fmtIstDateTime, fmtIstTime, fmtPrice, istDateKey,
+  TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry,
+  AXIS_COLOR, GRID_COLOR, BORDER_COLOR, istTimeFormatter, istTickMarkFormatter, toBar, toChartTime, dayResetMarkers,
+} from './shared.jsx'
 
 // This page's own persisted keys - underlying/timeframe are shared across every page (see
 // STORED_UNDERLYING/STORED_TIMEFRAME above), but strategy/parameters/date-range only mean
@@ -62,6 +67,112 @@ function renderPnl(v, isOpen) {
   )
 }
 
+// One arrow per trade at its own entry (falling back to the signal time for a NoData trade, which
+// has no entry of its own) - direction decides the arrow's side/color/shape, the same convention
+// every other chart on this app uses for a bullish/bearish event. Sorted ascending:
+// createSeriesMarkers requires it.
+function tradeEntryMarkers(trades) {
+  return trades
+    .map((t) => ({
+      time: toChartTime(t.entryTimeUtc ?? t.signalTimeUtc),
+      position: t.direction === 'Bullish' ? 'belowBar' : 'aboveBar',
+      color: t.direction === 'Bullish' ? UP_COLOR : DOWN_COLOR,
+      shape: t.direction === 'Bullish' ? 'arrowUp' : 'arrowDown',
+      text: `${t.side === 'Sell' ? 'SELL' : 'BUY'} ${t.strike}${t.optionType}`,
+    }))
+    .sort((a, b) => a.time - b.time)
+}
+
+// Plain candlestick chart of the underlying's own currently-backfilled/live spot history, with this
+// run's own trade entries marked on it - lets a signal be checked against the real price action
+// rather than only read off the Trades table below. Same plain shape as StrikeDataPage's own
+// StrikeCandleChart/ExpiredBacktestPage's own ExpiredSpotChart (no EMA overlay, no cross-chart pan/
+// zoom sync) - deliberately NOT App.jsx's own live-ticking PriceChart, since this page's own data
+// (trades/signals) only ever refreshes on a deliberate Run, not bar-by-bar.
+function SpotCandleChart({ bars, trades, height = 420 }) {
+  const containerRef = useRef(null)
+  const chartRef = useRef(null)
+  const seriesRef = useRef(null)
+  const markersRef = useRef(null)
+
+  useEffect(() => {
+    if (!containerRef.current) return
+
+    const chart = createChart(containerRef.current, {
+      width: containerRef.current.clientWidth,
+      height,
+      layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
+      grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
+      rightPriceScale: { borderColor: BORDER_COLOR },
+      timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter },
+      crosshair: { mode: CrosshairMode.Normal },
+      localization: { timeFormatter: istTimeFormatter },
+    })
+    chartRef.current = chart
+    seriesRef.current = chart.addSeries(CandlestickSeries, {
+      upColor: UP_COLOR,
+      downColor: DOWN_COLOR,
+      borderVisible: false,
+      wickUpColor: UP_COLOR,
+      wickDownColor: DOWN_COLOR,
+    })
+    markersRef.current = createSeriesMarkers(seriesRef.current, [])
+
+    const onResize = () => {
+      if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth })
+    }
+    window.addEventListener('resize', onResize)
+
+    return () => {
+      window.removeEventListener('resize', onResize)
+      chart.remove()
+      chartRef.current = null
+      seriesRef.current = null
+      markersRef.current = null
+    }
+    // One chart instance per mount - series/marker data is (re)populated by the effects below.
+  }, [height])
+
+  useEffect(() => {
+    if (!seriesRef.current) return
+    seriesRef.current.setData(bars)
+    if (bars.length > 0) chartRef.current?.timeScale().fitContent()
+  }, [bars])
+
+  useEffect(() => {
+    if (!markersRef.current) return
+    markersRef.current.setMarkers([...dayResetMarkers(bars), ...tradeEntryMarkers(trades)].sort((a, b) => a.time - b.time))
+  }, [bars, trades])
+
+  return <div ref={containerRef} style={{ width: '100%', height }} />
+}
+
+// Same reasoning as StrikeDataPage's own ChartErrorBoundary - a lightweight-charts assertion or bad
+// data shape must show a small fallback instead of unmounting the whole page (the tables below are
+// still useful even if the chart itself can't render). Must be a class component; React has no hook
+// equivalent for getDerivedStateFromError.
+class ChartErrorBoundary extends Component {
+  constructor(props) {
+    super(props)
+    this.state = { error: null }
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error }
+  }
+
+  componentDidCatch(error) {
+    console.error('Backtrack chart crashed:', error)
+  }
+
+  render() {
+    if (this.state.error) {
+      return <Alert type="warning" showIcon message="This chart could not be rendered - the data below is still available in the tables." />
+    }
+    return this.props.children
+  }
+}
+
 // Re-runs ConfluenceAlertService's exact leg-flip + confluence logic offline over whatever
 // spot/ATM CE/PE candle history the backend currently holds in memory (see BacktestService) - lets
 // you check what the live alert engine would have fired without waiting for it to happen live, and
@@ -85,6 +196,13 @@ export default function BacktestPage() {
   const [paramValues, setParamValues] = usePersistedState(STORED_PARAM_VALUES, {})
   const [trades, setTrades] = useState(null)
   const [tradesLoading, setTradesLoading] = useState(false)
+
+  // The underlying's own currently-backfilled/live spot history - what the chart below plots.
+  // Fetched alongside signals/trades (see loadSpotCandles' own call sites) rather than kept
+  // continuously live-ticking (unlike App.jsx's own Dashboard chart): this page's trades/signals
+  // are themselves a point-in-time snapshot from the last Run, so the chart matches that same
+  // cadence rather than drifting ahead of the data it is annotating.
+  const [spotCandles, setSpotCandles] = useState([])
 
   // Which strategy key paramValues currently reflects - seeded from the RESTORED strategyKey so a
   // page load that finds matching stored parameters keeps them, rather than the defaults-reset
@@ -131,6 +249,7 @@ export default function BacktestPage() {
     selectExpiry(expiry).then(() => {
       loadSignals()
       runTrades()
+      loadSpotCandles()
     })
   }
 
@@ -193,6 +312,17 @@ export default function BacktestPage() {
       .finally(() => setTradesLoading(false))
   }
 
+  // Same GET /api/spot/{underlying}/candles the Dashboard's own chart reads - this page's whole
+  // currently-backfilled/live spot history, at native 1-minute resolution (aggregated to the
+  // selected timeframe client-side below, same as the Dashboard's own timeframe switcher).
+  const loadSpotCandles = () => {
+    if (!selected) return
+    fetch(`/api/spot/${selected}/candles`)
+      .then((r) => r.json())
+      .then((data) => setSpotCandles(data ?? []))
+      .catch((err) => console.error('Failed to load spot candles:', err))
+  }
+
   // Signals refresh automatically on underlying/timeframe - those are discrete dropdown choices,
   // not something typed. Strategy parameters only apply when "Run" is clicked, so adjusting them
   // doesn't fire a request on every keystroke.
@@ -203,6 +333,7 @@ export default function BacktestPage() {
     if (!strategy) return
     loadSignals()
     runTrades()
+    loadSpotCandles()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected, timeframe, strategyKey, strategy, expiryParam])
 
@@ -230,6 +361,25 @@ export default function BacktestPage() {
     () => (signals ?? []).filter((sig) => inRange(sig.timeUtc)),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [signals, fromDay, toDay])
+
+  // The chart's own candles - same date-range filter as the tables above (so a narrowed date range
+  // narrows the chart too), converted to chart bars and bucketed to the selected timeframe
+  // client-side, same as App.jsx's own Dashboard chart does for its timeframe switcher (everything
+  // server-side stays at native 1-minute resolution).
+  const chartBars = useMemo(() => {
+    const bars = (spotCandles ?? []).filter((c) => inRange(c.time)).map(toBar)
+    if (timeframe <= 1 || bars.length === 0) return bars
+    const bucketSeconds = timeframe * 60
+    const buckets = new Map()
+    for (const b of bars) {
+      const bucketTime = Math.floor(b.time / bucketSeconds) * bucketSeconds
+      const existing = buckets.get(bucketTime)
+      if (!existing) buckets.set(bucketTime, { time: bucketTime, open: b.open, high: b.high, low: b.low, close: b.close })
+      else { existing.high = Math.max(existing.high, b.high); existing.low = Math.min(existing.low, b.low); existing.close = b.close }
+    }
+    return Array.from(buckets.values()).sort((a, b) => a.time - b.time)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [spotCandles, fromDay, toDay, timeframe])
 
   const summary = useMemo(() => {
     // Open positions are excluded from every stat below - they haven't actually closed, so folding
@@ -422,7 +572,7 @@ export default function BacktestPage() {
                   )}
                 </Space>
               ))}
-              <Button type="primary" icon={<PlayCircleOutlined />} onClick={() => { loadSignals(); runTrades() }} loading={tradesLoading} disabled={!selected || !strategyKey}>
+              <Button type="primary" icon={<PlayCircleOutlined />} onClick={() => { loadSignals(); runTrades(); loadSpotCandles() }} loading={tradesLoading} disabled={!selected || !strategyKey}>
                 Run
               </Button>
             </Space>
@@ -450,6 +600,14 @@ export default function BacktestPage() {
                 {fromDay ?? 'the start'} – {toDay ?? 'the end'} (IST). The backtest still ran over the
                 whole window; the stats above cover the filtered rows only.
               </Text>
+            )}
+
+            {chartBars.length > 0 ? (
+              <ChartErrorBoundary key={`${selected}-${expiryParam}-${timeframe}-${fromDay}-${toDay}`}>
+                <SpotCandleChart bars={chartBars} trades={visibleTrades} height={420} />
+              </ChartErrorBoundary>
+            ) : (
+              <Empty description="No spot candles to chart yet." />
             )}
 
             {tradesLoading && !trades ? (
