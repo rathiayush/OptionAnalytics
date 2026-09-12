@@ -24,6 +24,23 @@ namespace OptionAnalytics.Server.Dhan;
 ///             "yyyy-MM-dd", unlike /charts/intraday's date-TIME strings - this endpoint has no
 ///             intraday session concept, one bar's "day" is the calendar date its relative expiry
 ///             was resolved against). Capped by Dhan at 30 days per call.
+///
+///             toDate is explicitly documented as NON-INCLUSIVE ("End date of the desired range
+///             (non-inclusive)") - the opposite of every other date range in this app - so this
+///             method's own toDay parameter stays INCLUSIVE (consistent with
+///             DhanHistoricalDataService.GetIntradayCandlesAsync and everything else here) and adds
+///             a day when building each chunk's own outgoing "toDate" instead. Confirmed as a real
+///             bug, not a theoretical one: without it, a caller's toDay (typically the target
+///             expiry date itself) was silently missing from every response.
+///
+///             The "rolls across contracts" behavior above is likewise not just theoretical: a real
+///             run's returned series showed large premium jumps landing exactly at day boundaries
+///             (one day's last print to the next day's first), spaced roughly one expiry cycle
+///             apart - the signature of an old, about-to-expire contract hitting a fresh one, not
+///             one contract's own continuous decay. ExpiredOptionBacktestService trims each side's
+///             series down to the segment after its own LAST such jump before handing it to a
+///             strategy, so the backtest only ever sees the single contract nearest the requested
+///             expiry, regardless of how wide a lookback was requested.
 ///   response: {"data":{"ce":{"open":[...],"high":[...],...,"timestamp":[...]},"pe":null-or-same}}
 ///             - requesting drvOptionType CALL fills "ce" and leaves "pe" null (and vice versa for
 ///             PUT), so getting both sides costs two calls, not one.
@@ -105,7 +122,13 @@ public sealed class DhanRollingOptionDataService
                 drvOptionType,
                 requiredData = RequiredData,
                 fromDate = chunkStart.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
-                toDate = chunkEnd.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                // +1 day - Dhan's own docs state toDate is NON-INCLUSIVE ("End date of the desired
+                // range (non-inclusive)"), unlike every other date range in this app (GetIntradayCa
+                // ndlesAsync's toDay, this method's own toDay parameter, both inclusive). Sending
+                // chunkEnd as-is would silently drop chunkEnd's own trading day entirely - most
+                // often the exact day that matters, since a caller's toDay is typically the target
+                // expiry date itself.
+                toDate = chunkEnd.AddDays(1).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
             };
             var context = $"rolling option candles ({underlyingSecurityId}, {expiryFlag}+{expiryCode}, {strike} {drvOptionType}, {chunkStart:yyyy-MM-dd}..{chunkEnd:yyyy-MM-dd})";
 

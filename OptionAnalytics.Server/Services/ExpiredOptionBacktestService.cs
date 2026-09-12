@@ -121,9 +121,22 @@ public sealed class ExpiredOptionBacktestService
         var (ceBars1m, ceError) = await _rollingOption.GetRollingOptionCandlesAsync(instrument.SecurityId, expiryFlag, expiryCode, ceStrike, "CALL", fromDay, toDay, 1, cancellationToken);
         var (peBars1m, peError) = await _rollingOption.GetRollingOptionCandlesAsync(instrument.SecurityId, expiryFlag, expiryCode, peStrike, "PUT", fromDay, toDay, 1, cancellationToken);
 
+        var ceSplices = DetectPossibleSplices(ceBars1m);
+        var peSplices = DetectPossibleSplices(peBars1m);
+
+        // Confirmed, not just theoretical (see DhanRollingOptionDataService's own doc comment): a
+        // wide lookback's returned series can genuinely be several real contracts spliced end to
+        // end, only the LAST of which is the one nearest the requested expiry. Trimming to the
+        // segment after the last detected splice is what makes the strategy actually run against
+        // just that one contract - a signal from BEFORE the trim point simply finds no option bars
+        // (BacktestTrade.NoData), the same outcome this app already reports for any other strike
+        // with no tracked history, rather than silently pricing it off the wrong contract.
+        var ceUsed = ceSplices.Count > 0 ? ceBars1m.Where(b => b.Time >= ceSplices[^1]).ToList() : ceBars1m;
+        var peUsed = peSplices.Count > 0 ? peBars1m.Where(b => b.Time >= peSplices[^1]).ToList() : peBars1m;
+
         var timeframe = Math.Max(1, timeframeMinutes);
-        var ceCandles1m = ceBars1m.Select(c => c.ToCandle()).ToList();
-        var peCandles1m = peBars1m.Select(c => c.ToCandle()).ToList();
+        var ceCandles1m = ceUsed.Select(c => c.ToCandle()).ToList();
+        var peCandles1m = peUsed.Select(c => c.ToCandle()).ToList();
         var ceCandlesTf = BacktestUtil.AggregateCandles(ceCandles1m, timeframe);
         var peCandlesTf = BacktestUtil.AggregateCandles(peCandles1m, timeframe);
 
@@ -155,8 +168,10 @@ public sealed class ExpiredOptionBacktestService
 
         return new ExpiredBacktestResult(
             true, null, trades, signals, expiryCode, ceStrike, peStrike, ceError, peError,
-            spotBars1m.Count, ceBars1m.Count, peBars1m.Count,
-            DetectPossibleSplices(ceBars1m), DetectPossibleSplices(peBars1m));
+            // The counts actually fed to the strategy after trimming, not the raw fetch - what the
+            // page should show as "how much of the single target contract's own history this run
+            // used."
+            spotBars1m.Count, ceUsed.Count, peUsed.Count, ceSplices, peSplices);
     }
 
     private static string StrikeToken(int steps) => steps == 0 ? "ATM" : $"ATM{(steps > 0 ? "+" : "")}{steps}";
