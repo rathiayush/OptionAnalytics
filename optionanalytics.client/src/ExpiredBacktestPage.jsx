@@ -275,15 +275,15 @@ export default function ExpiredBacktestPage() {
                 <Space direction="vertical" size={2}>
                   <Text>
                     Resolved to expiryCode {result.expiryCode} ({expiryFlag === 'WEEK' ? 'weekly' : 'monthly'}) - CE at {result.ceStrike}, PE at {result.peStrike}.
-                    {' '}{result.spotBarCount} spot bar(s), {result.ceBarCount} CE bar(s), {result.peBarCount} PE bar(s) fetched.
+                    {' '}{result.spotBarCount} spot bar(s) fetched; {result.ceBarCount} CE bar(s), {result.peBarCount} PE bar(s) actually used for the backtest.
                   </Text>
                   {result.ceError && <Text type="warning">CE: {result.ceError}</Text>}
                   {result.peError && <Text type="warning">PE: {result.peError}</Text>}
                   {spliceCount > 0 && (
                     <Text type="warning">
-                      Possible contract splice detected - a large, sudden premium jump was found at{' '}
-                      {[...(result.ceSpliceTimes ?? []).map((t) => `CE ${fmtIstDateTime(t)}`), ...(result.peSpliceTimes ?? []).map((t) => `PE ${fmtIstDateTime(t)}`)].join(', ')}.
-                      {' '}This can mean the lookback window is wide enough to have crossed from one real contract onto another - shorten the lookback (or the expiry-cycle nudge) if you want data from only the single contract expiring on your chosen date.
+                      A contract splice was detected at{' '}
+                      {[...(result.ceSpliceTimes ?? []).map((t) => `CE ${fmtIstDateTime(t)}`), ...(result.peSpliceTimes ?? []).map((t) => `PE ${fmtIstDateTime(t)}`)].join(', ')}
+                      {' '}(a large, sudden premium jump - the lookback window was wide enough to reach an earlier contract before this one). The data before that point has already been trimmed away automatically - only the bars after the last splice were used above, so the backtest still ran against just the single contract nearest your chosen expiry.
                     </Text>
                   )}
                 </Space>
