@@ -57,7 +57,11 @@ public sealed class DhanRollingOptionDataService
 {
     private const string FnoSegment = "NSE_FNO";
     private const string OptionInstrument = "OPTIDX";
-    private static readonly string[] RequiredData = { "open", "high", "low", "close", "volume" };
+    // "strike" asks Dhan to report the ACTUAL absolute strike it resolved "ATM+-K" to for every
+    // bar - without this, this app has no way to check whether Dhan's own contract resolution
+    // actually landed anywhere near what it asked for, which is exactly the kind of silent mismatch
+    // an implausible entry price (a "near-ATM" option priced in the thousands) would otherwise be.
+    private static readonly string[] RequiredData = { "open", "high", "low", "close", "volume", "strike" };
 
     // Dhan's own stated cap (see the endpoint's docs) - chunked into successive calls so a caller
     // can still ask for a range wider than one call supports, rather than needing to paginate it.
@@ -82,21 +86,26 @@ public sealed class DhanRollingOptionDataService
         _logger = logger;
     }
 
-    /// <summary>Every candle for [fromDay,toDay] inclusive, one relative contract
+    /// <summary>Every bar for [fromDay,toDay] inclusive, one relative contract
     /// (expiryFlag/expiryCode/strike/drvOptionType), chunked transparently across Dhan's 30-day
     /// per-call cap. Stops and returns whatever already succeeded plus Dhan's own error the moment
-    /// one chunk fails, rather than silently discarding partial history.</summary>
-    public async Task<(IReadOnlyList<CandleWithVolume> Candles, string? Error)> GetRollingOptionCandlesAsync(
+    /// one chunk fails, rather than silently discarding partial history.
+    ///
+    /// Each bar carries the ABSOLUTE strike Dhan itself resolved "ATM+-K" to for that specific bar
+    /// (null only if Dhan's response omitted it) - the caller's own sanity check against what it
+    /// expected that resolution to be, since nothing else here can otherwise tell a genuinely-priced
+    /// but unexpected contract apart from a resolution that landed on the wrong one entirely.</summary>
+    public async Task<(IReadOnlyList<(CandleWithVolume Bar, decimal? Strike)> Bars, string? Error)> GetRollingOptionCandlesAsync(
         uint underlyingSecurityId, string expiryFlag, int expiryCode, string strike, string drvOptionType,
         DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken)
     {
         if (!_api.HasSession)
-            return (Array.Empty<CandleWithVolume>(), "Dhan is not authenticated (check Dhan:ClientId/Dhan:AccessToken).");
+            return (Array.Empty<(CandleWithVolume, decimal?)>(), "Dhan is not authenticated (check Dhan:ClientId/Dhan:AccessToken).");
 
         if (toDay < fromDay)
-            return (Array.Empty<CandleWithVolume>(), "'to' date must not be before 'from' date.");
+            return (Array.Empty<(CandleWithVolume, decimal?)>(), "'to' date must not be before 'from' date.");
 
-        var all = new List<CandleWithVolume>();
+        var all = new List<(CandleWithVolume Bar, decimal? Strike)>();
         var chunkStart = fromDay;
         var isFirstChunk = true;
 
@@ -184,25 +193,26 @@ public sealed class DhanRollingOptionDataService
         }
     }
 
-    private List<CandleWithVolume> ParseSide(JsonElement root, string drvOptionType)
+    private List<(CandleWithVolume Bar, decimal? Strike)> ParseSide(JsonElement root, string drvOptionType)
     {
-        var candles = new List<CandleWithVolume>();
+        var bars = new List<(CandleWithVolume, decimal?)>();
 
         if (!root.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Object)
-            return candles;
+            return bars;
 
         var sideKey = string.Equals(drvOptionType, "PUT", StringComparison.OrdinalIgnoreCase) ? "pe" : "ce";
         if (!data.TryGetProperty(sideKey, out var side) || side.ValueKind != JsonValueKind.Object)
-            return candles; // The requested side simply has no data for this window - not an error.
+            return bars; // The requested side simply has no data for this window - not an error.
 
         if (!side.TryGetProperty("timestamp", out var timestamps) || timestamps.ValueKind != JsonValueKind.Array)
-            return candles;
+            return bars;
 
         var open = GetArray(side, "open");
         var high = GetArray(side, "high");
         var low = GetArray(side, "low");
         var close = GetArray(side, "close");
         var volume = GetArray(side, "volume");
+        var strike = GetArray(side, "strike");
 
         var count = timestamps.GetArrayLength();
         for (var i = 0; i < count; i++)
@@ -223,8 +233,8 @@ public sealed class DhanRollingOptionDataService
                     continue;
                 }
 
-                candles.Add(new CandleWithVolume(
-                    DateTimeOffset.FromUnixTimeSeconds(epochSeconds), o, h, l, c, i < volume.Count ? (long)volume[i] : 0));
+                var resolvedStrike = i < strike.Count && strike[i] > 0 ? strike[i] : (decimal?)null;
+                bars.Add((new CandleWithVolume(DateTimeOffset.FromUnixTimeSeconds(epochSeconds), o, h, l, c, i < volume.Count ? (long)volume[i] : 0), resolvedStrike));
             }
             catch (Exception ex) when (ex is FormatException or InvalidOperationException or OverflowException)
             {
@@ -232,7 +242,7 @@ public sealed class DhanRollingOptionDataService
             }
         }
 
-        return candles;
+        return bars;
     }
 
     private static List<decimal> GetArray(JsonElement root, string propertyName)

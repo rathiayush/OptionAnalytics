@@ -118,9 +118,11 @@ public sealed class ExpiredOptionBacktestService
         // bursting requests in parallel, each individually paced but with no coordination between
         // them. One side fully finishing before the other starts keeps every request this method
         // makes on the same, single, paced cadence.
-        var (ceBars1m, ceError) = await _rollingOption.GetRollingOptionCandlesAsync(instrument.SecurityId, expiryFlag, expiryCode, ceStrike, "CALL", fromDay, toDay, 1, cancellationToken);
-        var (peBars1m, peError) = await _rollingOption.GetRollingOptionCandlesAsync(instrument.SecurityId, expiryFlag, expiryCode, peStrike, "PUT", fromDay, toDay, 1, cancellationToken);
+        var (ceRaw, ceError) = await _rollingOption.GetRollingOptionCandlesAsync(instrument.SecurityId, expiryFlag, expiryCode, ceStrike, "CALL", fromDay, toDay, 1, cancellationToken);
+        var (peRaw, peError) = await _rollingOption.GetRollingOptionCandlesAsync(instrument.SecurityId, expiryFlag, expiryCode, peStrike, "PUT", fromDay, toDay, 1, cancellationToken);
 
+        var ceBars1m = ceRaw.Select(b => b.Bar).ToList();
+        var peBars1m = peRaw.Select(b => b.Bar).ToList();
         var ceSplices = DetectPossibleSplices(ceBars1m);
         var peSplices = DetectPossibleSplices(peBars1m);
 
@@ -131,8 +133,23 @@ public sealed class ExpiredOptionBacktestService
         // just that one contract - a signal from BEFORE the trim point simply finds no option bars
         // (BacktestTrade.NoData), the same outcome this app already reports for any other strike
         // with no tracked history, rather than silently pricing it off the wrong contract.
-        var ceUsed = ceSplices.Count > 0 ? ceBars1m.Where(b => b.Time >= ceSplices[^1]).ToList() : ceBars1m;
-        var peUsed = peSplices.Count > 0 ? peBars1m.Where(b => b.Time >= peSplices[^1]).ToList() : peBars1m;
+        var ceUsedRaw = ceSplices.Count > 0 ? ceRaw.Where(b => b.Bar.Time >= ceSplices[^1]).ToList() : ceRaw;
+        var peUsedRaw = peSplices.Count > 0 ? peRaw.Where(b => b.Bar.Time >= peSplices[^1]).ToList() : peRaw;
+        var ceUsed = ceUsedRaw.Select(b => b.Bar).ToList();
+        var peUsed = peUsedRaw.Select(b => b.Bar).ToList();
+
+        // What strike Dhan itself actually resolved "ATM+-K" to, versus what this app expected from
+        // its own real spot - the direct check for a mismatched contract resolution rather than a
+        // genuinely-priced but merely surprising premium. Read off the LAST bar (closest to expiry,
+        // most representative of "the ATM this run cared about") rather than averaging across a
+        // series that may itself have re-centered as spot moved through the window.
+        var ceResolvedStrike = ceUsedRaw.LastOrDefault(b => b.Strike is > 0).Strike;
+        var peResolvedStrike = peUsedRaw.LastOrDefault(b => b.Strike is > 0).Strike;
+        var spotDuringUsedWindow = ceUsed.Count > 0 ? spotBars1m.Where(b => b.Time >= ceUsed[0].Time).ToList() : spotBars1m;
+        var referenceSpot = spotDuringUsedWindow.Count > 0 ? spotDuringUsedWindow[^1].Close : spotBars1m[^1].Close;
+        var referenceAtm = step > 0 ? Math.Round(referenceSpot / step) * step : referenceSpot;
+        var ceExpectedStrike = referenceAtm + otmSteps * step;
+        var peExpectedStrike = referenceAtm - otmSteps * step;
 
         var timeframe = Math.Max(1, timeframeMinutes);
         var ceCandles1m = ceUsed.Select(c => c.ToCandle()).ToList();
@@ -171,7 +188,8 @@ public sealed class ExpiredOptionBacktestService
             // The counts actually fed to the strategy after trimming, not the raw fetch - what the
             // page should show as "how much of the single target contract's own history this run
             // used."
-            spotBars1m.Count, ceUsed.Count, peUsed.Count, ceSplices, peSplices);
+            spotBars1m.Count, ceUsed.Count, peUsed.Count, ceSplices, peSplices,
+            ceResolvedStrike, peResolvedStrike, ceExpectedStrike, peExpectedStrike);
     }
 
     private static string StrikeToken(int steps) => steps == 0 ? "ATM" : $"ATM{(steps > 0 ? "+" : "")}{steps}";
