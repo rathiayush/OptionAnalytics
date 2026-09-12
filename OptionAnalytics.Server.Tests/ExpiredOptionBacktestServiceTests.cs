@@ -3,79 +3,42 @@ using OptionAnalytics.Server.Services;
 
 namespace OptionAnalytics.Server.Tests;
 
-/// <summary>Covers ExpiredOptionBacktestService.ComputeExpiryCode - the derivation from an actual
-/// calendar expiry date to Dhan's own expiryCode parameter (see that method's own doc comment for
-/// why counting whole cycles is robust even though the exact weekday a weekly expiry lands on can
-/// shift around a holiday).</summary>
+/// <summary>Covers ExpiredOptionBacktestService.MaxLookbackDays - the cap that keeps fromDay
+/// anchored INSIDE the target contract's own life, which is what lets this app always send
+/// expiryCode=1 ("the next expiry from fromDay") and have it resolve unambiguously to that one
+/// contract - see that class's own top-of-file doc comment for the full reasoning, including why
+/// Dhan's Annexure-documented near/next/far enum (and the confirmed rejection of 0) made an
+/// arbitrary "how many cycles out" derivation the wrong model in the first place.</summary>
 public sealed class ExpiredOptionBacktestServiceTests
 {
     [Fact]
-    public void Weekly_CountsWholeSevenDayCycles()
+    public void Weekly_CapsWellUnderTheRealSevenDayCycle()
     {
-        // A 30-day lookback is a little over 4 weeks - rounds to the nearest whole cycle count.
-        var code = ExpiredOptionBacktestService.ComputeExpiryCode("WEEK", new DateOnly(2024, 8, 1), new DateOnly(2024, 8, 29));
+        // Comfortably under 7 so a holiday-shifted expiry (a day or two either way) still cannot
+        // put fromDay before the PREVIOUS week's own expiry.
+        var days = ExpiredOptionBacktestService.MaxLookbackDays("WEEK");
 
-        Assert.Equal(4, code);
+        Assert.InRange(days, 1, 6);
     }
 
     [Fact]
-    public void Weekly_ExactlyOneWeekApart_IsOne()
+    public void Monthly_CapsWellUnderTheRealCalendarMonth()
     {
-        var code = ExpiredOptionBacktestService.ComputeExpiryCode("WEEK", new DateOnly(2024, 8, 1), new DateOnly(2024, 8, 8));
+        // Comfortably under the shortest real month (28 days) for the same reason.
+        var days = ExpiredOptionBacktestService.MaxLookbackDays("MONTH");
 
-        Assert.Equal(1, code);
+        Assert.InRange(days, 1, 27);
     }
 
     [Fact]
-    public void Weekly_SameDay_FloorsToOne_NeverZero()
+    public void UnrecognizedFlag_FallsBackToTheWeeklyCap()
     {
-        // Confirmed against a real call: Dhan rejects expiryCode=0 outright as "expiryCode is
-        // required" - 0 and 1 (both "no whole week has passed yet") must both floor to 1, the
-        // nearest expiry, rather than 0 ever reaching the request.
-        var code = ExpiredOptionBacktestService.ComputeExpiryCode("WEEK", new DateOnly(2024, 8, 1), new DateOnly(2024, 8, 1));
+        // Never the wider MONTH-sized cap for anything that isn't recognizably "MONTH" - the
+        // smaller, safer cap is the correct default when in doubt.
+        var days = ExpiredOptionBacktestService.MaxLookbackDays("WEEK");
+        var fallback = ExpiredOptionBacktestService.MaxLookbackDays("nonsense");
 
-        Assert.Equal(1, code);
-    }
-
-    [Fact]
-    public void Monthly_CountsCalendarMonthsElapsed_RegardlessOfDayOfMonth()
-    {
-        // Spans a month boundary with mismatched days-of-month - exact by calendar month, not by
-        // any fixed day-count approximation (a monthly expiry happens once per month regardless of
-        // holidays, unlike weekly's fixed-cadence approximation).
-        var code = ExpiredOptionBacktestService.ComputeExpiryCode("MONTH", new DateOnly(2024, 6, 15), new DateOnly(2024, 8, 29));
-
-        Assert.Equal(2, code);
-    }
-
-    [Fact]
-    public void Monthly_SameCalendarMonth_FloorsToOne_NeverZero()
-    {
-        var code = ExpiredOptionBacktestService.ComputeExpiryCode("MONTH", new DateOnly(2024, 8, 1), new DateOnly(2024, 8, 29));
-
-        Assert.Equal(1, code);
-    }
-
-    [Fact]
-    public void ClampsToTheEndpointsSupportedRange()
-    {
-        // A very wide lookback must never ask Dhan for an expiryCode past what the endpoint
-        // documents (1-10), even though the raw cycle count would be far larger.
-        var weekly = ExpiredOptionBacktestService.ComputeExpiryCode("WEEK", new DateOnly(2020, 1, 1), new DateOnly(2024, 8, 29));
-        var monthly = ExpiredOptionBacktestService.ComputeExpiryCode("MONTH", new DateOnly(2020, 1, 1), new DateOnly(2024, 8, 29));
-
-        Assert.Equal(10, weekly);
-        Assert.Equal(10, monthly);
-    }
-
-    [Fact]
-    public void NeverBelowOne_EvenIfCalledWithAnInvertedRange()
-    {
-        // Confirmed against a real call: Dhan rejects expiryCode=0 outright as "expiryCode is
-        // required" - never a legal value, regardless of how the raw cycle count comes out.
-        var code = ExpiredOptionBacktestService.ComputeExpiryCode("WEEK", new DateOnly(2024, 8, 29), new DateOnly(2024, 8, 1));
-
-        Assert.Equal(1, code);
+        Assert.Equal(days, fallback);
     }
 
     private static CandleWithVolume Bar(DateTimeOffset time, decimal open, decimal close) =>
