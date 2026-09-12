@@ -264,22 +264,33 @@ export default function ExpiredBacktestPage() {
 
         {runError && <Alert type="error" showIcon message={runError} />}
 
-        {result && (
-          <Alert
-            type={result.ceError || result.peError ? 'warning' : 'info'}
-            showIcon
-            message={
-              <Space direction="vertical" size={2}>
-                <Text>
-                  Resolved to expiryCode {result.expiryCode} ({expiryFlag === 'WEEK' ? 'weekly' : 'monthly'}) - CE at {result.ceStrike}, PE at {result.peStrike}.
-                  {' '}{result.spotBarCount} spot bar(s), {result.ceBarCount} CE bar(s), {result.peBarCount} PE bar(s) fetched.
-                </Text>
-                {result.ceError && <Text type="warning">CE: {result.ceError}</Text>}
-                {result.peError && <Text type="warning">PE: {result.peError}</Text>}
-              </Space>
-            }
-          />
-        )}
+        {result && (() => {
+          const spliceCount = (result.ceSpliceTimes?.length ?? 0) + (result.peSpliceTimes?.length ?? 0)
+          const hasWarning = Boolean(result.ceError || result.peError || spliceCount > 0)
+          return (
+            <Alert
+              type={hasWarning ? 'warning' : 'info'}
+              showIcon
+              message={
+                <Space direction="vertical" size={2}>
+                  <Text>
+                    Resolved to expiryCode {result.expiryCode} ({expiryFlag === 'WEEK' ? 'weekly' : 'monthly'}) - CE at {result.ceStrike}, PE at {result.peStrike}.
+                    {' '}{result.spotBarCount} spot bar(s), {result.ceBarCount} CE bar(s), {result.peBarCount} PE bar(s) fetched.
+                  </Text>
+                  {result.ceError && <Text type="warning">CE: {result.ceError}</Text>}
+                  {result.peError && <Text type="warning">PE: {result.peError}</Text>}
+                  {spliceCount > 0 && (
+                    <Text type="warning">
+                      Possible contract splice detected - a large, sudden premium jump was found at{' '}
+                      {[...(result.ceSpliceTimes ?? []).map((t) => `CE ${fmtIstDateTime(t)}`), ...(result.peSpliceTimes ?? []).map((t) => `PE ${fmtIstDateTime(t)}`)].join(', ')}.
+                      {' '}This can mean the lookback window is wide enough to have crossed from one real contract onto another - shorten the lookback (or the expiry-cycle nudge) if you want data from only the single contract expiring on your chosen date.
+                    </Text>
+                  )}
+                </Space>
+              }
+            />
+          )
+        })()}
 
         {result && summary && (
           <Card size="small">

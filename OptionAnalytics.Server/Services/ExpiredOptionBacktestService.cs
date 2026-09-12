@@ -155,10 +155,45 @@ public sealed class ExpiredOptionBacktestService
 
         return new ExpiredBacktestResult(
             true, null, trades, signals, expiryCode, ceStrike, peStrike, ceError, peError,
-            spotBars1m.Count, ceBars1m.Count, peBars1m.Count);
+            spotBars1m.Count, ceBars1m.Count, peBars1m.Count,
+            DetectPossibleSplices(ceBars1m), DetectPossibleSplices(peBars1m));
     }
 
     private static string StrikeToken(int steps) => steps == 0 ? "ATM" : $"ATM{(steps > 0 ? "+" : "")}{steps}";
+
+    /// <summary>Whether the returned series genuinely stays on ONE single contract for the whole
+    /// requested window, or Dhan's own rolling resolution splices between several as the range
+    /// crosses their individual expiries, is NOT something Dhan's docs state outright - the
+    /// endpoint's very existence (returning ONE continuous series over an arbitrary date range
+    /// rather than requiring one call per specific contract) is exactly the point of a "rolling"
+    /// product, so it is plausible the series is stitched from more than one real contract when the
+    /// window is wide enough to span more than one expiry cycle.
+    ///
+    /// This is the one thing that can be checked directly from the data itself without Dhan
+    /// confirming anything: a real option's own premium decays/moves continuously toward its own
+    /// expiry - it does not suddenly multiply several-fold from one minute to the next. A splice
+    /// from an old, nearly-worthless, about-to-expire contract onto a fresh one (or vice versa) is
+    /// exactly the shape that WOULD produce such a jump, so a handful of large consecutive-bar
+    /// jumps is strong first-hand evidence the window crossed a contract boundary, even though its
+    /// absence is not proof it didn't (a smooth-enough transition is not impossible, just unlikely
+    /// for a real premium).</summary>
+    internal static List<DateTimeOffset> DetectPossibleSplices(IReadOnlyList<CandleWithVolume> bars)
+    {
+        const decimal SuspiciousRatio = 3m;
+        var splices = new List<DateTimeOffset>();
+
+        for (var i = 1; i < bars.Count && splices.Count < 10; i++)
+        {
+            var previousClose = bars[i - 1].Close;
+            var thisOpen = bars[i].Open;
+            if (previousClose <= 0 || thisOpen <= 0) continue;
+
+            var ratio = thisOpen >= previousClose ? thisOpen / previousClose : previousClose / thisOpen;
+            if (ratio >= SuspiciousRatio) splices.Add(bars[i].Time);
+        }
+
+        return splices;
+    }
 
     /// <summary>Derives Dhan's expiryCode (0,1,2... - see DhanRollingOptionDataService's own doc
     /// comment for why it is neither negative nor relative to today) from an actual calendar expiry
