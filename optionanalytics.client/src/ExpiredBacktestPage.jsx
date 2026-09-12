@@ -510,7 +510,7 @@ export default function ExpiredBacktestPage() {
                         ...(result.ceSplices ?? []).map((s) => `CE ${fmtIstDateTime(s.time)} (${fmtPrice(s.previousClose)} → ${fmtPrice(s.thisOpen)})`),
                         ...(result.peSplices ?? []).map((s) => `PE ${fmtIstDateTime(s.time)} (${fmtPrice(s.previousClose)} → ${fmtPrice(s.thisOpen)})`),
                       ].join(', ')}
-                      {' '}(a large, sudden premium jump). The lookback is capped specifically so this should not happen - the data before that point has been trimmed away automatically, but seeing this at all is a stronger sign something is off than it used to be, not routine.
+                      {' '}(a large, sudden premium jump). The window has been automatically trimmed to the larger, single-contract side of that jump (whichever side of it has more bars) - a signal falling in the trimmed-away side simply finds no option data (shown as "No Data" below), rather than being priced off the wrong contract.
                     </Text>
                   )}
                 </Space>

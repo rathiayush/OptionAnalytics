@@ -254,15 +254,22 @@ public sealed class ExpiredOptionBacktestService
         var ceSplices = DetectPossibleSplices(ceBars1m);
         var peSplices = DetectPossibleSplices(peBars1m);
 
-        // Confirmed, not just theoretical (see DhanRollingOptionDataService's own doc comment): a
-        // wide lookback's returned series can genuinely be several real contracts spliced end to
-        // end, only the LAST of which is the one nearest the requested expiry. Trimming to the
-        // segment after the last detected splice is what makes the strategy actually run against
-        // just that one contract - a signal from BEFORE the trim point simply finds no option bars
-        // (BacktestTrade.NoData), the same outcome this app already reports for any other strike
-        // with no tracked history, rather than silently pricing it off the wrong contract.
-        var ceUsedRaw = ceSplices.Count > 0 ? ceRaw.Where(b => b.Bar.Time >= ceSplices[^1].Time).ToList() : ceRaw;
-        var peUsedRaw = peSplices.Count > 0 ? peRaw.Where(b => b.Bar.Time >= peSplices[^1].Time).ToList() : peRaw;
+        // A wide lookback's returned series COULD genuinely be several real contracts spliced end to
+        // end - but a real run confirmed a splice showing up somewhere other than the head of the
+        // window too: right in the FINAL hour before close, ON the target contract's own real expiry
+        // date, regardless of month or how far OTM/ITM the strike was. Keeping "everything after the
+        // last splice" - the original assumption, when a too-wide lookback crossing into an OLDER
+        // contract was the only failure mode this had ever seen - is exactly backwards for that case:
+        // it kept a sliver of a few dozen bars and threw away the entire correct series. Keeping the
+        // LARGEST contiguous segment between splices (or a splice and either edge) instead handles
+        // both shapes with one rule: a genuine older-contract splice near the head still leaves the
+        // correct, nearer-to-expiry segment as the larger one; a corrupted tail sliver near close
+        // leaves the correct, earlier segment as the larger one. A signal whose time falls outside
+        // the kept segment simply finds no option bars (BacktestTrade.NoData), the same outcome this
+        // app already reports for any other strike with no tracked history, rather than silently
+        // pricing it off the wrong contract.
+        var ceUsedRaw = TrimToLargestSegment(ceRaw, ceSplices);
+        var peUsedRaw = TrimToLargestSegment(peRaw, peSplices);
         var ceUsed = ceUsedRaw.Select(b => b.Bar).ToList();
         var peUsed = peUsedRaw.Select(b => b.Bar).ToList();
 
@@ -417,6 +424,33 @@ public sealed class ExpiredOptionBacktestService
         return (bars, error);
     }
 
+    /// <summary>Splits raw into the segments delimited by splices' own timestamps and returns the
+    /// LARGEST one by bar count - see DetectPossibleSplices' own doc comment for why "largest", not
+    /// "last", is the right one to trust: a genuine anomaly can now show up at either edge of the
+    /// window (a too-old contract at the head, or Dhan's own rolling resolution flipping early near
+    /// the target contract's real expiry at the tail), and the correct, single-contract data is
+    /// whichever side of it is bigger, not always the side closest to the requested expiry.</summary>
+    internal static List<(CandleWithVolume Bar, decimal? Strike)> TrimToLargestSegment(
+        List<(CandleWithVolume Bar, decimal? Strike)> raw, IReadOnlyList<PossibleSplice> splices)
+    {
+        if (splices.Count == 0) return raw;
+
+        List<(CandleWithVolume Bar, decimal? Strike)>? best = null;
+        var previousCutoff = DateTimeOffset.MinValue;
+
+        foreach (var cutoff in splices.Select(s => s.Time))
+        {
+            var segment = raw.Where(b => b.Bar.Time >= previousCutoff && b.Bar.Time < cutoff).ToList();
+            if (best is null || segment.Count > best.Count) best = segment;
+            previousCutoff = cutoff;
+        }
+
+        var tail = raw.Where(b => b.Bar.Time >= previousCutoff).ToList();
+        if (best is null || tail.Count > best.Count) best = tail;
+
+        return best;
+    }
+
     /// <summary>Whether the returned series genuinely stays on ONE single contract for the whole
     /// requested window, or Dhan's own rolling resolution splices between several as the range
     /// crosses their individual expiries, is NOT something Dhan's docs state outright - the
@@ -443,7 +477,18 @@ public sealed class ExpiredOptionBacktestService
     /// a fresh contract carries meaningfully more absolute time value than a few rupees, so an
     /// ABSOLUTE floor on top of the ratio (both must hold) filters the OTM false-positive case
     /// without weakening real-splice detection: every genuine splice this app has actually seen
-    /// (see the test suite's own worked examples) clears this floor by a wide margin.</summary>
+    /// (see the test suite's own worked examples) clears this floor by a wide margin.
+    ///
+    /// A SEPARATE real run then surfaced a large-magnitude jump (tens of rupees, comfortably past
+    /// the absolute floor above) that was NOT a false positive from a tiny premium - it showed up
+    /// consistently in the FINAL hour before close, on the TARGET contract's own real expiry date,
+    /// regardless of month or strike moneyness (OTM and ITM alike). The likely explanation: Dhan's
+    /// own rolling resolution appears to flip which contract is "current" sometime before that
+    /// day's actual 3:30pm close, so the tail end of a window that ends on expiry day itself can
+    /// genuinely be the NEXT contract's opening data, not the target's. This is a real splice, not a
+    /// detection bug - what needed fixing was TrimToLargestSegment's caller-side assumption that the
+    /// segment nearest the requested expiry is always the correct one to keep (see its own doc
+    /// comment for why that is no longer true).</summary>
     internal static List<PossibleSplice> DetectPossibleSplices(IReadOnlyList<CandleWithVolume> bars)
     {
         const decimal SuspiciousRatio = 3m;

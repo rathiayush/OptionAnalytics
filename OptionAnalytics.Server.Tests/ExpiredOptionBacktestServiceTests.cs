@@ -100,6 +100,70 @@ public sealed class ExpiredOptionBacktestServiceTests
     private static CandleWithVolume Bar(DateTimeOffset time, decimal open, decimal close) =>
         new(time, open, Math.Max(open, close), Math.Min(open, close), close, 0);
 
+    private static (CandleWithVolume Bar, decimal? Strike) RawBar(DateTimeOffset time, decimal open, decimal close) =>
+        (Bar(time, open, close), null);
+
+    [Fact]
+    public void TrimToLargestSegment_NoSplices_ReturnsEverythingUnchanged()
+    {
+        var t0 = new DateTimeOffset(2024, 8, 1, 9, 15, 0, TimeSpan.FromHours(5.5));
+        var raw = new List<(CandleWithVolume Bar, decimal? Strike)> { RawBar(t0, 10m, 10m), RawBar(t0.AddMinutes(1), 10m, 10m) };
+
+        var trimmed = ExpiredOptionBacktestService.TrimToLargestSegment(raw, Array.Empty<PossibleSplice>());
+
+        Assert.Same(raw, trimmed);
+    }
+
+    [Fact]
+    public void TrimToLargestSegment_SpliceNearTheEnd_KeepsTheLargerHeadNotTheTinyTail()
+    {
+        // The real bug this exists to fix: a splice landing in the final few bars (Dhan's own
+        // rolling resolution flipping to the next contract right before the target's own real
+        // close) used to keep only that tiny tail and discard the entire correct head.
+        var t0 = new DateTimeOffset(2024, 8, 1, 9, 15, 0, TimeSpan.FromHours(5.5));
+        var raw = new List<(CandleWithVolume Bar, decimal? Strike)>();
+        for (var i = 0; i < 100; i++) raw.Add(RawBar(t0.AddMinutes(i), 10m, 10m));
+        var spliceTime = t0.AddMinutes(97); // 97 head bars, only 3 tail bars
+        var splices = new List<PossibleSplice> { new(spliceTime, 10m, 50m) };
+
+        var trimmed = ExpiredOptionBacktestService.TrimToLargestSegment(raw, splices);
+
+        Assert.Equal(97, trimmed.Count);
+        Assert.All(trimmed, b => Assert.True(b.Bar.Time < spliceTime));
+    }
+
+    [Fact]
+    public void TrimToLargestSegment_SpliceNearTheStart_KeepsTheLargerTailNotTheTinyHead()
+    {
+        // The ORIGINAL motivating case: a too-wide lookback crossing into an older, different
+        // contract near the head of the window - the correct, nearer-to-expiry data is the tail.
+        var t0 = new DateTimeOffset(2024, 8, 1, 9, 15, 0, TimeSpan.FromHours(5.5));
+        var raw = new List<(CandleWithVolume Bar, decimal? Strike)>();
+        for (var i = 0; i < 100; i++) raw.Add(RawBar(t0.AddMinutes(i), 10m, 10m));
+        var spliceTime = t0.AddMinutes(3); // 3 head bars, 97 tail bars
+        var splices = new List<PossibleSplice> { new(spliceTime, 10m, 50m) };
+
+        var trimmed = ExpiredOptionBacktestService.TrimToLargestSegment(raw, splices);
+
+        Assert.Equal(97, trimmed.Count);
+        Assert.All(trimmed, b => Assert.True(b.Bar.Time >= spliceTime));
+    }
+
+    [Fact]
+    public void TrimToLargestSegment_TwoSplices_KeepsTheLargestOfAllThreeSegments()
+    {
+        var t0 = new DateTimeOffset(2024, 8, 1, 9, 15, 0, TimeSpan.FromHours(5.5));
+        var raw = new List<(CandleWithVolume Bar, decimal? Strike)>();
+        for (var i = 0; i < 100; i++) raw.Add(RawBar(t0.AddMinutes(i), 10m, 10m));
+        // Three segments: [0,10) = 10 bars, [10,20) = 10 bars, [20,100) = 80 bars - the tail wins.
+        var splices = new List<PossibleSplice> { new(t0.AddMinutes(10), 10m, 50m), new(t0.AddMinutes(20), 10m, 50m) };
+
+        var trimmed = ExpiredOptionBacktestService.TrimToLargestSegment(raw, splices);
+
+        Assert.Equal(80, trimmed.Count);
+        Assert.All(trimmed, b => Assert.True(b.Bar.Time >= t0.AddMinutes(20)));
+    }
+
     [Fact]
     public void DetectPossibleSplices_SmoothDecay_FindsNothing()
     {
