@@ -67,6 +67,11 @@ export default function ExpiredBacktestPage() {
   const [expiryDate, setExpiryDate] = useState(null)
   const [expiries, setExpiries] = useState([])
   const [expiriesLoading, setExpiriesLoading] = useState(false)
+  // False means the backend could not read Backtrack's own live-tracked boundary for this
+  // underlying (spot history hasn't backfilled yet) and fell back to a conservative fixed margin
+  // instead - the list is still safe, but may be shorter than it will be once that boundary is
+  // known, which is worth explaining rather than leaving as an unexplained gap.
+  const [expiriesLiveBoundaryKnown, setExpiriesLiveBoundaryKnown] = useState(true)
   // Defaults to "the whole contract's life" (the cadence's own max) - reset whenever the cadence
   // changes, since WEEK's and MONTH's safe caps are very different (see MAX_LOOKBACK_DAYS).
   const [lookbackDays, setLookbackDays] = useState(MAX_LOOKBACK_DAYS.WEEK)
@@ -107,13 +112,16 @@ export default function ExpiredBacktestPage() {
     setExpiriesLoading(true)
     fetch(`/api/expired-backtest/${underlying}/expiries?expiryFlag=${expiryFlag}`)
       .then((r) => r.json())
-      .then((list) => {
-        setExpiries(list ?? [])
-        setExpiryDate((list ?? [])[0] ?? null)
+      .then((body) => {
+        const list = body?.expiries ?? []
+        setExpiries(list)
+        setExpiriesLiveBoundaryKnown(body?.liveBoundaryKnown ?? true)
+        setExpiryDate(list[0] ?? null)
       })
       .catch((err) => {
         console.error('Failed to load available expiries:', err)
         setExpiries([])
+        setExpiriesLiveBoundaryKnown(true)
       })
       .finally(() => setExpiriesLoading(false))
   }, [underlying, expiryFlag])
@@ -280,6 +288,11 @@ export default function ExpiredBacktestPage() {
                   options={expiries.map((d) => ({ value: d, label: dayjs(d).format('DD MMM YYYY') }))}
                   notFoundContent={expiriesLoading ? 'Loading…' : 'None available'}
                 />
+                {!expiriesLoading && !expiriesLiveBoundaryKnown && (
+                  <Text type="warning" style={{ fontSize: 11 }}>
+                    Backtrack's own live boundary for {underlying} isn't known yet (spot history may still be loading) - this list is using a conservative fallback and may be shorter than usual.
+                  </Text>
+                )}
               </Space>
               <Space direction="vertical" size={2}>
                 <Text type="secondary" style={{ fontSize: 12 }}>
