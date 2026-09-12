@@ -127,7 +127,10 @@ public sealed class ExpiredOptionBacktestServiceTests
 
         var splices = ExpiredOptionBacktestService.DetectPossibleSplices(bars);
 
-        Assert.Equal(new[] { t1 }, splices);
+        var splice = Assert.Single(splices);
+        Assert.Equal(t1, splice.Time);
+        Assert.Equal(2m, splice.PreviousClose);
+        Assert.Equal(40m, splice.ThisOpen);
     }
 
     [Fact]

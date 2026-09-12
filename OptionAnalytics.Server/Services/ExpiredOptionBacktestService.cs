@@ -261,8 +261,8 @@ public sealed class ExpiredOptionBacktestService
         // just that one contract - a signal from BEFORE the trim point simply finds no option bars
         // (BacktestTrade.NoData), the same outcome this app already reports for any other strike
         // with no tracked history, rather than silently pricing it off the wrong contract.
-        var ceUsedRaw = ceSplices.Count > 0 ? ceRaw.Where(b => b.Bar.Time >= ceSplices[^1]).ToList() : ceRaw;
-        var peUsedRaw = peSplices.Count > 0 ? peRaw.Where(b => b.Bar.Time >= peSplices[^1]).ToList() : peRaw;
+        var ceUsedRaw = ceSplices.Count > 0 ? ceRaw.Where(b => b.Bar.Time >= ceSplices[^1].Time).ToList() : ceRaw;
+        var peUsedRaw = peSplices.Count > 0 ? peRaw.Where(b => b.Bar.Time >= peSplices[^1].Time).ToList() : peRaw;
         var ceUsed = ceUsedRaw.Select(b => b.Bar).ToList();
         var peUsed = peUsedRaw.Select(b => b.Bar).ToList();
 
@@ -444,11 +444,11 @@ public sealed class ExpiredOptionBacktestService
     /// ABSOLUTE floor on top of the ratio (both must hold) filters the OTM false-positive case
     /// without weakening real-splice detection: every genuine splice this app has actually seen
     /// (see the test suite's own worked examples) clears this floor by a wide margin.</summary>
-    internal static List<DateTimeOffset> DetectPossibleSplices(IReadOnlyList<CandleWithVolume> bars)
+    internal static List<PossibleSplice> DetectPossibleSplices(IReadOnlyList<CandleWithVolume> bars)
     {
         const decimal SuspiciousRatio = 3m;
         const decimal MinimumAbsoluteJump = 5m;
-        var splices = new List<DateTimeOffset>();
+        var splices = new List<PossibleSplice>();
 
         for (var i = 1; i < bars.Count && splices.Count < 10; i++)
         {
@@ -458,7 +458,7 @@ public sealed class ExpiredOptionBacktestService
             if (Math.Abs(thisOpen - previousClose) < MinimumAbsoluteJump) continue;
 
             var ratio = thisOpen >= previousClose ? thisOpen / previousClose : previousClose / thisOpen;
-            if (ratio >= SuspiciousRatio) splices.Add(bars[i].Time);
+            if (ratio >= SuspiciousRatio) splices.Add(new PossibleSplice(bars[i].Time, previousClose, thisOpen));
         }
 
         return splices;
