@@ -85,6 +85,11 @@ public sealed class ExpiredOptionBacktestService
             return ExpiredBacktestResult.Failed(
                 $"'{strategyKey}' cannot run against expired-option history - it needs order-flow (OBV/CDV) across the whole surrounding strike chain, which Dhan's rolling-option endpoint does not provide (a single relative strike per call only). Supported here: {string.Join(", ", SupportedStrategyKeys)}.");
 
+        // A no-op once SpotFeedHostedService's own startup resolve has already loaded the shared
+        // instance (see EnsureLoadedAsync's freshness check) - only actually downloads/parses
+        // anything on a cold request that beat that background resolve to it.
+        await _instrumentMaster.EnsureLoadedAsync(cancellationToken);
+
         var instrument = _instrumentMaster.FindSpot(underlying);
         if (instrument is null)
             return ExpiredBacktestResult.Failed($"Could not resolve {underlying}'s Dhan security id yet - the scrip master may still be loading. Try again shortly.");

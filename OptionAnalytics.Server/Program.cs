@@ -84,7 +84,20 @@ builder.Services.AddAuthorization(options =>
 
 builder.Services.AddSingleton<DhanSession>();
 builder.Services.AddHttpClient<DhanApiClient>();
-builder.Services.AddHttpClient<DhanSpotInstrumentMaster>();
+// AddHttpClient<DhanSpotInstrumentMaster>() (the pattern every other typed client here uses)
+// registers it TRANSIENT - the same bug DhanOptionChainMaster had (see that registration's own
+// comment below): a brand new instance, with its own empty in-memory list, for every distinct
+// injection site. SpotFeedHostedService's own copy loads fine at startup, but
+// ExpiredOptionBacktestService's separately-injected copy was NEVER loaded - FindSpot on it
+// returns null forever, which is the actual cause of "Could not resolve NIFTY's Dhan security id
+// yet" on every single Expired Backtest run, not just an occasional race at startup. Registered as
+// an explicit singleton instead, built from IHttpClientFactory so it still gets a pooled, properly-
+// configured HttpClient - now there is exactly one shared, actually-loaded instance for every
+// consumer.
+builder.Services.AddSingleton<DhanSpotInstrumentMaster>(sp => new DhanSpotInstrumentMaster(
+    sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(DhanSpotInstrumentMaster)),
+    sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<DhanOptions>>(),
+    sp.GetRequiredService<ILogger<DhanSpotInstrumentMaster>>()));
 builder.Services.AddHttpClient<DhanTotpAuthService>();
 builder.Services.AddSingleton<DhanHistoricalDataService>();
 builder.Services.AddSingleton<DhanRollingOptionDataService>();
