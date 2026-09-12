@@ -353,6 +353,7 @@ public sealed class BacktestService
             AtmPeBars = peBars,
             AtmCeVolumeBars = BacktestUtil.AggregateCandlesWithVolume(ToCandlesWithVolume(cdvState.GetAtmClosedVolumeBars(true)), timeframe),
             AtmPeVolumeBars = BacktestUtil.AggregateCandlesWithVolume(ToCandlesWithVolume(cdvState.GetAtmClosedVolumeBars(false)), timeframe),
+            FuturesVolumeBars = BacktestUtil.AggregateCandlesWithVolume(_spotFeed.GetFuturesVolumeBars(underlying), timeframe),
             AtmStrike = cdvState.AtmStrike,
             ObvCeSeries = BacktestUtil.AggregateLine(cdvState.GetObvSeries(true), timeframe),
             ObvPeSeries = BacktestUtil.AggregateLine(cdvState.GetObvSeries(false), timeframe),

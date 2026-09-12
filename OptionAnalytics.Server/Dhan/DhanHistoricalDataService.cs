@@ -26,6 +26,7 @@ public sealed class DhanHistoricalDataService
 {
     private const string Instrument = "INDEX";
     private const string OptionInstrument = "OPTIDX";
+    private const string FuturesInstrument = "FUTIDX";
 
     private readonly DhanApiClient _api;
     private readonly ILogger<DhanHistoricalDataService> _logger;
@@ -121,12 +122,23 @@ public sealed class DhanHistoricalDataService
     /// option history is missing" indistinguishable from "those strikes simply didn't trade", with
     /// no way to tell which without turning on Debug logging in production. The caller aggregates
     /// these into one line per backfill batch.</summary>
-    public async Task<(IReadOnlyList<CandleWithVolume> Candles, string? Error)> GetIntradayOptionCandlesAsync(
-        uint securityId, string dhanSegment, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken)
+    public Task<(IReadOnlyList<CandleWithVolume> Candles, string? Error)> GetIntradayOptionCandlesAsync(
+        uint securityId, string dhanSegment, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken) =>
+        GetIntradayDerivativeCandlesAsync(securityId, dhanSegment, OptionInstrument, fromDay, toDay, intervalMinutes, cancellationToken);
+
+    /// <summary>The same call for an index FUTURE (instrument "FUTIDX") - what
+    /// DhanFuturesInstrument exists for. An index carries no volume of its own, so this is the only
+    /// route to a real traded-volume series for NIFTY/BANKNIFTY/SENSEX.</summary>
+    public Task<(IReadOnlyList<CandleWithVolume> Candles, string? Error)> GetIntradayFuturesCandlesAsync(
+        uint securityId, string dhanSegment, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken) =>
+        GetIntradayDerivativeCandlesAsync(securityId, dhanSegment, FuturesInstrument, fromDay, toDay, intervalMinutes, cancellationToken);
+
+    private async Task<(IReadOnlyList<CandleWithVolume> Candles, string? Error)> GetIntradayDerivativeCandlesAsync(
+        uint securityId, string dhanSegment, string instrumentType, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken)
     {
         if (!_api.HasSession)
         {
-            _logger.LogWarning("Cannot fetch intraday option candles for {Segment}:{Id} - Dhan is not authenticated.", dhanSegment, securityId);
+            _logger.LogWarning("Cannot fetch intraday {Instrument} candles for {Segment}:{Id} - Dhan is not authenticated.", instrumentType, dhanSegment, securityId);
             return (Array.Empty<CandleWithVolume>(), "Dhan is not authenticated");
         }
 
@@ -134,21 +146,21 @@ public sealed class DhanHistoricalDataService
         {
             securityId = securityId.ToString(CultureInfo.InvariantCulture),
             exchangeSegment = dhanSegment,
-            instrument = OptionInstrument,
+            instrument = instrumentType,
             interval = intervalMinutes.ToString(CultureInfo.InvariantCulture),
             fromDate = $"{fromDay:yyyy-MM-dd} 09:15:00",
             toDate = $"{toDay:yyyy-MM-dd} 15:30:00",
         };
 
         using var response = await _api.SendAsync(HttpMethod.Post, "/charts/intraday", payload,
-            $"option intraday candles ({dhanSegment}:{securityId}, {fromDay:yyyy-MM-dd}..{toDay:yyyy-MM-dd})", cancellationToken);
+            $"{instrumentType} intraday candles ({dhanSegment}:{securityId}, {fromDay:yyyy-MM-dd}..{toDay:yyyy-MM-dd})", cancellationToken);
 
         if (!response.Success)
         {
             // Debug, not Warning - routine for a strike that simply didn't trade/exist for part of
             // the lookback window (added to the chain partway through, or never traded some days),
             // which CdvHostedService.RecenterAsync would otherwise log once per strike as noise.
-            _logger.LogDebug("Option intraday candle request failed for {Segment}:{Id} ({From}..{To}) - {Error}", dhanSegment, securityId, fromDay, toDay, response.ErrorMessage);
+            _logger.LogDebug("{Instrument} intraday candle request failed for {Segment}:{Id} ({From}..{To}) - {Error}", instrumentType, dhanSegment, securityId, fromDay, toDay, response.ErrorMessage);
             return (Array.Empty<CandleWithVolume>(), string.IsNullOrWhiteSpace(response.ErrorMessage) ? $"HTTP {(int)response.StatusCode}" : response.ErrorMessage);
         }
 

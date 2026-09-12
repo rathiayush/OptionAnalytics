@@ -159,7 +159,38 @@ public sealed class VwmaCloseCrossStrategyTests
         Assert.Equal(12, byTime[At(0)]);
     }
 
-    private static BacktestStrategyContext ContextWith(CandleWithVolume[] ce, CandleWithVolume[] pe) => new()
+    [Fact]
+    public void VolumeByTime_PrefersTheFuturesVolumeWhenItExists()
+    {
+        // The front-month future is the honest weight for an index - the most liquid single
+        // instrument on the underlying - so when it is available the option chain's volume must not
+        // be mixed in or added on top. The answer here is the future's 99, not 99+12.
+        var context = ContextWith(
+            ce: new[] { new CandleWithVolume(At(0), 10, 10, 10, 10, 7) },
+            pe: new[] { new CandleWithVolume(At(0), 20, 20, 20, 20, 5) },
+            futures: new[] { new CandleWithVolume(At(0), 100, 100, 100, 100, 99) });
+
+        var byTime = VwmaCloseCrossStrategy.VolumeByTime(context);
+
+        Assert.Equal(99, byTime[At(0)]);
+    }
+
+    [Fact]
+    public void VolumeByTime_FallsBackToOptionVolumeWhenNoFutureResolved()
+    {
+        // No future (none listed, or Dhan served nothing) must not mean no weights at all - the
+        // option chain is a worse measure of the underlying's activity but far better than none.
+        var context = ContextWith(
+            ce: new[] { new CandleWithVolume(At(0), 10, 10, 10, 10, 7) },
+            pe: new[] { new CandleWithVolume(At(0), 20, 20, 20, 20, 5) },
+            futures: Array.Empty<CandleWithVolume>());
+
+        var byTime = VwmaCloseCrossStrategy.VolumeByTime(context);
+
+        Assert.Equal(12, byTime[At(0)]);
+    }
+
+    private static BacktestStrategyContext ContextWith(CandleWithVolume[] ce, CandleWithVolume[] pe, CandleWithVolume[]? futures = null) => new()
     {
         Underlying = "NIFTY",
         TimeframeMinutes = 1,
@@ -176,6 +207,7 @@ public sealed class VwmaCloseCrossStrategyTests
         AtmPeBars = Array.Empty<Candle>(),
         AtmCeVolumeBars = ce,
         AtmPeVolumeBars = pe,
+        FuturesVolumeBars = futures ?? Array.Empty<CandleWithVolume>(),
         AtmStrike = null,
     };
 }
