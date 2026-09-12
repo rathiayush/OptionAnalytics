@@ -250,6 +250,7 @@ const NAV_ITEMS = [
   { key: '/', label: 'Dashboard' },
   { key: '/backtest', label: 'Backtrack' },
   { key: '/strike-data', label: 'Strike Data' },
+  { key: '/expired-options', label: 'Expired Options' },
   { key: '/triggers', label: 'Triggers' },
   { key: '/contracts', label: 'Contracts' },
 ]

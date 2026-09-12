@@ -163,6 +163,10 @@ market data (see `StrategyTriggerStore`). Those live in a JSON file whose locati
 `Storage__TriggersPath`; compose points it at the `optionanalytics-data` volume, so triggers survive
 a redeploy. Without that volume they reset every deploy.
 
+The login cookie's Data Protection key ring is persisted the same way (`Storage__DataProtectionKeysPath`,
+also on the `optionanalytics-data` volume) - without it, every redeploy would generate a fresh key
+ring and silently sign everyone out, regardless of the cookie's own 14-day expiry.
+
 ### Dokploy
 
 Create an application pointed at this repository, choose the branch to deploy, and pick either

@@ -1,5 +1,6 @@
 using System.Reflection;
 using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Authorization;
 using OptionAnalytics.Server.Auth;
 using OptionAnalytics.Server.Dhan;
@@ -22,6 +23,20 @@ builder.Services.Configure<AuthOptions>(builder.Configuration.GetSection(AuthOpt
 builder.Services.AddHttpClient<TelegramAlertService>();
 
 builder.Services.AddSingleton<AuthService>();
+
+// Persists the Data Protection key ring that encrypts/signs the login cookie below to the same
+// volume strategy-triggers.json already lives on (see docker-compose.yml). Without this, ASP.NET
+// Core generates a fresh, in-memory-only key ring every time the container starts - which silently
+// invalidates every outstanding "oa_session" cookie on the very next redeploy, forcing everyone to
+// log in again regardless of the 14-day ExpireTimeSpan below. Keeping the key ring on disk is what
+// actually makes a login survive a redeploy; the cookie itself was never the problem.
+var dataProtectionKeysPath = builder.Configuration["Storage:DataProtectionKeysPath"];
+if (string.IsNullOrWhiteSpace(dataProtectionKeysPath))
+    dataProtectionKeysPath = Path.Combine(builder.Environment.ContentRootPath, "dataprotection-keys");
+Directory.CreateDirectory(dataProtectionKeysPath);
+builder.Services.AddDataProtection()
+    .SetApplicationName("OptionAnalytics")
+    .PersistKeysToFileSystem(new DirectoryInfo(dataProtectionKeysPath));
 
 // Cookie sign-in for the app's two fixed accounts (AuthController/AuthService) - this app has no
 // user database, so no need for anything heavier. OnRedirectToLogin/OnRedirectToAccessDenied are
@@ -72,6 +87,7 @@ builder.Services.AddHttpClient<DhanApiClient>();
 builder.Services.AddHttpClient<DhanSpotInstrumentMaster>();
 builder.Services.AddHttpClient<DhanTotpAuthService>();
 builder.Services.AddSingleton<DhanHistoricalDataService>();
+builder.Services.AddSingleton<DhanRollingOptionDataService>();
 builder.Services.AddSingleton<DhanMarketFeedClient>();
 // AddHttpClient<DhanOptionChainMaster>() (the pattern every other typed client here uses) registers
 // it TRANSIENT - a brand new instance, with its own empty in-memory dictionary, for every distinct

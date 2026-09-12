@@ -20,6 +20,10 @@ services:
       # Onto the mounted volume below - the container's content root is not persistent.
       Storage__TriggersPath: /app/data/strategy-triggers.json
       Storage__OrderHistoryPath: /app/data/trigger-order-history.json
+      # Keeps the login cookie's signing/encryption key ring on the same persistent volume, so
+      # everyone stays logged in across a redeploy instead of the whole key ring (and every
+      # outstanding session) resetting every time the container restarts.
+      Storage__DataProtectionKeysPath: /app/data/dataprotection-keys
 
       # Dhan. Either supply a long-lived AccessToken, or leave it empty and set Pin + TotpSecret so
       # DhanTotpAutoRenewalHostedService logs in on its own and keeps the token fresh.
