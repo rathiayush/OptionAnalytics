@@ -73,30 +73,20 @@ public sealed class ExpiredOptionBacktestService
     /// Tuesday-expiry convention has been in effect (SEBI's November 2024 rule).</summary>
     private const int CalendarMonthsBack = 12;
 
-    /// <summary>The fallback safety margin GetAvailableExpiries uses when it cannot read
-    /// Backtrack's own live-tracked boundary at all (spot history for this underlying has not
-    /// backfilled yet). Reuses HistoryWindow's own real cap - the widest the live window could
-    /// possibly be - rather than a separate guess, so this fallback can never be narrower than
-    /// what the live window might actually turn out to cover once it does load.</summary>
-    private const int ConservativeLiveWindowDays = HistoryWindow.LookbackCalendarDays;
-
     private readonly DhanSpotInstrumentMaster _instrumentMaster;
     private readonly DhanHistoricalDataService _historicalData;
     private readonly DhanRollingOptionDataService _rollingOption;
-    private readonly SpotFeedHostedService _spotFeed;
     private readonly IReadOnlyDictionary<string, IBacktestStrategy> _strategies;
 
     public ExpiredOptionBacktestService(
         DhanSpotInstrumentMaster instrumentMaster,
         DhanHistoricalDataService historicalData,
         DhanRollingOptionDataService rollingOption,
-        SpotFeedHostedService spotFeed,
         IEnumerable<IBacktestStrategy> strategies)
     {
         _instrumentMaster = instrumentMaster;
         _historicalData = historicalData;
         _rollingOption = rollingOption;
-        _spotFeed = spotFeed;
         _strategies = strategies.Where(s => SupportedStrategyKeys.Contains(s.Key)).ToDictionary(s => s.Key);
     }
 
@@ -106,60 +96,30 @@ public sealed class ExpiredOptionBacktestService
     public IReadOnlyList<BacktestStrategyInfo> GetStrategies() =>
         _strategies.Values.Select(s => new BacktestStrategyInfo(s.Key, s.Name, s.Description, s.Parameters)).OrderBy(s => s.Name).ToList();
 
-    /// <summary>Every date this page will actually accept for expiryDate - the two things a real
-    /// run getting a wrong-contract splice turned out to require, both enforced here rather than
-    /// left to the free-form date picker that let it happen:
-    ///   1. A REAL listed expiry (see ExpiryCalendar) - not just any Tuesday-ish date a user might
-    ///      type, since the anchoring logic (see this class's own top-of-file doc comment) assumes
-    ///      fromDate sits just inside the ACTUAL target contract's own life, which only holds when
-    ///      expiryDate itself is genuine.
-    ///   2. Not already covered by Backtrack's own live-tracked history for this underlying, newest
-    ///      first - that data is already verified-correct and continuously updated; re-fetching the
-    ///      same days through the rolling-option endpoint adds risk (as the wrong-contract splice
-    ///      demonstrated) for zero benefit when Backtrack already answers it correctly.
+    /// <summary>Every date this page will actually accept for expiryDate - a REAL listed expiry
+    /// (see ExpiryCalendar), not just any Tuesday-ish date a user might type, since the anchoring
+    /// logic (see this class's own top-of-file doc comment) assumes fromDate sits just inside the
+    /// ACTUAL target contract's own life, which only holds when expiryDate itself is genuine.
     /// Descending (most recent first), since a recent expiry is usually the more useful default.
     ///
-    /// LiveBoundaryKnown says whether Backtrack's own boundary was actually read (true) or this
-    /// fell back to ConservativeLiveWindowDays because it couldn't be (false) - surfaced so a
-    /// suspiciously short/empty list is diagnosable (spot history hasn't backfilled for this
-    /// underlying yet, worth checking the Dashboard for) instead of looking like unexplained
-    /// missing months.</summary>
-    public (IReadOnlyList<DateOnly> Expiries, bool LiveBoundaryKnown) GetAvailableExpiries(string underlying, string expiryFlag)
+    /// This deliberately does NOT exclude dates already covered by Backtrack's own live-tracked
+    /// history (an earlier version of this method did) - the caller is expected to keep their own
+    /// lookbackDays within the target contract's own life (see MaxLookbackDays) to avoid
+    /// re-fetching across a live contract boundary.</summary>
+    public IReadOnlyList<DateOnly> GetAvailableExpiries(string underlying, string expiryFlag)
     {
-        if (!StrikeStepByUnderlying.ContainsKey(underlying)) return (Array.Empty<DateOnly>(), true);
+        if (!StrikeStepByUnderlying.ContainsKey(underlying)) return Array.Empty<DateOnly>();
         if (string.Equals(underlying, "BANKNIFTY", StringComparison.OrdinalIgnoreCase) && string.Equals(expiryFlag, "WEEK", StringComparison.OrdinalIgnoreCase))
-            return (Array.Empty<DateOnly>(), true);
+            return Array.Empty<DateOnly>();
 
         var today = IstClock.Today();
         var rangeStart = today.AddMonths(-CalendarMonthsBack);
-        var liveTrackedFrom = GetLiveTrackedBoundary(underlying);
-        // Strictly before whatever Backtrack itself already holds. When that boundary is unknown
-        // (spot history for this underlying has not backfilled yet - a startup race, or a genuine
-        // backfill problem worth investigating on its own), fall back to a fixed, conservative
-        // safety margin instead of the FULL calendar range - failing closed should only hide the
-        // recent, actually-ambiguous dates, not silently empty the whole dropdown back to
-        // CalendarMonthsBack. That was a real bug: it hid dates many weeks older than any plausible
-        // live window right alongside the genuinely-overlapping recent ones, with no way to tell
-        // the two apart from an empty list.
-        var candidateEnd = (liveTrackedFrom ?? today.AddDays(-ConservativeLiveWindowDays)).AddDays(-1);
 
         var candidates = string.Equals(expiryFlag, "MONTH", StringComparison.OrdinalIgnoreCase)
             ? ExpiryCalendar.MonthlyExpiries(rangeStart, today)
             : ExpiryCalendar.WeeklyExpiries(rangeStart, today);
 
-        var expiries = candidates.Where(d => d <= candidateEnd).OrderByDescending(d => d).ToList();
-        return (expiries, liveTrackedFrom is not null);
-    }
-
-    /// <summary>The earliest IST calendar date Backtrack's own live-tracked history currently holds
-    /// for this underlying - null if nothing has backfilled yet. Real and continuously accurate
-    /// (unlike ExpiryCalendar's computed dates), since it reads SpotFeedHostedService's actual
-    /// in-memory candles rather than assuming anything about how far back that window reaches.</summary>
-    private DateOnly? GetLiveTrackedBoundary(string underlying)
-    {
-        if (!_spotFeed.States.TryGetValue(underlying, out var state)) return null;
-        var candles = state.GetClosedCandles();
-        return candles.Count == 0 ? null : candles.Min(c => IstClock.IstDate(c.Time));
+        return candidates.OrderByDescending(d => d).ToList();
     }
 
     public async Task<ExpiredBacktestResult> RunAsync(
@@ -190,10 +150,6 @@ public sealed class ExpiredOptionBacktestService
         // have offered - distinguishing the two failure reasons since they have different remedies.
         var cadence = string.Equals(expiryFlag, "MONTH", StringComparison.OrdinalIgnoreCase) ? "monthly" : "weekly";
         var today = IstClock.Today();
-        var liveTrackedFrom = GetLiveTrackedBoundary(underlying);
-        if (liveTrackedFrom is { } boundary && expiryDate >= boundary)
-            return ExpiredBacktestResult.Failed(
-                $"{expiryDate:dd MMM yyyy} is already covered by Backtrack's own live-tracked history for {underlying} (from {boundary:dd MMM yyyy} onward) - use Backtrack for it instead. Expired Backtest is only for contracts that have genuinely already rolled out of that live window.");
 
         var isRealExpiry = string.Equals(expiryFlag, "MONTH", StringComparison.OrdinalIgnoreCase)
             ? ExpiryCalendar.MonthlyExpiries(expiryDate, expiryDate).Count > 0

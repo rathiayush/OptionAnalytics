@@ -67,11 +67,6 @@ export default function ExpiredBacktestPage() {
   const [expiryDate, setExpiryDate] = useState(null)
   const [expiries, setExpiries] = useState([])
   const [expiriesLoading, setExpiriesLoading] = useState(false)
-  // False means the backend could not read Backtrack's own live-tracked boundary for this
-  // underlying (spot history hasn't backfilled yet) and fell back to a conservative fixed margin
-  // instead - the list is still safe, but may be shorter than it will be once that boundary is
-  // known, which is worth explaining rather than leaving as an unexplained gap.
-  const [expiriesLiveBoundaryKnown, setExpiriesLiveBoundaryKnown] = useState(true)
   // Defaults to "the whole contract's life" (the cadence's own max) - reset whenever the cadence
   // changes, since WEEK's and MONTH's safe caps are very different (see MAX_LOOKBACK_DAYS).
   const [lookbackDays, setLookbackDays] = useState(MAX_LOOKBACK_DAYS.WEEK)
@@ -103,9 +98,9 @@ export default function ExpiredBacktestPage() {
   }, [expiryFlag])
 
   // Reloads the list of real, actually-usable expiries whenever underlying/cadence changes -
-  // newest first (see the backend's own GetAvailableExpiries), so the most recent one still
-  // outside Backtrack's live window is the natural default. Clears the current selection first so
-  // a stale date from a different underlying/cadence can never briefly be submitted.
+  // newest first (see the backend's own GetAvailableExpiries), so the most recent listed expiry
+  // is the natural default. Clears the current selection first so a stale date from a different
+  // underlying/cadence can never briefly be submitted.
   useEffect(() => {
     if (!underlying) return
     setExpiryDate(null)
@@ -115,13 +110,11 @@ export default function ExpiredBacktestPage() {
       .then((body) => {
         const list = body?.expiries ?? []
         setExpiries(list)
-        setExpiriesLiveBoundaryKnown(body?.liveBoundaryKnown ?? true)
         setExpiryDate(list[0] ?? null)
       })
       .catch((err) => {
         console.error('Failed to load available expiries:', err)
         setExpiries([])
-        setExpiriesLiveBoundaryKnown(true)
       })
       .finally(() => setExpiriesLoading(false))
   }, [underlying, expiryFlag])
@@ -275,7 +268,7 @@ export default function ExpiredBacktestPage() {
               <Space direction="vertical" size={2}>
                 <Text type="secondary" style={{ fontSize: 12 }}>
                   Expiry date{' '}
-                  <Tooltip title="Only real listed expiries are offered, and only ones not already covered by Backtrack's own live-tracked history - a typed date that wasn't a genuine expiry previously let the fetch window cross into a different contract and splice their premiums together.">
+                  <Tooltip title="Only real listed expiries are offered - a typed date that wasn't a genuine expiry previously let the fetch window cross into a different contract and splice their premiums together. Keep Lookback (days) within this contract's own life to avoid overlapping Backtrack's own live-tracked history for this underlying.">
                     <InfoCircleOutlined />
                   </Tooltip>
                 </Text>
@@ -288,11 +281,6 @@ export default function ExpiredBacktestPage() {
                   options={expiries.map((d) => ({ value: d, label: dayjs(d).format('DD MMM YYYY') }))}
                   notFoundContent={expiriesLoading ? 'Loading…' : 'None available'}
                 />
-                {!expiriesLoading && !expiriesLiveBoundaryKnown && (
-                  <Text type="warning" style={{ fontSize: 11 }}>
-                    Backtrack's own live boundary for {underlying} isn't known yet (spot history may still be loading) - this list is using a conservative fallback and may be shorter than usual.
-                  </Text>
-                )}
               </Space>
               <Space direction="vertical" size={2}>
                 <Text type="secondary" style={{ fontSize: 12 }}>
