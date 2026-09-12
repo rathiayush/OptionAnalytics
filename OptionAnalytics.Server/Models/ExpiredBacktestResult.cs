@@ -22,7 +22,13 @@ namespace OptionAnalytics.Server.Models;
 /// strike step of each other - a wider gap means Dhan's own contract resolution landed somewhere
 /// this app did not ask for, which is the direct, checkable explanation for an implausible premium
 /// (e.g. a "near-ATM" option priced in the thousands) rather than that premium being a genuine, just
-/// surprising, price.</summary>
+/// surprising, price.
+///
+/// SpotChartBars is the underlying's own spot candle series for the page's chart - deliberately
+/// WIDER than [fromDay,toDay] (see ExpiredOptionBacktestService.ChartPaddingDays), a few days of
+/// spot history on each side of the actual lookback window purely so a signal sitting right at the
+/// window's own edge has visible context around it, not because the strategy itself saw any of that
+/// padding.</summary>
 public sealed record ExpiredBacktestResult(
     bool Success,
     string? Error,
@@ -42,9 +48,10 @@ public sealed record ExpiredBacktestResult(
     decimal? PeResolvedStrike,
     decimal CeExpectedStrike,
     decimal PeExpectedStrike,
-    int EffectiveLookbackDays)
+    int EffectiveLookbackDays,
+    IReadOnlyList<Candle> SpotChartBars)
 {
     public static ExpiredBacktestResult Failed(string error) =>
         new(false, error, Array.Empty<BacktestTrade>(), Array.Empty<BacktestSignal>(), 0, "", "", null, null, 0, 0, 0,
-            Array.Empty<DateTimeOffset>(), Array.Empty<DateTimeOffset>(), null, null, 0, 0, 0);
+            Array.Empty<DateTimeOffset>(), Array.Empty<DateTimeOffset>(), null, null, 0, 0, 0, Array.Empty<Candle>());
 }

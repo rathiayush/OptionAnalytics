@@ -73,6 +73,11 @@ public sealed class ExpiredOptionBacktestService
     /// Tuesday-expiry convention has been in effect (SEBI's November 2024 rule).</summary>
     private const int CalendarMonthsBack = 12;
 
+    /// <summary>How many extra days of spot history the CHART fetches on each side of the actual
+    /// [fromDay,toDay] lookback window - see RunAsync's own comment on why this is safe to widen
+    /// (spot has no contract of its own to splice across) even though CE/PE's window cannot be.</summary>
+    private const int ChartPaddingDays = 2;
+
     private readonly DhanSpotInstrumentMaster _instrumentMaster;
     private readonly DhanHistoricalDataService _historicalData;
     private readonly DhanRollingOptionDataService _rollingOption;
@@ -179,7 +184,19 @@ public sealed class ExpiredOptionBacktestService
         var toDay = expiryDate;
         var fromDay = expiryDate.AddDays(-effectiveLookbackDays);
 
-        var (spotBars1m, spotError) = await _historicalData.GetIntradayCandlesAsync(instrument.SecurityId, instrument.DhanSegment, fromDay, toDay, 1, cancellationToken);
+        // The spot CHART shown alongside the trade table is fetched a few days wider than the
+        // lookback window itself on both sides - purely for visual context around it, so a signal
+        // sitting right at the window's own edge doesn't look like it appeared out of nowhere. Safe
+        // to widen ONLY on the spot side: unlike CE/PE (see this class's own top-of-file doc
+        // comment), the underlying INDEX has no "expired contract" of its own to accidentally splice
+        // across, so this padding carries none of the risk MaxLookbackDays exists to avoid. The
+        // strategy itself still only ever sees spotBars1m below (the exact [fromDay,toDay] slice),
+        // unaffected by this wider fetch.
+        var chartFromDay = fromDay.AddDays(-ChartPaddingDays);
+        var chartToDay = toDay.AddDays(ChartPaddingDays);
+
+        var (spotBarsForChart, spotError) = await _historicalData.GetIntradayCandlesAsync(instrument.SecurityId, instrument.DhanSegment, chartFromDay, chartToDay, 1, cancellationToken);
+        var spotBars1m = spotBarsForChart.Where(b => IstClock.IstDate(b.Time) >= fromDay && IstClock.IstDate(b.Time) <= toDay).ToList();
         if (spotBars1m.Count == 0)
             return ExpiredBacktestResult.Failed(spotError is null
                 ? $"No spot history for {underlying} between {fromDay:dd MMM yyyy} and {toDay:dd MMM yyyy} - the market may simply have been closed the whole window, or Dhan's intraday history may not reach back that far for a window this old."
@@ -240,6 +257,10 @@ public sealed class ExpiredOptionBacktestService
         var ceCandlesTf = BacktestUtil.AggregateCandles(ceCandles1m, timeframe);
         var peCandlesTf = BacktestUtil.AggregateCandles(peCandles1m, timeframe);
 
+        // The WIDER (chartFromDay..chartToDay) series, not spotBars1m - what the page's own chart
+        // plots, so the padding around the lookback window this method fetched actually reaches it.
+        var spotChartCandlesTf = BacktestUtil.AggregateCandles(spotBarsForChart, timeframe);
+
         var context = new BacktestStrategyContext
         {
             Underlying = underlying,
@@ -272,7 +293,8 @@ public sealed class ExpiredOptionBacktestService
             // page should show as "how much of the single target contract's own history this run
             // used."
             spotBars1m.Count, ceUsed.Count, peUsed.Count, ceSplices, peSplices,
-            ceResolvedStrike, peResolvedStrike, ceExpectedStrike, peExpectedStrike, effectiveLookbackDays);
+            ceResolvedStrike, peResolvedStrike, ceExpectedStrike, peExpectedStrike, effectiveLookbackDays,
+            spotChartCandlesTf);
     }
 
     private static string StrikeToken(int steps) => steps == 0 ? "ATM" : $"ATM{(steps > 0 ? "+" : "")}{steps}";
