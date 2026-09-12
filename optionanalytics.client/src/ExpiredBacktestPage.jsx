@@ -20,11 +20,13 @@ const UNDERLYINGS = ['NIFTY', 'BANKNIFTY']
 // than harmless rounding.
 const STRIKE_STEP_BY_UNDERLYING = { NIFTY: 50, BANKNIFTY: 100 }
 
-// Matches ExpiredOptionBacktestService.MaxLookbackDays - comfortably under each cadence's real
-// cycle length (7 days weekly, ~28-31 monthly) so the window can never reach back into the
-// PREVIOUS contract's own life. Only used here to bound the "Lookback" control and default it to
-// "the whole contract's life"; the backend clamps independently regardless of what this sends.
-const MAX_LOOKBACK_DAYS = { WEEK: 5, MONTH: 25 }
+// Matches ExpiredOptionBacktestService.MaxLookbackDays - under each cadence's real cycle length
+// (7 days weekly, 28-35 monthly) so the window can never reach back into the PREVIOUS contract's
+// own life. MONTH is flush against the shortest possible real monthly cycle (28 days) rather than
+// comfortably under it, at the user's own explicit request. Only used here to bound the
+// "Lookback" control and default it to "the whole contract's life"; the backend clamps
+// independently regardless of what this sends.
+const MAX_LOOKBACK_DAYS = { WEEK: 5, MONTH: 28 }
 
 const STORED_STRATEGY_KEY = 'optionanalytics.expiredBacktest.strategyKey'
 const STORED_PARAM_VALUES = 'optionanalytics.expiredBacktest.paramValues'
@@ -397,7 +399,7 @@ export default function ExpiredBacktestPage() {
               <Space direction="vertical" size={2}>
                 <Text type="secondary" style={{ fontSize: 12 }}>
                   Lookback (days){' '}
-                  <Tooltip title="Capped well under this cadence's own real cycle length so the window can never reach into the PREVIOUS contract - that's what lets this resolve to exactly the single contract expiring on your chosen date.">
+                  <Tooltip title="Capped at or under this cadence's own real cycle length so the window can never reach into the PREVIOUS contract - that's what lets this resolve to exactly the single contract expiring on your chosen date. Monthly's cap now has little to no safety margin left in a short (28-day) cycle - a holiday-shifted expiry could push it into ambiguity.">
                     <InfoCircleOutlined />
                   </Tooltip>
                 </Text>

@@ -22,12 +22,17 @@ public sealed class ExpiredOptionBacktestServiceTests
     }
 
     [Fact]
-    public void Monthly_CapsWellUnderTheRealCalendarMonth()
+    public void Monthly_CapsAtOrUnderTheRealCalendarMonth()
     {
-        // Comfortably under the shortest real month (28 days) for the same reason.
+        // Raised to 28 (from a previously more conservative 25) at the user's explicit request -
+        // 28 days is the SHORTEST gap two consecutive real last-Tuesday-of-month expiries can ever
+        // be apart (always a multiple of 7, 28-35 days), so this is now flush against the worst
+        // case rather than comfortably under it: a holiday-shifted previous expiry in exactly a
+        // 28-day cycle has zero margin left. Must never exceed 28 - that would let fromDay reach
+        // AT OR PAST a real previous expiry even with no holiday shift at all.
         var days = ExpiredOptionBacktestService.MaxLookbackDays("MONTH");
 
-        Assert.InRange(days, 1, 27);
+        Assert.InRange(days, 1, 28);
     }
 
     [Fact]
