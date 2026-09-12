@@ -144,6 +144,21 @@ public sealed class ExpiredOptionBacktestServiceTests
     }
 
     [Fact]
+    public void DetectPossibleSplices_IgnoresARatioJumpTooSmallInAbsoluteTerms()
+    {
+        // A real bug from a real run: a deep-OTM strike's own premium genuinely swinging several-
+        // fold in its final hour before expiry (0.50 -> 2.50 here, a 5x ratio) on an almost-zero
+        // base - not a splice, just what a near-worthless option's own last-hour gamma looks like.
+        // The ratio alone used to trim the ENTIRE rest of the series away on jumps like this.
+        var t0 = new DateTimeOffset(2024, 8, 1, 15, 10, 0, TimeSpan.FromHours(5.5));
+        var bars = new List<CandleWithVolume> { Bar(t0, 0.5m, 0.5m), Bar(t0.AddMinutes(1), 2.5m, 2.5m) };
+
+        var splices = ExpiredOptionBacktestService.DetectPossibleSplices(bars);
+
+        Assert.Empty(splices);
+    }
+
+    [Fact]
     public void DetectPossibleSplices_CapsAtTenEvenWithManyJumps()
     {
         var t0 = new DateTimeOffset(2024, 8, 1, 9, 15, 0, TimeSpan.FromHours(5.5));
