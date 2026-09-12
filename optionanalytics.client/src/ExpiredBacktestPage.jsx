@@ -473,7 +473,7 @@ export default function ExpiredBacktestPage() {
         {runError && <Alert type="error" showIcon message={runError} />}
 
         {result && (() => {
-          const spliceCount = (result.ceSpliceTimes?.length ?? 0) + (result.peSpliceTimes?.length ?? 0)
+          const spliceCount = (result.ceSplices?.length ?? 0) + (result.peSplices?.length ?? 0)
           const step = STRIKE_STEP_BY_UNDERLYING[underlying] ?? 50
           // Dhan's own resolved strike vs what this app expected from its own real spot - a gap
           // wider than one strike step means the contract resolution itself landed somewhere this
@@ -506,7 +506,10 @@ export default function ExpiredBacktestPage() {
                   {spliceCount > 0 && (
                     <Text type="warning">
                       Unexpected: a contract splice was detected at{' '}
-                      {[...(result.ceSpliceTimes ?? []).map((t) => `CE ${fmtIstDateTime(t)}`), ...(result.peSpliceTimes ?? []).map((t) => `PE ${fmtIstDateTime(t)}`)].join(', ')}
+                      {[
+                        ...(result.ceSplices ?? []).map((s) => `CE ${fmtIstDateTime(s.time)} (${fmtPrice(s.previousClose)} → ${fmtPrice(s.thisOpen)})`),
+                        ...(result.peSplices ?? []).map((s) => `PE ${fmtIstDateTime(s.time)} (${fmtPrice(s.previousClose)} → ${fmtPrice(s.thisOpen)})`),
+                      ].join(', ')}
                       {' '}(a large, sudden premium jump). The lookback is capped specifically so this should not happen - the data before that point has been trimmed away automatically, but seeing this at all is a stronger sign something is off than it used to be, not routine.
                     </Text>
                   )}

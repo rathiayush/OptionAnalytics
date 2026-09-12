@@ -13,13 +13,13 @@ namespace OptionAnalytics.Server.Models;
 /// prior expiries actually reach - see BuildMonthlyFetchSegments), which the page should show so a
 /// smaller-than-asked-for window doesn't read as a bug.
 ///
-/// CeSpliceTimes/PeSpliceTimes (see ExpiredOptionBacktestService.DetectPossibleSplices) are the
-/// timestamps of any suspiciously large premium jump found in that side's own series - a defensive
-/// backstop against a wrong contract resolution rather than an expected occurrence for a SINGLE-
-/// segment run, but genuinely possible (not yet confirmed either way) at the boundary between a
-/// monthly run's two fetch segments, if it used two - see BuildMonthlyFetchSegments's own doc
-/// comment. A splice found anywhere else is stronger evidence something is still off than it used
-/// to be.
+/// CeSplices/PeSplices (see ExpiredOptionBacktestService.DetectPossibleSplices and
+/// PossibleSplice's own doc comment) are any suspiciously large premium jump found in that side's
+/// own series, with the actual prices either side of it - a defensive backstop against a wrong
+/// contract resolution rather than an expected occurrence for a SINGLE-segment run, but genuinely
+/// possible (not yet confirmed either way) at the boundary between a monthly run's two fetch
+/// segments, if it used two - see BuildMonthlyFetchSegments's own doc comment. A splice found
+/// anywhere else is stronger evidence something is still off than it used to be.
 ///
 /// Ce/PeResolvedStrike are the ACTUAL absolute strike Dhan itself reported resolving "ATM+-K" to
 /// (null if Dhan's response omitted the "strike" field entirely); Ce/PeExpectedStrike are what this
@@ -47,8 +47,8 @@ public sealed record ExpiredBacktestResult(
     int SpotBarCount,
     int CeBarCount,
     int PeBarCount,
-    IReadOnlyList<DateTimeOffset> CeSpliceTimes,
-    IReadOnlyList<DateTimeOffset> PeSpliceTimes,
+    IReadOnlyList<PossibleSplice> CeSplices,
+    IReadOnlyList<PossibleSplice> PeSplices,
     decimal? CeResolvedStrike,
     decimal? PeResolvedStrike,
     decimal CeExpectedStrike,
@@ -58,5 +58,5 @@ public sealed record ExpiredBacktestResult(
 {
     public static ExpiredBacktestResult Failed(string error) =>
         new(false, error, Array.Empty<BacktestTrade>(), Array.Empty<BacktestSignal>(), 0, "", "", null, null, 0, 0, 0,
-            Array.Empty<DateTimeOffset>(), Array.Empty<DateTimeOffset>(), null, null, 0, 0, 0, Array.Empty<Candle>());
+            Array.Empty<PossibleSplice>(), Array.Empty<PossibleSplice>(), null, null, 0, 0, 0, Array.Empty<Candle>());
 }
