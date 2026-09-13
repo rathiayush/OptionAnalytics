@@ -12,10 +12,12 @@ namespace OptionAnalytics.Server.Controllers;
 public sealed class ExpiredBacktestController : ControllerBase
 {
     private readonly ExpiredOptionBacktestService _service;
+    private readonly SpotFeedHostedService _spotFeed;
 
-    public ExpiredBacktestController(ExpiredOptionBacktestService service)
+    public ExpiredBacktestController(ExpiredOptionBacktestService service, SpotFeedHostedService spotFeed)
     {
         _service = service;
+        _spotFeed = spotFeed;
     }
 
     /// <summary>Just the strategies this page can run - see ExpiredOptionBacktestService.
@@ -79,13 +81,24 @@ public sealed class ExpiredBacktestController : ControllerBase
     /// including the per-bar RESOLVED strike and any splice this app's own safety net already flags
     /// - see ExpiredOptionBacktestService.GetRollingChartAsync's own doc comment for why this exists
     /// separately from POST /run (a real premium anomaly is easier to see directly than to infer
-    /// from a trade's own surprising exit).</summary>
+    /// from a trade's own surprising exit).
+    ///
+    /// Dhan's rolling-option endpoint itself only ever takes a RELATIVE strike ("ATM"/"ATM+-K"), so
+    /// an ABSOLUTE strike (<paramref name="strike"/>, e.g. the exact "56200" a trade's own row named)
+    /// is converted to the otmSteps that reaches it, computed against the underlying's CURRENT live
+    /// spot (SpotFeedHostedService) - the only real-time ATM reference this controller has. This is
+    /// necessarily an approximation of "the same otmSteps a run on that historical day would have
+    /// used" (spot has moved since), which is fine for INSPECTING roughly the right contract but is
+    /// why otmSteps, not strike, is what actually reaches GetRollingChartAsync - strike is purely a
+    /// convenience for finding a starting otmSteps, never sent to Dhan itself. Takes priority over an
+    /// explicit otmSteps when both are given.</summary>
     [HttpGet("{underlying}/rolling-chart")]
     public async Task<IActionResult> GetRollingChart(
         string underlying,
         [FromQuery] string? expiryFlag,
         [FromQuery] string? expiryDate,
         [FromQuery] int otmSteps,
+        [FromQuery] decimal? strike,
         [FromQuery] string? side,
         [FromQuery] int lookbackDays,
         CancellationToken cancellationToken)
@@ -101,8 +114,22 @@ public sealed class ExpiredBacktestController : ControllerBase
         if (normalizedSide is not ("CE" or "PE"))
             return BadRequest(new { error = "'side' must be CE or PE." });
 
+        var resolvedOtmSteps = otmSteps;
+        if (strike is { } absoluteStrike)
+        {
+            if (!_spotFeed.States.TryGetValue(underlying.ToUpperInvariant(), out var spotState) || spotState.LastPrice <= 0 || spotState.Step <= 0)
+                return BadRequest(new { error = $"Current spot price for {underlying} is not available yet - try again shortly, or use Strike offset instead." });
+
+            var atm = Math.Round(spotState.LastPrice / spotState.Step) * spotState.Step;
+            var stepsFromAtm = (int)Math.Round((absoluteStrike - atm) / spotState.Step, MidpointRounding.AwayFromZero);
+            // Same sign convention GetRollingChartAsync/RunAsync already use: otmSteps is "how far
+            // OTM for the side being looked at", which is ABOVE current ATM for a call and BELOW it
+            // for a put - so a PE's absolute strike converts with the sign flipped.
+            resolvedOtmSteps = normalizedSide == "CE" ? stepsFromAtm : -stepsFromAtm;
+        }
+
         var result = await _service.GetRollingChartAsync(
-            underlying.ToUpperInvariant(), normalizedFlag, parsedExpiry, otmSteps, normalizedSide == "CE",
+            underlying.ToUpperInvariant(), normalizedFlag, parsedExpiry, resolvedOtmSteps, normalizedSide == "CE",
             lookbackDays > 0 ? lookbackDays : 30, cancellationToken);
 
         return result.Success ? Ok(result) : BadRequest(new { error = result.Error });
