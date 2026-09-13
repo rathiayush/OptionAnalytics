@@ -33,8 +33,17 @@ public sealed record RollingOptionChartResult(
     int EffectiveLookbackDays,
     IReadOnlyList<RollingOptionChartBar> Bars,
     IReadOnlyList<PossibleSplice> Splices,
-    decimal? RequestedAbsoluteStrike)
+    decimal? RequestedAbsoluteStrike,
+    /// <summary>Populated ONLY when RequestedAbsoluteStrike is not null - RequestedAbsoluteStrike's
+    /// own price, stitched continuously from a whole BAND of relative tokens fetched around it (see
+    /// ExpiredOptionBacktestService.StrikeBandSteps/BuildFixedStrikeSeries), not just the single
+    /// primary token Bars above holds. Where Bars can genuinely drift onto a different real strike
+    /// partway through the window (Dhan resolves "ATM+-K" AS OF EACH DAY, not once for the whole
+    /// request), every bar here is guaranteed to actually BE RequestedAbsoluteStrike's own contract -
+    /// the "even if the index moved, keep giving me that particular strike's data" view, added at the
+    /// user's own explicit request.</summary>
+    IReadOnlyList<RollingOptionChartBar> FixedStrikeBars)
 {
     public static RollingOptionChartResult Failed(string error) =>
-        new(false, error, "", "", 0, Array.Empty<RollingOptionChartBar>(), Array.Empty<PossibleSplice>(), null);
+        new(false, error, "", "", 0, Array.Empty<RollingOptionChartBar>(), Array.Empty<PossibleSplice>(), null, Array.Empty<RollingOptionChartBar>());
 }
