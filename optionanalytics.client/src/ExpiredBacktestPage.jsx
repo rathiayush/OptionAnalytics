@@ -489,16 +489,19 @@ export default function ExpiredBacktestPage() {
               message={
                 <Space direction="vertical" size={2}>
                   <Text>
-                    Used the last {result.effectiveLookbackDays} day(s) before expiry ({expiryFlag === 'WEEK' ? 'weekly' : 'monthly'}) - CE at {result.ceStrike}, PE at {result.peStrike}.
-                    {' '}{result.spotBarCount} spot bar(s) fetched; {result.ceBarCount} CE bar(s), {result.peBarCount} PE bar(s) actually used for the backtest.
+                    Used the last {result.effectiveLookbackDays} day(s) before expiry ({expiryFlag === 'WEEK' ? 'weekly' : 'monthly'}) - reference token CE at {result.ceStrike}, PE at {result.peStrike}.
+                    {' '}{result.spotBarCount} spot bar(s) fetched; {result.ceBarCount} CE bar(s), {result.peBarCount} PE bar(s) for that reference token.
                     {result.effectiveLookbackDays < lookbackDays && ` (your requested ${lookbackDays}-day lookback was capped to keep the window on this one contract)`}
                   </Text>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    Each trade below is priced off the EXACT strike it entered at (see its own Strike column), tracked from a band of 13 strikes (6 either side of this reference) fetched around it - so a trade stays on the same contract from entry to exit even if the index has since moved, not necessarily this reference token's own bars above.
+                  </Text>
                   <Text type={ceMismatch ? 'warning' : 'secondary'} style={{ fontSize: 12 }}>
-                    CE strike - Dhan resolved: {result.ceResolvedStrike != null ? fmtPrice(result.ceResolvedStrike) : 'not reported'}, this app expected: ~{fmtPrice(result.ceExpectedStrike)}
+                    CE reference strike - Dhan resolved: {result.ceResolvedStrike != null ? fmtPrice(result.ceResolvedStrike) : 'not reported'}, this app expected: ~{fmtPrice(result.ceExpectedStrike)}
                     {ceMismatch && ' — MISMATCH, do not trust these trades'}
                   </Text>
                   <Text type={peMismatch ? 'warning' : 'secondary'} style={{ fontSize: 12 }}>
-                    PE strike - Dhan resolved: {result.peResolvedStrike != null ? fmtPrice(result.peResolvedStrike) : 'not reported'}, this app expected: ~{fmtPrice(result.peExpectedStrike)}
+                    PE reference strike - Dhan resolved: {result.peResolvedStrike != null ? fmtPrice(result.peResolvedStrike) : 'not reported'}, this app expected: ~{fmtPrice(result.peExpectedStrike)}
                     {peMismatch && ' — MISMATCH, do not trust these trades'}
                   </Text>
                   {result.ceError && <Text type="warning">CE: {result.ceError}</Text>}
