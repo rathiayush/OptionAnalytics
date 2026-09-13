@@ -473,7 +473,7 @@ public sealed class ExpiredOptionBacktestService
         return new RollingOptionChartResult(
             true, error, strikeToken, optionType, effectiveLookbackDays,
             raw.Select(b => new RollingOptionChartBar(b.Bar.Time, b.Bar.Open, b.Bar.High, b.Bar.Low, b.Bar.Close, b.Bar.Volume, b.Strike)).ToList(),
-            splices);
+            splices, absoluteStrike);
     }
 
     private static string StrikeToken(int steps) => steps == 0 ? "ATM" : $"ATM{(steps > 0 ? "+" : "")}{steps}";
