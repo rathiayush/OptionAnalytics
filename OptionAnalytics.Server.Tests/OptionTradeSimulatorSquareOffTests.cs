@@ -68,7 +68,10 @@ public sealed class OptionTradeSimulatorSquareOffTests
 
         var trade = Assert.Single(trades);
         Assert.Equal("SquareOff", trade.ExitReason);
-        Assert.Equal(new DateTimeOffset(2026, 1, 5, 9, 35, 0, TimeSpan.FromHours(5.5)), trade.ExitTimeUtc);
+        // The [09:35,09:36) bucket is the first whose own START reaches the 09:35 cutoff - its
+        // Close only actually becomes known at 09:36, its own real close instant (see Run's own
+        // barCloseTime comment for why exitTime is never the bucket's bare start label).
+        Assert.Equal(new DateTimeOffset(2026, 1, 5, 9, 36, 0, TimeSpan.FromHours(5.5)), trade.ExitTimeUtc);
     }
 
     [Fact]
@@ -101,6 +104,7 @@ public sealed class OptionTradeSimulatorSquareOffTests
 
         var trade = Assert.Single(trades);
         Assert.Equal("SquareOff", trade.ExitReason);
-        Assert.Equal(new DateTimeOffset(2026, 1, 5, 9, 31, 0, TimeSpan.FromHours(5.5)), trade.ExitTimeUtc);
+        // The very first bar checked is [09:31,09:32) - its own real close instant is 09:32.
+        Assert.Equal(new DateTimeOffset(2026, 1, 5, 9, 32, 0, TimeSpan.FromHours(5.5)), trade.ExitTimeUtc);
     }
 }

@@ -258,31 +258,42 @@ public static class OptionTradeSimulator
             for (var i = signalIndex + 1; i < optionBars.Count && BacktestUtil.IstDate(optionBars[i].Time) == entryDay; i++)
             {
                 var bar = optionBars[i];
+                // bar.Time is this bar's own BUCKET-START label (same convention entryTime itself
+                // converts away from above) - the real wall-clock instant its Close/High/Low
+                // actually became known is bar.Time + fillMinutes, exactly like a signal's own bar
+                // needed the same conversion to become entryTime. A real run's trades table showing
+                // identical entry/exit times on nearly every row (confirmed against a live backtest)
+                // was this exact bug: bar N+1's own START label numerically equals bar N's CLOSE, so
+                // an exit firing on the very first bar checked after entry - extremely common -
+                // collided with entryTime instead of landing one bar later where it actually
+                // happened. Every exitTime assignment below now applies the same conversion.
+                var barCloseTime = bar.Time + TimeSpan.FromMinutes(fillMinutes);
+
                 // Conservative when a single bar's range spans both thresholds (a volatile bar
                 // right after entry, most likely): check the stop first either way, so the worse
                 // outcome for the trade wins rather than guessing which was touched first intra-bar.
                 var stopHit = slPoints > 0 && (isSell ? bar.High >= stopLossPrice : bar.Low <= stopLossPrice);
-                if (stopHit) { exitTime = bar.Time; exitPrice = stopLossPrice; exitReason = "StopLoss"; break; }
+                if (stopHit) { exitTime = barCloseTime; exitPrice = stopLossPrice; exitReason = "StopLoss"; break; }
 
                 var targetHit = tpPoints > 0 && (isSell ? bar.Low <= takeProfitPrice : bar.High >= takeProfitPrice);
-                if (targetHit) { exitTime = bar.Time; exitPrice = takeProfitPrice; exitReason = "TakeProfit"; break; }
+                if (targetHit) { exitTime = barCloseTime; exitPrice = takeProfitPrice; exitReason = "TakeProfit"; break; }
 
                 if (forcedExit is { } fx && bar.Time >= fx)
                 {
-                    exitTime = bar.Time; exitPrice = bar.Close; exitReason = "SignalExit"; break;
+                    exitTime = barCloseTime; exitPrice = bar.Close; exitReason = "SignalExit"; break;
                 }
 
                 if (signalExit is { } sx && bar.Time >= sx.Time)
                 {
-                    exitTime = bar.Time; exitPrice = bar.Close; exitReason = sx.Reason; break;
+                    exitTime = barCloseTime; exitPrice = bar.Close; exitReason = sx.Reason; break;
                 }
 
                 if (squareOffTime is { } cutoff && bar.Time >= cutoff)
                 {
-                    exitTime = bar.Time; exitPrice = bar.Close; exitReason = "SquareOff"; break;
+                    exitTime = barCloseTime; exitPrice = bar.Close; exitReason = "SquareOff"; break;
                 }
 
-                exitTime = bar.Time;
+                exitTime = barCloseTime;
                 exitPrice = bar.Close;
             }
 
