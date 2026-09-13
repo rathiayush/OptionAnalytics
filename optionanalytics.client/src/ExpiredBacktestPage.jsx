@@ -481,7 +481,13 @@ export default function ExpiredBacktestPage() {
           // premium rather than that premium being genuine.
           const ceMismatch = result.ceResolvedStrike != null && Math.abs(result.ceResolvedStrike - result.ceExpectedStrike) > step
           const peMismatch = result.peResolvedStrike != null && Math.abs(result.peResolvedStrike - result.peExpectedStrike) > step
-          const hasWarning = Boolean(result.ceError || result.peError || spliceCount > 0 || ceMismatch || peMismatch)
+          // Only ever set for a not-yet-expired expiry this app is ALSO tracking live right now (see
+          // ExpiredOptionBacktestService.FindLiveDataMismatch) - a real run showed the identical
+          // signal hitting a Stop Loss here and a Take Profit on Backtrack for the same live contract,
+          // because the two pages fetch premium from two independently-built series that are not
+          // guaranteed to agree bar-for-bar.
+          const hasLiveMismatch = Boolean(result.ceLiveMismatch || result.peLiveMismatch)
+          const hasWarning = Boolean(result.ceError || result.peError || spliceCount > 0 || ceMismatch || peMismatch || hasLiveMismatch)
           return (
             <Alert
               type={hasWarning ? 'warning' : 'info'}
@@ -511,6 +517,16 @@ export default function ExpiredBacktestPage() {
                         ...(result.peSplices ?? []).map((s) => `PE ${fmtIstDateTime(s.time)} (${fmtPrice(s.previousClose)} → ${fmtPrice(s.thisOpen)})`),
                       ].join(', ')}
                       {' '}(a large, sudden premium jump). The window has been automatically trimmed to the larger, single-contract side of that jump (whichever side of it has more bars) - a signal falling in the trimmed-away side simply finds no option data (shown as "No Data" below), rather than being priced off the wrong contract.
+                    </Text>
+                  )}
+                  {hasLiveMismatch && (
+                    <Text type="warning">
+                      Unexpected: this fetch disagrees with Backtrack's own live-tracked data for the same still-active contract at{' '}
+                      {[
+                        result.ceLiveMismatch && `CE ${fmtIstDateTime(result.ceLiveMismatch.time)} (this fetch: ${fmtPrice(result.ceLiveMismatch.fetchedPrice)}, live: ${fmtPrice(result.ceLiveMismatch.livePrice)})`,
+                        result.peLiveMismatch && `PE ${fmtIstDateTime(result.peLiveMismatch.time)} (this fetch: ${fmtPrice(result.peLiveMismatch.fetchedPrice)}, live: ${fmtPrice(result.peLiveMismatch.livePrice)})`,
+                      ].filter(Boolean).join(', ')}
+                      . This expiry hasn't happened yet, so its premium is still being reconstructed from Dhan's historical endpoint here rather than read from the real ticks Backtrack tracks live - treat Backtrack as the more trustworthy source whenever the two disagree like this.
                     </Text>
                   )}
                 </Space>

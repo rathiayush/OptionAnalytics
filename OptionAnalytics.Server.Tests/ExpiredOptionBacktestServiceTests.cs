@@ -178,6 +178,67 @@ public sealed class ExpiredOptionBacktestServiceTests
     private static CandleWithVolume Bar(DateTimeOffset time, decimal open, decimal close) =>
         new(time, open, Math.Max(open, close), Math.Min(open, close), close, 0);
 
+    private static readonly DateTimeOffset MismatchT0 = new(2026, 9, 11, 4, 45, 0, TimeSpan.Zero); // 10:15 IST
+
+    [Fact]
+    public void FindLargestMismatch_NoSharedTimestamps_ReturnsNull()
+    {
+        var fetched = new[] { Bar(MismatchT0, 615.85m, 615.85m) };
+        var live = new Dictionary<DateTimeOffset, decimal> { [MismatchT0.AddMinutes(5)] = 620m };
+
+        Assert.Null(ExpiredOptionBacktestService.FindLargestMismatch(fetched, live));
+    }
+
+    [Fact]
+    public void FindLargestMismatch_CloseAgreement_IsNotFlagged()
+    {
+        // A couple of rupees apart at a shared timestamp - ordinary tick-timing noise between two
+        // independently-built series, not a real disagreement.
+        var fetched = new[] { Bar(MismatchT0, 615.85m, 617m) };
+        var live = new Dictionary<DateTimeOffset, decimal> { [MismatchT0] = 615.85m };
+
+        Assert.Null(ExpiredOptionBacktestService.FindLargestMismatch(fetched, live));
+    }
+
+    [Fact]
+    public void FindLargestMismatch_LargeDisagreement_ReturnsIt()
+    {
+        // The shape of the real run this exists to catch: fetched premium reads well above what the
+        // live-tracked series says at the same real minute - a stop-loss-vs-take-profit-sized gap,
+        // comfortably past both the absolute floor and the 10% relative threshold.
+        var fetched = new[] { Bar(MismatchT0, 615.85m, 690m) };
+        var live = new Dictionary<DateTimeOffset, decimal> { [MismatchT0] = 600m };
+
+        var mismatch = ExpiredOptionBacktestService.FindLargestMismatch(fetched, live);
+
+        Assert.NotNull(mismatch);
+        Assert.Equal(MismatchT0, mismatch.Time);
+        Assert.Equal(690m, mismatch.FetchedPrice);
+        Assert.Equal(600m, mismatch.LivePrice);
+    }
+
+    [Fact]
+    public void FindLargestMismatch_MultipleSharedTimestamps_ReturnsTheLargestGapOnly()
+    {
+        var fetched = new[]
+        {
+            Bar(MismatchT0, 615.85m, 620m), // gap 2 - below the absolute floor, not flagged at all
+            Bar(MismatchT0.AddMinutes(1), 620m, 690m), // gap 90 vs 60-point threshold - the largest
+            Bar(MismatchT0.AddMinutes(2), 690m, 685m), // gap 75 vs 61-point threshold - real, but smaller
+        };
+        var live = new Dictionary<DateTimeOffset, decimal>
+        {
+            [MismatchT0] = 618m,
+            [MismatchT0.AddMinutes(1)] = 600m,
+            [MismatchT0.AddMinutes(2)] = 610m,
+        };
+
+        var mismatch = ExpiredOptionBacktestService.FindLargestMismatch(fetched, live);
+
+        Assert.NotNull(mismatch);
+        Assert.Equal(MismatchT0.AddMinutes(1), mismatch.Time);
+    }
+
     private static (CandleWithVolume Bar, decimal? Strike) RawBar(DateTimeOffset time, decimal open, decimal close) =>
         (Bar(time, open, close), null);
 

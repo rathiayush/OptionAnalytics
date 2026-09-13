@@ -109,17 +109,20 @@ public sealed class ExpiredOptionBacktestService
     private readonly DhanSpotInstrumentMaster _instrumentMaster;
     private readonly DhanHistoricalDataService _historicalData;
     private readonly DhanRollingOptionDataService _rollingOption;
+    private readonly CdvHostedService _cdv;
     private readonly IReadOnlyDictionary<string, IBacktestStrategy> _strategies;
 
     public ExpiredOptionBacktestService(
         DhanSpotInstrumentMaster instrumentMaster,
         DhanHistoricalDataService historicalData,
         DhanRollingOptionDataService rollingOption,
+        CdvHostedService cdv,
         IEnumerable<IBacktestStrategy> strategies)
     {
         _instrumentMaster = instrumentMaster;
         _historicalData = historicalData;
         _rollingOption = rollingOption;
+        _cdv = cdv;
         _strategies = strategies.Where(s => SupportedStrategyKeys.Contains(s.Key)).ToDictionary(s => s.Key);
     }
 
@@ -315,6 +318,14 @@ public sealed class ExpiredOptionBacktestService
         // series that may itself have re-centered as spot moved through the window.
         var ceResolvedStrike = ceUsedRaw.LastOrDefault(b => b.Strike is > 0).Strike;
         var peResolvedStrike = peUsedRaw.LastOrDefault(b => b.Strike is > 0).Strike;
+
+        // Only ever non-null for a NOT-YET-EXPIRED target this app also happens to be tracking live
+        // right now - see FindLiveDataMismatch's own doc comment for why the two can genuinely
+        // disagree, and RunAsync's toDay clamping (above) for why a future target's own fetch window
+        // can only ever reach this far anyway.
+        var ceLiveMismatch = FindLiveDataMismatch(underlying, expiryDate, ceResolvedStrike, isCall: true, ceUsed);
+        var peLiveMismatch = FindLiveDataMismatch(underlying, expiryDate, peResolvedStrike, isCall: false, peUsed);
+
         var spotDuringUsedWindow = ceUsed.Count > 0 ? spotBars1m.Where(b => b.Time >= ceUsed[0].Time).ToList() : spotBars1m;
         var referenceSpot = spotDuringUsedWindow.Count > 0 ? spotDuringUsedWindow[^1].Close : spotBars1m[^1].Close;
         var referenceAtm = step > 0 ? Math.Round(referenceSpot / step) * step : referenceSpot;
@@ -364,7 +375,7 @@ public sealed class ExpiredOptionBacktestService
             // used."
             spotBars1m.Count, ceUsed.Count, peUsed.Count, ceSplices, peSplices,
             ceResolvedStrike, peResolvedStrike, ceExpectedStrike, peExpectedStrike, effectiveLookbackDays,
-            spotChartCandlesTf);
+            spotChartCandlesTf, ceLiveMismatch, peLiveMismatch);
     }
 
     private static string StrikeToken(int steps) => steps == 0 ? "ATM" : $"ATM{(steps > 0 ? "+" : "")}{steps}";
@@ -574,5 +585,61 @@ public sealed class ExpiredOptionBacktestService
         }
 
         return splices;
+    }
+
+    /// <summary>Compares this run's own fetched (and trimmed) 1-minute bars against CdvHostedService's
+    /// live-tracked candles for the SAME real contract, whenever the target expiry happens to be one
+    /// this app is also tracking live right now - only possible for a not-yet-expired target (see
+    /// RunAsync's own toDay clamping), and a no-op (returns null) for the ordinary, already-expired
+    /// case since nothing live exists to compare against.
+    ///
+    /// Real run that showed why this matters: the identical signal (same spot, same entry price) hit
+    /// a Stop Loss here and a Take Profit on Backtrack for the very same still-live contract, because
+    /// the two pages source premium from two independently-built series - Dhan's historical rolling-
+    /// option reconstruction here, real folded WebSocket ticks on Backtrack - that are not guaranteed
+    /// to agree bar-for-bar even for a genuinely healthy contract. See FindLargestMismatch for the
+    /// actual comparison.</summary>
+    private LiveDataMismatch? FindLiveDataMismatch(
+        string underlying, DateOnly expiryDate, decimal? resolvedStrike, bool isCall, IReadOnlyList<CandleWithVolume> fetchedBars)
+    {
+        if (resolvedStrike is not { } strike || fetchedBars.Count == 0) return null;
+
+        var liveBars = _cdv.StateFor(underlying, expiryDate)?.GetStrikeCandles(strike, isCall);
+        if (liveBars is null || liveBars.Count == 0) return null;
+
+        return FindLargestMismatch(fetchedBars, liveBars.ToDictionary(b => b.Time, b => b.Close));
+    }
+
+    /// <summary>The pure comparison FindLiveDataMismatch delegates to, split out so it is testable
+    /// without constructing the whole CdvHostedService dependency graph - see FindLiveDataMismatch's
+    /// own doc comment for why this comparison exists and what it caught. Flagged only on a LARGE
+    /// disagreement (both an absolute floor and a relative one, the same two-signal shape
+    /// DetectPossibleSplices already uses) so ordinary tick-timing/rounding noise between the two
+    /// sources is never reported as a mismatch. Returns the single LARGEST disagreement found at a
+    /// shared timestamp - enough to prove something is actually wrong without listing every minor
+    /// divergence.</summary>
+    internal static LiveDataMismatch? FindLargestMismatch(
+        IReadOnlyList<CandleWithVolume> fetchedBars, IReadOnlyDictionary<DateTimeOffset, decimal> liveCloseByTime)
+    {
+        const decimal MinimumAbsoluteGap = 5m;
+        const decimal MismatchRatio = 0.10m;
+
+        LiveDataMismatch? worst = null;
+        var worstGap = 0m;
+        foreach (var bar in fetchedBars)
+        {
+            if (!liveCloseByTime.TryGetValue(bar.Time, out var liveClose) || liveClose <= 0 || bar.Close <= 0) continue;
+
+            var gap = Math.Abs(bar.Close - liveClose);
+            if (gap < MinimumAbsoluteGap || gap < liveClose * MismatchRatio) continue;
+
+            if (gap > worstGap)
+            {
+                worstGap = gap;
+                worst = new LiveDataMismatch(bar.Time, bar.Close, liveClose);
+            }
+        }
+
+        return worst;
     }
 }

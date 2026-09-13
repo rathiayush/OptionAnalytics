@@ -33,7 +33,13 @@ namespace OptionAnalytics.Server.Models;
 /// WIDER than [fromDay,toDay] (see ExpiredOptionBacktestService.ChartPaddingDays), a few days of
 /// spot history on each side of the actual lookback window purely so a signal sitting right at the
 /// window's own edge has visible context around it, not because the strategy itself saw any of that
-/// padding.</summary>
+/// padding.
+///
+/// Ce/PeLiveMismatch (see LiveDataMismatch's own doc comment) is the largest disagreement found
+/// against CdvHostedService's live-tracked candles for the same real contract - null whenever there
+/// was nothing live to compare against (an already-expired target, the ordinary case) or every
+/// shared timestamp agreed within tolerance. Only ever possible for a not-yet-expired target this
+/// app is also tracking live right now.</summary>
 public sealed record ExpiredBacktestResult(
     bool Success,
     string? Error,
@@ -54,9 +60,11 @@ public sealed record ExpiredBacktestResult(
     decimal CeExpectedStrike,
     decimal PeExpectedStrike,
     int EffectiveLookbackDays,
-    IReadOnlyList<Candle> SpotChartBars)
+    IReadOnlyList<Candle> SpotChartBars,
+    LiveDataMismatch? CeLiveMismatch,
+    LiveDataMismatch? PeLiveMismatch)
 {
     public static ExpiredBacktestResult Failed(string error) =>
         new(false, error, Array.Empty<BacktestTrade>(), Array.Empty<BacktestSignal>(), 0, "", "", null, null, 0, 0, 0,
-            Array.Empty<PossibleSplice>(), Array.Empty<PossibleSplice>(), null, null, 0, 0, 0, Array.Empty<Candle>());
+            Array.Empty<PossibleSplice>(), Array.Empty<PossibleSplice>(), null, null, 0, 0, 0, Array.Empty<Candle>(), null, null);
 }
