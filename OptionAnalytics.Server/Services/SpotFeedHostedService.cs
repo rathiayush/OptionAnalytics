@@ -173,7 +173,12 @@ public sealed class SpotFeedHostedService : BackgroundService
 
         for (var attempt = 1; !stoppingToken.IsCancellationRequested; attempt++)
         {
-            if (States.Values.All(s => s.GetCandles().Count > 0)) return;
+            // GetClosedCandles(), never GetCandles() - the latter also counts the still-forming live
+            // bar, so a single stray tick (even a bogus post-connect snapshot with no real trade
+            // behind it - see DhanTickPacketParser.ReadEpoch's own doc comment) would satisfy this
+            // check and stop the retry loop for good, permanently leaving an underlying with a
+            // real backfill history of zero candles that nothing ever asks Dhan for again.
+            if (States.Values.All(s => s.GetClosedCandles().Count > 0)) return;
 
             try
             {
@@ -184,7 +189,7 @@ public sealed class SpotFeedHostedService : BackgroundService
                 return;
             }
 
-            var empty = States.Values.Where(s => s.GetCandles().Count == 0).Select(s => s.Underlying).ToArray();
+            var empty = States.Values.Where(s => s.GetClosedCandles().Count == 0).Select(s => s.Underlying).ToArray();
             if (empty.Length == 0) return;
 
             // Log the first few attempts at Information and everything after that at Debug: the
@@ -258,7 +263,11 @@ public sealed class SpotFeedHostedService : BackgroundService
         foreach (var state in States.Values)
         {
             if (state.Instrument is not { } instrument) continue;
-            if (onlyIfEmpty && state.GetCandles().Count > 0) continue;
+            // GetClosedCandles(), not GetCandles() - see RetryBackfillIfNeededAsync's own comment on
+            // this same distinction. Without it, an underlying whose backfill genuinely returned zero
+            // candles but has since received one live tick (building only a still-forming _currentBar)
+            // reads as "already has data" here and is skipped on every future retry forever.
+            if (onlyIfEmpty && state.GetClosedCandles().Count > 0) continue;
 
             // Per-underlying, for the same reason CdvHostedService.RecenterAllAsync isolates its own
             // loop: these underlyings no longer even share an exchange (NIFTY/BANKNIFTY are NSE,
