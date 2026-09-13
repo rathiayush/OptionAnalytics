@@ -65,7 +65,11 @@ public sealed class DhanRollingOptionDataService
     // bar - without this, this app has no way to check whether Dhan's own contract resolution
     // actually landed anywhere near what it asked for, which is exactly the kind of silent mismatch
     // an implausible entry price (a "near-ATM" option priced in the thousands) would otherwise be.
-    private static readonly string[] RequiredData = { "open", "high", "low", "close", "volume", "strike" };
+    // "spot" is the underlying spot price Dhan itself used to resolve "ATM+-K" for that SAME bar -
+    // strictly better than this app's own nearest-earlier-match against a separately fetched spot
+    // series (ExpiredOptionBacktestService's spotBars1m), since it is exactly what Dhan used, not an
+    // approximation of it.
+    private static readonly string[] RequiredData = { "open", "high", "low", "close", "volume", "strike", "spot" };
 
     // Dhan's own stated cap (see the endpoint's docs) - chunked into successive calls so a caller
     // can still ask for a range wider than one call supports, rather than needing to paginate it.
@@ -98,18 +102,22 @@ public sealed class DhanRollingOptionDataService
     /// Each bar carries the ABSOLUTE strike Dhan itself resolved "ATM+-K" to for that specific bar
     /// (null only if Dhan's response omitted it) - the caller's own sanity check against what it
     /// expected that resolution to be, since nothing else here can otherwise tell a genuinely-priced
-    /// but unexpected contract apart from a resolution that landed on the wrong one entirely.</summary>
-    public async Task<(IReadOnlyList<(CandleWithVolume Bar, decimal? Strike)> Bars, string? Error)> GetRollingOptionCandlesAsync(
+    /// but unexpected contract apart from a resolution that landed on the wrong one entirely. It also
+    /// carries the underlying SPOT price Dhan itself used to resolve that same bar (null if Dhan's
+    /// response omitted it) - lets a caller verify the resolved strike EXACTLY (against Dhan's own
+    /// spot for that bar) instead of only approximately (against a separately fetched spot series
+    /// matched to the nearest earlier bar).</summary>
+    public async Task<(IReadOnlyList<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> Bars, string? Error)> GetRollingOptionCandlesAsync(
         uint underlyingSecurityId, string expiryFlag, int expiryCode, string strike, string drvOptionType,
         DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken)
     {
         if (!_api.HasSession)
-            return (Array.Empty<(CandleWithVolume, decimal?)>(), "Dhan is not authenticated (check Dhan:ClientId/Dhan:AccessToken).");
+            return (Array.Empty<(CandleWithVolume, decimal?, decimal?)>(), "Dhan is not authenticated (check Dhan:ClientId/Dhan:AccessToken).");
 
         if (toDay < fromDay)
-            return (Array.Empty<(CandleWithVolume, decimal?)>(), "'to' date must not be before 'from' date.");
+            return (Array.Empty<(CandleWithVolume, decimal?, decimal?)>(), "'to' date must not be before 'from' date.");
 
-        var all = new List<(CandleWithVolume Bar, decimal? Strike)>();
+        var all = new List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)>();
         var chunkStart = fromDay;
         var isFirstChunk = true;
 
@@ -177,10 +185,10 @@ public sealed class DhanRollingOptionDataService
     /// asking for data "through toDay" never silently receives a bar from the day after - which,
     /// for a ROLLING series, can be the very first bar of the NEXT contract, exactly the kind of
     /// contamination DetectPossibleSplices exists to catch but this stops from happening at all.</summary>
-    internal static List<(CandleWithVolume Bar, decimal? Strike)> ClipToRange(
-        List<(CandleWithVolume Bar, decimal? Strike)> bars, DateOnly fromDay, DateOnly toDay)
+    internal static List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> ClipToRange(
+        List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> bars, DateOnly fromDay, DateOnly toDay)
     {
-        bool InRange((CandleWithVolume Bar, decimal? Strike) b)
+        bool InRange((CandleWithVolume Bar, decimal? Strike, decimal? Spot) b)
         {
             var day = IstClock.IstDate(b.Bar.Time);
             return day >= fromDay && day <= toDay;
@@ -221,9 +229,9 @@ public sealed class DhanRollingOptionDataService
         }
     }
 
-    private List<(CandleWithVolume Bar, decimal? Strike)> ParseSide(JsonElement root, string drvOptionType)
+    private List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> ParseSide(JsonElement root, string drvOptionType)
     {
-        var bars = new List<(CandleWithVolume, decimal?)>();
+        var bars = new List<(CandleWithVolume, decimal?, decimal?)>();
 
         if (!root.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Object)
             return bars;
@@ -241,6 +249,7 @@ public sealed class DhanRollingOptionDataService
         var close = GetArray(side, "close");
         var volume = GetArray(side, "volume");
         var strike = GetArray(side, "strike");
+        var spot = GetArray(side, "spot");
 
         var count = timestamps.GetArrayLength();
         for (var i = 0; i < count; i++)
@@ -262,7 +271,8 @@ public sealed class DhanRollingOptionDataService
                 }
 
                 var resolvedStrike = i < strike.Count && strike[i] > 0 ? strike[i] : (decimal?)null;
-                bars.Add((new CandleWithVolume(DateTimeOffset.FromUnixTimeSeconds(epochSeconds), o, h, l, c, i < volume.Count ? (long)volume[i] : 0), resolvedStrike));
+                var resolvedSpot = i < spot.Count && spot[i] > 0 ? spot[i] : (decimal?)null;
+                bars.Add((new CandleWithVolume(DateTimeOffset.FromUnixTimeSeconds(epochSeconds), o, h, l, c, i < volume.Count ? (long)volume[i] : 0), resolvedStrike, resolvedSpot));
             }
             catch (Exception ex) when (ex is FormatException or InvalidOperationException or OverflowException)
             {

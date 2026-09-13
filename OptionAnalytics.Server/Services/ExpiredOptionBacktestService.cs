@@ -577,11 +577,11 @@ public sealed class ExpiredOptionBacktestService
     /// sorting needed. Per-segment errors are concatenated rather than only the first/last kept, so
     /// a failure on the OLDER (less-tested, code-2) segment is never silently hidden by an older
     /// segment's success or vice versa.</summary>
-    private async Task<(List<(CandleWithVolume Bar, decimal? Strike)> Bars, string? Error)> FetchAcrossSegmentsAsync(
+    private async Task<(List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> Bars, string? Error)> FetchAcrossSegmentsAsync(
         uint underlyingSecurityId, string expiryFlag, IReadOnlyList<FetchSegment> segments, string strikeToken, string optionType,
         CancellationToken cancellationToken)
     {
-        var bars = new List<(CandleWithVolume Bar, decimal? Strike)>();
+        var bars = new List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)>();
         string? error = null;
 
         foreach (var segment in segments)
@@ -601,12 +601,12 @@ public sealed class ExpiredOptionBacktestService
     /// window (a too-old contract at the head, or Dhan's own rolling resolution flipping early near
     /// the target contract's real expiry at the tail), and the correct, single-contract data is
     /// whichever side of it is bigger, not always the side closest to the requested expiry.</summary>
-    internal static List<(CandleWithVolume Bar, decimal? Strike)> TrimToLargestSegment(
-        List<(CandleWithVolume Bar, decimal? Strike)> raw, IReadOnlyList<PossibleSplice> splices)
+    internal static List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> TrimToLargestSegment(
+        List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> raw, IReadOnlyList<PossibleSplice> splices)
     {
         if (splices.Count == 0) return raw;
 
-        List<(CandleWithVolume Bar, decimal? Strike)>? best = null;
+        List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)>? best = null;
         var previousCutoff = DateTimeOffset.MinValue;
 
         foreach (var cutoff in splices.Select(s => s.Time))
@@ -630,32 +630,54 @@ public sealed class ExpiredOptionBacktestService
     /// A real run confirmed this shape exactly - a Stop Loss triggered off a premium that never
     /// actually traded, with no splice anywhere near it.
     ///
-    /// Deliberately compares against spot as of EACH bar's own time (the nearest spot bar at or
-    /// before it), not one fixed reference for the whole window - a strike legitimately re-centers
-    /// as ATM moves across the days a wide lookback spans, and that is not a bug; only a bar that
-    /// disagrees with what ITS OWN day's ATM implies is dropped. A bar with no resolved strike at all
-    /// (Dhan's response omitted the field) or no spot reference yet available is kept, not dropped -
-    /// there is nothing to disprove it with, and this is a targeted removal of bars actively shown to
-    /// be wrong, not a blanket "trust nothing unverified" filter.</summary>
-    internal static List<(CandleWithVolume Bar, decimal? Strike)> FilterToExpectedStrike(
-        List<(CandleWithVolume Bar, decimal? Strike)> bars, IReadOnlyList<Candle> spotBars, int step, int otmSteps, bool isCall)
+    /// Prefers a bar's OWN reported Spot (Dhan's "spot" field - the exact underlying price Dhan
+    /// itself used to resolve THIS bar's "ATM+-K") when Dhan's response included it: that is exact,
+    /// not an approximation, so there is no time-alignment question at all. Only falls back to the
+    /// nearest-earlier match against the separately fetched spotBars series (the original mechanism,
+    /// still needed for a bar whose response omitted "spot") when a bar's own Spot is null.
+    ///
+    /// Deliberately compares against spot as of EACH bar's own time, not one fixed reference for the
+    /// whole window - a strike legitimately re-centers as ATM moves across the days a wide lookback
+    /// spans, and that is not a bug; only a bar that disagrees with what ITS OWN day's ATM implies is
+    /// dropped. A bar with no resolved strike at all (Dhan's response omitted the field), or neither
+    /// its own Spot nor a spotBars reference yet available, is kept, not dropped - there is nothing to
+    /// disprove it with, and this is a targeted removal of bars actively shown to be wrong, not a
+    /// blanket "trust nothing unverified" filter.</summary>
+    internal static List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> FilterToExpectedStrike(
+        List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> bars, IReadOnlyList<Candle> spotBars, int step, int otmSteps, bool isCall)
     {
-        if (step <= 0 || spotBars.Count == 0) return bars;
+        if (step <= 0) return bars;
 
-        var kept = new List<(CandleWithVolume Bar, decimal? Strike)>(bars.Count);
+        var kept = new List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)>(bars.Count);
         var spotIndex = 0;
 
         foreach (var entry in bars)
         {
-            while (spotIndex + 1 < spotBars.Count && spotBars[spotIndex + 1].Time <= entry.Bar.Time) spotIndex++;
-
-            if (spotBars[spotIndex].Time > entry.Bar.Time || entry.Strike is not { } resolvedStrike)
+            if (entry.Strike is not { } resolvedStrike)
             {
-                kept.Add(entry); // no spot reference yet, or nothing reported to check - can't disprove it
+                kept.Add(entry); // nothing reported to check - can't disprove it
                 continue;
             }
 
-            var expectedAtm = Math.Round(spotBars[spotIndex].Close / step) * step;
+            decimal referenceSpot;
+            if (entry.Spot is { } ownSpot)
+            {
+                referenceSpot = ownSpot; // exact - Dhan's own resolution reference for THIS bar
+            }
+            else
+            {
+                while (spotIndex + 1 < spotBars.Count && spotBars[spotIndex + 1].Time <= entry.Bar.Time) spotIndex++;
+
+                if (spotBars.Count == 0 || spotBars[spotIndex].Time > entry.Bar.Time)
+                {
+                    kept.Add(entry); // no spot reference yet available either way - can't disprove it
+                    continue;
+                }
+
+                referenceSpot = spotBars[spotIndex].Close;
+            }
+
+            var expectedAtm = Math.Round(referenceSpot / step) * step;
             var expectedStrike = isCall ? expectedAtm + otmSteps * step : expectedAtm - otmSteps * step;
 
             if (Math.Abs(resolvedStrike - expectedStrike) <= step / 2m) kept.Add(entry);
