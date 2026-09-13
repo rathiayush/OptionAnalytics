@@ -379,9 +379,18 @@ public sealed class ExpiredOptionBacktestService
     /// Deliberately returns the RAW fetch, not TrimToLargestSegment's trimmed result - a real splice
     /// or a wrong-contract bar is exactly what this page exists to make visible, not something to
     /// quietly cut away before the user ever sees it (RunAsync itself trims, since a live strategy
-    /// run has to pick ONE contract to trade; this one does not).</summary>
+    /// run has to pick ONE contract to trade; this one does not).
+    ///
+    /// <paramref name="absoluteStrike"/>, when given, overrides <paramref name="otmSteps"/>: an
+    /// ABSOLUTE strike (e.g. the exact "56200" a disputed trade's own row named) is converted to the
+    /// relative token Dhan's endpoint actually needs (it has no "give me this exact strike" input at
+    /// all) using the ATM AS OF <paramref name="expiryDate"/>'s own window (a few real days of spot
+    /// ending at toDay), NOT today's current spot - converting against today's price for a date that
+    /// may be weeks or months in the past would round to a strike offset several steps away from the
+    /// one that actually existed back then, which is a wrong-contract bug of this app's OWN making
+    /// rather than anything Dhan itself did.</summary>
     public async Task<RollingOptionChartResult> GetRollingChartAsync(
-        string underlying, string expiryFlag, DateOnly expiryDate, int otmSteps, bool isCall, int lookbackDays,
+        string underlying, string expiryFlag, DateOnly expiryDate, int otmSteps, decimal? absoluteStrike, bool isCall, int lookbackDays,
         CancellationToken cancellationToken)
     {
         if (!StrikeStepByUnderlying.ContainsKey(underlying))
@@ -427,10 +436,34 @@ public sealed class ExpiredOptionBacktestService
         segments = ClampSegmentsToToday(segments, today);
         var effectiveLookbackDays = toDay.DayNumber - fromDay.DayNumber;
 
+        var resolvedOtmSteps = otmSteps;
+        if (absoluteStrike is { } strikeValue)
+        {
+            var step = StrikeStepByUnderlying[underlying];
+            // A few days of REAL spot ending at toDay - the ATM this contract actually traded
+            // against back then, not whatever spot happens to be right now (see this method's own
+            // doc comment for why that distinction matters).
+            var referenceFromDay = toDay.AddDays(-5);
+            var (referenceSpotBars, referenceSpotError) = await _historicalData.GetIntradayCandlesAsync(
+                instrument.SecurityId, instrument.DhanSegment, referenceFromDay, toDay, 1, cancellationToken);
+            if (referenceSpotBars.Count == 0)
+                return RollingOptionChartResult.Failed(
+                    $"Could not resolve a reference spot price near {toDay:dd MMM yyyy} to convert {strikeValue:0.##} into a strike offset - {referenceSpotError ?? "no spot history in that window"}.");
+
+            var referenceSpot = referenceSpotBars[^1].Close;
+            var referenceAtm = step > 0 ? Math.Round(referenceSpot / step) * step : referenceSpot;
+            var absoluteToken = step > 0 ? (int)Math.Round((strikeValue - referenceAtm) / step, MidpointRounding.AwayFromZero) : 0;
+            // The token is symmetric in ABSOLUTE terms - "ATM+2" names the same real strike whether
+            // asking for the CE or PE sitting at it - so this cancels back out via the same isCall
+            // sign flip below, the same way RunAsync's own ceStrike/peStrike do for a shared
+            // otmSteps; nothing extra needed here beyond computing the plain absolute offset.
+            resolvedOtmSteps = isCall ? absoluteToken : -absoluteToken;
+        }
+
         // Same sign convention RunAsync itself uses: otmSteps is "how far OTM for the side actually
         // being looked at", negated for PE since OTM sits BELOW spot for a put but above it for a
         // call - see StrikeToken/RunAsync's own ceStrike/peStrike computation.
-        var strikeToken = StrikeToken(isCall ? otmSteps : -otmSteps);
+        var strikeToken = StrikeToken(isCall ? resolvedOtmSteps : -resolvedOtmSteps);
         var optionType = isCall ? "CALL" : "PUT";
 
         var (raw, error) = await FetchAcrossSegmentsAsync(instrument.SecurityId, expiryFlag, segments, strikeToken, optionType, cancellationToken);

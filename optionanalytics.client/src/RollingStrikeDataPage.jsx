@@ -307,7 +307,7 @@ export default function RollingStrikeDataPage() {
               <Space direction="vertical" size={2}>
                 <Text type="secondary" style={{ fontSize: 12 }}>
                   Strike (optional){' '}
-                  <Tooltip title="Type the exact strike you want to inspect (e.g. 56200) and it's converted to a strike offset using CURRENT spot - an approximation of the offset a run on that historical date would have used, since spot has moved since. Leave empty to use the offset below directly instead.">
+                  <Tooltip title="Type the exact strike you want to inspect (e.g. 56200) and it's converted to a strike offset using the ATM as of the expiry date's own window - not today's spot, so a historical date converts against the price that actually applied back then. Leave empty to use the offset below directly instead.">
                     <InfoCircleOutlined />
                   </Tooltip>
                 </Text>
