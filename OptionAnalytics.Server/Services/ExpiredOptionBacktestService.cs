@@ -90,6 +90,17 @@ public sealed class ExpiredOptionBacktestService
     /// Tuesday-expiry convention has been in effect (SEBI's November 2024 rule).</summary>
     private const int CalendarMonthsBack = 12;
 
+    /// <summary>How far forward GetAvailableExpiries offers NOT-YET-EXPIRED dates for, at the user's
+    /// own explicit request ("I should be able to test against them as well"). This carries none of
+    /// CalendarMonthsBack's accuracy concern - a future expiry is a real, currently-listed, actively
+    /// trading contract, not a guess at one that doesn't exist yet, and the exact same fetch/anchor
+    /// mechanism already handles the CURRENT (nearest, not-yet-expired) contract correctly, which is
+    /// exactly what removing the old live-overlap guard on this dropdown proved out. Bounded anyway,
+    /// generously, so the dropdown doesn't fill with dates so far out Dhan may not have listed the
+    /// actual contract for yet - RunAsync's own "no data" failure is the backstop if one slips
+    /// through with nothing to fetch.</summary>
+    private const int CalendarMonthsForward = 3;
+
     /// <summary>How many extra days of spot history the CHART fetches on each side of the actual
     /// [fromDay,toDay] lookback window - see RunAsync's own comment on why this is safe to widen
     /// (spot has no contract of its own to splice across) even though CE/PE's window cannot be.</summary>
@@ -122,7 +133,9 @@ public sealed class ExpiredOptionBacktestService
     /// (see ExpiryCalendar), not just any Tuesday-ish date a user might type, since the anchoring
     /// logic (see this class's own top-of-file doc comment) assumes fromDate sits just inside the
     /// ACTUAL target contract's own life, which only holds when expiryDate itself is genuine.
-    /// Descending (most recent first), since a recent expiry is usually the more useful default.
+    /// Descending (most recent first), since a recent expiry is usually the more useful default -
+    /// this also puts the not-yet-expired, still-trading contracts (today's nearest expiry and
+    /// CalendarMonthsForward beyond it) at the very top of the list.
     ///
     /// This deliberately does NOT exclude dates already covered by Backtrack's own live-tracked
     /// history (an earlier version of this method did) - the caller is expected to keep their own
@@ -136,10 +149,11 @@ public sealed class ExpiredOptionBacktestService
 
         var today = IstClock.Today();
         var rangeStart = today.AddMonths(-CalendarMonthsBack);
+        var rangeEnd = today.AddMonths(CalendarMonthsForward);
 
         var candidates = string.Equals(expiryFlag, "MONTH", StringComparison.OrdinalIgnoreCase)
-            ? ExpiryCalendar.MonthlyExpiries(rangeStart, today)
-            : ExpiryCalendar.WeeklyExpiries(rangeStart, today);
+            ? ExpiryCalendar.MonthlyExpiries(rangeStart, rangeEnd)
+            : ExpiryCalendar.WeeklyExpiries(rangeStart, rangeEnd);
 
         return candidates.OrderByDescending(d => d).ToList();
     }
@@ -183,6 +197,10 @@ public sealed class ExpiredOptionBacktestService
         if (expiryDate < today.AddMonths(-CalendarMonthsBack))
             return ExpiredBacktestResult.Failed(
                 $"{expiryDate:dd MMM yyyy} is further back than this app can reliably validate ({CalendarMonthsBack} months) - NSE's expiry-weekday convention has changed more than once historically, so a date this old is not offered.");
+
+        if (expiryDate > today.AddMonths(CalendarMonthsForward))
+            return ExpiredBacktestResult.Failed(
+                $"{expiryDate:dd MMM yyyy} is further ahead than this app offers ({CalendarMonthsForward} months) - Dhan may not have even listed that contract yet. Pick a date from the list.");
 
         // A no-op once SpotFeedHostedService's own startup resolve has already loaded the shared
         // instance (see EnsureLoadedAsync's freshness check) - only actually downloads/parses
