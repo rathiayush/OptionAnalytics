@@ -79,13 +79,21 @@ public sealed class ExpiredBacktestController : ControllerBase
     /// including the per-bar RESOLVED strike and any splice this app's own safety net already flags
     /// - see ExpiredOptionBacktestService.GetRollingChartAsync's own doc comment for why this exists
     /// separately from POST /run (a real premium anomaly is easier to see directly than to infer
-    /// from a trade's own surprising exit).</summary>
+    /// from a trade's own surprising exit).
+    ///
+    /// Dhan's rolling-option endpoint itself only ever takes a RELATIVE strike ("ATM"/"ATM+-K"), so
+    /// an ABSOLUTE strike (<paramref name="strike"/>, e.g. the exact "56200" a trade's own row named)
+    /// is converted to the otmSteps that reaches it - see
+    /// ExpiredOptionBacktestService.GetRollingChartAsync's own doc comment for why that conversion
+    /// uses the ATM as of expiryDate's own window, not today's spot. Takes priority over an explicit
+    /// otmSteps when both are given.</summary>
     [HttpGet("{underlying}/rolling-chart")]
     public async Task<IActionResult> GetRollingChart(
         string underlying,
         [FromQuery] string? expiryFlag,
         [FromQuery] string? expiryDate,
         [FromQuery] int otmSteps,
+        [FromQuery] decimal? strike,
         [FromQuery] string? side,
         [FromQuery] int lookbackDays,
         CancellationToken cancellationToken)
@@ -102,7 +110,7 @@ public sealed class ExpiredBacktestController : ControllerBase
             return BadRequest(new { error = "'side' must be CE or PE." });
 
         var result = await _service.GetRollingChartAsync(
-            underlying.ToUpperInvariant(), normalizedFlag, parsedExpiry, otmSteps, normalizedSide == "CE",
+            underlying.ToUpperInvariant(), normalizedFlag, parsedExpiry, otmSteps, strike, normalizedSide == "CE",
             lookbackDays > 0 ? lookbackDays : 30, cancellationToken);
 
         return result.Success ? Ok(result) : BadRequest(new { error = result.Error });

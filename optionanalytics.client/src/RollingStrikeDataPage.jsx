@@ -16,6 +16,10 @@ const { Title, Text } = Typography
 // here at all.
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY']
 
+// Matches ExpiredOptionBacktestService.StrikeStepByUnderlying - only used here as the InputNumber
+// step for an absolute strike, and as the fallback default when picking one blind.
+const STRIKE_STEP_BY_UNDERLYING = { NIFTY: 50, BANKNIFTY: 100 }
+
 // Same generous UI ceilings Expired Backtest itself uses - the backend computes and reports the
 // ACTUAL usable window per request regardless of what this sends (see
 // ExpiredOptionBacktestService.BuildFetchSegments).
@@ -138,6 +142,9 @@ export default function RollingStrikeDataPage() {
   const [expiries, setExpiries] = useState([])
   const [expiriesLoading, setExpiriesLoading] = useState(false)
   const [otmSteps, setOtmSteps] = useState(0)
+  // An exact absolute strike (e.g. 56200) - takes priority over otmSteps when set (see the backend's
+  // own GetRollingChart doc comment). null means "use the offset below instead".
+  const [strike, setStrike] = useState(null)
   const [side, setSide] = usePersistedState(STORED_SIDE, 'CE')
   const [lookbackDays, setLookbackDays] = useState(DEFAULT_LOOKBACK_DAYS.WEEK)
 
@@ -194,6 +201,9 @@ export default function RollingStrikeDataPage() {
       side,
       lookbackDays: String(lookbackDays),
     })
+    // Absolute strike takes priority over the offset above - see the backend's own doc comment on
+    // GetRollingChart for how it converts one to the other using current spot.
+    if (strike != null) params.set('strike', String(strike))
 
     fetch(`/api/expired-backtest/${underlying}/rolling-chart?${params.toString()}`)
       .then(async (r) => {
@@ -210,8 +220,11 @@ export default function RollingStrikeDataPage() {
       .finally(() => setLoading(false))
   }
 
-  const bars = result?.bars ?? []
-  const splices = result?.splices ?? []
+  // Memoized so `bars`/`splices` are stable references across renders that don't change `result` -
+  // `result?.bars ?? []` alone would allocate a fresh empty array every render while result is
+  // null, which the hooks below depend on.
+  const bars = useMemo(() => result?.bars ?? [], [result])
+  const splices = useMemo(() => result?.splices ?? [], [result])
 
   // Descending (newest first) - same convention every other table on this app already uses.
   const rows = useMemo(
@@ -284,7 +297,29 @@ export default function RollingStrikeDataPage() {
             <Space align="end" size={16} wrap>
               <Space direction="vertical" size={2}>
                 <Text type="secondary" style={{ fontSize: 12 }}>Underlying</Text>
-                <Select value={underlying} onChange={setUnderlying} style={{ width: 140 }} options={UNDERLYINGS.map((u) => ({ value: u, label: u }))} />
+                <Select
+                  value={underlying}
+                  onChange={(v) => { setUnderlying(v); setStrike(null) }}
+                  style={{ width: 140 }}
+                  options={UNDERLYINGS.map((u) => ({ value: u, label: u }))}
+                />
+              </Space>
+              <Space direction="vertical" size={2}>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  Strike (optional){' '}
+                  <Tooltip title="Type the exact strike you want to inspect (e.g. 56200) and it's converted to a strike offset using the ATM as of the expiry date's own window - not today's spot, so a historical date converts against the price that actually applied back then. Leave empty to use the offset below directly instead.">
+                    <InfoCircleOutlined />
+                  </Tooltip>
+                </Text>
+                <InputNumber
+                  controls={false}
+                  placeholder="e.g. 56200"
+                  min={0}
+                  step={STRIKE_STEP_BY_UNDERLYING[underlying] ?? 50}
+                  value={strike}
+                  onChange={setStrike}
+                  style={{ width: 130 }}
+                />
               </Space>
               <Space direction="vertical" size={2}>
                 <Text type="secondary" style={{ fontSize: 12 }}>Expiry cadence</Text>
@@ -312,11 +347,11 @@ export default function RollingStrikeDataPage() {
               <Space direction="vertical" size={2}>
                 <Text type="secondary" style={{ fontSize: 12 }}>
                   Strike offset from ATM{' '}
-                  <Tooltip title="Positive is OTM for the side picked below, negative is ITM, 0 is ATM itself - same convention every strategy's own otmSteps parameter uses. This is a RELATIVE token (Dhan resolves the actual absolute strike itself, re-centering as spot moves through the window), not a fixed price - see the Resolved strike column below for what it actually landed on.">
+                  <Tooltip title="Ignored when Strike above is filled in. Positive is OTM for the side picked below, negative is ITM, 0 is ATM itself - same convention every strategy's own otmSteps parameter uses. This is a RELATIVE token (Dhan resolves the actual absolute strike itself, re-centering as spot moves through the window), not a fixed price - see the Resolved strike column below for what it actually landed on.">
                     <InfoCircleOutlined />
                   </Tooltip>
                 </Text>
-                <InputNumber min={-8} max={8} value={otmSteps} onChange={(v) => setOtmSteps(v ?? 0)} style={{ width: 100 }} />
+                <InputNumber min={-8} max={8} value={otmSteps} onChange={(v) => setOtmSteps(v ?? 0)} disabled={strike != null} style={{ width: 100 }} />
               </Space>
               <Space direction="vertical" size={2}>
                 <Text type="secondary" style={{ fontSize: 12 }}>Side</Text>
