@@ -181,10 +181,11 @@ export default function ExpiredBacktestPage() {
   const [expiryFlag, setExpiryFlag] = useState('WEEK')
   // A plain "yyyy-MM-dd" string, not a dayjs object - this is now a closed choice from
   // /api/expired-backtest/{underlying}/expiries (see the effect below), never freely typed. That
-  // endpoint only ever offers REAL listed expiries not already covered by Backtrack's own live
-  // history - the two things a real run breaking (a typed date that wasn't an actual expiry let the
-  // fetch window cross into a different contract and splice their premiums together) showed this
-  // page needed to enforce rather than leave to a free date picker.
+  // endpoint only ever offers REAL listed expiries (past AND not-yet-expired/future ones, both -
+  // see ExpiredOptionBacktestService.GetAvailableExpiries) - a typed date that wasn't an actual
+  // expiry once let the fetch window cross into a different contract and splice their premiums
+  // together, which is what showed this page needed to enforce a closed list rather than leave it
+  // to a free date picker.
   const [expiryDate, setExpiryDate] = useState(null)
   const [expiries, setExpiries] = useState([])
   const [expiriesLoading, setExpiriesLoading] = useState(false)
