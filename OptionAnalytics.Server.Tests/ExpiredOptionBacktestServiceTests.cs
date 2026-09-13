@@ -131,6 +131,50 @@ public sealed class ExpiredOptionBacktestServiceTests
         Assert.Equal(2, segments[0].ExpiryCode);
     }
 
+    [Fact]
+    public void ClampSegmentsToToday_SegmentEntirelyInThePast_IsLeftUnchanged()
+    {
+        var segments = new[] { new ExpiredOptionBacktestService.FetchSegment(PrevExpiry.AddDays(1), TargetExpiry, 1) };
+        var today = TargetExpiry.AddDays(30); // TargetExpiry itself is now well in the past
+
+        var clamped = ExpiredOptionBacktestService.ClampSegmentsToToday(segments, today);
+
+        var segment = Assert.Single(clamped);
+        Assert.Equal(TargetExpiry, segment.To);
+    }
+
+    [Fact]
+    public void ClampSegmentsToToday_SegmentReachingPastToday_IsShortenedToToday()
+    {
+        // TargetExpiry (25 Aug) is a not-yet-expired contract here - today sits partway through the
+        // segment's own [PrevExpiry+1, TargetExpiry] range.
+        var segments = new[] { new ExpiredOptionBacktestService.FetchSegment(PrevExpiry.AddDays(1), TargetExpiry, 1) };
+        var today = TargetExpiry.AddDays(-10);
+
+        var clamped = ExpiredOptionBacktestService.ClampSegmentsToToday(segments, today);
+
+        var segment = Assert.Single(clamped);
+        Assert.Equal(PrevExpiry.AddDays(1), segment.From);
+        Assert.Equal(today, segment.To);
+    }
+
+    [Fact]
+    public void ClampSegmentsToToday_SegmentEntirelyPastToday_IsDroppedOutright()
+    {
+        // The pathological two-segment case: the older segment still has real data up to today, but
+        // the nearer one (anchored right after a PrevExpiry that is itself still in the future)
+        // would otherwise come out inverted (From left past the newly-clamped To).
+        var olderSegment = new ExpiredOptionBacktestService.FetchSegment(TargetExpiry.AddDays(-60), TargetExpiry.AddDays(-20), 2);
+        var nearerSegment = new ExpiredOptionBacktestService.FetchSegment(TargetExpiry.AddDays(-19), TargetExpiry, 1);
+        var today = TargetExpiry.AddDays(-20); // exactly the older segment's own end
+
+        var clamped = ExpiredOptionBacktestService.ClampSegmentsToToday(new[] { olderSegment, nearerSegment }, today);
+
+        var segment = Assert.Single(clamped);
+        Assert.Equal(olderSegment.From, segment.From);
+        Assert.Equal(today, segment.To);
+    }
+
     private static CandleWithVolume Bar(DateTimeOffset time, decimal open, decimal close) =>
         new(time, open, Math.Max(open, close), Math.Min(open, close), close, 0);
 
