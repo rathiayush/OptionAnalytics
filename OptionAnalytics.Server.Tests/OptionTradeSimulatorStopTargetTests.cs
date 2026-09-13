@@ -67,7 +67,9 @@ public sealed class OptionTradeSimulatorStopTargetTests
         var trade = Assert.Single(trades);
         Assert.Equal("TakeProfit", trade.ExitReason);
         Assert.Equal(120, trade.ExitPrice);
-        Assert.Equal(new DateTimeOffset(2026, 1, 5, 9, 31, 0, Ist), trade.ExitTimeUtc);
+        // The triggering bar is [09:31,09:32) - its own real close instant is 09:32, not its
+        // 09:31 start label (see Run's own barCloseTime comment).
+        Assert.Equal(new DateTimeOffset(2026, 1, 5, 9, 32, 0, Ist), trade.ExitTimeUtc);
     }
 
     [Fact]
