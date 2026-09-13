@@ -242,6 +242,19 @@ export default function RollingStrikeDataPage() {
     ? [Math.min(...resolvedStrikes), Math.max(...resolvedStrikes)]
     : null
 
+  const requestedStrike = result?.requestedAbsoluteStrike ?? null
+  const step = STRIKE_STEP_BY_UNDERLYING[underlying] ?? 50
+  // More than 2 steps away from what was actually requested - Dhan's rolling-option endpoint
+  // resolves "ATM+-K" AS OF EACH DAY in the window (its own docs' wording), not once against a
+  // single reference, so the SAME requested token can legitimately land on a different absolute
+  // strike on an earlier day if spot itself was far from where it is on the day the offset was
+  // computed against. Either way, a range spanning this far from the requested strike means the
+  // series is not one steady strike's own history throughout - see the note shown for it below.
+  const strikeDrift = requestedStrike != null && resolvedStrikeRange
+    ? Math.max(Math.abs(resolvedStrikeRange[0] - requestedStrike), Math.abs(resolvedStrikeRange[1] - requestedStrike))
+    : 0
+  const hasSignificantDrift = strikeDrift > step * 2
+
   // One row per trading day actually present, most recent first - same shape StrikeDataPage's own
   // rollup uses, so a day with far fewer candles than its neighbours (or a day that stops well
   // before close) is just as visible here for the rolling reconstruction as it already is there
@@ -408,6 +421,15 @@ export default function RollingStrikeDataPage() {
               />
             )}
 
+            {hasSignificantDrift && (
+              <Alert
+                type="warning"
+                showIcon
+                message={`Resolved strike drifted well away from the ${fmtPrice(requestedStrike)} you asked for`}
+                description={`Dhan's rolling-option endpoint resolves "${result.strikeToken}" AS OF EACH DAY in the window, not once for the whole request - so this same token can land on a different absolute strike on an earlier day if spot itself was far from where it was when the offset was computed. A ${fmtPrice(resolvedStrikeRange[0])} – ${fmtPrice(resolvedStrikeRange[1])} range means this series is NOT ${fmtPrice(requestedStrike)}'s own steady history throughout - only the bars near the end of the window (closest to today) sit near what you actually asked for. Try a shorter lookback centred on the specific date you care about for a cleaner single-strike view.`}
+              />
+            )}
+
             <Card size="small" title={`${underlying} ${result.strikeToken} ${result.optionType === 'CALL' ? 'CE' : 'PE'} — ${expiryDate}`}>
               <Row gutter={24}>
                 <Col><Statistic title="Total bars" value={rows.length} /></Col>
@@ -415,10 +437,12 @@ export default function RollingStrikeDataPage() {
                 <Col><Statistic title="Effective lookback" value={result.effectiveLookbackDays} suffix="days" /></Col>
                 <Col><Statistic title="Oldest bar" value={rows.length ? fmtIstDateTime(rows[rows.length - 1].time) : '—'} /></Col>
                 <Col><Statistic title="Newest bar" value={rows.length ? fmtIstDateTime(rows[0].time) : '—'} /></Col>
+                {requestedStrike != null && <Col><Statistic title="Requested strike" value={fmtPrice(requestedStrike)} /></Col>}
                 <Col>
                   <Statistic
                     title="Resolved strike range"
                     value={resolvedStrikeRange ? `${fmtPrice(resolvedStrikeRange[0])} – ${fmtPrice(resolvedStrikeRange[1])}` : 'not reported'}
+                    valueStyle={hasSignificantDrift ? { color: DOWN_COLOR } : undefined}
                   />
                 </Col>
               </Row>
