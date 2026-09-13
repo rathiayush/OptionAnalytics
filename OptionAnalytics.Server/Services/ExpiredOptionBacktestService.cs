@@ -29,13 +29,17 @@ namespace OptionAnalytics.Server.Services;
 /// unsupported here rather than built on synthetic/empty flow series that would silently never
 /// confirm a trade.
 ///
-/// GetOptionBars/GetOptionBarsOneMinute below ignore the actual "strike" value a strategy passes
-/// in and always return the one relative-strike series this run fetched - which is correct, not an
-/// approximation: OptionTradeSimulator computes that argument as "ATM at the signal's own time +-
-/// otmSteps", and the rolling-option endpoint was asked for exactly that same relative position
-/// ("ATM+otmSteps" for the call leg, "ATM-otmSteps" for the put leg), re-resolved by Dhan itself as
-/// spot moves through the window. Different runs use different otmSteps, so a new run always
-/// re-fetches rather than serving stale strikes from a previous one.
+/// GetOptionBars/GetOptionBarsOneMinute below DO use the actual "strike" value a strategy passes in
+/// (an ABSOLUTE price - OptionTradeSimulator computes it as "ATM at the signal's own time +-
+/// otmSteps") - see StrikeBandSteps/FetchStrikeBandAsync/BuildFixedStrikeSeries for why: the single
+/// relative token this run's own otmSteps calls for is fetched alongside a whole BAND of nearby
+/// tokens too, so that a trade entered at one specific absolute strike keeps being priced off THAT
+/// exact contract for its whole life, even if the index has since moved far enough that Dhan's own
+/// day-level "ATM+-K" resolution for the single primary token would otherwise have quietly drifted
+/// onto a different real contract by the time of exit (added at the user's own explicit request -
+/// "even if index is moved you need to keep watch on it... give me result from that particular
+/// strike"). Different runs use different otmSteps, so a new run always re-fetches its own band
+/// rather than serving stale strikes from a previous one.
 ///
 /// HOW EXPIRYCODE IS CHOSEN (this is the part that took several real runs to get right):
 /// Dhan's own Annexure documents expiryCode as a tiny enum - 0 = current/near expiry, 1 = next,
@@ -105,6 +109,29 @@ public sealed class ExpiredOptionBacktestService
     /// [fromDay,toDay] lookback window - see RunAsync's own comment on why this is safe to widen
     /// (spot has no contract of its own to splice across) even though CE/PE's window cannot be.</summary>
     private const int ChartPaddingDays = 2;
+
+    /// <summary>How many relative-strike tokens EITHER SIDE of a run's own primary otmSteps (or, on
+    /// the Rolling Strike Data page, the offset a requested absolute strike converts to) get fetched
+    /// into a BAND, at the user's own explicit request ("even if index is moved you need to keep
+    /// watch on it... give me result from that particular strike"): Dhan's rolling-option endpoint
+    /// only ever accepts a RELATIVE "ATM+-K" token, so there is no way to ask it directly for "strike
+    /// 56200's own price, whatever ATM does later" - the only way to get that with this API is to
+    /// fetch a wide enough range of tokens that, whatever day the index has since drifted to, SOME
+    /// token in the band still resolves to that exact absolute strike, then stitch those matching
+    /// bars together (see BuildFixedStrikeSeries). 6 either side (13 tokens total per side) is what
+    /// the user confirmed after being told the real cost: StrikeBandSteps*2+1 separate rolling-
+    /// option fetches per side instead of 1, each individually chunked/paced exactly like a single
+    /// fetch is today - a real run takes noticeably longer and carries more exposure to Dhan's own
+    /// rate limit, which the user explicitly accepted ("even it takes few min lets do it").</summary>
+    private const int StrikeBandSteps = 6;
+
+    /// <summary>Pacing between successive TOKEN fetches within one side's own band (see
+    /// FetchStrikeBandAsync) - same idea and same value as DhanRollingOptionDataService's own
+    /// ChunkDelay (which only paces chunks WITHIN one token's own fetch), extended to the band loop
+    /// itself so StrikeBandSteps*2+1 back-to-back token fetches do not burst at Dhan the same way
+    /// running CE and PE concurrently used to (see this class's own top-of-file doc comment on that
+    /// real failure).</summary>
+    private static readonly TimeSpan BandFetchDelay = TimeSpan.FromMilliseconds(350);
 
     private readonly DhanSpotInstrumentMaster _instrumentMaster;
     private readonly DhanHistoricalDataService _historicalData;
@@ -280,54 +307,35 @@ public sealed class ExpiredOptionBacktestService
         // bursting requests in parallel, each individually paced but with no coordination between
         // them. One side fully finishing before the other starts keeps every request this method
         // makes on the same, single, paced cadence - including every SEGMENT of one side (see
-        // BuildFetchSegments), not just each side as a whole.
-        var (ceRaw, ceError) = await FetchAcrossSegmentsAsync(instrument.SecurityId, expiryFlag, segments, ceStrike, "CALL", cancellationToken);
-        var (peRaw, peError) = await FetchAcrossSegmentsAsync(instrument.SecurityId, expiryFlag, segments, peStrike, "PUT", cancellationToken);
+        // BuildFetchSegments) and every TOKEN in one side's own band (see FetchStrikeBandAsync), not
+        // just each side as a whole.
+        //
+        // A BAND of tokens per side, not just the single one otmSteps calls for - see
+        // StrikeBandSteps' own doc comment for why: it is what lets GetOptionBars below keep pricing
+        // a trade off the EXACT absolute strike it entered at, even if the index has since moved far
+        // enough that Dhan's own day-level "ATM+-K" resolution for the single primary token would
+        // otherwise have quietly drifted onto a different real contract.
+        var (ceBand, ceError) = await FetchStrikeBandAsync(instrument.SecurityId, expiryFlag, segments, otmSteps, isCall: true, spotBars1m, step, cancellationToken);
+        var (peBand, peError) = await FetchStrikeBandAsync(instrument.SecurityId, expiryFlag, segments, otmSteps, isCall: false, spotBars1m, step, cancellationToken);
 
-        var ceBars1m = ceRaw.Select(b => b.Bar).ToList();
-        var peBars1m = peRaw.Select(b => b.Bar).ToList();
-        var ceSplices = DetectPossibleSplices(ceBars1m);
-        var peSplices = DetectPossibleSplices(peBars1m);
+        // The PRIMARY (centre-of-band) member - what this run's own otmSteps actually calls for -
+        // used only for the summary stats below (resolved/expected strike, splices, bar counts).
+        // Pricing itself no longer depends on any one band member alone - see GetOptionBars below.
+        var cePrimary = ceBand.First(m => m.Steps == otmSteps);
+        var pePrimary = peBand.First(m => m.Steps == otmSteps);
+        var ceSplices = cePrimary.Splices;
+        var peSplices = pePrimary.Splices;
 
-        // A wide lookback's returned series COULD genuinely be several real contracts spliced end to
-        // end - but a real run confirmed a splice showing up somewhere other than the head of the
-        // window too: right in the FINAL hour before close, ON the target contract's own real expiry
-        // date, regardless of month or how far OTM/ITM the strike was. Keeping "everything after the
-        // last splice" - the original assumption, when a too-wide lookback crossing into an OLDER
-        // contract was the only failure mode this had ever seen - is exactly backwards for that case:
-        // it kept a sliver of a few dozen bars and threw away the entire correct series. Keeping the
-        // LARGEST contiguous segment between splices (or a splice and either edge) instead handles
-        // both shapes with one rule: a genuine older-contract splice near the head still leaves the
-        // correct, nearer-to-expiry segment as the larger one; a corrupted tail sliver near close
-        // leaves the correct, earlier segment as the larger one. A signal whose time falls outside
-        // the kept segment simply finds no option bars (BacktestTrade.NoData), the same outcome this
-        // app already reports for any other strike with no tracked history, rather than silently
-        // pricing it off the wrong contract.
-        var ceUsedRaw = TrimToLargestSegment(ceRaw, ceSplices);
-        var peUsedRaw = TrimToLargestSegment(peRaw, peSplices);
-
-        // A confirmed real bug this catches that TrimToLargestSegment's splice-based trimming
-        // cannot: a bar whose own resolved strike quietly drifted away from what spot at that EXACT
-        // bar's own time implies it should be - no sudden jump for DetectPossibleSplices to see, just
-        // a wrong value sitting in the middle of an otherwise-smooth series. A real run showed
-        // exactly this shape: a Stop Loss triggered off a premium that never actually traded, on a
-        // bar whose own resolved strike did not match what spot said at that instant. Judged against
-        // spot AT EACH BAR'S OWN TIME (not one fixed reference for the whole window), so this does
-        // NOT flag the ordinary, expected case of a strike legitimately re-centering as ATM moves
-        // across the days in a wide lookback - only a bar that disagrees with its OWN day's ATM.
-        ceUsedRaw = FilterToExpectedStrike(ceUsedRaw, spotBars1m, step, otmSteps, isCall: true);
-        peUsedRaw = FilterToExpectedStrike(peUsedRaw, spotBars1m, step, otmSteps, isCall: false);
-
-        var ceUsed = ceUsedRaw.Select(b => b.Bar).ToList();
-        var peUsed = peUsedRaw.Select(b => b.Bar).ToList();
+        var ceUsed = cePrimary.Bars.Select(b => b.Bar).ToList();
+        var peUsed = pePrimary.Bars.Select(b => b.Bar).ToList();
 
         // What strike Dhan itself actually resolved "ATM+-K" to, versus what this app expected from
         // its own real spot - the direct check for a mismatched contract resolution rather than a
         // genuinely-priced but merely surprising premium. Read off the LAST bar (closest to expiry,
         // most representative of "the ATM this run cared about") rather than averaging across a
         // series that may itself have re-centered as spot moved through the window.
-        var ceResolvedStrike = ceUsedRaw.LastOrDefault(b => b.Strike is > 0).Strike;
-        var peResolvedStrike = peUsedRaw.LastOrDefault(b => b.Strike is > 0).Strike;
+        var ceResolvedStrike = cePrimary.Bars.LastOrDefault(b => b.Strike is > 0).Strike;
+        var peResolvedStrike = pePrimary.Bars.LastOrDefault(b => b.Strike is > 0).Strike;
         var spotDuringUsedWindow = ceUsed.Count > 0 ? spotBars1m.Where(b => b.Time >= ceUsed[0].Time).ToList() : spotBars1m;
         var referenceSpot = spotDuringUsedWindow.Count > 0 ? spotDuringUsedWindow[^1].Close : spotBars1m[^1].Close;
         var referenceAtm = step > 0 ? Math.Round(referenceSpot / step) * step : referenceSpot;
@@ -335,10 +343,18 @@ public sealed class ExpiredOptionBacktestService
         var peExpectedStrike = referenceAtm - otmSteps * step;
 
         var timeframe = Math.Max(1, timeframeMinutes);
-        var ceCandles1m = ceUsed.Select(c => c.ToCandle()).ToList();
-        var peCandles1m = peUsed.Select(c => c.ToCandle()).ToList();
-        var ceCandlesTf = BacktestUtil.AggregateCandles(ceCandles1m, timeframe);
-        var peCandlesTf = BacktestUtil.AggregateCandles(peCandles1m, timeframe);
+
+        // GetOptionBars/GetOptionBarsOneMinute now actually USE the strike argument a strategy
+        // passes in, instead of ignoring it - BuildFixedStrikeSeries searches the WHOLE fetched band
+        // (StrikeBandSteps either side of otmSteps) for whichever token, AT EACH BAR, actually
+        // resolved to the exact absolute strike requested, so a trade entered at (say) 56200 keeps
+        // being priced off 56200's own real data for as long as ANY fetched token in the band still
+        // reports it - not whatever the single primary token happens to have drifted onto by exit.
+        IReadOnlyList<Candle> OneMinuteOptionBars(decimal strikeArg, bool isCallArg) =>
+            BuildFixedStrikeSeries(isCallArg ? ceBand : peBand, strikeArg, step).Select(b => b.ToCandle()).ToList();
+
+        IReadOnlyList<Candle> TimeframeOptionBars(decimal strikeArg, bool isCallArg) =>
+            BacktestUtil.AggregateCandles(OneMinuteOptionBars(strikeArg, isCallArg), timeframe);
 
         // The WIDER (chartFromDay..chartToDay) series, not spotBars1m - what the page's own chart
         // plots, so the padding around the lookback window this method fetched actually reaches it.
@@ -357,9 +373,8 @@ public sealed class ExpiredOptionBacktestService
             ObvPeSeries = Array.Empty<ObvPoint>(),
             CdvCeSeries = Array.Empty<ObvPoint>(),
             CdvPeSeries = Array.Empty<ObvPoint>(),
-            // Ignores the strike argument on purpose - see this class's own doc comment.
-            GetOptionBars = (_, isCall) => isCall ? ceCandlesTf : peCandlesTf,
-            GetOptionBarsOneMinute = (_, isCall) => isCall ? ceCandles1m : peCandles1m,
+            GetOptionBars = TimeframeOptionBars,
+            GetOptionBarsOneMinute = OneMinuteOptionBars,
             AtmCeBars = Array.Empty<Candle>(),
             AtmPeBars = Array.Empty<Candle>(),
             AtmCeVolumeBars = Array.Empty<CandleWithVolume>(),
@@ -397,11 +412,19 @@ public sealed class ExpiredOptionBacktestService
     /// <paramref name="absoluteStrike"/>, when given, overrides <paramref name="otmSteps"/>: an
     /// ABSOLUTE strike (e.g. the exact "56200" a disputed trade's own row named) is converted to the
     /// relative token Dhan's endpoint actually needs (it has no "give me this exact strike" input at
-    /// all) using the ATM AS OF <paramref name="expiryDate"/>'s own window (a few real days of spot
-    /// ending at toDay), NOT today's current spot - converting against today's price for a date that
-    /// may be weeks or months in the past would round to a strike offset several steps away from the
-    /// one that actually existed back then, which is a wrong-contract bug of this app's OWN making
-    /// rather than anything Dhan itself did.</summary>
+    /// all) using the ATM AS OF <paramref name="expiryDate"/>'s own window (real spot across the
+    /// whole [fromDay,toDay] fetch window, its LATEST bar), NOT today's current spot - converting
+    /// against today's price for a date that may be weeks or months in the past would round to a
+    /// strike offset several steps away from the one that actually existed back then, which is a
+    /// wrong-contract bug of this app's OWN making rather than anything Dhan itself did.
+    ///
+    /// When <paramref name="absoluteStrike"/> is given, this ALSO fetches a whole BAND of tokens
+    /// around that starting offset (see StrikeBandSteps) and returns, in the result's own
+    /// FixedStrikeBars, absoluteStrike's own price stitched continuously across the whole window
+    /// (see BuildFixedStrikeSeries) - so the chart can show that ONE real contract's own data even on
+    /// a day the index has since moved far enough that the single starting token would have drifted
+    /// onto a different real strike. Bars (the raw, unfiltered per-token fetch) stays exactly what it
+    /// always was: the single PRIMARY token's own untouched response, for auditing.</summary>
     public async Task<RollingOptionChartResult> GetRollingChartAsync(
         string underlying, string expiryFlag, DateOnly expiryDate, int otmSteps, decimal? absoluteStrike, bool isCall, int lookbackDays,
         CancellationToken cancellationToken)
@@ -449,21 +472,26 @@ public sealed class ExpiredOptionBacktestService
         segments = ClampSegmentsToToday(segments, today);
         var effectiveLookbackDays = toDay.DayNumber - fromDay.DayNumber;
 
+        var step = StrikeStepByUnderlying[underlying];
         var resolvedOtmSteps = otmSteps;
+        List<StrikeBandMember>? band = null;
+        string? bandError = null;
+
         if (absoluteStrike is { } strikeValue)
         {
-            var step = StrikeStepByUnderlying[underlying];
-            // A few days of REAL spot ending at toDay - the ATM this contract actually traded
-            // against back then, not whatever spot happens to be right now (see this method's own
-            // doc comment for why that distinction matters).
-            var referenceFromDay = toDay.AddDays(-5);
-            var (referenceSpotBars, referenceSpotError) = await _historicalData.GetIntradayCandlesAsync(
-                instrument.SecurityId, instrument.DhanSegment, referenceFromDay, toDay, 1, cancellationToken);
-            if (referenceSpotBars.Count == 0)
+            // The FULL [fromDay,toDay] window, not just a short reference slice near toDay - still
+            // used to convert strikeValue into a starting relative offset off the window's own
+            // LATEST spot (unchanged from before), but now ALSO needed for FilterToExpectedStrike to
+            // validate every member of the strike BAND fetched below - see StrikeBandSteps' own doc
+            // comment for why one token alone cannot keep tracking a fixed absolute strike as the
+            // index moves.
+            var (windowSpotBars, spotError) = await _historicalData.GetIntradayCandlesAsync(
+                instrument.SecurityId, instrument.DhanSegment, fromDay, toDay, 1, cancellationToken);
+            if (windowSpotBars.Count == 0)
                 return RollingOptionChartResult.Failed(
-                    $"Could not resolve a reference spot price near {toDay:dd MMM yyyy} to convert {strikeValue:0.##} into a strike offset - {referenceSpotError ?? "no spot history in that window"}.");
+                    $"Could not resolve spot history for {fromDay:dd MMM yyyy}..{toDay:dd MMM yyyy} to convert {strikeValue:0.##} into a strike offset - {spotError ?? "no spot history in that window"}.");
 
-            var referenceSpot = referenceSpotBars[^1].Close;
+            var referenceSpot = windowSpotBars[^1].Close;
             var referenceAtm = step > 0 ? Math.Round(referenceSpot / step) * step : referenceSpot;
             var absoluteToken = step > 0 ? (int)Math.Round((strikeValue - referenceAtm) / step, MidpointRounding.AwayFromZero) : 0;
             // The token is symmetric in ABSOLUTE terms - "ATM+2" names the same real strike whether
@@ -471,6 +499,11 @@ public sealed class ExpiredOptionBacktestService
             // sign flip below, the same way RunAsync's own ceStrike/peStrike do for a shared
             // otmSteps; nothing extra needed here beyond computing the plain absolute offset.
             resolvedOtmSteps = isCall ? absoluteToken : -absoluteToken;
+
+            // A BAND of tokens around resolvedOtmSteps, not just the single one - so absoluteStrike
+            // keeps being found even on a day the index has drifted enough that this single starting
+            // offset no longer resolves to it (see BuildFixedStrikeSeries below).
+            (band, bandError) = await FetchStrikeBandAsync(instrument.SecurityId, expiryFlag, segments, resolvedOtmSteps, isCall, windowSpotBars, step, cancellationToken);
         }
 
         // Same sign convention RunAsync itself uses: otmSteps is "how far OTM for the side actually
@@ -479,14 +512,40 @@ public sealed class ExpiredOptionBacktestService
         var strikeToken = StrikeToken(isCall ? resolvedOtmSteps : -resolvedOtmSteps);
         var optionType = isCall ? "CALL" : "PUT";
 
-        var (raw, error) = await FetchAcrossSegmentsAsync(instrument.SecurityId, expiryFlag, segments, strikeToken, optionType, cancellationToken);
-        var bars = raw.Select(b => b.Bar).ToList();
-        var splices = DetectPossibleSplices(bars);
+        List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> raw;
+        List<PossibleSplice> splices;
+        string? error;
+
+        if (band is { } fetchedBand)
+        {
+            // Already fetched as part of the band above (resolvedOtmSteps sits at its exact centre)
+            // - reuse it rather than fetching the very same token a second time.
+            var primary = fetchedBand.First(m => m.Steps == resolvedOtmSteps);
+            raw = primary.RawBars;
+            splices = primary.Splices;
+            error = bandError;
+        }
+        else
+        {
+            (raw, error) = await FetchAcrossSegmentsAsync(instrument.SecurityId, expiryFlag, segments, strikeToken, optionType, cancellationToken);
+            splices = DetectPossibleSplices(raw.Select(b => b.Bar).ToList());
+        }
+
+        // Only populated when a specific absolute strike was requested - see StrikeBandSteps' own
+        // doc comment. Stitched from the band fetched above, so it keeps tracking absoluteStrike's
+        // OWN price continuously across the whole window, not just the days the single primary token
+        // happened to land on it (unlike Bars below, which stays the single primary token's own RAW,
+        // unfiltered fetch, exactly as before, for auditing).
+        var fixedStrikeBars = absoluteStrike is { } targetStrike && band is { } strikeBand
+            ? BuildFixedStrikeSeries(strikeBand, targetStrike, step)
+                .Select(b => new RollingOptionChartBar(b.Time, b.Open, b.High, b.Low, b.Close, b.Volume, targetStrike))
+                .ToList()
+            : new List<RollingOptionChartBar>();
 
         return new RollingOptionChartResult(
             true, error, strikeToken, optionType, effectiveLookbackDays,
             raw.Select(b => new RollingOptionChartBar(b.Bar.Time, b.Bar.Open, b.Bar.High, b.Bar.Low, b.Bar.Close, b.Bar.Volume, b.Strike)).ToList(),
-            splices, absoluteStrike);
+            splices, absoluteStrike, fixedStrikeBars);
     }
 
     private static string StrikeToken(int steps) => steps == 0 ? "ATM" : $"ATM{(steps > 0 ? "+" : "")}{steps}";
@@ -595,6 +654,55 @@ public sealed class ExpiredOptionBacktestService
         return (bars, error);
     }
 
+    /// <summary>One band member's own data (see FetchStrikeBandAsync): RawBars is the untouched fetch
+    /// (what a caller inspecting "everything Dhan sent back for this token" wants), Bars is the SAME
+    /// data after this run's usual TrimToLargestSegment + FilterToExpectedStrike processing (what a
+    /// real backtest trade should actually be priced from), and Splices is what DetectPossibleSplices
+    /// found in RawBars - kept per member so a caller can still report "what did the PRIMARY token's
+    /// own splices/resolved-strike look like" exactly as before, even though pricing itself no longer
+    /// depends on any one member alone (see BuildFixedStrikeSeries).</summary>
+    internal readonly record struct StrikeBandMember(
+        int Steps,
+        List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> RawBars,
+        List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> Bars,
+        List<PossibleSplice> Splices);
+
+    /// <summary>Fetches every relative-strike token from centerSteps-StrikeBandSteps to
+    /// centerSteps+StrikeBandSteps for one side (CE or PE, isCall says which) - the raw ingredients
+    /// BuildFixedStrikeSeries stitches one FIXED absolute strike's own continuous series from. See
+    /// StrikeBandSteps' own doc comment for why one token alone cannot do that at all.
+    ///
+    /// Sequential, individually paced (BandFetchDelay) - never parallel, for the same account-wide
+    /// rate-limit reason this class's own top-of-file doc comment already explains for CE-vs-PE.
+    /// Per-member errors are concatenated, same convention FetchAcrossSegmentsAsync itself uses.</summary>
+    private async Task<(List<StrikeBandMember> Band, string? Error)> FetchStrikeBandAsync(
+        uint underlyingSecurityId, string expiryFlag, IReadOnlyList<FetchSegment> segments, int centerSteps, bool isCall,
+        IReadOnlyList<Candle> spotBars, int step, CancellationToken cancellationToken)
+    {
+        var optionType = isCall ? "CALL" : "PUT";
+        var band = new List<StrikeBandMember>();
+        string? error = null;
+        var isFirst = true;
+
+        for (var steps = centerSteps - StrikeBandSteps; steps <= centerSteps + StrikeBandSteps; steps++)
+        {
+            // Paced, not back to back - see BandFetchDelay's own doc comment. Skipped before the
+            // very first token only.
+            if (!isFirst) await Task.Delay(BandFetchDelay, cancellationToken);
+            isFirst = false;
+
+            var token = StrikeToken(isCall ? steps : -steps);
+            var (raw, fetchError) = await FetchAcrossSegmentsAsync(underlyingSecurityId, expiryFlag, segments, token, optionType, cancellationToken);
+            if (fetchError is not null) error = error is null ? fetchError : $"{error}; {fetchError}";
+
+            var splices = DetectPossibleSplices(raw.Select(b => b.Bar).ToList());
+            var filtered = FilterToExpectedStrike(TrimToLargestSegment(raw, splices), spotBars, step, steps, isCall);
+            band.Add(new StrikeBandMember(steps, raw, filtered, splices));
+        }
+
+        return (band, error);
+    }
+
     /// <summary>Splits raw into the segments delimited by splices' own timestamps and returns the
     /// LARGEST one by bar count - see DetectPossibleSplices' own doc comment for why "largest", not
     /// "last", is the right one to trust: a genuine anomaly can now show up at either edge of the
@@ -684,6 +792,40 @@ public sealed class ExpiredOptionBacktestService
         }
 
         return kept;
+    }
+
+    /// <summary>Stitches ONE fixed absolute strike's own continuous candle series from across an
+    /// entire fetched band of relative tokens (see FetchStrikeBandAsync) - at every bar time ANY
+    /// band member reports, keeps the bar from whichever member's OWN resolved strike actually
+    /// matches targetStrike (within step/2, the same tolerance FilterToExpectedStrike uses), so a
+    /// trade entered at one specific absolute strike (or a caller inspecting one on the Rolling
+    /// Strike Data page) keeps seeing THAT exact contract's own price for as long as ANY fetched
+    /// token in the band still reports it - regardless of which relative offset was needed to reach
+    /// it on a given day, and regardless of how far the underlying's own ATM has since moved away
+    /// from where it was when the strike was chosen. A bar time no band member's resolved strike
+    /// matches at all (the index moved further than StrikeBandSteps can reach) simply produces no
+    /// candle there - the same "no data for this strike" outcome any other untracked strike already
+    /// gets, not a crash or a silently wrong price.
+    ///
+    /// When more than one band member reports the SAME bar time as a match (possible right at the
+    /// edge of two adjacent tokens both resolving near targetStrike that day), the first one
+    /// encountered wins - band members are iterated in the same fixed (ascending Steps) order every
+    /// time, so this is deterministic, not a source of run-to-run variance.</summary>
+    internal static List<CandleWithVolume> BuildFixedStrikeSeries(
+        IReadOnlyList<StrikeBandMember> band, decimal targetStrike, int step)
+    {
+        var merged = new SortedDictionary<DateTimeOffset, CandleWithVolume>();
+
+        foreach (var member in band)
+        {
+            foreach (var entry in member.Bars)
+            {
+                if (entry.Strike is not { } resolved || Math.Abs(resolved - targetStrike) > step / 2m) continue;
+                merged.TryAdd(entry.Bar.Time, entry.Bar);
+            }
+        }
+
+        return merged.Values.ToList();
     }
 
     /// <summary>Whether the returned series genuinely stays on ONE single contract for the whole

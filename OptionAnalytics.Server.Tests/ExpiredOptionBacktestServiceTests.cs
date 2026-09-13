@@ -477,4 +477,97 @@ public sealed class ExpiredOptionBacktestServiceTests
 
         Assert.Equal(10, splices.Count);
     }
+
+    private static ExpiredOptionBacktestService.StrikeBandMember BandMember(int steps, params (DateTimeOffset Time, decimal Price, decimal? Strike)[] entries)
+    {
+        var bars = entries.Select(e => (Bar(e.Time, e.Price, e.Price), e.Strike, (decimal?)null)).ToList();
+        return new ExpiredOptionBacktestService.StrikeBandMember(steps, bars, bars, new List<PossibleSplice>());
+    }
+
+    [Fact]
+    public void BuildFixedStrikeSeries_StitchesAcrossBandMembers_FollowingIndexDrift()
+    {
+        // The real scenario this exists for: a trade entered at absolute strike 24050. Day 1's ATM+1
+        // token (steps=1) resolves to exactly that. The index then moves, and by day 2 it is the
+        // ATM+0 token (steps=0) that now resolves to 24050 instead - a single relative token could
+        // never follow this, but the band (both members fetched) can.
+        var day1 = new DateTimeOffset(2024, 8, 1, 9, 15, 0, TimeSpan.FromHours(5.5));
+        var day2 = new DateTimeOffset(2024, 8, 2, 9, 15, 0, TimeSpan.FromHours(5.5));
+        var band = new List<ExpiredOptionBacktestService.StrikeBandMember>
+        {
+            BandMember(steps: 0, (day2, 105m, 24050m)), // day2: steps=0 now resolves to 24050
+            BandMember(steps: 1, (day1, 100m, 24050m)), // day1: steps=1 resolves to 24050
+        };
+
+        var stitched = ExpiredOptionBacktestService.BuildFixedStrikeSeries(band, targetStrike: 24050m, step: 50);
+
+        Assert.Equal(2, stitched.Count);
+        Assert.Equal(day1, stitched[0].Time); // sorted ascending by time regardless of band order
+        Assert.Equal(100m, stitched[0].Close);
+        Assert.Equal(day2, stitched[1].Time);
+        Assert.Equal(105m, stitched[1].Close);
+    }
+
+    [Fact]
+    public void BuildFixedStrikeSeries_NoBandMemberMatchesAtSomeTime_LeavesAGapNotAnError()
+    {
+        // The index drifted further than the fetched band (StrikeBandSteps) can reach - there is
+        // simply no data for the target strike at that time, not a crash or a wrong-strike price.
+        var t0 = new DateTimeOffset(2024, 8, 1, 9, 15, 0, TimeSpan.FromHours(5.5));
+        var band = new List<ExpiredOptionBacktestService.StrikeBandMember>
+        {
+            BandMember(steps: 0, (t0, 100m, 23000m)), // far from the 24050 target - no match
+        };
+
+        var stitched = ExpiredOptionBacktestService.BuildFixedStrikeSeries(band, targetStrike: 24050m, step: 50);
+
+        Assert.Empty(stitched);
+    }
+
+    [Fact]
+    public void BuildFixedStrikeSeries_NullResolvedStrike_IsNeverTreatedAsAMatch()
+    {
+        var t0 = new DateTimeOffset(2024, 8, 1, 9, 15, 0, TimeSpan.FromHours(5.5));
+        var band = new List<ExpiredOptionBacktestService.StrikeBandMember>
+        {
+            BandMember(steps: 0, (t0, 100m, null)),
+        };
+
+        var stitched = ExpiredOptionBacktestService.BuildFixedStrikeSeries(band, targetStrike: 24050m, step: 50);
+
+        Assert.Empty(stitched);
+    }
+
+    [Fact]
+    public void BuildFixedStrikeSeries_TwoMembersMatchTheSameTime_TheFirstOneInBandOrderWins()
+    {
+        // Both members happen to resolve to the target strike at the exact same bar time (possible
+        // right at the edge of two adjacent tokens) - deterministic, not run-to-run varying: the
+        // member earlier in the band list (ascending Steps in real use) wins.
+        var t0 = new DateTimeOffset(2024, 8, 1, 9, 15, 0, TimeSpan.FromHours(5.5));
+        var band = new List<ExpiredOptionBacktestService.StrikeBandMember>
+        {
+            BandMember(steps: 0, (t0, 100m, 24050m)),
+            BandMember(steps: 1, (t0, 999m, 24050m)),
+        };
+
+        var stitched = ExpiredOptionBacktestService.BuildFixedStrikeSeries(band, targetStrike: 24050m, step: 50);
+
+        var kept = Assert.Single(stitched);
+        Assert.Equal(100m, kept.Close);
+    }
+
+    [Fact]
+    public void BuildFixedStrikeSeries_ResolvedStrikeJustOutsideTolerance_IsExcluded()
+    {
+        var t0 = new DateTimeOffset(2024, 8, 1, 9, 15, 0, TimeSpan.FromHours(5.5));
+        var band = new List<ExpiredOptionBacktestService.StrikeBandMember>
+        {
+            BandMember(steps: 0, (t0, 100m, 24076m)), // 26 away from 24050 - step/2 tolerance is 25
+        };
+
+        var stitched = ExpiredOptionBacktestService.BuildFixedStrikeSeries(band, targetStrike: 24050m, step: 50);
+
+        Assert.Empty(stitched);
+    }
 }
