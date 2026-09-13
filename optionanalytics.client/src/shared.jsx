@@ -249,9 +249,15 @@ export function DirectionTag({ direction }) {
 const NAV_ITEMS = [
   { key: '/', label: 'Dashboard' },
   { key: '/backtest', label: 'Backtrack' },
-  { key: '/strike-data', label: 'Strike Data' },
+  {
+    key: 'strike-data-group',
+    label: 'Strike Data',
+    children: [
+      { key: '/strike-data', label: 'Live' },
+      { key: '/rolling-strike-data', label: 'Rolling (Expired)' },
+    ],
+  },
   { key: '/expired-backtest', label: 'Expired Backtest' },
-  { key: '/rolling-strike-data', label: 'Rolling Strike Data' },
   { key: '/triggers', label: 'Triggers' },
   { key: '/contracts', label: 'Contracts' },
 ]
