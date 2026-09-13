@@ -74,6 +74,40 @@ public sealed class ExpiredBacktestController : ControllerBase
         return result.Success ? Ok(result) : BadRequest(new { error = result.Error });
     }
 
+    /// <summary>The raw rolling-option series for one relative strike/side - no strategy run, just
+    /// literally what Dhan's rolling-option endpoint returns for this underlying/expiry/strike,
+    /// including the per-bar RESOLVED strike and any splice this app's own safety net already flags
+    /// - see ExpiredOptionBacktestService.GetRollingChartAsync's own doc comment for why this exists
+    /// separately from POST /run (a real premium anomaly is easier to see directly than to infer
+    /// from a trade's own surprising exit).</summary>
+    [HttpGet("{underlying}/rolling-chart")]
+    public async Task<IActionResult> GetRollingChart(
+        string underlying,
+        [FromQuery] string? expiryFlag,
+        [FromQuery] string? expiryDate,
+        [FromQuery] int otmSteps,
+        [FromQuery] string? side,
+        [FromQuery] int lookbackDays,
+        CancellationToken cancellationToken)
+    {
+        var normalizedFlag = expiryFlag?.Trim().ToUpperInvariant();
+        if (normalizedFlag is not ("WEEK" or "MONTH"))
+            return BadRequest(new { error = "'expiryFlag' must be WEEK or MONTH." });
+
+        if (!DateOnly.TryParse(expiryDate, out var parsedExpiry))
+            return BadRequest(new { error = "'expiryDate' must be a valid date." });
+
+        var normalizedSide = side?.Trim().ToUpperInvariant();
+        if (normalizedSide is not ("CE" or "PE"))
+            return BadRequest(new { error = "'side' must be CE or PE." });
+
+        var result = await _service.GetRollingChartAsync(
+            underlying.ToUpperInvariant(), normalizedFlag, parsedExpiry, otmSteps, normalizedSide == "CE",
+            lookbackDays > 0 ? lookbackDays : 30, cancellationToken);
+
+        return result.Success ? Ok(result) : BadRequest(new { error = result.Error });
+    }
+
     /// <summary>Every query param other than the named ones above that parses as a number, passed
     /// through as the selected strategy's own parameter - generic on purpose, matching
     /// BacktestController.ReadParameters, so a new strategy's parameters reach it with no

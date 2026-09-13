@@ -367,6 +367,82 @@ public sealed class ExpiredOptionBacktestService
             spotChartCandlesTf);
     }
 
+    /// <summary>The raw rolling-option series for ONE relative strike/side, with no strategy run
+    /// against it at all - what the Strike Data (Rolling) page needs to let a real premium anomaly
+    /// (a bar whose High/Low never actually traded - see this app's own real finding of exactly
+    /// that) be inspected directly, bar by bar and resolved-strike by resolved-strike, instead of
+    /// only inferred from a trade's own surprising exit. Shares every validation/anchoring rule
+    /// RunAsync uses (same expiry/lookback bounds, same BuildFetchSegments/ClampSegmentsToToday
+    /// anchoring, same DetectPossibleSplices safety net) so this page can never show a window the
+    /// real backtest page itself would have rejected or handled differently.
+    ///
+    /// Deliberately returns the RAW fetch, not TrimToLargestSegment's trimmed result - a real splice
+    /// or a wrong-contract bar is exactly what this page exists to make visible, not something to
+    /// quietly cut away before the user ever sees it (RunAsync itself trims, since a live strategy
+    /// run has to pick ONE contract to trade; this one does not).</summary>
+    public async Task<RollingOptionChartResult> GetRollingChartAsync(
+        string underlying, string expiryFlag, DateOnly expiryDate, int otmSteps, bool isCall, int lookbackDays,
+        CancellationToken cancellationToken)
+    {
+        if (!StrikeStepByUnderlying.ContainsKey(underlying))
+            return RollingOptionChartResult.Failed($"'{underlying}' is not supported - only NIFTY and BANKNIFTY (Dhan's rolling-option API only documents NSE_FNO index options).");
+
+        if (string.Equals(underlying, "BANKNIFTY", StringComparison.OrdinalIgnoreCase) && string.Equals(expiryFlag, "WEEK", StringComparison.OrdinalIgnoreCase))
+            return RollingOptionChartResult.Failed("BANKNIFTY has no weekly expiry - NSE discontinued it. Use Monthly instead.");
+
+        var cadence = string.Equals(expiryFlag, "MONTH", StringComparison.OrdinalIgnoreCase) ? "monthly" : "weekly";
+        var today = IstClock.Today();
+
+        var isRealExpiry = string.Equals(expiryFlag, "MONTH", StringComparison.OrdinalIgnoreCase)
+            ? ExpiryCalendar.MonthlyExpiries(expiryDate, expiryDate).Count > 0
+            : ExpiryCalendar.WeeklyExpiries(expiryDate, expiryDate).Count > 0;
+        if (!isRealExpiry)
+            return RollingOptionChartResult.Failed(
+                $"{expiryDate:dd MMM yyyy} is not a real {cadence} expiry - NSE's current convention (since Nov 2024) is the last Tuesday of the month (monthly) or every Tuesday (weekly), possibly shifted a day earlier around a trading holiday. Pick a date from the list.");
+
+        if (expiryDate < today.AddMonths(-CalendarMonthsBack))
+            return RollingOptionChartResult.Failed(
+                $"{expiryDate:dd MMM yyyy} is further back than this app can reliably validate ({CalendarMonthsBack} months) - NSE's expiry-weekday convention has changed more than once historically, so a date this old is not offered.");
+
+        if (expiryDate > today.AddMonths(CalendarMonthsForward))
+            return RollingOptionChartResult.Failed(
+                $"{expiryDate:dd MMM yyyy} is further ahead than this app offers ({CalendarMonthsForward} months) - Dhan may not have even listed that contract yet. Pick a date from the list.");
+
+        await _instrumentMaster.EnsureLoadedAsync(cancellationToken);
+
+        var instrument = _instrumentMaster.FindSpot(underlying);
+        if (instrument is null)
+            return RollingOptionChartResult.Failed($"Could not resolve {underlying}'s Dhan security id yet - the scrip master may still be loading. Try again shortly.");
+
+        var toDay = expiryDate > today ? today : expiryDate;
+
+        var requestedFromDay = expiryDate.AddDays(-Math.Clamp(lookbackDays, 1, MaxLookbackDays(expiryFlag)));
+        var segments = BuildFetchSegments(expiryFlag, expiryDate, requestedFromDay);
+        var fromDay = segments[0].From;
+
+        if (fromDay > toDay)
+            return RollingOptionChartResult.Failed(
+                $"{underlying} hasn't traded yet over the requested window - today is {today:dd MMM yyyy}, but a {lookbackDays}-day lookback from {expiryDate:dd MMM yyyy} starts {fromDay:dd MMM yyyy}, which is still in the future. Pick a shorter lookback (or wait until closer to today) to inspect this contract's life so far.");
+
+        segments = ClampSegmentsToToday(segments, today);
+        var effectiveLookbackDays = toDay.DayNumber - fromDay.DayNumber;
+
+        // Same sign convention RunAsync itself uses: otmSteps is "how far OTM for the side actually
+        // being looked at", negated for PE since OTM sits BELOW spot for a put but above it for a
+        // call - see StrikeToken/RunAsync's own ceStrike/peStrike computation.
+        var strikeToken = StrikeToken(isCall ? otmSteps : -otmSteps);
+        var optionType = isCall ? "CALL" : "PUT";
+
+        var (raw, error) = await FetchAcrossSegmentsAsync(instrument.SecurityId, expiryFlag, segments, strikeToken, optionType, cancellationToken);
+        var bars = raw.Select(b => b.Bar).ToList();
+        var splices = DetectPossibleSplices(bars);
+
+        return new RollingOptionChartResult(
+            true, error, strikeToken, optionType, effectiveLookbackDays,
+            raw.Select(b => new RollingOptionChartBar(b.Bar.Time, b.Bar.Open, b.Bar.High, b.Bar.Low, b.Bar.Close, b.Bar.Volume, b.Strike)).ToList(),
+            splices);
+    }
+
     private static string StrikeToken(int steps) => steps == 0 ? "ATM" : $"ATM{(steps > 0 ? "+" : "")}{steps}";
 
     /// <summary>Neither cadence uses this as a real safety boundary any more - BuildFetchSegments
