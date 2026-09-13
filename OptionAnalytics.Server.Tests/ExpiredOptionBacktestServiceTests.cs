@@ -242,6 +242,107 @@ public sealed class ExpiredOptionBacktestServiceTests
         Assert.All(trimmed, b => Assert.True(b.Bar.Time >= t0.AddMinutes(20)));
     }
 
+    private static (CandleWithVolume Bar, decimal? Strike) RawBarWithStrike(DateTimeOffset time, decimal price, decimal? strike) =>
+        (Bar(time, price, price), strike);
+
+    private static Candle SpotBar(DateTimeOffset time, decimal close) => new(time, close, close, close, close);
+
+    [Fact]
+    public void FilterToExpectedStrike_EveryBarMatchesSpotImpliedStrike_KeepsAllOfThem()
+    {
+        var t0 = new DateTimeOffset(2024, 8, 1, 9, 15, 0, TimeSpan.FromHours(5.5));
+        var spot = new List<Candle> { SpotBar(t0, 24000m) }; // ATM = 24000, otmSteps=1 CE -> 24050
+        var bars = new List<(CandleWithVolume Bar, decimal? Strike)>
+        {
+            RawBarWithStrike(t0, 100m, 24050m),
+            RawBarWithStrike(t0.AddMinutes(1), 99m, 24050m),
+        };
+
+        var filtered = ExpiredOptionBacktestService.FilterToExpectedStrike(bars, spot, step: 50, otmSteps: 1, isCall: true);
+
+        Assert.Equal(2, filtered.Count);
+    }
+
+    [Fact]
+    public void FilterToExpectedStrike_OneBarResolvedToADifferentStrike_IsDroppedAlone()
+    {
+        // The real bug this exists to catch: a single bar quietly resolved to a wrong strike with no
+        // sudden jump around it for DetectPossibleSplices to see.
+        var t0 = new DateTimeOffset(2024, 8, 1, 9, 15, 0, TimeSpan.FromHours(5.5));
+        var spot = new List<Candle> { SpotBar(t0, 24000m) }; // ATM = 24000, otmSteps=1 CE -> 24050
+        var bars = new List<(CandleWithVolume Bar, decimal? Strike)>
+        {
+            RawBarWithStrike(t0, 100m, 24050m),
+            RawBarWithStrike(t0.AddMinutes(1), 675.85m, 24200m), // resolved 3 steps away - wrong strike
+            RawBarWithStrike(t0.AddMinutes(2), 99m, 24050m),
+        };
+
+        var filtered = ExpiredOptionBacktestService.FilterToExpectedStrike(bars, spot, step: 50, otmSteps: 1, isCall: true);
+
+        Assert.Equal(2, filtered.Count);
+        Assert.DoesNotContain(filtered, b => b.Bar.Time == t0.AddMinutes(1));
+    }
+
+    [Fact]
+    public void FilterToExpectedStrike_LegitimateReCenteringAcrossDays_IsNotFlagged()
+    {
+        // Spot itself moved between the two spot bars - the resolved strike correctly following ATM
+        // to a new value on the second day is the expected, healthy behaviour, not a bug.
+        var day1 = new DateTimeOffset(2024, 8, 1, 9, 15, 0, TimeSpan.FromHours(5.5));
+        var day2 = new DateTimeOffset(2024, 8, 2, 9, 15, 0, TimeSpan.FromHours(5.5));
+        var spot = new List<Candle> { SpotBar(day1, 24000m), SpotBar(day2, 24500m) };
+        var bars = new List<(CandleWithVolume Bar, decimal? Strike)>
+        {
+            RawBarWithStrike(day1, 100m, 24050m), // day1 ATM 24000 -> +1 step = 24050
+            RawBarWithStrike(day2, 90m, 24550m), // day2 ATM 24500 -> +1 step = 24550
+        };
+
+        var filtered = ExpiredOptionBacktestService.FilterToExpectedStrike(bars, spot, step: 50, otmSteps: 1, isCall: true);
+
+        Assert.Equal(2, filtered.Count);
+    }
+
+    [Fact]
+    public void FilterToExpectedStrike_NullResolvedStrike_IsKeptRegardless()
+    {
+        var t0 = new DateTimeOffset(2024, 8, 1, 9, 15, 0, TimeSpan.FromHours(5.5));
+        var spot = new List<Candle> { SpotBar(t0, 24000m) };
+        var bars = new List<(CandleWithVolume Bar, decimal? Strike)> { RawBarWithStrike(t0, 100m, null) };
+
+        var filtered = ExpiredOptionBacktestService.FilterToExpectedStrike(bars, spot, step: 50, otmSteps: 1, isCall: true);
+
+        Assert.Single(filtered);
+    }
+
+    [Fact]
+    public void FilterToExpectedStrike_BarBeforeAnySpotReference_IsKept()
+    {
+        var t0 = new DateTimeOffset(2024, 8, 1, 9, 15, 0, TimeSpan.FromHours(5.5));
+        var spot = new List<Candle> { SpotBar(t0.AddMinutes(5), 24000m) }; // spot only starts later
+        var bars = new List<(CandleWithVolume Bar, decimal? Strike)> { RawBarWithStrike(t0, 100m, 99999m) }; // wildly wrong, but unverifiable yet
+
+        var filtered = ExpiredOptionBacktestService.FilterToExpectedStrike(bars, spot, step: 50, otmSteps: 1, isCall: true);
+
+        Assert.Single(filtered);
+    }
+
+    [Fact]
+    public void FilterToExpectedStrike_PutSide_ExpectsTheOppositeSignStrike()
+    {
+        var t0 = new DateTimeOffset(2024, 8, 1, 9, 15, 0, TimeSpan.FromHours(5.5));
+        var spot = new List<Candle> { SpotBar(t0, 24000m) }; // ATM = 24000, otmSteps=1 PE -> 23950
+        var bars = new List<(CandleWithVolume Bar, decimal? Strike)>
+        {
+            RawBarWithStrike(t0, 100m, 23950m), // correct PE strike
+            RawBarWithStrike(t0.AddMinutes(1), 99m, 24050m), // this is the CE-side strike, wrong for a PE
+        };
+
+        var filtered = ExpiredOptionBacktestService.FilterToExpectedStrike(bars, spot, step: 50, otmSteps: 1, isCall: false);
+
+        var kept = Assert.Single(filtered);
+        Assert.Equal(t0, kept.Bar.Time);
+    }
+
     [Fact]
     public void DetectPossibleSplices_SmoothDecay_FindsNothing()
     {

@@ -305,6 +305,19 @@ public sealed class ExpiredOptionBacktestService
         // pricing it off the wrong contract.
         var ceUsedRaw = TrimToLargestSegment(ceRaw, ceSplices);
         var peUsedRaw = TrimToLargestSegment(peRaw, peSplices);
+
+        // A confirmed real bug this catches that TrimToLargestSegment's splice-based trimming
+        // cannot: a bar whose own resolved strike quietly drifted away from what spot at that EXACT
+        // bar's own time implies it should be - no sudden jump for DetectPossibleSplices to see, just
+        // a wrong value sitting in the middle of an otherwise-smooth series. A real run showed
+        // exactly this shape: a Stop Loss triggered off a premium that never actually traded, on a
+        // bar whose own resolved strike did not match what spot said at that instant. Judged against
+        // spot AT EACH BAR'S OWN TIME (not one fixed reference for the whole window), so this does
+        // NOT flag the ordinary, expected case of a strike legitimately re-centering as ATM moves
+        // across the days in a wide lookback - only a bar that disagrees with its OWN day's ATM.
+        ceUsedRaw = FilterToExpectedStrike(ceUsedRaw, spotBars1m, step, otmSteps, isCall: true);
+        peUsedRaw = FilterToExpectedStrike(peUsedRaw, spotBars1m, step, otmSteps, isCall: false);
+
         var ceUsed = ceUsedRaw.Select(b => b.Bar).ToList();
         var peUsed = peUsedRaw.Select(b => b.Bar).ToList();
 
@@ -607,6 +620,48 @@ public sealed class ExpiredOptionBacktestService
         if (best is null || tail.Count > best.Count) best = tail;
 
         return best;
+    }
+
+    /// <summary>Drops any bar whose own resolved strike does not match what SPOT AT THAT BAR'S OWN
+    /// TIME implies it should be - the direct, per-bar counterpart to Ce/PeResolvedStrike's single
+    /// end-of-window check, and the one thing TrimToLargestSegment's splice-based trimming cannot
+    /// catch: a bar can be individually wrong without ever producing the sudden jump
+    /// DetectPossibleSplices looks for, sitting quietly in the middle of an otherwise-smooth series.
+    /// A real run confirmed this shape exactly - a Stop Loss triggered off a premium that never
+    /// actually traded, with no splice anywhere near it.
+    ///
+    /// Deliberately compares against spot as of EACH bar's own time (the nearest spot bar at or
+    /// before it), not one fixed reference for the whole window - a strike legitimately re-centers
+    /// as ATM moves across the days a wide lookback spans, and that is not a bug; only a bar that
+    /// disagrees with what ITS OWN day's ATM implies is dropped. A bar with no resolved strike at all
+    /// (Dhan's response omitted the field) or no spot reference yet available is kept, not dropped -
+    /// there is nothing to disprove it with, and this is a targeted removal of bars actively shown to
+    /// be wrong, not a blanket "trust nothing unverified" filter.</summary>
+    internal static List<(CandleWithVolume Bar, decimal? Strike)> FilterToExpectedStrike(
+        List<(CandleWithVolume Bar, decimal? Strike)> bars, IReadOnlyList<Candle> spotBars, int step, int otmSteps, bool isCall)
+    {
+        if (step <= 0 || spotBars.Count == 0) return bars;
+
+        var kept = new List<(CandleWithVolume Bar, decimal? Strike)>(bars.Count);
+        var spotIndex = 0;
+
+        foreach (var entry in bars)
+        {
+            while (spotIndex + 1 < spotBars.Count && spotBars[spotIndex + 1].Time <= entry.Bar.Time) spotIndex++;
+
+            if (spotBars[spotIndex].Time > entry.Bar.Time || entry.Strike is not { } resolvedStrike)
+            {
+                kept.Add(entry); // no spot reference yet, or nothing reported to check - can't disprove it
+                continue;
+            }
+
+            var expectedAtm = Math.Round(spotBars[spotIndex].Close / step) * step;
+            var expectedStrike = isCall ? expectedAtm + otmSteps * step : expectedAtm - otmSteps * step;
+
+            if (Math.Abs(resolvedStrike - expectedStrike) <= step / 2m) kept.Add(entry);
+        }
+
+        return kept;
     }
 
     /// <summary>Whether the returned series genuinely stays on ONE single contract for the whole
