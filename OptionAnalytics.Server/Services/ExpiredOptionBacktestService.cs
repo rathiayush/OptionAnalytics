@@ -211,16 +211,39 @@ public sealed class ExpiredOptionBacktestService
         if (instrument is null)
             return ExpiredBacktestResult.Failed($"Could not resolve {underlying}'s Dhan security id yet - the scrip master may still be loading. Try again shortly.");
 
-        var toDay = expiryDate;
+        // Capped at today, never expiryDate itself, for a not-yet-expired contract - "the contract's
+        // life so far" (the whole point of offering future expiries at all) can only ever mean up to
+        // right now, since no trading has happened on any day after today regardless of how real and
+        // currently-listed the contract is. Left equal to expiryDate for an already-past one, exactly
+        // as before.
+        var toDay = expiryDate > today ? today : expiryDate;
 
         // Anchors directly against ExpiryCalendar's own real prior expiry dates (see
         // BuildFetchSegments) - and, when the requested lookback reaches past the immediately
         // preceding one, builds a SECOND, older segment rather than just clamping the request away;
         // MaxLookbackDays here is only the outer sanity bound on the raw input, not the real safety
-        // boundary.
+        // boundary. Deliberately anchored against the REAL expiryDate, not toDay - Dhan's own
+        // expiryCode resolution (see this class's own top-of-file doc comment) needs the actual
+        // future expiry to land on the right contract; only the DATA window fetched from it is ever
+        // capped at today.
         var requestedFromDay = expiryDate.AddDays(-Math.Clamp(lookbackDays, 1, MaxLookbackDays(expiryFlag)));
         var segments = BuildFetchSegments(expiryFlag, expiryDate, requestedFromDay);
         var fromDay = segments[0].From;
+
+        // A future expiry whose own requested lookback hasn't even STARTED yet (fromDay itself is
+        // still ahead of today) is a completely different situation from "Dhan lacks history this
+        // old" or "the market was shut" - nothing failed, the window the caller asked for simply
+        // hasn't happened. Caught here, before a single Dhan call, with a message that says exactly
+        // that rather than the generic no-data one below.
+        if (fromDay > toDay)
+            return ExpiredBacktestResult.Failed(
+                $"{underlying} hasn't traded yet over the requested window - today is {today:dd MMM yyyy}, but a {lookbackDays}-day lookback from {expiryDate:dd MMM yyyy} starts {fromDay:dd MMM yyyy}, which is still in the future. Pick a shorter lookback (or wait until closer to today) to backtest this contract's life so far.");
+
+        // Every fetch segment's own upper bound is capped the same way as toDay above - a future
+        // contract has no real data past right now no matter how far out its own expiry still is.
+        // The fromDay > toDay guard above already guarantees at least one segment survives this.
+        segments = ClampSegmentsToToday(segments, today);
+
         var effectiveLookbackDays = toDay.DayNumber - fromDay.DayNumber;
 
         // The spot CHART shown alongside the trade table is fetched a few days wider than the
@@ -411,6 +434,19 @@ public sealed class ExpiredOptionBacktestService
     }
 
     private static DateOnly Later(DateOnly a, DateOnly b) => a > b ? a : b;
+
+    /// <summary>Caps every segment's own upper bound at <paramref name="today"/> and drops any that
+    /// end up inverted (From left past the new, clamped To) as a result - a not-yet-expired target
+    /// contract has no real data past right now no matter how far out its own expiry still is, and
+    /// with a target far enough out even the PREVIOUS same-cadence expiry an older segment anchors
+    /// against (see BuildFetchSegments) can itself still be in the future, which is what leaves a
+    /// segment inverted rather than merely shortened. RunAsync's own fromDay > toDay guard (checked
+    /// BEFORE calling this) already guarantees at least one segment survives.</summary>
+    internal static List<FetchSegment> ClampSegmentsToToday(IReadOnlyList<FetchSegment> segments, DateOnly today) =>
+        segments
+            .Select(s => s.To > today ? s with { To = today } : s)
+            .Where(s => s.From <= s.To)
+            .ToList();
 
     /// <summary>Fetches one option side across every segment (see BuildFetchSegments),
     /// oldest first, and concatenates the results - segments are already ordered oldest-first and
