@@ -226,13 +226,41 @@ export default function RollingStrikeDataPage() {
   const bars = useMemo(() => result?.bars ?? [], [result])
   const splices = useMemo(() => result?.splices ?? [], [result])
 
-  // Descending (newest first) - same convention every other table on this app already uses.
+  const requestedStrike = result?.requestedAbsoluteStrike ?? null
+  const step = STRIKE_STEP_BY_UNDERLYING[underlying] ?? 50
+
+  // When an absolute strike was requested: "ATM-4" (or whatever token that converted to) still
+  // resolves AS OF EACH DAY in the window (see the drift note below), so the raw fetch can genuinely
+  // contain several real strikes' worth of bars - only some of which are actually the strike asked
+  // for. Filtering to bars whose OWN resolved strike matches (within half a step, to tolerate
+  // rounding) is what turns "here is everything Dhan sent back" into "here is 56,200's own data",
+  // which is what this page should show by default whenever a specific strike was named. Falls back
+  // to every bar unfiltered when the caller used a plain offset instead (no single strike to match
+  // against).
+  const matchedBars = useMemo(() => {
+    if (requestedStrike == null) return bars
+    const tolerance = step / 2
+    return bars.filter((b) => b.resolvedStrike != null && Math.abs(b.resolvedStrike - requestedStrike) <= tolerance)
+  }, [bars, requestedStrike, step])
+
+  const excludedCount = bars.length - matchedBars.length
+
+  // Descending (newest first) - same convention every other table on this app already uses. Built
+  // off matchedBars - the chart/stats below show ONLY the requested strike's own bars, not whatever
+  // else the raw fetch also contained.
   const rows = useMemo(
+    () => matchedBars.map((b, i) => ({ ...b, key: i, day: istDateKey(b.time) })).reverse(),
+    [matchedBars],
+  )
+
+  // The full, unfiltered raw fetch - shown separately below for anyone auditing exactly what Dhan
+  // sent back, splice or wrong-contract bars included.
+  const rawRows = useMemo(
     () => bars.map((b, i) => ({ ...b, key: i, day: istDateKey(b.time) })).reverse(),
     [bars],
   )
 
-  const chartBars = useMemo(() => bars.map(toBar), [bars])
+  const chartBars = useMemo(() => matchedBars.map(toBar), [matchedBars])
 
   const resolvedStrikes = useMemo(
     () => bars.map((b) => b.resolvedStrike).filter((s) => s != null),
@@ -242,18 +270,13 @@ export default function RollingStrikeDataPage() {
     ? [Math.min(...resolvedStrikes), Math.max(...resolvedStrikes)]
     : null
 
-  const requestedStrike = result?.requestedAbsoluteStrike ?? null
-  const step = STRIKE_STEP_BY_UNDERLYING[underlying] ?? 50
-  // More than 2 steps away from what was actually requested - Dhan's rolling-option endpoint
-  // resolves "ATM+-K" AS OF EACH DAY in the window (its own docs' wording), not once against a
-  // single reference, so the SAME requested token can legitimately land on a different absolute
-  // strike on an earlier day if spot itself was far from where it is on the day the offset was
-  // computed against. Either way, a range spanning this far from the requested strike means the
-  // series is not one steady strike's own history throughout - see the note shown for it below.
-  const strikeDrift = requestedStrike != null && resolvedStrikeRange
-    ? Math.max(Math.abs(resolvedStrikeRange[0] - requestedStrike), Math.abs(resolvedStrikeRange[1] - requestedStrike))
-    : 0
-  const hasSignificantDrift = strikeDrift > step * 2
+  // Any bar at all excluded means the raw fetch drifted onto a different real strike somewhere in
+  // the window - Dhan's rolling-option endpoint resolves "ATM+-K" AS OF EACH DAY (its own docs' own
+  // wording), not once against a single reference, so the same requested token can legitimately
+  // land on a different absolute strike on an earlier day if spot itself was far from where it was
+  // when the offset was computed. The chart/stats above already exclude those bars; this is what
+  // explains WHY some of the raw fetch is missing from them.
+  const hasSignificantDrift = requestedStrike != null && excludedCount > 0
 
   // One row per trading day actually present, most recent first - same shape StrikeDataPage's own
   // rollup uses, so a day with far fewer candles than its neighbours (or a day that stops well
@@ -409,13 +432,13 @@ export default function RollingStrikeDataPage() {
               <Alert
                 type="warning"
                 showIcon
-                message="Possible splice(s) detected in this raw series"
+                message="Possible splice(s) detected in the raw fetch"
                 description={
                   <>
                     {splices.map((s, i) => (
-                      <div key={i}>{fmtIstDateTime(s.time)}: {fmtPrice(s.previousClose)} → {fmtPrice(s.thisOpen)} (a large, sudden jump - marked on the chart below)</div>
+                      <div key={i}>{fmtIstDateTime(s.time)}: {fmtPrice(s.previousClose)} → {fmtPrice(s.thisOpen)} (a large, sudden jump)</div>
                     ))}
-                    A genuine contract-splice, or a single bad bar Dhan's own reconstruction produced - this page shows the RAW fetch (unlike a real backtest run, nothing here is trimmed away), so every bar around a marked splice is visible for direct inspection.
+                    A genuine contract-splice, or a single bad bar Dhan's own reconstruction produced. Marked on the chart below only if it falls on a bar that matched your requested strike - see the raw table at the bottom of the page for every bar, matched or not.
                   </>
                 }
               />
@@ -425,14 +448,19 @@ export default function RollingStrikeDataPage() {
               <Alert
                 type="warning"
                 showIcon
-                message={`Resolved strike drifted well away from the ${fmtPrice(requestedStrike)} you asked for`}
-                description={`Dhan's rolling-option endpoint resolves "${result.strikeToken}" AS OF EACH DAY in the window, not once for the whole request - so this same token can land on a different absolute strike on an earlier day if spot itself was far from where it was when the offset was computed. A ${fmtPrice(resolvedStrikeRange[0])} – ${fmtPrice(resolvedStrikeRange[1])} range means this series is NOT ${fmtPrice(requestedStrike)}'s own steady history throughout - only the bars near the end of the window (closest to today) sit near what you actually asked for. Try a shorter lookback centred on the specific date you care about for a cleaner single-strike view.`}
+                message={`Showing ${matchedBars.length} of ${bars.length} raw bars - the rest resolved to a different strike than the ${fmtPrice(requestedStrike)} you asked for`}
+                description={`Dhan's rolling-option endpoint resolves "${result.strikeToken}" AS OF EACH DAY in the window, not once for the whole request - so this same token can land on a different absolute strike on an earlier day if spot itself was far from where it was when the offset was computed (here, spanning ${fmtPrice(resolvedStrikeRange[0])} – ${fmtPrice(resolvedStrikeRange[1])} across the raw fetch). The chart and stats below already exclude those ${excludedCount} bar(s) so they only show ${fmtPrice(requestedStrike)}'s own data - the excluded ones are still visible in the raw table at the bottom if you want to see what Dhan actually sent back for those days. For a window with fewer (or no) exclusions, try a shorter lookback centred on the specific date you care about.`}
               />
             )}
 
-            <Card size="small" title={`${underlying} ${result.strikeToken} ${result.optionType === 'CALL' ? 'CE' : 'PE'} — ${expiryDate}`}>
+            <Card size="small" title={`${underlying} ${requestedStrike != null ? fmtPrice(requestedStrike) : result.strikeToken} ${result.optionType === 'CALL' ? 'CE' : 'PE'} — ${expiryDate}`}>
               <Row gutter={24}>
-                <Col><Statistic title="Total bars" value={rows.length} /></Col>
+                <Col>
+                  <Statistic
+                    title={requestedStrike != null ? 'Matching bars' : 'Total bars'}
+                    value={requestedStrike != null ? `${rows.length} / ${bars.length}` : rows.length}
+                  />
+                </Col>
                 <Col><Statistic title="Trading days covered" value={dayRollup.length} /></Col>
                 <Col><Statistic title="Effective lookback" value={result.effectiveLookbackDays} suffix="days" /></Col>
                 <Col><Statistic title="Oldest bar" value={rows.length ? fmtIstDateTime(rows[rows.length - 1].time) : '—'} /></Col>
@@ -440,14 +468,16 @@ export default function RollingStrikeDataPage() {
                 {requestedStrike != null && <Col><Statistic title="Requested strike" value={fmtPrice(requestedStrike)} /></Col>}
                 <Col>
                   <Statistic
-                    title="Resolved strike range"
+                    title="Resolved strike range (raw fetch)"
                     value={resolvedStrikeRange ? `${fmtPrice(resolvedStrikeRange[0])} – ${fmtPrice(resolvedStrikeRange[1])}` : 'not reported'}
                     valueStyle={hasSignificantDrift ? { color: DOWN_COLOR } : undefined}
                   />
                 </Col>
               </Row>
               <Text type="secondary" style={{ fontSize: 12 }}>
-                This is the RAW rolling-option fetch - the same data a real Expired Backtest run would use, before that page's own trimming picks one contiguous contract out of it. A resolved strike range spanning much more than a couple of steps, or a splice above, both mean this series may contain more than one real contract's premium.
+                {requestedStrike != null
+                  ? `The chart and tables below show only the ${rows.length} bar(s) whose own resolved strike matched ${fmtPrice(requestedStrike)} - not the full raw fetch. See the raw table at the very bottom of the page for everything Dhan returned, matched or not.`
+                  : "This is the RAW rolling-option fetch - the same data a real Expired Backtest run would use, before that page's own trimming picks one contiguous contract out of it. A resolved strike range spanning much more than a couple of steps, or a splice above, both mean this series may contain more than one real contract's premium."}
               </Text>
             </Card>
 
@@ -461,7 +491,7 @@ export default function RollingStrikeDataPage() {
               )}
             </Card>
 
-            <Card size="small" title="Bars by trading day">
+            <Card size="small" title={requestedStrike != null ? `Bars by trading day (matching ${fmtPrice(requestedStrike)})` : 'Bars by trading day'}>
               <Table
                 size="small"
                 rowKey="day"
@@ -473,11 +503,11 @@ export default function RollingStrikeDataPage() {
               />
             </Card>
 
-            <Card size="small" title="Every bar (raw fetch)">
+            <Card size="small" title={requestedStrike != null ? `Every bar (raw fetch, ${bars.length} total - unfiltered)` : 'Every bar (raw fetch)'}>
               <Table
                 size="small"
                 rowKey="key"
-                dataSource={rows}
+                dataSource={rawRows}
                 columns={candleColumns}
                 loading={loading && !hasLoaded}
                 pagination={{ pageSize: 100, showSizeChanger: true, pageSizeOptions: [50, 100, 250, 500] }}
