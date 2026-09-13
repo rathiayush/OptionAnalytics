@@ -29,9 +29,13 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 ///     in SPOT points, which do not convert to premium points at a fixed rate (that ratio is the
 ///     option's delta, and it moves). So the shared points-based stop/target every other strategy in
 ///     this app uses stays in force here, and the alert candle's own high/low is not used as a stop.
-///   - ENTRY IS THE NEXT BAR'S OPEN, not a resting order at the alert candle's low/high. This is
-///     OptionTradeSimulator's standing no-look-ahead rule: the breaking bar's own prices are only
-///     known once it has closed. In a fast move that is a worse fill than the taught entry.
+///   - ENTRY IS THE BREAKING BAR'S OWN CLOSE, not a resting order at the alert candle's low/high.
+///     This is OptionTradeSimulator's standing no-look-ahead rule: the breaking bar's own prices
+///     are only known once it has closed, and that close is a real, already-traded print at the
+///     exact instant the break confirmed - not a further bar's open, which would just be the same
+///     instant measured one bar late for no benefit (see OptionTradeSimulator's own doc comment). In
+///     a fast move that is still a worse fill than the taught entry (a resting order at the level
+///     itself).
 ///
 /// The taught EXIT of "get out when price comes back and touches the 5 EMA" DOES translate, since it
 /// is a condition on spot rather than a price level on the option, and it is on by default - see
