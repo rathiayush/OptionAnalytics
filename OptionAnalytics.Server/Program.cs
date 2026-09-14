@@ -166,11 +166,7 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<ConfluenceAlertSer
 // IEnumerable<IBacktestStrategy> constructor param - add a new strategy by implementing the
 // interface and adding one more AddSingleton line here, nothing else needs to change.
 builder.Services.AddSingleton<IBacktestStrategy, FiveEmaStrategy>();
-builder.Services.AddSingleton<IBacktestStrategy, FiveEmaV2Strategy>();
-builder.Services.AddSingleton<IBacktestStrategy, FiveEmaAsTaughtStrategy>();
 builder.Services.AddSingleton<IBacktestStrategy, EmaCrossAtmFlowStrategy>();
-builder.Services.AddSingleton<IBacktestStrategy, EmaCrossAtmConfirmStrategy>();
-builder.Services.AddSingleton<IBacktestStrategy, EmaCrossAtmReversalStrategy>();
 
 // Stateless - reads SpotFeedHostedService/CdvHostedService's in-memory history fresh on every
 // request, nothing to run in the background. See BacktestController/BacktestService.

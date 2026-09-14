@@ -24,9 +24,10 @@ namespace OptionAnalytics.Server.Services;
 ///
 /// Every strategy whose ENTIRE signal and pricing logic reads spot bars plus GetOptionBars(strike,
 /// isCall) for one specific strike at a time is trivially supported (see SupportedStrategyKeys) -
-/// EmaCrossAtmConfirmStrategy is the plain case, built entirely on GetOptionBars for whichever
-/// strike is ATM at each candidate bar, which this class already serves for any strike within the
-/// fetched band (see StrikeBandSteps).
+/// FiveEmaStrategy is the plain case, its signal generation reading only spot bars while
+/// OptionTradeSimulator.Run itself calls GetOptionBars for whichever strike the resulting trade is
+/// actually taken at, which this class already serves for any strike within the fetched band (see
+/// StrikeBandSteps).
 ///
 /// EmaCrossAtmFlowStrategy additionally needs OBV/CDV computed across the WHOLE surrounding strike
 /// chain (see BacktestStrategyContext.ObvCeSeries/CdvCeSeries and CdvUnderlyingState.GetObvSeries's
@@ -88,7 +89,7 @@ namespace OptionAnalytics.Server.Services;
 /// result rather than silently mispricing anything.</summary>
 public sealed class ExpiredOptionBacktestService
 {
-    private static readonly HashSet<string> SupportedStrategyKeys = new() { "five-ema", "five-ema-v2", "five-ema-taught", "ema-cross-atm-confirm", "ema-cross-atm-reversal", "ema-cross-atm-flow" };
+    private static readonly HashSet<string> SupportedStrategyKeys = new() { "five-ema", "ema-cross-atm-flow" };
 
     /// <summary>Underlyings this feature supports at all - Dhan's rolling-option docs only ever show
     /// "NSE_FNO" as the exchange segment, never a BSE one, so SENSEX is left out rather than
