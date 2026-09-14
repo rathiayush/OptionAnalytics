@@ -63,7 +63,7 @@ public sealed class EmaCrossAtmReversalStrategyTests
     }
 
     [Fact]
-    public void ReversesIntoTheOppositeDirection_AcrossDayBoundary_WithNoStopOrTarget()
+    public void CutsAtEndOfDay_AndEntersFreshTheNextDay_NoOvernightCarry()
     {
         var day2Start = T0.AddDays(1);
 
@@ -72,15 +72,13 @@ public sealed class EmaCrossAtmReversalStrategyTests
         var ceDay1 = DayBars(T0, 100m, wantBullish: true);
         var peDay1 = DayBars(T0, 200m, wantBullish: false);
 
-        // Day 2: the mirror image - spot/CE/PE all turn BEARISH at bar 10 (spot and CE fall, PE
-        // rises) - proving the position rides straight across the day boundary with no forced
-        // close, unlike every other strategy here, until this real opposite signal ends it.
-        // Each leg's day-2 fixture continues from where its OWN day-1 series ended, not a fresh
-        // fixed base - an artificial jump at the boundary would itself register as a discontinuity
-        // right when EMA continuity matters, throwing off exactly when the real cross happens.
+        // Day 2: the mirror image - spot/CE/PE all turn BEARISH at bar 10. Each leg's day-2
+        // fixture continues from where its OWN day-1 series ended, not a fresh fixed base - an
+        // artificial jump at the boundary would itself register as a discontinuity right when EMA
+        // continuity matters, throwing off exactly when the real cross happens.
         var spotDay2 = DayBars(day2Start, spotDay1[^1].Close, wantBullish: false);
-        var ceDay2 = DayBars(day2Start, ceDay1[^1].Close, wantBullish: false); // CE falls - bearish confirmation on the same leg
-        var peDay2 = DayBars(day2Start, peDay1[^1].Close, wantBullish: true); // PE rises
+        var ceDay2 = DayBars(day2Start, ceDay1[^1].Close, wantBullish: false);
+        var peDay2 = DayBars(day2Start, peDay1[^1].Close, wantBullish: true);
 
         var spot = spotDay1.Concat(spotDay2).ToList();
         var ceBars = ceDay1.Concat(ceDay2).ToList();
@@ -91,23 +89,22 @@ public sealed class EmaCrossAtmReversalStrategyTests
         var context = Context(spot, GetOptionBars);
         var trades = new EmaCrossAtmReversalStrategy().Simulate(context, Parameters());
 
+        // We can not carry forward a trade - it must be cut every day, and the next entry (even
+        // one that turns out to be the opposite direction) is a FRESH trade the following day, not
+        // a same-instant flip out of the day-1 position the way an intraday reversal would be.
         Assert.Equal(2, trades.Count);
-        // Newest first (OrderByDescending SignalTimeUtc) - the bearish flip is still open, the
-        // bullish leg it replaced is the one that got closed out.
-        var bearishOpen = trades[0];
-        var bullishClosed = trades[1];
+        var day2Trade = trades[0]; // newest first
+        var day1Trade = trades[1];
 
-        Assert.Equal("Bearish", bearishOpen.Direction);
-        Assert.Equal("Open", bearishOpen.ExitReason);
+        Assert.Equal("Bullish", day1Trade.Direction);
+        Assert.Equal("EndOfDay", day1Trade.ExitReason);
+        Assert.Equal(ceDay1[^1].Time, day1Trade.ExitTimeUtc);
+        Assert.Equal(ceDay1[^1].Close, day1Trade.ExitPrice);
 
-        Assert.Equal("Bullish", bullishClosed.Direction);
-        Assert.Equal("Reversed", bullishClosed.ExitReason);
-        // CE rose from ~100 toward ~140 before the reversal closed it out - a real, positive P&L,
-        // not a stop/target level (there is none).
-        Assert.True(bullishClosed.PnlPoints > 0, $"expected a positive P&L on the closed bullish leg, got {bullishClosed.PnlPoints}");
+        Assert.Equal("Bearish", day2Trade.Direction);
+        Assert.True(day2Trade.EntryTimeUtc > day1Trade.ExitTimeUtc, "day 2's entry must come strictly after day 1's own end-of-day close");
 
-        // The whole point: no forced day-boundary exit anywhere in the trade list.
-        Assert.DoesNotContain(trades, t => t.ExitReason is "EndOfDay" or "SquareOff" or "StopLoss" or "TakeProfit");
+        Assert.DoesNotContain(trades, t => t.ExitReason == "Reversed"); // nothing carried over to reverse OUT of
     }
 
     // Rise, then fall back to base, then rise again - a fast(2)/slow(5) EMA pair genuinely CANNOT
@@ -145,7 +142,10 @@ public sealed class EmaCrossAtmReversalStrategyTests
 
         Assert.Single(trades);
         Assert.Equal("Bullish", trades[0].Direction);
-        Assert.Equal("Open", trades[0].ExitReason);
+        // The fixture's single day is already in the past relative to "now", so the dangling
+        // position at the end of the data reads as a completed EndOfDay exit, not a live "Open"
+        // one - same distinction OptionTradeSimulator.Run's own EndOfDay/Open exit makes.
+        Assert.Equal("EndOfDay", trades[0].ExitReason);
         Assert.Contains(signals, s => s.Kind == "Rejected" && s.Direction == "Bullish" && s.Summary.Contains("already positioned", StringComparison.OrdinalIgnoreCase));
     }
 
@@ -260,7 +260,9 @@ public sealed class EmaCrossAtmReversalStrategyTests
         var trades = new EmaCrossAtmReversalStrategy().Simulate(context, parameters);
 
         var trade = Assert.Single(trades);
-        Assert.Equal("Open", trade.ExitReason);
+        // Single day, already in the past - see CutsAtEndOfDay_AndEntersFreshTheNextDay's own note
+        // on why this reads as EndOfDay rather than "Open".
+        Assert.Equal("EndOfDay", trade.ExitReason);
         Assert.Equal(ceBars[^1].Close, trade.ExitPrice);
     }
 }

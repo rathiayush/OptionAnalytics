@@ -5,43 +5,48 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 /// <summary>
 /// EmaCrossAtmConfirmStrategy's own entry rule (spot's fast/slow EMA crosses, AND the pure ATM
 /// option on that side makes the same cross on its own premium within a short window - optionally
-/// also requiring the opposite leg to cross the other way), but with a completely different exit:
-/// no take-profit at all, and no per-trade stop-loss either - just an optional MAXIMUM stop-loss
-/// safety net (see maxSlPoints below). A position stays open - across days if that is how long it
-/// takes, unlike every other strategy here (see OptionTradeSimulator's own "positions never carry
-/// overnight" rule, deliberately NOT applied here) - until the OPPOSITE side confirms the same way,
-/// at which point it closes AND immediately flips into the new direction from that same instant.
-/// Always in the market from the first confirmed signal onward. Added at the user's own explicit
-/// request: "spot crossover for bull, ATM also crossover for bull, we enter bull, but as soon as
-/// spot and ATM breakdown we close bull but will enter bear" - no target, no ordinary stop, the
-/// opposite signal is the only INTENDED exit.
+/// also requiring the opposite leg to cross the other way), but with a different exit: no
+/// take-profit at all, and no per-trade stop-loss either - just an optional MAXIMUM stop-loss safety
+/// net (see maxSlPoints below). WITHIN a day, a position stays open until the OPPOSITE side confirms
+/// the same way, at which point it closes AND immediately flips into the new direction from that
+/// same instant - always in the market, intraday. Added at the user's own explicit request: "spot
+/// crossover for bull, ATM also crossover for bull, we enter bull, but as soon as spot and ATM
+/// breakdown we close bull but will enter bear" - no target, no ordinary stop, the opposite signal
+/// is the only INTENDED exit.
 ///
-/// Two refinements the user asked for after the first version shipped:
+/// Refinements the user asked for after the first version shipped:
 ///   - "Candle close is important": a cross now requires the candle to have actually CLOSED beyond
 ///     BOTH EMAs (EmaCrossoverDetector.ConfirmedDirectionSeries' own rule - the same noise filter
 ///     every live alert in this app already uses), not just the fast/slow EMA order flipping on a
 ///     single tick the way EmaCrossAtmFlowStrategy.CrossedUp checks it. In a flat/choppy stretch the
 ///     two EMAs can swap order on noise alone while price never really leaves their neighborhood -
-///     this strategy is ALWAYS in the market once started, so a bare order-flip whipsaw here is
-///     costlier than for a strategy that would have exited on its own stop/target anyway. Kept as
-///     this class's OWN cross detection (ConfirmedCrossedUp/ConfirmedCrossTimes below) rather than
-///     changed on the shared EmaCrossAtmFlowStrategy.CrossedUp/EmaCrossAtmConfirmStrategy.CrossTimes
-///     helpers, since those two strategies already ship with the simpler rule and were not what was
-///     asked to change.
+///     this strategy is in the market for as long as a day's own signals keep it there, so a bare
+///     order-flip whipsaw here is costlier than for a strategy that would have exited on its own
+///     stop/target anyway. Kept as this class's OWN cross detection (ConfirmedCrossedUp/
+///     ConfirmedCrossTimes below) rather than changed on the shared EmaCrossAtmFlowStrategy.CrossedUp/
+///     EmaCrossAtmConfirmStrategy.CrossTimes helpers, since those two strategies already ship with
+///     the simpler rule and were not what was asked to change.
 ///   - "Max SL should be there": maxSlPoints (0 = off) is a hard safety cap in absolute premium
 ///     points, checked bar by bar against the CURRENTLY open leg the same way OptionTradeSimulator's
 ///     own stop-loss is - if breached, the position closes there (ExitReason "MaxStopLoss") and the
 ///     strategy goes FLAT, waiting for the next confirmed signal in EITHER direction (not
 ///     automatically reversed the way a real opposite signal is - a safety-net exit is not itself a
 ///     view on the other direction).
+///   - "We can not carry forward trade / we have to cut every day": unlike the first version
+///     shipped, a position is FORCE-CLOSED at the end of every trading day (ExitReason "EndOfDay",
+///     same name OptionTradeSimulator.Run uses for its own day-close), same "positions never carry
+///     overnight" rule every other strategy in this app already follows. The very next trading day
+///     starts flat - whichever direction confirms first (bullish or bearish, there is no "already
+///     positioned" memory left over from the day before) opens a fresh trade, not necessarily the
+///     opposite of what was cut.
 ///
 /// Built as its own trade-construction loop rather than reusing OptionTradeSimulator.Run: Run's
-/// rules (one position per day, closed by stop/target/square-off/end-of-day, a signal arriving
-/// while a trade is still open simply skipped) are all wrong for this strategy - the whole point is
-/// that the very NEXT opposite signal, however many days later, is the one thing allowed to end a
-/// trade on its own, and it must also open the next one in the same step, not be dropped as "still
-/// busy". A same-direction signal while already positioned that way is dropped instead - there is
-/// nothing to reverse into.
+/// rules (one position per day, but a signal arriving while a trade is still open is simply
+/// SKIPPED rather than closing and reopening it) are still wrong for this strategy even with the
+/// daily cut added back - the whole point INTRADAY is that the very next opposite signal is the one
+/// thing allowed to end a trade on its own and must also open the next one in the same step, not be
+/// dropped as "still busy". A same-direction signal while already positioned that way is dropped
+/// instead - there is nothing to reverse into.
 ///
 /// Only ever reads SpotBars plus GetOptionBars(strike, isCall), the same narrow contract
 /// EmaCrossAtmConfirmStrategy relies on, so this runs on both Backtrack and Expired Backtest.
@@ -49,8 +54,8 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 public sealed class EmaCrossAtmReversalStrategy : IBacktestStrategy
 {
     public string Key => "ema-cross-atm-reversal";
-    public string Name => "EMA Crossover + ATM Reversal (always in market)";
-    public string Description => "Enters when spot's fast EMA crosses its slow EMA AND the pure ATM option on that side makes the same upward cross on its own premium within a short window - a cross means the candle actually CLOSED beyond both EMAs, not just the EMA order flipping. No take-profit and no ordinary stop-loss - just an optional maximum stop-loss safety net. The position stays open, across days if needed, until the OPPOSITE side confirms the same way - it then closes and immediately flips into the new direction. Always in the market once the first signal fires.";
+    public string Name => "EMA Crossover + ATM Reversal (no overnight carry)";
+    public string Description => "Enters when spot's fast EMA crosses its slow EMA AND the pure ATM option on that side makes the same upward cross on its own premium within a short window - a cross means the candle actually CLOSED beyond both EMAs, not just the EMA order flipping. No take-profit and no ordinary stop-loss - just an optional maximum stop-loss safety net. The position stays open until the OPPOSITE side confirms the same way (it then closes and immediately flips into the new direction) or the trading day ends, whichever comes first - positions never carry overnight, and the next day starts flat.";
 
     private const decimal FlagOff = 0;
     private const decimal FlagOn = 1;
@@ -160,11 +165,50 @@ public sealed class EmaCrossAtmReversalStrategy : IBacktestStrategy
             openDirection = null;
         }
 
+        // "We can not carry forward trade / have to cut every day" - forces whatever is open closed
+        // the moment a new trading day starts, priced off the OPEN LEG's own last real print
+        // STRICTLY before that new day (never a print from the new day itself - this always runs
+        // BEFORE the new day's own first bar is otherwise processed). Scans forward from
+        // openWalkIndex (never re-scanning bars already checked) so a max-SL breach in yesterday's
+        // last few bars still wins over a plain end-of-day close, exactly as it would have
+        // intraday - only the FINAL fallback (nothing breached) differs, closing on the day's last
+        // print instead of continuing to look for a reversal.
+        void CloseAtEndOfDay(DateTimeOffset newDayStartTime)
+        {
+            Candle? lastOfDay = null;
+            while (openWalkIndex < openOptionBars.Count && openOptionBars[openWalkIndex].Time < newDayStartTime)
+            {
+                var ob = openOptionBars[openWalkIndex];
+                openWalkIndex++;
+                if (ob.Time <= openEntryTime) continue;
+
+                if (maxSlPoints > 0)
+                {
+                    var stopPrice = isSell ? openEntryPrice + maxSlPoints : Math.Max(0, openEntryPrice - maxSlPoints);
+                    var hit = isSell ? ob.High >= stopPrice : ob.Low <= stopPrice;
+                    if (hit) { CloseOpenPosition(ob.Time, stopPrice, "MaxStopLoss"); return; }
+                }
+                lastOfDay = ob;
+            }
+
+            if (lastOfDay is { } last) CloseOpenPosition(last.Time, last.Close, "EndOfDay");
+            else CloseOpenPosition(openEntryTime, openEntryPrice, "EndOfDay"); // opened and closed same bar, no further prints
+        }
+
         DateOnly? currentDay = null;
 
         for (var i = 1; i < bars.Count; i++)
         {
             var bar = bars[i];
+
+            // Nothing carries across an opening gap - a session's first bar can flip the EMA
+            // relationship against the last bar of the PREVIOUS day with no real crossover in between.
+            var day = BacktestUtil.IstDate(bar.Time);
+            var isFirstBarOfDay = currentDay != day;
+            currentDay = day;
+
+            if (isFirstBarOfDay && openDirection is not null) CloseAtEndOfDay(bar.Time);
+            if (isFirstBarOfDay) continue;
 
             // Max-SL safety net: scan the currently open leg's own option bars up to (and
             // including) this spot bar's own time, closing it the moment the level is breached -
@@ -187,13 +231,6 @@ public sealed class EmaCrossAtmReversalStrategy : IBacktestStrategy
                     }
                 }
             }
-
-            // Nothing carries across an opening gap - a session's first bar can flip the EMA
-            // relationship against the last bar of the PREVIOUS day with no real crossover in between.
-            var day = BacktestUtil.IstDate(bar.Time);
-            var isFirstBarOfDay = currentDay != day;
-            currentDay = day;
-            if (isFirstBarOfDay) continue;
 
             if (!ConfirmedCrossedUp(spotConfirmed, i, out var bullish)) continue;
 
@@ -295,11 +332,10 @@ public sealed class EmaCrossAtmReversalStrategy : IBacktestStrategy
             openWalkIndex = 0;
         }
 
-        // Still open at the end of the window - one final max-SL sweep over whatever of the open
-        // leg's own bars were never reached by the main loop above (its own series can run past the
-        // last spot bar checked), then reported as an unrealized position at its own latest
-        // available price if it survived that sweep - the same "Open" convention
-        // OptionTradeSimulator.Run uses for a trade that has not yet met its own exit condition.
+        // Still open once the data runs out - the LAST trading day in the window never got a
+        // following day's first bar to trigger CloseAtEndOfDay above. One final max-SL sweep over
+        // whatever of the open leg's own bars were never reached by the main loop (its own series
+        // can run past the last spot bar checked) first, same as CloseAtEndOfDay's own ordering.
         if (openDirection is not null && maxSlPoints > 0)
         {
             for (; openWalkIndex < openOptionBars.Count; openWalkIndex++)
@@ -319,6 +355,13 @@ public sealed class EmaCrossAtmReversalStrategy : IBacktestStrategy
 
         if (openDirection is not null)
         {
+            // Same distinction OptionTradeSimulator.Run's own EndOfDay/Open exit makes: a position
+            // opened on a day already fully in the past has unambiguously seen its whole session
+            // close out (this run's data simply stops there) and reads as a completed EndOfDay
+            // exit, exactly as CloseAtEndOfDay would have made it had there been a following day's
+            // first bar to trigger it. Only a position opened TODAY - the still-live, in-progress
+            // session - is genuinely unrealized and reported as "Open".
+            var reason = BacktestUtil.IstDate(openEntryTime) < BacktestUtil.IstDate(DateTimeOffset.UtcNow) ? "EndOfDay" : "Open";
             var optionType = openIsCall ? "CE" : "PE";
             var lastIndex = openOptionBars.Count - 1;
             if (lastIndex >= 0 && openOptionBars[lastIndex].Time > openEntryTime)
@@ -326,12 +369,12 @@ public sealed class EmaCrossAtmReversalStrategy : IBacktestStrategy
                 var lastPrice = openOptionBars[lastIndex].Close;
                 var pnl = isSell ? openEntryPrice - lastPrice : lastPrice - openEntryPrice;
                 trades.Add(new BacktestTrade(underlying, openSignalTime, openDirection, sideLabel, optionType,
-                    openStrike, openSpotPrice, openEntryTime, openEntryPrice, openOptionBars[lastIndex].Time, lastPrice, "Open", pnl));
+                    openStrike, openSpotPrice, openEntryTime, openEntryPrice, openOptionBars[lastIndex].Time, lastPrice, reason, pnl));
             }
             else
             {
                 trades.Add(new BacktestTrade(underlying, openSignalTime, openDirection, sideLabel, optionType,
-                    openStrike, openSpotPrice, openEntryTime, openEntryPrice, openEntryTime, openEntryPrice, "Open", 0m));
+                    openStrike, openSpotPrice, openEntryTime, openEntryPrice, openEntryTime, openEntryPrice, reason, 0m));
             }
         }
 
