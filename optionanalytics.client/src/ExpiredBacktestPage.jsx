@@ -69,7 +69,11 @@ function renderPnl(v, isOpen) {
 
 // One arrow per trade at its own entry (falling back to the signal time for a NoData trade, which
 // has no entry of its own) - direction decides the arrow's side/color/shape, the same convention
-// every other chart on this app uses for a bullish/bearish event. Sorted ascending: createSeriesMarkers
+// every other chart on this app uses for a bullish/bearish event. The label text uses the trade's
+// own actual SIDE (Buy/Sell), not its direction - matching BacktestPage's own tradeEntryMarkers:
+// with "Sell option (opposite leg)" selected, a Bullish signal really does SELL the PE (see
+// OptionTradeSimulator's own doc comment), so labeling it "BUY" off the signal's direction word
+// would say the opposite of what was actually traded. Sorted ascending: createSeriesMarkers
 // requires it, and trades already come back in that order but this stays correct even if that changes.
 function tradeEntryMarkers(trades) {
   return trades
@@ -78,7 +82,7 @@ function tradeEntryMarkers(trades) {
       position: t.direction === 'Bullish' ? 'belowBar' : 'aboveBar',
       color: t.direction === 'Bullish' ? UP_COLOR : DOWN_COLOR,
       shape: t.direction === 'Bullish' ? 'arrowUp' : 'arrowDown',
-      text: `${t.direction === 'Bullish' ? 'BUY' : 'SELL'} ${t.strike}${t.optionType}`,
+      text: `${t.side === 'Sell' ? 'SELL' : 'BUY'} ${t.strike}${t.optionType}`,
     }))
     .sort((a, b) => a.time - b.time)
 }
