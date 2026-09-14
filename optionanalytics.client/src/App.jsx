@@ -10,7 +10,7 @@ import RollingStrikeDataPage from './RollingStrikeDataPage.jsx'
 import TriggersPage from './TriggersPage.jsx'
 import ContractsPage from './ContractsPage.jsx'
 import LoginPage from './LoginPage.jsx'
-import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, fmtPrice, fmtIstTime, fmtIstDateTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry, AuthContext, useAuth } from './shared.jsx'
+import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, computeEma, fmtPrice, fmtIstTime, fmtIstDateTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry, AuthContext, useAuth } from './shared.jsx'
 import './App.css'
 
 const { Title, Text } = Typography
@@ -326,25 +326,6 @@ function useAggregatedLine(points, liveBarRaw, timeframeMinutes, valueKeys) {
     const merged = liveBarRaw ? mergeLiveBar(mapped, toLinePoint(liveBarRaw, valueKeys)) : mapped
     return aggregateLine(merged, timeframeMinutes)
   }, [points, liveBarRaw, timeframeMinutes])
-}
-
-// Standard EMA: seeded with a plain average of the first `period` closes, then the usual
-// exponential recurrence. Returns one value per input bar, null before the seed window fills.
-function computeEma(closes, period) {
-  const result = new Array(closes.length).fill(null)
-  if (closes.length < period) return result
-
-  const k = 2 / (period + 1)
-  let sum = 0
-  for (let i = 0; i < period; i++) sum += closes[i]
-  let prev = sum / period
-  result[period - 1] = prev
-
-  for (let i = period; i < closes.length; i++) {
-    prev = closes[i] * k + prev * (1 - k)
-    result[i] = prev
-  }
-  return result
 }
 
 // EMA9/EMA21 line points plus crossover markers (bullish: 9 crosses above 21, bearish: below) -

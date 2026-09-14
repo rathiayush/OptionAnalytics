@@ -1,10 +1,10 @@
 import { Component, useEffect, useMemo, useRef, useState } from 'react'
-import { Select, Space, Typography, Spin, Card, Button, Table, Tag, InputNumber, Statistic, Row, Col, DatePicker, TimePicker, Alert, Empty } from 'antd'
+import { Select, Space, Typography, Spin, Card, Button, Table, Tag, InputNumber, Statistic, Row, Col, DatePicker, TimePicker, Alert, Empty, Checkbox } from 'antd'
 import dayjs from 'dayjs'
 import { ReloadOutlined, PlayCircleOutlined } from '@ant-design/icons'
-import { createChart, createSeriesMarkers, CandlestickSeries, CrosshairMode } from 'lightweight-charts'
+import { createChart, createSeriesMarkers, CandlestickSeries, LineSeries, CrosshairMode } from 'lightweight-charts'
 import {
-  UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, NavBar, DirectionTag, ALERT_KIND_LABEL, fmtIstDateTime, fmtIstTime, fmtPrice, istDateKey,
+  UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, EMA_COLOR, computeEma, NavBar, DirectionTag, ALERT_KIND_LABEL, fmtIstDateTime, fmtIstTime, fmtPrice, istDateKey,
   TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry,
   AXIS_COLOR, GRID_COLOR, BORDER_COLOR, istTimeFormatter, istTickMarkFormatter, toBar, toChartTime, dayResetMarkers,
 } from './shared.jsx'
@@ -93,13 +93,18 @@ function tradeEntryMarkers(trades) {
 // Plain candlestick chart of the underlying's own currently-backfilled/live spot history, with this
 // run's own trade entries marked on it - lets a signal be checked against the real price action
 // rather than only read off the Trades table below. Same plain shape as StrikeDataPage's own
-// StrikeCandleChart/ExpiredBacktestPage's own ExpiredSpotChart (no EMA overlay, no cross-chart pan/
-// zoom sync) - deliberately NOT App.jsx's own live-ticking PriceChart, since this page's own data
-// (trades/signals) only ever refreshes on a deliberate Run, not bar-by-bar.
-function SpotCandleChart({ bars, trades, height = 420 }) {
+// StrikeCandleChart/ExpiredBacktestPage's own ExpiredSpotChart, plus an optional 5 EMA overlay (see
+// the "Show 5 EMA" checkbox below) - deliberately NOT App.jsx's own live-ticking PriceChart, since
+// this page's own data (trades/signals) only ever refreshes on a deliberate Run, not bar-by-bar.
+//
+// emaPoints is already pre-computed (or empty) by the caller - this component only ever calls
+// setData with whatever it is handed, so unticking the checkbox (which then passes []) clears the
+// line without this component needing to know WHY it's empty.
+function SpotCandleChart({ bars, trades, emaPoints, height = 420 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
+  const emaRef = useRef(null)
   const markersRef = useRef(null)
 
   useEffect(() => {
@@ -123,6 +128,7 @@ function SpotCandleChart({ bars, trades, height = 420 }) {
       wickUpColor: UP_COLOR,
       wickDownColor: DOWN_COLOR,
     })
+    emaRef.current = chart.addSeries(LineSeries, { color: EMA_COLOR, lineWidth: 2, title: '5 EMA', priceLineVisible: false, crosshairMarkerVisible: false })
     markersRef.current = createSeriesMarkers(seriesRef.current, [])
 
     const onResize = () => {
@@ -135,6 +141,7 @@ function SpotCandleChart({ bars, trades, height = 420 }) {
       chart.remove()
       chartRef.current = null
       seriesRef.current = null
+      emaRef.current = null
       markersRef.current = null
     }
     // One chart instance per mount - series/marker data is (re)populated by the effects below.
@@ -145,6 +152,10 @@ function SpotCandleChart({ bars, trades, height = 420 }) {
     seriesRef.current.setData(bars)
     if (bars.length > 0) chartRef.current?.timeScale().fitContent()
   }, [bars])
+
+  useEffect(() => {
+    emaRef.current?.setData(emaPoints ?? [])
+  }, [emaPoints])
 
   useEffect(() => {
     if (!markersRef.current) return
@@ -247,6 +258,11 @@ export default function BacktestPage() {
   }
 
   const strategy = strategies.find((s) => s.key === strategyKey) ?? null
+
+  // Purely a display toggle, not a run parameter - unticking it never changes the backtest itself,
+  // only whether the chart below draws the line. Off by default so the chart stays uncluttered for
+  // a strategy that has nothing to do with the 5 EMA.
+  const [showEma, setShowEma] = useState(false)
 
   // Which expiry THIS PAGE backtests against - see useExpirySelector. Every tracked expiry is held
   // live server-side, so this is just a different ?expiry= on this page's own requests: backtesting
@@ -387,6 +403,22 @@ export default function BacktestPage() {
     return Array.from(buckets.values()).sort((a, b) => a.time - b.time)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [spotCandles, fromDay, toDay, timeframe])
+
+  // The 5 EMA line for the chart's own "Show 5 EMA" toggle - computed off the SAME bars the chart
+  // itself plots (already timeframe-bucketed above), using whichever emaPeriod the current strategy
+  // is actually running with when it has one (the five-ema family), falling back to the classic 5
+  // otherwise. [] when unticked - SpotCandleChart just clears the line on an empty series, it does
+  // not need to know why.
+  const emaPoints = useMemo(() => {
+    if (!showEma || chartBars.length === 0) return []
+    const emaPeriodSpec = strategy?.parameters?.find((p) => p.key === 'emaPeriod')
+    const emaPeriod = paramValues.emaPeriod ?? emaPeriodSpec?.default ?? 5
+    const values = computeEma(chartBars.map((b) => b.close), emaPeriod)
+    return chartBars.reduce((points, b, i) => {
+      if (values[i] != null) points.push({ time: b.time, value: values[i] })
+      return points
+    }, [])
+  }, [showEma, chartBars, paramValues.emaPeriod, strategy])
 
   const summary = useMemo(() => {
     // Open positions are excluded from every stat below - they haven't actually closed, so folding
@@ -610,9 +642,14 @@ export default function BacktestPage() {
             )}
 
             {chartBars.length > 0 ? (
-              <ChartErrorBoundary key={`${selected}-${expiryParam}-${timeframe}-${fromDay}-${toDay}`}>
-                <SpotCandleChart bars={chartBars} trades={visibleTrades} height={420} />
-              </ChartErrorBoundary>
+              <>
+                <Checkbox checked={showEma} onChange={(e) => setShowEma(e.target.checked)}>
+                  <Text style={{ color: EMA_COLOR }}>Show 5 EMA</Text>
+                </Checkbox>
+                <ChartErrorBoundary key={`${selected}-${expiryParam}-${timeframe}-${fromDay}-${toDay}`}>
+                  <SpotCandleChart bars={chartBars} trades={visibleTrades} emaPoints={emaPoints} height={420} />
+                </ChartErrorBoundary>
+              </>
             ) : (
               <Empty description="No spot candles to chart yet." />
             )}
