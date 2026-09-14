@@ -281,8 +281,9 @@ public sealed class SpotFeedHostedService : BackgroundService
             {
                 var (candles, error) = await _historicalData.GetIntradayCandlesAsync(instrument.SecurityId, instrument.DhanSegment, fromDay, today, 1, cancellationToken);
 
-                var trimmed = TrimToRecentTradingDays(candles, HistoryTradingDays);
-                state.SeedHistory(trimmed);
+                var trimmed = TrimToRecentTradingDays(candles, HistoryTradingDays, c => c.Time);
+                state.SeedHistory(trimmed.Select(c => c.ToCandle()));
+                state.SeedVolumeHistory(trimmed);
 
                 var dayCount = trimmed.Select(c => IstDate(c.Time)).Distinct().Count();
                 _logger.LogInformation("Backfilled {Count} candle(s) across {Days} trading day(s) for {Underlying}.", trimmed.Count, dayCount, state.Underlying);
@@ -290,6 +291,16 @@ public sealed class SpotFeedHostedService : BackgroundService
                 if (trimmed.Count == 0)
                     _logger.LogWarning("Backfill returned NO candles for {Underlying} ({Segment}:{Id}) - it will chart nothing and any backtest on it finds no signals. Check whether this account is entitled to that exchange's data. {Error}",
                         state.Underlying, instrument.DhanSegment, instrument.SecurityId, error);
+                // Real index volume is a January 2026 Dhan rollout (see DhanHistoricalDataService's
+                // own doc comment) - worth a loud, one-time-per-backfill signal if this account's own
+                // Dhan plan/segment isn't actually delivering it despite that rollout, since nothing
+                // else here would ever surface that: a strategy reading VwapCalculator off an
+                // all-zero-volume series simply finds no VWAP at any bar and quietly takes no trades,
+                // which looks identical to "the strategy's other conditions never lined up" from the
+                // Backtrack page alone.
+                else if (trimmed.All(c => c.Volume == 0))
+                    _logger.LogWarning("Backfill for {Underlying} ({Segment}:{Id}) returned {Count} candle(s), all with ZERO volume - a VWAP-based strategy will find no confirmation at any bar for this underlying. Dhan is expected to report real index volume for spot/index bars since January 2026; if this persists, check whether this account's own Dhan plan/data subscription actually includes it.",
+                        state.Underlying, instrument.DhanSegment, instrument.SecurityId, trimmed.Count);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -303,19 +314,20 @@ public sealed class SpotFeedHostedService : BackgroundService
     /// IST calendar dates present in <paramref name="candles"/> - Dhan's range response may
     /// legitimately span more days than that (the lookback window is intentionally generous to
     /// survive holiday clusters), so this is what actually enforces "last HistoryTradingDays trading
-    /// days".</summary>
-    private static List<Candle> TrimToRecentTradingDays(IReadOnlyList<Candle> candles, int maxDays)
+    /// days". Generic over the candle shape (Candle or CandleWithVolume) via <paramref name="time"/>
+    /// rather than duplicated per shape.</summary>
+    private static List<T> TrimToRecentTradingDays<T>(IReadOnlyList<T> candles, int maxDays, Func<T, DateTimeOffset> time)
     {
         var recentDays = candles
-            .Select(c => IstDate(c.Time))
+            .Select(c => IstDate(time(c)))
             .Distinct()
             .OrderDescending()
             .Take(maxDays)
             .ToHashSet();
 
         return candles
-            .Where(c => recentDays.Contains(IstDate(c.Time)))
-            .OrderBy(c => c.Time)
+            .Where(c => recentDays.Contains(IstDate(time(c))))
+            .OrderBy(time)
             .ToList();
     }
 
@@ -347,7 +359,10 @@ public sealed class SpotFeedHostedService : BackgroundService
         _lastTrimmedDay = today;
 
         foreach (var state in States.Values)
-            state.SeedHistory(TrimToRecentTradingDays(state.GetClosedCandles(), HistoryTradingDays));
+        {
+            state.SeedHistory(TrimToRecentTradingDays(state.GetClosedCandles(), HistoryTradingDays, c => c.Time));
+            state.SeedVolumeHistory(TrimToRecentTradingDays(state.GetClosedVolumeBars(), HistoryTradingDays, c => c.Time));
+        }
     }
 
     private async Task BroadcastAsync(SpotUnderlyingState state)

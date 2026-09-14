@@ -9,8 +9,8 @@ namespace OptionAnalytics.Server.Dhan;
 /// in-memory history before the live feed has produced enough of its own - everything this app
 /// holds is in-memory only, so this range call (rather than one call per day) is what fills the
 /// last several trading days back into RAM on every restart. Ported from LiveSpreadCalculator's
-/// DhanHistoricalDataService, narrowed to the one instrument type this app ever asks for: index
-/// spot ("INDEX" / "IDX_I").
+/// DhanHistoricalDataService, narrowed to the instrument types this app asks for: index spot
+/// ("INDEX" / "IDX_I") and index options ("OPTIDX").
 ///
 /// Request/response shapes per Dhan's docs:
 ///   request:  {"securityId","exchangeSegment","instrument","interval","fromDate","toDate"}
@@ -21,6 +21,13 @@ namespace OptionAnalytics.Server.Dhan;
 ///   response: {"open":[...],"high":[...],"low":[...],"close":[...],"volume":[...],"timestamp":[...]}
 ///             - parallel arrays, one entry per candle across the whole range; timestamp is Unix
 ///             epoch seconds.
+///
+/// The "volume" array is now read for INDEX requests too, not just OPTIDX - Dhan rolled out real
+/// index volume (sum of each index's constituent stocks' own traded volume, the same convention
+/// NSE and TradingView use) across both its historical and live feeds in January 2026; before
+/// that, an index genuinely had no traded volume of its own to report (indices aren't directly
+/// tradeable), which is why this class used to discard the field outright for INDEX. See
+/// VwapCalculator for what this unlocks.
 /// </summary>
 public sealed class DhanHistoricalDataService
 {
@@ -42,14 +49,19 @@ public sealed class DhanHistoricalDataService
     /// rate limit, a window Dhan's intraday endpoint won't serve) - null when it succeeded, even if
     /// that meant zero candles (a real closed market span). Surfaced so a caller with its own error
     /// budget (ExpiredOptionBacktestService's own Failed() message, in particular) can report the
-    /// ACTUAL reason instead of guessing at one.</summary>
-    public async Task<(IReadOnlyList<Candle> Candles, string? Error)> GetIntradayCandlesAsync(
+    /// ACTUAL reason instead of guessing at one.
+    ///
+    /// Returns CandleWithVolume, not the plain Candle this used to return - Dhan now sends real
+    /// index volume too (see this class's own doc comment). A caller that only ever wanted OHLC can
+    /// still get that via CandleWithVolume.ToCandle(); one computing VWAP (VwapCalculator) needs the
+    /// Volume this shape carries.</summary>
+    public async Task<(IReadOnlyList<CandleWithVolume> Candles, string? Error)> GetIntradayCandlesAsync(
         uint securityId, string dhanSegment, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken)
     {
         if (!_api.HasSession)
         {
             _logger.LogWarning("Cannot fetch intraday candles for {Segment}:{Id} - Dhan is not authenticated (check Dhan:ClientId/Dhan:AccessToken).", dhanSegment, securityId);
-            return (Array.Empty<Candle>(), "Dhan is not authenticated");
+            return (Array.Empty<CandleWithVolume>(), "Dhan is not authenticated");
         }
 
         var payload = new
@@ -68,63 +80,20 @@ public sealed class DhanHistoricalDataService
         if (!response.Success)
         {
             _logger.LogWarning("Intraday candle request failed for {Segment}:{Id} ({From}..{To}) - {Error}", dhanSegment, securityId, fromDay, toDay, response.ErrorMessage);
-            return (Array.Empty<Candle>(), string.IsNullOrWhiteSpace(response.ErrorMessage) ? $"HTTP {(int)response.StatusCode}" : response.ErrorMessage);
+            return (Array.Empty<CandleWithVolume>(), string.IsNullOrWhiteSpace(response.ErrorMessage) ? $"HTTP {(int)response.StatusCode}" : response.ErrorMessage);
         }
 
-        return (ParseCandles(response.Root), null);
-    }
-
-    private List<Candle> ParseCandles(JsonElement root)
-    {
-        var candles = new List<Candle>();
-        if (!root.TryGetProperty("timestamp", out var timestamps) || timestamps.ValueKind != JsonValueKind.Array)
-            return candles;
-
-        var open = GetArray(root, "open");
-        var high = GetArray(root, "high");
-        var low = GetArray(root, "low");
-        var close = GetArray(root, "close");
-
-        var count = timestamps.GetArrayLength();
-        for (var i = 0; i < count; i++)
-        {
-            try
-            {
-                // Dhan sends timestamp as a JSON number, but not reliably as an integer literal -
-                // it comes back as e.g. 1786938360.0 (a float-formatted whole number), which
-                // JsonElement.GetInt64() rejects outright (it throws on any literal with a decimal
-                // point, even a trailing ".0"). Going through GetDouble() first tolerates both
-                // shapes; every one of the 4340-odd candles in a typical backfill was silently
-                // dropped by the old GetInt64() call, since the per-candle catch below swallowed
-                // that FormatException for each and every index.
-                var epochSeconds = (long)timestamps[i].GetDouble();
-                candles.Add(new Candle(
-                    Time: DateTimeOffset.FromUnixTimeSeconds(epochSeconds),
-                    Open: i < open.Count ? open[i] : 0m,
-                    High: i < high.Count ? high[i] : 0m,
-                    Low: i < low.Count ? low[i] : 0m,
-                    Close: i < close.Count ? close[i] : 0m));
-            }
-            catch (Exception ex) when (ex is FormatException or InvalidOperationException or OverflowException)
-            {
-                _logger.LogDebug(ex, "Skipped an unparsable candle at index {Index}", i);
-            }
-        }
-
-        return candles;
+        return (ParseCandlesWithVolume(response.Root), null);
     }
 
     /// <summary>Same range-call shape as GetIntradayCandlesAsync, but for an option contract
     /// (instrument "OPTIDX", not "INDEX" - CDV's underlying spot backfill uses that method, this
-    /// one is what CdvHostedService calls per strike) and carrying Volume too, since both OBV and
-    /// the CDV backfill's bar-proxy delta classification need it and the plain Candle shape
-    /// doesn't carry it.</summary>
-    /// <summary>Returns the candles plus, when the call did not succeed, Dhan's own reason for it.
-    /// The reason is surfaced rather than swallowed because a per-strike failure is logged at Debug
-    /// (see below) and so is invisible at normal log level - which made "an entire underlying's
-    /// option history is missing" indistinguishable from "those strikes simply didn't trade", with
-    /// no way to tell which without turning on Debug logging in production. The caller aggregates
-    /// these into one line per backfill batch.</summary>
+    /// one is what CdvHostedService calls per strike). Returns the candles plus, when the call did
+    /// not succeed, Dhan's own reason for it. The reason is surfaced rather than swallowed because a
+    /// per-strike failure is logged at Debug (see below) and so is invisible at normal log level -
+    /// which made "an entire underlying's option history is missing" indistinguishable from "those
+    /// strikes simply didn't trade", with no way to tell which without turning on Debug logging in
+    /// production. The caller aggregates these into one line per backfill batch.</summary>
     public Task<(IReadOnlyList<CandleWithVolume> Candles, string? Error)> GetIntradayOptionCandlesAsync(
         uint securityId, string dhanSegment, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken) =>
         GetIntradayDerivativeCandlesAsync(securityId, dhanSegment, OptionInstrument, fromDay, toDay, intervalMinutes, cancellationToken);
@@ -190,11 +159,12 @@ public sealed class DhanHistoricalDataService
                 // blew out to the tens of millions while its real candles sat in the hundreds - must
                 // never reach a chart, a backtest's entry/stop/target math, or a live order. Skipped
                 // like an unparsable one below, just for implausibility rather than a parse failure -
-                // see OptionPriceSanity's own doc comment for why this bound is safe against ever
-                // rejecting a real premium.
+                // see OptionPriceSanity's own doc comment for why this bound (100,000) is safe
+                // against ever rejecting a real premium OR a real NIFTY/BANKNIFTY index level, both
+                // of which sit comfortably under it.
                 if (!OptionPriceSanity.IsPlausibleBar(o, h, l, c))
                 {
-                    _logger.LogWarning("Skipped an implausible option candle at index {Index} (O={Open} H={High} L={Low} C={Close}) - looks like corrupt upstream data, not a real premium.",
+                    _logger.LogWarning("Skipped an implausible candle at index {Index} (O={Open} H={High} L={Low} C={Close}) - looks like corrupt upstream data, not a real price.",
                         i, o, h, l, c);
                     continue;
                 }
@@ -209,7 +179,7 @@ public sealed class DhanHistoricalDataService
             }
             catch (Exception ex) when (ex is FormatException or InvalidOperationException or OverflowException)
             {
-                _logger.LogDebug(ex, "Skipped an unparsable option candle at index {Index}", i);
+                _logger.LogDebug(ex, "Skipped an unparsable candle at index {Index}", i);
             }
         }
 

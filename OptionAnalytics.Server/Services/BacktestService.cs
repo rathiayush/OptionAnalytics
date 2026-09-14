@@ -348,6 +348,7 @@ public sealed class BacktestService
             Step = spotState.Step,
             SpotBars = spotBars,
             SpotBarsOneMinute = spotState.GetClosedCandles(),
+            SpotVolumeBarsOneMinute = spotState.GetClosedVolumeBars(),
             ConfluenceSignalsAscending = confluenceAscending,
             AllSignals = allSignals,
             AtmCeBars = ceBars,

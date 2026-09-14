@@ -39,6 +39,15 @@ public sealed class BacktestStrategyContext
     /// one.</summary>
     public required IReadOnlyList<Candle> SpotBarsOneMinute { get; init; }
 
+    /// <summary>The underlying's own native 1-minute bars WITH volume - what VwapCalculator reads to
+    /// build a session VWAP series (a strategy computes this itself, the same way it computes its
+    /// own EMAs off SpotBars via EmaCrossoverDetector.EmaSeries, rather than this context precomputing
+    /// every possible derived series). Real index volume only exists via Dhan's own January 2026
+    /// rollout (see DhanHistoricalDataService's doc comment) - empty for an underlying/window this
+    /// account's Dhan plan doesn't actually deliver it for, in which case VwapCalculator.ComputeSeries
+    /// simply returns all-null and a strategy gating on VWAP correctly finds nothing to confirm.</summary>
+    public required IReadOnlyList<CandleWithVolume> SpotVolumeBarsOneMinute { get; init; }
+
     /// <summary>Every Confluence signal BacktestService's shared replay produced at this timeframe,
     /// ascending (oldest first) - the natural order to walk when simulating trades one at a time.</summary>
     public required IReadOnlyList<BacktestSignal> ConfluenceSignalsAscending { get; init; }

@@ -33,6 +33,7 @@ public sealed class OptionTradeSimulatorExcludeLastDaysTests
         Step = 50,
         SpotBars = spotBars,
         SpotBarsOneMinute = spotBars,
+        SpotVolumeBarsOneMinute = Array.Empty<CandleWithVolume>(),
         ConfluenceSignalsAscending = Array.Empty<BacktestSignal>(),
         AllSignals = Array.Empty<BacktestSignal>(),
         ObvCeSeries = Array.Empty<ObvPoint>(),
