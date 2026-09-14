@@ -160,4 +160,107 @@ public sealed class EmaCrossAtmReversalStrategyTests
 
         Assert.Empty(trades);
     }
+
+    // ---- ConfirmedCrossedUp: "candle close is important" -------------------------------------
+
+    [Fact]
+    public void ConfirmedCrossedUp_OnlyFiresOnATransitionIntoANewConfirmedDirection()
+    {
+        var t = Enumerable.Range(0, 6).Select(i => T0.AddMinutes(i)).ToArray();
+        var series = new List<(DateTimeOffset Time, string? Direction)>
+        {
+            (t[0], null),      // no confirmed bias yet
+            (t[1], null),      // still nothing - the EMA order may have flipped, but price never
+                               // closed beyond both lines (exactly the noise ConfirmedDirectionSeries
+                               // filters out and CrossedUp's own looser rule would have missed)
+            (t[2], "Bullish"), // resolves into a real, close-confirmed bullish bias
+            (t[3], "Bullish"), // stays bullish - not a fresh cross, must not re-fire
+            (t[4], null),      // drops back to unconfirmed (choppy) - not itself a cross
+            (t[5], "Bearish"), // resolves into bearish
+        };
+
+        Assert.False(EmaCrossAtmReversalStrategy.ConfirmedCrossedUp(series, 1, out _)); // null -> null
+        Assert.True(EmaCrossAtmReversalStrategy.ConfirmedCrossedUp(series, 2, out var bullishAt2));
+        Assert.True(bullishAt2);
+        Assert.False(EmaCrossAtmReversalStrategy.ConfirmedCrossedUp(series, 3, out _)); // repeat, ignored
+        Assert.False(EmaCrossAtmReversalStrategy.ConfirmedCrossedUp(series, 4, out _)); // Bullish -> null, not a cross
+        Assert.True(EmaCrossAtmReversalStrategy.ConfirmedCrossedUp(series, 5, out var bullishAt5));
+        Assert.False(bullishAt5);
+    }
+
+    [Fact]
+    public void ConfirmedCrossTimes_MatchesTheSharpMoveShape_AndSkipsTheFirstBarOfEachDay()
+    {
+        var bars = new List<Candle>();
+        for (var i = 0; i < 5; i++) bars.Add(Bar(T0.AddMinutes(i), 100));
+        for (var i = 5; i < 15; i++) bars.Add(Bar(T0.AddMinutes(i), 100 + (i - 4) * 10)); // sharp, sustained rise
+        for (var i = 15; i < 25; i++) bars.Add(Bar(T0.AddMinutes(i), 200 - (i - 14) * 10)); // sharp, sustained fall
+
+        var upTimes = EmaCrossAtmReversalStrategy.ConfirmedCrossTimes(bars, fastPeriod: 2, slowPeriod: 5, wantBullish: true);
+        var downTimes = EmaCrossAtmReversalStrategy.ConfirmedCrossTimes(bars, fastPeriod: 2, slowPeriod: 5, wantBullish: false);
+
+        Assert.NotEmpty(upTimes);
+        Assert.NotEmpty(downTimes);
+        Assert.True(upTimes.Max() < downTimes.Min());
+        Assert.Empty(EmaCrossAtmReversalStrategy.ConfirmedCrossTimes(Array.Empty<Candle>(), 2, 5, wantBullish: true));
+    }
+
+    // ---- Max stop loss -------------------------------------------------------------------------
+
+    [Fact]
+    public void MaxStopLoss_ClosesThePosition_EvenWithNoOppositeSignalAtAll()
+    {
+        // Spot: one clean bullish turn, then it just keeps trending - no further cross of any kind,
+        // so the ONLY thing that can end this trade is the max-SL safety net, never a reversal.
+        var spot = DayBars(T0, 24000m, wantBullish: true);
+
+        // CE: confirms the same bullish turn (rising through bar ~19, matching spot's own timing),
+        // then craters - a decline that has nothing to do with any spot signal, purely a premium
+        // move that must trip the safety net on its own.
+        var ceBars = new List<Candle>();
+        for (var i = 0; i < 10; i++) ceBars.Add(Bar(T0.AddMinutes(i), 100));
+        for (var i = 10; i < 20; i++) ceBars.Add(Bar(T0.AddMinutes(i), 100 + (i - 9) * 2));
+        var peak = ceBars[^1].Close;
+        for (var i = 20; i < 30; i++) ceBars.Add(Bar(T0.AddMinutes(i), peak - (i - 19) * 10)); // steep drop
+
+        var peBars = Enumerable.Range(0, 30).Select(i => Bar(T0.AddMinutes(i), 200m)).ToList();
+
+        IReadOnlyList<Candle> GetOptionBars(decimal strike, bool isCall) => isCall ? ceBars : peBars;
+
+        var parameters = Parameters();
+        parameters["maxSlPoints"] = 30m;
+
+        var context = Context(spot, GetOptionBars);
+        var trades = new EmaCrossAtmReversalStrategy().Simulate(context, parameters);
+
+        var trade = Assert.Single(trades);
+        Assert.Equal("Bullish", trade.Direction);
+        Assert.Equal("MaxStopLoss", trade.ExitReason);
+        Assert.Equal(trade.EntryPrice - 30m, trade.ExitPrice);
+        Assert.Equal(-30m, trade.PnlPoints);
+    }
+
+    [Fact]
+    public void MaxStopLossOfZero_MeansNoSafetyNet_PositionStaysOpenThroughTheDrop()
+    {
+        var spot = DayBars(T0, 24000m, wantBullish: true);
+        var ceBars = new List<Candle>();
+        for (var i = 0; i < 10; i++) ceBars.Add(Bar(T0.AddMinutes(i), 100));
+        for (var i = 10; i < 20; i++) ceBars.Add(Bar(T0.AddMinutes(i), 100 + (i - 9) * 2));
+        var peak = ceBars[^1].Close;
+        for (var i = 20; i < 30; i++) ceBars.Add(Bar(T0.AddMinutes(i), peak - (i - 19) * 10));
+        var peBars = Enumerable.Range(0, 30).Select(i => Bar(T0.AddMinutes(i), 200m)).ToList();
+
+        IReadOnlyList<Candle> GetOptionBars(decimal strike, bool isCall) => isCall ? ceBars : peBars;
+
+        var parameters = Parameters();
+        parameters["maxSlPoints"] = 0m;
+
+        var context = Context(spot, GetOptionBars);
+        var trades = new EmaCrossAtmReversalStrategy().Simulate(context, parameters);
+
+        var trade = Assert.Single(trades);
+        Assert.Equal("Open", trade.ExitReason);
+        Assert.Equal(ceBars[^1].Close, trade.ExitPrice);
+    }
 }
