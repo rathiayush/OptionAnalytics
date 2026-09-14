@@ -894,17 +894,22 @@ public sealed class ExpiredOptionBacktestService
     /// rolling-option data instead of Dhan's ordinary option-chain one). A scratch CdvUnderlyingState
     /// is built fresh per run and thrown away after - nothing here touches the live one.
     ///
-    /// Each band member is registered under a SYNTHETIC strike price (referenceAtm + member.Steps *
-    /// step, using the SAME end-of-window reference spot RunAsync itself already computes
-    /// ceExpectedStrike/peExpectedStrike from) rather than trusting that member's own bar-by-bar
-    /// resolved "strike" field for the identity CdvUnderlyingState's own moneyness weighting needs -
-    /// Dhan's own resolution is exactly the field this app's whole strike-band mechanism already
-    /// exists to work around when it drifts (see FilterToExpectedStrike), so a STABLE reference
-    /// value per band slot is deliberately used here instead of a value already known to wobble.
-    /// OBV's own moneyness weight additionally uses ONE fixed reference spot for the WHOLE series
-    /// (CdvUnderlyingState.LastSpot) rather than each bar's own historical spot - the same
-    /// approximation the live OBV path already makes (see its own doc comment), carried over
-    /// unchanged rather than "improved" into something Backtrack itself would not produce.</summary>
+    /// Every bar is registered under a SYNTHETIC strike price (member.Steps * step away from THAT
+    /// bar's own resolved ATM) rather than trusting that bar's own resolved "strike" field for the
+    /// identity CdvUnderlyingState's own moneyness weighting needs - Dhan's own resolution is
+    /// exactly the field this app's whole strike-band mechanism already exists to work around when
+    /// it drifts (see FilterToExpectedStrike). This is deliberately PER BAR, not one fixed value for
+    /// a member's whole life: a real, in-market run confirmed that pinning it to a single
+    /// end-of-window reference (as an earlier version of this method did) manufactures a nonsense
+    /// moneyness distance for every earlier day the window's spot has since moved away from,
+    /// mis-weighting those bars' volume and firing flow confirmations Backtrack's own live
+    /// reconstruction never would - see the per-bar loop below.
+    ///
+    /// OBV is the one exception: its own moneyness weight uses ONE fixed reference spot for the
+    /// WHOLE series (CdvUnderlyingState.LastSpot) rather than each bar's own historical spot - the
+    /// same approximation the live OBV path already makes (see its own doc comment) - so pinning its
+    /// per-member synthetic strike to that same single end-of-window reference is consistent with
+    /// that existing approximation, not a second instance of the CDV bug above.</summary>
     internal static (
         IReadOnlyList<Candle> AtmCeBars, IReadOnlyList<Candle> AtmPeBars,
         IReadOnlyList<ObvPoint> ObvCeSeries, IReadOnlyList<ObvPoint> ObvPeSeries,
@@ -934,19 +939,46 @@ public sealed class ExpiredOptionBacktestService
             {
                 if (member.Bars.Count == 0) continue;
 
-                var slotStrike = referenceAtm + member.Steps * step;
-                var syntheticId = nextSyntheticId++;
-                cdvState.EnsureTracked(syntheticId, slotStrike, isCall);
-
                 var bars = member.Bars.Select(b => b.Bar).ToList();
+
+                // OBV: one fixed representative strike for the member's whole life, matching the
+                // live OBV path's own single-LastSpot-weight approximation (see this method's own
+                // doc comment) - OBV already accepts one static weight per strike for its ENTIRE
+                // series, so which reasonably-representative strike identity is used here does not
+                // change that approximation's nature.
+                var obvId = nextSyntheticId++;
+                cdvState.EnsureTracked(obvId, referenceAtm + member.Steps * step, isCall);
                 // OBV's own multi-day history (SeedHistory, called inside regardless of
                 // includeInCdvHistory) - CDV itself is seeded separately below, so this never asks
                 // for the today-only CDV reconstruction this method also happens to offer.
-                cdvState.SeedStrikeHistory(syntheticId, bars, Array.Empty<CandleWithVolume>(), 0m, includeInCdvHistory: false);
-                // CDV's own day-scoped, per-bar-spot-weighted reconstruction, across every day in
-                // the window - the multi-day counterpart SeedStrikeHistory's own CDV path only ever
-                // does for "today".
-                cdvState.SeedHistoricalDayStrike(syntheticId, bars, spotByTime, referenceSpot);
+                cdvState.SeedStrikeHistory(obvId, bars, Array.Empty<CandleWithVolume>(), 0m, includeInCdvHistory: false);
+
+                // CDV: unlike OBV, SeedHistoricalDayStrike already re-weights every bar by ITS OWN
+                // historical spot (spotByTime) rather than one fixed reference - pairing that with a
+                // strike identity fixed to the END of the window was the actual bug here (confirmed
+                // against a real run): a "steps=N" member's bars on an early day are the option that
+                // was ACTUALLY N steps from ATM back then (that is what Dhan's own rolling series
+                // tracks - the real listed contract behind "ATM+N" changes as spot moves), not N
+                // steps from whatever ATM the window happens to end on. Using the stale, window-end
+                // strike against that day's own (correct) spot manufactured a moneyness distance
+                // that had nothing to do with the contract's real distance from ATM that day,
+                // over/under-weighting its volume and producing flow confirmations - and rejections
+                // - that would never happen live. Each bar gets its OWN synthetic strike instead,
+                // resolved from that bar's own historical spot, one EnsureTracked+
+                // SeedHistoricalDayStrike call per bar (SeedHistoricalDayStrike's per-bar increments
+                // sum correctly across however many distinct synthetic ids contribute to a given
+                // minute, so this doesn't change how days/bars aggregate - only which strike each
+                // bar's own delta is weighted against).
+                foreach (var entry in member.Bars)
+                {
+                    var bar = entry.Bar;
+                    var barSpot = spotByTime.TryGetValue(bar.Time, out var atBar) && atBar > 0 ? atBar : referenceSpot;
+                    var barAtm = Math.Round(barSpot / step) * step;
+
+                    var cdvId = nextSyntheticId++;
+                    cdvState.EnsureTracked(cdvId, barAtm + member.Steps * step, isCall);
+                    cdvState.SeedHistoricalDayStrike(cdvId, new List<CandleWithVolume> { bar }, spotByTime, referenceSpot);
+                }
             }
         }
 

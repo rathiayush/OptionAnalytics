@@ -112,6 +112,45 @@ public sealed class ExpiredOptionBacktestServiceFlowChainTests
         Assert.Empty(badStep.CdvPeSeries);
     }
 
+    // Mirrors CdvUnderlyingState.ComputeDeltaWeight's own documented sigmoid exactly, so the test can
+    // predict CDV's expected number independently of BuildFlowChainSeries's own internals.
+    private static decimal SigmoidWeight(decimal strike, decimal spot, bool isCall)
+    {
+        var moneyness = (double)((strike - spot) / spot);
+        var delta = isCall ? 1.0 / (1.0 + Math.Exp(8.5 * moneyness)) : -1.0 / (1.0 + Math.Exp(-8.5 * moneyness));
+        return (decimal)Math.Abs(delta);
+    }
+
+    [Fact]
+    public void Cdv_WeightsEachBarByItsOwnHistoricalSpot_NotTheWindowsFinalOne()
+    {
+        // A far-OTM member (steps=+8) with ONE bar that traded while spot was much LOWER than where
+        // the window eventually ends up. Pinning that bar's moneyness weight to the window's FINAL
+        // spot (the real bug this guards against, found from a live discrepancy against Backtrack)
+        // manufactures a nonsense ~22% moneyness distance that has nothing to do with how far OTM
+        // the contract actually was the day it traded - understating its true contribution. Each bar
+        // must be weighted against its OWN historical spot instead.
+        var barTime = T0;
+        var ceChain = new List<ExpiredOptionBacktestService.StrikeBandMember> { Member(0), Member(8, (barTime, 130m, 1000L)) };
+        var peChain = new List<ExpiredOptionBacktestService.StrikeBandMember> { Member(0) };
+
+        var spot = new List<Candle>
+        {
+            new(barTime, 20000m, 20000m, 20000m, 20000m), // spot when this bar actually traded
+            new(barTime.AddMinutes(1), 24000m, 24000m, 24000m, 24000m), // window ends much higher
+        };
+
+        var result = ExpiredOptionBacktestService.BuildFlowChainSeries("NIFTY", ceChain, peChain, spot, step: 50);
+
+        // BarProxyDelta for a bullish (close-at-high) 1000-volume bar is the full 1000 - see Entry.
+        var correct = (double)(1000m * SigmoidWeight(strike: 20000m + 8 * 50m, spot: 20000m, isCall: true));
+        var stalePinnedToWindowEnd = (double)(1000m * SigmoidWeight(strike: 24000m + 8 * 50m, spot: 20000m, isCall: true));
+        var actual = (double)result.CdvCeSeries[0].Obv;
+
+        Assert.Equal(correct, actual, 3);
+        Assert.NotEqual(stalePinnedToWindowEnd, actual, 3);
+    }
+
     [Fact]
     public void ObvSeries_HasNoContributionOnTheVeryFirstBar()
     {
