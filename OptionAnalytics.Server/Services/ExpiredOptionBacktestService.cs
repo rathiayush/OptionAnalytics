@@ -22,15 +22,25 @@ namespace OptionAnalytics.Server.Services;
 ///   - The OPTION premium comes from Dhan's rolling-option endpoint (DhanRollingOptionDataService) -
 ///     the only way to reach an expired contract's own price history at all.
 ///
-/// Only strategies whose ENTIRE signal and pricing logic reads spot bars plus GetOptionBars(strike,
-/// isCall) for one specific strike at a time are supported (see SupportedStrategyKeys) -
-/// EmaCrossAtmFlowStrategy needs OBV/CDV computed across the WHOLE surrounding strike chain (see
-/// BacktestStrategyContext.ObvCeSeries/CdvCeSeries), which would need ~17 separate rolling-option
-/// calls per side per run; unsupported here rather than built on synthetic/empty flow series that
-/// would silently never confirm a trade. EmaCrossAtmConfirmStrategy is the same spot+ATM-cross idea
-/// WITHOUT that flow gate, built entirely on GetOptionBars for whichever strike is ATM at each
-/// candidate bar - which this class already serves for any strike within the fetched band (see
-/// StrikeBandSteps) - so it IS supported here.
+/// Every strategy whose ENTIRE signal and pricing logic reads spot bars plus GetOptionBars(strike,
+/// isCall) for one specific strike at a time is trivially supported (see SupportedStrategyKeys) -
+/// EmaCrossAtmConfirmStrategy is the plain case, built entirely on GetOptionBars for whichever
+/// strike is ATM at each candidate bar, which this class already serves for any strike within the
+/// fetched band (see StrikeBandSteps).
+///
+/// EmaCrossAtmFlowStrategy additionally needs OBV/CDV computed across the WHOLE surrounding strike
+/// chain (see BacktestStrategyContext.ObvCeSeries/CdvCeSeries and CdvUnderlyingState.GetObvSeries's
+/// own "summed across every tracked strike" doc comment) - not something GetOptionBars for one
+/// strike can ever supply on its own. Supported anyway, at the user's own explicit request for exact
+/// parity with what Backtrack itself would show: RunAsync fetches a much WIDER band for this one
+/// strategy (pure ATM +-FlowChainRadius, matching live's own tracked ATM+-8 window) and reconstructs
+/// OBV/CDV/AtmCeBars/AtmPeBars from it via a scratch, throwaway CdvUnderlyingState instance (see
+/// BuildFlowChainSeries) - the SAME offline backfill machinery CdvHostedService itself uses to seed
+/// a strike's history before its first live tick, just driven from Dhan's rolling-option data
+/// instead of Dhan's ordinary option-chain one. This is real, not synthetic/empty flow data, but it
+/// is real work: 34 separate rolling-option fetches instead of the usual 26, each individually
+/// chunked/paced like every other token here - a run using this specific strategy takes noticeably
+/// longer and carries more exposure to Dhan's own rate limit than any other strategy this app runs.
 ///
 /// GetOptionBars/GetOptionBarsOneMinute below DO use the actual "strike" value a strategy passes in
 /// (an ABSOLUTE price - OptionTradeSimulator computes it as "ATM at the signal's own time +-
@@ -74,7 +84,7 @@ namespace OptionAnalytics.Server.Services;
 /// result rather than silently mispricing anything.</summary>
 public sealed class ExpiredOptionBacktestService
 {
-    private static readonly HashSet<string> SupportedStrategyKeys = new() { "five-ema", "five-ema-v2", "five-ema-taught", "ema-cross-atm-confirm" };
+    private static readonly HashSet<string> SupportedStrategyKeys = new() { "five-ema", "five-ema-v2", "five-ema-taught", "ema-cross-atm-confirm", "ema-cross-atm-flow" };
 
     /// <summary>Underlyings this feature supports at all - Dhan's rolling-option docs only ever show
     /// "NSE_FNO" as the exchange segment, never a BSE one, so SENSEX is left out rather than
@@ -127,6 +137,22 @@ public sealed class ExpiredOptionBacktestService
     /// fetch is today - a real run takes noticeably longer and carries more exposure to Dhan's own
     /// rate limit, which the user explicitly accepted ("even it takes few min lets do it").</summary>
     private const int StrikeBandSteps = 6;
+
+    /// <summary>Radius (steps either side of pure ATM) for the WIDE, exact-parity flow-chain band
+    /// EmaCrossAtmFlowStrategy needs when it runs here - matching live CdvHostedService's own
+    /// tracked ATM+-8 window exactly, since OBV/CDV are a delta-weighted SUM across every tracked
+    /// strike (see CdvUnderlyingState.GetObvSeries's own doc comment: "summed across every tracked
+    /// strike"), not one leg's own series the way GetOptionBars/AtmCeBars are. 8 either side (17
+    /// tokens per side, 34 total instead of the usual 13/26) is what the user confirmed after being
+    /// told the real cost - noticeably slower and more exposed to Dhan's rate limit than any other
+    /// strategy this app runs, accepted for genuine parity with what Backtrack itself would show
+    /// rather than a cheaper approximation (see BuildFlowChainSeries).
+    ///
+    /// This band is STRICTLY WIDER than a normal run's own otmSteps+-StrikeBandSteps band (otmSteps
+    /// is bounded to +-8 by StrikeOffsetParameter, and this is +-8 around 0), so it doubles as the
+    /// SAME band an ordinary run would have fetched for pricing - RunAsync fetches only this ONE,
+    /// wider band when the strategy needs it, never both.</summary>
+    private const int FlowChainRadius = 8;
 
     /// <summary>Pacing between successive TOKEN fetches within one side's own band (see
     /// FetchStrikeBandAsync) - same idea and same value as DhanRollingOptionDataService's own
@@ -318,8 +344,17 @@ public sealed class ExpiredOptionBacktestService
         // a trade off the EXACT absolute strike it entered at, even if the index has since moved far
         // enough that Dhan's own day-level "ATM+-K" resolution for the single primary token would
         // otherwise have quietly drifted onto a different real contract.
-        var (ceBand, ceError) = await FetchStrikeBandAsync(instrument.SecurityId, expiryFlag, segments, otmSteps, isCall: true, spotBars1m, step, cancellationToken);
-        var (peBand, peError) = await FetchStrikeBandAsync(instrument.SecurityId, expiryFlag, segments, otmSteps, isCall: false, spotBars1m, step, cancellationToken);
+        //
+        // EmaCrossAtmFlowStrategy needs a WIDER band (pure ATM +-FlowChainRadius) to reconstruct
+        // OBV/CDV summed across the whole live-tracked chain (see FlowChainRadius/BuildFlowChainSeries'
+        // own doc comments) - fetched here INSTEAD of the ordinary otmSteps+-StrikeBandSteps one, not
+        // in addition to it, since FlowChainRadius (8) already comfortably covers any legal otmSteps
+        // (also bounded to +-8), so the wider band alone still serves this run's own pricing too.
+        var needsFlowChain = strategyKey == "ema-cross-atm-flow";
+        var bandCenterSteps = needsFlowChain ? 0 : otmSteps;
+        var bandRadius = needsFlowChain ? FlowChainRadius : StrikeBandSteps;
+        var (ceBand, ceError) = await FetchStrikeBandAsync(instrument.SecurityId, expiryFlag, segments, bandCenterSteps, bandRadius, isCall: true, spotBars1m, step, cancellationToken);
+        var (peBand, peError) = await FetchStrikeBandAsync(instrument.SecurityId, expiryFlag, segments, bandCenterSteps, bandRadius, isCall: false, spotBars1m, step, cancellationToken);
 
         // The PRIMARY (centre-of-band) member - what this run's own otmSteps actually calls for -
         // used only for the summary stats below (resolved/expected strike, splices, bar counts).
@@ -363,6 +398,12 @@ public sealed class ExpiredOptionBacktestService
         // plots, so the padding around the lookback window this method fetched actually reaches it.
         var spotChartCandlesTf = BacktestUtil.AggregateCandles(spotBarsForChart, timeframe);
 
+        // Only EmaCrossAtmFlowStrategy reads any of this (see needsFlowChain above) - every other
+        // strategy gets the same harmless empty placeholders this class has always handed them.
+        var (atmCeBars1m, atmPeBars1m, obvCeSeries1m, obvPeSeries1m, cdvCeSeries1m, cdvPeSeries1m) = needsFlowChain
+            ? BuildFlowChainSeries(underlying, ceBand, peBand, spotBars1m, step)
+            : (Array.Empty<Candle>(), Array.Empty<Candle>(), Array.Empty<ObvPoint>(), Array.Empty<ObvPoint>(), Array.Empty<ObvPoint>(), Array.Empty<ObvPoint>());
+
         var context = new BacktestStrategyContext
         {
             Underlying = underlying,
@@ -372,14 +413,14 @@ public sealed class ExpiredOptionBacktestService
             SpotBarsOneMinute = spotBars1m,
             ConfluenceSignalsAscending = Array.Empty<BacktestSignal>(),
             AllSignals = Array.Empty<BacktestSignal>(),
-            ObvCeSeries = Array.Empty<ObvPoint>(),
-            ObvPeSeries = Array.Empty<ObvPoint>(),
-            CdvCeSeries = Array.Empty<ObvPoint>(),
-            CdvPeSeries = Array.Empty<ObvPoint>(),
+            ObvCeSeries = BacktestUtil.AggregateLine(obvCeSeries1m, timeframe),
+            ObvPeSeries = BacktestUtil.AggregateLine(obvPeSeries1m, timeframe),
+            CdvCeSeries = BacktestUtil.AggregateLine(cdvCeSeries1m, timeframe),
+            CdvPeSeries = BacktestUtil.AggregateLine(cdvPeSeries1m, timeframe),
             GetOptionBars = TimeframeOptionBars,
             GetOptionBarsOneMinute = OneMinuteOptionBars,
-            AtmCeBars = Array.Empty<Candle>(),
-            AtmPeBars = Array.Empty<Candle>(),
+            AtmCeBars = BacktestUtil.AggregateCandles(atmCeBars1m, timeframe),
+            AtmPeBars = BacktestUtil.AggregateCandles(atmPeBars1m, timeframe),
             AtmCeVolumeBars = Array.Empty<CandleWithVolume>(),
             AtmPeVolumeBars = Array.Empty<CandleWithVolume>(),
             AtmStrike = null,
@@ -506,7 +547,7 @@ public sealed class ExpiredOptionBacktestService
             // A BAND of tokens around resolvedOtmSteps, not just the single one - so absoluteStrike
             // keeps being found even on a day the index has drifted enough that this single starting
             // offset no longer resolves to it (see BuildFixedStrikeSeries below).
-            (band, bandError) = await FetchStrikeBandAsync(instrument.SecurityId, expiryFlag, segments, resolvedOtmSteps, isCall, windowSpotBars, step, cancellationToken);
+            (band, bandError) = await FetchStrikeBandAsync(instrument.SecurityId, expiryFlag, segments, resolvedOtmSteps, StrikeBandSteps, isCall, windowSpotBars, step, cancellationToken);
         }
 
         // Same sign convention RunAsync itself uses: otmSteps is "how far OTM for the side actually
@@ -670,16 +711,18 @@ public sealed class ExpiredOptionBacktestService
         List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> Bars,
         List<PossibleSplice> Splices);
 
-    /// <summary>Fetches every relative-strike token from centerSteps-StrikeBandSteps to
-    /// centerSteps+StrikeBandSteps for one side (CE or PE, isCall says which) - the raw ingredients
-    /// BuildFixedStrikeSeries stitches one FIXED absolute strike's own continuous series from. See
-    /// StrikeBandSteps' own doc comment for why one token alone cannot do that at all.
+    /// <summary>Fetches every relative-strike token from centerSteps-radius to centerSteps+radius
+    /// for one side (CE or PE, isCall says which) - the raw ingredients BuildFixedStrikeSeries
+    /// stitches one FIXED absolute strike's own continuous series from. See StrikeBandSteps' own doc
+    /// comment for why one token alone cannot do that at all - callers pass StrikeBandSteps for an
+    /// ordinary run, or FlowChainRadius (wider, always centered on pure ATM) when the selected
+    /// strategy needs the whole flow chain (see BuildFlowChainSeries).
     ///
     /// Sequential, individually paced (BandFetchDelay) - never parallel, for the same account-wide
     /// rate-limit reason this class's own top-of-file doc comment already explains for CE-vs-PE.
     /// Per-member errors are concatenated, same convention FetchAcrossSegmentsAsync itself uses.</summary>
     private async Task<(List<StrikeBandMember> Band, string? Error)> FetchStrikeBandAsync(
-        uint underlyingSecurityId, string expiryFlag, IReadOnlyList<FetchSegment> segments, int centerSteps, bool isCall,
+        uint underlyingSecurityId, string expiryFlag, IReadOnlyList<FetchSegment> segments, int centerSteps, int radius, bool isCall,
         IReadOnlyList<Candle> spotBars, int step, CancellationToken cancellationToken)
     {
         var optionType = isCall ? "CALL" : "PUT";
@@ -687,7 +730,7 @@ public sealed class ExpiredOptionBacktestService
         string? error = null;
         var isFirst = true;
 
-        for (var steps = centerSteps - StrikeBandSteps; steps <= centerSteps + StrikeBandSteps; steps++)
+        for (var steps = centerSteps - radius; steps <= centerSteps + radius; steps++)
         {
             // Paced, not back to back - see BandFetchDelay's own doc comment. Skipped before the
             // very first token only.
@@ -829,6 +872,92 @@ public sealed class ExpiredOptionBacktestService
         }
 
         return merged.Values.ToList();
+    }
+
+    /// <summary>Reconstructs EmaCrossAtmFlowStrategy's own AtmCeBars/AtmPeBars/ObvCeSeries/
+    /// ObvPeSeries/CdvCeSeries/CdvPeSeries from the wide flow-chain band (see FlowChainRadius) - the
+    /// data that strategy needs but this class otherwise never computes, since every OTHER strategy
+    /// here only ever reads SpotBars + GetOptionBars(strike, isCall).
+    ///
+    /// AtmCeBars/AtmPeBars: the pure-ATM (Steps == 0) member's own bars - a SNAPSHOT, exactly like
+    /// live CdvUnderlyingState.GetAtmClosedCandles is (see BacktestStrategyContext.AtmCeBars' own
+    /// doc comment: "whichever strike is ATM right now, its own full stored history" - a known
+    /// approximation replayed across a whole multi-day backtest, not something this method changes).
+    ///
+    /// ObvCeSeries/ObvPeSeries/CdvCeSeries/CdvPeSeries: OBV and CDV are each a delta-weighted SUM
+    /// across EVERY member of the band (see CdvUnderlyingState.GetObvSeries's own doc comment -
+    /// "summed across every tracked strike"), so reproducing them means feeding every member's own
+    /// bars through the SAME offline reconstruction CdvUnderlyingState already exposes for exactly
+    /// this purpose (SeedStrikeHistory for OBV's multi-day history, SeedHistoricalDayStrike +
+    /// FinalizeHistory for CDV's day-scoped one - the same two paths CdvHostedService itself uses to
+    /// backfill a strike's history before its first live tick, just driven here from Dhan's
+    /// rolling-option data instead of Dhan's ordinary option-chain one). A scratch CdvUnderlyingState
+    /// is built fresh per run and thrown away after - nothing here touches the live one.
+    ///
+    /// Each band member is registered under a SYNTHETIC strike price (referenceAtm + member.Steps *
+    /// step, using the SAME end-of-window reference spot RunAsync itself already computes
+    /// ceExpectedStrike/peExpectedStrike from) rather than trusting that member's own bar-by-bar
+    /// resolved "strike" field for the identity CdvUnderlyingState's own moneyness weighting needs -
+    /// Dhan's own resolution is exactly the field this app's whole strike-band mechanism already
+    /// exists to work around when it drifts (see FilterToExpectedStrike), so a STABLE reference
+    /// value per band slot is deliberately used here instead of a value already known to wobble.
+    /// OBV's own moneyness weight additionally uses ONE fixed reference spot for the WHOLE series
+    /// (CdvUnderlyingState.LastSpot) rather than each bar's own historical spot - the same
+    /// approximation the live OBV path already makes (see its own doc comment), carried over
+    /// unchanged rather than "improved" into something Backtrack itself would not produce.</summary>
+    internal static (
+        IReadOnlyList<Candle> AtmCeBars, IReadOnlyList<Candle> AtmPeBars,
+        IReadOnlyList<ObvPoint> ObvCeSeries, IReadOnlyList<ObvPoint> ObvPeSeries,
+        IReadOnlyList<ObvPoint> CdvCeSeries, IReadOnlyList<ObvPoint> CdvPeSeries) BuildFlowChainSeries(
+        string underlying, List<StrikeBandMember> ceChain, List<StrikeBandMember> peChain, IReadOnlyList<Candle> spotBars, int step)
+    {
+        var atmCeBars = ceChain.First(m => m.Steps == 0).Bars.Select(b => b.Bar.ToCandle()).ToList();
+        var atmPeBars = peChain.First(m => m.Steps == 0).Bars.Select(b => b.Bar.ToCandle()).ToList();
+
+        if (spotBars.Count == 0 || step <= 0)
+            return (atmCeBars, atmPeBars, Array.Empty<ObvPoint>(), Array.Empty<ObvPoint>(), Array.Empty<ObvPoint>(), Array.Empty<ObvPoint>());
+
+        var referenceSpot = spotBars[^1].Close;
+        var referenceAtm = Math.Round(referenceSpot / step) * step;
+
+        // Last-write-wins on a duplicate timestamp is harmless - spot never legitimately reports two
+        // different closes for the same minute.
+        var spotByTime = new Dictionary<DateTimeOffset, decimal>();
+        foreach (var bar in spotBars) spotByTime[bar.Time] = bar.Close;
+
+        var cdvState = new CdvUnderlyingState(underlying) { LastSpot = referenceSpot };
+        uint nextSyntheticId = 1;
+
+        void Seed(List<StrikeBandMember> chain, bool isCall)
+        {
+            foreach (var member in chain)
+            {
+                if (member.Bars.Count == 0) continue;
+
+                var slotStrike = referenceAtm + member.Steps * step;
+                var syntheticId = nextSyntheticId++;
+                cdvState.EnsureTracked(syntheticId, slotStrike, isCall);
+
+                var bars = member.Bars.Select(b => b.Bar).ToList();
+                // OBV's own multi-day history (SeedHistory, called inside regardless of
+                // includeInCdvHistory) - CDV itself is seeded separately below, so this never asks
+                // for the today-only CDV reconstruction this method also happens to offer.
+                cdvState.SeedStrikeHistory(syntheticId, bars, Array.Empty<CandleWithVolume>(), 0m, includeInCdvHistory: false);
+                // CDV's own day-scoped, per-bar-spot-weighted reconstruction, across every day in
+                // the window - the multi-day counterpart SeedStrikeHistory's own CDV path only ever
+                // does for "today".
+                cdvState.SeedHistoricalDayStrike(syntheticId, bars, spotByTime, referenceSpot);
+            }
+        }
+
+        Seed(ceChain, true);
+        Seed(peChain, false);
+        cdvState.FinalizeHistory();
+
+        return (
+            atmCeBars, atmPeBars,
+            cdvState.GetObvSeries(true), cdvState.GetObvSeries(false),
+            cdvState.GetSmoothedCdvSeries(true), cdvState.GetSmoothedCdvSeries(false));
     }
 
     /// <summary>Whether the returned series genuinely stays on ONE single contract for the whole
