@@ -26,6 +26,32 @@ export const UP_COLOR = '#26a69a'
 export const DOWN_COLOR = '#ef5350'
 export const CE_COLOR = '#3ddc84'
 export const PE_COLOR = '#ff5c5c'
+// The 5 EMA overlay's own line color on Backtrack/Expired Backtest's spot charts - distinct from
+// every other color already in play there (CE/PE, UP/DOWN, the amber "Open" trade status).
+export const EMA_COLOR = '#9254de'
+
+// Standard EMA: seeded with a plain average of the first `period` closes, then the usual
+// exponential recurrence. Returns one value per input bar, null before the seed window fills.
+// Shared rather than duplicated per page - App.jsx's own EMA9/21 crossover overlay used this first;
+// Backtrack/Expired Backtest's own "Show 5 EMA" chart toggle reuses it for the same visual line the
+// 5 EMA strategies themselves reason about (see EmaCrossoverDetector.EmaSeries server-side - not
+// byte-for-byte identical seeding, but the same standard EMA, close enough for a chart overlay).
+export function computeEma(closes, period) {
+  const result = new Array(closes.length).fill(null)
+  if (closes.length < period) return result
+
+  const k = 2 / (period + 1)
+  let sum = 0
+  for (let i = 0; i < period; i++) sum += closes[i]
+  let prev = sum / period
+  result[period - 1] = prev
+
+  for (let i = period; i < closes.length; i++) {
+    prev = closes[i] * k + prev * (1 - k)
+    result[i] = prev
+  }
+  return result
+}
 
 export const ALERT_KIND_LABEL = { Spot: 'Spot', AtmCe: 'ATM CE', AtmPe: 'ATM PE', Confluence: 'CONFLUENCE' }
 
