@@ -39,6 +39,13 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 ///     starts flat - whichever direction confirms first (bullish or bearish, there is no "already
 ///     positioned" memory left over from the day before) opens a fresh trade, not necessarily the
 ///     opposite of what was cut.
+///   - "Provide square off time, else it will be carry forward": the day-boundary cut above only
+///     ever fires once the day's OWN data runs out - a real IST cutoff independent of that (the same
+///     squareOffMinutes every other strategy already exposes) closes the position explicitly at a
+///     known time each day (ExitReason "SquareOff") rather than leaving it to however far that day's
+///     option data happens to reach, and blocks any NEW entry for the rest of that same day too - a
+///     square-off cutoff that let a fresh trade open five minutes later would defeat its own point.
+///     0 (the default) leaves the day-boundary cut as the only exit, exactly as before this existed.
 ///
 /// Built as its own trade-construction loop rather than reusing OptionTradeSimulator.Run: Run's
 /// rules (one position per day, but a signal arriving while a trade is still open is simply
@@ -55,7 +62,7 @@ public sealed class EmaCrossAtmReversalStrategy : IBacktestStrategy
 {
     public string Key => "ema-cross-atm-reversal";
     public string Name => "EMA Crossover + ATM Reversal (no overnight carry)";
-    public string Description => "Enters when spot's fast EMA crosses its slow EMA AND the pure ATM option on that side makes the same upward cross on its own premium within a short window - a cross means the candle actually CLOSED beyond both EMAs, not just the EMA order flipping. No take-profit and no ordinary stop-loss - just an optional maximum stop-loss safety net. The position stays open until the OPPOSITE side confirms the same way (it then closes and immediately flips into the new direction) or the trading day ends, whichever comes first - positions never carry overnight, and the next day starts flat.";
+    public string Description => "Enters when spot's fast EMA crosses its slow EMA AND the pure ATM option on that side makes the same upward cross on its own premium within a short window - a cross means the candle actually CLOSED beyond both EMAs, not just the EMA order flipping. No take-profit and no ordinary stop-loss - just an optional maximum stop-loss safety net. The position stays open until the OPPOSITE side confirms the same way (it then closes and immediately flips into the new direction), an optional square-off time is reached, or the trading day ends, whichever comes first - positions never carry overnight, and the next day starts flat.";
 
     private const decimal FlagOff = 0;
     private const decimal FlagOn = 1;
@@ -65,6 +72,7 @@ public sealed class EmaCrossAtmReversalStrategy : IBacktestStrategy
         OptionTradeSimulator.SideParameter(),
         new BacktestParameterSpec("otmSteps", "Strike to TRADE, steps from ATM (confirmation always checks pure ATM)", Default: 0, Min: -8, Max: 8, Step: 1),
         new BacktestParameterSpec("maxSlPoints", "Maximum stop loss (points, 0 = off)", Default: 100, Min: 0, Max: 2000, Step: 1),
+        OptionTradeSimulator.SquareOffTimeParameter(),
         OptionTradeSimulator.SignalStartTimeParameter(),
         OptionTradeSimulator.ExcludeLastDaysParameter(),
         new BacktestParameterSpec("fastEmaPeriod", "Fast EMA (bars)", Default: 9, Min: 1, Max: 200, Step: 1),
@@ -91,6 +99,7 @@ public sealed class EmaCrossAtmReversalStrategy : IBacktestStrategy
         var confirmWithin = (int)parameters["atmConfirmWithinBars"];
         var requireOppositeLeg = parameters["requireOppositeLegConfirm"] >= (FlagOff + FlagOn) / 2;
         var signalStartMinutes = (int)parameters.GetValueOrDefault("signalStartMinutes", 555);
+        var squareOffMinutes = (int)parameters.GetValueOrDefault("squareOffMinutes", 0);
         var excludeLastDays = (int)parameters.GetValueOrDefault("excludeLastDays", 0);
         var isSell = parameters["side"] >= (OptionTradeSimulator.SideBuy + OptionTradeSimulator.SideSell) / 2;
         var otmSteps = (int)parameters["otmSteps"];
@@ -235,6 +244,24 @@ public sealed class EmaCrossAtmReversalStrategy : IBacktestStrategy
             // CloseAtEndOfDay's own benefit - only the stop-price check itself is conditional.
             if (openDirection is not null) AdvanceOpenLeg(bar.Time, inclusive: true);
 
+            // Explicit square-off cutoff: closes whatever is open the first bar at/after this IST
+            // time, rather than leaving it to however far the day's own option data happens to run
+            // (CloseAtEndOfDay's own job) - see this class's own doc comment. Fires at most once per
+            // day, since openDirection is null again immediately after.
+            if (openDirection is not null && squareOffMinutes > 0 && IstClock.MinutesOfDay(bar.Time) >= squareOffMinutes)
+            {
+                var closeIndex = OptionTradeSimulator.FindAt(openOptionBars, bar.Time);
+                if (closeIndex >= 0 && openOptionBars[closeIndex].Close > 0)
+                {
+                    CloseOpenPosition(bar.Time, openOptionBars[closeIndex].Close, "SquareOff");
+                }
+                else
+                {
+                    trades.Add(BacktestTrade.NoData(underlying, openSignalTime, openDirection, sideLabel, openIsCall ? "CE" : "PE", openStrike, openSpotPrice));
+                    openDirection = null;
+                }
+            }
+
             if (!ConfirmedCrossedUp(spotConfirmed, i, out var bullish)) continue;
 
             var direction = bullish ? "Bullish" : "Bearish";
@@ -251,6 +278,16 @@ public sealed class EmaCrossAtmReversalStrategy : IBacktestStrategy
             {
                 signals.Add(new BacktestSignal(underlying, bar.Time, "Rejected", direction,
                     $"{summary} - skipped, before {IstClock.FormatMinutesOfDay(signalStartMinutes)} IST (pre-open)"));
+                continue;
+            }
+
+            // A square-off cutoff that let a fresh trade open five minutes later would defeat its
+            // own point - no new entry for the rest of THIS day once past it (tomorrow starts flat
+            // and eligible again, same as after any other close).
+            if (squareOffMinutes > 0 && IstClock.MinutesOfDay(bar.Time) >= squareOffMinutes)
+            {
+                signals.Add(new BacktestSignal(underlying, bar.Time, "Rejected", direction,
+                    $"{summary} - skipped, at/after square-off ({IstClock.FormatMinutesOfDay(squareOffMinutes)} IST)"));
                 continue;
             }
 
