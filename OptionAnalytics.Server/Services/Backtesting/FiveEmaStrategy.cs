@@ -9,17 +9,17 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 /// an exhaustion bar - followed by price failing to continue:
 ///
 ///   SHORT: an ALERT CANDLE forms entirely ABOVE the 5 EMA (its LOW does not touch the line). Enter
-///          short when a LATER candle's own CLOSE crosses back BELOW the EMA - not a break of the
-///          alert candle's own low, a close on the other side of the average itself.
+///          short when a later candle breaks BELOW that candle's low.
 ///   LONG:  an ALERT CANDLE forms entirely BELOW the 5 EMA (its HIGH does not touch the line). Enter
-///          long when a LATER candle's own CLOSE crosses back ABOVE the EMA, by the same reasoning.
+///          long when a later candle breaks ABOVE that candle's high.
 ///
-/// The alert candle ROLLS FORWARD: while it hasn't triggered an entry, any newer candle that is
-/// itself entirely clear of the EMA on the same side replaces it, so the reference is always the
-/// most recent exhaustion bar rather than a stale one. A candle that TOUCHES the EMA (its own range
-/// straddles the line) cancels the pending alert candle outright on both sides, regardless of where
-/// that same candle's own close ends up - price has come back to the average, so the stretched-away
-/// condition the setup is built on is gone either way. Nothing is carried across a trading day, either.
+/// The alert candle ROLLS FORWARD: while it hasn't been broken, any newer candle that is itself
+/// entirely clear of the EMA on the same side replaces it, so the reference is always the most
+/// recent exhaustion bar rather than a stale one ("if the price moves higher without breaking the
+/// low and forms a new valid candle not touching the EMA, shift your alert candle to the new one").
+/// A candle that TOUCHES the EMA cancels the pending alert candle outright on both sides - price
+/// has come back to the average, so the stretched-away condition the setup is built on is gone.
+/// Nothing is carried across a trading day, either.
 ///
 /// Two deliberate deviations from the setup as taught, both because this app trades OPTIONS off a
 /// spot signal rather than trading the underlying itself:
@@ -29,11 +29,13 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 ///     in SPOT points, which do not convert to premium points at a fixed rate (that ratio is the
 ///     option's delta, and it moves). So the shared points-based stop/target every other strategy in
 ///     this app uses stays in force here, and the alert candle's own high/low is not used as a stop.
-///   - ENTRY IS THE TRIGGERING BAR'S OWN CLOSE - the very close that crossed the EMA to confirm the
-///     signal in the first place, so the trigger and the fill are the same print. This is also
-///     OptionTradeSimulator's standing no-look-ahead rule: that close is a real, already-traded price
-///     at the exact instant the signal confirmed - not a further bar's open, which would just be the
-///     same instant measured one bar late for no benefit (see OptionTradeSimulator's own doc comment).
+///   - ENTRY IS THE BREAKING BAR'S OWN CLOSE, not a resting order at the alert candle's low/high.
+///     This is OptionTradeSimulator's standing no-look-ahead rule: the breaking bar's own prices
+///     are only known once it has closed, and that close is a real, already-traded print at the
+///     exact instant the break confirmed - not a further bar's open, which would just be the same
+///     instant measured one bar late for no benefit (see OptionTradeSimulator's own doc comment). In
+///     a fast move that is still a worse fill than the taught entry (a resting order at the level
+///     itself).
 ///
 /// The taught EXIT of "get out when price comes back and touches the 5 EMA" DOES translate, since it
 /// is a condition on spot rather than a price level on the option, and it is on by default - see
@@ -47,7 +49,7 @@ public sealed class FiveEmaStrategy : IBacktestStrategy
 {
     public string Key => "five-ema";
     public string Name => "5 EMA (Subhasish Pani) v1 - candle close";
-    public string Description => "An alert candle that forms entirely clear of the 5 EMA - low above it for a short, high below it for a long - and entry when a later candle's own CLOSE crosses back through the EMA (below it for a short, above it for a long). The alert candle rolls forward to any newer qualifying candle and is cancelled outright by any candle that touches the EMA. Taught as 5-minute for shorts and 15-minute for longs.";
+    public string Description => "An alert candle that forms entirely clear of the 5 EMA - low above it for a short, high below it for a long - and entry when a later candle breaks that candle's low (short) or high (long). The alert candle rolls forward to any newer qualifying candle and is cancelled outright by any candle that touches the EMA. Taught as 5-minute for shorts and 15-minute for longs.";
 
     private const decimal DirectionBoth = 0;
     private const decimal DirectionLongOnly = 1;
@@ -141,18 +143,16 @@ public sealed class FiveEmaStrategy : IBacktestStrategy
                 if (longAlert is { } l && i - l.Index > maxAgeBars) longAlert = null;
             }
 
-            // Step 1: does THIS bar's own CLOSE cross back through the EMA against a PREVIOUS bar's
-            // pending alert candle? Checked before the alert candle is updated below, so a candle
-            // can never trigger against itself. The alert candle's own high/low is no longer the
-            // trigger level at all - only which side of the EMA it formed on matters now.
+            // Step 1: does THIS bar break a PREVIOUS bar's alert candle? Checked before the alert
+            // candle is updated below, so a candle can never trigger against itself.
             // Before anything else: a bar timestamped inside the pre-open call auction can never
             // produce a real signal, regardless of direction filters or alert-candle state - see
             // SignalStartTimeParameter's own doc comment.
             var beforeSignalStart = signalStartMinutes > 0 && IstClock.MinutesOfDay(bar.Time) < signalStartMinutes;
 
-            if (shortAlert is { } shortCandle && bar.Close < emaValue)
+            if (shortAlert is { } shortCandle && bar.Low < shortCandle.Bar.Low)
             {
-                var summary = $"Alert candle at {BacktestUtil.IstDate(shortCandle.Bar.Time):dd MMM} low {shortCandle.Bar.Low:0.##} formed clear above the {emaPeriod} EMA - this candle's close crossed back below it";
+                var summary = $"Alert candle at {BacktestUtil.IstDate(shortCandle.Bar.Time):dd MMM} low {shortCandle.Bar.Low:0.##} formed clear above the {emaPeriod} EMA and broke down";
                 if (beforeSignalStart)
                 {
                     signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", "Bearish", $"{summary} - skipped, before {IstClock.FormatMinutesOfDay(signalStartMinutes)} IST (pre-open)"));
@@ -168,9 +168,9 @@ public sealed class FiveEmaStrategy : IBacktestStrategy
                 }
                 shortAlert = null;
             }
-            else if (longAlert is { } longCandle && bar.Close > emaValue)
+            else if (longAlert is { } longCandle && bar.High > longCandle.Bar.High)
             {
-                var summary = $"Alert candle at {BacktestUtil.IstDate(longCandle.Bar.Time):dd MMM} high {longCandle.Bar.High:0.##} formed clear below the {emaPeriod} EMA - this candle's close crossed back above it";
+                var summary = $"Alert candle at {BacktestUtil.IstDate(longCandle.Bar.Time):dd MMM} high {longCandle.Bar.High:0.##} formed clear below the {emaPeriod} EMA and broke up";
                 if (beforeSignalStart)
                 {
                     signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", "Bullish", $"{summary} - skipped, before {IstClock.FormatMinutesOfDay(signalStartMinutes)} IST (pre-open)"));
