@@ -1,15 +1,16 @@
 import { Component, useEffect, useMemo, useRef, useState } from 'react'
-import { Select, Space, Typography, Card, Button, Table, Tag, InputNumber, Statistic, Row, Col, TimePicker, Segmented, Alert, Empty, Tooltip, Checkbox } from 'antd'
+import { Select, Space, Typography, Card, Button, Table, Tag, InputNumber, Statistic, Row, Col, DatePicker, TimePicker, Segmented, Alert, Empty, Tooltip, Checkbox } from 'antd'
 import dayjs from 'dayjs'
 import { PlayCircleOutlined, InfoCircleOutlined } from '@ant-design/icons'
 import { createChart, createSeriesMarkers, CandlestickSeries, LineSeries, CrosshairMode } from 'lightweight-charts'
 import {
-  UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, EMA_COLOR, computeEma, NavBar, DirectionTag, fmtIstDateTime, fmtIstTime, fmtPrice,
+  UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, EMA_COLOR, computeEma, NavBar, DirectionTag, fmtIstDateTime, fmtIstTime, fmtPrice, istDateKey,
   TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState,
   AXIS_COLOR, GRID_COLOR, BORDER_COLOR, istTimeFormatter, istTickMarkFormatter, toBar, toChartTime, dayResetMarkers,
 } from './shared.jsx'
 
 const { Title, Text } = Typography
+const { RangePicker } = DatePicker
 
 // Only NIFTY/BANKNIFTY - Dhan's rolling-option docs only ever show "NSE_FNO" as the exchange
 // segment, never a BSE one, so SENSEX is left out (see ExpiredOptionBacktestService's own comment).
@@ -38,6 +39,7 @@ const DEFAULT_LOOKBACK_DAYS = { WEEK: 5, MONTH: 28 }
 
 const STORED_STRATEGY_KEY = 'optionanalytics.expiredBacktest.strategyKey'
 const STORED_PARAM_VALUES = 'optionanalytics.expiredBacktest.paramValues'
+const STORED_DATE_RANGE = 'optionanalytics.expiredBacktest.dateRange'
 
 const BUY_COLOR = '#4dabf7'
 const SELL_COLOR = '#c084fc'
@@ -226,6 +228,34 @@ export default function ExpiredBacktestPage() {
   // a strategy that has nothing to do with the 5 EMA.
   const [showEma, setShowEma] = useState(false)
 
+  // Which IST days to show - a VIEW filter applied AFTER the run, same as BacktestPage's own date
+  // range: narrows the trades/signals/chart to a slice of the lookback window this run already
+  // fetched, without re-running against Dhan. Widening or clearing it never re-fetches anything -
+  // the full run's own data is already sitting in `result`, this just decides what's shown from it.
+  // Persisted as plain ISO date strings (dayjs instances themselves are not JSON-safe - see
+  // usePersistedState) rather than through that hook directly.
+  const [dateRange, setDateRangeState] = useState(() => {
+    try {
+      const raw = window.localStorage.getItem(STORED_DATE_RANGE)
+      if (!raw) return null
+      const [from, to] = JSON.parse(raw)
+      return [from ? dayjs(from) : null, to ? dayjs(to) : null]
+    } catch {
+      return null
+    }
+  })
+  const setDateRange = (range) => {
+    setDateRangeState(range)
+    try {
+      window.localStorage.setItem(STORED_DATE_RANGE, JSON.stringify([
+        range?.[0] ? range[0].format('YYYY-MM-DD') : null,
+        range?.[1] ? range[1].format('YYYY-MM-DD') : null,
+      ]))
+    } catch {
+      // Remembering the date filter is a convenience, never a requirement - see usePersistedState.
+    }
+  }
+
   // BANKNIFTY's weekly options were discontinued by NSE - there is no such contract to backtest,
   // so WEEK is not just a bad default for it, it is not a legal choice at all. Forced here (not
   // just hidden below) so switching underlying can never leave a stale WEEK selection in place.
@@ -319,7 +349,38 @@ export default function ExpiredBacktestPage() {
 
   const trades = result?.trades ?? []
   const signals = result?.signals ?? []
-  const chartBars = useMemo(() => (result?.spotChartBars ?? []).map(toBar), [result])
+
+  const [fromDay, toDay] = useMemo(() => {
+    const from = dateRange?.[0] ? dateRange[0].format('YYYY-MM-DD') : null
+    const to = dateRange?.[1] ? dateRange[1].format('YYYY-MM-DD') : null
+    return [from, to]
+  }, [dateRange])
+
+  // Both tables filter on the SIGNAL's own IST day - the day the strategy decided to act. A trade
+  // entered late and exited the next morning therefore stays under the day that produced it, same
+  // convention BacktestPage's own date filter uses.
+  const inRange = (iso) => {
+    if (!fromDay && !toDay) return true
+    const day = istDateKey(iso)
+    return (!fromDay || day >= fromDay) && (!toDay || day <= toDay)
+  }
+
+  const visibleTrades = useMemo(
+    () => trades.filter((t) => inRange(t.signalTimeUtc)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [trades, fromDay, toDay])
+
+  const visibleSignals = useMemo(
+    () => signals.filter((sig) => inRange(sig.timeUtc)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [signals, fromDay, toDay])
+
+  // The chart's own candles - same date-range filter as the tables above, so a narrowed date range
+  // narrows the chart too.
+  const chartBars = useMemo(
+    () => (result?.spotChartBars ?? []).filter((c) => inRange(c.time)).map(toBar),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [result, fromDay, toDay])
 
   // The 5 EMA line for the chart's own "Show 5 EMA" toggle - computed off the SAME bars the chart
   // itself plots, using whichever emaPeriod the current strategy is actually running with when it
@@ -337,16 +398,16 @@ export default function ExpiredBacktestPage() {
   }, [showEma, chartBars, paramValues.emaPeriod, strategy])
 
   const summary = useMemo(() => {
-    const openCount = trades.filter((t) => t.exitReason === 'Open').length
-    const closed = trades.filter((t) => t.pnlPoints != null && t.exitReason !== 'Open')
+    // Computed off visibleTrades (the date-filtered set), not the raw run - narrowing the date
+    // filter narrows these stats too, same convention BacktestPage's own summary uses.
+    const openCount = visibleTrades.filter((t) => t.exitReason === 'Open').length
+    const closed = visibleTrades.filter((t) => t.pnlPoints != null && t.exitReason !== 'Open')
     if (closed.length === 0) return openCount > 0 ? { count: 0, openCount } : null
     const wins = closed.filter((t) => t.pnlPoints > 0).length
     const totalPnl = closed.reduce((sum, t) => sum + t.pnlPoints, 0)
     return { count: closed.length, openCount, wins, losses: closed.length - wins, winRate: (wins / closed.length) * 100, totalPnl, avgPnl: totalPnl / closed.length }
-    // trades is a fresh [] literal whenever result is null, so depending on `result` instead keeps
-    // this memoized across renders that don't actually change the data.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [result])
+  }, [visibleTrades])
 
   const tradeColumns = [
     { title: 'Signal Time', dataIndex: 'signalTimeUtc', key: 'signalTimeUtc', width: 180, render: (t) => fmtIstDateTime(t) },
@@ -465,6 +526,22 @@ export default function ExpiredBacktestPage() {
               <Space direction="vertical" size={2}>
                 <Text type="secondary" style={{ fontSize: 12 }}>Strategy</Text>
                 <Select value={strategyKey} onChange={setStrategyKey} style={{ width: 220 }} options={strategies.map((s) => ({ value: s.key, label: s.name }))} />
+              </Space>
+              <Space direction="vertical" size={2}>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  Date filter{' '}
+                  <Tooltip title="Narrows the trades/signals/chart below to a slice of this run's own lookback window - a VIEW filter only, applied after the fact. It never re-fetches from Dhan; widen or clear it to see the rest of the same run.">
+                    <InfoCircleOutlined />
+                  </Tooltip>
+                </Text>
+                <RangePicker
+                  value={dateRange}
+                  onChange={setDateRange}
+                  allowEmpty={[true, true]}
+                  format="DD MMM YYYY"
+                  placeholder={['From date', 'To date']}
+                  style={{ width: 260 }}
+                />
               </Space>
             </Space>
 
@@ -590,34 +667,51 @@ export default function ExpiredBacktestPage() {
                   <Checkbox checked={showEma} onChange={(e) => setShowEma(e.target.checked)}>
                     <Text style={{ color: EMA_COLOR }}>Show 5 EMA</Text>
                   </Checkbox>
-                  <ChartErrorBoundary key={`${underlying}-${expiryDate}-${timeframe}`}>
-                    <ExpiredSpotChart bars={chartBars} trades={trades} emaPoints={emaPoints} height={420} />
+                  <ChartErrorBoundary key={`${underlying}-${expiryDate}-${timeframe}-${fromDay}-${toDay}`}>
+                    <ExpiredSpotChart bars={chartBars} trades={visibleTrades} emaPoints={emaPoints} height={420} />
                   </ChartErrorBoundary>
                 </>
               ) : (
-                <Empty description="No spot candles to chart for this run." />
+                <Empty description={(fromDay || toDay) ? 'No spot candles on the selected dates - widen or clear the date filter.' : 'No spot candles to chart for this run.'} />
               )}
             </Card>
 
             <Card size="small" title="Trades">
+              {(fromDay || toDay) && (
+                <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 8 }}>
+                  Showing {visibleTrades.length} of {trades.length} trades, filtered to{' '}
+                  {fromDay ?? 'the start'} – {toDay ?? 'the end'} (IST). The run itself still covers the
+                  whole lookback window; this only narrows what's shown.
+                </Text>
+              )}
               <Table
                 size="small"
                 rowKey={(r, i) => `${r.signalTimeUtc}-${i}`}
-                dataSource={trades}
+                dataSource={visibleTrades}
                 columns={tradeColumns}
                 pagination={{ pageSize: 50, showSizeChanger: true, pageSizeOptions: [25, 50, 100] }}
-                locale={{ emptyText: 'No trades - no entry signals over this window, or click Run to try different settings.' }}
+                locale={{ emptyText: (fromDay || toDay)
+                  ? 'No trades on the selected dates - widen or clear the date filter.'
+                  : 'No trades - no entry signals over this window, or click Run to try different settings.' }}
               />
             </Card>
 
             <Card size="small" title="Signals">
+              {(fromDay || toDay) && (
+                <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 8 }}>
+                  Showing {visibleSignals.length} of {signals.length} signals, filtered to{' '}
+                  {fromDay ?? 'the start'} – {toDay ?? 'the end'} (IST).
+                </Text>
+              )}
               <Table
                 size="small"
                 rowKey={(r, i) => `${r.timeUtc}-${i}`}
-                dataSource={signals}
+                dataSource={visibleSignals}
                 columns={signalColumns}
                 pagination={{ pageSize: 50, showSizeChanger: true, pageSizeOptions: [25, 50, 100] }}
-                locale={{ emptyText: 'No signals over this window.' }}
+                locale={{ emptyText: (fromDay || toDay)
+                  ? 'No signals on the selected dates - widen or clear the date filter.'
+                  : 'No signals over this window.' }}
               />
             </Card>
           </>
