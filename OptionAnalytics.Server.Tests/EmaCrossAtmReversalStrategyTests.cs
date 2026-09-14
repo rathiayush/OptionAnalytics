@@ -113,6 +113,44 @@ public sealed class EmaCrossAtmReversalStrategyTests
         Assert.DoesNotContain(trades, t => t.ExitReason == "Reversed"); // nothing carried over to reverse OUT of
     }
 
+    [Fact]
+    public void SquareOffTime_ClosesBeforeTheDaysOwnLastBar_AndBlocksANewEntryForTheRestOfThatDay()
+    {
+        // Spot/CE: flat, rise (bullish entry confirms ~bar 12-15), then a sharp fall starting at
+        // bar 20 - a genuine bearish cross lands somewhere around bar 22-25, well AFTER the
+        // square-off cutoff below, so it must be rejected rather than opened as a fresh trade.
+        var spot = new List<Candle>();
+        for (var i = 0; i < 10; i++) spot.Add(Bar(T0.AddMinutes(i), 24000m));
+        for (var i = 10; i < 20; i++) spot.Add(Bar(T0.AddMinutes(i), 24000m + (i - 9) * 2));
+        for (var i = 20; i < 40; i++) spot.Add(Bar(T0.AddMinutes(i), 24020m - (i - 19) * 2));
+
+        var ceBars = new List<Candle>();
+        for (var i = 0; i < 10; i++) ceBars.Add(Bar(T0.AddMinutes(i), 100m));
+        for (var i = 10; i < 20; i++) ceBars.Add(Bar(T0.AddMinutes(i), 100m + (i - 9) * 2));
+        for (var i = 20; i < 40; i++) ceBars.Add(Bar(T0.AddMinutes(i), 120m - (i - 19) * 2));
+
+        var peBars = Enumerable.Range(0, 40).Select(i => Bar(T0.AddMinutes(i), 200m)).ToList();
+
+        IReadOnlyList<Candle> GetOptionBars(decimal strike, bool isCall) => isCall ? ceBars : peBars;
+
+        var parameters = Parameters();
+        parameters["squareOffMinutes"] = 9 * 60 + 33; // 09:33 IST = bar 18 - after entry, before the later bearish cross
+
+        var context = Context(spot, GetOptionBars);
+        var trades = new EmaCrossAtmReversalStrategy().Simulate(context, parameters);
+        var signals = new EmaCrossAtmReversalStrategy().EntrySignals(context, parameters);
+
+        var trade = Assert.Single(trades);
+        Assert.Equal("Bullish", trade.Direction);
+        Assert.Equal("SquareOff", trade.ExitReason);
+        Assert.Equal(T0.AddMinutes(18), trade.ExitTimeUtc);
+        Assert.Equal(ceBars[18].Close, trade.ExitPrice);
+        // The whole point: closed well before the day's own last bar, not whenever the data ran out.
+        Assert.True(trade.ExitTimeUtc < ceBars[^1].Time);
+
+        Assert.Contains(signals, s => s.Kind == "Rejected" && s.Direction == "Bearish" && s.Summary.Contains("square-off", StringComparison.OrdinalIgnoreCase));
+    }
+
     // Rise, then fall back to base, then rise again - a fast(2)/slow(5) EMA pair genuinely CANNOT
     // cross "up" twice in a row without an intervening "down" cross first (they are the same two
     // lines flipping order back and forth), so testing "a repeated bullish confirmation is ignored"
