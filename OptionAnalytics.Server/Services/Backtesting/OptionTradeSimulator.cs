@@ -133,10 +133,14 @@ public static class OptionTradeSimulator
     /// as before.
     ///
     /// <paramref name="signalExits"/> (optional, keyed by the SIGNAL's own time) is the per-trade
-    /// counterpart, for a strategy whose exit level differs from trade to trade - a stop at each
-    /// alert candle's own high/low, say, with a target a fixed multiple away. Keying by signal
-    /// rather than sharing one ascending list matters: those levels belong to one specific trade,
-    /// and a global list would let one trade's stop close a completely different one. It carries its own reason string too, so a row says WHICH of the two hit rather than a
+    /// counterpart, for a strategy whose exit level differs from trade to trade - FiveEmaAsTaughtStrategy
+    /// is the concrete case this was added for: a stop at that trade's own alert candle's high/low,
+    /// with a target a fixed multiple away, both in SPOT terms - each precomputed as the exact TIME
+    /// spot first crosses that level (walking spot forward from the entry itself), not a level this
+    /// method re-checks bar by bar, so the caller does that walk once up front rather than this
+    /// method needing to know anything about spot levels at all. Keying by signal rather than
+    /// sharing one ascending list matters: those levels belong to one specific trade, and a global
+    /// list would let one trade's stop close a completely different one. It carries its own reason string too, so a row says WHICH of the two hit rather than a
     /// generic "SignalExit".
     ///
     /// slPoints/tpPoints of 0 disable the premium stop/target entirely - for a strategy exiting on
@@ -154,8 +158,13 @@ public static class OptionTradeSimulator
 
         var isSell = parameters["side"] >= (SideBuy + SideSell) / 2;
         var otmSteps = (int)parameters["otmSteps"];
-        var slPoints = parameters["slPoints"];
-        var tpPoints = parameters["tpPoints"];
+        // Optional and defaulted here (0 = disabled - see this method's own doc comment), not
+        // indexed - a strategy whose exit rule lives entirely in signalExits/forcedExitTimes (an
+        // underlying condition, not a premium level) can simply omit slPoints/tpPoints from its own
+        // Parameters list rather than exposing a premium stop/target control it never means the user
+        // to touch.
+        var slPoints = parameters.GetValueOrDefault("slPoints", 0m);
+        var tpPoints = parameters.GetValueOrDefault("tpPoints", 0m);
         // Optional and defaulted here rather than indexed, so a caller (existing tests included)
         // built before this parameter existed keeps working unchanged with it simply off.
         var squareOffMinutes = (int)parameters.GetValueOrDefault("squareOffMinutes", 0);
