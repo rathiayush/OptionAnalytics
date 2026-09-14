@@ -6,22 +6,42 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 /// EmaCrossAtmConfirmStrategy's own entry rule (spot's fast/slow EMA crosses, AND the pure ATM
 /// option on that side makes the same cross on its own premium within a short window - optionally
 /// also requiring the opposite leg to cross the other way), but with a completely different exit:
-/// no stop-loss or take-profit at all. A position stays open - across days if that is how long it
+/// no take-profit at all, and no per-trade stop-loss either - just an optional MAXIMUM stop-loss
+/// safety net (see maxSlPoints below). A position stays open - across days if that is how long it
 /// takes, unlike every other strategy here (see OptionTradeSimulator's own "positions never carry
 /// overnight" rule, deliberately NOT applied here) - until the OPPOSITE side confirms the same way,
 /// at which point it closes AND immediately flips into the new direction from that same instant.
 /// Always in the market from the first confirmed signal onward. Added at the user's own explicit
 /// request: "spot crossover for bull, ATM also crossover for bull, we enter bull, but as soon as
-/// spot and ATM breakdown we close bull but will enter bear" - no target, no stop, the opposite
-/// signal is the only exit there is.
+/// spot and ATM breakdown we close bull but will enter bear" - no target, no ordinary stop, the
+/// opposite signal is the only INTENDED exit.
+///
+/// Two refinements the user asked for after the first version shipped:
+///   - "Candle close is important": a cross now requires the candle to have actually CLOSED beyond
+///     BOTH EMAs (EmaCrossoverDetector.ConfirmedDirectionSeries' own rule - the same noise filter
+///     every live alert in this app already uses), not just the fast/slow EMA order flipping on a
+///     single tick the way EmaCrossAtmFlowStrategy.CrossedUp checks it. In a flat/choppy stretch the
+///     two EMAs can swap order on noise alone while price never really leaves their neighborhood -
+///     this strategy is ALWAYS in the market once started, so a bare order-flip whipsaw here is
+///     costlier than for a strategy that would have exited on its own stop/target anyway. Kept as
+///     this class's OWN cross detection (ConfirmedCrossedUp/ConfirmedCrossTimes below) rather than
+///     changed on the shared EmaCrossAtmFlowStrategy.CrossedUp/EmaCrossAtmConfirmStrategy.CrossTimes
+///     helpers, since those two strategies already ship with the simpler rule and were not what was
+///     asked to change.
+///   - "Max SL should be there": maxSlPoints (0 = off) is a hard safety cap in absolute premium
+///     points, checked bar by bar against the CURRENTLY open leg the same way OptionTradeSimulator's
+///     own stop-loss is - if breached, the position closes there (ExitReason "MaxStopLoss") and the
+///     strategy goes FLAT, waiting for the next confirmed signal in EITHER direction (not
+///     automatically reversed the way a real opposite signal is - a safety-net exit is not itself a
+///     view on the other direction).
 ///
 /// Built as its own trade-construction loop rather than reusing OptionTradeSimulator.Run: Run's
 /// rules (one position per day, closed by stop/target/square-off/end-of-day, a signal arriving
 /// while a trade is still open simply skipped) are all wrong for this strategy - the whole point is
 /// that the very NEXT opposite signal, however many days later, is the one thing allowed to end a
-/// trade, and it must also open the next one in the same step, not be dropped as "still busy". A
-/// same-direction signal while already positioned that way is dropped instead - there is nothing to
-/// reverse into.
+/// trade on its own, and it must also open the next one in the same step, not be dropped as "still
+/// busy". A same-direction signal while already positioned that way is dropped instead - there is
+/// nothing to reverse into.
 ///
 /// Only ever reads SpotBars plus GetOptionBars(strike, isCall), the same narrow contract
 /// EmaCrossAtmConfirmStrategy relies on, so this runs on both Backtrack and Expired Backtest.
@@ -30,7 +50,7 @@ public sealed class EmaCrossAtmReversalStrategy : IBacktestStrategy
 {
     public string Key => "ema-cross-atm-reversal";
     public string Name => "EMA Crossover + ATM Reversal (always in market)";
-    public string Description => "Enters when spot's fast EMA crosses its slow EMA AND the pure ATM option on that side makes the same upward cross on its own premium within a short window - same confirmation as the ATM Confirmation strategy, but with NO stop loss or take profit. The position stays open, across days if needed, until the OPPOSITE side confirms the same way - it then closes and immediately flips into the new direction. Always in the market once the first signal fires.";
+    public string Description => "Enters when spot's fast EMA crosses its slow EMA AND the pure ATM option on that side makes the same upward cross on its own premium within a short window - a cross means the candle actually CLOSED beyond both EMAs, not just the EMA order flipping. No take-profit and no ordinary stop-loss - just an optional maximum stop-loss safety net. The position stays open, across days if needed, until the OPPOSITE side confirms the same way - it then closes and immediately flips into the new direction. Always in the market once the first signal fires.";
 
     private const decimal FlagOff = 0;
     private const decimal FlagOn = 1;
@@ -39,6 +59,7 @@ public sealed class EmaCrossAtmReversalStrategy : IBacktestStrategy
     {
         OptionTradeSimulator.SideParameter(),
         new BacktestParameterSpec("otmSteps", "Strike to TRADE, steps from ATM (confirmation always checks pure ATM)", Default: 0, Min: -8, Max: 8, Step: 1),
+        new BacktestParameterSpec("maxSlPoints", "Maximum stop loss (points, 0 = off)", Default: 100, Min: 0, Max: 2000, Step: 1),
         OptionTradeSimulator.SignalStartTimeParameter(),
         OptionTradeSimulator.ExcludeLastDaysParameter(),
         new BacktestParameterSpec("fastEmaPeriod", "Fast EMA (bars)", Default: 9, Min: 1, Max: 200, Step: 1),
@@ -57,9 +78,6 @@ public sealed class EmaCrossAtmReversalStrategy : IBacktestStrategy
     public IReadOnlyList<BacktestSignal> EntrySignals(BacktestStrategyContext context, IReadOnlyDictionary<string, decimal> parameters) =>
         Evaluate(context, parameters).Signals;
 
-    /// <summary>One leg currently held, tracked as plain locals rather than a record so the main
-    /// loop below can mutate it in place bar by bar without allocating a new instance on every
-    /// signal - there is only ever at most one at a time anyway.</summary>
     private (IReadOnlyList<BacktestTrade> Trades, IReadOnlyList<BacktestSignal> Signals) Evaluate(
         BacktestStrategyContext context, IReadOnlyDictionary<string, decimal> parameters)
     {
@@ -71,6 +89,7 @@ public sealed class EmaCrossAtmReversalStrategy : IBacktestStrategy
         var excludeLastDays = (int)parameters.GetValueOrDefault("excludeLastDays", 0);
         var isSell = parameters["side"] >= (OptionTradeSimulator.SideBuy + OptionTradeSimulator.SideSell) / 2;
         var otmSteps = (int)parameters["otmSteps"];
+        var maxSlPoints = parameters.GetValueOrDefault("maxSlPoints", 0m);
         var step = context.Step;
         var underlying = context.Underlying;
         var sideLabel = isSell ? "Sell" : "Buy";
@@ -81,12 +100,13 @@ public sealed class EmaCrossAtmReversalStrategy : IBacktestStrategy
         if (fastPeriod >= slowPeriod || step <= 0) return (trades, signals);
 
         var bars = context.SpotBars;
-        var spotFast = EmaCrossoverDetector.EmaSeries(bars, fastPeriod);
-        var spotSlow = EmaCrossoverDetector.EmaSeries(bars, slowPeriod);
+        var spotConfirmed = EmaCrossoverDetector.ConfirmedDirectionSeries(bars, fastPeriod, slowPeriod);
         var window = TimeSpan.FromMinutes((double)Math.Max(0, confirmWithin) * Math.Max(1, context.TimeframeMinutes));
 
-        // One specific absolute strike's own up/down cross times, computed once per strike
-        // encountered and reused - same reasoning and same cache shape as EmaCrossAtmConfirmStrategy.
+        // One specific absolute strike's own confirmed up/down cross times, computed once per
+        // strike encountered and reused - same reasoning and cache shape as EmaCrossAtmConfirmStrategy,
+        // just built off ConfirmedCrossTimes (see this class's own doc comment) instead of that
+        // strategy's own CrossTimes.
         var ceCrossCache = new Dictionary<decimal, (List<DateTimeOffset> Up, List<DateTimeOffset> Down)>();
         var peCrossCache = new Dictionary<decimal, (List<DateTimeOffset> Up, List<DateTimeOffset> Down)>();
 
@@ -96,8 +116,8 @@ public sealed class EmaCrossAtmReversalStrategy : IBacktestStrategy
             if (cache.TryGetValue(strike, out var cached)) return cached;
 
             var optionBars = context.GetOptionBars(strike, isCall);
-            var result = (EmaCrossAtmConfirmStrategy.CrossTimes(optionBars, fastPeriod, slowPeriod, wantBullish: true),
-                          EmaCrossAtmConfirmStrategy.CrossTimes(optionBars, fastPeriod, slowPeriod, wantBullish: false));
+            var result = (ConfirmedCrossTimes(optionBars, fastPeriod, slowPeriod, wantBullish: true),
+                          ConfirmedCrossTimes(optionBars, fastPeriod, slowPeriod, wantBullish: false));
             cache[strike] = result;
             return result;
         }
@@ -112,12 +132,15 @@ public sealed class EmaCrossAtmReversalStrategy : IBacktestStrategy
 
         // Skips taking a NEW entry this close to expiry (same meaning as everywhere else this
         // parameter appears) - it does not force-close a position already running from before the
-        // cutoff, since this strategy has no other exit mechanism to fall back on.
+        // cutoff, since this strategy has no day-boundary exit to fall back on.
         var excludeFromDay = excludeLastDays > 0 && bars.Count > 0
             ? BacktestUtil.IstDate(bars[^1].Time).AddDays(-(excludeLastDays - 1))
             : (DateOnly?)null;
 
-        // The one leg currently held, if any - see this method's own doc comment.
+        // The one leg currently held, if any - see this method's own doc comment. openWalkIndex is
+        // how far the max-SL scan (below) has already checked THIS leg's own option bars - it only
+        // ever moves forward, reset to 0 whenever a fresh leg opens, so the whole run's worth of
+        // max-SL checking is O(bars) total rather than O(bars) PER open position.
         string? openDirection = null;
         var openIsCall = false;
         var openStrike = 0m;
@@ -126,12 +149,44 @@ public sealed class EmaCrossAtmReversalStrategy : IBacktestStrategy
         var openSignalTime = default(DateTimeOffset);
         decimal? openSpotPrice = null;
         var openOptionBars = (IReadOnlyList<Candle>)Array.Empty<Candle>();
+        var openWalkIndex = 0;
+
+        void CloseOpenPosition(DateTimeOffset time, decimal price, string reason)
+        {
+            var optionType = openIsCall ? "CE" : "PE";
+            var pnl = isSell ? openEntryPrice - price : price - openEntryPrice;
+            trades.Add(new BacktestTrade(underlying, openSignalTime, openDirection!, sideLabel, optionType,
+                openStrike, openSpotPrice, openEntryTime, openEntryPrice, time, price, reason, pnl));
+            openDirection = null;
+        }
 
         DateOnly? currentDay = null;
 
         for (var i = 1; i < bars.Count; i++)
         {
             var bar = bars[i];
+
+            // Max-SL safety net: scan the currently open leg's own option bars up to (and
+            // including) this spot bar's own time, closing it the moment the level is breached -
+            // in TIME ORDER relative to spot signal processing below, so whichever happens first
+            // (this, or the next confirmed opposite signal) is genuinely what closed the trade.
+            if (openDirection is not null && maxSlPoints > 0)
+            {
+                while (openWalkIndex < openOptionBars.Count && openOptionBars[openWalkIndex].Time <= bar.Time)
+                {
+                    var ob = openOptionBars[openWalkIndex];
+                    openWalkIndex++;
+                    if (ob.Time <= openEntryTime) continue; // this bar's own High/Low predates the position
+
+                    var stopPrice = isSell ? openEntryPrice + maxSlPoints : Math.Max(0, openEntryPrice - maxSlPoints);
+                    var hit = isSell ? ob.High >= stopPrice : ob.Low <= stopPrice;
+                    if (hit)
+                    {
+                        CloseOpenPosition(ob.Time, stopPrice, "MaxStopLoss");
+                        break;
+                    }
+                }
+            }
 
             // Nothing carries across an opening gap - a session's first bar can flip the EMA
             // relationship against the last bar of the PREVIOUS day with no real crossover in between.
@@ -140,10 +195,10 @@ public sealed class EmaCrossAtmReversalStrategy : IBacktestStrategy
             currentDay = day;
             if (isFirstBarOfDay) continue;
 
-            if (!EmaCrossAtmFlowStrategy.CrossedUp(spotFast, spotSlow, i, out var bullish)) continue;
+            if (!ConfirmedCrossedUp(spotConfirmed, i, out var bullish)) continue;
 
             var direction = bullish ? "Bullish" : "Bearish";
-            var summary = $"Spot {fastPeriod}/{slowPeriod} EMA crossed {(bullish ? "up" : "down")}";
+            var summary = $"Spot {fastPeriod}/{slowPeriod} EMA closed beyond both lines, {(bullish ? "bullish" : "bearish")}";
 
             if (direction == openDirection)
             {
@@ -176,7 +231,7 @@ public sealed class EmaCrossAtmReversalStrategy : IBacktestStrategy
             if (!EmaCrossAtmFlowStrategy.CrossedWithin(sameUp, bar.Time, window))
             {
                 signals.Add(new BacktestSignal(underlying, bar.Time, "Rejected", direction,
-                    $"{summary} - but ATM {sameLegName} ({atmStrike:0.##}) made no {fastPeriod}/{slowPeriod} cross of its own within {confirmWithin} bar(s)"));
+                    $"{summary} - but ATM {sameLegName} ({atmStrike:0.##}) made no {fastPeriod}/{slowPeriod} close-confirmed cross of its own within {confirmWithin} bar(s)"));
                 continue;
             }
 
@@ -186,7 +241,7 @@ public sealed class EmaCrossAtmReversalStrategy : IBacktestStrategy
                 if (!EmaCrossAtmFlowStrategy.CrossedWithin(oppositeDown, bar.Time, window))
                 {
                     signals.Add(new BacktestSignal(underlying, bar.Time, "Rejected", direction,
-                        $"{summary}, ATM {sameLegName} confirmed - but ATM {oppositeLegName} made no opposite {fastPeriod}/{slowPeriod} cross within {confirmWithin} bar(s)"));
+                        $"{summary}, ATM {sameLegName} confirmed - but ATM {oppositeLegName} made no opposite close-confirmed {fastPeriod}/{slowPeriod} cross within {confirmWithin} bar(s)"));
                     continue;
                 }
             }
@@ -204,19 +259,15 @@ public sealed class EmaCrossAtmReversalStrategy : IBacktestStrategy
             if (openDirection is not null)
             {
                 var closeIndex = OptionTradeSimulator.FindAt(openOptionBars, bar.Time);
-                var closingOptionType = openIsCall ? "CE" : "PE";
                 if (closeIndex >= 0 && openOptionBars[closeIndex].Close > 0)
                 {
-                    var exitPrice = openOptionBars[closeIndex].Close;
-                    var pnl = isSell ? openEntryPrice - exitPrice : exitPrice - openEntryPrice;
-                    trades.Add(new BacktestTrade(underlying, openSignalTime, openDirection, sideLabel, closingOptionType,
-                        openStrike, openSpotPrice, openEntryTime, openEntryPrice, bar.Time, exitPrice, "Reversed", pnl));
+                    CloseOpenPosition(bar.Time, openOptionBars[closeIndex].Close, "Reversed");
                 }
                 else
                 {
-                    trades.Add(BacktestTrade.NoData(underlying, openSignalTime, openDirection, sideLabel, closingOptionType, openStrike, openSpotPrice));
+                    trades.Add(BacktestTrade.NoData(underlying, openSignalTime, openDirection, sideLabel, openIsCall ? "CE" : "PE", openStrike, openSpotPrice));
+                    openDirection = null;
                 }
-                openDirection = null;
             }
 
             if (newIndex < 0 || newOptionBars[newIndex].Close <= 0)
@@ -241,11 +292,31 @@ public sealed class EmaCrossAtmReversalStrategy : IBacktestStrategy
             openSignalTime = bar.Time;
             openSpotPrice = bar.Close;
             openOptionBars = newOptionBars;
+            openWalkIndex = 0;
         }
 
-        // Still open at the end of the window - reported as an unrealized position at its own
-        // latest available price, the same "Open" convention OptionTradeSimulator.Run uses for a
-        // trade that has not yet met its own exit condition.
+        // Still open at the end of the window - one final max-SL sweep over whatever of the open
+        // leg's own bars were never reached by the main loop above (its own series can run past the
+        // last spot bar checked), then reported as an unrealized position at its own latest
+        // available price if it survived that sweep - the same "Open" convention
+        // OptionTradeSimulator.Run uses for a trade that has not yet met its own exit condition.
+        if (openDirection is not null && maxSlPoints > 0)
+        {
+            for (; openWalkIndex < openOptionBars.Count; openWalkIndex++)
+            {
+                var ob = openOptionBars[openWalkIndex];
+                if (ob.Time <= openEntryTime) continue;
+
+                var stopPrice = isSell ? openEntryPrice + maxSlPoints : Math.Max(0, openEntryPrice - maxSlPoints);
+                var hit = isSell ? ob.High >= stopPrice : ob.Low <= stopPrice;
+                if (hit)
+                {
+                    CloseOpenPosition(ob.Time, stopPrice, "MaxStopLoss");
+                    break;
+                }
+            }
+        }
+
         if (openDirection is not null)
         {
             var optionType = openIsCall ? "CE" : "PE";
@@ -265,5 +336,49 @@ public sealed class EmaCrossAtmReversalStrategy : IBacktestStrategy
         }
 
         return (trades.OrderByDescending(t => t.SignalTimeUtc).ToList(), signals);
+    }
+
+    /// <summary>True at the bar where <paramref name="confirmedSeries"/> (see
+    /// EmaCrossoverDetector.ConfirmedDirectionSeries) settles into a NEW confirmed bias different
+    /// from the previous bar's - i.e. the candle has actually closed beyond both EMAs in that
+    /// direction, not merely the fast/slow EMA order flipping (EmaCrossAtmFlowStrategy.CrossedUp's
+    /// own, looser rule). A transition out of "no confirmed bias" (null) counts too - the first time
+    /// a choppy stretch resolves into a real trend is exactly the moment this strategy cares about.</summary>
+    internal static bool ConfirmedCrossedUp(IReadOnlyList<(DateTimeOffset Time, string? Direction)> confirmedSeries, int i, out bool bullish)
+    {
+        bullish = false;
+        if (i <= 0 || i >= confirmedSeries.Count) return false;
+
+        var current = confirmedSeries[i].Direction;
+        var previous = confirmedSeries[i - 1].Direction;
+        if (current is null || current == previous) return false;
+
+        bullish = current == "Bullish";
+        return true;
+    }
+
+    /// <summary>Every time <paramref name="bars"/>' own confirmed direction (close beyond both
+    /// EMAs, not just their order flipping) settled into the WANTED bias - the close-confirmed
+    /// counterpart to EmaCrossAtmConfirmStrategy.CrossTimes, built on ConfirmedCrossedUp above
+    /// instead of EmaCrossAtmFlowStrategy.CrossedUp.</summary>
+    internal static List<DateTimeOffset> ConfirmedCrossTimes(IReadOnlyList<Candle> bars, int fastPeriod, int slowPeriod, bool wantBullish)
+    {
+        var times = new List<DateTimeOffset>();
+        if (bars.Count == 0) return times;
+
+        var series = EmaCrossoverDetector.ConfirmedDirectionSeries(bars, fastPeriod, slowPeriod);
+
+        DateOnly? currentDay = null;
+        for (var i = 1; i < series.Count; i++)
+        {
+            var day = BacktestUtil.IstDate(bars[i].Time);
+            var isFirstBarOfDay = currentDay != day;
+            currentDay = day;
+            if (isFirstBarOfDay) continue; // same overnight-gap rule spot uses
+
+            if (ConfirmedCrossedUp(series, i, out var bullish) && bullish == wantBullish) times.Add(bars[i].Time);
+        }
+
+        return times;
     }
 }
