@@ -13,6 +13,15 @@ public sealed class SpotUnderlyingState
     private readonly List<Candle> _closedCandles = new();
     private Candle? _currentBar;
 
+    // Volume counterpart to _closedCandles/_currentBar, folded in parallel rather than replacing
+    // them - see SeedVolumeHistory/ApplyTick's own comments. _prevVolume is Dhan's last-seen
+    // CUMULATIVE day volume for this underlying (SpotTick.Volume's own documented shape), diffed
+    // per tick to get an incremental amount - the exact same PrevVolume convention
+    // CdvUnderlyingState.ApplyTick already uses for option ticks.
+    private readonly List<CandleWithVolume> _closedVolumeBars = new();
+    private CandleWithVolume? _currentVolumeBar;
+    private long? _prevVolume;
+
     public SpotUnderlyingState(string underlying, int step)
     {
         Underlying = underlying;
@@ -54,6 +63,22 @@ public sealed class SpotUnderlyingState
                 LastPrice = _closedCandles[^1].Close;
                 LastUpdateUtc = DateTimeOffset.UtcNow;
             }
+        }
+    }
+
+    /// <summary>Volume counterpart to SeedHistory - called alongside it (never instead of it) with
+    /// the SAME backfilled bars in their volume-bearing shape, now that Dhan reports real index
+    /// volume (see DhanHistoricalDataService's own doc comment). Each historical bar's Volume is
+    /// already a per-bar amount, not a cumulative one (unlike a live tick's SpotTick.Volume), so this
+    /// needs no diffing - straight replacement, exactly like SeedHistory's own clear-then-replace.
+    /// What VwapCalculator reads to build the session VWAP series a strategy like the EMA/VWAP
+    /// alignment one asks for.</summary>
+    public void SeedVolumeHistory(IEnumerable<CandleWithVolume> bars)
+    {
+        lock (_lock)
+        {
+            _closedVolumeBars.Clear();
+            _closedVolumeBars.AddRange(bars.OrderBy(b => b.Time));
         }
     }
 
@@ -102,6 +127,16 @@ public sealed class SpotUnderlyingState
             }
 
             result = _currentBar.Value;
+
+            // The very first live tick only seeds the cumulative-volume baseline - same convention
+            // CdvUnderlyingState.ApplyTick uses for option ticks - so today's (or this process's)
+            // entire pre-subscription volume is not counted as one giant fake delta on the first
+            // tick. tick.Volume < prevVolume (a fresh trading day's counter having reset, or a
+            // corrupt packet) contributes zero rather than a negative amount; _prevVolume is still
+            // advanced unconditionally so the NEXT tick resumes diffing correctly either way.
+            var deltaVolume = _prevVolume is { } prev && tick.Volume >= prev ? tick.Volume - prev : 0L;
+            _prevVolume = tick.Volume;
+            ApplyVolumeTick(tick.LastPrice, deltaVolume, minute);
         }
 
         // Raised outside the lock - a subscriber (EmaCrossoverAlertService) calling back into
@@ -109,6 +144,57 @@ public sealed class SpotUnderlyingState
         if (justClosed is { } closed) BarClosed?.Invoke(closed);
 
         return result;
+    }
+
+    /// <summary>Folds one tick's own incremental volume into the currently-forming 1-minute volume
+    /// bar, mirroring ApplyTick's own OHLC bucketing exactly (same minute boundary, same
+    /// still-forming-bucket replace-on-overlap rule for a bar the historical backfill and the live
+    /// feed both touched) - kept as its own parallel series rather than merged into _closedCandles/
+    /// _currentBar so every existing caller of GetCandles/GetClosedCandles/ApplyTick's own return
+    /// value keeps working completely unchanged. Must be called from inside the lock ApplyTick
+    /// already holds.</summary>
+    private void ApplyVolumeTick(decimal price, long tickVolume, DateTimeOffset minute)
+    {
+        if (_currentVolumeBar is not { } cur || cur.Time != minute)
+        {
+            if (_currentVolumeBar is { } previous)
+            {
+                if (_closedVolumeBars.Count > 0 && _closedVolumeBars[^1].Time == previous.Time)
+                    _closedVolumeBars[^1] = previous;
+                else
+                    _closedVolumeBars.Add(previous);
+            }
+            _currentVolumeBar = new CandleWithVolume(minute, price, price, price, price, tickVolume);
+        }
+        else
+        {
+            _currentVolumeBar = cur with
+            {
+                High = Math.Max(cur.High, price),
+                Low = Math.Min(cur.Low, price),
+                Close = price,
+                Volume = cur.Volume + tickVolume,
+            };
+        }
+    }
+
+    /// <summary>Volume-bearing counterpart to GetCandles - what VwapCalculator reads. Includes the
+    /// still-forming current bar, same as GetCandles.</summary>
+    public IReadOnlyList<CandleWithVolume> GetVolumeBars()
+    {
+        lock (_lock)
+        {
+            var list = new List<CandleWithVolume>(_closedVolumeBars);
+            if (_currentVolumeBar is { } bar) list.Add(bar);
+            return list;
+        }
+    }
+
+    /// <summary>Closed-only counterpart to GetVolumeBars, same "never compute off a still-forming
+    /// bar" reasoning as GetClosedCandles.</summary>
+    public IReadOnlyList<CandleWithVolume> GetClosedVolumeBars()
+    {
+        lock (_lock) { return new List<CandleWithVolume>(_closedVolumeBars); }
     }
 
     public IReadOnlyList<Candle> GetCandles()

@@ -168,6 +168,7 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<ConfluenceAlertSer
 builder.Services.AddSingleton<IBacktestStrategy, FiveEmaStrategy>();
 builder.Services.AddSingleton<IBacktestStrategy, AyushFiveEmaStrategy>();
 builder.Services.AddSingleton<IBacktestStrategy, EmaCrossAtmFlowStrategy>();
+builder.Services.AddSingleton<IBacktestStrategy, EmaVwapSellStrategy>();
 
 // Stateless - reads SpotFeedHostedService/CdvHostedService's in-memory history fresh on every
 // request, nothing to run in the background. See BacktestController/BacktestService.

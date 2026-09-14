@@ -89,7 +89,7 @@ namespace OptionAnalytics.Server.Services;
 /// result rather than silently mispricing anything.</summary>
 public sealed class ExpiredOptionBacktestService
 {
-    private static readonly HashSet<string> SupportedStrategyKeys = new() { "five-ema", "ayush-5-ema", "ema-cross-atm-flow" };
+    private static readonly HashSet<string> SupportedStrategyKeys = new() { "five-ema", "ayush-5-ema", "ema-cross-atm-flow", "ema-vwap-sell" };
 
     /// <summary>Underlyings this feature supports at all - Dhan's rolling-option docs only ever show
     /// "NSE_FNO" as the exchange segment, never a BSE one, so SENSEX is left out rather than
@@ -319,8 +319,13 @@ public sealed class ExpiredOptionBacktestService
         var chartFromDay = fromDay.AddDays(-ChartPaddingDays);
         var chartToDay = toDay.AddDays(ChartPaddingDays);
 
-        var (spotBarsForChart, spotError) = await _historicalData.GetIntradayCandlesAsync(instrument.SecurityId, instrument.DhanSegment, chartFromDay, chartToDay, 1, cancellationToken);
+        var (spotVolumeBarsForChart, spotError) = await _historicalData.GetIntradayCandlesAsync(instrument.SecurityId, instrument.DhanSegment, chartFromDay, chartToDay, 1, cancellationToken);
+        var spotBarsForChart = spotVolumeBarsForChart.Select(b => b.ToCandle()).ToList();
         var spotBars1m = spotBarsForChart.Where(b => IstClock.IstDate(b.Time) >= fromDay && IstClock.IstDate(b.Time) <= toDay).ToList();
+        // The same [fromDay,toDay] slice as spotBars1m, but keeping Volume - what VwapCalculator
+        // needs; spotBars1m itself stays plain Candle since every other reader here (FetchStrikeBandAsync,
+        // BuildFlowChainSeries, AggregateCandles) only ever wants OHLC.
+        var spotVolumeBars1m = spotVolumeBarsForChart.Where(b => IstClock.IstDate(b.Time) >= fromDay && IstClock.IstDate(b.Time) <= toDay).ToList();
         if (spotBars1m.Count == 0)
             return ExpiredBacktestResult.Failed(spotError is null
                 ? $"No spot history for {underlying} between {fromDay:dd MMM yyyy} and {toDay:dd MMM yyyy} - the market may simply have been closed the whole window, or Dhan's intraday history may not reach back that far for a window this old."
@@ -417,6 +422,7 @@ public sealed class ExpiredOptionBacktestService
             Step = step,
             SpotBars = BacktestUtil.AggregateCandles(spotBars1m, timeframe),
             SpotBarsOneMinute = spotBars1m,
+            SpotVolumeBarsOneMinute = spotVolumeBars1m,
             ConfluenceSignalsAscending = Array.Empty<BacktestSignal>(),
             AllSignals = Array.Empty<BacktestSignal>(),
             ObvCeSeries = BacktestUtil.AggregateLine(obvCeSeries1m, timeframe),
@@ -535,8 +541,9 @@ public sealed class ExpiredOptionBacktestService
             // validate every member of the strike BAND fetched below - see StrikeBandSteps' own doc
             // comment for why one token alone cannot keep tracking a fixed absolute strike as the
             // index moves.
-            var (windowSpotBars, spotError) = await _historicalData.GetIntradayCandlesAsync(
+            var (windowSpotVolumeBars, spotError) = await _historicalData.GetIntradayCandlesAsync(
                 instrument.SecurityId, instrument.DhanSegment, fromDay, toDay, 1, cancellationToken);
+            var windowSpotBars = windowSpotVolumeBars.Select(b => b.ToCandle()).ToList();
             if (windowSpotBars.Count == 0)
                 return RollingOptionChartResult.Failed(
                     $"Could not resolve spot history for {fromDay:dd MMM yyyy}..{toDay:dd MMM yyyy} to convert {strikeValue:0.##} into a strike offset - {spotError ?? "no spot history in that window"}.");

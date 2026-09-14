@@ -116,6 +116,22 @@ public static class BacktestUtil
         return result;
     }
 
+    /// <summary>The last point in a time-ascending series at or before <paramref name="at"/> - null
+    /// if the series has nothing that early yet. The same "read a differently-timed series by
+    /// timestamp, not by index" lookup EmaCrossAtmFlowStrategy already uses for OBV/CDV, shared here
+    /// so VwapCalculator's own time-keyed VWAP series (see its own doc comment on why it can't be
+    /// index-aligned to a caller's SpotBars) can be read the same way without a second private copy.</summary>
+    public static decimal? LastValueAtOrBefore(IReadOnlyList<ObvPoint> series, DateTimeOffset at)
+    {
+        decimal? value = null;
+        foreach (var point in series)
+        {
+            if (point.Time > at) break;
+            value = point.Obv;
+        }
+        return value;
+    }
+
     /// <summary>One past the last second any source point actually covers - each source point is
     /// itself a closed 1-minute bar/sample, so it accounts for its own minute through :59.</summary>
     private static long LatestCoveredSecond<T>(IReadOnlyList<T> source, Func<T, DateTimeOffset> time)
