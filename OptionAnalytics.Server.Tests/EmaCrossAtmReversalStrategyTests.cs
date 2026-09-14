@@ -41,6 +41,12 @@ public sealed class EmaCrossAtmReversalStrategyTests
     {
         ["side"] = OptionTradeSimulator.SideBuy,
         ["otmSteps"] = 0,
+        // Matches the strategy's own real default (100), not 0/off - a test suite that leaves this
+        // off everywhere it doesn't specifically care about max-SL is exactly how the interaction
+        // bug between the intraday max-SL scan and CloseAtEndOfDay (every EndOfDay row showing
+        // entry == exit, 0 P&L on a live run) went undetected: every existing test ran with the
+        // safety net silently disabled, unlike every real run the frontend actually makes.
+        ["maxSlPoints"] = 100,
         ["fastEmaPeriod"] = 2,
         ["slowEmaPeriod"] = 5,
         ["atmConfirmWithinBars"] = 5,

@@ -155,6 +155,15 @@ public sealed class EmaCrossAtmReversalStrategy : IBacktestStrategy
         decimal? openSpotPrice = null;
         var openOptionBars = (IReadOnlyList<Candle>)Array.Empty<Candle>();
         var openWalkIndex = 0;
+        // The last option bar actually seen (after entry) by EITHER scan below, kept across calls -
+        // NOT a per-call local. openWalkIndex only ever moves forward and is shared by both scans,
+        // so by the time a day boundary is reached the intraday scan (which runs every bar) has
+        // almost always already consumed every one of today's remaining option bars for its own
+        // max-SL check; CloseAtEndOfDay's own walk then finds nothing NEW and, without this,
+        // wrongly concluded "no further prints today" and closed the trade back at its own entry
+        // price/time (a real bug this fixes: every EndOfDay row showed entry == exit, 0 P&L,
+        // confirmed against a live run).
+        Candle? openLastBar = null;
 
         void CloseOpenPosition(DateTimeOffset time, decimal price, string reason)
         {
@@ -165,33 +174,41 @@ public sealed class EmaCrossAtmReversalStrategy : IBacktestStrategy
             openDirection = null;
         }
 
-        // "We can not carry forward trade / have to cut every day" - forces whatever is open closed
-        // the moment a new trading day starts, priced off the OPEN LEG's own last real print
-        // STRICTLY before that new day (never a print from the new day itself - this always runs
-        // BEFORE the new day's own first bar is otherwise processed). Scans forward from
-        // openWalkIndex (never re-scanning bars already checked) so a max-SL breach in yesterday's
-        // last few bars still wins over a plain end-of-day close, exactly as it would have
-        // intraday - only the FINAL fallback (nothing breached) differs, closing on the day's last
-        // print instead of continuing to look for a reversal.
-        void CloseAtEndOfDay(DateTimeOffset newDayStartTime)
+        // Advances openWalkIndex through the open leg's own bars up to (inclusive ? <= : <)
+        // boundTime, updating openLastBar to the latest one seen and closing the position the
+        // moment maxSlPoints is breached. Returns true if it closed the position (max-SL) - the
+        // caller should not treat the leg as still open afterward.
+        bool AdvanceOpenLeg(DateTimeOffset boundTime, bool inclusive)
         {
-            Candle? lastOfDay = null;
-            while (openWalkIndex < openOptionBars.Count && openOptionBars[openWalkIndex].Time < newDayStartTime)
+            while (openWalkIndex < openOptionBars.Count &&
+                   (inclusive ? openOptionBars[openWalkIndex].Time <= boundTime : openOptionBars[openWalkIndex].Time < boundTime))
             {
                 var ob = openOptionBars[openWalkIndex];
                 openWalkIndex++;
-                if (ob.Time <= openEntryTime) continue;
+                if (ob.Time <= openEntryTime) continue; // this bar's own High/Low predates the position
+
+                openLastBar = ob;
 
                 if (maxSlPoints > 0)
                 {
                     var stopPrice = isSell ? openEntryPrice + maxSlPoints : Math.Max(0, openEntryPrice - maxSlPoints);
                     var hit = isSell ? ob.High >= stopPrice : ob.Low <= stopPrice;
-                    if (hit) { CloseOpenPosition(ob.Time, stopPrice, "MaxStopLoss"); return; }
+                    if (hit) { CloseOpenPosition(ob.Time, stopPrice, "MaxStopLoss"); return true; }
                 }
-                lastOfDay = ob;
             }
+            return false;
+        }
 
-            if (lastOfDay is { } last) CloseOpenPosition(last.Time, last.Close, "EndOfDay");
+        // "We can not carry forward trade / have to cut every day" - forces whatever is open closed
+        // the moment a new trading day starts, priced off the OPEN LEG's own last real print
+        // STRICTLY before that new day (never a print from the new day itself - this always runs
+        // BEFORE the new day's own first bar is otherwise processed). A max-SL breach in yesterday's
+        // last few bars still wins over a plain end-of-day close, exactly as it would have intraday.
+        void CloseAtEndOfDay(DateTimeOffset newDayStartTime)
+        {
+            if (AdvanceOpenLeg(newDayStartTime, inclusive: false)) return; // closed by max-SL instead
+
+            if (openLastBar is { } last) CloseOpenPosition(last.Time, last.Close, "EndOfDay");
             else CloseOpenPosition(openEntryTime, openEntryPrice, "EndOfDay"); // opened and closed same bar, no further prints
         }
 
@@ -214,23 +231,9 @@ public sealed class EmaCrossAtmReversalStrategy : IBacktestStrategy
             // including) this spot bar's own time, closing it the moment the level is breached -
             // in TIME ORDER relative to spot signal processing below, so whichever happens first
             // (this, or the next confirmed opposite signal) is genuinely what closed the trade.
-            if (openDirection is not null && maxSlPoints > 0)
-            {
-                while (openWalkIndex < openOptionBars.Count && openOptionBars[openWalkIndex].Time <= bar.Time)
-                {
-                    var ob = openOptionBars[openWalkIndex];
-                    openWalkIndex++;
-                    if (ob.Time <= openEntryTime) continue; // this bar's own High/Low predates the position
-
-                    var stopPrice = isSell ? openEntryPrice + maxSlPoints : Math.Max(0, openEntryPrice - maxSlPoints);
-                    var hit = isSell ? ob.High >= stopPrice : ob.Low <= stopPrice;
-                    if (hit)
-                    {
-                        CloseOpenPosition(ob.Time, stopPrice, "MaxStopLoss");
-                        break;
-                    }
-                }
-            }
+            // Runs even when maxSlPoints is 0 so openLastBar still tracks correctly for
+            // CloseAtEndOfDay's own benefit - only the stop-price check itself is conditional.
+            if (openDirection is not null) AdvanceOpenLeg(bar.Time, inclusive: true);
 
             if (!ConfirmedCrossedUp(spotConfirmed, i, out var bullish)) continue;
 
@@ -330,28 +333,14 @@ public sealed class EmaCrossAtmReversalStrategy : IBacktestStrategy
             openSpotPrice = bar.Close;
             openOptionBars = newOptionBars;
             openWalkIndex = 0;
+            openLastBar = null;
         }
 
         // Still open once the data runs out - the LAST trading day in the window never got a
-        // following day's first bar to trigger CloseAtEndOfDay above. One final max-SL sweep over
-        // whatever of the open leg's own bars were never reached by the main loop (its own series
-        // can run past the last spot bar checked) first, same as CloseAtEndOfDay's own ordering.
-        if (openDirection is not null && maxSlPoints > 0)
-        {
-            for (; openWalkIndex < openOptionBars.Count; openWalkIndex++)
-            {
-                var ob = openOptionBars[openWalkIndex];
-                if (ob.Time <= openEntryTime) continue;
-
-                var stopPrice = isSell ? openEntryPrice + maxSlPoints : Math.Max(0, openEntryPrice - maxSlPoints);
-                var hit = isSell ? ob.High >= stopPrice : ob.Low <= stopPrice;
-                if (hit)
-                {
-                    CloseOpenPosition(ob.Time, stopPrice, "MaxStopLoss");
-                    break;
-                }
-            }
-        }
+        // following day's first bar to trigger CloseAtEndOfDay above. Drain whatever of the open
+        // leg's own bars were never reached by the main loop (its own series can run past the last
+        // spot bar checked), checking max-SL along the way, before reporting whatever remains.
+        if (openDirection is not null) AdvanceOpenLeg(DateTimeOffset.MaxValue, inclusive: true);
 
         if (openDirection is not null)
         {
@@ -362,20 +351,10 @@ public sealed class EmaCrossAtmReversalStrategy : IBacktestStrategy
             // first bar to trigger it. Only a position opened TODAY - the still-live, in-progress
             // session - is genuinely unrealized and reported as "Open".
             var reason = BacktestUtil.IstDate(openEntryTime) < BacktestUtil.IstDate(DateTimeOffset.UtcNow) ? "EndOfDay" : "Open";
-            var optionType = openIsCall ? "CE" : "PE";
-            var lastIndex = openOptionBars.Count - 1;
-            if (lastIndex >= 0 && openOptionBars[lastIndex].Time > openEntryTime)
-            {
-                var lastPrice = openOptionBars[lastIndex].Close;
-                var pnl = isSell ? openEntryPrice - lastPrice : lastPrice - openEntryPrice;
-                trades.Add(new BacktestTrade(underlying, openSignalTime, openDirection, sideLabel, optionType,
-                    openStrike, openSpotPrice, openEntryTime, openEntryPrice, openOptionBars[lastIndex].Time, lastPrice, reason, pnl));
-            }
+            if (openLastBar is { } last)
+                CloseOpenPosition(last.Time, last.Close, reason);
             else
-            {
-                trades.Add(new BacktestTrade(underlying, openSignalTime, openDirection, sideLabel, optionType,
-                    openStrike, openSpotPrice, openEntryTime, openEntryPrice, openEntryTime, openEntryPrice, reason, 0m));
-            }
+                CloseOpenPosition(openEntryTime, openEntryPrice, reason);
         }
 
         return (trades.OrderByDescending(t => t.SignalTimeUtc).ToList(), signals);
