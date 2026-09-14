@@ -359,7 +359,7 @@ public static class OptionTradeSimulator
     /// -1 when there is truly nothing yet on this bucket's own day (a strike with no data at all
     /// on the signal's day, or - for a signal from this exact instant - not even one native minute
     /// of it has closed yet; self-corrects on the next evaluation).</summary>
-    internal static int FindAt(IReadOnlyList<Candle> bars, DateTimeOffset time)
+    private static int FindAt(IReadOnlyList<Candle> bars, DateTimeOffset time)
     {
         var fallback = -1;
         for (var i = 0; i < bars.Count; i++)
