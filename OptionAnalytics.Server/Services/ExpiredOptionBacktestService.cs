@@ -22,12 +22,15 @@ namespace OptionAnalytics.Server.Services;
 ///   - The OPTION premium comes from Dhan's rolling-option endpoint (DhanRollingOptionDataService) -
 ///     the only way to reach an expired contract's own price history at all.
 ///
-/// Only strategies whose ENTIRE signal and pricing logic reads spot bars plus ONE CE/PE strike
-/// relative to ATM are supported (see SupportedStrategyKeys) - EmaCrossAtmFlowStrategy needs OBV/
-/// CDV computed across the WHOLE surrounding strike chain (see BacktestStrategyContext.
-/// ObvCeSeries/CdvCeSeries), which would need ~17 separate rolling-option calls per side per run;
-/// unsupported here rather than built on synthetic/empty flow series that would silently never
-/// confirm a trade.
+/// Only strategies whose ENTIRE signal and pricing logic reads spot bars plus GetOptionBars(strike,
+/// isCall) for one specific strike at a time are supported (see SupportedStrategyKeys) -
+/// EmaCrossAtmFlowStrategy needs OBV/CDV computed across the WHOLE surrounding strike chain (see
+/// BacktestStrategyContext.ObvCeSeries/CdvCeSeries), which would need ~17 separate rolling-option
+/// calls per side per run; unsupported here rather than built on synthetic/empty flow series that
+/// would silently never confirm a trade. EmaCrossAtmConfirmStrategy is the same spot+ATM-cross idea
+/// WITHOUT that flow gate, built entirely on GetOptionBars for whichever strike is ATM at each
+/// candidate bar - which this class already serves for any strike within the fetched band (see
+/// StrikeBandSteps) - so it IS supported here.
 ///
 /// GetOptionBars/GetOptionBarsOneMinute below DO use the actual "strike" value a strategy passes in
 /// (an ABSOLUTE price - OptionTradeSimulator computes it as "ATM at the signal's own time +-
@@ -71,7 +74,7 @@ namespace OptionAnalytics.Server.Services;
 /// result rather than silently mispricing anything.</summary>
 public sealed class ExpiredOptionBacktestService
 {
-    private static readonly HashSet<string> SupportedStrategyKeys = new() { "five-ema", "five-ema-v2", "five-ema-taught" };
+    private static readonly HashSet<string> SupportedStrategyKeys = new() { "five-ema", "five-ema-v2", "five-ema-taught", "ema-cross-atm-confirm" };
 
     /// <summary>Underlyings this feature supports at all - Dhan's rolling-option docs only ever show
     /// "NSE_FNO" as the exchange segment, never a BSE one, so SENSEX is left out rather than
