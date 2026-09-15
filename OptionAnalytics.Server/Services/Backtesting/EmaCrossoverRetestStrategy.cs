@@ -46,7 +46,8 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 /// reconstruction when this parameter is on - see ExpiredOptionBacktestService's own
 /// needsFlowChain), checked once, at the entry bar itself: the traded leg's OBV/CDV (CE for a
 /// bullish entry, PE for a bearish one) has to be both ABOVE the other leg and RISING over
-/// FlowLookbackBars bars - the same ordering-and-rising definition EmaCrossAtmFlowStrategy's own
+/// FlowLookbackBars bars, optionally by at least MinFlowRisePercent (0 = off, any rise counts) -
+/// the same ordering-and-rising(-by-at-least-X%) definition EmaCrossAtmFlowStrategy's own
 /// (since-removed) FlowConfirmation class used, reimplemented here directly rather than resurrecting
 /// a shared class for what only this one strategy currently needs beyond SrFlowSellStrategy's own
 /// (differently-shaped, acceleration-based) check.
@@ -100,6 +101,7 @@ public sealed class EmaCrossoverRetestStrategy : IBacktestStrategy
             new BacktestParameterOption(FlagOn, "Yes - flow must favor + rise toward the entry"),
         }),
         new BacktestParameterSpec("flowLookbackBars", "Flow must be rising over (bars)", Default: 5, Min: 1, Max: 200, Step: 1),
+        new BacktestParameterSpec("minFlowRisePercent", "Flow rise must be at least (%, 0 = off - any rise counts)", Default: 0, Min: 0, Max: 500, Step: 5),
         new BacktestParameterSpec("flowMode", "Flow must favor + rise toward the entry on", Default: ModeEither, Min: ModeObvOnly, Max: ModeBoth, Step: 1, Options: new[]
         {
             new BacktestParameterOption(ModeObvOnly, "OBV only"),
@@ -133,6 +135,7 @@ public sealed class EmaCrossoverRetestStrategy : IBacktestStrategy
         var requiredRetests = Math.Max(1, (int)parameters["requiredRetests"]);
         var requireFlowConfirmation = parameters.GetValueOrDefault("requireFlowConfirmation", FlagOff) >= (FlagOff + FlagOn) / 2;
         var flowLookbackBars = Math.Max(1, (int)parameters.GetValueOrDefault("flowLookbackBars", 5));
+        var minFlowRisePercent = parameters.GetValueOrDefault("minFlowRisePercent", 0m);
         var flowMode = parameters.GetValueOrDefault("flowMode", ModeEither);
 
         var entries = new List<(DateTimeOffset Time, string Direction)>();
@@ -190,7 +193,7 @@ public sealed class EmaCrossoverRetestStrategy : IBacktestStrategy
                         }
                         else
                         {
-                            var (flowOk, flowReason) = FlowCheck(context, bar.Time, p.Bullish, requireFlowConfirmation, flowLookbackBars, flowMode);
+                            var (flowOk, flowReason) = FlowCheck(context, bar.Time, p.Bullish, requireFlowConfirmation, flowLookbackBars, minFlowRisePercent, flowMode);
                             if (!flowOk)
                             {
                                 signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", dir, $"{summary} - but {flowReason}"));
@@ -245,9 +248,15 @@ public sealed class EmaCrossoverRetestStrategy : IBacktestStrategy
     /// actually buy for that direction. True (no reason given) when the filter is off. "Favors"
     /// means both ordering (the traded leg above the other, right now) AND rising (that leg higher
     /// now than one flowLookbackBars-bar window earlier) - the same combination this app settled on
-    /// for EmaCrossAtmFlowStrategy's own (since-removed) flow gate.</summary>
+    /// for EmaCrossAtmFlowStrategy's own (since-removed) flow gate - plus an OPTIONAL minimum rise
+    /// percentage (minRisePercent, 0 = off): when set, the winning side's own rise over that same
+    /// window has to clear at least that % of its own earlier value, not just be positive. Guarded
+    /// against a zero or sign-flipped base (a delta-weighted OBV/CDV value can be negative) the same
+    /// way EmaCrossAtmFlowStrategy's own removed check did - a rise off a base that straddles zero,
+    /// or is exactly zero, is not a meaningful percentage, so it is rejected rather than computed
+    /// into a misleading number.</summary>
     private static (bool Ok, string Reason) FlowCheck(
-        BacktestStrategyContext context, DateTimeOffset at, bool bullish, bool requireFlowConfirmation, int lookbackBars, decimal flowMode)
+        BacktestStrategyContext context, DateTimeOffset at, bool bullish, bool requireFlowConfirmation, int lookbackBars, decimal minRisePercent, decimal flowMode)
     {
         if (!requireFlowConfirmation) return (true, "");
 
@@ -262,7 +271,11 @@ public sealed class EmaCrossoverRetestStrategy : IBacktestStrategy
             var winningSeries = bullish ? ceSeries : peSeries;
             var winningNow = bullish ? ceNow : peNow;
             if (BacktestUtil.LastValueAtOrBefore(winningSeries, at - window) is not { } winningEarlier) return null;
-            return winningNow > winningEarlier;
+            if (winningNow <= winningEarlier) return false;
+            if (minRisePercent <= 0) return true;
+            if (winningEarlier == 0 || Math.Sign(winningNow) != Math.Sign(winningEarlier)) return false;
+            var risePercent = (winningNow - winningEarlier) / Math.Abs(winningEarlier) * 100m;
+            return risePercent >= minRisePercent;
         }
 
         var obv = Favors(context.ObvCeSeries, context.ObvPeSeries);
@@ -277,9 +290,10 @@ public sealed class EmaCrossoverRetestStrategy : IBacktestStrategy
 
         var leg = bullish ? "CE over PE" : "PE over CE";
         var modeLabel = flowMode switch { ModeObvOnly => "OBV", ModeCdvOnly => "CDV", ModeBoth => "OBV and CDV", _ => "OBV or CDV" };
+        var riseRequirement = minRisePercent > 0 ? $"risen at least {minRisePercent:0.##}%" : "risen at all";
         var reason = confirmed
-            ? $"flow favors {leg} and has risen over the last {lookbackBars} bar(s) ({modeLabel})"
-            : $"flow does not favor {leg} and rising over the last {lookbackBars} bar(s) as required ({modeLabel}; OBV {(obv is true ? "confirms it" : "does not")}, CDV {(cdv is true ? "confirms it" : "does not")})";
+            ? $"flow favors {leg} and has {riseRequirement} over the last {lookbackBars} bar(s) ({modeLabel})"
+            : $"flow does not favor {leg} and {riseRequirement} over the last {lookbackBars} bar(s) as required ({modeLabel}; OBV {(obv is true ? "confirms it" : "does not")}, CDV {(cdv is true ? "confirms it" : "does not")})";
         return (confirmed, reason);
     }
 }

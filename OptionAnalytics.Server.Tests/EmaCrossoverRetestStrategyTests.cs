@@ -198,6 +198,44 @@ public sealed class EmaCrossoverRetestStrategyTests
     }
 
     [Fact]
+    public void MinFlowRisePercent_AcceptsExactlyAtTheThresholdAndRejectsJustOver()
+    {
+        var bars = BullishFixture();
+        // CE: 100 -> 130 over the lookback - exactly a 30% rise, with PE flat and always below.
+        var ce = new[] { new ObvPoint(T0.AddMinutes(8), 100), new ObvPoint(T0.AddMinutes(13), 130) };
+        var pe = new[] { new ObvPoint(T0.AddMinutes(8), 50), new ObvPoint(T0.AddMinutes(13), 50) };
+        var parameters = Parameters();
+        parameters["requireFlowConfirmation"] = 1;
+        parameters["flowLookbackBars"] = 5;
+        parameters["flowMode"] = 0; // OBV only
+
+        parameters["minFlowRisePercent"] = 30;
+        Assert.Contains(new EmaCrossoverRetestStrategy().EntrySignals(Context(bars, ce, pe), parameters), s => s.Kind == "Entry");
+
+        parameters["minFlowRisePercent"] = 31;
+        Assert.DoesNotContain(new EmaCrossoverRetestStrategy().EntrySignals(Context(bars, ce, pe), parameters), s => s.Kind == "Entry");
+    }
+
+    [Fact]
+    public void MinFlowRisePercentZero_KeepsThePlainAnyRiseReading()
+    {
+        var bars = BullishFixture();
+        // The same modest rise still passes when the threshold is off (0, the default) - adding
+        // this parameter must not tighten the existing "any rise" behavior on its own.
+        var ce = new[] { new ObvPoint(T0.AddMinutes(8), 100), new ObvPoint(T0.AddMinutes(13), 101) };
+        var pe = new[] { new ObvPoint(T0.AddMinutes(8), 50), new ObvPoint(T0.AddMinutes(13), 50) };
+        var parameters = Parameters();
+        parameters["requireFlowConfirmation"] = 1;
+        parameters["flowLookbackBars"] = 5;
+        parameters["flowMode"] = 0; // OBV only
+        parameters["minFlowRisePercent"] = 0;
+
+        var signals = new EmaCrossoverRetestStrategy().EntrySignals(Context(bars, ce, pe), parameters);
+
+        Assert.Contains(signals, s => s.Kind == "Entry");
+    }
+
+    [Fact]
     public void DirectionFilter_BearishOnly_RejectsAWouldBeBullishEntry()
     {
         var bars = BullishFixture();
