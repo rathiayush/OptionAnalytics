@@ -7,7 +7,7 @@ import {
   UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, EMA_COLOR, computeEma, NavBar, DirectionTag, fmtIstDateTime, fmtIstTime, fmtPrice, istDateKey,
   TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState,
   AXIS_COLOR, GRID_COLOR, BORDER_COLOR, istTimeFormatter, istTickMarkFormatter, toBar, toChartTime, dayResetMarkers,
-  CeVsPeChart, VolumeVwapChart,
+  CeVsPeChart, VolumeVwapChart, scrollChartToTime,
 } from './shared.jsx'
 
 const { Title, Text } = Typography
@@ -98,7 +98,7 @@ function tradeEntryMarkers(trades) {
 // emaPoints is already pre-computed (or empty) by the caller - this component only ever calls
 // setData with whatever it is handed, so unticking the checkbox (which then passes []) clears the
 // line without this component needing to know WHY it's empty.
-function ExpiredSpotChart({ bars, trades, emaPoints, height = 420 }) {
+function ExpiredSpotChart({ bars, trades, emaPoints, height = 420, focusTime }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
@@ -163,6 +163,11 @@ function ExpiredSpotChart({ bars, trades, emaPoints, height = 420 }) {
     markersRef.current.setMarkers([...dayResetMarkers(bars), ...tradeEntryMarkers(trades)].sort((a, b) => a.time - b.time))
   }, [bars, trades])
 
+  // A Trades/Signals row click elsewhere on the page sets focusTime to that row's own time.
+  useEffect(() => {
+    scrollChartToTime(chartRef.current, focusTime)
+  }, [focusTime])
+
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }
 
@@ -226,10 +231,15 @@ export default function ExpiredBacktestPage() {
   const [loading, setLoading] = useState(false)
   const [runError, setRunError] = useState(null)
 
+  // Set by clicking a Trades/Signals row - every chart on this page (spot, OBV, CDV, Volume+VWAP)
+  // recenters on this same moment, at whatever zoom level it already had - see shared.jsx's
+  // scrollChartToTime.
+  const [focusTime, setFocusTime] = useState(null)
+
   // Off by default - see ExpiredOptionBacktestService.RunAsync's own doc comment on why: computing
   // OBV/CDV for a strategy that doesn't otherwise need them means a much wider (and slower, more
   // Dhan-rate-limit-exposed) option-chain fetch, so a run only pays for it when this is ticked.
-  // Always effectively on for "EMA Crossover + ATM Cross + Rising Flow" itself, since that strategy
+  // Always effectively on for "EMA Crossover + ATM Cross + Flow Confirmation" itself, since that strategy
   // computes them anyway for its own signal logic regardless of this checkbox.
   const [includeObvCdv, setIncludeObvCdv] = useState(false)
 
@@ -596,7 +606,7 @@ export default function ExpiredBacktestPage() {
             </Space>
             <Checkbox checked={includeObvCdv} onChange={(e) => setIncludeObvCdv(e.target.checked)}>
               Also compute CDV / OBV for this run{' '}
-              <Tooltip title="Off by default: reconstructing order-flow (CDV/OBV) across the whole surrounding strike chain needs a much wider option-chain fetch (about 1.6x the calls), so it's opt-in for a strategy other than 'EMA Crossover + ATM Cross + Rising Flow' (which always computes it anyway). Tick this to plot the CDV/OBV/Volume charts below and visually check they look right for the strategy you're actually running.">
+              <Tooltip title="Off by default: reconstructing order-flow (CDV/OBV) across the whole surrounding strike chain needs a much wider option-chain fetch (about 1.6x the calls), so it's opt-in for a strategy other than 'EMA Crossover + ATM Cross + Flow Confirmation' (which always computes it anyway). Tick this to plot the CDV/OBV/Volume charts below and visually check they look right for the strategy you're actually running.">
                 <InfoCircleOutlined />
               </Tooltip>
             </Checkbox>
@@ -687,7 +697,7 @@ export default function ExpiredBacktestPage() {
                     <Text style={{ color: EMA_COLOR }}>Show 5 EMA</Text>
                   </Checkbox>
                   <ChartErrorBoundary key={`${underlying}-${expiryDate}-${timeframe}-${fromDay}-${toDay}`}>
-                    <ExpiredSpotChart bars={chartBars} trades={visibleTrades} emaPoints={emaPoints} height={420} />
+                    <ExpiredSpotChart bars={chartBars} trades={visibleTrades} emaPoints={emaPoints} height={420} focusTime={focusTime} />
                   </ChartErrorBoundary>
                 </>
               ) : (
@@ -698,13 +708,13 @@ export default function ExpiredBacktestPage() {
             <Card
               size="small"
               title="Order Flow — verify CDV / OBV / Volume"
-              extra={<Text type="secondary" style={{ fontSize: 12 }}>Reconstructed from this run's own fetched history, over the same lookback window as the spot chart above</Text>}
+              extra={<Text type="secondary" style={{ fontSize: 12 }}>Reconstructed from this run's own fetched history, over the same lookback window as the spot chart above - click a row in Trades/Signals below to jump every chart here (and the spot chart above) to that moment</Text>}
             >
               <Space direction="vertical" size={16} style={{ width: '100%' }}>
                 <div>
                   <Text type="secondary" style={{ fontSize: 12 }}>Spot Volume + Session VWAP</Text>
                   <ChartErrorBoundary key={`vol-${underlying}-${expiryDate}`}>
-                    <VolumeVwapChart volumeBars={result.spotVolumeChartBars ?? []} vwapSeries={result.spotVwapSeries ?? []} height={180} />
+                    <VolumeVwapChart volumeBars={result.spotVolumeChartBars ?? []} vwapSeries={result.spotVwapSeries ?? []} height={180} focusTime={focusTime} />
                   </ChartErrorBoundary>
                 </div>
                 {(result.obvCeSeries?.length > 0 || result.cdvCeSeries?.length > 0) ? (
@@ -712,13 +722,13 @@ export default function ExpiredBacktestPage() {
                     <div>
                       <Text type="secondary" style={{ fontSize: 12 }}>OBV (delta-weighted, CE vs PE)</Text>
                       <ChartErrorBoundary key={`obv-${underlying}-${expiryDate}`}>
-                        <CeVsPeChart ceSeries={result.obvCeSeries ?? []} peSeries={result.obvPeSeries ?? []} valueKey="obv" height={220} />
+                        <CeVsPeChart ceSeries={result.obvCeSeries ?? []} peSeries={result.obvPeSeries ?? []} valueKey="obv" height={220} focusTime={focusTime} />
                       </ChartErrorBoundary>
                     </div>
                     <div>
                       <Text type="secondary" style={{ fontSize: 12 }}>CDV (session, resets daily)</Text>
                       <ChartErrorBoundary key={`cdv-${underlying}-${expiryDate}`}>
-                        <CeVsPeChart ceSeries={result.cdvCeSeries ?? []} peSeries={result.cdvPeSeries ?? []} valueKey="obv" height={220} />
+                        <CeVsPeChart ceSeries={result.cdvCeSeries ?? []} peSeries={result.cdvPeSeries ?? []} valueKey="obv" height={220} focusTime={focusTime} />
                       </ChartErrorBoundary>
                     </div>
                   </>
@@ -746,6 +756,7 @@ export default function ExpiredBacktestPage() {
                 dataSource={visibleTrades}
                 columns={tradeColumns}
                 pagination={{ pageSize: 50, showSizeChanger: true, pageSizeOptions: [25, 50, 100] }}
+                onRow={(row) => ({ onClick: () => setFocusTime(row.entryTimeUtc ?? row.signalTimeUtc), style: { cursor: 'pointer' } })}
                 locale={{ emptyText: (fromDay || toDay)
                   ? 'No trades on the selected dates - widen or clear the date filter.'
                   : 'No trades - no entry signals over this window, or click Run to try different settings.' }}
@@ -765,6 +776,7 @@ export default function ExpiredBacktestPage() {
                 dataSource={visibleSignals}
                 columns={signalColumns}
                 pagination={{ pageSize: 50, showSizeChanger: true, pageSizeOptions: [25, 50, 100] }}
+                onRow={(row) => ({ onClick: () => setFocusTime(row.timeUtc), style: { cursor: 'pointer' } })}
                 locale={{ emptyText: (fromDay || toDay)
                   ? 'No signals on the selected dates - widen or clear the date filter.'
                   : 'No signals over this window.' }}
