@@ -18,9 +18,16 @@ namespace OptionAnalytics.Server.Services;
 ///     Close) would silently corrupt any breakout/EMA-touch logic that reads a bar's High/Low - the
 ///     exact thing FiveEmaStrategy's alert-candle rule depends on. If /charts/intraday doesn't
 ///     reach back far enough for the requested date range, this fails loudly (see RunAsync) rather
-///     than falling back to that degraded shape.
+///     than falling back to that degraded shape. GetSpotCandlesAsync below tries
+///     HistoricalSpotDataStore's on-disk cache first (HistoricalSpotDataPrefetchHostedService fills
+///     it once per deployment with the last ~1 year) and only falls back to this live call when the
+///     cache does not fully cover the requested window - a run within that cached year no longer
+///     costs a Dhan call for its spot side at all.
 ///   - The OPTION premium comes from Dhan's rolling-option endpoint (DhanRollingOptionDataService) -
-///     the only way to reach an expired contract's own price history at all.
+///     the only way to reach an expired contract's own price history at all. NOT covered by the
+///     on-disk cache above - see HistoricalSpotDataPrefetchHostedService's own doc comment for why
+///     (its RELATIVE "ATM+-K" token means there is no single absolute series to cache the way spot
+///     has one).
 ///
 /// Every strategy whose ENTIRE signal and pricing logic reads spot bars plus GetOptionBars(strike,
 /// isCall) for one specific strike at a time is trivially supported (see SupportedStrategyKeys) -
@@ -171,18 +178,37 @@ public sealed class ExpiredOptionBacktestService
     private readonly DhanSpotInstrumentMaster _instrumentMaster;
     private readonly DhanHistoricalDataService _historicalData;
     private readonly DhanRollingOptionDataService _rollingOption;
+    private readonly HistoricalSpotDataStore _spotCache;
     private readonly IReadOnlyDictionary<string, IBacktestStrategy> _strategies;
 
     public ExpiredOptionBacktestService(
         DhanSpotInstrumentMaster instrumentMaster,
         DhanHistoricalDataService historicalData,
         DhanRollingOptionDataService rollingOption,
+        HistoricalSpotDataStore spotCache,
         IEnumerable<IBacktestStrategy> strategies)
     {
         _instrumentMaster = instrumentMaster;
         _historicalData = historicalData;
         _rollingOption = rollingOption;
+        _spotCache = spotCache;
         _strategies = strategies.Where(s => SupportedStrategyKeys.Contains(s.Key)).ToDictionary(s => s.Key);
+    }
+
+    /// <summary>Spot candles for [fromDay,toDay], served from HistoricalSpotDataPrefetchHostedService's
+    /// own on-disk cache when it fully covers the window (a fast local CSV read, no Dhan call at
+    /// all), falling straight back to the ordinary live fetch otherwise - a window reaching earlier
+    /// than the cache's own year, or newer than its last prefetch, or simply not yet prefetched on
+    /// this deployment. Every caller here already handles GetIntradayCandlesAsync's own (Candles,
+    /// Error) shape, so the cache hit path returns the identical shape with a null error rather than
+    /// introducing a third return convention.</summary>
+    private async Task<(IReadOnlyList<CandleWithVolume> Candles, string? Error)> GetSpotCandlesAsync(
+        string underlying, DhanSpotInstrument instrument, DateOnly fromDay, DateOnly toDay, CancellationToken cancellationToken)
+    {
+        if (_spotCache.HasCompleteData(underlying, fromDay, toDay))
+            return (_spotCache.Read(underlying, fromDay, toDay), null);
+
+        return await _historicalData.GetIntradayCandlesAsync(instrument.SecurityId, instrument.DhanSegment, fromDay, toDay, 1, cancellationToken);
     }
 
     /// <summary>Metadata for just the strategies this page can actually run - see
@@ -319,7 +345,7 @@ public sealed class ExpiredOptionBacktestService
         var chartFromDay = fromDay.AddDays(-ChartPaddingDays);
         var chartToDay = toDay.AddDays(ChartPaddingDays);
 
-        var (spotVolumeBarsForChart, spotError) = await _historicalData.GetIntradayCandlesAsync(instrument.SecurityId, instrument.DhanSegment, chartFromDay, chartToDay, 1, cancellationToken);
+        var (spotVolumeBarsForChart, spotError) = await GetSpotCandlesAsync(underlying, instrument, chartFromDay, chartToDay, cancellationToken);
         var spotBarsForChart = spotVolumeBarsForChart.Select(b => b.ToCandle()).ToList();
         var spotBars1m = spotBarsForChart.Where(b => IstClock.IstDate(b.Time) >= fromDay && IstClock.IstDate(b.Time) <= toDay).ToList();
         // The same [fromDay,toDay] slice as spotBars1m, but keeping Volume - what VwapCalculator
@@ -567,8 +593,7 @@ public sealed class ExpiredOptionBacktestService
             // validate every member of the strike BAND fetched below - see StrikeBandSteps' own doc
             // comment for why one token alone cannot keep tracking a fixed absolute strike as the
             // index moves.
-            var (windowSpotVolumeBars, spotError) = await _historicalData.GetIntradayCandlesAsync(
-                instrument.SecurityId, instrument.DhanSegment, fromDay, toDay, 1, cancellationToken);
+            var (windowSpotVolumeBars, spotError) = await GetSpotCandlesAsync(underlying, instrument, fromDay, toDay, cancellationToken);
             var windowSpotBars = windowSpotVolumeBars.Select(b => b.ToCandle()).ToList();
             if (windowSpotBars.Count == 0)
                 return RollingOptionChartResult.Failed(

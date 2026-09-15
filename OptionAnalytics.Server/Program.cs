@@ -162,6 +162,12 @@ builder.Services.AddHostedService<EmaCrossoverAlertService>();
 builder.Services.AddSingleton<ConfluenceAlertService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<ConfluenceAlertService>());
 
+// The on-disk cache HistoricalSpotDataPrefetchHostedService fills once per deployment and
+// ExpiredOptionBacktestService reads from afterward - a plain singleton (not hosted itself) since
+// both of those consume it directly.
+builder.Services.AddSingleton<HistoricalSpotDataStore>();
+builder.Services.AddHostedService<HistoricalSpotDataPrefetchHostedService>();
+
 // Every registered IBacktestStrategy is picked up automatically by BacktestService's
 // IEnumerable<IBacktestStrategy> constructor param - add a new strategy by implementing the
 // interface and adding one more AddSingleton line here, nothing else needs to change.
