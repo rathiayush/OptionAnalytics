@@ -8,6 +8,7 @@ import {
   TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry,
   AXIS_COLOR, GRID_COLOR, BORDER_COLOR, istTimeFormatter, istTickMarkFormatter, toBar, toChartTime, dayResetMarkers,
   CeVsPeChart, VolumeVwapChart, scrollChartToTime, highlightChartAtTime, lastValueAtOrBeforeChartTime,
+  useChartSyncGroup, registerChartForSyncAfterSettling,
 } from './shared.jsx'
 
 // This page's own persisted keys - underlying/timeframe are shared across every page (see
@@ -101,12 +102,17 @@ function tradeEntryMarkers(trades) {
 // emaPoints is already pre-computed (or empty) by the caller - this component only ever calls
 // setData with whatever it is handed, so unticking the checkbox (which then passes []) clears the
 // line without this component needing to know WHY it's empty.
-function SpotCandleChart({ bars, trades, emaPoints, height = 420, focusTime }) {
+function SpotCandleChart({ bars, trades, emaPoints, height = 420, focusTime, syncGroup }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
   const emaRef = useRef(null)
   const markersRef = useRef(null)
+  // Only auto-fit (and join the sync group) once per mount - a later `bars` update (a fresh Run,
+  // not a remount: the page keys this component on underlying/timeframe/date-range, see its own
+  // call site) should not re-fit over a pan/zoom the user has since set, nor re-register for sync.
+  const hasFitRef = useRef(false)
+  const syncCleanupRef = useRef(null)
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -131,6 +137,8 @@ function SpotCandleChart({ bars, trades, emaPoints, height = 420, focusTime }) {
     })
     emaRef.current = chart.addSeries(LineSeries, { color: EMA_COLOR, lineWidth: 2, title: '5 EMA', priceLineVisible: false, crosshairMarkerVisible: false })
     markersRef.current = createSeriesMarkers(seriesRef.current, [])
+    hasFitRef.current = false
+    syncCleanupRef.current = null
 
     const onResize = () => {
       if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth })
@@ -139,6 +147,7 @@ function SpotCandleChart({ bars, trades, emaPoints, height = 420, focusTime }) {
 
     return () => {
       window.removeEventListener('resize', onResize)
+      syncCleanupRef.current?.()
       chart.remove()
       chartRef.current = null
       seriesRef.current = null
@@ -150,8 +159,16 @@ function SpotCandleChart({ bars, trades, emaPoints, height = 420, focusTime }) {
 
   useEffect(() => {
     if (!seriesRef.current) return
+    const preservedRange = hasFitRef.current ? chartRef.current?.timeScale().getVisibleRange() : null
     seriesRef.current.setData(bars)
-    if (bars.length > 0) chartRef.current?.timeScale().fitContent()
+    if (!hasFitRef.current && bars.length > 0) {
+      chartRef.current?.timeScale().fitContent()
+      hasFitRef.current = true
+      const chartAtFit = chartRef.current
+      registerChartForSyncAfterSettling(syncGroup, chartAtFit, () => chartRef.current !== chartAtFit, (cleanup) => { syncCleanupRef.current = cleanup })
+    } else if (preservedRange) {
+      try { chartRef.current?.timeScale().setVisibleRange(preservedRange) } catch { /* empty */ }
+    }
   }, [bars])
 
   useEffect(() => {
@@ -252,6 +269,11 @@ export default function BacktestPage() {
   // shared.jsx's scrollChartToTime). A plain ISO string, the same shape every row's own time field
   // already is, so no conversion is needed between "the row I clicked" and "the time to scroll to".
   const [focusTime, setFocusTime] = useState(null)
+
+  // All four charts below (spot, Volume+VWAP, OBV, CDV) pan/zoom together - dragging or zooming any
+  // one of them pushes the same window to the rest. See shared.jsx's useChartSyncGroup for why this
+  // is scoped to this page's own charts rather than a global registry.
+  const chartSyncGroup = useChartSyncGroup()
 
   // Which strategy key paramValues currently reflects - seeded from the RESTORED strategyKey so a
   // page load that finds matching stored parameters keeps them, rather than the defaults-reset
@@ -715,7 +737,7 @@ export default function BacktestPage() {
                   <Text style={{ color: EMA_COLOR }}>Show 5 EMA</Text>
                 </Checkbox>
                 <ChartErrorBoundary key={`${selected}-${expiryParam}-${timeframe}-${fromDay}-${toDay}`}>
-                  <SpotCandleChart bars={chartBars} trades={visibleTrades} emaPoints={emaPoints} height={420} focusTime={focusTime} />
+                  <SpotCandleChart bars={chartBars} trades={visibleTrades} emaPoints={emaPoints} height={420} focusTime={focusTime} syncGroup={chartSyncGroup} />
                 </ChartErrorBoundary>
               </div>
             ) : (
@@ -724,19 +746,19 @@ export default function BacktestPage() {
             <div>
               <Text type="secondary" style={{ fontSize: 12 }}>Spot Volume + Session VWAP</Text>
               <ChartErrorBoundary key={`vol-${selected}-${expiryParam}`}>
-                <VolumeVwapChart volumeBars={spotVolumeBars} vwapSeries={spotVwapSeries} height={180} focusTime={focusTime} />
+                <VolumeVwapChart volumeBars={spotVolumeBars} vwapSeries={spotVwapSeries} height={180} focusTime={focusTime} syncGroup={chartSyncGroup} />
               </ChartErrorBoundary>
             </div>
             <div>
               <Text type="secondary" style={{ fontSize: 12 }}>OBV (delta-weighted, CE vs PE)</Text>
               <ChartErrorBoundary key={`obv-${selected}-${expiryParam}`}>
-                <CeVsPeChart ceSeries={obvCe} peSeries={obvPe} valueKey="obv" height={220} focusTime={focusTime} />
+                <CeVsPeChart ceSeries={obvCe} peSeries={obvPe} valueKey="obv" height={220} focusTime={focusTime} syncGroup={chartSyncGroup} />
               </ChartErrorBoundary>
             </div>
             <div>
               <Text type="secondary" style={{ fontSize: 12 }}>CDV (session, resets daily — dashed line is the previous trading day)</Text>
               <ChartErrorBoundary key={`cdv-${selected}-${expiryParam}`}>
-                <CeVsPeChart ceSeries={cdvCe} peSeries={cdvPe} prevCeSeries={cdvPrevCe} prevPeSeries={cdvPrevPe} valueKey="obv" height={220} focusTime={focusTime} />
+                <CeVsPeChart ceSeries={cdvCe} peSeries={cdvPe} prevCeSeries={cdvPrevCe} prevPeSeries={cdvPrevPe} valueKey="obv" height={220} focusTime={focusTime} syncGroup={chartSyncGroup} />
               </ChartErrorBoundary>
             </div>
           </Space>

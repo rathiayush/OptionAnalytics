@@ -96,35 +96,60 @@ public sealed class EmaCrossAtmFlowStrategyTests
     }
 
     // ---- FlowFavors ------------------------------------------------------------------------------
+    // Two conditions, both required: ORDERING (the winning side above the other, right now) AND
+    // RISING (that same winning side higher now than one `window` earlier).
+
+    private static readonly TimeSpan FlowWindow = TimeSpan.FromMinutes(5);
 
     [Fact]
-    public void FlowFavors_BullishNeedsCeAbovePe()
+    public void FlowFavors_BullishNeedsCeAbovePeAndCeRising()
     {
-        var ce = new[] { new ObvPoint(At(10), 140) };
-        var pe = new[] { new ObvPoint(At(10), 100) };
+        var ce = new[] { new ObvPoint(At(5), 100), new ObvPoint(At(10), 140) };
+        var pe = new[] { new ObvPoint(At(5), 100), new ObvPoint(At(10), 100) };
 
-        Assert.True(EmaCrossAtmFlowStrategy.FlowFavors(ce, pe, At(10), bullish: true));
-        Assert.False(EmaCrossAtmFlowStrategy.FlowFavors(ce, pe, At(10), bullish: false));
+        Assert.True(EmaCrossAtmFlowStrategy.FlowFavors(ce, pe, At(10), bullish: true, FlowWindow));
+        Assert.False(EmaCrossAtmFlowStrategy.FlowFavors(ce, pe, At(10), bullish: false, FlowWindow));
     }
 
     [Fact]
-    public void FlowFavors_BearishNeedsPeAboveCe()
+    public void FlowFavors_BearishNeedsPeAboveCeAndPeRising()
     {
-        var ce = new[] { new ObvPoint(At(10), 100) };
-        var pe = new[] { new ObvPoint(At(10), 140) };
+        var ce = new[] { new ObvPoint(At(5), 100), new ObvPoint(At(10), 100) };
+        var pe = new[] { new ObvPoint(At(5), 100), new ObvPoint(At(10), 140) };
 
-        Assert.True(EmaCrossAtmFlowStrategy.FlowFavors(ce, pe, At(10), bullish: false));
-        Assert.False(EmaCrossAtmFlowStrategy.FlowFavors(ce, pe, At(10), bullish: true));
+        Assert.True(EmaCrossAtmFlowStrategy.FlowFavors(ce, pe, At(10), bullish: false, FlowWindow));
+        Assert.False(EmaCrossAtmFlowStrategy.FlowFavors(ce, pe, At(10), bullish: true, FlowWindow));
+    }
+
+    [Fact]
+    public void FlowFavors_OrderingAloneIsNotEnoughIfTheWinningSideIsFalling()
+    {
+        // CE is still above PE right now, but CE's own lead is SHRINKING (200 -> 140) rather than
+        // growing - being ahead is not the same as still gaining, and this rule requires both.
+        var ce = new[] { new ObvPoint(At(5), 200), new ObvPoint(At(10), 140) };
+        var pe = new[] { new ObvPoint(At(5), 50), new ObvPoint(At(10), 100) };
+
+        Assert.False(EmaCrossAtmFlowStrategy.FlowFavors(ce, pe, At(10), bullish: true, FlowWindow));
+    }
+
+    [Fact]
+    public void FlowFavors_RisingAloneIsNotEnoughIfOrderingDoesNotHold()
+    {
+        // CE is rising, but PE is still above it right now - the direction isn't actually won yet.
+        var ce = new[] { new ObvPoint(At(5), 50), new ObvPoint(At(10), 90) };
+        var pe = new[] { new ObvPoint(At(5), 80), new ObvPoint(At(10), 100) };
+
+        Assert.False(EmaCrossAtmFlowStrategy.FlowFavors(ce, pe, At(10), bullish: true, FlowWindow));
     }
 
     [Fact]
     public void FlowFavors_ExactlyEqualFavorsNeitherSide()
     {
-        var ce = new[] { new ObvPoint(At(10), 100) };
-        var pe = new[] { new ObvPoint(At(10), 100) };
+        var ce = new[] { new ObvPoint(At(5), 100), new ObvPoint(At(10), 100) };
+        var pe = new[] { new ObvPoint(At(5), 100), new ObvPoint(At(10), 100) };
 
-        Assert.False(EmaCrossAtmFlowStrategy.FlowFavors(ce, pe, At(10), bullish: true));
-        Assert.False(EmaCrossAtmFlowStrategy.FlowFavors(ce, pe, At(10), bullish: false));
+        Assert.False(EmaCrossAtmFlowStrategy.FlowFavors(ce, pe, At(10), bullish: true, FlowWindow));
+        Assert.False(EmaCrossAtmFlowStrategy.FlowFavors(ce, pe, At(10), bullish: false, FlowWindow));
     }
 
     [Fact]
@@ -132,23 +157,36 @@ public sealed class EmaCrossAtmFlowStrategyTests
     {
         // Neither series has a point exactly on the spot bar's own timestamp - each is read as "the
         // last value known by then", which is what makes this work across series that do not share
-        // an index (CE/PE bars do not necessarily land on the same timestamps as spot's).
+        // an index (CE/PE bars do not necessarily land on the same timestamps as spot's). Same for
+        // the window-ago end: CE's own "5 minutes before now" reading comes from its point at 1, the
+        // last one at or before 5.
         var ce = new[] { new ObvPoint(At(1), 100), new ObvPoint(At(7), 140) };
         var pe = new[] { new ObvPoint(At(2), 100), new ObvPoint(At(8), 100) };
 
-        Assert.True(EmaCrossAtmFlowStrategy.FlowFavors(ce, pe, At(10), bullish: true));
+        Assert.True(EmaCrossAtmFlowStrategy.FlowFavors(ce, pe, At(10), bullish: true, FlowWindow));
     }
 
     [Fact]
-    public void FlowFavors_NoReadingOnEitherSideFavorsNeitherDirection()
+    public void FlowFavors_NoReadingAtNowFavorsNeitherDirection()
     {
         // Nothing at or before the given time yet: "no data" must not pass a filter whose whole job
         // is to require evidence for whichever direction is being confirmed.
         var ce = new[] { new ObvPoint(At(11), 100) };
         var pe = new[] { new ObvPoint(At(10), 50) };
 
-        Assert.False(EmaCrossAtmFlowStrategy.FlowFavors(ce, pe, At(10), bullish: true));
-        Assert.False(EmaCrossAtmFlowStrategy.FlowFavors(Array.Empty<ObvPoint>(), Array.Empty<ObvPoint>(), At(10), bullish: true));
+        Assert.False(EmaCrossAtmFlowStrategy.FlowFavors(ce, pe, At(10), bullish: true, FlowWindow));
+        Assert.False(EmaCrossAtmFlowStrategy.FlowFavors(Array.Empty<ObvPoint>(), Array.Empty<ObvPoint>(), At(10), bullish: true, FlowWindow));
+    }
+
+    [Fact]
+    public void FlowFavors_OrderingHoldsButNoReadingBeforeTheWindowIsNotConfirmed()
+    {
+        // CE is above PE right now, but neither series has anything at or before the window-ago
+        // instant to compare against - there is no evidence of a slope yet, so this must not pass.
+        var ce = new[] { new ObvPoint(At(10), 140) };
+        var pe = new[] { new ObvPoint(At(10), 100) };
+
+        Assert.False(EmaCrossAtmFlowStrategy.FlowFavors(ce, pe, At(10), bullish: true, FlowWindow));
     }
 
     // ---- FlowConfirms --------------------------------------------------------------------------
