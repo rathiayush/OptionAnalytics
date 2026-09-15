@@ -223,7 +223,7 @@ public sealed class ExpiredOptionBacktestService
     public async Task<ExpiredBacktestResult> RunAsync(
         string underlying, string expiryFlag, DateOnly expiryDate, int lookbackDays, string strategyKey,
         int timeframeMinutes, IReadOnlyDictionary<string, decimal> parameters,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, bool includeObvCdv = false)
     {
         if (!StrikeStepByUnderlying.TryGetValue(underlying, out var step))
             return ExpiredBacktestResult.Failed($"'{underlying}' is not supported - only NIFTY and BANKNIFTY (Dhan's rolling-option API only documents NSE_FNO index options).");
@@ -361,7 +361,15 @@ public sealed class ExpiredOptionBacktestService
         // own doc comments) - fetched here INSTEAD of the ordinary otmSteps+-StrikeBandSteps one, not
         // in addition to it, since FlowChainRadius (10) already covers any legal otmSteps (bounded to
         // +-8), so the wider band alone still serves this run's own pricing too.
-        var needsFlowChain = strategyKey == "ema-cross-atm-flow";
+        //
+        // includeObvCdv is the SAME wide fetch, opted into for ANY strategy - not because that
+        // strategy's own signal logic needs it (only EmaCrossAtmFlowStrategy's does), but so the page
+        // can plot the OBV/CDV chart alongside a run of five-ema/ayush-5-ema/ema-vwap-sell too, purely
+        // for the user to visually check those series are behaving sensibly. Off by default: it is
+        // real extra work (42 rolling-option fetches instead of the usual 26, per FlowChainRadius'
+        // own doc comment) and extra exposure to Dhan's rate limit, so a run that does not ask for the
+        // chart does not pay for it.
+        var needsFlowChain = strategyKey == "ema-cross-atm-flow" || includeObvCdv;
         var bandCenterSteps = needsFlowChain ? 0 : otmSteps;
         var bandRadius = needsFlowChain ? FlowChainRadius : StrikeBandSteps;
         var (ceBand, ceError) = await FetchStrikeBandAsync(instrument.SecurityId, expiryFlag, segments, bandCenterSteps, bandRadius, isCall: true, spotBars1m, step, cancellationToken);
@@ -408,12 +416,29 @@ public sealed class ExpiredOptionBacktestService
         // The WIDER (chartFromDay..chartToDay) series, not spotBars1m - what the page's own chart
         // plots, so the padding around the lookback window this method fetched actually reaches it.
         var spotChartCandlesTf = BacktestUtil.AggregateCandles(spotBarsForChart, timeframe);
+        // Volume counterpart, same wider chart window - a plain fetch reuse (spotVolumeBarsForChart
+        // was already fetched for spotBarsForChart/spotVolumeBars1m above), no extra Dhan call. VWAP
+        // is computed off the native 1-minute series FIRST (session-anchored cumulative sums need
+        // per-minute granularity, not pre-aggregated buckets) and only aggregated to the chart's own
+        // timeframe afterward - the same "compute at 1m, then AggregateLine" order OBV/CDV already use.
+        var spotVolumeChartBarsTf = BacktestUtil.AggregateCandlesWithVolume(spotVolumeBarsForChart, timeframe);
+        var spotVwapSeriesTf = BacktestUtil.AggregateLine(VwapCalculator.ComputeSeries(spotVolumeBarsForChart), timeframe);
 
-        // Only EmaCrossAtmFlowStrategy reads any of this (see needsFlowChain above) - every other
-        // strategy gets the same harmless empty placeholders this class has always handed them.
+        // Only EmaCrossAtmFlowStrategy reads any of this for its own signal logic (see needsFlowChain
+        // above) - a run of any other strategy still gets it computed (and returned - see below) when
+        // includeObvCdv asked for it; otherwise the same harmless empty placeholders this class has
+        // always handed a strategy that does not read them.
         var (atmCeBars1m, atmPeBars1m, obvCeSeries1m, obvPeSeries1m, cdvCeSeries1m, cdvPeSeries1m) = needsFlowChain
             ? BuildFlowChainSeries(underlying, ceBand, peBand, spotBars1m, step)
             : (Array.Empty<Candle>(), Array.Empty<Candle>(), Array.Empty<ObvPoint>(), Array.Empty<ObvPoint>(), Array.Empty<ObvPoint>(), Array.Empty<ObvPoint>());
+
+        // Computed once, at the chart's own timeframe, and reused both by the strategy context below
+        // AND the result returned to the page - so the OBV/CDV chart plots EXACTLY what the strategy
+        // itself saw, not a second, separately-aggregated copy that could drift from it.
+        var obvCeSeriesTf = BacktestUtil.AggregateLine(obvCeSeries1m, timeframe);
+        var obvPeSeriesTf = BacktestUtil.AggregateLine(obvPeSeries1m, timeframe);
+        var cdvCeSeriesTf = BacktestUtil.AggregateLine(cdvCeSeries1m, timeframe);
+        var cdvPeSeriesTf = BacktestUtil.AggregateLine(cdvPeSeries1m, timeframe);
 
         var context = new BacktestStrategyContext
         {
@@ -425,10 +450,10 @@ public sealed class ExpiredOptionBacktestService
             SpotVolumeBarsOneMinute = spotVolumeBars1m,
             ConfluenceSignalsAscending = Array.Empty<BacktestSignal>(),
             AllSignals = Array.Empty<BacktestSignal>(),
-            ObvCeSeries = BacktestUtil.AggregateLine(obvCeSeries1m, timeframe),
-            ObvPeSeries = BacktestUtil.AggregateLine(obvPeSeries1m, timeframe),
-            CdvCeSeries = BacktestUtil.AggregateLine(cdvCeSeries1m, timeframe),
-            CdvPeSeries = BacktestUtil.AggregateLine(cdvPeSeries1m, timeframe),
+            ObvCeSeries = obvCeSeriesTf,
+            ObvPeSeries = obvPeSeriesTf,
+            CdvCeSeries = cdvCeSeriesTf,
+            CdvPeSeries = cdvPeSeriesTf,
             GetOptionBars = TimeframeOptionBars,
             GetOptionBarsOneMinute = OneMinuteOptionBars,
             AtmCeBars = BacktestUtil.AggregateCandles(atmCeBars1m, timeframe),
@@ -448,7 +473,8 @@ public sealed class ExpiredOptionBacktestService
             // used."
             spotBars1m.Count, ceUsed.Count, peUsed.Count, ceSplices, peSplices,
             ceResolvedStrike, peResolvedStrike, ceExpectedStrike, peExpectedStrike, effectiveLookbackDays,
-            spotChartCandlesTf);
+            spotChartCandlesTf, spotVolumeChartBarsTf, spotVwapSeriesTf,
+            obvCeSeriesTf, obvPeSeriesTf, cdvCeSeriesTf, cdvPeSeriesTf);
     }
 
     /// <summary>The raw rolling-option series for ONE relative strike/side, with no strategy run

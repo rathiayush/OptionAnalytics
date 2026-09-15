@@ -7,6 +7,7 @@ import {
   UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, EMA_COLOR, computeEma, NavBar, DirectionTag, fmtIstDateTime, fmtIstTime, fmtPrice, istDateKey,
   TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState,
   AXIS_COLOR, GRID_COLOR, BORDER_COLOR, istTimeFormatter, istTickMarkFormatter, toBar, toChartTime, dayResetMarkers,
+  CeVsPeChart, VolumeVwapChart,
 } from './shared.jsx'
 
 const { Title, Text } = Typography
@@ -225,6 +226,13 @@ export default function ExpiredBacktestPage() {
   const [loading, setLoading] = useState(false)
   const [runError, setRunError] = useState(null)
 
+  // Off by default - see ExpiredOptionBacktestService.RunAsync's own doc comment on why: computing
+  // OBV/CDV for a strategy that doesn't otherwise need them means a much wider (and slower, more
+  // Dhan-rate-limit-exposed) option-chain fetch, so a run only pays for it when this is ticked.
+  // Always effectively on for "EMA Crossover + ATM Cross + Rising Flow" itself, since that strategy
+  // computes them anyway for its own signal logic regardless of this checkbox.
+  const [includeObvCdv, setIncludeObvCdv] = useState(false)
+
   const strategy = strategies.find((s) => s.key === strategyKey) ?? null
 
   // Purely a display toggle, not a run parameter - unticking it never changes the backtest itself,
@@ -333,6 +341,7 @@ export default function ExpiredBacktestPage() {
       lookbackDays: String(lookbackDays),
       strategy: strategyKey,
       timeframe: String(timeframe),
+      includeObvCdv: String(includeObvCdv),
     })
     for (const [k, v] of Object.entries(paramValues)) params.set(k, String(v))
 
@@ -585,6 +594,12 @@ export default function ExpiredBacktestPage() {
               ))}
               <Button type="primary" icon={<PlayCircleOutlined />} onClick={run} loading={loading} disabled={!canRun}>Run</Button>
             </Space>
+            <Checkbox checked={includeObvCdv} onChange={(e) => setIncludeObvCdv(e.target.checked)}>
+              Also compute CDV / OBV for this run{' '}
+              <Tooltip title="Off by default: reconstructing order-flow (CDV/OBV) across the whole surrounding strike chain needs a much wider option-chain fetch (about 1.6x the calls), so it's opt-in for a strategy other than 'EMA Crossover + ATM Cross + Rising Flow' (which always computes it anyway). Tick this to plot the CDV/OBV/Volume charts below and visually check they look right for the strategy you're actually running.">
+                <InfoCircleOutlined />
+              </Tooltip>
+            </Checkbox>
           </Space>
         </Card>
 
@@ -678,6 +693,43 @@ export default function ExpiredBacktestPage() {
               ) : (
                 <Empty description={(fromDay || toDay) ? 'No spot candles on the selected dates - widen or clear the date filter.' : 'No spot candles to chart for this run.'} />
               )}
+            </Card>
+
+            <Card
+              size="small"
+              title="Order Flow — verify CDV / OBV / Volume"
+              extra={<Text type="secondary" style={{ fontSize: 12 }}>Reconstructed from this run's own fetched history, over the same lookback window as the spot chart above</Text>}
+            >
+              <Space direction="vertical" size={16} style={{ width: '100%' }}>
+                <div>
+                  <Text type="secondary" style={{ fontSize: 12 }}>Spot Volume + Session VWAP</Text>
+                  <ChartErrorBoundary key={`vol-${underlying}-${expiryDate}`}>
+                    <VolumeVwapChart volumeBars={result.spotVolumeChartBars ?? []} vwapSeries={result.spotVwapSeries ?? []} height={180} />
+                  </ChartErrorBoundary>
+                </div>
+                {(result.obvCeSeries?.length > 0 || result.cdvCeSeries?.length > 0) ? (
+                  <>
+                    <div>
+                      <Text type="secondary" style={{ fontSize: 12 }}>OBV (delta-weighted, CE vs PE)</Text>
+                      <ChartErrorBoundary key={`obv-${underlying}-${expiryDate}`}>
+                        <CeVsPeChart ceSeries={result.obvCeSeries ?? []} peSeries={result.obvPeSeries ?? []} valueKey="obv" height={220} />
+                      </ChartErrorBoundary>
+                    </div>
+                    <div>
+                      <Text type="secondary" style={{ fontSize: 12 }}>CDV (session, resets daily)</Text>
+                      <ChartErrorBoundary key={`cdv-${underlying}-${expiryDate}`}>
+                        <CeVsPeChart ceSeries={result.cdvCeSeries ?? []} peSeries={result.cdvPeSeries ?? []} valueKey="obv" height={220} />
+                      </ChartErrorBoundary>
+                    </div>
+                  </>
+                ) : (
+                  <Empty description={
+                    strategyKey === 'ema-cross-atm-flow'
+                      ? 'No CDV/OBV data for this run.'
+                      : "No CDV/OBV data - tick 'Also compute CDV / OBV for this run' above and Run again."
+                  } />
+                )}
+              </Space>
             </Card>
 
             <Card size="small" title="Trades">

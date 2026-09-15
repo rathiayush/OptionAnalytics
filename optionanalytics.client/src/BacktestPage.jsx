@@ -7,6 +7,7 @@ import {
   UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, EMA_COLOR, computeEma, NavBar, DirectionTag, ALERT_KIND_LABEL, fmtIstDateTime, fmtIstTime, fmtPrice, istDateKey,
   TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry,
   AXIS_COLOR, GRID_COLOR, BORDER_COLOR, istTimeFormatter, istTickMarkFormatter, toBar, toChartTime, dayResetMarkers,
+  CeVsPeChart, VolumeVwapChart,
 } from './shared.jsx'
 
 // This page's own persisted keys - underlying/timeframe are shared across every page (see
@@ -222,6 +223,20 @@ export default function BacktestPage() {
   // cadence rather than drifting ahead of the data it is annotating.
   const [spotCandles, setSpotCandles] = useState([])
 
+  // Order-flow verification charts - the SAME live CDV/OBV state the Dashboard's own charts read
+  // (GET /api/cdv/{underlying}/...), plus real spot/index volume and its session VWAP - fetched
+  // alongside the run itself so a signal on the Signals table can be checked against what CDV/OBV/
+  // volume actually looked like at that moment, not just trusted. Purely a display concern: nothing
+  // here feeds back into the strategy run.
+  const [obvCe, setObvCe] = useState([])
+  const [obvPe, setObvPe] = useState([])
+  const [cdvCe, setCdvCe] = useState([])
+  const [cdvPe, setCdvPe] = useState([])
+  const [cdvPrevCe, setCdvPrevCe] = useState([])
+  const [cdvPrevPe, setCdvPrevPe] = useState([])
+  const [spotVolumeBars, setSpotVolumeBars] = useState([])
+  const [spotVwapSeries, setSpotVwapSeries] = useState([])
+
   // Which strategy key paramValues currently reflects - seeded from the RESTORED strategyKey so a
   // page load that finds matching stored parameters keeps them, rather than the defaults-reset
   // effect below immediately overwriting them before the user ever sees them. Only a genuine
@@ -273,6 +288,7 @@ export default function BacktestPage() {
       loadSignals()
       runTrades()
       loadSpotCandles()
+      loadFlowCharts()
     })
   }
 
@@ -346,6 +362,33 @@ export default function BacktestPage() {
       .catch((err) => console.error('Failed to load spot candles:', err))
   }
 
+  // The three verification charts (OBV, CDV, spot Volume+VWAP) - see the state above's own comment.
+  // CDV/OBV honor ?expiry= like every other CDV read on this page; spot volume/VWAP don't (spot has
+  // no expiry of its own).
+  const loadFlowCharts = () => {
+    if (!selected) return
+    fetch(withExpiry(`/api/cdv/${selected}/obv-series`, expiryParam))
+      .then((r) => r.json())
+      .then((data) => { setObvCe(data?.ce ?? []); setObvPe(data?.pe ?? []) })
+      .catch((err) => console.error('Failed to load OBV series:', err))
+    fetch(withExpiry(`/api/cdv/${selected}/series`, expiryParam))
+      .then((r) => r.json())
+      .then((data) => { setCdvCe(data?.map((p) => ({ time: p.time, obv: p.ceCdv })) ?? []); setCdvPe(data?.map((p) => ({ time: p.time, obv: p.peCdv })) ?? []) })
+      .catch((err) => console.error('Failed to load CDV series:', err))
+    fetch(withExpiry(`/api/cdv/${selected}/previous-day-series`, expiryParam))
+      .then((r) => r.json())
+      .then((data) => { setCdvPrevCe(data?.map((p) => ({ time: p.time, obv: p.ceCdv })) ?? []); setCdvPrevPe(data?.map((p) => ({ time: p.time, obv: p.peCdv })) ?? []) })
+      .catch((err) => console.error('Failed to load CDV previous-day series:', err))
+    fetch(`/api/spot/${selected}/volume-candles`)
+      .then((r) => r.json())
+      .then((data) => setSpotVolumeBars(data ?? []))
+      .catch((err) => console.error('Failed to load spot volume candles:', err))
+    fetch(`/api/spot/${selected}/vwap-series`)
+      .then((r) => r.json())
+      .then((data) => setSpotVwapSeries(data ?? []))
+      .catch((err) => console.error('Failed to load spot VWAP series:', err))
+  }
+
   // Signals refresh automatically on underlying/timeframe - those are discrete dropdown choices,
   // not something typed. Strategy parameters only apply when "Run" is clicked, so adjusting them
   // doesn't fire a request on every keystroke.
@@ -357,6 +400,7 @@ export default function BacktestPage() {
     loadSignals()
     runTrades()
     loadSpotCandles()
+    loadFlowCharts()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected, timeframe, strategyKey, strategy, expiryParam])
 
@@ -611,7 +655,7 @@ export default function BacktestPage() {
                   )}
                 </Space>
               ))}
-              <Button type="primary" icon={<PlayCircleOutlined />} onClick={() => { loadSignals(); runTrades(); loadSpotCandles() }} loading={tradesLoading} disabled={!selected || !strategyKey}>
+              <Button type="primary" icon={<PlayCircleOutlined />} onClick={() => { loadSignals(); runTrades(); loadSpotCandles(); loadFlowCharts() }} loading={tradesLoading} disabled={!selected || !strategyKey}>
                 Run
               </Button>
             </Space>
@@ -670,6 +714,33 @@ export default function BacktestPage() {
                   : 'No trades - no Confluence signals yet, or click Run to simulate with the current settings.' }}
               />
             )}
+          </Space>
+        </Card>
+
+        <Card
+          size="small"
+          title="Order Flow — verify CDV / OBV / Volume"
+          extra={<Text type="secondary" style={{ fontSize: 12 }}>The same live series the Dashboard charts, for checking a strategy's own signals against them</Text>}
+        >
+          <Space direction="vertical" size={16} style={{ width: '100%' }}>
+            <div>
+              <Text type="secondary" style={{ fontSize: 12 }}>Spot Volume + Session VWAP</Text>
+              <ChartErrorBoundary key={`vol-${selected}-${expiryParam}`}>
+                <VolumeVwapChart volumeBars={spotVolumeBars} vwapSeries={spotVwapSeries} height={180} />
+              </ChartErrorBoundary>
+            </div>
+            <div>
+              <Text type="secondary" style={{ fontSize: 12 }}>OBV (delta-weighted, CE vs PE)</Text>
+              <ChartErrorBoundary key={`obv-${selected}-${expiryParam}`}>
+                <CeVsPeChart ceSeries={obvCe} peSeries={obvPe} valueKey="obv" height={220} />
+              </ChartErrorBoundary>
+            </div>
+            <div>
+              <Text type="secondary" style={{ fontSize: 12 }}>CDV (session, resets daily — dashed line is the previous trading day)</Text>
+              <ChartErrorBoundary key={`cdv-${selected}-${expiryParam}`}>
+                <CeVsPeChart ceSeries={cdvCe} peSeries={cdvPe} prevCeSeries={cdvPrevCe} prevPeSeries={cdvPrevPe} valueKey="obv" height={220} />
+              </ChartErrorBoundary>
+            </div>
           </Space>
         </Card>
 

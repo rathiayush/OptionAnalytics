@@ -55,6 +55,7 @@ public sealed class ExpiredBacktestController : ControllerBase
         [FromQuery] int lookbackDays,
         [FromQuery] string? strategy,
         [FromQuery] int timeframe,
+        [FromQuery] bool includeObvCdv,
         CancellationToken cancellationToken)
     {
         var normalizedFlag = expiryFlag?.Trim().ToUpperInvariant();
@@ -69,7 +70,7 @@ public sealed class ExpiredBacktestController : ControllerBase
 
         var result = await _service.RunAsync(
             underlying.ToUpperInvariant(), normalizedFlag, parsedExpiry, lookbackDays > 0 ? lookbackDays : 30,
-            strategy, Math.Max(1, timeframe), ReadParameters(), cancellationToken);
+            strategy, Math.Max(1, timeframe), ReadParameters(), cancellationToken, includeObvCdv);
 
         return result.Success ? Ok(result) : BadRequest(new { error = result.Error });
     }
