@@ -244,75 +244,6 @@ function sanitizeSeries(points) {
   return result
 }
 
-// Every chart on the dashboard pans/zooms as one: each registers itself here - once IT'S ready
-// (see below), not at mount - and dragging or zooming any of them pushes the same window to all
-// the others.
-//
-// The window is synced as a TIME range, not lightweight-charts' logical (bar-index) range - the
-// charts hold completely different series (spot has every 1-minute bar of 5 days, an ATM CE
-// contract only has bars from whenever that strike started being tracked, CDV/OBV have their own
-// counts again), so index N is a different instant on each one and only real timestamps line up.
-//
-// isApplyingSync is the guard for the obvious feedback loop: applying a range to another chart
-// fires that chart's own range-change handler, which would otherwise bounce straight back.
-//
-// Callers register only AFTER their own first fitContent() - not at chart creation. fitContent()
-// settles asynchronously and can fire more than one visibleTimeRangeChange event well after it's
-// called, so a chart registered any earlier would broadcast its own first-load auto-fit to every
-// other chart on the page as if it were a user's pan/zoom, silently overriding whatever view the
-// user had already set on another chart - which is exactly what an ATM strike roll used to do:
-// DashboardPage remounts the ATM CE/PE/OBV charts fresh on every roll (see their own key= props),
-// and each one's brand new fitContent() was stomping on the spot chart the user might be actively
-// dragging, with no relationship between the two beyond both being registered here.
-const chartSyncRegistry = new Set()
-let isApplyingSync = false
-
-function registerChartForSync(chart) {
-  const onVisibleRangeChange = () => {
-    if (isApplyingSync) return
-    const range = chart.timeScale().getVisibleRange()
-    if (!range) return
-
-    isApplyingSync = true
-    try {
-      for (const other of chartSyncRegistry) {
-        if (other === chart) continue
-        // A chart whose own data doesn't reach into this window can reject the range - that's a
-        // "nothing to show there", not an error worth breaking the drag over.
-        try { other.timeScale().setVisibleRange(range) } catch { /* empty */ }
-      }
-    } finally {
-      isApplyingSync = false
-    }
-  }
-
-  chartSyncRegistry.add(chart)
-  chart.timeScale().subscribeVisibleTimeRangeChange(onVisibleRangeChange)
-
-  return () => {
-    chart.timeScale().unsubscribeVisibleTimeRangeChange(onVisibleRangeChange)
-    chartSyncRegistry.delete(chart)
-  }
-}
-
-// Calls registerChartForSync only once `chart`'s own fitContent() has actually settled - measured
-// (against this exact lightweight-charts version) to still be raising its own
-// visibleTimeRangeChange events a full animation frame after fitContent() is called and returns,
-// so registering any sooner - including synchronously right after that call - joins the chart to
-// chartSyncRegistry before its own settling finishes and broadcasts it anyway. Two frames leaves a
-// full frame of margin beyond the measured worst case. `isStale` lets a caller detect its own
-// unmount/remount before the deferred callback runs (pass e.g. `() => chartRef.current !== chart`)
-// and skip registering a chart that no longer belongs to the calling component instance.
-function registerChartForSyncAfterSettling(chart, isStale, onRegistered) {
-  requestAnimationFrame(() => {
-    if (isStale()) return
-    requestAnimationFrame(() => {
-      if (isStale()) return
-      onRegistered(registerChartForSync(chart))
-    })
-  })
-}
-
 function useAggregatedCandles(candles, liveBarRaw, timeframeMinutes) {
   return useMemo(() => {
     const bars = mergeLiveBar(candles.map(toBar), liveBarRaw ? toBar(liveBarRaw) : null)
@@ -462,8 +393,6 @@ function PriceChart({ bars, height = 360 }) {
   // underlying+timeframe, so switching either remounts it fresh (this flag resets to false) rather
   // than silently reusing the old pan/zoom position for a completely different dataset.
   const hasFitRef = useRef(false)
-  // Set once this chart has joined chartSyncRegistry (see below) - cleared on remount.
-  const syncCleanupRef = useRef(null)
 
   const sanitizedBars = useMemo(() => sanitizeSeries(bars), [bars])
   const { ema9Points, ema21Points, markers } = useEmaCrossover(sanitizedBars)
@@ -499,18 +428,14 @@ function PriceChart({ bars, height = 360 }) {
     ema21Ref.current = chart.addSeries(LineSeries, { color: EMA_SLOW_COLOR, lineWidth: 1, title: 'EMA 21', priceLineVisible: false, crosshairMarkerVisible: false })
     markersRef.current = createSeriesMarkers(seriesRef.current, [])
     hasFitRef.current = false
-    syncCleanupRef.current = null
 
     const onResize = () => {
       if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth })
     }
     window.addEventListener('resize', onResize)
-    // NOT registered for cross-chart sync yet - see the data effect below for why joining has to
-    // wait until after this chart's own first fit.
 
     return () => {
       window.removeEventListener('resize', onResize)
-      syncCleanupRef.current?.()
       chart.remove()
       chartRef.current = null
       seriesRef.current = null
@@ -537,14 +462,6 @@ function PriceChart({ bars, height = 360 }) {
     if (!hasFitRef.current && sanitizedBars.length > 0) {
       chartRef.current?.timeScale().fitContent()
       hasFitRef.current = true
-      // Only joins the shared cross-chart sync group once this fit has actually settled - see
-      // registerChartForSyncAfterSettling's own doc comment for why joining any earlier would
-      // broadcast THIS chart's own first-load auto-fit to every other chart on the page as if it
-      // were a user's pan/zoom - stomping on whatever view the user had already set on, say, the
-      // spot chart, purely because an unrelated chart (re)mounted (the ATM CE/PE/OBV charts
-      // remount on every ATM strike roll - see their own key= props).
-      const chartAtFit = chartRef.current
-      registerChartForSyncAfterSettling(chartAtFit, () => chartRef.current !== chartAtFit, (cleanup) => { syncCleanupRef.current = cleanup })
     } else if (preservedRange) {
       // The new data may no longer cover exactly this range (e.g. the oldest bar rolled off) -
       // that's a "nothing to show past this edge" case for the time scale, not an error worth
@@ -587,9 +504,6 @@ function CeVsPeChart({ ceSeries, peSeries, prevCeSeries = [], prevPeSeries = [],
   const markersRef = useRef(null)
   // See PriceChart's identical hasFitRef for why this only fits once per mount, not on every live update.
   const hasFitRef = useRef(false)
-  // See PriceChart's identical syncCleanupRef for why joining chartSyncRegistry has to wait until
-  // after this chart's own first fit.
-  const syncCleanupRef = useRef(null)
   const sanitizedCe = useMemo(() => sanitizeSeries(ceSeries), [ceSeries])
   const sanitizedPe = useMemo(() => sanitizeSeries(peSeries), [peSeries])
   const sanitizedPrevCe = useMemo(() => sanitizeSeries(prevCeSeries), [prevCeSeries])
@@ -615,17 +529,14 @@ function CeVsPeChart({ ceSeries, peSeries, prevCeSeries = [], prevPeSeries = [],
     peRef.current = chart.addSeries(LineSeries, { color: PE_COLOR, lineWidth: 2, title: 'PE', priceLineVisible: false })
     markersRef.current = createSeriesMarkers(ceRef.current, [])
     hasFitRef.current = false
-    syncCleanupRef.current = null
 
     const onResize = () => {
       if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth })
     }
     window.addEventListener('resize', onResize)
-    // NOT registered for cross-chart sync yet - see the data effect below.
 
     return () => {
       window.removeEventListener('resize', onResize)
-      syncCleanupRef.current?.()
       chart.remove()
       chartRef.current = null
       ceRef.current = null
@@ -650,12 +561,6 @@ function CeVsPeChart({ ceSeries, peSeries, prevCeSeries = [], prevPeSeries = [],
     if (!hasFitRef.current && hasAnyData) {
       chartRef.current?.timeScale().fitContent()
       hasFitRef.current = true
-      // Only joins the shared cross-chart sync group once this fit has actually settled - see
-      // PriceChart's identical comment (and registerChartForSyncAfterSettling's own doc comment)
-      // for why joining any earlier would broadcast this chart's own first-load auto-fit to every
-      // other chart on the page as if it were a user's pan/zoom.
-      const chartAtFit = chartRef.current
-      registerChartForSyncAfterSettling(chartAtFit, () => chartRef.current !== chartAtFit, (cleanup) => { syncCleanupRef.current = cleanup })
     } else if (preservedRange) {
       try { chartRef.current?.timeScale().setVisibleRange(preservedRange) } catch { /* empty */ }
     }
