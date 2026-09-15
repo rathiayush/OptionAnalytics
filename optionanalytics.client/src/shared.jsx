@@ -291,6 +291,25 @@ function toLinePoints(points, valueKey) {
   return points.map((p) => ({ time: toChartTime(p.time), value: p[valueKey] }))
 }
 
+// Recenters `chart`'s own current visible window on `isoTime`, preserving however wide/zoomed that
+// window already is - what a "click a row, jump every chart to that moment" feature needs, WITHOUT
+// changing zoom level out from under the user the way fitContent() or a fixed-width window would.
+// lightweight-charts has no direct "scroll to this time" call (only scrollToPosition, which moves by
+// a bar-index offset from the right edge - meaningless across charts with different bar counts/
+// timeframes), so this reads the current {from, to} itself and shifts it by hand. A silent no-op if
+// the chart has no data yet (getVisibleRange returns null) or the target falls outside what
+// setVisibleRange will accept - "nothing to show there" is not worth surfacing as an error over a
+// chart the user didn't necessarily mean to scroll (an OBV chart has no data before its own history
+// started, for instance, even when the spot chart right next to it does).
+export function scrollChartToTime(chart, isoTime) {
+  if (!chart || !isoTime) return
+  const range = chart.timeScale().getVisibleRange()
+  if (!range) return
+  const target = toChartTime(isoTime)
+  const half = (range.to - range.from) / 2
+  try { chart.timeScale().setVisibleRange({ from: target - half, to: target + half }) } catch { /* empty */ }
+}
+
 // A generic two-line CE/PE running-total chart - CDV or OBV, whichever `valueKey` names on the raw
 // point shape the backend returns (ObvPoint's own JSON field is "obv" for both: OBV and CDV are
 // exposed as the same shape). A simplified port of App.jsx's own CeVsPeChart (the Dashboard's live
@@ -302,7 +321,7 @@ function toLinePoints(points, valueKey) {
 //
 // prevCeSeries/prevPeSeries (optional, dashed) is a reference line - CDV's previous trading day,
 // typically; OBV has no equivalent and simply omits them.
-export function CeVsPeChart({ ceSeries, peSeries, prevCeSeries = [], prevPeSeries = [], valueKey = 'obv', height = 240 }) {
+export function CeVsPeChart({ ceSeries, peSeries, prevCeSeries = [], prevPeSeries = [], valueKey = 'obv', height = 240, focusTime }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const ceRef = useRef(null)
@@ -380,6 +399,12 @@ export function CeVsPeChart({ ceSeries, peSeries, prevCeSeries = [], prevPeSerie
     markersRef.current?.setMarkers(resetMarkers)
   }, [resetMarkers])
 
+  // A row click elsewhere on the page sets focusTime to that row's own time - see
+  // scrollChartToTime's own doc comment for why this recenters rather than re-fits/re-zooms.
+  useEffect(() => {
+    scrollChartToTime(chartRef.current, focusTime)
+  }, [focusTime])
+
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }
 
@@ -390,7 +415,7 @@ export function CeVsPeChart({ ceSeries, peSeries, prevCeSeries = [], prevPeSerie
 // JSON shape - open/high/low/close are ignored, only the bar's own volume is plotted); `vwapSeries`
 // is raw {time: isoString, obv: number} (ObvPoint's own JSON shape, reused for VWAP the same way
 // CdvCeSeries/CdvPeSeries reuse it for CDV).
-export function VolumeVwapChart({ volumeBars, vwapSeries, height = 180 }) {
+export function VolumeVwapChart({ volumeBars, vwapSeries, height = 180, focusTime }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const volumeRef = useRef(null)
@@ -449,6 +474,10 @@ export function VolumeVwapChart({ volumeBars, vwapSeries, height = 180 }) {
       try { chartRef.current?.timeScale().setVisibleRange(preservedRange) } catch { /* empty */ }
     }
   }, [sanitizedVolume, sanitizedVwap])
+
+  useEffect(() => {
+    scrollChartToTime(chartRef.current, focusTime)
+  }, [focusTime])
 
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }

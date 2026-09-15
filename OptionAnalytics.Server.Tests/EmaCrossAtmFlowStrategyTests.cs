@@ -4,9 +4,9 @@ using OptionAnalytics.Server.Services.Backtesting;
 namespace OptionAnalytics.Server.Tests;
 
 /// <summary>Covers EmaCrossAtmFlowStrategy's three confirmation gates in isolation - the cross
-/// detector, the "did the option leg cross recently enough" window, the "is flow rising" test, and
-/// the OBV/CDV mode combination. Pulled out because the strategy as a whole reads live CDV/Dhan
-/// state this project has no harness for.</summary>
+/// detector, the "did the option leg cross recently enough" window, the "does flow favor this
+/// direction" test, and the OBV/CDV mode combination. Pulled out because the strategy as a whole
+/// reads live CDV/Dhan state this project has no harness for.</summary>
 public sealed class EmaCrossAtmFlowStrategyTests
 {
     private static readonly DateTimeOffset T0 = new(2026, 1, 5, 4, 0, 0, TimeSpan.Zero);
@@ -95,47 +95,60 @@ public sealed class EmaCrossAtmFlowStrategyTests
         Assert.False(EmaCrossAtmFlowStrategy.CrossedWithin(new[] { At(9) }, At(10), TimeSpan.Zero));
     }
 
-    // ---- IsRising ------------------------------------------------------------------------------
+    // ---- FlowFavors ------------------------------------------------------------------------------
 
     [Fact]
-    public void IsRising_ComparesAgainstTheValueOneWindowBack()
+    public void FlowFavors_BullishNeedsCeAbovePe()
     {
-        var series = new[] { new ObvPoint(At(0), 100), new ObvPoint(At(5), 120), new ObvPoint(At(10), 140) };
+        var ce = new[] { new ObvPoint(At(10), 140) };
+        var pe = new[] { new ObvPoint(At(10), 100) };
 
-        Assert.True(EmaCrossAtmFlowStrategy.IsRising(series, At(10), TimeSpan.FromMinutes(5)));
+        Assert.True(EmaCrossAtmFlowStrategy.FlowFavors(ce, pe, At(10), bullish: true));
+        Assert.False(EmaCrossAtmFlowStrategy.FlowFavors(ce, pe, At(10), bullish: false));
     }
 
     [Fact]
-    public void IsRising_FallingOrFlatIsNotRising()
+    public void FlowFavors_BearishNeedsPeAboveCe()
     {
-        var falling = new[] { new ObvPoint(At(5), 200), new ObvPoint(At(10), 150) };
-        Assert.False(EmaCrossAtmFlowStrategy.IsRising(falling, At(10), TimeSpan.FromMinutes(5)));
+        var ce = new[] { new ObvPoint(At(10), 100) };
+        var pe = new[] { new ObvPoint(At(10), 140) };
 
-        // Exactly equal is not rising either - "not falling" is a weaker claim than the filter makes.
-        var flat = new[] { new ObvPoint(At(5), 150), new ObvPoint(At(10), 150) };
-        Assert.False(EmaCrossAtmFlowStrategy.IsRising(flat, At(10), TimeSpan.FromMinutes(5)));
+        Assert.True(EmaCrossAtmFlowStrategy.FlowFavors(ce, pe, At(10), bullish: false));
+        Assert.False(EmaCrossAtmFlowStrategy.FlowFavors(ce, pe, At(10), bullish: true));
     }
 
     [Fact]
-    public void IsRising_ReadsTheLastPointAtOrBeforeEachEnd()
+    public void FlowFavors_ExactlyEqualFavorsNeitherSide()
     {
-        // The flow series need not have a point exactly on the spot bar's timestamp - it is read as
-        // "the last value known by then", which is what makes this work across series that do not
-        // share an index.
-        var series = new[] { new ObvPoint(At(1), 100), new ObvPoint(At(7), 130) };
+        var ce = new[] { new ObvPoint(At(10), 100) };
+        var pe = new[] { new ObvPoint(At(10), 100) };
 
-        Assert.True(EmaCrossAtmFlowStrategy.IsRising(series, At(10), TimeSpan.FromMinutes(5)));
+        Assert.False(EmaCrossAtmFlowStrategy.FlowFavors(ce, pe, At(10), bullish: true));
+        Assert.False(EmaCrossAtmFlowStrategy.FlowFavors(ce, pe, At(10), bullish: false));
     }
 
     [Fact]
-    public void IsRising_NoReadingAtEitherEndIsNotRising()
+    public void FlowFavors_ReadsTheLastPointAtOrBeforeTheGivenTime()
     {
-        // Nothing before the window starts: "no data" must not pass a filter whose whole job is to
-        // require evidence.
-        var series = new[] { new ObvPoint(At(9), 100), new ObvPoint(At(10), 200) };
+        // Neither series has a point exactly on the spot bar's own timestamp - each is read as "the
+        // last value known by then", which is what makes this work across series that do not share
+        // an index (CE/PE bars do not necessarily land on the same timestamps as spot's).
+        var ce = new[] { new ObvPoint(At(1), 100), new ObvPoint(At(7), 140) };
+        var pe = new[] { new ObvPoint(At(2), 100), new ObvPoint(At(8), 100) };
 
-        Assert.False(EmaCrossAtmFlowStrategy.IsRising(series, At(10), TimeSpan.FromMinutes(5)));
-        Assert.False(EmaCrossAtmFlowStrategy.IsRising(Array.Empty<ObvPoint>(), At(10), TimeSpan.FromMinutes(5)));
+        Assert.True(EmaCrossAtmFlowStrategy.FlowFavors(ce, pe, At(10), bullish: true));
+    }
+
+    [Fact]
+    public void FlowFavors_NoReadingOnEitherSideFavorsNeitherDirection()
+    {
+        // Nothing at or before the given time yet: "no data" must not pass a filter whose whole job
+        // is to require evidence for whichever direction is being confirmed.
+        var ce = new[] { new ObvPoint(At(11), 100) };
+        var pe = new[] { new ObvPoint(At(10), 50) };
+
+        Assert.False(EmaCrossAtmFlowStrategy.FlowFavors(ce, pe, At(10), bullish: true));
+        Assert.False(EmaCrossAtmFlowStrategy.FlowFavors(Array.Empty<ObvPoint>(), Array.Empty<ObvPoint>(), At(10), bullish: true));
     }
 
     // ---- FlowConfirms --------------------------------------------------------------------------

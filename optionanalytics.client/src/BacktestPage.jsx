@@ -7,7 +7,7 @@ import {
   UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, EMA_COLOR, computeEma, NavBar, DirectionTag, ALERT_KIND_LABEL, fmtIstDateTime, fmtIstTime, fmtPrice, istDateKey,
   TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry,
   AXIS_COLOR, GRID_COLOR, BORDER_COLOR, istTimeFormatter, istTickMarkFormatter, toBar, toChartTime, dayResetMarkers,
-  CeVsPeChart, VolumeVwapChart,
+  CeVsPeChart, VolumeVwapChart, scrollChartToTime,
 } from './shared.jsx'
 
 // This page's own persisted keys - underlying/timeframe are shared across every page (see
@@ -101,7 +101,7 @@ function tradeEntryMarkers(trades) {
 // emaPoints is already pre-computed (or empty) by the caller - this component only ever calls
 // setData with whatever it is handed, so unticking the checkbox (which then passes []) clears the
 // line without this component needing to know WHY it's empty.
-function SpotCandleChart({ bars, trades, emaPoints, height = 420 }) {
+function SpotCandleChart({ bars, trades, emaPoints, height = 420, focusTime }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
@@ -162,6 +162,11 @@ function SpotCandleChart({ bars, trades, emaPoints, height = 420 }) {
     if (!markersRef.current) return
     markersRef.current.setMarkers([...dayResetMarkers(bars), ...tradeEntryMarkers(trades)].sort((a, b) => a.time - b.time))
   }, [bars, trades])
+
+  // A Trades/Signals row click elsewhere on the page sets focusTime to that row's own time.
+  useEffect(() => {
+    scrollChartToTime(chartRef.current, focusTime)
+  }, [focusTime])
 
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }
@@ -236,6 +241,12 @@ export default function BacktestPage() {
   const [cdvPrevPe, setCdvPrevPe] = useState([])
   const [spotVolumeBars, setSpotVolumeBars] = useState([])
   const [spotVwapSeries, setSpotVwapSeries] = useState([])
+
+  // Set by clicking a Trades/Signals row - every chart on this page (spot, OBV, CDV, Volume+VWAP)
+  // recenters on this same moment, at whatever zoom level it already had (see
+  // shared.jsx's scrollChartToTime). A plain ISO string, the same shape every row's own time field
+  // already is, so no conversion is needed between "the row I clicked" and "the time to scroll to".
+  const [focusTime, setFocusTime] = useState(null)
 
   // Which strategy key paramValues currently reflects - seeded from the RESTORED strategyKey so a
   // page load that finds matching stored parameters keeps them, rather than the defaults-reset
@@ -691,7 +702,7 @@ export default function BacktestPage() {
                   <Text style={{ color: EMA_COLOR }}>Show 5 EMA</Text>
                 </Checkbox>
                 <ChartErrorBoundary key={`${selected}-${expiryParam}-${timeframe}-${fromDay}-${toDay}`}>
-                  <SpotCandleChart bars={chartBars} trades={visibleTrades} emaPoints={emaPoints} height={420} />
+                  <SpotCandleChart bars={chartBars} trades={visibleTrades} emaPoints={emaPoints} height={420} focusTime={focusTime} />
                 </ChartErrorBoundary>
               </>
             ) : (
@@ -709,6 +720,7 @@ export default function BacktestPage() {
                 dataSource={visibleTrades}
                 columns={tradeColumns}
                 pagination={{ pageSize: 25, showSizeChanger: false }}
+                onRow={(row) => ({ onClick: () => setFocusTime(row.entryTimeUtc ?? row.signalTimeUtc), style: { cursor: 'pointer' } })}
                 locale={{ emptyText: (fromDay || toDay)
                   ? 'No trades on the selected dates - widen or clear the date filter.'
                   : 'No trades - no Confluence signals yet, or click Run to simulate with the current settings.' }}
@@ -720,25 +732,25 @@ export default function BacktestPage() {
         <Card
           size="small"
           title="Order Flow — verify CDV / OBV / Volume"
-          extra={<Text type="secondary" style={{ fontSize: 12 }}>The same live series the Dashboard charts, for checking a strategy's own signals against them</Text>}
+          extra={<Text type="secondary" style={{ fontSize: 12 }}>The same live series the Dashboard charts, for checking a strategy's own signals against them - click a row in Trades/Signals below to jump every chart here (and the spot chart above) to that moment</Text>}
         >
           <Space direction="vertical" size={16} style={{ width: '100%' }}>
             <div>
               <Text type="secondary" style={{ fontSize: 12 }}>Spot Volume + Session VWAP</Text>
               <ChartErrorBoundary key={`vol-${selected}-${expiryParam}`}>
-                <VolumeVwapChart volumeBars={spotVolumeBars} vwapSeries={spotVwapSeries} height={180} />
+                <VolumeVwapChart volumeBars={spotVolumeBars} vwapSeries={spotVwapSeries} height={180} focusTime={focusTime} />
               </ChartErrorBoundary>
             </div>
             <div>
               <Text type="secondary" style={{ fontSize: 12 }}>OBV (delta-weighted, CE vs PE)</Text>
               <ChartErrorBoundary key={`obv-${selected}-${expiryParam}`}>
-                <CeVsPeChart ceSeries={obvCe} peSeries={obvPe} valueKey="obv" height={220} />
+                <CeVsPeChart ceSeries={obvCe} peSeries={obvPe} valueKey="obv" height={220} focusTime={focusTime} />
               </ChartErrorBoundary>
             </div>
             <div>
               <Text type="secondary" style={{ fontSize: 12 }}>CDV (session, resets daily — dashed line is the previous trading day)</Text>
               <ChartErrorBoundary key={`cdv-${selected}-${expiryParam}`}>
-                <CeVsPeChart ceSeries={cdvCe} peSeries={cdvPe} prevCeSeries={cdvPrevCe} prevPeSeries={cdvPrevPe} valueKey="obv" height={220} />
+                <CeVsPeChart ceSeries={cdvCe} peSeries={cdvPe} prevCeSeries={cdvPrevCe} prevPeSeries={cdvPrevPe} valueKey="obv" height={220} focusTime={focusTime} />
               </ChartErrorBoundary>
             </div>
           </Space>
@@ -776,6 +788,7 @@ export default function BacktestPage() {
             dataSource={visibleSignals}
             columns={signalColumns}
             pagination={{ pageSize: 25, showSizeChanger: false }}
+            onRow={(row) => ({ onClick: () => setFocusTime(row.timeUtc), style: { cursor: 'pointer' } })}
             locale={{ emptyText: (fromDay || toDay)
               ? 'No signals on the selected dates - widen or clear the date filter.'
               : 'No signals - not enough closed-bar history yet, or the underlying has no backfilled candles.' }}
