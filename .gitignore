@@ -22,6 +22,17 @@ appsettings.*.local.json
 
 # Saved strategy triggers are local runtime config (see StrategyTriggerStore), not source.
 strategy-triggers.json
+trigger-order-history.json
+
+# DataProtection's own key ring (see Program.cs's Storage:DataProtectionKeysPath) - regenerated
+# locally on first run when that setting isn't configured; committing it would both be pointless
+# (docker-compose.yml points production at a persistent volume instead) and put real key material
+# in source control.
+dataprotection-keys/
+
+# HistoricalSpotDataPrefetchHostedService's on-disk cache (see Storage:HistoricalDataPath) -
+# regenerated locally the same way, and only ever meaningful on the machine that fetched it.
+historical-data/
 
 # Local deployment env (never commit)
 .env
