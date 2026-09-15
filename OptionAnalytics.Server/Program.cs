@@ -171,8 +171,8 @@ builder.Services.AddHostedService<HistoricalSpotDataPrefetchHostedService>();
 
 // Every registered IBacktestStrategy is picked up automatically by BacktestService's
 // IEnumerable<IBacktestStrategy> constructor param - add a strategy by implementing the
-// interface and adding one AddSingleton line here, nothing else needs to change. None
-// registered right now - Backtrack/Expired Backtest's own strategy dropdowns are empty until one is.
+// interface and adding one AddSingleton line here, nothing else needs to change.
+builder.Services.AddSingleton<IBacktestStrategy, SrFlowSellStrategy>();
 
 // Stateless - reads SpotFeedHostedService/CdvHostedService's in-memory history fresh on every
 // request, nothing to run in the background. See BacktestController/BacktestService.
