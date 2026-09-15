@@ -752,11 +752,7 @@ export default function ExpiredBacktestPage() {
                     </div>
                   </>
                 ) : (
-                  <Empty description={
-                    strategyKey === 'ema-cross-atm-flow'
-                      ? 'No CDV/OBV data for this run.'
-                      : "No CDV/OBV data - tick 'Also compute CDV / OBV for this run' above and Run again."
-                  } />
+                  <Empty description="No CDV/OBV data - tick 'Also compute CDV / OBV for this run' above and Run again." />
                 )}
               </Space>
             </Card>

@@ -96,7 +96,13 @@ namespace OptionAnalytics.Server.Services;
 /// result rather than silently mispricing anything.</summary>
 public sealed class ExpiredOptionBacktestService
 {
-    private static readonly HashSet<string> SupportedStrategyKeys = new() { "five-ema", "ayush-5-ema", "ema-cross-atm-flow", "ema-vwap-sell" };
+    /// <summary>Empty right now - every strategy that used to be listed here was removed. A new
+    /// strategy becomes eligible for Expired Backtest by adding its key here, provided its entire
+    /// signal/pricing logic only reads spot bars plus GetOptionBars(strike, isCall) for one strike at
+    /// a time (see this class's own top-of-file doc comment for the one exception that needs more:
+    /// order-flow across the whole surrounding strike chain, via includeObvCdv/needsFlowChain
+    /// below).</summary>
+    private static readonly HashSet<string> SupportedStrategyKeys = new();
 
     /// <summary>Underlyings this feature supports at all - Dhan's rolling-option docs only ever show
     /// "NSE_FNO" as the exchange segment, never a BSE one, so SENSEX is left out rather than
@@ -388,14 +394,14 @@ public sealed class ExpiredOptionBacktestService
         // in addition to it, since FlowChainRadius (10) already covers any legal otmSteps (bounded to
         // +-8), so the wider band alone still serves this run's own pricing too.
         //
-        // includeObvCdv is the SAME wide fetch, opted into for ANY strategy - not because that
-        // strategy's own signal logic needs it (only EmaCrossAtmFlowStrategy's does), but so the page
-        // can plot the OBV/CDV chart alongside a run of five-ema/ayush-5-ema/ema-vwap-sell too, purely
-        // for the user to visually check those series are behaving sensibly. Off by default: it is
-        // real extra work (42 rolling-option fetches instead of the usual 26, per FlowChainRadius'
-        // own doc comment) and extra exposure to Dhan's rate limit, so a run that does not ask for the
-        // chart does not pay for it.
-        var needsFlowChain = strategyKey == "ema-cross-atm-flow" || includeObvCdv;
+        // includeObvCdv opts ANY strategy into this same wide fetch purely so the page can plot the
+        // OBV/CDV chart alongside a run, for the user to visually check those series are behaving
+        // sensibly - no currently-registered strategy's own signal logic reads it (see
+        // SupportedStrategyKeys' own doc comment for the kind of strategy that would). Off by
+        // default: it is real extra work (42 rolling-option fetches instead of the usual 26, per
+        // FlowChainRadius' own doc comment) and extra exposure to Dhan's rate limit, so a run that
+        // does not ask for the chart does not pay for it.
+        var needsFlowChain = includeObvCdv;
         var bandCenterSteps = needsFlowChain ? 0 : otmSteps;
         var bandRadius = needsFlowChain ? FlowChainRadius : StrikeBandSteps;
         var (ceBand, ceError) = await FetchStrikeBandAsync(instrument.SecurityId, expiryFlag, segments, bandCenterSteps, bandRadius, isCall: true, spotBars1m, step, cancellationToken);
