@@ -59,7 +59,8 @@ public sealed class EmaCrossoverRetestStrategyTests
         return bars;
     }
 
-    private static BacktestStrategyContext Context(IReadOnlyList<Candle> spotBars) => new()
+    private static BacktestStrategyContext Context(
+        IReadOnlyList<Candle> spotBars, IReadOnlyList<ObvPoint>? obvCe = null, IReadOnlyList<ObvPoint>? obvPe = null) => new()
     {
         Underlying = "NIFTY",
         TimeframeMinutes = 1,
@@ -69,8 +70,8 @@ public sealed class EmaCrossoverRetestStrategyTests
         SpotVolumeBarsOneMinute = Array.Empty<CandleWithVolume>(),
         ConfluenceSignalsAscending = Array.Empty<BacktestSignal>(),
         AllSignals = Array.Empty<BacktestSignal>(),
-        ObvCeSeries = Array.Empty<ObvPoint>(),
-        ObvPeSeries = Array.Empty<ObvPoint>(),
+        ObvCeSeries = obvCe ?? Array.Empty<ObvPoint>(),
+        ObvPeSeries = obvPe ?? Array.Empty<ObvPoint>(),
         CdvCeSeries = Array.Empty<ObvPoint>(),
         CdvPeSeries = Array.Empty<ObvPoint>(),
         GetOptionBars = (_, _) => Array.Empty<Candle>(),
@@ -148,6 +149,52 @@ public sealed class EmaCrossoverRetestStrategyTests
         var signals = new EmaCrossoverRetestStrategy().EntrySignals(Context(bars), Parameters());
 
         Assert.DoesNotContain(signals, s => s.Kind == "Entry" && s.Direction == "Bullish");
+    }
+
+    [Fact]
+    public void RequireFlowConfirmation_OffByDefault_EntersRegardlessOfFlow()
+    {
+        var bars = BullishFixture();
+        // PE dominant, not CE - would FAIL a bullish flow check if the filter were on.
+        var ce = new[] { new ObvPoint(T0.AddMinutes(8), 100), new ObvPoint(T0.AddMinutes(13), 100) };
+        var pe = new[] { new ObvPoint(T0.AddMinutes(8), 50), new ObvPoint(T0.AddMinutes(13), 150) };
+
+        var signals = new EmaCrossoverRetestStrategy().EntrySignals(Context(bars, ce, pe), Parameters());
+
+        Assert.Contains(signals, s => s.Kind == "Entry");
+    }
+
+    [Fact]
+    public void RequireFlowConfirmation_On_RejectsWhenFlowDoesNotFavorTheDirection()
+    {
+        var bars = BullishFixture();
+        var ce = new[] { new ObvPoint(T0.AddMinutes(8), 100), new ObvPoint(T0.AddMinutes(13), 100) };
+        var pe = new[] { new ObvPoint(T0.AddMinutes(8), 50), new ObvPoint(T0.AddMinutes(13), 150) };
+        var parameters = Parameters();
+        parameters["requireFlowConfirmation"] = 1;
+        parameters["flowLookbackBars"] = 5;
+
+        var signals = new EmaCrossoverRetestStrategy().EntrySignals(Context(bars, ce, pe), parameters);
+
+        Assert.DoesNotContain(signals, s => s.Kind == "Entry");
+        Assert.Contains(signals, s => s.Kind == "Rejected" && s.Direction == "Bullish" && s.Summary.Contains("flow"));
+    }
+
+    [Fact]
+    public void RequireFlowConfirmation_On_EntersWhenFlowFavorsAndRisesTowardTheDirection()
+    {
+        var bars = BullishFixture();
+        // CE above PE and rising over the lookback - favors the Bullish entry this setup would fire.
+        var ce = new[] { new ObvPoint(T0.AddMinutes(8), 100), new ObvPoint(T0.AddMinutes(13), 140) };
+        var pe = new[] { new ObvPoint(T0.AddMinutes(8), 100), new ObvPoint(T0.AddMinutes(13), 100) };
+        var parameters = Parameters();
+        parameters["requireFlowConfirmation"] = 1;
+        parameters["flowLookbackBars"] = 5;
+
+        var signals = new EmaCrossoverRetestStrategy().EntrySignals(Context(bars, ce, pe), parameters);
+
+        var entry = Assert.Single(signals, s => s.Kind == "Entry");
+        Assert.Equal("Bullish", entry.Direction);
     }
 
     [Fact]

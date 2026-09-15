@@ -63,6 +63,7 @@ public sealed class SrFlowSellStrategyTests
         ["signalStartMinutes"] = 0, // disabled - keeps these fixtures independent of wall-clock IST
         ["excludeLastDays"] = 0,
         ["direction"] = 0, // both sides
+        ["srTimeframeMinutes"] = 30,
         ["srLookbackBars"] = 1,
         ["levelBreakBufferPoints"] = 2,
         ["retestTolerancePoints"] = 2,

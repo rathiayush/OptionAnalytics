@@ -10,9 +10,10 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 /// breakout retest ... if cdv and obv rising in bull direction growing from last few candles then
 /// it is breakout, if not it is going to be a fakeout".
 ///
-/// THE LEVEL: a rolling high/low channel over the last SrLookbackBars 30-MINUTE bars (aggregated
-/// here from SpotBarsOneMinute, independent of whatever timeframe the page itself is running at) -
-/// resistance is that window's own High, support its own Low. Deliberately a plain rolling channel
+/// THE LEVEL: a rolling high/low channel over the last srLookbackBars bars of srTimeframeMinutes
+/// size (30 by default, tunable - aggregated here from SpotBarsOneMinute, independent of whatever
+/// timeframe the page itself is running at) - resistance is that window's own High, support its
+/// own Low. Deliberately a plain rolling channel
 /// rather than swing/fractal pivot detection: simpler to reason about and to test, and still a
 /// legitimate, common definition of "the level currently in play." Only ever read as of the most
 /// recently CLOSED 30-minute bar strictly before the bar being evaluated - never the still-forming
@@ -64,8 +65,6 @@ public sealed class SrFlowSellStrategy : IBacktestStrategy
     private const decimal DirectionLongOnly = 1;
     private const decimal DirectionShortOnly = 2;
 
-    private const int SrTimeframeMinutes = 30;
-
     public IReadOnlyList<BacktestParameterSpec> Parameters { get; } = new[]
     {
         OptionTradeSimulator.SideParameter() with { Default = OptionTradeSimulator.SideSell },
@@ -81,7 +80,12 @@ public sealed class SrFlowSellStrategy : IBacktestStrategy
             new BacktestParameterOption(DirectionLongOnly, "Bullish only"),
             new BacktestParameterOption(DirectionShortOnly, "Bearish only"),
         }),
-        new BacktestParameterSpec("srLookbackBars", "Support/resistance channel (30-min bars)", Default: 20, Min: 2, Max: 100, Step: 1),
+        // Was a fixed 30 - now tunable, so a 15-min or 60-min channel can be tried without a code
+        // change. Still labeled "-min bars" rather than a bar COUNT of the page's own timeframe:
+        // this is a SEPARATE aggregation of SpotBarsOneMinute (see this class's own doc comment),
+        // independent of whatever timeframe the page itself is running at.
+        new BacktestParameterSpec("srTimeframeMinutes", "Support/resistance bar size (minutes)", Default: 30, Min: 5, Max: 120, Step: 5),
+        new BacktestParameterSpec("srLookbackBars", "Support/resistance channel (bars, at the size above)", Default: 20, Min: 2, Max: 100, Step: 1),
         new BacktestParameterSpec("levelBreakBufferPoints", "Close must clear the level by at least (points)", Default: 10, Min: 0, Max: 500, Step: 1),
         new BacktestParameterSpec("retestTolerancePoints", "Counts as a retest within (points of the broken level)", Default: 10, Min: 0, Max: 500, Step: 1),
         new BacktestParameterSpec("maxRetestBars", "Give up waiting for a retest after (bars)", Default: 10, Min: 1, Max: 100, Step: 1),
@@ -111,6 +115,7 @@ public sealed class SrFlowSellStrategy : IBacktestStrategy
         var takeShorts = direction != DirectionLongOnly;
         var signalStartMinutes = (int)parameters.GetValueOrDefault("signalStartMinutes", 555);
 
+        var srTimeframeMinutes = Math.Max(1, (int)parameters["srTimeframeMinutes"]);
         var srLookbackBars = Math.Max(1, (int)parameters["srLookbackBars"]);
         var levelBreakBufferPoints = parameters["levelBreakBufferPoints"];
         var retestTolerancePoints = parameters["retestTolerancePoints"];
@@ -122,7 +127,7 @@ public sealed class SrFlowSellStrategy : IBacktestStrategy
         var signals = new List<BacktestSignal>();
 
         var bars = context.SpotBars;
-        var srBars = BacktestUtil.AggregateCandles(context.SpotBarsOneMinute, SrTimeframeMinutes);
+        var srBars = BacktestUtil.AggregateCandles(context.SpotBarsOneMinute, srTimeframeMinutes);
         if (bars.Count == 0 || srBars.Count == 0) return (entries, signals);
 
         PendingBreakout? pending = null;
@@ -132,10 +137,10 @@ public sealed class SrFlowSellStrategy : IBacktestStrategy
         {
             var bar = bars[i];
 
-            // Advance to every 30-min bar that has fully closed by this bar's own time - never the
+            // Advance to every S/R bar that has fully closed by this bar's own time - never the
             // bucket still forming through it, so the level in play is always one this bar could
             // actually have known about live.
-            while (srIndex + 1 < srBars.Count && srBars[srIndex + 1].Time.AddMinutes(SrTimeframeMinutes) <= bar.Time)
+            while (srIndex + 1 < srBars.Count && srBars[srIndex + 1].Time.AddMinutes(srTimeframeMinutes) <= bar.Time)
                 srIndex++;
 
             if (srIndex + 1 < srLookbackBars) continue; // not enough 30-min history yet for a full channel

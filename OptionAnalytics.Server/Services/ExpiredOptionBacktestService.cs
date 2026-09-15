@@ -392,14 +392,19 @@ public sealed class ExpiredOptionBacktestService
         // in addition to it, since FlowChainRadius (10) already covers any legal otmSteps (bounded to
         // +-8), so the wider band alone still serves this run's own pricing too.
         //
-        // sr-flow-sell's own entry logic reads ObvCeSeries/CdvCeSeries directly (see its own doc
-        // comment) - the same reason EmaCrossAtmFlowStrategy used to need this wide band. includeObvCdv
-        // opts ANY OTHER strategy into the same fetch purely so the page can plot the OBV/CDV chart
-        // alongside a run, for the user to visually check those series are behaving sensibly. Off by
-        // default otherwise: it is real extra work (42 rolling-option fetches instead of the usual 26,
-        // per FlowChainRadius' own doc comment) and extra exposure to Dhan's rate limit, so a run that
-        // does not need or ask for it does not pay for it.
-        var needsFlowChain = strategyKey == "sr-flow-sell" || includeObvCdv;
+        // sr-flow-sell's own entry logic ALWAYS reads ObvCeSeries/CdvCeSeries (see its own doc
+        // comment) - the same reason EmaCrossAtmFlowStrategy used to need this wide band.
+        // ema-crossover-retest only reads it when its own requireFlowConfirmation parameter is on
+        // (off by default - see its own FlowCheck), so this run's own parameters decide it rather
+        // than the strategy key alone. includeObvCdv opts ANY OTHER strategy into the same fetch
+        // purely so the page can plot the OBV/CDV chart alongside a run, for the user to visually
+        // check those series are behaving sensibly. Off by default otherwise: it is real extra work
+        // (42 rolling-option fetches instead of the usual 26, per FlowChainRadius' own doc comment)
+        // and extra exposure to Dhan's rate limit, so a run that does not need or ask for it does
+        // not pay for it.
+        var needsFlowChain = strategyKey == "sr-flow-sell"
+            || (strategyKey == "ema-crossover-retest" && mergedParameters.GetValueOrDefault("requireFlowConfirmation", 0m) >= 0.5m)
+            || includeObvCdv;
         var bandCenterSteps = needsFlowChain ? 0 : otmSteps;
         var bandRadius = needsFlowChain ? FlowChainRadius : StrikeBandSteps;
         var (ceBand, ceError) = await FetchStrikeBandAsync(instrument.SecurityId, expiryFlag, segments, bandCenterSteps, bandRadius, isCall: true, spotBars1m, step, cancellationToken);

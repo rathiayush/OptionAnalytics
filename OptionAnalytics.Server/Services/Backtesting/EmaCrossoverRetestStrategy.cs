@@ -39,6 +39,17 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 /// rather than forcedExitTimes, since a break is DIRECTIONAL (a bullish trade exits on a break
 /// DOWN, a bearish one on a break UP - a single shared list of either direction would not
 /// distinguish them the way FiveEmaStrategy's own symmetric "touch" exit safely can).
+///
+/// OPTIONAL flow confirmation (RequireFlowConfirmation, off by default): the same OBV/CDV series
+/// SrFlowSellStrategy already reads (context.ObvCeSeries/CdvCeSeries etc. - summed across the
+/// whole live-tracked ATM+-16 strike chain on Backtrack, or Expired Backtest's own wider
+/// reconstruction when this parameter is on - see ExpiredOptionBacktestService's own
+/// needsFlowChain), checked once, at the entry bar itself: the traded leg's OBV/CDV (CE for a
+/// bullish entry, PE for a bearish one) has to be both ABOVE the other leg and RISING over
+/// FlowLookbackBars bars - the same ordering-and-rising definition EmaCrossAtmFlowStrategy's own
+/// (since-removed) FlowConfirmation class used, reimplemented here directly rather than resurrecting
+/// a shared class for what only this one strategy currently needs beyond SrFlowSellStrategy's own
+/// (differently-shaped, acceleration-based) check.
 /// </summary>
 public sealed class EmaCrossoverRetestStrategy : IBacktestStrategy
 {
@@ -52,6 +63,11 @@ public sealed class EmaCrossoverRetestStrategy : IBacktestStrategy
 
     private const decimal FlagOff = 0;
     private const decimal FlagOn = 1;
+
+    private const decimal ModeObvOnly = 0;
+    private const decimal ModeCdvOnly = 1;
+    private const decimal ModeEither = 2;
+    private const decimal ModeBoth = 3;
 
     public IReadOnlyList<BacktestParameterSpec> Parameters { get; } = new[]
     {
@@ -75,6 +91,21 @@ public sealed class EmaCrossoverRetestStrategy : IBacktestStrategy
         {
             new BacktestParameterOption(FlagOn, "Yes - the taught target"),
             new BacktestParameterOption(FlagOff, "No - stop/target only"),
+        }),
+        // Optional and off by default, so the setup as described is unaffected unless deliberately
+        // turned on - see this class's own doc comment for exactly what it checks.
+        new BacktestParameterSpec("requireFlowConfirmation", "Also require order flow (OBV/CDV) to confirm", Default: FlagOff, Min: FlagOff, Max: FlagOn, Step: 1, Options: new[]
+        {
+            new BacktestParameterOption(FlagOff, "No - structure only"),
+            new BacktestParameterOption(FlagOn, "Yes - flow must favor + rise toward the entry"),
+        }),
+        new BacktestParameterSpec("flowLookbackBars", "Flow must be rising over (bars)", Default: 5, Min: 1, Max: 200, Step: 1),
+        new BacktestParameterSpec("flowMode", "Flow must favor + rise toward the entry on", Default: ModeEither, Min: ModeObvOnly, Max: ModeBoth, Step: 1, Options: new[]
+        {
+            new BacktestParameterOption(ModeObvOnly, "OBV only"),
+            new BacktestParameterOption(ModeCdvOnly, "CDV only"),
+            new BacktestParameterOption(ModeEither, "Either OBV or CDV"),
+            new BacktestParameterOption(ModeBoth, "Both OBV and CDV"),
         }),
     };
 
@@ -100,6 +131,9 @@ public sealed class EmaCrossoverRetestStrategy : IBacktestStrategy
         var fastPeriod = Math.Max(1, (int)parameters["fastEmaPeriod"]);
         var slowPeriod = Math.Max(fastPeriod + 1, (int)parameters["slowEmaPeriod"]);
         var requiredRetests = Math.Max(1, (int)parameters["requiredRetests"]);
+        var requireFlowConfirmation = parameters.GetValueOrDefault("requireFlowConfirmation", FlagOff) >= (FlagOff + FlagOn) / 2;
+        var flowLookbackBars = Math.Max(1, (int)parameters.GetValueOrDefault("flowLookbackBars", 5));
+        var flowMode = parameters.GetValueOrDefault("flowMode", ModeEither);
 
         var entries = new List<(DateTimeOffset Time, string Direction)>();
         var signals = new List<BacktestSignal>();
@@ -156,9 +190,17 @@ public sealed class EmaCrossoverRetestStrategy : IBacktestStrategy
                         }
                         else
                         {
-                            signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Entry", dir, summary));
-                            entries.Add((bar.Time, dir));
-                            entryIndexes.Add((i, bar.Time, p.Bullish));
+                            var (flowOk, flowReason) = FlowCheck(context, bar.Time, p.Bullish, requireFlowConfirmation, flowLookbackBars, flowMode);
+                            if (!flowOk)
+                            {
+                                signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", dir, $"{summary} - but {flowReason}"));
+                            }
+                            else
+                            {
+                                signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Entry", dir, requireFlowConfirmation ? $"{summary}, and {flowReason}" : summary));
+                                entries.Add((bar.Time, dir));
+                                entryIndexes.Add((i, bar.Time, p.Bullish));
+                            }
                         }
                         pending = null;
                     }
@@ -196,5 +238,48 @@ public sealed class EmaCrossoverRetestStrategy : IBacktestStrategy
         }
 
         return (entries, signals.OrderByDescending(s => s.TimeUtc).ToList(), emaBreakExits);
+    }
+
+    /// <summary>Optional (see requireFlowConfirmation's own doc comment) - CE for a Bullish entry,
+    /// PE for a Bearish one, the same leg OptionTradeSimulator's own default Buy side would
+    /// actually buy for that direction. True (no reason given) when the filter is off. "Favors"
+    /// means both ordering (the traded leg above the other, right now) AND rising (that leg higher
+    /// now than one flowLookbackBars-bar window earlier) - the same combination this app settled on
+    /// for EmaCrossAtmFlowStrategy's own (since-removed) flow gate.</summary>
+    private static (bool Ok, string Reason) FlowCheck(
+        BacktestStrategyContext context, DateTimeOffset at, bool bullish, bool requireFlowConfirmation, int lookbackBars, decimal flowMode)
+    {
+        if (!requireFlowConfirmation) return (true, "");
+
+        var window = TimeSpan.FromMinutes(Math.Max(1, context.TimeframeMinutes) * lookbackBars);
+
+        bool? Favors(IReadOnlyList<ObvPoint> ceSeries, IReadOnlyList<ObvPoint> peSeries)
+        {
+            if (BacktestUtil.LastValueAtOrBefore(ceSeries, at) is not { } ceNow || BacktestUtil.LastValueAtOrBefore(peSeries, at) is not { } peNow)
+                return null;
+            var onRightSide = bullish ? ceNow > peNow : peNow > ceNow;
+            if (!onRightSide) return false;
+            var winningSeries = bullish ? ceSeries : peSeries;
+            var winningNow = bullish ? ceNow : peNow;
+            if (BacktestUtil.LastValueAtOrBefore(winningSeries, at - window) is not { } winningEarlier) return null;
+            return winningNow > winningEarlier;
+        }
+
+        var obv = Favors(context.ObvCeSeries, context.ObvPeSeries);
+        var cdv = Favors(context.CdvCeSeries, context.CdvPeSeries);
+        var confirmed = flowMode switch
+        {
+            ModeObvOnly => obv ?? false,
+            ModeCdvOnly => cdv ?? false,
+            ModeBoth => (obv ?? false) && (cdv ?? false),
+            _ => (obv ?? false) || (cdv ?? false),
+        };
+
+        var leg = bullish ? "CE over PE" : "PE over CE";
+        var modeLabel = flowMode switch { ModeObvOnly => "OBV", ModeCdvOnly => "CDV", ModeBoth => "OBV and CDV", _ => "OBV or CDV" };
+        var reason = confirmed
+            ? $"flow favors {leg} and has risen over the last {lookbackBars} bar(s) ({modeLabel})"
+            : $"flow does not favor {leg} and rising over the last {lookbackBars} bar(s) as required ({modeLabel}; OBV {(obv is true ? "confirms it" : "does not")}, CDV {(cdv is true ? "confirms it" : "does not")})";
+        return (confirmed, reason);
     }
 }
