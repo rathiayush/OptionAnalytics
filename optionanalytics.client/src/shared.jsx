@@ -310,6 +310,42 @@ export function scrollChartToTime(chart, isoTime) {
   try { chart.timeScale().setVisibleRange({ from: target - half, to: target + half }) } catch { /* empty */ }
 }
 
+// The last point in a chart-time-ascending, already-converted array (bars from toBar, or points from
+// toLinePoints/the volume mapper - anything shaped {time, [valueKey]}) at or before targetChartTime -
+// what a highlight needs to know "where on this series' own line does that time actually fall",
+// since a click's exact time rarely lands on one of this particular series' own bars (CE/PE/volume
+// bars do not share spot's own timestamps).
+export function lastValueAtOrBeforeChartTime(points, targetChartTime, valueKey = 'value') {
+  let value = null
+  for (const p of points) {
+    if (p.time > targetChartTime) break
+    value = p[valueKey]
+  }
+  return value
+}
+
+// Drops lightweight-charts' own crosshair (the dashed vertical+horizontal line pair, with axis
+// labels) onto `series` at `targetChartTime`/`price` and leaves it there - unlike the crosshair's
+// usual behavior (following the mouse, vanishing when it leaves the chart), an explicitly-set one
+// stays exactly where put until moved or cleared, which is what makes it work as a persistent
+// "here is the row you clicked" marker rather than something that disappears the instant the pointer
+// moves. This is what actually answers "which bar is that" - scrollChartToTime alone only brings the
+// right neighborhood into view, it does not mark anything.
+//
+// `targetChartTime` null clears the crosshair outright (nothing focused, or nothing to show it on
+// yet); a non-null price` of null/undefined leaves the previous crosshair as-is rather than setting
+// a nonsensical one - the caller has nothing at or before that time on THIS particular series (e.g.
+// an OBV chart whose own history starts later than the clicked row).
+export function highlightChartAtTime(chart, series, targetChartTime, price) {
+  if (!chart) return
+  if (targetChartTime == null) {
+    try { chart.clearCrosshairPosition() } catch { /* empty */ }
+    return
+  }
+  if (!series || price == null) return
+  try { chart.setCrosshairPosition(price, targetChartTime, series) } catch { /* empty */ }
+}
+
 // A generic two-line CE/PE running-total chart - CDV or OBV, whichever `valueKey` names on the raw
 // point shape the backend returns (ObvPoint's own JSON field is "obv" for both: OBV and CDV are
 // exposed as the same shape). A simplified port of App.jsx's own CeVsPeChart (the Dashboard's live
@@ -399,11 +435,17 @@ export function CeVsPeChart({ ceSeries, peSeries, prevCeSeries = [], prevPeSerie
     markersRef.current?.setMarkers(resetMarkers)
   }, [resetMarkers])
 
-  // A row click elsewhere on the page sets focusTime to that row's own time - see
-  // scrollChartToTime's own doc comment for why this recenters rather than re-fits/re-zooms.
+  // A row click elsewhere on the page sets focusTime to that row's own time - recenter (see
+  // scrollChartToTime's own doc comment for why that recenters rather than re-fits/re-zooms) AND
+  // drop a persistent crosshair on the CE line so the exact bar is actually marked, not just
+  // somewhere in view - see highlightChartAtTime's own doc comment for why scrolling alone isn't
+  // enough to answer "which one is it".
   useEffect(() => {
     scrollChartToTime(chartRef.current, focusTime)
-  }, [focusTime])
+    const target = focusTime ? toChartTime(focusTime) : null
+    const price = target != null ? lastValueAtOrBeforeChartTime(sanitizedCe, target) : null
+    highlightChartAtTime(chartRef.current, ceRef.current, target, price)
+  }, [focusTime, sanitizedCe])
 
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }
@@ -477,7 +519,10 @@ export function VolumeVwapChart({ volumeBars, vwapSeries, height = 180, focusTim
 
   useEffect(() => {
     scrollChartToTime(chartRef.current, focusTime)
-  }, [focusTime])
+    const target = focusTime ? toChartTime(focusTime) : null
+    const price = target != null ? lastValueAtOrBeforeChartTime(sanitizedVolume, target) : null
+    highlightChartAtTime(chartRef.current, volumeRef.current, target, price)
+  }, [focusTime, sanitizedVolume])
 
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }

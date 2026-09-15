@@ -7,7 +7,7 @@ import {
   UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, EMA_COLOR, computeEma, NavBar, DirectionTag, ALERT_KIND_LABEL, fmtIstDateTime, fmtIstTime, fmtPrice, istDateKey,
   TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry,
   AXIS_COLOR, GRID_COLOR, BORDER_COLOR, istTimeFormatter, istTickMarkFormatter, toBar, toChartTime, dayResetMarkers,
-  CeVsPeChart, VolumeVwapChart, scrollChartToTime,
+  CeVsPeChart, VolumeVwapChart, scrollChartToTime, highlightChartAtTime, lastValueAtOrBeforeChartTime,
 } from './shared.jsx'
 
 // This page's own persisted keys - underlying/timeframe are shared across every page (see
@@ -163,10 +163,15 @@ function SpotCandleChart({ bars, trades, emaPoints, height = 420, focusTime }) {
     markersRef.current.setMarkers([...dayResetMarkers(bars), ...tradeEntryMarkers(trades)].sort((a, b) => a.time - b.time))
   }, [bars, trades])
 
-  // A Trades/Signals row click elsewhere on the page sets focusTime to that row's own time.
+  // A Trades/Signals row click elsewhere on the page sets focusTime to that row's own time -
+  // recenter AND drop a persistent crosshair on the candlestick series at that exact bar, so the
+  // signal is actually marked, not just somewhere in the visible window.
   useEffect(() => {
     scrollChartToTime(chartRef.current, focusTime)
-  }, [focusTime])
+    const target = focusTime ? toChartTime(focusTime) : null
+    const price = target != null ? lastValueAtOrBeforeChartTime(bars, target, 'close') : null
+    highlightChartAtTime(chartRef.current, seriesRef.current, target, price)
+  }, [focusTime, bars])
 
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }
@@ -695,46 +700,27 @@ export default function BacktestPage() {
                 whole window; the stats above cover the filtered rows only.
               </Text>
             )}
+          </Space>
+        </Card>
 
+        <Card
+          size="small"
+          title="Charts — Spot, CDV, OBV, Volume"
+          extra={<Text type="secondary" style={{ fontSize: 12 }}>Click a row in Trades/Signals below to jump every chart here to that exact moment, marked with a crosshair</Text>}
+        >
+          <Space direction="vertical" size={16} style={{ width: '100%' }}>
             {chartBars.length > 0 ? (
-              <>
+              <div>
                 <Checkbox checked={showEma} onChange={(e) => setShowEma(e.target.checked)}>
                   <Text style={{ color: EMA_COLOR }}>Show 5 EMA</Text>
                 </Checkbox>
                 <ChartErrorBoundary key={`${selected}-${expiryParam}-${timeframe}-${fromDay}-${toDay}`}>
                   <SpotCandleChart bars={chartBars} trades={visibleTrades} emaPoints={emaPoints} height={420} focusTime={focusTime} />
                 </ChartErrorBoundary>
-              </>
+              </div>
             ) : (
               <Empty description="No spot candles to chart yet." />
             )}
-
-            {tradesLoading && !trades ? (
-              <div style={{ display: 'flex', justifyContent: 'center', padding: 40 }}>
-                <Spin size="large" />
-              </div>
-            ) : (
-              <Table
-                size="small"
-                rowKey={(row) => `${row.signalTimeUtc}-${row.optionType}`}
-                dataSource={visibleTrades}
-                columns={tradeColumns}
-                pagination={{ pageSize: 25, showSizeChanger: false }}
-                onRow={(row) => ({ onClick: () => setFocusTime(row.entryTimeUtc ?? row.signalTimeUtc), style: { cursor: 'pointer' } })}
-                locale={{ emptyText: (fromDay || toDay)
-                  ? 'No trades on the selected dates - widen or clear the date filter.'
-                  : 'No trades - no Confluence signals yet, or click Run to simulate with the current settings.' }}
-              />
-            )}
-          </Space>
-        </Card>
-
-        <Card
-          size="small"
-          title="Order Flow — verify CDV / OBV / Volume"
-          extra={<Text type="secondary" style={{ fontSize: 12 }}>The same live series the Dashboard charts, for checking a strategy's own signals against them - click a row in Trades/Signals below to jump every chart here (and the spot chart above) to that moment</Text>}
-        >
-          <Space direction="vertical" size={16} style={{ width: '100%' }}>
             <div>
               <Text type="secondary" style={{ fontSize: 12 }}>Spot Volume + Session VWAP</Text>
               <ChartErrorBoundary key={`vol-${selected}-${expiryParam}`}>
@@ -754,6 +740,26 @@ export default function BacktestPage() {
               </ChartErrorBoundary>
             </div>
           </Space>
+        </Card>
+
+        <Card size="small" title="Trades">
+          {tradesLoading && !trades ? (
+            <div style={{ display: 'flex', justifyContent: 'center', padding: 40 }}>
+              <Spin size="large" />
+            </div>
+          ) : (
+            <Table
+              size="small"
+              rowKey={(row) => `${row.signalTimeUtc}-${row.optionType}`}
+              dataSource={visibleTrades}
+              columns={tradeColumns}
+              pagination={{ pageSize: 25, showSizeChanger: false }}
+              onRow={(row) => ({ onClick: () => setFocusTime(row.entryTimeUtc ?? row.signalTimeUtc), style: { cursor: 'pointer' } })}
+              locale={{ emptyText: (fromDay || toDay)
+                ? 'No trades on the selected dates - widen or clear the date filter.'
+                : 'No trades - no Confluence signals yet, or click Run to simulate with the current settings.' }}
+            />
+          )}
         </Card>
 
         <Card
