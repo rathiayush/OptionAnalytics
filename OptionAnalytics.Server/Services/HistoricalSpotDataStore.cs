@@ -30,12 +30,16 @@ public sealed class HistoricalSpotDataStore
     public HistoricalSpotDataStore(IHostEnvironment environment, IConfiguration configuration, ILogger<HistoricalSpotDataStore> logger)
     {
         // Same convention as StrategyTriggerStore's own TriggersPath - Storage:HistoricalDataPath
-        // (env var Storage__HistoricalDataPath) points this at the mounted volume in production;
-        // next to the app by default for a local run. See docker-compose.yml.
+        // (env var Storage__HistoricalDataPath) points this at the mounted volume in production
+        // (docker-compose.yml sets it to an absolute /app/data/... path there); appsettings.json's
+        // own default ("historical-data") is deliberately relative, so a rooted override still wins
+        // outright while the plain default - or a local run's own relative override - resolves next
+        // to the app exactly like every other Storage:* path already does.
         var configured = configuration["Storage:HistoricalDataPath"];
-        _directory = string.IsNullOrWhiteSpace(configured)
-            ? Path.Combine(environment.ContentRootPath, "historical-data")
-            : configured;
+        var relativeOrAbsolute = string.IsNullOrWhiteSpace(configured) ? "historical-data" : configured;
+        _directory = Path.IsPathRooted(relativeOrAbsolute)
+            ? relativeOrAbsolute
+            : Path.Combine(environment.ContentRootPath, relativeOrAbsolute);
         _logger = logger;
 
         Directory.CreateDirectory(_directory);

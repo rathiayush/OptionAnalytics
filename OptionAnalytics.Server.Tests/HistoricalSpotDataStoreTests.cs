@@ -13,9 +13,10 @@ public sealed class HistoricalSpotDataStoreTests : IDisposable
 {
     private readonly string _tempDirectory = Path.Combine(Path.GetTempPath(), "oa-historical-tests-" + Guid.NewGuid().ToString("n"));
 
-    // A minimal IHostEnvironment stub - HistoricalSpotDataStore only ever reads ContentRootPath
-    // (as the fallback when Storage:HistoricalDataPath itself is set, which every test here does,
-    // so ContentRootPath is never actually consulted - just required to construct the interface).
+    // A minimal IHostEnvironment stub - ContentRootPath is what a relative (or absent)
+    // Storage:HistoricalDataPath resolves against (see ResolvesARelativeOrAbsentConfiguredPath...
+    // below); every other test here configures an absolute path directly, so ContentRootPath is
+    // otherwise unused.
     private sealed class FakeHostEnvironment : IHostEnvironment
     {
         public string EnvironmentName { get; set; } = "Test";
@@ -84,6 +85,21 @@ public sealed class HistoricalSpotDataStoreTests : IDisposable
         var store = CreateStore();
 
         Assert.Empty(store.Read("BANKNIFTY", new DateOnly(2026, 1, 1), new DateOnly(2026, 1, 31)));
+    }
+
+    [Fact]
+    public void ResolvesARelativeOrAbsentConfiguredPath_AgainstContentRootPath()
+    {
+        // appsettings.json's own default ("historical-data") is deliberately relative - this is what
+        // makes both "nothing configured at all" and "the plain appsettings.json default" land next
+        // to the app locally, exactly like every other Storage:* path, while docker-compose.yml's own
+        // absolute /app/data/... override still wins outright (covered by CreateStore's own absolute
+        // path in every other test above).
+        var configuration = new ConfigurationBuilder().Build(); // no Storage:HistoricalDataPath at all
+        var environment = new FakeHostEnvironment { ContentRootPath = _tempDirectory };
+        _ = new HistoricalSpotDataStore(environment, configuration, NullLogger<HistoricalSpotDataStore>.Instance);
+
+        Assert.True(Directory.Exists(Path.Combine(_tempDirectory, "historical-data")));
     }
 
     public void Dispose()

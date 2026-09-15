@@ -40,6 +40,11 @@ services:
       Telegram__BotToken: ${TELEGRAM_BOT_TOKEN:-}
       Telegram__ChatId: ${TELEGRAM_CHAT_ID:-}
 
+      # One-time NIFTY/BANKNIFTY historical spot download (see HistoricalSpotDataPrefetchHostedService) -
+      # off by default like Telegram above; a real year of Dhan traffic, so opt a deployment into it
+      # deliberately rather than it running the moment Dhan credentials exist.
+      HistoricalDataPrefetch__Enabled: ${HISTORICAL_DATA_PREFETCH_ENABLED:-false}
+
       # Login - the whole app requires one of these two accounts (see AuthOptions/AuthController).
       # Credentials are fixed in appsettings.json (not read from the environment) - only the emails
       # are overridable here. Deliberately NOT setting Auth__AdminPassword/Auth__UserPassword here:
