@@ -33,7 +33,19 @@ namespace OptionAnalytics.Server.Models;
 /// WIDER than [fromDay,toDay] (see ExpiredOptionBacktestService.ChartPaddingDays), a few days of
 /// spot history on each side of the actual lookback window purely so a signal sitting right at the
 /// window's own edge has visible context around it, not because the strategy itself saw any of that
-/// padding.</summary>
+/// padding.
+///
+/// SpotVolumeChartBars/SpotVwapSeries are the same widened window's own volume (real index volume,
+/// not synthetic - see DhanHistoricalDataService's own doc comment) and the session VWAP computed
+/// off it (VwapCalculator) - always populated, at zero extra Dhan cost, since both are built from
+/// spot bars this run already fetches for SpotChartBars regardless of strategy.
+///
+/// ObvCeSeries/ObvPeSeries/CdvCeSeries/CdvPeSeries are the SAME order-flow series the strategy
+/// itself was run against (see BacktestStrategyContext) - empty unless EmaCrossAtmFlowStrategy was
+/// selected, or the caller passed includeObvCdv=true to opt a DIFFERENT strategy into computing them
+/// anyway purely so the page can plot them for a visual sanity check. See
+/// ExpiredOptionBacktestService.RunAsync's own doc comment on why that is opt-in: reconstructing
+/// these needs a much wider option-chain fetch than an ordinary run.</summary>
 public sealed record ExpiredBacktestResult(
     bool Success,
     string? Error,
@@ -54,9 +66,17 @@ public sealed record ExpiredBacktestResult(
     decimal CeExpectedStrike,
     decimal PeExpectedStrike,
     int EffectiveLookbackDays,
-    IReadOnlyList<Candle> SpotChartBars)
+    IReadOnlyList<Candle> SpotChartBars,
+    IReadOnlyList<CandleWithVolume> SpotVolumeChartBars,
+    IReadOnlyList<ObvPoint> SpotVwapSeries,
+    IReadOnlyList<ObvPoint> ObvCeSeries,
+    IReadOnlyList<ObvPoint> ObvPeSeries,
+    IReadOnlyList<ObvPoint> CdvCeSeries,
+    IReadOnlyList<ObvPoint> CdvPeSeries)
 {
     public static ExpiredBacktestResult Failed(string error) =>
         new(false, error, Array.Empty<BacktestTrade>(), Array.Empty<BacktestSignal>(), 0, "", "", null, null, 0, 0, 0,
-            Array.Empty<PossibleSplice>(), Array.Empty<PossibleSplice>(), null, null, 0, 0, 0, Array.Empty<Candle>());
+            Array.Empty<PossibleSplice>(), Array.Empty<PossibleSplice>(), null, null, 0, 0, 0, Array.Empty<Candle>(),
+            Array.Empty<CandleWithVolume>(), Array.Empty<ObvPoint>(), Array.Empty<ObvPoint>(), Array.Empty<ObvPoint>(),
+            Array.Empty<ObvPoint>(), Array.Empty<ObvPoint>());
 }

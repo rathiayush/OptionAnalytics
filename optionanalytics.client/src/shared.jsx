@@ -1,7 +1,7 @@
-import { createContext, useContext, useEffect, useState } from 'react'
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { Button, Menu, Select, Space, Tag, Typography } from 'antd'
 import { useLocation, useNavigate } from 'react-router-dom'
-import { TickMarkType } from 'lightweight-charts'
+import { createChart, createSeriesMarkers, HistogramSeries, LineSeries, CrosshairMode, LineStyle, TickMarkType } from 'lightweight-charts'
 
 // Provided once, at the app root (App.jsx), after GET /api/auth/me resolves - {email, role} or
 // null. NavBar (rendered independently from four different pages) reads this via useAuth() rather
@@ -265,6 +265,192 @@ export function dayResetMarkers(bars) {
     previousDay = day
   }
   return markers
+}
+
+// Last line of defense before handing data to lightweight-charts, which throws an UNCAUGHT error if
+// two consecutive points share a time or aren't strictly ascending - duplicated (not imported) from
+// App.jsx's own identical copy, same reasoning as every other duplicated helper in this file's own
+// header comment. Sorts ascending; for a duplicate time, keeps the LAST occurrence.
+function sanitizeSeries(points) {
+  if (points.length === 0) return points
+  const sorted = [...points].sort((a, b) => a.time - b.time)
+  const result = []
+  for (const p of sorted) {
+    if (result.length > 0 && result[result.length - 1].time === p.time) {
+      result[result.length - 1] = p
+    } else {
+      result.push(p)
+    }
+  }
+  return result
+}
+
+// Raw {time: isoString, [valueKey]: number} points (the shape an ObvPoint/CandleWithVolume-derived
+// series comes off the wire as) into lightweight-charts' own {time: epochSeconds, value} shape.
+function toLinePoints(points, valueKey) {
+  return points.map((p) => ({ time: toChartTime(p.time), value: p[valueKey] }))
+}
+
+// A generic two-line CE/PE running-total chart - CDV or OBV, whichever `valueKey` names on the raw
+// point shape the backend returns (ObvPoint's own JSON field is "obv" for both: OBV and CDV are
+// exposed as the same shape). A simplified port of App.jsx's own CeVsPeChart (the Dashboard's live
+// CDV/OBV chart) for Backtrack/Expired Backtest's own verification charts - see this file's header
+// comment for why App.jsx's tuned original is left untouched rather than imported. Deliberately
+// WITHOUT App.jsx's cross-chart pan/zoom sync registry: that machinery is tuned for the Dashboard's
+// own cluster of several always-present charts, and each page using this component only ever shows
+// one or two of these, each independent.
+//
+// prevCeSeries/prevPeSeries (optional, dashed) is a reference line - CDV's previous trading day,
+// typically; OBV has no equivalent and simply omits them.
+export function CeVsPeChart({ ceSeries, peSeries, prevCeSeries = [], prevPeSeries = [], valueKey = 'obv', height = 240 }) {
+  const containerRef = useRef(null)
+  const chartRef = useRef(null)
+  const ceRef = useRef(null)
+  const peRef = useRef(null)
+  const prevCeRef = useRef(null)
+  const prevPeRef = useRef(null)
+  const markersRef = useRef(null)
+  const hasFitRef = useRef(false)
+
+  const sanitizedCe = useMemo(() => sanitizeSeries(toLinePoints(ceSeries, valueKey)), [ceSeries, valueKey])
+  const sanitizedPe = useMemo(() => sanitizeSeries(toLinePoints(peSeries, valueKey)), [peSeries, valueKey])
+  const sanitizedPrevCe = useMemo(() => sanitizeSeries(toLinePoints(prevCeSeries, valueKey)), [prevCeSeries, valueKey])
+  const sanitizedPrevPe = useMemo(() => sanitizeSeries(toLinePoints(prevPeSeries, valueKey)), [prevPeSeries, valueKey])
+
+  useEffect(() => {
+    if (!containerRef.current) return
+
+    const chart = createChart(containerRef.current, {
+      width: containerRef.current.clientWidth,
+      height,
+      layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
+      grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
+      rightPriceScale: { borderColor: BORDER_COLOR },
+      timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter },
+      crosshair: { mode: CrosshairMode.Normal },
+      localization: { timeFormatter: istTimeFormatter },
+    })
+    chartRef.current = chart
+    prevCeRef.current = chart.addSeries(LineSeries, { color: CE_COLOR, lineWidth: 1, lineStyle: LineStyle.Dashed, title: 'CE (prev day)', priceLineVisible: false, crosshairMarkerVisible: false })
+    prevPeRef.current = chart.addSeries(LineSeries, { color: PE_COLOR, lineWidth: 1, lineStyle: LineStyle.Dashed, title: 'PE (prev day)', priceLineVisible: false, crosshairMarkerVisible: false })
+    ceRef.current = chart.addSeries(LineSeries, { color: CE_COLOR, lineWidth: 2, title: 'CE', priceLineVisible: false })
+    peRef.current = chart.addSeries(LineSeries, { color: PE_COLOR, lineWidth: 2, title: 'PE', priceLineVisible: false })
+    markersRef.current = createSeriesMarkers(ceRef.current, [])
+    hasFitRef.current = false
+
+    const onResize = () => {
+      if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth })
+    }
+    window.addEventListener('resize', onResize)
+
+    return () => {
+      window.removeEventListener('resize', onResize)
+      chart.remove()
+      chartRef.current = null
+      ceRef.current = null
+      peRef.current = null
+      prevCeRef.current = null
+      prevPeRef.current = null
+      markersRef.current = null
+    }
+  }, [height])
+
+  useEffect(() => {
+    if (!ceRef.current || !peRef.current || !prevCeRef.current || !prevPeRef.current) return
+    const preservedRange = hasFitRef.current ? chartRef.current?.timeScale().getVisibleRange() : null
+    prevCeRef.current.setData(sanitizedPrevCe)
+    prevPeRef.current.setData(sanitizedPrevPe)
+    ceRef.current.setData(sanitizedCe)
+    peRef.current.setData(sanitizedPe)
+    const hasAnyData = sanitizedCe.length > 0 || sanitizedPe.length > 0 || sanitizedPrevCe.length > 0 || sanitizedPrevPe.length > 0
+    if (!hasFitRef.current && hasAnyData) {
+      chartRef.current?.timeScale().fitContent()
+      hasFitRef.current = true
+    } else if (preservedRange) {
+      try { chartRef.current?.timeScale().setVisibleRange(preservedRange) } catch { /* empty */ }
+    }
+  }, [sanitizedCe, sanitizedPe, sanitizedPrevCe, sanitizedPrevPe])
+
+  const resetMarkers = useMemo(
+    () => dayResetMarkers([...sanitizedPrevCe, ...sanitizedCe]),
+    [sanitizedPrevCe, sanitizedCe],
+  )
+
+  useEffect(() => {
+    markersRef.current?.setMarkers(resetMarkers)
+  }, [resetMarkers])
+
+  return <div ref={containerRef} style={{ width: '100%', height }} />
+}
+
+// A plain volume histogram with a VWAP line overlaid - the third of the three verification charts
+// (CDV/OBV via CeVsPeChart above, this one for real spot/index volume - see
+// DhanHistoricalDataService's own doc comment on Dhan's January 2026 index-volume rollout, and
+// VwapCalculator). `volumeBars` is raw {time: isoString, volume: number} (CandleWithVolume's own
+// JSON shape - open/high/low/close are ignored, only the bar's own volume is plotted); `vwapSeries`
+// is raw {time: isoString, obv: number} (ObvPoint's own JSON shape, reused for VWAP the same way
+// CdvCeSeries/CdvPeSeries reuse it for CDV).
+export function VolumeVwapChart({ volumeBars, vwapSeries, height = 180 }) {
+  const containerRef = useRef(null)
+  const chartRef = useRef(null)
+  const volumeRef = useRef(null)
+  const vwapRef = useRef(null)
+  const hasFitRef = useRef(false)
+
+  const sanitizedVolume = useMemo(
+    () => sanitizeSeries(volumeBars.map((b) => ({ time: toChartTime(b.time), value: b.volume, color: UP_COLOR }))),
+    [volumeBars],
+  )
+  const sanitizedVwap = useMemo(() => sanitizeSeries(toLinePoints(vwapSeries, 'obv')), [vwapSeries])
+
+  useEffect(() => {
+    if (!containerRef.current) return
+
+    const chart = createChart(containerRef.current, {
+      width: containerRef.current.clientWidth,
+      height,
+      layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
+      grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
+      rightPriceScale: { borderColor: BORDER_COLOR },
+      timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter },
+      crosshair: { mode: CrosshairMode.Normal },
+      localization: { timeFormatter: istTimeFormatter },
+    })
+    chartRef.current = chart
+    volumeRef.current = chart.addSeries(HistogramSeries, { color: UP_COLOR, priceFormat: { type: 'volume' }, title: 'Volume', priceLineVisible: false })
+    vwapRef.current = chart.addSeries(LineSeries, { color: EMA_COLOR, lineWidth: 2, title: 'VWAP', priceLineVisible: false, priceScaleId: 'left' })
+    chart.priceScale('left').applyOptions({ visible: true, borderColor: BORDER_COLOR })
+    hasFitRef.current = false
+
+    const onResize = () => {
+      if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth })
+    }
+    window.addEventListener('resize', onResize)
+
+    return () => {
+      window.removeEventListener('resize', onResize)
+      chart.remove()
+      chartRef.current = null
+      volumeRef.current = null
+      vwapRef.current = null
+    }
+  }, [height])
+
+  useEffect(() => {
+    if (!volumeRef.current || !vwapRef.current) return
+    const preservedRange = hasFitRef.current ? chartRef.current?.timeScale().getVisibleRange() : null
+    volumeRef.current.setData(sanitizedVolume)
+    vwapRef.current.setData(sanitizedVwap)
+    const hasAnyData = sanitizedVolume.length > 0 || sanitizedVwap.length > 0
+    if (!hasFitRef.current && hasAnyData) {
+      chartRef.current?.timeScale().fitContent()
+      hasFitRef.current = true
+    } else if (preservedRange) {
+      try { chartRef.current?.timeScale().setVisibleRange(preservedRange) } catch { /* empty */ }
+    }
+  }, [sanitizedVolume, sanitizedVwap])
+
+  return <div ref={containerRef} style={{ width: '100%', height }} />
 }
 
 export function DirectionTag({ direction }) {

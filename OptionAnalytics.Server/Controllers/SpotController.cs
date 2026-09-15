@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using OptionAnalytics.Server.Dhan;
 using OptionAnalytics.Server.Services;
+using OptionAnalytics.Server.Services.Backtesting;
 
 namespace OptionAnalytics.Server.Controllers;
 
@@ -86,6 +87,31 @@ public sealed class SpotController : ControllerBase
             return NotFound(new { error = $"Unknown underlying '{underlying}'." });
 
         return Ok(state.GetCandles());
+    }
+
+    /// <summary>The same spot history as GetCandles, but carrying each bar's own real index volume
+    /// (see DhanHistoricalDataService's own doc comment on Dhan's January 2026 index-volume rollout,
+    /// and SpotUnderlyingState.GetVolumeBars) - what a volume histogram or VwapCalculator needs, which
+    /// GetCandles' plain Candle shape does not carry.</summary>
+    [HttpGet("{underlying}/volume-candles")]
+    public IActionResult GetVolumeCandles(string underlying)
+    {
+        if (!_feed.States.TryGetValue(underlying.ToUpperInvariant(), out var state))
+            return NotFound(new { error = $"Unknown underlying '{underlying}'." });
+
+        return Ok(state.GetVolumeBars());
+    }
+
+    /// <summary>The live session VWAP off this underlying's own real index volume - VwapCalculator
+    /// run fresh on every request (cheap: it is one pass over whatever GetVolumeBars already holds in
+    /// memory, no Dhan call at all) rather than cached, so it is always exactly current.</summary>
+    [HttpGet("{underlying}/vwap-series")]
+    public IActionResult GetVwapSeries(string underlying)
+    {
+        if (!_feed.States.TryGetValue(underlying.ToUpperInvariant(), out var state))
+            return NotFound(new { error = $"Unknown underlying '{underlying}'." });
+
+        return Ok(VwapCalculator.ComputeSeries(state.GetVolumeBars()));
     }
 
     [HttpGet("{underlying}/snapshot")]
