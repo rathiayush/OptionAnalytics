@@ -189,6 +189,54 @@ public sealed class EmaCrossAtmFlowStrategyTests
         Assert.False(EmaCrossAtmFlowStrategy.FlowFavors(ce, pe, At(10), bullish: true, FlowWindow));
     }
 
+    // ---- FlowFavors: minRisePercent (optional) --------------------------------------------------
+
+    [Fact]
+    public void FlowFavors_MinRisePercent_AcceptsExactlyAtTheThresholdAndRejectsJustOver()
+    {
+        // CE: 100 -> 130 over the window - exactly a 30% rise, with PE flat and always below.
+        var ce = new[] { new ObvPoint(At(5), 100), new ObvPoint(At(10), 130) };
+        var pe = new[] { new ObvPoint(At(5), 50), new ObvPoint(At(10), 50) };
+
+        Assert.True(EmaCrossAtmFlowStrategy.FlowFavors(ce, pe, At(10), bullish: true, FlowWindow, minRisePercent: 30));
+        Assert.False(EmaCrossAtmFlowStrategy.FlowFavors(ce, pe, At(10), bullish: true, FlowWindow, minRisePercent: 31));
+    }
+
+    [Fact]
+    public void FlowFavors_MinRisePercentZero_KeepsThePlainAnyRiseReading()
+    {
+        // The same modest rise as above still passes when the threshold is off (0, the default) -
+        // adding this parameter must not tighten the existing "any rise" behavior on its own.
+        var ce = new[] { new ObvPoint(At(5), 100), new ObvPoint(At(10), 101) };
+        var pe = new[] { new ObvPoint(At(5), 50), new ObvPoint(At(10), 50) };
+
+        Assert.True(EmaCrossAtmFlowStrategy.FlowFavors(ce, pe, At(10), bullish: true, FlowWindow, minRisePercent: 0));
+        Assert.False(EmaCrossAtmFlowStrategy.FlowFavors(ce, pe, At(10), bullish: true, FlowWindow, minRisePercent: 5));
+    }
+
+    [Fact]
+    public void FlowFavors_MinRisePercent_RejectsWhenTheBaseCrossedZero()
+    {
+        // CE went from -10 to +50 - a real rise (and still passes with the threshold OFF), but a
+        // "600% rise" off a base that straddles zero is not a meaningful percentage, so any actual
+        // threshold must reject it rather than compute a misleading number.
+        var ce = new[] { new ObvPoint(At(5), -10), new ObvPoint(At(10), 50) };
+        var pe = new[] { new ObvPoint(At(5), -100), new ObvPoint(At(10), 0) };
+
+        Assert.True(EmaCrossAtmFlowStrategy.FlowFavors(ce, pe, At(10), bullish: true, FlowWindow, minRisePercent: 0));
+        Assert.False(EmaCrossAtmFlowStrategy.FlowFavors(ce, pe, At(10), bullish: true, FlowWindow, minRisePercent: 10));
+    }
+
+    [Fact]
+    public void FlowFavors_MinRisePercent_RejectsWhenTheBaseIsExactlyZero()
+    {
+        var ce = new[] { new ObvPoint(At(5), 0), new ObvPoint(At(10), 50) };
+        var pe = new[] { new ObvPoint(At(5), -10), new ObvPoint(At(10), 0) };
+
+        Assert.True(EmaCrossAtmFlowStrategy.FlowFavors(ce, pe, At(10), bullish: true, FlowWindow, minRisePercent: 0));
+        Assert.False(EmaCrossAtmFlowStrategy.FlowFavors(ce, pe, At(10), bullish: true, FlowWindow, minRisePercent: 10));
+    }
+
     // ---- FlowConfirms --------------------------------------------------------------------------
 
     [Theory]

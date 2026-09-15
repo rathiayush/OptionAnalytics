@@ -14,7 +14,8 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 ///      for a bearish one - the same "green over red" reading the CDV/OBV chart itself is looked at
 ///      for, CE drawn green and PE red), AND that same winning side's own total RISING over the last
 ///      N bars (CE's own slope for a bullish signal, PE's for a bearish one) - not just ahead right
-///      now, but still gaining.
+///      now, but still gaining. MinFlowRisePercent optionally raises that second bar from "any rise
+///      at all" to "risen by at least this %" (0 = off, the default - any rise still counts).
 ///
 /// Why the option leg is checked separately rather than assumed from spot: an index EMA cross says
 /// nothing about what the option chain did with it. Premium is moved by implied volatility and time
@@ -34,7 +35,7 @@ public sealed class EmaCrossAtmFlowStrategy : IBacktestStrategy
 {
     public string Key => "ema-cross-atm-flow";
     public string Name => "EMA Crossover + ATM Cross + Flow Confirmation";
-    public string Description => "Enters when THREE things agree: spot's fast EMA crosses its slow EMA, the ATM option being bought makes the same fast/slow cross on its own premium (CE for bullish, PE for bearish) within a short window, and order flow favors that same direction (OBV, CDV, either, or both - configurable) - CE's own running total above PE's AND rising over the last N bars for a bullish signal, PE above CE and rising for a bearish one. The option leg is checked separately because premium moves with implied volatility and decay as well as direction, so a spot cross alone says nothing about what the contract you would actually buy did.";
+    public string Description => "Enters when THREE things agree: spot's fast EMA crosses its slow EMA, the ATM option being bought makes the same fast/slow cross on its own premium (CE for bullish, PE for bearish) within a short window, and order flow favors that same direction (OBV, CDV, either, or both - configurable) - CE's own running total above PE's AND rising over the last N bars for a bullish signal, PE above CE and rising for a bearish one, optionally requiring that rise to be at least a given % rather than just any rise. The option leg is checked separately because premium moves with implied volatility and decay as well as direction, so a spot cross alone says nothing about what the contract you would actually buy did.";
 
     private const decimal DirectionBoth = 0;
     private const decimal DirectionLongOnly = 1;
@@ -63,6 +64,7 @@ public sealed class EmaCrossAtmFlowStrategy : IBacktestStrategy
         new BacktestParameterSpec("slowEmaPeriod", "Slow EMA (bars)", Default: 21, Min: 2, Max: 400, Step: 1),
         new BacktestParameterSpec("atmConfirmWithinBars", "ATM cross must land within (bars, 0 = same bar)", Default: 3, Min: 0, Max: 50, Step: 1),
         new BacktestParameterSpec("flowLookbackBars", "Flow must be rising over (bars)", Default: 5, Min: 1, Max: 200, Step: 1),
+        new BacktestParameterSpec("minFlowRisePercent", "Flow rise must be at least (%, 0 = off - any rise counts)", Default: 0, Min: 0, Max: 500, Step: 5),
         new BacktestParameterSpec("flowMode", "Flow must favor + rise toward the signal's direction on", Default: FlowEither, Min: FlowObvOnly, Max: FlowBoth, Step: 1, Options: new[]
         {
             new BacktestParameterOption(FlowObvOnly, "OBV only"),
@@ -91,6 +93,7 @@ public sealed class EmaCrossAtmFlowStrategy : IBacktestStrategy
         var slowPeriod = (int)parameters["slowEmaPeriod"];
         var confirmWithin = (int)parameters["atmConfirmWithinBars"];
         var flowLookback = (int)parameters["flowLookbackBars"];
+        var minFlowRisePercent = parameters.GetValueOrDefault("minFlowRisePercent", 0m);
         var flowMode = parameters["flowMode"];
         var direction = parameters["direction"];
         var signalStartMinutes = (int)parameters.GetValueOrDefault("signalStartMinutes", 555);
@@ -163,17 +166,19 @@ public sealed class EmaCrossAtmFlowStrategy : IBacktestStrategy
             // Confirmation 3: flow favors this same direction AND is still rising toward it - CE's
             // own running total above PE's AND itself rising over the lookback for a bullish signal,
             // PE above CE and rising for a bearish one (see FlowFavors).
-            var obvFavors = FlowFavors(context.ObvCeSeries, context.ObvPeSeries, bar.Time, bullish, flowWindow);
-            var cdvFavors = FlowFavors(context.CdvCeSeries, context.CdvPeSeries, bar.Time, bullish, flowWindow);
+            var obvFavors = FlowFavors(context.ObvCeSeries, context.ObvPeSeries, bar.Time, bullish, flowWindow, minFlowRisePercent);
+            var cdvFavors = FlowFavors(context.CdvCeSeries, context.CdvPeSeries, bar.Time, bullish, flowWindow, minFlowRisePercent);
 
             if (!FlowConfirms(flowMode, obvFavors, cdvFavors))
             {
+                var riseRequirement = minFlowRisePercent > 0 ? $"risen at least {minFlowRisePercent:0.##}%" : "risen at all";
                 signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", bullish ? "Bullish" : "Bearish",
-                    $"{summary}, ATM {legName} confirmed - but flow does not favor and rise toward {(bullish ? "CE over PE" : "PE over CE")} over the last {flowLookback} bar(s) as required ({FlowModeLabel(flowMode)}; OBV {(obvFavors ? "confirms it" : "does not")}, CDV {(cdvFavors ? "confirms it" : "does not")})"));
+                    $"{summary}, ATM {legName} confirmed - but flow does not favor {(bullish ? "CE over PE" : "PE over CE")} and {riseRequirement} over the last {flowLookback} bar(s) as required ({FlowModeLabel(flowMode)}; OBV {(obvFavors ? "confirms it" : "does not")}, CDV {(cdvFavors ? "confirms it" : "does not")})"));
                 continue;
             }
 
-            var full = $"{summary}, ATM {legName} crossed with it, and flow favors and is rising toward {(bullish ? "CE over PE" : "PE over CE")} over the last {flowLookback} bar(s) ({FlowModeLabel(flowMode)})";
+            var riseDescription = minFlowRisePercent > 0 ? $"risen at least {minFlowRisePercent:0.##}%" : "rising";
+            var full = $"{summary}, ATM {legName} crossed with it, and flow favors {(bullish ? "CE over PE" : "PE over CE")} and is {riseDescription} over the last {flowLookback} bar(s) ({FlowModeLabel(flowMode)})";
             signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Entry", bullish ? "Bullish" : "Bearish", full));
             entries.Add((bar.Time, bullish ? "Bullish" : "Bearish"));
         }
@@ -247,8 +252,20 @@ public sealed class EmaCrossAtmFlowStrategy : IBacktestStrategy
     /// Every series is read as "the last point at or before this time" so the comparison works even
     /// when CE/PE's own bars do not land on exactly the same timestamps as spot's; false when any
     /// reading needed is missing, since "no data" can neither favor a direction nor confirm a
-    /// slope.</summary>
-    internal static bool FlowFavors(IReadOnlyList<ObvPoint> ceSeries, IReadOnlyList<ObvPoint> peSeries, DateTimeOffset at, bool bullish, TimeSpan window)
+    /// slope.
+    ///
+    /// <paramref name="minRisePercent"/> optionally tightens condition 2 from "any rise at all" to
+    /// "risen by at least this %" (0, the default, keeps the plain "any rise" reading) - e.g. 30 to
+    /// only count a move that is at least 30% bigger than it was a lookback ago, for a user who
+    /// wants to filter out a technically-positive but trivially small tick. The percentage is only
+    /// computed when the base (the earlier reading) is meaningful to divide by - mirrors
+    /// CdvUnderlyingState.ComputeLookbackChange's own guard: a base of exactly zero, or one that sits
+    /// on the OPPOSITE side of zero from the current reading (OBV/CDV are signed totals that can
+    /// cross zero), makes a percentage technically computable but meaningless - e.g. a move from -5
+    /// to +50 is not "a 1100% rise" in any sense a threshold should accept - so either case is
+    /// treated as not having met the threshold, rather than divide by a near-zero base into a huge,
+    /// misleading number.</summary>
+    internal static bool FlowFavors(IReadOnlyList<ObvPoint> ceSeries, IReadOnlyList<ObvPoint> peSeries, DateTimeOffset at, bool bullish, TimeSpan window, decimal minRisePercent = 0)
     {
         if (LastAtOrBefore(ceSeries, at) is not { } ceNow || LastAtOrBefore(peSeries, at) is not { } peNow) return false;
 
@@ -259,7 +276,12 @@ public sealed class EmaCrossAtmFlowStrategy : IBacktestStrategy
         var winningNow = bullish ? ceNow : peNow;
         if (LastAtOrBefore(winningSeries, at - window) is not { } winningEarlier) return false;
 
-        return winningNow > winningEarlier;
+        if (winningNow <= winningEarlier) return false;
+        if (minRisePercent <= 0) return true;
+
+        if (winningEarlier == 0 || Math.Sign(winningNow) != Math.Sign(winningEarlier)) return false;
+        var risePercent = (winningNow - winningEarlier) / Math.Abs(winningEarlier) * 100m;
+        return risePercent >= minRisePercent;
     }
 
     private static decimal? LastAtOrBefore(IReadOnlyList<ObvPoint> series, DateTimeOffset at)
