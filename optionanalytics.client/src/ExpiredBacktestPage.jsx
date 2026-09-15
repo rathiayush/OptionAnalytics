@@ -7,7 +7,7 @@ import {
   UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, EMA_COLOR, computeEma, NavBar, DirectionTag, fmtIstDateTime, fmtIstTime, fmtPrice, istDateKey,
   TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState,
   AXIS_COLOR, GRID_COLOR, BORDER_COLOR, istTimeFormatter, istTickMarkFormatter, toBar, toChartTime, dayResetMarkers,
-  CeVsPeChart, VolumeVwapChart, scrollChartToTime,
+  CeVsPeChart, VolumeVwapChart, scrollChartToTime, highlightChartAtTime, lastValueAtOrBeforeChartTime,
 } from './shared.jsx'
 
 const { Title, Text } = Typography
@@ -163,10 +163,15 @@ function ExpiredSpotChart({ bars, trades, emaPoints, height = 420, focusTime }) 
     markersRef.current.setMarkers([...dayResetMarkers(bars), ...tradeEntryMarkers(trades)].sort((a, b) => a.time - b.time))
   }, [bars, trades])
 
-  // A Trades/Signals row click elsewhere on the page sets focusTime to that row's own time.
+  // A Trades/Signals row click elsewhere on the page sets focusTime to that row's own time -
+  // recenter AND drop a persistent crosshair on the candlestick series at that exact bar, so the
+  // signal is actually marked, not just somewhere in the visible window.
   useEffect(() => {
     scrollChartToTime(chartRef.current, focusTime)
-  }, [focusTime])
+    const target = focusTime ? toChartTime(focusTime) : null
+    const price = target != null ? lastValueAtOrBeforeChartTime(bars, target, 'close') : null
+    highlightChartAtTime(chartRef.current, seriesRef.current, target, price)
+  }, [focusTime, bars])
 
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }
@@ -688,29 +693,22 @@ export default function ExpiredBacktestPage() {
           <>
             <Card
               size="small"
-              title="Spot Chart"
-              extra={<Text type="secondary" style={{ fontSize: 12 }}>Lookback window, plus a couple of days of context on each side - arrows mark this run's own trade entries</Text>}
-            >
-              {chartBars.length > 0 ? (
-                <>
-                  <Checkbox checked={showEma} onChange={(e) => setShowEma(e.target.checked)}>
-                    <Text style={{ color: EMA_COLOR }}>Show 5 EMA</Text>
-                  </Checkbox>
-                  <ChartErrorBoundary key={`${underlying}-${expiryDate}-${timeframe}-${fromDay}-${toDay}`}>
-                    <ExpiredSpotChart bars={chartBars} trades={visibleTrades} emaPoints={emaPoints} height={420} focusTime={focusTime} />
-                  </ChartErrorBoundary>
-                </>
-              ) : (
-                <Empty description={(fromDay || toDay) ? 'No spot candles on the selected dates - widen or clear the date filter.' : 'No spot candles to chart for this run.'} />
-              )}
-            </Card>
-
-            <Card
-              size="small"
-              title="Order Flow — verify CDV / OBV / Volume"
-              extra={<Text type="secondary" style={{ fontSize: 12 }}>Reconstructed from this run's own fetched history, over the same lookback window as the spot chart above - click a row in Trades/Signals below to jump every chart here (and the spot chart above) to that moment</Text>}
+              title="Charts — Spot, CDV, OBV, Volume"
+              extra={<Text type="secondary" style={{ fontSize: 12 }}>Same lookback window for every chart here - click a row in Trades/Signals below to jump all of them to that exact moment, marked with a crosshair</Text>}
             >
               <Space direction="vertical" size={16} style={{ width: '100%' }}>
+                {chartBars.length > 0 ? (
+                  <div>
+                    <Checkbox checked={showEma} onChange={(e) => setShowEma(e.target.checked)}>
+                      <Text style={{ color: EMA_COLOR }}>Show 5 EMA</Text>
+                    </Checkbox>
+                    <ChartErrorBoundary key={`${underlying}-${expiryDate}-${timeframe}-${fromDay}-${toDay}`}>
+                      <ExpiredSpotChart bars={chartBars} trades={visibleTrades} emaPoints={emaPoints} height={420} focusTime={focusTime} />
+                    </ChartErrorBoundary>
+                  </div>
+                ) : (
+                  <Empty description={(fromDay || toDay) ? 'No spot candles on the selected dates - widen or clear the date filter.' : 'No spot candles to chart for this run.'} />
+                )}
                 <div>
                   <Text type="secondary" style={{ fontSize: 12 }}>Spot Volume + Session VWAP</Text>
                   <ChartErrorBoundary key={`vol-${underlying}-${expiryDate}`}>
