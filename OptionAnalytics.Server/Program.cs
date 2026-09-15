@@ -20,6 +20,7 @@ builder.Configuration.AddJsonFile("appsettings.Local.json", optional: true, relo
 builder.Services.Configure<DhanOptions>(builder.Configuration.GetSection(DhanOptions.SectionName));
 builder.Services.Configure<TelegramOptions>(builder.Configuration.GetSection(TelegramOptions.SectionName));
 builder.Services.Configure<AuthOptions>(builder.Configuration.GetSection(AuthOptions.SectionName));
+builder.Services.Configure<HistoricalDataPrefetchOptions>(builder.Configuration.GetSection(HistoricalDataPrefetchOptions.SectionName));
 builder.Services.AddHttpClient<TelegramAlertService>();
 
 builder.Services.AddSingleton<AuthService>();
