@@ -44,12 +44,20 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 /// Timeframe is the page's, not the strategy's: Pani teaches 5-minute for the short side and
 /// 15-minute for the long side, which is why Direction exists - run it twice, once per timeframe,
 /// rather than trying to express two timeframes in one backtest.
+///
+/// OPTIONAL flow confirmation (at the user's own explicit request): RequireFlowConfirmation, off by
+/// default so the setup as taught is unaffected unless deliberately turned on. When on, a break that
+/// would otherwise enter also has to clear FlowConfirmation.Favors on the entered direction's own leg
+/// (CE for a Bullish/long entry, PE for a Bearish/short one) - the same "CE above PE and rising, PE
+/// above CE and rising, optionally by at least a given %" gate EmaCrossAtmFlowStrategy already
+/// requires unconditionally. Here it is purely an extra filter a user can choose to add on top of the
+/// taught price-action rule, not a replacement for it.
 /// </summary>
 public sealed class FiveEmaStrategy : IBacktestStrategy
 {
     public string Key => "five-ema";
     public string Name => "5 EMA (Subhasish Pani) v1 - candle close";
-    public string Description => "An alert candle that forms entirely clear of the 5 EMA - low above it for a short, high below it for a long - and entry when a later candle breaks that candle's low (short) or high (long). The alert candle rolls forward to any newer qualifying candle and is cancelled outright by any candle that touches the EMA. Taught as 5-minute for shorts and 15-minute for longs.";
+    public string Description => "An alert candle that forms entirely clear of the 5 EMA - low above it for a short, high below it for a long - and entry when a later candle breaks that candle's low (short) or high (long). The alert candle rolls forward to any newer qualifying candle and is cancelled outright by any candle that touches the EMA. Taught as 5-minute for shorts and 15-minute for longs. Optionally also requires order flow (OBV/CDV) to favor and be rising toward the entered direction, off by default.";
 
     private const decimal DirectionBoth = 0;
     private const decimal DirectionLongOnly = 1;
@@ -80,6 +88,16 @@ public sealed class FiveEmaStrategy : IBacktestStrategy
             new BacktestParameterOption(FlagOn, "Yes - the taught target"),
             new BacktestParameterOption(FlagOff, "No - stop/target only"),
         }),
+        // Optional flow confirmation - off by default, so the setup as taught is unaffected unless
+        // deliberately turned on. See this class's own doc comment for exactly what it checks.
+        new BacktestParameterSpec("requireFlowConfirmation", "Also require order flow (OBV/CDV) to confirm", Default: FlagOff, Min: FlagOff, Max: FlagOn, Step: 1, Options: new[]
+        {
+            new BacktestParameterOption(FlagOff, "No - price action only (as taught)"),
+            new BacktestParameterOption(FlagOn, "Yes - flow must also favor + rise toward the entry"),
+        }),
+        FlowConfirmation.LookbackParameter(),
+        FlowConfirmation.MinRisePercentParameter(),
+        FlowConfirmation.ModeParameter(),
     };
 
     public IReadOnlyList<BacktestTrade> Simulate(BacktestStrategyContext context, IReadOnlyDictionary<string, decimal> parameters)
@@ -99,6 +117,10 @@ public sealed class FiveEmaStrategy : IBacktestStrategy
         var direction = parameters["direction"];
         var maxAgeBars = (int)parameters["alertMaxAgeBars"];
         var signalStartMinutes = (int)parameters.GetValueOrDefault("signalStartMinutes", 555);
+        var requireFlowConfirmation = parameters.GetValueOrDefault("requireFlowConfirmation", FlagOff) >= (FlagOff + FlagOn) / 2;
+        var flowLookback = (int)parameters.GetValueOrDefault("flowLookbackBars", 5);
+        var minFlowRisePercent = parameters.GetValueOrDefault("minFlowRisePercent", 0m);
+        var flowMode = parameters.GetValueOrDefault("flowMode", FlowConfirmation.ModeEither);
 
         var takeLongs = direction != DirectionShortOnly;
         var takeShorts = direction != DirectionLongOnly;
@@ -109,6 +131,24 @@ public sealed class FiveEmaStrategy : IBacktestStrategy
 
         var bars = context.SpotBars;
         var ema = EmaCrossoverDetector.EmaSeries(bars, emaPeriod);
+        var flowWindow = TimeSpan.FromMinutes((double)Math.Max(1, flowLookback) * Math.Max(1, context.TimeframeMinutes));
+
+        // Optional (see requireFlowConfirmation's own doc comment) - CE for a Bullish/long entry, PE
+        // for a Bearish/short one, the same leg OptionTradeSimulator would actually buy for that
+        // direction. True (no reason given) when the filter is off, so the two entry branches below
+        // never need their own "is this even enabled" check.
+        (bool Ok, string Reason) FlowCheck(bool bullish, DateTimeOffset at)
+        {
+            if (!requireFlowConfirmation) return (true, "");
+            var obvFavors = FlowConfirmation.Favors(context.ObvCeSeries, context.ObvPeSeries, at, bullish, flowWindow, minFlowRisePercent);
+            var cdvFavors = FlowConfirmation.Favors(context.CdvCeSeries, context.CdvPeSeries, at, bullish, flowWindow, minFlowRisePercent);
+            var confirmed = FlowConfirmation.Confirms(flowMode, obvFavors, cdvFavors);
+            var riseRequirement = minFlowRisePercent > 0 ? $"risen at least {minFlowRisePercent:0.##}%" : "risen at all";
+            var reason = confirmed
+                ? $"flow favors {(bullish ? "CE over PE" : "PE over CE")} and has {riseRequirement} over the last {flowLookback} bar(s) ({FlowConfirmation.ModeLabel(flowMode)})"
+                : $"flow does not favor {(bullish ? "CE over PE" : "PE over CE")} and {riseRequirement} over the last {flowLookback} bar(s) as required ({FlowConfirmation.ModeLabel(flowMode)}; OBV {(obvFavors ? "confirms it" : "does not")}, CDV {(cdvFavors ? "confirms it" : "does not")})";
+            return (confirmed, reason);
+        }
 
         // The pending alert candle on each side, with the bar index it formed at so its age can be
         // checked. Only one of the two can ever be set: a candle entirely above the EMA is a short
@@ -157,14 +197,22 @@ public sealed class FiveEmaStrategy : IBacktestStrategy
                 {
                     signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", "Bearish", $"{summary} - skipped, before {IstClock.FormatMinutesOfDay(signalStartMinutes)} IST (pre-open)"));
                 }
-                else if (takeShorts)
+                else if (!takeShorts)
                 {
-                    signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Entry", "Bearish", summary));
-                    entries.Add((bar.Time, "Bearish"));
+                    signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", "Bearish", $"{summary} - skipped, longs only"));
                 }
                 else
                 {
-                    signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", "Bearish", $"{summary} - skipped, longs only"));
+                    var (flowOk, flowReason) = FlowCheck(bullish: false, bar.Time);
+                    if (!flowOk)
+                    {
+                        signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", "Bearish", $"{summary} - but {flowReason}"));
+                    }
+                    else
+                    {
+                        signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Entry", "Bearish", requireFlowConfirmation ? $"{summary}, and {flowReason}" : summary));
+                        entries.Add((bar.Time, "Bearish"));
+                    }
                 }
                 shortAlert = null;
             }
@@ -175,14 +223,22 @@ public sealed class FiveEmaStrategy : IBacktestStrategy
                 {
                     signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", "Bullish", $"{summary} - skipped, before {IstClock.FormatMinutesOfDay(signalStartMinutes)} IST (pre-open)"));
                 }
-                else if (takeLongs)
+                else if (!takeLongs)
                 {
-                    signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Entry", "Bullish", summary));
-                    entries.Add((bar.Time, "Bullish"));
+                    signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", "Bullish", $"{summary} - skipped, shorts only"));
                 }
                 else
                 {
-                    signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", "Bullish", $"{summary} - skipped, shorts only"));
+                    var (flowOk, flowReason) = FlowCheck(bullish: true, bar.Time);
+                    if (!flowOk)
+                    {
+                        signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", "Bullish", $"{summary} - but {flowReason}"));
+                    }
+                    else
+                    {
+                        signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Entry", "Bullish", requireFlowConfirmation ? $"{summary}, and {flowReason}" : summary));
+                        entries.Add((bar.Time, "Bullish"));
+                    }
                 }
                 longAlert = null;
             }

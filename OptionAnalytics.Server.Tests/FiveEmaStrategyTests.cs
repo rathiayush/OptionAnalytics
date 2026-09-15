@@ -47,6 +47,33 @@ public sealed class FiveEmaStrategyTests
         ["exitOnEmaTouch"] = 1,
     };
 
+    // Same context as Context(), but with real OBV/CDV series for the optional flow-confirmation
+    // tests below - every other test in this file leaves these empty, which is exactly how the
+    // filter must behave when left off (see RequireFlowConfirmation_Off... below).
+    private static BacktestStrategyContext ContextWithFlow(
+        IReadOnlyList<Candle> spotBars, IReadOnlyList<ObvPoint> ceSeries, IReadOnlyList<ObvPoint> peSeries) => new()
+    {
+        Underlying = "NIFTY",
+        TimeframeMinutes = 1,
+        Step = 50,
+        SpotBars = spotBars,
+        SpotBarsOneMinute = spotBars,
+        SpotVolumeBarsOneMinute = Array.Empty<CandleWithVolume>(),
+        ConfluenceSignalsAscending = Array.Empty<BacktestSignal>(),
+        AllSignals = Array.Empty<BacktestSignal>(),
+        ObvCeSeries = ceSeries,
+        ObvPeSeries = peSeries,
+        CdvCeSeries = ceSeries,
+        CdvPeSeries = peSeries,
+        GetOptionBars = (_, _) => Array.Empty<Candle>(),
+        GetOptionBarsOneMinute = (_, _) => Array.Empty<Candle>(),
+        AtmCeBars = Array.Empty<Candle>(),
+        AtmPeBars = Array.Empty<Candle>(),
+        AtmCeVolumeBars = Array.Empty<CandleWithVolume>(),
+        AtmPeVolumeBars = Array.Empty<CandleWithVolume>(),
+        AtmStrike = null,
+    };
+
     // 8 flat bars at a constant close of 100 - EMA(5) of a constant series is that same constant
     // forever, once seeded, regardless of exactly which bar the seed lands on.
     private static List<Candle> FlatSeed() =>
@@ -135,5 +162,66 @@ public sealed class FiveEmaStrategyTests
         var signals = new FiveEmaStrategy().EntrySignals(context, Parameters());
 
         Assert.DoesNotContain(signals, s => s.Kind == "Entry");
+    }
+
+    // ---- Optional flow confirmation (off by default) ----------------------------------------------
+    // Reuses EntersImmediately_WhenALaterCandleBreaksTheAlertCandlesLow...'s own fixture - a Bearish
+    // entry at bar 9 (T0+9min) - so only the flow gate itself differs between these three tests.
+
+    private static List<Candle> BearishBreakFixture()
+    {
+        var bars = FlatSeed();
+        bars.Add(Bar(8, 125, 140, 120, 138)); // shortAlert forms
+        bars.Add(Bar(9, 119, 120, 116, 118)); // breaks it - Bearish entry, absent any flow filter
+        return bars;
+    }
+
+    [Fact]
+    public void RequireFlowConfirmation_OffByDefault_EntersRegardlessOfFlow()
+    {
+        var bars = BearishBreakFixture();
+        // CE dominant, not PE - would FAIL a bearish flow check if the filter were on.
+        var ce = new[] { new ObvPoint(T0.AddMinutes(4), 50), new ObvPoint(T0.AddMinutes(9), 140) };
+        var pe = new[] { new ObvPoint(T0.AddMinutes(4), 100), new ObvPoint(T0.AddMinutes(9), 100) };
+        var context = ContextWithFlow(bars, ce, pe);
+
+        var parameters = Parameters(); // requireFlowConfirmation omitted - defaults to off
+        var signals = new FiveEmaStrategy().EntrySignals(context, parameters);
+
+        Assert.Contains(signals, s => s.Kind == "Entry");
+    }
+
+    [Fact]
+    public void RequireFlowConfirmation_On_RejectsWhenFlowDoesNotFavorTheDirection()
+    {
+        var bars = BearishBreakFixture();
+        // Same non-favoring series as above, but now the filter is actually on.
+        var ce = new[] { new ObvPoint(T0.AddMinutes(4), 50), new ObvPoint(T0.AddMinutes(9), 140) };
+        var pe = new[] { new ObvPoint(T0.AddMinutes(4), 100), new ObvPoint(T0.AddMinutes(9), 100) };
+        var context = ContextWithFlow(bars, ce, pe);
+
+        var parameters = Parameters();
+        parameters["requireFlowConfirmation"] = 1;
+        var signals = new FiveEmaStrategy().EntrySignals(context, parameters);
+
+        Assert.DoesNotContain(signals, s => s.Kind == "Entry");
+        Assert.Contains(signals, s => s.Kind == "Rejected" && s.Direction == "Bearish" && s.Summary.Contains("flow"));
+    }
+
+    [Fact]
+    public void RequireFlowConfirmation_On_EntersWhenFlowFavorsAndRisesTowardTheDirection()
+    {
+        var bars = BearishBreakFixture();
+        // PE above CE and rising - favors the Bearish direction this break would enter.
+        var ce = new[] { new ObvPoint(T0.AddMinutes(4), 100), new ObvPoint(T0.AddMinutes(9), 100) };
+        var pe = new[] { new ObvPoint(T0.AddMinutes(4), 50), new ObvPoint(T0.AddMinutes(9), 140) };
+        var context = ContextWithFlow(bars, ce, pe);
+
+        var parameters = Parameters();
+        parameters["requireFlowConfirmation"] = 1;
+        var signals = new FiveEmaStrategy().EntrySignals(context, parameters);
+
+        var entry = Assert.Single(signals, s => s.Kind == "Entry");
+        Assert.Equal("Bearish", entry.Direction);
     }
 }
