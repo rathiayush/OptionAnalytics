@@ -8,6 +8,7 @@ import {
   TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState,
   AXIS_COLOR, GRID_COLOR, BORDER_COLOR, istTimeFormatter, istTickMarkFormatter, toBar, toChartTime, dayResetMarkers,
   CeVsPeChart, VolumeVwapChart, scrollChartToTime, highlightChartAtTime, lastValueAtOrBeforeChartTime,
+  useChartSyncGroup, registerChartForSyncAfterSettling,
 } from './shared.jsx'
 
 const { Title, Text } = Typography
@@ -98,12 +99,17 @@ function tradeEntryMarkers(trades) {
 // emaPoints is already pre-computed (or empty) by the caller - this component only ever calls
 // setData with whatever it is handed, so unticking the checkbox (which then passes []) clears the
 // line without this component needing to know WHY it's empty.
-function ExpiredSpotChart({ bars, trades, emaPoints, height = 420, focusTime }) {
+function ExpiredSpotChart({ bars, trades, emaPoints, height = 420, focusTime, syncGroup }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
   const emaRef = useRef(null)
   const markersRef = useRef(null)
+  // Separate from the (deliberately unconditional, see the bars effect below) re-fit - sync
+  // registration only ever needs to happen once per mount, or a second Run under the same
+  // underlying/expiry/timeframe would register this same chart into the sync group twice over.
+  const hasRegisteredSyncRef = useRef(false)
+  const syncCleanupRef = useRef(null)
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -128,6 +134,8 @@ function ExpiredSpotChart({ bars, trades, emaPoints, height = 420, focusTime }) 
     })
     emaRef.current = chart.addSeries(LineSeries, { color: EMA_COLOR, lineWidth: 2, title: '5 EMA', priceLineVisible: false, crosshairMarkerVisible: false })
     markersRef.current = createSeriesMarkers(seriesRef.current, [])
+    hasRegisteredSyncRef.current = false
+    syncCleanupRef.current = null
 
     const onResize = () => {
       if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth })
@@ -136,6 +144,7 @@ function ExpiredSpotChart({ bars, trades, emaPoints, height = 420, focusTime }) 
 
     return () => {
       window.removeEventListener('resize', onResize)
+      syncCleanupRef.current?.()
       chart.remove()
       chartRef.current = null
       seriesRef.current = null
@@ -151,7 +160,14 @@ function ExpiredSpotChart({ bars, trades, emaPoints, height = 420, focusTime }) 
     seriesRef.current.setData(bars)
     // A fresh run is a genuinely NEW series - always re-fit rather than preserve a stale pan/zoom
     // from a previous run's very different date range.
-    if (bars.length > 0) chartRef.current?.timeScale().fitContent()
+    if (bars.length > 0) {
+      chartRef.current?.timeScale().fitContent()
+      if (!hasRegisteredSyncRef.current) {
+        hasRegisteredSyncRef.current = true
+        const chartAtFit = chartRef.current
+        registerChartForSyncAfterSettling(syncGroup, chartAtFit, () => chartRef.current !== chartAtFit, (cleanup) => { syncCleanupRef.current = cleanup })
+      }
+    }
   }, [bars])
 
   useEffect(() => {
@@ -240,6 +256,11 @@ export default function ExpiredBacktestPage() {
   // recenters on this same moment, at whatever zoom level it already had - see shared.jsx's
   // scrollChartToTime.
   const [focusTime, setFocusTime] = useState(null)
+
+  // All four charts below (spot, Volume+VWAP, OBV, CDV) pan/zoom together - dragging or zooming any
+  // one of them pushes the same window to the rest. See shared.jsx's useChartSyncGroup for why this
+  // is scoped to this page's own charts rather than a global registry.
+  const chartSyncGroup = useChartSyncGroup()
 
   // Off by default - see ExpiredOptionBacktestService.RunAsync's own doc comment on why: computing
   // OBV/CDV for a strategy that doesn't otherwise need them means a much wider (and slower, more
@@ -703,7 +724,7 @@ export default function ExpiredBacktestPage() {
                       <Text style={{ color: EMA_COLOR }}>Show 5 EMA</Text>
                     </Checkbox>
                     <ChartErrorBoundary key={`${underlying}-${expiryDate}-${timeframe}-${fromDay}-${toDay}`}>
-                      <ExpiredSpotChart bars={chartBars} trades={visibleTrades} emaPoints={emaPoints} height={420} focusTime={focusTime} />
+                      <ExpiredSpotChart bars={chartBars} trades={visibleTrades} emaPoints={emaPoints} height={420} focusTime={focusTime} syncGroup={chartSyncGroup} />
                     </ChartErrorBoundary>
                   </div>
                 ) : (
@@ -712,7 +733,7 @@ export default function ExpiredBacktestPage() {
                 <div>
                   <Text type="secondary" style={{ fontSize: 12 }}>Spot Volume + Session VWAP</Text>
                   <ChartErrorBoundary key={`vol-${underlying}-${expiryDate}`}>
-                    <VolumeVwapChart volumeBars={result.spotVolumeChartBars ?? []} vwapSeries={result.spotVwapSeries ?? []} height={180} focusTime={focusTime} />
+                    <VolumeVwapChart volumeBars={result.spotVolumeChartBars ?? []} vwapSeries={result.spotVwapSeries ?? []} height={180} focusTime={focusTime} syncGroup={chartSyncGroup} />
                   </ChartErrorBoundary>
                 </div>
                 {(result.obvCeSeries?.length > 0 || result.cdvCeSeries?.length > 0) ? (
@@ -720,13 +741,13 @@ export default function ExpiredBacktestPage() {
                     <div>
                       <Text type="secondary" style={{ fontSize: 12 }}>OBV (delta-weighted, CE vs PE)</Text>
                       <ChartErrorBoundary key={`obv-${underlying}-${expiryDate}`}>
-                        <CeVsPeChart ceSeries={result.obvCeSeries ?? []} peSeries={result.obvPeSeries ?? []} valueKey="obv" height={220} focusTime={focusTime} />
+                        <CeVsPeChart ceSeries={result.obvCeSeries ?? []} peSeries={result.obvPeSeries ?? []} valueKey="obv" height={220} focusTime={focusTime} syncGroup={chartSyncGroup} />
                       </ChartErrorBoundary>
                     </div>
                     <div>
                       <Text type="secondary" style={{ fontSize: 12 }}>CDV (session, resets daily)</Text>
                       <ChartErrorBoundary key={`cdv-${underlying}-${expiryDate}`}>
-                        <CeVsPeChart ceSeries={result.cdvCeSeries ?? []} peSeries={result.cdvPeSeries ?? []} valueKey="obv" height={220} focusTime={focusTime} />
+                        <CeVsPeChart ceSeries={result.cdvCeSeries ?? []} peSeries={result.cdvPeSeries ?? []} valueKey="obv" height={220} focusTime={focusTime} syncGroup={chartSyncGroup} />
                       </ChartErrorBoundary>
                     </div>
                   </>

@@ -310,6 +310,79 @@ export function scrollChartToTime(chart, isoTime) {
   try { chart.timeScale().setVisibleRange({ from: target - half, to: target + half }) } catch { /* empty */ }
 }
 
+// One page's own group of charts that pan/zoom together - dragging or zooming any ONE of them pushes
+// the same visible time range to every other chart in the SAME group. Deliberately NOT the global,
+// module-level registry the Dashboard used to use (removed at the user's own report that it made the
+// Dashboard hard to use - its charts remount/re-fit on every live tick and ATM strike roll, which
+// kept re-broadcasting a stale chart's own auto-fit over whatever the user was actively looking at).
+// Backtrack/Expired Backtest's own charts are a much safer fit for this: they only ever refresh on a
+// deliberate Run, not continuously, so there is no equivalent stream of remounts to fight - and here
+// the user explicitly asked for it, to correlate a spot move with what CDV/OBV/Volume did at the same
+// instant by eye. One group per page instance (see useChartSyncGroup) rather than a shared singleton,
+// so a page unmounting can never leave stale chart references behind for the next page to inherit.
+function createChartSyncGroup() {
+  const charts = new Set()
+  let isApplying = false
+
+  function register(chart) {
+    const onVisibleRangeChange = () => {
+      if (isApplying) return
+      const range = chart.timeScale().getVisibleRange()
+      if (!range) return
+
+      isApplying = true
+      try {
+        for (const other of charts) {
+          if (other === chart) continue
+          // A chart whose own data doesn't reach into this window can reject the range - "nothing
+          // to show there", not an error worth breaking the drag over.
+          try { other.timeScale().setVisibleRange(range) } catch { /* empty */ }
+        }
+      } finally {
+        isApplying = false
+      }
+    }
+
+    charts.add(chart)
+    chart.timeScale().subscribeVisibleTimeRangeChange(onVisibleRangeChange)
+
+    return () => {
+      chart.timeScale().unsubscribeVisibleTimeRangeChange(onVisibleRangeChange)
+      charts.delete(chart)
+    }
+  }
+
+  return { register }
+}
+
+// One sync group per page instance, stable across re-renders (React's lazy useState initializer
+// runs the factory only once, on mount) - pass the SAME returned object to every chart on the page
+// that should pan/zoom together.
+export function useChartSyncGroup() {
+  return useState(() => createChartSyncGroup())[0]
+}
+
+// Joins `chart` to `syncGroup` only once `chart`'s own fitContent() has actually settled - measured
+// (against this exact lightweight-charts version) to still be raising its own visibleTimeRangeChange
+// events a full animation frame after fitContent() is called and returns, so registering any sooner
+// - including synchronously right after that call - broadcasts THIS chart's own first-load auto-fit
+// to every other chart in the group as if it were a user's pan/zoom, silently overriding whatever
+// view the user had already set on one of them. Two frames leaves a full frame of margin beyond the
+// measured worst case. `isStale` lets a caller detect its own unmount/remount before the deferred
+// callback runs (pass e.g. `() => chartRef.current !== chart`) and skip registering a chart that no
+// longer belongs to the calling component instance. No-op if `syncGroup` is falsy, so a chart that
+// doesn't want syncing can simply omit the prop.
+export function registerChartForSyncAfterSettling(syncGroup, chart, isStale, onRegistered) {
+  if (!syncGroup) return
+  requestAnimationFrame(() => {
+    if (isStale()) return
+    requestAnimationFrame(() => {
+      if (isStale()) return
+      onRegistered(syncGroup.register(chart))
+    })
+  })
+}
+
 // The last point in a chart-time-ascending, already-converted array (bars from toBar, or points from
 // toLinePoints/the volume mapper - anything shaped {time, [valueKey]}) at or before targetChartTime -
 // what a highlight needs to know "where on this series' own line does that time actually fall",
@@ -350,14 +423,13 @@ export function highlightChartAtTime(chart, series, targetChartTime, price) {
 // point shape the backend returns (ObvPoint's own JSON field is "obv" for both: OBV and CDV are
 // exposed as the same shape). A simplified port of App.jsx's own CeVsPeChart (the Dashboard's live
 // CDV/OBV chart) for Backtrack/Expired Backtest's own verification charts - see this file's header
-// comment for why App.jsx's tuned original is left untouched rather than imported. Deliberately
-// WITHOUT App.jsx's cross-chart pan/zoom sync registry: that machinery is tuned for the Dashboard's
-// own cluster of several always-present charts, and each page using this component only ever shows
-// one or two of these, each independent.
+// comment for why App.jsx's tuned original is left untouched rather than imported.
 //
 // prevCeSeries/prevPeSeries (optional, dashed) is a reference line - CDV's previous trading day,
-// typically; OBV has no equivalent and simply omits them.
-export function CeVsPeChart({ ceSeries, peSeries, prevCeSeries = [], prevPeSeries = [], valueKey = 'obv', height = 240, focusTime }) {
+// typically; OBV has no equivalent and simply omits them. `syncGroup` (see useChartSyncGroup) joins
+// this chart's own pan/zoom to every other chart passed the same group - omit it for a standalone
+// chart that shouldn't sync with anything.
+export function CeVsPeChart({ ceSeries, peSeries, prevCeSeries = [], prevPeSeries = [], valueKey = 'obv', height = 240, focusTime, syncGroup }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const ceRef = useRef(null)
@@ -366,6 +438,7 @@ export function CeVsPeChart({ ceSeries, peSeries, prevCeSeries = [], prevPeSerie
   const prevPeRef = useRef(null)
   const markersRef = useRef(null)
   const hasFitRef = useRef(false)
+  const syncCleanupRef = useRef(null)
 
   const sanitizedCe = useMemo(() => sanitizeSeries(toLinePoints(ceSeries, valueKey)), [ceSeries, valueKey])
   const sanitizedPe = useMemo(() => sanitizeSeries(toLinePoints(peSeries, valueKey)), [peSeries, valueKey])
@@ -392,6 +465,7 @@ export function CeVsPeChart({ ceSeries, peSeries, prevCeSeries = [], prevPeSerie
     peRef.current = chart.addSeries(LineSeries, { color: PE_COLOR, lineWidth: 2, title: 'PE', priceLineVisible: false })
     markersRef.current = createSeriesMarkers(ceRef.current, [])
     hasFitRef.current = false
+    syncCleanupRef.current = null
 
     const onResize = () => {
       if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth })
@@ -400,6 +474,7 @@ export function CeVsPeChart({ ceSeries, peSeries, prevCeSeries = [], prevPeSerie
 
     return () => {
       window.removeEventListener('resize', onResize)
+      syncCleanupRef.current?.()
       chart.remove()
       chartRef.current = null
       ceRef.current = null
@@ -421,6 +496,8 @@ export function CeVsPeChart({ ceSeries, peSeries, prevCeSeries = [], prevPeSerie
     if (!hasFitRef.current && hasAnyData) {
       chartRef.current?.timeScale().fitContent()
       hasFitRef.current = true
+      const chartAtFit = chartRef.current
+      registerChartForSyncAfterSettling(syncGroup, chartAtFit, () => chartRef.current !== chartAtFit, (cleanup) => { syncCleanupRef.current = cleanup })
     } else if (preservedRange) {
       try { chartRef.current?.timeScale().setVisibleRange(preservedRange) } catch { /* empty */ }
     }
@@ -457,12 +534,13 @@ export function CeVsPeChart({ ceSeries, peSeries, prevCeSeries = [], prevPeSerie
 // JSON shape - open/high/low/close are ignored, only the bar's own volume is plotted); `vwapSeries`
 // is raw {time: isoString, obv: number} (ObvPoint's own JSON shape, reused for VWAP the same way
 // CdvCeSeries/CdvPeSeries reuse it for CDV).
-export function VolumeVwapChart({ volumeBars, vwapSeries, height = 180, focusTime }) {
+export function VolumeVwapChart({ volumeBars, vwapSeries, height = 180, focusTime, syncGroup }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const volumeRef = useRef(null)
   const vwapRef = useRef(null)
   const hasFitRef = useRef(false)
+  const syncCleanupRef = useRef(null)
 
   const sanitizedVolume = useMemo(
     () => sanitizeSeries(volumeBars.map((b) => ({ time: toChartTime(b.time), value: b.volume, color: UP_COLOR }))),
@@ -488,6 +566,7 @@ export function VolumeVwapChart({ volumeBars, vwapSeries, height = 180, focusTim
     vwapRef.current = chart.addSeries(LineSeries, { color: EMA_COLOR, lineWidth: 2, title: 'VWAP', priceLineVisible: false, priceScaleId: 'left' })
     chart.priceScale('left').applyOptions({ visible: true, borderColor: BORDER_COLOR })
     hasFitRef.current = false
+    syncCleanupRef.current = null
 
     const onResize = () => {
       if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth })
@@ -496,6 +575,7 @@ export function VolumeVwapChart({ volumeBars, vwapSeries, height = 180, focusTim
 
     return () => {
       window.removeEventListener('resize', onResize)
+      syncCleanupRef.current?.()
       chart.remove()
       chartRef.current = null
       volumeRef.current = null
@@ -512,6 +592,8 @@ export function VolumeVwapChart({ volumeBars, vwapSeries, height = 180, focusTim
     if (!hasFitRef.current && hasAnyData) {
       chartRef.current?.timeScale().fitContent()
       hasFitRef.current = true
+      const chartAtFit = chartRef.current
+      registerChartForSyncAfterSettling(syncGroup, chartAtFit, () => chartRef.current !== chartAtFit, (cleanup) => { syncCleanupRef.current = cleanup })
     } else if (preservedRange) {
       try { chartRef.current?.timeScale().setVisibleRange(preservedRange) } catch { /* empty */ }
     }
