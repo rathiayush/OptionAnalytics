@@ -173,6 +173,7 @@ builder.Services.AddHostedService<HistoricalSpotDataPrefetchHostedService>();
 // IEnumerable<IBacktestStrategy> constructor param - add a strategy by implementing the
 // interface and adding one AddSingleton line here, nothing else needs to change.
 builder.Services.AddSingleton<IBacktestStrategy, SrFlowSellStrategy>();
+builder.Services.AddSingleton<IBacktestStrategy, EmaCrossoverRetestStrategy>();
 
 // Stateless - reads SpotFeedHostedService/CdvHostedService's in-memory history fresh on every
 // request, nothing to run in the background. See BacktestController/BacktestService.
