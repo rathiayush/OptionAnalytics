@@ -20,6 +20,9 @@ services:
       # Onto the mounted volume below - the container's content root is not persistent.
       Storage__TriggersPath: /app/data/strategy-triggers.json
       Storage__OrderHistoryPath: /app/data/trigger-order-history.json
+      # Where the one-time historical spot prefetch caches its NIFTY/BANKNIFTY CSVs - onto the same
+      # persistent volume, or the whole year would be re-fetched from Dhan on every redeploy.
+      Storage__HistoricalDataPath: /app/data/historical
       # Keeps the login cookie's signing/encryption key ring on the same persistent volume, so
       # everyone stays logged in across a redeploy instead of the whole key ring (and every
       # outstanding session) resetting every time the container restarts.
