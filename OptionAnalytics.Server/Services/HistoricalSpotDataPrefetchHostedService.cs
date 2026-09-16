@@ -6,7 +6,7 @@ namespace OptionAnalytics.Server.Services;
 
 /// <summary>
 /// Runs once per deployment (see HistoricalSpotDataStore.HasCompleteData) to fetch the last
-/// ~1 calendar year of NIFTY/BANKNIFTY 1-minute spot candles from Dhan and cache them to disk, so
+/// ~6 calendar months of NIFTY/BANKNIFTY 1-minute spot candles from Dhan and cache them to disk, so
 /// ExpiredOptionBacktestService's spot fetch (today, always live) can read straight from that cache
 /// instead of hitting Dhan on every single run.
 ///
@@ -25,8 +25,8 @@ namespace OptionAnalytics.Server.Services;
 /// again from scratch next boot, since no meta file was written; a restart AFTER it finished is a
 /// pure no-op two file reads.
 ///
-/// Off by default (see HistoricalDataPrefetchOptions.Enabled) - a year of NIFTY/BANKNIFTY history is
-/// real Dhan traffic, so a deployment opts into paying for it explicitly (HistoricalDataPrefetch__Enabled=true)
+/// Off by default (see HistoricalDataPrefetchOptions.Enabled) - 6 months of NIFTY/BANKNIFTY history
+/// is real Dhan traffic, so a deployment opts into paying for it explicitly (HistoricalDataPrefetch__Enabled=true)
 /// rather than it running automatically the moment Dhan credentials exist.
 /// </summary>
 public sealed class HistoricalSpotDataPrefetchHostedService : BackgroundService
@@ -36,8 +36,10 @@ public sealed class HistoricalSpotDataPrefetchHostedService : BackgroundService
     /// feature (Dhan's rolling-option docs only ever document NSE_FNO, never a BSE segment).</summary>
     private static readonly string[] Underlyings = { "NIFTY", "BANKNIFTY" };
 
-    /// <summary>How far back to cache, in calendar days - "last one year", the user's own words.</summary>
-    private const int LookbackCalendarDays = 365;
+    /// <summary>How far back to cache, in calendar days - "last 6 months", the user's own words
+    /// (originally a full year; narrowed down once the option side's own equivalent window was
+    /// narrowed too, to keep both prefetch jobs covering the same span).</summary>
+    private const int LookbackCalendarDays = 182;
 
     /// <summary>Per-request window size, comfortably under Dhan's documented 90-day-per-request cap
     /// for /charts/intraday (see HistoryWindow's own doc comment) - a year needs 5 of these rather

@@ -8,13 +8,17 @@ namespace OptionAnalytics.Server.Services;
 /// Runs once per deployment (see ExpiredOptionDataStore.HasContract, and this class's own per-
 /// contract completeness rule below) to fetch every NIFTY/BANKNIFTY expiry's own rolling-option data
 /// - RAW bars for every token in the ATM+-FlowChainRadius band, both CALL and PUT - across the last
-/// CalendarMonthsBack months, and cache it to disk so ExpiredOptionBacktestService's own
+/// PrefetchMonthsBack months, and cache it to a database so ExpiredOptionBacktestService's own
 /// FetchAcrossSegmentsAsync can read a segment from there instead of hitting Dhan on every single
-/// backtest run.
+/// backtest run. PrefetchMonthsBack (6, "last 6 months" in the user's own words) is deliberately its
+/// own constant, narrower than ExpiredOptionBacktestService.CalendarMonthsBack (12) - that one still
+/// governs how far back a LIVE backtest may pick an expiry at all; picking one older than this job's
+/// own prefetch window just means that one contract's fetch falls through to a live Dhan call
+/// instead of a cache hit (see FetchAcrossSegmentsAsync), not that it's refused.
 ///
 /// SCALE: NIFTY still has a weekly cadence (~52 expiries/year) plus monthly (~12); BANKNIFTY is
 /// monthly only (its own weekly options were discontinued - see ExpiredOptionBacktestService's own
-/// BANKNIFTY+WEEK rejection). Roughly 60-80 contracts across CalendarMonthsBack months, each needing
+/// BANKNIFTY+WEEK rejection). Roughly 30-40 contracts across PrefetchMonthsBack months, each needing
 /// (FlowChainRadius*2+1)*2 = 42 separate rolling-option fetches (every token ATM-10..ATM+10, both
 /// sides) - a few thousand paced requests in total, easily tens of minutes end to end. This is
 /// exactly the tradeoff the user accepted explicitly for the spot-side prefetch this mirrors ("even
@@ -54,6 +58,11 @@ public sealed class ExpiredOptionDataPrefetchHostedService : BackgroundService
     /// back to back, on top of (not instead of) the per-token/per-chunk pacing DhanRollingOptionDataService
     /// and ExpiredOptionBacktestService.BandFetchDelay already apply.</summary>
     private static readonly TimeSpan ContractDelay = TimeSpan.FromSeconds(1);
+
+    /// <summary>How far back this job itself prefetches, independent of ExpiredOptionBacktestService.
+    /// CalendarMonthsBack (12) - see this class's own top-of-file doc comment for why the two are
+    /// deliberately decoupled.</summary>
+    private const int PrefetchMonthsBack = 6;
 
     /// <summary>How far back of a requestedFromDay to hand BuildFetchSegments so its own
     /// Later(requestedFromDay, segment1EarliestStart) clamp always resolves to the contract's real
@@ -126,7 +135,7 @@ public sealed class ExpiredOptionDataPrefetchHostedService : BackgroundService
         }
 
         var today = IstClock.Today();
-        var rangeStart = today.AddMonths(-ExpiredOptionBacktestService.CalendarMonthsBack);
+        var rangeStart = today.AddMonths(-PrefetchMonthsBack);
         var rangeEnd = today.AddDays(-1); // strictly already-expired only
 
         var isFirstContract = true;
