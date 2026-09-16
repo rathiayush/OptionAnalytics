@@ -92,6 +92,57 @@ function tradeEntryMarkers(trades) {
     .sort((a, b) => a.time - b.time)
 }
 
+// A plain EMA line over the chart's own (already timeframe-bucketed) bars - the same computeEma
+// helper the old single "Show 5 EMA" checkbox used, just parameterized on whichever period the
+// caller asks for instead of a hardcoded 5.
+function emaLine(bars, period) {
+  const values = computeEma(bars.map((b) => b.close), period)
+  return bars.reduce((points, b, i) => {
+    if (values[i] != null) points.push({ time: b.time, value: values[i] })
+    return points
+  }, [])
+}
+
+// Mirrors SrFlowSellStrategy's own rolling support/resistance channel exactly (see the backend's
+// own doc comment on THE LEVEL): aggregates the NATIVE 1-minute spot history (oneMinuteBars, not
+// the chart's own possibly-coarser timeframe - the backend computes this from SpotBarsOneMinute
+// independently of whatever timeframe a run uses) into srTimeframeMinutes buckets, drops a still-
+// forming trailing one exactly like BacktestUtil.AggregateCandles does, then for each of the
+// chart's own bars reads the rolling high (resistance) or low (support) over the last
+// srLookbackBars such buckets that have fully closed strictly before that bar's own time - never
+// the bucket still forming through it, so this never looks ahead of what the strategy itself could
+// have known at the same moment.
+function srLevelLine(oneMinuteBars, chartBars, srTimeframeMinutes, srLookbackBars, which) {
+  if (oneMinuteBars.length === 0 || chartBars.length === 0) return []
+
+  const bucketSeconds = Math.max(1, srTimeframeMinutes) * 60
+  const buckets = new Map()
+  let latestCovered = 0
+  for (const b of oneMinuteBars) {
+    const t = Math.floor(b.time / bucketSeconds) * bucketSeconds
+    const existing = buckets.get(t)
+    if (!existing) buckets.set(t, { time: t, high: b.high, low: b.low })
+    else { existing.high = Math.max(existing.high, b.high); existing.low = Math.min(existing.low, b.low) }
+    if (b.time + 60 > latestCovered) latestCovered = b.time + 60
+  }
+  const srBars = Array.from(buckets.values()).sort((a, b) => a.time - b.time)
+  if (srBars.length > 0 && srBars[srBars.length - 1].time + bucketSeconds > latestCovered) srBars.pop()
+
+  const points = []
+  let srIndex = -1
+  for (const bar of chartBars) {
+    while (srIndex + 1 < srBars.length && srBars[srIndex + 1].time + bucketSeconds <= bar.time) srIndex++
+    if (srIndex + 1 < srLookbackBars) continue
+
+    let value = which === 'high' ? -Infinity : Infinity
+    for (let w = srIndex - srLookbackBars + 1; w <= srIndex; w++) {
+      value = which === 'high' ? Math.max(value, srBars[w].high) : Math.min(value, srBars[w].low)
+    }
+    points.push({ time: bar.time, value })
+  }
+  return points
+}
+
 // Plain candlestick chart of the underlying's own currently-backfilled/live spot history, with this
 // run's own trade entries marked on it - lets a signal be checked against the real price action
 // rather than only read off the Trades table below. Same plain shape as StrikeDataPage's own
@@ -99,14 +150,16 @@ function tradeEntryMarkers(trades) {
 // the "Show 5 EMA" checkbox below) - deliberately NOT App.jsx's own live-ticking PriceChart, since
 // this page's own data (trades/signals) only ever refreshes on a deliberate Run, not bar-by-bar.
 //
-// emaPoints is already pre-computed (or empty) by the caller - this component only ever calls
-// setData with whatever it is handed, so unticking the checkbox (which then passes []) clears the
-// line without this component needing to know WHY it's empty.
-function SpotCandleChart({ bars, trades, emaPoints, height = 420, focusTime, syncGroup }) {
+// indicatorLines is an array of { key, label, color, points } - already pre-computed (or omitted
+// entirely) by the caller for whichever indicators the CURRENT strategy exposes and the user has
+// ticked on; this component just keeps one lightweight-charts line series per key in sync with
+// that array (added when a new key appears, removed when one drops out, setData'd on every
+// change), so it needs no knowledge of what any of these lines actually mean.
+function SpotCandleChart({ bars, trades, indicatorLines, height = 420, focusTime, syncGroup }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
-  const emaRef = useRef(null)
+  const indicatorSeriesRef = useRef(new Map())
   const markersRef = useRef(null)
   // Only auto-fit (and join the sync group) once per mount - a later `bars` update (a fresh Run,
   // not a remount: the page keys this component on underlying/timeframe/date-range, see its own
@@ -135,7 +188,7 @@ function SpotCandleChart({ bars, trades, emaPoints, height = 420, focusTime, syn
       wickUpColor: UP_COLOR,
       wickDownColor: DOWN_COLOR,
     })
-    emaRef.current = chart.addSeries(LineSeries, { color: EMA_COLOR, lineWidth: 2, title: '5 EMA', priceLineVisible: false, crosshairMarkerVisible: false })
+    indicatorSeriesRef.current = new Map()
     markersRef.current = createSeriesMarkers(seriesRef.current, [])
     hasFitRef.current = false
     syncCleanupRef.current = null
@@ -151,7 +204,7 @@ function SpotCandleChart({ bars, trades, emaPoints, height = 420, focusTime, syn
       chart.remove()
       chartRef.current = null
       seriesRef.current = null
-      emaRef.current = null
+      indicatorSeriesRef.current = new Map()
       markersRef.current = null
     }
     // One chart instance per mount - series/marker data is (re)populated by the effects below.
@@ -172,8 +225,27 @@ function SpotCandleChart({ bars, trades, emaPoints, height = 420, focusTime, syn
   }, [bars])
 
   useEffect(() => {
-    emaRef.current?.setData(emaPoints ?? [])
-  }, [emaPoints])
+    if (!chartRef.current) return
+    const chart = chartRef.current
+    const existing = indicatorSeriesRef.current
+    const next = indicatorLines ?? []
+    const nextKeys = new Set(next.map((l) => l.key))
+
+    for (const [key, series] of existing) {
+      if (!nextKeys.has(key)) {
+        chart.removeSeries(series)
+        existing.delete(key)
+      }
+    }
+    for (const line of next) {
+      let series = existing.get(line.key)
+      if (!series) {
+        series = chart.addSeries(LineSeries, { color: line.color, lineWidth: 2, title: line.label, priceLineVisible: false, crosshairMarkerVisible: false })
+        existing.set(line.key, series)
+      }
+      series.setData(line.points ?? [])
+    }
+  }, [indicatorLines])
 
   useEffect(() => {
     if (!markersRef.current) return
@@ -312,10 +384,12 @@ export default function BacktestPage() {
 
   const strategy = strategies.find((s) => s.key === strategyKey) ?? null
 
-  // Purely a display toggle, not a run parameter - unticking it never changes the backtest itself,
-  // only whether the chart below draws the line. Off by default so the chart stays uncluttered for
-  // a strategy that has nothing to do with the 5 EMA.
-  const [showEma, setShowEma] = useState(false)
+  // Which of the CURRENT strategy's own indicator lines (see indicatorDefs below) are ticked on -
+  // purely a display toggle, not a run parameter: unticking one never changes the backtest itself,
+  // only whether the chart below draws that line. Keyed by indicator key so a strategy switch
+  // naturally shows nothing ticked for indicators it has never heard of, without needing an explicit
+  // reset effect.
+  const [visibleIndicators, setVisibleIndicators] = useState({})
 
   // Which expiry THIS PAGE backtests against - see useExpirySelector. Every tracked expiry is held
   // live server-side, so this is just a different ?expiry= on this page's own requests: backtesting
@@ -486,21 +560,46 @@ export default function BacktestPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [spotCandles, fromDay, toDay, timeframe])
 
-  // The 5 EMA line for the chart's own "Show 5 EMA" toggle - computed off the SAME bars the chart
-  // itself plots (already timeframe-bucketed above), using whichever emaPeriod the current strategy
-  // is actually running with when it has one (the five-ema family), falling back to the classic 5
-  // otherwise. [] when unticked - SpotCandleChart just clears the line on an empty series, it does
-  // not need to know why.
-  const emaPoints = useMemo(() => {
-    if (!showEma || chartBars.length === 0) return []
-    const emaPeriodSpec = strategy?.parameters?.find((p) => p.key === 'emaPeriod')
-    const emaPeriod = paramValues.emaPeriod ?? emaPeriodSpec?.default ?? 5
-    const values = computeEma(chartBars.map((b) => b.close), emaPeriod)
-    return chartBars.reduce((points, b, i) => {
-      if (values[i] != null) points.push({ time: b.time, value: values[i] })
-      return points
-    }, [])
-  }, [showEma, chartBars, paramValues.emaPeriod, strategy])
+  // Which indicator line(s) the CURRENT strategy exposes - one checkbox per entry, replacing the
+  // old single hardcoded "Show 5 EMA" toggle (which read a literal "emaPeriod" parameter neither
+  // currently-registered strategy has). Each entry's own `compute` reads whatever THIS strategy's
+  // own tuned parameter values currently are, so the plotted line always matches what a Run would
+  // actually use, not a stale default. A strategy with no descriptor here (there isn't one yet, but
+  // a future strategy might ship before this list is updated for it) simply shows no checkboxes -
+  // never a crash.
+  const indicatorDefs = useMemo(() => {
+    if (!strategy) return []
+    const paramDefault = (key, fallback) => paramValues[key] ?? strategy.parameters?.find((p) => p.key === key)?.default ?? fallback
+
+    if (strategy.key === 'ema-crossover-retest') {
+      const fastPeriod = paramDefault('fastEmaPeriod', 20)
+      const slowPeriod = paramDefault('slowEmaPeriod', 50)
+      return [
+        { key: 'fastEma', label: `Fast EMA (${fastPeriod})`, color: '#f0a020', compute: (bars) => emaLine(bars, fastPeriod) },
+        { key: 'slowEma', label: `Slow EMA (${slowPeriod})`, color: EMA_COLOR, compute: (bars) => emaLine(bars, slowPeriod) },
+      ]
+    }
+    if (strategy.key === 'sr-flow-sell') {
+      const srTimeframeMinutes = paramDefault('srTimeframeMinutes', 30)
+      const srLookbackBars = paramDefault('srLookbackBars', 20)
+      const oneMinuteBars = (spotCandles ?? []).map(toBar)
+      return [
+        { key: 'resistance', label: `Resistance (${srTimeframeMinutes}m x${srLookbackBars})`, color: DOWN_COLOR, compute: (bars) => srLevelLine(oneMinuteBars, bars, srTimeframeMinutes, srLookbackBars, 'high') },
+        { key: 'support', label: `Support (${srTimeframeMinutes}m x${srLookbackBars})`, color: UP_COLOR, compute: (bars) => srLevelLine(oneMinuteBars, bars, srTimeframeMinutes, srLookbackBars, 'low') },
+      ]
+    }
+    return []
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [strategy, paramValues.fastEmaPeriod, paramValues.slowEmaPeriod, paramValues.srTimeframeMinutes, paramValues.srLookbackBars, spotCandles])
+
+  // The actual plotted line data - only for whichever of the above are ticked on in
+  // visibleIndicators, and only once there is something to plot them against.
+  const indicatorLines = useMemo(() => {
+    if (chartBars.length === 0) return []
+    return indicatorDefs
+      .filter((def) => visibleIndicators[def.key])
+      .map((def) => ({ key: def.key, label: def.label, color: def.color, points: def.compute(chartBars) }))
+  }, [indicatorDefs, visibleIndicators, chartBars])
 
   const summary = useMemo(() => {
     // Open positions are excluded from every stat below - they haven't actually closed, so folding
@@ -733,11 +832,17 @@ export default function BacktestPage() {
           <Space direction="vertical" size={16} style={{ width: '100%' }}>
             {chartBars.length > 0 ? (
               <div>
-                <Checkbox checked={showEma} onChange={(e) => setShowEma(e.target.checked)}>
-                  <Text style={{ color: EMA_COLOR }}>Show 5 EMA</Text>
-                </Checkbox>
+                {indicatorDefs.map((def) => (
+                  <Checkbox
+                    key={def.key}
+                    checked={!!visibleIndicators[def.key]}
+                    onChange={(e) => setVisibleIndicators((v) => ({ ...v, [def.key]: e.target.checked }))}
+                  >
+                    <Text style={{ color: def.color }}>{def.label}</Text>
+                  </Checkbox>
+                ))}
                 <ChartErrorBoundary key={`${selected}-${expiryParam}-${timeframe}-${fromDay}-${toDay}`}>
-                  <SpotCandleChart bars={chartBars} trades={visibleTrades} emaPoints={emaPoints} height={420} focusTime={focusTime} syncGroup={chartSyncGroup} />
+                  <SpotCandleChart bars={chartBars} trades={visibleTrades} indicatorLines={indicatorLines} height={420} focusTime={focusTime} syncGroup={chartSyncGroup} />
                 </ChartErrorBoundary>
               </div>
             ) : (
