@@ -141,6 +141,25 @@ public sealed class RegimeAdaptiveStrategyTests
     }
 
     [Fact]
+    public void RangeOrNeutral_PairedLegsSquareOffTogether_NotIndependently()
+    {
+        var bars = RangeFixture();
+
+        var trades = new RegimeAdaptiveStrategy().Simulate(Context(bars), Parameters());
+        var pairs = trades.Where(t => t.EntryTimeUtc is not null && t.ExitTimeUtc is not null)
+            .GroupBy(t => t.SignalTimeUtc).Where(g => g.Count() == 2).ToList();
+
+        Assert.NotEmpty(pairs);
+        // Every CE+PE pair entered at the same signal exits at the SAME time too - per explicit
+        // instruction that trades executed together must be squared off together (see
+        // OptionTradeSimulator.RunPairedLegs). This fixture's flat, never-moving synthetic premium
+        // means every exit here is RegimeChange/EndOfDay/time-driven rather than stop/target-driven,
+        // so it hits none of RunPairedLegs' own documented rare cascading residual - see that
+        // method's own dedicated stress test for the ~99%-not-100% case.
+        Assert.All(pairs, g => Assert.Single(g.Select(t => t.ExitTimeUtc).Distinct()));
+    }
+
+    [Fact]
     public void NoSignalsAtAll_WhenTooFewOneMinuteBarsExistForA15MinuteRegime()
     {
         var bars = TrendFixture(500); // well short of the 15-minute regime's own warmup

@@ -380,22 +380,41 @@ public sealed class RegimeAdaptiveStrategy : IBacktestStrategy
             TryEnter(i, false, regimeType, summary); // Bearish leg -> sell CE
         }
 
-        var trades = new List<BacktestTrade>();
-        foreach (var stream in streams.Values)
+        Dictionary<string, decimal> BuildStreamParameters(LegStream stream) => new(parameters)
         {
-            if (stream.Signals.Count == 0) continue;
-            var streamParameters = new Dictionary<string, decimal>(parameters)
+            ["side"] = OptionTradeSimulator.SideSell,
+            ["otmSteps"] = stream.OtmSteps,
+            ["slPoints"] = 0m,
+            ["tpPoints"] = 0m,
+            ["slPercentOfPremium"] = stream.SlPercent,
+            ["tpPercentOfPremium"] = stream.PtPercent,
+            ["squareOffMinutes"] = squareOffMinutes,
+            ["excludeLastDays"] = excludeLastDays,
+        };
+
+        // Range/Neutral's two legs were entered TOGETHER (a Short Strangle) and, per explicit
+        // instruction, must square off together too - see OptionTradeSimulator.RunPairedLegs' own
+        // doc comment. Trend's own two possible leg-streams (a "sell CE" stream from its downtrend
+        // periods, a "sell PE" one from its uptrend periods) are NEVER paired - they are sequential
+        // single-leg bets from different, non-overlapping regime windows, not one two-leg position.
+        var trades = new List<BacktestTrade>();
+        foreach (var regimeType in streams.Keys.Select(k => k.RegimeType).Distinct())
+        {
+            var hasCall = streams.TryGetValue((regimeType, true), out var callStream) && callStream.Signals.Count > 0;
+            var hasPut = streams.TryGetValue((regimeType, false), out var putStream) && putStream.Signals.Count > 0;
+
+            if (regimeType != "Trend" && hasCall && hasPut)
             {
-                ["side"] = OptionTradeSimulator.SideSell,
-                ["otmSteps"] = stream.OtmSteps,
-                ["slPoints"] = 0m,
-                ["tpPoints"] = 0m,
-                ["slPercentOfPremium"] = stream.SlPercent,
-                ["tpPercentOfPremium"] = stream.PtPercent,
-                ["squareOffMinutes"] = squareOffMinutes,
-                ["excludeLastDays"] = excludeLastDays,
-            };
-            trades.AddRange(OptionTradeSimulator.Run(context, stream.Signals, streamParameters, signalExits: stream.Exits));
+                trades.AddRange(OptionTradeSimulator.RunPairedLegs(
+                    context,
+                    putStream!.Signals, putStream.Exits, BuildStreamParameters(putStream),
+                    callStream!.Signals, callStream.Exits, BuildStreamParameters(callStream)));
+            }
+            else
+            {
+                if (hasCall) trades.AddRange(OptionTradeSimulator.Run(context, callStream!.Signals, BuildStreamParameters(callStream), signalExits: callStream.Exits));
+                if (hasPut) trades.AddRange(OptionTradeSimulator.Run(context, putStream!.Signals, BuildStreamParameters(putStream), signalExits: putStream.Exits));
+            }
         }
 
         return (trades.OrderByDescending(t => t.SignalTimeUtc).ToList(), signals.OrderByDescending(s => s.TimeUtc).ToList());

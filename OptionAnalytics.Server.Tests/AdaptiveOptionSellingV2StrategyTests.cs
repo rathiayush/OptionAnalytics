@@ -125,6 +125,23 @@ public sealed class AdaptiveOptionSellingV2StrategyTests
     }
 
     [Fact]
+    public void RangeSideways_PairedLegsSquareOffTogether_NotIndependently()
+    {
+        var bars = ChoppyFixture();
+
+        var trades = new AdaptiveOptionSellingV2Strategy().Simulate(Context(bars), Parameters());
+        var pairs = trades.Where(t => t.EntryTimeUtc is not null && t.ExitTimeUtc is not null)
+            .GroupBy(t => t.SignalTimeUtc).Where(g => g.Count() == 2).ToList();
+
+        Assert.NotEmpty(pairs);
+        // Per explicit instruction: trades executed together must be squared off together - see
+        // OptionTradeSimulator.RunPairedLegs (this fixture's flat premium means every exit here is
+        // RegimeChange/EndOfDay/time-driven, so it doesn't hit that method's own documented rare
+        // stop/target-driven cascade residual - see its dedicated stress test for that ~99% case).
+        Assert.All(pairs, g => Assert.Single(g.Select(t => t.ExitTimeUtc).Distinct()));
+    }
+
+    [Fact]
     public void Trend_DirectionFilter_BlocksTheDisallowedSide()
     {
         var bars = TrendFixture();
