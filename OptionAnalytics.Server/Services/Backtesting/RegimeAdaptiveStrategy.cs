@@ -50,7 +50,34 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 /// a VWAP+-ATR band on the PAGE's own timeframe (<c>rangeAtrMultiple</c> x ATR either side of VWAP),
 /// RSI-neutral gated - but now only attempted when the 15-minute regime score reads below
 /// <c>regimeScoreMin</c> (i.e., genuinely not trending), so this and the cascade above never both
-/// fire into the same market condition.
+/// fire into the same market condition. Its own signal text additionally labels the bar "Choppy"
+/// (ADX &lt;= <c>chopAdxMax</c> AND the 15-minute EMA slope within +-<c>chopFlatSlopePercent</c> of
+/// flat) versus a plainer "weak trend" when the score is merely low without those two also reading
+/// genuinely flat/directionless - a label only, it does not change what fires, but it directly answers
+/// "let me see the market is actually being read as choppy," not just infer it from an absence.
+///
+/// VOLATILE REGIME - a THIRD, higher-priority condition, checked ahead of both of the above and
+/// capable of overriding either: this app has no VIX feed (see TechnicalIndicators' own doc comment),
+/// so instead of one fixed ATR%-of-price cutoff alone (which has to be hand-tuned per underlying/price
+/// level and never adapts on its own), four independent, mostly SELF-REFERENCING signals are ORed
+/// together - any one being true marks the bar Volatile:
+///   1. ATR is still at/above the fixed <c>atrExtremePercent</c> cutoff (kept for continuity/backward
+///      compatibility with the single-timeframe version).
+///   2. ATR has EXPANDED to at least <c>atrExpansionRatio</c> x its own rolling
+///      <c>atrAverageLookbackBars</c>-bar average - "volatility is spiking right now relative to its
+///      OWN recent normal," which adapts automatically to whatever underlying/price level/timeframe is
+///      running, unlike a fixed % cutoff.
+///   3. The current candle's own High-Low range is at least <c>largeCandleRatio</c> x its own rolling
+///      average range - a single outsized bar, even before ATR's own smoothing has caught up to it.
+///   4. The opening gap (|Open - previous Close|) is at least <c>gapAtrMultiple</c> x ATR - a sudden
+///      jump between bars, which neither ATR nor a same-bar range check would necessarily flag on its
+///      own.
+/// A Volatile bar suspends BOTH the Trend cascade's final entry and the Range fade's final entry (the
+/// closest a single-trade decision can get to the flowchart's own "reduce size / stay out until it
+/// settles" - see this class's own "what this does not do" section on position sizing) - checked at
+/// the actual entry moment for each path (native 1-minute for the cascade, the page's own timeframe
+/// for the Range fade), not baked into the 15-minute regime score itself, so a bar that was calm when
+/// the 15-minute regime last updated but has since gone volatile is still caught.
 ///
 /// OPTION SIDE, ORDER FLOW, and everything this class still deliberately does NOT do (true
 /// simultaneous Iron Condor selling, India VIX, position sizing/daily-loss/consecutive-SL state,
@@ -68,7 +95,7 @@ public sealed class RegimeAdaptiveStrategy : IBacktestStrategy
 {
     public string Key => "regime-adaptive";
     public string Name => "Regime-Adaptive Option Selling (15M->5M->3M->1M Cascade)";
-    public string Description => "A genuine multi-timeframe cascade: 15-minute regime score (EMA stack+slope, ADX, VWAP side, 5-minute confirmation) gates a 5-minute setup, a 3-minute confirmation candle, and a 1-minute pullback-rejection entry, all built from the underlying's own 1-minute history regardless of the page's selected timeframe. Falls back to a VWAP+-ATR range fade (RSI-neutral gated) when the 15-minute regime isn't trending. Sells options by default; CDV/OBV order-flow confirmation is ON by default here.";
+    public string Description => "Identifies Trending, Choppy, and Volatile conditions and trades each differently: a 15M->5M->3M->1M multi-timeframe cascade sells the trend's own direction; a VWAP+-ATR range fade (RSI-neutral gated) sells premium at the edges of a genuinely choppy range; and a relative volatility spike (ATR expansion, an oversized candle, or a gap - not just a fixed ATR% cutoff) suspends new entries from either path until it settles. Sells options by default; CDV/OBV order-flow confirmation is ON by default here.";
 
     private const decimal DirectionBoth = 0;
     private const decimal DirectionLongOnly = 1;
@@ -138,6 +165,18 @@ public sealed class RegimeAdaptiveStrategy : IBacktestStrategy
         new BacktestParameterSpec("rsiPeriod", "RSI (bars)", Default: 14, Min: 2, Max: 100, Step: 1),
         new BacktestParameterSpec("rsiNeutralLow", "Entries need RSI above", Default: 40, Min: 0, Max: 50, Step: 1),
         new BacktestParameterSpec("rsiNeutralHigh", "Entries need RSI below", Default: 60, Min: 50, Max: 100, Step: 1),
+
+        // ---- Volatile-regime detection - RELATIVE (self-referencing) signals on top of the fixed
+        // ATR%-of-price cutoff above, so a genuine spike gets caught on any underlying/price level
+        // without needing its own manual retune. See this class's own doc comment.
+        new BacktestParameterSpec("atrAverageLookbackBars", "ATR/range averaging window (bars, page timeframe)", Default: 20, Min: 5, Max: 100, Step: 1),
+        new BacktestParameterSpec("atrExpansionRatio", "ATR vs its own average counts as Volatile at", Default: 1.5m, Min: 1, Max: 5, Step: 0.1m),
+        new BacktestParameterSpec("largeCandleRatio", "Candle range vs its own average counts as Volatile at", Default: 2, Min: 1, Max: 6, Step: 0.1m),
+        new BacktestParameterSpec("gapAtrMultiple", "Opening gap vs ATR counts as Volatile at", Default: 1, Min: 0.2m, Max: 5, Step: 0.1m),
+
+        // ---- Choppy labeling only (does not change routing - see this class's own doc comment) ----
+        new BacktestParameterSpec("chopAdxMax", "15-min ADX at/below this, with a flat slope, reads as Choppy", Default: 20, Min: 0, Max: 60, Step: 1),
+        new BacktestParameterSpec("chopFlatSlopePercent", "15-min EMA slope within +- this reads as flat (Choppy)", Default: 0.02m, Min: 0, Max: 1, Step: 0.01m),
 
         // ON by default (every other strategy here defaults this off) - explicit instruction for
         // this strategy specifically.
@@ -215,6 +254,13 @@ public sealed class RegimeAdaptiveStrategy : IBacktestStrategy
         var rsiNeutralLow = parameters.GetValueOrDefault("rsiNeutralLow", 40m);
         var rsiNeutralHigh = parameters.GetValueOrDefault("rsiNeutralHigh", 60m);
 
+        var atrAverageLookbackBars = Math.Max(2, (int)parameters.GetValueOrDefault("atrAverageLookbackBars", 20));
+        var atrExpansionRatio = parameters.GetValueOrDefault("atrExpansionRatio", 1.5m);
+        var largeCandleRatio = parameters.GetValueOrDefault("largeCandleRatio", 2m);
+        var gapAtrMultiple = parameters.GetValueOrDefault("gapAtrMultiple", 1m);
+        var chopAdxMax = parameters.GetValueOrDefault("chopAdxMax", 20m);
+        var chopFlatSlopePercent = parameters.GetValueOrDefault("chopFlatSlopePercent", 0.02m);
+
         var requireFlowConfirmation = parameters.GetValueOrDefault("requireFlowConfirmation", FlagOn) >= (FlagOff + FlagOn) / 2;
         var flowLookback = (int)parameters.GetValueOrDefault("flowLookbackBars", 5);
         var minFlowRisePercent = parameters.GetValueOrDefault("minFlowRisePercent", 0m);
@@ -246,11 +292,10 @@ public sealed class RegimeAdaptiveStrategy : IBacktestStrategy
             return (confirmed, reason);
         }
 
-        void EmitAt(DateTimeOffset time, bool bullish, string summary, decimal? atrPercentHere)
+        void EmitAt(DateTimeOffset time, bool bullish, string summary, decimal? atrPercentHere, string? volatileReason)
         {
             var dir = bullish ? "Bullish" : "Bearish";
-            var volatilityExtreme = atrPercentHere is { } ap1 && ap1 >= atrExtremePercent;
-            var volatilityHigh = !volatilityExtreme && atrPercentHere is { } ap2 && ap2 >= atrNormalHighPercent;
+            var volatilityHigh = volatileReason is null && atrPercentHere is { } ap2 && ap2 >= atrNormalHighPercent;
             var beforeSignalStart = signalStartMinutes > 0 && IstClock.MinutesOfDay(time) < signalStartMinutes;
             var afterEntryCutoff = noNewEntriesAfterMinutes > 0 && IstClock.MinutesOfDay(time) >= noNewEntriesAfterMinutes;
             var sizingNote = volatilityHigh ? " (ATR reads High volatility - consider reduced size; not enforced by this backtest)" : "";
@@ -259,8 +304,8 @@ public sealed class RegimeAdaptiveStrategy : IBacktestStrategy
                 signals.Add(new BacktestSignal(context.Underlying, time, "Rejected", dir, $"{summary} - skipped, before {IstClock.FormatMinutesOfDay(signalStartMinutes)} IST (pre-open)"));
             else if (afterEntryCutoff)
                 signals.Add(new BacktestSignal(context.Underlying, time, "Rejected", dir, $"{summary} - skipped, at/after {IstClock.FormatMinutesOfDay(noNewEntriesAfterMinutes)} IST (no new entries)"));
-            else if (volatilityExtreme)
-                signals.Add(new BacktestSignal(context.Underlying, time, "Rejected", dir, $"{summary} - skipped, ATR {atrPercentHere:0.##}% of price is Extreme volatility (no new trades)"));
+            else if (volatileReason is { Length: > 0 })
+                signals.Add(new BacktestSignal(context.Underlying, time, "Rejected", dir, $"{summary} - skipped, market reads Volatile right now ({volatileReason})"));
             else if (bullish && !takeLongs)
                 signals.Add(new BacktestSignal(context.Underlying, time, "Rejected", dir, $"{summary} - skipped, shorts only"));
             else if (!bullish && !takeShorts)
@@ -339,6 +384,10 @@ public sealed class RegimeAdaptiveStrategy : IBacktestStrategy
         var rsiPage = ToQuotes(pageBars).GetRsi(rsiPeriod).Select(r => (decimal?)r.Rsi).ToList();
         var atrPercentPage = pageBars.Select((b, i) => atrPage[i] is { } a && b.Close != 0 ? (decimal?)(a / b.Close * 100m) : null).ToList();
 
+        // ---- Volatile regime - see this class's own doc comment for what each of the four signals
+        // means; any one being true is enough to flag the bar, and the reason text says which. ----
+        var volatileReasonPage = ComputeVolatileReasons(pageBars, atrPage, atrPercentPage, atrExtremePercent, atrAverageLookbackBars, atrExpansionRatio, largeCandleRatio, gapAtrMultiple);
+
         // ==== TREND CASCADE - native 1-minute entries, gated by every stage above agreeing ====
         var regime15OnOneMin = AlignStepToTime(bars15, regime15Direction, oneMin, (string?)null);
         var regime15ScoreOnOneMin = AlignStepToTime(bars15, regime15Score, oneMin, 0);
@@ -347,6 +396,7 @@ public sealed class RegimeAdaptiveStrategy : IBacktestStrategy
         var confirm3OkOnOneMinBullish = AlignStepToTime(bars3, confirm3OkBullish, oneMin, false);
         var confirm3OkOnOneMinBearish = AlignStepToTime(bars3, confirm3OkBearish, oneMin, false);
         var atrPercentOnOneMin = AlignStepToTime(pageBars, atrPercentPage, oneMin, (decimal?)null);
+        var volatileReasonOnOneMin = AlignStepToTime(pageBars, volatileReasonPage, oneMin, (string?)null);
 
         for (var i = Math.Max(1, slopeLookback); i < oneMin.Count; i++)
         {
@@ -369,11 +419,18 @@ public sealed class RegimeAdaptiveStrategy : IBacktestStrategy
             var score = regime15ScoreOnOneMin[i];
             var confidence = score >= regimeScoreFull ? "full confidence" : "selective/reduced confidence";
             var summary = $"15M regime {dir} (score {score}/5, {confidence}) -> 5M setup ok -> 3M confirmed -> 1M pullback rejection (EMA{entry1EmaFast}/{entry1EmaSlow})";
-            EmitAt(oneMin[i].Time, bullish, summary, atrPercentOnOneMin[i]);
+            EmitAt(oneMin[i].Time, bullish, summary, atrPercentOnOneMin[i], volatileReasonOnOneMin[i]);
         }
 
         // ==== RANGE FADE - page-timeframe VWAP+-ATR band, only when the 15M regime is NOT trending ====
         var regime15ScoreOnPage = AlignStepToTime(bars15, regime15Score, pageBars, 0);
+        // Labeling only (see this class's own doc comment) - a genuinely flat, weak-ADX 15-minute
+        // read is called "Choppy" in the signal text; anything else that still failed to trend is
+        // just a plainer "weak trend".
+        var slope15 = bars15.Select((_, i) => Slope(ema15Fast, i, slopeLookback)).ToList();
+        var adx15OnPage = AlignStepToTime(bars15, adx15, pageBars, (decimal?)null);
+        var slope15OnPage = AlignStepToTime(bars15, slope15, pageBars, (decimal?)null);
+
         for (var i = 1; i < pageBars.Count; i++)
         {
             if (regime15ScoreOnPage[i] >= regimeScoreMin) continue; // 15M cascade already has a candidate - don't fade into it
@@ -388,26 +445,74 @@ public sealed class RegimeAdaptiveStrategy : IBacktestStrategy
             var upper = vwapNow + atrNow * rangeAtrMultiple;
             var prevUpper = prevVwap + prevAtr * rangeAtrMultiple;
             var rsiNeutral = rsiNow > rsiNeutralLow && rsiNow < rsiNeutralHigh;
+            var isChoppy = adx15OnPage[i] is { } a15 && a15 <= chopAdxMax && slope15OnPage[i] is { } s15 && Math.Abs(s15) <= chopFlatSlopePercent;
+            var regimeLabel = isChoppy ? $"Choppy (15M ADX {adx15OnPage[i]:0.#}, slope {slope15OnPage[i]:0.###}%)" : $"weak trend (score {regime15ScoreOnPage[i]}/5)";
 
             if (prevBar.Close <= prevLower && bar.Close > lower)
             {
-                var summary = $"15M regime Range (score {regime15ScoreOnPage[i]}/5) - close rejected back above the VWAP-{rangeAtrMultiple:0.#}xATR lower band ({lower:0.##}), RSI {rsiNow:0.#}";
+                var summary = $"15M regime {regimeLabel} - close rejected back above the VWAP-{rangeAtrMultiple:0.#}xATR lower band ({lower:0.##}), RSI {rsiNow:0.#}";
                 if (!rsiNeutral)
                     signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", "Bullish", $"{summary} - skipped, RSI outside the {rsiNeutralLow:0.#}-{rsiNeutralHigh:0.#} neutral band (momentum may be accelerating away, not just testing the range)"));
                 else
-                    EmitAt(bar.Time, true, summary, atrPctNow);
+                    EmitAt(bar.Time, true, summary, atrPctNow, volatileReasonPage[i]);
             }
             else if (prevBar.Close >= prevUpper && bar.Close < upper)
             {
-                var summary = $"15M regime Range (score {regime15ScoreOnPage[i]}/5) - close rejected back below the VWAP+{rangeAtrMultiple:0.#}xATR upper band ({upper:0.##}), RSI {rsiNow:0.#}";
+                var summary = $"15M regime {regimeLabel} - close rejected back below the VWAP+{rangeAtrMultiple:0.#}xATR upper band ({upper:0.##}), RSI {rsiNow:0.#}";
                 if (!rsiNeutral)
                     signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", "Bearish", $"{summary} - skipped, RSI outside the {rsiNeutralLow:0.#}-{rsiNeutralHigh:0.#} neutral band (momentum may be accelerating away, not just testing the range)"));
                 else
-                    EmitAt(bar.Time, false, summary, atrPctNow);
+                    EmitAt(bar.Time, false, summary, atrPctNow, volatileReasonPage[i]);
             }
         }
 
         return (entries, signals.OrderByDescending(s => s.TimeUtc).ToList());
+    }
+
+    /// <summary>The Volatile-regime reason text for every page-timeframe bar, one entry per
+    /// <paramref name="pageBars"/> index, null where none of the four signals fire - see this class's
+    /// own doc comment for what each one means. Internal (not private) purely so
+    /// RegimeAdaptiveStrategyTests can exercise this specific detection logic directly with small,
+    /// hand-built candle sequences, rather than needing a full end-to-end cascade fixture that
+    /// happens to also trip a price-action trigger at the exact volatile bar.</summary>
+    internal static string?[] ComputeVolatileReasons(
+        IReadOnlyList<Candle> pageBars, IReadOnlyList<decimal?> atrPage, IReadOnlyList<decimal?> atrPercentPage,
+        decimal atrExtremePercent, int atrAverageLookbackBars, decimal atrExpansionRatio, decimal largeCandleRatio, decimal gapAtrMultiple)
+    {
+        var volatileReasonPage = new string?[pageBars.Count];
+        for (var i = 0; i < pageBars.Count; i++)
+        {
+            var reasons = new List<string>();
+            if (atrPercentPage[i] is { } atrPct && atrPct >= atrExtremePercent)
+                reasons.Add($"ATR {atrPct:0.##}% of price >= the {atrExtremePercent:0.##}% Extreme cutoff");
+
+            var windowStart = Math.Max(0, i - atrAverageLookbackBars + 1);
+            var atrWindow = new List<decimal>();
+            for (var j = windowStart; j <= i; j++) if (atrPage[j] is { } a) atrWindow.Add(a);
+            if (atrPage[i] is { } atrNow && atrWindow.Count > 0)
+            {
+                var atrAvg = atrWindow.Average();
+                if (atrAvg > 0 && atrNow >= atrAvg * atrExpansionRatio)
+                    reasons.Add($"ATR expanded to {atrNow / atrAvg:0.##}x its own {atrAverageLookbackBars}-bar average");
+            }
+
+            var rangeWindow = new List<decimal>();
+            for (var j = windowStart; j <= i; j++) rangeWindow.Add(pageBars[j].High - pageBars[j].Low);
+            var rangeNow = pageBars[i].High - pageBars[i].Low;
+            var rangeAvg = rangeWindow.Count > 0 ? rangeWindow.Average() : 0;
+            if (rangeAvg > 0 && rangeNow >= rangeAvg * largeCandleRatio)
+                reasons.Add($"candle range is {rangeNow / rangeAvg:0.##}x its own {atrAverageLookbackBars}-bar average (large candle)");
+
+            if (i > 0 && atrPage[i] is { } atrForGap && atrForGap > 0)
+            {
+                var gap = Math.Abs(pageBars[i].Open - pageBars[i - 1].Close);
+                if (gap >= atrForGap * gapAtrMultiple)
+                    reasons.Add($"opening gap of {gap:0.##} points is {gap / atrForGap:0.##}x ATR");
+            }
+
+            volatileReasonPage[i] = reasons.Count > 0 ? string.Join("; ", reasons) : null;
+        }
+        return volatileReasonPage;
     }
 
     /// <summary>% change of <paramref name="series"/> over <paramref name="lookback"/> bars ending at
