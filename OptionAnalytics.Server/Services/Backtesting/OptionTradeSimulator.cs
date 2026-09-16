@@ -179,6 +179,14 @@ public static class OptionTradeSimulator
         // to touch.
         var slPoints = parameters.GetValueOrDefault("slPoints", 0m);
         var tpPoints = parameters.GetValueOrDefault("tpPoints", 0m);
+        // Optional, additive, and OFF (0) for every existing caller - a strategy whose own risk model
+        // is naturally a PERCENTAGE of what it actually sold for (RegimeAdaptiveStrategy's own spec,
+        // e.g. "stop loss = 75% of premium") rather than a fixed point distance the same regardless of
+        // premium level. When set (>0), it REPLACES slPoints/tpPoints for that trade only, computed
+        // against THIS TRADE'S OWN entryPrice below - every other caller leaves both at 0 and keeps
+        // slPoints/tpPoints exactly as before, zero behavior change.
+        var slPercentOfPremium = parameters.GetValueOrDefault("slPercentOfPremium", 0m);
+        var tpPercentOfPremium = parameters.GetValueOrDefault("tpPercentOfPremium", 0m);
         // Optional and defaulted here rather than indexed, so a caller (existing tests included)
         // built before this parameter existed keeps working unchanged with it simply off.
         var squareOffMinutes = (int)parameters.GetValueOrDefault("squareOffMinutes", 0);
@@ -259,8 +267,12 @@ public static class OptionTradeSimulator
             // real print rather than a fresher one that never happened.
             var entryTime = signal.Time + TimeSpan.FromMinutes(fillMinutes);
             var entryPrice = signalBar.Close;
-            var takeProfitPrice = isSell ? Math.Max(0, entryPrice - tpPoints) : entryPrice + tpPoints;
-            var stopLossPrice = isSell ? entryPrice + slPoints : Math.Max(0, entryPrice - slPoints);
+            // See slPercentOfPremium/tpPercentOfPremium's own comment above - resolved per trade,
+            // against THIS trade's own entryPrice, only when the caller opted in.
+            var effectiveSlPoints = slPercentOfPremium > 0 ? entryPrice * slPercentOfPremium / 100m : slPoints;
+            var effectiveTpPoints = tpPercentOfPremium > 0 ? entryPrice * tpPercentOfPremium / 100m : tpPoints;
+            var takeProfitPrice = isSell ? Math.Max(0, entryPrice - effectiveTpPoints) : entryPrice + effectiveTpPoints;
+            var stopLossPrice = isSell ? entryPrice + effectiveSlPoints : Math.Max(0, entryPrice - effectiveSlPoints);
             var entryDay = BacktestUtil.IstDate(entryTime);
 
             var exitTime = entryTime;
@@ -295,10 +307,10 @@ public static class OptionTradeSimulator
                 // Conservative when a single bar's range spans both thresholds (a volatile bar
                 // right after entry, most likely): check the stop first either way, so the worse
                 // outcome for the trade wins rather than guessing which was touched first intra-bar.
-                var stopHit = slPoints > 0 && (isSell ? bar.High >= stopLossPrice : bar.Low <= stopLossPrice);
+                var stopHit = effectiveSlPoints > 0 && (isSell ? bar.High >= stopLossPrice : bar.Low <= stopLossPrice);
                 if (stopHit) { exitTime = barCloseTime; exitPrice = stopLossPrice; exitReason = "StopLoss"; break; }
 
-                var targetHit = tpPoints > 0 && (isSell ? bar.Low <= takeProfitPrice : bar.High >= takeProfitPrice);
+                var targetHit = effectiveTpPoints > 0 && (isSell ? bar.Low <= takeProfitPrice : bar.High >= takeProfitPrice);
                 if (targetHit) { exitTime = barCloseTime; exitPrice = takeProfitPrice; exitReason = "TakeProfit"; break; }
 
                 if (forcedExit is { } fx && bar.Time >= fx)
