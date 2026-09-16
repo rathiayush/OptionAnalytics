@@ -1203,7 +1203,13 @@ public sealed class CdvHostedService : BackgroundService
         var pe = state.GetSmoothedCdvSeries(false);
         if (ce.Count == 0 || pe.Count == 0) return;
 
-        _ = BroadcastAggregateBarClosedAsync(new CdvBarClosedPush(underlying, ce[^1].Time, ce[^1].Obv, pe[^1].Obv));
+        var obvCe = state.GetObvSeries(true);
+        var obvPe = state.GetObvSeries(false);
+
+        _ = BroadcastAggregateBarClosedAsync(new CdvBarClosedPush(
+            underlying, ce[^1].Time, ce[^1].Obv, pe[^1].Obv,
+            obvCe.Count > 0 ? obvCe[^1].Obv : null,
+            obvPe.Count > 0 ? obvPe[^1].Obv : null));
     }
 
     private async Task BroadcastAggregateBarClosedAsync(CdvBarClosedPush push)

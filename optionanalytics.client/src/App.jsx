@@ -1217,38 +1217,33 @@ function DashboardPage() {
     // instead of the table re-fetching GET .../lookback itself. Same pinned-expiry guard as the
     // cdvUpdate handler above: while viewing a non-selected expiry this push describes a different
     // option chain entirely, and the polling effect below keeps a pinned view current instead.
+    // Also carries OBV's own tail value (aggregate across every tracked strike, independent of
+    // whichever strike the ATM premium charts happen to be pinned to) - the OBV chart's live update,
+    // replacing what used to be a GET .../obv-series re-fetch on every bar close.
     (point) => {
       if (point.underlying !== selected || expiryParam) return
       const time = point.time
       setCdvSmoothedCe((prev) => appendOrReplaceLast(prev, { time, obv: point.cdvCe }))
       setCdvSmoothedPe((prev) => appendOrReplaceLast(prev, { time, obv: point.cdvPe }))
+      if (point.obvCe != null) setObvCe((prev) => appendOrReplaceLast(prev, { time, obv: point.obvCe }))
+      if (point.obvPe != null) setObvPe((prev) => appendOrReplaceLast(prev, { time, obv: point.obvPe }))
     },
   )
 
-  // ATM CE/PE bars only change value on every tick (the premium moves), but OBV is a per-bar
-  // indicator - only worth recomputing when a bar actually closes. Refetch the (small) OBV series
-  // whenever either side's current-bar time moves to a new minute, not on every tick.
-  //
-  // A PINNED strike has no live current bar of its own coming down the SignalR snapshot (only the
-  // ATM contracts do), so this same once-a-minute beat is what keeps its chart moving - it refetches
-  // the strike's candles too rather than just the OBV series.
+  // A PINNED strike (selectedStrike !== ATM_STRIKE) has no live current bar of its own coming down
+  // the SignalR snapshot (only the ATM contracts do), so this once-a-minute beat is what keeps ITS
+  // OWN premium candles moving. OBV itself needs no such fallback here - it's an aggregate across
+  // every tracked strike, independent of which one is pinned, and is kept current by the
+  // 'cdvBarClosed' push above instead (see useHub).
   useEffect(() => {
-    if (!selected || !cdvSnapshot) return
+    if (!selected || !cdvSnapshot || selectedStrike === ATM_STRIKE) return
     const ceTime = cdvSnapshot.atmCeCurrentBar?.time ?? null
     const peTime = cdvSnapshot.atmPeCurrentBar?.time ?? null
     const prev = lastObvBarTimeRef.current
     if (ceTime === prev.ce && peTime === prev.pe) return
     lastObvBarTimeRef.current = { ce: ceTime, pe: peTime }
 
-    if (selectedStrike !== ATM_STRIKE) {
-      fetchAtmAndObv(selected, { cancelled: false }, selectedStrike)
-      return
-    }
-
-    fetch(withExpiry(`/api/cdv/${selected}/obv-series`, expiryParam))
-      .then((r) => r.json())
-      .then((data) => { setObvCe(data.ce ?? []); setObvPe(data.pe ?? []) })
-      .catch((err) => console.error('Failed to refresh OBV series:', err))
+    fetchAtmAndObv(selected, { cancelled: false }, selectedStrike)
   }, [selected, expiryParam, selectedStrike, cdvSnapshot?.atmCeCurrentBar?.time, cdvSnapshot?.atmPeCurrentBar?.time])
 
   // ATM strike rolling (every 30 minutes, or whenever spot crosses a strike-step boundary) means
