@@ -83,22 +83,8 @@ public sealed class HistoricalSpotDataPrefetchHostedService : BackgroundService
         _logger = logger;
     }
 
-    /// <summary>Hard kill switch, independent of HistoricalDataPrefetchOptions.Enabled - see
-    /// ExpiredOptionDataPrefetchHostedService.ForceDisabledPendingInfra's own doc comment for why
-    /// (the current Postgres instance doesn't have the infra headroom for this yet). Flip back to
-    /// false once the infra is sized for it - nothing else about this class needs to change.</summary>
-    // static readonly, not const - a const would fold at compile time and make the code below it
-    // provably unreachable (CS0162), which defeats the point of a flag meant to be flipped back.
-    private static readonly bool ForceDisabledPendingInfra = true;
-
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        if (ForceDisabledPendingInfra)
-        {
-            _logger.LogInformation("Historical spot prefetch is force-disabled pending more Postgres infra, regardless of HistoricalDataPrefetch:Enabled - skipping.");
-            return;
-        }
-
         // Off by default (see HistoricalDataPrefetchOptions) - set HistoricalDataPrefetch__Enabled=true
         // to opt a deployment into this one-time download.
         if (!_prefetchOptions.Enabled)
