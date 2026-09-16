@@ -22,6 +22,7 @@ builder.Services.Configure<TelegramOptions>(builder.Configuration.GetSection(Tel
 builder.Services.Configure<AuthOptions>(builder.Configuration.GetSection(AuthOptions.SectionName));
 builder.Services.Configure<HistoricalDataPrefetchOptions>(builder.Configuration.GetSection(HistoricalDataPrefetchOptions.SectionName));
 builder.Services.Configure<ExpiredOptionDataPrefetchOptions>(builder.Configuration.GetSection(ExpiredOptionDataPrefetchOptions.SectionName));
+builder.Services.Configure<PostgresOptions>(builder.Configuration.GetSection(PostgresOptions.SectionName));
 builder.Services.AddHttpClient<TelegramAlertService>();
 
 builder.Services.AddSingleton<AuthService>();
