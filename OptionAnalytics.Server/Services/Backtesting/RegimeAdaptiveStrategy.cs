@@ -5,95 +5,70 @@ using Skender.Stock.Indicators;
 namespace OptionAnalytics.Server.Services.Backtesting;
 
 /// <summary>
-/// A "classify the regime first, then pick a strategy for it" approach - the answer to a real,
-/// specific complaint (a single fixed strategy working some months and not others) rather than
-/// another fixed rule set: a market that is genuinely trending and a market that is genuinely
-/// chopping sideways call for opposite tactics (ride the trend vs. fade an extreme), and running
-/// the same one regardless of which regime is actually in effect is exactly why a strategy tuned on
-/// a trending month can bleed through a sideways one. This is a direct implementation of the user's
-/// own "NIFTY &amp; BANKNIFTY - Adaptive Option Selling Strategy" flowchart (5-filter 0-5 regime
-/// score, ADX/VWAP/EMA-slope/chop-count/ATR-volatility, RSI-neutral range entries, etc.) - see each
-/// section below for exactly which parts map to which box in it, and which parts this app's engine
-/// genuinely cannot do yet.
+/// A genuine multi-timeframe cascade, per the user's own follow-up refinement of the "NIFTY &amp;
+/// BANKNIFTY - Adaptive Option Selling Strategy" flowchart: 15-minute REGIME -&gt; 5-minute SETUP -&gt;
+/// 3-minute CONFIRM -&gt; 1-minute ENTRY, each stage gating the next, rather than one score computed
+/// off a single timeframe. All four timeframes are built once per run straight from
+/// <see cref="BacktestStrategyContext.SpotBarsOneMinute"/> (via BacktestUtil.AggregateCandles) and
+/// used together on EVERY run, independent of whatever timeframe the Backtrack/Expired Backtest page
+/// itself happens to be set to - the page's own timeframe only still matters for the Range-fade path
+/// and the ATR volatility gate below, which is why DefaultsForTimeframe still scales those two and
+/// nothing else here.
 ///
-/// REGIME SCORE (0-5, recomputed fresh every bar), one point each for:
-///   1. EMA STACK+SLOPE: EMA-fast &gt; EMA-mid &gt; EMA-slow with the fast EMA's own slope at least
-///      +<c>slopeThresholdPercent</c> (Bearish is the exact mirror) - this point is MANDATORY for
-///      calling the regime Trending at all (see below), the other four only refine confidence once a
-///      real directional stack already exists.
-///   2. ADX(<c>adxPeriod</c>) &gt;= <c>adxTrendMin</c> (the flowchart's own 25) - below
-///      <c>adxRangeMax</c> (20) is explicitly non-trending; the 20-25 gap earns neither a point nor a
-///      strike against.
-///   3. VWAP SIDE: close crossed VWAP fewer than <c>minChopCrosses</c> times in the last
-///      <c>chopWindowMinutes</c> - "price consistently on one side," the flowchart's own phrase.
-///   4. VOLATILITY NOT DEAD: ATR as a % of price is at least <c>atrNormalLowPercent</c> - a market
-///      too quiet to move is not "trending," it is asleep.
-///   5. LOW EMA CROSS COUNT: EMA-fast/EMA-mid crossed fewer than <c>minChopCrosses</c> times in the
-///      same window (the flowchart's own explicit "chop if &gt;3 crosses in 30 minutes").
-/// Regime = Trending (in whichever direction filter 1 found) only when the STACK point (1) is present
-/// AND the total score reaches <c>trendScoreThreshold</c> (4 of 5, the flowchart's own "Score 4-5" band)
-/// - everything else, including its own "Score 3 / Weak-Uncertain" middle band, is treated as Range,
-/// matching the flowchart's own routing (only two strategy boxes exist below the three-way score
-/// legend).
+/// REGIME SCORE (0-5), computed fresh on every 15-minute bar:
+///   1. 15M EMA ALIGNMENT: EMA-fast &gt; EMA-mid (Bearish is the mirror) - this point is MANDATORY;
+///      without a directional stack there is no candidate direction to score the other four against.
+///   2. 15M EMA SLOPE: that same fast EMA's slope (over <c>cascadeSlopeLookbackBars</c>) at least
+///      +<c>regime15SlopeMinPercent</c> in the aligned direction.
+///   3. 15M ADX &gt;= <c>regime15AdxMin</c>.
+///   4. PRICE VS VWAP: the 15-minute bar's own close on the aligned side of session VWAP.
+///   5. 5M EMA CONFIRMATION: the 5-minute EMA stack (its OWN pair, <c>setup5EmaFast</c>/
+///      <c>setup5EmaSlow</c>) agrees with the same direction.
+/// Score &gt;= <c>regimeScoreFull</c> (4) is full-confidence Trend; score &gt;= <c>regimeScoreMin</c>
+/// (3) but below that is still attempted, just labelled "selective/reduced confidence" in the signal
+/// text (this app has no lot-size/quantity model to actually reduce a real position by); anything
+/// below <c>regimeScoreMin</c> never attempts a trend trade at all - the Range path picks it up
+/// instead, per the flowchart's own "0-2 -&gt; don't use trend strategy."
 ///
-/// TREND STRATEGY: enters once, at the bar the regime first flips Trending in a direction (not on
-/// every bar it remains true) - "7/20 EMA alignment, price vs VWAP, EMA slope, confirmed on a closed
-/// candle," exactly the regime conditions themselves per the flowchart's own Entry Rules panel.
+/// THE CASCADE ITSELF, once a 15-minute bar's regime clears <c>regimeScoreMin</c>, at every
+/// 1-minute bar for as long as that 15-minute regime holds:
+///   - 5M SETUP: the 5-minute EMA stack + ADX(&gt;=<c>setup5AdxMin</c>) + price on the matching side
+///     of VWAP, all on the 5-minute bar most recently closed at or before this 1-minute bar's time.
+///   - 3M CONFIRM: the 3-minute EMA stack + ADX(&gt;=<c>confirm3AdxMin</c>) + slope
+///     (&gt;=<c>confirm3SlopeMinPercent</c>) + that 3-minute bar's own candle closing in the trend's
+///     direction (close vs open) - the flowchart's own "confirmation candle closes bullish."
+///   - 1M ENTRY: the 1-minute EMA-fast/EMA-mid pair (<c>entry1EmaFast</c>/<c>entry1EmaSlow</c>)
+///     crossing back in the trend's favor (a pullback that just got rejected), plus its own
+///     ADX(&gt;=<c>entry1AdxMin</c>)/slope(&gt;=<c>entry1SlopeMinPercent</c>) gates and an RSI-neutral
+///     check (<c>rsiNeutralLow</c>-<c>rsiNeutralHigh</c>) so the entry isn't sold into what might
+///     already be a breakout.
+/// All four stages have to agree on the SAME bar for an entry to fire - a real confluence
+/// requirement, so entries are expected to be rare (this is intentional, not a bug: waiting for a
+/// genuine multi-timeframe lineup is the whole point of a cascade over a single-timeframe score).
 ///
-/// RANGE STRATEGY: fades the extremes of a VWAP+-ATR band (<c>rangeAtrMultiple</c> x ATR either side
-/// of VWAP - "price near range edge" + "VWAP touch/rejection"), gated by RSI(<c>rsiPeriod</c>)
-/// sitting inside [<c>rsiNeutralLow</c>,<c>rsiNeutralHigh</c>] - the flowchart's own "RSI not extreme
-/// (30-70)" check, which here means "momentum isn't already accelerating away" (a reason NOT to sell
-/// into what might be a breakout), not a mean-reversion trigger by itself.
+/// RANGE STRATEGY: unchanged in mechanism from the single-timeframe version - fades the extremes of
+/// a VWAP+-ATR band on the PAGE's own timeframe (<c>rangeAtrMultiple</c> x ATR either side of VWAP),
+/// RSI-neutral gated - but now only attempted when the 15-minute regime score reads below
+/// <c>regimeScoreMin</c> (i.e., genuinely not trending), so this and the cascade above never both
+/// fire into the same market condition.
 ///
-/// OPTION SIDE - SELLING, not buying, is this strategy's own default (<c>side</c> defaults to Sell,
-/// every other strategy here defaults to Buy) - the flowchart is titled an "option SELLING" system.
+/// OPTION SIDE, ORDER FLOW, and everything this class still deliberately does NOT do (true
+/// simultaneous Iron Condor selling, India VIX, position sizing/daily-loss/consecutive-SL state,
+/// regime-segmented performance reporting, OI/Volume strike screening) are UNCHANGED from the
+/// single-timeframe version - see the CE/PE direction note below, still worth a second look given
+/// real money is involved.
+///
 /// Bullish -&gt; sell PE, Bearish -&gt; sell CE is OptionTradeSimulator.Run's own existing Sell
-/// convention (isCall = isSell ? !isBullish : isBullish) and is the standard defined-direction credit
-/// convention (profit if price does NOT go the wrong way) - the flowchart's own Trade Direction box
-/// ("Uptrend -&gt; Sell CE, Downtrend -&gt; Sell PE") reads backwards from that, and backwards from
-/// every other Sell-capable strategy already shipped in this app, so this class follows the
-/// standard/existing convention rather than the flowchart's literal text. Worth a second look on your
-/// end given real money is involved; happy to flip it if that reading was actually intended.
-///
-/// ORDER FLOW: CDV/OBV confirmation (FlowConfirmation, same as FiveEmaStrategy/LuxAlgoSrBreakStrategy/
-/// SrChannelStrategy/etc.) defaults ON here specifically, per explicit instruction - every other
-/// strategy in this app defaults it off. Still a real parameter, so it can be turned off where flow
-/// data is not available.
-///
-/// WHAT THIS DOES NOT DO, on purpose - the flowchart asks for several things outside what a single
-/// IBacktestStrategy/OptionTradeSimulator run can honestly provide, and faking any of them would be
-/// worse than leaving them out:
-///   - "Sell both CE and PE" (Iron Condor / short strangle) needs a genuine concurrent TWO-LEG
-///     position with combined P&amp;L - OptionTradeSimulator.Run holds exactly one position at a time
-///     (see its own busyUntil gating). This strategy instead sells ONE defined-direction leg per
-///     range-edge rejection (PE at the lower edge, CE at the upper), a real and honest approximation,
-///     not the flowchart's true simultaneous structure. A real Iron Condor engine is a separate,
-///     larger project.
-///   - India VIX has no data source anywhere in this app (see TechnicalIndicators' own doc comment on
-///     why ATR is this app's volatility proxy throughout) - the Normal/High/Extreme bands below are
-///     ATR-percent-of-price only.
-///   - Position sizing (100%/50%/0% by volatility band), daily loss limits, and "pause after 2
-///     consecutive stop-losses" are portfolio/session-level risk rules that need state ACROSS trades
-///     and days - this class (like every strategy here) only ever answers "what would this one trade
-///     have been," so Extreme volatility instead means "reject every new entry outright" (the
-///     closest a single-trade decision can get to "no new trades"), and High volatility is reported
-///     in the signal text as a sizing hint only, not enforced.
-///   - "Performance tracking by regime" is a reporting/analytics feature over a whole backtest run's
-///     results, not a per-trade entry rule - out of scope for this class entirely.
-///   - OI/Volume-based strike liquidity screening isn't modelled anywhere in this app's strike
-///     selection (ATM +/- N steps only, via the shared otmSteps parameter) - unchanged here.
-///
-/// A NOTE ON THE NUMBERS: every threshold below (ADX 25/20, ATR bands 0.8/1.5/2.5% of price, slope
-/// 0.05%, RSI 30/70, chop count 3 in 30 minutes) is taken directly from the flowchart's own stated
-/// settings, not independently back-tested against this app's own NIFTY/BANKNIFTY history - each one
-/// is still a tunable BacktestParameterSpec so it can be adjusted against real results.
+/// convention (isCall = isSell ? !isBullish : isBullish), the standard defined-direction credit
+/// convention - the flowchart's own Trade Direction text ("Uptrend -&gt; Sell CE") reads backwards
+/// from that and from every other Sell-capable strategy already shipped here, so this class keeps the
+/// standard/existing mapping rather than the literal text.
 /// </summary>
 public sealed class RegimeAdaptiveStrategy : IBacktestStrategy
 {
     public string Key => "regime-adaptive";
-    public string Name => "Regime-Adaptive Option Selling (Trend/Range)";
-    public string Description => "Scores every bar 0-5 (EMA7/20/50 stack+slope, ADX, VWAP side, ATR volatility, EMA/VWAP chop count) to classify it Trending or Range, then sells the defined-direction leg that regime calls for - the trend's own direction, or the VWAP+-ATR band edge being rejected (RSI-neutral gated). Sells options by default; CDV/OBV order-flow confirmation is ON by default here.";
+    public string Name => "Regime-Adaptive Option Selling (15M->5M->3M->1M Cascade)";
+    public string Description => "A genuine multi-timeframe cascade: 15-minute regime score (EMA stack+slope, ADX, VWAP side, 5-minute confirmation) gates a 5-minute setup, a 3-minute confirmation candle, and a 1-minute pullback-rejection entry, all built from the underlying's own 1-minute history regardless of the page's selected timeframe. Falls back to a VWAP+-ATR range fade (RSI-neutral gated) when the 15-minute regime isn't trending. Sells options by default; CDV/OBV order-flow confirmation is ON by default here.";
 
     private const decimal DirectionBoth = 0;
     private const decimal DirectionLongOnly = 1;
@@ -101,8 +76,6 @@ public sealed class RegimeAdaptiveStrategy : IBacktestStrategy
 
     private const decimal FlagOff = 0;
     private const decimal FlagOn = 1;
-
-    private enum Regime { Range, TrendingBullish, TrendingBearish }
 
     public IReadOnlyList<BacktestParameterSpec> Parameters { get; } = new[]
     {
@@ -117,10 +90,8 @@ public sealed class RegimeAdaptiveStrategy : IBacktestStrategy
         OptionTradeSimulator.StopLossParameter(),
         OptionTradeSimulator.TakeProfitParameter(),
         OptionTradeSimulator.SquareOffTimeParameter(),
-        // 09:30, not the shared 09:15 default - the flowchart's own "avoid 9:15-9:30, trade after
-        // 9:30" entry-time rule.
+        // 09:30, not the shared 09:15 default - "observe only" 9:15-9:30 per the flowchart.
         new BacktestParameterSpec("signalStartMinutes", "No signals before (IST time, 0 = off)", Default: 570, Min: 0, Max: 1439, Step: 1),
-        // Optional (0 = off) - the flowchart's own "avoid last 30 minutes" is marked optional there too.
         new BacktestParameterSpec("noNewEntriesAfterMinutes", "No new entries from (IST time, 0 = off)", Default: 0, Min: 0, Max: 1439, Step: 1),
         OptionTradeSimulator.ExcludeLastDaysParameter(),
         new BacktestParameterSpec("direction", "Take", Default: DirectionBoth, Min: DirectionBoth, Max: DirectionShortOnly, Step: 1, Options: new[]
@@ -129,27 +100,47 @@ public sealed class RegimeAdaptiveStrategy : IBacktestStrategy
             new BacktestParameterOption(DirectionLongOnly, "Bullish only"),
             new BacktestParameterOption(DirectionShortOnly, "Bearish only"),
         }),
-        new BacktestParameterSpec("emaFastPeriod", "EMA fast (bars)", Default: 7, Min: 2, Max: 50, Step: 1),
-        new BacktestParameterSpec("emaMidPeriod", "EMA mid (bars)", Default: 20, Min: 3, Max: 100, Step: 1),
-        new BacktestParameterSpec("emaSlowPeriod", "EMA slow (bars)", Default: 50, Min: 5, Max: 300, Step: 1),
-        new BacktestParameterSpec("slopeLookbackBars", "EMA slope measured over (bars)", Default: 5, Min: 1, Max: 50, Step: 1),
-        new BacktestParameterSpec("slopeThresholdPercent", "EMA slope must be at least (%, over that lookback)", Default: 0.05m, Min: 0, Max: 5, Step: 0.01m),
-        new BacktestParameterSpec("adxPeriod", "ADX (bars)", Default: 14, Min: 2, Max: 100, Step: 1),
-        new BacktestParameterSpec("adxTrendMin", "ADX at/above this earns a trend point", Default: 25, Min: 0, Max: 80, Step: 1),
-        new BacktestParameterSpec("adxRangeMax", "ADX below this is explicitly non-trending", Default: 20, Min: 0, Max: 80, Step: 1),
-        new BacktestParameterSpec("atrPeriod", "ATR (bars)", Default: 14, Min: 2, Max: 100, Step: 1),
-        new BacktestParameterSpec("atrNormalLowPercent", "ATR %% of price - Normal band starts at", Default: 0.8m, Min: 0, Max: 5, Step: 0.05m),
-        new BacktestParameterSpec("atrNormalHighPercent", "ATR %% of price - High band starts at", Default: 1.5m, Min: 0, Max: 10, Step: 0.05m),
+
+        // ---- 15-minute regime (fixed to real 15-minute bars, independent of the page timeframe) ----
+        new BacktestParameterSpec("regime15EmaFast", "15-min regime EMA fast (bars)", Default: 20, Min: 3, Max: 100, Step: 1),
+        new BacktestParameterSpec("regime15EmaSlow", "15-min regime EMA slow (bars)", Default: 50, Min: 5, Max: 300, Step: 1),
+        new BacktestParameterSpec("regime15SlopeMinPercent", "15-min EMA slope must be at least (%)", Default: 0.050m, Min: 0, Max: 5, Step: 0.005m),
+        new BacktestParameterSpec("regime15AdxMin", "15-min ADX must be at least", Default: 25, Min: 0, Max: 80, Step: 1),
+        new BacktestParameterSpec("regimeScoreMin", "Regime score needed (out of 5) to even attempt a trend trade", Default: 3, Min: 1, Max: 5, Step: 1),
+        new BacktestParameterSpec("regimeScoreFull", "Regime score needed (out of 5) for full confidence (below = selective)", Default: 4, Min: 1, Max: 5, Step: 1),
+
+        // ---- 5-minute setup ----
+        new BacktestParameterSpec("setup5EmaFast", "5-min setup EMA fast (bars)", Default: 9, Min: 2, Max: 100, Step: 1),
+        new BacktestParameterSpec("setup5EmaSlow", "5-min setup EMA slow (bars)", Default: 21, Min: 3, Max: 200, Step: 1),
+        new BacktestParameterSpec("setup5AdxMin", "5-min ADX must be at least", Default: 25, Min: 0, Max: 80, Step: 1),
+
+        // ---- 3-minute confirmation ----
+        new BacktestParameterSpec("confirm3EmaFast", "3-min confirm EMA fast (bars)", Default: 7, Min: 2, Max: 100, Step: 1),
+        new BacktestParameterSpec("confirm3EmaSlow", "3-min confirm EMA slow (bars)", Default: 20, Min: 3, Max: 200, Step: 1),
+        new BacktestParameterSpec("confirm3AdxMin", "3-min ADX must be at least", Default: 23, Min: 0, Max: 80, Step: 1),
+        new BacktestParameterSpec("confirm3SlopeMinPercent", "3-min EMA slope must be at least (%)", Default: 0.025m, Min: 0, Max: 5, Step: 0.005m),
+
+        // ---- 1-minute entry ----
+        new BacktestParameterSpec("entry1EmaFast", "1-min entry EMA fast (bars)", Default: 5, Min: 2, Max: 100, Step: 1),
+        new BacktestParameterSpec("entry1EmaSlow", "1-min entry EMA slow (bars)", Default: 13, Min: 3, Max: 200, Step: 1),
+        new BacktestParameterSpec("entry1AdxMin", "1-min ADX must be at least", Default: 22, Min: 0, Max: 80, Step: 1),
+        new BacktestParameterSpec("entry1SlopeMinPercent", "1-min EMA slope must be at least (%)", Default: 0.015m, Min: 0, Max: 5, Step: 0.005m),
+
+        // ---- shared across every cascade stage ----
+        new BacktestParameterSpec("cascadeSlopeLookbackBars", "EMA slope measured over (bars, at each stage's own timeframe)", Default: 3, Min: 1, Max: 50, Step: 1),
+        new BacktestParameterSpec("cascadeAdxPeriod", "ADX (bars, every cascade stage)", Default: 14, Min: 2, Max: 100, Step: 1),
+
+        // ---- Range fade (page timeframe) + shared RSI/ATR - unchanged mechanism from before ----
+        new BacktestParameterSpec("atrPeriod", "ATR (bars, page timeframe)", Default: 14, Min: 2, Max: 100, Step: 1),
+        new BacktestParameterSpec("atrNormalHighPercent", "ATR %% of price - High volatility band starts at", Default: 1.5m, Min: 0, Max: 10, Step: 0.05m),
         new BacktestParameterSpec("atrExtremePercent", "ATR %% of price - Extreme (no new trades) starts at", Default: 2.5m, Min: 0, Max: 15, Step: 0.05m),
-        new BacktestParameterSpec("chopWindowMinutes", "Chop count window (minutes)", Default: 30, Min: 5, Max: 240, Step: 5),
-        new BacktestParameterSpec("minChopCrosses", "EMA/VWAP crosses in that window needed to count toward chop", Default: 3, Min: 1, Max: 20, Step: 1),
-        new BacktestParameterSpec("trendScoreThreshold", "Regime score needed (out of 5) to call the bar Trending", Default: 4, Min: 1, Max: 5, Step: 1),
         new BacktestParameterSpec("rangeAtrMultiple", "Range fade band = VWAP +- this x ATR", Default: 1.5m, Min: 0.2m, Max: 5, Step: 0.1m),
-        new BacktestParameterSpec("rsiPeriod", "RSI (bars, for the Range entry's neutral gate)", Default: 14, Min: 2, Max: 100, Step: 1),
-        new BacktestParameterSpec("rsiNeutralLow", "Range entries need RSI above", Default: 30, Min: 0, Max: 50, Step: 1),
-        new BacktestParameterSpec("rsiNeutralHigh", "Range entries need RSI below", Default: 70, Min: 50, Max: 100, Step: 1),
-        // ON by default (every other strategy here defaults this off) - the user's own explicit
-        // instruction for this strategy specifically. See this class's own doc comment.
+        new BacktestParameterSpec("rsiPeriod", "RSI (bars)", Default: 14, Min: 2, Max: 100, Step: 1),
+        new BacktestParameterSpec("rsiNeutralLow", "Entries need RSI above", Default: 40, Min: 0, Max: 50, Step: 1),
+        new BacktestParameterSpec("rsiNeutralHigh", "Entries need RSI below", Default: 60, Min: 50, Max: 100, Step: 1),
+
+        // ON by default (every other strategy here defaults this off) - explicit instruction for
+        // this strategy specifically.
         new BacktestParameterSpec("requireFlowConfirmation", "Require order flow (OBV/CDV) to confirm", Default: FlagOn, Min: FlagOff, Max: FlagOn, Step: 1, Options: new[]
         {
             new BacktestParameterOption(FlagOff, "No - price action only (turn off only if flow data isn't available)"),
@@ -160,35 +151,11 @@ public sealed class RegimeAdaptiveStrategy : IBacktestStrategy
         FlowConfirmation.ModeParameter(),
     };
 
-    /// <summary>Overrides the default interface's slPoints/tpPoints-only scaling (see
-    /// IBacktestStrategy.DefaultsForTimeframe's own doc comment) to also scale every OTHER
-    /// timeframe-sensitive default this strategy has, by the same 1x/2x/3x
-    /// OptionTradeSimulator.TimeframeScale bucket - so switching the page's timeframe from 1 to 3
-    /// minutes re-fills the whole parameter form with values suited to 3-minute bars (via GET
-    /// .../strategies?timeframe=3, which BacktestUtil.ApplyTimeframeDefaults already calls this for),
-    /// and any further tweak is then made against sensible starting numbers rather than the 1-minute
-    /// ones left untouched underneath.
-    ///
-    /// SCALED - a coarser bar covers more real time, so these are all "expect a bigger raw number at
-    /// a coarser timeframe" values:
-    ///   - slopeThresholdPercent: the same NUMBER of slopeLookbackBars covers 3x the real time at a
-    ///     3-minute timeframe as at 1-minute, so the EMA is expected to have moved further in % terms
-    ///     over that same bar count.
-    ///   - atrNormalLowPercent/atrNormalHighPercent/atrExtremePercent: a coarser candle's own
-    ///     High-Low range is naturally wider as a % of price than a finer one's, so the same
-    ///     Normal/High/Extreme bands would misfire (everything reading "Extreme") if left at their
-    ///     1-minute numbers.
-    ///   - chopWindowMinutes: scaled UP (not left as a fixed 30) so the window still covers enough
-    ///     BARS to meaningfully count crosses against minChopCrosses once each bar itself spans more
-    ///     time - 30 minutes is just 6 bars at a 5-minute timeframe otherwise.
-    ///
-    /// DELIBERATELY NOT SCALED - the same reasoning IBacktestStrategy's own default implementation
-    /// documents for bar-count parameters generally: EMA/ADX/ATR/RSI PERIODS (a "20-bar EMA" is a
-    /// conventional, timeframe-independent notion traders already reason in bar counts for, not real
-    /// minutes - rescaling it on every timeframe switch would be surprising, not helpful), ADX/RSI's
-    /// own thresholds (already-normalized 0-100 oscillators, not raw price), rangeAtrMultiple (a
-    /// ratio of ATR to itself, already scale-invariant since ATR itself scales), and
-    /// minChopCrosses/trendScoreThreshold (plain counts/scores, not a real-time or price quantity).</summary>
+    /// <summary>Only slPoints/tpPoints and the two page-timeframe ATR bands scale with the page's
+    /// own selected timeframe - every cascade parameter above is already pinned to a REAL timeframe
+    /// (15/5/3/1 minutes) regardless of what the page happens to be set to, so scaling those by the
+    /// page timeframe would be actively wrong (a "15-minute EMA slope" doesn't mean anything different
+    /// because the Backtrack page's OWN dropdown reads "5 min").</summary>
     public IReadOnlyDictionary<string, decimal> DefaultsForTimeframe(int timeframeMinutes)
     {
         var scale = OptionTradeSimulator.TimeframeScale(timeframeMinutes);
@@ -196,11 +163,8 @@ public sealed class RegimeAdaptiveStrategy : IBacktestStrategy
         {
             ["slPoints"] = 10m * scale,
             ["tpPoints"] = 20m * scale,
-            ["slopeThresholdPercent"] = 0.05m * scale,
-            ["atrNormalLowPercent"] = 0.8m * scale,
             ["atrNormalHighPercent"] = 1.5m * scale,
             ["atrExtremePercent"] = 2.5m * scale,
-            ["chopWindowMinutes"] = 30m * scale,
         };
     }
 
@@ -219,24 +183,37 @@ public sealed class RegimeAdaptiveStrategy : IBacktestStrategy
         var signalStartMinutes = (int)parameters.GetValueOrDefault("signalStartMinutes", 570);
         var noNewEntriesAfterMinutes = (int)parameters.GetValueOrDefault("noNewEntriesAfterMinutes", 0);
 
-        var emaFastPeriod = Math.Max(2, (int)parameters.GetValueOrDefault("emaFastPeriod", 7));
-        var emaMidPeriod = Math.Max(3, (int)parameters.GetValueOrDefault("emaMidPeriod", 20));
-        var emaSlowPeriod = Math.Max(5, (int)parameters.GetValueOrDefault("emaSlowPeriod", 50));
-        var slopeLookback = Math.Max(1, (int)parameters.GetValueOrDefault("slopeLookbackBars", 5));
-        var slopeThreshold = parameters.GetValueOrDefault("slopeThresholdPercent", 0.05m);
-        var adxPeriod = Math.Max(2, (int)parameters.GetValueOrDefault("adxPeriod", 14));
-        var adxTrendMin = parameters.GetValueOrDefault("adxTrendMin", 25m);
+        var regime15EmaFast = Math.Max(2, (int)parameters.GetValueOrDefault("regime15EmaFast", 20));
+        var regime15EmaSlow = Math.Max(3, (int)parameters.GetValueOrDefault("regime15EmaSlow", 50));
+        var regime15SlopeMin = parameters.GetValueOrDefault("regime15SlopeMinPercent", 0.050m);
+        var regime15AdxMin = parameters.GetValueOrDefault("regime15AdxMin", 25m);
+        var regimeScoreMin = Math.Max(1, (int)parameters.GetValueOrDefault("regimeScoreMin", 3));
+        var regimeScoreFull = Math.Max(regimeScoreMin, (int)parameters.GetValueOrDefault("regimeScoreFull", 4));
+
+        var setup5EmaFast = Math.Max(2, (int)parameters.GetValueOrDefault("setup5EmaFast", 9));
+        var setup5EmaSlow = Math.Max(3, (int)parameters.GetValueOrDefault("setup5EmaSlow", 21));
+        var setup5AdxMin = parameters.GetValueOrDefault("setup5AdxMin", 25m);
+
+        var confirm3EmaFast = Math.Max(2, (int)parameters.GetValueOrDefault("confirm3EmaFast", 7));
+        var confirm3EmaSlow = Math.Max(3, (int)parameters.GetValueOrDefault("confirm3EmaSlow", 20));
+        var confirm3AdxMin = parameters.GetValueOrDefault("confirm3AdxMin", 23m);
+        var confirm3SlopeMin = parameters.GetValueOrDefault("confirm3SlopeMinPercent", 0.025m);
+
+        var entry1EmaFast = Math.Max(2, (int)parameters.GetValueOrDefault("entry1EmaFast", 5));
+        var entry1EmaSlow = Math.Max(3, (int)parameters.GetValueOrDefault("entry1EmaSlow", 13));
+        var entry1AdxMin = parameters.GetValueOrDefault("entry1AdxMin", 22m);
+        var entry1SlopeMin = parameters.GetValueOrDefault("entry1SlopeMinPercent", 0.015m);
+
+        var slopeLookback = Math.Max(1, (int)parameters.GetValueOrDefault("cascadeSlopeLookbackBars", 3));
+        var adxPeriod = Math.Max(2, (int)parameters.GetValueOrDefault("cascadeAdxPeriod", 14));
+
         var atrPeriod = Math.Max(2, (int)parameters.GetValueOrDefault("atrPeriod", 14));
-        var atrNormalLowPercent = parameters.GetValueOrDefault("atrNormalLowPercent", 0.8m);
         var atrNormalHighPercent = parameters.GetValueOrDefault("atrNormalHighPercent", 1.5m);
         var atrExtremePercent = parameters.GetValueOrDefault("atrExtremePercent", 2.5m);
-        var chopWindowMinutes = Math.Max(1, (int)parameters.GetValueOrDefault("chopWindowMinutes", 30));
-        var minChopCrosses = Math.Max(1, (int)parameters.GetValueOrDefault("minChopCrosses", 3));
-        var trendScoreThreshold = Math.Max(1, (int)parameters.GetValueOrDefault("trendScoreThreshold", 4));
         var rangeAtrMultiple = parameters.GetValueOrDefault("rangeAtrMultiple", 1.5m);
         var rsiPeriod = Math.Max(2, (int)parameters.GetValueOrDefault("rsiPeriod", 14));
-        var rsiNeutralLow = parameters.GetValueOrDefault("rsiNeutralLow", 30m);
-        var rsiNeutralHigh = parameters.GetValueOrDefault("rsiNeutralHigh", 70m);
+        var rsiNeutralLow = parameters.GetValueOrDefault("rsiNeutralLow", 40m);
+        var rsiNeutralHigh = parameters.GetValueOrDefault("rsiNeutralHigh", 60m);
 
         var requireFlowConfirmation = parameters.GetValueOrDefault("requireFlowConfirmation", FlagOn) >= (FlagOff + FlagOn) / 2;
         var flowLookback = (int)parameters.GetValueOrDefault("flowLookbackBars", 5);
@@ -247,18 +224,14 @@ public sealed class RegimeAdaptiveStrategy : IBacktestStrategy
         var entries = new List<(DateTimeOffset Time, string Direction)>();
         var signals = new List<BacktestSignal>();
 
-        var bars = context.SpotBars;
-        if (bars.Count < emaSlowPeriod + slopeLookback + 2) return (entries, signals);
+        var oneMin = context.SpotBarsOneMinute;
+        var pageBars = context.SpotBars;
+        if (oneMin.Count < 30 || pageBars.Count < 2) return (entries, signals);
 
-        var chopWindowBars = Math.Max(2, chopWindowMinutes / Math.Max(1, context.TimeframeMinutes));
-
-        var ema7 = EmaCrossoverDetector.EmaSeries(bars, emaFastPeriod);
-        var ema20 = EmaCrossoverDetector.EmaSeries(bars, emaMidPeriod);
-        var ema50 = EmaCrossoverDetector.EmaSeries(bars, emaSlowPeriod);
-        var adx = ToQuotes(bars).GetAdx(adxPeriod).Select(r => (decimal?)r.Adx).ToList();
-        var atr = ToQuotes(bars).GetAtr(atrPeriod).Select(r => (decimal?)r.Atr).ToList();
-        var rsi = ToQuotes(bars).GetRsi(rsiPeriod).Select(r => (decimal?)r.Rsi).ToList();
-        var vwap = AlignToTime(VwapCalculator.ComputeSeries(context.SpotVolumeBarsOneMinute), bars);
+        var bars3 = BacktestUtil.AggregateCandles(oneMin, 3);
+        var bars5 = BacktestUtil.AggregateCandles(oneMin, 5);
+        var bars15 = BacktestUtil.AggregateCandles(oneMin, 15);
+        if (bars15.Count < regime15EmaSlow + slopeLookback + 2) return (entries, signals);
 
         (bool Ok, string Reason) FlowCheck(bool bullish, DateTimeOffset at)
         {
@@ -273,138 +246,178 @@ public sealed class RegimeAdaptiveStrategy : IBacktestStrategy
             return (confirmed, reason);
         }
 
-        var regimes = new Regime?[bars.Count];
-        var scores = new int[bars.Count];
-        for (var i = slopeLookback; i < bars.Count; i++)
+        void EmitAt(DateTimeOffset time, bool bullish, string summary, decimal? atrPercentHere)
         {
-            if (ema7[i] is not { } f || ema20[i] is not { } m || ema50[i] is not { } s) continue;
-            if (ema7[i - slopeLookback] is not { } fPast || fPast == 0) continue;
-            if (adx[i] is not { } adxNow || vwap[i] is not { } vwapNow || atr[i] is not { } atrNow) continue;
+            var dir = bullish ? "Bullish" : "Bearish";
+            var volatilityExtreme = atrPercentHere is { } ap1 && ap1 >= atrExtremePercent;
+            var volatilityHigh = !volatilityExtreme && atrPercentHere is { } ap2 && ap2 >= atrNormalHighPercent;
+            var beforeSignalStart = signalStartMinutes > 0 && IstClock.MinutesOfDay(time) < signalStartMinutes;
+            var afterEntryCutoff = noNewEntriesAfterMinutes > 0 && IstClock.MinutesOfDay(time) >= noNewEntriesAfterMinutes;
+            var sizingNote = volatilityHigh ? " (ATR reads High volatility - consider reduced size; not enforced by this backtest)" : "";
 
-            var slopePercent = (f - fPast) / Math.Abs(fPast) * 100m;
-            var atrPercent = bars[i].Close != 0 ? atrNow / bars[i].Close * 100m : 0m;
-            var (emaCrosses, vwapCrosses) = CrossCounts(bars, ema7, ema20, vwap, i, chopWindowBars);
-
-            var stackBullish = f > m && m > s && slopePercent >= slopeThreshold;
-            var stackBearish = f < m && m < s && slopePercent <= -slopeThreshold;
-
-            var score = 0;
-            if (stackBullish || stackBearish) score++;
-            if (adxNow >= adxTrendMin) score++;
-            if (vwapCrosses < minChopCrosses) score++;
-            if (atrPercent >= atrNormalLowPercent) score++;
-            if (emaCrosses < minChopCrosses) score++;
-            scores[i] = score;
-
-            regimes[i] = score >= trendScoreThreshold && stackBullish ? Regime.TrendingBullish
-                : score >= trendScoreThreshold && stackBearish ? Regime.TrendingBearish
-                : Regime.Range;
+            if (beforeSignalStart)
+                signals.Add(new BacktestSignal(context.Underlying, time, "Rejected", dir, $"{summary} - skipped, before {IstClock.FormatMinutesOfDay(signalStartMinutes)} IST (pre-open)"));
+            else if (afterEntryCutoff)
+                signals.Add(new BacktestSignal(context.Underlying, time, "Rejected", dir, $"{summary} - skipped, at/after {IstClock.FormatMinutesOfDay(noNewEntriesAfterMinutes)} IST (no new entries)"));
+            else if (volatilityExtreme)
+                signals.Add(new BacktestSignal(context.Underlying, time, "Rejected", dir, $"{summary} - skipped, ATR {atrPercentHere:0.##}% of price is Extreme volatility (no new trades)"));
+            else if (bullish && !takeLongs)
+                signals.Add(new BacktestSignal(context.Underlying, time, "Rejected", dir, $"{summary} - skipped, shorts only"));
+            else if (!bullish && !takeShorts)
+                signals.Add(new BacktestSignal(context.Underlying, time, "Rejected", dir, $"{summary} - skipped, longs only"));
+            else if (FlowCheck(bullish, time) is (false, var rejectReason))
+                signals.Add(new BacktestSignal(context.Underlying, time, "Rejected", dir, $"{summary} - but {rejectReason}"));
+            else
+            {
+                var flowReason = requireFlowConfirmation ? FlowCheck(bullish, time).Reason : null;
+                var extras = string.Join("", new[] { flowReason is { Length: > 0 } ? $", and {flowReason}" : null, sizingNote }.Where(e => !string.IsNullOrEmpty(e)));
+                signals.Add(new BacktestSignal(context.Underlying, time, "Entry", dir, $"{summary}{extras}"));
+                entries.Add((time, dir));
+            }
         }
 
-        for (var i = Math.Max(1, slopeLookback); i < bars.Count; i++)
+        var vwap1m = AlignToTime(VwapCalculator.ComputeSeries(context.SpotVolumeBarsOneMinute), oneMin);
+        var vwap15 = AlignToTime(VwapCalculator.ComputeSeries(context.SpotVolumeBarsOneMinute), bars15);
+        var vwap5 = AlignToTime(VwapCalculator.ComputeSeries(context.SpotVolumeBarsOneMinute), bars5);
+        var vwapPage = AlignToTime(VwapCalculator.ComputeSeries(context.SpotVolumeBarsOneMinute), pageBars);
+
+        // ---- 15-minute regime ----
+        var ema15Fast = EmaCrossoverDetector.EmaSeries(bars15, regime15EmaFast);
+        var ema15Slow = EmaCrossoverDetector.EmaSeries(bars15, regime15EmaSlow);
+        var adx15 = ToQuotes(bars15).GetAdx(adxPeriod).Select(r => (decimal?)r.Adx).ToList();
+
+        // ---- 5-minute EMA stack (reused for the 15M score's 5th point AND the 5M setup gate) ----
+        var ema5Fast = EmaCrossoverDetector.EmaSeries(bars5, setup5EmaFast);
+        var ema5Slow = EmaCrossoverDetector.EmaSeries(bars5, setup5EmaSlow);
+        var adx5 = ToQuotes(bars5).GetAdx(adxPeriod).Select(r => (decimal?)r.Adx).ToList();
+        var stack5Bullish = bars5.Select((_, i) => ema5Fast[i] is { } f && ema5Slow[i] is { } s && f > s).ToList();
+        var stack5Bearish = bars5.Select((_, i) => ema5Fast[i] is { } f && ema5Slow[i] is { } s && f < s).ToList();
+        var setup5OkBullish = bars5.Select((b, i) => stack5Bullish[i] && adx5[i] is { } a && a >= setup5AdxMin && vwap5[i] is { } v && b.Close > v).ToList();
+        var setup5OkBearish = bars5.Select((b, i) => stack5Bearish[i] && adx5[i] is { } a && a >= setup5AdxMin && vwap5[i] is { } v && b.Close < v).ToList();
+
+        // ---- 3-minute confirmation ----
+        var ema3Fast = EmaCrossoverDetector.EmaSeries(bars3, confirm3EmaFast);
+        var ema3Slow = EmaCrossoverDetector.EmaSeries(bars3, confirm3EmaSlow);
+        var adx3 = ToQuotes(bars3).GetAdx(adxPeriod).Select(r => (decimal?)r.Adx).ToList();
+        var confirm3OkBullish = bars3.Select((b, i) => ema3Fast[i] is { } f && ema3Slow[i] is { } s && f > s && adx3[i] is { } a && a >= confirm3AdxMin
+            && Slope(ema3Fast, i, slopeLookback) is { } sl && sl >= confirm3SlopeMin && b.Close > b.Open).ToList();
+        var confirm3OkBearish = bars3.Select((b, i) => ema3Fast[i] is { } f && ema3Slow[i] is { } s && f < s && adx3[i] is { } a && a >= confirm3AdxMin
+            && Slope(ema3Fast, i, slopeLookback) is { } sl && sl <= -confirm3SlopeMin && b.Close < b.Open).ToList();
+
+        // ---- 1-minute entry inputs ----
+        var ema1Fast = EmaCrossoverDetector.EmaSeries(oneMin, entry1EmaFast);
+        var ema1Slow = EmaCrossoverDetector.EmaSeries(oneMin, entry1EmaSlow);
+        var adx1 = ToQuotes(oneMin).GetAdx(adxPeriod).Select(r => (decimal?)r.Adx).ToList();
+        var rsi1 = ToQuotes(oneMin).GetRsi(rsiPeriod).Select(r => (decimal?)r.Rsi).ToList();
+
+        // ---- 15-minute regime direction + score ----
+        var stack5OnBars15Bullish = AlignStepToTime(bars5, stack5Bullish, bars15, false);
+        var stack5OnBars15Bearish = AlignStepToTime(bars5, stack5Bearish, bars15, false);
+        var regime15Direction = new string?[bars15.Count];
+        var regime15Score = new int[bars15.Count];
+        for (var i = slopeLookback; i < bars15.Count; i++)
         {
-            if (regimes[i] is not { } regime || regimes[i - 1] is null) continue;
-            if (atr[i] is not { } atrNow) continue;
+            if (ema15Fast[i] is not { } f || ema15Slow[i] is not { } s) continue;
+            if (adx15[i] is not { } a || vwap15[i] is not { } v) continue;
 
-            var bar = bars[i];
-            var prevBar = bars[i - 1];
-            var atrPercentNow = bar.Close != 0 ? atrNow / bar.Close * 100m : 0m;
-            var volatilityExtreme = atrPercentNow >= atrExtremePercent;
-            var volatilityHigh = !volatilityExtreme && atrPercentNow >= atrNormalHighPercent;
-            var beforeSignalStart = signalStartMinutes > 0 && IstClock.MinutesOfDay(bar.Time) < signalStartMinutes;
-            var afterEntryCutoff = noNewEntriesAfterMinutes > 0 && IstClock.MinutesOfDay(bar.Time) >= noNewEntriesAfterMinutes;
+            var candidate = f > s ? "Bullish" : f < s ? "Bearish" : null;
+            if (candidate is null) continue;
 
-            void Emit(bool bullish, string summary)
+            var bullish = candidate == "Bullish";
+            var slopeOk = Slope(ema15Fast, i, slopeLookback) is { } sl && (bullish ? sl >= regime15SlopeMin : sl <= -regime15SlopeMin);
+            var adxOk = a >= regime15AdxMin;
+            var vwapOk = bullish ? bars15[i].Close > v : bars15[i].Close < v;
+            var fiveMOk = bullish ? stack5OnBars15Bullish[i] : stack5OnBars15Bearish[i];
+
+            var score = 1 + (slopeOk ? 1 : 0) + (adxOk ? 1 : 0) + (vwapOk ? 1 : 0) + (fiveMOk ? 1 : 0);
+            regime15Score[i] = score;
+            regime15Direction[i] = score >= regimeScoreMin ? candidate : null;
+        }
+
+        // ---- page-timeframe ATR/RSI for the Range path + the volatility gate ----
+        var atrPage = ToQuotes(pageBars).GetAtr(atrPeriod).Select(r => (decimal?)r.Atr).ToList();
+        var rsiPage = ToQuotes(pageBars).GetRsi(rsiPeriod).Select(r => (decimal?)r.Rsi).ToList();
+        var atrPercentPage = pageBars.Select((b, i) => atrPage[i] is { } a && b.Close != 0 ? (decimal?)(a / b.Close * 100m) : null).ToList();
+
+        // ==== TREND CASCADE - native 1-minute entries, gated by every stage above agreeing ====
+        var regime15OnOneMin = AlignStepToTime(bars15, regime15Direction, oneMin, (string?)null);
+        var regime15ScoreOnOneMin = AlignStepToTime(bars15, regime15Score, oneMin, 0);
+        var setup5OkOnOneMinBullish = AlignStepToTime(bars5, setup5OkBullish, oneMin, false);
+        var setup5OkOnOneMinBearish = AlignStepToTime(bars5, setup5OkBearish, oneMin, false);
+        var confirm3OkOnOneMinBullish = AlignStepToTime(bars3, confirm3OkBullish, oneMin, false);
+        var confirm3OkOnOneMinBearish = AlignStepToTime(bars3, confirm3OkBearish, oneMin, false);
+        var atrPercentOnOneMin = AlignStepToTime(pageBars, atrPercentPage, oneMin, (decimal?)null);
+
+        for (var i = Math.Max(1, slopeLookback); i < oneMin.Count; i++)
+        {
+            if (regime15OnOneMin[i] is not { } dir) continue;
+            if (ema1Fast[i] is not { } f1 || ema1Fast[i - 1] is not { } prevF1) continue;
+            if (ema1Slow[i] is not { } s1 || ema1Slow[i - 1] is not { } prevS1) continue;
+            if (adx1[i] is not { } a1 || rsi1[i] is not { } r1) continue;
+            if (Slope(ema1Fast, i, slopeLookback) is not { } sl1) continue;
+
+            var bullish = dir == "Bullish";
+            var setupOk = bullish ? setup5OkOnOneMinBullish[i] : setup5OkOnOneMinBearish[i];
+            var confirmOk = bullish ? confirm3OkOnOneMinBullish[i] : confirm3OkOnOneMinBearish[i];
+            var pullback = bullish ? prevF1 <= prevS1 && f1 > s1 : prevF1 >= prevS1 && f1 < s1;
+            var adxOk = a1 >= entry1AdxMin;
+            var slopeOk = bullish ? sl1 >= entry1SlopeMin : sl1 <= -entry1SlopeMin;
+            var rsiOk = r1 > rsiNeutralLow && r1 < rsiNeutralHigh;
+
+            if (!(setupOk && confirmOk && pullback && adxOk && slopeOk && rsiOk)) continue;
+
+            var score = regime15ScoreOnOneMin[i];
+            var confidence = score >= regimeScoreFull ? "full confidence" : "selective/reduced confidence";
+            var summary = $"15M regime {dir} (score {score}/5, {confidence}) -> 5M setup ok -> 3M confirmed -> 1M pullback rejection (EMA{entry1EmaFast}/{entry1EmaSlow})";
+            EmitAt(oneMin[i].Time, bullish, summary, atrPercentOnOneMin[i]);
+        }
+
+        // ==== RANGE FADE - page-timeframe VWAP+-ATR band, only when the 15M regime is NOT trending ====
+        var regime15ScoreOnPage = AlignStepToTime(bars15, regime15Score, pageBars, 0);
+        for (var i = 1; i < pageBars.Count; i++)
+        {
+            if (regime15ScoreOnPage[i] >= regimeScoreMin) continue; // 15M cascade already has a candidate - don't fade into it
+            if (vwapPage[i] is not { } vwapNow || vwapPage[i - 1] is not { } prevVwap) continue;
+            if (atrPage[i] is not { } atrNow || atrPage[i - 1] is not { } prevAtr) continue;
+            if (rsiPage[i] is not { } rsiNow || atrPercentPage[i] is not { } atrPctNow) continue;
+
+            var bar = pageBars[i];
+            var prevBar = pageBars[i - 1];
+            var lower = vwapNow - atrNow * rangeAtrMultiple;
+            var prevLower = prevVwap - prevAtr * rangeAtrMultiple;
+            var upper = vwapNow + atrNow * rangeAtrMultiple;
+            var prevUpper = prevVwap + prevAtr * rangeAtrMultiple;
+            var rsiNeutral = rsiNow > rsiNeutralLow && rsiNow < rsiNeutralHigh;
+
+            if (prevBar.Close <= prevLower && bar.Close > lower)
             {
-                var dir = bullish ? "Bullish" : "Bearish";
-                var sizingNote = volatilityHigh ? " (ATR reads High volatility - consider reduced size; not enforced by this backtest)" : "";
-                if (beforeSignalStart)
-                    signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", dir, $"{summary} - skipped, before {IstClock.FormatMinutesOfDay(signalStartMinutes)} IST (pre-open)"));
-                else if (afterEntryCutoff)
-                    signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", dir, $"{summary} - skipped, at/after {IstClock.FormatMinutesOfDay(noNewEntriesAfterMinutes)} IST (no new entries)"));
-                else if (volatilityExtreme)
-                    signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", dir, $"{summary} - skipped, ATR {atrPercentNow:0.##}% of price is Extreme volatility (no new trades)"));
-                else if (bullish && !takeLongs)
-                    signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", dir, $"{summary} - skipped, shorts only"));
-                else if (!bullish && !takeShorts)
-                    signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", dir, $"{summary} - skipped, longs only"));
-                else if (FlowCheck(bullish, bar.Time) is (false, var rejectReason))
-                    signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", dir, $"{summary} - but {rejectReason}"));
+                var summary = $"15M regime Range (score {regime15ScoreOnPage[i]}/5) - close rejected back above the VWAP-{rangeAtrMultiple:0.#}xATR lower band ({lower:0.##}), RSI {rsiNow:0.#}";
+                if (!rsiNeutral)
+                    signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", "Bullish", $"{summary} - skipped, RSI outside the {rsiNeutralLow:0.#}-{rsiNeutralHigh:0.#} neutral band (momentum may be accelerating away, not just testing the range)"));
                 else
-                {
-                    var flowReason = requireFlowConfirmation ? FlowCheck(bullish, bar.Time).Reason : null;
-                    var extras = string.Join("", new[] { flowReason is { Length: > 0 } ? $", and {flowReason}" : null, sizingNote }.Where(e => !string.IsNullOrEmpty(e)));
-                    signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Entry", dir, $"{summary}{extras}"));
-                    entries.Add((bar.Time, dir));
-                }
+                    EmitAt(bar.Time, true, summary, atrPctNow);
             }
-
-            if (regime == Regime.TrendingBullish && regimes[i - 1] != Regime.TrendingBullish)
+            else if (prevBar.Close >= prevUpper && bar.Close < upper)
             {
-                Emit(true, $"Regime turned Trending Bullish (score {scores[i]}/5 - EMA{emaFastPeriod}/{emaMidPeriod}/{emaSlowPeriod} stacked up, sloping up, above VWAP)");
-            }
-            else if (regime == Regime.TrendingBearish && regimes[i - 1] != Regime.TrendingBearish)
-            {
-                Emit(false, $"Regime turned Trending Bearish (score {scores[i]}/5 - EMA{emaFastPeriod}/{emaMidPeriod}/{emaSlowPeriod} stacked down, sloping down, below VWAP)");
-            }
-            else if (regime == Regime.Range && vwap[i] is { } vwapNow && vwap[i - 1] is { } prevVwap && atr[i - 1] is { } prevAtr && rsi[i] is { } rsiNow)
-            {
-                var lower = vwapNow - atrNow * rangeAtrMultiple;
-                var prevLower = prevVwap - prevAtr * rangeAtrMultiple;
-                var upper = vwapNow + atrNow * rangeAtrMultiple;
-                var prevUpper = prevVwap + prevAtr * rangeAtrMultiple;
-                var rsiNeutral = rsiNow > rsiNeutralLow && rsiNow < rsiNeutralHigh;
-
-                if (prevBar.Close <= prevLower && bar.Close > lower)
-                {
-                    var summary = $"Regime Range - close rejected back above the VWAP-{rangeAtrMultiple:0.#}xATR lower band ({lower:0.##}), RSI {rsiNow:0.#}";
-                    if (!rsiNeutral)
-                        signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", "Bullish", $"{summary} - skipped, RSI outside the {rsiNeutralLow:0.#}-{rsiNeutralHigh:0.#} neutral band (momentum may be accelerating away, not just testing the range)"));
-                    else
-                        Emit(true, summary);
-                }
-                else if (prevBar.Close >= prevUpper && bar.Close < upper)
-                {
-                    var summary = $"Regime Range - close rejected back below the VWAP+{rangeAtrMultiple:0.#}xATR upper band ({upper:0.##}), RSI {rsiNow:0.#}";
-                    if (!rsiNeutral)
-                        signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", "Bearish", $"{summary} - skipped, RSI outside the {rsiNeutralLow:0.#}-{rsiNeutralHigh:0.#} neutral band (momentum may be accelerating away, not just testing the range)"));
-                    else
-                        Emit(false, summary);
-                }
+                var summary = $"15M regime Range (score {regime15ScoreOnPage[i]}/5) - close rejected back below the VWAP+{rangeAtrMultiple:0.#}xATR upper band ({upper:0.##}), RSI {rsiNow:0.#}";
+                if (!rsiNeutral)
+                    signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", "Bearish", $"{summary} - skipped, RSI outside the {rsiNeutralLow:0.#}-{rsiNeutralHigh:0.#} neutral band (momentum may be accelerating away, not just testing the range)"));
+                else
+                    EmitAt(bar.Time, false, summary, atrPctNow);
             }
         }
 
         return (entries, signals.OrderByDescending(s => s.TimeUtc).ToList());
     }
 
-    /// <summary>How many times EMA-fast/EMA-mid crossed, and how many times close crossed VWAP, in
-    /// the <paramref name="windowBars"/> bars ending at <paramref name="index"/> - the flowchart's
-    /// own "EMA Cross Count" and "VWAP Position" chop inputs.</summary>
-    private static (int EmaCrosses, int VwapCrosses) CrossCounts(
-        IReadOnlyList<Candle> bars, IReadOnlyList<decimal?> ema7, IReadOnlyList<decimal?> ema20, IReadOnlyList<decimal?> vwap,
-        int index, int windowBars)
+    /// <summary>% change of <paramref name="series"/> over <paramref name="lookback"/> bars ending at
+    /// <paramref name="index"/> - null if either end is missing or the base is exactly zero (a
+    /// meaningless divisor, not a real "infinite slope").</summary>
+    private static decimal? Slope(IReadOnlyList<decimal?> series, int index, int lookback)
     {
-        var windowStart = Math.Max(1, index - windowBars + 1);
-        var emaCrosses = 0;
-        var vwapCrosses = 0;
-        for (var j = windowStart; j <= index; j++)
-        {
-            if (ema7[j] is { } f && ema20[j] is { } m && ema7[j - 1] is { } prevF && ema20[j - 1] is { } prevM)
-            {
-                var now = Math.Sign(f - m);
-                var prev = Math.Sign(prevF - prevM);
-                if (now != prev && now != 0 && prev != 0) emaCrosses++;
-            }
-
-            if (vwap[j] is { } v && vwap[j - 1] is { } prevV)
-            {
-                var now = Math.Sign(bars[j].Close - v);
-                var prev = Math.Sign(bars[j - 1].Close - prevV);
-                if (now != prev && now != 0 && prev != 0) vwapCrosses++;
-            }
-        }
-
-        return (emaCrosses, vwapCrosses);
+        if (index - lookback < 0) return null;
+        if (series[index] is not { } now || series[index - lookback] is not { } past || past == 0) return null;
+        return (now - past) / Math.Abs(past) * 100m;
     }
 
     private static List<Quote> ToQuotes(IReadOnlyList<Candle> bars) => bars.Select(c => new Quote
@@ -421,9 +434,7 @@ public sealed class RegimeAdaptiveStrategy : IBacktestStrategy
     /// <paramref name="bars"/> by index - "the last value at or before this bar's time" for every
     /// bar in one forward merge pass, rather than BacktestUtil.LastValueAtOrBefore's own per-call
     /// O(series length) scan repeated once per bar (this strategy needs a VWAP reading on EVERY bar
-    /// for its own chop-count/regime scan, not just at a handful of candidate entries the way
-    /// FlowConfirmation.Favors is normally called, so the repeated-scan cost would actually add up
-    /// here).</summary>
+    /// of FOUR separate timeframes, not just at a handful of candidate entries).</summary>
     private static List<decimal?> AlignToTime(IReadOnlyList<ObvPoint> series, IReadOnlyList<Candle> bars)
     {
         var result = new List<decimal?>(bars.Count);
@@ -434,6 +445,29 @@ public sealed class RegimeAdaptiveStrategy : IBacktestStrategy
             while (pointer < series.Count && series[pointer].Time <= bar.Time)
             {
                 current = series[pointer].Obv;
+                pointer++;
+            }
+            result.Add(current);
+        }
+        return result;
+    }
+
+    /// <summary>Generic counterpart to AlignToTime - projects any coarser timeframe's own per-bar
+    /// series (<paramref name="sourceBars"/>/<paramref name="sourceValues"/>, e.g. the 15-minute
+    /// regime direction) onto a finer timeframe's own bar times (<paramref name="targetBars"/>, e.g.
+    /// the native 1-minute series), so "what did the 15-minute regime say as of this 1-minute bar"
+    /// is a plain array lookup rather than a per-bar binary search. <paramref name="defaultValue"/>
+    /// covers every target bar before the source series' own first value.</summary>
+    private static List<T> AlignStepToTime<T>(IReadOnlyList<Candle> sourceBars, IReadOnlyList<T> sourceValues, IReadOnlyList<Candle> targetBars, T defaultValue)
+    {
+        var result = new List<T>(targetBars.Count);
+        var pointer = 0;
+        var current = defaultValue;
+        foreach (var bar in targetBars)
+        {
+            while (pointer < sourceBars.Count && sourceBars[pointer].Time <= bar.Time)
+            {
+                current = sourceValues[pointer];
                 pointer++;
             }
             result.Add(current);

@@ -66,29 +66,27 @@ public sealed class TimeframeDefaultsTests
     }
 
     [Fact]
-    public void ApplyTimeframeDefaults_RegimeAdaptiveStrategy_ScalesItsThresholdsAndWindow_ButNotBarCountPeriods()
+    public void ApplyTimeframeDefaults_RegimeAdaptiveStrategy_ScalesOnlyThePageTimeframeAtrBands_NotTheFixedCascadeTimeframes()
     {
         var strategy = new RegimeAdaptiveStrategy();
-        var staticEmaFast = strategy.Parameters.Single(p => p.Key == "emaFastPeriod").Default;
-        var staticAdxPeriod = strategy.Parameters.Single(p => p.Key == "adxPeriod").Default;
-        var staticAdxTrendMin = strategy.Parameters.Single(p => p.Key == "adxTrendMin").Default;
+        var staticRegime15EmaFast = strategy.Parameters.Single(p => p.Key == "regime15EmaFast").Default;
+        var staticRegime15SlopeMin = strategy.Parameters.Single(p => p.Key == "regime15SlopeMinPercent").Default;
+        var staticEntry1AdxMin = strategy.Parameters.Single(p => p.Key == "entry1AdxMin").Default;
         var staticRangeAtrMultiple = strategy.Parameters.Single(p => p.Key == "rangeAtrMultiple").Default;
-        var staticMinChopCrosses = strategy.Parameters.Single(p => p.Key == "minChopCrosses").Default;
+        var staticRsiNeutralLow = strategy.Parameters.Single(p => p.Key == "rsiNeutralLow").Default;
 
         var result = BacktestUtil.ApplyTimeframeDefaults(strategy, 5);
 
         Assert.Equal(30m, result.Single(p => p.Key == "slPoints").Default);
         Assert.Equal(60m, result.Single(p => p.Key == "tpPoints").Default);
-        Assert.Equal(0.15m, result.Single(p => p.Key == "slopeThresholdPercent").Default);
-        Assert.Equal(2.4m, result.Single(p => p.Key == "atrNormalLowPercent").Default);
         Assert.Equal(4.5m, result.Single(p => p.Key == "atrNormalHighPercent").Default);
         Assert.Equal(7.5m, result.Single(p => p.Key == "atrExtremePercent").Default);
-        Assert.Equal(90m, result.Single(p => p.Key == "chopWindowMinutes").Default);
-        // Deliberately untouched - bar-count periods and already-normalized oscillator thresholds.
-        Assert.Equal(staticEmaFast, result.Single(p => p.Key == "emaFastPeriod").Default);
-        Assert.Equal(staticAdxPeriod, result.Single(p => p.Key == "adxPeriod").Default);
-        Assert.Equal(staticAdxTrendMin, result.Single(p => p.Key == "adxTrendMin").Default);
+        // Deliberately untouched - every cascade parameter is already pinned to a REAL timeframe
+        // (15/5/3/1 minutes), independent of whatever the page's own timeframe happens to be.
+        Assert.Equal(staticRegime15EmaFast, result.Single(p => p.Key == "regime15EmaFast").Default);
+        Assert.Equal(staticRegime15SlopeMin, result.Single(p => p.Key == "regime15SlopeMinPercent").Default);
+        Assert.Equal(staticEntry1AdxMin, result.Single(p => p.Key == "entry1AdxMin").Default);
         Assert.Equal(staticRangeAtrMultiple, result.Single(p => p.Key == "rangeAtrMultiple").Default);
-        Assert.Equal(staticMinChopCrosses, result.Single(p => p.Key == "minChopCrosses").Default);
+        Assert.Equal(staticRsiNeutralLow, result.Single(p => p.Key == "rsiNeutralLow").Default);
     }
 }
