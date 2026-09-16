@@ -17,6 +17,12 @@ namespace OptionAnalytics.Server.Services;
 /// (re)written together, inside one transaction, right before its own marker row is upserted - a
 /// process killed mid-save leaves neither behind, the same completeness guarantee the old
 /// write-CSV-then-write-meta ordering gave.
+///
+/// NEVER LETS A POSTGRES FAILURE TAKE THE APP DOWN - HasCompleteData/Read/SaveAsync each catch and
+/// log rather than throw, and schema creation at construction is wrapped too: this class is a
+/// singleton a background service depends on, constructed eagerly at app startup, so an unhandled
+/// exception there would crash the entire process before it ever serves a request. A failed
+/// connection anywhere simply behaves as "nothing cached yet" rather than a crash.
 /// </summary>
 public sealed class HistoricalSpotDataStore
 {
@@ -28,7 +34,14 @@ public sealed class HistoricalSpotDataStore
         _connectionString = postgresOptions.Value.BuildConnectionString();
         _logger = logger;
 
-        EnsureSchemaCreated();
+        try
+        {
+            EnsureSchemaCreated();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Could not reach Postgres to ensure the historical-spot-data schema exists - the app will keep starting, but this cache will behave as empty until Postgres is reachable.");
+        }
     }
 
     private void EnsureSchemaCreated()
@@ -65,19 +78,27 @@ public sealed class HistoricalSpotDataStore
     /// restart.</summary>
     public bool HasCompleteData(string underlying, DateOnly requiredFromDay, DateOnly requiredToDay)
     {
-        using var connection = new NpgsqlConnection(_connectionString);
-        connection.Open();
+        try
+        {
+            using var connection = new NpgsqlConnection(_connectionString);
+            connection.Open();
 
-        using var command = connection.CreateCommand();
-        command.CommandText = "SELECT from_day, to_day FROM spot_data_ranges WHERE underlying = @underlying";
-        command.Parameters.AddWithValue("underlying", underlying.ToUpperInvariant());
+            using var command = connection.CreateCommand();
+            command.CommandText = "SELECT from_day, to_day FROM spot_data_ranges WHERE underlying = @underlying";
+            command.Parameters.AddWithValue("underlying", underlying.ToUpperInvariant());
 
-        using var reader = command.ExecuteReader();
-        if (!reader.Read()) return false;
+            using var reader = command.ExecuteReader();
+            if (!reader.Read()) return false;
 
-        var fromDay = DateOnly.FromDateTime(reader.GetDateTime(0));
-        var toDay = DateOnly.FromDateTime(reader.GetDateTime(1));
-        return fromDay <= requiredFromDay && toDay >= requiredToDay;
+            var fromDay = DateOnly.FromDateTime(reader.GetDateTime(0));
+            var toDay = DateOnly.FromDateTime(reader.GetDateTime(1));
+            return fromDay <= requiredFromDay && toDay >= requiredToDay;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not reach Postgres to check the historical-spot-data cache for {Underlying} - treating it as not cached.", underlying);
+            return false;
+        }
     }
 
     /// <summary>Every cached candle for [fromDay,toDay] (IST calendar dates, both inclusive) -
@@ -85,31 +106,39 @@ public sealed class HistoricalSpotDataStore
     /// window, empty if nothing was ever saved for this underlying.</summary>
     public IReadOnlyList<CandleWithVolume> Read(string underlying, DateOnly fromDay, DateOnly toDay)
     {
-        using var connection = new NpgsqlConnection(_connectionString);
-        connection.Open();
-
-        using var command = connection.CreateCommand();
-        command.CommandText = """
-            SELECT bar_time, open, high, low, close, volume
-            FROM spot_bars
-            WHERE underlying = @underlying AND bar_time >= @fromInclusiveUtc AND bar_time < @toExclusiveUtc
-            ORDER BY bar_time
-            """;
-        command.Parameters.AddWithValue("underlying", underlying.ToUpperInvariant());
-        // Both boundaries in UTC, converted from the requested IST calendar-day window - IST has no
-        // DST, so a fixed +5:30 offset is exact for any date.
-        command.Parameters.AddWithValue("fromInclusiveUtc", IstClock.AtIstTime(fromDay, 0).UtcDateTime);
-        command.Parameters.AddWithValue("toExclusiveUtc", IstClock.AtIstTime(toDay.AddDays(1), 0).UtcDateTime);
-
-        var result = new List<CandleWithVolume>();
-        using var reader = command.ExecuteReader();
-        while (reader.Read())
+        try
         {
-            var time = new DateTimeOffset(reader.GetDateTime(0), TimeSpan.Zero);
-            result.Add(new CandleWithVolume(time, reader.GetDecimal(1), reader.GetDecimal(2), reader.GetDecimal(3), reader.GetDecimal(4), reader.GetInt64(5)));
-        }
+            using var connection = new NpgsqlConnection(_connectionString);
+            connection.Open();
 
-        return result;
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+                SELECT bar_time, open, high, low, close, volume
+                FROM spot_bars
+                WHERE underlying = @underlying AND bar_time >= @fromInclusiveUtc AND bar_time < @toExclusiveUtc
+                ORDER BY bar_time
+                """;
+            command.Parameters.AddWithValue("underlying", underlying.ToUpperInvariant());
+            // Both boundaries in UTC, converted from the requested IST calendar-day window - IST has
+            // no DST, so a fixed +5:30 offset is exact for any date.
+            command.Parameters.AddWithValue("fromInclusiveUtc", IstClock.AtIstTime(fromDay, 0).UtcDateTime);
+            command.Parameters.AddWithValue("toExclusiveUtc", IstClock.AtIstTime(toDay.AddDays(1), 0).UtcDateTime);
+
+            var result = new List<CandleWithVolume>();
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                var time = new DateTimeOffset(reader.GetDateTime(0), TimeSpan.Zero);
+                result.Add(new CandleWithVolume(time, reader.GetDecimal(1), reader.GetDecimal(2), reader.GetDecimal(3), reader.GetDecimal(4), reader.GetInt64(5)));
+            }
+
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not reach Postgres to read the historical-spot-data cache for {Underlying} - returning empty.", underlying);
+            return Array.Empty<CandleWithVolume>();
+        }
     }
 
     /// <summary>Replaces this underlying's whole row set with <paramref name="candles"/> (assumed
@@ -121,53 +150,60 @@ public sealed class HistoricalSpotDataStore
     {
         var normalizedUnderlying = underlying.ToUpperInvariant();
 
-        await using var connection = new NpgsqlConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-
-        await using (var delete = connection.CreateCommand())
+        try
         {
-            delete.Transaction = transaction;
-            delete.CommandText = "DELETE FROM spot_bars WHERE underlying = @underlying";
-            delete.Parameters.AddWithValue("underlying", normalizedUnderlying);
-            await delete.ExecuteNonQueryAsync(cancellationToken);
-        }
+            await using var connection = new NpgsqlConnection(_connectionString);
+            await connection.OpenAsync(cancellationToken);
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
-        await using (var importer = await connection.BeginBinaryImportAsync(
-            "COPY spot_bars (underlying, bar_time, open, high, low, close, volume) FROM STDIN (FORMAT BINARY)", cancellationToken))
-        {
-            foreach (var c in candles)
+            await using (var delete = connection.CreateCommand())
             {
-                await importer.StartRowAsync(cancellationToken);
-                await importer.WriteAsync(normalizedUnderlying, NpgsqlTypes.NpgsqlDbType.Text, cancellationToken);
-                await importer.WriteAsync(c.Time.UtcDateTime, NpgsqlTypes.NpgsqlDbType.TimestampTz, cancellationToken);
-                await importer.WriteAsync(c.Open, NpgsqlTypes.NpgsqlDbType.Numeric, cancellationToken);
-                await importer.WriteAsync(c.High, NpgsqlTypes.NpgsqlDbType.Numeric, cancellationToken);
-                await importer.WriteAsync(c.Low, NpgsqlTypes.NpgsqlDbType.Numeric, cancellationToken);
-                await importer.WriteAsync(c.Close, NpgsqlTypes.NpgsqlDbType.Numeric, cancellationToken);
-                await importer.WriteAsync(c.Volume, NpgsqlTypes.NpgsqlDbType.Bigint, cancellationToken);
+                delete.Transaction = transaction;
+                delete.CommandText = "DELETE FROM spot_bars WHERE underlying = @underlying";
+                delete.Parameters.AddWithValue("underlying", normalizedUnderlying);
+                await delete.ExecuteNonQueryAsync(cancellationToken);
             }
-            await importer.CompleteAsync(cancellationToken);
-        }
 
-        await using (var upsert = connection.CreateCommand())
+            await using (var importer = await connection.BeginBinaryImportAsync(
+                "COPY spot_bars (underlying, bar_time, open, high, low, close, volume) FROM STDIN (FORMAT BINARY)", cancellationToken))
+            {
+                foreach (var c in candles)
+                {
+                    await importer.StartRowAsync(cancellationToken);
+                    await importer.WriteAsync(normalizedUnderlying, NpgsqlTypes.NpgsqlDbType.Text, cancellationToken);
+                    await importer.WriteAsync(c.Time.UtcDateTime, NpgsqlTypes.NpgsqlDbType.TimestampTz, cancellationToken);
+                    await importer.WriteAsync(c.Open, NpgsqlTypes.NpgsqlDbType.Numeric, cancellationToken);
+                    await importer.WriteAsync(c.High, NpgsqlTypes.NpgsqlDbType.Numeric, cancellationToken);
+                    await importer.WriteAsync(c.Low, NpgsqlTypes.NpgsqlDbType.Numeric, cancellationToken);
+                    await importer.WriteAsync(c.Close, NpgsqlTypes.NpgsqlDbType.Numeric, cancellationToken);
+                    await importer.WriteAsync(c.Volume, NpgsqlTypes.NpgsqlDbType.Bigint, cancellationToken);
+                }
+                await importer.CompleteAsync(cancellationToken);
+            }
+
+            await using (var upsert = connection.CreateCommand())
+            {
+                upsert.Transaction = transaction;
+                upsert.CommandText = """
+                    INSERT INTO spot_data_ranges (underlying, from_day, to_day, fetched_at_utc)
+                    VALUES (@underlying, @fromDay, @toDay, @fetchedAtUtc)
+                    ON CONFLICT (underlying)
+                    DO UPDATE SET from_day = EXCLUDED.from_day, to_day = EXCLUDED.to_day, fetched_at_utc = EXCLUDED.fetched_at_utc
+                    """;
+                upsert.Parameters.AddWithValue("underlying", normalizedUnderlying);
+                upsert.Parameters.AddWithValue("fromDay", fromDay);
+                upsert.Parameters.AddWithValue("toDay", toDay);
+                upsert.Parameters.AddWithValue("fetchedAtUtc", DateTime.UtcNow);
+                await upsert.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await transaction.CommitAsync(cancellationToken);
+
+            _logger.LogInformation("Saved {Count} cached spot candle(s) for {Underlying} ({From}..{To}).", candles.Count, underlying, fromDay, toDay);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            upsert.Transaction = transaction;
-            upsert.CommandText = """
-                INSERT INTO spot_data_ranges (underlying, from_day, to_day, fetched_at_utc)
-                VALUES (@underlying, @fromDay, @toDay, @fetchedAtUtc)
-                ON CONFLICT (underlying)
-                DO UPDATE SET from_day = EXCLUDED.from_day, to_day = EXCLUDED.to_day, fetched_at_utc = EXCLUDED.fetched_at_utc
-                """;
-            upsert.Parameters.AddWithValue("underlying", normalizedUnderlying);
-            upsert.Parameters.AddWithValue("fromDay", fromDay);
-            upsert.Parameters.AddWithValue("toDay", toDay);
-            upsert.Parameters.AddWithValue("fetchedAtUtc", DateTime.UtcNow);
-            await upsert.ExecuteNonQueryAsync(cancellationToken);
+            _logger.LogWarning(ex, "Could not reach Postgres to save the historical-spot-data cache for {Underlying} - it will retry on the next prefetch run.", underlying);
         }
-
-        await transaction.CommitAsync(cancellationToken);
-
-        _logger.LogInformation("Saved {Count} cached spot candle(s) for {Underlying} ({From}..{To}).", candles.Count, underlying, fromDay, toDay);
     }
 }
