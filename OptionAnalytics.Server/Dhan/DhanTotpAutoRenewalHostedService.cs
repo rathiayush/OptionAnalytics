@@ -33,6 +33,14 @@ public sealed class DhanTotpAutoRenewalHostedService : BackgroundService
     /// margin over Dhan's stated 2 minutes accounts for clock/latency slop.</summary>
     private static readonly TimeSpan RateLimitCooldown = TimeSpan.FromSeconds(130);
 
+    /// <summary>Dhan's account-level "too many attempts" lockout (see DhanTotpAuthService.
+    /// ClassifyThrottle's own doc comment) has no documented reset window, and - per Dhan's own user
+    /// community - is almost always caused by the calling server's clock being out of sync (TOTP
+    /// codes are only valid for a narrow ~30-second window), which retrying sooner does nothing to
+    /// fix and everything to keep re-triggering. 15 minutes is a deliberately conservative wait
+    /// before trying again, not a documented Dhan value.</summary>
+    private static readonly TimeSpan TooManyAttemptsCooldown = TimeSpan.FromMinutes(15);
+
     private readonly DhanOptions _options;
     private readonly DhanSession _session;
     private readonly DhanTotpAuthService _authService;
@@ -90,11 +98,17 @@ public sealed class DhanTotpAutoRenewalHostedService : BackgroundService
                 return result.ExpiresUtc ?? DateTimeOffset.UtcNow.AddHours(23);
             }
 
-            var delay = result.RateLimited ? RateLimitCooldown : backoff;
-            _logger.LogWarning("Dhan TOTP auto-login failed: {Error} - retrying in {Seconds}s.", result.Error, delay.TotalSeconds);
+            var delay = result.TooManyAttempts ? TooManyAttemptsCooldown : result.RateLimited ? RateLimitCooldown : backoff;
+
+            if (result.TooManyAttempts)
+                _logger.LogError(
+                    "Dhan TOTP login is being rejected as 'too many attempts' ({Error}). This almost always means this server's clock is out of sync with real time - TOTP codes are only valid for a ~30-second window. Check the container/host clock (e.g. `date -u`) against real UTC time before this next attempt. Waiting {Minutes} minute(s) rather than retrying sooner, since a fast retry only re-triggers the same lockout if the clock is genuinely skewed.",
+                    result.Error, delay.TotalMinutes);
+            else
+                _logger.LogWarning("Dhan TOTP auto-login failed: {Error} - retrying in {Seconds}s.", result.Error, delay.TotalSeconds);
 
             if (!await DelayAsync(delay, stoppingToken)) return null;
-            backoff = result.RateLimited ? RetryBackoffInitial : Min(backoff * 2, RetryBackoffMax);
+            backoff = result.RateLimited || result.TooManyAttempts ? RetryBackoffInitial : Min(backoff * 2, RetryBackoffMax);
         }
 
         return null;

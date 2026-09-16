@@ -3,7 +3,7 @@ using Microsoft.Extensions.Options;
 
 namespace OptionAnalytics.Server.Dhan;
 
-public readonly record struct DhanTotpLoginResult(bool Success, DateTimeOffset? ExpiresUtc, string? Error, bool RateLimited = false);
+public readonly record struct DhanTotpLoginResult(bool Success, DateTimeOffset? ExpiresUtc, string? Error, bool RateLimited = false, bool TooManyAttempts = false);
 
 /// <summary>
 /// Mints a fresh Dhan access token with no browser and no human involved: computes the current
@@ -68,8 +68,9 @@ public sealed class DhanTotpAuthService
                 // therefore DiagnosticsController) rather than flattened to the status code alone -
                 // redacted first, since the request URL carried the pin/totp as query parameters and
                 // an error body that echoes the request back would otherwise leak them.
+                var (rateLimited, tooManyAttempts) = ClassifyThrottle(body);
                 return new DhanTotpLoginResult(false, null,
-                    $"Dhan rejected the TOTP login (HTTP {(int)response.StatusCode}): {Redact(Truncate(body), _options.Pin, totp)}");
+                    $"Dhan rejected the TOTP login (HTTP {(int)response.StatusCode}): {Redact(Truncate(body), _options.Pin, totp)}", rateLimited, tooManyAttempts);
             }
 
             using var document = JsonDocument.Parse(body);
@@ -85,10 +86,9 @@ public sealed class DhanTotpAuthService
                 // DhanTotpAutoRenewalHostedService) can wait out Dhan's own cooldown instead of
                 // retrying every few seconds and re-triggering the same limit forever.
                 var message = root.TryGetProperty("message", out var m) ? m.GetString() : null;
-                var rateLimited = message?.Contains("every", StringComparison.OrdinalIgnoreCase) == true
-                    && message.Contains("minute", StringComparison.OrdinalIgnoreCase);
+                var (rateLimited, tooManyAttempts) = ClassifyThrottle(message);
 
-                return new DhanTotpLoginResult(false, null, message ?? "Dhan's TOTP login response contained no accessToken.", rateLimited);
+                return new DhanTotpLoginResult(false, null, message ?? "Dhan's TOTP login response contained no accessToken.", rateLimited, tooManyAttempts);
             }
 
             var clientId = root.TryGetProperty("dhanClientId", out var cid) ? cid.GetString() : null;
@@ -117,6 +117,27 @@ public sealed class DhanTotpAuthService
             System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal, out var parsed)
             ? parsed
             : null;
+    }
+
+    /// <summary>Two DISTINCT Dhan throttle responses need two different cooldowns, not one:
+    ///   - RateLimited: the plain, well-known "Token can be generated once every 2 minutes" throttle
+    ///     on generateAccessToken itself - always exactly 2 minutes, regardless of cause.
+    ///   - TooManyAttempts: Dhan's own account-level lockout (seen in the wild as
+    ///     "[RS-0060] Too many requests, please try again after some time") after repeated INVALID
+    ///     TOTP submissions - almost always caused by the calling server's clock being out of sync
+    ///     with real time (TOTP codes are only valid for a ~30-second window), per Dhan's own user
+    ///     community's troubleshooting for this exact message. Its actual reset window is not
+    ///     documented and is very unlikely to be a fixed 2 minutes, so treating it the same as
+    ///     RateLimited above would very plausibly keep re-triggering it forever if the clock is
+    ///     genuinely skewed - see DhanTotpAutoRenewalHostedService's own much longer cooldown for
+    ///     this case, and its log line pointing directly at clock sync.</summary>
+    private static (bool RateLimited, bool TooManyAttempts) ClassifyThrottle(string? text)
+    {
+        if (string.IsNullOrEmpty(text)) return (false, false);
+        var rateLimited = text.Contains("every", StringComparison.OrdinalIgnoreCase)
+            && text.Contains("minute", StringComparison.OrdinalIgnoreCase);
+        var tooManyAttempts = !rateLimited && text.Contains("too many", StringComparison.OrdinalIgnoreCase);
+        return (rateLimited, tooManyAttempts);
     }
 
     private static string Truncate(string value) => value.Length <= 300 ? value : value[..300] + "...";
