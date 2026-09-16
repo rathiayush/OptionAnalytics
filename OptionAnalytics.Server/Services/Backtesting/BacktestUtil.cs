@@ -7,6 +7,22 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 /// by bar needs to know when its own trading day ends.</summary>
 public static class BacktestUtil
 {
+    /// <summary>Applies a strategy's own IBacktestStrategy.DefaultsForTimeframe overrides on top of
+    /// its plain Parameters - what GET .../strategies uses for both Backtrack and Expired Backtest
+    /// (same shape, one implementation) when the caller names a timeframe. Null (no timeframe named)
+    /// or an empty override set both return Parameters completely unchanged - no allocation, no
+    /// surprise reordering.</summary>
+    public static IReadOnlyList<BacktestParameterSpec> ApplyTimeframeDefaults(IBacktestStrategy strategy, int? timeframeMinutes)
+    {
+        if (timeframeMinutes is not { } tf) return strategy.Parameters;
+
+        var overrides = strategy.DefaultsForTimeframe(tf);
+        if (overrides.Count == 0) return strategy.Parameters;
+
+        return strategy.Parameters.Select(p => overrides.TryGetValue(p.Key, out var value) ? p with { Default = value } : p).ToList();
+    }
+
+
     /// <summary>Buckets native 1-minute closed bars into <paramref name="minutes"/>-minute OHLC
     /// bars - the server-side counterpart to the dashboard's client-side aggregateCandles, needed
     /// here because EMA9/21 (and anything else a strategy computes) has to be recomputed off the

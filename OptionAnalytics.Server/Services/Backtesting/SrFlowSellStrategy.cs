@@ -105,6 +105,25 @@ public sealed class SrFlowSellStrategy : IBacktestStrategy
     public IReadOnlyList<BacktestSignal> EntrySignals(BacktestStrategyContext context, IReadOnlyDictionary<string, decimal> parameters) =>
         Evaluate(context, parameters).Signals;
 
+    /// <summary>On top of the interface's own default slPoints/tpPoints scaling (see
+    /// IBacktestStrategy.DefaultsForTimeframe), this strategy's own two points-based parameters -
+    /// how decisively a close must clear the level, and how close a retest has to come back to it -
+    /// scale the same way: a coarser timeframe's bars move in bigger points, so a buffer/tolerance
+    /// tuned for 1-minute bars reads as too tight at 5 minutes. srTimeframeMinutes/srLookbackBars
+    /// are deliberately NOT scaled here - that channel is its own separate aggregation, independent
+    /// of the page's timeframe by design (see this class's own top-of-file doc comment).</summary>
+    public IReadOnlyDictionary<string, decimal> DefaultsForTimeframe(int timeframeMinutes)
+    {
+        var scale = OptionTradeSimulator.TimeframeScale(timeframeMinutes);
+        return new Dictionary<string, decimal>
+        {
+            ["slPoints"] = 10m * scale,
+            ["tpPoints"] = 20m * scale,
+            ["levelBreakBufferPoints"] = 10m * scale,
+            ["retestTolerancePoints"] = 10m * scale,
+        };
+    }
+
     private sealed record PendingBreakout(bool Bullish, decimal Level, int BarIndex);
 
     private (List<(DateTimeOffset Time, string Direction)> Entries, List<BacktestSignal> Signals) Evaluate(

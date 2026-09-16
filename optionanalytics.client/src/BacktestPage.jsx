@@ -347,12 +347,12 @@ export default function BacktestPage() {
   // is scoped to this page's own charts rather than a global registry.
   const chartSyncGroup = useChartSyncGroup()
 
-  // Which strategy key paramValues currently reflects - seeded from the RESTORED strategyKey so a
-  // page load that finds matching stored parameters keeps them, rather than the defaults-reset
-  // effect below immediately overwriting them before the user ever sees them. Only a genuine
-  // strategy SWITCH (this ref no longer matching strategy.key) resets to that strategy's own
-  // declared defaults.
-  const paramsForStrategyRef = useRef(strategyKey)
+  // Which (strategy key, timeframe) pair paramValues currently reflects - seeded from the RESTORED
+  // strategyKey/timeframe so a page load that finds matching stored parameters keeps them, rather
+  // than the defaults-reset effect below immediately overwriting them before the user ever sees
+  // them. Only a genuine strategy switch OR timeframe change (this ref no longer matching) resets
+  // to that (strategy, timeframe) pair's own declared defaults.
+  const paramsForStrategyRef = useRef(`${strategyKey}:${timeframe}`)
 
   // Which IST days to show. Purely a VIEW filter applied after the run - the backtest itself always
   // runs over the whole backfilled window, because a strategy needs the bars before a day to have
@@ -413,7 +413,15 @@ export default function BacktestPage() {
       })
       .catch((err) => console.error('Failed to load underlyings:', err))
 
-    fetch('/api/backtest/strategies')
+  }, [])
+
+  // Re-fetched whenever the page's own timeframe changes, not just once on mount: a strategy's
+  // Default for a points-based parameter (stop/target, and a couple of strategies' own extra
+  // buffer/tolerance points) can differ per timeframe (see IBacktestStrategy.DefaultsForTimeframe on
+  // the backend) - a 1-minute-tuned default reads as too tight once bars widen to 5 minutes. Passing
+  // ?timeframe= is what lets the backend apply those overrides before this even reaches the page.
+  useEffect(() => {
+    fetch(`/api/backtest/strategies?timeframe=${timeframe}`)
       .then((r) => r.json())
       .then((list) => {
         setStrategies(list ?? [])
@@ -423,20 +431,24 @@ export default function BacktestPage() {
         setStrategyKey((current) => (list?.some((s) => s.key === current) ? current : list?.[0]?.key ?? null))
       })
       .catch((err) => console.error('Failed to load backtest strategies:', err))
-  }, [])
+  }, [timeframe])
 
-  // Reset every parameter to the newly-picked strategy's own declared defaults - each strategy's
-  // parameters are independent (a different key set entirely), so values from the previous
-  // strategy would be meaningless carried over. Skipped when paramValues already belongs to this
-  // exact strategy (paramsForStrategyRef) - the case right after a page load that restored both a
-  // strategyKey and matching paramValues from storage, which must survive this effect's first run
-  // rather than being immediately overwritten by fresh defaults.
+  // Reset every parameter to the newly-picked strategy's own declared defaults (already timeframe-
+  // adjusted - see the fetch above) - each strategy's parameters are independent (a different key
+  // set entirely), so values from the previous strategy would be meaningless carried over, and a
+  // timeframe switch is treated the same way (paramsForStrategyRef keyed on BOTH), since its whole
+  // point is to start the form over from values suited to the newly-selected timeframe rather than
+  // silently leaving stale 1-minute-tuned numbers in place at 5 minutes. Skipped only when
+  // paramValues already belongs to this exact (strategy, timeframe) pair - the case right after a
+  // page load that restored both a strategyKey and matching paramValues from storage, which must
+  // survive this effect's first run rather than being immediately overwritten by fresh defaults.
   useEffect(() => {
     if (!strategy) return
-    if (paramsForStrategyRef.current === strategy.key) return
+    const key = `${strategy.key}:${timeframe}`
+    if (paramsForStrategyRef.current === key) return
     setParamValues(Object.fromEntries(strategy.parameters.map((p) => [p.key, p.default])))
-    paramsForStrategyRef.current = strategy.key
-  }, [strategy])
+    paramsForStrategyRef.current = key
+  }, [strategy, timeframe])
 
   // The signal table describes whichever strategy is selected - each strategy reports the signals
   // IT reasons about (see the backend's IBacktestStrategy.EntrySignals), so the table always
