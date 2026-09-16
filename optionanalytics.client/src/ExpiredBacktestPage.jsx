@@ -671,7 +671,7 @@ export default function ExpiredBacktestPage() {
                     {result.effectiveLookbackDays < lookbackDays && ` (your requested ${lookbackDays}-day lookback was capped to keep the window on this one contract)`}
                   </Text>
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    Each trade below is priced off the EXACT strike it entered at (see its own Strike column), tracked from a band of 13 strikes (6 either side of this reference) fetched around it - so a trade stays on the same contract from entry to exit even if the index has since moved, not necessarily this reference token's own bars above.
+                    Each trade below is priced off the EXACT strike it entered at (see its own Strike column), tracked from a band of {result.bandRadiusSteps * 2 + 1} strikes ({result.bandRadiusSteps} either side of this reference) fetched around it - so a trade stays on the same contract from entry to exit even if the index has since moved, not necessarily this reference token's own bars above.
                   </Text>
                   <Text type={ceMismatch ? 'warning' : 'secondary'} style={{ fontSize: 12 }}>
                     CE reference strike - Dhan resolved: {result.ceResolvedStrike != null ? fmtPrice(result.ceResolvedStrike) : 'not reported'}, this app expected: ~{fmtPrice(result.ceExpectedStrike)}
