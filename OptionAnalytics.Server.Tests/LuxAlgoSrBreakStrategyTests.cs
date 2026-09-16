@@ -25,7 +25,9 @@ public sealed class LuxAlgoSrBreakStrategyTests
     private static List<Candle> BullishFixture() =>
         new[] { 90m, 95m, 100m, 95m, 90m, 92m, 105m, 110m, 115m }.Select((p, i) => Bar(i, p)).ToList();
 
-    private static BacktestStrategyContext Context(IReadOnlyList<Candle> spotBars, IReadOnlyList<CandleWithVolume>? volumeBars = null) => new()
+    private static BacktestStrategyContext Context(
+        IReadOnlyList<Candle> spotBars, IReadOnlyList<CandleWithVolume>? volumeBars = null,
+        IReadOnlyList<ObvPoint>? obvCe = null, IReadOnlyList<ObvPoint>? obvPe = null) => new()
     {
         Underlying = "NIFTY",
         TimeframeMinutes = 1,
@@ -35,8 +37,8 @@ public sealed class LuxAlgoSrBreakStrategyTests
         SpotVolumeBarsOneMinute = volumeBars ?? Array.Empty<CandleWithVolume>(),
         ConfluenceSignalsAscending = Array.Empty<BacktestSignal>(),
         AllSignals = Array.Empty<BacktestSignal>(),
-        ObvCeSeries = Array.Empty<ObvPoint>(),
-        ObvPeSeries = Array.Empty<ObvPoint>(),
+        ObvCeSeries = obvCe ?? Array.Empty<ObvPoint>(),
+        ObvPeSeries = obvPe ?? Array.Empty<ObvPoint>(),
         CdvCeSeries = Array.Empty<ObvPoint>(),
         CdvPeSeries = Array.Empty<ObvPoint>(),
         GetOptionBars = (_, _) => Array.Empty<Candle>(),
@@ -66,6 +68,10 @@ public sealed class LuxAlgoSrBreakStrategyTests
             ["volumeShortEma"] = 5,
             ["volumeLongEma"] = 10,
             ["volumeThreshold"] = 20,
+            ["requireFlowConfirmation"] = 0,
+            ["flowLookbackBars"] = 5,
+            ["minFlowRisePercent"] = 0,
+            ["flowMode"] = FlowConfirmation.ModeEither,
         };
         overrides?.Invoke(p);
         return p;
@@ -129,5 +135,33 @@ public sealed class LuxAlgoSrBreakStrategyTests
 
         Assert.DoesNotContain(signals, s => s.Kind == "Entry");
         Assert.Contains(signals, s => s.Kind == "Rejected" && s.Direction == "Bearish" && s.Summary.Contains("not ready"));
+    }
+
+    [Fact]
+    public void RequireFlowConfirmation_OffByDefault_EntersRegardlessOfFlow()
+    {
+        var bars = BearishFixture();
+        // PE dominant, not CE - would FAIL a bearish-favoring flow check if the filter were on
+        // (bearish wants PE over CE, so this is deliberately the WRONG side to prove the default-off
+        // filter doesn't care).
+        var ce = new[] { new ObvPoint(T0.AddMinutes(4), 500), new ObvPoint(T0.AddMinutes(6), 500) };
+        var pe = new[] { new ObvPoint(T0.AddMinutes(4), 50), new ObvPoint(T0.AddMinutes(6), 60) };
+
+        var signals = new LuxAlgoSrBreakStrategy().EntrySignals(Context(bars, obvCe: ce, obvPe: pe), Parameters());
+
+        Assert.Contains(signals, s => s.Kind == "Entry" && s.Direction == "Bearish");
+    }
+
+    [Fact]
+    public void RequireFlowConfirmation_On_RejectsEntry_WhenFlowDoesNotFavorTheDirection()
+    {
+        var bars = BearishFixture();
+        var ce = new[] { new ObvPoint(T0.AddMinutes(4), 500), new ObvPoint(T0.AddMinutes(6), 500) };
+        var pe = new[] { new ObvPoint(T0.AddMinutes(4), 50), new ObvPoint(T0.AddMinutes(6), 60) };
+
+        var signals = new LuxAlgoSrBreakStrategy().EntrySignals(Context(bars, obvCe: ce, obvPe: pe), Parameters(p => p["requireFlowConfirmation"] = 1));
+
+        Assert.DoesNotContain(signals, s => s.Kind == "Entry");
+        Assert.Contains(signals, s => s.Kind == "Rejected" && s.Direction == "Bearish" && s.Summary.Contains("flow does not favor"));
     }
 }
