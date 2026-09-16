@@ -49,10 +49,10 @@ namespace OptionAnalytics.Server.Services;
 /// rolling-option endpoint's own documented "strike" enum tops out at "ATM+-10" (see
 /// DhanRollingOptionDataService's own doc comment), so ATM+-10 is the actual ceiling this data
 /// source can ever supply, not a cost/latency choice this app is free to widen further. This is
-/// real, not synthetic/empty flow data, but it is real work: 42 separate rolling-option fetches
-/// instead of the usual 26, each individually chunked/paced like every other token here - a run
-/// using this specific strategy takes noticeably longer and carries more exposure to Dhan's own
-/// rate limit than any other strategy this app runs.
+/// real, not synthetic/empty flow data: 42 separate rolling-option fetches, each individually
+/// chunked/paced like every other token here (the same 42 an ordinary run now also pays, per
+/// StrikeBandSteps's own doc comment - only this strategy's own extra OBV/CDV reconstruction work on
+/// top of that fetch is unique to it), plus the real time that reconstruction itself takes.
 ///
 /// GetOptionBars/GetOptionBarsOneMinute below DO use the actual "strike" value a strategy passes in
 /// (an ABSOLUTE price - OptionTradeSimulator computes it as "ATM at the signal's own time +-
@@ -147,25 +147,29 @@ public sealed class ExpiredOptionBacktestService
     /// 56200's own price, whatever ATM does later" - the only way to get that with this API is to
     /// fetch a wide enough range of tokens that, whatever day the index has since drifted to, SOME
     /// token in the band still resolves to that exact absolute strike, then stitch those matching
-    /// bars together (see BuildFixedStrikeSeries). 6 either side (13 tokens total per side) is what
-    /// the user confirmed after being told the real cost: StrikeBandSteps*2+1 separate rolling-
-    /// option fetches per side instead of 1, each individually chunked/paced exactly like a single
-    /// fetch is today - a real run takes noticeably longer and carries more exposure to Dhan's own
-    /// rate limit, which the user explicitly accepted ("even it takes few min lets do it").</summary>
-    private const int StrikeBandSteps = 6;
+    /// bars together (see BuildFixedStrikeSeries). Originally 6 either side, raised to match
+    /// FlowChainRadius (10, itself Dhan's own hard ceiling - see that constant's own doc comment) at
+    /// the user's own later, explicit request for more headroom against index drift after a real run
+    /// showed a reference-strike mismatch - the extra cost (same as FlowChainRadius's own: 21 tokens
+    /// per side, 42 total instead of 13/26) is accepted for every ordinary run now, not just the
+    /// flow-chain one.</summary>
+    private const int StrikeBandSteps = 10;
 
     /// <summary>Radius (steps either side of pure ATM) for the WIDE, exact-parity flow-chain band
     /// EmaCrossAtmFlowStrategy needs when it runs here, since OBV/CDV are a delta-weighted SUM
     /// across every tracked strike (see CdvUnderlyingState.GetObvSeries's own doc comment: "summed
     /// across every tracked strike"), not one leg's own series the way GetOptionBars/AtmCeBars are.
-    /// 10 either side (21 tokens per side, 42 total instead of the usual 13/26) is the actual CEILING
-    /// this data source can supply, not a cost/latency choice: Dhan's rolling-option endpoint's own
-    /// documented "strike" enum tops out at "ATM+-10" (see DhanRollingOptionDataService's own doc
-    /// comment), narrower than live CdvHostedService's own tracked ATM+-16 window
-    /// (CdvHostedService.StrikeRange) - so this is the closest this endpoint can ever get to genuine
-    /// parity with what Backtrack itself would show, confirmed with the user as worth the real cost
-    /// (noticeably slower and more exposed to Dhan's rate limit than any other strategy this app
-    /// runs) even knowing it stops short of the live window's own full radius.
+    /// 10 either side (21 tokens per side, 42 total) is the actual CEILING this data source can
+    /// supply, not a cost/latency choice: Dhan's rolling-option endpoint's own documented "strike"
+    /// enum tops out at "ATM+-10" (see DhanRollingOptionDataService's own doc comment), narrower than
+    /// live CdvHostedService's own tracked ATM+-16 window (CdvHostedService.StrikeRange) - so this is
+    /// the closest this endpoint can ever get to genuine parity with what Backtrack itself would show,
+    /// confirmed with the user as worth the real cost (noticeably slower and more exposed to Dhan's
+    /// rate limit than any other strategy this app runs) even knowing it stops short of the live
+    /// window's own full radius. StrikeBandSteps (an ordinary run's own band radius) was later raised
+    /// to this SAME ceiling too - see its own doc comment - so an ordinary run and a flow-chain one
+    /// now cost the same per side; only the band's CENTER still differs (pure ATM here, this run's own
+    /// otmSteps for an ordinary run - see bandCenterSteps in RunAsync).
     ///
     /// RunAsync fetches only this ONE band when the strategy needs it, reused for pricing too -
     /// never a second, separate fetch just for the traded strike.</summary>
@@ -403,10 +407,10 @@ public sealed class ExpiredOptionBacktestService
         // requireFlowConfirmation parameter is on (off by default - see each one's own FlowCheck),
         // so this run's own parameters decide it rather than the strategy key alone. includeObvCdv
         // opts ANY OTHER strategy into the same fetch purely so the page can plot the OBV/CDV chart
-        // alongside a run, for the user to visually check those series are behaving sensibly. Off
-        // by default otherwise: it is real extra work (42 rolling-option fetches instead of the
-        // usual 26, per FlowChainRadius' own doc comment) and extra exposure to Dhan's rate limit,
-        // so a run that does not need or ask for it does not pay for it.
+        // alongside a run, for the user to visually check those series are behaving sensibly. Off by
+        // default otherwise: even though StrikeBandSteps==FlowChainRadius now (see StrikeBandSteps'
+        // own doc comment), this path also pays for the OBV/CDV reconstruction itself, so a run that
+        // does not need or ask for it still does not pay for that extra work.
         var needsFlowChain = strategyKey == "sr-flow-sell"
             || ((strategyKey == "ema-crossover-retest" || strategyKey == "luxalgo-sr-break" || strategyKey == "sr-channel" || strategyKey == "regime-adaptive") && mergedParameters.GetValueOrDefault("requireFlowConfirmation", 0m) >= 0.5m)
             || includeObvCdv;
@@ -512,7 +516,7 @@ public sealed class ExpiredOptionBacktestService
             // page should show as "how much of the single target contract's own history this run
             // used."
             spotBars1m.Count, ceUsed.Count, peUsed.Count, ceSplices, peSplices,
-            ceResolvedStrike, peResolvedStrike, ceExpectedStrike, peExpectedStrike, effectiveLookbackDays,
+            ceResolvedStrike, peResolvedStrike, ceExpectedStrike, peExpectedStrike, bandRadius, effectiveLookbackDays,
             spotChartCandlesTf, spotVolumeChartBarsTf, spotVwapSeriesTf,
             obvCeSeriesTf, obvPeSeriesTf, cdvCeSeriesTf, cdvPeSeriesTf);
     }

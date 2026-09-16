@@ -29,6 +29,12 @@ namespace OptionAnalytics.Server.Models;
 /// (e.g. a "near-ATM" option priced in the thousands) rather than that premium being a genuine, just
 /// surprising, price.
 ///
+/// BandRadiusSteps is how many relative-strike tokens either side of the band's own center this run
+/// actually fetched (ExpiredOptionBacktestService.StrikeBandSteps for an ordinary run, FlowChainRadius
+/// for one needing the wide flow chain - see needsFlowChain) - carried through so the page can state
+/// the real band width it used directly, rather than a copy of the backend constant hardcoded into the
+/// page's own text that would silently go stale the next time that constant changes.
+///
 /// SpotChartBars is the underlying's own spot candle series for the page's chart - deliberately
 /// WIDER than [fromDay,toDay] (see ExpiredOptionBacktestService.ChartPaddingDays), a few days of
 /// spot history on each side of the actual lookback window purely so a signal sitting right at the
@@ -65,6 +71,7 @@ public sealed record ExpiredBacktestResult(
     decimal? PeResolvedStrike,
     decimal CeExpectedStrike,
     decimal PeExpectedStrike,
+    int BandRadiusSteps,
     int EffectiveLookbackDays,
     IReadOnlyList<Candle> SpotChartBars,
     IReadOnlyList<CandleWithVolume> SpotVolumeChartBars,
@@ -76,7 +83,7 @@ public sealed record ExpiredBacktestResult(
 {
     public static ExpiredBacktestResult Failed(string error) =>
         new(false, error, Array.Empty<BacktestTrade>(), Array.Empty<BacktestSignal>(), 0, "", "", null, null, 0, 0, 0,
-            Array.Empty<PossibleSplice>(), Array.Empty<PossibleSplice>(), null, null, 0, 0, 0, Array.Empty<Candle>(),
+            Array.Empty<PossibleSplice>(), Array.Empty<PossibleSplice>(), null, null, 0, 0, 0, 0, Array.Empty<Candle>(),
             Array.Empty<CandleWithVolume>(), Array.Empty<ObvPoint>(), Array.Empty<ObvPoint>(), Array.Empty<ObvPoint>(),
             Array.Empty<ObvPoint>(), Array.Empty<ObvPoint>());
 }
