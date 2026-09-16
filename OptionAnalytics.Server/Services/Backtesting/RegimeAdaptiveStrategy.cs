@@ -38,13 +38,21 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 ///     (&gt;=<c>confirm3SlopeMinPercent</c>) + that 3-minute bar's own candle closing in the trend's
 ///     direction (close vs open) - the flowchart's own "confirmation candle closes bullish."
 ///   - 1M ENTRY: the 1-minute EMA-fast/EMA-mid pair (<c>entry1EmaFast</c>/<c>entry1EmaSlow</c>)
-///     crossing back in the trend's favor (a pullback that just got rejected), plus its own
-///     ADX(&gt;=<c>entry1AdxMin</c>)/slope(&gt;=<c>entry1SlopeMinPercent</c>) gates and an RSI-neutral
-///     check (<c>rsiNeutralLow</c>-<c>rsiNeutralHigh</c>) so the entry isn't sold into what might
-///     already be a breakout.
-/// All four stages have to agree on the SAME bar for an entry to fire - a real confluence
-/// requirement, so entries are expected to be rare (this is intentional, not a bug: waiting for a
-/// genuine multi-timeframe lineup is the whole point of a cascade over a single-timeframe score).
+///     crossing back in the trend's favor (a pullback that just got rejected) at any point within
+///     the last <c>entry1CrossWithinBars</c> 1-minute bars - not necessarily the exact same bar as
+///     the 5M/3M gates. This window exists because 5M/3M/15M are LEVEL conditions (true for their
+///     whole bucket once it closes) while the 1-minute cross is a single-bar EDGE event; without
+///     look-ahead bias (see the alignment helpers below), the 3-minute confirmation bar closes up to
+///     ~3 minutes after the 1-minute EMA cross itself, so requiring both on the exact same bar would
+///     make the cascade nearly impossible to complete even in genuine trends - real live trading
+///     never gets that razor-exact a coincidence across three closing clocks either. Once the window
+///     condition is met the entry still needs its own ADX(&gt;=<c>entry1AdxMin</c>)/slope
+///     (&gt;=<c>entry1SlopeMinPercent</c>) gates and an RSI-neutral check
+///     (<c>rsiNeutralLow</c>-<c>rsiNeutralHigh</c>) so the entry isn't sold into what might already
+///     be a breakout.
+/// All four stages have to agree by the time the entry fires - a real confluence requirement, so
+/// entries are expected to be rare (this is intentional, not a bug: waiting for a genuine
+/// multi-timeframe lineup is the whole point of a cascade over a single-timeframe score).
 ///
 /// RANGE STRATEGY: unchanged in mechanism from the single-timeframe version - fades the extremes of
 /// a VWAP+-ATR band on the PAGE's own timeframe (<c>rangeAtrMultiple</c> x ATR either side of VWAP),
@@ -79,11 +87,15 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 /// for the Range fade), not baked into the 15-minute regime score itself, so a bar that was calm when
 /// the 15-minute regime last updated but has since gone volatile is still caught.
 ///
-/// OPTION SIDE, ORDER FLOW, and everything this class still deliberately does NOT do (true
-/// simultaneous Iron Condor selling, India VIX, position sizing/daily-loss/consecutive-SL state,
-/// regime-segmented performance reporting, OI/Volume strike screening) are UNCHANGED from the
-/// single-timeframe version - see the CE/PE direction note below, still worth a second look given
-/// real money is involved.
+/// No CDV/OBV order-flow filter - an earlier version of this strategy had one ON by default (per an
+/// explicit instruction at the time), later explicitly removed at a later, equally explicit
+/// instruction, so this is price action + the checks above only, nothing else gating an entry.
+///
+/// OPTION SIDE and everything this class still deliberately does NOT do (true simultaneous Iron
+/// Condor selling, India VIX, position sizing/daily-loss/consecutive-SL state, regime-segmented
+/// performance reporting, OI/Volume strike screening) are UNCHANGED from the single-timeframe
+/// version - see the CE/PE direction note below, still worth a second look given real money is
+/// involved.
 ///
 /// Bullish -&gt; sell PE, Bearish -&gt; sell CE is OptionTradeSimulator.Run's own existing Sell
 /// convention (isCall = isSell ? !isBullish : isBullish), the standard defined-direction credit
@@ -95,7 +107,7 @@ public sealed class RegimeAdaptiveStrategy : IBacktestStrategy
 {
     public string Key => "regime-adaptive";
     public string Name => "Regime-Adaptive Option Selling (15M->5M->3M->1M Cascade)";
-    public string Description => "Identifies Trending, Choppy, and Volatile conditions and trades each differently: a 15M->5M->3M->1M multi-timeframe cascade sells the trend's own direction; a VWAP+-ATR range fade (RSI-neutral gated) sells premium at the edges of a genuinely choppy range; and a relative volatility spike (ATR expansion, an oversized candle, or a gap - not just a fixed ATR% cutoff) suspends new entries from either path until it settles. Sells options by default; CDV/OBV order-flow confirmation is ON by default here.";
+    public string Description => "Identifies Trending, Choppy, and Volatile conditions and trades each differently: a 15M->5M->3M->1M multi-timeframe cascade sells the trend's own direction; a VWAP+-ATR range fade (RSI-neutral gated) sells premium at the edges of a genuinely choppy range; and a relative volatility spike (ATR expansion, an oversized candle, or a gap - not just a fixed ATR% cutoff) suspends new entries from either path until it settles. Sells options by default. Price action only - no CDV/OBV order-flow filter.";
 
     private const decimal DirectionBoth = 0;
     private const decimal DirectionLongOnly = 1;
@@ -152,6 +164,7 @@ public sealed class RegimeAdaptiveStrategy : IBacktestStrategy
         new BacktestParameterSpec("entry1EmaSlow", "1-min entry EMA slow (bars)", Default: 13, Min: 3, Max: 200, Step: 1),
         new BacktestParameterSpec("entry1AdxMin", "1-min ADX must be at least", Default: 22, Min: 0, Max: 80, Step: 1),
         new BacktestParameterSpec("entry1SlopeMinPercent", "1-min EMA slope must be at least (%)", Default: 0.015m, Min: 0, Max: 5, Step: 0.005m),
+        new BacktestParameterSpec("entry1CrossWithinBars", "1-min EMA cross must have happened within this many bars (not necessarily the exact bar)", Default: 5, Min: 1, Max: 30, Step: 1),
 
         // ---- shared across every cascade stage ----
         new BacktestParameterSpec("cascadeSlopeLookbackBars", "EMA slope measured over (bars, at each stage's own timeframe)", Default: 3, Min: 1, Max: 50, Step: 1),
@@ -177,17 +190,6 @@ public sealed class RegimeAdaptiveStrategy : IBacktestStrategy
         // ---- Choppy labeling only (does not change routing - see this class's own doc comment) ----
         new BacktestParameterSpec("chopAdxMax", "15-min ADX at/below this, with a flat slope, reads as Choppy", Default: 20, Min: 0, Max: 60, Step: 1),
         new BacktestParameterSpec("chopFlatSlopePercent", "15-min EMA slope within +- this reads as flat (Choppy)", Default: 0.02m, Min: 0, Max: 1, Step: 0.01m),
-
-        // ON by default (every other strategy here defaults this off) - explicit instruction for
-        // this strategy specifically.
-        new BacktestParameterSpec("requireFlowConfirmation", "Require order flow (OBV/CDV) to confirm", Default: FlagOn, Min: FlagOff, Max: FlagOn, Step: 1, Options: new[]
-        {
-            new BacktestParameterOption(FlagOff, "No - price action only (turn off only if flow data isn't available)"),
-            new BacktestParameterOption(FlagOn, "Yes - flow must favor + rise toward the entry"),
-        }),
-        FlowConfirmation.LookbackParameter(),
-        FlowConfirmation.MinRisePercentParameter(),
-        FlowConfirmation.ModeParameter(),
     };
 
     /// <summary>Only slPoints/tpPoints and the two page-timeframe ATR bands scale with the page's
@@ -242,6 +244,7 @@ public sealed class RegimeAdaptiveStrategy : IBacktestStrategy
         var entry1EmaSlow = Math.Max(3, (int)parameters.GetValueOrDefault("entry1EmaSlow", 13));
         var entry1AdxMin = parameters.GetValueOrDefault("entry1AdxMin", 22m);
         var entry1SlopeMin = parameters.GetValueOrDefault("entry1SlopeMinPercent", 0.015m);
+        var entry1CrossWithinBars = Math.Max(1, (int)parameters.GetValueOrDefault("entry1CrossWithinBars", 5));
 
         var slopeLookback = Math.Max(1, (int)parameters.GetValueOrDefault("cascadeSlopeLookbackBars", 3));
         var adxPeriod = Math.Max(2, (int)parameters.GetValueOrDefault("cascadeAdxPeriod", 14));
@@ -261,12 +264,6 @@ public sealed class RegimeAdaptiveStrategy : IBacktestStrategy
         var chopAdxMax = parameters.GetValueOrDefault("chopAdxMax", 20m);
         var chopFlatSlopePercent = parameters.GetValueOrDefault("chopFlatSlopePercent", 0.02m);
 
-        var requireFlowConfirmation = parameters.GetValueOrDefault("requireFlowConfirmation", FlagOn) >= (FlagOff + FlagOn) / 2;
-        var flowLookback = (int)parameters.GetValueOrDefault("flowLookbackBars", 5);
-        var minFlowRisePercent = parameters.GetValueOrDefault("minFlowRisePercent", 0m);
-        var flowMode = parameters.GetValueOrDefault("flowMode", FlowConfirmation.ModeEither);
-        var flowWindow = TimeSpan.FromMinutes((double)Math.Max(1, flowLookback) * Math.Max(1, context.TimeframeMinutes));
-
         var entries = new List<(DateTimeOffset Time, string Direction)>();
         var signals = new List<BacktestSignal>();
 
@@ -278,19 +275,6 @@ public sealed class RegimeAdaptiveStrategy : IBacktestStrategy
         var bars5 = BacktestUtil.AggregateCandles(oneMin, 5);
         var bars15 = BacktestUtil.AggregateCandles(oneMin, 15);
         if (bars15.Count < regime15EmaSlow + slopeLookback + 2) return (entries, signals);
-
-        (bool Ok, string Reason) FlowCheck(bool bullish, DateTimeOffset at)
-        {
-            if (!requireFlowConfirmation) return (true, "");
-            var obvFavors = FlowConfirmation.Favors(context.ObvCeSeries, context.ObvPeSeries, at, bullish, flowWindow, minFlowRisePercent);
-            var cdvFavors = FlowConfirmation.Favors(context.CdvCeSeries, context.CdvPeSeries, at, bullish, flowWindow, minFlowRisePercent);
-            var confirmed = FlowConfirmation.Confirms(flowMode, obvFavors, cdvFavors);
-            var riseRequirement = minFlowRisePercent > 0 ? $"risen at least {minFlowRisePercent:0.##}%" : "risen at all";
-            var reason = confirmed
-                ? $"flow favors {(bullish ? "CE over PE" : "PE over CE")} and has {riseRequirement} over the last {flowLookback} bar(s) ({FlowConfirmation.ModeLabel(flowMode)})"
-                : $"flow does not favor {(bullish ? "CE over PE" : "PE over CE")} and {riseRequirement} over the last {flowLookback} bar(s) as required ({FlowConfirmation.ModeLabel(flowMode)}; OBV {(obvFavors ? "confirms it" : "does not")}, CDV {(cdvFavors ? "confirms it" : "does not")})";
-            return (confirmed, reason);
-        }
 
         void EmitAt(DateTimeOffset time, bool bullish, string summary, decimal? atrPercentHere, string? volatileReason)
         {
@@ -310,21 +294,17 @@ public sealed class RegimeAdaptiveStrategy : IBacktestStrategy
                 signals.Add(new BacktestSignal(context.Underlying, time, "Rejected", dir, $"{summary} - skipped, shorts only"));
             else if (!bullish && !takeShorts)
                 signals.Add(new BacktestSignal(context.Underlying, time, "Rejected", dir, $"{summary} - skipped, longs only"));
-            else if (FlowCheck(bullish, time) is (false, var rejectReason))
-                signals.Add(new BacktestSignal(context.Underlying, time, "Rejected", dir, $"{summary} - but {rejectReason}"));
             else
             {
-                var flowReason = requireFlowConfirmation ? FlowCheck(bullish, time).Reason : null;
-                var extras = string.Join("", new[] { flowReason is { Length: > 0 } ? $", and {flowReason}" : null, sizingNote }.Where(e => !string.IsNullOrEmpty(e)));
-                signals.Add(new BacktestSignal(context.Underlying, time, "Entry", dir, $"{summary}{extras}"));
+                signals.Add(new BacktestSignal(context.Underlying, time, "Entry", dir, $"{summary}{sizingNote}"));
                 entries.Add((time, dir));
             }
         }
 
-        var vwap1m = AlignToTime(VwapCalculator.ComputeSeries(context.SpotVolumeBarsOneMinute), oneMin);
-        var vwap15 = AlignToTime(VwapCalculator.ComputeSeries(context.SpotVolumeBarsOneMinute), bars15);
-        var vwap5 = AlignToTime(VwapCalculator.ComputeSeries(context.SpotVolumeBarsOneMinute), bars5);
-        var vwapPage = AlignToTime(VwapCalculator.ComputeSeries(context.SpotVolumeBarsOneMinute), pageBars);
+        var vwapSeries1m = VwapCalculator.ComputeSeries(context.SpotVolumeBarsOneMinute);
+        var vwap15 = AlignToTime(vwapSeries1m, 1, bars15, 15);
+        var vwap5 = AlignToTime(vwapSeries1m, 1, bars5, 5);
+        var vwapPage = AlignToTime(vwapSeries1m, 1, pageBars, context.TimeframeMinutes);
 
         // ---- 15-minute regime ----
         var ema15Fast = EmaCrossoverDetector.EmaSeries(bars15, regime15EmaFast);
@@ -356,8 +336,8 @@ public sealed class RegimeAdaptiveStrategy : IBacktestStrategy
         var rsi1 = ToQuotes(oneMin).GetRsi(rsiPeriod).Select(r => (decimal?)r.Rsi).ToList();
 
         // ---- 15-minute regime direction + score ----
-        var stack5OnBars15Bullish = AlignStepToTime(bars5, stack5Bullish, bars15, false);
-        var stack5OnBars15Bearish = AlignStepToTime(bars5, stack5Bearish, bars15, false);
+        var stack5OnBars15Bullish = AlignStepToTime(bars5, stack5Bullish, 5, bars15, 15, false);
+        var stack5OnBars15Bearish = AlignStepToTime(bars5, stack5Bearish, 5, bars15, 15, false);
         var regime15Direction = new string?[bars15.Count];
         var regime15Score = new int[bars15.Count];
         for (var i = slopeLookback; i < bars15.Count; i++)
@@ -389,27 +369,53 @@ public sealed class RegimeAdaptiveStrategy : IBacktestStrategy
         var volatileReasonPage = ComputeVolatileReasons(pageBars, atrPage, atrPercentPage, atrExtremePercent, atrAverageLookbackBars, atrExpansionRatio, largeCandleRatio, gapAtrMultiple);
 
         // ==== TREND CASCADE - native 1-minute entries, gated by every stage above agreeing ====
-        var regime15OnOneMin = AlignStepToTime(bars15, regime15Direction, oneMin, (string?)null);
-        var regime15ScoreOnOneMin = AlignStepToTime(bars15, regime15Score, oneMin, 0);
-        var setup5OkOnOneMinBullish = AlignStepToTime(bars5, setup5OkBullish, oneMin, false);
-        var setup5OkOnOneMinBearish = AlignStepToTime(bars5, setup5OkBearish, oneMin, false);
-        var confirm3OkOnOneMinBullish = AlignStepToTime(bars3, confirm3OkBullish, oneMin, false);
-        var confirm3OkOnOneMinBearish = AlignStepToTime(bars3, confirm3OkBearish, oneMin, false);
-        var atrPercentOnOneMin = AlignStepToTime(pageBars, atrPercentPage, oneMin, (decimal?)null);
-        var volatileReasonOnOneMin = AlignStepToTime(pageBars, volatileReasonPage, oneMin, (string?)null);
+        var regime15OnOneMin = AlignStepToTime(bars15, regime15Direction, 15, oneMin, 1, (string?)null);
+        var regime15ScoreOnOneMin = AlignStepToTime(bars15, regime15Score, 15, oneMin, 1, 0);
+        var setup5OkOnOneMinBullish = AlignStepToTime(bars5, setup5OkBullish, 5, oneMin, 1, false);
+        var setup5OkOnOneMinBearish = AlignStepToTime(bars5, setup5OkBearish, 5, oneMin, 1, false);
+        var confirm3OkOnOneMinBullish = AlignStepToTime(bars3, confirm3OkBullish, 3, oneMin, 1, false);
+        var confirm3OkOnOneMinBearish = AlignStepToTime(bars3, confirm3OkBearish, 3, oneMin, 1, false);
+        var atrPercentOnOneMin = AlignStepToTime(pageBars, atrPercentPage, context.TimeframeMinutes, oneMin, 1, (decimal?)null);
+        var volatileReasonOnOneMin = AlignStepToTime(pageBars, volatileReasonPage, context.TimeframeMinutes, oneMin, 1, (string?)null);
+
+        bool CrossedUpRecently(int idx)
+        {
+            for (var k = 0; k <= entry1CrossWithinBars; k++)
+            {
+                var j = idx - k;
+                if (j < 1) return false;
+                if (ema1Fast[j] is not { } cf || ema1Slow[j] is not { } cs) continue;
+                if (ema1Fast[j - 1] is not { } pf || ema1Slow[j - 1] is not { } ps) continue;
+                if (pf <= ps && cf > cs) return true;
+            }
+            return false;
+        }
+
+        bool CrossedDownRecently(int idx)
+        {
+            for (var k = 0; k <= entry1CrossWithinBars; k++)
+            {
+                var j = idx - k;
+                if (j < 1) return false;
+                if (ema1Fast[j] is not { } cf || ema1Slow[j] is not { } cs) continue;
+                if (ema1Fast[j - 1] is not { } pf || ema1Slow[j - 1] is not { } ps) continue;
+                if (pf >= ps && cf < cs) return true;
+            }
+            return false;
+        }
 
         for (var i = Math.Max(1, slopeLookback); i < oneMin.Count; i++)
         {
             if (regime15OnOneMin[i] is not { } dir) continue;
-            if (ema1Fast[i] is not { } f1 || ema1Fast[i - 1] is not { } prevF1) continue;
-            if (ema1Slow[i] is not { } s1 || ema1Slow[i - 1] is not { } prevS1) continue;
+            if (ema1Fast[i] is not { } f1) continue;
+            if (ema1Slow[i] is not { } s1) continue;
             if (adx1[i] is not { } a1 || rsi1[i] is not { } r1) continue;
             if (Slope(ema1Fast, i, slopeLookback) is not { } sl1) continue;
 
             var bullish = dir == "Bullish";
             var setupOk = bullish ? setup5OkOnOneMinBullish[i] : setup5OkOnOneMinBearish[i];
             var confirmOk = bullish ? confirm3OkOnOneMinBullish[i] : confirm3OkOnOneMinBearish[i];
-            var pullback = bullish ? prevF1 <= prevS1 && f1 > s1 : prevF1 >= prevS1 && f1 < s1;
+            var pullback = bullish ? f1 > s1 && CrossedUpRecently(i) : f1 < s1 && CrossedDownRecently(i);
             var adxOk = a1 >= entry1AdxMin;
             var slopeOk = bullish ? sl1 >= entry1SlopeMin : sl1 <= -entry1SlopeMin;
             var rsiOk = r1 > rsiNeutralLow && r1 < rsiNeutralHigh;
@@ -423,13 +429,13 @@ public sealed class RegimeAdaptiveStrategy : IBacktestStrategy
         }
 
         // ==== RANGE FADE - page-timeframe VWAP+-ATR band, only when the 15M regime is NOT trending ====
-        var regime15ScoreOnPage = AlignStepToTime(bars15, regime15Score, pageBars, 0);
+        var regime15ScoreOnPage = AlignStepToTime(bars15, regime15Score, 15, pageBars, context.TimeframeMinutes, 0);
         // Labeling only (see this class's own doc comment) - a genuinely flat, weak-ADX 15-minute
         // read is called "Choppy" in the signal text; anything else that still failed to trend is
         // just a plainer "weak trend".
         var slope15 = bars15.Select((_, i) => Slope(ema15Fast, i, slopeLookback)).ToList();
-        var adx15OnPage = AlignStepToTime(bars15, adx15, pageBars, (decimal?)null);
-        var slope15OnPage = AlignStepToTime(bars15, slope15, pageBars, (decimal?)null);
+        var adx15OnPage = AlignStepToTime(bars15, adx15, 15, pageBars, context.TimeframeMinutes, (decimal?)null);
+        var slope15OnPage = AlignStepToTime(bars15, slope15, 15, pageBars, context.TimeframeMinutes, (decimal?)null);
 
         for (var i = 1; i < pageBars.Count; i++)
         {
@@ -535,19 +541,31 @@ public sealed class RegimeAdaptiveStrategy : IBacktestStrategy
         Volume = 0,
     }).ToList();
 
-    /// <summary>Aligns a time-keyed running series (VWAP, shaped like ObvCeSeries/CdvCeSeries) to
-    /// <paramref name="bars"/> by index - "the last value at or before this bar's time" for every
-    /// bar in one forward merge pass, rather than BacktestUtil.LastValueAtOrBefore's own per-call
-    /// O(series length) scan repeated once per bar (this strategy needs a VWAP reading on EVERY bar
-    /// of FOUR separate timeframes, not just at a handful of candidate entries).</summary>
-    private static List<decimal?> AlignToTime(IReadOnlyList<ObvPoint> series, IReadOnlyList<Candle> bars)
+    /// <summary>Aligns a time-keyed running series (VWAP here, shaped like ObvCeSeries/CdvCeSeries) to
+    /// <paramref name="targetBars"/> by index - "the last value KNOWN as of this target bar's own
+    /// close" for every bar in one forward merge pass, rather than BacktestUtil.LastValueAtOrBefore's
+    /// own per-call O(series length) scan repeated once per bar.
+    ///
+    /// <paramref name="sourcePointMinutes"/>/<paramref name="targetBucketMinutes"/> matter more than
+    /// they look: a series point or a candle's own Time field is when its bucket OPENED, not when its
+    /// value actually became knowable - a 15-minute candle timestamped 09:15 only finishes closing at
+    /// 09:30, so comparing raw Open-times directly (as an earlier version of this method did) let a
+    /// 1-minute bar sitting exactly on that boundary use a value that would not exist yet in a real,
+    /// live run - textbook look-ahead bias, silently inflating a backtest's own results bar after bar
+    /// at every 15/5/3-minute mark. Shifting BOTH sides to their own CLOSE instant
+    /// (Time + their respective bucket span) before comparing is what actually fixes that: a source
+    /// point only counts once it has closed at or before the target bar's own close.</summary>
+    private static List<decimal?> AlignToTime(IReadOnlyList<ObvPoint> series, int sourcePointMinutes, IReadOnlyList<Candle> targetBars, int targetBucketMinutes)
     {
-        var result = new List<decimal?>(bars.Count);
+        var sourceSpan = TimeSpan.FromMinutes(sourcePointMinutes);
+        var targetSpan = TimeSpan.FromMinutes(targetBucketMinutes);
+        var result = new List<decimal?>(targetBars.Count);
         var pointer = 0;
         decimal? current = null;
-        foreach (var bar in bars)
+        foreach (var bar in targetBars)
         {
-            while (pointer < series.Count && series[pointer].Time <= bar.Time)
+            var targetKnownAt = bar.Time + targetSpan;
+            while (pointer < series.Count && series[pointer].Time + sourceSpan <= targetKnownAt)
             {
                 current = series[pointer].Obv;
                 pointer++;
@@ -557,20 +575,27 @@ public sealed class RegimeAdaptiveStrategy : IBacktestStrategy
         return result;
     }
 
-    /// <summary>Generic counterpart to AlignToTime - projects any coarser timeframe's own per-bar
-    /// series (<paramref name="sourceBars"/>/<paramref name="sourceValues"/>, e.g. the 15-minute
-    /// regime direction) onto a finer timeframe's own bar times (<paramref name="targetBars"/>, e.g.
-    /// the native 1-minute series), so "what did the 15-minute regime say as of this 1-minute bar"
-    /// is a plain array lookup rather than a per-bar binary search. <paramref name="defaultValue"/>
-    /// covers every target bar before the source series' own first value.</summary>
-    private static List<T> AlignStepToTime<T>(IReadOnlyList<Candle> sourceBars, IReadOnlyList<T> sourceValues, IReadOnlyList<Candle> targetBars, T defaultValue)
+    /// <summary>Generic counterpart to AlignToTime, same "compare CLOSE instants, not Open-times" fix
+    /// and for the identical reason (see AlignToTime's own doc comment) - projects any timeframe's own
+    /// per-bar series (<paramref name="sourceBars"/>/<paramref name="sourceValues"/>, e.g. the
+    /// 15-minute regime direction) onto another timeframe's own bar times (<paramref
+    /// name="targetBars"/>, e.g. the native 1-minute series - this is used in both directions, coarser
+    /// onto finer AND finer onto coarser), so "what did the 15-minute regime say as of this bar" is a
+    /// plain array lookup rather than a per-bar binary search. <paramref name="defaultValue"/> covers
+    /// every target bar before the source series' own first CLOSED value.</summary>
+    private static List<T> AlignStepToTime<T>(
+        IReadOnlyList<Candle> sourceBars, IReadOnlyList<T> sourceValues, int sourceBucketMinutes,
+        IReadOnlyList<Candle> targetBars, int targetBucketMinutes, T defaultValue)
     {
+        var sourceSpan = TimeSpan.FromMinutes(sourceBucketMinutes);
+        var targetSpan = TimeSpan.FromMinutes(targetBucketMinutes);
         var result = new List<T>(targetBars.Count);
         var pointer = 0;
         var current = defaultValue;
         foreach (var bar in targetBars)
         {
-            while (pointer < sourceBars.Count && sourceBars[pointer].Time <= bar.Time)
+            var targetKnownAt = bar.Time + targetSpan;
+            while (pointer < sourceBars.Count && sourceBars[pointer].Time + sourceSpan <= targetKnownAt)
             {
                 current = sourceValues[pointer];
                 pointer++;
