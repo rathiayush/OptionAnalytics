@@ -26,6 +26,10 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 /// comment for why): the source's own volume oscillator, 100*(EMA5(volume)-EMA10(volume))/EMA10(volume)
 /// must clear VolumeThreshold (20, the source's own default).
 ///
+/// OPTIONAL order-flow (CDV/OBV) confirmation, also off by default - the same FlowConfirmation
+/// filter FiveEmaStrategy uses (CE/PE ordering + rising, per its own doc comment), applied here on
+/// top of the pivot break rather than in place of it.
+///
 /// EXIT/stop/target: the source is a pure marker/alert indicator with no taught trade management, so
 /// this uses the app's standard option-premium stop/target parameters, same as every other strategy.
 /// </summary>
@@ -71,6 +75,16 @@ public sealed class LuxAlgoSrBreakStrategy : IBacktestStrategy
         new BacktestParameterSpec("volumeShortEma", "Volume oscillator fast EMA (bars)", Default: 5, Min: 1, Max: 100, Step: 1),
         new BacktestParameterSpec("volumeLongEma", "Volume oscillator slow EMA (bars)", Default: 10, Min: 2, Max: 200, Step: 1),
         new BacktestParameterSpec("volumeThreshold", "Volume oscillator must exceed", Default: 20, Min: 0, Max: 200, Step: 1),
+        // Optional order-flow (CDV/OBV) confirmation - off by default, same as the volume filter
+        // above, so the pivot break's own price action is unaffected unless deliberately turned on.
+        new BacktestParameterSpec("requireFlowConfirmation", "Also require order flow (OBV/CDV) to confirm", Default: FlagOff, Min: FlagOff, Max: FlagOn, Step: 1, Options: new[]
+        {
+            new BacktestParameterOption(FlagOff, "No - price action only"),
+            new BacktestParameterOption(FlagOn, "Yes - flow must also favor + rise toward the entry"),
+        }),
+        FlowConfirmation.LookbackParameter(),
+        FlowConfirmation.MinRisePercentParameter(),
+        FlowConfirmation.ModeParameter(),
     };
 
     public IReadOnlyList<BacktestTrade> Simulate(BacktestStrategyContext context, IReadOnlyDictionary<string, decimal> parameters) =>
@@ -90,6 +104,11 @@ public sealed class LuxAlgoSrBreakStrategy : IBacktestStrategy
         var rightBars = Math.Max(2, (int)parameters["rightBars"]);
         var requireVolume = parameters.GetValueOrDefault("requireVolumeConfirmation", FlagOff) >= (FlagOff + FlagOn) / 2;
         var volumeThreshold = parameters.GetValueOrDefault("volumeThreshold", 20m);
+        var requireFlowConfirmation = parameters.GetValueOrDefault("requireFlowConfirmation", FlagOff) >= (FlagOff + FlagOn) / 2;
+        var flowLookback = (int)parameters.GetValueOrDefault("flowLookbackBars", 5);
+        var minFlowRisePercent = parameters.GetValueOrDefault("minFlowRisePercent", 0m);
+        var flowMode = parameters.GetValueOrDefault("flowMode", FlowConfirmation.ModeEither);
+        var flowWindow = TimeSpan.FromMinutes((double)Math.Max(1, flowLookback) * Math.Max(1, context.TimeframeMinutes));
 
         var entries = new List<(DateTimeOffset Time, string Direction)>();
         var signals = new List<BacktestSignal>();
@@ -101,6 +120,22 @@ public sealed class LuxAlgoSrBreakStrategy : IBacktestStrategy
         var oscillator = requireVolume
             ? VolumeOscillator(context.SpotVolumeBarsOneMinute, context.TimeframeMinutes, bars, (int)parameters.GetValueOrDefault("volumeShortEma", 5), (int)parameters.GetValueOrDefault("volumeLongEma", 10))
             : null;
+
+        // Optional (see requireFlowConfirmation's own doc comment) - CE for a Bullish entry, PE for
+        // a Bearish one, the same leg OptionTradeSimulator would actually buy for that direction.
+        // True (no reason given) when the filter is off.
+        (bool Ok, string Reason) FlowCheck(bool bullish, DateTimeOffset at)
+        {
+            if (!requireFlowConfirmation) return (true, "");
+            var obvFavors = FlowConfirmation.Favors(context.ObvCeSeries, context.ObvPeSeries, at, bullish, flowWindow, minFlowRisePercent);
+            var cdvFavors = FlowConfirmation.Favors(context.CdvCeSeries, context.CdvPeSeries, at, bullish, flowWindow, minFlowRisePercent);
+            var confirmed = FlowConfirmation.Confirms(flowMode, obvFavors, cdvFavors);
+            var riseRequirement = minFlowRisePercent > 0 ? $"risen at least {minFlowRisePercent:0.##}%" : "risen at all";
+            var reason = confirmed
+                ? $"flow favors {(bullish ? "CE over PE" : "PE over CE")} and has {riseRequirement} over the last {flowLookback} bar(s) ({FlowConfirmation.ModeLabel(flowMode)})"
+                : $"flow does not favor {(bullish ? "CE over PE" : "PE over CE")} and {riseRequirement} over the last {flowLookback} bar(s) as required ({FlowConfirmation.ModeLabel(flowMode)}; OBV {(obvFavors ? "confirms it" : "does not")}, CDV {(cdvFavors ? "confirms it" : "does not")})";
+            return (confirmed, reason);
+        }
 
         for (var i = 1; i < bars.Count; i++)
         {
@@ -130,11 +165,15 @@ public sealed class LuxAlgoSrBreakStrategy : IBacktestStrategy
                     signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", "Bearish", $"{summary} - skipped, before {IstClock.FormatMinutesOfDay(signalStartMinutes)} IST (pre-open)"));
                 else if (!takeShorts)
                     signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", "Bearish", $"{summary} - skipped, longs only"));
-                else if (!VolumeOk(out var reason))
-                    signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", "Bearish", $"{summary} - but {reason}"));
+                else if (!VolumeOk(out var volumeReason))
+                    signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", "Bearish", $"{summary} - but {volumeReason}"));
+                else if (FlowCheck(bullish: false, bar.Time) is (false, var rejectFlowReason))
+                    signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", "Bearish", $"{summary} - but {rejectFlowReason}"));
                 else
                 {
-                    signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Entry", "Bearish", requireVolume ? $"{summary}, and {VolumeReason(oscillator, i, volumeThreshold)}" : summary));
+                    var flowReason = requireFlowConfirmation ? FlowCheck(false, bar.Time).Reason : null;
+                    var extras = string.Join("; ", new[] { requireVolume ? VolumeReason(oscillator, i, volumeThreshold) : null, flowReason }.Where(r => !string.IsNullOrEmpty(r)));
+                    signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Entry", "Bearish", extras.Length > 0 ? $"{summary}, and {extras}" : summary));
                     entries.Add((bar.Time, "Bearish"));
                 }
             }
@@ -146,11 +185,15 @@ public sealed class LuxAlgoSrBreakStrategy : IBacktestStrategy
                     signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", "Bullish", $"{summary} - skipped, before {IstClock.FormatMinutesOfDay(signalStartMinutes)} IST (pre-open)"));
                 else if (!takeLongs)
                     signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", "Bullish", $"{summary} - skipped, shorts only"));
-                else if (!VolumeOk(out var reason))
-                    signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", "Bullish", $"{summary} - but {reason}"));
+                else if (!VolumeOk(out var volumeReason))
+                    signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", "Bullish", $"{summary} - but {volumeReason}"));
+                else if (FlowCheck(bullish: true, bar.Time) is (false, var rejectFlowReason))
+                    signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", "Bullish", $"{summary} - but {rejectFlowReason}"));
                 else
                 {
-                    signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Entry", "Bullish", requireVolume ? $"{summary}, and {VolumeReason(oscillator, i, volumeThreshold)}" : summary));
+                    var flowReason = requireFlowConfirmation ? FlowCheck(true, bar.Time).Reason : null;
+                    var extras = string.Join("; ", new[] { requireVolume ? VolumeReason(oscillator, i, volumeThreshold) : null, flowReason }.Where(r => !string.IsNullOrEmpty(r)));
+                    signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Entry", "Bullish", extras.Length > 0 ? $"{summary}, and {extras}" : summary));
                     entries.Add((bar.Time, "Bullish"));
                 }
             }
