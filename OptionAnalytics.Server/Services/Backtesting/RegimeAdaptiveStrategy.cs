@@ -198,12 +198,29 @@ public sealed class RegimeAdaptiveStrategy : IBacktestStrategy
         new BacktestParameterSpec("chopFlatSlopePercent", "Regime-layer EMA slope within +- this reads as flat (Choppy)", Default: 0.02m, Min: 0, Max: 1, Step: 0.01m),
     };
 
-    /// <summary>Only slPoints/tpPoints and the two ATR%-of-price bands scale here - every cascade
-    /// EMA/ADX/slope parameter above is already expressed in BAR COUNTS and a slope-per-N-bars
-    /// percentage, both of which stay meaningful as-is once the bar aggregation itself re-bases to
-    /// the new page timeframe (see this class's own doc comment on the 15x/5x/3x/1x scaling) - an
-    /// "EMA20 slope over 3 bars" means the same thing whether those bars are 15-minute or 45-minute
-    /// buckets, so there is nothing left here to additionally scale for those.</summary>
+    /// <summary>What scales here, and why the rest deliberately does not, now that the cascade's own
+    /// BAR SIZES already re-base with the page timeframe (15x/5x/3x/1x - see this class's own doc
+    /// comment):
+    ///   - slPoints/tpPoints/atrNormalHighPercent/atrExtremePercent scale with <c>scale</c> - these
+    ///     are all POINT or ATR%-OF-PRICE distances, and a coarser bar naturally covers more price
+    ///     distance even in ordinary noise, so the same raw number would be too tight on a 15-minute
+    ///     page and too loose on a 1-minute one. Same reasoning OptionTradeSimulator.TimeframeScale
+    ///     already applies for every other strategy's own SL/TP.
+    ///   - The four SLOPE-MIN-PERCENT parameters (regime15/confirm3/entry1SlopeMinPercent,
+    ///     chopFlatSlopePercent) ALSO scale with <c>scale</c>, for the exact same reason - a slope is
+    ///     itself a %-price-move-per-N-bars distance, so a coarser REGIME/SETUP/CONFIRM/ENTRY bucket
+    ///     needs a proportionally bigger minimum to mean "trending," not just the 1-minute-tuned
+    ///     number reused as-is (this is the fix for "every timeframe needs its own entry/exit feel,"
+    ///     not the same static numbers stretched over bigger buckets).
+    ///   - ADX minimums and RSI bounds do NOT scale - both are already unitless 0-100 oscillators BY
+    ///     CONSTRUCTION (that is the entire point of Wilder's normalization), which is exactly why
+    ///     classic TA uses the same ADX&gt;25/RSI 30-70 style cutoffs on a 1-minute chart and a
+    ///     15-minute chart alike; scaling them would not track anything real.
+    ///   - EMA-period/lookback/cross-window BAR COUNTS (regime15EmaFast, cascadeSlopeLookbackBars,
+    ///     entry1CrossWithinBars, etc.) do NOT scale - they are already counted in that layer's OWN
+    ///     bars, and each layer's bar duration already re-bases with the page timeframe on its own
+    ///     (see the Evaluate method), so "20 bars" or "within 5 bars" keeps meaning the same relative
+    ///     lookback at every page timeframe without any further adjustment here.</summary>
     public IReadOnlyDictionary<string, decimal> DefaultsForTimeframe(int timeframeMinutes)
     {
         var scale = OptionTradeSimulator.TimeframeScale(timeframeMinutes);
@@ -213,6 +230,10 @@ public sealed class RegimeAdaptiveStrategy : IBacktestStrategy
             ["tpPoints"] = 20m * scale,
             ["atrNormalHighPercent"] = 1.5m * scale,
             ["atrExtremePercent"] = 2.5m * scale,
+            ["regime15SlopeMinPercent"] = 0.050m * scale,
+            ["confirm3SlopeMinPercent"] = 0.025m * scale,
+            ["entry1SlopeMinPercent"] = 0.015m * scale,
+            ["chopFlatSlopePercent"] = 0.02m * scale,
         };
     }
 
