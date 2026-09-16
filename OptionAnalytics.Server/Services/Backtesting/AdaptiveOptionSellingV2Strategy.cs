@@ -5,14 +5,15 @@ using Skender.Stock.Indicators;
 namespace OptionAnalytics.Server.Services.Backtesting;
 
 /// <summary>
-/// A second, DELIBERATELY PLAINER "adaptive option selling" strategy, built alongside
-/// RegimeAdaptiveStrategy (not replacing it) per the user's own explicit request for a second,
-/// simpler version of the "NIFTY &amp; BANKNIFTY - Adaptive Option Selling Strategy" flowchart - the
-/// same one that originally seeded RegimeAdaptiveStrategy before that class grew into the later,
-/// more detailed ADAPTIVE OPTIONS SELLING spec (fixed 15-minute regime, Bollinger Bands, DI+/-,
-/// per-regime multiplier tables). This class has NONE of that: everything - regime AND entry/exit -
-/// runs on ONE timeframe, the page's own selected one, so there is no cross-timeframe alignment
-/// anywhere in this file at all.
+/// The DELIBERATELY PLAIN "adaptive option selling" strategy, matching the "NIFTY &amp; BANKNIFTY -
+/// Adaptive Option Selling Strategy" flowchart. This was originally built as a second, simpler
+/// sibling alongside a more elaborate RegimeAdaptiveStrategy (fixed 15-minute regime, Bollinger
+/// Bands, DI+/-, per-regime multiplier tables) - that class was later REMOVED entirely by explicit
+/// request ("so many parameters getting confused"), leaving this one as the sole adaptive-selling
+/// strategy here. Everything - regime AND entry/exit - runs on ONE timeframe, the page's own
+/// selected one (1/3/5/15-minute, via <see cref="DefaultsForTimeframe"/> below), so there is no
+/// cross-timeframe alignment anywhere in this file at all - the smaller, single parameter set this
+/// design was chosen for in the first place.
 ///
 /// REGIME SCORE (0-5), computed fresh on EVERY bar of the page's own timeframe (this flowchart never
 /// says "only recompute every 15 minutes" the way the other spec did):
@@ -34,10 +35,10 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 /// isn't Trending).
 ///
 /// HIGH VOLATILITY/EXTREME overrides the score entirely, checked first: page-timeframe ATR% &gt;
-/// <c>atrExtremePercent</c> (this app has no VIX feed, so "or VIX high" is dropped, same choice
-/// RegimeAdaptiveStrategy already made and documents). No new trades at all while this holds - the
-/// flowchart's own "reduce size / hedged only / stay out" collapses to "stay out," the only one of
-/// those three this app can do without a capital or defined-risk-spread model (see below).
+/// <c>atrExtremePercent</c> (this app has no VIX feed, so "or VIX high" is dropped). No new trades at
+/// all while this holds - the flowchart's own "reduce size / hedged only / stay out" collapses to
+/// "stay out," the only one of those three this app can do without a capital or defined-risk-spread
+/// model (see below).
 ///
 /// STRATEGY PER REGIME:
 ///   - TRENDING: single-leg directional selling (Bullish -&gt; sell PE, Bearish -&gt; sell CE - this
@@ -46,28 +47,36 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 ///   - RANGE/SIDEWAYS: BOTH legs at once - sell CE AND sell PE as two independent concurrent
 ///     positions (a Short Strangle), triggered on a VWAP+/-ATR band rejection (price closes back
 ///     inside the band after having been outside it) with RSI inside the flowchart's own 30-70
-///     neutral window - achieved the same way as RegimeAdaptiveStrategy's own Strangle: two
-///     independent OptionTradeSimulator.Run calls, no changes to its own single-position walk.
+///     neutral window - two independent OptionTradeSimulator.Run calls, no changes to its own
+///     single-position walk, and squared off TOGETHER via OptionTradeSimulator.RunPairedLegs (see
+///     its own doc comment) rather than each leg exiting independently.
 ///
-/// PER-TIMEFRAME DEFAULTS (<see cref="DefaultsForTimeframe"/>): the SAME "one parameter box, default
-/// changes with the page's own selected timeframe" mechanism this app already uses everywhere -
-/// switching the page timeframe does not add or remove a box, it updates the numbers already in the
-/// existing ones (otmSteps/slPercentOfPremium/tpPercentOfPremium/atrNormalHighPercent/
-/// atrExtremePercent). Deliberately PLAIN compared to RegimeAdaptiveStrategy: no separate multiplier
-/// table per regime - the flowchart gives strike/target/stop guidance once, not once per regime.
+/// PER-TIMEFRAME DEFAULTS (<see cref="DefaultsForTimeframe"/>): one parameter box per value, default
+/// changes with the page's own selected timeframe - switching the page timeframe does not add or
+/// remove a box, it updates the numbers already in the existing ones (otmSteps/
+/// slPercentOfPremium/tpPercentOfPremium/atrNormalHighPercent/atrExtremePercent). Deliberately PLAIN:
+/// no separate multiplier table per regime - the flowchart gives strike/target/stop guidance once,
+/// not once per regime.
 ///
-/// STOP-LOSS/TARGET ARE PERCENT OF PREMIUM (the same additive OptionTradeSimulator.Run extension
-/// RegimeAdaptiveStrategy uses) - the flowchart's own "2-3x premium" stop and "1.5-2x risk" target.
-/// The target figure does not translate cleanly to a %-of-premium SELL model (a seller's stop can
-/// rise unbounded but a target can only ever fall to 0%, so "1.5-2x the stop's own % distance" is
-/// not a coherent number for the profit side) - this class uses a plain, independent
-/// tpPercentOfPremium instead, a standard theta-seller take-profit level, and documents the
-/// substitution here rather than computing a number that would not mean what it claims to.
+/// STOP-LOSS/TARGET ARE PERCENT OF PREMIUM (an additive OptionTradeSimulator.Run extension,
+/// slPercentOfPremium/tpPercentOfPremium - off by default and untouched for every other strategy) -
+/// the flowchart's own "2-3x premium" stop and "1.5-2x risk" target. The target figure does not
+/// translate cleanly to a %-of-premium SELL model (a seller's stop can rise unbounded but a target
+/// can only ever fall to 0%, so "1.5-2x the stop's own % distance" is not a coherent number for the
+/// profit side) - this class uses a plain, independent tpPercentOfPremium instead, a standard
+/// theta-seller take-profit level, and documents the substitution here rather than computing a
+/// number that would not mean what it claims to.
 ///
-/// WHAT THIS DOES NOT DO - same limitations as RegimeAdaptiveStrategy, for the same reasons (see its
-/// own doc comment for the full explanation): no option greeks/delta (OTM distance is a strike-step
-/// proxy), no protective long legs (a true Iron Condor), no capital-based position sizing/daily-loss/
-/// consecutive-SL state, no OI/Volume-ranked strikes, no economic-calendar filter, no India VIX.
+/// WHAT THIS DOES NOT DO, flagged explicitly rather than silently approximated, since real money is
+/// involved: no option greeks/delta - there is no IV/Black-Scholes engine anywhere in this app, so
+/// the flowchart's OI/Volume-informed strike pick is approximated with a fixed strike-step count
+/// (<c>otmSteps</c>) instead; no protective long legs - the Strangle above is genuinely two short
+/// legs, not a four-leg Iron Condor; no capital-based position sizing, daily-loss-as-%-of-capital, or
+/// consecutive-SL size throttling - this app's backtest engine has no capital/equity model at all;
+/// no OI/Volume-ranked strike selection - open interest exists in the LIVE feed but was never
+/// plumbed into what a backtest strategy can see historically; no economic-calendar / event filter -
+/// this app has no calendar feed; no India VIX - volatility is read from this underlying's own ATR%
+/// instead.
 /// </summary>
 public sealed class AdaptiveOptionSellingV2Strategy : IBacktestStrategy
 {
@@ -124,11 +133,12 @@ public sealed class AdaptiveOptionSellingV2Strategy : IBacktestStrategy
     };
 
     /// <summary>Only the price-distance parameters scale here - ATR%-of-price bands and the
-    /// %-of-premium SL/TP, for the same reason RegimeAdaptiveStrategy's own DefaultsForTimeframe
-    /// scales its equivalents (a coarser bar covers more price distance even in ordinary noise).
-    /// EMA/ADX/RSI/slope-lookback bar counts and the ADX/RSI thresholds themselves do not scale -
-    /// see RegimeAdaptiveStrategy's own doc comment for why (bar counts already mean the same
-    /// relative thing, and ADX/RSI are unitless 0-100 oscillators by construction).</summary>
+    /// %-of-premium SL/TP - because a coarser bar covers more price distance even in ordinary noise,
+    /// so the same raw number would be too tight on a 15-minute page and too loose on a 1-minute one.
+    /// EMA/ADX/RSI/slope-lookback bar counts and the ADX/RSI thresholds themselves do NOT scale: bar
+    /// counts already mean the same relative lookback regardless of how long each bar spans, and
+    /// ADX/RSI are unitless 0-100 oscillators by construction - the same cutoff (ADX&gt;25, RSI
+    /// 30-70) means the same thing on a 1-minute chart and a 15-minute one alike.</summary>
     public IReadOnlyDictionary<string, decimal> DefaultsForTimeframe(int timeframeMinutes)
     {
         var scale = (decimal)Math.Sqrt(Math.Max(1, timeframeMinutes));
@@ -404,9 +414,10 @@ public sealed class AdaptiveOptionSellingV2Strategy : IBacktestStrategy
     }).ToList();
 
     /// <summary>Aligns the 1-minute VWAP series onto the page's own timeframe bars, using each side's
-    /// own CLOSE time - the same non-look-ahead rule RegimeAdaptiveStrategy's own alignment helpers
-    /// use, simplified here since there is only ever ONE target timeframe (the page's) in this
-    /// class, not several.</summary>
+    /// own CLOSE time rather than raw open time, so a target bar never uses a VWAP reading from
+    /// before it had genuinely closed - the standard non-look-ahead rule for cross-timeframe
+    /// alignment in this app, simplified here since there is only ever ONE target timeframe (the
+    /// page's) in this class, not several.</summary>
     private static List<decimal?> AlignToTime(IReadOnlyList<ObvPoint> series, IReadOnlyList<Candle> targetBars, int targetBucketMinutes)
     {
         var targetSpan = TimeSpan.FromMinutes(targetBucketMinutes);

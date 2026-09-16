@@ -65,7 +65,7 @@ public sealed class TimeframeDefaultsTests
         Assert.Equal(staticSrLookback, result.Single(p => p.Key == "srLookbackBars").Default);
     }
 
-    // RegimeAdaptiveStrategy's own DefaultsForTimeframe coverage moved to
-    // RegimeAdaptiveStrategyTests.cs (DefaultsForTimeframe_GivesEachOfTheFourSelectableTimeframesItsOwnDistinctBaseValues)
-    // after that class's full rewrite - see its own doc comment.
+    // AdaptiveOptionSellingV2Strategy's own DefaultsForTimeframe coverage lives in
+    // AdaptiveOptionSellingV2StrategyTests.cs
+    // (DefaultsForTimeframe_ScalesPriceDistanceParameters_ButNotIndicatorPeriodsOrThresholds).
 }
