@@ -68,16 +68,35 @@ public sealed class RegimeAdaptiveStrategyTests
         return result;
     }
 
+    // Same shape as UptrendFixture but with a 300-bar cycle (divisible by 1x, 3x, 5x... page
+    // timeframes) so the cascade's REGIME/SETUP/CONFIRM/ENTRY layers still land on clean bucket
+    // boundaries once re-based to a non-1-minute page timeframe - used only by the timeframe-scaling
+    // test below, confirmed via a diagnostic dump to produce entries at tf=3 (45M/15M/9M/3M layers).
+    private static List<Candle> ScalableUptrendFixture(int bars = 20000)
+    {
+        var result = new List<Candle>(bars);
+        var price = 20000m;
+        for (var i = 0; i < bars; i++)
+        {
+            var open = price;
+            var inPullback = i % 300 >= 240;
+            price += inPullback ? -0.2m : 0.13333m;
+            var close = price;
+            result.Add(new Candle(T0.AddMinutes(i), open, Math.Max(open, close), Math.Min(open, close), close));
+        }
+        return result;
+    }
+
     private static List<CandleWithVolume> Volume(IReadOnlyList<Candle> bars) =>
         bars.Select(b => new CandleWithVolume(b.Time, b.Open, b.High, b.Low, b.Close, 1000)).ToList();
 
     private static BacktestStrategyContext Context(
-        IReadOnlyList<Candle> oneMinuteBars, IReadOnlyList<ObvPoint>? obvCe = null, IReadOnlyList<ObvPoint>? obvPe = null) => new()
+        IReadOnlyList<Candle> oneMinuteBars, IReadOnlyList<ObvPoint>? obvCe = null, IReadOnlyList<ObvPoint>? obvPe = null, int timeframeMinutes = 1) => new()
     {
         Underlying = "NIFTY",
-        TimeframeMinutes = 1,
+        TimeframeMinutes = timeframeMinutes,
         Step = 50,
-        SpotBars = oneMinuteBars,
+        SpotBars = timeframeMinutes == 1 ? oneMinuteBars : BacktestUtil.AggregateCandles(oneMinuteBars, timeframeMinutes),
         SpotBarsOneMinute = oneMinuteBars,
         SpotVolumeBarsOneMinute = Volume(oneMinuteBars),
         ConfluenceSignalsAscending = Array.Empty<BacktestSignal>(),
@@ -170,6 +189,22 @@ public sealed class RegimeAdaptiveStrategyTests
         Assert.NotEmpty(entries);
         Assert.All(entries, e => Assert.Equal("Bearish", e.Direction));
         Assert.All(entries, e => Assert.Contains("regime Bearish", e.Summary));
+    }
+
+    [Fact]
+    public void CascadeLayers_ScaleWithThePageOwnSelectedTimeframe_NotFixedRealClockMinutes()
+    {
+        var bars = ScalableUptrendFixture();
+
+        // Page set to a 3-minute timeframe: REGIME/SETUP/CONFIRM/ENTRY should re-base to
+        // 45/15/9/3 minutes (15x/5x/3x/1x of 3), not stay pinned at 15/5/3/1 real minutes.
+        var signals = new RegimeAdaptiveStrategy().EntrySignals(Context(bars, timeframeMinutes: 3), Parameters());
+        var entries = signals.Where(s => s.Kind == "Entry").ToList();
+
+        Assert.NotEmpty(entries);
+        Assert.All(entries, e => Assert.Equal("Bullish", e.Direction));
+        Assert.All(entries, e => Assert.Contains("45M regime Bullish", e.Summary));
+        Assert.All(entries, e => Assert.Contains("15M setup ok -> 9M confirmed -> 3M pullback rejection", e.Summary));
     }
 
     [Fact]

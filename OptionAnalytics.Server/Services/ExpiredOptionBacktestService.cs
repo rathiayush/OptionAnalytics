@@ -403,16 +403,19 @@ public sealed class ExpiredOptionBacktestService
         //
         // sr-flow-sell's own entry logic ALWAYS reads ObvCeSeries/CdvCeSeries (see its own doc
         // comment) - the same reason EmaCrossAtmFlowStrategy used to need this wide band.
-        // ema-crossover-retest and luxalgo-sr-break only read it when their own
+        // ema-crossover-retest, luxalgo-sr-break, and sr-channel only read it when their own
         // requireFlowConfirmation parameter is on (off by default - see each one's own FlowCheck),
-        // so this run's own parameters decide it rather than the strategy key alone. includeObvCdv
-        // opts ANY OTHER strategy into the same fetch purely so the page can plot the OBV/CDV chart
-        // alongside a run, for the user to visually check those series are behaving sensibly. Off by
-        // default otherwise: even though StrikeBandSteps==FlowChainRadius now (see StrikeBandSteps'
-        // own doc comment), this path also pays for the OBV/CDV reconstruction itself, so a run that
-        // does not need or ask for it still does not pay for that extra work.
+        // so this run's own parameters decide it rather than the strategy key alone. regime-adaptive
+        // is deliberately NOT in that list - it has no requireFlowConfirmation parameter at all (its
+        // earlier CDV/OBV filter was removed by explicit request), so it never needs this wide band
+        // purely for its own entry logic. includeObvCdv opts ANY OTHER strategy into the same fetch
+        // purely so the page can plot the OBV/CDV chart alongside a run, for the user to visually
+        // check those series are behaving sensibly. Off by default otherwise: even though
+        // StrikeBandSteps==FlowChainRadius now (see StrikeBandSteps' own doc comment), this path also
+        // pays for the OBV/CDV reconstruction itself, so a run that does not need or ask for it still
+        // does not pay for that extra work.
         var needsFlowChain = strategyKey == "sr-flow-sell"
-            || ((strategyKey == "ema-crossover-retest" || strategyKey == "luxalgo-sr-break" || strategyKey == "sr-channel" || strategyKey == "regime-adaptive") && mergedParameters.GetValueOrDefault("requireFlowConfirmation", 0m) >= 0.5m)
+            || ((strategyKey == "ema-crossover-retest" || strategyKey == "luxalgo-sr-break" || strategyKey == "sr-channel") && mergedParameters.GetValueOrDefault("requireFlowConfirmation", 0m) >= 0.5m)
             || includeObvCdv;
         var bandCenterSteps = needsFlowChain ? 0 : otmSteps;
         var bandRadius = needsFlowChain ? FlowChainRadius : StrikeBandSteps;
