@@ -251,8 +251,17 @@ public sealed class AdaptiveOptionSellingV2Strategy : IBacktestStrategy
         }
 
         var step = context.Step;
-        var streams = new Dictionary<bool, LegStream>();
-        LegStream StreamFor(bool isCall) => streams.TryGetValue(isCall, out var s) ? s : streams[isCall] = new LegStream(isCall);
+        // Keyed by (regime type, leg) - NOT leg alone - so a Trend CE sell (single leg, its own
+        // sequential bets from different downtrend windows) never shares a signal stream with a
+        // Range/Sideways CE sell (one half of a paired Strangle) just because both happen to sell
+        // the same option type. Pairing for synchronized square-off below only ever looks within one
+        // regime type's own two leg-streams.
+        var streams = new Dictionary<(string RegimeType, bool IsCall), LegStream>();
+        LegStream StreamFor(string regimeTypeNow, bool isCall)
+        {
+            var key = (regimeTypeNow, isCall);
+            return streams.TryGetValue(key, out var s) ? s : streams[key] = new LegStream(isCall);
+        }
 
         var signals = new List<BacktestSignal>();
 
@@ -297,7 +306,7 @@ public sealed class AdaptiveOptionSellingV2Strategy : IBacktestStrategy
             else
             {
                 var isCall = !bullish; // sells only - Bullish->sell PE, Bearish->sell CE
-                var stream = StreamFor(isCall);
+                var stream = StreamFor(regimeTypeNow, isCall);
                 var atmAtSignal = step > 0 ? Math.Round(pageBars[i].Close / step) * step : pageBars[i].Close;
                 var strike = isCall ? atmAtSignal + otmSteps * step : atmAtSignal - otmSteps * step;
 
@@ -338,22 +347,40 @@ public sealed class AdaptiveOptionSellingV2Strategy : IBacktestStrategy
             TryEnter(i, false, "RangeSideways", summary); // Bearish leg -> sell CE
         }
 
-        var trades = new List<BacktestTrade>();
-        foreach (var stream in streams.Values)
+        Dictionary<string, decimal> BuildStreamParameters() => new(parameters)
         {
-            if (stream.Signals.Count == 0) continue;
-            var streamParameters = new Dictionary<string, decimal>(parameters)
+            ["side"] = OptionTradeSimulator.SideSell,
+            ["otmSteps"] = otmSteps,
+            ["slPoints"] = 0m,
+            ["tpPoints"] = 0m,
+            ["slPercentOfPremium"] = slPercentOfPremium,
+            ["tpPercentOfPremium"] = tpPercentOfPremium,
+            ["squareOffMinutes"] = squareOffMinutes,
+            ["excludeLastDays"] = excludeLastDays,
+        };
+
+        // Range/Sideways' two legs were entered TOGETHER (a Short Strangle) and, per explicit
+        // instruction, must square off together too - see OptionTradeSimulator.RunPairedLegs' own
+        // doc comment. Trending's own two possible leg-streams are NEVER paired - sequential
+        // single-leg bets from different, non-overlapping regime windows, not one two-leg position.
+        var trades = new List<BacktestTrade>();
+        foreach (var regimeTypeKey in streams.Keys.Select(k => k.RegimeType).Distinct())
+        {
+            var hasCall = streams.TryGetValue((regimeTypeKey, true), out var callStream) && callStream.Signals.Count > 0;
+            var hasPut = streams.TryGetValue((regimeTypeKey, false), out var putStream) && putStream.Signals.Count > 0;
+
+            if (regimeTypeKey == "RangeSideways" && hasCall && hasPut)
             {
-                ["side"] = OptionTradeSimulator.SideSell,
-                ["otmSteps"] = otmSteps,
-                ["slPoints"] = 0m,
-                ["tpPoints"] = 0m,
-                ["slPercentOfPremium"] = slPercentOfPremium,
-                ["tpPercentOfPremium"] = tpPercentOfPremium,
-                ["squareOffMinutes"] = squareOffMinutes,
-                ["excludeLastDays"] = excludeLastDays,
-            };
-            trades.AddRange(OptionTradeSimulator.Run(context, stream.Signals, streamParameters, signalExits: stream.Exits));
+                trades.AddRange(OptionTradeSimulator.RunPairedLegs(
+                    context,
+                    putStream!.Signals, putStream.Exits, BuildStreamParameters(),
+                    callStream!.Signals, callStream.Exits, BuildStreamParameters()));
+            }
+            else
+            {
+                if (hasCall) trades.AddRange(OptionTradeSimulator.Run(context, callStream!.Signals, BuildStreamParameters(), signalExits: callStream.Exits));
+                if (hasPut) trades.AddRange(OptionTradeSimulator.Run(context, putStream!.Signals, BuildStreamParameters(), signalExits: putStream.Exits));
+            }
         }
 
         return (trades.OrderByDescending(t => t.SignalTimeUtc).ToList(), signals.OrderByDescending(s => s.TimeUtc).ToList());

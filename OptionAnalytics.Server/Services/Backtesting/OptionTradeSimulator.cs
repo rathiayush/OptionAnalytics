@@ -359,6 +359,88 @@ public static class OptionTradeSimulator
         return trades.OrderByDescending(t => t.SignalTimeUtc).ToList();
     }
 
+    /// <summary>Runs two option legs entered TOGETHER (a Short Strangle's CE+PE, most notably - see
+    /// RegimeAdaptiveStrategy/AdaptiveOptionSellingV2Strategy's own Range/Neutral execution) and
+    /// forces them to square off TOGETHER too, per explicit instruction: "if trades executed
+    /// together they should be squared off together as well." Without this, each leg's own
+    /// <see cref="Run"/> call is completely independent, so one leg could sit open long after its
+    /// partner has already closed - a real risk-management gap for a position that is conceptually
+    /// ONE trade with two legs, not two unrelated ones.
+    ///
+    /// Iterates toward a fixed point rather than a single probe-then-final pass, no changes to Run's
+    /// own single-position walk. A single pass is NOT enough: shortening one trade via pairing can
+    /// free up that leg's own "one position at a time" busy window early, letting a LATER signal the
+    /// first pass's probe never captured (it was still busy back then) fire in the next run - and
+    /// that newly-captured trade would never get paired at all if the loop stopped there. Confirmed
+    /// via a diagnostic dump: a single pass left a small fraction of pairs mismatched, every one of
+    /// them exactly this cascade; iterating recovers the large majority of them - close to 100% for
+    /// realistic, gated entry patterns (RegimeAdaptiveStrategy/AdaptiveOptionSellingV2Strategy's own
+    /// tests measure exact synchronization on their own fixtures), noticeably lower on a deliberately
+    /// adversarial fixture of back-to-back overlapping entries with no gap at all between them - see
+    /// OptionTradeSimulatorRunPairedLegsTests' own dedicated stress test for that measured floor.
+    /// Real strategies here always have SOME gating between entries (a regime/RSI/BB condition has to
+    /// hold), so that worst case is not what production traffic looks like.
+    ///
+    /// Every round: run both legs, then for every entry time BOTH legs' current run captured, take
+    /// the EARLIER of the two exits as the pair's shared square-off moment and override the OTHER
+    /// leg's signalExits entry to force it there too - the leg that would have run longer gets pulled
+    /// in to match its partner; the one that closes first (or already matches) is unaffected. Stops
+    /// as soon as a round makes no changes, capped at ROUNDS as a cost bound (each round is a full
+    /// extra pair of Run calls).
+    ///
+    /// NOT a mathematical guarantee of 100% synchronization: a residual involves cascades deep enough
+    /// that an even later round would be needed, at which point the cost of chasing full convergence
+    /// stops being worth it against how rare that residual case is for real entry patterns. Those
+    /// trades still run through Run's own ordinary exit logic independently - never left broken, just
+    /// not pulled into the pairing this time.</summary>
+    public static IReadOnlyList<BacktestTrade> RunPairedLegs(
+        BacktestStrategyContext context,
+        IReadOnlyList<(DateTimeOffset Time, string Direction)> legASignals,
+        Dictionary<DateTimeOffset, (DateTimeOffset Time, string Reason)> legAExits,
+        IReadOnlyDictionary<string, decimal> legAParameters,
+        IReadOnlyList<(DateTimeOffset Time, string Direction)> legBSignals,
+        Dictionary<DateTimeOffset, (DateTimeOffset Time, string Reason)> legBExits,
+        IReadOnlyDictionary<string, decimal> legBParameters)
+    {
+        var sharedTimes = legASignals.Select(s => s.Time).Intersect(legBSignals.Select(s => s.Time)).ToList();
+        // Run's own signalExits check compares a bar's RAW (bucket-open) Time against the deadline,
+        // but BacktestTrade.ExitTimeUtc is already close-adjusted (bar.Time + this same span) - see
+        // Run's own doc comment on that exact conversion. Feeding ExitTimeUtc straight back in as a
+        // deadline would therefore always land one bar late (confirmed via a diagnostic dump); this
+        // converts back to the raw-time convention the deadline check actually uses.
+        var fillSpan = TimeSpan.FromMinutes(context.TimeframeMinutes);
+
+        IReadOnlyList<BacktestTrade> currentA = Array.Empty<BacktestTrade>();
+        IReadOnlyList<BacktestTrade> currentB = Array.Empty<BacktestTrade>();
+
+        const int Rounds = 10;
+        for (var round = 0; round < Rounds; round++)
+        {
+            currentA = Run(context, legASignals, legAParameters, signalExits: legAExits);
+            currentB = Run(context, legBSignals, legBParameters, signalExits: legBExits);
+            var byTimeA = currentA.ToDictionary(t => t.SignalTimeUtc);
+            var byTimeB = currentB.ToDictionary(t => t.SignalTimeUtc);
+
+            var changed = false;
+            foreach (var time in sharedTimes)
+            {
+                if (!byTimeA.TryGetValue(time, out var tradeA) || tradeA.ExitTimeUtc is not { } exitA) continue;
+                if (!byTimeB.TryGetValue(time, out var tradeB) || tradeB.ExitTimeUtc is not { } exitB) continue;
+                if (exitA == exitB) continue; // already synchronized - nothing to force
+
+                if (exitA < exitB)
+                    legBExits[time] = (exitA - fillSpan, $"PairedSquareOff (other leg: {tradeA.ExitReason})");
+                else
+                    legAExits[time] = (exitB - fillSpan, $"PairedSquareOff (other leg: {tradeB.ExitReason})");
+                changed = true;
+            }
+
+            if (!changed) break;
+        }
+
+        return currentA.Concat(currentB).OrderByDescending(t => t.SignalTimeUtc).ToList();
+    }
+
     /// <summary>The earliest forced-exit time not before <paramref name="time"/> - null when the
     /// strategy supplied none, or when none of them fall after this entry.</summary>
     private static DateTimeOffset? FirstAtOrAfter(IReadOnlyList<DateTimeOffset>? times, DateTimeOffset time)
