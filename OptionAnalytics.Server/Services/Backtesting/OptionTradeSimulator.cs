@@ -180,9 +180,9 @@ public static class OptionTradeSimulator
         var slPoints = parameters.GetValueOrDefault("slPoints", 0m);
         var tpPoints = parameters.GetValueOrDefault("tpPoints", 0m);
         // Optional, additive, and OFF (0) for every existing caller - a strategy whose own risk model
-        // is naturally a PERCENTAGE of what it actually sold for (RegimeAdaptiveStrategy's own spec,
-        // e.g. "stop loss = 75% of premium") rather than a fixed point distance the same regardless of
-        // premium level. When set (>0), it REPLACES slPoints/tpPoints for that trade only, computed
+        // is naturally a PERCENTAGE of what it actually sold for (AdaptiveOptionSellingV2Strategy's
+        // own spec, e.g. "stop loss = 2-3x premium") rather than a fixed point distance the same
+        // regardless of premium level. When set (>0), it REPLACES slPoints/tpPoints for that trade only, computed
         // against THIS TRADE'S OWN entryPrice below - every other caller leaves both at 0 and keeps
         // slPoints/tpPoints exactly as before, zero behavior change.
         var slPercentOfPremium = parameters.GetValueOrDefault("slPercentOfPremium", 0m);
@@ -360,8 +360,8 @@ public static class OptionTradeSimulator
     }
 
     /// <summary>Runs two option legs entered TOGETHER (a Short Strangle's CE+PE, most notably - see
-    /// RegimeAdaptiveStrategy/AdaptiveOptionSellingV2Strategy's own Range/Neutral execution) and
-    /// forces them to square off TOGETHER too, per explicit instruction: "if trades executed
+    /// AdaptiveOptionSellingV2Strategy's own Range/Sideways execution) and forces them to square off
+    /// TOGETHER too, per explicit instruction: "if trades executed
     /// together they should be squared off together as well." Without this, each leg's own
     /// <see cref="Run"/> call is completely independent, so one leg could sit open long after its
     /// partner has already closed - a real risk-management gap for a position that is conceptually
@@ -374,8 +374,8 @@ public static class OptionTradeSimulator
     /// that newly-captured trade would never get paired at all if the loop stopped there. Confirmed
     /// via a diagnostic dump: a single pass left a small fraction of pairs mismatched, every one of
     /// them exactly this cascade; iterating recovers the large majority of them - close to 100% for
-    /// realistic, gated entry patterns (RegimeAdaptiveStrategy/AdaptiveOptionSellingV2Strategy's own
-    /// tests measure exact synchronization on their own fixtures), noticeably lower on a deliberately
+    /// realistic, gated entry patterns (AdaptiveOptionSellingV2Strategy's own tests measure exact
+    /// synchronization on their own fixtures), noticeably lower on a deliberately
     /// adversarial fixture of back-to-back overlapping entries with no gap at all between them - see
     /// OptionTradeSimulatorRunPairedLegsTests' own dedicated stress test for that measured floor.
     /// Real strategies here always have SOME gating between entries (a regime/RSI/BB condition has to

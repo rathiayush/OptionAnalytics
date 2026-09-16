@@ -3,8 +3,8 @@ using OptionAnalytics.Server.Services.Backtesting;
 
 namespace OptionAnalytics.Server.Tests;
 
-/// <summary>Covers AdaptiveOptionSellingV2Strategy - the deliberately plainer, single-timeframe
-/// sibling of RegimeAdaptiveStrategy (see its own doc comment). Fixtures confirmed via a diagnostic
+/// <summary>Covers AdaptiveOptionSellingV2Strategy - the deliberately plain, single-timeframe
+/// adaptive-selling strategy (see its own class doc comment). Fixtures confirmed via a diagnostic
 /// dump: a smooth, wide sine wave actually reads as genuine Trending during each half-cycle (a real
 /// local slope/ADX/alignment lineup, not a bug), so the Range/Sideways fixture here uses a small-
 /// amplitude, short-period oscillation instead - choppy enough that EMA7/20/50 rarely sustain a
