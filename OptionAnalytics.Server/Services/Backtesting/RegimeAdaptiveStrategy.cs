@@ -160,6 +160,50 @@ public sealed class RegimeAdaptiveStrategy : IBacktestStrategy
         FlowConfirmation.ModeParameter(),
     };
 
+    /// <summary>Overrides the default interface's slPoints/tpPoints-only scaling (see
+    /// IBacktestStrategy.DefaultsForTimeframe's own doc comment) to also scale every OTHER
+    /// timeframe-sensitive default this strategy has, by the same 1x/2x/3x
+    /// OptionTradeSimulator.TimeframeScale bucket - so switching the page's timeframe from 1 to 3
+    /// minutes re-fills the whole parameter form with values suited to 3-minute bars (via GET
+    /// .../strategies?timeframe=3, which BacktestUtil.ApplyTimeframeDefaults already calls this for),
+    /// and any further tweak is then made against sensible starting numbers rather than the 1-minute
+    /// ones left untouched underneath.
+    ///
+    /// SCALED - a coarser bar covers more real time, so these are all "expect a bigger raw number at
+    /// a coarser timeframe" values:
+    ///   - slopeThresholdPercent: the same NUMBER of slopeLookbackBars covers 3x the real time at a
+    ///     3-minute timeframe as at 1-minute, so the EMA is expected to have moved further in % terms
+    ///     over that same bar count.
+    ///   - atrNormalLowPercent/atrNormalHighPercent/atrExtremePercent: a coarser candle's own
+    ///     High-Low range is naturally wider as a % of price than a finer one's, so the same
+    ///     Normal/High/Extreme bands would misfire (everything reading "Extreme") if left at their
+    ///     1-minute numbers.
+    ///   - chopWindowMinutes: scaled UP (not left as a fixed 30) so the window still covers enough
+    ///     BARS to meaningfully count crosses against minChopCrosses once each bar itself spans more
+    ///     time - 30 minutes is just 6 bars at a 5-minute timeframe otherwise.
+    ///
+    /// DELIBERATELY NOT SCALED - the same reasoning IBacktestStrategy's own default implementation
+    /// documents for bar-count parameters generally: EMA/ADX/ATR/RSI PERIODS (a "20-bar EMA" is a
+    /// conventional, timeframe-independent notion traders already reason in bar counts for, not real
+    /// minutes - rescaling it on every timeframe switch would be surprising, not helpful), ADX/RSI's
+    /// own thresholds (already-normalized 0-100 oscillators, not raw price), rangeAtrMultiple (a
+    /// ratio of ATR to itself, already scale-invariant since ATR itself scales), and
+    /// minChopCrosses/trendScoreThreshold (plain counts/scores, not a real-time or price quantity).</summary>
+    public IReadOnlyDictionary<string, decimal> DefaultsForTimeframe(int timeframeMinutes)
+    {
+        var scale = OptionTradeSimulator.TimeframeScale(timeframeMinutes);
+        return new Dictionary<string, decimal>
+        {
+            ["slPoints"] = 10m * scale,
+            ["tpPoints"] = 20m * scale,
+            ["slopeThresholdPercent"] = 0.05m * scale,
+            ["atrNormalLowPercent"] = 0.8m * scale,
+            ["atrNormalHighPercent"] = 1.5m * scale,
+            ["atrExtremePercent"] = 2.5m * scale,
+            ["chopWindowMinutes"] = 30m * scale,
+        };
+    }
+
     public IReadOnlyList<BacktestTrade> Simulate(BacktestStrategyContext context, IReadOnlyDictionary<string, decimal> parameters) =>
         OptionTradeSimulator.Run(context, Evaluate(context, parameters).Entries, parameters);
 
