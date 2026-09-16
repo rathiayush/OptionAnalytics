@@ -848,7 +848,14 @@ public sealed class CdvHostedService : BackgroundService
         string underlying, int step, DateOnly expiry, decimal spot, DateOnly today, CancellationToken cancellationToken)
     {
         var key = (underlying, expiry);
-        var state = _byExpiry.GetOrAdd(key, _ => new CdvUnderlyingState(underlying));
+        var state = _byExpiry.GetOrAdd(key, _ =>
+        {
+            var created = new CdvUnderlyingState(underlying);
+            // Subscribed once, right here, rather than at every recenter - GetOrAdd's factory only
+            // ever runs for a brand-new state, so this can never double-subscribe an existing one.
+            created.AggregateBarClosed += () => OnAggregateBarClosed(underlying, created);
+            return created;
+        });
         if (!_subscribedTokens.ContainsKey(key)) _subscribedTokens[key] = new HashSet<uint>();
 
         // CDV is a SESSION indicator (see CdvUnderlyingState.TradingDay's doc comment) - the moment
@@ -1178,6 +1185,36 @@ public sealed class CdvHostedService : BackgroundService
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "Failed to broadcast a CDV update for {Underlying}.", state.Underlying);
+        }
+    }
+
+    /// <summary>Fires on every CdvUnderlyingState the moment its aggregate CE/PE bar closes - see
+    /// CdvUnderlyingState.AggregateBarClosed. Pushes that bar's already-smoothed CDV value over
+    /// SignalR so the dashboard's lookback table can append it instead of re-fetching
+    /// GET .../lookback on every bar close (see the "cdvBarClosed" event). Only the currently
+    /// SELECTED expiry is pushed - same rule OnTick's own cdvUpdate broadcast uses, for the same
+    /// reason: the push names only its underlying, not its expiry, so a page pinned to a different
+    /// expiry must never receive it.</summary>
+    private void OnAggregateBarClosed(string underlying, CdvUnderlyingState state)
+    {
+        if (!_selected.TryGetValue(underlying, out var selected) || !ReferenceEquals(selected, state)) return;
+
+        var ce = state.GetSmoothedCdvSeries(true);
+        var pe = state.GetSmoothedCdvSeries(false);
+        if (ce.Count == 0 || pe.Count == 0) return;
+
+        _ = BroadcastAggregateBarClosedAsync(new CdvBarClosedPush(underlying, ce[^1].Time, ce[^1].Obv, pe[^1].Obv));
+    }
+
+    private async Task BroadcastAggregateBarClosedAsync(CdvBarClosedPush push)
+    {
+        try
+        {
+            await _hub.Clients.All.SendAsync("cdvBarClosed", push);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to broadcast a CDV bar-closed push for {Underlying}.", push.Underlying);
         }
     }
 

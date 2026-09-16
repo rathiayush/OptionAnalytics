@@ -182,6 +182,16 @@ function toLinePoint(p, valueKeys) {
   return point
 }
 
+// Appends a live-pushed point to a REST-seeded series, replacing the last entry instead of
+// duplicating it when both share the same time - the same "keep the latest at this time" rule
+// CdvUnderlyingState.UpdateBar_NoLock itself applies server-side, and sanitizeSeries mirrors here.
+function appendOrReplaceLast(points, point) {
+  if (points.length > 0 && points[points.length - 1].time === point.time) {
+    return [...points.slice(0, -1), point]
+  }
+  return [...points, point]
+}
+
 function mergeLiveBar(bars, liveBar) {
   if (!liveBar) return bars
   return [...bars.filter((b) => b.time !== liveBar.time), liveBar].sort((a, b) => a.time - b.time)
@@ -340,15 +350,17 @@ function fmtNum(v) {
 // to a fresh candle showing the opposite is a correctness bug, not a cosmetic one - onReconnected
 // is the hook a caller uses to fully re-fetch from REST (the source of truth) rather than trust
 // whatever incremental state survived the gap.
-function useHub(onSpotUpdate, onCdvUpdate, onConfluenceAlert, onReconnected) {
+function useHub(onSpotUpdate, onCdvUpdate, onConfluenceAlert, onReconnected, onCdvBarClosed) {
   const spotHandlerRef = useRef(onSpotUpdate)
   const cdvHandlerRef = useRef(onCdvUpdate)
   const alertHandlerRef = useRef(onConfluenceAlert)
   const reconnectedHandlerRef = useRef(onReconnected)
+  const cdvBarClosedHandlerRef = useRef(onCdvBarClosed)
   spotHandlerRef.current = onSpotUpdate
   cdvHandlerRef.current = onCdvUpdate
   alertHandlerRef.current = onConfluenceAlert
   reconnectedHandlerRef.current = onReconnected
+  cdvBarClosedHandlerRef.current = onCdvBarClosed
 
   useEffect(() => {
     const connection = new signalR.HubConnectionBuilder()
@@ -359,6 +371,9 @@ function useHub(onSpotUpdate, onCdvUpdate, onConfluenceAlert, onReconnected) {
     connection.on('spotUpdate', (snapshot) => spotHandlerRef.current(snapshot))
     connection.on('cdvUpdate', (snapshot) => cdvHandlerRef.current(snapshot))
     connection.on('confluenceAlert', (alert) => alertHandlerRef.current(alert))
+    // Pushed the instant the aggregate CDV bar closes - see CdvHostedService.OnAggregateBarClosed.
+    // Lets the CDV lookback table append this point instead of re-fetching GET .../lookback.
+    connection.on('cdvBarClosed', (point) => cdvBarClosedHandlerRef.current?.(point))
     // Fires after automatic reconnect actually succeeds (not on the initial connect, which the
     // page's own mount-time fetches already cover) - see this function's own doc comment for why
     // a resync here, not just letting new events trickle in, is what a correctness-sensitive page
@@ -831,45 +846,55 @@ function renderPercent(v) {
   return <Text style={{ color }}>{v > 0 ? '+' : ''}{v.toFixed(2)}%</Text>
 }
 
-// CE/PE %-change over configurable lookback windows, off the backend's EMA-smoothed series -
-// mirrors the "Multi-Lookback" table in the Pine indicators these are ported from, and is used for
-// both CDV (endpoint "lookback", default 3/5/7 bars) and OBV (endpoint "obv-lookback", default
-// 20/25/30 - the periods that Pine's own OBV multi-lookback table defaults to). The bars selector
-// accepts free-form numbers (antd's tags mode), not just the preset options, so "configurable"
-// isn't limited to a fixed list. The chosen bars are remembered under `storageKey` (a distinct key
-// per instance - the CDV and OBV tables' choices are independent) so a reload doesn't reset back
-// to the default.
-function LookbackTable({ underlying, expiry, timeframe, cdvSnapshot, endpoint = 'lookback', title = 'CE / PE Lookback % Change', defaultBars = DEFAULT_LOOKBACK_BARS, storageKey }) {
+// Ports CdvUnderlyingState.ComputeLookbackChange exactly: null percentChange whenever the earlier
+// reading is exactly zero or sits on the opposite side of zero from the current one (a value that
+// crossed zero within the window) - dividing by a level that was merely near zero, rather than
+// exactly zero, is what produced wildly misleading swings (e.g. -900%+) this guard suppresses.
+// `series` is already bucketed-and-smoothed (see LookbackTable below); each entry's `.obv` field is
+// the value regardless of whether it came from a CDV or OBV series (both use that same field name
+// on the wire - see ObvPoint).
+function computeLookbackChange(series, barsAgo) {
+  const lastIndex = series.length - 1
+  if (lastIndex < 0) return { bars: barsAgo, current: null, previous: null, percentChange: null }
+  const current = series[lastIndex].obv
+  const previousIndex = lastIndex - barsAgo
+  if (previousIndex < 0) return { bars: barsAgo, current, previous: null, percentChange: null }
+  const previous = series[previousIndex].obv
+  if (previous === 0 || Math.sign(current) !== Math.sign(previous))
+    return { bars: barsAgo, current, previous, percentChange: null }
+  return { bars: barsAgo, current, previous, percentChange: ((current - previous) / Math.abs(previous)) * 100 }
+}
+
+// CE/PE %-change over configurable lookback windows, off an already EMA-smoothed series - mirrors
+// the "Multi-Lookback" table in the Pine indicators these are ported from, and is used for both CDV
+// (`smoothedCe`/`smoothedPe`, backed by CdvUnderlyingState.GetSmoothedCdvSeries) and OBV (the same
+// `obvCe`/`obvPe` state the OBV chart itself already holds, backed by GetObvSeries). Both series are
+// seeded once via REST when a page picks an underlying and then grown live by SignalR pushes (the
+// CDV chart's "cdvBarClosed" handler, OBV's own existing per-bar refetch) - this component itself
+// makes no network calls at all, computing the whole table client-side from whatever series it's
+// handed via aggregateLine (the same bucket-the-already-smoothed-series convention the CDV/OBV
+// charts use for display) followed by computeLookbackChange above. The bars selector accepts
+// free-form numbers (antd's tags mode), not just the preset options, so "configurable" isn't
+// limited to a fixed list. The chosen bars are remembered under `storageKey` (a distinct key per
+// instance - the CDV and OBV tables' choices are independent) so a reload doesn't reset back to
+// the default.
+function LookbackTable({ smoothedCe, smoothedPe, timeframe, title = 'CE / PE Lookback % Change', defaultBars = DEFAULT_LOOKBACK_BARS, storageKey }) {
   const [bars, setBars] = usePersistedState(storageKey, defaultBars)
-  const [table, setTable] = useState(null)
-  const lastBarTimeRef = useRef(null)
 
-  // Without &timeframe=, "N bars ago" silently meant N native 1-minute bars no matter what
-  // timeframe the chart next to this table was showing - on a 3-minute chart, the table's own
-  // longest window (30 bars) reached only 30 minutes back, a third as far as it looked like it
-  // should sitting beside 3-minute candles. Passing the SAME timeframe the rest of the dashboard
-  // is on is what makes "30 bars ago" here mean the same thing it means on that chart.
-  const load = (barsToUse) => {
-    fetch(withExpiry(`/api/cdv/${underlying}/${endpoint}?bars=${barsToUse.join(',')}&timeframe=${timeframe}`, expiry))
-      .then((r) => r.json())
-      .then(setTable)
-      .catch((err) => console.error(`Failed to load ${endpoint} table:`, err))
-  }
+  // Without this bucketing, "N bars ago" would silently mean N native 1-minute bars no matter what
+  // timeframe the chart next to this table is showing - on a 3-minute chart, the table's own
+  // longest window (30 bars) would reach only 30 minutes back, a third as far as it looks like it
+  // should sitting beside 3-minute candles. Bucketing to the SAME timeframe the rest of the
+  // dashboard is on is what makes "30 bars ago" here mean the same thing it means on that chart.
+  const ceLine = useMemo(() => aggregateLine(smoothedCe.map((p) => toLinePoint(p, ['obv'])), timeframe), [smoothedCe, timeframe])
+  const peLine = useMemo(() => aggregateLine(smoothedPe.map((p) => toLinePoint(p, ['obv'])), timeframe), [smoothedPe, timeframe])
 
-  useEffect(() => { load(bars) }, [underlying, timeframe, bars.join(',')])
+  const table = useMemo(() => ({
+    ce: bars.map((n) => computeLookbackChange(ceLine, n)),
+    pe: bars.map((n) => computeLookbackChange(peLine, n)),
+  }), [ceLine, peLine, bars])
 
-  // Refetch whenever the CDV bar closes - same "new minute" trigger the OBV refetch elsewhere uses.
-  useEffect(() => {
-    const barTime = cdvSnapshot?.currentBar?.time ?? null
-    if (barTime === lastBarTimeRef.current) return
-    lastBarTimeRef.current = barTime
-    load(bars)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cdvSnapshot?.currentBar?.time])
-
-  const rows = table
-    ? table.ce.map((c, i) => ({ key: c.bars, bars: c.bars, cePercent: c.percentChange, pePercent: table.pe[i]?.percentChange }))
-    : []
+  const rows = table.ce.map((c, i) => ({ key: c.bars, bars: c.bars, cePercent: c.percentChange, pePercent: table.pe[i]?.percentChange }))
 
   return (
     <Card
@@ -895,20 +920,16 @@ function LookbackTable({ underlying, expiry, timeframe, cdvSnapshot, endpoint = 
         </Space>
       }
     >
-      {!table ? (
-        <Text type="secondary">Loading…</Text>
-      ) : (
-        <Table
-          size="small"
-          pagination={false}
-          dataSource={rows}
-          columns={[
-            { title: 'Lookback', dataIndex: 'bars', key: 'bars', render: (b) => `${b} bars ago` },
-            { title: 'CE % Change', dataIndex: 'cePercent', key: 'cePercent', render: renderPercent },
-            { title: 'PE % Change', dataIndex: 'pePercent', key: 'pePercent', render: renderPercent },
-          ]}
-        />
-      )}
+      <Table
+        size="small"
+        pagination={false}
+        dataSource={rows}
+        columns={[
+          { title: 'Lookback', dataIndex: 'bars', key: 'bars', render: (b) => `${b} bars ago` },
+          { title: 'CE % Change', dataIndex: 'cePercent', key: 'cePercent', render: renderPercent },
+          { title: 'PE % Change', dataIndex: 'pePercent', key: 'pePercent', render: renderPercent },
+        ]}
+      />
     </Card>
   )
 }
@@ -1001,6 +1022,12 @@ function DashboardPage() {
   const [obvCe, setObvCe] = useState([])
   const [obvPe, setObvPe] = useState([])
 
+  // The EMA-smoothed CDV series the lookback table's %-change is computed off - a separate line
+  // from cdvSeries above (that one is the RAW running total the chart displays). Seeded once here
+  // and then grown by the "cdvBarClosed" SignalR push as each new bar closes, never re-fetched.
+  const [cdvSmoothedCe, setCdvSmoothedCe] = useState([])
+  const [cdvSmoothedPe, setCdvSmoothedPe] = useState([])
+
   const lastObvBarTimeRef = useRef({ ce: null, pe: null })
 
   // Which expiry THIS PAGE is looking at - see useExpirySelector. Every tracked expiry is held live
@@ -1065,7 +1092,14 @@ function DashboardPage() {
       .then((data) => { if (!cancelledRef.cancelled) { setObvCe(data.ce ?? []); setObvPe(data.pe ?? []) } })
       .catch((err) => console.error('Failed to load OBV series:', err))
 
-    return Promise.allSettled([ce, pe, obv])
+    // One-time seed for the CDV lookback table - see cdvSmoothedCe's own doc comment. Every bar
+    // closed after this arrives over SignalR instead (the 'cdvBarClosed' handler below).
+    const smoothedCdv = fetch(withExpiry(`/api/cdv/${underlying}/smoothed-cdv-series`, expiryParam))
+      .then((r) => r.json())
+      .then((data) => { if (!cancelledRef.cancelled) { setCdvSmoothedCe(data.ce ?? []); setCdvSmoothedPe(data.pe ?? []) } })
+      .catch((err) => console.error('Failed to load smoothed CDV series:', err))
+
+    return Promise.allSettled([ce, pe, obv, smoothedCdv])
   }
 
   // Everything the page shows for one underlying, fetched fresh - the initial [selected] load and
@@ -1178,6 +1212,16 @@ function DashboardPage() {
       if (!selected) return
       refetchCrossoverStates()
       fetchAllData(selected, { cancelled: false })
+    },
+    // The CDV lookback table's own live update - appends the just-closed bar's smoothed CE/PE value
+    // instead of the table re-fetching GET .../lookback itself. Same pinned-expiry guard as the
+    // cdvUpdate handler above: while viewing a non-selected expiry this push describes a different
+    // option chain entirely, and the polling effect below keeps a pinned view current instead.
+    (point) => {
+      if (point.underlying !== selected || expiryParam) return
+      const time = point.time
+      setCdvSmoothedCe((prev) => appendOrReplaceLast(prev, { time, obv: point.cdvCe }))
+      setCdvSmoothedPe((prev) => appendOrReplaceLast(prev, { time, obv: point.cdvPe }))
     },
   )
 
@@ -1394,7 +1438,7 @@ function DashboardPage() {
           )}
         </ChartCard>
 
-        {selected && <LookbackTable underlying={selected} expiry={expiryParam} timeframe={timeframe} cdvSnapshot={cdvSnapshot} storageKey={STORED_CDV_LOOKBACK_BARS} />}
+        {selected && <LookbackTable smoothedCe={cdvSmoothedCe} smoothedPe={cdvSmoothedPe} timeframe={timeframe} storageKey={STORED_CDV_LOOKBACK_BARS} />}
 
         <ChartCard
           title="CE / PE On-Balance Volume (delta-weighted, all tracked strikes)"
@@ -1415,11 +1459,9 @@ function DashboardPage() {
 
         {selected && (
           <LookbackTable
-            underlying={selected}
-            expiry={expiryParam}
+            smoothedCe={obvCe}
+            smoothedPe={obvPe}
             timeframe={timeframe}
-            cdvSnapshot={cdvSnapshot}
-            endpoint="obv-lookback"
             title="OBV Multi-Lookback % Change"
             defaultBars={DEFAULT_LOOKBACK_BARS}
             storageKey={STORED_OBV_LOOKBACK_BARS}

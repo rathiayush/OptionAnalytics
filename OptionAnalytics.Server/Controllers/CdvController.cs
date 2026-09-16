@@ -83,6 +83,19 @@ public sealed class CdvController : ControllerBase
         return Ok(new ObvSeriesResponse(state.GetObvSeries(isCall: true), state.GetObvSeries(isCall: false)));
     }
 
+    /// <summary>One-time seed for the dashboard's CDV lookback table - the same EMA-smoothed CDV
+    /// series GetLookbackTable computes its %-changes off (CdvUnderlyingState.GetSmoothedCdvSeries),
+    /// reused verbatim so there is exactly one place that math happens. Fetched once when a page
+    /// picks an underlying (same pattern as .../series and .../obv-series above); every bar closed
+    /// after that arrives over SignalR instead (see CdvHostedService's "cdvBarClosed" push), so this
+    /// is a seed, not something re-polled.</summary>
+    [HttpGet("{underlying}/smoothed-cdv-series")]
+    public IActionResult GetSmoothedCdvSeries(string underlying, [FromQuery] string? expiry)
+    {
+        if (!TryGetState(underlying, ParseExpiry(expiry), out var state)) return NotFoundResult(underlying);
+        return Ok(new ObvSeriesResponse(state.GetSmoothedCdvSeries(isCall: true), state.GetSmoothedCdvSeries(isCall: false)));
+    }
+
     /// <summary>The previous trading day's reconstructed CDV curve - a separate reference series
     /// for visual comparison against today's live one, never merged into it (CDV resets daily -
     /// see CdvUnderlyingState.Reset). Empty until the day's first backfill batch has run.</summary>
