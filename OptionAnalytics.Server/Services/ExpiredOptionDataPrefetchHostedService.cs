@@ -97,24 +97,8 @@ public sealed class ExpiredOptionDataPrefetchHostedService : BackgroundService
         _logger = logger;
     }
 
-    /// <summary>Hard kill switch, independent of ExpiredOptionDataPrefetchOptions.Enabled - the
-    /// current Postgres instance doesn't have the disk/infra headroom for the ~5.8M rows this job
-    /// would write (see the row-count estimate this was requested after), so this stays true even if
-    /// ExpiredOptionDataPrefetch__Enabled is accidentally left/set true in a deployment's env. Flip
-    /// back to false once the infra is sized for it - nothing else about this class needs to
-    /// change.</summary>
-    // static readonly, not const - a const would fold at compile time and make the code below it
-    // provably unreachable (CS0162), which defeats the point of a flag meant to be flipped back.
-    private static readonly bool ForceDisabledPendingInfra = true;
-
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        if (ForceDisabledPendingInfra)
-        {
-            _logger.LogInformation("Expired-option data prefetch is force-disabled pending more Postgres infra, regardless of ExpiredOptionDataPrefetch:Enabled - skipping.");
-            return;
-        }
-
         // Off by default (see ExpiredOptionDataPrefetchOptions) - set
         // ExpiredOptionDataPrefetch__Enabled=true to opt a deployment into this one-time download.
         if (!_prefetchOptions.Enabled)
