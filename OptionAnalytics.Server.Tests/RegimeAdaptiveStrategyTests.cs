@@ -1,5 +1,6 @@
 using OptionAnalytics.Server.Models;
 using OptionAnalytics.Server.Services.Backtesting;
+using Skender.Stock.Indicators;
 
 namespace OptionAnalytics.Server.Tests;
 
@@ -213,7 +214,7 @@ public sealed class RegimeAdaptiveStrategyTests
         var signals = new RegimeAdaptiveStrategy().EntrySignals(Context(bars), Parameters(p => p["atrExtremePercent"] = 0.0001m));
 
         Assert.DoesNotContain(signals, s => s.Kind == "Entry");
-        Assert.Contains(signals, s => s.Kind == "Rejected" && s.Summary.Contains("Extreme volatility"));
+        Assert.Contains(signals, s => s.Kind == "Rejected" && s.Summary.Contains("reads Volatile"));
     }
 
     [Fact]
@@ -228,5 +229,82 @@ public sealed class RegimeAdaptiveStrategyTests
     {
         var strategy = new RegimeAdaptiveStrategy();
         Assert.Equal(1m, strategy.Parameters.Single(p => p.Key == "requireFlowConfirmation").Default);
+    }
+
+    // ---- ComputeVolatileReasons: direct unit tests against the internal detector (made internal
+    // for exactly this reason - see its own doc comment) with small, hand-built candle sequences,
+    // rather than needing a full cascade fixture that also happens to trip a price-action trigger at
+    // the exact volatile bar. Each test disables every OTHER signal (a very high ratio/percent
+    // effectively never fires) so it isolates the one being tested. ----
+
+    private static List<Candle> CalmThenOneBar(Candle oddBar, int calmBars = 25)
+    {
+        var bars = new List<Candle>();
+        for (var i = 0; i < calmBars; i++) bars.Add(new Candle(T0.AddMinutes(i), 100m, 100.5m, 99.5m, 100m));
+        bars.Add(oddBar);
+        return bars;
+    }
+
+    private static (List<decimal?> AtrPage, List<decimal?> AtrPercentPage) Atr(IReadOnlyList<Candle> bars, int period = 14)
+    {
+        var quotes = bars.Select(c => new Quote { Date = c.Time.UtcDateTime, Open = c.Open, High = c.High, Low = c.Low, Close = c.Close, Volume = 0 }).ToList();
+        var atr = quotes.GetAtr(period).Select(r => (decimal?)r.Atr).ToList();
+        var atrPercent = bars.Select((b, i) => atr[i] is { } a && b.Close != 0 ? (decimal?)(a / b.Close * 100m) : null).ToList();
+        return (atr, atrPercent);
+    }
+
+    [Fact]
+    public void ComputeVolatileReasons_FlagsAtrExpansion_WhenATRSpikesRelativeToItsOwnAverage()
+    {
+        var bars = CalmThenOneBar(new Candle(T0.AddMinutes(25), 100m, 130m, 100m, 115m)); // a single huge-range bar
+        var (atrPage, atrPercentPage) = Atr(bars);
+
+        var reasons = RegimeAdaptiveStrategy.ComputeVolatileReasons(
+            bars, atrPage, atrPercentPage, atrExtremePercent: 1000m, atrAverageLookbackBars: 20, atrExpansionRatio: 1.5m, largeCandleRatio: 1000m, gapAtrMultiple: 1000m);
+
+        Assert.Null(reasons[24]); // still calm the bar before
+        Assert.NotNull(reasons[25]);
+        Assert.Contains("ATR expanded", reasons[25]);
+    }
+
+    [Fact]
+    public void ComputeVolatileReasons_FlagsALargeCandle_RelativeToItsOwnAverageRange()
+    {
+        var bars = CalmThenOneBar(new Candle(T0.AddMinutes(25), 100m, 130m, 100m, 115m));
+        var (atrPage, atrPercentPage) = Atr(bars);
+
+        var reasons = RegimeAdaptiveStrategy.ComputeVolatileReasons(
+            bars, atrPage, atrPercentPage, atrExtremePercent: 1000m, atrAverageLookbackBars: 20, atrExpansionRatio: 1000m, largeCandleRatio: 2m, gapAtrMultiple: 1000m);
+
+        Assert.NotNull(reasons[25]);
+        Assert.Contains("large candle", reasons[25]);
+    }
+
+    [Fact]
+    public void ComputeVolatileReasons_FlagsAnOpeningGap_EvenWhenThatBarsOwnRangeIsTight()
+    {
+        // Bar 25 gaps 15 points up from bar 24's close, but its OWN High-Low range is as tight as
+        // every calm bar around it - isolates the gap check from the large-candle one.
+        var bars = CalmThenOneBar(new Candle(T0.AddMinutes(25), 115m, 115.5m, 114.5m, 115m));
+        var (atrPage, atrPercentPage) = Atr(bars);
+
+        var reasons = RegimeAdaptiveStrategy.ComputeVolatileReasons(
+            bars, atrPage, atrPercentPage, atrExtremePercent: 1000m, atrAverageLookbackBars: 20, atrExpansionRatio: 1000m, largeCandleRatio: 1000m, gapAtrMultiple: 1m);
+
+        Assert.NotNull(reasons[25]);
+        Assert.Contains("opening gap", reasons[25]);
+    }
+
+    [Fact]
+    public void ComputeVolatileReasons_FlagsNothing_OnACalmSteadySeries()
+    {
+        var bars = new List<Candle>();
+        for (var i = 0; i < 30; i++) bars.Add(new Candle(T0.AddMinutes(i), 100m, 100.5m, 99.5m, 100m));
+        var (atrPage, atrPercentPage) = Atr(bars);
+
+        var reasons = RegimeAdaptiveStrategy.ComputeVolatileReasons(
+            bars, atrPage, atrPercentPage, atrExtremePercent: 2.5m, atrAverageLookbackBars: 20, atrExpansionRatio: 1.5m, largeCandleRatio: 2m, gapAtrMultiple: 1m);
+
+        Assert.All(reasons, Assert.Null);
     }
 }
