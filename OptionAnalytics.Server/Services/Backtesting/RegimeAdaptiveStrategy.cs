@@ -201,17 +201,23 @@ public sealed class RegimeAdaptiveStrategy : IBacktestStrategy
     /// <summary>What scales here, and why the rest deliberately does not, now that the cascade's own
     /// BAR SIZES already re-base with the page timeframe (15x/5x/3x/1x - see this class's own doc
     /// comment):
-    ///   - slPoints/tpPoints/atrNormalHighPercent/atrExtremePercent scale with <c>scale</c> - these
-    ///     are all POINT or ATR%-OF-PRICE distances, and a coarser bar naturally covers more price
-    ///     distance even in ordinary noise, so the same raw number would be too tight on a 15-minute
-    ///     page and too loose on a 1-minute one. Same reasoning OptionTradeSimulator.TimeframeScale
-    ///     already applies for every other strategy's own SL/TP.
-    ///   - The four SLOPE-MIN-PERCENT parameters (regime15/confirm3/entry1SlopeMinPercent,
-    ///     chopFlatSlopePercent) ALSO scale with <c>scale</c>, for the exact same reason - a slope is
-    ///     itself a %-price-move-per-N-bars distance, so a coarser REGIME/SETUP/CONFIRM/ENTRY bucket
-    ///     needs a proportionally bigger minimum to mean "trending," not just the 1-minute-tuned
-    ///     number reused as-is (this is the fix for "every timeframe needs its own entry/exit feel,"
-    ///     not the same static numbers stretched over bigger buckets).
+    ///   - slPoints/tpPoints/atrNormalHighPercent/atrExtremePercent AND the four SLOPE-MIN-PERCENT
+    ///     parameters (regime15/confirm3/entry1SlopeMinPercent, chopFlatSlopePercent) all scale with
+    ///     <c>scale</c> - every one of these is a PRICE-DISTANCE threshold (points, ATR%-of-price, or
+    ///     a slope's own %-move-per-N-bars), and a coarser bar naturally covers more price distance
+    ///     even in ordinary noise, so the same raw number would be too tight on a 15-minute page and
+    ///     too loose on a 1-minute one.
+    ///
+    ///     <c>scale</c> here is <c>sqrt(timeframeMinutes)</c> - the standard random-walk scaling for
+    ///     how far price wanders over a longer window (distance grows with the SQUARE ROOT of
+    ///     elapsed time, not linearly) - evaluated at the EXACT page timeframe rather than reusing
+    ///     OptionTradeSimulator.TimeframeScale's shared 3-step bucket (1x/2x/3x collapsing everything
+    ///     &gt;=4 minutes together). This app's own TIMEFRAME_OPTIONS only ever offers 1/3/5/15
+    ///     minutes, and this strategy's whole design point is a genuinely distinct feel per timeframe
+    ///     (bar sizes 3x apart at each step) - a bucket that gives 5-minute and 15-minute pages the
+    ///     identical multiplier defeats that, so this strategy computes its own continuous factor
+    ///     instead: 1x at 1 minute, ~1.73x at 3, ~2.24x at 5, ~3.87x at 15 - four distinct values for
+    ///     the four distinct choices, and it degrades gracefully to any other timeframe too.
     ///   - ADX minimums and RSI bounds do NOT scale - both are already unitless 0-100 oscillators BY
     ///     CONSTRUCTION (that is the entire point of Wilder's normalization), which is exactly why
     ///     classic TA uses the same ADX&gt;25/RSI 30-70 style cutoffs on a 1-minute chart and a
@@ -223,17 +229,17 @@ public sealed class RegimeAdaptiveStrategy : IBacktestStrategy
     ///     lookback at every page timeframe without any further adjustment here.</summary>
     public IReadOnlyDictionary<string, decimal> DefaultsForTimeframe(int timeframeMinutes)
     {
-        var scale = OptionTradeSimulator.TimeframeScale(timeframeMinutes);
+        var scale = (decimal)Math.Sqrt(Math.Max(1, timeframeMinutes));
         return new Dictionary<string, decimal>
         {
-            ["slPoints"] = 10m * scale,
-            ["tpPoints"] = 20m * scale,
-            ["atrNormalHighPercent"] = 1.5m * scale,
-            ["atrExtremePercent"] = 2.5m * scale,
-            ["regime15SlopeMinPercent"] = 0.050m * scale,
-            ["confirm3SlopeMinPercent"] = 0.025m * scale,
-            ["entry1SlopeMinPercent"] = 0.015m * scale,
-            ["chopFlatSlopePercent"] = 0.02m * scale,
+            ["slPoints"] = Math.Round(10m * scale, 2),
+            ["tpPoints"] = Math.Round(20m * scale, 2),
+            ["atrNormalHighPercent"] = Math.Round(1.5m * scale, 2),
+            ["atrExtremePercent"] = Math.Round(2.5m * scale, 2),
+            ["regime15SlopeMinPercent"] = Math.Round(0.050m * scale, 3),
+            ["confirm3SlopeMinPercent"] = Math.Round(0.025m * scale, 3),
+            ["entry1SlopeMinPercent"] = Math.Round(0.015m * scale, 3),
+            ["chopFlatSlopePercent"] = Math.Round(0.02m * scale, 3),
         };
     }
 
