@@ -325,6 +325,13 @@ public sealed class CdvUnderlyingState
     /// back into this instance must never deadlock against it).</summary>
     public event Action<bool /* isCall */, Candle>? AtmBarClosed;
 
+    /// <summary>Raised when the AGGREGATE CE/PE total just closed a 1-minute bar - i.e. every tick
+    /// that folds into ANY tracked strike, not just the one at ATM (see AtmBarClosed for that). This
+    /// is what a subscriber uses to know GetSmoothedCdvSeries/GetObvSeries have a new tail value
+    /// worth pushing, without having to poll them on every tick to find out. Invoked outside _lock,
+    /// same reasoning as AtmBarClosed.</summary>
+    public event Action? AggregateBarClosed;
+
     /// <summary>Folds one option tick into its contract's running CDV using the tick rule (price
     /// up from the last trade = buy, down = sell, unchanged = carry the prior direction) weighted
     /// by a sigmoid approximation of the contract's delta given <paramref name="currentSpot"/> -
@@ -337,6 +344,7 @@ public sealed class CdvUnderlyingState
     {
         bool? closedIsCall = null;
         Candle closedBar = default;
+        CdvBarPoint? closedAggregateBar = null;
 
         lock (_lock)
         {
@@ -381,10 +389,11 @@ public sealed class CdvUnderlyingState
             }
 
             LastUpdateUtc = DateTimeOffset.UtcNow;
-            UpdateBar_NoLock(tick.ExchangeTimestamp);
+            closedAggregateBar = UpdateBar_NoLock(tick.ExchangeTimestamp);
         }
 
         if (closedIsCall is { } isCall) AtmBarClosed?.Invoke(isCall, closedBar);
+        if (closedAggregateBar is not null) AggregateBarClosed?.Invoke();
     }
 
     /// <summary>Sigmoid moneyness weighting - the same formula the Pine "delta auto" indicator
@@ -593,10 +602,14 @@ public sealed class CdvUnderlyingState
         return buyVol - sellVol;
     }
 
-    private void UpdateBar_NoLock(DateTimeOffset timestamp)
+    /// <summary>Returns the bar that just closed (the previous <see cref="_currentBar"/>), or null
+    /// when this tick only extended the still-forming one - what ApplyTick uses to raise
+    /// AggregateBarClosed only on a genuine close, not on every tick.</summary>
+    private CdvBarPoint? UpdateBar_NoLock(DateTimeOffset timestamp)
     {
         var (ceCdv, peCdv) = TotalsNoLock();
         var minute = new DateTimeOffset(timestamp.Year, timestamp.Month, timestamp.Day, timestamp.Hour, timestamp.Minute, 0, timestamp.Offset);
+        CdvBarPoint? justClosed = null;
 
         if (_currentBar is not { } bar || bar.Time != minute)
         {
@@ -609,6 +622,7 @@ public sealed class CdvUnderlyingState
                     _closedBars[^1] = previous;
                 else
                     _closedBars.Add(previous);
+                justClosed = previous;
             }
             _currentBar = new CdvBarPoint(minute, ceCdv, peCdv);
         }
@@ -616,6 +630,8 @@ public sealed class CdvUnderlyingState
         {
             _currentBar = bar with { CeCdv = ceCdv, PeCdv = peCdv };
         }
+
+        return justClosed;
     }
 
     private (decimal Ce, decimal Pe) TotalsNoLock()
