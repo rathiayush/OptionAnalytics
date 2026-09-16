@@ -110,10 +110,17 @@ public sealed class BacktestService
 
     /// <summary>Every registered IBacktestStrategy's metadata (key/name/description/parameters) -
     /// what the Backtrack page needs to populate its strategy dropdown and render each one's own
-    /// parameter controls generically. Ordered by Name for a stable, readable dropdown.</summary>
-    public IReadOnlyList<BacktestStrategyInfo> GetStrategies() =>
+    /// parameter controls generically. Ordered by Name for a stable, readable dropdown.
+    ///
+    /// <paramref name="timeframeMinutes"/>, when given, applies that strategy's own
+    /// DefaultsForTimeframe on top of its plain Parameters (see BacktestUtil.
+    /// ApplyTimeframeDefaults) - the page re-fetches this whenever its own timeframe selector
+    /// changes, so a freshly-populated parameter form starts from values suited to whichever
+    /// timeframe is now selected instead of one fixed number that only really fits one of
+    /// them.</summary>
+    public IReadOnlyList<BacktestStrategyInfo> GetStrategies(int? timeframeMinutes = null) =>
         _strategies.Values
-            .Select(s => new BacktestStrategyInfo(s.Key, s.Name, s.Description, s.Parameters))
+            .Select(s => new BacktestStrategyInfo(s.Key, s.Name, s.Description, BacktestUtil.ApplyTimeframeDefaults(s, timeframeMinutes)))
             .OrderBy(s => s.Name)
             .ToList();
 

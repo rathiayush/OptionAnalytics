@@ -246,7 +246,7 @@ export default function ExpiredBacktestPage() {
   const [strategies, setStrategies] = useState([])
   const [strategyKey, setStrategyKey] = usePersistedState(STORED_STRATEGY_KEY, null)
   const [paramValues, setParamValues] = usePersistedState(STORED_PARAM_VALUES, {})
-  const paramsForStrategyRef = useRef(strategyKey)
+  const paramsForStrategyRef = useRef(`${strategyKey}:${timeframe}`)
 
   const [result, setResult] = useState(null) // null = never run yet
   const [loading, setLoading] = useState(false)
@@ -344,26 +344,34 @@ export default function ExpiredBacktestPage() {
 
   useEffect(() => {
     if (underlying && !UNDERLYINGS.includes(underlying)) setUnderlying('NIFTY')
-    fetch('/api/expired-backtest/strategies')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Re-fetched whenever this page's own timeframe changes, not just once on mount - see
+  // BacktestPage's own identical effect for why (a strategy's points-based parameter defaults can
+  // differ per timeframe, IBacktestStrategy.DefaultsForTimeframe on the backend).
+  useEffect(() => {
+    fetch(`/api/expired-backtest/strategies?timeframe=${timeframe}`)
       .then((r) => r.json())
       .then((list) => {
         setStrategies(list ?? [])
         setStrategyKey((current) => (list?.some((s) => s.key === current) ? current : list?.[0]?.key ?? null))
       })
       .catch((err) => console.error('Failed to load expired-backtest strategies:', err))
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [timeframe])
 
-  // Reset every parameter to the newly-picked strategy's own declared defaults - same rule
-  // BacktestPage uses, skipped when paramValues already belongs to this exact strategy (the restore-
-  // from-storage case on first load).
+  // Reset every parameter to the newly-picked strategy's own declared (timeframe-adjusted) defaults
+  // - same rule BacktestPage uses, including treating a timeframe change the same as a strategy
+  // switch (paramsForStrategyRef keyed on both), skipped only when paramValues already belongs to
+  // this exact (strategy, timeframe) pair (the restore-from-storage case on first load).
   useEffect(() => {
     if (!strategy) return
-    if (paramsForStrategyRef.current === strategy.key) return
+    const key = `${strategy.key}:${timeframe}`
+    if (paramsForStrategyRef.current === key) return
     setParamValues(Object.fromEntries(strategy.parameters.map((p) => [p.key, p.default])))
-    paramsForStrategyRef.current = strategy.key
+    paramsForStrategyRef.current = key
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [strategy])
+  }, [strategy, timeframe])
 
   const canRun = Boolean(underlying && expiryDate && strategyKey)
 

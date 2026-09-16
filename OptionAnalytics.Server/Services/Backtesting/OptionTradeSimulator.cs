@@ -61,6 +61,20 @@ public static class OptionTradeSimulator
     public static BacktestParameterSpec StrikeOffsetParameter() =>
         new("otmSteps", "Strike offset from ATM (+OTM / -ITM)", Default: 1, Min: -8, Max: 8, Step: 1);
 
+    /// <summary>How much wider a points-based stop/target should default to at a coarser page
+    /// timeframe than the base 1-minute one - larger bars mean larger typical price swings, so a
+    /// fixed points value tuned for 1-minute bars often reads as too tight once bars widen to 5
+    /// minutes. See IBacktestStrategy.DefaultsForTimeframe's own doc comment for where this feeds
+    /// in. A simple bucketed multiplier at the app's own selectable 1/3/5-minute timeframes,
+    /// deliberately coarse and easy to retune by eye rather than a precise but unverifiable
+    /// curve.</summary>
+    public static decimal TimeframeScale(int timeframeMinutes) => timeframeMinutes switch
+    {
+        <= 1 => 1m,
+        <= 3 => 2m,
+        _ => 3m,
+    };
+
     public static BacktestParameterSpec StopLossParameter() =>
         new("slPoints", "Stop loss (points)", Default: 10, Min: 0.05m, Max: 1000, Step: 0.5m);
 

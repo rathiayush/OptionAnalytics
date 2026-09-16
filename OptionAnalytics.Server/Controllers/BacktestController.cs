@@ -25,9 +25,12 @@ public sealed class BacktestController : ControllerBase
 
     /// <summary>Every registered strategy's metadata - key, name, description, and the parameter
     /// controls the Backtrack page should render for it. See Services.Backtesting.IBacktestStrategy
-    /// for how to add a new one; it shows up here automatically once registered in Program.cs.</summary>
+    /// for how to add a new one; it shows up here automatically once registered in Program.cs.
+    /// ?timeframe=, when given, applies that strategy's own per-timeframe Default overrides (see
+    /// IBacktestStrategy.DefaultsForTimeframe) - the page passes its own currently-selected
+    /// timeframe and re-fetches this whenever that selector changes.</summary>
     [HttpGet("strategies")]
-    public IActionResult GetStrategies() => Ok(_backtest.GetStrategies());
+    public IActionResult GetStrategies([FromQuery] int? timeframe = null) => Ok(_backtest.GetStrategies(timeframe));
 
     /// <summary>Runs one registered strategy (?strategy=, defaulting to the 5 EMA one) over the
     /// underlying's current history at the given timeframe - see

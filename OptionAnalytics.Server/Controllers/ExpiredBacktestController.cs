@@ -20,9 +20,11 @@ public sealed class ExpiredBacktestController : ControllerBase
 
     /// <summary>Just the strategies this page can run - see ExpiredOptionBacktestService.
     /// SupportedStrategyKeys. Same BacktestStrategyInfo shape as GET /api/backtest/strategies, so
-    /// the frontend's existing generic strategy-picker/parameter-control code works unchanged.</summary>
+    /// the frontend's existing generic strategy-picker/parameter-control code works unchanged.
+    /// ?timeframe=, when given, applies per-timeframe Default overrides - see BacktestController.
+    /// GetStrategies' own doc comment.</summary>
     [HttpGet("strategies")]
-    public IActionResult GetStrategies() => Ok(_service.GetStrategies());
+    public IActionResult GetStrategies([FromQuery] int? timeframe = null) => Ok(_service.GetStrategies(timeframe));
 
     /// <summary>Every expiry date this page will actually accept for the given underlying/cadence -
     /// see ExpiredOptionBacktestService.GetAvailableExpiries for what "accept" means (a genuine

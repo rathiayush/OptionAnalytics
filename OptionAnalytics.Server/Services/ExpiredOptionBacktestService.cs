@@ -219,10 +219,12 @@ public sealed class ExpiredOptionBacktestService
     }
 
     /// <summary>Metadata for just the strategies this page can actually run - see
-    /// SupportedStrategyKeys. Same BacktestStrategyInfo shape BacktestService.GetStrategies uses, so
-    /// the frontend's existing generic parameter-rendering code works unchanged here.</summary>
-    public IReadOnlyList<BacktestStrategyInfo> GetStrategies() =>
-        _strategies.Values.Select(s => new BacktestStrategyInfo(s.Key, s.Name, s.Description, s.Parameters)).OrderBy(s => s.Name).ToList();
+    /// SupportedStrategyKeys. Same BacktestStrategyInfo shape BacktestService.GetStrategies uses
+    /// (including the same optional per-timeframe default overrides - see BacktestUtil.
+    /// ApplyTimeframeDefaults), so the frontend's existing generic parameter-rendering code works
+    /// unchanged here.</summary>
+    public IReadOnlyList<BacktestStrategyInfo> GetStrategies(int? timeframeMinutes = null) =>
+        _strategies.Values.Select(s => new BacktestStrategyInfo(s.Key, s.Name, s.Description, BacktestUtil.ApplyTimeframeDefaults(s, timeframeMinutes))).OrderBy(s => s.Name).ToList();
 
     /// <summary>Every date this page will actually accept for expiryDate - a REAL listed expiry
     /// (see ExpiryCalendar), not just any Tuesday-ish date a user might type, since the anchoring
