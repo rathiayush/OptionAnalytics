@@ -21,6 +21,7 @@ builder.Services.Configure<DhanOptions>(builder.Configuration.GetSection(DhanOpt
 builder.Services.Configure<TelegramOptions>(builder.Configuration.GetSection(TelegramOptions.SectionName));
 builder.Services.Configure<AuthOptions>(builder.Configuration.GetSection(AuthOptions.SectionName));
 builder.Services.Configure<HistoricalDataPrefetchOptions>(builder.Configuration.GetSection(HistoricalDataPrefetchOptions.SectionName));
+builder.Services.Configure<ExpiredOptionDataPrefetchOptions>(builder.Configuration.GetSection(ExpiredOptionDataPrefetchOptions.SectionName));
 builder.Services.AddHttpClient<TelegramAlertService>();
 
 builder.Services.AddSingleton<AuthService>();
@@ -168,6 +169,12 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<ConfluenceAlertSer
 // both of those consume it directly.
 builder.Services.AddSingleton<HistoricalSpotDataStore>();
 builder.Services.AddHostedService<HistoricalSpotDataPrefetchHostedService>();
+
+// Same pattern, for the rolling-option (CE/PE premium) side ExpiredOptionBacktestService.
+// FetchAcrossSegmentsAsync reads from - see ExpiredOptionDataStore/
+// ExpiredOptionDataPrefetchHostedService's own doc comments.
+builder.Services.AddSingleton<ExpiredOptionDataStore>();
+builder.Services.AddHostedService<ExpiredOptionDataPrefetchHostedService>();
 
 // Every registered IBacktestStrategy is picked up automatically by BacktestService's
 // IEnumerable<IBacktestStrategy> constructor param - add a strategy by implementing the

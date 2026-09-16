@@ -23,6 +23,9 @@ services:
       # Where the one-time historical spot prefetch caches its NIFTY/BANKNIFTY CSVs - onto the same
       # persistent volume, or the whole year would be re-fetched from Dhan on every redeploy.
       Storage__HistoricalDataPath: /app/data/historical
+      # Same idea for the rolling-option (CE/PE premium) prefetch's own per-expiry CSVs - see
+      # ExpiredOptionDataPrefetchHostedService.
+      Storage__ExpiredOptionDataPath: /app/data/expired-option-data
       # Keeps the login cookie's signing/encryption key ring on the same persistent volume, so
       # everyone stays logged in across a redeploy instead of the whole key ring (and every
       # outstanding session) resetting every time the container restarts.
@@ -44,6 +47,11 @@ services:
       # off by default like Telegram above; a real year of Dhan traffic, so opt a deployment into it
       # deliberately rather than it running the moment Dhan credentials exist.
       HistoricalDataPrefetch__Enabled: ${HISTORICAL_DATA_PREFETCH_ENABLED:-false}
+      # Same idea, for the much larger one-time rolling-option (CE/PE premium, every expiry, the
+      # whole ATM+-10 band) download - see ExpiredOptionDataPrefetchHostedService's own doc comment
+      # for just how much Dhan traffic this is. Off by default; expect this to run for tens of
+      # minutes the first time it is turned on.
+      ExpiredOptionDataPrefetch__Enabled: ${EXPIRED_OPTION_DATA_PREFETCH_ENABLED:-false}
 
       # Login - the whole app requires one of these two accounts (see AuthOptions/AuthController).
       # Credentials are fixed in appsettings.json (not read from the environment) - only the emails
