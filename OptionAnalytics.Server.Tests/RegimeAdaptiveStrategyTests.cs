@@ -1,88 +1,49 @@
 using OptionAnalytics.Server.Models;
 using OptionAnalytics.Server.Services.Backtesting;
-using Skender.Stock.Indicators;
 
 namespace OptionAnalytics.Server.Tests;
 
-/// <summary>Covers RegimeAdaptiveStrategy's full 15M-&gt;5M-&gt;3M-&gt;1M cascade end to end. Needs a
-/// LONG fixture (thousands of 1-minute bars) since the 15-minute regime alone needs ~55 fifteen-
-/// minute bars (825 minutes) just to warm up its own EMA50 - built as a repeating "climb, then a
-/// sharp 20-minute pullback, then resume" cycle so the 1-minute EMA5/13 pullback-rejection trigger
-/// fires repeatedly once the whole cascade is confirmed to line up (via a temporary Assert.Fail dump
-/// of every signal this fixture produces, the same "confirm the real output before asserting on it"
-/// approach LuxAlgoSrBreakStrategyTests' own history used for GetPivots).
-///
-/// The cycle/step numbers here (100-bar cycle, 20-bar pullback, -0.6/+0.4 point steps) were re-picked
-/// after fixing a look-ahead bias in AlignStepToTime/AlignToTime (both now compare each bar's own
-/// CLOSE time across timeframes instead of its open time - see their own doc comments): the 1-minute
-/// EMA5/13 cross and the now-honestly-lagging 3-minute confirmation bar no longer land on the exact
-/// same synthetic bar under the old 60/50/10 shape, which is why entry1CrossWithinBars exists (see
-/// the strategy's own doc comment) and why this fixture's numbers changed - re-verified via a
-/// diagnostic dump that this shape produces 17 full-cascade entries, evenly spread, not a one-off.
-///
-/// confirm3SlopeMinPercent/entry1SlopeMinPercent are set to 0 in these tests specifically (not this
-/// strategy's own production defaults of 0.025%/0.015%) - a SHARP V-shaped synthetic pullback (the
-/// simplest fixture to build and reason about) reads a genuinely negative EMA slope on the 3-minute/
-/// 1-minute charts for the few bars right at the bottom of the dip, which a real, noisier market's
-/// own gentler pullbacks would not necessarily do - disabling just these two slope gates isolates the
-/// rest of the cascade (regime score, EMA stacks, ADX, VWAP side, RSI-neutral) rather than requiring a
-/// second, much fussier fixture shape purely to also satisfy them.</summary>
+/// <summary>Covers the full rewrite of RegimeAdaptiveStrategy per the user's own detailed
+/// "ADAPTIVE OPTIONS SELLING STRATEGY" specification - see the class's own doc comment for the
+/// exact rules. REGIME classification itself (ClassifyRegime) is tested directly with small,
+/// hand-built indicator series - confirmed via a diagnostic dump that a block-wide perturbation
+/// self-dilutes its own rolling average, so only the LAST few bars are perturbed, keeping the
+/// rolling average close to the untouched baseline. End-to-end fixtures then cover the cascade of
+/// entry/exit/concurrency behaviour built on top of that classification.</summary>
 public sealed class RegimeAdaptiveStrategyTests
 {
-    private static readonly DateTimeOffset T0 = new(2026, 1, 5, 3, 45, 0, TimeSpan.Zero); // 09:15 IST
+    private static readonly DateTimeOffset T0 = new(2026, 1, 5, 3, 45, 0, TimeSpan.Zero);
 
-    // Climbs by 0.4/bar for 80 bars, then a sharp 20-bar pullback of -0.6/bar, repeating every 100
-    // bars - confirmed (via a diagnostic dump) to produce 17 full-cascade Bullish entries across the
-    // fixture, at the bar the 1-minute EMA5 crosses back over EMA13 (within entry1CrossWithinBars) as
-    // the climb resumes.
-    private static List<Candle> UptrendFixture(int bars = 6000)
+    // A steady uptrend (ADX/DI + EMA slope all confirm) - confirmed via a diagnostic dump to read
+    // Trend/Bullish throughout once past warmup.
+    private static List<Candle> TrendFixture(int bars = 6000, decimal step = 0.5m)
     {
         var result = new List<Candle>(bars);
         var price = 20000m;
         for (var i = 0; i < bars; i++)
         {
             var open = price;
-            var inPullback = i % 100 >= 80;
-            price += inPullback ? -0.6m : 0.4m;
+            price += step;
             var close = price;
-            result.Add(new Candle(T0.AddMinutes(i), open, Math.Max(open, close), Math.Min(open, close), close));
+            result.Add(new Candle(T0.AddMinutes(i), open, Math.Max(open, close) + 0.3m, Math.Min(open, close) - 0.3m, close));
         }
         return result;
     }
 
-    // An independent (not reflected) descending construction, same cycle shape with every role
-    // sign-flipped - confirmed via the same diagnostic dump to produce the exact mirrored result
-    // (identical entry count and timing, Bearish throughout).
-    private static List<Candle> DowntrendFixture(int bars = 6000)
+    // A steady sine-wave oscillation - confirmed via a diagnostic dump to read Neutral throughout
+    // (its own ATR%/BB-width stay roughly constant relative to their own rolling average, so it
+    // never dips far enough below to read as the stricter Range - Neutral is RANGE's own sibling in
+    // this design and shares the identical Short Strangle execution, so this still exercises that
+    // path end to end).
+    private static List<Candle> RangeFixture(int bars = 6000, decimal amplitude = 15m, int period = 40)
     {
         var result = new List<Candle>(bars);
-        var price = 20000m;
+        var mid = 20000m;
         for (var i = 0; i < bars; i++)
         {
-            var open = price;
-            var inBounce = i % 100 >= 80;
-            price += inBounce ? 0.6m : -0.4m;
-            var close = price;
-            result.Add(new Candle(T0.AddMinutes(i), open, Math.Max(open, close), Math.Min(open, close), close));
-        }
-        return result;
-    }
-
-    // Same shape as UptrendFixture but with a 300-bar cycle (divisible by 1x, 3x, 5x... page
-    // timeframes) so the cascade's REGIME/SETUP/CONFIRM/ENTRY layers still land on clean bucket
-    // boundaries once re-based to a non-1-minute page timeframe - used only by the timeframe-scaling
-    // test below, confirmed via a diagnostic dump to produce entries at tf=3 (45M/15M/9M/3M layers).
-    private static List<Candle> ScalableUptrendFixture(int bars = 20000)
-    {
-        var result = new List<Candle>(bars);
-        var price = 20000m;
-        for (var i = 0; i < bars; i++)
-        {
-            var open = price;
-            var inPullback = i % 300 >= 240;
-            price += inPullback ? -0.2m : 0.13333m;
-            var close = price;
-            result.Add(new Candle(T0.AddMinutes(i), open, Math.Max(open, close), Math.Min(open, close), close));
+            var open = mid + amplitude * (decimal)Math.Sin(2 * Math.PI * i / period);
+            var close = mid + amplitude * (decimal)Math.Sin(2 * Math.PI * (i + 1) / period);
+            result.Add(new Candle(T0.AddMinutes(i), open, Math.Max(open, close) + 0.2m, Math.Min(open, close) - 0.2m, close));
         }
         return result;
     }
@@ -90,127 +51,99 @@ public sealed class RegimeAdaptiveStrategyTests
     private static List<CandleWithVolume> Volume(IReadOnlyList<Candle> bars) =>
         bars.Select(b => new CandleWithVolume(b.Time, b.Open, b.High, b.Low, b.Close, 1000)).ToList();
 
-    private static BacktestStrategyContext Context(
-        IReadOnlyList<Candle> oneMinuteBars, IReadOnlyList<ObvPoint>? obvCe = null, IReadOnlyList<ObvPoint>? obvPe = null, int timeframeMinutes = 1) => new()
+    private static BacktestStrategyContext Context(IReadOnlyList<Candle> oneMin, int timeframeMinutes = 1)
     {
-        Underlying = "NIFTY",
-        TimeframeMinutes = timeframeMinutes,
-        Step = 50,
-        SpotBars = timeframeMinutes == 1 ? oneMinuteBars : BacktestUtil.AggregateCandles(oneMinuteBars, timeframeMinutes),
-        SpotBarsOneMinute = oneMinuteBars,
-        SpotVolumeBarsOneMinute = Volume(oneMinuteBars),
-        ConfluenceSignalsAscending = Array.Empty<BacktestSignal>(),
-        AllSignals = Array.Empty<BacktestSignal>(),
-        ObvCeSeries = obvCe ?? Array.Empty<ObvPoint>(),
-        ObvPeSeries = obvPe ?? Array.Empty<ObvPoint>(),
-        CdvCeSeries = Array.Empty<ObvPoint>(),
-        CdvPeSeries = Array.Empty<ObvPoint>(),
-        GetOptionBars = (_, _) => Array.Empty<Candle>(),
-        GetOptionBarsOneMinute = (_, _) => Array.Empty<Candle>(),
-        AtmCeBars = Array.Empty<Candle>(),
-        AtmPeBars = Array.Empty<Candle>(),
-        AtmCeVolumeBars = Array.Empty<CandleWithVolume>(),
-        AtmPeVolumeBars = Array.Empty<CandleWithVolume>(),
-        AtmStrike = null,
-    };
+        // A flat, never-moving synthetic premium for every strike - lets Simulate() produce real
+        // (non-NoData) trades without needing to model actual option pricing, which is not this
+        // test's concern; every trade here is expected to resolve via time/regime-change/EndOfDay,
+        // never StopLoss/TakeProfit, since the premium literally never moves.
+        var oneMinOption = oneMin.Select(b => new Candle(b.Time, 100m, 100.5m, 99.5m, 100m)).ToList();
+        return new()
+        {
+            Underlying = "NIFTY",
+            TimeframeMinutes = timeframeMinutes,
+            Step = 50,
+            SpotBars = timeframeMinutes == 1 ? oneMin : BacktestUtil.AggregateCandles(oneMin, timeframeMinutes),
+            SpotBarsOneMinute = oneMin,
+            SpotVolumeBarsOneMinute = Volume(oneMin),
+            ConfluenceSignalsAscending = Array.Empty<BacktestSignal>(),
+            AllSignals = Array.Empty<BacktestSignal>(),
+            ObvCeSeries = Array.Empty<ObvPoint>(),
+            ObvPeSeries = Array.Empty<ObvPoint>(),
+            CdvCeSeries = Array.Empty<ObvPoint>(),
+            CdvPeSeries = Array.Empty<ObvPoint>(),
+            GetOptionBars = (_, _) => timeframeMinutes == 1 ? oneMinOption : BacktestUtil.AggregateCandles(oneMinOption, timeframeMinutes),
+            GetOptionBarsOneMinute = (_, _) => oneMinOption,
+            AtmCeBars = Array.Empty<Candle>(),
+            AtmPeBars = Array.Empty<Candle>(),
+            AtmCeVolumeBars = Array.Empty<CandleWithVolume>(),
+            AtmPeVolumeBars = Array.Empty<CandleWithVolume>(),
+            AtmStrike = null,
+        };
+    }
 
     private static Dictionary<string, decimal> Parameters(Action<Dictionary<string, decimal>>? overrides = null)
     {
-        var p = new Dictionary<string, decimal>
-        {
-            ["side"] = OptionTradeSimulator.SideBuy,
-            ["otmSteps"] = 1,
-            ["slPoints"] = 10,
-            ["tpPoints"] = 20,
-            ["squareOffMinutes"] = 0,
-            ["signalStartMinutes"] = 0,
-            ["noNewEntriesAfterMinutes"] = 0,
-            ["excludeLastDays"] = 0,
-            ["direction"] = 0,
-            ["regime15EmaFast"] = 20,
-            ["regime15EmaSlow"] = 50,
-            ["regime15SlopeMinPercent"] = 0.010m,
-            ["regime15AdxMin"] = 20,
-            ["regimeScoreMin"] = 3,
-            ["regimeScoreFull"] = 4,
-            ["setup5EmaFast"] = 9,
-            ["setup5EmaSlow"] = 21,
-            ["setup5AdxMin"] = 20,
-            ["confirm3EmaFast"] = 7,
-            ["confirm3EmaSlow"] = 20,
-            ["confirm3AdxMin"] = 15,
-            ["confirm3SlopeMinPercent"] = 0m, // see class doc comment
-            ["entry1EmaFast"] = 5,
-            ["entry1EmaSlow"] = 13,
-            ["entry1AdxMin"] = 10,
-            ["entry1SlopeMinPercent"] = 0m, // see class doc comment
-            ["cascadeSlopeLookbackBars"] = 3,
-            ["cascadeAdxPeriod"] = 14,
-            ["atrPeriod"] = 14,
-            ["atrNormalHighPercent"] = 1.5m,
-            ["atrExtremePercent"] = 2.5m,
-            ["rangeAtrMultiple"] = 1.5m,
-            ["rsiPeriod"] = 14,
-            ["rsiNeutralLow"] = 40,
-            ["rsiNeutralHigh"] = 60,
-        };
+        var p = new RegimeAdaptiveStrategy().Parameters.ToDictionary(x => x.Key, x => x.Default);
+        p["signalStartMinutes"] = 0;
+        p["noNewEntriesAfterMinutes"] = 0;
         overrides?.Invoke(p);
         return p;
     }
 
     [Fact]
-    public void Bullish_FiresRepeatedCascadeEntries_OnASustainedUptrendWithPeriodicPullbacks()
+    public void Trend_FiresSingleLegDirectionalEntries_MatchingTheSustainedUptrend()
     {
-        var bars = UptrendFixture();
+        var bars = TrendFixture();
 
         var signals = new RegimeAdaptiveStrategy().EntrySignals(Context(bars), Parameters());
         var entries = signals.Where(s => s.Kind == "Entry").ToList();
 
         Assert.NotEmpty(entries);
         Assert.All(entries, e => Assert.Equal("Bullish", e.Direction));
-        Assert.All(entries, e => Assert.Contains("regime Bullish", e.Summary));
-        Assert.All(entries, e => Assert.Contains("5M setup ok -> 3M confirmed -> 1M pullback rejection", e.Summary));
-        // Well past the 750-minute warmup the 15-minute EMA50 needs (50 fifteen-minute bars) - a real
-        // cascade result, not an artifact of the fixture's own early, still-warming-up bars.
-        Assert.All(entries, e => Assert.True(e.TimeUtc >= T0.AddMinutes(750)));
-        // Entries keep firing across the whole fixture, not just in one early burst - signals are
-        // newest-first, so entries[0] is the LATEST one.
-        Assert.True(entries[0].TimeUtc >= T0.AddMinutes(bars.Count - 500));
+        Assert.All(entries, e => Assert.Contains("Trend regime Bullish", e.Summary));
+        Assert.All(entries, e => Assert.Contains("sell PE", e.Summary));
     }
 
     [Fact]
-    public void Bearish_FiresRepeatedCascadeEntries_OnASustainedDowntrendWithPeriodicBounces()
+    public void RangeOrNeutral_FiresBothLegsAtOnce_AsAShortStrangle()
     {
-        var bars = DowntrendFixture();
+        var bars = RangeFixture();
 
         var signals = new RegimeAdaptiveStrategy().EntrySignals(Context(bars), Parameters());
         var entries = signals.Where(s => s.Kind == "Entry").ToList();
 
         Assert.NotEmpty(entries);
-        Assert.All(entries, e => Assert.Equal("Bearish", e.Direction));
-        Assert.All(entries, e => Assert.Contains("regime Bearish", e.Summary));
+        var bullish = entries.Count(e => e.Direction == "Bullish");
+        var bearish = entries.Count(e => e.Direction == "Bearish");
+        // Every qualifying bar fires BOTH legs together - equal counts, not just "some of each".
+        Assert.Equal(bullish, bearish);
+        Assert.All(entries, e => Assert.Contains("Short Strangle", e.Summary));
     }
 
     [Fact]
-    public void CascadeLayers_ScaleWithThePageOwnSelectedTimeframe_NotFixedRealClockMinutes()
+    public void RangeOrNeutral_TheTwoLegsAreGenuinelyConcurrentPositions_NotOneAtATime()
     {
-        var bars = ScalableUptrendFixture();
+        var bars = RangeFixture();
 
-        // Page set to a 3-minute timeframe: REGIME/SETUP/CONFIRM/ENTRY should re-base to
-        // 45/15/9/3 minutes (15x/5x/3x/1x of 3), not stay pinned at 15/5/3/1 real minutes.
-        var signals = new RegimeAdaptiveStrategy().EntrySignals(Context(bars, timeframeMinutes: 3), Parameters());
-        var entries = signals.Where(s => s.Kind == "Entry").ToList();
+        var trades = new RegimeAdaptiveStrategy().Simulate(Context(bars), Parameters());
+        var ceWindows = trades.Where(t => t.OptionType == "CE" && t.EntryTimeUtc is not null && t.ExitTimeUtc is not null)
+            .Select(t => (Start: t.EntryTimeUtc!.Value, End: t.ExitTimeUtc!.Value)).ToList();
+        var peWindows = trades.Where(t => t.OptionType == "PE" && t.EntryTimeUtc is not null && t.ExitTimeUtc is not null)
+            .Select(t => (Start: t.EntryTimeUtc!.Value, End: t.ExitTimeUtc!.Value)).ToList();
 
-        Assert.NotEmpty(entries);
-        Assert.All(entries, e => Assert.Equal("Bullish", e.Direction));
-        Assert.All(entries, e => Assert.Contains("45M regime Bullish", e.Summary));
-        Assert.All(entries, e => Assert.Contains("15M setup ok -> 9M confirmed -> 3M pullback rejection", e.Summary));
+        Assert.NotEmpty(ceWindows);
+        Assert.NotEmpty(peWindows);
+        // At least one CE window genuinely overlaps a PE window in time - proof the two legs really
+        // held open simultaneously (via two independent OptionTradeSimulator.Run calls), not that
+        // one leg waited for the other to close first the way a single shared signal stream would.
+        Assert.Contains(ceWindows, ce => peWindows.Any(pe => ce.Start < pe.End && pe.Start < ce.End));
     }
 
     [Fact]
     public void NoSignalsAtAll_WhenTooFewOneMinuteBarsExistForA15MinuteRegime()
     {
-        var bars = UptrendFixture(500); // well short of the ~55*15=825 minimum for a 15-minute EMA50 warm-up
+        var bars = TrendFixture(500); // well short of the 15-minute regime's own warmup
 
         var signals = new RegimeAdaptiveStrategy().EntrySignals(Context(bars), Parameters());
 
@@ -218,107 +151,132 @@ public sealed class RegimeAdaptiveStrategyTests
     }
 
     [Fact]
-    public void ExtremeVolatility_RejectsEveryCascadeEntry()
+    public void Trend_DirectionFilter_BlocksTheDisallowedSide()
     {
-        var bars = UptrendFixture();
+        var bars = TrendFixture(); // a Bullish-only uptrend
 
-        // This fixture's own bar-to-bar ATR% is a small fraction of a percent (a ~0.4-0.6 point move
-        // on a ~20000 price level) - a threshold effectively at zero guarantees every bar reads as
-        // Extreme, regardless of what that natural ATR% actually is.
-        var signals = new RegimeAdaptiveStrategy().EntrySignals(Context(bars), Parameters(p => p["atrExtremePercent"] = 0.0001m));
+        var signals = new RegimeAdaptiveStrategy().EntrySignals(Context(bars), Parameters(p => p["direction"] = 2m /* ShortOnly */));
 
         Assert.DoesNotContain(signals, s => s.Kind == "Entry");
-        Assert.Contains(signals, s => s.Kind == "Rejected" && s.Summary.Contains("reads Volatile"));
+        Assert.Contains(signals, s => s.Kind == "Rejected" && s.Summary.Contains("direction filter"));
     }
 
     [Fact]
-    public void Side_DefaultsToSell_UnlikeEveryOtherStrategyHere()
+    public void HasNoStaticSideOrOtmStepsOrPointBasedSlTpParameters_ThoseAreComputedInternallyNow()
     {
         var strategy = new RegimeAdaptiveStrategy();
-        Assert.Equal(OptionTradeSimulator.SideSell, strategy.Parameters.Single(p => p.Key == "side").Default);
+        Assert.DoesNotContain(strategy.Parameters, p => p.Key is "side" or "otmSteps" or "slPoints" or "tpPoints");
+        Assert.Contains(strategy.Parameters, p => p.Key == "baseOtmSteps");
+        Assert.Contains(strategy.Parameters, p => p.Key == "baseProfitTargetPercent");
+        Assert.Contains(strategy.Parameters, p => p.Key == "baseStopLossPercent");
     }
 
     [Fact]
-    public void HasNoCdvObvFlowConfirmationParameter_ItWasRemovedByExplicitRequest()
+    public void DefaultsForTimeframe_GivesEachOfTheFourSelectableTimeframesItsOwnDistinctBaseValues()
     {
         var strategy = new RegimeAdaptiveStrategy();
-        Assert.DoesNotContain(strategy.Parameters, p => p.Key is "requireFlowConfirmation" or "flowLookbackBars" or "minFlowRisePercent" or "flowMode");
+
+        var byTimeframe = new[] { 1, 3, 5, 15 }
+            .Select(tf => BacktestUtil.ApplyTimeframeDefaults(strategy, tf))
+            .Select(ps => (
+                Otm: ps.Single(p => p.Key == "baseOtmSteps").Default,
+                Pt: ps.Single(p => p.Key == "baseProfitTargetPercent").Default,
+                Sl: ps.Single(p => p.Key == "baseStopLossPercent").Default,
+                Hold: ps.Single(p => p.Key == "baseMaxHoldingMinutes").Default))
+            .ToList();
+
+        Assert.Equal(4, byTimeframe.Select(x => (x.Pt, x.Sl, x.Hold)).Distinct().Count());
+        // The spec's own exact 5-minute defaults.
+        Assert.Equal((38m, 75m, 150m), (byTimeframe[2].Pt, byTimeframe[2].Sl, byTimeframe[2].Hold));
     }
 
-    // ---- ComputeVolatileReasons: direct unit tests against the internal detector (made internal
-    // for exactly this reason - see its own doc comment) with small, hand-built candle sequences,
-    // rather than needing a full cascade fixture that also happens to trip a price-action trigger at
-    // the exact volatile bar. Each test disables every OTHER signal (a very high ratio/percent
-    // effectively never fires) so it isolates the one being tested. ----
+    // ---- ClassifyRegime: direct unit tests against the internal classifier (made internal for
+    // exactly this reason) with small, hand-built indicator series. A block-wide perturbation was
+    // confirmed (via a diagnostic dump) to self-dilute its own rolling average - only the LAST few
+    // bars are perturbed here, keeping the rolling average close to the untouched baseline so the
+    // CURRENT bar's ratio-to-average genuinely spikes/contracts the way a real regime shift would. ----
 
-    private static List<Candle> CalmThenOneBar(Candle oddBar, int calmBars = 25)
+    private static decimal?[] Flat(int n, decimal v) => Enumerable.Repeat((decimal?)v, n).ToArray();
+
+    private static decimal?[] FlatThenLastFew(int n, decimal baseline, decimal lastValue, int lastCount = 3)
     {
-        var bars = new List<Candle>();
-        for (var i = 0; i < calmBars; i++) bars.Add(new Candle(T0.AddMinutes(i), 100m, 100.5m, 99.5m, 100m));
-        bars.Add(oddBar);
-        return bars;
-    }
-
-    private static (List<decimal?> AtrPage, List<decimal?> AtrPercentPage) Atr(IReadOnlyList<Candle> bars, int period = 14)
-    {
-        var quotes = bars.Select(c => new Quote { Date = c.Time.UtcDateTime, Open = c.Open, High = c.High, Low = c.Low, Close = c.Close, Volume = 0 }).ToList();
-        var atr = quotes.GetAtr(period).Select(r => (decimal?)r.Atr).ToList();
-        var atrPercent = bars.Select((b, i) => atr[i] is { } a && b.Close != 0 ? (decimal?)(a / b.Close * 100m) : null).ToList();
-        return (atr, atrPercent);
-    }
-
-    [Fact]
-    public void ComputeVolatileReasons_FlagsAtrExpansion_WhenATRSpikesRelativeToItsOwnAverage()
-    {
-        var bars = CalmThenOneBar(new Candle(T0.AddMinutes(25), 100m, 130m, 100m, 115m)); // a single huge-range bar
-        var (atrPage, atrPercentPage) = Atr(bars);
-
-        var reasons = RegimeAdaptiveStrategy.ComputeVolatileReasons(
-            bars, atrPage, atrPercentPage, atrExtremePercent: 1000m, atrAverageLookbackBars: 20, atrExpansionRatio: 1.5m, largeCandleRatio: 1000m, gapAtrMultiple: 1000m);
-
-        Assert.Null(reasons[24]); // still calm the bar before
-        Assert.NotNull(reasons[25]);
-        Assert.Contains("ATR expanded", reasons[25]);
+        var a = Flat(n, baseline);
+        for (var i = n - lastCount; i < n; i++) a[i] = lastValue;
+        return a;
     }
 
     [Fact]
-    public void ComputeVolatileReasons_FlagsALargeCandle_RelativeToItsOwnAverageRange()
+    public void ClassifyRegime_FlagsHighVol_WhenAtrPercentSpikesAboveItsOwnAverage_WithAdxConfirming()
     {
-        var bars = CalmThenOneBar(new Candle(T0.AddMinutes(25), 100m, 130m, 100m, 115m));
-        var (atrPage, atrPercentPage) = Atr(bars);
+        const int n = 80;
+        var (type, _) = RegimeAdaptiveStrategy.ClassifyRegime(
+            atrPct: FlatThenLastFew(n, 1.0m, 2.5m), bbWidth: Flat(n, 2m), adx: Flat(n, 30m), pdi: Flat(n, 10m), mdi: Flat(n, 5m), ema: Flat(n, 100m),
+            rollingAverageLookback: 20, emaSlopeLookback: 5, trendSlopeConsistentBars: 4,
+            highVolAtrPctRatio: 1.2m, highVolBbWidthRatio: 1.4m, highVolAdxMin: 22m,
+            trendAdxMin: 28m, trendDiSpreadMin: 12m,
+            rangeAtrPctRatio: 0.85m, rangeAdxMax: 20m, rangeBbWidthRatio: 0.9m);
 
-        var reasons = RegimeAdaptiveStrategy.ComputeVolatileReasons(
-            bars, atrPage, atrPercentPage, atrExtremePercent: 1000m, atrAverageLookbackBars: 20, atrExpansionRatio: 1000m, largeCandleRatio: 2m, gapAtrMultiple: 1000m);
-
-        Assert.NotNull(reasons[25]);
-        Assert.Contains("large candle", reasons[25]);
+        Assert.Equal("HighVol", type[^1]);
     }
 
     [Fact]
-    public void ComputeVolatileReasons_FlagsAnOpeningGap_EvenWhenThatBarsOwnRangeIsTight()
+    public void ClassifyRegime_FlagsTrend_WhenAdxDiAndSustainedEmaSlopeAllAgree()
     {
-        // Bar 25 gaps 15 points up from bar 24's close, but its OWN High-Low range is as tight as
-        // every calm bar around it - isolates the gap check from the large-candle one.
-        var bars = CalmThenOneBar(new Candle(T0.AddMinutes(25), 115m, 115.5m, 114.5m, 115m));
-        var (atrPage, atrPercentPage) = Atr(bars);
+        const int n = 80;
+        var risingEma = Enumerable.Range(0, n).Select(i => (decimal?)(100m + i)).ToArray();
 
-        var reasons = RegimeAdaptiveStrategy.ComputeVolatileReasons(
-            bars, atrPage, atrPercentPage, atrExtremePercent: 1000m, atrAverageLookbackBars: 20, atrExpansionRatio: 1000m, largeCandleRatio: 1000m, gapAtrMultiple: 1m);
+        var (type, direction) = RegimeAdaptiveStrategy.ClassifyRegime(
+            atrPct: Flat(n, 1.0m), bbWidth: Flat(n, 2m), adx: Flat(n, 35m), pdi: Flat(n, 30m), mdi: Flat(n, 10m), ema: risingEma,
+            rollingAverageLookback: 20, emaSlopeLookback: 5, trendSlopeConsistentBars: 4,
+            highVolAtrPctRatio: 1.2m, highVolBbWidthRatio: 1.4m, highVolAdxMin: 22m,
+            trendAdxMin: 28m, trendDiSpreadMin: 12m,
+            rangeAtrPctRatio: 0.85m, rangeAdxMax: 20m, rangeBbWidthRatio: 0.9m);
 
-        Assert.NotNull(reasons[25]);
-        Assert.Contains("opening gap", reasons[25]);
+        Assert.Equal("Trend", type[^1]);
+        Assert.Equal("Bullish", direction[^1]);
     }
 
     [Fact]
-    public void ComputeVolatileReasons_FlagsNothing_OnACalmSteadySeries()
+    public void ClassifyRegime_FlagsRange_WhenAtrPercentAndBbWidthBothContractBelowTheirOwnAverage()
     {
-        var bars = new List<Candle>();
-        for (var i = 0; i < 30; i++) bars.Add(new Candle(T0.AddMinutes(i), 100m, 100.5m, 99.5m, 100m));
-        var (atrPage, atrPercentPage) = Atr(bars);
+        const int n = 80;
+        var (type, direction) = RegimeAdaptiveStrategy.ClassifyRegime(
+            atrPct: FlatThenLastFew(n, 1.0m, 0.5m), bbWidth: FlatThenLastFew(n, 2m, 1.0m), adx: Flat(n, 15m), pdi: Flat(n, 10m), mdi: Flat(n, 9m), ema: Flat(n, 100m),
+            rollingAverageLookback: 20, emaSlopeLookback: 5, trendSlopeConsistentBars: 4,
+            highVolAtrPctRatio: 1.2m, highVolBbWidthRatio: 1.4m, highVolAdxMin: 22m,
+            trendAdxMin: 28m, trendDiSpreadMin: 12m,
+            rangeAtrPctRatio: 0.85m, rangeAdxMax: 20m, rangeBbWidthRatio: 0.9m);
 
-        var reasons = RegimeAdaptiveStrategy.ComputeVolatileReasons(
-            bars, atrPage, atrPercentPage, atrExtremePercent: 2.5m, atrAverageLookbackBars: 20, atrExpansionRatio: 1.5m, largeCandleRatio: 2m, gapAtrMultiple: 1m);
+        Assert.Equal("Range", type[^1]);
+        Assert.Null(direction[^1]);
+    }
 
-        Assert.All(reasons, Assert.Null);
+    [Fact]
+    public void ClassifyRegime_FlagsNeutral_WhenNothingElseMatches()
+    {
+        const int n = 80;
+        var (type, direction) = RegimeAdaptiveStrategy.ClassifyRegime(
+            atrPct: Flat(n, 1.0m), bbWidth: Flat(n, 2m), adx: Flat(n, 15m), pdi: Flat(n, 10m), mdi: Flat(n, 9m), ema: Flat(n, 100m),
+            rollingAverageLookback: 20, emaSlopeLookback: 5, trendSlopeConsistentBars: 4,
+            highVolAtrPctRatio: 1.2m, highVolBbWidthRatio: 1.4m, highVolAdxMin: 22m,
+            trendAdxMin: 28m, trendDiSpreadMin: 12m,
+            rangeAtrPctRatio: 0.85m, rangeAdxMax: 20m, rangeBbWidthRatio: 0.9m);
+
+        Assert.Equal("Neutral", type[^1]);
+        Assert.Null(direction[^1]);
+    }
+
+    [Fact]
+    public void ClassifyRegime_ReturnsNull_BeforeEnoughWarmupDataExists()
+    {
+        const int n = 5; // well short of rollingAverageLookback=20
+        var (type, _) = RegimeAdaptiveStrategy.ClassifyRegime(
+            atrPct: Flat(n, 1.0m), bbWidth: Flat(n, 2m), adx: Flat(n, 15m), pdi: Flat(n, 10m), mdi: Flat(n, 9m), ema: Flat(n, 100m),
+            rollingAverageLookback: 20, emaSlopeLookback: 5, trendSlopeConsistentBars: 4,
+            highVolAtrPctRatio: 1.2m, highVolBbWidthRatio: 1.4m, highVolAdxMin: 22m,
+            trendAdxMin: 28m, trendDiSpreadMin: 12m,
+            rangeAtrPctRatio: 0.85m, rangeAdxMax: 20m, rangeBbWidthRatio: 0.9m);
+
+        Assert.All(type, Assert.Null);
     }
 }
