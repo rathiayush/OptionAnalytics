@@ -105,7 +105,7 @@ public sealed class ExpiredOptionBacktestService
     /// <summary>Underlyings this feature supports at all - Dhan's rolling-option docs only ever show
     /// "NSE_FNO" as the exchange segment, never a BSE one, so SENSEX is left out rather than
     /// guessed at.</summary>
-    private static readonly Dictionary<string, int> StrikeStepByUnderlying = new(StringComparer.OrdinalIgnoreCase)
+    internal static readonly Dictionary<string, int> StrikeStepByUnderlying = new(StringComparer.OrdinalIgnoreCase)
     {
         ["NIFTY"] = 50,
         ["BANKNIFTY"] = 100,
@@ -121,7 +121,7 @@ public sealed class ExpiredOptionBacktestService
     /// <summary>How far back GetAvailableExpiries offers dates for - see ExpiryCalendar's own doc
     /// comment for why this app cannot defensibly claim accuracy further back than the current
     /// Tuesday-expiry convention has been in effect (SEBI's November 2024 rule).</summary>
-    private const int CalendarMonthsBack = 12;
+    internal const int CalendarMonthsBack = 12;
 
     /// <summary>How far forward GetAvailableExpiries offers NOT-YET-EXPIRED dates for, at the user's
     /// own explicit request ("I should be able to test against them as well"). This carries none of
@@ -169,7 +169,7 @@ public sealed class ExpiredOptionBacktestService
     ///
     /// RunAsync fetches only this ONE band when the strategy needs it, reused for pricing too -
     /// never a second, separate fetch just for the traded strike.</summary>
-    private const int FlowChainRadius = 10;
+    internal const int FlowChainRadius = 10;
 
     /// <summary>Pacing between successive TOKEN fetches within one side's own band (see
     /// FetchStrikeBandAsync) - same idea and same value as DhanRollingOptionDataService's own
@@ -177,12 +177,13 @@ public sealed class ExpiredOptionBacktestService
     /// itself so StrikeBandSteps*2+1 back-to-back token fetches do not burst at Dhan the same way
     /// running CE and PE concurrently used to (see this class's own top-of-file doc comment on that
     /// real failure).</summary>
-    private static readonly TimeSpan BandFetchDelay = TimeSpan.FromMilliseconds(350);
+    internal static readonly TimeSpan BandFetchDelay = TimeSpan.FromMilliseconds(350);
 
     private readonly DhanSpotInstrumentMaster _instrumentMaster;
     private readonly DhanHistoricalDataService _historicalData;
     private readonly DhanRollingOptionDataService _rollingOption;
     private readonly HistoricalSpotDataStore _spotCache;
+    private readonly ExpiredOptionDataStore _optionCache;
     private readonly IReadOnlyDictionary<string, IBacktestStrategy> _strategies;
 
     public ExpiredOptionBacktestService(
@@ -190,12 +191,14 @@ public sealed class ExpiredOptionBacktestService
         DhanHistoricalDataService historicalData,
         DhanRollingOptionDataService rollingOption,
         HistoricalSpotDataStore spotCache,
+        ExpiredOptionDataStore optionCache,
         IEnumerable<IBacktestStrategy> strategies)
     {
         _instrumentMaster = instrumentMaster;
         _historicalData = historicalData;
         _rollingOption = rollingOption;
         _spotCache = spotCache;
+        _optionCache = optionCache;
         _strategies = strategies.Where(s => SupportedStrategyKeys.Contains(s.Key)).ToDictionary(s => s.Key);
     }
 
@@ -407,8 +410,8 @@ public sealed class ExpiredOptionBacktestService
             || includeObvCdv;
         var bandCenterSteps = needsFlowChain ? 0 : otmSteps;
         var bandRadius = needsFlowChain ? FlowChainRadius : StrikeBandSteps;
-        var (ceBand, ceError) = await FetchStrikeBandAsync(instrument.SecurityId, expiryFlag, segments, bandCenterSteps, bandRadius, isCall: true, spotBars1m, step, cancellationToken);
-        var (peBand, peError) = await FetchStrikeBandAsync(instrument.SecurityId, expiryFlag, segments, bandCenterSteps, bandRadius, isCall: false, spotBars1m, step, cancellationToken);
+        var (ceBand, ceError) = await FetchStrikeBandAsync(underlying, instrument.SecurityId, expiryFlag, segments, bandCenterSteps, bandRadius, isCall: true, spotBars1m, step, cancellationToken);
+        var (peBand, peError) = await FetchStrikeBandAsync(underlying, instrument.SecurityId, expiryFlag, segments, bandCenterSteps, bandRadius, isCall: false, spotBars1m, step, cancellationToken);
 
         // The PRIMARY (centre-of-band) member - what this run's own otmSteps actually calls for -
         // used only for the summary stats below (resolved/expected strike, splices, bar counts).
@@ -620,7 +623,7 @@ public sealed class ExpiredOptionBacktestService
             // A BAND of tokens around resolvedOtmSteps, not just the single one - so absoluteStrike
             // keeps being found even on a day the index has drifted enough that this single starting
             // offset no longer resolves to it (see BuildFixedStrikeSeries below).
-            (band, bandError) = await FetchStrikeBandAsync(instrument.SecurityId, expiryFlag, segments, resolvedOtmSteps, StrikeBandSteps, isCall, windowSpotBars, step, cancellationToken);
+            (band, bandError) = await FetchStrikeBandAsync(underlying, instrument.SecurityId, expiryFlag, segments, resolvedOtmSteps, StrikeBandSteps, isCall, windowSpotBars, step, cancellationToken);
         }
 
         // Same sign convention RunAsync itself uses: otmSteps is "how far OTM for the side actually
@@ -644,7 +647,7 @@ public sealed class ExpiredOptionBacktestService
         }
         else
         {
-            (raw, error) = await FetchAcrossSegmentsAsync(instrument.SecurityId, expiryFlag, segments, strikeToken, optionType, cancellationToken);
+            (raw, error, _) = await FetchAcrossSegmentsAsync(underlying, instrument.SecurityId, expiryFlag, segments, strikeToken, optionType, cancellationToken);
             splices = DetectPossibleSplices(raw.Select(b => b.Bar).ToList());
         }
 
@@ -665,7 +668,7 @@ public sealed class ExpiredOptionBacktestService
             splices, absoluteStrike, fixedStrikeBars);
     }
 
-    private static string StrikeToken(int steps) => steps == 0 ? "ATM" : $"ATM{(steps > 0 ? "+" : "")}{steps}";
+    internal static string StrikeToken(int steps) => steps == 0 ? "ATM" : $"ATM{(steps > 0 ? "+" : "")}{steps}";
 
     /// <summary>Neither cadence uses this as a real safety boundary any more - BuildFetchSegments
     /// computes its own directly from ExpiryCalendar's real expiry dates instead of approximating
@@ -752,23 +755,42 @@ public sealed class ExpiredOptionBacktestService
     /// chunking preserves that), so the combined series is time-ascending too with no extra
     /// sorting needed. Per-segment errors are concatenated rather than only the first/last kept, so
     /// a failure on the OLDER (less-tested, code-2) segment is never silently hidden by an older
-    /// segment's success or vice versa.</summary>
-    private async Task<(List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> Bars, string? Error)> FetchAcrossSegmentsAsync(
-        uint underlyingSecurityId, string expiryFlag, IReadOnlyList<FetchSegment> segments, string strikeToken, string optionType,
+    /// segment's success or vice versa.
+    ///
+    /// Each segment's own `.To` IS the real expiry date its data belongs to (see BuildFetchSegments'
+    /// own doc comment: segment 1's `.To` is always the target expiry, segment 2's the prior
+    /// same-cadence one) - exactly the cache key ExpiredOptionDataPrefetchHostedService stores a
+    /// contract's own full natural range under (see ExpiredOptionDataStore's own doc comment for why
+    /// that range is always a superset of any segment's own narrower [From,To] window here). A cache
+    /// hit skips the live Dhan call for that segment entirely; a miss falls back to it unchanged.
+    /// The returned AnyLiveCall flag tells FetchStrikeBandAsync's own band loop whether this token
+    /// actually reached Dhan at all, so a fully-cached run does not pay BandFetchDelay's own pacing
+    /// for a token that made no live call to pace in the first place - the entire point of caching
+    /// this data being a genuinely fast Expired Backtest read.</summary>
+    private async Task<(List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> Bars, string? Error, bool AnyLiveCall)> FetchAcrossSegmentsAsync(
+        string underlying, uint underlyingSecurityId, string expiryFlag, IReadOnlyList<FetchSegment> segments, string strikeToken, string optionType,
         CancellationToken cancellationToken)
     {
         var bars = new List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)>();
         string? error = null;
+        var anyLiveCall = false;
 
         foreach (var segment in segments)
         {
+            if (_optionCache.HasContract(underlying, expiryFlag, segment.To))
+            {
+                bars.AddRange(_optionCache.Read(underlying, expiryFlag, segment.To, strikeToken, optionType, segment.From, segment.To));
+                continue;
+            }
+
+            anyLiveCall = true;
             var (segmentBars, segmentError) = await _rollingOption.GetRollingOptionCandlesAsync(
                 underlyingSecurityId, expiryFlag, segment.ExpiryCode, strikeToken, optionType, segment.From, segment.To, 1, cancellationToken);
             bars.AddRange(segmentBars);
             if (segmentError is not null) error = error is null ? segmentError : $"{error}; {segmentError}";
         }
 
-        return (bars, error);
+        return (bars, error, anyLiveCall);
     }
 
     /// <summary>One band member's own data (see FetchStrikeBandAsync): RawBars is the untouched fetch
@@ -792,27 +814,32 @@ public sealed class ExpiredOptionBacktestService
     /// strategy needs the whole flow chain (see BuildFlowChainSeries).
     ///
     /// Sequential, individually paced (BandFetchDelay) - never parallel, for the same account-wide
-    /// rate-limit reason this class's own top-of-file doc comment already explains for CE-vs-PE.
+    /// rate-limit reason this class's own top-of-file doc comment already explains for CE-vs-PE. The
+    /// pacing itself is skipped for a token that FetchAcrossSegmentsAsync serves entirely from
+    /// ExpiredOptionDataStore's cache (see its own AnyLiveCall doc comment) - nothing to rate-limit
+    /// against when no live call happened, and skipping it is what makes a fully-cached run of this
+    /// loop fast rather than still paying FlowChainRadius*2+1 waits for calls it never makes.
     /// Per-member errors are concatenated, same convention FetchAcrossSegmentsAsync itself uses.</summary>
     private async Task<(List<StrikeBandMember> Band, string? Error)> FetchStrikeBandAsync(
-        uint underlyingSecurityId, string expiryFlag, IReadOnlyList<FetchSegment> segments, int centerSteps, int radius, bool isCall,
+        string underlying, uint underlyingSecurityId, string expiryFlag, IReadOnlyList<FetchSegment> segments, int centerSteps, int radius, bool isCall,
         IReadOnlyList<Candle> spotBars, int step, CancellationToken cancellationToken)
     {
         var optionType = isCall ? "CALL" : "PUT";
         var band = new List<StrikeBandMember>();
         string? error = null;
-        var isFirst = true;
+        var pacePendingFromPreviousToken = false;
 
         for (var steps = centerSteps - radius; steps <= centerSteps + radius; steps++)
         {
-            // Paced, not back to back - see BandFetchDelay's own doc comment. Skipped before the
-            // very first token only.
-            if (!isFirst) await Task.Delay(BandFetchDelay, cancellationToken);
-            isFirst = false;
+            // Paced, not back to back - see BandFetchDelay's own doc comment - but only when the
+            // PREVIOUS token actually made a live call worth pacing after; never before the first
+            // token, and never after a token served entirely from cache.
+            if (pacePendingFromPreviousToken) await Task.Delay(BandFetchDelay, cancellationToken);
 
             var token = StrikeToken(isCall ? steps : -steps);
-            var (raw, fetchError) = await FetchAcrossSegmentsAsync(underlyingSecurityId, expiryFlag, segments, token, optionType, cancellationToken);
+            var (raw, fetchError, anyLiveCall) = await FetchAcrossSegmentsAsync(underlying, underlyingSecurityId, expiryFlag, segments, token, optionType, cancellationToken);
             if (fetchError is not null) error = error is null ? fetchError : $"{error}; {fetchError}";
+            pacePendingFromPreviousToken = anyLiveCall;
 
             var splices = DetectPossibleSplices(raw.Select(b => b.Bar).ToList());
             var filtered = FilterToExpectedStrike(TrimToLargestSegment(raw, splices), spotBars, step, steps, isCall);
