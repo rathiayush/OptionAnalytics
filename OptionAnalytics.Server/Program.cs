@@ -182,6 +182,7 @@ builder.Services.AddHostedService<ExpiredOptionDataPrefetchHostedService>();
 // interface and adding one AddSingleton line here, nothing else needs to change.
 builder.Services.AddSingleton<IBacktestStrategy, SrFlowSellStrategy>();
 builder.Services.AddSingleton<IBacktestStrategy, EmaCrossoverRetestStrategy>();
+builder.Services.AddSingleton<IBacktestStrategy, FiveEmaStrategy>();
 
 // Stateless - reads SpotFeedHostedService/CdvHostedService's in-memory history fresh on every
 // request, nothing to run in the background. See BacktestController/BacktestService.

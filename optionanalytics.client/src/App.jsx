@@ -427,7 +427,10 @@ function PriceChart({ bars, height = 360 }) {
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
       grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
       rightPriceScale: { borderColor: BORDER_COLOR },
-      timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter },
+      // rightOffset reserves a few empty bar-slots past the newest candle - without it, fitContent()
+      // below squeezes the whole series edge-to-edge and the live-forming bar sits flush against the
+      // chart's right border with no room to breathe, which reads as the chart being "stuck" there.
+      timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter, rightOffset: 6 },
       crosshair: { mode: CrosshairMode.Normal },
       localization: { timeFormatter: istTimeFormatter },
     })
@@ -533,7 +536,9 @@ function CeVsPeChart({ ceSeries, peSeries, prevCeSeries = [], prevPeSeries = [],
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
       grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
       rightPriceScale: { borderColor: BORDER_COLOR },
-      timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter },
+      // Same reasoning as PriceChart's own rightOffset - room past the newest point so the live line
+      // doesn't sit flush against the chart's right border.
+      timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter, rightOffset: 6 },
       crosshair: { mode: CrosshairMode.Normal },
       localization: { timeFormatter: istTimeFormatter },
     })
