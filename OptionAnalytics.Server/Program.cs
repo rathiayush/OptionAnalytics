@@ -183,6 +183,7 @@ builder.Services.AddHostedService<ExpiredOptionDataPrefetchHostedService>();
 builder.Services.AddSingleton<IBacktestStrategy, SrFlowSellStrategy>();
 builder.Services.AddSingleton<IBacktestStrategy, EmaCrossoverRetestStrategy>();
 builder.Services.AddSingleton<IBacktestStrategy, FiveEmaStrategy>();
+builder.Services.AddSingleton<IBacktestStrategy, LuxAlgoSrBreakStrategy>();
 
 // Stateless - reads SpotFeedHostedService/CdvHostedService's in-memory history fresh on every
 // request, nothing to run in the background. See BacktestController/BacktestService.
