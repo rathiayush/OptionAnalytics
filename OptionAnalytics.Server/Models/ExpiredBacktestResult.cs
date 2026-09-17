@@ -41,6 +41,13 @@ namespace OptionAnalytics.Server.Models;
 /// window's own edge has visible context around it, not because the strategy itself saw any of that
 /// padding.
 ///
+/// SpotChartBarsOneMinute is that exact same widened window at NATIVE 1-minute resolution, before
+/// SpotChartBars' own BacktestUtil.AggregateCandles bucketing to the run's page timeframe - what the
+/// frontend's own S/R overlay needs (see BacktestPage.jsx's srLevelLine, mirrored here), since a
+/// strategy's own rolling support/resistance channel is computed off the real minute bars
+/// independently of whatever timeframe the chart itself displays, never off an already-bucketed
+/// series a second time.
+///
 /// SpotVolumeChartBars/SpotVwapSeries are the same widened window's own volume (real index volume,
 /// not synthetic - see DhanHistoricalDataService's own doc comment) and the session VWAP computed
 /// off it (VwapCalculator) - always populated, at zero extra Dhan cost, since both are built from
@@ -74,6 +81,7 @@ public sealed record ExpiredBacktestResult(
     int BandRadiusSteps,
     int EffectiveLookbackDays,
     IReadOnlyList<Candle> SpotChartBars,
+    IReadOnlyList<Candle> SpotChartBarsOneMinute,
     IReadOnlyList<CandleWithVolume> SpotVolumeChartBars,
     IReadOnlyList<ObvPoint> SpotVwapSeries,
     IReadOnlyList<ObvPoint> ObvCeSeries,
@@ -84,6 +92,6 @@ public sealed record ExpiredBacktestResult(
     public static ExpiredBacktestResult Failed(string error) =>
         new(false, error, Array.Empty<BacktestTrade>(), Array.Empty<BacktestSignal>(), 0, "", "", null, null, 0, 0, 0,
             Array.Empty<PossibleSplice>(), Array.Empty<PossibleSplice>(), null, null, 0, 0, 0, 0, Array.Empty<Candle>(),
-            Array.Empty<CandleWithVolume>(), Array.Empty<ObvPoint>(), Array.Empty<ObvPoint>(), Array.Empty<ObvPoint>(),
+            Array.Empty<Candle>(), Array.Empty<CandleWithVolume>(), Array.Empty<ObvPoint>(), Array.Empty<ObvPoint>(), Array.Empty<ObvPoint>(),
             Array.Empty<ObvPoint>(), Array.Empty<ObvPoint>());
 }

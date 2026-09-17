@@ -517,7 +517,7 @@ public sealed class ExpiredOptionBacktestService
             // used."
             spotBars1m.Count, ceUsed.Count, peUsed.Count, ceSplices, peSplices,
             ceResolvedStrike, peResolvedStrike, ceExpectedStrike, peExpectedStrike, bandRadius, effectiveLookbackDays,
-            spotChartCandlesTf, spotVolumeChartBarsTf, spotVwapSeriesTf,
+            spotChartCandlesTf, spotBarsForChart, spotVolumeChartBarsTf, spotVwapSeriesTf,
             obvCeSeriesTf, obvPeSeriesTf, cdvCeSeriesTf, cdvPeSeriesTf);
     }
 

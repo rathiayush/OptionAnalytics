@@ -4,7 +4,7 @@ import dayjs from 'dayjs'
 import { PlayCircleOutlined, InfoCircleOutlined } from '@ant-design/icons'
 import { createChart, createSeriesMarkers, CandlestickSeries, LineSeries, CrosshairMode } from 'lightweight-charts'
 import {
-  UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, EMA_COLOR, computeEma, NavBar, DirectionTag, fmtIstDateTime, fmtIstTime, fmtPrice, istDateKey,
+  UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, EMA_COLOR, emaLine, srLevelLine, NavBar, DirectionTag, fmtIstDateTime, fmtIstTime, fmtPrice, istDateKey,
   TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState,
   AXIS_COLOR, GRID_COLOR, BORDER_COLOR, istTimeFormatter, istTickMarkFormatter, toBar, toChartTime, dayResetMarkers,
   CeVsPeChart, VolumeVwapChart, scrollChartToTime, highlightChartAtTime, lastValueAtOrBeforeChartTime,
@@ -93,17 +93,20 @@ function tradeEntryMarkers(trades) {
 // pads it a few days on each side purely for visual context - see ExpiredOptionBacktestService.
 // ChartPaddingDays), with the strategy's own trade entries marked on it so a signal can be checked
 // against the real price action rather than only read off the Trades table below. Same plain shape
-// as StrikeDataPage's own StrikeCandleChart, plus an optional 5 EMA overlay (see the "Show 5 EMA"
-// checkbox below) - this is one static, already-complete series for one run, not a live-ticking feed.
+// as StrikeDataPage's own StrikeCandleChart, plus whichever indicator overlay(s) the CURRENT
+// strategy exposes (see indicatorDefs below) - this is one static, already-complete series for one
+// run, not a live-ticking feed.
 //
-// emaPoints is already pre-computed (or empty) by the caller - this component only ever calls
-// setData with whatever it is handed, so unticking the checkbox (which then passes []) clears the
-// line without this component needing to know WHY it's empty.
-function ExpiredSpotChart({ bars, trades, emaPoints, height = 420, focusTime, syncGroup }) {
+// indicatorLines is an array of { key, label, color, points } - already pre-computed (or omitted
+// entirely) by the caller for whichever indicators the current strategy exposes and the user has
+// ticked on; this component just keeps one lightweight-charts line series per key in sync with that
+// array (added when a new key appears, removed when one drops out, setData'd on every change), the
+// same mechanism BacktestPage.jsx's own SpotCandleChart uses.
+function ExpiredSpotChart({ bars, trades, indicatorLines, height = 420, focusTime, syncGroup }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
-  const emaRef = useRef(null)
+  const indicatorSeriesRef = useRef(new Map())
   const markersRef = useRef(null)
   // Separate from the (deliberately unconditional, see the bars effect below) re-fit - sync
   // registration only ever needs to happen once per mount, or a second Run under the same
@@ -132,7 +135,7 @@ function ExpiredSpotChart({ bars, trades, emaPoints, height = 420, focusTime, sy
       wickUpColor: UP_COLOR,
       wickDownColor: DOWN_COLOR,
     })
-    emaRef.current = chart.addSeries(LineSeries, { color: EMA_COLOR, lineWidth: 2, title: '5 EMA', priceLineVisible: false, crosshairMarkerVisible: false })
+    indicatorSeriesRef.current = new Map()
     markersRef.current = createSeriesMarkers(seriesRef.current, [])
     hasRegisteredSyncRef.current = false
     syncCleanupRef.current = null
@@ -148,7 +151,7 @@ function ExpiredSpotChart({ bars, trades, emaPoints, height = 420, focusTime, sy
       chart.remove()
       chartRef.current = null
       seriesRef.current = null
-      emaRef.current = null
+      indicatorSeriesRef.current = new Map()
       markersRef.current = null
     }
     // One chart instance per mount, same reasoning as every other page's own chart - series/marker
@@ -171,8 +174,27 @@ function ExpiredSpotChart({ bars, trades, emaPoints, height = 420, focusTime, sy
   }, [bars])
 
   useEffect(() => {
-    emaRef.current?.setData(emaPoints ?? [])
-  }, [emaPoints])
+    if (!chartRef.current) return
+    const chart = chartRef.current
+    const existing = indicatorSeriesRef.current
+    const next = indicatorLines ?? []
+    const nextKeys = new Set(next.map((l) => l.key))
+
+    for (const [key, series] of existing) {
+      if (!nextKeys.has(key)) {
+        chart.removeSeries(series)
+        existing.delete(key)
+      }
+    }
+    for (const line of next) {
+      let series = existing.get(line.key)
+      if (!series) {
+        series = chart.addSeries(LineSeries, { color: line.color, lineWidth: 2, title: line.label, priceLineVisible: false, crosshairMarkerVisible: false })
+        existing.set(line.key, series)
+      }
+      series.setData(line.points ?? [])
+    }
+  }, [indicatorLines])
 
   useEffect(() => {
     if (!markersRef.current) return
@@ -271,10 +293,11 @@ export default function ExpiredBacktestPage() {
 
   const strategy = strategies.find((s) => s.key === strategyKey) ?? null
 
-  // Purely a display toggle, not a run parameter - unticking it never changes the backtest itself,
-  // only whether the chart below draws the line. Off by default so the chart stays uncluttered for
-  // a strategy that has nothing to do with the 5 EMA.
-  const [showEma, setShowEma] = useState(false)
+  // Purely a display toggle, not a run parameter - unticking an indicator never changes the
+  // backtest itself, only whether the chart below draws that line. Off by default so the chart
+  // stays uncluttered until the user actually wants an overlay. Keyed by indicator key, same as
+  // BacktestPage.jsx's own visibleIndicators.
+  const [visibleIndicators, setVisibleIndicators] = useState({})
 
   // Which IST days to show - a VIEW filter applied AFTER the run, same as BacktestPage's own date
   // range: narrows the trades/signals/chart to a slice of the lookback window this run already
@@ -439,20 +462,44 @@ export default function ExpiredBacktestPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [result, fromDay, toDay])
 
-  // The 5 EMA line for the chart's own "Show 5 EMA" toggle - computed off the SAME bars the chart
-  // itself plots, using whichever emaPeriod the current strategy is actually running with when it
-  // has one (the five-ema family), falling back to the classic 5 otherwise. [] when unticked -
-  // ExpiredSpotChart just clears the line on an empty series, it does not need to know why.
-  const emaPoints = useMemo(() => {
-    if (!showEma || chartBars.length === 0) return []
-    const emaPeriodSpec = strategy?.parameters?.find((p) => p.key === 'emaPeriod')
-    const emaPeriod = paramValues.emaPeriod ?? emaPeriodSpec?.default ?? 5
-    const values = computeEma(chartBars.map((b) => b.close), emaPeriod)
-    return chartBars.reduce((points, b, i) => {
-      if (values[i] != null) points.push({ time: b.time, value: values[i] })
-      return points
-    }, [])
-  }, [showEma, chartBars, paramValues.emaPeriod, strategy])
+  // Which indicator line(s) the CURRENT strategy exposes - one checkbox per entry, the exact same
+  // mechanism BacktestPage.jsx's own indicatorDefs uses (see its own doc comment), scoped to the
+  // three strategies this page can actually run (see /api/expired-backtest/strategies). Each
+  // entry's own `compute` reads whatever THIS strategy's own tuned parameter values currently are,
+  // so the plotted line always matches what a Run would actually use, not a stale default.
+  const indicatorDefs = useMemo(() => {
+    if (!strategy) return []
+    const paramDefault = (key, fallback) => paramValues[key] ?? strategy.parameters?.find((p) => p.key === key)?.default ?? fallback
+
+    if (strategy.key === 'ema-crossover-retest' || strategy.key === 'kathy-lien-ema20-ema200-pullback') {
+      const fastPeriod = paramDefault('fastEmaPeriod', 20)
+      const slowPeriod = paramDefault('slowEmaPeriod', strategy.key === 'kathy-lien-ema20-ema200-pullback' ? 200 : 50)
+      return [
+        { key: 'fastEma', label: `Fast EMA (${fastPeriod})`, color: '#f0a020', compute: (bars) => emaLine(bars, fastPeriod) },
+        { key: 'slowEma', label: `Slow EMA (${slowPeriod})`, color: EMA_COLOR, compute: (bars) => emaLine(bars, slowPeriod) },
+      ]
+    }
+    if (strategy.key === 'sr-flow-sell') {
+      const srTimeframeMinutes = paramDefault('srTimeframeMinutes', 30)
+      const srLookbackBars = paramDefault('srLookbackBars', 20)
+      const oneMinuteBars = (result?.spotChartBarsOneMinute ?? []).map(toBar)
+      return [
+        { key: 'resistance', label: `Resistance (${srTimeframeMinutes}m x${srLookbackBars})`, color: DOWN_COLOR, compute: (bars) => srLevelLine(oneMinuteBars, bars, srTimeframeMinutes, srLookbackBars, 'high') },
+        { key: 'support', label: `Support (${srTimeframeMinutes}m x${srLookbackBars})`, color: UP_COLOR, compute: (bars) => srLevelLine(oneMinuteBars, bars, srTimeframeMinutes, srLookbackBars, 'low') },
+      ]
+    }
+    return []
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [strategy, paramValues.fastEmaPeriod, paramValues.slowEmaPeriod, paramValues.srTimeframeMinutes, paramValues.srLookbackBars, result])
+
+  // The actual plotted line data - only for whichever of the above are ticked on in
+  // visibleIndicators, and only once there is something to plot them against.
+  const indicatorLines = useMemo(() => {
+    if (chartBars.length === 0) return []
+    return indicatorDefs
+      .filter((def) => visibleIndicators[def.key])
+      .map((def) => ({ key: def.key, label: def.label, color: def.color, points: def.compute(chartBars) }))
+  }, [indicatorDefs, visibleIndicators, chartBars])
 
   const summary = useMemo(() => {
     // Computed off visibleTrades (the date-filtered set), not the raw run - narrowing the date
@@ -728,11 +775,17 @@ export default function ExpiredBacktestPage() {
               <Space direction="vertical" size={16} style={{ width: '100%' }}>
                 {chartBars.length > 0 ? (
                   <div>
-                    <Checkbox checked={showEma} onChange={(e) => setShowEma(e.target.checked)}>
-                      <Text style={{ color: EMA_COLOR }}>Show 5 EMA</Text>
-                    </Checkbox>
+                    {indicatorDefs.map((def) => (
+                      <Checkbox
+                        key={def.key}
+                        checked={!!visibleIndicators[def.key]}
+                        onChange={(e) => setVisibleIndicators((v) => ({ ...v, [def.key]: e.target.checked }))}
+                      >
+                        <Text style={{ color: def.color }}>{def.label}</Text>
+                      </Checkbox>
+                    ))}
                     <ChartErrorBoundary key={`${underlying}-${expiryDate}-${timeframe}-${fromDay}-${toDay}`}>
-                      <ExpiredSpotChart bars={chartBars} trades={visibleTrades} emaPoints={emaPoints} height={420} focusTime={focusTime} syncGroup={chartSyncGroup} />
+                      <ExpiredSpotChart bars={chartBars} trades={visibleTrades} indicatorLines={indicatorLines} height={420} focusTime={focusTime} syncGroup={chartSyncGroup} />
                     </ChartErrorBoundary>
                   </div>
                 ) : (

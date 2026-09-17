@@ -4,7 +4,7 @@ import dayjs from 'dayjs'
 import { ReloadOutlined, PlayCircleOutlined } from '@ant-design/icons'
 import { createChart, createSeriesMarkers, CandlestickSeries, LineSeries, CrosshairMode } from 'lightweight-charts'
 import {
-  UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, EMA_COLOR, computeEma, NavBar, DirectionTag, ALERT_KIND_LABEL, fmtIstDateTime, fmtIstTime, fmtPrice, istDateKey,
+  UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, EMA_COLOR, emaLine, srLevelLine, NavBar, DirectionTag, ALERT_KIND_LABEL, fmtIstDateTime, fmtIstTime, fmtPrice, istDateKey,
   TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry,
   AXIS_COLOR, GRID_COLOR, BORDER_COLOR, istTimeFormatter, istTickMarkFormatter, toBar, toChartTime, dayResetMarkers,
   CeVsPeChart, VolumeVwapChart, scrollChartToTime, highlightChartAtTime, lastValueAtOrBeforeChartTime,
@@ -90,57 +90,6 @@ function tradeEntryMarkers(trades) {
       text: `${t.side === 'Sell' ? 'SELL' : 'BUY'} ${t.strike}${t.optionType}`,
     }))
     .sort((a, b) => a.time - b.time)
-}
-
-// A plain EMA line over the chart's own (already timeframe-bucketed) bars - the same computeEma
-// helper the old single "Show 5 EMA" checkbox used, just parameterized on whichever period the
-// caller asks for instead of a hardcoded 5.
-function emaLine(bars, period) {
-  const values = computeEma(bars.map((b) => b.close), period)
-  return bars.reduce((points, b, i) => {
-    if (values[i] != null) points.push({ time: b.time, value: values[i] })
-    return points
-  }, [])
-}
-
-// Mirrors SrFlowSellStrategy's own rolling support/resistance channel exactly (see the backend's
-// own doc comment on THE LEVEL): aggregates the NATIVE 1-minute spot history (oneMinuteBars, not
-// the chart's own possibly-coarser timeframe - the backend computes this from SpotBarsOneMinute
-// independently of whatever timeframe a run uses) into srTimeframeMinutes buckets, drops a still-
-// forming trailing one exactly like BacktestUtil.AggregateCandles does, then for each of the
-// chart's own bars reads the rolling high (resistance) or low (support) over the last
-// srLookbackBars such buckets that have fully closed strictly before that bar's own time - never
-// the bucket still forming through it, so this never looks ahead of what the strategy itself could
-// have known at the same moment.
-function srLevelLine(oneMinuteBars, chartBars, srTimeframeMinutes, srLookbackBars, which) {
-  if (oneMinuteBars.length === 0 || chartBars.length === 0) return []
-
-  const bucketSeconds = Math.max(1, srTimeframeMinutes) * 60
-  const buckets = new Map()
-  let latestCovered = 0
-  for (const b of oneMinuteBars) {
-    const t = Math.floor(b.time / bucketSeconds) * bucketSeconds
-    const existing = buckets.get(t)
-    if (!existing) buckets.set(t, { time: t, high: b.high, low: b.low })
-    else { existing.high = Math.max(existing.high, b.high); existing.low = Math.min(existing.low, b.low) }
-    if (b.time + 60 > latestCovered) latestCovered = b.time + 60
-  }
-  const srBars = Array.from(buckets.values()).sort((a, b) => a.time - b.time)
-  if (srBars.length > 0 && srBars[srBars.length - 1].time + bucketSeconds > latestCovered) srBars.pop()
-
-  const points = []
-  let srIndex = -1
-  for (const bar of chartBars) {
-    while (srIndex + 1 < srBars.length && srBars[srIndex + 1].time + bucketSeconds <= bar.time) srIndex++
-    if (srIndex + 1 < srLookbackBars) continue
-
-    let value = which === 'high' ? -Infinity : Infinity
-    for (let w = srIndex - srLookbackBars + 1; w <= srIndex; w++) {
-      value = which === 'high' ? Math.max(value, srBars[w].high) : Math.min(value, srBars[w].low)
-    }
-    points.push({ time: bar.time, value })
-  }
-  return points
 }
 
 // Plain candlestick chart of the underlying's own currently-backfilled/live spot history, with this
@@ -573,12 +522,10 @@ export default function BacktestPage() {
   }, [spotCandles, fromDay, toDay, timeframe])
 
   // Which indicator line(s) the CURRENT strategy exposes - one checkbox per entry, replacing the
-  // old single hardcoded "Show 5 EMA" toggle (which read a literal "emaPeriod" parameter neither
-  // currently-registered strategy has). Each entry's own `compute` reads whatever THIS strategy's
-  // own tuned parameter values currently are, so the plotted line always matches what a Run would
-  // actually use, not a stale default. A strategy with no descriptor here (there isn't one yet, but
-  // a future strategy might ship before this list is updated for it) simply shows no checkboxes -
-  // never a crash.
+  // old single hardcoded "Show 5 EMA" toggle. Each entry's own `compute` reads whatever THIS
+  // strategy's own tuned parameter values currently are, so the plotted line always matches what a
+  // Run would actually use, not a stale default. A strategy with no descriptor here (a future one
+  // that ships before this list is updated for it) simply shows no checkboxes - never a crash.
   const indicatorDefs = useMemo(() => {
     if (!strategy) return []
     const paramDefault = (key, fallback) => paramValues[key] ?? strategy.parameters?.find((p) => p.key === key)?.default ?? fallback
@@ -589,6 +536,20 @@ export default function BacktestPage() {
       return [
         { key: 'fastEma', label: `Fast EMA (${fastPeriod})`, color: '#f0a020', compute: (bars) => emaLine(bars, fastPeriod) },
         { key: 'slowEma', label: `Slow EMA (${slowPeriod})`, color: EMA_COLOR, compute: (bars) => emaLine(bars, slowPeriod) },
+      ]
+    }
+    if (strategy.key === 'kathy-lien-ema20-ema200-pullback') {
+      const fastPeriod = paramDefault('fastEmaPeriod', 20)
+      const slowPeriod = paramDefault('slowEmaPeriod', 200)
+      return [
+        { key: 'fastEma', label: `Fast EMA (${fastPeriod})`, color: '#f0a020', compute: (bars) => emaLine(bars, fastPeriod) },
+        { key: 'slowEma', label: `Slow EMA (${slowPeriod})`, color: EMA_COLOR, compute: (bars) => emaLine(bars, slowPeriod) },
+      ]
+    }
+    if (strategy.key === 'five-ema') {
+      const period = paramDefault('emaPeriod', 5)
+      return [
+        { key: 'ema', label: `${period} EMA`, color: EMA_COLOR, compute: (bars) => emaLine(bars, period) },
       ]
     }
     if (strategy.key === 'sr-flow-sell') {
@@ -602,7 +563,7 @@ export default function BacktestPage() {
     }
     return []
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [strategy, paramValues.fastEmaPeriod, paramValues.slowEmaPeriod, paramValues.srTimeframeMinutes, paramValues.srLookbackBars, spotCandles])
+  }, [strategy, paramValues.fastEmaPeriod, paramValues.slowEmaPeriod, paramValues.emaPeriod, paramValues.srTimeframeMinutes, paramValues.srLookbackBars, spotCandles])
 
   // The actual plotted line data - only for whichever of the above are ticked on in
   // visibleIndicators, and only once there is something to plot them against.
