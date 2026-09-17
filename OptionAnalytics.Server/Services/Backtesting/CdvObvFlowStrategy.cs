@@ -19,8 +19,14 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 /// FlowConfirmation.ModeParameter toggle every other strategy here already uses.
 ///
 /// Entry direction is Bullish/Bearish exactly as confirmed; STOP/TARGET are the standard shared
-/// points-based 10/20 (1:2) default, not a bespoke flow-based exit - kept plain, same call every
-/// other strategy here makes when the underlying idea does not itself suggest a different rule.
+/// points-based 10/20 (1:2) default. OPTIONAL on top of that (FlowReversalExitBars, 0 = off, the
+/// default): once in a trade, keep watching the SAME leg that was rising and justified the entry
+/// (CE for a Bullish trade, PE for a Bearish one) - if it now FALLS for that many consecutive bars
+/// in a row, the thesis that justified the trade has broken, so exit immediately as a stop-loss
+/// rather than waiting for the premium's own stop/target to eventually catch up. Which measure's
+/// reversal counts (OBV, CDV, either, or both) reuses the SAME FlowMode toggle entry itself uses -
+/// if Both had to rise to enter, both have to fall to force this exit; if Either was enough to
+/// enter, either reversing is enough to exit.
 /// </summary>
 public sealed class CdvObvFlowStrategy : IBacktestStrategy
 {
@@ -55,10 +61,17 @@ public sealed class CdvObvFlowStrategy : IBacktestStrategy
         new BacktestParameterSpec("lookback3Bars", "Lookback window 3 (bars)", Default: 15, Min: 1, Max: 200, Step: 1),
         new BacktestParameterSpec("threshold3Percent", "Window 3's own CE/PE spread must reach at least (%)", Default: 30, Min: 0, Max: 500, Step: 5),
         FlowConfirmation.ModeParameter("Require rising/falling agreement on"),
+        new BacktestParameterSpec("flowReversalExitBars", "Exit as stop-loss if the entry's own rising leg falls for (bars, 0 = off)", Default: 0, Min: 0, Max: 50, Step: 1),
     };
 
-    public IReadOnlyList<BacktestTrade> Simulate(BacktestStrategyContext context, IReadOnlyDictionary<string, decimal> parameters) =>
-        OptionTradeSimulator.Run(context, Evaluate(context, parameters).Entries, parameters);
+    public IReadOnlyList<BacktestTrade> Simulate(BacktestStrategyContext context, IReadOnlyDictionary<string, decimal> parameters)
+    {
+        var evaluation = Evaluate(context, parameters);
+        var flowReversalExitBars = (int)parameters.GetValueOrDefault("flowReversalExitBars", 0m);
+        var flowMode = parameters.GetValueOrDefault("flowMode", FlowConfirmation.ModeEither);
+        var signalExits = flowReversalExitBars > 0 ? BuildFlowReversalExits(context, evaluation.EntryIndexes, flowReversalExitBars, flowMode) : null;
+        return OptionTradeSimulator.Run(context, evaluation.Entries, parameters, signalExits: signalExits);
+    }
 
     public IReadOnlyList<BacktestSignal> EntrySignals(BacktestStrategyContext context, IReadOnlyDictionary<string, decimal> parameters) =>
         Evaluate(context, parameters).Signals;
@@ -97,7 +110,51 @@ public sealed class CdvObvFlowStrategy : IBacktestStrategy
         return (bullishConfirmed, bearishConfirmed, scores);
     }
 
-    private (List<(DateTimeOffset Time, string Direction)> Entries, List<BacktestSignal> Signals) Evaluate(
+    /// <summary>Walks forward from each entry's own bar, counting consecutive bar-over-bar FALLS in
+    /// the leg that was rising and justified that entry (CE for Bullish, PE for Bearish) - once a
+    /// streak reaches <paramref name="reversalBars"/>, that bar becomes the trade's forced exit, at
+    /// the FIRST bar the streak completes (not a further bar after it - consistent with every other
+    /// forced-exit mechanism in this app). A missing reading anywhere breaks the streak back to zero
+    /// rather than counting toward it - "no data" is not "falling". Which measure's own streak counts
+    /// is the same FlowConfirmation.Confirms(flowMode, ...) combination entry itself uses.</summary>
+    private static Dictionary<DateTimeOffset, (DateTimeOffset Time, string Reason)> BuildFlowReversalExits(
+        BacktestStrategyContext context, IReadOnlyList<(int Index, DateTimeOffset Time, bool Bullish)> entryIndexes, int reversalBars, decimal flowMode)
+    {
+        var exits = new Dictionary<DateTimeOffset, (DateTimeOffset, string)>();
+        var bars = context.SpotBars;
+
+        foreach (var (entryIndex, entryTime, bullish) in entryIndexes)
+        {
+            var obvSeries = bullish ? context.ObvCeSeries : context.ObvPeSeries;
+            var cdvSeries = bullish ? context.CdvCeSeries : context.CdvPeSeries;
+            var obvPrev = BacktestUtil.LastValueAtOrBefore(obvSeries, bars[entryIndex].Time);
+            var cdvPrev = BacktestUtil.LastValueAtOrBefore(cdvSeries, bars[entryIndex].Time);
+            var obvFallStreak = 0;
+            var cdvFallStreak = 0;
+
+            for (var j = entryIndex + 1; j < bars.Count; j++)
+            {
+                var obvNow = BacktestUtil.LastValueAtOrBefore(obvSeries, bars[j].Time);
+                var cdvNow = BacktestUtil.LastValueAtOrBefore(cdvSeries, bars[j].Time);
+
+                obvFallStreak = obvNow is { } ov && obvPrev is { } op && ov < op ? obvFallStreak + 1 : 0;
+                cdvFallStreak = cdvNow is { } cv && cdvPrev is { } cp && cv < cp ? cdvFallStreak + 1 : 0;
+
+                if (FlowConfirmation.Confirms(flowMode, obvFallStreak >= reversalBars, cdvFallStreak >= reversalBars))
+                {
+                    exits[entryTime] = (bars[j].Time, "FlowStopLoss");
+                    break;
+                }
+
+                obvPrev = obvNow ?? obvPrev;
+                cdvPrev = cdvNow ?? cdvPrev;
+            }
+        }
+
+        return exits;
+    }
+
+    private (List<(DateTimeOffset Time, string Direction)> Entries, List<BacktestSignal> Signals, List<(int Index, DateTimeOffset Time, bool Bullish)> EntryIndexes) Evaluate(
         BacktestStrategyContext context, IReadOnlyDictionary<string, decimal> parameters)
     {
         var direction = parameters["direction"];
@@ -115,12 +172,14 @@ public sealed class CdvObvFlowStrategy : IBacktestStrategy
 
         var entries = new List<(DateTimeOffset Time, string Direction)>();
         var signals = new List<BacktestSignal>();
+        var entryIndexes = new List<(int Index, DateTimeOffset Time, bool Bullish)>();
 
         var bars = context.SpotBars;
-        if (bars.Count == 0) return (entries, signals);
+        if (bars.Count == 0) return (entries, signals, entryIndexes);
 
-        foreach (var bar in bars)
+        for (var i = 0; i < bars.Count; i++)
         {
+            var bar = bars[i];
             var beforeSignalStart = signalStartMinutes > 0 && IstClock.MinutesOfDay(bar.Time) < signalStartMinutes;
 
             var obv = EvaluateLeg(context.ObvCeSeries, context.ObvPeSeries, bar.Time, windows);
@@ -158,9 +217,10 @@ public sealed class CdvObvFlowStrategy : IBacktestStrategy
             {
                 signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Entry", dir, summary));
                 entries.Add((bar.Time, dir));
+                entryIndexes.Add((i, bar.Time, bullish));
             }
         }
 
-        return (entries, signals.OrderByDescending(s => s.TimeUtc).ToList());
+        return (entries, signals.OrderByDescending(s => s.TimeUtc).ToList(), entryIndexes);
     }
 }
