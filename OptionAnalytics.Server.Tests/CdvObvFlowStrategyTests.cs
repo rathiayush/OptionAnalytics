@@ -68,15 +68,15 @@ public sealed class CdvObvFlowStrategyTests
             ["excludeLastDays"] = 0,
             ["direction"] = 0, // both sides
             ["lookback1Bars"] = 2,
-            ["threshold1Score"] = 0.3m,
+            ["threshold1Percent"] = 30,
             ["lookback2Bars"] = 3,
-            ["threshold2Score"] = 0.3m,
+            ["threshold2Percent"] = 30,
             ["lookback3Bars"] = 4,
-            ["threshold3Score"] = 0.3m,
+            ["threshold3Percent"] = 30,
             ["flowNormalizationBars"] = 5,
             ["flowMode"] = FlowConfirmation.ModeEither,
             ["flowExitLookbackBars"] = 0,
-            ["flowExitThresholdScore"] = 0,
+            ["flowExitThresholdPercent"] = 0,
         };
         overrides?.Invoke(p);
         return p;
@@ -85,9 +85,9 @@ public sealed class CdvObvFlowStrategyTests
     [Fact]
     public void BullishFlow_FiresEntries_WhenCeRisesAndPeFallsConsistently()
     {
-        // CE +1/bar, PE -1/bar - a perfectly consistent slope scores exactly +1.0/-1.0 on every
+        // CE +1/bar, PE -1/bar - a perfectly consistent slope scores exactly +100%/-100% on every
         // window once there is enough history (index 5, since flowNormalizationBars=5 needs bars
-        // 1..5), comfortably clearing the 0.3 default threshold.
+        // 1..5), comfortably clearing the 30% default threshold.
         var obvCe = ConstantSlopeSeries(30, 100, 1);
         var obvPe = ConstantSlopeSeries(30, 100, -1);
 
@@ -119,8 +119,8 @@ public sealed class CdvObvFlowStrategyTests
         // in much bigger bar-to-bar noise (average |delta| ~4.6). This is exactly the "sideways/
         // choppy" case the OLD %-of-cumulative-total measure could not reliably reject (a growing
         // cumulative total still LOOKS like a rise by %), but the new normalized score correctly
-        // scores each leg low (~+-0.1, since the net move barely exceeds a single typical bar's own
-        // noise) - spread stays well under the 0.3 threshold, so it's rejected. (Both legs choppy,
+        // scores each leg low (~+-10%, since the net move barely exceeds a single typical bar's own
+        // noise) - spread stays well under the 30% threshold, so it's rejected. (Both legs choppy,
         // not just one - a lopsided fixture where only one leg is choppy while the other cleanly
         // trends would let the CLEAN leg's own strength carry the spread over threshold on its own,
         // which is a real but different case from "both sides are just noise".)
@@ -144,14 +144,14 @@ public sealed class CdvObvFlowStrategyTests
     [Fact]
     public void EachWindowsThresholdIsIndependentlyTunable_RaisingOneAloneBlocksAnOtherwiseValidEntry()
     {
-        // Every window scores exactly 2.0 (CE +1.0 minus PE -1.0) on the consistent-slope fixture -
-        // raising JUST threshold2Score past that (to 3.0) should block the whole bar, since ALL
+        // Every window scores exactly 200% (CE +100% minus PE -100%) on the consistent-slope fixture -
+        // raising JUST threshold2Percent past that (to 300%) should block the whole bar, since ALL
         // THREE windows must clear their own threshold, not most of them.
         var obvCe = ConstantSlopeSeries(30, 100, 1);
         var obvPe = ConstantSlopeSeries(30, 100, -1);
 
         var signalsBefore = new CdvObvFlowStrategy().EntrySignals(Context(obvCe, obvPe), Parameters());
-        var signalsAfter = new CdvObvFlowStrategy().EntrySignals(Context(obvCe, obvPe), Parameters(p => p["threshold2Score"] = 3m));
+        var signalsAfter = new CdvObvFlowStrategy().EntrySignals(Context(obvCe, obvPe), Parameters(p => p["threshold2Percent"] = 300m));
 
         Assert.Contains(signalsBefore, s => s.Kind == "Entry"); // confirms the fixture would otherwise fire
         Assert.DoesNotContain(signalsAfter, s => s.Kind == "Entry");
@@ -230,7 +230,7 @@ public sealed class CdvObvFlowStrategyTests
         var trades = new CdvObvFlowStrategy().Simulate(Context(obvCe, obvPe), Parameters(p =>
         {
             p["flowExitLookbackBars"] = 2;
-            p["flowExitThresholdScore"] = 0;
+            p["flowExitThresholdPercent"] = 0;
         }));
 
         var trade = trades.Single(t => t.SignalTimeUtc == T0.AddMinutes(5));
@@ -262,7 +262,7 @@ public sealed class CdvObvFlowStrategyTests
         var trades = new CdvObvFlowStrategy().Simulate(Context(obvCe, obvPe, optionBarsOverride: optionBars), Parameters(p =>
         {
             p["flowExitLookbackBars"] = 2;
-            p["flowExitThresholdScore"] = 0;
+            p["flowExitThresholdPercent"] = 0;
         }));
 
         var trade = trades.Single(t => t.SignalTimeUtc == T0.AddMinutes(5));
@@ -293,7 +293,7 @@ public sealed class CdvObvFlowStrategyTests
         var trades = new CdvObvFlowStrategy().Simulate(Context(obvCe, obvPe), Parameters(p =>
         {
             p["flowExitLookbackBars"] = 2;
-            p["flowExitThresholdScore"] = 0;
+            p["flowExitThresholdPercent"] = 0;
         }));
 
         var trade = trades.Single(t => t.SignalTimeUtc == T0.AddMinutes(5));
