@@ -301,4 +301,51 @@ public sealed class CdvObvFlowStrategyTests
         Assert.Equal("FlowStopLoss", trade.ExitReason);
         Assert.Equal(T0.AddMinutes(11), trade.ExitTimeUtc);
     }
+
+    [Fact]
+    public void Simulate_OnAMultiWeekBacktest_CompletesInLinearRatherThanQuadraticTime()
+    {
+        // A real "why is this taking so long" report traced to FlowScore/AverageAbsBarDelta each
+        // doing a fresh linear scan (BacktestUtil.LastValueAtOrBefore) per lookup, called ~12 times
+        // per bar with a 30-bar trailing average each - effectively quadratic over a multi-day
+        // backtest. Fixed by aligning each series to bar indices once (SeriesStats) and reading a
+        // precomputed prefix sum instead. 20,000 bars is roughly 7 weeks of 1-minute data - the
+        // previous O(bars^2) approach took tens of seconds to minutes at this size in a local
+        // repro; a generous 5-second ceiling here easily separates "still linear" from "regressed
+        // back to quadratic" without being flaky on a slower CI box.
+        const int bars = 20_000;
+        var obvCe = ConstantSlopeSeries(bars, 100, 1);
+        var obvPe = ConstantSlopeSeries(bars, 100, -1);
+        var spotBars = Enumerable.Range(0, bars).Select(i => new Candle(T0.AddMinutes(i), 20000m, 20000m, 20000m, 20000m)).ToList();
+        var optionBars = spotBars.Select(b => new Candle(b.Time, 100m, 100.5m, 99.5m, 100m)).ToList();
+        var context = new BacktestStrategyContext
+        {
+            Underlying = "NIFTY",
+            TimeframeMinutes = 1,
+            Step = 50,
+            SpotBars = spotBars,
+            SpotBarsOneMinute = spotBars,
+            SpotVolumeBarsOneMinute = spotBars.Select(b => new CandleWithVolume(b.Time, b.Open, b.High, b.Low, b.Close, 1000)).ToList(),
+            ConfluenceSignalsAscending = Array.Empty<BacktestSignal>(),
+            AllSignals = Array.Empty<BacktestSignal>(),
+            ObvCeSeries = obvCe,
+            ObvPeSeries = obvPe,
+            CdvCeSeries = obvCe,
+            CdvPeSeries = obvPe,
+            GetOptionBars = (_, _) => optionBars,
+            GetOptionBarsOneMinute = (_, _) => optionBars,
+            AtmCeBars = Array.Empty<Candle>(),
+            AtmPeBars = Array.Empty<Candle>(),
+            AtmCeVolumeBars = Array.Empty<CandleWithVolume>(),
+            AtmPeVolumeBars = Array.Empty<CandleWithVolume>(),
+            AtmStrike = null,
+        };
+
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        var trades = new CdvObvFlowStrategy().Simulate(context, Parameters(p => p["flowExitLookbackBars"] = 3));
+        stopwatch.Stop();
+
+        Assert.NotEmpty(trades);
+        Assert.True(stopwatch.ElapsedMilliseconds < 5000, $"took {stopwatch.ElapsedMilliseconds}ms - expected O(bars), not O(bars^2)");
+    }
 }

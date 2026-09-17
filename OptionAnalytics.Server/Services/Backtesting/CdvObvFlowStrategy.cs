@@ -48,6 +48,28 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 /// ignoreSignalExitsWhileInProfit). A trade already in profit rides on toward its own stop/target/
 /// day-close instead, even while the flow itself has gone sideways or reversed; the flow check
 /// keeps watching every subsequent bar too, so it can still fire later if that profit fades back out.
+///
+/// PERFORMANCE: the naive way to answer "what was this series' value at bar i" - a fresh linear scan
+/// (BacktestUtil.LastValueAtOrBefore) from the start of the series every single time - is what every
+/// OTHER strategy here does too, but they only ever call it once or twice per bar. This strategy calls
+/// it far more (3 windows x CE/PE x OBV/CDV, each also needing a 30-bar trailing average), which
+/// turned a per-bar cost that is normally trivial into a genuinely quadratic one over a multi-day
+/// backtest (confirmed as the actual cause of a real "why is this taking so long" report). Fixed by
+/// ALIGNING each series to context.SpotBars' own bar indices ONCE up front (SeriesStats, a single
+/// forward merge-scan - both a series and SpotBars are already time-ascending, so this never
+/// backtracks) and precomputing a running prefix sum of the per-bar |delta| alongside it, so both a
+/// window's own value lookup AND its normalizer's trailing average become a handful of array reads
+/// and a subtraction - O(1) per FlowScore call instead of O(bars) - rather than changing anything
+/// about what the strategy actually computes.
+///
+/// That fix alone was not enough: BuildFlowExits still walked forward from EVERY entry's own bar
+/// looking for its first weak bar, and on a strongly one-directional session (continuous entries,
+/// the flow never actually weakening for a long stretch) that is itself O(entries x bars) - measured
+/// at 85 SECONDS for a 20,000-bar (roughly 7-week) backtest even after the first fix. Whether bar j
+/// is weak never depends on which entry is asking, only on j itself, so ComputeNextWeakBar computes
+/// it ONCE per leg direction via a single backward pass (bars.Count-1 down to 0, carrying the nearest
+/// weak index forward) - every entry's own exit then becomes a single O(1) array read into that
+/// shared result instead of its own independent forward walk.
 /// </summary>
 public sealed class CdvObvFlowStrategy : IBacktestStrategy
 {
@@ -95,7 +117,7 @@ public sealed class CdvObvFlowStrategy : IBacktestStrategy
         var flowMode = parameters.GetValueOrDefault("flowMode", FlowConfirmation.ModeEither);
         var normalizationBars = Math.Max(1, (int)parameters.GetValueOrDefault("flowNormalizationBars", 30m));
         var signalExits = flowExitLookbackBars > 0
-            ? BuildFlowExits(context, evaluation.EntryIndexes, flowExitLookbackBars, flowExitThresholdScore, flowMode, normalizationBars)
+            ? BuildFlowExits(context, evaluation.EntryIndexes, evaluation.ObvCe, evaluation.ObvPe, evaluation.CdvCe, evaluation.CdvPe, flowExitLookbackBars, flowExitThresholdScore, flowMode, normalizationBars)
             : null;
         // Per explicit request: a weakening flow should cut a LOSING trade short, never override one
         // already ahead - see Run's own doc comment on ignoreSignalExitsWhileInProfit.
@@ -107,25 +129,56 @@ public sealed class CdvObvFlowStrategy : IBacktestStrategy
 
     private readonly record struct LookbackWindow(int Bars, decimal ThresholdScore);
 
+    /// <summary>One series' value at every one of context.SpotBars' own bar indices (Values[i] =
+    /// BacktestUtil.LastValueAtOrBefore(series, bars[i].Time), but computed via a single forward
+    /// merge-scan instead of a fresh linear scan per bar - both series and bars are already
+    /// time-ascending, so one cursor into series only ever needs to move forward as i increases), plus
+    /// a running prefix sum (and count, since a gap leaves a bar's own delta undefined) of the
+    /// bar-over-bar |delta| - see this class's own doc comment for why. AbsDeltaSumPrefix[i]/
+    /// AbsDeltaCountPrefix[i] cover deltas at indices 1..i (index 0 has no prior bar, so no delta of
+    /// its own); both are 0 at index 0.</summary>
+    private readonly record struct SeriesStats(decimal?[] Values, decimal[] AbsDeltaSumPrefix, int[] AbsDeltaCountPrefix);
+
+    private static SeriesStats BuildSeriesStats(IReadOnlyList<ObvPoint> series, IReadOnlyList<Candle> bars)
+    {
+        var values = new decimal?[bars.Count];
+        var sumPrefix = new decimal[bars.Count];
+        var countPrefix = new int[bars.Count];
+
+        var cursor = 0;
+        decimal? current = null;
+        for (var i = 0; i < bars.Count; i++)
+        {
+            while (cursor < series.Count && series[cursor].Time <= bars[i].Time)
+            {
+                current = series[cursor].Obv;
+                cursor++;
+            }
+            values[i] = current;
+
+            if (i > 0)
+            {
+                var delta = values[i] is { } now && values[i - 1] is { } prev ? (decimal?)Math.Abs(now - prev) : null;
+                sumPrefix[i] = sumPrefix[i - 1] + (delta ?? 0);
+                countPrefix[i] = countPrefix[i - 1] + (delta.HasValue ? 1 : 0);
+            }
+        }
+
+        return new SeriesStats(values, sumPrefix, countPrefix);
+    }
+
     /// <summary>The recent "typical single-bar move" for one series ending at bar index i - the mean
     /// of |value(k) - value(k-1)| over the trailing <paramref name="lookbackBars"/> native chart
-    /// bars. Null until there is enough history, or if every one of those bars was itself unreadable
-    /// (BacktestUtil.LastValueAtOrBefore missing a point) - a normalizer of zero/unknown scale can
-    /// never produce a meaningful ratio.</summary>
-    private static decimal? AverageAbsBarDelta(IReadOnlyList<ObvPoint> series, IReadOnlyList<Candle> bars, int i, int lookbackBars)
+    /// bars, read off the precomputed prefix sums in O(1). Null until there is enough history, or if
+    /// every one of those bars was itself unreadable - a normalizer of zero/unknown scale can never
+    /// produce a meaningful ratio.</summary>
+    private static decimal? AverageAbsBarDelta(SeriesStats stats, int i, int lookbackBars)
     {
         var start = i - lookbackBars + 1;
         if (start < 1) return null;
 
-        decimal sum = 0;
-        var count = 0;
-        for (var k = start; k <= i; k++)
-        {
-            if (BacktestUtil.LastValueAtOrBefore(series, bars[k].Time) is not { } now) continue;
-            if (BacktestUtil.LastValueAtOrBefore(series, bars[k - 1].Time) is not { } prev) continue;
-            sum += Math.Abs(now - prev);
-            count++;
-        }
+        var sum = stats.AbsDeltaSumPrefix[i] - stats.AbsDeltaSumPrefix[start - 1];
+        var count = stats.AbsDeltaCountPrefix[i] - stats.AbsDeltaCountPrefix[start - 1];
         return count > 0 ? sum / count : null;
     }
 
@@ -134,12 +187,12 @@ public sealed class CdvObvFlowStrategy : IBacktestStrategy
     /// why this replaces a raw percentage of the cumulative total. Null when there is not yet enough
     /// history for either the window or the normalizer, or the normalizer itself is zero (a flat
     /// series has no "typical move" to divide by).</summary>
-    private static decimal? FlowScore(IReadOnlyList<ObvPoint> series, IReadOnlyList<Candle> bars, int i, int windowBars, int normalizationBars)
+    private static decimal? FlowScore(SeriesStats stats, int i, int windowBars, int normalizationBars)
     {
         if (i - windowBars < 0) return null;
-        if (BacktestUtil.LastValueAtOrBefore(series, bars[i].Time) is not { } now) return null;
-        if (BacktestUtil.LastValueAtOrBefore(series, bars[i - windowBars].Time) is not { } earlier) return null;
-        if (AverageAbsBarDelta(series, bars, i, normalizationBars) is not { } avgAbs || avgAbs <= 0) return null;
+        if (stats.Values[i] is not { } now) return null;
+        if (stats.Values[i - windowBars] is not { } earlier) return null;
+        if (AverageAbsBarDelta(stats, i, normalizationBars) is not { } avgAbs || avgAbs <= 0) return null;
 
         return (now - earlier) / (avgAbs * windowBars);
     }
@@ -148,7 +201,7 @@ public sealed class CdvObvFlowStrategy : IBacktestStrategy
     /// window's own direction AND own threshold both hold; a single missing reading, wrong-direction
     /// window, or under-threshold window anywhere fails the whole leg.</summary>
     private static (bool BullishConfirmed, bool BearishConfirmed, IReadOnlyList<decimal> WindowScores) EvaluateLeg(
-        IReadOnlyList<ObvPoint> ceSeries, IReadOnlyList<ObvPoint> peSeries, IReadOnlyList<Candle> bars, int i, IReadOnlyList<LookbackWindow> windows, int normalizationBars)
+        SeriesStats ceStats, SeriesStats peStats, int i, IReadOnlyList<LookbackWindow> windows, int normalizationBars)
     {
         var bullishConfirmed = true;
         var bearishConfirmed = true;
@@ -156,8 +209,8 @@ public sealed class CdvObvFlowStrategy : IBacktestStrategy
 
         for (var w = 0; w < windows.Count; w++)
         {
-            var ce = FlowScore(ceSeries, bars, i, windows[w].Bars, normalizationBars);
-            var pe = FlowScore(peSeries, bars, i, windows[w].Bars, normalizationBars);
+            var ce = FlowScore(ceStats, i, windows[w].Bars, normalizationBars);
+            var pe = FlowScore(peStats, i, windows[w].Bars, normalizationBars);
             if (ce is not { } ceScore || pe is not { } peScore) return (false, false, scores);
 
             var spread = ceScore - peScore; // CE rising / PE falling both push this positive; the mirror pushes it negative.
@@ -170,42 +223,61 @@ public sealed class CdvObvFlowStrategy : IBacktestStrategy
         return (bullishConfirmed, bearishConfirmed, scores);
     }
 
-    /// <summary>Walks forward from each entry's own bar, recomputing the FlowScore of the SAME leg
-    /// that justified it (CE for Bullish, PE for Bearish) EVERY bar over flowExitLookbackBars - the
-    /// FIRST bar that score falls to or below flowExitThresholdScore becomes the trade's forced exit
-    /// (not a further bar after it, consistent with every other forced-exit mechanism in this app).
-    /// A not-yet-computable score (not enough history right after entry) can never itself justify an
-    /// exit - "no reading yet" is not "weak". Which measure's own weakness counts is the same
-    /// FlowConfirmation.Confirms(flowMode, ...) combination entry itself uses.</summary>
+    /// <summary>For ONE leg (CE for Bullish entries, PE for Bearish), the nearest bar at or after
+    /// EVERY index j where the flow has gone weak - a single BACKWARD pass (bars.Count-1 down to 0)
+    /// carrying the most recent weak index forward, so "where does entry X's own exit land" becomes
+    /// an O(1) array read afterward instead of walking forward from every entry independently.
+    /// Whether the flow is weak at any one bar depends only on that bar's own FlowScore, never on
+    /// which entry is asking - a dense run of entries (a strongly one-directional session, exactly
+    /// the case that made this necessary - see this class's own doc comment on the quadratic
+    /// per-entry forward walk this replaced) would otherwise redo most of the same walk once per
+    /// entry.</summary>
+    private static int?[] ComputeNextWeakBar(SeriesStats obvStats, SeriesStats cdvStats, int exitLookbackBars, decimal exitThresholdScore, decimal flowMode, int normalizationBars, int barCount)
+    {
+        var nextWeak = new int?[barCount];
+        int? nearest = null;
+        for (var j = barCount - 1; j >= 0; j--)
+        {
+            var obvWeak = FlowScore(obvStats, j, exitLookbackBars, normalizationBars) is { } ov && ov <= exitThresholdScore;
+            var cdvWeak = FlowScore(cdvStats, j, exitLookbackBars, normalizationBars) is { } cv && cv <= exitThresholdScore;
+            if (FlowConfirmation.Confirms(flowMode, obvWeak, cdvWeak)) nearest = j;
+            nextWeak[j] = nearest;
+        }
+        return nextWeak;
+    }
+
+    /// <summary>The FIRST bar after each entry's own bar where the SAME leg that justified it (CE for
+    /// Bullish, PE for Bearish) has gone weak becomes that trade's forced exit (not a further bar
+    /// after it, consistent with every other forced-exit mechanism in this app) - a not-yet-computable
+    /// score (not enough history right after entry) can never itself justify an exit, and
+    /// ComputeNextWeakBar's own "no weak bar found" (null) leaves a trade with no forced exit at all,
+    /// same as before. Takes the SAME SeriesStats Evaluate already built rather than rebuilding
+    /// them.</summary>
     private static Dictionary<DateTimeOffset, (DateTimeOffset Time, string Reason)> BuildFlowExits(
         BacktestStrategyContext context, IReadOnlyList<(int Index, DateTimeOffset Time, bool Bullish)> entryIndexes,
+        SeriesStats obvCe, SeriesStats obvPe, SeriesStats cdvCe, SeriesStats cdvPe,
         int exitLookbackBars, decimal exitThresholdScore, decimal flowMode, int normalizationBars)
     {
         var exits = new Dictionary<DateTimeOffset, (DateTimeOffset, string)>();
         var bars = context.SpotBars;
+        var nextWeakBullish = ComputeNextWeakBar(obvCe, cdvCe, exitLookbackBars, exitThresholdScore, flowMode, normalizationBars, bars.Count);
+        var nextWeakBearish = ComputeNextWeakBar(obvPe, cdvPe, exitLookbackBars, exitThresholdScore, flowMode, normalizationBars, bars.Count);
 
         foreach (var (entryIndex, entryTime, bullish) in entryIndexes)
         {
-            var obvSeries = bullish ? context.ObvCeSeries : context.ObvPeSeries;
-            var cdvSeries = bullish ? context.CdvCeSeries : context.CdvPeSeries;
-
-            for (var j = entryIndex + 1; j < bars.Count; j++)
+            var nextWeak = bullish ? nextWeakBullish : nextWeakBearish;
+            if (entryIndex + 1 < bars.Count && nextWeak[entryIndex + 1] is { } weakIndex)
             {
-                var obvWeak = FlowScore(obvSeries, bars, j, exitLookbackBars, normalizationBars) is { } ov && ov <= exitThresholdScore;
-                var cdvWeak = FlowScore(cdvSeries, bars, j, exitLookbackBars, normalizationBars) is { } cv && cv <= exitThresholdScore;
-
-                if (FlowConfirmation.Confirms(flowMode, obvWeak, cdvWeak))
-                {
-                    exits[entryTime] = (bars[j].Time, "FlowStopLoss");
-                    break;
-                }
+                exits[entryTime] = (bars[weakIndex].Time, "FlowStopLoss");
             }
         }
 
         return exits;
     }
 
-    private (List<(DateTimeOffset Time, string Direction)> Entries, List<BacktestSignal> Signals, List<(int Index, DateTimeOffset Time, bool Bullish)> EntryIndexes) Evaluate(
+    private (List<(DateTimeOffset Time, string Direction)> Entries, List<BacktestSignal> Signals,
+        List<(int Index, DateTimeOffset Time, bool Bullish)> EntryIndexes,
+        SeriesStats ObvCe, SeriesStats ObvPe, SeriesStats CdvCe, SeriesStats CdvPe) Evaluate(
         BacktestStrategyContext context, IReadOnlyDictionary<string, decimal> parameters)
     {
         var direction = parameters["direction"];
@@ -226,15 +298,19 @@ public sealed class CdvObvFlowStrategy : IBacktestStrategy
         var entryIndexes = new List<(int Index, DateTimeOffset Time, bool Bullish)>();
 
         var bars = context.SpotBars;
-        if (bars.Count == 0) return (entries, signals, entryIndexes);
+        var obvCeStats = BuildSeriesStats(context.ObvCeSeries, bars);
+        var obvPeStats = BuildSeriesStats(context.ObvPeSeries, bars);
+        var cdvCeStats = BuildSeriesStats(context.CdvCeSeries, bars);
+        var cdvPeStats = BuildSeriesStats(context.CdvPeSeries, bars);
+        if (bars.Count == 0) return (entries, signals, entryIndexes, obvCeStats, obvPeStats, cdvCeStats, cdvPeStats);
 
         for (var i = 0; i < bars.Count; i++)
         {
             var bar = bars[i];
             var beforeSignalStart = signalStartMinutes > 0 && IstClock.MinutesOfDay(bar.Time) < signalStartMinutes;
 
-            var obv = EvaluateLeg(context.ObvCeSeries, context.ObvPeSeries, bars, i, windows, normalizationBars);
-            var cdv = EvaluateLeg(context.CdvCeSeries, context.CdvPeSeries, bars, i, windows, normalizationBars);
+            var obv = EvaluateLeg(obvCeStats, obvPeStats, i, windows, normalizationBars);
+            var cdv = EvaluateLeg(cdvCeStats, cdvPeStats, i, windows, normalizationBars);
 
             var bullish = FlowConfirmation.Confirms(flowMode, obv.BullishConfirmed, cdv.BullishConfirmed);
             var bearish = FlowConfirmation.Confirms(flowMode, obv.BearishConfirmed, cdv.BearishConfirmed);
@@ -272,6 +348,6 @@ public sealed class CdvObvFlowStrategy : IBacktestStrategy
             }
         }
 
-        return (entries, signals.OrderByDescending(s => s.TimeUtc).ToList(), entryIndexes);
+        return (entries, signals.OrderByDescending(s => s.TimeUtc).ToList(), entryIndexes, obvCeStats, obvPeStats, cdvCeStats, cdvPeStats);
     }
 }
