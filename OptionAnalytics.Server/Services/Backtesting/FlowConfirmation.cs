@@ -92,6 +92,22 @@ public static class FlowConfirmation
         _ => obvFavors || cdvFavors,
     };
 
+    /// <summary>The SIGNED % change of one series (OBV or CDV, whichever the caller passes) between
+    /// <paramref name="window"/> ago and now, both read via BacktestUtil.LastValueAtOrBefore -
+    /// positive means rising, negative means falling. Added for CdvObvFlowStrategy, which needs the
+    /// actual magnitude (not just Favors' own yes/no) to combine several lookback windows into one
+    /// score - same zero/sign-flipped-base guard as Favors' own minRisePercent (a base of exactly
+    /// zero, or one on the opposite side of zero from now, makes a percentage technically computable
+    /// but meaningless), returning null rather than a misleading number in that case, or when either
+    /// reading is simply missing.</summary>
+    public static decimal? PercentChange(IReadOnlyList<ObvPoint> series, DateTimeOffset at, TimeSpan window)
+    {
+        if (BacktestUtil.LastValueAtOrBefore(series, at) is not { } now) return null;
+        if (BacktestUtil.LastValueAtOrBefore(series, at - window) is not { } earlier) return null;
+        if (earlier == 0 || Math.Sign(now) != Math.Sign(earlier)) return null;
+        return (now - earlier) / Math.Abs(earlier) * 100m;
+    }
+
     public static string ModeLabel(decimal flowMode) => flowMode switch
     {
         ModeObvOnly => "OBV",

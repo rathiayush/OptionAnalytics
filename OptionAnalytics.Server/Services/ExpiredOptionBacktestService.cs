@@ -100,7 +100,7 @@ public sealed class ExpiredOptionBacktestService
     /// provided its entire signal/pricing logic only reads spot bars plus GetOptionBars(strike,
     /// isCall) for one strike at a time - or, like sr-flow-sell, also needs order-flow across the
     /// whole surrounding strike chain, via includeObvCdv/needsFlowChain below.</summary>
-    private static readonly HashSet<string> SupportedStrategyKeys = new() { "sr-flow-sell", "ema-crossover-retest", "kathy-lien-ema20-ema200-pullback" };
+    private static readonly HashSet<string> SupportedStrategyKeys = new() { "sr-flow-sell", "ema-crossover-retest", "kathy-lien-ema20-ema200-pullback", "cdv-obv-flow" };
 
     /// <summary>Underlyings this feature supports at all - Dhan's rolling-option docs only ever show
     /// "NSE_FNO" as the exchange segment, never a BSE one, so SENSEX is left out rather than
@@ -401,17 +401,17 @@ public sealed class ExpiredOptionBacktestService
         // in addition to it, since FlowChainRadius (10) already covers any legal otmSteps (bounded to
         // +-8), so the wider band alone still serves this run's own pricing too.
         //
-        // sr-flow-sell's own entry logic ALWAYS reads ObvCeSeries/CdvCeSeries (see its own doc
-        // comment) - the same reason EmaCrossAtmFlowStrategy used to need this wide band.
-        // ema-crossover-retest only reads it when its own requireFlowConfirmation parameter is on
-        // (off by default - see its own FlowCheck), so this run's own parameters decide it rather
-        // than the strategy key alone. includeObvCdv opts ANY OTHER strategy into the same fetch
-        // purely so the page can plot the OBV/CDV chart alongside a run, for the user to visually
-        // check those series are behaving sensibly. Off by default otherwise: even though
-        // StrikeBandSteps==FlowChainRadius now (see StrikeBandSteps' own doc comment), this path also
-        // pays for the OBV/CDV reconstruction itself, so a run that does not need or ask for it still
-        // does not pay for that extra work.
-        var needsFlowChain = strategyKey == "sr-flow-sell"
+        // sr-flow-sell's and cdv-obv-flow's own entry logic ALWAYS reads ObvCeSeries/CdvCeSeries
+        // (see each one's own doc comment) - the same reason EmaCrossAtmFlowStrategy used to need
+        // this wide band. ema-crossover-retest only reads it when its own requireFlowConfirmation
+        // parameter is on (off by default - see its own FlowCheck), so this run's own parameters
+        // decide it rather than the strategy key alone. includeObvCdv opts ANY OTHER strategy into
+        // the same fetch purely so the page can plot the OBV/CDV chart alongside a run, for the user
+        // to visually check those series are behaving sensibly. Off by default otherwise: even
+        // though StrikeBandSteps==FlowChainRadius now (see StrikeBandSteps' own doc comment), this
+        // path also pays for the OBV/CDV reconstruction itself, so a run that does not need or ask
+        // for it still does not pay for that extra work.
+        var needsFlowChain = strategyKey == "sr-flow-sell" || strategyKey == "cdv-obv-flow"
             || (strategyKey == "ema-crossover-retest" && mergedParameters.GetValueOrDefault("requireFlowConfirmation", 0m) >= 0.5m)
             || includeObvCdv;
         var bandCenterSteps = needsFlowChain ? 0 : otmSteps;
