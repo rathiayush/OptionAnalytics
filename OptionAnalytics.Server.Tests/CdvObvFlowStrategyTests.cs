@@ -206,4 +206,64 @@ public sealed class CdvObvFlowStrategyTests
         Assert.NotEmpty(trades);
         Assert.All(trades, t => Assert.Equal("CE", t.OptionType)); // Buy + Bullish -> buy CE
     }
+
+    // CE matches BullishFlow_FiresEntries' own growth through bar 4 (entry fires there), then
+    // reverses: bar 5 dips below bar 4, bar 6 dips below bar 5 - two consecutive falls.
+    private static List<ObvPoint> RisingThenReversingCe()
+    {
+        var obvCe = new List<ObvPoint>
+        {
+            new(T0, 100m), new(T0.AddMinutes(1), 110m), new(T0.AddMinutes(2), 121m), new(T0.AddMinutes(3), 133.1m), new(T0.AddMinutes(4), 146.41m),
+            new(T0.AddMinutes(5), 140m), new(T0.AddMinutes(6), 130m),
+        };
+        for (var i = 7; i < 20; i++) obvCe.Add(new ObvPoint(T0.AddMinutes(i), 130m));
+        return obvCe;
+    }
+
+    [Fact]
+    public void Simulate_ExitsAsFlowStopLoss_WhenTheRisingLegFallsForTheConfiguredBars()
+    {
+        // PE keeps decaying throughout - unrelated to this check, since a Bullish trade only watches
+        // CE (the leg that was rising and justified the entry).
+        var obvCe = RisingThenReversingCe();
+        var obvPe = ExponentialSeries(20, 100, 0.9m);
+
+        var trades = new CdvObvFlowStrategy().Simulate(Context(obvCe, obvPe), Parameters(p => p["flowReversalExitBars"] = 2m));
+
+        var trade = trades.Single(t => t.SignalTimeUtc == T0.AddMinutes(4));
+        Assert.Equal("FlowStopLoss", trade.ExitReason);
+        // Streak of 2 completes at bar 6 (index 6) - the option bar there triggers the exit, whose
+        // own real close instant is one bar later, at T0+7.
+        Assert.Equal(T0.AddMinutes(7), trade.ExitTimeUtc);
+    }
+
+    [Fact]
+    public void Simulate_FlowReversalExitDisabledByDefault_NeverFiresFlowStopLoss()
+    {
+        var obvCe = RisingThenReversingCe();
+        var obvPe = ExponentialSeries(20, 100, 0.9m);
+
+        // Same fixture as above, but flowReversalExitBars is left off (0, the default).
+        var trades = new CdvObvFlowStrategy().Simulate(Context(obvCe, obvPe), Parameters());
+
+        var trade = trades.Single(t => t.SignalTimeUtc == T0.AddMinutes(4));
+        Assert.NotEqual("FlowStopLoss", trade.ExitReason);
+    }
+
+    [Fact]
+    public void Simulate_BearishTrade_MonitorsPeForTheReversal_NotCe()
+    {
+        // The mirror of the bullish fixture: PE is the leg that was rising and justified a Bearish
+        // entry, so PE's own reversal (not CE's) has to drive this exit. CE decays throughout,
+        // unrelated to a Bearish trade's own reversal check.
+        var obvPe = RisingThenReversingCe();
+        var obvCe = ExponentialSeries(20, 100, 0.9m);
+
+        var trades = new CdvObvFlowStrategy().Simulate(Context(obvCe, obvPe), Parameters(p => p["flowReversalExitBars"] = 2m));
+
+        var trade = trades.Single(t => t.SignalTimeUtc == T0.AddMinutes(4));
+        Assert.Equal("PE", trade.OptionType); // Buy + Bearish -> buy PE
+        Assert.Equal("FlowStopLoss", trade.ExitReason);
+        Assert.Equal(T0.AddMinutes(7), trade.ExitTimeUtc);
+    }
 }

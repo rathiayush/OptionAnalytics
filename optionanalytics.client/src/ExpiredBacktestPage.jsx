@@ -46,14 +46,16 @@ const STORED_DATE_RANGE = 'optionanalytics.expiredBacktest.dateRange'
 const BUY_COLOR = '#4dabf7'
 const SELL_COLOR = '#c084fc'
 const OPEN_COLOR = '#ffb100'
-const EXIT_REASON_COLOR = { TakeProfit: UP_COLOR, StopLoss: DOWN_COLOR, SpotTakeProfit: UP_COLOR, SpotStopLoss: DOWN_COLOR, EndOfDay: undefined, NoData: undefined, SignalExit: undefined, SquareOff: undefined, MaxHoldingTime: undefined, Open: OPEN_COLOR }
+const EXIT_REASON_COLOR = { TakeProfit: UP_COLOR, StopLoss: DOWN_COLOR, SpotTakeProfit: UP_COLOR, SpotStopLoss: DOWN_COLOR, FlowStopLoss: DOWN_COLOR, EndOfDay: undefined, NoData: undefined, SignalExit: undefined, SquareOff: undefined, MaxHoldingTime: undefined, Open: OPEN_COLOR }
 // SpotTakeProfit/SpotStopLoss are FiveEmaAsTaughtStrategy's own stop/target - a level on the
 // underlying's spot (the alert candle's own high/low, taught 1:3), not the option's premium - but
-// still a real win/loss exit, so they share TakeProfit/StopLoss's own colors. MaxHoldingTime
+// still a real win/loss exit, so they share TakeProfit/StopLoss's own colors. FlowStopLoss
+// (CdvObvFlowStrategy's own FlowReversalExitBars) is the same idea - the entry thesis breaking
+// rather than a premium level, still a real loss-cutting exit, same color. MaxHoldingTime
 // (OptionTradeSimulator.MaxHoldingTimeParameter) is a per-trade duration cap since entry, rule-based
 // rather than a price level, so it shares SignalExit/SquareOff's own neutral color.
 const EXIT_REASON_LABEL = {
-  TakeProfit: 'Take Profit', StopLoss: 'Stop Loss', SpotTakeProfit: 'Take Profit (spot)', SpotStopLoss: 'Stop Loss (spot)',
+  TakeProfit: 'Take Profit', StopLoss: 'Stop Loss', SpotTakeProfit: 'Take Profit (spot)', SpotStopLoss: 'Stop Loss (spot)', FlowStopLoss: 'Stop Loss (flow)',
   EndOfDay: 'End of Day', NoData: 'No Data', SignalExit: 'Strategy Exit', SquareOff: 'Square Off', MaxHoldingTime: 'Max Holding Time', Open: 'Open',
 }
 
