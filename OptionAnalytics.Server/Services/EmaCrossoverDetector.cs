@@ -88,26 +88,6 @@ public static class EmaCrossoverDetector
         return quotes.GetEma(period).Select(e => (decimal?)e.Ema).ToList();
     }
 
-    /// <summary>Same shape as EmaSeries but the plain Simple Moving Average - added for
-    /// KathyLienEma20Sma200Strategy's own 200 SMA trend filter, which is deliberately a SIMPLE
-    /// average (Lien's own setup), not another EMA.</summary>
-    public static IReadOnlyList<decimal?> SmaSeries(IReadOnlyList<Candle> bars, int period)
-    {
-        if (period < 1 || bars.Count == 0) return bars.Select(_ => (decimal?)null).ToList();
-
-        var quotes = bars.Select(c => new Quote
-        {
-            Date = c.Time.UtcDateTime,
-            Open = c.Open,
-            High = c.High,
-            Low = c.Low,
-            Close = c.Close,
-            Volume = 0,
-        }).ToList();
-
-        return quotes.GetSma(period).Select(e => (decimal?)e.Sma).ToList();
-    }
-
     /// <summary>Batch counterpart to ConfirmedDirection - every bar's confirmed bias in one pass,
     /// same "not quadratic over a multi-day series" reasoning as DirectionSeries. BacktestService's
     /// Confluence replay uses this (not the plain DirectionSeries) so the Backtrack page and every
