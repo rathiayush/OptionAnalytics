@@ -26,18 +26,27 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 /// happens to be at that moment.
 ///
 /// Per window w: CE's FlowScore has to be positive AND PE's negative, AND the combined spread
-/// (CeScore_w - PeScore_w) has to clear THAT window's own Threshold(1/2/3)Score. ALL THREE windows
+/// (CeScore_w - PeScore_w) has to clear THAT window's own Threshold(1/2/3)Percent. ALL THREE windows
 /// have to pass their own check - not an average - so raising one window's own threshold tightens
 /// only that window. Bearish is the exact mirror. Which of OBV/CDV (or both, or either) has to
 /// confirm is the existing FlowConfirmation.ModeParameter toggle every other strategy here uses.
+///
+/// DISPLAYED AS A PERCENTAGE, per explicit request - the raw 0-ish-to-1-ish ratio FlowScore itself
+/// returns (see above: 1.0 = "moved like every bar pushed one typical bar's worth") reads awkwardly
+/// next to this app's other percent-based parameters, so every threshold and the summary text below
+/// multiply it by 100 (0.3 becomes "30%", 1.0 becomes "100%") purely for a familiar unit. This is
+/// NOT a reintroduction of the ORIGINAL bug (see above) - that measured a window's move as a percent
+/// of OBV/CDV's own cumulative running total, which is what actually drifted through the day; this
+/// percent is still computed from the exact same scale-stable FlowScore ratio, just relabeled.
 ///
 /// EXIT: STOP/TARGET are the standard shared points-based 10/20 (1:2) default. OPTIONAL on top
 /// (FlowExitLookbackBars, 0 = off, the default) - directly the user's own stated trading style:
 /// "I want the lookback bars to keep flowing in my direction; the moment it goes sideways or starts
 /// falling, I get out." Once in a trade, the SAME leg that justified entry (CE for Bullish, PE for
 /// Bearish) has its OWN FlowScore recomputed EVERY bar over this (typically shorter, more reactive)
-/// window; the instant that score drops to or below FlowExitThresholdScore (0 = sideways-or-worse,
-/// the default), the trade exits immediately as a stop-loss rather than waiting for the premium's own
+/// window; the instant that score (again as a %) drops to or below FlowExitThresholdPercent (0 =
+/// sideways-or-worse, the default), the trade exits immediately as a stop-loss rather than waiting for
+/// the premium's own
 /// stop/target to eventually catch up. This replaces the first cut's cruder "N raw consecutive
 /// falling bars" rule with the same lookback-window measure entry itself uses, continuously
 /// re-checked - and which measure's own weakness counts is, again, the same FlowMode toggle.
@@ -75,7 +84,7 @@ public sealed class CdvObvFlowStrategy : IBacktestStrategy
 {
     public string Key => "cdv-obv-flow";
     public string Name => "CDV/OBV Rising/Falling Flow Momentum";
-    public string Description => "CE's OBV/CDV rising while PE's is falling (or the mirror) across ALL of three lookback windows (5/10/15 bars by default) is the signal, each window scored as a normalized ratio (not a raw % of the cumulative total, which drifts through the day) against its own threshold. Optionally exits as a stop-loss the moment that same flow goes sideways or reverses while held.";
+    public string Description => "CE's OBV/CDV rising while PE's is falling (or the mirror) across ALL of three lookback windows (5/10/15 bars by default) is the signal, each window scored as a % of a typical single bar's own move (NOT a raw % of the cumulative OBV/CDV total, which drifts through the day) against its own threshold. Optionally exits as a stop-loss the moment that same flow goes sideways or reverses while held.";
 
     private const decimal DirectionBoth = 0;
     private const decimal DirectionLongOnly = 1;
@@ -98,26 +107,26 @@ public sealed class CdvObvFlowStrategy : IBacktestStrategy
             new BacktestParameterOption(DirectionShortOnly, "Bearish only"),
         }),
         new BacktestParameterSpec("lookback1Bars", "Lookback window 1 (bars)", Default: 5, Min: 1, Max: 200, Step: 1),
-        new BacktestParameterSpec("threshold1Score", "Window 1's own flow score must reach at least", Default: 0.3m, Min: 0, Max: 5, Step: 0.05m),
+        new BacktestParameterSpec("threshold1Percent", "Window 1's own flow score must reach at least (%)", Default: 30, Min: 0, Max: 500, Step: 5),
         new BacktestParameterSpec("lookback2Bars", "Lookback window 2 (bars)", Default: 10, Min: 1, Max: 200, Step: 1),
-        new BacktestParameterSpec("threshold2Score", "Window 2's own flow score must reach at least", Default: 0.3m, Min: 0, Max: 5, Step: 0.05m),
+        new BacktestParameterSpec("threshold2Percent", "Window 2's own flow score must reach at least (%)", Default: 30, Min: 0, Max: 500, Step: 5),
         new BacktestParameterSpec("lookback3Bars", "Lookback window 3 (bars)", Default: 15, Min: 1, Max: 200, Step: 1),
-        new BacktestParameterSpec("threshold3Score", "Window 3's own flow score must reach at least", Default: 0.3m, Min: 0, Max: 5, Step: 0.05m),
+        new BacktestParameterSpec("threshold3Percent", "Window 3's own flow score must reach at least (%)", Default: 30, Min: 0, Max: 500, Step: 5),
         new BacktestParameterSpec("flowNormalizationBars", "\"Typical single-bar move\" measured over (bars)", Default: 30, Min: 5, Max: 200, Step: 5),
         FlowConfirmation.ModeParameter("Require rising/falling agreement on"),
         new BacktestParameterSpec("flowExitLookbackBars", "Continuously re-check flow over (bars, 0 = off)", Default: 0, Min: 0, Max: 200, Step: 1),
-        new BacktestParameterSpec("flowExitThresholdScore", "Exit as stop-loss once that re-check score falls to or below", Default: 0, Min: -5, Max: 5, Step: 0.05m),
+        new BacktestParameterSpec("flowExitThresholdPercent", "Exit as stop-loss once that re-check score falls to or below (%)", Default: 0, Min: -500, Max: 500, Step: 5),
     };
 
     public IReadOnlyList<BacktestTrade> Simulate(BacktestStrategyContext context, IReadOnlyDictionary<string, decimal> parameters)
     {
         var evaluation = Evaluate(context, parameters);
         var flowExitLookbackBars = (int)parameters.GetValueOrDefault("flowExitLookbackBars", 0m);
-        var flowExitThresholdScore = parameters.GetValueOrDefault("flowExitThresholdScore", 0m);
+        var flowExitThresholdPercent = parameters.GetValueOrDefault("flowExitThresholdPercent", 0m);
         var flowMode = parameters.GetValueOrDefault("flowMode", FlowConfirmation.ModeEither);
         var normalizationBars = Math.Max(1, (int)parameters.GetValueOrDefault("flowNormalizationBars", 30m));
         var signalExits = flowExitLookbackBars > 0
-            ? BuildFlowExits(context, evaluation.EntryIndexes, evaluation.ObvCe, evaluation.ObvPe, evaluation.CdvCe, evaluation.CdvPe, flowExitLookbackBars, flowExitThresholdScore, flowMode, normalizationBars)
+            ? BuildFlowExits(context, evaluation.EntryIndexes, evaluation.ObvCe, evaluation.ObvPe, evaluation.CdvCe, evaluation.CdvPe, flowExitLookbackBars, flowExitThresholdPercent, flowMode, normalizationBars)
             : null;
         // Per explicit request: a weakening flow should cut a LOSING trade short, never override one
         // already ahead - see Run's own doc comment on ignoreSignalExitsWhileInProfit.
@@ -127,7 +136,7 @@ public sealed class CdvObvFlowStrategy : IBacktestStrategy
     public IReadOnlyList<BacktestSignal> EntrySignals(BacktestStrategyContext context, IReadOnlyDictionary<string, decimal> parameters) =>
         Evaluate(context, parameters).Signals;
 
-    private readonly record struct LookbackWindow(int Bars, decimal ThresholdScore);
+    private readonly record struct LookbackWindow(int Bars, decimal ThresholdPercent);
 
     /// <summary>One series' value at every one of context.SpotBars' own bar indices (Values[i] =
     /// BacktestUtil.LastValueAtOrBefore(series, bars[i].Time), but computed via a single forward
@@ -199,7 +208,8 @@ public sealed class CdvObvFlowStrategy : IBacktestStrategy
 
     /// <summary>Every window's own CE/PE FlowScore check at one bar - confirmed only when EVERY
     /// window's own direction AND own threshold both hold; a single missing reading, wrong-direction
-    /// window, or under-threshold window anywhere fails the whole leg.</summary>
+    /// window, or under-threshold window anywhere fails the whole leg. ceScore/peScore/spread are all
+    /// FlowScore x 100 (a %) here, purely for a familiar unit - see this class's own doc comment.</summary>
     private static (bool BullishConfirmed, bool BearishConfirmed, IReadOnlyList<decimal> WindowScores) EvaluateLeg(
         SeriesStats ceStats, SeriesStats peStats, int i, IReadOnlyList<LookbackWindow> windows, int normalizationBars)
     {
@@ -213,11 +223,11 @@ public sealed class CdvObvFlowStrategy : IBacktestStrategy
             var pe = FlowScore(peStats, i, windows[w].Bars, normalizationBars);
             if (ce is not { } ceScore || pe is not { } peScore) return (false, false, scores);
 
-            var spread = ceScore - peScore; // CE rising / PE falling both push this positive; the mirror pushes it negative.
+            var spread = ceScore * 100m - peScore * 100m; // CE rising / PE falling both push this positive; the mirror pushes it negative.
             scores[w] = spread;
 
-            if (!(ceScore > 0 && peScore < 0 && spread >= windows[w].ThresholdScore)) bullishConfirmed = false;
-            if (!(ceScore < 0 && peScore > 0 && -spread >= windows[w].ThresholdScore)) bearishConfirmed = false;
+            if (!(ceScore > 0 && peScore < 0 && spread >= windows[w].ThresholdPercent)) bullishConfirmed = false;
+            if (!(ceScore < 0 && peScore > 0 && -spread >= windows[w].ThresholdPercent)) bearishConfirmed = false;
         }
 
         return (bullishConfirmed, bearishConfirmed, scores);
@@ -232,14 +242,15 @@ public sealed class CdvObvFlowStrategy : IBacktestStrategy
     /// the case that made this necessary - see this class's own doc comment on the quadratic
     /// per-entry forward walk this replaced) would otherwise redo most of the same walk once per
     /// entry.</summary>
-    private static int?[] ComputeNextWeakBar(SeriesStats obvStats, SeriesStats cdvStats, int exitLookbackBars, decimal exitThresholdScore, decimal flowMode, int normalizationBars, int barCount)
+    private static int?[] ComputeNextWeakBar(SeriesStats obvStats, SeriesStats cdvStats, int exitLookbackBars, decimal exitThresholdPercent, decimal flowMode, int normalizationBars, int barCount)
     {
         var nextWeak = new int?[barCount];
         int? nearest = null;
         for (var j = barCount - 1; j >= 0; j--)
         {
-            var obvWeak = FlowScore(obvStats, j, exitLookbackBars, normalizationBars) is { } ov && ov <= exitThresholdScore;
-            var cdvWeak = FlowScore(cdvStats, j, exitLookbackBars, normalizationBars) is { } cv && cv <= exitThresholdScore;
+            // x 100 - the same % unit every threshold here uses, see this class's own doc comment.
+            var obvWeak = FlowScore(obvStats, j, exitLookbackBars, normalizationBars) is { } ov && ov * 100m <= exitThresholdPercent;
+            var cdvWeak = FlowScore(cdvStats, j, exitLookbackBars, normalizationBars) is { } cv && cv * 100m <= exitThresholdPercent;
             if (FlowConfirmation.Confirms(flowMode, obvWeak, cdvWeak)) nearest = j;
             nextWeak[j] = nearest;
         }
@@ -256,12 +267,12 @@ public sealed class CdvObvFlowStrategy : IBacktestStrategy
     private static Dictionary<DateTimeOffset, (DateTimeOffset Time, string Reason)> BuildFlowExits(
         BacktestStrategyContext context, IReadOnlyList<(int Index, DateTimeOffset Time, bool Bullish)> entryIndexes,
         SeriesStats obvCe, SeriesStats obvPe, SeriesStats cdvCe, SeriesStats cdvPe,
-        int exitLookbackBars, decimal exitThresholdScore, decimal flowMode, int normalizationBars)
+        int exitLookbackBars, decimal exitThresholdPercent, decimal flowMode, int normalizationBars)
     {
         var exits = new Dictionary<DateTimeOffset, (DateTimeOffset, string)>();
         var bars = context.SpotBars;
-        var nextWeakBullish = ComputeNextWeakBar(obvCe, cdvCe, exitLookbackBars, exitThresholdScore, flowMode, normalizationBars, bars.Count);
-        var nextWeakBearish = ComputeNextWeakBar(obvPe, cdvPe, exitLookbackBars, exitThresholdScore, flowMode, normalizationBars, bars.Count);
+        var nextWeakBullish = ComputeNextWeakBar(obvCe, cdvCe, exitLookbackBars, exitThresholdPercent, flowMode, normalizationBars, bars.Count);
+        var nextWeakBearish = ComputeNextWeakBar(obvPe, cdvPe, exitLookbackBars, exitThresholdPercent, flowMode, normalizationBars, bars.Count);
 
         foreach (var (entryIndex, entryTime, bullish) in entryIndexes)
         {
@@ -287,9 +298,9 @@ public sealed class CdvObvFlowStrategy : IBacktestStrategy
         var normalizationBars = Math.Max(1, (int)parameters.GetValueOrDefault("flowNormalizationBars", 30m));
         var windows = new[]
         {
-            new LookbackWindow(Math.Max(1, (int)parameters["lookback1Bars"]), parameters.GetValueOrDefault("threshold1Score", 0.3m)),
-            new LookbackWindow(Math.Max(1, (int)parameters["lookback2Bars"]), parameters.GetValueOrDefault("threshold2Score", 0.3m)),
-            new LookbackWindow(Math.Max(1, (int)parameters["lookback3Bars"]), parameters.GetValueOrDefault("threshold3Score", 0.3m)),
+            new LookbackWindow(Math.Max(1, (int)parameters["lookback1Bars"]), parameters.GetValueOrDefault("threshold1Percent", 30m)),
+            new LookbackWindow(Math.Max(1, (int)parameters["lookback2Bars"]), parameters.GetValueOrDefault("threshold2Percent", 30m)),
+            new LookbackWindow(Math.Max(1, (int)parameters["lookback3Bars"]), parameters.GetValueOrDefault("threshold3Percent", 30m)),
         };
         var flowMode = parameters.GetValueOrDefault("flowMode", FlowConfirmation.ModeEither);
 
@@ -325,7 +336,7 @@ public sealed class CdvObvFlowStrategy : IBacktestStrategy
             // purely for a readable summary, not part of the decision itself.
             var obvConfirmedThisDirection = bullish ? obv.BullishConfirmed : obv.BearishConfirmed;
             var scores = obvConfirmedThisDirection ? obv.WindowScores : cdv.WindowScores;
-            var windowBreakdown = string.Join(", ", windows.Select((win, i) => $"{win.Bars}-bar {(bullish ? scores[i] : -scores[i]):0.00}>={win.ThresholdScore:0.00}"));
+            var windowBreakdown = string.Join(", ", windows.Select((win, i) => $"{win.Bars}-bar {(bullish ? scores[i] : -scores[i]):0.#}%>={win.ThresholdPercent:0.#}%"));
             var summary = $"CE {(bullish ? "rising" : "falling")} / PE {(bullish ? "falling" : "rising")} clearing its own threshold on all of {windows[0].Bars}/{windows[1].Bars}/{windows[2].Bars} bars ({FlowConfirmation.ModeLabel(flowMode)}): {windowBreakdown}";
 
             if (beforeSignalStart)
