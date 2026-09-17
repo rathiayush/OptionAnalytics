@@ -3,8 +3,9 @@ using OptionAnalytics.Server.Services.Backtesting;
 
 namespace OptionAnalytics.Server.Tests;
 
-/// <summary>Covers CdvObvFlowStrategy - see its own doc comment for the "agreement across all three
-/// lookback windows, then average (not sum) within each leg" design worked out with the user.
+/// <summary>Covers CdvObvFlowStrategy - see its own doc comment for the "each of the three lookback
+/// windows has its own independently-tunable threshold, all three must pass" design worked out with
+/// the user.
 ///
 /// Fixtures use small lookback windows (2/3/4 bars instead of the real 5/10/15) purely to keep them
 /// short, plus a PURE EXPONENTIAL series for OBV/PE so every bar's own %-change over ANY window is
@@ -64,10 +65,12 @@ public sealed class CdvObvFlowStrategyTests
             ["excludeLastDays"] = 0,
             ["direction"] = 0, // both sides
             ["lookback1Bars"] = 2,
+            ["threshold1Percent"] = 30,
             ["lookback2Bars"] = 3,
+            ["threshold2Percent"] = 30,
             ["lookback3Bars"] = 4,
+            ["threshold3Percent"] = 30,
             ["flowMode"] = FlowConfirmation.ModeEither,
-            ["thresholdPercent"] = 30,
         };
         overrides?.Invoke(p);
         return p;
@@ -105,15 +108,33 @@ public sealed class CdvObvFlowStrategyTests
     }
 
     [Fact]
-    public void NoEntry_WhenTheCombinedScoreNeverClearsTheThreshold()
+    public void NoEntry_WhenNoWindowClearsItsOwnThreshold()
     {
-        // A gentle 2%/bar move: %-change over 2/3/4 bars is only ~4%/6%/8%, nowhere near 30%.
+        // A gentle 2%/bar move: the CE-PE spread over 2/3/4 bars is only ~8%/12%/16%, nowhere near
+        // any window's own 30% default threshold.
         var obvCe = ExponentialSeries(20, 100, 1.02m);
         var obvPe = ExponentialSeries(20, 100, 0.98m);
 
         var signals = new CdvObvFlowStrategy().EntrySignals(Context(obvCe, obvPe), Parameters());
 
         Assert.DoesNotContain(signals, s => s.Kind == "Entry");
+    }
+
+    [Fact]
+    public void EachWindowsThresholdIsIndependentlyTunable_RaisingOneAloneBlocksAnOtherwiseValidEntry()
+    {
+        // Same 10%/bar CE growth and 10%/bar PE decay as BullishFlow_FiresEntries - window 2's own
+        // spread (~60%, over its 3-bar lookback) clears its default 30% threshold comfortably, but
+        // raising JUST threshold2Percent past that (to 90%) should block the whole bar, since ALL
+        // THREE windows must clear their own threshold, not most of them.
+        var obvCe = ExponentialSeries(20, 100, 1.1m);
+        var obvPe = ExponentialSeries(20, 100, 0.9m);
+
+        var signalsBefore = new CdvObvFlowStrategy().EntrySignals(Context(obvCe, obvPe), Parameters());
+        var signalsAfter = new CdvObvFlowStrategy().EntrySignals(Context(obvCe, obvPe), Parameters(p => p["threshold2Percent"] = 90m));
+
+        Assert.Contains(signalsBefore, s => s.Kind == "Entry"); // confirms the fixture would otherwise fire
+        Assert.DoesNotContain(signalsAfter, s => s.Kind == "Entry");
     }
 
     [Fact]
