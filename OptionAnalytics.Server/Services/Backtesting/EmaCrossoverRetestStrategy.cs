@@ -79,6 +79,7 @@ public sealed class EmaCrossoverRetestStrategy : IBacktestStrategy
         OptionTradeSimulator.SquareOffTimeParameter(),
         OptionTradeSimulator.SignalStartTimeParameter(),
         OptionTradeSimulator.ExcludeLastDaysParameter(),
+        OptionTradeSimulator.MaxHoldingTimeParameter(),
         new BacktestParameterSpec("direction", "Take", Default: DirectionBoth, Min: DirectionBoth, Max: DirectionShortOnly, Step: 1, Options: new[]
         {
             new BacktestParameterOption(DirectionBoth, "Both sides"),

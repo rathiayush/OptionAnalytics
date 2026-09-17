@@ -39,6 +39,11 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 ///     time of day, every day, rather than riding all the way to the day's last bar - useful for a
 ///     strategy that should never hold into the volatile last few minutes of a session, or a rule
 ///     tuned to only ever be in the market during a specific window.
+///   - MaxHoldingTimeParameter (0 = off, the default) forces a position closed after a fixed number
+///     of bars SINCE ITS OWN ENTRY, regardless of the time of day - a per-trade duration cap, unlike
+///     SquareOffTimeParameter's shared daily clock cutoff. Useful for a strategy that wants to bail
+///     on a trade that simply hasn't moved rather than ride it all the way to the stop/target/day's
+///     close.
 ///   - One position at a time: a signal arriving while an earlier trade is still open is skipped,
 ///     same as a trader who cannot take a second position until the first closes.
 ///   - A signal whose target strike was never tracked produces a BacktestTrade.NoData row rather
@@ -135,6 +140,18 @@ public static class OptionTradeSimulator
     public static BacktestParameterSpec ExcludeLastDaysParameter() =>
         new("excludeLastDays", "Skip entries in the last N day(s) before expiry (0 = off)", Default: 0, Min: 0, Max: 10, Step: 1);
 
+    /// <summary>A per-trade holding-duration cap, in bars (0 = off, the default - a position rides
+    /// to its stop/target/day-close exactly as before this parameter existed). "Bars" rather than a
+    /// fixed minute count so the same value means the same thing at whatever page timeframe is
+    /// selected (10 bars is 10 minutes on a 1-minute chart, 30 minutes on a 3-minute one) - the same
+    /// reasoning FiveEmaStrategy's own alertMaxAgeBars and FlowConfirmation's own lookbackBars
+    /// already use. Genuinely a DURATION since entry (not an absolute IST time like
+    /// SquareOffTimeParameter, which is a fixed daily cutoff every trade shares regardless of when it
+    /// entered) - added for a strategy that wants to force an early, planned exit if the trade simply
+    /// hasn't gone anywhere yet, independent of that day's own square-off time.</summary>
+    public static BacktestParameterSpec MaxHoldingTimeParameter() =>
+        new("maxHoldingBars", "Exit after holding for (bars, 0 = off)", Default: 0, Min: 0, Max: 500, Step: 1);
+
     /// <summary>Runs <paramref name="entrySignals"/> (time-ascending; Direction "Bullish"/"Bearish")
     /// through the rules above and returns the resulting trades, most recent first.
     ///
@@ -191,6 +208,9 @@ public static class OptionTradeSimulator
         // built before this parameter existed keeps working unchanged with it simply off.
         var squareOffMinutes = (int)parameters.GetValueOrDefault("squareOffMinutes", 0);
         var excludeLastDays = (int)parameters.GetValueOrDefault("excludeLastDays", 0);
+        // Optional and defaulted here rather than indexed, same reasoning as squareOffMinutes above -
+        // a caller built before this parameter existed keeps working unchanged with it simply off.
+        var maxHoldingBars = (int)parameters.GetValueOrDefault("maxHoldingBars", 0);
 
         var side = isSell ? "Sell" : "Buy";
         var underlying = context.Underlying;
@@ -286,6 +306,15 @@ public static class OptionTradeSimulator
             // earlier than an already-open position's own entry) - the position exits at the very
             // next bar rather than silently ignoring a square-off time the trade never respected.
             var squareOffTime = squareOffMinutes > 0 ? IstClock.AtIstTime(entryDay, squareOffMinutes) : (DateTimeOffset?)null;
+            // "N bars held" means the exit lands exactly N*fillMinutes minutes after entryTime (the
+            // real fill instant) - since the loop below compares against each bar's own BUCKET-START
+            // label (bar.Time), not its close-adjusted instant, this deadline is expressed the same
+            // way: one fillMinutes short of the real target instant, the same "-fillSpan" adjustment
+            // OptionTradeSimulator.RunPairedLegs' own override deadlines need for exactly this reason
+            // (see its own doc comment). maxHoldingBars=1 means "exit at the very next bar" - the
+            // first bar checked already has bar.Time == entryTime, so a deadline of entryTime itself
+            // (0 bars short) correctly fires there.
+            var maxHoldingDeadline = maxHoldingBars > 0 ? entryTime + TimeSpan.FromMinutes((maxHoldingBars - 1) * fillMinutes) : (DateTimeOffset?)null;
 
             // Starts AFTER the signal bar, never at it - its own High/Low happened BEFORE entry
             // (which is at its very last instant, the close), so checking stop/target against that
@@ -321,6 +350,11 @@ public static class OptionTradeSimulator
                 if (signalExit is { } sx && bar.Time >= sx.Time)
                 {
                     exitTime = barCloseTime; exitPrice = bar.Close; exitReason = sx.Reason; break;
+                }
+
+                if (maxHoldingDeadline is { } holdDeadline && bar.Time >= holdDeadline)
+                {
+                    exitTime = barCloseTime; exitPrice = bar.Close; exitReason = "MaxHoldingTime"; break;
                 }
 
                 if (squareOffTime is { } cutoff && bar.Time >= cutoff)

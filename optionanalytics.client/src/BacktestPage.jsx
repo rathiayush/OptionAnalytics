@@ -31,11 +31,13 @@ const SIGNAL_KIND_LABEL = { ...ALERT_KIND_LABEL, Entry: 'ENTRY', Rejected: 'reje
 // Amber, not green/red/neutral - Open is neither a win nor a loss yet, and reusing a settled
 // color would misread as a finished result on a row that can still move.
 const OPEN_COLOR = '#ffb100'
-const EXIT_REASON_COLOR = { TakeProfit: UP_COLOR, StopLoss: DOWN_COLOR, SpotTakeProfit: UP_COLOR, SpotStopLoss: DOWN_COLOR, EndOfDay: undefined, NoData: undefined, SignalExit: undefined, SquareOff: undefined, Open: OPEN_COLOR }
+const EXIT_REASON_COLOR = { TakeProfit: UP_COLOR, StopLoss: DOWN_COLOR, SpotTakeProfit: UP_COLOR, SpotStopLoss: DOWN_COLOR, EndOfDay: undefined, NoData: undefined, SignalExit: undefined, SquareOff: undefined, MaxHoldingTime: undefined, Open: OPEN_COLOR }
 // SignalExit is a strategy's own exit rule firing rather than a price level being hit - the 5 EMA
 // strategy's "get out when spot comes back and touches the EMA" is the one that uses it today.
 // SquareOff is the user-configured daily cutoff (OptionTradeSimulator.SquareOffTimeParameter) -
 // also rule-based rather than a price level, so it shares SignalExit's neutral, undefined color.
+// MaxHoldingTime (OptionTradeSimulator.MaxHoldingTimeParameter) is the same idea but a per-trade
+// duration cap since ENTRY rather than a shared daily clock cutoff - same neutral color.
 // SpotTakeProfit/SpotStopLoss are FiveEmaAsTaughtStrategy's own stop/target - a level on the
 // UNDERLYING's spot (the alert candle's own high/low, taught 1:3) rather than on the option's
 // premium, but still an exit that made/lost money exactly like TakeProfit/StopLoss, so they share
@@ -47,7 +49,7 @@ const EXIT_REASON_COLOR = { TakeProfit: UP_COLOR, StopLoss: DOWN_COLOR, SpotTake
 // renderPnl) - both can still change before this row would ever legitimately read "End of Day".
 const EXIT_REASON_LABEL = {
   TakeProfit: 'Take Profit', StopLoss: 'Stop Loss', SpotTakeProfit: 'Take Profit (spot)', SpotStopLoss: 'Stop Loss (spot)',
-  EndOfDay: 'End of Day', NoData: 'No Data', SignalExit: 'Strategy Exit', SquareOff: 'Square Off', Open: 'Open',
+  EndOfDay: 'End of Day', NoData: 'No Data', SignalExit: 'Strategy Exit', SquareOff: 'Square Off', MaxHoldingTime: 'Max Holding Time', Open: 'Open',
 }
 
 function isConfluenceLabel(kind) {
