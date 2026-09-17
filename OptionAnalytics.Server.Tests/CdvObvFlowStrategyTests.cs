@@ -26,10 +26,11 @@ public sealed class CdvObvFlowStrategyTests
         Enumerable.Range(0, bars).Select(i => new Candle(T0.AddMinutes(i), 20000m, 20000m, 20000m, 20000m)).ToList();
 
     private static BacktestStrategyContext Context(
-        IReadOnlyList<ObvPoint> obvCe, IReadOnlyList<ObvPoint> obvPe, IReadOnlyList<ObvPoint>? cdvCe = null, IReadOnlyList<ObvPoint>? cdvPe = null)
+        IReadOnlyList<ObvPoint> obvCe, IReadOnlyList<ObvPoint> obvPe, IReadOnlyList<ObvPoint>? cdvCe = null, IReadOnlyList<ObvPoint>? cdvPe = null,
+        IReadOnlyList<Candle>? optionBarsOverride = null)
     {
         var spotBars = FlatSpotBars(30);
-        var optionBars = spotBars.Select(b => new Candle(b.Time, 100m, 100.5m, 99.5m, 100m)).ToList();
+        var optionBars = optionBarsOverride ?? spotBars.Select(b => new Candle(b.Time, 100m, 100.5m, 99.5m, 100m)).ToList();
         return new()
         {
             Underlying = "NIFTY",
@@ -238,6 +239,36 @@ public sealed class CdvObvFlowStrategyTests
         // flat region, at index 10 - the option bar there triggers the exit, whose own real close
         // instant is one bar later.
         Assert.Equal(T0.AddMinutes(11), trade.ExitTimeUtc);
+    }
+
+    [Fact]
+    public void Simulate_ProfitableTrade_RidesPastAFlowWeakBar_ThenExitsOnceProfitFades()
+    {
+        // Per explicit request: a weakening flow should never override a trade already ahead. Same
+        // entry/flow-weak timing as Simulate_ExitsAsFlowStopLoss_WhenTheRisingLegGoesSideways (the
+        // flow-weak deadline lands at bar 10, unaffected by option premium), but this time the
+        // premium is IN PROFIT (110 vs a 100 entry) right at bars 10-11 - the exit must be skipped
+        // there. Bar 12 drops to 95 (no longer in profit, but not the ordinary 10-point stop either)
+        // - the flow exit fires there instead.
+        var obvCe = RisingThenFlatCe();
+        var obvPe = ConstantSlopeSeries(30, 100, -1);
+        var optionBars = FlatSpotBars(30).Select((b, i) => i switch
+        {
+            < 10 => new Candle(b.Time, 100m, 100.5m, 99.5m, 100m), // entry fills at 100
+            < 12 => new Candle(b.Time, 110m, 110.5m, 109.5m, 110m), // in profit - flow exit must be skipped
+            _ => new Candle(b.Time, 95m, 95.5m, 94.5m, 95m), // profit faded - flow exit can fire now
+        }).ToList();
+
+        var trades = new CdvObvFlowStrategy().Simulate(Context(obvCe, obvPe, optionBarsOverride: optionBars), Parameters(p =>
+        {
+            p["flowExitLookbackBars"] = 2;
+            p["flowExitThresholdScore"] = 0;
+        }));
+
+        var trade = trades.Single(t => t.SignalTimeUtc == T0.AddMinutes(5));
+        Assert.Equal("FlowStopLoss", trade.ExitReason);
+        Assert.Equal(95m, trade.ExitPrice);
+        Assert.Equal(T0.AddMinutes(13), trade.ExitTimeUtc); // bar 12's own real close instant
     }
 
     [Fact]

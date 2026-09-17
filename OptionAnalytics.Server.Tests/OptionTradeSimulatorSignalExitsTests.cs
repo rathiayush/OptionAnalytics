@@ -84,6 +84,59 @@ public sealed class OptionTradeSimulatorSignalExitsTests
     }
 
     [Fact]
+    public void SignalExits_SuppressedWhileInProfit_ThenFiresOnceProfitFades()
+    {
+        // Entry at 100 (Buy). Bar 1 closes at 108 - already in profit - so with the ignore flag set,
+        // the signalExits deadline (which arrives right there) is skipped even though it has been
+        // reached. Bar 2 drops back to 95 - no longer in profit - so it fires there instead.
+        var spotBars = new[] { Bar(T0, 24000, 24000, 24000, 24000) };
+        var optionBars = new[]
+        {
+            Bar(T0, 100, 100, 100, 100),
+            Bar(T0.AddMinutes(1), 100, 110, 100, 108), // in profit - exit must be skipped here
+            Bar(T0.AddMinutes(2), 108, 108, 90, 95), // no longer in profit - exit fires here
+        };
+        var context = Context(spotBars, optionBars);
+        var parameters = new Dictionary<string, decimal> { ["side"] = OptionTradeSimulator.SideBuy, ["otmSteps"] = 0 };
+        var signalExits = new Dictionary<DateTimeOffset, (DateTimeOffset Time, string Reason)>
+        {
+            [T0] = (optionBars[1].Time, "FlowStopLoss"),
+        };
+
+        var trades = OptionTradeSimulator.Run(context, new[] { (T0, "Bullish") }, parameters, signalExits: signalExits, ignoreSignalExitsWhileInProfit: true);
+
+        var trade = Assert.Single(trades);
+        Assert.Equal("FlowStopLoss", trade.ExitReason);
+        Assert.Equal(95, trade.ExitPrice);
+        Assert.Equal(optionBars[2].Time.AddMinutes(1), trade.ExitTimeUtc);
+    }
+
+    [Fact]
+    public void SignalExits_FireEvenWhileInProfit_WhenTheIgnoreFlagIsOff()
+    {
+        // Same in-profit bar as above, but the flag defaults to false - every existing caller keeps
+        // honoring signalExits unconditionally.
+        var spotBars = new[] { Bar(T0, 24000, 24000, 24000, 24000) };
+        var optionBars = new[]
+        {
+            Bar(T0, 100, 100, 100, 100),
+            Bar(T0.AddMinutes(1), 100, 110, 100, 108), // in profit, but the flag is off
+        };
+        var context = Context(spotBars, optionBars);
+        var parameters = new Dictionary<string, decimal> { ["side"] = OptionTradeSimulator.SideBuy, ["otmSteps"] = 0 };
+        var signalExits = new Dictionary<DateTimeOffset, (DateTimeOffset Time, string Reason)>
+        {
+            [T0] = (optionBars[1].Time, "FlowStopLoss"),
+        };
+
+        var trades = OptionTradeSimulator.Run(context, new[] { (T0, "Bullish") }, parameters, signalExits: signalExits);
+
+        var trade = Assert.Single(trades);
+        Assert.Equal("FlowStopLoss", trade.ExitReason);
+        Assert.Equal(108, trade.ExitPrice);
+    }
+
+    [Fact]
     public void SignalExits_KeyedByASignalNotInTheDictionary_IsIgnored()
     {
         // Only the specific signal this exit belongs to is affected - an unrelated trade with no
