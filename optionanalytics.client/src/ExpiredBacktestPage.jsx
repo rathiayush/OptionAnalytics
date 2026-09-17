@@ -245,12 +245,15 @@ class ChartErrorBoundary extends Component {
 }
 
 // Runs a real strategy (trades, P&L, signals - not just a chart) against an EXPIRED contract, given
-// an actual calendar expiry date instead of BacktestPage's "whatever is currently live". Only two
-// strategies can run here at all (see /api/expired-backtest/strategies) - the rest need order-flow
-// data across the whole surrounding strike chain that Dhan's rolling-option endpoint cannot supply
-// from a single relative-strike call. Deliberately a separate page/engine from Backtrack: that one
-// always reads this app's own in-memory live/backfilled history, which has no way to reach an
-// expiry that has already rolled off.
+// an actual calendar expiry date instead of BacktestPage's "whatever is currently live". Only a
+// subset of strategies can run here at all (see /api/expired-backtest/strategies) - a strategy
+// whose ENTIRE signal/pricing logic reads spot bars plus one strike's own option bars, or that
+// itself always needs order-flow across the whole surrounding strike chain; anything ELSE that only
+// OPTIONALLY reads that chain (an off-by-default confirmation toggle) is supported too, gated by that
+// same toggle on this run's own parameters - see ExpiredOptionBacktestService.SupportedStrategyKeys/
+// needsFlowChain server-side for the exact list and why. Deliberately a separate page/engine from
+// Backtrack: that one always reads this app's own in-memory live/backfilled history, which has no
+// way to reach an expiry that has already rolled off.
 export default function ExpiredBacktestPage() {
   const [underlying, setUnderlying] = usePersistedState(STORED_UNDERLYING, 'NIFTY')
   const [timeframe, setTimeframe] = usePersistedState(STORED_TIMEFRAME, 5)
@@ -468,9 +471,9 @@ export default function ExpiredBacktestPage() {
 
   // Which indicator line(s) the CURRENT strategy exposes - one checkbox per entry, the exact same
   // mechanism BacktestPage.jsx's own indicatorDefs uses (see its own doc comment), scoped to the
-  // three strategies this page can actually run (see /api/expired-backtest/strategies). Each
-  // entry's own `compute` reads whatever THIS strategy's own tuned parameter values currently are,
-  // so the plotted line always matches what a Run would actually use, not a stale default.
+  // strategies this page can actually run (see /api/expired-backtest/strategies). Each entry's own
+  // `compute` reads whatever THIS strategy's own tuned parameter values currently are, so the
+  // plotted line always matches what a Run would actually use, not a stale default.
   const indicatorDefs = useMemo(() => {
     if (!strategy) return []
     const paramDefault = (key, fallback) => paramValues[key] ?? strategy.parameters?.find((p) => p.key === key)?.default ?? fallback
@@ -492,9 +495,15 @@ export default function ExpiredBacktestPage() {
         { key: 'support', label: `Support (${srTimeframeMinutes}m x${srLookbackBars})`, color: UP_COLOR, compute: (bars) => srLevelLine(oneMinuteBars, bars, srTimeframeMinutes, srLookbackBars, 'low') },
       ]
     }
+    if (strategy.key === 'five-ema') {
+      const period = paramDefault('emaPeriod', 5)
+      return [
+        { key: 'ema', label: `${period} EMA`, color: EMA_COLOR, compute: (bars) => emaLine(bars, period) },
+      ]
+    }
     return []
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [strategy, paramValues.fastEmaPeriod, paramValues.slowEmaPeriod, paramValues.srTimeframeMinutes, paramValues.srLookbackBars, result])
+  }, [strategy, paramValues.fastEmaPeriod, paramValues.slowEmaPeriod, paramValues.emaPeriod, paramValues.srTimeframeMinutes, paramValues.srLookbackBars, result])
 
   // The actual plotted line data - only for whichever of the above are ticked on in
   // visibleIndicators, and only once there is something to plot them against.
