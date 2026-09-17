@@ -3,22 +3,24 @@ using OptionAnalytics.Server.Services.Backtesting;
 
 namespace OptionAnalytics.Server.Tests;
 
-/// <summary>Covers CdvObvFlowStrategy - see its own doc comment for the "each of the three lookback
-/// windows has its own independently-tunable threshold, all three must pass" design worked out with
-/// the user.
+/// <summary>Covers CdvObvFlowStrategy - see its own doc comment for why the ORIGINAL %-of-cumulative-
+/// total measure was replaced with a normalized FlowScore (net window move / this leg's own recent
+/// typical single-bar move), and why the exit rule is a continuous re-check of that same score
+/// rather than a raw consecutive-falling-bars count.
 ///
-/// Fixtures use small lookback windows (2/3/4 bars instead of the real 5/10/15) purely to keep them
-/// short, plus a PURE EXPONENTIAL series for OBV/PE so every bar's own %-change over ANY window is
-/// the same constant ((rate)^window - 1) * 100 - easy to hand-verify rather than needing a diagnostic
-/// dump, and it means every bar from the point the longest window has enough history onward
-/// independently qualifies (this is expected, not a bug - see KathyLienEma20Ema200StrategyTests' own
-/// doc comment for the same "a clean synthetic ramp legitimately re-qualifies every bar" reasoning).</summary>
+/// Fixtures use small lookback windows (2/3/4 bars instead of the real 5/10/15) and a small
+/// flowNormalizationBars (5 instead of 30) purely to keep them short. A CONSTANT-DELTA (arithmetic,
+/// not exponential) series for CE/PE makes every window's own FlowScore exactly +-1.0 once there is
+/// enough history - the net move over any window exactly equals windowBars times the (constant)
+/// per-bar delta, and the normalizer is that same constant, so they cancel to 1.0 regardless of the
+/// window length or the delta's own size. This is the direct proof the new measure is scale-
+/// independent (unlike the old %-of-cumulative-total one).</summary>
 public sealed class CdvObvFlowStrategyTests
 {
     private static readonly DateTimeOffset T0 = new(2026, 1, 5, 3, 45, 0, TimeSpan.Zero);
 
-    private static List<ObvPoint> ExponentialSeries(int bars, decimal start, decimal ratePerBar) =>
-        Enumerable.Range(0, bars).Select(i => new ObvPoint(T0.AddMinutes(i), start * (decimal)Math.Pow((double)ratePerBar, i))).ToList();
+    private static List<ObvPoint> ConstantSlopeSeries(int bars, decimal start, decimal deltaPerBar) =>
+        Enumerable.Range(0, bars).Select(i => new ObvPoint(T0.AddMinutes(i), start + i * deltaPerBar)).ToList();
 
     private static List<Candle> FlatSpotBars(int bars) =>
         Enumerable.Range(0, bars).Select(i => new Candle(T0.AddMinutes(i), 20000m, 20000m, 20000m, 20000m)).ToList();
@@ -26,7 +28,7 @@ public sealed class CdvObvFlowStrategyTests
     private static BacktestStrategyContext Context(
         IReadOnlyList<ObvPoint> obvCe, IReadOnlyList<ObvPoint> obvPe, IReadOnlyList<ObvPoint>? cdvCe = null, IReadOnlyList<ObvPoint>? cdvPe = null)
     {
-        var spotBars = FlatSpotBars(20);
+        var spotBars = FlatSpotBars(30);
         var optionBars = spotBars.Select(b => new Candle(b.Time, 100m, 100.5m, 99.5m, 100m)).ToList();
         return new()
         {
@@ -65,40 +67,42 @@ public sealed class CdvObvFlowStrategyTests
             ["excludeLastDays"] = 0,
             ["direction"] = 0, // both sides
             ["lookback1Bars"] = 2,
-            ["threshold1Percent"] = 30,
+            ["threshold1Score"] = 0.3m,
             ["lookback2Bars"] = 3,
-            ["threshold2Percent"] = 30,
+            ["threshold2Score"] = 0.3m,
             ["lookback3Bars"] = 4,
-            ["threshold3Percent"] = 30,
+            ["threshold3Score"] = 0.3m,
+            ["flowNormalizationBars"] = 5,
             ["flowMode"] = FlowConfirmation.ModeEither,
+            ["flowExitLookbackBars"] = 0,
+            ["flowExitThresholdScore"] = 0,
         };
         overrides?.Invoke(p);
         return p;
     }
 
     [Fact]
-    public void BullishFlow_FiresEntries_WhenCeRisesAndPeFallsAcrossAllThreeWindows()
+    public void BullishFlow_FiresEntries_WhenCeRisesAndPeFallsConsistently()
     {
-        // CE grows 10%/bar, PE decays 10%/bar - every bar's own %-change over 2/3/4 bars is a
-        // constant ~21%/33%/46% (CE) and ~-19%/-27%/-34% (PE), giving a combined score around 60%,
-        // comfortably clearing the 30% default threshold.
-        var obvCe = ExponentialSeries(20, 100, 1.1m);
-        var obvPe = ExponentialSeries(20, 100, 0.9m);
+        // CE +1/bar, PE -1/bar - a perfectly consistent slope scores exactly +1.0/-1.0 on every
+        // window once there is enough history (index 5, since flowNormalizationBars=5 needs bars
+        // 1..5), comfortably clearing the 0.3 default threshold.
+        var obvCe = ConstantSlopeSeries(30, 100, 1);
+        var obvPe = ConstantSlopeSeries(30, 100, -1);
 
         var signals = new CdvObvFlowStrategy().EntrySignals(Context(obvCe, obvPe), Parameters());
         var entries = signals.Where(s => s.Kind == "Entry").ToList();
 
         Assert.NotEmpty(entries);
         Assert.All(entries, e => Assert.Equal("Bullish", e.Direction));
-        // Bar index 4 is the first with enough history for the 4-bar window.
-        Assert.Contains(entries, e => e.TimeUtc == T0.AddMinutes(4));
+        Assert.Contains(entries, e => e.TimeUtc == T0.AddMinutes(5));
     }
 
     [Fact]
-    public void BearishFlow_FiresEntries_WhenCeFallsAndPeRisesAcrossAllThreeWindows()
+    public void BearishFlow_FiresEntries_WhenCeFallsAndPeRisesConsistently()
     {
-        var obvCe = ExponentialSeries(20, 100, 0.9m);
-        var obvPe = ExponentialSeries(20, 100, 1.1m);
+        var obvCe = ConstantSlopeSeries(30, 100, -1);
+        var obvPe = ConstantSlopeSeries(30, 100, 1);
 
         var signals = new CdvObvFlowStrategy().EntrySignals(Context(obvCe, obvPe), Parameters());
         var entries = signals.Where(s => s.Kind == "Entry").ToList();
@@ -108,12 +112,28 @@ public sealed class CdvObvFlowStrategyTests
     }
 
     [Fact]
-    public void NoEntry_WhenNoWindowClearsItsOwnThreshold()
+    public void NoEntry_WhenFlowIsChoppyRatherThanConsistentlyTrending()
     {
-        // A gentle 2%/bar move: the CE-PE spread over 2/3/4 bars is only ~8%/12%/16%, nowhere near
-        // any window's own 30% default threshold.
-        var obvCe = ExponentialSeries(20, 100, 1.02m);
-        var obvPe = ExponentialSeries(20, 100, 0.98m);
+        // Both legs alternate +-5/4 deltas (mirrored) - a small net drift (+-1 every 2 bars) buried
+        // in much bigger bar-to-bar noise (average |delta| ~4.6). This is exactly the "sideways/
+        // choppy" case the OLD %-of-cumulative-total measure could not reliably reject (a growing
+        // cumulative total still LOOKS like a rise by %), but the new normalized score correctly
+        // scores each leg low (~+-0.1, since the net move barely exceeds a single typical bar's own
+        // noise) - spread stays well under the 0.3 threshold, so it's rejected. (Both legs choppy,
+        // not just one - a lopsided fixture where only one leg is choppy while the other cleanly
+        // trends would let the CLEAN leg's own strength carry the spread over threshold on its own,
+        // which is a real but different case from "both sides are just noise".)
+        var obvCe = new List<ObvPoint>();
+        var obvPe = new List<ObvPoint>();
+        decimal ceValue = 100;
+        decimal peValue = 100;
+        for (var i = 0; i < 30; i++)
+        {
+            obvCe.Add(new ObvPoint(T0.AddMinutes(i), ceValue));
+            obvPe.Add(new ObvPoint(T0.AddMinutes(i), peValue));
+            ceValue += i % 2 == 0 ? 5 : -4;
+            peValue += i % 2 == 0 ? -5 : 4;
+        }
 
         var signals = new CdvObvFlowStrategy().EntrySignals(Context(obvCe, obvPe), Parameters());
 
@@ -123,42 +143,24 @@ public sealed class CdvObvFlowStrategyTests
     [Fact]
     public void EachWindowsThresholdIsIndependentlyTunable_RaisingOneAloneBlocksAnOtherwiseValidEntry()
     {
-        // Same 10%/bar CE growth and 10%/bar PE decay as BullishFlow_FiresEntries - window 2's own
-        // spread (~60%, over its 3-bar lookback) clears its default 30% threshold comfortably, but
-        // raising JUST threshold2Percent past that (to 90%) should block the whole bar, since ALL
+        // Every window scores exactly 2.0 (CE +1.0 minus PE -1.0) on the consistent-slope fixture -
+        // raising JUST threshold2Score past that (to 3.0) should block the whole bar, since ALL
         // THREE windows must clear their own threshold, not most of them.
-        var obvCe = ExponentialSeries(20, 100, 1.1m);
-        var obvPe = ExponentialSeries(20, 100, 0.9m);
+        var obvCe = ConstantSlopeSeries(30, 100, 1);
+        var obvPe = ConstantSlopeSeries(30, 100, -1);
 
         var signalsBefore = new CdvObvFlowStrategy().EntrySignals(Context(obvCe, obvPe), Parameters());
-        var signalsAfter = new CdvObvFlowStrategy().EntrySignals(Context(obvCe, obvPe), Parameters(p => p["threshold2Percent"] = 90m));
+        var signalsAfter = new CdvObvFlowStrategy().EntrySignals(Context(obvCe, obvPe), Parameters(p => p["threshold2Score"] = 3m));
 
         Assert.Contains(signalsBefore, s => s.Kind == "Entry"); // confirms the fixture would otherwise fire
         Assert.DoesNotContain(signalsAfter, s => s.Kind == "Entry");
     }
 
     [Fact]
-    public void NoEntry_WhenTheWindowsDisagree_OneRisingOneFalling()
-    {
-        // A steady rise (100 + 10*bar) through bar 11, then bar 12 dips just BELOW bar 11 but stays
-        // ABOVE bar 8 - so at bar 12 the 2-bar window reads a small FALL (195 vs bar-10's 200) while
-        // the 3- and 4-bar windows still read a RISE (195 vs bar-9's 190, and vs bar-8's 180). Mixed
-        // signs across the three windows means neither "rising in all three" (Bullish) nor "falling
-        // in all three" (Bearish) holds - no entry either way at that bar, regardless of what PE
-        // does (PE is a clean decay throughout, so it never becomes the reason for the mismatch).
-        var obvCe = Enumerable.Range(0, 20).Select(i => new ObvPoint(T0.AddMinutes(i), i == 12 ? 195m : 100m + i * 10m)).ToList();
-        var obvPe = ExponentialSeries(20, 100, 0.9m);
-
-        var signals = new CdvObvFlowStrategy().EntrySignals(Context(obvCe, obvPe), Parameters());
-
-        Assert.DoesNotContain(signals, s => s.Kind == "Entry" && s.TimeUtc == T0.AddMinutes(12));
-    }
-
-    [Fact]
     public void Direction_ShortOnly_BlocksBullishEntries()
     {
-        var obvCe = ExponentialSeries(20, 100, 1.1m);
-        var obvPe = ExponentialSeries(20, 100, 0.9m);
+        var obvCe = ConstantSlopeSeries(30, 100, 1);
+        var obvPe = ConstantSlopeSeries(30, 100, -1);
 
         var signals = new CdvObvFlowStrategy().EntrySignals(Context(obvCe, obvPe), Parameters(p => p["direction"] = 2m /* ShortOnly */));
 
@@ -169,12 +171,12 @@ public sealed class CdvObvFlowStrategyTests
     [Fact]
     public void FlowMode_ObvOnly_IgnoresCdvEvenWhenCdvAlsoConfirms()
     {
-        // OBV confirms bullish; CDV is flat (no series movement -> PercentChange never computable,
-        // so CDV's own agreement check always fails) - ObvOnly should still fire since it never
-        // looks at CDV at all.
-        var obvCe = ExponentialSeries(20, 100, 1.1m);
-        var obvPe = ExponentialSeries(20, 100, 0.9m);
-        var flatCdv = Enumerable.Range(0, 20).Select(i => new ObvPoint(T0.AddMinutes(i), 100m)).ToList();
+        // OBV confirms bullish; CDV is flat (no series movement -> AverageAbsBarDelta is 0, so
+        // FlowScore is never computable, and CDV's own agreement check always fails) - ObvOnly
+        // should still fire since it never looks at CDV at all.
+        var obvCe = ConstantSlopeSeries(30, 100, 1);
+        var obvPe = ConstantSlopeSeries(30, 100, -1);
+        var flatCdv = Enumerable.Range(0, 30).Select(i => new ObvPoint(T0.AddMinutes(i), 100m)).ToList();
 
         var signals = new CdvObvFlowStrategy().EntrySignals(
             Context(obvCe, obvPe, flatCdv, flatCdv), Parameters(p => p["flowMode"] = FlowConfirmation.ModeObvOnly));
@@ -185,9 +187,9 @@ public sealed class CdvObvFlowStrategyTests
     [Fact]
     public void FlowMode_Both_RequiresCdvToConfirmTooEvenWhenObvAlreadyDoes()
     {
-        var obvCe = ExponentialSeries(20, 100, 1.1m);
-        var obvPe = ExponentialSeries(20, 100, 0.9m);
-        var flatCdv = Enumerable.Range(0, 20).Select(i => new ObvPoint(T0.AddMinutes(i), 100m)).ToList();
+        var obvCe = ConstantSlopeSeries(30, 100, 1);
+        var obvPe = ConstantSlopeSeries(30, 100, -1);
+        var flatCdv = Enumerable.Range(0, 30).Select(i => new ObvPoint(T0.AddMinutes(i), 100m)).ToList();
 
         var signals = new CdvObvFlowStrategy().EntrySignals(
             Context(obvCe, obvPe, flatCdv, flatCdv), Parameters(p => p["flowMode"] = FlowConfirmation.ModeBoth));
@@ -198,8 +200,8 @@ public sealed class CdvObvFlowStrategyTests
     [Fact]
     public void Simulate_TakesTradesOnTheBullishLeg_MatchingTheEntrySignals()
     {
-        var obvCe = ExponentialSeries(20, 100, 1.1m);
-        var obvPe = ExponentialSeries(20, 100, 0.9m);
+        var obvCe = ConstantSlopeSeries(30, 100, 1);
+        var obvPe = ConstantSlopeSeries(30, 100, -1);
 
         var trades = new CdvObvFlowStrategy().Simulate(Context(obvCe, obvPe), Parameters());
 
@@ -207,63 +209,65 @@ public sealed class CdvObvFlowStrategyTests
         Assert.All(trades, t => Assert.Equal("CE", t.OptionType)); // Buy + Bullish -> buy CE
     }
 
-    // CE matches BullishFlow_FiresEntries' own growth through bar 4 (entry fires there), then
-    // reverses: bar 5 dips below bar 4, bar 6 dips below bar 5 - two consecutive falls.
-    private static List<ObvPoint> RisingThenReversingCe()
+    // CE rises at a constant +1/bar through index 8, then goes perfectly FLAT (no further change)
+    // from index 9 onward - directly "flowing in my direction, then goes sideways", the user's own
+    // framing for when they want out.
+    private static List<ObvPoint> RisingThenFlatCe()
     {
-        var obvCe = new List<ObvPoint>
+        var series = new List<ObvPoint>();
+        for (var i = 0; i <= 8; i++) series.Add(new ObvPoint(T0.AddMinutes(i), 100 + i));
+        for (var i = 9; i < 30; i++) series.Add(new ObvPoint(T0.AddMinutes(i), 108m));
+        return series;
+    }
+
+    [Fact]
+    public void Simulate_ExitsAsFlowStopLoss_WhenTheRisingLegGoesSideways()
+    {
+        var obvCe = RisingThenFlatCe();
+        var obvPe = ConstantSlopeSeries(30, 100, -1); // unrelated to this check - a Bullish trade only watches CE
+
+        var trades = new CdvObvFlowStrategy().Simulate(Context(obvCe, obvPe), Parameters(p =>
         {
-            new(T0, 100m), new(T0.AddMinutes(1), 110m), new(T0.AddMinutes(2), 121m), new(T0.AddMinutes(3), 133.1m), new(T0.AddMinutes(4), 146.41m),
-            new(T0.AddMinutes(5), 140m), new(T0.AddMinutes(6), 130m),
-        };
-        for (var i = 7; i < 20; i++) obvCe.Add(new ObvPoint(T0.AddMinutes(i), 130m));
-        return obvCe;
-    }
+            p["flowExitLookbackBars"] = 2;
+            p["flowExitThresholdScore"] = 0;
+        }));
 
-    [Fact]
-    public void Simulate_ExitsAsFlowStopLoss_WhenTheRisingLegFallsForTheConfiguredBars()
-    {
-        // PE keeps decaying throughout - unrelated to this check, since a Bullish trade only watches
-        // CE (the leg that was rising and justified the entry).
-        var obvCe = RisingThenReversingCe();
-        var obvPe = ExponentialSeries(20, 100, 0.9m);
-
-        var trades = new CdvObvFlowStrategy().Simulate(Context(obvCe, obvPe), Parameters(p => p["flowReversalExitBars"] = 2m));
-
-        var trade = trades.Single(t => t.SignalTimeUtc == T0.AddMinutes(4));
+        var trade = trades.Single(t => t.SignalTimeUtc == T0.AddMinutes(5));
         Assert.Equal("FlowStopLoss", trade.ExitReason);
-        // Streak of 2 completes at bar 6 (index 6) - the option bar there triggers the exit, whose
-        // own real close instant is one bar later, at T0+7.
-        Assert.Equal(T0.AddMinutes(7), trade.ExitTimeUtc);
+        // The 2-bar window's own net move first reaches exactly 0 once it sits entirely inside the
+        // flat region, at index 10 - the option bar there triggers the exit, whose own real close
+        // instant is one bar later.
+        Assert.Equal(T0.AddMinutes(11), trade.ExitTimeUtc);
     }
 
     [Fact]
-    public void Simulate_FlowReversalExitDisabledByDefault_NeverFiresFlowStopLoss()
+    public void Simulate_FlowExitDisabledByDefault_NeverFiresFlowStopLoss()
     {
-        var obvCe = RisingThenReversingCe();
-        var obvPe = ExponentialSeries(20, 100, 0.9m);
+        var obvCe = RisingThenFlatCe();
+        var obvPe = ConstantSlopeSeries(30, 100, -1);
 
-        // Same fixture as above, but flowReversalExitBars is left off (0, the default).
+        // Same fixture as above, but flowExitLookbackBars is left off (0, the default).
         var trades = new CdvObvFlowStrategy().Simulate(Context(obvCe, obvPe), Parameters());
 
-        var trade = trades.Single(t => t.SignalTimeUtc == T0.AddMinutes(4));
+        var trade = trades.Single(t => t.SignalTimeUtc == T0.AddMinutes(5));
         Assert.NotEqual("FlowStopLoss", trade.ExitReason);
     }
 
     [Fact]
     public void Simulate_BearishTrade_MonitorsPeForTheReversal_NotCe()
     {
-        // The mirror of the bullish fixture: PE is the leg that was rising and justified a Bearish
-        // entry, so PE's own reversal (not CE's) has to drive this exit. CE decays throughout,
-        // unrelated to a Bearish trade's own reversal check.
-        var obvPe = RisingThenReversingCe();
-        var obvCe = ExponentialSeries(20, 100, 0.9m);
+        var obvPe = RisingThenFlatCe();
+        var obvCe = ConstantSlopeSeries(30, 100, -1);
 
-        var trades = new CdvObvFlowStrategy().Simulate(Context(obvCe, obvPe), Parameters(p => p["flowReversalExitBars"] = 2m));
+        var trades = new CdvObvFlowStrategy().Simulate(Context(obvCe, obvPe), Parameters(p =>
+        {
+            p["flowExitLookbackBars"] = 2;
+            p["flowExitThresholdScore"] = 0;
+        }));
 
-        var trade = trades.Single(t => t.SignalTimeUtc == T0.AddMinutes(4));
+        var trade = trades.Single(t => t.SignalTimeUtc == T0.AddMinutes(5));
         Assert.Equal("PE", trade.OptionType); // Buy + Bearish -> buy PE
         Assert.Equal("FlowStopLoss", trade.ExitReason);
-        Assert.Equal(T0.AddMinutes(7), trade.ExitTimeUtc);
+        Assert.Equal(T0.AddMinutes(11), trade.ExitTimeUtc);
     }
 }
