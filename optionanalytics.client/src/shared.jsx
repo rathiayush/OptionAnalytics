@@ -53,6 +53,56 @@ export function computeEma(closes, period) {
   return result
 }
 
+// A plain EMA line over a chart's own (already timeframe-bucketed) bars - used by both
+// BacktestPage/ExpiredBacktestPage's own per-strategy indicator overlays (see each page's own
+// indicatorDefs) to plot whichever EMA a strategy's own parameters currently specify.
+export function emaLine(bars, period) {
+  const values = computeEma(bars.map((b) => b.close), period)
+  return bars.reduce((points, b, i) => {
+    if (values[i] != null) points.push({ time: b.time, value: values[i] })
+    return points
+  }, [])
+}
+
+// Mirrors SrFlowSellStrategy's own rolling support/resistance channel exactly (see the backend's
+// own doc comment on THE LEVEL): aggregates the NATIVE 1-minute spot history (oneMinuteBars, not
+// the chart's own possibly-coarser timeframe) into srTimeframeMinutes buckets, drops a still-
+// forming trailing one exactly like BacktestUtil.AggregateCandles does, then for each of the
+// chart's own bars reads the rolling high (resistance) or low (support) over the last
+// srLookbackBars such buckets that have fully closed strictly before that bar's own time - never
+// the bucket still forming through it, so this never looks ahead of what the strategy itself could
+// have known at the same moment.
+export function srLevelLine(oneMinuteBars, chartBars, srTimeframeMinutes, srLookbackBars, which) {
+  if (oneMinuteBars.length === 0 || chartBars.length === 0) return []
+
+  const bucketSeconds = Math.max(1, srTimeframeMinutes) * 60
+  const buckets = new Map()
+  let latestCovered = 0
+  for (const b of oneMinuteBars) {
+    const t = Math.floor(b.time / bucketSeconds) * bucketSeconds
+    const existing = buckets.get(t)
+    if (!existing) buckets.set(t, { time: t, high: b.high, low: b.low })
+    else { existing.high = Math.max(existing.high, b.high); existing.low = Math.min(existing.low, b.low) }
+    if (b.time + 60 > latestCovered) latestCovered = b.time + 60
+  }
+  const srBars = Array.from(buckets.values()).sort((a, b) => a.time - b.time)
+  if (srBars.length > 0 && srBars[srBars.length - 1].time + bucketSeconds > latestCovered) srBars.pop()
+
+  const points = []
+  let srIndex = -1
+  for (const bar of chartBars) {
+    while (srIndex + 1 < srBars.length && srBars[srIndex + 1].time + bucketSeconds <= bar.time) srIndex++
+    if (srIndex + 1 < srLookbackBars) continue
+
+    let value = which === 'high' ? -Infinity : Infinity
+    for (let w = srIndex - srLookbackBars + 1; w <= srIndex; w++) {
+      value = which === 'high' ? Math.max(value, srBars[w].high) : Math.min(value, srBars[w].low)
+    }
+    points.push({ time: bar.time, value })
+  }
+  return points
+}
+
 export const ALERT_KIND_LABEL = { Spot: 'Spot', AtmCe: 'ATM CE', AtmPe: 'ATM PE', Confluence: 'CONFLUENCE' }
 
 // One list for every page, so a timeframe stored by one is always a valid choice on the others.
