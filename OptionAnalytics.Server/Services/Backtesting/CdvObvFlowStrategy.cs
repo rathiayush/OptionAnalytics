@@ -41,6 +41,13 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 /// stop/target to eventually catch up. This replaces the first cut's cruder "N raw consecutive
 /// falling bars" rule with the same lookback-window measure entry itself uses, continuously
 /// re-checked - and which measure's own weakness counts is, again, the same FlowMode toggle.
+///
+/// This flow-based stop-loss only ever cuts a LOSING (or breakeven) trade short - per explicit
+/// request ("when strategy is in profit do not hit flow SL"), it never fires on a bar where the
+/// trade is CURRENTLY ahead on premium (see OptionTradeSimulator.Run's own
+/// ignoreSignalExitsWhileInProfit). A trade already in profit rides on toward its own stop/target/
+/// day-close instead, even while the flow itself has gone sideways or reversed; the flow check
+/// keeps watching every subsequent bar too, so it can still fire later if that profit fades back out.
 /// </summary>
 public sealed class CdvObvFlowStrategy : IBacktestStrategy
 {
@@ -90,7 +97,9 @@ public sealed class CdvObvFlowStrategy : IBacktestStrategy
         var signalExits = flowExitLookbackBars > 0
             ? BuildFlowExits(context, evaluation.EntryIndexes, flowExitLookbackBars, flowExitThresholdScore, flowMode, normalizationBars)
             : null;
-        return OptionTradeSimulator.Run(context, evaluation.Entries, parameters, signalExits: signalExits);
+        // Per explicit request: a weakening flow should cut a LOSING trade short, never override one
+        // already ahead - see Run's own doc comment on ignoreSignalExitsWhileInProfit.
+        return OptionTradeSimulator.Run(context, evaluation.Entries, parameters, signalExits: signalExits, ignoreSignalExitsWhileInProfit: true);
     }
 
     public IReadOnlyList<BacktestSignal> EntrySignals(BacktestStrategyContext context, IReadOnlyDictionary<string, decimal> parameters) =>

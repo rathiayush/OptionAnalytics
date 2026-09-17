@@ -176,14 +176,26 @@ public static class OptionTradeSimulator
     ///
     /// slPoints/tpPoints of 0 disable the premium stop/target entirely - for a strategy exiting on
     /// an underlying condition instead, a premium stop is an optional safety net rather than the
-    /// mechanism, and 0 is how it says "no net".</summary>
+    /// mechanism, and 0 is how it says "no net".
+    ///
+    /// <paramref name="ignoreSignalExitsWhileInProfit"/> (optional, off by default so every existing
+    /// caller keeps honoring signalExits unconditionally) - for a rule-based exit that should only
+    /// cut a LOSING trade short, never override one already ahead (CdvObvFlowStrategy's own
+    /// FlowStopLoss is the case this was added for, per explicit request: "when strategy is in
+    /// profit do not hit flow SL"). "In profit" is checked fresh on THIS bar's own Close against the
+    /// trade's own entryPrice (mirroring the same P&amp;L sign Run's own pnlPoints uses: below entry
+    /// for a seller, above for a buyer) - not a level from signalExits itself, since a flow measure
+    /// has no premium level of its own to compare against. When true, a signalExit whose deadline has
+    /// arrived is simply skipped on any bar the trade is currently profitable, leaving stop/target/
+    /// day-close to decide it instead - it can still fire on a LATER bar once profit fades.</summary>
     public static IReadOnlyList<BacktestTrade> Run(
         BacktestStrategyContext context,
         IReadOnlyList<(DateTimeOffset Time, string Direction)> entrySignals,
         IReadOnlyDictionary<string, decimal> parameters,
         IReadOnlyList<DateTimeOffset>? forcedExitTimes = null,
         IReadOnlyDictionary<DateTimeOffset, (DateTimeOffset Time, string Reason)>? signalExits = null,
-        bool oneMinuteFills = false)
+        bool oneMinuteFills = false,
+        bool ignoreSignalExitsWhileInProfit = false)
     {
         if (entrySignals.Count == 0) return Array.Empty<BacktestTrade>();
 
@@ -349,7 +361,11 @@ public static class OptionTradeSimulator
 
                 if (signalExit is { } sx && bar.Time >= sx.Time)
                 {
-                    exitTime = barCloseTime; exitPrice = bar.Close; exitReason = sx.Reason; break;
+                    var currentlyInProfit = isSell ? bar.Close < entryPrice : bar.Close > entryPrice;
+                    if (!ignoreSignalExitsWhileInProfit || !currentlyInProfit)
+                    {
+                        exitTime = barCloseTime; exitPrice = bar.Close; exitReason = sx.Reason; break;
+                    }
                 }
 
                 if (maxHoldingDeadline is { } holdDeadline && bar.Time >= holdDeadline)
