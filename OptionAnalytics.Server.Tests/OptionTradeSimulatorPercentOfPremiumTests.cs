@@ -4,8 +4,8 @@ using OptionAnalytics.Server.Services.Backtesting;
 namespace OptionAnalytics.Server.Tests;
 
 /// <summary>Covers OptionTradeSimulator.Run's slPercentOfPremium/tpPercentOfPremium extension -
-/// additive and OFF by default, added for AdaptiveOptionSellingV2Strategy's own "stop/target = % of
-/// the premium actually collected" model. Confirms it computes each trade's stop/target from THAT
+/// additive and OFF by default, added for a "stop/target = % of the premium actually collected"
+/// risk model. Confirms it computes each trade's stop/target from THAT
 /// trade's own entry price rather than a shared flat point value, and that leaving it at 0 (every
 /// other strategy's own case) reproduces the pre-existing plain slPoints/tpPoints behavior exactly.</summary>
 public sealed class OptionTradeSimulatorPercentOfPremiumTests

@@ -24,8 +24,7 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 /// 1:2 ratio, and independently tunable if a run wants a different one).
 ///
 /// Deliberately kept plain - no flow/technical-indicator add-ons - per explicit instruction that this
-/// app's strategies were accumulating too many confusing optional parameters (see
-/// AdaptiveOptionSellingV2Strategy's own doc comment for the same call).
+/// app's strategies were accumulating too many confusing optional parameters.
 /// </summary>
 public sealed class KathyLienEma20Sma200Strategy : IBacktestStrategy
 {

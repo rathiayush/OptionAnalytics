@@ -4,8 +4,8 @@ using OptionAnalytics.Server.Services.Backtesting;
 namespace OptionAnalytics.Server.Tests;
 
 /// <summary>Covers OptionTradeSimulator.RunPairedLegs - added per explicit instruction ("if trades
-/// executed together they should be squared off together as well") for AdaptiveOptionSellingV2Strategy's
-/// own Short Strangle legs. See its own doc comment for the iterate-to-a-fixed-point design and the
+/// executed together they should be squared off together as well") for a Short Strangle's two legs.
+/// See its own doc comment for the iterate-to-a-fixed-point design and the
 /// documented near-100%-not-100% residual on a stress fixture - this file measures that residual
 /// directly rather than just asserting it exists.</summary>
 public sealed class OptionTradeSimulatorRunPairedLegsTests
@@ -113,8 +113,8 @@ public sealed class OptionTradeSimulatorRunPairedLegsTests
         // have SOME regime/RSI/BB gap between entries, never back-to-back on every bar or near it) to
         // maximize how often shortening one trade frees up a later, previously-busy signal - the
         // cascade RunPairedLegs' own doc comment describes. This is a WORST-CASE stress floor, not
-        // the typical rate: AdaptiveOptionSellingV2Strategy's own tests measure EXACT (100%)
-        // synchronization on their own realistically-gated fixtures.
+        // the typical rate: a real strategy's own realistically-gated fixtures measure EXACT (100%)
+        // synchronization.
         var peSignals = Enumerable.Range(1, bars - 2).Where(i => i % 3 == 0).Select(i => (T0.AddMinutes(i), "Bullish")).ToList();
         var ceSignals = Enumerable.Range(1, bars - 2).Where(i => i % 3 == 0).Select(i => (T0.AddMinutes(i), "Bearish")).ToList();
 
