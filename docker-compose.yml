@@ -26,9 +26,6 @@ services:
       # Same idea for the rolling-option (CE/PE premium) prefetch's own per-expiry CSVs - see
       # ExpiredOptionDataPrefetchHostedService.
       Storage__ExpiredOptionDataPath: /app/data/expired-option-data
-      # Each morning's OI baseline (OiUnwindStrategy) - onto the same persistent volume so a
-      # mid-morning redeploy doesn't lose that day's baseline and capture a second, later one.
-      Storage__OpenInterestPath: /app/data/open-interest
       # Keeps the login cookie's signing/encryption key ring on the same persistent volume, so
       # everyone stays logged in across a redeploy instead of the whole key ring (and every
       # outstanding session) resetting every time the container restarts.

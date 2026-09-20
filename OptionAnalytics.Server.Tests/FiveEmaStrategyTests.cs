@@ -43,7 +43,6 @@ public sealed class FiveEmaStrategyTests
         AtmCeVolumeBars = Array.Empty<CandleWithVolume>(),
         AtmPeVolumeBars = Array.Empty<CandleWithVolume>(),
         AtmStrike = null,
-        OpenInterest = null,
     };
 
     private static Dictionary<string, decimal> Parameters(Action<Dictionary<string, decimal>>? overrides = null)
