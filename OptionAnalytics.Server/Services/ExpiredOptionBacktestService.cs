@@ -100,7 +100,7 @@ public sealed class ExpiredOptionBacktestService
     /// provided its entire signal/pricing logic only reads spot bars plus GetOptionBars(strike,
     /// isCall) for one strike at a time - or, like sr-flow-sell, also needs order-flow across the
     /// whole surrounding strike chain, via includeObvCdv/needsFlowChain below.</summary>
-    private static readonly HashSet<string> SupportedStrategyKeys = new() { "sr-flow-sell", "ema-crossover-retest", "kathy-lien-ema20-ema200-pullback", "cdv-obv-flow", "five-ema" };
+    private static readonly HashSet<string> SupportedStrategyKeys = new() { "sr-flow-sell", "ema-crossover-retest", "kathy-lien-ema20-ema200-pullback", "cdv-obv-flow", "five-ema", "orb-order-block-retrace", "daily-bias-sweep-fvg" };
 
     /// <summary>Underlyings this feature supports at all - Dhan's rolling-option docs only ever show
     /// "NSE_FNO" as the exchange segment, never a BSE one, so SENSEX is left out rather than

@@ -184,6 +184,8 @@ builder.Services.AddSingleton<IBacktestStrategy, EmaCrossoverRetestStrategy>();
 builder.Services.AddSingleton<IBacktestStrategy, FiveEmaStrategy>();
 builder.Services.AddSingleton<IBacktestStrategy, KathyLienEma20Ema200Strategy>();
 builder.Services.AddSingleton<IBacktestStrategy, CdvObvFlowStrategy>();
+builder.Services.AddSingleton<IBacktestStrategy, OrbOrderBlockStrategy>();
+builder.Services.AddSingleton<IBacktestStrategy, DailyBiasSweepFvgStrategy>();
 
 // Stateless - reads SpotFeedHostedService/CdvHostedService's in-memory history fresh on every
 // request, nothing to run in the background. See BacktestController/BacktestService.
