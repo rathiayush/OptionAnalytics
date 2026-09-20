@@ -81,6 +81,7 @@ public sealed class EmaCrossoverRetestStrategyTests
         AtmCeVolumeBars = Array.Empty<CandleWithVolume>(),
         AtmPeVolumeBars = Array.Empty<CandleWithVolume>(),
         AtmStrike = null,
+        OpenInterest = null,
     };
 
     private static Dictionary<string, decimal> Parameters() => new()
