@@ -42,6 +42,7 @@ public sealed class OptionTradeSimulatorStopTargetTests
         AtmCeVolumeBars = Array.Empty<CandleWithVolume>(),
         AtmPeVolumeBars = Array.Empty<CandleWithVolume>(),
         AtmStrike = null,
+        OpenInterest = null,
     };
 
     private static Dictionary<string, decimal> Parameters(decimal side, decimal slPoints = 10, decimal tpPoints = 20) => new()
