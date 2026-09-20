@@ -505,10 +505,6 @@ public sealed class ExpiredOptionBacktestService
             AtmCeVolumeBars = Array.Empty<CandleWithVolume>(),
             AtmPeVolumeBars = Array.Empty<CandleWithVolume>(),
             AtmStrike = null,
-            // No historical OI exists for an expired contract - Dhan's Option Chain API is a live
-            // snapshot only, with no history to replay (see OiChainSnapshot's own doc comment). This
-            // is exactly why oi-unwind-flow is never added to SupportedStrategyKeys.
-            OpenInterest = null,
         };
 
         var trades = strategy.Simulate(context, mergedParameters);

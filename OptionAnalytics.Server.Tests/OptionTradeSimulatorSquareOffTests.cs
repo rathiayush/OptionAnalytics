@@ -46,7 +46,6 @@ public sealed class OptionTradeSimulatorSquareOffTests
         AtmCeVolumeBars = Array.Empty<CandleWithVolume>(),
         AtmPeVolumeBars = Array.Empty<CandleWithVolume>(),
         AtmStrike = null,
-        OpenInterest = null,
     };
 
     private static Dictionary<string, decimal> Parameters(decimal squareOffMinutes) => new()

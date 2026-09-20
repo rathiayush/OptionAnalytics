@@ -120,14 +120,4 @@ public sealed class BacktestStrategyContext
     /// by N steps" via GetOptionBars(AtmStrike + n * Step, isCall). Null until CDV has resolved an
     /// ATM at least once.</summary>
     public required int? AtmStrike { get; init; }
-
-    /// <summary>This morning's OI baseline plus the current live snapshot, from
-    /// OpenInterestHostedService - what OiUnwindStrategy reads to find the strongest CE/PE wall near
-    /// ATM and tell whether that strike's writers are covering. Null whenever nothing has been
-    /// captured yet (no live session, this underlying/expiry isn't tracked, before the morning
-    /// baseline capture, or - always, for ExpiredOptionBacktestService's replay of an expired
-    /// contract - because Dhan's Option Chain API has no history at all, only a live snapshot; see
-    /// DhanOptionChainQuotes). A strategy reading this can only ever reason about "right now," not
-    /// replay it across a backtest - see OiChainSnapshot's own doc comment.</summary>
-    public required OiChainSnapshot? OpenInterest { get; init; }
 }

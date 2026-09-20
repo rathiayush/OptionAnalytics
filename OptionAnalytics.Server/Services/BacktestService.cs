@@ -80,7 +80,6 @@ public sealed class BacktestService
 
     private readonly SpotFeedHostedService _spotFeed;
     private readonly CdvHostedService _cdv;
-    private readonly OpenInterestHostedService _openInterest;
     private readonly IReadOnlyDictionary<string, IBacktestStrategy> _strategies;
     private readonly ILogger<BacktestService> _logger;
 
@@ -89,13 +88,10 @@ public sealed class BacktestService
     /// calls into a rate-limited Dhan endpoint to do work that is already in progress.</summary>
     private readonly ConcurrentDictionary<(string Underlying, DateOnly? Expiry), byte> _backgroundFills = new();
 
-    public BacktestService(
-        SpotFeedHostedService spotFeed, CdvHostedService cdv, OpenInterestHostedService openInterest,
-        IEnumerable<IBacktestStrategy> strategies, ILogger<BacktestService> logger)
+    public BacktestService(SpotFeedHostedService spotFeed, CdvHostedService cdv, IEnumerable<IBacktestStrategy> strategies, ILogger<BacktestService> logger)
     {
         _spotFeed = spotFeed;
         _cdv = cdv;
-        _openInterest = openInterest;
         _strategies = strategies.ToDictionary(s => s.Key);
         _logger = logger;
     }
@@ -367,7 +363,6 @@ public sealed class BacktestService
             AtmCeVolumeBars = BacktestUtil.AggregateCandlesWithVolume(ToCandlesWithVolume(cdvState.GetAtmClosedVolumeBars(true)), timeframe),
             AtmPeVolumeBars = BacktestUtil.AggregateCandlesWithVolume(ToCandlesWithVolume(cdvState.GetAtmClosedVolumeBars(false)), timeframe),
             AtmStrike = cdvState.AtmStrike,
-            OpenInterest = _openInterest.TryGetSnapshot(underlying, cdvState.Expiry),
             ObvCeSeries = BacktestUtil.AggregateLine(cdvState.GetObvSeries(true), timeframe),
             ObvPeSeries = BacktestUtil.AggregateLine(cdvState.GetObvSeries(false), timeframe),
             CdvCeSeries = BacktestUtil.AggregateLine(cdvState.GetSmoothedCdvSeries(true), timeframe),

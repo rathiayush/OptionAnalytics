@@ -29,7 +29,6 @@ public sealed class OptionTradeSimulatorRunPairedLegsTests
         AtmCeBars = Array.Empty<Candle>(), AtmPeBars = Array.Empty<Candle>(),
         AtmCeVolumeBars = Array.Empty<CandleWithVolume>(), AtmPeVolumeBars = Array.Empty<CandleWithVolume>(),
         AtmStrike = null,
-        OpenInterest = null,
     };
 
     [Fact]

@@ -52,7 +52,6 @@ public sealed class CdvObvFlowStrategyTests
             AtmCeVolumeBars = Array.Empty<CandleWithVolume>(),
             AtmPeVolumeBars = Array.Empty<CandleWithVolume>(),
             AtmStrike = null,
-            OpenInterest = null,
         };
     }
 
@@ -340,7 +339,6 @@ public sealed class CdvObvFlowStrategyTests
             AtmCeVolumeBars = Array.Empty<CandleWithVolume>(),
             AtmPeVolumeBars = Array.Empty<CandleWithVolume>(),
             AtmStrike = null,
-            OpenInterest = null,
         };
 
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();

@@ -176,13 +176,6 @@ builder.Services.AddHostedService<HistoricalSpotDataPrefetchHostedService>();
 builder.Services.AddSingleton<ExpiredOptionDataStore>();
 builder.Services.AddHostedService<ExpiredOptionDataPrefetchHostedService>();
 
-// This morning's OI baseline + a live-refreshed current snapshot per underlying/expiry - what
-// OiUnwindStrategy reads through BacktestStrategyContext.OpenInterest. Same singleton+hosted
-// pattern as SpotFeedHostedService/CdvHostedService: BacktestService reads the snapshot directly.
-builder.Services.AddSingleton<OpenInterestSnapshotStore>();
-builder.Services.AddSingleton<OpenInterestHostedService>();
-builder.Services.AddHostedService(sp => sp.GetRequiredService<OpenInterestHostedService>());
-
 // Every registered IBacktestStrategy is picked up automatically by BacktestService's
 // IEnumerable<IBacktestStrategy> constructor param - add a strategy by implementing the
 // interface and adding one AddSingleton line here, nothing else needs to change.
@@ -191,7 +184,6 @@ builder.Services.AddSingleton<IBacktestStrategy, EmaCrossoverRetestStrategy>();
 builder.Services.AddSingleton<IBacktestStrategy, FiveEmaStrategy>();
 builder.Services.AddSingleton<IBacktestStrategy, KathyLienEma20Ema200Strategy>();
 builder.Services.AddSingleton<IBacktestStrategy, CdvObvFlowStrategy>();
-builder.Services.AddSingleton<IBacktestStrategy, OiUnwindStrategy>();
 
 // Stateless - reads SpotFeedHostedService/CdvHostedService's in-memory history fresh on every
 // request, nothing to run in the background. See BacktestController/BacktestService.
