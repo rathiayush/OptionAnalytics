@@ -114,7 +114,7 @@ public sealed class CollectorHostedService : BackgroundService
     private async Task RunOneCycleAsync(DhanSpotInstrument instrument, TrackedUnderlying config, CancellationToken cancellationToken)
     {
         var today = IstClock.Today();
-        var fromDay = today.AddDays(-_options.BackfillDays);
+        var fromDay = _options.BackfillFromDate ?? today.AddDays(-_options.BackfillDays);
 
         // ---- Spot OHLC history --------------------------------------------------------------
         try

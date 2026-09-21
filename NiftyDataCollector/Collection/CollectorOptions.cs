@@ -52,6 +52,20 @@ public sealed class CollectorOptions
     /// own, rather than the whole 500-day range succeeding or failing as one unit.</summary>
     public int BackfillDays { get; set; } = 500;
 
+    /// <summary>An explicit "backfill from THIS calendar date" override, per the user's own request
+    /// for one shared date they can set once and have EVERY table (spot_bars_1m, option_bars_1m,
+    /// AND rolling_option_bars_1m) backfill from - not just rolling-option data, which already had
+    /// its own absolute RollingOption:StartDate. Null (the default) leaves every table on its own
+    /// existing independent default (BackfillDays here, RollingOption:StartDate there). Set this to
+    /// override BOTH: CollectorHostedService uses it in place of BackfillDays'
+    /// today-minus-N-days computation, and RollingOptionBackfillHostedService uses it in place of
+    /// RollingOption:StartDate (see RefreshSeriesAsync's own read of it). Same rules as any other
+    /// backfill-range change in this project apply once set - see Schema.sql's own doc comment on
+    /// backfill_progress: an earlier date than what's already covered is picked up automatically as
+    /// a checkpointed BACKWARD extension on the next cycle, never disturbing what's already saved.
+    /// Takes effect on restart (bound once at startup, not hot-reloaded mid-run).</summary>
+    public DateOnly? BackfillFromDate { get; set; } = null;
+
     /// <summary>How often to poll the live option chain (OI/IV/greeks/volume) per tracked expiry -
     /// bounded below by DhanRateLimiter's own 3.5s-per-call floor regardless of how low this is
     /// set.</summary>

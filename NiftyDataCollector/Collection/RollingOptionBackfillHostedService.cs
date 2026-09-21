@@ -53,9 +53,10 @@ public sealed class RollingOptionBackfillHostedService : BackgroundService
         await _writer.EnsureSchemaAsync(stoppingToken);
 
         var strikeOffsets = BuildStrikeOffsets(_collectorOptions.StrikesEachSide);
+        var effectiveStartDate = _collectorOptions.BackfillFromDate ?? _options.StartDate;
         _logger.LogInformation(
             "RollingOption backfill starting - {Underlyings} underlying(s) x {Offsets} strike offset(s) x 2 legs x {Codes} expiry code(s), from {Start} to today (each underlying uses its own Collector:Underlyings[].ExpiryFlag).",
-            _collectorOptions.Underlyings.Count, strikeOffsets.Count, _options.ExpiryCodes.Count, _options.StartDate);
+            _collectorOptions.Underlyings.Count, strikeOffsets.Count, _options.ExpiryCodes.Count, effectiveStartDate);
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -102,7 +103,10 @@ public sealed class RollingOptionBackfillHostedService : BackgroundService
     {
         var seriesKey = $"ROLLING:{underlying}:{expiryFlag}:{expiryCode}:{strikeOffset}:{(isCall ? "CE" : "PE")}";
         var today = IstClock.Today();
-        var desiredFrom = _options.StartDate;
+        // Collector:BackfillFromDate, when set, is the one shared "backfill from this date"
+        // override the user asked for - takes priority over RollingOption:StartDate here exactly
+        // the same way it takes priority over Collector:BackfillDays in CollectorHostedService.
+        var desiredFrom = _collectorOptions.BackfillFromDate ?? _options.StartDate;
 
         var checkpoint = await _writer.GetBackfillCheckpointAsync(seriesKey, cancellationToken);
         var completedFrom = checkpoint?.From;

@@ -15,12 +15,14 @@ public sealed class RollingOptionOptions
     /// <summary>How far back to backfill. Defaults to the last 6 months, per the user's own
     /// explicit "first fetch for last 6 months" instruction - a window big enough to be useful for
     /// real backtesting while still being a fraction of the full range they may eventually want
-    /// ("2023 march till date"). Once verified, widen this to an earlier date (e.g. "2023-03-01")
-    /// in appsettings.Local.json and restart - each series' own checkpoint picks the new, earlier
-    /// window up as a BACKWARD extension on the very next pass without re-fetching or disturbing
-    /// what this run already saved (see Schema.sql's own doc comment on backfill_progress). "Till
-    /// date" itself needs no separate setting - every pass always tops up through today
-    /// automatically, same as every other backfill in this project.</summary>
+    /// ("2023 march till date"). OVERRIDDEN by Collector:BackfillFromDate when that is set (see its
+    /// own doc comment - one shared date the user can set once for every table, not just this
+    /// one). Once verified, widen this (or Collector:BackfillFromDate) to an earlier date (e.g.
+    /// "2023-03-01") in appsettings.Local.json and restart - each series' own checkpoint picks the
+    /// new, earlier window up as a BACKWARD extension on the very next pass without re-fetching or
+    /// disturbing what this run already saved (see Schema.sql's own doc comment on
+    /// backfill_progress). "Till date" itself needs no separate setting - every pass always tops
+    /// up through today automatically, same as every other backfill in this project.</summary>
     public DateOnly StartDate { get; set; } = DateOnly.FromDateTime(DateTime.UtcNow.AddMonths(-6));
 
     /// <summary>Which "cycles out" to backfill - CONFIRMED 1-indexed against a real account: 1 is
