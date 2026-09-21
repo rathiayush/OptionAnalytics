@@ -1,14 +1,18 @@
 namespace NiftyDataCollector.Dhan;
 
 /// <summary>
-/// Dhan credentials for this collector. Two ways to authenticate, same as OptionAnalytics.Server:
+/// Dhan credentials for this collector. Two ways to authenticate, same as OptionAnalytics.Server -
+/// and, per explicit request, PRIORITY ORDER matters here:
 ///
-///  1. STATIC TOKEN - paste a portal-generated AccessToken (Dhan Web -> Profile -> DhanHQ Trading
-///     APIs). Needs a fresh paste roughly once a day (portal tokens are fixed at 24h validity).
-///  2. TOTP - set ClientId + Pin + TotpSecret and leave AccessToken empty.
-///     DhanTotpAutoRenewalHostedService then mints and renews its own token with zero manual
-///     steps, same RFC 6238 algorithm as an authenticator app (see TotpGenerator). Takes priority
-///     over a stale static AccessToken whenever HasTotpCredentials is true.
+///  1. STATIC TOKEN (primary, when set) - paste a portal-generated AccessToken (Dhan Web -> Profile
+///     -> DhanHQ Trading APIs). Used as-is for as long as it keeps working; needs a fresh paste
+///     roughly once a day (portal tokens are fixed at 24h validity) if you're relying on it alone.
+///  2. TOTP (fallback) - set ClientId + Pin + TotpSecret alongside it (or instead of it, leaving
+///     AccessToken empty). DhanTotpAutoRenewalHostedService stands by and only starts minting/
+///     renewing its own token once AccessToken is either not configured at all, or is confirmed
+///     dead (rejected by Dhan) - see that service's own doc comment for exactly how the handover
+///     works. Once TOTP has taken over, it stays authenticated automatically forever, same RFC
+///     6238 algorithm as an authenticator app (see TotpGenerator).
 ///
 /// THE REAL RISK, explicit per prior discussion: if OptionAnalytics.Server's own dashboard is ALSO
 /// running in TOTP mode against this SAME Dhan account, the two processes' independent logins can

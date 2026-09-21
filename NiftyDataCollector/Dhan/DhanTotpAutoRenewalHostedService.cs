@@ -4,22 +4,26 @@ namespace NiftyDataCollector.Dhan;
 
 /// <summary>
 /// Keeps DhanSession authenticated with zero human involvement, whenever TOTP credentials are
-/// configured (DhanOptions.HasTotpCredentials) - takes priority over a plain static AccessToken.
-/// If TOTP isn't configured, this service is a no-op and the session just runs on whatever static
-/// AccessToken is set.
+/// configured (DhanOptions.HasTotpCredentials). PRIORITY ORDER, per explicit request: a configured
+/// Dhan:AccessToken is used FIRST and is left alone as long as it keeps working - this service only
+/// takes over with TOTP once that static token is either not configured at all, or is confirmed
+/// dead (DhanSession.SessionInvalidated fires - a 401 from DhanApiClient). If TOTP isn't configured
+/// either, this service is a no-op and the session just runs on whatever static AccessToken is set
+/// (with no automatic recovery if that ever stops working).
 ///
-///  1. STARTUP - authenticated within seconds of boot, retried with backoff (2s doubling to 30s
-///     for an ordinary transient failure) until it succeeds - ~130s specifically when Dhan reports
-///     its own "once every 2 minutes" cooldown, or DhanOptions.TooManyAttemptsCooldownSeconds
+/// Once TOTP has taken over (no static token, or the static one died), it stays authenticated by:
+///  1. STARTUP OF TOTP MODE - authenticated within seconds, retried with backoff (2s doubling to
+///     30s for an ordinary transient failure) until it succeeds - ~130s specifically when Dhan
+///     reports its own "once every 2 minutes" cooldown, or DhanOptions.TooManyAttemptsCooldownSeconds
 ///     (configurable, defaults to 30s) on Dhan's separate account-level "too many attempts"
 ///     lockout - see that option's own doc comment for the tradeoff it controls.
-///  2. PROACTIVELY, an hour before the current token's own expiry.
-///  3. REACTIVELY, the instant DhanSession.SessionInvalidated fires (a 401 from DhanApiClient).
+///  2. PROACTIVELY, an hour before the current TOTP-minted token's own expiry.
+///  3. REACTIVELY, the instant DhanSession.SessionInvalidated fires again.
 ///
-/// FALLBACK: while a TOTP attempt is failing (any reason - rate-limited, locked out, network), if
-/// Dhan:AccessToken is also configured and the session has no token right now, that static token is
-/// used as a stopgap so API calls keep working off it while TOTP retries continue in the
-/// background - the moment TOTP succeeds, its fresh token overwrites the static one as usual.
+/// There is deliberately no reverse fallback: once the static token is confirmed dead, this
+/// service never goes back to trying it again (there'd be nothing to retry - it's a fixed value
+/// that only a human editing config can fix), so from that point on it behaves exactly as it would
+/// if only TOTP had ever been configured.
 ///
 /// See DhanOptions' own doc comment for the real risk of running this ALONGSIDE
 /// OptionAnalytics.Server's own TOTP renewal against the same Dhan account.
@@ -61,11 +65,30 @@ public sealed class DhanTotpAutoRenewalHostedService : BackgroundService
             return;
         }
 
+        // Static token is primary: if it's configured and DhanSession has already seeded a valid
+        // session from it (see DhanSession's own constructor), stand by rather than immediately
+        // trying to log in via TOTP - only take over once that token is confirmed dead.
+        var usingStaticToken = !string.IsNullOrWhiteSpace(_options.AccessToken) && _session.IsAuthenticated;
+        if (usingStaticToken)
+            _logger.LogInformation(
+                "Dhan:AccessToken is configured and currently valid - using it as the session's primary auth for now. " +
+                "TOTP auto-login is on standby and takes over automatically the moment that token is cleared (expired/rejected).");
+
         _session.SessionInvalidated += OnInvalidated;
         try
         {
             while (!stoppingToken.IsCancellationRequested)
             {
+                if (usingStaticToken)
+                {
+                    await WaitForInvalidationAsync(stoppingToken);
+                    if (stoppingToken.IsCancellationRequested) return;
+
+                    usingStaticToken = false;
+                    _logger.LogWarning("Dhan:AccessToken was cleared (expired/rejected) - TOTP auto-login is now taking over as the session's primary auth method.");
+                    continue;
+                }
+
                 var expiresUtc = await RenewUntilSuccessAsync(stoppingToken);
                 if (expiresUtc is null) return; // cancelled while retrying - shutting down
 
@@ -101,8 +124,6 @@ public sealed class DhanTotpAutoRenewalHostedService : BackgroundService
             else
                 _logger.LogWarning("Dhan TOTP auto-login failed: {Error} - retrying in {Seconds}s.", result.Error, delay.TotalSeconds);
 
-            FallBackToStaticAccessTokenIfConfigured();
-
             if (!await DelayAsync(delay, stoppingToken)) return null;
             backoff = result.RateLimited || result.TooManyAttempts ? RetryBackoffInitial : Min(backoff * 2, RetryBackoffMax);
         }
@@ -133,6 +154,22 @@ public sealed class DhanTotpAutoRenewalHostedService : BackgroundService
         }
     }
 
+    /// <summary>Blocks until DhanSession.SessionInvalidated fires (or the service is stopping) -
+    /// no deadline, unlike WaitForInvalidationOrDeadlineAsync, because there's no TOTP-minted
+    /// token expiry to race against while the static AccessToken is still the one in use.</summary>
+    private async Task WaitForInvalidationAsync(CancellationToken stoppingToken)
+    {
+        try
+        {
+            await _invalidatedSignal.WaitAsync(stoppingToken);
+            Interlocked.Exchange(ref _invalidatedPending, 0);
+        }
+        catch (OperationCanceledException)
+        {
+            // The service is stopping.
+        }
+    }
+
     private void OnInvalidated()
     {
         if (Interlocked.CompareExchange(ref _invalidatedPending, 1, 0) == 0)
@@ -140,20 +177,6 @@ public sealed class DhanTotpAutoRenewalHostedService : BackgroundService
             try { _invalidatedSignal.Release(); }
             catch (SemaphoreFullException) { /* already armed - coalesced */ }
         }
-    }
-
-    /// <summary>Stopgap so API calls don't go dark for the whole time TOTP is failing/locked out,
-    /// when the user has also left a static Dhan:AccessToken configured as a backup. Only fills a
-    /// currently-empty session - never overwrites a token that's still live (there's no way from
-    /// here to tell whether it's still valid, so leaving it alone is the safe default).</summary>
-    private void FallBackToStaticAccessTokenIfConfigured()
-    {
-        if (_session.IsAuthenticated) return;
-        if (string.IsNullOrWhiteSpace(_options.AccessToken) || string.IsNullOrWhiteSpace(_options.ClientId)) return;
-
-        _session.AccessToken = _options.AccessToken;
-        _session.ClientId = _options.ClientId;
-        _logger.LogWarning("Falling back to the static Dhan:AccessToken while TOTP login keeps retrying in the background.");
     }
 
     private static TimeSpan Min(TimeSpan a, TimeSpan b) => a < b ? a : b;

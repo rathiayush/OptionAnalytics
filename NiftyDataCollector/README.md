@@ -39,19 +39,23 @@ removed specifically because OI was believed to be live-only everywhere in Dhan'
    everything). The connecting Postgres role needs `CREATEDB` privilege for this - the default
    `postgres` superuser role always has it.
 2. **Dhan credentials**: copy `appsettings.Local.json.example` to `appsettings.Local.json` and fill
-   in `Dhan:ClientId` plus ONE of:
+   in `Dhan:ClientId` plus either or both of:
 
-   - **TOTP auto-login (no daily manual step)**: set `Dhan:Pin` + `Dhan:TotpSecret` (Dhan Web ->
-     Profile -> DhanHQ Trading APIs -> Setup TOTP) and leave `Dhan:AccessToken` empty.
-     `DhanTotpAutoRenewalHostedService` mints and renews its own token automatically forever -
-     same tested logic (backoff, Dhan's 2-minute cooldown handling) as OptionAnalytics.Server's own
-     TOTP auto-login. You can ALSO fill in `Dhan:AccessToken` alongside TOTP as a fallback: while a
-     TOTP attempt is failing (rate-limited, locked out, network issue), that static token is used
-     as a stopgap so API calls keep working off it while TOTP keeps retrying in the background -
-     the moment TOTP succeeds, its fresh token takes back over as usual.
-   - **Static portal token**: paste a token from that same Profile page into `Dhan:AccessToken`
-     and leave `Pin`/`TotpSecret` empty. Simpler, but expires in ~24h - you'll need to paste a
-     fresh one and restart about once a day.
+   - **Static portal token** (`Dhan:AccessToken`) - paste a token from Dhan Web -> Profile -> DhanHQ
+     Trading APIs. **This is used first whenever it's set**, and left alone for as long as it keeps
+     working. Simplest option on its own, but expires in ~24h with no auto-recovery - you'd need to
+     paste a fresh one and restart about once a day.
+   - **TOTP auto-login** (`Dhan:Pin` + `Dhan:TotpSecret`, from that same Profile page -> Setup TOTP)
+     - the automatic **fallback**: `DhanTotpAutoRenewalHostedService` stands by and only starts
+       minting/renewing its own token once `Dhan:AccessToken` is either left empty, or is confirmed
+       dead (rejected by Dhan) - from that point on it keeps the session authenticated automatically
+       forever, with zero manual steps, same tested logic (backoff, Dhan's 2-minute cooldown
+       handling) as OptionAnalytics.Server's own TOTP auto-login. There's no reverse handover: once
+       the static token is confirmed dead, TOTP stays in charge until you restart with a fresh one.
+   - Set **both** for "paste a token when convenient, but don't worry if it expires unattended" -
+     the collector runs on the static token as long as it's valid and falls over to TOTP the moment
+     it isn't, with no restart needed. Set **TOTP only** (leave `Dhan:AccessToken` empty) for
+     zero-touch operation from the start.
 
    **The real tradeoff between the two, if you're also running OptionAnalytics.Server against the
    same Dhan account**: TOTP mode here means TWO independent processes can each mint a fresh login
