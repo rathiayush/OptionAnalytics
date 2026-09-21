@@ -428,6 +428,62 @@ export default function OiReplayPage() {
 
   const maxPain = useMemo(() => computeMaxPain(ladderRows), [ladderRows])
 
+  // Every strike/side's OI at the very first revealed bar of the day - the fixed reference point
+  // "day accumulation" and the top-movers list below both compare the CURRENT ladder against, so
+  // both read "since the open", not "since the last minute" (that's what OiChange already covers).
+  const dayStartMs = bars[0] ? bars[0].time * 1000 : null
+  const dayStartByStrike = useMemo(() => {
+    if (dayStartMs == null) return new Map()
+    const map = new Map()
+    for (const strike of new Set([...ceByStrike.keys(), ...peByStrike.keys()])) {
+      map.set(strike, {
+        ceOi: latestAtOrBefore(ceByStrike.get(strike) ?? [], dayStartMs)?.openInterest ?? null,
+        peOi: latestAtOrBefore(peByStrike.get(strike) ?? [], dayStartMs)?.openInterest ?? null,
+      })
+    }
+    return map
+  }, [ceByStrike, peByStrike, dayStartMs])
+
+  // Whole-day accumulation (same Price+OI combination logic as the per-tick "OI buildup" in
+  // Market Read, just measured from the DAY'S OPEN to right now instead of the last single minute)
+  // plus the two strike/side pairs that have added the most OI and the two that have shed the most,
+  // across the whole fetched band - "continuously" read as "net change since the open", not a
+  // strict every-single-minute streak (this app has no per-minute streak tracker, and a streak that
+  // reverses for one minute then resumes is still the same real accumulation story).
+  const dayOiSummary = useMemo(() => {
+    if (!currentBar || bars.length === 0 || dayStartByStrike.size === 0) return null
+
+    let ceStartTotal = 0
+    let peStartTotal = 0
+    const movers = []
+    for (const row of ladderRows) {
+      const start = dayStartByStrike.get(row.strike)
+      if (row.ceOi != null && start?.ceOi != null) {
+        ceStartTotal += start.ceOi
+        movers.push({ strike: row.strike, side: 'CE', change: row.ceOi - start.ceOi })
+      }
+      if (row.peOi != null && start?.peOi != null) {
+        peStartTotal += start.peOi
+        movers.push({ strike: row.strike, side: 'PE', change: row.peOi - start.peOi })
+      }
+    }
+    const ceDayChange = totalCeOi - ceStartTotal
+    const peDayChange = totalPeOi - peStartTotal
+    const dayPriceChange = currentBar.close - bars[0].open
+
+    let dayBias = 'Neutral'
+    let dayReason = 'No clear net accumulation pattern for the day so far'
+    if (dayPriceChange > 0 && peDayChange > 0 && peDayChange >= ceDayChange) { dayBias = 'Bullish'; dayReason = `Net put writing since the open (+${peDayChange.toLocaleString()} PE OI) while price is up ${dayPriceChange.toFixed(0)} pts - support built through the day` }
+    else if (dayPriceChange < 0 && ceDayChange > 0 && ceDayChange >= peDayChange) { dayBias = 'Bearish'; dayReason = `Net call writing since the open (+${ceDayChange.toLocaleString()} CE OI) while price is down ${Math.abs(dayPriceChange).toFixed(0)} pts - resistance built through the day` }
+    else if (dayPriceChange > 0 && ceDayChange < 0) { dayBias = 'Bullish'; dayReason = `Net call unwinding since the open (${ceDayChange.toLocaleString()} CE OI) as price rose ${dayPriceChange.toFixed(0)} pts - short covering, not fresh support` }
+    else if (dayPriceChange < 0 && peDayChange < 0) { dayBias = 'Bearish'; dayReason = `Net put unwinding since the open (${peDayChange.toLocaleString()} PE OI) as price fell ${Math.abs(dayPriceChange).toFixed(0)} pts - long unwinding, not fresh resistance` }
+
+    const added = [...movers].filter((m) => m.change > 0).sort((a, b) => b.change - a.change).slice(0, 2)
+    const removed = [...movers].filter((m) => m.change < 0).sort((a, b) => a.change - b.change).slice(0, 2)
+
+    return { dayBias, dayReason, ceDayChange, peDayChange, added, removed }
+  }, [currentBar, bars, ladderRows, dayStartByStrike, totalCeOi, totalPeOi])
+
   // Synthesizes PCR + OI buildup + IV skew into one heuristic read - three independent votes
   // (Bullish/Bearish/Neutral), combined into an overall bias and a candidate strike/side. This is a
   // rule-of-thumb reading of the SAME numbers already shown above, not a prediction - all three
@@ -610,6 +666,55 @@ export default function OiReplayPage() {
                   <Text type="secondary" style={{ fontSize: 11 }}>
                     Heuristic reading of the same PCR/OI/IV numbers shown above - three independent, naively-thresholded votes, not a signal or advice. Always cross-check against price action itself.
                   </Text>
+                </Space>
+              </Card>
+            )}
+
+            {dayOiSummary && (
+              <Card size="small" title="Day OI Accumulation (since today's open)">
+                <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                  <Alert
+                    type={dayOiSummary.dayBias === 'Bullish' ? 'success' : dayOiSummary.dayBias === 'Bearish' ? 'error' : 'info'}
+                    showIcon
+                    message={`Day so far: ${dayOiSummary.dayBias}`}
+                    description={dayOiSummary.dayReason}
+                  />
+                  <Row gutter={24}>
+                    <Col span={6}>
+                      <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>CE OI since open</Text>
+                      <Text style={{ fontSize: 13, color: dayOiSummary.ceDayChange >= 0 ? CE_COLOR : PE_COLOR }}>
+                        {dayOiSummary.ceDayChange >= 0 ? '+' : ''}{dayOiSummary.ceDayChange.toLocaleString()}
+                      </Text>
+                    </Col>
+                    <Col span={6}>
+                      <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>PE OI since open</Text>
+                      <Text style={{ fontSize: 13, color: dayOiSummary.peDayChange >= 0 ? CE_COLOR : PE_COLOR }}>
+                        {dayOiSummary.peDayChange >= 0 ? '+' : ''}{dayOiSummary.peDayChange.toLocaleString()}
+                      </Text>
+                    </Col>
+                    <Col span={6}>
+                      <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>Top 2 OI added</Text>
+                      {dayOiSummary.added.length === 0
+                        ? <Text style={{ fontSize: 11, color: AXIS_COLOR }}>None yet</Text>
+                        : dayOiSummary.added.map((m) => (
+                          <div key={`${m.strike}-${m.side}`} style={{ fontSize: 11 }}>
+                            <Tag color={m.side === 'CE' ? 'success' : 'error'} style={{ fontSize: 10, marginRight: 4 }}>{m.side}</Tag>
+                            {m.strike} <span style={{ color: CE_COLOR }}>+{m.change.toLocaleString()}</span>
+                          </div>
+                        ))}
+                    </Col>
+                    <Col span={6}>
+                      <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>Top 2 OI removed</Text>
+                      {dayOiSummary.removed.length === 0
+                        ? <Text style={{ fontSize: 11, color: AXIS_COLOR }}>None yet</Text>
+                        : dayOiSummary.removed.map((m) => (
+                          <div key={`${m.strike}-${m.side}`} style={{ fontSize: 11 }}>
+                            <Tag color={m.side === 'CE' ? 'success' : 'error'} style={{ fontSize: 10, marginRight: 4 }}>{m.side}</Tag>
+                            {m.strike} <span style={{ color: PE_COLOR }}>{m.change.toLocaleString()}</span>
+                          </div>
+                        ))}
+                    </Col>
+                  </Row>
                 </Space>
               </Card>
             )}
