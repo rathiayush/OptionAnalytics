@@ -14,6 +14,15 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 /// back inside. Unlike that strategy, there is no daily-bias gate here - either direction is hunted
 /// at all times.
 ///
+/// THE CHANNEL/SWING HISTORY SPANS MULTIPLE DAYS, not just the current session: a real trading day
+/// only has ~6-7 hourly bars, nowhere near enough to hold a genuine "recent 20-hour swing channel"
+/// or "last two confirmed swing highs" on its own. An earlier version of this strategy reset the
+/// sweep channel and swing history at every calendar-day boundary, which made it produce ZERO
+/// signals at any parameter setting (the sweepLookbackBars>20-bars-that-day gate could never be
+/// reached). Only the eventual TRADE stays intraday-only, per this app's own trade model - the
+/// DETECTION state (channel, swings, pending IFVG/trendline) is one continuous scan across the
+/// whole run's hourly history.
+///
 /// THE IFVG: an ordinary 3-candle fair-value gap in the ORIGINAL (pre-reversal) direction - a
 /// bearish gap for a bullish sweep, the mirror for bearish - found by searching backward from the
 /// sweep bar (bounded by ifvgLookbackBars). It only counts once INVERTED: the sweep bar's own close
@@ -136,20 +145,21 @@ public sealed class SweepIfvgTrendlineBreakStrategy : IBacktestStrategy
             }
         }
 
-        var hourStart = 0;
-        while (hourStart < hourlyBars.Count)
+        // The sweep channel, confirmed swing-high/low history, and any pending IFVG/trendline state
+        // all need to look back across MULTIPLE DAYS to mean anything real - a genuine "recent
+        // 20-hour swing channel" or "last two confirmed swing highs" cannot be reconstructed from
+        // the ~6-7 hourly bars a single NSE trading day actually has. This used to run once PER
+        // CALENDAR DAY (resetting all of that state at each boundary), which made the
+        // sweepLookbackBars>20 gate below structurally unreachable within one day - RunSession was
+        // never even called, at any parameter setting, which is why this produced zero signals no
+        // matter what else was configured. Now one continuous pass over the WHOLE run's hourly
+        // history - only the eventual TRADE itself stays intraday (LocateInOneMinuteBars/
+        // FindSpotExit already scope the fill/exit search to the retrace bar's own calendar day,
+        // unaffected by this change).
+        if (hourlyBars.Count > sweepLookbackBars)
         {
-            var day = IstClock.IstDate(hourlyBars[hourStart].Time);
-            var hourEnd = hourStart;
-            while (hourEnd < hourlyBars.Count && IstClock.IstDate(hourlyBars[hourEnd].Time) == day) hourEnd++;
-
-            if (hourEnd - hourStart > sweepLookbackBars)
-            {
-                RunSession(hourlyBars, hourStart, hourEnd, oneMinBars, sweepLookbackBars, sweepBufferPoints,
-                    ifvgLookbackBars, trendlineLookaheadBars, retraceLookaheadBars, stopBufferPoints, riskRewardMultiple, Emit);
-            }
-
-            hourStart = hourEnd;
+            RunSession(hourlyBars, 0, hourlyBars.Count, oneMinBars, sweepLookbackBars, sweepBufferPoints,
+                ifvgLookbackBars, trendlineLookaheadBars, retraceLookaheadBars, stopBufferPoints, riskRewardMultiple, Emit);
         }
 
         return (entries, signals.OrderByDescending(sig => sig.TimeUtc).ToList(), signalExits);

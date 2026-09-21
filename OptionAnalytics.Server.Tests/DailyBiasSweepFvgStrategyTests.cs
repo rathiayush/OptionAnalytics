@@ -106,6 +106,8 @@ public sealed class DailyBiasSweepFvgStrategyTests
         AtmCeVolumeBars = Array.Empty<CandleWithVolume>(),
         AtmPeVolumeBars = Array.Empty<CandleWithVolume>(),
         AtmStrike = null,
+        CeOiIvBand = Array.Empty<OiIvPoint>(),
+        PeOiIvBand = Array.Empty<OiIvPoint>(),
     };
 
     private static Dictionary<string, decimal> Parameters(Action<Dictionary<string, decimal>>? overrides = null)
@@ -148,6 +150,37 @@ public sealed class DailyBiasSweepFvgStrategyTests
         bars.AddRange(BullishSweepFvgSession(Today));
 
         var signals = new DailyBiasSweepFvgStrategy().EntrySignals(Context(bars), Parameters());
+
+        var signal = Assert.Single(signals);
+        Assert.Equal("Entry", signal.Kind);
+        Assert.Equal("Bullish", signal.Direction);
+        Assert.Contains("Swept 85", signal.Summary);
+        Assert.Contains("FVG [110-115]", signal.Summary);
+    }
+
+    // The real bug this exists to catch: an earlier version reset the sweep channel (and any
+    // pending sweep/FVG) at every calendar-day boundary, so it only ever started scanning a day
+    // once that SAME day had MORE than sweepLookbackBars hourly bars - never true for a real
+    // ~6-7-bar trading day at the DEFAULT sweepLookbackBars (20) or anything close to it. This adds
+    // 20 flat filler hourly bars on Day7 (the day right before Today - safe to widen since Day7 was
+    // never itself a swing point in BullishBiasDailyHistory's own confirmed HH/HL sequence) ahead of
+    // the session, then runs with the real default sweepLookbackBars - only correct if the channel
+    // is allowed to look back ACROSS that day boundary. The filler's own flat value (105) sits
+    // between the session's own recentLow(100)/recentHigh(110), so it changes nothing about which
+    // bars the channel picks up - same sweep/gap/retrace, same expected values as the test above.
+    [Fact]
+    public void BullishBias_StillFires_WhenSweepLookbackBarsExceedsASingleDaysOwnBarCount()
+    {
+        var bars = BullishBiasDailyHistory();
+        bars.AddRange(Enumerable.Range(0, 20).Select(h => HourBar(Day7, h, 105, 105, 105, 105)));
+        bars.AddRange(BullishSweepFvgSession(Today));
+
+        var signals = new DailyBiasSweepFvgStrategy().EntrySignals(Context(bars), Parameters(p =>
+        {
+            p["sweepLookbackBars"] = 20; // the real, documented default - not the test suite's own tiny 2
+            p["fvgLookaheadBars"] = 1;
+            p["retraceLookaheadBars"] = 1;
+        }));
 
         var signal = Assert.Single(signals);
         Assert.Equal("Entry", signal.Kind);

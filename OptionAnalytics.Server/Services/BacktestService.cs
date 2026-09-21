@@ -386,6 +386,10 @@ public sealed class BacktestService
             // Same series, same on-demand behaviour, just un-bucketed - see
             // BacktestStrategyContext.GetOptionBarsOneMinute.
             GetOptionBarsOneMinute = (strike, isCall) => OptionBarsAt(strike, isCall, 1),
+            // Live Backtrack has no historical OI/IV source (see BacktestStrategyContext's own doc
+            // comment on CeOiIvBand/PeOiIvBand) - always empty here, never populated.
+            CeOiIvBand = Array.Empty<OiIvPoint>(),
+            PeOiIvBand = Array.Empty<OiIvPoint>(),
         };
 
         IReadOnlyList<Candle> OptionBarsAt(decimal strike, bool isCall, int bucketMinutes)

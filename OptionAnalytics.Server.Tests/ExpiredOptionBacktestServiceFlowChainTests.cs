@@ -19,8 +19,8 @@ public sealed class ExpiredOptionBacktestServiceFlowChainTests
     // range - actually attributes the bar's volume entirely to the buy side; a bar with close
     // exactly midway between high and low (e.g. close +-1) is a doji and yields zero delta too,
     // which would make CDV comparisons meaningless regardless of chain size.
-    private static (CandleWithVolume Bar, decimal? Strike, decimal? Spot) Entry(DateTimeOffset time, decimal close, long volume) =>
-        (new CandleWithVolume(time, close - 2m, close, close - 2m, close, volume), null, null);
+    private static (CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility) Entry(DateTimeOffset time, decimal close, long volume) =>
+        (new CandleWithVolume(time, close - 2m, close, close - 2m, close, volume), null, null, null, null);
 
     private static ExpiredOptionBacktestService.StrikeBandMember Member(int steps, params (DateTimeOffset Time, decimal Close, long Volume)[] bars)
     {

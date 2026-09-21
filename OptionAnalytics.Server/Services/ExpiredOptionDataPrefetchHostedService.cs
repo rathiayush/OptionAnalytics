@@ -196,7 +196,7 @@ public sealed class ExpiredOptionDataPrefetchHostedService : BackgroundService
         _logger.LogInformation("Starting one-time expired-option data prefetch for {Underlying} {ExpiryFlag} {ExpiryDate}: {From}..{To} (chunked and paced, {Tokens} token/side member(s)).",
             underlying, expiryFlag, expiryDate, fromDay, toDay, (ExpiredOptionBacktestService.FlowChainRadius * 2 + 1) * 2);
 
-        var members = new List<(string StrikeToken, string OptionType, IReadOnlyList<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> Bars)>();
+        var members = new List<(string StrikeToken, string OptionType, IReadOnlyList<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)> Bars)>();
         var hadError = false;
         var isFirstToken = true;
 
@@ -211,7 +211,7 @@ public sealed class ExpiredOptionDataPrefetchHostedService : BackgroundService
                 var optionType = isCall ? "CALL" : "PUT";
 
                 var (bars, error) = await _rollingOption.GetRollingOptionCandlesAsync(
-                    instrument.SecurityId, expiryFlag, segment.ExpiryCode, token, optionType, fromDay, toDay, 1, cancellationToken);
+                    underlying, instrument.SecurityId, expiryFlag, segment.ExpiryCode, token, optionType, fromDay, toDay, 1, cancellationToken);
 
                 if (error is not null)
                 {

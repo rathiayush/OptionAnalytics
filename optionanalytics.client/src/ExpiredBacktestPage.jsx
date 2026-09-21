@@ -106,12 +106,16 @@ function tradeEntryMarkers(trades) {
 // ticked on; this component just keeps one lightweight-charts line series per key in sync with that
 // array (added when a new key appears, removed when one drops out, setData'd on every change), the
 // same mechanism BacktestPage.jsx's own SpotCandleChart uses.
-function ExpiredSpotChart({ bars, trades, indicatorLines, height = 420, focusTime, syncGroup }) {
+function ExpiredSpotChart({ bars, trades, indicatorLines, height = 420, focusTime, focusSignal, syncGroup }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
   const indicatorSeriesRef = useRef(new Map())
   const markersRef = useRef(null)
+  // The OI-wall price line for whichever row is currently focused - at most one at a time, added/
+  // removed as focusSignal changes rather than ever accumulating one per trade (see this
+  // component's own doc comment on why only the CLICKED row's own basis is shown).
+  const wallPriceLineRef = useRef(null)
   // Separate from the (deliberately unconditional, see the bars effect below) re-fit - sync
   // registration only ever needs to happen once per mount, or a second Run under the same
   // underlying/expiry/timeframe would register this same chart into the sync group twice over.
@@ -157,6 +161,7 @@ function ExpiredSpotChart({ bars, trades, indicatorLines, height = 420, focusTim
       seriesRef.current = null
       indicatorSeriesRef.current = new Map()
       markersRef.current = null
+      wallPriceLineRef.current = null // the series it belonged to is gone along with the chart
     }
     // One chart instance per mount, same reasoning as every other page's own chart - series/marker
     // data is (re)populated by the effects below rather than by recreating the chart.
@@ -214,6 +219,28 @@ function ExpiredSpotChart({ bars, trades, indicatorLines, height = 420, focusTim
     const price = target != null ? lastValueAtOrBeforeChartTime(bars, target, 'close') : null
     highlightChartAtTime(chartRef.current, seriesRef.current, target, price)
   }, [focusTime, bars])
+
+  // The OI-wall level for whichever row is currently focused (see OrbOrderBlockStrategy's own
+  // useOiWallFilter) - ONLY drawn while that one row stays focused, removed the instant focus moves
+  // to a different row or clears, so a run with many trades never accumulates one line per trade.
+  useEffect(() => {
+    if (!seriesRef.current) return
+    if (wallPriceLineRef.current) {
+      seriesRef.current.removePriceLine(wallPriceLineRef.current)
+      wallPriceLineRef.current = null
+    }
+    const strike = focusSignal?.oiWallStrike
+    if (strike == null) return
+    const oi = focusSignal?.oiWallOpenInterest
+    wallPriceLineRef.current = seriesRef.current.createPriceLine({
+      price: strike,
+      color: '#d4a017',
+      lineWidth: 2,
+      lineStyle: 2, // dashed - visually distinct from the solid stop/target lines OptionTradeSimulator itself doesn't draw, so this never gets confused with anything else
+      axisLabelVisible: true,
+      title: oi != null ? `OI wall (${oi.toLocaleString()} OI)` : 'OI wall',
+    })
+  }, [focusSignal])
 
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }
@@ -286,6 +313,13 @@ export default function ExpiredBacktestPage() {
   // scrollChartToTime.
   const [focusTime, setFocusTime] = useState(null)
 
+  // The full clicked signal (OrbOrderBlockStrategy's own OiWallStrike/OiWallOpenInterest/IvNow/
+  // IvPrior diagnostics, when present - see BacktestSignal's own doc comment), set alongside
+  // focusTime by the SAME row click so the spot chart can show "the basis of entry" (an OI-wall
+  // price line, an IV caption) for JUST that one row - never all of them at once, which is exactly
+  // what would make the chart unreadable for a run with many trades.
+  const [focusSignal, setFocusSignal] = useState(null)
+
   // All four charts below (spot, Volume+VWAP, OBV, CDV) pan/zoom together - dragging or zooming any
   // one of them pushes the same window to the rest. See shared.jsx's useChartSyncGroup for why this
   // is scoped to this page's own charts rather than a global registry.
@@ -297,6 +331,13 @@ export default function ExpiredBacktestPage() {
   // Always effectively on for "EMA Crossover + ATM Cross + Flow Confirmation" itself, since that strategy
   // computes them anyway for its own signal logic regardless of this checkbox.
   const [includeObvCdv, setIncludeObvCdv] = useState(false)
+
+  // On by default: reads real historical option data straight from NiftyDataCollector's own
+  // database instead of calling Dhan live - much faster (no live rate-limit pacing) and works for
+  // a fully expired week Dhan's live rolling-option endpoint may no longer resolve cleanly. Turn
+  // it off to fall back to the original live-Dhan-call path (e.g. if the stored data doesn't cover
+  // the window you need yet, or the local database isn't reachable from wherever this is running).
+  const [useStoredData, setUseStoredData] = useState(true)
 
   const strategy = strategies.find((s) => s.key === strategyKey) ?? null
 
@@ -416,6 +457,7 @@ export default function ExpiredBacktestPage() {
       strategy: strategyKey,
       timeframe: String(timeframe),
       includeObvCdv: String(includeObvCdv),
+      useStoredData: String(useStoredData),
     })
     for (const [k, v] of Object.entries(paramValues)) params.set(k, String(v))
 
@@ -698,6 +740,12 @@ export default function ExpiredBacktestPage() {
               ))}
               <Button type="primary" icon={<PlayCircleOutlined />} onClick={run} loading={loading} disabled={!canRun}>Run</Button>
             </Space>
+            <Checkbox checked={useStoredData} onChange={(e) => setUseStoredData(e.target.checked)}>
+              Use stored data{' '}
+              <Tooltip title="On by default: reads real historical option data straight from NiftyDataCollector's own database instead of calling Dhan live - faster, and works for a fully expired week Dhan's live rolling-option endpoint may no longer resolve cleanly. Turn this off to fall back to live Dhan API calls instead (e.g. if the stored data doesn't cover the window you need yet, or you're running this somewhere the local database isn't reachable - that case is handled gracefully with a clear error, not a crash).">
+                <InfoCircleOutlined />
+              </Tooltip>
+            </Checkbox>
             <Checkbox checked={includeObvCdv} onChange={(e) => setIncludeObvCdv(e.target.checked)}>
               Also compute CDV / OBV for this run{' '}
               <Tooltip title="Off by default: reconstructing order-flow (CDV/OBV) across the whole surrounding strike chain needs a much wider option-chain fetch (about 1.6x the calls), so it's opt-in for a strategy other than 'EMA Crossover + ATM Cross + Flow Confirmation' (which always computes it anyway). Tick this to plot the CDV/OBV/Volume charts below and visually check they look right for the strategy you're actually running.">
@@ -797,8 +845,21 @@ export default function ExpiredBacktestPage() {
                         <Text style={{ color: def.color }}>{def.label}</Text>
                       </Checkbox>
                     ))}
+                    {/* The clicked row's own OI-wall/IV basis - ONLY for that one row (see
+                        focusSignal's own doc comment above), never a permanent legend, so the chart
+                        stays uncluttered for every row that isn't currently selected. The OI wall
+                        itself is drawn as a price line directly on the chart below; IV has no
+                        natural "price" to draw a line at, so it's shown here as text instead. */}
+                    {focusSignal?.ivNow != null && (
+                      <div style={{ marginBottom: 4 }}>
+                        <Tag color={focusSignal.ivPrior != null && focusSignal.ivNow > focusSignal.ivPrior * 1.001 ? 'orange' : 'default'}>
+                          IV {focusSignal.ivPrior != null ? `${focusSignal.ivPrior.toFixed(1)} → ` : ''}{focusSignal.ivNow.toFixed(1)}
+                          {focusSignal.ivPrior ? ` (${(((focusSignal.ivNow - focusSignal.ivPrior) / focusSignal.ivPrior) * 100).toFixed(1)}% over ${focusSignal.ivLookbackBars ?? '?'} bar(s))` : ''}
+                        </Tag>
+                      </div>
+                    )}
                     <ChartErrorBoundary key={`${underlying}-${expiryDate}-${timeframe}-${fromDay}-${toDay}`}>
-                      <ExpiredSpotChart bars={chartBars} trades={visibleTrades} indicatorLines={indicatorLines} height={420} focusTime={focusTime} syncGroup={chartSyncGroup} />
+                      <ExpiredSpotChart bars={chartBars} trades={visibleTrades} indicatorLines={indicatorLines} height={420} focusTime={focusTime} focusSignal={focusSignal} syncGroup={chartSyncGroup} />
                     </ChartErrorBoundary>
                   </div>
                 ) : (
@@ -845,7 +906,15 @@ export default function ExpiredBacktestPage() {
                 dataSource={visibleTrades}
                 columns={tradeColumns}
                 pagination={{ pageSize: 50, showSizeChanger: true, pageSizeOptions: [25, 50, 100] }}
-                onRow={(row) => ({ onClick: () => setFocusTime(row.entryTimeUtc ?? row.signalTimeUtc), style: { cursor: 'pointer' } })}
+                onRow={(row) => ({
+                  onClick: () => {
+                    setFocusTime(row.entryTimeUtc ?? row.signalTimeUtc)
+                    // A trade itself carries no OI-wall/IV diagnostics - those live on the Entry
+                    // signal that produced it (same TimeUtc as the trade's own signalTimeUtc).
+                    setFocusSignal(signals.find((s) => s.kind === 'Entry' && s.timeUtc === row.signalTimeUtc) ?? null)
+                  },
+                  style: { cursor: 'pointer' },
+                })}
                 locale={{ emptyText: (fromDay || toDay)
                   ? 'No trades on the selected dates - widen or clear the date filter.'
                   : 'No trades - no entry signals over this window, or click Run to try different settings.' }}
@@ -865,7 +934,7 @@ export default function ExpiredBacktestPage() {
                 dataSource={visibleSignals}
                 columns={signalColumns}
                 pagination={{ pageSize: 50, showSizeChanger: true, pageSizeOptions: [25, 50, 100] }}
-                onRow={(row) => ({ onClick: () => setFocusTime(row.timeUtc), style: { cursor: 'pointer' } })}
+                onRow={(row) => ({ onClick: () => { setFocusTime(row.timeUtc); setFocusSignal(row) }, style: { cursor: 'pointer' } })}
                 locale={{ emptyText: (fromDay || toDay)
                   ? 'No signals on the selected dates - widen or clear the date filter.'
                   : 'No signals over this window.' }}

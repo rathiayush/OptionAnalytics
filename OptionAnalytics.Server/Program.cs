@@ -22,6 +22,7 @@ builder.Services.Configure<TelegramOptions>(builder.Configuration.GetSection(Tel
 builder.Services.Configure<AuthOptions>(builder.Configuration.GetSection(AuthOptions.SectionName));
 builder.Services.Configure<HistoricalDataPrefetchOptions>(builder.Configuration.GetSection(HistoricalDataPrefetchOptions.SectionName));
 builder.Services.Configure<ExpiredOptionDataPrefetchOptions>(builder.Configuration.GetSection(ExpiredOptionDataPrefetchOptions.SectionName));
+builder.Services.Configure<OiReplayOptions>(builder.Configuration.GetSection(OiReplayOptions.SectionName));
 builder.Services.AddHttpClient<TelegramAlertService>();
 
 builder.Services.AddSingleton<AuthService>();
@@ -103,6 +104,18 @@ builder.Services.AddSingleton<DhanSpotInstrumentMaster>(sp => new DhanSpotInstru
 builder.Services.AddHttpClient<DhanTotpAuthService>();
 builder.Services.AddSingleton<DhanHistoricalDataService>();
 builder.Services.AddSingleton<DhanRollingOptionDataService>();
+// Reads NiftyDataCollector's own TimescaleDB instead of calling Dhan live - inert (never even
+// tries to connect) when ConnectionStrings:NiftyDataCollectorTimescale is blank, which it always
+// is in production (see docker-compose.yml, which deliberately does not set it) - see
+// StoredRollingOptionDataService's own doc comment.
+builder.Services.AddSingleton<StoredRollingOptionDataService>();
+// Same idea, for spot instead of the option premium side - see StoredSpotDataService's own doc
+// comment for why this needed adding separately (useStoredData previously never reached spot at
+// all).
+builder.Services.AddSingleton<StoredSpotDataService>();
+// Backs the OI Replay page - entirely stored-data-only, no Dhan client injected at all (see its
+// own doc comment).
+builder.Services.AddSingleton<OiReplayService>();
 builder.Services.AddSingleton<DhanMarketFeedClient>();
 // AddHttpClient<DhanOptionChainMaster>() (the pattern every other typed client here uses) registers
 // it TRANSIENT - a brand new instance, with its own empty in-memory dictionary, for every distinct

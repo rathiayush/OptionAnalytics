@@ -11,8 +11,8 @@ namespace OptionAnalytics.Server.Tests;
 /// either interpretation of Dhan's behavior).</summary>
 public sealed class DhanRollingOptionDataServiceTests
 {
-    private static (CandleWithVolume Bar, decimal? Strike, decimal? Spot) Bar(DateTimeOffset time) =>
-        (new CandleWithVolume(time, 10m, 11m, 9m, 10m, 0), 100m, 100m);
+    private static (CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility) Bar(DateTimeOffset time) =>
+        (new CandleWithVolume(time, 10m, 11m, 9m, 10m, 0), 100m, 100m, null, null);
 
     private static DateTimeOffset At(int year, int month, int day, int hour = 9, int minute = 15) =>
         new(year, month, day, hour, minute, 0, TimeSpan.FromHours(5.5));
@@ -22,7 +22,7 @@ public sealed class DhanRollingOptionDataServiceTests
     {
         // The exact real-world case this was added for: a rolling-option response came back with
         // an extra bar dated one day past the caller's own requested end date.
-        var bars = new List<(CandleWithVolume, decimal?, decimal?)> { Bar(At(2026, 8, 25)), Bar(At(2026, 8, 26)) };
+        var bars = new List<(CandleWithVolume, decimal?, decimal?, long?, decimal?)> { Bar(At(2026, 8, 25)), Bar(At(2026, 8, 26)) };
 
         var clipped = DhanRollingOptionDataService.ClipToRange(bars, new DateOnly(2026, 8, 1), new DateOnly(2026, 8, 25));
 
@@ -33,7 +33,7 @@ public sealed class DhanRollingOptionDataServiceTests
     [Fact]
     public void DropsABarFromBeforeFromDay()
     {
-        var bars = new List<(CandleWithVolume, decimal?, decimal?)> { Bar(At(2026, 7, 31)), Bar(At(2026, 8, 1)) };
+        var bars = new List<(CandleWithVolume, decimal?, decimal?, long?, decimal?)> { Bar(At(2026, 7, 31)), Bar(At(2026, 8, 1)) };
 
         var clipped = DhanRollingOptionDataService.ClipToRange(bars, new DateOnly(2026, 8, 1), new DateOnly(2026, 8, 25));
 
@@ -44,7 +44,7 @@ public sealed class DhanRollingOptionDataServiceTests
     [Fact]
     public void KeepsEveryBarStrictlyInsideTheRangeUntouched()
     {
-        var bars = new List<(CandleWithVolume, decimal?, decimal?)>
+        var bars = new List<(CandleWithVolume, decimal?, decimal?, long?, decimal?)>
         {
             Bar(At(2026, 8, 1)), Bar(At(2026, 8, 15)), Bar(At(2026, 8, 25)),
         };
@@ -57,7 +57,7 @@ public sealed class DhanRollingOptionDataServiceTests
     [Fact]
     public void EmptyInput_ReturnsEmpty()
     {
-        var clipped = DhanRollingOptionDataService.ClipToRange(new List<(CandleWithVolume, decimal?, decimal?)>(), new DateOnly(2026, 8, 1), new DateOnly(2026, 8, 25));
+        var clipped = DhanRollingOptionDataService.ClipToRange(new List<(CandleWithVolume, decimal?, decimal?, long?, decimal?)>(), new DateOnly(2026, 8, 1), new DateOnly(2026, 8, 25));
 
         Assert.Empty(clipped);
     }

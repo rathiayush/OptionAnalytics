@@ -90,14 +90,20 @@ public sealed class ExpiredOptionDataStore
     /// [fromDay,toDay] (IST calendar dates, both inclusive) - the same clipping
     /// DhanRollingOptionDataService.ClipToRange applies to a live fetch, so a cache hit behaves
     /// identically to the live call it replaces. Callers should check HasContract first; this
-    /// returns empty if the file itself is missing.</summary>
-    public IReadOnlyList<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> Read(
+    /// returns empty if the file itself is missing.
+    ///
+    /// Accepts EITHER the current 11-column row shape (with OpenInterest/ImpliedVolatility) or the
+    /// original 9-column one written before those were added - a file cached by an older build of
+    /// this app must not silently look "empty" (and force every historical run back onto a live
+    /// Dhan call) just because two columns were appended to the format; a 9-column row simply
+    /// yields null OI/IV, same as a live bar whose own response omitted them.</summary>
+    public IReadOnlyList<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)> Read(
         string underlying, string expiryFlag, DateOnly expiryDate, string strikeToken, string optionType, DateOnly fromDay, DateOnly toDay)
     {
         var path = CsvPath(underlying, expiryFlag, expiryDate);
-        if (!File.Exists(path)) return Array.Empty<(CandleWithVolume, decimal?, decimal?)>();
+        if (!File.Exists(path)) return Array.Empty<(CandleWithVolume, decimal?, decimal?, long?, decimal?)>();
 
-        var result = new List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)>();
+        var result = new List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)>();
         using var reader = new StreamReader(path);
         reader.ReadLine(); // header
 
@@ -106,7 +112,7 @@ public sealed class ExpiredOptionDataStore
         {
             if (line.Length == 0) continue;
             var parts = line.Split(',');
-            if (parts.Length != 9) continue;
+            if (parts.Length != 9 && parts.Length != 11) continue;
             if (!string.Equals(parts[0], strikeToken, StringComparison.OrdinalIgnoreCase)) continue;
             if (!string.Equals(parts[1], optionType, StringComparison.OrdinalIgnoreCase)) continue;
 
@@ -124,9 +130,11 @@ public sealed class ExpiredOptionDataStore
                 decimal.Parse(parts[6], CultureInfo.InvariantCulture),
                 long.Parse(parts[7], CultureInfo.InvariantCulture));
             var strike = parts[8].Length > 0 ? decimal.Parse(parts[8], CultureInfo.InvariantCulture) : (decimal?)null;
+            var openInterest = parts.Length == 11 && parts[9].Length > 0 ? long.Parse(parts[9], CultureInfo.InvariantCulture) : (long?)null;
+            var impliedVolatility = parts.Length == 11 && parts[10].Length > 0 ? decimal.Parse(parts[10], CultureInfo.InvariantCulture) : (decimal?)null;
             // Spot is intentionally not persisted (see SaveAsync's own doc comment) - callers that
             // need it fall back to null exactly like a live bar whose own response omitted it does.
-            result.Add((bar, strike, null));
+            result.Add((bar, strike, null, openInterest, impliedVolatility));
         }
 
         return result;
@@ -146,7 +154,7 @@ public sealed class ExpiredOptionDataStore
     /// out.</summary>
     public async Task SaveAsync(
         string underlying, string expiryFlag, DateOnly expiryDate, DateOnly fromDay, DateOnly toDay,
-        IReadOnlyList<(string StrikeToken, string OptionType, IReadOnlyList<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> Bars)> members,
+        IReadOnlyList<(string StrikeToken, string OptionType, IReadOnlyList<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)> Bars)> members,
         CancellationToken cancellationToken)
     {
         var csvPath = CsvPath(underlying, expiryFlag, expiryDate);
@@ -154,10 +162,10 @@ public sealed class ExpiredOptionDataStore
 
         await using (var writer = new StreamWriter(tempPath, append: false))
         {
-            await writer.WriteLineAsync("StrikeToken,OptionType,TimeUtc,Open,High,Low,Close,Volume,Strike");
+            await writer.WriteLineAsync("StrikeToken,OptionType,TimeUtc,Open,High,Low,Close,Volume,Strike,OpenInterest,ImpliedVolatility");
             foreach (var member in members)
             {
-                foreach (var (bar, strike, _) in member.Bars)
+                foreach (var (bar, strike, _, openInterest, impliedVolatility) in member.Bars)
                 {
                     await writer.WriteLineAsync(string.Join(',',
                         member.StrikeToken,
@@ -168,7 +176,9 @@ public sealed class ExpiredOptionDataStore
                         bar.Low.ToString(CultureInfo.InvariantCulture),
                         bar.Close.ToString(CultureInfo.InvariantCulture),
                         bar.Volume.ToString(CultureInfo.InvariantCulture),
-                        strike?.ToString(CultureInfo.InvariantCulture) ?? ""));
+                        strike?.ToString(CultureInfo.InvariantCulture) ?? "",
+                        openInterest?.ToString(CultureInfo.InvariantCulture) ?? "",
+                        impliedVolatility?.ToString(CultureInfo.InvariantCulture) ?? ""));
                 }
             }
         }

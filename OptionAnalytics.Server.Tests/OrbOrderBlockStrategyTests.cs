@@ -22,7 +22,9 @@ public sealed class OrbOrderBlockStrategyTests
     private static List<Candle> OpeningRange(int minutes = 15, decimal level = 100) =>
         Enumerable.Range(0, minutes).Select(i => Bar(i, level, level, level, level)).ToList();
 
-    private static BacktestStrategyContext Context(IReadOnlyList<Candle> bars, Func<decimal, bool, IReadOnlyList<Candle>>? getOptionBarsOneMinute = null) => new()
+    private static BacktestStrategyContext Context(
+        IReadOnlyList<Candle> bars, Func<decimal, bool, IReadOnlyList<Candle>>? getOptionBarsOneMinute = null,
+        IReadOnlyList<OiIvPoint>? ceOiIvBand = null, IReadOnlyList<OiIvPoint>? peOiIvBand = null) => new()
     {
         Underlying = "NIFTY",
         TimeframeMinutes = 1,
@@ -43,6 +45,8 @@ public sealed class OrbOrderBlockStrategyTests
         AtmCeVolumeBars = Array.Empty<CandleWithVolume>(),
         AtmPeVolumeBars = Array.Empty<CandleWithVolume>(),
         AtmStrike = null,
+        CeOiIvBand = ceOiIvBand ?? Array.Empty<OiIvPoint>(),
+        PeOiIvBand = peOiIvBand ?? Array.Empty<OiIvPoint>(),
     };
 
     private static Dictionary<string, decimal> Parameters(Action<Dictionary<string, decimal>>? overrides = null)
@@ -195,5 +199,138 @@ public sealed class OrbOrderBlockStrategyTests
         var trade = Assert.Single(trades);
         Assert.Equal("OrderBlockTarget", trade.ExitReason);
         Assert.Equal(T0.AddMinutes(20), trade.ExitTimeUtc); // bar 19's own close time (bar.Time + 1 minute)
+    }
+
+    // BullishSetup's own entry fires at bar 18 (T0+18min), entry price (bar.Close) 102, target 123 -
+    // see BullishEntry_FiresOnTheRetraceIntoTheOrderBlock's own asserted values above.
+
+    [Fact]
+    public void OiWallFilter_Off_IgnoresAWallEvenWhenOneWouldOtherwiseBlock()
+    {
+        var band = new[] { new OiIvPoint(T0.AddMinutes(18), 115m, 500_000, null) };
+        var context = Context(BullishSetup(), ceOiIvBand: band);
+
+        var signals = new OrbOrderBlockStrategy().EntrySignals(context, Parameters()); // useOiWallFilter defaults to 0
+
+        var signal = Assert.Single(signals);
+        Assert.Equal("Entry", signal.Kind);
+    }
+
+    [Fact]
+    public void OiWallFilter_On_BlocksWhenTheHeaviestCallOiStrikeSitsBetweenEntryAndTarget()
+    {
+        // Entry 102, target 123 - a Call-OI wall at 115 sits squarely in between.
+        var band = new[]
+        {
+            new OiIvPoint(T0.AddMinutes(18), 115m, 500_000, null), // the wall
+            new OiIvPoint(T0.AddMinutes(18), 150m, 10_000, null),  // far OTM, much lower OI - not the wall
+        };
+        var context = Context(BullishSetup(), ceOiIvBand: band);
+
+        var signals = new OrbOrderBlockStrategy().EntrySignals(context, Parameters(p => p["useOiWallFilter"] = 1));
+
+        var signal = Assert.Single(signals);
+        Assert.Equal("Rejected", signal.Kind);
+        Assert.Contains("OI wall at 115", signal.Summary);
+        Assert.Equal(115m, signal.OiWallStrike);
+        Assert.Equal(500_000, signal.OiWallOpenInterest);
+    }
+
+    [Fact]
+    public void OiWallFilter_On_AllowsEntry_WhenTheWallIsBehindPriceNotAheadOfIt()
+    {
+        // A heavy-OI strike at 90 sits BELOW the entry price (102) - irrelevant to an upside target.
+        var band = new[] { new OiIvPoint(T0.AddMinutes(18), 90m, 500_000, null) };
+        var context = Context(BullishSetup(), ceOiIvBand: band);
+
+        var signals = new OrbOrderBlockStrategy().EntrySignals(context, Parameters(p => p["useOiWallFilter"] = 1));
+
+        var signal = Assert.Single(signals);
+        Assert.Equal("Entry", signal.Kind);
+        // The filter's own diagnostics are still attached to the accepted entry - what the frontend
+        // needs to show "the basis of entry" (here: the nearest wall it saw, even though it didn't
+        // block) when this signal/trade row is clicked.
+        Assert.Equal(90m, signal.OiWallStrike);
+        Assert.Equal(500_000, signal.OiWallOpenInterest);
+    }
+
+    [Fact]
+    public void OiWallFilter_On_AllowsEntry_WhenTheWallSitsWellBeyondTheTargetWithBuffer()
+    {
+        // Target is 123 (+10 default buffer = 133) - a wall at 200 is nowhere near it.
+        var band = new[] { new OiIvPoint(T0.AddMinutes(18), 200m, 500_000, null) };
+        var context = Context(BullishSetup(), ceOiIvBand: band);
+
+        var signals = new OrbOrderBlockStrategy().EntrySignals(context, Parameters(p => p["useOiWallFilter"] = 1));
+
+        var signal = Assert.Single(signals);
+        Assert.Equal("Entry", signal.Kind);
+        Assert.Equal(200m, signal.OiWallStrike);
+    }
+
+    [Fact]
+    public void OiWallFilter_On_AllowsEntry_WhenNoOiDataIsAvailableAtAll()
+    {
+        // Empty band (e.g. live Backtrack, which has no historical OI source at all) must fail OPEN,
+        // never silently block every trade just because this filter's own data isn't there.
+        var context = Context(BullishSetup()); // no ceOiIvBand/peOiIvBand supplied - empty
+
+        var signals = new OrbOrderBlockStrategy().EntrySignals(context, Parameters(p => p["useOiWallFilter"] = 1));
+
+        var signal = Assert.Single(signals);
+        Assert.Equal("Entry", signal.Kind);
+        Assert.Null(signal.OiWallStrike); // nothing to show - no data, not a false zero
+    }
+
+    [Fact]
+    public void IvSpikeFilter_On_BlocksWhenNearTheMoneyIvJumpsPastTheThreshold()
+    {
+        // IV 15 -> 25 over 5 bars is a 66.7% rise, comfortably past the default 20% threshold.
+        var band = new[]
+        {
+            new OiIvPoint(T0.AddMinutes(10), 100m, null, 15m),
+            new OiIvPoint(T0.AddMinutes(18), 100m, null, 25m),
+        };
+        var context = Context(BullishSetup(), ceOiIvBand: band);
+
+        var signals = new OrbOrderBlockStrategy().EntrySignals(context, Parameters(p => p["useIvSpikeFilter"] = 1));
+
+        var signal = Assert.Single(signals);
+        Assert.Equal("Rejected", signal.Kind);
+        Assert.Contains("IV spiked", signal.Summary);
+        Assert.Equal(25m, signal.IvNow);
+        Assert.Equal(15m, signal.IvPrior);
+        Assert.Equal(5, signal.IvLookbackBars);
+    }
+
+    [Fact]
+    public void IvSpikeFilter_On_AllowsEntry_WhenIvIsFlat()
+    {
+        var band = new[]
+        {
+            new OiIvPoint(T0.AddMinutes(10), 100m, null, 15m),
+            new OiIvPoint(T0.AddMinutes(18), 100m, null, 15.5m), // well under the 20% threshold
+        };
+        var context = Context(BullishSetup(), ceOiIvBand: band);
+
+        var signals = new OrbOrderBlockStrategy().EntrySignals(context, Parameters(p => p["useIvSpikeFilter"] = 1));
+
+        var signal = Assert.Single(signals);
+        Assert.Equal("Entry", signal.Kind);
+        // Diagnostics attached even though the check was clear - the frontend's "basis of entry"
+        // view for an accepted trade.
+        Assert.Equal(15.5m, signal.IvNow);
+        Assert.Equal(15m, signal.IvPrior);
+    }
+
+    [Fact]
+    public void IvSpikeFilter_On_AllowsEntry_WhenNoIvDataIsAvailableAtAll()
+    {
+        var context = Context(BullishSetup()); // empty band - fails open, same as the OI wall filter
+
+        var signals = new OrbOrderBlockStrategy().EntrySignals(context, Parameters(p => p["useIvSpikeFilter"] = 1));
+
+        var signal = Assert.Single(signals);
+        Assert.Equal("Entry", signal.Kind);
     }
 }

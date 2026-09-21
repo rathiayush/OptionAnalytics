@@ -53,6 +53,14 @@ services:
       # minutes the first time it is turned on.
       ExpiredOptionDataPrefetch__Enabled: ${EXPIRED_OPTION_DATA_PREFETCH_ENABLED:-false}
 
+      # ConnectionStrings__NiftyDataCollectorTimescale is DELIBERATELY NOT SET HERE. It lets the
+      # Expired Backtest page's "Use stored data" toggle read real historical option data straight
+      # from NiftyDataCollector's own local-only TimescaleDB (see StoredRollingOptionDataService's
+      # own doc comment) - that database is a separate, local-machine-only project this server has
+      # no business reaching in a real deployment. With it unset, that data source is simply
+      # reported as "not configured" per request (a normal, handled result, never a crash), and the
+      # toggle's own UI lets a user switch to live Dhan calls instead. Do not add this var here.
+
       # Login - the whole app requires one of these two accounts (see AuthOptions/AuthController).
       # Credentials are fixed in appsettings.json (not read from the environment) - only the emails
       # are overridable here. Deliberately NOT setting Auth__AdminPassword/Auth__UserPassword here:

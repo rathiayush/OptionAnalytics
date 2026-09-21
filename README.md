@@ -84,6 +84,34 @@ export CandleStorage__ConnectionString="Host=localhost;Port=5432;Database=option
 `candles` hypertable and its indexes are created automatically on first use - no separate
 migration step.
 
+## Expired Backtest: reading NiftyDataCollector's stored data (optional)
+
+The Expired Backtest page's "Use stored data" checkbox (on by default) reads real historical
+option data (OI, IV, OHLC) straight from the separate `NiftyDataCollector` project's own
+TimescaleDB, instead of calling Dhan's live rolling-option API for every request - see
+`StoredRollingOptionDataService`'s own doc comment. This is a completely different database from
+"Candle storage" above - NiftyDataCollector runs and manages its own schema independently (see
+`NiftyDataCollector/README.md`).
+
+To use it locally, set `ConnectionStrings:NiftyDataCollectorTimescale` to the SAME connection
+string your running `NiftyDataCollector` instance uses, e.g. in `appsettings.Local.json`:
+
+```json
+{
+  "ConnectionStrings": {
+    "NiftyDataCollectorTimescale": "Host=localhost;Port=5432;Database=niftydata;Username=postgres;Password=yourpassword"
+  }
+}
+```
+
+**Deliberately left unset in production** (see `docker-compose.yml`'s own comment on this) -
+NiftyDataCollector is a local-only project this server has no business reaching in a real
+deployment. Leaving it unset (the default everywhere except your own local
+`appsettings.Local.json`) is completely safe: `StoredRollingOptionDataService` never attempts a
+connection when it isn't configured, and simply returns a clean "not configured" result for that
+one request rather than throwing - untick "Use stored data" on the page to fall back to the
+original live-Dhan-call path, which works everywhere regardless of this setting.
+
 ## Running locally
 
 Backend (from `OptionAnalytics.Server/`):

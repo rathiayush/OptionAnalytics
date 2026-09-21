@@ -35,6 +35,21 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 ///
 /// BUYING, not selling - a retracement entry into a confirmed order block is a continuation trade
 /// with the break, buying the leg that benefits.
+///
+/// TWO OPTIONAL FILTERS, both off by default, both EXPIRED-BACKTEST-ONLY (see
+/// BacktestStrategyContext.CeOiIvBand/PeOiIvBand's own doc comment: live Backtrack has no
+/// historical OI/IV source, so these silently no-op there rather than reject every trade):
+///   - useOiWallFilter: at the moment of entry, finds the strike carrying the heaviest OI on the
+///     side that would act as resistance/support against this trade (Call OI above spot for a
+///     bullish trade, Put OI below spot for a bearish one - the standard "OI wall" read: writers
+///     concentrated at a strike tend to defend it). Rejects the entry if that wall sits between the
+///     entry price and the target (within oiWallBufferPoints of it), on the theory that a real OI
+///     concentration is more likely to cap the move before target than a fresh order-block breakout
+///     is to blow through it.
+///   - useIvSpikeFilter: rejects an entry if the traded side's own IV (read from the band member
+///     nearest ATM) has jumped more than ivSpikeThresholdPercent over the last ivSpikeLookbackBars -
+///     a hard IV spike right at the signal more often means a news-driven, whippy move than a clean
+///     trending breakout.
 /// </summary>
 public sealed class OrbOrderBlockStrategy : IBacktestStrategy
 {
@@ -66,6 +81,19 @@ public sealed class OrbOrderBlockStrategy : IBacktestStrategy
         new BacktestParameterSpec("retraceLookaheadBars", "Give up waiting for the retrace after (1-min bars)", Default: 30, Min: 1, Max: 120, Step: 1),
         new BacktestParameterSpec("stopBufferPoints", "Stop placed this far beyond the order block's far side (points)", Default: 2, Min: 0, Max: 200, Step: 1),
         new BacktestParameterSpec("riskRewardMultiple", "Target = this many times the stop distance", Default: 3, Min: 1, Max: 10, Step: 0.5m),
+        new BacktestParameterSpec("useOiWallFilter", "Reject entries where an OI wall sits between price and target (Expired Backtest only)", Default: 0, Min: 0, Max: 1, Step: 1, Options: new[]
+        {
+            new BacktestParameterOption(0, "Off"),
+            new BacktestParameterOption(1, "On"),
+        }),
+        new BacktestParameterSpec("oiWallBufferPoints", "Clearance beyond an OI wall required before it's considered blocking (points)", Default: 10, Min: 0, Max: 200, Step: 1),
+        new BacktestParameterSpec("useIvSpikeFilter", "Reject entries where the traded side's IV just spiked (Expired Backtest only)", Default: 0, Min: 0, Max: 1, Step: 1, Options: new[]
+        {
+            new BacktestParameterOption(0, "Off"),
+            new BacktestParameterOption(1, "On"),
+        }),
+        new BacktestParameterSpec("ivSpikeLookbackBars", "Compare IV against this many 1-min bars ago", Default: 5, Min: 1, Max: 60, Step: 1),
+        new BacktestParameterSpec("ivSpikeThresholdPercent", "IV rise over the lookback that counts as a spike (%)", Default: 20, Min: 1, Max: 200, Step: 1),
     };
 
     public IReadOnlyList<BacktestTrade> Simulate(BacktestStrategyContext context, IReadOnlyDictionary<string, decimal> parameters)
@@ -92,6 +120,11 @@ public sealed class OrbOrderBlockStrategy : IBacktestStrategy
         var retraceLookaheadBars = Math.Max(1, (int)parameters["retraceLookaheadBars"]);
         var stopBufferPoints = parameters["stopBufferPoints"];
         var riskRewardMultiple = parameters["riskRewardMultiple"];
+        var useOiWallFilter = parameters.GetValueOrDefault("useOiWallFilter", 0m) >= 0.5m;
+        var oiWallBufferPoints = parameters.GetValueOrDefault("oiWallBufferPoints", 10m);
+        var useIvSpikeFilter = parameters.GetValueOrDefault("useIvSpikeFilter", 0m) >= 0.5m;
+        var ivSpikeLookbackBars = Math.Max(1, (int)parameters.GetValueOrDefault("ivSpikeLookbackBars", 5m));
+        var ivSpikeThresholdPercent = parameters.GetValueOrDefault("ivSpikeThresholdPercent", 20m);
 
         var entries = new List<(DateTimeOffset, string)>();
         var signals = new List<BacktestSignal>();
@@ -111,9 +144,37 @@ public sealed class OrbOrderBlockStrategy : IBacktestStrategy
                 signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", dir, $"{detail} - skipped, bullish only"));
             else if (!bearish && !takeLongs)
                 signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", dir, $"{detail} - skipped, bearish only"));
+            else if (useOiWallFilter && target is { } targetForWall && OiWallBlocksEntry(context, bar.Time, bearish, bar.Close, targetForWall, oiWallBufferPoints, out var wallReason, out var blockingWall))
+                signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", dir, $"{detail} - skipped, {wallReason}")
+                {
+                    OiWallStrike = blockingWall?.Strike,
+                    OiWallOpenInterest = blockingWall?.OpenInterest,
+                });
+            else if (useIvSpikeFilter && IvSpikeBlocksEntry(context, bar.Time, bearish, bar.Close, ivSpikeLookbackBars, ivSpikeThresholdPercent, out var ivReason, out var blockingIvNow, out var blockingIvPrior))
+                signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", dir, $"{detail} - skipped, {ivReason}")
+                {
+                    IvNow = blockingIvNow,
+                    IvPrior = blockingIvPrior,
+                    IvLookbackBars = ivSpikeLookbackBars,
+                });
             else
             {
-                signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Entry", dir, detail));
+                // Diagnostics attached whenever the corresponding filter is ON, whether or not it
+                // actually found anything to flag - this is what lets the frontend show "the basis
+                // of entry" (what the OI-wall/IV check saw, even when it was clear) on a click,
+                // not just what blocked a rejected signal.
+                var acceptedWall = useOiWallFilter ? StrikeWithMaxOiAtOrBefore(bearish ? context.PeOiIvBand : context.CeOiIvBand, bar.Time) : null;
+                var acceptedIvNow = useIvSpikeFilter ? NearestStrikeAtOrBefore(bearish ? context.PeOiIvBand : context.CeOiIvBand, bar.Time, bar.Close)?.ImpliedVolatility : null;
+                var acceptedIvPrior = useIvSpikeFilter ? NearestStrikeAtOrBefore(bearish ? context.PeOiIvBand : context.CeOiIvBand, bar.Time.AddMinutes(-ivSpikeLookbackBars), bar.Close)?.ImpliedVolatility : null;
+
+                signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Entry", dir, detail)
+                {
+                    OiWallStrike = acceptedWall?.Strike,
+                    OiWallOpenInterest = acceptedWall?.OpenInterest,
+                    IvNow = acceptedIvNow,
+                    IvPrior = acceptedIvPrior,
+                    IvLookbackBars = useIvSpikeFilter ? ivSpikeLookbackBars : null,
+                });
                 entries.Add((bar.Time, dir));
 
                 if (stop is { } s && target is { } t && entryIndex is { } ei && dayEndIndexExclusive is { } dayEnd)
@@ -225,5 +286,110 @@ public sealed class OrbOrderBlockStrategy : IBacktestStrategy
             if (targetHit) return (bar.Time, "OrderBlockTarget");
         }
         return null;
+    }
+
+    /// <summary>True when a real OI concentration sits between the entry price and the target, on
+    /// the side that would act as resistance (bullish trade - looks at CeOiIvBand, the highest Call
+    /// OI strike) or support (bearish trade - PeOiIvBand, highest Put OI). Fails OPEN (returns
+    /// false, never blocks) whenever OI data simply is not there - an empty band (live Backtrack),
+    /// no snapshot at-or-before asOf yet, or no band member reporting both a resolved strike and OI
+    /// at that snapshot - since this filter's entire premise (a real OI wall) cannot be evaluated
+    /// without it, and a strategy parameter should never silently reject every trade just because
+    /// the data source it depends on happens to be unavailable.</summary>
+    private static bool OiWallBlocksEntry(
+        BacktestStrategyContext context, DateTimeOffset asOf, bool bearish, decimal entryPrice, decimal target, decimal wallBufferPoints,
+        out string reason, out OiIvPoint? wall)
+    {
+        reason = "";
+        var band = bearish ? context.PeOiIvBand : context.CeOiIvBand;
+
+        wall = StrikeWithMaxOiAtOrBefore(band, asOf);
+        if (wall is not { Strike: { } wallStrike, OpenInterest: { } wallOi }) return false;
+
+        // Only a wall AHEAD of the trade (above entry for a bullish trade, below for a bearish one)
+        // can cap it - a wall already behind price is irrelevant to where this trade is headed.
+        var wallIsAhead = bearish ? wallStrike < entryPrice : wallStrike > entryPrice;
+        if (!wallIsAhead) return false;
+
+        // Blocking means the wall (plus its own buffer) sits ON THE WAY to target - i.e. target
+        // reaches into or past it - not merely that a wall exists somewhere beyond target.
+        var targetReachesWall = bearish ? wallStrike >= target - wallBufferPoints : wallStrike <= target + wallBufferPoints;
+        if (!targetReachesWall) return false;
+
+        reason = $"OI wall at {wallStrike:0.##} ({wallOi:N0} OI) sits in the way of the {(bearish ? "downside" : "upside")} target {target:0.##}";
+        return true;
+    }
+
+    /// <summary>True when the near-the-money strike's own IV has risen by at least
+    /// thresholdPercent over the last lookbackBars 1-min bars. Fails open (returns false) exactly
+    /// like OiWallBlocksEntry whenever IV data is not there to compare - no band, no snapshot at
+    /// either point in time, or a zero/missing prior IV that would make a percentage change
+    /// meaningless.</summary>
+    private static bool IvSpikeBlocksEntry(
+        BacktestStrategyContext context, DateTimeOffset asOf, bool bearish, decimal referencePrice, int lookbackBars, decimal thresholdPercent,
+        out string reason, out decimal? currentIvOut, out decimal? priorIvOut)
+    {
+        reason = "";
+        currentIvOut = null;
+        priorIvOut = null;
+        var band = bearish ? context.PeOiIvBand : context.CeOiIvBand;
+
+        var current = NearestStrikeAtOrBefore(band, asOf, referencePrice);
+        if (current?.ImpliedVolatility is not { } currentIv) return false;
+        currentIvOut = currentIv;
+
+        var prior = NearestStrikeAtOrBefore(band, asOf.AddMinutes(-lookbackBars), referencePrice);
+        if (prior?.ImpliedVolatility is not { } priorIv || priorIv <= 0) return false;
+        priorIvOut = priorIv;
+
+        var changePercent = (currentIv - priorIv) / priorIv * 100m;
+        if (changePercent < thresholdPercent) return false;
+
+        reason = $"IV spiked {changePercent:0.#}% over the last {lookbackBars} bar(s) ({priorIv:0.##} -> {currentIv:0.##})";
+        return true;
+    }
+
+    /// <summary>The band point with the highest OpenInterest among every strike reported at the
+    /// LATEST snapshot time at-or-before asOf - every band member is fetched at the same 1-minute
+    /// resolution, so distinct strikes share the same timestamps, making "the latest shared
+    /// timestamp not after asOf" a well-defined single snapshot to compare across strikes. Points
+    /// missing a resolved Strike or OpenInterest are excluded from consideration entirely (can't
+    /// meaningfully call one of them "the wall"), which also means a genuinely empty/unavailable
+    /// band correctly returns null rather than a spurious match.</summary>
+    private static OiIvPoint? StrikeWithMaxOiAtOrBefore(IReadOnlyList<OiIvPoint> band, DateTimeOffset asOf)
+    {
+        DateTimeOffset? snapshotTime = null;
+        foreach (var p in band)
+            if (p.Time <= asOf && (snapshotTime is null || p.Time > snapshotTime))
+                snapshotTime = p.Time;
+        if (snapshotTime is null) return null;
+
+        OiIvPoint? best = null;
+        foreach (var p in band)
+            if (p.Time == snapshotTime && p.Strike is not null && p.OpenInterest is not null
+                && (best is null || p.OpenInterest > best.Value.OpenInterest))
+                best = p;
+        return best;
+    }
+
+    /// <summary>The band point at the LATEST snapshot time at-or-before asOf whose own resolved
+    /// strike sits closest to referencePrice - a proxy for "the near-the-money strike's own IV at
+    /// this moment" when the exact traded strike isn't known at this point in the evaluation (that
+    /// only gets resolved later, per-trade, by OptionTradeSimulator). Same exclusion/empty-band
+    /// behavior as StrikeWithMaxOiAtOrBefore.</summary>
+    private static OiIvPoint? NearestStrikeAtOrBefore(IReadOnlyList<OiIvPoint> band, DateTimeOffset asOf, decimal referencePrice)
+    {
+        DateTimeOffset? snapshotTime = null;
+        foreach (var p in band)
+            if (p.Time <= asOf && (snapshotTime is null || p.Time > snapshotTime))
+                snapshotTime = p.Time;
+        if (snapshotTime is null) return null;
+
+        OiIvPoint? nearest = null;
+        foreach (var p in band)
+            if (p.Time == snapshotTime && p.Strike is not null
+                && (nearest is null || Math.Abs(p.Strike.Value - referencePrice) < Math.Abs(nearest.Value.Strike!.Value - referencePrice)))
+                nearest = p;
+        return nearest;
     }
 }

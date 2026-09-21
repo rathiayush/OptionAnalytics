@@ -23,6 +23,15 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 /// recent low by sweepBufferPoints and then CLOSES back above it (a liquidity grab that reverses) -
 /// the mirror for a downtrend day.
 ///
+/// THE CHANNEL SPANS MULTIPLE DAYS, not just the current session: a real trading day only has
+/// ~6-7 hourly bars, nowhere near enough to hold a genuine "recent 20-hour swing channel" on its
+/// own. An earlier version reset this channel (and any pending sweep/FVG) at every calendar-day
+/// boundary, which made it produce ZERO signals at any parameter setting (the
+/// sweepLookbackBars>20-bars-that-day gate could never be reached). BIAS, unlike the channel,
+/// genuinely IS a per-day quantity - it is still resolved fresh for each bar's own calendar day
+/// (see BiasFor), just no longer tied to resetting the channel/pending state alongside it. Only the
+/// eventual TRADE stays intraday-only, per this app's own trade model.
+///
 /// THE FVG: once a sweep confirms, searches forward (bounded by fvgLookaheadBars, never past the
 /// same session) for the standard 3-candle fair-value gap - bars[j-1].High below bars[j+1].Low for a
 /// bullish gap (the mirror for bearish) - the imbalance the impulsive reversal leg leaves behind.
@@ -135,23 +144,25 @@ public sealed class DailyBiasSweepFvgStrategy : IBacktestStrategy
             }
         }
 
-        // hourIndexByDay groups hourlyBars' own indices by IST calendar day, so the sweep/FVG/retrace
-        // state machine below never reaches across a session boundary - every trade here is intraday.
-        var hourStart = 0;
-        while (hourStart < hourlyBars.Count)
+        // The sweep channel and any pending sweep/FVG state now span the WHOLE run's hourly
+        // history, not just the current calendar day - a real trading day only has ~6-7 hourly
+        // bars, nowhere near enough to hold a genuine "recent 20-hour swing channel" on its own.
+        // This used to run once PER CALENDAR DAY (resetting the channel/pending state at every
+        // boundary), which made the sweepLookbackBars>20-bars-that-day gate structurally
+        // unreachable within one day - RunSession was never even called, at any parameter setting,
+        // which is why this produced zero signals regardless of everything else configured.
+        //
+        // Bias, unlike the channel, genuinely IS a per-day quantity (see BiasFor's own doc comment)
+        // - RunSession now resolves it PER BAR from dailyBars (passed in directly) rather than once
+        // for a whole session, so a fresh sweep is only started on a bar whose OWN day currently has
+        // that bias, even though the channel/pending state itself is no longer day-scoped. Only the
+        // eventual TRADE stays intraday-only, per this app's own trade model (LocateInOneMinuteBars/
+        // FindSpotExit already scope the fill/exit search to the retrace bar's own calendar day,
+        // unaffected by this change).
+        if (hourlyBars.Count > sweepLookbackBars)
         {
-            var day = IstClock.IstDate(hourlyBars[hourStart].Time);
-            var hourEnd = hourStart;
-            while (hourEnd < hourlyBars.Count && IstClock.IstDate(hourlyBars[hourEnd].Time) == day) hourEnd++;
-
-            var bias = BiasFor(dailyBars, day);
-            if (bias != Bias.None && hourEnd - hourStart > sweepLookbackBars)
-            {
-                RunSession(hourlyBars, hourStart, hourEnd, bias, oneMinBars, sweepLookbackBars, sweepBufferPoints,
-                    fvgLookaheadBars, retraceLookaheadBars, stopBufferPoints, riskRewardMultiple, Emit);
-            }
-
-            hourStart = hourEnd;
+            RunSession(hourlyBars, 0, hourlyBars.Count, dailyBars, oneMinBars, sweepLookbackBars, sweepBufferPoints,
+                fvgLookaheadBars, retraceLookaheadBars, stopBufferPoints, riskRewardMultiple, Emit);
         }
 
         return (entries, signals.OrderByDescending(sig => sig.TimeUtc).ToList(), signalExits);
@@ -161,7 +172,7 @@ public sealed class DailyBiasSweepFvgStrategy : IBacktestStrategy
     private sealed record FvgZone(bool Bullish, decimal High, decimal Low, int SweepIndex);
 
     private static void RunSession(
-        IReadOnlyList<Candle> hourlyBars, int start, int end, Bias bias, IReadOnlyList<Candle> oneMinBars,
+        IReadOnlyList<Candle> hourlyBars, int start, int end, IReadOnlyList<Candle> dailyBars, IReadOnlyList<Candle> oneMinBars,
         int sweepLookbackBars, decimal sweepBufferPoints, int fvgLookaheadBars, int retraceLookaheadBars,
         decimal stopBufferPoints, decimal riskRewardMultiple,
         Action<Candle, bool, string, decimal?, decimal?, int?, int?> emit)
@@ -220,6 +231,10 @@ public sealed class DailyBiasSweepFvgStrategy : IBacktestStrategy
                 recentLow = Math.Min(recentLow, hourlyBars[w].Low);
             }
 
+            // Resolved fresh for THIS bar's own calendar day, not once for a whole session - see
+            // this method's own caller for why the channel/pending state no longer resets daily but
+            // bias still needs to be evaluated per day.
+            var bias = BiasFor(dailyBars, IstClock.IstDate(bar.Time));
             if (bias == Bias.Bullish && bar.Low <= recentLow - sweepBufferPoints && bar.Close > recentLow)
             {
                 pendingSweep = new SweepState(true, bar.Low, i);

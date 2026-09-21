@@ -46,6 +46,8 @@ public sealed class OptionTradeSimulatorMaxHoldingTimeTests
         AtmCeVolumeBars = Array.Empty<CandleWithVolume>(),
         AtmPeVolumeBars = Array.Empty<CandleWithVolume>(),
         AtmStrike = null,
+        CeOiIvBand = Array.Empty<OiIvPoint>(),
+        PeOiIvBand = Array.Empty<OiIvPoint>(),
     };
 
     private static Dictionary<string, decimal> Parameters(decimal maxHoldingBars) => new()

@@ -186,6 +186,8 @@ public sealed class ExpiredOptionBacktestService
     private readonly DhanSpotInstrumentMaster _instrumentMaster;
     private readonly DhanHistoricalDataService _historicalData;
     private readonly DhanRollingOptionDataService _rollingOption;
+    private readonly StoredRollingOptionDataService _storedRollingOption;
+    private readonly StoredSpotDataService _storedSpot;
     private readonly HistoricalSpotDataStore _spotCache;
     private readonly ExpiredOptionDataStore _optionCache;
     private readonly IReadOnlyDictionary<string, IBacktestStrategy> _strategies;
@@ -194,6 +196,8 @@ public sealed class ExpiredOptionBacktestService
         DhanSpotInstrumentMaster instrumentMaster,
         DhanHistoricalDataService historicalData,
         DhanRollingOptionDataService rollingOption,
+        StoredRollingOptionDataService storedRollingOption,
+        StoredSpotDataService storedSpot,
         HistoricalSpotDataStore spotCache,
         ExpiredOptionDataStore optionCache,
         IEnumerable<IBacktestStrategy> strategies)
@@ -201,25 +205,72 @@ public sealed class ExpiredOptionBacktestService
         _instrumentMaster = instrumentMaster;
         _historicalData = historicalData;
         _rollingOption = rollingOption;
+        _storedRollingOption = storedRollingOption;
+        _storedSpot = storedSpot;
         _spotCache = spotCache;
         _optionCache = optionCache;
         _strategies = strategies.Where(s => SupportedStrategyKeys.Contains(s.Key)).ToDictionary(s => s.Key);
     }
 
-    /// <summary>Spot candles for [fromDay,toDay], served from HistoricalSpotDataPrefetchHostedService's
-    /// own on-disk cache when it fully covers the window (a fast local CSV read, no Dhan call at
-    /// all), falling straight back to the ordinary live fetch otherwise - a window reaching earlier
-    /// than the cache's own year, or newer than its last prefetch, or simply not yet prefetched on
-    /// this deployment. Every caller here already handles GetIntradayCandlesAsync's own (Candles,
-    /// Error) shape, so the cache hit path returns the identical shape with a null error rather than
-    /// introducing a third return convention.</summary>
+    /// <summary>Spot candles for [fromDay,toDay]. Order of preference when useStoredData is on:
+    /// NiftyDataCollector's own TimescaleDB (StoredSpotDataService - no Dhan call, no rate limit)
+    /// first, then HistoricalSpotDataPrefetchHostedService's on-disk cache when it fully covers the
+    /// window (a fast local CSV read), and only then the live Dhan call. When useStoredData is off,
+    /// the stored source is skipped entirely and behavior is exactly what it was before this
+    /// parameter existed (disk cache, then live).
+    ///
+    /// Added because useStoredData previously only ever reached the option-premium fetch below -
+    /// this method took no such parameter at all, so a run with the toggle ON still fell through to a
+    /// live /charts/intraday call for spot on any window the disk cache didn't already fully cover
+    /// (its own prefetch only holds roughly the last year).
+    ///
+    /// coreFromDay/coreToDay (the actual [fromDay,toDay] a strategy trades over) are what coverage is
+    /// checked against - NOT fromDay/toDay themselves, which for the CHART fetch are widened by
+    /// ChartPaddingDays on each side (see RunAsync's own chartFromDay/chartToDay). A real run
+    /// confirmed why that distinction matters: ChartPaddingDays=2 from a Tuesday lookback start lands
+    /// squarely on the preceding Sunday, which no trading day ever covers - checking the WIDENED
+    /// window made this method conclude "incomplete" and fall back to a live call for the ENTIRE
+    /// fetch (padding included) even when the actual [fromDay,toDay] the backtest needs was fully
+    /// backfilled. The chart's own cosmetic padding is allowed to fall a day or two short at either
+    /// edge (this app has no trading-calendar/holiday helper to resolve "the padding's nearest real
+    /// trading day" precisely) - only the core window has to be genuinely complete for this source to
+    /// be trusted.
+    ///
+    /// A stored-source result must fully cover [coreFromDay,coreToDay] to be trusted - a partial hit
+    /// (e.g. today's still-forming session, which NiftyDataCollector's own collector cycle may not
+    /// have written yet) falls through to the next source rather than silently returning an
+    /// incomplete series as if it were whole.</summary>
     private async Task<(IReadOnlyList<CandleWithVolume> Candles, string? Error)> GetSpotCandlesAsync(
-        string underlying, DhanSpotInstrument instrument, DateOnly fromDay, DateOnly toDay, CancellationToken cancellationToken)
+        string underlying, DhanSpotInstrument instrument, DateOnly fromDay, DateOnly toDay, DateOnly coreFromDay, DateOnly coreToDay,
+        bool useStoredData, CancellationToken cancellationToken)
     {
+        if (useStoredData && _storedSpot.IsConfigured)
+        {
+            var (storedBars, storedError) = await _storedSpot.GetSpotCandlesAsync(underlying, fromDay, toDay, cancellationToken);
+            if (storedError is null && CoversWholeRange(storedBars, coreFromDay, coreToDay))
+                return (storedBars, null);
+        }
+
         if (_spotCache.HasCompleteData(underlying, fromDay, toDay))
             return (_spotCache.Read(underlying, fromDay, toDay), null);
 
         return await _historicalData.GetIntradayCandlesAsync(instrument.SecurityId, instrument.DhanSegment, fromDay, toDay, 1, cancellationToken);
+    }
+
+    /// <summary>Whether bars actually reach every trading day in [fromDay,toDay] - a cheap
+    /// day-count check (not a bar-count one, since a half/holiday-shortened session is still a
+    /// legitimately "complete" day) used to decide whether a stored-source result is trustworthy
+    /// enough to stop looking further, or is instead a partial result (a still-forming session,
+    /// a collector that hasn't caught up yet) that should fall through to the next source instead
+    /// of being served as if it were whole. Callers must pass the CORE window this data actually
+    /// needs to be correct for, not a cosmetically-padded one - see GetSpotCandlesAsync's own doc
+    /// comment for the real bug that came from getting this wrong.</summary>
+    private static bool CoversWholeRange(IReadOnlyList<CandleWithVolume> bars, DateOnly fromDay, DateOnly toDay)
+    {
+        if (bars.Count == 0) return false;
+        var firstDay = IstClock.IstDate(bars[0].Time);
+        var lastDay = IstClock.IstDate(bars[^1].Time);
+        return firstDay <= fromDay && lastDay >= toDay;
     }
 
     /// <summary>Metadata for just the strategies this page can actually run - see
@@ -262,7 +313,7 @@ public sealed class ExpiredOptionBacktestService
     public async Task<ExpiredBacktestResult> RunAsync(
         string underlying, string expiryFlag, DateOnly expiryDate, int lookbackDays, string strategyKey,
         int timeframeMinutes, IReadOnlyDictionary<string, decimal> parameters,
-        CancellationToken cancellationToken, bool includeObvCdv = false)
+        CancellationToken cancellationToken, bool includeObvCdv = false, bool useStoredData = true)
     {
         if (!StrikeStepByUnderlying.TryGetValue(underlying, out var step))
             return ExpiredBacktestResult.Failed($"'{underlying}' is not supported - only NIFTY and BANKNIFTY (Dhan's rolling-option API only documents NSE_FNO index options).");
@@ -358,7 +409,7 @@ public sealed class ExpiredOptionBacktestService
         var chartFromDay = fromDay.AddDays(-ChartPaddingDays);
         var chartToDay = toDay.AddDays(ChartPaddingDays);
 
-        var (spotVolumeBarsForChart, spotError) = await GetSpotCandlesAsync(underlying, instrument, chartFromDay, chartToDay, cancellationToken);
+        var (spotVolumeBarsForChart, spotError) = await GetSpotCandlesAsync(underlying, instrument, chartFromDay, chartToDay, fromDay, toDay, useStoredData, cancellationToken);
         var spotBarsForChart = spotVolumeBarsForChart.Select(b => b.ToCandle()).ToList();
         var spotBars1m = spotBarsForChart.Where(b => IstClock.IstDate(b.Time) >= fromDay && IstClock.IstDate(b.Time) <= toDay).ToList();
         // The same [fromDay,toDay] slice as spotBars1m, but keeping Volume - what VwapCalculator
@@ -416,8 +467,8 @@ public sealed class ExpiredOptionBacktestService
             || includeObvCdv;
         var bandCenterSteps = needsFlowChain ? 0 : otmSteps;
         var bandRadius = needsFlowChain ? FlowChainRadius : StrikeBandSteps;
-        var (ceBand, ceError) = await FetchStrikeBandAsync(underlying, instrument.SecurityId, expiryFlag, segments, bandCenterSteps, bandRadius, isCall: true, spotBars1m, step, cancellationToken);
-        var (peBand, peError) = await FetchStrikeBandAsync(underlying, instrument.SecurityId, expiryFlag, segments, bandCenterSteps, bandRadius, isCall: false, spotBars1m, step, cancellationToken);
+        var (ceBand, ceError) = await FetchStrikeBandAsync(underlying, instrument.SecurityId, expiryFlag, segments, bandCenterSteps, bandRadius, isCall: true, spotBars1m, step, useStoredData, cancellationToken);
+        var (peBand, peError) = await FetchStrikeBandAsync(underlying, instrument.SecurityId, expiryFlag, segments, bandCenterSteps, bandRadius, isCall: false, spotBars1m, step, useStoredData, cancellationToken);
 
         // The PRIMARY (centre-of-band) member - what this run's own otmSteps actually calls for -
         // used only for the summary stats below (resolved/expected strike, splices, bar counts).
@@ -505,6 +556,12 @@ public sealed class ExpiredOptionBacktestService
             AtmCeVolumeBars = Array.Empty<CandleWithVolume>(),
             AtmPeVolumeBars = Array.Empty<CandleWithVolume>(),
             AtmStrike = null,
+            // ceBand/peBand are always fetched (StrikeBandSteps or FlowChainRadius radius either
+            // way - see needsFlowChain above), so this is populated on every Expired Backtest run,
+            // not just ones that ask for the flow chain - an OI-wall/IV-spike strategy filter needs
+            // no extra opt-in fetch beyond what pricing already pays for.
+            CeOiIvBand = BuildOiIvBand(ceBand),
+            PeOiIvBand = BuildOiIvBand(peBand),
         };
 
         var trades = strategy.Simulate(context, mergedParameters);
@@ -553,7 +610,7 @@ public sealed class ExpiredOptionBacktestService
     /// always was: the single PRIMARY token's own untouched response, for auditing.</summary>
     public async Task<RollingOptionChartResult> GetRollingChartAsync(
         string underlying, string expiryFlag, DateOnly expiryDate, int otmSteps, decimal? absoluteStrike, bool isCall, int lookbackDays,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, bool useStoredData = true)
     {
         if (!StrikeStepByUnderlying.ContainsKey(underlying))
             return RollingOptionChartResult.Failed($"'{underlying}' is not supported - only NIFTY and BANKNIFTY (Dhan's rolling-option API only documents NSE_FNO index options).");
@@ -611,7 +668,7 @@ public sealed class ExpiredOptionBacktestService
             // validate every member of the strike BAND fetched below - see StrikeBandSteps' own doc
             // comment for why one token alone cannot keep tracking a fixed absolute strike as the
             // index moves.
-            var (windowSpotVolumeBars, spotError) = await GetSpotCandlesAsync(underlying, instrument, fromDay, toDay, cancellationToken);
+            var (windowSpotVolumeBars, spotError) = await GetSpotCandlesAsync(underlying, instrument, fromDay, toDay, fromDay, toDay, useStoredData, cancellationToken);
             var windowSpotBars = windowSpotVolumeBars.Select(b => b.ToCandle()).ToList();
             if (windowSpotBars.Count == 0)
                 return RollingOptionChartResult.Failed(
@@ -629,7 +686,7 @@ public sealed class ExpiredOptionBacktestService
             // A BAND of tokens around resolvedOtmSteps, not just the single one - so absoluteStrike
             // keeps being found even on a day the index has drifted enough that this single starting
             // offset no longer resolves to it (see BuildFixedStrikeSeries below).
-            (band, bandError) = await FetchStrikeBandAsync(underlying, instrument.SecurityId, expiryFlag, segments, resolvedOtmSteps, StrikeBandSteps, isCall, windowSpotBars, step, cancellationToken);
+            (band, bandError) = await FetchStrikeBandAsync(underlying, instrument.SecurityId, expiryFlag, segments, resolvedOtmSteps, StrikeBandSteps, isCall, windowSpotBars, step, useStoredData, cancellationToken);
         }
 
         // Same sign convention RunAsync itself uses: otmSteps is "how far OTM for the side actually
@@ -638,7 +695,7 @@ public sealed class ExpiredOptionBacktestService
         var strikeToken = StrikeToken(isCall ? resolvedOtmSteps : -resolvedOtmSteps);
         var optionType = isCall ? "CALL" : "PUT";
 
-        List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> raw;
+        List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)> raw;
         List<PossibleSplice> splices;
         string? error;
 
@@ -653,7 +710,7 @@ public sealed class ExpiredOptionBacktestService
         }
         else
         {
-            (raw, error, _) = await FetchAcrossSegmentsAsync(underlying, instrument.SecurityId, expiryFlag, segments, strikeToken, optionType, cancellationToken);
+            (raw, error, _) = await FetchAcrossSegmentsAsync(underlying, instrument.SecurityId, expiryFlag, segments, strikeToken, optionType, useStoredData, cancellationToken);
             splices = DetectPossibleSplices(raw.Select(b => b.Bar).ToList());
         }
 
@@ -773,13 +830,13 @@ public sealed class ExpiredOptionBacktestService
     /// actually reached Dhan at all, so a fully-cached run does not pay BandFetchDelay's own pacing
     /// for a token that made no live call to pace in the first place - the entire point of caching
     /// this data being a genuinely fast Expired Backtest read.</summary>
-    private async Task<(List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> Bars, string? Error, bool AnyLiveCall)> FetchAcrossSegmentsAsync(
+    private async Task<(List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)> Bars, string? Error, bool AnyLiveCall)> FetchAcrossSegmentsAsync(
         string underlying, uint underlyingSecurityId, string expiryFlag, IReadOnlyList<FetchSegment> segments, string strikeToken, string optionType,
-        CancellationToken cancellationToken)
+        bool useStoredData, CancellationToken cancellationToken)
     {
-        var bars = new List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)>();
+        var bars = new List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)>();
         string? error = null;
-        var anyLiveCall = false;
+        var anyLiveDhanCall = false;
 
         foreach (var segment in segments)
         {
@@ -789,14 +846,19 @@ public sealed class ExpiredOptionBacktestService
                 continue;
             }
 
-            anyLiveCall = true;
-            var (segmentBars, segmentError) = await _rollingOption.GetRollingOptionCandlesAsync(
-                underlyingSecurityId, expiryFlag, segment.ExpiryCode, strikeToken, optionType, segment.From, segment.To, 1, cancellationToken);
+            // useStoredData picks NiftyDataCollector's own TimescaleDB (no Dhan call, no rate limit
+            // to pace against) over a live Dhan call - see IRollingOptionDataSource's own doc
+            // comment. AnyLiveCall below stays scoped to the DHAN path specifically: a Postgres read
+            // needs none of BandFetchDelay's pacing, only an actual Dhan call does.
+            IRollingOptionDataSource source = useStoredData ? _storedRollingOption : _rollingOption;
+            var (segmentBars, segmentError) = await source.GetRollingOptionCandlesAsync(
+                underlying, underlyingSecurityId, expiryFlag, segment.ExpiryCode, strikeToken, optionType, segment.From, segment.To, 1, cancellationToken);
             bars.AddRange(segmentBars);
             if (segmentError is not null) error = error is null ? segmentError : $"{error}; {segmentError}";
+            if (!useStoredData) anyLiveDhanCall = true;
         }
 
-        return (bars, error, anyLiveCall);
+        return (bars, error, anyLiveDhanCall);
     }
 
     /// <summary>One band member's own data (see FetchStrikeBandAsync): RawBars is the untouched fetch
@@ -808,8 +870,8 @@ public sealed class ExpiredOptionBacktestService
     /// depends on any one member alone (see BuildFixedStrikeSeries).</summary>
     internal readonly record struct StrikeBandMember(
         int Steps,
-        List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> RawBars,
-        List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> Bars,
+        List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)> RawBars,
+        List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)> Bars,
         List<PossibleSplice> Splices);
 
     /// <summary>Fetches every relative-strike token from centerSteps-radius to centerSteps+radius
@@ -828,7 +890,7 @@ public sealed class ExpiredOptionBacktestService
     /// Per-member errors are concatenated, same convention FetchAcrossSegmentsAsync itself uses.</summary>
     private async Task<(List<StrikeBandMember> Band, string? Error)> FetchStrikeBandAsync(
         string underlying, uint underlyingSecurityId, string expiryFlag, IReadOnlyList<FetchSegment> segments, int centerSteps, int radius, bool isCall,
-        IReadOnlyList<Candle> spotBars, int step, CancellationToken cancellationToken)
+        IReadOnlyList<Candle> spotBars, int step, bool useStoredData, CancellationToken cancellationToken)
     {
         var optionType = isCall ? "CALL" : "PUT";
         var band = new List<StrikeBandMember>();
@@ -843,7 +905,7 @@ public sealed class ExpiredOptionBacktestService
             if (pacePendingFromPreviousToken) await Task.Delay(BandFetchDelay, cancellationToken);
 
             var token = StrikeToken(isCall ? steps : -steps);
-            var (raw, fetchError, anyLiveCall) = await FetchAcrossSegmentsAsync(underlying, underlyingSecurityId, expiryFlag, segments, token, optionType, cancellationToken);
+            var (raw, fetchError, anyLiveCall) = await FetchAcrossSegmentsAsync(underlying, underlyingSecurityId, expiryFlag, segments, token, optionType, useStoredData, cancellationToken);
             if (fetchError is not null) error = error is null ? fetchError : $"{error}; {fetchError}";
             pacePendingFromPreviousToken = anyLiveCall;
 
@@ -861,12 +923,12 @@ public sealed class ExpiredOptionBacktestService
     /// window (a too-old contract at the head, or Dhan's own rolling resolution flipping early near
     /// the target contract's real expiry at the tail), and the correct, single-contract data is
     /// whichever side of it is bigger, not always the side closest to the requested expiry.</summary>
-    internal static List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> TrimToLargestSegment(
-        List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> raw, IReadOnlyList<PossibleSplice> splices)
+    internal static List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)> TrimToLargestSegment(
+        List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)> raw, IReadOnlyList<PossibleSplice> splices)
     {
         if (splices.Count == 0) return raw;
 
-        List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)>? best = null;
+        List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)>? best = null;
         var previousCutoff = DateTimeOffset.MinValue;
 
         foreach (var cutoff in splices.Select(s => s.Time))
@@ -903,12 +965,12 @@ public sealed class ExpiredOptionBacktestService
     /// its own Spot nor a spotBars reference yet available, is kept, not dropped - there is nothing to
     /// disprove it with, and this is a targeted removal of bars actively shown to be wrong, not a
     /// blanket "trust nothing unverified" filter.</summary>
-    internal static List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> FilterToExpectedStrike(
-        List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> bars, IReadOnlyList<Candle> spotBars, int step, int otmSteps, bool isCall)
+    internal static List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)> FilterToExpectedStrike(
+        List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)> bars, IReadOnlyList<Candle> spotBars, int step, int otmSteps, bool isCall)
     {
         if (step <= 0) return bars;
 
-        var kept = new List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)>(bars.Count);
+        var kept = new List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)>(bars.Count);
         var spotIndex = 0;
 
         foreach (var entry in bars)
@@ -963,6 +1025,21 @@ public sealed class ExpiredOptionBacktestService
     /// edge of two adjacent tokens both resolving near targetStrike that day), the first one
     /// encountered wins - band members are iterated in the same fixed (ascending Steps) order every
     /// time, so this is deterministic, not a source of run-to-run variance.</summary>
+    /// <summary>Flattens every band member's own (already trimmed/filtered) bars into one
+    /// time-ascending OiIvPoint list - what BacktestStrategyContext.CeOiIvBand/PeOiIvBand expose to a
+    /// strategy. Uses member.Bars (the same post-TrimToLargestSegment/FilterToExpectedStrike series
+    /// pricing itself trusts), not member.RawBars, so an OI-wall/IV-spike read never sees a bar this
+    /// app has already identified as belonging to the wrong contract. Deliberately NOT deduplicated
+    /// by time the way BuildFixedStrikeSeries is - unlike pricing (which needs exactly ONE price at
+    /// a given moment), an OI-wall read wants EVERY strike's own OI at that moment side by side, so
+    /// multiple members contributing entries at the same timestamp is the whole point, not a
+    /// collision to resolve.</summary>
+    internal static List<OiIvPoint> BuildOiIvBand(IReadOnlyList<StrikeBandMember> band) =>
+        band.SelectMany(m => m.Bars)
+            .Select(entry => new OiIvPoint(entry.Bar.Time, entry.Strike, entry.OpenInterest, entry.ImpliedVolatility))
+            .OrderBy(p => p.Time)
+            .ToList();
+
     internal static List<CandleWithVolume> BuildFixedStrikeSeries(
         IReadOnlyList<StrikeBandMember> band, decimal targetStrike, int step)
     {

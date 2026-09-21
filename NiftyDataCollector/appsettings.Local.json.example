@@ -1,0 +1,59 @@
+{
+  "Dhan": {
+    "ClientId": "your-dhan-client-id",
+
+    "Pin": "your-dhan-pin",
+    "TotpSecret": "your-base32-totp-secret-from-dhan-web",
+
+    "AccessToken": ""
+  },
+  "ConnectionStrings": {
+    "Timescale": "Host=localhost;Port=5432;Database=niftydata;Username=postgres;Password=yourpassword"
+  },
+  "RollingOption": {
+    "Enabled": false
+  },
+  "Collector": {
+    "BackfillFromDate": "2023-03-01"
+  }
+}
+
+//{
+//  "Logging": {
+//    "LogLevel": {
+//      "Default": "Information",
+//      "Microsoft": "Warning"
+//    }
+//  },
+//  "Dhan": {
+//    "ClientId": "1101635720",
+//    "Pin": "756989",
+//    "TotpSecret": "QDVO5ZE2TIUDPNTQLEIBHTYKHF2BNZFE",
+//    "AccessToken": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiJ9.eyJ1c2VyUmVnaW9uIjoiUjEiLCJpc3MiOiJkaGFuIiwicGFydG5lcklkIjoiIiwiZXhwIjoxNzkwMDY3NjY5LCJpYXQiOjE3ODk5ODEyNjksInRva2VuQ29uc3VtZXJUeXBlIjoiU0VMRiIsIndlYmhvb2tVcmwiOiIiLCJkaGFuQ2xpZW50SWQiOiIxMTAxNjM1NzIwIn0.xz98sJwVnB_PU_7kPi71mKwawW8kH8ULaPsGDGe4GBRTsk-kqhgMfiALbCF3ZqhbspV5TiL-mQ4xKzl_Qf0p7g",
+
+//    "TooManyAttemptsCooldownSeconds": 30,
+//    "GlobalCallSpacingMilliseconds": 300
+//  },
+//  "Collector": {
+//    "Underlyings": [
+//      {
+//        "Name": "NIFTY",
+//        "StrikeStep": 50
+//      }
+//    ],
+//    "StrikesEachSide": 10,
+//    "TrackedExpiryCount": 1,
+//    "BackfillDays": 90,
+//    "SnapshotPollIntervalSeconds": 60,
+//    "HistoricalRefreshIntervalMinutes": 5
+//  },
+//  "RollingOption": {
+//    "Enabled": true,
+//    "ExpiryFlag": "WEEK",
+//    "ExpiryCodes": [ 1, 2 ],
+//    "PollIntervalMinutes": 60
+//  },
+//  "ConnectionStrings": {
+//    "Timescale": "Host=localhost;Port=5432;Database=niftydata;Username=postgres;Password=Testinguser@321"
+//  }
+//}
