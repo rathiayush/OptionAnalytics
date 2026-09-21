@@ -191,9 +191,9 @@ function OiLadder({ rows, atmStrike }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
       <Row style={{ fontSize: 11, color: AXIS_COLOR, marginBottom: 4 }}>
-        <Col span={9} style={{ textAlign: 'right', paddingRight: 6 }}>PE OI (support)</Col>
-        <Col span={6} style={{ textAlign: 'center' }}>Strike</Col>
-        <Col span={9} style={{ paddingLeft: 6 }}>CE OI (resistance)</Col>
+        <Col span={10} style={{ textAlign: 'right', paddingRight: 6 }}>PE OI (support)</Col>
+        <Col span={4} style={{ textAlign: 'center' }}>Strike</Col>
+        <Col span={10} style={{ paddingLeft: 6 }}>CE OI (resistance)</Col>
       </Row>
       {rows.map((row) => {
         const isAtm = atmStrike != null && row.strike === atmStrike
@@ -210,12 +210,13 @@ function OiLadder({ rows, atmStrike }) {
               padding: '1px 0',
             }}
           >
-            <Col span={9} style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 4 }}>
+            <Col span={10} style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 4 }}>
               <Text style={{ fontSize: 10, color: AXIS_COLOR, whiteSpace: 'nowrap' }}>
-                {row.peIv != null ? `IV ${row.peIv.toFixed(1)}` : ''}
+                {row.pePrice != null ? `${row.pePrice.toFixed(2)}` : ''}
+                {row.peIv != null ? ` · IV ${row.peIv.toFixed(1)}` : ''}
               </Text>
-              <div style={{ width: 90, display: 'flex', justifyContent: 'flex-end' }}>
-                <Tooltip title={row.peOi != null ? `PE OI: ${row.peOi.toLocaleString()}` : 'No data'}>
+              <div style={{ width: 70, display: 'flex', justifyContent: 'flex-end' }}>
+                <Tooltip title={row.peOi != null ? `PE OI: ${row.peOi.toLocaleString()}${row.pePrice != null ? `, LTP ${row.pePrice.toFixed(2)}` : ''}` : 'No data'}>
                   <div style={{
                     width: `${((row.peOi ?? 0) / maxPeOi) * 100}%`, minWidth: row.peOi ? 2 : 0, height: 14,
                     background: isSupport ? PE_COLOR : `${PE_COLOR}99`,
@@ -223,12 +224,12 @@ function OiLadder({ rows, atmStrike }) {
                 </Tooltip>
               </div>
             </Col>
-            <Col span={6} style={{ textAlign: 'center' }}>
+            <Col span={4} style={{ textAlign: 'center' }}>
               <Text strong={isAtm} style={{ fontSize: 12, color: isAtm ? '#fff' : undefined }}>{row.strike.toLocaleString()}</Text>
             </Col>
-            <Col span={9} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-              <div style={{ width: 90 }}>
-                <Tooltip title={row.ceOi != null ? `CE OI: ${row.ceOi.toLocaleString()}` : 'No data'}>
+            <Col span={10} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <div style={{ width: 70 }}>
+                <Tooltip title={row.ceOi != null ? `CE OI: ${row.ceOi.toLocaleString()}${row.cePrice != null ? `, LTP ${row.cePrice.toFixed(2)}` : ''}` : 'No data'}>
                   <div style={{
                     width: `${((row.ceOi ?? 0) / maxCeOi) * 100}%`, minWidth: row.ceOi ? 2 : 0, height: 14,
                     background: isResistance ? CE_COLOR : `${CE_COLOR}99`,
@@ -236,7 +237,8 @@ function OiLadder({ rows, atmStrike }) {
                 </Tooltip>
               </div>
               <Text style={{ fontSize: 10, color: AXIS_COLOR, whiteSpace: 'nowrap' }}>
-                {row.ceIv != null ? `IV ${row.ceIv.toFixed(1)}` : ''}
+                {row.cePrice != null ? `${row.cePrice.toFixed(2)}` : ''}
+                {row.ceIv != null ? ` · IV ${row.ceIv.toFixed(1)}` : ''}
               </Text>
             </Col>
           </Row>
@@ -341,8 +343,8 @@ export default function OiReplayPage() {
       const pe = latestAtOrBefore(peByStrike.get(strike) ?? [], asOfMs)
       return {
         strike,
-        ceOi: ce?.openInterest ?? null, ceIv: ce?.impliedVolatility ?? null,
-        peOi: pe?.openInterest ?? null, peIv: pe?.impliedVolatility ?? null,
+        ceOi: ce?.openInterest ?? null, ceIv: ce?.impliedVolatility ?? null, cePrice: ce?.price ?? null,
+        peOi: pe?.openInterest ?? null, peIv: pe?.impliedVolatility ?? null, pePrice: pe?.price ?? null,
       }
     })
     return rows.sort((a, b) => b.strike - a.strike)

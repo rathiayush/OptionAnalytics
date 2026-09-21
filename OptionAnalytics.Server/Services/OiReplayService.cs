@@ -80,13 +80,13 @@ public sealed class OiReplayService
                 underlying, 0, expiryFlag, NearestExpiryCode, token, "CALL", date, date, 1, cancellationToken);
             foreach (var bar in ceBars)
                 if (bar.Strike is { } strike)
-                    cePoints.Add(new OiReplayPoint(bar.Bar.Time, strike, bar.OpenInterest, bar.ImpliedVolatility));
+                    cePoints.Add(new OiReplayPoint(bar.Bar.Time, strike, bar.OpenInterest, bar.ImpliedVolatility, bar.Bar.Close));
 
             var (peBars, _) = await _storedRollingOption.GetRollingOptionCandlesAsync(
                 underlying, 0, expiryFlag, NearestExpiryCode, token, "PUT", date, date, 1, cancellationToken);
             foreach (var bar in peBars)
                 if (bar.Strike is { } strike)
-                    pePoints.Add(new OiReplayPoint(bar.Bar.Time, strike, bar.OpenInterest, bar.ImpliedVolatility));
+                    pePoints.Add(new OiReplayPoint(bar.Bar.Time, strike, bar.OpenInterest, bar.ImpliedVolatility, bar.Bar.Close));
         }
 
         var spotCandlesTf = BacktestUtil.AggregateCandles(spotBars1m, timeframe);

@@ -1,11 +1,13 @@
 namespace OptionAnalytics.Server.Models;
 
-/// <summary>One stored 1-minute OI/IV reading for a single strike/side, from
+/// <summary>One stored 1-minute OI/IV/price reading for a single strike/side, from
 /// OiReplayService - the raw ingredients the OI Replay page's frontend groups into per-strike rows
 /// and looks up "as of the currently revealed candle's time" as the replay advances. Strike is never
 /// null here (unlike OiIvPoint) - a point with no resolved strike is simply excluded before this is
-/// built, since a row with no strike to key it by is useless to this page.</summary>
-public readonly record struct OiReplayPoint(DateTimeOffset Time, decimal Strike, long? OpenInterest, decimal? ImpliedVolatility);
+/// built, since a row with no strike to key it by is useless to this page. Price is that bar's own
+/// Close (the option's own last traded/theoretical premium at this minute) - shown alongside OI/IV
+/// in the ladder so a level's own option cost is visible without a second lookup elsewhere.</summary>
+public readonly record struct OiReplayPoint(DateTimeOffset Time, decimal Strike, long? OpenInterest, decimal? ImpliedVolatility, decimal Price);
 
 /// <summary>
 /// Everything the OI Replay page needs for one full day, in one response - the whole day's worth of
