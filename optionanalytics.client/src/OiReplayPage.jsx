@@ -436,9 +436,11 @@ export default function OiReplayPage() {
     if (dayStartMs == null) return new Map()
     const map = new Map()
     for (const strike of new Set([...ceByStrike.keys(), ...peByStrike.keys()])) {
+      const ce = latestAtOrBefore(ceByStrike.get(strike) ?? [], dayStartMs)
+      const pe = latestAtOrBefore(peByStrike.get(strike) ?? [], dayStartMs)
       map.set(strike, {
-        ceOi: latestAtOrBefore(ceByStrike.get(strike) ?? [], dayStartMs)?.openInterest ?? null,
-        peOi: latestAtOrBefore(peByStrike.get(strike) ?? [], dayStartMs)?.openInterest ?? null,
+        ceOi: ce?.openInterest ?? null, peOi: pe?.openInterest ?? null,
+        ceIv: ce?.impliedVolatility ?? null, peIv: pe?.impliedVolatility ?? null,
       })
     }
     return map
@@ -519,20 +521,37 @@ export default function OiReplayPage() {
     else if (priceChange > 0 && ceChangeSum < 0) { oiBuildup = 'Call unwinding as price rises - short covering, no fresh support built'; oiBias = 'Bullish' }
     else if (priceChange < 0 && peChangeSum < 0) { oiBuildup = 'Put unwinding as price falls - long unwinding, no fresh resistance built'; oiBias = 'Bearish' }
 
-    // IV skew at (or nearest to) ATM - Put IV richer than Call IV is the conventional "more downside
-    // hedging demand" read; the mirror for Call-rich skew. A real equity index almost always carries
-    // SOME natural put skew, so this is read relative to itself over the day, not an absolute rule.
+    // IV skew at ATM - read as a CHANGE since the day's open, not an absolute level. NIFTY/
+    // BANKNIFTY (like almost every equity index) structurally has PE IV > CE IV almost all the
+    // time - a permanent downside-protection premium baked into the vol surface, not a sentiment
+    // signal. Thresholding the raw level (an earlier version of this did) reads "Bearish" on
+    // nearly every normal day regardless of what's actually happening, which is exactly the bug
+    // report this fixes. WIDENING skew (PE getting richer relative to CE as the day goes on) means
+    // downside fear building - that is the real signal; narrowing means it is easing.
     const atmRow = ladderRows.find((r) => r.strike === atmStrike) ?? nearAtm[0] ?? null
     const skew = atmRow && atmRow.peIv != null && atmRow.ceIv != null ? atmRow.peIv - atmRow.ceIv : null
-    const ivBias = skew == null ? 'Neutral' : skew > 1 ? 'Bearish' : skew < -1 ? 'Bullish' : 'Neutral'
+    const startAtm = dayStartByStrike.get(atmStrike)
+    const skewAtOpen = startAtm && startAtm.peIv != null && startAtm.ceIv != null ? startAtm.peIv - startAtm.ceIv : null
+    const skewChange = skew != null && skewAtOpen != null ? skew - skewAtOpen : null
+    const ivBias = skewChange == null ? 'Neutral' : skewChange > 0.5 ? 'Bearish' : skewChange < -0.5 ? 'Bullish' : 'Neutral'
 
     const votes = [pcrBias, oiBias, ivBias]
     const bullCount = votes.filter((v) => v === 'Bullish').length
     const bearCount = votes.filter((v) => v === 'Bearish').length
     const overall = bullCount > bearCount ? 'Bullish' : bearCount > bullCount ? 'Bearish' : 'Mixed / Neutral'
 
-    const suggestedStrike = overall === 'Bullish' ? atmStrike + step : overall === 'Bearish' ? atmStrike - step : atmStrike
-    const suggestedSide = overall === 'Bullish' ? 'CE' : overall === 'Bearish' ? 'PE' : 'No clear edge - consider staying flat'
+    // BUY: direction-following - the nearest OTM strike in whichever way the overall vote leans.
+    // SELL: the wall on the side the overall vote does NOT expect to be tested - selling premium
+    // against a level the move is unlikely to reach is the safer side of that same read (sell CE at
+    // resistance when the bias is bearish/mixed - upside isn't expected to be tested; sell PE at
+    // support when bullish/mixed - downside isn't expected to be tested).
+    const buySide = overall === 'Bullish' ? 'CE' : overall === 'Bearish' ? 'PE' : null
+    const buyStrike = overall === 'Bullish' ? atmStrike + step : overall === 'Bearish' ? atmStrike - step : null
+    const sellSide = overall === 'Bearish' ? 'CE' : 'PE'
+    const sellStrike = sellSide === 'CE' ? resistance?.strike ?? null : support?.strike ?? null
+
+    const suggestedStrike = buyStrike ?? atmStrike
+    const suggestedSide = buySide ?? 'No clear edge - consider staying flat'
 
     // "Are we okay right now" - a plain proximity-to-wall check, independent of the bullish/bearish
     // vote above: even a clear directional read is riskier to act on right this second if price is
@@ -551,11 +570,12 @@ export default function OiReplayPage() {
         : `Price is clear of both the resistance wall (${resistance ? `${resistance.strike}, ${(resistance.strike - currentBar.close).toFixed(0)} pts away` : 'none'}) and the support wall (${support ? `${support.strike}, ${(currentBar.close - support.strike).toFixed(0)} pts away` : 'none'}) right now.`
 
     return {
-      pcrBias, resistance, support, oiBuildup, oiBias, skew, ivBias,
+      pcrBias, resistance, support, oiBuildup, oiBias, skew, skewChange, ivBias,
       atmCeIv: atmRow?.ceIv, atmPeIv: atmRow?.peIv, overall, suggestedStrike, suggestedSide,
+      buySide, buyStrike, sellSide, sellStrike,
       safetyOk, safetyReason,
     }
-  }, [currentBar, ladderRows, pcr, atmStrike, step, bars, visibleCount])
+  }, [currentBar, ladderRows, pcr, atmStrike, step, bars, visibleCount, dayStartByStrike])
 
   return (
     <div style={{ maxWidth: 1280, margin: '0 auto', padding: '24px 16px' }}>
@@ -644,11 +664,11 @@ export default function OiReplayPage() {
                       <div style={{ fontSize: 11, color: AXIS_COLOR, marginTop: 2 }}>{marketRead.oiBuildup}</div>
                     </Col>
                     <Col span={8}>
-                      <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>IV skew (PE − CE, at ATM)</Text>
+                      <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>IV skew trend (PE − CE, at ATM)</Text>
                       <Tag color={biasColor(marketRead.ivBias)} style={{ fontSize: 12 }}>{marketRead.ivBias}</Tag>
                       <div style={{ fontSize: 11, color: AXIS_COLOR, marginTop: 2 }}>
                         {marketRead.skew != null
-                          ? `${marketRead.skew >= 0 ? '+' : ''}${marketRead.skew.toFixed(1)} (CE ${marketRead.atmCeIv?.toFixed(1)}, PE ${marketRead.atmPeIv?.toFixed(1)})`
+                          ? `Now ${marketRead.skew >= 0 ? '+' : ''}${marketRead.skew.toFixed(1)} (CE ${marketRead.atmCeIv?.toFixed(1)}, PE ${marketRead.atmPeIv?.toFixed(1)})${marketRead.skewChange != null ? `, ${marketRead.skewChange >= 0 ? 'widened' : 'narrowed'} ${Math.abs(marketRead.skewChange).toFixed(1)} since open` : ''}`
                           : 'IV not available at ATM yet'}
                       </div>
                     </Col>
@@ -659,12 +679,12 @@ export default function OiReplayPage() {
                     message={`Overall bias: ${marketRead.overall}`}
                     description={
                       marketRead.overall === 'Mixed / Neutral'
-                        ? 'PCR, OI buildup and IV skew don’t agree right now - no clean directional edge to act on.'
-                        : `Candidate: ${marketRead.suggestedStrike} ${marketRead.suggestedSide} (resistance ${marketRead.resistance?.strike ?? '—'}, support ${marketRead.support?.strike ?? '—'}).`
+                        ? 'PCR, OI buildup and IV skew trend don’t agree right now - no clean directional edge to act on.'
+                        : `Buy: ${marketRead.buyStrike} ${marketRead.buySide}. Sell: ${marketRead.sellStrike ?? '—'} ${marketRead.sellSide} (the wall on the side this move isn't expected to reach).`
                     }
                   />
                   <Text type="secondary" style={{ fontSize: 11 }}>
-                    Heuristic reading of the same PCR/OI/IV numbers shown above - three independent, naively-thresholded votes, not a signal or advice. Always cross-check against price action itself.
+                    Heuristic reading of the same PCR/OI/IV numbers shown above - three independent, naively-thresholded votes, not a signal or advice. Always cross-check against price action itself. IV skew is read as a CHANGE since the open, not its raw level - index options almost always price puts richer than calls (a permanent structural premium, not a daily sentiment signal), so only the trend is informative.
                   </Text>
                 </Space>
               </Card>
