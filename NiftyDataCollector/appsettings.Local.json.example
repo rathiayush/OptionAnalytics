@@ -1,0 +1,9 @@
+{
+  "Dhan": {
+    "ClientId": "your-dhan-client-id",
+    "AccessToken": "paste-a-static-portal-token-here"
+  },
+  "ConnectionStrings": {
+    "Timescale": "Host=localhost;Port=5432;Database=niftydata;Username=postgres;Password=yourpassword"
+  }
+}
