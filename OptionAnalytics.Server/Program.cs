@@ -108,6 +108,10 @@ builder.Services.AddSingleton<DhanRollingOptionDataService>();
 // is in production (see docker-compose.yml, which deliberately does not set it) - see
 // StoredRollingOptionDataService's own doc comment.
 builder.Services.AddSingleton<StoredRollingOptionDataService>();
+// Same idea, for spot instead of the option premium side - see StoredSpotDataService's own doc
+// comment for why this needed adding separately (useStoredData previously never reached spot at
+// all).
+builder.Services.AddSingleton<StoredSpotDataService>();
 builder.Services.AddSingleton<DhanMarketFeedClient>();
 // AddHttpClient<DhanOptionChainMaster>() (the pattern every other typed client here uses) registers
 // it TRANSIENT - a brand new instance, with its own empty in-memory dictionary, for every distinct
