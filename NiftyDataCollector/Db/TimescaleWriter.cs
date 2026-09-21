@@ -1,3 +1,4 @@
+using System.Text;
 using Npgsql;
 using NiftyDataCollector.Dhan;
 
@@ -146,7 +147,65 @@ public sealed class TimescaleWriter
         command.Parameters.Add(new NpgsqlParameter("from", NpgsqlTypes.NpgsqlDbType.Date) { Value = completedFrom.ToDateTime(TimeOnly.MinValue) });
         command.Parameters.Add(new NpgsqlParameter("through", NpgsqlTypes.NpgsqlDbType.Date) { Value = completedThrough.ToDateTime(TimeOnly.MinValue) });
         await command.ExecuteNonQueryAsync(cancellationToken);
+
+        await ExportBackfillProgressCsvAsync(cancellationToken);
     }
+
+    /// <summary>Dumps the full current backfill_progress table to a CSV next to the running .exe
+    /// (backfill_progress.csv in AppContext.BaseDirectory) - a plain, Excel-openable ledger of
+    /// exactly which series are current and which have gone stale, updated after every single
+    /// successful checkpoint write (see SaveBackfillCheckpointAsync's own call site above) so it
+    /// stays live without you needing to run SQL yourself. `completed_through_days_behind` is the
+    /// quick "is this stuck" signal - 0 or 1 for a series that's current, a large/growing number
+    /// for one that's stalled (check the console log for that series' own key for why).
+    ///
+    /// Written to a temp file and swapped in with File.Move rather than written in place, so a
+    /// reader (e.g. this file open in Excel) never sees a half-written row - if the destination is
+    /// currently locked (e.g. Excel has it open on Windows), the swap is skipped for this update
+    /// and logged, rather than crashing the collector; the next successful checkpoint retries it.</summary>
+    private async Task ExportBackfillProgressCsvAsync(CancellationToken cancellationToken)
+    {
+        var path = Path.Combine(AppContext.BaseDirectory, "backfill_progress.csv");
+        var tempPath = path + ".tmp";
+
+        try
+        {
+            await using var connection = new NpgsqlConnection(_connectionString);
+            await connection.OpenAsync(cancellationToken);
+            await using var command = new NpgsqlCommand("""
+                SELECT series_key, underlying, completed_from, completed_through,
+                       (CURRENT_DATE - completed_through) AS days_behind, updated_at
+                FROM backfill_progress
+                ORDER BY underlying, series_key
+                """, connection);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+
+            var sb = new StringBuilder();
+            sb.AppendLine("series_key,underlying,completed_from,completed_through,completed_through_days_behind,updated_at_utc");
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                sb.AppendLine(string.Join(",",
+                    CsvField(reader.GetString(0)),
+                    CsvField(reader.GetString(1)),
+                    DateOnly.FromDateTime(reader.GetDateTime(2)).ToString("yyyy-MM-dd"),
+                    DateOnly.FromDateTime(reader.GetDateTime(3)).ToString("yyyy-MM-dd"),
+                    reader.GetInt32(4).ToString(),
+                    reader.GetDateTime(5).ToString("yyyy-MM-dd HH:mm:ss")));
+            }
+
+            await File.WriteAllTextAsync(tempPath, sb.ToString(), cancellationToken);
+            File.Move(tempPath, path, overwrite: true);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Could not refresh backfill_progress.csv this time (e.g. the file may be open elsewhere) - will retry on the next checkpoint update.");
+        }
+    }
+
+    private static string CsvField(string value) =>
+        value.Contains(',') || value.Contains('"')
+            ? "\"" + value.Replace("\"", "\"\"") + "\""
+            : value;
 
     public async Task<int> SaveSpotBarsAsync(string underlying, IReadOnlyList<DhanHistoricalBar> bars, CancellationToken cancellationToken)
     {

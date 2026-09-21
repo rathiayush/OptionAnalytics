@@ -138,6 +138,30 @@ is done:
   = '<key>'` (or `DELETE FROM backfill_progress WHERE series_key = '<key>'` to redo its entire
   range from scratch). No restart needed either way - the very next pass picks up the change.
 
+### Watching progress without writing SQL: `backfill_progress.csv`
+
+Every successful checkpoint write also refreshes a plain CSV, `backfill_progress.csv`, sitting next
+to the running `.exe` (`AppContext.BaseDirectory` - e.g.
+`NiftyDataCollector/bin/Debug/net8.0/backfill_progress.csv`). One row per series:
+
+| Column | Meaning |
+|---|---|
+| `series_key` | A security id (spot/option contract) or a `ROLLING:...` key |
+| `underlying` | NIFTY, BANKNIFTY, etc. |
+| `completed_from` / `completed_through` | The contiguous window this series currently covers |
+| `completed_through_days_behind` | `today - completed_through` - **0 or 1 means current; a large or growing number means that series is stuck** |
+| `updated_at_utc` | Last time this series' checkpoint actually advanced |
+
+Open it in Excel (or just re-open/refresh the tab) any time to see, at a glance, exactly which
+series are current and which need attention - if `completed_through_days_behind` isn't shrinking
+for a series across several checks, look in the console log for that series' own key (e.g. `grep
+"ROLLING:NIFTY:WEEK:1:ATM+3:CE"`) for the actual error, fix it if needed, and restart - everything
+resumes from its own last-good checkpoint automatically, nothing is lost.
+
+If the file is open in Excel when an update tries to land, that one update is skipped (logged as a
+warning, not a crash) and simply retried on the next successful checkpoint - close and reopen the
+file to see the latest state.
+
 ## Rolling Options: multi-year ATM±N backtesting data
 
 `RollingOptionBackfillHostedService` backfills Dhan's separate "Rolling Options" API
