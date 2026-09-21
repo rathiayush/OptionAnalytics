@@ -7,6 +7,7 @@ import BacktestPage from './BacktestPage.jsx'
 import StrikeDataPage from './StrikeDataPage.jsx'
 import ExpiredBacktestPage from './ExpiredBacktestPage.jsx'
 import RollingStrikeDataPage from './RollingStrikeDataPage.jsx'
+import OiReplayPage from './OiReplayPage.jsx'
 import TriggersPage from './TriggersPage.jsx'
 import ContractsPage from './ContractsPage.jsx'
 import LoginPage from './LoginPage.jsx'
@@ -1537,6 +1538,7 @@ export default function App() {
         <Route path="/backtest" element={<BacktestPage />} />
         <Route path="/strike-data" element={<StrikeDataPage />} />
         <Route path="/expired-backtest" element={<ExpiredBacktestPage />} />
+        <Route path="/oi-replay" element={<OiReplayPage />} />
         <Route path="/rolling-strike-data" element={<RollingStrikeDataPage />} />
         <Route path="/triggers" element={<RequireAdmin><TriggersPage /></RequireAdmin>} />
         <Route path="/contracts" element={<RequireAdmin><ContractsPage /></RequireAdmin>} />

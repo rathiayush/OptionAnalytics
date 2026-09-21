@@ -112,6 +112,9 @@ builder.Services.AddSingleton<StoredRollingOptionDataService>();
 // comment for why this needed adding separately (useStoredData previously never reached spot at
 // all).
 builder.Services.AddSingleton<StoredSpotDataService>();
+// Backs the OI Replay page - entirely stored-data-only, no Dhan client injected at all (see its
+// own doc comment).
+builder.Services.AddSingleton<OiReplayService>();
 builder.Services.AddSingleton<DhanMarketFeedClient>();
 // AddHttpClient<DhanOptionChainMaster>() (the pattern every other typed client here uses) registers
 // it TRANSIENT - a brand new instance, with its own empty in-memory dictionary, for every distinct

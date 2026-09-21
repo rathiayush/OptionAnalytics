@@ -676,6 +676,7 @@ const NAV_ITEMS = [
     ],
   },
   { key: '/expired-backtest', label: 'Expired Backtest' },
+  { key: '/oi-replay', label: 'OI Replay' },
   { key: '/triggers', label: 'Triggers' },
   { key: '/contracts', label: 'Contracts' },
 ]
