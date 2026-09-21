@@ -12,16 +12,16 @@ public sealed class RollingOptionOptions
     /// README section on this feature and are ready for that.</summary>
     public bool Enabled { get; set; } = false;
 
-    /// <summary>How far back to backfill. Defaults to just the last 30 days, per the user's own
-    /// "first fetch for 30 days" plan - a small, quick window to confirm the resolved
-    /// strike/spot/OI/IV values look right before committing to the full range they actually want
+    /// <summary>How far back to backfill. Defaults to the last 6 months, per the user's own
+    /// explicit "first fetch for last 6 months" instruction - a window big enough to be useful for
+    /// real backtesting while still being a fraction of the full range they may eventually want
     /// ("2023 march till date"). Once verified, widen this to an earlier date (e.g. "2023-03-01")
     /// in appsettings.Local.json and restart - each series' own checkpoint picks the new, earlier
     /// window up as a BACKWARD extension on the very next pass without re-fetching or disturbing
-    /// what this initial 30-day run already saved (see Schema.sql's own doc comment on
-    /// backfill_progress). "Till date" itself needs no separate setting - every pass always tops
-    /// up through today automatically, same as every other backfill in this project.</summary>
-    public DateOnly StartDate { get; set; } = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-30));
+    /// what this run already saved (see Schema.sql's own doc comment on backfill_progress). "Till
+    /// date" itself needs no separate setting - every pass always tops up through today
+    /// automatically, same as every other backfill in this project.</summary>
+    public DateOnly StartDate { get; set; } = DateOnly.FromDateTime(DateTime.UtcNow.AddMonths(-6));
 
     /// <summary>"WEEK" or "MONTH" - which expiry cycle to roll across. NIFTY trades weekly, so
     /// WEEK is the default; switch to MONTH for an underlying that only has monthly expiries.</summary>

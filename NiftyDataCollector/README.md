@@ -106,7 +106,7 @@ See "Rolling Options" below for what this feature is and the recommended rollout
 | Key | Default | Meaning |
 |---|---|---|
 | `Enabled` | `false` | Turn on to start the rolling-option backfill |
-| `StartDate` | last 30 days | How far back to backfill - widen this later (e.g. `"2023-03-01"`) once a small test run looks right |
+| `StartDate` | last 6 months | How far back to backfill - widen this later (e.g. `"2023-03-01"`) once this looks right |
 | `ExpiryFlag` | `"WEEK"` | `"WEEK"` or `"MONTH"` - which expiry cycle to roll across |
 | `ExpiryCodes` | `[1, 2]` | Which "cycles out" to track (1-indexed: 1 = nearest, 2 = next) - nearest 2 expiries by default |
 | `PollIntervalMinutes` | 60 | How often to re-sweep every series once the initial catch-up finishes |
@@ -181,12 +181,13 @@ of Dhan API calls (`StrikesEachSide=10` means 21 relative strikes x 2 legs = 42 
 underlying per expiry code, each needing several 30-day chunks per year of history). Recommended
 workflow, matching how this was actually rolled out:
 
-1. Turn it on with the default `RollingOption:StartDate` (last 30 days) and let it run - a quick,
-   cheap way to confirm the resolved `strike`/`spot`/`open_interest`/`implied_volatility` values
-   coming back actually look right for your account before committing to a much bigger range.
-2. Once confirmed, widen `RollingOption:StartDate` in `appsettings.Local.json` (e.g. `"2023-03-01"`)
-   and restart - the existing 30-day window's data and checkpoint are untouched; the wider range is
-   picked up as a checkpointed BACKWARD extension (see "Backfilling long ranges" above).
+1. Turn it on with the default `RollingOption:StartDate` (last 6 months) and let it run - a
+   window big enough for real backtesting while confirming the resolved
+   `strike`/`spot`/`open_interest`/`implied_volatility` values look right for your account, before
+   committing to a much bigger range.
+2. If you want more, widen `RollingOption:StartDate` in `appsettings.Local.json` (e.g.
+   `"2023-03-01"`) and restart - the existing window's data and checkpoint are untouched; the wider
+   range is picked up as a checkpointed BACKWARD extension (see "Backfilling long ranges" above).
 
 **`expiryCode` is 1-indexed** - confirmed against a real account: `1` is the currently-rolling
 nearest cycle, `2` the one after that, and so on. **`0` is NOT valid** - Dhan's API rejects it
