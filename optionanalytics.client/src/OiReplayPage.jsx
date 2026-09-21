@@ -4,7 +4,7 @@ import { PlayCircleOutlined, PauseCircleOutlined, ReloadOutlined, SoundOutlined 
 import { createChart, CandlestickSeries, CrosshairMode } from 'lightweight-charts'
 import {
   UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR,
-  istTimeFormatter, istTickMarkFormatter, toBar, toChartTime,
+  istTimeFormatter, istTickMarkFormatter, toBar, toChartTime, fromChartTime,
   NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState,
 } from './shared.jsx'
 
@@ -500,7 +500,14 @@ export default function OiReplayPage() {
   }, [playing, speedMs, oneMinBars.length])
 
   const currentBar = oneMinBars[visibleCount - 1] ?? null
-  const asOfMs = currentBar ? currentBar.time * 1000 : null
+  // oneMinBars' own .time is chart time (shifted +5.5h by toChartTime, for the chart library's own
+  // display trick) - ceByStrike/peByStrike's points are the RAW, unshifted times straight off the
+  // wire. Comparing a shifted value against unshifted ones directly (as this used to) skews every
+  // lookup forward by a fixed 5.5 hours - once real time-of-day passes 10:00 IST, that skew alone
+  // pushes the lookup past 15:30 (market close), so every strike's "latest reading" permanently
+  // resolves to the day's very last point from then on - the exact "ladder/chart goes static right
+  // at 10:00 every time" bug. fromChartTime converts back to real time before use here.
+  const asOfMs = currentBar ? fromChartTime(currentBar.time) * 1000 : null
 
   // The chart's own displayed candles - the visible slice of 1-minute bars, re-aggregated to
   // whatever timeframe is selected, recomputed fresh each tick so the LAST (currently forming)
@@ -511,7 +518,7 @@ export default function OiReplayPage() {
   )
   const dayHigh = useMemo(() => (oneMinBars.length > 0 ? Math.max(...oneMinBars.map((b) => b.high)) : null), [oneMinBars])
   const dayLow = useMemo(() => (oneMinBars.length > 0 ? Math.min(...oneMinBars.map((b) => b.low)) : null), [oneMinBars])
-  const dayStartMs = oneMinBars[0] ? oneMinBars[0].time * 1000 : null
+  const dayStartMs = oneMinBars[0] ? fromChartTime(oneMinBars[0].time) * 1000 : null
 
   // Every row carries its OI both ONE MINUTE AGO (native resolution regardless of the chart's own
   // timeframe - "change every min" was explicit) AND at the DAY'S OPEN, alongside the current

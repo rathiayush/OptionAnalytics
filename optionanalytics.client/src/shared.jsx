@@ -276,6 +276,14 @@ export function toChartTime(isoOrDate) {
   return Math.floor(new Date(isoOrDate).getTime() / 1000) + IST_OFFSET_SECONDS
 }
 
+// Inverse of toChartTime - a caller holding a chart-time value (e.g. a bar's own .time, already
+// shifted for display) that needs to compare it against a REAL timestamp (an ISO string straight
+// off the wire, never shifted) must convert back first - comparing the two directly, one shifted
+// and one not, silently skews the comparison by a fixed 5.5 hours. Returns real UTC epoch seconds.
+export function fromChartTime(chartTimeSeconds) {
+  return chartTimeSeconds - IST_OFFSET_SECONDS
+}
+
 const IST_TIME_FORMAT = new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'UTC' })
 const IST_TICK_DATE_FORMAT = new Intl.DateTimeFormat('en-IN', { day: 'numeric', month: 'short', timeZone: 'UTC' })
 
