@@ -54,8 +54,8 @@ public sealed class RollingOptionBackfillHostedService : BackgroundService
 
         var strikeOffsets = BuildStrikeOffsets(_collectorOptions.StrikesEachSide);
         _logger.LogInformation(
-            "RollingOption backfill starting - {Underlyings} underlying(s) x {Offsets} strike offset(s) x 2 legs x {Codes} expiry code(s) ({Flag}), from {Start} to today.",
-            _collectorOptions.Underlyings.Count, strikeOffsets.Count, _options.ExpiryCodes.Count, _options.ExpiryFlag, _options.StartDate);
+            "RollingOption backfill starting - {Underlyings} underlying(s) x {Offsets} strike offset(s) x 2 legs x {Codes} expiry code(s), from {Start} to today (each underlying uses its own Collector:Underlyings[].ExpiryFlag).",
+            _collectorOptions.Underlyings.Count, strikeOffsets.Count, _options.ExpiryCodes.Count, _options.StartDate);
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -80,12 +80,12 @@ public sealed class RollingOptionBackfillHostedService : BackgroundService
                         {
                             try
                             {
-                                await RefreshSeriesAsync(instrument, underlying.Name, expiryCode, strikeOffset, isCall, stoppingToken);
+                                await RefreshSeriesAsync(instrument, underlying.Name, underlying.ExpiryFlag, expiryCode, strikeOffset, isCall, stoppingToken);
                             }
                             catch (Exception ex) when (ex is not OperationCanceledException)
                             {
                                 _logger.LogError(ex, "Rolling-option series {Underlying} {Flag}:{Code} {Offset}{Side} failed this pass - will retry next pass.",
-                                    underlying.Name, _options.ExpiryFlag, expiryCode, strikeOffset, isCall ? "CE" : "PE");
+                                    underlying.Name, underlying.ExpiryFlag, expiryCode, strikeOffset, isCall ? "CE" : "PE");
                             }
                         }
                     }
@@ -98,9 +98,9 @@ public sealed class RollingOptionBackfillHostedService : BackgroundService
     }
 
     private async Task RefreshSeriesAsync(
-        DhanSpotInstrument instrument, string underlying, int expiryCode, string strikeOffset, bool isCall, CancellationToken cancellationToken)
+        DhanSpotInstrument instrument, string underlying, string expiryFlag, int expiryCode, string strikeOffset, bool isCall, CancellationToken cancellationToken)
     {
-        var seriesKey = $"ROLLING:{underlying}:{_options.ExpiryFlag}:{expiryCode}:{strikeOffset}:{(isCall ? "CE" : "PE")}";
+        var seriesKey = $"ROLLING:{underlying}:{expiryFlag}:{expiryCode}:{strikeOffset}:{(isCall ? "CE" : "PE")}";
         var today = IstClock.Today();
         var desiredFrom = _options.StartDate;
 
@@ -115,8 +115,8 @@ public sealed class RollingOptionBackfillHostedService : BackgroundService
             var backTo = cpBack.From.AddDays(-1);
             var savedBack = 0;
             var (_, backComplete, backError) = await _rollingOption.GetRollingOptionBarsAsync(
-                instrument.SecurityId, _options.ExpiryFlag, expiryCode, strikeOffset, isCall, desiredFrom, backTo,
-                async (bars, chunkFrom, chunkTo) => savedBack += await _writer.SaveRollingOptionBarsAsync(underlying, _options.ExpiryFlag, expiryCode, strikeOffset, isCall, bars, cancellationToken),
+                instrument.SecurityId, expiryFlag, expiryCode, strikeOffset, isCall, desiredFrom, backTo,
+                async (bars, chunkFrom, chunkTo) => savedBack += await _writer.SaveRollingOptionBarsAsync(underlying, expiryFlag, expiryCode, strikeOffset, isCall, bars, cancellationToken),
                 cancellationToken);
 
             if (backComplete)
@@ -125,12 +125,12 @@ public sealed class RollingOptionBackfillHostedService : BackgroundService
                 await _writer.SaveBackfillCheckpointAsync(seriesKey, underlying, completedFrom.Value, cpBack.Through, cancellationToken);
                 if (savedBack > 0)
                     _logger.LogInformation("Extended {Underlying} {Flag}:{Code} {Offset}{Side} rolling-option backfill backward to {From} - saved {Count} bar(s).",
-                        underlying, _options.ExpiryFlag, expiryCode, strikeOffset, isCall ? "CE" : "PE", desiredFrom, savedBack);
+                        underlying, expiryFlag, expiryCode, strikeOffset, isCall ? "CE" : "PE", desiredFrom, savedBack);
             }
             else
             {
                 _logger.LogWarning("{Underlying} {Flag}:{Code} {Offset}{Side} rolling-option backward extension [{From}..{To}] stopped early ({Error}) - will retry the whole extension next pass.",
-                    underlying, _options.ExpiryFlag, expiryCode, strikeOffset, isCall ? "CE" : "PE", desiredFrom, backTo, backError);
+                    underlying, expiryFlag, expiryCode, strikeOffset, isCall ? "CE" : "PE", desiredFrom, backTo, backError);
             }
         }
 
@@ -139,10 +139,10 @@ public sealed class RollingOptionBackfillHostedService : BackgroundService
 
         var savedTotal = 0;
         var (_, fullyComplete, error) = await _rollingOption.GetRollingOptionBarsAsync(
-            instrument.SecurityId, _options.ExpiryFlag, expiryCode, strikeOffset, isCall, forwardFrom, today,
+            instrument.SecurityId, expiryFlag, expiryCode, strikeOffset, isCall, forwardFrom, today,
             async (bars, chunkFrom, chunkTo) =>
             {
-                var saved = await _writer.SaveRollingOptionBarsAsync(underlying, _options.ExpiryFlag, expiryCode, strikeOffset, isCall, bars, cancellationToken);
+                var saved = await _writer.SaveRollingOptionBarsAsync(underlying, expiryFlag, expiryCode, strikeOffset, isCall, bars, cancellationToken);
                 savedTotal += saved;
                 await _writer.SaveBackfillCheckpointAsync(seriesKey, underlying, completedFrom ?? forwardFrom, chunkTo, cancellationToken);
             },
@@ -150,10 +150,10 @@ public sealed class RollingOptionBackfillHostedService : BackgroundService
 
         if (savedTotal > 0)
             _logger.LogInformation("Saved {Count} rolling-option bar(s) for {Underlying} {Flag}:{Code} {Offset}{Side} ({From}..{To}).",
-                savedTotal, underlying, _options.ExpiryFlag, expiryCode, strikeOffset, isCall ? "CE" : "PE", forwardFrom, today);
+                savedTotal, underlying, expiryFlag, expiryCode, strikeOffset, isCall ? "CE" : "PE", forwardFrom, today);
         if (!fullyComplete)
             _logger.LogWarning("{Underlying} {Flag}:{Code} {Offset}{Side} rolling-option backfill stopped early this pass ({Error}) - checkpoint holds the last successful chunk.",
-                underlying, _options.ExpiryFlag, expiryCode, strikeOffset, isCall ? "CE" : "PE", error);
+                underlying, expiryFlag, expiryCode, strikeOffset, isCall ? "CE" : "PE", error);
     }
 
     private static List<string> BuildStrikeOffsets(int strikesEachSide)

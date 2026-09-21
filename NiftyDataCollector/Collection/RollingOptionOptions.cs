@@ -23,10 +23,6 @@ public sealed class RollingOptionOptions
     /// automatically, same as every other backfill in this project.</summary>
     public DateOnly StartDate { get; set; } = DateOnly.FromDateTime(DateTime.UtcNow.AddMonths(-6));
 
-    /// <summary>"WEEK" or "MONTH" - which expiry cycle to roll across. NIFTY trades weekly, so
-    /// WEEK is the default; switch to MONTH for an underlying that only has monthly expiries.</summary>
-    public string ExpiryFlag { get; set; } = "WEEK";
-
     /// <summary>Which "cycles out" to backfill - CONFIRMED 1-indexed against a real account: 1 is
     /// the currently-rolling nearest cycle, 2 the one after that. (0 is NOT valid - Dhan's API
     /// rejects it outright with "Input_Exception: expiryCode is required", i.e. it's treated as

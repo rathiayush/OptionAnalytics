@@ -7,12 +7,13 @@ only to discover which strikes/contracts to pull real history for, never to pers
 response itself. Runs independently of OptionAnalytics.Server - no project reference, no shared
 runtime state - see "Why duplicated Dhan code?" below.
 
-**Tracking more than one index**: `Collector:Underlyings` in `appsettings.json` is a list; it ships
-with just NIFTY so a first backfill run stays focused on one index. To add BANKNIFTY (or run it on
-its own), add `{ "Name": "BANKNIFTY", "StrikeStep": 100 }` to that list (in `appsettings.json` or
-your own `appsettings.Local.json`) and restart - each index gets its own full cycle every poll, and
-each security's own backfill checkpoint (see below) means adding one later never disturbs the
-other's already-saved data or progress.
+**Tracking more than one index**: `Collector:Underlyings` in `appsettings.json` is a list, shipping
+with both NIFTY and BANKNIFTY by default - each gets its own full cycle every poll, and each
+security's own backfill checkpoint (see below) means adding or removing one never disturbs the
+other's already-saved data or progress. Each entry sets its own `StrikeStep` AND `ExpiryFlag` -
+NIFTY is `"WEEK"`, BANKNIFTY is `"MONTH"` (NSE discontinued BANKNIFTY's own weekly options
+entirely - requesting `"WEEK"` for it returns nothing to backfill, confirmed in practice). To trim
+back to just one index, remove the other's entry from the list.
 
 ## What it collects, and why different tables
 
@@ -92,7 +93,7 @@ scoped to `/charts/intraday` only.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `Underlyings` | `[{"Name":"NIFTY","StrikeStep":50}]` | Which indices to track, each with its own strike spacing - add `{"Name":"BANKNIFTY","StrikeStep":100}` to track it too (see above) |
+| `Underlyings` | NIFTY (`WEEK`) + BANKNIFTY (`MONTH`) | Which indices to track, each with its own strike spacing and `ExpiryFlag` (see above) |
 | `StrikesEachSide` | 10 | ATM ± this many strikes |
 | `TrackedExpiryCount` | 1 | How many of the nearest listed expiries to track |
 | `BackfillDays` | 500 | How far back a NEW contract's (or spot's) OHLC history reaches (OI/IV are unaffected - see above) |
@@ -107,9 +108,14 @@ See "Rolling Options" below for what this feature is and the recommended rollout
 |---|---|---|
 | `Enabled` | `false` | Turn on to start the rolling-option backfill |
 | `StartDate` | last 6 months | How far back to backfill - widen this later (e.g. `"2023-03-01"`) once this looks right |
-| `ExpiryFlag` | `"WEEK"` | `"WEEK"` or `"MONTH"` - which expiry cycle to roll across |
 | `ExpiryCodes` | `[1, 2]` | Which "cycles out" to track (1-indexed: 1 = nearest, 2 = next) - nearest 2 expiries by default |
 | `PollIntervalMinutes` | 60 | How often to re-sweep every series once the initial catch-up finishes |
+
+**`ExpiryFlag` is per-underlying, not here** - set it on each entry in `Collector:Underlyings`
+instead (e.g. `{ "Name": "BANKNIFTY", "StrikeStep": 100, "ExpiryFlag": "MONTH" }`), since NIFTY and
+BANKNIFTY genuinely don't share a cadence: NSE discontinued BANKNIFTY's own weekly options
+entirely, so requesting `"WEEK"` for it returns nothing to backfill (confirmed in practice - zero
+rows ever saved). Defaults to `"WEEK"` per underlying if left unset.
 
 ## Backfilling long ranges: chunking and checkpoints
 

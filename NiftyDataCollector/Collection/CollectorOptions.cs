@@ -8,6 +8,15 @@ public sealed class TrackedUnderlying
 {
     public string Name { get; set; } = "NIFTY";
     public int StrikeStep { get; set; } = 50;
+
+    /// <summary>"WEEK" or "MONTH" - which expiry cycle RollingOptionBackfillHostedService rolls
+    /// across for THIS underlying specifically. Per-underlying (not a single shared setting)
+    /// because NIFTY and BANKNIFTY genuinely don't share one: NSE discontinued BANKNIFTY's own
+    /// weekly options entirely, so requesting "WEEK" for it returns nothing to backfill at all -
+    /// confirmed in practice (zero rows ever saved for BANKNIFTY under WEEK). CollectorHostedService
+    /// itself doesn't use this field - it discovers real expiries from the live option chain
+    /// directly, which needs no cadence hint.</summary>
+    public string ExpiryFlag { get; set; } = "WEEK";
 }
 
 /// <summary>Bound from the "Collector" section of appsettings.json.</summary>
