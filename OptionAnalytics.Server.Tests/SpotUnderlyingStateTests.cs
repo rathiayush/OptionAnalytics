@@ -17,7 +17,7 @@ public sealed class SpotUnderlyingStateTests
     private static readonly DateTimeOffset T0 = new(2026, 1, 5, 4, 0, 0, TimeSpan.Zero);
 
     private static SpotTick Tick(DateTimeOffset time, decimal price = 100m) =>
-        new(SecurityId: 13, LastPrice: price, Open: price, High: price, Low: price, Close: price, Volume: 0, BestBidPrice: 0, BestAskPrice: 0, ExchangeTimestamp: time);
+        new(SecurityId: 13, LastPrice: price, Open: price, High: price, Low: price, Close: price, Volume: 0, BestBidPrice: 0, BestAskPrice: 0, OpenInterest: 0, ExchangeTimestamp: time);
 
     [Fact]
     public void ASingleLiveTick_WithNoBackfillSeeded_MakesGetCandlesNonEmptyButGetClosedCandlesStaysEmpty()

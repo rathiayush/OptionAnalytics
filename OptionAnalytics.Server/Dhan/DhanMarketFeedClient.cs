@@ -408,6 +408,9 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
             // depth" rather than a real zero price.
             BestBidPrice: packet.BestBidPrice > 0 ? packet.BestBidPrice : previous?.BestBidPrice ?? 0,
             BestAskPrice: packet.BestAskPrice > 0 ? packet.BestAskPrice : previous?.BestAskPrice ?? 0,
+            // Also only ever populated by a Full-mode packet - see BestBidPrice/BestAskPrice's own
+            // comment just above, same reasoning.
+            OpenInterest: packet.OpenInterest > 0 ? packet.OpenInterest : previous?.OpenInterest ?? 0,
             ExchangeTimestamp: packet.ExchangeTimestamp);
 
         _lastTick[packet.SecurityId] = tick;

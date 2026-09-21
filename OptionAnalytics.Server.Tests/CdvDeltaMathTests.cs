@@ -128,7 +128,7 @@ public sealed class CdvDeltaMathTests
     }
 
     private static SpotTick Tick(uint securityId, decimal price, long volume, DateTimeOffset time) =>
-        new(securityId, price, price, price, price, price, volume, 0, 0, time);
+        new(securityId, price, price, price, price, price, volume, 0, 0, 0, time);
 
     [Fact]
     public void ApplyTick_TickRuleAccumulation_MatchesHandComputedRunningTotal()

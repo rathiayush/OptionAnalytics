@@ -10,7 +10,9 @@ namespace OptionAnalytics.Server.Dhan;
 /// strikes - see DhanMarketFeedClient/CdvHostedService; the spot/index token stays Quote-only,
 /// since an index has no order book) AND at least one Full packet has arrived for it - a caller
 /// pricing off these must treat 0 as "no live depth yet" and fall back to the last traded price,
-/// same as StrategyTriggerHostedService does re-pricing an order retry.</summary>
+/// same as StrategyTriggerHostedService does re-pricing an order retry. OpenInterest is likewise
+/// only ever populated for a Full-mode instrument (an index has no OI either) - see
+/// OiReplayLiveFeedService, the first live consumer of this field.</summary>
 public sealed record SpotTick(
     uint SecurityId,
     decimal LastPrice,
@@ -21,4 +23,5 @@ public sealed record SpotTick(
     long Volume,
     decimal BestBidPrice,
     decimal BestAskPrice,
+    long OpenInterest,
     DateTimeOffset ExchangeTimestamp);
