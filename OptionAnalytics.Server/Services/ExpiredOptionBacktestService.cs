@@ -222,17 +222,32 @@ public sealed class ExpiredOptionBacktestService
     /// Added because useStoredData previously only ever reached the option-premium fetch below -
     /// this method took no such parameter at all, so a run with the toggle ON still fell through to a
     /// live /charts/intraday call for spot on any window the disk cache didn't already fully cover
-    /// (its own prefetch only holds roughly the last year). A stored-source result must fully cover
-    /// [fromDay,toDay] to be trusted - a partial hit (e.g. today's still-forming session, which
-    /// NiftyDataCollector's own collector cycle may not have written yet) falls through to the next
-    /// source rather than silently returning an incomplete series as if it were whole.</summary>
+    /// (its own prefetch only holds roughly the last year).
+    ///
+    /// coreFromDay/coreToDay (the actual [fromDay,toDay] a strategy trades over) are what coverage is
+    /// checked against - NOT fromDay/toDay themselves, which for the CHART fetch are widened by
+    /// ChartPaddingDays on each side (see RunAsync's own chartFromDay/chartToDay). A real run
+    /// confirmed why that distinction matters: ChartPaddingDays=2 from a Tuesday lookback start lands
+    /// squarely on the preceding Sunday, which no trading day ever covers - checking the WIDENED
+    /// window made this method conclude "incomplete" and fall back to a live call for the ENTIRE
+    /// fetch (padding included) even when the actual [fromDay,toDay] the backtest needs was fully
+    /// backfilled. The chart's own cosmetic padding is allowed to fall a day or two short at either
+    /// edge (this app has no trading-calendar/holiday helper to resolve "the padding's nearest real
+    /// trading day" precisely) - only the core window has to be genuinely complete for this source to
+    /// be trusted.
+    ///
+    /// A stored-source result must fully cover [coreFromDay,coreToDay] to be trusted - a partial hit
+    /// (e.g. today's still-forming session, which NiftyDataCollector's own collector cycle may not
+    /// have written yet) falls through to the next source rather than silently returning an
+    /// incomplete series as if it were whole.</summary>
     private async Task<(IReadOnlyList<CandleWithVolume> Candles, string? Error)> GetSpotCandlesAsync(
-        string underlying, DhanSpotInstrument instrument, DateOnly fromDay, DateOnly toDay, bool useStoredData, CancellationToken cancellationToken)
+        string underlying, DhanSpotInstrument instrument, DateOnly fromDay, DateOnly toDay, DateOnly coreFromDay, DateOnly coreToDay,
+        bool useStoredData, CancellationToken cancellationToken)
     {
         if (useStoredData && _storedSpot.IsConfigured)
         {
             var (storedBars, storedError) = await _storedSpot.GetSpotCandlesAsync(underlying, fromDay, toDay, cancellationToken);
-            if (storedError is null && CoversWholeRange(storedBars, fromDay, toDay))
+            if (storedError is null && CoversWholeRange(storedBars, coreFromDay, coreToDay))
                 return (storedBars, null);
         }
 
@@ -247,7 +262,9 @@ public sealed class ExpiredOptionBacktestService
     /// legitimately "complete" day) used to decide whether a stored-source result is trustworthy
     /// enough to stop looking further, or is instead a partial result (a still-forming session,
     /// a collector that hasn't caught up yet) that should fall through to the next source instead
-    /// of being served as if it were whole.</summary>
+    /// of being served as if it were whole. Callers must pass the CORE window this data actually
+    /// needs to be correct for, not a cosmetically-padded one - see GetSpotCandlesAsync's own doc
+    /// comment for the real bug that came from getting this wrong.</summary>
     private static bool CoversWholeRange(IReadOnlyList<CandleWithVolume> bars, DateOnly fromDay, DateOnly toDay)
     {
         if (bars.Count == 0) return false;
@@ -392,7 +409,7 @@ public sealed class ExpiredOptionBacktestService
         var chartFromDay = fromDay.AddDays(-ChartPaddingDays);
         var chartToDay = toDay.AddDays(ChartPaddingDays);
 
-        var (spotVolumeBarsForChart, spotError) = await GetSpotCandlesAsync(underlying, instrument, chartFromDay, chartToDay, useStoredData, cancellationToken);
+        var (spotVolumeBarsForChart, spotError) = await GetSpotCandlesAsync(underlying, instrument, chartFromDay, chartToDay, fromDay, toDay, useStoredData, cancellationToken);
         var spotBarsForChart = spotVolumeBarsForChart.Select(b => b.ToCandle()).ToList();
         var spotBars1m = spotBarsForChart.Where(b => IstClock.IstDate(b.Time) >= fromDay && IstClock.IstDate(b.Time) <= toDay).ToList();
         // The same [fromDay,toDay] slice as spotBars1m, but keeping Volume - what VwapCalculator
@@ -645,7 +662,7 @@ public sealed class ExpiredOptionBacktestService
             // validate every member of the strike BAND fetched below - see StrikeBandSteps' own doc
             // comment for why one token alone cannot keep tracking a fixed absolute strike as the
             // index moves.
-            var (windowSpotVolumeBars, spotError) = await GetSpotCandlesAsync(underlying, instrument, fromDay, toDay, useStoredData, cancellationToken);
+            var (windowSpotVolumeBars, spotError) = await GetSpotCandlesAsync(underlying, instrument, fromDay, toDay, fromDay, toDay, useStoredData, cancellationToken);
             var windowSpotBars = windowSpotVolumeBars.Select(b => b.ToCandle()).ToList();
             if (windowSpotBars.Count == 0)
                 return RollingOptionChartResult.Failed(
