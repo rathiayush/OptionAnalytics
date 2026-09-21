@@ -92,6 +92,6 @@ public sealed class OiReplayService
         var spotCandlesTf = BacktestUtil.AggregateCandles(spotBars1m, timeframe);
 
         return new OiReplayResult(true, null, underlying, date, timeframe, step, expiryFlag, NearestExpiryCode,
-            spotCandlesTf, cePoints, pePoints);
+            spotCandlesTf, spotBars1m, cePoints, pePoints);
     }
 }

@@ -1,9 +1,9 @@
 import { Component, useEffect, useMemo, useRef, useState } from 'react'
-import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicker, Alert, Empty, Tooltip, Slider, Tag } from 'antd'
-import { PlayCircleOutlined, PauseCircleOutlined, ReloadOutlined } from '@ant-design/icons'
+import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicker, Alert, Empty, Tooltip, Slider, Tag, InputNumber, Switch } from 'antd'
+import { PlayCircleOutlined, PauseCircleOutlined, ReloadOutlined, SoundOutlined } from '@ant-design/icons'
 import { createChart, CandlestickSeries, CrosshairMode } from 'lightweight-charts'
 import {
-  UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR,
+  UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR,
   istTimeFormatter, istTickMarkFormatter, toBar,
   NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState,
 } from './shared.jsx'
@@ -35,6 +35,57 @@ function latestAtOrBefore(sortedPoints, asOfMs) {
     if (t <= asOfMs) return sortedPoints[i]
   }
   return null
+}
+
+// Client-side counterpart to the backend's own BacktestUtil.AggregateCandles - buckets native
+// 1-minute bars (already chart-time-shifted by toBar/toChartTime) into timeframeMinutes candles.
+// Deliberately does NOT drop a trailing incomplete bucket the way the backend does for a finished
+// backtest: here the whole point is to show the CURRENTLY FORMING candle live as 1-minute ticks
+// keep arriving, the same way a real charting terminal's current bar updates mid-formation. Safe to
+// bucket the already-IST-shifted time directly - the shift (5.5 hours) divides evenly into every
+// offered timeframe (1/3/5/15 min), so it lands on the exact same bucket boundaries plain UTC would.
+function aggregateBars(oneMinBars, timeframeMinutes) {
+  if (timeframeMinutes <= 1) return oneMinBars
+  const bucketSeconds = timeframeMinutes * 60
+  const buckets = new Map()
+  for (const bar of oneMinBars) {
+    const bucketTime = Math.floor(bar.time / bucketSeconds) * bucketSeconds
+    const existing = buckets.get(bucketTime)
+    if (existing) {
+      existing.high = Math.max(existing.high, bar.high)
+      existing.low = Math.min(existing.low, bar.low)
+      existing.close = bar.close
+    } else {
+      buckets.set(bucketTime, { time: bucketTime, open: bar.open, high: bar.high, low: bar.low, close: bar.close })
+    }
+  }
+  return [...buckets.values()].sort((a, b) => a.time - b.time)
+}
+
+// A short beep via the Web Audio API - no asset file needed. Lazily creates (and reuses) one
+// AudioContext, created on first call rather than at module load, since most browsers refuse to
+// start an AudioContext before any user gesture on the page - by the time this can fire (a replay
+// tick), the user has already clicked Load/Start, which satisfies that.
+let sharedAudioCtx = null
+function playBeep() {
+  try {
+    sharedAudioCtx ??= new (window.AudioContext || window.webkitAudioContext)()
+    const ctx = sharedAudioCtx
+    const osc = ctx.createOscillator()
+    const gain = ctx.createGain()
+    osc.type = 'sine'
+    osc.frequency.value = 880
+    gain.gain.setValueAtTime(0.001, ctx.currentTime)
+    gain.gain.exponentialRampToValueAtTime(0.25, ctx.currentTime + 0.02)
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.35)
+    osc.connect(gain)
+    gain.connect(ctx.destination)
+    osc.start()
+    osc.stop(ctx.currentTime + 0.35)
+  } catch {
+    // Audio unavailable/blocked - the visual alert banner still shows either way, so this is not
+    // the only way the user finds out.
+  }
 }
 
 // The classic Max Pain read: the strike where option WRITERS (as a whole, both legs) would owe the
@@ -87,7 +138,7 @@ const SUPPORT_DARK = '#0a5c1f'
 // further data fetch, just a local re-render. Also draws the strongest OI levels on each side as
 // horizontal price lines directly on the chart (darker = heavier OI = a "harder" level) - the same
 // data the ladder shows in table form, here as the market-structure read on the price chart itself.
-function ReplayChart({ bars, visibleCount, ladderRows, height = 440 }) {
+function ReplayChart({ bars, ladderRows, dayKey, dayHigh, dayLow, height = 440 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
@@ -123,15 +174,17 @@ function ReplayChart({ bars, visibleCount, ladderRows, height = 440 }) {
 
   useEffect(() => {
     if (!seriesRef.current) return
-    seriesRef.current.setData(bars.slice(0, visibleCount))
-  }, [bars, visibleCount])
+    seriesRef.current.setData(bars)
+  }, [bars])
 
-  // Re-fit once when a brand new day's own bars first load - not on every tick, which would fight
-  // the user's own pan/zoom during playback.
+  // Re-fit once when a brand new day/timeframe first loads (dayKey changes) - deliberately NOT on
+  // every tick (bars itself is a fresh array reference every tick as the replay reveals/reaggregates
+  // more of it), which would fight the user's own pan/zoom/scroll during playback - the actual
+  // "should be able to zoom in/out" ask depends on this NOT resetting the view underneath them.
   useEffect(() => {
     if (bars.length > 0) chartRef.current?.timeScale().fitContent()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bars])
+  }, [dayKey])
 
   // Redraws the strongest CHART_LEVELS_PER_SIDE resistance (CE OI) / support (PE OI) lines on
   // every tick, since OI itself changes as the replay advances - always clears the previous set
@@ -148,10 +201,8 @@ function ReplayChart({ bars, visibleCount, ladderRows, height = 440 }) {
     if (!seriesRef.current) return
     for (const line of priceLinesRef.current) seriesRef.current.removePriceLine(line)
     priceLinesRef.current = []
-    if (!ladderRows || ladderRows.length === 0 || bars.length === 0) return
+    if (!ladderRows || ladderRows.length === 0 || dayHigh == null || dayLow == null) return
 
-    const dayHigh = Math.max(...bars.map((b) => b.high))
-    const dayLow = Math.min(...bars.map((b) => b.low))
     const buffer = (dayHigh - dayLow) * 0.5 || dayHigh * 0.02
     const inRange = ladderRows.filter((r) => r.strike >= dayLow - buffer && r.strike <= dayHigh + buffer)
 
@@ -181,7 +232,7 @@ function ReplayChart({ bars, visibleCount, ladderRows, height = 440 }) {
 
     drawSide('ceOi', 'ceIv', RESISTANCE_LIGHT, RESISTANCE_DARK, 'R')
     drawSide('peOi', 'peIv', SUPPORT_LIGHT, SUPPORT_DARK, 'S')
-  }, [ladderRows, bars])
+  }, [ladderRows, dayHigh, dayLow])
 
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }
@@ -217,22 +268,22 @@ function OiLadder({ rows, atmStrike }) {
             align="middle"
             style={{
               background: isAtm ? '#ffffff12' : 'transparent',
-              borderTop: isResistance ? `1px solid ${CE_COLOR}` : isSupport ? `1px solid ${PE_COLOR}` : '1px solid transparent',
-              borderBottom: isResistance ? `1px solid ${CE_COLOR}` : isSupport ? `1px solid ${PE_COLOR}` : '1px solid transparent',
+              borderTop: isResistance ? `1px solid ${DOWN_COLOR}` : isSupport ? `1px solid ${UP_COLOR}` : '1px solid transparent',
+              borderBottom: isResistance ? `1px solid ${DOWN_COLOR}` : isSupport ? `1px solid ${UP_COLOR}` : '1px solid transparent',
               padding: '1px 0',
             }}
           >
             <Col span={10} style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 4 }}>
-              <OiChange value={row.peOiChange} />
+              <OiChangeStack changeValue={row.peOiChange} sinceOpenValue={row.peOiSinceOpen} />
               <Text style={{ fontSize: 10, color: AXIS_COLOR, whiteSpace: 'nowrap' }}>
                 {row.pePrice != null ? `${row.pePrice.toFixed(2)}` : ''}
                 {row.peIv != null ? ` · IV ${row.peIv.toFixed(1)}` : ''}
               </Text>
               <div style={{ width: 70, display: 'flex', justifyContent: 'flex-end' }}>
-                <Tooltip title={row.peOi != null ? `PE OI: ${row.peOi.toLocaleString()}${row.pePrice != null ? `, LTP ${row.pePrice.toFixed(2)}` : ''}${row.peOiChange != null ? ` (${row.peOiChange >= 0 ? '+' : ''}${row.peOiChange.toLocaleString()} in the last min)` : ''}` : 'No data'}>
+                <Tooltip title={row.peOi != null ? `PE OI: ${row.peOi.toLocaleString()}${row.pePrice != null ? `, LTP ${row.pePrice.toFixed(2)}` : ''}${row.peOiChange != null ? ` (${row.peOiChange >= 0 ? '+' : ''}${row.peOiChange.toLocaleString()} in the last min)` : ''}${row.peOiSinceOpen != null ? ` (${row.peOiSinceOpen >= 0 ? '+' : ''}${row.peOiSinceOpen.toLocaleString()} since open)` : ''}` : 'No data'}>
                   <div style={{
                     width: `${((row.peOi ?? 0) / maxPeOi) * 100}%`, minWidth: row.peOi ? 2 : 0, height: 14,
-                    background: isSupport ? PE_COLOR : `${PE_COLOR}99`,
+                    background: isSupport ? UP_COLOR : `${UP_COLOR}99`,
                   }} />
                 </Tooltip>
               </div>
@@ -242,14 +293,14 @@ function OiLadder({ rows, atmStrike }) {
             </Col>
             <Col span={10} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
               <div style={{ width: 70 }}>
-                <Tooltip title={row.ceOi != null ? `CE OI: ${row.ceOi.toLocaleString()}${row.cePrice != null ? `, LTP ${row.cePrice.toFixed(2)}` : ''}${row.ceOiChange != null ? ` (${row.ceOiChange >= 0 ? '+' : ''}${row.ceOiChange.toLocaleString()} in the last min)` : ''}` : 'No data'}>
+                <Tooltip title={row.ceOi != null ? `CE OI: ${row.ceOi.toLocaleString()}${row.cePrice != null ? `, LTP ${row.cePrice.toFixed(2)}` : ''}${row.ceOiChange != null ? ` (${row.ceOiChange >= 0 ? '+' : ''}${row.ceOiChange.toLocaleString()} in the last min)` : ''}${row.ceOiSinceOpen != null ? ` (${row.ceOiSinceOpen >= 0 ? '+' : ''}${row.ceOiSinceOpen.toLocaleString()} since open)` : ''}` : 'No data'}>
                   <div style={{
                     width: `${((row.ceOi ?? 0) / maxCeOi) * 100}%`, minWidth: row.ceOi ? 2 : 0, height: 14,
-                    background: isResistance ? CE_COLOR : `${CE_COLOR}99`,
+                    background: isResistance ? DOWN_COLOR : `${DOWN_COLOR}99`,
                   }} />
                 </Tooltip>
               </div>
-              <OiChange value={row.ceOiChange} />
+              <OiChangeStack changeValue={row.ceOiChange} sinceOpenValue={row.ceOiSinceOpen} />
               <Text style={{ fontSize: 10, color: AXIS_COLOR, whiteSpace: 'nowrap' }}>
                 {row.cePrice != null ? `${row.cePrice.toFixed(2)}` : ''}
                 {row.ceIv != null ? ` · IV ${row.ceIv.toFixed(1)}` : ''}
@@ -294,9 +345,43 @@ function OiChange({ value }) {
   if (value == null || value === 0) return <Text style={{ fontSize: 9, color: AXIS_COLOR }}>·</Text>
   const up = value > 0
   return (
-    <Text style={{ fontSize: 9, color: up ? CE_COLOR : PE_COLOR }}>
+    <Text style={{ fontSize: 9, color: up ? UP_COLOR : DOWN_COLOR }}>
       {up ? '▲' : '▼'}{Math.abs(value).toLocaleString()}
     </Text>
+  )
+}
+
+function formatCompact(n) {
+  const abs = Math.abs(n)
+  const sign = n < 0 ? '-' : '+'
+  if (abs >= 1_000_000) return `${sign}${(abs / 1_000_000).toFixed(1)}M`
+  if (abs >= 1_000) return `${sign}${(abs / 1_000).toFixed(1)}K`
+  return `${sign}${abs}`
+}
+
+// Cumulative OI change since the day's very first revealed candle - same up/down coloring as
+// OiChange (the last-minute delta) but visually distinct (compact K/M notation, "open" tag and a
+// tooltip with the exact figure) so it's never confused with the single-tick number sitting right
+// next to it - this is the whole day's drift, per the user's own "change in OI since days open".
+function SinceOpenChange({ value }) {
+  if (value == null) return null
+  if (value === 0) return <Text style={{ fontSize: 8, color: AXIS_COLOR }}>open ·</Text>
+  const up = value > 0
+  return (
+    <Tooltip title={`${up ? '+' : ''}${value.toLocaleString()} since today's open`}>
+      <Text style={{ fontSize: 8, color: up ? UP_COLOR : DOWN_COLOR, whiteSpace: 'nowrap' }}>
+        open {formatCompact(value)}
+      </Text>
+    </Tooltip>
+  )
+}
+
+function OiChangeStack({ changeValue, sinceOpenValue }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', lineHeight: 1.15 }}>
+      <OiChange value={changeValue} />
+      <SinceOpenChange value={sinceOpenValue} />
+    </div>
   )
 }
 
@@ -361,7 +446,7 @@ export default function OiReplayPage() {
       .then((body) => {
         if (!body?.success) throw new Error(body?.error || 'This run did not succeed.')
         setResult(body)
-        setVisibleCount(body.spotCandles?.length > 0 ? 1 : 0)
+        setVisibleCount(body.spotCandlesOneMinute?.length > 0 ? 1 : 0)
       })
       .catch((err) => {
         console.error('Failed to load OI replay data:', err)
@@ -371,29 +456,48 @@ export default function OiReplayPage() {
       .finally(() => setLoading(false))
   }
 
-  const bars = useMemo(() => (result?.spotCandles ?? []).map(toBar), [result])
+  // The TRUE replay clock - native 1-minute bars, so every derived read (ladder, OI change, Market
+  // Read, Day Accumulation, alerts) advances one real minute per tick regardless of which timeframe
+  // the CHART itself displays. The chart's own candles are a re-aggregation of a slice of this,
+  // computed separately below - the two used to be the same array, which meant everything on the
+  // page only updated once per whole displayed candle (once every 5 or 15 real minutes on a coarser
+  // timeframe) instead of continuously.
+  const oneMinBars = useMemo(() => (result?.spotCandlesOneMinute ?? []).map(toBar), [result])
   const ceByStrike = useMemo(() => groupByStrike(result?.cePoints ?? []), [result])
   const peByStrike = useMemo(() => groupByStrike(result?.pePoints ?? []), [result])
 
-  // Playback loop - a single interval that advances visibleCount by one bar per tick, self-stopping
-  // at the end of the day's own bars rather than needing a separate "are we done" effect.
+  // Playback loop - a single interval that advances visibleCount by one NATIVE MINUTE per tick,
+  // self-stopping at the end of the day's own bars rather than needing a separate "are we done"
+  // effect.
   useEffect(() => {
     if (!playing) return
     timerRef.current = setInterval(() => {
       setVisibleCount((c) => {
-        if (c >= bars.length) { setPlaying(false); return c }
+        if (c >= oneMinBars.length) { setPlaying(false); return c }
         return c + 1
       })
     }, speedMs)
     return () => clearInterval(timerRef.current)
-  }, [playing, speedMs, bars.length])
+  }, [playing, speedMs, oneMinBars.length])
 
-  const currentBar = bars[visibleCount - 1] ?? null
+  const currentBar = oneMinBars[visibleCount - 1] ?? null
   const asOfMs = currentBar ? currentBar.time * 1000 : null
 
-  // Every row also carries its own OI ONE MINUTE AGO (native resolution, regardless of the chart's
-  // own timeframe - "change every min" was explicit) alongside the current reading, so the ladder
-  // can show a rising/falling delta per strike, not just the current absolute number.
+  // The chart's own displayed candles - the visible slice of 1-minute bars, re-aggregated to
+  // whatever timeframe is selected, recomputed fresh each tick so the LAST (currently forming)
+  // candle updates live exactly like a real charting terminal's current bar does.
+  const displayBars = useMemo(
+    () => aggregateBars(oneMinBars.slice(0, visibleCount), timeframe),
+    [oneMinBars, visibleCount, timeframe],
+  )
+  const dayHigh = useMemo(() => (oneMinBars.length > 0 ? Math.max(...oneMinBars.map((b) => b.high)) : null), [oneMinBars])
+  const dayLow = useMemo(() => (oneMinBars.length > 0 ? Math.min(...oneMinBars.map((b) => b.low)) : null), [oneMinBars])
+  const dayStartMs = oneMinBars[0] ? oneMinBars[0].time * 1000 : null
+
+  // Every row carries its OI both ONE MINUTE AGO (native resolution regardless of the chart's own
+  // timeframe - "change every min" was explicit) AND at the DAY'S OPEN, alongside the current
+  // reading - the ladder shows both a tick-to-tick delta and a since-open delta per strike, not
+  // just the Day OI Accumulation card's own whole-band totals.
   const ladderRows = useMemo(() => {
     if (asOfMs == null) return []
     const priorMs = asOfMs - 60_000
@@ -403,16 +507,20 @@ export default function OiReplayPage() {
       const pe = latestAtOrBefore(peByStrike.get(strike) ?? [], asOfMs)
       const cePrior = latestAtOrBefore(ceByStrike.get(strike) ?? [], priorMs)
       const pePrior = latestAtOrBefore(peByStrike.get(strike) ?? [], priorMs)
+      const ceOpen = dayStartMs != null ? latestAtOrBefore(ceByStrike.get(strike) ?? [], dayStartMs) : null
+      const peOpen = dayStartMs != null ? latestAtOrBefore(peByStrike.get(strike) ?? [], dayStartMs) : null
       return {
         strike,
         ceOi: ce?.openInterest ?? null, ceIv: ce?.impliedVolatility ?? null, cePrice: ce?.price ?? null,
         peOi: pe?.openInterest ?? null, peIv: pe?.impliedVolatility ?? null, pePrice: pe?.price ?? null,
         ceOiChange: ce?.openInterest != null && cePrior?.openInterest != null ? ce.openInterest - cePrior.openInterest : null,
         peOiChange: pe?.openInterest != null && pePrior?.openInterest != null ? pe.openInterest - pePrior.openInterest : null,
+        ceOiSinceOpen: ce?.openInterest != null && ceOpen?.openInterest != null ? ce.openInterest - ceOpen.openInterest : null,
+        peOiSinceOpen: pe?.openInterest != null && peOpen?.openInterest != null ? pe.openInterest - peOpen.openInterest : null,
       }
     })
     return rows.sort((a, b) => b.strike - a.strike)
-  }, [ceByStrike, peByStrike, asOfMs])
+  }, [ceByStrike, peByStrike, asOfMs, dayStartMs])
 
   const step = result?.step || 50
   const atmStrike = currentBar ? Math.round(currentBar.close / step) * step : null
@@ -431,7 +539,7 @@ export default function OiReplayPage() {
   // Every strike/side's OI at the very first revealed bar of the day - the fixed reference point
   // "day accumulation" and the top-movers list below both compare the CURRENT ladder against, so
   // both read "since the open", not "since the last minute" (that's what OiChange already covers).
-  const dayStartMs = bars[0] ? bars[0].time * 1000 : null
+  // (dayStartMs itself is declared above, before ladderRows, since the ladder now also needs it.)
   const dayStartByStrike = useMemo(() => {
     if (dayStartMs == null) return new Map()
     const map = new Map()
@@ -453,7 +561,7 @@ export default function OiReplayPage() {
   // strict every-single-minute streak (this app has no per-minute streak tracker, and a streak that
   // reverses for one minute then resumes is still the same real accumulation story).
   const dayOiSummary = useMemo(() => {
-    if (!currentBar || bars.length === 0 || dayStartByStrike.size === 0) return null
+    if (!currentBar || oneMinBars.length === 0 || dayStartByStrike.size === 0) return null
 
     let ceStartTotal = 0
     let peStartTotal = 0
@@ -471,7 +579,7 @@ export default function OiReplayPage() {
     }
     const ceDayChange = totalCeOi - ceStartTotal
     const peDayChange = totalPeOi - peStartTotal
-    const dayPriceChange = currentBar.close - bars[0].open
+    const dayPriceChange = currentBar.close - oneMinBars[0].open
 
     let dayBias = 'Neutral'
     let dayReason = 'No clear net accumulation pattern for the day so far'
@@ -484,7 +592,37 @@ export default function OiReplayPage() {
     const removed = [...movers].filter((m) => m.change < 0).sort((a, b) => a.change - b.change).slice(0, 2)
 
     return { dayBias, dayReason, ceDayChange, peDayChange, added, removed }
-  }, [currentBar, bars, ladderRows, dayStartByStrike, totalCeOi, totalPeOi])
+  }, [currentBar, oneMinBars, ladderRows, dayStartByStrike, totalCeOi, totalPeOi])
+
+  // Smart alert: whenever a strike NEAR ATM shows a one-minute OI shift past this threshold, flag
+  // it and beep - the "someone just loaded/unwound a huge quantity" event this app can't otherwise
+  // call out on its own. "Near ATM" is +-3 strike-steps (the same handful of strikes a real trader
+  // actually watches tick to tick, not the whole +-10 band the ladder shows). Checked once PER
+  // REPLAY TICK (native 1-minute), not once per render, so it beeps at most once per real minute
+  // rather than repeatedly while a breach's own row re-renders for unrelated reasons.
+  const [alertThreshold, setAlertThreshold] = useState(1_000_000)
+  const [soundEnabled, setSoundEnabled] = useState(true)
+
+  const activeAlerts = useMemo(() => {
+    if (atmStrike == null || ladderRows.length === 0) return []
+    const nearAtm = ladderRows.filter((r) => Math.abs(r.strike - atmStrike) <= step * 3)
+    const breaches = []
+    for (const r of nearAtm) {
+      if (r.ceOiChange != null && Math.abs(r.ceOiChange) >= alertThreshold) breaches.push({ strike: r.strike, side: 'CE', change: r.ceOiChange })
+      if (r.peOiChange != null && Math.abs(r.peOiChange) >= alertThreshold) breaches.push({ strike: r.strike, side: 'PE', change: r.peOiChange })
+    }
+    return breaches
+  }, [ladderRows, atmStrike, step, alertThreshold])
+
+  // The beep is the one genuine side effect here (activeAlerts above is a plain derived value) -
+  // fires at most once per NEW replay tick that has a breach, not once per render, so it doesn't
+  // re-beep for the same tick if something unrelated causes a re-render.
+  const lastAlertedTickRef = useRef(-1)
+  useEffect(() => {
+    if (visibleCount === lastAlertedTickRef.current) return
+    lastAlertedTickRef.current = visibleCount
+    if (activeAlerts.length > 0 && soundEnabled) playBeep()
+  }, [visibleCount, activeAlerts, soundEnabled])
 
   // Synthesizes PCR + OI buildup + IV skew into one heuristic read - three independent votes
   // (Bullish/Bearish/Neutral), combined into an overall bias and a candidate strike/side. This is a
@@ -511,7 +649,7 @@ export default function OiReplayPage() {
     const nearAtm = ladderRows.filter((r) => Math.abs(r.strike - atmStrike) <= step * 2)
     const ceChangeSum = nearAtm.reduce((s, r) => s + (r.ceOiChange ?? 0), 0)
     const peChangeSum = nearAtm.reduce((s, r) => s + (r.peOiChange ?? 0), 0)
-    const priorBar = bars[Math.max(0, visibleCount - 6)]
+    const priorBar = oneMinBars[Math.max(0, visibleCount - 6)]
     const priceChange = priorBar ? currentBar.close - priorBar.close : 0
 
     let oiBuildup = 'No clear buildup pattern near ATM yet'
@@ -575,7 +713,7 @@ export default function OiReplayPage() {
       buySide, buyStrike, sellSide, sellStrike,
       safetyOk, safetyReason,
     }
-  }, [currentBar, ladderRows, pcr, atmStrike, step, bars, visibleCount, dayStartByStrike])
+  }, [currentBar, ladderRows, pcr, atmStrike, step, oneMinBars, visibleCount, dayStartByStrike])
 
   return (
     <div style={{ maxWidth: 1280, margin: '0 auto', padding: '24px 16px' }}>
@@ -612,35 +750,58 @@ export default function OiReplayPage() {
                 <Button
                   icon={playing ? <PauseCircleOutlined /> : <PlayCircleOutlined />}
                   onClick={() => setPlaying((p) => !p)}
-                  disabled={bars.length === 0 || visibleCount >= bars.length}
+                  disabled={oneMinBars.length === 0 || visibleCount >= oneMinBars.length}
                 >
                   {playing ? 'Pause' : 'Start'}
                 </Button>
-                <Button icon={<ReloadOutlined />} onClick={() => { setPlaying(false); setVisibleCount(bars.length > 0 ? 1 : 0) }}>Reset</Button>
+                <Button icon={<ReloadOutlined />} onClick={() => { setPlaying(false); setVisibleCount(oneMinBars.length > 0 ? 1 : 0) }}>Reset</Button>
                 <Text type="secondary" style={{ fontSize: 12 }}>Speed</Text>
                 <Select value={speedMs} onChange={setSpeedMs} style={{ width: 90 }} options={SPEED_OPTIONS} />
                 <div style={{ flex: 1, minWidth: 200 }}>
                   <Slider
-                    min={0} max={Math.max(0, bars.length - 1)} value={visibleCount - 1}
+                    min={0} max={Math.max(0, oneMinBars.length - 1)} value={visibleCount - 1}
                     onChange={(v) => { setPlaying(false); setVisibleCount(v + 1) }}
-                    tooltip={{ formatter: (v) => bars[v] ? istTimeFormatter(bars[v].time) : '' }}
+                    tooltip={{ formatter: (v) => oneMinBars[v] ? istTimeFormatter(oneMinBars[v].time) : '' }}
                   />
                 </div>
                 <Text style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
-                  {currentBar ? `${istTimeFormatter(currentBar.time)} (${visibleCount}/${bars.length})` : '—'}
+                  {currentBar ? `${istTimeFormatter(currentBar.time)} (${visibleCount}/${oneMinBars.length})` : '—'}
                 </Text>
               </Space>
+              <Space align="center" size={12} wrap style={{ marginTop: 10 }}>
+                <Text type="secondary" style={{ fontSize: 12 }}>Alert when a strike near ATM shifts by</Text>
+                <InputNumber
+                  value={alertThreshold} onChange={(v) => setAlertThreshold(v ?? 0)}
+                  min={0} step={100000} style={{ width: 140 }}
+                  formatter={(v) => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
+                  parser={(v) => v.replace(/,/g, '')}
+                />
+                <Text type="secondary" style={{ fontSize: 12 }}>OI in one minute</Text>
+                <Switch
+                  checked={soundEnabled} onChange={setSoundEnabled}
+                  checkedChildren={<SoundOutlined />} unCheckedChildren="Muted"
+                />
+              </Space>
             </Card>
+
+            {activeAlerts.length > 0 && (
+              <Alert
+                type="warning"
+                showIcon
+                message="Large OI shift near ATM"
+                description={activeAlerts.map((a) => `${a.side} ${a.strike}: ${a.change >= 0 ? '+' : ''}${a.change.toLocaleString()} in the last minute (${a.change >= 0 ? 'loading' : 'unwinding'})`).join(' · ')}
+              />
+            )}
 
             <Card size="small">
               <Row gutter={24}>
                 <Col><Statistic title="Spot" value={currentBar?.close ?? '—'} precision={2} /></Col>
                 <Col><Statistic title="ATM" value={atmStrike ?? '—'} /></Col>
                 <Col><Statistic title="PCR (PE OI / CE OI)" value={pcr != null ? pcr : '—'} precision={2}
-                  valueStyle={{ color: pcr == null ? undefined : pcr > 1 ? PE_COLOR : CE_COLOR }} /></Col>
+                  valueStyle={{ color: pcr == null ? undefined : pcr > 1 ? UP_COLOR : DOWN_COLOR }} /></Col>
                 <Col><Statistic title="Max Pain" value={maxPain ?? '—'} /></Col>
-                <Col><Statistic title="Total CE OI" value={totalCeOi} valueStyle={{ color: CE_COLOR }} /></Col>
-                <Col><Statistic title="Total PE OI" value={totalPeOi} valueStyle={{ color: PE_COLOR }} /></Col>
+                <Col><Statistic title="Total CE OI" value={totalCeOi} valueStyle={{ color: DOWN_COLOR }} /></Col>
+                <Col><Statistic title="Total PE OI" value={totalPeOi} valueStyle={{ color: UP_COLOR }} /></Col>
               </Row>
             </Card>
 
@@ -664,7 +825,21 @@ export default function OiReplayPage() {
                       <div style={{ fontSize: 11, color: AXIS_COLOR, marginTop: 2 }}>{marketRead.oiBuildup}</div>
                     </Col>
                     <Col span={8}>
-                      <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>IV skew trend (PE − CE, at ATM)</Text>
+                      <Tooltip title={
+                        <span>
+                          Real use case: at 9:20am, say CE and PE at ATM both show IV 12% (skew 0). By 11am,
+                          price hasn't moved much but PE IV has climbed to 14% while CE stays near 12%
+                          (skew widened to +2). That means traders are actively bidding up PUT premiums -
+                          buying downside protection or outright puts - even though price itself looks calm.
+                          That is often an early warning of a selloff building BEFORE it shows in price. If
+                          the widening continues, expect more downside volatility soon; if it reverses and
+                          narrows back, the fear is fading and price is more likely to hold or rally.
+                        </span>
+                      }>
+                        <Text type="secondary" style={{ fontSize: 11, display: 'block', textDecoration: 'underline dotted' }}>
+                          IV skew trend (PE − CE, at ATM)
+                        </Text>
+                      </Tooltip>
                       <Tag color={biasColor(marketRead.ivBias)} style={{ fontSize: 12 }}>{marketRead.ivBias}</Tag>
                       <div style={{ fontSize: 11, color: AXIS_COLOR, marginTop: 2 }}>
                         {marketRead.skew != null
@@ -702,13 +877,13 @@ export default function OiReplayPage() {
                   <Row gutter={24}>
                     <Col span={6}>
                       <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>CE OI since open</Text>
-                      <Text style={{ fontSize: 13, color: dayOiSummary.ceDayChange >= 0 ? CE_COLOR : PE_COLOR }}>
+                      <Text style={{ fontSize: 13, color: dayOiSummary.ceDayChange >= 0 ? DOWN_COLOR : UP_COLOR }}>
                         {dayOiSummary.ceDayChange >= 0 ? '+' : ''}{dayOiSummary.ceDayChange.toLocaleString()}
                       </Text>
                     </Col>
                     <Col span={6}>
                       <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>PE OI since open</Text>
-                      <Text style={{ fontSize: 13, color: dayOiSummary.peDayChange >= 0 ? CE_COLOR : PE_COLOR }}>
+                      <Text style={{ fontSize: 13, color: dayOiSummary.peDayChange >= 0 ? UP_COLOR : DOWN_COLOR }}>
                         {dayOiSummary.peDayChange >= 0 ? '+' : ''}{dayOiSummary.peDayChange.toLocaleString()}
                       </Text>
                     </Col>
@@ -718,8 +893,8 @@ export default function OiReplayPage() {
                         ? <Text style={{ fontSize: 11, color: AXIS_COLOR }}>None yet</Text>
                         : dayOiSummary.added.map((m) => (
                           <div key={`${m.strike}-${m.side}`} style={{ fontSize: 11 }}>
-                            <Tag color={m.side === 'CE' ? 'success' : 'error'} style={{ fontSize: 10, marginRight: 4 }}>{m.side}</Tag>
-                            {m.strike} <span style={{ color: CE_COLOR }}>+{m.change.toLocaleString()}</span>
+                            <Tag color={m.side === 'CE' ? 'error' : 'success'} style={{ fontSize: 10, marginRight: 4 }}>{m.side}</Tag>
+                            {m.strike} <span style={{ color: m.side === 'CE' ? DOWN_COLOR : UP_COLOR }}>+{m.change.toLocaleString()}</span>
                           </div>
                         ))}
                     </Col>
@@ -729,8 +904,8 @@ export default function OiReplayPage() {
                         ? <Text style={{ fontSize: 11, color: AXIS_COLOR }}>None yet</Text>
                         : dayOiSummary.removed.map((m) => (
                           <div key={`${m.strike}-${m.side}`} style={{ fontSize: 11 }}>
-                            <Tag color={m.side === 'CE' ? 'success' : 'error'} style={{ fontSize: 10, marginRight: 4 }}>{m.side}</Tag>
-                            {m.strike} <span style={{ color: PE_COLOR }}>{m.change.toLocaleString()}</span>
+                            <Tag color={m.side === 'CE' ? 'error' : 'success'} style={{ fontSize: 10, marginRight: 4 }}>{m.side}</Tag>
+                            {m.strike} <span style={{ color: m.side === 'CE' ? UP_COLOR : DOWN_COLOR }}>{m.change.toLocaleString()}</span>
                           </div>
                         ))}
                     </Col>
@@ -742,10 +917,17 @@ export default function OiReplayPage() {
             <Row gutter={16}>
               <Col span={15}>
                 <Card size="small" title="Spot (replaying)">
-                  {bars.length > 0
+                  {oneMinBars.length > 0
                     ? (
                       <ChartErrorBoundary key={`${underlying}-${result.date}-${timeframe}`}>
-                        <ReplayChart bars={bars} visibleCount={visibleCount} ladderRows={ladderRows} height={460} />
+                        <ReplayChart
+                          bars={displayBars}
+                          ladderRows={ladderRows}
+                          dayKey={`${underlying}-${result.date}-${timeframe}`}
+                          dayHigh={dayHigh}
+                          dayLow={dayLow}
+                          height={460}
+                        />
                       </ChartErrorBoundary>
                     )
                     : <Empty description="No spot candles for this day." />}

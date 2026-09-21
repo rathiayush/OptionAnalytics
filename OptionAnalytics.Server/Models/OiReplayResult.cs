@@ -28,9 +28,16 @@ public sealed record OiReplayResult(
     string ExpiryFlag,
     int ExpiryCode,
     IReadOnlyList<Candle> SpotCandles,
+    /// <summary>The SAME day's spot, at native 1-minute resolution - what the frontend now drives
+    /// its whole replay clock from (OI/IV/ladder/every derived read), so those stay "continuously
+    /// updated on 1-min" regardless of which timeframe SpotCandles itself is aggregated to for the
+    /// chart display. The frontend re-aggregates a slice of this itself, client-side, as playback
+    /// advances - SpotCandles above still exists for a caller that only wants the finished, whole-
+    /// day aggregated series without doing that itself.</summary>
+    IReadOnlyList<Candle> SpotCandlesOneMinute,
     IReadOnlyList<OiReplayPoint> CePoints,
     IReadOnlyList<OiReplayPoint> PePoints)
 {
     public static OiReplayResult Failed(string underlying, DateOnly date, int timeframeMinutes, string error) =>
-        new(false, error, underlying, date, timeframeMinutes, 0, "", 0, Array.Empty<Candle>(), Array.Empty<OiReplayPoint>(), Array.Empty<OiReplayPoint>());
+        new(false, error, underlying, date, timeframeMinutes, 0, "", 0, Array.Empty<Candle>(), Array.Empty<Candle>(), Array.Empty<OiReplayPoint>(), Array.Empty<OiReplayPoint>());
 }
