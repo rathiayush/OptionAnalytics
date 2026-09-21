@@ -16,6 +16,9 @@ public sealed class TimescaleWriter
     private readonly string _connectionString;
     private readonly ILogger<TimescaleWriter> _logger;
 
+    private readonly SemaphoreSlim _schemaLock = new(1, 1);
+    private bool _schemaEnsured;
+
     public TimescaleWriter(IConfiguration configuration, ILogger<TimescaleWriter> logger)
     {
         _connectionString = configuration.GetConnectionString("Timescale")
@@ -26,20 +29,42 @@ public sealed class TimescaleWriter
     /// <summary>Creates the target database (see EnsureDatabaseExistsAsync) if it doesn't exist
     /// yet, then applies Schema.sql against it - the collector's own connection string can point at
     /// a database that has never been created before and this still works, no manual pgAdmin/psql
-    /// step required first.</summary>
+    /// step required first.
+    ///
+    /// Guarded to run AT MOST ONCE per process, no matter how many hosted services call it (both
+    /// CollectorHostedService and RollingOptionBackfillHostedService do, and both start
+    /// concurrently with no ordering guarantee) - without this, two concurrent callers can both run
+    /// Schema.sql's own "CREATE EXTENSION IF NOT EXISTS timescaledb" at once and hit Postgres'
+    /// own well-known race there (the existence check and the catalog insert aren't atomic
+    /// together, so both callers can decide it doesn't exist yet and then collide on
+    /// pg_extension's unique index - exactly the "duplicate key value violates unique constraint
+    /// pg_extension_name_index" this once threw in practice).</summary>
     public async Task EnsureSchemaAsync(CancellationToken cancellationToken)
     {
-        await EnsureDatabaseExistsAsync(cancellationToken);
+        if (_schemaEnsured) return;
 
-        var schemaPath = Path.Combine(AppContext.BaseDirectory, "Db", "Schema.sql");
-        var sql = await File.ReadAllTextAsync(schemaPath, cancellationToken);
+        await _schemaLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (_schemaEnsured) return;
 
-        await using var connection = new NpgsqlConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken);
-        await using var command = new NpgsqlCommand(sql, connection);
-        await command.ExecuteNonQueryAsync(cancellationToken);
+            await EnsureDatabaseExistsAsync(cancellationToken);
 
-        _logger.LogInformation("TimescaleDB schema is up to date.");
+            var schemaPath = Path.Combine(AppContext.BaseDirectory, "Db", "Schema.sql");
+            var sql = await File.ReadAllTextAsync(schemaPath, cancellationToken);
+
+            await using var connection = new NpgsqlConnection(_connectionString);
+            await connection.OpenAsync(cancellationToken);
+            await using var command = new NpgsqlCommand(sql, connection);
+            await command.ExecuteNonQueryAsync(cancellationToken);
+
+            _schemaEnsured = true;
+            _logger.LogInformation("TimescaleDB schema is up to date.");
+        }
+        finally
+        {
+            _schemaLock.Release();
+        }
     }
 
     /// <summary>Connects to Postgres' own "postgres" maintenance database (never the collector's own
