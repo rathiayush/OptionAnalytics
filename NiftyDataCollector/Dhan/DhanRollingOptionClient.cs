@@ -38,14 +38,12 @@ public delegate Task DhanRollingOptionChunkSavedCallback(IReadOnlyList<DhanRolli
 ///    MaxDaysPerChunk. Same chunk-at-a-time save/checkpoint contract as DhanHistoricalDataClient:
 ///    stop at the first failed chunk so a checkpoint's "contiguous coverage" guarantee holds.
 ///
-/// expiryCode's exact semantics are NOT explicitly spelled out in Dhan's own docs beyond "expiry
-/// of the instrument" with a worked example using expiryCode=1 + expiryFlag=MONTH - the working
-/// assumption here (consistent with how "cycles out" indices work elsewhere in Dhan's API, e.g.
-/// futures near/next/far month) is 0 = the currently-rolling nearest cycle, 1 = the one after that,
-/// and so on. RollingOptionOptions.ExpiryCodes defaults to just [0] specifically so a first real
-/// run stays on the one value this collector is confident about; check the resolved `strike`/
-/// `spot` values that come back for a known historical date before trusting a larger backfill on
-/// any other value.
+/// expiryCode is 1-INDEXED - CONFIRMED against a real account: 1 is the currently-rolling nearest
+/// cycle, 2 the one after that, and so on. 0 is NOT a valid "cycle zero" - Dhan's API rejects it
+/// outright with "Input_Exception: expiryCode is required" (i.e. a literal 0 is treated the same
+/// as the field being omitted entirely, not as an index). This was the original assumption of
+/// this doc comment (0-indexed, "unconfirmed") before it was tested against a real account and
+/// found wrong - left this note so the same mistake doesn't get re-introduced later.
 /// </summary>
 public sealed class DhanRollingOptionClient
 {

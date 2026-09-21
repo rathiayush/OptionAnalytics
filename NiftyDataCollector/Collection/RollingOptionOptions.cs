@@ -27,13 +27,12 @@ public sealed class RollingOptionOptions
     /// WEEK is the default; switch to MONTH for an underlying that only has monthly expiries.</summary>
     public string ExpiryFlag { get; set; } = "WEEK";
 
-    /// <summary>Which "cycles out" to backfill - 0 is the currently-rolling nearest cycle, 1 the
-    /// one after that. Defaults to the nearest 2 expiries ([0, 1]) per the user's own spec. See
-    /// DhanRollingOptionClient's own doc comment: expiryCode's exact semantics beyond "successive
-    /// cycles out" aren't spelled out in Dhan's own docs, so it's worth checking the resolved
-    /// strike/spot values that come back for expiryCode=1 against a known historical date before
-    /// trusting a large backfill on it.</summary>
-    public List<int> ExpiryCodes { get; set; } = new() { 0, 1 };
+    /// <summary>Which "cycles out" to backfill - CONFIRMED 1-indexed against a real account: 1 is
+    /// the currently-rolling nearest cycle, 2 the one after that. (0 is NOT valid - Dhan's API
+    /// rejects it outright with "Input_Exception: expiryCode is required", i.e. it's treated as
+    /// equivalent to omitting the field entirely, not as "cycle zero".) Defaults to the nearest 2
+    /// expiries ([1, 2]) per the user's own spec.</summary>
+    public List<int> ExpiryCodes { get; set; } = new() { 1, 2 };
 
     /// <summary>How often to re-run the whole underlying x offset x leg x expiryCode sweep once the
     /// initial catch-up finishes - each series' own checkpoint means a re-run only ever asks for

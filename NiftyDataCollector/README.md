@@ -108,7 +108,7 @@ See "Rolling Options" below for what this feature is and the recommended rollout
 | `Enabled` | `false` | Turn on to start the rolling-option backfill |
 | `StartDate` | last 30 days | How far back to backfill - widen this later (e.g. `"2023-03-01"`) once a small test run looks right |
 | `ExpiryFlag` | `"WEEK"` | `"WEEK"` or `"MONTH"` - which expiry cycle to roll across |
-| `ExpiryCodes` | `[0, 1]` | Which "cycles out" to track - nearest 2 expiries by default |
+| `ExpiryCodes` | `[1, 2]` | Which "cycles out" to track (1-indexed: 1 = nearest, 2 = next) - nearest 2 expiries by default |
 | `PollIntervalMinutes` | 60 | How often to re-sweep every series once the initial catch-up finishes |
 
 ## Backfilling long ranges: chunking and checkpoints
@@ -164,13 +164,11 @@ workflow, matching how this was actually rolled out:
    and restart - the existing 30-day window's data and checkpoint are untouched; the wider range is
    picked up as a checkpointed BACKWARD extension (see "Backfilling long ranges" above).
 
-**`expiryCode` caution**: Dhan's own docs don't spell out this field's exact semantics beyond "expiry
-of the instrument" - the working assumption here (consistent with "cycles out" conventions
-elsewhere in Dhan's API) is `0` = the currently-rolling nearest cycle, `1` = the one after that, and
-so on; `RollingOption:ExpiryCodes` defaults to `[0, 1]` (nearest 2 expiries) per the user's own
-spec. Worth spot-checking `expiryCode: 1`'s resolved values against a known date before trusting a
-large backfill built on it, same "verify, don't just trust the docs" caution this project already
-applies to `/charts/intraday`'s own "oi" flag.
+**`expiryCode` is 1-indexed** - confirmed against a real account: `1` is the currently-rolling
+nearest cycle, `2` the one after that, and so on. **`0` is NOT valid** - Dhan's API rejects it
+outright with `Input_Exception: expiryCode is required` (a literal `0` is treated the same as
+omitting the field, not as "cycle zero"). `RollingOption:ExpiryCodes` defaults to `[1, 2]` (nearest
+2 expiries) per the user's own spec.
 
 ## Rate limiting
 
