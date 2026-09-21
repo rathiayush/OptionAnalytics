@@ -148,7 +148,23 @@ public sealed class RollingOptionBackfillHostedService : BackgroundService
             {
                 var saved = await _writer.SaveRollingOptionBarsAsync(underlying, expiryFlag, expiryCode, strikeOffset, isCall, bars, cancellationToken);
                 savedTotal += saved;
-                await _writer.SaveBackfillCheckpointAsync(seriesKey, underlying, completedFrom ?? forwardFrom, chunkTo, cancellationToken);
+
+                // NEVER checkpoint TODAY itself as "complete" - a chunk whose own chunkTo is today
+                // only ever contains whatever intraday data existed at the moment of THIS call, not
+                // the full trading day, since today isn't over yet. Advancing the checkpoint through
+                // today anyway would make every later poll this pass (and every poll on every later
+                // day, forever - a checkpoint never looks backward) believe today is already fully
+                // covered and permanently skip re-fetching its remainder, freezing that day's stored
+                // OI/IV at whatever partial time this one call happened to catch it - exactly the
+                // "OI Replay ladder goes stale/static partway through the day" bug this guards
+                // against. Cap at yesterday instead: today then simply gets re-fetched (harmlessly,
+                // since SaveRollingOptionBarsAsync upserts) on every subsequent poll until it is
+                // genuinely no longer today, at which point a later pass's own chunk naturally
+                // covers it in full and advances the checkpoint past it for real.
+                var checkpointThrough = chunkTo < today ? chunkTo : chunkTo.AddDays(-1);
+                var checkpointFrom = completedFrom ?? forwardFrom;
+                if (checkpointThrough >= checkpointFrom)
+                    await _writer.SaveBackfillCheckpointAsync(seriesKey, underlying, checkpointFrom, checkpointThrough, cancellationToken);
             },
             cancellationToken);
 

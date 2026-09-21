@@ -190,7 +190,17 @@ public sealed class CollectorHostedService : BackgroundService
             {
                 var saved = await _writer.SaveSpotBarsAsync(underlying, bars, cancellationToken);
                 savedTotal += saved;
-                await _writer.SaveBackfillCheckpointAsync(seriesKey, underlying, completedFrom ?? forwardFrom, chunkTo, cancellationToken);
+                // NEVER checkpoint TODAY itself as "complete" - see
+                // RollingOptionBackfillHostedService.RefreshSeriesAsync's own doc comment on this
+                // exact pattern for why (a chunk reaching today only has today's data as of THIS
+                // call, and a checkpoint never looks backward, so marking it complete anyway would
+                // permanently freeze today's stored data at whatever partial point this call caught
+                // it). Cap at yesterday - today then simply gets re-fetched (harmlessly, since
+                // SaveSpotBarsAsync upserts) every cycle until it's genuinely a past day.
+                var checkpointThrough = chunkTo < today ? chunkTo : chunkTo.AddDays(-1);
+                var checkpointFrom = completedFrom ?? forwardFrom;
+                if (checkpointThrough >= checkpointFrom)
+                    await _writer.SaveBackfillCheckpointAsync(seriesKey, underlying, checkpointFrom, checkpointThrough, cancellationToken);
             },
             cancellationToken);
 
@@ -291,7 +301,15 @@ public sealed class CollectorHostedService : BackgroundService
             {
                 var saved = await _writer.SaveOptionBarsAsync(underlying, expiry, strike, isCall, securityId, bars, cancellationToken);
                 savedTotal += saved;
-                await _writer.SaveBackfillCheckpointAsync(seriesKey, underlying, completedFrom ?? forwardFrom, chunkTo, cancellationToken);
+                // NEVER checkpoint TODAY itself as "complete" - see
+                // RollingOptionBackfillHostedService.RefreshSeriesAsync's own doc comment on this
+                // exact pattern for why. Cap at yesterday - today then simply gets re-fetched
+                // (harmlessly, since SaveOptionBarsAsync upserts) every cycle until it's genuinely
+                // a past day.
+                var checkpointThrough = chunkTo < today ? chunkTo : chunkTo.AddDays(-1);
+                var checkpointFrom = completedFrom ?? forwardFrom;
+                if (checkpointThrough >= checkpointFrom)
+                    await _writer.SaveBackfillCheckpointAsync(seriesKey, underlying, checkpointFrom, checkpointThrough, cancellationToken);
             },
             cancellationToken);
 
