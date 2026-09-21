@@ -1,4 +1,3 @@
-using Microsoft.Extensions.Options;
 using OptionAnalytics.Server.Dhan;
 using OptionAnalytics.Server.Models;
 using OptionAnalytics.Server.Services.Backtesting;
@@ -11,18 +10,20 @@ namespace OptionAnalytics.Server.Services;
 /// heaviest one - see the page's own "there could be multiple [support/resistance levels]" request)
 /// updating alongside it, at whatever speed the page's own playback control is set to.
 ///
-/// STORED-DATA-FIRST, with an OPT-IN live Dhan fallback (see OiReplayOptions.AllowLiveDataFallback)
-/// - this page was originally built deliberately stored-data-only (no Dhan client injected at all),
-/// per the user's own explicit "no live call please on this page". That held fine for replaying a
-/// past, fully-closed day, where the stored data is either complete or genuinely missing (and a live
-/// re-fetch of the identical already-closed window wouldn't fix a real backfill gap anyway). It falls
-/// down for TODAY specifically: NiftyDataCollector's own rolling-option backfill polls on its own
-/// cadence (RollingOption:PollIntervalMinutes, an hour by default), so replaying the CURRENT, still-
-/// forming session will routinely find the stored data trailing "now" by up to that whole interval -
-/// not a bug, just the natural lag of a periodic background poll. AllowLiveDataFallback (auto-on
-/// whenever this isn't running locally - see its own doc comment) lets that gap be filled with a
-/// live Dhan call instead of leaving today's replay stuck showing stale numbers, while a genuinely
-/// past day still never needs to make one at all.
+/// STORED-DATA-FIRST, with a live Dhan fallback that's OFF during local development and ON
+/// otherwise (see AppEnvironment.IsLocal) - this page was originally built deliberately
+/// stored-data-only (no Dhan client injected at all), per the user's own explicit "no live call
+/// please on this page". That held fine for replaying a past, fully-closed day, where the stored
+/// data is either complete or genuinely missing (and a live re-fetch of the identical already-closed
+/// window wouldn't fix a real backfill gap anyway). It falls down for TODAY specifically:
+/// NiftyDataCollector's own rolling-option backfill polls on its own cadence
+/// (RollingOption:PollIntervalMinutes, an hour by default), so replaying the CURRENT, still-forming
+/// session will routinely find the stored data trailing "now" by up to that whole interval - not a
+/// bug, just the natural lag of a periodic background poll. It ALSO covers a deployed instance that
+/// simply has no database configured at all (ConnectionStrings:NiftyDataCollectorTimescale blank) -
+/// StoredSpotDataService/StoredRollingOptionDataService's own IsConfigured guards mean this service
+/// just skips straight to Dhan for every series in that case, rather than ever needing the database
+/// to be present for this page to work on a deployed environment.
 ///
 /// NEAREST EXPIRY ONLY (expiryCode fixed at 1) - the user's own explicit choice: "at any given point
 /// of time it will show nearest expiry OI", matching what NiftyDataCollector's own rolling-option
@@ -56,14 +57,14 @@ public sealed class OiReplayService
     public OiReplayService(
         StoredSpotDataService storedSpot, StoredRollingOptionDataService storedRollingOption,
         DhanSpotInstrumentMaster instrumentMaster, DhanHistoricalDataService historicalData, DhanRollingOptionDataService rollingOption,
-        IHostEnvironment environment, IOptions<OiReplayOptions> options)
+        AppEnvironment appEnvironment)
     {
         _storedSpot = storedSpot;
         _storedRollingOption = storedRollingOption;
         _instrumentMaster = instrumentMaster;
         _historicalData = historicalData;
         _rollingOption = rollingOption;
-        _allowLiveDataFallback = options.Value.AllowLiveDataFallback ?? !environment.IsDevelopment();
+        _allowLiveDataFallback = !appEnvironment.IsLocal;
     }
 
     public async Task<OiReplayResult> RunAsync(

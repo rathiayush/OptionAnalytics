@@ -22,7 +22,8 @@ builder.Services.Configure<TelegramOptions>(builder.Configuration.GetSection(Tel
 builder.Services.Configure<AuthOptions>(builder.Configuration.GetSection(AuthOptions.SectionName));
 builder.Services.Configure<HistoricalDataPrefetchOptions>(builder.Configuration.GetSection(HistoricalDataPrefetchOptions.SectionName));
 builder.Services.Configure<ExpiredOptionDataPrefetchOptions>(builder.Configuration.GetSection(ExpiredOptionDataPrefetchOptions.SectionName));
-builder.Services.Configure<OiReplayOptions>(builder.Configuration.GetSection(OiReplayOptions.SectionName));
+builder.Services.Configure<AppEnvironmentOptions>(builder.Configuration.GetSection(AppEnvironmentOptions.SectionName));
+builder.Services.AddSingleton<AppEnvironment>();
 builder.Services.AddHttpClient<TelegramAlertService>();
 
 builder.Services.AddSingleton<AuthService>();

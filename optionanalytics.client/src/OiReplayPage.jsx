@@ -950,7 +950,32 @@ export default function OiReplayPage() {
 
             <Row gutter={16}>
               <Col span={15}>
-                <Card size="small" title="Spot (replaying)">
+                <Card
+                  size="small"
+                  title="Spot (replaying)"
+                  extra={
+                    // Same Start/Pause/Reset actions as the controls card above, duplicated here
+                    // right on the chart's own title bar - the user's own "give start stop buttons
+                    // near charts" ask, so playback can be driven without looking away from it.
+                    <Space size={8}>
+                      <Button
+                        size="small"
+                        icon={playing ? <PauseCircleOutlined /> : <PlayCircleOutlined />}
+                        onClick={() => setPlaying((p) => !p)}
+                        disabled={oneMinBars.length === 0 || visibleCount >= oneMinBars.length}
+                      >
+                        {playing ? 'Pause' : 'Start'}
+                      </Button>
+                      <Button
+                        size="small"
+                        icon={<ReloadOutlined />}
+                        onClick={() => { setPlaying(false); setVisibleCount(oneMinBars.length > 0 ? 1 : 0) }}
+                      >
+                        Reset
+                      </Button>
+                    </Space>
+                  }
+                >
                   {oneMinBars.length > 0
                     ? (
                       <ChartErrorBoundary key={`${underlying}-${result.date}-${timeframe}`}>
