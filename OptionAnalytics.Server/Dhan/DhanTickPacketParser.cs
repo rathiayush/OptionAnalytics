@@ -28,6 +28,7 @@ public readonly record struct DhanPacket(
     decimal Close,
     decimal BestBidPrice,
     decimal BestAskPrice,
+    long OpenInterest,
     DateTimeOffset ExchangeTimestamp,
     int DisconnectCode);
 
@@ -37,8 +38,15 @@ public readonly record struct DhanPacket(
 /// full protocol writeup: little-endian, float32 prices already in rupees, and a message that may
 /// carry several length-prefixed packets back to back) - this app also reads best bid/ask now
 /// (see the Full case and ReadBestBidAsk below), for pricing/re-pricing live option orders off the
-/// real tradeable side of the book rather than only the last traded price; open-interest is still
-/// dropped, since nothing here reads it.
+/// real tradeable side of the book rather than only the last traded price.
+///
+/// Open interest is read out of the Full packet (bytes 34-38, uint32 LE - see the Full case below)
+/// - it arrives piggybacked on every Full-mode tick an option strike already receives, so nothing
+/// extra needs subscribing for it. The separate standalone OpenInterest packet kind (5) is still
+/// left unread (see its own case below) - Full already covers every OI-Replay-tracked leg, since
+/// they are all Full-subscribed for depth anyway, and touching that shared packet-kind's handling
+/// would also change behavior for every other existing live consumer of this one parser (CDV,
+/// StrategyTriggerHostedService) for no benefit here.
 /// </summary>
 public static class DhanTickPacketParser
 {
@@ -138,7 +146,8 @@ public static class DhanTickPacketParser
                 // bidOrders uint16, askOrders uint16, bidPrice float32, askPrice float32) - the
                 // best bid/ask are the first entry's price fields, at offsets 74/78. This is the
                 // only packet kind carrying depth at all, which is why option strikes are
-                // subscribed in Full mode (see DhanMarketFeedClient) rather than Quote.
+                // subscribed in Full mode (see DhanMarketFeedClient) rather than Quote. Bytes
+                // 34-38 (uint32 LE) are open interest - see this file's own doc comment above.
                 if (packet.Length < 162) return false;
                 var (bid, ask) = ReadBestBidAsk(packet, FullDepthOffset);
                 result = New(kind, securityId, exchangeSegment) with
@@ -146,6 +155,7 @@ public static class DhanTickPacketParser
                     LastPrice = ReadPrice(packet.Slice(8, 4)),
                     ExchangeTimestamp = ReadEpoch(packet.Slice(14, 4), now),
                     Volume = BinaryPrimitives.ReadUInt32LittleEndian(packet.Slice(22, 4)),
+                    OpenInterest = BinaryPrimitives.ReadUInt32LittleEndian(packet.Slice(34, 4)),
                     Open = ReadPrice(packet.Slice(46, 4)),
                     Close = ReadPrice(packet.Slice(50, 4)),
                     High = ReadPrice(packet.Slice(54, 4)),
@@ -184,7 +194,7 @@ public static class DhanTickPacketParser
     }
 
     private static DhanPacket New(DhanPacketKind kind, uint securityId, byte exchangeSegment) =>
-        new(kind, securityId, exchangeSegment, 0, 0, 0, 0, 0, 0, 0, 0, DateTimeOffset.UtcNow, 0);
+        new(kind, securityId, exchangeSegment, 0, 0, 0, 0, 0, 0, 0, 0, 0, DateTimeOffset.UtcNow, 0);
 
     /// <summary>Best bid/ask are the price fields of the FIRST of the five depth entries.</summary>
     private static (decimal Bid, decimal Ask) ReadBestBidAsk(ReadOnlySpan<byte> packet, int depthOffset)

@@ -58,7 +58,7 @@ public sealed class EmaCrossoverAlertServiceTests
         for (var i = 0; i < bars; i++)
         {
             price += stepPerBar;
-            state.ApplyTick(new SpotTick(0, price, price, price, price, price, 0, 0, 0, time));
+            state.ApplyTick(new SpotTick(0, price, price, price, price, price, 0, 0, 0, 0, time));
             time = time.AddMinutes(1);
         }
     }

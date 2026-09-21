@@ -217,6 +217,10 @@ builder.Services.AddSingleton<StrategyTriggerStore>();
 builder.Services.AddSingleton<TriggerOrderHistoryStore>();
 builder.Services.AddHostedService<StrategyTriggerHostedService>();
 
+// Keeps OI Replay's own "today, live" mode genuinely live over the same shared Dhan WS feed -
+// see OiReplayLiveFeedService's own doc comment.
+builder.Services.AddHostedService<OiReplayLiveFeedService>();
+
 builder.Services.AddSignalR();
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();

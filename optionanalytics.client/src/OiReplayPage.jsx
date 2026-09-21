@@ -2,13 +2,56 @@ import { Component, useEffect, useMemo, useRef, useState } from 'react'
 import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicker, Alert, Empty, Tooltip, Slider, Tag, InputNumber, Switch } from 'antd'
 import { PlayCircleOutlined, PauseCircleOutlined, ReloadOutlined, SoundOutlined } from '@ant-design/icons'
 import { createChart, CandlestickSeries, CrosshairMode } from 'lightweight-charts'
+import * as signalR from '@microsoft/signalr'
 import {
   UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR,
-  istTimeFormatter, istTickMarkFormatter, toBar, toChartTime, fromChartTime,
+  istTimeFormatter, istTickMarkFormatter, toBar, toChartTime, fromChartTime, istDateKey,
   NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState,
 } from './shared.jsx'
 
 const { Text, Title } = Typography
+
+// The (underlying, expiryFlag) combos OiReplayLiveFeedService actually tracks live on the backend -
+// BANKNIFTY has no weekly expiry (same rule the rest of this page and Expired Backtest enforce), so
+// a live feed for that combo will simply never arrive; kept in sync with that service's own list by
+// hand since the two sides have no shared source of truth to derive it from automatically.
+const LIVE_FEED_COMBOS = new Set(['NIFTY:WEEK', 'NIFTY:MONTH', 'BANKNIFTY:MONTH'])
+
+// Connects to the same SignalR hub the live dashboard already uses (App.jsx's own useHub), for two
+// events: "spotUpdate" (SpotFeedHostedService's existing push - the underlying's own currently-
+// forming 1-minute bar, reused as-is rather than building a second live-spot pipeline) and
+// "oiReplayTick" (OiReplayLiveFeedService's new push - one option leg's live price/OI). Both
+// callbacks are read through refs (same pattern as App.jsx's useHub) so the connection itself only
+// needs to open/close when `enabled` changes, never when underlying/expiryFlag/the callbacks
+// themselves change identity across a re-render.
+function useOiReplayLiveFeed(enabled, onSpotUpdate, onOiReplayTick, onReconnected) {
+  const spotRef = useRef(onSpotUpdate)
+  const tickRef = useRef(onOiReplayTick)
+  const reconnectedRef = useRef(onReconnected)
+  spotRef.current = onSpotUpdate
+  tickRef.current = onOiReplayTick
+  reconnectedRef.current = onReconnected
+
+  useEffect(() => {
+    if (!enabled) return
+    const connection = new signalR.HubConnectionBuilder()
+      .withUrl('/hubs/spot')
+      .withAutomaticReconnect()
+      .build()
+
+    connection.on('spotUpdate', (snapshot) => spotRef.current(snapshot))
+    connection.on('oiReplayTick', (tick) => tickRef.current(tick))
+    connection.onreconnected(() => reconnectedRef.current?.())
+    connection.start().catch((err) => {
+      // Same StrictMode double-mount as App.jsx's useHub - the first connection's start() gets
+      // aborted by this effect's own cleanup before negotiation finishes on the second mount.
+      if (err?.name === 'AbortError') return
+      console.error('OI Replay live feed connection failed:', err)
+    })
+
+    return () => { connection.stop() }
+  }, [enabled])
+}
 
 // One entry per distinct strike this side ever reported, its own points sorted ascending by time -
 // built once per fetched run (see useMemo below), not recomputed on every replay tick. Grouping by
@@ -416,11 +459,12 @@ const SPEED_OPTIONS = [
   { value: 100, label: '10x' },
 ]
 
-// Candle-by-candle replay of one stored trading day - spot chart on the left, an OI/IV ladder
-// across the whole fetched strike band on the right, updating together as playback advances. Every
-// byte this page ever reads comes from NiftyDataCollector's own TimescaleDB via OiReplayService -
-// this page makes NO live Dhan call under any circumstance (unlike Expired Backtest's own
-// useStoredData toggle, which only ever prefers stored data and can still fall back to Dhan).
+// Candle-by-candle replay of one trading day - spot chart on the left, an OI/IV ladder across the
+// whole fetched strike band on the right, updating together as playback advances. A past day's data
+// comes from NiftyDataCollector's own TimescaleDB, falling back to a direct Dhan REST call when
+// that's not fresh enough (see OiReplayService's own doc comment); TODAY additionally stays live
+// via OiReplayLiveFeedService's WebSocket-fed ticks (see useOiReplayLiveFeed below) once the
+// initial snapshot has loaded, rather than only ever showing whatever was true at load time.
 export default function OiReplayPage() {
   const [underlying, setUnderlying] = usePersistedState(STORED_UNDERLYING, 'NIFTY')
   const [timeframe, setTimeframe] = usePersistedState(STORED_TIMEFRAME, 5)
@@ -436,6 +480,14 @@ export default function OiReplayPage() {
   const [playing, setPlaying] = useState(false)
   const timerRef = useRef(null)
 
+  // The live "tail" beyond whatever the initial REST snapshot carried - only ever appended to while
+  // isToday is true (see below), reset on every fresh load() so switching days never carries a
+  // previous day's live ticks forward.
+  const [liveBars, setLiveBars] = useState([])
+  const [liveCePoints, setLiveCePoints] = useState([])
+  const [livePePoints, setLivePePoints] = useState([])
+  const caughtUpLenRef = useRef(0)
+
   // BANKNIFTY has no weekly expiry - NSE discontinued it (same rule Expired Backtest enforces).
   // Corrected right in the underlying picker's own onChange below, not a separate effect - this
   // is a direct response to that one user action, not a value derived from external state.
@@ -445,12 +497,17 @@ export default function OiReplayPage() {
   }
 
   const canLoad = Boolean(underlying && date)
+  const isToday = Boolean(date && date.format('YYYY-MM-DD') === istDateKey(new Date()))
+  const liveFeedSupported = LIVE_FEED_COMBOS.has(`${underlying}:${expiryFlag}`)
 
   const load = () => {
     if (!canLoad) return
     setPlaying(false)
     setLoading(true)
     setError(null)
+    setLiveBars([])
+    setLiveCePoints([])
+    setLivePePoints([])
     const params = new URLSearchParams({
       date: date.format('YYYY-MM-DD'),
       timeframeMinutes: String(timeframe),
@@ -465,7 +522,12 @@ export default function OiReplayPage() {
       .then((body) => {
         if (!body?.success) throw new Error(body?.error || 'This run did not succeed.')
         setResult(body)
-        setVisibleCount(body.spotCandlesOneMinute?.length > 0 ? 1 : 0)
+        const initialLen = body.spotCandlesOneMinute?.length ?? 0
+        setVisibleCount(initialLen > 0 ? 1 : 0)
+        // Seeds the auto-follow effect below with "caught up" meaning THIS length, not 0 - so
+        // loading a fresh day (even today) always starts the replay at its own beginning rather
+        // than the auto-follow effect immediately yanking visibleCount to the end because 1 >= 0.
+        caughtUpLenRef.current = initialLen
       })
       .catch((err) => {
         console.error('Failed to load OI replay data:', err)
@@ -480,10 +542,70 @@ export default function OiReplayPage() {
   // the CHART itself displays. The chart's own candles are a re-aggregation of a slice of this,
   // computed separately below - the two used to be the same array, which meant everything on the
   // page only updated once per whole displayed candle (once every 5 or 15 real minutes on a coarser
-  // timeframe) instead of continuously.
-  const oneMinBars = useMemo(() => (result?.spotCandlesOneMinute ?? []).map(toBar), [result])
-  const ceByStrike = useMemo(() => groupByStrike(result?.cePoints ?? []), [result])
-  const peByStrike = useMemo(() => groupByStrike(result?.pePoints ?? []), [result])
+  // timeframe) instead of continuously. While isToday, this also folds in liveBars - the initial
+  // REST snapshot's own bars, with the live feed's tail merged on top (replacing the still-forming
+  // final minute in place as it updates, appending once a new minute actually starts).
+  const oneMinBars = useMemo(() => {
+    const base = (result?.spotCandlesOneMinute ?? []).map(toBar)
+    if (!isToday || liveBars.length === 0) return base
+    const merged = base.slice()
+    for (const bar of liveBars) {
+      if (merged.length > 0 && merged[merged.length - 1].time === bar.time) merged[merged.length - 1] = bar
+      else if (merged.length === 0 || bar.time > merged[merged.length - 1].time) merged.push(bar)
+    }
+    return merged
+  }, [result, liveBars, isToday])
+  const ceByStrike = useMemo(
+    () => groupByStrike(isToday ? [...(result?.cePoints ?? []), ...liveCePoints] : (result?.cePoints ?? [])),
+    [result, liveCePoints, isToday],
+  )
+  const peByStrike = useMemo(
+    () => groupByStrike(isToday ? [...(result?.pePoints ?? []), ...livePePoints] : (result?.pePoints ?? [])),
+    [result, livePePoints, isToday],
+  )
+
+  // Live feed wiring - see useOiReplayLiveFeed's own doc comment. Only connects once an initial
+  // snapshot has actually loaded (this is a "keep it fresh from here" layer on top of that fetch,
+  // not a replacement for it) and only for a combo OiReplayLiveFeedService actually tracks.
+  const handleSpotUpdate = (snapshot) => {
+    if (!isToday || snapshot?.underlying !== underlying || !snapshot?.currentBar) return
+    const bar = toBar(snapshot.currentBar)
+    setLiveBars((prev) => {
+      if (prev.length > 0 && prev[prev.length - 1].time === bar.time) {
+        const next = prev.slice()
+        next[next.length - 1] = bar
+        return next
+      }
+      return [...prev, bar]
+    })
+  }
+  const handleOiReplayTick = (tick) => {
+    if (!isToday || tick?.underlying !== underlying || tick?.expiryFlag !== expiryFlag) return
+    const isCall = tick.side === 'CE'
+    // The live feed carries no IV (Dhan's tick stream doesn't - see OiReplayLiveFeedService's own
+    // doc comment) - carry forward whatever the initial REST fetch last saw for this strike/side
+    // rather than showing a blank once live ticks start arriving.
+    const sourcePoints = isCall ? result?.cePoints : result?.pePoints
+    const known = (sourcePoints ?? []).filter((p) => p.strike === tick.strike && p.impliedVolatility != null)
+    const lastKnownIv = known.length > 0 ? known[known.length - 1].impliedVolatility : null
+    const point = { time: tick.time, strike: tick.strike, openInterest: tick.openInterest, impliedVolatility: lastKnownIv, price: tick.price }
+    if (isCall) setLiveCePoints((prev) => [...prev, point])
+    else setLivePePoints((prev) => [...prev, point])
+  }
+  const handleLiveReconnected = () => { if (isToday) load() }
+  useOiReplayLiveFeed(isToday && liveFeedSupported && Boolean(result), handleSpotUpdate, handleOiReplayTick, handleLiveReconnected)
+
+  // Auto-follow: once the user is caught up to the tail of what's loaded, a newly-arrived live bar
+  // (oneMinBars.length growing) keeps visibleCount pinned to the end automatically - the whole point
+  // of "today" being live rather than a fixed-length replay. A user who paused and scrubbed BACK to
+  // review an earlier point is deliberately left alone; the new bar just waits at the tail for them.
+  useEffect(() => {
+    setVisibleCount((c) => {
+      const wasCaughtUp = c >= caughtUpLenRef.current
+      caughtUpLenRef.current = oneMinBars.length
+      return isToday && wasCaughtUp ? oneMinBars.length : c
+    })
+  }, [oneMinBars.length, isToday])
 
   // Playback loop - a single interval that advances visibleCount by one NATIVE MINUTE per tick,
   // self-stopping at the end of the day's own bars rather than needing a separate "are we done"
@@ -958,6 +1080,11 @@ export default function OiReplayPage() {
                     // right on the chart's own title bar - the user's own "give start stop buttons
                     // near charts" ask, so playback can be driven without looking away from it.
                     <Space size={8}>
+                      {isToday && liveFeedSupported && (
+                        <Tooltip title="Streaming live ticks from Dhan's WebSocket feed on top of today's snapshot (price + OI - IV stays at the last REST-fetched value)">
+                          <Tag color="success" style={{ marginRight: 0 }}>● LIVE</Tag>
+                        </Tooltip>
+                      )}
                       <Button
                         size="small"
                         icon={playing ? <PauseCircleOutlined /> : <PlayCircleOutlined />}
