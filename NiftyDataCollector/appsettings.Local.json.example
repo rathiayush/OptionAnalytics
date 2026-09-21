@@ -11,8 +11,10 @@
     "Timescale": "Host=localhost;Port=5432;Database=niftydata;Username=postgres;Password=yourpassword"
   },
   "RollingOption": {
-    "Enabled": false,
-    "StartDate": "2023-03-01"
+    "Enabled": false
+  },
+  "Collector": {
+    "BackfillFromDate": "2023-03-01"
   }
 }
 

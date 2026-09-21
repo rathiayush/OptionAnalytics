@@ -96,7 +96,8 @@ scoped to `/charts/intraday` only.
 | `Underlyings` | NIFTY (`WEEK`) + BANKNIFTY (`MONTH`) | Which indices to track, each with its own strike spacing and `ExpiryFlag` (see above) |
 | `StrikesEachSide` | 10 | ATM ± this many strikes |
 | `TrackedExpiryCount` | 1 | How many of the nearest listed expiries to track |
-| `BackfillDays` | 500 | How far back a NEW contract's (or spot's) OHLC history reaches (OI/IV are unaffected - see above) |
+| `BackfillDays` | 500 | How far back a NEW contract's (or spot's) OHLC history reaches (OI/IV are unaffected - see above) - ignored if `BackfillFromDate` is set |
+| `BackfillFromDate` | (unset) | An explicit calendar date (e.g. `"2023-03-01"`) instead of a day-count - one setting that overrides BOTH `BackfillDays` here AND `RollingOption:StartDate`, so every table (`spot_bars_1m`, `option_bars_1m`, `rolling_option_bars_1m`) backfills from the same date. Set it once in `appsettings.Local.json` and restart; already-covered dates are never re-fetched (see "Backfilling long ranges" below - this is the same checkpointed backward-extension logic, just exposed as one date instead of juggling two separate settings) |
 | `SnapshotPollIntervalSeconds` | 60 | How often to poll the live option chain |
 | `HistoricalRefreshIntervalMinutes` | 5 | (reserved for a future incremental-refresh pass) |
 
@@ -107,7 +108,7 @@ See "Rolling Options" below for what this feature is and the recommended rollout
 | Key | Default | Meaning |
 |---|---|---|
 | `Enabled` | `false` | Turn on to start the rolling-option backfill |
-| `StartDate` | last 6 months | How far back to backfill - widen this later (e.g. `"2023-03-01"`) once this looks right |
+| `StartDate` | last 6 months | How far back to backfill - widen this later (e.g. `"2023-03-01"`) once this looks right. Ignored if `Collector:BackfillFromDate` is set (see that setting's own row above) |
 | `ExpiryCodes` | `[1, 2]` | Which "cycles out" to track (1-indexed: 1 = nearest, 2 = next) - nearest 2 expiries by default |
 | `PollIntervalMinutes` | 60 | How often to re-sweep every series once the initial catch-up finishes |
 
