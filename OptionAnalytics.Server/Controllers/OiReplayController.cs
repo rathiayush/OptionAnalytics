@@ -3,8 +3,9 @@ using OptionAnalytics.Server.Services;
 
 namespace OptionAnalytics.Server.Controllers;
 
-/// <summary>Backs the OI Replay page - see OiReplayService's own doc comment for why this endpoint
-/// never makes a live Dhan call under any circumstance, unlike Expired Backtest.</summary>
+/// <summary>Backs the OI Replay page - see OiReplayService's own doc comment for when (and why)
+/// this endpoint falls back to a live Dhan call at all, e.g. for replaying the current, still-
+/// forming session (OiReplayOptions.AllowLiveDataFallback) - it otherwise stays stored-data-only.</summary>
 [ApiController]
 [Route("api/oi-replay")]
 public sealed class OiReplayController : ControllerBase

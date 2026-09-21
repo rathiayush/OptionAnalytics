@@ -12,11 +12,11 @@ public readonly record struct OiReplayPoint(DateTimeOffset Time, decimal Strike,
 /// <summary>
 /// Everything the OI Replay page needs for one full day, in one response - the whole day's worth of
 /// spot candles (already aggregated to the requested timeframe) plus the whole day's own CE/PE
-/// OI/IV history across the fetched strike band, all sourced from NiftyDataCollector's own
-/// TimescaleDB (see OiReplayService's own doc comment: this page makes NO live Dhan calls at all,
-/// unlike Expired Backtest's useStoredData toggle which merely PREFERS stored data). The frontend
-/// then plays the day back candle by candle client-side - no further server round trips per tick,
-/// just local array indexing into what this one response already carries.
+/// OI/IV history across the fetched strike band, primarily sourced from NiftyDataCollector's own
+/// TimescaleDB (see OiReplayService's own doc comment on when it also falls back to a live Dhan
+/// call - a genuinely past day still never needs one). The frontend then plays the day back candle
+/// by candle client-side - no further server round trips per tick, just local array indexing into
+/// what this one response already carries.
 /// </summary>
 public sealed record OiReplayResult(
     bool Success,
