@@ -17,6 +17,9 @@ public sealed class SweepIfvgTrendlineBreakStrategyTests
     private static Candle HourBar(int utcHour, decimal open, decimal high, decimal low, decimal close) =>
         new(new DateTimeOffset(Day.Year, Day.Month, Day.Day, utcHour, 0, 0, TimeSpan.Zero), open, high, low, close);
 
+    private static Candle HourBarOn(DateOnly day, int utcHour, decimal value) =>
+        new(new DateTimeOffset(day.Year, day.Month, day.Day, utcHour, 0, 0, TimeSpan.Zero), value, value, value, value);
+
     /// <summary>Bars 1 and 3 are confirmed swing highs (110 then 105 - a declining resistance
     /// line); bar 6 sweeps below the bars[4]/bars[5] channel low, and its own close (98) already
     /// closes back above the bearish gap left by bars[3]/bars[5] (High 95, Low 88) - sweep and
@@ -142,6 +145,31 @@ public sealed class SweepIfvgTrendlineBreakStrategyTests
         var signal = Assert.Single(signals);
         Assert.Equal("Rejected", signal.Kind);
         Assert.Contains("bearish only", signal.Summary);
+    }
+
+    // The real bug this exists to catch: an earlier version reset the sweep channel/swing history
+    // at every calendar-day boundary, so it only ever started scanning a day once that SAME day had
+    // MORE than sweepLookbackBars hourly bars - never true for a real ~6-7-bar trading day, at the
+    // DEFAULT sweepLookbackBars (20) or anything close to it. This prepends 15 flat filler bars on
+    // the PRECEDING calendar day (not enough on their own, and no single day's own count exceeds 20
+    // either) ahead of BullishSetup's own 10 bars, then runs with the real default sweepLookbackBars
+    // - only correct if the channel/swing history is allowed to look back ACROSS that day boundary.
+    [Fact]
+    public void BullishEntry_StillFires_WhenSweepLookbackBarsExceedsASingleDaysOwnBarCount()
+    {
+        var priorDay = Day.AddDays(-1);
+        var filler = Enumerable.Range(0, 15).Select(h => HourBarOn(priorDay, h, 90m)).ToList();
+        var bars = filler.Concat(BullishSetup()).ToList();
+
+        var signals = new SweepIfvgTrendlineBreakStrategy().EntrySignals(Context(bars), Parameters(p =>
+        {
+            p["sweepLookbackBars"] = 20; // the real, documented default - not the test suite's own tiny 2
+            p["ifvgLookbackBars"] = 20;
+        }));
+
+        var signal = Assert.Single(signals);
+        Assert.Equal("Entry", signal.Kind);
+        Assert.Equal("Bullish", signal.Direction);
     }
 
     [Fact]
