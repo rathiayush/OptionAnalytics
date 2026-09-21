@@ -78,6 +78,29 @@ CREATE TABLE IF NOT EXISTS option_chain_snapshots (
 SELECT create_hypertable('option_chain_snapshots', 'time', if_not_exists => TRUE);
 CREATE INDEX IF NOT EXISTS idx_option_chain_snapshots_lookup ON option_chain_snapshots (underlying, expiry, strike, option_type, time DESC);
 
+-- Every Dhan response, VERBATIM, as an append-only log - the collector's own field lists above are
+-- a convenience view, not the source of truth. This is what actually guarantees "store everything
+-- Dhan is returning": if the structured tables' own parsing ever misses a field, or Dhan adds a new
+-- one, it is still sitting here untouched and can be backfilled into a structured column later by
+-- re-reading response_json - which matters far more for option_chain_snapshots than anywhere else,
+-- since a missed live OI/IV/greeks instant can never be re-fetched from Dhan afterward. No upsert
+-- here on purpose: every call is its own distinct historical fact, so repeats simply accumulate
+-- rather than overwrite - this table is also, incidentally, a complete audit log of every request
+-- this collector ever made and exactly what Dhan said back.
+CREATE TABLE IF NOT EXISTS dhan_raw_responses (
+    id              BIGSERIAL,
+    time            TIMESTAMPTZ NOT NULL,
+    endpoint        TEXT        NOT NULL,  -- 'optionchain' | 'optionchain/expirylist' | 'charts/intraday'
+    underlying      TEXT        NOT NULL,
+    expiry          DATE,                  -- null for the spot historical call, which has no expiry
+    security_id     BIGINT,                -- null for the option-chain/expiry-list calls (they cover many strikes/dates at once)
+    request_params  JSONB       NOT NULL,
+    response_json   JSONB       NOT NULL,
+    PRIMARY KEY (id, time)
+);
+SELECT create_hypertable('dhan_raw_responses', 'time', if_not_exists => TRUE);
+CREATE INDEX IF NOT EXISTS idx_dhan_raw_responses_lookup ON dhan_raw_responses (underlying, endpoint, time DESC);
+
 -- Not enabled by default - turn on once you've validated the pipeline and want to keep disk usage
 -- down for data older than your active query window. Left commented out deliberately: compressed
 -- chunks are read-only for inserts, and this collector may still want to backfill/repair older

@@ -14,6 +14,17 @@ separate rather than pretending one is the other:
 | `spot_bars_1m` | `/charts/intraday` (INDEX) | Yes - backfillable for any past window Dhan still serves |
 | `option_bars_1m` | `/charts/intraday` (OPTIDX) | Yes - OHLC + volume, and possibly `open_interest` (see below) |
 | `option_chain_snapshots` | `/optionchain` (live only) | **No** - `implied_volatility` and the greeks have no history anywhere in Dhan's API; this table only ever has data from whenever the collector was actually running |
+| `dhan_raw_responses` | every call above | The EXACT response body, verbatim, plus the exact request that produced it |
+
+**Everything Dhan returns, not just what's in the structured columns above**: every single Dhan
+call this collector makes - the expiry list, each option-chain poll, each historical bars fetch -
+also gets its complete, untouched response body archived into `dhan_raw_responses` (a JSONB
+column), append-only, alongside the request that produced it. The structured tables are a
+convenience view for querying; this table is the source of truth if a field ever turns out to be
+missing from them, or Dhan adds a new one your running collector predates - which matters far more
+for `option_chain_snapshots` than anywhere else, since a missed live IV/OI/greeks instant can never
+be re-fetched from Dhan afterward. Query it with plain Postgres JSON operators, e.g.:
+`SELECT response_json -> 'data' -> 'oc' FROM dhan_raw_responses WHERE endpoint = 'optionchain' ORDER BY time DESC LIMIT 1;`
 
 **The "oi" open question**: Dhan's docs for `/charts/intraday` describe an optional `"oi": true`
 request field that returns an `open_interest` array. This collector always sets it for option

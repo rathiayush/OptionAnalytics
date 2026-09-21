@@ -51,7 +51,7 @@ public sealed class DhanOptionChainClient
         _logger = logger;
     }
 
-    public async Task<IReadOnlyList<DateOnly>> GetExpiriesAsync(uint underlyingScrip, string underlyingSeg, CancellationToken cancellationToken)
+    public async Task<(IReadOnlyList<DateOnly> Expiries, string? RawJson)> GetExpiriesAsync(uint underlyingScrip, string underlyingSeg, CancellationToken cancellationToken)
     {
         var payload = new { UnderlyingScrip = (int)underlyingScrip, UnderlyingSeg = underlyingSeg };
         using var response = await _api.SendAsync(HttpMethod.Post, "/optionchain/expirylist", payload, "expiry list", cancellationToken);
@@ -59,11 +59,11 @@ public sealed class DhanOptionChainClient
         if (!response.Success)
         {
             _logger.LogWarning("Expiry list request failed for {Seg}:{Scrip} - {Error}", underlyingSeg, underlyingScrip, response.ErrorMessage);
-            return Array.Empty<DateOnly>();
+            return (Array.Empty<DateOnly>(), response.RawBody);
         }
 
         if (!response.Root.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Array)
-            return Array.Empty<DateOnly>();
+            return (Array.Empty<DateOnly>(), response.RawBody);
 
         var expiries = new List<DateOnly>();
         foreach (var element in data.EnumerateArray())
@@ -72,10 +72,13 @@ public sealed class DhanOptionChainClient
                 && DateOnly.TryParseExact(element.GetString(), "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var expiry))
                 expiries.Add(expiry);
         }
-        return expiries.OrderBy(e => e).ToList();
+        return (expiries.OrderBy(e => e).ToList(), response.RawBody);
     }
 
-    public async Task<DhanOptionChainSnapshot?> GetChainAsync(uint underlyingScrip, string underlyingSeg, DateOnly expiry, CancellationToken cancellationToken)
+    /// <summary>RawJson is the EXACT response body Dhan sent, unparsed - see DhanApiResponse's own
+    /// doc comment for why this collector always keeps it, not just whatever Snapshot's own field
+    /// list happens to cover.</summary>
+    public async Task<(DhanOptionChainSnapshot? Snapshot, string? RawJson)> GetChainAsync(uint underlyingScrip, string underlyingSeg, DateOnly expiry, CancellationToken cancellationToken)
     {
         var payload = new
         {
@@ -90,10 +93,10 @@ public sealed class DhanOptionChainClient
         if (!response.Success)
         {
             _logger.LogWarning("Option chain request failed for {Seg}:{Scrip} {Expiry} - {Error}", underlyingSeg, underlyingScrip, expiry, response.ErrorMessage);
-            return null;
+            return (null, response.RawBody);
         }
 
-        return Parse(response.Root);
+        return (Parse(response.Root), response.RawBody);
     }
 
     private static DhanOptionChainSnapshot Parse(JsonElement root)

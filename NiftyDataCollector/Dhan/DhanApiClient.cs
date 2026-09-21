@@ -5,22 +5,29 @@ using Microsoft.Extensions.Options;
 
 namespace NiftyDataCollector.Dhan;
 
-/// <summary>One parsed Dhan REST response - owns the JsonDocument, so callers must dispose it.</summary>
+/// <summary>One parsed Dhan REST response - owns the JsonDocument, so callers must dispose it.
+/// Carries RawBody (the exact bytes Dhan sent, as text) alongside the parsed Root specifically so a
+/// caller can persist the UNTOUCHED response verbatim (see TimescaleWriter.SaveRawResponseAsync) -
+/// insurance against this collector's own field list ever being incomplete or falling behind a
+/// future Dhan API change, which matters far more here than in a normal API client because OI/IV
+/// snapshots can never be re-fetched for a past instant once missed.</summary>
 public sealed class DhanApiResponse : IDisposable
 {
     private readonly JsonDocument? _document;
 
-    internal DhanApiResponse(bool success, HttpStatusCode statusCode, JsonDocument? document, string? errorMessage)
+    internal DhanApiResponse(bool success, HttpStatusCode statusCode, JsonDocument? document, string? errorMessage, string? rawBody)
     {
         Success = success;
         StatusCode = statusCode;
         _document = document;
         ErrorMessage = errorMessage;
+        RawBody = rawBody;
     }
 
     public bool Success { get; }
     public HttpStatusCode StatusCode { get; }
     public string? ErrorMessage { get; }
+    public string? RawBody { get; }
     public JsonElement Root => _document?.RootElement
         ?? throw new InvalidOperationException("This Dhan response has no body to read - check Success first.");
 
@@ -69,7 +76,7 @@ public sealed class DhanApiClient
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(ex, "Dhan request failed while {Context} ({Method} {Path})", context, method, path);
-            return new DhanApiResponse(false, HttpStatusCode.ServiceUnavailable, null, ex.Message);
+            return new DhanApiResponse(false, HttpStatusCode.ServiceUnavailable, null, ex.Message, null);
         }
     }
 
@@ -83,7 +90,7 @@ public sealed class DhanApiClient
         }
 
         var isSuccess = (int)statusCode is >= 200 and <= 299;
-        if (isSuccess && document is not null) return new DhanApiResponse(true, statusCode, document, null);
+        if (isSuccess && document is not null) return new DhanApiResponse(true, statusCode, document, null, body);
 
         var message = ReadError(document, body);
         document?.Dispose();
@@ -94,7 +101,7 @@ public sealed class DhanApiClient
             _logger.LogError("Dhan authentication failed: {Message}. This collector never re-logs in on its own (see DhanOptions) - paste a fresh access token into config and restart.", message);
         }
 
-        return new DhanApiResponse(false, statusCode, null, message ?? $"Dhan returned HTTP {(int)statusCode}.");
+        return new DhanApiResponse(false, statusCode, null, message ?? $"Dhan returned HTTP {(int)statusCode}.", body);
     }
 
     private static string? ReadError(JsonDocument? document, string rawBody)
