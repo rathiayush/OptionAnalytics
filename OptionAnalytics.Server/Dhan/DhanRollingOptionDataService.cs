@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json;
 using OptionAnalytics.Server.Models;
+using OptionAnalytics.Server.Services;
 
 namespace OptionAnalytics.Server.Dhan;
 
@@ -57,7 +58,7 @@ namespace OptionAnalytics.Server.Dhan;
 /// assumed - still build defensively for anything beyond that, and let Dhan's own error message
 /// surface immediately if some other assumption here turns out wrong too.
 /// </summary>
-public sealed class DhanRollingOptionDataService
+public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
 {
     private const string FnoSegment = "NSE_FNO";
     private const string OptionInstrument = "OPTIDX";
@@ -108,9 +109,13 @@ public sealed class DhanRollingOptionDataService
     /// spot for that bar) instead of only approximately (against a separately fetched spot series
     /// matched to the nearest earlier bar).</summary>
     public async Task<(IReadOnlyList<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> Bars, string? Error)> GetRollingOptionCandlesAsync(
-        uint underlyingSecurityId, string expiryFlag, int expiryCode, string strike, string drvOptionType,
+        string underlying, uint underlyingSecurityId, string expiryFlag, int expiryCode, string strike, string drvOptionType,
         DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken)
     {
+        // `underlying` is part of IRollingOptionDataSource's shared signature but unused here -
+        // this implementation identifies the underlying by underlyingSecurityId (what Dhan itself
+        // needs), not by name; StoredRollingOptionDataService is the one that needs the name, to
+        // query TimescaleDB's own underlying-keyed table.
         if (!_api.HasSession)
             return (Array.Empty<(CandleWithVolume, decimal?, decimal?)>(), "Dhan is not authenticated (check Dhan:ClientId/Dhan:AccessToken).");
 

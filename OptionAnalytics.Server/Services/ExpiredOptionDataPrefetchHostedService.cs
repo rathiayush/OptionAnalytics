@@ -211,7 +211,7 @@ public sealed class ExpiredOptionDataPrefetchHostedService : BackgroundService
                 var optionType = isCall ? "CALL" : "PUT";
 
                 var (bars, error) = await _rollingOption.GetRollingOptionCandlesAsync(
-                    instrument.SecurityId, expiryFlag, segment.ExpiryCode, token, optionType, fromDay, toDay, 1, cancellationToken);
+                    underlying, instrument.SecurityId, expiryFlag, segment.ExpiryCode, token, optionType, fromDay, toDay, 1, cancellationToken);
 
                 if (error is not null)
                 {

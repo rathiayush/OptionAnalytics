@@ -103,6 +103,11 @@ builder.Services.AddSingleton<DhanSpotInstrumentMaster>(sp => new DhanSpotInstru
 builder.Services.AddHttpClient<DhanTotpAuthService>();
 builder.Services.AddSingleton<DhanHistoricalDataService>();
 builder.Services.AddSingleton<DhanRollingOptionDataService>();
+// Reads NiftyDataCollector's own TimescaleDB instead of calling Dhan live - inert (never even
+// tries to connect) when ConnectionStrings:NiftyDataCollectorTimescale is blank, which it always
+// is in production (see docker-compose.yml, which deliberately does not set it) - see
+// StoredRollingOptionDataService's own doc comment.
+builder.Services.AddSingleton<StoredRollingOptionDataService>();
 builder.Services.AddSingleton<DhanMarketFeedClient>();
 // AddHttpClient<DhanOptionChainMaster>() (the pattern every other typed client here uses) registers
 // it TRANSIENT - a brand new instance, with its own empty in-memory dictionary, for every distinct

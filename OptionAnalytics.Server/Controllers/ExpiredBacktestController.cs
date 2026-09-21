@@ -58,6 +58,7 @@ public sealed class ExpiredBacktestController : ControllerBase
         [FromQuery] string? strategy,
         [FromQuery] int timeframe,
         [FromQuery] bool includeObvCdv,
+        [FromQuery] bool? useStoredData,
         CancellationToken cancellationToken)
     {
         var normalizedFlag = expiryFlag?.Trim().ToUpperInvariant();
@@ -72,7 +73,7 @@ public sealed class ExpiredBacktestController : ControllerBase
 
         var result = await _service.RunAsync(
             underlying.ToUpperInvariant(), normalizedFlag, parsedExpiry, lookbackDays > 0 ? lookbackDays : 30,
-            strategy, Math.Max(1, timeframe), ReadParameters(), cancellationToken, includeObvCdv);
+            strategy, Math.Max(1, timeframe), ReadParameters(), cancellationToken, includeObvCdv, useStoredData ?? true);
 
         return result.Success ? Ok(result) : BadRequest(new { error = result.Error });
     }
@@ -99,6 +100,7 @@ public sealed class ExpiredBacktestController : ControllerBase
         [FromQuery] decimal? strike,
         [FromQuery] string? side,
         [FromQuery] int lookbackDays,
+        [FromQuery] bool? useStoredData,
         CancellationToken cancellationToken)
     {
         var normalizedFlag = expiryFlag?.Trim().ToUpperInvariant();
@@ -114,7 +116,7 @@ public sealed class ExpiredBacktestController : ControllerBase
 
         var result = await _service.GetRollingChartAsync(
             underlying.ToUpperInvariant(), normalizedFlag, parsedExpiry, otmSteps, strike, normalizedSide == "CE",
-            lookbackDays > 0 ? lookbackDays : 30, cancellationToken);
+            lookbackDays > 0 ? lookbackDays : 30, cancellationToken, useStoredData ?? true);
 
         return result.Success ? Ok(result) : BadRequest(new { error = result.Error });
     }

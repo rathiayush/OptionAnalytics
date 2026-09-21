@@ -186,6 +186,7 @@ public sealed class ExpiredOptionBacktestService
     private readonly DhanSpotInstrumentMaster _instrumentMaster;
     private readonly DhanHistoricalDataService _historicalData;
     private readonly DhanRollingOptionDataService _rollingOption;
+    private readonly StoredRollingOptionDataService _storedRollingOption;
     private readonly HistoricalSpotDataStore _spotCache;
     private readonly ExpiredOptionDataStore _optionCache;
     private readonly IReadOnlyDictionary<string, IBacktestStrategy> _strategies;
@@ -194,6 +195,7 @@ public sealed class ExpiredOptionBacktestService
         DhanSpotInstrumentMaster instrumentMaster,
         DhanHistoricalDataService historicalData,
         DhanRollingOptionDataService rollingOption,
+        StoredRollingOptionDataService storedRollingOption,
         HistoricalSpotDataStore spotCache,
         ExpiredOptionDataStore optionCache,
         IEnumerable<IBacktestStrategy> strategies)
@@ -201,6 +203,7 @@ public sealed class ExpiredOptionBacktestService
         _instrumentMaster = instrumentMaster;
         _historicalData = historicalData;
         _rollingOption = rollingOption;
+        _storedRollingOption = storedRollingOption;
         _spotCache = spotCache;
         _optionCache = optionCache;
         _strategies = strategies.Where(s => SupportedStrategyKeys.Contains(s.Key)).ToDictionary(s => s.Key);
@@ -262,7 +265,7 @@ public sealed class ExpiredOptionBacktestService
     public async Task<ExpiredBacktestResult> RunAsync(
         string underlying, string expiryFlag, DateOnly expiryDate, int lookbackDays, string strategyKey,
         int timeframeMinutes, IReadOnlyDictionary<string, decimal> parameters,
-        CancellationToken cancellationToken, bool includeObvCdv = false)
+        CancellationToken cancellationToken, bool includeObvCdv = false, bool useStoredData = true)
     {
         if (!StrikeStepByUnderlying.TryGetValue(underlying, out var step))
             return ExpiredBacktestResult.Failed($"'{underlying}' is not supported - only NIFTY and BANKNIFTY (Dhan's rolling-option API only documents NSE_FNO index options).");
@@ -416,8 +419,8 @@ public sealed class ExpiredOptionBacktestService
             || includeObvCdv;
         var bandCenterSteps = needsFlowChain ? 0 : otmSteps;
         var bandRadius = needsFlowChain ? FlowChainRadius : StrikeBandSteps;
-        var (ceBand, ceError) = await FetchStrikeBandAsync(underlying, instrument.SecurityId, expiryFlag, segments, bandCenterSteps, bandRadius, isCall: true, spotBars1m, step, cancellationToken);
-        var (peBand, peError) = await FetchStrikeBandAsync(underlying, instrument.SecurityId, expiryFlag, segments, bandCenterSteps, bandRadius, isCall: false, spotBars1m, step, cancellationToken);
+        var (ceBand, ceError) = await FetchStrikeBandAsync(underlying, instrument.SecurityId, expiryFlag, segments, bandCenterSteps, bandRadius, isCall: true, spotBars1m, step, useStoredData, cancellationToken);
+        var (peBand, peError) = await FetchStrikeBandAsync(underlying, instrument.SecurityId, expiryFlag, segments, bandCenterSteps, bandRadius, isCall: false, spotBars1m, step, useStoredData, cancellationToken);
 
         // The PRIMARY (centre-of-band) member - what this run's own otmSteps actually calls for -
         // used only for the summary stats below (resolved/expected strike, splices, bar counts).
@@ -553,7 +556,7 @@ public sealed class ExpiredOptionBacktestService
     /// always was: the single PRIMARY token's own untouched response, for auditing.</summary>
     public async Task<RollingOptionChartResult> GetRollingChartAsync(
         string underlying, string expiryFlag, DateOnly expiryDate, int otmSteps, decimal? absoluteStrike, bool isCall, int lookbackDays,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, bool useStoredData = true)
     {
         if (!StrikeStepByUnderlying.ContainsKey(underlying))
             return RollingOptionChartResult.Failed($"'{underlying}' is not supported - only NIFTY and BANKNIFTY (Dhan's rolling-option API only documents NSE_FNO index options).");
@@ -629,7 +632,7 @@ public sealed class ExpiredOptionBacktestService
             // A BAND of tokens around resolvedOtmSteps, not just the single one - so absoluteStrike
             // keeps being found even on a day the index has drifted enough that this single starting
             // offset no longer resolves to it (see BuildFixedStrikeSeries below).
-            (band, bandError) = await FetchStrikeBandAsync(underlying, instrument.SecurityId, expiryFlag, segments, resolvedOtmSteps, StrikeBandSteps, isCall, windowSpotBars, step, cancellationToken);
+            (band, bandError) = await FetchStrikeBandAsync(underlying, instrument.SecurityId, expiryFlag, segments, resolvedOtmSteps, StrikeBandSteps, isCall, windowSpotBars, step, useStoredData, cancellationToken);
         }
 
         // Same sign convention RunAsync itself uses: otmSteps is "how far OTM for the side actually
@@ -653,7 +656,7 @@ public sealed class ExpiredOptionBacktestService
         }
         else
         {
-            (raw, error, _) = await FetchAcrossSegmentsAsync(underlying, instrument.SecurityId, expiryFlag, segments, strikeToken, optionType, cancellationToken);
+            (raw, error, _) = await FetchAcrossSegmentsAsync(underlying, instrument.SecurityId, expiryFlag, segments, strikeToken, optionType, useStoredData, cancellationToken);
             splices = DetectPossibleSplices(raw.Select(b => b.Bar).ToList());
         }
 
@@ -775,11 +778,11 @@ public sealed class ExpiredOptionBacktestService
     /// this data being a genuinely fast Expired Backtest read.</summary>
     private async Task<(List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> Bars, string? Error, bool AnyLiveCall)> FetchAcrossSegmentsAsync(
         string underlying, uint underlyingSecurityId, string expiryFlag, IReadOnlyList<FetchSegment> segments, string strikeToken, string optionType,
-        CancellationToken cancellationToken)
+        bool useStoredData, CancellationToken cancellationToken)
     {
         var bars = new List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)>();
         string? error = null;
-        var anyLiveCall = false;
+        var anyLiveDhanCall = false;
 
         foreach (var segment in segments)
         {
@@ -789,14 +792,19 @@ public sealed class ExpiredOptionBacktestService
                 continue;
             }
 
-            anyLiveCall = true;
-            var (segmentBars, segmentError) = await _rollingOption.GetRollingOptionCandlesAsync(
-                underlyingSecurityId, expiryFlag, segment.ExpiryCode, strikeToken, optionType, segment.From, segment.To, 1, cancellationToken);
+            // useStoredData picks NiftyDataCollector's own TimescaleDB (no Dhan call, no rate limit
+            // to pace against) over a live Dhan call - see IRollingOptionDataSource's own doc
+            // comment. AnyLiveCall below stays scoped to the DHAN path specifically: a Postgres read
+            // needs none of BandFetchDelay's pacing, only an actual Dhan call does.
+            IRollingOptionDataSource source = useStoredData ? _storedRollingOption : _rollingOption;
+            var (segmentBars, segmentError) = await source.GetRollingOptionCandlesAsync(
+                underlying, underlyingSecurityId, expiryFlag, segment.ExpiryCode, strikeToken, optionType, segment.From, segment.To, 1, cancellationToken);
             bars.AddRange(segmentBars);
             if (segmentError is not null) error = error is null ? segmentError : $"{error}; {segmentError}";
+            if (!useStoredData) anyLiveDhanCall = true;
         }
 
-        return (bars, error, anyLiveCall);
+        return (bars, error, anyLiveDhanCall);
     }
 
     /// <summary>One band member's own data (see FetchStrikeBandAsync): RawBars is the untouched fetch
@@ -828,7 +836,7 @@ public sealed class ExpiredOptionBacktestService
     /// Per-member errors are concatenated, same convention FetchAcrossSegmentsAsync itself uses.</summary>
     private async Task<(List<StrikeBandMember> Band, string? Error)> FetchStrikeBandAsync(
         string underlying, uint underlyingSecurityId, string expiryFlag, IReadOnlyList<FetchSegment> segments, int centerSteps, int radius, bool isCall,
-        IReadOnlyList<Candle> spotBars, int step, CancellationToken cancellationToken)
+        IReadOnlyList<Candle> spotBars, int step, bool useStoredData, CancellationToken cancellationToken)
     {
         var optionType = isCall ? "CALL" : "PUT";
         var band = new List<StrikeBandMember>();
@@ -843,7 +851,7 @@ public sealed class ExpiredOptionBacktestService
             if (pacePendingFromPreviousToken) await Task.Delay(BandFetchDelay, cancellationToken);
 
             var token = StrikeToken(isCall ? steps : -steps);
-            var (raw, fetchError, anyLiveCall) = await FetchAcrossSegmentsAsync(underlying, underlyingSecurityId, expiryFlag, segments, token, optionType, cancellationToken);
+            var (raw, fetchError, anyLiveCall) = await FetchAcrossSegmentsAsync(underlying, underlyingSecurityId, expiryFlag, segments, token, optionType, useStoredData, cancellationToken);
             if (fetchError is not null) error = error is null ? fetchError : $"{error}; {fetchError}";
             pacePendingFromPreviousToken = anyLiveCall;
 

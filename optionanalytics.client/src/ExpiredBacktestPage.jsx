@@ -298,6 +298,13 @@ export default function ExpiredBacktestPage() {
   // computes them anyway for its own signal logic regardless of this checkbox.
   const [includeObvCdv, setIncludeObvCdv] = useState(false)
 
+  // On by default: reads real historical option data straight from NiftyDataCollector's own
+  // database instead of calling Dhan live - much faster (no live rate-limit pacing) and works for
+  // a fully expired week Dhan's live rolling-option endpoint may no longer resolve cleanly. Turn
+  // it off to fall back to the original live-Dhan-call path (e.g. if the stored data doesn't cover
+  // the window you need yet, or the local database isn't reachable from wherever this is running).
+  const [useStoredData, setUseStoredData] = useState(true)
+
   const strategy = strategies.find((s) => s.key === strategyKey) ?? null
 
   // Purely a display toggle, not a run parameter - unticking an indicator never changes the
@@ -416,6 +423,7 @@ export default function ExpiredBacktestPage() {
       strategy: strategyKey,
       timeframe: String(timeframe),
       includeObvCdv: String(includeObvCdv),
+      useStoredData: String(useStoredData),
     })
     for (const [k, v] of Object.entries(paramValues)) params.set(k, String(v))
 
@@ -698,6 +706,12 @@ export default function ExpiredBacktestPage() {
               ))}
               <Button type="primary" icon={<PlayCircleOutlined />} onClick={run} loading={loading} disabled={!canRun}>Run</Button>
             </Space>
+            <Checkbox checked={useStoredData} onChange={(e) => setUseStoredData(e.target.checked)}>
+              Use stored data{' '}
+              <Tooltip title="On by default: reads real historical option data straight from NiftyDataCollector's own database instead of calling Dhan live - faster, and works for a fully expired week Dhan's live rolling-option endpoint may no longer resolve cleanly. Turn this off to fall back to live Dhan API calls instead (e.g. if the stored data doesn't cover the window you need yet, or you're running this somewhere the local database isn't reachable - that case is handled gracefully with a clear error, not a crash).">
+                <InfoCircleOutlined />
+              </Tooltip>
+            </Checkbox>
             <Checkbox checked={includeObvCdv} onChange={(e) => setIncludeObvCdv(e.target.checked)}>
               Also compute CDV / OBV for this run{' '}
               <Tooltip title="Off by default: reconstructing order-flow (CDV/OBV) across the whole surrounding strike chain needs a much wider option-chain fetch (about 1.6x the calls), so it's opt-in for a strategy other than 'EMA Crossover + ATM Cross + Flow Confirmation' (which always computes it anyway). Tick this to plot the CDV/OBV/Volume charts below and visually check they look right for the strategy you're actually running.">
