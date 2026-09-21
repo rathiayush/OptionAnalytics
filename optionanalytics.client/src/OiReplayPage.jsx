@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicker, Alert, Empty, Tooltip, Slider } from 'antd'
+import { Component, useEffect, useMemo, useRef, useState } from 'react'
+import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicker, Alert, Empty, Tooltip, Slider, Tag } from 'antd'
 import { PlayCircleOutlined, PauseCircleOutlined, ReloadOutlined } from '@ant-design/icons'
 import { createChart, CandlestickSeries, CrosshairMode } from 'lightweight-charts'
 import {
@@ -137,14 +137,26 @@ function ReplayChart({ bars, visibleCount, ladderRows, height = 440 }) {
   // every tick, since OI itself changes as the replay advances - always clears the previous set
   // first rather than trying to diff/reuse handles, since which strikes even qualify as "top 5" can
   // change from one tick to the next.
+  //
+  // Candidates are restricted to strikes within the DAY'S OWN high/low (plus a small buffer) before
+  // ranking by OI - the real bug this guards against: the fetched band can reach +-10 strikes from
+  // ATM (500+ points for NIFTY), while a real day often only moves 150-200 points. A heaviest-OI
+  // strike sitting far outside that range is real data, but drawing it pulls the price axis wide
+  // enough to squash the actual candles into an unreadable sliver - "cannot see anything" was this,
+  // not a crash. A level that far away isn't a near-term read on THIS day's action anyway.
   useEffect(() => {
     if (!seriesRef.current) return
     for (const line of priceLinesRef.current) seriesRef.current.removePriceLine(line)
     priceLinesRef.current = []
-    if (!ladderRows || ladderRows.length === 0) return
+    if (!ladderRows || ladderRows.length === 0 || bars.length === 0) return
+
+    const dayHigh = Math.max(...bars.map((b) => b.high))
+    const dayLow = Math.min(...bars.map((b) => b.low))
+    const buffer = (dayHigh - dayLow) * 0.5 || dayHigh * 0.02
+    const inRange = ladderRows.filter((r) => r.strike >= dayLow - buffer && r.strike <= dayHigh + buffer)
 
     const drawSide = (key, ivKey, lightColor, darkColor, labelPrefix) => {
-      const top = [...ladderRows]
+      const top = [...inRange]
         .filter((r) => (r[key] ?? 0) > 0)
         .sort((a, b) => (b[key] ?? 0) - (a[key] ?? 0))
         .slice(0, CHART_LEVELS_PER_SIDE)
@@ -169,7 +181,7 @@ function ReplayChart({ bars, visibleCount, ladderRows, height = 440 }) {
 
     drawSide('ceOi', 'ceIv', RESISTANCE_LIGHT, RESISTANCE_DARK, 'R')
     drawSide('peOi', 'peIv', SUPPORT_LIGHT, SUPPORT_DARK, 'S')
-  }, [ladderRows])
+  }, [ladderRows, bars])
 
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }
@@ -211,12 +223,13 @@ function OiLadder({ rows, atmStrike }) {
             }}
           >
             <Col span={10} style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 4 }}>
+              <OiChange value={row.peOiChange} />
               <Text style={{ fontSize: 10, color: AXIS_COLOR, whiteSpace: 'nowrap' }}>
                 {row.pePrice != null ? `${row.pePrice.toFixed(2)}` : ''}
                 {row.peIv != null ? ` · IV ${row.peIv.toFixed(1)}` : ''}
               </Text>
               <div style={{ width: 70, display: 'flex', justifyContent: 'flex-end' }}>
-                <Tooltip title={row.peOi != null ? `PE OI: ${row.peOi.toLocaleString()}${row.pePrice != null ? `, LTP ${row.pePrice.toFixed(2)}` : ''}` : 'No data'}>
+                <Tooltip title={row.peOi != null ? `PE OI: ${row.peOi.toLocaleString()}${row.pePrice != null ? `, LTP ${row.pePrice.toFixed(2)}` : ''}${row.peOiChange != null ? ` (${row.peOiChange >= 0 ? '+' : ''}${row.peOiChange.toLocaleString()} in the last min)` : ''}` : 'No data'}>
                   <div style={{
                     width: `${((row.peOi ?? 0) / maxPeOi) * 100}%`, minWidth: row.peOi ? 2 : 0, height: 14,
                     background: isSupport ? PE_COLOR : `${PE_COLOR}99`,
@@ -229,13 +242,14 @@ function OiLadder({ rows, atmStrike }) {
             </Col>
             <Col span={10} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
               <div style={{ width: 70 }}>
-                <Tooltip title={row.ceOi != null ? `CE OI: ${row.ceOi.toLocaleString()}${row.cePrice != null ? `, LTP ${row.cePrice.toFixed(2)}` : ''}` : 'No data'}>
+                <Tooltip title={row.ceOi != null ? `CE OI: ${row.ceOi.toLocaleString()}${row.cePrice != null ? `, LTP ${row.cePrice.toFixed(2)}` : ''}${row.ceOiChange != null ? ` (${row.ceOiChange >= 0 ? '+' : ''}${row.ceOiChange.toLocaleString()} in the last min)` : ''}` : 'No data'}>
                   <div style={{
                     width: `${((row.ceOi ?? 0) / maxCeOi) * 100}%`, minWidth: row.ceOi ? 2 : 0, height: 14,
                     background: isResistance ? CE_COLOR : `${CE_COLOR}99`,
                   }} />
                 </Tooltip>
               </div>
+              <OiChange value={row.ceOiChange} />
               <Text style={{ fontSize: 10, color: AXIS_COLOR, whiteSpace: 'nowrap' }}>
                 {row.cePrice != null ? `${row.cePrice.toFixed(2)}` : ''}
                 {row.ceIv != null ? ` · IV ${row.ceIv.toFixed(1)}` : ''}
@@ -246,6 +260,48 @@ function OiLadder({ rows, atmStrike }) {
       })}
     </div>
   )
+}
+
+// Same reasoning as ExpiredBacktestPage's own ChartErrorBoundary - a lightweight-charts assertion or
+// bad data shape should degrade to a message, not blank the whole page (the stats/ladder above are
+// still useful even if the chart itself can't render). Must be a class component; React has no hook
+// equivalent for catching a child's render/effect errors.
+class ChartErrorBoundary extends Component {
+  constructor(props) {
+    super(props)
+    this.state = { error: null }
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error }
+  }
+
+  componentDidCatch(error) {
+    console.error('OI Replay chart crashed:', error)
+  }
+
+  render() {
+    if (this.state.error) {
+      return <Alert type="warning" showIcon message="This chart could not be rendered - the ladder and stats above are still available." />
+    }
+    return this.props.children
+  }
+}
+
+// A small colored delta label for a one-minute OI change - green/up for building, red/down for
+// unwinding, dash for no change or not-yet-available (first minute of the day, no prior reading).
+function OiChange({ value }) {
+  if (value == null || value === 0) return <Text style={{ fontSize: 9, color: AXIS_COLOR }}>·</Text>
+  const up = value > 0
+  return (
+    <Text style={{ fontSize: 9, color: up ? CE_COLOR : PE_COLOR }}>
+      {up ? '▲' : '▼'}{Math.abs(value).toLocaleString()}
+    </Text>
+  )
+}
+
+function biasColor(bias) {
+  return bias === 'Bullish' ? 'success' : bias === 'Bearish' ? 'error' : 'default'
 }
 
 const SPEED_OPTIONS = [
@@ -335,16 +391,24 @@ export default function OiReplayPage() {
   const currentBar = bars[visibleCount - 1] ?? null
   const asOfMs = currentBar ? currentBar.time * 1000 : null
 
+  // Every row also carries its own OI ONE MINUTE AGO (native resolution, regardless of the chart's
+  // own timeframe - "change every min" was explicit) alongside the current reading, so the ladder
+  // can show a rising/falling delta per strike, not just the current absolute number.
   const ladderRows = useMemo(() => {
     if (asOfMs == null) return []
+    const priorMs = asOfMs - 60_000
     const strikes = new Set([...ceByStrike.keys(), ...peByStrike.keys()])
     const rows = [...strikes].map((strike) => {
       const ce = latestAtOrBefore(ceByStrike.get(strike) ?? [], asOfMs)
       const pe = latestAtOrBefore(peByStrike.get(strike) ?? [], asOfMs)
+      const cePrior = latestAtOrBefore(ceByStrike.get(strike) ?? [], priorMs)
+      const pePrior = latestAtOrBefore(peByStrike.get(strike) ?? [], priorMs)
       return {
         strike,
         ceOi: ce?.openInterest ?? null, ceIv: ce?.impliedVolatility ?? null, cePrice: ce?.price ?? null,
         peOi: pe?.openInterest ?? null, peIv: pe?.impliedVolatility ?? null, pePrice: pe?.price ?? null,
+        ceOiChange: ce?.openInterest != null && cePrior?.openInterest != null ? ce.openInterest - cePrior.openInterest : null,
+        peOiChange: pe?.openInterest != null && pePrior?.openInterest != null ? pe.openInterest - pePrior.openInterest : null,
       }
     })
     return rows.sort((a, b) => b.strike - a.strike)
@@ -363,6 +427,79 @@ export default function OiReplayPage() {
   }, [ladderRows])
 
   const maxPain = useMemo(() => computeMaxPain(ladderRows), [ladderRows])
+
+  // Synthesizes PCR + OI buildup + IV skew into one heuristic read - three independent votes
+  // (Bullish/Bearish/Neutral), combined into an overall bias and a candidate strike/side. This is a
+  // rule-of-thumb reading of the SAME numbers already shown above, not a prediction - all three
+  // signals can (and often do) disagree, which is exactly what "Mixed" reports honestly rather than
+  // forcing a call either way.
+  const marketRead = useMemo(() => {
+    if (!currentBar || ladderRows.length === 0 || atmStrike == null) return null
+
+    // PCR: conventional NSE-desk reading - a high PCR means more puts written relative to calls,
+    // which (writers being confident enough to sell there) reads as support/bullish; a low PCR the
+    // mirror. Thresholds are naive, not calibrated against real outcomes - a starting point, not
+    // a validated signal.
+    const pcrBias = pcr == null ? 'Neutral' : pcr > 1.2 ? 'Bullish' : pcr < 0.8 ? 'Bearish' : 'Neutral'
+
+    const resistance = ladderRows.reduce((best, r) => ((r.ceOi ?? 0) > (best?.ceOi ?? -1) ? r : best), null)
+    const support = ladderRows.reduce((best, r) => ((r.peOi ?? 0) > (best?.peOi ?? -1) ? r : best), null)
+
+    // OI buildup near ATM (+-2 steps), combined with the spot move over the last 5 revealed bars -
+    // the classic "Price + OI" combination read: rising price + rising Put OI = fresh put WRITING
+    // (bullish, support being defended); falling price + rising Call OI = fresh call writing
+    // (bearish, resistance being defended); the two unwind variants are the same move without fresh
+    // OI backing it - weaker, "covering" rather than a defended level.
+    const nearAtm = ladderRows.filter((r) => Math.abs(r.strike - atmStrike) <= step * 2)
+    const ceChangeSum = nearAtm.reduce((s, r) => s + (r.ceOiChange ?? 0), 0)
+    const peChangeSum = nearAtm.reduce((s, r) => s + (r.peOiChange ?? 0), 0)
+    const priorBar = bars[Math.max(0, visibleCount - 6)]
+    const priceChange = priorBar ? currentBar.close - priorBar.close : 0
+
+    let oiBuildup = 'No clear buildup pattern near ATM yet'
+    let oiBias = 'Neutral'
+    if (priceChange > 0 && peChangeSum > 0 && peChangeSum >= ceChangeSum) { oiBuildup = 'Put writing near ATM as price rises - support being defended'; oiBias = 'Bullish' }
+    else if (priceChange < 0 && ceChangeSum > 0 && ceChangeSum >= peChangeSum) { oiBuildup = 'Call writing near ATM as price falls - resistance being defended'; oiBias = 'Bearish' }
+    else if (priceChange > 0 && ceChangeSum < 0) { oiBuildup = 'Call unwinding as price rises - short covering, no fresh support built'; oiBias = 'Bullish' }
+    else if (priceChange < 0 && peChangeSum < 0) { oiBuildup = 'Put unwinding as price falls - long unwinding, no fresh resistance built'; oiBias = 'Bearish' }
+
+    // IV skew at (or nearest to) ATM - Put IV richer than Call IV is the conventional "more downside
+    // hedging demand" read; the mirror for Call-rich skew. A real equity index almost always carries
+    // SOME natural put skew, so this is read relative to itself over the day, not an absolute rule.
+    const atmRow = ladderRows.find((r) => r.strike === atmStrike) ?? nearAtm[0] ?? null
+    const skew = atmRow && atmRow.peIv != null && atmRow.ceIv != null ? atmRow.peIv - atmRow.ceIv : null
+    const ivBias = skew == null ? 'Neutral' : skew > 1 ? 'Bearish' : skew < -1 ? 'Bullish' : 'Neutral'
+
+    const votes = [pcrBias, oiBias, ivBias]
+    const bullCount = votes.filter((v) => v === 'Bullish').length
+    const bearCount = votes.filter((v) => v === 'Bearish').length
+    const overall = bullCount > bearCount ? 'Bullish' : bearCount > bullCount ? 'Bearish' : 'Mixed / Neutral'
+
+    const suggestedStrike = overall === 'Bullish' ? atmStrike + step : overall === 'Bearish' ? atmStrike - step : atmStrike
+    const suggestedSide = overall === 'Bullish' ? 'CE' : overall === 'Bearish' ? 'PE' : 'No clear edge - consider staying flat'
+
+    // "Are we okay right now" - a plain proximity-to-wall check, independent of the bullish/bearish
+    // vote above: even a clear directional read is riskier to act on right this second if price is
+    // already sitting on top of a wall (the next tick either breaks it or gets rejected hard).
+    // Threshold is half a strike-step - close enough to matter, not so tight it never fires.
+    const wallThreshold = step * 0.5
+    const distToResistance = resistance ? resistance.strike - currentBar.close : null
+    const distToSupport = support ? currentBar.close - support.strike : null
+    const nearResistance = distToResistance != null && distToResistance >= 0 && distToResistance <= wallThreshold
+    const nearSupport = distToSupport != null && distToSupport >= 0 && distToSupport <= wallThreshold
+    const safetyOk = !nearResistance && !nearSupport
+    const safetyReason = nearResistance
+      ? `Price is only ${distToResistance.toFixed(0)} pts below the resistance wall at ${resistance.strike} - a break needs conviction, a rejection is live risk right now.`
+      : nearSupport
+        ? `Price is only ${distToSupport.toFixed(0)} pts above the support wall at ${support.strike} - a break needs conviction, a bounce is live risk right now.`
+        : `Price is clear of both the resistance wall (${resistance ? `${resistance.strike}, ${(resistance.strike - currentBar.close).toFixed(0)} pts away` : 'none'}) and the support wall (${support ? `${support.strike}, ${(currentBar.close - support.strike).toFixed(0)} pts away` : 'none'}) right now.`
+
+    return {
+      pcrBias, resistance, support, oiBuildup, oiBias, skew, ivBias,
+      atmCeIv: atmRow?.ceIv, atmPeIv: atmRow?.peIv, overall, suggestedStrike, suggestedSide,
+      safetyOk, safetyReason,
+    }
+  }, [currentBar, ladderRows, pcr, atmStrike, step, bars, visibleCount])
 
   return (
     <div style={{ maxWidth: 1280, margin: '0 auto', padding: '24px 16px' }}>
@@ -431,11 +568,61 @@ export default function OiReplayPage() {
               </Row>
             </Card>
 
+            {marketRead && (
+              <Card size="small" title="Market Read">
+                <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                  <Alert
+                    type={marketRead.safetyOk ? 'success' : 'warning'}
+                    showIcon
+                    message={marketRead.safetyOk ? 'Are we okay right now? Yes - clear of major walls.' : 'Are we okay right now? Caution - sitting right at a wall.'}
+                    description={marketRead.safetyReason}
+                  />
+                  <Row gutter={24}>
+                    <Col span={8}>
+                      <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>PCR read</Text>
+                      <Tag color={biasColor(marketRead.pcrBias)} style={{ fontSize: 12 }}>{marketRead.pcrBias}</Tag>
+                    </Col>
+                    <Col span={8}>
+                      <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>OI buildup (near ATM)</Text>
+                      <Tag color={biasColor(marketRead.oiBias)} style={{ fontSize: 12 }}>{marketRead.oiBias}</Tag>
+                      <div style={{ fontSize: 11, color: AXIS_COLOR, marginTop: 2 }}>{marketRead.oiBuildup}</div>
+                    </Col>
+                    <Col span={8}>
+                      <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>IV skew (PE − CE, at ATM)</Text>
+                      <Tag color={biasColor(marketRead.ivBias)} style={{ fontSize: 12 }}>{marketRead.ivBias}</Tag>
+                      <div style={{ fontSize: 11, color: AXIS_COLOR, marginTop: 2 }}>
+                        {marketRead.skew != null
+                          ? `${marketRead.skew >= 0 ? '+' : ''}${marketRead.skew.toFixed(1)} (CE ${marketRead.atmCeIv?.toFixed(1)}, PE ${marketRead.atmPeIv?.toFixed(1)})`
+                          : 'IV not available at ATM yet'}
+                      </div>
+                    </Col>
+                  </Row>
+                  <Alert
+                    type={marketRead.overall === 'Bullish' ? 'success' : marketRead.overall === 'Bearish' ? 'error' : 'info'}
+                    showIcon
+                    message={`Overall bias: ${marketRead.overall}`}
+                    description={
+                      marketRead.overall === 'Mixed / Neutral'
+                        ? 'PCR, OI buildup and IV skew don’t agree right now - no clean directional edge to act on.'
+                        : `Candidate: ${marketRead.suggestedStrike} ${marketRead.suggestedSide} (resistance ${marketRead.resistance?.strike ?? '—'}, support ${marketRead.support?.strike ?? '—'}).`
+                    }
+                  />
+                  <Text type="secondary" style={{ fontSize: 11 }}>
+                    Heuristic reading of the same PCR/OI/IV numbers shown above - three independent, naively-thresholded votes, not a signal or advice. Always cross-check against price action itself.
+                  </Text>
+                </Space>
+              </Card>
+            )}
+
             <Row gutter={16}>
               <Col span={15}>
                 <Card size="small" title="Spot (replaying)">
                   {bars.length > 0
-                    ? <ReplayChart bars={bars} visibleCount={visibleCount} ladderRows={ladderRows} height={460} />
+                    ? (
+                      <ChartErrorBoundary key={`${underlying}-${result.date}-${timeframe}`}>
+                        <ReplayChart bars={bars} visibleCount={visibleCount} ladderRows={ladderRows} height={460} />
+                      </ChartErrorBoundary>
+                    )
                     : <Empty description="No spot candles for this day." />}
                 </Card>
               </Col>
