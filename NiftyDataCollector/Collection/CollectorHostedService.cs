@@ -23,11 +23,23 @@ namespace NiftyDataCollector.Collection;
 /// </summary>
 public sealed class CollectorHostedService : BackgroundService
 {
+    /// <summary>How long to give DhanTotpAutoRenewalHostedService a head start before this
+    /// service's own first Dhan call, when TOTP is configured - without this, the two hosted
+    /// services start concurrently and the collector's first /optionchain/expirylist call can race
+    /// ahead of login finishing, sending an empty access-token and getting back Dhan's own
+    /// "Access token is invalid" rather than a clean "not authenticated yet". Purely a startup
+    /// nicety: if login is still slow after this (a rate-limit cooldown, a genuine lockout), this
+    /// service proceeds anyway and its own per-cycle error handling absorbs the resulting failures
+    /// exactly as it always did, recovering on a later cycle once auth actually succeeds.</summary>
+    private static readonly TimeSpan AuthWaitTimeout = TimeSpan.FromSeconds(15);
+
     private readonly DhanSpotInstrumentMaster _spotMaster;
     private readonly DhanOptionChainClient _optionChain;
     private readonly DhanHistoricalDataClient _historicalData;
     private readonly DhanRateLimiter _rateLimiter;
     private readonly TimescaleWriter _writer;
+    private readonly DhanSession _session;
+    private readonly DhanOptions _dhanOptions;
     private readonly CollectorOptions _options;
     private readonly ILogger<CollectorHostedService> _logger;
 
@@ -39,13 +51,16 @@ public sealed class CollectorHostedService : BackgroundService
 
     public CollectorHostedService(
         DhanSpotInstrumentMaster spotMaster, DhanOptionChainClient optionChain, DhanHistoricalDataClient historicalData,
-        DhanRateLimiter rateLimiter, TimescaleWriter writer, IOptions<CollectorOptions> options, ILogger<CollectorHostedService> logger)
+        DhanRateLimiter rateLimiter, TimescaleWriter writer, DhanSession session, IOptions<DhanOptions> dhanOptions,
+        IOptions<CollectorOptions> options, ILogger<CollectorHostedService> logger)
     {
         _spotMaster = spotMaster;
         _optionChain = optionChain;
         _historicalData = historicalData;
         _rateLimiter = rateLimiter;
         _writer = writer;
+        _session = session;
+        _dhanOptions = dhanOptions.Value;
         _options = options.Value;
         _logger = logger;
     }
@@ -57,6 +72,18 @@ public sealed class CollectorHostedService : BackgroundService
         var nifty = await _spotMaster.ResolveNiftyAsync(stoppingToken);
         _logger.LogInformation("NiftyDataCollector starting - NIFTY securityId={Id}, segment={Segment}, strikeStep={Step}, strikesEachSide={N}, backfillDays={Days}.",
             nifty.SecurityId, nifty.DhanSegment, _options.StrikeStep, _options.StrikesEachSide, _options.BackfillDays);
+
+        if (_dhanOptions.HasTotpCredentials)
+        {
+            var waited = TimeSpan.Zero;
+            while (!_session.IsAuthenticated && waited < AuthWaitTimeout && !stoppingToken.IsCancellationRequested)
+            {
+                await Task.Delay(500, stoppingToken);
+                waited += TimeSpan.FromMilliseconds(500);
+            }
+            if (!_session.IsAuthenticated)
+                _logger.LogInformation("Still waiting on Dhan TOTP login after {Seconds}s - proceeding anyway; the first cycle may fail and recover on the next one once login succeeds.", AuthWaitTimeout.TotalSeconds);
+        }
 
         while (!stoppingToken.IsCancellationRequested)
         {

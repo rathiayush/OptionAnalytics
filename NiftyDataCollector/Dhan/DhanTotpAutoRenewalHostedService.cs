@@ -6,13 +6,14 @@ namespace NiftyDataCollector.Dhan;
 /// Keeps DhanSession authenticated with zero human involvement, whenever TOTP credentials are
 /// configured (DhanOptions.HasTotpCredentials) - takes priority over a plain static AccessToken.
 /// If TOTP isn't configured, this service is a no-op and the session just runs on whatever static
-/// AccessToken is set. Ported verbatim from OptionAnalytics.Server's own
-/// DhanTotpAutoRenewalHostedService (identical schedule and backoff, already validated in
-/// production there):
+/// AccessToken is set.
 ///
-///  1. STARTUP - authenticated within seconds of boot, retried with backoff (2s doubling to 30s,
-///     including on Dhan's own account-level "too many attempts" lockout) until it succeeds - or
-///     ~130s specifically when Dhan reports its own "once every 2 minutes" cooldown.
+///  1. STARTUP - authenticated within seconds of boot, retried with backoff (2s doubling to 30s
+///     for an ordinary transient failure) until it succeeds - ~130s specifically when Dhan reports
+///     its own "once every 2 minutes" cooldown, or TooManyAttemptsCooldown (long, fixed) on Dhan's
+///     separate account-level "too many attempts" lockout - see that constant's own doc comment
+///     for why this diverges from OptionAnalytics.Server's own original tuning, which retried this
+///     specific case fast.
 ///  2. PROACTIVELY, an hour before the current token's own expiry.
 ///  3. REACTIVELY, the instant DhanSession.SessionInvalidated fires (a 401 from DhanApiClient).
 ///
@@ -30,6 +31,18 @@ public sealed class DhanTotpAutoRenewalHostedService : BackgroundService
     /// too short to ever clear that cooldown - a little margin over Dhan's stated 2 minutes
     /// accounts for clock/latency slop.</summary>
     private static readonly TimeSpan RateLimitCooldown = TimeSpan.FromSeconds(130);
+
+    /// <summary>Dhan's account-level "Too many attempts. Please try again after sometime." lockout
+    /// - a DIFFERENT, undocumented cooldown from RateLimitCooldown's own well-known 2 minutes, and
+    /// this collector's own real-world evidence says it does NOT reliably clear within a couple of
+    /// minutes: OptionAnalytics.Server's original tuning retried this case on the same fast 2s->30s
+    /// backoff as an ordinary transient failure, on the theory that the cause is almost always
+    /// clock skew and a fixed retry gets back online fastest once that's fixed - but repeatedly
+    /// retrying every 30 seconds AGAINST AN ACCOUNT THAT IS GENUINELY LOCKED OUT (not clock skew)
+    /// risks being read by Dhan as more of the same abuse pattern, extending the lockout rather
+    /// than waiting it out. A long, fixed cooldown is the safer default here: still self-healing
+    /// with zero manual steps, just patient about it instead of hammering an active lockout.</summary>
+    private static readonly TimeSpan TooManyAttemptsCooldown = TimeSpan.FromMinutes(15);
 
     private readonly DhanOptions _options;
     private readonly DhanSession _session;
@@ -85,17 +98,17 @@ public sealed class DhanTotpAutoRenewalHostedService : BackgroundService
                 return result.ExpiresUtc ?? DateTimeOffset.UtcNow.AddHours(23);
             }
 
-            var delay = result.RateLimited ? RateLimitCooldown : backoff;
+            var delay = result.RateLimited ? RateLimitCooldown : result.TooManyAttempts ? TooManyAttemptsCooldown : backoff;
 
             if (result.TooManyAttempts)
                 _logger.LogError(
-                    "Dhan TOTP login is being rejected as 'too many attempts' ({Error}). This almost always means this machine's clock is out of sync with real time - TOTP codes are only valid for a ~30-second window. Check your clock against real UTC time - retrying in {Seconds}s regardless; if the clock is genuinely skewed this will keep re-triggering the same lockout until it's fixed.",
-                    result.Error, delay.TotalSeconds);
+                    "Dhan TOTP login is being rejected as 'too many attempts' ({Error}). Check your clock against real UTC time (a common cause), but this can also be a genuine account-level lockout that simply needs time to clear - waiting {Minutes} minute(s) before retrying, rather than hammering it, since repeated attempts against an active lockout risk extending it.",
+                    result.Error, delay.TotalMinutes);
             else
                 _logger.LogWarning("Dhan TOTP auto-login failed: {Error} - retrying in {Seconds}s.", result.Error, delay.TotalSeconds);
 
             if (!await DelayAsync(delay, stoppingToken)) return null;
-            backoff = result.RateLimited ? RetryBackoffInitial : Min(backoff * 2, RetryBackoffMax);
+            backoff = result.RateLimited || result.TooManyAttempts ? RetryBackoffInitial : Min(backoff * 2, RetryBackoffMax);
         }
 
         return null;
