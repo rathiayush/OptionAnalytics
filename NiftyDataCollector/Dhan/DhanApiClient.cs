@@ -40,13 +40,15 @@ public sealed class DhanApiClient
     private readonly HttpClient _httpClient;
     private readonly DhanOptions _options;
     private readonly DhanSession _session;
+    private readonly DhanRateLimiter _rateLimiter;
     private readonly ILogger<DhanApiClient> _logger;
 
-    public DhanApiClient(HttpClient httpClient, IOptions<DhanOptions> options, DhanSession session, ILogger<DhanApiClient> logger)
+    public DhanApiClient(HttpClient httpClient, IOptions<DhanOptions> options, DhanSession session, DhanRateLimiter rateLimiter, ILogger<DhanApiClient> logger)
     {
         _httpClient = httpClient;
         _options = options.Value;
         _session = session;
+        _rateLimiter = rateLimiter;
         _logger = logger;
     }
 
@@ -54,6 +56,8 @@ public sealed class DhanApiClient
 
     public async Task<DhanApiResponse> SendAsync(HttpMethod method, string path, object? payload, string context, CancellationToken cancellationToken)
     {
+        await _rateLimiter.WaitForDailyBudgetAsync(_logger, cancellationToken);
+
         using var request = new HttpRequestMessage(method, $"{_options.RestBaseUrl}{path}");
         request.Headers.TryAddWithoutValidation("access-token", _session.AccessToken ?? "");
         request.Headers.TryAddWithoutValidation("client-id", _session.ClientId ?? "");

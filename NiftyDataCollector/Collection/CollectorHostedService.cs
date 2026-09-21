@@ -1,3 +1,4 @@
+using System.Globalization;
 using Microsoft.Extensions.Options;
 using NiftyDataCollector.Db;
 using NiftyDataCollector.Dhan;
@@ -149,25 +150,55 @@ public sealed class CollectorHostedService : BackgroundService
 
     private async Task RefreshSpotBarsAsync(DhanSpotInstrument instrument, string underlying, DateOnly fromDay, DateOnly today, CancellationToken cancellationToken)
     {
-        var effectiveFrom = await ResolveEffectiveFromAsync(instrument.SecurityId, fromDay, today, cancellationToken);
-        if (effectiveFrom is null) return; // already fully caught up through today as of an earlier cycle
+        var seriesKey = instrument.SecurityId.ToString(CultureInfo.InvariantCulture);
+        var checkpoint = await _writer.GetBackfillCheckpointAsync(seriesKey, cancellationToken);
+        var completedFrom = checkpoint?.From;
+
+        // Backward extension - only if BackfillDays was raised since this series was last fully
+        // covered. See Schema.sql's own doc comment on backfill_progress: only advances
+        // completed_from once the WHOLE extension succeeds end to end, never mid-way.
+        if (checkpoint is { } cpBack && fromDay < cpBack.From)
+        {
+            var backTo = cpBack.From.AddDays(-1);
+            var savedBack = 0;
+            var (_, backComplete, backError) = await _historicalData.GetSpotIntradayAsync(
+                instrument.SecurityId, instrument.DhanSegment, fromDay, backTo, 1,
+                async (bars, chunkFrom, chunkTo) => savedBack += await _writer.SaveSpotBarsAsync(underlying, bars, cancellationToken),
+                cancellationToken);
+
+            if (backComplete)
+            {
+                completedFrom = fromDay;
+                await _writer.SaveBackfillCheckpointAsync(seriesKey, underlying, completedFrom.Value, cpBack.Through, cancellationToken);
+                if (savedBack > 0) _logger.LogInformation("Extended {Underlying} spot backfill backward - saved {Count} bar(s) ({From}..{To}).", underlying, savedBack, fromDay, backTo);
+            }
+            else
+            {
+                _logger.LogWarning("{Underlying} spot backward extension [{From}..{To}] stopped early ({Error}) - will retry the whole extension next cycle.", underlying, fromDay, backTo, backError);
+            }
+        }
+
+        // Forward top-up - the normal "keep today's data current" case, advancing completed_through
+        // after every successful chunk so a partial failure never loses already-saved progress.
+        var forwardFrom = checkpoint?.Through.AddDays(1) ?? fromDay;
+        if (forwardFrom > today) return; // already fully caught up through today as of an earlier cycle
 
         var savedTotal = 0;
         var (_, fullyComplete, error) = await _historicalData.GetSpotIntradayAsync(
-            instrument.SecurityId, instrument.DhanSegment, effectiveFrom.Value, today, 1,
+            instrument.SecurityId, instrument.DhanSegment, forwardFrom, today, 1,
             async (bars, chunkFrom, chunkTo) =>
             {
                 var saved = await _writer.SaveSpotBarsAsync(underlying, bars, cancellationToken);
                 savedTotal += saved;
-                await _writer.SaveBackfillCheckpointAsync(instrument.SecurityId, underlying, chunkTo, cancellationToken);
+                await _writer.SaveBackfillCheckpointAsync(seriesKey, underlying, completedFrom ?? forwardFrom, chunkTo, cancellationToken);
             },
             cancellationToken);
 
         if (savedTotal > 0)
-            _logger.LogInformation("Saved {Count} {Underlying} spot bar(s) ({From}..{To}).", savedTotal, underlying, effectiveFrom, today);
+            _logger.LogInformation("Saved {Count} {Underlying} spot bar(s) ({From}..{To}).", savedTotal, underlying, forwardFrom, today);
         if (!fullyComplete)
             _logger.LogWarning("{Underlying} spot backfill stopped early this cycle ({Error}) - checkpoint holds the last successful chunk, so next cycle resumes from there rather than redoing [{From}..{To}].",
-                underlying, error, effectiveFrom, today);
+                underlying, error, forwardFrom, today);
     }
 
     private async Task RunExpiryAsync(
@@ -219,35 +250,50 @@ public sealed class CollectorHostedService : BackgroundService
     private async Task RefreshOptionBarsAsync(
         string underlying, DateOnly expiry, decimal strike, bool isCall, long securityId, string dhanSegment, DateOnly fromDay, DateOnly today, CancellationToken cancellationToken)
     {
-        var effectiveFrom = await ResolveEffectiveFromAsync(securityId, fromDay, today, cancellationToken);
-        if (effectiveFrom is null) return; // already fully caught up through today as of an earlier cycle
+        var seriesKey = securityId.ToString(CultureInfo.InvariantCulture);
+        var checkpoint = await _writer.GetBackfillCheckpointAsync(seriesKey, cancellationToken);
+        var completedFrom = checkpoint?.From;
+
+        // Backward extension - see RefreshSpotBarsAsync's own comment on the same pattern.
+        if (checkpoint is { } cpBack && fromDay < cpBack.From)
+        {
+            var backTo = cpBack.From.AddDays(-1);
+            var savedBack = 0;
+            var (_, backComplete, backError) = await _historicalData.GetOptionIntradayAsync(
+                (uint)securityId, dhanSegment, fromDay, backTo, 1,
+                async (bars, chunkFrom, chunkTo) => savedBack += await _writer.SaveOptionBarsAsync(underlying, expiry, strike, isCall, securityId, bars, cancellationToken),
+                cancellationToken);
+
+            if (backComplete)
+            {
+                completedFrom = fromDay;
+                await _writer.SaveBackfillCheckpointAsync(seriesKey, underlying, completedFrom.Value, cpBack.Through, cancellationToken);
+                if (savedBack > 0) _logger.LogDebug("Extended {Underlying} {Expiry} {Strike}{Side} backfill backward - saved {Count} bar(s).", underlying, expiry, strike, isCall ? "CE" : "PE", savedBack);
+            }
+            else
+            {
+                _logger.LogDebug("{Underlying} {Expiry} {Strike}{Side} backward extension stopped early ({Error}) - will retry next cycle.", underlying, expiry, strike, isCall ? "CE" : "PE", backError);
+            }
+        }
+
+        var forwardFrom = checkpoint?.Through.AddDays(1) ?? fromDay;
+        if (forwardFrom > today) return; // already fully caught up through today as of an earlier cycle
 
         var savedTotal = 0;
         var (_, fullyComplete, error) = await _historicalData.GetOptionIntradayAsync(
-            (uint)securityId, dhanSegment, effectiveFrom.Value, today, 1,
+            (uint)securityId, dhanSegment, forwardFrom, today, 1,
             async (bars, chunkFrom, chunkTo) =>
             {
                 var saved = await _writer.SaveOptionBarsAsync(underlying, expiry, strike, isCall, securityId, bars, cancellationToken);
                 savedTotal += saved;
-                await _writer.SaveBackfillCheckpointAsync(securityId, underlying, chunkTo, cancellationToken);
+                await _writer.SaveBackfillCheckpointAsync(seriesKey, underlying, completedFrom ?? forwardFrom, chunkTo, cancellationToken);
             },
             cancellationToken);
 
         if (savedTotal > 0)
-            _logger.LogDebug("Saved {Count} bar(s) for {Underlying} {Expiry} {Strike}{Side} ({From}..{To}).", savedTotal, underlying, expiry, strike, isCall ? "CE" : "PE", effectiveFrom, today);
+            _logger.LogDebug("Saved {Count} bar(s) for {Underlying} {Expiry} {Strike}{Side} ({From}..{To}).", savedTotal, underlying, expiry, strike, isCall ? "CE" : "PE", forwardFrom, today);
         if (!fullyComplete)
             _logger.LogDebug("{Underlying} {Expiry} {Strike}{Side} backfill stopped early this cycle ({Error}) - will resume from its own checkpoint next cycle.",
                 underlying, expiry, strike, isCall ? "CE" : "PE", error);
-    }
-
-    /// <summary>Where a backfill for this security should resume from: the day after its own
-    /// checkpoint (see backfill_progress / DhanHistoricalDataClient's doc comments), clamped to
-    /// never go earlier than fromDay (in case BackfillDays was lowered since the checkpoint was
-    /// set) - or null if it's already caught up through today.</summary>
-    private async Task<DateOnly?> ResolveEffectiveFromAsync(long securityId, DateOnly fromDay, DateOnly today, CancellationToken cancellationToken)
-    {
-        var checkpoint = await _writer.GetBackfillCheckpointAsync(securityId, cancellationToken);
-        var effectiveFrom = checkpoint is { } c && c.AddDays(1) > fromDay ? c.AddDays(1) : fromDay;
-        return effectiveFrom > today ? null : effectiveFrom;
     }
 }

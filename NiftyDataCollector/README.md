@@ -22,13 +22,15 @@ separate rather than pretending one is the other:
 | `spot_bars_1m` | `/charts/intraday` (INDEX) | Yes - backfillable for any past window Dhan still serves |
 | `option_bars_1m` | `/charts/intraday` (OPTIDX) | Yes - OHLC + volume, and possibly `open_interest` (see below) |
 | `option_chain_snapshots` | `/optionchain` (live only) | **No** - `implied_volatility` and the greeks have no history anywhere in Dhan's API; this table only ever has data from whenever the collector was actually running |
+| `rolling_option_bars_1m` | `/charts/rollingoption` (opt-in - see below) | **Yes, including OI and IV** - a genuinely different endpoint from the other three; see its own section below |
 
-**The "oi" open question**: Dhan's docs for `/charts/intraday` describe an optional `"oi": true`
-request field that returns an `open_interest` array. This collector always sets it for option
-contracts. Dhan's own doc example shows all zeros, which proves nothing either way - run this for
-real and check `option_bars_1m.open_interest` yourself. If it comes back with real non-zero
-history, that's a genuinely new capability (OptionAnalytics.Server's own OI-based strategy was
-removed specifically because OI was believed to be live-only everywhere in Dhan's API).
+**The "oi" open question (for `/charts/intraday` specifically)**: Dhan's docs for `/charts/intraday`
+describe an optional `"oi": true` request field that returns an `open_interest` array. This
+collector always sets it for option contracts. Dhan's own doc example shows all zeros, which
+proves nothing either way - run this for real and check `option_bars_1m.open_interest` yourself.
+This is a SEPARATE question from `/charts/rollingoption`'s own OI/IV history (see below), which
+Dhan's docs describe unambiguously - the two endpoints are independent and this open question is
+scoped to `/charts/intraday` only.
 
 ## Setup
 
@@ -77,25 +79,78 @@ removed specifically because OI was believed to be live-only everywhere in Dhan'
 | `SnapshotPollIntervalSeconds` | 60 | How often to poll the live option chain |
 | `HistoricalRefreshIntervalMinutes` | 5 | (reserved for a future incremental-refresh pass) |
 
-## Backfilling 500 days: chunking and checkpoints
+## Configuration (`RollingOption` section)
 
-Dhan's intraday endpoint caps a single call at roughly 90 days, so a 500-day backfill for one
-security is fetched as several chunked calls (`DhanHistoricalDataClient`), each its own rate-limited
-request. Each chunk is **saved and checkpointed as soon as it succeeds** (in the `backfill_progress`
-table - one row per security, holding the last date its own backfill has *contiguously* reached) -
-deliberately not buffered until the whole 500-day range is done:
+See "Rolling Options" below for what this feature is and the recommended rollout workflow.
 
-- A transient failure partway through (a rate limit, a dropped connection) stops that security's
-  backfill for the cycle **without losing the chunks that already saved** - the checkpoint sits at
-  the end of the last good chunk.
-- The next cycle resumes from `checkpoint + 1`, not from day one - so a partial failure costs you a
-  retry of the one chunk, never a re-run of the whole 500 days.
-- **If you ever spot bad data in a specific window**: delete those rows from `spot_bars_1m` /
-  `option_bars_1m`, then rewind that security's own checkpoint so the next cycle refills it -
-  `UPDATE backfill_progress SET completed_through = '<day-before-the-bad-window>' WHERE security_id
-  = <id>` (or `DELETE FROM backfill_progress WHERE security_id = <id>` to redo its entire
-  `BackfillDays` window from scratch). No restart needed either way - the very next cycle picks up
-  the change.
+| Key | Default | Meaning |
+|---|---|---|
+| `Enabled` | `false` | Turn on to start the rolling-option backfill |
+| `StartDate` | last 30 days | How far back to backfill - widen this later (e.g. `"2023-03-01"`) once a small test run looks right |
+| `ExpiryFlag` | `"WEEK"` | `"WEEK"` or `"MONTH"` - which expiry cycle to roll across |
+| `ExpiryCodes` | `[0, 1]` | Which "cycles out" to track - nearest 2 expiries by default |
+| `PollIntervalMinutes` | 60 | How often to re-sweep every series once the initial catch-up finishes |
+
+## Backfilling long ranges: chunking and checkpoints
+
+Dhan's intraday endpoint caps a single call at roughly 90 days (30 for `/charts/rollingoption` -
+see below), so a long backfill for one series is fetched as several chunked calls, each its own
+rate-limited request. Each chunk is **saved and checkpointed as soon as it succeeds** (in the
+`backfill_progress` table - one row per series, holding the contiguous `[completed_from,
+completed_through]` window it currently covers) - deliberately not buffered until the whole range
+is done:
+
+- A transient failure partway through (a rate limit, a dropped connection) stops that series'
+  backfill for the pass **without losing the chunks that already saved** - `completed_through`
+  sits at the end of the last good chunk.
+- The next pass resumes from `completed_through + 1`, not from day one - so a partial failure costs
+  you a retry of the one chunk, never a re-run of the whole range.
+- **Widening a range later** (raising `BackfillDays`, or moving `RollingOption:StartDate` further
+  back, after an earlier smaller-range run already completed) is picked up automatically as a
+  BACKWARD extension: the next pass fetches from the new, earlier start up to the old
+  `completed_from - 1` and, only once that whole extension succeeds end to end, moves
+  `completed_from` back to match - it never disturbs or re-fetches what was already covered. A
+  failed backward extension leaves `completed_from` untouched and simply retries the full
+  extension again next pass (safe to retry - upserts make redoing an already-saved chunk a no-op).
+- **If you ever spot bad data in a specific window**: delete those rows from the bars table, then
+  adjust that series' own checkpoint so the next pass refills it - e.g.
+  `UPDATE backfill_progress SET completed_through = '<day-before-the-bad-window>' WHERE series_key
+  = '<key>'` (or `DELETE FROM backfill_progress WHERE series_key = '<key>'` to redo its entire
+  range from scratch). No restart needed either way - the very next pass picks up the change.
+
+## Rolling Options: multi-year ATM±N backtesting data
+
+`RollingOptionBackfillHostedService` backfills Dhan's separate "Rolling Options" API
+(`POST /charts/rollingoption`, see `Dhan/DhanRollingOptionClient.cs`'s own doc comment for full
+detail) into `rolling_option_bars_1m`. This is genuinely different from everything else this
+collector does: instead of naming one fixed contract, you name a RULE - "the `{ExpiryCode}`-th
+`{ExpiryFlag}` cycle's `ATM±N` strike" - and Dhan resolves that rule fresh for every day in the
+range, stitching together whichever actual contract matched each day into one continuous series.
+That's what makes a multi-year "always the nearest weekly ATM+3 CE" backtest possible without
+manually enumerating years of past expiries - and, notably, this endpoint's response includes real
+historical `open_interest` and `implied_volatility`, unlike the live-only OI/IV elsewhere in this
+project (see the "oi" open question above - that's a different endpoint's open question, not this
+one's).
+
+**Off by default** (`RollingOption:Enabled: false`) - a full multi-year backfill is genuinely a lot
+of Dhan API calls (`StrikesEachSide=10` means 21 relative strikes x 2 legs = 42 series per
+underlying per expiry code, each needing several 30-day chunks per year of history). Recommended
+workflow, matching how this was actually rolled out:
+
+1. Turn it on with the default `RollingOption:StartDate` (last 30 days) and let it run - a quick,
+   cheap way to confirm the resolved `strike`/`spot`/`open_interest`/`implied_volatility` values
+   coming back actually look right for your account before committing to a much bigger range.
+2. Once confirmed, widen `RollingOption:StartDate` in `appsettings.Local.json` (e.g. `"2023-03-01"`)
+   and restart - the existing 30-day window's data and checkpoint are untouched; the wider range is
+   picked up as a checkpointed BACKWARD extension (see "Backfilling long ranges" above).
+
+**`expiryCode` caution**: Dhan's own docs don't spell out this field's exact semantics beyond "expiry
+of the instrument" - the working assumption here (consistent with "cycles out" conventions
+elsewhere in Dhan's API) is `0` = the currently-rolling nearest cycle, `1` = the one after that, and
+so on; `RollingOption:ExpiryCodes` defaults to `[0, 1]` (nearest 2 expiries) per the user's own
+spec. Worth spot-checking `expiryCode: 1`'s resolved values against a known date before trusting a
+large backfill built on it, same "verify, don't just trust the docs" caution this project already
+applies to `/charts/intraday`'s own "oi" flag.
 
 ## Rate limiting
 
@@ -103,14 +158,21 @@ Centralized in `Dhan/DhanRateLimiter.cs` rather than scattered per-class delays:
 - Option chain + expiry list: 3.5s between calls (Dhan's documented "one request every 3 seconds").
 - Historical intraday: 200ms between calls (OptionAnalytics.Server's own production-validated
   pacing for the same endpoint, reused rather than guessed) - applied per CHUNK now, not just per
-  contract, since a 500-day backfill means multiple chunked calls per contract (see above).
+  contract, since a long backfill means multiple chunked calls per contract (see above).
+- Rolling option: 250ms between calls (Dhan's own documented "5 requests/second" cap for Data
+  APIs, with margin).
+- **Daily budget, across ALL of the above combined**: Dhan's own documented cap is 7,000
+  requests/day for Data APIs; `DhanApiClient` tracks a sliding 24h count of every Dhan call this
+  process makes and PAUSES (never drops) once within margin of that ceiling, logging clearly -
+  relevant mainly if `RollingOption` is enabled with a wide date range, since that can genuinely
+  run into the thousands of calls.
 
 A full cycle for `StrikesEachSide=10` polls up to 42 contracts (21 strikes x CE/PE) per tracked
-underlying. Once each contract's 500-day history is fully backfilled (a one-time cost, several
-chunks per contract at 200ms apiece), ongoing cycles only fetch a single day's worth per contract
-and comfortably fit inside the 60s default poll interval; the very first run - and any run that adds
-a new index or contract - will take noticeably longer while that initial backfill catches up,
-which is expected.
+underlying. Once each contract's history is fully backfilled (a one-time cost, several chunks per
+contract at 200ms apiece), ongoing cycles only fetch a single day's worth per contract and
+comfortably fit inside the 60s default poll interval; the very first run - and any run that adds a
+new index, contract, or widens a backfill range - will take noticeably longer while that catch-up
+runs, which is expected.
 
 ## Why duplicated Dhan code, instead of referencing OptionAnalytics.Server?
 
@@ -138,3 +200,10 @@ Three reasons, in order of importance:
 | time | underlying | expiry | strike | option_type | open | high | low | close | volume | open_interest |
 |---|---|---|---|---|---|---|---|---|---|---|
 | 2026-09-21 09:15:00+05:30 | NIFTY | 2026-09-25 | 25650 | CE | 138.20 | 140.00 | 137.50 | 139.10 | 42500 | *(TBD - see "oi" open question above)* |
+
+`rolling_option_bars_1m` (real history, OHLC + volume + OI + IV, resolved strike included since it
+can shift day to day as spot moves and expiries roll):
+
+| time | underlying | expiry_flag | expiry_code | strike_offset | option_type | strike | spot_price | close | volume | open_interest | implied_volatility |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 2026-09-21 09:15:00+05:30 | NIFTY | WEEK | 0 | ATM+3 | CE | 25800 | 25642.80 | 145.30 | 18900 | 2145300 | 10.12 |

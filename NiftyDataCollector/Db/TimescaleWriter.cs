@@ -78,39 +78,47 @@ public sealed class TimescaleWriter
         _logger.LogInformation("Created database \"{Database}\" - it did not exist yet.", targetDatabase);
     }
 
-    /// <summary>The last calendar day this security's historical backfill has contiguously reached,
-    /// or null if it has never completed even one chunk - see Schema.sql's own doc comment on
-    /// backfill_progress for the contiguity guarantee this relies on.</summary>
-    public async Task<DateOnly?> GetBackfillCheckpointAsync(long securityId, CancellationToken cancellationToken)
+    /// <summary>The contiguous [From, Through] window this series' historical backfill currently
+    /// covers, or null if it has never completed even one chunk - see Schema.sql's own doc comment
+    /// on backfill_progress for the forward/backward extension rules this relies on, and for what
+    /// a seriesKey is (a plain security_id for a spot/option-contract backfill, or a synthetic
+    /// "ROLLING:underlying:expiryFlag:expiryCode:strikeOffset:optionType" key for a rolling-option
+    /// series).</summary>
+    public async Task<(DateOnly From, DateOnly Through)?> GetBackfillCheckpointAsync(string seriesKey, CancellationToken cancellationToken)
     {
         await using var connection = new NpgsqlConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
 
-        await using var command = new NpgsqlCommand("SELECT completed_through FROM backfill_progress WHERE security_id = @id", connection);
-        command.Parameters.AddWithValue("id", securityId);
+        await using var command = new NpgsqlCommand("SELECT completed_from, completed_through FROM backfill_progress WHERE series_key = @key", connection);
+        command.Parameters.AddWithValue("key", seriesKey);
 
-        var result = await command.ExecuteScalarAsync(cancellationToken);
-        return result is DateTime dt ? DateOnly.FromDateTime(dt) : null;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken)) return null;
+        return (DateOnly.FromDateTime(reader.GetDateTime(0)), DateOnly.FromDateTime(reader.GetDateTime(1)));
     }
 
-    /// <summary>Advances (or creates) this security's checkpoint - called once per successfully
-    /// fetched chunk, never skipped for an empty one (see DhanHistoricalDataClient's own call site
-    /// comment on why).</summary>
-    public async Task SaveBackfillCheckpointAsync(long securityId, string underlying, DateOnly completedThrough, CancellationToken cancellationToken)
+    /// <summary>Sets (or creates) this series' full checkpoint window - callers always pass BOTH
+    /// bounds (not just whichever one moved) since this is a plain overwrite, not an increment; see
+    /// Schema.sql's own doc comment on backfill_progress for the different rules callers must
+    /// follow for growing completed_through (every successful chunk) vs completed_from (only once
+    /// a whole backward-extension range succeeds end to end).</summary>
+    public async Task SaveBackfillCheckpointAsync(string seriesKey, string underlying, DateOnly completedFrom, DateOnly completedThrough, CancellationToken cancellationToken)
     {
         await using var connection = new NpgsqlConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
 
         const string sql = """
-            INSERT INTO backfill_progress (security_id, underlying, completed_through, updated_at)
-            VALUES (@id, @underlying, @through, now())
-            ON CONFLICT (security_id) DO UPDATE SET
-                completed_through = EXCLUDED.completed_through, underlying = EXCLUDED.underlying, updated_at = now()
+            INSERT INTO backfill_progress (series_key, underlying, completed_from, completed_through, updated_at)
+            VALUES (@key, @underlying, @from, @through, now())
+            ON CONFLICT (series_key) DO UPDATE SET
+                completed_from = EXCLUDED.completed_from, completed_through = EXCLUDED.completed_through,
+                underlying = EXCLUDED.underlying, updated_at = now()
             """;
 
         await using var command = new NpgsqlCommand(sql, connection);
-        command.Parameters.AddWithValue("id", securityId);
+        command.Parameters.AddWithValue("key", seriesKey);
         command.Parameters.AddWithValue("underlying", underlying);
+        command.Parameters.Add(new NpgsqlParameter("from", NpgsqlTypes.NpgsqlDbType.Date) { Value = completedFrom.ToDateTime(TimeOnly.MinValue) });
         command.Parameters.Add(new NpgsqlParameter("through", NpgsqlTypes.NpgsqlDbType.Date) { Value = completedThrough.ToDateTime(TimeOnly.MinValue) });
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
@@ -304,5 +312,71 @@ public sealed class TimescaleWriter
 
         await transaction.CommitAsync(cancellationToken);
         return rowCount;
+    }
+
+    public async Task<int> SaveRollingOptionBarsAsync(
+        string underlying, string expiryFlag, int expiryCode, string strikeOffset, bool isCall,
+        IReadOnlyList<DhanRollingOptionBar> bars, CancellationToken cancellationToken)
+    {
+        if (bars.Count == 0) return 0;
+
+        await using var connection = new NpgsqlConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        const string sql = """
+            INSERT INTO rolling_option_bars_1m (
+                time, underlying, expiry_flag, expiry_code, strike_offset, option_type,
+                strike, spot_price, open, high, low, close, volume, open_interest, implied_volatility)
+            VALUES (
+                @time, @underlying, @expiryFlag, @expiryCode, @strikeOffset, @optionType,
+                @strike, @spotPrice, @open, @high, @low, @close, @volume, @oi, @iv)
+            ON CONFLICT (underlying, expiry_flag, expiry_code, strike_offset, option_type, time) DO UPDATE SET
+                strike = EXCLUDED.strike, spot_price = EXCLUDED.spot_price,
+                open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low, close = EXCLUDED.close,
+                volume = EXCLUDED.volume, open_interest = EXCLUDED.open_interest, implied_volatility = EXCLUDED.implied_volatility
+            """;
+
+        await using var command = new NpgsqlCommand(sql, connection, transaction);
+        void AddParam(string name, NpgsqlTypes.NpgsqlDbType type) => command.Parameters.Add(new NpgsqlParameter(name, type) { IsNullable = true });
+        AddParam("time", NpgsqlTypes.NpgsqlDbType.TimestampTz);
+        AddParam("underlying", NpgsqlTypes.NpgsqlDbType.Text);
+        AddParam("expiryFlag", NpgsqlTypes.NpgsqlDbType.Text);
+        AddParam("expiryCode", NpgsqlTypes.NpgsqlDbType.Integer);
+        AddParam("strikeOffset", NpgsqlTypes.NpgsqlDbType.Text);
+        AddParam("optionType", NpgsqlTypes.NpgsqlDbType.Text);
+        AddParam("strike", NpgsqlTypes.NpgsqlDbType.Numeric);
+        AddParam("spotPrice", NpgsqlTypes.NpgsqlDbType.Numeric);
+        AddParam("open", NpgsqlTypes.NpgsqlDbType.Numeric);
+        AddParam("high", NpgsqlTypes.NpgsqlDbType.Numeric);
+        AddParam("low", NpgsqlTypes.NpgsqlDbType.Numeric);
+        AddParam("close", NpgsqlTypes.NpgsqlDbType.Numeric);
+        AddParam("volume", NpgsqlTypes.NpgsqlDbType.Bigint);
+        AddParam("oi", NpgsqlTypes.NpgsqlDbType.Bigint);
+        AddParam("iv", NpgsqlTypes.NpgsqlDbType.Numeric);
+        await command.PrepareAsync(cancellationToken);
+
+        foreach (var bar in bars)
+        {
+            command.Parameters["time"].Value = bar.Time;
+            command.Parameters["underlying"].Value = underlying;
+            command.Parameters["expiryFlag"].Value = expiryFlag;
+            command.Parameters["expiryCode"].Value = expiryCode;
+            command.Parameters["strikeOffset"].Value = strikeOffset;
+            command.Parameters["optionType"].Value = isCall ? "CE" : "PE";
+            command.Parameters["strike"].Value = (object?)bar.Strike ?? DBNull.Value;
+            command.Parameters["spotPrice"].Value = (object?)bar.SpotPrice ?? DBNull.Value;
+            command.Parameters["open"].Value = (object?)bar.Open ?? DBNull.Value;
+            command.Parameters["high"].Value = (object?)bar.High ?? DBNull.Value;
+            command.Parameters["low"].Value = (object?)bar.Low ?? DBNull.Value;
+            command.Parameters["close"].Value = (object?)bar.Close ?? DBNull.Value;
+            command.Parameters["volume"].Value = (object?)bar.Volume ?? DBNull.Value;
+            command.Parameters["oi"].Value = (object?)bar.OpenInterest ?? DBNull.Value;
+            command.Parameters["iv"].Value = (object?)bar.ImpliedVolatility ?? DBNull.Value;
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return bars.Count;
     }
 }

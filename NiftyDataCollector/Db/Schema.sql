@@ -78,25 +78,74 @@ CREATE TABLE IF NOT EXISTS option_chain_snapshots (
 SELECT create_hypertable('option_chain_snapshots', 'time', if_not_exists => TRUE);
 CREATE INDEX IF NOT EXISTS idx_option_chain_snapshots_lookup ON option_chain_snapshots (underlying, expiry, strike, option_type, time DESC);
 
--- Backfill CHECKPOINTS - one row per security (spot index or option contract), recording the last
--- calendar day its own historical OHLC backfill has contiguously reached. A long backfill
--- (BackfillDays=500 by default) is fetched in ~90-day chunks (Dhan's own per-call cap - see
--- DhanHistoricalDataClient); this row is only advanced to a chunk's own end date AFTER that
--- chunk's bars are saved, and the whole chunk loop stops at the first failed chunk rather than
--- skipping ahead - so completed_through always means "every bar from scratch up to this date is
--- saved", never "most of them are". The next cycle resumes from completed_through+1, re-fetching
--- only what's missing rather than redoing the whole range from day one.
+-- Backfill CHECKPOINTS - one row per backfilled SERIES, recording the contiguous [completed_from,
+-- completed_through] window its own historical backfill currently covers. A series_key is either
+-- a plain security_id (spot index or a specific live option contract, from
+-- CollectorHostedService's own OHLC backfill) or a synthetic
+-- "ROLLING:underlying:expiryFlag:expiryCode:strikeOffset:optionType" key (a rolling-option series,
+-- from RollingOptionBackfillHostedService) - one unified table for both. A long backfill is
+-- fetched in chunks (Dhan's own per-call cap - 90 days for /charts/intraday, 30 for
+-- /charts/rollingoption - see DhanHistoricalDataClient and DhanRollingOptionClient).
+--
+-- TWO DIRECTIONS this window can grow, handled differently on purpose:
+--  - FORWARD (completed_through -> today, the normal "keep today's data current" case): advanced
+--    chunk by chunk, immediately after each chunk's own bars are saved, and the whole chunk loop
+--    stops at the first failed chunk - so completed_through always means "every bar from scratch
+--    up to this date is saved", never "most of them are". The next cycle resumes from
+--    completed_through+1, re-fetching only what's missing.
+--  - BACKWARD (completed_from moves earlier - happens when you widen how far back a backfill
+--    should reach, e.g. raising BackfillDays or moving RollingOption:StartDate earlier, AFTER an
+--    initial smaller-range run already completed - the collector's own "first fetch for 30 days,
+--    then widen once it looks right" workflow): completed_from is only ever moved once the WHOLE
+--    newly-requested older window has fetched successfully end to end, never advanced mid-way -
+--    a partial failure here leaves completed_from untouched and simply retries the full extension
+--    next cycle (an idempotent, if slightly wasteful, redo - safer than a third watermark to track
+--    partial backward progress). This is why completed_from moving backward and
+--    completed_through moving forward use different update rules even though they're stored in
+--    the same row.
 --
 -- TO FORCE A RE-FETCH of a specific window (e.g. you spotted bad data and deleted those rows from
--- spot_bars_1m/option_bars_1m): rewind this row's completed_through to the day before the bad
--- window (or delete the row entirely, to redo the full BackfillDays range) for that security_id -
--- the next cycle picks it up automatically, no restart required.
+-- the bars table): rewind completed_through (or advance completed_from past the bad window) for
+-- that series_key - or delete the row entirely to redo the whole backfill range from scratch. The
+-- next cycle picks up the change automatically, no restart required.
 CREATE TABLE IF NOT EXISTS backfill_progress (
-    security_id         BIGINT      PRIMARY KEY,
+    series_key           TEXT        PRIMARY KEY,
     underlying           TEXT        NOT NULL,
+    completed_from        DATE        NOT NULL,
     completed_through    DATE        NOT NULL,
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Rolling-option historical data, from Dhan's own "Rolling Options" API (POST
+-- /v2/charts/rollingoption) - a SYNTHETIC continuous series that, for each day in the requested
+-- range, resolves "the {expiryCode}-th {expiryFlag} cycle's {strike_offset} strike" fresh (so the
+-- underlying absolute strike can and does change day to day as spot moves and expiries roll) and
+-- returns that resolved contract's own minute OHLC - critically, ALSO open_interest and
+-- implied_volatility, which is genuinely new: OptionAnalytics.Server's OI-is-live-only assumption,
+-- and this collector's own earlier open question about /charts/intraday's "oi" flag, are both
+-- about a DIFFERENT endpoint - this one documents historical OI/IV directly. strike/spot_price are
+-- captured per bar (not just per query) because they can shift within the same requested range.
+-- One row per (underlying, expiry_flag, expiry_code, strike_offset, option_type, minute).
+CREATE TABLE IF NOT EXISTS rolling_option_bars_1m (
+    time                TIMESTAMPTZ NOT NULL,
+    underlying          TEXT        NOT NULL,
+    expiry_flag         TEXT        NOT NULL CHECK (expiry_flag IN ('WEEK', 'MONTH')),
+    expiry_code         INT         NOT NULL,
+    strike_offset       TEXT        NOT NULL,
+    option_type         TEXT        NOT NULL CHECK (option_type IN ('CE', 'PE')),
+    strike              NUMERIC,
+    spot_price          NUMERIC,
+    open                NUMERIC,
+    high                NUMERIC,
+    low                 NUMERIC,
+    close               NUMERIC,
+    volume              BIGINT,
+    open_interest       BIGINT,
+    implied_volatility  NUMERIC,
+    PRIMARY KEY (underlying, expiry_flag, expiry_code, strike_offset, option_type, time)
+);
+SELECT create_hypertable('rolling_option_bars_1m', 'time', if_not_exists => TRUE);
+CREATE INDEX IF NOT EXISTS idx_rolling_option_bars_1m_lookup ON rolling_option_bars_1m (underlying, expiry_flag, expiry_code, strike_offset, option_type, time DESC);
 
 -- Not enabled by default - turn on once you've validated the pipeline and want to keep disk usage
 -- down for data older than your active query window. Left commented out deliberately: compressed
