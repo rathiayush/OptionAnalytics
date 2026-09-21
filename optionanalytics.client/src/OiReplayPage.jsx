@@ -4,7 +4,7 @@ import { PlayCircleOutlined, PauseCircleOutlined, ReloadOutlined, SoundOutlined 
 import { createChart, CandlestickSeries, CrosshairMode } from 'lightweight-charts'
 import {
   UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR,
-  istTimeFormatter, istTickMarkFormatter, toBar,
+  istTimeFormatter, istTickMarkFormatter, toBar, toChartTime,
   NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState,
 } from './shared.jsx'
 
@@ -111,6 +111,14 @@ function computeMaxPain(rows) {
 // per side earn a line there. Support/resistance is a relative-strength read anyway.
 const CHART_LEVELS_PER_SIDE = 5
 
+// latestAtOrBefore always returns the newest point at-or-before "now", even if that point is from
+// an hour ago - if NiftyDataCollector's own backfill for a strike/side simply has no newer rows yet
+// (a real gap in the stored data, not a rendering bug), the ladder/chart would otherwise silently
+// keep repeating that same last-known reading forever, looking exactly like "the page froze" with
+// nothing in the UI to say why. Anything older than this, relative to the replay's current time, is
+// flagged stale (dimmed + a "no update since HH:MM" tooltip) instead of being shown as if live.
+const OI_STALE_MS = 5 * 60_000
+
 function hexToRgb(hex) {
   const n = parseInt(hex.slice(1), 16)
   return [(n >> 16) & 255, (n >> 8) & 255, n & 255]
@@ -206,7 +214,7 @@ function ReplayChart({ bars, ladderRows, dayKey, dayHigh, dayLow, height = 440 }
     const buffer = (dayHigh - dayLow) * 0.5 || dayHigh * 0.02
     const inRange = ladderRows.filter((r) => r.strike >= dayLow - buffer && r.strike <= dayHigh + buffer)
 
-    const drawSide = (key, ivKey, lightColor, darkColor, labelPrefix) => {
+    const drawSide = (key, ivKey, staleKey, lightColor, darkColor, labelPrefix) => {
       const top = [...inRange]
         .filter((r) => (r[key] ?? 0) > 0)
         .sort((a, b) => (b[key] ?? 0) - (a[key] ?? 0))
@@ -218,20 +226,24 @@ function ReplayChart({ bars, ladderRows, dayKey, dayHigh, dayLow, height = 440 }
 
       for (const row of top) {
         const t = span > 0 ? (row[key] - minOi) / span : 1
+        // A stale level (see OI_STALE_MS) is a real OI reading, just a frozen one - still worth
+        // drawing (it's the last known wall), but visually muted and labeled so it doesn't look
+        // like a live, currently-updating level when the underlying data has stopped arriving.
+        const stale = row[staleKey]
         const line = seriesRef.current.createPriceLine({
           price: row.strike,
-          color: shade(lightColor, darkColor, t),
+          color: stale ? `${shade(lightColor, darkColor, t)}80` : shade(lightColor, darkColor, t),
           lineWidth: 1 + Math.round(t * 2), // thicker as OI (and darkness) increases too
-          lineStyle: 2, // dashed
+          lineStyle: stale ? 1 : 2, // dotted when stale, dashed when live
           axisLabelVisible: true,
-          title: `${labelPrefix} ${row.strike} (${row[key].toLocaleString()} OI${row[ivKey] != null ? `, IV ${row[ivKey].toFixed(1)}` : ''})`,
+          title: `${labelPrefix} ${row.strike} (${row[key].toLocaleString()} OI${row[ivKey] != null ? `, IV ${row[ivKey].toFixed(1)}` : ''})${stale ? ' [STALE]' : ''}`,
         })
         priceLinesRef.current.push(line)
       }
     }
 
-    drawSide('ceOi', 'ceIv', RESISTANCE_LIGHT, RESISTANCE_DARK, 'R')
-    drawSide('peOi', 'peIv', SUPPORT_LIGHT, SUPPORT_DARK, 'S')
+    drawSide('ceOi', 'ceIv', 'ceStale', RESISTANCE_LIGHT, RESISTANCE_DARK, 'R')
+    drawSide('peOi', 'peIv', 'peStale', SUPPORT_LIGHT, SUPPORT_DARK, 'S')
   }, [ladderRows, dayHigh, dayLow])
 
   return <div ref={containerRef} style={{ width: '100%', height }} />
@@ -273,14 +285,15 @@ function OiLadder({ rows, atmStrike }) {
               padding: '1px 0',
             }}
           >
-            <Col span={10} style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 4 }}>
+            <Col span={10} style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 4, opacity: row.peStale ? 0.45 : 1 }}>
               <OiChangeStack changeValue={row.peOiChange} sinceOpenValue={row.peOiSinceOpen} />
               <Text style={{ fontSize: 10, color: AXIS_COLOR, whiteSpace: 'nowrap' }}>
                 {row.pePrice != null ? `${row.pePrice.toFixed(2)}` : ''}
                 {row.peIv != null ? ` · IV ${row.peIv.toFixed(1)}` : ''}
+                {row.peStale ? ' ⚠' : ''}
               </Text>
               <div style={{ width: 70, display: 'flex', justifyContent: 'flex-end' }}>
-                <Tooltip title={row.peOi != null ? `PE OI: ${row.peOi.toLocaleString()}${row.pePrice != null ? `, LTP ${row.pePrice.toFixed(2)}` : ''}${row.peOiChange != null ? ` (${row.peOiChange >= 0 ? '+' : ''}${row.peOiChange.toLocaleString()} in the last min)` : ''}${row.peOiSinceOpen != null ? ` (${row.peOiSinceOpen >= 0 ? '+' : ''}${row.peOiSinceOpen.toLocaleString()} since open)` : ''}` : 'No data'}>
+                <Tooltip title={row.peOi != null ? `PE OI: ${row.peOi.toLocaleString()}${row.pePrice != null ? `, LTP ${row.pePrice.toFixed(2)}` : ''}${row.peOiChange != null ? ` (${row.peOiChange >= 0 ? '+' : ''}${row.peOiChange.toLocaleString()} in the last min)` : ''}${row.peOiSinceOpen != null ? ` (${row.peOiSinceOpen >= 0 ? '+' : ''}${row.peOiSinceOpen.toLocaleString()} since open)` : ''}${row.peStale && row.peAsOfMs != null ? ` — STALE, no update since ${istTimeFormatter(toChartTime(row.peAsOfMs))}` : ''}` : 'No data'}>
                   <div style={{
                     width: `${((row.peOi ?? 0) / maxPeOi) * 100}%`, minWidth: row.peOi ? 2 : 0, height: 14,
                     background: isSupport ? UP_COLOR : `${UP_COLOR}99`,
@@ -291,9 +304,9 @@ function OiLadder({ rows, atmStrike }) {
             <Col span={4} style={{ textAlign: 'center' }}>
               <Text strong={isAtm} style={{ fontSize: 12, color: isAtm ? '#fff' : undefined }}>{row.strike.toLocaleString()}</Text>
             </Col>
-            <Col span={10} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+            <Col span={10} style={{ display: 'flex', alignItems: 'center', gap: 4, opacity: row.ceStale ? 0.45 : 1 }}>
               <div style={{ width: 70 }}>
-                <Tooltip title={row.ceOi != null ? `CE OI: ${row.ceOi.toLocaleString()}${row.cePrice != null ? `, LTP ${row.cePrice.toFixed(2)}` : ''}${row.ceOiChange != null ? ` (${row.ceOiChange >= 0 ? '+' : ''}${row.ceOiChange.toLocaleString()} in the last min)` : ''}${row.ceOiSinceOpen != null ? ` (${row.ceOiSinceOpen >= 0 ? '+' : ''}${row.ceOiSinceOpen.toLocaleString()} since open)` : ''}` : 'No data'}>
+                <Tooltip title={row.ceOi != null ? `CE OI: ${row.ceOi.toLocaleString()}${row.cePrice != null ? `, LTP ${row.cePrice.toFixed(2)}` : ''}${row.ceOiChange != null ? ` (${row.ceOiChange >= 0 ? '+' : ''}${row.ceOiChange.toLocaleString()} in the last min)` : ''}${row.ceOiSinceOpen != null ? ` (${row.ceOiSinceOpen >= 0 ? '+' : ''}${row.ceOiSinceOpen.toLocaleString()} since open)` : ''}${row.ceStale && row.ceAsOfMs != null ? ` — STALE, no update since ${istTimeFormatter(toChartTime(row.ceAsOfMs))}` : ''}` : 'No data'}>
                   <div style={{
                     width: `${((row.ceOi ?? 0) / maxCeOi) * 100}%`, minWidth: row.ceOi ? 2 : 0, height: 14,
                     background: isResistance ? DOWN_COLOR : `${DOWN_COLOR}99`,
@@ -304,6 +317,7 @@ function OiLadder({ rows, atmStrike }) {
               <Text style={{ fontSize: 10, color: AXIS_COLOR, whiteSpace: 'nowrap' }}>
                 {row.cePrice != null ? `${row.cePrice.toFixed(2)}` : ''}
                 {row.ceIv != null ? ` · IV ${row.ceIv.toFixed(1)}` : ''}
+                {row.ceStale ? ' ⚠' : ''}
               </Text>
             </Col>
           </Row>
@@ -509,6 +523,8 @@ export default function OiReplayPage() {
       const pePrior = latestAtOrBefore(peByStrike.get(strike) ?? [], priorMs)
       const ceOpen = dayStartMs != null ? latestAtOrBefore(ceByStrike.get(strike) ?? [], dayStartMs) : null
       const peOpen = dayStartMs != null ? latestAtOrBefore(peByStrike.get(strike) ?? [], dayStartMs) : null
+      const ceAsOfMs = ce ? new Date(ce.time).getTime() : null
+      const peAsOfMs = pe ? new Date(pe.time).getTime() : null
       return {
         strike,
         ceOi: ce?.openInterest ?? null, ceIv: ce?.impliedVolatility ?? null, cePrice: ce?.price ?? null,
@@ -517,6 +533,12 @@ export default function OiReplayPage() {
         peOiChange: pe?.openInterest != null && pePrior?.openInterest != null ? pe.openInterest - pePrior.openInterest : null,
         ceOiSinceOpen: ce?.openInterest != null && ceOpen?.openInterest != null ? ce.openInterest - ceOpen.openInterest : null,
         peOiSinceOpen: pe?.openInterest != null && peOpen?.openInterest != null ? pe.openInterest - peOpen.openInterest : null,
+        // "Stale" = the newest reading we have for this strike/side is already more than
+        // OI_STALE_MS behind the replay's own current time - the stored data has stopped arriving,
+        // not that the market itself has gone quiet (see OI_STALE_MS's own doc comment).
+        ceAsOfMs, peAsOfMs,
+        ceStale: ceAsOfMs != null && asOfMs - ceAsOfMs > OI_STALE_MS,
+        peStale: peAsOfMs != null && asOfMs - peAsOfMs > OI_STALE_MS,
       }
     })
     return rows.sort((a, b) => b.strike - a.strike)
