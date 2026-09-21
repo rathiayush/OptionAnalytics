@@ -232,6 +232,8 @@ public sealed class OrbOrderBlockStrategyTests
         var signal = Assert.Single(signals);
         Assert.Equal("Rejected", signal.Kind);
         Assert.Contains("OI wall at 115", signal.Summary);
+        Assert.Equal(115m, signal.OiWallStrike);
+        Assert.Equal(500_000, signal.OiWallOpenInterest);
     }
 
     [Fact]
@@ -245,6 +247,11 @@ public sealed class OrbOrderBlockStrategyTests
 
         var signal = Assert.Single(signals);
         Assert.Equal("Entry", signal.Kind);
+        // The filter's own diagnostics are still attached to the accepted entry - what the frontend
+        // needs to show "the basis of entry" (here: the nearest wall it saw, even though it didn't
+        // block) when this signal/trade row is clicked.
+        Assert.Equal(90m, signal.OiWallStrike);
+        Assert.Equal(500_000, signal.OiWallOpenInterest);
     }
 
     [Fact]
@@ -258,6 +265,7 @@ public sealed class OrbOrderBlockStrategyTests
 
         var signal = Assert.Single(signals);
         Assert.Equal("Entry", signal.Kind);
+        Assert.Equal(200m, signal.OiWallStrike);
     }
 
     [Fact]
@@ -271,6 +279,7 @@ public sealed class OrbOrderBlockStrategyTests
 
         var signal = Assert.Single(signals);
         Assert.Equal("Entry", signal.Kind);
+        Assert.Null(signal.OiWallStrike); // nothing to show - no data, not a false zero
     }
 
     [Fact]
@@ -289,6 +298,9 @@ public sealed class OrbOrderBlockStrategyTests
         var signal = Assert.Single(signals);
         Assert.Equal("Rejected", signal.Kind);
         Assert.Contains("IV spiked", signal.Summary);
+        Assert.Equal(25m, signal.IvNow);
+        Assert.Equal(15m, signal.IvPrior);
+        Assert.Equal(5, signal.IvLookbackBars);
     }
 
     [Fact]
@@ -305,6 +317,10 @@ public sealed class OrbOrderBlockStrategyTests
 
         var signal = Assert.Single(signals);
         Assert.Equal("Entry", signal.Kind);
+        // Diagnostics attached even though the check was clear - the frontend's "basis of entry"
+        // view for an accepted trade.
+        Assert.Equal(15.5m, signal.IvNow);
+        Assert.Equal(15m, signal.IvPrior);
     }
 
     [Fact]

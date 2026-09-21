@@ -18,4 +18,17 @@ public sealed record BacktestSignal(
     /// these are init-only extras rather than part of the record's positional shape.</summary>
     public string? CeObvCross { get; init; }
     public string? PeObvCross { get; init; }
+
+    /// <summary>The OI-wall/IV-spike diagnostics OrbOrderBlockStrategy's own optional filters read to
+    /// accept or reject a signal (see its own doc comment) - attached whenever the corresponding
+    /// filter parameter is ON, on BOTH an accepted Entry (so the frontend can show what supported it)
+    /// and a Rejected-by-that-filter signal (so it can show what blocked it), null otherwise
+    /// (filter off, or another strategy that doesn't compute these at all). Init-only extras, same
+    /// pattern as CeObvCross/PeObvCross above, so adding these never touches every other strategy's
+    /// own BacktestSignal construction.</summary>
+    public decimal? OiWallStrike { get; init; }
+    public long? OiWallOpenInterest { get; init; }
+    public decimal? IvNow { get; init; }
+    public decimal? IvPrior { get; init; }
+    public int? IvLookbackBars { get; init; }
 }

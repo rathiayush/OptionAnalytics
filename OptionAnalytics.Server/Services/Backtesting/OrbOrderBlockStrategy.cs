@@ -144,13 +144,37 @@ public sealed class OrbOrderBlockStrategy : IBacktestStrategy
                 signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", dir, $"{detail} - skipped, bullish only"));
             else if (!bearish && !takeLongs)
                 signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", dir, $"{detail} - skipped, bearish only"));
-            else if (useOiWallFilter && target is { } targetForWall && OiWallBlocksEntry(context, bar.Time, bearish, bar.Close, targetForWall, oiWallBufferPoints, out var wallReason))
-                signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", dir, $"{detail} - skipped, {wallReason}"));
-            else if (useIvSpikeFilter && IvSpikeBlocksEntry(context, bar.Time, bearish, bar.Close, ivSpikeLookbackBars, ivSpikeThresholdPercent, out var ivReason))
-                signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", dir, $"{detail} - skipped, {ivReason}"));
+            else if (useOiWallFilter && target is { } targetForWall && OiWallBlocksEntry(context, bar.Time, bearish, bar.Close, targetForWall, oiWallBufferPoints, out var wallReason, out var blockingWall))
+                signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", dir, $"{detail} - skipped, {wallReason}")
+                {
+                    OiWallStrike = blockingWall?.Strike,
+                    OiWallOpenInterest = blockingWall?.OpenInterest,
+                });
+            else if (useIvSpikeFilter && IvSpikeBlocksEntry(context, bar.Time, bearish, bar.Close, ivSpikeLookbackBars, ivSpikeThresholdPercent, out var ivReason, out var blockingIvNow, out var blockingIvPrior))
+                signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", dir, $"{detail} - skipped, {ivReason}")
+                {
+                    IvNow = blockingIvNow,
+                    IvPrior = blockingIvPrior,
+                    IvLookbackBars = ivSpikeLookbackBars,
+                });
             else
             {
-                signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Entry", dir, detail));
+                // Diagnostics attached whenever the corresponding filter is ON, whether or not it
+                // actually found anything to flag - this is what lets the frontend show "the basis
+                // of entry" (what the OI-wall/IV check saw, even when it was clear) on a click,
+                // not just what blocked a rejected signal.
+                var acceptedWall = useOiWallFilter ? StrikeWithMaxOiAtOrBefore(bearish ? context.PeOiIvBand : context.CeOiIvBand, bar.Time) : null;
+                var acceptedIvNow = useIvSpikeFilter ? NearestStrikeAtOrBefore(bearish ? context.PeOiIvBand : context.CeOiIvBand, bar.Time, bar.Close)?.ImpliedVolatility : null;
+                var acceptedIvPrior = useIvSpikeFilter ? NearestStrikeAtOrBefore(bearish ? context.PeOiIvBand : context.CeOiIvBand, bar.Time.AddMinutes(-ivSpikeLookbackBars), bar.Close)?.ImpliedVolatility : null;
+
+                signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Entry", dir, detail)
+                {
+                    OiWallStrike = acceptedWall?.Strike,
+                    OiWallOpenInterest = acceptedWall?.OpenInterest,
+                    IvNow = acceptedIvNow,
+                    IvPrior = acceptedIvPrior,
+                    IvLookbackBars = useIvSpikeFilter ? ivSpikeLookbackBars : null,
+                });
                 entries.Add((bar.Time, dir));
 
                 if (stop is { } s && target is { } t && entryIndex is { } ei && dayEndIndexExclusive is { } dayEnd)
@@ -273,12 +297,13 @@ public sealed class OrbOrderBlockStrategy : IBacktestStrategy
     /// without it, and a strategy parameter should never silently reject every trade just because
     /// the data source it depends on happens to be unavailable.</summary>
     private static bool OiWallBlocksEntry(
-        BacktestStrategyContext context, DateTimeOffset asOf, bool bearish, decimal entryPrice, decimal target, decimal wallBufferPoints, out string reason)
+        BacktestStrategyContext context, DateTimeOffset asOf, bool bearish, decimal entryPrice, decimal target, decimal wallBufferPoints,
+        out string reason, out OiIvPoint? wall)
     {
         reason = "";
         var band = bearish ? context.PeOiIvBand : context.CeOiIvBand;
 
-        var wall = StrikeWithMaxOiAtOrBefore(band, asOf);
+        wall = StrikeWithMaxOiAtOrBefore(band, asOf);
         if (wall is not { Strike: { } wallStrike, OpenInterest: { } wallOi }) return false;
 
         // Only a wall AHEAD of the trade (above entry for a bullish trade, below for a bearish one)
@@ -301,16 +326,21 @@ public sealed class OrbOrderBlockStrategy : IBacktestStrategy
     /// either point in time, or a zero/missing prior IV that would make a percentage change
     /// meaningless.</summary>
     private static bool IvSpikeBlocksEntry(
-        BacktestStrategyContext context, DateTimeOffset asOf, bool bearish, decimal referencePrice, int lookbackBars, decimal thresholdPercent, out string reason)
+        BacktestStrategyContext context, DateTimeOffset asOf, bool bearish, decimal referencePrice, int lookbackBars, decimal thresholdPercent,
+        out string reason, out decimal? currentIvOut, out decimal? priorIvOut)
     {
         reason = "";
+        currentIvOut = null;
+        priorIvOut = null;
         var band = bearish ? context.PeOiIvBand : context.CeOiIvBand;
 
         var current = NearestStrikeAtOrBefore(band, asOf, referencePrice);
         if (current?.ImpliedVolatility is not { } currentIv) return false;
+        currentIvOut = currentIv;
 
         var prior = NearestStrikeAtOrBefore(band, asOf.AddMinutes(-lookbackBars), referencePrice);
         if (prior?.ImpliedVolatility is not { } priorIv || priorIv <= 0) return false;
+        priorIvOut = priorIv;
 
         var changePercent = (currentIv - priorIv) / priorIv * 100m;
         if (changePercent < thresholdPercent) return false;
