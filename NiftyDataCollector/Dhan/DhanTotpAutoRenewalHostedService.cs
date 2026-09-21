@@ -10,12 +10,16 @@ namespace NiftyDataCollector.Dhan;
 ///
 ///  1. STARTUP - authenticated within seconds of boot, retried with backoff (2s doubling to 30s
 ///     for an ordinary transient failure) until it succeeds - ~130s specifically when Dhan reports
-///     its own "once every 2 minutes" cooldown, or TooManyAttemptsCooldown (long, fixed) on Dhan's
-///     separate account-level "too many attempts" lockout - see that constant's own doc comment
-///     for why this diverges from OptionAnalytics.Server's own original tuning, which retried this
-///     specific case fast.
+///     its own "once every 2 minutes" cooldown, or DhanOptions.TooManyAttemptsCooldownSeconds
+///     (configurable, defaults to 30s) on Dhan's separate account-level "too many attempts"
+///     lockout - see that option's own doc comment for the tradeoff it controls.
 ///  2. PROACTIVELY, an hour before the current token's own expiry.
 ///  3. REACTIVELY, the instant DhanSession.SessionInvalidated fires (a 401 from DhanApiClient).
+///
+/// FALLBACK: while a TOTP attempt is failing (any reason - rate-limited, locked out, network), if
+/// Dhan:AccessToken is also configured and the session has no token right now, that static token is
+/// used as a stopgap so API calls keep working off it while TOTP retries continue in the
+/// background - the moment TOTP succeeds, its fresh token overwrites the static one as usual.
 ///
 /// See DhanOptions' own doc comment for the real risk of running this ALONGSIDE
 /// OptionAnalytics.Server's own TOTP renewal against the same Dhan account.
@@ -31,18 +35,6 @@ public sealed class DhanTotpAutoRenewalHostedService : BackgroundService
     /// too short to ever clear that cooldown - a little margin over Dhan's stated 2 minutes
     /// accounts for clock/latency slop.</summary>
     private static readonly TimeSpan RateLimitCooldown = TimeSpan.FromSeconds(130);
-
-    /// <summary>Dhan's account-level "Too many attempts. Please try again after sometime." lockout
-    /// - a DIFFERENT, undocumented cooldown from RateLimitCooldown's own well-known 2 minutes, and
-    /// this collector's own real-world evidence says it does NOT reliably clear within a couple of
-    /// minutes: OptionAnalytics.Server's original tuning retried this case on the same fast 2s->30s
-    /// backoff as an ordinary transient failure, on the theory that the cause is almost always
-    /// clock skew and a fixed retry gets back online fastest once that's fixed - but repeatedly
-    /// retrying every 30 seconds AGAINST AN ACCOUNT THAT IS GENUINELY LOCKED OUT (not clock skew)
-    /// risks being read by Dhan as more of the same abuse pattern, extending the lockout rather
-    /// than waiting it out. A long, fixed cooldown is the safer default here: still self-healing
-    /// with zero manual steps, just patient about it instead of hammering an active lockout.</summary>
-    private static readonly TimeSpan TooManyAttemptsCooldown = TimeSpan.FromMinutes(15);
 
     private readonly DhanOptions _options;
     private readonly DhanSession _session;
@@ -98,14 +90,18 @@ public sealed class DhanTotpAutoRenewalHostedService : BackgroundService
                 return result.ExpiresUtc ?? DateTimeOffset.UtcNow.AddHours(23);
             }
 
-            var delay = result.RateLimited ? RateLimitCooldown : result.TooManyAttempts ? TooManyAttemptsCooldown : backoff;
+            var delay = result.RateLimited ? RateLimitCooldown
+                : result.TooManyAttempts ? TimeSpan.FromSeconds(_options.TooManyAttemptsCooldownSeconds)
+                : backoff;
 
             if (result.TooManyAttempts)
                 _logger.LogError(
-                    "Dhan TOTP login is being rejected as 'too many attempts' ({Error}). Check your clock against real UTC time (a common cause), but this can also be a genuine account-level lockout that simply needs time to clear - waiting {Minutes} minute(s) before retrying, rather than hammering it, since repeated attempts against an active lockout risk extending it.",
-                    result.Error, delay.TotalMinutes);
+                    "Dhan TOTP login is being rejected as 'too many attempts' ({Error}). Check your clock against real UTC time (a common cause), but this can also be a genuine account-level lockout that simply needs time to clear - waiting {Seconds}s before retrying, rather than hammering it, since repeated attempts against an active lockout risk extending it.",
+                    result.Error, delay.TotalSeconds);
             else
                 _logger.LogWarning("Dhan TOTP auto-login failed: {Error} - retrying in {Seconds}s.", result.Error, delay.TotalSeconds);
+
+            FallBackToStaticAccessTokenIfConfigured();
 
             if (!await DelayAsync(delay, stoppingToken)) return null;
             backoff = result.RateLimited || result.TooManyAttempts ? RetryBackoffInitial : Min(backoff * 2, RetryBackoffMax);
@@ -144,6 +140,20 @@ public sealed class DhanTotpAutoRenewalHostedService : BackgroundService
             try { _invalidatedSignal.Release(); }
             catch (SemaphoreFullException) { /* already armed - coalesced */ }
         }
+    }
+
+    /// <summary>Stopgap so API calls don't go dark for the whole time TOTP is failing/locked out,
+    /// when the user has also left a static Dhan:AccessToken configured as a backup. Only fills a
+    /// currently-empty session - never overwrites a token that's still live (there's no way from
+    /// here to tell whether it's still valid, so leaving it alone is the safe default).</summary>
+    private void FallBackToStaticAccessTokenIfConfigured()
+    {
+        if (_session.IsAuthenticated) return;
+        if (string.IsNullOrWhiteSpace(_options.AccessToken) || string.IsNullOrWhiteSpace(_options.ClientId)) return;
+
+        _session.AccessToken = _options.AccessToken;
+        _session.ClientId = _options.ClientId;
+        _logger.LogWarning("Falling back to the static Dhan:AccessToken while TOTP login keeps retrying in the background.");
     }
 
     private static TimeSpan Min(TimeSpan a, TimeSpan b) => a < b ? a : b;

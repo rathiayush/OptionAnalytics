@@ -5,13 +5,19 @@ namespace NiftyDataCollector.Dhan;
 
 public sealed record DhanHistoricalBar(DateTimeOffset Time, decimal Open, decimal High, decimal Low, decimal Close, long Volume, long? OpenInterest);
 
+/// <summary>Called once per successfully-fetched chunk, bars for [ChunkFrom, ChunkTo] only - lets
+/// the caller save progress incrementally rather than holding a whole multi-hundred-day fetch in
+/// memory and writing nothing until every chunk succeeds (see FetchAsync's own doc comment on
+/// why chunk-at-a-time save+report matters here).</summary>
+public delegate Task DhanHistoricalChunkSavedCallback(IReadOnlyList<DhanHistoricalBar> bars, DateOnly chunkFrom, DateOnly chunkTo);
+
 /// <summary>
 /// Dhan's Intraday Historical Data API (POST /v2/charts/intraday) - the one endpoint that can give
-/// this collector actual OHLC HISTORY (up to 90 days per call, per Dhan's docs) for a specific
-/// security, rather than a live-only snapshot. Ported from OptionAnalytics.Server's own
-/// DhanHistoricalDataService's request/response shape, with one addition: the optional "oi": true
-/// request field, which Dhan's docs describe as returning an "open_interest" array alongside
-/// OHLCV for F&amp;O instruments.
+/// this collector actual OHLC HISTORY (Dhan's docs cap a single call at roughly 90 days) for a
+/// specific security, rather than a live-only snapshot. Ported from OptionAnalytics.Server's own
+/// DhanHistoricalDataService's request/response shape, with two additions: the optional "oi": true
+/// request field (Dhan's docs describe it returning an "open_interest" array for F&amp;O
+/// instruments), and chunking for a range longer than Dhan will serve in one call.
 ///
 /// THIS IS AN OPEN QUESTION THIS COLLECTOR EXISTS PARTLY TO ANSWER: OptionAnalytics.Server's own
 /// DhanOptionChainQuotes is built on the (previously confirmed) assumption that OI has NO history
@@ -23,53 +29,103 @@ public sealed record DhanHistoricalBar(DateTimeOffset Time, decimal Open, decima
 /// true. If it turns out to carry real historical OI, that reopens the door to backtesting an
 /// OI-based strategy the way OiUnwindStrategy (removed from OptionAnalytics.Server, live-only OI
 /// having been the reason) could not.
+///
+/// CHUNKING: a caller asking for BackfillDays=500 worth of history gets that split into ~90-day
+/// chunks, each its own rate-limited call, fed to the caller's onChunkFetched callback as soon as
+/// it succeeds - deliberately NOT buffered until the whole range is done. That way a failure
+/// partway through a long backfill (rate limit, a transient Dhan error) still leaves every earlier
+/// chunk's data safely saved rather than losing the whole call; the caller (CollectorHostedService)
+/// only marks a contract "fully backfilled" once every chunk in the range came back clean, so a
+/// partial failure gets the WHOLE range retried (an idempotent no-op for the chunks that already
+/// succeeded, thanks to upsert) on the next cycle rather than silently leaving a permanent gap. If
+/// a specific chunk's saved data ever looks wrong, deleting just that date range from Postgres and
+/// letting the next cycle's retry refill it is a normal, supported way to recover - see the
+/// project README.
 /// </summary>
 public sealed class DhanHistoricalDataClient
 {
     private const string OptionInstrument = "OPTIDX";
     private const string IndexInstrument = "INDEX";
 
+    /// <summary>Dhan's own documented ceiling per /charts/intraday call. Kept a few days under the
+    /// ~100 Dhan's docs mention as margin.</summary>
+    private const int MaxDaysPerChunk = 90;
+
     private readonly DhanApiClient _api;
+    private readonly DhanRateLimiter _rateLimiter;
     private readonly ILogger<DhanHistoricalDataClient> _logger;
 
-    public DhanHistoricalDataClient(DhanApiClient api, ILogger<DhanHistoricalDataClient> logger)
+    public DhanHistoricalDataClient(DhanApiClient api, DhanRateLimiter rateLimiter, ILogger<DhanHistoricalDataClient> logger)
     {
         _api = api;
+        _rateLimiter = rateLimiter;
         _logger = logger;
     }
 
-    public Task<(IReadOnlyList<DhanHistoricalBar> Bars, string? Error)> GetSpotIntradayAsync(
-        uint securityId, string dhanSegment, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken) =>
-        FetchAsync(securityId, dhanSegment, IndexInstrument, fromDay, toDay, intervalMinutes, includeOi: false, cancellationToken);
+    public Task<(int TotalBars, bool FullyComplete, string? LastError)> GetSpotIntradayAsync(
+        uint securityId, string dhanSegment, DateOnly fromDay, DateOnly toDay, int intervalMinutes,
+        DhanHistoricalChunkSavedCallback onChunkFetched, CancellationToken cancellationToken) =>
+        FetchAsync(securityId, dhanSegment, IndexInstrument, fromDay, toDay, intervalMinutes, includeOi: false, onChunkFetched, cancellationToken);
 
-    public Task<(IReadOnlyList<DhanHistoricalBar> Bars, string? Error)> GetOptionIntradayAsync(
-        uint securityId, string dhanSegment, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken) =>
-        FetchAsync(securityId, dhanSegment, OptionInstrument, fromDay, toDay, intervalMinutes, includeOi: true, cancellationToken);
+    public Task<(int TotalBars, bool FullyComplete, string? LastError)> GetOptionIntradayAsync(
+        uint securityId, string dhanSegment, DateOnly fromDay, DateOnly toDay, int intervalMinutes,
+        DhanHistoricalChunkSavedCallback onChunkFetched, CancellationToken cancellationToken) =>
+        FetchAsync(securityId, dhanSegment, OptionInstrument, fromDay, toDay, intervalMinutes, includeOi: true, onChunkFetched, cancellationToken);
 
-    private async Task<(IReadOnlyList<DhanHistoricalBar> Bars, string? Error)> FetchAsync(
-        uint securityId, string dhanSegment, string instrument, DateOnly fromDay, DateOnly toDay, int intervalMinutes, bool includeOi, CancellationToken cancellationToken)
+    private async Task<(int TotalBars, bool FullyComplete, string? LastError)> FetchAsync(
+        uint securityId, string dhanSegment, string instrument, DateOnly fromDay, DateOnly toDay, int intervalMinutes, bool includeOi,
+        DhanHistoricalChunkSavedCallback onChunkFetched, CancellationToken cancellationToken)
     {
-        var payload = new
-        {
-            securityId = securityId.ToString(CultureInfo.InvariantCulture),
-            exchangeSegment = dhanSegment,
-            instrument,
-            interval = intervalMinutes.ToString(CultureInfo.InvariantCulture),
-            oi = includeOi,
-            fromDate = $"{fromDay:yyyy-MM-dd} 09:15:00",
-            toDate = $"{toDay:yyyy-MM-dd} 15:30:00",
-        };
+        var totalBars = 0;
+        var fullyComplete = true;
+        string? lastError = null;
+        var chunkFrom = fromDay;
 
-        using var response = await _api.SendAsync(HttpMethod.Post, "/charts/intraday", payload,
-            $"{instrument} intraday ({dhanSegment}:{securityId}, {fromDay:yyyy-MM-dd}..{toDay:yyyy-MM-dd})", cancellationToken);
-
-        if (!response.Success)
+        while (chunkFrom <= toDay)
         {
-            _logger.LogDebug("{Instrument} intraday request failed for {Segment}:{Id} ({From}..{To}) - {Error}", instrument, dhanSegment, securityId, fromDay, toDay, response.ErrorMessage);
-            return (Array.Empty<DhanHistoricalBar>(), response.ErrorMessage);
+            var chunkTo = chunkFrom.AddDays(MaxDaysPerChunk - 1);
+            if (chunkTo > toDay) chunkTo = toDay;
+
+            await _rateLimiter.WaitForHistoricalDataSlotAsync(cancellationToken);
+
+            var payload = new
+            {
+                securityId = securityId.ToString(CultureInfo.InvariantCulture),
+                exchangeSegment = dhanSegment,
+                instrument,
+                interval = intervalMinutes.ToString(CultureInfo.InvariantCulture),
+                oi = includeOi,
+                fromDate = $"{chunkFrom:yyyy-MM-dd} 09:15:00",
+                toDate = $"{chunkTo:yyyy-MM-dd} 15:30:00",
+            };
+
+            using var response = await _api.SendAsync(HttpMethod.Post, "/charts/intraday", payload,
+                $"{instrument} intraday ({dhanSegment}:{securityId}, {chunkFrom:yyyy-MM-dd}..{chunkTo:yyyy-MM-dd})", cancellationToken);
+
+            if (!response.Success)
+            {
+                fullyComplete = false;
+                lastError = response.ErrorMessage;
+                _logger.LogWarning(
+                    "{Instrument} intraday chunk FAILED for {Segment}:{Id} [{ChunkFrom}..{ChunkTo}] - {Error}. " +
+                    "Stopping here for this security this cycle rather than continuing further chunks - the checkpoint stays before this chunk, " +
+                    "so the next cycle resumes from here instead of redoing the whole [{From}..{To}] range.",
+                    instrument, dhanSegment, securityId, chunkFrom, chunkTo, response.ErrorMessage, fromDay, toDay);
+                break; // Stop at the first failure: the checkpoint's "contiguous coverage up to this date" guarantee
+                       // would break if a later chunk succeeded past a hole left by this one.
+            }
+
+            var bars = ParseBars(response.Root);
+            totalBars += bars.Count;
+            // Called even for a zero-bar chunk (e.g. before an option contract existed) - the
+            // callback still needs to advance the checkpoint past it, or every future cycle would
+            // keep re-requesting the same known-empty range forever.
+            await onChunkFetched(bars, chunkFrom, chunkTo);
+
+            chunkFrom = chunkTo.AddDays(1);
         }
 
-        return (ParseBars(response.Root), null);
+        return (totalBars, fullyComplete, lastError);
     }
 
     private static List<DhanHistoricalBar> ParseBars(JsonElement root)

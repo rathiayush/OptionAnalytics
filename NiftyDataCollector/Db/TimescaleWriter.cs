@@ -78,6 +78,43 @@ public sealed class TimescaleWriter
         _logger.LogInformation("Created database \"{Database}\" - it did not exist yet.", targetDatabase);
     }
 
+    /// <summary>The last calendar day this security's historical backfill has contiguously reached,
+    /// or null if it has never completed even one chunk - see Schema.sql's own doc comment on
+    /// backfill_progress for the contiguity guarantee this relies on.</summary>
+    public async Task<DateOnly?> GetBackfillCheckpointAsync(long securityId, CancellationToken cancellationToken)
+    {
+        await using var connection = new NpgsqlConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = new NpgsqlCommand("SELECT completed_through FROM backfill_progress WHERE security_id = @id", connection);
+        command.Parameters.AddWithValue("id", securityId);
+
+        var result = await command.ExecuteScalarAsync(cancellationToken);
+        return result is DateTime dt ? DateOnly.FromDateTime(dt) : null;
+    }
+
+    /// <summary>Advances (or creates) this security's checkpoint - called once per successfully
+    /// fetched chunk, never skipped for an empty one (see DhanHistoricalDataClient's own call site
+    /// comment on why).</summary>
+    public async Task SaveBackfillCheckpointAsync(long securityId, string underlying, DateOnly completedThrough, CancellationToken cancellationToken)
+    {
+        await using var connection = new NpgsqlConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        const string sql = """
+            INSERT INTO backfill_progress (security_id, underlying, completed_through, updated_at)
+            VALUES (@id, @underlying, @through, now())
+            ON CONFLICT (security_id) DO UPDATE SET
+                completed_through = EXCLUDED.completed_through, underlying = EXCLUDED.underlying, updated_at = now()
+            """;
+
+        await using var command = new NpgsqlCommand(sql, connection);
+        command.Parameters.AddWithValue("id", securityId);
+        command.Parameters.AddWithValue("underlying", underlying);
+        command.Parameters.Add(new NpgsqlParameter("through", NpgsqlTypes.NpgsqlDbType.Date) { Value = completedThrough.ToDateTime(TimeOnly.MinValue) });
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
     public async Task<int> SaveSpotBarsAsync(string underlying, IReadOnlyList<DhanHistoricalBar> bars, CancellationToken cancellationToken)
     {
         if (bars.Count == 0) return 0;

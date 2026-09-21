@@ -4,23 +4,31 @@ using System.Text;
 namespace NiftyDataCollector.Dhan;
 
 /// <summary>
-/// Downloads Dhan's scrip master CSV and resolves NIFTY's own cash/index row - a NIFTY-only trim
-/// of OptionAnalytics.Server's own DhanSpotInstrumentMaster (same CSV, same column-resolution
-/// logic, kept identical on purpose so a future BANKNIFTY extension is a one-line change to
-/// IndexAliases, not a rewrite). Copied rather than referenced - see this project's own README for
-/// why this collector intentionally duplicates rather than shares code with OptionAnalytics.Server.
+/// Downloads Dhan's scrip master CSV once and resolves whichever index rows this collector is
+/// configured to track (NIFTY, BANKNIFTY, ...) from that single pass - a trim of
+/// OptionAnalytics.Server's own DhanSpotInstrumentMaster, same CSV, same column-resolution logic.
+/// Copied rather than referenced - see this project's own README for why this collector
+/// intentionally duplicates rather than shares code with OptionAnalytics.Server.
 /// </summary>
 public sealed class DhanSpotInstrumentMaster
 {
     private const string ScripMasterUrl = "https://images.dhan.co/api-data/api-scrip-master.csv";
     private static readonly TimeSpan CacheLifetime = TimeSpan.FromHours(12);
-    private static readonly string[] NiftyAliases = { "NIFTY 50", "NIFTY50", "NIFTY" };
+
+    /// <summary>Canonical name (matches Collector:Underlyings[].Name in config) -> the trading
+    /// symbol/underlying-name spellings Dhan's scrip master uses for that index. Add a new entry
+    /// here to track another index - nothing else in this class needs to change.</summary>
+    private static readonly Dictionary<string, string[]> IndexAliases = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["NIFTY"] = new[] { "NIFTY 50", "NIFTY50", "NIFTY" },
+        ["BANKNIFTY"] = new[] { "NIFTY BANK", "BANKNIFTY", "NIFTY BANK 50" },
+    };
 
     private readonly HttpClient _httpClient;
     private readonly ILogger<DhanSpotInstrumentMaster> _logger;
     private readonly SemaphoreSlim _loadLock = new(1, 1);
 
-    private DhanSpotInstrument? _nifty;
+    private readonly Dictionary<string, DhanSpotInstrument> _resolved = new(StringComparer.OrdinalIgnoreCase);
     private DateTimeOffset _loadedAt = DateTimeOffset.MinValue;
 
     public DhanSpotInstrumentMaster(HttpClient httpClient, ILogger<DhanSpotInstrumentMaster> logger)
@@ -29,19 +37,20 @@ public sealed class DhanSpotInstrumentMaster
         _logger = logger;
     }
 
-    /// <summary>NIFTY's own securityId/segment, refreshing the scrip master first if it is missing
-    /// or older than CacheLifetime. Throws only when NEITHER a fresh nor a previously cached
-    /// resolution exists - a transient download failure with a still-valid cached value is logged
-    /// and swallowed instead, same "keep serving the last good answer" rule
-    /// OptionAnalytics.Server's own scrip master classes use.</summary>
-    public async Task<DhanSpotInstrument> ResolveNiftyAsync(CancellationToken cancellationToken)
+    /// <summary>The named index's own securityId/segment (canonicalName must be a key in
+    /// IndexAliases, e.g. "NIFTY" or "BANKNIFTY"), refreshing the scrip master first if it is
+    /// missing or older than CacheLifetime. One CSV download refreshes every tracked index at once,
+    /// not just the one asked for. Throws only when NEITHER a fresh nor a previously cached
+    /// resolution exists for this name - a transient download failure with a still-valid cached
+    /// value is logged and swallowed instead.</summary>
+    public async Task<DhanSpotInstrument> ResolveAsync(string canonicalName, CancellationToken cancellationToken)
     {
-        if (_nifty is not null && DateTimeOffset.UtcNow - _loadedAt < CacheLifetime) return _nifty;
+        if (_resolved.TryGetValue(canonicalName, out var cached) && DateTimeOffset.UtcNow - _loadedAt < CacheLifetime) return cached;
 
         await _loadLock.WaitAsync(cancellationToken);
         try
         {
-            if (_nifty is not null && DateTimeOffset.UtcNow - _loadedAt < CacheLifetime) return _nifty;
+            if (_resolved.TryGetValue(canonicalName, out cached) && DateTimeOffset.UtcNow - _loadedAt < CacheLifetime) return cached;
 
             try
             {
@@ -49,12 +58,13 @@ public sealed class DhanSpotInstrumentMaster
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                if (_nifty is null) throw;
-                _logger.LogWarning(ex, "Scrip master refresh failed - continuing with the previously resolved NIFTY instrument.");
+                if (!_resolved.ContainsKey(canonicalName)) throw;
+                _logger.LogWarning(ex, "Scrip master refresh failed - continuing with the previously resolved {Name} instrument.", canonicalName);
             }
 
-            if (_nifty is null) throw new InvalidOperationException("Could not resolve a NIFTY spot/index row from the Dhan scrip master.");
-            return _nifty;
+            if (!_resolved.TryGetValue(canonicalName, out cached))
+                throw new InvalidOperationException($"Could not resolve a {canonicalName} spot/index row from the Dhan scrip master - check IndexAliases in DhanSpotInstrumentMaster.");
+            return cached;
         }
         finally
         {
@@ -69,18 +79,22 @@ public sealed class DhanSpotInstrumentMaster
         response.EnsureSuccessStatusCode();
 
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-        var resolved = ParseForNifty(stream);
+        var found = ParseIndices(stream);
 
-        if (resolved is null)
+        foreach (var (name, _) in IndexAliases)
         {
-            _logger.LogError("Could not find a NIFTY row in the Dhan scrip master - {Action}",
-                _nifty is not null ? "keeping the previously resolved instrument." : "nothing was resolved before either.");
-            return;
+            if (found.TryGetValue(name, out var instrument))
+            {
+                _resolved[name] = instrument;
+                _logger.LogInformation("Resolved {Name} spot -> securityId={Id} ({Symbol}, segment={Segment})", name, instrument.SecurityId, instrument.TradingSymbol, instrument.DhanSegment);
+            }
+            else if (!_resolved.ContainsKey(name))
+            {
+                _logger.LogError("Could not find a {Name} row in the Dhan scrip master.", name);
+            }
         }
 
-        _nifty = resolved;
         _loadedAt = DateTimeOffset.UtcNow;
-        _logger.LogInformation("Resolved NIFTY spot -> securityId={Id} ({Symbol}, segment={Segment})", resolved.SecurityId, resolved.TradingSymbol, resolved.DhanSegment);
     }
 
     private static class Columns
@@ -92,11 +106,13 @@ public sealed class DhanSpotInstrumentMaster
         public static readonly string[] UnderlyingName = { "SM_SYMBOL_NAME", "UNDERLYING_SYMBOL", "SYMBOL_NAME" };
     }
 
-    private DhanSpotInstrument? ParseForNifty(Stream stream)
+    private Dictionary<string, DhanSpotInstrument> ParseIndices(Stream stream)
     {
+        var found = new Dictionary<string, DhanSpotInstrument>(StringComparer.OrdinalIgnoreCase);
+
         using var reader = new StreamReader(stream);
         var headerLine = reader.ReadLine();
-        if (headerLine is null) { _logger.LogError("Dhan scrip master was empty - no header row."); return null; }
+        if (headerLine is null) { _logger.LogError("Dhan scrip master was empty - no header row."); return found; }
 
         var header = BuildHeaderMap(SplitCsvLine(headerLine));
         var securityIdIndex = Resolve(header, Columns.SecurityId);
@@ -108,11 +124,11 @@ public sealed class DhanSpotInstrumentMaster
         if (securityIdIndex < 0 || exchangeIndex < 0 || instrumentNameIndex < 0 || tradingSymbolIndex < 0)
         {
             _logger.LogError("Dhan scrip master is missing required columns. Header was: {Header}", headerLine);
-            return null;
+            return found;
         }
 
         string? line;
-        while ((line = reader.ReadLine()) is not null)
+        while ((line = reader.ReadLine()) is not null && found.Count < IndexAliases.Count)
         {
             if (line.Length == 0) continue;
             var fields = SplitCsvLine(line);
@@ -125,17 +141,23 @@ public sealed class DhanSpotInstrumentMaster
 
             var tradingSymbol = Get(fields, tradingSymbolIndex);
             var name = Get(fields, underlyingIndex);
-            if (!NiftyAliases.Contains(tradingSymbol, StringComparer.OrdinalIgnoreCase) &&
-                !NiftyAliases.Contains(name, StringComparer.OrdinalIgnoreCase))
-                continue;
 
-            if (!uint.TryParse(Get(fields, securityIdIndex), NumberStyles.Integer, CultureInfo.InvariantCulture, out var securityId))
-                continue;
+            foreach (var (canonicalName, aliases) in IndexAliases)
+            {
+                if (found.ContainsKey(canonicalName)) continue;
+                if (!aliases.Contains(tradingSymbol, StringComparer.OrdinalIgnoreCase) &&
+                    !aliases.Contains(name, StringComparer.OrdinalIgnoreCase))
+                    continue;
 
-            return new DhanSpotInstrument(securityId, tradingSymbol ?? "NIFTY 50", name ?? "NIFTY 50", "IDX_I");
+                if (!uint.TryParse(Get(fields, securityIdIndex), NumberStyles.Integer, CultureInfo.InvariantCulture, out var securityId))
+                    continue;
+
+                found[canonicalName] = new DhanSpotInstrument(securityId, tradingSymbol ?? canonicalName, name ?? canonicalName, "IDX_I");
+                break;
+            }
         }
 
-        return null;
+        return found;
     }
 
     private static Dictionary<string, int> BuildHeaderMap(string[] header)

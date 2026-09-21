@@ -43,4 +43,16 @@ public sealed class DhanOptions
     /// plain static AccessToken (see DhanTotpAutoRenewalHostedService's doc comment).</summary>
     public bool HasTotpCredentials =>
         !string.IsNullOrWhiteSpace(ClientId) && !string.IsNullOrWhiteSpace(Pin) && !string.IsNullOrWhiteSpace(TotpSecret);
+
+    /// <summary>How long DhanTotpAutoRenewalHostedService waits before retrying after Dhan's own
+    /// account-level "Too many attempts. Please try again after sometime." lockout - a DIFFERENT,
+    /// undocumented cooldown from the well-known 2-minute one for the plain "once every 2 minutes"
+    /// throttle (that one is not configurable, since Dhan's own stated value for it is fixed and
+    /// known). Defaults to 30s, matching the fast retry OptionAnalytics.Server's own original
+    /// tuning uses for this case - configurable here because that fast setting trades recovery
+    /// speed once a transient cause (clock skew, most commonly) clears against the risk of
+    /// repeated attempts reading as continued abuse if the lockout is instead a genuine
+    /// account-level one with its own longer, unknown reset window. Raise this if you hit that
+    /// lockout for real and want fewer, more patient retries instead.</summary>
+    public int TooManyAttemptsCooldownSeconds { get; set; } = 30;
 }

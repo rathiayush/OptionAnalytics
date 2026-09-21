@@ -78,6 +78,26 @@ CREATE TABLE IF NOT EXISTS option_chain_snapshots (
 SELECT create_hypertable('option_chain_snapshots', 'time', if_not_exists => TRUE);
 CREATE INDEX IF NOT EXISTS idx_option_chain_snapshots_lookup ON option_chain_snapshots (underlying, expiry, strike, option_type, time DESC);
 
+-- Backfill CHECKPOINTS - one row per security (spot index or option contract), recording the last
+-- calendar day its own historical OHLC backfill has contiguously reached. A long backfill
+-- (BackfillDays=500 by default) is fetched in ~90-day chunks (Dhan's own per-call cap - see
+-- DhanHistoricalDataClient); this row is only advanced to a chunk's own end date AFTER that
+-- chunk's bars are saved, and the whole chunk loop stops at the first failed chunk rather than
+-- skipping ahead - so completed_through always means "every bar from scratch up to this date is
+-- saved", never "most of them are". The next cycle resumes from completed_through+1, re-fetching
+-- only what's missing rather than redoing the whole range from day one.
+--
+-- TO FORCE A RE-FETCH of a specific window (e.g. you spotted bad data and deleted those rows from
+-- spot_bars_1m/option_bars_1m): rewind this row's completed_through to the day before the bad
+-- window (or delete the row entirely, to redo the full BackfillDays range) for that security_id -
+-- the next cycle picks it up automatically, no restart required.
+CREATE TABLE IF NOT EXISTS backfill_progress (
+    security_id         BIGINT      PRIMARY KEY,
+    underlying           TEXT        NOT NULL,
+    completed_through    DATE        NOT NULL,
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- Not enabled by default - turn on once you've validated the pipeline and want to keep disk usage
 -- down for data older than your active query window. Left commented out deliberately: compressed
 -- chunks are read-only for inserts, and this collector may still want to backfill/repair older

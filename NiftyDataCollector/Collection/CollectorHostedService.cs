@@ -5,17 +5,20 @@ using NiftyDataCollector.Dhan;
 namespace NiftyDataCollector.Collection;
 
 /// <summary>
-/// The whole collector: resolve NIFTY, track its nearest expiry(ies), and on each cycle -
+/// The whole collector: resolve each configured underlying (NIFTY, BANKNIFTY, ... - see
+/// CollectorOptions.Underlyings) and track its nearest expiry(ies), and on each cycle, per
+/// underlying -
 ///
 ///   1. Poll the LIVE option chain for the tracked expiry (one rate-limited call covers every
 ///      strike at once) - this is the only source for IV/greeks/OI/volume, all of which are
 ///      live-only in Dhan's API (see DhanOptionChainClient's own doc comment).
-///   2. From that same call's own underlying last_price, compute ATM (rounded to StrikeStep) and
-///      save the live snapshot for every strike within StrikesEachSide of it.
+///   2. From that same call's own underlying last_price, compute ATM (rounded to that underlying's
+///      own StrikeStep) and save the live snapshot for every strike within StrikesEachSide of it.
 ///   3. For each of those strikes' CE/PE contracts (and for spot), backfill/refresh 1-minute OHLC
 ///      history via the historical intraday endpoint - real, replayable history, unlike step 1.
-///      A contract already backfilled today is only asked for bars since its own last saved time,
-///      not re-fetched from scratch every cycle.
+///      Resumes from that security's own CHECKPOINT (backfill_progress table - see
+///      DhanHistoricalDataClient and TimescaleWriter's own doc comments) rather than re-fetching
+///      the whole BackfillDays window every cycle, or redoing it all after a partial failure.
 ///
 /// Runs forever until cancelled, sleeping SnapshotPollIntervalSeconds between cycles. A single bad
 /// cycle (a transient Dhan error, one contract's history failing) never stops the loop - see the
@@ -43,12 +46,6 @@ public sealed class CollectorHostedService : BackgroundService
     private readonly CollectorOptions _options;
     private readonly ILogger<CollectorHostedService> _logger;
 
-    /// <summary>(underlying-side security id, day) already backfilled - so a cycle only ever
-    /// fetches a NEW contract's full BackfillDays window once, and every later cycle that same day
-    /// just tops up whatever bars have printed since.</summary>
-    private readonly HashSet<(long SecurityId, DateOnly Day)> _backfilledToday = new();
-    private readonly Dictionary<long, DateTimeOffset> _lastBarTimeBySecurityId = new();
-
     public CollectorHostedService(
         DhanSpotInstrumentMaster spotMaster, DhanOptionChainClient optionChain, DhanHistoricalDataClient historicalData,
         DhanRateLimiter rateLimiter, TimescaleWriter writer, DhanSession session, IOptions<DhanOptions> dhanOptions,
@@ -69,9 +66,15 @@ public sealed class CollectorHostedService : BackgroundService
     {
         await _writer.EnsureSchemaAsync(stoppingToken);
 
-        var nifty = await _spotMaster.ResolveNiftyAsync(stoppingToken);
-        _logger.LogInformation("NiftyDataCollector starting - NIFTY securityId={Id}, segment={Segment}, strikeStep={Step}, strikesEachSide={N}, backfillDays={Days}.",
-            nifty.SecurityId, nifty.DhanSegment, _options.StrikeStep, _options.StrikesEachSide, _options.BackfillDays);
+        var tracked = new List<(DhanSpotInstrument Instrument, TrackedUnderlying Config)>();
+        foreach (var underlying in _options.Underlyings)
+        {
+            var instrument = await _spotMaster.ResolveAsync(underlying.Name, stoppingToken);
+            tracked.Add((instrument, underlying));
+            _logger.LogInformation(
+                "NiftyDataCollector tracking {Underlying} - securityId={Id}, segment={Segment}, strikeStep={Step}, strikesEachSide={N}, backfillDays={Days}.",
+                underlying.Name, instrument.SecurityId, instrument.DhanSegment, underlying.StrikeStep, _options.StrikesEachSide, _options.BackfillDays);
+        }
 
         if (_dhanOptions.HasTotpCredentials)
         {
@@ -88,13 +91,17 @@ public sealed class CollectorHostedService : BackgroundService
         while (!stoppingToken.IsCancellationRequested)
         {
             var cycleStart = DateTimeOffset.UtcNow;
-            try
+
+            foreach (var (instrument, config) in tracked)
             {
-                await RunOneCycleAsync(nifty, stoppingToken);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                _logger.LogError(ex, "Collector cycle failed - will retry next cycle rather than stopping.");
+                try
+                {
+                    await RunOneCycleAsync(instrument, config, stoppingToken);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogError(ex, "Collector cycle failed for {Underlying} - will retry next cycle rather than stopping.", config.Name);
+                }
             }
 
             var elapsed = DateTimeOffset.UtcNow - cycleStart;
@@ -103,7 +110,7 @@ public sealed class CollectorHostedService : BackgroundService
         }
     }
 
-    private async Task RunOneCycleAsync(DhanSpotInstrument nifty, CancellationToken cancellationToken)
+    private async Task RunOneCycleAsync(DhanSpotInstrument instrument, TrackedUnderlying config, CancellationToken cancellationToken)
     {
         var today = IstClock.Today();
         var fromDay = today.AddDays(-_options.BackfillDays);
@@ -111,19 +118,19 @@ public sealed class CollectorHostedService : BackgroundService
         // ---- Spot OHLC history --------------------------------------------------------------
         try
         {
-            await RefreshSpotBarsAsync(nifty, fromDay, today, cancellationToken);
+            await RefreshSpotBarsAsync(instrument, config.Name, fromDay, today, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger.LogWarning(ex, "Spot bar refresh failed this cycle.");
+            _logger.LogWarning(ex, "{Underlying} spot bar refresh failed this cycle.", config.Name);
         }
 
         // ---- Tracked expiries ----------------------------------------------------------------
         await _rateLimiter.WaitForOptionChainSlotAsync(cancellationToken);
-        var expiries = await _optionChain.GetExpiriesAsync(nifty.SecurityId, nifty.DhanSegment, cancellationToken);
+        var expiries = await _optionChain.GetExpiriesAsync(instrument.SecurityId, instrument.DhanSegment, cancellationToken);
         if (expiries.Count == 0)
         {
-            _logger.LogWarning("No expiries returned for NIFTY this cycle - skipping option-side work.");
+            _logger.LogWarning("No expiries returned for {Underlying} this cycle - skipping option-side work.", config.Name);
             return;
         }
 
@@ -131,36 +138,46 @@ public sealed class CollectorHostedService : BackgroundService
         {
             try
             {
-                await RunExpiryAsync(nifty, expiry, fromDay, today, cancellationToken);
+                await RunExpiryAsync(instrument, config, expiry, fromDay, today, cancellationToken);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                _logger.LogError(ex, "Expiry {Expiry} failed this cycle - continuing with any other tracked expiries.", expiry);
+                _logger.LogError(ex, "{Underlying} expiry {Expiry} failed this cycle - continuing with any other tracked expiries.", config.Name, expiry);
             }
         }
     }
 
-    private async Task RefreshSpotBarsAsync(DhanSpotInstrument nifty, DateOnly fromDay, DateOnly today, CancellationToken cancellationToken)
+    private async Task RefreshSpotBarsAsync(DhanSpotInstrument instrument, string underlying, DateOnly fromDay, DateOnly today, CancellationToken cancellationToken)
     {
-        var key = (SecurityId: (long)nifty.SecurityId, Day: today);
-        var effectiveFrom = _backfilledToday.Contains(key) ? today : fromDay;
+        var effectiveFrom = await ResolveEffectiveFromAsync(instrument.SecurityId, fromDay, today, cancellationToken);
+        if (effectiveFrom is null) return; // already fully caught up through today as of an earlier cycle
 
-        await _rateLimiter.WaitForHistoricalDataSlotAsync(cancellationToken);
-        var (bars, error) = await _historicalData.GetSpotIntradayAsync(nifty.SecurityId, nifty.DhanSegment, effectiveFrom, today, 1, cancellationToken);
-        if (error is not null) { _logger.LogDebug("Spot bar fetch error: {Error}", error); return; }
+        var savedTotal = 0;
+        var (_, fullyComplete, error) = await _historicalData.GetSpotIntradayAsync(
+            instrument.SecurityId, instrument.DhanSegment, effectiveFrom.Value, today, 1,
+            async (bars, chunkFrom, chunkTo) =>
+            {
+                var saved = await _writer.SaveSpotBarsAsync(underlying, bars, cancellationToken);
+                savedTotal += saved;
+                await _writer.SaveBackfillCheckpointAsync(instrument.SecurityId, underlying, chunkTo, cancellationToken);
+            },
+            cancellationToken);
 
-        var saved = await _writer.SaveSpotBarsAsync("NIFTY", bars, cancellationToken);
-        _backfilledToday.Add(key);
-        if (saved > 0) _logger.LogInformation("Saved {Count} NIFTY spot bar(s) ({From}..{To}).", saved, effectiveFrom, today);
+        if (savedTotal > 0)
+            _logger.LogInformation("Saved {Count} {Underlying} spot bar(s) ({From}..{To}).", savedTotal, underlying, effectiveFrom, today);
+        if (!fullyComplete)
+            _logger.LogWarning("{Underlying} spot backfill stopped early this cycle ({Error}) - checkpoint holds the last successful chunk, so next cycle resumes from there rather than redoing [{From}..{To}].",
+                underlying, error, effectiveFrom, today);
     }
 
-    private async Task RunExpiryAsync(DhanSpotInstrument nifty, DateOnly expiry, DateOnly fromDay, DateOnly today, CancellationToken cancellationToken)
+    private async Task RunExpiryAsync(
+        DhanSpotInstrument instrument, TrackedUnderlying config, DateOnly expiry, DateOnly fromDay, DateOnly today, CancellationToken cancellationToken)
     {
         await _rateLimiter.WaitForOptionChainSlotAsync(cancellationToken);
-        var chain = await _optionChain.GetChainAsync(nifty.SecurityId, nifty.DhanSegment, expiry, cancellationToken);
+        var chain = await _optionChain.GetChainAsync(instrument.SecurityId, instrument.DhanSegment, expiry, cancellationToken);
         if (chain is null || chain.Strikes.Count == 0)
         {
-            _logger.LogWarning("Empty option chain for NIFTY {Expiry} this cycle.", expiry);
+            _logger.LogWarning("Empty option chain for {Underlying} {Expiry} this cycle.", config.Name, expiry);
             return;
         }
 
@@ -169,18 +186,18 @@ public sealed class CollectorHostedService : BackgroundService
 
         if (spotPrice is not { } spot)
         {
-            _logger.LogWarning("Option chain for {Expiry} returned no underlying last_price - cannot compute ATM this cycle.", expiry);
+            _logger.LogWarning("Option chain for {Underlying} {Expiry} returned no underlying last_price - cannot compute ATM this cycle.", config.Name, expiry);
             return;
         }
 
-        var atm = Math.Round(spot / _options.StrikeStep) * _options.StrikeStep;
-        var lowStrike = atm - _options.StrikesEachSide * _options.StrikeStep;
-        var highStrike = atm + _options.StrikesEachSide * _options.StrikeStep;
+        var atm = Math.Round(spot / config.StrikeStep) * config.StrikeStep;
+        var lowStrike = atm - _options.StrikesEachSide * config.StrikeStep;
+        var highStrike = atm + _options.StrikesEachSide * config.StrikeStep;
         var band = chain.Strikes.Where(s => s.Strike >= lowStrike && s.Strike <= highStrike).ToList();
 
-        var snapshotRows = await _writer.SaveOptionChainSnapshotAsync("NIFTY", expiry, capturedAt, spotPrice, band, cancellationToken);
-        _logger.LogInformation("NIFTY {Expiry}: ATM={Atm}, saved {Rows} live snapshot row(s) for strikes [{Low}-{High}].",
-            expiry, atm, snapshotRows, lowStrike, highStrike);
+        var snapshotRows = await _writer.SaveOptionChainSnapshotAsync(config.Name, expiry, capturedAt, spotPrice, band, cancellationToken);
+        _logger.LogInformation("{Underlying} {Expiry}: ATM={Atm}, saved {Rows} live snapshot row(s) for strikes [{Low}-{High}].",
+            config.Name, expiry, atm, snapshotRows, lowStrike, highStrike);
 
         foreach (var strike in band)
         {
@@ -189,30 +206,48 @@ public sealed class CollectorHostedService : BackgroundService
                 if (leg is null || leg.SecurityId <= 0) continue;
                 try
                 {
-                    await RefreshOptionBarsAsync(expiry, strike.Strike, isCall, leg.SecurityId, nifty.DhanSegment, fromDay, today, cancellationToken);
+                    await RefreshOptionBarsAsync(config.Name, expiry, strike.Strike, isCall, leg.SecurityId, instrument.DhanSegment, fromDay, today, cancellationToken);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
-                    _logger.LogDebug(ex, "Option bar refresh failed for {Expiry} {Strike}{Side}.", expiry, strike.Strike, isCall ? "CE" : "PE");
+                    _logger.LogDebug(ex, "Option bar refresh failed for {Underlying} {Expiry} {Strike}{Side}.", config.Name, expiry, strike.Strike, isCall ? "CE" : "PE");
                 }
             }
         }
     }
 
     private async Task RefreshOptionBarsAsync(
-        DateOnly expiry, decimal strike, bool isCall, long securityId, string dhanSegment, DateOnly fromDay, DateOnly today, CancellationToken cancellationToken)
+        string underlying, DateOnly expiry, decimal strike, bool isCall, long securityId, string dhanSegment, DateOnly fromDay, DateOnly today, CancellationToken cancellationToken)
     {
-        var key = (SecurityId: securityId, Day: today);
-        var effectiveFrom = _backfilledToday.Contains(key) ? today : fromDay;
+        var effectiveFrom = await ResolveEffectiveFromAsync(securityId, fromDay, today, cancellationToken);
+        if (effectiveFrom is null) return; // already fully caught up through today as of an earlier cycle
 
-        await _rateLimiter.WaitForHistoricalDataSlotAsync(cancellationToken);
-        var (bars, error) = await _historicalData.GetOptionIntradayAsync((uint)securityId, dhanSegment, effectiveFrom, today, 1, cancellationToken);
-        if (error is not null) return; // routine for a strike that hasn't traded yet/at all - not logged at Info to avoid noise every cycle
+        var savedTotal = 0;
+        var (_, fullyComplete, error) = await _historicalData.GetOptionIntradayAsync(
+            (uint)securityId, dhanSegment, effectiveFrom.Value, today, 1,
+            async (bars, chunkFrom, chunkTo) =>
+            {
+                var saved = await _writer.SaveOptionBarsAsync(underlying, expiry, strike, isCall, securityId, bars, cancellationToken);
+                savedTotal += saved;
+                await _writer.SaveBackfillCheckpointAsync(securityId, underlying, chunkTo, cancellationToken);
+            },
+            cancellationToken);
 
-        var saved = await _writer.SaveOptionBarsAsync("NIFTY", expiry, strike, isCall, securityId, bars, cancellationToken);
-        _backfilledToday.Add(key);
-        if (bars.Count > 0) _lastBarTimeBySecurityId[securityId] = bars[^1].Time;
-        if (saved > 0)
-            _logger.LogDebug("Saved {Count} bar(s) for {Expiry} {Strike}{Side} ({From}..{To}).", saved, expiry, strike, isCall ? "CE" : "PE", effectiveFrom, today);
+        if (savedTotal > 0)
+            _logger.LogDebug("Saved {Count} bar(s) for {Underlying} {Expiry} {Strike}{Side} ({From}..{To}).", savedTotal, underlying, expiry, strike, isCall ? "CE" : "PE", effectiveFrom, today);
+        if (!fullyComplete)
+            _logger.LogDebug("{Underlying} {Expiry} {Strike}{Side} backfill stopped early this cycle ({Error}) - will resume from its own checkpoint next cycle.",
+                underlying, expiry, strike, isCall ? "CE" : "PE", error);
+    }
+
+    /// <summary>Where a backfill for this security should resume from: the day after its own
+    /// checkpoint (see backfill_progress / DhanHistoricalDataClient's doc comments), clamped to
+    /// never go earlier than fromDay (in case BackfillDays was lowered since the checkpoint was
+    /// set) - or null if it's already caught up through today.</summary>
+    private async Task<DateOnly?> ResolveEffectiveFromAsync(long securityId, DateOnly fromDay, DateOnly today, CancellationToken cancellationToken)
+    {
+        var checkpoint = await _writer.GetBackfillCheckpointAsync(securityId, cancellationToken);
+        var effectiveFrom = checkpoint is { } c && c.AddDays(1) > fromDay ? c.AddDays(1) : fromDay;
+        return effectiveFrom > today ? null : effectiveFrom;
     }
 }

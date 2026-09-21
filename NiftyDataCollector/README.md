@@ -1,8 +1,16 @@
 # NiftyDataCollector
 
-A standalone .NET worker that polls Dhan for NIFTY option-chain data (ATM ± N strikes, for the
-nearest tracked expiry) and writes it into TimescaleDB. Runs independently of OptionAnalytics.Server
-- no project reference, no shared runtime state - see "Why duplicated Dhan code?" below.
+A standalone .NET worker that polls Dhan for option-chain data (ATM ± N strikes, for the nearest
+tracked expiry) - NIFTY and, once you add it, BANKNIFTY - and writes it into TimescaleDB. Runs
+independently of OptionAnalytics.Server - no project reference, no shared runtime state - see "Why
+duplicated Dhan code?" below.
+
+**Tracking more than one index**: `Collector:Underlyings` in `appsettings.json` is a list; it ships
+with just NIFTY so a first backfill run stays focused on one index. To add BANKNIFTY (or run it on
+its own), add `{ "Name": "BANKNIFTY", "StrikeStep": 100 }` to that list (in `appsettings.json` or
+your own `appsettings.Local.json`) and restart - each index gets its own full cycle every poll, and
+each security's own backfill checkpoint (see below) means adding one later never disturbs the
+other's already-saved data or progress.
 
 ## What it collects, and why two different tables
 
@@ -37,7 +45,10 @@ removed specifically because OI was believed to be live-only everywhere in Dhan'
      Profile -> DhanHQ Trading APIs -> Setup TOTP) and leave `Dhan:AccessToken` empty.
      `DhanTotpAutoRenewalHostedService` mints and renews its own token automatically forever -
      same tested logic (backoff, Dhan's 2-minute cooldown handling) as OptionAnalytics.Server's own
-     TOTP auto-login.
+     TOTP auto-login. You can ALSO fill in `Dhan:AccessToken` alongside TOTP as a fallback: while a
+     TOTP attempt is failing (rate-limited, locked out, network issue), that static token is used
+     as a stopgap so API calls keep working off it while TOTP keeps retrying in the background -
+     the moment TOTP succeeds, its fresh token takes back over as usual.
    - **Static portal token**: paste a token from that same Profile page into `Dhan:AccessToken`
      and leave `Pin`/`TotpSecret` empty. Simpler, but expires in ~24h - you'll need to paste a
      fresh one and restart about once a day.
@@ -55,22 +66,47 @@ removed specifically because OI was believed to be live-only everywhere in Dhan'
 
 | Key | Default | Meaning |
 |---|---|---|
-| `StrikeStep` | 50 | NIFTY's strike spacing |
+| `Underlyings` | `[{"Name":"NIFTY","StrikeStep":50}]` | Which indices to track, each with its own strike spacing - add `{"Name":"BANKNIFTY","StrikeStep":100}` to track it too (see above) |
 | `StrikesEachSide` | 10 | ATM ± this many strikes |
 | `TrackedExpiryCount` | 1 | How many of the nearest listed expiries to track |
-| `BackfillDays` | 5 | How far back a NEW contract's OHLC history reaches (OI/IV are unaffected - see above) |
+| `BackfillDays` | 500 | How far back a NEW contract's (or spot's) OHLC history reaches (OI/IV are unaffected - see above) |
 | `SnapshotPollIntervalSeconds` | 60 | How often to poll the live option chain |
 | `HistoricalRefreshIntervalMinutes` | 5 | (reserved for a future incremental-refresh pass) |
+
+## Backfilling 500 days: chunking and checkpoints
+
+Dhan's intraday endpoint caps a single call at roughly 90 days, so a 500-day backfill for one
+security is fetched as several chunked calls (`DhanHistoricalDataClient`), each its own rate-limited
+request. Each chunk is **saved and checkpointed as soon as it succeeds** (in the `backfill_progress`
+table - one row per security, holding the last date its own backfill has *contiguously* reached) -
+deliberately not buffered until the whole 500-day range is done:
+
+- A transient failure partway through (a rate limit, a dropped connection) stops that security's
+  backfill for the cycle **without losing the chunks that already saved** - the checkpoint sits at
+  the end of the last good chunk.
+- The next cycle resumes from `checkpoint + 1`, not from day one - so a partial failure costs you a
+  retry of the one chunk, never a re-run of the whole 500 days.
+- **If you ever spot bad data in a specific window**: delete those rows from `spot_bars_1m` /
+  `option_bars_1m`, then rewind that security's own checkpoint so the next cycle refills it -
+  `UPDATE backfill_progress SET completed_through = '<day-before-the-bad-window>' WHERE security_id
+  = <id>` (or `DELETE FROM backfill_progress WHERE security_id = <id>` to redo its entire
+  `BackfillDays` window from scratch). No restart needed either way - the very next cycle picks up
+  the change.
 
 ## Rate limiting
 
 Centralized in `Dhan/DhanRateLimiter.cs` rather than scattered per-class delays:
 - Option chain + expiry list: 3.5s between calls (Dhan's documented "one request every 3 seconds").
 - Historical intraday: 200ms between calls (OptionAnalytics.Server's own production-validated
-  pacing for the same endpoint, reused rather than guessed).
+  pacing for the same endpoint, reused rather than guessed) - applied per CHUNK now, not just per
+  contract, since a 500-day backfill means multiple chunked calls per contract (see above).
 
-A full cycle for `StrikesEachSide=10` fetches history for up to 42 contracts (21 strikes x CE/PE) -
-at 200ms spacing that's under 9 seconds, well inside the 60s default poll interval.
+A full cycle for `StrikesEachSide=10` polls up to 42 contracts (21 strikes x CE/PE) per tracked
+underlying. Once each contract's 500-day history is fully backfilled (a one-time cost, several
+chunks per contract at 200ms apiece), ongoing cycles only fetch a single day's worth per contract
+and comfortably fit inside the 60s default poll interval; the very first run - and any run that adds
+a new index or contract - will take noticeably longer while that initial backfill catches up,
+which is expected.
 
 ## Why duplicated Dhan code, instead of referencing OptionAnalytics.Server?
 
