@@ -59,4 +59,19 @@ public sealed class DhanOptions
     /// account-level one with its own longer, unknown reset window. Raise this if you hit that
     /// lockout for real and want fewer, more patient retries instead.</summary>
     public int TooManyAttemptsCooldownSeconds { get; set; } = 30;
+
+    /// <summary>Minimum gap enforced between LITERALLY EVERY Dhan REST call this process makes,
+    /// regardless of which endpoint - on top of DhanRateLimiter's own per-endpoint spacing, not
+    /// instead of it. Exists because Dhan's own rate limit turned out to be PER ACCOUNT, not per
+    /// endpoint ("Rate_Limit: Too many requests on server from single user breaching rate
+    /// limits.", hit in practice running CollectorHostedService's option-bars backfill and
+    /// RollingOptionBackfillHostedService at the same time) - two per-endpoint gates that are each
+    /// individually within their own budget can still burst past Dhan's real limit when they run
+    /// concurrently, since Dhan is counting the SAME account's calls across both. HistoricalData
+    /// (200ms) and RollingOption (250ms) running at once can combine to ~9 req/s, which is what
+    /// actually triggered the real Rate_Limit rejection above - this defaults to 300ms (~3.3 req/s
+    /// combined ceiling across EVERYTHING) to comfortably undercut that. Raise this further if you
+    /// still see Rate_Limit errors with multiple backfills running together, or lower it once
+    /// you've confirmed Dhan tolerates faster for your account.</summary>
+    public int GlobalCallSpacingMilliseconds { get; set; } = 300;
 }

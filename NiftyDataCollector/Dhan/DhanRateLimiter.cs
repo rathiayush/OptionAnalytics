@@ -1,3 +1,5 @@
+using Microsoft.Extensions.Options;
+
 namespace NiftyDataCollector.Dhan;
 
 /// <summary>
@@ -25,13 +27,23 @@ namespace NiftyDataCollector.Dhan;
 /// Each budget is a simple "wait until at least this long since the last call in this budget"
 /// gate, serialized per budget (SemaphoreSlim(1,1)) so concurrent callers queue rather than burst.
 ///
-/// ON TOP OF the per-budget spacing above, DhanApiClient calls WaitForDailyBudgetAsync before
-/// EVERY Dhan REST call regardless of which budget it belongs to - Dhan's own documented cap for
-/// Data APIs is "7,000 requests/day". A rolling-option backfill spanning years can easily run into
-/// the thousands of calls (StrikesEachSide=10 means 21 strikes x 2 legs = 42 series, each needing
-/// several 30-day chunks per year of history), so this tracks a sliding 24h window of every call
-/// this process makes and DELAYS (never drops) once the configured ceiling is hit, logging clearly
-/// - safer than letting the process find out the hard way that Dhan started rejecting calls.
+/// ON TOP OF the per-budget spacing above, DhanApiClient calls two more gates before EVERY single
+/// Dhan REST call, regardless of which per-endpoint budget above it also went through:
+///
+///   WaitForGlobalSlotAsync - Dhan's rate limit turned out to be PER ACCOUNT, not per endpoint (a
+///   real "Rate_Limit: Too many requests on server from single user breaching rate limits." was
+///   hit running CollectorHostedService's option-bars backfill and RollingOptionBackfillHostedService
+///   at once - each individually within ITS OWN budget above, but their combined rate burst past
+///   what Dhan allows for the account as a whole). See DhanOptions.GlobalCallSpacingMilliseconds
+///   for the configurable minimum gap this enforces between literally any two Dhan calls.
+///
+///   WaitForDailyBudgetAsync - Dhan's own documented cap for Data APIs is "7,000 requests/day". A
+///   rolling-option backfill spanning years can easily run into the thousands of calls
+///   (StrikesEachSide=10 means 21 strikes x 2 legs = 42 series per expiry code, each needing
+///   several 30-day chunks per year of history), so this tracks a sliding 24h window of every call
+///   this process makes and DELAYS (never drops) once the configured ceiling is hit, logging
+///   clearly - safer than letting the process find out the hard way that Dhan started rejecting
+///   calls.
 /// </summary>
 public sealed class DhanRateLimiter
 {
@@ -45,14 +57,22 @@ public sealed class DhanRateLimiter
     /// none today, but future-proofing) share the same budget in practice.</summary>
     private const int DailyBudgetCeiling = 6500;
 
+    private readonly DhanOptions _options;
     private readonly SemaphoreSlim _optionChainGate = new(1, 1);
     private readonly SemaphoreSlim _historicalDataGate = new(1, 1);
     private readonly SemaphoreSlim _rollingOptionGate = new(1, 1);
+    private readonly SemaphoreSlim _globalGate = new(1, 1);
     private readonly SemaphoreSlim _dailyBudgetGate = new(1, 1);
     private DateTimeOffset _lastOptionChainCallAt = DateTimeOffset.MinValue;
     private DateTimeOffset _lastHistoricalDataCallAt = DateTimeOffset.MinValue;
     private DateTimeOffset _lastRollingOptionCallAt = DateTimeOffset.MinValue;
+    private DateTimeOffset _lastGlobalCallAt = DateTimeOffset.MinValue;
     private readonly Queue<DateTimeOffset> _dailyCallLog = new();
+
+    public DhanRateLimiter(IOptions<DhanOptions> options)
+    {
+        _options = options.Value;
+    }
 
     public Task WaitForOptionChainSlotAsync(CancellationToken cancellationToken) =>
         WaitAsync(_optionChainGate, () => _lastOptionChainCallAt, t => _lastOptionChainCallAt = t, OptionChainSpacing, cancellationToken);
@@ -62,6 +82,12 @@ public sealed class DhanRateLimiter
 
     public Task WaitForRollingOptionSlotAsync(CancellationToken cancellationToken) =>
         WaitAsync(_rollingOptionGate, () => _lastRollingOptionCallAt, t => _lastRollingOptionCallAt = t, RollingOptionSpacing, cancellationToken);
+
+    /// <summary>Called by DhanApiClient before every single Dhan REST call, on top of whichever
+    /// per-endpoint budget the caller already waited for - see this class' own doc comment.</summary>
+    public Task WaitForGlobalSlotAsync(CancellationToken cancellationToken) =>
+        WaitAsync(_globalGate, () => _lastGlobalCallAt, t => _lastGlobalCallAt = t,
+            TimeSpan.FromMilliseconds(_options.GlobalCallSpacingMilliseconds), cancellationToken);
 
     /// <summary>Called by DhanApiClient before every single Dhan REST call, regardless of which
     /// per-endpoint budget above it also goes through - see this class' own doc comment.</summary>

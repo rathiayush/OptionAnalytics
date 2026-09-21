@@ -203,6 +203,14 @@ Centralized in `Dhan/DhanRateLimiter.cs` rather than scattered per-class delays:
   contract, since a long backfill means multiple chunked calls per contract (see above).
 - Rolling option: 250ms between calls (Dhan's own documented "5 requests/second" cap for Data
   APIs, with margin).
+- **`Dhan:GlobalCallSpacingMilliseconds` (default 300ms) - a minimum gap between LITERALLY EVERY
+  Dhan call, across all endpoints combined**, on top of the per-endpoint spacing above. Added
+  after hitting a real `Rate_Limit: Too many requests on server from single user breaching rate
+  limits.` error running the option-bars backfill and the rolling-option backfill at the same
+  time - each was individually within its own budget, but Dhan's limit turned out to be PER
+  ACCOUNT, not per endpoint, so their combined rate (up to ~9 req/s) burst past what a single
+  account is allowed. If you still see `Rate_Limit` errors with multiple backfills running
+  together, raise this further; if you confirm your account tolerates faster, you can lower it.
 - **Daily budget, across ALL of the above combined**: Dhan's own documented cap is 7,000
   requests/day for Data APIs; `DhanApiClient` tracks a sliding 24h count of every Dhan call this
   process makes and PAUSES (never drops) once within margin of that ceiling, logging clearly -

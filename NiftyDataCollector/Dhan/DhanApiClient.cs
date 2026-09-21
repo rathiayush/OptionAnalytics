@@ -57,6 +57,7 @@ public sealed class DhanApiClient
     public async Task<DhanApiResponse> SendAsync(HttpMethod method, string path, object? payload, string context, CancellationToken cancellationToken)
     {
         await _rateLimiter.WaitForDailyBudgetAsync(_logger, cancellationToken);
+        await _rateLimiter.WaitForGlobalSlotAsync(cancellationToken);
 
         using var request = new HttpRequestMessage(method, $"{_options.RestBaseUrl}{path}");
         request.Headers.TryAddWithoutValidation("access-token", _session.AccessToken ?? "");
