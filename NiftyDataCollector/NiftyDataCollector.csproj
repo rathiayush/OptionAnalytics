@@ -18,6 +18,15 @@
     <None Update="appsettings.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <!-- Gitignored (holds real Dhan/Postgres credentials - see appsettings.Local.json.example),
+         so it doesn't exist in a fresh clone until you create it yourself. Once you do, this is
+         what actually gets it copied into bin/<config>/net8.0/ next to the .exe - without this
+         entry, Program.cs's AddJsonFile("appsettings.Local.json", optional: true, ...) silently
+         finds nothing at runtime no matter how correctly the file's own content is filled in,
+         since it looks relative to the OUTPUT directory, not the project source folder. -->
+    <None Update="appsettings.Local.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
     <None Update="Db/Schema.sql">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
