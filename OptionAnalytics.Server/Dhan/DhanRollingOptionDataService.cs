@@ -70,7 +70,12 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
     // strictly better than this app's own nearest-earlier-match against a separately fetched spot
     // series (ExpiredOptionBacktestService's spotBars1m), since it is exactly what Dhan used, not an
     // approximation of it.
-    private static readonly string[] RequiredData = { "open", "high", "low", "close", "volume", "strike", "spot" };
+    // "oi"/"iv" - this endpoint's own documented open_interest/implied_volatility history (see
+    // NiftyDataCollector's DhanRollingOptionClient doc comment, which first confirmed this endpoint
+    // genuinely returns OI/IV history, unlike /optionchain or /charts/intraday) - added so an
+    // OI/IV-aware strategy filter (e.g. OrbOrderBlockStrategy's own OI-wall/IV-spike options) has
+    // real data to read on this side too, at no extra Dhan call cost (same response, same request).
+    private static readonly string[] RequiredData = { "open", "high", "low", "close", "volume", "strike", "spot", "oi", "iv" };
 
     // Dhan's own stated cap (see the endpoint's docs) - chunked into successive calls so a caller
     // can still ask for a range wider than one call supports, rather than needing to paginate it.
@@ -108,7 +113,7 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
     /// response omitted it) - lets a caller verify the resolved strike EXACTLY (against Dhan's own
     /// spot for that bar) instead of only approximately (against a separately fetched spot series
     /// matched to the nearest earlier bar).</summary>
-    public async Task<(IReadOnlyList<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> Bars, string? Error)> GetRollingOptionCandlesAsync(
+    public async Task<(IReadOnlyList<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)> Bars, string? Error)> GetRollingOptionCandlesAsync(
         string underlying, uint underlyingSecurityId, string expiryFlag, int expiryCode, string strike, string drvOptionType,
         DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken)
     {
@@ -117,12 +122,12 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
         // needs), not by name; StoredRollingOptionDataService is the one that needs the name, to
         // query TimescaleDB's own underlying-keyed table.
         if (!_api.HasSession)
-            return (Array.Empty<(CandleWithVolume, decimal?, decimal?)>(), "Dhan is not authenticated (check Dhan:ClientId/Dhan:AccessToken).");
+            return (Array.Empty<(CandleWithVolume, decimal?, decimal?, long?, decimal?)>(), "Dhan is not authenticated (check Dhan:ClientId/Dhan:AccessToken).");
 
         if (toDay < fromDay)
-            return (Array.Empty<(CandleWithVolume, decimal?, decimal?)>(), "'to' date must not be before 'from' date.");
+            return (Array.Empty<(CandleWithVolume, decimal?, decimal?, long?, decimal?)>(), "'to' date must not be before 'from' date.");
 
-        var all = new List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)>();
+        var all = new List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)>();
         var chunkStart = fromDay;
         var isFirstChunk = true;
 
@@ -190,10 +195,10 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
     /// asking for data "through toDay" never silently receives a bar from the day after - which,
     /// for a ROLLING series, can be the very first bar of the NEXT contract, exactly the kind of
     /// contamination DetectPossibleSplices exists to catch but this stops from happening at all.</summary>
-    internal static List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> ClipToRange(
-        List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> bars, DateOnly fromDay, DateOnly toDay)
+    internal static List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)> ClipToRange(
+        List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)> bars, DateOnly fromDay, DateOnly toDay)
     {
-        bool InRange((CandleWithVolume Bar, decimal? Strike, decimal? Spot) b)
+        bool InRange((CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility) b)
         {
             var day = IstClock.IstDate(b.Bar.Time);
             return day >= fromDay && day <= toDay;
@@ -234,9 +239,9 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
         }
     }
 
-    private List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> ParseSide(JsonElement root, string drvOptionType)
+    private List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)> ParseSide(JsonElement root, string drvOptionType)
     {
-        var bars = new List<(CandleWithVolume, decimal?, decimal?)>();
+        var bars = new List<(CandleWithVolume, decimal?, decimal?, long?, decimal?)>();
 
         if (!root.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Object)
             return bars;
@@ -255,6 +260,11 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
         var volume = GetArray(side, "volume");
         var strike = GetArray(side, "strike");
         var spot = GetArray(side, "spot");
+        // oi/iv are genuinely optional - older Dhan responses (or a chunk Dhan happens to omit them
+        // for) simply lack the property; GetArray already returns an empty list for that, which the
+        // per-bar "i < list.Count" checks below treat as "no value at this index" (null), not zero.
+        var oi = GetArray(side, "oi");
+        var iv = GetArray(side, "iv");
 
         var count = timestamps.GetArrayLength();
         for (var i = 0; i < count; i++)
@@ -277,7 +287,14 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
 
                 var resolvedStrike = i < strike.Count && strike[i] > 0 ? strike[i] : (decimal?)null;
                 var resolvedSpot = i < spot.Count && spot[i] > 0 ? spot[i] : (decimal?)null;
-                bars.Add((new CandleWithVolume(DateTimeOffset.FromUnixTimeSeconds(epochSeconds), o, h, l, c, i < volume.Count ? (long)volume[i] : 0), resolvedStrike, resolvedSpot));
+                // OI/IV have no "must be positive" sanity rule the way strike/spot do - Dhan's own
+                // documented "unavailable" sentinel for these is a literal 0 (see
+                // NiftyDataCollector's DhanRollingOptionClient doc comment on the same distinction),
+                // not something this parser can improve on without changing what a real 0 means -
+                // kept as-is (0 stored as 0), only genuinely missing array entries become null.
+                var openInterest = i < oi.Count ? (long?)(long)oi[i] : null;
+                var impliedVolatility = i < iv.Count ? (decimal?)iv[i] : null;
+                bars.Add((new CandleWithVolume(DateTimeOffset.FromUnixTimeSeconds(epochSeconds), o, h, l, c, i < volume.Count ? (long)volume[i] : 0), resolvedStrike, resolvedSpot, openInterest, impliedVolatility));
             }
             catch (Exception ex) when (ex is FormatException or InvalidOperationException or OverflowException)
             {

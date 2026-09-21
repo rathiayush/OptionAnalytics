@@ -21,7 +21,7 @@ namespace OptionAnalytics.Server.Services;
 /// </summary>
 public interface IRollingOptionDataSource
 {
-    Task<(IReadOnlyList<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> Bars, string? Error)> GetRollingOptionCandlesAsync(
+    Task<(IReadOnlyList<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)> Bars, string? Error)> GetRollingOptionCandlesAsync(
         string underlying, uint underlyingSecurityId, string expiryFlag, int expiryCode, string strike, string drvOptionType,
         DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken);
 }

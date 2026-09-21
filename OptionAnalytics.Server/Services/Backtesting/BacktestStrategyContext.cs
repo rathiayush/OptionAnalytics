@@ -120,4 +120,24 @@ public sealed class BacktestStrategyContext
     /// by N steps" via GetOptionBars(AtmStrike + n * Step, isCall). Null until CDV has resolved an
     /// ATM at least once.</summary>
     public required int? AtmStrike { get; init; }
+
+    /// <summary>Every CE/PE band member's own OI/IV history, flattened into one list per side (not
+    /// aggregated to TimeframeMinutes - an OI wall or an IV spike is read at native bar resolution,
+    /// the same way GetOptionBarsOneMinute is), for a strategy that wants to read open interest or
+    /// implied volatility ACROSS the whole surrounding strike chain rather than one leg alone (e.g.
+    /// "which strike currently holds the most Call OI" - the classic OI-wall support/resistance
+    /// read, or "has IV on the traded leg just spiked"). ONLY populated by ExpiredOptionBacktestService
+    /// (the one place this app has genuine historical OI/IV - see IRollingOptionDataSource's own doc
+    /// comment); BacktestService's own live path has no historical OI/IV source and always leaves
+    /// this empty. A strategy reading either of these MUST treat empty as "not available" and skip
+    /// whatever OI/IV logic it gates on it, never error or reject every signal outright - that is
+    /// what lets an OI/IV-aware filter stay a strictly OPT-IN parameter (default off) that degrades
+    /// to a no-op on Backtrack's own live replay instead of silently blocking every trade there.</summary>
+    public required IReadOnlyList<OiIvPoint> CeOiIvBand { get; init; }
+    public required IReadOnlyList<OiIvPoint> PeOiIvBand { get; init; }
 }
+
+/// <summary>One bar's own resolved strike plus OI/IV, from CeOiIvBand/PeOiIvBand - see their own doc
+/// comment. Strike is nullable for the same reason GetRollingChartAsync's own bars carry a nullable
+/// strike: Dhan's response can omit it for a given bar.</summary>
+public readonly record struct OiIvPoint(DateTimeOffset Time, decimal? Strike, long? OpenInterest, decimal? ImpliedVolatility);

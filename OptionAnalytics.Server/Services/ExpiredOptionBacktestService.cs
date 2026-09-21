@@ -556,6 +556,12 @@ public sealed class ExpiredOptionBacktestService
             AtmCeVolumeBars = Array.Empty<CandleWithVolume>(),
             AtmPeVolumeBars = Array.Empty<CandleWithVolume>(),
             AtmStrike = null,
+            // ceBand/peBand are always fetched (StrikeBandSteps or FlowChainRadius radius either
+            // way - see needsFlowChain above), so this is populated on every Expired Backtest run,
+            // not just ones that ask for the flow chain - an OI-wall/IV-spike strategy filter needs
+            // no extra opt-in fetch beyond what pricing already pays for.
+            CeOiIvBand = BuildOiIvBand(ceBand),
+            PeOiIvBand = BuildOiIvBand(peBand),
         };
 
         var trades = strategy.Simulate(context, mergedParameters);
@@ -689,7 +695,7 @@ public sealed class ExpiredOptionBacktestService
         var strikeToken = StrikeToken(isCall ? resolvedOtmSteps : -resolvedOtmSteps);
         var optionType = isCall ? "CALL" : "PUT";
 
-        List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> raw;
+        List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)> raw;
         List<PossibleSplice> splices;
         string? error;
 
@@ -824,11 +830,11 @@ public sealed class ExpiredOptionBacktestService
     /// actually reached Dhan at all, so a fully-cached run does not pay BandFetchDelay's own pacing
     /// for a token that made no live call to pace in the first place - the entire point of caching
     /// this data being a genuinely fast Expired Backtest read.</summary>
-    private async Task<(List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> Bars, string? Error, bool AnyLiveCall)> FetchAcrossSegmentsAsync(
+    private async Task<(List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)> Bars, string? Error, bool AnyLiveCall)> FetchAcrossSegmentsAsync(
         string underlying, uint underlyingSecurityId, string expiryFlag, IReadOnlyList<FetchSegment> segments, string strikeToken, string optionType,
         bool useStoredData, CancellationToken cancellationToken)
     {
-        var bars = new List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)>();
+        var bars = new List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)>();
         string? error = null;
         var anyLiveDhanCall = false;
 
@@ -864,8 +870,8 @@ public sealed class ExpiredOptionBacktestService
     /// depends on any one member alone (see BuildFixedStrikeSeries).</summary>
     internal readonly record struct StrikeBandMember(
         int Steps,
-        List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> RawBars,
-        List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> Bars,
+        List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)> RawBars,
+        List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)> Bars,
         List<PossibleSplice> Splices);
 
     /// <summary>Fetches every relative-strike token from centerSteps-radius to centerSteps+radius
@@ -917,12 +923,12 @@ public sealed class ExpiredOptionBacktestService
     /// window (a too-old contract at the head, or Dhan's own rolling resolution flipping early near
     /// the target contract's real expiry at the tail), and the correct, single-contract data is
     /// whichever side of it is bigger, not always the side closest to the requested expiry.</summary>
-    internal static List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> TrimToLargestSegment(
-        List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> raw, IReadOnlyList<PossibleSplice> splices)
+    internal static List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)> TrimToLargestSegment(
+        List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)> raw, IReadOnlyList<PossibleSplice> splices)
     {
         if (splices.Count == 0) return raw;
 
-        List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)>? best = null;
+        List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)>? best = null;
         var previousCutoff = DateTimeOffset.MinValue;
 
         foreach (var cutoff in splices.Select(s => s.Time))
@@ -959,12 +965,12 @@ public sealed class ExpiredOptionBacktestService
     /// its own Spot nor a spotBars reference yet available, is kept, not dropped - there is nothing to
     /// disprove it with, and this is a targeted removal of bars actively shown to be wrong, not a
     /// blanket "trust nothing unverified" filter.</summary>
-    internal static List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> FilterToExpectedStrike(
-        List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> bars, IReadOnlyList<Candle> spotBars, int step, int otmSteps, bool isCall)
+    internal static List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)> FilterToExpectedStrike(
+        List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)> bars, IReadOnlyList<Candle> spotBars, int step, int otmSteps, bool isCall)
     {
         if (step <= 0) return bars;
 
-        var kept = new List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)>(bars.Count);
+        var kept = new List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)>(bars.Count);
         var spotIndex = 0;
 
         foreach (var entry in bars)
@@ -1019,6 +1025,21 @@ public sealed class ExpiredOptionBacktestService
     /// edge of two adjacent tokens both resolving near targetStrike that day), the first one
     /// encountered wins - band members are iterated in the same fixed (ascending Steps) order every
     /// time, so this is deterministic, not a source of run-to-run variance.</summary>
+    /// <summary>Flattens every band member's own (already trimmed/filtered) bars into one
+    /// time-ascending OiIvPoint list - what BacktestStrategyContext.CeOiIvBand/PeOiIvBand expose to a
+    /// strategy. Uses member.Bars (the same post-TrimToLargestSegment/FilterToExpectedStrike series
+    /// pricing itself trusts), not member.RawBars, so an OI-wall/IV-spike read never sees a bar this
+    /// app has already identified as belonging to the wrong contract. Deliberately NOT deduplicated
+    /// by time the way BuildFixedStrikeSeries is - unlike pricing (which needs exactly ONE price at
+    /// a given moment), an OI-wall read wants EVERY strike's own OI at that moment side by side, so
+    /// multiple members contributing entries at the same timestamp is the whole point, not a
+    /// collision to resolve.</summary>
+    internal static List<OiIvPoint> BuildOiIvBand(IReadOnlyList<StrikeBandMember> band) =>
+        band.SelectMany(m => m.Bars)
+            .Select(entry => new OiIvPoint(entry.Bar.Time, entry.Strike, entry.OpenInterest, entry.ImpliedVolatility))
+            .OrderBy(p => p.Time)
+            .ToList();
+
     internal static List<CandleWithVolume> BuildFixedStrikeSeries(
         IReadOnlyList<StrikeBandMember> band, decimal targetStrike, int step)
     {

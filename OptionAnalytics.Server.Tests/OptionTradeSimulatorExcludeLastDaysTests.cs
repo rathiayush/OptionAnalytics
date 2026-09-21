@@ -47,6 +47,8 @@ public sealed class OptionTradeSimulatorExcludeLastDaysTests
         AtmCeVolumeBars = Array.Empty<CandleWithVolume>(),
         AtmPeVolumeBars = Array.Empty<CandleWithVolume>(),
         AtmStrike = null,
+        CeOiIvBand = Array.Empty<OiIvPoint>(),
+        PeOiIvBand = Array.Empty<OiIvPoint>(),
     };
 
     private static Dictionary<string, decimal> Parameters(decimal excludeLastDays) => new()

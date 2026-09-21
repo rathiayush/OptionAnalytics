@@ -39,12 +39,12 @@ public sealed class StoredRollingOptionDataService : IRollingOptionDataSource
     /// report this without needing to run a query just to find out.</summary>
     public bool IsConfigured => _connectionString is not null;
 
-    public async Task<(IReadOnlyList<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> Bars, string? Error)> GetRollingOptionCandlesAsync(
+    public async Task<(IReadOnlyList<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)> Bars, string? Error)> GetRollingOptionCandlesAsync(
         string underlying, uint underlyingSecurityId, string expiryFlag, int expiryCode, string strike, string drvOptionType,
         DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken)
     {
         if (_connectionString is null)
-            return (Array.Empty<(CandleWithVolume, decimal?, decimal?)>(),
+            return (Array.Empty<(CandleWithVolume, decimal?, decimal?, long?, decimal?)>(),
                 "Stored data source is not configured on this server (no NiftyDataCollector database connection) - turn off 'Use stored data' to fetch live from Dhan instead.");
 
         // NiftyDataCollector stores the option type as "CE"/"PE" (Dhan's own convention), while this
@@ -58,7 +58,7 @@ public sealed class StoredRollingOptionDataService : IRollingOptionDataSource
             await connection.OpenAsync(cancellationToken);
 
             const string sql = """
-                SELECT time, open, high, low, close, volume, strike, spot_price
+                SELECT time, open, high, low, close, volume, strike, spot_price, open_interest, implied_volatility
                 FROM rolling_option_bars_1m
                 WHERE underlying = @underlying AND expiry_flag = @expiryFlag AND expiry_code = @expiryCode
                   AND strike_offset = @strikeOffset AND option_type = @optionType
@@ -81,7 +81,7 @@ public sealed class StoredRollingOptionDataService : IRollingOptionDataSource
             // date ranges use, translated to the half-open range a plain "time < x" comparison needs.
             command.Parameters.Add(new NpgsqlParameter("toExclusive", NpgsqlTypes.NpgsqlDbType.Date) { Value = toDay.AddDays(1).ToDateTime(TimeOnly.MinValue) });
 
-            var bars = new List<(CandleWithVolume, decimal?, decimal?)>();
+            var bars = new List<(CandleWithVolume, decimal?, decimal?, long?, decimal?)>();
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
@@ -93,8 +93,10 @@ public sealed class StoredRollingOptionDataService : IRollingOptionDataSource
                 var volume = reader.IsDBNull(5) ? 0L : reader.GetInt64(5);
                 var resolvedStrike = reader.IsDBNull(6) ? (decimal?)null : reader.GetDecimal(6);
                 var resolvedSpot = reader.IsDBNull(7) ? (decimal?)null : reader.GetDecimal(7);
+                var openInterest = reader.IsDBNull(8) ? (long?)null : reader.GetInt64(8);
+                var impliedVolatility = reader.IsDBNull(9) ? (decimal?)null : reader.GetDecimal(9);
 
-                bars.Add((new CandleWithVolume(new DateTimeOffset(time, TimeSpan.Zero), open, high, low, close, volume), resolvedStrike, resolvedSpot));
+                bars.Add((new CandleWithVolume(new DateTimeOffset(time, TimeSpan.Zero), open, high, low, close, volume), resolvedStrike, resolvedSpot, openInterest, impliedVolatility));
             }
 
             return (bars, null);
@@ -104,7 +106,7 @@ public sealed class StoredRollingOptionDataService : IRollingOptionDataSource
             _logger.LogWarning(ex,
                 "Could not read stored rolling-option data for {Underlying} {ExpiryFlag}+{ExpiryCode} {Strike} {Side} ({From}..{To}) - the database may be unreachable.",
                 underlying, expiryFlag, expiryCode, strike, drvOptionType, fromDay, toDay);
-            return (Array.Empty<(CandleWithVolume, decimal?, decimal?)>(), $"Could not read stored data: {ex.Message}");
+            return (Array.Empty<(CandleWithVolume, decimal?, decimal?, long?, decimal?)>(), $"Could not read stored data: {ex.Message}");
         }
     }
 }

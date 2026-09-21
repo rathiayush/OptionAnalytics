@@ -32,11 +32,11 @@ public sealed class ExpiredOptionDataStoreTests : IDisposable
 
     private static readonly DateTimeOffset T0 = new(2026, 1, 5, 3, 45, 0, TimeSpan.Zero);
 
-    private static (CandleWithVolume Bar, decimal? Strike, decimal? Spot) Bar(int minute, decimal close, decimal strike) =>
-        (new CandleWithVolume(T0.AddMinutes(minute), close, close, close, close, 1000 + minute), strike, null);
+    private static (CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility) Bar(int minute, decimal close, decimal strike) =>
+        (new CandleWithVolume(T0.AddMinutes(minute), close, close, close, close, 1000 + minute), strike, null, null, null);
 
-    private static (string StrikeToken, string OptionType, IReadOnlyList<(CandleWithVolume, decimal?, decimal?)> Bars) Member(
-        string token, string optionType, params (CandleWithVolume, decimal?, decimal?)[] bars) => (token, optionType, bars);
+    private static (string StrikeToken, string OptionType, IReadOnlyList<(CandleWithVolume, decimal?, decimal?, long?, decimal?)> Bars) Member(
+        string token, string optionType, params (CandleWithVolume, decimal?, decimal?, long?, decimal?)[] bars) => (token, optionType, bars);
 
     [Fact]
     public void HasContract_IsFalse_WhenNothingHasEverBeenSaved()
@@ -97,8 +97,8 @@ public sealed class ExpiredOptionDataStoreTests : IDisposable
         var members = new[]
         {
             Member("ATM", "CALL",
-                (new CandleWithVolume(IstClock.AtIstTime(day1, 600), 100, 100, 100, 100, 1), (decimal?)24000, null),
-                (new CandleWithVolume(IstClock.AtIstTime(expiry, 600), 110, 110, 110, 110, 1), (decimal?)24100, null)),
+                (new CandleWithVolume(IstClock.AtIstTime(day1, 600), 100, 100, 100, 100, 1), (decimal?)24000, null, null, null),
+                (new CandleWithVolume(IstClock.AtIstTime(expiry, 600), 110, 110, 110, 110, 1), (decimal?)24100, null, null, null)),
         };
 
         await store.SaveAsync("NIFTY", "WEEK", expiry, day1, expiry, members, CancellationToken.None);

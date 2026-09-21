@@ -178,14 +178,14 @@ public sealed class ExpiredOptionBacktestServiceTests
     private static CandleWithVolume Bar(DateTimeOffset time, decimal open, decimal close) =>
         new(time, open, Math.Max(open, close), Math.Min(open, close), close, 0);
 
-    private static (CandleWithVolume Bar, decimal? Strike, decimal? Spot) RawBar(DateTimeOffset time, decimal open, decimal close) =>
-        (Bar(time, open, close), null, null);
+    private static (CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility) RawBar(DateTimeOffset time, decimal open, decimal close) =>
+        (Bar(time, open, close), null, null, null, null);
 
     [Fact]
     public void TrimToLargestSegment_NoSplices_ReturnsEverythingUnchanged()
     {
         var t0 = new DateTimeOffset(2024, 8, 1, 9, 15, 0, TimeSpan.FromHours(5.5));
-        var raw = new List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> { RawBar(t0, 10m, 10m), RawBar(t0.AddMinutes(1), 10m, 10m) };
+        var raw = new List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)> { RawBar(t0, 10m, 10m), RawBar(t0.AddMinutes(1), 10m, 10m) };
 
         var trimmed = ExpiredOptionBacktestService.TrimToLargestSegment(raw, Array.Empty<PossibleSplice>());
 
@@ -199,7 +199,7 @@ public sealed class ExpiredOptionBacktestServiceTests
         // rolling resolution flipping to the next contract right before the target's own real
         // close) used to keep only that tiny tail and discard the entire correct head.
         var t0 = new DateTimeOffset(2024, 8, 1, 9, 15, 0, TimeSpan.FromHours(5.5));
-        var raw = new List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)>();
+        var raw = new List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)>();
         for (var i = 0; i < 100; i++) raw.Add(RawBar(t0.AddMinutes(i), 10m, 10m));
         var spliceTime = t0.AddMinutes(97); // 97 head bars, only 3 tail bars
         var splices = new List<PossibleSplice> { new(spliceTime, 10m, 50m) };
@@ -216,7 +216,7 @@ public sealed class ExpiredOptionBacktestServiceTests
         // The ORIGINAL motivating case: a too-wide lookback crossing into an older, different
         // contract near the head of the window - the correct, nearer-to-expiry data is the tail.
         var t0 = new DateTimeOffset(2024, 8, 1, 9, 15, 0, TimeSpan.FromHours(5.5));
-        var raw = new List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)>();
+        var raw = new List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)>();
         for (var i = 0; i < 100; i++) raw.Add(RawBar(t0.AddMinutes(i), 10m, 10m));
         var spliceTime = t0.AddMinutes(3); // 3 head bars, 97 tail bars
         var splices = new List<PossibleSplice> { new(spliceTime, 10m, 50m) };
@@ -231,7 +231,7 @@ public sealed class ExpiredOptionBacktestServiceTests
     public void TrimToLargestSegment_TwoSplices_KeepsTheLargestOfAllThreeSegments()
     {
         var t0 = new DateTimeOffset(2024, 8, 1, 9, 15, 0, TimeSpan.FromHours(5.5));
-        var raw = new List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)>();
+        var raw = new List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)>();
         for (var i = 0; i < 100; i++) raw.Add(RawBar(t0.AddMinutes(i), 10m, 10m));
         // Three segments: [0,10) = 10 bars, [10,20) = 10 bars, [20,100) = 80 bars - the tail wins.
         var splices = new List<PossibleSplice> { new(t0.AddMinutes(10), 10m, 50m), new(t0.AddMinutes(20), 10m, 50m) };
@@ -242,8 +242,8 @@ public sealed class ExpiredOptionBacktestServiceTests
         Assert.All(trimmed, b => Assert.True(b.Bar.Time >= t0.AddMinutes(20)));
     }
 
-    private static (CandleWithVolume Bar, decimal? Strike, decimal? Spot) RawBarWithStrike(DateTimeOffset time, decimal price, decimal? strike, decimal? spot = null) =>
-        (Bar(time, price, price), strike, spot);
+    private static (CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility) RawBarWithStrike(DateTimeOffset time, decimal price, decimal? strike, decimal? spot = null) =>
+        (Bar(time, price, price), strike, spot, null, null);
 
     private static Candle SpotBar(DateTimeOffset time, decimal close) => new(time, close, close, close, close);
 
@@ -252,7 +252,7 @@ public sealed class ExpiredOptionBacktestServiceTests
     {
         var t0 = new DateTimeOffset(2024, 8, 1, 9, 15, 0, TimeSpan.FromHours(5.5));
         var spot = new List<Candle> { SpotBar(t0, 24000m) }; // ATM = 24000, otmSteps=1 CE -> 24050
-        var bars = new List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)>
+        var bars = new List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)>
         {
             RawBarWithStrike(t0, 100m, 24050m),
             RawBarWithStrike(t0.AddMinutes(1), 99m, 24050m),
@@ -270,7 +270,7 @@ public sealed class ExpiredOptionBacktestServiceTests
         // sudden jump around it for DetectPossibleSplices to see.
         var t0 = new DateTimeOffset(2024, 8, 1, 9, 15, 0, TimeSpan.FromHours(5.5));
         var spot = new List<Candle> { SpotBar(t0, 24000m) }; // ATM = 24000, otmSteps=1 CE -> 24050
-        var bars = new List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)>
+        var bars = new List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)>
         {
             RawBarWithStrike(t0, 100m, 24050m),
             RawBarWithStrike(t0.AddMinutes(1), 675.85m, 24200m), // resolved 3 steps away - wrong strike
@@ -291,7 +291,7 @@ public sealed class ExpiredOptionBacktestServiceTests
         var day1 = new DateTimeOffset(2024, 8, 1, 9, 15, 0, TimeSpan.FromHours(5.5));
         var day2 = new DateTimeOffset(2024, 8, 2, 9, 15, 0, TimeSpan.FromHours(5.5));
         var spot = new List<Candle> { SpotBar(day1, 24000m), SpotBar(day2, 24500m) };
-        var bars = new List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)>
+        var bars = new List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)>
         {
             RawBarWithStrike(day1, 100m, 24050m), // day1 ATM 24000 -> +1 step = 24050
             RawBarWithStrike(day2, 90m, 24550m), // day2 ATM 24500 -> +1 step = 24550
@@ -307,7 +307,7 @@ public sealed class ExpiredOptionBacktestServiceTests
     {
         var t0 = new DateTimeOffset(2024, 8, 1, 9, 15, 0, TimeSpan.FromHours(5.5));
         var spot = new List<Candle> { SpotBar(t0, 24000m) };
-        var bars = new List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> { RawBarWithStrike(t0, 100m, null) };
+        var bars = new List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)> { RawBarWithStrike(t0, 100m, null) };
 
         var filtered = ExpiredOptionBacktestService.FilterToExpectedStrike(bars, spot, step: 50, otmSteps: 1, isCall: true);
 
@@ -319,7 +319,7 @@ public sealed class ExpiredOptionBacktestServiceTests
     {
         var t0 = new DateTimeOffset(2024, 8, 1, 9, 15, 0, TimeSpan.FromHours(5.5));
         var spot = new List<Candle> { SpotBar(t0.AddMinutes(5), 24000m) }; // spot only starts later
-        var bars = new List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)> { RawBarWithStrike(t0, 100m, 99999m) }; // wildly wrong, but unverifiable yet
+        var bars = new List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)> { RawBarWithStrike(t0, 100m, 99999m) }; // wildly wrong, but unverifiable yet
 
         var filtered = ExpiredOptionBacktestService.FilterToExpectedStrike(bars, spot, step: 50, otmSteps: 1, isCall: true);
 
@@ -331,7 +331,7 @@ public sealed class ExpiredOptionBacktestServiceTests
     {
         var t0 = new DateTimeOffset(2024, 8, 1, 9, 15, 0, TimeSpan.FromHours(5.5));
         var spot = new List<Candle> { SpotBar(t0, 24000m) }; // ATM = 24000, otmSteps=1 PE -> 23950
-        var bars = new List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)>
+        var bars = new List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)>
         {
             RawBarWithStrike(t0, 100m, 23950m), // correct PE strike
             RawBarWithStrike(t0.AddMinutes(1), 99m, 24050m), // this is the CE-side strike, wrong for a PE
@@ -352,7 +352,7 @@ public sealed class ExpiredOptionBacktestServiceTests
         // 24100 correct instead), so the bar's own spot must win over the approximate spotBars match.
         var t0 = new DateTimeOffset(2024, 8, 1, 9, 15, 0, TimeSpan.FromHours(5.5));
         var spot = new List<Candle> { SpotBar(t0, 24000m) }; // spotBars alone implies ATM 24000 -> +1 step = 24050
-        var bars = new List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)>
+        var bars = new List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)>
         {
             // Own spot 24100 -> ATM 24100 -> +1 step = 24150, which matches this bar's resolved
             // strike - spotBars alone (implying 24050) would have wrongly dropped it.
@@ -371,7 +371,7 @@ public sealed class ExpiredOptionBacktestServiceTests
         // though the approximate spotBars series alone would have accepted it.
         var t0 = new DateTimeOffset(2024, 8, 1, 9, 15, 0, TimeSpan.FromHours(5.5));
         var spot = new List<Candle> { SpotBar(t0, 24000m) }; // spotBars alone implies ATM 24000 -> +1 step = 24050 (would match)
-        var bars = new List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot)>
+        var bars = new List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)>
         {
             // Own spot 24500 -> ATM 24500 -> +1 step = 24550, which does NOT match this bar's
             // resolved 24050 - the bar's own spot proves this one wrong.
@@ -480,7 +480,7 @@ public sealed class ExpiredOptionBacktestServiceTests
 
     private static ExpiredOptionBacktestService.StrikeBandMember BandMember(int steps, params (DateTimeOffset Time, decimal Price, decimal? Strike)[] entries)
     {
-        var bars = entries.Select(e => (Bar(e.Time, e.Price, e.Price), e.Strike, (decimal?)null)).ToList();
+        var bars = entries.Select(e => (Bar(e.Time, e.Price, e.Price), e.Strike, (decimal?)null, (long?)null, (decimal?)null)).ToList();
         return new ExpiredOptionBacktestService.StrikeBandMember(steps, bars, bars, new List<PossibleSplice>());
     }
 
