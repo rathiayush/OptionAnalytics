@@ -226,47 +226,4 @@ public sealed class TimescaleWriter
         await transaction.CommitAsync(cancellationToken);
         return rowCount;
     }
-
-    /// <summary>Persists ONE Dhan call's exact response body, untouched - see Schema.sql's own
-    /// comment on dhan_raw_responses for why this exists alongside the structured tables rather
-    /// than instead of them. Plain INSERT, never upsert: every call is its own historical fact.
-    /// requestParamsJson/responseJson must already be valid JSON text (the caller's own request
-    /// payload serialized, and DhanApiResponse.RawBody respectively) - this method does no
-    /// validation of its own, since a malformed responseJson would mean Dhan itself sent something
-    /// unparsable, which is exactly the case this table exists to still capture rather than
-    /// silently drop.</summary>
-    public async Task SaveRawResponseAsync(
-        DateTimeOffset time, string endpoint, string underlying, DateOnly? expiry, long? securityId,
-        string requestParamsJson, string? responseJson, CancellationToken cancellationToken)
-    {
-        if (string.IsNullOrEmpty(responseJson)) return; // nothing came back at all (a network failure before any body) - nothing to archive
-
-        await using var connection = new NpgsqlConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken);
-
-        const string sql = """
-            INSERT INTO dhan_raw_responses (time, endpoint, underlying, expiry, security_id, request_params, response_json)
-            VALUES (@time, @endpoint, @underlying, @expiry, @securityId, @requestParams::jsonb, @responseJson::jsonb)
-            """;
-
-        await using var command = new NpgsqlCommand(sql, connection);
-        command.Parameters.Add(new NpgsqlParameter("time", NpgsqlTypes.NpgsqlDbType.TimestampTz) { Value = time });
-        command.Parameters.Add(new NpgsqlParameter("endpoint", NpgsqlTypes.NpgsqlDbType.Text) { Value = endpoint });
-        command.Parameters.Add(new NpgsqlParameter("underlying", NpgsqlTypes.NpgsqlDbType.Text) { Value = underlying });
-        command.Parameters.Add(new NpgsqlParameter("expiry", NpgsqlTypes.NpgsqlDbType.Date) { Value = (object?)expiry ?? DBNull.Value, IsNullable = true });
-        command.Parameters.Add(new NpgsqlParameter("securityId", NpgsqlTypes.NpgsqlDbType.Bigint) { Value = (object?)securityId ?? DBNull.Value, IsNullable = true });
-        command.Parameters.Add(new NpgsqlParameter("requestParams", NpgsqlTypes.NpgsqlDbType.Text) { Value = requestParamsJson });
-        command.Parameters.Add(new NpgsqlParameter("responseJson", NpgsqlTypes.NpgsqlDbType.Text) { Value = responseJson });
-
-        try
-        {
-            await command.ExecuteNonQueryAsync(cancellationToken);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            // A raw-capture failure must never take down the structured-table writes that already
-            // succeeded this cycle - logged and swallowed, not rethrown.
-            _logger.LogWarning(ex, "Failed to archive raw {Endpoint} response for {Underlying} - continuing without it.", endpoint, underlying);
-        }
-    }
 }

@@ -38,15 +38,15 @@ public sealed class DhanHistoricalDataClient
         _logger = logger;
     }
 
-    public Task<(IReadOnlyList<DhanHistoricalBar> Bars, string? Error, string? RawJson)> GetSpotIntradayAsync(
+    public Task<(IReadOnlyList<DhanHistoricalBar> Bars, string? Error)> GetSpotIntradayAsync(
         uint securityId, string dhanSegment, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken) =>
         FetchAsync(securityId, dhanSegment, IndexInstrument, fromDay, toDay, intervalMinutes, includeOi: false, cancellationToken);
 
-    public Task<(IReadOnlyList<DhanHistoricalBar> Bars, string? Error, string? RawJson)> GetOptionIntradayAsync(
+    public Task<(IReadOnlyList<DhanHistoricalBar> Bars, string? Error)> GetOptionIntradayAsync(
         uint securityId, string dhanSegment, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken) =>
         FetchAsync(securityId, dhanSegment, OptionInstrument, fromDay, toDay, intervalMinutes, includeOi: true, cancellationToken);
 
-    private async Task<(IReadOnlyList<DhanHistoricalBar> Bars, string? Error, string? RawJson)> FetchAsync(
+    private async Task<(IReadOnlyList<DhanHistoricalBar> Bars, string? Error)> FetchAsync(
         uint securityId, string dhanSegment, string instrument, DateOnly fromDay, DateOnly toDay, int intervalMinutes, bool includeOi, CancellationToken cancellationToken)
     {
         var payload = new
@@ -66,10 +66,10 @@ public sealed class DhanHistoricalDataClient
         if (!response.Success)
         {
             _logger.LogDebug("{Instrument} intraday request failed for {Segment}:{Id} ({From}..{To}) - {Error}", instrument, dhanSegment, securityId, fromDay, toDay, response.ErrorMessage);
-            return (Array.Empty<DhanHistoricalBar>(), response.ErrorMessage, response.RawBody);
+            return (Array.Empty<DhanHistoricalBar>(), response.ErrorMessage);
         }
 
-        return (ParseBars(response.Root), null, response.RawBody);
+        return (ParseBars(response.Root), null);
     }
 
     private static List<DhanHistoricalBar> ParseBars(JsonElement root)

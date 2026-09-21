@@ -1,4 +1,3 @@
-using System.Text.Json;
 using Microsoft.Extensions.Options;
 using NiftyDataCollector.Db;
 using NiftyDataCollector.Dhan;
@@ -18,10 +17,6 @@ namespace NiftyDataCollector.Collection;
 ///      A contract already backfilled today is only asked for bars since its own last saved time,
 ///      not re-fetched from scratch every cycle.
 ///
-/// Every one of those Dhan calls also has its raw, unparsed response archived via
-/// TimescaleWriter.SaveRawResponseAsync - see Schema.sql's own comment on dhan_raw_responses for
-/// why, and this class's own SaveRawAsync helper for the one place that happens.
-///
 /// Runs forever until cancelled, sleeping SnapshotPollIntervalSeconds between cycles. A single bad
 /// cycle (a transient Dhan error, one contract's history failing) never stops the loop - see the
 /// per-step try/catch below - so a restart is never required to recover from routine flakiness.
@@ -40,6 +35,7 @@ public sealed class CollectorHostedService : BackgroundService
     /// fetches a NEW contract's full BackfillDays window once, and every later cycle that same day
     /// just tops up whatever bars have printed since.</summary>
     private readonly HashSet<(long SecurityId, DateOnly Day)> _backfilledToday = new();
+    private readonly Dictionary<long, DateTimeOffset> _lastBarTimeBySecurityId = new();
 
     public CollectorHostedService(
         DhanSpotInstrumentMaster spotMaster, DhanOptionChainClient optionChain, DhanHistoricalDataClient historicalData,
@@ -97,10 +93,7 @@ public sealed class CollectorHostedService : BackgroundService
 
         // ---- Tracked expiries ----------------------------------------------------------------
         await _rateLimiter.WaitForOptionChainSlotAsync(cancellationToken);
-        var expiryRequest = new { UnderlyingScrip = (int)nifty.SecurityId, UnderlyingSeg = nifty.DhanSegment };
-        var (expiries, expiryRawJson) = await _optionChain.GetExpiriesAsync(nifty.SecurityId, nifty.DhanSegment, cancellationToken);
-        await SaveRawAsync("optionchain/expirylist", expiry: null, securityId: null, expiryRequest, expiryRawJson, cancellationToken);
-
+        var expiries = await _optionChain.GetExpiriesAsync(nifty.SecurityId, nifty.DhanSegment, cancellationToken);
         if (expiries.Count == 0)
         {
             _logger.LogWarning("No expiries returned for NIFTY this cycle - skipping option-side work.");
@@ -126,10 +119,7 @@ public sealed class CollectorHostedService : BackgroundService
         var effectiveFrom = _backfilledToday.Contains(key) ? today : fromDay;
 
         await _rateLimiter.WaitForHistoricalDataSlotAsync(cancellationToken);
-        var (bars, error, rawJson) = await _historicalData.GetSpotIntradayAsync(nifty.SecurityId, nifty.DhanSegment, effectiveFrom, today, 1, cancellationToken);
-        await SaveRawAsync("charts/intraday", expiry: null, (long)nifty.SecurityId,
-            new { nifty.SecurityId, nifty.DhanSegment, instrument = "INDEX", from = effectiveFrom, to = today }, rawJson, cancellationToken);
-
+        var (bars, error) = await _historicalData.GetSpotIntradayAsync(nifty.SecurityId, nifty.DhanSegment, effectiveFrom, today, 1, cancellationToken);
         if (error is not null) { _logger.LogDebug("Spot bar fetch error: {Error}", error); return; }
 
         var saved = await _writer.SaveSpotBarsAsync("NIFTY", bars, cancellationToken);
@@ -140,10 +130,7 @@ public sealed class CollectorHostedService : BackgroundService
     private async Task RunExpiryAsync(DhanSpotInstrument nifty, DateOnly expiry, DateOnly fromDay, DateOnly today, CancellationToken cancellationToken)
     {
         await _rateLimiter.WaitForOptionChainSlotAsync(cancellationToken);
-        var (chain, chainRawJson) = await _optionChain.GetChainAsync(nifty.SecurityId, nifty.DhanSegment, expiry, cancellationToken);
-        await SaveRawAsync("optionchain", expiry, securityId: null,
-            new { UnderlyingScrip = (int)nifty.SecurityId, UnderlyingSeg = nifty.DhanSegment, Expiry = expiry }, chainRawJson, cancellationToken);
-
+        var chain = await _optionChain.GetChainAsync(nifty.SecurityId, nifty.DhanSegment, expiry, cancellationToken);
         if (chain is null || chain.Strikes.Count == 0)
         {
             _logger.LogWarning("Empty option chain for NIFTY {Expiry} this cycle.", expiry);
@@ -192,31 +179,13 @@ public sealed class CollectorHostedService : BackgroundService
         var effectiveFrom = _backfilledToday.Contains(key) ? today : fromDay;
 
         await _rateLimiter.WaitForHistoricalDataSlotAsync(cancellationToken);
-        var (bars, error, rawJson) = await _historicalData.GetOptionIntradayAsync((uint)securityId, dhanSegment, effectiveFrom, today, 1, cancellationToken);
-        await SaveRawAsync("charts/intraday", expiry, securityId,
-            new { securityId, dhanSegment, instrument = "OPTIDX", strike, side = isCall ? "CE" : "PE", from = effectiveFrom, to = today }, rawJson, cancellationToken);
-
+        var (bars, error) = await _historicalData.GetOptionIntradayAsync((uint)securityId, dhanSegment, effectiveFrom, today, 1, cancellationToken);
         if (error is not null) return; // routine for a strike that hasn't traded yet/at all - not logged at Info to avoid noise every cycle
 
         var saved = await _writer.SaveOptionBarsAsync("NIFTY", expiry, strike, isCall, securityId, bars, cancellationToken);
         _backfilledToday.Add(key);
+        if (bars.Count > 0) _lastBarTimeBySecurityId[securityId] = bars[^1].Time;
         if (saved > 0)
             _logger.LogDebug("Saved {Count} bar(s) for {Expiry} {Strike}{Side} ({From}..{To}).", saved, expiry, strike, isCall ? "CE" : "PE", effectiveFrom, today);
-    }
-
-    /// <summary>The one place every Dhan call's raw response gets archived - see Schema.sql's own
-    /// comment on dhan_raw_responses. Never allowed to fail the caller's own cycle: swallows and
-    /// logs, same as TimescaleWriter.SaveRawResponseAsync's own internal guard, belt-and-braces
-    /// since this is purely an archival side effect, never the thing a cycle actually depends on.</summary>
-    private async Task SaveRawAsync(string endpoint, DateOnly? expiry, long? securityId, object requestParams, string? rawJson, CancellationToken cancellationToken)
-    {
-        try
-        {
-            await _writer.SaveRawResponseAsync(DateTimeOffset.UtcNow, endpoint, "NIFTY", expiry, securityId, JsonSerializer.Serialize(requestParams), rawJson, cancellationToken);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            _logger.LogDebug(ex, "Raw response archive failed for {Endpoint} - continuing.", endpoint);
-        }
     }
 }
