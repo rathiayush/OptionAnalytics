@@ -24,9 +24,12 @@ removed specifically because OI was believed to be live-only everywhere in Dhan'
 
 ## Setup
 
-1. **Postgres/TimescaleDB**: create a database and run `Db/Schema.sql` against it - or just start
-   the collector once with a valid connection string; it applies the schema automatically on every
-   startup (every statement is idempotent).
+1. **Postgres/TimescaleDB**: nothing to create by hand - point `ConnectionStrings:Timescale` (step 2
+   below) at whatever database name you want (it does not need to exist yet) and the collector
+   creates it and applies `Db/Schema.sql` automatically on every startup (both steps are
+   idempotent, so this is also just as safe to let run again on a database that already has
+   everything). The connecting Postgres role needs `CREATEDB` privilege for this - the default
+   `postgres` superuser role always has it.
 2. **Dhan credentials**: copy `appsettings.Local.json.example` to `appsettings.Local.json` and fill
    in `Dhan:ClientId` / `Dhan:AccessToken` and `ConnectionStrings:Timescale`.
 

@@ -23,8 +23,14 @@ public sealed class TimescaleWriter
         _logger = logger;
     }
 
+    /// <summary>Creates the target database (see EnsureDatabaseExistsAsync) if it doesn't exist
+    /// yet, then applies Schema.sql against it - the collector's own connection string can point at
+    /// a database that has never been created before and this still works, no manual pgAdmin/psql
+    /// step required first.</summary>
     public async Task EnsureSchemaAsync(CancellationToken cancellationToken)
     {
+        await EnsureDatabaseExistsAsync(cancellationToken);
+
         var schemaPath = Path.Combine(AppContext.BaseDirectory, "Db", "Schema.sql");
         var sql = await File.ReadAllTextAsync(schemaPath, cancellationToken);
 
@@ -34,6 +40,42 @@ public sealed class TimescaleWriter
         await command.ExecuteNonQueryAsync(cancellationToken);
 
         _logger.LogInformation("TimescaleDB schema is up to date.");
+    }
+
+    /// <summary>Connects to Postgres' own "postgres" maintenance database (never the collector's own
+    /// target database, which is exactly the one that might not exist yet) to check for - and if
+    /// missing, create - the database named in ConnectionStrings:Timescale. The connecting role
+    /// needs CREATEDB privilege for this to succeed (the default "postgres" superuser role
+    /// always has it); a role without it gets Postgres' own permission-denied error surfaced
+    /// straight through, which is a clearer failure than a confusing "database does not exist"
+    /// from the schema-apply step right after.</summary>
+    private async Task EnsureDatabaseExistsAsync(CancellationToken cancellationToken)
+    {
+        var builder = new NpgsqlConnectionStringBuilder(_connectionString);
+        var targetDatabase = builder.Database;
+        if (string.IsNullOrWhiteSpace(targetDatabase))
+            throw new InvalidOperationException("ConnectionStrings:Timescale must specify a Database.");
+
+        builder.Database = "postgres";
+
+        await using var connection = new NpgsqlConnection(builder.ConnectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        await using (var checkCommand = new NpgsqlCommand("SELECT 1 FROM pg_database WHERE datname = @name", connection))
+        {
+            checkCommand.Parameters.AddWithValue("name", targetDatabase);
+            if (await checkCommand.ExecuteScalarAsync(cancellationToken) is not null) return; // already exists
+        }
+
+        // CREATE DATABASE cannot run inside a transaction, and Postgres has no parameterized way to
+        // pass an identifier - NpgsqlConnectionStringBuilder having already accepted this name as a
+        // valid Database value doesn't rule out it containing a double-quote, so it is escaped here
+        // the standard SQL way (doubling any embedded quote) before being interpolated.
+        var quotedName = targetDatabase.Replace("\"", "\"\"");
+        await using var createCommand = new NpgsqlCommand($"CREATE DATABASE \"{quotedName}\"", connection);
+        await createCommand.ExecuteNonQueryAsync(cancellationToken);
+
+        _logger.LogInformation("Created database \"{Database}\" - it did not exist yet.", targetDatabase);
     }
 
     public async Task<int> SaveSpotBarsAsync(string underlying, IReadOnlyList<DhanHistoricalBar> bars, CancellationToken cancellationToken)
