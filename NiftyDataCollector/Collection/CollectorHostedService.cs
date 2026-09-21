@@ -226,9 +226,14 @@ public sealed class CollectorHostedService : BackgroundService
         var highStrike = atm + _options.StrikesEachSide * config.StrikeStep;
         var band = chain.Strikes.Where(s => s.Strike >= lowStrike && s.Strike <= highStrike).ToList();
 
-        var snapshotRows = await _writer.SaveOptionChainSnapshotAsync(config.Name, expiry, capturedAt, spotPrice, band, cancellationToken);
-        _logger.LogInformation("{Underlying} {Expiry}: ATM={Atm}, saved {Rows} live snapshot row(s) for strikes [{Low}-{High}].",
-            config.Name, expiry, atm, snapshotRows, lowStrike, highStrike);
+        // NOT persisted - per explicit "do not want to store live data" - this live chain call is
+        // still made (and still rate-limited/paced the same as before) purely to compute ATM and
+        // discover each strike's own security_id, which RefreshOptionBarsAsync below then uses to
+        // pull REAL historical OHLC via /charts/intraday. See the README for where live OI/IV/
+        // greeks now live instead (nowhere - only rolling_option_bars_1m has historical OI/IV, no
+        // greeks anywhere in Dhan's API - see the project's own doc comments on this tradeoff).
+        _logger.LogInformation("{Underlying} {Expiry}: ATM={Atm}, backfilling strikes [{Low}-{High}] (capturedAt={CapturedAt:u}).",
+            config.Name, expiry, atm, lowStrike, highStrike, capturedAt);
 
         foreach (var strike in band)
         {

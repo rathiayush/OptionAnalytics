@@ -1,9 +1,11 @@
 # NiftyDataCollector
 
-A standalone .NET worker that polls Dhan for option-chain data (ATM ± N strikes, for the nearest
-tracked expiry) - NIFTY and, once you add it, BANKNIFTY - and writes it into TimescaleDB. Runs
-independently of OptionAnalytics.Server - no project reference, no shared runtime state - see "Why
-duplicated Dhan code?" below.
+A standalone .NET worker that backfills real historical option data (ATM ± N strikes, for the
+nearest tracked expiry) - NIFTY and, once you add it, BANKNIFTY - into TimescaleDB. No live/current-
+instant data is ever stored (see "No live data" below); it also polls Dhan's live option chain, but
+only to discover which strikes/contracts to pull real history for, never to persist that live
+response itself. Runs independently of OptionAnalytics.Server - no project reference, no shared
+runtime state - see "Why duplicated Dhan code?" below.
 
 **Tracking more than one index**: `Collector:Underlyings` in `appsettings.json` is a list; it ships
 with just NIFTY so a first backfill run stays focused on one index. To add BANKNIFTY (or run it on
@@ -12,24 +14,42 @@ your own `appsettings.Local.json`) and restart - each index gets its own full cy
 each security's own backfill checkpoint (see below) means adding one later never disturbs the
 other's already-saved data or progress.
 
-## What it collects, and why two different tables
+## What it collects, and why different tables
 
-Dhan's API genuinely offers two different shapes of data, and this schema keeps them honestly
-separate rather than pretending one is the other:
+This collector does NOT store live data - every table here is real, replayable history, never a
+live/current-instant snapshot (see "No live data" below for what that ruled out and why):
 
 | Table | Source | Real history? |
 |---|---|---|
 | `spot_bars_1m` | `/charts/intraday` (INDEX) | Yes - backfillable for any past window Dhan still serves |
-| `option_bars_1m` | `/charts/intraday` (OPTIDX) | Yes - OHLC + volume, and possibly `open_interest` (see below) |
-| `option_chain_snapshots` | `/optionchain` (live only) | **No** - `implied_volatility` and the greeks have no history anywhere in Dhan's API; this table only ever has data from whenever the collector was actually running |
-| `rolling_option_bars_1m` | `/charts/rollingoption` (opt-in - see below) | **Yes, including OI and IV** - a genuinely different endpoint from the other three; see its own section below |
+| `option_bars_1m` | `/charts/intraday` (OPTIDX) | Yes - OHLC + volume, and possibly `open_interest` (see below) - only for expiries the collector was tracking (see below - the LIVE option chain is still used server-side to compute ATM/discover strikes, that response just isn't persisted) |
+| `rolling_option_bars_1m` | `/charts/rollingoption` (opt-in - see below) | **Yes, including OI and IV**, for ANY past date within the last 5 years - a genuinely different endpoint from the other two; see its own section below |
+
+## No live data
+
+Per explicit request, this collector never persists a live/current-instant snapshot - every row in
+every table above is real historical OHLC (or, for `rolling_option_bars_1m`, real historical
+OI/IV too), never "whatever Dhan reported at the moment we happened to be polling." One real
+consequence: **greeks (delta/theta/gamma/vega) are not collected at all** - Dhan's ONLY source for
+them was ever the live option chain, and there's no history-preserving way to store them without
+reintroducing a live snapshot; this project isn't doing that.
+
+**Why `option_bars_1m` can go empty for an already-expired week**: this table's contracts are
+discovered from Dhan's LIVE option chain (`/optionchain`, which only ever lists currently
+listed/future expiries) - it has no way to discover a contract whose expiry has already passed,
+since Dhan's own live endpoint stops listing it. So `option_bars_1m` can only ever hold data for an
+expiry the collector was ALREADY tracking (`Collector:TrackedExpiryCount`) *before* it expired. If
+you want a specific week's data after that week has already passed (e.g. last week's expiry), the
+ONLY path is `rolling_option_bars_1m` (see below) - it resolves ATM strikes server-side for any
+past date regardless of whether a contract is still live, which is exactly what a rolling/expired
+options endpoint is for.
 
 **The "oi" open question (for `/charts/intraday` specifically)**: Dhan's docs for `/charts/intraday`
 describe an optional `"oi": true` request field that returns an `open_interest` array. This
 collector always sets it for option contracts. Dhan's own doc example shows all zeros, which
 proves nothing either way - run this for real and check `option_bars_1m.open_interest` yourself.
 This is a SEPARATE question from `/charts/rollingoption`'s own OI/IV history (see below), which
-Dhan's docs describe unambiguously - the two endpoints are independent and this open question is
+Dhan's docs describe unambiguously - the two endpoints are independent, and this open question is
 scoped to `/charts/intraday` only.
 
 ## Setup
@@ -188,12 +208,6 @@ Three reasons, in order of importance:
    a library.
 
 ## Example row (once real data lands)
-
-`option_chain_snapshots` (live, IV/greeks/OI - one row per leg per poll):
-
-| time | underlying | expiry | strike | option_type | last_price | implied_volatility | open_interest | delta | spot_price |
-|---|---|---|---|---|---|---|---|---|---|
-| 2026-09-21 10:32:00+05:30 | NIFTY | 2026-09-25 | 25650 | CE | 134.00 | 9.79 | 3786445 | 0.5387 | 25642.80 |
 
 `option_bars_1m` (real history, OHLC + volume + maybe OI):
 

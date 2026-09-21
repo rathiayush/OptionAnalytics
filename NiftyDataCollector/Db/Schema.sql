@@ -42,41 +42,18 @@ CREATE TABLE IF NOT EXISTS option_bars_1m (
 SELECT create_hypertable('option_bars_1m', 'time', if_not_exists => TRUE);
 CREATE INDEX IF NOT EXISTS idx_option_bars_1m_lookup ON option_bars_1m (underlying, expiry, strike, option_type, time DESC);
 
--- Option chain LIVE snapshots - implied_volatility, the greeks, and open_interest/volume as Dhan
--- reports them AT THIS INSTANT (poll cadence, not true 1-minute bars: Dhan's Option Chain API has
--- no history of its own, only ever a live snapshot - see OptionAnalytics.Server's own
--- DhanOptionChainQuotes doc comment, which is what led to OiUnwindStrategy being removed there).
--- One row per (underlying, expiry, strike, option_type) per poll, spot_price carrying the
--- underlying's OWN last_price at that same instant so a snapshot never needs a join to know what
--- spot was doing when it was captured.
-CREATE TABLE IF NOT EXISTS option_chain_snapshots (
-    time                TIMESTAMPTZ NOT NULL,
-    underlying          TEXT        NOT NULL,
-    expiry              DATE        NOT NULL,
-    strike              NUMERIC     NOT NULL,
-    option_type         TEXT        NOT NULL CHECK (option_type IN ('CE', 'PE')),
-    security_id         BIGINT      NOT NULL,
-    spot_price          NUMERIC,
-    last_price          NUMERIC,
-    average_price       NUMERIC,
-    open_interest       BIGINT,
-    previous_open_interest BIGINT,
-    volume              BIGINT,
-    previous_volume     BIGINT,
-    previous_close_price NUMERIC,
-    implied_volatility  NUMERIC,
-    delta               NUMERIC,
-    theta               NUMERIC,
-    gamma               NUMERIC,
-    vega                NUMERIC,
-    top_bid_price       NUMERIC,
-    top_bid_quantity    BIGINT,
-    top_ask_price       NUMERIC,
-    top_ask_quantity    BIGINT,
-    PRIMARY KEY (underlying, expiry, strike, option_type, time)
-);
-SELECT create_hypertable('option_chain_snapshots', 'time', if_not_exists => TRUE);
-CREATE INDEX IF NOT EXISTS idx_option_chain_snapshots_lookup ON option_chain_snapshots (underlying, expiry, strike, option_type, time DESC);
+-- NOTE: this collector used to also persist a live option-chain snapshot table
+-- (option_chain_snapshots - implied_volatility, greeks, OI/volume AT POLL INSTANT, no real
+-- history of its own) alongside the tables above. Removed per explicit "do not want to store live
+-- data" - the live option chain is still POLLED (CollectorHostedService still calls
+-- DhanOptionChainClient.GetChainAsync every cycle), but purely to compute ATM and discover each
+-- strike's own security_id for the REAL historical OHLC backfill into option_bars_1m above; the
+-- live response itself is no longer written anywhere. If your database was created before this
+-- change, the old table is still there with whatever it already collected - this script never
+-- drops it, so nothing is lost; it just stops receiving new rows. The only place OI/IV history
+-- lives now is rolling_option_bars_1m below (real history, not a live snapshot) - greeks have no
+-- historical source anywhere in Dhan's API, live-snapshot or otherwise, so they are simply not
+-- collected by this project anymore.
 
 -- Backfill CHECKPOINTS - one row per backfilled SERIES, recording the contiguous [completed_from,
 -- completed_through] window its own historical backfill currently covers. A series_key is either
