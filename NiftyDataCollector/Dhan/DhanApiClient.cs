@@ -28,33 +28,35 @@ public sealed class DhanApiResponse : IDisposable
 }
 
 /// <summary>
-/// The one place every Dhan REST call goes through - trimmed from OptionAnalytics.Server's own
-/// DhanApiClient down to what a static-token-only collector needs: no auth-retry/TOTP-recovery
-/// loop, since there is no session to recover here (see DhanOptions' own doc comment for why this
-/// collector never logs in on its own). A stale/expired token simply fails every call until a
-/// human pastes a fresh one into config and restarts - which is the correct behavior for a process
-/// that must never trigger its own re-login against a shared account.
+/// The one place every Dhan REST call goes through - reads its access-token/client-id headers from
+/// DhanSession (mutable, live-updated by DhanTotpAutoRenewalHostedService when TOTP is configured),
+/// not from the static DhanOptions binding, so a renewed token takes effect on the very next call
+/// with no restart. In static-token mode (no TOTP configured), DhanSession simply never changes
+/// after startup and a stale/expired token fails every call until a human pastes a fresh one into
+/// config and restarts - see DhanOptions' own doc comment for the tradeoff between the two modes.
 /// </summary>
 public sealed class DhanApiClient
 {
     private readonly HttpClient _httpClient;
     private readonly DhanOptions _options;
+    private readonly DhanSession _session;
     private readonly ILogger<DhanApiClient> _logger;
 
-    public DhanApiClient(HttpClient httpClient, IOptions<DhanOptions> options, ILogger<DhanApiClient> logger)
+    public DhanApiClient(HttpClient httpClient, IOptions<DhanOptions> options, DhanSession session, ILogger<DhanApiClient> logger)
     {
         _httpClient = httpClient;
         _options = options.Value;
+        _session = session;
         _logger = logger;
     }
 
-    public bool HasSession => _options.HasSession;
+    public bool HasSession => _session.IsAuthenticated;
 
     public async Task<DhanApiResponse> SendAsync(HttpMethod method, string path, object? payload, string context, CancellationToken cancellationToken)
     {
         using var request = new HttpRequestMessage(method, $"{_options.RestBaseUrl}{path}");
-        request.Headers.TryAddWithoutValidation("access-token", _options.AccessToken);
-        request.Headers.TryAddWithoutValidation("client-id", _options.ClientId);
+        request.Headers.TryAddWithoutValidation("access-token", _session.AccessToken ?? "");
+        request.Headers.TryAddWithoutValidation("client-id", _session.ClientId ?? "");
         request.Headers.TryAddWithoutValidation("Accept", "application/json");
 
         if (payload is not null)
@@ -91,7 +93,12 @@ public sealed class DhanApiClient
         if (statusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden
             || (message?.Contains("invalid token", StringComparison.OrdinalIgnoreCase) ?? false))
         {
-            _logger.LogError("Dhan authentication failed: {Message}. This collector never re-logs in on its own (see DhanOptions) - paste a fresh access token into config and restart.", message);
+            _logger.LogWarning("Dhan authentication failed: {Message}. The access token may have expired.", message);
+            // Wakes DhanTotpAutoRenewalHostedService immediately instead of waiting for its next
+            // scheduled renewal - a no-op when TOTP auto-login isn't configured (nothing is
+            // listening to SessionInvalidated in that mode), matching OptionAnalytics.Server's own
+            // DhanApiClient behavior.
+            _session.ClearAccessToken();
         }
 
         return new DhanApiResponse(false, statusCode, null, message ?? $"Dhan returned HTTP {(int)statusCode}.");

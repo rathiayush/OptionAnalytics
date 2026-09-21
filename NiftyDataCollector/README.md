@@ -31,19 +31,24 @@ removed specifically because OI was believed to be live-only everywhere in Dhan'
    everything). The connecting Postgres role needs `CREATEDB` privilege for this - the default
    `postgres` superuser role always has it.
 2. **Dhan credentials**: copy `appsettings.Local.json.example` to `appsettings.Local.json` and fill
-   in `Dhan:ClientId` / `Dhan:AccessToken` and `ConnectionStrings:Timescale`.
+   in `Dhan:ClientId` plus ONE of:
 
-   **Use a static portal token here (Dhan Web -> Profile -> DhanHQ Trading APIs), not
-   Pin/TotpSecret** - even though this collector is meant to "share the session" with the main
-   OptionAnalytics dashboard, it must never independently log in against the same Dhan account. If
-   the dashboard is running in TOTP auto-renewal mode, generate a SEPARATE static token for this
-   collector instead of reusing Pin/TotpSecret - a second independent login commonly invalidates
-   whichever token the other process is currently holding, which would silently break the live
-   dashboard. If the dashboard already uses a static `Dhan:AccessToken` (not TOTP), you can safely
-   paste that exact same value here.
+   - **TOTP auto-login (no daily manual step)**: set `Dhan:Pin` + `Dhan:TotpSecret` (Dhan Web ->
+     Profile -> DhanHQ Trading APIs -> Setup TOTP) and leave `Dhan:AccessToken` empty.
+     `DhanTotpAutoRenewalHostedService` mints and renews its own token automatically forever -
+     same tested logic (backoff, Dhan's 2-minute cooldown handling) as OptionAnalytics.Server's own
+     TOTP auto-login.
+   - **Static portal token**: paste a token from that same Profile page into `Dhan:AccessToken`
+     and leave `Pin`/`TotpSecret` empty. Simpler, but expires in ~24h - you'll need to paste a
+     fresh one and restart about once a day.
 
-   Portal tokens are valid ~24h, so you'll need to refresh this file's `AccessToken` about once a
-   day for continuous running.
+   **The real tradeoff between the two, if you're also running OptionAnalytics.Server against the
+   same Dhan account**: TOTP mode here means TWO independent processes can each mint a fresh login
+   against one account - a fresh login commonly invalidates whichever token the OTHER process is
+   currently holding, which can silently break the live dashboard's own session (or vice versa).
+   If both need to run at once against the same account, the static-token option above is the
+   zero-risk choice; TOTP here is safe if only one of the two is ever running TOTP mode at a time
+   (e.g. the dashboard uses a static token, or you don't run them concurrently).
 3. Run it: `dotnet run --project NiftyDataCollector`
 
 ## Configuration (`Collector` section)
@@ -72,9 +77,10 @@ at 200ms spacing that's under 9 seconds, well inside the 60s default poll interv
 Three reasons, in order of importance:
 1. **Zero risk to the live dashboard.** This project has no build or runtime dependency on
    OptionAnalytics.Server at all - a bug here cannot break the other, and vice versa.
-2. **Different auth model.** OptionAnalytics.Server supports TOTP auto-login; this collector
-   deliberately does not (see `Dhan/DhanOptions.cs`), since two independent logins against one
-   Dhan account can invalidate each other.
+2. **Independent auth lifecycle.** Both TOTP auto-login and a static token are supported here too
+   (see `Dhan/DhanOptions.cs`), but as a completely separate login from OptionAnalytics.Server's
+   own - see the Setup section above for the real tradeoff if both run TOTP mode against the same
+   account at once.
 3. **Precedent already set by this codebase.** OptionAnalytics.Server itself was originally ported
    from a sibling project (LiveSpreadCalculator) the same way - copied and trimmed, not shared via
    a library.

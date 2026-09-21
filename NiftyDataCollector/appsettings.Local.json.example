@@ -1,7 +1,11 @@
 {
   "Dhan": {
     "ClientId": "your-dhan-client-id",
-    "AccessToken": "paste-a-static-portal-token-here"
+
+    "Pin": "your-dhan-pin",
+    "TotpSecret": "your-base32-totp-secret-from-dhan-web",
+
+    "AccessToken": ""
   },
   "ConnectionStrings": {
     "Timescale": "Host=localhost;Port=5432;Database=niftydata;Username=postgres;Password=yourpassword"
