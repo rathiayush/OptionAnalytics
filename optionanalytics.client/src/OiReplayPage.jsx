@@ -214,7 +214,7 @@ function ReplayChart({ bars, ladderRows, dayKey, dayHigh, dayLow, height = 440 }
     const buffer = (dayHigh - dayLow) * 0.5 || dayHigh * 0.02
     const inRange = ladderRows.filter((r) => r.strike >= dayLow - buffer && r.strike <= dayHigh + buffer)
 
-    const drawSide = (key, ivKey, staleKey, lightColor, darkColor, labelPrefix) => {
+    const drawSide = (key, ivKey, staleKey, sinceOpenKey, lightColor, darkColor, labelPrefix) => {
       const top = [...inRange]
         .filter((r) => (r[key] ?? 0) > 0)
         .sort((a, b) => (b[key] ?? 0) - (a[key] ?? 0))
@@ -230,20 +230,25 @@ function ReplayChart({ bars, ladderRows, dayKey, dayHigh, dayLow, height = 440 }
         // drawing (it's the last known wall), but visually muted and labeled so it doesn't look
         // like a live, currently-updating level when the underlying data has stopped arriving.
         const stale = row[staleKey]
+        // Day's open OI backed out from the already-computed since-open delta (current - delta =
+        // open) rather than a second lookup - shown right in the on-chart label (a price line's
+        // title renders directly on the chart, not just on hover) so a wall's CURRENT weight is
+        // always read against where it started the day, without leaving the chart for the ladder.
+        const openOi = row[sinceOpenKey] != null ? row[key] - row[sinceOpenKey] : null
         const line = seriesRef.current.createPriceLine({
           price: row.strike,
           color: stale ? `${shade(lightColor, darkColor, t)}80` : shade(lightColor, darkColor, t),
           lineWidth: 1 + Math.round(t * 2), // thicker as OI (and darkness) increases too
           lineStyle: stale ? 1 : 2, // dotted when stale, dashed when live
           axisLabelVisible: true,
-          title: `${labelPrefix} ${row.strike} (${row[key].toLocaleString()} OI${row[ivKey] != null ? `, IV ${row[ivKey].toFixed(1)}` : ''})${stale ? ' [STALE]' : ''}`,
+          title: `${labelPrefix} ${row.strike} (${row[key].toLocaleString()} OI${row[ivKey] != null ? `, IV ${row[ivKey].toFixed(1)}` : ''}${openOi != null ? `, open ${openOi.toLocaleString()}` : ''})${stale ? ' [STALE]' : ''}`,
         })
         priceLinesRef.current.push(line)
       }
     }
 
-    drawSide('ceOi', 'ceIv', 'ceStale', RESISTANCE_LIGHT, RESISTANCE_DARK, 'R')
-    drawSide('peOi', 'peIv', 'peStale', SUPPORT_LIGHT, SUPPORT_DARK, 'S')
+    drawSide('ceOi', 'ceIv', 'ceStale', 'ceOiSinceOpen', RESISTANCE_LIGHT, RESISTANCE_DARK, 'R')
+    drawSide('peOi', 'peIv', 'peStale', 'peOiSinceOpen', SUPPORT_LIGHT, SUPPORT_DARK, 'S')
   }, [ladderRows, dayHigh, dayLow])
 
   return <div ref={containerRef} style={{ width: '100%', height }} />
