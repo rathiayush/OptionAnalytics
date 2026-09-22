@@ -127,6 +127,31 @@ function computeEma(bars, period) {
   return points
 }
 
+// ATM+-10 offset dropdown options, shared by anything that lets the user pick a strike RELATIVE to
+// the currently-drifting ATM (PaperTradePanel's own strike selector, and the option premium
+// chart's CE/PE strike pickers below) - an offset rather than an absolute strike, so "the default
+// stays ATM" holds true all through the session even as ATM itself moves, matching
+// PaperTradePanel's own original reasoning for the same choice.
+function buildStrikeOffsetOptions(atmStrike, step) {
+  if (atmStrike == null || !step) return []
+  return Array.from({ length: 21 }, (_, i) => i - 10).map((offset) => ({
+    value: offset,
+    label: offset === 0 ? `ATM (${atmStrike})` : `ATM${offset > 0 ? '+' : ''}${offset} (${atmStrike + offset * step})`,
+  }))
+}
+
+// One strike/side's own premium (its `.price` field - a per-minute LTP snapshot, not real OHLC, so
+// a LINE is the honest representation here, not a fake candle) as a lightweight-charts line-series
+// dataset, clipped to the replay's own current tick - same "only reveal what's happened so far"
+// rule every other chart on this page follows, just against real (unshifted) point times rather
+// than chart-shifted bar times.
+function buildPremiumLine(points, asOfMs) {
+  if (!points || asOfMs == null) return []
+  return points
+    .filter((p) => new Date(p.time).getTime() <= asOfMs)
+    .map((p) => ({ time: toChartTime(new Date(p.time).getTime() / 1000), value: p.price }))
+}
+
 // A short beep via the Web Audio API - no asset file needed. Lazily creates (and reuses) one
 // AudioContext, created on first call rather than at module load, since most browsers refuse to
 // start an AudioContext before any user gesture on the page - by the time this can fire (a replay
@@ -189,6 +214,7 @@ const SECTION_OPTIONS = [
   { value: 'marketRead', label: 'Market Read' },
   { value: 'dayOi', label: 'Day OI Accumulation' },
   { value: 'entryCharts', label: 'Fast entry charts (3/1 min)' },
+  { value: 'optionPremium', label: 'Option premium (CE/PE)' },
   { value: 'liquidityMap', label: 'Liquidity map' },
   { value: 'futures', label: 'Futures' },
 ]
@@ -716,6 +742,60 @@ function DraggableFloatingPanel({ title, pos, onPosChange, onClose, children }) 
   )
 }
 
+// A CE line and a PE line, each one strike's own real premium over time (see buildPremiumLine's own
+// doc comment on why a line, not a candle) - the user's own "add atm ce and pe charts... I should
+// be able to choose it +- from dropdown" ask: watch the actual option premium move for whichever
+// strike is currently interesting, not just the underlying spot every other chart on this page
+// already shows. Both lines share ONE price scale (right axis) since CE and PE premiums are the
+// same unit and usually a comparable order of magnitude, unlike, say, price vs OI.
+function OptionPremiumChart({ cePoints, pePoints, dayKey, height = 320 }) {
+  const containerRef = useRef(null)
+  const chartRef = useRef(null)
+  const ceSeriesRef = useRef(null)
+  const peSeriesRef = useRef(null)
+
+  useEffect(() => {
+    if (!containerRef.current) return
+    const chart = createChart(containerRef.current, {
+      width: containerRef.current.clientWidth,
+      height,
+      layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
+      grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
+      rightPriceScale: { borderColor: BORDER_COLOR },
+      timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter },
+      crosshair: { mode: CrosshairMode.Normal },
+      localization: { timeFormatter: istTimeFormatter },
+    })
+    chartRef.current = chart
+    ceSeriesRef.current = chart.addSeries(LineSeries, { color: RESISTANCE_DARK, lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: 'CE' })
+    peSeriesRef.current = chart.addSeries(LineSeries, { color: SUPPORT_DARK, lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: 'PE' })
+
+    const onResize = () => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }) }
+    window.addEventListener('resize', onResize)
+    return () => {
+      window.removeEventListener('resize', onResize)
+      chart.remove()
+      chartRef.current = null
+      ceSeriesRef.current = null
+      peSeriesRef.current = null
+    }
+  }, [height])
+
+  useEffect(() => { if (ceSeriesRef.current) ceSeriesRef.current.setData(cePoints) }, [cePoints])
+  useEffect(() => { if (peSeriesRef.current) peSeriesRef.current.setData(pePoints) }, [pePoints])
+
+  // Re-fit on a brand new day OR whenever either strike selection changes (dayKey covers both, see
+  // the caller) - switching from ATM to ATM+5 can jump the premium's own scale entirely (a far OTM
+  // strike is worth a fraction of ATM's), so the old zoom/scale would otherwise show a flat, useless
+  // line until manually re-fit.
+  useEffect(() => {
+    if (cePoints.length > 0 || pePoints.length > 0) chartRef.current?.timeScale().fitContent()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dayKey])
+
+  return <div ref={containerRef} style={{ width: '100%', height }} />
+}
+
 // SEBI periodically revises each index's own lot size - update this if it changes. This feature is
 // paper trading only (no real order is ever placed - see PaperTradePanel's own doc comment), so a
 // stale value here only skews the SIMULATED PnL's scale, not anything real.
@@ -733,13 +813,7 @@ function PaperTradePanel({
   atmStrike, step, side, onSideChange, direction, onDirectionChange, strikeOffset, onStrikeOffsetChange,
   qtyLots, onQtyLotsChange, onPunch, canPunch, positions, onExit, onClearAll,
 }) {
-  const strikeOptions = useMemo(() => {
-    if (atmStrike == null || !step) return []
-    return Array.from({ length: 21 }, (_, i) => i - 10).map((offset) => ({
-      value: offset,
-      label: offset === 0 ? `ATM (${atmStrike})` : `ATM${offset > 0 ? '+' : ''}${offset} (${atmStrike + offset * step})`,
-    }))
-  }, [atmStrike, step])
+  const strikeOptions = useMemo(() => buildStrikeOffsetOptions(atmStrike, step), [atmStrike, step])
 
   const totalPnl = positions.reduce((sum, p) => sum + p.pnl, 0)
 
@@ -1112,6 +1186,12 @@ export default function OiReplayPage() {
   const [chartCEma1, setChartCEma1] = useState(9)
   const [chartCEma2, setChartCEma2] = useState(15)
 
+  // Option premium chart's own CE/PE strike pickers - offsets from ATM (see
+  // buildStrikeOffsetOptions' own doc comment), independently selectable, both defaulting to ATM
+  // itself. The user's own "I should be able to choose it +- from dropdown" ask.
+  const [cePremiumOffset, setCePremiumOffset] = useState(0)
+  const [pePremiumOffset, setPePremiumOffset] = useState(0)
+
   const [visibleSections, setVisibleSections] = useState(ALL_SECTION_VALUES)
 
   const [loading, setLoading] = useState(false)
@@ -1411,6 +1491,18 @@ export default function OiReplayPage() {
 
   const step = result?.step || 50
   const atmStrike = currentBar ? Math.round(currentBar.close / step) * step : null
+
+  const cePremiumStrike = atmStrike != null ? atmStrike + cePremiumOffset * step : null
+  const pePremiumStrike = atmStrike != null ? atmStrike + pePremiumOffset * step : null
+  const cePremiumLine = useMemo(
+    () => buildPremiumLine(ceByStrike.get(cePremiumStrike), asOfMs),
+    [ceByStrike, cePremiumStrike, asOfMs],
+  )
+  const pePremiumLine = useMemo(
+    () => buildPremiumLine(peByStrike.get(pePremiumStrike), asOfMs),
+    [peByStrike, pePremiumStrike, asOfMs],
+  )
+  const premiumStrikeOptions = useMemo(() => buildStrikeOffsetOptions(atmStrike, step), [atmStrike, step])
 
   const paperStrike = atmStrike != null ? atmStrike + paperStrikeOffset * step : null
   const paperEntryPreview = useMemo(() => {
@@ -2046,6 +2138,38 @@ export default function OiReplayPage() {
                 </Card>
               </Col>
             </Row>
+
+            {visibleSections.includes('optionPremium') && (
+              <Row gutter={16} style={{ marginTop: 16 }}>
+                <Col span={24}>
+                  <Card
+                    size="small"
+                    title="Option premium (choose strike)"
+                    extra={
+                      <Space size={12} wrap>
+                        <Text style={{ fontSize: 12, color: RESISTANCE_DARK }}>CE</Text>
+                        <Select value={cePremiumOffset} onChange={setCePremiumOffset} style={{ width: 150 }} options={premiumStrikeOptions} disabled={atmStrike == null} />
+                        <Text style={{ fontSize: 12, color: SUPPORT_DARK }}>PE</Text>
+                        <Select value={pePremiumOffset} onChange={setPePremiumOffset} style={{ width: 150 }} options={premiumStrikeOptions} disabled={atmStrike == null} />
+                      </Space>
+                    }
+                  >
+                    {oneMinBars.length > 0
+                      ? (
+                        <ChartErrorBoundary key={`premium-${underlying}-${result.date}-${cePremiumOffset}-${pePremiumOffset}`}>
+                          <OptionPremiumChart
+                            cePoints={cePremiumLine}
+                            pePoints={pePremiumLine}
+                            dayKey={`premium-${underlying}-${result.date}-${cePremiumOffset}-${pePremiumOffset}`}
+                            height={320}
+                          />
+                        </ChartErrorBoundary>
+                      )
+                      : <Empty description="No spot candles for this day." />}
+                  </Card>
+                </Col>
+              </Row>
+            )}
 
             {visibleSections.includes('liquidityMap') && (
               <Row gutter={16} style={{ marginTop: 16 }}>
