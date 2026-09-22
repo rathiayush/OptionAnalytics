@@ -301,9 +301,6 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = tru
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
   const priceLinesRef = useRef([])
-  // {strike, diff, y}[] - one per drawn level, y being that strike's OWN current pixel position on
-  // the chart's price axis (see the price-line-drawing effect below for how it's kept in sync).
-  const [leftDiffRows, setLeftDiffRows] = useState([])
 
   // Same ATM-centered adaptive window the price lines below are drawn from - memoized so the
   // render's own CE/PE delta tags (see the bottom of this component) read the EXACT SAME top
@@ -445,13 +442,20 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = tru
         // This used to back it out INTO the raw open-of-day value instead ("open +13.61M") which
         // read like a delta but wasn't one - the user's own "show delta at each level" ask.
         const sinceOpen = row[sinceOpenKey]
+        // Current support-minus-resistance OI at this level (peOi - ceOi right now - a DIFFERENT,
+        // complementary number from the since-open Δ above) folded directly into this SAME native
+        // price-line title, rather than a hand-positioned overlay tracking its own y-coordinate via
+        // priceToCoordinate: that overlay kept drifting out of sync with the chart's own pan/zoom/
+        // rescale timing and got clipped by its own line - a real, repeatedly-reported bug. A price
+        // line's own title is pinned by the library itself, so it can't drift or get cut off.
+        const srDiff = (row.peOi ?? 0) - (row.ceOi ?? 0)
         const line = seriesRef.current.createPriceLine({
           price: row.strike,
           color: stale ? `${shade(lightColor, darkColor, t)}80` : shade(lightColor, darkColor, t),
           lineWidth: 1 + Math.round(t * 2), // thicker as OI (and darkness) increases too
           lineStyle: stale ? 1 : 2, // dotted when stale, dashed when live
           axisLabelVisible: true,
-          title: `${labelPrefix} ${oiBarText(t)} ${row.strike} (${formatOiMillions(row[key])} OI${row[ivKey] != null ? `, IV ${row[ivKey].toFixed(1)}` : ''}${sinceOpen != null ? `, Δ ${formatOiMillions(sinceOpen, { signed: true })}` : ''})${stale ? ' [STALE]' : ''}`,
+          title: `${labelPrefix} ${oiBarText(t)} ${row.strike} (${formatOiMillions(row[key])} OI${row[ivKey] != null ? `, IV ${row[ivKey].toFixed(1)}` : ''}${sinceOpen != null ? `, Δ ${formatOiMillions(sinceOpen, { signed: true })}` : ''}, S-R ${formatOiMillions(srDiff, { signed: true })})${stale ? ' [STALE]' : ''}`,
         })
         priceLinesRef.current.push(line)
       }
@@ -459,40 +463,6 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = tru
 
     drawSide(topRows, 'ceOi', 'ceIv', 'ceStale', 'ceOiSinceOpen', RESISTANCE_LIGHT, RESISTANCE_DARK, 'R')
     drawSide(topRows, 'peOi', 'peIv', 'peStale', 'peOiSinceOpen', SUPPORT_LIGHT, SUPPORT_DARK, 'S')
-
-    // Support-minus-resistance CURRENT OI at every drawn level, pinned to that SAME strike's own
-    // y-coordinate on the left edge - the user's own "difference between support and resistance...
-    // on left hand side on that line, continuously updating" ask. Deliberately the CURRENT reading
-    // (peOi - ceOi right now), not a since-open change - that's what the Δ already in each price
-    // line's own title (see drawSide above) already covers; this is a different, complementary
-    // number. priceToCoordinate returns null for a strike currently outside the visible price
-    // range (zoomed/panned away from it) - simply left out rather than drawn off-chart.
-    const updateLeftDiffRows = () => {
-      if (!seriesRef.current) return
-      setLeftDiffRows(topRows
-        .map((row) => {
-          const y = seriesRef.current.priceToCoordinate(row.strike)
-          return y == null ? null : { strike: row.strike, diff: (row.peOi ?? 0) - (row.ceOi ?? 0), y }
-        })
-        .filter(Boolean))
-    }
-    // Deferred to the next animation frame, NOT called synchronously right here - price lines were
-    // just (re)created above, and lightweight-charts doesn't recompute its own autoscaled price
-    // range until its next internal render pass, so calling priceToCoordinate synchronously read
-    // the OLD range and produced wildly wrong y values (tags rendering far outside the chart,
-    // overlapping unrelated cards above/below it - a real, visible bug a screenshot caught). One
-    // frame later, the library's own recalculation has already happened.
-    const rafId = requestAnimationFrame(updateLeftDiffRows)
-    // Re-run on pan/zoom too, not just on this effect's own topRows-changed trigger - scrolling the
-    // time axis is exactly when lightweight-charts' own default autoscale re-ranges the price axis
-    // (a different visible slice of candles has a different high/low), which would otherwise leave
-    // these tags pinned to their OLD y-coordinates until the next OI tick happened to re-run this
-    // whole effect. This one fires AFTER the library's own range change, so it needs no extra defer.
-    chartRef.current?.timeScale().subscribeVisibleLogicalRangeChange(updateLeftDiffRows)
-    return () => {
-      cancelAnimationFrame(rafId)
-      chartRef.current?.timeScale().unsubscribeVisibleLogicalRangeChange(updateLeftDiffRows)
-    }
   }, [topRows])
 
   // The single heaviest strike on each side - the actual level just drawn as "R"/"S" above - read as
@@ -529,26 +499,6 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = tru
           {peLead && <span style={deltaTagStyle(peBias)}>S {peLead.strike} Δ {formatOiMillions(peDelta, { signed: true })}</span>}
         </div>
       )}
-      {/* Support-minus-resistance CURRENT OI, one per drawn level, each pinned to that strike's own
-          y so it reads right off the same horizontal line as its R/S price lines - see the
-          price-line-drawing effect's own doc comment on updateLeftDiffRows. A separate absolutely-
-          positioned layer from the corner tags above (which stay fixed regardless of price) since
-          these move with the price axis instead. */}
-      <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
-        {leftDiffRows.map((row) => (
-          <span
-            key={row.strike}
-            style={{
-              position: 'absolute', left: 8, top: row.y, transform: 'translateY(-50%)',
-              fontSize: 10, fontWeight: 600, padding: '1px 5px', borderRadius: 3,
-              background: '#00000080', color: row.diff >= 0 ? UP_COLOR : DOWN_COLOR,
-              border: `1px solid ${row.diff >= 0 ? UP_COLOR : DOWN_COLOR}`, whiteSpace: 'nowrap',
-            }}
-          >
-            {row.strike} S-R {formatOiMillions(row.diff, { signed: true })}
-          </span>
-        ))}
-      </div>
     </div>
   )
 }
@@ -2229,14 +2179,6 @@ export default function OiReplayPage() {
               )}
             </Row>
 
-            <Row gutter={16} style={{ marginTop: 16 }}>
-              <Col span={24}>
-                <Card size="small" title="OI / IV ladder (nearest expiry, as of the current candle)" bodyStyle={{ maxHeight: 460, overflowY: 'auto' }}>
-                  <OiLadder rows={ladderRows} atmStrike={atmStrike} />
-                </Card>
-              </Col>
-            </Row>
-
             {visibleSections.includes('optionPremium') && (
               <Row gutter={16} style={{ marginTop: 16 }}>
                 <Col span={24}>
@@ -2275,6 +2217,14 @@ export default function OiReplayPage() {
                 </Col>
               </Row>
             )}
+
+            <Row gutter={16} style={{ marginTop: 16 }}>
+              <Col span={24}>
+                <Card size="small" title="OI / IV ladder (nearest expiry, as of the current candle)" bodyStyle={{ maxHeight: 460, overflowY: 'auto' }}>
+                  <OiLadder rows={ladderRows} atmStrike={atmStrike} />
+                </Card>
+              </Col>
+            </Row>
 
             {visibleSections.includes('liquidityMap') && (
               <Row gutter={16} style={{ marginTop: 16 }}>
