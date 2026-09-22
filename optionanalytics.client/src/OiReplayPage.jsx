@@ -229,8 +229,17 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, height = 440 }
   // Same ATM-centered adaptive window the price lines below are drawn from - memoized so the
   // render's own CE/PE delta tags (see the bottom of this component) read the EXACT SAME top
   // strikes the chart just drew as R/S, rather than picking a possibly different pair.
-  const { ceTop, peTop } = useMemo(() => {
-    if (!ladderRows || ladderRows.length === 0 || atmStrike == null || !step) return { ceTop: [], peTop: [] }
+  //
+  // ceTop/peTop are still each independently ranked (the strongest 5 CE-OI strikes, the strongest 5
+  // PE-OI strikes) - kept for ceLead/peLead below (the single heaviest wall PER SIDE, for the
+  // left-edge delta tags). topRows is the DRAWING set: the UNION of those two strike sets, each
+  // entry carrying its OWN ceOi AND peOi - the user's own "at each level, buying and selling both
+  // should be shown" ask. Before this, a strike that made the CE top-5 but not the PE top-5 (or vice
+  // versa) only ever got ONE line drawn, even though it plainly has a real reading on both sides
+  // (see OiLadder, which already always shows both) - this reconciles the chart with that, rather
+  // than only showing a side because it happened to also be one of the 5 heaviest ANYWHERE nearby.
+  const { ceTop, peTop, topRows } = useMemo(() => {
+    if (!ladderRows || ladderRows.length === 0 || atmStrike == null || !step) return { ceTop: [], peTop: [], topRows: [] }
     const findTop = (key) => {
       for (let windowSteps = CHART_LEVELS_PER_SIDE; windowSteps <= CHART_MAX_WINDOW_STEPS; windowSteps++) {
         const candidates = ladderRows.filter((r) => Math.abs(r.strike - atmStrike) <= step * windowSteps && (r[key] ?? 0) > 0)
@@ -239,7 +248,11 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, height = 440 }
       }
       return []
     }
-    return { ceTop: findTop('ceOi'), peTop: findTop('peOi') }
+    const ceTop = findTop('ceOi')
+    const peTop = findTop('peOi')
+    const byStrike = new Map()
+    for (const row of [...ceTop, ...peTop]) byStrike.set(row.strike, row)
+    return { ceTop, peTop, topRows: [...byStrike.values()] }
   }, [ladderRows, atmStrike, step])
 
   useEffect(() => {
@@ -305,7 +318,7 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, height = 440 }
     if (!seriesRef.current) return
     for (const line of priceLinesRef.current) seriesRef.current.removePriceLine(line)
     priceLinesRef.current = []
-    if (ceTop.length === 0 && peTop.length === 0) return
+    if (topRows.length === 0) return
 
     // ONE shared scale across BOTH sides, not one independently computed per side - drawing R and
     // S lines with their own separate scale meant a 33M PE level could render THINNER than a 17M
@@ -319,11 +332,18 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, height = 440 }
     // strongest up to the thickest/darkest regardless of how close together their real OI actually
     // was, which is exactly the "shown out of proportion" the user's own screenshots were catching.
     // Same formula the ladder's own bar width already uses (row.xxOi / maxOi), for the same reason.
-    const allOi = [...ceTop.map((r) => r.ceOi), ...peTop.map((r) => r.peOi)]
+    const allOi = [...topRows.map((r) => r.ceOi ?? 0), ...topRows.map((r) => r.peOi ?? 0)]
     const maxOi = allOi.length > 0 ? Math.max(...allOi) : 0
 
-    const drawSide = (top, key, ivKey, staleKey, sinceOpenKey, lightColor, darkColor, labelPrefix) => {
-      for (const row of top) {
+    // Both calls below now iterate the SAME topRows (the union, see this component's own doc
+    // comment on ceTop/peTop/topRows) - a row that only qualified via its OTHER side still gets ITS
+    // OWN line drawn here, using whatever real OI it has on THIS side, however modest - "at each
+    // level, both buying and selling should be shown", not just whichever side independently ranked
+    // in the top 5. A side with genuinely zero OI (never collected/never traded) still draws nothing
+    // for it - there is no real level to show there.
+    const drawSide = (rows, key, ivKey, staleKey, sinceOpenKey, lightColor, darkColor, labelPrefix) => {
+      for (const row of rows) {
+        if ((row[key] ?? 0) <= 0) continue
         const t = maxOi > 0 ? row[key] / maxOi : 1
         // A stale level (see OI_STALE_MS) is a real OI reading, just a frozen one - still worth
         // drawing (it's the last known wall), but visually muted and labeled so it doesn't look
@@ -348,9 +368,9 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, height = 440 }
       }
     }
 
-    drawSide(ceTop, 'ceOi', 'ceIv', 'ceStale', 'ceOiSinceOpen', RESISTANCE_LIGHT, RESISTANCE_DARK, 'R')
-    drawSide(peTop, 'peOi', 'peIv', 'peStale', 'peOiSinceOpen', SUPPORT_LIGHT, SUPPORT_DARK, 'S')
-  }, [ceTop, peTop])
+    drawSide(topRows, 'ceOi', 'ceIv', 'ceStale', 'ceOiSinceOpen', RESISTANCE_LIGHT, RESISTANCE_DARK, 'R')
+    drawSide(topRows, 'peOi', 'peIv', 'peStale', 'peOiSinceOpen', SUPPORT_LIGHT, SUPPORT_DARK, 'S')
+  }, [topRows])
 
   // The single heaviest strike on each side - the actual level just drawn as "R"/"S" above - read as
   // a bullish/bearish tag from its OI change since today's open: rising CALL OI means fresh call
