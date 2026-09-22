@@ -278,20 +278,29 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, height = 440 }
     priceLinesRef.current = []
     if (!ladderRows || ladderRows.length === 0 || atmStrike == null || !step) return
 
-    const drawSide = (key, ivKey, staleKey, sinceOpenKey, lightColor, darkColor, labelPrefix) => {
-      let top = []
+    const findTop = (key) => {
       for (let windowSteps = CHART_LEVELS_PER_SIDE; windowSteps <= CHART_MAX_WINDOW_STEPS; windowSteps++) {
         const candidates = ladderRows.filter((r) => Math.abs(r.strike - atmStrike) <= step * windowSteps && (r[key] ?? 0) > 0)
-        if (candidates.length >= CHART_LEVELS_PER_SIDE || windowSteps === CHART_MAX_WINDOW_STEPS) {
-          top = candidates.sort((a, b) => (b[key] ?? 0) - (a[key] ?? 0)).slice(0, CHART_LEVELS_PER_SIDE)
-          break
-        }
+        if (candidates.length >= CHART_LEVELS_PER_SIDE || windowSteps === CHART_MAX_WINDOW_STEPS)
+          return candidates.sort((a, b) => (b[key] ?? 0) - (a[key] ?? 0)).slice(0, CHART_LEVELS_PER_SIDE)
       }
-      if (top.length === 0) return
-      const maxOi = top[0][key]
-      const minOi = top[top.length - 1][key]
-      const span = maxOi - minOi
+      return []
+    }
 
+    const ceTop = findTop('ceOi')
+    const peTop = findTop('peOi')
+
+    // ONE shared scale across BOTH sides, not one independently computed per side - drawing R and
+    // S lines with their own separate min/max meant a 33M PE level could render THINNER than a
+    // 17M CE level (each was only ranked against its own side's other four candidates), which is
+    // exactly backwards and misleading to read at a glance. A strike's line thickness/darkness on
+    // this chart now means the same thing everywhere on it, CE or PE.
+    const allOi = [...ceTop.map((r) => r.ceOi), ...peTop.map((r) => r.peOi)]
+    const maxOi = allOi.length > 0 ? Math.max(...allOi) : 0
+    const minOi = allOi.length > 0 ? Math.min(...allOi) : 0
+    const span = maxOi - minOi
+
+    const drawSide = (top, key, ivKey, staleKey, sinceOpenKey, lightColor, darkColor, labelPrefix) => {
       for (const row of top) {
         const t = span > 0 ? (row[key] - minOi) / span : 1
         // A stale level (see OI_STALE_MS) is a real OI reading, just a frozen one - still worth
@@ -315,8 +324,8 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, height = 440 }
       }
     }
 
-    drawSide('ceOi', 'ceIv', 'ceStale', 'ceOiSinceOpen', RESISTANCE_LIGHT, RESISTANCE_DARK, 'R')
-    drawSide('peOi', 'peIv', 'peStale', 'peOiSinceOpen', SUPPORT_LIGHT, SUPPORT_DARK, 'S')
+    drawSide(ceTop, 'ceOi', 'ceIv', 'ceStale', 'ceOiSinceOpen', RESISTANCE_LIGHT, RESISTANCE_DARK, 'R')
+    drawSide(peTop, 'peOi', 'peIv', 'peStale', 'peOiSinceOpen', SUPPORT_LIGHT, SUPPORT_DARK, 'S')
   }, [ladderRows, atmStrike, step])
 
   return <div ref={containerRef} style={{ width: '100%', height }} />
