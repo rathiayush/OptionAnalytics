@@ -445,57 +445,28 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = tru
         // This used to back it out INTO the raw open-of-day value instead ("open +13.61M") which
         // read like a delta but wasn't one - the user's own "show delta at each level" ask.
         const sinceOpen = row[sinceOpenKey]
+        // Current support-minus-resistance OI at this level (peOi - ceOi right now - a DIFFERENT,
+        // complementary number from the since-open Δ below) folded into this SAME line's title,
+        // rather than a separate price line per number: splitting Δ/S-R into their own axis-label
+        // badges tripled the number of rows stacked on the price axis (one for the wall, one for Δ,
+        // one for S-R, at every single strike) and turned the ladder into unreadable clutter - a
+        // real, screenshot-caught regression. Back to one combined, larger-font (see this chart's own
+        // fontSize) label per line.
+        const srDiff = (row.peOi ?? 0) - (row.ceOi ?? 0)
         const line = seriesRef.current.createPriceLine({
           price: row.strike,
           color: stale ? `${shade(lightColor, darkColor, t)}80` : shade(lightColor, darkColor, t),
           lineWidth: 1 + Math.round(t * 2), // thicker as OI (and darkness) increases too
           lineStyle: stale ? 1 : 2, // dotted when stale, dashed when live
           axisLabelVisible: true,
-          title: `${labelPrefix} ${oiBarText(t)} ${row.strike} (${formatOiMillions(row[key])} OI${row[ivKey] != null ? `, IV ${row[ivKey].toFixed(1)}` : ''})${stale ? ' [STALE]' : ''}`,
+          title: `${labelPrefix} ${oiBarText(t)} ${row.strike} (${formatOiMillions(row[key])} OI${row[ivKey] != null ? `, IV ${row[ivKey].toFixed(1)}` : ''}${sinceOpen != null ? `, Δ ${formatOiMillions(sinceOpen, { signed: true })}` : ''}, S-R ${formatOiMillions(srDiff, { signed: true })})${stale ? ' [STALE]' : ''}`,
         })
         priceLinesRef.current.push(line)
-
-        // The since-open change (Δ) gets its OWN price line at the exact same price, purely for its
-        // axis-label badge - lineVisible:false draws no extra horizontal line, just a colored pill on
-        // the price axis. A single price line's title is one plain-colored string (lightweight-charts
-        // has no per-segment styling), so a genuine green-fill/white-text (up) vs red-fill/white-text
-        // (down) badge - the user's own explicit ask - needs its own price line with axisLabelColor/
-        // axisLabelTextColor set directly, pinned by the library itself like every other line here.
-        if (sinceOpen != null) {
-          const deltaLine = seriesRef.current.createPriceLine({
-            price: row.strike,
-            color: 'transparent',
-            lineVisible: false,
-            axisLabelVisible: true,
-            axisLabelColor: sinceOpen >= 0 ? UP_COLOR : DOWN_COLOR,
-            axisLabelTextColor: '#ffffff',
-            title: `Δ ${formatOiMillions(sinceOpen, { signed: true })}`,
-          })
-          priceLinesRef.current.push(deltaLine)
-        }
       }
     }
 
     drawSide(topRows, 'ceOi', 'ceIv', 'ceStale', 'ceOiSinceOpen', RESISTANCE_LIGHT, RESISTANCE_DARK, 'R')
     drawSide(topRows, 'peOi', 'peIv', 'peStale', 'peOiSinceOpen', SUPPORT_LIGHT, SUPPORT_DARK, 'S')
-
-    // Current support-minus-resistance OI (peOi - ceOi right now, a DIFFERENT, complementary number
-    // from the since-open Δ above) - once per row, not once per side, so it isn't drawn twice at the
-    // same price. Same colored-badge-via-invisible-price-line pattern as Δ above.
-    for (const row of topRows) {
-      if ((row.ceOi ?? 0) <= 0 && (row.peOi ?? 0) <= 0) continue
-      const srDiff = (row.peOi ?? 0) - (row.ceOi ?? 0)
-      const srLine = seriesRef.current.createPriceLine({
-        price: row.strike,
-        color: 'transparent',
-        lineVisible: false,
-        axisLabelVisible: true,
-        axisLabelColor: srDiff >= 0 ? UP_COLOR : DOWN_COLOR,
-        axisLabelTextColor: '#ffffff',
-        title: `S-R ${formatOiMillions(srDiff, { signed: true })}`,
-      })
-      priceLinesRef.current.push(srLine)
-    }
   }, [topRows])
 
   // The single heaviest strike on each side - the actual level just drawn as "R"/"S" above - read as
