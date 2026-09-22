@@ -1,5 +1,6 @@
 import { Component, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import dayjs from 'dayjs'
 import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicker, Alert, Empty, Tooltip, Slider, Tag, InputNumber, Switch, Table, Segmented } from 'antd'
 import { PlayCircleOutlined, PauseCircleOutlined, ReloadOutlined, SoundOutlined } from '@ant-design/icons'
 import { createChart, createSeriesMarkers, CandlestickSeries, LineSeries, CrosshairMode } from 'lightweight-charts'
@@ -1012,8 +1013,13 @@ export default function OiReplayPage() {
   const isToday = Boolean(date && date.format('YYYY-MM-DD') === istDateKey(new Date()))
   const liveFeedSupported = LIVE_FEED_COMBOS.has(`${underlying}:${expiryFlag}`)
 
-  const load = () => {
-    if (!canLoad) return
+  // Takes an optional explicit date rather than only ever reading the `date` state, so goLive below
+  // can set today's date AND kick off the fetch in one click - setDate(today) followed immediately
+  // by load() would still read the OLD `date` from this closure (React state updates aren't
+  // synchronous), so the caller passes the date it just set instead of relying on it having landed.
+  const load = (overrideDate) => {
+    const effectiveDate = overrideDate ?? date
+    if (!underlying || !effectiveDate) return
     setPlaying(false)
     setLoading(true)
     setError(null)
@@ -1022,7 +1028,7 @@ export default function OiReplayPage() {
     setLivePePoints([])
     setPaperPositions([])
     const params = new URLSearchParams({
-      date: date.format('YYYY-MM-DD'),
+      date: effectiveDate.format('YYYY-MM-DD'),
       timeframeMinutes: String(timeframe),
       expiryFlag,
     })
@@ -1048,6 +1054,18 @@ export default function OiReplayPage() {
         setError(err.message || 'Failed to load this day.')
       })
       .finally(() => setLoading(false))
+  }
+
+  // One click for "switch to today and start following it live" - the user's own "if tomorrow
+  // markets opens and if select live this will work on live data" ask, rather than needing to open
+  // the date picker and find today's date by hand every single morning. Whatever underlying/
+  // expiryFlag/timeframe are already selected stay as they are - this only ever changes the date.
+  // isToday + liveFeedSupported (see below) is what actually keeps it updating tick by tick once
+  // loaded; this button just gets there in one step instead of several.
+  const goLive = () => {
+    const today = dayjs()
+    setDate(today)
+    load(today)
   }
 
   // The TRUE replay clock - native 1-minute bars, so every derived read (ladder, OI change, Market
@@ -1553,6 +1571,12 @@ export default function OiReplayPage() {
               stored source for either.
             </Text>
             <Space wrap size={12}>
+              <Button
+                type="primary" onClick={goLive} loading={loading} disabled={!underlying}
+                style={isToday ? { background: UP_COLOR, borderColor: UP_COLOR } : undefined}
+              >
+                ● {isToday ? 'Live' : 'Go Live'}
+              </Button>
               <Select
                 value={underlying} onChange={selectUnderlying} style={{ width: 130 }}
                 options={[{ value: 'NIFTY', label: 'NIFTY' }, { value: 'BANKNIFTY', label: 'BANKNIFTY' }, { value: 'SENSEX', label: 'SENSEX' }]}
@@ -1563,8 +1587,14 @@ export default function OiReplayPage() {
               />
               <DatePicker value={date} onChange={setDate} format="DD MMM YYYY" placeholder="Trading day" />
               <Select value={timeframe} onChange={setTimeframe} style={{ width: 110 }} options={TIMEFRAME_OPTIONS} />
-              <Button type="primary" onClick={load} loading={loading} disabled={!canLoad}>Load day</Button>
+              <Button type="primary" onClick={() => load()} loading={loading} disabled={!canLoad}>Load day</Button>
             </Space>
+            {isToday && !liveFeedSupported && (
+              <Alert
+                type="info" showIcon
+                message={`Today's data will load, but live tick-by-tick updates aren't wired up for ${underlying} ${expiryFlag === 'WEEK' ? 'Weekly' : 'Monthly'} - you'll see a snapshot as of Load day/Go Live, not a continuously ticking feed. NIFTY (Weekly/Monthly), BANKNIFTY (Monthly) and SENSEX (Weekly/Monthly) all stay live.`}
+              />
+            )}
             {error && <Alert type="error" showIcon message={error} />}
           </Space>
         </Card>
