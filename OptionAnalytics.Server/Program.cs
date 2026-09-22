@@ -114,9 +114,17 @@ builder.Services.AddSingleton<StoredRollingOptionDataService>();
 // comment for why this needed adding separately (useStoredData previously never reached spot at
 // all).
 builder.Services.AddSingleton<StoredSpotDataService>();
-// Backs the OI Replay page - entirely stored-data-only, no Dhan client injected at all (see its
-// own doc comment).
+// Backs the OI Replay page - stored-data-first for spot/options, with a live Dhan fallback outside
+// local development, and futures ALWAYS a live Dhan call (see its own doc comment for all three).
 builder.Services.AddSingleton<OiReplayService>();
+// Same "must be an explicit singleton, not AddHttpClient<T>()'s transient default" reasoning as
+// DhanSpotInstrumentMaster/DhanOptionChainMaster just above/below - this also holds the loaded
+// scrip master as instance state (_byUnderlying), so a transient registration would give
+// OiReplayService its own never-loaded copy.
+builder.Services.AddSingleton<DhanFuturesInstrumentMaster>(sp => new DhanFuturesInstrumentMaster(
+    sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(DhanFuturesInstrumentMaster)),
+    sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<DhanOptions>>(),
+    sp.GetRequiredService<ILogger<DhanFuturesInstrumentMaster>>()));
 builder.Services.AddSingleton<DhanMarketFeedClient>();
 // AddHttpClient<DhanOptionChainMaster>() (the pattern every other typed client here uses) registers
 // it TRANSIENT - a brand new instance, with its own empty in-memory dictionary, for every distinct

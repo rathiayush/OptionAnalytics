@@ -9,6 +9,12 @@ namespace OptionAnalytics.Server.Models;
 /// in the ladder so a level's own option cost is visible without a second lookup elsewhere.</summary>
 public readonly record struct OiReplayPoint(DateTimeOffset Time, decimal Strike, long? OpenInterest, decimal? ImpliedVolatility, decimal Price);
 
+/// <summary>One 1-minute futures bar - OHLC + volume + (when Dhan's response actually included it)
+/// open interest. See OiReplayResult.FuturesOiAvailable/OiReplayService's own doc comment for why
+/// this is ALWAYS a live Dhan call rather than ever reading NiftyDataCollector's database - no
+/// futures data exists there at all.</summary>
+public readonly record struct FuturesBar(DateTimeOffset Time, decimal Open, decimal High, decimal Low, decimal Close, long Volume, long? OpenInterest);
+
 /// <summary>
 /// Everything the OI Replay page needs for one full day, in one response - the whole day's worth of
 /// spot candles (already aggregated to the requested timeframe) plus the whole day's own CE/PE
@@ -36,8 +42,28 @@ public sealed record OiReplayResult(
     /// day aggregated series without doing that itself.</summary>
     IReadOnlyList<Candle> SpotCandlesOneMinute,
     IReadOnlyList<OiReplayPoint> CePoints,
-    IReadOnlyList<OiReplayPoint> PePoints)
+    IReadOnlyList<OiReplayPoint> PePoints,
+    /// <summary>The SAME day's nearest currently-listed futures contract, 1-minute bars - ALWAYS a
+    /// live Dhan call (see OiReplayService's own doc comment: no futures data exists in
+    /// NiftyDataCollector's database at all, unlike spot/options). Empty when nothing could be
+    /// fetched - see FuturesError for why (the resolvable contract simply did not exist yet on this
+    /// date, Dhan isn't authenticated, etc.) rather than assuming a call failure.</summary>
+    IReadOnlyList<FuturesBar> FuturesBars,
+    /// <summary>Which contract FuturesBars actually came from - null if none could even be
+    /// resolved (e.g. the futures instrument master hasn't finished loading yet).</summary>
+    DateOnly? FuturesExpiry,
+    /// <summary>Whether Dhan's response for the futures call actually included an "open_interest"
+    /// array at all - false means every FuturesBar's own OpenInterest is meaningless (always null)
+    /// because Dhan didn't return the field, not that OI was genuinely zero all day. This endpoint's
+    /// own "oi" flag has never been exercised by this app before (everywhere else that needs OI
+    /// history uses /charts/rollingoption instead, which IS confirmed to return it) - surfaced so
+    /// the frontend can say so plainly rather than silently showing blanks.</summary>
+    bool FuturesOiAvailable,
+    /// <summary>Set when the futures fetch itself did not succeed, or found nothing for this date -
+    /// shown on the page instead of an empty chart with no explanation.</summary>
+    string? FuturesError)
 {
     public static OiReplayResult Failed(string underlying, DateOnly date, int timeframeMinutes, string error) =>
-        new(false, error, underlying, date, timeframeMinutes, 0, "", 0, Array.Empty<Candle>(), Array.Empty<Candle>(), Array.Empty<OiReplayPoint>(), Array.Empty<OiReplayPoint>());
+        new(false, error, underlying, date, timeframeMinutes, 0, "", 0, Array.Empty<Candle>(), Array.Empty<Candle>(), Array.Empty<OiReplayPoint>(), Array.Empty<OiReplayPoint>(),
+            Array.Empty<FuturesBar>(), null, false, null);
 }
