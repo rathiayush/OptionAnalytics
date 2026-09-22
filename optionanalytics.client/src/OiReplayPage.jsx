@@ -438,8 +438,12 @@ function FuturesChart({ bars, oiLine, markers, dayKey, height = 320 }) {
 function OiLadder({ rows, atmStrike }) {
   if (rows.length === 0) return <Empty description="No stored OI/IV data yet at this point in the replay." />
 
-  const maxCeOi = Math.max(1, ...rows.map((r) => r.ceOi ?? 0))
-  const maxPeOi = Math.max(1, ...rows.map((r) => r.peOi ?? 0))
+  // ONE shared max across BOTH sides, not one independently computed per side - the exact same bug
+  // just fixed on the chart's own R/S lines (see ReplayChart's own doc comment): a 33M PE bar and a
+  // 17M CE bar rendering at the SAME width because each was only ever measured against its own
+  // side's own max would give exactly the "false impression" the user's own screenshots caught.
+  // Bar width now means the same thing everywhere in this ladder, CE or PE.
+  const maxOi = Math.max(1, ...rows.map((r) => r.ceOi ?? 0), ...rows.map((r) => r.peOi ?? 0))
   const resistanceStrike = rows.reduce((best, r) => ((r.ceOi ?? 0) > (best?.ceOi ?? -1) ? r : best), null)?.strike
   const supportStrike = rows.reduce((best, r) => ((r.peOi ?? 0) > (best?.peOi ?? -1) ? r : best), null)?.strike
 
@@ -478,7 +482,7 @@ function OiLadder({ rows, atmStrike }) {
               <div style={{ width: 70, display: 'flex', justifyContent: 'flex-end' }}>
                 <Tooltip title={row.peOi != null ? `PE OI: ${row.peOi.toLocaleString()}${row.pePrice != null ? `, LTP ${row.pePrice.toFixed(2)}` : ''}${row.peOiChange != null ? ` (${row.peOiChange >= 0 ? '+' : ''}${row.peOiChange.toLocaleString()} in the last min)` : ''}${row.peOiSinceOpen != null ? ` (${row.peOiSinceOpen >= 0 ? '+' : ''}${row.peOiSinceOpen.toLocaleString()} since open)` : ''}${row.peStale && row.peAsOfMs != null ? ` — STALE, no update since ${istTimeFormatter(toChartTime(row.peAsOfMs))}` : ''}` : 'No data'}>
                   <div style={{
-                    width: `${((row.peOi ?? 0) / maxPeOi) * 100}%`, minWidth: row.peOi ? 2 : 0, height: 14,
+                    width: `${((row.peOi ?? 0) / maxOi) * 100}%`, minWidth: row.peOi ? 2 : 0, height: 14,
                     background: isSupport ? UP_COLOR : `${UP_COLOR}99`,
                   }} />
                 </Tooltip>
@@ -491,7 +495,7 @@ function OiLadder({ rows, atmStrike }) {
               <div style={{ width: 70 }}>
                 <Tooltip title={row.ceOi != null ? `CE OI: ${row.ceOi.toLocaleString()}${row.cePrice != null ? `, LTP ${row.cePrice.toFixed(2)}` : ''}${row.ceOiChange != null ? ` (${row.ceOiChange >= 0 ? '+' : ''}${row.ceOiChange.toLocaleString()} in the last min)` : ''}${row.ceOiSinceOpen != null ? ` (${row.ceOiSinceOpen >= 0 ? '+' : ''}${row.ceOiSinceOpen.toLocaleString()} since open)` : ''}${row.ceStale && row.ceAsOfMs != null ? ` — STALE, no update since ${istTimeFormatter(toChartTime(row.ceAsOfMs))}` : ''}` : 'No data'}>
                   <div style={{
-                    width: `${((row.ceOi ?? 0) / maxCeOi) * 100}%`, minWidth: row.ceOi ? 2 : 0, height: 14,
+                    width: `${((row.ceOi ?? 0) / maxOi) * 100}%`, minWidth: row.ceOi ? 2 : 0, height: 14,
                     background: isResistance ? DOWN_COLOR : `${DOWN_COLOR}99`,
                   }} />
                 </Tooltip>
