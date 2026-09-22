@@ -1,7 +1,7 @@
 import { Component, useEffect, useMemo, useRef, useState } from 'react'
 import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicker, Alert, Empty, Tooltip, Slider, Tag, InputNumber, Switch } from 'antd'
 import { PlayCircleOutlined, PauseCircleOutlined, ReloadOutlined, SoundOutlined } from '@ant-design/icons'
-import { createChart, CandlestickSeries, LineSeries, CrosshairMode } from 'lightweight-charts'
+import { createChart, createSeriesMarkers, CandlestickSeries, LineSeries, CrosshairMode } from 'lightweight-charts'
 import * as signalR from '@microsoft/signalr'
 import {
   UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR,
@@ -225,6 +225,22 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, height = 440 }
   const seriesRef = useRef(null)
   const priceLinesRef = useRef([])
 
+  // Same ATM-centered adaptive window the price lines below are drawn from - memoized so the
+  // render's own CE/PE delta tags (see the bottom of this component) read the EXACT SAME top
+  // strikes the chart just drew as R/S, rather than picking a possibly different pair.
+  const { ceTop, peTop } = useMemo(() => {
+    if (!ladderRows || ladderRows.length === 0 || atmStrike == null || !step) return { ceTop: [], peTop: [] }
+    const findTop = (key) => {
+      for (let windowSteps = CHART_LEVELS_PER_SIDE; windowSteps <= CHART_MAX_WINDOW_STEPS; windowSteps++) {
+        const candidates = ladderRows.filter((r) => Math.abs(r.strike - atmStrike) <= step * windowSteps && (r[key] ?? 0) > 0)
+        if (candidates.length >= CHART_LEVELS_PER_SIDE || windowSteps === CHART_MAX_WINDOW_STEPS)
+          return candidates.sort((a, b) => (b[key] ?? 0) - (a[key] ?? 0)).slice(0, CHART_LEVELS_PER_SIDE)
+      }
+      return []
+    }
+    return { ceTop: findTop('ceOi'), peTop: findTop('peOi') }
+  }, [ladderRows, atmStrike, step])
+
   useEffect(() => {
     if (!containerRef.current) return
     const chart = createChart(containerRef.current, {
@@ -288,19 +304,7 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, height = 440 }
     if (!seriesRef.current) return
     for (const line of priceLinesRef.current) seriesRef.current.removePriceLine(line)
     priceLinesRef.current = []
-    if (!ladderRows || ladderRows.length === 0 || atmStrike == null || !step) return
-
-    const findTop = (key) => {
-      for (let windowSteps = CHART_LEVELS_PER_SIDE; windowSteps <= CHART_MAX_WINDOW_STEPS; windowSteps++) {
-        const candidates = ladderRows.filter((r) => Math.abs(r.strike - atmStrike) <= step * windowSteps && (r[key] ?? 0) > 0)
-        if (candidates.length >= CHART_LEVELS_PER_SIDE || windowSteps === CHART_MAX_WINDOW_STEPS)
-          return candidates.sort((a, b) => (b[key] ?? 0) - (a[key] ?? 0)).slice(0, CHART_LEVELS_PER_SIDE)
-      }
-      return []
-    }
-
-    const ceTop = findTop('ceOi')
-    const peTop = findTop('peOi')
+    if (ceTop.length === 0 && peTop.length === 0) return
 
     // ONE shared scale across BOTH sides, not one independently computed per side - drawing R and
     // S lines with their own separate scale meant a 33M PE level could render THINNER than a 17M
@@ -343,9 +347,44 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, height = 440 }
 
     drawSide(ceTop, 'ceOi', 'ceIv', 'ceStale', 'ceOiSinceOpen', RESISTANCE_LIGHT, RESISTANCE_DARK, 'R')
     drawSide(peTop, 'peOi', 'peIv', 'peStale', 'peOiSinceOpen', SUPPORT_LIGHT, SUPPORT_DARK, 'S')
-  }, [ladderRows, atmStrike, step])
+  }, [ceTop, peTop])
 
-  return <div ref={containerRef} style={{ width: '100%', height }} />
+  // The single heaviest strike on each side - the actual level just drawn as "R"/"S" above - read as
+  // a bullish/bearish tag from its OI change since today's open: rising CALL OI means fresh call
+  // writing defending that resistance (bearish), rising PUT OI means fresh put writing defending
+  // that support (bullish) - the standard option-OI reading, mirroring classifyFuturesRegime's own
+  // price/OI read for futures below. Rendered as plain HTML on the LEFT edge of the chart (not
+  // another lightweight-charts price line) since the price-line labels already crowd the right edge
+  // - the user's own "right side become too noisy" complaint - so this is deliberately a second,
+  // separate visual channel rather than one more thing stacked into that same corner.
+  const ceLead = ceTop[0] ?? null
+  const peLead = peTop[0] ?? null
+  const ceDelta = ceLead?.ceOiSinceOpen ?? null
+  const peDelta = peLead?.peOiSinceOpen ?? null
+  const ceBias = ceDelta ? (ceDelta > 0 ? 'bearish' : 'bullish') : null
+  const peBias = peDelta ? (peDelta > 0 ? 'bullish' : 'bearish') : null
+  const biasColor = (bias) => (bias === 'bullish' ? UP_COLOR : bias === 'bearish' ? DOWN_COLOR : AXIS_COLOR)
+  const deltaTagStyle = (bias) => ({
+    fontSize: 11,
+    fontWeight: 600,
+    padding: '2px 6px',
+    borderRadius: 4,
+    background: '#00000080',
+    color: biasColor(bias),
+    border: `1px solid ${biasColor(bias)}`,
+  })
+
+  return (
+    <div style={{ position: 'relative', width: '100%', height }}>
+      <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
+      {(ceLead || peLead) && (
+        <div style={{ position: 'absolute', top: 8, left: 8, display: 'flex', flexDirection: 'column', gap: 4, pointerEvents: 'none' }}>
+          {ceLead && <span style={deltaTagStyle(ceBias)}>R {ceLead.strike} Δ {formatOiMillions(ceDelta, { signed: true })}</span>}
+          {peLead && <span style={deltaTagStyle(peBias)}>S {peLead.strike} Δ {formatOiMillions(peDelta, { signed: true })}</span>}
+        </div>
+      )}
+    </div>
+  )
 }
 
 // Colors for the futures regime read - Long Buildup/Short Covering are bullish (price+OI both
@@ -382,6 +421,7 @@ function FuturesChart({ bars, oiLine, markers, dayKey, height = 320 }) {
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
   const oiSeriesRef = useRef(null)
+  const markersRef = useRef(null)
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -400,6 +440,13 @@ function FuturesChart({ bars, oiLine, markers, dayKey, height = 320 }) {
     seriesRef.current = chart.addSeries(CandlestickSeries, {
       upColor: UP_COLOR, downColor: DOWN_COLOR, borderVisible: false, wickUpColor: UP_COLOR, wickDownColor: DOWN_COLOR,
     })
+    // lightweight-charts v5 removed ISeriesApi.setMarkers() - markers are now a separate plugin
+    // instance created via createSeriesMarkers, same pattern every other chart in this codebase
+    // already uses (App.jsx, BacktestPage.jsx, etc). Calling .setMarkers() on the series itself (as
+    // this chart used to) throws a TypeError as soon as any regime markers exist, which the
+    // ChartErrorBoundary above then swallows into "This chart could not be rendered" - the exact
+    // "futures chart is unable to render" bug.
+    markersRef.current = createSeriesMarkers(seriesRef.current, [])
     // Own (left) price scale and a thin, semi-transparent line - OI's own numbers (lakhs/crores)
     // are a totally different scale than price, so sharing the right-hand axis with candles would
     // otherwise squash one or the other into a flat line.
@@ -421,6 +468,7 @@ function FuturesChart({ bars, oiLine, markers, dayKey, height = 320 }) {
       chartRef.current = null
       seriesRef.current = null
       oiSeriesRef.current = null
+      markersRef.current = null
     }
   }, [height])
 
@@ -435,7 +483,7 @@ function FuturesChart({ bars, oiLine, markers, dayKey, height = 320 }) {
   }, [oiLine])
 
   useEffect(() => {
-    seriesRef.current?.setMarkers(markers ?? [])
+    markersRef.current?.setMarkers(markers ?? [])
   }, [markers])
 
   useEffect(() => {
