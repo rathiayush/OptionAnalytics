@@ -220,7 +220,7 @@ const SUPPORT_DARK = '#0a5c1f'
 // further data fetch, just a local re-render. Also draws the strongest OI levels on each side as
 // horizontal price lines directly on the chart (darker = heavier OI = a "harder" level) - the same
 // data the ladder shows in table form, here as the market-structure read on the price chart itself.
-function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, height = 440 }) {
+function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = true, height = 440 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
@@ -230,14 +230,17 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, height = 440 }
   // render's own CE/PE delta tags (see the bottom of this component) read the EXACT SAME top
   // strikes the chart just drew as R/S, rather than picking a possibly different pair.
   //
-  // ceTop/peTop are still each independently ranked (the strongest 5 CE-OI strikes, the strongest 5
-  // PE-OI strikes) - kept for ceLead/peLead below (the single heaviest wall PER SIDE, for the
-  // left-edge delta tags). topRows is the DRAWING set: the UNION of those two strike sets, each
-  // entry carrying its OWN ceOi AND peOi - the user's own "at each level, buying and selling both
-  // should be shown" ask. Before this, a strike that made the CE top-5 but not the PE top-5 (or vice
-  // versa) only ever got ONE line drawn, even though it plainly has a real reading on both sides
-  // (see OiLadder, which already always shows both) - this reconciles the chart with that, rather
-  // than only showing a side because it happened to also be one of the 5 heaviest ANYWHERE nearby.
+  // ceTop/peTop are always each independently ranked (the strongest 5 CE-OI strikes, the strongest 5
+  // PE-OI strikes anywhere in the fetched band) - used for ceLead/peLead below (the single heaviest
+  // wall PER SIDE, for the left-edge delta tags) regardless of top5Only, since "the single strongest
+  // wall" is a well-defined idea either way.
+  //
+  // topRows is the DRAWING set, and IS what top5Only switches: true (the default) keeps it to the
+  // union of ceTop/peTop, each entry carrying its OWN ceOi AND peOi so both R and S are drawn for
+  // every row in it (the user's own earlier "at each level, buying and selling both should be
+  // shown" ask) - still capped to the 5 strongest per side so the chart stays readable. false shows
+  // EVERY strike in the whole fetched band with real OI on either side, no ranking or cap at all -
+  // the user's own "switch ... if true show top 5 else all wall" ask.
   const { ceTop, peTop, topRows } = useMemo(() => {
     if (!ladderRows || ladderRows.length === 0 || atmStrike == null || !step) return { ceTop: [], peTop: [], topRows: [] }
     const findTop = (key) => {
@@ -250,10 +253,17 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, height = 440 }
     }
     const ceTop = findTop('ceOi')
     const peTop = findTop('peOi')
+
+    if (!top5Only) {
+      const allWalls = ladderRows.filter((r) =>
+        Math.abs(r.strike - atmStrike) <= step * CHART_MAX_WINDOW_STEPS && ((r.ceOi ?? 0) > 0 || (r.peOi ?? 0) > 0))
+      return { ceTop, peTop, topRows: allWalls }
+    }
+
     const byStrike = new Map()
     for (const row of [...ceTop, ...peTop]) byStrike.set(row.strike, row)
     return { ceTop, peTop, topRows: [...byStrike.values()] }
-  }, [ladderRows, atmStrike, step])
+  }, [ladderRows, atmStrike, step, top5Only])
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -1403,6 +1413,10 @@ export default function OiReplayPage() {
   // rather than repeatedly while a breach's own row re-renders for unrelated reasons.
   const [alertThreshold, setAlertThreshold] = useState(1_000_000)
   const [soundEnabled, setSoundEnabled] = useState(true)
+  // Defaults to top-5-only (the chart's original, carefully-tuned-for-readability behavior) - the
+  // user's own "switch ... if true show top 5 else all wall" ask, off shows every real wall in the
+  // whole fetched band instead (see ReplayChart's own top5Only doc comment).
+  const [top5WallsOnly, setTop5WallsOnly] = useState(true)
 
   const activeAlerts = useMemo(() => {
     if (atmStrike == null || ladderRows.length === 0) return []
@@ -1751,6 +1765,8 @@ export default function OiReplayPage() {
                       checked={soundEnabled} onChange={setSoundEnabled}
                       checkedChildren={<SoundOutlined />} unCheckedChildren="Muted"
                     />
+                    <Text type="secondary" style={{ fontSize: 12 }}>Top 5 walls only</Text>
+                    <Switch checked={top5WallsOnly} onChange={setTop5WallsOnly} />
                   </Space>
                   {activeAlerts.length > 0 && (
                     <Alert
@@ -1770,6 +1786,7 @@ export default function OiReplayPage() {
                           dayKey={`${underlying}-${result.date}-${timeframe}`}
                           atmStrike={atmStrike}
                           step={step}
+                          top5Only={top5WallsOnly}
                           height={460}
                         />
                       </ChartErrorBoundary>
