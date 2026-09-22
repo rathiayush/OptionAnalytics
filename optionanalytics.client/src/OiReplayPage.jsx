@@ -19,19 +19,24 @@ const { Text, Title } = Typography
 // hand since the two sides have no shared source of truth to derive it from automatically.
 const LIVE_FEED_COMBOS = new Set(['NIFTY:WEEK', 'NIFTY:MONTH', 'BANKNIFTY:MONTH', 'SENSEX:WEEK', 'SENSEX:MONTH'])
 
-// Connects to the same SignalR hub the live dashboard already uses (App.jsx's own useHub), for two
-// events: "spotUpdate" (SpotFeedHostedService's existing push - the underlying's own currently-
-// forming 1-minute bar, reused as-is rather than building a second live-spot pipeline) and
-// "oiReplayTick" (OiReplayLiveFeedService's new push - one option leg's live price/OI). Both
+// Connects to the same SignalR hub the live dashboard already uses (App.jsx's own useHub), for
+// three events: "spotUpdate" (SpotFeedHostedService's existing push - the underlying's own
+// currently-forming 1-minute bar, reused as-is rather than building a second live-spot pipeline),
+// "oiReplayTick" (OiReplayLiveFeedService's push - one option leg's live price/OI), and
+// "futuresTick" (that same service's push for the underlying's own nearest futures contract - the
+// user's own "make sure ALL functionality of this page should work [live]" ask: the Futures section
+// used to be a one-time REST snapshot that never updated again until the next full reload). All
 // callbacks are read through refs (same pattern as App.jsx's useHub) so the connection itself only
 // needs to open/close when `enabled` changes, never when underlying/expiryFlag/the callbacks
 // themselves change identity across a re-render.
-function useOiReplayLiveFeed(enabled, onSpotUpdate, onOiReplayTick, onReconnected) {
+function useOiReplayLiveFeed(enabled, onSpotUpdate, onOiReplayTick, onFuturesTick, onReconnected) {
   const spotRef = useRef(onSpotUpdate)
   const tickRef = useRef(onOiReplayTick)
+  const futuresRef = useRef(onFuturesTick)
   const reconnectedRef = useRef(onReconnected)
   spotRef.current = onSpotUpdate
   tickRef.current = onOiReplayTick
+  futuresRef.current = onFuturesTick
   reconnectedRef.current = onReconnected
 
   useEffect(() => {
@@ -43,6 +48,7 @@ function useOiReplayLiveFeed(enabled, onSpotUpdate, onOiReplayTick, onReconnecte
 
     connection.on('spotUpdate', (snapshot) => spotRef.current(snapshot))
     connection.on('oiReplayTick', (tick) => tickRef.current(tick))
+    connection.on('futuresTick', (tick) => futuresRef.current?.(tick))
     connection.onreconnected(() => reconnectedRef.current?.())
     connection.start().catch((err) => {
       // Same StrictMode double-mount as App.jsx's useHub - the first connection's start() gets
@@ -1256,6 +1262,7 @@ export default function OiReplayPage() {
   const [liveBars, setLiveBars] = useState([])
   const [liveCePoints, setLiveCePoints] = useState([])
   const [livePePoints, setLivePePoints] = useState([])
+  const [liveFuturesPoints, setLiveFuturesPoints] = useState([])
   const caughtUpLenRef = useRef(0)
 
   // Paper trade panel state - see PaperTradePanel's own doc comment. strikeOffset defaults to 0
@@ -1303,6 +1310,7 @@ export default function OiReplayPage() {
     setLiveBars([])
     setLiveCePoints([])
     setLivePePoints([])
+    setLiveFuturesPoints([])
     setPaperPositions([])
     const params = new URLSearchParams({
       date: effectiveDate.format('YYYY-MM-DD'),
@@ -1400,8 +1408,30 @@ export default function OiReplayPage() {
     if (isCall) setLiveCePoints((prev) => [...prev, point])
     else setLivePePoints((prev) => [...prev, point])
   }
+  // Buckets each raw tick into its own current MINUTE (unlike handleSpotUpdate, which gets an
+  // already-bucketed "current bar" straight from SpotFeedHostedService - OiReplayLiveFeedService's
+  // own futuresTick broadcast is a raw tick, so the bucketing happens here instead). volume is
+  // deliberately left null for every live-ticked point: SpotTick.Volume is Dhan's CUMULATIVE volume
+  // for the whole day, not a per-minute figure the way the REST-sourced FuturesBar.Volume is - and
+  // reconciling those two units would need knowing the cumulative total as of the last REST bar,
+  // which this page doesn't have. futuresVolumeSoFar's own sum already treats a null as 0, so this
+  // slightly under-counts the live tail rather than risk wildly over-counting it.
+  const handleFuturesTick = (tick) => {
+    if (!isToday || tick?.underlying !== underlying) return
+    const bucketIso = new Date(Math.floor(new Date(tick.time).getTime() / 60_000) * 60_000).toISOString()
+    setLiveFuturesPoints((prev) => {
+      if (prev.length > 0 && prev[prev.length - 1].time === bucketIso) {
+        const last = prev[prev.length - 1]
+        const next = prev.slice()
+        next[next.length - 1] = { ...last, high: Math.max(last.high, tick.price), low: Math.min(last.low, tick.price), close: tick.price, openInterest: tick.openInterest }
+        return next
+      }
+      return [...prev, { time: bucketIso, open: tick.price, high: tick.price, low: tick.price, close: tick.price, volume: null, openInterest: tick.openInterest }]
+    })
+  }
+
   const handleLiveReconnected = () => { if (isToday) load() }
-  useOiReplayLiveFeed(isToday && liveFeedSupported && Boolean(result), handleSpotUpdate, handleOiReplayTick, handleLiveReconnected)
+  useOiReplayLiveFeed(isToday && liveFeedSupported && Boolean(result), handleSpotUpdate, handleOiReplayTick, handleFuturesTick, handleLiveReconnected)
 
   // Auto-follow: once the user is caught up to the tail of what's loaded, a newly-arrived live bar
   // (oneMinBars.length growing) keeps visibleCount pinned to the end automatically - the whole point
@@ -1448,17 +1478,28 @@ export default function OiReplayPage() {
   )
   const dayStartMs = oneMinBars[0] ? fromChartTime(oneMinBars[0].time) * 1000 : null
 
-  // Futures - always a live-Dhan-only series from the backend (see OiReplayService's own doc
-  // comment: no futures data exists in NiftyDataCollector's database at all), so unlike
-  // oneMinBars/ceByStrike/peByStrike this never gets a "today, live WS" tail merged in - it is
-  // simply whatever OiReplayService's own single live call returned for the whole day.
-  const futuresBarsChart = useMemo(() => (result?.futuresBars ?? []).map(toBar), [result])
+  // Futures - the REST snapshot from OiReplayService's own single live call, PLUS (while isToday)
+  // the live tick tail from OiReplayLiveFeedService's own "futuresTick" broadcast (see
+  // handleFuturesTick below) - same "today, live WS" merge shape as oneMinBars/ceByStrike/peByStrike
+  // now use, closing what used to be a real gap: the Futures section never updated again after the
+  // initial Load day/Go Live until now.
+  //
   // Raw (unshifted) points, time-ascending, for latestAtOrBefore-style stat lookups - same
   // real-time-vs-chart-time distinction as ceByStrike/peByStrike above (see asOfMs's own comment).
-  const futuresPointsRaw = useMemo(
-    () => [...(result?.futuresBars ?? [])].sort((a, b) => new Date(a.time) - new Date(b.time)),
-    [result],
-  )
+  // Merged the same way oneMinBars merges liveBars: an exact same-minute match REPLACES the
+  // existing point (the still-forming current bar keeps updating in place), a genuinely newer one
+  // is appended.
+  const futuresPointsRaw = useMemo(() => {
+    const base = [...(result?.futuresBars ?? [])].sort((a, b) => new Date(a.time) - new Date(b.time))
+    if (!isToday || liveFuturesPoints.length === 0) return base
+    const merged = base.slice()
+    for (const point of liveFuturesPoints) {
+      if (merged.length > 0 && merged[merged.length - 1].time === point.time) merged[merged.length - 1] = point
+      else if (merged.length === 0 || new Date(point.time) > new Date(merged[merged.length - 1].time)) merged.push(point)
+    }
+    return merged
+  }, [result, liveFuturesPoints, isToday])
+  const futuresBarsChart = useMemo(() => futuresPointsRaw.map(toBar), [futuresPointsRaw])
   const displayFuturesBars = useMemo(() => {
     if (asOfMs == null) return []
     const cutoff = toChartTime(asOfMs)

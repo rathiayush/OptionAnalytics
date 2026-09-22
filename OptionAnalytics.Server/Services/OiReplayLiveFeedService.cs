@@ -38,6 +38,12 @@ namespace OptionAnalytics.Server.Services;
 /// feed, since that would mean ~126 extra Dhan API calls every cycle against the SAME shared
 /// account/rate budget the live trading pipeline depends on, for a figure the page's own Market
 /// Read logic already only ever reads as a since-open TREND, not a per-tick value.
+///
+/// ALSO keeps each underlying's own nearest FUTURES contract live (see RecenterFuturesAsync) -
+/// broadcast as its own "futuresTick" event, separate from "oiReplayTick" - the page's Futures
+/// section used to be a one-time REST snapshot from OiReplayService.GetFuturesAsync that never
+/// updated again until the next full Load day/Go Live, unlike every other section on the page once
+/// today is playing live.
 /// </summary>
 public sealed class OiReplayLiveFeedService : BackgroundService
 {
@@ -60,10 +66,16 @@ public sealed class OiReplayLiveFeedService : BackgroundService
         new("SENSEX", "MONTH"),
     };
 
+    /// <summary>Every underlying OiReplayService's own GetFuturesAsync supports - unlike the
+    /// options Combos above, a future has no expiryFlag choice to multiply against (exactly one
+    /// nearest contract per underlying), so this is just the plain underlying list.</summary>
+    private static readonly string[] FuturesUnderlyings = { "NIFTY", "BANKNIFTY", "SENSEX" };
+
     private sealed record LegInfo(string Underlying, string ExpiryFlag, decimal Strike, bool IsCall);
 
     private readonly SpotFeedHostedService _spotFeed;
     private readonly DhanOptionChainMaster _optionChainMaster;
+    private readonly DhanFuturesInstrumentMaster _futuresInstrumentMaster;
     private readonly DhanMarketFeedClient _feedClient;
     private readonly IHubContext<SpotHub> _hub;
     private readonly ILogger<OiReplayLiveFeedService> _logger;
@@ -73,12 +85,18 @@ public sealed class OiReplayLiveFeedService : BackgroundService
     /// drifts out of the currently-computed band.</summary>
     private readonly ConcurrentDictionary<uint, LegInfo> _legsBySecurityId = new();
 
+    /// <summary>Same "never remove" reasoning as _legsBySecurityId - a future's own nearest
+    /// contract only changes at expiry (once every week/month), so in practice this dictionary
+    /// almost never grows beyond one entry per underlying anyway.</summary>
+    private readonly ConcurrentDictionary<uint, string> _futuresLegsBySecurityId = new();
+
     public OiReplayLiveFeedService(
-        SpotFeedHostedService spotFeed, DhanOptionChainMaster optionChainMaster, DhanMarketFeedClient feedClient,
-        IHubContext<SpotHub> hub, ILogger<OiReplayLiveFeedService> logger)
+        SpotFeedHostedService spotFeed, DhanOptionChainMaster optionChainMaster, DhanFuturesInstrumentMaster futuresInstrumentMaster,
+        DhanMarketFeedClient feedClient, IHubContext<SpotHub> hub, ILogger<OiReplayLiveFeedService> logger)
     {
         _spotFeed = spotFeed;
         _optionChainMaster = optionChainMaster;
+        _futuresInstrumentMaster = futuresInstrumentMaster;
         _feedClient = feedClient;
         _hub = hub;
         _logger = logger;
@@ -107,9 +125,48 @@ public sealed class OiReplayLiveFeedService : BackgroundService
                 }
             }
 
+            foreach (var underlying in FuturesUnderlyings)
+            {
+                try
+                {
+                    if (!await RecenterFuturesAsync(underlying, stoppingToken)) complete = false;
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogError(ex, "OI Replay live feed: {Underlying} futures re-center failed - left as it was.", underlying);
+                    complete = false;
+                }
+            }
+
             try { await Task.Delay(complete ? RecenterInterval : IncompleteRetryInterval, stoppingToken); }
             catch (OperationCanceledException) { break; }
         }
+    }
+
+    /// <summary>Subscribes the underlying's own nearest futures contract if not already - mirrors
+    /// RecenterComboAsync's own shape but far simpler (one contract, not a whole strike band).
+    /// Re-resolving every cycle rather than caching the contract forever is deliberate: it is what
+    /// picks up a fresh nearest contract automatically the moment the current one expires, with no
+    /// separate "did it just expire" check needed.</summary>
+    private async Task<bool> RecenterFuturesAsync(string underlying, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _futuresInstrumentMaster.EnsureLoadedAsync(cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "OI Replay live feed: could not refresh the futures instrument master for {Underlying} - keeping the previous contract.", underlying);
+        }
+
+        var contract = _futuresInstrumentMaster.GetNearestContract(underlying, IstClock.Today());
+        if (contract is null) return false;
+
+        _futuresLegsBySecurityId[contract.SecurityId] = underlying;
+        if (!_feedClient.IsSubscribed(contract.SecurityId))
+            await _feedClient.SubscribeAsync(new Dictionary<uint, string> { [contract.SecurityId] = contract.DhanSegment }, cancellationToken, full: true);
+
+        return true;
     }
 
     private async Task<bool> RecenterComboAsync(Combo combo, CancellationToken cancellationToken)
@@ -185,35 +242,47 @@ public sealed class OiReplayLiveFeedService : BackgroundService
 
     private void OnTick(SpotTick tick)
     {
-        if (!_legsBySecurityId.TryGetValue(tick.SecurityId, out var leg)) return;
-        if (tick.LastPrice <= 0 && tick.OpenInterest <= 0) return;
-
-        var payload = new
+        if (_legsBySecurityId.TryGetValue(tick.SecurityId, out var leg) && (tick.LastPrice > 0 || tick.OpenInterest > 0))
         {
-            underlying = leg.Underlying,
-            expiryFlag = leg.ExpiryFlag,
-            strike = leg.Strike,
-            side = leg.IsCall ? "CE" : "PE",
-            price = tick.LastPrice,
-            openInterest = tick.OpenInterest,
-            time = tick.ExchangeTimestamp,
-        };
+            var payload = new
+            {
+                underlying = leg.Underlying,
+                expiryFlag = leg.ExpiryFlag,
+                strike = leg.Strike,
+                side = leg.IsCall ? "CE" : "PE",
+                price = tick.LastPrice,
+                openInterest = tick.OpenInterest,
+                time = tick.ExchangeTimestamp,
+            };
+            _ = BroadcastAsync("oiReplayTick", payload);
+        }
 
-        _ = BroadcastAsync(payload);
+        if (_futuresLegsBySecurityId.TryGetValue(tick.SecurityId, out var futuresUnderlying) && tick.LastPrice > 0)
+        {
+            var payload = new
+            {
+                underlying = futuresUnderlying,
+                price = tick.LastPrice,
+                openInterest = tick.OpenInterest,
+                volume = tick.Volume,
+                time = tick.ExchangeTimestamp,
+            };
+            _ = BroadcastAsync("futuresTick", payload);
+        }
     }
 
     /// <summary>Fire-and-forget from OnTick (a synchronous event handler) - same reasoning as
     /// SpotFeedHostedService's own BroadcastAsync: a slow or failed SignalR send must never block or
     /// crash the tick-handling path that every other live consumer of this same event also runs on.</summary>
-    private async Task BroadcastAsync(object payload)
+    private async Task BroadcastAsync(string eventName, object payload)
     {
         try
         {
-            await _hub.Clients.All.SendAsync("oiReplayTick", payload);
+            await _hub.Clients.All.SendAsync(eventName, payload);
         }
         catch (Exception ex)
         {
-            _logger.LogDebug(ex, "OI Replay live feed: failed to broadcast a tick.");
+            _logger.LogDebug(ex, "OI Replay live feed: failed to broadcast a {Event} tick.", eventName);
         }
     }
 }
