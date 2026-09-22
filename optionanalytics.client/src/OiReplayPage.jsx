@@ -1,5 +1,6 @@
 import { Component, useEffect, useMemo, useRef, useState } from 'react'
-import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicker, Alert, Empty, Tooltip, Slider, Tag, InputNumber, Switch, Table, Popover, Segmented } from 'antd'
+import { createPortal } from 'react-dom'
+import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicker, Alert, Empty, Tooltip, Slider, Tag, InputNumber, Switch, Table, Segmented } from 'antd'
 import { PlayCircleOutlined, PauseCircleOutlined, ReloadOutlined, SoundOutlined } from '@ant-design/icons'
 import { createChart, createSeriesMarkers, CandlestickSeries, LineSeries, CrosshairMode } from 'lightweight-charts'
 import * as signalR from '@microsoft/signalr'
@@ -496,6 +497,61 @@ function FuturesChart({ bars, oiLine, markers, dayKey, height = 320 }) {
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }
 
+// A genuinely draggable floating panel - antd's own Popover only ever anchors next to its trigger,
+// even when manually controlled to stay open, which isn't what "floating, I should be able to move
+// it anywhere on screen" means. Rendered into a portal on document.body so it sits above every other
+// element regardless of where its trigger lives in the tree, and tracked as a plain {x,y} in the
+// PARENT's own state (not local state here) so the position survives closing and reopening the
+// panel, not just drags within one open session. Dragged via native mouse events on the header - no
+// drag library needed for something this small.
+function DraggableFloatingPanel({ title, pos, onPosChange, onClose, children }) {
+  const dragRef = useRef(null)
+
+  const onHeaderMouseDown = (e) => {
+    dragRef.current = { startX: e.clientX, startY: e.clientY, origX: pos.x, origY: pos.y }
+    const onMouseMove = (moveEvent) => {
+      if (!dragRef.current) return
+      const dx = moveEvent.clientX - dragRef.current.startX
+      const dy = moveEvent.clientY - dragRef.current.startY
+      const maxX = Math.max(0, window.innerWidth - 80)
+      const maxY = Math.max(0, window.innerHeight - 40)
+      onPosChange({
+        x: Math.min(Math.max(0, dragRef.current.origX + dx), maxX),
+        y: Math.min(Math.max(0, dragRef.current.origY + dy), maxY),
+      })
+    }
+    const onMouseUp = () => {
+      dragRef.current = null
+      window.removeEventListener('mousemove', onMouseMove)
+      window.removeEventListener('mouseup', onMouseUp)
+    }
+    window.addEventListener('mousemove', onMouseMove)
+    window.addEventListener('mouseup', onMouseUp)
+  }
+
+  return createPortal(
+    <div style={{
+      position: 'fixed', left: pos.x, top: pos.y, zIndex: 1000, width: 440,
+      background: '#1f1f1f', border: `1px solid ${BORDER_COLOR}`, borderRadius: 8,
+      boxShadow: '0 8px 28px rgba(0, 0, 0, 0.55)',
+    }}
+    >
+      <div
+        onMouseDown={onHeaderMouseDown}
+        style={{
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+          padding: '8px 12px', cursor: 'move', borderBottom: `1px solid ${BORDER_COLOR}`, userSelect: 'none',
+        }}
+      >
+        <Text strong style={{ fontSize: 13 }}>{title}</Text>
+        <Button type="text" size="small" onClick={onClose} style={{ padding: '0 4px' }}>✕</Button>
+      </div>
+      <div style={{ padding: 12 }}>{children}</div>
+    </div>,
+    document.body,
+  )
+}
+
 // SEBI periodically revises each index's own lot size - update this if it changes. This feature is
 // paper trading only (no real order is ever placed - see PaperTradePanel's own doc comment), so a
 // stale value here only skews the SIMULATED PnL's scale, not anything real.
@@ -539,7 +595,7 @@ function PaperTradePanel({
   ]
 
   return (
-    <div style={{ width: 420 }}>
+    <div style={{ width: '100%' }}>
       <Space direction="vertical" size={10} style={{ width: '100%' }}>
         <Space wrap size={8}>
           <Segmented value={side} onChange={onSideChange} options={[{ label: 'CE', value: 'CE' }, { label: 'PE', value: 'PE' }]} />
@@ -894,11 +950,14 @@ export default function OiReplayPage() {
   const [paperStrikeOffset, setPaperStrikeOffset] = useState(0)
   const [paperQtyLots, setPaperQtyLots] = useState(10)
   const [paperPositions, setPaperPositions] = useState([])
-  // Manually controlled (trigger={[]} below) rather than antd's own click-to-dismiss behavior - a
-  // trade panel that closes the moment you drag the timeline slider or click anywhere on the chart
-  // underneath it defeats the point of "floating" next to the chart while you watch a position's
-  // PnL move. Only the panel's own close button, or clicking the trigger again, ever closes it.
+  // Toggled by the trigger button/tag and the panel's own close button only - never by clicking
+  // elsewhere (it's a portal-rendered DraggableFloatingPanel, not an antd Popover, so there is no
+  // click-outside-to-dismiss behavior to fight in the first place). Position lives here, not inside
+  // the panel component, so it survives closing and reopening rather than resetting every time.
   const [paperPanelOpen, setPaperPanelOpen] = useState(false)
+  const [paperPanelPos, setPaperPanelPos] = useState(() => ({
+    x: Math.max(24, window.innerWidth - 480), y: 140,
+  }))
 
   // BANKNIFTY has no weekly expiry - NSE discontinued it (same rule Expired Backtest enforces).
   // Corrected right in the underlying picker's own onChange below, not a separate effect - this
@@ -1615,39 +1674,32 @@ export default function OiReplayPage() {
                         <Tag color="success">● LIVE</Tag>
                       </Tooltip>
                     )}
-                    <Popover
-                      title={(
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 16 }}>
-                          <span>Paper trade</span>
-                          <Button type="text" size="small" onClick={() => setPaperPanelOpen(false)} style={{ padding: '0 4px' }}>✕</Button>
-                        </div>
-                      )}
-                      trigger={[]}
-                      open={paperPanelOpen}
-                      placement="bottomRight"
-                      content={(
-                        <PaperTradePanel
-                          atmStrike={atmStrike} step={step}
-                          side={paperSide} onSideChange={setPaperSide}
-                          strikeOffset={paperStrikeOffset} onStrikeOffsetChange={setPaperStrikeOffset}
-                          qtyLots={paperQtyLots} onQtyLotsChange={setPaperQtyLots}
-                          onBuy={handlePaperBuy} canBuy={atmStrike != null && paperEntryPreview?.price != null}
-                          positions={enrichedPaperPositions} onExit={handlePaperExit}
-                        />
-                      )}
-                    >
-                      {paperTotalPnl !== 0 || paperOpenCount > 0 ? (
-                        <Tag
-                          color={paperTotalPnl >= 0 ? 'success' : 'error'} style={{ cursor: 'pointer' }}
-                          onClick={() => setPaperPanelOpen((o) => !o)}
-                        >
-                          Paper PnL: {paperTotalPnl >= 0 ? '+' : ''}{paperTotalPnl.toFixed(0)}{paperOpenCount > 0 ? ` (${paperOpenCount} open)` : ''}
-                        </Tag>
-                      ) : (
-                        <Button size="small" onClick={() => setPaperPanelOpen((o) => !o)}>Paper Trade</Button>
-                      )}
-                    </Popover>
+                    {paperTotalPnl !== 0 || paperOpenCount > 0 ? (
+                      <Tag
+                        color={paperTotalPnl >= 0 ? 'success' : 'error'} style={{ cursor: 'pointer' }}
+                        onClick={() => setPaperPanelOpen((o) => !o)}
+                      >
+                        Paper PnL: {paperTotalPnl >= 0 ? '+' : ''}{paperTotalPnl.toFixed(0)}{paperOpenCount > 0 ? ` (${paperOpenCount} open)` : ''}
+                      </Tag>
+                    ) : (
+                      <Button size="small" onClick={() => setPaperPanelOpen((o) => !o)}>Paper Trade</Button>
+                    )}
                   </Space>
+                  {paperPanelOpen && (
+                    <DraggableFloatingPanel
+                      title="Paper trade" pos={paperPanelPos} onPosChange={setPaperPanelPos}
+                      onClose={() => setPaperPanelOpen(false)}
+                    >
+                      <PaperTradePanel
+                        atmStrike={atmStrike} step={step}
+                        side={paperSide} onSideChange={setPaperSide}
+                        strikeOffset={paperStrikeOffset} onStrikeOffsetChange={setPaperStrikeOffset}
+                        qtyLots={paperQtyLots} onQtyLotsChange={setPaperQtyLots}
+                        onBuy={handlePaperBuy} canBuy={atmStrike != null && paperEntryPreview?.price != null}
+                        positions={enrichedPaperPositions} onExit={handlePaperExit}
+                      />
+                    </DraggableFloatingPanel>
+                  )}
                   <Space align="center" size={12} wrap style={{ marginBottom: 8 }}>
                     <Text type="secondary" style={{ fontSize: 12 }}>Alert when a strike near ATM shifts by</Text>
                     <InputNumber
