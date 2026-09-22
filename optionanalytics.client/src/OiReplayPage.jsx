@@ -2198,18 +2198,20 @@ export default function OiReplayPage() {
                     title={`CE premium ${cePremiumStrike ?? ''}`}
                     extra={<Select value={cePremiumOffset} onChange={setCePremiumOffset} style={{ width: 150 }} options={premiumStrikeOptions} disabled={atmStrike == null} />}
                   >
-                    {oneMinBars.length > 0
-                      ? (
-                        <ChartErrorBoundary key={`premium-ce-${underlying}-${result.date}-${cePremiumOffset}`}>
-                          <PremiumLineChart
-                            points={cePremiumLine}
-                            dayKey={`premium-ce-${underlying}-${result.date}-${cePremiumOffset}`}
-                            color={RESISTANCE_DARK}
-                            height={320}
-                          />
-                        </ChartErrorBoundary>
-                      )
-                      : <Empty description="No spot candles for this day." />}
+                    {oneMinBars.length === 0
+                      ? <Empty description="No spot candles for this day." />
+                      : cePremiumLine.length === 0
+                        ? <Empty description={`No CE ${cePremiumStrike ?? ''} premium data yet today.`} />
+                        : (
+                          <ChartErrorBoundary key={`premium-ce-${underlying}-${result.date}-${cePremiumOffset}`}>
+                            <PremiumLineChart
+                              points={cePremiumLine}
+                              dayKey={`premium-ce-${underlying}-${result.date}-${cePremiumOffset}`}
+                              color={RESISTANCE_DARK}
+                              height={320}
+                            />
+                          </ChartErrorBoundary>
+                        )}
                   </Card>
                 </Col>
                 <Col span={12}>
@@ -2218,18 +2220,20 @@ export default function OiReplayPage() {
                     title={`PE premium ${pePremiumStrike ?? ''}`}
                     extra={<Select value={pePremiumOffset} onChange={setPePremiumOffset} style={{ width: 150 }} options={premiumStrikeOptions} disabled={atmStrike == null} />}
                   >
-                    {oneMinBars.length > 0
-                      ? (
-                        <ChartErrorBoundary key={`premium-pe-${underlying}-${result.date}-${pePremiumOffset}`}>
-                          <PremiumLineChart
-                            points={pePremiumLine}
-                            dayKey={`premium-pe-${underlying}-${result.date}-${pePremiumOffset}`}
-                            color={SUPPORT_DARK}
-                            height={320}
-                          />
-                        </ChartErrorBoundary>
-                      )
-                      : <Empty description="No spot candles for this day." />}
+                    {oneMinBars.length === 0
+                      ? <Empty description="No spot candles for this day." />
+                      : pePremiumLine.length === 0
+                        ? <Empty description={`No PE ${pePremiumStrike ?? ''} premium data yet today.`} />
+                        : (
+                          <ChartErrorBoundary key={`premium-pe-${underlying}-${result.date}-${pePremiumOffset}`}>
+                            <PremiumLineChart
+                              points={pePremiumLine}
+                              dayKey={`premium-pe-${underlying}-${result.date}-${pePremiumOffset}`}
+                              color={SUPPORT_DARK}
+                              height={320}
+                            />
+                          </ChartErrorBoundary>
+                        )}
                   </Card>
                 </Col>
               </Row>
