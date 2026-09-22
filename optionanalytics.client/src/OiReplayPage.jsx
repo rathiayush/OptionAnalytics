@@ -761,11 +761,15 @@ function DraggableFloatingPanel({ title, pos, onPosChange, onClose, children }) 
 // strike is currently interesting, not just the underlying spot every other chart on this page
 // already shows. Both lines share ONE price scale (right axis) since CE and PE premiums are the
 // same unit and usually a comparable order of magnitude, unlike, say, price vs OI.
-function OptionPremiumChart({ cePoints, pePoints, dayKey, height = 320 }) {
+// A SINGLE leg's own premium as its own chart, with its own auto-scaled price axis - two of these
+// (CE and PE) are rendered side by side rather than one chart with both as overlaid lines, since a
+// far OTM leg's premium can be a small fraction of ATM's and would otherwise flatten to a useless
+// sliver against the other leg's own scale. Mirrors how the Dashboard page (App.jsx) shows its own
+// ATM CE/PE premium charts as two separate cards, not one overlay.
+function PremiumLineChart({ points, dayKey, color, height = 320 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
-  const ceSeriesRef = useRef(null)
-  const peSeriesRef = useRef(null)
+  const seriesRef = useRef(null)
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -780,8 +784,7 @@ function OptionPremiumChart({ cePoints, pePoints, dayKey, height = 320 }) {
       localization: { timeFormatter: istTimeFormatter },
     })
     chartRef.current = chart
-    ceSeriesRef.current = chart.addSeries(LineSeries, { color: RESISTANCE_DARK, lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: 'CE' })
-    peSeriesRef.current = chart.addSeries(LineSeries, { color: SUPPORT_DARK, lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: 'PE' })
+    seriesRef.current = chart.addSeries(LineSeries, { color, lineWidth: 2, priceLineVisible: false, lastValueVisible: true })
 
     const onResize = () => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }) }
     window.addEventListener('resize', onResize)
@@ -789,20 +792,17 @@ function OptionPremiumChart({ cePoints, pePoints, dayKey, height = 320 }) {
       window.removeEventListener('resize', onResize)
       chart.remove()
       chartRef.current = null
-      ceSeriesRef.current = null
-      peSeriesRef.current = null
+      seriesRef.current = null
     }
-  }, [height])
+  }, [height, color])
 
-  useEffect(() => { if (ceSeriesRef.current) ceSeriesRef.current.setData(cePoints) }, [cePoints])
-  useEffect(() => { if (peSeriesRef.current) peSeriesRef.current.setData(pePoints) }, [pePoints])
+  useEffect(() => { if (seriesRef.current) seriesRef.current.setData(points) }, [points])
 
-  // Re-fit on a brand new day OR whenever either strike selection changes (dayKey covers both, see
-  // the caller) - switching from ATM to ATM+5 can jump the premium's own scale entirely (a far OTM
-  // strike is worth a fraction of ATM's), so the old zoom/scale would otherwise show a flat, useless
-  // line until manually re-fit.
+  // Re-fit on a brand new day OR whenever the strike selection changes (dayKey covers both, see the
+  // caller) - switching from ATM to ATM+5 can jump the premium's own scale entirely, so the old
+  // zoom/scale would otherwise show a flat, useless line until manually re-fit.
   useEffect(() => {
-    if (cePoints.length > 0 || pePoints.length > 0) chartRef.current?.timeScale().fitContent()
+    if (points.length > 0) chartRef.current?.timeScale().fitContent()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dayKey])
 
@@ -2181,33 +2181,50 @@ export default function OiReplayPage() {
 
             {visibleSections.includes('optionPremium') && (
               <Row gutter={16} style={{ marginTop: 16 }}>
-                <Col span={24}>
+                <Col span={24} style={{ marginBottom: 8 }}>
+                  <Space size={12} wrap>
+                    <Text type="secondary" style={{ fontSize: 12 }}>Shift ATM (both)</Text>
+                    <Select
+                      value={cePremiumOffset === pePremiumOffset ? cePremiumOffset : null}
+                      placeholder="Mixed"
+                      onChange={(v) => { setCePremiumOffset(v); setPePremiumOffset(v) }}
+                      style={{ width: 160 }} options={premiumStrikeOptions} disabled={atmStrike == null}
+                    />
+                  </Space>
+                </Col>
+                <Col span={12}>
                   <Card
                     size="small"
-                    title="Option premium (choose strike)"
-                    extra={
-                      <Space size={12} wrap>
-                        <Text type="secondary" style={{ fontSize: 12 }}>Shift ATM (both)</Text>
-                        <Select
-                          value={cePremiumOffset === pePremiumOffset ? cePremiumOffset : null}
-                          placeholder="Mixed"
-                          onChange={(v) => { setCePremiumOffset(v); setPePremiumOffset(v) }}
-                          style={{ width: 160 }} options={premiumStrikeOptions} disabled={atmStrike == null}
-                        />
-                        <Text style={{ fontSize: 12, color: RESISTANCE_DARK }}>CE</Text>
-                        <Select value={cePremiumOffset} onChange={setCePremiumOffset} style={{ width: 150 }} options={premiumStrikeOptions} disabled={atmStrike == null} />
-                        <Text style={{ fontSize: 12, color: SUPPORT_DARK }}>PE</Text>
-                        <Select value={pePremiumOffset} onChange={setPePremiumOffset} style={{ width: 150 }} options={premiumStrikeOptions} disabled={atmStrike == null} />
-                      </Space>
-                    }
+                    title={`CE premium ${cePremiumStrike ?? ''}`}
+                    extra={<Select value={cePremiumOffset} onChange={setCePremiumOffset} style={{ width: 150 }} options={premiumStrikeOptions} disabled={atmStrike == null} />}
                   >
                     {oneMinBars.length > 0
                       ? (
-                        <ChartErrorBoundary key={`premium-${underlying}-${result.date}-${cePremiumOffset}-${pePremiumOffset}`}>
-                          <OptionPremiumChart
-                            cePoints={cePremiumLine}
-                            pePoints={pePremiumLine}
-                            dayKey={`premium-${underlying}-${result.date}-${cePremiumOffset}-${pePremiumOffset}`}
+                        <ChartErrorBoundary key={`premium-ce-${underlying}-${result.date}-${cePremiumOffset}`}>
+                          <PremiumLineChart
+                            points={cePremiumLine}
+                            dayKey={`premium-ce-${underlying}-${result.date}-${cePremiumOffset}`}
+                            color={RESISTANCE_DARK}
+                            height={320}
+                          />
+                        </ChartErrorBoundary>
+                      )
+                      : <Empty description="No spot candles for this day." />}
+                  </Card>
+                </Col>
+                <Col span={12}>
+                  <Card
+                    size="small"
+                    title={`PE premium ${pePremiumStrike ?? ''}`}
+                    extra={<Select value={pePremiumOffset} onChange={setPePremiumOffset} style={{ width: 150 }} options={premiumStrikeOptions} disabled={atmStrike == null} />}
+                  >
+                    {oneMinBars.length > 0
+                      ? (
+                        <ChartErrorBoundary key={`premium-pe-${underlying}-${result.date}-${pePremiumOffset}`}>
+                          <PremiumLineChart
+                            points={pePremiumLine}
+                            dayKey={`premium-pe-${underlying}-${result.date}-${pePremiumOffset}`}
+                            color={SUPPORT_DARK}
                             height={320}
                           />
                         </ChartErrorBoundary>
