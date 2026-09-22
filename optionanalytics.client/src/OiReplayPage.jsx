@@ -1703,8 +1703,11 @@ export default function OiReplayPage() {
     // futures chart at once, all genuinely useful wider (more candles visible, more of the ladder's
     // own numbers readable without scrolling) rather than sitting centered in a narrow column with
     // large empty margins either side on any normal desktop monitor - the user's own "I see a lot of
-    // space on left and right, it should fit, we can show a lot of thing in left and right".
-    <div style={{ maxWidth: 1800, margin: '0 auto', padding: '24px 16px' }}>
+    // space on left and right, it should fit, we can show a lot of thing in left and right". Raised
+    // again to 2600 for the user's own "width more than 2500 trading monitor" - three chart columns
+    // (Spot + Entry chart B + Entry chart C) side by side need real width each to stay readable, not
+    // just technically fit.
+    <div style={{ maxWidth: 2600, margin: '0 auto', padding: '24px 16px' }}>
       <Space direction="vertical" size={20} style={{ width: '100%' }}>
         <Space align="center" size={16} wrap>
           <Title level={3} style={{ margin: 0 }}>Option Analytics</Title>
@@ -1885,7 +1888,7 @@ export default function OiReplayPage() {
             )}
 
             <Row gutter={16}>
-              <Col span={15}>
+              <Col span={visibleSections.includes('entryCharts') ? 8 : 24}>
                 <Card size="small" title="Spot (replaying)">
                   {/* Playback controls, literally inside the same card as the chart, right above
                       the canvas itself - the user's own "this bar should be near to chart just on
@@ -1986,55 +1989,63 @@ export default function OiReplayPage() {
                     : <Empty description="No spot candles for this day." />}
                 </Card>
               </Col>
-              <Col span={9}>
+              {/* The user's own "width more than 2500... adjust all 3 charts in same row" ask - on a
+                  wide enough monitor, the main chart and both fast-entry charts sit side by side in
+                  ONE row instead of the main chart's own row plus a second row underneath. The OI/IV
+                  ladder moves to its own full-width row below (see maxWidth's own doc comment on the
+                  page container this depends on) rather than squeezing a 4th column in here - a
+                  table full of numbers benefits from the extra width just as much as a chart does. */}
+              {visibleSections.includes('entryCharts') && (
+                <>
+                  <Col span={8}>
+                    <Card size="small" title="Entry chart B (independent timeframe + EMA)">
+                      {oneMinBars.length > 0
+                        ? (
+                          <ChartErrorBoundary key={`emaB-${underlying}-${result.date}-${chartBTimeframe}`}>
+                            <EmaChart
+                              oneMinBars={oneMinBars}
+                              visibleCount={visibleCount}
+                              timeframe={chartBTimeframe} onTimeframeChange={setChartBTimeframe}
+                              ema1Period={chartBEma1} onEma1PeriodChange={setChartBEma1}
+                              ema2Period={chartBEma2} onEma2PeriodChange={setChartBEma2}
+                              dayKey={`emaB-${underlying}-${result.date}`}
+                              height={460}
+                            />
+                          </ChartErrorBoundary>
+                        )
+                        : <Empty description="No spot candles for this day." />}
+                    </Card>
+                  </Col>
+                  <Col span={8}>
+                    <Card size="small" title="Entry chart C (independent timeframe + EMA)">
+                      {oneMinBars.length > 0
+                        ? (
+                          <ChartErrorBoundary key={`emaC-${underlying}-${result.date}-${chartCTimeframe}`}>
+                            <EmaChart
+                              oneMinBars={oneMinBars}
+                              visibleCount={visibleCount}
+                              timeframe={chartCTimeframe} onTimeframeChange={setChartCTimeframe}
+                              ema1Period={chartCEma1} onEma1PeriodChange={setChartCEma1}
+                              ema2Period={chartCEma2} onEma2PeriodChange={setChartCEma2}
+                              dayKey={`emaC-${underlying}-${result.date}`}
+                              height={460}
+                            />
+                          </ChartErrorBoundary>
+                        )
+                        : <Empty description="No spot candles for this day." />}
+                    </Card>
+                  </Col>
+                </>
+              )}
+            </Row>
+
+            <Row gutter={16} style={{ marginTop: 16 }}>
+              <Col span={24}>
                 <Card size="small" title="OI / IV ladder (nearest expiry, as of the current candle)" bodyStyle={{ maxHeight: 460, overflowY: 'auto' }}>
                   <OiLadder rows={ladderRows} atmStrike={atmStrike} />
                 </Card>
               </Col>
             </Row>
-
-            {visibleSections.includes('entryCharts') && (
-              <Row gutter={16} style={{ marginTop: 16 }}>
-                <Col span={12}>
-                  <Card size="small" title="Entry chart B (independent timeframe + EMA)">
-                    {oneMinBars.length > 0
-                      ? (
-                        <ChartErrorBoundary key={`emaB-${underlying}-${result.date}-${chartBTimeframe}`}>
-                          <EmaChart
-                            oneMinBars={oneMinBars}
-                            visibleCount={visibleCount}
-                            timeframe={chartBTimeframe} onTimeframeChange={setChartBTimeframe}
-                            ema1Period={chartBEma1} onEma1PeriodChange={setChartBEma1}
-                            ema2Period={chartBEma2} onEma2PeriodChange={setChartBEma2}
-                            dayKey={`emaB-${underlying}-${result.date}`}
-                            height={320}
-                          />
-                        </ChartErrorBoundary>
-                      )
-                      : <Empty description="No spot candles for this day." />}
-                  </Card>
-                </Col>
-                <Col span={12}>
-                  <Card size="small" title="Entry chart C (independent timeframe + EMA)">
-                    {oneMinBars.length > 0
-                      ? (
-                        <ChartErrorBoundary key={`emaC-${underlying}-${result.date}-${chartCTimeframe}`}>
-                          <EmaChart
-                            oneMinBars={oneMinBars}
-                            visibleCount={visibleCount}
-                            timeframe={chartCTimeframe} onTimeframeChange={setChartCTimeframe}
-                            ema1Period={chartCEma1} onEma1PeriodChange={setChartCEma1}
-                            ema2Period={chartCEma2} onEma2PeriodChange={setChartCEma2}
-                            dayKey={`emaC-${underlying}-${result.date}`}
-                            height={320}
-                          />
-                        </ChartErrorBoundary>
-                      )
-                      : <Empty description="No spot candles for this day." />}
-                  </Card>
-                </Col>
-              </Row>
-            )}
 
             {visibleSections.includes('liquidityMap') && (
               <Row gutter={16} style={{ marginTop: 16 }}>
