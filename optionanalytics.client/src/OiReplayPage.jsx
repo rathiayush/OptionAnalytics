@@ -2245,6 +2245,13 @@ export default function OiReplayPage() {
                     title="Option premium (choose strike)"
                     extra={
                       <Space size={12} wrap>
+                        <Text type="secondary" style={{ fontSize: 12 }}>Shift ATM (both)</Text>
+                        <Select
+                          value={cePremiumOffset === pePremiumOffset ? cePremiumOffset : null}
+                          placeholder="Mixed"
+                          onChange={(v) => { setCePremiumOffset(v); setPePremiumOffset(v) }}
+                          style={{ width: 160 }} options={premiumStrikeOptions} disabled={atmStrike == null}
+                        />
                         <Text style={{ fontSize: 12, color: RESISTANCE_DARK }}>CE</Text>
                         <Select value={cePremiumOffset} onChange={setCePremiumOffset} style={{ width: 150 }} options={premiumStrikeOptions} disabled={atmStrike == null} />
                         <Text style={{ fontSize: 12, color: SUPPORT_DARK }}>PE</Text>
