@@ -894,6 +894,11 @@ export default function OiReplayPage() {
   const [paperStrikeOffset, setPaperStrikeOffset] = useState(0)
   const [paperQtyLots, setPaperQtyLots] = useState(10)
   const [paperPositions, setPaperPositions] = useState([])
+  // Manually controlled (trigger={[]} below) rather than antd's own click-to-dismiss behavior - a
+  // trade panel that closes the moment you drag the timeline slider or click anywhere on the chart
+  // underneath it defeats the point of "floating" next to the chart while you watch a position's
+  // PnL move. Only the panel's own close button, or clicking the trigger again, ever closes it.
+  const [paperPanelOpen, setPaperPanelOpen] = useState(false)
 
   // BANKNIFTY has no weekly expiry - NSE discontinued it (same rule Expired Backtest enforces).
   // Corrected right in the underlying picker's own onChange below, not a separate effect - this
@@ -1416,7 +1421,13 @@ export default function OiReplayPage() {
   }, [currentBar, ladderRows, pcr, atmStrike, step, oneMinBars, visibleCount, dayStartByStrike])
 
   return (
-    <div style={{ maxWidth: 1280, margin: '0 auto', padding: '24px 16px' }}>
+    // Deliberately wider than every other page's own 1280 (see shared.jsx/App.jsx/etc.) - this is
+    // the one page in the app carrying a chart, an OI/IV ladder, a whole-band liquidity table AND a
+    // futures chart at once, all genuinely useful wider (more candles visible, more of the ladder's
+    // own numbers readable without scrolling) rather than sitting centered in a narrow column with
+    // large empty margins either side on any normal desktop monitor - the user's own "I see a lot of
+    // space on left and right, it should fit, we can show a lot of thing in left and right".
+    <div style={{ maxWidth: 1800, margin: '0 auto', padding: '24px 16px' }}>
       <Space direction="vertical" size={20} style={{ width: '100%' }}>
         <Space align="center" size={16} wrap>
           <Title level={3} style={{ margin: 0 }}>Option Analytics</Title>
@@ -1605,8 +1616,14 @@ export default function OiReplayPage() {
                       </Tooltip>
                     )}
                     <Popover
-                      title="Paper trade"
-                      trigger="click"
+                      title={(
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 16 }}>
+                          <span>Paper trade</span>
+                          <Button type="text" size="small" onClick={() => setPaperPanelOpen(false)} style={{ padding: '0 4px' }}>✕</Button>
+                        </div>
+                      )}
+                      trigger={[]}
+                      open={paperPanelOpen}
                       placement="bottomRight"
                       content={(
                         <PaperTradePanel
@@ -1620,11 +1637,14 @@ export default function OiReplayPage() {
                       )}
                     >
                       {paperTotalPnl !== 0 || paperOpenCount > 0 ? (
-                        <Tag color={paperTotalPnl >= 0 ? 'success' : 'error'} style={{ cursor: 'pointer' }}>
+                        <Tag
+                          color={paperTotalPnl >= 0 ? 'success' : 'error'} style={{ cursor: 'pointer' }}
+                          onClick={() => setPaperPanelOpen((o) => !o)}
+                        >
                           Paper PnL: {paperTotalPnl >= 0 ? '+' : ''}{paperTotalPnl.toFixed(0)}{paperOpenCount > 0 ? ` (${paperOpenCount} open)` : ''}
                         </Tag>
                       ) : (
-                        <Button size="small">Paper Trade</Button>
+                        <Button size="small" onClick={() => setPaperPanelOpen((o) => !o)}>Paper Trade</Button>
                       )}
                     </Popover>
                   </Space>
