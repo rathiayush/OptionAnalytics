@@ -15,7 +15,7 @@ const { Text, Title } = Typography
 // BANKNIFTY has no weekly expiry (same rule the rest of this page and Expired Backtest enforce), so
 // a live feed for that combo will simply never arrive; kept in sync with that service's own list by
 // hand since the two sides have no shared source of truth to derive it from automatically.
-const LIVE_FEED_COMBOS = new Set(['NIFTY:WEEK', 'NIFTY:MONTH', 'BANKNIFTY:MONTH'])
+const LIVE_FEED_COMBOS = new Set(['NIFTY:WEEK', 'NIFTY:MONTH', 'BANKNIFTY:MONTH', 'SENSEX:WEEK', 'SENSEX:MONTH'])
 
 // Connects to the same SignalR hub the live dashboard already uses (App.jsx's own useHub), for two
 // events: "spotUpdate" (SpotFeedHostedService's existing push - the underlying's own currently-
@@ -1196,11 +1196,16 @@ export default function OiReplayPage() {
         <Card size="small" title="OI Replay">
           <Space direction="vertical" size={12} style={{ width: '100%' }}>
             <Text type="secondary" style={{ fontSize: 12 }}>
-              Plays a stored trading day back candle by candle, with the nearest-expiry OI/IV ladder across the whole
-              strike band alongside it. Reads only from your NiftyDataCollector database - this page never calls Dhan live.
+              Plays a trading day back candle by candle, with the nearest-expiry OI/IV ladder across the whole
+              strike band alongside it. NIFTY/BANKNIFTY prefer your NiftyDataCollector database, falling back to a
+              live Dhan call when it's stale or unconfigured; SENSEX and futures always call Dhan live - there is no
+              stored source for either.
             </Text>
             <Space wrap size={12}>
-              <Select value={underlying} onChange={selectUnderlying} style={{ width: 130 }} options={[{ value: 'NIFTY', label: 'NIFTY' }, { value: 'BANKNIFTY', label: 'BANKNIFTY' }]} />
+              <Select
+                value={underlying} onChange={selectUnderlying} style={{ width: 130 }}
+                options={[{ value: 'NIFTY', label: 'NIFTY' }, { value: 'BANKNIFTY', label: 'BANKNIFTY' }, { value: 'SENSEX', label: 'SENSEX' }]}
+              />
               <Select
                 value={expiryFlag} onChange={setExpiryFlag} style={{ width: 130 }}
                 options={[{ value: 'WEEK', label: 'Weekly', disabled: underlying === 'BANKNIFTY' }, { value: 'MONTH', label: 'Monthly' }]}

@@ -60,8 +60,19 @@ namespace OptionAnalytics.Server.Dhan;
 /// </summary>
 public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
 {
-    private const string FnoSegment = "NSE_FNO";
     private const string OptionInstrument = "OPTIDX";
+
+    /// <summary>NIFTY/BANKNIFTY's option chain trades on NSE ("NSE_FNO"); SENSEX's trades on BSE
+    /// ("BSE_FNO") - the same per-underlying exchange split DhanOptionChainMaster/
+    /// DhanFuturesInstrumentMaster already carry, applied here too now that OiReplayService supports
+    /// SENSEX as an always-live underlying. UNCONFIRMED against a real Dhan call for THIS specific
+    /// endpoint as of this change - Dhan's own /charts/rollingoption docs only ever show NSE_FNO in
+    /// their one worked example, which is exactly why ExpiredOptionBacktestService's own
+    /// StrikeStepByUnderlying deliberately left SENSEX out rather than guess. If Dhan rejects
+    /// BSE_FNO here, the failure surfaces as a plain Dhan error string on the page (see
+    /// SendWithRateLimitRetryAsync), not a crash - worth confirming with a real run.</summary>
+    private static string ResolveFnoSegment(string underlying) =>
+        string.Equals(underlying, "SENSEX", StringComparison.OrdinalIgnoreCase) ? "BSE_FNO" : "NSE_FNO";
     // "strike" asks Dhan to report the ACTUAL absolute strike it resolved "ATM+-K" to for every
     // bar - without this, this app has no way to check whether Dhan's own contract resolution
     // actually landed anywhere near what it asked for, which is exactly the kind of silent mismatch
@@ -117,10 +128,9 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
         string underlying, uint underlyingSecurityId, string expiryFlag, int expiryCode, string strike, string drvOptionType,
         DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken)
     {
-        // `underlying` is part of IRollingOptionDataSource's shared signature but unused here -
-        // this implementation identifies the underlying by underlyingSecurityId (what Dhan itself
-        // needs), not by name; StoredRollingOptionDataService is the one that needs the name, to
-        // query TimescaleDB's own underlying-keyed table.
+        // `underlying` used to be unused here (this implementation identifies the CONTRACT by
+        // underlyingSecurityId, not by name) - now also read once, just to pick the right exchange
+        // segment below (see ResolveFnoSegment), since Dhan itself needs that distinguished by name.
         if (!_api.HasSession)
             return (Array.Empty<(CandleWithVolume, decimal?, decimal?, long?, decimal?)>(), "Dhan is not authenticated (check Dhan:ClientId/Dhan:AccessToken).");
 
@@ -143,7 +153,7 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
 
             var payload = new
             {
-                exchangeSegment = FnoSegment,
+                exchangeSegment = ResolveFnoSegment(underlying),
                 interval = intervalMinutes.ToString(CultureInfo.InvariantCulture),
                 securityId = underlyingSecurityId,
                 instrument = OptionInstrument,

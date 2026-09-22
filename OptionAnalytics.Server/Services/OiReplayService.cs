@@ -34,6 +34,16 @@ namespace OptionAnalytics.Server.Services;
 /// including local development, with no stored source and no AppEnvironment.IsLocal gate at all -
 /// see GetFuturesAsync's own doc comment. NiftyDataCollector's database has no futures data
 /// whatsoever, so there is nothing to prefer over Dhan the way spot/options do.
+///
+/// SENSEX IS LIVE-ONLY TOO, LIKE FUTURES - the user's own explicit "sensex will always be fetch
+/// from live dhan call": NiftyDataCollector's database has never collected SENSEX at all (see
+/// HistoricalSpotDataPrefetchHostedService's own doc comment), so spot AND options for SENSEX skip
+/// the stored path entirely and always call Dhan directly, in every environment, the same shape
+/// futures already uses (see AlwaysLiveUnderlyings below). This is a DIFFERENT reason than
+/// ExpiredOptionBacktestService's own StrikeStepByUnderlying excluding SENSEX (uncertainty over
+/// whether Dhan's rolling-option endpoint even accepts a BSE exchange segment) - that uncertainty
+/// still applies here too (see DhanRollingOptionDataService.ResolveFnoSegment's own doc comment),
+/// just accepted now at the user's own explicit request rather than left unsupported.
 /// </summary>
 public sealed class OiReplayService
 {
@@ -45,6 +55,28 @@ public sealed class OiReplayService
 
     /// <summary>The only expiry cycle this page ever reads - see this class's own doc comment.</summary>
     private const int NearestExpiryCode = 1;
+
+    /// <summary>Strike step per underlying THIS PAGE supports - deliberately its own dictionary
+    /// rather than reusing ExpiredOptionBacktestService.StrikeStepByUnderlying, which excludes
+    /// SENSEX for a reason specific to ITS OWN stored/prefetch pipeline (see that dictionary's own
+    /// doc comment) that does not apply here - OI Replay never touches NiftyDataCollector's database
+    /// for SENSEX at all (see AlwaysLiveUnderlyings below and this class's own top-of-file doc
+    /// comment), so there is nothing stored to be uncertain about. 100 matches SENSEX's own real
+    /// strike spacing, the same value CdvHostedService/SpotFeedHostedService already use for it.
+    /// Also read by OiReplayLiveFeedService for the same reason.</summary>
+    internal static readonly Dictionary<string, int> StrikeStepByUnderlying = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["NIFTY"] = 50,
+        ["BANKNIFTY"] = 100,
+        ["SENSEX"] = 100,
+    };
+
+    /// <summary>Underlyings with no stored source to prefer at all - see this class's own top-of-file
+    /// doc comment ("SENSEX IS LIVE-ONLY TOO"). RunAsync/GetSeriesAsync skip NiftyDataCollector's
+    /// database entirely for these and always call Dhan directly, for spot AND options, regardless
+    /// of AppEnvironment.IsLocal or freshness - exactly like GetFuturesAsync already does for every
+    /// underlying.</summary>
+    private static readonly HashSet<string> AlwaysLiveUnderlyings = new(StringComparer.OrdinalIgnoreCase) { "SENSEX" };
 
     /// <summary>How far behind "now" today's own stored data is allowed to trail before a live Dhan
     /// call is worth making for it - short enough that a genuinely stale series (an hourly poll that
@@ -79,13 +111,14 @@ public sealed class OiReplayService
         string underlying, DateOnly date, int timeframeMinutes, string expiryFlag, CancellationToken cancellationToken)
     {
         var timeframe = Math.Max(1, timeframeMinutes);
+        var isAlwaysLive = AlwaysLiveUnderlyings.Contains(underlying);
 
-        if (!_storedSpot.IsConfigured && !_allowLiveDataFallback)
+        if (!isAlwaysLive && !_storedSpot.IsConfigured && !_allowLiveDataFallback)
             return OiReplayResult.Failed(underlying, date, timeframe,
                 "Stored data is not configured on this server (no NiftyDataCollector database connection) - see ConnectionStrings:NiftyDataCollectorTimescale.");
 
-        if (!ExpiredOptionBacktestService.StrikeStepByUnderlying.TryGetValue(underlying, out var step))
-            return OiReplayResult.Failed(underlying, date, timeframe, $"'{underlying}' is not supported - only NIFTY and BANKNIFTY.");
+        if (!StrikeStepByUnderlying.TryGetValue(underlying, out var step))
+            return OiReplayResult.Failed(underlying, date, timeframe, $"'{underlying}' is not supported - only NIFTY, BANKNIFTY, and SENSEX.");
 
         if (string.Equals(underlying, "BANKNIFTY", StringComparison.OrdinalIgnoreCase) && string.Equals(expiryFlag, "WEEK", StringComparison.OrdinalIgnoreCase))
             return OiReplayResult.Failed(underlying, date, timeframe, "BANKNIFTY has no weekly expiry - NSE discontinued it. Use Monthly instead.");
@@ -104,12 +137,12 @@ public sealed class OiReplayService
             return instrument;
         }
 
-        var spotBarsRaw = _storedSpot.IsConfigured
+        var spotBarsRaw = !isAlwaysLive && _storedSpot.IsConfigured
             ? (await _storedSpot.GetSpotCandlesAsync(underlying, date, date, cancellationToken)).Bars
             : Array.Empty<CandleWithVolume>();
         var spotError = (string?)null;
 
-        if (_allowLiveDataFallback && !IsFreshEnough(date, spotBarsRaw.Count > 0 ? spotBarsRaw[^1].Time : null))
+        if (isAlwaysLive || (_allowLiveDataFallback && !IsFreshEnough(date, spotBarsRaw.Count > 0 ? spotBarsRaw[^1].Time : null)))
         {
             var liveInstrument = await ResolveInstrumentAsync();
             if (liveInstrument is not null)
@@ -200,19 +233,23 @@ public sealed class OiReplayService
     /// enough (see IsFreshEnough) - the exact same "prefer stored, fall through when it's not good
     /// enough" shape as ExpiredOptionBacktestService's own useStoredData handling, just decided per
     /// series here instead of once per whole request, since different strikes' own stored rows can
-    /// in principle lag by different amounts.</summary>
+    /// in principle lag by different amounts. Skips straight to the live call, unconditionally, for
+    /// an AlwaysLiveUnderlyings member (SENSEX) - there is no stored series to prefer for those at
+    /// all.</summary>
     private async Task<IReadOnlyList<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)>> GetSeriesAsync(
         string underlying, string expiryFlag, string strikeToken, string drvOptionType, DateOnly date,
         Func<Task<DhanSpotInstrument?>> resolveInstrument, CancellationToken cancellationToken)
     {
-        var storedBars = _storedRollingOption.IsConfigured
+        var isAlwaysLive = AlwaysLiveUnderlyings.Contains(underlying);
+
+        var storedBars = !isAlwaysLive && _storedRollingOption.IsConfigured
             ? (await _storedRollingOption.GetRollingOptionCandlesAsync(underlying, 0, expiryFlag, NearestExpiryCode, strikeToken, drvOptionType, date, date, 1, cancellationToken)).Bars
             : Array.Empty<(CandleWithVolume, decimal?, decimal?, long?, decimal?)>();
 
-        if (!_allowLiveDataFallback) return storedBars;
+        if (!isAlwaysLive && !_allowLiveDataFallback) return storedBars;
 
         var latest = storedBars.Count > 0 ? storedBars[^1].Item1.Time : (DateTimeOffset?)null;
-        if (IsFreshEnough(date, latest)) return storedBars;
+        if (!isAlwaysLive && IsFreshEnough(date, latest)) return storedBars;
 
         var instrument = await resolveInstrument();
         if (instrument is null) return storedBars;

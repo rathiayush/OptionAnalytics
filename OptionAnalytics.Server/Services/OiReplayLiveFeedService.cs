@@ -9,11 +9,15 @@ namespace OptionAnalytics.Server.Services;
 /// Keeps OI Replay's own "today, live" mode genuinely live: continuously tracks the ATM+-10 strike
 /// band (same width as OiReplayService's own StrikeBandSteps) for every (underlying, expiryFlag)
 /// combo the page supports - NIFTY+WEEK, NIFTY+MONTH, BANKNIFTY+MONTH (BANKNIFTY has no weekly
-/// expiry - see ExpiredOptionBacktestService's own rejection of it) - over the SAME shared Dhan
-/// market-feed WebSocket connection CdvHostedService/StrategyTriggerHostedService already use for
-/// live trading, and pushes every tick straight to the browser over SignalR's existing SpotHub, so
-/// the OI Replay page's ladder/chart keep updating in real time once today's initial REST snapshot
-/// (see OiReplayService's own live-fallback doc comment) has loaded.
+/// expiry - see ExpiredOptionBacktestService's own rejection of it), SENSEX+WEEK, SENSEX+MONTH
+/// (SENSEX has both, weekly on Thursday under BSE's own current single-weekly-expiry convention) -
+/// over the SAME shared Dhan market-feed WebSocket connection CdvHostedService/
+/// StrategyTriggerHostedService already use for live trading, and pushes every tick straight to the
+/// browser over SignalR's existing SpotHub, so the OI Replay page's ladder/chart keep updating in
+/// real time once today's initial REST snapshot (see OiReplayService's own live-fallback doc
+/// comment) has loaded. SENSEX's own combos need no special handling here at all beyond being
+/// listed - DhanOptionChainMaster/SpotFeedHostedService/DhanMarketFeedClient already resolve and
+/// subscribe it correctly on BSE_FNO like every other live consumer in this app does.
 ///
 /// DELIBERATELY NEVER UNSUBSCRIBES a strike that drifts out of the recentered band - the shared
 /// DhanMarketFeedClient's subscription registry has no reference counting across independent
@@ -52,6 +56,8 @@ public sealed class OiReplayLiveFeedService : BackgroundService
         new("NIFTY", "WEEK"),
         new("NIFTY", "MONTH"),
         new("BANKNIFTY", "MONTH"),
+        new("SENSEX", "WEEK"),
+        new("SENSEX", "MONTH"),
     };
 
     private sealed record LegInfo(string Underlying, string ExpiryFlag, decimal Strike, bool IsCall);
@@ -111,7 +117,7 @@ public sealed class OiReplayLiveFeedService : BackgroundService
         if (!_spotFeed.States.TryGetValue(combo.Underlying, out var spotState) || spotState.LastPrice <= 0)
             return false;
 
-        if (!ExpiredOptionBacktestService.StrikeStepByUnderlying.TryGetValue(combo.Underlying, out var step))
+        if (!OiReplayService.StrikeStepByUnderlying.TryGetValue(combo.Underlying, out var step))
             return false;
 
         try
