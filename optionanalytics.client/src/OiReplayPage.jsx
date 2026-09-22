@@ -557,16 +557,17 @@ function DraggableFloatingPanel({ title, pos, onPosChange, onClose, children }) 
 // stale value here only skews the SIMULATED PnL's scale, not anything real.
 const PAPER_TRADE_LOT_SIZE = { NIFTY: 75, BANKNIFTY: 35, SENSEX: 20 }
 
-// One simulated position: Buy CE/PE at whatever this replay's own premium series shows as of the
-// CURRENT replay tick, then Exit later (again at whatever the series shows as of the tick Exit is
-// clicked) - entirely client-side, no backend call, no real order. Punching multiple positions in
-// one session, CE and PE both, is the point (the user's own "I can trade multiple things ce and pe
-// both") - each is tracked independently, so a CE and a PE (or several of either) can be open at
-// once with their own live PnL. Long-only (no short side) - keeps the control surface to just Buy/
-// Exit rather than a full order ticket, since this is a practice tool, not an execution path.
+// One simulated position: Buy (long) or Sell (short/write) CE/PE at whatever this replay's own
+// premium series shows as of the CURRENT replay tick, then Exit later (again at whatever the series
+// shows as of the tick Exit is clicked) - entirely client-side, no backend call, no real order.
+// Punching multiple positions in one session, CE and PE both, is the point (the user's own "I can
+// trade multiple things ce and pe both") - each is tracked independently, so several positions (any
+// mix of Buy/Sell, CE/PE) can be open at once with their own live PnL. A Sell position's PnL is the
+// mirror of a Buy's (entryPrice - ltp instead of ltp - entryPrice, since the writer profits as the
+// premium falls) - see the PnL calc in the caller's own enrichedPaperPositions.
 function PaperTradePanel({
-  atmStrike, step, side, onSideChange, strikeOffset, onStrikeOffsetChange, qtyLots, onQtyLotsChange,
-  onBuy, canBuy, positions, onExit,
+  atmStrike, step, side, onSideChange, direction, onDirectionChange, strikeOffset, onStrikeOffsetChange,
+  qtyLots, onQtyLotsChange, onPunch, canPunch, positions, onExit, onClearAll,
 }) {
   const strikeOptions = useMemo(() => {
     if (atmStrike == null || !step) return []
@@ -579,7 +580,10 @@ function PaperTradePanel({
   const totalPnl = positions.reduce((sum, p) => sum + p.pnl, 0)
 
   const columns = [
-    { title: 'Side', dataIndex: 'side', key: 'side', width: 50, render: (s) => <Tag color={s === 'CE' ? 'error' : 'success'}>{s}</Tag> },
+    {
+      title: 'Action', dataIndex: 'direction', key: 'direction', width: 60,
+      render: (d, r) => <Tag color={d === 'BUY' ? 'success' : 'error'}>{d} {r.side}</Tag>,
+    },
     { title: 'Strike', dataIndex: 'strike', key: 'strike', width: 70 },
     { title: 'Qty', dataIndex: 'qtyLots', key: 'qtyLots', width: 60, render: (q, r) => `${q}×${r.lotSize}` },
     { title: 'Entry', dataIndex: 'entryPrice', key: 'entryPrice', width: 65, render: (v) => v.toFixed(2) },
@@ -598,22 +602,28 @@ function PaperTradePanel({
     <div style={{ width: '100%' }}>
       <Space direction="vertical" size={10} style={{ width: '100%' }}>
         <Space wrap size={8}>
+          <Segmented value={direction} onChange={onDirectionChange} options={[{ label: 'Buy', value: 'BUY' }, { label: 'Sell', value: 'SELL' }]} />
           <Segmented value={side} onChange={onSideChange} options={[{ label: 'CE', value: 'CE' }, { label: 'PE', value: 'PE' }]} />
           <Select value={strikeOffset} onChange={onStrikeOffsetChange} style={{ width: 160 }} options={strikeOptions} disabled={atmStrike == null} />
           <InputNumber value={qtyLots} onChange={(v) => onQtyLotsChange(v ?? 1)} min={1} step={1} style={{ width: 100 }} addonAfter="lots" />
-          <Button type="primary" size="small" onClick={onBuy} disabled={!canBuy}>Buy</Button>
+          <Button type="primary" size="small" onClick={onPunch} disabled={!canPunch}>
+            {direction === 'SELL' ? 'Sell' : 'Buy'}
+          </Button>
         </Space>
         {positions.length > 0 && (
           <>
             <Table dataSource={positions} columns={columns} rowKey="id" size="small" pagination={false} scroll={{ y: 220 }} />
-            <Text strong style={{ color: totalPnl >= 0 ? UP_COLOR : DOWN_COLOR }}>
-              Total PnL: {totalPnl >= 0 ? '+' : ''}{totalPnl.toFixed(0)}
-            </Text>
+            <Space style={{ width: '100%', justifyContent: 'space-between' }}>
+              <Text strong style={{ color: totalPnl >= 0 ? UP_COLOR : DOWN_COLOR }}>
+                Total PnL: {totalPnl >= 0 ? '+' : ''}{totalPnl.toFixed(0)}
+              </Text>
+              <Button size="small" danger onClick={onClearAll}>Clear all</Button>
+            </Space>
           </>
         )}
         <Text type="secondary" style={{ fontSize: 10 }}>
-          Paper trade only - simulated against this replay's own premium series, no real order is ever placed. Long-only (Buy, then Exit); lot
-          size is a fixed per-underlying constant, not fetched live. Resets when a new day is loaded.
+          Paper trade only - simulated against this replay's own premium series, no real order is ever placed. Buy (long) or Sell (short/write),
+          then Exit; lot size is a fixed per-underlying constant, not fetched live. Resets when a new day is loaded, or click Clear all.
         </Text>
       </Space>
     </div>
@@ -947,6 +957,7 @@ export default function OiReplayPage() {
   // below), same as the live feed's own tail - a paper position only means something against the
   // ONE day's premium series it was punched into.
   const [paperSide, setPaperSide] = useState('CE')
+  const [paperDirection, setPaperDirection] = useState('BUY')
   const [paperStrikeOffset, setPaperStrikeOffset] = useState(0)
   const [paperQtyLots, setPaperQtyLots] = useState(10)
   const [paperPositions, setPaperPositions] = useState([])
@@ -1211,11 +1222,12 @@ export default function OiReplayPage() {
     return latestAtOrBefore(series ?? [], asOfMs)
   }, [paperSide, paperStrike, ceByStrike, peByStrike, asOfMs])
 
-  const handlePaperBuy = () => {
+  const handlePaperPunch = () => {
     if (paperStrike == null || paperEntryPreview?.price == null) return
     setPaperPositions((prev) => [...prev, {
       id: `${Date.now()}-${Math.random()}`,
-      side: paperSide, strike: paperStrike, qtyLots: paperQtyLots, lotSize: PAPER_TRADE_LOT_SIZE[underlying] ?? 1,
+      side: paperSide, direction: paperDirection, strike: paperStrike, qtyLots: paperQtyLots,
+      lotSize: PAPER_TRADE_LOT_SIZE[underlying] ?? 1,
       entryPrice: paperEntryPreview.price, entryTime: asOfMs, status: 'OPEN', exitPrice: null,
     }])
   }
@@ -1229,14 +1241,19 @@ export default function OiReplayPage() {
     }))
   }
 
+  const handlePaperClearAll = () => setPaperPositions([])
+
   // Live PnL for every position, OPEN or CLOSED - an OPEN one is marked to the replay's CURRENT
   // tick (so it moves as playback advances, exactly like a real open position would), a CLOSED one
-  // is locked to whatever price Exit was clicked at.
+  // is locked to whatever price Exit was clicked at. A SELL (short/write) position's PnL is the
+  // mirror of a BUY's - the writer profits as the premium FALLS, not rises - so the ltp/entry delta
+  // flips sign for it rather than sharing one formula both directions would get backwards for one.
   const enrichedPaperPositions = useMemo(() => paperPositions.map((p) => {
     const series = (p.side === 'CE' ? ceByStrike : peByStrike).get(p.strike)
     const livePoint = p.status === 'OPEN' && asOfMs != null ? latestAtOrBefore(series ?? [], asOfMs) : null
     const ltp = p.status === 'OPEN' ? (livePoint?.price ?? p.entryPrice) : p.exitPrice
-    return { ...p, ltp, pnl: (ltp - p.entryPrice) * p.qtyLots * p.lotSize }
+    const priceDelta = p.direction === 'SELL' ? p.entryPrice - ltp : ltp - p.entryPrice
+    return { ...p, ltp, pnl: priceDelta * p.qtyLots * p.lotSize }
   }), [paperPositions, ceByStrike, peByStrike, asOfMs])
   const paperOpenCount = enrichedPaperPositions.filter((p) => p.status === 'OPEN').length
   const paperTotalPnl = enrichedPaperPositions.reduce((sum, p) => sum + p.pnl, 0)
@@ -1693,10 +1710,11 @@ export default function OiReplayPage() {
                       <PaperTradePanel
                         atmStrike={atmStrike} step={step}
                         side={paperSide} onSideChange={setPaperSide}
+                        direction={paperDirection} onDirectionChange={setPaperDirection}
                         strikeOffset={paperStrikeOffset} onStrikeOffsetChange={setPaperStrikeOffset}
                         qtyLots={paperQtyLots} onQtyLotsChange={setPaperQtyLots}
-                        onBuy={handlePaperBuy} canBuy={atmStrike != null && paperEntryPreview?.price != null}
-                        positions={enrichedPaperPositions} onExit={handlePaperExit}
+                        onPunch={handlePaperPunch} canPunch={atmStrike != null && paperEntryPreview?.price != null}
+                        positions={enrichedPaperPositions} onExit={handlePaperExit} onClearAll={handlePaperClearAll}
                       />
                     </DraggableFloatingPanel>
                   )}
