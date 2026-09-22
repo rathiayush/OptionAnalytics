@@ -1,5 +1,5 @@
 import { Component, useEffect, useMemo, useRef, useState } from 'react'
-import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicker, Alert, Empty, Tooltip, Slider, Tag, InputNumber, Switch, Table } from 'antd'
+import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicker, Alert, Empty, Tooltip, Slider, Tag, InputNumber, Switch, Table, Popover, Segmented } from 'antd'
 import { PlayCircleOutlined, PauseCircleOutlined, ReloadOutlined, SoundOutlined } from '@ant-design/icons'
 import { createChart, createSeriesMarkers, CandlestickSeries, LineSeries, CrosshairMode } from 'lightweight-charts'
 import * as signalR from '@microsoft/signalr'
@@ -496,6 +496,74 @@ function FuturesChart({ bars, oiLine, markers, dayKey, height = 320 }) {
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }
 
+// SEBI periodically revises each index's own lot size - update this if it changes. This feature is
+// paper trading only (no real order is ever placed - see PaperTradePanel's own doc comment), so a
+// stale value here only skews the SIMULATED PnL's scale, not anything real.
+const PAPER_TRADE_LOT_SIZE = { NIFTY: 75, BANKNIFTY: 35, SENSEX: 20 }
+
+// One simulated position: Buy CE/PE at whatever this replay's own premium series shows as of the
+// CURRENT replay tick, then Exit later (again at whatever the series shows as of the tick Exit is
+// clicked) - entirely client-side, no backend call, no real order. Punching multiple positions in
+// one session, CE and PE both, is the point (the user's own "I can trade multiple things ce and pe
+// both") - each is tracked independently, so a CE and a PE (or several of either) can be open at
+// once with their own live PnL. Long-only (no short side) - keeps the control surface to just Buy/
+// Exit rather than a full order ticket, since this is a practice tool, not an execution path.
+function PaperTradePanel({
+  atmStrike, step, side, onSideChange, strikeOffset, onStrikeOffsetChange, qtyLots, onQtyLotsChange,
+  onBuy, canBuy, positions, onExit,
+}) {
+  const strikeOptions = useMemo(() => {
+    if (atmStrike == null || !step) return []
+    return Array.from({ length: 21 }, (_, i) => i - 10).map((offset) => ({
+      value: offset,
+      label: offset === 0 ? `ATM (${atmStrike})` : `ATM${offset > 0 ? '+' : ''}${offset} (${atmStrike + offset * step})`,
+    }))
+  }, [atmStrike, step])
+
+  const totalPnl = positions.reduce((sum, p) => sum + p.pnl, 0)
+
+  const columns = [
+    { title: 'Side', dataIndex: 'side', key: 'side', width: 50, render: (s) => <Tag color={s === 'CE' ? 'error' : 'success'}>{s}</Tag> },
+    { title: 'Strike', dataIndex: 'strike', key: 'strike', width: 70 },
+    { title: 'Qty', dataIndex: 'qtyLots', key: 'qtyLots', width: 60, render: (q, r) => `${q}×${r.lotSize}` },
+    { title: 'Entry', dataIndex: 'entryPrice', key: 'entryPrice', width: 65, render: (v) => v.toFixed(2) },
+    { title: 'LTP', dataIndex: 'ltp', key: 'ltp', width: 65, render: (v) => v.toFixed(2) },
+    {
+      title: 'PnL', dataIndex: 'pnl', key: 'pnl', width: 85,
+      render: (v) => <Text strong style={{ color: v >= 0 ? UP_COLOR : DOWN_COLOR, fontSize: 12 }}>{v >= 0 ? '+' : ''}{v.toFixed(0)}</Text>,
+    },
+    {
+      title: '', key: 'action', width: 55,
+      render: (_, r) => (r.status === 'OPEN' ? <Button size="small" onClick={() => onExit(r.id)}>Exit</Button> : <Tag>Closed</Tag>),
+    },
+  ]
+
+  return (
+    <div style={{ width: 420 }}>
+      <Space direction="vertical" size={10} style={{ width: '100%' }}>
+        <Space wrap size={8}>
+          <Segmented value={side} onChange={onSideChange} options={[{ label: 'CE', value: 'CE' }, { label: 'PE', value: 'PE' }]} />
+          <Select value={strikeOffset} onChange={onStrikeOffsetChange} style={{ width: 160 }} options={strikeOptions} disabled={atmStrike == null} />
+          <InputNumber value={qtyLots} onChange={(v) => onQtyLotsChange(v ?? 1)} min={1} step={1} style={{ width: 100 }} addonAfter="lots" />
+          <Button type="primary" size="small" onClick={onBuy} disabled={!canBuy}>Buy</Button>
+        </Space>
+        {positions.length > 0 && (
+          <>
+            <Table dataSource={positions} columns={columns} rowKey="id" size="small" pagination={false} scroll={{ y: 220 }} />
+            <Text strong style={{ color: totalPnl >= 0 ? UP_COLOR : DOWN_COLOR }}>
+              Total PnL: {totalPnl >= 0 ? '+' : ''}{totalPnl.toFixed(0)}
+            </Text>
+          </>
+        )}
+        <Text type="secondary" style={{ fontSize: 10 }}>
+          Paper trade only - simulated against this replay's own premium series, no real order is ever placed. Long-only (Buy, then Exit); lot
+          size is a fixed per-underlying constant, not fetched live. Resets when a new day is loaded.
+        </Text>
+      </Space>
+    </div>
+  )
+}
+
 // The right-hand OI/IV ladder: every strike in the fetched band gets its own row (never just the
 // single heaviest one - see this page's own "there could be multiple [levels]" request), a CE bar
 // extending right and a PE bar extending left from a shared center scale, both sides' IV printed
@@ -816,6 +884,17 @@ export default function OiReplayPage() {
   const [livePePoints, setLivePePoints] = useState([])
   const caughtUpLenRef = useRef(0)
 
+  // Paper trade panel state - see PaperTradePanel's own doc comment. strikeOffset defaults to 0
+  // (ATM) and stays an OFFSET rather than an absolute strike, so "the default is ATM" holds true
+  // all through the session even as ATM itself drifts with price - the user never has to re-pick it
+  // unless they actually want an OTM/ITM strike instead. Positions reset on every fresh load() (see
+  // below), same as the live feed's own tail - a paper position only means something against the
+  // ONE day's premium series it was punched into.
+  const [paperSide, setPaperSide] = useState('CE')
+  const [paperStrikeOffset, setPaperStrikeOffset] = useState(0)
+  const [paperQtyLots, setPaperQtyLots] = useState(10)
+  const [paperPositions, setPaperPositions] = useState([])
+
   // BANKNIFTY has no weekly expiry - NSE discontinued it (same rule Expired Backtest enforces).
   // Corrected right in the underlying picker's own onChange below, not a separate effect - this
   // is a direct response to that one user action, not a value derived from external state.
@@ -836,6 +915,7 @@ export default function OiReplayPage() {
     setLiveBars([])
     setLiveCePoints([])
     setLivePePoints([])
+    setPaperPositions([])
     const params = new URLSearchParams({
       date: date.format('YYYY-MM-DD'),
       timeframeMinutes: String(timeframe),
@@ -1059,6 +1139,43 @@ export default function OiReplayPage() {
 
   const step = result?.step || 50
   const atmStrike = currentBar ? Math.round(currentBar.close / step) * step : null
+
+  const paperStrike = atmStrike != null ? atmStrike + paperStrikeOffset * step : null
+  const paperEntryPreview = useMemo(() => {
+    if (paperStrike == null || asOfMs == null) return null
+    const series = (paperSide === 'CE' ? ceByStrike : peByStrike).get(paperStrike)
+    return latestAtOrBefore(series ?? [], asOfMs)
+  }, [paperSide, paperStrike, ceByStrike, peByStrike, asOfMs])
+
+  const handlePaperBuy = () => {
+    if (paperStrike == null || paperEntryPreview?.price == null) return
+    setPaperPositions((prev) => [...prev, {
+      id: `${Date.now()}-${Math.random()}`,
+      side: paperSide, strike: paperStrike, qtyLots: paperQtyLots, lotSize: PAPER_TRADE_LOT_SIZE[underlying] ?? 1,
+      entryPrice: paperEntryPreview.price, entryTime: asOfMs, status: 'OPEN', exitPrice: null,
+    }])
+  }
+
+  const handlePaperExit = (id) => {
+    setPaperPositions((prev) => prev.map((p) => {
+      if (p.id !== id || p.status !== 'OPEN') return p
+      const series = (p.side === 'CE' ? ceByStrike : peByStrike).get(p.strike)
+      const point = asOfMs != null ? latestAtOrBefore(series ?? [], asOfMs) : null
+      return { ...p, status: 'CLOSED', exitPrice: point?.price ?? p.entryPrice }
+    }))
+  }
+
+  // Live PnL for every position, OPEN or CLOSED - an OPEN one is marked to the replay's CURRENT
+  // tick (so it moves as playback advances, exactly like a real open position would), a CLOSED one
+  // is locked to whatever price Exit was clicked at.
+  const enrichedPaperPositions = useMemo(() => paperPositions.map((p) => {
+    const series = (p.side === 'CE' ? ceByStrike : peByStrike).get(p.strike)
+    const livePoint = p.status === 'OPEN' && asOfMs != null ? latestAtOrBefore(series ?? [], asOfMs) : null
+    const ltp = p.status === 'OPEN' ? (livePoint?.price ?? p.entryPrice) : p.exitPrice
+    return { ...p, ltp, pnl: (ltp - p.entryPrice) * p.qtyLots * p.lotSize }
+  }), [paperPositions, ceByStrike, peByStrike, asOfMs])
+  const paperOpenCount = enrichedPaperPositions.filter((p) => p.status === 'OPEN').length
+  const paperTotalPnl = enrichedPaperPositions.reduce((sum, p) => sum + p.pnl, 0)
 
   // Regime-change markers stamped on the exact candle where a Long Buildup/Short Buildup/Short
   // Covering/Long Unwinding stretch actually started - "show me when what happened" on the chart
@@ -1487,6 +1604,29 @@ export default function OiReplayPage() {
                         <Tag color="success">● LIVE</Tag>
                       </Tooltip>
                     )}
+                    <Popover
+                      title="Paper trade"
+                      trigger="click"
+                      placement="bottomRight"
+                      content={(
+                        <PaperTradePanel
+                          atmStrike={atmStrike} step={step}
+                          side={paperSide} onSideChange={setPaperSide}
+                          strikeOffset={paperStrikeOffset} onStrikeOffsetChange={setPaperStrikeOffset}
+                          qtyLots={paperQtyLots} onQtyLotsChange={setPaperQtyLots}
+                          onBuy={handlePaperBuy} canBuy={atmStrike != null && paperEntryPreview?.price != null}
+                          positions={enrichedPaperPositions} onExit={handlePaperExit}
+                        />
+                      )}
+                    >
+                      {paperTotalPnl !== 0 || paperOpenCount > 0 ? (
+                        <Tag color={paperTotalPnl >= 0 ? 'success' : 'error'} style={{ cursor: 'pointer' }}>
+                          Paper PnL: {paperTotalPnl >= 0 ? '+' : ''}{paperTotalPnl.toFixed(0)}{paperOpenCount > 0 ? ` (${paperOpenCount} open)` : ''}
+                        </Tag>
+                      ) : (
+                        <Button size="small">Paper Trade</Button>
+                      )}
+                    </Popover>
                   </Space>
                   <Space align="center" size={12} wrap style={{ marginBottom: 8 }}>
                     <Text type="secondary" style={{ fontSize: 12 }}>Alert when a strike near ATM shifts by</Text>
