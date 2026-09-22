@@ -1,7 +1,7 @@
 import { Component, useEffect, useMemo, useRef, useState } from 'react'
 import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicker, Alert, Empty, Tooltip, Slider, Tag, InputNumber, Switch } from 'antd'
 import { PlayCircleOutlined, PauseCircleOutlined, ReloadOutlined, SoundOutlined } from '@ant-design/icons'
-import { createChart, CandlestickSeries, CrosshairMode } from 'lightweight-charts'
+import { createChart, CandlestickSeries, LineSeries, CrosshairMode } from 'lightweight-charts'
 import * as signalR from '@microsoft/signalr'
 import {
   UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR,
@@ -162,6 +162,16 @@ const CHART_LEVELS_PER_SIDE = 5
 // were never actually fetched.
 const CHART_MAX_WINDOW_STEPS = 10
 
+// How big a since-PREVIOUS-CANDLE OI/price move has to be before FuturesChart marks it as a real
+// regime shift rather than noise - a futures contract's own total OI is a totally different scale
+// from a single option strike's (tens of millions vs a single strike's few million), so this is
+// its own dedicated threshold rather than reusing the options ladder's per-strike alertThreshold.
+// PRICE_STEP_FACTOR is a fraction of the underlying's own strike step (already a sensible "is this
+// a real move" unit elsewhere on this page), not a fixed point value, so it scales automatically
+// between NIFTY (step 50) and BANKNIFTY (step 100).
+const FUTURES_REGIME_OI_THRESHOLD = 50_000
+const FUTURES_REGIME_PRICE_STEP_FACTOR = 0.2
+
 // latestAtOrBefore always returns the newest point at-or-before "now", even if that point is from
 // an hour ago - if NiftyDataCollector's own backfill for a strike/side simply has no newer rows yet
 // (a real gap in the stored data, not a rendering bug), the ladder/chart would otherwise silently
@@ -312,14 +322,40 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, height = 440 }
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }
 
-// A plain candlestick chart for the day's futures contract - same reveal-as-replay-advances shape
-// as ReplayChart, minus the OI price lines (a future has no strike chain to draw walls for).
-// Separate component rather than reusing ReplayChart with ladderRows=[] so this stays simple and
-// doesn't carry unused price-line plumbing for a series that will never have any.
-function FuturesChart({ bars, dayKey, height = 320 }) {
+// Colors for the futures regime read - Long Buildup/Short Covering are bullish (price+OI both
+// rising, or OI unwinding as price rises - fresh longs or shorts closing out), Short Buildup/Long
+// Unwinding are bearish (the mirror image) - same UP_COLOR/DOWN_COLOR sentiment convention as
+// everywhere else on this page, not the CE/PE-type colors.
+const FUTURES_REGIME_INFO = {
+  'Long Buildup': { bias: 'Bullish', color: UP_COLOR, blurb: 'Price rising with OI rising - fresh long positions being added.' },
+  'Short Covering': { bias: 'Bullish', color: UP_COLOR, blurb: 'Price rising with OI falling - shorts buying back to close, not fresh buying.' },
+  'Short Buildup': { bias: 'Bearish', color: DOWN_COLOR, blurb: 'Price falling with OI rising - fresh short positions being added.' },
+  'Long Unwinding': { bias: 'Bearish', color: DOWN_COLOR, blurb: 'Price falling with OI falling - longs exiting, not fresh selling.' },
+  Neutral: { bias: 'Neutral', color: AXIS_COLOR, blurb: 'No significant price/OI move yet.' },
+}
+
+// The classic futures 4-quadrant read: price direction x OI direction. Unlike an option strike
+// (where OI sits AT a level and a wall is a relative-strength read), a future has exactly one
+// instrument, so its own OI change is a direct, unambiguous read on aggregate conviction - no
+// "relative to what" question the way an option chain's OI needs.
+function classifyFuturesRegime(priceDelta, oiDelta, priceThreshold, oiThreshold) {
+  if (oiDelta == null || Math.abs(oiDelta) < oiThreshold || Math.abs(priceDelta) < priceThreshold) return 'Neutral'
+  if (oiDelta > 0) return priceDelta > 0 ? 'Long Buildup' : 'Short Buildup'
+  return priceDelta > 0 ? 'Short Covering' : 'Long Unwinding'
+}
+
+// Candlestick chart for the day's futures contract - same reveal-as-replay-advances shape as
+// ReplayChart - PLUS an OI overlay line (own left-hand price scale, so it never competes with the
+// candles' own right-hand price axis) and regime-change markers (Long Buildup/Short Buildup/Short
+// Covering/Long Unwinding - see classifyFuturesRegime) stamped directly on the candle where each
+// shift actually started, the "show me when what happened" read for a future's own OI - unlike an
+// option strike, a future has no strike chain to draw S/R walls for, so this chart's OI story is
+// entirely about ITS OWN change over time rather than a level.
+function FuturesChart({ bars, oiLine, markers, dayKey, height = 320 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
+  const oiSeriesRef = useRef(null)
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -329,6 +365,7 @@ function FuturesChart({ bars, dayKey, height = 320 }) {
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
       grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
       rightPriceScale: { borderColor: BORDER_COLOR },
+      leftPriceScale: { visible: true, borderColor: BORDER_COLOR },
       timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter },
       crosshair: { mode: CrosshairMode.Normal },
       localization: { timeFormatter: istTimeFormatter },
@@ -336,6 +373,13 @@ function FuturesChart({ bars, dayKey, height = 320 }) {
     chartRef.current = chart
     seriesRef.current = chart.addSeries(CandlestickSeries, {
       upColor: UP_COLOR, downColor: DOWN_COLOR, borderVisible: false, wickUpColor: UP_COLOR, wickDownColor: DOWN_COLOR,
+    })
+    // Own (left) price scale and a thin, semi-transparent line - OI's own numbers (lakhs/crores)
+    // are a totally different scale than price, so sharing the right-hand axis with candles would
+    // otherwise squash one or the other into a flat line.
+    oiSeriesRef.current = chart.addSeries(LineSeries, {
+      color: `${AXIS_COLOR}cc`, lineWidth: 2, priceScaleId: 'left', priceLineVisible: false, lastValueVisible: true,
+      title: 'OI',
     })
 
     const onResize = () => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }) }
@@ -345,6 +389,7 @@ function FuturesChart({ bars, dayKey, height = 320 }) {
       chart.remove()
       chartRef.current = null
       seriesRef.current = null
+      oiSeriesRef.current = null
     }
   }, [height])
 
@@ -352,6 +397,15 @@ function FuturesChart({ bars, dayKey, height = 320 }) {
     if (!seriesRef.current) return
     seriesRef.current.setData(bars)
   }, [bars])
+
+  useEffect(() => {
+    if (!oiSeriesRef.current) return
+    oiSeriesRef.current.setData(oiLine)
+  }, [oiLine])
+
+  useEffect(() => {
+    seriesRef.current?.setMarkers(markers ?? [])
+  }, [markers])
 
   useEffect(() => {
     if (bars.length > 0) chartRef.current?.timeScale().fitContent()
@@ -742,6 +796,19 @@ export default function OiReplayPage() {
     ? currentFutures.close - currentBar.close
     : null
 
+  // The OI overlay line drawn on FuturesChart's own left price scale - one point per DISPLAYED
+  // candle (not native 1-min), each carrying whatever OI was current as of that candle's own
+  // close, so the line reveals in step with the candles rather than at a different resolution.
+  const futuresOiLine = useMemo(() => {
+    if (!result?.futuresOiAvailable) return []
+    return displayFuturesBars
+      .map((bar) => {
+        const point = latestAtOrBefore(futuresPointsRaw, fromChartTime(bar.time) * 1000)
+        return point?.openInterest != null ? { time: bar.time, value: point.openInterest } : null
+      })
+      .filter(Boolean)
+  }, [displayFuturesBars, futuresPointsRaw, result])
+
   // Every row carries its OI both ONE MINUTE AGO (native resolution regardless of the chart's own
   // timeframe - "change every min" was explicit) AND at the DAY'S OPEN, alongside the current
   // reading - the ladder shows both a tick-to-tick delta and a since-open delta per strike, not
@@ -780,6 +847,54 @@ export default function OiReplayPage() {
 
   const step = result?.step || 50
   const atmStrike = currentBar ? Math.round(currentBar.close / step) * step : null
+
+  // Regime-change markers stamped on the exact candle where a Long Buildup/Short Buildup/Short
+  // Covering/Long Unwinding stretch actually started - "show me when what happened" on the chart
+  // itself, not just a single end-of-day verdict. Compares each displayed candle against the PRIOR
+  // one (not the day's open) so this reflects the CURRENT regime, and only emits a marker when the
+  // classification actually changes (a run of 10 "still Long Buildup" candles in a row would
+  // otherwise draw 10 markers on top of each other).
+  const futuresRegimeMarkers = useMemo(() => {
+    if (!result?.futuresOiAvailable || displayFuturesBars.length < 2) return []
+    const priceThreshold = step * FUTURES_REGIME_PRICE_STEP_FACTOR
+    const markers = []
+    let prevRegime = 'Neutral'
+    let prevClose = displayFuturesBars[0].close
+    let prevOi = latestAtOrBefore(futuresPointsRaw, fromChartTime(displayFuturesBars[0].time) * 1000)?.openInterest ?? null
+
+    for (let i = 1; i < displayFuturesBars.length; i++) {
+      const bar = displayFuturesBars[i]
+      const oi = latestAtOrBefore(futuresPointsRaw, fromChartTime(bar.time) * 1000)?.openInterest ?? null
+      if (oi == null || prevOi == null) { prevClose = bar.close; prevOi = oi; continue }
+
+      const regime = classifyFuturesRegime(bar.close - prevClose, oi - prevOi, priceThreshold, FUTURES_REGIME_OI_THRESHOLD)
+      if (regime !== 'Neutral' && regime !== prevRegime) {
+        const info = FUTURES_REGIME_INFO[regime]
+        const bullish = info.bias === 'Bullish'
+        markers.push({
+          time: bar.time,
+          position: bullish ? 'belowBar' : 'aboveBar',
+          color: info.color,
+          shape: bullish ? 'arrowUp' : 'arrowDown',
+          text: regime,
+        })
+      }
+      if (regime !== 'Neutral') prevRegime = regime
+      prevClose = bar.close
+      prevOi = oi
+    }
+    return markers
+  }, [displayFuturesBars, futuresPointsRaw, step, result])
+
+  // The single "as of right now" verdict for the table/read box - same 4-quadrant classification
+  // as the chart markers, just measured since the DAY'S OPEN rather than the previous candle, so
+  // it reads as "today's overall futures story so far" rather than "what just happened".
+  const futuresRegimeSinceOpen = useMemo(() => {
+    if (!result?.futuresOiAvailable || currentFutures?.close == null || futuresOpen?.close == null || futuresOiSinceOpen == null) return null
+    const priceDelta = currentFutures.close - futuresOpen.close
+    const regime = classifyFuturesRegime(priceDelta, futuresOiSinceOpen, step * FUTURES_REGIME_PRICE_STEP_FACTOR, FUTURES_REGIME_OI_THRESHOLD)
+    return { regime, priceDelta, oiDelta: futuresOiSinceOpen, ...FUTURES_REGIME_INFO[regime] }
+  }, [currentFutures, futuresOpen, futuresOiSinceOpen, step, result])
 
   // PCR (Put-Call Ratio, total PE OI / total CE OI across the whole fetched band) and Max Pain -
   // the two standard derived reads a real OI chain gets used for beyond "where's the wall" (per the
@@ -1231,17 +1346,33 @@ export default function OiReplayPage() {
                 <Card
                   size="small"
                   title="Futures (nearest listed contract - always live from Dhan, never stored)"
-                  extra={result.futuresExpiry ? <Tag>{result.futuresExpiry} expiry</Tag> : null}
+                  extra={
+                    <Space size={8}>
+                      {futuresRegimeSinceOpen && futuresRegimeSinceOpen.regime !== 'Neutral' && (
+                        <Tag color={futuresRegimeSinceOpen.bias === 'Bullish' ? 'success' : 'error'}>{futuresRegimeSinceOpen.regime}</Tag>
+                      )}
+                      {result.futuresExpiry ? <Tag>{result.futuresExpiry} expiry</Tag> : null}
+                    </Space>
+                  }
                 >
                   {result.futuresError && (
                     <Alert type="warning" showIcon style={{ marginBottom: 12 }} message={result.futuresError} />
                   )}
                   {!result.futuresOiAvailable && result.futuresBars?.length > 0 && (
                     <Alert type="info" showIcon style={{ marginBottom: 12 }}
-                      message="Dhan did not return an Open Interest series for this futures contract - the OI figures below are unavailable, not zero." />
+                      message="Dhan did not return an Open Interest series for this futures contract - the OI figures and Long/Short read below are unavailable, not zero/neutral." />
                   )}
                   {displayFuturesBars.length > 0 ? (
                     <>
+                      {futuresRegimeSinceOpen && (
+                        <Alert
+                          style={{ marginBottom: 12 }}
+                          type={futuresRegimeSinceOpen.bias === 'Bullish' ? 'success' : futuresRegimeSinceOpen.bias === 'Bearish' ? 'error' : 'info'}
+                          showIcon
+                          message={`Since open: ${futuresRegimeSinceOpen.regime} (${futuresRegimeSinceOpen.bias})`}
+                          description={`${futuresRegimeSinceOpen.blurb} Price ${futuresRegimeSinceOpen.priceDelta >= 0 ? '+' : ''}${futuresRegimeSinceOpen.priceDelta.toFixed(1)} pts, OI ${futuresRegimeSinceOpen.oiDelta >= 0 ? '+' : ''}${futuresRegimeSinceOpen.oiDelta.toLocaleString()} since today's open.`}
+                        />
+                      )}
                       <Row gutter={24} style={{ marginBottom: 12 }}>
                         <Col>
                           <Statistic title="Futures LTP" value={currentFutures?.close ?? '—'} precision={currentFutures?.close != null ? 2 : undefined} />
@@ -1266,10 +1397,28 @@ export default function OiReplayPage() {
                         <Col>
                           <Statistic title="Volume so far" value={futuresVolumeSoFar != null ? futuresVolumeSoFar.toLocaleString() : '—'} />
                         </Col>
+                        <Col>
+                          <Statistic
+                            title="Regime (since open)"
+                            value={result.futuresOiAvailable ? (futuresRegimeSinceOpen?.regime ?? '—') : 'N/A'}
+                            valueStyle={{ fontSize: 16, color: futuresRegimeSinceOpen?.color }}
+                          />
+                        </Col>
                       </Row>
                       <ChartErrorBoundary key={`futures-${underlying}-${result.date}-${timeframe}`}>
-                        <FuturesChart bars={displayFuturesBars} dayKey={`futures-${underlying}-${result.date}-${timeframe}`} height={320} />
+                        <FuturesChart
+                          bars={displayFuturesBars}
+                          oiLine={futuresOiLine}
+                          markers={futuresRegimeMarkers}
+                          dayKey={`futures-${underlying}-${result.date}-${timeframe}`}
+                          height={320}
+                        />
                       </ChartErrorBoundary>
+                      {result.futuresOiAvailable && (
+                        <Text type="secondary" style={{ fontSize: 11 }}>
+                          Grey line (left axis) is Open Interest. Arrows mark where a Long Buildup/Short Buildup/Short Covering/Long Unwinding stretch began - green/up = bullish, red/down = bearish.
+                        </Text>
+                      )}
                     </>
                   ) : (
                     <Empty description={result.futuresError || 'No futures data for this day.'} />
