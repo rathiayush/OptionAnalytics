@@ -176,6 +176,24 @@ function computeMaxPain(rows) {
 // (typically 15-min) timeframe for timing entries - the user's own explicit "1-3-5min" ask.
 const FAST_TIMEFRAME_OPTIONS = TIMEFRAME_OPTIONS.filter((o) => o.value <= 5)
 
+// Every major OPTIONAL section on this page - the user's own "give option to remove everything...
+// by default all sections true, and we can select to include" ask, for a big-monitor layout where
+// the three charts (15/3/1 min) matter most and the heuristic/summary cards underneath them are
+// optional clutter on any given day. All start checked; unchecking one just stops that Card from
+// rendering at all, nothing about its own data or state. The main Spot chart itself is deliberately
+// NOT in this list - it's the one Card holding the shared playback controls (Start/Pause/Reset/
+// Speed/timeline slider) every other chart on the page (including both fast entry charts) depends
+// on, so hiding it would strand the whole page with no way to advance the replay at all.
+const SECTION_OPTIONS = [
+  { value: 'topStats', label: 'Top stats' },
+  { value: 'marketRead', label: 'Market Read' },
+  { value: 'dayOi', label: 'Day OI Accumulation' },
+  { value: 'entryCharts', label: 'Fast entry charts (3/1 min)' },
+  { value: 'liquidityMap', label: 'Liquidity map' },
+  { value: 'futures', label: 'Futures' },
+]
+const ALL_SECTION_VALUES = SECTION_OPTIONS.map((o) => o.value)
+
 // How many strikes on EACH side get an actual line drawn on the chart - the ladder already shows
 // every strike; the chart would just be noise at that density, so only the strongest few (by OI)
 // per side earn a line there. Support/resistance is a relative-strength read anyway. Also the
@@ -1080,13 +1098,21 @@ export default function OiReplayPage() {
   const [date, setDate] = useState(null)
   const [speedMs, setSpeedMs] = useState(500)
 
-  // EmaChart's own state - a faster, independently-timeframed companion chart with two EMAs, for
-  // timing an entry against the main chart's own coarser read (see EmaChart's own doc comment).
-  // Deliberately NOT persisted the way the main timeframe is - this is a quick per-session tuning
-  // knob, not a durable preference.
-  const [emaTimeframe, setEmaTimeframe] = useState(5)
-  const [ema1Period, setEma1Period] = useState(9)
-  const [ema2Period, setEma2Period] = useState(15)
+  // Two EmaChart instances, running SIDE BY SIDE alongside the main (typically 15-min) chart - the
+  // user's own "I need basically three charts... 15, 3 and 1 min... according to their tick" ask:
+  // not a single switchable secondary chart anymore, but two independent ones defaulting to 3-min
+  // and 1-min so all three are visible and ticking at once on a wide enough monitor. Each keeps its
+  // own timeframe/EMA controls (see EmaChart itself), so either can still be retuned to something
+  // else entirely if wanted. Deliberately NOT persisted the way the main timeframe is - a quick
+  // per-session tuning knob, not a durable preference.
+  const [chartBTimeframe, setChartBTimeframe] = useState(3)
+  const [chartBEma1, setChartBEma1] = useState(9)
+  const [chartBEma2, setChartBEma2] = useState(15)
+  const [chartCTimeframe, setChartCTimeframe] = useState(1)
+  const [chartCEma1, setChartCEma1] = useState(9)
+  const [chartCEma2, setChartCEma2] = useState(15)
+
+  const [visibleSections, setVisibleSections] = useState(ALL_SECTION_VALUES)
 
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
@@ -1712,6 +1738,17 @@ export default function OiReplayPage() {
               <Select value={timeframe} onChange={setTimeframe} style={{ width: 110 }} options={TIMEFRAME_OPTIONS} />
               <Button type="primary" onClick={() => load()} loading={loading} disabled={!canLoad}>Load day</Button>
             </Space>
+            <Space align="center" size={12} wrap>
+              <Text type="secondary" style={{ fontSize: 12 }}>Sections shown</Text>
+              <Select
+                mode="multiple" value={visibleSections} onChange={setVisibleSections}
+                style={{ minWidth: 320 }} maxTagCount="responsive"
+                options={SECTION_OPTIONS}
+              />
+              <Button size="small" onClick={() => setVisibleSections(ALL_SECTION_VALUES)} disabled={visibleSections.length === ALL_SECTION_VALUES.length}>
+                Show all
+              </Button>
+            </Space>
             {isToday && !liveFeedSupported && (
               <Alert
                 type="info" showIcon
@@ -1724,19 +1761,21 @@ export default function OiReplayPage() {
 
         {result && (
           <>
-            <Card size="small">
-              <Row gutter={24}>
-                <Col><Statistic title="Spot" value={currentBar?.close ?? '—'} precision={2} /></Col>
-                <Col><Statistic title="ATM" value={atmStrike ?? '—'} /></Col>
-                <Col><Statistic title="PCR (PE OI / CE OI)" value={pcr != null ? pcr : '—'} precision={2}
-                  valueStyle={{ color: pcr == null ? undefined : pcr > 1 ? UP_COLOR : DOWN_COLOR }} /></Col>
-                <Col><Statistic title="Max Pain" value={maxPain ?? '—'} /></Col>
-                <Col><Statistic title="Total CE OI (M)" value={formatOiMillions(totalCeOi, { withUnit: false })} valueStyle={{ color: DOWN_COLOR }} /></Col>
-                <Col><Statistic title="Total PE OI (M)" value={formatOiMillions(totalPeOi, { withUnit: false })} valueStyle={{ color: UP_COLOR }} /></Col>
-              </Row>
-            </Card>
+            {visibleSections.includes('topStats') && (
+              <Card size="small">
+                <Row gutter={24}>
+                  <Col><Statistic title="Spot" value={currentBar?.close ?? '—'} precision={2} /></Col>
+                  <Col><Statistic title="ATM" value={atmStrike ?? '—'} /></Col>
+                  <Col><Statistic title="PCR (PE OI / CE OI)" value={pcr != null ? pcr : '—'} precision={2}
+                    valueStyle={{ color: pcr == null ? undefined : pcr > 1 ? UP_COLOR : DOWN_COLOR }} /></Col>
+                  <Col><Statistic title="Max Pain" value={maxPain ?? '—'} /></Col>
+                  <Col><Statistic title="Total CE OI (M)" value={formatOiMillions(totalCeOi, { withUnit: false })} valueStyle={{ color: DOWN_COLOR }} /></Col>
+                  <Col><Statistic title="Total PE OI (M)" value={formatOiMillions(totalPeOi, { withUnit: false })} valueStyle={{ color: UP_COLOR }} /></Col>
+                </Row>
+              </Card>
+            )}
 
-            {marketRead && (
+            {visibleSections.includes('marketRead') && marketRead && (
               <Card size="small" title="Market Read">
                 <Space direction="vertical" size={12} style={{ width: '100%' }}>
                   <Alert
@@ -1796,7 +1835,7 @@ export default function OiReplayPage() {
               </Card>
             )}
 
-            {dayOiSummary && (
+            {visibleSections.includes('dayOi') && dayOiSummary && (
               <Card size="small" title="Day OI Accumulation (since today's open)">
                 <Space direction="vertical" size={12} style={{ width: '100%' }}>
                   <Alert
@@ -1954,121 +1993,146 @@ export default function OiReplayPage() {
               </Col>
             </Row>
 
-            <Row gutter={16} style={{ marginTop: 16 }}>
-              <Col span={24}>
-                <Card size="small" title="Fast entry chart (independent timeframe + EMA)">
-                  {oneMinBars.length > 0
-                    ? (
-                      <ChartErrorBoundary key={`ema-${underlying}-${result.date}-${emaTimeframe}`}>
-                        <EmaChart
-                          oneMinBars={oneMinBars}
-                          visibleCount={visibleCount}
-                          timeframe={emaTimeframe} onTimeframeChange={setEmaTimeframe}
-                          ema1Period={ema1Period} onEma1PeriodChange={setEma1Period}
-                          ema2Period={ema2Period} onEma2PeriodChange={setEma2Period}
-                          dayKey={`ema-${underlying}-${result.date}`}
-                          height={320}
-                        />
-                      </ChartErrorBoundary>
-                    )
-                    : <Empty description="No spot candles for this day." />}
-                </Card>
-              </Col>
-            </Row>
+            {visibleSections.includes('entryCharts') && (
+              <Row gutter={16} style={{ marginTop: 16 }}>
+                <Col span={12}>
+                  <Card size="small" title="Entry chart B (independent timeframe + EMA)">
+                    {oneMinBars.length > 0
+                      ? (
+                        <ChartErrorBoundary key={`emaB-${underlying}-${result.date}-${chartBTimeframe}`}>
+                          <EmaChart
+                            oneMinBars={oneMinBars}
+                            visibleCount={visibleCount}
+                            timeframe={chartBTimeframe} onTimeframeChange={setChartBTimeframe}
+                            ema1Period={chartBEma1} onEma1PeriodChange={setChartBEma1}
+                            ema2Period={chartBEma2} onEma2PeriodChange={setChartBEma2}
+                            dayKey={`emaB-${underlying}-${result.date}`}
+                            height={320}
+                          />
+                        </ChartErrorBoundary>
+                      )
+                      : <Empty description="No spot candles for this day." />}
+                  </Card>
+                </Col>
+                <Col span={12}>
+                  <Card size="small" title="Entry chart C (independent timeframe + EMA)">
+                    {oneMinBars.length > 0
+                      ? (
+                        <ChartErrorBoundary key={`emaC-${underlying}-${result.date}-${chartCTimeframe}`}>
+                          <EmaChart
+                            oneMinBars={oneMinBars}
+                            visibleCount={visibleCount}
+                            timeframe={chartCTimeframe} onTimeframeChange={setChartCTimeframe}
+                            ema1Period={chartCEma1} onEma1PeriodChange={setChartCEma1}
+                            ema2Period={chartCEma2} onEma2PeriodChange={setChartCEma2}
+                            dayKey={`emaC-${underlying}-${result.date}`}
+                            height={320}
+                          />
+                        </ChartErrorBoundary>
+                      )
+                      : <Empty description="No spot candles for this day." />}
+                  </Card>
+                </Col>
+              </Row>
+            )}
 
-            <Row gutter={16} style={{ marginTop: 16 }}>
-              <Col span={24}>
-                <Card size="small" title="Liquidity map (imbalance & likely levels, whole band)">
-                  <LiquidityMapTable rows={ladderRows} atmStrike={atmStrike} currentPrice={currentBar?.close} />
-                </Card>
-              </Col>
-            </Row>
+            {visibleSections.includes('liquidityMap') && (
+              <Row gutter={16} style={{ marginTop: 16 }}>
+                <Col span={24}>
+                  <Card size="small" title="Liquidity map (imbalance & likely levels, whole band)">
+                    <LiquidityMapTable rows={ladderRows} atmStrike={atmStrike} currentPrice={currentBar?.close} />
+                  </Card>
+                </Col>
+              </Row>
+            )}
 
-            <Row gutter={16} style={{ marginTop: 16 }}>
-              <Col span={24}>
-                <Card
-                  size="small"
-                  title="Futures (nearest listed contract - always live from Dhan, never stored)"
-                  extra={
-                    <Space size={8}>
-                      {futuresRegimeSinceOpen && futuresRegimeSinceOpen.regime !== 'Neutral' && (
-                        <Tag color={futuresRegimeSinceOpen.bias === 'Bullish' ? 'success' : 'error'}>{futuresRegimeSinceOpen.regime}</Tag>
-                      )}
-                      {result.futuresExpiry ? <Tag>{result.futuresExpiry} expiry</Tag> : null}
-                    </Space>
-                  }
-                >
-                  {result.futuresError && (
-                    <Alert type="warning" showIcon style={{ marginBottom: 12 }} message={result.futuresError} />
-                  )}
-                  {!result.futuresOiAvailable && result.futuresBars?.length > 0 && (
-                    <Alert type="info" showIcon style={{ marginBottom: 12 }}
-                      message="Dhan did not return an Open Interest series for this futures contract - the OI figures and Long/Short read below are unavailable, not zero/neutral." />
-                  )}
-                  {displayFuturesBars.length > 0 ? (
-                    <>
-                      {futuresRegimeSinceOpen && (
-                        <Alert
-                          style={{ marginBottom: 12 }}
-                          type={futuresRegimeSinceOpen.bias === 'Bullish' ? 'success' : futuresRegimeSinceOpen.bias === 'Bearish' ? 'error' : 'info'}
-                          showIcon
-                          message={`Since open: ${futuresRegimeSinceOpen.regime} (${futuresRegimeSinceOpen.bias})`}
-                          description={`${futuresRegimeSinceOpen.blurb} Price ${futuresRegimeSinceOpen.priceDelta >= 0 ? '+' : ''}${futuresRegimeSinceOpen.priceDelta.toFixed(1)} pts, OI ${formatOiMillions(futuresRegimeSinceOpen.oiDelta, { signed: true })} since today's open.`}
-                        />
-                      )}
-                      <Row gutter={24} style={{ marginBottom: 12 }}>
-                        <Col>
-                          <Statistic title="Futures LTP" value={currentFutures?.close ?? '—'} precision={currentFutures?.close != null ? 2 : undefined} />
-                        </Col>
-                        <Col>
-                          <Statistic
-                            title="Basis (Fut - Spot)"
-                            value={futuresBasis != null ? `${futuresBasis >= 0 ? '+' : ''}${futuresBasis.toFixed(2)}` : '—'}
-                            valueStyle={{ color: futuresBasis == null ? undefined : futuresBasis >= 0 ? UP_COLOR : DOWN_COLOR }}
+            {visibleSections.includes('futures') && (
+              <Row gutter={16} style={{ marginTop: 16 }}>
+                <Col span={24}>
+                  <Card
+                    size="small"
+                    title="Futures (nearest listed contract - always live from Dhan, never stored)"
+                    extra={
+                      <Space size={8}>
+                        {futuresRegimeSinceOpen && futuresRegimeSinceOpen.regime !== 'Neutral' && (
+                          <Tag color={futuresRegimeSinceOpen.bias === 'Bullish' ? 'success' : 'error'}>{futuresRegimeSinceOpen.regime}</Tag>
+                        )}
+                        {result.futuresExpiry ? <Tag>{result.futuresExpiry} expiry</Tag> : null}
+                      </Space>
+                    }
+                  >
+                    {result.futuresError && (
+                      <Alert type="warning" showIcon style={{ marginBottom: 12 }} message={result.futuresError} />
+                    )}
+                    {!result.futuresOiAvailable && result.futuresBars?.length > 0 && (
+                      <Alert type="info" showIcon style={{ marginBottom: 12 }}
+                        message="Dhan did not return an Open Interest series for this futures contract - the OI figures and Long/Short read below are unavailable, not zero/neutral." />
+                    )}
+                    {displayFuturesBars.length > 0 ? (
+                      <>
+                        {futuresRegimeSinceOpen && (
+                          <Alert
+                            style={{ marginBottom: 12 }}
+                            type={futuresRegimeSinceOpen.bias === 'Bullish' ? 'success' : futuresRegimeSinceOpen.bias === 'Bearish' ? 'error' : 'info'}
+                            showIcon
+                            message={`Since open: ${futuresRegimeSinceOpen.regime} (${futuresRegimeSinceOpen.bias})`}
+                            description={`${futuresRegimeSinceOpen.blurb} Price ${futuresRegimeSinceOpen.priceDelta >= 0 ? '+' : ''}${futuresRegimeSinceOpen.priceDelta.toFixed(1)} pts, OI ${formatOiMillions(futuresRegimeSinceOpen.oiDelta, { signed: true })} since today's open.`}
                           />
-                        </Col>
-                        <Col>
-                          <Statistic title="Futures OI (M)" value={result.futuresOiAvailable ? formatOiMillions(currentFutures?.openInterest, { withUnit: false }) : 'N/A'} />
-                        </Col>
-                        <Col>
-                          <Statistic
-                            title="OI since open"
-                            value={result.futuresOiAvailable ? formatOiMillions(futuresOiSinceOpen, { signed: true }) : 'N/A'}
-                            valueStyle={{ color: futuresOiSinceOpen == null ? undefined : futuresOiSinceOpen >= 0 ? UP_COLOR : DOWN_COLOR }}
+                        )}
+                        <Row gutter={24} style={{ marginBottom: 12 }}>
+                          <Col>
+                            <Statistic title="Futures LTP" value={currentFutures?.close ?? '—'} precision={currentFutures?.close != null ? 2 : undefined} />
+                          </Col>
+                          <Col>
+                            <Statistic
+                              title="Basis (Fut - Spot)"
+                              value={futuresBasis != null ? `${futuresBasis >= 0 ? '+' : ''}${futuresBasis.toFixed(2)}` : '—'}
+                              valueStyle={{ color: futuresBasis == null ? undefined : futuresBasis >= 0 ? UP_COLOR : DOWN_COLOR }}
+                            />
+                          </Col>
+                          <Col>
+                            <Statistic title="Futures OI (M)" value={result.futuresOiAvailable ? formatOiMillions(currentFutures?.openInterest, { withUnit: false }) : 'N/A'} />
+                          </Col>
+                          <Col>
+                            <Statistic
+                              title="OI since open"
+                              value={result.futuresOiAvailable ? formatOiMillions(futuresOiSinceOpen, { signed: true }) : 'N/A'}
+                              valueStyle={{ color: futuresOiSinceOpen == null ? undefined : futuresOiSinceOpen >= 0 ? UP_COLOR : DOWN_COLOR }}
+                            />
+                          </Col>
+                          <Col>
+                            <Statistic title="Volume so far" value={futuresVolumeSoFar != null ? futuresVolumeSoFar.toLocaleString() : '—'} />
+                          </Col>
+                          <Col>
+                            <Statistic
+                              title="Regime (since open)"
+                              value={result.futuresOiAvailable ? (futuresRegimeSinceOpen?.regime ?? '—') : 'N/A'}
+                              valueStyle={{ fontSize: 16, color: futuresRegimeSinceOpen?.color }}
+                            />
+                          </Col>
+                        </Row>
+                        <ChartErrorBoundary key={`futures-${underlying}-${result.date}-${timeframe}`}>
+                          <FuturesChart
+                            bars={displayFuturesBars}
+                            oiLine={futuresOiLine}
+                            markers={futuresRegimeMarkers}
+                            dayKey={`futures-${underlying}-${result.date}-${timeframe}`}
+                            height={320}
                           />
-                        </Col>
-                        <Col>
-                          <Statistic title="Volume so far" value={futuresVolumeSoFar != null ? futuresVolumeSoFar.toLocaleString() : '—'} />
-                        </Col>
-                        <Col>
-                          <Statistic
-                            title="Regime (since open)"
-                            value={result.futuresOiAvailable ? (futuresRegimeSinceOpen?.regime ?? '—') : 'N/A'}
-                            valueStyle={{ fontSize: 16, color: futuresRegimeSinceOpen?.color }}
-                          />
-                        </Col>
-                      </Row>
-                      <ChartErrorBoundary key={`futures-${underlying}-${result.date}-${timeframe}`}>
-                        <FuturesChart
-                          bars={displayFuturesBars}
-                          oiLine={futuresOiLine}
-                          markers={futuresRegimeMarkers}
-                          dayKey={`futures-${underlying}-${result.date}-${timeframe}`}
-                          height={320}
-                        />
-                      </ChartErrorBoundary>
-                      {result.futuresOiAvailable && (
-                        <Text type="secondary" style={{ fontSize: 11 }}>
-                          Grey line (left axis) is Open Interest. Arrows mark where a Long Buildup/Short Buildup/Short Covering/Long Unwinding stretch began - green/up = bullish, red/down = bearish.
-                        </Text>
-                      )}
-                    </>
-                  ) : (
-                    <Empty description={result.futuresError || 'No futures data for this day.'} />
-                  )}
-                </Card>
-              </Col>
-            </Row>
+                        </ChartErrorBoundary>
+                        {result.futuresOiAvailable && (
+                          <Text type="secondary" style={{ fontSize: 11 }}>
+                            Grey line (left axis) is Open Interest. Arrows mark where a Long Buildup/Short Buildup/Short Covering/Long Unwinding stretch began - green/up = bullish, red/down = bearish.
+                          </Text>
+                        )}
+                      </>
+                    ) : (
+                      <Empty description={result.futuresError || 'No futures data for this day.'} />
+                    )}
+                  </Card>
+                </Col>
+              </Row>
+            )}
           </>
         )}
 
