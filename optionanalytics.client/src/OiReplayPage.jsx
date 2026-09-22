@@ -1136,62 +1136,14 @@ export default function OiReplayPage() {
         {result && (
           <>
             <Card size="small">
-              <Space align="center" size={16} wrap>
-                <Button
-                  icon={playing ? <PauseCircleOutlined /> : <PlayCircleOutlined />}
-                  onClick={() => setPlaying((p) => !p)}
-                  disabled={oneMinBars.length === 0 || visibleCount >= oneMinBars.length}
-                >
-                  {playing ? 'Pause' : 'Start'}
-                </Button>
-                <Button icon={<ReloadOutlined />} onClick={() => { setPlaying(false); setVisibleCount(oneMinBars.length > 0 ? 1 : 0) }}>Reset</Button>
-                <Text type="secondary" style={{ fontSize: 12 }}>Speed</Text>
-                <Select value={speedMs} onChange={setSpeedMs} style={{ width: 90 }} options={SPEED_OPTIONS} />
-                <div style={{ flex: 1, minWidth: 200 }}>
-                  <Slider
-                    min={0} max={Math.max(0, oneMinBars.length - 1)} value={visibleCount - 1}
-                    onChange={(v) => { setPlaying(false); setVisibleCount(v + 1) }}
-                    tooltip={{ formatter: (v) => oneMinBars[v] ? istTimeFormatter(oneMinBars[v].time) : '' }}
-                  />
-                </div>
-                <Text style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
-                  {currentBar ? `${istTimeFormatter(currentBar.time)} (${visibleCount}/${oneMinBars.length})` : '—'}
-                </Text>
-              </Space>
-              <Space align="center" size={12} wrap style={{ marginTop: 10 }}>
-                <Text type="secondary" style={{ fontSize: 12 }}>Alert when a strike near ATM shifts by</Text>
-                <InputNumber
-                  value={alertThreshold} onChange={(v) => setAlertThreshold(v ?? 0)}
-                  min={0} step={100000} style={{ width: 140 }}
-                  formatter={(v) => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
-                  parser={(v) => v.replace(/,/g, '')}
-                />
-                <Text type="secondary" style={{ fontSize: 12 }}>OI in one minute</Text>
-                <Switch
-                  checked={soundEnabled} onChange={setSoundEnabled}
-                  checkedChildren={<SoundOutlined />} unCheckedChildren="Muted"
-                />
-              </Space>
-            </Card>
-
-            {activeAlerts.length > 0 && (
-              <Alert
-                type="warning"
-                showIcon
-                message="Large OI shift near ATM"
-                description={activeAlerts.map((a) => `${a.side} ${a.strike}: ${formatOiMillions(a.change, { signed: true })} in the last minute (${a.change >= 0 ? 'loading' : 'unwinding'})`).join(' · ')}
-              />
-            )}
-
-            <Card size="small">
               <Row gutter={24}>
                 <Col><Statistic title="Spot" value={currentBar?.close ?? '—'} precision={2} /></Col>
                 <Col><Statistic title="ATM" value={atmStrike ?? '—'} /></Col>
                 <Col><Statistic title="PCR (PE OI / CE OI)" value={pcr != null ? pcr : '—'} precision={2}
                   valueStyle={{ color: pcr == null ? undefined : pcr > 1 ? UP_COLOR : DOWN_COLOR }} /></Col>
                 <Col><Statistic title="Max Pain" value={maxPain ?? '—'} /></Col>
-                <Col><Statistic title="Total CE OI" value={totalCeOi} valueStyle={{ color: DOWN_COLOR }} /></Col>
-                <Col><Statistic title="Total PE OI" value={totalPeOi} valueStyle={{ color: UP_COLOR }} /></Col>
+                <Col><Statistic title="Total CE OI (M)" value={formatOiMillions(totalCeOi, { withUnit: false })} valueStyle={{ color: DOWN_COLOR }} /></Col>
+                <Col><Statistic title="Total PE OI (M)" value={formatOiMillions(totalPeOi, { withUnit: false })} valueStyle={{ color: UP_COLOR }} /></Col>
               </Row>
             </Card>
 
@@ -1304,39 +1256,66 @@ export default function OiReplayPage() {
               </Card>
             )}
 
+            {/* Playback controls, right next to the chart they drive - the user's own "the play
+                pause button whole panel should be near to chart" ask. Used to sit up top, well
+                above Stats/Market Read/Day OI Accumulation, forcing a scroll back and forth
+                between the controls and the thing they control. */}
+            <Card size="small">
+              <Space align="center" size={16} wrap>
+                <Button
+                  icon={playing ? <PauseCircleOutlined /> : <PlayCircleOutlined />}
+                  onClick={() => setPlaying((p) => !p)}
+                  disabled={oneMinBars.length === 0 || visibleCount >= oneMinBars.length}
+                >
+                  {playing ? 'Pause' : 'Start'}
+                </Button>
+                <Button icon={<ReloadOutlined />} onClick={() => { setPlaying(false); setVisibleCount(oneMinBars.length > 0 ? 1 : 0) }}>Reset</Button>
+                <Text type="secondary" style={{ fontSize: 12 }}>Speed</Text>
+                <Select value={speedMs} onChange={setSpeedMs} style={{ width: 90 }} options={SPEED_OPTIONS} />
+                <div style={{ flex: 1, minWidth: 200 }}>
+                  <Slider
+                    min={0} max={Math.max(0, oneMinBars.length - 1)} value={visibleCount - 1}
+                    onChange={(v) => { setPlaying(false); setVisibleCount(v + 1) }}
+                    tooltip={{ formatter: (v) => oneMinBars[v] ? istTimeFormatter(oneMinBars[v].time) : '' }}
+                  />
+                </div>
+                <Text style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
+                  {currentBar ? `${istTimeFormatter(currentBar.time)} (${visibleCount}/${oneMinBars.length})` : '—'}
+                </Text>
+                {isToday && liveFeedSupported && (
+                  <Tooltip title="Streaming live ticks from Dhan's WebSocket feed on top of today's snapshot (price + OI - IV stays at the last REST-fetched value)">
+                    <Tag color="success">● LIVE</Tag>
+                  </Tooltip>
+                )}
+              </Space>
+              <Space align="center" size={12} wrap style={{ marginTop: 10 }}>
+                <Text type="secondary" style={{ fontSize: 12 }}>Alert when a strike near ATM shifts by</Text>
+                <InputNumber
+                  value={alertThreshold} onChange={(v) => setAlertThreshold(v ?? 0)}
+                  min={0} step={100000} style={{ width: 140 }}
+                  formatter={(v) => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
+                  parser={(v) => v.replace(/,/g, '')}
+                />
+                <Text type="secondary" style={{ fontSize: 12 }}>OI in one minute</Text>
+                <Switch
+                  checked={soundEnabled} onChange={setSoundEnabled}
+                  checkedChildren={<SoundOutlined />} unCheckedChildren="Muted"
+                />
+              </Space>
+            </Card>
+
+            {activeAlerts.length > 0 && (
+              <Alert
+                type="warning"
+                showIcon
+                message="Large OI shift near ATM"
+                description={activeAlerts.map((a) => `${a.side} ${a.strike}: ${formatOiMillions(a.change, { signed: true })} in the last minute (${a.change >= 0 ? 'loading' : 'unwinding'})`).join(' · ')}
+              />
+            )}
+
             <Row gutter={16}>
               <Col span={15}>
-                <Card
-                  size="small"
-                  title="Spot (replaying)"
-                  extra={
-                    // Same Start/Pause/Reset actions as the controls card above, duplicated here
-                    // right on the chart's own title bar - the user's own "give start stop buttons
-                    // near charts" ask, so playback can be driven without looking away from it.
-                    <Space size={8}>
-                      {isToday && liveFeedSupported && (
-                        <Tooltip title="Streaming live ticks from Dhan's WebSocket feed on top of today's snapshot (price + OI - IV stays at the last REST-fetched value)">
-                          <Tag color="success" style={{ marginRight: 0 }}>● LIVE</Tag>
-                        </Tooltip>
-                      )}
-                      <Button
-                        size="small"
-                        icon={playing ? <PauseCircleOutlined /> : <PlayCircleOutlined />}
-                        onClick={() => setPlaying((p) => !p)}
-                        disabled={oneMinBars.length === 0 || visibleCount >= oneMinBars.length}
-                      >
-                        {playing ? 'Pause' : 'Start'}
-                      </Button>
-                      <Button
-                        size="small"
-                        icon={<ReloadOutlined />}
-                        onClick={() => { setPlaying(false); setVisibleCount(oneMinBars.length > 0 ? 1 : 0) }}
-                      >
-                        Reset
-                      </Button>
-                    </Space>
-                  }
-                >
+                <Card size="small" title="Spot (replaying)">
                   {oneMinBars.length > 0
                     ? (
                       <ChartErrorBoundary key={`${underlying}-${result.date}-${timeframe}`}>
