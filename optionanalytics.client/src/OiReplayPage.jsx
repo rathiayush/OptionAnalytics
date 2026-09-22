@@ -151,8 +151,16 @@ function computeMaxPain(rows) {
 
 // How many strikes on EACH side get an actual line drawn on the chart - the ladder already shows
 // every strike; the chart would just be noise at that density, so only the strongest few (by OI)
-// per side earn a line there. Support/resistance is a relative-strength read anyway.
+// per side earn a line there. Support/resistance is a relative-strength read anyway. Also the
+// MINIMUM count ReplayChart's own ATM-centered window widens to find - see that component's own
+// doc comment on why "at least 5, always" needed an adaptive window rather than a fixed one.
 const CHART_LEVELS_PER_SIDE = 5
+
+// The widest ReplayChart's own candidate window is ever allowed to grow to hunt for
+// CHART_LEVELS_PER_SIDE strikes with real OI - matches the backend's own StrikeBandSteps (the
+// fetched band's own half-width), since a window wider than that would just be band strikes that
+// were never actually fetched.
+const CHART_MAX_WINDOW_STEPS = 10
 
 // latestAtOrBefore always returns the newest point at-or-before "now", even if that point is from
 // an hour ago - if NiftyDataCollector's own backfill for a strike/side simply has no newer rows yet
@@ -189,7 +197,7 @@ const SUPPORT_DARK = '#0a5c1f'
 // further data fetch, just a local re-render. Also draws the strongest OI levels on each side as
 // horizontal price lines directly on the chart (darker = heavier OI = a "harder" level) - the same
 // data the ladder shows in table form, here as the market-structure read on the price chart itself.
-function ReplayChart({ bars, ladderRows, dayKey, dayHigh, dayLow, height = 440 }) {
+function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, height = 440 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
@@ -237,31 +245,38 @@ function ReplayChart({ bars, ladderRows, dayKey, dayHigh, dayLow, height = 440 }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dayKey])
 
-  // Redraws the strongest CHART_LEVELS_PER_SIDE resistance (CE OI) / support (PE OI) lines on
-  // every tick, since OI itself changes as the replay advances - always clears the previous set
-  // first rather than trying to diff/reuse handles, since which strikes even qualify as "top 5" can
-  // change from one tick to the next.
+  // Redraws the strongest CHART_LEVELS_PER_SIDE (5) resistance (CE OI) / support (PE OI) lines on
+  // every tick, since OI itself changes as the replay advances AND which strikes even qualify
+  // shifts as ATM moves - always clears the previous set first rather than trying to diff/reuse
+  // handles, since "top 5" can change entirely from one tick to the next.
   //
-  // Candidates are restricted to strikes within the DAY'S OWN high/low (plus a small buffer) before
-  // ranking by OI - the real bug this guards against: the fetched band can reach +-10 strikes from
-  // ATM (500+ points for NIFTY), while a real day often only moves 150-200 points. A heaviest-OI
-  // strike sitting far outside that range is real data, but drawing it pulls the price axis wide
-  // enough to squash the actual candles into an unreadable sliver - "cannot see anything" was this,
-  // not a crash. A level that far away isn't a near-term read on THIS day's action anyway.
+  // Candidates are ranked within a window CENTERED ON ATM (not the day's own realized high/low),
+  // widened one strike-step at a time until at least CHART_LEVELS_PER_SIDE candidates qualify (or
+  // the fetched band - +-10 steps - is exhausted) - two real problems this fixes together:
+  //   1. A day-range-based window is fixed for the whole day and doesn't move with price, so once
+  //      ATM has drifted away from where the day opened, "the 5 strongest levels" silently stopped
+  //      being the 5 strongest levels NEAR PRICE - the user's own "as soon as price shifts you add
+  //      or remove new ones" ask.
+  //   2. A FIXED window width (even an ATM-centered one) still under-fills to fewer than 5 lines
+  //      whenever a quiet stretch or a data gap leaves too few non-zero strikes inside it - this
+  //      widens just as far as actually needed to reach 5, rather than an always-maximal band that
+  //      would reintroduce the original "candle axis squashed by a far-away strike" bug (see
+  //      CHART_MAX_WINDOW_STEPS's own comment) or an always-narrow one that under-fills.
   useEffect(() => {
     if (!seriesRef.current) return
     for (const line of priceLinesRef.current) seriesRef.current.removePriceLine(line)
     priceLinesRef.current = []
-    if (!ladderRows || ladderRows.length === 0 || dayHigh == null || dayLow == null) return
-
-    const buffer = (dayHigh - dayLow) * 0.5 || dayHigh * 0.02
-    const inRange = ladderRows.filter((r) => r.strike >= dayLow - buffer && r.strike <= dayHigh + buffer)
+    if (!ladderRows || ladderRows.length === 0 || atmStrike == null || !step) return
 
     const drawSide = (key, ivKey, staleKey, sinceOpenKey, lightColor, darkColor, labelPrefix) => {
-      const top = [...inRange]
-        .filter((r) => (r[key] ?? 0) > 0)
-        .sort((a, b) => (b[key] ?? 0) - (a[key] ?? 0))
-        .slice(0, CHART_LEVELS_PER_SIDE)
+      let top = []
+      for (let windowSteps = CHART_LEVELS_PER_SIDE; windowSteps <= CHART_MAX_WINDOW_STEPS; windowSteps++) {
+        const candidates = ladderRows.filter((r) => Math.abs(r.strike - atmStrike) <= step * windowSteps && (r[key] ?? 0) > 0)
+        if (candidates.length >= CHART_LEVELS_PER_SIDE || windowSteps === CHART_MAX_WINDOW_STEPS) {
+          top = candidates.sort((a, b) => (b[key] ?? 0) - (a[key] ?? 0)).slice(0, CHART_LEVELS_PER_SIDE)
+          break
+        }
+      }
       if (top.length === 0) return
       const maxOi = top[0][key]
       const minOi = top[top.length - 1][key]
@@ -292,7 +307,7 @@ function ReplayChart({ bars, ladderRows, dayKey, dayHigh, dayLow, height = 440 }
 
     drawSide('ceOi', 'ceIv', 'ceStale', 'ceOiSinceOpen', RESISTANCE_LIGHT, RESISTANCE_DARK, 'R')
     drawSide('peOi', 'peIv', 'peStale', 'peOiSinceOpen', SUPPORT_LIGHT, SUPPORT_DARK, 'S')
-  }, [ladderRows, dayHigh, dayLow])
+  }, [ladderRows, atmStrike, step])
 
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }
@@ -687,8 +702,6 @@ export default function OiReplayPage() {
     () => aggregateBars(oneMinBars.slice(0, visibleCount), timeframe),
     [oneMinBars, visibleCount, timeframe],
   )
-  const dayHigh = useMemo(() => (oneMinBars.length > 0 ? Math.max(...oneMinBars.map((b) => b.high)) : null), [oneMinBars])
-  const dayLow = useMemo(() => (oneMinBars.length > 0 ? Math.min(...oneMinBars.map((b) => b.low)) : null), [oneMinBars])
   const dayStartMs = oneMinBars[0] ? fromChartTime(oneMinBars[0].time) * 1000 : null
 
   // Futures - always a live-Dhan-only series from the backend (see OiReplayService's own doc
@@ -1197,8 +1210,8 @@ export default function OiReplayPage() {
                           bars={displayBars}
                           ladderRows={ladderRows}
                           dayKey={`${underlying}-${result.date}-${timeframe}`}
-                          dayHigh={dayHigh}
-                          dayLow={dayLow}
+                          atmStrike={atmStrike}
+                          step={step}
                           height={460}
                         />
                       </ChartErrorBoundary>
