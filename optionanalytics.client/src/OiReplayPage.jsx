@@ -295,6 +295,9 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = tru
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
   const priceLinesRef = useRef([])
+  // {strike, diff, y}[] - one per drawn level, y being that strike's OWN current pixel position on
+  // the chart's price axis (see the price-line-drawing effect below for how it's kept in sync).
+  const [leftDiffRows, setLeftDiffRows] = useState([])
 
   // Same ATM-centered adaptive window the price lines below are drawn from - memoized so the
   // render's own CE/PE delta tags (see the bottom of this component) read the EXACT SAME top
@@ -450,6 +453,31 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = tru
 
     drawSide(topRows, 'ceOi', 'ceIv', 'ceStale', 'ceOiSinceOpen', RESISTANCE_LIGHT, RESISTANCE_DARK, 'R')
     drawSide(topRows, 'peOi', 'peIv', 'peStale', 'peOiSinceOpen', SUPPORT_LIGHT, SUPPORT_DARK, 'S')
+
+    // Support-minus-resistance CURRENT OI at every drawn level, pinned to that SAME strike's own
+    // y-coordinate on the left edge - the user's own "difference between support and resistance...
+    // on left hand side on that line, continuously updating" ask. Deliberately the CURRENT reading
+    // (peOi - ceOi right now), not a since-open change - that's what the Δ already in each price
+    // line's own title (see drawSide above) already covers; this is a different, complementary
+    // number. priceToCoordinate returns null for a strike currently outside the visible price
+    // range (zoomed/panned away from it) - simply left out rather than drawn off-chart.
+    const updateLeftDiffRows = () => {
+      if (!seriesRef.current) return
+      setLeftDiffRows(topRows
+        .map((row) => {
+          const y = seriesRef.current.priceToCoordinate(row.strike)
+          return y == null ? null : { strike: row.strike, diff: (row.peOi ?? 0) - (row.ceOi ?? 0), y }
+        })
+        .filter(Boolean))
+    }
+    updateLeftDiffRows()
+    // Re-run on pan/zoom too, not just on this effect's own topRows-changed trigger - scrolling the
+    // time axis is exactly when lightweight-charts' own default autoscale re-ranges the price axis
+    // (a different visible slice of candles has a different high/low), which would otherwise leave
+    // these tags pinned to their OLD y-coordinates until the next OI tick happened to re-run this
+    // whole effect.
+    chartRef.current?.timeScale().subscribeVisibleLogicalRangeChange(updateLeftDiffRows)
+    return () => chartRef.current?.timeScale().unsubscribeVisibleLogicalRangeChange(updateLeftDiffRows)
   }, [topRows])
 
   // The single heaviest strike on each side - the actual level just drawn as "R"/"S" above - read as
@@ -486,6 +514,26 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = tru
           {peLead && <span style={deltaTagStyle(peBias)}>S {peLead.strike} Δ {formatOiMillions(peDelta, { signed: true })}</span>}
         </div>
       )}
+      {/* Support-minus-resistance CURRENT OI, one per drawn level, each pinned to that strike's own
+          y so it reads right off the same horizontal line as its R/S price lines - see the
+          price-line-drawing effect's own doc comment on updateLeftDiffRows. A separate absolutely-
+          positioned layer from the corner tags above (which stay fixed regardless of price) since
+          these move with the price axis instead. */}
+      <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
+        {leftDiffRows.map((row) => (
+          <span
+            key={row.strike}
+            style={{
+              position: 'absolute', left: 8, top: row.y, transform: 'translateY(-50%)',
+              fontSize: 10, fontWeight: 600, padding: '1px 5px', borderRadius: 3,
+              background: '#00000080', color: row.diff >= 0 ? UP_COLOR : DOWN_COLOR,
+              border: `1px solid ${row.diff >= 0 ? UP_COLOR : DOWN_COLOR}`, whiteSpace: 'nowrap',
+            }}
+          >
+            {row.strike} S-R {formatOiMillions(row.diff, { signed: true })}
+          </span>
+        ))}
+      </div>
     </div>
   )
 }
