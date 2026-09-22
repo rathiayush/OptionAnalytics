@@ -476,14 +476,23 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = tru
         })
         .filter(Boolean))
     }
-    updateLeftDiffRows()
+    // Deferred to the next animation frame, NOT called synchronously right here - price lines were
+    // just (re)created above, and lightweight-charts doesn't recompute its own autoscaled price
+    // range until its next internal render pass, so calling priceToCoordinate synchronously read
+    // the OLD range and produced wildly wrong y values (tags rendering far outside the chart,
+    // overlapping unrelated cards above/below it - a real, visible bug a screenshot caught). One
+    // frame later, the library's own recalculation has already happened.
+    const rafId = requestAnimationFrame(updateLeftDiffRows)
     // Re-run on pan/zoom too, not just on this effect's own topRows-changed trigger - scrolling the
     // time axis is exactly when lightweight-charts' own default autoscale re-ranges the price axis
     // (a different visible slice of candles has a different high/low), which would otherwise leave
     // these tags pinned to their OLD y-coordinates until the next OI tick happened to re-run this
-    // whole effect.
+    // whole effect. This one fires AFTER the library's own range change, so it needs no extra defer.
     chartRef.current?.timeScale().subscribeVisibleLogicalRangeChange(updateLeftDiffRows)
-    return () => chartRef.current?.timeScale().unsubscribeVisibleLogicalRangeChange(updateLeftDiffRows)
+    return () => {
+      cancelAnimationFrame(rafId)
+      chartRef.current?.timeScale().unsubscribeVisibleLogicalRangeChange(updateLeftDiffRows)
+    }
   }, [topRows])
 
   // The single heaviest strike on each side - the actual level just drawn as "R"/"S" above - read as
@@ -512,7 +521,7 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = tru
   })
 
   return (
-    <div style={{ position: 'relative', width: '100%', height }}>
+    <div style={{ position: 'relative', width: '100%', height, overflow: 'hidden' }}>
       <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
       {(ceLead || peLead) && (
         <div style={{ position: 'absolute', top: 8, left: 8, display: 'flex', flexDirection: 'column', gap: 4, pointerEvents: 'none' }}>
@@ -1926,7 +1935,7 @@ export default function OiReplayPage() {
               <Text type="secondary" style={{ fontSize: 12 }}>Sections shown</Text>
               <Select
                 mode="multiple" value={visibleSections} onChange={setVisibleSections}
-                style={{ minWidth: 320 }} maxTagCount="responsive"
+                style={{ minWidth: 420, maxWidth: 900 }} maxTagCount={SECTION_OPTIONS.length}
                 options={SECTION_OPTIONS}
               />
               <Button size="small" onClick={() => setVisibleSections(ALL_SECTION_VALUES)} disabled={visibleSections.length === ALL_SECTION_VALUES.length}>
