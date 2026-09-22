@@ -197,6 +197,18 @@ function shade(lightHex, darkHex, t) {
   return `rgb(${r}, ${g}, ${b})`
 }
 
+// lightweight-charts' price-line `title` renders as a text label whose background box auto-sizes to
+// fit its OWN TEXT, not to any data value - so varying lineWidth/color alone (as this chart used to)
+// never produces a visible "length" difference, since the label itself is the dominant element and
+// every label is roughly the same string length regardless of OI. Block characters baked directly
+// into the title text are the only way to get a genuinely variable-length visual inside that API -
+// this renders as a little inline bar-chart before the strike, e.g. "R ██████░░░░ 23400 (11.94M OI)".
+const OI_BAR_BLOCKS = 10
+function oiBarText(t, maxBlocks = OI_BAR_BLOCKS) {
+  const filled = Math.max(1, Math.min(maxBlocks, Math.round(t * maxBlocks)))
+  return '█'.repeat(filled) + '░'.repeat(maxBlocks - filled)
+}
+
 const RESISTANCE_LIGHT = '#ffb3b3'
 const RESISTANCE_DARK = '#7a0000'
 const SUPPORT_LIGHT = '#b3f0c2'
@@ -323,7 +335,7 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, height = 440 }
           lineWidth: 1 + Math.round(t * 2), // thicker as OI (and darkness) increases too
           lineStyle: stale ? 1 : 2, // dotted when stale, dashed when live
           axisLabelVisible: true,
-          title: `${labelPrefix} ${row.strike} (${formatOiMillions(row[key])} OI${row[ivKey] != null ? `, IV ${row[ivKey].toFixed(1)}` : ''}${openOi != null ? `, open ${formatOiMillions(openOi, { signed: true })}` : ''})${stale ? ' [STALE]' : ''}`,
+          title: `${labelPrefix} ${oiBarText(t)} ${row.strike} (${formatOiMillions(row[key])} OI${row[ivKey] != null ? `, IV ${row[ivKey].toFixed(1)}` : ''}${openOi != null ? `, open ${formatOiMillions(openOi, { signed: true })}` : ''})${stale ? ' [STALE]' : ''}`,
         })
         priceLinesRef.current.push(line)
       }
