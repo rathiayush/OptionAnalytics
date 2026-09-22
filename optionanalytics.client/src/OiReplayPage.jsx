@@ -107,6 +107,26 @@ function aggregateBars(oneMinBars, timeframeMinutes) {
   return [...buckets.values()].sort((a, b) => a.time - b.time)
 }
 
+// Standard exponential moving average over already-aggregated bars' own closes - seeded with a
+// plain SMA of the first `period` closes (the conventional seed every charting tool uses), then
+// smoothed forward from there with the usual k = 2/(period+1) factor. Returns one point per bar
+// from index period-1 onward - a bar before that doesn't have `period` bars of history behind it
+// yet, so it's left out entirely (no plotted point) rather than shown as a misleadingly early
+// partial average.
+function computeEma(bars, period) {
+  if (!bars || period <= 0 || bars.length < period) return []
+  const k = 2 / (period + 1)
+  let sum = 0
+  for (let i = 0; i < period; i++) sum += bars[i].close
+  let ema = sum / period
+  const points = [{ time: bars[period - 1].time, value: ema }]
+  for (let i = period; i < bars.length; i++) {
+    ema = bars[i].close * k + ema * (1 - k)
+    points.push({ time: bars[i].time, value: ema })
+  }
+  return points
+}
+
 // A short beep via the Web Audio API - no asset file needed. Lazily creates (and reuses) one
 // AudioContext, created on first call rather than at module load, since most browsers refuse to
 // start an AudioContext before any user gesture on the page - by the time this can fire (a replay
@@ -150,6 +170,11 @@ function computeMaxPain(rows) {
   }
   return best
 }
+
+// EmaChart's own timeframe choices - a subset of the shared TIMEFRAME_OPTIONS (1/3/5 min only, no
+// 15) since the whole point of this second chart is a FASTER read than the main chart's own
+// (typically 15-min) timeframe for timing entries - the user's own explicit "1-3-5min" ask.
+const FAST_TIMEFRAME_OPTIONS = TIMEFRAME_OPTIONS.filter((o) => o.value <= 5)
 
 // How many strikes on EACH side get an actual line drawn on the chart - the ladder already shows
 // every strike; the chart would just be noise at that density, so only the strongest few (by OI)
@@ -417,6 +442,96 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = tru
           {peLead && <span style={deltaTagStyle(peBias)}>S {peLead.strike} Δ {formatOiMillions(peDelta, { signed: true })}</span>}
         </div>
       )}
+    </div>
+  )
+}
+
+const EMA1_COLOR = '#f0b429'
+const EMA2_COLOR = '#38bdf8'
+
+// A second, independently-timeframed candlestick chart with two EMA overlays - the user's own "one
+// more chart along with this 15 min running chart... add ema indicator... for parallel execution to
+// specific entry" ask: a faster 1/3/5-min read with EMA crossovers for timing an entry precisely,
+// alongside (not instead of) the main chart's own coarser timeframe. Driven by the SAME replay
+// clock as the main chart (oneMinBars/visibleCount, both owned by the page, not this component) so
+// the two always show the same moment in the day, just re-aggregated to a different bucket size -
+// this one never fetches or replays anything on its own.
+//
+// The two EMA series are created ONCE (in the same setup effect as the candlestick series) and
+// only ever re-titled/re-fed data afterward, rather than destroyed and recreated when a period
+// changes - lightweight-charts series are cheap to keep, not to keep re-adding.
+function EmaChart({ oneMinBars, visibleCount, timeframe, onTimeframeChange, ema1Period, onEma1PeriodChange, ema2Period, onEma2PeriodChange, dayKey, height = 320 }) {
+  const containerRef = useRef(null)
+  const chartRef = useRef(null)
+  const seriesRef = useRef(null)
+  const ema1SeriesRef = useRef(null)
+  const ema2SeriesRef = useRef(null)
+
+  const displayBars = useMemo(
+    () => aggregateBars(oneMinBars.slice(0, visibleCount), timeframe),
+    [oneMinBars, visibleCount, timeframe],
+  )
+  const ema1Points = useMemo(() => computeEma(displayBars, ema1Period), [displayBars, ema1Period])
+  const ema2Points = useMemo(() => computeEma(displayBars, ema2Period), [displayBars, ema2Period])
+
+  useEffect(() => {
+    if (!containerRef.current) return
+    const chart = createChart(containerRef.current, {
+      width: containerRef.current.clientWidth,
+      height,
+      layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
+      grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
+      rightPriceScale: { borderColor: BORDER_COLOR },
+      timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter },
+      crosshair: { mode: CrosshairMode.Normal },
+      localization: { timeFormatter: istTimeFormatter },
+    })
+    chartRef.current = chart
+    seriesRef.current = chart.addSeries(CandlestickSeries, {
+      upColor: UP_COLOR, downColor: DOWN_COLOR, borderVisible: false, wickUpColor: UP_COLOR, wickDownColor: DOWN_COLOR,
+    })
+    ema1SeriesRef.current = chart.addSeries(LineSeries, { color: EMA1_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true })
+    ema2SeriesRef.current = chart.addSeries(LineSeries, { color: EMA2_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true })
+
+    const onResize = () => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }) }
+    window.addEventListener('resize', onResize)
+    return () => {
+      window.removeEventListener('resize', onResize)
+      chart.remove()
+      chartRef.current = null
+      seriesRef.current = null
+      ema1SeriesRef.current = null
+      ema2SeriesRef.current = null
+    }
+  }, [height])
+
+  useEffect(() => { ema1SeriesRef.current?.applyOptions({ title: `EMA ${ema1Period}` }) }, [ema1Period])
+  useEffect(() => { ema2SeriesRef.current?.applyOptions({ title: `EMA ${ema2Period}` }) }, [ema2Period])
+
+  useEffect(() => { if (seriesRef.current) seriesRef.current.setData(displayBars) }, [displayBars])
+  useEffect(() => { if (ema1SeriesRef.current) ema1SeriesRef.current.setData(ema1Points) }, [ema1Points])
+  useEffect(() => { if (ema2SeriesRef.current) ema2SeriesRef.current.setData(ema2Points) }, [ema2Points])
+
+  // Re-fit on a brand new day AND whenever this chart's OWN timeframe changes (unlike the main
+  // chart, which only re-fits on dayKey) - switching from 5min to 1min here goes from ~75 candles to
+  // ~375 for the same revealed stretch, and leaving the old zoom level in place would show only a
+  // sliver of that much denser series rather than the whole thing.
+  useEffect(() => {
+    if (displayBars.length > 0) chartRef.current?.timeScale().fitContent()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dayKey, timeframe])
+
+  return (
+    <div style={{ width: '100%' }}>
+      <Space align="center" size={12} wrap style={{ marginBottom: 8 }}>
+        <Text type="secondary" style={{ fontSize: 12 }}>Timeframe</Text>
+        <Select value={timeframe} onChange={onTimeframeChange} style={{ width: 90 }} options={FAST_TIMEFRAME_OPTIONS} />
+        <Text type="secondary" style={{ fontSize: 12, color: EMA1_COLOR }}>EMA</Text>
+        <InputNumber value={ema1Period} onChange={(v) => onEma1PeriodChange(v || 1)} min={1} max={200} style={{ width: 70 }} />
+        <Text type="secondary" style={{ fontSize: 12, color: EMA2_COLOR }}>EMA</Text>
+        <InputNumber value={ema2Period} onChange={(v) => onEma2PeriodChange(v || 1)} min={1} max={200} style={{ width: 70 }} />
+      </Space>
+      <div ref={containerRef} style={{ width: '100%', height }} />
     </div>
   )
 }
@@ -964,6 +1079,14 @@ export default function OiReplayPage() {
   const [expiryFlag, setExpiryFlag] = useState('WEEK')
   const [date, setDate] = useState(null)
   const [speedMs, setSpeedMs] = useState(500)
+
+  // EmaChart's own state - a faster, independently-timeframed companion chart with two EMAs, for
+  // timing an entry against the main chart's own coarser read (see EmaChart's own doc comment).
+  // Deliberately NOT persisted the way the main timeframe is - this is a quick per-session tuning
+  // knob, not a durable preference.
+  const [emaTimeframe, setEmaTimeframe] = useState(5)
+  const [ema1Period, setEma1Period] = useState(9)
+  const [ema2Period, setEma2Period] = useState(15)
 
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
@@ -1827,6 +1950,28 @@ export default function OiReplayPage() {
               <Col span={9}>
                 <Card size="small" title="OI / IV ladder (nearest expiry, as of the current candle)" bodyStyle={{ maxHeight: 460, overflowY: 'auto' }}>
                   <OiLadder rows={ladderRows} atmStrike={atmStrike} />
+                </Card>
+              </Col>
+            </Row>
+
+            <Row gutter={16} style={{ marginTop: 16 }}>
+              <Col span={24}>
+                <Card size="small" title="Fast entry chart (independent timeframe + EMA)">
+                  {oneMinBars.length > 0
+                    ? (
+                      <ChartErrorBoundary key={`ema-${underlying}-${result.date}-${emaTimeframe}`}>
+                        <EmaChart
+                          oneMinBars={oneMinBars}
+                          visibleCount={visibleCount}
+                          timeframe={emaTimeframe} onTimeframeChange={setEmaTimeframe}
+                          ema1Period={ema1Period} onEma1PeriodChange={setEma1Period}
+                          ema2Period={ema2Period} onEma2PeriodChange={setEma2Period}
+                          dayKey={`ema-${underlying}-${result.date}`}
+                          height={320}
+                        />
+                      </ChartErrorBoundary>
+                    )
+                    : <Empty description="No spot candles for this day." />}
                 </Card>
               </Col>
             </Row>
