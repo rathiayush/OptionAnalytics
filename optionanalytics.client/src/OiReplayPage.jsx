@@ -291,18 +291,23 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, height = 440 }
     const peTop = findTop('peOi')
 
     // ONE shared scale across BOTH sides, not one independently computed per side - drawing R and
-    // S lines with their own separate min/max meant a 33M PE level could render THINNER than a
-    // 17M CE level (each was only ranked against its own side's other four candidates), which is
+    // S lines with their own separate scale meant a 33M PE level could render THINNER than a 17M
+    // CE level (each was only ranked against its own side's other four candidates), which is
     // exactly backwards and misleading to read at a glance. A strike's line thickness/darkness on
     // this chart now means the same thing everywhere on it, CE or PE.
+    //
+    // t is a TRUE proportion of the absolute value (row[key] / maxOi), not a min-max stretch
+    // between the weakest and strongest of the five shown (the earlier (value-min)/(max-min) form)
+    // - that stretch always forced the weakest candidate down to the thinnest/lightest line and the
+    // strongest up to the thickest/darkest regardless of how close together their real OI actually
+    // was, which is exactly the "shown out of proportion" the user's own screenshots were catching.
+    // Same formula the ladder's own bar width already uses (row.xxOi / maxOi), for the same reason.
     const allOi = [...ceTop.map((r) => r.ceOi), ...peTop.map((r) => r.peOi)]
     const maxOi = allOi.length > 0 ? Math.max(...allOi) : 0
-    const minOi = allOi.length > 0 ? Math.min(...allOi) : 0
-    const span = maxOi - minOi
 
     const drawSide = (top, key, ivKey, staleKey, sinceOpenKey, lightColor, darkColor, labelPrefix) => {
       for (const row of top) {
-        const t = span > 0 ? (row[key] - minOi) / span : 1
+        const t = maxOi > 0 ? row[key] / maxOi : 1
         // A stale level (see OI_STALE_MS) is a real OI reading, just a frozen one - still worth
         // drawing (it's the last known wall), but visually muted and labeled so it doesn't look
         // like a live, currently-updating level when the underlying data has stopped arriving.
