@@ -328,18 +328,20 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, height = 440 }
         // drawing (it's the last known wall), but visually muted and labeled so it doesn't look
         // like a live, currently-updating level when the underlying data has stopped arriving.
         const stale = row[staleKey]
-        // Day's open OI backed out from the already-computed since-open delta (current - delta =
-        // open) rather than a second lookup - shown right in the on-chart label (a price line's
-        // title renders directly on the chart, not just on hover) so a wall's CURRENT weight is
-        // always read against where it started the day, without leaving the chart for the ladder.
-        const openOi = row[sinceOpenKey] != null ? row[key] - row[sinceOpenKey] : null
+        // The actual change since today's open (row[sinceOpenKey] IS current - open, already
+        // computed by ladderRows) - shown right in the on-chart label (a price line's title renders
+        // directly on the chart, not just on hover) so EVERY drawn level's own delta is visible, not
+        // just the single strongest one called out in the left-side overlay tag above this chart.
+        // This used to back it out INTO the raw open-of-day value instead ("open +13.61M") which
+        // read like a delta but wasn't one - the user's own "show delta at each level" ask.
+        const sinceOpen = row[sinceOpenKey]
         const line = seriesRef.current.createPriceLine({
           price: row.strike,
           color: stale ? `${shade(lightColor, darkColor, t)}80` : shade(lightColor, darkColor, t),
           lineWidth: 1 + Math.round(t * 2), // thicker as OI (and darkness) increases too
           lineStyle: stale ? 1 : 2, // dotted when stale, dashed when live
           axisLabelVisible: true,
-          title: `${labelPrefix} ${oiBarText(t)} ${row.strike} (${formatOiMillions(row[key])} OI${row[ivKey] != null ? `, IV ${row[ivKey].toFixed(1)}` : ''}${openOi != null ? `, open ${formatOiMillions(openOi, { signed: true })}` : ''})${stale ? ' [STALE]' : ''}`,
+          title: `${labelPrefix} ${oiBarText(t)} ${row.strike} (${formatOiMillions(row[key])} OI${row[ivKey] != null ? `, IV ${row[ivKey].toFixed(1)}` : ''}${sinceOpen != null ? `, Δ ${formatOiMillions(sinceOpen, { signed: true })}` : ''})${stale ? ' [STALE]' : ''}`,
         })
         priceLinesRef.current.push(line)
       }
