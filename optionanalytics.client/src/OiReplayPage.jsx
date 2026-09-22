@@ -1267,6 +1267,11 @@ export default function OiReplayPage() {
   const load = (overrideDate) => {
     const effectiveDate = overrideDate ?? date
     if (!underlying || !effectiveDate) return
+    // Computed fresh from effectiveDate rather than reading the isToday closed over at render time -
+    // goLive() calls setDate(today) then load(today) in the same tick, and React state updates
+    // aren't synchronous, so the outer isToday here would still reflect the PREVIOUS date until the
+    // next render.
+    const effectiveIsToday = effectiveDate.format('YYYY-MM-DD') === istDateKey(new Date())
     setPlaying(false)
     setLoading(true)
     setError(null)
@@ -1290,10 +1295,14 @@ export default function OiReplayPage() {
         if (!body?.success) throw new Error(body?.error || 'This run did not succeed.')
         setResult(body)
         const initialLen = body.spotCandlesOneMinute?.length ?? 0
-        setVisibleCount(initialLen > 0 ? 1 : 0)
-        // Seeds the auto-follow effect below with "caught up" meaning THIS length, not 0 - so
-        // loading a fresh day (even today) always starts the replay at its own beginning rather
-        // than the auto-follow effect immediately yanking visibleCount to the end because 1 >= 0.
+        // For TODAY, jump straight to the live tip - the entire point of "Go Live"/loading today is
+        // to see the CURRENT market state right away, not replay from market open and wait (or drag
+        // the slider) to catch up. Any other (historical) day still starts a fresh replay at its own
+        // beginning, as before. The Reset button still replays today from its own start on demand.
+        setVisibleCount(initialLen > 0 ? (effectiveIsToday ? initialLen : 1) : 0)
+        // Seeds the auto-follow effect below with "caught up" meaning THIS length - since
+        // visibleCount is set to exactly this same length for today, it's already caught up and the
+        // auto-follow effect keeps pinning it to the tail as new live bars arrive from here.
         caughtUpLenRef.current = initialLen
       })
       .catch((err) => {
