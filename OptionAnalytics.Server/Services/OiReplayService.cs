@@ -29,6 +29,11 @@ namespace OptionAnalytics.Server.Services;
 /// of time it will show nearest expiry OI", matching what NiftyDataCollector's own rolling-option
 /// collector actively tracks as "the current cycle" for a live position, rather than a further-out
 /// cycle a trader wouldn't usually be reading OI from day to day.
+///
+/// FUTURES ARE DIFFERENT FROM ALL OF THE ABOVE - always a live Dhan call, in every environment
+/// including local development, with no stored source and no AppEnvironment.IsLocal gate at all -
+/// see GetFuturesAsync's own doc comment. NiftyDataCollector's database has no futures data
+/// whatsoever, so there is nothing to prefer over Dhan the way spot/options do.
 /// </summary>
 public sealed class OiReplayService
 {
@@ -50,18 +55,21 @@ public sealed class OiReplayService
     private readonly StoredSpotDataService _storedSpot;
     private readonly StoredRollingOptionDataService _storedRollingOption;
     private readonly DhanSpotInstrumentMaster _instrumentMaster;
+    private readonly DhanFuturesInstrumentMaster _futuresInstrumentMaster;
     private readonly DhanHistoricalDataService _historicalData;
     private readonly DhanRollingOptionDataService _rollingOption;
     private readonly bool _allowLiveDataFallback;
 
     public OiReplayService(
         StoredSpotDataService storedSpot, StoredRollingOptionDataService storedRollingOption,
-        DhanSpotInstrumentMaster instrumentMaster, DhanHistoricalDataService historicalData, DhanRollingOptionDataService rollingOption,
+        DhanSpotInstrumentMaster instrumentMaster, DhanFuturesInstrumentMaster futuresInstrumentMaster,
+        DhanHistoricalDataService historicalData, DhanRollingOptionDataService rollingOption,
         AppEnvironment appEnvironment)
     {
         _storedSpot = storedSpot;
         _storedRollingOption = storedRollingOption;
         _instrumentMaster = instrumentMaster;
+        _futuresInstrumentMaster = futuresInstrumentMaster;
         _historicalData = historicalData;
         _rollingOption = rollingOption;
         _allowLiveDataFallback = !appEnvironment.IsLocal;
@@ -146,8 +154,45 @@ public sealed class OiReplayService
 
         var spotCandlesTf = BacktestUtil.AggregateCandles(spotBars1m, timeframe);
 
+        var (futuresBars, futuresExpiry, futuresOiAvailable, futuresError) = await GetFuturesAsync(underlying, date, cancellationToken);
+
         return new OiReplayResult(true, null, underlying, date, timeframe, step, expiryFlag, NearestExpiryCode,
-            spotCandlesTf, spotBars1m, cePoints, pePoints);
+            spotCandlesTf, spotBars1m, cePoints, pePoints, futuresBars, futuresExpiry, futuresOiAvailable, futuresError);
+    }
+
+    /// <summary>The day's futures contract, OHLC + (best-effort) OI - ALWAYS a live Dhan call, per
+    /// the user's own explicit "i do not have futures data in db so it will be dhan call always"
+    /// request. Unlike the spot/option paths above, there is no stored source to prefer and no
+    /// AppEnvironment.IsLocal gate - futures simply has nowhere else to come from, in every
+    /// environment including local development.</summary>
+    private async Task<(IReadOnlyList<FuturesBar> Bars, DateOnly? Expiry, bool OiAvailable, string? Error)> GetFuturesAsync(
+        string underlying, DateOnly date, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _futuresInstrumentMaster.EnsureLoadedAsync(cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return (Array.Empty<FuturesBar>(), null, false, $"Could not load the futures instrument master: {ex.Message}");
+        }
+
+        var contract = _futuresInstrumentMaster.GetNearestContract(underlying, date);
+        if (contract is null)
+            return (Array.Empty<FuturesBar>(), null, false, $"No currently-listed futures contract found for {underlying} - the instrument master may still be loading.");
+
+        var (bars, oiFieldPresent, error) = await _historicalData.GetIntradayFuturesCandlesAsync(
+            contract.SecurityId, contract.DhanSegment, date, date, 1, cancellationToken);
+
+        if (error is not null)
+            return (Array.Empty<FuturesBar>(), contract.Expiry, false, error);
+
+        if (bars.Count == 0)
+            return (Array.Empty<FuturesBar>(), contract.Expiry,
+                false, $"No futures data for {date:dd MMM yyyy} - the {contract.Expiry:dd MMM yyyy} contract Dhan currently lists likely did not exist yet on this date (an older contract that has since expired is no longer resolvable at all).");
+
+        var futuresBars = bars.Select(b => new FuturesBar(b.Bar.Time, b.Bar.Open, b.Bar.High, b.Bar.Low, b.Bar.Close, b.Bar.Volume, b.OpenInterest)).ToList();
+        return (futuresBars, contract.Expiry, oiFieldPresent, null);
     }
 
     /// <summary>One CE or PE series for one relative strike: stored first (when configured), then a

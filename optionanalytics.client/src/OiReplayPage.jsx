@@ -297,6 +297,55 @@ function ReplayChart({ bars, ladderRows, dayKey, dayHigh, dayLow, height = 440 }
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }
 
+// A plain candlestick chart for the day's futures contract - same reveal-as-replay-advances shape
+// as ReplayChart, minus the OI price lines (a future has no strike chain to draw walls for).
+// Separate component rather than reusing ReplayChart with ladderRows=[] so this stays simple and
+// doesn't carry unused price-line plumbing for a series that will never have any.
+function FuturesChart({ bars, dayKey, height = 320 }) {
+  const containerRef = useRef(null)
+  const chartRef = useRef(null)
+  const seriesRef = useRef(null)
+
+  useEffect(() => {
+    if (!containerRef.current) return
+    const chart = createChart(containerRef.current, {
+      width: containerRef.current.clientWidth,
+      height,
+      layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
+      grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
+      rightPriceScale: { borderColor: BORDER_COLOR },
+      timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter },
+      crosshair: { mode: CrosshairMode.Normal },
+      localization: { timeFormatter: istTimeFormatter },
+    })
+    chartRef.current = chart
+    seriesRef.current = chart.addSeries(CandlestickSeries, {
+      upColor: UP_COLOR, downColor: DOWN_COLOR, borderVisible: false, wickUpColor: UP_COLOR, wickDownColor: DOWN_COLOR,
+    })
+
+    const onResize = () => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }) }
+    window.addEventListener('resize', onResize)
+    return () => {
+      window.removeEventListener('resize', onResize)
+      chart.remove()
+      chartRef.current = null
+      seriesRef.current = null
+    }
+  }, [height])
+
+  useEffect(() => {
+    if (!seriesRef.current) return
+    seriesRef.current.setData(bars)
+  }, [bars])
+
+  useEffect(() => {
+    if (bars.length > 0) chartRef.current?.timeScale().fitContent()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dayKey])
+
+  return <div ref={containerRef} style={{ width: '100%', height }} />
+}
+
 // The right-hand OI/IV ladder: every strike in the fetched band gets its own row (never just the
 // single heaviest one - see this page's own "there could be multiple [levels]" request), a CE bar
 // extending right and a PE bar extending left from a shared center scale, both sides' IV printed
@@ -641,6 +690,44 @@ export default function OiReplayPage() {
   const dayHigh = useMemo(() => (oneMinBars.length > 0 ? Math.max(...oneMinBars.map((b) => b.high)) : null), [oneMinBars])
   const dayLow = useMemo(() => (oneMinBars.length > 0 ? Math.min(...oneMinBars.map((b) => b.low)) : null), [oneMinBars])
   const dayStartMs = oneMinBars[0] ? fromChartTime(oneMinBars[0].time) * 1000 : null
+
+  // Futures - always a live-Dhan-only series from the backend (see OiReplayService's own doc
+  // comment: no futures data exists in NiftyDataCollector's database at all), so unlike
+  // oneMinBars/ceByStrike/peByStrike this never gets a "today, live WS" tail merged in - it is
+  // simply whatever OiReplayService's own single live call returned for the whole day.
+  const futuresBarsChart = useMemo(() => (result?.futuresBars ?? []).map(toBar), [result])
+  // Raw (unshifted) points, time-ascending, for latestAtOrBefore-style stat lookups - same
+  // real-time-vs-chart-time distinction as ceByStrike/peByStrike above (see asOfMs's own comment).
+  const futuresPointsRaw = useMemo(
+    () => [...(result?.futuresBars ?? [])].sort((a, b) => new Date(a.time) - new Date(b.time)),
+    [result],
+  )
+  const displayFuturesBars = useMemo(() => {
+    if (asOfMs == null) return []
+    const cutoff = toChartTime(asOfMs)
+    return aggregateBars(futuresBarsChart.filter((b) => b.time <= cutoff), timeframe)
+  }, [futuresBarsChart, asOfMs, timeframe])
+  const currentFutures = useMemo(
+    () => (asOfMs != null ? latestAtOrBefore(futuresPointsRaw, asOfMs) : null),
+    [futuresPointsRaw, asOfMs],
+  )
+  const futuresOpen = futuresPointsRaw[0] ?? null
+  const futuresOiSinceOpen = currentFutures?.openInterest != null && futuresOpen?.openInterest != null
+    ? currentFutures.openInterest - futuresOpen.openInterest
+    : null
+  const futuresVolumeSoFar = useMemo(() => {
+    if (asOfMs == null) return null
+    return futuresPointsRaw
+      .filter((p) => new Date(p.time).getTime() <= asOfMs)
+      .reduce((sum, p) => sum + (p.volume ?? 0), 0)
+  }, [futuresPointsRaw, asOfMs])
+  // Basis = futures price - spot price - positive ("premium") usually reads bullish sentiment,
+  // negative ("discount") bearish, though on an index the gap is mostly just cost-of-carry drifting
+  // toward zero as expiry nears, not a pure sentiment read the way it can be on an individual stock.
+  // Both prices are already real (non-time) values, so no chart-time/real-time conversion applies.
+  const futuresBasis = currentFutures?.close != null && currentBar?.close != null
+    ? currentFutures.close - currentBar.close
+    : null
 
   // Every row carries its OI both ONE MINUTE AGO (native resolution regardless of the chart's own
   // timeframe - "change every min" was explicit) AND at the DAY'S OPEN, alongside the current
@@ -1122,6 +1209,58 @@ export default function OiReplayPage() {
               <Col span={9}>
                 <Card size="small" title="OI / IV ladder (nearest expiry, as of the current candle)" bodyStyle={{ maxHeight: 460, overflowY: 'auto' }}>
                   <OiLadder rows={ladderRows} atmStrike={atmStrike} />
+                </Card>
+              </Col>
+            </Row>
+
+            <Row gutter={16} style={{ marginTop: 16 }}>
+              <Col span={24}>
+                <Card
+                  size="small"
+                  title="Futures (nearest listed contract - always live from Dhan, never stored)"
+                  extra={result.futuresExpiry ? <Tag>{result.futuresExpiry} expiry</Tag> : null}
+                >
+                  {result.futuresError && (
+                    <Alert type="warning" showIcon style={{ marginBottom: 12 }} message={result.futuresError} />
+                  )}
+                  {!result.futuresOiAvailable && result.futuresBars?.length > 0 && (
+                    <Alert type="info" showIcon style={{ marginBottom: 12 }}
+                      message="Dhan did not return an Open Interest series for this futures contract - the OI figures below are unavailable, not zero." />
+                  )}
+                  {displayFuturesBars.length > 0 ? (
+                    <>
+                      <Row gutter={24} style={{ marginBottom: 12 }}>
+                        <Col>
+                          <Statistic title="Futures LTP" value={currentFutures?.close ?? '—'} precision={currentFutures?.close != null ? 2 : undefined} />
+                        </Col>
+                        <Col>
+                          <Statistic
+                            title="Basis (Fut - Spot)"
+                            value={futuresBasis != null ? `${futuresBasis >= 0 ? '+' : ''}${futuresBasis.toFixed(2)}` : '—'}
+                            valueStyle={{ color: futuresBasis == null ? undefined : futuresBasis >= 0 ? UP_COLOR : DOWN_COLOR }}
+                          />
+                        </Col>
+                        <Col>
+                          <Statistic title="Futures OI" value={result.futuresOiAvailable ? (currentFutures?.openInterest?.toLocaleString() ?? '—') : 'N/A'} />
+                        </Col>
+                        <Col>
+                          <Statistic
+                            title="OI since open"
+                            value={result.futuresOiAvailable ? (futuresOiSinceOpen != null ? `${futuresOiSinceOpen >= 0 ? '+' : ''}${futuresOiSinceOpen.toLocaleString()}` : '—') : 'N/A'}
+                            valueStyle={{ color: futuresOiSinceOpen == null ? undefined : futuresOiSinceOpen >= 0 ? UP_COLOR : DOWN_COLOR }}
+                          />
+                        </Col>
+                        <Col>
+                          <Statistic title="Volume so far" value={futuresVolumeSoFar != null ? futuresVolumeSoFar.toLocaleString() : '—'} />
+                        </Col>
+                      </Row>
+                      <ChartErrorBoundary key={`futures-${underlying}-${result.date}-${timeframe}`}>
+                        <FuturesChart bars={displayFuturesBars} dayKey={`futures-${underlying}-${result.date}-${timeframe}`} height={320} />
+                      </ChartErrorBoundary>
+                    </>
+                  ) : (
+                    <Empty description={result.futuresError || 'No futures data for this day.'} />
+                  )}
                 </Card>
               </Col>
             </Row>

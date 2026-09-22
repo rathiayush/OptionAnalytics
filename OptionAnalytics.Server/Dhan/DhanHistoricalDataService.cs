@@ -33,6 +33,7 @@ public sealed class DhanHistoricalDataService
 {
     private const string Instrument = "INDEX";
     private const string OptionInstrument = "OPTIDX";
+    private const string FuturesInstrument = "FUTIDX";
 
     private readonly DhanApiClient _api;
     private readonly ILogger<DhanHistoricalDataService> _logger;
@@ -97,6 +98,94 @@ public sealed class DhanHistoricalDataService
     public Task<(IReadOnlyList<CandleWithVolume> Candles, string? Error)> GetIntradayOptionCandlesAsync(
         uint securityId, string dhanSegment, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken) =>
         GetIntradayDerivativeCandlesAsync(securityId, dhanSegment, OptionInstrument, fromDay, toDay, intervalMinutes, cancellationToken);
+
+    /// <summary>OHLC + volume + (best-effort) open interest for one futures contract - the OI
+    /// Replay page's own "show me the futures too" chart. UNLIKE GetIntradayOptionCandlesAsync,
+    /// this passes "oi": true - Dhan's docs describe this flag as returning historical
+    /// open_interest for a derivative instrument, but this app has never actually exercised it
+    /// before now (every other OI-aware fetch here goes through DhanRollingOptionDataService's own
+    /// /charts/rollingoption instead, which is confirmed to return OI). OiFieldPresent tells the
+    /// caller whether Dhan's response actually included an "open_interest" array at all, so a
+    /// genuine "this endpoint doesn't return OI for futures" can be told apart from "OI was 0/
+    /// missing for these particular bars" - the first is a page-level "OI not available" message,
+    /// the second is normal, unremarkable missing data.</summary>
+    public async Task<(IReadOnlyList<(CandleWithVolume Bar, long? OpenInterest)> Bars, bool OiFieldPresent, string? Error)> GetIntradayFuturesCandlesAsync(
+        uint securityId, string dhanSegment, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken)
+    {
+        if (!_api.HasSession)
+        {
+            _logger.LogWarning("Cannot fetch intraday futures candles for {Segment}:{Id} - Dhan is not authenticated.", dhanSegment, securityId);
+            return (Array.Empty<(CandleWithVolume, long?)>(), false, "Dhan is not authenticated");
+        }
+
+        var payload = new
+        {
+            securityId = securityId.ToString(CultureInfo.InvariantCulture),
+            exchangeSegment = dhanSegment,
+            instrument = FuturesInstrument,
+            interval = intervalMinutes.ToString(CultureInfo.InvariantCulture),
+            fromDate = $"{fromDay:yyyy-MM-dd} 09:15:00",
+            toDate = $"{toDay:yyyy-MM-dd} 15:30:00",
+            oi = true,
+        };
+
+        using var response = await _api.SendAsync(HttpMethod.Post, "/charts/intraday", payload,
+            $"futures intraday candles ({dhanSegment}:{securityId}, {fromDay:yyyy-MM-dd}..{toDay:yyyy-MM-dd})", cancellationToken);
+
+        if (!response.Success)
+        {
+            _logger.LogWarning("Futures intraday candle request failed for {Segment}:{Id} ({From}..{To}) - {Error}", dhanSegment, securityId, fromDay, toDay, response.ErrorMessage);
+            return (Array.Empty<(CandleWithVolume, long?)>(), false, string.IsNullOrWhiteSpace(response.ErrorMessage) ? $"HTTP {(int)response.StatusCode}" : response.ErrorMessage);
+        }
+
+        var oiFieldPresent = response.Root.TryGetProperty("open_interest", out _);
+        return (ParseCandlesWithOpenInterest(response.Root), oiFieldPresent, null);
+    }
+
+    private List<(CandleWithVolume Bar, long? OpenInterest)> ParseCandlesWithOpenInterest(JsonElement root)
+    {
+        var candles = new List<(CandleWithVolume, long?)>();
+        if (!root.TryGetProperty("timestamp", out var timestamps) || timestamps.ValueKind != JsonValueKind.Array)
+            return candles;
+
+        var open = GetArray(root, "open");
+        var high = GetArray(root, "high");
+        var low = GetArray(root, "low");
+        var close = GetArray(root, "close");
+        var volume = GetArray(root, "volume");
+        var openInterest = GetArray(root, "open_interest");
+
+        var count = timestamps.GetArrayLength();
+        for (var i = 0; i < count; i++)
+        {
+            try
+            {
+                var epochSeconds = (long)timestamps[i].GetDouble();
+                var o = i < open.Count ? open[i] : 0m;
+                var h = i < high.Count ? high[i] : 0m;
+                var l = i < low.Count ? low[i] : 0m;
+                var c = i < close.Count ? close[i] : 0m;
+
+                if (!OptionPriceSanity.IsPlausibleBar(o, h, l, c))
+                {
+                    _logger.LogWarning("Skipped an implausible futures candle at index {Index} (O={Open} H={High} L={Low} C={Close}).", i, o, h, l, c);
+                    continue;
+                }
+
+                var oi = i < openInterest.Count && openInterest[i] > 0 ? (long?)openInterest[i] : null;
+                candles.Add((new CandleWithVolume(
+                    Time: DateTimeOffset.FromUnixTimeSeconds(epochSeconds),
+                    Open: o, High: h, Low: l, Close: c,
+                    Volume: i < volume.Count ? (long)volume[i] : 0), oi));
+            }
+            catch (Exception ex) when (ex is FormatException or InvalidOperationException or OverflowException)
+            {
+                _logger.LogDebug(ex, "Skipped an unparsable futures candle at index {Index}", i);
+            }
+        }
+
+        return candles;
+    }
 
     private async Task<(IReadOnlyList<CandleWithVolume> Candles, string? Error)> GetIntradayDerivativeCandlesAsync(
         uint securityId, string dhanSegment, string instrumentType, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken)
