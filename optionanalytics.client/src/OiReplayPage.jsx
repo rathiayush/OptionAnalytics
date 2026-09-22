@@ -1256,66 +1256,63 @@ export default function OiReplayPage() {
               </Card>
             )}
 
-            {/* Playback controls, right next to the chart they drive - the user's own "the play
-                pause button whole panel should be near to chart" ask. Used to sit up top, well
-                above Stats/Market Read/Day OI Accumulation, forcing a scroll back and forth
-                between the controls and the thing they control. */}
-            <Card size="small">
-              <Space align="center" size={16} wrap>
-                <Button
-                  icon={playing ? <PauseCircleOutlined /> : <PlayCircleOutlined />}
-                  onClick={() => setPlaying((p) => !p)}
-                  disabled={oneMinBars.length === 0 || visibleCount >= oneMinBars.length}
-                >
-                  {playing ? 'Pause' : 'Start'}
-                </Button>
-                <Button icon={<ReloadOutlined />} onClick={() => { setPlaying(false); setVisibleCount(oneMinBars.length > 0 ? 1 : 0) }}>Reset</Button>
-                <Text type="secondary" style={{ fontSize: 12 }}>Speed</Text>
-                <Select value={speedMs} onChange={setSpeedMs} style={{ width: 90 }} options={SPEED_OPTIONS} />
-                <div style={{ flex: 1, minWidth: 200 }}>
-                  <Slider
-                    min={0} max={Math.max(0, oneMinBars.length - 1)} value={visibleCount - 1}
-                    onChange={(v) => { setPlaying(false); setVisibleCount(v + 1) }}
-                    tooltip={{ formatter: (v) => oneMinBars[v] ? istTimeFormatter(oneMinBars[v].time) : '' }}
-                  />
-                </div>
-                <Text style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
-                  {currentBar ? `${istTimeFormatter(currentBar.time)} (${visibleCount}/${oneMinBars.length})` : '—'}
-                </Text>
-                {isToday && liveFeedSupported && (
-                  <Tooltip title="Streaming live ticks from Dhan's WebSocket feed on top of today's snapshot (price + OI - IV stays at the last REST-fetched value)">
-                    <Tag color="success">● LIVE</Tag>
-                  </Tooltip>
-                )}
-              </Space>
-              <Space align="center" size={12} wrap style={{ marginTop: 10 }}>
-                <Text type="secondary" style={{ fontSize: 12 }}>Alert when a strike near ATM shifts by</Text>
-                <InputNumber
-                  value={alertThreshold} onChange={(v) => setAlertThreshold(v ?? 0)}
-                  min={0} step={100000} style={{ width: 140 }}
-                  formatter={(v) => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
-                  parser={(v) => v.replace(/,/g, '')}
-                />
-                <Text type="secondary" style={{ fontSize: 12 }}>OI in one minute</Text>
-                <Switch
-                  checked={soundEnabled} onChange={setSoundEnabled}
-                  checkedChildren={<SoundOutlined />} unCheckedChildren="Muted"
-                />
-              </Space>
-            </Card>
-
-            {activeAlerts.length > 0 && (
-              <Alert
-                type="warning"
-                showIcon
-                message="Large OI shift near ATM"
-                description={activeAlerts.map((a) => `${a.side} ${a.strike}: ${formatOiMillions(a.change, { signed: true })} in the last minute (${a.change >= 0 ? 'loading' : 'unwinding'})`).join(' · ')}
-              />
-            )}
-
             <Row gutter={16}>
               <Col span={15}>
                 <Card size="small" title="Spot (replaying)">
+                  {/* Playback controls, literally inside the same card as the chart, right above
+                      the canvas itself - the user's own "this bar should be near to chart just on
+                      top of chart, it is too far right now" (a separate card above it, even
+                      directly adjacent, still wasn't close enough). */}
+                  <Space align="center" size={16} wrap style={{ marginBottom: 8 }}>
+                    <Button
+                      icon={playing ? <PauseCircleOutlined /> : <PlayCircleOutlined />}
+                      onClick={() => setPlaying((p) => !p)}
+                      disabled={oneMinBars.length === 0 || visibleCount >= oneMinBars.length}
+                    >
+                      {playing ? 'Pause' : 'Start'}
+                    </Button>
+                    <Button icon={<ReloadOutlined />} onClick={() => { setPlaying(false); setVisibleCount(oneMinBars.length > 0 ? 1 : 0) }}>Reset</Button>
+                    <Text type="secondary" style={{ fontSize: 12 }}>Speed</Text>
+                    <Select value={speedMs} onChange={setSpeedMs} style={{ width: 90 }} options={SPEED_OPTIONS} />
+                    <div style={{ flex: 1, minWidth: 160 }}>
+                      <Slider
+                        min={0} max={Math.max(0, oneMinBars.length - 1)} value={visibleCount - 1}
+                        onChange={(v) => { setPlaying(false); setVisibleCount(v + 1) }}
+                        tooltip={{ formatter: (v) => oneMinBars[v] ? istTimeFormatter(oneMinBars[v].time) : '' }}
+                      />
+                    </div>
+                    <Text style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
+                      {currentBar ? `${istTimeFormatter(currentBar.time)} (${visibleCount}/${oneMinBars.length})` : '—'}
+                    </Text>
+                    {isToday && liveFeedSupported && (
+                      <Tooltip title="Streaming live ticks from Dhan's WebSocket feed on top of today's snapshot (price + OI - IV stays at the last REST-fetched value)">
+                        <Tag color="success">● LIVE</Tag>
+                      </Tooltip>
+                    )}
+                  </Space>
+                  <Space align="center" size={12} wrap style={{ marginBottom: 8 }}>
+                    <Text type="secondary" style={{ fontSize: 12 }}>Alert when a strike near ATM shifts by</Text>
+                    <InputNumber
+                      value={alertThreshold} onChange={(v) => setAlertThreshold(v ?? 0)}
+                      min={0} step={100000} style={{ width: 140 }}
+                      formatter={(v) => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
+                      parser={(v) => v.replace(/,/g, '')}
+                    />
+                    <Text type="secondary" style={{ fontSize: 12 }}>OI in one minute</Text>
+                    <Switch
+                      checked={soundEnabled} onChange={setSoundEnabled}
+                      checkedChildren={<SoundOutlined />} unCheckedChildren="Muted"
+                    />
+                  </Space>
+                  {activeAlerts.length > 0 && (
+                    <Alert
+                      type="warning"
+                      showIcon
+                      style={{ marginBottom: 8 }}
+                      message="Large OI shift near ATM"
+                      description={activeAlerts.map((a) => `${a.side} ${a.strike}: ${formatOiMillions(a.change, { signed: true })} in the last minute (${a.change >= 0 ? 'loading' : 'unwinding'})`).join(' · ')}
+                    />
+                  )}
                   {oneMinBars.length > 0
                     ? (
                       <ChartErrorBoundary key={`${underlying}-${result.date}-${timeframe}`}>
