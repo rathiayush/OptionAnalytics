@@ -346,7 +346,10 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = tru
     const chart = createChart(containerRef.current, {
       width: containerRef.current.clientWidth,
       height,
-      layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
+      // A bigger fontSize than the page's other charts - the OI-wall price-line labels here carry
+      // the strike, OI, IV and now separate Δ/S-R badges, all crammed against the right axis, and
+      // the user's own "labels bit bigger, [I] can see it" ask was specifically about this chart.
+      layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 13 },
       grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
       rightPriceScale: { borderColor: BORDER_COLOR },
       timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter },
@@ -442,27 +445,57 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = tru
         // This used to back it out INTO the raw open-of-day value instead ("open +13.61M") which
         // read like a delta but wasn't one - the user's own "show delta at each level" ask.
         const sinceOpen = row[sinceOpenKey]
-        // Current support-minus-resistance OI at this level (peOi - ceOi right now - a DIFFERENT,
-        // complementary number from the since-open Δ above) folded directly into this SAME native
-        // price-line title, rather than a hand-positioned overlay tracking its own y-coordinate via
-        // priceToCoordinate: that overlay kept drifting out of sync with the chart's own pan/zoom/
-        // rescale timing and got clipped by its own line - a real, repeatedly-reported bug. A price
-        // line's own title is pinned by the library itself, so it can't drift or get cut off.
-        const srDiff = (row.peOi ?? 0) - (row.ceOi ?? 0)
         const line = seriesRef.current.createPriceLine({
           price: row.strike,
           color: stale ? `${shade(lightColor, darkColor, t)}80` : shade(lightColor, darkColor, t),
           lineWidth: 1 + Math.round(t * 2), // thicker as OI (and darkness) increases too
           lineStyle: stale ? 1 : 2, // dotted when stale, dashed when live
           axisLabelVisible: true,
-          title: `${labelPrefix} ${oiBarText(t)} ${row.strike} (${formatOiMillions(row[key])} OI${row[ivKey] != null ? `, IV ${row[ivKey].toFixed(1)}` : ''}${sinceOpen != null ? `, Δ ${formatOiMillions(sinceOpen, { signed: true })}` : ''}, S-R ${formatOiMillions(srDiff, { signed: true })})${stale ? ' [STALE]' : ''}`,
+          title: `${labelPrefix} ${oiBarText(t)} ${row.strike} (${formatOiMillions(row[key])} OI${row[ivKey] != null ? `, IV ${row[ivKey].toFixed(1)}` : ''})${stale ? ' [STALE]' : ''}`,
         })
         priceLinesRef.current.push(line)
+
+        // The since-open change (Δ) gets its OWN price line at the exact same price, purely for its
+        // axis-label badge - lineVisible:false draws no extra horizontal line, just a colored pill on
+        // the price axis. A single price line's title is one plain-colored string (lightweight-charts
+        // has no per-segment styling), so a genuine green-fill/white-text (up) vs red-fill/white-text
+        // (down) badge - the user's own explicit ask - needs its own price line with axisLabelColor/
+        // axisLabelTextColor set directly, pinned by the library itself like every other line here.
+        if (sinceOpen != null) {
+          const deltaLine = seriesRef.current.createPriceLine({
+            price: row.strike,
+            color: 'transparent',
+            lineVisible: false,
+            axisLabelVisible: true,
+            axisLabelColor: sinceOpen >= 0 ? UP_COLOR : DOWN_COLOR,
+            axisLabelTextColor: '#ffffff',
+            title: `Δ ${formatOiMillions(sinceOpen, { signed: true })}`,
+          })
+          priceLinesRef.current.push(deltaLine)
+        }
       }
     }
 
     drawSide(topRows, 'ceOi', 'ceIv', 'ceStale', 'ceOiSinceOpen', RESISTANCE_LIGHT, RESISTANCE_DARK, 'R')
     drawSide(topRows, 'peOi', 'peIv', 'peStale', 'peOiSinceOpen', SUPPORT_LIGHT, SUPPORT_DARK, 'S')
+
+    // Current support-minus-resistance OI (peOi - ceOi right now, a DIFFERENT, complementary number
+    // from the since-open Δ above) - once per row, not once per side, so it isn't drawn twice at the
+    // same price. Same colored-badge-via-invisible-price-line pattern as Δ above.
+    for (const row of topRows) {
+      if ((row.ceOi ?? 0) <= 0 && (row.peOi ?? 0) <= 0) continue
+      const srDiff = (row.peOi ?? 0) - (row.ceOi ?? 0)
+      const srLine = seriesRef.current.createPriceLine({
+        price: row.strike,
+        color: 'transparent',
+        lineVisible: false,
+        axisLabelVisible: true,
+        axisLabelColor: srDiff >= 0 ? UP_COLOR : DOWN_COLOR,
+        axisLabelTextColor: '#ffffff',
+        title: `S-R ${formatOiMillions(srDiff, { signed: true })}`,
+      })
+      priceLinesRef.current.push(srLine)
+    }
   }, [topRows])
 
   // The single heaviest strike on each side - the actual level just drawn as "R"/"S" above - read as
@@ -2122,7 +2155,7 @@ export default function OiReplayPage() {
                           atmStrike={atmStrike}
                           step={step}
                           top5Only={top5WallsOnly}
-                          height={460}
+                          height={560}
                         />
                       </ChartErrorBoundary>
                     )
@@ -2149,7 +2182,7 @@ export default function OiReplayPage() {
                               ema1Period={chartBEma1} onEma1PeriodChange={setChartBEma1}
                               ema2Period={chartBEma2} onEma2PeriodChange={setChartBEma2}
                               dayKey={`emaB-${underlying}-${result.date}`}
-                              height={460}
+                              height={560}
                             />
                           </ChartErrorBoundary>
                         )
@@ -2168,7 +2201,7 @@ export default function OiReplayPage() {
                               ema1Period={chartCEma1} onEma1PeriodChange={setChartCEma1}
                               ema2Period={chartCEma2} onEma2PeriodChange={setChartCEma2}
                               dayKey={`emaC-${underlying}-${result.date}`}
-                              height={460}
+                              height={560}
                             />
                           </ChartErrorBoundary>
                         )
