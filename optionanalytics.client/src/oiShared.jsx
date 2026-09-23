@@ -1,7 +1,8 @@
-import { Component, useEffect, useMemo, useRef } from 'react'
+import { Component, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Select, Space, Typography, Button, Row, Col, Tooltip, Tag, InputNumber, Table, Segmented, Empty, Alert } from 'antd'
 import { createChart, CandlestickSeries, LineSeries, CrosshairMode } from 'lightweight-charts'
+import * as signalR from '@microsoft/signalr'
 import {
   UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR,
   istTimeFormatter, istTickMarkFormatter, toChartTime, TIMEFRAME_OPTIONS,
@@ -15,6 +16,66 @@ const { Text } = Typography
 // separate replay-clock machinery (visibleCount/asOfMs) entirely to itself; nothing in this file
 // depends on that, which is exactly why it was safe to lift out - every function/component below
 // takes its data via plain arguments/props.
+
+// Modeled directly on App.jsx's own useHub: ONE connection, opened on mount and never torn down or
+// rebuilt - no `enabled` gate, no dependency on underlying/expiryFlag (the SAME hub broadcasts ticks
+// for every underlying; each caller just filters client-side in its own handlers, same as every
+// consumer of oiReplayTick/futuresTick already does). This is the exact fix for the "reconnect churn"
+// OiReplayPage's own useOiReplayLiveFeed was exposed to (its effect depends on `[enabled]`, which can
+// flip during a fetch and tear the socket down at the worst moment) - this hook has no such flag.
+// Originally local to OiLiveDashboardPage.jsx, moved here so a second live page (LiveStrikeDataPage)
+// can share the identical connection logic rather than a third bespoke copy - OiReplayPage.jsx does
+// not use this and is unaffected either way.
+export function useOiLiveHub(onSpotUpdate, onOiReplayTick, onReconnected, onCdvUpdate, onCdvBarClosed) {
+  const spotRef = useRef(onSpotUpdate)
+  const tickRef = useRef(onOiReplayTick)
+  const reconnectedRef = useRef(onReconnected)
+  const cdvRef = useRef(onCdvUpdate)
+  const cdvBarClosedRef = useRef(onCdvBarClosed)
+  spotRef.current = onSpotUpdate
+  tickRef.current = onOiReplayTick
+  reconnectedRef.current = onReconnected
+  cdvRef.current = onCdvUpdate
+  cdvBarClosedRef.current = onCdvBarClosed
+
+  const [connectionState, setConnectionState] = useState('connecting')
+
+  useEffect(() => {
+    const connection = new signalR.HubConnectionBuilder()
+      .withUrl('/hubs/spot')
+      .withAutomaticReconnect()
+      .build()
+
+    // Optional chaining on every one of these - unlike OiLiveDashboardPage (the original, only
+    // caller until now), a caller like LiveStrikeDataPage genuinely has no use for some of these
+    // events and passes null for them; calling a null ref directly would throw the moment that
+    // event arrives, which for spotUpdate/oiReplayTick is roughly every second.
+    connection.on('spotUpdate', (snapshot) => spotRef.current?.(snapshot))
+    connection.on('oiReplayTick', (tick) => tickRef.current?.(tick))
+    // Same CDV/OBV events App.jsx's own useHub already listens for, off the SAME shared hub -
+    // CdvHostedService broadcasts these regardless of which page is open, so nothing extra needs
+    // subscribing server-side for this page to receive them too.
+    connection.on('cdvUpdate', (snapshot) => cdvRef.current?.(snapshot))
+    connection.on('cdvBarClosed', (point) => cdvBarClosedRef.current?.(point))
+    connection.onreconnecting(() => setConnectionState('reconnecting'))
+    connection.onreconnected(() => { setConnectionState('connected'); reconnectedRef.current?.() })
+    connection.onclose(() => setConnectionState('disconnected'))
+    connection.start()
+      .then(() => setConnectionState('connected'))
+      .catch((err) => {
+        // React StrictMode double-mounts every effect once in development - the first connection's
+        // start() gets aborted by this effect's own cleanup before negotiation finishes on the
+        // second mount. Not a real failure.
+        if (err?.name === 'AbortError') return
+        console.error('Live hub connection failed:', err)
+        setConnectionState('disconnected')
+      })
+
+    return () => { connection.stop() }
+  }, [])
+
+  return connectionState
+}
 
 // One entry per distinct strike this side ever reported, its own points sorted ascending by time.
 export function groupByStrike(points) {

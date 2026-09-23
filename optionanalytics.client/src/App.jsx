@@ -9,6 +9,7 @@ import ExpiredBacktestPage from './ExpiredBacktestPage.jsx'
 import RollingStrikeDataPage from './RollingStrikeDataPage.jsx'
 import OiReplayPage from './OiReplayPage.jsx'
 import OiLiveDashboardPage from './OiLiveDashboardPage.jsx'
+import LiveStrikeDataPage from './LiveStrikeDataPage.jsx'
 import TriggersPage from './TriggersPage.jsx'
 import ContractsPage from './ContractsPage.jsx'
 import LoginPage from './LoginPage.jsx'
@@ -1541,6 +1542,7 @@ export default function App() {
         <Route path="/expired-backtest" element={<ExpiredBacktestPage />} />
         <Route path="/oi-replay" element={<OiReplayPage />} />
         <Route path="/oi-live" element={<OiLiveDashboardPage />} />
+        <Route path="/live-strike-data" element={<LiveStrikeDataPage />} />
         <Route path="/rolling-strike-data" element={<RollingStrikeDataPage />} />
         <Route path="/triggers" element={<RequireAdmin><TriggersPage /></RequireAdmin>} />
         <Route path="/contracts" element={<RequireAdmin><ContractsPage /></RequireAdmin>} />
