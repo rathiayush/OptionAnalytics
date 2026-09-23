@@ -716,8 +716,8 @@ export default function OiLiveDashboardPage() {
           </Space>
         </Card>
 
-        <Row gutter={16}>
-          <Col span={8}>
+        <Row gutter={[16, 16]}>
+          <Col xs={24} md={8}>
             <Card size="small" title="Spot (live)">
               {oneMinBars.length > 0 ? (
                 <ChartErrorBoundary key={`${underlying}-${expiryFlag}-${timeframe}`}>
@@ -728,7 +728,7 @@ export default function OiLiveDashboardPage() {
               )}
             </Card>
           </Col>
-          <Col span={8}>
+          <Col xs={24} md={8}>
             <Card
               size="small"
               title={`Entry chart B (independent timeframe + EMA) · ATM ${atmStrike ?? ''} OI Δ`}
@@ -766,7 +766,7 @@ export default function OiLiveDashboardPage() {
               )}
             </Card>
           </Col>
-          <Col span={8}>
+          <Col xs={24} md={8}>
             <Card size="small" title="Entry chart C (independent timeframe + EMA)">
               {oneMinBars.length > 0 ? (
                 <ChartErrorBoundary key={`emaC-${underlying}-${expiryFlag}-${chartCTimeframe}`}>
@@ -785,8 +785,8 @@ export default function OiLiveDashboardPage() {
           </Col>
         </Row>
 
-        <Row gutter={16}>
-          <Col span={12}>
+        <Row gutter={[16, 16]}>
+          <Col xs={24} md={12}>
             <Card
               size="small"
               title={`CE premium ${cePremiumStrike ?? ''}`}
@@ -809,7 +809,7 @@ export default function OiLiveDashboardPage() {
                   )}
             </Card>
           </Col>
-          <Col span={12}>
+          <Col xs={24} md={12}>
             <Card
               size="small"
               title={`PE premium ${pePremiumStrike ?? ''}`}
@@ -846,8 +846,8 @@ export default function OiLiveDashboardPage() {
                 Weekly/Monthly picker above - CDV only tracks a small rolling window of expiries, so it
                 will not always be the same one the rest of this page is showing.
               </Text>
-              <Row gutter={16}>
-                <Col span={12}>
+              <Row gutter={[16, 16]}>
+                <Col xs={24} md={12}>
                   <Text type="secondary" style={{ fontSize: 12 }}>CDV (cumulative delta volume)</Text>
                   {cdvCePoints.length === 0 && cdvPePoints.length === 0 ? (
                     <Empty description={cdvLoading ? 'Loading…' : 'No CDV data yet today.'} />
@@ -857,7 +857,7 @@ export default function OiLiveDashboardPage() {
                     </ChartErrorBoundary>
                   )}
                 </Col>
-                <Col span={12}>
+                <Col xs={24} md={12}>
                   <Text type="secondary" style={{ fontSize: 12 }}>OBV (on-balance volume)</Text>
                   {obvCePoints.length === 0 && obvPePoints.length === 0 ? (
                     <Empty description={cdvLoading ? 'Loading…' : 'No OBV data yet today.'} />
