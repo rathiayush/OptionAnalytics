@@ -389,6 +389,23 @@ export default function OiLiveDashboardPage() {
 
   const displayBars = useMemo(() => aggregateBars(oneMinBars, timeframe), [oneMinBars, timeframe])
 
+  // A plain tick, unrelated to any live data - exists ONLY so ladderRows' staleness check below
+  // re-evaluates on a real clock instead of purely as a side effect of the next incoming tick. Without
+  // it, ladderRows (a useMemo keyed on ceSeries/peSeries/day-open) only ever recomputes `now` when a
+  // NEW OI tick arrives for SOME strike - so if the feed goes quiet for a stretch (the backend's own
+  // Dhan feed watchdog re-subscribing/reconnecting after a brief silent patch - see
+  // DhanMarketFeedClient's own stall detector - is a normal, self-healing occurrence, not a page bug),
+  // every row that should have gone stale during that silence instead sits frozen showing "fresh"
+  // right up until the FIRST tick after the gap finally arrives, at which point `now` jumps forward to
+  // the real current time in one shot and every affected row flips to [STALE] all at once - exactly
+  // the "sometimes automatically getting stale" symptom. Ticking this independently of any live data
+  // makes staleness track wall-clock time continuously instead.
+  const [nowTick, setNowTick] = useState(() => Date.now())
+  useEffect(() => {
+    const id = setInterval(() => setNowTick(Date.now()), 15_000)
+    return () => clearInterval(id)
+  }, [])
+
   // Every strike either side has ever reported, current OI/IV/price plus a one-minute-ago and a
   // day-open reference - "now" and "a minute ago" are plain Date.now() reads (this page has no
   // concept of any other "now"), and "day-open" is simply each array's own first element, since the
@@ -430,7 +447,10 @@ export default function OiLiveDashboardPage() {
       }
     })
     return rows.sort((a, b) => b.strike - a.strike)
-  }, [ceSeries, peSeries, ceDayOpen, peDayOpen])
+    // nowTick is intentionally unused inside - it exists purely to force this memo to recompute on a
+    // real clock tick, not just when new tick data arrives. See nowTick's own doc comment above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ceSeries, peSeries, ceDayOpen, peDayOpen, nowTick])
 
   const cePremiumStrike = atmStrike != null ? atmStrike + cePremiumOffset * step : null
   const pePremiumStrike = atmStrike != null ? atmStrike + pePremiumOffset * step : null
