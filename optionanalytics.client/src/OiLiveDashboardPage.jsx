@@ -6,8 +6,8 @@ import {
   toChartTime, CE_COLOR, PE_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR, istTimeFormatter, istTickMarkFormatter,
 } from './shared.jsx'
 import {
-  groupByStrike, latestAtOrBefore, aggregateBars, buildStrikeOffsetOptions, buildPremiumCandles,
-  ReplayChart, EmaChart, PremiumCandleChart, PaperTradePanel, DraggableFloatingPanel,
+  groupByStrike, latestAtOrBefore, aggregateBars, buildStrikeOffsetOptions,
+  ReplayChart, EmaChart, PremiumEmaChart, PaperTradePanel, DraggableFloatingPanel,
   OiLadder, ChartErrorBoundary, PAPER_TRADE_LOT_SIZE, OI_STALE_MS, useOiLiveHub,
 } from './oiShared.jsx'
 
@@ -271,6 +271,12 @@ export default function OiLiveDashboardPage() {
 
   const [cePremiumOffset, setCePremiumOffset] = useState(0)
   const [pePremiumOffset, setPePremiumOffset] = useState(0)
+  const [cePremiumTimeframe, setCePremiumTimeframe] = useState(1)
+  const [cePremiumEma1, setCePremiumEma1] = useState(9)
+  const [cePremiumEma2, setCePremiumEma2] = useState(15)
+  const [pePremiumTimeframe, setPePremiumTimeframe] = useState(1)
+  const [pePremiumEma1, setPePremiumEma1] = useState(9)
+  const [pePremiumEma2, setPePremiumEma2] = useState(15)
 
   // OI ladder can get long once ATM has drifted a while (a strike's row never disappears once
   // seen - see ladderRows below) - 'top5' narrows it to the 5 highest-combined-OI strikes so the
@@ -584,8 +590,8 @@ export default function OiLiveDashboardPage() {
 
   const cePremiumStrike = atmStrike != null ? atmStrike + cePremiumOffset * step : null
   const pePremiumStrike = atmStrike != null ? atmStrike + pePremiumOffset * step : null
-  const cePremiumCandles = useMemo(() => buildPremiumCandles(ceSeries.get(cePremiumStrike)), [ceSeries, cePremiumStrike])
-  const pePremiumCandles = useMemo(() => buildPremiumCandles(peSeries.get(pePremiumStrike)), [peSeries, pePremiumStrike])
+  const cePremiumPoints = ceSeries.get(cePremiumStrike)
+  const pePremiumPoints = peSeries.get(pePremiumStrike)
   const premiumStrikeOptions = useMemo(() => buildStrikeOffsetOptions(atmStrike, step), [atmStrike, step])
 
   const cdvCePoints = useMemo(() => aggregateLinePoints(cdvSeries.map((p) => ({ time: p.time, value: p.ceCdv })), cdvTimeframe), [cdvSeries, cdvTimeframe])
@@ -788,11 +794,17 @@ export default function OiLiveDashboardPage() {
             >
               {oneMinBars.length === 0
                 ? <Empty description="No spot candles yet today." />
-                : cePremiumCandles.length === 0
+                : !cePremiumPoints || cePremiumPoints.length === 0
                   ? <Empty description={`No CE ${cePremiumStrike ?? ''} premium data yet today.`} />
                   : (
                     <ChartErrorBoundary key={`premium-ce-${underlying}-${expiryFlag}-${cePremiumOffset}`}>
-                      <PremiumCandleChart bars={cePremiumCandles} dayKey={`premium-ce-${dayKey}-${cePremiumOffset}`} height={320} />
+                      <PremiumEmaChart
+                        points={cePremiumPoints}
+                        timeframe={cePremiumTimeframe} onTimeframeChange={setCePremiumTimeframe}
+                        ema1Period={cePremiumEma1} onEma1PeriodChange={setCePremiumEma1}
+                        ema2Period={cePremiumEma2} onEma2PeriodChange={setCePremiumEma2}
+                        dayKey={`premium-ce-${dayKey}-${cePremiumOffset}`} height={320}
+                      />
                     </ChartErrorBoundary>
                   )}
             </Card>
@@ -805,11 +817,17 @@ export default function OiLiveDashboardPage() {
             >
               {oneMinBars.length === 0
                 ? <Empty description="No spot candles yet today." />
-                : pePremiumCandles.length === 0
+                : !pePremiumPoints || pePremiumPoints.length === 0
                   ? <Empty description={`No PE ${pePremiumStrike ?? ''} premium data yet today.`} />
                   : (
                     <ChartErrorBoundary key={`premium-pe-${underlying}-${expiryFlag}-${pePremiumOffset}`}>
-                      <PremiumCandleChart bars={pePremiumCandles} dayKey={`premium-pe-${dayKey}-${pePremiumOffset}`} height={320} />
+                      <PremiumEmaChart
+                        points={pePremiumPoints}
+                        timeframe={pePremiumTimeframe} onTimeframeChange={setPePremiumTimeframe}
+                        ema1Period={pePremiumEma1} onEma1PeriodChange={setPePremiumEma1}
+                        ema2Period={pePremiumEma2} onEma2PeriodChange={setPePremiumEma2}
+                        dayKey={`premium-pe-${dayKey}-${pePremiumOffset}`} height={320}
+                      />
                     </ChartErrorBoundary>
                   )}
             </Card>

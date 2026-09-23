@@ -591,6 +591,90 @@ export function PremiumCandleChart({ bars, dayKey, height = 320 }) {
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }
 
+// A leg's own premium as candles (via buildPremiumCandles above) PLUS two configurable EMA overlays
+// on top - CE/PE's own counterpart to EmaChart above (which does the same for the underlying spot),
+// used by BOTH Live OI Dashboard and OI Replay so their own CE/PE charts stop being a bare candle
+// chart (PremiumCandleChart, no EMA) or a plain line (OI Replay's own now-removed PremiumLineChart)
+// and instead match the same "candles + two EMAs, own timeframe" pattern the Entry charts already
+// use. `asOfMs` is optional: Live OI Dashboard omits it ("live" already means "everything captured
+// so far" needs no cutoff); OI Replay passes its own replay clock's asOfMs so this chart only ever
+// reveals what the rest of that page's replay has "played" up to, same as every other chart there.
+export function PremiumEmaChart({
+  points, asOfMs, timeframe, onTimeframeChange, ema1Period, onEma1PeriodChange, ema2Period, onEma2PeriodChange, dayKey, height = 320,
+}) {
+  const containerRef = useRef(null)
+  const chartRef = useRef(null)
+  const seriesRef = useRef(null)
+  const ema1SeriesRef = useRef(null)
+  const ema2SeriesRef = useRef(null)
+
+  const filteredPoints = useMemo(
+    () => (asOfMs == null ? points : (points ?? []).filter((p) => new Date(p.time).getTime() <= asOfMs)),
+    [points, asOfMs],
+  )
+  const oneMinCandles = useMemo(() => buildPremiumCandles(filteredPoints), [filteredPoints])
+  const displayBars = useMemo(() => sanitizeCandles(aggregateBars(oneMinCandles, timeframe)), [oneMinCandles, timeframe])
+  const ema1Points = useMemo(() => computeEma(displayBars, ema1Period), [displayBars, ema1Period])
+  const ema2Points = useMemo(() => computeEma(displayBars, ema2Period), [displayBars, ema2Period])
+
+  useEffect(() => {
+    if (!containerRef.current) return
+    const chart = createChart(containerRef.current, {
+      width: containerRef.current.clientWidth,
+      height,
+      layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
+      grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
+      rightPriceScale: { borderColor: BORDER_COLOR },
+      timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter },
+      crosshair: { mode: CrosshairMode.Normal },
+      localization: { timeFormatter: istTimeFormatter },
+    })
+    chartRef.current = chart
+    seriesRef.current = chart.addSeries(CandlestickSeries, {
+      upColor: UP_COLOR, downColor: DOWN_COLOR, borderVisible: false, wickUpColor: UP_COLOR, wickDownColor: DOWN_COLOR,
+    })
+    ema1SeriesRef.current = chart.addSeries(LineSeries, { color: EMA1_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true })
+    ema2SeriesRef.current = chart.addSeries(LineSeries, { color: EMA2_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true })
+
+    const onResize = () => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }) }
+    window.addEventListener('resize', onResize)
+    return () => {
+      window.removeEventListener('resize', onResize)
+      chart.remove()
+      chartRef.current = null
+      seriesRef.current = null
+      ema1SeriesRef.current = null
+      ema2SeriesRef.current = null
+    }
+  }, [height])
+
+  useEffect(() => { ema1SeriesRef.current?.applyOptions({ title: `EMA ${ema1Period}` }) }, [ema1Period])
+  useEffect(() => { ema2SeriesRef.current?.applyOptions({ title: `EMA ${ema2Period}` }) }, [ema2Period])
+
+  useEffect(() => { if (seriesRef.current) seriesRef.current.setData(displayBars) }, [displayBars])
+  useEffect(() => { if (ema1SeriesRef.current) ema1SeriesRef.current.setData(ema1Points) }, [ema1Points])
+  useEffect(() => { if (ema2SeriesRef.current) ema2SeriesRef.current.setData(ema2Points) }, [ema2Points])
+
+  useEffect(() => {
+    if (displayBars.length > 0) chartRef.current?.timeScale().fitContent()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dayKey, timeframe])
+
+  return (
+    <div style={{ width: '100%' }}>
+      <Space align="center" size={12} wrap style={{ marginBottom: 8 }}>
+        <Text type="secondary" style={{ fontSize: 12 }}>Timeframe</Text>
+        <Select value={timeframe} onChange={onTimeframeChange} style={{ width: 90 }} options={FAST_TIMEFRAME_OPTIONS} />
+        <Text type="secondary" style={{ fontSize: 12, color: EMA1_COLOR }}>EMA</Text>
+        <InputNumber value={ema1Period} onChange={(v) => onEma1PeriodChange(v || 1)} min={1} max={200} style={{ width: 70 }} />
+        <Text type="secondary" style={{ fontSize: 12, color: EMA2_COLOR }}>EMA</Text>
+        <InputNumber value={ema2Period} onChange={(v) => onEma2PeriodChange(v || 1)} min={1} max={200} style={{ width: 70 }} />
+      </Space>
+      <div ref={containerRef} style={{ width: '100%', height }} />
+    </div>
+  )
+}
+
 // SEBI periodically revises each index's own lot size - update this if it changes. This feature is
 // paper trading only (no real order is ever placed), so a stale value here only skews the SIMULATED
 // PnL's scale, not anything real.
