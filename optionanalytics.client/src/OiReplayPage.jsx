@@ -135,6 +135,68 @@ function aggregateBars(oneMinBars, timeframeMinutes) {
   return [...buckets.values()].sort((a, b) => a.time - b.time)
 }
 
+// Buckets a plain {time, value} line series (as opposed to aggregateBars' own OHLC candles) into
+// timeframeMinutes buckets, keeping the LAST value seen in each bucket - the right way to downsample
+// a LEVEL (like OI, which isn't meaningfully summed or averaged across a window) rather than a flow.
+// Used by the OI lookback features below (both the Entry chart B overlay and the Total OI Lookback
+// Table), mirroring the Live OI Dashboard's own identical helper.
+function aggregateLinePoints(points, minutes) {
+  if (minutes <= 1 || points.length === 0) return points
+  const bucketSeconds = minutes * 60
+  const buckets = new Map()
+  for (const p of points) buckets.set(Math.floor(p.time / bucketSeconds) * bucketSeconds, { ...p, time: Math.floor(p.time / bucketSeconds) * bucketSeconds })
+  return [...buckets.values()].sort((a, b) => a.time - b.time)
+}
+
+// "Current" vs "N bars ago" within an already-bucketed {time, value}[] line series - the shared
+// building block behind both OI lookback features below. OI is always non-negative and so never
+// crosses zero the way a CDV reading legitimately can (see App.jsx's own computeLookbackChange),
+// needing only the divide-by-zero guard, not that one's extra sign-crossing guard.
+function computeOiLookbackChange(series, barsAgo) {
+  const lastIndex = series.length - 1
+  if (lastIndex < 0) return { bars: barsAgo, current: null, previous: null, delta: null, percentChange: null }
+  const current = series[lastIndex].value
+  const previousIndex = lastIndex - barsAgo
+  if (previousIndex < 0) return { bars: barsAgo, current, previous: null, delta: null, percentChange: null }
+  const previous = series[previousIndex].value
+  if (!Number.isFinite(current) || !Number.isFinite(previous)) return { bars: barsAgo, current, previous, delta: null, percentChange: null }
+  const delta = current - previous
+  return { bars: barsAgo, current, previous, delta, percentChange: previous === 0 ? null : (delta / Math.abs(previous)) * 100 }
+}
+
+function fmtOiDelta(v) {
+  return v == null ? '—' : `${v > 0 ? '+' : ''}${v.toLocaleString()}`
+}
+
+// Single-value options for chart B's own "last N bars" OI-change overlay - a plain number picker,
+// not a multi-select: this overlay is one figure, tied directly to chart B itself, not a table with
+// several lookback windows at once (that's what the Total OI Lookback Table below is for instead).
+const OI_LOOKBACK_N_OPTIONS = [3, 5, 7, 10, 15, 20]
+
+// The Total OI Lookback Table's own multi-select bar-count options and independent timeframe picker -
+// unlike chart B's single-value overlay above, this table shows SEVERAL lookback windows at once
+// (the user's own "I can select multiple [bar counts]" ask), against the WHOLE chain's total CE/PE
+// OI rather than one strike, so it belongs in the Day OI Accumulation card rather than pinned to a
+// chart. Defaults to 1-minute bars ("it should work per min") - independent of chart B's own
+// timeframe, since this table can be read on its own regardless of what chart B is currently set to.
+const TOTAL_OI_LOOKBACK_BAR_OPTIONS = [3, 5, 7, 10, 15, 20, 25, 30]
+const DEFAULT_TOTAL_OI_LOOKBACK_BARS = [3, 5, 7]
+const TOTAL_OI_LOOKBACK_TIMEFRAME_OPTIONS = [
+  { value: 1, label: '1 min' }, { value: 2, label: '2 min' }, { value: 3, label: '3 min' }, { value: 5, label: '5 min' },
+]
+
+function renderOiLookbackDelta(v) {
+  if (v == null) return <Text type="secondary">—</Text>
+  const color = v > 0 ? UP_COLOR : v < 0 ? DOWN_COLOR : undefined
+  return <Text style={{ color }}>{v > 0 ? '+' : ''}{v.toLocaleString()}</Text>
+}
+
+function renderOiLookbackPercent(v) {
+  if (v == null) return <Text type="secondary">—</Text>
+  const color = v > 0 ? UP_COLOR : v < 0 ? DOWN_COLOR : undefined
+  return <Text style={{ color }}>{v > 0 ? '+' : ''}{v.toFixed(1)}%</Text>
+}
+
 // Standard exponential moving average over already-aggregated bars' own closes - seeded with a
 // plain SMA of the first `period` closes (the conventional seed every charting tool uses), then
 // smoothed forward from there with the usual k = 2/(period+1) factor. Returns one point per bar
@@ -1224,6 +1286,16 @@ export default function OiReplayPage() {
   const [chartBTimeframe, setChartBTimeframe] = useState(3)
   const [chartBEma1, setChartBEma1] = useState(9)
   const [chartBEma2, setChartBEma2] = useState(15)
+  // ATM OI change over the last N bars of chart B's OWN timeframe - shown as a small overlay
+  // directly on chart B's own Card (not a separate panel), same feature as the Live OI Dashboard's
+  // own Entry chart B, added here for parity - the replay clock (asOfMs) keeps this from ever
+  // revealing more than the rest of the page has "played" up to, unlike the live page's own version.
+  const [oiLookbackBars, setOiLookbackBars] = useState(3)
+  // Total OI Lookback Table's own state (Day OI Accumulation card, below) - deliberately separate
+  // from chart B's own oiLookbackBars above: several bar counts at once, against the WHOLE chain's
+  // total OI rather than one strike, with its own independent timeframe (default 1-minute bars).
+  const [totalOiLookbackBars, setTotalOiLookbackBars] = useState(DEFAULT_TOTAL_OI_LOOKBACK_BARS)
+  const [totalOiLookbackTimeframe, setTotalOiLookbackTimeframe] = useState(1)
   const [chartCTimeframe, setChartCTimeframe] = useState(1)
   const [chartCEma1, setChartCEma1] = useState(9)
   const [chartCEma2, setChartCEma2] = useState(15)
@@ -1572,6 +1644,27 @@ export default function OiReplayPage() {
   const step = result?.step || 50
   const atmStrike = currentBar ? Math.round(currentBar.close / step) * step : null
 
+  // ATM OI change over the last N bars, bucketed to chart B's OWN timeframe (chartBTimeframe) - see
+  // the state declaration above. Filtered to asOfMs first (unlike the Live OI Dashboard's identical
+  // feature, which needs no cutoff) so this never reveals a tick beyond what the rest of the replay
+  // has played up to.
+  const ceOiLookbackLine = useMemo(() => aggregateLinePoints(
+    (ceByStrike.get(atmStrike) ?? [])
+      .filter((p) => asOfMs != null && new Date(p.time).getTime() <= asOfMs)
+      .map((p) => ({ time: toChartTime(p.time), value: p.openInterest }))
+      .filter((p) => Number.isFinite(p.time) && Number.isFinite(p.value)),
+    chartBTimeframe,
+  ), [ceByStrike, atmStrike, chartBTimeframe, asOfMs])
+  const peOiLookbackLine = useMemo(() => aggregateLinePoints(
+    (peByStrike.get(atmStrike) ?? [])
+      .filter((p) => asOfMs != null && new Date(p.time).getTime() <= asOfMs)
+      .map((p) => ({ time: toChartTime(p.time), value: p.openInterest }))
+      .filter((p) => Number.isFinite(p.time) && Number.isFinite(p.value)),
+    chartBTimeframe,
+  ), [peByStrike, atmStrike, chartBTimeframe, asOfMs])
+  const ceOiLookback = useMemo(() => computeOiLookbackChange(ceOiLookbackLine, oiLookbackBars), [ceOiLookbackLine, oiLookbackBars])
+  const peOiLookback = useMemo(() => computeOiLookbackChange(peOiLookbackLine, oiLookbackBars), [peOiLookbackLine, oiLookbackBars])
+
   const cePremiumStrike = atmStrike != null ? atmStrike + cePremiumOffset * step : null
   const pePremiumStrike = atmStrike != null ? atmStrike + pePremiumOffset * step : null
   const cePremiumPoints = ceByStrike.get(cePremiumStrike)
@@ -1749,6 +1842,57 @@ export default function OiReplayPage() {
 
     return { dayBias, dayReason, ceDayChange, peDayChange, added, removed }
   }, [currentBar, oneMinBars, ladderRows, dayStartByStrike, totalCeOi, totalPeOi])
+
+  // One point per REVEALED 1-min bar, for the Total OI Lookback Table below - total (chain-wide)
+  // CE/PE OI as of that bar's own close, built the same way ladderRows/dayStartByStrike already read
+  // a single point in time, just repeated across every bar instead of one. Deliberately keyed on
+  // oneMinBars.length rather than on ceByStrike/peByStrike themselves (which get a new Map reference
+  // on every single live tick): a per-bar lookback table has no need for sub-minute precision on its
+  // HISTORICAL points, and redoing this whole-day sum across every strike on every tick (rather than
+  // once per completed minute) would be wasted work during a live "today" replay. underlying/
+  // result.date/expiryFlag are in the deps purely so switching to a different day/instrument that
+  // happens to produce the exact same bar count still forces a recompute instead of reusing stale
+  // totals from the day just left.
+  const completedOiHistory = useMemo(() => {
+    if (oneMinBars.length < 2) return []
+    const strikes = [...new Set([...ceByStrike.keys(), ...peByStrike.keys()])]
+    const ceSeriesList = strikes.map((s) => ceByStrike.get(s) ?? [])
+    const peSeriesList = strikes.map((s) => peByStrike.get(s) ?? [])
+    const history = []
+    for (let i = 0; i < oneMinBars.length - 1; i++) {
+      const bar = oneMinBars[i]
+      const barMs = fromChartTime(bar.time) * 1000
+      let ceTotal = 0
+      let peTotal = 0
+      for (const series of ceSeriesList) ceTotal += latestAtOrBefore(series, barMs)?.openInterest ?? 0
+      for (const series of peSeriesList) peTotal += latestAtOrBefore(series, barMs)?.openInterest ?? 0
+      history.push({ time: bar.time, ceTotal, peTotal })
+    }
+    return history
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [oneMinBars.length, underlying, result?.date, expiryFlag])
+
+  // The still-forming/current bar appended live, using the page's own already-ticking
+  // totalCeOi/totalPeOi rather than recomputing the whole day above - "now" stays continuously live
+  // even though completedOiHistory only updates once a minute.
+  const totalOiHistory = useMemo(() => {
+    if (oneMinBars.length === 0) return completedOiHistory
+    return [...completedOiHistory, { time: oneMinBars[oneMinBars.length - 1].time, ceTotal: totalCeOi, peTotal: totalPeOi }]
+  }, [completedOiHistory, oneMinBars, totalCeOi, totalPeOi])
+
+  const ceTotalOiLine = useMemo(
+    () => aggregateLinePoints(totalOiHistory.map((p) => ({ time: p.time, value: p.ceTotal })), totalOiLookbackTimeframe),
+    [totalOiHistory, totalOiLookbackTimeframe],
+  )
+  const peTotalOiLine = useMemo(
+    () => aggregateLinePoints(totalOiHistory.map((p) => ({ time: p.time, value: p.peTotal })), totalOiLookbackTimeframe),
+    [totalOiHistory, totalOiLookbackTimeframe],
+  )
+  const totalOiLookbackRows = totalOiLookbackBars.map((n) => {
+    const ce = computeOiLookbackChange(ceTotalOiLine, n)
+    const pe = computeOiLookbackChange(peTotalOiLine, n)
+    return { key: n, bars: n, ceDelta: ce.delta, cePercent: ce.percentChange, peDelta: pe.delta, pePercent: pe.percentChange }
+  })
 
   // Smart alert: whenever a strike NEAR ATM shows a one-minute OI shift past this threshold, flag
   // it and beep - the "someone just loaded/unwound a huge quantity" event this app can't otherwise
@@ -2080,6 +2224,38 @@ export default function OiReplayPage() {
                         ))}
                     </Col>
                   </Row>
+                  <div>
+                    <Space align="center" size={12} wrap style={{ marginBottom: 8 }}>
+                      <Text type="secondary" style={{ fontSize: 12 }}>Total OI lookback</Text>
+                      <Select
+                        value={totalOiLookbackTimeframe} onChange={setTotalOiLookbackTimeframe} size="small" style={{ width: 100 }}
+                        options={TOTAL_OI_LOOKBACK_TIMEFRAME_OPTIONS}
+                      />
+                      <Select
+                        mode="tags" size="small" value={totalOiLookbackBars.map(String)}
+                        onChange={(vals) => {
+                          const parsed = [...new Set(vals.map((v) => parseInt(v, 10)).filter((n) => Number.isInteger(n) && n > 0))].sort((a, b) => a - b)
+                          setTotalOiLookbackBars(parsed.length > 0 ? parsed : DEFAULT_TOTAL_OI_LOOKBACK_BARS)
+                        }}
+                        style={{ minWidth: 180 }}
+                        options={TOTAL_OI_LOOKBACK_BAR_OPTIONS.map((n) => ({ value: String(n), label: `${n} bars` }))}
+                      />
+                    </Space>
+                    <Table
+                      size="small"
+                      pagination={false}
+                      dataSource={totalOiLookbackRows}
+                      locale={{ emptyText: 'No OI data yet today.' }}
+                      scroll={{ x: 420 }}
+                      columns={[
+                        { title: 'Lookback', dataIndex: 'bars', key: 'bars', render: (b) => `${b} bars ago` },
+                        { title: 'Total CE OI Δ', dataIndex: 'ceDelta', key: 'ceDelta', render: renderOiLookbackDelta },
+                        { title: 'CE %', dataIndex: 'cePercent', key: 'cePercent', render: renderOiLookbackPercent },
+                        { title: 'Total PE OI Δ', dataIndex: 'peDelta', key: 'peDelta', render: renderOiLookbackDelta },
+                        { title: 'PE %', dataIndex: 'pePercent', key: 'pePercent', render: renderOiLookbackPercent },
+                      ]}
+                    />
+                  </div>
                 </Space>
               </Card>
             )}
@@ -2221,20 +2397,41 @@ export default function OiReplayPage() {
               {visibleSections.includes('entryCharts') && (
                 <>
                   <Col xs={24} md={8}>
-                    <Card size="small" title="Entry chart B (independent timeframe + EMA)">
+                    <Card
+                      size="small"
+                      title={`Entry chart B (independent timeframe + EMA) · ATM ${atmStrike ?? ''} OI Δ`}
+                      extra={
+                        <Select
+                          value={oiLookbackBars} onChange={setOiLookbackBars} size="small" style={{ width: 110 }}
+                          options={OI_LOOKBACK_N_OPTIONS.map((n) => ({ value: n, label: `${n} bars` }))}
+                        />
+                      }
+                    >
                       {oneMinBars.length > 0
                         ? (
-                          <ChartErrorBoundary key={`emaB-${underlying}-${result.date}-${chartBTimeframe}`}>
-                            <EmaChart
-                              oneMinBars={oneMinBars}
-                              visibleCount={visibleCount}
-                              timeframe={chartBTimeframe} onTimeframeChange={setChartBTimeframe}
-                              ema1Period={chartBEma1} onEma1PeriodChange={setChartBEma1}
-                              ema2Period={chartBEma2} onEma2PeriodChange={setChartBEma2}
-                              dayKey={`emaB-${underlying}-${result.date}`}
-                              height={560}
-                            />
-                          </ChartErrorBoundary>
+                          <div style={{ position: 'relative' }}>
+                            <ChartErrorBoundary key={`emaB-${underlying}-${result.date}-${chartBTimeframe}`}>
+                              <EmaChart
+                                oneMinBars={oneMinBars}
+                                visibleCount={visibleCount}
+                                timeframe={chartBTimeframe} onTimeframeChange={setChartBTimeframe}
+                                ema1Period={chartBEma1} onEma1PeriodChange={setChartBEma1}
+                                ema2Period={chartBEma2} onEma2PeriodChange={setChartBEma2}
+                                dayKey={`emaB-${underlying}-${result.date}`}
+                                height={560}
+                              />
+                            </ChartErrorBoundary>
+                            {atmStrike != null && (
+                              <div style={{ position: 'absolute', top: 8, left: 8, display: 'flex', flexDirection: 'column', gap: 4, pointerEvents: 'none' }}>
+                                <span style={{ fontSize: 11, fontWeight: 600, padding: '2px 6px', borderRadius: 4, background: '#00000080', color: ceOiLookback.delta > 0 ? '#3ddc84' : ceOiLookback.delta < 0 ? '#ff5c5c' : AXIS_COLOR, border: `1px solid ${AXIS_COLOR}` }}>
+                                  CE OI ({oiLookbackBars}×{chartBTimeframe}m) {fmtOiDelta(ceOiLookback.delta)}
+                                </span>
+                                <span style={{ fontSize: 11, fontWeight: 600, padding: '2px 6px', borderRadius: 4, background: '#00000080', color: peOiLookback.delta > 0 ? '#3ddc84' : peOiLookback.delta < 0 ? '#ff5c5c' : AXIS_COLOR, border: `1px solid ${AXIS_COLOR}` }}>
+                                  PE OI ({oiLookbackBars}×{chartBTimeframe}m) {fmtOiDelta(peOiLookback.delta)}
+                                </span>
+                              </div>
+                            )}
+                          </div>
                         )
                         : <Empty description="No spot candles for this day." />}
                     </Card>
