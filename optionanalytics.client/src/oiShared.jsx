@@ -97,10 +97,17 @@ export function buildPremiumLine(points, asOfMs) {
   const mapped = points
     .filter((p) => new Date(p.time).getTime() <= asOfMs)
     .map((p) => ({ time: toChartTime(p.time), value: p.price }))
-  // De-duplicate same-second points - points are already time-ascending, so any duplicate is
-  // adjacent; keep the LAST value for that second rather than reject it.
+    // A malformed p.time (toChartTime returns NaN for it) or a missing p.price would otherwise
+    // produce a non-finite point lightweight-charts throws on - see sanitizeCandles' own doc
+    // comment for the exact same reasoning applied to the candle-shaped chart alongside this one.
+    .filter((p) => Number.isFinite(p.time) && Number.isFinite(p.value))
+  // Sort first rather than assume input is already time-ascending - a confirmed real crash
+  // ("data must be asc ordered by time... prev time" later than the current one) showed that
+  // assumption does not always hold for a live tick stream, not just a theoretical concern.
+  const sorted = [...mapped].sort((a, b) => a.time - b.time)
+  // De-duplicate same-second points, keeping the LAST value for that second rather than rejecting it.
   const deduped = []
-  for (const point of mapped) {
+  for (const point of sorted) {
     if (deduped.length > 0 && deduped[deduped.length - 1].time === point.time) deduped[deduped.length - 1] = point
     else deduped.push(point)
   }
@@ -374,6 +381,7 @@ export function PremiumLineChart({ points, dayKey, color, height = 320 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
+  const sanitizedPoints = useMemo(() => sanitizeLinePoints(points), [points])
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -400,10 +408,10 @@ export function PremiumLineChart({ points, dayKey, color, height = 320 }) {
     }
   }, [height, color])
 
-  useEffect(() => { if (seriesRef.current) seriesRef.current.setData(points) }, [points])
+  useEffect(() => { if (seriesRef.current) seriesRef.current.setData(sanitizedPoints) }, [sanitizedPoints])
 
   useEffect(() => {
-    if (points.length > 0) chartRef.current?.timeScale().fitContent()
+    if (sanitizedPoints.length > 0) chartRef.current?.timeScale().fitContent()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dayKey])
 
@@ -454,6 +462,19 @@ function sanitizeCandles(bars) {
   for (const b of sorted) {
     if (result.length > 0 && result[result.length - 1].time === b.time) result[result.length - 1] = b
     else result.push(b)
+  }
+  return result
+}
+
+// Same "last line of defense" reasoning as sanitizeCandles above, for a plain {time, value} line
+// point instead of a candle - used by PremiumLineChart just below.
+function sanitizeLinePoints(points) {
+  const finite = points.filter((p) => Number.isFinite(p.time) && Number.isFinite(p.value))
+  const sorted = [...finite].sort((a, b) => a.time - b.time)
+  const result = []
+  for (const p of sorted) {
+    if (result.length > 0 && result[result.length - 1].time === p.time) result[result.length - 1] = p
+    else result.push(p)
   }
   return result
 }
