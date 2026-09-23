@@ -108,10 +108,16 @@ public sealed class OiReplayService
     }
 
     public async Task<OiReplayResult> RunAsync(
-        string underlying, DateOnly date, int timeframeMinutes, string expiryFlag, CancellationToken cancellationToken)
+        string underlying, DateOnly date, int timeframeMinutes, string expiryFlag, CancellationToken cancellationToken, bool forceLive = false)
     {
         var timeframe = Math.Max(1, timeframeMinutes);
-        var isAlwaysLive = AlwaysLiveUnderlyings.Contains(underlying);
+        // forceLive folds into the SAME isAlwaysLive treatment SENSEX already gets (skip stored
+        // entirely, always call Dhan, ignore AppEnvironment.IsLocal) - used by the Live OI Dashboard
+        // page, which (unlike OI Replay reviewing a past day, where stored-first is the right
+        // default) has no scenario where preferring possibly-stale stored data over a live call ever
+        // makes sense: it only ever asks for today, and its whole point is to never lag behind "now"
+        // the way OI Replay's own local-dev "stored only, no live top-up" rule otherwise would.
+        var isAlwaysLive = forceLive || AlwaysLiveUnderlyings.Contains(underlying);
 
         if (!isAlwaysLive && !_storedSpot.IsConfigured && !_allowLiveDataFallback)
             return OiReplayResult.Failed(underlying, date, timeframe,
@@ -174,12 +180,12 @@ public sealed class OiReplayService
         {
             var token = ExpiredOptionBacktestService.StrikeToken(steps);
 
-            var ceBars = await GetSeriesAsync(underlying, expiryFlag, token, "CALL", date, ResolveInstrumentAsync, cancellationToken);
+            var ceBars = await GetSeriesAsync(underlying, expiryFlag, token, "CALL", date, ResolveInstrumentAsync, cancellationToken, forceLive);
             foreach (var bar in ceBars)
                 if (bar.Strike is { } strike)
                     cePoints.Add(new OiReplayPoint(bar.Bar.Time, strike, bar.OpenInterest, bar.ImpliedVolatility, bar.Bar.Close));
 
-            var peBars = await GetSeriesAsync(underlying, expiryFlag, token, "PUT", date, ResolveInstrumentAsync, cancellationToken);
+            var peBars = await GetSeriesAsync(underlying, expiryFlag, token, "PUT", date, ResolveInstrumentAsync, cancellationToken, forceLive);
             foreach (var bar in peBars)
                 if (bar.Strike is { } strike)
                     pePoints.Add(new OiReplayPoint(bar.Bar.Time, strike, bar.OpenInterest, bar.ImpliedVolatility, bar.Bar.Close));
@@ -238,9 +244,9 @@ public sealed class OiReplayService
     /// all.</summary>
     private async Task<IReadOnlyList<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)>> GetSeriesAsync(
         string underlying, string expiryFlag, string strikeToken, string drvOptionType, DateOnly date,
-        Func<Task<DhanSpotInstrument?>> resolveInstrument, CancellationToken cancellationToken)
+        Func<Task<DhanSpotInstrument?>> resolveInstrument, CancellationToken cancellationToken, bool forceLive = false)
     {
-        var isAlwaysLive = AlwaysLiveUnderlyings.Contains(underlying);
+        var isAlwaysLive = forceLive || AlwaysLiveUnderlyings.Contains(underlying);
 
         var storedBars = !isAlwaysLive && _storedRollingOption.IsConfigured
             ? (await _storedRollingOption.GetRollingOptionCandlesAsync(underlying, 0, expiryFlag, NearestExpiryCode, strikeToken, drvOptionType, date, date, 1, cancellationToken)).Bars
