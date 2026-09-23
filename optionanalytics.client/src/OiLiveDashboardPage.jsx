@@ -68,21 +68,44 @@ function useOiLiveHub(onSpotUpdate, onOiReplayTick, onReconnected) {
   return connectionState
 }
 
+// How many of a strike's own most-recent points ever get kept in memory. This page never scrubs
+// backward and is meant to run for an entire session with no restart ("absolutely live without
+// stopping" - the whole point) - without a cap, a busy strike's array grows forever, and re-copying
+// (and re-scanning, in ladderRows below) an ever-larger array on EVERY single tick is exactly what
+// froze the tab solid ("Page Unresponsive") after running for a while: the cost of handling one more
+// tick kept climbing with the total number ever received, not staying flat the way a live feed needs
+// it to. 1500 points comfortably covers several hours of even a very actively-ticking strike while
+// keeping every tick's own cost constant regardless of how long the page has been open. Today's OPEN
+// reading is captured separately (see dayOpenByStrike) precisely so trimming here can never lose it.
+const MAX_POINTS_PER_STRIKE = 1500
+
 // Appends a point to one strike's own array, or replaces the last entry if it lands in the exact
 // same second (a still-forming reading updating in place) - the same "replace in place / append"
 // merge shape every live series in this app already uses. Carries the previous entry's own IV
 // forward when the new point doesn't have one (a live tick never carries IV - see
-// OiReplayLiveFeedService's own doc comment - only the initial REST seed does).
+// OiReplayLiveFeedService's own doc comment - only the initial REST seed does). Trims from the FRONT
+// once over MAX_POINTS_PER_STRIKE - the oldest points are the ones this page cares about least, since
+// "today's open" is tracked separately and never needs to survive in this array at all.
 function appendPoint(map, strike, point) {
   const next = new Map(map)
   const existing = next.get(strike) ?? []
   const withIv = { ...point, impliedVolatility: point.impliedVolatility ?? existing[existing.length - 1]?.impliedVolatility ?? null }
-  if (existing.length > 0 && new Date(existing[existing.length - 1].time).getTime() === new Date(point.time).getTime()) {
-    next.set(strike, [...existing.slice(0, -1), withIv])
-  } else {
-    next.set(strike, [...existing, withIv])
-  }
+  const updated = existing.length > 0 && new Date(existing[existing.length - 1].time).getTime() === new Date(point.time).getTime()
+    ? [...existing.slice(0, -1), withIv]
+    : [...existing, withIv]
+  next.set(strike, updated.length > MAX_POINTS_PER_STRIKE ? updated.slice(-MAX_POINTS_PER_STRIKE) : updated)
   return next
+}
+
+// Every strike/side's OI at the very first point the initial seed fetch ever saw - derived from the
+// SAME grouped (and correctly time-sorted) Map ceSeries/peSeries themselves get seeded from, then
+// captured into its own Map and never touched again, so it survives appendPoint's own trimming no
+// matter how long the page has been open or how much a strike's own rolling window has since moved
+// past its own opening reading.
+function buildDayOpenByStrike(grouped) {
+  const map = new Map()
+  for (const [strike, points] of grouped) if (points.length > 0) map.set(strike, points[0])
+  return map
 }
 
 // Merges one live spot bar into the day's own bar array - replace-by-timestamp if it's the same
@@ -116,6 +139,10 @@ export default function OiLiveDashboardPage() {
   const [oneMinBars, setOneMinBars] = useState([])
   const [ceSeries, setCeSeries] = useState(new Map())
   const [peSeries, setPeSeries] = useState(new Map())
+  // Today's own opening OI per strike/side, captured once at load() and never mutated afterward -
+  // see buildDayOpenByStrike's own doc comment for why this is separate from ceSeries/peSeries.
+  const [ceDayOpen, setCeDayOpen] = useState(new Map())
+  const [peDayOpen, setPeDayOpen] = useState(new Map())
 
   const [cePremiumOffset, setCePremiumOffset] = useState(0)
   const [pePremiumOffset, setPePremiumOffset] = useState(0)
@@ -145,8 +172,12 @@ export default function OiLiveDashboardPage() {
         if (!body?.success) throw new Error(body?.error || 'This run did not succeed.')
         setResult(body)
         setOneMinBars((body.spotCandlesOneMinute ?? []).map(toBar))
-        setCeSeries(groupByStrike(body.cePoints ?? []))
-        setPeSeries(groupByStrike(body.pePoints ?? []))
+        const ceGrouped = groupByStrike(body.cePoints ?? [])
+        const peGrouped = groupByStrike(body.pePoints ?? [])
+        setCeSeries(ceGrouped)
+        setPeSeries(peGrouped)
+        setCeDayOpen(buildDayOpenByStrike(ceGrouped))
+        setPeDayOpen(buildDayOpenByStrike(peGrouped))
         setPaperPositions([])
       })
       .catch((err) => {
@@ -201,8 +232,8 @@ export default function OiLiveDashboardPage() {
       const pe = peArr[peArr.length - 1] ?? null
       const cePrior = latestAtOrBefore(ceArr, priorMs)
       const pePrior = latestAtOrBefore(peArr, priorMs)
-      const ceOpen = ceArr[0] ?? null
-      const peOpen = peArr[0] ?? null
+      const ceOpen = ceDayOpen.get(strike) ?? null
+      const peOpen = peDayOpen.get(strike) ?? null
       const ceAsOfMs = ce ? new Date(ce.time).getTime() : null
       const peAsOfMs = pe ? new Date(pe.time).getTime() : null
       return {
@@ -219,7 +250,7 @@ export default function OiLiveDashboardPage() {
       }
     })
     return rows.sort((a, b) => b.strike - a.strike)
-  }, [ceSeries, peSeries])
+  }, [ceSeries, peSeries, ceDayOpen, peDayOpen])
 
   const cePremiumStrike = atmStrike != null ? atmStrike + cePremiumOffset * step : null
   const pePremiumStrike = atmStrike != null ? atmStrike + pePremiumOffset * step : null
