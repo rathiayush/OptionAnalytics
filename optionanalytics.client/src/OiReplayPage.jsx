@@ -39,8 +39,18 @@ function useOiReplayLiveFeed(enabled, onSpotUpdate, onOiReplayTick, onFuturesTic
   futuresRef.current = onFuturesTick
   reconnectedRef.current = onReconnected
 
+  // The actual SignalR connection state, not just "isToday" - the page's own "Live" badge used to be
+  // purely a date comparison, so it read "Live" (green) even when this connection had failed to
+  // negotiate, was stuck reconnecting, or had given up entirely after withAutomaticReconnect's own
+  // retry budget ran out - exactly the "everything is stuck but it still says Live" confusion the
+  // user hit. 'connecting' while start() is in flight, 'connected' once it resolves (or after
+  // onreconnected), 'reconnecting' while the client is retrying a dropped connection on its own,
+  // 'disconnected' once onclose fires (retries exhausted, or the connection was never enabled).
+  const [connectionState, setConnectionState] = useState('disconnected')
+
   useEffect(() => {
     if (!enabled) return
+    setConnectionState('connecting')
     const connection = new signalR.HubConnectionBuilder()
       .withUrl('/hubs/spot')
       .withAutomaticReconnect()
@@ -49,16 +59,26 @@ function useOiReplayLiveFeed(enabled, onSpotUpdate, onOiReplayTick, onFuturesTic
     connection.on('spotUpdate', (snapshot) => spotRef.current(snapshot))
     connection.on('oiReplayTick', (tick) => tickRef.current(tick))
     connection.on('futuresTick', (tick) => futuresRef.current?.(tick))
-    connection.onreconnected(() => reconnectedRef.current?.())
-    connection.start().catch((err) => {
-      // Same StrictMode double-mount as App.jsx's useHub - the first connection's start() gets
-      // aborted by this effect's own cleanup before negotiation finishes on the second mount.
-      if (err?.name === 'AbortError') return
-      console.error('OI Replay live feed connection failed:', err)
-    })
+    connection.onreconnecting(() => setConnectionState('reconnecting'))
+    connection.onreconnected(() => { setConnectionState('connected'); reconnectedRef.current?.() })
+    connection.onclose(() => setConnectionState('disconnected'))
+    connection.start()
+      .then(() => setConnectionState('connected'))
+      .catch((err) => {
+        // Same StrictMode double-mount as App.jsx's useHub - the first connection's start() gets
+        // aborted by this effect's own cleanup before negotiation finishes on the second mount.
+        if (err?.name === 'AbortError') return
+        console.error('OI Replay live feed connection failed:', err)
+        setConnectionState('disconnected')
+      })
 
     return () => { connection.stop() }
   }, [enabled])
+
+  // Derived rather than set from inside the effect's own !enabled branch - "disabled" isn't really a
+  // connection STATE this hook transitions through, it's the absence of one, so it belongs here as a
+  // plain fallback rather than as a setState a disabled render would otherwise redundantly re-fire.
+  return enabled ? connectionState : 'disconnected'
 }
 
 // One entry per distinct strike this side ever reported, its own points sorted ascending by time -
@@ -1421,7 +1441,7 @@ export default function OiReplayPage() {
   }
 
   const handleLiveReconnected = () => { if (isToday) load() }
-  useOiReplayLiveFeed(isToday && liveFeedSupported && Boolean(result), handleSpotUpdate, handleOiReplayTick, handleFuturesTick, handleLiveReconnected)
+  const liveConnectionState = useOiReplayLiveFeed(isToday && liveFeedSupported && Boolean(result), handleSpotUpdate, handleOiReplayTick, handleFuturesTick, handleLiveReconnected)
 
   // Auto-follow: once the user is caught up to the tail of what's loaded, a newly-arrived live bar
   // (oneMinBars.length growing) keeps visibleCount pinned to the end automatically - the whole point
@@ -1900,6 +1920,19 @@ export default function OiReplayPage() {
               >
                 ● {isToday ? 'Live' : 'Go Live'}
               </Button>
+              {isToday && liveFeedSupported && (
+                // The REAL SignalR connection state, not just "today is selected" - the button above
+                // says "Live" purely from a date match, which used to give false confidence that
+                // ticks were flowing even when this connection had failed, was stuck reconnecting, or
+                // had given up after withAutomaticReconnect's own retries ran out. This is the one
+                // place on the page that tells you whether data is ACTUALLY ticking right now.
+                <Tag color={liveConnectionState === 'connected' ? 'success' : liveConnectionState === 'reconnecting' ? 'warning' : liveConnectionState === 'connecting' ? 'processing' : 'error'}>
+                  {liveConnectionState === 'connected' ? '● Ticking live'
+                    : liveConnectionState === 'reconnecting' ? '● Reconnecting…'
+                      : liveConnectionState === 'connecting' ? '● Connecting…'
+                        : '● Disconnected - not receiving live ticks'}
+                </Tag>
+              )}
               <Select
                 value={underlying} onChange={selectUnderlying} style={{ width: 130 }}
                 options={[{ value: 'NIFTY', label: 'NIFTY' }, { value: 'BANKNIFTY', label: 'BANKNIFTY' }, { value: 'SENSEX', label: 'SENSEX' }]}
@@ -1927,6 +1960,12 @@ export default function OiReplayPage() {
               <Alert
                 type="info" showIcon
                 message={`Today's data will load, but live tick-by-tick updates aren't wired up for ${underlying} ${expiryFlag === 'WEEK' ? 'Weekly' : 'Monthly'} - you'll see a snapshot as of Load day/Go Live, not a continuously ticking feed. NIFTY (Weekly/Monthly), BANKNIFTY (Monthly) and SENSEX (Weekly/Monthly) all stay live.`}
+              />
+            )}
+            {isToday && liveFeedSupported && liveConnectionState === 'disconnected' && (
+              <Alert
+                type="error" showIcon
+                message="Not receiving live ticks right now - the page will look frozen at whatever it last loaded until this reconnects. Check the browser console for a SignalR connection error, and confirm the backend's own Dhan market-feed connection is up."
               />
             )}
             {error && <Alert type="error" showIcon message={error} />}
