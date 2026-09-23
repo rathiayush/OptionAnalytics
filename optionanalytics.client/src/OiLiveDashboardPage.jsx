@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Select, Space, Typography, Card, Button, Row, Col, Tag, Tooltip, Empty, Alert, Segmented } from 'antd'
-import * as signalR from '@microsoft/signalr'
 import { createChart, LineSeries, CrosshairMode } from 'lightweight-charts'
 import {
   NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, istDateKey, toBar,
@@ -9,7 +8,7 @@ import {
 import {
   groupByStrike, latestAtOrBefore, aggregateBars, buildStrikeOffsetOptions, buildPremiumCandles,
   ReplayChart, EmaChart, PremiumCandleChart, PaperTradePanel, DraggableFloatingPanel,
-  OiLadder, ChartErrorBoundary, PAPER_TRADE_LOT_SIZE, OI_STALE_MS,
+  OiLadder, ChartErrorBoundary, PAPER_TRADE_LOT_SIZE, OI_STALE_MS, useOiLiveHub,
 } from './oiShared.jsx'
 
 const { Text, Title } = Typography
@@ -52,59 +51,6 @@ const SINCE_OPEN_MIN_BASELINE = 50_000
 // server-side, from logs this page cannot see) - a silently stalled upstream feed would otherwise
 // look identical, from here, to a page working correctly during a genuinely quiet market moment.
 const FEED_STALL_WARNING_MS = 3 * 60_000
-
-// Modeled directly on App.jsx's own useHub: ONE connection, opened on mount and never torn down or
-// rebuilt - no `enabled` gate, no dependency on underlying/expiryFlag (the SAME hub broadcasts ticks
-// for every underlying; this page just filters client-side in its own handlers, same as every
-// consumer of oiReplayTick/futuresTick already does). This is the exact fix for the "reconnect churn"
-// OiReplayPage's own useOiReplayLiveFeed was exposed to (its effect depends on `[enabled]`, which can
-// flip during a fetch and tear the socket down at the worst moment) - this hook has no such flag.
-function useOiLiveHub(onSpotUpdate, onOiReplayTick, onReconnected, onCdvUpdate, onCdvBarClosed) {
-  const spotRef = useRef(onSpotUpdate)
-  const tickRef = useRef(onOiReplayTick)
-  const reconnectedRef = useRef(onReconnected)
-  const cdvRef = useRef(onCdvUpdate)
-  const cdvBarClosedRef = useRef(onCdvBarClosed)
-  spotRef.current = onSpotUpdate
-  tickRef.current = onOiReplayTick
-  reconnectedRef.current = onReconnected
-  cdvRef.current = onCdvUpdate
-  cdvBarClosedRef.current = onCdvBarClosed
-
-  const [connectionState, setConnectionState] = useState('connecting')
-
-  useEffect(() => {
-    const connection = new signalR.HubConnectionBuilder()
-      .withUrl('/hubs/spot')
-      .withAutomaticReconnect()
-      .build()
-
-    connection.on('spotUpdate', (snapshot) => spotRef.current(snapshot))
-    connection.on('oiReplayTick', (tick) => tickRef.current(tick))
-    // Same CDV/OBV events App.jsx's own useHub already listens for, off the SAME shared hub -
-    // CdvHostedService broadcasts these regardless of which page is open, so nothing extra needs
-    // subscribing server-side for this page to receive them too.
-    connection.on('cdvUpdate', (snapshot) => cdvRef.current?.(snapshot))
-    connection.on('cdvBarClosed', (point) => cdvBarClosedRef.current?.(point))
-    connection.onreconnecting(() => setConnectionState('reconnecting'))
-    connection.onreconnected(() => { setConnectionState('connected'); reconnectedRef.current?.() })
-    connection.onclose(() => setConnectionState('disconnected'))
-    connection.start()
-      .then(() => setConnectionState('connected'))
-      .catch((err) => {
-        // React StrictMode double-mounts every effect once in development - the first connection's
-        // start() gets aborted by this effect's own cleanup before negotiation finishes on the
-        // second mount. Not a real failure.
-        if (err?.name === 'AbortError') return
-        console.error('Live OI Dashboard connection failed:', err)
-        setConnectionState('disconnected')
-      })
-
-    return () => { connection.stop() }
-  }, [])
-
-  return connectionState
-}
 
 // How many of a strike's own most-recent points ever get kept in memory. This page never scrubs
 // backward and is meant to run for an entire session with no restart ("absolutely live without
