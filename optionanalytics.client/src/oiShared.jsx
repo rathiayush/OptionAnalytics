@@ -423,6 +423,13 @@ export function buildPremiumCandles(points) {
   const buckets = new Map()
   for (const p of points) {
     const minute = Math.floor(toChartTime(p.time) / 60) * 60
+    // A malformed/unparseable p.time (toChartTime returns NaN for it) or a missing/non-numeric
+    // p.price would otherwise silently produce a NaN-valued or NaN-keyed bucket - lightweight-charts
+    // throws an UNCAUGHT error on a non-finite candle value, which is exactly the "this chart could
+    // not be rendered" crash ChartErrorBoundary exists to catch, not something worth risking when a
+    // single bad point can be dropped here instead with no visible loss (this page already tolerates
+    // gaps - see OI_STALE_MS).
+    if (!Number.isFinite(minute) || !Number.isFinite(p.price)) continue
     const existing = buckets.get(minute)
     if (existing) {
       existing.high = Math.max(existing.high, p.price)
@@ -433,6 +440,22 @@ export function buildPremiumCandles(points) {
     }
   }
   return [...buckets.values()].sort((a, b) => a.time - b.time)
+}
+
+// Last line of defense before handing candles to lightweight-charts, which throws an UNCAUGHT error
+// on a non-finite value, a duplicate time, or non-ascending order - same reasoning as App.jsx's own
+// sanitizeSeries (this page's equivalent for a candle shape, not a plain line point). buildPremiumCa
+// ndles above already filters/sorts its own output, but this is a second, independent guard so a
+// crash here can never happen regardless of what future caller might pass to PremiumCandleChart.
+function sanitizeCandles(bars) {
+  const finite = bars.filter((b) => Number.isFinite(b.time) && Number.isFinite(b.open) && Number.isFinite(b.high) && Number.isFinite(b.low) && Number.isFinite(b.close))
+  const sorted = [...finite].sort((a, b) => a.time - b.time)
+  const result = []
+  for (const b of sorted) {
+    if (result.length > 0 && result[result.length - 1].time === b.time) result[result.length - 1] = b
+    else result.push(b)
+  }
+  return result
 }
 
 // A single leg's own premium as a genuine candlestick chart, with its own auto-scaled price axis -
@@ -447,6 +470,7 @@ export function PremiumCandleChart({ bars, dayKey, height = 320 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
+  const sanitizedBars = useMemo(() => sanitizeCandles(bars), [bars])
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -475,10 +499,10 @@ export function PremiumCandleChart({ bars, dayKey, height = 320 }) {
     }
   }, [height])
 
-  useEffect(() => { if (seriesRef.current) seriesRef.current.setData(bars) }, [bars])
+  useEffect(() => { if (seriesRef.current) seriesRef.current.setData(sanitizedBars) }, [sanitizedBars])
 
   useEffect(() => {
-    if (bars.length > 0) chartRef.current?.timeScale().fitContent()
+    if (sanitizedBars.length > 0) chartRef.current?.timeScale().fitContent()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dayKey])
 
