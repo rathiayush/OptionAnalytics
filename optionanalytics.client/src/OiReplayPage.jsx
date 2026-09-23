@@ -1253,9 +1253,26 @@ export default function OiReplayPage() {
   const [error, setError] = useState(null)
   const [result, setResult] = useState(null)
 
-  const [visibleCount, setVisibleCount] = useState(0)
+  // The MANUAL position - only meaningful for a historical day, or for today once the user has
+  // deliberately paused/scrubbed to review an earlier point (see `following` below). Renamed from
+  // this component's old bare `visibleCount` because it is no longer THE position while live-
+  // following - see visibleCount's own derivation further down.
+  const [manualVisibleCount, setManualVisibleCount] = useState(0)
   const [playing, setPlaying] = useState(false)
   const timerRef = useRef(null)
+
+  // Whether today's replay is following the live tip rather than sitting at a manually-chosen
+  // point. Deliberately NOT implemented as "an effect nudges visibleCount forward whenever new bars
+  // arrive" (the previous approach) - that relied on an effect actually re-firing on every single
+  // live update to stay caught up, and the user hit exactly the failure mode that design invites:
+  // it would silently stop advancing and only a manual Start click (which independently walks
+  // visibleCount forward one tick at a time) would "unstick" it. Instead, visibleCount is DERIVED
+  // straight from oneMinBars.length on every render while following is true (see its own const
+  // below) - there is no intermediate state to fall out of sync, so it cannot get stuck between one
+  // live tick and the next. Reset/Start/dragging the slider all drop out of following (reviewing an
+  // earlier point should stay put, not get yanked back to "now" mid-scrub); a "Resume live" action
+  // (see the JSX below) or a fresh Load day/Go Live turns it back on.
+  const [following, setFollowing] = useState(true)
 
   // The live "tail" beyond whatever the initial REST snapshot carried - only ever appended to while
   // isToday is true (see below), reset on every fresh load() so switching days never carries a
@@ -1264,7 +1281,6 @@ export default function OiReplayPage() {
   const [liveCePoints, setLiveCePoints] = useState([])
   const [livePePoints, setLivePePoints] = useState([])
   const [liveFuturesPoints, setLiveFuturesPoints] = useState([])
-  const caughtUpLenRef = useRef(0)
 
   // Paper trade panel state - see PaperTradePanel's own doc comment. strikeOffset defaults to 0
   // (ATM) and stays an OFFSET rather than an absolute strike, so "the default is ATM" holds true
@@ -1333,15 +1349,12 @@ export default function OiReplayPage() {
         if (!body?.success) throw new Error(body?.error || 'This run did not succeed.')
         setResult(body)
         const initialLen = body.spotCandlesOneMinute?.length ?? 0
-        // For TODAY, jump straight to the live tip - the entire point of "Go Live"/loading today is
-        // to see the CURRENT market state right away, not replay from market open and wait (or drag
-        // the slider) to catch up. Any other (historical) day still starts a fresh replay at its own
-        // beginning, as before. The Reset button still replays today from its own start on demand.
-        setVisibleCount(initialLen > 0 ? (effectiveIsToday ? initialLen : 1) : 0)
-        // Seeds the auto-follow effect below with "caught up" meaning THIS length - since
-        // visibleCount is set to exactly this same length for today, it's already caught up and the
-        // auto-follow effect keeps pinning it to the tail as new live bars arrive from here.
-        caughtUpLenRef.current = initialLen
+        // For TODAY, follow the live tip - the entire point of "Go Live"/loading today is to see the
+        // CURRENT market state right away and keep seeing it, not replay from market open. Any other
+        // (historical) day starts a fresh manual replay at its own beginning, as before. The Reset
+        // button still drops out of following to replay today from its own start on demand.
+        setFollowing(effectiveIsToday)
+        setManualVisibleCount(initialLen > 0 ? 1 : 0)
       })
       .catch((err) => {
         console.error('Failed to load OI replay data:', err)
@@ -1443,31 +1456,29 @@ export default function OiReplayPage() {
   const handleLiveReconnected = () => { if (isToday) load() }
   const liveConnectionState = useOiReplayLiveFeed(isToday && liveFeedSupported && Boolean(result), handleSpotUpdate, handleOiReplayTick, handleFuturesTick, handleLiveReconnected)
 
-  // Auto-follow: once the user is caught up to the tail of what's loaded, a newly-arrived live bar
-  // (oneMinBars.length growing) keeps visibleCount pinned to the end automatically - the whole point
-  // of "today" being live rather than a fixed-length replay. A user who paused and scrubbed BACK to
-  // review an earlier point is deliberately left alone; the new bar just waits at the tail for them.
-  useEffect(() => {
-    setVisibleCount((c) => {
-      const wasCaughtUp = c >= caughtUpLenRef.current
-      caughtUpLenRef.current = oneMinBars.length
-      return isToday && wasCaughtUp ? oneMinBars.length : c
-    })
-  }, [oneMinBars.length, isToday])
-
-  // Playback loop - a single interval that advances visibleCount by one NATIVE MINUTE per tick,
-  // self-stopping at the end of the day's own bars rather than needing a separate "are we done"
-  // effect.
+  // Playback loop - a single interval that advances manualVisibleCount by one NATIVE MINUTE per
+  // tick, self-stopping at the end of the day's own bars rather than needing a separate "are we
+  // done" effect. Only ever touches manualVisibleCount, never the derived visibleCount below -
+  // pressing Start while following (see its own doc comment above) already drops out of following
+  // first, seeded at the current live position, so this always continues forward from where the
+  // display actually was rather than jumping.
   useEffect(() => {
     if (!playing) return
     timerRef.current = setInterval(() => {
-      setVisibleCount((c) => {
+      setManualVisibleCount((c) => {
         if (c >= oneMinBars.length) { setPlaying(false); return c }
         return c + 1
       })
     }, speedMs)
     return () => clearInterval(timerRef.current)
   }, [playing, speedMs, oneMinBars.length])
+
+  // The position actually shown everywhere on the page - oneMinBars.length itself while following
+  // today (recomputed fresh on every render, straight off however many bars have arrived so far, so
+  // there is no separate piece of state that could fall behind and need a manual nudge to catch up),
+  // the manually-chosen position otherwise. See `following`'s own doc comment above for why this
+  // replaced an effect-driven "auto-follow".
+  const visibleCount = isToday && following ? oneMinBars.length : manualVisibleCount
 
   const currentBar = oneMinBars[visibleCount - 1] ?? null
   // oneMinBars' own .time is chart time (shifted +5.5h by toChartTime, for the chart library's own
@@ -2107,18 +2118,30 @@ export default function OiReplayPage() {
                   <Space align="center" size={16} wrap style={{ marginBottom: 8 }}>
                     <Button
                       icon={playing ? <PauseCircleOutlined /> : <PlayCircleOutlined />}
-                      onClick={() => setPlaying((p) => !p)}
-                      disabled={oneMinBars.length === 0 || visibleCount >= oneMinBars.length}
+                      onClick={() => {
+                        // Pressing Start while following live means "let me step through manually
+                        // from here" - drop out of following FIRST, seeded at the current live
+                        // position, so playback continues forward from where the display already
+                        // was rather than jumping to wherever manualVisibleCount last happened to be.
+                        if (following) { setFollowing(false); setManualVisibleCount(visibleCount) }
+                        setPlaying((p) => !p)
+                      }}
+                      disabled={oneMinBars.length === 0 || (!following && manualVisibleCount >= oneMinBars.length)}
                     >
                       {playing ? 'Pause' : 'Start'}
                     </Button>
-                    <Button icon={<ReloadOutlined />} onClick={() => { setPlaying(false); setVisibleCount(oneMinBars.length > 0 ? 1 : 0) }}>Reset</Button>
+                    <Button
+                      icon={<ReloadOutlined />}
+                      onClick={() => { setPlaying(false); setFollowing(false); setManualVisibleCount(oneMinBars.length > 0 ? 1 : 0) }}
+                    >
+                      Reset
+                    </Button>
                     <Text type="secondary" style={{ fontSize: 12 }}>Speed</Text>
                     <Select value={speedMs} onChange={setSpeedMs} style={{ width: 90 }} options={SPEED_OPTIONS} />
                     <div style={{ flex: 1, minWidth: 160 }}>
                       <Slider
                         min={0} max={Math.max(0, oneMinBars.length - 1)} value={visibleCount - 1}
-                        onChange={(v) => { setPlaying(false); setVisibleCount(v + 1) }}
+                        onChange={(v) => { setPlaying(false); setFollowing(false); setManualVisibleCount(v + 1) }}
                         tooltip={{ formatter: (v) => oneMinBars[v] ? istTimeFormatter(oneMinBars[v].time) : '' }}
                       />
                     </div>
@@ -2126,9 +2149,19 @@ export default function OiReplayPage() {
                       {currentBar ? `${istTimeFormatter(currentBar.time)} (${visibleCount}/${oneMinBars.length})` : '—'}
                     </Text>
                     {isToday && liveFeedSupported && (
-                      <Tooltip title="Streaming live ticks from Dhan's WebSocket feed on top of today's snapshot (price + OI - IV stays at the last REST-fetched value)">
-                        <Tag color="success">● LIVE</Tag>
+                      <Tooltip title={
+                        liveConnectionState === 'connected' ? "Streaming live ticks from Dhan's WebSocket feed on top of today's snapshot (price + OI - IV stays at the last REST-fetched value)"
+                          : liveConnectionState === 'reconnecting' ? 'Connection dropped - automatically retrying.'
+                            : liveConnectionState === 'connecting' ? 'Connecting to the live feed…'
+                              : 'Not connected - not receiving live ticks right now.'
+                      }>
+                        <Tag color={liveConnectionState === 'connected' ? 'success' : liveConnectionState === 'reconnecting' ? 'warning' : liveConnectionState === 'connecting' ? 'processing' : 'error'}>
+                          {liveConnectionState === 'connected' ? '● LIVE' : liveConnectionState === 'reconnecting' ? '● RECONNECTING' : liveConnectionState === 'connecting' ? '● CONNECTING' : '● OFFLINE'}
+                        </Tag>
                       </Tooltip>
+                    )}
+                    {isToday && !following && (
+                      <Button size="small" type="primary" onClick={() => setFollowing(true)}>Resume live</Button>
                     )}
                     {paperTotalPnl !== 0 || paperOpenCount > 0 ? (
                       <Tag
