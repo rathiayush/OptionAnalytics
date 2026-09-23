@@ -252,8 +252,8 @@ export default function OiLiveDashboardPage() {
   const [chartCEma1, setChartCEma1] = useState(9)
   const [chartCEma2, setChartCEma2] = useState(15)
 
-  const [result, setResult] = useState(null)
   const [loading, setLoading] = useState(false)
+  const [spotLoading, setSpotLoading] = useState(false)
   const [error, setError] = useState(null)
   const [cdvError, setCdvError] = useState(null)
   const [cdvLoading, setCdvLoading] = useState(false)
@@ -312,6 +312,29 @@ export default function OiLiveDashboardPage() {
 
   const liveFeedSupported = LIVE_FEED_COMBOS.has(`${underlying}:${expiryFlag}`)
 
+  // Spot candles + the live-forming bar - the SAME two endpoints the Dashboard page (App.jsx) uses,
+  // served from SpotFeedHostedService's always-warm in-memory state, not anything this page fetches
+  // on demand. Deliberately separate from load() below (which is slow - forceLive routes it through
+  // several PACED live Dhan calls) so the spot chart, ATM strike, and EMA charts B/C never wait on
+  // that slower OI-specific path at all - they're available the instant this near-instant fetch
+  // resolves, exactly like they already are on the Dashboard page.
+  const loadSpot = () => {
+    if (!underlying) return
+    setSpotLoading(true)
+    Promise.all([
+      fetch(`/api/spot/${underlying}/candles`).then((r) => r.json()),
+      fetch(`/api/spot/${underlying}/snapshot`).then((r) => r.json()),
+    ])
+      .then(([candles, snapshot]) => {
+        let bars = (candles ?? []).map(toBar)
+        if (snapshot?.underlying === underlying && snapshot?.currentBar) bars = mergeBar(bars, toBar(snapshot.currentBar))
+        setOneMinBars(bars)
+        setLastTickAtMs(Date.now())
+      })
+      .catch((err) => console.error('Failed to load spot candles:', err))
+      .finally(() => setSpotLoading(false))
+  }
+
   const load = () => {
     if (!underlying) return
     setLoading(true)
@@ -322,7 +345,9 @@ export default function OiLiveDashboardPage() {
     // this page's backfill incomplete/stale when tested locally, exactly like OI Replay's own
     // historical-review page would in the same environment. OI Replay itself keeps its existing
     // default (omits this param) since stored-first genuinely is the right choice for reviewing a
-    // past, already-closed day.
+    // past, already-closed day. This call is what's genuinely slow on this page (several paced Dhan
+    // calls per strike token) - only the OI/IV picture depends on it now; see loadSpot above for why
+    // the spot chart no longer does.
     const params = new URLSearchParams({ date: istDateKey(new Date()), timeframeMinutes: '1', expiryFlag, forceLive: 'true' })
     fetch(`/api/oi-replay/${underlying}/run?${params.toString()}`)
       .then(async (r) => {
@@ -332,8 +357,6 @@ export default function OiLiveDashboardPage() {
       })
       .then((body) => {
         if (!body?.success) throw new Error(body?.error || 'This run did not succeed.')
-        setResult(body)
-        setOneMinBars((body.spotCandlesOneMinute ?? []).map(toBar))
         const ceGrouped = groupByStrike(body.cePoints ?? [])
         const peGrouped = groupByStrike(body.pePoints ?? [])
         setCeSeries(ceGrouped)
@@ -341,14 +364,9 @@ export default function OiLiveDashboardPage() {
         setCeDayOpen(buildDayOpenByStrike(ceGrouped))
         setPeDayOpen(buildDayOpenByStrike(peGrouped))
         setPaperPositions([])
-        // Seeds the stall clock at load time, not at the first live tick - without this, the stall
-        // warning could fire immediately after a fresh load, before the feed has had any chance to
-        // send a first tick yet.
-        setLastTickAtMs(Date.now())
       })
       .catch((err) => {
         console.error('Failed to load Live OI Dashboard data:', err)
-        setResult(null)
         setError(err.message || 'Failed to load today.')
       })
       .finally(() => setLoading(false))
@@ -391,10 +409,12 @@ export default function OiLiveDashboardPage() {
     Promise.allSettled([expiryP, seriesP, obvP]).then(() => setCdvLoading(false))
   }
 
-  // Fresh seed whenever the underlying changes - loadCdv follows CDV's own tracked expiry, not
-  // expiryFlag, so it does not need to re-run when only expiryFlag changes.
+  // Fresh seed whenever the underlying changes - loadCdv and loadSpot both follow the underlying
+  // alone (CDV has its own tracked expiry, spot has none at all), so neither needs to re-run when
+  // only expiryFlag changes the way load() (the OI/IV picture) does.
   useEffect(() => { load() /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [underlying, expiryFlag])
   useEffect(() => { loadCdv() /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [underlying])
+  useEffect(() => { loadSpot() /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [underlying])
 
   // `loading` guards both handlers below against a real race: the SignalR hub connects and starts
   // streaming ticks the instant the page mounts, but the REST snapshot this page seeds from
@@ -406,8 +426,11 @@ export default function OiLiveDashboardPage() {
   // symptom a user actually hit. Dropping ticks until the snapshot for the CURRENT underlying/
   // expiryFlag has landed costs a few seconds of missed ticks at most - a live feed self-heals from
   // that trivially - in exchange for the ladder never showing a half-seeded state.
+  // No `loading` guard here, unlike handleOiReplayTick below - spot is seeded by loadSpot (fast,
+  // always-warm SpotFeedHostedService state), not the slow forceLive OI/IV load(), so there is no
+  // day-open-style baseline a live tick could race ahead of. Same as App.jsx's own spot handler.
   const handleSpotUpdate = (snapshot) => {
-    if (loading || snapshot?.underlying !== underlying || !snapshot?.currentBar) return
+    if (snapshot?.underlying !== underlying || !snapshot?.currentBar) return
     setLastTickAtMs(Date.now())
     setOneMinBars((prev) => mergeBar(prev, toBar(snapshot.currentBar)))
   }
@@ -422,7 +445,7 @@ export default function OiLiveDashboardPage() {
 
   // A dropped-then-restored connection can miss ticks entirely while it was down - re-fetch the
   // whole snapshot to resync rather than silently trusting whatever partial state accumulated.
-  const handleReconnected = () => { load(); loadCdv() }
+  const handleReconnected = () => { load(); loadCdv(); loadSpot() }
 
   // No expiryFlag guard here, unlike handleOiReplayTick above - CDV/OBV always follow CDV's own
   // tracked expiry (see cdvExpiry's own doc comment), which is exactly what this push describes.
@@ -442,7 +465,11 @@ export default function OiLiveDashboardPage() {
 
   const connectionState = useOiLiveHub(handleSpotUpdate, handleOiReplayTick, handleReconnected, handleCdvUpdate, handleCdvBarClosed)
 
-  const step = result?.step || STEP_BY_UNDERLYING[underlying] || 50
+  // STEP_BY_UNDERLYING alone, not result?.step - result comes from the slow forceLive OI/IV load(),
+  // and the step is a fixed constant per underlying either way (this frontend map matches OiReplay
+  // Service's own StrikeStepByUnderlying exactly), so ATM strike below never needs to wait on that
+  // slower load to resolve just to know the step.
+  const step = STEP_BY_UNDERLYING[underlying] || 50
   const currentBar = oneMinBars[oneMinBars.length - 1] ?? null
   const atmStrike = currentBar ? Math.round(currentBar.close / step) * step : null
 
@@ -678,7 +705,7 @@ export default function OiLiveDashboardPage() {
                   <ReplayChart bars={displayBars} ladderRows={displayedLadderRows} dayKey={dayKey} atmStrike={atmStrike} step={step} height={560} />
                 </ChartErrorBoundary>
               ) : (
-                <Empty description={loading ? 'Loading…' : 'No spot candles yet today.'} />
+                <Empty description={spotLoading ? 'Loading…' : 'No spot candles yet today.'} />
               )}
             </Card>
           </Col>
@@ -695,7 +722,7 @@ export default function OiLiveDashboardPage() {
                   />
                 </ChartErrorBoundary>
               ) : (
-                <Empty description={loading ? 'Loading…' : 'No spot candles yet today.'} />
+                <Empty description={spotLoading ? 'Loading…' : 'No spot candles yet today.'} />
               )}
             </Card>
           </Col>
@@ -712,7 +739,7 @@ export default function OiLiveDashboardPage() {
                   />
                 </ChartErrorBoundary>
               ) : (
-                <Empty description={loading ? 'Loading…' : 'No spot candles yet today.'} />
+                <Empty description={spotLoading ? 'Loading…' : 'No spot candles yet today.'} />
               )}
             </Card>
           </Col>
@@ -771,7 +798,7 @@ export default function OiLiveDashboardPage() {
                 <Col span={12}>
                   <Text type="secondary" style={{ fontSize: 12 }}>CDV (cumulative delta volume)</Text>
                   {cdvCePoints.length === 0 && cdvPePoints.length === 0 ? (
-                    <Empty description={loading ? 'Loading…' : 'No CDV data yet today.'} />
+                    <Empty description={cdvLoading ? 'Loading…' : 'No CDV data yet today.'} />
                   ) : (
                     <ChartErrorBoundary key={`cdv-${underlying}-${expiryFlag}-${cdvTimeframe}`}>
                       <CeVsPeLineChart ceSeries={cdvCePoints} peSeries={cdvPePoints} height={280} />
@@ -781,7 +808,7 @@ export default function OiLiveDashboardPage() {
                 <Col span={12}>
                   <Text type="secondary" style={{ fontSize: 12 }}>OBV (on-balance volume)</Text>
                   {obvCePoints.length === 0 && obvPePoints.length === 0 ? (
-                    <Empty description={loading ? 'Loading…' : 'No OBV data yet today.'} />
+                    <Empty description={cdvLoading ? 'Loading…' : 'No OBV data yet today.'} />
                   ) : (
                     <ChartErrorBoundary key={`obv-${underlying}-${expiryFlag}-${cdvTimeframe}`}>
                       <CeVsPeLineChart ceSeries={obvCePoints} peSeries={obvPePoints} height={280} />
