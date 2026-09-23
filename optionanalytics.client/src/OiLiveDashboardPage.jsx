@@ -24,6 +24,18 @@ const { Text, Title } = Typography
 const LIVE_FEED_COMBOS = new Set(['NIFTY:WEEK', 'NIFTY:MONTH', 'BANKNIFTY:MONTH', 'SENSEX:WEEK', 'SENSEX:MONTH'])
 const STEP_BY_UNDERLYING = { NIFTY: 50, BANKNIFTY: 100, SENSEX: 100 }
 
+// "Since open" OI deltas on this page diff TWO INDEPENDENT Dhan pipelines that have never been
+// cross-validated against each other anywhere in this app: "current" OI comes from the live
+// WebSocket tick feed (OiReplayLiveFeedService -> DhanTickPacketParser's Full-packet OI field),
+// while "day open" comes from the on-demand /charts/rollingoption REST call (DhanRollingOptionData
+// Service) that forceLive routes load() through. Both nominally describe the SAME real exchange
+// contract's OI, so they should never disagree by much - a swing far larger than the strike's own
+// current OI is a sign one of the two pipelines misreported it, not a real multi-million intraday
+// unwind, and showing it as a precise number would mislead a reader into trusting a figure this app
+// cannot itself vouch for. See ladderRows below, where a swing past this multiple of current OI is
+// suppressed (shown as no data) rather than displayed.
+const SINCE_OPEN_SANITY_MULTIPLE = 3
+
 // Modeled directly on App.jsx's own useHub: ONE connection, opened on mount and never torn down or
 // rebuilt - no `enabled` gate, no dependency on underlying/expiryFlag (the SAME hub broadcasts ticks
 // for every underlying; this page just filters client-side in its own handlers, same as every
@@ -243,14 +255,22 @@ export default function OiLiveDashboardPage() {
       const peOpen = peDayOpen.get(strike) ?? null
       const ceAsOfMs = ce ? new Date(ce.time).getTime() : null
       const peAsOfMs = pe ? new Date(pe.time).getTime() : null
+      const ceOiSinceOpenRaw = ce?.openInterest != null && ceOpen?.openInterest != null ? ce.openInterest - ceOpen.openInterest : null
+      const peOiSinceOpenRaw = pe?.openInterest != null && peOpen?.openInterest != null ? pe.openInterest - peOpen.openInterest : null
+      // See SINCE_OPEN_SANITY_MULTIPLE's own doc comment - a delta this far out of proportion to the
+      // strike's own current OI is treated as an untrustworthy reading, not a real move, and hidden
+      // rather than shown as a precise-looking number.
+      const ceOiSinceOpen = ceOiSinceOpenRaw != null && ce.openInterest > 0 && Math.abs(ceOiSinceOpenRaw) > ce.openInterest * SINCE_OPEN_SANITY_MULTIPLE
+        ? null : ceOiSinceOpenRaw
+      const peOiSinceOpen = peOiSinceOpenRaw != null && pe.openInterest > 0 && Math.abs(peOiSinceOpenRaw) > pe.openInterest * SINCE_OPEN_SANITY_MULTIPLE
+        ? null : peOiSinceOpenRaw
       return {
         strike,
         ceOi: ce?.openInterest ?? null, ceIv: ce?.impliedVolatility ?? null, cePrice: ce?.price ?? null,
         peOi: pe?.openInterest ?? null, peIv: pe?.impliedVolatility ?? null, pePrice: pe?.price ?? null,
         ceOiChange: ce?.openInterest != null && cePrior?.openInterest != null ? ce.openInterest - cePrior.openInterest : null,
         peOiChange: pe?.openInterest != null && pePrior?.openInterest != null ? pe.openInterest - pePrior.openInterest : null,
-        ceOiSinceOpen: ce?.openInterest != null && ceOpen?.openInterest != null ? ce.openInterest - ceOpen.openInterest : null,
-        peOiSinceOpen: pe?.openInterest != null && peOpen?.openInterest != null ? pe.openInterest - peOpen.openInterest : null,
+        ceOiSinceOpen, peOiSinceOpen,
         ceAsOfMs, peAsOfMs,
         ceStale: ceAsOfMs != null && now - ceAsOfMs > OI_STALE_MS,
         peStale: peAsOfMs != null && now - peAsOfMs > OI_STALE_MS,
