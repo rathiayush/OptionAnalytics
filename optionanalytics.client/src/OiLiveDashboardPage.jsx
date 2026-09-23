@@ -256,6 +256,7 @@ export default function OiLiveDashboardPage() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [cdvError, setCdvError] = useState(null)
+  const [cdvLoading, setCdvLoading] = useState(false)
   // Timestamp of the most recent tick this page has actually received, of ANY kind (spot, OI,
   // CDV/OBV) - see FEED_STALL_WARNING_MS's own doc comment for why this exists alongside
   // connectionState rather than instead of it.
@@ -359,21 +360,22 @@ export default function OiLiveDashboardPage() {
   const loadCdv = () => {
     if (!underlying) return
     setCdvError(null)
-    fetch(`/api/cdv/${underlying}/expiries`)
+    setCdvLoading(true)
+    const expiryP = fetch(`/api/cdv/${underlying}/expiries`)
       .then((r) => r.json())
       .then((data) => setCdvExpiry(data?.selected ?? null))
       .catch((err) => {
         console.error('Failed to load CDV expiry:', err)
         setCdvError('Failed to load CDV/OBV data - check the browser console for details.')
       })
-    fetch(`/api/cdv/${underlying}/series`)
+    const seriesP = fetch(`/api/cdv/${underlying}/series`)
       .then((r) => r.json())
       .then((data) => setCdvSeries((data ?? []).map(toCdvBar)))
       .catch((err) => {
         console.error('Failed to load CDV series:', err)
         setCdvError('Failed to load CDV/OBV data - check the browser console for details.')
       })
-    fetch(`/api/cdv/${underlying}/obv-series`)
+    const obvP = fetch(`/api/cdv/${underlying}/obv-series`)
       .then((r) => r.json())
       .then((data) => {
         setObvCeSeries((data?.ce ?? []).map((p) => ({ time: toChartTime(p.time), value: p.obv })))
@@ -383,6 +385,10 @@ export default function OiLiveDashboardPage() {
         console.error('Failed to load OBV series:', err)
         setCdvError('Failed to load CDV/OBV data - check the browser console for details.')
       })
+    // Same race this page's own load() guards against (see handleSpotUpdate/handleOiReplayTick's own
+    // doc comment) - cdvUpdate/cdvBarClosed ticks arriving before these three REST calls land would
+    // otherwise build a CDV/OBV series that starts mid-air instead of from a genuine seed.
+    Promise.allSettled([expiryP, seriesP, obvP]).then(() => setCdvLoading(false))
   }
 
   // Fresh seed whenever the underlying changes - loadCdv follows CDV's own tracked expiry, not
@@ -390,14 +396,24 @@ export default function OiLiveDashboardPage() {
   useEffect(() => { load() /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [underlying, expiryFlag])
   useEffect(() => { loadCdv() /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [underlying])
 
+  // `loading` guards both handlers below against a real race: the SignalR hub connects and starts
+  // streaming ticks the instant the page mounts, but the REST snapshot this page seeds from
+  // (forceLive=true, several PACED Dhan calls per strike - see load()'s own doc comment) can take
+  // several seconds to land. A tick arriving in that gap would call appendPoint for a strike that
+  // has no day-open entry yet (ceDayOpen/peDayOpen are only populated once load() succeeds) and no
+  // REST-seeded IV to carry forward (a live tick never carries IV on its own) - showing OI with IV
+  // and the since-open Δ both silently missing, which is exactly the "initial load looks wrong"
+  // symptom a user actually hit. Dropping ticks until the snapshot for the CURRENT underlying/
+  // expiryFlag has landed costs a few seconds of missed ticks at most - a live feed self-heals from
+  // that trivially - in exchange for the ladder never showing a half-seeded state.
   const handleSpotUpdate = (snapshot) => {
-    if (snapshot?.underlying !== underlying || !snapshot?.currentBar) return
+    if (loading || snapshot?.underlying !== underlying || !snapshot?.currentBar) return
     setLastTickAtMs(Date.now())
     setOneMinBars((prev) => mergeBar(prev, toBar(snapshot.currentBar)))
   }
 
   const handleOiReplayTick = (tick) => {
-    if (tick?.underlying !== underlying || tick?.expiryFlag !== expiryFlag) return
+    if (loading || tick?.underlying !== underlying || tick?.expiryFlag !== expiryFlag) return
     setLastTickAtMs(Date.now())
     const point = { time: tick.time, strike: tick.strike, openInterest: tick.openInterest, impliedVolatility: null, price: tick.price }
     if (tick.side === 'CE') setCeSeries((prev) => appendPoint(prev, tick.strike, point))
@@ -411,13 +427,13 @@ export default function OiLiveDashboardPage() {
   // No expiryFlag guard here, unlike handleOiReplayTick above - CDV/OBV always follow CDV's own
   // tracked expiry (see cdvExpiry's own doc comment), which is exactly what this push describes.
   const handleCdvUpdate = (incoming) => {
-    if (incoming?.underlying !== underlying || !incoming?.currentBar) return
+    if (cdvLoading || incoming?.underlying !== underlying || !incoming?.currentBar) return
     setLastTickAtMs(Date.now())
     setCdvSeries((prev) => mergeBar(prev, toCdvBar(incoming.currentBar)))
   }
 
   const handleCdvBarClosed = (point) => {
-    if (point?.underlying !== underlying) return
+    if (cdvLoading || point?.underlying !== underlying) return
     setLastTickAtMs(Date.now())
     const time = toChartTime(point.time)
     if (point.obvCe != null) setObvCeSeries((prev) => mergeBar(prev, { time, value: point.obvCe }))
