@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Select, Space, Typography, Card, Button, Row, Col, Tag, Tooltip, Empty, Alert, Segmented } from 'antd'
+import { Select, Space, Typography, Card, Button, Row, Col, Tag, Tooltip, Empty, Alert, Segmented, Table } from 'antd'
 import { createChart, LineSeries, CrosshairMode } from 'lightweight-charts'
 import {
   NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, istDateKey, toBar,
@@ -135,6 +135,108 @@ function aggregateLinePoints(points, minutes) {
 
 function toCdvBar(p) {
   return { time: toChartTime(p.time), ceCdv: p.ceCdv, peCdv: p.peCdv }
+}
+
+// Bar-count options offered by the OI lookback table's own multi-select, and its own timeframe
+// options - deliberately a SEPARATE, page-local list from shared.jsx's own TIMEFRAME_OPTIONS (which
+// has no 2-minute entry) since this table's own default is 2-minute bars specifically.
+const OI_LOOKBACK_BAR_OPTIONS = [3, 5, 7, 10, 15, 20, 25, 30]
+const OI_LOOKBACK_TIMEFRAME_OPTIONS = [
+  { value: 1, label: '1 min' }, { value: 2, label: '2 min' }, { value: 3, label: '3 min' }, { value: 5, label: '5 min' },
+]
+const DEFAULT_OI_LOOKBACK_BARS = [3, 5, 7]
+
+// OI's own counterpart to App.jsx's own computeLookbackChange (CDV/OBV) - simpler, since OI is
+// always non-negative and so never crosses zero the way a CDV reading legitimately can, needing
+// only the divide-by-zero guard, not that one's extra sign-crossing guard. `series` is already
+// bucketed to the chosen timeframe (see aggregateLinePoints above) with a plain .value field.
+function computeOiLookbackChange(series, barsAgo) {
+  const lastIndex = series.length - 1
+  if (lastIndex < 0) return { bars: barsAgo, current: null, previous: null, delta: null, percentChange: null }
+  const current = series[lastIndex].value
+  const previousIndex = lastIndex - barsAgo
+  if (previousIndex < 0) return { bars: barsAgo, current, previous: null, delta: null, percentChange: null }
+  const previous = series[previousIndex].value
+  if (!Number.isFinite(current) || !Number.isFinite(previous)) return { bars: barsAgo, current, previous, delta: null, percentChange: null }
+  const delta = current - previous
+  return { bars: barsAgo, current, previous, delta, percentChange: previous === 0 ? null : (delta / Math.abs(previous)) * 100 }
+}
+
+function renderOiDelta(v) {
+  if (v == null) return <Text type="secondary">—</Text>
+  const color = v > 0 ? '#3ddc84' : v < 0 ? '#ff5c5c' : undefined
+  return <Text style={{ color }}>{v > 0 ? '+' : ''}{v.toLocaleString()}</Text>
+}
+
+function renderOiPercent(v) {
+  if (v == null) return <Text type="secondary">—</Text>
+  const color = v > 0 ? '#3ddc84' : v < 0 ? '#ff5c5c' : undefined
+  return <Text style={{ color }}>{v > 0 ? '+' : ''}{v.toFixed(1)}%</Text>
+}
+
+// "How is OI actually accumulating/unwinding at the money, over several lookback windows at once" -
+// the same "pick several bar counts simultaneously" table Dashboard's own CDV/OBV Lookback Table
+// already offers (App.jsx's LookbackTable), ported here for raw per-strike OI instead of CDV/OBV,
+// since OI has no equivalent view anywhere yet. Pinned to the ATM strike specifically (not an
+// arbitrary offset like the premium charts above) - "what's happening overall, right now" is an ATM
+// question, and pinning it there avoids needing yet another strike picker on this already-busy page.
+function OiLookbackTable({ ceSeries, peSeries, atmStrike }) {
+  const [bars, setBars] = useState(DEFAULT_OI_LOOKBACK_BARS)
+  const [lookbackTimeframe, setLookbackTimeframe] = useState(2)
+
+  const ceLine = useMemo(() => aggregateLinePoints(
+    (ceSeries.get(atmStrike) ?? [])
+      .map((p) => ({ time: toChartTime(p.time), value: p.openInterest }))
+      .filter((p) => Number.isFinite(p.time) && Number.isFinite(p.value)),
+    lookbackTimeframe,
+  ), [ceSeries, atmStrike, lookbackTimeframe])
+  const peLine = useMemo(() => aggregateLinePoints(
+    (peSeries.get(atmStrike) ?? [])
+      .map((p) => ({ time: toChartTime(p.time), value: p.openInterest }))
+      .filter((p) => Number.isFinite(p.time) && Number.isFinite(p.value)),
+    lookbackTimeframe,
+  ), [peSeries, atmStrike, lookbackTimeframe])
+
+  const rows = bars.map((n) => {
+    const ce = computeOiLookbackChange(ceLine, n)
+    const pe = computeOiLookbackChange(peLine, n)
+    return { key: n, bars: n, ceDelta: ce.delta, cePercent: ce.percentChange, peDelta: pe.delta, pePercent: pe.percentChange }
+  })
+
+  return (
+    <Card
+      size="small"
+      title={`OI Lookback Change (ATM ${atmStrike ?? ''})`}
+      extra={
+        <Space size={12}>
+          <Select value={lookbackTimeframe} onChange={setLookbackTimeframe} size="small" style={{ width: 100 }} options={OI_LOOKBACK_TIMEFRAME_OPTIONS} />
+          <Select
+            mode="tags" size="small" value={bars.map(String)}
+            onChange={(vals) => {
+              const parsed = [...new Set(vals.map((v) => parseInt(v, 10)).filter((n) => Number.isInteger(n) && n > 0))].sort((a, b) => a - b)
+              setBars(parsed.length > 0 ? parsed : DEFAULT_OI_LOOKBACK_BARS)
+            }}
+            style={{ minWidth: 180 }}
+            options={OI_LOOKBACK_BAR_OPTIONS.map((n) => ({ value: String(n), label: `${n} bars` }))}
+          />
+        </Space>
+      }
+    >
+      <Table
+        size="small"
+        pagination={false}
+        dataSource={rows}
+        locale={{ emptyText: atmStrike == null ? 'No ATM strike yet.' : 'No OI data yet for this strike.' }}
+        columns={[
+          { title: 'Lookback', dataIndex: 'bars', key: 'bars', render: (b) => `${b} bars ago` },
+          { title: 'CE OI Δ', dataIndex: 'ceDelta', key: 'ceDelta', render: renderOiDelta },
+          { title: 'CE %', dataIndex: 'cePercent', key: 'cePercent', render: renderOiPercent },
+          { title: 'PE OI Δ', dataIndex: 'peDelta', key: 'peDelta', render: renderOiDelta },
+          { title: 'PE %', dataIndex: 'pePercent', key: 'pePercent', render: renderOiPercent },
+        ]}
+      />
+    </Card>
+  )
 }
 
 // Dedupes/sorts before handing points to lightweight-charts, which throws if two consecutive
@@ -746,6 +848,12 @@ export default function OiLiveDashboardPage() {
                     </ChartErrorBoundary>
                   )}
             </Card>
+          </Col>
+        </Row>
+
+        <Row gutter={16}>
+          <Col span={24}>
+            <OiLookbackTable ceSeries={ceSeries} peSeries={peSeries} atmStrike={atmStrike} />
           </Col>
         </Row>
 
