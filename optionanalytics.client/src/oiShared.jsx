@@ -499,8 +499,24 @@ export function buildPremiumCandles(points) {
     // single bad point can be dropped here instead with no visible loss (this page already tolerates
     // gaps - see OI_STALE_MS).
     if (!Number.isFinite(minute) || !Number.isFinite(p.price)) continue
+    // A real historical (or live-Dhan-sourced) minute bar already carries its OWN true Open/High/Low
+    // - see OiReplayPoint's own doc comment on the backend - so use those directly instead of
+    // re-deriving a synthetic range from p.price alone, which flattened every historical minute into
+    // a doji (open=high=low=close) even when the real bar underneath it had genuine intra-minute
+    // range. A genuine live tick (no open/high/low of its own, a single point in time rather than a
+    // bar) still falls back to price-only bucketing below, correctly widening high/low as multiple
+    // ticks land in the same still-forming minute.
+    const hasOwnRange = Number.isFinite(p.open) && Number.isFinite(p.high) && Number.isFinite(p.low)
     const existing = buckets.get(minute)
-    if (existing) {
+    if (hasOwnRange) {
+      if (existing) {
+        existing.high = Math.max(existing.high, p.high)
+        existing.low = Math.min(existing.low, p.low)
+        existing.close = p.price
+      } else {
+        buckets.set(minute, { time: minute, open: p.open, high: p.high, low: p.low, close: p.price })
+      }
+    } else if (existing) {
       existing.high = Math.max(existing.high, p.price)
       existing.low = Math.min(existing.low, p.price)
       existing.close = p.price
