@@ -1,0 +1,39 @@
+/* Continuous, viewport-width-driven scaling for the Live OI Dashboard and OI Replay pages' own antd
+   chrome (Card titles, Tags, Statistics) - clamp() rather than a fixed breakpoint so text/padding
+   shrink smoothly as the viewport narrows, matching the fluid stacking those pages' own responsive
+   Col spans already do, instead of snapping abruptly at one width. Scoped under .oi-mobile-page so
+   this can never reach any other page - Dashboard/App.jsx especially, which carries live trading
+   risk and must never be touched by an unrelated CSS change - since this file is only imported by
+   OiLiveDashboardPage.jsx and OiReplayPage.jsx.
+
+   clamp(min, preferred, max): the `vw` term is measured against the actual device viewport (not
+   this container's own maxWidth), so it converges to `max` on a desktop-sized screen and shrinks
+   toward `min` on a phone, exactly the "automatic" behavior wanted rather than a hand-picked
+   breakpoint. */
+
+.oi-mobile-page .ant-card-head-title {
+  font-size: clamp(12px, 3.4vw, 14px);
+  white-space: normal;
+}
+
+.oi-mobile-page .ant-card-body {
+  padding: clamp(8px, 2.5vw, 16px);
+}
+
+.oi-mobile-page .ant-tag {
+  font-size: clamp(9px, 2.6vw, 12px);
+  padding: 0 clamp(3px, 1vw, 7px);
+  line-height: clamp(14px, 4vw, 20px);
+}
+
+.oi-mobile-page .ant-statistic-title {
+  font-size: clamp(10px, 2.8vw, 14px);
+}
+
+.oi-mobile-page .ant-statistic-content {
+  font-size: clamp(14px, 4vw, 24px);
+}
+
+.oi-mobile-page .ant-btn {
+  font-size: clamp(11px, 2.8vw, 14px);
+}

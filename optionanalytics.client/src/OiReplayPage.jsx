@@ -5,6 +5,7 @@ import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicke
 import { PlayCircleOutlined, PauseCircleOutlined, ReloadOutlined, SoundOutlined } from '@ant-design/icons'
 import { createChart, createSeriesMarkers, CandlestickSeries, LineSeries, CrosshairMode } from 'lightweight-charts'
 import * as signalR from '@microsoft/signalr'
+import './oiMobile.css'
 import {
   UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR,
   istTimeFormatter, istTickMarkFormatter, toBar, toChartTime, fromChartTime, istDateKey,
@@ -925,8 +926,8 @@ function OiLadder({ rows, atmStrike }) {
     // rather than trying to reflow. touchAction/WebkitOverflowScrolling make that scroll a normal
     // touch swipe on a phone, not just a desktop scrollbar drag.
     <div style={{ overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 640 }}>
-      <Row style={{ fontSize: 11, color: AXIS_COLOR, marginBottom: 4 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 500 }}>
+      <Row style={{ fontSize: 'clamp(9px, 2.4vw, 11px)', color: AXIS_COLOR, marginBottom: 4 }}>
         <Col span={10} style={{ textAlign: 'right', paddingRight: 6 }}>PE OI (support, in M)</Col>
         <Col span={4} style={{ textAlign: 'center' }}>Strike</Col>
         <Col span={10} style={{ paddingLeft: 6 }}>CE OI (resistance, in M)</Col>
@@ -948,15 +949,15 @@ function OiLadder({ rows, atmStrike }) {
           >
             <Col span={10} style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 4, opacity: row.peStale ? 0.45 : 1 }}>
               <OiChangeStack changeValue={row.peOiChange} sinceOpenValue={row.peOiSinceOpen} />
-              <Text style={{ fontSize: 10, color: AXIS_COLOR, whiteSpace: 'nowrap' }}>
+              <Text style={{ fontSize: 'clamp(8px, 2.2vw, 10px)', color: AXIS_COLOR, whiteSpace: 'nowrap' }}>
                 {row.pePrice != null ? `${row.pePrice.toFixed(2)}` : ''}
                 {row.peIv != null ? ` · IV ${row.peIv.toFixed(1)}` : ''}
                 {row.peStale ? ' ⚠' : ''}
               </Text>
-              <Text style={{ fontSize: 9, color: AXIS_COLOR, width: 34, textAlign: 'right', whiteSpace: 'nowrap' }}>
+              <Text style={{ fontSize: 'clamp(7px, 2vw, 9px)', color: AXIS_COLOR, width: 'clamp(24px, 7vw, 34px)', textAlign: 'right', whiteSpace: 'nowrap' }}>
                 {row.peOi != null ? formatOiMillions(row.peOi) : ''}
               </Text>
-              <div style={{ width: 70, display: 'flex', justifyContent: 'flex-end' }}>
+              <div style={{ width: 'clamp(44px, 13vw, 70px)', display: 'flex', justifyContent: 'flex-end' }}>
                 <Tooltip title={row.peOi != null ? `PE OI: ${row.peOi.toLocaleString()}${row.pePrice != null ? `, LTP ${row.pePrice.toFixed(2)}` : ''}${row.peOiChange != null ? ` (${row.peOiChange >= 0 ? '+' : ''}${row.peOiChange.toLocaleString()} in the last min)` : ''}${row.peOiSinceOpen != null ? ` (${row.peOiSinceOpen >= 0 ? '+' : ''}${row.peOiSinceOpen.toLocaleString()} since open)` : ''}${row.peStale && row.peAsOfMs != null ? ` — STALE, no update since ${istTimeFormatter(toChartTime(row.peAsOfMs))}` : ''}` : 'No data'}>
                   <div style={{
                     width: `${((row.peOi ?? 0) / maxOi) * 100}%`, minWidth: row.peOi ? 2 : 0, height: 14,
@@ -966,10 +967,10 @@ function OiLadder({ rows, atmStrike }) {
               </div>
             </Col>
             <Col span={4} style={{ textAlign: 'center' }}>
-              <Text strong={isAtm} style={{ fontSize: 12, color: isAtm ? '#fff' : undefined }}>{row.strike.toLocaleString()}</Text>
+              <Text strong={isAtm} style={{ fontSize: 'clamp(10px, 2.8vw, 12px)', color: isAtm ? '#fff' : undefined }}>{row.strike.toLocaleString()}</Text>
             </Col>
             <Col span={10} style={{ display: 'flex', alignItems: 'center', gap: 4, opacity: row.ceStale ? 0.45 : 1 }}>
-              <div style={{ width: 70 }}>
+              <div style={{ width: 'clamp(44px, 13vw, 70px)' }}>
                 <Tooltip title={row.ceOi != null ? `CE OI: ${row.ceOi.toLocaleString()}${row.cePrice != null ? `, LTP ${row.cePrice.toFixed(2)}` : ''}${row.ceOiChange != null ? ` (${row.ceOiChange >= 0 ? '+' : ''}${row.ceOiChange.toLocaleString()} in the last min)` : ''}${row.ceOiSinceOpen != null ? ` (${row.ceOiSinceOpen >= 0 ? '+' : ''}${row.ceOiSinceOpen.toLocaleString()} since open)` : ''}${row.ceStale && row.ceAsOfMs != null ? ` — STALE, no update since ${istTimeFormatter(toChartTime(row.ceAsOfMs))}` : ''}` : 'No data'}>
                   <div style={{
                     width: `${((row.ceOi ?? 0) / maxOi) * 100}%`, minWidth: row.ceOi ? 2 : 0, height: 14,
@@ -977,11 +978,11 @@ function OiLadder({ rows, atmStrike }) {
                   }} />
                 </Tooltip>
               </div>
-              <Text style={{ fontSize: 9, color: AXIS_COLOR, width: 34, whiteSpace: 'nowrap' }}>
+              <Text style={{ fontSize: 'clamp(7px, 2vw, 9px)', color: AXIS_COLOR, width: 'clamp(24px, 7vw, 34px)', whiteSpace: 'nowrap' }}>
                 {row.ceOi != null ? formatOiMillions(row.ceOi) : ''}
               </Text>
               <OiChangeStack changeValue={row.ceOiChange} sinceOpenValue={row.ceOiSinceOpen} />
-              <Text style={{ fontSize: 10, color: AXIS_COLOR, whiteSpace: 'nowrap' }}>
+              <Text style={{ fontSize: 'clamp(8px, 2.2vw, 10px)', color: AXIS_COLOR, whiteSpace: 'nowrap' }}>
                 {row.cePrice != null ? `${row.cePrice.toFixed(2)}` : ''}
                 {row.ceIv != null ? ` · IV ${row.ceIv.toFixed(1)}` : ''}
                 {row.ceStale ? ' ⚠' : ''}
@@ -1139,10 +1140,10 @@ class ChartErrorBoundary extends Component {
 // A small colored delta label for a one-minute OI change - green/up for building, red/down for
 // unwinding, dash for no change or not-yet-available (first minute of the day, no prior reading).
 function OiChange({ value }) {
-  if (value == null || value === 0) return <Text style={{ fontSize: 9, color: AXIS_COLOR }}>·</Text>
+  if (value == null || value === 0) return <Text style={{ fontSize: 'clamp(7px, 2vw, 9px)', color: AXIS_COLOR }}>·</Text>
   const up = value > 0
   return (
-    <Text style={{ fontSize: 9, color: up ? UP_COLOR : DOWN_COLOR }}>
+    <Text style={{ fontSize: 'clamp(7px, 2vw, 9px)', color: up ? UP_COLOR : DOWN_COLOR }}>
       {up ? '▲' : '▼'}{formatOiMillions(Math.abs(value))}
     </Text>
   )
@@ -1168,11 +1169,11 @@ function formatOiMillions(n, { signed = false, withUnit = true } = {}) {
 // the whole day's drift, per the user's own "change in OI since days open".
 function SinceOpenChange({ value }) {
   if (value == null) return null
-  if (value === 0) return <Text style={{ fontSize: 8, color: AXIS_COLOR }}>open ·</Text>
+  if (value === 0) return <Text style={{ fontSize: 'clamp(6px, 1.8vw, 8px)', color: AXIS_COLOR }}>open ·</Text>
   const up = value > 0
   return (
     <Tooltip title={`${up ? '+' : ''}${value.toLocaleString()} since today's open`}>
-      <Text style={{ fontSize: 8, color: up ? UP_COLOR : DOWN_COLOR, whiteSpace: 'nowrap' }}>
+      <Text style={{ fontSize: 'clamp(6px, 1.8vw, 8px)', color: up ? UP_COLOR : DOWN_COLOR, whiteSpace: 'nowrap' }}>
         open {formatOiMillions(value, { signed: true })}
       </Text>
     </Tooltip>
@@ -1884,7 +1885,7 @@ export default function OiReplayPage() {
     // again to 2600 for the user's own "width more than 2500 trading monitor" - three chart columns
     // (Spot + Entry chart B + Entry chart C) side by side need real width each to stay readable, not
     // just technically fit.
-    <div style={{ maxWidth: 2600, margin: '0 auto', padding: '24px 16px' }}>
+    <div className="oi-mobile-page" style={{ maxWidth: 2600, margin: '0 auto', padding: '24px 16px' }}>
       <Space direction="vertical" size={20} style={{ width: '100%' }}>
         <Space align="center" size={16} wrap>
           <Title level={3} style={{ margin: 0 }}>Option Analytics</Title>

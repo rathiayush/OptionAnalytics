@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Select, Space, Typography, Card, Button, Row, Col, Tag, Tooltip, Empty, Alert, Segmented } from 'antd'
 import { createChart, LineSeries, CrosshairMode } from 'lightweight-charts'
+import './oiMobile.css'
 import {
   NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, istDateKey, toBar,
   toChartTime, CE_COLOR, PE_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR, istTimeFormatter, istTickMarkFormatter,
@@ -639,7 +640,7 @@ export default function OiLiveDashboardPage() {
   const dayKey = `${underlying}-${expiryFlag}`
 
   return (
-    <div style={{ maxWidth: 2600, margin: '0 auto', padding: '24px 16px' }}>
+    <div className="oi-mobile-page" style={{ maxWidth: 2600, margin: '0 auto', padding: '24px 16px' }}>
       <Space direction="vertical" size={20} style={{ width: '100%' }}>
         <Space align="center" size={16} wrap>
           <Title level={3} style={{ margin: 0 }}>Option Analytics</Title>
