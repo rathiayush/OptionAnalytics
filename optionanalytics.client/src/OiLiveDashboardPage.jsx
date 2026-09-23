@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Select, Space, Typography, Card, Button, Row, Col, Tag, Tooltip, Empty, Alert } from 'antd'
+import { Select, Space, Typography, Card, Button, Row, Col, Tag, Tooltip, Empty, Alert, Segmented } from 'antd'
 import * as signalR from '@microsoft/signalr'
 import { createChart, LineSeries, CrosshairMode } from 'lightweight-charts'
 import {
@@ -37,6 +37,21 @@ const STEP_BY_UNDERLYING = { NIFTY: 50, BANKNIFTY: 100, SENSEX: 100 }
 // cannot itself vouch for. See ladderRows below, where a swing past this multiple of current OI is
 // suppressed (shown as no data) rather than displayed.
 const SINCE_OPEN_SANITY_MULTIPLE = 3
+// Floor for SINCE_OPEN_SANITY_MULTIPLE's own comparison baseline, in raw (unscaled) contracts - a
+// strike whose CURRENT OI happens to read exactly 0 would otherwise divide the sanity check against
+// zero and let ANY delta magnitude through unfiltered, which is exactly the most extreme version of
+// the bug that check exists to catch (see SINCE_OPEN_SANITY_MULTIPLE's own doc comment). 50,000
+// contracts is comfortably below anything a real ATM-band strike shows, so it only ever matters when
+// current OI is genuinely tiny or zero.
+const SINCE_OPEN_MIN_BASELINE = 50_000
+
+// How long a supposedly-live page can go without ANY tick (spot, OI, or CDV/OBV) before this page
+// treats it as suspicious rather than trusting the "● LIVE" tag - that tag only reflects the
+// browser's own SignalR connection to OUR server, never whether the SERVER's own upstream Dhan feed
+// is actually flowing (see DhanMarketFeedClient's own stall detector for how THAT gets diagnosed,
+// server-side, from logs this page cannot see) - a silently stalled upstream feed would otherwise
+// look identical, from here, to a page working correctly during a genuinely quiet market moment.
+const FEED_STALL_WARNING_MS = 3 * 60_000
 
 // Modeled directly on App.jsx's own useHub: ONE connection, opened on mount and never torn down or
 // rebuilt - no `enabled` gate, no dependency on underlying/expiryFlag (the SAME hub broadcasts ticks
@@ -240,6 +255,11 @@ export default function OiLiveDashboardPage() {
   const [result, setResult] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
+  const [cdvError, setCdvError] = useState(null)
+  // Timestamp of the most recent tick this page has actually received, of ANY kind (spot, OI,
+  // CDV/OBV) - see FEED_STALL_WARNING_MS's own doc comment for why this exists alongside
+  // connectionState rather than instead of it.
+  const [lastTickAtMs, setLastTickAtMs] = useState(null)
 
   // The live state itself - an array of every 1-minute bar today has had so far, and a Map per side
   // of every strike's own points, ascending by time. No "as of" cursor anywhere: since this page
@@ -255,6 +275,11 @@ export default function OiLiveDashboardPage() {
 
   const [cePremiumOffset, setCePremiumOffset] = useState(0)
   const [pePremiumOffset, setPePremiumOffset] = useState(0)
+
+  // OI ladder can get long once ATM has drifted a while (a strike's row never disappears once
+  // seen - see ladderRows below) - 'top5' narrows it to the 5 highest-combined-OI strikes so the
+  // wall is still readable at a glance without losing the full picture (still one click away).
+  const [oiLadderScope, setOiLadderScope] = useState('all')
 
   // CDV/OBV - chain-wide CE/PE aggregates (not tied to any one strike, unlike the premium charts
   // above), reusing CdvHostedService's own always-on tracking rather than anything OiReplayService
@@ -315,6 +340,10 @@ export default function OiLiveDashboardPage() {
         setCeDayOpen(buildDayOpenByStrike(ceGrouped))
         setPeDayOpen(buildDayOpenByStrike(peGrouped))
         setPaperPositions([])
+        // Seeds the stall clock at load time, not at the first live tick - without this, the stall
+        // warning could fire immediately after a fresh load, before the feed has had any chance to
+        // send a first tick yet.
+        setLastTickAtMs(Date.now())
       })
       .catch((err) => {
         console.error('Failed to load Live OI Dashboard data:', err)
@@ -329,21 +358,31 @@ export default function OiLiveDashboardPage() {
   // page's WEEK/MONTH expiryFlag - see cdvExpiry's own doc comment above for why.
   const loadCdv = () => {
     if (!underlying) return
+    setCdvError(null)
     fetch(`/api/cdv/${underlying}/expiries`)
       .then((r) => r.json())
       .then((data) => setCdvExpiry(data?.selected ?? null))
-      .catch((err) => console.error('Failed to load CDV expiry:', err))
+      .catch((err) => {
+        console.error('Failed to load CDV expiry:', err)
+        setCdvError('Failed to load CDV/OBV data - check the browser console for details.')
+      })
     fetch(`/api/cdv/${underlying}/series`)
       .then((r) => r.json())
       .then((data) => setCdvSeries((data ?? []).map(toCdvBar)))
-      .catch((err) => console.error('Failed to load CDV series:', err))
+      .catch((err) => {
+        console.error('Failed to load CDV series:', err)
+        setCdvError('Failed to load CDV/OBV data - check the browser console for details.')
+      })
     fetch(`/api/cdv/${underlying}/obv-series`)
       .then((r) => r.json())
       .then((data) => {
         setObvCeSeries((data?.ce ?? []).map((p) => ({ time: toChartTime(p.time), value: p.obv })))
         setObvPeSeries((data?.pe ?? []).map((p) => ({ time: toChartTime(p.time), value: p.obv })))
       })
-      .catch((err) => console.error('Failed to load OBV series:', err))
+      .catch((err) => {
+        console.error('Failed to load OBV series:', err)
+        setCdvError('Failed to load CDV/OBV data - check the browser console for details.')
+      })
   }
 
   // Fresh seed whenever the underlying changes - loadCdv follows CDV's own tracked expiry, not
@@ -353,11 +392,13 @@ export default function OiLiveDashboardPage() {
 
   const handleSpotUpdate = (snapshot) => {
     if (snapshot?.underlying !== underlying || !snapshot?.currentBar) return
+    setLastTickAtMs(Date.now())
     setOneMinBars((prev) => mergeBar(prev, toBar(snapshot.currentBar)))
   }
 
   const handleOiReplayTick = (tick) => {
     if (tick?.underlying !== underlying || tick?.expiryFlag !== expiryFlag) return
+    setLastTickAtMs(Date.now())
     const point = { time: tick.time, strike: tick.strike, openInterest: tick.openInterest, impliedVolatility: null, price: tick.price }
     if (tick.side === 'CE') setCeSeries((prev) => appendPoint(prev, tick.strike, point))
     else setPeSeries((prev) => appendPoint(prev, tick.strike, point))
@@ -371,11 +412,13 @@ export default function OiLiveDashboardPage() {
   // tracked expiry (see cdvExpiry's own doc comment), which is exactly what this push describes.
   const handleCdvUpdate = (incoming) => {
     if (incoming?.underlying !== underlying || !incoming?.currentBar) return
+    setLastTickAtMs(Date.now())
     setCdvSeries((prev) => mergeBar(prev, toCdvBar(incoming.currentBar)))
   }
 
   const handleCdvBarClosed = (point) => {
     if (point?.underlying !== underlying) return
+    setLastTickAtMs(Date.now())
     const time = toChartTime(point.time)
     if (point.obvCe != null) setObvCeSeries((prev) => mergeBar(prev, { time, value: point.obvCe }))
     if (point.obvPe != null) setObvPeSeries((prev) => mergeBar(prev, { time, value: point.obvPe }))
@@ -406,6 +449,23 @@ export default function OiLiveDashboardPage() {
     return () => clearInterval(id)
   }, [])
 
+  // True when this page's own SignalR connection to the server says "connected" but nothing has
+  // actually arrived through it in a long time - see FEED_STALL_WARNING_MS's own doc comment for why
+  // that combination needs its own, separate signal from connectionState.
+  const feedStalled = liveFeedSupported && connectionState === 'connected'
+    && lastTickAtMs != null && nowTick - lastTickAtMs > FEED_STALL_WARNING_MS
+
+  // Edge-triggered (fires once per stall, not once per 15s tick while it persists) so this is
+  // findable in the browser console without flooding it - the exact "if any error log it please" ask
+  // for a failure mode that otherwise leaves no trace anywhere the page's own user can see.
+  const wasFeedStalledRef = useRef(false)
+  useEffect(() => {
+    if (feedStalled && !wasFeedStalledRef.current) {
+      console.error(`Live OI Dashboard: no ticks received for ${underlying} in over ${FEED_STALL_WARNING_MS / 60_000} minutes despite an open connection - the server's own Dhan feed may have stalled.`)
+    }
+    wasFeedStalledRef.current = feedStalled
+  }, [feedStalled, underlying])
+
   // Every strike either side has ever reported, current OI/IV/price plus a one-minute-ago and a
   // day-open reference - "now" and "a minute ago" are plain Date.now() reads (this page has no
   // concept of any other "now"), and "day-open" is simply each array's own first element, since the
@@ -429,10 +489,11 @@ export default function OiLiveDashboardPage() {
       const peOiSinceOpenRaw = pe?.openInterest != null && peOpen?.openInterest != null ? pe.openInterest - peOpen.openInterest : null
       // See SINCE_OPEN_SANITY_MULTIPLE's own doc comment - a delta this far out of proportion to the
       // strike's own current OI is treated as an untrustworthy reading, not a real move, and hidden
-      // rather than shown as a precise-looking number.
-      const ceOiSinceOpen = ceOiSinceOpenRaw != null && ce.openInterest > 0 && Math.abs(ceOiSinceOpenRaw) > ce.openInterest * SINCE_OPEN_SANITY_MULTIPLE
+      // rather than shown as a precise-looking number. Math.max(..., SINCE_OPEN_MIN_BASELINE) keeps
+      // this meaningful even when current OI itself reads 0 - see that constant's own doc comment.
+      const ceOiSinceOpen = ceOiSinceOpenRaw != null && Math.abs(ceOiSinceOpenRaw) > Math.max(ce.openInterest, SINCE_OPEN_MIN_BASELINE) * SINCE_OPEN_SANITY_MULTIPLE
         ? null : ceOiSinceOpenRaw
-      const peOiSinceOpen = peOiSinceOpenRaw != null && pe.openInterest > 0 && Math.abs(peOiSinceOpenRaw) > pe.openInterest * SINCE_OPEN_SANITY_MULTIPLE
+      const peOiSinceOpen = peOiSinceOpenRaw != null && Math.abs(peOiSinceOpenRaw) > Math.max(pe.openInterest, SINCE_OPEN_MIN_BASELINE) * SINCE_OPEN_SANITY_MULTIPLE
         ? null : peOiSinceOpenRaw
       return {
         strike,
@@ -451,6 +512,19 @@ export default function OiLiveDashboardPage() {
     // real clock tick, not just when new tick data arrives. See nowTick's own doc comment above.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ceSeries, peSeries, ceDayOpen, peDayOpen, nowTick])
+
+  // 'top5' - the 5 strikes with the highest COMBINED (CE+PE) OI, still sorted strike-descending
+  // (same order 'all' uses) rather than by OI rank, so the wall still reads top-to-bottom by price.
+  const displayedLadderRows = useMemo(() => {
+    if (oiLadderScope !== 'top5') return ladderRows
+    const top5Strikes = new Set(
+      [...ladderRows]
+        .sort((a, b) => ((b.ceOi ?? 0) + (b.peOi ?? 0)) - ((a.ceOi ?? 0) + (a.peOi ?? 0)))
+        .slice(0, 5)
+        .map((r) => r.strike),
+    )
+    return ladderRows.filter((r) => top5Strikes.has(r.strike))
+  }, [ladderRows, oiLadderScope])
 
   const cePremiumStrike = atmStrike != null ? atmStrike + cePremiumOffset * step : null
   const pePremiumStrike = atmStrike != null ? atmStrike + pePremiumOffset * step : null
@@ -556,7 +630,14 @@ export default function OiLiveDashboardPage() {
                 message="Not receiving live ticks right now - check the browser console for a SignalR connection error, and confirm the backend's own Dhan market-feed connection is up."
               />
             )}
+            {feedStalled && (
+              <Alert
+                type="warning" showIcon
+                message={`Connected, but no live tick for ${underlying} in over ${Math.round((nowTick - lastTickAtMs) / 60_000)} min - the connection itself is fine, but the server's own Dhan feed may have stalled. Logged to the browser console; try reloading if this doesn't clear on its own.`}
+              />
+            )}
             {error && <Alert type="error" showIcon message={error} />}
+            {cdvError && <Alert type="error" showIcon message={cdvError} />}
             {paperPanelOpen && (
               <DraggableFloatingPanel title="Paper trade" pos={paperPanelPos} onPosChange={setPaperPanelPos} onClose={() => setPaperPanelOpen(false)}>
                 <PaperTradePanel
@@ -578,7 +659,7 @@ export default function OiLiveDashboardPage() {
             <Card size="small" title="Spot (live)">
               {oneMinBars.length > 0 ? (
                 <ChartErrorBoundary key={`${underlying}-${expiryFlag}-${timeframe}`}>
-                  <ReplayChart bars={displayBars} ladderRows={ladderRows} dayKey={dayKey} atmStrike={atmStrike} step={step} height={560} />
+                  <ReplayChart bars={displayBars} ladderRows={displayedLadderRows} dayKey={dayKey} atmStrike={atmStrike} step={step} height={560} />
                 </ChartErrorBoundary>
               ) : (
                 <Empty description={loading ? 'Loading…' : 'No spot candles yet today.'} />
@@ -698,8 +779,13 @@ export default function OiLiveDashboardPage() {
 
         <Row gutter={16}>
           <Col span={24}>
-            <Card size="small" title="OI / IV ladder (nearest expiry, live)" bodyStyle={{ maxHeight: 560, overflowY: 'auto' }}>
-              <OiLadder rows={ladderRows} atmStrike={atmStrike} />
+            <Card
+              size="small"
+              title="OI / IV ladder (nearest expiry, live)"
+              extra={<Segmented value={oiLadderScope} onChange={setOiLadderScope} options={[{ label: 'All', value: 'all' }, { label: 'Top 5', value: 'top5' }]} />}
+              bodyStyle={{ maxHeight: 560, overflowY: 'auto' }}
+            >
+              <OiLadder rows={displayedLadderRows} atmStrike={atmStrike} />
             </Card>
           </Col>
         </Row>
