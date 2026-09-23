@@ -10,6 +10,7 @@ import {
   istTimeFormatter, istTickMarkFormatter, toBar, toChartTime, fromChartTime, istDateKey,
   NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState,
 } from './shared.jsx'
+import { PremiumEmaChart } from './oiShared.jsx'
 
 const { Text, Title } = Typography
 
@@ -164,36 +165,6 @@ function buildStrikeOffsetOptions(atmStrike, step) {
     value: offset,
     label: offset === 0 ? `ATM (${atmStrike})` : `ATM${offset > 0 ? '+' : ''}${offset} (${atmStrike + offset * step})`,
   }))
-}
-
-// One strike/side's own premium (its `.price` field - a per-minute LTP snapshot, not real OHLC, so
-// a LINE is the honest representation here, not a fake candle) as a lightweight-charts line-series
-// dataset, clipped to the replay's own current tick - same "only reveal what's happened so far"
-// rule every other chart on this page follows, just against real (unshifted) point times rather
-// than chart-shifted bar times.
-function buildPremiumLine(points, asOfMs) {
-  if (!points || asOfMs == null) return []
-  // toChartTime already does its own new Date(...).getTime()/1000 internally (see its own doc
-  // comment) - passing it a value ALREADY divided by 1000 here used to double-convert every point's
-  // time down near the Unix epoch. Since real timestamps only drift by a few hours across a trading
-  // day, the corrupted values stayed monotonic most of the time and this went unnoticed - until
-  // enough live ticks piled up that two points collapsed onto the exact same (wrong) integer second,
-  // which lightweight-charts' setData() rejects outright as duplicate/out-of-order data. That's the
-  // "This chart could not be rendered" the ChartErrorBoundary was swallowing. Passing p.time straight
-  // through (a millisecond number or ISO string both work - toChartTime accepts either) is correct.
-  const mapped = points
-    .filter((p) => new Date(p.time).getTime() <= asOfMs)
-    .map((p) => ({ time: toChartTime(p.time), value: p.price }))
-  // Still de-duplicate same-second points (e.g. two raw ticks landing in the same second) - points
-  // are already time-ascending (groupByStrike's own sort), so any duplicate is adjacent; keep the
-  // LAST value for that second rather than reject it, same "replace in place" merge shape as every
-  // other live series on this page.
-  const deduped = []
-  for (const point of mapped) {
-    if (deduped.length > 0 && deduped[deduped.length - 1].time === point.time) deduped[deduped.length - 1] = point
-    else deduped.push(point)
-  }
-  return deduped
 }
 
 // A short beep via the Web Audio API - no asset file needed. Lazily creates (and reuses) one
@@ -797,60 +768,6 @@ function DraggableFloatingPanel({ title, pos, onPosChange, onClose, children }) 
   )
 }
 
-// A CE line and a PE line, each one strike's own real premium over time (see buildPremiumLine's own
-// doc comment on why a line, not a candle) - the user's own "add atm ce and pe charts... I should
-// be able to choose it +- from dropdown" ask: watch the actual option premium move for whichever
-// strike is currently interesting, not just the underlying spot every other chart on this page
-// already shows. Both lines share ONE price scale (right axis) since CE and PE premiums are the
-// same unit and usually a comparable order of magnitude, unlike, say, price vs OI.
-// A SINGLE leg's own premium as its own chart, with its own auto-scaled price axis - two of these
-// (CE and PE) are rendered side by side rather than one chart with both as overlaid lines, since a
-// far OTM leg's premium can be a small fraction of ATM's and would otherwise flatten to a useless
-// sliver against the other leg's own scale. Mirrors how the Dashboard page (App.jsx) shows its own
-// ATM CE/PE premium charts as two separate cards, not one overlay.
-function PremiumLineChart({ points, dayKey, color, height = 320 }) {
-  const containerRef = useRef(null)
-  const chartRef = useRef(null)
-  const seriesRef = useRef(null)
-
-  useEffect(() => {
-    if (!containerRef.current) return
-    const chart = createChart(containerRef.current, {
-      width: containerRef.current.clientWidth,
-      height,
-      layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
-      grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
-      rightPriceScale: { borderColor: BORDER_COLOR },
-      timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter },
-      crosshair: { mode: CrosshairMode.Normal },
-      localization: { timeFormatter: istTimeFormatter },
-    })
-    chartRef.current = chart
-    seriesRef.current = chart.addSeries(LineSeries, { color, lineWidth: 2, priceLineVisible: false, lastValueVisible: true })
-
-    const onResize = () => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }) }
-    window.addEventListener('resize', onResize)
-    return () => {
-      window.removeEventListener('resize', onResize)
-      chart.remove()
-      chartRef.current = null
-      seriesRef.current = null
-    }
-  }, [height, color])
-
-  useEffect(() => { if (seriesRef.current) seriesRef.current.setData(points) }, [points])
-
-  // Re-fit on a brand new day OR whenever the strike selection changes (dayKey covers both, see the
-  // caller) - switching from ATM to ATM+5 can jump the premium's own scale entirely, so the old
-  // zoom/scale would otherwise show a flat, useless line until manually re-fit.
-  useEffect(() => {
-    if (points.length > 0) chartRef.current?.timeScale().fitContent()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dayKey])
-
-  return <div ref={containerRef} style={{ width: '100%', height }} />
-}
-
 // SEBI periodically revises each index's own lot size - update this if it changes. This feature is
 // paper trading only (no real order is ever placed - see PaperTradePanel's own doc comment), so a
 // stale value here only skews the SIMULATED PnL's scale, not anything real.
@@ -1246,6 +1163,12 @@ export default function OiReplayPage() {
   // itself. The user's own "I should be able to choose it +- from dropdown" ask.
   const [cePremiumOffset, setCePremiumOffset] = useState(0)
   const [pePremiumOffset, setPePremiumOffset] = useState(0)
+  const [cePremiumTimeframe, setCePremiumTimeframe] = useState(1)
+  const [cePremiumEma1, setCePremiumEma1] = useState(9)
+  const [cePremiumEma2, setCePremiumEma2] = useState(15)
+  const [pePremiumTimeframe, setPePremiumTimeframe] = useState(1)
+  const [pePremiumEma1, setPePremiumEma1] = useState(9)
+  const [pePremiumEma2, setPePremiumEma2] = useState(15)
 
   const [visibleSections, setVisibleSections] = useState(ALL_SECTION_VALUES)
 
@@ -1581,13 +1504,19 @@ export default function OiReplayPage() {
 
   const cePremiumStrike = atmStrike != null ? atmStrike + cePremiumOffset * step : null
   const pePremiumStrike = atmStrike != null ? atmStrike + pePremiumOffset * step : null
-  const cePremiumLine = useMemo(
-    () => buildPremiumLine(ceByStrike.get(cePremiumStrike), asOfMs),
-    [ceByStrike, cePremiumStrike, asOfMs],
+  const cePremiumPoints = ceByStrike.get(cePremiumStrike)
+  const pePremiumPoints = peByStrike.get(pePremiumStrike)
+  // Whether the replay has revealed at least one premium reading as of the CURRENT replay position -
+  // PremiumEmaChart does its own asOfMs filtering internally, but the Empty-state check here still
+  // needs to know "as of now", not "ever, across the whole day", or it would render a chart that's
+  // actually empty (every point still in the future) instead of the friendly empty message.
+  const cePremiumRevealed = useMemo(
+    () => asOfMs != null && (cePremiumPoints ?? []).some((p) => new Date(p.time).getTime() <= asOfMs),
+    [cePremiumPoints, asOfMs],
   )
-  const pePremiumLine = useMemo(
-    () => buildPremiumLine(peByStrike.get(pePremiumStrike), asOfMs),
-    [peByStrike, pePremiumStrike, asOfMs],
+  const pePremiumRevealed = useMemo(
+    () => asOfMs != null && (pePremiumPoints ?? []).some((p) => new Date(p.time).getTime() <= asOfMs),
+    [pePremiumPoints, asOfMs],
   )
   const premiumStrikeOptions = useMemo(() => buildStrikeOffsetOptions(atmStrike, step), [atmStrike, step])
 
@@ -2284,14 +2213,16 @@ export default function OiReplayPage() {
                   >
                     {oneMinBars.length === 0
                       ? <Empty description="No spot candles for this day." />
-                      : cePremiumLine.length === 0
+                      : !cePremiumRevealed
                         ? <Empty description={`No CE ${cePremiumStrike ?? ''} premium data yet today.`} />
                         : (
                           <ChartErrorBoundary key={`premium-ce-${underlying}-${result.date}-${cePremiumOffset}`}>
-                            <PremiumLineChart
-                              points={cePremiumLine}
+                            <PremiumEmaChart
+                              points={cePremiumPoints} asOfMs={asOfMs}
+                              timeframe={cePremiumTimeframe} onTimeframeChange={setCePremiumTimeframe}
+                              ema1Period={cePremiumEma1} onEma1PeriodChange={setCePremiumEma1}
+                              ema2Period={cePremiumEma2} onEma2PeriodChange={setCePremiumEma2}
                               dayKey={`premium-ce-${underlying}-${result.date}-${cePremiumOffset}`}
-                              color={RESISTANCE_DARK}
                               height={320}
                             />
                           </ChartErrorBoundary>
@@ -2306,14 +2237,16 @@ export default function OiReplayPage() {
                   >
                     {oneMinBars.length === 0
                       ? <Empty description="No spot candles for this day." />
-                      : pePremiumLine.length === 0
+                      : !pePremiumRevealed
                         ? <Empty description={`No PE ${pePremiumStrike ?? ''} premium data yet today.`} />
                         : (
                           <ChartErrorBoundary key={`premium-pe-${underlying}-${result.date}-${pePremiumOffset}`}>
-                            <PremiumLineChart
-                              points={pePremiumLine}
+                            <PremiumEmaChart
+                              points={pePremiumPoints} asOfMs={asOfMs}
+                              timeframe={pePremiumTimeframe} onTimeframeChange={setPePremiumTimeframe}
+                              ema1Period={pePremiumEma1} onEma1PeriodChange={setPePremiumEma1}
+                              ema2Period={pePremiumEma2} onEma2PeriodChange={setPePremiumEma2}
                               dayKey={`premium-pe-${underlying}-${result.date}-${pePremiumOffset}`}
-                              color={SUPPORT_DARK}
                               height={320}
                             />
                           </ChartErrorBoundary>
