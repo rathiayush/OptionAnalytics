@@ -117,6 +117,9 @@ builder.Services.AddSingleton<StoredSpotDataService>();
 // Backs the OI Replay page - stored-data-first for spot/options, with a live Dhan fallback outside
 // local development, and futures ALWAYS a live Dhan call (see its own doc comment for all three).
 builder.Services.AddSingleton<OiReplayService>();
+// Backs the Strike Data page's own OI/IV columns - stored-only (NiftyDataCollectorTimescale), no
+// live Dhan fallback, and unavailable for SENSEX - see its own doc comment for why.
+builder.Services.AddSingleton<StrikeOiIvHistoryService>();
 // Same "must be an explicit singleton, not AddHttpClient<T>()'s transient default" reasoning as
 // DhanSpotInstrumentMaster/DhanOptionChainMaster just above/below - this also holds the loaded
 // scrip master as instance state (_byUnderlying), so a transient registration would give

@@ -127,6 +127,12 @@ export default function StrikeDataPage() {
   const [optionType, setOptionType] = usePersistedState(STORED_STRIKE_TYPE, 'CE')
   const [candles, setCandles] = useState(null) // null = never loaded yet, distinct from [] = loaded and empty
   const [trackedStrikes, setTrackedStrikes] = useState([])
+  // null = not fetched (or not yet known whether it's available) - distinct from [] = fetched and
+  // genuinely empty (no stored OI/IV for this stretch). oiIvError explains WHY when it's null/empty
+  // for a reason worth surfacing (SENSEX, no stored source configured) rather than just quietly
+  // showing nothing - see StrikeOiIvHistoryService's own doc comment for the real limits here.
+  const [oiIvPoints, setOiIvPoints] = useState(null)
+  const [oiIvError, setOiIvError] = useState(null)
   const [loading, setLoading] = useState(false)
   // Purely a VIEW filter over whatever this contract's own history already came back with - never
   // re-fetched on a date change, same "narrow what's on screen, not what was asked for" philosophy
@@ -150,6 +156,8 @@ export default function StrikeDataPage() {
   const load = () => {
     if (!underlying || !strike) return
     setLoading(true)
+    setOiIvPoints(null)
+    setOiIvError(null)
     Promise.all([
       fetch(withExpiry(`/api/cdv/${underlying}/option/candles?strike=${strike}&type=${optionType}`, expiryParam)).then((r) => r.json()),
       fetch(withExpiry(`/api/cdv/${underlying}/strikes`, expiryParam)).then((r) => r.json()),
@@ -157,6 +165,20 @@ export default function StrikeDataPage() {
       .then(([candleData, strikeList]) => {
         setCandles(candleData ?? [])
         setTrackedStrikes(strikeList ?? [])
+
+        // OI/IV needs the SAME [from,to] window the candles themselves actually cover - chained
+        // after candles resolve (rather than fetched in the same Promise.all with a guessed range)
+        // so it exactly matches whatever range GetStrikeCandlesAsync decided to return, no matter
+        // how that window is sized. Skipped entirely when there's nothing to match it against.
+        if (!candleData || candleData.length === 0 || !expiryParam) return null
+        const fromDay = istDateKey(candleData[0].time)
+        const toDay = istDateKey(candleData[candleData.length - 1].time)
+        return fetch(`/api/cdv/${underlying}/option/oi-iv?strike=${strike}&type=${optionType}&expiry=${expiryParam}&from=${fromDay}&to=${toDay}`)
+          .then((r) => r.json())
+          .then((body) => {
+            setOiIvPoints(body?.points ?? [])
+            setOiIvError(body?.error ?? null)
+          })
       })
       .catch((err) => {
         console.error('Failed to load strike data:', err)
@@ -187,12 +209,24 @@ export default function StrikeDataPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [candles, fromDay, toDay])
 
+  // Keyed by the raw ISO time string straight off the wire (same convention both endpoints already
+  // share for every other per-minute series in this app) - a plain exact-match lookup, no parsing
+  // needed, since both this page's candles and its OI/IV points come from the same 1-minute grid.
+  const oiIvByTime = useMemo(() => {
+    const map = new Map()
+    for (const p of oiIvPoints ?? []) map.set(p.time, p)
+    return map
+  }, [oiIvPoints])
+
   // Descending (newest first) - the convention every other table on this app already uses
   // (Backtrack's signals/trades), and the more useful default here too: "is today's data there"
   // is usually the first thing worth checking, not the oldest day in a 45-day window.
   const rows = useMemo(
-    () => visibleCandles.map((c, i) => ({ ...c, key: i, day: istDateKey(c.time) })).reverse(),
-    [visibleCandles],
+    () => visibleCandles.map((c, i) => {
+      const oiIv = oiIvByTime.get(c.time)
+      return { ...c, key: i, day: istDateKey(c.time), openInterest: oiIv?.openInterest ?? null, impliedVolatility: oiIv?.impliedVolatility ?? null }
+    }).reverse(),
+    [visibleCandles, oiIvByTime],
   )
 
   // Chart-ready shape (IST-shifted epoch seconds, ascending) - a separate conversion from `rows`
@@ -250,6 +284,14 @@ export default function StrikeDataPage() {
     { title: 'High', dataIndex: 'high', key: 'high', width: 100, align: 'right', render: fmtPrice },
     { title: 'Low', dataIndex: 'low', key: 'low', width: 100, align: 'right', render: fmtPrice },
     { title: 'Close', dataIndex: 'close', key: 'close', width: 100, align: 'right', render: fmtPrice },
+    {
+      title: 'OI', dataIndex: 'openInterest', key: 'openInterest', width: 110, align: 'right',
+      render: (v) => (v == null ? '—' : v.toLocaleString()),
+    },
+    {
+      title: 'IV', dataIndex: 'impliedVolatility', key: 'impliedVolatility', width: 90, align: 'right',
+      render: (v) => (v == null ? '—' : v.toFixed(1)),
+    },
   ]
 
   const hasLoaded = candles !== null
@@ -322,6 +364,18 @@ export default function StrikeDataPage() {
                   : "Not in today's tracked-strikes list - either never inside the live ATM+-16 window today, or this is a different expiry/day. Its candles above (if any) came from Dhan's on-demand intraday history instead of the live feed."}
                 {' '}A trading day below with far fewer candles than its neighbours, or one that stops well before market close, means this contract's own tracking was incomplete for that day.
               </Text>
+              {oiIvError && (
+                <Alert type="info" showIcon style={{ marginTop: 8 }} message={oiIvError} />
+              )}
+              {!oiIvError && oiIvPoints !== null && (
+                <Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 8 }}>
+                  OI/IV columns come from NiftyDataCollector's own stored rolling-option history, not
+                  Dhan's candle API (which has neither) - only available where that's configured, and
+                  only for the stretch this contract was actually the nearest weekly/monthly one, so
+                  an OTM strike inspected long before it became current may show real candles with no
+                  OI/IV alongside them.
+                </Text>
+              )}
             </Card>
 
             <Card size="small" title="Chart">
