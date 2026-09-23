@@ -15,10 +15,12 @@ namespace OptionAnalytics.Server.Controllers;
 public sealed class CdvController : ControllerBase
 {
     private readonly CdvHostedService _cdv;
+    private readonly StrikeOiIvHistoryService _oiIvHistory;
 
-    public CdvController(CdvHostedService cdv)
+    public CdvController(CdvHostedService cdv, StrikeOiIvHistoryService oiIvHistory)
     {
         _cdv = cdv;
+        _oiIvHistory = oiIvHistory;
     }
 
     [HttpGet("{underlying}/series")]
@@ -74,6 +76,28 @@ public sealed class CdvController : ControllerBase
 
         if (!TryGetState(underlying, ParseExpiry(expiry), out _)) return NotFoundResult(underlying);
         return Ok(await _cdv.GetStrikeCandlesAsync(underlying.ToUpperInvariant(), strike, normalized == "CE", cancellationToken, ParseExpiry(expiry)));
+    }
+
+    /// <summary>OI/IV to merge alongside GetOptionCandles' own OHLC, by matching Time on the
+    /// frontend - see StrikeOiIvHistoryService's own doc comment for why this is a separate call
+    /// (a different, stored-only data source with real reconstruction limits of its own) rather than
+    /// folded into the candles response itself.</summary>
+    [HttpGet("{underlying}/option/oi-iv")]
+    public async Task<IActionResult> GetOptionOiIv(
+        string underlying, [FromQuery] decimal strike, [FromQuery] string? type, [FromQuery] string? expiry,
+        [FromQuery] DateOnly from, [FromQuery] DateOnly to, CancellationToken cancellationToken)
+    {
+        if (strike <= 0) return BadRequest(new { error = "A positive 'strike' is required." });
+
+        var normalized = type?.Trim().ToUpperInvariant();
+        if (normalized is not ("CE" or "PE")) return BadRequest(new { error = "'type' must be CE or PE." });
+
+        var expiryDate = ParseExpiry(expiry);
+        if (expiryDate is null) return BadRequest(new { error = "A resolved 'expiry' date is required." });
+
+        var (points, error) = await _oiIvHistory.GetHistoryAsync(
+            underlying.ToUpperInvariant(), strike, normalized == "CE", expiryDate.Value, from, to, cancellationToken);
+        return Ok(new { points, error });
     }
 
     [HttpGet("{underlying}/obv-series")]
