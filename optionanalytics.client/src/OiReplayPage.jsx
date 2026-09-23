@@ -903,11 +903,12 @@ const PAPER_TRADE_LOT_SIZE = { NIFTY: 75, BANKNIFTY: 35, SENSEX: 20 }
 // premium falls) - see the PnL calc in the caller's own enrichedPaperPositions.
 function PaperTradePanel({
   atmStrike, step, side, onSideChange, direction, onDirectionChange, strikeOffset, onStrikeOffsetChange,
-  qtyLots, onQtyLotsChange, onPunch, canPunch, positions, onExit, onClearAll,
+  qtyLots, onQtyLotsChange, slPoints, onSlPointsChange, onPunch, canPunch, positions, onExit, onExitAll, onClearAll,
 }) {
   const strikeOptions = useMemo(() => buildStrikeOffsetOptions(atmStrike, step), [atmStrike, step])
 
   const totalPnl = positions.reduce((sum, p) => sum + p.pnl, 0)
+  const hasOpenPosition = positions.some((p) => p.status === 'OPEN')
 
   const columns = [
     {
@@ -936,6 +937,10 @@ function PaperTradePanel({
           <Segmented value={side} onChange={onSideChange} options={[{ label: 'CE', value: 'CE' }, { label: 'PE', value: 'PE' }]} />
           <Select value={strikeOffset} onChange={onStrikeOffsetChange} style={{ width: 160 }} options={strikeOptions} disabled={atmStrike == null} />
           <InputNumber value={qtyLots} onChange={(v) => onQtyLotsChange(v ?? 1)} min={1} step={1} style={{ width: 100 }} addonAfter="lots" />
+          <InputNumber
+            value={slPoints} onChange={(v) => onSlPointsChange(v ?? 0)} min={0} step={5} style={{ width: 110 }}
+            addonBefore="SL" addonAfter="pts"
+          />
           <Button type="primary" size="small" onClick={onPunch} disabled={!canPunch}>
             {direction === 'SELL' ? 'Sell' : 'Buy'}
           </Button>
@@ -946,17 +951,23 @@ function PaperTradePanel({
                 DraggableFloatingPanel below), narrower than these columns' own combined width, so
                 the table needs to scroll horizontally within the panel rather than overflow it. */}
             <Table dataSource={positions} columns={columns} rowKey="id" size="small" pagination={false} scroll={{ x: 460, y: 220 }} />
-            <Space style={{ width: '100%', justifyContent: 'space-between' }}>
+            <Space style={{ width: '100%', justifyContent: 'space-between' }} wrap>
               <Text strong style={{ color: totalPnl >= 0 ? UP_COLOR : DOWN_COLOR }}>
                 Total PnL: {totalPnl >= 0 ? '+' : ''}{totalPnl.toFixed(0)}
               </Text>
-              <Button size="small" danger onClick={onClearAll}>Clear all</Button>
+              <Space size={8}>
+                <Button size="small" onClick={onExitAll} disabled={!hasOpenPosition}>Exit all</Button>
+                <Button size="small" danger onClick={onClearAll}>Clear all</Button>
+              </Space>
             </Space>
           </>
         )}
         <Text type="secondary" style={{ fontSize: 10 }}>
           Paper trade only - simulated against this replay's own premium series, no real order is ever placed. Buy (long) or Sell (short/write),
-          then Exit; lot size is a fixed per-underlying constant, not fetched live. Resets when a new day is loaded, or click Clear all.
+          then Exit; lot size is a fixed per-underlying constant, not fetched live. SL auto-exits an open
+          position once its own premium has moved that many points against it (0 disables it); Exit all
+          closes every open position right now at its current price, without clearing the table the way
+          Clear all does. Resets when a new day is loaded, or click Clear all.
         </Text>
       </Space>
     </div>
@@ -1343,6 +1354,9 @@ export default function OiReplayPage() {
   const [paperDirection, setPaperDirection] = useState('BUY')
   const [paperStrikeOffset, setPaperStrikeOffset] = useState(0)
   const [paperQtyLots, setPaperQtyLots] = useState(10)
+  // Auto stop-loss, in premium points - 30 by default (the user's own explicit ask), editable per
+  // session. 0/blank disables it entirely (see the effect that reads this below).
+  const [paperSlPoints, setPaperSlPoints] = useState(30)
   const [paperPositions, setPaperPositions] = useState([])
   // Toggled by the trigger button/tag and the panel's own close button only - never by clicking
   // elsewhere (it's a portal-rendered DraggableFloatingPanel, not an antd Popover, so there is no
@@ -1711,6 +1725,18 @@ export default function OiReplayPage() {
 
   const handlePaperClearAll = () => setPaperPositions([])
 
+  // Exits every currently OPEN position at its own live (as-of-replay) price, rather than deleting
+  // them the way Clear all does - a real "flatten everything" action whose exit prices/PnL stay in
+  // the table afterward, distinct from Clear all's "wipe the list" ask.
+  const handlePaperExitAll = () => {
+    setPaperPositions((prev) => prev.map((p) => {
+      if (p.status !== 'OPEN') return p
+      const series = (p.side === 'CE' ? ceByStrike : peByStrike).get(p.strike)
+      const point = asOfMs != null ? latestAtOrBefore(series ?? [], asOfMs) : null
+      return { ...p, status: 'CLOSED', exitPrice: point?.price ?? p.entryPrice }
+    }))
+  }
+
   // Live PnL for every position, OPEN or CLOSED - an OPEN one is marked to the replay's CURRENT
   // tick (so it moves as playback advances, exactly like a real open position would), a CLOSED one
   // is locked to whatever price Exit was clicked at. A SELL (short/write) position's PnL is the
@@ -1721,10 +1747,23 @@ export default function OiReplayPage() {
     const livePoint = p.status === 'OPEN' && asOfMs != null ? latestAtOrBefore(series ?? [], asOfMs) : null
     const ltp = p.status === 'OPEN' ? (livePoint?.price ?? p.entryPrice) : p.exitPrice
     const priceDelta = p.direction === 'SELL' ? p.entryPrice - ltp : ltp - p.entryPrice
-    return { ...p, ltp, pnl: priceDelta * p.qtyLots * p.lotSize }
+    return { ...p, ltp, priceDelta, pnl: priceDelta * p.qtyLots * p.lotSize }
   }), [paperPositions, ceByStrike, peByStrike, asOfMs])
   const paperOpenCount = enrichedPaperPositions.filter((p) => p.status === 'OPEN').length
   const paperTotalPnl = enrichedPaperPositions.reduce((sum, p) => sum + p.pnl, 0)
+
+  // Auto stop-loss: once an OPEN position's own premium has moved `paperSlPoints` against it, exit
+  // it automatically at the current (as-of-replay) price - the user's own "by default 30 point SL"
+  // ask. Checked whenever enrichedPaperPositions recomputes (i.e. on every replay tick), same
+  // "derive it, then setState if something crossed a threshold" shape as the OI-shift alert
+  // elsewhere on this page.
+  useEffect(() => {
+    if (!paperSlPoints || paperSlPoints <= 0) return
+    const hits = enrichedPaperPositions.filter((p) => p.status === 'OPEN' && p.priceDelta <= -paperSlPoints)
+    if (hits.length === 0) return
+    const hitById = new Map(hits.map((p) => [p.id, p.ltp]))
+    setPaperPositions((prev) => prev.map((p) => (hitById.has(p.id) && p.status === 'OPEN' ? { ...p, status: 'CLOSED', exitPrice: hitById.get(p.id) } : p)))
+  }, [enrichedPaperPositions, paperSlPoints])
 
   // Regime-change markers stamped on the exact candle where a Long Buildup/Short Buildup/Short
   // Covering/Long Unwinding stretch actually started - "show me when what happened" on the chart
@@ -2341,8 +2380,9 @@ export default function OiReplayPage() {
                         direction={paperDirection} onDirectionChange={setPaperDirection}
                         strikeOffset={paperStrikeOffset} onStrikeOffsetChange={setPaperStrikeOffset}
                         qtyLots={paperQtyLots} onQtyLotsChange={setPaperQtyLots}
+                        slPoints={paperSlPoints} onSlPointsChange={setPaperSlPoints}
                         onPunch={handlePaperPunch} canPunch={atmStrike != null && paperEntryPreview?.price != null}
-                        positions={enrichedPaperPositions} onExit={handlePaperExit} onClearAll={handlePaperClearAll}
+                        positions={enrichedPaperPositions} onExit={handlePaperExit} onExitAll={handlePaperExitAll} onClearAll={handlePaperClearAll}
                       />
                     </DraggableFloatingPanel>
                   )}
