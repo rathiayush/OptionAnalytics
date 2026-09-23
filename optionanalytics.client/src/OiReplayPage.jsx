@@ -722,22 +722,54 @@ function FuturesChart({ bars, oiLine, markers, dayKey, height = 320 }) {
 // drag library needed for something this small.
 function DraggableFloatingPanel({ title, pos, onPosChange, onClose, children }) {
   const dragRef = useRef(null)
+  const panelRef = useRef(null)
+
+  // A fixed 440px panel is wider than most phone screens, and the caller's own initial `pos` is
+  // computed once against whatever window.innerWidth happened to be at that moment - stale the
+  // instant the viewport changes (device rotation, a resized browser window, or just a caller doing
+  // its own math against a narrow screen). Re-clamping against this panel's OWN actual rendered
+  // width/height (which the CSS width below already keeps within the viewport) on mount and resize
+  // means it's never left partly or fully off-screen regardless of what `pos` it was handed.
+  useEffect(() => {
+    const clamp = () => {
+      if (!panelRef.current) return
+      const rect = panelRef.current.getBoundingClientRect()
+      const maxX = Math.max(0, window.innerWidth - rect.width)
+      const maxY = Math.max(0, window.innerHeight - rect.height)
+      const clampedX = Math.min(Math.max(0, pos.x), maxX)
+      const clampedY = Math.min(Math.max(0, pos.y), maxY)
+      if (clampedX !== pos.x || clampedY !== pos.y) onPosChange({ x: clampedX, y: clampedY })
+    }
+    clamp()
+    window.addEventListener('resize', clamp)
+    return () => window.removeEventListener('resize', clamp)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pos.x, pos.y])
+
+  const beginDrag = (clientX, clientY) => {
+    dragRef.current = { startX: clientX, startY: clientY, origX: pos.x, origY: pos.y }
+  }
+  const dragTo = (clientX, clientY) => {
+    if (!dragRef.current) return
+    const dx = clientX - dragRef.current.startX
+    const dy = clientY - dragRef.current.startY
+    // Deliberately looser than the mount/resize clamp above (a fixed 80px/40px slack rather than the
+    // panel's own full width/height) - lets the panel be dragged mostly off an edge and tucked out of
+    // the way, same as before this fix, rather than only ever settling flush against the viewport.
+    const maxX = Math.max(0, window.innerWidth - 80)
+    const maxY = Math.max(0, window.innerHeight - 40)
+    onPosChange({
+      x: Math.min(Math.max(0, dragRef.current.origX + dx), maxX),
+      y: Math.min(Math.max(0, dragRef.current.origY + dy), maxY),
+    })
+  }
+  const endDrag = () => { dragRef.current = null }
 
   const onHeaderMouseDown = (e) => {
-    dragRef.current = { startX: e.clientX, startY: e.clientY, origX: pos.x, origY: pos.y }
-    const onMouseMove = (moveEvent) => {
-      if (!dragRef.current) return
-      const dx = moveEvent.clientX - dragRef.current.startX
-      const dy = moveEvent.clientY - dragRef.current.startY
-      const maxX = Math.max(0, window.innerWidth - 80)
-      const maxY = Math.max(0, window.innerHeight - 40)
-      onPosChange({
-        x: Math.min(Math.max(0, dragRef.current.origX + dx), maxX),
-        y: Math.min(Math.max(0, dragRef.current.origY + dy), maxY),
-      })
-    }
+    beginDrag(e.clientX, e.clientY)
+    const onMouseMove = (moveEvent) => dragTo(moveEvent.clientX, moveEvent.clientY)
     const onMouseUp = () => {
-      dragRef.current = null
+      endDrag()
       window.removeEventListener('mousemove', onMouseMove)
       window.removeEventListener('mouseup', onMouseUp)
     }
@@ -745,18 +777,43 @@ function DraggableFloatingPanel({ title, pos, onPosChange, onClose, children }) 
     window.addEventListener('mouseup', onMouseUp)
   }
 
+  // Touch's own counterpart to onHeaderMouseDown above - a phone/tablet never fires mouse events for
+  // a finger drag, so without this the panel would be readable on mobile but simply un-repositionable.
+  const onHeaderTouchStart = (e) => {
+    const touch = e.touches[0]
+    if (!touch) return
+    beginDrag(touch.clientX, touch.clientY)
+    const onTouchMove = (moveEvent) => {
+      if (!dragRef.current) return
+      moveEvent.preventDefault()
+      const moveTouch = moveEvent.touches[0]
+      if (moveTouch) dragTo(moveTouch.clientX, moveTouch.clientY)
+    }
+    const onTouchEnd = () => {
+      endDrag()
+      window.removeEventListener('touchmove', onTouchMove)
+      window.removeEventListener('touchend', onTouchEnd)
+    }
+    window.addEventListener('touchmove', onTouchMove, { passive: false })
+    window.addEventListener('touchend', onTouchEnd)
+  }
+
   return createPortal(
-    <div style={{
-      position: 'fixed', left: pos.x, top: pos.y, zIndex: 1000, width: 440,
-      background: '#1f1f1f', border: `1px solid ${BORDER_COLOR}`, borderRadius: 8,
-      boxShadow: '0 8px 28px rgba(0, 0, 0, 0.55)',
-    }}
+    <div
+      ref={panelRef}
+      style={{
+        position: 'fixed', left: pos.x, top: pos.y, zIndex: 1000, width: 'min(440px, calc(100vw - 24px))',
+        background: '#1f1f1f', border: `1px solid ${BORDER_COLOR}`, borderRadius: 8,
+        boxShadow: '0 8px 28px rgba(0, 0, 0, 0.55)',
+      }}
     >
       <div
         onMouseDown={onHeaderMouseDown}
+        onTouchStart={onHeaderTouchStart}
         style={{
           display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-          padding: '8px 12px', cursor: 'move', borderBottom: `1px solid ${BORDER_COLOR}`, userSelect: 'none',
+          padding: '8px 12px', cursor: 'move', touchAction: 'none', userSelect: 'none',
+          borderBottom: `1px solid ${BORDER_COLOR}`,
         }}
       >
         <Text strong style={{ fontSize: 13 }}>{title}</Text>
@@ -822,7 +879,10 @@ function PaperTradePanel({
         </Space>
         {positions.length > 0 && (
           <>
-            <Table dataSource={positions} columns={columns} rowKey="id" size="small" pagination={false} scroll={{ y: 220 }} />
+            {/* scroll.x - the panel itself is capped to fit a phone's viewport width (see
+                DraggableFloatingPanel below), narrower than these columns' own combined width, so
+                the table needs to scroll horizontally within the panel rather than overflow it. */}
+            <Table dataSource={positions} columns={columns} rowKey="id" size="small" pagination={false} scroll={{ x: 460, y: 220 }} />
             <Space style={{ width: '100%', justifyContent: 'space-between' }}>
               <Text strong style={{ color: totalPnl >= 0 ? UP_COLOR : DOWN_COLOR }}>
                 Total PnL: {totalPnl >= 0 ? '+' : ''}{totalPnl.toFixed(0)}
@@ -859,7 +919,13 @@ function OiLadder({ rows, atmStrike }) {
   const supportStrike = rows.reduce((best, r) => ((r.peOi ?? 0) > (best?.peOi ?? -1) ? r : best), null)?.strike
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+    // Every row packs several fixed-width pieces (bars, OI text, IV text) into the 10/4/10 split
+    // below - shrinking that split on a narrow phone would squash or wrap those pieces into an
+    // unreadable mess, so instead this scrolls horizontally at its own natural width (minWidth)
+    // rather than trying to reflow. touchAction/WebkitOverflowScrolling make that scroll a normal
+    // touch swipe on a phone, not just a desktop scrollbar drag.
+    <div style={{ overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 640 }}>
       <Row style={{ fontSize: 11, color: AXIS_COLOR, marginBottom: 4 }}>
         <Col span={10} style={{ textAlign: 'right', paddingRight: 6 }}>PE OI (support, in M)</Col>
         <Col span={4} style={{ textAlign: 'center' }}>Strike</Col>
@@ -924,6 +990,7 @@ function OiLadder({ rows, atmStrike }) {
           </Row>
         )
       })}
+    </div>
     </div>
   )
 }
@@ -1029,9 +1096,11 @@ function LiquidityMapTable({ rows, atmStrike, currentPrice }) {
           {nearestSupport && <Text type="secondary" style={{ fontSize: 11 }}>{nearestSupport.liquidity} liquidity, {nearestSupport.bias.toLowerCase()} bias</Text>}
         </Col>
       </Row>
+      {/* scroll.x - these columns' own widths sum past a phone's viewport, so the table needs to
+          scroll horizontally there rather than squash columns or overflow the page. */}
       <Table
         dataSource={enriched} columns={columns} rowKey="strike" size="small" pagination={false}
-        scroll={{ y: 360 }}
+        scroll={{ x: 770, y: 360 }}
       />
       <Text type="secondary" style={{ fontSize: 11 }}>
         Zone/Liquidity/Bias are a mechanical read of the OI already shown in the ladder above (CE vs PE at each strike, and how that compares to the
@@ -1914,17 +1983,17 @@ export default function OiReplayPage() {
                     message={marketRead.safetyOk ? 'Are we okay right now? Yes - clear of major walls.' : 'Are we okay right now? Caution - sitting right at a wall.'}
                     description={marketRead.safetyReason}
                   />
-                  <Row gutter={24}>
-                    <Col span={8}>
+                  <Row gutter={[24, 16]}>
+                    <Col xs={24} md={8}>
                       <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>PCR read</Text>
                       <Tag color={biasColor(marketRead.pcrBias)} style={{ fontSize: 12 }}>{marketRead.pcrBias}</Tag>
                     </Col>
-                    <Col span={8}>
+                    <Col xs={24} md={8}>
                       <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>OI buildup (near ATM)</Text>
                       <Tag color={biasColor(marketRead.oiBias)} style={{ fontSize: 12 }}>{marketRead.oiBias}</Tag>
                       <div style={{ fontSize: 11, color: AXIS_COLOR, marginTop: 2 }}>{marketRead.oiBuildup}</div>
                     </Col>
-                    <Col span={8}>
+                    <Col xs={24} md={8}>
                       <Tooltip title={
                         <span>
                           Real use case: at 9:20am, say CE and PE at ATM both show IV 12% (skew 0). By 11am,
@@ -1974,20 +2043,20 @@ export default function OiReplayPage() {
                     message={`Day so far: ${dayOiSummary.dayBias}`}
                     description={dayOiSummary.dayReason}
                   />
-                  <Row gutter={24}>
-                    <Col span={6}>
+                  <Row gutter={[24, 16]}>
+                    <Col xs={12} md={6}>
                       <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>CE OI since open</Text>
                       <Text style={{ fontSize: 13, color: dayOiSummary.ceDayChange >= 0 ? DOWN_COLOR : UP_COLOR }}>
                         {formatOiMillions(dayOiSummary.ceDayChange, { signed: true })}
                       </Text>
                     </Col>
-                    <Col span={6}>
+                    <Col xs={12} md={6}>
                       <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>PE OI since open</Text>
                       <Text style={{ fontSize: 13, color: dayOiSummary.peDayChange >= 0 ? UP_COLOR : DOWN_COLOR }}>
                         {formatOiMillions(dayOiSummary.peDayChange, { signed: true })}
                       </Text>
                     </Col>
-                    <Col span={6}>
+                    <Col xs={12} md={6}>
                       <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>Top 2 OI added</Text>
                       {dayOiSummary.added.length === 0
                         ? <Text style={{ fontSize: 11, color: AXIS_COLOR }}>None yet</Text>
@@ -1998,7 +2067,7 @@ export default function OiReplayPage() {
                           </div>
                         ))}
                     </Col>
-                    <Col span={6}>
+                    <Col xs={12} md={6}>
                       <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>Top 2 OI removed</Text>
                       {dayOiSummary.removed.length === 0
                         ? <Text style={{ fontSize: 11, color: AXIS_COLOR }}>None yet</Text>
@@ -2014,8 +2083,8 @@ export default function OiReplayPage() {
               </Card>
             )}
 
-            <Row gutter={16}>
-              <Col span={visibleSections.includes('entryCharts') ? 8 : 24}>
+            <Row gutter={[16, 16]}>
+              <Col xs={24} md={visibleSections.includes('entryCharts') ? 8 : 24}>
                 <Card size="small" title="Spot (replaying)">
                   {/* Playback controls, literally inside the same card as the chart, right above
                       the canvas itself - the user's own "this bar should be near to chart just on
@@ -2150,7 +2219,7 @@ export default function OiReplayPage() {
                   table full of numbers benefits from the extra width just as much as a chart does. */}
               {visibleSections.includes('entryCharts') && (
                 <>
-                  <Col span={8}>
+                  <Col xs={24} md={8}>
                     <Card size="small" title="Entry chart B (independent timeframe + EMA)">
                       {oneMinBars.length > 0
                         ? (
@@ -2169,7 +2238,7 @@ export default function OiReplayPage() {
                         : <Empty description="No spot candles for this day." />}
                     </Card>
                   </Col>
-                  <Col span={8}>
+                  <Col xs={24} md={8}>
                     <Card size="small" title="Entry chart C (independent timeframe + EMA)">
                       {oneMinBars.length > 0
                         ? (
@@ -2193,7 +2262,7 @@ export default function OiReplayPage() {
             </Row>
 
             {visibleSections.includes('optionPremium') && (
-              <Row gutter={16} style={{ marginTop: 16 }}>
+              <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
                 <Col span={24} style={{ marginBottom: 8 }}>
                   <Space size={12} wrap>
                     <Text type="secondary" style={{ fontSize: 12 }}>Shift ATM (both)</Text>
@@ -2205,7 +2274,7 @@ export default function OiReplayPage() {
                     />
                   </Space>
                 </Col>
-                <Col span={12}>
+                <Col xs={24} md={12}>
                   <Card
                     size="small"
                     title={`CE premium ${cePremiumStrike ?? ''}`}
@@ -2229,7 +2298,7 @@ export default function OiReplayPage() {
                         )}
                   </Card>
                 </Col>
-                <Col span={12}>
+                <Col xs={24} md={12}>
                   <Card
                     size="small"
                     title={`PE premium ${pePremiumStrike ?? ''}`}
