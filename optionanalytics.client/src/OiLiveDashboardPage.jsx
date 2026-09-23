@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Select, Space, Typography, Card, Button, Row, Col, Tag, Tooltip, Empty, Alert } from 'antd'
 import * as signalR from '@microsoft/signalr'
+import { createChart, LineSeries, CrosshairMode } from 'lightweight-charts'
 import {
   NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, istDateKey, toBar,
+  toChartTime, CE_COLOR, PE_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR, istTimeFormatter, istTickMarkFormatter,
 } from './shared.jsx'
 import {
   groupByStrike, latestAtOrBefore, aggregateBars, buildStrikeOffsetOptions, buildPremiumCandles,
@@ -42,13 +44,17 @@ const SINCE_OPEN_SANITY_MULTIPLE = 3
 // consumer of oiReplayTick/futuresTick already does). This is the exact fix for the "reconnect churn"
 // OiReplayPage's own useOiReplayLiveFeed was exposed to (its effect depends on `[enabled]`, which can
 // flip during a fetch and tear the socket down at the worst moment) - this hook has no such flag.
-function useOiLiveHub(onSpotUpdate, onOiReplayTick, onReconnected) {
+function useOiLiveHub(onSpotUpdate, onOiReplayTick, onReconnected, onCdvUpdate, onCdvBarClosed) {
   const spotRef = useRef(onSpotUpdate)
   const tickRef = useRef(onOiReplayTick)
   const reconnectedRef = useRef(onReconnected)
+  const cdvRef = useRef(onCdvUpdate)
+  const cdvBarClosedRef = useRef(onCdvBarClosed)
   spotRef.current = onSpotUpdate
   tickRef.current = onOiReplayTick
   reconnectedRef.current = onReconnected
+  cdvRef.current = onCdvUpdate
+  cdvBarClosedRef.current = onCdvBarClosed
 
   const [connectionState, setConnectionState] = useState('connecting')
 
@@ -60,6 +66,11 @@ function useOiLiveHub(onSpotUpdate, onOiReplayTick, onReconnected) {
 
     connection.on('spotUpdate', (snapshot) => spotRef.current(snapshot))
     connection.on('oiReplayTick', (tick) => tickRef.current(tick))
+    // Same CDV/OBV events App.jsx's own useHub already listens for, off the SAME shared hub -
+    // CdvHostedService broadcasts these regardless of which page is open, so nothing extra needs
+    // subscribing server-side for this page to receive them too.
+    connection.on('cdvUpdate', (snapshot) => cdvRef.current?.(snapshot))
+    connection.on('cdvBarClosed', (point) => cdvBarClosedRef.current?.(point))
     connection.onreconnecting(() => setConnectionState('reconnecting'))
     connection.onreconnected(() => { setConnectionState('connected'); reconnectedRef.current?.() })
     connection.onclose(() => setConnectionState('disconnected'))
@@ -129,6 +140,92 @@ function mergeBar(bars, bar) {
   return bars
 }
 
+// Same last-value-per-bucket idea as aggregateBars (oiShared.jsx) but for a running-total LINE
+// series (CDV/OBV) instead of OHLC bars - a coarser bucket's meaningful value is simply its latest
+// sample, not an open/high/low/close.
+function aggregateLinePoints(points, minutes) {
+  if (minutes <= 1 || points.length === 0) return points
+  const bucketSeconds = minutes * 60
+  const buckets = new Map()
+  for (const p of points) buckets.set(Math.floor(p.time / bucketSeconds) * bucketSeconds, { ...p, time: Math.floor(p.time / bucketSeconds) * bucketSeconds })
+  return [...buckets.values()].sort((a, b) => a.time - b.time)
+}
+
+function toCdvBar(p) {
+  return { time: toChartTime(p.time), ceCdv: p.ceCdv, peCdv: p.peCdv }
+}
+
+// Dedupes/sorts before handing points to lightweight-charts, which throws if two consecutive
+// points share a time or aren't strictly ascending - same defensive last line as App.jsx's own
+// sanitizeSeries, kept for a duplicate time (the more recent value).
+function sanitizeLine(points) {
+  if (points.length === 0) return points
+  const sorted = [...points].sort((a, b) => a.time - b.time)
+  const result = []
+  for (const p of sorted) {
+    if (result.length > 0 && result[result.length - 1].time === p.time) result[result.length - 1] = p
+    else result.push(p)
+  }
+  return result
+}
+
+// Two-line running-total chart - CE vs PE - reused for both CDV and OBV. A trimmed-down copy of
+// App.jsx's own CeVsPeChart: no previous-day dashed overlay (this page has no multi-day concept at
+// all, unlike the Dashboard's CDV chart) and no crossover markers, just the two live lines.
+function CeVsPeLineChart({ ceSeries, peSeries, height = 280 }) {
+  const containerRef = useRef(null)
+  const chartRef = useRef(null)
+  const ceRef = useRef(null)
+  const peRef = useRef(null)
+  const hasFitRef = useRef(false)
+  const sanitizedCe = useMemo(() => sanitizeLine(ceSeries), [ceSeries])
+  const sanitizedPe = useMemo(() => sanitizeLine(peSeries), [peSeries])
+
+  useEffect(() => {
+    if (!containerRef.current) return
+    const chart = createChart(containerRef.current, {
+      width: containerRef.current.clientWidth,
+      height,
+      layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
+      grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
+      rightPriceScale: { borderColor: BORDER_COLOR },
+      timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter, rightOffset: 6 },
+      crosshair: { mode: CrosshairMode.Normal },
+      localization: { timeFormatter: istTimeFormatter },
+    })
+    chartRef.current = chart
+    ceRef.current = chart.addSeries(LineSeries, { color: CE_COLOR, lineWidth: 2, title: 'CE', priceLineVisible: false })
+    peRef.current = chart.addSeries(LineSeries, { color: PE_COLOR, lineWidth: 2, title: 'PE', priceLineVisible: false })
+    hasFitRef.current = false
+
+    const onResize = () => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }) }
+    window.addEventListener('resize', onResize)
+
+    return () => {
+      window.removeEventListener('resize', onResize)
+      chart.remove()
+      chartRef.current = null
+      ceRef.current = null
+      peRef.current = null
+    }
+  }, [height])
+
+  useEffect(() => {
+    if (!ceRef.current || !peRef.current) return
+    const preservedRange = hasFitRef.current ? chartRef.current?.timeScale().getVisibleRange() : null
+    ceRef.current.setData(sanitizedCe)
+    peRef.current.setData(sanitizedPe)
+    if (!hasFitRef.current && (sanitizedCe.length > 0 || sanitizedPe.length > 0)) {
+      chartRef.current?.timeScale().fitContent()
+      hasFitRef.current = true
+    } else if (preservedRange) {
+      try { chartRef.current?.timeScale().setVisibleRange(preservedRange) } catch { /* empty */ }
+    }
+  }, [sanitizedCe, sanitizedPe])
+
+  return <div ref={containerRef} style={{ width: '100%', height }} />
+}
+
 export default function OiLiveDashboardPage() {
   const [underlying, setUnderlying] = usePersistedState(STORED_UNDERLYING, 'NIFTY')
   const [expiryFlag, setExpiryFlag] = useState('WEEK')
@@ -158,6 +255,26 @@ export default function OiLiveDashboardPage() {
 
   const [cePremiumOffset, setCePremiumOffset] = useState(0)
   const [pePremiumOffset, setPePremiumOffset] = useState(0)
+
+  // CDV/OBV - chain-wide CE/PE aggregates (not tied to any one strike, unlike the premium charts
+  // above), reusing CdvHostedService's own always-on tracking rather than anything OiReplayService
+  // computes. One shared timeframe dropdown controls both charts, deliberately unlike chart B/C's
+  // own independent pickers above - the user asked for CDV and OBV to move together, not apart.
+  //
+  // Deliberately NOT matched to this page's own WEEK/MONTH expiryFlag: CdvHostedService tracks only
+  // the nearest few listed expiries per underlying (3 for NIFTY/SENSEX, 2 for BANKNIFTY - see its
+  // own Underlyings table), not "nearest weekly + nearest monthly" specifically, so there is no
+  // reliable way to classify which of those tracked dates IS the weekly vs. the monthly from this
+  // page alone (CDV's own /expiries endpoint exposes only its tracked subset, not the full listed
+  // chain OiReplayLiveFeedService's own classification needs). Always following CDV's own nearest/
+  // default tracked expiry instead is simpler AND always correct (never a silent mismatch), and is
+  // also the one expiry its SignalR broadcast actually keeps live - see cdvExpiry below, shown next
+  // to the charts so a switch to the OTHER expiry type is never silently misread as agreement.
+  const [cdvTimeframe, setCdvTimeframe] = useState(3)
+  const [cdvSeries, setCdvSeries] = useState([])
+  const [obvCeSeries, setObvCeSeries] = useState([])
+  const [obvPeSeries, setObvPeSeries] = useState([])
+  const [cdvExpiry, setCdvExpiry] = useState(null)
 
   const [paperSide, setPaperSide] = useState('CE')
   const [paperDirection, setPaperDirection] = useState('BUY')
@@ -207,10 +324,32 @@ export default function OiLiveDashboardPage() {
       .finally(() => setLoading(false))
   }
 
-  // Fresh seed whenever the underlying/expiry actually looked at changes - the live handlers below
-  // filter every incoming tick by `underlying`/`expiryFlag`, so switching either one needs a new
-  // snapshot for the newly-selected combo, exactly like a fresh Load in OI Replay.
+  // CDV/OBV's own seed - separate from load() above since it hits CdvController, not
+  // OiReplayController, and follows CDV's own nearest/default tracked expiry rather than this
+  // page's WEEK/MONTH expiryFlag - see cdvExpiry's own doc comment above for why.
+  const loadCdv = () => {
+    if (!underlying) return
+    fetch(`/api/cdv/${underlying}/expiries`)
+      .then((r) => r.json())
+      .then((data) => setCdvExpiry(data?.selected ?? null))
+      .catch((err) => console.error('Failed to load CDV expiry:', err))
+    fetch(`/api/cdv/${underlying}/series`)
+      .then((r) => r.json())
+      .then((data) => setCdvSeries((data ?? []).map(toCdvBar)))
+      .catch((err) => console.error('Failed to load CDV series:', err))
+    fetch(`/api/cdv/${underlying}/obv-series`)
+      .then((r) => r.json())
+      .then((data) => {
+        setObvCeSeries((data?.ce ?? []).map((p) => ({ time: toChartTime(p.time), value: p.obv })))
+        setObvPeSeries((data?.pe ?? []).map((p) => ({ time: toChartTime(p.time), value: p.obv })))
+      })
+      .catch((err) => console.error('Failed to load OBV series:', err))
+  }
+
+  // Fresh seed whenever the underlying changes - loadCdv follows CDV's own tracked expiry, not
+  // expiryFlag, so it does not need to re-run when only expiryFlag changes.
   useEffect(() => { load() /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [underlying, expiryFlag])
+  useEffect(() => { loadCdv() /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [underlying])
 
   const handleSpotUpdate = (snapshot) => {
     if (snapshot?.underlying !== underlying || !snapshot?.currentBar) return
@@ -226,9 +365,23 @@ export default function OiLiveDashboardPage() {
 
   // A dropped-then-restored connection can miss ticks entirely while it was down - re-fetch the
   // whole snapshot to resync rather than silently trusting whatever partial state accumulated.
-  const handleReconnected = () => load()
+  const handleReconnected = () => { load(); loadCdv() }
 
-  const connectionState = useOiLiveHub(handleSpotUpdate, handleOiReplayTick, handleReconnected)
+  // No expiryFlag guard here, unlike handleOiReplayTick above - CDV/OBV always follow CDV's own
+  // tracked expiry (see cdvExpiry's own doc comment), which is exactly what this push describes.
+  const handleCdvUpdate = (incoming) => {
+    if (incoming?.underlying !== underlying || !incoming?.currentBar) return
+    setCdvSeries((prev) => mergeBar(prev, toCdvBar(incoming.currentBar)))
+  }
+
+  const handleCdvBarClosed = (point) => {
+    if (point?.underlying !== underlying) return
+    const time = toChartTime(point.time)
+    if (point.obvCe != null) setObvCeSeries((prev) => mergeBar(prev, { time, value: point.obvCe }))
+    if (point.obvPe != null) setObvPeSeries((prev) => mergeBar(prev, { time, value: point.obvPe }))
+  }
+
+  const connectionState = useOiLiveHub(handleSpotUpdate, handleOiReplayTick, handleReconnected, handleCdvUpdate, handleCdvBarClosed)
 
   const step = result?.step || STEP_BY_UNDERLYING[underlying] || 50
   const currentBar = oneMinBars[oneMinBars.length - 1] ?? null
@@ -284,6 +437,11 @@ export default function OiLiveDashboardPage() {
   const cePremiumCandles = useMemo(() => buildPremiumCandles(ceSeries.get(cePremiumStrike)), [ceSeries, cePremiumStrike])
   const pePremiumCandles = useMemo(() => buildPremiumCandles(peSeries.get(pePremiumStrike)), [peSeries, pePremiumStrike])
   const premiumStrikeOptions = useMemo(() => buildStrikeOffsetOptions(atmStrike, step), [atmStrike, step])
+
+  const cdvCePoints = useMemo(() => aggregateLinePoints(cdvSeries.map((p) => ({ time: p.time, value: p.ceCdv })), cdvTimeframe), [cdvSeries, cdvTimeframe])
+  const cdvPePoints = useMemo(() => aggregateLinePoints(cdvSeries.map((p) => ({ time: p.time, value: p.peCdv })), cdvTimeframe), [cdvSeries, cdvTimeframe])
+  const obvCePoints = useMemo(() => aggregateLinePoints(obvCeSeries, cdvTimeframe), [obvCeSeries, cdvTimeframe])
+  const obvPePoints = useMemo(() => aggregateLinePoints(obvPeSeries, cdvTimeframe), [obvPeSeries, cdvTimeframe])
 
   const paperStrike = atmStrike != null ? atmStrike + paperStrikeOffset * step : null
   const paperEntryPreview = useMemo(() => {
@@ -476,6 +634,44 @@ export default function OiLiveDashboardPage() {
                       <PremiumCandleChart bars={pePremiumCandles} dayKey={`premium-pe-${dayKey}-${pePremiumOffset}`} height={320} />
                     </ChartErrorBoundary>
                   )}
+            </Card>
+          </Col>
+        </Row>
+
+        <Row gutter={16}>
+          <Col span={24}>
+            <Card
+              size="small"
+              title="CDV & OBV (chain-wide, live)"
+              extra={<Select value={cdvTimeframe} onChange={setCdvTimeframe} style={{ width: 110 }} options={TIMEFRAME_OPTIONS} />}
+            >
+              <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 12 }}>
+                Tracks CDV's own nearest expiry{cdvExpiry ? ` (${cdvExpiry})` : ''} independently of the
+                Weekly/Monthly picker above - CDV only tracks a small rolling window of expiries, so it
+                will not always be the same one the rest of this page is showing.
+              </Text>
+              <Row gutter={16}>
+                <Col span={12}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>CDV (cumulative delta volume)</Text>
+                  {cdvCePoints.length === 0 && cdvPePoints.length === 0 ? (
+                    <Empty description={loading ? 'Loading…' : 'No CDV data yet today.'} />
+                  ) : (
+                    <ChartErrorBoundary key={`cdv-${underlying}-${expiryFlag}-${cdvTimeframe}`}>
+                      <CeVsPeLineChart ceSeries={cdvCePoints} peSeries={cdvPePoints} height={280} />
+                    </ChartErrorBoundary>
+                  )}
+                </Col>
+                <Col span={12}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>OBV (on-balance volume)</Text>
+                  {obvCePoints.length === 0 && obvPePoints.length === 0 ? (
+                    <Empty description={loading ? 'Loading…' : 'No OBV data yet today.'} />
+                  ) : (
+                    <ChartErrorBoundary key={`obv-${underlying}-${expiryFlag}-${cdvTimeframe}`}>
+                      <CeVsPeLineChart ceSeries={obvCePoints} peSeries={obvPePoints} height={280} />
+                    </ChartErrorBoundary>
+                  )}
+                </Col>
+              </Row>
             </Card>
           </Col>
         </Row>
