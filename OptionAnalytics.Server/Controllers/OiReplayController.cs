@@ -26,9 +26,14 @@ public sealed class OiReplayController : ControllerBase
         [FromQuery] DateOnly date,
         [FromQuery] int timeframeMinutes,
         [FromQuery] string expiryFlag,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        // Defaults to false, preserving OI Replay's own existing stored-data-first behavior exactly -
+        // only the Live OI Dashboard page passes true, for which stored-vs-live has no good default
+        // (it only ever asks for today, and always wants the freshest reading available, in every
+        // environment including local dev - see OiReplayService.RunAsync's own doc comment).
+        [FromQuery] bool forceLive = false)
     {
-        var result = await _service.RunAsync(underlying.ToUpperInvariant(), date, timeframeMinutes, expiryFlag.ToUpperInvariant(), cancellationToken);
+        var result = await _service.RunAsync(underlying.ToUpperInvariant(), date, timeframeMinutes, expiryFlag.ToUpperInvariant(), cancellationToken, forceLive);
         return Ok(result);
     }
 }

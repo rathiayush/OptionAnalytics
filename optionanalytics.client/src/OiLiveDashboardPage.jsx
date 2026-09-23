@@ -5,8 +5,8 @@ import {
   NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, istDateKey, toBar,
 } from './shared.jsx'
 import {
-  groupByStrike, latestAtOrBefore, aggregateBars, buildStrikeOffsetOptions, buildPremiumLine,
-  ReplayChart, EmaChart, PremiumLineChart, PaperTradePanel, DraggableFloatingPanel,
+  groupByStrike, latestAtOrBefore, aggregateBars, buildStrikeOffsetOptions, buildPremiumCandles,
+  ReplayChart, EmaChart, PremiumCandleChart, PaperTradePanel, DraggableFloatingPanel,
   OiLadder, ChartErrorBoundary, PAPER_TRADE_LOT_SIZE, OI_STALE_MS,
 } from './oiShared.jsx'
 
@@ -161,7 +161,14 @@ export default function OiLiveDashboardPage() {
     if (!underlying) return
     setLoading(true)
     setError(null)
-    const params = new URLSearchParams({ date: istDateKey(new Date()), timeframeMinutes: '1', expiryFlag })
+    // forceLive: this page has no scenario where preferring possibly-stale stored data over a live
+    // Dhan call makes sense - it only ever asks for today, and OiReplayService's own stored-first
+    // default (with the live top-up disabled in local dev - see its own doc comment) is what left
+    // this page's backfill incomplete/stale when tested locally, exactly like OI Replay's own
+    // historical-review page would in the same environment. OI Replay itself keeps its existing
+    // default (omits this param) since stored-first genuinely is the right choice for reviewing a
+    // past, already-closed day.
+    const params = new URLSearchParams({ date: istDateKey(new Date()), timeframeMinutes: '1', expiryFlag, forceLive: 'true' })
     fetch(`/api/oi-replay/${underlying}/run?${params.toString()}`)
       .then(async (r) => {
         const body = await r.json().catch(() => null)
@@ -254,8 +261,8 @@ export default function OiLiveDashboardPage() {
 
   const cePremiumStrike = atmStrike != null ? atmStrike + cePremiumOffset * step : null
   const pePremiumStrike = atmStrike != null ? atmStrike + pePremiumOffset * step : null
-  const cePremiumLine = useMemo(() => buildPremiumLine(ceSeries.get(cePremiumStrike), Date.now()), [ceSeries, cePremiumStrike])
-  const pePremiumLine = useMemo(() => buildPremiumLine(peSeries.get(pePremiumStrike), Date.now()), [peSeries, pePremiumStrike])
+  const cePremiumCandles = useMemo(() => buildPremiumCandles(ceSeries.get(cePremiumStrike)), [ceSeries, cePremiumStrike])
+  const pePremiumCandles = useMemo(() => buildPremiumCandles(peSeries.get(pePremiumStrike)), [peSeries, pePremiumStrike])
   const premiumStrikeOptions = useMemo(() => buildStrikeOffsetOptions(atmStrike, step), [atmStrike, step])
 
   const paperStrike = atmStrike != null ? atmStrike + paperStrikeOffset * step : null
@@ -425,11 +432,11 @@ export default function OiLiveDashboardPage() {
             >
               {oneMinBars.length === 0
                 ? <Empty description="No spot candles yet today." />
-                : cePremiumLine.length === 0
+                : cePremiumCandles.length === 0
                   ? <Empty description={`No CE ${cePremiumStrike ?? ''} premium data yet today.`} />
                   : (
                     <ChartErrorBoundary key={`premium-ce-${underlying}-${expiryFlag}-${cePremiumOffset}`}>
-                      <PremiumLineChart points={cePremiumLine} dayKey={`premium-ce-${dayKey}-${cePremiumOffset}`} color="#7a0000" height={320} />
+                      <PremiumCandleChart bars={cePremiumCandles} dayKey={`premium-ce-${dayKey}-${cePremiumOffset}`} height={320} />
                     </ChartErrorBoundary>
                   )}
             </Card>
@@ -442,11 +449,11 @@ export default function OiLiveDashboardPage() {
             >
               {oneMinBars.length === 0
                 ? <Empty description="No spot candles yet today." />
-                : pePremiumLine.length === 0
+                : pePremiumCandles.length === 0
                   ? <Empty description={`No PE ${pePremiumStrike ?? ''} premium data yet today.`} />
                   : (
                     <ChartErrorBoundary key={`premium-pe-${underlying}-${expiryFlag}-${pePremiumOffset}`}>
-                      <PremiumLineChart points={pePremiumLine} dayKey={`premium-pe-${dayKey}-${pePremiumOffset}`} color="#0a5c1f" height={320} />
+                      <PremiumCandleChart bars={pePremiumCandles} dayKey={`premium-pe-${dayKey}-${pePremiumOffset}`} height={320} />
                     </ChartErrorBoundary>
                   )}
             </Card>

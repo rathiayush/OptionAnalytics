@@ -410,6 +410,81 @@ export function PremiumLineChart({ points, dayKey, color, height = 320 }) {
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }
 
+// Buckets one strike/side's own raw points into real per-minute OHLC bars, the same way a genuine
+// tick-driven candlestick chart is built anywhere else in this app (e.g. CdvStrikeRuntime's own
+// ApplyPriceTick on the backend). Naturally handles BOTH the backfilled portion of the day (one
+// point per minute from the rolling-option collector, so each becomes its own flat open=high=low=
+// close candle - an honest "we only know the per-minute closing print" read for anything before this
+// page was open) AND the live-ticked portion (several raw points landing in the same minute get
+// properly folded into open/high/low/close as they arrive) with the SAME bucketing logic - no need
+// to special-case which regime a given point came from.
+export function buildPremiumCandles(points) {
+  if (!points) return []
+  const buckets = new Map()
+  for (const p of points) {
+    const minute = Math.floor(toChartTime(p.time) / 60) * 60
+    const existing = buckets.get(minute)
+    if (existing) {
+      existing.high = Math.max(existing.high, p.price)
+      existing.low = Math.min(existing.low, p.price)
+      existing.close = p.price
+    } else {
+      buckets.set(minute, { time: minute, open: p.price, high: p.price, low: p.price, close: p.price })
+    }
+  }
+  return [...buckets.values()].sort((a, b) => a.time - b.time)
+}
+
+// A single leg's own premium as a genuine candlestick chart, with its own auto-scaled price axis -
+// two of these (CE and PE) render side by side rather than one chart with both overlaid, for the
+// same reason PremiumLineChart above does (a far OTM leg's premium can be a small fraction of ATM's
+// and would otherwise flatten to a useless sliver against the other leg's own scale). Mirrors how
+// the Dashboard page (App.jsx) shows its own ATM CE/PE charts as real candles, not a line - unlike
+// OiReplayPage's own single-price-per-minute rolling-collector data (which genuinely has no OHLC to
+// show, hence PremiumLineChart's own line), this page also has the raw tick stream, so it can build
+// real OHLC itself - see buildPremiumCandles above.
+export function PremiumCandleChart({ bars, dayKey, height = 320 }) {
+  const containerRef = useRef(null)
+  const chartRef = useRef(null)
+  const seriesRef = useRef(null)
+
+  useEffect(() => {
+    if (!containerRef.current) return
+    const chart = createChart(containerRef.current, {
+      width: containerRef.current.clientWidth,
+      height,
+      layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
+      grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
+      rightPriceScale: { borderColor: BORDER_COLOR },
+      timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter },
+      crosshair: { mode: CrosshairMode.Normal },
+      localization: { timeFormatter: istTimeFormatter },
+    })
+    chartRef.current = chart
+    seriesRef.current = chart.addSeries(CandlestickSeries, {
+      upColor: UP_COLOR, downColor: DOWN_COLOR, borderVisible: false, wickUpColor: UP_COLOR, wickDownColor: DOWN_COLOR,
+    })
+
+    const onResize = () => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }) }
+    window.addEventListener('resize', onResize)
+    return () => {
+      window.removeEventListener('resize', onResize)
+      chart.remove()
+      chartRef.current = null
+      seriesRef.current = null
+    }
+  }, [height])
+
+  useEffect(() => { if (seriesRef.current) seriesRef.current.setData(bars) }, [bars])
+
+  useEffect(() => {
+    if (bars.length > 0) chartRef.current?.timeScale().fitContent()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dayKey])
+
+  return <div ref={containerRef} style={{ width: '100%', height }} />
+}
+
 // SEBI periodically revises each index's own lot size - update this if it changes. This feature is
 // paper trading only (no real order is ever placed), so a stale value here only skews the SIMULATED
 // PnL's scale, not anything real.
