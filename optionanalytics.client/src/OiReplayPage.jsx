@@ -153,9 +153,27 @@ function buildStrikeOffsetOptions(atmStrike, step) {
 // than chart-shifted bar times.
 function buildPremiumLine(points, asOfMs) {
   if (!points || asOfMs == null) return []
-  return points
+  // toChartTime already does its own new Date(...).getTime()/1000 internally (see its own doc
+  // comment) - passing it a value ALREADY divided by 1000 here used to double-convert every point's
+  // time down near the Unix epoch. Since real timestamps only drift by a few hours across a trading
+  // day, the corrupted values stayed monotonic most of the time and this went unnoticed - until
+  // enough live ticks piled up that two points collapsed onto the exact same (wrong) integer second,
+  // which lightweight-charts' setData() rejects outright as duplicate/out-of-order data. That's the
+  // "This chart could not be rendered" the ChartErrorBoundary was swallowing. Passing p.time straight
+  // through (a millisecond number or ISO string both work - toChartTime accepts either) is correct.
+  const mapped = points
     .filter((p) => new Date(p.time).getTime() <= asOfMs)
-    .map((p) => ({ time: toChartTime(new Date(p.time).getTime() / 1000), value: p.price }))
+    .map((p) => ({ time: toChartTime(p.time), value: p.price }))
+  // Still de-duplicate same-second points (e.g. two raw ticks landing in the same second) - points
+  // are already time-ascending (groupByStrike's own sort), so any duplicate is adjacent; keep the
+  // LAST value for that second rather than reject it, same "replace in place" merge shape as every
+  // other live series on this page.
+  const deduped = []
+  for (const point of mapped) {
+    if (deduped.length > 0 && deduped[deduped.length - 1].time === point.time) deduped[deduped.length - 1] = point
+    else deduped.push(point)
+  }
+  return deduped
 }
 
 // A short beep via the Web Audio API - no asset file needed. Lazily creates (and reuses) one
