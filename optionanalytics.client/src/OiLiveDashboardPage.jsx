@@ -9,7 +9,7 @@ import {
 import {
   groupByStrike, latestAtOrBefore, aggregateBars, buildStrikeOffsetOptions,
   ReplayChart, EmaChart, PremiumEmaChart, PaperTradePanel, DraggableFloatingPanel,
-  OiLadder, ChartErrorBoundary, PAPER_TRADE_LOT_SIZE, OI_STALE_MS, useOiLiveHub,
+  OiLadder, ChartErrorBoundary, PAPER_TRADE_LOT_SIZE, OI_STALE_MS, useOiLiveHub, computeStopTargetHit,
 } from './oiShared.jsx'
 
 const { Text, Title } = Typography
@@ -308,9 +308,11 @@ export default function OiLiveDashboardPage() {
   const [paperDirection, setPaperDirection] = useState('BUY')
   const [paperStrikeOffset, setPaperStrikeOffset] = useState(0)
   const [paperQtyLots, setPaperQtyLots] = useState(10)
-  // Auto stop-loss, in premium points - 30 by default (the user's own explicit ask), editable per
-  // session. 0/blank disables it entirely (see the effect that reads this below).
+  // Auto stop-loss/target, in premium points - SL defaults to 30 (the user's own explicit ask),
+  // target has no natural default so it starts disabled; both editable per session. 0/blank
+  // disables either one (see the effect that reads these below).
   const [paperSlPoints, setPaperSlPoints] = useState(30)
+  const [paperTargetPoints, setPaperTargetPoints] = useState(0)
   const [paperPositions, setPaperPositions] = useState([])
   const [paperPanelOpen, setPaperPanelOpen] = useState(false)
   const [paperPanelPos, setPaperPanelPos] = useState(() => ({ x: Math.max(24, window.innerWidth - 480), y: 140 }))
@@ -615,7 +617,7 @@ export default function OiLiveDashboardPage() {
       id: `${Date.now()}-${Math.random()}`,
       side: paperSide, direction: paperDirection, strike: paperStrike, qtyLots: paperQtyLots,
       lotSize: PAPER_TRADE_LOT_SIZE[underlying] ?? 1,
-      entryPrice: paperEntryPreview.price, status: 'OPEN', exitPrice: null,
+      entryPrice: paperEntryPreview.price, entryTime: Date.now(), status: 'OPEN', exitPrice: null, exitReason: null,
     }])
   }
 
@@ -624,7 +626,7 @@ export default function OiLiveDashboardPage() {
       if (p.id !== id || p.status !== 'OPEN') return p
       const series = (p.side === 'CE' ? ceSeries : peSeries).get(p.strike)
       const point = series?.[series.length - 1] ?? null
-      return { ...p, status: 'CLOSED', exitPrice: point?.price ?? p.entryPrice }
+      return { ...p, status: 'CLOSED', exitPrice: point?.price ?? p.entryPrice, exitReason: 'Manual' }
     }))
   }
 
@@ -638,7 +640,7 @@ export default function OiLiveDashboardPage() {
       if (p.status !== 'OPEN') return p
       const series = (p.side === 'CE' ? ceSeries : peSeries).get(p.strike)
       const point = series?.[series.length - 1] ?? null
-      return { ...p, status: 'CLOSED', exitPrice: point?.price ?? p.entryPrice }
+      return { ...p, status: 'CLOSED', exitPrice: point?.price ?? p.entryPrice, exitReason: 'Manual' }
     }))
   }
 
@@ -652,17 +654,26 @@ export default function OiLiveDashboardPage() {
   const paperOpenCount = enrichedPaperPositions.filter((p) => p.status === 'OPEN').length
   const paperTotalPnl = enrichedPaperPositions.reduce((sum, p) => sum + p.pnl, 0)
 
-  // Auto stop-loss: once an OPEN position's own premium has moved `paperSlPoints` against it, exit
-  // it automatically at the current price - the user's own "by default 30 point SL" ask. Checked
-  // whenever enrichedPaperPositions recomputes (i.e. on every live tick), same "derive it, then
-  // setState if something crossed a threshold" shape as the OI-shift alert elsewhere on this page.
+  // Auto stop-loss/target: scans every tick since entry (not just the latest one) via
+  // computeStopTargetHit, so an intra-minute spike that reverses before the next check still gets
+  // caught - the user's own "are you actually calculating SL... with high low" correction. No
+  // asOfMs cutoff here (unlike OI Replay's own version of this effect) - "live" already means every
+  // point in ceSeries/peSeries has been genuinely revealed, there's no future to accidentally see.
   useEffect(() => {
-    if (!paperSlPoints || paperSlPoints <= 0) return
-    const hits = enrichedPaperPositions.filter((p) => p.status === 'OPEN' && p.priceDelta <= -paperSlPoints)
-    if (hits.length === 0) return
-    const hitById = new Map(hits.map((p) => [p.id, p.ltp]))
-    setPaperPositions((prev) => prev.map((p) => (hitById.has(p.id) && p.status === 'OPEN' ? { ...p, status: 'CLOSED', exitPrice: hitById.get(p.id) } : p)))
-  }, [enrichedPaperPositions, paperSlPoints])
+    if ((!paperSlPoints || paperSlPoints <= 0) && (!paperTargetPoints || paperTargetPoints <= 0)) return
+    const hits = new Map()
+    for (const p of paperPositions) {
+      if (p.status !== 'OPEN') continue
+      const series = (p.side === 'CE' ? ceSeries : peSeries).get(p.strike)
+      const hit = computeStopTargetHit(series, p.entryTime, null, p.entryPrice, p.direction, paperSlPoints, paperTargetPoints)
+      if (hit) hits.set(p.id, hit)
+    }
+    if (hits.size === 0) return
+    setPaperPositions((prev) => prev.map((p) => {
+      const hit = hits.get(p.id)
+      return hit && p.status === 'OPEN' ? { ...p, status: 'CLOSED', exitPrice: hit.fillPrice, exitReason: hit.kind === 'sl' ? 'SL' : 'Target' } : p
+    }))
+  }, [paperPositions, ceSeries, peSeries, paperSlPoints, paperTargetPoints])
 
   const dayKey = `${underlying}-${expiryFlag}`
 
@@ -737,6 +748,7 @@ export default function OiLiveDashboardPage() {
                   strikeOffset={paperStrikeOffset} onStrikeOffsetChange={setPaperStrikeOffset}
                   qtyLots={paperQtyLots} onQtyLotsChange={setPaperQtyLots}
                   slPoints={paperSlPoints} onSlPointsChange={setPaperSlPoints}
+                  targetPoints={paperTargetPoints} onTargetPointsChange={setPaperTargetPoints}
                   onPunch={handlePaperPunch} canPunch={paperEntryPreview?.price != null}
                   positions={enrichedPaperPositions} onExit={handlePaperExit} onExitAll={handlePaperExitAll} onClearAll={handlePaperClearAll}
                 />
