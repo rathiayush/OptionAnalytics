@@ -74,9 +74,30 @@ function appendPoint(map, strike, point) {
   const next = new Map(map)
   const existing = next.get(strike) ?? []
   const withIv = { ...point, impliedVolatility: point.impliedVolatility ?? existing[existing.length - 1]?.impliedVolatility ?? null }
-  const updated = existing.length > 0 && new Date(existing[existing.length - 1].time).getTime() === new Date(point.time).getTime()
-    ? [...existing.slice(0, -1), withIv]
-    : [...existing, withIv]
+  const pointTime = new Date(point.time).getTime()
+  const lastTime = existing.length > 0 ? new Date(existing[existing.length - 1].time).getTime() : -Infinity
+
+  let updated
+  if (pointTime >= lastTime) {
+    // The overwhelmingly common case: a new tick landing at or after the array's own latest time -
+    // append, or replace the last entry outright if it's an update to the exact same instant.
+    updated = pointTime === lastTime ? [...existing.slice(0, -1), withIv] : [...existing, withIv]
+  } else {
+    // A live tick CAN arrive slightly out of chronological order - confirmed for real, not
+    // theoretical: a live tick stream once threw lightweight-charts' own "data must be asc ordered
+    // by time" assertion with a LATER-arriving point timestamped BEFORE the one immediately before
+    // it (see PremiumCandleChart's own sanitizeCandles doc comment). Blindly appending here instead
+    // would leave THIS array silently out of order - which ceArr[length-1] ("the current reading"
+    // everywhere on this page) and buildPremiumCandles (whose open/close depend on genuinely
+    // chronological iteration) both assume never happens. Scan back from the end for the correct
+    // sorted position instead - a real out-of-order arrival is only ever slightly out of order (a
+    // network-level reordering of adjacent ticks), never wildly stale, so this is a short scan.
+    let i = existing.length - 1
+    while (i >= 0 && new Date(existing[i].time).getTime() > pointTime) i--
+    updated = new Date(existing[i]?.time ?? 0).getTime() === pointTime
+      ? [...existing.slice(0, i), withIv, ...existing.slice(i + 1)]
+      : [...existing.slice(0, i + 1), withIv, ...existing.slice(i + 1)]
+  }
   next.set(strike, updated.length > MAX_POINTS_PER_STRIKE ? updated.slice(-MAX_POINTS_PER_STRIKE) : updated)
   return next
 }
