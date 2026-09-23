@@ -675,6 +675,40 @@ export function PremiumEmaChart({
   )
 }
 
+// Scans every REVEALED point strictly after entry (bounded by asOfMs when given, for a replay that
+// must never "see" a bar it hasn't played yet) to find whether a stop-loss or target was actually
+// TOUCHED at any point since entry - not merely whether the LATEST point has crossed it, which would
+// miss an intra-minute spike that reversed before the next check. Each point's own high/low (a real
+// historical minute bar - see OiReplayPoint's own doc comment on the backend) is used when present;
+// a live tick (a genuine single point in time, with no range of its own) falls back to its own price
+// for both - the most accurate check that kind of data supports. Returns { kind: 'sl' | 'target',
+// fillPrice } for the FIRST point where either level was touched (fillPrice is the configured level
+// itself, not the bar's own high/low - a paper stop/limit order is assumed to fill exactly at its own
+// level, not with extra favorable slippage), or null if neither has been touched yet. If a single
+// bar's own range spans BOTH levels at once (a large bar engulfing both), the stop-loss is assumed to
+// have been touched first - the standard, conservative convention, since OHLC alone can't say which
+// one price actually reached first.
+export function computeStopTargetHit(series, entryTimeMs, asOfMs, entryPrice, direction, slPoints, targetPoints) {
+  const hasSl = slPoints > 0
+  const hasTarget = targetPoints > 0
+  if ((!hasSl && !hasTarget) || !series) return null
+  const slLevel = direction === 'SELL' ? entryPrice + slPoints : entryPrice - slPoints
+  const targetLevel = direction === 'SELL' ? entryPrice - targetPoints : entryPrice + targetPoints
+  for (const p of series) {
+    const t = new Date(p.time).getTime()
+    if (t <= entryTimeMs) continue
+    if (asOfMs != null && t > asOfMs) break
+    const high = p.high ?? p.price
+    const low = p.low ?? p.price
+    if (high == null || low == null) continue
+    const slHit = hasSl && (direction === 'SELL' ? high >= slLevel : low <= slLevel)
+    const targetHit = hasTarget && (direction === 'SELL' ? low <= targetLevel : high >= targetLevel)
+    if (slHit) return { kind: 'sl', fillPrice: slLevel }
+    if (targetHit) return { kind: 'target', fillPrice: targetLevel }
+  }
+  return null
+}
+
 // SEBI periodically revises each index's own lot size - update this if it changes. This feature is
 // paper trading only (no real order is ever placed), so a stale value here only skews the SIMULATED
 // PnL's scale, not anything real.
@@ -684,7 +718,8 @@ export const PAPER_TRADE_LOT_SIZE = { NIFTY: 75, BANKNIFTY: 35, SENSEX: 20 }
 // shows right now, then Exit later - entirely client-side, no backend call, no real order.
 export function PaperTradePanel({
   atmStrike, step, side, onSideChange, direction, onDirectionChange, strikeOffset, onStrikeOffsetChange,
-  qtyLots, onQtyLotsChange, slPoints, onSlPointsChange, onPunch, canPunch, positions, onExit, onExitAll, onClearAll,
+  qtyLots, onQtyLotsChange, slPoints, onSlPointsChange, targetPoints, onTargetPointsChange,
+  onPunch, canPunch, positions, onExit, onExitAll, onClearAll,
 }) {
   const strikeOptions = useMemo(() => buildStrikeOffsetOptions(atmStrike, step), [atmStrike, step])
 
@@ -705,8 +740,10 @@ export function PaperTradePanel({
       render: (v) => <Text strong style={{ color: v >= 0 ? UP_COLOR : DOWN_COLOR, fontSize: 12 }}>{v >= 0 ? '+' : ''}{v.toFixed(0)}</Text>,
     },
     {
-      title: '', key: 'action', width: 55,
-      render: (_, r) => (r.status === 'OPEN' ? <Button size="small" onClick={() => onExit(r.id)}>Exit</Button> : <Tag>Closed</Tag>),
+      title: '', key: 'action', width: 70,
+      render: (_, r) => (r.status === 'OPEN'
+        ? <Button size="small" onClick={() => onExit(r.id)}>Exit</Button>
+        : <Tag color={r.exitReason === 'SL' ? 'error' : r.exitReason === 'Target' ? 'success' : 'default'}>{r.exitReason ?? 'Closed'}</Tag>),
     },
   ]
 
@@ -722,6 +759,10 @@ export function PaperTradePanel({
             value={slPoints} onChange={(v) => onSlPointsChange(v ?? 0)} min={0} step={5} style={{ width: 110 }}
             addonBefore="SL" addonAfter="pts"
           />
+          <InputNumber
+            value={targetPoints} onChange={(v) => onTargetPointsChange(v ?? 0)} min={0} step={5} style={{ width: 130 }}
+            addonBefore="Target" addonAfter="pts"
+          />
           <Button type="primary" size="small" onClick={onPunch} disabled={!canPunch}>
             {direction === 'SELL' ? 'Sell' : 'Buy'}
           </Button>
@@ -731,7 +772,7 @@ export function PaperTradePanel({
             {/* scroll.x - the panel itself is capped to fit a phone's viewport width (see
                 DraggableFloatingPanel), narrower than these columns' own combined width, so the
                 table needs to scroll horizontally within the panel rather than overflow it. */}
-            <Table dataSource={positions} columns={columns} rowKey="id" size="small" pagination={false} scroll={{ x: 460, y: 220 }} />
+            <Table dataSource={positions} columns={columns} rowKey="id" size="small" pagination={false} scroll={{ x: 475, y: 220 }} />
             <Space style={{ width: '100%', justifyContent: 'space-between' }} wrap>
               <Text strong style={{ color: totalPnl >= 0 ? UP_COLOR : DOWN_COLOR }}>
                 Total PnL: {totalPnl >= 0 ? '+' : ''}{totalPnl.toFixed(0)}
@@ -745,10 +786,12 @@ export function PaperTradePanel({
         )}
         <Text type="secondary" style={{ fontSize: 10 }}>
           Paper trade only - simulated against the live premium series, no real order is ever placed. Buy (long) or Sell (short/write),
-          then Exit; lot size is a fixed per-underlying constant, not fetched live. SL auto-exits an open
-          position once its own premium has moved that many points against it (0 disables it); Exit all
-          closes every open position right now at its current price, without clearing the table the way
-          Clear all does.
+          then Exit; lot size is a fixed per-underlying constant, not fetched live. SL/Target auto-exit an
+          open position once its own premium has moved that many points against/in its favor (0 disables
+          either), checked against every tick/minute bar's own high-low since entry - not just the latest
+          price - so a real intra-bar touch is caught even if price reverses before the next check. Exit
+          all closes every open position right now at its current price, without clearing the table the
+          way Clear all does.
         </Text>
       </Space>
     </div>

@@ -183,12 +183,12 @@ public sealed class OiReplayService
             var ceBars = await GetSeriesAsync(underlying, expiryFlag, token, "CALL", date, ResolveInstrumentAsync, cancellationToken, forceLive);
             foreach (var bar in ceBars)
                 if (bar.Strike is { } strike)
-                    cePoints.Add(new OiReplayPoint(bar.Bar.Time, strike, bar.OpenInterest, bar.ImpliedVolatility, bar.Bar.Close));
+                    cePoints.Add(new OiReplayPoint(bar.Bar.Time, strike, bar.OpenInterest, bar.ImpliedVolatility, bar.Bar.Close, bar.Bar.Open, bar.Bar.High, bar.Bar.Low));
 
             var peBars = await GetSeriesAsync(underlying, expiryFlag, token, "PUT", date, ResolveInstrumentAsync, cancellationToken, forceLive);
             foreach (var bar in peBars)
                 if (bar.Strike is { } strike)
-                    pePoints.Add(new OiReplayPoint(bar.Bar.Time, strike, bar.OpenInterest, bar.ImpliedVolatility, bar.Bar.Close));
+                    pePoints.Add(new OiReplayPoint(bar.Bar.Time, strike, bar.OpenInterest, bar.ImpliedVolatility, bar.Bar.Close, bar.Bar.Open, bar.Bar.High, bar.Bar.Low));
         }
 
         var spotCandlesTf = BacktestUtil.AggregateCandles(spotBars1m, timeframe);
