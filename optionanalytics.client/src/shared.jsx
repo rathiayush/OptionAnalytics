@@ -16,6 +16,20 @@ export function useAuth() {
 // NavBar's own filtering and App.jsx's route guards can never drift apart on which paths these are.
 export const ADMIN_ONLY_PATHS = ['/triggers', '/contracts']
 
+// SignalR's own withAutomaticReconnect(), with no argument, only retries at [0, 2, 10, 30] seconds
+// (~42s total) before giving up PERMANENTLY - the connection then sits closed until the page is
+// reloaded, with no further automatic attempts ever. A live-market page open for a full trading day
+// WILL eventually see a backend redeploy or a brief network/Dhan-feed blip longer than 42 seconds -
+// it should keep trying forever with a capped backoff, not go silent until someone notices and
+// refreshes. Every hub connection in this app (App.jsx's own useHub, oiShared.jsx's useOiLiveHub)
+// passes this policy rather than the bare default.
+export const RECONNECT_RETRY_POLICY = {
+  nextRetryDelayInMilliseconds(retryContext) {
+    const delays = [0, 2000, 5000, 10000, 15000, 30000]
+    return delays[Math.min(retryContext.previousRetryCount, delays.length - 1)]
+  },
+}
+
 // Constants/components shared between App.jsx's DashboardPage and BacktestPage.jsx - kept in
 // their own module (not exported from App.jsx) specifically to avoid a circular import: App.jsx
 // imports BacktestPage for its route, so BacktestPage importing back from App.jsx creates a cycle

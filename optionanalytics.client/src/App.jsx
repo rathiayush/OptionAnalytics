@@ -13,7 +13,7 @@ import LiveStrikeDataPage from './LiveStrikeDataPage.jsx'
 import TriggersPage from './TriggersPage.jsx'
 import ContractsPage from './ContractsPage.jsx'
 import LoginPage from './LoginPage.jsx'
-import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, computeEma, fmtPrice, fmtIstTime, fmtIstDateTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry, AuthContext, useAuth } from './shared.jsx'
+import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, RECONNECT_RETRY_POLICY, computeEma, fmtPrice, fmtIstTime, fmtIstDateTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry, AuthContext, useAuth } from './shared.jsx'
 import './App.css'
 
 const { Title, Text } = Typography
@@ -340,6 +340,15 @@ function fmtNum(v) {
 // for the event it cares about ("spotUpdate" / "cdvUpdate", the latter also carrying the ATM
 // CE/PE premium bars, and "confluenceAlert" for the notification engine's live pushes).
 //
+// Bare withAutomaticReconnect() (no argument) only retries at SignalR's own default 0s/2s/10s/30s
+// (~42s total) before giving up FOR GOOD - the connection then sits closed until the page is
+// manually reloaded, with no further automatic attempts ever. This is the exact "stuck offline"
+// bug already found and fixed on the OI pages' own hub connections (see RECONNECT_RETRY_POLICY's
+// doc comment in shared.jsx) - Dashboard's own hub had never gotten the same fix, so any Dhan/
+// network blip lasting over 42 seconds silently and permanently killed the Dashboard's live feed
+// until someone noticed and refreshed, while the already-fixed pages kept retrying and recovered
+// from the identical blip. RECONNECT_RETRY_POLICY below retries forever with a capped backoff.
+//
 // onReconnected exists because withAutomaticReconnect() only repairs the SOCKET, not the state
 // built from it. Every piece of state this page holds - crossoverStates (the Confluence Alerts
 // panel's Bullish/Bearish tags) especially - is either fetched once on mount or updated purely by
@@ -368,7 +377,7 @@ function useHub(onSpotUpdate, onCdvUpdate, onConfluenceAlert, onReconnected, onC
   useEffect(() => {
     const connection = new signalR.HubConnectionBuilder()
       .withUrl('/hubs/spot')
-      .withAutomaticReconnect()
+      .withAutomaticReconnect(RECONNECT_RETRY_POLICY)
       .build()
 
     connection.on('spotUpdate', (snapshot) => spotHandlerRef.current(snapshot))
