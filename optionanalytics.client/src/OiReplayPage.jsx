@@ -1660,7 +1660,17 @@ export default function OiReplayPage() {
   // pushes the lookup past 15:30 (market close), so every strike's "latest reading" permanently
   // resolves to the day's very last point from then on - the exact "ladder/chart goes static right
   // at 10:00 every time" bug. fromChartTime converts back to real time before use here.
-  const asOfMs = currentBar ? fromChartTime(currentBar.time) * 1000 : null
+  //
+  // TODAY tracks real wall-clock time continuously instead - the "we shouldn't have to wait minute
+  // by minute" bug: asOfMs used to be pinned to the last REVEALED bar's own bucket-START time, which
+  // only advances once oneMinBars grows by a whole new bar (spotUpdate delivering the NEXT minute).
+  // Every single thing gated on asOfMs - the ladder's latestAtOrBefore lookups, premium charts,
+  // paper-trade entry/exit pricing, the SL/target touch-check - stayed frozen at that stale bucket
+  // start for up to 59 seconds at a time, silently ignoring ticks that had ALREADY landed in
+  // ceByStrike/peByStrike well before the next bar closed. Live OI Dashboard never had this problem
+  // (it just reads Date.now()/the array's own last entry, no bucket concept at all). A historical
+  // day still uses the scrubbed replay position exactly as before - only "today, live" changes.
+  const asOfMs = isToday ? Date.now() : (currentBar ? fromChartTime(currentBar.time) * 1000 : null)
 
   // The chart's own displayed candles - the visible slice of 1-minute bars, re-aggregated to
   // whatever timeframe is selected, recomputed fresh each tick so the LAST (currently forming)
