@@ -21,6 +21,16 @@ const { Text, Title } = Typography
 // hand since the two sides have no shared source of truth to derive it from automatically.
 const LIVE_FEED_COMBOS = new Set(['NIFTY:WEEK', 'NIFTY:MONTH', 'BANKNIFTY:MONTH', 'SENSEX:WEEK', 'SENSEX:MONTH'])
 
+// How long today's replay can go without ANY tick (spot, OI, or futures) before this page treats it
+// as suspicious rather than trusting the "● LIVE" tag - that tag only reflects the browser's own
+// SignalR connection to OUR server, never whether the SERVER's own upstream Dhan feed is actually
+// flowing (see DhanMarketFeedClient's own stall detector for how THAT gets diagnosed, server-side,
+// from logs this page cannot see). A silently stalled upstream feed would otherwise look identical,
+// from here, to a page working correctly during a genuinely quiet market moment - the exact "are we
+// not receiving live ticks from Dhan, flag us" gap the Live OI Dashboard already closes for itself
+// but this page never did. Same threshold as that page's own identical FEED_STALL_WARNING_MS.
+const FEED_STALL_WARNING_MS = 3 * 60_000
+
 // Bare withAutomaticReconnect() uses SignalR's own default retry policy - 0s/2s/10s/30s, then it
 // gives up FOR GOOD and fires onclose, leaving the connection permanently dead until the page is
 // manually reloaded - exactly the "had given up entirely after withAutomaticReconnect's own retry
@@ -1533,11 +1543,17 @@ export default function OiReplayPage() {
     [result, livePePoints, isToday],
   )
 
+  // See FEED_STALL_WARNING_MS's own doc comment - set on every live tick that actually matches
+  // today/the current underlying/expiryFlag, so this tracks "last time THIS page's own feed
+  // genuinely advanced", not just "last time any tick arrived for anything".
+  const [lastTickAtMs, setLastTickAtMs] = useState(null)
+
   // Live feed wiring - see useOiReplayLiveFeed's own doc comment. Only connects once an initial
   // snapshot has actually loaded (this is a "keep it fresh from here" layer on top of that fetch,
   // not a replacement for it) and only for a combo OiReplayLiveFeedService actually tracks.
   const handleSpotUpdate = (snapshot) => {
     if (!isToday || snapshot?.underlying !== underlying || !snapshot?.currentBar) return
+    setLastTickAtMs(Date.now())
     const bar = toBar(snapshot.currentBar)
     setLiveBars((prev) => {
       if (prev.length > 0 && prev[prev.length - 1].time === bar.time) {
@@ -1550,6 +1566,7 @@ export default function OiReplayPage() {
   }
   const handleOiReplayTick = (tick) => {
     if (!isToday || tick?.underlying !== underlying || tick?.expiryFlag !== expiryFlag) return
+    setLastTickAtMs(Date.now())
     const isCall = tick.side === 'CE'
     // The live feed carries no IV (Dhan's tick stream doesn't - see OiReplayLiveFeedService's own
     // doc comment) - carry forward whatever the initial REST fetch last saw for this strike/side
@@ -1571,6 +1588,7 @@ export default function OiReplayPage() {
   // slightly under-counts the live tail rather than risk wildly over-counting it.
   const handleFuturesTick = (tick) => {
     if (!isToday || tick?.underlying !== underlying) return
+    setLastTickAtMs(Date.now())
     const bucketIso = new Date(Math.floor(new Date(tick.time).getTime() / 60_000) * 60_000).toISOString()
     setLiveFuturesPoints((prev) => {
       if (prev.length > 0 && prev[prev.length - 1].time === bucketIso) {
@@ -1585,6 +1603,31 @@ export default function OiReplayPage() {
 
   const handleLiveReconnected = () => { if (isToday) load() }
   const liveConnectionState = useOiReplayLiveFeed(isToday && liveFeedSupported && Boolean(result), handleSpotUpdate, handleOiReplayTick, handleFuturesTick, handleLiveReconnected)
+
+  // A plain tick, unrelated to any live data - exists ONLY so feedStalled below re-evaluates on a
+  // real clock instead of purely as a side effect of the next incoming tick (same reasoning as Live
+  // OI Dashboard's own identical nowTick).
+  const [nowTick, setNowTick] = useState(() => Date.now())
+  useEffect(() => {
+    const id = setInterval(() => setNowTick(Date.now()), 15_000)
+    return () => clearInterval(id)
+  }, [])
+
+  // True when this page's own SignalR connection to the server says "connected" but nothing has
+  // actually arrived through it in a long time - see FEED_STALL_WARNING_MS's own doc comment for why
+  // that combination needs its own, separate signal from liveConnectionState.
+  const feedStalled = isToday && liveFeedSupported && liveConnectionState === 'connected'
+    && lastTickAtMs != null && nowTick - lastTickAtMs > FEED_STALL_WARNING_MS
+
+  // Edge-triggered (fires once per stall, not once per 15s tick while it persists) so this is
+  // findable in the browser console without flooding it.
+  const wasFeedStalledRef = useRef(false)
+  useEffect(() => {
+    if (feedStalled && !wasFeedStalledRef.current) {
+      console.error(`OI Replay: no ticks received for ${underlying} in over ${FEED_STALL_WARNING_MS / 60_000} minutes despite an open connection - the server's own Dhan feed may have stalled.`)
+    }
+    wasFeedStalledRef.current = feedStalled
+  }, [feedStalled, underlying])
 
   // Playback loop - a single interval that advances manualVisibleCount by one NATIVE MINUTE per
   // tick, self-stopping at the end of the day's own bars rather than needing a separate "are we
@@ -2223,6 +2266,12 @@ export default function OiReplayPage() {
               <Alert
                 type="error" showIcon
                 message="Not receiving live ticks right now - the page will look frozen at whatever it last loaded until this reconnects. Check the browser console for a SignalR connection error, and confirm the backend's own Dhan market-feed connection is up."
+              />
+            )}
+            {feedStalled && (
+              <Alert
+                type="warning" showIcon
+                message={`Connected, but no live tick for ${underlying} in over ${Math.round((nowTick - lastTickAtMs) / 60_000)} min - the connection itself is fine, but the server's own Dhan feed may have stalled. Logged to the browser console; try reloading if this doesn't clear on its own.`}
               />
             )}
             {error && <Alert type="error" showIcon message={error} />}
