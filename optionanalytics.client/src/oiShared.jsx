@@ -17,6 +17,22 @@ const { Text } = Typography
 // depends on that, which is exactly why it was safe to lift out - every function/component below
 // takes its data via plain arguments/props.
 
+// Bare withAutomaticReconnect() uses SignalR's own default retry policy - 0s/2s/10s/30s, then it
+// gives up FOR GOOD and fires onclose, leaving the connection permanently dead until the page is
+// manually reloaded. Confirmed as a real, previously-diagnosed cause of "stuck offline" on this
+// exact page (see the comment on OiReplayPage's own identical connection setup: "...or had given up
+// entirely after withAutomaticReconnect's own retries ran out" - that round only added a clearer
+// disconnected-state indicator, never actually fixed the give-up itself). A live-market page open for
+// a full trading day WILL eventually see a backend redeploy or a brief network blip longer than 42
+// seconds - it should keep trying forever with a capped backoff, not go silent until someone notices
+// and refreshes.
+const RECONNECT_RETRY_POLICY = {
+  nextRetryDelayInMilliseconds(retryContext) {
+    const delays = [0, 2000, 5000, 10000, 15000, 30000]
+    return delays[Math.min(retryContext.previousRetryCount, delays.length - 1)]
+  },
+}
+
 // Modeled directly on App.jsx's own useHub: ONE connection, opened on mount and never torn down or
 // rebuilt - no `enabled` gate, no dependency on underlying/expiryFlag (the SAME hub broadcasts ticks
 // for every underlying; each caller just filters client-side in its own handlers, same as every
@@ -43,7 +59,7 @@ export function useOiLiveHub(onSpotUpdate, onOiReplayTick, onReconnected, onCdvU
   useEffect(() => {
     const connection = new signalR.HubConnectionBuilder()
       .withUrl('/hubs/spot')
-      .withAutomaticReconnect()
+      .withAutomaticReconnect(RECONNECT_RETRY_POLICY)
       .build()
 
     // Optional chaining on every one of these - unlike OiLiveDashboardPage (the original, only

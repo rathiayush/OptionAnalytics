@@ -21,6 +21,21 @@ const { Text, Title } = Typography
 // hand since the two sides have no shared source of truth to derive it from automatically.
 const LIVE_FEED_COMBOS = new Set(['NIFTY:WEEK', 'NIFTY:MONTH', 'BANKNIFTY:MONTH', 'SENSEX:WEEK', 'SENSEX:MONTH'])
 
+// Bare withAutomaticReconnect() uses SignalR's own default retry policy - 0s/2s/10s/30s, then it
+// gives up FOR GOOD and fires onclose, leaving the connection permanently dead until the page is
+// manually reloaded - exactly the "had given up entirely after withAutomaticReconnect's own retry
+// budget ran out" scenario useOiReplayLiveFeed's own doc comment below already names as a real,
+// previously-hit failure mode (that round only added a clearer disconnected-state indicator, never
+// actually fixed the give-up itself). A live-market page open for a full trading day WILL eventually
+// see a backend redeploy or a brief network blip longer than 42 seconds - it should keep trying
+// forever with a capped backoff, not go silent until someone notices and reloads.
+const RECONNECT_RETRY_POLICY = {
+  nextRetryDelayInMilliseconds(retryContext) {
+    const delays = [0, 2000, 5000, 10000, 15000, 30000]
+    return delays[Math.min(retryContext.previousRetryCount, delays.length - 1)]
+  },
+}
+
 // Connects to the same SignalR hub the live dashboard already uses (App.jsx's own useHub), for
 // three events: "spotUpdate" (SpotFeedHostedService's existing push - the underlying's own
 // currently-forming 1-minute bar, reused as-is rather than building a second live-spot pipeline),
@@ -55,7 +70,7 @@ function useOiReplayLiveFeed(enabled, onSpotUpdate, onOiReplayTick, onFuturesTic
     setConnectionState('connecting')
     const connection = new signalR.HubConnectionBuilder()
       .withUrl('/hubs/spot')
-      .withAutomaticReconnect()
+      .withAutomaticReconnect(RECONNECT_RETRY_POLICY)
       .build()
 
     connection.on('spotUpdate', (snapshot) => spotRef.current(snapshot))
