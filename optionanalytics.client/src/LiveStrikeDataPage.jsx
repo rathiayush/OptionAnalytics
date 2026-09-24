@@ -107,6 +107,16 @@ export default function LiveStrikeDataPage() {
         openInterest: tick.openInterest,
         oiDelta: priorOi != null && tick.openInterest != null ? tick.openInterest - priorOi : null,
         impliedVolatility: ivByKey.get(key) ?? null,
+        // Everything else Dhan's own Full packet carries for this leg, forwarded as-is by
+        // OiReplayLiveFeedService - see its own doc comment on why dayOpen/dayHigh/dayLow are named
+        // that way (the CONTRACT's cumulative day-so-far O/H/L, not a per-minute range) and why
+        // bestBidPrice/bestAskPrice read 0 rather than null before the first Full packet lands.
+        volume: tick.volume,
+        bestBidPrice: tick.bestBidPrice,
+        bestAskPrice: tick.bestAskPrice,
+        dayOpen: tick.dayOpen,
+        dayHigh: tick.dayHigh,
+        dayLow: tick.dayLow,
       }
       setTicks((prevTicks) => {
         const next = [row, ...prevTicks]
@@ -143,6 +153,12 @@ export default function LiveStrikeDataPage() {
       render: (v) => v == null ? '—' : <Text style={{ color: v > 0 ? '#3ddc84' : v < 0 ? '#ff5c5c' : undefined }}>{v > 0 ? '+' : ''}{v.toLocaleString()}</Text>,
     },
     { title: 'IV', dataIndex: 'impliedVolatility', key: 'impliedVolatility', width: 80, align: 'right', render: (v) => (v == null ? '—' : v.toFixed(1)) },
+    { title: 'Volume', dataIndex: 'volume', key: 'volume', width: 100, align: 'right', render: (v) => (v == null ? '—' : v.toLocaleString()) },
+    { title: 'Bid', dataIndex: 'bestBidPrice', key: 'bestBidPrice', width: 80, align: 'right', render: (v) => (!v ? '—' : v.toFixed(2)) },
+    { title: 'Ask', dataIndex: 'bestAskPrice', key: 'bestAskPrice', width: 80, align: 'right', render: (v) => (!v ? '—' : v.toFixed(2)) },
+    { title: 'Day O', dataIndex: 'dayOpen', key: 'dayOpen', width: 80, align: 'right', render: (v) => (!v ? '—' : v.toFixed(2)) },
+    { title: 'Day H', dataIndex: 'dayHigh', key: 'dayHigh', width: 80, align: 'right', render: (v) => (!v ? '—' : v.toFixed(2)) },
+    { title: 'Day L', dataIndex: 'dayLow', key: 'dayLow', width: 80, align: 'right', render: (v) => (!v ? '—' : v.toFixed(2)) },
   ]
 
   const strikeOptions = [{ value: 'ALL', label: 'All strikes' }, ...knownStrikes.map((s) => ({ value: s, label: s.toLocaleString() }))]
@@ -161,7 +177,10 @@ export default function LiveStrikeDataPage() {
               Every live tick for this underlying/expiry's tracked strike band, one row per tick, newest
               first - the raw feed itself, not the OI Dashboard's own latest-per-strike ladder. IV is
               seeded once per strike (Dhan's live feed never carries it) and does not update tick by
-              tick - see the OI Dashboard page for the same caveat.
+              tick - see the OI Dashboard page for the same caveat. Volume/Bid/Ask/Day O-H-L are
+              whatever Dhan's own Full packet carries for that leg, forwarded as-is - Day O/H/L is the
+              CONTRACT's own cumulative high/low so far today, not a per-minute range; Bid/Ask read "—"
+              until at least one Full packet has actually arrived for that strike.
             </Text>
             <Space wrap size={12}>
               <Select
@@ -210,7 +229,7 @@ export default function LiveStrikeDataPage() {
                 dataSource={displayedTicks}
                 columns={columns}
                 pagination={false}
-                scroll={{ y: 640 }}
+                scroll={{ x: 1140, y: 640 }}
                 locale={{ emptyText: 'No ticks yet - waiting for the live feed.' }}
               />
             </Card>
