@@ -252,7 +252,14 @@ public sealed class OiReplayLiveFeedService : BackgroundService
                 side = leg.IsCall ? "CE" : "PE",
                 price = tick.LastPrice,
                 openInterest = tick.OpenInterest,
-                time = tick.ExchangeTimestamp,
+                // ExchangeTimestamp is already the correct absolute instant (DhanTickPacketParser's
+                // own IstOffset correction sees to that) - re-offsetting it to +05:30 here only
+                // changes how it's ANNOTATED on the wire, not what instant it represents (every
+                // consumer parses via new Date()/DateTimeOffset, which resolve to the identical
+                // absolute instant regardless of which offset the string carries). Done purely so a
+                // raw SignalR frame inspected directly (browser devtools, a saved WS capture) reads
+                // as IST instead of requiring a +5:30 mental conversion.
+                time = tick.ExchangeTimestamp.ToOffset(IstClock.Offset),
                 // Everything else Dhan's own Full packet already carries for this leg (SpotTick
                 // already parses all of it - see its own doc comment) - previously silently dropped
                 // here rather than forwarded, per the user's own "add whatever is coming from Dhan's
@@ -280,7 +287,8 @@ public sealed class OiReplayLiveFeedService : BackgroundService
                 price = tick.LastPrice,
                 openInterest = tick.OpenInterest,
                 volume = tick.Volume,
-                time = tick.ExchangeTimestamp,
+                // Same wire-annotation-only conversion as the options tick payload above.
+                time = tick.ExchangeTimestamp.ToOffset(IstClock.Offset),
             };
             _ = BroadcastAsync("futuresTick", payload);
         }
