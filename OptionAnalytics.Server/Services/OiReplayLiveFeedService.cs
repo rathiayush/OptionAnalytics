@@ -253,6 +253,21 @@ public sealed class OiReplayLiveFeedService : BackgroundService
                 price = tick.LastPrice,
                 openInterest = tick.OpenInterest,
                 time = tick.ExchangeTimestamp,
+                // Everything else Dhan's own Full packet already carries for this leg (SpotTick
+                // already parses all of it - see its own doc comment) - previously silently dropped
+                // here rather than forwarded, per the user's own "add whatever is coming from Dhan's
+                // options websocket" ask. Named dayOpen/dayHigh/dayLow (not open/high/low) deliberately:
+                // these are the CONTRACT's cumulative day-so-far O/H/L as Dhan itself tracks them, not
+                // a per-minute range - conflating the two would corrupt buildPremiumCandles' own
+                // per-minute bucketing on the frontend, which reads a plain "open"/"high"/"low" to mean
+                // exactly that bucket's own range. bestBidPrice/bestAskPrice are 0 until at least one
+                // Full packet has arrived for this leg - see SpotTick's own doc comment.
+                dayOpen = tick.Open,
+                dayHigh = tick.High,
+                dayLow = tick.Low,
+                volume = tick.Volume,
+                bestBidPrice = tick.BestBidPrice,
+                bestAskPrice = tick.BestAskPrice,
             };
             _ = BroadcastAsync("oiReplayTick", payload);
         }
