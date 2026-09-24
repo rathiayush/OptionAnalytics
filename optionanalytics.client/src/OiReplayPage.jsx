@@ -329,6 +329,18 @@ const FUTURES_REGIME_PRICE_STEP_FACTOR = 0.2
 // flagged stale (dimmed + a "no update since HH:MM" tooltip) instead of being shown as if live.
 const OI_STALE_MS = 5 * 60_000
 
+// How far the ladder's own "prior" (one-minute-ago) reference point is allowed to sit BEFORE the
+// exact minute-ago mark and still count as "one minute ago" for the OiChange/Large-OI-shift-alert
+// figures - not the same thing as OI_STALE_MS above (which flags the CURRENT reading as frozen).
+// latestAtOrBefore(series, priorMs) returns the LATEST point at or before priorMs regardless of how
+// far back that actually is - if the live feed had a real gap (a Dhan reconnect affecting the whole
+// subscribed strike band at once, or simply the seam between backfilled and live data), that "prior"
+// point can silently be many minutes old. The resulting delta is real, but every strike on the chain
+// would then report a big change "in the last minute" at the exact same tick once the feed catches
+// up - a coordinated false alarm, not an actual sudden move. Confirmed for real: a reported "Large OI
+// shift near ATM" alert firing on ~10 strikes at once, all unwinding, all in the same tick.
+const PRIOR_MINUTE_TOLERANCE_MS = 90_000
+
 function hexToRgb(hex) {
   const n = parseInt(hex.slice(1), 16)
   return [(n >> 16) & 255, (n >> 8) & 255, n & 255]
@@ -1678,6 +1690,11 @@ export default function OiReplayPage() {
       const pe = latestAtOrBefore(peByStrike.get(strike) ?? [], asOfMs)
       const cePrior = latestAtOrBefore(ceByStrike.get(strike) ?? [], priorMs)
       const pePrior = latestAtOrBefore(peByStrike.get(strike) ?? [], priorMs)
+      // See PRIOR_MINUTE_TOLERANCE_MS's own doc comment - a "prior" point found well before priorMs
+      // means there was a real gap, so the resulting delta would actually span however long that gap
+      // was, not one minute. Suppressed to null rather than shown as a misleadingly labeled figure.
+      const cePriorFresh = cePrior != null && priorMs - new Date(cePrior.time).getTime() <= PRIOR_MINUTE_TOLERANCE_MS
+      const pePriorFresh = pePrior != null && priorMs - new Date(pePrior.time).getTime() <= PRIOR_MINUTE_TOLERANCE_MS
       const ceOpen = dayStartMs != null ? latestAtOrBefore(ceByStrike.get(strike) ?? [], dayStartMs) : null
       const peOpen = dayStartMs != null ? latestAtOrBefore(peByStrike.get(strike) ?? [], dayStartMs) : null
       const ceAsOfMs = ce ? new Date(ce.time).getTime() : null
@@ -1686,8 +1703,8 @@ export default function OiReplayPage() {
         strike,
         ceOi: ce?.openInterest ?? null, ceIv: ce?.impliedVolatility ?? null, cePrice: ce?.price ?? null,
         peOi: pe?.openInterest ?? null, peIv: pe?.impliedVolatility ?? null, pePrice: pe?.price ?? null,
-        ceOiChange: ce?.openInterest != null && cePrior?.openInterest != null ? ce.openInterest - cePrior.openInterest : null,
-        peOiChange: pe?.openInterest != null && pePrior?.openInterest != null ? pe.openInterest - pePrior.openInterest : null,
+        ceOiChange: ce?.openInterest != null && cePriorFresh && cePrior.openInterest != null ? ce.openInterest - cePrior.openInterest : null,
+        peOiChange: pe?.openInterest != null && pePriorFresh && pePrior.openInterest != null ? pe.openInterest - pePrior.openInterest : null,
         ceOiSinceOpen: ce?.openInterest != null && ceOpen?.openInterest != null ? ce.openInterest - ceOpen.openInterest : null,
         peOiSinceOpen: pe?.openInterest != null && peOpen?.openInterest != null ? pe.openInterest - peOpen.openInterest : null,
         // "Stale" = the newest reading we have for this strike/side is already more than

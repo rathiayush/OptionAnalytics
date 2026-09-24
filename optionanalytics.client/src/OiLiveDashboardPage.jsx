@@ -45,6 +45,17 @@ const SINCE_OPEN_SANITY_MULTIPLE = 3
 // current OI is genuinely tiny or zero.
 const SINCE_OPEN_MIN_BASELINE = 50_000
 
+// How far the ladder's own "prior" (one-minute-ago) reference point is allowed to sit BEFORE the
+// exact minute-ago mark and still count as "one minute ago" for the OiChange figures. latestAtOrBefore
+// returns the LATEST point at or before priorMs regardless of how far back that actually is - if the
+// live feed had a real gap (a Dhan reconnect affecting the whole subscribed strike band at once),
+// that "prior" point can silently be many minutes old. The resulting delta is real, but every strike
+// on the chain would then report a big change "in the last minute" at the exact same tick once the
+// feed catches up - a coordinated false alarm, not an actual sudden move (confirmed for real on OI
+// Replay's own identical computation: a "Large OI shift near ATM" alert firing on ~10 strikes at
+// once, all in the same tick).
+const PRIOR_MINUTE_TOLERANCE_MS = 90_000
+
 // How long a supposedly-live page can go without ANY tick (spot, OI, or CDV/OBV) before this page
 // treats it as suspicious rather than trusting the "● LIVE" tag - that tag only reflects the
 // browser's own SignalR connection to OUR server, never whether the SERVER's own upstream Dhan feed
@@ -549,6 +560,11 @@ export default function OiLiveDashboardPage() {
       const pe = peArr[peArr.length - 1] ?? null
       const cePrior = latestAtOrBefore(ceArr, priorMs)
       const pePrior = latestAtOrBefore(peArr, priorMs)
+      // See PRIOR_MINUTE_TOLERANCE_MS's own doc comment - a "prior" point found well before priorMs
+      // means there was a real gap, so the resulting delta would actually span however long that gap
+      // was, not one minute. Suppressed to null rather than shown as a misleadingly labeled figure.
+      const cePriorFresh = cePrior != null && priorMs - new Date(cePrior.time).getTime() <= PRIOR_MINUTE_TOLERANCE_MS
+      const pePriorFresh = pePrior != null && priorMs - new Date(pePrior.time).getTime() <= PRIOR_MINUTE_TOLERANCE_MS
       const ceOpen = ceDayOpen.get(strike) ?? null
       const peOpen = peDayOpen.get(strike) ?? null
       const ceAsOfMs = ce ? new Date(ce.time).getTime() : null
@@ -567,8 +583,8 @@ export default function OiLiveDashboardPage() {
         strike,
         ceOi: ce?.openInterest ?? null, ceIv: ce?.impliedVolatility ?? null, cePrice: ce?.price ?? null,
         peOi: pe?.openInterest ?? null, peIv: pe?.impliedVolatility ?? null, pePrice: pe?.price ?? null,
-        ceOiChange: ce?.openInterest != null && cePrior?.openInterest != null ? ce.openInterest - cePrior.openInterest : null,
-        peOiChange: pe?.openInterest != null && pePrior?.openInterest != null ? pe.openInterest - pePrior.openInterest : null,
+        ceOiChange: ce?.openInterest != null && cePriorFresh && cePrior.openInterest != null ? ce.openInterest - cePrior.openInterest : null,
+        peOiChange: pe?.openInterest != null && pePriorFresh && pePrior.openInterest != null ? pe.openInterest - pePrior.openInterest : null,
         ceOiSinceOpen, peOiSinceOpen,
         ceAsOfMs, peAsOfMs,
         ceStale: ceAsOfMs != null && now - ceAsOfMs > OI_STALE_MS,
