@@ -542,8 +542,15 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = tru
     chart.subscribeClick((param) => {
       if (!param.point || !seriesRef.current || !stepRef.current) return
       const price = seriesRef.current.coordinateToPrice(param.point.y)
-      if (price == null) return
-      onStrikeClickRef.current?.(Math.round(price / stepRef.current) * stepRef.current)
+      // A click landing on the price axis/label margin (exactly where the R/S wall labels render)
+      // can hand back a value outside the series' own plotted range - not always a plain number.
+      // Guarded explicitly (rather than trusting `price == null` alone) after a real report of this
+      // click crashing the whole app: a non-finite strike reaching setDrilldownStrike downstream
+      // would render a broken title/lookup with nothing to show for it.
+      if (price == null || !Number.isFinite(price)) return
+      const strike = Math.round(price / stepRef.current) * stepRef.current
+      if (!Number.isFinite(strike)) return
+      onStrikeClickRef.current?.(strike)
     })
 
     const onResize = () => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }) }
