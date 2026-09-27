@@ -1886,9 +1886,10 @@ export default function OiReplayPage() {
 
   // The strike drill-down popup - opened by clicking anywhere on the main chart (see ReplayChart's
   // own onStrikeClick), answering the "how can I see per-minute OI change AND total OI for one
-  // strike, not just its since-open number" ask. null strike means the popup is closed.
+  // strike, not just its since-open number" ask. Shows both together (see the Modal's own JSX
+  // further down), not behind a tab switch, so the two can be read against each other directly -
+  // that comparison is the whole point. null strike means the popup is closed.
   const [drilldownStrike, setDrilldownStrike] = useState(null)
-  const [drilldownMode, setDrilldownMode] = useState('change')
   // Whole day's own history, not asOfMs-gated - this is a look-back analysis popup, not part of the
   // live replay HUD, so it always shows everything currently loaded for the strike regardless of
   // where a historical day's own scrub position sits.
@@ -3244,38 +3245,49 @@ export default function OiReplayPage() {
         footer={null}
         width={760}
       >
-        <Space direction="vertical" size={12} style={{ width: '100%' }}>
-          <Segmented
-            value={drilldownMode}
-            onChange={setDrilldownMode}
-            options={[{ value: 'change', label: 'Per-minute change' }, { value: 'total', label: 'Total OI' }]}
-          />
-          {drilldownMode === 'total' ? (
-            <Space size={16}>
-              <Text style={{ color: CE_COLOR }}>● CE</Text>
-              <Text style={{ color: PE_COLOR }}>● PE</Text>
-            </Space>
-          ) : (
-            <Space size={16} wrap>
-              <Text type="secondary">CE on top, PE on bottom</Text>
-              <Text style={{ color: OI_ADDED_COLOR }}>■ Added</Text>
-              <Text style={{ color: OI_REMOVED_COLOR }}>■ Removed</Text>
-            </Space>
-          )}
-          {(drilldownMode === 'total' ? drilldownCeTotal.length + drilldownPeTotal.length : drilldownCeChange.length + drilldownPeChange.length) > 0 ? (
-            <ChartErrorBoundary key={`drilldown-${underlying}-${drilldownStrike}-${drilldownMode}`}>
-              <StrikeOiDrilldownChart
-                ceSeries={drilldownMode === 'total' ? drilldownCeTotal : drilldownCeChange}
-                peSeries={drilldownMode === 'total' ? drilldownPeTotal : drilldownPeChange}
-                mode={drilldownMode}
-                dayKey={`drilldown-${underlying}-${result?.date}-${drilldownStrike}`}
-                height={360}
-              />
-            </ChartErrorBoundary>
-          ) : (
-            <Empty description="No OI data yet for this strike." />
-          )}
-        </Space>
+        {drilldownCeTotal.length + drilldownPeTotal.length + drilldownCeChange.length + drilldownPeChange.length > 0 ? (
+          <Space direction="vertical" size={20} style={{ width: '100%' }}>
+            {/* Total OI (the level) stacked directly above its own per-minute change (the derivative) -
+                shown together, not behind a tab switch, so a spike in the bottom chart can be read
+                straight up against exactly where it left the top chart's own level - the "day change
+                vs total" comparison this popup exists for. */}
+            <div>
+              <Space size={16} style={{ marginBottom: 4 }}>
+                <Text strong style={{ fontSize: 12 }}>Total OI</Text>
+                <Text style={{ color: CE_COLOR }}>● CE</Text>
+                <Text style={{ color: PE_COLOR }}>● PE</Text>
+              </Space>
+              <ChartErrorBoundary key={`drilldown-total-${underlying}-${drilldownStrike}`}>
+                <StrikeOiDrilldownChart
+                  ceSeries={drilldownCeTotal}
+                  peSeries={drilldownPeTotal}
+                  mode="total"
+                  dayKey={`drilldown-total-${underlying}-${result?.date}-${drilldownStrike}`}
+                  height={220}
+                />
+              </ChartErrorBoundary>
+            </div>
+            <div>
+              <Space size={16} wrap style={{ marginBottom: 4 }}>
+                <Text strong style={{ fontSize: 12 }}>Per-minute change</Text>
+                <Text type="secondary">CE on top, PE on bottom</Text>
+                <Text style={{ color: OI_ADDED_COLOR }}>■ Added</Text>
+                <Text style={{ color: OI_REMOVED_COLOR }}>■ Removed</Text>
+              </Space>
+              <ChartErrorBoundary key={`drilldown-change-${underlying}-${drilldownStrike}`}>
+                <StrikeOiDrilldownChart
+                  ceSeries={drilldownCeChange}
+                  peSeries={drilldownPeChange}
+                  mode="change"
+                  dayKey={`drilldown-change-${underlying}-${result?.date}-${drilldownStrike}`}
+                  height={220}
+                />
+              </ChartErrorBoundary>
+            </div>
+          </Space>
+        ) : (
+          <Empty description="No OI data yet for this strike." />
+        )}
       </Modal>
     </div>
   )
