@@ -57,18 +57,26 @@ public sealed class OiReplayService
     private const int NearestExpiryCode = 1;
 
     /// <summary>How many strike/side fetches (out of the 42 the ATM+-10 band needs - 21 strikes x
-    /// CE/PE) run concurrently, when they end up needing a live Dhan call. This used to be a plain
-    /// sequential loop - correct, but on a deployed environment with no stored database configured
-    /// (see ConnectionStrings:NiftyDataCollectorTimescale, deliberately blank there - this class's
-    /// own top-of-file doc comment), EVERY one of the 42 calls falls through to Dhan, one at a time,
-    /// so the page's own load time is 42x a single call's network round trip with zero overlap - the
-    /// dominant, previously-unaddressed cause of "OI Replay takes forever to load" on a real
-    /// deployment. A modest, bounded concurrency (not unbounded - Dhan's own per-connection/rate
-    /// limits for this endpoint aren't documented, and DhanRollingOptionDataService's own
-    /// RateLimitRetryDelay/MaxRateLimitRetries already give a graceful fallback if this guess turns
-    /// out too aggressive) cuts wall-clock time by roughly this factor without leaning on an
-    /// undocumented limit.</summary>
-    private const int MaxConcurrentStrikeFetches = 4;
+    /// CE/PE) may be IN FLIGHT at once, when they end up needing a live Dhan call. This used to be
+    /// a plain sequential loop - correct, but on a deployed environment with no stored database
+    /// configured (see ConnectionStrings:NiftyDataCollectorTimescale, deliberately blank there -
+    /// this class's own top-of-file doc comment), EVERY one of the 42 calls falls through to Dhan,
+    /// one at a time, so the page's own load time was 42x a single call's network round trip with
+    /// zero overlap - the dominant, previously-unaddressed cause of "OI Replay takes forever to
+    /// load" on a real deployment.
+    ///
+    /// The ACTUAL per-second ceiling Dhan documents (5 Data-API requests/second, account-wide) is
+    /// now enforced correctly and app-wide by DhanDataApiRateLimiter, which every one of these
+    /// fetches' underlying DhanRollingOptionDataService/DhanHistoricalDataService calls goes
+    /// through - a real requests-per-second limiter, not this semaphore (a semaphore only bounds
+    /// how many requests are simultaneously IN FLIGHT, which does not bound the RATE new ones start
+    /// at once responses come back quickly - a materially different, weaker guarantee that a plain
+    /// SemaphoreSlim here used to be the only protection against, before that limiter existed).
+    /// This constant's own job now is just capping how many tasks pile up waiting on that shared
+    /// limiter at once (bounding this one request's own memory/task overhead) - correctness against
+    /// Dhan's real limit no longer depends on this number at all, so it is set generously rather
+    /// than conservatively.</summary>
+    private const int MaxConcurrentStrikeFetches = 10;
 
     /// <summary>Strike step per underlying THIS PAGE supports - deliberately its own dictionary
     /// rather than reusing ExpiredOptionBacktestService.StrikeStepByUnderlying, which excludes
@@ -194,12 +202,15 @@ public sealed class OiReplayService
         // never tracked just comes back with zero rows, contributing no points, not an error; the
         // frontend's own ladder simply has nothing to show at that level.
         //
-        // Fetched concurrently now (bounded by MaxConcurrentStrikeFetches - see its own doc comment),
-        // not one strike/side at a time - the 21-strike band x CE/PE is 42 GetSeriesAsync calls, and
-        // on a deployment with no stored database every one of them is a live Dhan round trip with
-        // zero overlap under the old sequential loop. Each fetch returns its own point list rather
-        // than mutating a shared cePoints/pePoints list directly - List<T> is not safe for concurrent
-        // writers, and collecting via Task.WhenAll's own results sidesteps needing a lock entirely.
+        // Fetched concurrently now (in-flight count bounded by MaxConcurrentStrikeFetches, actual
+        // Dhan call RATE bounded separately and correctly by the shared DhanDataApiRateLimiter each
+        // fetch's own DhanRollingOptionDataService/DhanHistoricalDataService call goes through -
+        // see MaxConcurrentStrikeFetches' own doc comment), not one strike/side at a time - the
+        // 21-strike band x CE/PE is 42 GetSeriesAsync calls, and on a deployment with no stored
+        // database every one of them is a live Dhan round trip with zero overlap under the old
+        // sequential loop. Each fetch returns its own point list rather than mutating a shared
+        // cePoints/pePoints list directly - List<T> is not safe for concurrent writers, and
+        // collecting via Task.WhenAll's own results sidesteps needing a lock entirely.
         using var throttle = new SemaphoreSlim(MaxConcurrentStrikeFetches);
 
         async Task<List<OiReplayPoint>> FetchPointsAsync(string strikeToken, string drvOptionType)

@@ -94,20 +94,28 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
 
     // Spacing between successive chunk calls, and between a rate-limited chunk's own retries - a
     // multi-month lookback can need several chunks per side, and CallerService (see
-    // ExpiredOptionBacktestService) fetches CE and PE back to back, so without any pacing at all a
-    // single Run click can burst 4-6+ requests at Dhan in well under a second. Same idea as
-    // BacktestService.OnDemandCallDelay, just a little more generous since a live-money order-flow
-    // call is not competing for the same budget here.
+    // ExpiredOptionBacktestService) fetches CE and PE back to back. DhanDataApiRateLimiter (see
+    // SendWithRateLimitRetryAsync below) is now what actually enforces Dhan's documented Data-API
+    // ceiling app-wide, so this is just extra, harmless pacing on top of that, kept mainly so a
+    // multi-chunk backtest doesn't queue every one of its own chunks on the shared limiter at once.
     private static readonly TimeSpan ChunkDelay = TimeSpan.FromMilliseconds(350);
     private const int MaxRateLimitRetries = 3;
     private static readonly TimeSpan RateLimitRetryDelay = TimeSpan.FromSeconds(2);
 
+    // Bounds how long a single chunk call may hang waiting for Dhan before giving up - see
+    // DhanHistoricalDataService.CallTimeout's own doc comment for the full reasoning (same value,
+    // same rationale, kept as its own constant here rather than shared since these are two
+    // otherwise-independent classes).
+    private static readonly TimeSpan CallTimeout = TimeSpan.FromSeconds(20);
+
     private readonly DhanApiClient _api;
+    private readonly DhanDataApiRateLimiter _rateLimiter;
     private readonly ILogger<DhanRollingOptionDataService> _logger;
 
-    public DhanRollingOptionDataService(DhanApiClient api, ILogger<DhanRollingOptionDataService> logger)
+    public DhanRollingOptionDataService(DhanApiClient api, DhanDataApiRateLimiter rateLimiter, ILogger<DhanRollingOptionDataService> logger)
     {
         _api = api;
+        _rateLimiter = rateLimiter;
         _logger = logger;
     }
 
@@ -126,7 +134,7 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
     /// matched to the nearest earlier bar).</summary>
     public async Task<(IReadOnlyList<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)> Bars, string? Error)> GetRollingOptionCandlesAsync(
         string underlying, uint underlyingSecurityId, string expiryFlag, int expiryCode, string strike, string drvOptionType,
-        DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken)
+        DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken, bool interactive = true)
     {
         // `underlying` used to be unused here (this implementation identifies the CONTRACT by
         // underlyingSecurityId, not by name) - now also read once, just to pick the right exchange
@@ -173,7 +181,7 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
             };
             var context = $"rolling option candles ({underlyingSecurityId}, {expiryFlag}+{expiryCode}, {strike} {drvOptionType}, {chunkStart:yyyy-MM-dd}..{chunkEnd:yyyy-MM-dd})";
 
-            var (response, error) = await SendWithRateLimitRetryAsync(payload, context, cancellationToken);
+            var (response, error) = await SendWithRateLimitRetryAsync(payload, context, cancellationToken, interactive);
             if (response is null)
             {
                 _logger.LogWarning("Rolling option candle request failed for {Id} ({ExpiryFlag}+{ExpiryCode}, {Strike} {Side}, {From}..{To}) - {Error}",
@@ -218,8 +226,10 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
     }
 
     /// <summary>Sends one chunk, retrying with a backoff ONLY on Dhan's own rate-limit error - it
-    /// explicitly says "Try throttling API calls" (a transient condition ChunkDelay's own pacing
-    /// reduces but cannot fully rule out, since Dhan's limit is account-wide, not per-endpoint), so
+    /// explicitly says "Try throttling API calls" (a condition DhanDataApiRateLimiter's own
+    /// per-second gate below now actively prevents rather than merely reduces, since Dhan's limit
+    /// is account-wide, not per-endpoint - this retry is the fallback for whatever narrow race
+    /// still slips past it, e.g. another process/instance sharing the same Dhan account), so
     /// retrying that one specific failure is honoring Dhan's own instruction rather than giving up
     /// on a request that would very likely succeed a couple of seconds later. Any other failure -
     /// auth, a bad parameter, a genuine server error - returns immediately, unretried.
@@ -229,11 +239,30 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
     /// disposed - handing one back across this method's own return, after disposing here, would be
     /// use-after-dispose.</summary>
     private async Task<(DhanApiResponse? Response, string? Error)> SendWithRateLimitRetryAsync(
-        object payload, string context, CancellationToken cancellationToken)
+        object payload, string context, CancellationToken cancellationToken, bool interactive)
     {
         for (var attempt = 0; ; attempt++)
         {
-            var response = await _api.SendAsync(HttpMethod.Post, "/charts/rollingoption", payload, context, cancellationToken);
+            await _rateLimiter.WaitForPermitAsync(interactive, cancellationToken);
+
+            // CallTimeout bounds a single call, separately from the caller's own cancellationToken -
+            // see DhanHistoricalDataService.CallTimeout's own doc comment for why this can't just be
+            // DhanApiClient's shared HttpClient.Timeout (that HttpClient is also used by live order
+            // placement) and why the catch below specifically checks the CALLER's own token rather
+            // than trusting "OperationCanceledException" alone to mean a real cancellation - a timeout
+            // firing here throws exactly the same exception type HttpClient uses for that too.
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeoutCts.CancelAfter(CallTimeout);
+            DhanApiResponse response;
+            try
+            {
+                response = await _api.SendAsync(HttpMethod.Post, "/charts/rollingoption", payload, context, timeoutCts.Token);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                _logger.LogWarning("Dhan call timed out after {Seconds}s with no response ({Context}).", CallTimeout.TotalSeconds, context);
+                return (null, $"Dhan did not respond within {CallTimeout.TotalSeconds:0}s - it may be slow or unreachable right now.");
+            }
             if (response.Success) return (response, null);
 
             var isRateLimited = response.ErrorMessage?.Contains("rate", StringComparison.OrdinalIgnoreCase) == true

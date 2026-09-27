@@ -1078,7 +1078,7 @@ public sealed class CdvHostedService : BackgroundService
             IReadOnlyList<CandleWithVolume> bars;
             try
             {
-                var (fetched, error) = await _historicalData.GetIntradayOptionCandlesAsync(securityId, dhanSegment, fromDay, today, 1, cancellationToken);
+                var (fetched, error) = await _historicalData.GetIntradayOptionCandlesAsync(securityId, dhanSegment, fromDay, today, 1, cancellationToken, interactive: false);
                 bars = fetched;
                 if (error is not null)
                 {

@@ -338,7 +338,7 @@ public sealed class SpotFeedHostedService : BackgroundService
             // wired up, it would take the entire spot feed - live ticks included - down with it.
             try
             {
-                var (candles, error) = await _historicalData.GetIntradayCandlesAsync(instrument.SecurityId, instrument.DhanSegment, fromDay, today, 1, cancellationToken);
+                var (candles, error) = await _historicalData.GetIntradayCandlesAsync(instrument.SecurityId, instrument.DhanSegment, fromDay, today, 1, cancellationToken, interactive: false);
 
                 var trimmed = TrimToRecentTradingDays(candles, HistoryTradingDays, c => c.Time);
                 state.SeedHistory(trimmed.Select(c => c.ToCandle()));

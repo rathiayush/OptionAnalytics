@@ -21,7 +21,12 @@ namespace OptionAnalytics.Server.Services;
 /// </summary>
 public interface IRollingOptionDataSource
 {
+    /// <summary><paramref name="interactive"/> only matters for the live Dhan-backed
+    /// implementation (DhanRollingOptionDataService) - see DhanDataApiRateLimiter's own doc
+    /// comment for why a call made directly on behalf of a waiting user needs a separate lane from
+    /// a hosted background service's own prefetch work. StoredRollingOptionDataService ignores it
+    /// entirely (no Dhan call, no rate limit to lane).</summary>
     Task<(IReadOnlyList<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)> Bars, string? Error)> GetRollingOptionCandlesAsync(
         string underlying, uint underlyingSecurityId, string expiryFlag, int expiryCode, string strike, string drvOptionType,
-        DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken);
+        DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken, bool interactive = true);
 }
