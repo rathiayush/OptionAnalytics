@@ -255,11 +255,12 @@ function toSinceOpenSeries(totalSeries) {
 // a Map for O(1) lookup per cell. The column set is the UNION of every bucket ANY strike in the band
 // has touched (not just the first strike's own), so a strike that only started ticking partway
 // through the day still lines up against the correct real time rather than sliding left.
-function buildOiChangeMatrix(byStrike, strikes) {
+function buildOiChangeMatrix(byStrike, strikes, asOfMs) {
   const perStrikeChange = new Map()
   const bucketSet = new Set()
   for (const strike of strikes) {
-    const total = aggregateLinePoints((byStrike.get(strike) ?? []).map((p) => ({ time: toChartTime(p.time), value: p.openInterest })), 1)
+    const raw = (byStrike.get(strike) ?? []).filter((p) => asOfMs == null || new Date(p.time).getTime() <= asOfMs)
+    const total = aggregateLinePoints(raw.map((p) => ({ time: toChartTime(p.time), value: p.openInterest })), 1)
     const change = computeOiChangeSeries(total)
     perStrikeChange.set(strike, new Map(change.map((p) => [p.time, p.value])))
     for (const p of change) bucketSet.add(p.time)
@@ -859,11 +860,11 @@ const HEATMAP_AXIS_HEIGHT = 20
 // real heatmap out of a library with no native heatmap series type, and the cheapest to render at
 // this cell count. The strike-label column is plain HTML (not baked into the canvas) so it can stay
 // visually fixed while only the canvas itself scrolls horizontally through the day.
-function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike }) {
+function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfMs }) {
   const canvasRef = useRef(null)
   const scrollRef = useRef(null)
   const [hover, setHover] = useState(null)
-  const { buckets, perStrikeChange } = useMemo(() => buildOiChangeMatrix(byStrike, strikes), [byStrike, strikes])
+  const { buckets, perStrikeChange } = useMemo(() => buildOiChangeMatrix(byStrike, strikes, asOfMs), [byStrike, strikes, asOfMs])
 
   // Fixed per-CARD color (this plot is always rendered once per side, "CE" or "PE" - see its own
   // two call sites below), not per-cell by added/removed sign - the option-SELLING convention this
@@ -1995,21 +1996,9 @@ export default function OiReplayPage() {
   // further down), not behind a tab switch, so the two can be read against each other directly -
   // that comparison is the whole point. null strike means the popup is closed.
   const [drilldownStrike, setDrilldownStrike] = useState(null)
-  // Whole day's own history, not asOfMs-gated - this is a look-back analysis popup, not part of the
-  // live replay HUD, so it always shows everything currently loaded for the strike regardless of
-  // where a historical day's own scrub position sits.
-  const drilldownCeTotal = useMemo(
-    () => aggregateLinePoints((ceByStrike.get(drilldownStrike) ?? []).map((p) => ({ time: toChartTime(p.time), value: p.openInterest })), 1),
-    [ceByStrike, drilldownStrike],
-  )
-  const drilldownPeTotal = useMemo(
-    () => aggregateLinePoints((peByStrike.get(drilldownStrike) ?? []).map((p) => ({ time: toChartTime(p.time), value: p.openInterest })), 1),
-    [peByStrike, drilldownStrike],
-  )
-  const drilldownCeChange = useMemo(() => computeOiChangeSeries(drilldownCeTotal), [drilldownCeTotal])
-  const drilldownPeChange = useMemo(() => computeOiChangeSeries(drilldownPeTotal), [drilldownPeTotal])
-  const drilldownCeSinceOpen = useMemo(() => toSinceOpenSeries(drilldownCeTotal), [drilldownCeTotal])
-  const drilldownPeSinceOpen = useMemo(() => toSinceOpenSeries(drilldownPeTotal), [drilldownPeTotal])
+  // drilldownCeTotal/PeTotal/etc. (the popup's own OI series for whichever strike is picked) are
+  // defined further down, right after asOfMs - they need to filter against it, so they can't be
+  // declared here (asOfMs itself isn't computed yet at this point in the component).
 
   // See FEED_STALL_WARNING_MS's own doc comment - set on every live tick that actually matches
   // today/the current underlying/expiryFlag, so this tracks "last time THIS page's own feed
@@ -2148,6 +2137,25 @@ export default function OiReplayPage() {
   // (it just reads Date.now()/the array's own last entry, no bucket concept at all). A historical
   // day still uses the scrubbed replay position exactly as before - only "today, live" changes.
   const asOfMs = isToday ? Date.now() : (currentBar ? fromChartTime(currentBar.time) * 1000 : null)
+
+  // The strike drill-down popup's own OI series - gated to asOfMs like every other derived read on
+  // this page (the ladder, premium charts, Market Read), NOT the whole day's history regardless of
+  // replay position. Used to deliberately show everything ("a look-back analysis popup, not part of
+  // the live replay HUD") - a real report ("these graphs should work tick by tick, not all in one")
+  // reversed that: the popup now plays back in step with the rest of the page instead of jumping
+  // straight to the end of the day the moment it opens.
+  const drilldownCeTotal = useMemo(() => {
+    const raw = (ceByStrike.get(drilldownStrike) ?? []).filter((p) => asOfMs == null || new Date(p.time).getTime() <= asOfMs)
+    return aggregateLinePoints(raw.map((p) => ({ time: toChartTime(p.time), value: p.openInterest })), 1)
+  }, [ceByStrike, drilldownStrike, asOfMs])
+  const drilldownPeTotal = useMemo(() => {
+    const raw = (peByStrike.get(drilldownStrike) ?? []).filter((p) => asOfMs == null || new Date(p.time).getTime() <= asOfMs)
+    return aggregateLinePoints(raw.map((p) => ({ time: toChartTime(p.time), value: p.openInterest })), 1)
+  }, [peByStrike, drilldownStrike, asOfMs])
+  const drilldownCeChange = useMemo(() => computeOiChangeSeries(drilldownCeTotal), [drilldownCeTotal])
+  const drilldownPeChange = useMemo(() => computeOiChangeSeries(drilldownPeTotal), [drilldownPeTotal])
+  const drilldownCeSinceOpen = useMemo(() => toSinceOpenSeries(drilldownCeTotal), [drilldownCeTotal])
+  const drilldownPeSinceOpen = useMemo(() => toSinceOpenSeries(drilldownPeTotal), [drilldownPeTotal])
 
   // The chart's own displayed candles - the visible slice of 1-minute bars, re-aggregated to
   // whatever timeframe is selected, recomputed fresh each tick so the LAST (currently forming)
@@ -2510,23 +2518,32 @@ export default function OiReplayPage() {
     return { dayBias, dayReason, ceDayChange, peDayChange, added, removed }
   }, [currentBar, oneMinBars, ladderRows, dayStartByStrike, totalCeOi, totalPeOi])
 
-  // One point per REVEALED 1-min bar, for the Total OI Lookback Table below - total (chain-wide)
-  // CE/PE OI as of that bar's own close, built the same way ladderRows/dayStartByStrike already read
-  // a single point in time, just repeated across every bar instead of one. Deliberately keyed on
-  // oneMinBars.length rather than on ceByStrike/peByStrike themselves (which get a new Map reference
-  // on every single live tick): a per-bar lookback table has no need for sub-minute precision on its
-  // HISTORICAL points, and redoing this whole-day sum across every strike on every tick (rather than
-  // once per completed minute) would be wasted work during a live "today" replay. underlying/
-  // result.date/expiryFlag are in the deps purely so switching to a different day/instrument that
-  // happens to produce the exact same bar count still forces a recompute instead of reusing stale
-  // totals from the day just left.
+  // One point per REVEALED 1-min bar, for the Total OI Lookback Table AND the Day OI Accumulation
+  // card's own chain-wide chart below - total (chain-wide) CE/PE OI as of that bar's own close,
+  // built the same way ladderRows/dayStartByStrike already read a single point in time, just
+  // repeated across every bar instead of one. Bounded by visibleCount (Math.min against
+  // oneMinBars.length as a safety clamp, isToday's own visibleCount already equals it exactly) -
+  // NOT oneMinBars.length on its own, which used to build the whole day's history immediately
+  // regardless of how far a historical replay had actually played to. A real report ("these graphs
+  // should work tick by tick, not all in one") caught this: the chain-wide chart was showing the
+  // WHOLE day the instant it loaded, while every other derived read on this page (the ladder,
+  // premium charts, Market Read) correctly only reveals up to asOfMs/visibleCount.
+  //
+  // Deliberately keyed on oneMinBars.length rather than on ceByStrike/peByStrike themselves (which
+  // get a new Map reference on every single live tick): a per-bar lookback table has no need for
+  // sub-minute precision on its HISTORICAL points, and redoing this whole-day sum across every
+  // strike on every tick (rather than once per completed minute) would be wasted work during a live
+  // "today" replay. underlying/result.date/expiryFlag are in the deps purely so switching to a
+  // different day/instrument that happens to produce the exact same bar count still forces a
+  // recompute instead of reusing stale totals from the day just left.
   const completedOiHistory = useMemo(() => {
-    if (oneMinBars.length < 2) return []
+    const revealed = Math.min(visibleCount, oneMinBars.length)
+    if (revealed < 2) return []
     const strikes = [...new Set([...ceByStrike.keys(), ...peByStrike.keys()])]
     const ceSeriesList = strikes.map((s) => ceByStrike.get(s) ?? [])
     const peSeriesList = strikes.map((s) => peByStrike.get(s) ?? [])
     const history = []
-    for (let i = 0; i < oneMinBars.length - 1; i++) {
+    for (let i = 0; i < revealed - 1; i++) {
       const bar = oneMinBars[i]
       const barMs = fromChartTime(bar.time) * 1000
       let ceTotal = 0
@@ -2537,15 +2554,19 @@ export default function OiReplayPage() {
     }
     return history
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [oneMinBars.length, underlying, result?.date, expiryFlag])
+  }, [oneMinBars.length, visibleCount, underlying, result?.date, expiryFlag])
 
-  // The still-forming/current bar appended live, using the page's own already-ticking
-  // totalCeOi/totalPeOi rather than recomputing the whole day above - "now" stays continuously live
-  // even though completedOiHistory only updates once a minute.
+  // The still-forming/current REVEALED bar appended live, using the page's own already-ticking
+  // (and already asOfMs-gated, via ladderRows) totalCeOi/totalPeOi rather than recomputing the
+  // whole day above - "now" stays continuously live even though completedOiHistory only updates
+  // once a minute. currentBar, not oneMinBars' own last bar - the latter is the DAY's final bar
+  // regardless of replay position, which used to jump this chart's own last point straight to the
+  // end of the day even mid-replay; currentBar is already exactly "the last REVEALED bar" (see its
+  // own derivation above, oneMinBars[visibleCount - 1]).
   const totalOiHistory = useMemo(() => {
-    if (oneMinBars.length === 0) return completedOiHistory
-    return [...completedOiHistory, { time: oneMinBars[oneMinBars.length - 1].time, ceTotal: totalCeOi, peTotal: totalPeOi }]
-  }, [completedOiHistory, oneMinBars, totalCeOi, totalPeOi])
+    if (!currentBar) return completedOiHistory
+    return [...completedOiHistory, { time: currentBar.time, ceTotal: totalCeOi, peTotal: totalPeOi }]
+  }, [completedOiHistory, currentBar, totalCeOi, totalPeOi])
 
   const ceTotalOiLine = useMemo(
     () => aggregateLinePoints(totalOiHistory.map((p) => ({ time: p.time, value: p.ceTotal })), totalOiLookbackTimeframe),
@@ -2981,11 +3002,11 @@ export default function OiReplayPage() {
                   </Space>
                   <div>
                     <Text strong style={{ fontSize: 12 }}>CE</Text>
-                    <OiChangeHeatmapPlot label="CE" byStrike={ceByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} />
+                    <OiChangeHeatmapPlot label="CE" byStrike={ceByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} asOfMs={asOfMs} />
                   </div>
                   <div>
                     <Text strong style={{ fontSize: 12 }}>PE</Text>
-                    <OiChangeHeatmapPlot label="PE" byStrike={peByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} />
+                    <OiChangeHeatmapPlot label="PE" byStrike={peByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} asOfMs={asOfMs} />
                   </div>
                 </Space>
               </Card>
