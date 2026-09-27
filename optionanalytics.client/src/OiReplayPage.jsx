@@ -36,6 +36,17 @@ const LIVE_FEED_COMBOS = new Set(['NIFTY:WEEK', 'NIFTY:MONTH', 'BANKNIFTY:MONTH'
 // but this page never did. Same threshold as that page's own identical FEED_STALL_WARNING_MS.
 const FEED_STALL_WARNING_MS = 3 * 60_000
 
+// How long load() waits for /api/oi-replay/.../run before giving up on its own and showing an
+// error, rather than leaving the browser's plain fetch() (no timeout of its own) pending
+// indefinitely. Sized above the backend's own worst case: up to 44 live Dhan calls, 10 at a time,
+// each with its own 20s server-side timeout (see DhanHistoricalDataService.CallTimeout) - so
+// roughly ceil(44/10) * 20s = 100s in the worst case, plus real network time. A mobile/cellular
+// connection is more likely to hit this than WiFi/broadband: a long-held single connection is more
+// exposed to a carrier's own idle-connection timeout, and a backgrounded tab (screen lock, app
+// switch) can suspend or kill the fetch outright - either way, the user gets a clear message and a
+// live Cancel button instead of an indefinite spinner with no way out.
+const LOAD_TIMEOUT_MS = 120_000
+
 // Bare withAutomaticReconnect() uses SignalR's own default retry policy - 0s/2s/10s/30s, then it
 // gives up FOR GOOD and fires onclose, leaving the connection permanently dead until the page is
 // manually reloaded - exactly the "had given up entirely after withAutomaticReconnect's own retry
@@ -1738,6 +1749,12 @@ export default function OiReplayPage() {
   const [playing, setPlaying] = useState(false)
   const timerRef = useRef(null)
 
+  // The in-flight run fetch's own controller - lets a NEWER load() abort a STILL-PENDING older one
+  // (so a stale response can never land after a newer one already did) and lets the user's own
+  // Cancel button abort a load that is taking too long, instead of just staring at "Loading..."
+  // with no way out. See LOAD_TIMEOUT_MS's own doc comment for the auto-cancel this also drives.
+  const activeLoadController = useRef(null)
+
   // The live "tail" beyond whatever the initial REST snapshot carried - only ever appended to while
   // isToday is true (see below), reset on every fresh load() so switching days never carries a
   // previous day's live ticks forward.
@@ -1799,6 +1816,11 @@ export default function OiReplayPage() {
   const load = (overrideDate) => {
     const effectiveDate = overrideDate ?? date
     if (!underlying || !effectiveDate) return
+    // Abort whatever run fetch might still be pending from a previous click - otherwise a stale
+    // response landing late could clobber the result of THIS load with an older day's data.
+    activeLoadController.current?.abort('superseded')
+    const controller = new AbortController()
+    activeLoadController.current = controller
     setPlaying(false)
     setLoading(true)
     setError(null)
@@ -1823,7 +1845,8 @@ export default function OiReplayPage() {
       timeframeMinutes: String(timeframe),
       expiryFlag,
     })
-    fetch(`/api/oi-replay/${underlying}/run?${params.toString()}`)
+    const timeoutId = setTimeout(() => controller.abort('timeout'), LOAD_TIMEOUT_MS)
+    fetch(`/api/oi-replay/${underlying}/run?${params.toString()}`, { signal: controller.signal })
       .then(async (r) => {
         const body = await r.json().catch(() => null)
         if (!r.ok) throw new Error(body?.error || `Request failed (HTTP ${r.status}).`)
@@ -1838,12 +1861,33 @@ export default function OiReplayPage() {
         setManualVisibleCount(initialLen > 0 ? 1 : 0)
       })
       .catch((err) => {
+        // 'superseded' means a NEWER load() already aborted this one on purpose - that newer call
+        // owns the loading/error state now, so this stale one has nothing left to report.
+        if (controller.signal.reason === 'superseded') return
         console.error('Failed to load OI replay data:', err)
         setResult(null)
-        setError(err.message || 'Failed to load this day.')
+        setError(
+          controller.signal.reason === 'timeout'
+            ? `This took longer than ${LOAD_TIMEOUT_MS / 1000}s and was cancelled - the server may still be waiting on a slow Dhan response, or the connection dropped (more common on mobile/cellular, or if the tab was backgrounded). Try again.`
+            : controller.signal.reason === 'user-cancelled'
+              ? 'Cancelled.'
+              : err.message || 'Failed to load this day.',
+        )
       })
-      .finally(() => setLoading(false))
+      .finally(() => {
+        clearTimeout(timeoutId)
+        // Guards against a SUPERSEDED call's own finally clearing the loading state a newer call
+        // just set - only the currently-active controller's own completion may touch it.
+        if (activeLoadController.current === controller) {
+          setLoading(false)
+          activeLoadController.current = null
+        }
+      })
   }
+
+  // Lets the user clear a load that is stuck/taking too long instead of only ever waiting for
+  // LOAD_TIMEOUT_MS's own auto-cancel - see the Loading alert's own Cancel button below.
+  const cancelLoad = () => activeLoadController.current?.abort('user-cancelled')
 
   // One click for "switch to today and start following it live" - the user's own "if tomorrow
   // markets opens and if select live this will work on live data" ask, rather than needing to open
@@ -2666,7 +2710,7 @@ export default function OiReplayPage() {
                 message={`Connected, but no live tick for ${underlying} in over ${Math.round((nowTick - lastTickAtMs) / 60_000)} min - the connection itself is fine, but the server's own Dhan feed may have stalled. Logged to the browser console; try reloading if this doesn't clear on its own.`}
               />
             )}
-            {error && <Alert type="error" showIcon message={error} />}
+            {error && <Alert type="error" showIcon closable onClose={() => setError(null)} message={error} />}
           </Space>
         </Card>
 
@@ -3237,7 +3281,16 @@ export default function OiReplayPage() {
               type="info"
               showIcon
               message="Loading…"
-              description="Fetching each strike's OI/IV history directly from Dhan (no local cache is configured on this server) - this can take up to 10-15 seconds for the full ATM±10 band, longer if Dhan itself is slow to respond right now. Not stuck - just a lot of individually rate-limited API calls."
+              description={
+                <Space direction="vertical" size={8}>
+                  <Text>
+                    Fetching each strike's OI/IV history directly from Dhan (no local cache is configured on this server) -
+                    this can take up to 10-15 seconds for the full ATM±10 band, longer if Dhan itself is slow to respond right
+                    now. Will cancel itself and show an error after {LOAD_TIMEOUT_MS / 1000}s if nothing comes back.
+                  </Text>
+                  <Button size="small" onClick={cancelLoad}>Cancel</Button>
+                </Space>
+              }
             />
           </Card>
         )}
