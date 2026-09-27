@@ -722,8 +722,10 @@ function StrikeOiDrilldownChart({ ceSeries, peSeries, mode, dayKey, height = 320
       // PE on its own in the bottom half (own scaleMargins so they don't overlap) - that vertical
       // position is what tells CE and PE apart here, freeing color up to answer the actual "where is
       // it being added vs removed" ask instead: each BAR is colored by its own sign in the setData
-      // effect below (UP_COLOR when OI grew that minute, DOWN_COLOR when it shrank), the same
-      // green-up/red-down convention this app already uses everywhere else for a directional read.
+      // effect below (OI_ADDED_COLOR when OI grew that minute, OI_REMOVED_COLOR when it shrank) -
+      // deliberately blue/orange, not this app's own green/red up/down convention, since ReplayChart's
+      // OI-wall price lines right next to this popup already use red/green for a different meaning
+      // (see OI_ADDED_COLOR's own doc comment).
       ceSeriesRef.current = chart.addSeries(HistogramSeries, { title: 'CE OI Δ', priceLineVisible: false, priceScaleId: 'ce-change' })
       peSeriesRef.current = chart.addSeries(HistogramSeries, { title: 'PE OI Δ', priceLineVisible: false, priceScaleId: 'pe-change' })
       chart.priceScale('ce-change').applyOptions({ scaleMargins: { top: 0.1, bottom: 0.5 } })
@@ -748,7 +750,7 @@ function StrikeOiDrilldownChart({ ceSeries, peSeries, mode, dayKey, height = 320
     // sign - added (OI grew that minute) vs removed (OI shrank) - see this component's own doc
     // comment on why that, not a flat per-series color, is what actually answers "where is it being
     // added/removed."
-    const withDirectionColor = (series) => mode === 'change' ? series.map((p) => ({ ...p, color: p.value >= 0 ? UP_COLOR : DOWN_COLOR })) : series
+    const withDirectionColor = (series) => mode === 'change' ? series.map((p) => ({ ...p, color: p.value >= 0 ? OI_ADDED_COLOR : OI_REMOVED_COLOR })) : series
     ceSeriesRef.current.setData(withDirectionColor(ceSeries))
     peSeriesRef.current.setData(withDirectionColor(peSeries))
     if (ceSeries.length > 0 || peSeries.length > 0) chartRef.current?.timeScale().fitContent()
@@ -758,14 +760,24 @@ function StrikeOiDrilldownChart({ ceSeries, peSeries, mode, dayKey, height = 320
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }
 
-// One color, opacity-scaled by magnitude, per pole - the diverging encoding: UP_COLOR (this app's
-// own established green-up convention, already used for every other directional read on this page)
-// at low alpha for a small change, ramping toward full alpha at the grid's OWN largest |change| this
-// side has seen anywhere - so intensity is always relative to what this specific view is actually
+// Deliberately NOT UP_COLOR/DOWN_COLOR (this page's own green/red convention for a bullish/bearish
+// or gain/loss read) - ReplayChart's own OI-wall price lines already use red (RESISTANCE_LIGHT/DARK,
+// the CE side) and green (SUPPORT_LIGHT/DARK, the PE side) for a COMPLETELY different meaning (which
+// side, and how heavy). Reusing red/green here for "added vs removed" on the same page risks a
+// reader carrying one chart's meaning into the other - a strike whose wall renders red is a CE wall,
+// not "OI being removed," but a green/red change chart right next to it invites exactly that
+// conflation. Blue/orange instead: this app's own categorical palette's first two hues, an entirely
+// different hue family from the wall convention, so "which encoding am I looking at" is never
+// ambiguous. Validated as a CVD-safe pair against this app's real dark chart surface (#0d0e12):
+// worst-pair ΔE 26.8 protan / 31.8 normal-vision, both clear of the dataviz method's 8/15 targets.
+const OI_ADDED_COLOR = '#3987e5'
+const OI_REMOVED_COLOR = '#d95926'
+
+// One color, opacity-scaled by magnitude, per pole - the diverging encoding: OI_ADDED_COLOR at low
+// alpha for a small change, ramping toward full alpha at the grid's OWN largest |change| this side
+// has seen anywhere - so intensity is always relative to what this specific view is actually
 // showing, not some fixed absolute scale that would wash out on a quiet day and clip on a violent
-// one. DOWN_COLOR mirrors it for OI being removed. Validated as a CVD-safe pair against this app's
-// real dark chart surface (#0d0e12): worst-pair ΔE 11.6 deutan / 29.6 normal-vision, both clear of
-// the dataviz method's 8/15 targets - see the validator run in this PR's own description.
+// one. OI_REMOVED_COLOR mirrors it for OI being removed.
 const HEATMAP_MIN_ALPHA = 0.12
 const HEATMAP_MAX_ALPHA = 0.9
 
@@ -828,7 +840,7 @@ function OiChangeHeatmapGrid({ label, byStrike, strikes, atmStrike, height = 320
                   const v = byBucket?.get(t)
                   const cellColor = v == null || v === 0 || maxAbs === 0
                     ? 'transparent'
-                    : hexToRgba(v > 0 ? UP_COLOR : DOWN_COLOR, HEATMAP_MIN_ALPHA + (Math.abs(v) / maxAbs) * (HEATMAP_MAX_ALPHA - HEATMAP_MIN_ALPHA))
+                    : hexToRgba(v > 0 ? OI_ADDED_COLOR : OI_REMOVED_COLOR, HEATMAP_MIN_ALPHA + (Math.abs(v) / maxAbs) * (HEATMAP_MAX_ALPHA - HEATMAP_MIN_ALPHA))
                   return (
                     <td
                       key={t}
@@ -2751,11 +2763,13 @@ export default function OiReplayPage() {
                   <Text type="secondary" style={{ fontSize: 12 }}>
                     Every tracked strike's own OI change, minute by minute - color intensity is how much changed (scaled to the
                     heaviest change this side has shown today), not an absolute scale, so a quiet day and a violent one both
-                    use the full range. Hover a cell for the exact number. Scroll horizontally for earlier in the day.
+                    use the full range. Hover a cell for the exact number. Scroll horizontally for earlier in the day. Blue/orange
+                    here, not green/red - the chart's own R/S wall lines already use green/red for a different meaning (which
+                    side, how heavy), so this uses its own separate color language for "added vs removed."
                   </Text>
                   <Space size={16}>
-                    <Text style={{ color: UP_COLOR }}>■ OI added</Text>
-                    <Text style={{ color: DOWN_COLOR }}>■ OI removed</Text>
+                    <Text style={{ color: OI_ADDED_COLOR }}>■ OI added</Text>
+                    <Text style={{ color: OI_REMOVED_COLOR }}>■ OI removed</Text>
                   </Space>
                   <div>
                     <Text strong style={{ fontSize: 12 }}>CE</Text>
@@ -3175,8 +3189,8 @@ export default function OiReplayPage() {
           ) : (
             <Space size={16} wrap>
               <Text type="secondary">CE on top, PE on bottom</Text>
-              <Text style={{ color: UP_COLOR }}>■ Added</Text>
-              <Text style={{ color: DOWN_COLOR }}>■ Removed</Text>
+              <Text style={{ color: OI_ADDED_COLOR }}>■ Added</Text>
+              <Text style={{ color: OI_REMOVED_COLOR }}>■ Removed</Text>
             </Space>
           )}
           {(drilldownMode === 'total' ? drilldownCeTotal.length + drilldownPeTotal.length : drilldownCeChange.length + drilldownPeChange.length) > 0 ? (
