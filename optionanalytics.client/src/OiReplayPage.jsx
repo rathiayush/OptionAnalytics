@@ -3231,6 +3231,17 @@ export default function OiReplayPage() {
           </>
         )}
 
+        {loading && (
+          <Card size="small">
+            <Alert
+              type="info"
+              showIcon
+              message="Loading…"
+              description="Fetching each strike's OI/IV history directly from Dhan (no local cache is configured on this server) - this can take up to 10-15 seconds for the full ATM±10 band, longer if Dhan itself is slow to respond right now. Not stuck - just a lot of individually rate-limited API calls."
+            />
+          </Card>
+        )}
+
         {!result && !loading && (
           <Card size="small">
             <Empty description="Pick a stored trading day and click Load day." />

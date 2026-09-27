@@ -56,6 +56,20 @@ public sealed class OiReplayService
     /// <summary>The only expiry cycle this page ever reads - see this class's own doc comment.</summary>
     private const int NearestExpiryCode = 1;
 
+    /// <summary>How many strike/side fetches (out of the 42 the ATM+-10 band needs - 21 strikes x
+    /// CE/PE) run concurrently, when they end up needing a live Dhan call. This used to be a plain
+    /// sequential loop - correct, but on a deployed environment with no stored database configured
+    /// (see ConnectionStrings:NiftyDataCollectorTimescale, deliberately blank there - this class's
+    /// own top-of-file doc comment), EVERY one of the 42 calls falls through to Dhan, one at a time,
+    /// so the page's own load time is 42x a single call's network round trip with zero overlap - the
+    /// dominant, previously-unaddressed cause of "OI Replay takes forever to load" on a real
+    /// deployment. A modest, bounded concurrency (not unbounded - Dhan's own per-connection/rate
+    /// limits for this endpoint aren't documented, and DhanRollingOptionDataService's own
+    /// RateLimitRetryDelay/MaxRateLimitRetries already give a graceful fallback if this guess turns
+    /// out too aggressive) cuts wall-clock time by roughly this factor without leaning on an
+    /// undocumented limit.</summary>
+    private const int MaxConcurrentStrikeFetches = 4;
+
     /// <summary>Strike step per underlying THIS PAGE supports - deliberately its own dictionary
     /// rather than reusing ExpiredOptionBacktestService.StrikeStepByUnderlying, which excludes
     /// SENSEX for a reason specific to ITS OWN stored/prefetch pipeline (see that dictionary's own
@@ -129,19 +143,25 @@ public sealed class OiReplayService
         if (string.Equals(underlying, "BANKNIFTY", StringComparison.OrdinalIgnoreCase) && string.Equals(expiryFlag, "WEEK", StringComparison.OrdinalIgnoreCase))
             return OiReplayResult.Failed(underlying, date, timeframe, "BANKNIFTY has no weekly expiry - NSE discontinued it. Use Monthly instead.");
 
-        // Resolved lazily, at most once per request, only if a live call actually ends up being
-        // needed below - a past day whose stored data is already complete never touches Dhan at all.
+        // Resolved once, eagerly, up front - not lazily via a memoizing closure the way this used to
+        // work. A lazy "resolve on first use, cache the result" closure is fine for a purely
+        // sequential caller, but the strike-band loop below now fires its (up to) 42 fetches
+        // concurrently (see MaxConcurrentStrikeFetches), and multiple concurrent callers could all
+        // observe "not yet resolved" before any one of them finishes resolving it - a real race, not
+        // just a redundant-work inefficiency. Resolving once here, before any concurrent work starts,
+        // sidesteps that entirely. EnsureLoadedAsync/FindSpot are a cached in-memory dictionary
+        // lookup once the scrip master has loaded, not a network call, so paying for this even on a
+        // request that ends up needing no live call at all (a fully-fresh stored day, local dev) is a
+        // non-issue - and in the one environment this actually matters for (a deployed instance with
+        // no stored database at all), isAlwaysLive/_allowLiveDataFallback is unconditionally true
+        // anyway, so this was always going to be resolved regardless.
         DhanSpotInstrument? instrument = null;
-        var instrumentResolveAttempted = false;
-
-        async Task<DhanSpotInstrument?> ResolveInstrumentAsync()
+        if (isAlwaysLive || _allowLiveDataFallback)
         {
-            if (instrumentResolveAttempted) return instrument;
-            instrumentResolveAttempted = true;
             await _instrumentMaster.EnsureLoadedAsync(cancellationToken);
             instrument = _instrumentMaster.FindSpot(underlying);
-            return instrument;
         }
+        Task<DhanSpotInstrument?> ResolveInstrumentAsync() => Task.FromResult(instrument);
 
         var spotBarsRaw = !isAlwaysLive && _storedSpot.IsConfigured
             ? (await _storedSpot.GetSpotCandlesAsync(underlying, date, date, cancellationToken)).Bars
@@ -173,23 +193,45 @@ public sealed class OiReplayService
         // the time it collected, per underlying) - a strike this page asks for that the collector
         // never tracked just comes back with zero rows, contributing no points, not an error; the
         // frontend's own ladder simply has nothing to show at that level.
-        var cePoints = new List<OiReplayPoint>();
-        var pePoints = new List<OiReplayPoint>();
+        //
+        // Fetched concurrently now (bounded by MaxConcurrentStrikeFetches - see its own doc comment),
+        // not one strike/side at a time - the 21-strike band x CE/PE is 42 GetSeriesAsync calls, and
+        // on a deployment with no stored database every one of them is a live Dhan round trip with
+        // zero overlap under the old sequential loop. Each fetch returns its own point list rather
+        // than mutating a shared cePoints/pePoints list directly - List<T> is not safe for concurrent
+        // writers, and collecting via Task.WhenAll's own results sidesteps needing a lock entirely.
+        using var throttle = new SemaphoreSlim(MaxConcurrentStrikeFetches);
 
+        async Task<List<OiReplayPoint>> FetchPointsAsync(string strikeToken, string drvOptionType)
+        {
+            await throttle.WaitAsync(cancellationToken);
+            try
+            {
+                var bars = await GetSeriesAsync(underlying, expiryFlag, strikeToken, drvOptionType, date, ResolveInstrumentAsync, cancellationToken, forceLive);
+                var points = new List<OiReplayPoint>(bars.Count);
+                foreach (var bar in bars)
+                    if (bar.Strike is { } strike)
+                        points.Add(new OiReplayPoint(bar.Bar.Time, strike, bar.OpenInterest, bar.ImpliedVolatility, bar.Bar.Close, bar.Bar.Open, bar.Bar.High, bar.Bar.Low));
+                return points;
+            }
+            finally
+            {
+                throttle.Release();
+            }
+        }
+
+        var ceTasks = new List<Task<List<OiReplayPoint>>>();
+        var peTasks = new List<Task<List<OiReplayPoint>>>();
         for (var steps = -StrikeBandSteps; steps <= StrikeBandSteps; steps++)
         {
             var token = ExpiredOptionBacktestService.StrikeToken(steps);
-
-            var ceBars = await GetSeriesAsync(underlying, expiryFlag, token, "CALL", date, ResolveInstrumentAsync, cancellationToken, forceLive);
-            foreach (var bar in ceBars)
-                if (bar.Strike is { } strike)
-                    cePoints.Add(new OiReplayPoint(bar.Bar.Time, strike, bar.OpenInterest, bar.ImpliedVolatility, bar.Bar.Close, bar.Bar.Open, bar.Bar.High, bar.Bar.Low));
-
-            var peBars = await GetSeriesAsync(underlying, expiryFlag, token, "PUT", date, ResolveInstrumentAsync, cancellationToken, forceLive);
-            foreach (var bar in peBars)
-                if (bar.Strike is { } strike)
-                    pePoints.Add(new OiReplayPoint(bar.Bar.Time, strike, bar.OpenInterest, bar.ImpliedVolatility, bar.Bar.Close, bar.Bar.Open, bar.Bar.High, bar.Bar.Low));
+            ceTasks.Add(FetchPointsAsync(token, "CALL"));
+            peTasks.Add(FetchPointsAsync(token, "PUT"));
         }
+        await Task.WhenAll(ceTasks.Concat(peTasks));
+
+        var cePoints = ceTasks.SelectMany(t => t.Result).ToList();
+        var pePoints = peTasks.SelectMany(t => t.Result).ToList();
 
         var spotCandlesTf = BacktestUtil.AggregateCandles(spotBars1m, timeframe);
 
