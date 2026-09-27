@@ -1,9 +1,9 @@
 import { Component, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import dayjs from 'dayjs'
-import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicker, Alert, Empty, Tooltip, Slider, Tag, InputNumber, Switch, Table, Segmented, Checkbox } from 'antd'
+import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicker, Alert, Empty, Tooltip, Slider, Tag, InputNumber, Switch, Table, Segmented, Checkbox, Modal } from 'antd'
 import { PlayCircleOutlined, PauseCircleOutlined, ReloadOutlined, SoundOutlined } from '@ant-design/icons'
-import { createChart, createSeriesMarkers, CandlestickSeries, LineSeries, CrosshairMode } from 'lightweight-charts'
+import { createChart, createSeriesMarkers, CandlestickSeries, LineSeries, HistogramSeries, CrosshairMode } from 'lightweight-charts'
 import * as signalR from '@microsoft/signalr'
 import './oiMobile.css'
 import {
@@ -196,6 +196,21 @@ function computeOiLookbackChange(series, barsAgo) {
 
 function fmtOiDelta(v) {
   return v == null ? '—' : `${v > 0 ? '+' : ''}${v.toLocaleString()}`
+}
+
+// Per-minute OI CHANGE (the delta from the previous bucket) off an already-bucketed total-OI level
+// series (aggregateLinePoints' own output, one point per minute, last-value-per-bucket) - the
+// derivative of that level series, one point per minute after the first (which has no earlier
+// bucket to diff against, so it is left out rather than shown as some fake baseline delta). This is
+// what the strike drill-down's own "Per-minute change" tab plots - a level series alone answers
+// "how much OI is there," but not "which minute did it actually get added/removed in," which is
+// exactly the "how can I see WHERE it's been added" ask this exists for.
+function computeOiChangeSeries(totalSeries) {
+  const result = []
+  for (let i = 1; i < totalSeries.length; i++) {
+    result.push({ time: totalSeries[i].time, value: totalSeries[i].value - totalSeries[i - 1].value })
+  }
+  return result
 }
 
 // Single-value options for chart B's own "last N bars" OI-change overlay - a plain number picker,
@@ -410,11 +425,18 @@ const SUPPORT_DARK = '#0a5c1f'
 // further data fetch, just a local re-render. Also draws the strongest OI levels on each side as
 // horizontal price lines directly on the chart (darker = heavier OI = a "harder" level) - the same
 // data the ladder shows in table form, here as the market-structure read on the price chart itself.
-function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = true, vwapSeries = EMPTY_ARRAY, showVwap = false, height = 440 }) {
+function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = true, vwapSeries = EMPTY_ARRAY, showVwap = false, onStrikeClick, height = 440 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
   const vwapSeriesRef = useRef(null)
+  // Refs, not effect dependencies - clicking is wired up once in the chart-creation effect below
+  // ([height] only), so a new onStrikeClick/step on every render (step rarely changes; onStrikeClick
+  // is an inline arrow function at the call site) must not tear down and recreate the whole chart.
+  const onStrikeClickRef = useRef(onStrikeClick)
+  onStrikeClickRef.current = onStrikeClick
+  const stepRef = useRef(step)
+  stepRef.current = step
   const priceLinesRef = useRef([])
 
   // Same ATM-centered adaptive window the price lines below are drawn from - memoized so the
@@ -476,6 +498,17 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = tru
       upColor: UP_COLOR, downColor: DOWN_COLOR, borderVisible: false, wickUpColor: UP_COLOR, wickDownColor: DOWN_COLOR,
     })
     vwapSeriesRef.current = chart.addSeries(LineSeries, { color: VWAP_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: 'VWAP' })
+
+    // Click-to-drill-down: rounds whatever price was clicked to the nearest tracked strike (the same
+    // step every other strike-rounding on this page uses), regardless of whether that exact level
+    // happens to have an OI-wall price line drawn on it right now - every strike in the fetched band
+    // has its own ceByStrike/peByStrike history, walled or not, so this works anywhere on the chart.
+    chart.subscribeClick((param) => {
+      if (!param.point || !seriesRef.current || !stepRef.current) return
+      const price = seriesRef.current.coordinateToPrice(param.point.y)
+      if (price == null) return
+      onStrikeClickRef.current?.(Math.round(price / stepRef.current) * stepRef.current)
+    })
 
     const onResize = () => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }) }
     window.addEventListener('resize', onResize)
@@ -628,6 +661,68 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = tru
       )}
     </div>
   )
+}
+
+// The strike drill-down popup's own chart - CE and PE as two series, either both LineSeries (mode
+// 'total': the plain OI level, one point per minute) or both HistogramSeries (mode 'change': the
+// per-minute delta from computeOiChangeSeries, positive bars above zero when OI is being added,
+// negative below when it's unwinding - the "where has it been added" read a single since-open number
+// can't show). Rebuilds the whole chart on a mode switch rather than trying to swap a series' type
+// in place - lightweight-charts has no such API, and a mode change is a deliberate tab click, not a
+// live-tick-rate event, so the small recreation cost here is a non-issue.
+function StrikeOiDrilldownChart({ ceSeries, peSeries, mode, dayKey, height = 320 }) {
+  const containerRef = useRef(null)
+  const chartRef = useRef(null)
+  const ceSeriesRef = useRef(null)
+  const peSeriesRef = useRef(null)
+
+  useEffect(() => {
+    if (!containerRef.current) return
+    const chart = createChart(containerRef.current, {
+      width: containerRef.current.clientWidth,
+      height,
+      layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
+      grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
+      rightPriceScale: { borderColor: BORDER_COLOR },
+      timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter },
+      crosshair: { mode: CrosshairMode.Normal },
+      localization: { timeFormatter: istTimeFormatter },
+    })
+    chartRef.current = chart
+    if (mode === 'total') {
+      ceSeriesRef.current = chart.addSeries(LineSeries, { color: CE_COLOR, lineWidth: 2, title: 'CE OI', priceLineVisible: false })
+      peSeriesRef.current = chart.addSeries(LineSeries, { color: PE_COLOR, lineWidth: 2, title: 'PE OI', priceLineVisible: false })
+    } else {
+      // Two independent histograms on the SAME price scale (own scaleMargins so they don't fully
+      // overlap top-to-bottom) rather than one series colored per-point - CE and PE both swing
+      // through positive and negative on any given minute, and a single shared color-per-point
+      // series can't tell the two apart the way a real second series (own color, own legend line) can.
+      ceSeriesRef.current = chart.addSeries(HistogramSeries, { color: CE_COLOR, title: 'CE OI Δ', priceLineVisible: false, priceScaleId: 'ce-change' })
+      peSeriesRef.current = chart.addSeries(HistogramSeries, { color: PE_COLOR, title: 'PE OI Δ', priceLineVisible: false, priceScaleId: 'pe-change' })
+      chart.priceScale('ce-change').applyOptions({ scaleMargins: { top: 0.1, bottom: 0.5 } })
+      chart.priceScale('pe-change').applyOptions({ scaleMargins: { top: 0.5, bottom: 0.1 } })
+    }
+
+    const onResize = () => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }) }
+    window.addEventListener('resize', onResize)
+    return () => {
+      window.removeEventListener('resize', onResize)
+      chart.remove()
+      chartRef.current = null
+      ceSeriesRef.current = null
+      peSeriesRef.current = null
+    }
+  }, [height, mode])
+
+  useEffect(() => {
+    if (!ceSeriesRef.current || !peSeriesRef.current) return
+    ceSeriesRef.current.setData(ceSeries)
+    peSeriesRef.current.setData(peSeries)
+    if (ceSeries.length > 0 || peSeries.length > 0) chartRef.current?.timeScale().fitContent()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ceSeries, peSeries, mode, dayKey])
+
+  return <div ref={containerRef} style={{ width: '100%', height }} />
 }
 
 const EMA1_COLOR = '#f0b429'
@@ -1586,6 +1681,25 @@ export default function OiReplayPage() {
     () => groupByStrike(isToday ? [...(result?.pePoints ?? []), ...livePePoints] : (result?.pePoints ?? [])),
     [result, livePePoints, isToday],
   )
+
+  // The strike drill-down popup - opened by clicking anywhere on the main chart (see ReplayChart's
+  // own onStrikeClick), answering the "how can I see per-minute OI change AND total OI for one
+  // strike, not just its since-open number" ask. null strike means the popup is closed.
+  const [drilldownStrike, setDrilldownStrike] = useState(null)
+  const [drilldownMode, setDrilldownMode] = useState('change')
+  // Whole day's own history, not asOfMs-gated - this is a look-back analysis popup, not part of the
+  // live replay HUD, so it always shows everything currently loaded for the strike regardless of
+  // where a historical day's own scrub position sits.
+  const drilldownCeTotal = useMemo(
+    () => aggregateLinePoints((ceByStrike.get(drilldownStrike) ?? []).map((p) => ({ time: toChartTime(p.time), value: p.openInterest })), 1),
+    [ceByStrike, drilldownStrike],
+  )
+  const drilldownPeTotal = useMemo(
+    () => aggregateLinePoints((peByStrike.get(drilldownStrike) ?? []).map((p) => ({ time: toChartTime(p.time), value: p.openInterest })), 1),
+    [peByStrike, drilldownStrike],
+  )
+  const drilldownCeChange = useMemo(() => computeOiChangeSeries(drilldownCeTotal), [drilldownCeTotal])
+  const drilldownPeChange = useMemo(() => computeOiChangeSeries(drilldownPeTotal), [drilldownPeTotal])
 
   // See FEED_STALL_WARNING_MS's own doc comment - set on every live tick that actually matches
   // today/the current underlying/expiryFlag, so this tracks "last time THIS page's own feed
@@ -2624,6 +2738,7 @@ export default function OiReplayPage() {
                           top5Only={top5WallsOnly}
                           vwapSeries={vwapSeries}
                           showVwap={showVwap}
+                          onStrikeClick={setDrilldownStrike}
                           height={560}
                         />
                       </ChartErrorBoundary>
@@ -2882,6 +2997,39 @@ export default function OiReplayPage() {
           </Card>
         )}
       </Space>
+
+      <Modal
+        open={drilldownStrike != null}
+        onCancel={() => setDrilldownStrike(null)}
+        title={`${underlying} ${drilldownStrike?.toLocaleString() ?? ''} - OI history`}
+        footer={null}
+        width={760}
+      >
+        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          <Segmented
+            value={drilldownMode}
+            onChange={setDrilldownMode}
+            options={[{ value: 'change', label: 'Per-minute change' }, { value: 'total', label: 'Total OI' }]}
+          />
+          <Space size={16}>
+            <Text style={{ color: CE_COLOR }}>● CE</Text>
+            <Text style={{ color: PE_COLOR }}>● PE</Text>
+          </Space>
+          {(drilldownMode === 'total' ? drilldownCeTotal.length + drilldownPeTotal.length : drilldownCeChange.length + drilldownPeChange.length) > 0 ? (
+            <ChartErrorBoundary key={`drilldown-${underlying}-${drilldownStrike}-${drilldownMode}`}>
+              <StrikeOiDrilldownChart
+                ceSeries={drilldownMode === 'total' ? drilldownCeTotal : drilldownCeChange}
+                peSeries={drilldownMode === 'total' ? drilldownPeTotal : drilldownPeChange}
+                mode={drilldownMode}
+                dayKey={`drilldown-${underlying}-${result?.date}-${drilldownStrike}`}
+                height={360}
+              />
+            </ChartErrorBoundary>
+          ) : (
+            <Empty description="No OI data yet for this strike." />
+          )}
+        </Space>
+      </Modal>
     </div>
   )
 }
