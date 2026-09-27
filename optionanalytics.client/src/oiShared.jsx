@@ -537,24 +537,53 @@ export function buildPremiumCandles(points) {
     // bar) still falls back to price-only bucketing below, correctly widening high/low as multiple
     // ticks land in the same still-forming minute.
     const hasOwnRange = Number.isFinite(p.open) && Number.isFinite(p.high) && Number.isFinite(p.low)
+    // volume: last-value-wins, same as close - a real historical minute already carries its own
+    // true per-minute volume (see OiReplayPoint's own doc comment on the backend), a live tick
+    // defaults to 0 there (no per-tick volume of its own), so this correctly stays 0 through a
+    // still-forming minute rather than fabricating one. Feeds computePremiumVwap below.
+    const volume = Number.isFinite(p.volume) ? p.volume : 0
     const existing = buckets.get(minute)
     if (hasOwnRange) {
       if (existing) {
         existing.high = Math.max(existing.high, p.high)
         existing.low = Math.min(existing.low, p.low)
         existing.close = p.price
+        existing.volume = volume
       } else {
-        buckets.set(minute, { time: minute, open: p.open, high: p.high, low: p.low, close: p.price })
+        buckets.set(minute, { time: minute, open: p.open, high: p.high, low: p.low, close: p.price, volume })
       }
     } else if (existing) {
       existing.high = Math.max(existing.high, p.price)
       existing.low = Math.min(existing.low, p.price)
       existing.close = p.price
+      existing.volume = volume
     } else {
-      buckets.set(minute, { time: minute, open: p.price, high: p.price, low: p.price, close: p.price })
+      buckets.set(minute, { time: minute, open: p.price, high: p.price, low: p.price, close: p.price, volume })
     }
   }
   return [...buckets.values()].sort((a, b) => a.time - b.time)
+}
+
+// Session VWAP for one leg's own premium candles - cumulative typicalPrice*volume / cumulative
+// volume, mirroring VwapCalculator.cs's own backend convention exactly (typical price =
+// (H+L+C)/3, a zero-volume bar contributes nothing to the running total rather than being treated
+// as a real reading, and no point at all is emitted before the day's first traded volume - not a
+// zero, which would silently read as "below VWAP" against any real price). OI Replay is always one
+// day at a time already, so there is no cross-day reset to handle here the way the backend's own
+// multi-day version needs.
+export function computePremiumVwap(oneMinCandles) {
+  const points = []
+  let cumulativePriceVolume = 0
+  let cumulativeVolume = 0
+  for (const c of oneMinCandles) {
+    if (c.volume > 0) {
+      const typicalPrice = (c.high + c.low + c.close) / 3
+      cumulativePriceVolume += typicalPrice * c.volume
+      cumulativeVolume += c.volume
+    }
+    if (cumulativeVolume > 0) points.push({ time: c.time, value: cumulativePriceVolume / cumulativeVolume })
+  }
+  return points
 }
 
 // Last line of defense before handing candles to lightweight-charts, which throws an UNCAUGHT error
@@ -646,13 +675,15 @@ export function PremiumCandleChart({ bars, dayKey, height = 320 }) {
 // so far" needs no cutoff); OI Replay passes its own replay clock's asOfMs so this chart only ever
 // reveals what the rest of that page's replay has "played" up to, same as every other chart there.
 export function PremiumEmaChart({
-  points, asOfMs, timeframe, onTimeframeChange, ema1Period, onEma1PeriodChange, ema2Period, onEma2PeriodChange, dayKey, height = 320,
+  points, asOfMs, timeframe, onTimeframeChange, ema1Period, onEma1PeriodChange, ema2Period, onEma2PeriodChange, dayKey,
+  showVwap = false, height = 320,
 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
   const ema1SeriesRef = useRef(null)
   const ema2SeriesRef = useRef(null)
+  const vwapSeriesRef = useRef(null)
 
   const filteredPoints = useMemo(
     () => (asOfMs == null ? points : (points ?? []).filter((p) => new Date(p.time).getTime() <= asOfMs)),
@@ -662,6 +693,12 @@ export function PremiumEmaChart({
   const displayBars = useMemo(() => sanitizeCandles(aggregateBars(oneMinCandles, timeframe)), [oneMinCandles, timeframe])
   const ema1Points = useMemo(() => computeEma(displayBars, ema1Period), [displayBars, ema1Period])
   const ema2Points = useMemo(() => computeEma(displayBars, ema2Period), [displayBars, ema2Period])
+  // This LEG's own genuine VWAP - its own volume, not the underlying spot's (see
+  // computePremiumVwap's own doc comment) - computed at native 1-minute resolution like the EMAs
+  // above, not re-bucketed to the chart's own coarser timeframe (a session VWAP is a running total
+  // across the whole day regardless of display timeframe, the same way the spot VWAP elsewhere on
+  // this page is never re-aggregated either).
+  const vwapPoints = useMemo(() => computePremiumVwap(oneMinCandles), [oneMinCandles])
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -681,6 +718,7 @@ export function PremiumEmaChart({
     })
     ema1SeriesRef.current = chart.addSeries(LineSeries, { color: EMA1_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true })
     ema2SeriesRef.current = chart.addSeries(LineSeries, { color: EMA2_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true })
+    vwapSeriesRef.current = chart.addSeries(LineSeries, { color: VWAP_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: 'VWAP' })
 
     const onResize = () => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }) }
     window.addEventListener('resize', onResize)
@@ -691,6 +729,7 @@ export function PremiumEmaChart({
       seriesRef.current = null
       ema1SeriesRef.current = null
       ema2SeriesRef.current = null
+      vwapSeriesRef.current = null
     }
   }, [height])
 
@@ -700,6 +739,7 @@ export function PremiumEmaChart({
   useEffect(() => { if (seriesRef.current) seriesRef.current.setData(displayBars) }, [displayBars])
   useEffect(() => { if (ema1SeriesRef.current) ema1SeriesRef.current.setData(ema1Points) }, [ema1Points])
   useEffect(() => { if (ema2SeriesRef.current) ema2SeriesRef.current.setData(ema2Points) }, [ema2Points])
+  useEffect(() => { vwapSeriesRef.current?.setData(showVwap ? vwapPoints : EMPTY_ARRAY) }, [vwapPoints, showVwap])
 
   useEffect(() => {
     if (displayBars.length > 0) chartRef.current?.timeScale().fitContent()

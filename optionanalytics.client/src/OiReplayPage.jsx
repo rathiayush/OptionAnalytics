@@ -3249,6 +3249,7 @@ export default function OiReplayPage() {
                               ema1Period={cePremiumEma1} onEma1PeriodChange={setCePremiumEma1}
                               ema2Period={cePremiumEma2} onEma2PeriodChange={setCePremiumEma2}
                               dayKey={`premium-ce-${underlying}-${result.date}-${cePremiumOffset}`}
+                              showVwap={showVwap}
                               height={320}
                             />
                           </ChartErrorBoundary>
@@ -3273,6 +3274,7 @@ export default function OiReplayPage() {
                               ema1Period={pePremiumEma1} onEma1PeriodChange={setPePremiumEma1}
                               ema2Period={pePremiumEma2} onEma2PeriodChange={setPePremiumEma2}
                               dayKey={`premium-pe-${underlying}-${result.date}-${pePremiumOffset}`}
+                              showVwap={showVwap}
                               height={320}
                             />
                           </ChartErrorBoundary>

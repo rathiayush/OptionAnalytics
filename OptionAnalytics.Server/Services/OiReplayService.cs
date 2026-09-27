@@ -222,7 +222,7 @@ public sealed class OiReplayService
                 var points = new List<OiReplayPoint>(bars.Count);
                 foreach (var bar in bars)
                     if (bar.Strike is { } strike)
-                        points.Add(new OiReplayPoint(bar.Bar.Time, strike, bar.OpenInterest, bar.ImpliedVolatility, bar.Bar.Close, bar.Bar.Open, bar.Bar.High, bar.Bar.Low));
+                        points.Add(new OiReplayPoint(bar.Bar.Time, strike, bar.OpenInterest, bar.ImpliedVolatility, bar.Bar.Close, bar.Bar.Open, bar.Bar.High, bar.Bar.Low, bar.Bar.Volume));
                 return points;
             }
             finally
