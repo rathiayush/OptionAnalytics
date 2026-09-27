@@ -143,6 +143,65 @@ public sealed class SpotFeedHostedService : BackgroundService
         // backfill attempt (auth still not ready, a transient Dhan hiccup) still ends up with real
         // history instead of being stuck at zero for the rest of the run.
         _ = RetryBackfillIfNeededAsync(stoppingToken);
+
+        // See WatchForStaleTicksAsync's own doc comment for why this exists alongside
+        // DhanMarketFeedClient's own connection-wide stall watchdog, not instead of it.
+        _ = WatchForStaleTicksAsync(stoppingToken);
+    }
+
+    /// <summary>How long a spot instrument may go without a live tick, during market hours, before
+    /// this service suspects Dhan silently dropped just ITS OWN subscription. DhanMarketFeedClient's
+    /// shared FeedStallDetector judges the WHOLE connection - any message, from ANY instrument (an
+    /// option strike, a futures contract), counts as proof the feed is alive (see its own doc
+    /// comment: "liveness being tracked, not usefulness") - so as long as CdvHostedService/
+    /// OiReplayLiveFeedService keep seeing their own ticks, that watchdog never fires, even if
+    /// Dhan silently stopped sending just the spot/index token specifically. This is the narrower,
+    /// per-instrument check that catches exactly that case: a live spot index ticks essentially
+    /// continuously during market hours (unlike a deep OTM strike, which can legitimately go quiet
+    /// for a stretch), so 90 seconds of silence on it specifically, while the connection is
+    /// otherwise clearly alive, is a real signal rather than a normal lull.</summary>
+    private static readonly TimeSpan SpotStaleThreshold = TimeSpan.FromSeconds(90);
+    private static readonly TimeSpan StaleCheckInterval = TimeSpan.FromSeconds(30);
+
+    // NSE/BSE's regular equity/derivatives session - re-subscribing outside these hours would just
+    // manufacture warnings every day for a feed that is silent for the entirely ordinary reason that
+    // the market itself is closed.
+    private static readonly TimeOnly MarketOpen = new(9, 15);
+    private static readonly TimeOnly MarketClose = new(15, 30);
+
+    private async Task WatchForStaleTicksAsync(CancellationToken stoppingToken)
+    {
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            if (!await DelayAsync(StaleCheckInterval, stoppingToken)) return;
+
+            var timeOfDayIst = TimeOnly.FromDateTime(DateTimeOffset.UtcNow.ToOffset(IstClock.Offset).DateTime);
+            if (timeOfDayIst < MarketOpen || timeOfDayIst > MarketClose) continue;
+
+            var stale = _bySecurityId
+                .Where(kv => DateTimeOffset.UtcNow - kv.Value.LastUpdateUtc > SpotStaleThreshold)
+                .ToArray();
+            if (stale.Length == 0) continue;
+
+            _logger.LogWarning(
+                "Spot feed: {Underlyings} had no live tick in over {Seconds}s during market hours while the shared feed connection is otherwise alive - re-sending their subscription in case Dhan silently dropped just these.",
+                string.Join(", ", stale.Select(kv => kv.Value.Underlying)), SpotStaleThreshold.TotalSeconds);
+
+            try
+            {
+                await _feedClient.ResendSubscriptionsForAsync(stale.Select(kv => kv.Key), stoppingToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex, "Spot feed: re-subscribing stale instrument(s) failed - the connection-wide watchdog will still catch a genuinely dead connection.");
+            }
+        }
+    }
+
+    private static async Task<bool> DelayAsync(TimeSpan delay, CancellationToken cancellationToken)
+    {
+        try { await Task.Delay(delay, cancellationToken); return true; }
+        catch (OperationCanceledException) { return false; }
     }
 
     /// <summary>Keeps retrying BackfillAsync for as long as ANY underlying still has zero candles -
