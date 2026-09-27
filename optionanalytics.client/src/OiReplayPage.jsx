@@ -884,14 +884,6 @@ function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfMs }) {
   const [hover, setHover] = useState(null)
   const { buckets, perStrikeChange } = useMemo(() => buildOiChangeMatrix(byStrike, strikes, asOfMs), [byStrike, strikes, asOfMs])
 
-  // Fixed per-CARD color (this plot is always rendered once per side, "CE" or "PE" - see its own
-  // two call sites below), not per-cell by added/removed sign - the option-SELLING convention this
-  // page's OI reads elsewhere already use (ReplayChart's own R/S walls, the Total OI/Since-open Δ
-  // charts above): rising CE (call) OI is bearish, rising PE (put) OI is bullish, so CE is always
-  // DOWN_COLOR and PE always UP_COLOR here, with alpha still carrying the MAGNITUDE of that minute's
-  // change (a heavier change is more vivid) - only the sign-based hue swap was traded away.
-  const cellColor = label === 'PE' ? UP_COLOR : DOWN_COLOR
-
   const maxAbs = useMemo(() => {
     let max = 0
     for (const byBucket of perStrikeChange.values())
@@ -927,7 +919,14 @@ function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfMs }) {
         const v = byBucket?.get(t)
         if (v == null || v === 0 || maxAbs === 0) return
         const alpha = HEATMAP_MIN_ALPHA + (Math.abs(v) / maxAbs) * (HEATMAP_MAX_ALPHA - HEATMAP_MIN_ALPHA)
-        ctx.fillStyle = hexToRgba(cellColor, alpha)
+        // Added vs removed, by SIGN - not a fixed per-card color the way the CE/PE identity is
+        // encoded elsewhere (Total OI/Since-open Δ charts). Side is already unambiguous here without
+        // needing color for it at all: this plot always renders once per side, in its OWN card,
+        // labeled "CE" or "PE" in the card title - so the cell color is free to answer a DIFFERENT
+        // question this specific view exists for ("where has OI been added vs pulled, minute by
+        // minute"), the one thing a fixed-hue-by-side scheme would have hidden entirely. A real "how
+        // do you show OI removed, I need to tell them apart" report confirmed exactly that gap.
+        ctx.fillStyle = hexToRgba(v > 0 ? OI_ADDED_COLOR : OI_REMOVED_COLOR, alpha)
         ctx.fillRect(col * HEATMAP_CELL_WIDTH, y, HEATMAP_CELL_WIDTH - 1, HEATMAP_ROW_HEIGHT - 1)
       })
     })
@@ -942,7 +941,7 @@ function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfMs }) {
       if (col % labelEvery !== 0) return
       ctx.fillText(istTimeFormatter(t), col * HEATMAP_CELL_WIDTH + HEATMAP_CELL_WIDTH / 2, plotHeight + 14)
     })
-  }, [buckets, perStrikeChange, strikes, maxAbs, plotWidth, plotHeight, cellColor])
+  }, [buckets, perStrikeChange, strikes, maxAbs, plotWidth, plotHeight])
 
   // Scrolls to the newest minute once a fresh bucket set first appears (a new day loaded, or the
   // very first live buckets) - not on every subsequent tick, which would otherwise yank a reader's
@@ -1003,7 +1002,7 @@ function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfMs }) {
           }}
         >
           {label} {hover.strike.toLocaleString()} @ {istTimeFormatter(hover.time)}:{' '}
-          <Text strong style={{ color: hover.value ? cellColor : '#fff' }}>
+          <Text strong style={{ color: !hover.value ? '#fff' : hover.value > 0 ? OI_ADDED_COLOR : OI_REMOVED_COLOR }}>
             {hover.value == null ? '—' : formatOiMillions(hover.value, { signed: true })}
           </Text>
         </div>
