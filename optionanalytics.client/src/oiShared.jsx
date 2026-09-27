@@ -284,9 +284,18 @@ export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Onl
     vwapSeriesRef.current = chart.addSeries(LineSeries, { color: VWAP_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: 'VWAP' })
 
     const onResize = () => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }) }
-    window.addEventListener('resize', onResize)
+    // ResizeObserver, not a plain window 'resize' listener: on mobile, a chart's own container
+    // can still read a stale/zero clientWidth at the moment this effect runs (layout not yet
+    // settled - address bar show/hide, a not-yet-laid-out flex/card ancestor, fonts still
+    // loading), and nothing but an actual BROWSER WINDOW resize ever fired the old listener - a
+    // real report ("looks to be mobile only... when squeezing resolution it started working")
+    // was exactly this: resizing the window was the only thing that ever re-measured the chart.
+    // ResizeObserver fires once immediately on observe() with the container's ACTUAL current
+    // size, then again on every later layout change, not just a window-level resize.
+    const resizeObserver = new ResizeObserver(onResize)
+    resizeObserver.observe(containerRef.current)
     return () => {
-      window.removeEventListener('resize', onResize)
+      resizeObserver.disconnect()
       chart.remove()
       chartRef.current = null
       seriesRef.current = null
@@ -419,9 +428,18 @@ export function EmaChart({ oneMinBars, visibleCount, timeframe, onTimeframeChang
     vwapSeriesRef.current = chart.addSeries(LineSeries, { color: VWAP_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: 'VWAP' })
 
     const onResize = () => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }) }
-    window.addEventListener('resize', onResize)
+    // ResizeObserver, not a plain window 'resize' listener: on mobile, a chart's own container
+    // can still read a stale/zero clientWidth at the moment this effect runs (layout not yet
+    // settled - address bar show/hide, a not-yet-laid-out flex/card ancestor, fonts still
+    // loading), and nothing but an actual BROWSER WINDOW resize ever fired the old listener - a
+    // real report ("looks to be mobile only... when squeezing resolution it started working")
+    // was exactly this: resizing the window was the only thing that ever re-measured the chart.
+    // ResizeObserver fires once immediately on observe() with the container's ACTUAL current
+    // size, then again on every later layout change, not just a window-level resize.
+    const resizeObserver = new ResizeObserver(onResize)
+    resizeObserver.observe(containerRef.current)
     return () => {
-      window.removeEventListener('resize', onResize)
+      resizeObserver.disconnect()
       chart.remove()
       chartRef.current = null
       seriesRef.current = null
@@ -490,9 +508,18 @@ export function PremiumLineChart({ points, dayKey, color, height = 320 }) {
     seriesRef.current = chart.addSeries(LineSeries, { color, lineWidth: 2, priceLineVisible: false, lastValueVisible: true })
 
     const onResize = () => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }) }
-    window.addEventListener('resize', onResize)
+    // ResizeObserver, not a plain window 'resize' listener: on mobile, a chart's own container
+    // can still read a stale/zero clientWidth at the moment this effect runs (layout not yet
+    // settled - address bar show/hide, a not-yet-laid-out flex/card ancestor, fonts still
+    // loading), and nothing but an actual BROWSER WINDOW resize ever fired the old listener - a
+    // real report ("looks to be mobile only... when squeezing resolution it started working")
+    // was exactly this: resizing the window was the only thing that ever re-measured the chart.
+    // ResizeObserver fires once immediately on observe() with the container's ACTUAL current
+    // size, then again on every later layout change, not just a window-level resize.
+    const resizeObserver = new ResizeObserver(onResize)
+    resizeObserver.observe(containerRef.current)
     return () => {
-      window.removeEventListener('resize', onResize)
+      resizeObserver.disconnect()
       chart.remove()
       chartRef.current = null
       seriesRef.current = null
@@ -647,9 +674,18 @@ export function PremiumCandleChart({ bars, dayKey, height = 320 }) {
     })
 
     const onResize = () => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }) }
-    window.addEventListener('resize', onResize)
+    // ResizeObserver, not a plain window 'resize' listener: on mobile, a chart's own container
+    // can still read a stale/zero clientWidth at the moment this effect runs (layout not yet
+    // settled - address bar show/hide, a not-yet-laid-out flex/card ancestor, fonts still
+    // loading), and nothing but an actual BROWSER WINDOW resize ever fired the old listener - a
+    // real report ("looks to be mobile only... when squeezing resolution it started working")
+    // was exactly this: resizing the window was the only thing that ever re-measured the chart.
+    // ResizeObserver fires once immediately on observe() with the container's ACTUAL current
+    // size, then again on every later layout change, not just a window-level resize.
+    const resizeObserver = new ResizeObserver(onResize)
+    resizeObserver.observe(containerRef.current)
     return () => {
-      window.removeEventListener('resize', onResize)
+      resizeObserver.disconnect()
       chart.remove()
       chartRef.current = null
       seriesRef.current = null
@@ -721,9 +757,18 @@ export function PremiumEmaChart({
     vwapSeriesRef.current = chart.addSeries(LineSeries, { color: VWAP_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: 'VWAP' })
 
     const onResize = () => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }) }
-    window.addEventListener('resize', onResize)
+    // ResizeObserver, not a plain window 'resize' listener: on mobile, a chart's own container
+    // can still read a stale/zero clientWidth at the moment this effect runs (layout not yet
+    // settled - address bar show/hide, a not-yet-laid-out flex/card ancestor, fonts still
+    // loading), and nothing but an actual BROWSER WINDOW resize ever fired the old listener - a
+    // real report ("looks to be mobile only... when squeezing resolution it started working")
+    // was exactly this: resizing the window was the only thing that ever re-measured the chart.
+    // ResizeObserver fires once immediately on observe() with the container's ACTUAL current
+    // size, then again on every later layout change, not just a window-level resize.
+    const resizeObserver = new ResizeObserver(onResize)
+    resizeObserver.observe(containerRef.current)
     return () => {
-      window.removeEventListener('resize', onResize)
+      resizeObserver.disconnect()
       chart.remove()
       chartRef.current = null
       seriesRef.current = null
