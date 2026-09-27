@@ -213,6 +213,30 @@ function computeOiChangeSeries(totalSeries) {
   return result
 }
 
+// The all-strikes counterpart to the single-strike drill-down's own change tab - "where, across the
+// WHOLE tracked band, has OI actually been added or removed" at a glance, which reading one strike
+// at a time can't give. Builds a strike x minute matrix for one side (CE or PE): each strike gets
+// its own computeOiChangeSeries off its own 1-minute-bucketed level series, keyed by bucket time in
+// a Map for O(1) lookup per cell. The column set is the UNION of every bucket ANY strike in the band
+// has touched (not just the first strike's own), so a strike that only started ticking partway
+// through the day still lines up against the correct real time rather than sliding left.
+function buildOiChangeMatrix(byStrike, strikes) {
+  const perStrikeChange = new Map()
+  const bucketSet = new Set()
+  for (const strike of strikes) {
+    const total = aggregateLinePoints((byStrike.get(strike) ?? []).map((p) => ({ time: toChartTime(p.time), value: p.openInterest })), 1)
+    const change = computeOiChangeSeries(total)
+    perStrikeChange.set(strike, new Map(change.map((p) => [p.time, p.value])))
+    for (const p of change) bucketSet.add(p.time)
+  }
+  return { buckets: [...bucketSet].sort((a, b) => a - b), perStrikeChange }
+}
+
+function hexToRgba(hex, alpha) {
+  const [r, g, b] = hexToRgb(hex)
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`
+}
+
 // Single-value options for chart B's own "last N bars" OI-change overlay - a plain number picker,
 // not a multi-select: this overlay is one figure, tied directly to chart B itself, not a table with
 // several lookback windows at once (that's what the Total OI Lookback Table below is for instead).
@@ -336,6 +360,7 @@ const SECTION_OPTIONS = [
   { value: 'topStats', label: 'Top stats' },
   { value: 'marketRead', label: 'Market Read' },
   { value: 'dayOi', label: 'Day OI Accumulation' },
+  { value: 'oiHeatmap', label: 'OI change heatmap (all strikes)' },
   { value: 'entryCharts', label: 'Fast entry charts (3/1 min)' },
   { value: 'optionPremium', label: 'Option premium (CE/PE)' },
   { value: 'liquidityMap', label: 'Liquidity map' },
@@ -731,6 +756,94 @@ function StrikeOiDrilldownChart({ ceSeries, peSeries, mode, dayKey, height = 320
   }, [ceSeries, peSeries, mode, dayKey])
 
   return <div ref={containerRef} style={{ width: '100%', height }} />
+}
+
+// One color, opacity-scaled by magnitude, per pole - the diverging encoding: UP_COLOR (this app's
+// own established green-up convention, already used for every other directional read on this page)
+// at low alpha for a small change, ramping toward full alpha at the grid's OWN largest |change| this
+// side has seen anywhere - so intensity is always relative to what this specific view is actually
+// showing, not some fixed absolute scale that would wash out on a quiet day and clip on a violent
+// one. DOWN_COLOR mirrors it for OI being removed. Validated as a CVD-safe pair against this app's
+// real dark chart surface (#0d0e12): worst-pair ΔE 11.6 deutan / 29.6 normal-vision, both clear of
+// the dataviz method's 8/15 targets - see the validator run in this PR's own description.
+const HEATMAP_MIN_ALPHA = 0.12
+const HEATMAP_MAX_ALPHA = 0.9
+
+// Strike x minute OI-change grid for one side (CE or PE) - the all-strikes counterpart to the
+// single-strike drill-down popup's own "Per-minute change" tab. A native scrollable HTML table
+// rather than a lightweight-charts series: lightweight-charts has no heatmap/cell series type, and a
+// table gives free horizontal scroll, a sticky strike column, and a native per-cell hover tooltip
+// (the exact value, satisfying the "every value must be reachable, not just implied by color" rule)
+// with no extra plumbing. Defaults scrolled to the newest minute so a live/"today" view doesn't open
+// showing 9:15 AM while ticks are landing at 2 PM.
+function OiChangeHeatmapGrid({ label, byStrike, strikes, atmStrike, height = 320 }) {
+  const scrollRef = useRef(null)
+  const { buckets, perStrikeChange } = useMemo(() => buildOiChangeMatrix(byStrike, strikes), [byStrike, strikes])
+
+  const maxAbs = useMemo(() => {
+    let max = 0
+    for (const byBucket of perStrikeChange.values())
+      for (const v of byBucket.values())
+        if (Number.isFinite(v)) max = Math.max(max, Math.abs(v))
+    return max
+  }, [perStrikeChange])
+
+  // Runs once per fresh bucket set (a new day loaded, or the very first buckets to arrive live) -
+  // not on every live tick, which would otherwise yank a reader's own manual scroll-back to the
+  // right edge on every single update.
+  const bucketCountRef = useRef(0)
+  useEffect(() => {
+    if (buckets.length === 0 || buckets.length === bucketCountRef.current) return
+    bucketCountRef.current = buckets.length
+    if (scrollRef.current) scrollRef.current.scrollLeft = scrollRef.current.scrollWidth
+  }, [buckets.length])
+
+  if (buckets.length === 0) return <Empty description={`No ${label} OI data yet.`} />
+
+  return (
+    <div ref={scrollRef} style={{ overflow: 'auto', maxHeight: height, border: `1px solid ${BORDER_COLOR}`, borderRadius: 4 }}>
+      <table style={{ borderCollapse: 'collapse', fontSize: 11 }}>
+        <thead>
+          <tr>
+            <th style={{ position: 'sticky', left: 0, top: 0, zIndex: 2, background: '#161a22', padding: '2px 8px', textAlign: 'right', color: AXIS_COLOR }}>
+              {label}
+            </th>
+            {buckets.map((t) => (
+              <th key={t} style={{ position: 'sticky', top: 0, zIndex: 1, background: '#161a22', padding: '2px 3px', fontWeight: 400, color: AXIS_COLOR, whiteSpace: 'nowrap' }}>
+                {istTimeFormatter(t)}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {strikes.map((strike) => {
+            const byBucket = perStrikeChange.get(strike)
+            const isAtm = strike === atmStrike
+            return (
+              <tr key={strike}>
+                <td style={{ position: 'sticky', left: 0, background: '#161a22', padding: '2px 8px', textAlign: 'right', whiteSpace: 'nowrap', fontWeight: isAtm ? 700 : 400, color: isAtm ? '#fff' : AXIS_COLOR }}>
+                  {strike.toLocaleString()}
+                </td>
+                {buckets.map((t) => {
+                  const v = byBucket?.get(t)
+                  const cellColor = v == null || v === 0 || maxAbs === 0
+                    ? 'transparent'
+                    : hexToRgba(v > 0 ? UP_COLOR : DOWN_COLOR, HEATMAP_MIN_ALPHA + (Math.abs(v) / maxAbs) * (HEATMAP_MAX_ALPHA - HEATMAP_MIN_ALPHA))
+                  return (
+                    <td
+                      key={t}
+                      title={v == null ? undefined : `${label} ${strike.toLocaleString()} @ ${istTimeFormatter(t)}: ${v > 0 ? '+' : ''}${v.toLocaleString()}`}
+                      style={{ width: 20, height: 20, minWidth: 20, background: cellColor }}
+                    />
+                  )
+                })}
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
 }
 
 const EMA1_COLOR = '#f0b429'
@@ -1961,6 +2074,17 @@ export default function OiReplayPage() {
     return rows.sort((a, b) => b.strike - a.strike)
   }, [ceByStrike, peByStrike, asOfMs, dayStartMs])
 
+  // Same strike set/order as the ladder (descending, highest strike first) - derived straight from
+  // ceByStrike/peByStrike rather than ladderRows itself: ladderRows' own useMemo also depends on
+  // asOfMs, which ticks continuously in live mode (asOfMs = Date.now(), not gated on real data
+  // arriving - see its own doc comment), so deriving from it would recompute the whole heatmap matrix
+  // on every render even when no new OI actually landed. This only changes when the tracked strike
+  // SET itself changes (a new strike enters the band), not on every tick.
+  const heatmapStrikes = useMemo(
+    () => [...new Set([...ceByStrike.keys(), ...peByStrike.keys()])].sort((a, b) => b - a),
+    [ceByStrike, peByStrike],
+  )
+
   const step = result?.step || 50
   const atmStrike = currentBar ? Math.round(currentBar.close / step) * step : null
 
@@ -2616,6 +2740,30 @@ export default function OiReplayPage() {
                         { title: 'PE %', dataIndex: 'pePercent', key: 'pePercent', render: renderOiLookbackPercent },
                       ]}
                     />
+                  </div>
+                </Space>
+              </Card>
+            )}
+
+            {visibleSections.includes('oiHeatmap') && (
+              <Card size="small" title="OI change heatmap (all strikes, per minute)">
+                <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    Every tracked strike's own OI change, minute by minute - color intensity is how much changed (scaled to the
+                    heaviest change this side has shown today), not an absolute scale, so a quiet day and a violent one both
+                    use the full range. Hover a cell for the exact number. Scroll horizontally for earlier in the day.
+                  </Text>
+                  <Space size={16}>
+                    <Text style={{ color: UP_COLOR }}>■ OI added</Text>
+                    <Text style={{ color: DOWN_COLOR }}>■ OI removed</Text>
+                  </Space>
+                  <div>
+                    <Text strong style={{ fontSize: 12 }}>CE</Text>
+                    <OiChangeHeatmapGrid label="CE" byStrike={ceByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} height={280} />
+                  </div>
+                  <div>
+                    <Text strong style={{ fontSize: 12 }}>PE</Text>
+                    <OiChangeHeatmapGrid label="PE" byStrike={peByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} height={280} />
                   </div>
                 </Space>
               </Card>
