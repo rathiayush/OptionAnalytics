@@ -224,6 +224,19 @@ function computeOiChangeSeries(totalSeries) {
   return result
 }
 
+// The cumulative counterpart to computeOiChangeSeries above - every point re-based against the
+// FIRST point in the series (today's own opening OI, since every series plotted through this
+// component already starts at market open), rather than the previous point. Answers "how much has
+// built up/unwound since the day started, as of any given minute" as a running line - the same
+// number the ladder/Day OI Accumulation cards already show as a single "as of right now" figure,
+// just plotted continuously so its own trajectory through the day is visible instead of only its
+// current value.
+function toSinceOpenSeries(totalSeries) {
+  if (totalSeries.length === 0) return totalSeries
+  const base = totalSeries[0].value
+  return totalSeries.map((p) => ({ time: p.time, value: p.value - base }))
+}
+
 // The all-strikes counterpart to the single-strike drill-down's own change tab - "where, across the
 // WHOLE tracked band, has OI actually been added or removed" at a glance, which reading one strike
 // at a time can't give. Builds a strike x minute matrix for one side (CE or PE): each strike gets
@@ -732,9 +745,14 @@ function StrikeOiDrilldownChart({ ceSeries, peSeries, mode, dayKey, height = 320
       localization: { timeFormatter: istTimeFormatter },
     })
     chartRef.current = chart
-    if (mode === 'total') {
-      ceSeriesRef.current = chart.addSeries(LineSeries, { color: CE_COLOR, lineWidth: 2, title: 'CE OI', priceLineVisible: false })
-      peSeriesRef.current = chart.addSeries(LineSeries, { color: PE_COLOR, lineWidth: 2, title: 'PE OI', priceLineVisible: false })
+    if (mode === 'total' || mode === 'sinceOpen') {
+      // sinceOpen is still a plain LINE, same as total - a running Δ-from-open is exactly as
+      // continuous as the raw level it's derived from (see toSinceOpenSeries), just re-based to
+      // start at zero instead of at the day's actual opening OI. Only the title changes.
+      const title = mode === 'sinceOpen' ? 'CE OI Δ (since open)' : 'CE OI'
+      const peTitle = mode === 'sinceOpen' ? 'PE OI Δ (since open)' : 'PE OI'
+      ceSeriesRef.current = chart.addSeries(LineSeries, { color: CE_COLOR, lineWidth: 2, title, priceLineVisible: false })
+      peSeriesRef.current = chart.addSeries(LineSeries, { color: PE_COLOR, lineWidth: 2, title: peTitle, priceLineVisible: false })
     } else {
       // Two independent histograms on the SAME chart, CE on its own price scale in the top half and
       // PE on its own in the bottom half (own scaleMargins so they don't overlap) - that vertical
@@ -1727,6 +1745,12 @@ export default function OiReplayPage() {
   // total OI rather than one strike, with its own independent timeframe (default 1-minute bars).
   const [totalOiLookbackBars, setTotalOiLookbackBars] = useState(DEFAULT_TOTAL_OI_LOOKBACK_BARS)
   const [totalOiLookbackTimeframe, setTotalOiLookbackTimeframe] = useState(1)
+  // Which of the two whole-chain OI charts the Day OI Accumulation card shows - see the chart
+  // itself, further down, for why this is a switch rather than the per-strike drilldown's own
+  // stacked pair (both would double this card's already-tall height, and the day-level numbers
+  // right above the chart already give the CURRENT since-open figure - the chart's own job here is
+  // showing its TRAJECTORY, one view at a time, not re-deriving the same number again).
+  const [dayOiChartMode, setDayOiChartMode] = useState('total')
   const [chartCTimeframe, setChartCTimeframe] = useState(1)
   const [chartCEma1, setChartCEma1] = useState(9)
   const [chartCEma2, setChartCEma2] = useState(15)
@@ -1954,6 +1978,8 @@ export default function OiReplayPage() {
   )
   const drilldownCeChange = useMemo(() => computeOiChangeSeries(drilldownCeTotal), [drilldownCeTotal])
   const drilldownPeChange = useMemo(() => computeOiChangeSeries(drilldownPeTotal), [drilldownPeTotal])
+  const drilldownCeSinceOpen = useMemo(() => toSinceOpenSeries(drilldownCeTotal), [drilldownCeTotal])
+  const drilldownPeSinceOpen = useMemo(() => toSinceOpenSeries(drilldownPeTotal), [drilldownPeTotal])
 
   // See FEED_STALL_WARNING_MS's own doc comment - set on every live tick that actually matches
   // today/the current underlying/expiryFlag, so this tracks "last time THIS page's own feed
@@ -2504,6 +2530,12 @@ export default function OiReplayPage() {
     const pe = computeOiLookbackChange(peTotalOiLine, n)
     return { key: n, bars: n, ceDelta: ce.delta, cePercent: ce.percentChange, peDelta: pe.delta, pePercent: pe.percentChange }
   })
+  // The whole-chain counterpart to the per-strike drilldown's own "Since open Δ" chart - same
+  // toSinceOpenSeries re-basing, just fed the CHAIN-WIDE total lines above instead of one strike's
+  // own. dayOiSummary's ceDayChange/peDayChange already give this as a single current number; this
+  // is that same number's full trajectory through the day.
+  const ceTotalSinceOpenLine = useMemo(() => toSinceOpenSeries(ceTotalOiLine), [ceTotalOiLine])
+  const peTotalSinceOpenLine = useMemo(() => toSinceOpenSeries(peTotalOiLine), [peTotalOiLine])
 
   // Smart alert: whenever a strike NEAR ATM shows a one-minute OI shift past this threshold, flag
   // it and beep - the "someone just loaded/unwound a huge quantity" event this app can't otherwise
@@ -2873,6 +2905,31 @@ export default function OiReplayPage() {
                         { title: 'PE %', dataIndex: 'pePercent', key: 'pePercent', render: renderOiLookbackPercent },
                       ]}
                     />
+                  </div>
+                  {/* Whole-chain counterpart to the per-strike drill-down's own charts - a switch, not
+                      stacked, since the numbers right above already give the current since-open
+                      figure; this chart's own job is showing how it got there. */}
+                  <div>
+                    <Space align="center" size={12} wrap style={{ marginBottom: 8 }}>
+                      <Text type="secondary" style={{ fontSize: 12 }}>Chain-wide OI</Text>
+                      <Segmented
+                        size="small"
+                        value={dayOiChartMode}
+                        onChange={setDayOiChartMode}
+                        options={[{ label: 'Total OI', value: 'total' }, { label: 'Since open Δ', value: 'sinceOpen' }]}
+                      />
+                      <Text style={{ color: CE_COLOR }}>● CE</Text>
+                      <Text style={{ color: PE_COLOR }}>● PE</Text>
+                    </Space>
+                    <ChartErrorBoundary key={`day-oi-${dayOiChartMode}-${underlying}-${result?.date}`}>
+                      <StrikeOiDrilldownChart
+                        ceSeries={dayOiChartMode === 'total' ? ceTotalOiLine : ceTotalSinceOpenLine}
+                        peSeries={dayOiChartMode === 'total' ? peTotalOiLine : peTotalSinceOpenLine}
+                        mode={dayOiChartMode}
+                        dayKey={`day-oi-${dayOiChartMode}-${underlying}-${result?.date}-${timeframe}`}
+                        height={220}
+                      />
+                    </ChartErrorBoundary>
                   </div>
                 </Space>
               </Card>
@@ -3351,6 +3408,26 @@ export default function OiReplayPage() {
                   peSeries={drilldownPeChange}
                   mode="change"
                   dayKey={`drilldown-change-${underlying}-${result?.date}-${drilldownStrike}`}
+                  height={220}
+                />
+              </ChartErrorBoundary>
+            </div>
+            {/* Same running-total idea as Total OI above, just re-based to start at zero (today's own
+                open) instead of at the day's actual opening OI level - "how much has this ONE strike's
+                own OI built up or unwound since the day started" as a continuous line, stacked below
+                the other two for the same "read it straight up against the level/change" reason. */}
+            <div>
+              <Space size={16} style={{ marginBottom: 4 }}>
+                <Text strong style={{ fontSize: 12 }}>Since open Δ</Text>
+                <Text style={{ color: CE_COLOR }}>● CE</Text>
+                <Text style={{ color: PE_COLOR }}>● PE</Text>
+              </Space>
+              <ChartErrorBoundary key={`drilldown-sinceopen-${underlying}-${drilldownStrike}`}>
+                <StrikeOiDrilldownChart
+                  ceSeries={drilldownCeSinceOpen}
+                  peSeries={drilldownPeSinceOpen}
+                  mode="sinceOpen"
+                  dayKey={`drilldown-sinceopen-${underlying}-${result?.date}-${drilldownStrike}`}
                   height={220}
                 />
               </ChartErrorBoundary>
