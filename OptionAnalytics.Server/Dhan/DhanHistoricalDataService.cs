@@ -59,7 +59,7 @@ public sealed class DhanHistoricalDataService
     /// still get that via CandleWithVolume.ToCandle(); one computing VWAP (VwapCalculator) needs the
     /// Volume this shape carries.</summary>
     public async Task<(IReadOnlyList<CandleWithVolume> Candles, string? Error)> GetIntradayCandlesAsync(
-        uint securityId, string dhanSegment, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken)
+        uint securityId, string dhanSegment, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken, bool interactive = true)
     {
         if (!_api.HasSession)
         {
@@ -77,7 +77,7 @@ public sealed class DhanHistoricalDataService
             toDate = $"{toDay:yyyy-MM-dd} 15:30:00",
         };
 
-        await _rateLimiter.WaitForPermitAsync(cancellationToken);
+        await _rateLimiter.WaitForPermitAsync(interactive, cancellationToken);
         using var response = await _api.SendAsync(HttpMethod.Post, "/charts/intraday", payload,
             $"intraday candles ({dhanSegment}:{securityId}, {fromDay:yyyy-MM-dd}..{toDay:yyyy-MM-dd})", cancellationToken);
 
@@ -99,8 +99,8 @@ public sealed class DhanHistoricalDataService
     /// strikes simply didn't trade", with no way to tell which without turning on Debug logging in
     /// production. The caller aggregates these into one line per backfill batch.</summary>
     public Task<(IReadOnlyList<CandleWithVolume> Candles, string? Error)> GetIntradayOptionCandlesAsync(
-        uint securityId, string dhanSegment, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken) =>
-        GetIntradayDerivativeCandlesAsync(securityId, dhanSegment, OptionInstrument, fromDay, toDay, intervalMinutes, cancellationToken);
+        uint securityId, string dhanSegment, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken, bool interactive = true) =>
+        GetIntradayDerivativeCandlesAsync(securityId, dhanSegment, OptionInstrument, fromDay, toDay, intervalMinutes, cancellationToken, interactive);
 
     /// <summary>OHLC + volume + (best-effort) open interest for one futures contract - the OI
     /// Replay page's own "show me the futures too" chart. UNLIKE GetIntradayOptionCandlesAsync,
@@ -113,7 +113,7 @@ public sealed class DhanHistoricalDataService
     /// missing for these particular bars" - the first is a page-level "OI not available" message,
     /// the second is normal, unremarkable missing data.</summary>
     public async Task<(IReadOnlyList<(CandleWithVolume Bar, long? OpenInterest)> Bars, bool OiFieldPresent, string? Error)> GetIntradayFuturesCandlesAsync(
-        uint securityId, string dhanSegment, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken)
+        uint securityId, string dhanSegment, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken, bool interactive = true)
     {
         if (!_api.HasSession)
         {
@@ -132,7 +132,7 @@ public sealed class DhanHistoricalDataService
             oi = true,
         };
 
-        await _rateLimiter.WaitForPermitAsync(cancellationToken);
+        await _rateLimiter.WaitForPermitAsync(interactive, cancellationToken);
         using var response = await _api.SendAsync(HttpMethod.Post, "/charts/intraday", payload,
             $"futures intraday candles ({dhanSegment}:{securityId}, {fromDay:yyyy-MM-dd}..{toDay:yyyy-MM-dd})", cancellationToken);
 
@@ -192,7 +192,7 @@ public sealed class DhanHistoricalDataService
     }
 
     private async Task<(IReadOnlyList<CandleWithVolume> Candles, string? Error)> GetIntradayDerivativeCandlesAsync(
-        uint securityId, string dhanSegment, string instrumentType, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken)
+        uint securityId, string dhanSegment, string instrumentType, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken, bool interactive)
     {
         if (!_api.HasSession)
         {
@@ -210,7 +210,7 @@ public sealed class DhanHistoricalDataService
             toDate = $"{toDay:yyyy-MM-dd} 15:30:00",
         };
 
-        await _rateLimiter.WaitForPermitAsync(cancellationToken);
+        await _rateLimiter.WaitForPermitAsync(interactive, cancellationToken);
         using var response = await _api.SendAsync(HttpMethod.Post, "/charts/intraday", payload,
             $"{instrumentType} intraday candles ({dhanSegment}:{securityId}, {fromDay:yyyy-MM-dd}..{toDay:yyyy-MM-dd})", cancellationToken);
 

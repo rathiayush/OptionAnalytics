@@ -128,7 +128,7 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
     /// matched to the nearest earlier bar).</summary>
     public async Task<(IReadOnlyList<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)> Bars, string? Error)> GetRollingOptionCandlesAsync(
         string underlying, uint underlyingSecurityId, string expiryFlag, int expiryCode, string strike, string drvOptionType,
-        DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken)
+        DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken, bool interactive = true)
     {
         // `underlying` used to be unused here (this implementation identifies the CONTRACT by
         // underlyingSecurityId, not by name) - now also read once, just to pick the right exchange
@@ -175,7 +175,7 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
             };
             var context = $"rolling option candles ({underlyingSecurityId}, {expiryFlag}+{expiryCode}, {strike} {drvOptionType}, {chunkStart:yyyy-MM-dd}..{chunkEnd:yyyy-MM-dd})";
 
-            var (response, error) = await SendWithRateLimitRetryAsync(payload, context, cancellationToken);
+            var (response, error) = await SendWithRateLimitRetryAsync(payload, context, cancellationToken, interactive);
             if (response is null)
             {
                 _logger.LogWarning("Rolling option candle request failed for {Id} ({ExpiryFlag}+{ExpiryCode}, {Strike} {Side}, {From}..{To}) - {Error}",
@@ -233,11 +233,11 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
     /// disposed - handing one back across this method's own return, after disposing here, would be
     /// use-after-dispose.</summary>
     private async Task<(DhanApiResponse? Response, string? Error)> SendWithRateLimitRetryAsync(
-        object payload, string context, CancellationToken cancellationToken)
+        object payload, string context, CancellationToken cancellationToken, bool interactive)
     {
         for (var attempt = 0; ; attempt++)
         {
-            await _rateLimiter.WaitForPermitAsync(cancellationToken);
+            await _rateLimiter.WaitForPermitAsync(interactive, cancellationToken);
             var response = await _api.SendAsync(HttpMethod.Post, "/charts/rollingoption", payload, context, cancellationToken);
             if (response.Success) return (response, null);
 

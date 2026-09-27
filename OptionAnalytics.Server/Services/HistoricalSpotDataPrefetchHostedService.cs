@@ -179,7 +179,7 @@ public sealed class HistoricalSpotDataPrefetchHostedService : BackgroundService
 
             var chunkEnd = MinDate(chunkStart.AddDays(ChunkCalendarDays - 1), toDay);
 
-            var (candles, error) = await _historicalData.GetIntradayCandlesAsync(instrument.SecurityId, instrument.DhanSegment, chunkStart, chunkEnd, 1, cancellationToken);
+            var (candles, error) = await _historicalData.GetIntradayCandlesAsync(instrument.SecurityId, instrument.DhanSegment, chunkStart, chunkEnd, 1, cancellationToken, interactive: false);
             if (error is not null)
                 _logger.LogWarning("Historical spot prefetch chunk {From}..{To} for {Underlying} returned an error (continuing with the rest): {Error}", chunkStart, chunkEnd, underlying, error);
 
