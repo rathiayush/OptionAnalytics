@@ -693,12 +693,14 @@ function StrikeOiDrilldownChart({ ceSeries, peSeries, mode, dayKey, height = 320
       ceSeriesRef.current = chart.addSeries(LineSeries, { color: CE_COLOR, lineWidth: 2, title: 'CE OI', priceLineVisible: false })
       peSeriesRef.current = chart.addSeries(LineSeries, { color: PE_COLOR, lineWidth: 2, title: 'PE OI', priceLineVisible: false })
     } else {
-      // Two independent histograms on the SAME price scale (own scaleMargins so they don't fully
-      // overlap top-to-bottom) rather than one series colored per-point - CE and PE both swing
-      // through positive and negative on any given minute, and a single shared color-per-point
-      // series can't tell the two apart the way a real second series (own color, own legend line) can.
-      ceSeriesRef.current = chart.addSeries(HistogramSeries, { color: CE_COLOR, title: 'CE OI Δ', priceLineVisible: false, priceScaleId: 'ce-change' })
-      peSeriesRef.current = chart.addSeries(HistogramSeries, { color: PE_COLOR, title: 'PE OI Δ', priceLineVisible: false, priceScaleId: 'pe-change' })
+      // Two independent histograms on the SAME chart, CE on its own price scale in the top half and
+      // PE on its own in the bottom half (own scaleMargins so they don't overlap) - that vertical
+      // position is what tells CE and PE apart here, freeing color up to answer the actual "where is
+      // it being added vs removed" ask instead: each BAR is colored by its own sign in the setData
+      // effect below (UP_COLOR when OI grew that minute, DOWN_COLOR when it shrank), the same
+      // green-up/red-down convention this app already uses everywhere else for a directional read.
+      ceSeriesRef.current = chart.addSeries(HistogramSeries, { title: 'CE OI Δ', priceLineVisible: false, priceScaleId: 'ce-change' })
+      peSeriesRef.current = chart.addSeries(HistogramSeries, { title: 'PE OI Δ', priceLineVisible: false, priceScaleId: 'pe-change' })
       chart.priceScale('ce-change').applyOptions({ scaleMargins: { top: 0.1, bottom: 0.5 } })
       chart.priceScale('pe-change').applyOptions({ scaleMargins: { top: 0.5, bottom: 0.1 } })
     }
@@ -716,8 +718,14 @@ function StrikeOiDrilldownChart({ ceSeries, peSeries, mode, dayKey, height = 320
 
   useEffect(() => {
     if (!ceSeriesRef.current || !peSeriesRef.current) return
-    ceSeriesRef.current.setData(ceSeries)
-    peSeriesRef.current.setData(peSeries)
+    // 'total' is a plain level - the series' own flat CE_COLOR/PE_COLOR (set at series-creation time
+    // above) already applies with no per-point override needed. 'change' colors each bar by its OWN
+    // sign - added (OI grew that minute) vs removed (OI shrank) - see this component's own doc
+    // comment on why that, not a flat per-series color, is what actually answers "where is it being
+    // added/removed."
+    const withDirectionColor = (series) => mode === 'change' ? series.map((p) => ({ ...p, color: p.value >= 0 ? UP_COLOR : DOWN_COLOR })) : series
+    ceSeriesRef.current.setData(withDirectionColor(ceSeries))
+    peSeriesRef.current.setData(withDirectionColor(peSeries))
     if (ceSeries.length > 0 || peSeries.length > 0) chartRef.current?.timeScale().fitContent()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ceSeries, peSeries, mode, dayKey])
@@ -3011,10 +3019,18 @@ export default function OiReplayPage() {
             onChange={setDrilldownMode}
             options={[{ value: 'change', label: 'Per-minute change' }, { value: 'total', label: 'Total OI' }]}
           />
-          <Space size={16}>
-            <Text style={{ color: CE_COLOR }}>● CE</Text>
-            <Text style={{ color: PE_COLOR }}>● PE</Text>
-          </Space>
+          {drilldownMode === 'total' ? (
+            <Space size={16}>
+              <Text style={{ color: CE_COLOR }}>● CE</Text>
+              <Text style={{ color: PE_COLOR }}>● PE</Text>
+            </Space>
+          ) : (
+            <Space size={16} wrap>
+              <Text type="secondary">CE on top, PE on bottom</Text>
+              <Text style={{ color: UP_COLOR }}>■ Added</Text>
+              <Text style={{ color: DOWN_COLOR }}>■ Removed</Text>
+            </Space>
+          )}
           {(drilldownMode === 'total' ? drilldownCeTotal.length + drilldownPeTotal.length : drilldownCeChange.length + drilldownPeChange.length) > 0 ? (
             <ChartErrorBoundary key={`drilldown-${underlying}-${drilldownStrike}-${drilldownMode}`}>
               <StrikeOiDrilldownChart
