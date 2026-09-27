@@ -7,7 +7,7 @@ import { createChart, createSeriesMarkers, CandlestickSeries, LineSeries, Histog
 import * as signalR from '@microsoft/signalr'
 import './oiMobile.css'
 import {
-  UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR,
+  UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR,
   istTimeFormatter, istTickMarkFormatter, toBar, toChartTime, fromChartTime, istDateKey,
   NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, usePersistedState,
 } from './shared.jsx'
