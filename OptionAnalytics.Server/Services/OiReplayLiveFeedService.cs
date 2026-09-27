@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Linq;
 using Microsoft.AspNetCore.SignalR;
 using OptionAnalytics.Server.Dhan;
 using OptionAnalytics.Server.Hubs;
@@ -136,6 +137,28 @@ public sealed class OiReplayLiveFeedService : BackgroundService
                     _logger.LogError(ex, "OI Replay live feed: {Underlying} futures re-center failed - left as it was.", underlying);
                     complete = false;
                 }
+            }
+
+            // Unconditionally re-affirm EVERY tracked leg/futures contract's subscription every
+            // cycle, not just newly-entered ones - RecenterComboAsync/RecenterFuturesAsync only ever
+            // subscribe a token NOT already in DhanMarketFeedClient's own tracked set (see their
+            // IsSubscribed guards above), so a leg Dhan silently stopped ticking - its subscription
+            // quietly dropped server-side, while every other leg keeps ticking completely normally -
+            // would otherwise never be repaired: the shared connection-wide stall watchdog only
+            // notices when NOTHING at all has arrived recently (see SpotFeedHostedService's own
+            // identical fix and FeedStallDetector's doc comment). A per-leg staleness threshold isn't
+            // safe here the way it is for spot - a deep OTM strike can legitimately go many minutes
+            // between real trades, so "no tick recently" proves nothing on its own. Re-sending the
+            // whole tracked set every cycle instead sidesteps that: cheap and harmless for a leg Dhan
+            // already has right, silently repairs one it doesn't - no threshold to get wrong either
+            // way.
+            try
+            {
+                await _feedClient.ResendSubscriptionsForAsync(_legsBySecurityId.Keys.Concat(_futuresLegsBySecurityId.Keys), stoppingToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex, "OI Replay live feed: periodic re-subscribe of tracked legs failed.");
             }
 
             try { await Task.Delay(complete ? RecenterInterval : IncompleteRetryInterval, stoppingToken); }

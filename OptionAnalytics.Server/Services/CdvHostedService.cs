@@ -940,6 +940,29 @@ public sealed class CdvHostedService : BackgroundService
 
         _subscribedTokens[key] = desiredTokens;
 
+        // Unconditionally re-affirm EVERY currently-desired token's subscription, not just the ones
+        // newly added above (toSubscribe) - SubscribeAsync is a deliberate no-op for a token already
+        // in DhanMarketFeedClient's own tracked set (see its own doc comment), so a strike Dhan
+        // silently stopped ticking - its subscription quietly dropped server-side, while every other
+        // strike (and spot, options elsewhere) keeps ticking completely normally - would otherwise
+        // never be repaired: the shared connection-wide stall watchdog only notices when NOTHING at
+        // all has arrived recently (see SpotFeedHostedService's own identical fix and
+        // FeedStallDetector's doc comment). A per-strike staleness threshold isn't safe here the way
+        // it is for spot - a deep OTM strike can legitimately go many minutes between real trades, so
+        // "no tick recently" proves nothing on its own for an option. Re-sending the whole desired
+        // set every recenter instead sidesteps that entirely: cheap and harmless for a token Dhan
+        // already has right (StrategyTriggerHostedService's own live trading depends on this exact
+        // set staying genuinely live), silently repairs one it doesn't - no threshold to get wrong
+        // either way.
+        try
+        {
+            await _feedClient.ResendSubscriptionsForAsync(desiredTokens, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "CDV: {Underlying} {Expiry} periodic re-subscribe of tracked strikes failed.", underlying, expiry);
+        }
+
         _logger.LogInformation(
             "CDV: {Underlying} {Expiry} spot={Spot} -> ATM={Atm}. Tracking CE strikes [{Ce}] and PE strikes [{Pe}].",
             underlying, expiry, spot, atm, string.Join(", ", ceList.OrderBy(v => v)), string.Join(", ", peList.OrderBy(v => v)));
