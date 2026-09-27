@@ -102,6 +102,12 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
     private const int MaxRateLimitRetries = 3;
     private static readonly TimeSpan RateLimitRetryDelay = TimeSpan.FromSeconds(2);
 
+    // Bounds how long a single chunk call may hang waiting for Dhan before giving up - see
+    // DhanHistoricalDataService.CallTimeout's own doc comment for the full reasoning (same value,
+    // same rationale, kept as its own constant here rather than shared since these are two
+    // otherwise-independent classes).
+    private static readonly TimeSpan CallTimeout = TimeSpan.FromSeconds(20);
+
     private readonly DhanApiClient _api;
     private readonly DhanDataApiRateLimiter _rateLimiter;
     private readonly ILogger<DhanRollingOptionDataService> _logger;
@@ -238,7 +244,25 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
         for (var attempt = 0; ; attempt++)
         {
             await _rateLimiter.WaitForPermitAsync(interactive, cancellationToken);
-            var response = await _api.SendAsync(HttpMethod.Post, "/charts/rollingoption", payload, context, cancellationToken);
+
+            // CallTimeout bounds a single call, separately from the caller's own cancellationToken -
+            // see DhanHistoricalDataService.CallTimeout's own doc comment for why this can't just be
+            // DhanApiClient's shared HttpClient.Timeout (that HttpClient is also used by live order
+            // placement) and why the catch below specifically checks the CALLER's own token rather
+            // than trusting "OperationCanceledException" alone to mean a real cancellation - a timeout
+            // firing here throws exactly the same exception type HttpClient uses for that too.
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeoutCts.CancelAfter(CallTimeout);
+            DhanApiResponse response;
+            try
+            {
+                response = await _api.SendAsync(HttpMethod.Post, "/charts/rollingoption", payload, context, timeoutCts.Token);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                _logger.LogWarning("Dhan call timed out after {Seconds}s with no response ({Context}).", CallTimeout.TotalSeconds, context);
+                return (null, $"Dhan did not respond within {CallTimeout.TotalSeconds:0}s - it may be slow or unreachable right now.");
+            }
             if (response.Success) return (response, null);
 
             var isRateLimited = response.ErrorMessage?.Contains("rate", StringComparison.OrdinalIgnoreCase) == true
