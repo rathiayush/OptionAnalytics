@@ -14,7 +14,12 @@ namespace OptionAnalytics.Server.Models;
 /// point within a historical minute, not merely whether the minute's own closing price crossed it -
 /// falling back to Price (treating it as both High and Low) for a null-range live tick, which is the
 /// most accurate check that genuinely single-point data supports.</summary>
-public readonly record struct OiReplayPoint(DateTimeOffset Time, decimal Strike, long? OpenInterest, decimal? ImpliedVolatility, decimal Price, decimal? Open = null, decimal? High = null, decimal? Low = null);
+/// <summary>Volume defaults to 0 - genuinely means "no volume traded this minute" for a live tick
+/// (which carries no volume figure of its own, the same reasoning Open/High/Low's own null already
+/// documents above), not "unknown"; the option premium chart's own VWAP overlay treats a 0-volume
+/// minute as contributing nothing to the running total rather than skipping it, which is the
+/// correct behavior for a genuinely illiquid minute.</summary>
+public readonly record struct OiReplayPoint(DateTimeOffset Time, decimal Strike, long? OpenInterest, decimal? ImpliedVolatility, decimal Price, decimal? Open = null, decimal? High = null, decimal? Low = null, long Volume = 0);
 
 /// <summary>One 1-minute futures bar - OHLC + volume + (when Dhan's response actually included it)
 /// open interest. See OiReplayResult.FuturesOiAvailable/OiReplayService's own doc comment for why
