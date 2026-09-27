@@ -86,6 +86,27 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
     /// <summary>Whether this token is in the subscribed set right now.</summary>
     public bool IsSubscribed(uint securityId) => _tokenSegments.ContainsKey(securityId);
 
+    /// <summary>Re-sends a subscribe message for exactly the given, already-tracked tokens -
+    /// unlike SubscribeAsync (a no-op for a token already in the set, by design - see its own doc
+    /// comment), this bypasses that check and asks Dhan again regardless. For a caller
+    /// (SpotFeedHostedService) that suspects Dhan silently dropped just ITS OWN handful of tokens
+    /// while the connection as a whole keeps delivering other instruments perfectly normally: the
+    /// shared stall watchdog (FeedStallDetector) only judges the connection as a whole - ANY
+    /// message, from ANY instrument, counts as "alive" (see its own doc comment) - so it never
+    /// notices one specific instrument having gone silent on its own. Silently does nothing for a
+    /// token this client isn't actually tracking (never subscribed, or already unsubscribed).</summary>
+    public async Task ResendSubscriptionsForAsync(IEnumerable<uint> securityIds, CancellationToken cancellationToken)
+    {
+        if (_socket is not { State: WebSocketState.Open }) return;
+
+        var tokens = new List<KeyValuePair<uint, (string Segment, int SubscribeCode)>>();
+        foreach (var id in securityIds)
+            if (_tokenSegments.TryGetValue(id, out var entry))
+                tokens.Add(new(id, entry));
+
+        if (tokens.Count > 0) await ResendSubscriptionsAsync(tokens, cancellationToken);
+    }
+
     /// <summary>How many instruments are subscribed in total, across every underlying and
     /// expiry.</summary>
     public int SubscribedCount => _tokenSegments.Count;
