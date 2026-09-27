@@ -133,6 +133,9 @@ export const TIMEFRAME_OPTIONS = [
 // Both live under these keys, and every page reads and writes the same two.
 export const STORED_UNDERLYING = 'optionanalytics.underlying'
 export const STORED_TIMEFRAME = 'optionanalytics.timeframe'
+// One shared toggle for every page's VWAP checkbox, same as underlying/timeframe above - checking
+// it on one page and finding it already checked on another is the expected behavior, not a bug.
+export const STORED_SHOW_VWAP = 'optionanalytics.showVwap'
 
 function readStored(key, fallback) {
   try {

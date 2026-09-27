@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Select, Space, Typography, Card, Button, Row, Col, Tag, Tooltip, Empty, Alert, Segmented } from 'antd'
+import { Select, Space, Typography, Card, Button, Row, Col, Tag, Tooltip, Empty, Alert, Segmented, Checkbox } from 'antd'
 import { createChart, LineSeries, CrosshairMode } from 'lightweight-charts'
 import './oiMobile.css'
 import {
-  NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, istDateKey, toBar,
+  NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, usePersistedState, istDateKey, toBar,
   toChartTime, CE_COLOR, PE_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR, istTimeFormatter, istTickMarkFormatter,
 } from './shared.jsx'
 import {
@@ -258,6 +258,7 @@ export default function OiLiveDashboardPage() {
   const [chartCTimeframe, setChartCTimeframe] = useState(1)
   const [chartCEma1, setChartCEma1] = useState(9)
   const [chartCEma2, setChartCEma2] = useState(15)
+  const [showVwap, setShowVwap] = usePersistedState(STORED_SHOW_VWAP, false)
 
   const [loading, setLoading] = useState(false)
   const [spotLoading, setSpotLoading] = useState(false)
@@ -274,6 +275,12 @@ export default function OiLiveDashboardPage() {
   // never scrubs backward, "the latest reading" is always just the last element, and "today's open"
   // is always just the first - see ladderRows below.
   const [oneMinBars, setOneMinBars] = useState([])
+  // Session VWAP, one point per minute (ObvPoint shape - {time, value}) - seeded once via
+  // GET .../vwap-series in loadSpot below, grown live by handleSpotUpdate's own merge exactly like
+  // oneMinBars itself. Computed server-side (VwapCalculator) off real traded volume; see
+  // SpotSnapshot's own doc comment on why riding spotUpdate's existing per-tick push, rather than a
+  // separate poll, is what lets this line grow live instead of only catching up periodically.
+  const [vwapSeries, setVwapSeries] = useState([])
   const [ceSeries, setCeSeries] = useState(new Map())
   const [peSeries, setPeSeries] = useState(new Map())
   // Today's own opening OI per strike/side, captured once at load() and never mutated afterward -
@@ -342,11 +349,13 @@ export default function OiLiveDashboardPage() {
     Promise.all([
       fetch(`/api/spot/${underlying}/candles`).then((r) => r.json()),
       fetch(`/api/spot/${underlying}/snapshot`).then((r) => r.json()),
+      fetch(`/api/spot/${underlying}/vwap-series`).then((r) => r.json()),
     ])
-      .then(([candles, snapshot]) => {
+      .then(([candles, snapshot, vwap]) => {
         let bars = (candles ?? []).map(toBar)
         if (snapshot?.underlying === underlying && snapshot?.currentBar) bars = mergeBar(bars, toBar(snapshot.currentBar))
         setOneMinBars(bars)
+        setVwapSeries((vwap ?? []).map((p) => ({ time: toChartTime(p.time), value: p.obv })))
         setLastTickAtMs(Date.now())
       })
       .catch((err) => console.error('Failed to load spot candles:', err))
@@ -451,6 +460,10 @@ export default function OiLiveDashboardPage() {
     if (snapshot?.underlying !== underlying || !snapshot?.currentBar) return
     setLastTickAtMs(Date.now())
     setOneMinBars((prev) => mergeBar(prev, toBar(snapshot.currentBar)))
+    // null before the day's first traded volume (see SpotSnapshot's own doc comment) - nothing to
+    // plot yet, not a zero.
+    if (snapshot.vwap != null)
+      setVwapSeries((prev) => mergeBar(prev, { time: toChartTime(snapshot.currentBar.time), value: snapshot.vwap }))
   }
 
   const handleOiReplayTick = (tick) => {
@@ -717,6 +730,7 @@ export default function OiLiveDashboardPage() {
                 options={[{ value: 'WEEK', label: 'Weekly', disabled: underlying === 'BANKNIFTY' }, { value: 'MONTH', label: 'Monthly' }]}
               />
               <Select value={timeframe} onChange={setTimeframe} style={{ width: 110 }} options={TIMEFRAME_OPTIONS} />
+              <Checkbox checked={showVwap} onChange={(e) => setShowVwap(e.target.checked)}>VWAP</Checkbox>
               <Tooltip title={
                 connectionState === 'connected' ? "Streaming live ticks from Dhan's WebSocket feed (price + OI - IV stays at the last REST-fetched value)"
                   : connectionState === 'reconnecting' ? 'Connection dropped - automatically retrying.'
@@ -778,7 +792,7 @@ export default function OiLiveDashboardPage() {
             <Card size="small" title="Spot (live)">
               {oneMinBars.length > 0 ? (
                 <ChartErrorBoundary key={`${underlying}-${expiryFlag}-${timeframe}`}>
-                  <ReplayChart bars={displayBars} ladderRows={displayedLadderRows} dayKey={dayKey} atmStrike={atmStrike} step={step} height={560} />
+                  <ReplayChart bars={displayBars} ladderRows={displayedLadderRows} dayKey={dayKey} atmStrike={atmStrike} step={step} vwapSeries={vwapSeries} showVwap={showVwap} height={560} />
                 </ChartErrorBoundary>
               ) : (
                 <Empty description={spotLoading ? 'Loading…' : 'No spot candles yet today.'} />
@@ -804,7 +818,7 @@ export default function OiLiveDashboardPage() {
                       timeframe={chartBTimeframe} onTimeframeChange={setChartBTimeframe}
                       ema1Period={chartBEma1} onEma1PeriodChange={setChartBEma1}
                       ema2Period={chartBEma2} onEma2PeriodChange={setChartBEma2}
-                      dayKey={`emaB-${dayKey}`} height={560}
+                      dayKey={`emaB-${dayKey}`} vwapSeries={vwapSeries} showVwap={showVwap} height={560}
                     />
                   </ChartErrorBoundary>
                   {atmStrike != null && (
@@ -832,7 +846,7 @@ export default function OiLiveDashboardPage() {
                     timeframe={chartCTimeframe} onTimeframeChange={setChartCTimeframe}
                     ema1Period={chartCEma1} onEma1PeriodChange={setChartCEma1}
                     ema2Period={chartCEma2} onEma2PeriodChange={setChartCEma2}
-                    dayKey={`emaC-${dayKey}`} height={560}
+                    dayKey={`emaC-${dayKey}`} vwapSeries={vwapSeries} showVwap={showVwap} height={560}
                   />
                 </ChartErrorBoundary>
               ) : (
