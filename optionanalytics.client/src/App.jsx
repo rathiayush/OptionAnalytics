@@ -1,5 +1,5 @@
 import { Component, useEffect, useMemo, useRef, useState } from 'react'
-import { Select, Space, Typography, Spin, Card, Button, Modal, Table, Tag } from 'antd'
+import { Select, Space, Typography, Spin, Card, Button, Modal, Table, Tag, Checkbox } from 'antd'
 import { createChart, createSeriesMarkers, CandlestickSeries, LineSeries, CrosshairMode, LineStyle, TickMarkType } from 'lightweight-charts'
 import * as signalR from '@microsoft/signalr'
 import { Routes, Route, Navigate } from 'react-router-dom'
@@ -13,13 +13,18 @@ import LiveStrikeDataPage from './LiveStrikeDataPage.jsx'
 import TriggersPage from './TriggersPage.jsx'
 import ContractsPage from './ContractsPage.jsx'
 import LoginPage from './LoginPage.jsx'
-import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, RECONNECT_RETRY_POLICY, computeEma, fmtPrice, fmtIstTime, fmtIstDateTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry, AuthContext, useAuth } from './shared.jsx'
+import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, RECONNECT_RETRY_POLICY, computeEma, fmtPrice, fmtIstTime, fmtIstDateTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry, AuthContext, useAuth } from './shared.jsx'
 import './App.css'
 
 const { Title, Text } = Typography
 
 const EMA_FAST_COLOR = '#ffb100'
 const EMA_SLOW_COLOR = '#4dabf7'
+const VWAP_COLOR = '#e072e8'
+// A stable default for an optional array prop (PriceChart's own vwapSeries) - a plain `[]` literal
+// default is a NEW array every render, which would re-trigger any effect keyed on it even when the
+// caller never actually passes one.
+const EMPTY_ARRAY = []
 const AXIS_COLOR = '#9aa4b2'
 const GRID_COLOR = '#ffffff14'
 const BORDER_COLOR = '#ffffff22'
@@ -406,12 +411,13 @@ function useHub(onSpotUpdate, onCdvUpdate, onConfluenceAlert, onReconnected, onC
 
 // Candlestick + EMA9/EMA21 overlay + crossover markers - the one chart shape reused for the spot
 // price and both ATM option premium charts.
-function PriceChart({ bars, height = 360 }) {
+function PriceChart({ bars, vwapSeries = EMPTY_ARRAY, showVwap = false, height = 360 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
   const ema9Ref = useRef(null)
   const ema21Ref = useRef(null)
+  const vwapRef = useRef(null)
   const markersRef = useRef(null)
   // Only auto-fit the visible range once, the first time this chart instance gets data - a live
   // tick updates `bars` (a new array reference) many times a minute, and calling fitContent() on
@@ -456,6 +462,7 @@ function PriceChart({ bars, height = 360 }) {
     })
     ema9Ref.current = chart.addSeries(LineSeries, { color: EMA_FAST_COLOR, lineWidth: 1, title: 'EMA 9', priceLineVisible: false, crosshairMarkerVisible: false })
     ema21Ref.current = chart.addSeries(LineSeries, { color: EMA_SLOW_COLOR, lineWidth: 1, title: 'EMA 21', priceLineVisible: false, crosshairMarkerVisible: false })
+    vwapRef.current = chart.addSeries(LineSeries, { color: VWAP_COLOR, lineWidth: 2, title: 'VWAP', priceLineVisible: false, crosshairMarkerVisible: false })
     markersRef.current = createSeriesMarkers(seriesRef.current, [])
     hasFitRef.current = false
 
@@ -471,6 +478,7 @@ function PriceChart({ bars, height = 360 }) {
       seriesRef.current = null
       ema9Ref.current = null
       ema21Ref.current = null
+      vwapRef.current = null
       markersRef.current = null
     }
     // One chart instance per mount - series data is (re)populated by the effects below, not by
@@ -510,6 +518,17 @@ function PriceChart({ bars, height = 360 }) {
       try { chartRef.current?.timeScale().setVisibleRange(preservedRange) } catch { /* empty */ }
     }
   }, [ema9Points, ema21Points])
+
+  useEffect(() => {
+    if (!vwapRef.current) return
+    // Same setData-resets-the-visible-range reasoning as the candlestick series above. Fed only
+    // while checked, empty otherwise - simpler and just as instant as toggling a `visible` option.
+    const preservedRange = hasFitRef.current ? chartRef.current?.timeScale().getVisibleRange() : null
+    vwapRef.current.setData(showVwap ? vwapSeries : EMPTY_ARRAY)
+    if (preservedRange) {
+      try { chartRef.current?.timeScale().setVisibleRange(preservedRange) } catch { /* empty */ }
+    }
+  }, [vwapSeries, showVwap])
 
   useEffect(() => {
     markersRef.current?.setMarkers(allMarkers)
@@ -991,6 +1010,13 @@ function DashboardPage() {
 
   const [candles, setCandles] = useState([])
   const [snapshot, setSnapshot] = useState(null)
+  // Session VWAP, one point per minute (ObvPoint shape - {time, value}) - seeded once via
+  // GET .../vwap-series in fetchAllData below, grown live by the spotUpdate handler exactly like
+  // spotBars itself. Computed server-side (VwapCalculator) off real traded volume; see
+  // SpotSnapshot's own doc comment on why riding the existing per-tick spotUpdate push, rather than
+  // a separate poll, is what lets this line grow live instead of only catching up periodically.
+  const [vwapSeries, setVwapSeries] = useState([])
+  const [showVwap, setShowVwap] = usePersistedState(STORED_SHOW_VWAP, false)
 
   // Confluence alerts are a combined feed across every underlying, not scoped to `selected` -
   // fetched once on load (so alerts that fired before this tab connected still show up) and then
@@ -1132,6 +1158,11 @@ function DashboardPage() {
       .then((data) => { if (!cancelledRef.cancelled) setSnapshot(data) })
       .catch((err) => console.error('Failed to load snapshot:', err))
 
+    const vwapSeriesP = fetch(`/api/spot/${underlying}/vwap-series`)
+      .then((r) => r.json())
+      .then((data) => { if (!cancelledRef.cancelled) setVwapSeries((data ?? []).map((p) => ({ time: toChartTime(p.time), value: p.obv }))) })
+      .catch((err) => console.error('Failed to load VWAP series:', err))
+
     const cdvSeriesP = fetch(withExpiry(`/api/cdv/${underlying}/series`, expiryParam))
       .then((r) => r.json())
       .then((data) => { if (!cancelledRef.cancelled) setCdvSeries(data) })
@@ -1152,7 +1183,7 @@ function DashboardPage() {
       .then((data) => { if (!cancelledRef.cancelled) setCdvHistorySeries(data ?? []) })
       .catch((err) => console.error('Failed to load CDV history series:', err))
 
-    return Promise.allSettled([candlesP, snapshotP, cdvSeriesP, cdvSnapshotP, cdvPrevDayP, cdvHistoryP, fetchAtmAndObv(underlying, cancelledRef)])
+    return Promise.allSettled([candlesP, snapshotP, vwapSeriesP, cdvSeriesP, cdvSnapshotP, cdvPrevDayP, cdvHistoryP, fetchAtmAndObv(underlying, cancelledRef)])
   }
 
   useEffect(() => {
@@ -1201,7 +1232,14 @@ function DashboardPage() {
   }
 
   useHub(
-    (incoming) => { if (incoming.underlying === selected) setSnapshot(incoming) },
+    (incoming) => {
+      if (incoming.underlying !== selected) return
+      setSnapshot(incoming)
+      // null before the day's first traded volume (see SpotSnapshot's own doc comment) - nothing to
+      // plot yet, not a zero.
+      if (incoming.vwap != null && incoming.currentBar)
+        setVwapSeries((prev) => appendOrReplaceLast(prev, { time: toChartTime(incoming.currentBar.time), value: incoming.vwap }))
+    },
     (incoming) => {
       if (incoming.underlying !== selected) return
       // Only the server's SELECTED expiry is broadcast, and the snapshot does not name which expiry
@@ -1385,12 +1423,17 @@ function DashboardPage() {
 
         <ChartCard
           title={`${selected} spot`}
-          extra={<EmaLegend state={spotCrossState} />}
+          extra={
+            <Space size={12}>
+              <Checkbox checked={showVwap} onChange={(e) => setShowVwap(e.target.checked)}>VWAP</Checkbox>
+              <EmaLegend state={spotCrossState} />
+            </Space>
+          }
           empty="Waiting for chart data - the Dhan feed may still be connecting."
         >
           {spotBars.length > 0 && (
             <ChartErrorBoundary key={`${selected}-${timeframe}-${daysToShow}`} height={420}>
-              <PriceChart bars={spotBars} height={420} />
+              <PriceChart bars={spotBars} vwapSeries={vwapSeries} showVwap={showVwap} height={420} />
             </ChartErrorBoundary>
           )}
         </ChartCard>

@@ -1,5 +1,6 @@
 using OptionAnalytics.Server.Dhan;
 using OptionAnalytics.Server.Models;
+using OptionAnalytics.Server.Services.Backtesting;
 
 namespace OptionAnalytics.Server.Services;
 
@@ -221,7 +222,14 @@ public sealed class SpotUnderlyingState
 
     public decimal RoundedPrice => Step > 0 && LastPrice > 0 ? Math.Round(LastPrice / Step) * Step : LastPrice;
 
-    public SpotSnapshot ToSnapshot() => new(Underlying, Step, LastPrice, RoundedPrice, LastUpdateUtc, GetCurrentBar());
+    // Same "cheap, one pass over what GetVolumeBars already holds in memory, no Dhan call at all"
+    // cost SpotController's own GET .../vwap-series endpoint already accepts (see its doc comment) -
+    // at most a few hundred bars for a full trading day, trivial next to a live tick's own JSON
+    // serialize-and-broadcast. Riding the existing per-tick spotUpdate push with this is what lets
+    // the chart's VWAP line grow live instead of needing its own separate poll - see SpotSnapshot's
+    // own doc comment on Vwap.
+    public SpotSnapshot ToSnapshot() => new(Underlying, Step, LastPrice, RoundedPrice, LastUpdateUtc, GetCurrentBar(),
+        VwapCalculator.ComputeSeries(GetVolumeBars()) is { Count: > 0 } series ? series[^1].Obv : null);
 
     // IST is UTC+5:30, a whole number of minutes offset from UTC, so flooring a UTC instant to the
     // minute lands on exactly the same boundary as flooring its IST wall-clock time would - no

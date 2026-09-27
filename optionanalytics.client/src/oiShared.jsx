@@ -21,6 +21,11 @@ const { Text } = Typography
 // the identical policy instead of a third copy - see its doc comment there for why the bare
 // withAutomaticReconnect() default is unsafe for a live-market page.
 
+// A stable default for an optional array prop (ReplayChart/EmaChart's own vwapSeries) - a plain `[]`
+// literal default is a NEW array every render, which would re-trigger any effect keyed on it
+// (re-feeding the chart, losing its own pan/zoom) even when the caller never actually passes one.
+const EMPTY_ARRAY = []
+
 // Modeled directly on App.jsx's own useHub: ONE connection, opened on mount and never torn down or
 // rebuilt - no `enabled` gate, no dependency on underlying/expiryFlag (the SAME hub broadcasts ticks
 // for every underlying; each caller just filters client-side in its own handlers, same as every
@@ -229,10 +234,11 @@ const OI_STALE_MS = 5 * 60_000
 
 // Candlestick chart that draws the strongest OI levels on each side as horizontal price lines
 // directly on the chart (darker = heavier OI = a "harder" level).
-export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = true, height = 440 }) {
+export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = true, vwapSeries = EMPTY_ARRAY, showVwap = false, height = 440 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
+  const vwapSeriesRef = useRef(null)
   const priceLinesRef = useRef([])
 
   const { ceTop, peTop, topRows } = useMemo(() => {
@@ -275,6 +281,7 @@ export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Onl
     seriesRef.current = chart.addSeries(CandlestickSeries, {
       upColor: UP_COLOR, downColor: DOWN_COLOR, borderVisible: false, wickUpColor: UP_COLOR, wickDownColor: DOWN_COLOR,
     })
+    vwapSeriesRef.current = chart.addSeries(LineSeries, { color: VWAP_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: 'VWAP' })
 
     const onResize = () => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }) }
     window.addEventListener('resize', onResize)
@@ -283,6 +290,7 @@ export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Onl
       chart.remove()
       chartRef.current = null
       seriesRef.current = null
+      vwapSeriesRef.current = null
       priceLinesRef.current = []
     }
   }, [height])
@@ -291,6 +299,13 @@ export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Onl
     if (!seriesRef.current) return
     seriesRef.current.setData(bars)
   }, [bars])
+
+  // Fed only while checked, empty otherwise - simpler and just as instant as toggling a `visible`
+  // option, and it means an unchecked chart never even pays for lightweight-charts re-rendering data
+  // nobody asked to see.
+  useEffect(() => {
+    vwapSeriesRef.current?.setData(showVwap ? vwapSeries : EMPTY_ARRAY)
+  }, [vwapSeries, showVwap])
 
   useEffect(() => {
     if (bars.length > 0) chartRef.current?.timeScale().fitContent()
@@ -361,18 +376,20 @@ export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Onl
 
 const EMA1_COLOR = '#f0b429'
 const EMA2_COLOR = '#38bdf8'
+const VWAP_COLOR = '#e072e8'
 // A subset of the shared TIMEFRAME_OPTIONS (1/3/5 min only) - the whole point of the fast entry
 // charts is a faster read than the main chart's own coarser timeframe.
 export const FAST_TIMEFRAME_OPTIONS = TIMEFRAME_OPTIONS.filter((o) => o.value <= 5)
 
 // A second, independently-timeframed candlestick chart with two EMA overlays, driven by the SAME
 // oneMinBars/visibleCount the caller owns - never fetches or replays anything on its own.
-export function EmaChart({ oneMinBars, visibleCount, timeframe, onTimeframeChange, ema1Period, onEma1PeriodChange, ema2Period, onEma2PeriodChange, dayKey, height = 320 }) {
+export function EmaChart({ oneMinBars, visibleCount, timeframe, onTimeframeChange, ema1Period, onEma1PeriodChange, ema2Period, onEma2PeriodChange, dayKey, vwapSeries = EMPTY_ARRAY, showVwap = false, height = 320 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
   const ema1SeriesRef = useRef(null)
   const ema2SeriesRef = useRef(null)
+  const vwapSeriesRef = useRef(null)
 
   const displayBars = useMemo(
     () => aggregateBars(oneMinBars.slice(0, visibleCount), timeframe),
@@ -399,6 +416,7 @@ export function EmaChart({ oneMinBars, visibleCount, timeframe, onTimeframeChang
     })
     ema1SeriesRef.current = chart.addSeries(LineSeries, { color: EMA1_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true })
     ema2SeriesRef.current = chart.addSeries(LineSeries, { color: EMA2_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true })
+    vwapSeriesRef.current = chart.addSeries(LineSeries, { color: VWAP_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: 'VWAP' })
 
     const onResize = () => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }) }
     window.addEventListener('resize', onResize)
@@ -409,6 +427,7 @@ export function EmaChart({ oneMinBars, visibleCount, timeframe, onTimeframeChang
       seriesRef.current = null
       ema1SeriesRef.current = null
       ema2SeriesRef.current = null
+      vwapSeriesRef.current = null
     }
   }, [height])
 
@@ -418,6 +437,13 @@ export function EmaChart({ oneMinBars, visibleCount, timeframe, onTimeframeChang
   useEffect(() => { if (seriesRef.current) seriesRef.current.setData(displayBars) }, [displayBars])
   useEffect(() => { if (ema1SeriesRef.current) ema1SeriesRef.current.setData(ema1Points) }, [ema1Points])
   useEffect(() => { if (ema2SeriesRef.current) ema2SeriesRef.current.setData(ema2Points) }, [ema2Points])
+  // Same "own timeframe, not the candles' own" reasoning as ReplayChart's identical effect - VWAP is
+  // a session-cumulative value, not a moving average of the visible candles, so it is shown at its
+  // own native 1-minute cadence regardless of what timeframe this chart's OWN candles are aggregated
+  // to (exactly how TradingView shows it too).
+  useEffect(() => {
+    vwapSeriesRef.current?.setData(showVwap ? vwapSeries : EMPTY_ARRAY)
+  }, [vwapSeries, showVwap])
 
   useEffect(() => {
     if (displayBars.length > 0) chartRef.current?.timeScale().fitContent()

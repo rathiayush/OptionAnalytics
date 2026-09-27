@@ -1,7 +1,7 @@
 import { Component, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import dayjs from 'dayjs'
-import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicker, Alert, Empty, Tooltip, Slider, Tag, InputNumber, Switch, Table, Segmented } from 'antd'
+import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicker, Alert, Empty, Tooltip, Slider, Tag, InputNumber, Switch, Table, Segmented, Checkbox } from 'antd'
 import { PlayCircleOutlined, PauseCircleOutlined, ReloadOutlined, SoundOutlined } from '@ant-design/icons'
 import { createChart, createSeriesMarkers, CandlestickSeries, LineSeries, CrosshairMode } from 'lightweight-charts'
 import * as signalR from '@microsoft/signalr'
@@ -9,11 +9,16 @@ import './oiMobile.css'
 import {
   UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR,
   istTimeFormatter, istTickMarkFormatter, toBar, toChartTime, fromChartTime, istDateKey,
-  NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState,
+  NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, usePersistedState,
 } from './shared.jsx'
 import { PremiumEmaChart } from './oiShared.jsx'
 
 const { Text, Title } = Typography
+
+// A stable default for an optional array prop (ReplayChart/EmaChart's own vwapSeries) - a plain `[]`
+// literal default is a NEW array every render, which would re-trigger any effect keyed on it even
+// when the caller never actually passes one.
+const EMPTY_ARRAY = []
 
 // The (underlying, expiryFlag) combos OiReplayLiveFeedService actually tracks live on the backend -
 // BANKNIFTY has no weekly expiry (same rule the rest of this page and Expired Backtest enforce), so
@@ -405,10 +410,11 @@ const SUPPORT_DARK = '#0a5c1f'
 // further data fetch, just a local re-render. Also draws the strongest OI levels on each side as
 // horizontal price lines directly on the chart (darker = heavier OI = a "harder" level) - the same
 // data the ladder shows in table form, here as the market-structure read on the price chart itself.
-function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = true, height = 440 }) {
+function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = true, vwapSeries = EMPTY_ARRAY, showVwap = false, height = 440 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
+  const vwapSeriesRef = useRef(null)
   const priceLinesRef = useRef([])
 
   // Same ATM-centered adaptive window the price lines below are drawn from - memoized so the
@@ -469,6 +475,7 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = tru
     seriesRef.current = chart.addSeries(CandlestickSeries, {
       upColor: UP_COLOR, downColor: DOWN_COLOR, borderVisible: false, wickUpColor: UP_COLOR, wickDownColor: DOWN_COLOR,
     })
+    vwapSeriesRef.current = chart.addSeries(LineSeries, { color: VWAP_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: 'VWAP' })
 
     const onResize = () => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }) }
     window.addEventListener('resize', onResize)
@@ -477,6 +484,7 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = tru
       chart.remove()
       chartRef.current = null
       seriesRef.current = null
+      vwapSeriesRef.current = null
       priceLinesRef.current = [] // the series they belonged to is gone along with the chart
     }
   }, [height])
@@ -485,6 +493,12 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = tru
     if (!seriesRef.current) return
     seriesRef.current.setData(bars)
   }, [bars])
+
+  // Fed only while checked, empty otherwise - see EmaChart's own identical effect for why VWAP is
+  // shown at its own native cadence rather than re-aggregated to match this chart's timeframe.
+  useEffect(() => {
+    vwapSeriesRef.current?.setData(showVwap ? vwapSeries : EMPTY_ARRAY)
+  }, [vwapSeries, showVwap])
 
   // Re-fit once when a brand new day/timeframe first loads (dayKey changes) - deliberately NOT on
   // every tick (bars itself is a fresh array reference every tick as the replay reveals/reaggregates
@@ -618,6 +632,7 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = tru
 
 const EMA1_COLOR = '#f0b429'
 const EMA2_COLOR = '#38bdf8'
+const VWAP_COLOR = '#e072e8'
 
 // A second, independently-timeframed candlestick chart with two EMA overlays - the user's own "one
 // more chart along with this 15 min running chart... add ema indicator... for parallel execution to
@@ -630,12 +645,13 @@ const EMA2_COLOR = '#38bdf8'
 // The two EMA series are created ONCE (in the same setup effect as the candlestick series) and
 // only ever re-titled/re-fed data afterward, rather than destroyed and recreated when a period
 // changes - lightweight-charts series are cheap to keep, not to keep re-adding.
-function EmaChart({ oneMinBars, visibleCount, timeframe, onTimeframeChange, ema1Period, onEma1PeriodChange, ema2Period, onEma2PeriodChange, dayKey, height = 320 }) {
+function EmaChart({ oneMinBars, visibleCount, timeframe, onTimeframeChange, ema1Period, onEma1PeriodChange, ema2Period, onEma2PeriodChange, dayKey, vwapSeries = EMPTY_ARRAY, showVwap = false, height = 320 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
   const ema1SeriesRef = useRef(null)
   const ema2SeriesRef = useRef(null)
+  const vwapSeriesRef = useRef(null)
 
   const displayBars = useMemo(
     () => aggregateBars(oneMinBars.slice(0, visibleCount), timeframe),
@@ -662,6 +678,7 @@ function EmaChart({ oneMinBars, visibleCount, timeframe, onTimeframeChange, ema1
     })
     ema1SeriesRef.current = chart.addSeries(LineSeries, { color: EMA1_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true })
     ema2SeriesRef.current = chart.addSeries(LineSeries, { color: EMA2_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true })
+    vwapSeriesRef.current = chart.addSeries(LineSeries, { color: VWAP_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: 'VWAP' })
 
     const onResize = () => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }) }
     window.addEventListener('resize', onResize)
@@ -672,6 +689,7 @@ function EmaChart({ oneMinBars, visibleCount, timeframe, onTimeframeChange, ema1
       seriesRef.current = null
       ema1SeriesRef.current = null
       ema2SeriesRef.current = null
+      vwapSeriesRef.current = null
     }
   }, [height])
 
@@ -681,6 +699,12 @@ function EmaChart({ oneMinBars, visibleCount, timeframe, onTimeframeChange, ema1
   useEffect(() => { if (seriesRef.current) seriesRef.current.setData(displayBars) }, [displayBars])
   useEffect(() => { if (ema1SeriesRef.current) ema1SeriesRef.current.setData(ema1Points) }, [ema1Points])
   useEffect(() => { if (ema2SeriesRef.current) ema2SeriesRef.current.setData(ema2Points) }, [ema2Points])
+  // Own native 1-minute cadence, not re-aggregated to this chart's own timeframe - VWAP is a
+  // session-cumulative value, not a moving average of the visible candles (exactly how TradingView
+  // shows it too).
+  useEffect(() => {
+    vwapSeriesRef.current?.setData(showVwap ? vwapSeries : EMPTY_ARRAY)
+  }, [vwapSeries, showVwap])
 
   // Re-fit on a brand new day AND whenever this chart's OWN timeframe changes (unlike the main
   // chart, which only re-fits on dayKey) - switching from 5min to 1min here goes from ~75 candles to
@@ -1425,6 +1449,15 @@ export default function OiReplayPage() {
   const [livePePoints, setLivePePoints] = useState([])
   const [liveFuturesPoints, setLiveFuturesPoints] = useState([])
 
+  // Session VWAP - only meaningful for isToday (see oneMinBars' own identical isToday split just
+  // below): the live GET .../vwap-series endpoint reflects SpotUnderlyingState's own in-memory
+  // volume bars, i.e. recent/current days, not whatever historical day this page might otherwise be
+  // replaying. A genuinely historical day's own spotCandlesOneMinute carries no volume at all (see
+  // OiReplayResult), so VWAP simply isn't shown while replaying one - reset on every load() like
+  // liveBars above, seeded once isToday in load()'s own .then(), grown live by handleSpotUpdate.
+  const [vwapSeries, setVwapSeries] = useState([])
+  const [showVwap, setShowVwap] = usePersistedState(STORED_SHOW_VWAP, false)
+
   // Paper trade panel state - see PaperTradePanel's own doc comment. strikeOffset defaults to 0
   // (ATM) and stays an OFFSET rather than an absolute strike, so "the default is ATM" holds true
   // all through the session even as ATM itself drifts with price - the user never has to re-pick it
@@ -1477,6 +1510,17 @@ export default function OiReplayPage() {
     setLivePePoints([])
     setLiveFuturesPoints([])
     setPaperPositions([])
+    setVwapSeries([])
+    // Only for today - see vwapSeries' own doc comment on why a historical day has no VWAP to show
+    // at all (its own spotCandlesOneMinute carries no volume, and the live endpoint below reflects
+    // only recent/in-memory days). Independent of the main run fetch below so a slow/failed VWAP
+    // fetch never blocks or fails the actual replay load.
+    if (effectiveDate.format('YYYY-MM-DD') === istDateKey(new Date())) {
+      fetch(`/api/spot/${underlying}/vwap-series`)
+        .then((r) => r.json())
+        .then((vwap) => setVwapSeries((vwap ?? []).map((p) => ({ time: toChartTime(p.time), value: p.obv }))))
+        .catch((err) => console.error('Failed to load VWAP series:', err))
+    }
     const params = new URLSearchParams({
       date: effectiveDate.format('YYYY-MM-DD'),
       timeframeMinutes: String(timeframe),
@@ -1563,6 +1607,15 @@ export default function OiReplayPage() {
       }
       return [...prev, bar]
     })
+    // null before the day's first traded volume (see SpotSnapshot's own doc comment) - nothing to
+    // plot yet, not a zero.
+    if (snapshot.vwap != null) {
+      const point = { time: toChartTime(snapshot.currentBar.time), value: snapshot.vwap }
+      setVwapSeries((prev) => {
+        if (prev.length > 0 && prev[prev.length - 1].time === point.time) return [...prev.slice(0, -1), point]
+        return [...prev, point]
+      })
+    }
   }
   const handleOiReplayTick = (tick) => {
     if (!isToday || tick?.underlying !== underlying || tick?.expiryFlag !== expiryFlag) return
@@ -2254,6 +2307,7 @@ export default function OiReplayPage() {
               <DatePicker value={date} onChange={setDate} format="DD MMM YYYY" placeholder="Trading day" />
               <Select value={timeframe} onChange={setTimeframe} style={{ width: 110 }} options={TIMEFRAME_OPTIONS} />
               <Button type="primary" onClick={() => load()} loading={loading} disabled={!canLoad}>Load day</Button>
+              {isToday && <Checkbox checked={showVwap} onChange={(e) => setShowVwap(e.target.checked)}>VWAP</Checkbox>}
             </Space>
             <Space align="center" size={12} wrap>
               <Text type="secondary" style={{ fontSize: 12 }}>Sections shown</Text>
@@ -2568,6 +2622,8 @@ export default function OiReplayPage() {
                           atmStrike={atmStrike}
                           step={step}
                           top5Only={top5WallsOnly}
+                          vwapSeries={vwapSeries}
+                          showVwap={showVwap}
                           height={560}
                         />
                       </ChartErrorBoundary>
@@ -2605,6 +2661,7 @@ export default function OiReplayPage() {
                                 ema1Period={chartBEma1} onEma1PeriodChange={setChartBEma1}
                                 ema2Period={chartBEma2} onEma2PeriodChange={setChartBEma2}
                                 dayKey={`emaB-${underlying}-${result.date}`}
+                                vwapSeries={vwapSeries} showVwap={showVwap}
                                 height={560}
                               />
                             </ChartErrorBoundary>
@@ -2635,6 +2692,7 @@ export default function OiReplayPage() {
                               ema1Period={chartCEma1} onEma1PeriodChange={setChartCEma1}
                               ema2Period={chartCEma2} onEma2PeriodChange={setChartCEma2}
                               dayKey={`emaC-${underlying}-${result.date}`}
+                              vwapSeries={vwapSeries} showVwap={showVwap}
                               height={560}
                             />
                           </ChartErrorBoundary>
