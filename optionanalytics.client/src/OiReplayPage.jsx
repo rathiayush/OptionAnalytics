@@ -7,7 +7,7 @@ import { createChart, createSeriesMarkers, CandlestickSeries, LineSeries, Histog
 import * as signalR from '@microsoft/signalr'
 import './oiMobile.css'
 import {
-  UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR,
+  UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR,
   istTimeFormatter, istTickMarkFormatter, toBar, toChartTime, fromChartTime, istDateKey,
   NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, usePersistedState,
 } from './shared.jsx'
@@ -762,8 +762,13 @@ function StrikeOiDrilldownChart({ ceSeries, peSeries, mode, dayKey, height = 320
       // start at zero instead of at the day's actual opening OI. Only the title changes.
       const title = mode === 'sinceOpen' ? 'CE OI Δ (since open)' : 'CE OI'
       const peTitle = mode === 'sinceOpen' ? 'PE OI Δ (since open)' : 'PE OI'
-      ceSeriesRef.current = chart.addSeries(LineSeries, { color: CE_COLOR, lineWidth: 2, title, priceLineVisible: false })
-      peSeriesRef.current = chart.addSeries(LineSeries, { color: PE_COLOR, lineWidth: 2, title: peTitle, priceLineVisible: false })
+      // DOWN_COLOR/UP_COLOR (this app's own bearish/bullish convention), not CE_COLOR/PE_COLOR (a
+      // plain "tell the two lines apart" identity pair used for premium/price charts elsewhere) -
+      // OI specifically reads by option-SELLING convention: rising CE (call) OI is fresh call
+      // writing, bearish; rising PE (put) OI is fresh put writing, bullish. Matches ReplayChart's
+      // own R/S wall colors (RESISTANCE=CE=red-ish, SUPPORT=PE=green-ish) further up this same page.
+      ceSeriesRef.current = chart.addSeries(LineSeries, { color: DOWN_COLOR, lineWidth: 2, title, priceLineVisible: false })
+      peSeriesRef.current = chart.addSeries(LineSeries, { color: UP_COLOR, lineWidth: 2, title: peTitle, priceLineVisible: false })
     } else {
       // Two independent histograms on the SAME chart, CE on its own price scale in the top half and
       // PE on its own in the bottom half (own scaleMargins so they don't overlap) - that vertical
@@ -792,8 +797,8 @@ function StrikeOiDrilldownChart({ ceSeries, peSeries, mode, dayKey, height = 320
 
   useEffect(() => {
     if (!ceSeriesRef.current || !peSeriesRef.current) return
-    // 'total' is a plain level - the series' own flat CE_COLOR/PE_COLOR (set at series-creation time
-    // above) already applies with no per-point override needed. 'change' colors each bar by its OWN
+    // 'total'/'sinceOpen' are a plain level - the series' own flat DOWN_COLOR/UP_COLOR (set at
+    // series-creation time above) already applies with no per-point override needed. 'change' colors each bar by its OWN
     // sign - added (OI grew that minute) vs removed (OI shrank) - see this component's own doc
     // comment on why that, not a flat per-series color, is what actually answers "where is it being
     // added/removed."
@@ -860,11 +865,19 @@ function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike }) {
   const [hover, setHover] = useState(null)
   const { buckets, perStrikeChange } = useMemo(() => buildOiChangeMatrix(byStrike, strikes), [byStrike, strikes])
 
+  // Fixed per-CARD color (this plot is always rendered once per side, "CE" or "PE" - see its own
+  // two call sites below), not per-cell by added/removed sign - the option-SELLING convention this
+  // page's OI reads elsewhere already use (ReplayChart's own R/S walls, the Total OI/Since-open Δ
+  // charts above): rising CE (call) OI is bearish, rising PE (put) OI is bullish, so CE is always
+  // DOWN_COLOR and PE always UP_COLOR here, with alpha still carrying the MAGNITUDE of that minute's
+  // change (a heavier change is more vivid) - only the sign-based hue swap was traded away.
+  const cellColor = label === 'PE' ? UP_COLOR : DOWN_COLOR
+
   const maxAbs = useMemo(() => {
     let max = 0
     for (const byBucket of perStrikeChange.values())
       for (const v of byBucket.values())
-        if (Number.isFinite(v)) max = Math.max(max, Math.abs(v))
+        if (Number.isFinite(v) && v !== 0) max = Math.max(max, Math.abs(v))
     return max
   }, [perStrikeChange])
 
@@ -895,7 +908,7 @@ function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike }) {
         const v = byBucket?.get(t)
         if (v == null || v === 0 || maxAbs === 0) return
         const alpha = HEATMAP_MIN_ALPHA + (Math.abs(v) / maxAbs) * (HEATMAP_MAX_ALPHA - HEATMAP_MIN_ALPHA)
-        ctx.fillStyle = hexToRgba(v > 0 ? OI_ADDED_COLOR : OI_REMOVED_COLOR, alpha)
+        ctx.fillStyle = hexToRgba(cellColor, alpha)
         ctx.fillRect(col * HEATMAP_CELL_WIDTH, y, HEATMAP_CELL_WIDTH - 1, HEATMAP_ROW_HEIGHT - 1)
       })
     })
@@ -910,7 +923,7 @@ function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike }) {
       if (col % labelEvery !== 0) return
       ctx.fillText(istTimeFormatter(t), col * HEATMAP_CELL_WIDTH + HEATMAP_CELL_WIDTH / 2, plotHeight + 14)
     })
-  }, [buckets, perStrikeChange, strikes, maxAbs, plotWidth, plotHeight])
+  }, [buckets, perStrikeChange, strikes, maxAbs, plotWidth, plotHeight, cellColor])
 
   // Scrolls to the newest minute once a fresh bucket set first appears (a new day loaded, or the
   // very first live buckets) - not on every subsequent tick, which would otherwise yank a reader's
@@ -935,6 +948,12 @@ function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike }) {
   }
 
   if (buckets.length === 0) return <Empty description={`No ${label} OI data yet.`} />
+  // Cells this dense are drawn only where OI actually moved (see the draw effect's own
+  // v === 0/maxAbs === 0 guard) - a day where every tracked strike's own OI happened to be
+  // perfectly flat between EVERY tick draws nothing at all, which reads exactly like "broken" even
+  // though it is a real (if unusual) reading. Told apart here explicitly rather than left to look
+  // identical to the "no data fetched at all" Empty state above.
+  if (maxAbs === 0) return <Empty description={`${label} OI hasn't changed at all since the first data point today - nothing to show yet.`} />
 
   return (
     <div style={{ display: 'flex', border: `1px solid ${BORDER_COLOR}`, borderRadius: 4, overflow: 'hidden' }}>
@@ -965,8 +984,8 @@ function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike }) {
           }}
         >
           {label} {hover.strike.toLocaleString()} @ {istTimeFormatter(hover.time)}:{' '}
-          <Text strong style={{ color: hover.value == null ? '#fff' : hover.value > 0 ? OI_ADDED_COLOR : hover.value < 0 ? OI_REMOVED_COLOR : '#fff' }}>
-            {hover.value == null ? '—' : `${hover.value > 0 ? '+' : ''}${hover.value.toLocaleString()}`}
+          <Text strong style={{ color: hover.value ? cellColor : '#fff' }}>
+            {hover.value == null ? '—' : formatOiMillions(hover.value, { signed: true })}
           </Text>
         </div>
       )}
@@ -2929,8 +2948,8 @@ export default function OiReplayPage() {
                         onChange={setDayOiChartMode}
                         options={[{ label: 'Total OI', value: 'total' }, { label: 'Since open Δ', value: 'sinceOpen' }]}
                       />
-                      <Text style={{ color: CE_COLOR }}>● CE</Text>
-                      <Text style={{ color: PE_COLOR }}>● PE</Text>
+                      <Text style={{ color: DOWN_COLOR }}>● CE</Text>
+                      <Text style={{ color: UP_COLOR }}>● PE</Text>
                     </Space>
                     <ChartErrorBoundary key={`day-oi-${dayOiChartMode}-${underlying}-${result?.date}`}>
                       <StrikeOiDrilldownChart
@@ -3393,8 +3412,8 @@ export default function OiReplayPage() {
             <div>
               <Space size={16} style={{ marginBottom: 4 }}>
                 <Text strong style={{ fontSize: 12 }}>Total OI</Text>
-                <Text style={{ color: CE_COLOR }}>● CE</Text>
-                <Text style={{ color: PE_COLOR }}>● PE</Text>
+                <Text style={{ color: DOWN_COLOR }}>● CE</Text>
+                <Text style={{ color: UP_COLOR }}>● PE</Text>
               </Space>
               <ChartErrorBoundary key={`drilldown-total-${underlying}-${drilldownStrike}`}>
                 <StrikeOiDrilldownChart
@@ -3430,8 +3449,8 @@ export default function OiReplayPage() {
             <div>
               <Space size={16} style={{ marginBottom: 4 }}>
                 <Text strong style={{ fontSize: 12 }}>Since open Δ</Text>
-                <Text style={{ color: CE_COLOR }}>● CE</Text>
-                <Text style={{ color: PE_COLOR }}>● PE</Text>
+                <Text style={{ color: DOWN_COLOR }}>● CE</Text>
+                <Text style={{ color: UP_COLOR }}>● PE</Text>
               </Space>
               <ChartErrorBoundary key={`drilldown-sinceopen-${underlying}-${drilldownStrike}`}>
                 <StrikeOiDrilldownChart
