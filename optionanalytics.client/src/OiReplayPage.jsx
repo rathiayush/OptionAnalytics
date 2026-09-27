@@ -788,8 +788,29 @@ const HEATMAP_MAX_ALPHA = 0.9
 // (the exact value, satisfying the "every value must be reachable, not just implied by color" rule)
 // with no extra plumbing. Defaults scrolled to the newest minute so a live/"today" view doesn't open
 // showing 9:15 AM while ticks are landing at 2 PM.
-function OiChangeHeatmapGrid({ label, byStrike, strikes, atmStrike, height = 320 }) {
+// Cell/row geometry, fixed rather than responsive - a heatmap this dense (up to ~375 one-minute
+// columns for a full session) needs a stable pixel grid to draw and hit-test against; letting it
+// stretch to the container would make every column a different width depending on how many strikes
+// happen to be tracked that day, and the axis math below would have to recompute constantly instead
+// of being simple arithmetic.
+const HEATMAP_CELL_WIDTH = 14
+const HEATMAP_ROW_HEIGHT = 20
+const HEATMAP_LABEL_WIDTH = 64
+const HEATMAP_AXIS_HEIGHT = 20
+
+// The all-strikes OI-change plot - a genuine rendered chart (HTML5 canvas), not a table dressed up
+// with cell colors: an actual x/y grid with real axes (strike rows down the left, time columns along
+// the bottom) and a live hover readout, matching how every other chart on this page works. Canvas
+// instead of one lightweight-charts series per strike (which would mean up to ~21 separate chart
+// instances, one per row) or a DOM table (which means literally thousands of <td> elements for a
+// full session) - one canvas draws the whole grid as pixels, which is both the simplest way to get a
+// real heatmap out of a library with no native heatmap series type, and the cheapest to render at
+// this cell count. The strike-label column is plain HTML (not baked into the canvas) so it can stay
+// visually fixed while only the canvas itself scrolls horizontally through the day.
+function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike }) {
+  const canvasRef = useRef(null)
   const scrollRef = useRef(null)
+  const [hover, setHover] = useState(null)
   const { buckets, perStrikeChange } = useMemo(() => buildOiChangeMatrix(byStrike, strikes), [byStrike, strikes])
 
   const maxAbs = useMemo(() => {
@@ -800,9 +821,53 @@ function OiChangeHeatmapGrid({ label, byStrike, strikes, atmStrike, height = 320
     return max
   }, [perStrikeChange])
 
-  // Runs once per fresh bucket set (a new day loaded, or the very first buckets to arrive live) -
-  // not on every live tick, which would otherwise yank a reader's own manual scroll-back to the
-  // right edge on every single update.
+  const plotWidth = buckets.length * HEATMAP_CELL_WIDTH
+  const plotHeight = strikes.length * HEATMAP_ROW_HEIGHT
+
+  // Redraws the whole grid whenever the underlying matrix changes - a plain fillRect per cell, no
+  // retained shapes to diff, so a full redraw on every live tick is cheap (a canvas clear + a few
+  // thousand rectangle fills is well under a frame budget) and much simpler than trying to patch
+  // individual cells in place.
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas || buckets.length === 0 || strikes.length === 0) return
+    const dpr = window.devicePixelRatio || 1
+    const totalHeight = plotHeight + HEATMAP_AXIS_HEIGHT
+    canvas.width = plotWidth * dpr
+    canvas.height = totalHeight * dpr
+    canvas.style.width = `${plotWidth}px`
+    canvas.style.height = `${totalHeight}px`
+    const ctx = canvas.getContext('2d')
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    ctx.clearRect(0, 0, plotWidth, totalHeight)
+
+    strikes.forEach((strike, row) => {
+      const byBucket = perStrikeChange.get(strike)
+      const y = row * HEATMAP_ROW_HEIGHT
+      buckets.forEach((t, col) => {
+        const v = byBucket?.get(t)
+        if (v == null || v === 0 || maxAbs === 0) return
+        const alpha = HEATMAP_MIN_ALPHA + (Math.abs(v) / maxAbs) * (HEATMAP_MAX_ALPHA - HEATMAP_MIN_ALPHA)
+        ctx.fillStyle = hexToRgba(v > 0 ? OI_ADDED_COLOR : OI_REMOVED_COLOR, alpha)
+        ctx.fillRect(col * HEATMAP_CELL_WIDTH, y, HEATMAP_CELL_WIDTH - 1, HEATMAP_ROW_HEIGHT - 1)
+      })
+    })
+
+    // Time axis along the bottom - one label roughly every 60px regardless of cell width, so it
+    // never crowds even at the full 375-column width of a whole session.
+    ctx.fillStyle = AXIS_COLOR
+    ctx.font = '10px system-ui, -apple-system, sans-serif'
+    ctx.textAlign = 'center'
+    const labelEvery = Math.max(1, Math.round(60 / HEATMAP_CELL_WIDTH))
+    buckets.forEach((t, col) => {
+      if (col % labelEvery !== 0) return
+      ctx.fillText(istTimeFormatter(t), col * HEATMAP_CELL_WIDTH + HEATMAP_CELL_WIDTH / 2, plotHeight + 14)
+    })
+  }, [buckets, perStrikeChange, strikes, maxAbs, plotWidth, plotHeight])
+
+  // Scrolls to the newest minute once a fresh bucket set first appears (a new day loaded, or the
+  // very first live buckets) - not on every subsequent tick, which would otherwise yank a reader's
+  // own scroll-back position to the right edge on every single update.
   const bucketCountRef = useRef(0)
   useEffect(() => {
     if (buckets.length === 0 || buckets.length === bucketCountRef.current) return
@@ -810,50 +875,54 @@ function OiChangeHeatmapGrid({ label, byStrike, strikes, atmStrike, height = 320
     if (scrollRef.current) scrollRef.current.scrollLeft = scrollRef.current.scrollWidth
   }, [buckets.length])
 
+  const handleMouseMove = (e) => {
+    const rect = canvasRef.current.getBoundingClientRect()
+    const x = e.clientX - rect.left
+    const y = e.clientY - rect.top
+    const col = Math.floor(x / HEATMAP_CELL_WIDTH)
+    const row = Math.floor(y / HEATMAP_ROW_HEIGHT)
+    if (y >= plotHeight || col < 0 || col >= buckets.length || row < 0 || row >= strikes.length) { setHover(null); return }
+    const strike = strikes[row]
+    const t = buckets[col]
+    setHover({ clientX: e.clientX, clientY: e.clientY, strike, time: t, value: perStrikeChange.get(strike)?.get(t) })
+  }
+
   if (buckets.length === 0) return <Empty description={`No ${label} OI data yet.`} />
 
   return (
-    <div ref={scrollRef} style={{ overflow: 'auto', maxHeight: height, border: `1px solid ${BORDER_COLOR}`, borderRadius: 4 }}>
-      <table style={{ borderCollapse: 'collapse', fontSize: 11 }}>
-        <thead>
-          <tr>
-            <th style={{ position: 'sticky', left: 0, top: 0, zIndex: 2, background: '#161a22', padding: '2px 8px', textAlign: 'right', color: AXIS_COLOR }}>
-              {label}
-            </th>
-            {buckets.map((t) => (
-              <th key={t} style={{ position: 'sticky', top: 0, zIndex: 1, background: '#161a22', padding: '2px 3px', fontWeight: 400, color: AXIS_COLOR, whiteSpace: 'nowrap' }}>
-                {istTimeFormatter(t)}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {strikes.map((strike) => {
-            const byBucket = perStrikeChange.get(strike)
-            const isAtm = strike === atmStrike
-            return (
-              <tr key={strike}>
-                <td style={{ position: 'sticky', left: 0, background: '#161a22', padding: '2px 8px', textAlign: 'right', whiteSpace: 'nowrap', fontWeight: isAtm ? 700 : 400, color: isAtm ? '#fff' : AXIS_COLOR }}>
-                  {strike.toLocaleString()}
-                </td>
-                {buckets.map((t) => {
-                  const v = byBucket?.get(t)
-                  const cellColor = v == null || v === 0 || maxAbs === 0
-                    ? 'transparent'
-                    : hexToRgba(v > 0 ? OI_ADDED_COLOR : OI_REMOVED_COLOR, HEATMAP_MIN_ALPHA + (Math.abs(v) / maxAbs) * (HEATMAP_MAX_ALPHA - HEATMAP_MIN_ALPHA))
-                  return (
-                    <td
-                      key={t}
-                      title={v == null ? undefined : `${label} ${strike.toLocaleString()} @ ${istTimeFormatter(t)}: ${v > 0 ? '+' : ''}${v.toLocaleString()}`}
-                      style={{ width: 20, height: 20, minWidth: 20, background: cellColor }}
-                    />
-                  )
-                })}
-              </tr>
-            )
-          })}
-        </tbody>
-      </table>
+    <div style={{ display: 'flex', border: `1px solid ${BORDER_COLOR}`, borderRadius: 4, overflow: 'hidden' }}>
+      <div style={{ flexShrink: 0, width: HEATMAP_LABEL_WIDTH, background: '#161a22' }}>
+        <div style={{ height: HEATMAP_AXIS_HEIGHT }} />
+        {strikes.map((strike) => (
+          <div
+            key={strike}
+            style={{
+              height: HEATMAP_ROW_HEIGHT, lineHeight: `${HEATMAP_ROW_HEIGHT}px`, textAlign: 'right', paddingRight: 8,
+              fontSize: 11, whiteSpace: 'nowrap', fontWeight: strike === atmStrike ? 700 : 400,
+              color: strike === atmStrike ? '#fff' : AXIS_COLOR,
+            }}
+          >
+            {strike.toLocaleString()}
+          </div>
+        ))}
+      </div>
+      <div ref={scrollRef} style={{ overflowX: 'auto', overflowY: 'hidden' }} onMouseLeave={() => setHover(null)}>
+        <canvas ref={canvasRef} onMouseMove={handleMouseMove} style={{ display: 'block' }} />
+      </div>
+      {hover && (
+        <div
+          style={{
+            position: 'fixed', left: hover.clientX + 14, top: hover.clientY + 14, zIndex: 1000,
+            background: '#161a22', border: `1px solid ${BORDER_COLOR}`, borderRadius: 4, padding: '4px 8px',
+            fontSize: 11, color: '#fff', pointerEvents: 'none', whiteSpace: 'nowrap',
+          }}
+        >
+          {label} {hover.strike.toLocaleString()} @ {istTimeFormatter(hover.time)}:{' '}
+          <Text strong style={{ color: hover.value == null ? '#fff' : hover.value > 0 ? OI_ADDED_COLOR : hover.value < 0 ? OI_REMOVED_COLOR : '#fff' }}>
+            {hover.value == null ? '—' : `${hover.value > 0 ? '+' : ''}${hover.value.toLocaleString()}`}
+          </Text>
+        </div>
+      )}
     </div>
   )
 }
@@ -2773,11 +2842,11 @@ export default function OiReplayPage() {
                   </Space>
                   <div>
                     <Text strong style={{ fontSize: 12 }}>CE</Text>
-                    <OiChangeHeatmapGrid label="CE" byStrike={ceByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} height={280} />
+                    <OiChangeHeatmapPlot label="CE" byStrike={ceByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} />
                   </div>
                   <div>
                     <Text strong style={{ fontSize: 12 }}>PE</Text>
-                    <OiChangeHeatmapGrid label="PE" byStrike={peByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} height={280} />
+                    <OiChangeHeatmapPlot label="PE" byStrike={peByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} />
                   </div>
                 </Space>
               </Card>
