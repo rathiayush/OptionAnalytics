@@ -94,20 +94,22 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
 
     // Spacing between successive chunk calls, and between a rate-limited chunk's own retries - a
     // multi-month lookback can need several chunks per side, and CallerService (see
-    // ExpiredOptionBacktestService) fetches CE and PE back to back, so without any pacing at all a
-    // single Run click can burst 4-6+ requests at Dhan in well under a second. Same idea as
-    // BacktestService.OnDemandCallDelay, just a little more generous since a live-money order-flow
-    // call is not competing for the same budget here.
+    // ExpiredOptionBacktestService) fetches CE and PE back to back. DhanDataApiRateLimiter (see
+    // SendWithRateLimitRetryAsync below) is now what actually enforces Dhan's documented Data-API
+    // ceiling app-wide, so this is just extra, harmless pacing on top of that, kept mainly so a
+    // multi-chunk backtest doesn't queue every one of its own chunks on the shared limiter at once.
     private static readonly TimeSpan ChunkDelay = TimeSpan.FromMilliseconds(350);
     private const int MaxRateLimitRetries = 3;
     private static readonly TimeSpan RateLimitRetryDelay = TimeSpan.FromSeconds(2);
 
     private readonly DhanApiClient _api;
+    private readonly DhanDataApiRateLimiter _rateLimiter;
     private readonly ILogger<DhanRollingOptionDataService> _logger;
 
-    public DhanRollingOptionDataService(DhanApiClient api, ILogger<DhanRollingOptionDataService> logger)
+    public DhanRollingOptionDataService(DhanApiClient api, DhanDataApiRateLimiter rateLimiter, ILogger<DhanRollingOptionDataService> logger)
     {
         _api = api;
+        _rateLimiter = rateLimiter;
         _logger = logger;
     }
 
@@ -218,8 +220,10 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
     }
 
     /// <summary>Sends one chunk, retrying with a backoff ONLY on Dhan's own rate-limit error - it
-    /// explicitly says "Try throttling API calls" (a transient condition ChunkDelay's own pacing
-    /// reduces but cannot fully rule out, since Dhan's limit is account-wide, not per-endpoint), so
+    /// explicitly says "Try throttling API calls" (a condition DhanDataApiRateLimiter's own
+    /// per-second gate below now actively prevents rather than merely reduces, since Dhan's limit
+    /// is account-wide, not per-endpoint - this retry is the fallback for whatever narrow race
+    /// still slips past it, e.g. another process/instance sharing the same Dhan account), so
     /// retrying that one specific failure is honoring Dhan's own instruction rather than giving up
     /// on a request that would very likely succeed a couple of seconds later. Any other failure -
     /// auth, a bad parameter, a genuine server error - returns immediately, unretried.
@@ -233,6 +237,7 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
     {
         for (var attempt = 0; ; attempt++)
         {
+            await _rateLimiter.WaitForPermitAsync(cancellationToken);
             var response = await _api.SendAsync(HttpMethod.Post, "/charts/rollingoption", payload, context, cancellationToken);
             if (response.Success) return (response, null);
 

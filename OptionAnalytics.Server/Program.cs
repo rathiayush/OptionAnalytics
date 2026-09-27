@@ -103,6 +103,10 @@ builder.Services.AddSingleton<DhanSpotInstrumentMaster>(sp => new DhanSpotInstru
     sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<DhanOptions>>(),
     sp.GetRequiredService<ILogger<DhanSpotInstrumentMaster>>()));
 builder.Services.AddHttpClient<DhanTotpAuthService>();
+// Shared across DhanHistoricalDataService and DhanRollingOptionDataService below - see its own
+// doc comment for why this must be one singleton rather than one per service (Dhan's Data API
+// limit is account-wide, not per-endpoint).
+builder.Services.AddSingleton<DhanDataApiRateLimiter>();
 builder.Services.AddSingleton<DhanHistoricalDataService>();
 builder.Services.AddSingleton<DhanRollingOptionDataService>();
 // Reads NiftyDataCollector's own TimescaleDB instead of calling Dhan live - inert (never even

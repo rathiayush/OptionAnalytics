@@ -57,6 +57,20 @@ public sealed class DhanOptions
     /// a per-contract trading symbol column.</summary>
     public string ScripMasterUrl { get; set; } = "https://images.dhan.co/api-data/api-scrip-master.csv";
 
+    /// <summary>Ceiling on outbound Dhan "Data API" calls (the /charts/intraday and
+    /// /charts/rollingoption endpoints - historical/rolling-option candles) per second, shared
+    /// across every caller in the whole process via DhanDataApiRateLimiter - see that class's own
+    /// doc comment for why this has to be a single app-wide gate rather than a per-caller one.
+    /// Defaults to Dhan API v2's own documented Data API limit (5 requests/second, account-wide -
+    /// confirmed both via Dhan's official v2 docs and its support article on API rate limits, and
+    /// independently corroborated by DhanRollingOptionDataService's own pre-existing doc comment
+    /// that Dhan's limit is "account-wide, not per-endpoint"). Only meant to be dialed DOWN from
+    /// here (more conservative than Dhan's own stated limit), never raised past what Dhan actually
+    /// allows - Order APIs (10/sec) and Quote APIs (1/sec, already handled separately by
+    /// DhanOptionChainQuotes' own MinimumCallSpacing) are different categories with different
+    /// limits and are not affected by this setting at all.</summary>
+    public int DataApiRequestsPerSecond { get; set; } = 5;
+
     public bool HasSession => !string.IsNullOrWhiteSpace(ClientId) && !string.IsNullOrWhiteSpace(AccessToken);
 
     /// <summary>True when everything TOTP auto-login needs is configured. Checked before

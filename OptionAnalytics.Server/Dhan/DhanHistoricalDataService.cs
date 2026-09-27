@@ -36,11 +36,13 @@ public sealed class DhanHistoricalDataService
     private const string FuturesInstrument = "FUTIDX";
 
     private readonly DhanApiClient _api;
+    private readonly DhanDataApiRateLimiter _rateLimiter;
     private readonly ILogger<DhanHistoricalDataService> _logger;
 
-    public DhanHistoricalDataService(DhanApiClient api, ILogger<DhanHistoricalDataService> logger)
+    public DhanHistoricalDataService(DhanApiClient api, DhanDataApiRateLimiter rateLimiter, ILogger<DhanHistoricalDataService> logger)
     {
         _api = api;
+        _rateLimiter = rateLimiter;
         _logger = logger;
     }
 
@@ -75,6 +77,7 @@ public sealed class DhanHistoricalDataService
             toDate = $"{toDay:yyyy-MM-dd} 15:30:00",
         };
 
+        await _rateLimiter.WaitForPermitAsync(cancellationToken);
         using var response = await _api.SendAsync(HttpMethod.Post, "/charts/intraday", payload,
             $"intraday candles ({dhanSegment}:{securityId}, {fromDay:yyyy-MM-dd}..{toDay:yyyy-MM-dd})", cancellationToken);
 
@@ -129,6 +132,7 @@ public sealed class DhanHistoricalDataService
             oi = true,
         };
 
+        await _rateLimiter.WaitForPermitAsync(cancellationToken);
         using var response = await _api.SendAsync(HttpMethod.Post, "/charts/intraday", payload,
             $"futures intraday candles ({dhanSegment}:{securityId}, {fromDay:yyyy-MM-dd}..{toDay:yyyy-MM-dd})", cancellationToken);
 
@@ -206,6 +210,7 @@ public sealed class DhanHistoricalDataService
             toDate = $"{toDay:yyyy-MM-dd} 15:30:00",
         };
 
+        await _rateLimiter.WaitForPermitAsync(cancellationToken);
         using var response = await _api.SendAsync(HttpMethod.Post, "/charts/intraday", payload,
             $"{instrumentType} intraday candles ({dhanSegment}:{securityId}, {fromDay:yyyy-MM-dd}..{toDay:yyyy-MM-dd})", cancellationToken);
 
