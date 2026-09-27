@@ -232,9 +232,20 @@ function computeOiChangeSeries(totalSeries) {
 // just plotted continuously so its own trajectory through the day is visible instead of only its
 // current value.
 function toSinceOpenSeries(totalSeries) {
-  if (totalSeries.length === 0) return totalSeries
-  const base = totalSeries[0].value
-  return totalSeries.map((p) => ({ time: p.time, value: p.value - base }))
+  // Every call site here is a plain useMemo, not wrapped in its own ChartErrorBoundary the way the
+  // chart that eventually renders this IS - an exception thrown here would crash the whole page's
+  // top-level render instead of just that one chart. Guarded defensively after a real report of
+  // exactly that (a blank/crashed page, right after this since-open feature shipped) - degrading to
+  // an empty series (the chart then just shows nothing) is a far better failure than taking the
+  // entire page down with it.
+  try {
+    if (!Array.isArray(totalSeries) || totalSeries.length === 0) return []
+    const base = totalSeries[0]?.value
+    if (!Number.isFinite(base)) return []
+    return totalSeries.map((p) => ({ time: p.time, value: p.value - base }))
+  } catch {
+    return []
+  }
 }
 
 // The all-strikes counterpart to the single-strike drill-down's own change tab - "where, across the

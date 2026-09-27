@@ -29,13 +29,28 @@ class AppErrorBoundary extends Component {
 
   render() {
     if (this.state.error) {
+      const err = this.state.error
+      // WebKit's (Safari/mobile) Error.stack is JUST the call-frame trace - no leading "Error:
+      // message" line the way V8 formats it - so showing .stack alone (this component's own first
+      // cut) silently hid the one thing that actually explains a crash on that engine. message/
+      // toString() is shown first and always, on every engine; the stack is still useful (it at
+      // least narrows down WHERE), so it stays, just demoted to supporting detail underneath.
+      const message = (err && (err.message || String(err))) || 'Unknown error (no message was thrown).'
       return (
         <div style={{ padding: 24, maxWidth: 680, margin: '48px auto', fontFamily: 'sans-serif', color: '#e6e6e6', background: '#0d0e12', minHeight: '100vh' }}>
           <h2 style={{ color: '#f0a020' }}>Something went wrong</h2>
           <p>This page hit an unexpected error and stopped, instead of silently going blank. The actual error:</p>
-          <pre style={{ background: '#15161c', padding: 12, borderRadius: 6, overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: '#ff6b6b', fontSize: 13 }}>
-            {String(this.state.error?.stack ?? this.state.error?.message ?? this.state.error)}
-          </pre>
+          <p style={{ background: '#15161c', padding: 12, borderRadius: 6, whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: '#ff6b6b', fontSize: 14, fontWeight: 600 }}>
+            {message}
+          </p>
+          {err?.stack && (
+            <>
+              <p style={{ color: '#9a9a9a', fontSize: 12, marginBottom: 4 }}>Where (call stack):</p>
+              <pre style={{ background: '#15161c', padding: 12, borderRadius: 6, overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: '#9a9a9a', fontSize: 12 }}>
+                {String(err.stack)}
+              </pre>
+            </>
+          )}
           <button
             onClick={() => window.location.reload()}
             style={{ marginTop: 16, padding: '8px 20px', cursor: 'pointer', background: '#1668dc', color: '#fff', border: 'none', borderRadius: 6, fontSize: 14 }}
