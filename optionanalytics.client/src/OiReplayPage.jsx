@@ -10,6 +10,7 @@ import {
   UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR,
   istTimeFormatter, istTickMarkFormatter, toBar, toChartTime, fromChartTime, istDateKey,
   NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, usePersistedState,
+  syncSignalRGroups, joinAllSignalRGroups,
 } from './shared.jsx'
 import { PremiumEmaChart } from './oiShared.jsx'
 
@@ -68,11 +69,22 @@ const RECONNECT_RETRY_POLICY = {
 // "oiReplayTick" (OiReplayLiveFeedService's push - one option leg's live price/OI), and
 // "futuresTick" (that same service's push for the underlying's own nearest futures contract - the
 // user's own "make sure ALL functionality of this page should work [live]" ask: the Futures section
-// used to be a one-time REST snapshot that never updated again until the next full reload). All
-// callbacks are read through refs (same pattern as App.jsx's useHub) so the connection itself only
-// needs to open/close when `enabled` changes, never when underlying/expiryFlag/the callbacks
-// themselves change identity across a re-render.
-function useOiReplayLiveFeed(enabled, onSpotUpdate, onOiReplayTick, onFuturesTick, onReconnected) {
+// used to be a one-time REST snapshot that never updated again until the next full reload).
+//
+// ALWAYS connects on mount and never tears down/rebuilds - an empty dependency array, exactly like
+// App.jsx's own useHub/oiShared.jsx's useOiLiveHub. This USED to depend on `[enabled]`
+// (isToday && liveFeedSupported && Boolean(result)) so the connection only opened while genuinely
+// viewing today live - which sounds right but wasn't: `result` briefly goes null/undefined on
+// EVERY load() call (including a plain data refresh, not just a day switch), flipping `enabled`
+// false-then-true-then-false in quick succession and tearing the real WebSocket down and rebuilding
+// it each time - a real, confirmed source of "lots of web connections"/reconnect churn, the exact
+// bug oiShared.jsx's useOiLiveHub was already built specifically to avoid on the Live OI Dashboard,
+// just never backported here. Every callback below already independently checks `isToday` itself
+// before acting (see handleSpotUpdate/handleOiReplayTick/handleFuturesTick's own `if (!isToday...)`
+// guards) via the SAME ref-read pattern used here, so a tick arriving while a historical (non-today)
+// day is loaded already safely no-ops - nothing about correctness depended on tearing the
+// connection itself down, only on gating what it's ALLOWED to do once a tick arrives.
+function useOiReplayLiveFeed(onSpotUpdate, onOiReplayTick, onFuturesTick, onReconnected, underlying, expiryFlag) {
   const spotRef = useRef(onSpotUpdate)
   const tickRef = useRef(onOiReplayTick)
   const futuresRef = useRef(onFuturesTick)
@@ -82,46 +94,69 @@ function useOiReplayLiveFeed(enabled, onSpotUpdate, onOiReplayTick, onFuturesTic
   futuresRef.current = onFuturesTick
   reconnectedRef.current = onReconnected
 
-  // The actual SignalR connection state, not just "isToday" - the page's own "Live" badge used to be
-  // purely a date comparison, so it read "Live" (green) even when this connection had failed to
-  // negotiate, was stuck reconnecting, or had given up entirely after withAutomaticReconnect's own
-  // retry budget ran out - exactly the "everything is stuck but it still says Live" confusion the
-  // user hit. 'connecting' while start() is in flight, 'connected' once it resolves (or after
-  // onreconnected), 'reconnecting' while the client is retrying a dropped connection on its own,
-  // 'disconnected' once onclose fires (retries exhausted, or the connection was never enabled).
-  const [connectionState, setConnectionState] = useState('disconnected')
+  // The actual SignalR connection state - the page's own "Live" badge used to be purely a date
+  // comparison, so it read "Live" (green) even when this connection had failed to negotiate, was
+  // stuck reconnecting, or had given up entirely after withAutomaticReconnect's own retry budget ran
+  // out - exactly the "everything is stuck but it still says Live" confusion the user hit.
+  // 'connecting' while start() is in flight, 'connected' once it resolves (or after onreconnected),
+  // 'reconnecting' while the client is retrying a dropped connection on its own, 'disconnected' once
+  // onclose fires (retries exhausted).
+  const [connectionState, setConnectionState] = useState('connecting')
+  const connectionRef = useRef(null)
+  // "u:{underlying}" (spotUpdate/futuresTick) plus "c:{underlying}:{expiryFlag}" (oiReplayTick) -
+  // same two-group shape as oiShared.jsx's useOiLiveHub, see its own doc comment.
+  const groupsRef = useRef([])
 
   useEffect(() => {
-    if (!enabled) return
-    setConnectionState('connecting')
     const connection = new signalR.HubConnectionBuilder()
       .withUrl('/hubs/spot')
       .withAutomaticReconnect(RECONNECT_RETRY_POLICY)
       .build()
+    connectionRef.current = connection
 
     connection.on('spotUpdate', (snapshot) => spotRef.current(snapshot))
     connection.on('oiReplayTick', (tick) => tickRef.current(tick))
     connection.on('futuresTick', (tick) => futuresRef.current?.(tick))
     connection.onreconnecting(() => setConnectionState('reconnecting'))
-    connection.onreconnected(() => { setConnectionState('connected'); reconnectedRef.current?.() })
+    // A reconnect gets a brand-new server-side connection with no group membership at all - rejoin
+    // the CURRENT selection (groupsRef.current), not whatever it was when this connection object was
+    // first created.
+    connection.onreconnected(() => {
+      setConnectionState('connected')
+      joinAllSignalRGroups(connection, groupsRef.current)
+      reconnectedRef.current?.()
+    })
     connection.onclose(() => setConnectionState('disconnected'))
     connection.start()
-      .then(() => setConnectionState('connected'))
+      .then(() => {
+        setConnectionState('connected')
+        joinAllSignalRGroups(connection, groupsRef.current)
+      })
       .catch((err) => {
-        // Same StrictMode double-mount as App.jsx's useHub - the first connection's start() gets
-        // aborted by this effect's own cleanup before negotiation finishes on the second mount.
+        // React StrictMode double-mounts every effect once in development - the first connection's
+        // start() gets aborted by this effect's own cleanup before negotiation finishes on the
+        // second mount. Not a real failure.
         if (err?.name === 'AbortError') return
         console.error('OI Replay live feed connection failed:', err)
         setConnectionState('disconnected')
       })
 
-    return () => { connection.stop() }
-  }, [enabled])
+    return () => { connectionRef.current = null; connection.stop() }
+  }, [])
 
-  // Derived rather than set from inside the effect's own !enabled branch - "disabled" isn't really a
-  // connection STATE this hook transitions through, it's the absence of one, so it belongs here as a
-  // plain fallback rather than as a setState a disabled render would otherwise redundantly re-fire.
-  return enabled ? connectionState : 'disconnected'
+  // Keeps server-side group membership in sync with the currently selected underlying/expiryFlag,
+  // without touching the connection itself - see oiShared.jsx's useOiLiveHub for the identical
+  // shape/reasoning.
+  useEffect(() => {
+    const newGroups = [
+      underlying ? `u:${underlying}` : null,
+      underlying && expiryFlag ? `c:${underlying}:${expiryFlag}` : null,
+    ].filter(Boolean)
+    syncSignalRGroups(connectionRef.current, groupsRef.current, newGroups)
+    groupsRef.current = newGroups
+  }, [underlying, expiryFlag])
+
+  return connectionState
 }
 
 // One entry per distinct strike this side ever reported, its own points sorted ascending by time -
@@ -2103,7 +2138,7 @@ export default function OiReplayPage() {
   }
 
   const handleLiveReconnected = () => { if (isToday) load() }
-  const liveConnectionState = useOiReplayLiveFeed(isToday && liveFeedSupported && Boolean(result), handleSpotUpdate, handleOiReplayTick, handleFuturesTick, handleLiveReconnected)
+  const liveConnectionState = useOiReplayLiveFeed(handleSpotUpdate, handleOiReplayTick, handleFuturesTick, handleLiveReconnected, underlying, expiryFlag)
 
   // A plain tick, unrelated to any live data - exists ONLY so feedStalled below re-evaluates on a
   // real clock instead of purely as a side effect of the next incoming tick (same reasoning as Live

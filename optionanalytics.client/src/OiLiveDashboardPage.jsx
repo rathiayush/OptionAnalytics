@@ -537,7 +537,7 @@ export default function OiLiveDashboardPage() {
     if (point.obvPe != null) setObvPeSeries((prev) => mergeBar(prev, { time, value: point.obvPe }))
   }
 
-  const connectionState = useOiLiveHub(handleSpotUpdate, handleOiReplayTick, handleReconnected, handleCdvUpdate, handleCdvBarClosed, handleOiRestSnapshot)
+  const connectionState = useOiLiveHub(handleSpotUpdate, handleOiReplayTick, handleReconnected, handleCdvUpdate, handleCdvBarClosed, handleOiRestSnapshot, underlying, expiryFlag)
 
   // STEP_BY_UNDERLYING alone, not result?.step - result comes from the slow forceLive OI/IV load(),
   // and the step is a fixed constant per underlying either way (this frontend map matches OiReplay

@@ -269,7 +269,7 @@ public sealed class OiReplayLiveFeedService : BackgroundService
                 pePrice = q.PeLastPrice,
             }),
         };
-        await BroadcastAsync("oiRestSnapshot", payload);
+        await BroadcastAsync($"c:{combo.Underlying}:{combo.ExpiryFlag}", "oiRestSnapshot", payload);
     }
 
     private async Task<bool> RecenterComboAsync(Combo combo, CancellationToken cancellationToken)
@@ -379,7 +379,7 @@ public sealed class OiReplayLiveFeedService : BackgroundService
                 bestBidPrice = tick.BestBidPrice,
                 bestAskPrice = tick.BestAskPrice,
             };
-            _ = BroadcastAsync("oiReplayTick", payload);
+            _ = BroadcastAsync($"c:{leg.Underlying}:{leg.ExpiryFlag}", "oiReplayTick", payload);
         }
 
         if (_futuresLegsBySecurityId.TryGetValue(tick.SecurityId, out var futuresUnderlying) && tick.LastPrice > 0)
@@ -393,18 +393,22 @@ public sealed class OiReplayLiveFeedService : BackgroundService
                 // Same wire-annotation-only conversion as the options tick payload above.
                 time = tick.ExchangeTimestamp.ToOffset(IstClock.Offset),
             };
-            _ = BroadcastAsync("futuresTick", payload);
+            // Futures has no expiryFlag concept (see FuturesUnderlyings' own doc comment) - the
+            // plain underlying group, same one spotUpdate/confluenceAlert/cdvUpdate use.
+            _ = BroadcastAsync($"u:{futuresUnderlying}", "futuresTick", payload);
         }
     }
 
     /// <summary>Fire-and-forget from OnTick (a synchronous event handler) - same reasoning as
     /// SpotFeedHostedService's own BroadcastAsync: a slow or failed SignalR send must never block or
-    /// crash the tick-handling path that every other live consumer of this same event also runs on.</summary>
-    private async Task BroadcastAsync(string eventName, object payload)
+    /// crash the tick-handling path that every other live consumer of this same event also runs on.
+    /// groupName is one of SpotHub's own two conventions (see its doc comment) - never Clients.All,
+    /// so a client only ever receives a leg/underlying it actually joined.</summary>
+    private async Task BroadcastAsync(string groupName, string eventName, object payload)
     {
         try
         {
-            await _hub.Clients.All.SendAsync(eventName, payload);
+            await _hub.Clients.Group(groupName).SendAsync(eventName, payload);
         }
         catch (Exception ex)
         {

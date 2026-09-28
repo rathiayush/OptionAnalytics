@@ -428,7 +428,7 @@ public sealed class SpotFeedHostedService : BackgroundService
     {
         try
         {
-            await _hub.Clients.All.SendAsync("spotUpdate", state.ToSnapshot());
+            await _hub.Clients.Group($"u:{state.Underlying}").SendAsync("spotUpdate", state.ToSnapshot());
         }
         catch (Exception ex)
         {

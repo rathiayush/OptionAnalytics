@@ -289,6 +289,13 @@ public sealed class ConfluenceAlertService : BackgroundService
     {
         try
         {
+            // Deliberately Clients.All, NOT scoped to alert.Underlying's own group - the Dashboard's
+            // own Alerts panel shows alerts across EVERY underlying at once (it renders each alert's
+            // own a.underlying label per row, not just the currently-charted one), so scoping this
+            // to one group would silently drop alerts for every underlying the viewer isn't
+            // currently looking at. Also genuinely rare (only a real EMA-direction flip, not a
+            // per-tick event), so the Clients.All cost this event was never why SpotHub needed
+            // scoping in the first place - see SpotHub's own doc comment for which events are.
             await _hub.Clients.All.SendAsync("confluenceAlert", alert);
         }
         catch (Exception ex)
