@@ -83,8 +83,22 @@ body {
   .navbar-desktop-menu {
     display: none;
   }
+  /* Fixed to the corner rather than left inline where NavBar happens to sit in each page's own
+     header Space - every page builds that row differently (Title, then NavBar, then that page's
+     OWN Selects/buttons all sharing one wrapping Space), so an inline trigger landed in a different,
+     often mid-row spot depending on which page and how much else was in that row at the current
+     width - never a predictable, thumb-reachable corner the way a mobile nav trigger should be.
+     Fixed position makes it the same reachable spot on every page at every width under the
+     breakpoint, independent of that page's own layout entirely. Top-right (not top-left, where the
+     Drawer itself opens from) specifically to avoid the page's own Title text, which every page
+     places top-left. */
   .navbar-mobile-trigger {
     display: inline-flex;
+    position: fixed;
+    top: 12px;
+    right: 12px;
+    z-index: 1000;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
   }
   /* The signed-in email is the least useful thing on a phone-width header - it just steals space
      that Selects/NavBar itself need far more; the log-out button alone is enough to act on. */
