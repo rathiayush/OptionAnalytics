@@ -114,14 +114,25 @@ function appendPoint(map, strike, point) {
   return next
 }
 
-// Every strike/side's OI at the very first point the initial seed fetch ever saw - derived from the
-// SAME grouped (and correctly time-sorted) Map ceSeries/peSeries themselves get seeded from, then
-// captured into its own Map and never touched again, so it survives appendPoint's own trimming no
-// matter how long the page has been open or how much a strike's own rolling window has since moved
-// past its own opening reading.
+// Every strike/side's OI at the earliest point the initial seed fetch reported a GENUINE reading
+// for - derived from the SAME grouped (and correctly time-sorted) Map ceSeries/peSeries themselves
+// get seeded from, then captured into its own Map and never touched again, so it survives
+// appendPoint's own trimming no matter how long the page has been open or how much a strike's own
+// rolling window has since moved past its own opening reading.
+//
+// Deliberately the first point with a NONZERO OpenInterest, not simply points[0] - Dhan's own
+// documented sentinel for "OI/IV not available yet" on /charts/rollingoption is a literal 0 (see
+// DhanRollingOptionDataService.ParseSide's own doc comment), and the very first 1-minute bar of the
+// day is exactly where that fires in practice (Dhan hasn't finished computing OI for a brand-new
+// bar yet) - disproportionately on PE. Falling back to points[0] when EVERY point is still 0 (a
+// strike that genuinely has no OI reading yet) keeps this a graceful "no baseline yet" rather than
+// a thrown error - the caller's own `ceOpen?.openInterest` (falsy) check treats that 0 the same way.
 function buildDayOpenByStrike(grouped) {
   const map = new Map()
-  for (const [strike, points] of grouped) if (points.length > 0) map.set(strike, points[0])
+  for (const [strike, points] of grouped) {
+    if (points.length === 0) continue
+    map.set(strike, points.find((p) => (p.openInterest ?? 0) !== 0) ?? points[0])
+  }
   return map
 }
 
@@ -582,22 +593,32 @@ export default function OiLiveDashboardPage() {
       const peOpen = peDayOpen.get(strike) ?? null
       const ceAsOfMs = ce ? new Date(ce.time).getTime() : null
       const peAsOfMs = pe ? new Date(pe.time).getTime() : null
-      const ceOiSinceOpenRaw = ce?.openInterest != null && ceOpen?.openInterest != null ? ce.openInterest - ceOpen.openInterest : null
-      const peOiSinceOpenRaw = pe?.openInterest != null && peOpen?.openInterest != null ? pe.openInterest - peOpen.openInterest : null
+      // Dhan's own documented sentinel for "OI/IV not available yet" on /charts/rollingoption is a
+      // literal 0 (see DhanRollingOptionDataService.ParseSide's own doc comment) - NOT a genuine
+      // "zero open interest at open". The very first 1-minute bar of the day is exactly where this
+      // fires in practice (Dhan hasn't finished computing OI for a brand-new bar yet), and it was
+      // hitting PE far more often than CE - a 0 day-open baseline made every later real OI reading
+      // look like a delta of roughly the ENTIRE current OI, which is what was tripping the sanity
+      // check below on one side almost every time. Treating a 0 baseline as "no baseline yet"
+      // (falsy-checked, not just != null) instead of a real reading is the actual fix - a delta is
+      // simply not shown until a genuine (nonzero) day-open reading exists, rather than being
+      // computed from a placeholder and then hidden again downstream.
+      const ceOiSinceOpenRaw = ce?.openInterest != null && ceOpen?.openInterest ? ce.openInterest - ceOpen.openInterest : null
+      const peOiSinceOpenRaw = pe?.openInterest != null && peOpen?.openInterest ? pe.openInterest - peOpen.openInterest : null
       // See SINCE_OPEN_SANITY_MULTIPLE's own doc comment - a delta this far out of proportion to the
-      // strike's own current OI is treated as an untrustworthy reading, not a real move, and hidden
-      // rather than shown as a precise-looking number. Math.max(..., SINCE_OPEN_MIN_BASELINE) keeps
+      // strike's own current OI is flagged as an untrustworthy reading (the two pipelines likely
+      // disagreeing), but STILL SHOWN - never hidden. Math.max(..., SINCE_OPEN_MIN_BASELINE) keeps
       // this meaningful even when current OI itself reads 0 - see that constant's own doc comment.
       const ceOiSinceOpenSuspect = ceOiSinceOpenRaw != null && Math.abs(ceOiSinceOpenRaw) > Math.max(ce.openInterest, SINCE_OPEN_MIN_BASELINE) * SINCE_OPEN_SANITY_MULTIPLE
       const peOiSinceOpenSuspect = peOiSinceOpenRaw != null && Math.abs(peOiSinceOpenRaw) > Math.max(pe.openInterest, SINCE_OPEN_MIN_BASELINE) * SINCE_OPEN_SANITY_MULTIPLE
-      const ceOiSinceOpen = ceOiSinceOpenSuspect ? null : ceOiSinceOpenRaw
-      const peOiSinceOpen = peOiSinceOpenSuspect ? null : peOiSinceOpenRaw
-      // Logged, not just silently hidden - a real report ("this calculation is incorrect... OI
-      // showing incorrect data") turned out to be this exact suppression firing, uniformly, across
-      // every strike on one side - which is itself useful evidence (a systematic cross-pipeline
-      // disagreement, not a one-off blip), but was invisible without opening devtools. Now it is.
-      if (ceOiSinceOpenSuspect) console.warn(`Live OI Dashboard: hiding CE Δ (since open) for ${strike} - raw delta ${ceOiSinceOpenRaw} looks implausible against current OI ${ce.openInterest} (day-open was ${ceOpen.openInterest} from the REST seed; current is from the live tick feed - these two pipelines disagreeing this much on the same strike is the suspected cause).`)
-      if (peOiSinceOpenSuspect) console.warn(`Live OI Dashboard: hiding PE Δ (since open) for ${strike} - raw delta ${peOiSinceOpenRaw} looks implausible against current OI ${pe.openInterest} (day-open was ${peOpen.openInterest} from the REST seed; current is from the live tick feed - these two pipelines disagreeing this much on the same strike is the suspected cause).`)
+      const ceOiSinceOpen = ceOiSinceOpenRaw
+      const peOiSinceOpen = peOiSinceOpenRaw
+      // Logged as well as shown, flagged rather than hidden - a real report ("this calculation is
+      // incorrect... OI showing incorrect data") traced back to this exact check firing uniformly
+      // across every strike on one side, which is itself useful evidence (a systematic cross-pipeline
+      // disagreement, not a one-off blip) - kept here for whenever it fires again.
+      if (ceOiSinceOpenSuspect) console.warn(`Live OI Dashboard: CE Δ (since open) for ${strike} looks implausible - raw delta ${ceOiSinceOpenRaw} against current OI ${ce.openInterest} (day-open was ${ceOpen.openInterest} from the REST seed; current is from the live tick feed - these two pipelines disagreeing this much on the same strike is the suspected cause). Shown anyway, flagged.`)
+      if (peOiSinceOpenSuspect) console.warn(`Live OI Dashboard: PE Δ (since open) for ${strike} looks implausible - raw delta ${peOiSinceOpenRaw} against current OI ${pe.openInterest} (day-open was ${peOpen.openInterest} from the REST seed; current is from the live tick feed - these two pipelines disagreeing this much on the same strike is the suspected cause). Shown anyway, flagged.`)
       return {
         strike,
         ceOi: ce?.openInterest ?? null, ceIv: ce?.impliedVolatility ?? null, cePrice: ce?.price ?? null,
