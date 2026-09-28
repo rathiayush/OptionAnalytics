@@ -27,6 +27,45 @@ const { Text } = Typography
 // (re-feeding the chart, losing its own pan/zoom) even when the caller never actually passes one.
 const EMPTY_ARRAY = []
 
+// Keeps a chart's own visible time range showing "the whole day so far", growing as more bars
+// accumulate live, instead of staying frozen at whatever few bars existed the moment fitContent()
+// happened to run once. Every chart on this page/OiReplayPage.jsx used to call fitContent() only
+// on [dayKey] (a fresh day loading) - correct for that one moment, but a real report ("charts are
+// too zoomed, I have to squeeze/zoom out myself") traced back to exactly this: fitContent() fits to
+// however many bars exist RIGHT THEN, and nothing ever widened that window again as a live session
+// went on to accumulate far more bars over the rest of the day. The vertical (price) axis needed no
+// separate fix - lightweight-charts' own default autoScale already re-fits to whatever's in the
+// CURRENT visible window, so it was only ever following the same too-narrow horizontal window.
+//
+// Only re-fits while the viewer is already at the live edge (the previous last bar was already
+// visible) - re-fitting on every single new tick regardless would otherwise yank someone back to
+// the day's full span the moment they scroll/zoom back to inspect an earlier stretch, fighting the
+// very thing they just did. Same reasoning ReplayChart's own allowShiftVisibleRangeOnWhitespaceReplacement
+// doc comment already gives for shiftVisibleRangeOnNewBar.
+export function useFitContentAsDataGrows(chartRef, dataLength, dayKey) {
+  const prevLengthRef = useRef(0)
+
+  // A fresh day (or combo switch) always gets an unconditional fit, regardless of where the OLD
+  // day's chart happened to be scrolled to - there is no "previous" position to preserve.
+  useEffect(() => {
+    if (dataLength > 0) chartRef.current?.timeScale().fitContent()
+    prevLengthRef.current = dataLength
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dayKey])
+
+  useEffect(() => {
+    const chart = chartRef.current
+    const previousLength = prevLengthRef.current
+    prevLengthRef.current = dataLength
+    if (!chart || dataLength === 0 || dataLength <= previousLength) return
+    const timeScale = chart.timeScale()
+    const range = timeScale.getVisibleLogicalRange()
+    const wasAtLiveEdge = !range || range.to >= previousLength - 1
+    if (wasAtLiveEdge) timeScale.fitContent()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dataLength])
+}
+
 // Modeled directly on App.jsx's own useHub: ONE connection, opened on mount and never torn down or
 // rebuilt - no `enabled` gate, no dependency on underlying/expiryFlag (a fresh connection would mean
 // a fresh reconnect-and-rejoin cycle on every selection change, exactly the "reconnect churn"
@@ -396,10 +435,7 @@ export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Onl
     vwapSeriesRef.current?.setData(showVwap ? vwapSeries : EMPTY_ARRAY)
   }, [vwapSeries, showVwap])
 
-  useEffect(() => {
-    if (bars.length > 0) chartRef.current?.timeScale().fitContent()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dayKey])
+  useFitContentAsDataGrows(chartRef, bars.length, dayKey)
 
   useEffect(() => {
     if (!seriesRef.current) return
@@ -568,10 +604,7 @@ export function EmaChart({ oneMinBars, visibleCount, timeframe, onTimeframeChang
     vwapSeriesRef.current?.setData(showVwap ? vwapSeries : EMPTY_ARRAY)
   }, [vwapSeries, showVwap])
 
-  useEffect(() => {
-    if (displayBars.length > 0) chartRef.current?.timeScale().fitContent()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dayKey, timeframe])
+  useFitContentAsDataGrows(chartRef, displayBars.length, `${dayKey}-${timeframe}`)
 
   return (
     <div style={{ width: '100%' }}>
@@ -652,10 +685,7 @@ export function PremiumLineChart({ points, dayKey, color, height = 320 }) {
 
   useEffect(() => { if (seriesRef.current) seriesRef.current.setData(sanitizedPoints) }, [sanitizedPoints])
 
-  useEffect(() => {
-    if (sanitizedPoints.length > 0) chartRef.current?.timeScale().fitContent()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dayKey])
+  useFitContentAsDataGrows(chartRef, sanitizedPoints.length, dayKey)
 
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }
@@ -837,10 +867,7 @@ export function PremiumCandleChart({ bars, dayKey, height = 320 }) {
 
   useEffect(() => { if (seriesRef.current) seriesRef.current.setData(sanitizedBars) }, [sanitizedBars])
 
-  useEffect(() => {
-    if (sanitizedBars.length > 0) chartRef.current?.timeScale().fitContent()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dayKey])
+  useFitContentAsDataGrows(chartRef, sanitizedBars.length, dayKey)
 
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }
@@ -948,10 +975,7 @@ export function PremiumEmaChart({
   useEffect(() => { if (ema2SeriesRef.current) ema2SeriesRef.current.setData(ema2Points) }, [ema2Points])
   useEffect(() => { vwapSeriesRef.current?.setData(showVwap ? vwapPoints : EMPTY_ARRAY) }, [vwapPoints, showVwap])
 
-  useEffect(() => {
-    if (displayBars.length > 0) chartRef.current?.timeScale().fitContent()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dayKey, timeframe])
+  useFitContentAsDataGrows(chartRef, displayBars.length, `${dayKey}-${timeframe}`)
 
   return (
     <div style={{ width: '100%' }}>
