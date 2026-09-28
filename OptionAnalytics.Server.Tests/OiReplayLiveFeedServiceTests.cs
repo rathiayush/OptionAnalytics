@@ -63,4 +63,42 @@ public sealed class OiReplayLiveFeedServiceTests
         Assert.Null(OiReplayLiveFeedService.ResolveNearestExpiryCore(Array.Empty<DateOnly>(), "WEEK"));
         Assert.Null(OiReplayLiveFeedService.ResolveNearestExpiryCore(Array.Empty<DateOnly>(), "MONTH"));
     }
+
+    private static readonly DateOnly[] SixListed =
+    {
+        new(2026, 9, 29), new(2026, 10, 6), new(2026, 10, 13), new(2026, 10, 20), new(2026, 10, 27), new(2026, 11, 24),
+    };
+
+    [Theory]
+    [InlineData("N1", 0)]
+    [InlineData("N2", 1)]
+    [InlineData("N3", 2)]
+    [InlineData("N6", 5)]
+    public void PositionalFlag_ResolvesToThatIndexOfTheFullUnfilteredList(string flag, int expectedIndex)
+    {
+        var resolved = OiReplayLiveFeedService.ResolveNearestExpiryCore(SixListed, flag);
+
+        Assert.Equal(SixListed[expectedIndex], resolved);
+    }
+
+    [Fact]
+    public void PositionalFlag_N1_MatchesWeeksOwnIndexZero()
+    {
+        // N1 is deliberately just WEEK generalized to an explicit position - the two must always
+        // agree at position 0, since a client tracking "N1" and a client tracking "WEEK" are meant
+        // to be watching the exact same real contract (see PositionalExpiriesPerUnderlying's own
+        // doc comment on why N1 duplicates WEEK/MONTH rather than being special-cased away).
+        var week = OiReplayLiveFeedService.ResolveNearestExpiryCore(SixListed, "WEEK");
+        var n1 = OiReplayLiveFeedService.ResolveNearestExpiryCore(SixListed, "N1");
+
+        Assert.Equal(week, n1);
+    }
+
+    [Fact]
+    public void PositionalFlag_BeyondListedCount_ResolvesToNull_NotSomeOtherContract()
+    {
+        var resolved = OiReplayLiveFeedService.ResolveNearestExpiryCore(SixListed, "N7");
+
+        Assert.Null(resolved);
+    }
 }
