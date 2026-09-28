@@ -3,7 +3,7 @@ import { Select, Space, Typography, Card, Button, Row, Col, Tag, Tooltip, Empty,
 import { createChart, LineSeries, CrosshairMode } from 'lightweight-charts'
 import './oiMobile.css'
 import {
-  NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, usePersistedState, istDateKey, toBar,
+  NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, STORED_PREFER_REST_OI, usePersistedState, istDateKey, toBar,
   toChartTime, CE_COLOR, PE_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR, istTimeFormatter, istTickMarkFormatter,
 } from './shared.jsx'
 import {
@@ -299,6 +299,20 @@ export default function OiLiveDashboardPage() {
   const [ceDayOpen, setCeDayOpen] = useState(new Map())
   const [peDayOpen, setPeDayOpen] = useState(new Map())
 
+  // "OI via REST" fallback - a THIRD, independent OI source (Dhan's own Option Chain snapshot
+  // endpoint, re-polled server-side every ~30s regardless of this toggle - see
+  // OiReplayLiveFeedService.RunRestQuoteLoopAsync's own doc comment) a user can opt into preferring
+  // over the live tick feed's own OI, for whenever the tick feed's own number looks wrong for a
+  // strike and the since-open Δ's own "suspect" flag isn't enough reassurance on its own. Off by
+  // default - the tick feed is still the primary, lower-latency source; this exists as a manual
+  // cross-check/override, not a replacement. strike -> {ceOi, cePrice, peOi, pePrice}, replaced
+  // wholesale on every oiRestSnapshot broadcast for the CURRENT underlying/expiryFlag (never merged
+  // strike-by-strike - a fresh snapshot is a complete picture of every strike Dhan returned, so a
+  // strike missing from a new snapshot genuinely has no REST reading right now, not a stale one).
+  const [preferRestOi, setPreferRestOi] = usePersistedState(STORED_PREFER_REST_OI, false)
+  const [restQuotesByStrike, setRestQuotesByStrike] = useState(new Map())
+  const [restAsOfMs, setRestAsOfMs] = useState(null)
+
   const [cePremiumOffset, setCePremiumOffset] = useState(0)
   const [pePremiumOffset, setPePremiumOffset] = useState(0)
   const [cePremiumTimeframe, setCePremiumTimeframe] = useState(1)
@@ -377,6 +391,12 @@ export default function OiLiveDashboardPage() {
     if (!underlying) return
     setLoading(true)
     setError(null)
+    // A stale combo's REST snapshot must never linger and get matched against a new underlying/
+    // expiryFlag's strikes by strike-number coincidence - cleared here since load() already runs on
+    // every underlying/expiryFlag change (see the useEffect below), same trigger point ceSeries/
+    // peSeries themselves get replaced at.
+    setRestQuotesByStrike(new Map())
+    setRestAsOfMs(null)
     // forceLive: this page has no scenario where preferring possibly-stale stored data over a live
     // Dhan call makes sense - it only ever asks for today, and OiReplayService's own stored-first
     // default (with the live top-up disabled in local dev - see its own doc comment) is what left
@@ -489,6 +509,18 @@ export default function OiLiveDashboardPage() {
   // whole snapshot to resync rather than silently trusting whatever partial state accumulated.
   const handleReconnected = () => { load(); loadCdv(); loadSpot() }
 
+  // Broadcast unconditionally by the server every ~30s (see restQuotesByStrike's own doc comment) -
+  // filtered here to the CURRENTLY selected underlying/expiryFlag exactly like handleOiReplayTick,
+  // and kept even while preferRestOi is off so flipping the toggle on shows a snapshot immediately
+  // rather than waiting up to 30s for the next broadcast.
+  const handleOiRestSnapshot = (snapshot) => {
+    if (snapshot?.underlying !== underlying || snapshot?.expiryFlag !== expiryFlag) return
+    const map = new Map()
+    for (const s of snapshot.strikes ?? []) map.set(s.strike, s)
+    setRestQuotesByStrike(map)
+    setRestAsOfMs(Date.now())
+  }
+
   // No expiryFlag guard here, unlike handleOiReplayTick above - CDV/OBV always follow CDV's own
   // tracked expiry (see cdvExpiry's own doc comment), which is exactly what this push describes.
   const handleCdvUpdate = (incoming) => {
@@ -505,7 +537,7 @@ export default function OiLiveDashboardPage() {
     if (point.obvPe != null) setObvPeSeries((prev) => mergeBar(prev, { time, value: point.obvPe }))
   }
 
-  const connectionState = useOiLiveHub(handleSpotUpdate, handleOiReplayTick, handleReconnected, handleCdvUpdate, handleCdvBarClosed)
+  const connectionState = useOiLiveHub(handleSpotUpdate, handleOiReplayTick, handleReconnected, handleCdvUpdate, handleCdvBarClosed, handleOiRestSnapshot)
 
   // STEP_BY_UNDERLYING alone, not result?.step - result comes from the slow forceLive OI/IV load(),
   // and the step is a fixed constant per underlying either way (this frontend map matches OiReplay
@@ -593,6 +625,14 @@ export default function OiLiveDashboardPage() {
       const peOpen = peDayOpen.get(strike) ?? null
       const ceAsOfMs = ce ? new Date(ce.time).getTime() : null
       const peAsOfMs = pe ? new Date(pe.time).getTime() : null
+      // When preferRestOi is on, an available REST snapshot quote for this strike REPLACES the live
+      // tick feed's own "current OI" everywhere below (ladder figure, since-open delta, sanity
+      // check) - see restQuotesByStrike's own doc comment for why this exists as an independent
+      // third source rather than a fix to the tick feed itself. Falls back to the tick feed exactly
+      // as before whenever the toggle is off or this particular strike has no REST quote yet.
+      const restQuote = preferRestOi ? restQuotesByStrike.get(strike) : null
+      const ceCurrentOi = restQuote?.ceOi ?? ce?.openInterest ?? null
+      const peCurrentOi = restQuote?.peOi ?? pe?.openInterest ?? null
       // Dhan's own documented sentinel for "OI/IV not available yet" on /charts/rollingoption is a
       // literal 0 (see DhanRollingOptionDataService.ParseSide's own doc comment) - NOT a genuine
       // "zero open interest at open". The very first 1-minute bar of the day is exactly where this
@@ -603,39 +643,47 @@ export default function OiLiveDashboardPage() {
       // (falsy-checked, not just != null) instead of a real reading is the actual fix - a delta is
       // simply not shown until a genuine (nonzero) day-open reading exists, rather than being
       // computed from a placeholder and then hidden again downstream.
-      const ceOiSinceOpenRaw = ce?.openInterest != null && ceOpen?.openInterest ? ce.openInterest - ceOpen.openInterest : null
-      const peOiSinceOpenRaw = pe?.openInterest != null && peOpen?.openInterest ? pe.openInterest - peOpen.openInterest : null
+      const ceOiSinceOpenRaw = ceCurrentOi != null && ceOpen?.openInterest ? ceCurrentOi - ceOpen.openInterest : null
+      const peOiSinceOpenRaw = peCurrentOi != null && peOpen?.openInterest ? peCurrentOi - peOpen.openInterest : null
       // See SINCE_OPEN_SANITY_MULTIPLE's own doc comment - a delta this far out of proportion to the
       // strike's own current OI is flagged as an untrustworthy reading (the two pipelines likely
       // disagreeing), but STILL SHOWN - never hidden. Math.max(..., SINCE_OPEN_MIN_BASELINE) keeps
       // this meaningful even when current OI itself reads 0 - see that constant's own doc comment.
-      const ceOiSinceOpenSuspect = ceOiSinceOpenRaw != null && Math.abs(ceOiSinceOpenRaw) > Math.max(ce.openInterest, SINCE_OPEN_MIN_BASELINE) * SINCE_OPEN_SANITY_MULTIPLE
-      const peOiSinceOpenSuspect = peOiSinceOpenRaw != null && Math.abs(peOiSinceOpenRaw) > Math.max(pe.openInterest, SINCE_OPEN_MIN_BASELINE) * SINCE_OPEN_SANITY_MULTIPLE
+      const ceOiSinceOpenSuspect = ceOiSinceOpenRaw != null && Math.abs(ceOiSinceOpenRaw) > Math.max(ceCurrentOi, SINCE_OPEN_MIN_BASELINE) * SINCE_OPEN_SANITY_MULTIPLE
+      const peOiSinceOpenSuspect = peOiSinceOpenRaw != null && Math.abs(peOiSinceOpenRaw) > Math.max(peCurrentOi, SINCE_OPEN_MIN_BASELINE) * SINCE_OPEN_SANITY_MULTIPLE
       const ceOiSinceOpen = ceOiSinceOpenRaw
       const peOiSinceOpen = peOiSinceOpenRaw
       // Logged as well as shown, flagged rather than hidden - a real report ("this calculation is
       // incorrect... OI showing incorrect data") traced back to this exact check firing uniformly
       // across every strike on one side, which is itself useful evidence (a systematic cross-pipeline
       // disagreement, not a one-off blip) - kept here for whenever it fires again.
-      if (ceOiSinceOpenSuspect) console.warn(`Live OI Dashboard: CE Δ (since open) for ${strike} looks implausible - raw delta ${ceOiSinceOpenRaw} against current OI ${ce.openInterest} (day-open was ${ceOpen.openInterest} from the REST seed; current is from the live tick feed - these two pipelines disagreeing this much on the same strike is the suspected cause). Shown anyway, flagged.`)
-      if (peOiSinceOpenSuspect) console.warn(`Live OI Dashboard: PE Δ (since open) for ${strike} looks implausible - raw delta ${peOiSinceOpenRaw} against current OI ${pe.openInterest} (day-open was ${peOpen.openInterest} from the REST seed; current is from the live tick feed - these two pipelines disagreeing this much on the same strike is the suspected cause). Shown anyway, flagged.`)
+      if (ceOiSinceOpenSuspect) console.warn(`Live OI Dashboard: CE Δ (since open) for ${strike} looks implausible - raw delta ${ceOiSinceOpenRaw} against current OI ${ceCurrentOi} (day-open was ${ceOpen.openInterest} from the REST seed; current is from the ${restQuote ? 'REST option-chain snapshot' : 'live tick feed'} - these two pipelines disagreeing this much on the same strike is the suspected cause). Shown anyway, flagged.`)
+      if (peOiSinceOpenSuspect) console.warn(`Live OI Dashboard: PE Δ (since open) for ${strike} looks implausible - raw delta ${peOiSinceOpenRaw} against current OI ${peCurrentOi} (day-open was ${peOpen.openInterest} from the REST seed; current is from the ${restQuote ? 'REST option-chain snapshot' : 'live tick feed'} - these two pipelines disagreeing this much on the same strike is the suspected cause). Shown anyway, flagged.`)
+      // "As of" and staleness follow whichever source is actually feeding ceCurrentOi/peCurrentOi
+      // above - showing the tick feed's own (possibly old) timestamp/staleness next to a number that
+      // actually came from a fresh REST snapshot would contradict the very reading being displayed.
+      const ceEffectiveAsOfMs = restQuote ? restAsOfMs : ceAsOfMs
+      const peEffectiveAsOfMs = restQuote ? restAsOfMs : peAsOfMs
       return {
         strike,
-        ceOi: ce?.openInterest ?? null, ceIv: ce?.impliedVolatility ?? null, cePrice: ce?.price ?? null,
-        peOi: pe?.openInterest ?? null, peIv: pe?.impliedVolatility ?? null, pePrice: pe?.price ?? null,
+        ceOi: ceCurrentOi, ceIv: ce?.impliedVolatility ?? null, cePrice: restQuote?.cePrice ?? ce?.price ?? null,
+        peOi: peCurrentOi, peIv: pe?.impliedVolatility ?? null, pePrice: restQuote?.pePrice ?? pe?.price ?? null,
+        // Deliberately still tick-feed-only (never REST-overridden) - the REST snapshot is a
+        // wholesale-replaced current reading with no history of its own, so it cannot support a
+        // "change in the last minute" figure the way the tick feed's own point array can.
         ceOiChange: ce?.openInterest != null && cePriorFresh && cePrior.openInterest != null ? ce.openInterest - cePrior.openInterest : null,
         peOiChange: pe?.openInterest != null && pePriorFresh && pePrior.openInterest != null ? pe.openInterest - pePrior.openInterest : null,
         ceOiSinceOpen, peOiSinceOpen, ceOiSinceOpenSuspect, peOiSinceOpenSuspect,
-        ceAsOfMs, peAsOfMs,
-        ceStale: ceAsOfMs != null && now - ceAsOfMs > OI_STALE_MS,
-        peStale: peAsOfMs != null && now - peAsOfMs > OI_STALE_MS,
+        ceAsOfMs: ceEffectiveAsOfMs, peAsOfMs: peEffectiveAsOfMs,
+        ceStale: ceEffectiveAsOfMs != null && now - ceEffectiveAsOfMs > OI_STALE_MS,
+        peStale: peEffectiveAsOfMs != null && now - peEffectiveAsOfMs > OI_STALE_MS,
       }
     })
     return rows.sort((a, b) => b.strike - a.strike)
     // nowTick is intentionally unused inside - it exists purely to force this memo to recompute on a
     // real clock tick, not just when new tick data arrives. See nowTick's own doc comment above.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ceSeries, peSeries, ceDayOpen, peDayOpen, nowTick])
+  }, [ceSeries, peSeries, ceDayOpen, peDayOpen, nowTick, preferRestOi, restQuotesByStrike, restAsOfMs])
 
   // 'top5' - the 5 strikes with the highest COMBINED (CE+PE) OI, still sorted strike-descending
   // (same order 'all' uses) rather than by OI rank, so the wall still reads top-to-bottom by price.
@@ -758,6 +806,13 @@ export default function OiLiveDashboardPage() {
               />
               <Select value={timeframe} onChange={setTimeframe} style={{ width: 110 }} options={TIMEFRAME_OPTIONS} />
               <Checkbox checked={showVwap} onChange={(e) => setShowVwap(e.target.checked)}>VWAP</Checkbox>
+              <Tooltip title={
+                restAsOfMs != null
+                  ? `Every strike's OI/price straight from Dhan's Option Chain snapshot endpoint (a completely independent pipeline from the tick feed), re-fetched every ~30s regardless of this toggle. Turning it on makes it REPLACE the tick feed's own OI here whenever a fresher snapshot is available for a strike - useful when the tick feed's own number looks wrong. Last snapshot: ${new Date(restAsOfMs).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false })}.`
+                  : "Every strike's OI/price straight from Dhan's Option Chain snapshot endpoint (a completely independent pipeline from the tick feed), re-fetched every ~30s regardless of this toggle. Turning it on makes it REPLACE the tick feed's own OI here whenever a fresher snapshot is available for a strike - useful when the tick feed's own number looks wrong. No snapshot received yet."
+              }>
+                <Checkbox checked={preferRestOi} onChange={(e) => setPreferRestOi(e.target.checked)}>OI via REST (30s)</Checkbox>
+              </Tooltip>
               <Tooltip title={
                 connectionState === 'connected' ? "Streaming live ticks from Dhan's WebSocket feed (price + OI - IV stays at the last REST-fetched value)"
                   : connectionState === 'reconnecting' ? 'Connection dropped - automatically retrying.'

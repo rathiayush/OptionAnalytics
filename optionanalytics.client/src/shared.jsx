@@ -136,6 +136,9 @@ export const STORED_TIMEFRAME = 'optionanalytics.timeframe'
 // One shared toggle for every page's VWAP checkbox, same as underlying/timeframe above - checking
 // it on one page and finding it already checked on another is the expected behavior, not a bug.
 export const STORED_SHOW_VWAP = 'optionanalytics.showVwap'
+// Live OI Dashboard's "OI via REST" toggle - see OiLiveDashboardPage's own restQuotesByStrike doc
+// comment. Persisted the same way as the settings above so it survives a reload.
+export const STORED_PREFER_REST_OI = 'optionanalytics.preferRestOi'
 
 function readStored(key, fallback) {
   try {

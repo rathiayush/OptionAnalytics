@@ -51,6 +51,19 @@ public sealed class OiReplayLiveFeedService : BackgroundService
     private static readonly TimeSpan RecenterInterval = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan IncompleteRetryInterval = TimeSpan.FromSeconds(30);
 
+    /// <summary>How often the OPTIONAL REST-quote fallback (see RunRestQuoteLoopAsync) re-polls
+    /// Dhan's own Option Chain snapshot endpoint per combo. Independent of RecenterInterval above -
+    /// that loop is about keeping the SUBSCRIBED strike band/legs correct, this one is purely about
+    /// OI/price freshness for whichever strikes are already tracked. 30 seconds comfortably clears
+    /// DhanOptionChainQuotes' own "one call every 3.5s per underlying/expiry" self-throttle (one call
+    /// per combo per cycle, 5 combos, nowhere near Dhan's account-wide 5/sec, 100k/day Data-API cap),
+    /// so this always runs - there is no per-client toggle server-side; the frontend's own toggle
+    /// only decides whether to PREFER this broadcast over the live tick feed's own OI, never whether
+    /// the server bothers fetching it (broadcasting to Clients.All whether or not anyone is currently
+    /// listening is the same "server doesn't track per-client interest" shape every other event on
+    /// this hub already uses).</summary>
+    private static readonly TimeSpan RestQuoteInterval = TimeSpan.FromSeconds(30);
+
     /// <summary>Same width as OiReplayService.StrikeBandSteps - the live band must match the
     /// historical band's own strikes, or a strike the ladder already shows from the initial REST
     /// fetch would never receive a live update once the day is being replayed live.</summary>
@@ -78,6 +91,7 @@ public sealed class OiReplayLiveFeedService : BackgroundService
     private readonly DhanOptionChainMaster _optionChainMaster;
     private readonly DhanFuturesInstrumentMaster _futuresInstrumentMaster;
     private readonly DhanMarketFeedClient _feedClient;
+    private readonly DhanOptionChainQuotes _chainQuotes;
     private readonly IHubContext<SpotHub> _hub;
     private readonly ILogger<OiReplayLiveFeedService> _logger;
 
@@ -93,12 +107,13 @@ public sealed class OiReplayLiveFeedService : BackgroundService
 
     public OiReplayLiveFeedService(
         SpotFeedHostedService spotFeed, DhanOptionChainMaster optionChainMaster, DhanFuturesInstrumentMaster futuresInstrumentMaster,
-        DhanMarketFeedClient feedClient, IHubContext<SpotHub> hub, ILogger<OiReplayLiveFeedService> logger)
+        DhanMarketFeedClient feedClient, DhanOptionChainQuotes chainQuotes, IHubContext<SpotHub> hub, ILogger<OiReplayLiveFeedService> logger)
     {
         _spotFeed = spotFeed;
         _optionChainMaster = optionChainMaster;
         _futuresInstrumentMaster = futuresInstrumentMaster;
         _feedClient = feedClient;
+        _chainQuotes = chainQuotes;
         _hub = hub;
         _logger = logger;
     }
@@ -106,6 +121,11 @@ public sealed class OiReplayLiveFeedService : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _feedClient.TickReceived += OnTick;
+
+        // Fire-and-forget, its own independent cadence (RestQuoteInterval, not RecenterInterval) -
+        // see RestQuoteInterval's own doc comment for why this is safe to just always run rather
+        // than gating it behind whether any client currently wants it.
+        _ = RunRestQuoteLoopAsync(stoppingToken);
 
         // Same "recenter, come back soon if anything's still missing" loop shape as CdvHostedService
         // - a fresh deploy routinely loses the race with SpotFeedHostedService's own scrip-master
@@ -190,6 +210,66 @@ public sealed class OiReplayLiveFeedService : BackgroundService
             await _feedClient.SubscribeAsync(new Dictionary<uint, string> { [contract.SecurityId] = contract.DhanSegment }, cancellationToken, full: true);
 
         return true;
+    }
+
+    /// <summary>The OPTIONAL REST fallback: every RestQuoteInterval, re-polls Dhan's Option Chain
+    /// snapshot (the SAME endpoint DhanOptionChainQuotes already exists for - previously only ever
+    /// used to decorate the dashboard's strike picker) for every combo, and broadcasts each one as
+    /// its own "oiRestSnapshot" event. Exists because the live tick feed's own OI (Full packet,
+    /// per-strike) and the historical /charts/rollingoption seed (day-open baseline) are two
+    /// INDEPENDENT Dhan pipelines that can disagree (see OiLiveDashboardPage.jsx's own doc comment
+    /// on SINCE_OPEN_SANITY_MULTIPLE) - this is a THIRD, independent source a client can opt into
+    /// cross-checking against, or fully prefer, when it doesn't trust the tick feed's own number for
+    /// a given strike. Never touches _legsBySecurityId/subscriptions - purely read-only decoration,
+    /// same as the picker's own use of this endpoint.</summary>
+    private async Task RunRestQuoteLoopAsync(CancellationToken stoppingToken)
+    {
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            foreach (var combo in Combos)
+            {
+                try
+                {
+                    await BroadcastRestQuotesAsync(combo, stoppingToken);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogDebug(ex, "OI Replay live feed: REST-quote fallback failed for {Underlying} {ExpiryFlag} - will retry next cycle.", combo.Underlying, combo.ExpiryFlag);
+                }
+            }
+
+            try { await Task.Delay(RestQuoteInterval, stoppingToken); }
+            catch (OperationCanceledException) { break; }
+        }
+    }
+
+    private async Task BroadcastRestQuotesAsync(Combo combo, CancellationToken cancellationToken)
+    {
+        if (!_spotFeed.States.TryGetValue(combo.Underlying, out var spotState) || spotState.Instrument is null)
+            return;
+
+        var expiry = ResolveNearestExpiry(combo, IstClock.Today());
+        if (expiry is null) return;
+
+        var quotes = await _chainQuotes.GetQuotesAsync(
+            spotState.Instrument.SecurityId, spotState.Instrument.DhanSegment, expiry.Value, cancellationToken, maxAge: RestQuoteInterval);
+        if (quotes.Count == 0) return;
+
+        var payload = new
+        {
+            underlying = combo.Underlying,
+            expiryFlag = combo.ExpiryFlag,
+            asOf = DateTimeOffset.UtcNow.ToOffset(IstClock.Offset),
+            strikes = quotes.Select(q => new
+            {
+                strike = q.Strike,
+                ceOi = q.CeOpenInterest,
+                cePrice = q.CeLastPrice,
+                peOi = q.PeOpenInterest,
+                pePrice = q.PeLastPrice,
+            }),
+        };
+        await BroadcastAsync("oiRestSnapshot", payload);
     }
 
     private async Task<bool> RecenterComboAsync(Combo combo, CancellationToken cancellationToken)
