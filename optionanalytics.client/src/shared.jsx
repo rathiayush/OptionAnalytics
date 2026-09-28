@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react'
-import { Button, Menu, Select, Space, Tag, Typography } from 'antd'
+import { Button, Drawer, Menu, Select, Space, Tag, Typography } from 'antd'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { createChart, createSeriesMarkers, HistogramSeries, LineSeries, CrosshairMode, LineStyle, TickMarkType } from 'lightweight-charts'
 
@@ -711,11 +711,19 @@ const NAV_ITEMS = [
   { key: '/contracts', label: 'Contracts' },
 ]
 
-// Shared between DashboardPage/BacktestPage/TriggersPage/ContractsPage - a proper horizontal menu
-// (not just plain text links) so it reads as real site navigation, sitting inline in each page's
-// own header row with a transparent background so it blends into the page rather than looking
-// like a separate bar. Also carries the signed-in email and a log-out button - the one place
-// that's shown regardless of which page rendered this.
+// Shared between EVERY page (all ten currently render it) - a proper horizontal menu (not just
+// plain text links) so it reads as real site navigation, sitting inline in each page's own header
+// row with a transparent background so it blends into the page rather than looking like a separate
+// bar. Also carries the signed-in email and a log-out button - the one place that's shown
+// regardless of which page rendered this.
+//
+// Below NAV_COLLAPSE_BREAKPOINT, the horizontal Menu (9 top-level items, one with children - it has
+// no room to fit a phone-width screen at all, let alone stay legible) is replaced by a small "☰"
+// trigger opening the SAME items as a full-height Drawer with a vertical Menu instead - the same
+// "collapse to a drawer below a breakpoint" shape any responsive site nav uses. Both renderings
+// exist in the DOM at once and CSS (.navbar-desktop-menu/.navbar-mobile-trigger in index.css) picks
+// exactly one via the same breakpoint, rather than a JS resize listener - simpler, and immune to a
+// stale measurement on first paint before any resize event has fired.
 //
 // Triggers/Contracts are hidden here for a non-Admin account, but that is a convenience, not the
 // actual security boundary - App.jsx's own route guard covers someone typing the URL directly, and
@@ -725,22 +733,36 @@ export function NavBar() {
   const location = useLocation()
   const navigate = useNavigate()
   const auth = useAuth()
+  const [drawerOpen, setDrawerOpen] = useState(false)
   const isAdmin = auth?.user?.role === 'Admin'
   const items = isAdmin ? NAV_ITEMS : NAV_ITEMS.filter((item) => !ADMIN_ONLY_PATHS.includes(item.key))
 
+  const go = (key) => { navigate(key); setDrawerOpen(false) }
+
   return (
     <Space align="center" size={16} wrap>
-      <Menu
-        mode="horizontal"
-        theme="dark"
-        selectedKeys={[location.pathname]}
-        items={items}
-        onClick={({ key }) => navigate(key)}
-        style={{ minWidth: 340, background: 'transparent', borderBottom: 'none', lineHeight: '32px' }}
-      />
+      <div className="navbar-desktop-menu">
+        <Menu
+          mode="horizontal"
+          theme="dark"
+          selectedKeys={[location.pathname]}
+          items={items}
+          onClick={({ key }) => go(key)}
+          style={{ minWidth: 340, background: 'transparent', borderBottom: 'none', lineHeight: '32px' }}
+        />
+      </div>
+      <Button
+        className="navbar-mobile-trigger" size="large" onClick={() => setDrawerOpen(true)}
+        aria-label="Open navigation menu" style={{ fontSize: 18, lineHeight: 1 }}
+      >
+        ☰
+      </Button>
+      <Drawer title="Menu" placement="left" onClose={() => setDrawerOpen(false)} open={drawerOpen} width={260}>
+        <Menu mode="inline" selectedKeys={[location.pathname]} items={items} onClick={({ key }) => go(key)} />
+      </Drawer>
       {auth?.user && (
         <Space size={8}>
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>{auth.user.email}</Typography.Text>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }} className="navbar-email">{auth.user.email}</Typography.Text>
           <Button size="small" onClick={auth.logout}>Log out</Button>
         </Space>
       )}

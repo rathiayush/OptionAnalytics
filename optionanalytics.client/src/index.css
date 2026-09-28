@@ -13,8 +13,82 @@ body {
   margin: 0;
   background: #0d0e12;
   color: #e6e6e6;
+  /* No page should ever be able to force horizontal scroll on a narrow screen - a single stray
+     fixed-width element (a wide table, a chart container sized in px) would otherwise widen the
+     whole page instead of just overflowing its own box. */
+  overflow-x: hidden;
 }
 
 #root {
   min-height: 100svh;
+}
+
+/* NavBar (shared.jsx) - exactly one of these two is visible at a time, picked by viewport width
+   rather than a JS resize listener (see NavBar's own doc comment for why). This lives here, not in
+   a per-page scoped file like oiMobile.css, because NavBar itself is truly global (every page
+   renders it) and carries no trading logic of its own - unlike App.jsx's page BODY, which stays
+   deliberately isolated in its own file below. */
+.navbar-mobile-trigger {
+  display: none;
+}
+
+/* antd's horizontal Menu only collapses items into its own "..." overflow submenu once its
+   DIRECT parent reports a genuinely bounded (shrinkable) width via ResizeObserver - inside a flex
+   row (NavBar's own Space, itself inside each page's own header Space) a plain block/inline-flex
+   child instead just grows to its full natural content width and forces the WHOLE ROW past the
+   viewport, wider than the Menu's own already-working "..." collapse would ever need. min-width: 0
+   overrides flexbox's default "never shrink below content size" so this item can actually shrink
+   down to whatever room the row has left, at which point the Menu's own existing overflow
+   behavior (confirmed working - it already renders an overflow item, just was never being given a
+   small enough measurement to use it) takes over correctly. Found for real: the Dashboard's own
+   header row (Title + NavBar + several Selects) overflowed the page horizontally at exactly 820px
+   before this fix, with no viewport-width magic number that would have stayed safe as any page
+   adds one more control to that same row in the future - this fixes the actual cause instead. */
+.navbar-desktop-menu {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  flex: 1 1 auto;
+}
+
+/* A flex item's default min-width is `auto` (its own content's min-content size), NOT 0 - the
+   actual reason the Menu above still couldn't shrink: antd wraps every Space child in its own
+   ant-space-item, and EVERY level of that wrapping between the Menu and the page's own outer
+   container re-introduces this same "never shrink below content size" floor, so overriding it on
+   just the Menu's own wrapper wasn't enough - the block was several ant-space-item levels further
+   up. This is the standard, low-risk fix for antd's Space component in a responsive layout: it
+   changes nothing when a row already has enough room (flex only shrinks an item once the row's
+   total content exceeds the available space, which is exactly the "was that Menu too wide" problem
+   this whole file's own header rows - not just NavBar's - can otherwise both hit as those rows'
+   OWN other controls (Selects, buttons) grow or a screen narrows), and every one of those header
+   rows uses the SAME Space component this same rule now applies to. */
+.ant-space-item {
+  min-width: 0;
+}
+
+/* The min-width:0 fix above turned out not to be enough by itself: a horizontal Space nested
+   inside a vertical one (the "outer vertical page stack > horizontal header row > individual
+   controls" shape virtually every page here uses) sizes its OWN width to whatever its widest child
+   naturally wants (antd's vertical Space uses align-items: flex-start, not stretch, so a column
+   flex parent never caps a child's cross-axis/width the way flex-shrink caps a ROW's own children)
+   - so the header row itself was simply rendering wider than the page and pushing the whole page
+   wider with it, before flex-shrink along that row ever got a chance to run. Capping it to its own
+   parent's width is what actually makes that row's own children start shrinking/wrapping (the
+   `wrap` prop every header row already passes) instead of pushing the page wider. */
+.ant-space-horizontal {
+  max-width: 100%;
+}
+
+@media (max-width: 768px) {
+  .navbar-desktop-menu {
+    display: none;
+  }
+  .navbar-mobile-trigger {
+    display: inline-flex;
+  }
+  /* The signed-in email is the least useful thing on a phone-width header - it just steals space
+     that Selects/NavBar itself need far more; the log-out button alone is enough to act on. */
+  .navbar-email {
+    display: none;
+  }
 }

@@ -566,6 +566,7 @@ export default function TriggersPage() {
             dataSource={triggers}
             columns={columns}
             pagination={false}
+            scroll={{ x: 'max-content' }}
             locale={{ emptyText: 'No triggers yet - arm one above and it will notify over Telegram when its strategy fires.' }}
           />
         </Card>
@@ -594,6 +595,7 @@ export default function TriggersPage() {
             dataSource={orderEvents}
             columns={orderHistoryColumns}
             pagination={{ pageSize: 10, size: 'small' }}
+            scroll={{ x: 'max-content' }}
             locale={{ emptyText: 'No order activity yet - this fills in once a live-trading trigger fires.' }}
           />
         </Card>

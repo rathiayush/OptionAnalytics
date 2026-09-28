@@ -260,7 +260,7 @@ export default function ContractsPage() {
                 <Switch size="small" checked={liveOnly} onChange={setLiveOnly} />
                 <Text type="secondary" style={{ fontSize: 12 }}>Live only</Text>
               </Space>
-              <Input.Search allowClear placeholder="Filter by strike or symbol" value={search} onChange={(e) => setSearch(e.target.value)} style={{ width: 260 }} />
+              <Input.Search allowClear placeholder="Filter by strike or symbol" value={search} onChange={(e) => setSearch(e.target.value)} style={{ width: 'min(260px, 60vw)' }} />
             </Space>
           }
         >
@@ -271,6 +271,7 @@ export default function ContractsPage() {
             columns={columns}
             loading={loading && !data}
             pagination={{ pageSize: 50, showSizeChanger: false }}
+            scroll={{ x: 'max-content' }}
             locale={{ emptyText: masterBroken
               ? 'The scrip master holds no contracts at all - nothing can be listed.'
               : liveOnly
