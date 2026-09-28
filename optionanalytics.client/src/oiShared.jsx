@@ -287,7 +287,26 @@ export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Onl
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 13 },
       grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
       rightPriceScale: { borderColor: BORDER_COLOR },
-      timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter },
+      // allowShiftVisibleRangeOnWhitespaceReplacement: lightweight-charts' own default
+      // (shiftVisibleRangeOnNewBar, true) auto-scrolls to keep a freshly-appended bar in view, but
+      // ONLY for a bar strictly past the chart's existing range - not one filling in a WHITESPACE
+      // time point the chart had already pre-rendered further right (e.g. the next minute's empty
+      // slot within today's still-ahead market hours). Every chart here re-supplies its FULL series
+      // via setData() on every new tick (not series.update() for just the one changed bar), which is
+      // exactly the shape that tends to land as "replacing whitespace" rather than "a genuinely new
+      // bar" from the library's own perspective - without this flag, a live page's chart can silently
+      // stop auto-scrolling forward as the day progresses, leaving the visible candles/EMAs looking
+      // "stuck" in the past while a price label (which always reflects the true latest point
+      // regardless of what's currently scrolled into view) correctly shows a real, much newer price -
+      // a real report ("price incorrect") was exactly this: EMAs and candles frozen well behind the
+      // shown current price. Harmless for OI Replay's own manual-scrub use of these same charts too -
+      // both this and shiftVisibleRangeOnNewBar only ever act "when the last bar is visible", i.e.
+      // only once a viewer is already AT the live/current edge, never while deliberately scrolled
+      // back to inspect an earlier moment.
+      timeScale: {
+        borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter,
+        allowShiftVisibleRangeOnWhitespaceReplacement: true,
+      },
       crosshair: { mode: CrosshairMode.Normal },
       localization: { timeFormatter: istTimeFormatter },
     })
@@ -448,7 +467,26 @@ export function EmaChart({ oneMinBars, visibleCount, timeframe, onTimeframeChang
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
       grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
       rightPriceScale: { borderColor: BORDER_COLOR },
-      timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter },
+      // allowShiftVisibleRangeOnWhitespaceReplacement: lightweight-charts' own default
+      // (shiftVisibleRangeOnNewBar, true) auto-scrolls to keep a freshly-appended bar in view, but
+      // ONLY for a bar strictly past the chart's existing range - not one filling in a WHITESPACE
+      // time point the chart had already pre-rendered further right (e.g. the next minute's empty
+      // slot within today's still-ahead market hours). Every chart here re-supplies its FULL series
+      // via setData() on every new tick (not series.update() for just the one changed bar), which is
+      // exactly the shape that tends to land as "replacing whitespace" rather than "a genuinely new
+      // bar" from the library's own perspective - without this flag, a live page's chart can silently
+      // stop auto-scrolling forward as the day progresses, leaving the visible candles/EMAs looking
+      // "stuck" in the past while a price label (which always reflects the true latest point
+      // regardless of what's currently scrolled into view) correctly shows a real, much newer price -
+      // a real report ("price incorrect") was exactly this: EMAs and candles frozen well behind the
+      // shown current price. Harmless for OI Replay's own manual-scrub use of these same charts too -
+      // both this and shiftVisibleRangeOnNewBar only ever act "when the last bar is visible", i.e.
+      // only once a viewer is already AT the live/current edge, never while deliberately scrolled
+      // back to inspect an earlier moment.
+      timeScale: {
+        borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter,
+        allowShiftVisibleRangeOnWhitespaceReplacement: true,
+      },
       crosshair: { mode: CrosshairMode.Normal },
       localization: { timeFormatter: istTimeFormatter },
     })
@@ -533,7 +571,26 @@ export function PremiumLineChart({ points, dayKey, color, height = 320 }) {
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
       grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
       rightPriceScale: { borderColor: BORDER_COLOR },
-      timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter },
+      // allowShiftVisibleRangeOnWhitespaceReplacement: lightweight-charts' own default
+      // (shiftVisibleRangeOnNewBar, true) auto-scrolls to keep a freshly-appended bar in view, but
+      // ONLY for a bar strictly past the chart's existing range - not one filling in a WHITESPACE
+      // time point the chart had already pre-rendered further right (e.g. the next minute's empty
+      // slot within today's still-ahead market hours). Every chart here re-supplies its FULL series
+      // via setData() on every new tick (not series.update() for just the one changed bar), which is
+      // exactly the shape that tends to land as "replacing whitespace" rather than "a genuinely new
+      // bar" from the library's own perspective - without this flag, a live page's chart can silently
+      // stop auto-scrolling forward as the day progresses, leaving the visible candles/EMAs looking
+      // "stuck" in the past while a price label (which always reflects the true latest point
+      // regardless of what's currently scrolled into view) correctly shows a real, much newer price -
+      // a real report ("price incorrect") was exactly this: EMAs and candles frozen well behind the
+      // shown current price. Harmless for OI Replay's own manual-scrub use of these same charts too -
+      // both this and shiftVisibleRangeOnNewBar only ever act "when the last bar is visible", i.e.
+      // only once a viewer is already AT the live/current edge, never while deliberately scrolled
+      // back to inspect an earlier moment.
+      timeScale: {
+        borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter,
+        allowShiftVisibleRangeOnWhitespaceReplacement: true,
+      },
       crosshair: { mode: CrosshairMode.Normal },
       localization: { timeFormatter: istTimeFormatter },
     })
@@ -697,7 +754,26 @@ export function PremiumCandleChart({ bars, dayKey, height = 320 }) {
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
       grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
       rightPriceScale: { borderColor: BORDER_COLOR },
-      timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter },
+      // allowShiftVisibleRangeOnWhitespaceReplacement: lightweight-charts' own default
+      // (shiftVisibleRangeOnNewBar, true) auto-scrolls to keep a freshly-appended bar in view, but
+      // ONLY for a bar strictly past the chart's existing range - not one filling in a WHITESPACE
+      // time point the chart had already pre-rendered further right (e.g. the next minute's empty
+      // slot within today's still-ahead market hours). Every chart here re-supplies its FULL series
+      // via setData() on every new tick (not series.update() for just the one changed bar), which is
+      // exactly the shape that tends to land as "replacing whitespace" rather than "a genuinely new
+      // bar" from the library's own perspective - without this flag, a live page's chart can silently
+      // stop auto-scrolling forward as the day progresses, leaving the visible candles/EMAs looking
+      // "stuck" in the past while a price label (which always reflects the true latest point
+      // regardless of what's currently scrolled into view) correctly shows a real, much newer price -
+      // a real report ("price incorrect") was exactly this: EMAs and candles frozen well behind the
+      // shown current price. Harmless for OI Replay's own manual-scrub use of these same charts too -
+      // both this and shiftVisibleRangeOnNewBar only ever act "when the last bar is visible", i.e.
+      // only once a viewer is already AT the live/current edge, never while deliberately scrolled
+      // back to inspect an earlier moment.
+      timeScale: {
+        borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter,
+        allowShiftVisibleRangeOnWhitespaceReplacement: true,
+      },
       crosshair: { mode: CrosshairMode.Normal },
       localization: { timeFormatter: istTimeFormatter },
     })
@@ -777,7 +853,26 @@ export function PremiumEmaChart({
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
       grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
       rightPriceScale: { borderColor: BORDER_COLOR },
-      timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter },
+      // allowShiftVisibleRangeOnWhitespaceReplacement: lightweight-charts' own default
+      // (shiftVisibleRangeOnNewBar, true) auto-scrolls to keep a freshly-appended bar in view, but
+      // ONLY for a bar strictly past the chart's existing range - not one filling in a WHITESPACE
+      // time point the chart had already pre-rendered further right (e.g. the next minute's empty
+      // slot within today's still-ahead market hours). Every chart here re-supplies its FULL series
+      // via setData() on every new tick (not series.update() for just the one changed bar), which is
+      // exactly the shape that tends to land as "replacing whitespace" rather than "a genuinely new
+      // bar" from the library's own perspective - without this flag, a live page's chart can silently
+      // stop auto-scrolling forward as the day progresses, leaving the visible candles/EMAs looking
+      // "stuck" in the past while a price label (which always reflects the true latest point
+      // regardless of what's currently scrolled into view) correctly shows a real, much newer price -
+      // a real report ("price incorrect") was exactly this: EMAs and candles frozen well behind the
+      // shown current price. Harmless for OI Replay's own manual-scrub use of these same charts too -
+      // both this and shiftVisibleRangeOnNewBar only ever act "when the last bar is visible", i.e.
+      // only once a viewer is already AT the live/current edge, never while deliberately scrolled
+      // back to inspect an earlier moment.
+      timeScale: {
+        borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter,
+        allowShiftVisibleRangeOnWhitespaceReplacement: true,
+      },
       crosshair: { mode: CrosshairMode.Normal },
       localization: { timeFormatter: istTimeFormatter },
     })
