@@ -357,10 +357,10 @@ export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Onl
         const stale = row[staleKey]
         const sinceOpen = row[sinceOpenKey]
         // suspectKey (Live OI Dashboard only - OI Replay rows never set it) means a Δ WAS computed
-        // but looked implausible against current OI and was suppressed - see SinceOpenChange's own
-        // doc comment. Labeled explicitly rather than just omitting Δ, which used to look identical
-        // to "no data at all" - a real report ("this calculation is incorrect") traced back to this
-        // exact suppression on one side only, invisible without checking the console.
+        // but looks implausible against current OI - see SinceOpenChange's own doc comment. Still
+        // shown, just flagged with "(mismatch?)" appended - never hidden. A real report ("this
+        // calculation is incorrect") once traced back to this exact figure being suppressed instead
+        // of flagged, which read as "no data" rather than "here's a number, treat it with caution".
         const suspect = suspectKey && row[suspectKey]
         const srDiff = (row.peOi ?? 0) - (row.ceOi ?? 0)
         const line = seriesRef.current.createPriceLine({
@@ -369,7 +369,7 @@ export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Onl
           lineWidth: 1 + Math.round(t * 2),
           lineStyle: stale ? 1 : 2,
           axisLabelVisible: true,
-          title: `${labelPrefix} ${oiBarText(t)} ${row.strike} (${formatOiMillions(row[key])} OI${row[ivKey] != null ? `, IV ${row[ivKey].toFixed(1)}` : ''}${suspect ? ', Δ hidden (mismatch)' : sinceOpen != null ? `, Δ ${formatOiMillions(sinceOpen, { signed: true })}` : ''}, S-R ${formatOiMillions(srDiff, { signed: true })})${stale ? ' [STALE]' : ''}`,
+          title: `${labelPrefix} ${oiBarText(t)} ${row.strike} (${formatOiMillions(row[key])} OI${row[ivKey] != null ? `, IV ${row[ivKey].toFixed(1)}` : ''}${sinceOpen != null ? `, Δ ${formatOiMillions(sinceOpen, { signed: true })}${suspect ? ' (mismatch?)' : ''}` : ''}, S-R ${formatOiMillions(srDiff, { signed: true })})${stale ? ' [STALE]' : ''}`,
         })
         priceLinesRef.current.push(line)
       }
@@ -1076,26 +1076,19 @@ function OiChange({ value }) {
 
 // Cumulative OI change since the day's very first revealed point. `suspect` (Live OI Dashboard
 // only - OI Replay's own rows never set it, so this is always falsy there) means the raw delta
-// WAS computed but looked implausible against current OI and was suppressed rather than shown -
-// see SINCE_OPEN_SANITY_MULTIPLE's own doc comment on OiLiveDashboardPage.jsx. Shown as a distinct
-// "⚠ hidden" marker instead of silently rendering nothing, so a suppressed-as-untrustworthy reading
-// is never confused with "no data at all" - a real report ("this calculation is incorrect") turned
-// out to be this exact suppression, invisible without checking the browser console.
+// looks implausible against current OI - see SINCE_OPEN_SANITY_MULTIPLE's own doc comment on
+// OiLiveDashboardPage.jsx - but it is ALWAYS shown, never hidden, just marked with a "?" so a
+// reading worth double-checking is never confused with "no data at all" (a real report, "this
+// calculation is incorrect", once traced back to this exact figure being suppressed instead of
+// flagged).
 function SinceOpenChange({ value, suspect = false }) {
-  if (suspect) {
-    return (
-      <Tooltip title="Hidden - the live tick feed and today's opening (REST) reading disagree by more than looks plausible for this strike. Logged to the browser console with the actual numbers.">
-        <Text style={{ fontSize: 'clamp(6px, 1.8vw, 8px)', color: AXIS_COLOR, whiteSpace: 'nowrap' }}>⚠ hidden</Text>
-      </Tooltip>
-    )
-  }
   if (value == null) return null
   if (value === 0) return <Text style={{ fontSize: 'clamp(6px, 1.8vw, 8px)', color: AXIS_COLOR }}>open ·</Text>
   const up = value > 0
   return (
-    <Tooltip title={`${up ? '+' : ''}${value.toLocaleString()} since today's open`}>
+    <Tooltip title={`${up ? '+' : ''}${value.toLocaleString()} since today's open${suspect ? ' - flagged: the live tick feed and today\'s opening (REST) reading disagree by more than looks plausible for this strike. Logged to the browser console with the actual numbers.' : ''}`}>
       <Text style={{ fontSize: 'clamp(6px, 1.8vw, 8px)', color: up ? UP_COLOR : DOWN_COLOR, whiteSpace: 'nowrap' }}>
-        open {formatOiMillions(value, { signed: true })}
+        open {formatOiMillions(value, { signed: true })}{suspect ? ' ⚠' : ''}
       </Text>
     </Tooltip>
   )
