@@ -1109,6 +1109,18 @@ export function DraggableFloatingPanel({ title, pos, onPosChange, size, onSizeCh
   const dragRef = useRef(null)
   const resizeRef = useRef(null)
   const panelRef = useRef(null)
+  // Whichever gesture's own window-level listener teardown is CURRENTLY registered (drag OR
+  // resize, mouse OR touch - never more than one at once, since starting either kind of drag stops
+  // propagation/is otherwise mutually exclusive) - so the unmount effect further below can force
+  // that same teardown to run even if the gesture never got a natural mouseup/touchend first (the
+  // panel closed mid-drag, or the whole page navigated away). Without this, closing the panel while
+  // still holding a drag left its window 'mousemove'/'touchmove' listener attached indefinitely,
+  // silently firing (and calling onPosChange/onSizeChange on an unmounted panel) on every mouse
+  // movement anywhere on the page until whatever NEXT mouseup happened to occur, anywhere - a real,
+  // if usually short-lived, leak.
+  const activeGestureCleanupRef = useRef(null)
+
+  useEffect(() => () => activeGestureCleanupRef.current?.(), [])
   // Undefined size (a caller that hasn't opted in) keeps the ORIGINAL fixed-and-viewport-clamped
   // width with no explicit height (grows to fit content) - resizing is opt-in, not a forced change
   // in behavior for an existing caller.
@@ -1163,9 +1175,11 @@ export function DraggableFloatingPanel({ title, pos, onPosChange, size, onSizeCh
       endDrag()
       window.removeEventListener('mousemove', onMouseMove)
       window.removeEventListener('mouseup', onMouseUp)
+      activeGestureCleanupRef.current = null
     }
     window.addEventListener('mousemove', onMouseMove)
     window.addEventListener('mouseup', onMouseUp)
+    activeGestureCleanupRef.current = onMouseUp
   }
 
   // Touch's own counterpart to onHeaderMouseDown above - a phone/tablet never fires mouse events for
@@ -1184,9 +1198,11 @@ export function DraggableFloatingPanel({ title, pos, onPosChange, size, onSizeCh
       endDrag()
       window.removeEventListener('touchmove', onTouchMove)
       window.removeEventListener('touchend', onTouchEnd)
+      activeGestureCleanupRef.current = null
     }
     window.addEventListener('touchmove', onTouchMove, { passive: false })
     window.addEventListener('touchend', onTouchEnd)
+    activeGestureCleanupRef.current = onTouchEnd
   }
 
   // Resize is opt-in (onSizeChange provided) - a caller still on the old fixed-width API simply
@@ -1228,9 +1244,11 @@ export function DraggableFloatingPanel({ title, pos, onPosChange, size, onSizeCh
       document.body.style.userSelect = prevUserSelect
       window.removeEventListener('mousemove', onMouseMove)
       window.removeEventListener('mouseup', onMouseUp)
+      activeGestureCleanupRef.current = null
     }
     window.addEventListener('mousemove', onMouseMove)
     window.addEventListener('mouseup', onMouseUp)
+    activeGestureCleanupRef.current = onMouseUp
   }
   const onResizeHandleTouchStart = (e) => {
     e.stopPropagation()
@@ -1247,9 +1265,11 @@ export function DraggableFloatingPanel({ title, pos, onPosChange, size, onSizeCh
       endResize()
       window.removeEventListener('touchmove', onTouchMove)
       window.removeEventListener('touchend', onTouchEnd)
+      activeGestureCleanupRef.current = null
     }
     window.addEventListener('touchmove', onTouchMove, { passive: false })
     window.addEventListener('touchend', onTouchEnd)
+    activeGestureCleanupRef.current = onTouchEnd
   }
 
   return createPortal(
