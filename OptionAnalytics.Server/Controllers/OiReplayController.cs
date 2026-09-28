@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using OptionAnalytics.Server.Dhan;
 using OptionAnalytics.Server.Services;
 
 namespace OptionAnalytics.Server.Controllers;
@@ -11,10 +12,12 @@ namespace OptionAnalytics.Server.Controllers;
 public sealed class OiReplayController : ControllerBase
 {
     private readonly OiReplayService _service;
+    private readonly DhanOptionChainMaster _optionChainMaster;
 
-    public OiReplayController(OiReplayService service)
+    public OiReplayController(OiReplayService service, DhanOptionChainMaster optionChainMaster)
     {
         _service = service;
+        _optionChainMaster = optionChainMaster;
     }
 
     /// <summary>One full day's worth of spot candles (already aggregated to timeframeMinutes) plus
@@ -35,5 +38,24 @@ public sealed class OiReplayController : ControllerBase
     {
         var result = await _service.RunAsync(underlying.ToUpperInvariant(), date, timeframeMinutes, expiryFlag.ToUpperInvariant(), cancellationToken, forceLive);
         return Ok(result);
+    }
+
+    /// <summary>The REAL calendar date "Weekly"/"Monthly" each currently resolve to for this
+    /// underlying - exposed so a picker can show the actual date instead of an ambiguous label, and
+    /// so the two can be told apart even when they happen to be the SAME date (the final week before
+    /// a monthly expiry - see OiReplayLiveFeedService.ResolveNearestExpiryCore's own doc comment for
+    /// why that specific overlap used to silently resolve to the wrong, further-out contract).
+    /// Either field is null when that flag isn't available at all for this underlying (e.g.
+    /// BANKNIFTY has no weekly expiry) or nothing is currently listed.</summary>
+    [HttpGet("{underlying}/expiries")]
+    public async Task<IActionResult> GetExpiries(string underlying, CancellationToken cancellationToken)
+    {
+        await _optionChainMaster.EnsureLoadedAsync(cancellationToken);
+        var listed = _optionChainMaster.GetExpiries(underlying.ToUpperInvariant()).Where(e => e >= IstClock.Today()).OrderBy(e => e).ToList();
+        return Ok(new
+        {
+            week = OiReplayLiveFeedService.ResolveNearestExpiryCore(listed, "WEEK"),
+            month = OiReplayLiveFeedService.ResolveNearestExpiryCore(listed, "MONTH"),
+        });
     }
 }
