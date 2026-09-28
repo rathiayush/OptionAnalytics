@@ -321,26 +321,38 @@ public sealed class OiReplayLiveFeedService : BackgroundService
     /// EXPIRED date the live scrip master no longer lists - irrelevant here, since every candidate
     /// considered is still currently listed and tradeable). A listed date counts as "monthly" if it
     /// is also the LAST listed expiry falling in its own calendar month - every other listed date is
-    /// "weekly" - which matches NSE's real convention of exactly one monthly expiry per month with
-    /// every other listed Tuesday in between being a weekly.</summary>
+    /// "weekly" - which matches NSE's real convention of exactly one monthly expiry per month.
+    ///
+    /// WEEK is simply the single nearest listed date, full stop - it is NEVER filtered to exclude a
+    /// date IsMonthly classifies as "the month's own monthly" (a previous version here did exactly
+    /// that, on the reasoning "weekly and monthly are different dates"). That reasoning breaks down
+    /// during the final week before a month's own monthly expiry: NSE lists no SEPARATE, closer
+    /// weekly for that week at all - the monthly contract IS that week's nearest expiry, the same
+    /// real contract both a weekly and a monthly trader are looking at. The old code instead skipped
+    /// straight past it to NEXT MONTH's first weekly - confirmed for real: a live report of a
+    /// strike's own tracked premium abruptly jumping mid-session to a wildly different value ("this
+    /// premium is from next expiry") traced back to exactly this, since the live tick feed (this
+    /// method) and the initial REST seed (OiReplayService, which hands expiryFlag/expiryCode
+    /// straight to Dhan's own /charts/rollingoption rather than re-deriving a date here) disagreed on
+    /// which contract "this week" even meant, in exactly this final-week window.</summary>
     private DateOnly? ResolveNearestExpiry(Combo combo, DateOnly today)
     {
         var listed = _optionChainMaster.GetExpiries(combo.Underlying).Where(e => e >= today).OrderBy(e => e).ToList();
-        if (listed.Count == 0) return null;
+        return ResolveNearestExpiryCore(listed, combo.ExpiryFlag);
+    }
 
-        bool IsMonthly(DateOnly date) => listed.Where(e => e.Year == date.Year && e.Month == date.Month).Max() == date;
+    /// <summary>The pure decision itself, pulled out of ResolveNearestExpiry so a test can exercise
+    /// the exact final-week scenario its own doc comment describes without standing up this whole
+    /// service and its Dhan-backed dependencies - same reasoning as
+    /// DhanRollingOptionDataService.ClipToRange's own internal static split.</summary>
+    internal static DateOnly? ResolveNearestExpiryCore(IReadOnlyList<DateOnly> listedFromToday, string expiryFlag)
+    {
+        if (listedFromToday.Count == 0) return null;
+        if (expiryFlag != "MONTH") return listedFromToday[0];
 
-        if (combo.ExpiryFlag == "MONTH")
-        {
-            var monthly = listed.Where(IsMonthly).ToList();
-            return monthly.Count > 0 ? monthly[0] : listed[0];
-        }
-
-        // Falls back to the nearest listed date at all if every remaining listed expiry happens to
-        // double as its own month's monthly one (e.g. right at a weekly-less month boundary) -
-        // still real, still tradeable, just not distinctly "weekly" this particular stretch.
-        var weekly = listed.Where(e => !IsMonthly(e)).ToList();
-        return weekly.Count > 0 ? weekly[0] : listed[0];
+        bool IsMonthly(DateOnly date) => listedFromToday.Where(e => e.Year == date.Year && e.Month == date.Month).Max() == date;
+        var monthly = listedFromToday.Where(IsMonthly).ToList();
+        return monthly.Count > 0 ? monthly[0] : listedFromToday[0];
     }
 
     private void OnTick(SpotTick tick)
