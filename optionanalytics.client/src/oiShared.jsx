@@ -234,12 +234,19 @@ const OI_STALE_MS = 5 * 60_000
 
 // Candlestick chart that draws the strongest OI levels on each side as horizontal price lines
 // directly on the chart (darker = heavier OI = a "harder" level).
-export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = true, vwapSeries = EMPTY_ARRAY, showVwap = false, height = 440 }) {
+export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = true, vwapSeries = EMPTY_ARRAY, showVwap = false, onStrikeClick, height = 440 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
   const vwapSeriesRef = useRef(null)
   const priceLinesRef = useRef([])
+  // Refs, not effect dependencies - clicking is wired up once in the chart-creation effect below
+  // ([height] only), so a new onStrikeClick/step on every render must not tear down and recreate
+  // the whole chart.
+  const onStrikeClickRef = useRef(onStrikeClick)
+  onStrikeClickRef.current = onStrikeClick
+  const stepRef = useRef(step)
+  stepRef.current = step
 
   const { ceTop, peTop, topRows } = useMemo(() => {
     if (!ladderRows || ladderRows.length === 0 || atmStrike == null || !step) return { ceTop: [], peTop: [], topRows: [] }
@@ -282,6 +289,19 @@ export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Onl
       upColor: UP_COLOR, downColor: DOWN_COLOR, borderVisible: false, wickUpColor: UP_COLOR, wickDownColor: DOWN_COLOR,
     })
     vwapSeriesRef.current = chart.addSeries(LineSeries, { color: VWAP_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: 'VWAP' })
+
+    // Click-to-drill-down: rounds whatever price was clicked to the nearest tracked strike, same as
+    // OiReplayPage's own identical chart. Guards non-finite price/strike explicitly (a click landing
+    // on the price axis/label margin - exactly where the R/S wall labels render - can hand back a
+    // non-finite value from coordinateToPrice) after a real report of that crashing the whole app.
+    chart.subscribeClick((param) => {
+      if (!param.point || !seriesRef.current || !stepRef.current) return
+      const price = seriesRef.current.coordinateToPrice(param.point.y)
+      if (price == null || !Number.isFinite(price)) return
+      const strike = Math.round(price / stepRef.current) * stepRef.current
+      if (!Number.isFinite(strike)) return
+      onStrikeClickRef.current?.(strike)
+    })
 
     const onResize = () => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }) }
     // ResizeObserver, not a plain window 'resize' listener: on mobile, a chart's own container
@@ -330,12 +350,18 @@ export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Onl
     const allOi = [...topRows.map((r) => r.ceOi ?? 0), ...topRows.map((r) => r.peOi ?? 0)]
     const maxOi = allOi.length > 0 ? Math.max(...allOi) : 0
 
-    const drawSide = (rows, key, ivKey, staleKey, sinceOpenKey, lightColor, darkColor, labelPrefix) => {
+    const drawSide = (rows, key, ivKey, staleKey, sinceOpenKey, suspectKey, lightColor, darkColor, labelPrefix) => {
       for (const row of rows) {
         if ((row[key] ?? 0) <= 0) continue
         const t = maxOi > 0 ? row[key] / maxOi : 1
         const stale = row[staleKey]
         const sinceOpen = row[sinceOpenKey]
+        // suspectKey (Live OI Dashboard only - OI Replay rows never set it) means a Δ WAS computed
+        // but looked implausible against current OI and was suppressed - see SinceOpenChange's own
+        // doc comment. Labeled explicitly rather than just omitting Δ, which used to look identical
+        // to "no data at all" - a real report ("this calculation is incorrect") traced back to this
+        // exact suppression on one side only, invisible without checking the console.
+        const suspect = suspectKey && row[suspectKey]
         const srDiff = (row.peOi ?? 0) - (row.ceOi ?? 0)
         const line = seriesRef.current.createPriceLine({
           price: row.strike,
@@ -343,14 +369,14 @@ export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Onl
           lineWidth: 1 + Math.round(t * 2),
           lineStyle: stale ? 1 : 2,
           axisLabelVisible: true,
-          title: `${labelPrefix} ${oiBarText(t)} ${row.strike} (${formatOiMillions(row[key])} OI${row[ivKey] != null ? `, IV ${row[ivKey].toFixed(1)}` : ''}${sinceOpen != null ? `, Δ ${formatOiMillions(sinceOpen, { signed: true })}` : ''}, S-R ${formatOiMillions(srDiff, { signed: true })})${stale ? ' [STALE]' : ''}`,
+          title: `${labelPrefix} ${oiBarText(t)} ${row.strike} (${formatOiMillions(row[key])} OI${row[ivKey] != null ? `, IV ${row[ivKey].toFixed(1)}` : ''}${suspect ? ', Δ hidden (mismatch)' : sinceOpen != null ? `, Δ ${formatOiMillions(sinceOpen, { signed: true })}` : ''}, S-R ${formatOiMillions(srDiff, { signed: true })})${stale ? ' [STALE]' : ''}`,
         })
         priceLinesRef.current.push(line)
       }
     }
 
-    drawSide(topRows, 'ceOi', 'ceIv', 'ceStale', 'ceOiSinceOpen', RESISTANCE_LIGHT, RESISTANCE_DARK, 'R')
-    drawSide(topRows, 'peOi', 'peIv', 'peStale', 'peOiSinceOpen', SUPPORT_LIGHT, SUPPORT_DARK, 'S')
+    drawSide(topRows, 'ceOi', 'ceIv', 'ceStale', 'ceOiSinceOpen', 'ceOiSinceOpenSuspect', RESISTANCE_LIGHT, RESISTANCE_DARK, 'R')
+    drawSide(topRows, 'peOi', 'peIv', 'peStale', 'peOiSinceOpen', 'peOiSinceOpenSuspect', SUPPORT_LIGHT, SUPPORT_DARK, 'S')
   }, [topRows])
 
   const ceLead = ceTop[0] ?? null
@@ -1048,8 +1074,21 @@ function OiChange({ value }) {
   )
 }
 
-// Cumulative OI change since the day's very first revealed point.
-function SinceOpenChange({ value }) {
+// Cumulative OI change since the day's very first revealed point. `suspect` (Live OI Dashboard
+// only - OI Replay's own rows never set it, so this is always falsy there) means the raw delta
+// WAS computed but looked implausible against current OI and was suppressed rather than shown -
+// see SINCE_OPEN_SANITY_MULTIPLE's own doc comment on OiLiveDashboardPage.jsx. Shown as a distinct
+// "⚠ hidden" marker instead of silently rendering nothing, so a suppressed-as-untrustworthy reading
+// is never confused with "no data at all" - a real report ("this calculation is incorrect") turned
+// out to be this exact suppression, invisible without checking the browser console.
+function SinceOpenChange({ value, suspect = false }) {
+  if (suspect) {
+    return (
+      <Tooltip title="Hidden - the live tick feed and today's opening (REST) reading disagree by more than looks plausible for this strike. Logged to the browser console with the actual numbers.">
+        <Text style={{ fontSize: 'clamp(6px, 1.8vw, 8px)', color: AXIS_COLOR, whiteSpace: 'nowrap' }}>⚠ hidden</Text>
+      </Tooltip>
+    )
+  }
   if (value == null) return null
   if (value === 0) return <Text style={{ fontSize: 'clamp(6px, 1.8vw, 8px)', color: AXIS_COLOR }}>open ·</Text>
   const up = value > 0
@@ -1062,11 +1101,11 @@ function SinceOpenChange({ value }) {
   )
 }
 
-function OiChangeStack({ changeValue, sinceOpenValue }) {
+function OiChangeStack({ changeValue, sinceOpenValue, sinceOpenSuspect = false }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', lineHeight: 1.15 }}>
       <OiChange value={changeValue} />
-      <SinceOpenChange value={sinceOpenValue} />
+      <SinceOpenChange value={sinceOpenValue} suspect={sinceOpenSuspect} />
     </div>
   )
 }
@@ -1111,7 +1150,7 @@ export function OiLadder({ rows, atmStrike }) {
             }}
           >
             <Col span={10} style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 4, opacity: row.peStale ? 0.45 : 1 }}>
-              <OiChangeStack changeValue={row.peOiChange} sinceOpenValue={row.peOiSinceOpen} />
+              <OiChangeStack changeValue={row.peOiChange} sinceOpenValue={row.peOiSinceOpen} sinceOpenSuspect={row.peOiSinceOpenSuspect} />
               <Text style={{ fontSize: 'clamp(8px, 2.2vw, 10px)', color: AXIS_COLOR, whiteSpace: 'nowrap' }}>
                 {row.pePrice != null ? `${row.pePrice.toFixed(2)}` : ''}
                 {row.peIv != null ? ` · IV ${row.peIv.toFixed(1)}` : ''}
@@ -1144,7 +1183,7 @@ export function OiLadder({ rows, atmStrike }) {
               <Text style={{ fontSize: 'clamp(7px, 2vw, 9px)', color: AXIS_COLOR, width: 'clamp(24px, 7vw, 34px)', whiteSpace: 'nowrap' }}>
                 {row.ceOi != null ? formatOiMillions(row.ceOi) : ''}
               </Text>
-              <OiChangeStack changeValue={row.ceOiChange} sinceOpenValue={row.ceOiSinceOpen} />
+              <OiChangeStack changeValue={row.ceOiChange} sinceOpenValue={row.ceOiSinceOpen} sinceOpenSuspect={row.ceOiSinceOpenSuspect} />
               <Text style={{ fontSize: 'clamp(8px, 2.2vw, 10px)', color: AXIS_COLOR, whiteSpace: 'nowrap' }}>
                 {row.cePrice != null ? `${row.cePrice.toFixed(2)}` : ''}
                 {row.ceIv != null ? ` · IV ${row.ceIv.toFixed(1)}` : ''}

@@ -588,17 +588,23 @@ export default function OiLiveDashboardPage() {
       // strike's own current OI is treated as an untrustworthy reading, not a real move, and hidden
       // rather than shown as a precise-looking number. Math.max(..., SINCE_OPEN_MIN_BASELINE) keeps
       // this meaningful even when current OI itself reads 0 - see that constant's own doc comment.
-      const ceOiSinceOpen = ceOiSinceOpenRaw != null && Math.abs(ceOiSinceOpenRaw) > Math.max(ce.openInterest, SINCE_OPEN_MIN_BASELINE) * SINCE_OPEN_SANITY_MULTIPLE
-        ? null : ceOiSinceOpenRaw
-      const peOiSinceOpen = peOiSinceOpenRaw != null && Math.abs(peOiSinceOpenRaw) > Math.max(pe.openInterest, SINCE_OPEN_MIN_BASELINE) * SINCE_OPEN_SANITY_MULTIPLE
-        ? null : peOiSinceOpenRaw
+      const ceOiSinceOpenSuspect = ceOiSinceOpenRaw != null && Math.abs(ceOiSinceOpenRaw) > Math.max(ce.openInterest, SINCE_OPEN_MIN_BASELINE) * SINCE_OPEN_SANITY_MULTIPLE
+      const peOiSinceOpenSuspect = peOiSinceOpenRaw != null && Math.abs(peOiSinceOpenRaw) > Math.max(pe.openInterest, SINCE_OPEN_MIN_BASELINE) * SINCE_OPEN_SANITY_MULTIPLE
+      const ceOiSinceOpen = ceOiSinceOpenSuspect ? null : ceOiSinceOpenRaw
+      const peOiSinceOpen = peOiSinceOpenSuspect ? null : peOiSinceOpenRaw
+      // Logged, not just silently hidden - a real report ("this calculation is incorrect... OI
+      // showing incorrect data") turned out to be this exact suppression firing, uniformly, across
+      // every strike on one side - which is itself useful evidence (a systematic cross-pipeline
+      // disagreement, not a one-off blip), but was invisible without opening devtools. Now it is.
+      if (ceOiSinceOpenSuspect) console.warn(`Live OI Dashboard: hiding CE Δ (since open) for ${strike} - raw delta ${ceOiSinceOpenRaw} looks implausible against current OI ${ce.openInterest} (day-open was ${ceOpen.openInterest} from the REST seed; current is from the live tick feed - these two pipelines disagreeing this much on the same strike is the suspected cause).`)
+      if (peOiSinceOpenSuspect) console.warn(`Live OI Dashboard: hiding PE Δ (since open) for ${strike} - raw delta ${peOiSinceOpenRaw} looks implausible against current OI ${pe.openInterest} (day-open was ${peOpen.openInterest} from the REST seed; current is from the live tick feed - these two pipelines disagreeing this much on the same strike is the suspected cause).`)
       return {
         strike,
         ceOi: ce?.openInterest ?? null, ceIv: ce?.impliedVolatility ?? null, cePrice: ce?.price ?? null,
         peOi: pe?.openInterest ?? null, peIv: pe?.impliedVolatility ?? null, pePrice: pe?.price ?? null,
         ceOiChange: ce?.openInterest != null && cePriorFresh && cePrior.openInterest != null ? ce.openInterest - cePrior.openInterest : null,
         peOiChange: pe?.openInterest != null && pePriorFresh && pePrior.openInterest != null ? pe.openInterest - pePrior.openInterest : null,
-        ceOiSinceOpen, peOiSinceOpen,
+        ceOiSinceOpen, peOiSinceOpen, ceOiSinceOpenSuspect, peOiSinceOpenSuspect,
         ceAsOfMs, peAsOfMs,
         ceStale: ceAsOfMs != null && now - ceAsOfMs > OI_STALE_MS,
         peStale: peAsOfMs != null && now - peAsOfMs > OI_STALE_MS,
