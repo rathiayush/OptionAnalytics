@@ -35,17 +35,19 @@ const EMPTY_ARRAY = []
 // Originally local to OiLiveDashboardPage.jsx, moved here so a second live page (LiveStrikeDataPage)
 // can share the identical connection logic rather than a third bespoke copy - OiReplayPage.jsx does
 // not use this and is unaffected either way.
-export function useOiLiveHub(onSpotUpdate, onOiReplayTick, onReconnected, onCdvUpdate, onCdvBarClosed) {
+export function useOiLiveHub(onSpotUpdate, onOiReplayTick, onReconnected, onCdvUpdate, onCdvBarClosed, onOiRestSnapshot) {
   const spotRef = useRef(onSpotUpdate)
   const tickRef = useRef(onOiReplayTick)
   const reconnectedRef = useRef(onReconnected)
   const cdvRef = useRef(onCdvUpdate)
   const cdvBarClosedRef = useRef(onCdvBarClosed)
+  const restSnapshotRef = useRef(onOiRestSnapshot)
   spotRef.current = onSpotUpdate
   tickRef.current = onOiReplayTick
   reconnectedRef.current = onReconnected
   cdvRef.current = onCdvUpdate
   cdvBarClosedRef.current = onCdvBarClosed
+  restSnapshotRef.current = onOiRestSnapshot
 
   const [connectionState, setConnectionState] = useState('connecting')
 
@@ -66,6 +68,11 @@ export function useOiLiveHub(onSpotUpdate, onOiReplayTick, onReconnected, onCdvU
     // subscribing server-side for this page to receive them too.
     connection.on('cdvUpdate', (snapshot) => cdvRef.current?.(snapshot))
     connection.on('cdvBarClosed', (point) => cdvBarClosedRef.current?.(point))
+    // OPTIONAL REST-quote fallback (OiReplayLiveFeedService.RunRestQuoteLoopAsync) - every strike's
+    // OI/price from Dhan's Option Chain snapshot endpoint, re-broadcast every ~30s regardless of
+    // whether any client wants it (see that method's own doc comment for why that's safe/cheap).
+    // Only OiLiveDashboardPage currently passes a handler for this.
+    connection.on('oiRestSnapshot', (snapshot) => restSnapshotRef.current?.(snapshot))
     connection.onreconnecting(() => setConnectionState('reconnecting'))
     connection.onreconnected(() => { setConnectionState('connected'); reconnectedRef.current?.() })
     connection.onclose(() => setConnectionState('disconnected'))
