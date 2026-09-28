@@ -195,6 +195,75 @@ export function usePersistedState(key, fallback) {
   return [value, setValue]
 }
 
+// Drag-to-reorder a fixed set of named cards, persisted per page (own storageKey) so a rearrangement
+// survives a reload - no drag library needed for something this small, same reasoning
+// DraggableFloatingPanel's own doc comment already gives for using plain native events instead of a
+// dependency. `cardIds` is the CURRENT full set a page renders (order is unaware of each card's own
+// layout/span - callers still own that, this only reorders which one comes first).
+//
+// Deliberately reconciles against a stale persisted order rather than trusting it outright: a page
+// that later adds or removes a card must not end up silently dropping the new one (it would never
+// render at all) or keeping a ghost id around forever from before a card was removed. A newly added
+// card is appended at the end - the least surprising place for something that wasn't part of
+// whatever arrangement was saved.
+export function useCardOrder(storageKey, cardIds) {
+  const [storedOrder, setStoredOrder] = usePersistedState(storageKey, cardIds)
+  const dragIdRef = useRef(null)
+  const [dragOverId, setDragOverId] = useState(null)
+
+  const order = useMemo(() => {
+    const known = new Set(cardIds)
+    const kept = storedOrder.filter((id) => known.has(id))
+    const missing = cardIds.filter((id) => !kept.includes(id))
+    return [...kept, ...missing]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storedOrder, cardIds.join(',')])
+
+  const dragHandleProps = (id) => ({
+    draggable: true,
+    onDragStart: (e) => { dragIdRef.current = id; e.dataTransfer.effectAllowed = 'move' },
+    onDragEnd: () => { dragIdRef.current = null; setDragOverId(null) },
+  })
+
+  // Placed on the whole CARD (not just its handle) - a drop can land anywhere over the card, not
+  // only precisely on the small handle, which is both more forgiving and how every real drag-reorder
+  // UI (a file manager, a kanban board) already behaves.
+  const dropTargetProps = (id) => ({
+    onDragOver: (e) => { if (dragIdRef.current && dragIdRef.current !== id) { e.preventDefault(); setDragOverId(id) } },
+    onDragLeave: () => setDragOverId((prev) => (prev === id ? null : prev)),
+    onDrop: (e) => {
+      e.preventDefault()
+      const sourceId = dragIdRef.current
+      setDragOverId(null)
+      if (!sourceId || sourceId === id) return
+      const next = order.filter((x) => x !== sourceId)
+      next.splice(next.indexOf(id), 0, sourceId)
+      setStoredOrder(next)
+    },
+    // A light highlight on whichever card is currently the drop target - the only visual feedback
+    // native HTML5 drag-and-drop doesn't already give you for free (the dragged element itself gets
+    // the browser's own default drag ghost/cursor).
+    style: dragOverId === id ? { outline: '2px dashed #4c9ffe', outlineOffset: 2, borderRadius: 8 } : undefined,
+  })
+
+  return { order, dragHandleProps, dropTargetProps }
+}
+
+// A small "⠿" grip, draggable to reorder its own card (see useCardOrder) - a dedicated handle
+// rather than making the whole card/title draggable, so it never fights a title's own clickable
+// controls (a Select, a Segmented toggle) for the same mousedown.
+export function CardDragHandle(props) {
+  return (
+    <span
+      {...props}
+      title="Drag to reorder"
+      style={{ cursor: 'grab', padding: '0 6px', color: '#9aa4b2', fontSize: 14, lineHeight: 1, userSelect: 'none' }}
+    >
+      ⠿
+    </span>
+  )
+}
+
 // Keeps a stored underlying only if the backend still offers it, otherwise falls back to the
 // first one - so a stale or renamed symbol can't leave a page stuck on nothing.
 export function pickUnderlying(list, current) {

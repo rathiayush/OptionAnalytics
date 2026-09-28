@@ -13,7 +13,7 @@ import LiveStrikeDataPage from './LiveStrikeDataPage.jsx'
 import TriggersPage from './TriggersPage.jsx'
 import ContractsPage from './ContractsPage.jsx'
 import LoginPage from './LoginPage.jsx'
-import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, RECONNECT_RETRY_POLICY, computeEma, fmtPrice, fmtIstTime, fmtIstDateTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry, AuthContext, useAuth, syncSignalRGroups, joinAllSignalRGroups } from './shared.jsx'
+import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, RECONNECT_RETRY_POLICY, computeEma, fmtPrice, fmtIstTime, fmtIstDateTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry, AuthContext, useAuth, syncSignalRGroups, joinAllSignalRGroups, useCardOrder, CardDragHandle } from './shared.jsx'
 import './App.css'
 
 const { Title, Text } = Typography
@@ -74,6 +74,8 @@ const DAYS_OPTIONS = [
 // arbitrary narrower slice, while still landing on one of the picker's own labeled values instead
 // of silently behaving like "All" for a reason nobody chose.
 const DEFAULT_DAYS_TO_SHOW = 45
+
+const DASHBOARD_CARD_IDS = ['alerts', 'spot', 'strikes', 'cdv', 'obv']
 
 function useScaledLine(points, unitKey) {
   const { divisor } = VALUE_UNITS[unitKey]
@@ -843,9 +845,9 @@ const ALERT_DISPLAY_LIMIT = 20
 // one the moment any single leg's bias flips, plus a stronger CONFLUENCE alert when all three
 // confirm the same move at once. Kept visible on the page at all times (not a toast that
 // disappears) since the whole point is catching a signal even if nobody was looking when it fired.
-function AlertsPanel({ alerts, states }) {
+function AlertsPanel({ alerts, states, dragHandle }) {
   return (
-    <Card size="small" title="Confluence Alerts" extra={<Text type="secondary" style={{ fontSize: 12 }}>Spot + ATM CE/PE EMA 9/21</Text>}>
+    <Card size="small" title={<Space size={4}>{dragHandle}Confluence Alerts</Space>} extra={<Text type="secondary" style={{ fontSize: 12 }}>Spot + ATM CE/PE EMA 9/21</Text>}>
       <Space direction="vertical" size={12} style={{ width: '100%' }}>
         {states.length > 0 && (
           <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap' }}>
@@ -1400,6 +1402,8 @@ function DashboardPage() {
   const obvCeSplit = useTodayAndPreviousDay(obvCeScaled)
   const obvPeSplit = useTodayAndPreviousDay(obvPeScaled)
 
+  const { order: cardOrder, dragHandleProps, dropTargetProps } = useCardOrder('optionanalytics.dashboardCardOrder', DASHBOARD_CARD_IDS)
+
   if (loading) {
     return (
       <div style={{ display: 'flex', justifyContent: 'center', padding: 80 }}>
@@ -1442,109 +1446,136 @@ function DashboardPage() {
           <Text type="secondary">Last traded: {fmtPrice(snapshot?.lastPrice)}</Text>
         </Space>
 
-        <AlertsPanel alerts={alerts} states={crossoverStates} />
+        {(() => {
+          const cardsById = {
+            alerts: <AlertsPanel alerts={alerts} states={crossoverStates} dragHandle={<CardDragHandle {...dragHandleProps('alerts')} />} />,
 
-        <ChartCard
-          title={`${selected} spot`}
-          extra={
-            <Space size={12}>
-              <Checkbox checked={showVwap} onChange={(e) => setShowVwap(e.target.checked)}>VWAP</Checkbox>
-              <EmaLegend state={spotCrossState} />
-            </Space>
+            spot: (
+              <ChartCard
+                title={<Space size={4}><CardDragHandle {...dragHandleProps('spot')} />{`${selected} spot`}</Space>}
+                extra={
+                  <Space size={12}>
+                    <Checkbox checked={showVwap} onChange={(e) => setShowVwap(e.target.checked)}>VWAP</Checkbox>
+                    <EmaLegend state={spotCrossState} />
+                  </Space>
+                }
+                empty="Waiting for chart data - the Dhan feed may still be connecting."
+              >
+                {spotBars.length > 0 && (
+                  <ChartErrorBoundary key={`${selected}-${timeframe}-${daysToShow}`} height={420}>
+                    <PriceChart bars={spotBars} vwapSeries={vwapSeries} showVwap={showVwap} height={420} />
+                  </ChartErrorBoundary>
+                )}
+              </ChartCard>
+            ),
+
+            strikes: (
+              <div>
+                <Space size={4} style={{ marginBottom: 8 }}>
+                  <CardDragHandle {...dragHandleProps('strikes')} />
+                  <Text type="secondary" style={{ fontSize: 12 }}>Strikes</Text>
+                </Space>
+                <StrikePicker chain={strikeChain} value={selectedStrike} onChange={setSelectedStrike} live={showsAtmContract} />
+                <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginTop: 16 }}>
+                  <div style={{ flex: '1 1 400px', minWidth: 0 }}>
+                    <ChartCard
+                      title={`${showsAtmContract ? 'ATM ' : ''}CE ${chartedStrike ?? ''}`}
+                      extra={<EmaLegend state={atmCeCrossState} />}
+                      empty="Waiting for the CE contract to resolve and tick."
+                    >
+                      {atmCeBars.length > 0 && (
+                        <ChartErrorBoundary key={`${selected}-${timeframe}-${daysToShow}-${chartedStrike}`} height={320}>
+                          <PriceChart bars={atmCeBars} height={320} />
+                        </ChartErrorBoundary>
+                      )}
+                    </ChartCard>
+                  </div>
+                  <div style={{ flex: '1 1 400px', minWidth: 0 }}>
+                    <ChartCard
+                      title={`${showsAtmContract ? 'ATM ' : ''}PE ${chartedStrike ?? ''}`}
+                      extra={<EmaLegend state={atmPeCrossState} />}
+                      empty="Waiting for the PE contract to resolve and tick."
+                    >
+                      {atmPeBars.length > 0 && (
+                        <ChartErrorBoundary key={`${selected}-${timeframe}-${daysToShow}-${chartedStrike}`} height={320}>
+                          <PriceChart bars={atmPeBars} height={320} />
+                        </ChartErrorBoundary>
+                      )}
+                    </ChartCard>
+                  </div>
+                </div>
+              </div>
+            ),
+
+            cdv: (
+              <div>
+                <ChartCard
+                  title={<Space size={4}><CardDragHandle {...dragHandleProps('cdv')} />CE / PE Cumulative Delta Volume</Space>}
+                  extra={
+                    <Space size={12}>
+                      <Text type="secondary" style={{ fontSize: 12 }}>ATM {cdvSnapshot?.atmStrike ?? '—'} · Expiry {cdvSnapshot?.expiry ?? '—'}</Text>
+                      <Select value={cdvUnit} onChange={setCdvUnit} size="small" style={{ width: 140 }} options={VALUE_UNIT_OPTIONS} />
+                      <StrikesButton underlying={selected} expiry={expiryParam} />
+                    </Space>
+                  }
+                  empty="Waiting for option-chain data - strikes resolve once the spot price is known."
+                >
+                  {cdvCe.length > 0 && (
+                    <>
+                      <ChartErrorBoundary key={`${selected}-${timeframe}-${daysToShow}`} height={280}>
+                        <CeVsPeChart ceSeries={cdvCeScaled} peSeries={cdvPeScaled} prevCeSeries={cdvPrevCeScaled} prevPeSeries={cdvPrevPeScaled} height={280} />
+                      </ChartErrorBoundary>
+                      <Space size={24} style={{ marginTop: 8 }}>
+                        <Text style={{ color: CE_COLOR }}>CE {fmtScaled(cdvSnapshot?.ceCdv, cdvUnit)}</Text>
+                        <Text style={{ color: PE_COLOR }}>PE {fmtScaled(cdvSnapshot?.peCdv, cdvUnit)}</Text>
+                      </Space>
+                    </>
+                  )}
+                </ChartCard>
+
+                {selected && <LookbackTable smoothedCe={cdvSmoothedCe} smoothedPe={cdvSmoothedPe} timeframe={timeframe} storageKey={STORED_CDV_LOOKBACK_BARS} />}
+              </div>
+            ),
+
+            obv: (
+              <div>
+                <ChartCard
+                  title={<Space size={4}><CardDragHandle {...dragHandleProps('obv')} />CE / PE On-Balance Volume (delta-weighted, all tracked strikes)</Space>}
+                  extra={
+                    <Space size={12}>
+                      <Text type="secondary" style={{ fontSize: 12 }}>Skender.Stock.Indicators</Text>
+                      <Select value={obvUnit} onChange={setObvUnit} size="small" style={{ width: 140 }} options={VALUE_UNIT_OPTIONS} />
+                    </Space>
+                  }
+                  empty="Waiting for enough CE/PE bars to compute OBV."
+                >
+                  {(obvCePoints.length > 0 || obvPePoints.length > 0) && (
+                    <ChartErrorBoundary key={`${selected}-${timeframe}-${daysToShow}-${cdvSnapshot?.atmStrike}`} height={280}>
+                      <CeVsPeChart ceSeries={obvCeSplit.today} peSeries={obvPeSplit.today} prevCeSeries={obvCeSplit.previous} prevPeSeries={obvPeSplit.previous} height={280} />
+                    </ChartErrorBoundary>
+                  )}
+                </ChartCard>
+
+                {selected && (
+                  <LookbackTable
+                    smoothedCe={obvCe}
+                    smoothedPe={obvPe}
+                    timeframe={timeframe}
+                    title="OBV Multi-Lookback % Change"
+                    defaultBars={DEFAULT_LOOKBACK_BARS}
+                    storageKey={STORED_OBV_LOOKBACK_BARS}
+                  />
+                )}
+              </div>
+            ),
           }
-          empty="Waiting for chart data - the Dhan feed may still be connecting."
-        >
-          {spotBars.length > 0 && (
-            <ChartErrorBoundary key={`${selected}-${timeframe}-${daysToShow}`} height={420}>
-              <PriceChart bars={spotBars} vwapSeries={vwapSeries} showVwap={showVwap} height={420} />
-            </ChartErrorBoundary>
-          )}
-        </ChartCard>
 
-        <StrikePicker chain={strikeChain} value={selectedStrike} onChange={setSelectedStrike} live={showsAtmContract} />
-
-        <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
-          <div style={{ flex: '1 1 400px', minWidth: 0 }}>
-            <ChartCard
-              title={`${showsAtmContract ? 'ATM ' : ''}CE ${chartedStrike ?? ''}`}
-              extra={<EmaLegend state={atmCeCrossState} />}
-              empty="Waiting for the CE contract to resolve and tick."
-            >
-              {atmCeBars.length > 0 && (
-                <ChartErrorBoundary key={`${selected}-${timeframe}-${daysToShow}-${chartedStrike}`} height={320}>
-                  <PriceChart bars={atmCeBars} height={320} />
-                </ChartErrorBoundary>
-              )}
-            </ChartCard>
-          </div>
-          <div style={{ flex: '1 1 400px', minWidth: 0 }}>
-            <ChartCard
-              title={`${showsAtmContract ? 'ATM ' : ''}PE ${chartedStrike ?? ''}`}
-              extra={<EmaLegend state={atmPeCrossState} />}
-              empty="Waiting for the PE contract to resolve and tick."
-            >
-              {atmPeBars.length > 0 && (
-                <ChartErrorBoundary key={`${selected}-${timeframe}-${daysToShow}-${chartedStrike}`} height={320}>
-                  <PriceChart bars={atmPeBars} height={320} />
-                </ChartErrorBoundary>
-              )}
-            </ChartCard>
-          </div>
-        </div>
-
-        <ChartCard
-          title="CE / PE Cumulative Delta Volume"
-          extra={
-            <Space size={12}>
-              <Text type="secondary" style={{ fontSize: 12 }}>ATM {cdvSnapshot?.atmStrike ?? '—'} · Expiry {cdvSnapshot?.expiry ?? '—'}</Text>
-              <Select value={cdvUnit} onChange={setCdvUnit} size="small" style={{ width: 140 }} options={VALUE_UNIT_OPTIONS} />
-              <StrikesButton underlying={selected} expiry={expiryParam} />
-            </Space>
-          }
-          empty="Waiting for option-chain data - strikes resolve once the spot price is known."
-        >
-          {cdvCe.length > 0 && (
-            <>
-              <ChartErrorBoundary key={`${selected}-${timeframe}-${daysToShow}`} height={280}>
-                <CeVsPeChart ceSeries={cdvCeScaled} peSeries={cdvPeScaled} prevCeSeries={cdvPrevCeScaled} prevPeSeries={cdvPrevPeScaled} height={280} />
-              </ChartErrorBoundary>
-              <Space size={24} style={{ marginTop: 8 }}>
-                <Text style={{ color: CE_COLOR }}>CE {fmtScaled(cdvSnapshot?.ceCdv, cdvUnit)}</Text>
-                <Text style={{ color: PE_COLOR }}>PE {fmtScaled(cdvSnapshot?.peCdv, cdvUnit)}</Text>
-              </Space>
-            </>
-          )}
-        </ChartCard>
-
-        {selected && <LookbackTable smoothedCe={cdvSmoothedCe} smoothedPe={cdvSmoothedPe} timeframe={timeframe} storageKey={STORED_CDV_LOOKBACK_BARS} />}
-
-        <ChartCard
-          title="CE / PE On-Balance Volume (delta-weighted, all tracked strikes)"
-          extra={
-            <Space size={12}>
-              <Text type="secondary" style={{ fontSize: 12 }}>Skender.Stock.Indicators</Text>
-              <Select value={obvUnit} onChange={setObvUnit} size="small" style={{ width: 140 }} options={VALUE_UNIT_OPTIONS} />
-            </Space>
-          }
-          empty="Waiting for enough CE/PE bars to compute OBV."
-        >
-          {(obvCePoints.length > 0 || obvPePoints.length > 0) && (
-            <ChartErrorBoundary key={`${selected}-${timeframe}-${daysToShow}-${cdvSnapshot?.atmStrike}`} height={280}>
-              <CeVsPeChart ceSeries={obvCeSplit.today} peSeries={obvPeSplit.today} prevCeSeries={obvCeSplit.previous} prevPeSeries={obvPeSplit.previous} height={280} />
-            </ChartErrorBoundary>
-          )}
-        </ChartCard>
-
-        {selected && (
-          <LookbackTable
-            smoothedCe={obvCe}
-            smoothedPe={obvPe}
-            timeframe={timeframe}
-            title="OBV Multi-Lookback % Change"
-            defaultBars={DEFAULT_LOOKBACK_BARS}
-            storageKey={STORED_OBV_LOOKBACK_BARS}
-          />
-        )}
+          return cardOrder.map((id) => (
+            <div key={id} {...dropTargetProps(id)}>
+              {cardsById[id]}
+            </div>
+          ))
+        })()}
 
         <BuildInfoFooter />
       </Space>
