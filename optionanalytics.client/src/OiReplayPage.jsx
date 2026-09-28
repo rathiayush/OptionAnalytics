@@ -2810,7 +2810,7 @@ export default function OiReplayPage() {
               <Text type="secondary" style={{ fontSize: 12 }}>Sections shown</Text>
               <Select
                 mode="multiple" value={visibleSections} onChange={setVisibleSections}
-                style={{ minWidth: 420, maxWidth: 900 }} maxTagCount={SECTION_OPTIONS.length}
+                style={{ minWidth: 'min(420px, 100%)', maxWidth: 900 }} maxTagCount={SECTION_OPTIONS.length}
                 options={SECTION_OPTIONS}
               />
               <Button size="small" onClick={() => setVisibleSections(ALL_SECTION_VALUES)} disabled={visibleSections.length === ALL_SECTION_VALUES.length}>

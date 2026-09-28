@@ -859,6 +859,7 @@ export default function BacktestPage() {
               dataSource={visibleTrades}
               columns={tradeColumns}
               pagination={{ pageSize: 25, showSizeChanger: false }}
+              scroll={{ x: 'max-content' }}
               onRow={(row) => ({ onClick: () => setFocusTime(row.entryTimeUtc ?? row.signalTimeUtc), style: { cursor: 'pointer' } })}
               locale={{ emptyText: (fromDay || toDay)
                 ? 'No trades on the selected dates - widen or clear the date filter.'
@@ -899,6 +900,7 @@ export default function BacktestPage() {
             dataSource={visibleSignals}
             columns={signalColumns}
             pagination={{ pageSize: 25, showSizeChanger: false }}
+            scroll={{ x: 'max-content' }}
             onRow={(row) => ({ onClick: () => setFocusTime(row.timeUtc), style: { cursor: 'pointer' } })}
             locale={{ emptyText: (fromDay || toDay)
               ? 'No signals on the selected dates - widen or clear the date filter.'
