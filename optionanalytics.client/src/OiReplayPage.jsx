@@ -9,9 +9,9 @@ import {
   UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR,
   istTimeFormatter, istTickMarkFormatter, toBar, toChartTime, fromChartTime, istDateKey, fmtDateOnly,
   NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, usePersistedState,
-  syncSignalRGroups, joinAllSignalRGroups,
+  syncSignalRGroups, joinAllSignalRGroups, useCardOrder, CardDragHandle,
 } from './shared.jsx'
-import { PremiumEmaChart, DraggableFloatingPanel } from './oiShared.jsx'
+import { PremiumEmaChart, DraggableFloatingPanel, useFitContentAsDataGrows } from './oiShared.jsx'
 
 const { Text, Title } = Typography
 
@@ -433,6 +433,14 @@ const SECTION_OPTIONS = [
 ]
 const ALL_SECTION_VALUES = SECTION_OPTIONS.map((o) => o.value)
 
+// The page's own top-level draggable blocks, in DEFAULT order - see useCardOrder's own doc comment
+// for why the actual render order comes from that hook, not this literal order, once the user has
+// ever dragged anything. Deliberately a SEPARATE, coarser list than SECTION_OPTIONS above (which
+// toggles visibility) - 'spotAndEntry' bundles three individually-titled Cards (Spot/Entry B/Entry
+// C) that already share one responsive Row (see its own doc comment on the wide-monitor 3-up
+// layout), and 'ladder' is never hidden by SECTION_OPTIONS at all but is still reorderable.
+const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'dayOi', 'oiHeatmap', 'spotAndEntry', 'optionPremium', 'ladder', 'liquidityMap', 'futures']
+
 // How many strikes on EACH side get an actual line drawn on the chart - the ladder already shows
 // every strike; the chart would just be noise at that density, so only the strongest few (by OI)
 // per side earn a line there. Support/resistance is a relative-strength read anyway. Also the
@@ -639,14 +647,12 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = tru
     vwapSeriesRef.current?.setData(showVwap ? vwapSeries : EMPTY_ARRAY)
   }, [vwapSeries, showVwap])
 
-  // Re-fit once when a brand new day/timeframe first loads (dayKey changes) - deliberately NOT on
-  // every tick (bars itself is a fresh array reference every tick as the replay reveals/reaggregates
-  // more of it), which would fight the user's own pan/zoom/scroll during playback - the actual
-  // "should be able to zoom in/out" ask depends on this NOT resetting the view underneath them.
-  useEffect(() => {
-    if (bars.length > 0) chartRef.current?.timeScale().fitContent()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dayKey])
+  // Re-fits to the WHOLE day so far as it grows, not just once when it first loads - see
+  // useFitContentAsDataGrows' own doc comment. Only while the viewer is already at the live edge,
+  // so a deliberate pan/zoom/scroll during playback to inspect an earlier stretch is left alone -
+  // the "should be able to zoom in/out" ask still holds, this just stops the DEFAULT view from
+  // staying frozen at whatever few bars existed the moment the day was first loaded.
+  useFitContentAsDataGrows(chartRef, bars.length, dayKey)
 
   // Redraws the strongest CHART_LEVELS_PER_SIDE (5) resistance (CE OI) / support (PE OI) lines on
   // every tick, since OI itself changes as the replay advances AND which strikes even qualify
@@ -921,6 +927,23 @@ function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfMs }) {
     return max
   }, [perStrikeChange])
 
+  // The whole grid's own totals - every strike, every minute this side has revealed so far, summed
+  // rather than left to only ever be read cell by cell. `removed` is kept as the NEGATIVE sum (so
+  // `delta = added + removed` falls out directly) and only flipped to a positive magnitude for
+  // display, matching how the per-cell tooltip and Day OI Accumulation card both already show
+  // "removed" as a magnitude, not a signed figure that would otherwise read as "still positive".
+  const totals = useMemo(() => {
+    let added = 0
+    let removed = 0
+    for (const byBucket of perStrikeChange.values())
+      for (const v of byBucket.values()) {
+        if (!Number.isFinite(v)) continue
+        if (v > 0) added += v
+        else if (v < 0) removed += v
+      }
+    return { added, removed, delta: added + removed }
+  }, [perStrikeChange])
+
   const plotWidth = buckets.length * HEATMAP_CELL_WIDTH
   const plotHeight = strikes.length * HEATMAP_ROW_HEIGHT
 
@@ -1003,6 +1026,7 @@ function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfMs }) {
   if (maxAbs === 0) return <Empty description={`${label} OI hasn't changed at all since the first data point today - nothing to show yet.`} />
 
   return (
+    <>
     <div style={{ display: 'flex', border: `1px solid ${BORDER_COLOR}`, borderRadius: 4, overflow: 'hidden' }}>
       <div style={{ flexShrink: 0, width: HEATMAP_LABEL_WIDTH, background: '#161a22' }}>
         <div style={{ height: HEATMAP_AXIS_HEIGHT }} />
@@ -1037,6 +1061,18 @@ function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfMs }) {
         </div>
       )}
     </div>
+    <Space size={16} style={{ marginTop: 6 }}>
+      <Text style={{ fontSize: 12 }}>
+        Total {label} OI added: <Text strong style={{ color: OI_ADDED_COLOR }}>{formatOiMillions(totals.added)}</Text>
+      </Text>
+      <Text style={{ fontSize: 12 }}>
+        Total {label} OI removed: <Text strong style={{ color: OI_REMOVED_COLOR }}>{formatOiMillions(Math.abs(totals.removed))}</Text>
+      </Text>
+      <Text style={{ fontSize: 12 }}>
+        Δ: <Text strong style={{ color: totals.delta >= 0 ? OI_ADDED_COLOR : OI_REMOVED_COLOR }}>{formatOiMillions(totals.delta, { signed: true })}</Text>
+      </Text>
+    </Space>
+    </>
   )
 }
 
@@ -1125,14 +1161,13 @@ function EmaChart({ oneMinBars, visibleCount, timeframe, onTimeframeChange, ema1
     vwapSeriesRef.current?.setData(showVwap ? vwapSeries : EMPTY_ARRAY)
   }, [vwapSeries, showVwap])
 
-  // Re-fit on a brand new day AND whenever this chart's OWN timeframe changes (unlike the main
-  // chart, which only re-fits on dayKey) - switching from 5min to 1min here goes from ~75 candles to
+  // Unconditional re-fit on a brand new day AND whenever this chart's OWN timeframe changes (unlike
+  // just growing with more data, below) - switching from 5min to 1min here goes from ~75 candles to
   // ~375 for the same revealed stretch, and leaving the old zoom level in place would show only a
-  // sliver of that much denser series rather than the whole thing.
-  useEffect(() => {
-    if (displayBars.length > 0) chartRef.current?.timeScale().fitContent()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dayKey, timeframe])
+  // sliver of that much denser series rather than the whole thing. Also keeps re-fitting as MORE
+  // bars accumulate live at the SAME timeframe, while still at the live edge - see
+  // useFitContentAsDataGrows' own doc comment.
+  useFitContentAsDataGrows(chartRef, displayBars.length, `${dayKey}-${timeframe}`)
 
   return (
     <div style={{ width: '100%' }}>
@@ -1257,10 +1292,7 @@ function FuturesChart({ bars, oiLine, markers, dayKey, height = 320 }) {
     markersRef.current?.setMarkers(markers ?? [])
   }, [markers])
 
-  useEffect(() => {
-    if (bars.length > 0) chartRef.current?.timeScale().fitContent()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dayKey])
+  useFitContentAsDataGrows(chartRef, bars.length, dayKey)
 
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }
@@ -1767,6 +1799,15 @@ export default function OiReplayPage() {
   const [pePremiumEma2, setPePremiumEma2] = useState(15)
 
   const [visibleSections, setVisibleSections] = useState(ALL_SECTION_VALUES)
+  // Drag-to-reorder the page's own top-level blocks - see OI_REPLAY_CARD_IDS' own doc comment.
+  const { order: cardOrder, dragHandleProps, dropTargetProps } = useCardOrder('optionanalytics.oiReplayCardOrder', OI_REPLAY_CARD_IDS)
+  // dropTargetProps already returns its own conditional highlight `style` (see useCardOrder's own
+  // doc comment) - merged here with the `order` CSS property that actually moves the block, rather
+  // than each of the 9 call sites below re-deriving that merge by hand.
+  const orderedDropProps = (id) => {
+    const { style, ...handlers } = dropTargetProps(id)
+    return { style: { order: cardOrder.indexOf(id), ...style }, ...handlers }
+  }
 
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
@@ -2145,6 +2186,16 @@ export default function OiReplayPage() {
   // day still uses the scrubbed replay position exactly as before - only "today, live" changes.
   const asOfMs = isToday ? Date.now() : (currentBar ? fromChartTime(currentBar.time) * 1000 : null)
 
+  // Purely for the ladder's OWN "stale" flag below (ceStale/peStale) - NOT used for asOfMs itself,
+  // which must keep tracking real wall-clock time for every other read on this page (paper-trade
+  // exit pricing, the drilldown popup, etc). Once the market has closed for the day, ticks genuinely
+  // stop while Date.now() keeps climbing - comparing OI_STALE_MS against the ever-advancing real
+  // time would then mark EVERY strike stale forever a few minutes after 15:30 IST, which reads
+  // exactly like a broken feed but only ever means "the trading day is over, nothing more is
+  // coming". Capped at today's own market close instead, so a reading from the day's last few
+  // trades still reads as fresh relative to that close, not "5+ hours stale" relative to right now.
+  const staleReferenceMs = isToday ? Math.min(Date.now(), new Date(`${istDateKey(new Date())}T15:30:00+05:30`).getTime()) : asOfMs
+
   // The strike drill-down popup's own OI series - gated to asOfMs like every other derived read on
   // this page (the ladder, premium charts, Market Read), NOT the whole day's history regardless of
   // replay position. Used to deliberately show everything ("a look-back analysis popup, not part of
@@ -2271,12 +2322,12 @@ export default function OiReplayPage() {
         // OI_STALE_MS behind the replay's own current time - the stored data has stopped arriving,
         // not that the market itself has gone quiet (see OI_STALE_MS's own doc comment).
         ceAsOfMs, peAsOfMs,
-        ceStale: ceAsOfMs != null && asOfMs - ceAsOfMs > OI_STALE_MS,
-        peStale: peAsOfMs != null && asOfMs - peAsOfMs > OI_STALE_MS,
+        ceStale: ceAsOfMs != null && staleReferenceMs - ceAsOfMs > OI_STALE_MS,
+        peStale: peAsOfMs != null && staleReferenceMs - peAsOfMs > OI_STALE_MS,
       }
     })
     return rows.sort((a, b) => b.strike - a.strike)
-  }, [ceByStrike, peByStrike, asOfMs, dayStartMs])
+  }, [ceByStrike, peByStrike, asOfMs, staleReferenceMs, dayStartMs])
 
   // Same strike set/order as the ladder (descending, highest strike first) - derived straight from
   // ceByStrike/peByStrike rather than ladderRows itself: ladderRows' own useMemo also depends on
@@ -2828,7 +2879,7 @@ export default function OiReplayPage() {
         {result && (
           <>
             {visibleSections.includes('topStats') && (
-              <Card size="small">
+              <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('topStats')} />Snapshot</Space>} {...orderedDropProps('topStats')}>
                 <Row gutter={24}>
                   <Col><Statistic title="Spot" value={currentBar?.close ?? '—'} precision={2} /></Col>
                   <Col><Statistic title="ATM" value={atmStrike ?? '—'} /></Col>
@@ -2842,7 +2893,7 @@ export default function OiReplayPage() {
             )}
 
             {visibleSections.includes('marketRead') && marketRead && (
-              <Card size="small" title="Market Read">
+              <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('marketRead')} />Market Read</Space>} {...orderedDropProps('marketRead')}>
                 <Space direction="vertical" size={12} style={{ width: '100%' }}>
                   <Alert
                     type={marketRead.safetyOk ? 'success' : 'warning'}
@@ -2902,7 +2953,7 @@ export default function OiReplayPage() {
             )}
 
             {visibleSections.includes('dayOi') && dayOiSummary && (
-              <Card size="small" title="Day OI Accumulation (since today's open)">
+              <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('dayOi')} />Day OI Accumulation (since today's open)</Space>} {...orderedDropProps('dayOi')}>
                 <Space direction="vertical" size={12} style={{ width: '100%' }}>
                   <Alert
                     type={dayOiSummary.dayBias === 'Bullish' ? 'success' : dayOiSummary.dayBias === 'Bearish' ? 'error' : 'info'}
@@ -3008,7 +3059,7 @@ export default function OiReplayPage() {
             )}
 
             {visibleSections.includes('oiHeatmap') && (
-              <Card size="small" title="OI change heatmap (all strikes, per minute)">
+              <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('oiHeatmap')} />OI change heatmap (all strikes, per minute)</Space>} {...orderedDropProps('oiHeatmap')}>
                 <Space direction="vertical" size={12} style={{ width: '100%' }}>
                   <Text type="secondary" style={{ fontSize: 12 }}>
                     Every tracked strike's own OI change, minute by minute - color intensity is how much changed (scaled to the
@@ -3033,9 +3084,14 @@ export default function OiReplayPage() {
               </Card>
             )}
 
-            <Row gutter={[16, 16]}>
-              <Col xs={24} md={visibleSections.includes('entryCharts') ? 8 : 24}>
-                <Card size="small" title="Spot (replaying)">
+            <div {...orderedDropProps('spotAndEntry')}>
+              <Space size={4} style={{ marginBottom: 4 }}>
+                <CardDragHandle {...dragHandleProps('spotAndEntry')} />
+                <Text type="secondary" style={{ fontSize: 12 }}>Spot &amp; entry charts</Text>
+              </Space>
+              <Row gutter={[16, 16]}>
+                <Col xs={24} md={visibleSections.includes('entryCharts') ? 8 : 24}>
+                  <Card size="small" title="Spot (replaying)">
                   {/* Playback controls, literally inside the same card as the chart, right above
                       the canvas itself - the user's own "this bar should be near to chart just on
                       top of chart, it is too far right now" (a separate card above it, even
@@ -3238,12 +3294,14 @@ export default function OiReplayPage() {
                   </Col>
                 </>
               )}
-            </Row>
+              </Row>
+            </div>
 
             {visibleSections.includes('optionPremium') && (
-              <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
+              <Row gutter={[16, 16]} style={{ marginTop: 16 }} {...orderedDropProps('optionPremium')}>
                 <Col span={24} style={{ marginBottom: 8 }}>
                   <Space size={12} wrap>
+                    <CardDragHandle {...dragHandleProps('optionPremium')} />
                     <Text type="secondary" style={{ fontSize: 12 }}>Shift ATM (both)</Text>
                     <Select
                       value={cePremiumOffset === pePremiumOffset ? cePremiumOffset : null}
@@ -3306,18 +3364,22 @@ export default function OiReplayPage() {
               </Row>
             )}
 
-            <Row gutter={16} style={{ marginTop: 16 }}>
+            <Row gutter={16} style={{ marginTop: 16 }} {...orderedDropProps('ladder')}>
               <Col span={24}>
-                <Card size="small" title="OI / IV ladder (nearest expiry, as of the current candle)" bodyStyle={{ maxHeight: 460, overflowY: 'auto' }}>
+                <Card
+                  size="small"
+                  title={<Space size={4}><CardDragHandle {...dragHandleProps('ladder')} />OI / IV ladder (nearest expiry, as of the current candle)</Space>}
+                  bodyStyle={{ maxHeight: 460, overflowY: 'auto' }}
+                >
                   <OiLadder rows={ladderRows} atmStrike={atmStrike} />
                 </Card>
               </Col>
             </Row>
 
             {visibleSections.includes('liquidityMap') && (
-              <Row gutter={16} style={{ marginTop: 16 }}>
+              <Row gutter={16} style={{ marginTop: 16 }} {...orderedDropProps('liquidityMap')}>
                 <Col span={24}>
-                  <Card size="small" title="Liquidity map (imbalance & likely levels, whole band)">
+                  <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('liquidityMap')} />Liquidity map (imbalance &amp; likely levels, whole band)</Space>}>
                     <LiquidityMapTable rows={ladderRows} atmStrike={atmStrike} currentPrice={currentBar?.close} />
                   </Card>
                 </Col>
@@ -3325,11 +3387,11 @@ export default function OiReplayPage() {
             )}
 
             {visibleSections.includes('futures') && (
-              <Row gutter={16} style={{ marginTop: 16 }}>
+              <Row gutter={16} style={{ marginTop: 16 }} {...orderedDropProps('futures')}>
                 <Col span={24}>
                   <Card
                     size="small"
-                    title="Futures (nearest listed contract - always live from Dhan, never stored)"
+                    title={<Space size={4}><CardDragHandle {...dragHandleProps('futures')} />Futures (nearest listed contract - always live from Dhan, never stored)</Space>}
                     extra={
                       <Space size={8}>
                         {futuresRegimeSinceOpen && futuresRegimeSinceOpen.regime !== 'Neutral' && (
