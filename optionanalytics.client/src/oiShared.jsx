@@ -1092,12 +1092,28 @@ export function PaperTradePanel({
   )
 }
 
-// A genuinely draggable floating panel, rendered into a portal on document.body so it sits above
-// every other element regardless of where its trigger lives in the tree. Position is tracked as a
-// plain {x,y} in the PARENT's own state so it survives closing and reopening the panel.
-export function DraggableFloatingPanel({ title, pos, onPosChange, onClose, children }) {
+// Every DraggableFloatingPanel shares this one floor - small enough to still show a title/close
+// button and at least a little content, never so small a caller's own inner layout (e.g. Paper
+// Trade's own Buy/Sell row) breaks down.
+const FLOATING_PANEL_MIN_WIDTH = 280
+const FLOATING_PANEL_MIN_HEIGHT = 160
+
+// A genuinely draggable AND resizable floating panel, rendered into a portal on document.body so it
+// sits above every other element regardless of where its trigger lives in the tree. Position and
+// size are both tracked as plain objects in the PARENT's own state ({x,y} and {width,height}) so
+// both survive closing and reopening the panel - the same "caller owns the state, this component
+// only ever reports a change" shape already established for `pos` before size was added, so a
+// caller that doesn't care about resizing yet can simply not pass `size`/`onSizeChange` and get the
+// same fixed-440px behavior as before.
+export function DraggableFloatingPanel({ title, pos, onPosChange, size, onSizeChange, onClose, children }) {
   const dragRef = useRef(null)
+  const resizeRef = useRef(null)
   const panelRef = useRef(null)
+  // Undefined size (a caller that hasn't opted in) keeps the ORIGINAL fixed-and-viewport-clamped
+  // width with no explicit height (grows to fit content) - resizing is opt-in, not a forced change
+  // in behavior for an existing caller.
+  const width = size?.width ?? null
+  const height = size?.height ?? null
 
   // A fixed 440px panel is wider than most phone screens, and the caller's own initial `pos` is
   // computed once against whatever window.innerWidth happened to be at that moment - stale the
@@ -1173,11 +1189,78 @@ export function DraggableFloatingPanel({ title, pos, onPosChange, onClose, child
     window.addEventListener('touchend', onTouchEnd)
   }
 
+  // Resize is opt-in (onSizeChange provided) - a caller still on the old fixed-width API simply
+  // never renders the handle at all, rather than resizing into a `size` no one is listening for.
+  const beginResize = (clientX, clientY) => {
+    if (!panelRef.current) return
+    const rect = panelRef.current.getBoundingClientRect()
+    resizeRef.current = { startX: clientX, startY: clientY, origWidth: rect.width, origHeight: rect.height }
+  }
+  const resizeTo = (clientX, clientY) => {
+    if (!resizeRef.current || !panelRef.current) return
+    const dx = clientX - resizeRef.current.startX
+    const dy = clientY - resizeRef.current.startY
+    // Capped against the panel's own CURRENT position (pos.x/pos.y), not the full viewport width -
+    // growing further than the remaining room to the right/bottom edge would just push the panel's
+    // own far edge off-screen instead of actually growing it any further, the same clipping mount/
+    // resize clamp above already prevents for POSITION.
+    const maxWidth = Math.max(FLOATING_PANEL_MIN_WIDTH, window.innerWidth - pos.x - 8)
+    const maxHeight = Math.max(FLOATING_PANEL_MIN_HEIGHT, window.innerHeight - pos.y - 8)
+    onSizeChange({
+      width: Math.min(Math.max(FLOATING_PANEL_MIN_WIDTH, resizeRef.current.origWidth + dx), maxWidth),
+      height: Math.min(Math.max(FLOATING_PANEL_MIN_HEIGHT, resizeRef.current.origHeight + dy), maxHeight),
+    })
+  }
+  const endResize = () => { resizeRef.current = null }
+
+  const onResizeHandleMouseDown = (e) => {
+    e.stopPropagation() // Never also start a HEADER drag - the two gestures share no pixels, but bubbling would otherwise reach the same window-level listeners twice.
+    beginResize(e.clientX, e.clientY)
+    // A fast/sloppy mouse move during the drag otherwise selects whatever text (the panel's own
+    // instructions, a page label underneath) the cursor happens to pass over mid-drag - the header
+    // drag already prevents this on itself via userSelect: 'none', but that only covers the header;
+    // a resize drag's cursor travels over the panel's own BODY content instead.
+    const prevUserSelect = document.body.style.userSelect
+    document.body.style.userSelect = 'none'
+    const onMouseMove = (moveEvent) => resizeTo(moveEvent.clientX, moveEvent.clientY)
+    const onMouseUp = () => {
+      endResize()
+      document.body.style.userSelect = prevUserSelect
+      window.removeEventListener('mousemove', onMouseMove)
+      window.removeEventListener('mouseup', onMouseUp)
+    }
+    window.addEventListener('mousemove', onMouseMove)
+    window.addEventListener('mouseup', onMouseUp)
+  }
+  const onResizeHandleTouchStart = (e) => {
+    e.stopPropagation()
+    const touch = e.touches[0]
+    if (!touch) return
+    beginResize(touch.clientX, touch.clientY)
+    const onTouchMove = (moveEvent) => {
+      if (!resizeRef.current) return
+      moveEvent.preventDefault()
+      const moveTouch = moveEvent.touches[0]
+      if (moveTouch) resizeTo(moveTouch.clientX, moveTouch.clientY)
+    }
+    const onTouchEnd = () => {
+      endResize()
+      window.removeEventListener('touchmove', onTouchMove)
+      window.removeEventListener('touchend', onTouchEnd)
+    }
+    window.addEventListener('touchmove', onTouchMove, { passive: false })
+    window.addEventListener('touchend', onTouchEnd)
+  }
+
   return createPortal(
     <div
       ref={panelRef}
       style={{
-        position: 'fixed', left: pos.x, top: pos.y, zIndex: 1000, width: 'min(440px, calc(100vw - 24px))',
+        position: 'fixed', left: pos.x, top: pos.y, zIndex: 1000,
+        width: width != null ? `${width}px` : 'min(440px, calc(100vw - 24px))',
+        height: height != null ? `${height}px` : undefined,
+        maxWidth: 'calc(100vw - 24px)', maxHeight: 'calc(100vh - 24px)',
+        display: 'flex', flexDirection: 'column',
         background: '#1f1f1f', border: `1px solid ${BORDER_COLOR}`, borderRadius: 8,
         boxShadow: '0 8px 28px rgba(0, 0, 0, 0.55)',
       }}
@@ -1186,15 +1269,29 @@ export function DraggableFloatingPanel({ title, pos, onPosChange, onClose, child
         onMouseDown={onHeaderMouseDown}
         onTouchStart={onHeaderTouchStart}
         style={{
-          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center', flex: '0 0 auto',
           padding: '8px 12px', cursor: 'move', touchAction: 'none', userSelect: 'none',
           borderBottom: `1px solid ${BORDER_COLOR}`,
         }}
       >
-        <Text strong style={{ fontSize: 13 }}>{title}</Text>
+        <Text strong style={{ fontSize: 'clamp(12px, 3.2vw, 13px)' }}>{title}</Text>
         <Button type="text" size="small" onClick={onClose} style={{ padding: '0 4px' }}>✕</Button>
       </div>
-      <div style={{ padding: 12 }}>{children}</div>
+      <div style={{ padding: 12, overflow: 'auto', flex: '1 1 auto', minHeight: 0 }}>{children}</div>
+      {onSizeChange && (
+        <div
+          onMouseDown={onResizeHandleMouseDown}
+          onTouchStart={onResizeHandleTouchStart}
+          title="Drag to resize"
+          style={{
+            position: 'absolute', right: 0, bottom: 0, width: 22, height: 22,
+            cursor: 'nwse-resize', touchAction: 'none',
+            // A plain corner-notch look via a diagonal gradient rather than an icon font/SVG asset -
+            // three faint parallel lines, the universal "drag to resize" affordance.
+            background: `linear-gradient(135deg, transparent 0 40%, ${BORDER_COLOR} 40% 46%, transparent 46% 60%, ${BORDER_COLOR} 60% 66%, transparent 66% 80%, ${BORDER_COLOR} 80% 86%, transparent 86%)`,
+          }}
+        />
+      )}
     </div>,
     document.body,
   )
