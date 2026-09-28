@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useMemo, useRef, useState } from 
 import { Button, Drawer, Menu, Select, Space, Tag, Typography } from 'antd'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { createChart, createSeriesMarkers, HistogramSeries, LineSeries, CrosshairMode, LineStyle, TickMarkType } from 'lightweight-charts'
+import * as signalR from '@microsoft/signalr'
 
 // Provided once, at the app root (App.jsx), after GET /api/auth/me resolves - {email, role} or
 // null. NavBar (rendered independently from four different pages) reads this via useAuth() rather
@@ -28,6 +29,35 @@ export const RECONNECT_RETRY_POLICY = {
     const delays = [0, 2000, 5000, 10000, 15000, 30000]
     return delays[Math.min(retryContext.previousRetryCount, delays.length - 1)]
   },
+}
+
+// SpotHub used to broadcast every event to Clients.All - a client viewing just NIFTY Weekly still
+// received (and had to filter out, client-side) every tick for every OTHER underlying/expiry/
+// futures contract too, on top of CDV/confluence events for underlyings nobody had open. SpotHub.cs
+// now scopes each broadcast to a SignalR Group instead (see its own doc comment for the two naming
+// conventions - "u:{underlying}" and "c:{underlying}:{expiryFlag}"), so a client only ever receives
+// what it explicitly joins. These two helpers are what every hub hook in this app (App.jsx's
+// useHub, oiShared.jsx's useOiLiveHub, OiReplayPage.jsx's useOiReplayLiveFeed) calls to stay in
+// sync with its own caller's current selection, so the join/leave/rejoin logic only has to be
+// gotten right once rather than three times with three chances to drift apart.
+//
+// Silently no-ops if the connection isn't currently Connected - each hook's own onreconnected
+// handler is what re-establishes group membership from scratch afterward (a dropped connection
+// loses ALL of its own group membership server-side the instant it drops; there is nothing to
+// "diff" against a stale prior list once that happens, only a fresh join of whatever groups are
+// current right now).
+export function syncSignalRGroups(connection, oldGroups, newGroups) {
+  if (!connection || connection.state !== signalR.HubConnectionState.Connected) return
+  for (const g of oldGroups) if (!newGroups.includes(g)) connection.invoke('LeaveGroup', g).catch(() => {})
+  for (const g of newGroups) if (!oldGroups.includes(g)) connection.invoke('JoinGroup', g).catch((err) => console.error('Failed to join SignalR group', g, err))
+}
+
+// Every group in `groups`, unconditionally - used right after a fresh connect/reconnect, when the
+// server-side connection is known to hold NO group membership at all yet, so there is nothing to
+// diff against (unlike syncSignalRGroups, for a later selection change on an already-connected
+// socket).
+export function joinAllSignalRGroups(connection, groups) {
+  for (const g of groups) connection.invoke('JoinGroup', g).catch((err) => console.error('Failed to join SignalR group', g, err))
 }
 
 // Constants/components shared between App.jsx's DashboardPage and BacktestPage.jsx - kept in

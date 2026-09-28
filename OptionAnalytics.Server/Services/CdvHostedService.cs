@@ -1203,7 +1203,7 @@ public sealed class CdvHostedService : BackgroundService
     {
         try
         {
-            await _hub.Clients.All.SendAsync("cdvUpdate", state.ToSnapshot());
+            await _hub.Clients.Group($"u:{state.Underlying}").SendAsync("cdvUpdate", state.ToSnapshot());
         }
         catch (Exception ex)
         {
@@ -1239,7 +1239,7 @@ public sealed class CdvHostedService : BackgroundService
     {
         try
         {
-            await _hub.Clients.All.SendAsync("cdvBarClosed", push);
+            await _hub.Clients.Group($"u:{push.Underlying}").SendAsync("cdvBarClosed", push);
         }
         catch (Exception ex)
         {

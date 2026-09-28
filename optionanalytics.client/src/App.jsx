@@ -13,7 +13,7 @@ import LiveStrikeDataPage from './LiveStrikeDataPage.jsx'
 import TriggersPage from './TriggersPage.jsx'
 import ContractsPage from './ContractsPage.jsx'
 import LoginPage from './LoginPage.jsx'
-import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, RECONNECT_RETRY_POLICY, computeEma, fmtPrice, fmtIstTime, fmtIstDateTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry, AuthContext, useAuth } from './shared.jsx'
+import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, RECONNECT_RETRY_POLICY, computeEma, fmtPrice, fmtIstTime, fmtIstDateTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry, AuthContext, useAuth, syncSignalRGroups, joinAllSignalRGroups } from './shared.jsx'
 import './App.css'
 
 const { Title, Text } = Typography
@@ -367,7 +367,7 @@ function fmtNum(v) {
 // to a fresh candle showing the opposite is a correctness bug, not a cosmetic one - onReconnected
 // is the hook a caller uses to fully re-fetch from REST (the source of truth) rather than trust
 // whatever incremental state survived the gap.
-function useHub(onSpotUpdate, onCdvUpdate, onConfluenceAlert, onReconnected, onCdvBarClosed) {
+function useHub(onSpotUpdate, onCdvUpdate, onConfluenceAlert, onReconnected, onCdvBarClosed, underlying) {
   const spotHandlerRef = useRef(onSpotUpdate)
   const cdvHandlerRef = useRef(onCdvUpdate)
   const alertHandlerRef = useRef(onConfluenceAlert)
@@ -379,11 +379,19 @@ function useHub(onSpotUpdate, onCdvUpdate, onConfluenceAlert, onReconnected, onC
   reconnectedHandlerRef.current = onReconnected
   cdvBarClosedHandlerRef.current = onCdvBarClosed
 
+  const connectionRef = useRef(null)
+  // The single underlying-scoped group this page ever needs - spotUpdate/cdvUpdate/cdvBarClosed/
+  // confluenceAlert are all broadcast per-underlying (SpotHub's own "u:{underlying}" convention -
+  // see its doc comment), never per-expiry, so unlike oiShared.jsx's useOiLiveHub there is only ever
+  // one group in play here.
+  const groupsRef = useRef([])
+
   useEffect(() => {
     const connection = new signalR.HubConnectionBuilder()
       .withUrl('/hubs/spot')
       .withAutomaticReconnect(RECONNECT_RETRY_POLICY)
       .build()
+    connectionRef.current = connection
 
     connection.on('spotUpdate', (snapshot) => spotHandlerRef.current(snapshot))
     connection.on('cdvUpdate', (snapshot) => cdvHandlerRef.current(snapshot))
@@ -394,19 +402,33 @@ function useHub(onSpotUpdate, onCdvUpdate, onConfluenceAlert, onReconnected, onC
     // Fires after automatic reconnect actually succeeds (not on the initial connect, which the
     // page's own mount-time fetches already cover) - see this function's own doc comment for why
     // a resync here, not just letting new events trickle in, is what a correctness-sensitive page
-    // needs.
-    connection.onreconnected(() => reconnectedHandlerRef.current?.())
-    connection.start().catch((err) => {
-      // React StrictMode mounts this effect, runs its cleanup, then mounts it again - the first
-      // connection's start() gets aborted by that cleanup's stop() before negotiation finishes,
-      // which is expected and harmless (the second mount's connection succeeds normally), not a
-      // real connection failure worth alarming about.
-      if (err?.name === 'AbortError') return
-      console.error('SignalR connection failed:', err)
+    // needs. A reconnect also gets a brand-new server-side connection with no group membership at
+    // all, so the CURRENT selection (groupsRef.current) is rejoined here too, not just resynced.
+    connection.onreconnected(() => {
+      joinAllSignalRGroups(connection, groupsRef.current)
+      reconnectedHandlerRef.current?.()
     })
+    connection.start()
+      .then(() => joinAllSignalRGroups(connection, groupsRef.current))
+      .catch((err) => {
+        // React StrictMode mounts this effect, runs its cleanup, then mounts it again - the first
+        // connection's start() gets aborted by that cleanup's stop() before negotiation finishes,
+        // which is expected and harmless (the second mount's connection succeeds normally), not a
+        // real connection failure worth alarming about.
+        if (err?.name === 'AbortError') return
+        console.error('SignalR connection failed:', err)
+      })
 
-    return () => { connection.stop() }
+    return () => { connectionRef.current = null; connection.stop() }
   }, [])
+
+  // Keeps server-side group membership in sync with the currently selected underlying, without
+  // touching the connection itself - see oiShared.jsx's useOiLiveHub for the identical shape/reasoning.
+  useEffect(() => {
+    const newGroups = underlying ? [`u:${underlying}`] : []
+    syncSignalRGroups(connectionRef.current, groupsRef.current, newGroups)
+    groupsRef.current = newGroups
+  }, [underlying])
 }
 
 // Candlestick + EMA9/EMA21 overlay + crossover markers - the one chart shape reused for the spot
@@ -1283,6 +1305,7 @@ function DashboardPage() {
       if (point.obvCe != null) setObvCe((prev) => appendOrReplaceLast(prev, { time, obv: point.obvCe }))
       if (point.obvPe != null) setObvPe((prev) => appendOrReplaceLast(prev, { time, obv: point.obvPe }))
     },
+    selected,
   )
 
   // A PINNED strike (selectedStrike !== ATM_STRIKE) has no live current bar of its own coming down

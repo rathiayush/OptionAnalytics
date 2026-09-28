@@ -6,6 +6,7 @@ import * as signalR from '@microsoft/signalr'
 import {
   UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR, RECONNECT_RETRY_POLICY,
   istTimeFormatter, istTickMarkFormatter, toChartTime, TIMEFRAME_OPTIONS,
+  syncSignalRGroups, joinAllSignalRGroups,
 } from './shared.jsx'
 
 const { Text } = Typography
@@ -27,15 +28,17 @@ const { Text } = Typography
 const EMPTY_ARRAY = []
 
 // Modeled directly on App.jsx's own useHub: ONE connection, opened on mount and never torn down or
-// rebuilt - no `enabled` gate, no dependency on underlying/expiryFlag (the SAME hub broadcasts ticks
-// for every underlying; each caller just filters client-side in its own handlers, same as every
-// consumer of oiReplayTick/futuresTick already does). This is the exact fix for the "reconnect churn"
-// OiReplayPage's own useOiReplayLiveFeed was exposed to (its effect depends on `[enabled]`, which can
-// flip during a fetch and tear the socket down at the worst moment) - this hook has no such flag.
-// Originally local to OiLiveDashboardPage.jsx, moved here so a second live page (LiveStrikeDataPage)
-// can share the identical connection logic rather than a third bespoke copy - OiReplayPage.jsx does
-// not use this and is unaffected either way.
-export function useOiLiveHub(onSpotUpdate, onOiReplayTick, onReconnected, onCdvUpdate, onCdvBarClosed, onOiRestSnapshot) {
+// rebuilt - no `enabled` gate, no dependency on underlying/expiryFlag (a fresh connection would mean
+// a fresh reconnect-and-rejoin cycle on every selection change, exactly the "reconnect churn"
+// OiReplayPage's own useOiReplayLiveFeed used to be exposed to before its own [enabled] dependency
+// was removed - see its doc comment). Instead the connection stays open across a selection change
+// and just SWITCHES GROUPS (see syncSignalRGroups) - underlying/expiryFlag are passed in purely to
+// drive that, never to gate the connection's own lifecycle. Originally local to
+// OiLiveDashboardPage.jsx, moved here so a second live page (LiveStrikeDataPage) can share the
+// identical connection logic rather than a third bespoke copy - OiReplayPage.jsx keeps its own
+// separate hook (it also needs a futures-only underlying-group case oiRestSnapshot never does) but
+// follows the exact same group-membership shape.
+export function useOiLiveHub(onSpotUpdate, onOiReplayTick, onReconnected, onCdvUpdate, onCdvBarClosed, onOiRestSnapshot, underlying, expiryFlag) {
   const spotRef = useRef(onSpotUpdate)
   const tickRef = useRef(onOiReplayTick)
   const reconnectedRef = useRef(onReconnected)
@@ -50,12 +53,19 @@ export function useOiLiveHub(onSpotUpdate, onOiReplayTick, onReconnected, onCdvU
   restSnapshotRef.current = onOiRestSnapshot
 
   const [connectionState, setConnectionState] = useState('connecting')
+  const connectionRef = useRef(null)
+  // Groups the SERVER currently thinks this connection is in - empty until the first successful
+  // connect/reconnect actually joins something. Read by the groups-sync effect below to compute a
+  // diff against a later selection change, and by the connection effect's own reconnect handler to
+  // know what to rejoin from scratch.
+  const groupsRef = useRef([])
 
   useEffect(() => {
     const connection = new signalR.HubConnectionBuilder()
       .withUrl('/hubs/spot')
       .withAutomaticReconnect(RECONNECT_RETRY_POLICY)
       .build()
+    connectionRef.current = connection
 
     // Optional chaining on every one of these - unlike OiLiveDashboardPage (the original, only
     // caller until now), a caller like LiveStrikeDataPage genuinely has no use for some of these
@@ -74,10 +84,20 @@ export function useOiLiveHub(onSpotUpdate, onOiReplayTick, onReconnected, onCdvU
     // Only OiLiveDashboardPage currently passes a handler for this.
     connection.on('oiRestSnapshot', (snapshot) => restSnapshotRef.current?.(snapshot))
     connection.onreconnecting(() => setConnectionState('reconnecting'))
-    connection.onreconnected(() => { setConnectionState('connected'); reconnectedRef.current?.() })
+    // A reconnect gets a brand-new server-side connection with NO group membership at all - rejoin
+    // whatever the current selection is (groupsRef.current), not what it was when this specific
+    // connection object was first created.
+    connection.onreconnected(() => {
+      setConnectionState('connected')
+      joinAllSignalRGroups(connection, groupsRef.current)
+      reconnectedRef.current?.()
+    })
     connection.onclose(() => setConnectionState('disconnected'))
     connection.start()
-      .then(() => setConnectionState('connected'))
+      .then(() => {
+        setConnectionState('connected')
+        joinAllSignalRGroups(connection, groupsRef.current)
+      })
       .catch((err) => {
         // React StrictMode double-mounts every effect once in development - the first connection's
         // start() gets aborted by this effect's own cleanup before negotiation finishes on the
@@ -87,8 +107,23 @@ export function useOiLiveHub(onSpotUpdate, onOiReplayTick, onReconnected, onCdvU
         setConnectionState('disconnected')
       })
 
-    return () => { connection.stop() }
+    return () => { connectionRef.current = null; connection.stop() }
   }, [])
+
+  // Keeps server-side group membership in sync with the caller's own CURRENT selection, without
+  // touching the connection itself - runs on every underlying/expiryFlag change (including the
+  // first render, where groupsRef.current is still empty so every group here counts as "new" and
+  // gets joined once the connect effect above actually reaches Connected; syncSignalRGroups itself
+  // is a no-op before that, and groupsRef.current is still updated below so the connect effect's own
+  // joinAllSignalRGroups call picks it up the moment it does connect).
+  useEffect(() => {
+    const newGroups = [
+      underlying ? `u:${underlying}` : null,
+      underlying && expiryFlag ? `c:${underlying}:${expiryFlag}` : null,
+    ].filter(Boolean)
+    syncSignalRGroups(connectionRef.current, groupsRef.current, newGroups)
+    groupsRef.current = newGroups
+  }, [underlying, expiryFlag])
 
   return connectionState
 }
