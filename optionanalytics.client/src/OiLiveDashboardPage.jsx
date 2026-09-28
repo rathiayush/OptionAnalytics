@@ -24,7 +24,6 @@ const { Text, Title } = Typography
 // time cursor anywhere. OI Replay itself is UNTOUCHED by this file - every helper/component used
 // here comes from oiShared.jsx (a copy, not an edit of OiReplayPage.jsx), so nothing about this page
 // can regress historical replay.
-const LIVE_FEED_COMBOS = new Set(['NIFTY:WEEK', 'NIFTY:MONTH', 'BANKNIFTY:MONTH', 'SENSEX:WEEK', 'SENSEX:MONTH'])
 const STEP_BY_UNDERLYING = { NIFTY: 50, BANKNIFTY: 100, SENSEX: 100 }
 
 // "Since open" OI deltas on this page diff TWO INDEPENDENT Dhan pipelines that have never been
@@ -264,16 +263,22 @@ const OI_LIVE_CARD_IDS = ['spot', 'entryB', 'entryC', 'cePremium', 'pePremium', 
 
 export default function OiLiveDashboardPage() {
   const [underlying, setUnderlying] = usePersistedState(STORED_UNDERLYING, 'NIFTY')
-  const [expiryFlag, setExpiryFlag] = useState('WEEK')
+  // "N1".."N6" - the Nth nearest currently-listed expiry for `underlying` overall (not "weekly" or
+  // "monthly" specifically - see OiReplayLiveFeedService.PositionalExpiriesPerUnderlying's own doc
+  // comment), picked directly off the real listed-date list below rather than an ambiguous Weekly/
+  // Monthly toggle. The user's own explicit "list active expiry and select from there" /
+  // "it's going to next expiry, add an expiry filter" ask - being able to see and pick the EXACT
+  // contract removes any need to trust an automatic "nearest" resolution at all.
+  const [expiryFlag, setExpiryFlag] = useState('N1')
   const [timeframe, setTimeframe] = usePersistedState(STORED_TIMEFRAME, 15)
-  // The REAL calendar date "Weekly"/"Monthly" currently resolve to server-side - shown right in the
-  // picker (e.g. "Weekly (29 Sep 2026)") instead of leaving that resolution invisible, so it's
-  // obvious which actual contract is being tracked and the two can be told apart even when they
-  // happen to be the SAME date (the final week before a monthly expiry - see
-  // OiReplayLiveFeedService.ResolveNearestExpiryCore's own doc comment for the bug that exact
-  // overlap used to cause: a strike's own tracked premium silently coming from the wrong,
-  // further-out contract with no visible way to notice from this page alone).
-  const [resolvedExpiries, setResolvedExpiries] = useState({ week: null, month: null })
+  // The full flat list of currently-listed expiry dates backing the picker below (index i here is
+  // always flag "N{i+1}" - see OiReplayController.GetExpiries' own doc comment), plus which of them
+  // (if any) is the REAL calendar date "Weekly"/"Monthly" resolve to - shown as a "(Weekly)"/
+  // "(Monthly)" tag on the matching option so those two familiar labels are still visible, without
+  // them being the only two choices any more. See OiReplayLiveFeedService.ResolveNearestExpiryCore's
+  // own doc comment for the historical bug (a strike's own tracked premium silently coming from the
+  // wrong, further-out contract) that made trusting only an automatic label risky in the first place.
+  const [resolvedExpiries, setResolvedExpiries] = useState({ week: null, month: null, expiries: [] })
   // Drag-to-reorder the cards below (Spot/Entry B/Entry C/CE premium/PE premium/CDV & OBV/ladder) -
   // see useCardOrder's own doc comment. One shared arrangement across every underlying/expiry this
   // page is pointed at, not per-combo - a layout preference, not a per-symbol setting.
@@ -382,7 +387,6 @@ export default function OiLiveDashboardPage() {
   // shape as paperPanelPos above.
   const [paperPanelSize, setPaperPanelSize] = useState(null)
 
-  const liveFeedSupported = LIVE_FEED_COMBOS.has(`${underlying}:${expiryFlag}`)
 
   // Spot candles + the live-forming bar - the SAME two endpoints the Dashboard page (App.jsx) uses,
   // served from SpotFeedHostedService's always-warm in-memory state, not anything this page fetches
@@ -428,7 +432,22 @@ export default function OiLiveDashboardPage() {
     // past, already-closed day. This call is what's genuinely slow on this page (several paced Dhan
     // calls per strike token) - only the OI/IV picture depends on it now; see loadSpot above for why
     // the spot chart no longer does.
-    const params = new URLSearchParams({ date: istDateKey(new Date()), timeframeMinutes: '1', expiryFlag, forceLive: 'true' })
+    //
+    // expiryFlag here is always "N1".."N6" (see the expiry Select below) - Dhan's own rolling-option
+    // REST endpoint (what /run's CE/PE data ultimately comes from) only ever accepts the literal
+    // flags "WEEK"/"MONTH", never our own positional "N{k}" label, so this always asks /run for the
+    // SAFE, already-verified nearest flag (WEEK, or MONTH for BANKNIFTY which lists no weeklies at
+    // all) regardless of which position the user actually picked. For N1 (BANKNIFTY's MONTH already
+    // duplicates ITS position-0 date - see OiReplayLiveFeedService.PositionalExpiriesPerUnderlying's
+    // own doc comment) that IS the picked contract, so its CE/PE since-open history is used as-is.
+    // For N2..N6 - a real, different, further-out contract - that history would be for the WRONG
+    // expiry, so it's discarded below and the CE/PE series instead start empty, filled in going
+    // forward purely by this page's own live ticks/30s REST snapshot for the ACTUAL picked expiry -
+    // less convenient than a full day's history, but never wrong data, which is what matters most for
+    // this page.
+    const safeFlag = underlying === 'BANKNIFTY' ? 'MONTH' : 'WEEK'
+    const usesRunsCePeData = expiryFlag === 'N1'
+    const params = new URLSearchParams({ date: istDateKey(new Date()), timeframeMinutes: '1', expiryFlag: safeFlag, forceLive: 'true' })
     fetch(`/api/oi-replay/${underlying}/run?${params.toString()}`)
       .then(async (r) => {
         const body = await r.json().catch(() => null)
@@ -437,8 +456,8 @@ export default function OiLiveDashboardPage() {
       })
       .then((body) => {
         if (!body?.success) throw new Error(body?.error || 'This run did not succeed.')
-        const ceGrouped = groupByStrike(body.cePoints ?? [])
-        const peGrouped = groupByStrike(body.pePoints ?? [])
+        const ceGrouped = groupByStrike(usesRunsCePeData ? (body.cePoints ?? []) : [])
+        const peGrouped = groupByStrike(usesRunsCePeData ? (body.pePoints ?? []) : [])
         setCeSeries(ceGrouped)
         setPeSeries(peGrouped)
         setCeDayOpen(buildDayOpenByStrike(ceGrouped))
@@ -496,18 +515,27 @@ export default function OiLiveDashboardPage() {
   useEffect(() => { loadCdv() /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [underlying])
   useEffect(() => { loadSpot() /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [underlying])
 
-  // Only follows `underlying`, not `expiryFlag` - both resolved dates are fetched together every
-  // time regardless of which one is currently selected, so switching Weekly<->Monthly never needs a
-  // fresh request to show the OTHER flag's own already-known date too.
+  // Only follows `underlying`, not `expiryFlag` - the full flat list (and which entries are the
+  // Weekly/Monthly ones) is fetched together every time regardless of which one is currently
+  // selected, so switching the picker never needs a fresh request to show the list again.
   useEffect(() => {
     if (!underlying) return
     let cancelled = false
     fetch(`/api/oi-replay/${underlying}/expiries`)
       .then((r) => r.json())
-      .then((body) => { if (!cancelled) setResolvedExpiries({ week: body?.week ?? null, month: body?.month ?? null }) })
+      .then((body) => { if (!cancelled) setResolvedExpiries({ week: body?.week ?? null, month: body?.month ?? null, expiries: body?.expiries ?? [] }) })
       .catch((err) => { if (!cancelled) console.error('Failed to load resolved expiry dates:', err) })
     return () => { cancelled = true }
   }, [underlying])
+
+  // Clamps back to N1 if the currently-selected position no longer exists once a fresh expiries list
+  // lands - e.g. switching underlying to one with fewer near-term listed expiries than the previous
+  // one, or a listed date rolling off entirely. N1 always exists whenever anything is listed at all.
+  useEffect(() => {
+    const position = Number(expiryFlag.slice(1))
+    if (resolvedExpiries.expiries.length > 0 && position > resolvedExpiries.expiries.length) setExpiryFlag('N1')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resolvedExpiries.expiries])
 
   // `loading` guards both handlers below against a real race: the SignalR hub connects and starts
   // streaming ticks the instant the page mounts, but the REST snapshot this page seeds from
@@ -622,7 +650,7 @@ export default function OiLiveDashboardPage() {
   // True when this page's own SignalR connection to the server says "connected" but nothing has
   // actually arrived through it in a long time - see FEED_STALL_WARNING_MS's own doc comment for why
   // that combination needs its own, separate signal from connectionState.
-  const feedStalled = liveFeedSupported && connectionState === 'connected'
+  const feedStalled = connectionState === 'connected'
     && lastTickAtMs != null && nowTick - lastTickAtMs > FEED_STALL_WARNING_MS
 
   // Edge-triggered (fires once per stall, not once per 15s tick while it persists) so this is
@@ -836,11 +864,12 @@ export default function OiLiveDashboardPage() {
                 options={[{ value: 'NIFTY', label: 'NIFTY' }, { value: 'BANKNIFTY', label: 'BANKNIFTY' }, { value: 'SENSEX', label: 'SENSEX' }]}
               />
               <Select
-                value={expiryFlag} onChange={setExpiryFlag} style={{ width: 190 }}
-                options={[
-                  { value: 'WEEK', label: `Weekly${resolvedExpiries.week ? ` (${fmtDateOnly(resolvedExpiries.week)})` : ''}`, disabled: underlying === 'BANKNIFTY' },
-                  { value: 'MONTH', label: `Monthly${resolvedExpiries.month ? ` (${fmtDateOnly(resolvedExpiries.month)})` : ''}` },
-                ]}
+                value={expiryFlag} onChange={setExpiryFlag} style={{ width: 220 }}
+                options={resolvedExpiries.expiries.map((date, i) => {
+                  const tag = date === resolvedExpiries.week ? ' (Weekly)' : date === resolvedExpiries.month ? ' (Monthly)' : ''
+                  return { value: `N${i + 1}`, label: `${fmtDateOnly(date)}${tag}` }
+                })}
+                placeholder="Loading expiries…"
               />
               <Select value={timeframe} onChange={setTimeframe} style={{ width: 110 }} options={TIMEFRAME_OPTIONS} />
               <Checkbox checked={showVwap} onChange={(e) => setShowVwap(e.target.checked)}>VWAP</Checkbox>
@@ -869,13 +898,13 @@ export default function OiLiveDashboardPage() {
                 <Button size="small" onClick={() => setPaperPanelOpen((o) => !o)}>Paper Trade</Button>
               )}
             </Space>
-            {!liveFeedSupported && (
+            {expiryFlag !== 'N1' && (
               <Alert
                 type="info" showIcon
-                message={`Live tick-by-tick updates aren't wired up for ${underlying} ${expiryFlag === 'WEEK' ? 'Weekly' : 'Monthly'} - you'll see today's snapshot as of the last load, not a continuously ticking feed. NIFTY (Weekly/Monthly), BANKNIFTY (Monthly) and SENSEX (Weekly/Monthly) all stay live.`}
+                message="This expiry isn't the nearest one - its CE/PE charts have no since-open history yet (Dhan's historical endpoint only reliably covers the nearest weekly/monthly), so they'll build up from live ticks starting now rather than showing the whole day."
               />
             )}
-            {liveFeedSupported && connectionState === 'disconnected' && (
+            {connectionState === 'disconnected' && (
               <Alert
                 type="error" showIcon
                 message="Not receiving live ticks right now - check the browser console for a SignalR connection error, and confirm the backend's own Dhan market-feed connection is up."

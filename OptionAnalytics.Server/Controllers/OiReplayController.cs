@@ -46,7 +46,14 @@ public sealed class OiReplayController : ControllerBase
     /// a monthly expiry - see OiReplayLiveFeedService.ResolveNearestExpiryCore's own doc comment for
     /// why that specific overlap used to silently resolve to the wrong, further-out contract).
     /// Either field is null when that flag isn't available at all for this underlying (e.g.
-    /// BANKNIFTY has no weekly expiry) or nothing is currently listed.</summary>
+    /// BANKNIFTY has no weekly expiry) or nothing is currently listed.
+    ///
+    /// expiries is the flat, ordered list backing the Live OI Dashboard's own explicit expiry picker
+    /// (the user's own "list active expiry and select from there" ask) - up to
+    /// OiReplayLiveFeedService.PositionalExpiriesPerUnderlying dates, index i (0-based) here always
+    /// matches flag "N{i+1}" (see ResolveNearestExpiryCore's own doc comment on that flag shape), so
+    /// the frontend can join "c:{underlying}:N{i+1}" for whichever entry the user picks with no
+    /// separate lookup needed.</summary>
     [HttpGet("{underlying}/expiries")]
     public async Task<IActionResult> GetExpiries(string underlying, CancellationToken cancellationToken)
     {
@@ -56,6 +63,7 @@ public sealed class OiReplayController : ControllerBase
         {
             week = OiReplayLiveFeedService.ResolveNearestExpiryCore(listed, "WEEK"),
             month = OiReplayLiveFeedService.ResolveNearestExpiryCore(listed, "MONTH"),
+            expiries = listed.Take(OiReplayLiveFeedService.PositionalExpiriesPerUnderlying),
         });
     }
 }

@@ -80,6 +80,23 @@ public sealed class OiReplayLiveFeedService : BackgroundService
         new("SENSEX", "MONTH"),
     };
 
+    /// <summary>How many of each underlying's own nearest currently-listed expiries get their own
+    /// positional "N1".."N6" combo (see ResolveNearestExpiryCore's own doc comment on this flag
+    /// shape) - the user's own explicit "list active expiry and select from there" request: WEEK/
+    /// MONTH above only ever expose the SINGLE nearest weekly/monthly, with no way to explicitly
+    /// track, say, the 3rd listed weekly out. N1 always duplicates whichever of WEEK/MONTH is that
+    /// underlying's own index-0 listed date (WEEK for NIFTY/SENSEX, MONTH for BANKNIFTY, which lists
+    /// no weeklies at all) - genuinely redundant tracking of the same real contract under two flags,
+    /// accepted deliberately rather than special-cased away, so this stays a simple "just add more
+    /// combos" extension instead of touching the WEEK/MONTH combos (and therefore OiReplayPage.jsx's
+    /// own still-live "today" mode, which only ever requests WEEK/MONTH) at all.</summary>
+    internal const int PositionalExpiriesPerUnderlying = 6;
+
+    /// <summary>The underlyings a positional N-flag applies to - every underlying this service
+    /// already tracks options for (excludes futures, which has no expiry choice at all - see
+    /// FuturesUnderlyings' own doc comment).</summary>
+    private static readonly string[] PositionalUnderlyings = { "NIFTY", "BANKNIFTY", "SENSEX" };
+
     /// <summary>Every underlying OiReplayService's own GetFuturesAsync supports - unlike the
     /// options Combos above, a future has no expiryFlag choice to multiply against (exactly one
     /// nearest contract per underlying), so this is just the plain underlying list.</summary>
@@ -97,8 +114,13 @@ public sealed class OiReplayLiveFeedService : BackgroundService
 
     /// <summary>Every leg this service has ever resolved and subscribed, across every recenter -
     /// see this class's own doc comment for why entries are never removed even after a strike
-    /// drifts out of the currently-computed band.</summary>
-    private readonly ConcurrentDictionary<uint, LegInfo> _legsBySecurityId = new();
+    /// drifts out of the currently-computed band. Keyed by flag (WEEK/MONTH/N1../N6) UNDER the
+    /// security id, not a single LegInfo per id - the same real contract routinely belongs to more
+    /// than one combo at once (N1 always duplicates WEEK or MONTH's own index-0 date, see
+    /// PositionalExpiriesPerUnderlying's own doc comment), and each needs its own tick broadcast to
+    /// its own group so a client that joined "c:NIFTY:N1" still gets ticks even though the identical
+    /// contract is ALSO tracked under "c:NIFTY:WEEK" for OiReplayPage.jsx's sake.</summary>
+    private readonly ConcurrentDictionary<uint, ConcurrentDictionary<string, LegInfo>> _legsBySecurityId = new();
 
     /// <summary>Same "never remove" reasoning as _legsBySecurityId - a future's own nearest
     /// contract only changes at expiry (once every week/month), so in practice this dictionary
@@ -133,7 +155,8 @@ public sealed class OiReplayLiveFeedService : BackgroundService
         while (!stoppingToken.IsCancellationRequested)
         {
             var complete = true;
-            foreach (var combo in Combos)
+            var allCombos = Combos.Concat(await BuildPositionalCombosAsync(stoppingToken)).ToList();
+            foreach (var combo in allCombos)
             {
                 try
                 {
@@ -226,7 +249,8 @@ public sealed class OiReplayLiveFeedService : BackgroundService
     {
         while (!stoppingToken.IsCancellationRequested)
         {
-            foreach (var combo in Combos)
+            var allCombos = Combos.Concat(await BuildPositionalCombosAsync(stoppingToken)).ToList();
+            foreach (var combo in allCombos)
             {
                 try
                 {
@@ -241,6 +265,34 @@ public sealed class OiReplayLiveFeedService : BackgroundService
             try { await Task.Delay(RestQuoteInterval, stoppingToken); }
             catch (OperationCanceledException) { break; }
         }
+    }
+
+    /// <summary>Freshly recomputed every call (both loops above call this every cycle, never cache
+    /// it) - a listed date can drop off (expired) or a new one can appear exactly like RecenterFuturesAsync's
+    /// own "re-resolve every cycle rather than cache" reasoning. EnsureLoadedAsync is cheap once the
+    /// scrip master has actually loaded (an in-memory dictionary read), so paying for it here even
+    /// when RecenterComboAsync's own callers already called it moments ago for the SAME cycle is a
+    /// non-issue.</summary>
+    private async Task<List<Combo>> BuildPositionalCombosAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _optionChainMaster.EnsureLoadedAsync(cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "OI Replay live feed: could not refresh the option chain for positional expiry combos - using whatever was last loaded.");
+        }
+
+        var today = IstClock.Today();
+        var combos = new List<Combo>();
+        foreach (var underlying in PositionalUnderlyings)
+        {
+            var listed = _optionChainMaster.GetExpiries(underlying).Where(e => e >= today).OrderBy(e => e).Take(PositionalExpiriesPerUnderlying).ToList();
+            for (var i = 0; i < listed.Count; i++)
+                combos.Add(new Combo(underlying, $"N{i + 1}"));
+        }
+        return combos;
     }
 
     private async Task BroadcastRestQuotesAsync(Combo combo, CancellationToken cancellationToken)
@@ -303,7 +355,8 @@ public sealed class OiReplayLiveFeedService : BackgroundService
                 var contract = _optionChainMaster.Find(combo.Underlying, expiry.Value, strike, isCall);
                 if (contract is null) continue;
 
-                _legsBySecurityId[contract.SecurityId] = new LegInfo(combo.Underlying, combo.ExpiryFlag, strike, isCall);
+                var legsForSecurity = _legsBySecurityId.GetOrAdd(contract.SecurityId, _ => new ConcurrentDictionary<string, LegInfo>());
+                legsForSecurity[combo.ExpiryFlag] = new LegInfo(combo.Underlying, combo.ExpiryFlag, strike, isCall);
                 if (!_feedClient.IsSubscribed(contract.SecurityId))
                     toSubscribe[contract.SecurityId] = contract.DhanSegment;
             }
@@ -344,10 +397,22 @@ public sealed class OiReplayLiveFeedService : BackgroundService
     /// <summary>The pure decision itself, pulled out of ResolveNearestExpiry so a test can exercise
     /// the exact final-week scenario its own doc comment describes without standing up this whole
     /// service and its Dhan-backed dependencies - same reasoning as
-    /// DhanRollingOptionDataService.ClipToRange's own internal static split.</summary>
+    /// DhanRollingOptionDataService.ClipToRange's own internal static split.
+    ///
+    /// ALSO handles the positional "N1".."N6" flags (see PositionalExpiriesPerUnderlying's own doc
+    /// comment) - "N{k}" (1-indexed) is simply listedFromToday[k-1], the SAME unfiltered population
+    /// WEEK itself already indexes into at position 0 (confirmed correct there) - not a separate rule,
+    /// just WEEK's own existing behavior generalized to an explicit position instead of always 0. Null
+    /// (not listedFromToday[0]) when the list is shorter than k - a client that asked for "the 5th
+    /// listed expiry" when only 3 are currently listed should see "not currently available", never
+    /// silently fall back to some other contract it did not ask for.</summary>
     internal static DateOnly? ResolveNearestExpiryCore(IReadOnlyList<DateOnly> listedFromToday, string expiryFlag)
     {
         if (listedFromToday.Count == 0) return null;
+
+        if (expiryFlag.Length >= 2 && expiryFlag[0] == 'N' && int.TryParse(expiryFlag.AsSpan(1), out var position) && position >= 1)
+            return position <= listedFromToday.Count ? listedFromToday[position - 1] : null;
+
         if (expiryFlag != "MONTH") return listedFromToday[0];
 
         bool IsMonthly(DateOnly date) => listedFromToday.Where(e => e.Year == date.Year && e.Month == date.Month).Max() == date;
@@ -357,7 +422,10 @@ public sealed class OiReplayLiveFeedService : BackgroundService
 
     private void OnTick(SpotTick tick)
     {
-        if (_legsBySecurityId.TryGetValue(tick.SecurityId, out var leg) && (tick.LastPrice > 0 || tick.OpenInterest > 0))
+        if (!_legsBySecurityId.TryGetValue(tick.SecurityId, out var legsByFlag) || !(tick.LastPrice > 0 || tick.OpenInterest > 0))
+            return;
+
+        foreach (var leg in legsByFlag.Values)
         {
             var payload = new
             {
