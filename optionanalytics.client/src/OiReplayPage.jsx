@@ -7,7 +7,7 @@ import * as signalR from '@microsoft/signalr'
 import './oiMobile.css'
 import {
   UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR,
-  istTimeFormatter, istTickMarkFormatter, toBar, toChartTime, fromChartTime, istDateKey,
+  istTimeFormatter, istTickMarkFormatter, toBar, toChartTime, fromChartTime, istDateKey, fmtDateOnly,
   NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, usePersistedState,
   syncSignalRGroups, joinAllSignalRGroups,
 } from './shared.jsx'
@@ -20,11 +20,6 @@ const { Text, Title } = Typography
 // when the caller never actually passes one.
 const EMPTY_ARRAY = []
 
-// The (underlying, expiryFlag) combos OiReplayLiveFeedService actually tracks live on the backend -
-// BANKNIFTY has no weekly expiry (same rule the rest of this page and Expired Backtest enforce), so
-// a live feed for that combo will simply never arrive; kept in sync with that service's own list by
-// hand since the two sides have no shared source of truth to derive it from automatically.
-const LIVE_FEED_COMBOS = new Set(['NIFTY:WEEK', 'NIFTY:MONTH', 'BANKNIFTY:MONTH', 'SENSEX:WEEK', 'SENSEX:MONTH'])
 
 // How long today's replay can go without ANY tick (spot, OI, or futures) before this page treats it
 // as suspicious rather than trusting the "● LIVE" tag - that tag only reflects the browser's own
@@ -77,8 +72,8 @@ const RECONNECT_RETRY_POLICY = {
 // EVERY load() call (including a plain data refresh, not just a day switch), flipping `enabled`
 // false-then-true-then-false in quick succession and tearing the real WebSocket down and rebuilding
 // it each time - a real, confirmed source of "lots of web connections"/reconnect churn, the exact
-// bug oiShared.jsx's useOiLiveHub was already built specifically to avoid on the Live OI Dashboard,
-// just never backported here. Every callback below already independently checks `isToday` itself
+// bug oiShared.jsx's useOiLiveHub was already built specifically to avoid. Every callback below
+// already independently checks `isToday` itself
 // before acting (see handleSpotUpdate/handleOiReplayTick/handleFuturesTick's own `if (!isToday...)`
 // guards) via the SAME ref-read pattern used here, so a tick arriving while a historical (non-today)
 // day is loaded already safely no-ops - nothing about correctness depended on tearing the
@@ -1712,7 +1707,20 @@ const SPEED_OPTIONS = [
 export default function OiReplayPage() {
   const [underlying, setUnderlying] = usePersistedState(STORED_UNDERLYING, 'NIFTY')
   const [timeframe, setTimeframe] = usePersistedState(STORED_TIMEFRAME, 5)
+  // Only meaningful for a HISTORICAL (non-today) day - Dhan's rolling-option REST endpoint (what a
+  // past day's CE/PE data ultimately comes from) only ever accepts these two literal flags.
   const [expiryFlag, setExpiryFlag] = useState('WEEK')
+  // "N1".."N6" - the Nth nearest currently-listed expiry for `underlying` overall, only meaningful
+  // while isToday (see the expiry Select below, shown in place of the WEEK/MONTH one once live). The
+  // user's own explicit "it's going to next expiry, add an expiry filter" ask for the live page this
+  // replaced (see OiReplayLiveFeedService.PositionalExpiriesPerUnderlying's own doc comment) - being
+  // able to see and pick the EXACT contract removes any need to trust an automatic "nearest"
+  // resolution once today is playing live.
+  const [liveExpiryFlag, setLiveExpiryFlag] = useState('N1')
+  // The full flat list of currently-listed expiry dates backing that picker (index i is always flag
+  // "N{i+1}" - see OiReplayController.GetExpiries' own doc comment), plus which of them (if any) is
+  // the real calendar date "Weekly"/"Monthly" resolve to, shown as a tag on the matching option.
+  const [resolvedExpiries, setResolvedExpiries] = useState({ week: null, month: null, expiries: [] })
   const [date, setDate] = useState(null)
   const [speedMs, setSpeedMs] = useState(500)
 
@@ -1833,7 +1841,27 @@ export default function OiReplayPage() {
 
   const canLoad = Boolean(underlying && date)
   const isToday = Boolean(date && date.format('YYYY-MM-DD') === istDateKey(new Date()))
-  const liveFeedSupported = LIVE_FEED_COMBOS.has(`${underlying}:${expiryFlag}`)
+
+  // Backs the live-mode expiry picker - fetched per underlying regardless of isToday, so the list is
+  // already there the instant the user clicks Go Live rather than needing its own separate load.
+  useEffect(() => {
+    if (!underlying) return
+    let cancelled = false
+    fetch(`/api/oi-replay/${underlying}/expiries`)
+      .then((r) => r.json())
+      .then((body) => { if (!cancelled) setResolvedExpiries({ week: body?.week ?? null, month: body?.month ?? null, expiries: body?.expiries ?? [] }) })
+      .catch((err) => { if (!cancelled) console.error('Failed to load resolved expiry dates:', err) })
+    return () => { cancelled = true }
+  }, [underlying])
+
+  // Clamps back to N1 if the currently-selected position no longer exists once a fresh expiries list
+  // lands - e.g. switching underlying to one with fewer near-term listed expiries than the previous
+  // one, or a listed date rolling off entirely. N1 always exists whenever anything is listed at all.
+  useEffect(() => {
+    const position = Number(liveExpiryFlag.slice(1))
+    if (resolvedExpiries.expiries.length > 0 && position > resolvedExpiries.expiries.length) setLiveExpiryFlag('N1')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resolvedExpiries.expiries])
 
   // Takes an optional explicit date rather than only ever reading the `date` state, so goLive below
   // can set today's date AND kick off the fetch in one click - setDate(today) followed immediately
@@ -1842,6 +1870,7 @@ export default function OiReplayPage() {
   const load = (overrideDate) => {
     const effectiveDate = overrideDate ?? date
     if (!underlying || !effectiveDate) return
+    const effectiveIsToday = effectiveDate.format('YYYY-MM-DD') === istDateKey(new Date())
     // Abort whatever run fetch might still be pending from a previous click - otherwise a stale
     // response landing late could clobber the result of THIS load with an older day's data.
     activeLoadController.current?.abort('superseded')
@@ -1860,16 +1889,30 @@ export default function OiReplayPage() {
     // at all (its own spotCandlesOneMinute carries no volume, and the live endpoint below reflects
     // only recent/in-memory days). Independent of the main run fetch below so a slow/failed VWAP
     // fetch never blocks or fails the actual replay load.
-    if (effectiveDate.format('YYYY-MM-DD') === istDateKey(new Date())) {
+    if (effectiveIsToday) {
       fetch(`/api/spot/${underlying}/vwap-series`)
         .then((r) => r.json())
         .then((vwap) => setVwapSeries((vwap ?? []).map((p) => ({ time: toChartTime(p.time), value: p.obv }))))
         .catch((err) => console.error('Failed to load VWAP series:', err))
     }
+    // While playing today live, expiryFlag (WEEK/MONTH - the historical picker) is not what the user
+    // actually picked (liveExpiryFlag, "N1".."N6", is - see its own doc comment); Dhan's rolling-
+    // option REST endpoint (what this call's own cePoints/pePoints come from) only ever accepts the
+    // literal flags WEEK/MONTH though, never our own positional "N{k}" label, so this always asks for
+    // the SAFE, already-verified nearest flag (WEEK, or MONTH for BANKNIFTY which lists no weeklies
+    // at all) regardless of which position the user picked. For N1 that IS the picked contract
+    // (BANKNIFTY's own MONTH already duplicates its position-0 date - see
+    // OiReplayLiveFeedService.PositionalExpiriesPerUnderlying's own doc comment), so its CE/PE
+    // since-open history is used as-is. For N2..N6 - a real, different, further-out contract - that
+    // history would be for the WRONG expiry, so it's discarded below and the CE/PE series instead
+    // start empty, filled in going forward purely by this page's own live ticks for the ACTUAL picked
+    // expiry - less convenient than a full day's history, but never wrong data.
+    const requestFlag = effectiveIsToday ? (underlying === 'BANKNIFTY' ? 'MONTH' : 'WEEK') : expiryFlag
+    const usesRunsCePeData = !effectiveIsToday || liveExpiryFlag === 'N1'
     const params = new URLSearchParams({
       date: effectiveDate.format('YYYY-MM-DD'),
       timeframeMinutes: String(timeframe),
-      expiryFlag,
+      expiryFlag: requestFlag,
     })
     const timeoutId = setTimeout(() => controller.abort('timeout'), LOAD_TIMEOUT_MS)
     fetch(`/api/oi-replay/${underlying}/run?${params.toString()}`, { signal: controller.signal })
@@ -1880,7 +1923,7 @@ export default function OiReplayPage() {
       })
       .then((body) => {
         if (!body?.success) throw new Error(body?.error || 'This run did not succeed.')
-        setResult(body)
+        setResult(usesRunsCePeData ? body : { ...body, cePoints: [], pePoints: [] })
         const initialLen = body.spotCandlesOneMinute?.length ?? 0
         // manualVisibleCount only matters for a historical (non-today) day - see visibleCount's own
         // derivation below, which reads oneMinBars.length directly for today, always, unconditionally.
@@ -1918,9 +1961,9 @@ export default function OiReplayPage() {
   // One click for "switch to today and start following it live" - the user's own "if tomorrow
   // markets opens and if select live this will work on live data" ask, rather than needing to open
   // the date picker and find today's date by hand every single morning. Whatever underlying/
-  // expiryFlag/timeframe are already selected stay as they are - this only ever changes the date.
-  // isToday + liveFeedSupported (see below) is what actually keeps it updating tick by tick once
-  // loaded; this button just gets there in one step instead of several.
+  // liveExpiryFlag/timeframe are already selected stay as they are - this only ever changes the date.
+  // isToday (see below) is what actually keeps it updating tick by tick once loaded; this button just
+  // gets there in one step instead of several.
   const goLive = () => {
     const today = dayjs()
     setDate(today)
@@ -1995,7 +2038,7 @@ export default function OiReplayPage() {
     }
   }
   const handleOiReplayTick = (tick) => {
-    if (!isToday || tick?.underlying !== underlying || tick?.expiryFlag !== expiryFlag) return
+    if (!isToday || tick?.underlying !== underlying || tick?.expiryFlag !== liveExpiryFlag) return
     setLastTickAtMs(Date.now())
     const isCall = tick.side === 'CE'
     // The live feed carries no IV (Dhan's tick stream doesn't - see OiReplayLiveFeedService's own
@@ -2032,7 +2075,7 @@ export default function OiReplayPage() {
   }
 
   const handleLiveReconnected = () => { if (isToday) load() }
-  const liveConnectionState = useOiReplayLiveFeed(handleSpotUpdate, handleOiReplayTick, handleFuturesTick, handleLiveReconnected, underlying, expiryFlag)
+  const liveConnectionState = useOiReplayLiveFeed(handleSpotUpdate, handleOiReplayTick, handleFuturesTick, handleLiveReconnected, underlying, liveExpiryFlag)
 
   // A plain tick, unrelated to any live data - exists ONLY so feedStalled below re-evaluates on a
   // real clock instead of purely as a side effect of the next incoming tick (same reasoning as Live
@@ -2046,7 +2089,7 @@ export default function OiReplayPage() {
   // True when this page's own SignalR connection to the server says "connected" but nothing has
   // actually arrived through it in a long time - see FEED_STALL_WARNING_MS's own doc comment for why
   // that combination needs its own, separate signal from liveConnectionState.
-  const feedStalled = isToday && liveFeedSupported && liveConnectionState === 'connected'
+  const feedStalled = isToday && liveConnectionState === 'connected'
     && lastTickAtMs != null && nowTick - lastTickAtMs > FEED_STALL_WARNING_MS
 
   // Edge-triggered (fires once per stall, not once per 15s tick while it persists) so this is
@@ -2709,7 +2752,7 @@ export default function OiReplayPage() {
               >
                 ● {isToday ? 'Live' : 'Go Live'}
               </Button>
-              {isToday && liveFeedSupported && (
+              {isToday && (
                 // The REAL SignalR connection state, not just "today is selected" - the button above
                 // says "Live" purely from a date match, which used to give false confidence that
                 // ticks were flowing even when this connection had failed, was stuck reconnecting, or
@@ -2726,10 +2769,24 @@ export default function OiReplayPage() {
                 value={underlying} onChange={selectUnderlying} style={{ width: 130 }}
                 options={[{ value: 'NIFTY', label: 'NIFTY' }, { value: 'BANKNIFTY', label: 'BANKNIFTY' }, { value: 'SENSEX', label: 'SENSEX' }]}
               />
-              <Select
-                value={expiryFlag} onChange={setExpiryFlag} style={{ width: 130 }}
-                options={[{ value: 'WEEK', label: 'Weekly', disabled: underlying === 'BANKNIFTY' }, { value: 'MONTH', label: 'Monthly' }]}
-              />
+              {isToday ? (
+                // Only meaningful once today is playing live - lists the real currently-listed
+                // expiries (see resolvedExpiries' own doc comment) instead of an ambiguous Weekly/
+                // Monthly toggle, so the exact contract being tracked is never in doubt.
+                <Select
+                  value={liveExpiryFlag} onChange={setLiveExpiryFlag} style={{ width: 220 }}
+                  options={resolvedExpiries.expiries.map((d, i) => {
+                    const tag = d === resolvedExpiries.week ? ' (Weekly)' : d === resolvedExpiries.month ? ' (Monthly)' : ''
+                    return { value: `N${i + 1}`, label: `${fmtDateOnly(d)}${tag}` }
+                  })}
+                  placeholder="Loading expiries…"
+                />
+              ) : (
+                <Select
+                  value={expiryFlag} onChange={setExpiryFlag} style={{ width: 130 }}
+                  options={[{ value: 'WEEK', label: 'Weekly', disabled: underlying === 'BANKNIFTY' }, { value: 'MONTH', label: 'Monthly' }]}
+                />
+              )}
               <DatePicker value={date} onChange={setDate} format="DD MMM YYYY" placeholder="Trading day" />
               <Select value={timeframe} onChange={setTimeframe} style={{ width: 110 }} options={TIMEFRAME_OPTIONS} />
               <Button type="primary" onClick={() => load()} loading={loading} disabled={!canLoad}>Load day</Button>
@@ -2746,13 +2803,13 @@ export default function OiReplayPage() {
                 Show all
               </Button>
             </Space>
-            {isToday && !liveFeedSupported && (
+            {isToday && liveExpiryFlag !== 'N1' && (
               <Alert
                 type="info" showIcon
-                message={`Today's data will load, but live tick-by-tick updates aren't wired up for ${underlying} ${expiryFlag === 'WEEK' ? 'Weekly' : 'Monthly'} - you'll see a snapshot as of Load day/Go Live, not a continuously ticking feed. NIFTY (Weekly/Monthly), BANKNIFTY (Monthly) and SENSEX (Weekly/Monthly) all stay live.`}
+                message="This expiry isn't the nearest one - its CE/PE data has no since-open history yet (Dhan's historical endpoint only reliably covers the nearest weekly/monthly), so it'll build up from live ticks starting now rather than showing the whole day. Click Load day/Go Live again after picking it if you haven't already."
               />
             )}
-            {isToday && liveFeedSupported && liveConnectionState === 'disconnected' && (
+            {isToday && liveConnectionState === 'disconnected' && (
               <Alert
                 type="error" showIcon
                 message="Not receiving live ticks right now - the page will look frozen at whatever it last loaded until this reconnects. Check the browser console for a SignalR connection error, and confirm the backend's own Dhan market-feed connection is up."
@@ -3023,7 +3080,7 @@ export default function OiReplayPage() {
                     <Text style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
                       {currentBar ? `${istTimeFormatter(currentBar.time)} (${visibleCount}/${oneMinBars.length})` : '—'}
                     </Text>
-                    {isToday && liveFeedSupported && (
+                    {isToday && (
                       <Tooltip title={
                         liveConnectionState === 'connected' ? "Streaming live ticks from Dhan's WebSocket feed on top of today's snapshot (price + OI - IV stays at the last REST-fetched value)"
                           : liveConnectionState === 'reconnecting' ? 'Connection dropped - automatically retrying.'

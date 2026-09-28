@@ -5,11 +5,11 @@ import { useOiLiveHub } from './oiShared.jsx'
 
 const { Text, Title } = Typography
 
-// "Live Strike Data" - a raw tick TAPE, deliberately different from the Live OI Dashboard's own
-// ladder (which only ever shows the LATEST reading per strike, folded into a Map). This page shows
-// literally every individual oiReplayTick as its own row, newest first, capped so the browser tab
-// never grows unbounded - for answering "is this strike's OI actually updating, and with what values,
-// tick by tick" directly, without any aggregation standing between the raw feed and what's on screen.
+// "Live Strike Data" - a raw tick TAPE, deliberately different from OI Replay's own ladder (which
+// only ever shows the LATEST reading per strike, folded into a Map). This page shows literally every
+// individual oiReplayTick as its own row, newest first, capped so the browser tab never grows
+// unbounded - for answering "is this strike's OI actually updating, and with what values, tick by
+// tick" directly, without any aggregation standing between the raw feed and what's on screen.
 const LIVE_FEED_COMBOS = new Set(['NIFTY:WEEK', 'NIFTY:MONTH', 'BANKNIFTY:MONTH', 'SENSEX:WEEK', 'SENSEX:MONTH'])
 const MAX_ROWS = 500
 
@@ -20,18 +20,19 @@ function fmtTickTime(iso) {
 export default function LiveStrikeDataPage() {
   const [underlying, setUnderlying] = usePersistedState(STORED_UNDERLYING, 'NIFTY')
   const [expiryFlag, setExpiryFlag] = useState('WEEK')
-  // The REAL calendar date "Weekly"/"Monthly" currently resolve to server-side - see
-  // OiLiveDashboardPage's own identical state for why this is shown rather than left implicit.
+  // The REAL calendar date "Weekly"/"Monthly" currently resolve to server-side - shown so the exact
+  // contract being tracked is never left implicit (see OiReplayLiveFeedService.ResolveNearestExpiryCore's
+  // own doc comment for the bug that ambiguity used to cause).
   const [resolvedExpiries, setResolvedExpiries] = useState({ week: null, month: null })
   const [strikeFilter, setStrikeFilter] = useState('ALL')
   const [sideFilter, setSideFilter] = useState('ALL')
   const [paused, setPaused] = useState(false)
 
-  // IV per strike/side - seeded once from the SAME forceLive REST call the Live OI Dashboard uses,
-  // never updated from live ticks afterward, because live ticks never carry IV at all (Dhan's live
-  // feed has no IV field - see OiReplayLiveFeedService's own doc comment). A row ticked before this
-  // seed lands simply shows IV as "-" rather than blocking the tape on it - "tick by tick, as it
-  // actually happens" is the whole point of this page, including the honest gaps.
+  // IV per strike/side - seeded once from a forceLive REST call, never updated from live ticks
+  // afterward, because live ticks never carry IV at all (Dhan's live feed has no IV field - see
+  // OiReplayLiveFeedService's own doc comment). A row ticked before this seed lands simply shows IV
+  // as "-" rather than blocking the tape on it - "tick by tick, as it actually happens" is the whole
+  // point of this page, including the honest gaps.
   const [ivByKey, setIvByKey] = useState(new Map())
   const [seedError, setSeedError] = useState(null)
   const [knownStrikes, setKnownStrikes] = useState([])
@@ -88,7 +89,9 @@ export default function LiveStrikeDataPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [underlying, expiryFlag])
 
-  // Only follows `underlying`, not `expiryFlag` - see OiLiveDashboardPage's own identical effect.
+  // Only follows `underlying`, not `expiryFlag` - both resolved dates are fetched together every
+  // time regardless of which one is currently selected, so switching Weekly<->Monthly never needs a
+  // fresh request to show the OTHER flag's own already-known date too.
   useEffect(() => {
     if (!underlying) return
     let cancelled = false

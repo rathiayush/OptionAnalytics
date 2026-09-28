@@ -166,10 +166,6 @@ export const STORED_TIMEFRAME = 'optionanalytics.timeframe'
 // One shared toggle for every page's VWAP checkbox, same as underlying/timeframe above - checking
 // it on one page and finding it already checked on another is the expected behavior, not a bug.
 export const STORED_SHOW_VWAP = 'optionanalytics.showVwap'
-// Live OI Dashboard's "OI via REST" toggle - see OiLiveDashboardPage's own restQuotesByStrike doc
-// comment. Persisted the same way as the settings above so it survives a reload.
-export const STORED_PREFER_REST_OI = 'optionanalytics.preferRestOi'
-
 function readStored(key, fallback) {
   try {
     const raw = window.localStorage.getItem(key)
@@ -815,13 +811,12 @@ const NAV_ITEMS = [
   },
   { key: '/expired-backtest', label: 'Expired Backtest' },
   { key: '/oi-replay', label: 'OI Replay' },
-  { key: '/oi-live', label: 'Live OI' },
   { key: '/live-strike-data', label: 'Live Strike Data' },
   { key: '/triggers', label: 'Triggers' },
   { key: '/contracts', label: 'Contracts' },
 ]
 
-// Shared between EVERY page (all ten currently render it) - a proper horizontal menu (not just
+// Shared between EVERY page (all nine currently render it) - a proper horizontal menu (not just
 // plain text links) so it reads as real site navigation, sitting inline in each page's own header
 // row with a transparent background so it blends into the page rather than looking like a separate
 // bar. Also carries the signed-in email and a log-out button - the one place that's shown
