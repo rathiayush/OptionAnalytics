@@ -305,6 +305,17 @@ export function fmtIstTime(isoOrDate) {
   return new Date(isoOrDate).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true })
 }
 
+// A plain calendar date (a backend DateOnly, e.g. "2026-09-29") as "29 Sep 2026" - null passes
+// through as null so a caller can fall back to its own placeholder rather than rendering "Invalid
+// Date". Used to show the REAL resolved expiry date next to an otherwise-ambiguous "Weekly"/
+// "Monthly" label (see OiReplayController.GetExpiries) - a date-only string has no time-of-day
+// component to shift, so formatting it in IST is safe (never crosses a calendar boundary the way an
+// actual UTC instant near midnight could).
+export function fmtDateOnly(isoDate) {
+  if (!isoDate) return null
+  return new Date(isoDate).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', year: 'numeric' })
+}
+
 // lightweight-charts styling/time-axis helpers, duplicated (not imported) from App.jsx's own
 // private copies rather than having App.jsx import them from here - App.jsx's charting code is
 // heavily tuned (cross-chart pan/zoom sync, EMA overlays, live-tick preservation of the visible

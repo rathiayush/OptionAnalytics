@@ -4,7 +4,7 @@ import { createChart, LineSeries, CrosshairMode } from 'lightweight-charts'
 import './oiMobile.css'
 import {
   NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, STORED_PREFER_REST_OI, usePersistedState, istDateKey, toBar,
-  toChartTime, CE_COLOR, PE_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR, istTimeFormatter, istTickMarkFormatter,
+  toChartTime, CE_COLOR, PE_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR, istTimeFormatter, istTickMarkFormatter, fmtDateOnly,
 } from './shared.jsx'
 import {
   groupByStrike, latestAtOrBefore, aggregateBars, buildStrikeOffsetOptions,
@@ -260,6 +260,14 @@ export default function OiLiveDashboardPage() {
   const [underlying, setUnderlying] = usePersistedState(STORED_UNDERLYING, 'NIFTY')
   const [expiryFlag, setExpiryFlag] = useState('WEEK')
   const [timeframe, setTimeframe] = usePersistedState(STORED_TIMEFRAME, 15)
+  // The REAL calendar date "Weekly"/"Monthly" currently resolve to server-side - shown right in the
+  // picker (e.g. "Weekly (29 Sep 2026)") instead of leaving that resolution invisible, so it's
+  // obvious which actual contract is being tracked and the two can be told apart even when they
+  // happen to be the SAME date (the final week before a monthly expiry - see
+  // OiReplayLiveFeedService.ResolveNearestExpiryCore's own doc comment for the bug that exact
+  // overlap used to cause: a strike's own tracked premium silently coming from the wrong,
+  // further-out contract with no visible way to notice from this page alone).
+  const [resolvedExpiries, setResolvedExpiries] = useState({ week: null, month: null })
   const [chartBTimeframe, setChartBTimeframe] = useState(3)
   const [chartBEma1, setChartBEma1] = useState(9)
   const [chartBEma2, setChartBEma2] = useState(15)
@@ -477,6 +485,19 @@ export default function OiLiveDashboardPage() {
   useEffect(() => { load() /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [underlying, expiryFlag])
   useEffect(() => { loadCdv() /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [underlying])
   useEffect(() => { loadSpot() /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [underlying])
+
+  // Only follows `underlying`, not `expiryFlag` - both resolved dates are fetched together every
+  // time regardless of which one is currently selected, so switching Weekly<->Monthly never needs a
+  // fresh request to show the OTHER flag's own already-known date too.
+  useEffect(() => {
+    if (!underlying) return
+    let cancelled = false
+    fetch(`/api/oi-replay/${underlying}/expiries`)
+      .then((r) => r.json())
+      .then((body) => { if (!cancelled) setResolvedExpiries({ week: body?.week ?? null, month: body?.month ?? null }) })
+      .catch((err) => { if (!cancelled) console.error('Failed to load resolved expiry dates:', err) })
+    return () => { cancelled = true }
+  }, [underlying])
 
   // `loading` guards both handlers below against a real race: the SignalR hub connects and starts
   // streaming ticks the instant the page mounts, but the REST snapshot this page seeds from
@@ -805,8 +826,11 @@ export default function OiLiveDashboardPage() {
                 options={[{ value: 'NIFTY', label: 'NIFTY' }, { value: 'BANKNIFTY', label: 'BANKNIFTY' }, { value: 'SENSEX', label: 'SENSEX' }]}
               />
               <Select
-                value={expiryFlag} onChange={setExpiryFlag} style={{ width: 130 }}
-                options={[{ value: 'WEEK', label: 'Weekly', disabled: underlying === 'BANKNIFTY' }, { value: 'MONTH', label: 'Monthly' }]}
+                value={expiryFlag} onChange={setExpiryFlag} style={{ width: 190 }}
+                options={[
+                  { value: 'WEEK', label: `Weekly${resolvedExpiries.week ? ` (${fmtDateOnly(resolvedExpiries.week)})` : ''}`, disabled: underlying === 'BANKNIFTY' },
+                  { value: 'MONTH', label: `Monthly${resolvedExpiries.month ? ` (${fmtDateOnly(resolvedExpiries.month)})` : ''}` },
+                ]}
               />
               <Select value={timeframe} onChange={setTimeframe} style={{ width: 110 }} options={TIMEFRAME_OPTIONS} />
               <Checkbox checked={showVwap} onChange={(e) => setShowVwap(e.target.checked)}>VWAP</Checkbox>

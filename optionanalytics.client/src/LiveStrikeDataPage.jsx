@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Select, Space, Typography, Card, Button, Row, Col, Tag, Tooltip, Table, Alert } from 'antd'
-import { NavBar, STORED_UNDERLYING, usePersistedState, istDateKey } from './shared.jsx'
+import { NavBar, STORED_UNDERLYING, usePersistedState, istDateKey, fmtDateOnly } from './shared.jsx'
 import { useOiLiveHub } from './oiShared.jsx'
 
 const { Text, Title } = Typography
@@ -20,6 +20,9 @@ function fmtTickTime(iso) {
 export default function LiveStrikeDataPage() {
   const [underlying, setUnderlying] = usePersistedState(STORED_UNDERLYING, 'NIFTY')
   const [expiryFlag, setExpiryFlag] = useState('WEEK')
+  // The REAL calendar date "Weekly"/"Monthly" currently resolve to server-side - see
+  // OiLiveDashboardPage's own identical state for why this is shown rather than left implicit.
+  const [resolvedExpiries, setResolvedExpiries] = useState({ week: null, month: null })
   const [strikeFilter, setStrikeFilter] = useState('ALL')
   const [sideFilter, setSideFilter] = useState('ALL')
   const [paused, setPaused] = useState(false)
@@ -84,6 +87,17 @@ export default function LiveStrikeDataPage() {
     loadSeed()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [underlying, expiryFlag])
+
+  // Only follows `underlying`, not `expiryFlag` - see OiLiveDashboardPage's own identical effect.
+  useEffect(() => {
+    if (!underlying) return
+    let cancelled = false
+    fetch(`/api/oi-replay/${underlying}/expiries`)
+      .then((r) => r.json())
+      .then((body) => { if (!cancelled) setResolvedExpiries({ week: body?.week ?? null, month: body?.month ?? null }) })
+      .catch((err) => { if (!cancelled) console.error('Failed to load resolved expiry dates:', err) })
+    return () => { cancelled = true }
+  }, [underlying])
 
   const handleTick = (tick) => {
     if (tick?.underlying !== underlying || tick?.expiryFlag !== expiryFlag) return
@@ -188,8 +202,11 @@ export default function LiveStrikeDataPage() {
                 options={[{ value: 'NIFTY', label: 'NIFTY' }, { value: 'BANKNIFTY', label: 'BANKNIFTY' }, { value: 'SENSEX', label: 'SENSEX' }]}
               />
               <Select
-                value={expiryFlag} onChange={setExpiryFlag} style={{ width: 130 }}
-                options={[{ value: 'WEEK', label: 'Weekly', disabled: underlying === 'BANKNIFTY' }, { value: 'MONTH', label: 'Monthly' }]}
+                value={expiryFlag} onChange={setExpiryFlag} style={{ width: 190 }}
+                options={[
+                  { value: 'WEEK', label: `Weekly${resolvedExpiries.week ? ` (${fmtDateOnly(resolvedExpiries.week)})` : ''}`, disabled: underlying === 'BANKNIFTY' },
+                  { value: 'MONTH', label: `Monthly${resolvedExpiries.month ? ` (${fmtDateOnly(resolvedExpiries.month)})` : ''}` },
+                ]}
               />
               <Select value={strikeFilter} onChange={setStrikeFilter} style={{ width: 140 }} options={strikeOptions} />
               <Select
