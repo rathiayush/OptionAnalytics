@@ -1,5 +1,4 @@
 import { Component, useEffect, useMemo, useRef, useState } from 'react'
-import { createPortal } from 'react-dom'
 import dayjs from 'dayjs'
 import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicker, Alert, Empty, Tooltip, Slider, Tag, InputNumber, Switch, Table, Segmented, Checkbox, Modal } from 'antd'
 import { PlayCircleOutlined, PauseCircleOutlined, ReloadOutlined, SoundOutlined } from '@ant-design/icons'
@@ -12,7 +11,7 @@ import {
   NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, usePersistedState,
   syncSignalRGroups, joinAllSignalRGroups,
 } from './shared.jsx'
-import { PremiumEmaChart } from './oiShared.jsx'
+import { PremiumEmaChart, DraggableFloatingPanel } from './oiShared.jsx'
 
 const { Text, Title } = Typography
 
@@ -1271,117 +1270,8 @@ function FuturesChart({ bars, oiLine, markers, dayKey, height = 320 }) {
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }
 
-// A genuinely draggable floating panel - antd's own Popover only ever anchors next to its trigger,
-// even when manually controlled to stay open, which isn't what "floating, I should be able to move
-// it anywhere on screen" means. Rendered into a portal on document.body so it sits above every other
-// element regardless of where its trigger lives in the tree, and tracked as a plain {x,y} in the
-// PARENT's own state (not local state here) so the position survives closing and reopening the
-// panel, not just drags within one open session. Dragged via native mouse events on the header - no
-// drag library needed for something this small.
-function DraggableFloatingPanel({ title, pos, onPosChange, onClose, children }) {
-  const dragRef = useRef(null)
-  const panelRef = useRef(null)
-
-  // A fixed 440px panel is wider than most phone screens, and the caller's own initial `pos` is
-  // computed once against whatever window.innerWidth happened to be at that moment - stale the
-  // instant the viewport changes (device rotation, a resized browser window, or just a caller doing
-  // its own math against a narrow screen). Re-clamping against this panel's OWN actual rendered
-  // width/height (which the CSS width below already keeps within the viewport) on mount and resize
-  // means it's never left partly or fully off-screen regardless of what `pos` it was handed.
-  useEffect(() => {
-    const clamp = () => {
-      if (!panelRef.current) return
-      const rect = panelRef.current.getBoundingClientRect()
-      const maxX = Math.max(0, window.innerWidth - rect.width)
-      const maxY = Math.max(0, window.innerHeight - rect.height)
-      const clampedX = Math.min(Math.max(0, pos.x), maxX)
-      const clampedY = Math.min(Math.max(0, pos.y), maxY)
-      if (clampedX !== pos.x || clampedY !== pos.y) onPosChange({ x: clampedX, y: clampedY })
-    }
-    clamp()
-    window.addEventListener('resize', clamp)
-    return () => window.removeEventListener('resize', clamp)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pos.x, pos.y])
-
-  const beginDrag = (clientX, clientY) => {
-    dragRef.current = { startX: clientX, startY: clientY, origX: pos.x, origY: pos.y }
-  }
-  const dragTo = (clientX, clientY) => {
-    if (!dragRef.current) return
-    const dx = clientX - dragRef.current.startX
-    const dy = clientY - dragRef.current.startY
-    // Deliberately looser than the mount/resize clamp above (a fixed 80px/40px slack rather than the
-    // panel's own full width/height) - lets the panel be dragged mostly off an edge and tucked out of
-    // the way, same as before this fix, rather than only ever settling flush against the viewport.
-    const maxX = Math.max(0, window.innerWidth - 80)
-    const maxY = Math.max(0, window.innerHeight - 40)
-    onPosChange({
-      x: Math.min(Math.max(0, dragRef.current.origX + dx), maxX),
-      y: Math.min(Math.max(0, dragRef.current.origY + dy), maxY),
-    })
-  }
-  const endDrag = () => { dragRef.current = null }
-
-  const onHeaderMouseDown = (e) => {
-    beginDrag(e.clientX, e.clientY)
-    const onMouseMove = (moveEvent) => dragTo(moveEvent.clientX, moveEvent.clientY)
-    const onMouseUp = () => {
-      endDrag()
-      window.removeEventListener('mousemove', onMouseMove)
-      window.removeEventListener('mouseup', onMouseUp)
-    }
-    window.addEventListener('mousemove', onMouseMove)
-    window.addEventListener('mouseup', onMouseUp)
-  }
-
-  // Touch's own counterpart to onHeaderMouseDown above - a phone/tablet never fires mouse events for
-  // a finger drag, so without this the panel would be readable on mobile but simply un-repositionable.
-  const onHeaderTouchStart = (e) => {
-    const touch = e.touches[0]
-    if (!touch) return
-    beginDrag(touch.clientX, touch.clientY)
-    const onTouchMove = (moveEvent) => {
-      if (!dragRef.current) return
-      moveEvent.preventDefault()
-      const moveTouch = moveEvent.touches[0]
-      if (moveTouch) dragTo(moveTouch.clientX, moveTouch.clientY)
-    }
-    const onTouchEnd = () => {
-      endDrag()
-      window.removeEventListener('touchmove', onTouchMove)
-      window.removeEventListener('touchend', onTouchEnd)
-    }
-    window.addEventListener('touchmove', onTouchMove, { passive: false })
-    window.addEventListener('touchend', onTouchEnd)
-  }
-
-  return createPortal(
-    <div
-      ref={panelRef}
-      style={{
-        position: 'fixed', left: pos.x, top: pos.y, zIndex: 1000, width: 'min(440px, calc(100vw - 24px))',
-        background: '#1f1f1f', border: `1px solid ${BORDER_COLOR}`, borderRadius: 8,
-        boxShadow: '0 8px 28px rgba(0, 0, 0, 0.55)',
-      }}
-    >
-      <div
-        onMouseDown={onHeaderMouseDown}
-        onTouchStart={onHeaderTouchStart}
-        style={{
-          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-          padding: '8px 12px', cursor: 'move', touchAction: 'none', userSelect: 'none',
-          borderBottom: `1px solid ${BORDER_COLOR}`,
-        }}
-      >
-        <Text strong style={{ fontSize: 13 }}>{title}</Text>
-        <Button type="text" size="small" onClick={onClose} style={{ padding: '0 4px' }}>✕</Button>
-      </div>
-      <div style={{ padding: 12 }}>{children}</div>
-    </div>,
-    document.body,
-  )
-}
+// DraggableFloatingPanel itself now lives in oiShared.jsx only (was a byte-identical duplicate
+// here) - imported below, alongside PremiumEmaChart.
 
 // Scans every REVEALED point strictly after entry (bounded by asOfMs, so the replay never "sees" a
 // bar it hasn't played yet) to find whether a stop-loss or target was actually TOUCHED at any point
@@ -1928,6 +1818,10 @@ export default function OiReplayPage() {
   const [paperPanelPos, setPaperPanelPos] = useState(() => ({
     x: Math.max(24, window.innerWidth - 480), y: 140,
   }))
+  // null (the default) keeps DraggableFloatingPanel's own original fixed-440px-wide, grow-to-content
+  // height - only set once the user actually drags the resize handle, same "caller owns the state"
+  // shape as paperPanelPos above.
+  const [paperPanelSize, setPaperPanelSize] = useState(null)
 
   // BANKNIFTY has no weekly expiry - NSE discontinued it (same rule Expired Backtest enforces).
   // Corrected right in the underlying picker's own onChange below, not a separate effect - this
@@ -3155,6 +3049,7 @@ export default function OiReplayPage() {
                   {paperPanelOpen && (
                     <DraggableFloatingPanel
                       title="Paper trade" pos={paperPanelPos} onPosChange={setPaperPanelPos}
+                      size={paperPanelSize} onSizeChange={setPaperPanelSize}
                       onClose={() => setPaperPanelOpen(false)}
                     >
                       <PaperTradePanel

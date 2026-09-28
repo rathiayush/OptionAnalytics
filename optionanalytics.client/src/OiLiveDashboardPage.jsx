@@ -359,6 +359,10 @@ export default function OiLiveDashboardPage() {
   const [paperPositions, setPaperPositions] = useState([])
   const [paperPanelOpen, setPaperPanelOpen] = useState(false)
   const [paperPanelPos, setPaperPanelPos] = useState(() => ({ x: Math.max(24, window.innerWidth - 480), y: 140 }))
+  // null (the default) keeps DraggableFloatingPanel's own original fixed-440px-wide, grow-to-content
+  // height - only set once the user actually drags the resize handle, same "caller owns the state"
+  // shape as paperPanelPos above.
+  const [paperPanelSize, setPaperPanelSize] = useState(null)
 
   const liveFeedSupported = LIVE_FEED_COMBOS.has(`${underlying}:${expiryFlag}`)
 
@@ -852,7 +856,10 @@ export default function OiLiveDashboardPage() {
             {error && <Alert type="error" showIcon message={error} />}
             {cdvError && <Alert type="error" showIcon message={cdvError} />}
             {paperPanelOpen && (
-              <DraggableFloatingPanel title="Paper trade" pos={paperPanelPos} onPosChange={setPaperPanelPos} onClose={() => setPaperPanelOpen(false)}>
+              <DraggableFloatingPanel
+                title="Paper trade" pos={paperPanelPos} onPosChange={setPaperPanelPos}
+                size={paperPanelSize} onSizeChange={setPaperPanelSize} onClose={() => setPaperPanelOpen(false)}
+              >
                 <PaperTradePanel
                   atmStrike={atmStrike} step={step}
                   side={paperSide} onSideChange={setPaperSide}
