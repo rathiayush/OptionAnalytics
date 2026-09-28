@@ -5,6 +5,7 @@ import './oiMobile.css'
 import {
   NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, STORED_PREFER_REST_OI, usePersistedState, istDateKey, toBar,
   toChartTime, CE_COLOR, PE_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR, istTimeFormatter, istTickMarkFormatter, fmtDateOnly,
+  useCardOrder, CardDragHandle,
 } from './shared.jsx'
 import {
   groupByStrike, latestAtOrBefore, aggregateBars, buildStrikeOffsetOptions,
@@ -256,6 +257,11 @@ function CeVsPeLineChart({ ceSeries, peSeries, height = 280 }) {
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }
 
+// Every reorderable card below the top control card, in their DEFAULT order - see useCardOrder's
+// own doc comment for why a page's actual render order comes from that hook, not this literal
+// order, once the user has ever dragged anything.
+const OI_LIVE_CARD_IDS = ['spot', 'entryB', 'entryC', 'cePremium', 'pePremium', 'cdvObv', 'ladder']
+
 export default function OiLiveDashboardPage() {
   const [underlying, setUnderlying] = usePersistedState(STORED_UNDERLYING, 'NIFTY')
   const [expiryFlag, setExpiryFlag] = useState('WEEK')
@@ -268,6 +274,10 @@ export default function OiLiveDashboardPage() {
   // overlap used to cause: a strike's own tracked premium silently coming from the wrong,
   // further-out contract with no visible way to notice from this page alone).
   const [resolvedExpiries, setResolvedExpiries] = useState({ week: null, month: null })
+  // Drag-to-reorder the cards below (Spot/Entry B/Entry C/CE premium/PE premium/CDV & OBV/ladder) -
+  // see useCardOrder's own doc comment. One shared arrangement across every underlying/expiry this
+  // page is pointed at, not per-combo - a layout preference, not a per-symbol setting.
+  const { order: cardOrder, dragHandleProps, dropTargetProps } = useCardOrder('optionanalytics.oiLiveCardOrder', OI_LIVE_CARD_IDS)
   const [chartBTimeframe, setChartBTimeframe] = useState(3)
   const [chartBEma1, setChartBEma1] = useState(9)
   const [chartBEma2, setChartBEma2] = useState(15)
@@ -900,30 +910,33 @@ export default function OiLiveDashboardPage() {
           </Space>
         </Card>
 
-        <Row gutter={[16, 16]}>
-          <Col xs={24} md={8}>
-            <Card size="small" title="Spot (live)">
-              {oneMinBars.length > 0 ? (
+        {(() => {
+          // One entry per OI_LIVE_CARD_IDS member - span is this card's own natural width
+          // (unaffected by drag order), title/body are exactly what each Card rendered before this
+          // became reorderable. Built inline (not hoisted out) since every card's body closes over
+          // this render's own local state/derived values, same as before.
+          const cardsById = {
+            spot: {
+              span: 8,
+              title: 'Spot (live)',
+              body: oneMinBars.length > 0 ? (
                 <ChartErrorBoundary key={`${underlying}-${expiryFlag}-${timeframe}`}>
                   <ReplayChart bars={displayBars} ladderRows={displayedLadderRows} dayKey={dayKey} atmStrike={atmStrike} step={step} vwapSeries={vwapSeries} showVwap={showVwap} height={560} />
                 </ChartErrorBoundary>
               ) : (
                 <Empty description={spotLoading ? 'Loading…' : 'No spot candles yet today.'} />
-              )}
-            </Card>
-          </Col>
-          <Col xs={24} md={8}>
-            <Card
-              size="small"
-              title={`Entry chart B (independent timeframe + EMA) · ATM ${atmStrike ?? ''} OI Δ`}
-              extra={
+              ),
+            },
+            entryB: {
+              span: 8,
+              title: `Entry chart B (independent timeframe + EMA) · ATM ${atmStrike ?? ''} OI Δ`,
+              extra: (
                 <Select
                   value={oiLookbackBars} onChange={setOiLookbackBars} size="small" style={{ width: 110 }}
                   options={OI_LOOKBACK_N_OPTIONS.map((n) => ({ value: n, label: `${n} bars` }))}
                 />
-              }
-            >
-              {oneMinBars.length > 0 ? (
+              ),
+              body: oneMinBars.length > 0 ? (
                 <div style={{ position: 'relative' }}>
                   <ChartErrorBoundary key={`emaB-${underlying}-${expiryFlag}-${chartBTimeframe}`}>
                     <EmaChart
@@ -947,12 +960,12 @@ export default function OiLiveDashboardPage() {
                 </div>
               ) : (
                 <Empty description={spotLoading ? 'Loading…' : 'No spot candles yet today.'} />
-              )}
-            </Card>
-          </Col>
-          <Col xs={24} md={8}>
-            <Card size="small" title="Entry chart C (independent timeframe + EMA)">
-              {oneMinBars.length > 0 ? (
+              ),
+            },
+            entryC: {
+              span: 8,
+              title: 'Entry chart C (independent timeframe + EMA)',
+              body: oneMinBars.length > 0 ? (
                 <ChartErrorBoundary key={`emaC-${underlying}-${expiryFlag}-${chartCTimeframe}`}>
                   <EmaChart
                     oneMinBars={oneMinBars} visibleCount={oneMinBars.length}
@@ -964,19 +977,13 @@ export default function OiLiveDashboardPage() {
                 </ChartErrorBoundary>
               ) : (
                 <Empty description={spotLoading ? 'Loading…' : 'No spot candles yet today.'} />
-              )}
-            </Card>
-          </Col>
-        </Row>
-
-        <Row gutter={[16, 16]}>
-          <Col xs={24} md={12}>
-            <Card
-              size="small"
-              title={`CE premium ${cePremiumStrike ?? ''}`}
-              extra={<Select value={cePremiumOffset} onChange={setCePremiumOffset} style={{ width: 150 }} options={premiumStrikeOptions} disabled={atmStrike == null} />}
-            >
-              {oneMinBars.length === 0
+              ),
+            },
+            cePremium: {
+              span: 12,
+              title: `CE premium ${cePremiumStrike ?? ''}`,
+              extra: <Select value={cePremiumOffset} onChange={setCePremiumOffset} style={{ width: 150 }} options={premiumStrikeOptions} disabled={atmStrike == null} />,
+              body: oneMinBars.length === 0
                 ? <Empty description="No spot candles yet today." />
                 : !cePremiumPoints || cePremiumPoints.length === 0
                   ? <Empty description={`No CE ${cePremiumStrike ?? ''} premium data yet today.`} />
@@ -990,16 +997,13 @@ export default function OiLiveDashboardPage() {
                         dayKey={`premium-ce-${dayKey}-${cePremiumOffset}`} height={320}
                       />
                     </ChartErrorBoundary>
-                  )}
-            </Card>
-          </Col>
-          <Col xs={24} md={12}>
-            <Card
-              size="small"
-              title={`PE premium ${pePremiumStrike ?? ''}`}
-              extra={<Select value={pePremiumOffset} onChange={setPePremiumOffset} style={{ width: 150 }} options={premiumStrikeOptions} disabled={atmStrike == null} />}
-            >
-              {oneMinBars.length === 0
+                  ),
+            },
+            pePremium: {
+              span: 12,
+              title: `PE premium ${pePremiumStrike ?? ''}`,
+              extra: <Select value={pePremiumOffset} onChange={setPePremiumOffset} style={{ width: 150 }} options={premiumStrikeOptions} disabled={atmStrike == null} />,
+              body: oneMinBars.length === 0
                 ? <Empty description="No spot candles yet today." />
                 : !pePremiumPoints || pePremiumPoints.length === 0
                   ? <Empty description={`No PE ${pePremiumStrike ?? ''} premium data yet today.`} />
@@ -1013,61 +1017,74 @@ export default function OiLiveDashboardPage() {
                         dayKey={`premium-pe-${dayKey}-${pePremiumOffset}`} height={320}
                       />
                     </ChartErrorBoundary>
-                  )}
-            </Card>
-          </Col>
-        </Row>
+                  ),
+            },
+            cdvObv: {
+              span: 24,
+              title: 'CDV & OBV (chain-wide, live)',
+              extra: <Select value={cdvTimeframe} onChange={setCdvTimeframe} style={{ width: 110 }} options={TIMEFRAME_OPTIONS} />,
+              body: (
+                <>
+                  <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 12 }}>
+                    Tracks CDV's own nearest expiry{cdvExpiry ? ` (${cdvExpiry})` : ''} independently of the
+                    Weekly/Monthly picker above - CDV only tracks a small rolling window of expiries, so it
+                    will not always be the same one the rest of this page is showing.
+                  </Text>
+                  <Row gutter={[16, 16]}>
+                    <Col xs={24} md={12}>
+                      <Text type="secondary" style={{ fontSize: 12 }}>CDV (cumulative delta volume)</Text>
+                      {cdvCePoints.length === 0 && cdvPePoints.length === 0 ? (
+                        <Empty description={cdvLoading ? 'Loading…' : 'No CDV data yet today.'} />
+                      ) : (
+                        <ChartErrorBoundary key={`cdv-${underlying}-${expiryFlag}-${cdvTimeframe}`}>
+                          <CeVsPeLineChart ceSeries={cdvCePoints} peSeries={cdvPePoints} height={280} />
+                        </ChartErrorBoundary>
+                      )}
+                    </Col>
+                    <Col xs={24} md={12}>
+                      <Text type="secondary" style={{ fontSize: 12 }}>OBV (on-balance volume)</Text>
+                      {obvCePoints.length === 0 && obvPePoints.length === 0 ? (
+                        <Empty description={cdvLoading ? 'Loading…' : 'No OBV data yet today.'} />
+                      ) : (
+                        <ChartErrorBoundary key={`obv-${underlying}-${expiryFlag}-${cdvTimeframe}`}>
+                          <CeVsPeLineChart ceSeries={obvCePoints} peSeries={obvPePoints} height={280} />
+                        </ChartErrorBoundary>
+                      )}
+                    </Col>
+                  </Row>
+                </>
+              ),
+            },
+            ladder: {
+              span: 24,
+              title: 'OI / IV ladder (nearest expiry, live)',
+              extra: <Segmented value={oiLadderScope} onChange={setOiLadderScope} options={[{ label: 'All', value: 'all' }, { label: 'Top 5', value: 'top5' }]} />,
+              bodyStyle: { maxHeight: 560, overflowY: 'auto' },
+              body: <OiLadder rows={displayedLadderRows} atmStrike={atmStrike} />,
+            },
+          }
 
-        <Row gutter={16}>
-          <Col span={24}>
-            <Card
-              size="small"
-              title="CDV & OBV (chain-wide, live)"
-              extra={<Select value={cdvTimeframe} onChange={setCdvTimeframe} style={{ width: 110 }} options={TIMEFRAME_OPTIONS} />}
-            >
-              <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 12 }}>
-                Tracks CDV's own nearest expiry{cdvExpiry ? ` (${cdvExpiry})` : ''} independently of the
-                Weekly/Monthly picker above - CDV only tracks a small rolling window of expiries, so it
-                will not always be the same one the rest of this page is showing.
-              </Text>
-              <Row gutter={[16, 16]}>
-                <Col xs={24} md={12}>
-                  <Text type="secondary" style={{ fontSize: 12 }}>CDV (cumulative delta volume)</Text>
-                  {cdvCePoints.length === 0 && cdvPePoints.length === 0 ? (
-                    <Empty description={cdvLoading ? 'Loading…' : 'No CDV data yet today.'} />
-                  ) : (
-                    <ChartErrorBoundary key={`cdv-${underlying}-${expiryFlag}-${cdvTimeframe}`}>
-                      <CeVsPeLineChart ceSeries={cdvCePoints} peSeries={cdvPePoints} height={280} />
-                    </ChartErrorBoundary>
-                  )}
-                </Col>
-                <Col xs={24} md={12}>
-                  <Text type="secondary" style={{ fontSize: 12 }}>OBV (on-balance volume)</Text>
-                  {obvCePoints.length === 0 && obvPePoints.length === 0 ? (
-                    <Empty description={cdvLoading ? 'Loading…' : 'No OBV data yet today.'} />
-                  ) : (
-                    <ChartErrorBoundary key={`obv-${underlying}-${expiryFlag}-${cdvTimeframe}`}>
-                      <CeVsPeLineChart ceSeries={obvCePoints} peSeries={obvPePoints} height={280} />
-                    </ChartErrorBoundary>
-                  )}
-                </Col>
-              </Row>
-            </Card>
-          </Col>
-        </Row>
-
-        <Row gutter={16}>
-          <Col span={24}>
-            <Card
-              size="small"
-              title="OI / IV ladder (nearest expiry, live)"
-              extra={<Segmented value={oiLadderScope} onChange={setOiLadderScope} options={[{ label: 'All', value: 'all' }, { label: 'Top 5', value: 'top5' }]} />}
-              bodyStyle={{ maxHeight: 560, overflowY: 'auto' }}
-            >
-              <OiLadder rows={displayedLadderRows} atmStrike={atmStrike} />
-            </Card>
-          </Col>
-        </Row>
+          return (
+            <Row gutter={[16, 16]}>
+              {cardOrder.map((id) => {
+                const c = cardsById[id]
+                if (!c) return null
+                return (
+                  <Col xs={24} md={c.span} key={id} {...dropTargetProps(id)}>
+                    <Card
+                      size="small"
+                      title={<Space size={4}><CardDragHandle {...dragHandleProps(id)} />{c.title}</Space>}
+                      extra={c.extra}
+                      bodyStyle={c.bodyStyle}
+                    >
+                      {c.body}
+                    </Card>
+                  </Col>
+                )
+              })}
+            </Row>
+          )
+        })()}
       </Space>
     </div>
   )
