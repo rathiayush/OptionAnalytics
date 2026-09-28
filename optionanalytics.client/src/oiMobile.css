@@ -1,10 +1,9 @@
-/* Continuous, viewport-width-driven scaling for the Live OI Dashboard and OI Replay pages' own antd
-   chrome (Card titles, Tags, Statistics) - clamp() rather than a fixed breakpoint so text/padding
-   shrink smoothly as the viewport narrows, matching the fluid stacking those pages' own responsive
-   Col spans already do, instead of snapping abruptly at one width. Scoped under .oi-mobile-page so
-   this can never reach any other page - Dashboard/App.jsx especially, which carries live trading
-   risk and must never be touched by an unrelated CSS change - since this file is only imported by
-   OiLiveDashboardPage.jsx and OiReplayPage.jsx.
+/* Continuous, viewport-width-driven scaling for OI Replay's own antd chrome (Card titles, Tags,
+   Statistics) - clamp() rather than a fixed breakpoint so text/padding shrink smoothly as the
+   viewport narrows, matching the fluid stacking that page's own responsive Col spans already do,
+   instead of snapping abruptly at one width. Scoped under .oi-mobile-page so this can never reach
+   any other page - Dashboard/App.jsx especially, which carries live trading risk and must never be
+   touched by an unrelated CSS change - since this file is only imported by OiReplayPage.jsx.
 
    clamp(min, preferred, max): the `vw` term is measured against the actual device viewport (not
    this container's own maxWidth), so it converges to `max` on a desktop-sized screen and shrinks

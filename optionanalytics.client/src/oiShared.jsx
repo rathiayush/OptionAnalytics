@@ -11,12 +11,12 @@ import {
 
 const { Text } = Typography
 
-// Pure helpers and chart/table components shared between OiReplayPage.jsx (historical replay) and
-// OiLiveDashboardPage.jsx (always-live) - originally all lived inside OiReplayPage.jsx, extracted
-// here UNCHANGED so both pages get one tested implementation. OiReplayPage.jsx keeps its own
-// separate replay-clock machinery (visibleCount/asOfMs) entirely to itself; nothing in this file
-// depends on that, which is exactly why it was safe to lift out - every function/component below
-// takes its data via plain arguments/props.
+// Pure helpers and chart/table components originally lived inside OiReplayPage.jsx, extracted here
+// UNCHANGED so a second live consumer (LiveStrikeDataPage.jsx) could reuse the identical
+// implementation rather than a bespoke copy. OiReplayPage.jsx keeps its own separate replay-clock
+// machinery (visibleCount/asOfMs) entirely to itself; nothing in this file depends on that, which is
+// exactly why it was safe to lift out - every function/component below takes its data via plain
+// arguments/props.
 //
 // RECONNECT_RETRY_POLICY itself now lives in shared.jsx (not here) so App.jsx's own useHub can use
 // the identical policy instead of a third copy - see its doc comment there for why the bare
@@ -33,11 +33,10 @@ const EMPTY_ARRAY = []
 // OiReplayPage's own useOiReplayLiveFeed used to be exposed to before its own [enabled] dependency
 // was removed - see its doc comment). Instead the connection stays open across a selection change
 // and just SWITCHES GROUPS (see syncSignalRGroups) - underlying/expiryFlag are passed in purely to
-// drive that, never to gate the connection's own lifecycle. Originally local to
-// OiLiveDashboardPage.jsx, moved here so a second live page (LiveStrikeDataPage) can share the
-// identical connection logic rather than a third bespoke copy - OiReplayPage.jsx keeps its own
-// separate hook (it also needs a futures-only underlying-group case oiRestSnapshot never does) but
-// follows the exact same group-membership shape.
+// drive that, never to gate the connection's own lifecycle. Currently only used by
+// LiveStrikeDataPage.jsx - OiReplayPage.jsx keeps its own separate hook (it also needs a
+// futures-only underlying-group case oiRestSnapshot never does) but follows the exact same
+// group-membership shape.
 export function useOiLiveHub(onSpotUpdate, onOiReplayTick, onReconnected, onCdvUpdate, onCdvBarClosed, onOiRestSnapshot, underlying, expiryFlag) {
   const spotRef = useRef(onSpotUpdate)
   const tickRef = useRef(onOiReplayTick)
@@ -67,10 +66,9 @@ export function useOiLiveHub(onSpotUpdate, onOiReplayTick, onReconnected, onCdvU
       .build()
     connectionRef.current = connection
 
-    // Optional chaining on every one of these - unlike OiLiveDashboardPage (the original, only
-    // caller until now), a caller like LiveStrikeDataPage genuinely has no use for some of these
-    // events and passes null for them; calling a null ref directly would throw the moment that
-    // event arrives, which for spotUpdate/oiReplayTick is roughly every second.
+    // Optional chaining on every one of these - a caller like LiveStrikeDataPage genuinely has no
+    // use for some of these events and passes null for them; calling a null ref directly would throw
+    // the moment that event arrives, which for spotUpdate/oiReplayTick is roughly every second.
     connection.on('spotUpdate', (snapshot) => spotRef.current?.(snapshot))
     connection.on('oiReplayTick', (tick) => tickRef.current?.(tick))
     // Same CDV/OBV events App.jsx's own useHub already listens for, off the SAME shared hub -
@@ -81,7 +79,8 @@ export function useOiLiveHub(onSpotUpdate, onOiReplayTick, onReconnected, onCdvU
     // OPTIONAL REST-quote fallback (OiReplayLiveFeedService.RunRestQuoteLoopAsync) - every strike's
     // OI/price from Dhan's Option Chain snapshot endpoint, re-broadcast every ~30s regardless of
     // whether any client wants it (see that method's own doc comment for why that's safe/cheap).
-    // Only OiLiveDashboardPage currently passes a handler for this.
+    // No current caller passes a handler for this (null, like LiveStrikeDataPage's other unused
+    // events above) - kept wired up since a future caller may want it.
     connection.on('oiRestSnapshot', (snapshot) => restSnapshotRef.current?.(snapshot))
     connection.onreconnecting(() => setConnectionState('reconnecting'))
     // A reconnect gets a brand-new server-side connection with NO group membership at all - rejoin
@@ -1328,12 +1327,10 @@ function OiChange({ value }) {
   )
 }
 
-// Cumulative OI change since the day's very first revealed point. `suspect` (Live OI Dashboard
-// only - OI Replay's own rows never set it, so this is always falsy there) means the raw delta
-// looks implausible against current OI - see SINCE_OPEN_SANITY_MULTIPLE's own doc comment on
-// OiLiveDashboardPage.jsx - but it is ALWAYS shown, never hidden, just marked with a "?" so a
-// reading worth double-checking is never confused with "no data at all" (a real report, "this
-// calculation is incorrect", once traced back to this exact figure being suppressed instead of
+// Cumulative OI change since the day's very first revealed point. `suspect` means the raw delta
+// looks implausible against current OI - but it is ALWAYS shown, never hidden, just marked with a
+// "?" so a reading worth double-checking is never confused with "no data at all" (a real report,
+// "this calculation is incorrect", once traced back to this exact figure being suppressed instead of
 // flagged).
 function SinceOpenChange({ value, suspect = false }) {
   if (value == null) return null
