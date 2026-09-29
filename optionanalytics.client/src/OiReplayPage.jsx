@@ -1513,6 +1513,14 @@ function writePersistedPaperPositions(underlying, dateKey, positions) {
 // fetch runs in the background to reconcile, never a skipped one.
 const LIVE_DAY_CACHE_STORAGE_KEY = 'optionanalytics.oiReplay.liveDayCache'
 
+// How often the live-day cache is actually allowed to write to localStorage, at most - see the
+// write effect's own doc comment for the real, confirmed slowdown this throttle fixes. A few
+// seconds of possible staleness in the cache is a non-issue: the reload path that reads it back
+// still reconciles with a genuine fetch right after painting from it (see this constant's own
+// caller), so this is purely a perceived-latency optimization losing a few seconds of headroom, not
+// a correctness one giving anything up.
+const CACHE_WRITE_THROTTLE_MS = 3000
+
 function readLiveDayCache(underlying, dateKey) {
   try {
     const raw = window.localStorage.getItem(LIVE_DAY_CACHE_STORAGE_KEY)
@@ -2131,9 +2139,29 @@ export default function OiReplayPage() {
   // (including a historical day switch) - skipped rather than overwriting today's still-good cache
   // with nothing, same reasoning useOiReplayLiveFeed's own doc comment gives for not tearing the
   // connection down on that same transient null.
+  //
+  // THROTTLED, not run on every tick directly - this used to fire this effect's own JSON.stringify +
+  // synchronous localStorage.setItem unconditionally on every single live tick (spot, each strike's
+  // own OI, futures, all independently), and the payload it serializes only grows through the day -
+  // by the afternoon this was a real, confirmed "the page hangs and gets slower as the day goes on"
+  // regression: a synchronous main-thread write of an ever-larger blob, several times a second, was
+  // squarely in the way of every chart's own re-render. cacheWriteRef holds a trailing timer so the
+  // LATEST state still always eventually gets written (never silently dropped), but never more often
+  // than CACHE_WRITE_THROTTLE_MS - immediately if enough time has already passed since the last
+  // write, otherwise scheduled for whatever's left of that window.
+  const cacheWriteRef = useRef({ timeoutId: null, lastWriteMs: 0 })
   useEffect(() => {
     if (!isToday || !underlying || !date || !result) return
-    writeLiveDayCache(underlying, date.format('YYYY-MM-DD'), { result, liveBars, liveCePoints, livePePoints, liveFuturesPoints, vwapSeries, liveExpiryFlag })
+    const state = cacheWriteRef.current
+    if (state.timeoutId) clearTimeout(state.timeoutId)
+    const writeNow = () => {
+      state.lastWriteMs = Date.now()
+      writeLiveDayCache(underlying, date.format('YYYY-MM-DD'), { result, liveBars, liveCePoints, livePePoints, liveFuturesPoints, vwapSeries, liveExpiryFlag })
+    }
+    const elapsedMs = Date.now() - state.lastWriteMs
+    if (elapsedMs >= CACHE_WRITE_THROTTLE_MS) writeNow()
+    else state.timeoutId = setTimeout(writeNow, CACHE_WRITE_THROTTLE_MS - elapsedMs)
+    return () => clearTimeout(state.timeoutId)
   }, [result, liveBars, liveCePoints, livePePoints, liveFuturesPoints, vwapSeries, liveExpiryFlag, isToday, underlying, date])
 
   // Backs the live-mode expiry picker - fetched per underlying regardless of isToday, so the list is
