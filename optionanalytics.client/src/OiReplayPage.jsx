@@ -2100,6 +2100,19 @@ export default function OiReplayPage() {
     load(today)
   }
 
+  // Opens straight into today's live view instead of the empty "pick a day and click Load day"
+  // state - the user's own "should always be a live dashboard, we shouldn't have to load every time"
+  // ask. Guarded on `date` still being null (its own initial value, before ANYTHING has been
+  // loaded) so this only ever fires once, on the very first mount - manually loading a historical
+  // day afterward is untouched, and re-clicking Go Live is still exactly the same one-liner it
+  // always was. underlying needs no guard of its own: it's already persisted with a real default
+  // (see its own usePersistedState call above), never null.
+  useEffect(() => {
+    if (date) return
+    goLive()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   // The TRUE replay clock - native 1-minute bars, so every derived read (ladder, OI change, Market
   // Read, Day Accumulation, alerts) advances one real minute per tick regardless of which timeframe
   // the CHART itself displays. The chart's own candles are a re-aggregation of a slice of this,
