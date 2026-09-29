@@ -954,6 +954,19 @@ function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfMs, time
     return max
   }, [perStrikeChange])
 
+  // `strikes` is the UNION of every strike EITHER side has ever reported (see heatmapStrikes' own
+  // doc comment) - a strike with real PE activity but that this side (say CE) has simply never
+  // ticked for renders as a genuinely, entirely empty row here, not a bug: buildOiChangeMatrix gives
+  // it an empty Map (nothing to compute a delta FROM), so every cell in its row correctly has
+  // nothing to draw. Tracked separately from maxAbs === 0 (below) - that's "every row is flat",
+  // this is "THIS row specifically has no data at all" - so the row's own label can say so instead
+  // of leaving a blank row that reads exactly like a rendering glitch.
+  const strikesWithNoData = useMemo(() => {
+    const set = new Set()
+    for (const strike of strikes) if ((perStrikeChange.get(strike)?.size ?? 0) === 0) set.add(strike)
+    return set
+  }, [strikes, perStrikeChange])
+
   // The whole grid's own totals - every strike, every minute this side has revealed so far, summed
   // rather than left to only ever be read cell by cell. `removed` is kept as the NEGATIVE sum (so
   // `delta = added + removed` falls out directly) and only flipped to a positive magnitude for
@@ -1057,18 +1070,26 @@ function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfMs, time
     <div style={{ display: 'flex', border: `1px solid ${BORDER_COLOR}`, borderRadius: 4, overflow: 'hidden' }}>
       <div style={{ flexShrink: 0, width: HEATMAP_LABEL_WIDTH, background: '#161a22' }}>
         <div style={{ height: HEATMAP_AXIS_HEIGHT }} />
-        {strikes.map((strike) => (
-          <div
-            key={strike}
-            style={{
-              height: HEATMAP_ROW_HEIGHT, lineHeight: `${HEATMAP_ROW_HEIGHT}px`, textAlign: 'right', paddingRight: 8,
-              fontSize: 11, whiteSpace: 'nowrap', fontWeight: strike === atmStrike ? 700 : 400,
-              color: strike === atmStrike ? '#fff' : AXIS_COLOR,
-            }}
-          >
-            {strike.toLocaleString()}
-          </div>
-        ))}
+        {strikes.map((strike) => {
+          const noData = strikesWithNoData.has(strike)
+          return (
+            <div
+              key={strike}
+              title={noData ? `No ${label} OI data at this strike` : undefined}
+              style={{
+                height: HEATMAP_ROW_HEIGHT, lineHeight: `${HEATMAP_ROW_HEIGHT}px`, textAlign: 'right', paddingRight: 8,
+                fontSize: 11, whiteSpace: 'nowrap', fontWeight: strike === atmStrike ? 700 : 400,
+                // Dimmed further than the normal AXIS_COLOR label, and italic - an empty row reads
+                // like a rendering glitch otherwise (see strikesWithNoData's own doc comment); this
+                // marks it as a real, explained absence instead, without needing a whole extra column.
+                color: noData ? `${AXIS_COLOR}80` : strike === atmStrike ? '#fff' : AXIS_COLOR,
+                fontStyle: noData ? 'italic' : 'normal',
+              }}
+            >
+              {strike.toLocaleString()}
+            </div>
+          )
+        })}
       </div>
       <div ref={scrollRef} style={{ overflowX: 'auto', overflowY: 'hidden' }} onMouseLeave={() => setHover(null)}>
         <canvas ref={canvasRef} onMouseMove={handleMouseMove} style={{ display: 'block' }} />
@@ -1076,7 +1097,17 @@ function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfMs, time
       {hover && (
         <div
           style={{
-            position: 'fixed', left: hover.clientX + 14, top: hover.clientY + 14, zIndex: 1000,
+            position: 'fixed',
+            // Flips to the LEFT of the cursor once there isn't roughly enough room to the right for
+            // the widest label this ever renders ("CE 22,650 @ 03:14 pm: +1.23M") - fixed `left:
+            // clientX + 14` alone ran the label straight off the right edge of the screen on a phone
+            // (or anywhere the cursor/touch lands in that last ~220px), clipping it exactly like the
+            // real screenshot caught. translateX(-100%) shifts the box fully behind its own anchor
+            // point instead of needing this label's own actual rendered width up front.
+            ...(hover.clientX > window.innerWidth - 220
+              ? { left: hover.clientX - 14, transform: 'translateX(-100%)' }
+              : { left: hover.clientX + 14 }),
+            top: hover.clientY + 14, zIndex: 1000,
             background: '#161a22', border: `1px solid ${BORDER_COLOR}`, borderRadius: 4, padding: '4px 8px',
             fontSize: 11, color: '#fff', pointerEvents: 'none', whiteSpace: 'nowrap',
           }}
