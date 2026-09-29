@@ -101,6 +101,15 @@ function useOiReplayLiveFeed(onSpotUpdate, onOiReplayTick, onFuturesTick, onReco
   const groupsRef = useRef([])
 
   useEffect(() => {
+    // Belt-and-suspenders, not a fix for an observed leak: with today's `[]` deps this effect only
+    // ever runs once per mount, and React always runs the PREVIOUS mount's own cleanup (which already
+    // calls connection.stop() below) before a new one - so connectionRef.current is already null by
+    // the time we get here in every normal case. Stopping whatever's still referenced here anyway
+    // costs nothing and closes the one way this could ever go wrong: a future edit reintroducing a
+    // dependency to this array (exactly the reconnect-churn bug this hook's own history already
+    // describes) would otherwise leave the OLD connection open and unreferenced - a genuine socket
+    // leak - the moment a new one replaces it.
+    if (connectionRef.current) connectionRef.current.stop()
     const connection = new signalR.HubConnectionBuilder()
       .withUrl('/hubs/spot')
       .withAutomaticReconnect(RECONNECT_RETRY_POLICY)
