@@ -7,7 +7,7 @@ import * as signalR from '@microsoft/signalr'
 import './oiMobile.css'
 import {
   UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR,
-  istTimeFormatter, istTickMarkFormatter, toBar, toChartTime, fromChartTime, istDateKey, fmtDateOnly,
+  istTimeFormatter, istTimeWithSecondsFormatter, istTickMarkFormatter, toBar, toChartTime, fromChartTime, istDateKey, fmtDateOnly,
   NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, usePersistedState,
   syncSignalRGroups, joinAllSignalRGroups, useCardOrder, CardDragHandle,
 } from './shared.jsx'
@@ -208,9 +208,18 @@ function aggregateBars(oneMinBars, timeframeMinutes) {
 // timeframeMinutes buckets, keeping the LAST value seen in each bucket - the right way to downsample
 // a LEVEL (like OI, which isn't meaningfully summed or averaged across a window) rather than a flow.
 // Used by the OI lookback features below (both the Entry chart B overlay and the Total OI Lookback
-// Table).
+// Table) and the OI change heatmap.
+//
+// Previously short-circuited (returned the raw points untouched) whenever minutes <= 1, on the
+// assumption a "1-minute" bucket size meant "the source is already 1-minute resolution, nothing to
+// do" - true for candle-derived series, but OI ticks arrive whenever the feed updates, not neatly
+// once a minute, so that early return left them un-bucketed: every raw tick became its own column,
+// most within the SAME displayed minute (istTimeFormatter only shows hour:minute, no seconds) - the
+// "tick by tick instead of a real timeframe" report, where the heatmap showed the same time label
+// repeated across many columns and most of the grid blank. Also allows fractional minutes (0.5 = 30
+// seconds) for a finer bucket than the whole-minute options everywhere else on this page offer.
 function aggregateLinePoints(points, minutes) {
-  if (minutes <= 1 || points.length === 0) return points
+  if (minutes <= 0 || points.length === 0) return points
   const bucketSeconds = minutes * 60
   const buckets = new Map()
   for (const p of points) buckets.set(Math.floor(p.time / bucketSeconds) * bucketSeconds, { ...p, time: Math.floor(p.time / bucketSeconds) * bucketSeconds })
@@ -278,17 +287,17 @@ function toSinceOpenSeries(totalSeries) {
 
 // The all-strikes counterpart to the single-strike drill-down's own change tab - "where, across the
 // WHOLE tracked band, has OI actually been added or removed" at a glance, which reading one strike
-// at a time can't give. Builds a strike x minute matrix for one side (CE or PE): each strike gets
-// its own computeOiChangeSeries off its own 1-minute-bucketed level series, keyed by bucket time in
-// a Map for O(1) lookup per cell. The column set is the UNION of every bucket ANY strike in the band
-// has touched (not just the first strike's own), so a strike that only started ticking partway
-// through the day still lines up against the correct real time rather than sliding left.
-function buildOiChangeMatrix(byStrike, strikes, asOfMs) {
+// at a time can't give. Builds a strike x timeframe matrix for one side (CE or PE): each strike gets
+// its own computeOiChangeSeries off its own timeframeMinutes-bucketed level series, keyed by bucket
+// time in a Map for O(1) lookup per cell. The column set is the UNION of every bucket ANY strike in
+// the band has touched (not just the first strike's own), so a strike that only started ticking
+// partway through the day still lines up against the correct real time rather than sliding left.
+function buildOiChangeMatrix(byStrike, strikes, asOfMs, timeframeMinutes) {
   const perStrikeChange = new Map()
   const bucketSet = new Set()
   for (const strike of strikes) {
     const raw = (byStrike.get(strike) ?? []).filter((p) => asOfMs == null || new Date(p.time).getTime() <= asOfMs)
-    const total = aggregateLinePoints(raw.map((p) => ({ time: toChartTime(p.time), value: p.openInterest })), 1)
+    const total = aggregateLinePoints(raw.map((p) => ({ time: toChartTime(p.time), value: p.openInterest })), timeframeMinutes)
     const change = computeOiChangeSeries(total)
     perStrikeChange.set(strike, new Map(change.map((p) => [p.time, p.value])))
     for (const p of change) bucketSet.add(p.time)
@@ -886,6 +895,18 @@ const OI_REMOVED_COLOR = '#d95926'
 const HEATMAP_MIN_ALPHA = 0.12
 const HEATMAP_MAX_ALPHA = 0.9
 
+// The heatmap's own bucket size - independent of every other timeframe picker on this page (chart B,
+// the Total OI Lookback table), since none of those need a sub-minute option and this one specifically
+// does: OI ticks arrive whenever the feed updates, not neatly once a minute, so without a real bucket
+// size every raw tick became its own column (see aggregateLinePoints' own doc comment for the "tick by
+// tick instead of a real timeframe" report this fixes). 30 sec is the finest offered - anything finer
+// would just be raw ticks again.
+const HEATMAP_TIMEFRAME_OPTIONS = [
+  { value: 0.5, label: '30 sec' },
+  { value: 1, label: '1 min' },
+  { value: 3, label: '3 min' },
+]
+
 // Strike x minute OI-change grid for one side (CE or PE) - the all-strikes counterpart to the
 // single-strike drill-down popup's own "Per-minute change" tab. A native scrollable HTML table
 // rather than a lightweight-charts series: lightweight-charts has no heatmap/cell series type, and a
@@ -912,11 +933,18 @@ const HEATMAP_AXIS_HEIGHT = 20
 // real heatmap out of a library with no native heatmap series type, and the cheapest to render at
 // this cell count. The strike-label column is plain HTML (not baked into the canvas) so it can stay
 // visually fixed while only the canvas itself scrolls horizontally through the day.
-function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfMs }) {
+function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfMs, timeframeMinutes }) {
   const canvasRef = useRef(null)
   const scrollRef = useRef(null)
   const [hover, setHover] = useState(null)
-  const { buckets, perStrikeChange } = useMemo(() => buildOiChangeMatrix(byStrike, strikes, asOfMs), [byStrike, strikes, asOfMs])
+  const { buckets, perStrikeChange } = useMemo(
+    () => buildOiChangeMatrix(byStrike, strikes, asOfMs, timeframeMinutes),
+    [byStrike, strikes, asOfMs, timeframeMinutes],
+  )
+  // istTimeFormatter (hour:minute only) reads two distinct 30-second buckets as the identical label -
+  // fine at 1 min/3 min, where every column IS a distinct minute, but exactly the "same time shown
+  // over and over" look at the 30 sec option unless seconds are shown too.
+  const formatBucketTime = timeframeMinutes < 1 ? istTimeWithSecondsFormatter : istTimeFormatter
 
   const maxAbs = useMemo(() => {
     let max = 0
@@ -990,9 +1018,9 @@ function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfMs }) {
     const labelEvery = Math.max(1, Math.round(60 / HEATMAP_CELL_WIDTH))
     buckets.forEach((t, col) => {
       if (col % labelEvery !== 0) return
-      ctx.fillText(istTimeFormatter(t), col * HEATMAP_CELL_WIDTH + HEATMAP_CELL_WIDTH / 2, plotHeight + 14)
+      ctx.fillText(formatBucketTime(t), col * HEATMAP_CELL_WIDTH + HEATMAP_CELL_WIDTH / 2, plotHeight + 14)
     })
-  }, [buckets, perStrikeChange, strikes, maxAbs, plotWidth, plotHeight])
+  }, [buckets, perStrikeChange, strikes, maxAbs, plotWidth, plotHeight, formatBucketTime])
 
   // Scrolls to the newest minute once a fresh bucket set first appears (a new day loaded, or the
   // very first live buckets) - not on every subsequent tick, which would otherwise yank a reader's
@@ -1053,7 +1081,7 @@ function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfMs }) {
             fontSize: 11, color: '#fff', pointerEvents: 'none', whiteSpace: 'nowrap',
           }}
         >
-          {label} {hover.strike.toLocaleString()} @ {istTimeFormatter(hover.time)}:{' '}
+          {label} {hover.strike.toLocaleString()} @ {formatBucketTime(hover.time)}:{' '}
           <Text strong style={{ color: !hover.value ? '#fff' : hover.value > 0 ? OI_ADDED_COLOR : OI_REMOVED_COLOR }}>
             {hover.value == null ? '—' : formatOiMillions(hover.value, { signed: true })}
           </Text>
@@ -1774,6 +1802,9 @@ export default function OiReplayPage() {
   // total OI rather than one strike, with its own independent timeframe (default 1-minute bars).
   const [totalOiLookbackBars, setTotalOiLookbackBars] = useState(DEFAULT_TOTAL_OI_LOOKBACK_BARS)
   const [totalOiLookbackTimeframe, setTotalOiLookbackTimeframe] = useState(1)
+  // OI change heatmap's own bucket size - see HEATMAP_TIMEFRAME_OPTIONS' own doc comment for why this
+  // is independent of every other timeframe picker on the page.
+  const [heatmapTimeframeMinutes, setHeatmapTimeframeMinutes] = useState(1)
   // Which of the two whole-chain OI charts the Day OI Accumulation card shows - see the chart
   // itself, further down, for why this is a switch rather than the per-strike drilldown's own
   // stacked pair (both would double this card's already-tall height, and the day-level numbers
@@ -3064,26 +3095,34 @@ export default function OiReplayPage() {
             )}
 
             {visibleSections.includes('oiHeatmap') && (
-              <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('oiHeatmap')} />OI change heatmap (all strikes, per minute)</Space>} {...orderedDropProps('oiHeatmap')}>
+              <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('oiHeatmap')} />OI change heatmap (all strikes)</Space>} {...orderedDropProps('oiHeatmap')}>
                 <Space direction="vertical" size={12} style={{ width: '100%' }}>
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    Every tracked strike's own OI change, minute by minute - color intensity is how much changed (scaled to the
-                    heaviest change this side has shown today), not an absolute scale, so a quiet day and a violent one both
-                    use the full range. Hover a cell for the exact number. Scroll horizontally for earlier in the day. Blue/orange
-                    here, not green/red - the chart's own R/S wall lines already use green/red for a different meaning (which
-                    side, how heavy), so this uses its own separate color language for "added vs removed."
+                    Every tracked strike's own OI change, bucketed to the timeframe below - color intensity is how much changed
+                    (scaled to the heaviest change this side has shown today), not an absolute scale, so a quiet day and a
+                    violent one both use the full range. Hover a cell for the exact number. Scroll horizontally for earlier in
+                    the day. Blue/orange here, not green/red - the chart's own R/S wall lines already use green/red for a
+                    different meaning (which side, how heavy), so this uses its own separate color language for "added vs
+                    removed."
                   </Text>
-                  <Space size={16}>
+                  <Space size={16} wrap>
                     <Text style={{ color: OI_ADDED_COLOR }}>■ OI added</Text>
                     <Text style={{ color: OI_REMOVED_COLOR }}>■ OI removed</Text>
+                    <Space size={4}>
+                      <Text type="secondary" style={{ fontSize: 12 }}>Bucket</Text>
+                      <Select
+                        value={heatmapTimeframeMinutes} onChange={setHeatmapTimeframeMinutes} size="small" style={{ width: 90 }}
+                        options={HEATMAP_TIMEFRAME_OPTIONS}
+                      />
+                    </Space>
                   </Space>
                   <div>
                     <Text strong style={{ fontSize: 12 }}>CE</Text>
-                    <OiChangeHeatmapPlot label="CE" byStrike={ceByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} asOfMs={asOfMs} />
+                    <OiChangeHeatmapPlot label="CE" byStrike={ceByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} />
                   </div>
                   <div>
                     <Text strong style={{ fontSize: 12 }}>PE</Text>
-                    <OiChangeHeatmapPlot label="PE" byStrike={peByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} asOfMs={asOfMs} />
+                    <OiChangeHeatmapPlot label="PE" byStrike={peByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} />
                   </div>
                 </Space>
               </Card>

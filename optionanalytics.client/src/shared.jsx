@@ -411,10 +411,19 @@ export function fromChartTime(chartTimeSeconds) {
 }
 
 const IST_TIME_FORMAT = new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'UTC' })
+const IST_TIME_WITH_SECONDS_FORMAT = new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true, timeZone: 'UTC' })
 const IST_TICK_DATE_FORMAT = new Intl.DateTimeFormat('en-IN', { day: 'numeric', month: 'short', timeZone: 'UTC' })
 
 export function istTimeFormatter(time) {
   return IST_TIME_FORMAT.format(new Date(time * 1000))
+}
+
+// Only ever needed where a bucket size finer than a minute is possible (the OI change heatmap's own
+// 30-second option) - istTimeFormatter alone would show the same hour:minute label for every such
+// bucket, which is exactly the "same time repeated across many columns" bug that option was added to
+// fix.
+export function istTimeWithSecondsFormatter(time) {
+  return IST_TIME_WITH_SECONDS_FORMAT.format(new Date(time * 1000))
 }
 
 export function istTickMarkFormatter(time, tickMarkType) {
