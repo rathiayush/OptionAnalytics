@@ -388,6 +388,12 @@ function useHub(onSpotUpdate, onCdvUpdate, onConfluenceAlert, onReconnected, onC
   const groupsRef = useRef([])
 
   useEffect(() => {
+    // Belt-and-suspenders, not a fix for an observed leak - see OiReplayPage.jsx's own
+    // useOiReplayLiveFeed for the identical guard and its full reasoning: with today's `[]` deps this
+    // is already unreachable in every normal case (React's own cleanup-before-next-effect ordering
+    // already stops the previous connection), but costs nothing and closes off a future edit
+    // reintroducing a dependency here leaving an old connection open and unreferenced.
+    if (connectionRef.current) connectionRef.current.stop()
     const connection = new signalR.HubConnectionBuilder()
       .withUrl('/hubs/spot')
       .withAutomaticReconnect(RECONNECT_RETRY_POLICY)
