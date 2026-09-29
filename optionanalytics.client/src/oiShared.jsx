@@ -5,7 +5,7 @@ import { createChart, CandlestickSeries, LineSeries, CrosshairMode } from 'light
 import * as signalR from '@microsoft/signalr'
 import {
   UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR, RECONNECT_RETRY_POLICY,
-  istTimeFormatter, istTickMarkFormatter, toChartTime, fromChartTime, istDateKey, TIMEFRAME_OPTIONS,
+  istTimeFormatter, istTickMarkFormatter, toChartTime, TIMEFRAME_OPTIONS,
   syncSignalRGroups, joinAllSignalRGroups,
 } from './shared.jsx'
 
@@ -64,36 +64,6 @@ export function useFitContentAsDataGrows(chartRef, dataLength, dayKey) {
     if (wasAtLiveEdge) timeScale.fitContent()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dataLength])
-}
-
-// Extends a live, still-forming day's own series with WHITESPACE points (bare {time}, no value) from
-// its last real point through today's market close (15:30 IST), at the SAME interval already present
-// in the real data. lightweight-charts includes whitespace in fitContent()'s own time-domain
-// calculation but never autoscales the PRICE axis against it and never draws anything for it - so a
-// chart fed this reserves its FULL session's width from the very first real point, rather than one
-// that only ever spans however much of the day has actually ticked so far and gets stretched to fill
-// the whole canvas because so few points exist yet. That stretching was exactly the "too zoomed in,
-// I have to squeeze to fit" report; reserving the rest of the day up front is also what makes candles
-// render at a comfortable, unstretched width anchored to the LEFT from the very first tick - like
-// every other trading platform - instead of centered/stretched across the whole canvas, the "candles
-// should come to the left hand side" ask.
-//
-// A NO-OP for anything that isn't today (a fully historical day's own last point is already at or
-// past its own market close, so the loop below never adds anything) - deliberately still gated on an
-// explicit `isToday` rather than relying on that alone, so a historical day's manual scrub position
-// (deliberately NOT genuinely reaching market close until the user scrubs there) is never padded out
-// to look "further along" than what has actually been revealed.
-export function padWithWhitespaceToMarketClose(points, isToday, timeKey = 'time') {
-  if (!isToday || points.length < 2) return points
-  const interval = points[1][timeKey] - points[0][timeKey]
-  if (interval <= 0) return points
-  const lastTime = points[points.length - 1][timeKey]
-  const lastRealMs = fromChartTime(lastTime) * 1000
-  const closeChartTime = toChartTime(`${istDateKey(new Date(lastRealMs))}T15:30:00+05:30`)
-  if (closeChartTime <= lastTime) return points
-  const padded = points.slice()
-  for (let t = lastTime + interval; t <= closeChartTime; t += interval) padded.push({ [timeKey]: t })
-  return padded
 }
 
 // Modeled directly on App.jsx's own useHub: ONE connection, opened on mount and never torn down or
@@ -344,7 +314,7 @@ const OI_STALE_MS = 5 * 60_000
 
 // Candlestick chart that draws the strongest OI levels on each side as horizontal price lines
 // directly on the chart (darker = heavier OI = a "harder" level).
-export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = true, vwapSeries = EMPTY_ARRAY, showVwap = false, onStrikeClick, height = 440, isToday = false }) {
+export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = true, vwapSeries = EMPTY_ARRAY, showVwap = false, onStrikeClick, height = 440 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
@@ -455,8 +425,8 @@ export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Onl
 
   useEffect(() => {
     if (!seriesRef.current) return
-    seriesRef.current.setData(padWithWhitespaceToMarketClose(bars, isToday))
-  }, [bars, isToday])
+    seriesRef.current.setData(bars)
+  }, [bars])
 
   // Fed only while checked, empty otherwise - simpler and just as instant as toggling a `visible`
   // option, and it means an unchecked chart never even pays for lightweight-charts re-rendering data
@@ -544,7 +514,7 @@ export const FAST_TIMEFRAME_OPTIONS = TIMEFRAME_OPTIONS.filter((o) => o.value <=
 
 // A second, independently-timeframed candlestick chart with two EMA overlays, driven by the SAME
 // oneMinBars/visibleCount the caller owns - never fetches or replays anything on its own.
-export function EmaChart({ oneMinBars, visibleCount, timeframe, onTimeframeChange, ema1Period, onEma1PeriodChange, ema2Period, onEma2PeriodChange, dayKey, vwapSeries = EMPTY_ARRAY, showVwap = false, height = 320, isToday = false }) {
+export function EmaChart({ oneMinBars, visibleCount, timeframe, onTimeframeChange, ema1Period, onEma1PeriodChange, ema2Period, onEma2PeriodChange, dayKey, vwapSeries = EMPTY_ARRAY, showVwap = false, height = 320 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
@@ -623,7 +593,7 @@ export function EmaChart({ oneMinBars, visibleCount, timeframe, onTimeframeChang
   useEffect(() => { ema1SeriesRef.current?.applyOptions({ title: `EMA ${ema1Period}` }) }, [ema1Period])
   useEffect(() => { ema2SeriesRef.current?.applyOptions({ title: `EMA ${ema2Period}` }) }, [ema2Period])
 
-  useEffect(() => { if (seriesRef.current) seriesRef.current.setData(padWithWhitespaceToMarketClose(displayBars, isToday)) }, [displayBars, isToday])
+  useEffect(() => { if (seriesRef.current) seriesRef.current.setData(displayBars) }, [displayBars])
   useEffect(() => { if (ema1SeriesRef.current) ema1SeriesRef.current.setData(ema1Points) }, [ema1Points])
   useEffect(() => { if (ema2SeriesRef.current) ema2SeriesRef.current.setData(ema2Points) }, [ema2Points])
   // Same "own timeframe, not the candles' own" reasoning as ReplayChart's identical effect - VWAP is
@@ -912,7 +882,7 @@ export function PremiumCandleChart({ bars, dayKey, height = 320 }) {
 // page's replay has "played" up to, same as every other chart there.
 export function PremiumEmaChart({
   points, asOfMs, timeframe, onTimeframeChange, ema1Period, onEma1PeriodChange, ema2Period, onEma2PeriodChange, dayKey,
-  showVwap = false, height = 320, isToday = false,
+  showVwap = false, height = 320,
 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
@@ -1000,7 +970,7 @@ export function PremiumEmaChart({
   useEffect(() => { ema1SeriesRef.current?.applyOptions({ title: `EMA ${ema1Period}` }) }, [ema1Period])
   useEffect(() => { ema2SeriesRef.current?.applyOptions({ title: `EMA ${ema2Period}` }) }, [ema2Period])
 
-  useEffect(() => { if (seriesRef.current) seriesRef.current.setData(padWithWhitespaceToMarketClose(displayBars, isToday)) }, [displayBars, isToday])
+  useEffect(() => { if (seriesRef.current) seriesRef.current.setData(displayBars) }, [displayBars])
   useEffect(() => { if (ema1SeriesRef.current) ema1SeriesRef.current.setData(ema1Points) }, [ema1Points])
   useEffect(() => { if (ema2SeriesRef.current) ema2SeriesRef.current.setData(ema2Points) }, [ema2Points])
   useEffect(() => { vwapSeriesRef.current?.setData(showVwap ? vwapPoints : EMPTY_ARRAY) }, [vwapPoints, showVwap])

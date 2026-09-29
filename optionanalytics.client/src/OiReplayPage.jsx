@@ -11,7 +11,7 @@ import {
   NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, usePersistedState,
   syncSignalRGroups, joinAllSignalRGroups, useCardOrder, CardDragHandle,
 } from './shared.jsx'
-import { PremiumEmaChart, DraggableFloatingPanel, useFitContentAsDataGrows, padWithWhitespaceToMarketClose } from './oiShared.jsx'
+import { PremiumEmaChart, DraggableFloatingPanel, useFitContentAsDataGrows } from './oiShared.jsx'
 
 const { Text, Title } = Typography
 
@@ -522,7 +522,7 @@ const SUPPORT_DARK = '#0a5c1f'
 // further data fetch, just a local re-render. Also draws the strongest OI levels on each side as
 // horizontal price lines directly on the chart (darker = heavier OI = a "harder" level) - the same
 // data the ladder shows in table form, here as the market-structure read on the price chart itself.
-function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = true, vwapSeries = EMPTY_ARRAY, showVwap = false, onStrikeClick, height = 440, isToday = false }) {
+function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = true, vwapSeries = EMPTY_ARRAY, showVwap = false, onStrikeClick, height = 440 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
@@ -637,8 +637,8 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = tru
 
   useEffect(() => {
     if (!seriesRef.current) return
-    seriesRef.current.setData(padWithWhitespaceToMarketClose(bars, isToday))
-  }, [bars, isToday])
+    seriesRef.current.setData(bars)
+  }, [bars])
 
   // Fed only while checked, empty otherwise - see EmaChart's own identical effect for why VWAP is
   // shown at its own native cadence rather than re-aggregated to match this chart's timeframe.
@@ -1090,7 +1090,7 @@ const VWAP_COLOR = '#e072e8'
 // The two EMA series are created ONCE (in the same setup effect as the candlestick series) and
 // only ever re-titled/re-fed data afterward, rather than destroyed and recreated when a period
 // changes - lightweight-charts series are cheap to keep, not to keep re-adding.
-function EmaChart({ oneMinBars, visibleCount, timeframe, onTimeframeChange, ema1Period, onEma1PeriodChange, ema2Period, onEma2PeriodChange, dayKey, vwapSeries = EMPTY_ARRAY, showVwap = false, height = 320, isToday = false }) {
+function EmaChart({ oneMinBars, visibleCount, timeframe, onTimeframeChange, ema1Period, onEma1PeriodChange, ema2Period, onEma2PeriodChange, dayKey, vwapSeries = EMPTY_ARRAY, showVwap = false, height = 320 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
@@ -1150,7 +1150,7 @@ function EmaChart({ oneMinBars, visibleCount, timeframe, onTimeframeChange, ema1
   useEffect(() => { ema1SeriesRef.current?.applyOptions({ title: `EMA ${ema1Period}` }) }, [ema1Period])
   useEffect(() => { ema2SeriesRef.current?.applyOptions({ title: `EMA ${ema2Period}` }) }, [ema2Period])
 
-  useEffect(() => { if (seriesRef.current) seriesRef.current.setData(padWithWhitespaceToMarketClose(displayBars, isToday)) }, [displayBars, isToday])
+  useEffect(() => { if (seriesRef.current) seriesRef.current.setData(displayBars) }, [displayBars])
   useEffect(() => { if (ema1SeriesRef.current) ema1SeriesRef.current.setData(ema1Points) }, [ema1Points])
   useEffect(() => { if (ema2SeriesRef.current) ema2SeriesRef.current.setData(ema2Points) }, [ema2Points])
   // Own native 1-minute cadence, not re-aggregated to this chart's own timeframe - VWAP is a
@@ -1212,7 +1212,7 @@ function classifyFuturesRegime(priceDelta, oiDelta, priceThreshold, oiThreshold)
 // shift actually started, the "show me when what happened" read for a future's own OI - unlike an
 // option strike, a future has no strike chain to draw S/R walls for, so this chart's OI story is
 // entirely about ITS OWN change over time rather than a level.
-function FuturesChart({ bars, oiLine, markers, dayKey, height = 320, isToday = false }) {
+function FuturesChart({ bars, oiLine, markers, dayKey, height = 320 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
@@ -1279,8 +1279,8 @@ function FuturesChart({ bars, oiLine, markers, dayKey, height = 320, isToday = f
 
   useEffect(() => {
     if (!seriesRef.current) return
-    seriesRef.current.setData(padWithWhitespaceToMarketClose(bars, isToday))
-  }, [bars, isToday])
+    seriesRef.current.setData(bars)
+  }, [bars])
 
   useEffect(() => {
     if (!oiSeriesRef.current) return
@@ -3222,7 +3222,6 @@ export default function OiReplayPage() {
                           showVwap={showVwap}
                           onStrikeClick={setDrilldownStrike}
                           height={560}
-                          isToday={isToday}
                         />
                       </ChartErrorBoundary>
                     )
@@ -3261,7 +3260,6 @@ export default function OiReplayPage() {
                                 dayKey={`emaB-${underlying}-${result.date}`}
                                 vwapSeries={vwapSeries} showVwap={showVwap}
                                 height={560}
-                                isToday={isToday}
                               />
                             </ChartErrorBoundary>
                             {atmStrike != null && (
@@ -3293,7 +3291,6 @@ export default function OiReplayPage() {
                               dayKey={`emaC-${underlying}-${result.date}`}
                               vwapSeries={vwapSeries} showVwap={showVwap}
                               height={560}
-                              isToday={isToday}
                             />
                           </ChartErrorBoundary>
                         )
@@ -3339,7 +3336,6 @@ export default function OiReplayPage() {
                               dayKey={`premium-ce-${underlying}-${result.date}-${cePremiumOffset}`}
                               showVwap={showVwap}
                               height={320}
-                              isToday={isToday}
                             />
                           </ChartErrorBoundary>
                         )}
@@ -3365,7 +3361,6 @@ export default function OiReplayPage() {
                               dayKey={`premium-pe-${underlying}-${result.date}-${pePremiumOffset}`}
                               showVwap={showVwap}
                               height={320}
-                              isToday={isToday}
                             />
                           </ChartErrorBoundary>
                         )}
@@ -3468,7 +3463,6 @@ export default function OiReplayPage() {
                             markers={futuresRegimeMarkers}
                             dayKey={`futures-${underlying}-${result.date}-${timeframe}`}
                             height={320}
-                            isToday={isToday}
                           />
                         </ChartErrorBoundary>
                         {result.futuresOiAvailable && (
