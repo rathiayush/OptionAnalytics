@@ -173,25 +173,7 @@ public sealed class OiReplayService
         }
         Task<DhanSpotInstrument?> ResolveInstrumentAsync() => Task.FromResult(instrument);
 
-        var spotBarsRaw = !isAlwaysLive && _storedSpot.IsConfigured
-            ? (await _storedSpot.GetSpotCandlesAsync(underlying, date, date, cancellationToken)).Bars
-            : Array.Empty<CandleWithVolume>();
-        var spotError = (string?)null;
-
-        if (isAlwaysLive || (_allowLiveDataFallback && !IsFreshEnough(date, spotBarsRaw.Count > 0 ? spotBarsRaw[^1].Time : null)))
-        {
-            var liveInstrument = await ResolveInstrumentAsync();
-            if (liveInstrument is not null)
-            {
-                var (liveSpotBars, liveSpotError) = await _historicalData.GetIntradayCandlesAsync(
-                    liveInstrument.SecurityId, liveInstrument.DhanSegment, date, date, 1, cancellationToken);
-                // Only trust the live call over whatever's already stored if it actually found
-                // something - a live error (auth, market holiday) should never blank out a
-                // perfectly good, merely slightly-stale stored result.
-                if (liveSpotBars.Count > 0) spotBarsRaw = liveSpotBars;
-                else spotError = liveSpotError;
-            }
-        }
+        var (spotBarsRaw, spotError) = await FetchSpotBarsWithVolumeAsync(underlying, date, isAlwaysLive, ResolveInstrumentAsync, cancellationToken);
 
         if (spotBarsRaw.Count == 0)
             return OiReplayResult.Failed(underlying, date, timeframe,
@@ -332,5 +314,148 @@ public sealed class OiReplayService
         if (latestStoredTime is null) return false;
         if (date < IstClock.Today()) return true;
         return DateTimeOffset.UtcNow - latestStoredTime.Value <= LiveFreshnessWindow;
+    }
+
+    /// <summary>The exact stored-then-live-fallback shape RunAsync's own spot fetch always used
+    /// (extracted verbatim, not reimplemented) - stored first when configured and not an
+    /// AlwaysLiveUnderlyings member, then a live Dhan call over it when isAlwaysLive OR the stored
+    /// result isn't fresh enough (see IsFreshEnough). Reused by GetPreviousDayVolumeProfileAsync
+    /// below so "how spot bars for a date get fetched" has exactly one implementation, not two
+    /// silently drifting copies.</summary>
+    private async Task<(IReadOnlyList<CandleWithVolume> Bars, string? Error)> FetchSpotBarsWithVolumeAsync(
+        string underlying, DateOnly date, bool isAlwaysLive, Func<Task<DhanSpotInstrument?>> resolveInstrument, CancellationToken cancellationToken)
+    {
+        var spotBarsRaw = !isAlwaysLive && _storedSpot.IsConfigured
+            ? (await _storedSpot.GetSpotCandlesAsync(underlying, date, date, cancellationToken)).Bars
+            : Array.Empty<CandleWithVolume>();
+        var spotError = (string?)null;
+
+        if (isAlwaysLive || (_allowLiveDataFallback && !IsFreshEnough(date, spotBarsRaw.Count > 0 ? spotBarsRaw[^1].Time : null)))
+        {
+            var liveInstrument = await resolveInstrument();
+            if (liveInstrument is not null)
+            {
+                var (liveSpotBars, liveSpotError) = await _historicalData.GetIntradayCandlesAsync(
+                    liveInstrument.SecurityId, liveInstrument.DhanSegment, date, date, 1, cancellationToken);
+                // Only trust the live call over whatever's already stored if it actually found
+                // something - a live error (auth, market holiday) should never blank out a
+                // perfectly good, merely slightly-stale stored result.
+                if (liveSpotBars.Count > 0) spotBarsRaw = liveSpotBars;
+                else spotError = liveSpotError;
+            }
+        }
+        return (spotBarsRaw, spotError);
+    }
+
+    /// <summary>How many equal-width price bins the previous day's own [low, high] range is divided
+    /// into before summing volume into each - a day-RELATIVE bin size, not a fixed point value, so
+    /// this scales correctly whether the day's own range was 50 points or 500 and needs no
+    /// per-underlying tuning. 60 gives a reasonably fine-grained distribution without being so
+    /// granular that a single stray tick's bar creates its own noisy little peak.</summary>
+    private const int VolumeProfileBinCount = 60;
+
+    /// <summary>The standard value-area convention - the price band that captured 70% of the day's
+    /// own traded volume, expanding outward from POC.</summary>
+    private const decimal ValueAreaShare = 0.70m;
+
+    /// <summary>Walks backward from the day before `onOrBeforeDate` (today's own live view, or
+    /// whatever historical day the replay is currently on) to find the nearest PRIOR trading day with
+    /// real spot volume, then computes its volume profile - POC/VAH/VAL/HVN/LVN, the reference levels
+    /// a trader marks up before the session from yesterday's own traded activity. Skips weekends
+    /// outright and, for anything else, simply moves one more day back whenever a candidate day comes
+    /// back with no data at all (most commonly a market holiday) - up to a week back, comfortably
+    /// covering any ordinary single holiday (or a holiday adjacent to a weekend) without needing a
+    /// full NSE holiday calendar.</summary>
+    public async Task<VolumeProfileResult> GetPreviousDayVolumeProfileAsync(string underlying, DateOnly onOrBeforeDate, CancellationToken cancellationToken)
+    {
+        if (!StrikeStepByUnderlying.ContainsKey(underlying))
+            return VolumeProfileResult.Failed(underlying, $"'{underlying}' is not supported - only NIFTY, BANKNIFTY, and SENSEX.");
+
+        var isAlwaysLive = AlwaysLiveUnderlyings.Contains(underlying);
+        if (!isAlwaysLive && !_storedSpot.IsConfigured && !_allowLiveDataFallback)
+            return VolumeProfileResult.Failed(underlying, "Stored data is not configured on this server (no NiftyDataCollector database connection) - see ConnectionStrings:NiftyDataCollectorTimescale.");
+
+        DhanSpotInstrument? instrument = null;
+        if (isAlwaysLive || _allowLiveDataFallback)
+        {
+            await _instrumentMaster.EnsureLoadedAsync(cancellationToken);
+            instrument = _instrumentMaster.FindSpot(underlying);
+        }
+        Task<DhanSpotInstrument?> ResolveInstrumentAsync() => Task.FromResult(instrument);
+
+        var candidate = onOrBeforeDate.AddDays(-1);
+        for (var attempts = 0; attempts < 7; attempts++, candidate = candidate.AddDays(-1))
+        {
+            if (candidate.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday) continue;
+            var (bars, _) = await FetchSpotBarsWithVolumeAsync(underlying, candidate, isAlwaysLive, ResolveInstrumentAsync, cancellationToken);
+            if (bars.Count == 0) continue;
+            return ComputeVolumeProfile(underlying, candidate, bars);
+        }
+        return VolumeProfileResult.Failed(underlying, $"No previous trading day data found for {underlying} in the last week.");
+    }
+
+    /// <summary>internal (not private), tested directly via InternalsVisibleTo - see
+    /// AssemblyInfo.cs's own doc comment and VolumeProfileTests for why, matching
+    /// CdvUnderlyingState.ComputeLookbackChange's identical reasoning.</summary>
+    internal static VolumeProfileResult ComputeVolumeProfile(string underlying, DateOnly date, IReadOnlyList<CandleWithVolume> bars)
+    {
+        var low = bars.Min(b => b.Low);
+        var high = bars.Max(b => b.High);
+        if (high <= low) return VolumeProfileResult.Failed(underlying, $"{date:dd MMM yyyy}'s own range was flat - nothing to profile.");
+        var binSize = (high - low) / VolumeProfileBinCount;
+
+        var volumeByBin = new long[VolumeProfileBinCount];
+        foreach (var bar in bars)
+        {
+            // Attributes a bar's WHOLE volume to its own CLOSE price's bin - the standard
+            // simplification for bars this short (1 minute): their own high-low range is typically a
+            // sliver of a bin this wide, so splitting volume proportionally across that range would
+            // add real complexity for a difference that rounds away at this granularity.
+            var bin = (int)((bar.Close - low) / binSize);
+            if (bin >= VolumeProfileBinCount) bin = VolumeProfileBinCount - 1;
+            if (bin < 0) bin = 0;
+            volumeByBin[bin] += bar.Volume;
+        }
+
+        var totalVolume = volumeByBin.Sum();
+        if (totalVolume == 0) return VolumeProfileResult.Failed(underlying, $"{date:dd MMM yyyy} had no traded volume to profile.");
+
+        decimal BinPrice(int i) => low + (i + 0.5m) * binSize;
+
+        var pocBin = 0;
+        for (var i = 1; i < VolumeProfileBinCount; i++) if (volumeByBin[i] > volumeByBin[pocBin]) pocBin = i;
+
+        // Value area: expand outward from POC one bin at a time, always taking whichever side's next
+        // bin carries more volume, until the accumulated share reaches ValueAreaShare of the day's
+        // total - the textbook algorithm, not an approximation of it.
+        var targetVolume = totalVolume * ValueAreaShare;
+        var accumulated = (decimal)volumeByBin[pocBin];
+        var lowBin = pocBin;
+        var highBin = pocBin;
+        while (accumulated < targetVolume && (lowBin > 0 || highBin < VolumeProfileBinCount - 1))
+        {
+            var belowVolume = lowBin > 0 ? volumeByBin[lowBin - 1] : -1;
+            var aboveVolume = highBin < VolumeProfileBinCount - 1 ? volumeByBin[highBin + 1] : -1;
+            if (aboveVolume >= belowVolume) { highBin++; accumulated += aboveVolume; }
+            else { lowBin--; accumulated += belowVolume; }
+        }
+
+        // HVN/LVN: local peaks/troughs in the histogram (strictly higher/lower than BOTH neighbors) -
+        // the top 2 of each, by volume for HVN (the strongest OTHER concentrations besides POC itself)
+        // and by how pronounced the dip is for LVN (the levels price previously moved through
+        // quickly rather than consolidating at). Excludes both histogram edges (no second neighbor to
+        // compare against) and the POC bin itself (already surfaced separately).
+        var hvnCandidates = new List<(int Bin, long Volume)>();
+        var lvnCandidates = new List<(int Bin, long Volume)>();
+        for (var i = 1; i < VolumeProfileBinCount - 1; i++)
+        {
+            if (i == pocBin) continue;
+            if (volumeByBin[i] > volumeByBin[i - 1] && volumeByBin[i] > volumeByBin[i + 1]) hvnCandidates.Add((i, volumeByBin[i]));
+            else if (volumeByBin[i] < volumeByBin[i - 1] && volumeByBin[i] < volumeByBin[i + 1]) lvnCandidates.Add((i, volumeByBin[i]));
+        }
+        var hvn = hvnCandidates.OrderByDescending(c => c.Volume).Take(2).Select(c => BinPrice(c.Bin)).ToList();
+        var lvn = lvnCandidates.OrderBy(c => c.Volume).Take(2).Select(c => BinPrice(c.Bin)).ToList();
+
+        return new VolumeProfileResult(true, null, underlying, date, BinPrice(pocBin), BinPrice(highBin), BinPrice(lowBin), hvn, lvn);
     }
 }

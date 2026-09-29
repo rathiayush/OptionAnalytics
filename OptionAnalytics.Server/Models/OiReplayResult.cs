@@ -36,6 +36,33 @@ public readonly record struct FuturesBar(DateTimeOffset Time, decimal Open, deci
 /// by candle client-side - no further server round trips per tick, just local array indexing into
 /// what this one response already carries.
 /// </summary>
+/// <summary>The previous trading day's volume profile for one underlying - POC (Point of Control,
+/// the single price that traded the most volume), VAH/VAL (Value Area High/Low, the price band
+/// holding 70% of the day's total volume, centered on POC), and up to two each of HVN (High Volume
+/// Nodes - local peaks in the volume-by-price distribution besides POC itself) and LVN (Low Volume
+/// Nodes - local troughs, price levels the previous day traded through quickly rather than
+/// consolidating at). All from OiReplayService.GetPreviousDayVolumeProfileAsync, which walks
+/// backward from whatever date the frontend is currently viewing (live or a historical replay day
+/// alike) to find the nearest PRIOR day with real spot volume data, skipping weekends and any day
+/// that simply comes back empty (most commonly a market holiday).</summary>
+public sealed record VolumeProfileResult(
+    bool Success,
+    string? Error,
+    string Underlying,
+    /// <summary>The actual calendar date this profile was computed from - the nearest prior trading
+    /// day found, which for a Monday is Friday, and for a day right after a holiday skips back past
+    /// it too. Null on failure.</summary>
+    DateOnly? ProfileDate,
+    decimal? Poc,
+    decimal? Vah,
+    decimal? Val,
+    IReadOnlyList<decimal> Hvn,
+    IReadOnlyList<decimal> Lvn)
+{
+    public static VolumeProfileResult Failed(string underlying, string error) =>
+        new(false, error, underlying, null, null, null, null, Array.Empty<decimal>(), Array.Empty<decimal>());
+}
+
 public sealed record OiReplayResult(
     bool Success,
     string? Error,

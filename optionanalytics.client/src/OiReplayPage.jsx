@@ -1147,6 +1147,15 @@ const EMA1_COLOR = '#f0b429'
 const EMA2_COLOR = '#38bdf8'
 const VWAP_COLOR = '#e072e8'
 
+// Previous-day volume profile overlay colors - all distinct from EMA1/EMA2/VWAP above and from the
+// main chart's own red/green R/S wall convention, so five more lines on the SAME chart never get
+// mistaken for one of those. POC is the boldest (the single most important level); VAH/VAL a step
+// down; HVN/LVN dotted and muted - genuinely useful reference points, but secondary to POC/VA.
+const VOLUME_PROFILE_POC_COLOR = '#14b8a6'
+const VOLUME_PROFILE_VA_COLOR = '#8b5cf6'
+const VOLUME_PROFILE_HVN_COLOR = '#facc15'
+const VOLUME_PROFILE_LVN_COLOR = '#64748b'
+
 // A second, independently-timeframed candlestick chart with two EMA overlays - the user's own "one
 // more chart along with this 15 min running chart... add ema indicator... for parallel execution to
 // specific entry" ask: a faster 1/3/5-min read with EMA crossovers for timing an entry precisely,
@@ -1158,13 +1167,17 @@ const VWAP_COLOR = '#e072e8'
 // The two EMA series are created ONCE (in the same setup effect as the candlestick series) and
 // only ever re-titled/re-fed data afterward, rather than destroyed and recreated when a period
 // changes - lightweight-charts series are cheap to keep, not to keep re-adding.
-function EmaChart({ oneMinBars, visibleCount, timeframe, onTimeframeChange, ema1Period, onEma1PeriodChange, ema2Period, onEma2PeriodChange, dayKey, vwapSeries = EMPTY_ARRAY, showVwap = false, height = 320 }) {
+function EmaChart({
+  oneMinBars, visibleCount, timeframe, onTimeframeChange, ema1Period, onEma1PeriodChange, ema2Period, onEma2PeriodChange, dayKey,
+  vwapSeries = EMPTY_ARRAY, showVwap = false, height = 320, volumeProfile = null,
+}) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
   const ema1SeriesRef = useRef(null)
   const ema2SeriesRef = useRef(null)
   const vwapSeriesRef = useRef(null)
+  const volumeProfileLinesRef = useRef([])
 
   const displayBars = useMemo(
     () => aggregateBars(oneMinBars.slice(0, visibleCount), timeframe),
@@ -1212,6 +1225,7 @@ function EmaChart({ oneMinBars, visibleCount, timeframe, onTimeframeChange, ema1
       ema1SeriesRef.current = null
       ema2SeriesRef.current = null
       vwapSeriesRef.current = null
+      volumeProfileLinesRef.current = [] // the series they belonged to is gone along with the chart
     }
   }, [height])
 
@@ -1227,6 +1241,31 @@ function EmaChart({ oneMinBars, visibleCount, timeframe, onTimeframeChange, ema1
   useEffect(() => {
     vwapSeriesRef.current?.setData(showVwap ? vwapSeries : EMPTY_ARRAY)
   }, [vwapSeries, showVwap])
+
+  // Previous-day volume profile - marked on BY DEFAULT (no toggle; the user's own explicit ask), not
+  // gated behind isToday the way VWAP is: yesterday's own already-closed levels are just as valid a
+  // reference while reviewing an older replay day as while trading live today. Redrawn from scratch
+  // on every change (clear then recreate, same shape as ReplayChart's own OI-wall lines) since these
+  // five-ish lines never so densely churn that diffing them individually would be worth the code -
+  // in practice this only ever actually reruns once per day/underlying, when the fetch that produced
+  // volumeProfile itself resolves.
+  useEffect(() => {
+    if (!seriesRef.current) return
+    for (const line of volumeProfileLinesRef.current) seriesRef.current.removePriceLine(line)
+    volumeProfileLinesRef.current = []
+    if (!volumeProfile) return
+    const addLine = (price, color, title, lineWidth, lineStyle) => {
+      if (price == null) return
+      const line = seriesRef.current.createPriceLine({ price, color, lineWidth, lineStyle, axisLabelVisible: true, title })
+      volumeProfileLinesRef.current.push(line)
+    }
+    const dateLabel = volumeProfile.profileDate ? ` (${fmtDateOnly(volumeProfile.profileDate)})` : ''
+    addLine(volumeProfile.poc, VOLUME_PROFILE_POC_COLOR, `POC${dateLabel}`, 2, 0)
+    addLine(volumeProfile.vah, VOLUME_PROFILE_VA_COLOR, 'VAH', 1, 2)
+    addLine(volumeProfile.val, VOLUME_PROFILE_VA_COLOR, 'VAL', 1, 2)
+    volumeProfile.hvn?.forEach((price) => addLine(price, VOLUME_PROFILE_HVN_COLOR, 'HVN', 1, 1))
+    volumeProfile.lvn?.forEach((price) => addLine(price, VOLUME_PROFILE_LVN_COLOR, 'LVN', 1, 1))
+  }, [volumeProfile])
 
   // Unconditional re-fit on a brand new day AND whenever this chart's OWN timeframe changes (unlike
   // just growing with more data, below) - switching from 5min to 1min here goes from ~75 candles to
@@ -1994,6 +2033,23 @@ export default function OiReplayPage() {
   // liveBars above, seeded once isToday in load()'s own .then(), grown live by handleSpotUpdate.
   const [vwapSeries, setVwapSeries] = useState([])
   const [showVwap, setShowVwap] = usePersistedState(STORED_SHOW_VWAP, false)
+
+  // Previous-day volume profile (POC/VAH/VAL/HVN/LVN) - marked on the fast entry charts (B/C) BY
+  // DEFAULT, the user's own explicit ask, so no separate toggle/persisted preference exists for it
+  // the way showVwap has. Refetched whenever the underlying or the loaded day itself changes (NOT on
+  // every tick - these are yesterday's own already-closed levels, which never move once fetched) -
+  // keyed off result's own fields rather than the raw underlying/date state above so this never fires
+  // for a day whose actual data hasn't landed yet.
+  const [volumeProfile, setVolumeProfile] = useState(null)
+  useEffect(() => {
+    if (!result?.success || !underlying || !result.date) { setVolumeProfile(null); return }
+    let cancelled = false
+    fetch(`/api/oi-replay/${underlying}/previous-day-volume-profile?date=${result.date}`)
+      .then((r) => r.json())
+      .then((body) => { if (!cancelled) setVolumeProfile(body?.success ? body : null) })
+      .catch((err) => { if (!cancelled) { console.error('Failed to load previous-day volume profile:', err); setVolumeProfile(null) } })
+    return () => { cancelled = true }
+  }, [underlying, result?.success, result?.date])
 
   // Paper trade panel state - see PaperTradePanel's own doc comment. strikeOffset defaults to 0
   // (ATM) and stays an OFFSET rather than an absolute strike, so "the default is ATM" holds true
@@ -3560,6 +3616,7 @@ export default function OiReplayPage() {
                                 dayKey={`emaB-${underlying}-${result.date}`}
                                 vwapSeries={vwapSeries} showVwap={showVwap}
                                 height={560}
+                                volumeProfile={volumeProfile}
                               />
                             </ChartErrorBoundary>
                             {atmStrike != null && (
@@ -3591,6 +3648,7 @@ export default function OiReplayPage() {
                               dayKey={`emaC-${underlying}-${result.date}`}
                               vwapSeries={vwapSeries} showVwap={showVwap}
                               height={560}
+                              volumeProfile={volumeProfile}
                             />
                           </ChartErrorBoundary>
                         )
