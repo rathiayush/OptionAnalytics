@@ -904,12 +904,12 @@ export function PremiumCandleChart({ bars, dayKey, height = 320 }) {
 
 // A leg's own premium as candles (via buildPremiumCandles above) PLUS two configurable EMA overlays
 // on top - CE/PE's own counterpart to EmaChart above (which does the same for the underlying spot),
-// used by BOTH Live OI Dashboard and OI Replay so their own CE/PE charts stop being a bare candle
-// chart (PremiumCandleChart, no EMA) or a plain line (OI Replay's own now-removed PremiumLineChart)
-// and instead match the same "candles + two EMAs, own timeframe" pattern the Entry charts already
-// use. `asOfMs` is optional: Live OI Dashboard omits it ("live" already means "everything captured
-// so far" needs no cutoff); OI Replay passes its own replay clock's asOfMs so this chart only ever
-// reveals what the rest of that page's replay has "played" up to, same as every other chart there.
+// so OI Replay's own CE/PE charts aren't a bare candle chart (PremiumCandleChart, no EMA) or a plain
+// line (its own now-removed PremiumLineChart), instead matching the same "candles + two EMAs, own
+// timeframe" pattern the Entry charts already use. `asOfMs` is optional: while isToday, OI Replay
+// omits it ("live" already means "everything captured so far" needs no cutoff); for a historical day
+// it passes its own replay clock's asOfMs so this chart only ever reveals what the rest of that
+// page's replay has "played" up to, same as every other chart there.
 export function PremiumEmaChart({
   points, asOfMs, timeframe, onTimeframeChange, ema1Period, onEma1PeriodChange, ema2Period, onEma2PeriodChange, dayKey,
   showVwap = false, height = 320, isToday = false,
@@ -1509,7 +1509,7 @@ export class ChartErrorBoundary extends Component {
   }
 
   componentDidCatch(error) {
-    console.error('Live OI Dashboard chart crashed:', error)
+    console.error('OI Replay chart crashed:', error)
   }
 
   render() {
