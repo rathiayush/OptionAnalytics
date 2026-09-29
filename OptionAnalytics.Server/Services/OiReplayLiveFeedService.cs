@@ -240,11 +240,10 @@ public sealed class OiReplayLiveFeedService : BackgroundService
     /// used to decorate the dashboard's strike picker) for every combo, and broadcasts each one as
     /// its own "oiRestSnapshot" event. Exists because the live tick feed's own OI (Full packet,
     /// per-strike) and the historical /charts/rollingoption seed (day-open baseline) are two
-    /// INDEPENDENT Dhan pipelines that can disagree (see OiLiveDashboardPage.jsx's own doc comment
-    /// on SINCE_OPEN_SANITY_MULTIPLE) - this is a THIRD, independent source a client can opt into
-    /// cross-checking against, or fully prefer, when it doesn't trust the tick feed's own number for
-    /// a given strike. Never touches _legsBySecurityId/subscriptions - purely read-only decoration,
-    /// same as the picker's own use of this endpoint.</summary>
+    /// INDEPENDENT Dhan pipelines that can disagree - this is a THIRD, independent source a client
+    /// can opt into cross-checking against, or fully prefer, when it doesn't trust the tick feed's
+    /// own number for a given strike. Never touches _legsBySecurityId/subscriptions - purely
+    /// read-only decoration, same as the picker's own use of this endpoint.</summary>
     private async Task RunRestQuoteLoopAsync(CancellationToken stoppingToken)
     {
         while (!stoppingToken.IsCancellationRequested)

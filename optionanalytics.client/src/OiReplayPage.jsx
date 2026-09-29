@@ -26,9 +26,8 @@ const EMPTY_ARRAY = []
 // SignalR connection to OUR server, never whether the SERVER's own upstream Dhan feed is actually
 // flowing (see DhanMarketFeedClient's own stall detector for how THAT gets diagnosed, server-side,
 // from logs this page cannot see). A silently stalled upstream feed would otherwise look identical,
-// from here, to a page working correctly during a genuinely quiet market moment - the exact "are we
-// not receiving live ticks from Dhan, flag us" gap the Live OI Dashboard already closes for itself
-// but this page never did. Same threshold as that page's own identical FEED_STALL_WARNING_MS.
+// from here, to a page working correctly during a genuinely quiet market moment - the "are we not
+// receiving live ticks from Dhan, flag us" ask this closes.
 const FEED_STALL_WARNING_MS = 3 * 60_000
 
 // How long load() waits for /api/oi-replay/.../run before giving up on its own and showing an
@@ -209,7 +208,7 @@ function aggregateBars(oneMinBars, timeframeMinutes) {
 // timeframeMinutes buckets, keeping the LAST value seen in each bucket - the right way to downsample
 // a LEVEL (like OI, which isn't meaningfully summed or averaged across a window) rather than a flow.
 // Used by the OI lookback features below (both the Entry chart B overlay and the Total OI Lookback
-// Table), mirroring the Live OI Dashboard's own identical helper.
+// Table).
 function aggregateLinePoints(points, minutes) {
   if (minutes <= 1 || points.length === 0) return points
   const bucketSeconds = minutes * 60
@@ -1767,9 +1766,8 @@ export default function OiReplayPage() {
   const [chartBEma1, setChartBEma1] = useState(9)
   const [chartBEma2, setChartBEma2] = useState(15)
   // ATM OI change over the last N bars of chart B's OWN timeframe - shown as a small overlay
-  // directly on chart B's own Card (not a separate panel), same feature as the Live OI Dashboard's
-  // own Entry chart B, added here for parity - the replay clock (asOfMs) keeps this from ever
-  // revealing more than the rest of the page has "played" up to, unlike the live page's own version.
+  // directly on chart B's own Card (not a separate panel) - the replay clock (asOfMs) keeps this
+  // from ever revealing more than the rest of the page has "played" up to.
   const [oiLookbackBars, setOiLookbackBars] = useState(3)
   // Total OI Lookback Table's own state (Day OI Accumulation card, below) - deliberately separate
   // from chart B's own oiLookbackBars above: several bar counts at once, against the WHOLE chain's
@@ -1950,10 +1948,19 @@ export default function OiReplayPage() {
     // expiry - less convenient than a full day's history, but never wrong data.
     const requestFlag = effectiveIsToday ? (underlying === 'BANKNIFTY' ? 'MONTH' : 'WEEK') : expiryFlag
     const usesRunsCePeData = !effectiveIsToday || liveExpiryFlag === 'N1'
+    // forceLive for today: this page's own "today, live" mode has no scenario where preferring
+    // possibly-stale or entirely-absent stored data over a direct Dhan call makes sense - it's about
+    // to hand off to the live tick feed anyway (see useOiReplayLiveFeed below), so the SEED itself
+    // should always be the freshest reading available rather than first checking a periodically-
+    // backfilled database that may simply not have caught up to today yet (NiftyDataCollector's own
+    // backfill runs on its own cadence - see OiReplayService's own doc comment). A historical
+    // (non-today) day keeps the default stored-first behavior exactly as before - reviewing a
+    // genuinely closed day has no "freshness" concern to force past.
     const params = new URLSearchParams({
       date: effectiveDate.format('YYYY-MM-DD'),
       timeframeMinutes: String(timeframe),
       expiryFlag: requestFlag,
+      ...(effectiveIsToday ? { forceLive: 'true' } : {}),
     })
     const timeoutId = setTimeout(() => controller.abort('timeout'), LOAD_TIMEOUT_MS)
     fetch(`/api/oi-replay/${underlying}/run?${params.toString()}`, { signal: controller.signal })
@@ -2181,9 +2188,8 @@ export default function OiReplayPage() {
   // Every single thing gated on asOfMs - the ladder's latestAtOrBefore lookups, premium charts,
   // paper-trade entry/exit pricing, the SL/target touch-check - stayed frozen at that stale bucket
   // start for up to 59 seconds at a time, silently ignoring ticks that had ALREADY landed in
-  // ceByStrike/peByStrike well before the next bar closed. Live OI Dashboard never had this problem
-  // (it just reads Date.now()/the array's own last entry, no bucket concept at all). A historical
-  // day still uses the scrubbed replay position exactly as before - only "today, live" changes.
+  // ceByStrike/peByStrike well before the next bar closed. A historical day still uses the scrubbed
+  // replay position exactly as before - only "today, live" changes.
   const asOfMs = isToday ? Date.now() : (currentBar ? fromChartTime(currentBar.time) * 1000 : null)
 
   // Purely for the ladder's OWN "stale" flag below (ceStale/peStale) - NOT used for asOfMs itself,
@@ -2344,9 +2350,8 @@ export default function OiReplayPage() {
   const atmStrike = currentBar ? Math.round(currentBar.close / step) * step : null
 
   // ATM OI change over the last N bars, bucketed to chart B's OWN timeframe (chartBTimeframe) - see
-  // the state declaration above. Filtered to asOfMs first (unlike the Live OI Dashboard's identical
-  // feature, which needs no cutoff) so this never reveals a tick beyond what the rest of the replay
-  // has played up to.
+  // the state declaration above. Filtered to asOfMs first so this never reveals a tick beyond what
+  // the rest of the replay has played up to.
   const ceOiLookbackLine = useMemo(() => aggregateLinePoints(
     (ceByStrike.get(atmStrike) ?? [])
       .filter((p) => asOfMs != null && new Date(p.time).getTime() <= asOfMs)

@@ -30,10 +30,11 @@ public sealed class OiReplayController : ControllerBase
         [FromQuery] int timeframeMinutes,
         [FromQuery] string expiryFlag,
         CancellationToken cancellationToken,
-        // Defaults to false, preserving OI Replay's own existing stored-data-first behavior exactly -
-        // only the Live OI Dashboard page passes true, for which stored-vs-live has no good default
-        // (it only ever asks for today, and always wants the freshest reading available, in every
-        // environment including local dev - see OiReplayService.RunAsync's own doc comment).
+        // Defaults to false, preserving OI Replay's own stored-data-first behavior for a genuinely
+        // past day - the frontend passes true whenever the requested date is TODAY (its own "Go
+        // Live" mode), for which stored-vs-live has no good default: it's about to hand off to the
+        // live tick feed anyway, so it always wants the freshest reading available, in every
+        // environment including local dev - see OiReplayService.RunAsync's own doc comment.
         [FromQuery] bool forceLive = false)
     {
         var result = await _service.RunAsync(underlying.ToUpperInvariant(), date, timeframeMinutes, expiryFlag.ToUpperInvariant(), cancellationToken, forceLive);
@@ -48,7 +49,7 @@ public sealed class OiReplayController : ControllerBase
     /// Either field is null when that flag isn't available at all for this underlying (e.g.
     /// BANKNIFTY has no weekly expiry) or nothing is currently listed.
     ///
-    /// expiries is the flat, ordered list backing the Live OI Dashboard's own explicit expiry picker
+    /// expiries is the flat, ordered list backing OI Replay's own live-mode explicit expiry picker
     /// (the user's own "list active expiry and select from there" ask) - up to
     /// OiReplayLiveFeedService.PositionalExpiriesPerUnderlying dates, index i (0-based) here always
     /// matches flag "N{i+1}" (see ResolveNearestExpiryCore's own doc comment on that flag shape), so

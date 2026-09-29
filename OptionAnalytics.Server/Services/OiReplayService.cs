@@ -134,11 +134,13 @@ public sealed class OiReplayService
     {
         var timeframe = Math.Max(1, timeframeMinutes);
         // forceLive folds into the SAME isAlwaysLive treatment SENSEX already gets (skip stored
-        // entirely, always call Dhan, ignore AppEnvironment.IsLocal) - used by the Live OI Dashboard
-        // page, which (unlike OI Replay reviewing a past day, where stored-first is the right
-        // default) has no scenario where preferring possibly-stale stored data over a live call ever
-        // makes sense: it only ever asks for today, and its whole point is to never lag behind "now"
-        // the way OI Replay's own local-dev "stored only, no live top-up" rule otherwise would.
+        // entirely, always call Dhan, ignore AppEnvironment.IsLocal) - set by OiReplayPage's own
+        // frontend whenever the requested date is TODAY (its "Go Live" mode), which unlike reviewing
+        // a genuinely past day (where stored-first is the right default) has no scenario where
+        // preferring possibly-stale OR entirely-not-yet-backfilled stored data over a live call ever
+        // makes sense: it's about to hand off to the live tick feed anyway, so the seed itself should
+        // always be the freshest reading available rather than first checking a database that may
+        // simply not have caught up to today yet.
         var isAlwaysLive = forceLive || AlwaysLiveUnderlyings.Contains(underlying);
 
         if (!isAlwaysLive && !_storedSpot.IsConfigured && !_allowLiveDataFallback)
