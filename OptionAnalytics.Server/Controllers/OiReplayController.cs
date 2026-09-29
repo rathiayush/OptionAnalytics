@@ -41,6 +41,18 @@ public sealed class OiReplayController : ControllerBase
         return Ok(result);
     }
 
+    /// <summary>The previous trading day's volume profile (POC/VAH/VAL/HVN/LVN) relative to
+    /// `date` - see OiReplayService.GetPreviousDayVolumeProfileAsync's own doc comment for exactly
+    /// which day that resolves to and how each level is computed. `date` is whatever day the
+    /// frontend is currently viewing (today's live session or a historical replay day alike), not
+    /// the profile's own date - the response's own ProfileDate says which day was actually used.</summary>
+    [HttpGet("{underlying}/previous-day-volume-profile")]
+    public async Task<ActionResult> GetPreviousDayVolumeProfile(string underlying, [FromQuery] DateOnly date, CancellationToken cancellationToken)
+    {
+        var result = await _service.GetPreviousDayVolumeProfileAsync(underlying.ToUpperInvariant(), date, cancellationToken);
+        return Ok(result);
+    }
+
     /// <summary>The REAL calendar date "Weekly"/"Monthly" each currently resolve to for this
     /// underlying - exposed so a picker can show the actual date instead of an ambiguous label, and
     /// so the two can be told apart even when they happen to be the SAME date (the final week before
