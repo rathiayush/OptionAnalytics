@@ -1,6 +1,6 @@
 import { Component, useEffect, useMemo, useRef, useState } from 'react'
 import dayjs from 'dayjs'
-import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicker, Alert, Empty, Tooltip, Slider, Tag, InputNumber, Switch, Table, Segmented, Checkbox, Modal } from 'antd'
+import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicker, Alert, Empty, Tooltip, Popconfirm, Slider, Tag, InputNumber, Switch, Table, Segmented, Checkbox, Modal } from 'antd'
 import { PlayCircleOutlined, PauseCircleOutlined, ReloadOutlined, SoundOutlined } from '@ant-design/icons'
 import { createChart, createSeriesMarkers, CandlestickSeries, LineSeries, HistogramSeries, CrosshairMode } from 'lightweight-charts'
 import * as signalR from '@microsoft/signalr'
@@ -1399,6 +1399,51 @@ function writePersistedPaperPositions(underlying, dateKey, positions) {
   }
 }
 
+// Today's own fetched run (result) plus everything the live feed has appended on top of it since
+// (liveBars/liveCePoints/livePePoints/liveFuturesPoints) - the "keep current day data in memory, and
+// live ticks, so a reload doesn't have to load it again" ask. Scoped by underlying + calendar day,
+// same reasoning as PAPER_POSITIONS_STORAGE_KEY's own doc comment: a cached NIFTY snapshot from
+// yesterday (or from BANKNIFTY today) means nothing once a different underlying/day is what's
+// actually loaded, and must never be mistaken for it.
+//
+// ONLY consulted by the very first auto-live call on page mount (see the mount effect below) - never
+// by the Go Live button itself, by "Load day," or by the live feed's own reconnect-triggered load()
+// (handleLiveReconnected), all three of which keep doing a genuine fetch exactly as before. That
+// keeps every EXISTING guarantee about freshness intact (a real reconnect after a network drop still
+// re-syncs for real, and the user can still force one explicitly) while still answering the actual
+// ask: skip the redundant re-fetch on a plain page reload, not skip re-syncing altogether.
+const LIVE_DAY_CACHE_STORAGE_KEY = 'optionanalytics.oiReplay.liveDayCache'
+
+function readLiveDayCache(underlying, dateKey) {
+  try {
+    const raw = window.localStorage.getItem(LIVE_DAY_CACHE_STORAGE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    if (parsed?.underlying !== underlying || parsed?.dateKey !== dateKey || parsed?.result == null) return null
+    return parsed
+  } catch {
+    // Storage can throw outright (private browsing, blocked site data) - falling back to a genuine
+    // fetch is always safe, so this just means the reload isn't instant this one time.
+    return null
+  }
+}
+
+function writeLiveDayCache(underlying, dateKey, snapshot) {
+  try {
+    window.localStorage.setItem(LIVE_DAY_CACHE_STORAGE_KEY, JSON.stringify({ underlying, dateKey, ...snapshot }))
+  } catch {
+    // Same as above - remembering is a convenience, never a requirement.
+  }
+}
+
+function clearLiveDayCache() {
+  try {
+    window.localStorage.removeItem(LIVE_DAY_CACHE_STORAGE_KEY)
+  } catch {
+    // Nothing to do - if removeItem itself threw, the entry likely never stuck in the first place.
+  }
+}
+
 // One simulated position: Buy (long) or Sell (short/write) CE/PE at whatever this replay's own
 // premium series shows as of the CURRENT replay tick, then Exit later (again at whatever the series
 // shows as of the tick Exit is clicked) - entirely client-side, no backend call, no real order.
@@ -1959,6 +2004,17 @@ export default function OiReplayPage() {
     writePersistedPaperPositions(underlying, date.format('YYYY-MM-DD'), paperPositions)
   }, [paperPositions, isToday, underlying, date])
 
+  // Keeps today's own fetched run PLUS everything the live feed has appended since in storage, so a
+  // reload can restore it instantly instead of re-fetching (see load()'s own preferCache branch, and
+  // LIVE_DAY_CACHE_STORAGE_KEY's doc comment). `result` is null for a moment during every load() call
+  // (including a historical day switch) - skipped rather than overwriting today's still-good cache
+  // with nothing, same reasoning useOiReplayLiveFeed's own doc comment gives for not tearing the
+  // connection down on that same transient null.
+  useEffect(() => {
+    if (!isToday || !underlying || !date || !result) return
+    writeLiveDayCache(underlying, date.format('YYYY-MM-DD'), { result, liveBars, liveCePoints, livePePoints, liveFuturesPoints, vwapSeries, liveExpiryFlag })
+  }, [result, liveBars, liveCePoints, livePePoints, liveFuturesPoints, vwapSeries, liveExpiryFlag, isToday, underlying, date])
+
   // Backs the live-mode expiry picker - fetched per underlying regardless of isToday, so the list is
   // already there the instant the user clicks Go Live rather than needing its own separate load.
   useEffect(() => {
@@ -1984,10 +2040,43 @@ export default function OiReplayPage() {
   // can set today's date AND kick off the fetch in one click - setDate(today) followed immediately
   // by load() would still read the OLD `date` from this closure (React state updates aren't
   // synchronous), so the caller passes the date it just set instead of relying on it having landed.
-  const load = (overrideDate) => {
+  // preferCache: ONLY passed true by the page-mount effect below, never by the Go Live button,
+  // "Load day," or the live feed's own reconnect-triggered load() - see LIVE_DAY_CACHE_STORAGE_KEY's
+  // own doc comment for why those three keep doing a genuine fetch unconditionally.
+  const load = (overrideDate, { preferCache = false } = {}) => {
     const effectiveDate = overrideDate ?? date
     if (!underlying || !effectiveDate) return
     const effectiveIsToday = effectiveDate.format('YYYY-MM-DD') === istDateKey(new Date())
+    const dateKey = effectiveDate.format('YYYY-MM-DD')
+
+    if (preferCache && effectiveIsToday) {
+      const cached = readLiveDayCache(underlying, dateKey)
+      if (cached) {
+        setPlaying(false)
+        setLoading(false)
+        setError(null)
+        setResult(cached.result)
+        setLiveBars(cached.liveBars ?? [])
+        setLiveCePoints(cached.liveCePoints ?? [])
+        setLivePePoints(cached.livePePoints ?? [])
+        setLiveFuturesPoints(cached.liveFuturesPoints ?? [])
+        // Restored alongside the data it was actually tracking - liveExpiryFlag itself resets to its
+        // own 'N1' default on every fresh mount (never persisted), so without this a restore of a
+        // cached NON-default expiry (N2+) would show that expiry's frozen snapshot while the live feed
+        // silently rejoins N1's group instead, ticking an expiry the screen isn't even showing.
+        if (cached.liveExpiryFlag) setLiveExpiryFlag(cached.liveExpiryFlag)
+        setPaperPositions(readPersistedPaperPositions(underlying, dateKey))
+        setVwapSeries(cached.vwapSeries ?? [])
+        // VWAP still gets a fresh read - a cheap, always-in-memory endpoint (see its own call further
+        // down), not the Dhan-touching main run fetch this cache exists to skip.
+        fetch(`/api/spot/${underlying}/vwap-series`)
+          .then((r) => r.json())
+          .then((vwap) => setVwapSeries((vwap ?? []).map((p) => ({ time: toChartTime(p.time), value: p.obv }))))
+          .catch((err) => console.error('Failed to load VWAP series:', err))
+        return
+      }
+    }
+
     // Abort whatever run fetch might still be pending from a previous click - otherwise a stale
     // response landing late could clobber the result of THIS load with an older day's data.
     activeLoadController.current?.abort('superseded')
@@ -2088,6 +2177,16 @@ export default function OiReplayPage() {
   // LOAD_TIMEOUT_MS's own auto-cancel - see the Loading alert's own Cancel button below.
   const cancelLoad = () => activeLoadController.current?.abort('user-cancelled')
 
+  // The one way to force a genuine re-fetch once today's run is cached (see
+  // LIVE_DAY_CACHE_STORAGE_KEY's own doc comment) - wipes the cached entry, then immediately calls
+  // load() with no options (preferCache defaults false), the exact same real fetch Go Live/Load day
+  // already do. Only shown while isToday (see its own button below) - a historical day was never
+  // cached in the first place, so there'd be nothing here to clear.
+  const handleClearLiveCache = () => {
+    clearLiveDayCache()
+    load(date)
+  }
+
   // One click for "switch to today and start following it live" - the user's own "if tomorrow
   // markets opens and if select live this will work on live data" ask, rather than needing to open
   // the date picker and find today's date by hand every single morning. Whatever underlying/
@@ -2107,9 +2206,17 @@ export default function OiReplayPage() {
   // day afterward is untouched, and re-clicking Go Live is still exactly the same one-liner it
   // always was. underlying needs no guard of its own: it's already persisted with a real default
   // (see its own usePersistedState call above), never null.
+  //
+  // preferCache (not goLive() itself - see load()'s own doc comment on preferCache) is what actually
+  // answers the "keep current day data in memory + live ticks, don't make us load it again" ask: a
+  // reload lands here, finds today's own cached run still in storage, and restores it instantly with
+  // no network fetch at all, live ticks picking back up from wherever the cache left off. The Clear
+  // button below (writeLiveDayCache's own doc comment) is the one way to force a genuine re-fetch.
   useEffect(() => {
     if (date) return
-    goLive()
+    const today = dayjs()
+    setDate(today)
+    load(today, { preferCache: true })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -2942,6 +3049,21 @@ export default function OiReplayPage() {
               <Select value={timeframe} onChange={setTimeframe} style={{ width: 110 }} options={TIMEFRAME_OPTIONS} />
               <Button type="primary" onClick={() => load()} loading={loading} disabled={!canLoad}>Load day</Button>
               {isToday && <Checkbox checked={showVwap} onChange={(e) => setShowVwap(e.target.checked)}>VWAP</Checkbox>}
+              {isToday && (
+                // Today's own run + live ticks are kept in this browser (see LIVE_DAY_CACHE_STORAGE_KEY's
+                // own doc comment) so a reload doesn't have to re-fetch - this is the one way to force a
+                // genuine re-fetch instead, for whenever the cached data looks wrong/stale. Popconfirm
+                // rather than a bare click - clearing re-triggers a real Dhan-touching fetch right away,
+                // not just a no-op reset, so an accidental click deserves one more step before it fires.
+                <Popconfirm
+                  title="Clear cached data and refetch?"
+                  description="Removes today's cached run and live ticks from this browser, then re-fetches fresh from the server right now."
+                  onConfirm={handleClearLiveCache}
+                  okText="Clear & refetch"
+                >
+                  <Button danger>Clear cache</Button>
+                </Popconfirm>
+              )}
             </Space>
             <Space align="center" size={12} wrap>
               <Text type="secondary" style={{ fontSize: 12 }}>Sections shown</Text>
