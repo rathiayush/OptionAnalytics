@@ -383,15 +383,43 @@ public sealed class OiReplayService
         }
         Task<DhanSpotInstrument?> ResolveInstrumentAsync() => Task.FromResult(instrument);
 
+        IReadOnlyList<CandleWithVolume> foundBars = Array.Empty<CandleWithVolume>();
+        var resolvedDate = await ResolvePreviousTradingDayAsync(onOrBeforeDate, async candidate =>
+        {
+            var (bars, _) = await FetchSpotBarsWithVolumeAsync(underlying, candidate, isAlwaysLive, ResolveInstrumentAsync, cancellationToken);
+            if (bars.Count == 0) return false;
+            foundBars = bars;
+            return true;
+        });
+        if (resolvedDate is null)
+            return VolumeProfileResult.Failed(underlying, $"No previous trading day data found for {underlying} in the last week.");
+        return ComputeVolumeProfile(underlying, resolvedDate.Value, foundBars);
+    }
+
+    /// <summary>How many calendar days back GetPreviousDayVolumeProfileAsync will walk before giving
+    /// up - comfortably covers any ordinary single holiday (or one adjacent to a weekend) without
+    /// needing a full NSE holiday calendar.</summary>
+    private const int PreviousTradingDayMaxAttempts = 7;
+
+    /// <summary>The actual date-walking logic, pulled out of GetPreviousDayVolumeProfileAsync as its
+    /// own pure-shaped, independently testable piece (internal + InternalsVisibleTo, same reasoning
+    /// as ComputeVolumeProfile's own doc comment) - the real question worth pinning down with a test
+    /// is exactly this: does it correctly skip weekends, and does it correctly keep walking back one
+    /// more day whenever a candidate reports no data (a market holiday) rather than giving up on the
+    /// first miss, all while never trying more than PreviousTradingDayMaxAttempts real weekdays.
+    /// hasDataAsync is the caller's own "does this specific date have anything" check - production
+    /// code fetches for real; a test fakes specific dates as holidays with no network/DB at all.
+    /// Starts at onOrBeforeDate - 1 (the day BEFORE whatever is currently loaded), returns the first
+    /// date hasDataAsync confirms, or null once attempts are exhausted with nothing found.</summary>
+    internal static async Task<DateOnly?> ResolvePreviousTradingDayAsync(DateOnly onOrBeforeDate, Func<DateOnly, Task<bool>> hasDataAsync)
+    {
         var candidate = onOrBeforeDate.AddDays(-1);
-        for (var attempts = 0; attempts < 7; attempts++, candidate = candidate.AddDays(-1))
+        for (var attempts = 0; attempts < PreviousTradingDayMaxAttempts; attempts++, candidate = candidate.AddDays(-1))
         {
             if (candidate.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday) continue;
-            var (bars, _) = await FetchSpotBarsWithVolumeAsync(underlying, candidate, isAlwaysLive, ResolveInstrumentAsync, cancellationToken);
-            if (bars.Count == 0) continue;
-            return ComputeVolumeProfile(underlying, candidate, bars);
+            if (await hasDataAsync(candidate)) return candidate;
         }
-        return VolumeProfileResult.Failed(underlying, $"No previous trading day data found for {underlying} in the last week.");
+        return null;
     }
 
     /// <summary>internal (not private), tested directly via InternalsVisibleTo - see
