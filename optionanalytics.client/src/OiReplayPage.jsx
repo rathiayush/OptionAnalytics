@@ -1156,6 +1156,13 @@ const VOLUME_PROFILE_VA_COLOR = '#8b5cf6'
 const VOLUME_PROFILE_HVN_COLOR = '#facc15'
 const VOLUME_PROFILE_LVN_COLOR = '#64748b'
 
+// Index 0 = the single strongest HVN/LVN (ComputeVolumeProfile's own OrderByDescending/OrderBy
+// already ranks them this way, backend-side) - shown at near-full strength; each one after it fades
+// further, so "there are several of these" reads as several DIFFERENT-weight levels, not several
+// identical-looking lines. Backend caps each list at 2, but this reads by index regardless of length
+// (falling back to the last entry for anything beyond it) rather than hard-coding "exactly two."
+const VOLUME_PROFILE_NODE_SHADE_ALPHAS = [0.9, 0.45]
+
 // A second, independently-timeframed candlestick chart with two EMA overlays - the user's own "one
 // more chart along with this 15 min running chart... add ema indicator... for parallel execution to
 // specific entry" ask: a faster 1/3/5-min read with EMA crossovers for timing an entry precisely,
@@ -1263,8 +1270,17 @@ function EmaChart({
     addLine(volumeProfile.poc, VOLUME_PROFILE_POC_COLOR, `POC${dateLabel}`, 2, 0)
     addLine(volumeProfile.vah, VOLUME_PROFILE_VA_COLOR, 'VAH', 1, 2)
     addLine(volumeProfile.val, VOLUME_PROFILE_VA_COLOR, 'VAL', 1, 2)
-    volumeProfile.hvn?.forEach((price) => addLine(price, VOLUME_PROFILE_HVN_COLOR, 'HVN', 1, 1))
-    volumeProfile.lvn?.forEach((price) => addLine(price, VOLUME_PROFILE_LVN_COLOR, 'LVN', 1, 1))
+    // Multiple HVN/LVN entries are already returned STRONGEST FIRST (ComputeVolumeProfile's own
+    // OrderByDescending/OrderBy) - shading each by that same rank, not redoing the ranking here,
+    // is what actually answers "show shades" for however many of each there are: the single
+    // strongest node in each list stays full-strength, and every one after it fades a step further,
+    // so a second/third node reads as "real but secondary" rather than looking identical in weight
+    // to the primary one.
+    const addRankedLines = (levels, color, title) => {
+      levels?.forEach((price, i) => addLine(price, hexToRgba(color, VOLUME_PROFILE_NODE_SHADE_ALPHAS[i] ?? VOLUME_PROFILE_NODE_SHADE_ALPHAS.at(-1)), title, 1, 1))
+    }
+    addRankedLines(volumeProfile.hvn, VOLUME_PROFILE_HVN_COLOR, 'HVN')
+    addRankedLines(volumeProfile.lvn, VOLUME_PROFILE_LVN_COLOR, 'LVN')
   }, [volumeProfile, showVolumeProfile])
 
   // Unconditional re-fit on a brand new day AND whenever this chart's OWN timeframe changes (unlike
