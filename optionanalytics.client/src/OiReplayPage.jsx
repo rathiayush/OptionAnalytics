@@ -8,7 +8,7 @@ import './oiMobile.css'
 import {
   UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR,
   istTimeFormatter, istTimeWithSecondsFormatter, istTickMarkFormatter, toBar, toChartTime, fromChartTime, istDateKey, fmtDateOnly,
-  NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, usePersistedState,
+  NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, STORED_SHOW_VOLUME_PROFILE, usePersistedState,
   syncSignalRGroups, joinAllSignalRGroups, useCardOrder, CardDragHandle,
 } from './shared.jsx'
 import { PremiumEmaChart, DraggableFloatingPanel, useFitContentAsDataGrows } from './oiShared.jsx'
@@ -1169,7 +1169,7 @@ const VOLUME_PROFILE_LVN_COLOR = '#64748b'
 // changes - lightweight-charts series are cheap to keep, not to keep re-adding.
 function EmaChart({
   oneMinBars, visibleCount, timeframe, onTimeframeChange, ema1Period, onEma1PeriodChange, ema2Period, onEma2PeriodChange, dayKey,
-  vwapSeries = EMPTY_ARRAY, showVwap = false, height = 320, volumeProfile = null,
+  vwapSeries = EMPTY_ARRAY, showVwap = false, height = 320, volumeProfile = null, showVolumeProfile = true,
 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
@@ -1253,7 +1253,7 @@ function EmaChart({
     if (!seriesRef.current) return
     for (const line of volumeProfileLinesRef.current) seriesRef.current.removePriceLine(line)
     volumeProfileLinesRef.current = []
-    if (!volumeProfile) return
+    if (!volumeProfile || !showVolumeProfile) return
     const addLine = (price, color, title, lineWidth, lineStyle) => {
       if (price == null) return
       const line = seriesRef.current.createPriceLine({ price, color, lineWidth, lineStyle, axisLabelVisible: true, title })
@@ -1265,7 +1265,7 @@ function EmaChart({
     addLine(volumeProfile.val, VOLUME_PROFILE_VA_COLOR, 'VAL', 1, 2)
     volumeProfile.hvn?.forEach((price) => addLine(price, VOLUME_PROFILE_HVN_COLOR, 'HVN', 1, 1))
     volumeProfile.lvn?.forEach((price) => addLine(price, VOLUME_PROFILE_LVN_COLOR, 'LVN', 1, 1))
-  }, [volumeProfile])
+  }, [volumeProfile, showVolumeProfile])
 
   // Unconditional re-fit on a brand new day AND whenever this chart's OWN timeframe changes (unlike
   // just growing with more data, below) - switching from 5min to 1min here goes from ~75 candles to
@@ -2034,12 +2034,17 @@ export default function OiReplayPage() {
   const [vwapSeries, setVwapSeries] = useState([])
   const [showVwap, setShowVwap] = usePersistedState(STORED_SHOW_VWAP, false)
 
-  // Previous-day volume profile (POC/VAH/VAL/HVN/LVN) - marked on the fast entry charts (B/C) BY
-  // DEFAULT, the user's own explicit ask, so no separate toggle/persisted preference exists for it
-  // the way showVwap has. Refetched whenever the underlying or the loaded day itself changes (NOT on
-  // every tick - these are yesterday's own already-closed levels, which never move once fetched) -
-  // keyed off result's own fields rather than the raw underlying/date state above so this never fires
-  // for a day whose actual data hasn't landed yet.
+  // Previous-day volume profile (POC/VAH/VAL/HVN/LVN) - marked on the fast entry charts (B/C) ON BY
+  // DEFAULT (the user's own original ask), with this checkbox the one way to hide it once it's
+  // covering something else on the chart - same persisted-shared-across-pages shape as showVwap
+  // above, just defaulting true instead of false since this one starts ON. Still fetched regardless
+  // of whether it's currently shown (cheap, and toggling back on shouldn't need a fresh network
+  // round trip) - only the DRAWING inside EmaChart is gated on it.
+  const [showVolumeProfile, setShowVolumeProfile] = usePersistedState(STORED_SHOW_VOLUME_PROFILE, true)
+  // Refetched whenever the underlying or the loaded day itself changes (NOT on every tick - these are
+  // yesterday's own already-closed levels, which never move once fetched) - keyed off result's own
+  // fields rather than the raw underlying/date state above so this never fires for a day whose actual
+  // data hasn't landed yet.
   const [volumeProfile, setVolumeProfile] = useState(null)
   useEffect(() => {
     if (!result?.success || !underlying || !result.date) { setVolumeProfile(null); return }
@@ -3180,6 +3185,7 @@ export default function OiReplayPage() {
               <Select value={timeframe} onChange={setTimeframe} style={{ width: 110 }} options={TIMEFRAME_OPTIONS} />
               <Button type="primary" onClick={() => load()} loading={loading} disabled={!canLoad}>Load day</Button>
               {isToday && <Checkbox checked={showVwap} onChange={(e) => setShowVwap(e.target.checked)}>VWAP</Checkbox>}
+              <Checkbox checked={showVolumeProfile} onChange={(e) => setShowVolumeProfile(e.target.checked)}>Volume Profile</Checkbox>
               {isToday && (
                 // Today's own run + live ticks are kept in this browser (see LIVE_DAY_CACHE_STORAGE_KEY's
                 // own doc comment) so a reload doesn't have to re-fetch - this is the one way to force a
@@ -3616,7 +3622,7 @@ export default function OiReplayPage() {
                                 dayKey={`emaB-${underlying}-${result.date}`}
                                 vwapSeries={vwapSeries} showVwap={showVwap}
                                 height={560}
-                                volumeProfile={volumeProfile}
+                                volumeProfile={volumeProfile} showVolumeProfile={showVolumeProfile}
                               />
                             </ChartErrorBoundary>
                             {atmStrike != null && (
@@ -3648,7 +3654,7 @@ export default function OiReplayPage() {
                               dayKey={`emaC-${underlying}-${result.date}`}
                               vwapSeries={vwapSeries} showVwap={showVwap}
                               height={560}
-                              volumeProfile={volumeProfile}
+                              volumeProfile={volumeProfile} showVolumeProfile={showVolumeProfile}
                             />
                           </ChartErrorBoundary>
                         )

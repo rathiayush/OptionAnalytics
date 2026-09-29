@@ -166,6 +166,10 @@ export const STORED_TIMEFRAME = 'optionanalytics.timeframe'
 // One shared toggle for every page's VWAP checkbox, same as underlying/timeframe above - checking
 // it on one page and finding it already checked on another is the expected behavior, not a bug.
 export const STORED_SHOW_VWAP = 'optionanalytics.showVwap'
+// Same shape, for OI Replay's own previous-day volume profile (POC/VAH/VAL/HVN/LVN) overlay -
+// shown on by default (the user's own original ask), with this the one way to hide it once it's
+// in the way of something else on the chart.
+export const STORED_SHOW_VOLUME_PROFILE = 'optionanalytics.showVolumeProfile'
 function readStored(key, fallback) {
   try {
     const raw = window.localStorage.getItem(key)
