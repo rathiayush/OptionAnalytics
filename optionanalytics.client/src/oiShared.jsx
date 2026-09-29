@@ -5,7 +5,7 @@ import { createChart, CandlestickSeries, LineSeries, CrosshairMode } from 'light
 import * as signalR from '@microsoft/signalr'
 import {
   UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR, RECONNECT_RETRY_POLICY,
-  istTimeFormatter, istTickMarkFormatter, toChartTime, fromChartTime, istDateKey, TIMEFRAME_OPTIONS,
+  istTimeFormatter, istTickMarkFormatter, toChartTime, TIMEFRAME_OPTIONS,
   syncSignalRGroups, joinAllSignalRGroups,
 } from './shared.jsx'
 
@@ -27,51 +27,28 @@ const { Text } = Typography
 // (re-feeding the chart, losing its own pan/zoom) even when the caller never actually passes one.
 const EMPTY_ARRAY = []
 
-// Keeps a chart's own visible time range showing "the whole day so far" - growing as more bars
-// accumulate live for a HISTORICAL day (isToday=false), or reserved up front via whitespace padding
-// for TODAY (isToday=true, see padWithWhitespaceToMarketClose's own doc comment - dataLength must be
-// the PADDED length in that case, not the raw bar count).
+// Keeps a chart's own visible time range showing "the whole day so far", growing as more bars
+// accumulate live, instead of staying frozen at whatever few bars existed the moment fitContent()
+// happened to run once. Every chart on this page/OiReplayPage.jsx used to call fitContent() only
+// on [dayKey] (a fresh day loading) - correct for that one moment, but a real report ("charts are
+// too zoomed, I have to squeeze/zoom out myself") traced back to exactly this: fitContent() fits to
+// however many bars exist RIGHT THEN, and nothing ever widened that window again as a live session
+// went on to accumulate far more bars over the rest of the day. The vertical (price) axis needed no
+// separate fix - lightweight-charts' own default autoScale already re-fits to whatever's in the
+// CURRENT visible window, so it was only ever following the same too-narrow horizontal window.
 //
-// isToday=true uses setVisibleLogicalRange, never fitContent() - confirmed empirically (lightweight-
-// charts 5.2.1) that fitContent() does NOT correctly extend the visible range to cover trailing
-// WHITESPACE-only points: it instead snaps to a range ending near the last REAL point, with the
-// "extra" reserved space added as NEGATIVE logical indices before the data instead of after it - so
-// a whitespace-padded chart calling fitContent() renders its real candles squeezed into a sliver at
-// the FAR RIGHT of the pane (whitespace on the wrong side) rather than left-anchored as intended.
-// Since the padded array's own total length is INVARIANT all day (a new real tick replaces one
-// whitespace slot, it never grows the array - the first real point's own time and today's market
-// close both stay fixed), this only needs setting ONCE, on the very first render for this dayKey;
-// there is nothing to "regrow" into afterward the way a historical day's own fitContent() still does.
-//
-// isToday=false (historical) keeps the ORIGINAL fitContent()-based behavior exactly: a fresh
-// fitContent() on [dayKey], then again as MORE real bars arrive (a still-updating stored day),
-// but ONLY while the viewer is already at the live edge (the previous last bar was already visible)
-// - re-fitting on every single new tick regardless would otherwise yank someone back to the day's
-// full span the moment they scroll/zoom back to inspect an earlier stretch, fighting the very thing
-// they just did. Same reasoning ReplayChart's own allowShiftVisibleRangeOnWhitespaceReplacement doc
-// comment already gives for shiftVisibleRangeOnNewBar.
-//
-// Deferred two animation frames: the chart's container can still be mid-layout (e.g. its own
-// ResizeObserver callback hasn't fired with the real width yet) at the moment setData() runs, so a
-// setVisibleLogicalRange() called synchronously there gets silently recomputed/overridden once that
-// real width lands. Confirmed empirically that one rAF isn't always enough but two reliably is -
-// this mirrors ResizeObserver callbacks themselves firing after layout but around paint timing.
-export function setPaddedVisibleRange(chartRef, paddedLength) {
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => {
-      chartRef.current?.timeScale().setVisibleLogicalRange({ from: 0, to: paddedLength - 1 })
-    })
-  })
-}
-
-export function useFitContentAsDataGrows(chartRef, dataLength, dayKey, isToday = false) {
+// Only re-fits while the viewer is already at the live edge (the previous last bar was already
+// visible) - re-fitting on every single new tick regardless would otherwise yank someone back to
+// the day's full span the moment they scroll/zoom back to inspect an earlier stretch, fighting the
+// very thing they just did. Same reasoning ReplayChart's own allowShiftVisibleRangeOnWhitespaceReplacement
+// doc comment already gives for shiftVisibleRangeOnNewBar.
+export function useFitContentAsDataGrows(chartRef, dataLength, dayKey) {
   const prevLengthRef = useRef(0)
 
+  // A fresh day (or combo switch) always gets an unconditional fit, regardless of where the OLD
+  // day's chart happened to be scrolled to - there is no "previous" position to preserve.
   useEffect(() => {
-    if (dataLength > 0) {
-      if (isToday) setPaddedVisibleRange(chartRef, dataLength)
-      else chartRef.current?.timeScale().fitContent()
-    }
+    if (dataLength > 0) chartRef.current?.timeScale().fitContent()
     prevLengthRef.current = dataLength
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dayKey])
@@ -80,44 +57,13 @@ export function useFitContentAsDataGrows(chartRef, dataLength, dayKey, isToday =
     const chart = chartRef.current
     const previousLength = prevLengthRef.current
     prevLengthRef.current = dataLength
-    // Nothing to regrow into while isToday - see this hook's own doc comment.
-    if (isToday || !chart || dataLength === 0 || dataLength <= previousLength) return
+    if (!chart || dataLength === 0 || dataLength <= previousLength) return
     const timeScale = chart.timeScale()
     const range = timeScale.getVisibleLogicalRange()
     const wasAtLiveEdge = !range || range.to >= previousLength - 1
     if (wasAtLiveEdge) timeScale.fitContent()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dataLength])
-}
-
-// Extends a live, still-forming day's own series with WHITESPACE points (bare {time}, no value) from
-// its last real point through today's market close (15:30 IST), at the SAME interval already present
-// in the real data. lightweight-charts includes whitespace in fitContent()'s own time-domain
-// calculation but never autoscales the PRICE axis against it and never draws anything for it - so a
-// chart fed this reserves its FULL session's width from the very first real point, rather than one
-// that only ever spans however much of the day has actually ticked so far and gets stretched to fill
-// the whole canvas because so few points exist yet. That stretching was exactly the "too zoomed in,
-// I have to squeeze to fit" report; reserving the rest of the day up front is also what makes candles
-// render at a comfortable, unstretched width anchored to the LEFT from the very first tick - like
-// every other trading platform - instead of centered/stretched across the whole canvas, the "candles
-// should come to the left hand side" ask.
-//
-// A NO-OP for anything that isn't today (a fully historical day's own last point is already at or
-// past its own market close, so the loop below never adds anything) - deliberately still gated on an
-// explicit `isToday` rather than relying on that alone, so a historical day's manual scrub position
-// (deliberately NOT genuinely reaching market close until the user scrubs there) is never padded out
-// to look "further along" than what has actually been revealed.
-export function padWithWhitespaceToMarketClose(points, isToday, timeKey = 'time') {
-  if (!isToday || points.length < 2) return points
-  const interval = points[1][timeKey] - points[0][timeKey]
-  if (interval <= 0) return points
-  const lastTime = points[points.length - 1][timeKey]
-  const lastRealMs = fromChartTime(lastTime) * 1000
-  const closeChartTime = toChartTime(`${istDateKey(new Date(lastRealMs))}T15:30:00+05:30`)
-  if (closeChartTime <= lastTime) return points
-  const padded = points.slice()
-  for (let t = lastTime + interval; t <= closeChartTime; t += interval) padded.push({ [timeKey]: t })
-  return padded
 }
 
 // Modeled directly on App.jsx's own useHub: ONE connection, opened on mount and never torn down or
@@ -368,7 +314,7 @@ const OI_STALE_MS = 5 * 60_000
 
 // Candlestick chart that draws the strongest OI levels on each side as horizontal price lines
 // directly on the chart (darker = heavier OI = a "harder" level).
-export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = true, vwapSeries = EMPTY_ARRAY, showVwap = false, onStrikeClick, height = 440, isToday = false }) {
+export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = true, vwapSeries = EMPTY_ARRAY, showVwap = false, onStrikeClick, height = 440 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
@@ -479,8 +425,8 @@ export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Onl
 
   useEffect(() => {
     if (!seriesRef.current) return
-    seriesRef.current.setData(padWithWhitespaceToMarketClose(bars, isToday))
-  }, [bars, isToday])
+    seriesRef.current.setData(bars)
+  }, [bars])
 
   // Fed only while checked, empty otherwise - simpler and just as instant as toggling a `visible`
   // option, and it means an unchecked chart never even pays for lightweight-charts re-rendering data
@@ -568,7 +514,7 @@ export const FAST_TIMEFRAME_OPTIONS = TIMEFRAME_OPTIONS.filter((o) => o.value <=
 
 // A second, independently-timeframed candlestick chart with two EMA overlays, driven by the SAME
 // oneMinBars/visibleCount the caller owns - never fetches or replays anything on its own.
-export function EmaChart({ oneMinBars, visibleCount, timeframe, onTimeframeChange, ema1Period, onEma1PeriodChange, ema2Period, onEma2PeriodChange, dayKey, vwapSeries = EMPTY_ARRAY, showVwap = false, height = 320, isToday = false }) {
+export function EmaChart({ oneMinBars, visibleCount, timeframe, onTimeframeChange, ema1Period, onEma1PeriodChange, ema2Period, onEma2PeriodChange, dayKey, vwapSeries = EMPTY_ARRAY, showVwap = false, height = 320 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
@@ -647,7 +593,7 @@ export function EmaChart({ oneMinBars, visibleCount, timeframe, onTimeframeChang
   useEffect(() => { ema1SeriesRef.current?.applyOptions({ title: `EMA ${ema1Period}` }) }, [ema1Period])
   useEffect(() => { ema2SeriesRef.current?.applyOptions({ title: `EMA ${ema2Period}` }) }, [ema2Period])
 
-  useEffect(() => { if (seriesRef.current) seriesRef.current.setData(padWithWhitespaceToMarketClose(displayBars, isToday)) }, [displayBars, isToday])
+  useEffect(() => { if (seriesRef.current) seriesRef.current.setData(displayBars) }, [displayBars])
   useEffect(() => { if (ema1SeriesRef.current) ema1SeriesRef.current.setData(ema1Points) }, [ema1Points])
   useEffect(() => { if (ema2SeriesRef.current) ema2SeriesRef.current.setData(ema2Points) }, [ema2Points])
   // Same "own timeframe, not the candles' own" reasoning as ReplayChart's identical effect - VWAP is
@@ -936,7 +882,7 @@ export function PremiumCandleChart({ bars, dayKey, height = 320 }) {
 // page's replay has "played" up to, same as every other chart there.
 export function PremiumEmaChart({
   points, asOfMs, timeframe, onTimeframeChange, ema1Period, onEma1PeriodChange, ema2Period, onEma2PeriodChange, dayKey,
-  showVwap = false, height = 320, isToday = false,
+  showVwap = false, height = 320,
 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
@@ -1024,14 +970,12 @@ export function PremiumEmaChart({
   useEffect(() => { ema1SeriesRef.current?.applyOptions({ title: `EMA ${ema1Period}` }) }, [ema1Period])
   useEffect(() => { ema2SeriesRef.current?.applyOptions({ title: `EMA ${ema2Period}` }) }, [ema2Period])
 
-  const paddedDisplayBars = useMemo(() => padWithWhitespaceToMarketClose(displayBars, isToday), [displayBars, isToday])
-
-  useEffect(() => { if (seriesRef.current) seriesRef.current.setData(paddedDisplayBars) }, [paddedDisplayBars])
+  useEffect(() => { if (seriesRef.current) seriesRef.current.setData(displayBars) }, [displayBars])
   useEffect(() => { if (ema1SeriesRef.current) ema1SeriesRef.current.setData(ema1Points) }, [ema1Points])
   useEffect(() => { if (ema2SeriesRef.current) ema2SeriesRef.current.setData(ema2Points) }, [ema2Points])
   useEffect(() => { vwapSeriesRef.current?.setData(showVwap ? vwapPoints : EMPTY_ARRAY) }, [vwapPoints, showVwap])
 
-  useFitContentAsDataGrows(chartRef, paddedDisplayBars.length, `${dayKey}-${timeframe}`, isToday)
+  useFitContentAsDataGrows(chartRef, displayBars.length, `${dayKey}-${timeframe}`)
 
   return (
     <div style={{ width: '100%' }}>

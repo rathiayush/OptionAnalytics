@@ -11,7 +11,7 @@ import {
   NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, usePersistedState,
   syncSignalRGroups, joinAllSignalRGroups, useCardOrder, CardDragHandle,
 } from './shared.jsx'
-import { PremiumEmaChart, DraggableFloatingPanel, useFitContentAsDataGrows, padWithWhitespaceToMarketClose, setPaddedVisibleRange } from './oiShared.jsx'
+import { PremiumEmaChart, DraggableFloatingPanel, useFitContentAsDataGrows } from './oiShared.jsx'
 
 const { Text, Title } = Typography
 
@@ -522,7 +522,7 @@ const SUPPORT_DARK = '#0a5c1f'
 // further data fetch, just a local re-render. Also draws the strongest OI levels on each side as
 // horizontal price lines directly on the chart (darker = heavier OI = a "harder" level) - the same
 // data the ladder shows in table form, here as the market-structure read on the price chart itself.
-function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = true, vwapSeries = EMPTY_ARRAY, showVwap = false, onStrikeClick, height = 440, isToday = false }) {
+function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = true, vwapSeries = EMPTY_ARRAY, showVwap = false, onStrikeClick, height = 440 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
@@ -635,15 +635,10 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = tru
     }
   }, [height])
 
-  // Padded to market close while isToday (see padWithWhitespaceToMarketClose's own doc comment) -
-  // computed once and reused for both setData below and the visible-range hook, so the two never
-  // disagree on what "the padded length" actually is.
-  const paddedBars = useMemo(() => padWithWhitespaceToMarketClose(bars, isToday), [bars, isToday])
-
   useEffect(() => {
     if (!seriesRef.current) return
-    seriesRef.current.setData(paddedBars)
-  }, [paddedBars])
+    seriesRef.current.setData(bars)
+  }, [bars])
 
   // Fed only while checked, empty otherwise - see EmaChart's own identical effect for why VWAP is
   // shown at its own native cadence rather than re-aggregated to match this chart's timeframe.
@@ -656,7 +651,7 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = tru
   // so a deliberate pan/zoom/scroll during playback to inspect an earlier stretch is left alone -
   // the "should be able to zoom in/out" ask still holds, this just stops the DEFAULT view from
   // staying frozen at whatever few bars existed the moment the day was first loaded.
-  useFitContentAsDataGrows(chartRef, paddedBars.length, dayKey, isToday)
+  useFitContentAsDataGrows(chartRef, bars.length, dayKey)
 
   // Redraws the strongest CHART_LEVELS_PER_SIDE (5) resistance (CE OI) / support (PE OI) lines on
   // every tick, since OI itself changes as the replay advances AND which strikes even qualify
@@ -786,7 +781,7 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = tru
 // can't show). Rebuilds the whole chart on a mode switch rather than trying to swap a series' type
 // in place - lightweight-charts has no such API, and a mode change is a deliberate tab click, not a
 // live-tick-rate event, so the small recreation cost here is a non-issue.
-function StrikeOiDrilldownChart({ ceSeries, peSeries, mode, dayKey, height = 320, isToday = false }) {
+function StrikeOiDrilldownChart({ ceSeries, peSeries, mode, dayKey, height = 320 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const ceSeriesRef = useRef(null)
@@ -861,23 +856,11 @@ function StrikeOiDrilldownChart({ ceSeries, peSeries, mode, dayKey, height = 320
     // comment on why that, not a flat per-series color, is what actually answers "where is it being
     // added/removed."
     const withDirectionColor = (series) => mode === 'change' ? series.map((p) => ({ ...p, color: p.value >= 0 ? OI_ADDED_COLOR : OI_REMOVED_COLOR })) : series
-    // Whitespace-padded to market close while isToday, same reasoning as every other live chart on
-    // this page (see padWithWhitespaceToMarketClose's own doc comment). The visible range is then
-    // set EXPLICITLY to the padded length rather than via fitContent() - confirmed empirically that
-    // fitContent() does not correctly extend across trailing whitespace-only points (see
-    // useFitContentAsDataGrows' own doc comment for the full explanation) and would otherwise
-    // squeeze the real line into a sliver at the far RIGHT of the pane instead of anchoring it left.
-    const cePadded = padWithWhitespaceToMarketClose(withDirectionColor(ceSeries), isToday)
-    const pePadded = padWithWhitespaceToMarketClose(withDirectionColor(peSeries), isToday)
-    ceSeriesRef.current.setData(cePadded)
-    peSeriesRef.current.setData(pePadded)
-    const paddedLength = Math.max(cePadded.length, pePadded.length)
-    if (paddedLength > 0) {
-      if (isToday) setPaddedVisibleRange(chartRef, paddedLength)
-      else chartRef.current?.timeScale().fitContent()
-    }
+    ceSeriesRef.current.setData(withDirectionColor(ceSeries))
+    peSeriesRef.current.setData(withDirectionColor(peSeries))
+    if (ceSeries.length > 0 || peSeries.length > 0) chartRef.current?.timeScale().fitContent()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ceSeries, peSeries, mode, dayKey, isToday])
+  }, [ceSeries, peSeries, mode, dayKey])
 
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }
@@ -1107,7 +1090,7 @@ const VWAP_COLOR = '#e072e8'
 // The two EMA series are created ONCE (in the same setup effect as the candlestick series) and
 // only ever re-titled/re-fed data afterward, rather than destroyed and recreated when a period
 // changes - lightweight-charts series are cheap to keep, not to keep re-adding.
-function EmaChart({ oneMinBars, visibleCount, timeframe, onTimeframeChange, ema1Period, onEma1PeriodChange, ema2Period, onEma2PeriodChange, dayKey, vwapSeries = EMPTY_ARRAY, showVwap = false, height = 320, isToday = false }) {
+function EmaChart({ oneMinBars, visibleCount, timeframe, onTimeframeChange, ema1Period, onEma1PeriodChange, ema2Period, onEma2PeriodChange, dayKey, vwapSeries = EMPTY_ARRAY, showVwap = false, height = 320 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
@@ -1167,9 +1150,7 @@ function EmaChart({ oneMinBars, visibleCount, timeframe, onTimeframeChange, ema1
   useEffect(() => { ema1SeriesRef.current?.applyOptions({ title: `EMA ${ema1Period}` }) }, [ema1Period])
   useEffect(() => { ema2SeriesRef.current?.applyOptions({ title: `EMA ${ema2Period}` }) }, [ema2Period])
 
-  const paddedDisplayBars = useMemo(() => padWithWhitespaceToMarketClose(displayBars, isToday), [displayBars, isToday])
-
-  useEffect(() => { if (seriesRef.current) seriesRef.current.setData(paddedDisplayBars) }, [paddedDisplayBars])
+  useEffect(() => { if (seriesRef.current) seriesRef.current.setData(displayBars) }, [displayBars])
   useEffect(() => { if (ema1SeriesRef.current) ema1SeriesRef.current.setData(ema1Points) }, [ema1Points])
   useEffect(() => { if (ema2SeriesRef.current) ema2SeriesRef.current.setData(ema2Points) }, [ema2Points])
   // Own native 1-minute cadence, not re-aggregated to this chart's own timeframe - VWAP is a
@@ -1185,7 +1166,7 @@ function EmaChart({ oneMinBars, visibleCount, timeframe, onTimeframeChange, ema1
   // sliver of that much denser series rather than the whole thing. Also keeps re-fitting as MORE
   // bars accumulate live at the SAME timeframe, while still at the live edge - see
   // useFitContentAsDataGrows' own doc comment.
-  useFitContentAsDataGrows(chartRef, paddedDisplayBars.length, `${dayKey}-${timeframe}`, isToday)
+  useFitContentAsDataGrows(chartRef, displayBars.length, `${dayKey}-${timeframe}`)
 
   return (
     <div style={{ width: '100%' }}>
@@ -1231,7 +1212,7 @@ function classifyFuturesRegime(priceDelta, oiDelta, priceThreshold, oiThreshold)
 // shift actually started, the "show me when what happened" read for a future's own OI - unlike an
 // option strike, a future has no strike chain to draw S/R walls for, so this chart's OI story is
 // entirely about ITS OWN change over time rather than a level.
-function FuturesChart({ bars, oiLine, markers, dayKey, height = 320, isToday = false }) {
+function FuturesChart({ bars, oiLine, markers, dayKey, height = 320 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
@@ -1296,12 +1277,10 @@ function FuturesChart({ bars, oiLine, markers, dayKey, height = 320, isToday = f
     }
   }, [height])
 
-  const paddedBars = useMemo(() => padWithWhitespaceToMarketClose(bars, isToday), [bars, isToday])
-
   useEffect(() => {
     if (!seriesRef.current) return
-    seriesRef.current.setData(paddedBars)
-  }, [paddedBars])
+    seriesRef.current.setData(bars)
+  }, [bars])
 
   useEffect(() => {
     if (!oiSeriesRef.current) return
@@ -1312,7 +1291,7 @@ function FuturesChart({ bars, oiLine, markers, dayKey, height = 320, isToday = f
     markersRef.current?.setMarkers(markers ?? [])
   }, [markers])
 
-  useFitContentAsDataGrows(chartRef, paddedBars.length, dayKey, isToday)
+  useFitContentAsDataGrows(chartRef, bars.length, dayKey)
 
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }
@@ -3077,7 +3056,6 @@ export default function OiReplayPage() {
                         mode={dayOiChartMode}
                         dayKey={`day-oi-${dayOiChartMode}-${underlying}-${result?.date}-${timeframe}`}
                         height={220}
-                        isToday={isToday}
                       />
                     </ChartErrorBoundary>
                   </div>
@@ -3244,7 +3222,6 @@ export default function OiReplayPage() {
                           showVwap={showVwap}
                           onStrikeClick={setDrilldownStrike}
                           height={560}
-                          isToday={isToday}
                         />
                       </ChartErrorBoundary>
                     )
@@ -3283,7 +3260,6 @@ export default function OiReplayPage() {
                                 dayKey={`emaB-${underlying}-${result.date}`}
                                 vwapSeries={vwapSeries} showVwap={showVwap}
                                 height={560}
-                                isToday={isToday}
                               />
                             </ChartErrorBoundary>
                             {atmStrike != null && (
@@ -3315,7 +3291,6 @@ export default function OiReplayPage() {
                               dayKey={`emaC-${underlying}-${result.date}`}
                               vwapSeries={vwapSeries} showVwap={showVwap}
                               height={560}
-                              isToday={isToday}
                             />
                           </ChartErrorBoundary>
                         )
@@ -3361,7 +3336,6 @@ export default function OiReplayPage() {
                               dayKey={`premium-ce-${underlying}-${result.date}-${cePremiumOffset}`}
                               showVwap={showVwap}
                               height={320}
-                              isToday={isToday}
                             />
                           </ChartErrorBoundary>
                         )}
@@ -3387,7 +3361,6 @@ export default function OiReplayPage() {
                               dayKey={`premium-pe-${underlying}-${result.date}-${pePremiumOffset}`}
                               showVwap={showVwap}
                               height={320}
-                              isToday={isToday}
                             />
                           </ChartErrorBoundary>
                         )}
@@ -3490,7 +3463,6 @@ export default function OiReplayPage() {
                             markers={futuresRegimeMarkers}
                             dayKey={`futures-${underlying}-${result.date}-${timeframe}`}
                             height={320}
-                            isToday={isToday}
                           />
                         </ChartErrorBoundary>
                         {result.futuresOiAvailable && (
@@ -3562,7 +3534,6 @@ export default function OiReplayPage() {
                   mode="total"
                   dayKey={`drilldown-total-${underlying}-${result?.date}-${drilldownStrike}`}
                   height={220}
-                  isToday={isToday}
                 />
               </ChartErrorBoundary>
             </div>
@@ -3580,7 +3551,6 @@ export default function OiReplayPage() {
                   mode="change"
                   dayKey={`drilldown-change-${underlying}-${result?.date}-${drilldownStrike}`}
                   height={220}
-                  isToday={isToday}
                 />
               </ChartErrorBoundary>
             </div>
@@ -3601,7 +3571,6 @@ export default function OiReplayPage() {
                   mode="sinceOpen"
                   dayKey={`drilldown-sinceopen-${underlying}-${result?.date}-${drilldownStrike}`}
                   height={220}
-                  isToday={isToday}
                 />
               </ChartErrorBoundary>
             </div>
