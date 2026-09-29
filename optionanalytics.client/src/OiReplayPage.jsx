@@ -1366,6 +1366,39 @@ function computeStopTargetHit(series, entryTimeMs, asOfMs, entryPrice, direction
 // stale value here only skews the SIMULATED PnL's scale, not anything real.
 const PAPER_TRADE_LOT_SIZE = { NIFTY: 75, BANKNIFTY: 35, SENSEX: 20 }
 
+// Survives a page reload for TODAY's own live session only - a historical replay day's positions
+// still reset on every load() the same as before (see PaperTradePanel's own doc comment: "a paper
+// position only means something against the ONE day's premium series it was punched into"), which is
+// exactly why this is scoped to BOTH the underlying and the calendar day, not a single flat key -
+// restoring blindly from storage regardless of which underlying/day is now loaded would resurrect
+// yesterday's (or a different underlying's) positions against today's entirely different premium
+// series. Real order placement was never in scope here (see PAPER_TRADE_LOT_SIZE's own comment) - a
+// stale localStorage entry from an old session, or one edited by hand, only ever skews a SIMULATED
+// PnL number, so restoring it needs no more validation than "does the shape look like an array."
+const PAPER_POSITIONS_STORAGE_KEY = 'optionanalytics.oiReplay.livePaperPositions'
+
+function readPersistedPaperPositions(underlying, dateKey) {
+  try {
+    const raw = window.localStorage.getItem(PAPER_POSITIONS_STORAGE_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    if (parsed?.underlying !== underlying || parsed?.dateKey !== dateKey || !Array.isArray(parsed.positions)) return []
+    return parsed.positions
+  } catch {
+    // Storage can throw outright (private browsing, blocked site data) - the feature still works,
+    // it just doesn't remember, same as usePersistedState elsewhere on this page.
+    return []
+  }
+}
+
+function writePersistedPaperPositions(underlying, dateKey, positions) {
+  try {
+    window.localStorage.setItem(PAPER_POSITIONS_STORAGE_KEY, JSON.stringify({ underlying, dateKey, positions }))
+  } catch {
+    // Same as above - remembering is a convenience, never a requirement.
+  }
+}
+
 // One simulated position: Buy (long) or Sell (short/write) CE/PE at whatever this replay's own
 // premium series shows as of the CURRENT replay tick, then Exit later (again at whatever the series
 // shows as of the tick Exit is clicked) - entirely client-side, no backend call, no real order.
@@ -1449,8 +1482,9 @@ function PaperTradePanel({
           either), checked against every revealed minute bar's own high-low since entry (or each live
           tick, once today's live feed is ticking) - not just the latest price - so a real intra-bar touch
           is caught even if price reverses before the next check. Exit all closes every open position
-          right now at its current price, without clearing the table the way Clear all does. Resets when
-          a new day is loaded, or click Clear all.
+          right now at its current price, without clearing the table the way Clear all does. Today's own
+          positions survive a page reload (saved locally in this browser); loading a historical day, a
+          different underlying, or clicking Clear all still resets them.
         </Text>
       </Space>
     </div>
@@ -1875,9 +1909,12 @@ export default function OiReplayPage() {
   // Paper trade panel state - see PaperTradePanel's own doc comment. strikeOffset defaults to 0
   // (ATM) and stays an OFFSET rather than an absolute strike, so "the default is ATM" holds true
   // all through the session even as ATM itself drifts with price - the user never has to re-pick it
-  // unless they actually want an OTM/ITM strike instead. Positions reset on every fresh load() (see
-  // below), same as the live feed's own tail - a paper position only means something against the
-  // ONE day's premium series it was punched into.
+  // unless they actually want an OTM/ITM strike instead. Positions reset on every fresh load() of a
+  // HISTORICAL day, same as the live feed's own tail - a paper position only means something against
+  // the ONE day's premium series it was punched into. TODAY's own positions are the one exception:
+  // they persist in localStorage instead (see PAPER_POSITIONS_STORAGE_KEY's own doc comment) so a
+  // page reload doesn't lose an open live session's positions - only Clear all, or loading a
+  // different day/underlying, actually clears them.
   const [paperSide, setPaperSide] = useState('CE')
   const [paperDirection, setPaperDirection] = useState('BUY')
   const [paperStrikeOffset, setPaperStrikeOffset] = useState(0)
@@ -1911,6 +1948,16 @@ export default function OiReplayPage() {
 
   const canLoad = Boolean(underlying && date)
   const isToday = Boolean(date && date.format('YYYY-MM-DD') === istDateKey(new Date()))
+
+  // Keeps today's own paper positions in storage as they change (punched, exited, SL/target hit) so
+  // a page reload can restore them (see load()'s own read, and PAPER_POSITIONS_STORAGE_KEY's doc
+  // comment) - a historical replay day's positions are deliberately never written here, matching how
+  // they were never meant to survive past that one load() in the first place. Clear all clearing the
+  // array back to [] flows through this same effect, no separate storage write needed there.
+  useEffect(() => {
+    if (!isToday || !underlying || !date) return
+    writePersistedPaperPositions(underlying, date.format('YYYY-MM-DD'), paperPositions)
+  }, [paperPositions, isToday, underlying, date])
 
   // Backs the live-mode expiry picker - fetched per underlying regardless of isToday, so the list is
   // already there the instant the user clicks Go Live rather than needing its own separate load.
@@ -1953,7 +2000,11 @@ export default function OiReplayPage() {
     setLiveCePoints([])
     setLivePePoints([])
     setLiveFuturesPoints([])
-    setPaperPositions([])
+    // Today's own positions survive THIS reload (see PAPER_POSITIONS_STORAGE_KEY's own doc comment) -
+    // restored from storage rather than reset, so long as they were punched against the SAME
+    // underlying and the SAME calendar day now loading. Any other day (or a stale/foreign entry)
+    // still resets to empty exactly as before.
+    setPaperPositions(effectiveIsToday ? readPersistedPaperPositions(underlying, effectiveDate.format('YYYY-MM-DD')) : [])
     setVwapSeries([])
     // Only for today - see vwapSeries' own doc comment on why a historical day has no VWAP to show
     // at all (its own spotCandlesOneMinute carries no volume, and the live endpoint below reflects
