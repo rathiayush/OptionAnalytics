@@ -6,7 +6,7 @@ import * as signalR from '@microsoft/signalr'
 import {
   UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR, RECONNECT_RETRY_POLICY,
   istTimeFormatter, istTickMarkFormatter, toChartTime, TIMEFRAME_OPTIONS,
-  syncSignalRGroups, joinAllSignalRGroups,
+  syncSignalRGroups, joinAllSignalRGroups, onLiveBatch,
 } from './shared.jsx'
 
 const { Text } = Typography
@@ -114,12 +114,13 @@ export function useOiLiveHub(onSpotUpdate, onOiReplayTick, onReconnected, onCdvU
     // Optional chaining on every one of these - a caller like LiveStrikeDataPage genuinely has no
     // use for some of these events and passes null for them; calling a null ref directly would throw
     // the moment that event arrives, which for spotUpdate/oiReplayTick is roughly every second.
-    connection.on('spotUpdate', (snapshot) => spotRef.current?.(snapshot))
+    // spotUpdate/cdvUpdate arrive inside the conflated "liveBatch" (see onLiveBatch); the raw
+    // oiReplayTick tape and the rarer cdvBarClosed/oiRestSnapshot events come directly.
+    onLiveBatch(connection, {
+      spotUpdate: (snapshot) => spotRef.current?.(snapshot),
+      cdvUpdate: (snapshot) => cdvRef.current?.(snapshot),
+    })
     connection.on('oiReplayTick', (tick) => tickRef.current?.(tick))
-    // Same CDV/OBV events App.jsx's own useHub already listens for, off the SAME shared hub -
-    // CdvHostedService broadcasts these regardless of which page is open, so nothing extra needs
-    // subscribing server-side for this page to receive them too.
-    connection.on('cdvUpdate', (snapshot) => cdvRef.current?.(snapshot))
     connection.on('cdvBarClosed', (point) => cdvBarClosedRef.current?.(point))
     // OPTIONAL REST-quote fallback (OiReplayLiveFeedService.RunRestQuoteLoopAsync) - every strike's
     // OI/price from Dhan's Option Chain snapshot endpoint, re-broadcast every ~30s regardless of

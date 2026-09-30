@@ -5,83 +5,180 @@ using OptionAnalytics.Server.Services;
 
 namespace OptionAnalytics.Server.Tests;
 
-/// <summary>Drain is the whole batching contract with the timer and SignalR taken out: latest-wins
-/// per key, factories evaluated only at flush, accumulated entries merged per key and sent as one
-/// array per (group, event), and nothing sent twice.</summary>
+/// <summary>Flush is the whole delivery contract with the timer and SignalR taken out. The property
+/// that matters to a trader: a connection that is slow to acknowledge never accumulates a backlog -
+/// it gets the NEWEST state next time, with nothing lost that a chart needs (open/high/low).</summary>
 public sealed class LiveBroadcastBatcherTests
 {
-    private static LiveBroadcastBatcher NewBatcher() => new(null!, NullLogger<LiveBroadcastBatcher>.Instance);
+    private static readonly DateTimeOffset T0 = new(2026, 9, 30, 4, 30, 0, TimeSpan.Zero);
 
-    private sealed record Leg(string Key, decimal Price, decimal High, decimal Low, int Ticks);
+    private static LiveBroadcastBatcher NewBatcher() => new(null, NullLogger<LiveBroadcastBatcher>.Instance);
+
+    private static LiveOptionTick Leg(decimal price, long oi = 100) =>
+        new("NIFTY", "N1", 25000, "CE", price, price, price, price, oi, T0);
+
+    private static List<LiveOptionTick> Legs(LiveBatch batch) =>
+        batch.Items.Where(i => i.E == "oiReplayTicks").SelectMany(i => ((IEnumerable<object>)i.D).Cast<LiveOptionTick>()).ToList();
 
     [Fact]
-    public void SetLatest_KeepsOnlyTheNewestPerKey_AndBuildsItAtFlushTime()
+    public void SetLatest_SendsOnlyTheNewestPerKey_BuiltOncePerFlush()
     {
         var batcher = NewBatcher();
+        batcher.Join("a", "u:NIFTY");
         var built = 0;
         for (var i = 1; i <= 50; i++)
         {
             var value = i;
-            batcher.SetLatest("u:NIFTY", "cdvUpdate", "selected", () => { built++; return value; });
+            batcher.SetLatest("u:NIFTY", "spotUpdate", "NIFTY", () => { built++; return value; });
         }
 
-        var messages = batcher.Drain();
+        var (connection, batch) = Assert.Single(batcher.Flush(T0));
 
-        Assert.Single(messages);
-        Assert.Equal(("u:NIFTY", "cdvUpdate", (object)50), (messages[0].Group, messages[0].Event, messages[0].Payload));
+        Assert.Equal("a", connection);
+        Assert.Equal(new LiveBatchItem("spotUpdate", 50), Assert.Single(batch.Items));
         Assert.Equal(1, built);
     }
 
     [Fact]
-    public void SetLatest_DifferentKeysAndGroups_AreSentSeparately()
+    public void OnlyMembersOfAGroupReceiveIt()
     {
         var batcher = NewBatcher();
-        batcher.SetLatest("u:NIFTY", "cdvExpiryUpdate", "2026-10-06", () => "a");
-        batcher.SetLatest("u:NIFTY", "cdvExpiryUpdate", "2026-10-13", () => "b");
-        batcher.SetLatest("u:SENSEX", "cdvUpdate", "selected", () => "c");
+        batcher.Join("dashboard", "cdv:NIFTY");
+        batcher.Join("oiReplay", "u:NIFTY");
+        batcher.SetLatest("cdv:NIFTY", "cdvUpdate", "selected", () => "cdv");
 
-        Assert.Equal(3, batcher.Drain().Count);
+        var (connection, _) = Assert.Single(batcher.Flush(T0));
+        Assert.Equal("dashboard", connection);
     }
 
     [Fact]
-    public void Accumulate_MergesPerKey_AndSendsOneArrayPerGroupAndEvent()
+    public void AnUnacknowledgedConnection_GetsNothingMore_ThenOnlyTheNewestOnceItAcks()
     {
         var batcher = NewBatcher();
-        void Tick(string key, decimal price) => batcher.Accumulate<Leg>("c:NIFTY:N1", "oiReplayTicks", key, prev =>
-            new Leg(key, price, prev is null ? price : Math.Max(prev.High, price), prev is null ? price : Math.Min(prev.Low, price), (prev?.Ticks ?? 0) + 1));
+        batcher.Join("phone", "u:NIFTY");
+        batcher.SetLatest("u:NIFTY", "spotUpdate", "NIFTY", () => 1);
+        var first = Assert.Single(batcher.Flush(T0)).Batch;
 
-        Tick("25000:CE", 100); Tick("25000:CE", 112); Tick("25000:CE", 95); Tick("25000:CE", 101);
-        Tick("25050:PE", 80);
+        // Twenty more flushes' worth of ticks while the phone hasn't acked: nothing is sent, nothing queues.
+        for (var i = 2; i <= 21; i++)
+        {
+            var value = i;
+            batcher.SetLatest("u:NIFTY", "spotUpdate", "NIFTY", () => value);
+            Assert.Empty(batcher.Flush(T0.AddMilliseconds(200 * i)));
+        }
 
-        var messages = batcher.Drain();
+        batcher.Ack("phone", first.Sequence);
+        var next = Assert.Single(batcher.Flush(T0.AddMilliseconds(4500))).Batch;
 
-        var message = Assert.Single(messages);
-        var legs = Assert.IsAssignableFrom<IEnumerable<object>>(message.Payload).Cast<Leg>().ToList();
-        Assert.Equal(2, legs.Count);
-        var ce = legs.Single(l => l.Key == "25000:CE");
-        Assert.Equal((101m, 112m, 95m, 4), (ce.Price, ce.High, ce.Low, ce.Ticks));
+        Assert.Equal(new LiveBatchItem("spotUpdate", 21), Assert.Single(next.Items));
+        Assert.True(next.Sequence > first.Sequence);
     }
 
     [Fact]
-    public void Drain_ClearsEverything_SoNothingIsSentTwice()
+    public void ConflatedLegs_KeepTheFirstOpenAndWidenHighLow_AcrossSkippedFlushes()
     {
         var batcher = NewBatcher();
-        batcher.SetLatest("u:NIFTY", "cdvUpdate", "selected", () => 1);
-        batcher.Accumulate<Leg>("c:NIFTY:N1", "oiReplayTicks", "k", _ => new Leg("k", 1, 1, 1, 1));
+        batcher.Join("phone", "c:NIFTY:N1");
+        batcher.Accumulate("c:NIFTY:N1", "oiReplayTicks", "25000:CE:1", Leg(100));
+        var first = Assert.Single(batcher.Flush(T0)).Batch;
 
-        Assert.Equal(2, batcher.Drain().Count);
-        Assert.Empty(batcher.Drain());
+        batcher.Accumulate("c:NIFTY:N1", "oiReplayTicks", "25000:CE:1", Leg(104));
+        Assert.Empty(batcher.Flush(T0.AddMilliseconds(300)));
+        batcher.Accumulate("c:NIFTY:N1", "oiReplayTicks", "25000:CE:1", Leg(120));
+        batcher.Accumulate("c:NIFTY:N1", "oiReplayTicks", "25000:CE:1", Leg(90));
+        Assert.Empty(batcher.Flush(T0.AddMilliseconds(600)));
+        batcher.Accumulate("c:NIFTY:N1", "oiReplayTicks", "25000:CE:1", Leg(101, oi: 777));
+
+        batcher.Ack("phone", first.Sequence);
+        var leg = Assert.Single(Legs(Assert.Single(batcher.Flush(T0.AddMilliseconds(900))).Batch));
+
+        Assert.Equal((104m, 101m, 120m, 90m, 777L), (leg.Open, leg.Price, leg.High, leg.Low, leg.OpenInterest));
     }
 
     [Fact]
-    public void Drain_AFailingFactory_DoesNotDropTheOtherMessages()
+    public void AStaleAck_DoesNotReleaseTheConnection()
     {
         var batcher = NewBatcher();
-        batcher.SetLatest("u:NIFTY", "cdvUpdate", "selected", () => throw new InvalidOperationException());
-        batcher.SetLatest("u:SENSEX", "cdvUpdate", "selected", () => "ok");
+        batcher.Join("a", "u:NIFTY");
+        batcher.SetLatest("u:NIFTY", "spotUpdate", "NIFTY", () => 1);
+        var first = Assert.Single(batcher.Flush(T0)).Batch;
 
-        var message = Assert.Single(batcher.Drain());
-        Assert.Equal("ok", message.Payload);
+        batcher.Ack("a", first.Sequence - 1);
+        batcher.SetLatest("u:NIFTY", "spotUpdate", "NIFTY", () => 2);
+
+        Assert.Empty(batcher.Flush(T0.AddSeconds(1)));
+    }
+
+    [Fact]
+    public void ALostAck_TimesOut_SoAConnectionIsNeverStuck()
+    {
+        var batcher = NewBatcher();
+        batcher.Join("a", "u:NIFTY");
+        batcher.SetLatest("u:NIFTY", "spotUpdate", "NIFTY", () => 1);
+        Assert.Single(batcher.Flush(T0));
+
+        batcher.SetLatest("u:NIFTY", "spotUpdate", "NIFTY", () => 2);
+        Assert.Empty(batcher.Flush(T0 + LiveBroadcastBatcher.AckTimeout - TimeSpan.FromMilliseconds(1)));
+        Assert.Single(batcher.Flush(T0 + LiveBroadcastBatcher.AckTimeout));
+    }
+
+    [Fact]
+    public void AFastConnection_IsNotHeldBackByASlowOne()
+    {
+        var batcher = NewBatcher();
+        batcher.Join("fast", "u:NIFTY");
+        batcher.Join("slow", "u:NIFTY");
+        batcher.SetLatest("u:NIFTY", "spotUpdate", "NIFTY", () => 1);
+        var sent = batcher.Flush(T0);
+        batcher.Ack("fast", sent.Single(s => s.ConnectionId == "fast").Batch.Sequence);
+
+        batcher.SetLatest("u:NIFTY", "spotUpdate", "NIFTY", () => 2);
+        var second = batcher.Flush(T0.AddMilliseconds(300));
+
+        Assert.Equal("fast", Assert.Single(second).ConnectionId);
+    }
+
+    [Fact]
+    public void LeaveAndDisconnect_StopDelivery()
+    {
+        var batcher = NewBatcher();
+        batcher.Join("a", "u:NIFTY");
+        batcher.Join("b", "u:NIFTY");
+        batcher.Leave("a", "u:NIFTY");
+        batcher.Disconnected("b");
+        batcher.SetLatest("u:NIFTY", "spotUpdate", "NIFTY", () => 1);
+
+        Assert.Empty(batcher.Flush(T0));
+        Assert.False(batcher.HasMembers("u:NIFTY"));
+    }
+
+    [Fact]
+    public void Batch_SerializesEntriesWithTheirRealFields_OnTheWire()
+    {
+        var batcher = NewBatcher();
+        batcher.Join("a", "c:NIFTY:N1");
+        batcher.Accumulate("c:NIFTY:N1", "oiReplayTicks", "25000:CE:1", Leg(101, oi: 555));
+
+        var batch = Assert.Single(batcher.Flush(T0)).Batch;
+        // SignalR's JSON hub protocol uses the Web (camelCase) defaults.
+        var json = JsonSerializer.Serialize(batch, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+
+        Assert.Contains("\"e\":\"oiReplayTicks\"", json);
+        Assert.Contains("\"openInterest\":555", json);
+        Assert.Contains("\"strike\":25000", json);
+        Assert.Contains("\"sequence\":1", json);
+    }
+
+    [Fact]
+    public void AFailingFactory_DoesNotDropTheOtherMessages()
+    {
+        var batcher = NewBatcher();
+        batcher.Join("a", "u:NIFTY");
+        batcher.SetLatest("u:NIFTY", "spotUpdate", "NIFTY", () => throw new InvalidOperationException());
+        batcher.SetLatest("u:NIFTY", "futuresTicksX", "k", () => "ok");
+
+        var batch = Assert.Single(batcher.Flush(T0)).Batch;
+        Assert.Equal(new LiveBatchItem("futuresTicksX", "ok"), Assert.Single(batch.Items));
     }
 }
 

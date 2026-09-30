@@ -1,7 +1,5 @@
-using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Options;
 using OptionAnalytics.Server.Dhan;
-using OptionAnalytics.Server.Hubs;
 using OptionAnalytics.Server.Models;
 
 namespace OptionAnalytics.Server.Services;
@@ -36,7 +34,7 @@ public sealed class SpotFeedHostedService : BackgroundService
     private readonly DhanSpotInstrumentMaster _instrumentMaster;
     private readonly DhanHistoricalDataService _historicalData;
     private readonly DhanMarketFeedClient _feedClient;
-    private readonly IHubContext<SpotHub> _hub;
+    private readonly LiveBroadcastBatcher _batcher;
     private readonly ILogger<SpotFeedHostedService> _logger;
 
     private readonly Dictionary<uint, SpotUnderlyingState> _bySecurityId = new();
@@ -51,15 +49,15 @@ public sealed class SpotFeedHostedService : BackgroundService
         DhanSpotInstrumentMaster instrumentMaster,
         DhanHistoricalDataService historicalData,
         DhanMarketFeedClient feedClient,
-        IHubContext<SpotHub> hub,
+        LiveBroadcastBatcher batcher,
         ILogger<SpotFeedHostedService> logger)
     {
+        _batcher = batcher;
         _options = options.Value;
         _session = session;
         _instrumentMaster = instrumentMaster;
         _historicalData = historicalData;
         _feedClient = feedClient;
-        _hub = hub;
         _logger = logger;
 
         States = Underlyings.ToDictionary(u => u.Underlying, u => new SpotUnderlyingState(u.Underlying, u.Step));
@@ -398,7 +396,9 @@ public sealed class SpotFeedHostedService : BackgroundService
 
         state.ApplyTick(tick);
         TrimHistoryOnceDaily();
-        _ = BroadcastAsync(state);
+        // Conflated like every other live push (see LiveBroadcastBatcher) - the snapshot is built at
+        // flush time, and a browser that can't keep up gets the newest one rather than a queue.
+        _batcher.SetLatest($"u:{state.Underlying}", "spotUpdate", state.Underlying, state.ToSnapshot);
     }
 
     /// <summary>SpotUnderlyingState.ApplyTick only ever APPENDS a closed candle - BackfillAsync's
@@ -421,18 +421,6 @@ public sealed class SpotFeedHostedService : BackgroundService
         {
             state.SeedHistory(TrimToRecentTradingDays(state.GetClosedCandles(), HistoryTradingDays, c => c.Time));
             state.SeedVolumeHistory(TrimToRecentTradingDays(state.GetClosedVolumeBars(), HistoryTradingDays, c => c.Time));
-        }
-    }
-
-    private async Task BroadcastAsync(SpotUnderlyingState state)
-    {
-        try
-        {
-            await _hub.Clients.Group($"u:{state.Underlying}").SendAsync("spotUpdate", state.ToSnapshot());
-        }
-        catch (Exception ex)
-        {
-            _logger.LogDebug(ex, "Failed to broadcast a spot update for {Underlying}.", state.Underlying);
         }
     }
 

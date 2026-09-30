@@ -12,7 +12,7 @@ import LiveStrikeDataPage from './LiveStrikeDataPage.jsx'
 import TriggersPage from './TriggersPage.jsx'
 import ContractsPage from './ContractsPage.jsx'
 import LoginPage from './LoginPage.jsx'
-import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, RECONNECT_RETRY_POLICY, computeEma, fmtPrice, fmtIstTime, fmtIstDateTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry, AuthContext, useAuth, syncSignalRGroups, joinAllSignalRGroups, useCardOrder, CardDragHandle } from './shared.jsx'
+import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, RECONNECT_RETRY_POLICY, computeEma, fmtPrice, fmtIstTime, fmtIstDateTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry, AuthContext, useAuth, syncSignalRGroups, joinAllSignalRGroups, useCardOrder, CardDragHandle, onLiveBatch, useFeedLag, FeedLagTag, FeedLagAlert, LiveSection, captureChartView, restoreChartView } from './shared.jsx'
 import './App.css'
 
 const { Title, Text } = Typography
@@ -409,12 +409,14 @@ function fmtNum(v) {
 // to a fresh candle showing the opposite is a correctness bug, not a cosmetic one - onReconnected
 // is the hook a caller uses to fully re-fetch from REST (the source of truth) rather than trust
 // whatever incremental state survived the gap.
-function useHub(onSpotUpdate, onCdvUpdate, onConfluenceAlert, onReconnected, onCdvBarClosed, underlying) {
+function useHub(onSpotUpdate, onCdvUpdate, onConfluenceAlert, onReconnected, onCdvBarClosed, onPainted, underlying, pinnedExpiry) {
   const spotHandlerRef = useRef(onSpotUpdate)
   const cdvHandlerRef = useRef(onCdvUpdate)
   const alertHandlerRef = useRef(onConfluenceAlert)
   const reconnectedHandlerRef = useRef(onReconnected)
   const cdvBarClosedHandlerRef = useRef(onCdvBarClosed)
+  const paintedHandlerRef = useRef(onPainted)
+  paintedHandlerRef.current = onPainted
   spotHandlerRef.current = onSpotUpdate
   cdvHandlerRef.current = onCdvUpdate
   alertHandlerRef.current = onConfluenceAlert
@@ -441,11 +443,15 @@ function useHub(onSpotUpdate, onCdvUpdate, onConfluenceAlert, onReconnected, onC
       .build()
     connectionRef.current = connection
 
-    connection.on('spotUpdate', (snapshot) => spotHandlerRef.current(snapshot))
-    connection.on('cdvUpdate', (snapshot) => cdvHandlerRef.current(snapshot, false))
-    // Every NON-selected tracked expiry's snapshot, naming its own expiry - what keeps a pinned
-    // expiry live instead of polled (see CdvHostedService.OnTick).
-    connection.on('cdvExpiryUpdate', (snapshot) => cdvHandlerRef.current(snapshot, true))
+    // Spot and CDV state arrive inside the conflated "liveBatch" (see onLiveBatch) - newest state
+    // only, acknowledged after paint, so the Dashboard can't fall behind the market.
+    // cdvExpiryUpdate is a NON-selected tracked expiry's snapshot, naming its own expiry - what
+    // keeps a pinned expiry live instead of polled (see CdvHostedService.OnTick).
+    onLiveBatch(connection, {
+      spotUpdate: (snapshot) => spotHandlerRef.current(snapshot),
+      cdvUpdate: (snapshot) => cdvHandlerRef.current(snapshot, false),
+      cdvExpiryUpdate: (snapshot) => cdvHandlerRef.current(snapshot, true),
+    }, (sentAtMs, clockOffsetMs) => paintedHandlerRef.current?.(sentAtMs, clockOffsetMs))
     connection.on('confluenceAlert', (alert) => alertHandlerRef.current(alert))
     // Pushed the instant the aggregate CDV bar closes - see CdvHostedService.OnAggregateBarClosed.
     // Lets the CDV lookback table append this point instead of re-fetching GET .../lookback.
@@ -475,11 +481,14 @@ function useHub(onSpotUpdate, onCdvUpdate, onConfluenceAlert, onReconnected, onC
 
   // Keeps server-side group membership in sync with the currently selected underlying, without
   // touching the connection itself - see oiShared.jsx's useOiLiveHub for the identical shape/reasoning.
+  // "cdv:{u}" carries the server's selected-expiry CDV; "cdv:{u}:{expiry}" a pinned one's.
   useEffect(() => {
-    const newGroups = underlying ? [`u:${underlying}`] : []
+    const newGroups = underlying
+      ? [`u:${underlying}`, `cdv:${underlying}`, ...(pinnedExpiry ? [`cdv:${underlying}:${pinnedExpiry}`] : [])]
+      : []
     syncSignalRGroups(connectionRef.current, groupsRef.current, newGroups)
     groupsRef.current = newGroups
-  }, [underlying])
+  }, [underlying, pinnedExpiry])
 }
 
 // Candlestick + EMA9/EMA21 overlay + crossover markers - the one chart shape reused for the spot
@@ -568,16 +577,15 @@ function PriceChart({ bars, vwapSeries = EMPTY_ARRAY, showVwap = false, height =
     // Capturing the visible range immediately before setData and restoring it immediately after
     // neutralizes that reset while keeping the data current. Skipped before the first real fit -
     // there's nothing of the user's to preserve yet, and fitContent below handles that one instead.
-    const preservedRange = hasFitRef.current ? chartRef.current?.timeScale().getVisibleRange() : null
+    // Follows the newest bar while the view is at the live edge; otherwise keeps the range the user
+    // scrolled to - see captureChartView.
+    const view = hasFitRef.current ? captureChartView(chartRef.current, seriesRef.current) : null
     seriesRef.current.setData(sanitizedBars)
     if (!hasFitRef.current && sanitizedBars.length > 0) {
       chartRef.current?.timeScale().fitContent()
       hasFitRef.current = true
-    } else if (preservedRange) {
-      // The new data may no longer cover exactly this range (e.g. the oldest bar rolled off) -
-      // that's a "nothing to show past this edge" case for the time scale, not an error worth
-      // fighting the tick over.
-      try { chartRef.current?.timeScale().setVisibleRange(preservedRange) } catch { /* empty */ }
+    } else {
+      restoreChartView(chartRef.current, view)
     }
   }, [sanitizedBars])
 
@@ -676,7 +684,7 @@ function CeVsPeChart({ ceSeries, peSeries, prevCeSeries = [], prevPeSeries = [],
     // See PriceChart's identical preservedRange for why - a live tick recomputes these series (new
     // array references) roughly once a second, and setData() resets the visible range as a side
     // effect, snapping a user's drag/pinch back on the very next tick unless it's restored.
-    const preservedRange = hasFitRef.current ? chartRef.current?.timeScale().getVisibleRange() : null
+    const view = hasFitRef.current ? captureChartView(chartRef.current, ceRef.current) : null
     prevCeRef.current.setData(sanitizedPrevCe)
     prevPeRef.current.setData(sanitizedPrevPe)
     ceRef.current.setData(sanitizedCe)
@@ -685,8 +693,8 @@ function CeVsPeChart({ ceSeries, peSeries, prevCeSeries = [], prevPeSeries = [],
     if (!hasFitRef.current && hasAnyData) {
       chartRef.current?.timeScale().fitContent()
       hasFitRef.current = true
-    } else if (preservedRange) {
-      try { chartRef.current?.timeScale().setVisibleRange(preservedRange) } catch { /* empty */ }
+    } else {
+      restoreChartView(chartRef.current, view)
     }
   }, [sanitizedCe, sanitizedPe, sanitizedPrevCe, sanitizedPrevPe])
 
@@ -1317,9 +1325,12 @@ function DashboardPage() {
   // contract's candles must not get the new one's bars appended).
   const optionCandlesStrikeRef = useRef(null)
 
+  const feedLag = useFeedLag(Boolean(selected))
+
   useHub(
     (incoming) => {
       if (incoming.underlying !== selected) return
+      feedLag.recordSource(new Date(incoming.timestampUtc).getTime(), incoming.exchangeTimeUtc ? new Date(incoming.exchangeTimeUtc).getTime() : null)
       setSnapshot(incoming)
       const closedSpot = takeClosedBar(liveTrackersRef.current.spot, incoming.underlying, incoming.currentBar)
       if (closedSpot) setCandles((prev) => appendClosedBar(prev, closedSpot))
@@ -1385,7 +1396,9 @@ function DashboardPage() {
       if (point.obvCe != null) setObvCe((prev) => appendOrReplaceLast(prev, { time, obv: point.obvCe }))
       if (point.obvPe != null) setObvPe((prev) => appendOrReplaceLast(prev, { time, obv: point.obvPe }))
     },
+    feedLag.recordPainted,
     selected,
+    expiryParam,
   )
 
   // A PINNED strike (selectedStrike !== ATM_STRIKE) has no live current bar of its own coming down
@@ -1516,7 +1529,9 @@ function DashboardPage() {
             options={DAYS_OPTIONS}
           />
           <Button onClick={handleRefresh} loading={refreshing} disabled={!selected}>Refresh</Button>
+          <FeedLagTag delayMs={feedLag.delayMs} />
         </Space>
+        <FeedLagAlert delayMs={feedLag.delayMs} sourceDelayMs={feedLag.sourceDelayMs} />
 
         <Space direction="vertical" size={2} align="center" style={{ width: '100%' }}>
           <Text type="secondary">{selected} spot (rounded to nearest {step ?? '—'})</Text>
@@ -1648,9 +1663,10 @@ function DashboardPage() {
             ),
           }
 
+          // LiveSection: a card scrolled off-screen skips live re-renders until it's back in view.
           return cardOrder.map((id) => (
             <div key={id} {...dropTargetProps(id)}>
-              {cardsById[id]}
+              <LiveSection version={cardOrder.join(',')}>{cardsById[id]}</LiveSection>
             </div>
           ))
         })()}
