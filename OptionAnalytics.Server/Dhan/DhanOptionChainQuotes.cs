@@ -111,7 +111,15 @@ public sealed class DhanOptionChainQuotes
             }
 
             var quotes = Parse(response.Root);
-            lock (_cache) { _cache[key] = (DateTimeOffset.UtcNow, quotes); }
+            lock (_cache)
+            {
+                _cache[key] = (DateTimeOffset.UtcNow, quotes);
+                // One entry per underlying/expiry ever asked for - drop expiries that have passed so
+                // a server that stays up for weeks doesn't keep every old chain.
+                var today = IstClock.Today();
+                foreach (var stale in _cache.Keys.Where(k => DateOnly.TryParseExact(k[(k.LastIndexOf(':') + 1)..], "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var e) && e < today).ToList())
+                    _cache.Remove(stale);
+            }
             return quotes;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

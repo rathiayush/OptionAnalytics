@@ -102,7 +102,9 @@ public sealed class OiReplayLiveFeedService : BackgroundService
     /// nearest contract per underlying), so this is just the plain underlying list.</summary>
     private static readonly string[] FuturesUnderlyings = { "NIFTY", "BANKNIFTY", "SENSEX" };
 
-    private sealed record LegInfo(string Underlying, string ExpiryFlag, decimal Strike, bool IsCall);
+    internal sealed record LegInfo(string Underlying, string ExpiryFlag, decimal Strike, bool IsCall, DateOnly Expiry);
+
+    internal sealed record FuturesLeg(string Underlying, DateOnly Expiry);
 
     private readonly SpotFeedHostedService _spotFeed;
     private readonly DhanOptionChainMaster _optionChainMaster;
@@ -113,9 +115,10 @@ public sealed class OiReplayLiveFeedService : BackgroundService
     private readonly LiveBroadcastBatcher _batcher;
     private readonly ILogger<OiReplayLiveFeedService> _logger;
 
-    /// <summary>Every leg this service has ever resolved and subscribed, across every recenter -
-    /// see this class's own doc comment for why entries are never removed even after a strike
-    /// drifts out of the currently-computed band. Keyed by flag (WEEK/MONTH/N1../N6) UNDER the
+    /// <summary>Every leg this service has resolved and subscribed, across every recenter - see this
+    /// class's own doc comment for why entries are never removed when a strike merely drifts out of
+    /// the currently-computed band. They ARE removed once their expiry has passed, or once their
+    /// flag resolves to a different expiry (N2 becoming N1 after a rollover) - see PruneLegs. Keyed by flag (WEEK/MONTH/N1../N6) UNDER the
     /// security id, not a single LegInfo per id - the same real contract routinely belongs to more
     /// than one combo at once (N1 always duplicates WEEK or MONTH's own index-0 date, see
     /// PositionalExpiriesPerUnderlying's own doc comment), and each needs its own tick broadcast to
@@ -123,10 +126,9 @@ public sealed class OiReplayLiveFeedService : BackgroundService
     /// contract is ALSO tracked under "c:NIFTY:WEEK" for OiReplayPage.jsx's sake.</summary>
     private readonly ConcurrentDictionary<uint, ConcurrentDictionary<string, LegInfo>> _legsBySecurityId = new();
 
-    /// <summary>Same "never remove" reasoning as _legsBySecurityId - a future's own nearest
-    /// contract only changes at expiry (once every week/month), so in practice this dictionary
-    /// almost never grows beyond one entry per underlying anyway.</summary>
-    private readonly ConcurrentDictionary<uint, string> _futuresLegsBySecurityId = new();
+    /// <summary>Each underlying's nearest futures contract. The previous contract is dropped (and,
+    /// being expired, unsubscribed) when RecenterFuturesAsync resolves the next one.</summary>
+    private readonly ConcurrentDictionary<uint, FuturesLeg> _futuresLegsBySecurityId = new();
 
     public OiReplayLiveFeedService(
         SpotFeedHostedService spotFeed, DhanOptionChainMaster optionChainMaster, DhanFuturesInstrumentMaster futuresInstrumentMaster,
@@ -158,12 +160,13 @@ public sealed class OiReplayLiveFeedService : BackgroundService
         while (!stoppingToken.IsCancellationRequested)
         {
             var complete = true;
+            var resolvedExpiries = new Dictionary<(string Underlying, string ExpiryFlag), DateOnly>();
             var allCombos = Combos.Concat(await BuildPositionalCombosAsync(stoppingToken)).ToList();
             foreach (var combo in allCombos)
             {
                 try
                 {
-                    if (!await RecenterComboAsync(combo, stoppingToken)) complete = false;
+                    if (!await RecenterComboAsync(combo, resolvedExpiries, stoppingToken)) complete = false;
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -183,6 +186,23 @@ public sealed class OiReplayLiveFeedService : BackgroundService
                     _logger.LogError(ex, "OI Replay live feed: {Underlying} futures re-center failed - left as it was.", underlying);
                     complete = false;
                 }
+            }
+
+            // Without this a server that stays up across expiries would keep every contract it ever
+            // tracked: re-sent to Dhan every cycle below, creeping toward the per-connection cap, and
+            // - worse - a contract that moved from N2 to N1 would keep broadcasting under N2 too.
+            try
+            {
+                var expired = PruneLegs(_legsBySecurityId, resolvedExpiries, IstClock.Today());
+                if (expired.Count > 0)
+                {
+                    _logger.LogInformation("OI Replay live feed: dropped {Count} expired option legs.", expired.Count);
+                    await _feedClient.UnsubscribeAsync(expired, stoppingToken);
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex, "OI Replay live feed: pruning expired legs failed.");
             }
 
             // Unconditionally re-affirm EVERY tracked leg/futures contract's subscription every
@@ -231,7 +251,17 @@ public sealed class OiReplayLiveFeedService : BackgroundService
         var contract = _futuresInstrumentMaster.GetNearestContract(underlying, IstClock.Today());
         if (contract is null) return false;
 
-        _futuresLegsBySecurityId[contract.SecurityId] = underlying;
+        var today = IstClock.Today();
+        var rolledOff = _futuresLegsBySecurityId
+            .Where(kv => kv.Key != contract.SecurityId && kv.Value.Underlying == underlying)
+            .ToList();
+        foreach (var (id, _) in rolledOff) _futuresLegsBySecurityId.TryRemove(id, out _);
+        // Only an expired contract is unsubscribed - the shared feed has no reference counting (see
+        // this class's own doc comment), and nothing can still need a contract that no longer trades.
+        var expired = rolledOff.Where(kv => kv.Value.Expiry < today).Select(kv => kv.Key).ToList();
+        if (expired.Count > 0) await _feedClient.UnsubscribeAsync(expired, cancellationToken);
+
+        _futuresLegsBySecurityId[contract.SecurityId] = new FuturesLeg(underlying, contract.Expiry);
         if (!_feedClient.IsSubscribed(contract.SecurityId))
             await _feedClient.SubscribeAsync(new Dictionary<uint, string> { [contract.SecurityId] = contract.DhanSegment }, cancellationToken, full: true);
 
@@ -328,7 +358,37 @@ public sealed class OiReplayLiveFeedService : BackgroundService
         await BroadcastAsync($"c:{combo.Underlying}:{combo.ExpiryFlag}", "oiRestSnapshot", payload);
     }
 
-    private async Task<bool> RecenterComboAsync(Combo combo, CancellationToken cancellationToken)
+    /// <summary>Drops every leg whose contract has expired, or whose flag now resolves to a different
+    /// expiry than the one it was tracked for (resolvedExpiries holds this cycle's resolution; a combo
+    /// that failed to resolve is only pruned by date). Returns the security ids no flag tracks any
+    /// more whose contracts have expired - safe to unsubscribe, since nothing can still need them.
+    /// A contract merely dropped from a flag, still trading, stays subscribed (see this class's own
+    /// doc comment on the shared feed's lack of reference counting).</summary>
+    internal static IReadOnlyList<uint> PruneLegs(
+        ConcurrentDictionary<uint, ConcurrentDictionary<string, LegInfo>> legsBySecurityId,
+        IReadOnlyDictionary<(string Underlying, string ExpiryFlag), DateOnly> resolvedExpiries,
+        DateOnly today)
+    {
+        var expired = new List<uint>();
+        foreach (var (securityId, legsByFlag) in legsBySecurityId)
+        {
+            var anyExpired = false;
+            foreach (var (flag, leg) in legsByFlag)
+            {
+                var isExpired = leg.Expiry < today;
+                var moved = resolvedExpiries.TryGetValue((leg.Underlying, flag), out var current) && current != leg.Expiry;
+                if (!isExpired && !moved) continue;
+                legsByFlag.TryRemove(flag, out _);
+                anyExpired |= isExpired;
+            }
+            if (legsByFlag.IsEmpty && legsBySecurityId.TryRemove(KeyValuePair.Create(securityId, legsByFlag)) && anyExpired)
+                expired.Add(securityId);
+        }
+        return expired;
+    }
+
+    private async Task<bool> RecenterComboAsync(
+        Combo combo, Dictionary<(string Underlying, string ExpiryFlag), DateOnly> resolvedExpiries, CancellationToken cancellationToken)
     {
         if (!_spotFeed.States.TryGetValue(combo.Underlying, out var spotState) || spotState.LastPrice <= 0)
             return false;
@@ -347,6 +407,7 @@ public sealed class OiReplayLiveFeedService : BackgroundService
 
         var expiry = ResolveNearestExpiry(combo, IstClock.Today());
         if (expiry is null) return false;
+        resolvedExpiries[(combo.Underlying, combo.ExpiryFlag)] = expiry.Value;
 
         var atm = Math.Round(spotState.LastPrice / step) * step;
         var toSubscribe = new Dictionary<uint, string>();
@@ -360,7 +421,7 @@ public sealed class OiReplayLiveFeedService : BackgroundService
                 if (contract is null) continue;
 
                 var legsForSecurity = _legsBySecurityId.GetOrAdd(contract.SecurityId, _ => new ConcurrentDictionary<string, LegInfo>());
-                legsForSecurity[combo.ExpiryFlag] = new LegInfo(combo.Underlying, combo.ExpiryFlag, strike, isCall);
+                legsForSecurity[combo.ExpiryFlag] = new LegInfo(combo.Underlying, combo.ExpiryFlag, strike, isCall, expiry.Value);
                 if (!_feedClient.IsSubscribed(contract.SecurityId))
                     toSubscribe[contract.SecurityId] = contract.DhanSegment;
             }
@@ -479,8 +540,9 @@ public sealed class OiReplayLiveFeedService : BackgroundService
             });
         }
 
-        if (_futuresLegsBySecurityId.TryGetValue(tick.SecurityId, out var futuresUnderlying) && tick.LastPrice > 0)
+        if (_futuresLegsBySecurityId.TryGetValue(tick.SecurityId, out var futuresLeg) && tick.LastPrice > 0)
         {
+            var futuresUnderlying = futuresLeg.Underlying;
             // Futures has no expiryFlag concept (see FuturesUnderlyings' own doc comment) - the plain
             // underlying group spotUpdate also uses. Same per-minute conflation as above.
             _batcher.Accumulate($"u:{futuresUnderlying}", "futuresTicks", minuteKey.ToString(), new LiveFuturesTick(
