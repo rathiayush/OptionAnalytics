@@ -9,9 +9,9 @@ import {
   UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR,
   istTimeFormatter, istTimeWithSecondsFormatter, istTickMarkFormatter, toBar, toChartTime, fromChartTime, istDateKey, fmtDateOnly,
   NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, STORED_SHOW_VOLUME_PROFILE, usePersistedState,
-  syncSignalRGroups, joinAllSignalRGroups, useCardOrder, CardDragHandle, onLiveBatch, useFeedLag, FeedLagTag, FeedLagAlert, LiveSection, checkForNewDeploy,
+  syncSignalRGroups, joinAllSignalRGroups, useCardOrder, CardDragHandle, onLiveBatch, useFeedLag, FeedLagTag, FeedLagAlert, LiveSection, checkForNewDeploy, captureChartView, restoreChartView,
 } from './shared.jsx'
-import { PremiumEmaChart, DraggableFloatingPanel, useFitContentAsDataGrows } from './oiShared.jsx'
+import { PremiumEmaChart, DraggableFloatingPanel, useFitContentAsDataGrows, useChartUserControl } from './oiShared.jsx'
 
 const { Text, Title } = Typography
 
@@ -1029,6 +1029,8 @@ function StrikeOiDrilldownChart({ ceSeries, peSeries, mode, dayKey, height = 320
     }
   }, [height, mode])
 
+  const userControlRef = useChartUserControl(chartRef, `${dayKey}-${mode}`)
+
   useEffect(() => {
     if (!ceSeriesRef.current || !peSeriesRef.current) return
     // 'total'/'sinceOpen' are a plain level - the series' own flat DOWN_COLOR/UP_COLOR (set at
@@ -1037,9 +1039,17 @@ function StrikeOiDrilldownChart({ ceSeries, peSeries, mode, dayKey, height = 320
     // comment on why that, not a flat per-series color, is what actually answers "where is it being
     // added/removed."
     const withDirectionColor = (series) => mode === 'change' ? series.map((p) => ({ ...p, color: p.value >= 0 ? OI_ADDED_COLOR : OI_REMOVED_COLOR })) : series
+    // Auto-fits to the whole series only until the viewer zooms/drags (see useChartUserControl) -
+    // this used to fitContent() on EVERY update, and with live data arriving several times a second
+    // any zoom or scroll-back snapped back to the full day before a value could be read.
+    const view = userControlRef.current ? captureChartView(chartRef.current, ceSeriesRef.current) : null
     ceSeriesRef.current.setData(withDirectionColor(ceSeries))
     peSeriesRef.current.setData(withDirectionColor(peSeries))
-    if (ceSeries.length > 0 || peSeries.length > 0) chartRef.current?.timeScale().fitContent()
+    if (!userControlRef.current) {
+      if (ceSeries.length > 0 || peSeries.length > 0) chartRef.current?.timeScale().fitContent()
+    } else {
+      restoreChartView(chartRef.current, view)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ceSeries, peSeries, mode, dayKey])
 

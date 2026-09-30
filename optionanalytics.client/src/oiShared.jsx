@@ -44,6 +44,7 @@ const EMPTY_ARRAY = []
 // doc comment already gives for shiftVisibleRangeOnNewBar.
 export function useFitContentAsDataGrows(chartRef, dataLength, dayKey) {
   const prevLengthRef = useRef(0)
+  const userControlRef = useChartUserControl(chartRef, dayKey)
 
   // A fresh day (or combo switch) always gets an unconditional fit, regardless of where the OLD
   // day's chart happened to be scrolled to - there is no "previous" position to preserve.
@@ -61,9 +62,52 @@ export function useFitContentAsDataGrows(chartRef, dataLength, dayKey) {
     const timeScale = chart.timeScale()
     const range = timeScale.getVisibleLogicalRange()
     const wasAtLiveEdge = !range || range.to >= previousLength - 1
-    if (wasAtLiveEdge) timeScale.fitContent()
+    if (!wasAtLiveEdge) return
+    // Once the viewer has zoomed/dragged, keep THEIR zoom and just follow the newest bar - re-fitting
+    // to the whole day would undo what they just did on every new bar.
+    if (userControlRef.current) timeScale.scrollToRealTime()
+    else timeScale.fitContent()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dataLength])
+}
+
+// Whether the viewer has taken manual control of a chart's view - dragged, zoomed (wheel) or
+// pinched it. Live charts auto-fit to the whole day only until then; after that the view is theirs
+// (see useFitContentAsDataGrows / StrikeOiDrilldownChart), because re-fitting on every live update
+// snapped a zoom or scroll-back straight back before anything could be read. Double-click the chart
+// to hand the view back to auto-fit. Reset whenever `resetKey` changes (a new day/strike/mode).
+export function useChartUserControl(chartRef, resetKey) {
+  const controlledRef = useRef(false)
+  const attachedRef = useRef(null)
+
+  useEffect(() => { controlledRef.current = false }, [resetKey])
+
+  // No dependency array on purpose: the chart instance can be recreated (e.g. a height change), so
+  // this re-checks each render and re-attaches only when the underlying element actually changed.
+  useEffect(() => {
+    const element = chartRef.current?.chartElement?.() ?? null
+    if (element === (attachedRef.current?.element ?? null)) return
+    attachedRef.current?.detach()
+    attachedRef.current = null
+    if (!element) return
+    const take = () => { controlledRef.current = true }
+    const release = () => { controlledRef.current = false; chartRef.current?.timeScale().fitContent() }
+    element.addEventListener('wheel', take, { passive: true })
+    element.addEventListener('pointerdown', take)
+    element.addEventListener('dblclick', release)
+    attachedRef.current = {
+      element,
+      detach: () => {
+        element.removeEventListener('wheel', take)
+        element.removeEventListener('pointerdown', take)
+        element.removeEventListener('dblclick', release)
+      },
+    }
+  })
+
+  useEffect(() => () => attachedRef.current?.detach(), [])
+
+  return controlledRef
 }
 
 // Modeled directly on App.jsx's own useHub: ONE connection, opened on mount and never torn down or
