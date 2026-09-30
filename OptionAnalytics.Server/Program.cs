@@ -173,6 +173,11 @@ builder.Services.AddHostedService<DhanTotpAutoRenewalHostedService>();
 // opening their own connection.
 builder.Services.AddHostedService<DhanMarketFeedHostedService>();
 
+// Coalesces per-tick CDV/option/futures pushes into one SignalR send per 300ms - see its doc
+// comment. Singleton + hosted, same shared-instance pattern as the services below.
+builder.Services.AddSingleton<LiveBroadcastBatcher>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<LiveBroadcastBatcher>());
+
 // SpotFeedHostedService is both the hosted background loop AND the read model the REST
 // controller queries (its per-underlying candle/price state) - registered as a singleton and
 // then handed to AddHostedService so both consumers share the exact same instance.

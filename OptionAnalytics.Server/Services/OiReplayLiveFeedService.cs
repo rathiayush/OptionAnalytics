@@ -110,6 +110,7 @@ public sealed class OiReplayLiveFeedService : BackgroundService
     private readonly DhanMarketFeedClient _feedClient;
     private readonly DhanOptionChainQuotes _chainQuotes;
     private readonly IHubContext<SpotHub> _hub;
+    private readonly LiveBroadcastBatcher _batcher;
     private readonly ILogger<OiReplayLiveFeedService> _logger;
 
     /// <summary>Every leg this service has ever resolved and subscribed, across every recenter -
@@ -129,8 +130,10 @@ public sealed class OiReplayLiveFeedService : BackgroundService
 
     public OiReplayLiveFeedService(
         SpotFeedHostedService spotFeed, DhanOptionChainMaster optionChainMaster, DhanFuturesInstrumentMaster futuresInstrumentMaster,
-        DhanMarketFeedClient feedClient, DhanOptionChainQuotes chainQuotes, IHubContext<SpotHub> hub, ILogger<OiReplayLiveFeedService> logger)
+        DhanMarketFeedClient feedClient, DhanOptionChainQuotes chainQuotes, IHubContext<SpotHub> hub, LiveBroadcastBatcher batcher,
+        ILogger<OiReplayLiveFeedService> logger)
     {
+        _batcher = batcher;
         _spotFeed = spotFeed;
         _optionChainMaster = optionChainMaster;
         _futuresInstrumentMaster = futuresInstrumentMaster;
@@ -316,8 +319,10 @@ public sealed class OiReplayLiveFeedService : BackgroundService
                 strike = q.Strike,
                 ceOi = q.CeOpenInterest,
                 cePrice = q.CeLastPrice,
+                ceIv = q.CeImpliedVolatility,
                 peOi = q.PeOpenInterest,
                 pePrice = q.PeLastPrice,
+                peIv = q.PeImpliedVolatility,
             }),
         };
         await BroadcastAsync($"c:{combo.Underlying}:{combo.ExpiryFlag}", "oiRestSnapshot", payload);
@@ -433,54 +438,68 @@ public sealed class OiReplayLiveFeedService : BackgroundService
         var observedAt = DateTimeOffset.UtcNow.ToOffset(IstClock.Offset);
         var lastTradeTime = tick.ExchangeTimestamp.ToOffset(IstClock.Offset);
 
+        var minuteKey = observedAt.ToUnixTimeSeconds() / 60;
+
         foreach (var leg in legsByFlag.Values)
         {
-            var payload = new
+            var side = leg.IsCall ? "CE" : "PE";
+            var group = $"c:{leg.Underlying}:{leg.ExpiryFlag}";
+
+            // Coalesced for the charts (OI Replay) - one entry per leg per 300ms flush, carrying the
+            // window's own high/low so nothing about the price path inside it is lost. Keyed by
+            // minute too, so a window straddling a minute boundary sends one entry per minute
+            // instead of attributing the old minute's high/low to the new one.
+            _batcher.Accumulate<LiveOptionTick>(group, "oiReplayTicks", $"{leg.Strike}:{side}:{minuteKey}", previous => new LiveOptionTick(
+                leg.Underlying, leg.ExpiryFlag, leg.Strike, side,
+                Open: previous?.Open ?? tick.LastPrice,
+                Price: tick.LastPrice,
+                High: previous is null ? tick.LastPrice : Math.Max(previous.High, tick.LastPrice),
+                Low: previous is null ? tick.LastPrice : Math.Min(previous.Low, tick.LastPrice),
+                OpenInterest: tick.OpenInterest,
+                Time: observedAt,
+                LastTradeTime: lastTradeTime,
+                DayOpen: tick.Open, DayHigh: tick.High, DayLow: tick.Low,
+                Volume: tick.Volume,
+                BestBidPrice: tick.BestBidPrice, BestAskPrice: tick.BestAskPrice,
+                Ticks: (previous?.Ticks ?? 0) + 1));
+
+            // The raw per-tick tape stays exactly as it was, on its own "t:" group, for the Live
+            // Strike Data page - its whole purpose is to show every individual tick, so it opts in to
+            // that volume explicitly and nothing else pays for it. dayOpen/dayHigh/dayLow are the
+            // CONTRACT's day-so-far O/H/L as Dhan tracks them, not a per-minute range.
+            _ = BroadcastAsync($"t:{leg.Underlying}:{leg.ExpiryFlag}", "oiReplayTick", new
             {
                 underlying = leg.Underlying,
                 expiryFlag = leg.ExpiryFlag,
                 strike = leg.Strike,
-                side = leg.IsCall ? "CE" : "PE",
+                side,
                 price = tick.LastPrice,
                 openInterest = tick.OpenInterest,
-                // +05:30 offset is annotation only (same absolute instant) - it just makes a raw
-                // SignalR frame read as IST in devtools.
                 time = observedAt,
                 lastTradeTime,
-                // Everything else Dhan's own Full packet already carries for this leg (SpotTick
-                // already parses all of it - see its own doc comment) - previously silently dropped
-                // here rather than forwarded, per the user's own "add whatever is coming from Dhan's
-                // options websocket" ask. Named dayOpen/dayHigh/dayLow (not open/high/low) deliberately:
-                // these are the CONTRACT's cumulative day-so-far O/H/L as Dhan itself tracks them, not
-                // a per-minute range - conflating the two would corrupt buildPremiumCandles' own
-                // per-minute bucketing on the frontend, which reads a plain "open"/"high"/"low" to mean
-                // exactly that bucket's own range. bestBidPrice/bestAskPrice are 0 until at least one
-                // Full packet has arrived for this leg - see SpotTick's own doc comment.
                 dayOpen = tick.Open,
                 dayHigh = tick.High,
                 dayLow = tick.Low,
                 volume = tick.Volume,
                 bestBidPrice = tick.BestBidPrice,
                 bestAskPrice = tick.BestAskPrice,
-            };
-            _ = BroadcastAsync($"c:{leg.Underlying}:{leg.ExpiryFlag}", "oiReplayTick", payload);
+            });
         }
 
         if (_futuresLegsBySecurityId.TryGetValue(tick.SecurityId, out var futuresUnderlying) && tick.LastPrice > 0)
         {
-            var payload = new
-            {
-                underlying = futuresUnderlying,
-                price = tick.LastPrice,
-                openInterest = tick.OpenInterest,
-                volume = tick.Volume,
-                // Observed-at, same reasoning as the options payload above.
-                time = observedAt,
-                lastTradeTime,
-            };
-            // Futures has no expiryFlag concept (see FuturesUnderlyings' own doc comment) - the
-            // plain underlying group, same one spotUpdate/confluenceAlert/cdvUpdate use.
-            _ = BroadcastAsync($"u:{futuresUnderlying}", "futuresTick", payload);
+            // Futures has no expiryFlag concept (see FuturesUnderlyings' own doc comment) - the plain
+            // underlying group, same one spotUpdate/cdvUpdate use. Same per-minute keying as above.
+            _batcher.Accumulate<LiveFuturesTick>($"u:{futuresUnderlying}", "futuresTicks", minuteKey.ToString(), previous => new LiveFuturesTick(
+                futuresUnderlying,
+                Open: previous?.Open ?? tick.LastPrice,
+                High: previous is null ? tick.LastPrice : Math.Max(previous.High, tick.LastPrice),
+                Low: previous is null ? tick.LastPrice : Math.Min(previous.Low, tick.LastPrice),
+                Price: tick.LastPrice,
+                OpenInterest: tick.OpenInterest,
+                Volume: tick.Volume,
+                Time: observedAt,
+                LastTradeTime: lastTradeTime));
         }
     }
 
@@ -501,3 +520,18 @@ public sealed class OiReplayLiveFeedService : BackgroundService
         }
     }
 }
+
+/// <summary>One option leg's coalesced live state for one 300ms flush - see LiveBroadcastBatcher.
+/// Open/High/Low are the leg's own last-traded-price range inside that window; Ticks is how many Dhan
+/// packets it folds.</summary>
+public sealed record LiveOptionTick(
+    string Underlying, string ExpiryFlag, decimal Strike, string Side,
+    decimal Open, decimal Price, decimal High, decimal Low, long OpenInterest,
+    DateTimeOffset Time, DateTimeOffset LastTradeTime,
+    decimal DayOpen, decimal DayHigh, decimal DayLow, long Volume,
+    decimal BestBidPrice, decimal BestAskPrice, int Ticks);
+
+/// <summary>The underlying's nearest futures contract, coalesced the same way.</summary>
+public sealed record LiveFuturesTick(
+    string Underlying, decimal Open, decimal High, decimal Low, decimal Price,
+    long OpenInterest, long Volume, DateTimeOffset Time, DateTimeOffset LastTradeTime);

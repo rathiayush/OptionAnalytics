@@ -981,7 +981,11 @@ public sealed class CdvUnderlyingState
             var (ce, pe) = TotalsNoLock();
             var atmCeBar = FindAtmStrikeNoLock(true)?.GetCurrentBar();
             var atmPeBar = FindAtmStrikeNoLock(false)?.GetCurrentBar();
-            return new CdvSnapshot(Underlying, AtmStrike, Expiry, ce, pe, LastUpdateUtc, _currentBar, atmCeBar, atmPeBar);
+            var strikeBars = _strikes.Values
+                .Select(s => s.GetCurrentBar() is { } bar ? new CdvStrikeBar(s.Strike, s.IsCall, bar) : null)
+                .OfType<CdvStrikeBar>()
+                .ToList();
+            return new CdvSnapshot(Underlying, AtmStrike, Expiry, ce, pe, LastUpdateUtc, _currentBar, atmCeBar, atmPeBar, strikeBars);
         }
     }
 }
