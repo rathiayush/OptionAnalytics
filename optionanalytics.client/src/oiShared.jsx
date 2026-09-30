@@ -42,6 +42,29 @@ const EMPTY_ARRAY = []
 // the day's full span the moment they scroll/zoom back to inspect an earlier stretch, fighting the
 // very thing they just did. Same reasoning ReplayChart's own allowShiftVisibleRangeOnWhitespaceReplacement
 // doc comment already gives for shiftVisibleRangeOnNewBar.
+// Auto-fit never zooms in further than this many pixels per candle: with only a few bars (early in
+// the day, or a coarse timeframe) fitting them all made every candle huge and the viewer had to
+// squeeze the chart by hand. Past that, the newest candles are shown at this width instead.
+const MAX_AUTO_BAR_SPACING = 8
+
+// Candle charts leave this much room above and below the candles by default, so a quiet stretch
+// doesn't stretch a few points of range across the whole height.
+export const CANDLE_SCALE_MARGINS = { top: 0.2, bottom: 0.2 }
+
+// Fits the whole series, capped at MAX_AUTO_BAR_SPACING per candle (see its comment).
+export function fitWholeDay(chart) {
+  if (!chart) return
+  const timeScale = chart.timeScale()
+  timeScale.fitContent()
+  const range = timeScale.getVisibleLogicalRange()
+  const width = timeScale.width()
+  if (!range || width <= 0) return
+  if (width / Math.max(1, range.to - range.from) > MAX_AUTO_BAR_SPACING) {
+    timeScale.applyOptions({ barSpacing: MAX_AUTO_BAR_SPACING })
+    timeScale.scrollToRealTime()
+  }
+}
+
 export function useFitContentAsDataGrows(chartRef, dataLength, dayKey) {
   const prevLengthRef = useRef(0)
   const userControlRef = useChartUserControl(chartRef, dayKey)
@@ -49,7 +72,7 @@ export function useFitContentAsDataGrows(chartRef, dataLength, dayKey) {
   // A fresh day (or combo switch) always gets an unconditional fit, regardless of where the OLD
   // day's chart happened to be scrolled to - there is no "previous" position to preserve.
   useEffect(() => {
-    if (dataLength > 0) chartRef.current?.timeScale().fitContent()
+    if (dataLength > 0) fitWholeDay(chartRef.current)
     prevLengthRef.current = dataLength
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dayKey])
@@ -59,14 +82,14 @@ export function useFitContentAsDataGrows(chartRef, dataLength, dayKey) {
     const previousLength = prevLengthRef.current
     prevLengthRef.current = dataLength
     if (!chart || dataLength === 0 || dataLength <= previousLength) return
-    const timeScale = chart.timeScale()
-    const range = timeScale.getVisibleLogicalRange()
+    // Once the viewer has dragged or zoomed, the view is exactly where they put it - no following
+    // the newest bar either, even if it is still on screen (that used to scroll a chart the viewer
+    // had nudged left back to the right on every new candle). Double-click hands it back.
+    if (userControlRef.current) return
+    const range = chart.timeScale().getVisibleLogicalRange()
     const wasAtLiveEdge = !range || range.to >= previousLength - 1
     if (!wasAtLiveEdge) return
-    // Once the viewer has zoomed/dragged, keep THEIR zoom and just follow the newest bar - re-fitting
-    // to the whole day would undo what they just did on every new bar.
-    if (userControlRef.current) timeScale.scrollToRealTime()
-    else timeScale.fitContent()
+    fitWholeDay(chart)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dataLength])
 }
@@ -85,7 +108,22 @@ export function useChartUserControl(chartRef, resetKey) {
   const controlledRef = useRef(false)
   const attachedRef = useRef(null)
 
-  useEffect(() => { controlledRef.current = false }, [resetKey])
+  // While the viewer controls the view the chart library must not shift it either: by default it
+  // scrolls one bar right whenever a bar is added while the last one is visible.
+  const setFollowsNewBars = (follows) => chartRef.current?.timeScale().applyOptions({
+    shiftVisibleRangeOnNewBar: follows, allowShiftVisibleRangeOnWhitespaceReplacement: follows,
+  })
+  const takeControl = () => {
+    if (controlledRef.current) return
+    controlledRef.current = true
+    setFollowsNewBars(false)
+  }
+
+  useEffect(() => {
+    controlledRef.current = false
+    setFollowsNewBars(true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resetKey])
 
   // No dependency array on purpose: the chart instance can be recreated (e.g. a height change), so
   // this re-checks each render and re-attaches only when the underlying element actually changed.
@@ -106,27 +144,34 @@ export function useChartUserControl(chartRef, resetKey) {
     let pressedRange = null
     const press = () => { pressedRange = visibleRange() }
     const releasePress = () => {
-      if (pressedRange && moved(pressedRange)) controlledRef.current = true
+      if (pressedRange && moved(pressedRange)) takeControl()
       pressedRange = null
     }
     const wheel = () => {
       const before = visibleRange()
-      requestAnimationFrame(() => { if (moved(before)) controlledRef.current = true })
+      requestAnimationFrame(() => { if (moved(before)) takeControl() })
     }
-    const release = () => { controlledRef.current = false; chartRef.current?.timeScale().fitContent() }
-    element.addEventListener('wheel', wheel, { passive: true })
-    element.addEventListener('pointerdown', press)
-    window.addEventListener('pointerup', releasePress)
-    window.addEventListener('pointercancel', releasePress)
-    element.addEventListener('dblclick', release)
+    const release = () => {
+      controlledRef.current = false
+      setFollowsNewBars(true)
+      fitWholeDay(chartRef.current)
+    }
+    // Capture phase: the chart library handles these events on its own canvases and can stop them
+    // before they would bubble up to here (the spot chart's click-a-wall handler did exactly that
+    // to the double-click reset).
+    element.addEventListener('wheel', wheel, { passive: true, capture: true })
+    element.addEventListener('pointerdown', press, true)
+    window.addEventListener('pointerup', releasePress, true)
+    window.addEventListener('pointercancel', releasePress, true)
+    element.addEventListener('dblclick', release, true)
     attachedRef.current = {
       element,
       detach: () => {
-        element.removeEventListener('wheel', wheel)
-        element.removeEventListener('pointerdown', press)
-        window.removeEventListener('pointerup', releasePress)
-        window.removeEventListener('pointercancel', releasePress)
-        element.removeEventListener('dblclick', release)
+        element.removeEventListener('wheel', wheel, { capture: true })
+        element.removeEventListener('pointerdown', press, true)
+        window.removeEventListener('pointerup', releasePress, true)
+        window.removeEventListener('pointercancel', releasePress, true)
+        element.removeEventListener('dblclick', release, true)
       },
     }
   })
@@ -440,7 +485,7 @@ export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Onl
       height,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 13 },
       grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
-      rightPriceScale: { borderColor: BORDER_COLOR },
+      rightPriceScale: { borderColor: BORDER_COLOR, scaleMargins: CANDLE_SCALE_MARGINS },
       // allowShiftVisibleRangeOnWhitespaceReplacement: lightweight-charts' own default
       // (shiftVisibleRangeOnNewBar, true) auto-scrolls to keep a freshly-appended bar in view, but
       // ONLY for a bar strictly past the chart's existing range - not one filling in a WHITESPACE
@@ -617,7 +662,7 @@ export function EmaChart({ oneMinBars, visibleCount, timeframe, onTimeframeChang
       height,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
       grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
-      rightPriceScale: { borderColor: BORDER_COLOR },
+      rightPriceScale: { borderColor: BORDER_COLOR, scaleMargins: CANDLE_SCALE_MARGINS },
       // allowShiftVisibleRangeOnWhitespaceReplacement: lightweight-charts' own default
       // (shiftVisibleRangeOnNewBar, true) auto-scrolls to keep a freshly-appended bar in view, but
       // ONLY for a bar strictly past the chart's existing range - not one filling in a WHITESPACE
@@ -898,7 +943,7 @@ export function PremiumCandleChart({ bars, dayKey, height = 320 }) {
       height,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
       grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
-      rightPriceScale: { borderColor: BORDER_COLOR },
+      rightPriceScale: { borderColor: BORDER_COLOR, scaleMargins: CANDLE_SCALE_MARGINS },
       // allowShiftVisibleRangeOnWhitespaceReplacement: lightweight-charts' own default
       // (shiftVisibleRangeOnNewBar, true) auto-scrolls to keep a freshly-appended bar in view, but
       // ONLY for a bar strictly past the chart's existing range - not one filling in a WHITESPACE
@@ -994,7 +1039,7 @@ export function PremiumEmaChart({
       height,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
       grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
-      rightPriceScale: { borderColor: BORDER_COLOR },
+      rightPriceScale: { borderColor: BORDER_COLOR, scaleMargins: CANDLE_SCALE_MARGINS },
       // allowShiftVisibleRangeOnWhitespaceReplacement: lightweight-charts' own default
       // (shiftVisibleRangeOnNewBar, true) auto-scrolls to keep a freshly-appended bar in view, but
       // ONLY for a bar strictly past the chart's existing range - not one filling in a WHITESPACE

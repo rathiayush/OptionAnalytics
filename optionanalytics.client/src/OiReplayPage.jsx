@@ -9,9 +9,9 @@ import {
   UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR,
   istTimeFormatter, istTimeWithSecondsFormatter, istTickMarkFormatter, toBar, toChartTime, fromChartTime, istDateKey, fmtDateOnly,
   NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, STORED_SHOW_VOLUME_PROFILE, usePersistedState,
-  syncSignalRGroups, joinAllSignalRGroups, useCardOrder, CardDragHandle, onLiveBatch, useFeedLag, FeedLagTag, FeedLagAlert, LiveSection, checkForNewDeploy, captureChartView, restoreChartView,
+  syncSignalRGroups, joinAllSignalRGroups, useCardOrder, CardDragHandle, onLiveBatch, useFeedLag, FeedLagTag, FeedLagAlert, LiveSection, checkForNewDeploy,
 } from './shared.jsx'
-import { PremiumEmaChart, DraggableFloatingPanel, useFitContentAsDataGrows, useChartUserControl } from './oiShared.jsx'
+import { PremiumEmaChart, DraggableFloatingPanel, useFitContentAsDataGrows, useChartUserControl, CANDLE_SCALE_MARGINS } from './oiShared.jsx'
 
 const { Text, Title } = Typography
 
@@ -725,6 +725,9 @@ const SUPPORT_DARK = '#0a5c1f'
 // further data fetch, just a local re-render. Also draws the strongest OI levels on each side as
 // horizontal price lines directly on the chart (darker = heavier OI = a "harder" level) - the same
 // data the ladder shows in table form, here as the market-structure read on the price chart itself.
+// Long enough for the second click of a double-click to arrive (see ReplayChart's click handler).
+const STRIKE_CLICK_DELAY_MS = 300
+
 function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = true, vwapSeries = EMPTY_ARRAY, showVwap = false, onStrikeClick, height = 440 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
@@ -788,7 +791,7 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = tru
       // the user's own "labels bit bigger, [I] can see it" ask was specifically about this chart.
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 13 },
       grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
-      rightPriceScale: { borderColor: BORDER_COLOR },
+      rightPriceScale: { borderColor: BORDER_COLOR, scaleMargins: CANDLE_SCALE_MARGINS },
       timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter },
       crosshair: { mode: CrosshairMode.Normal },
       localization: { timeFormatter: istTimeFormatter },
@@ -803,7 +806,14 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = tru
     // step every other strike-rounding on this page uses), regardless of whether that exact level
     // happens to have an OI-wall price line drawn on it right now - every strike in the fetched band
     // has its own ceByStrike/peByStrike history, walled or not, so this works anywhere on the chart.
+    //
+    // Opened a moment after the click rather than at once, so a double-click (which resets the
+    // chart's view - see useChartUserControl) isn't swallowed: the popup opening on its first click
+    // put its backdrop under the second one.
+    let pendingStrikeClick = null
+    chart.subscribeDblClick(() => { clearTimeout(pendingStrikeClick) })
     chart.subscribeClick((param) => {
+      clearTimeout(pendingStrikeClick)
       if (!param.point || !seriesRef.current || !stepRef.current) return
       const price = seriesRef.current.coordinateToPrice(param.point.y)
       // A click landing on the price axis/label margin (exactly where the R/S wall labels render)
@@ -814,7 +824,7 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = tru
       if (price == null || !Number.isFinite(price)) return
       const strike = Math.round(price / stepRef.current) * stepRef.current
       if (!Number.isFinite(strike)) return
-      onStrikeClickRef.current?.(strike)
+      pendingStrikeClick = setTimeout(() => onStrikeClickRef.current?.(strike), STRIKE_CLICK_DELAY_MS)
     })
 
     const onResize = () => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }) }
@@ -830,6 +840,7 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = tru
     resizeObserver.observe(containerRef.current)
     return () => {
       resizeObserver.disconnect()
+      clearTimeout(pendingStrikeClick)
       chart.remove()
       chartRef.current = null
       seriesRef.current = null
@@ -1066,13 +1077,14 @@ function StrikeOiDrilldownChart({ ceSeries, peSeries, mode, dayKey, height = 320
     // Auto-fits to the whole series only until the viewer zooms/drags (see useChartUserControl) -
     // this used to fitContent() on EVERY update, and with live data arriving several times a second
     // any zoom or scroll-back snapped back to the full day before a value could be read.
-    const view = userControlRef.current ? captureChartView(chartRef.current, ceSeriesRef.current) : null
+    // Once they have, the view stays exactly where they put it - not even following the newest bar.
+    const heldRange = userControlRef.current ? chartRef.current?.timeScale().getVisibleLogicalRange() : null
     ceSeriesRef.current.setData(withDirectionColor(ceSeries))
     peSeriesRef.current.setData(withDirectionColor(peSeries))
     if (!userControlRef.current) {
       if (ceSeries.length > 0 || peSeries.length > 0) chartRef.current?.timeScale().fitContent()
-    } else {
-      restoreChartView(chartRef.current, view)
+    } else if (heldRange) {
+      chartRef.current?.timeScale().setVisibleLogicalRange(heldRange)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ceSeries, peSeries, mode, dayKey])
@@ -1412,7 +1424,7 @@ function EmaChart({
       height,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
       grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
-      rightPriceScale: { borderColor: BORDER_COLOR },
+      rightPriceScale: { borderColor: BORDER_COLOR, scaleMargins: CANDLE_SCALE_MARGINS },
       timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter },
       crosshair: { mode: CrosshairMode.Normal },
       localization: { timeFormatter: istTimeFormatter },
@@ -1561,7 +1573,7 @@ function FuturesChart({ bars, oiLine, markers, dayKey, height = 320 }) {
       height,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
       grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
-      rightPriceScale: { borderColor: BORDER_COLOR },
+      rightPriceScale: { borderColor: BORDER_COLOR, scaleMargins: CANDLE_SCALE_MARGINS },
       leftPriceScale: { visible: true, borderColor: BORDER_COLOR },
       timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter },
       crosshair: { mode: CrosshairMode.Normal },
