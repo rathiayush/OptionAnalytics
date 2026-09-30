@@ -76,6 +76,11 @@ export function useFitContentAsDataGrows(chartRef, dataLength, dayKey) {
 // (see useFitContentAsDataGrows / StrikeOiDrilldownChart), because re-fitting on every live update
 // snapped a zoom or scroll-back straight back before anything could be read. Double-click the chart
 // to hand the view back to auto-fit. Reset whenever `resetKey` changes (a new day/strike/mode).
+//
+// Control is taken only when a gesture actually MOVED the view. It used to be taken on any press -
+// a plain click to read the crosshair, or a finger resting on the chart while scrolling the page on
+// a phone - after which every new minute scrolled the chart one bar right at a fixed zoom, sliding
+// the morning off the left edge: "the chart keeps going right after some time".
 export function useChartUserControl(chartRef, resetKey) {
   const controlledRef = useRef(false)
   const attachedRef = useRef(null)
@@ -90,16 +95,37 @@ export function useChartUserControl(chartRef, resetKey) {
     attachedRef.current?.detach()
     attachedRef.current = null
     if (!element) return
-    const take = () => { controlledRef.current = true }
+    const visibleRange = () => chartRef.current?.timeScale().getVisibleLogicalRange() ?? null
+    const moved = (before) => {
+      const after = visibleRange()
+      if (!before || !after) return false
+      return Math.abs(after.from - before.from) > 0.5 || Math.abs(after.to - before.to) > 0.5
+    }
+    // Compared once the gesture ends - a live update can't land in between, since the chart is only
+    // ever re-fitted from React effects, which run after this event's own handlers.
+    let pressedRange = null
+    const press = () => { pressedRange = visibleRange() }
+    const releasePress = () => {
+      if (pressedRange && moved(pressedRange)) controlledRef.current = true
+      pressedRange = null
+    }
+    const wheel = () => {
+      const before = visibleRange()
+      requestAnimationFrame(() => { if (moved(before)) controlledRef.current = true })
+    }
     const release = () => { controlledRef.current = false; chartRef.current?.timeScale().fitContent() }
-    element.addEventListener('wheel', take, { passive: true })
-    element.addEventListener('pointerdown', take)
+    element.addEventListener('wheel', wheel, { passive: true })
+    element.addEventListener('pointerdown', press)
+    window.addEventListener('pointerup', releasePress)
+    window.addEventListener('pointercancel', releasePress)
     element.addEventListener('dblclick', release)
     attachedRef.current = {
       element,
       detach: () => {
-        element.removeEventListener('wheel', take)
-        element.removeEventListener('pointerdown', take)
+        element.removeEventListener('wheel', wheel)
+        element.removeEventListener('pointerdown', press)
+        window.removeEventListener('pointerup', releasePress)
+        window.removeEventListener('pointercancel', releasePress)
         element.removeEventListener('dblclick', release)
       },
     }
