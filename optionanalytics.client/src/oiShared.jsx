@@ -1,4 +1,4 @@
-import { Component, useEffect, useMemo, useRef, useState } from 'react'
+import { Component, useEffect, useMemo, useRef, useState, useId, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
 import { Select, Space, Typography, Button, Row, Col, Tooltip, Tag, InputNumber, Table, Segmented, Empty, Alert } from 'antd'
 import { createChart, CandlestickSeries, LineSeries, CrosshairMode } from 'lightweight-charts'
@@ -1209,7 +1209,40 @@ const FLOATING_PANEL_MIN_HEIGHT = 160
 // only ever reports a change" shape already established for `pos` before size was added, so a
 // caller that doesn't care about resizing yet can simply not pass `size`/`onSizeChange` and get the
 // same fixed-440px behavior as before.
+// Floating panels stack in the order they were last used: pressing anywhere on one brings it to the
+// front, so with several open (spot chart, replay controls, paper trade) the one being worked with is
+// never hidden under another. z-indexes stay between 1000 and antd's popups (1050), so a Select or
+// TimePicker inside a panel still opens above every panel.
+const floatingPanelStack = []
+const floatingPanelListeners = new Set()
+function notifyFloatingPanels() { for (const listener of floatingPanelListeners) listener() }
+function subscribeFloatingPanels(listener) {
+  floatingPanelListeners.add(listener)
+  return () => floatingPanelListeners.delete(listener)
+}
+function raiseFloatingPanel(id) {
+  const index = floatingPanelStack.indexOf(id)
+  if (index >= 0 && index === floatingPanelStack.length - 1) return
+  if (index >= 0) floatingPanelStack.splice(index, 1)
+  floatingPanelStack.push(id)
+  notifyFloatingPanels()
+}
+function useFloatingPanelZIndex() {
+  const id = useId()
+  useEffect(() => {
+    raiseFloatingPanel(id)
+    return () => {
+      const index = floatingPanelStack.indexOf(id)
+      if (index >= 0) floatingPanelStack.splice(index, 1)
+      notifyFloatingPanels()
+    }
+  }, [id])
+  const position = useSyncExternalStore(subscribeFloatingPanels, () => floatingPanelStack.indexOf(id))
+  return { zIndex: 1000 + Math.min(Math.max(position, 0), 40), raise: () => raiseFloatingPanel(id) }
+}
+
 export function DraggableFloatingPanel({ title, pos, onPosChange, size, onSizeChange, onClose, children }) {
+  const { zIndex, raise } = useFloatingPanelZIndex()
   const dragRef = useRef(null)
   const resizeRef = useRef(null)
   const panelRef = useRef(null)
@@ -1379,8 +1412,9 @@ export function DraggableFloatingPanel({ title, pos, onPosChange, size, onSizeCh
   return createPortal(
     <div
       ref={panelRef}
+      onPointerDownCapture={raise}
       style={{
-        position: 'fixed', left: pos.x, top: pos.y, zIndex: 1000,
+        position: 'fixed', left: pos.x, top: pos.y, zIndex,
         width: width != null ? `${width}px` : 'min(440px, calc(100vw - 24px))',
         height: height != null ? `${height}px` : undefined,
         maxWidth: 'calc(100vw - 24px)', maxHeight: 'calc(100vh - 24px)',

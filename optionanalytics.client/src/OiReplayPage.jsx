@@ -302,6 +302,7 @@ function applyIvSnapshot(prev, ivByStrike) {
 }
 
 const STORED_REPLAY_CONTROLS_FLOATING = 'optionanalytics.oiReplay.replayControlsFloating'
+const STORED_SPOT_FLOATING = 'optionanalytics.oiReplay.spotFloating'
 
 // Replay position (a visible-bar count) for a picked IST wall-clock time: the last 1-minute bar at
 // or before it, so Start plays on from exactly there. A time before the first bar lands on the first
@@ -2354,6 +2355,11 @@ export default function OiReplayPage() {
   const [replayControlsFloating, setReplayControlsFloating] = usePersistedState(STORED_REPLAY_CONTROLS_FLOATING, false)
   const [replayPanelPos, setReplayPanelPos] = useState(() => ({ x: Math.max(24, Math.round(window.innerWidth / 2 - 240)), y: 90 }))
   const [replayPanelSize, setReplayPanelSize] = useState(null)
+  // The whole Spot card (chart, alerts, replay controls) can float too - e.g. beside the heatmap.
+  // Remembered in this browser; independent of every other floating panel's own state.
+  const [spotFloating, setSpotFloating] = usePersistedState(STORED_SPOT_FLOATING, false)
+  const [spotPanelPos, setSpotPanelPos] = useState(() => ({ x: Math.max(24, window.innerWidth - 780), y: 70 }))
+  const [spotPanelSize, setSpotPanelSize] = useState({ width: 740 })
 
   // BANKNIFTY has no weekly expiry - NSE discontinued it (same rule Expired Backtest enforces).
   // Corrected right in the underlying picker's own onChange below, not a separate effect - this
@@ -3514,6 +3520,124 @@ export default function OiReplayPage() {
     />
   )
 
+  // The Spot card's whole content, shared by its inline and floating placements (see spotFloating).
+  const spotChartHeight = spotFloating ? 440 : 560
+  const spotCardContent = (
+    <>
+      {/* Playback controls, literally inside the same card as the chart, right above
+          the canvas itself - the user's own "this bar should be near to chart just on
+          top of chart, it is too far right now" (a separate card above it, even
+          directly adjacent, still wasn't close enough). */}
+      <Space align="center" size={16} wrap style={{ marginBottom: 8 }}>
+        {/* TODAY IS ALWAYS LIVE, FULL STOP - no Start/Pause/Speed/Slider at all, and no
+            way for any control here to drop out of following the tip. The previous
+            design let Start/Reset/the slider each pause live-following (to "review an
+            earlier point"), but that meant clicking Start out of habit - exactly what a
+            button labelled "Start" invites - silently froze the page at whatever bar it
+            was on, needing ANOTHER Start click to catch back up: the precise "I have to
+            start it again" loop reported. There is nothing left here that can do that.
+            Reviewing an earlier point in the day is still possible - pick that date with
+            the DatePicker above and Load it, which gets the FULL replay scrubber below,
+            just not live. */}
+        {!isLive && !replayControlsFloating && (
+          <>
+            {replayButtons}
+            <div style={{ flex: 1, minWidth: 160 }}>{replaySlider}</div>
+            <Tooltip title="Pop the replay controls out into a panel you can drag anywhere">
+              <Button size="small" icon={<ExportOutlined />} onClick={() => setReplayControlsFloating(true)}>Float</Button>
+            </Tooltip>
+          </>
+        )}
+        {!isLive && replayControlsFloating && (
+          <>
+            <Button size="small" onClick={() => setReplayControlsFloating(false)}>Dock replay controls</Button>
+          </>
+        )}
+        <Text style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
+          {currentBar ? `${istTimeFormatter(currentBar.time)} (${visibleCount}/${oneMinBars.length})` : '—'}
+        </Text>
+        {isLive && (
+          <Tooltip title={
+            liveConnectionState === 'connected' ? "Streaming live ticks from Dhan's WebSocket feed on top of today's snapshot (price + OI - IV stays at the last REST-fetched value)"
+              : liveConnectionState === 'reconnecting' ? 'Connection dropped - automatically retrying.'
+                : liveConnectionState === 'connecting' ? 'Connecting to the live feed…'
+                  : 'Not connected - not receiving live ticks right now.'
+          }>
+            <Tag color={liveConnectionState === 'connected' ? 'success' : liveConnectionState === 'reconnecting' ? 'warning' : liveConnectionState === 'connecting' ? 'processing' : 'error'}>
+              {liveConnectionState === 'connected' ? '● LIVE' : liveConnectionState === 'reconnecting' ? '● RECONNECTING' : liveConnectionState === 'connecting' ? '● CONNECTING' : '● OFFLINE'}
+            </Tag>
+          </Tooltip>
+        )}
+        {ladderRows.length > 0 && (
+          // Chain-wide total OI, live, right where the trade is punched - same totals the
+          // Snapshot card shows, with each side's change since the open. Red CE / green PE
+          // by this page's option-selling OI convention (see StrikeOiDrilldownChart).
+          <Tooltip title="Total open interest across every tracked strike, live, with the change since today's open.">
+            <Text style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
+              <span style={{ color: DOWN_COLOR }}>CE {formatOiMillions(totalCeOi)}{dayOiSummary ? ` (${formatOiMillions(dayOiSummary.ceDayChange, { signed: true })})` : ''}</span>
+              <Text type="secondary" style={{ fontSize: 11 }}>{' · '}</Text>
+              <span style={{ color: UP_COLOR }}>PE {formatOiMillions(totalPeOi)}{dayOiSummary ? ` (${formatOiMillions(dayOiSummary.peDayChange, { signed: true })})` : ''}</span>
+              {pcr != null && <Text type="secondary" style={{ fontSize: 11 }}>{` · PCR ${pcr.toFixed(2)}`}</Text>}
+            </Text>
+          </Tooltip>
+        )}
+        {paperTotalPnl !== 0 || paperOpenCount > 0 ? (
+          <Tag
+            color={paperTotalPnl >= 0 ? 'success' : 'error'} style={{ cursor: 'pointer' }}
+            onClick={() => setPaperPanelOpen((o) => !o)}
+          >
+            Paper PnL: {paperTotalPnl >= 0 ? '+' : ''}{paperTotalPnl.toFixed(0)}{paperOpenCount > 0 ? ` (${paperOpenCount} open)` : ''}
+          </Tag>
+        ) : (
+          <Button size="small" onClick={() => setPaperPanelOpen((o) => !o)}>Paper Trade</Button>
+        )}
+      </Space>
+      <Space align="center" size={12} wrap style={{ marginBottom: 8 }}>
+        <Text type="secondary" style={{ fontSize: 12 }}>Alert when a strike near ATM shifts by</Text>
+        <InputNumber
+          value={alertThreshold} onChange={(v) => setAlertThreshold(v ?? 0)}
+          min={0} step={100000} style={{ width: 140 }}
+          formatter={(v) => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
+          parser={(v) => v.replace(/,/g, '')}
+        />
+        <Text type="secondary" style={{ fontSize: 12 }}>OI in one minute</Text>
+        <Switch
+          checked={soundEnabled} onChange={setSoundEnabled}
+          checkedChildren={<SoundOutlined />} unCheckedChildren="Muted"
+        />
+        <Text type="secondary" style={{ fontSize: 12 }}>Top 5 walls only</Text>
+        <Switch checked={top5WallsOnly} onChange={setTop5WallsOnly} />
+      </Space>
+      {activeAlerts.length > 0 && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 8 }}
+          message="Large OI shift near ATM"
+          description={activeAlerts.map((a) => `${a.side} ${a.strike}: ${formatOiMillions(a.change, { signed: true })} in the last minute (${a.change >= 0 ? 'loading' : 'unwinding'})`).join(' · ')}
+        />
+      )}
+      {oneMinBars.length > 0
+        ? (
+          <ChartErrorBoundary key={`${underlying}-${result.date}-${timeframe}`}>
+            <ReplayChart
+              bars={displayBars}
+              ladderRows={ladderRows}
+              dayKey={`${underlying}-${result.date}-${timeframe}`}
+              atmStrike={atmStrike}
+              step={step}
+              top5Only={top5WallsOnly}
+              vwapSeries={vwapSeries}
+              showVwap={showVwap}
+              onStrikeClick={setDrilldownStrike}
+              height={spotChartHeight}
+            />
+          </ChartErrorBoundary>
+        )
+        : <Empty description="No spot candles for this day." />}
+    </>
+  )
+
   return (
     // Deliberately wider than every other page's own 1280 (see shared.jsx/App.jsx/etc.) - this is
     // the one page in the app carrying a chart, an OI/IV ladder, a whole-band liquidity table AND a
@@ -3888,150 +4012,20 @@ export default function OiReplayPage() {
               </Space>
               <Row gutter={[16, 16]}>
                 <Col xs={24} md={visibleSections.includes('entryCharts') ? 8 : 24}>
-                  <Card size="small" title="Spot (replaying)">
-                  {/* Playback controls, literally inside the same card as the chart, right above
-                      the canvas itself - the user's own "this bar should be near to chart just on
-                      top of chart, it is too far right now" (a separate card above it, even
-                      directly adjacent, still wasn't close enough). */}
-                  <Space align="center" size={16} wrap style={{ marginBottom: 8 }}>
-                    {/* TODAY IS ALWAYS LIVE, FULL STOP - no Start/Pause/Speed/Slider at all, and no
-                        way for any control here to drop out of following the tip. The previous
-                        design let Start/Reset/the slider each pause live-following (to "review an
-                        earlier point"), but that meant clicking Start out of habit - exactly what a
-                        button labelled "Start" invites - silently froze the page at whatever bar it
-                        was on, needing ANOTHER Start click to catch back up: the precise "I have to
-                        start it again" loop reported. There is nothing left here that can do that.
-                        Reviewing an earlier point in the day is still possible - pick that date with
-                        the DatePicker above and Load it, which gets the FULL replay scrubber below,
-                        just not live. */}
-                    {!isLive && !replayControlsFloating && (
-                      <>
-                        {replayButtons}
-                        <div style={{ flex: 1, minWidth: 160 }}>{replaySlider}</div>
-                        <Tooltip title="Pop the replay controls out into a panel you can drag anywhere">
-                          <Button size="small" icon={<ExportOutlined />} onClick={() => setReplayControlsFloating(true)}>Float</Button>
-                        </Tooltip>
-                      </>
-                    )}
-                    {!isLive && replayControlsFloating && (
-                      <>
-                        <Button size="small" onClick={() => setReplayControlsFloating(false)}>Dock replay controls</Button>
-                        <DraggableFloatingPanel
-                          title="Replay" pos={replayPanelPos} onPosChange={setReplayPanelPos}
-                          size={replayPanelSize} onSizeChange={setReplayPanelSize}
-                          onClose={() => setReplayControlsFloating(false)}
-                        >
-                          <Space direction="vertical" size={8} style={{ width: '100%' }}>
-                            <Space wrap size={8} align="center">{replayButtons}</Space>
-                            {replaySlider}
-                            <Text style={{ fontSize: 12 }}>
-                              {currentBar ? `${istTimeFormatter(currentBar.time)} (${visibleCount}/${oneMinBars.length})` : '—'}
-                            </Text>
-                          </Space>
-                        </DraggableFloatingPanel>
-                      </>
-                    )}
-                    <Text style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
-                      {currentBar ? `${istTimeFormatter(currentBar.time)} (${visibleCount}/${oneMinBars.length})` : '—'}
-                    </Text>
-                    {isLive && (
-                      <Tooltip title={
-                        liveConnectionState === 'connected' ? "Streaming live ticks from Dhan's WebSocket feed on top of today's snapshot (price + OI - IV stays at the last REST-fetched value)"
-                          : liveConnectionState === 'reconnecting' ? 'Connection dropped - automatically retrying.'
-                            : liveConnectionState === 'connecting' ? 'Connecting to the live feed…'
-                              : 'Not connected - not receiving live ticks right now.'
-                      }>
-                        <Tag color={liveConnectionState === 'connected' ? 'success' : liveConnectionState === 'reconnecting' ? 'warning' : liveConnectionState === 'connecting' ? 'processing' : 'error'}>
-                          {liveConnectionState === 'connected' ? '● LIVE' : liveConnectionState === 'reconnecting' ? '● RECONNECTING' : liveConnectionState === 'connecting' ? '● CONNECTING' : '● OFFLINE'}
-                        </Tag>
+                  <Card
+                    size="small" title="Spot (replaying)"
+                    extra={!spotFloating && (
+                      <Tooltip title="Pop the whole spot chart out into a panel you can drag anywhere - e.g. next to the heatmap">
+                        <Button size="small" icon={<ExportOutlined />} onClick={() => setSpotFloating(true)}>Float</Button>
                       </Tooltip>
                     )}
-                    {ladderRows.length > 0 && (
-                      // Chain-wide total OI, live, right where the trade is punched - same totals the
-                      // Snapshot card shows, with each side's change since the open. Red CE / green PE
-                      // by this page's option-selling OI convention (see StrikeOiDrilldownChart).
-                      <Tooltip title="Total open interest across every tracked strike, live, with the change since today's open.">
-                        <Text style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
-                          <span style={{ color: DOWN_COLOR }}>CE {formatOiMillions(totalCeOi)}{dayOiSummary ? ` (${formatOiMillions(dayOiSummary.ceDayChange, { signed: true })})` : ''}</span>
-                          <Text type="secondary" style={{ fontSize: 11 }}>{' · '}</Text>
-                          <span style={{ color: UP_COLOR }}>PE {formatOiMillions(totalPeOi)}{dayOiSummary ? ` (${formatOiMillions(dayOiSummary.peDayChange, { signed: true })})` : ''}</span>
-                          {pcr != null && <Text type="secondary" style={{ fontSize: 11 }}>{` · PCR ${pcr.toFixed(2)}`}</Text>}
-                        </Text>
-                      </Tooltip>
-                    )}
-                    {paperTotalPnl !== 0 || paperOpenCount > 0 ? (
-                      <Tag
-                        color={paperTotalPnl >= 0 ? 'success' : 'error'} style={{ cursor: 'pointer' }}
-                        onClick={() => setPaperPanelOpen((o) => !o)}
-                      >
-                        Paper PnL: {paperTotalPnl >= 0 ? '+' : ''}{paperTotalPnl.toFixed(0)}{paperOpenCount > 0 ? ` (${paperOpenCount} open)` : ''}
-                      </Tag>
-                    ) : (
-                      <Button size="small" onClick={() => setPaperPanelOpen((o) => !o)}>Paper Trade</Button>
-                    )}
-                  </Space>
-                  {paperPanelOpen && (
-                    <DraggableFloatingPanel
-                      title="Paper trade" pos={paperPanelPos} onPosChange={setPaperPanelPos}
-                      size={paperPanelSize} onSizeChange={setPaperPanelSize}
-                      onClose={() => setPaperPanelOpen(false)}
-                    >
-                      <PaperTradePanel
-                        atmStrike={atmStrike} step={step}
-                        side={paperSide} onSideChange={setPaperSide}
-                        direction={paperDirection} onDirectionChange={setPaperDirection}
-                        strikeOffset={paperStrikeOffset} onStrikeOffsetChange={setPaperStrikeOffset}
-                        qtyLots={paperQtyLots} onQtyLotsChange={setPaperQtyLots}
-                        slPoints={paperSlPoints} onSlPointsChange={setPaperSlPoints}
-                        targetPoints={paperTargetPoints} onTargetPointsChange={setPaperTargetPoints}
-                        onPunch={handlePaperPunch} canPunch={atmStrike != null && paperEntryPreview?.price != null}
-                        positions={enrichedPaperPositions} onExit={handlePaperExit} onExitAll={handlePaperExitAll} onClearAll={handlePaperClearAll}
-                      />
-                    </DraggableFloatingPanel>
-                  )}
-                  <Space align="center" size={12} wrap style={{ marginBottom: 8 }}>
-                    <Text type="secondary" style={{ fontSize: 12 }}>Alert when a strike near ATM shifts by</Text>
-                    <InputNumber
-                      value={alertThreshold} onChange={(v) => setAlertThreshold(v ?? 0)}
-                      min={0} step={100000} style={{ width: 140 }}
-                      formatter={(v) => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
-                      parser={(v) => v.replace(/,/g, '')}
-                    />
-                    <Text type="secondary" style={{ fontSize: 12 }}>OI in one minute</Text>
-                    <Switch
-                      checked={soundEnabled} onChange={setSoundEnabled}
-                      checkedChildren={<SoundOutlined />} unCheckedChildren="Muted"
-                    />
-                    <Text type="secondary" style={{ fontSize: 12 }}>Top 5 walls only</Text>
-                    <Switch checked={top5WallsOnly} onChange={setTop5WallsOnly} />
-                  </Space>
-                  {activeAlerts.length > 0 && (
-                    <Alert
-                      type="warning"
-                      showIcon
-                      style={{ marginBottom: 8 }}
-                      message="Large OI shift near ATM"
-                      description={activeAlerts.map((a) => `${a.side} ${a.strike}: ${formatOiMillions(a.change, { signed: true })} in the last minute (${a.change >= 0 ? 'loading' : 'unwinding'})`).join(' · ')}
-                    />
-                  )}
-                  {oneMinBars.length > 0
-                    ? (
-                      <ChartErrorBoundary key={`${underlying}-${result.date}-${timeframe}`}>
-                        <ReplayChart
-                          bars={displayBars}
-                          ladderRows={ladderRows}
-                          dayKey={`${underlying}-${result.date}-${timeframe}`}
-                          atmStrike={atmStrike}
-                          step={step}
-                          top5Only={top5WallsOnly}
-                          vwapSeries={vwapSeries}
-                          showVwap={showVwap}
-                          onStrikeClick={setDrilldownStrike}
-                          height={560}
-                        />
-                      </ChartErrorBoundary>
-                    )
-                    : <Empty description="No spot candles for this day." />}
+                  >
+                  {spotFloating ? (
+                    <Space direction="vertical" size={8} style={{ width: '100%', padding: '24px 0' }} align="center">
+                      <Text type="secondary">The spot chart is in its own floating panel.</Text>
+                      <Button size="small" onClick={() => setSpotFloating(false)}>Dock it back here</Button>
+                    </Space>
+                  ) : spotCardContent}
                 </Card>
               </Col>
               {/* The user's own "width more than 2500... adjust all 3 charts in same row" ask - on a
@@ -4394,6 +4388,55 @@ export default function OiReplayPage() {
           <Empty description="No OI data yet for this strike." />
         )}
       </Modal>
+
+      {/* Every floating panel lives here, outside the LiveSections: a section scrolled off-screen
+          stops re-rendering (LiveSection), and a panel rendered from inside one froze with it - the
+          floating spot chart while viewing the heatmap, Paper Trade's P&L, the replay clock. Each
+          panel keeps its own open/position/size state, so opening or closing one never touches
+          another. */}
+      {spotFloating && result && (
+        <DraggableFloatingPanel
+          title={`Spot - ${underlying}`} pos={spotPanelPos} onPosChange={setSpotPanelPos}
+          size={spotPanelSize} onSizeChange={setSpotPanelSize}
+          onClose={() => setSpotFloating(false)}
+        >
+          {spotCardContent}
+        </DraggableFloatingPanel>
+      )}
+      {!isLive && replayControlsFloating && result && (
+        <DraggableFloatingPanel
+          title="Replay" pos={replayPanelPos} onPosChange={setReplayPanelPos}
+          size={replayPanelSize} onSizeChange={setReplayPanelSize}
+          onClose={() => setReplayControlsFloating(false)}
+        >
+          <Space direction="vertical" size={8} style={{ width: '100%' }}>
+            <Space wrap size={8} align="center">{replayButtons}</Space>
+            {replaySlider}
+            <Text style={{ fontSize: 12 }}>
+              {currentBar ? `${istTimeFormatter(currentBar.time)} (${visibleCount}/${oneMinBars.length})` : '—'}
+            </Text>
+          </Space>
+        </DraggableFloatingPanel>
+      )}
+      {paperPanelOpen && (
+        <DraggableFloatingPanel
+          title="Paper trade" pos={paperPanelPos} onPosChange={setPaperPanelPos}
+          size={paperPanelSize} onSizeChange={setPaperPanelSize}
+          onClose={() => setPaperPanelOpen(false)}
+        >
+          <PaperTradePanel
+            atmStrike={atmStrike} step={step}
+            side={paperSide} onSideChange={setPaperSide}
+            direction={paperDirection} onDirectionChange={setPaperDirection}
+            strikeOffset={paperStrikeOffset} onStrikeOffsetChange={setPaperStrikeOffset}
+            qtyLots={paperQtyLots} onQtyLotsChange={setPaperQtyLots}
+            slPoints={paperSlPoints} onSlPointsChange={setPaperSlPoints}
+            targetPoints={paperTargetPoints} onTargetPointsChange={setPaperTargetPoints}
+            onPunch={handlePaperPunch} canPunch={atmStrike != null && paperEntryPreview?.price != null}
+            positions={enrichedPaperPositions} onExit={handlePaperExit} onExitAll={handlePaperExitAll} onClearAll={handlePaperClearAll}
+          />
+        </DraggableFloatingPanel>
+      )}
     </div>
   )
 }
