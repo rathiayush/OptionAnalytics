@@ -60,6 +60,48 @@ export function joinAllSignalRGroups(connection, groups) {
   for (const g of groups) connection.invoke('JoinGroup', g).catch((err) => console.error('Failed to join SignalR group', g, err))
 }
 
+// An open tab keeps running the JavaScript it was loaded with, while a deploy replaces the server
+// underneath it - and live events are a contract between the two (an event renamed or reshaped on
+// the server is simply never heard by an older page). The page then looks live but quietly stops
+// updating whatever changed, e.g. the OI heatmap frozen at the minute of the deploy while spot still
+// ticked. So: remember the server build this page started against (GET /api/version's
+// buildTimeUtc), and the moment the server reports a different one, reload once to pick up the
+// matching code. Checked every minute, when the tab becomes visible again, and on every live
+// reconnect (a deploy restarts the server, so that's when a new build shows up first). Today's
+// paper positions and the live-day cache survive a reload on their own.
+const DEPLOY_CHECK_INTERVAL_MS = 60_000
+const RELOADED_FOR_BUILD_KEY = 'optionanalytics.reloadedForBuild'
+let pageBuild = null
+
+export async function checkForNewDeploy() {
+  try {
+    const response = await fetch('/api/version', { cache: 'no-store' })
+    const build = (await response.json())?.buildTimeUtc
+    if (!build) return
+    if (pageBuild == null) { pageBuild = build; return }
+    if (build === pageBuild) return
+    // At most one reload per new build, so an odd server can never put the page in a reload loop.
+    try {
+      if (sessionStorage.getItem(RELOADED_FOR_BUILD_KEY) === build) return
+      sessionStorage.setItem(RELOADED_FOR_BUILD_KEY, build)
+    } catch { /* storage unavailable - still reload once, this page instance won't try again */ }
+    pageBuild = build
+    window.location.reload()
+  } catch {
+    // Server restarting or unreachable - the next check will catch up.
+  }
+}
+
+export function useReloadOnNewDeploy() {
+  useEffect(() => {
+    checkForNewDeploy()
+    const id = setInterval(checkForNewDeploy, DEPLOY_CHECK_INTERVAL_MS)
+    const onVisible = () => { if (!document.hidden) checkForNewDeploy() }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => { clearInterval(id); document.removeEventListener('visibilitychange', onVisible) }
+  }, [])
+}
+
 // Live state (spot, option legs, futures, CDV) arrives as one "liveBatch" per ~300ms, CONFLATED per
 // browser on the server (see LiveBroadcastBatcher): each batch holds only the newest data, and the
 // next one is sent only after this page acknowledges the previous. So a slow phone or a busy page

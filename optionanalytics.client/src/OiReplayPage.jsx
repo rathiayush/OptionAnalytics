@@ -9,7 +9,7 @@ import {
   UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR,
   istTimeFormatter, istTimeWithSecondsFormatter, istTickMarkFormatter, toBar, toChartTime, fromChartTime, istDateKey, fmtDateOnly,
   NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, STORED_SHOW_VOLUME_PROFILE, usePersistedState,
-  syncSignalRGroups, joinAllSignalRGroups, useCardOrder, CardDragHandle, onLiveBatch, useFeedLag, FeedLagTag, FeedLagAlert, LiveSection,
+  syncSignalRGroups, joinAllSignalRGroups, useCardOrder, CardDragHandle, onLiveBatch, useFeedLag, FeedLagTag, FeedLagAlert, LiveSection, checkForNewDeploy,
 } from './shared.jsx'
 import { PremiumEmaChart, DraggableFloatingPanel, useFitContentAsDataGrows } from './oiShared.jsx'
 
@@ -138,6 +138,7 @@ function useOiReplayLiveFeed(onSpotUpdate, onOiReplayTicks, onFuturesTicks, onRe
     connection.onreconnected(() => {
       setConnectionState('connected')
       joinAllSignalRGroups(connection, groupsRef.current)
+      checkForNewDeploy()
       reconnectedRef.current?.()
     })
     connection.onclose(() => setConnectionState('disconnected'))
