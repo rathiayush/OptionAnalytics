@@ -1,7 +1,7 @@
 import { Component, useEffect, useMemo, useRef, useState } from 'react'
 import dayjs from 'dayjs'
 import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicker, TimePicker, Alert, Empty, Tooltip, Popconfirm, Slider, Tag, InputNumber, Switch, Table, Segmented, Checkbox, Modal } from 'antd'
-import { PlayCircleOutlined, PauseCircleOutlined, ReloadOutlined, SoundOutlined } from '@ant-design/icons'
+import { PlayCircleOutlined, PauseCircleOutlined, ReloadOutlined, SoundOutlined, ExportOutlined } from '@ant-design/icons'
 import { createChart, createSeriesMarkers, CandlestickSeries, LineSeries, HistogramSeries, CrosshairMode } from 'lightweight-charts'
 import * as signalR from '@microsoft/signalr'
 import './oiMobile.css'
@@ -300,6 +300,8 @@ function applyIvSnapshot(prev, ivByStrike) {
   }
   return next ?? prev
 }
+
+const STORED_REPLAY_CONTROLS_FLOATING = 'optionanalytics.oiReplay.replayControlsFloating'
 
 // Replay position (a visible-bar count) for a picked IST wall-clock time: the last 1-minute bar at
 // or before it, so Start plays on from exactly there. A time before the first bar lands on the first
@@ -2346,6 +2348,12 @@ export default function OiReplayPage() {
   // height - only set once the user actually drags the resize handle, same "caller owns the state"
   // shape as paperPanelPos above.
   const [paperPanelSize, setPaperPanelSize] = useState(null)
+  // The replay controls (Start/Pause, Reset, Speed, Go to time, slider) either sit inline in the Spot
+  // card or float in their own draggable panel that stays in reach while scrolling - the viewer's
+  // choice, remembered in this browser. Closing the floating panel docks them back inline.
+  const [replayControlsFloating, setReplayControlsFloating] = usePersistedState(STORED_REPLAY_CONTROLS_FLOATING, false)
+  const [replayPanelPos, setReplayPanelPos] = useState(() => ({ x: Math.max(24, Math.round(window.innerWidth / 2 - 240)), y: 90 }))
+  const [replayPanelSize, setReplayPanelSize] = useState(null)
 
   // BANKNIFTY has no weekly expiry - NSE discontinued it (same rule Expired Backtest enforces).
   // Corrected right in the underlying picker's own onChange below, not a separate effect - this
@@ -3462,6 +3470,50 @@ export default function OiReplayPage() {
     }
   }, [currentBar, ladderRows, pcr, atmStrike, step, oneMinBars, visibleCount, dayStartByStrike])
 
+  // Shared by the inline and floating placements of the replay controls (see replayControlsFloating).
+  const replayButtons = (
+    <>
+      <Button
+        icon={playing ? <PauseCircleOutlined /> : <PlayCircleOutlined />}
+        onClick={() => setPlaying((p) => !p)}
+        disabled={oneMinBars.length === 0 || manualVisibleCount >= oneMinBars.length}
+      >
+        {playing ? 'Pause' : 'Start'}
+      </Button>
+      <Button
+        icon={<ReloadOutlined />}
+        onClick={() => { setPlaying(false); setManualVisibleCount(oneMinBars.length > 0 ? 1 : 0) }}
+      >
+        Reset
+      </Button>
+      <Text type="secondary" style={{ fontSize: 12 }}>Speed</Text>
+      <Select value={speedMs} onChange={setSpeedMs} style={{ width: 90 }} options={SPEED_OPTIONS} />
+      {/* A label rather than a hover tooltip: in the compact floating panel a tooltip above the
+          picker sat right over the Start button. */}
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, whiteSpace: 'nowrap' }}>
+        <Text type="secondary" style={{ fontSize: 12 }}>Go to</Text>
+        <TimePicker
+          format="HH:mm" minuteStep={1} allowClear={false} needConfirm={false} showNow={false}
+          placeholder="Go to time" style={{ width: 110 }} disabled={oneMinBars.length === 0}
+          value={currentBar ? dayjs().hour(new Date(currentBar.time * 1000).getUTCHours()).minute(new Date(currentBar.time * 1000).getUTCMinutes()).second(0) : null}
+          disabledTime={() => ({ disabledHours: () => [...Array(24).keys()].filter((h) => h < 9 || h > 15) })}
+          onChange={(v) => {
+            if (!v) return
+            setPlaying(false)
+            setManualVisibleCount(replayCountAt(oneMinBars, v.hour(), v.minute()))
+          }}
+        />
+      </span>
+    </>
+  )
+  const replaySlider = (
+    <Slider
+      min={0} max={Math.max(0, oneMinBars.length - 1)} value={visibleCount - 1}
+      onChange={(v) => { setPlaying(false); setManualVisibleCount(v + 1) }}
+      tooltip={{ formatter: (v) => oneMinBars[v] ? istTimeFormatter(oneMinBars[v].time) : '' }}
+    />
+  )
+
   return (
     // Deliberately wider than every other page's own 1280 (see shared.jsx/App.jsx/etc.) - this is
     // the one page in the app carrying a chart, an OI/IV ladder, a whole-band liquidity table AND a
@@ -3852,43 +3904,31 @@ export default function OiReplayPage() {
                         Reviewing an earlier point in the day is still possible - pick that date with
                         the DatePicker above and Load it, which gets the FULL replay scrubber below,
                         just not live. */}
-                    {!isLive && (
+                    {!isLive && !replayControlsFloating && (
                       <>
-                        <Button
-                          icon={playing ? <PauseCircleOutlined /> : <PlayCircleOutlined />}
-                          onClick={() => setPlaying((p) => !p)}
-                          disabled={oneMinBars.length === 0 || manualVisibleCount >= oneMinBars.length}
-                        >
-                          {playing ? 'Pause' : 'Start'}
-                        </Button>
-                        <Button
-                          icon={<ReloadOutlined />}
-                          onClick={() => { setPlaying(false); setManualVisibleCount(oneMinBars.length > 0 ? 1 : 0) }}
-                        >
-                          Reset
-                        </Button>
-                        <Text type="secondary" style={{ fontSize: 12 }}>Speed</Text>
-                        <Select value={speedMs} onChange={setSpeedMs} style={{ width: 90 }} options={SPEED_OPTIONS} />
-                        <Tooltip title="Jump the replay to this time - press Start to play on from there">
-                          <TimePicker
-                            format="HH:mm" minuteStep={1} allowClear={false} needConfirm={false} showNow={false}
-                            placeholder="Go to time" style={{ width: 110 }} disabled={oneMinBars.length === 0}
-                            value={currentBar ? dayjs().hour(new Date(currentBar.time * 1000).getUTCHours()).minute(new Date(currentBar.time * 1000).getUTCMinutes()).second(0) : null}
-                            disabledTime={() => ({ disabledHours: () => [...Array(24).keys()].filter((h) => h < 9 || h > 15) })}
-                            onChange={(v) => {
-                              if (!v) return
-                              setPlaying(false)
-                              setManualVisibleCount(replayCountAt(oneMinBars, v.hour(), v.minute()))
-                            }}
-                          />
+                        {replayButtons}
+                        <div style={{ flex: 1, minWidth: 160 }}>{replaySlider}</div>
+                        <Tooltip title="Pop the replay controls out into a panel you can drag anywhere">
+                          <Button size="small" icon={<ExportOutlined />} onClick={() => setReplayControlsFloating(true)}>Float</Button>
                         </Tooltip>
-                        <div style={{ flex: 1, minWidth: 160 }}>
-                          <Slider
-                            min={0} max={Math.max(0, oneMinBars.length - 1)} value={visibleCount - 1}
-                            onChange={(v) => { setPlaying(false); setManualVisibleCount(v + 1) }}
-                            tooltip={{ formatter: (v) => oneMinBars[v] ? istTimeFormatter(oneMinBars[v].time) : '' }}
-                          />
-                        </div>
+                      </>
+                    )}
+                    {!isLive && replayControlsFloating && (
+                      <>
+                        <Button size="small" onClick={() => setReplayControlsFloating(false)}>Dock replay controls</Button>
+                        <DraggableFloatingPanel
+                          title="Replay" pos={replayPanelPos} onPosChange={setReplayPanelPos}
+                          size={replayPanelSize} onSizeChange={setReplayPanelSize}
+                          onClose={() => setReplayControlsFloating(false)}
+                        >
+                          <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                            <Space wrap size={8} align="center">{replayButtons}</Space>
+                            {replaySlider}
+                            <Text style={{ fontSize: 12 }}>
+                              {currentBar ? `${istTimeFormatter(currentBar.time)} (${visibleCount}/${oneMinBars.length})` : '—'}
+                            </Text>
+                          </Space>
+                        </DraggableFloatingPanel>
                       </>
                     )}
                     <Text style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
