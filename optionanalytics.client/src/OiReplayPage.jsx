@@ -189,6 +189,7 @@ function groupByStrike(points) {
   // list is already in order (the normal case: REST history, then live points appended in arrival
   // order) instead of re-sorting with a Date parse inside every comparison.
   for (const list of byStrike.values()) {
+    for (const p of list) if (p.ms == null) p.ms = new Date(p.time).getTime()
     for (let i = 1; i < list.length; i++) {
       if (pointMs(list[i]) < pointMs(list[i - 1])) { list.sort((a, b) => pointMs(a) - pointMs(b)); break }
     }
@@ -196,31 +197,37 @@ function groupByStrike(points) {
   return byStrike
 }
 
-// Live points carry their own pre-parsed `ms`; REST points (and older cached live ones) don't.
+// Live points carry their own pre-parsed `ms`; REST points (and older cached live ones) get it
+// stamped once by groupByStrike, so a lookup never re-parses a date string.
 function pointMs(p) {
   return p.ms ?? new Date(p.time).getTime()
 }
 
 // The last point at or before asOfMs in a time-ascending list - null if the series hasn't started
-// yet as of this point in the replay. Linear scan from the end: a real day's own per-strike series
-// is at most a few hundred points, and this runs once per strike per tick, so this is nowhere near
-// hot enough to need a binary search.
+// yet as of this point in the replay. Binary search: this runs for every strike (and, in the
+// per-bar loops, for every bar too) on every live batch, and a linear scan over a whole day's
+// series made the page slower and slower as the day went on.
 function latestAtOrBefore(sortedPoints, asOfMs) {
-  for (let i = sortedPoints.length - 1; i >= 0; i--) {
-    if (pointMs(sortedPoints[i]) <= asOfMs) return sortedPoints[i]
+  let lo = 0
+  let hi = sortedPoints.length - 1
+  let found = null
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1
+    if (pointMs(sortedPoints[mid]) <= asOfMs) { found = sortedPoints[mid]; lo = mid + 1 } else hi = mid - 1
   }
-  return null
+  return found
 }
 
 // The server coalesces Dhan's per-strike ticks (100+/s across a strike band) into one "oiReplayTicks"
 // array per ~300ms - see LiveBroadcastBatcher - each entry carrying that leg's latest reading plus the
-// open/high/low of its price inside the window. Each batch is applied as ONE state update. Each strike
-// still keeps at most one stored point per LIVE_POINT_SLOT_MS (later batches in the same slot update
-// it in place, widening its high/low) so a full day's history stays small enough to re-derive every
-// chart from on each batch. The newest reading is always what's shown; only history is thinned (15s
-// still sits well inside the finest 30s heatmap bucket).
+// open/high/low of its price inside the window. Each batch is applied as ONE state update. Raw ticks
+// are never kept: each strike holds one 1-minute bar per completed minute (open/high/low/last price,
+// OI and IV as of the minute's last tick - the same shape as the REST history) plus the forming
+// minute, which later batches update in place. A minute can see thousands of ticks, but the day's
+// history stays at ~375 points per strike, so memory and per-batch work stay flat all day. The newest
+// reading is always what's shown.
 const LIVE_STATUS_INTERVAL_MS = 500
-const LIVE_POINT_SLOT_MS = 15_000
+const LIVE_POINT_SLOT_MS = 60_000
 
 function mergeLiveOptionTicks(prev, ticks, ivByStrike, slotMs = LIVE_POINT_SLOT_MS) {
   if (ticks.length === 0) return prev
@@ -1084,10 +1091,9 @@ const LIVE_COLUMN_OUTLINE_COLOR = 'rgba(255, 255, 255, 0.55)'
 // the Total OI Lookback table), since none of those need a sub-minute option and this one specifically
 // does: OI ticks arrive whenever the feed updates, not neatly once a minute, so without a real bucket
 // size every raw tick became its own column (see aggregateLinePoints' own doc comment for the "tick by
-// tick instead of a real timeframe" report this fixes). 30 sec is the finest offered - anything finer
-// would just be raw ticks again.
+// tick instead of a real timeframe" report this fixes). 1 min is the finest offered: the REST history
+// and the live feed both keep one point per strike per minute (see LIVE_POINT_SLOT_MS).
 const HEATMAP_TIMEFRAME_OPTIONS = [
-  { value: 0.5, label: '30 sec' },
   { value: 1, label: '1 min' },
   { value: 3, label: '3 min' },
 ]
@@ -1705,12 +1711,12 @@ function writePersistedPaperPositions(underlying, dateKey, positions) {
 const LIVE_DAY_CACHE_STORAGE_KEY = 'optionanalytics.oiReplay.liveDayCache'
 
 // How often the live-day cache is actually allowed to write to localStorage, at most - see the
-// write effect's own doc comment for the real, confirmed slowdown this throttle fixes. A few
-// seconds of possible staleness in the cache is a non-issue: the reload path that reads it back
-// still reconciles with a genuine fetch right after painting from it (see this constant's own
-// caller), so this is purely a perceived-latency optimization losing a few seconds of headroom, not
-// a correctness one giving anything up.
-const CACHE_WRITE_THROTTLE_MS = 3000
+// write effect's own doc comment for the real, confirmed slowdown this throttle fixes. Each write
+// serializes the whole day so far, so it is kept rare. Up to 30s of staleness in the cache is a
+// non-issue: the reload path that reads it back still reconciles with a genuine fetch right after
+// painting from it (see this constant's own caller), so this is purely a perceived-latency
+// optimization, not a correctness one giving anything up.
+const CACHE_WRITE_THROTTLE_MS = 30_000
 
 function readLiveDayCache(underlying, dateKey) {
   try {
@@ -1726,11 +1732,18 @@ function readLiveDayCache(underlying, dateKey) {
   }
 }
 
+// Returns false when the write failed - most often the browser's ~5 MB storage quota. The caller
+// then stops trying for the rest of the page's life rather than re-serializing the whole day every
+// throttle window only to be refused again.
 function writeLiveDayCache(underlying, dateKey, snapshot) {
   try {
     window.localStorage.setItem(LIVE_DAY_CACHE_STORAGE_KEY, JSON.stringify({ underlying, dateKey, ...snapshot }))
+    return true
   } catch {
-    // Same as above - remembering is a convenience, never a requirement.
+    // Same as above - remembering is a convenience, never a requirement. Drop the older entry so a
+    // reload doesn't paint from a snapshot that stopped updating hours ago.
+    clearLiveDayCache()
+    return false
   }
 }
 
@@ -2360,14 +2373,14 @@ export default function OiReplayPage() {
   // LATEST state still always eventually gets written (never silently dropped), but never more often
   // than CACHE_WRITE_THROTTLE_MS - immediately if enough time has already passed since the last
   // write, otherwise scheduled for whatever's left of that window.
-  const cacheWriteRef = useRef({ timeoutId: null, lastWriteMs: 0 })
+  const cacheWriteRef = useRef({ timeoutId: null, lastWriteMs: 0, disabled: false })
   useEffect(() => {
-    if (!isToday || !underlying || !date || !result) return
+    if (!isToday || !underlying || !date || !result || cacheWriteRef.current.disabled) return
     const state = cacheWriteRef.current
     if (state.timeoutId) clearTimeout(state.timeoutId)
     const writeNow = () => {
       state.lastWriteMs = Date.now()
-      writeLiveDayCache(underlying, date.format('YYYY-MM-DD'), { result, liveBars, liveCePoints, livePePoints, liveFuturesPoints, vwapSeries, liveExpiryFlag })
+      if (!writeLiveDayCache(underlying, date.format('YYYY-MM-DD'), { result, liveBars, liveCePoints, livePePoints, liveFuturesPoints, vwapSeries, liveExpiryFlag })) state.disabled = true
     }
     const elapsedMs = Date.now() - state.lastWriteMs
     if (elapsedMs >= CACHE_WRITE_THROTTLE_MS) writeNow()
@@ -3241,17 +3254,25 @@ export default function OiReplayPage() {
     const revealed = Math.min(visibleCount, oneMinBars.length)
     if (revealed < 2) return []
     const strikes = [...new Set([...ceByStrike.keys(), ...peByStrike.keys()])]
-    const ceSeriesList = strikes.map((s) => ceByStrike.get(s) ?? [])
-    const peSeriesList = strikes.map((s) => peByStrike.get(s) ?? [])
+    // One forward sweep per series (bars and points are both time-ascending), each cursor only ever
+    // moving forward - linear in the day's data, where a lookup per bar per strike grew with the
+    // square of it and froze the page for over a second each minute by the afternoon.
+    const cursorsFor = (byStrike) => strikes.map((s) => ({ series: byStrike.get(s) ?? [], next: 0, oi: 0 }))
+    const ceCursors = cursorsFor(ceByStrike)
+    const peCursors = cursorsFor(peByStrike)
+    const totalAt = (cursors, barMs) => {
+      let total = 0
+      for (const c of cursors) {
+        while (c.next < c.series.length && pointMs(c.series[c.next]) <= barMs) c.oi = c.series[c.next++].openInterest ?? 0
+        total += c.oi
+      }
+      return total
+    }
     const history = []
     for (let i = 0; i < revealed - 1; i++) {
       const bar = oneMinBars[i]
       const barMs = fromChartTime(bar.time) * 1000
-      let ceTotal = 0
-      let peTotal = 0
-      for (const series of ceSeriesList) ceTotal += latestAtOrBefore(series, barMs)?.openInterest ?? 0
-      for (const series of peSeriesList) peTotal += latestAtOrBefore(series, barMs)?.openInterest ?? 0
-      history.push({ time: bar.time, ceTotal, peTotal })
+      history.push({ time: bar.time, ceTotal: totalAt(ceCursors, barMs), peTotal: totalAt(peCursors, barMs) })
     }
     return history
     // eslint-disable-next-line react-hooks/exhaustive-deps
