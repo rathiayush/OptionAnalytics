@@ -424,17 +424,56 @@ function toSinceOpenSeries(totalSeries) {
 // time in a Map for O(1) lookup per cell. The column set is the UNION of every bucket ANY strike in
 // the band has touched (not just the first strike's own), so a strike that only started ticking
 // partway through the day still lines up against the correct real time rather than sliding left.
+//
+// The one bucket where a strike's series switches from the morning REST seed (Dhan's historical
+// /charts/rollingoption data) to the live websocket feed only counts what the LIVE feed saw change
+// inside it: those are two independent Dhan pipelines that don't report identical OI (see
+// OiReplayLiveFeedService's own note on it), so live-minus-seed is mostly the gap between two
+// sources, not OI actually added or removed.
+// Drawn, it showed up as one huge fake column that set the color scale and left every genuine live
+// change after it nearly invisible - the heatmap looked frozen while it was in fact updating. Live
+// points are the ones carrying their own pre-parsed `ms` (see mergeLiveOptionTicks).
 function buildOiChangeMatrix(byStrike, strikes, asOfMs, timeframeMinutes) {
   const perStrikeChange = new Map()
   const bucketSet = new Set()
   for (const strike of strikes) {
     const raw = (byStrike.get(strike) ?? []).filter((p) => asOfMs == null || pointMs(p) <= asOfMs)
-    const total = aggregateLinePoints(raw.map((p) => ({ time: toChartTime(p.time), value: p.openInterest })), timeframeMinutes)
-    const change = computeOiChangeSeries(total)
-    perStrikeChange.set(strike, new Map(change.map((p) => [p.time, p.value])))
-    for (const p of change) bucketSet.add(p.time)
+    const total = aggregateLinePoints(raw.map((p) => ({ time: toChartTime(p.time), value: p.openInterest, live: p.ms != null })), timeframeMinutes)
+    const byBucket = new Map()
+    for (let i = 1; i < total.length; i++) {
+      let change = total[i].value - total[i - 1].value
+      if (total[i].live && !total[i - 1].live) {
+        // Seam bucket: only what the live feed itself saw change inside it, never live-vs-seed.
+        const firstLive = raw.find((p) => p.ms != null && bucketOf(toChartTime(p.time), timeframeMinutes) === total[i].time)
+        change = firstLive ? total[i].value - firstLive.openInterest : 0
+      }
+      byBucket.set(total[i].time, change)
+      bucketSet.add(total[i].time)
+    }
+    perStrikeChange.set(strike, byBucket)
   }
   return { buckets: [...bucketSet].sort((a, b) => a - b), perStrikeChange }
+}
+
+function bucketOf(chartTime, minutes) {
+  const bucketSeconds = minutes * 60
+  return Math.floor(chartTime / bucketSeconds) * bucketSeconds
+}
+
+// The |change| that maps to full color - the 95th percentile of every non-zero change on the grid
+// rather than the single largest one, so one outsized burst (a big block trade, a strike newly
+// entering the band) can't wash every ordinary minute out to near-transparent. Anything above it
+// simply draws at full intensity; the tooltip always has the exact number.
+const HEATMAP_SCALE_PERCENTILE = 0.95
+
+function heatmapScale(perStrikeChange) {
+  const magnitudes = []
+  for (const byBucket of perStrikeChange.values())
+    for (const v of byBucket.values())
+      if (Number.isFinite(v) && v !== 0) magnitudes.push(Math.abs(v))
+  if (magnitudes.length === 0) return 0
+  magnitudes.sort((a, b) => a - b)
+  return magnitudes[Math.min(magnitudes.length - 1, Math.floor(magnitudes.length * HEATMAP_SCALE_PERCENTILE))]
 }
 
 function hexToRgba(hex, alpha) {
@@ -1020,12 +1059,13 @@ const OI_ADDED_COLOR = '#3987e5'
 const OI_REMOVED_COLOR = '#d95926'
 
 // One color, opacity-scaled by magnitude, per pole - the diverging encoding: OI_ADDED_COLOR at low
-// alpha for a small change, ramping toward full alpha at the grid's OWN largest |change| this side
-// has seen anywhere - so intensity is always relative to what this specific view is actually
+// alpha for a small change, ramping toward full alpha at the grid's own typical-large |change| (see
+// heatmapScale) - so intensity is always relative to what this specific view is actually
 // showing, not some fixed absolute scale that would wash out on a quiet day and clip on a violent
 // one. OI_REMOVED_COLOR mirrors it for OI being removed.
 const HEATMAP_MIN_ALPHA = 0.12
 const HEATMAP_MAX_ALPHA = 0.9
+const LIVE_COLUMN_OUTLINE_COLOR = 'rgba(255, 255, 255, 0.55)'
 
 // The heatmap's own bucket size - independent of every other timeframe picker on this page (chart B,
 // the Total OI Lookback table), since none of those need a sub-minute option and this one specifically
@@ -1065,7 +1105,7 @@ const HEATMAP_AXIS_HEIGHT = 20
 // real heatmap out of a library with no native heatmap series type, and the cheapest to render at
 // this cell count. The strike-label column is plain HTML (not baked into the canvas) so it can stay
 // visually fixed while only the canvas itself scrolls horizontally through the day.
-function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfMs, timeframeMinutes }) {
+function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfMs, timeframeMinutes, live = false }) {
   const canvasRef = useRef(null)
   const scrollRef = useRef(null)
   const [hover, setHover] = useState(null)
@@ -1078,13 +1118,7 @@ function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfMs, time
   // over and over" look at the 30 sec option unless seconds are shown too.
   const formatBucketTime = timeframeMinutes < 1 ? istTimeWithSecondsFormatter : istTimeFormatter
 
-  const maxAbs = useMemo(() => {
-    let max = 0
-    for (const byBucket of perStrikeChange.values())
-      for (const v of byBucket.values())
-        if (Number.isFinite(v) && v !== 0) max = Math.max(max, Math.abs(v))
-    return max
-  }, [perStrikeChange])
+  const maxAbs = useMemo(() => heatmapScale(perStrikeChange), [perStrikeChange])
 
   // `strikes` is the UNION of every strike EITHER side has ever reported (see heatmapStrikes' own
   // doc comment) - a strike with real PE activity but that this side (say CE) has simply never
@@ -1142,7 +1176,7 @@ function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfMs, time
       buckets.forEach((t, col) => {
         const v = byBucket?.get(t)
         if (v == null || v === 0 || maxAbs === 0) return
-        const alpha = HEATMAP_MIN_ALPHA + (Math.abs(v) / maxAbs) * (HEATMAP_MAX_ALPHA - HEATMAP_MIN_ALPHA)
+        const alpha = HEATMAP_MIN_ALPHA + Math.min(1, Math.abs(v) / maxAbs) * (HEATMAP_MAX_ALPHA - HEATMAP_MIN_ALPHA)
         // Added vs removed, by SIGN - not a fixed per-card color the way the CE/PE identity is
         // encoded elsewhere (Total OI/Since-open Δ charts). Side is already unambiguous here without
         // needing color for it at all: this plot always renders once per side, in its OWN card,
@@ -1155,6 +1189,15 @@ function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfMs, time
       })
     })
 
+    // While live, the newest column is the bucket still filling - outlined so it's obvious which
+    // column is updating right now (a quiet bucket has no colored cells yet, which otherwise reads
+    // as nothing happening).
+    if (live) {
+      ctx.strokeStyle = LIVE_COLUMN_OUTLINE_COLOR
+      ctx.lineWidth = 1
+      ctx.strokeRect((buckets.length - 1) * HEATMAP_CELL_WIDTH + 0.5, 0.5, HEATMAP_CELL_WIDTH - 1, plotHeight - 1)
+    }
+
     // Time axis along the bottom - one label roughly every 60px regardless of cell width, so it
     // never crowds even at the full 375-column width of a whole session.
     ctx.fillStyle = AXIS_COLOR
@@ -1165,7 +1208,7 @@ function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfMs, time
       if (col % labelEvery !== 0) return
       ctx.fillText(formatBucketTime(t), col * HEATMAP_CELL_WIDTH + HEATMAP_CELL_WIDTH / 2, plotHeight + 14)
     })
-  }, [buckets, perStrikeChange, strikes, maxAbs, plotWidth, plotHeight, formatBucketTime])
+  }, [buckets, perStrikeChange, strikes, maxAbs, plotWidth, plotHeight, formatBucketTime, live])
 
   // Scrolls to the newest minute once a fresh bucket set first appears (a new day loaded, or the
   // very first live buckets) - not on every subsequent tick, which would otherwise yank a reader's
@@ -2178,6 +2221,11 @@ export default function OiReplayPage() {
   const lastSpotAtRef = useRef(null)
   // Newest server-observed tick time seen so far - see asOfMs below.
   const [latestLiveMs, setLatestLiveMs] = useState(0)
+  // When Dhan last reported a DIFFERENT open interest on any tracked leg - see the heatmap card's own
+  // "OI last changed" readout. Prices tick constantly but OI only moves on position changes, so this
+  // is what tells "the feed is live but OI is quiet" apart from "nothing is arriving".
+  const lastOiByLegRef = useRef(new Map())
+  const [lastOiChangeMs, setLastOiChangeMs] = useState(null)
   const [spotSilentMs, setSpotSilentMs] = useState(0)
 
   // Session VWAP - only meaningful for isToday (see oneMinBars' own identical isToday split just
@@ -2378,6 +2426,8 @@ export default function OiReplayPage() {
       setLiveCePoints([])
       setLivePePoints([])
       setLiveFuturesPoints([])
+      lastOiByLegRef.current = new Map()
+      setLastOiChangeMs(null)
       // Today's own positions survive THIS reload (see PAPER_POSITIONS_STORAGE_KEY's own doc comment) -
       // restored from storage rather than reset, so long as they were punched against the SAME
       // underlying and the SAME calendar day now loading. Any other day (or a stale/foreign entry)
@@ -2618,6 +2668,14 @@ export default function OiReplayPage() {
     lastTickAtRef.current = receivedAt
     let newest = 0
     for (const tick of [...ce, ...pe]) newest = Math.max(newest, new Date(tick.time).getTime() || 0)
+    let oiChangedAt = 0
+    for (const tick of [...ce, ...pe]) {
+      const key = `${tick.side}:${tick.strike}`
+      const previousOi = lastOiByLegRef.current.get(key)
+      if (previousOi != null && previousOi !== tick.openInterest) oiChangedAt = Math.max(oiChangedAt, new Date(tick.time).getTime() || 0)
+      lastOiByLegRef.current.set(key, tick.openInterest)
+    }
+    if (oiChangedAt) setLastOiChangeMs((prev) => Math.max(prev ?? 0, oiChangedAt))
     if (ce.length) setLiveCePoints((prev) => mergeLiveOptionTicks(prev, ce, liveIvRef.current.ce))
     if (pe.length) setLivePePoints((prev) => mergeLiveOptionTicks(prev, pe, liveIvRef.current.pe))
     setLatestLiveMs((prev) => Math.max(prev, newest))
@@ -3648,8 +3706,9 @@ export default function OiReplayPage() {
                 <Space direction="vertical" size={12} style={{ width: '100%' }}>
                   <Text type="secondary" style={{ fontSize: 12 }}>
                     Every tracked strike's own OI change, bucketed to the timeframe below - color intensity is how much changed
-                    (scaled to the heaviest change this side has shown today), not an absolute scale, so a quiet day and a
-                    violent one both use the full range. Hover a cell for the exact number. Scroll horizontally for earlier in
+                    (relative to this side's own typical large move today, so one outsized burst doesn't wash everything else
+                    out), not an absolute scale, so a quiet day and a violent one both use the full range. While live, the
+                    outlined column is the one filling right now. Hover a cell for the exact number. Scroll horizontally for earlier in
                     the day. Blue/orange here, not green/red - the chart's own R/S wall lines already use green/red for a
                     different meaning (which side, how heavy), so this uses its own separate color language for "added vs
                     removed."
@@ -3657,6 +3716,13 @@ export default function OiReplayPage() {
                   <Space size={16} wrap>
                     <Text style={{ color: OI_ADDED_COLOR }}>■ OI added</Text>
                     <Text style={{ color: OI_REMOVED_COLOR }}>■ OI removed</Text>
+                    {isToday && (
+                      <Tooltip title="When Dhan last reported a changed open interest on any tracked strike. Prices tick constantly; OI only moves when positions are opened or closed, so a column can sit empty for a while in a quiet market.">
+                        <Text type="secondary" style={{ fontSize: 12 }}>
+                          OI last changed: {lastOiChangeMs ? `${istTimeWithSecondsFormatter(toChartTime(lastOiChangeMs))} (${Math.max(0, Math.round((nowTick - lastOiChangeMs) / 1000))}s ago)` : 'no live change yet'}
+                        </Text>
+                      </Tooltip>
+                    )}
                     <Space size={4}>
                       <Text type="secondary" style={{ fontSize: 12 }}>Bucket</Text>
                       <Select
@@ -3667,11 +3733,11 @@ export default function OiReplayPage() {
                   </Space>
                   <div>
                     <Text strong style={{ fontSize: 12 }}>CE</Text>
-                    <OiChangeHeatmapPlot label="CE" byStrike={ceByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} />
+                    <OiChangeHeatmapPlot label="CE" byStrike={ceByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} live={isToday} />
                   </div>
                   <div>
                     <Text strong style={{ fontSize: 12 }}>PE</Text>
-                    <OiChangeHeatmapPlot label="PE" byStrike={peByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} />
+                    <OiChangeHeatmapPlot label="PE" byStrike={peByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} live={isToday} />
                   </div>
                 </Space>
               </Card>
