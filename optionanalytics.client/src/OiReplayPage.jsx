@@ -67,14 +67,14 @@ const RECONNECT_RETRY_POLICY = {
 //
 // ALWAYS connects on mount and never tears down/rebuilds - an empty dependency array, exactly like
 // App.jsx's own useHub/oiShared.jsx's useOiLiveHub. This USED to depend on `[enabled]`
-// (isToday && liveFeedSupported && Boolean(result)) so the connection only opened while genuinely
+// (isLive && liveFeedSupported && Boolean(result)) so the connection only opened while genuinely
 // viewing today live - which sounds right but wasn't: `result` briefly goes null/undefined on
 // EVERY load() call (including a plain data refresh, not just a day switch), flipping `enabled`
 // false-then-true-then-false in quick succession and tearing the real WebSocket down and rebuilding
 // it each time - a real, confirmed source of "lots of web connections"/reconnect churn, the exact
 // bug oiShared.jsx's useOiLiveHub was already built specifically to avoid. Every callback below
-// already independently checks `isToday` itself
-// before acting (see handleSpotUpdate/handleOiReplayTicks/handleFuturesTicks's own `if (!isToday...)`
+// already independently checks `isLive` itself
+// before acting (see handleSpotUpdate/handleOiReplayTicks/handleFuturesTicks's own `if (!isLive...)`
 // guards) via the SAME ref-read pattern used here, so a tick arriving while a historical (non-today)
 // day is loaded already safely no-ops - nothing about correctness depended on tearing the
 // connection itself down, only on gating what it's ALLOWED to do once a tick arrives.
@@ -1447,7 +1447,7 @@ function EmaChart({
   }, [vwapSeries, showVwap])
 
   // Previous-day volume profile - marked on BY DEFAULT (no toggle; the user's own explicit ask), not
-  // gated behind isToday the way VWAP is: yesterday's own already-closed levels are just as valid a
+  // gated behind isLive the way VWAP is: yesterday's own already-closed levels are just as valid a
   // reference while reviewing an older replay day as while trading live today. Redrawn from scratch
   // on every change (clear then recreate, same shape as ReplayChart's own OI-wall lines) since these
   // five-ish lines never so densely churn that diffing them individually would be worth the code -
@@ -2166,7 +2166,7 @@ export default function OiReplayPage() {
   // past day's CE/PE data ultimately comes from) only ever accepts these two literal flags.
   const [expiryFlag, setExpiryFlag] = useState('WEEK')
   // "N1".."N6" - the Nth nearest currently-listed expiry for `underlying` overall, only meaningful
-  // while isToday (see the expiry Select below, shown in place of the WEEK/MONTH one once live). The
+  // while isLive (see the expiry Select below, shown in place of the WEEK/MONTH one once live). The
   // user's own explicit "it's going to next expiry, add an expiry filter" ask for the live page this
   // replaced (see OiReplayLiveFeedService.PositionalExpiriesPerUnderlying's own doc comment) - being
   // able to see and pick the EXACT contract removes any need to trust an automatic "nearest"
@@ -2255,7 +2255,7 @@ export default function OiReplayPage() {
   const activeLoadController = useRef(null)
 
   // The live "tail" beyond whatever the initial REST snapshot carried - only ever appended to while
-  // isToday is true (see below), reset on every fresh load() so switching days never carries a
+  // isLive is true (see below), reset on every fresh load() so switching days never carries a
   // previous day's live ticks forward.
   const [liveBars, setLiveBars] = useState([])
   const [liveCePoints, setLiveCePoints] = useState([])
@@ -2272,12 +2272,12 @@ export default function OiReplayPage() {
   const [lastOiChangeMs, setLastOiChangeMs] = useState(null)
   const [spotSilentMs, setSpotSilentMs] = useState(0)
 
-  // Session VWAP - only meaningful for isToday (see oneMinBars' own identical isToday split just
+  // Session VWAP - only meaningful for isLive (see oneMinBars' own identical isLive split just
   // below): the live GET .../vwap-series endpoint reflects SpotUnderlyingState's own in-memory
   // volume bars, i.e. recent/current days, not whatever historical day this page might otherwise be
   // replaying. A genuinely historical day's own spotCandlesOneMinute carries no volume at all (see
   // OiReplayResult), so VWAP simply isn't shown while replaying one - reset on every load() like
-  // liveBars above, seeded once isToday in load()'s own .then(), grown live by handleSpotUpdate.
+  // liveBars above, seeded once isLive in load()'s own .then(), grown live by handleSpotUpdate.
   const [vwapSeries, setVwapSeries] = useState([])
   const [showVwap, setShowVwap] = usePersistedState(STORED_SHOW_VWAP, false)
 
@@ -2344,8 +2344,13 @@ export default function OiReplayPage() {
   }
 
   const canLoad = Boolean(underlying && date)
-  const isToday = Boolean(date && date.format('YYYY-MM-DD') === istDateKey(new Date()))
-  const feedLag = useFeedLag(isToday)
+  // Today can be followed live (Go Live) or replayed like any other day (Load day) - replaying it
+  // fetches the day so far and gets the Start/Pause/slider scrubber instead of the live feed.
+  // isLive is "today, followed live": every live-only behaviour below keys off it.
+  const [todayMode, setTodayMode] = useState('live')
+  const isTodayDate = Boolean(date && date.format('YYYY-MM-DD') === istDateKey(new Date()))
+  const isLive = isTodayDate && todayMode === 'live'
+  const feedLag = useFeedLag(isLive)
 
   // Keeps today's own paper positions in storage as they change (punched, exited, SL/target hit) so
   // a page reload can restore them (see load()'s own read, and PAPER_POSITIONS_STORAGE_KEY's doc
@@ -2353,9 +2358,9 @@ export default function OiReplayPage() {
   // they were never meant to survive past that one load() in the first place. Clear all clearing the
   // array back to [] flows through this same effect, no separate storage write needed there.
   useEffect(() => {
-    if (!isToday || !underlying || !date) return
+    if (!isLive || !underlying || !date) return
     writePersistedPaperPositions(underlying, date.format('YYYY-MM-DD'), paperPositions)
-  }, [paperPositions, isToday, underlying, date])
+  }, [paperPositions, isLive, underlying, date])
 
   // Keeps today's own fetched run PLUS everything the live feed has appended since in storage, so a
   // reload can restore it instantly instead of re-fetching (see load()'s own preferCache branch, and
@@ -2375,7 +2380,7 @@ export default function OiReplayPage() {
   // write, otherwise scheduled for whatever's left of that window.
   const cacheWriteRef = useRef({ timeoutId: null, lastWriteMs: 0, disabled: false })
   useEffect(() => {
-    if (!isToday || !underlying || !date || !result || cacheWriteRef.current.disabled) return
+    if (!isLive || !underlying || !date || !result || cacheWriteRef.current.disabled) return
     const state = cacheWriteRef.current
     if (state.timeoutId) clearTimeout(state.timeoutId)
     const writeNow = () => {
@@ -2386,9 +2391,9 @@ export default function OiReplayPage() {
     if (elapsedMs >= CACHE_WRITE_THROTTLE_MS) writeNow()
     else state.timeoutId = setTimeout(writeNow, CACHE_WRITE_THROTTLE_MS - elapsedMs)
     return () => clearTimeout(state.timeoutId)
-  }, [result, liveBars, liveCePoints, livePePoints, liveFuturesPoints, vwapSeries, liveExpiryFlag, isToday, underlying, date])
+  }, [result, liveBars, liveCePoints, livePePoints, liveFuturesPoints, vwapSeries, liveExpiryFlag, isLive, underlying, date])
 
-  // Backs the live-mode expiry picker - fetched per underlying regardless of isToday, so the list is
+  // Backs the live-mode expiry picker - fetched per underlying regardless of isLive, so the list is
   // already there the instant the user clicks Go Live rather than needing its own separate load.
   useEffect(() => {
     if (!underlying) return
@@ -2417,10 +2422,12 @@ export default function OiReplayPage() {
   // "Load day," or the live feed's own reconnect-triggered load() - it never skips THIS call's own
   // real fetch, only paints from the cache first while that fetch is still in flight (see
   // LIVE_DAY_CACHE_STORAGE_KEY's own doc comment).
-  const load = (overrideDate, { preferCache = false } = {}) => {
+  const load = (overrideDate, { preferCache = false, live } = {}) => {
     const effectiveDate = overrideDate ?? date
     if (!underlying || !effectiveDate) return
     const effectiveIsToday = effectiveDate.format('YYYY-MM-DD') === istDateKey(new Date())
+    // `live` is passed by the buttons that just switched todayMode (the state hasn't landed yet).
+    const effectiveLive = effectiveIsToday && (live ?? todayMode === 'live')
     const dateKey = effectiveDate.format('YYYY-MM-DD')
 
     // Paints instantly from cache when one exists, but NEVER as a substitute for the real fetch
@@ -2433,7 +2440,7 @@ export default function OiReplayPage() {
     // real right after, and once that lands treat it as authoritative - see the liveBars/etc reset
     // inside the fetch's own .then() below for the other half of this fix.
     let restoredFromCache = false
-    if (preferCache && effectiveIsToday) {
+    if (preferCache && effectiveLive) {
       const cached = readLiveDayCache(underlying, dateKey)
       if (cached) {
         restoredFromCache = true
@@ -2476,14 +2483,14 @@ export default function OiReplayPage() {
       // restored from storage rather than reset, so long as they were punched against the SAME
       // underlying and the SAME calendar day now loading. Any other day (or a stale/foreign entry)
       // still resets to empty exactly as before.
-      setPaperPositions(effectiveIsToday ? readPersistedPaperPositions(underlying, dateKey) : [])
+      setPaperPositions(effectiveLive ? readPersistedPaperPositions(underlying, dateKey) : [])
       setVwapSeries([])
     }
     // Only for today - see vwapSeries' own doc comment on why a historical day has no VWAP to show
     // at all (its own spotCandlesOneMinute carries no volume, and the live endpoint below reflects
     // only recent/in-memory days). Independent of the main run fetch below so a slow/failed VWAP
     // fetch never blocks or fails the actual replay load.
-    if (effectiveIsToday) {
+    if (effectiveLive) {
       fetch(`/api/spot/${underlying}/vwap-series`)
         .then((r) => r.json())
         .then((vwap) => setVwapSeries((vwap ?? []).map((p) => ({ time: toChartTime(p.time), value: p.obv }))))
@@ -2501,8 +2508,8 @@ export default function OiReplayPage() {
     // history would be for the WRONG expiry, so it's discarded below and the CE/PE series instead
     // start empty, filled in going forward purely by this page's own live ticks for the ACTUAL picked
     // expiry - less convenient than a full day's history, but never wrong data.
-    const requestFlag = effectiveIsToday ? (underlying === 'BANKNIFTY' ? 'MONTH' : 'WEEK') : expiryFlag
-    const usesRunsCePeData = !effectiveIsToday || liveExpiryFlag === 'N1'
+    const requestFlag = effectiveLive ? (underlying === 'BANKNIFTY' ? 'MONTH' : 'WEEK') : expiryFlag
+    const usesRunsCePeData = !effectiveLive || liveExpiryFlag === 'N1'
     // forceLive for today: this page's own "today, live" mode has no scenario where preferring
     // possibly-stale or entirely-absent stored data over a direct Dhan call makes sense - it's about
     // to hand off to the live tick feed anyway (see useOiReplayLiveFeed below), so the SEED itself
@@ -2585,7 +2592,7 @@ export default function OiReplayPage() {
   // fetch with NO stale cache shown first, for whenever the cached picture on screen right now looks
   // wrong and waiting for the background reconciliation isn't good enough. Wipes the cached entry,
   // then calls load() with no options (preferCache defaults false), the exact same real fetch Go
-  // Live/Load day already do. Only shown while isToday (see its own button below) - a historical day
+  // Live/Load day already do. Only shown while isLive (see its own button below) - a historical day
   // was never cached in the first place, so there'd be nothing here to clear.
   const handleClearLiveCache = () => {
     clearLiveDayCache()
@@ -2596,12 +2603,20 @@ export default function OiReplayPage() {
   // markets opens and if select live this will work on live data" ask, rather than needing to open
   // the date picker and find today's date by hand every single morning. Whatever underlying/
   // liveExpiryFlag/timeframe are already selected stay as they are - this only ever changes the date.
-  // isToday (see below) is what actually keeps it updating tick by tick once loaded; this button just
+  // isLive (see below) is what actually keeps it updating tick by tick once loaded; this button just
   // gets there in one step instead of several.
   const goLive = () => {
     const today = dayjs()
+    setTodayMode('live')
     setDate(today)
-    load(today)
+    load(today, { live: true })
+  }
+
+  // Load day always REPLAYS the picked day - today included, as far as it has got - with the
+  // Start/Pause/slider scrubber. Go Live is the way back to following today live.
+  const loadForReplay = () => {
+    setTodayMode('replay')
+    load(undefined, { live: false })
   }
 
   // Opens straight into today's live view instead of the empty "pick a day and click Load day"
@@ -2631,26 +2646,26 @@ export default function OiReplayPage() {
   // the CHART itself displays. The chart's own candles are a re-aggregation of a slice of this,
   // computed separately below - the two used to be the same array, which meant everything on the
   // page only updated once per whole displayed candle (once every 5 or 15 real minutes on a coarser
-  // timeframe) instead of continuously. While isToday, this also folds in liveBars - the initial
+  // timeframe) instead of continuously. While isLive, this also folds in liveBars - the initial
   // REST snapshot's own bars, with the live feed's tail merged on top (replacing the still-forming
   // final minute in place as it updates, appending once a new minute actually starts).
   const oneMinBars = useMemo(() => {
     const base = (result?.spotCandlesOneMinute ?? []).map(toBar)
-    if (!isToday || liveBars.length === 0) return base
+    if (!isLive || liveBars.length === 0) return base
     const merged = base.slice()
     for (const bar of liveBars) {
       if (merged.length > 0 && merged[merged.length - 1].time === bar.time) merged[merged.length - 1] = bar
       else if (merged.length === 0 || bar.time > merged[merged.length - 1].time) merged.push(bar)
     }
     return merged
-  }, [result, liveBars, isToday])
+  }, [result, liveBars, isLive])
   const ceByStrike = useMemo(
-    () => groupByStrike(isToday ? [...(result?.cePoints ?? []), ...liveCePoints] : (result?.cePoints ?? [])),
-    [result, liveCePoints, isToday],
+    () => groupByStrike(isLive ? [...(result?.cePoints ?? []), ...liveCePoints] : (result?.cePoints ?? [])),
+    [result, liveCePoints, isLive],
   )
   const peByStrike = useMemo(
-    () => groupByStrike(isToday ? [...(result?.pePoints ?? []), ...livePePoints] : (result?.pePoints ?? [])),
-    [result, livePePoints, isToday],
+    () => groupByStrike(isLive ? [...(result?.pePoints ?? []), ...livePePoints] : (result?.pePoints ?? [])),
+    [result, livePePoints, isLive],
   )
 
   // The strike drill-down popup - opened by clicking anywhere on the main chart (see ReplayChart's
@@ -2672,7 +2687,7 @@ export default function OiReplayPage() {
   // snapshot has actually loaded (this is a "keep it fresh from here" layer on top of that fetch,
   // not a replacement for it) and only for a combo OiReplayLiveFeedService actually tracks.
   const handleSpotUpdate = (snapshot) => {
-    if (!isToday || snapshot?.underlying !== underlying || !snapshot?.currentBar) return
+    if (!isLive || snapshot?.underlying !== underlying || !snapshot?.currentBar) return
     const receivedAt = Date.now()
     lastTickAtRef.current = receivedAt
     lastSpotAtRef.current = receivedAt
@@ -2700,7 +2715,7 @@ export default function OiReplayPage() {
   // update per side. Entry `time` is the server's own receive time of that leg's latest tick (see
   // OiReplayLiveFeedService.OnTick), which is also what feed lag is measured against.
   const handleOiReplayTicks = (batch) => {
-    if (!isToday) return
+    if (!isLive) return
     const ce = []
     const pe = []
     for (const tick of batch) {
@@ -2725,7 +2740,7 @@ export default function OiReplayPage() {
     setLatestLiveMs((prev) => Math.max(prev, newest))
   }
   const handleFuturesTicks = (batch) => {
-    if (!isToday) return
+    if (!isLive) return
     const mine = batch.filter((tick) => tick?.underlying === underlying)
     if (mine.length === 0) return
     lastTickAtRef.current = Date.now()
@@ -2734,7 +2749,7 @@ export default function OiReplayPage() {
   // Fresh IV from Dhan's option-chain snapshot: remembered for every new live point from here on,
   // and stamped onto each strike's current point right away so the ladder/Market Read update now.
   const handleRestSnapshot = (snapshot) => {
-    if (!isToday || snapshot?.underlying !== underlying || snapshot?.expiryFlag !== liveExpiryFlag) return
+    if (!isLive || snapshot?.underlying !== underlying || snapshot?.expiryFlag !== liveExpiryFlag) return
     const ce = new Map(liveIvRef.current.ce)
     const pe = new Map(liveIvRef.current.pe)
     const ceNow = new Map()
@@ -2757,7 +2772,7 @@ export default function OiReplayPage() {
 
   // Status only (no data is applied here any more): the "last tick", lag and spot-silence readouts.
   useEffect(() => {
-    if (!isToday) return
+    if (!isLive) return
     // Counts from now, so spot that never ticks at all after the page opens is caught too.
     if (lastSpotAtRef.current == null) lastSpotAtRef.current = Date.now()
     const id = setInterval(() => {
@@ -2768,10 +2783,10 @@ export default function OiReplayPage() {
       setSpotSilentMs(silent >= SPOT_SILENCE_WARN_MS ? Math.floor(silent / 1000) * 1000 : 0)
     }, LIVE_STATUS_INTERVAL_MS)
     return () => clearInterval(id)
-  }, [isToday])
+  }, [isLive])
 
-  const handleLiveReconnected = () => { if (isToday) load() }
-  const liveConnectionState = useOiReplayLiveFeed(handleSpotUpdate, handleOiReplayTicks, handleFuturesTicks, handleRestSnapshot, handleLiveReconnected, isToday ? feedLag.recordPainted : null, underlying, liveExpiryFlag)
+  const handleLiveReconnected = () => { if (isLive) load() }
+  const liveConnectionState = useOiReplayLiveFeed(handleSpotUpdate, handleOiReplayTicks, handleFuturesTicks, handleRestSnapshot, handleLiveReconnected, isLive ? feedLag.recordPainted : null, underlying, liveExpiryFlag)
 
   // A plain tick, unrelated to any live data - exists ONLY so feedStalled below re-evaluates on a
   // real clock instead of purely as a side effect of the next incoming tick (same reasoning as Live
@@ -2785,7 +2800,7 @@ export default function OiReplayPage() {
   // True when this page's own SignalR connection to the server says "connected" but nothing has
   // actually arrived through it in a long time - see FEED_STALL_WARNING_MS's own doc comment for why
   // that combination needs its own, separate signal from liveConnectionState.
-  const feedStalled = isToday && liveConnectionState === 'connected'
+  const feedStalled = isLive && liveConnectionState === 'connected'
     && lastTickAtMs != null && nowTick - lastTickAtMs > FEED_STALL_WARNING_MS
 
   // Edge-triggered (fires once per stall, not once per 15s tick while it persists) so this is
@@ -2801,7 +2816,7 @@ export default function OiReplayPage() {
   // Playback loop - a single interval that advances manualVisibleCount by one NATIVE MINUTE per
   // tick, self-stopping at the end of the day's own bars rather than needing a separate "are we
   // done" effect. Only relevant for a historical (non-today) day - see visibleCount's own comment
-  // below on why today ignores manualVisibleCount entirely, so this loop is inert whenever isToday.
+  // below on why today ignores manualVisibleCount entirely, so this loop is inert whenever isLive.
   useEffect(() => {
     if (!playing) return
     timerRef.current = setInterval(() => {
@@ -2819,7 +2834,7 @@ export default function OiReplayPage() {
   // broke) - recomputed fresh on every render straight off however many bars have arrived so far, so
   // there is no separate piece of state that could ever fall behind and need a manual nudge to catch
   // up. A historical day uses the manually-chosen replay position instead, exactly as before.
-  const visibleCount = isToday ? oneMinBars.length : manualVisibleCount
+  const visibleCount = isLive ? oneMinBars.length : manualVisibleCount
 
   const currentBar = oneMinBars[visibleCount - 1] ?? null
   // oneMinBars' own .time is chart time (shifted +5.5h by toChartTime, for the chart library's own
@@ -2841,7 +2856,7 @@ export default function OiReplayPage() {
   // latestLiveMs covers a device clock running behind the server: ticks are stamped with the
   // server's receive time, so a plain Date.now() cutoff would hide the newest ones until this
   // device's clock caught up.
-  const asOfMs = isToday ? Math.max(Date.now(), latestLiveMs) : (currentBar ? fromChartTime(currentBar.time) * 1000 : null)
+  const asOfMs = isLive ? Math.max(Date.now(), latestLiveMs) : (currentBar ? fromChartTime(currentBar.time) * 1000 : null)
 
   // Purely for the ladder's OWN "stale" flag below (ceStale/peStale) - NOT used for asOfMs itself,
   // which must keep tracking real wall-clock time for every other read on this page (paper-trade
@@ -2851,7 +2866,7 @@ export default function OiReplayPage() {
   // exactly like a broken feed but only ever means "the trading day is over, nothing more is
   // coming". Capped at today's own market close instead, so a reading from the day's last few
   // trades still reads as fresh relative to that close, not "5+ hours stale" relative to right now.
-  const staleReferenceMs = isToday ? Math.min(Date.now(), new Date(`${istDateKey(new Date())}T15:30:00+05:30`).getTime()) : asOfMs
+  const staleReferenceMs = isLive ? Math.min(Date.now(), new Date(`${istDateKey(new Date())}T15:30:00+05:30`).getTime()) : asOfMs
 
   // The strike drill-down popup's own OI series - gated to asOfMs like every other derived read on
   // this page (the ladder, premium charts, Market Read), NOT the whole day's history regardless of
@@ -2881,7 +2896,7 @@ export default function OiReplayPage() {
   )
   const dayStartMs = oneMinBars[0] ? fromChartTime(oneMinBars[0].time) * 1000 : null
 
-  // Futures - the REST snapshot from OiReplayService's own single live call, PLUS (while isToday)
+  // Futures - the REST snapshot from OiReplayService's own single live call, PLUS (while isLive)
   // the live tick tail from OiReplayLiveFeedService's own "futuresTick" broadcast (see
   // handleFuturesTick below) - same "today, live WS" merge shape as oneMinBars/ceByStrike/peByStrike
   // now use, closing what used to be a real gap: the Futures section never updated again after the
@@ -2894,14 +2909,14 @@ export default function OiReplayPage() {
   // is appended.
   const futuresPointsRaw = useMemo(() => {
     const base = [...(result?.futuresBars ?? [])].sort((a, b) => new Date(a.time) - new Date(b.time))
-    if (!isToday || liveFuturesPoints.length === 0) return base
+    if (!isLive || liveFuturesPoints.length === 0) return base
     const merged = base.slice()
     for (const point of liveFuturesPoints) {
       if (merged.length > 0 && merged[merged.length - 1].time === point.time) merged[merged.length - 1] = point
       else if (merged.length === 0 || new Date(point.time) > new Date(merged[merged.length - 1].time)) merged.push(point)
     }
     return merged
-  }, [result, liveFuturesPoints, isToday])
+  }, [result, liveFuturesPoints, isLive])
   const futuresBarsChart = useMemo(() => futuresPointsRaw.map(toBar), [futuresPointsRaw])
   const displayFuturesBars = useMemo(() => {
     if (asOfMs == null) return []
@@ -3236,7 +3251,7 @@ export default function OiReplayPage() {
   // card's own chain-wide chart below - total (chain-wide) CE/PE OI as of that bar's own close,
   // built the same way ladderRows/dayStartByStrike already read a single point in time, just
   // repeated across every bar instead of one. Bounded by visibleCount (Math.min against
-  // oneMinBars.length as a safety clamp, isToday's own visibleCount already equals it exactly) -
+  // oneMinBars.length as a safety clamp, isLive's own visibleCount already equals it exactly) -
   // NOT oneMinBars.length on its own, which used to build the whole day's history immediately
   // regardless of how far a historical replay had actually played to. A real report ("these graphs
   // should work tick by tick, not all in one") caught this: the chain-wide chart was showing the
@@ -3463,11 +3478,11 @@ export default function OiReplayPage() {
             <Space wrap size={12}>
               <Button
                 type="primary" onClick={goLive} loading={loading} disabled={!underlying}
-                style={isToday ? { background: UP_COLOR, borderColor: UP_COLOR } : undefined}
+                style={isLive ? { background: UP_COLOR, borderColor: UP_COLOR } : undefined}
               >
-                ● {isToday ? 'Live' : 'Go Live'}
+                ● {isLive ? 'Live' : 'Go Live'}
               </Button>
-              {isToday && (
+              {isLive && (
                 // The REAL SignalR connection state, not just "today is selected" - the button above
                 // says "Live" purely from a date match, which used to give false confidence that
                 // ticks were flowing even when this connection had failed, was stuck reconnecting, or
@@ -3480,12 +3495,12 @@ export default function OiReplayPage() {
                         : '● Disconnected - not receiving live ticks'}
                 </Tag>
               )}
-              {isToday && liveConnectionState === 'connected' && <FeedLagTag delayMs={feedLag.delayMs} />}
+              {isLive && liveConnectionState === 'connected' && <FeedLagTag delayMs={feedLag.delayMs} />}
               <Select
                 value={underlying} onChange={selectUnderlying} style={{ width: 130 }}
                 options={[{ value: 'NIFTY', label: 'NIFTY' }, { value: 'BANKNIFTY', label: 'BANKNIFTY' }, { value: 'SENSEX', label: 'SENSEX' }]}
               />
-              {isToday ? (
+              {isLive ? (
                 // Only meaningful once today is playing live - lists the real currently-listed
                 // expiries (see resolvedExpiries' own doc comment) instead of an ambiguous Weekly/
                 // Monthly toggle, so the exact contract being tracked is never in doubt.
@@ -3505,10 +3520,15 @@ export default function OiReplayPage() {
               )}
               <DatePicker value={date} onChange={setDate} format="DD MMM YYYY" placeholder="Trading day" />
               <Select value={timeframe} onChange={setTimeframe} style={{ width: 110 }} options={TIMEFRAME_OPTIONS} />
-              <Button type="primary" onClick={() => load()} loading={loading} disabled={!canLoad}>Load day</Button>
-              {isToday && <Checkbox checked={showVwap} onChange={(e) => setShowVwap(e.target.checked)}>VWAP</Checkbox>}
+              <Tooltip title={isTodayDate ? "Replays today's session so far with the Start/Pause/slider - use Go Live to follow it live again" : undefined}>
+                <Button type="primary" onClick={loadForReplay} loading={loading} disabled={!canLoad}>Load day</Button>
+              </Tooltip>
+              {isTodayDate && !isLive && oneMinBars.length > 0 && (
+                <Tag color="blue">Replaying today up to {istTimeFormatter(oneMinBars.at(-1).time)} - Load day again for the latest</Tag>
+              )}
+              {isLive && <Checkbox checked={showVwap} onChange={(e) => setShowVwap(e.target.checked)}>VWAP</Checkbox>}
               <Checkbox checked={showVolumeProfile} onChange={(e) => setShowVolumeProfile(e.target.checked)}>Volume Profile</Checkbox>
-              {isToday && (
+              {isLive && (
                 // Today's own run + live ticks are kept in this browser (see LIVE_DAY_CACHE_STORAGE_KEY's
                 // own doc comment) so a reload doesn't have to re-fetch - this is the one way to force a
                 // genuine re-fetch instead, for whenever the cached data looks wrong/stale. Popconfirm
@@ -3535,13 +3555,13 @@ export default function OiReplayPage() {
                 Show all
               </Button>
             </Space>
-            {isToday && liveExpiryFlag !== 'N1' && (
+            {isLive && liveExpiryFlag !== 'N1' && (
               <Alert
                 type="info" showIcon
                 message="This expiry isn't the nearest one - its CE/PE data has no since-open history yet (Dhan's historical endpoint only reliably covers the nearest weekly/monthly), so it'll build up from live ticks starting now rather than showing the whole day. Click Load day/Go Live again after picking it if you haven't already."
               />
             )}
-            {isToday && liveConnectionState === 'disconnected' && (
+            {isLive && liveConnectionState === 'disconnected' && (
               <Alert
                 type="error" showIcon
                 message="Not receiving live ticks right now - the page will look frozen at whatever it last loaded until this reconnects. Check the browser console for a SignalR connection error, and confirm the backend's own Dhan market-feed connection is up."
@@ -3553,13 +3573,13 @@ export default function OiReplayPage() {
                 message={`Connected, but no live tick for ${underlying} in over ${Math.round((nowTick - lastTickAtMs) / 60_000)} min - the connection itself is fine, but the server's own Dhan feed may have stalled. Logged to the browser console; try reloading if this doesn't clear on its own.`}
               />
             )}
-            {isToday && liveConnectionState === 'connected' && spotSilentMs > 0 && (
+            {isLive && liveConnectionState === 'connected' && spotSilentMs > 0 && (
               <Alert
                 type="warning" showIcon
                 message={`${underlying} spot hasn't ticked for ${Math.round(spotSilentMs / 1000)}s during market hours - the spot chart is not live right now even though option ticks may still be arriving. The server re-subscribes a silent spot feed after 10s on its own (and restarts its stream after 30s).`}
               />
             )}
-            {isToday && liveConnectionState === 'connected' && <FeedLagAlert delayMs={feedLag.delayMs} sourceDelayMs={feedLag.sourceDelayMs} />}
+            {isLive && liveConnectionState === 'connected' && <FeedLagAlert delayMs={feedLag.delayMs} sourceDelayMs={feedLag.sourceDelayMs} />}
             {error && <Alert type="error" showIcon closable onClose={() => setError(null)} message={error} />}
           </Space>
         </Card>
@@ -3768,7 +3788,7 @@ export default function OiReplayPage() {
                   <Space size={16} wrap>
                     <Text style={{ color: OI_ADDED_COLOR }}>■ OI added</Text>
                     <Text style={{ color: OI_REMOVED_COLOR }}>■ OI removed</Text>
-                    {isToday && (
+                    {isLive && (
                       <Tooltip title="When Dhan last reported a changed open interest on any tracked strike. Prices tick constantly; OI only moves when positions are opened or closed, so a column can sit empty for a while in a quiet market.">
                         <Text type="secondary" style={{ fontSize: 12 }}>
                           OI last changed: {lastOiChangeMs ? `${istTimeWithSecondsFormatter(toChartTime(lastOiChangeMs))} (${Math.max(0, Math.round((nowTick - lastOiChangeMs) / 1000))}s ago)` : 'no live change yet'}
@@ -3785,11 +3805,11 @@ export default function OiReplayPage() {
                   </Space>
                   <div>
                     <Text strong style={{ fontSize: 12 }}>CE</Text>
-                    <OiChangeHeatmapPlot label="CE" byStrike={ceByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} live={isToday} />
+                    <OiChangeHeatmapPlot label="CE" byStrike={ceByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} live={isLive} />
                   </div>
                   <div>
                     <Text strong style={{ fontSize: 12 }}>PE</Text>
-                    <OiChangeHeatmapPlot label="PE" byStrike={peByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} live={isToday} />
+                    <OiChangeHeatmapPlot label="PE" byStrike={peByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} live={isLive} />
                   </div>
                 </Space>
               </Card>
@@ -3820,7 +3840,7 @@ export default function OiReplayPage() {
                         Reviewing an earlier point in the day is still possible - pick that date with
                         the DatePicker above and Load it, which gets the FULL replay scrubber below,
                         just not live. */}
-                    {!isToday && (
+                    {!isLive && (
                       <>
                         <Button
                           icon={playing ? <PauseCircleOutlined /> : <PlayCircleOutlined />}
@@ -3849,7 +3869,7 @@ export default function OiReplayPage() {
                     <Text style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
                       {currentBar ? `${istTimeFormatter(currentBar.time)} (${visibleCount}/${oneMinBars.length})` : '—'}
                     </Text>
-                    {isToday && (
+                    {isLive && (
                       <Tooltip title={
                         liveConnectionState === 'connected' ? "Streaming live ticks from Dhan's WebSocket feed on top of today's snapshot (price + OI - IV stays at the last REST-fetched value)"
                           : liveConnectionState === 'reconnecting' ? 'Connection dropped - automatically retrying.'
