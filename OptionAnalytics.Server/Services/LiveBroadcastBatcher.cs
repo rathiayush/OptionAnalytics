@@ -126,6 +126,10 @@ public sealed class LiveBroadcastBatcher : BackgroundService
             accumulated = _accumulated;
             _latest = new();
             _accumulated = new();
+            // Nobody subscribed to a group (e.g. no Dashboard open for a non-default expiry's CDV):
+            // don't build its payload at all - the factories read other services' state under their
+            // locks, the same locks the Dhan receive thread takes on every tick.
+            foreach (var id in latest.Keys.Where(id => !_members.ContainsKey(id.Group)).ToList()) latest.Remove(id);
         }
 
         // Payloads are built outside the lock - the factories read other services' state.

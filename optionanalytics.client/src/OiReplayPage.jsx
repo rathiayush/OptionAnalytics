@@ -3535,7 +3535,7 @@ export default function OiReplayPage() {
             {isToday && liveConnectionState === 'connected' && spotSilentMs > 0 && (
               <Alert
                 type="warning" showIcon
-                message={`${underlying} spot hasn't ticked for ${Math.round(spotSilentMs / 1000)}s during market hours - the spot chart is not live right now even though option ticks may still be arriving. The server re-subscribes a silent spot feed after 90s on its own.`}
+                message={`${underlying} spot hasn't ticked for ${Math.round(spotSilentMs / 1000)}s during market hours - the spot chart is not live right now even though option ticks may still be arriving. The server re-subscribes a silent spot feed after 10s on its own (and restarts its stream after 30s).`}
               />
             )}
             {isToday && liveConnectionState === 'connected' && <FeedLagAlert delayMs={feedLag.delayMs} sourceDelayMs={feedLag.sourceDelayMs} />}
