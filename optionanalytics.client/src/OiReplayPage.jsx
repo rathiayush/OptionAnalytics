@@ -1,6 +1,6 @@
 import { Component, useEffect, useMemo, useRef, useState } from 'react'
 import dayjs from 'dayjs'
-import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicker, Alert, Empty, Tooltip, Popconfirm, Slider, Tag, InputNumber, Switch, Table, Segmented, Checkbox, Modal } from 'antd'
+import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicker, TimePicker, Alert, Empty, Tooltip, Popconfirm, Slider, Tag, InputNumber, Switch, Table, Segmented, Checkbox, Modal } from 'antd'
 import { PlayCircleOutlined, PauseCircleOutlined, ReloadOutlined, SoundOutlined } from '@ant-design/icons'
 import { createChart, createSeriesMarkers, CandlestickSeries, LineSeries, HistogramSeries, CrosshairMode } from 'lightweight-charts'
 import * as signalR from '@microsoft/signalr'
@@ -299,6 +299,18 @@ function applyIvSnapshot(prev, ivByStrike) {
     next[i] = { ...p, impliedVolatility: iv }
   }
   return next ?? prev
+}
+
+// Replay position (a visible-bar count) for a picked IST wall-clock time: the last 1-minute bar at
+// or before it, so Start plays on from exactly there. A time before the first bar lands on the first
+// bar, one after the last on the last. Chart times are IST wall-clock encoded as UTC seconds (see
+// toChartTime), so the day's midnight is just the first bar's time floored to a whole day.
+function replayCountAt(oneMinBars, hour, minute) {
+  if (oneMinBars.length === 0) return 0
+  const target = Math.floor(oneMinBars[0].time / 86_400) * 86_400 + hour * 3600 + minute * 60
+  let count = 1
+  for (let i = 0; i < oneMinBars.length && oneMinBars[i].time <= target; i++) count = i + 1
+  return count
 }
 
 // NSE indices tick about once a second in market hours - this much silence on spot alone is a
@@ -3857,6 +3869,19 @@ export default function OiReplayPage() {
                         </Button>
                         <Text type="secondary" style={{ fontSize: 12 }}>Speed</Text>
                         <Select value={speedMs} onChange={setSpeedMs} style={{ width: 90 }} options={SPEED_OPTIONS} />
+                        <Tooltip title="Jump the replay to this time - press Start to play on from there">
+                          <TimePicker
+                            format="HH:mm" minuteStep={1} allowClear={false} needConfirm={false} showNow={false}
+                            placeholder="Go to time" style={{ width: 110 }} disabled={oneMinBars.length === 0}
+                            value={currentBar ? dayjs().hour(new Date(currentBar.time * 1000).getUTCHours()).minute(new Date(currentBar.time * 1000).getUTCMinutes()).second(0) : null}
+                            disabledTime={() => ({ disabledHours: () => [...Array(24).keys()].filter((h) => h < 9 || h > 15) })}
+                            onChange={(v) => {
+                              if (!v) return
+                              setPlaying(false)
+                              setManualVisibleCount(replayCountAt(oneMinBars, v.hour(), v.minute()))
+                            }}
+                          />
+                        </Tooltip>
                         <div style={{ flex: 1, minWidth: 160 }}>
                           <Slider
                             min={0} max={Math.max(0, oneMinBars.length - 1)} value={visibleCount - 1}
