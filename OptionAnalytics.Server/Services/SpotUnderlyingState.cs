@@ -228,8 +228,30 @@ public sealed class SpotUnderlyingState
     // serialize-and-broadcast. Riding the existing per-tick spotUpdate push with this is what lets
     // the chart's VWAP line grow live instead of needing its own separate poll - see SpotSnapshot's
     // own doc comment on Vwap.
+    // Runs on EVERY spot tick, on the Dhan receive thread every other live consumer shares - so only
+    // the current session's bars are fed to VwapCalculator (session VWAP resets each IST day, so the
+    // result is identical) instead of the full HistoryWindow (~45 days, ~17k bars) re-sorted per tick.
     public SpotSnapshot ToSnapshot() => new(Underlying, Step, LastPrice, RoundedPrice, LastUpdateUtc, GetCurrentBar(),
-        VwapCalculator.ComputeSeries(GetVolumeBars()) is { Count: > 0 } series ? series[^1].Obv : null);
+        VwapCalculator.ComputeSeries(GetCurrentSessionVolumeBars()) is { Count: > 0 } series ? series[^1].Obv : null);
+
+    /// <summary>The volume bars of the latest bar's own IST day only, oldest first - a backward scan
+    /// from the end, so the cost is one session's worth of bars regardless of how much history is held.</summary>
+    internal IReadOnlyList<CandleWithVolume> GetCurrentSessionVolumeBars()
+    {
+        lock (_lock)
+        {
+            var latest = _currentVolumeBar ?? (_closedVolumeBars.Count > 0 ? _closedVolumeBars[^1] : (CandleWithVolume?)null);
+            if (latest is not { } last) return Array.Empty<CandleWithVolume>();
+
+            var day = IstClock.IstDate(last.Time);
+            var start = _closedVolumeBars.Count;
+            while (start > 0 && IstClock.IstDate(_closedVolumeBars[start - 1].Time) == day) start--;
+
+            var list = _closedVolumeBars.GetRange(start, _closedVolumeBars.Count - start);
+            if (_currentVolumeBar is { } bar) list.Add(bar);
+            return list;
+        }
+    }
 
     // IST is UTC+5:30, a whole number of minutes offset from UTC, so flooring a UTC instant to the
     // minute lands on exactly the same boundary as flooring its IST wall-clock time would - no
