@@ -57,12 +57,13 @@ const RECONNECT_RETRY_POLICY = {
 }
 
 // Connects to the same SignalR hub the live dashboard already uses (App.jsx's own useHub), for
-// three events: "spotUpdate" (SpotFeedHostedService's existing push - the underlying's own
+// these events: "spotUpdate" (SpotFeedHostedService's existing push - the underlying's own
 // currently-forming 1-minute bar, reused as-is rather than building a second live-spot pipeline),
-// "oiReplayTick" (OiReplayLiveFeedService's push - one option leg's live price/OI), and
-// "futuresTick" (that same service's push for the underlying's own nearest futures contract - the
+// "oiReplayTicks" (OiReplayLiveFeedService's coalesced push - each option leg's live price/OI), and
+// "futuresTicks" (that same service's push for the underlying's own nearest futures contract - the
 // user's own "make sure ALL functionality of this page should work [live]" ask: the Futures section
-// used to be a one-time REST snapshot that never updated again until the next full reload).
+// used to be a one-time REST snapshot that never updated again until the next full reload), and
+// "oiRestSnapshot" (Dhan's option-chain snapshot - the live IV source).
 //
 // ALWAYS connects on mount and never tears down/rebuilds - an empty dependency array, exactly like
 // App.jsx's own useHub/oiShared.jsx's useOiLiveHub. This USED to depend on `[enabled]`
@@ -73,18 +74,20 @@ const RECONNECT_RETRY_POLICY = {
 // it each time - a real, confirmed source of "lots of web connections"/reconnect churn, the exact
 // bug oiShared.jsx's useOiLiveHub was already built specifically to avoid. Every callback below
 // already independently checks `isToday` itself
-// before acting (see handleSpotUpdate/handleOiReplayTick/handleFuturesTick's own `if (!isToday...)`
+// before acting (see handleSpotUpdate/handleOiReplayTicks/handleFuturesTicks's own `if (!isToday...)`
 // guards) via the SAME ref-read pattern used here, so a tick arriving while a historical (non-today)
 // day is loaded already safely no-ops - nothing about correctness depended on tearing the
 // connection itself down, only on gating what it's ALLOWED to do once a tick arrives.
-function useOiReplayLiveFeed(onSpotUpdate, onOiReplayTick, onFuturesTick, onReconnected, underlying, expiryFlag) {
+function useOiReplayLiveFeed(onSpotUpdate, onOiReplayTicks, onFuturesTicks, onRestSnapshot, onReconnected, underlying, expiryFlag) {
   const spotRef = useRef(onSpotUpdate)
-  const tickRef = useRef(onOiReplayTick)
-  const futuresRef = useRef(onFuturesTick)
+  const tickRef = useRef(onOiReplayTicks)
+  const futuresRef = useRef(onFuturesTicks)
+  const restSnapshotRef = useRef(onRestSnapshot)
   const reconnectedRef = useRef(onReconnected)
   spotRef.current = onSpotUpdate
-  tickRef.current = onOiReplayTick
-  futuresRef.current = onFuturesTick
+  tickRef.current = onOiReplayTicks
+  futuresRef.current = onFuturesTicks
+  restSnapshotRef.current = onRestSnapshot
   reconnectedRef.current = onReconnected
 
   // The actual SignalR connection state - the page's own "Live" badge used to be purely a date
@@ -96,7 +99,7 @@ function useOiReplayLiveFeed(onSpotUpdate, onOiReplayTick, onFuturesTick, onReco
   // onclose fires (retries exhausted).
   const [connectionState, setConnectionState] = useState('connecting')
   const connectionRef = useRef(null)
-  // "u:{underlying}" (spotUpdate/futuresTick) plus "c:{underlying}:{expiryFlag}" (oiReplayTick) -
+  // "u:{underlying}" (spotUpdate/futuresTicks) plus "c:{underlying}:{expiryFlag}" (oiReplayTicks/oiRestSnapshot) -
   // same two-group shape as oiShared.jsx's useOiLiveHub, see its own doc comment.
   const groupsRef = useRef([])
 
@@ -117,8 +120,13 @@ function useOiReplayLiveFeed(onSpotUpdate, onOiReplayTick, onFuturesTick, onReco
     connectionRef.current = connection
 
     connection.on('spotUpdate', (snapshot) => spotRef.current(snapshot))
-    connection.on('oiReplayTick', (tick) => tickRef.current(tick))
-    connection.on('futuresTick', (tick) => futuresRef.current?.(tick))
+    // Option and futures ticks arrive already coalesced by the server (LiveBroadcastBatcher) - one
+    // array per ~300ms holding each leg's latest reading plus its high/low inside that window.
+    connection.on('oiReplayTicks', (ticks) => tickRef.current(ticks ?? []))
+    connection.on('futuresTicks', (ticks) => futuresRef.current?.(ticks ?? []))
+    // Dhan's option-chain snapshot (every ~30-90s per expiry) - the only live source of IV, since
+    // the websocket tick carries none.
+    connection.on('oiRestSnapshot', (snapshot) => restSnapshotRef.current?.(snapshot))
     connection.onreconnecting(() => setConnectionState('reconnecting'))
     // A reconnect gets a brand-new server-side connection with no group membership at all - rejoin
     // the CURRENT selection (groupsRef.current), not whatever it was when this connection object was
@@ -199,20 +207,15 @@ function latestAtOrBefore(sortedPoints, asOfMs) {
   return null
 }
 
-// Dhan sends a Full packet for EVERY change on every subscribed strike (trade, OI, any depth level),
-// so ~42 legs routinely deliver 100+ ticks a second. Applying each one as its own React state update
-// (an ever-growing array copy + a full re-render of every chart) is what backed the page up until
-// the spot chart itself lagged and froze. Ticks are buffered and applied together every
-// LIVE_FLUSH_MS, and each strike keeps at most ONE point per LIVE_POINT_SLOT_MS - later ticks in the
-// same slot update it in place, carrying the slot's own open/high/low so buildPremiumCandles still
-// gets the true intra-minute range. The newest reading is always what's shown; only history is
-// thinned (15s still sits well inside the finest 30s heatmap bucket).
-const LIVE_FLUSH_MS = 500
+// The server coalesces Dhan's per-strike ticks (100+/s across a strike band) into one "oiReplayTicks"
+// array per ~300ms - see LiveBroadcastBatcher - each entry carrying that leg's latest reading plus the
+// open/high/low of its price inside the window. Each batch is applied as ONE state update. Each strike
+// still keeps at most one stored point per LIVE_POINT_SLOT_MS (later batches in the same slot update
+// it in place, widening its high/low) so a full day's history stays small enough to re-derive every
+// chart from on each batch. The newest reading is always what's shown; only history is thinned (15s
+// still sits well inside the finest 30s heatmap bucket).
+const LIVE_STATUS_INTERVAL_MS = 500
 const LIVE_POINT_SLOT_MS = 15_000
-
-function emptyLivePending() {
-  return { ce: [], pe: [], futures: [] }
-}
 
 function mergeLiveOptionTicks(prev, ticks, ivByStrike, slotMs = LIVE_POINT_SLOT_MS) {
   if (ticks.length === 0) return prev
@@ -223,20 +226,23 @@ function mergeLiveOptionTicks(prev, ticks, ivByStrike, slotMs = LIVE_POINT_SLOT_
     const strike = next[i].strike
     if (wanted.has(strike) && !lastIndex.has(strike)) lastIndex.set(strike, i)
   }
-  for (const tick of ticks) {
+  const ordered = [...ticks].sort((a, b) => new Date(a.time) - new Date(b.time))
+  for (const tick of ordered) {
     const ms = new Date(tick.time).getTime()
     if (!Number.isFinite(ms)) continue
+    const tickHigh = Number.isFinite(tick.high) ? tick.high : tick.price
+    const tickLow = Number.isFinite(tick.low) ? tick.low : tick.price
     const idx = lastIndex.get(tick.strike)
     const last = idx != null ? next[idx] : null
     if (last && Math.floor(pointMs(last) / slotMs) === Math.floor(ms / slotMs)) {
-      const high = Number.isFinite(last.high) ? Math.max(last.high, tick.price) : tick.price
-      const low = Number.isFinite(last.low) ? Math.min(last.low, tick.price) : tick.price
+      const high = Number.isFinite(last.high) ? Math.max(last.high, tickHigh) : tickHigh
+      const low = Number.isFinite(last.low) ? Math.min(last.low, tickLow) : tickLow
       next[idx] = { ...last, time: tick.time, ms, openInterest: tick.openInterest, price: tick.price, high, low }
-    } else {
+    } else if (!last || ms >= pointMs(last)) {
       next.push({
         time: tick.time, ms, strike: tick.strike, openInterest: tick.openInterest,
-        impliedVolatility: ivByStrike?.get(tick.strike) ?? null,
-        price: tick.price, open: tick.price, high: tick.price, low: tick.price,
+        impliedVolatility: ivByStrike?.get(tick.strike) ?? last?.impliedVolatility ?? null,
+        price: tick.price, open: Number.isFinite(tick.open) ? tick.open : tick.price, high: tickHigh, low: tickLow,
       })
       lastIndex.set(tick.strike, next.length - 1)
     }
@@ -244,22 +250,43 @@ function mergeLiveOptionTicks(prev, ticks, ivByStrike, slotMs = LIVE_POINT_SLOT_
   return next
 }
 
-// Futures ticks folded into their own current MINUTE (same shape the per-tick handler used to
-// build) - raw futuresTick is a single trade, not a bar. volume stays null: SpotTick.Volume is
-// Dhan's cumulative day volume, not a per-minute figure (see handleFuturesTick's old comment).
+// Futures entries folded into their own current MINUTE. volume stays null: SpotTick.Volume is Dhan's
+// cumulative day volume, not a per-minute figure - futuresVolumeSoFar's own sum treats null as 0,
+// slightly under-counting the live tail rather than risk wildly over-counting it.
 function mergeLiveFuturesTicks(prev, ticks) {
   if (ticks.length === 0) return prev
   const next = prev.slice()
-  for (const tick of ticks) {
+  const ordered = [...ticks].sort((a, b) => new Date(a.time) - new Date(b.time))
+  for (const tick of ordered) {
     const bucketIso = new Date(Math.floor(new Date(tick.time).getTime() / 60_000) * 60_000).toISOString()
+    const high = Number.isFinite(tick.high) ? tick.high : tick.price
+    const low = Number.isFinite(tick.low) ? tick.low : tick.price
     const last = next[next.length - 1]
     if (last && last.time === bucketIso) {
-      next[next.length - 1] = { ...last, high: Math.max(last.high, tick.price), low: Math.min(last.low, tick.price), close: tick.price, openInterest: tick.openInterest }
+      next[next.length - 1] = { ...last, high: Math.max(last.high, high), low: Math.min(last.low, low), close: tick.price, openInterest: tick.openInterest }
     } else if (!last || bucketIso > last.time) {
-      next.push({ time: bucketIso, open: tick.price, high: tick.price, low: tick.price, close: tick.price, volume: null, openInterest: tick.openInterest })
+      next.push({ time: bucketIso, open: Number.isFinite(tick.open) ? tick.open : tick.price, high, low, close: tick.price, volume: null, openInterest: tick.openInterest })
     }
   }
   return next
+}
+
+// Stamps a fresh option-chain IV onto each strike's newest live point - IV is otherwise frozen at the
+// morning REST seed, since Dhan's websocket tick has no IV field at all.
+function applyIvSnapshot(prev, ivByStrike) {
+  if (ivByStrike.size === 0) return prev
+  let next = null
+  const seen = new Set()
+  for (let i = prev.length - 1; i >= 0 && seen.size < ivByStrike.size; i--) {
+    const p = prev[i]
+    if (seen.has(p.strike) || !ivByStrike.has(p.strike)) continue
+    seen.add(p.strike)
+    const iv = ivByStrike.get(p.strike)
+    if (p.impliedVolatility === iv) continue
+    next ??= prev.slice()
+    next[i] = { ...p, impliedVolatility: iv }
+  }
+  return next ?? prev
 }
 
 // How far behind the page is running. This device's clock and the server's can disagree by
@@ -2175,9 +2202,6 @@ export default function OiReplayPage() {
   const [liveCePoints, setLiveCePoints] = useState([])
   const [livePePoints, setLivePePoints] = useState([])
   const [liveFuturesPoints, setLiveFuturesPoints] = useState([])
-  // Ticks received since the last flush - see LIVE_FLUSH_MS. Cleared wherever the live arrays above
-  // are reset, so a tick queued for a previous underlying/day can never be flushed into the new one.
-  const pendingLiveRef = useRef(emptyLivePending())
   const lastTickAtRef = useRef(null)
   const lastSpotAtRef = useRef(null)
   const feedLagRef = useRef(createFeedLagTracker())
@@ -2356,7 +2380,6 @@ export default function OiReplayPage() {
         setLiveCePoints(cached.liveCePoints ?? [])
         setLivePePoints(cached.livePePoints ?? [])
         setLiveFuturesPoints(cached.liveFuturesPoints ?? [])
-        pendingLiveRef.current = emptyLivePending()
         // Restored alongside the data it was actually tracking - liveExpiryFlag itself resets to its
         // own 'N1' default on every fresh mount (never persisted), so without this a restore of a
         // cached NON-default expiry (N2+) would show that expiry's frozen snapshot while the live feed
@@ -2383,7 +2406,6 @@ export default function OiReplayPage() {
       setLiveCePoints([])
       setLivePePoints([])
       setLiveFuturesPoints([])
-      pendingLiveRef.current = emptyLivePending()
       // Today's own positions survive THIS reload (see PAPER_POSITIONS_STORAGE_KEY's own doc comment) -
       // restored from storage rather than reset, so long as they were punched against the SAME
       // underlying and the SAME calendar day now loading. Any other day (or a stale/foreign entry)
@@ -2452,8 +2474,7 @@ export default function OiReplayPage() {
           setLiveCePoints([])
           setLivePePoints([])
           setLiveFuturesPoints([])
-          pendingLiveRef.current = emptyLivePending()
-        }
+          }
         const initialLen = body.spotCandlesOneMinute?.length ?? 0
         // manualVisibleCount only matters for a historical (non-today) day - see visibleCount's own
         // derivation below, which reads oneMinBars.length directly for today, always, unconditionally.
@@ -2609,60 +2630,77 @@ export default function OiReplayPage() {
       })
     }
   }
-  // Option and futures ticks only get queued here (O(1), no re-render) - the flush loop below applies
-  // them. `tick.time` is the server's own receive time (see OiReplayLiveFeedService.OnTick), which is
-  // also what feed lag is measured against.
-  const handleOiReplayTick = (tick) => {
-    if (!isToday || tick?.underlying !== underlying || tick?.expiryFlag !== liveExpiryFlag) return
+  // Each batch (~every 300ms, one entry per leg - see LiveBroadcastBatcher) is applied as ONE state
+  // update per side. Entry `time` is the server's own receive time of that leg's latest tick (see
+  // OiReplayLiveFeedService.OnTick), which is also what feed lag is measured against.
+  const handleOiReplayTicks = (batch) => {
+    if (!isToday) return
+    const ce = []
+    const pe = []
+    for (const tick of batch) {
+      if (tick?.underlying !== underlying || tick?.expiryFlag !== liveExpiryFlag) continue
+      ;(tick.side === 'CE' ? ce : pe).push(tick)
+    }
+    if (ce.length === 0 && pe.length === 0) return
     const receivedAt = Date.now()
     lastTickAtRef.current = receivedAt
-    recordFeedLag(feedLagRef.current, receivedAt, new Date(tick.time).getTime())
-    const pending = pendingLiveRef.current
-    ;(tick.side === 'CE' ? pending.ce : pending.pe).push(tick)
+    let newest = 0
+    for (const tick of [...ce, ...pe]) newest = Math.max(newest, new Date(tick.time).getTime() || 0)
+    recordFeedLag(feedLagRef.current, receivedAt, newest)
+    if (ce.length) setLiveCePoints((prev) => mergeLiveOptionTicks(prev, ce, liveIvRef.current.ce))
+    if (pe.length) setLivePePoints((prev) => mergeLiveOptionTicks(prev, pe, liveIvRef.current.pe))
+    setLatestLiveMs((prev) => Math.max(prev, newest))
   }
-  const handleFuturesTick = (tick) => {
-    if (!isToday || tick?.underlying !== underlying) return
+  const handleFuturesTicks = (batch) => {
+    if (!isToday) return
+    const mine = batch.filter((tick) => tick?.underlying === underlying)
+    if (mine.length === 0) return
     lastTickAtRef.current = Date.now()
-    pendingLiveRef.current.futures.push(tick)
+    setLiveFuturesPoints((prev) => mergeLiveFuturesTicks(prev, mine))
+  }
+  // Fresh IV from Dhan's option-chain snapshot: remembered for every new live point from here on,
+  // and stamped onto each strike's current point right away so the ladder/Market Read update now.
+  const handleRestSnapshot = (snapshot) => {
+    if (!isToday || snapshot?.underlying !== underlying || snapshot?.expiryFlag !== liveExpiryFlag) return
+    const ce = new Map(liveIvRef.current.ce)
+    const pe = new Map(liveIvRef.current.pe)
+    const ceNow = new Map()
+    const peNow = new Map()
+    for (const row of snapshot.strikes ?? []) {
+      if (row.ceIv != null) { ce.set(row.strike, row.ceIv); ceNow.set(row.strike, row.ceIv) }
+      if (row.peIv != null) { pe.set(row.strike, row.peIv); peNow.set(row.strike, row.peIv) }
+    }
+    liveIvRef.current = { ce, pe }
+    if (ceNow.size) setLiveCePoints((prev) => applyIvSnapshot(prev, ceNow))
+    if (peNow.size) setLivePePoints((prev) => applyIvSnapshot(prev, peNow))
   }
 
-  // Carried onto each new live point - see lastIvByStrike. A ref so the flush loop (an interval
-  // created once) always reads the current seed's IV rather than whatever it was when it started.
+  // Carried onto each new live point - see lastIvByStrike. A ref so handlers always read the newest
+  // IV known (seed, then each option-chain snapshot) without re-subscribing anything.
   const liveIvRef = useRef({ ce: new Map(), pe: new Map() })
   useEffect(() => {
     liveIvRef.current = { ce: lastIvByStrike(result?.cePoints), pe: lastIvByStrike(result?.pePoints) }
   }, [result])
 
+  // Status only (no data is applied here any more): the "last tick", lag and spot-silence readouts.
   const [feedLag, setFeedLag] = useState(null)
   useEffect(() => {
     if (!isToday) return
     // Counts from now, so spot that never ticks at all after the page opens is caught too.
     if (lastSpotAtRef.current == null) lastSpotAtRef.current = Date.now()
     const id = setInterval(() => {
-      const pending = pendingLiveRef.current
-      pendingLiveRef.current = emptyLivePending()
-      const { ce, pe, futures } = pending
-      if (ce.length) setLiveCePoints((prev) => mergeLiveOptionTicks(prev, ce, liveIvRef.current.ce))
-      if (pe.length) setLivePePoints((prev) => mergeLiveOptionTicks(prev, pe, liveIvRef.current.pe))
-      if (futures.length) setLiveFuturesPoints((prev) => mergeLiveFuturesTicks(prev, futures))
-      if (ce.length || pe.length) {
-        let newest = 0
-        for (const t of ce) newest = Math.max(newest, new Date(t.time).getTime() || 0)
-        for (const t of pe) newest = Math.max(newest, new Date(t.time).getTime() || 0)
-        setLatestLiveMs((prev) => Math.max(prev, newest))
-      }
       if (lastTickAtRef.current != null) setLastTickAtMs(lastTickAtRef.current)
       setFeedLag(summarizeFeedLag(feedLagRef.current))
       const now = Date.now()
       const silent = lastSpotAtRef.current != null && isIndianMarketHours(now) ? now - lastSpotAtRef.current : 0
       // Whole seconds only, and 0 below the threshold, so a healthy feed never re-renders for this.
       setSpotSilentMs(silent >= SPOT_SILENCE_WARN_MS ? Math.floor(silent / 1000) * 1000 : 0)
-    }, LIVE_FLUSH_MS)
+    }, LIVE_STATUS_INTERVAL_MS)
     return () => clearInterval(id)
   }, [isToday])
 
   const handleLiveReconnected = () => { if (isToday) load() }
-  const liveConnectionState = useOiReplayLiveFeed(handleSpotUpdate, handleOiReplayTick, handleFuturesTick, handleLiveReconnected, underlying, liveExpiryFlag)
+  const liveConnectionState = useOiReplayLiveFeed(handleSpotUpdate, handleOiReplayTicks, handleFuturesTicks, handleRestSnapshot, handleLiveReconnected, underlying, liveExpiryFlag)
 
   // A plain tick, unrelated to any live data - exists ONLY so feedStalled below re-evaluates on a
   // real clock instead of purely as a side effect of the next incoming tick (same reasoning as Live

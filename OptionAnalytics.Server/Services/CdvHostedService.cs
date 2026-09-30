@@ -106,6 +106,7 @@ public sealed class CdvHostedService : BackgroundService
     private readonly SpotFeedHostedService _spotFeed;
     private readonly DhanHistoricalDataService _historicalData;
     private readonly IHubContext<SpotHub> _hub;
+    private readonly LiveBroadcastBatcher _batcher;
     private readonly ILogger<CdvHostedService> _logger;
 
     /// <summary>Which state a live tick belongs to. Already state-valued rather than
@@ -185,8 +186,10 @@ public sealed class CdvHostedService : BackgroundService
         SpotFeedHostedService spotFeed,
         DhanHistoricalDataService historicalData,
         IHubContext<SpotHub> hub,
+        LiveBroadcastBatcher batcher,
         ILogger<CdvHostedService> logger)
     {
+        _batcher = batcher;
         _optionChainMaster = optionChainMaster;
         _chainQuotes = chainQuotes;
         _feedClient = feedClient;
@@ -1191,24 +1194,16 @@ public sealed class CdvHostedService : BackgroundService
         var spot = _spotFeed.States.TryGetValue(state.Underlying, out var spotState) ? spotState.LastPrice : 0;
         state.ApplyTick(tick, spot);
 
-        // Every tracked expiry updates its own state, but only the SELECTED one is broadcast: the
-        // snapshot names its underlying and not its expiry, so pushing all of them would interleave
-        // three different chains into one chart. The others are read on demand instead, by a caller
-        // that names the expiry it wants.
+        // Coalesced to one push per LiveBroadcastBatcher flush (the snapshot is cumulative state, so
+        // the newest one loses nothing) and built at flush time rather than per tick. The SELECTED
+        // expiry keeps its "cdvUpdate" event exactly as before; every other tracked expiry goes out
+        // as "cdvExpiryUpdate" instead, which names its Expiry - so a page pinned to a non-default
+        // expiry stays live too, and nothing listening to cdvUpdate can mix two chains together.
+        var group = $"u:{state.Underlying}";
         if (_selected.TryGetValue(state.Underlying, out var selected) && ReferenceEquals(selected, state))
-            _ = BroadcastAsync(state);
-    }
-
-    private async Task BroadcastAsync(CdvUnderlyingState state)
-    {
-        try
-        {
-            await _hub.Clients.Group($"u:{state.Underlying}").SendAsync("cdvUpdate", state.ToSnapshot());
-        }
-        catch (Exception ex)
-        {
-            _logger.LogDebug(ex, "Failed to broadcast a CDV update for {Underlying}.", state.Underlying);
-        }
+            _batcher.SetLatest(group, "cdvUpdate", "selected", state.ToSnapshot);
+        else if (state.Expiry is { } expiry)
+            _batcher.SetLatest(group, "cdvExpiryUpdate", expiry.ToString("yyyy-MM-dd"), state.ToSnapshot);
     }
 
     /// <summary>Fires on every CdvUnderlyingState the moment its aggregate CE/PE bar closes - see

@@ -201,6 +201,47 @@ function appendOrReplaceLast(points, point) {
   return [...points, point]
 }
 
+// The strike picker's premium/OI come from Dhan's option-chain snapshot, which the server itself only
+// refreshes this often - polling it faster would gain nothing.
+const CHAIN_REFRESH_MS = 30_000
+
+// Folds a FINISHED live bar into a REST-loaded series: replaces the series' own last bar when it's
+// the same minute (REST includes the then-forming bar), appends when newer, ignores anything older.
+// Without this the Dashboard's series only ever held what REST returned at page load, with just the
+// single currently-forming bar spliced on top - every minute that closed after load vanished, so a
+// chart open since 9:30 jumped straight from 9:30 to "now", and the EMA badges (which read the
+// closed-bar series) never saw a new bar at all.
+function appendClosedBar(series, bar) {
+  if (!bar) return series
+  const t = Date.parse(bar.time)
+  const last = series[series.length - 1]
+  const lastT = last ? Date.parse(last.time) : -Infinity
+  if (t === lastT) return [...series.slice(0, -1), bar]
+  if (t > lastT) return [...series, bar]
+  return series
+}
+
+// Tracks one live stream's forming bar and returns the PREVIOUS one the moment a new minute starts
+// (i.e. the bar that just closed), or null. `key` identifies what the bars belong to (a strike) - a
+// change of key drops the tracked bar instead of handing a different contract's bar back as "closed".
+function takeClosedBar(tracker, key, bar) {
+  const previous = tracker.key === key ? tracker.bar : null
+  tracker.key = key
+  tracker.bar = bar ?? null
+  return previous && bar && previous.time !== bar.time ? previous : null
+}
+
+// One strike's live-forming premium bar out of a CDV snapshot - any tracked strike (strikeBars),
+// falling back to the ATM pair for a server that predates strikeBars. Null when that strike isn't
+// tracked live (a pinned strike far from ATM), in which case its chart refreshes per bar instead.
+function strikeLiveBar(snapshot, strike, isCall) {
+  if (!snapshot || strike == null) return null
+  const tracked = snapshot.strikeBars?.find((b) => b.isCall === isCall && b.strike === strike)
+  if (tracked) return tracked.bar
+  if (strike !== snapshot.atmStrike) return null
+  return (isCall ? snapshot.atmCeCurrentBar : snapshot.atmPeCurrentBar) ?? null
+}
+
 function mergeLiveBar(bars, liveBar) {
   if (!liveBar) return bars
   return [...bars.filter((b) => b.time !== liveBar.time), liveBar].sort((a, b) => a.time - b.time)
@@ -401,7 +442,10 @@ function useHub(onSpotUpdate, onCdvUpdate, onConfluenceAlert, onReconnected, onC
     connectionRef.current = connection
 
     connection.on('spotUpdate', (snapshot) => spotHandlerRef.current(snapshot))
-    connection.on('cdvUpdate', (snapshot) => cdvHandlerRef.current(snapshot))
+    connection.on('cdvUpdate', (snapshot) => cdvHandlerRef.current(snapshot, false))
+    // Every NON-selected tracked expiry's snapshot, naming its own expiry - what keeps a pinned
+    // expiry live instead of polled (see CdvHostedService.OnTick).
+    connection.on('cdvExpiryUpdate', (snapshot) => cdvHandlerRef.current(snapshot, true))
     connection.on('confluenceAlert', (alert) => alertHandlerRef.current(alert))
     // Pushed the instant the aggregate CDV bar closes - see CdvHostedService.OnAggregateBarClosed.
     // Lets the CDV lookback table append this point instead of re-fetching GET .../lookback.
@@ -1145,6 +1189,7 @@ function DashboardPage() {
   // a pinned strike goes to the per-strike endpoint instead, which also covers strikes this app
   // never subscribed to (it fetches their history from Dhan on demand).
   const fetchAtmAndObv = (underlying, cancelledRef, strike = selectedStrike) => {
+    optionCandlesStrikeRef.current = strike === ATM_STRIKE ? (cdvSnapshot?.atmStrike ?? null) : strike
     const url = (type) => (strike === ATM_STRIKE
       ? withExpiry(`/api/cdv/${underlying}/atm-${type.toLowerCase()}/candles`, expiryParam)
       : withExpiry(`/api/cdv/${underlying}/option/candles?strike=${strike}&type=${type}`, expiryParam))
@@ -1227,14 +1272,18 @@ function DashboardPage() {
 
   // The strike picker's own list. Refreshed when the ATM rolls too, since it is centred on ATM and
   // carries live premium/OI that goes stale.
+  // Also refreshed every CHAIN_REFRESH_MS so its premium/OI don't sit at whatever they were when the
+  // ATM last rolled.
   useEffect(() => {
     if (!selected) return
     const cancelledRef = { cancelled: false }
-    fetch(withExpiry(`/api/cdv/${selected}/chain`, expiryParam))
+    const load = () => fetch(withExpiry(`/api/cdv/${selected}/chain`, expiryParam))
       .then((r) => r.json())
       .then((data) => { if (!cancelledRef.cancelled) setStrikeChain(data) })
       .catch((err) => console.error('Failed to load the option chain:', err))
-    return () => { cancelledRef.cancelled = true }
+    load()
+    const id = setInterval(load, CHAIN_REFRESH_MS)
+    return () => { cancelledRef.cancelled = true; clearInterval(id) }
   }, [selected, expiryParam, cdvSnapshot?.atmStrike])
 
   // A strike number means nothing across underlyings (a NIFTY strike is not a BANKNIFTY one), so
@@ -1260,23 +1309,47 @@ function DashboardPage() {
     fetchAllData(selected, { cancelled: false }).finally(() => setRefreshing(false))
   }
 
+  // The forming bar each live stream last sent - see takeClosedBar. Kept across renders in a ref since
+  // it's bookkeeping for the handlers below, not something any render reads.
+  const liveTrackersRef = useRef({ spot: {}, cdv: {}, ce: {}, pe: {} })
+  // Which strike atmCeCandles/atmPeCandles were last fetched for - live closed bars are only folded
+  // in while they belong to that same contract (an ATM roll refetches, and until it lands the old
+  // contract's candles must not get the new one's bars appended).
+  const optionCandlesStrikeRef = useRef(null)
+
   useHub(
     (incoming) => {
       if (incoming.underlying !== selected) return
       setSnapshot(incoming)
+      const closedSpot = takeClosedBar(liveTrackersRef.current.spot, incoming.underlying, incoming.currentBar)
+      if (closedSpot) setCandles((prev) => appendClosedBar(prev, closedSpot))
       // null before the day's first traded volume (see SpotSnapshot's own doc comment) - nothing to
       // plot yet, not a zero.
       if (incoming.vwap != null && incoming.currentBar)
         setVwapSeries((prev) => appendOrReplaceLast(prev, { time: toChartTime(incoming.currentBar.time), value: incoming.vwap }))
     },
-    (incoming) => {
+    (incoming, isExpiryUpdate) => {
       if (incoming.underlying !== selected) return
-      // Only the server's SELECTED expiry is broadcast, and the snapshot does not name which expiry
-      // it is. While this page is pinned to a different one, that push describes a different option
-      // chain entirely - taking it would paint next month's CDV onto this month's chart. The polling
-      // effects below keep a pinned view current instead.
-      if (expiryParam) return
+      // cdvUpdate is always the server's own selected expiry; cdvExpiryUpdate carries every other
+      // tracked one. Following the server: take cdvUpdate only. Pinned: take whichever push names
+      // the pinned expiry (that can be cdvUpdate too, when the pin happens to be the default).
+      const wanted = expiryParam ? incoming.expiry === expiryParam : !isExpiryUpdate
+      if (!wanted) return
       setCdvSnapshot(incoming)
+
+      const trackers = liveTrackersRef.current
+      const chainKey = `${incoming.underlying}:${incoming.expiry}`
+      const closedCdv = takeClosedBar(trackers.cdv, chainKey, incoming.currentBar)
+      if (closedCdv) setCdvSeries((prev) => appendClosedBar(prev, closedCdv))
+
+      const charted = selectedStrike === ATM_STRIKE ? incoming.atmStrike : selectedStrike
+      const key = `${chainKey}:${charted}`
+      const closedCe = takeClosedBar(trackers.ce, key, strikeLiveBar(incoming, charted, true))
+      const closedPe = takeClosedBar(trackers.pe, key, strikeLiveBar(incoming, charted, false))
+      if (charted != null && optionCandlesStrikeRef.current === charted) {
+        if (closedCe) setAtmCeCandles((prev) => appendClosedBar(prev, closedCe))
+        if (closedPe) setAtmPeCandles((prev) => appendClosedBar(prev, closedPe))
+      }
     },
     (alert) => {
       setAlerts((prev) => [alert, ...prev].slice(0, 50))
@@ -1345,9 +1418,9 @@ function DashboardPage() {
   const step = snapshot?.step
   const rounded = snapshot?.roundedPrice ?? null
 
-  // The live current bar in the CDV snapshot belongs to the ATM contract specifically, so it may
-  // only be spliced onto these charts while they ARE the ATM contract - splicing it onto a pinned
-  // strike would graft one contract's forming bar onto another contract's series.
+  // The forming bar spliced onto the two premium charts is always the CHARTED strike's own (see
+  // strikeLiveBar) - so a pinned strike ticks live too, and one contract's bar is never grafted onto
+  // another contract's series.
   const chartedStrike = selectedStrike === ATM_STRIKE ? (cdvSnapshot?.atmStrike ?? null) : selectedStrike
   const showsAtmContract = chartedStrike != null && chartedStrike === cdvSnapshot?.atmStrike
 
@@ -1360,8 +1433,8 @@ function DashboardPage() {
   const trimmedAtmPeCandles = useMemo(() => trimToRecentDays(atmPeCandles, daysToShow), [atmPeCandles, daysToShow])
 
   const spotBars = useAggregatedCandles(trimmedCandles, snapshot?.currentBar, timeframe)
-  const atmCeBars = useAggregatedCandles(trimmedAtmCeCandles, showsAtmContract ? cdvSnapshot?.atmCeCurrentBar : null, timeframe)
-  const atmPeBars = useAggregatedCandles(trimmedAtmPeCandles, showsAtmContract ? cdvSnapshot?.atmPeCurrentBar : null, timeframe)
+  const atmCeBars = useAggregatedCandles(trimmedAtmCeCandles, strikeLiveBar(cdvSnapshot, chartedStrike, true), timeframe)
+  const atmPeBars = useAggregatedCandles(trimmedAtmPeCandles, strikeLiveBar(cdvSnapshot, chartedStrike, false), timeframe)
 
   // Same three series with no live bar merged in - the badge (unlike the chart itself, which
   // still renders spotBars/atmCeBars/atmPeBars with the live candle) only ever reads a closed,

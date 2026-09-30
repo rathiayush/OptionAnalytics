@@ -164,6 +164,9 @@ export function useOiLiveHub(onSpotUpdate, onOiReplayTick, onReconnected, onCdvU
     const newGroups = [
       underlying ? `u:${underlying}` : null,
       underlying && expiryFlag ? `c:${underlying}:${expiryFlag}` : null,
+      // The raw, one-message-per-Dhan-tick "oiReplayTick" tape lives on its own group - charts get
+      // the coalesced "oiReplayTicks" on c: instead (see LiveBroadcastBatcher).
+      underlying && expiryFlag ? `t:${underlying}:${expiryFlag}` : null,
     ].filter(Boolean)
     syncSignalRGroups(connectionRef.current, groupsRef.current, newGroups)
     groupsRef.current = newGroups
