@@ -502,7 +502,7 @@ const TOTAL_OI_LOOKBACK_TIMEFRAME_OPTIONS = [
 function renderOiLookbackDelta(v) {
   if (v == null) return <Text type="secondary">—</Text>
   const color = v > 0 ? UP_COLOR : v < 0 ? DOWN_COLOR : undefined
-  return <Text style={{ color }}>{v > 0 ? '+' : ''}{v.toLocaleString()}</Text>
+  return <Text style={{ color }} title={`${v > 0 ? '+' : ''}${v.toLocaleString()}`}>{formatOiMillions(v, { signed: true })}</Text>
 }
 
 function renderOiLookbackPercent(v) {
@@ -978,7 +978,9 @@ function StrikeOiDrilldownChart({ ceSeries, peSeries, mode, dayKey, height = 320
       rightPriceScale: { borderColor: BORDER_COLOR },
       timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter },
       crosshair: { mode: CrosshairMode.Normal },
-      localization: { timeFormatter: istTimeFormatter },
+      // OI in millions on the axis and crosshair (5.96M, not 5962385.00). The per-minute change
+      // chart keeps a third decimal - a single minute's change is often well under 0.01M.
+      localization: { timeFormatter: istTimeFormatter, priceFormatter: (v) => formatOiMillionsAxis(v, mode === 'change') },
     })
     chartRef.current = chart
     if (mode === 'total' || mode === 'sinceOpen') {
@@ -2087,6 +2089,12 @@ function OiChange({ value }) {
 // signed=true prefixes a delta with +/- (a "change" reads oddly without a sign); an absolute level
 // never needs one. withUnit=false drops the trailing "M" for a context that already labels the unit
 // itself (an axis/column header, most concretely).
+function formatOiMillionsAxis(v, precise) {
+  if (!Number.isFinite(v)) return ''
+  const millions = v / 1_000_000
+  return `${millions > 0 && precise ? '+' : ''}${millions.toFixed(precise ? 3 : 2)}M`
+}
+
 function formatOiMillions(n, { signed = false, withUnit = true } = {}) {
   if (n == null) return '—'
   const millions = n / 1_000_000
@@ -3830,6 +3838,19 @@ export default function OiReplayPage() {
                         <Tag color={liveConnectionState === 'connected' ? 'success' : liveConnectionState === 'reconnecting' ? 'warning' : liveConnectionState === 'connecting' ? 'processing' : 'error'}>
                           {liveConnectionState === 'connected' ? '● LIVE' : liveConnectionState === 'reconnecting' ? '● RECONNECTING' : liveConnectionState === 'connecting' ? '● CONNECTING' : '● OFFLINE'}
                         </Tag>
+                      </Tooltip>
+                    )}
+                    {ladderRows.length > 0 && (
+                      // Chain-wide total OI, live, right where the trade is punched - same totals the
+                      // Snapshot card shows, with each side's change since the open. Red CE / green PE
+                      // by this page's option-selling OI convention (see StrikeOiDrilldownChart).
+                      <Tooltip title="Total open interest across every tracked strike, live, with the change since today's open.">
+                        <Text style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
+                          <span style={{ color: DOWN_COLOR }}>CE {formatOiMillions(totalCeOi)}{dayOiSummary ? ` (${formatOiMillions(dayOiSummary.ceDayChange, { signed: true })})` : ''}</span>
+                          <Text type="secondary" style={{ fontSize: 11 }}>{' · '}</Text>
+                          <span style={{ color: UP_COLOR }}>PE {formatOiMillions(totalPeOi)}{dayOiSummary ? ` (${formatOiMillions(dayOiSummary.peDayChange, { signed: true })})` : ''}</span>
+                          {pcr != null && <Text type="secondary" style={{ fontSize: 11 }}>{` · PCR ${pcr.toFixed(2)}`}</Text>}
+                        </Text>
                       </Tooltip>
                     )}
                     {paperTotalPnl !== 0 || paperOpenCount > 0 ? (
