@@ -424,6 +424,15 @@ public sealed class OiReplayLiveFeedService : BackgroundService
         if (!_legsBySecurityId.TryGetValue(tick.SecurityId, out var legsByFlag) || !(tick.LastPrice > 0 || tick.OpenInterest > 0))
             return;
 
+        // `time` is when this reading was OBSERVED, not Dhan's own ExchangeTimestamp - that field is
+        // the contract's LAST TRADE time, which for a quiet strike can be minutes old while its OI,
+        // depth and bid/ask keep updating (and every periodic re-subscribe replays each leg's snapshot
+        // stamped with that same old trade time). Stamping with it filed fresh OI into long-past
+        // buckets and left the current one empty - the scattered live heatmap. The trade time is still
+        // forwarded as lastTradeTime for anything that genuinely wants it.
+        var observedAt = DateTimeOffset.UtcNow.ToOffset(IstClock.Offset);
+        var lastTradeTime = tick.ExchangeTimestamp.ToOffset(IstClock.Offset);
+
         foreach (var leg in legsByFlag.Values)
         {
             var payload = new
@@ -434,14 +443,10 @@ public sealed class OiReplayLiveFeedService : BackgroundService
                 side = leg.IsCall ? "CE" : "PE",
                 price = tick.LastPrice,
                 openInterest = tick.OpenInterest,
-                // ExchangeTimestamp is already the correct absolute instant (DhanTickPacketParser's
-                // own IstOffset correction sees to that) - re-offsetting it to +05:30 here only
-                // changes how it's ANNOTATED on the wire, not what instant it represents (every
-                // consumer parses via new Date()/DateTimeOffset, which resolve to the identical
-                // absolute instant regardless of which offset the string carries). Done purely so a
-                // raw SignalR frame inspected directly (browser devtools, a saved WS capture) reads
-                // as IST instead of requiring a +5:30 mental conversion.
-                time = tick.ExchangeTimestamp.ToOffset(IstClock.Offset),
+                // +05:30 offset is annotation only (same absolute instant) - it just makes a raw
+                // SignalR frame read as IST in devtools.
+                time = observedAt,
+                lastTradeTime,
                 // Everything else Dhan's own Full packet already carries for this leg (SpotTick
                 // already parses all of it - see its own doc comment) - previously silently dropped
                 // here rather than forwarded, per the user's own "add whatever is coming from Dhan's
@@ -469,8 +474,9 @@ public sealed class OiReplayLiveFeedService : BackgroundService
                 price = tick.LastPrice,
                 openInterest = tick.OpenInterest,
                 volume = tick.Volume,
-                // Same wire-annotation-only conversion as the options tick payload above.
-                time = tick.ExchangeTimestamp.ToOffset(IstClock.Offset),
+                // Observed-at, same reasoning as the options payload above.
+                time = observedAt,
+                lastTradeTime,
             };
             // Futures has no expiryFlag concept (see FuturesUnderlyings' own doc comment) - the
             // plain underlying group, same one spotUpdate/confluenceAlert/cdvUpdate use.
