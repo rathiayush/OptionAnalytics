@@ -3,35 +3,49 @@ using OptionAnalytics.Server.Hubs;
 
 namespace OptionAnalytics.Server.Services;
 
+/// <summary>An accumulated live entry that knows how to fold an OLDER entry for the same key into
+/// itself (keep the older open, widen high/low) - so skipping sends never loses a price extreme.</summary>
+public interface ILiveMergeable
+{
+    ILiveMergeable MergeAfter(ILiveMergeable older);
+}
+
 /// <summary>
-/// Coalesces high-frequency live pushes and sends them to SignalR on a fixed cadence
-/// (FlushInterval) instead of once per Dhan tick. Dhan delivers a Full packet for every change on
-/// every subscribed strike - 100+ a second across a strike band - and pushing each one as its own
-/// SignalR message made every browser parse and apply each one individually, which is what let a
-/// page fall behind the feed. Here every tick still updates the pending state immediately; the
-/// browser just receives the result at most once per FlushInterval per (group, event), so a page
-/// is never more than ~FlushInterval behind and never has more work than it can keep up with.
+/// Delivers every high-frequency live push (spot, option legs, futures, CDV) as CONFLATED state:
+/// each browser only ever gets the LATEST data, never a queue of stale updates.
 ///
-/// Two shapes:
-///  - SetLatest: only the newest value matters (a snapshot of cumulative state, e.g. CDV). The
-///    factory runs at FLUSH time, not per tick, so building the snapshot costs nothing extra on the
-///    Dhan receive thread no matter how fast ticks arrive.
-///  - Accumulate: several independent keys per message (one entry per option leg), each folded with
-///    a caller-supplied merge so nothing a coarser cadence would lose (a price's high/low inside the
-///    window) is dropped. Sent as one array per (group, event).
+/// Why: Dhan delivers 100+ ticks a second. Pushing each one straight to every browser meant a
+/// phone on a weak connection (or a busy page) fell behind, and because the server kept writing,
+/// the backlog sat in network buffers - the screen then showed data that was 10s, 20s, a minute
+/// old, and got worse the longer the session ran.
+///
+/// How (the standard market-data "conflation" approach):
+///  1. Ticks update pending state immediately (SetLatest / Accumulate) - no network work per tick.
+///  2. Every FlushInterval that state is folded into each subscribed connection's own outbox, where
+///     newer values simply replace older ones (merged, for accumulated entries).
+///  3. A connection is sent its outbox as one "liveBatch" message only once it has ACKNOWLEDGED the
+///     previous one (SpotHub.AckLive, which the browser calls after applying it). A slow connection
+///     therefore just skips intermediate states and gets the newest picture next time - at most one
+///     batch is ever in flight, so lag cannot build up anywhere between here and the screen. AckTimeout
+///     keeps a connection that lost an ack (or an older page that never sends one) from stalling.
 /// </summary>
 public sealed class LiveBroadcastBatcher : BackgroundService
 {
     public static readonly TimeSpan FlushInterval = TimeSpan.FromMilliseconds(300);
+    public static readonly TimeSpan AckTimeout = TimeSpan.FromSeconds(5);
 
-    private readonly IHubContext<SpotHub> _hub;
+    private readonly IHubContext<SpotHub>? _hub;
     private readonly ILogger<LiveBroadcastBatcher> _logger;
     private readonly object _lock = new();
 
+    // Pending since the last flush, per group.
     private Dictionary<(string Group, string Event, string Key), Func<object>> _latest = new();
-    private Dictionary<(string Group, string Event), Dictionary<string, object>> _accumulated = new();
+    private Dictionary<(string Group, string Event), Dictionary<string, ILiveMergeable>> _accumulated = new();
 
-    public LiveBroadcastBatcher(IHubContext<SpotHub> hub, ILogger<LiveBroadcastBatcher> logger)
+    private readonly Dictionary<string, Outbox> _outboxes = new();
+    private readonly Dictionary<string, HashSet<string>> _members = new();
+
+    public LiveBroadcastBatcher(IHubContext<SpotHub>? hub, ILogger<LiveBroadcastBatcher> logger)
     {
         _hub = hub;
         _logger = logger;
@@ -42,40 +56,126 @@ public sealed class LiveBroadcastBatcher : BackgroundService
         lock (_lock) _latest[(group, eventName, key)] = payloadFactory;
     }
 
-    public void Accumulate<T>(string group, string eventName, string key, Func<T?, T> merge) where T : class
+    public void Accumulate(string group, string eventName, string key, ILiveMergeable entry)
     {
         lock (_lock)
         {
             if (!_accumulated.TryGetValue((group, eventName), out var entries))
-                _accumulated[(group, eventName)] = entries = new Dictionary<string, object>();
-            entries[key] = merge(entries.TryGetValue(key, out var existing) ? existing as T : null);
+                _accumulated[(group, eventName)] = entries = new Dictionary<string, ILiveMergeable>();
+            entries[key] = entries.TryGetValue(key, out var older) ? entry.MergeAfter(older) : entry;
         }
     }
 
-    /// <summary>Everything pending, cleared - separated from the send so a test can drive it
-    /// without SignalR or a timer.</summary>
-    internal IReadOnlyList<(string Group, string Event, object Payload)> Drain()
+    /// <summary>Whether any connection has joined <paramref name="group"/> - lets a producer skip
+    /// building a payload nobody will receive.</summary>
+    public bool HasMembers(string group)
     {
-        Dictionary<(string Group, string Event, string Key), Func<object>> latest;
-        Dictionary<(string Group, string Event), Dictionary<string, object>> accumulated;
+        lock (_lock) return _members.ContainsKey(group);
+    }
+
+    public void Join(string connectionId, string group)
+    {
         lock (_lock)
         {
-            if (_latest.Count == 0 && _accumulated.Count == 0) return Array.Empty<(string, string, object)>();
+            OutboxFor(connectionId).Groups.Add(group);
+            if (!_members.TryGetValue(group, out var members)) _members[group] = members = new HashSet<string>();
+            members.Add(connectionId);
+        }
+    }
+
+    public void Leave(string connectionId, string group)
+    {
+        lock (_lock)
+        {
+            if (_outboxes.TryGetValue(connectionId, out var outbox)) outbox.Groups.Remove(group);
+            if (_members.TryGetValue(group, out var members) && members.Remove(connectionId) && members.Count == 0) _members.Remove(group);
+        }
+    }
+
+    public void Disconnected(string connectionId)
+    {
+        lock (_lock)
+        {
+            if (!_outboxes.Remove(connectionId, out var outbox)) return;
+            foreach (var group in outbox.Groups)
+                if (_members.TryGetValue(group, out var members) && members.Remove(connectionId) && members.Count == 0) _members.Remove(group);
+        }
+    }
+
+    /// <summary>The browser has applied batch <paramref name="sequence"/> - it may be sent the next one.
+    /// An ack for anything but the batch currently awaited (a stale or duplicate ack) is ignored.</summary>
+    public void Ack(string connectionId, long sequence)
+    {
+        lock (_lock)
+        {
+            if (_outboxes.TryGetValue(connectionId, out var outbox) && outbox.AwaitingSequence == sequence)
+                outbox.AwaitingSequence = null;
+        }
+    }
+
+    /// <summary>One flush: fold everything pending into each subscribed connection's outbox, then take
+    /// the batches for every connection that is free to receive one. Separate from the timer and
+    /// SignalR so a test can drive it directly.</summary>
+    internal IReadOnlyList<(string ConnectionId, LiveBatch Batch)> Flush(DateTimeOffset now)
+    {
+        Dictionary<(string Group, string Event, string Key), Func<object>> latest;
+        Dictionary<(string Group, string Event), Dictionary<string, ILiveMergeable>> accumulated;
+        lock (_lock)
+        {
             latest = _latest;
             accumulated = _accumulated;
             _latest = new();
             _accumulated = new();
         }
 
-        var messages = new List<(string, string, object)>(latest.Count + accumulated.Count);
-        foreach (var ((group, eventName, _), factory) in latest)
+        // Payloads are built outside the lock - the factories read other services' state.
+        var built = new List<((string Group, string Event, string Key) Id, object Payload)>(latest.Count);
+        foreach (var (id, factory) in latest)
         {
-            try { messages.Add((group, eventName, factory())); }
-            catch (Exception ex) { _logger.LogDebug(ex, "Live broadcast: building a {Event} payload failed.", eventName); }
+            try { built.Add((id, factory())); }
+            catch (Exception ex) { _logger.LogDebug(ex, "Live broadcast: building a {Event} payload failed.", id.Event); }
         }
-        foreach (var ((group, eventName), entries) in accumulated)
-            messages.Add((group, eventName, entries.Values.ToList()));
-        return messages;
+
+        var ready = new List<(string, LiveBatch)>();
+        lock (_lock)
+        {
+            foreach (var (id, payload) in built)
+            {
+                if (!_members.TryGetValue(id.Group, out var members)) continue;
+                foreach (var connectionId in members) _outboxes[connectionId].Latest[id] = payload;
+            }
+
+            foreach (var ((group, eventName), entries) in accumulated)
+            {
+                if (!_members.TryGetValue(group, out var members)) continue;
+                foreach (var connectionId in members)
+                {
+                    var pending = _outboxes[connectionId].Accumulated;
+                    if (!pending.TryGetValue((group, eventName), out var target))
+                        pending[(group, eventName)] = target = new Dictionary<string, ILiveMergeable>();
+                    foreach (var (key, entry) in entries)
+                        target[key] = target.TryGetValue(key, out var older) ? entry.MergeAfter(older) : entry;
+                }
+            }
+
+            foreach (var (connectionId, outbox) in _outboxes)
+            {
+                if (outbox.Latest.Count == 0 && outbox.Accumulated.Count == 0) continue;
+                if (outbox.AwaitingSequence is not null && now - outbox.SentAt < AckTimeout) continue;
+
+                var items = new List<LiveBatchItem>(outbox.Latest.Count + outbox.Accumulated.Count);
+                foreach (var ((_, eventName, _), payload) in outbox.Latest) items.Add(new LiveBatchItem(eventName, payload));
+                foreach (var ((_, eventName), entries) in outbox.Accumulated) items.Add(new LiveBatchItem(eventName, entries.Values.Cast<object>().ToList()));
+                outbox.Latest.Clear();
+                outbox.Accumulated.Clear();
+
+                var sequence = ++outbox.Sequence;
+                outbox.AwaitingSequence = sequence;
+                outbox.SentAt = now;
+                ready.Add((connectionId, new LiveBatch(sequence, now, items)));
+            }
+        }
+        return ready;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -83,26 +183,55 @@ public sealed class LiveBroadcastBatcher : BackgroundService
         using var timer = new PeriodicTimer(FlushInterval);
         try
         {
-            // Awaited before the next flush on purpose: a slow client backs this loop up, and
-            // everything that ticks meanwhile simply coalesces into the next flush (latest wins)
-            // instead of piling up as an unbounded queue of stale messages.
             while (await timer.WaitForNextTickAsync(stoppingToken))
-                await Task.WhenAll(Drain().Select(m => SendAsync(m.Group, m.Event, m.Payload, stoppingToken)));
+            {
+                // Not awaited per connection: each connection has at most one batch in flight (the
+                // ack gate above), so a slow one can never hold up anyone else's delivery.
+                foreach (var (connectionId, batch) in Flush(DateTimeOffset.UtcNow))
+                    _ = SendAsync(connectionId, batch);
+            }
         }
         catch (OperationCanceledException)
         {
         }
     }
 
-    private async Task SendAsync(string group, string eventName, object payload, CancellationToken cancellationToken)
+    private async Task SendAsync(string connectionId, LiveBatch batch)
     {
         try
         {
-            await _hub.Clients.Group(group).SendAsync(eventName, payload, cancellationToken);
+            await _hub!.Clients.Client(connectionId).SendAsync("liveBatch", batch);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex)
         {
-            _logger.LogDebug(ex, "Live broadcast: sending {Event} to {Group} failed.", eventName, group);
+            _logger.LogDebug(ex, "Live broadcast: sending a batch to {ConnectionId} failed.", connectionId);
         }
     }
+
+    private Outbox OutboxFor(string connectionId)
+    {
+        if (!_outboxes.TryGetValue(connectionId, out var outbox)) _outboxes[connectionId] = outbox = new Outbox();
+        return outbox;
+    }
+
+    private sealed class Outbox
+    {
+        public HashSet<string> Groups { get; } = new();
+        public Dictionary<(string Group, string Event, string Key), object> Latest { get; } = new();
+        public Dictionary<(string Group, string Event), Dictionary<string, ILiveMergeable>> Accumulated { get; } = new();
+        public long Sequence { get; set; }
+        public long? AwaitingSequence { get; set; }
+        public DateTimeOffset SentAt { get; set; }
+    }
 }
+
+/// <summary>What one connection receives per flush: every live event that changed since its last
+/// batch, newest values only. The browser acks Sequence once applied, and measures how far behind it
+/// is showing things from SentAtUtc (compared at paint time, so slow rendering counts too).</summary>
+public sealed record LiveBatch(long Sequence, DateTimeOffset SentAtUtc, IReadOnlyList<LiveBatchItem> Items);
+
+/// <summary>One event inside a batch - E is the event name the page already handles (spotUpdate,
+/// cdvUpdate, oiReplayTicks, ...), D its payload. Typed object (and accumulated entries listed as
+/// object) on purpose: System.Text.Json serializes object-typed values by their runtime type, where
+/// the ILiveMergeable interface type would serialize as an empty {}.</summary>
+public sealed record LiveBatchItem(string E, object D);

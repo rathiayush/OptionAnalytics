@@ -9,7 +9,7 @@ import {
   UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR,
   istTimeFormatter, istTimeWithSecondsFormatter, istTickMarkFormatter, toBar, toChartTime, fromChartTime, istDateKey, fmtDateOnly,
   NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, STORED_SHOW_VOLUME_PROFILE, usePersistedState,
-  syncSignalRGroups, joinAllSignalRGroups, useCardOrder, CardDragHandle,
+  syncSignalRGroups, joinAllSignalRGroups, useCardOrder, CardDragHandle, onLiveBatch, useFeedLag, FeedLagTag, FeedLagAlert, LiveSection,
 } from './shared.jsx'
 import { PremiumEmaChart, DraggableFloatingPanel, useFitContentAsDataGrows } from './oiShared.jsx'
 
@@ -78,12 +78,14 @@ const RECONNECT_RETRY_POLICY = {
 // guards) via the SAME ref-read pattern used here, so a tick arriving while a historical (non-today)
 // day is loaded already safely no-ops - nothing about correctness depended on tearing the
 // connection itself down, only on gating what it's ALLOWED to do once a tick arrives.
-function useOiReplayLiveFeed(onSpotUpdate, onOiReplayTicks, onFuturesTicks, onRestSnapshot, onReconnected, underlying, expiryFlag) {
+function useOiReplayLiveFeed(onSpotUpdate, onOiReplayTicks, onFuturesTicks, onRestSnapshot, onReconnected, onPainted, underlying, expiryFlag) {
   const spotRef = useRef(onSpotUpdate)
   const tickRef = useRef(onOiReplayTicks)
   const futuresRef = useRef(onFuturesTicks)
   const restSnapshotRef = useRef(onRestSnapshot)
   const reconnectedRef = useRef(onReconnected)
+  const paintedRef = useRef(onPainted)
+  paintedRef.current = onPainted
   spotRef.current = onSpotUpdate
   tickRef.current = onOiReplayTicks
   futuresRef.current = onFuturesTicks
@@ -119,11 +121,13 @@ function useOiReplayLiveFeed(onSpotUpdate, onOiReplayTicks, onFuturesTicks, onRe
       .build()
     connectionRef.current = connection
 
-    connection.on('spotUpdate', (snapshot) => spotRef.current(snapshot))
-    // Option and futures ticks arrive already coalesced by the server (LiveBroadcastBatcher) - one
-    // array per ~300ms holding each leg's latest reading plus its high/low inside that window.
-    connection.on('oiReplayTicks', (ticks) => tickRef.current(ticks ?? []))
-    connection.on('futuresTicks', (ticks) => futuresRef.current?.(ticks ?? []))
+    // spotUpdate/oiReplayTicks/futuresTicks all arrive inside the conflated "liveBatch" (see
+    // onLiveBatch) - the newest state only, acknowledged after paint, so this page can't fall behind.
+    onLiveBatch(connection, {
+      spotUpdate: (snapshot) => spotRef.current(snapshot),
+      oiReplayTicks: (ticks) => tickRef.current(ticks ?? []),
+      futuresTicks: (ticks) => futuresRef.current?.(ticks ?? []),
+    }, (sentAtMs, clockOffsetMs) => paintedRef.current?.(sentAtMs, clockOffsetMs))
     // Dhan's option-chain snapshot (every ~30-90s per expiry) - the only live source of IV, since
     // the websocket tick carries none.
     connection.on('oiRestSnapshot', (snapshot) => restSnapshotRef.current?.(snapshot))
@@ -289,44 +293,9 @@ function applyIvSnapshot(prev, ivByStrike) {
   return next ?? prev
 }
 
-// How far behind the page is running. This device's clock and the server's can disagree by
-// seconds, so raw (received - server time) isn't a delay by itself: the lowest lag seen in the last
-// few minutes is taken as "clock skew + network floor", and only the excess over it is reported -
-// which is exactly the part that grows when ticks queue up faster than the page can apply them.
-// "Last tick N seconds ago" could never catch that: a backed-up page still receives ticks, just late.
-const FEED_LAG_WINDOW_MS = 5 * 60_000
-const FEED_LAG_WARN_MS = 2_000
-const FEED_LAG_BAD_MS = 5_000
 // NSE indices tick about once a second in market hours - this much silence on spot alone is a
 // real stall even while option ticks keep the connection looking alive.
 const SPOT_SILENCE_WARN_MS = 20_000
-
-function createFeedLagTracker() {
-  return { windowStart: 0, windowMin: Infinity, prevWindowMin: Infinity, latest: null, peak: -Infinity }
-}
-
-function recordFeedLag(tracker, receivedAt, serverMs) {
-  if (!Number.isFinite(serverMs)) return
-  const lag = receivedAt - serverMs
-  if (receivedAt - tracker.windowStart > FEED_LAG_WINDOW_MS) {
-    tracker.prevWindowMin = tracker.windowMin
-    tracker.windowMin = Infinity
-    tracker.windowStart = receivedAt
-  }
-  tracker.windowMin = Math.min(tracker.windowMin, lag)
-  tracker.latest = lag
-  tracker.peak = Math.max(tracker.peak, lag)
-}
-
-// Worst excess lag since the previous summary, rounded to 0.1s so an unchanged reading doesn't
-// re-render the page.
-function summarizeFeedLag(tracker) {
-  if (tracker.latest == null) return null
-  const baseline = Math.min(tracker.windowMin, tracker.prevWindowMin)
-  const worst = Number.isFinite(tracker.peak) ? tracker.peak : tracker.latest
-  tracker.peak = -Infinity
-  return Math.round(Math.max(0, worst - baseline) / 100) * 100
-}
 
 function isIndianMarketHours(ms) {
   const ist = new Date(ms + 5.5 * 3600_000)
@@ -2173,6 +2142,9 @@ export default function OiReplayPage() {
   // dropTargetProps already returns its own conditional highlight `style` (see useCardOrder's own
   // doc comment) - merged here with the `order` CSS property that actually moves the block, rather
   // than each of the 9 call sites below re-deriving that merge by hand.
+  // See LiveSection - off-screen sections still re-render when this changes (layout, not data).
+  const sectionVersion = `${cardOrder.join(',')}|${visibleSections.join(',')}`
+
   const orderedDropProps = (id) => {
     const { style, ...handlers } = dropTargetProps(id)
     return { style: { order: cardOrder.indexOf(id), ...style }, ...handlers }
@@ -2204,7 +2176,6 @@ export default function OiReplayPage() {
   const [liveFuturesPoints, setLiveFuturesPoints] = useState([])
   const lastTickAtRef = useRef(null)
   const lastSpotAtRef = useRef(null)
-  const feedLagRef = useRef(createFeedLagTracker())
   // Newest server-observed tick time seen so far - see asOfMs below.
   const [latestLiveMs, setLatestLiveMs] = useState(0)
   const [spotSilentMs, setSpotSilentMs] = useState(0)
@@ -2282,6 +2253,7 @@ export default function OiReplayPage() {
 
   const canLoad = Boolean(underlying && date)
   const isToday = Boolean(date && date.format('YYYY-MM-DD') === istDateKey(new Date()))
+  const feedLag = useFeedLag(isToday)
 
   // Keeps today's own paper positions in storage as they change (punched, exited, SL/target hit) so
   // a page reload can restore them (see load()'s own read, and PAPER_POSITIONS_STORAGE_KEY's doc
@@ -2610,7 +2582,7 @@ export default function OiReplayPage() {
     const receivedAt = Date.now()
     lastTickAtRef.current = receivedAt
     lastSpotAtRef.current = receivedAt
-    recordFeedLag(feedLagRef.current, receivedAt, new Date(snapshot.lastUpdateUtc).getTime())
+    feedLag.recordSource(new Date(snapshot.timestampUtc).getTime(), snapshot.exchangeTimeUtc ? new Date(snapshot.exchangeTimeUtc).getTime() : null)
     const bar = toBar(snapshot.currentBar)
     setLiveBars((prev) => {
       if (prev.length > 0 && prev[prev.length - 1].time === bar.time) {
@@ -2646,7 +2618,6 @@ export default function OiReplayPage() {
     lastTickAtRef.current = receivedAt
     let newest = 0
     for (const tick of [...ce, ...pe]) newest = Math.max(newest, new Date(tick.time).getTime() || 0)
-    recordFeedLag(feedLagRef.current, receivedAt, newest)
     if (ce.length) setLiveCePoints((prev) => mergeLiveOptionTicks(prev, ce, liveIvRef.current.ce))
     if (pe.length) setLivePePoints((prev) => mergeLiveOptionTicks(prev, pe, liveIvRef.current.pe))
     setLatestLiveMs((prev) => Math.max(prev, newest))
@@ -2683,14 +2654,12 @@ export default function OiReplayPage() {
   }, [result])
 
   // Status only (no data is applied here any more): the "last tick", lag and spot-silence readouts.
-  const [feedLag, setFeedLag] = useState(null)
   useEffect(() => {
     if (!isToday) return
     // Counts from now, so spot that never ticks at all after the page opens is caught too.
     if (lastSpotAtRef.current == null) lastSpotAtRef.current = Date.now()
     const id = setInterval(() => {
       if (lastTickAtRef.current != null) setLastTickAtMs(lastTickAtRef.current)
-      setFeedLag(summarizeFeedLag(feedLagRef.current))
       const now = Date.now()
       const silent = lastSpotAtRef.current != null && isIndianMarketHours(now) ? now - lastSpotAtRef.current : 0
       // Whole seconds only, and 0 below the threshold, so a healthy feed never re-renders for this.
@@ -2700,7 +2669,7 @@ export default function OiReplayPage() {
   }, [isToday])
 
   const handleLiveReconnected = () => { if (isToday) load() }
-  const liveConnectionState = useOiReplayLiveFeed(handleSpotUpdate, handleOiReplayTicks, handleFuturesTicks, handleRestSnapshot, handleLiveReconnected, underlying, liveExpiryFlag)
+  const liveConnectionState = useOiReplayLiveFeed(handleSpotUpdate, handleOiReplayTicks, handleFuturesTicks, handleRestSnapshot, handleLiveReconnected, isToday ? feedLag.recordPainted : null, underlying, liveExpiryFlag)
 
   // A plain tick, unrelated to any live data - exists ONLY so feedStalled below re-evaluates on a
   // real clock instead of purely as a side effect of the next incoming tick (same reasoning as Live
@@ -3401,13 +3370,7 @@ export default function OiReplayPage() {
                         : '● Disconnected - not receiving live ticks'}
                 </Tag>
               )}
-              {isToday && liveConnectionState === 'connected' && feedLag != null && (
-                <Tooltip title="How far behind the server this page is applying ticks, above this device's usual clock offset. Should stay near 0 - if it climbs, the page is falling behind the feed.">
-                  <Tag color={feedLag >= FEED_LAG_BAD_MS ? 'error' : feedLag >= FEED_LAG_WARN_MS ? 'warning' : 'default'}>
-                    Delay {(feedLag / 1000).toFixed(1)}s
-                  </Tag>
-                </Tooltip>
-              )}
+              {isToday && liveConnectionState === 'connected' && <FeedLagTag delayMs={feedLag.delayMs} />}
               <Select
                 value={underlying} onChange={selectUnderlying} style={{ width: 130 }}
                 options={[{ value: 'NIFTY', label: 'NIFTY' }, { value: 'BANKNIFTY', label: 'BANKNIFTY' }, { value: 'SENSEX', label: 'SENSEX' }]}
@@ -3486,12 +3449,7 @@ export default function OiReplayPage() {
                 message={`${underlying} spot hasn't ticked for ${Math.round(spotSilentMs / 1000)}s during market hours - the spot chart is not live right now even though option ticks may still be arriving. The server re-subscribes a silent spot feed after 90s on its own.`}
               />
             )}
-            {isToday && liveConnectionState === 'connected' && feedLag != null && feedLag >= FEED_LAG_BAD_MS && (
-              <Alert
-                type="warning" showIcon
-                message={`This page is running ${(feedLag / 1000).toFixed(1)}s behind the live feed - ticks are arriving faster than this device is applying them. Hiding sections you aren't using lightens the load.`}
-              />
-            )}
+            {isToday && liveConnectionState === 'connected' && <FeedLagAlert delayMs={feedLag.delayMs} sourceDelayMs={feedLag.sourceDelayMs} />}
             {error && <Alert type="error" showIcon closable onClose={() => setError(null)} message={error} />}
           </Space>
         </Card>
@@ -3499,6 +3457,7 @@ export default function OiReplayPage() {
         {result && (
           <>
             {visibleSections.includes('topStats') && (
+              <LiveSection version={sectionVersion}>
               <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('topStats')} />Snapshot</Space>} {...orderedDropProps('topStats')}>
                 <Row gutter={24}>
                   <Col><Statistic title="Spot" value={currentBar?.close ?? '—'} precision={2} /></Col>
@@ -3510,9 +3469,11 @@ export default function OiReplayPage() {
                   <Col><Statistic title="Total PE OI (M)" value={formatOiMillions(totalPeOi, { withUnit: false })} valueStyle={{ color: UP_COLOR }} /></Col>
                 </Row>
               </Card>
+              </LiveSection>
             )}
 
             {visibleSections.includes('marketRead') && marketRead && (
+              <LiveSection version={sectionVersion}>
               <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('marketRead')} />Market Read</Space>} {...orderedDropProps('marketRead')}>
                 <Space direction="vertical" size={12} style={{ width: '100%' }}>
                   <Alert
@@ -3570,9 +3531,11 @@ export default function OiReplayPage() {
                   </Text>
                 </Space>
               </Card>
+              </LiveSection>
             )}
 
             {visibleSections.includes('dayOi') && dayOiSummary && (
+              <LiveSection version={sectionVersion}>
               <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('dayOi')} />Day OI Accumulation (since today's open)</Space>} {...orderedDropProps('dayOi')}>
                 <Space direction="vertical" size={12} style={{ width: '100%' }}>
                   <Alert
@@ -3676,9 +3639,11 @@ export default function OiReplayPage() {
                   </div>
                 </Space>
               </Card>
+              </LiveSection>
             )}
 
             {visibleSections.includes('oiHeatmap') && (
+              <LiveSection version={sectionVersion}>
               <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('oiHeatmap')} />OI change heatmap (all strikes)</Space>} {...orderedDropProps('oiHeatmap')}>
                 <Space direction="vertical" size={12} style={{ width: '100%' }}>
                   <Text type="secondary" style={{ fontSize: 12 }}>
@@ -3710,8 +3675,10 @@ export default function OiReplayPage() {
                   </div>
                 </Space>
               </Card>
+              </LiveSection>
             )}
 
+            <LiveSection version={sectionVersion}>
             <div {...orderedDropProps('spotAndEntry')}>
               <Space size={4} style={{ marginBottom: 4 }}>
                 <CardDragHandle {...dragHandleProps('spotAndEntry')} />
@@ -3926,8 +3893,10 @@ export default function OiReplayPage() {
               )}
               </Row>
             </div>
+            </LiveSection>
 
             {visibleSections.includes('optionPremium') && (
+              <LiveSection version={sectionVersion}>
               <Row gutter={[16, 16]} style={{ marginTop: 16 }} {...orderedDropProps('optionPremium')}>
                 <Col span={24} style={{ marginBottom: 8 }}>
                   <Space size={12} wrap>
@@ -3992,6 +3961,7 @@ export default function OiReplayPage() {
                   </Card>
                 </Col>
               </Row>
+              </LiveSection>
             )}
 
             <Row gutter={16} style={{ marginTop: 16 }} {...orderedDropProps('ladder')}>
@@ -4007,6 +3977,7 @@ export default function OiReplayPage() {
             </Row>
 
             {visibleSections.includes('liquidityMap') && (
+              <LiveSection version={sectionVersion}>
               <Row gutter={16} style={{ marginTop: 16 }} {...orderedDropProps('liquidityMap')}>
                 <Col span={24}>
                   <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('liquidityMap')} />Liquidity map (imbalance &amp; likely levels, whole band)</Space>}>
@@ -4014,9 +3985,11 @@ export default function OiReplayPage() {
                   </Card>
                 </Col>
               </Row>
+              </LiveSection>
             )}
 
             {visibleSections.includes('futures') && (
+              <LiveSection version={sectionVersion}>
               <Row gutter={16} style={{ marginTop: 16 }} {...orderedDropProps('futures')}>
                 <Col span={24}>
                   <Card
@@ -4102,6 +4075,7 @@ export default function OiReplayPage() {
                   </Card>
                 </Col>
               </Row>
+              </LiveSection>
             )}
           </>
         )}

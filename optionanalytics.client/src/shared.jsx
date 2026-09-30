@@ -1,5 +1,5 @@
-import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react'
-import { Button, Drawer, Menu, Select, Space, Tag, Typography } from 'antd'
+import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
+import { Alert, Button, Drawer, Menu, Select, Space, Tag, Tooltip, Typography } from 'antd'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { createChart, createSeriesMarkers, HistogramSeries, LineSeries, CrosshairMode, LineStyle, TickMarkType } from 'lightweight-charts'
 import * as signalR from '@microsoft/signalr'
@@ -58,6 +58,210 @@ export function syncSignalRGroups(connection, oldGroups, newGroups) {
 // socket).
 export function joinAllSignalRGroups(connection, groups) {
   for (const g of groups) connection.invoke('JoinGroup', g).catch((err) => console.error('Failed to join SignalR group', g, err))
+}
+
+// Live state (spot, option legs, futures, CDV) arrives as one "liveBatch" per ~300ms, CONFLATED per
+// browser on the server (see LiveBroadcastBatcher): each batch holds only the newest data, and the
+// next one is sent only after this page acknowledges the previous. So a slow phone or a busy page
+// skips straight to the latest picture instead of building up a queue of stale updates - the screen
+// can't drift 10s/20s/a minute behind. The ack goes after the browser has painted, so the server is
+// paced to what this device can actually show (a hidden tab stops acking and the server backs off
+// to its ack timeout until the tab is visible again).
+//
+// onPainted(sentAtMs) runs at that same post-paint moment with the server's send time, which is
+// what an honest "how far behind is the SCREEN" measure needs (receipt time alone misses slow
+// rendering).
+export function onLiveBatch(connection, handlers, onPainted) {
+  const clock = createServerClock(connection)
+  connection.on('liveBatch', (batch) => {
+    clock.syncIfDue()
+    for (const item of batch?.items ?? []) {
+      try { handlers[item.e]?.(item.d) } catch (err) { console.error(`Live update "${item.e}" failed:`, err) }
+    }
+    if (batch?.sequence == null) return
+    const afterPaint = () => {
+      onPainted?.(new Date(batch.sentAtUtc).getTime(), clock.offsetMs())
+      if (connection.state === signalR.HubConnectionState.Connected) connection.send('AckLive', batch.sequence).catch(() => {})
+    }
+    requestAnimationFrame(() => setTimeout(afterPaint, 0))
+  })
+}
+
+// This device's clock minus the server's, estimated NTP-style from a ServerTime round trip: assume the
+// reply was stamped halfway through, and trust the sample with the shortest round trip seen recently
+// (a busy page or slow link only ever makes a round trip LONGER, never shorter). Null until the first
+// sync lands. Re-synced every CLOCK_SYNC_INTERVAL_MS.
+const CLOCK_SYNC_INTERVAL_MS = 30_000
+const CLOCK_SAMPLE_MAX_AGE_MS = 5 * 60_000
+
+function createServerClock(connection) {
+  let best = null
+  let lastAttempt = 0
+  const sync = async () => {
+    const t0 = Date.now()
+    try {
+      const serverTime = await connection.invoke('ServerTime')
+      const t1 = Date.now()
+      const sample = { rtt: t1 - t0, offset: t0 + (t1 - t0) / 2 - new Date(serverTime).getTime(), at: t1 }
+      if (!best || sample.rtt <= best.rtt || t1 - best.at > CLOCK_SAMPLE_MAX_AGE_MS) best = sample
+    } catch {
+      // A server without ServerTime, or a dropped connection - the baseline measure still works.
+    }
+  }
+  return {
+    syncIfDue() {
+      const now = Date.now()
+      if (now - lastAttempt < CLOCK_SYNC_INTERVAL_MS) return
+      lastAttempt = now
+      if (connection.state === signalR.HubConnectionState.Connected) sync()
+    },
+    offsetMs: () => best?.offset ?? null,
+  }
+}
+
+// How far behind the market this page is running, split into the two legs that can lag:
+//  - delayMs: server -> this screen (network + rendering on this device), measured when a batch is
+//    PAINTED. With the server clock offset known (createServerClock) it's the true delay; before the
+//    first clock sync it falls back to the excess over the lowest lag seen recently (which cancels
+//    clock skew but can't see a constant delay).
+//  - sourceDelayMs: Dhan -> server (Dhan's own tick timestamp vs when the server received it), same
+//    excess-over-baseline measure - tells "our side is slow" apart from "Dhan's feed is slow".
+const FEED_LAG_WINDOW_MS = 5 * 60_000
+export const FEED_LAG_WARN_MS = 2_000
+export const FEED_LAG_BAD_MS = 5_000
+
+export function createFeedLagTracker() {
+  return { windowStart: 0, windowMin: Infinity, prevWindowMin: Infinity, latest: null, peak: -Infinity }
+}
+
+export function recordFeedLag(tracker, receivedAt, sentMs) {
+  if (!Number.isFinite(sentMs) || !Number.isFinite(receivedAt)) return
+  const lag = receivedAt - sentMs
+  if (receivedAt - tracker.windowStart > FEED_LAG_WINDOW_MS) {
+    tracker.prevWindowMin = tracker.windowMin
+    tracker.windowMin = Infinity
+    tracker.windowStart = receivedAt
+  }
+  tracker.windowMin = Math.min(tracker.windowMin, lag)
+  tracker.latest = lag
+  tracker.peak = Math.max(tracker.peak, lag)
+}
+
+// Worst excess lag since the previous summary, rounded to 0.1s so an unchanged reading doesn't
+// re-render the page.
+export function summarizeFeedLag(tracker) {
+  if (tracker.latest == null) return null
+  const baseline = Math.min(tracker.windowMin, tracker.prevWindowMin)
+  const worst = Number.isFinite(tracker.peak) ? tracker.peak : tracker.latest
+  tracker.peak = -Infinity
+  return Math.round(Math.max(0, worst - baseline) / 100) * 100
+}
+
+export function useFeedLag(active) {
+  const trackersRef = useRef({ link: createFeedLagTracker(), source: createFeedLagTracker(), absolute: { peak: -Infinity, latest: null } })
+  const [lag, setLag] = useState({ delayMs: null, sourceDelayMs: null })
+  useEffect(() => {
+    if (!active) return
+    const id = setInterval(() => {
+      const trackers = trackersRef.current
+      const relative = summarizeFeedLag(trackers.link)
+      const absolute = trackers.absolute
+      const worst = Number.isFinite(absolute.peak) ? absolute.peak : absolute.latest
+      absolute.peak = -Infinity
+      const delayMs = worst != null ? Math.round(Math.max(0, worst) / 100) * 100 : relative
+      const next = { delayMs, sourceDelayMs: summarizeFeedLag(trackers.source) }
+      setLag((prev) => (prev.delayMs === next.delayMs && prev.sourceDelayMs === next.sourceDelayMs ? prev : next))
+    }, 500)
+    return () => clearInterval(id)
+  }, [active])
+  // A batch the server sent at sentAtMs has just been painted. clockOffsetMs: this device's clock
+  // minus the server's, when known.
+  const recordPainted = useCallback((sentAtMs, clockOffsetMs) => {
+    const now = Date.now()
+    const trackers = trackersRef.current
+    recordFeedLag(trackers.link, now, sentAtMs)
+    if (clockOffsetMs != null && Number.isFinite(sentAtMs)) {
+      const lag = now - clockOffsetMs - sentAtMs
+      trackers.absolute.latest = lag
+      trackers.absolute.peak = Math.max(trackers.absolute.peak, lag)
+    }
+  }, [])
+  // Dhan stamped a tick at exchangeMs; the server received it at serverReceivedMs.
+  const recordSource = useCallback((serverReceivedMs, exchangeMs) => {
+    if (exchangeMs != null) recordFeedLag(trackersRef.current.source, serverReceivedMs, exchangeMs)
+  }, [])
+  return { ...lag, recordPainted, recordSource }
+}
+
+// Skips re-rendering a page section while it's scrolled off-screen, so a live update only pays for
+// what's actually visible - on a phone that's one or two cards, not the whole page. The moment the
+// section comes back into view (with a small margin, so it's already current by the time it's seen)
+// it renders once with the newest data. `version` forces a re-render even while hidden, for changes
+// that affect layout rather than data (card order, which sections are shown).
+//
+// display: contents keeps this wrapper out of the layout entirely, so the section's own root stays
+// the flex item its `order` style (card drag-reordering) applies to; the observer watches that root.
+const FrozenWhenHidden = memo(({ children }) => children, (prev, next) => next.frozen && prev.version === next.version)
+
+// What a live chart's view is doing right before its data is replaced: FOLLOWING the newest data
+// (then it should keep following it - the standard live-chart behaviour) or parked on a range the user
+// scrolled/zoomed back to (then that exact range is restored). Needed because setData() resets the
+// view: restoring the old time range unconditionally (what these charts used to do) pinned a live
+// chart to the window it opened with, so new points kept landing off its right edge unseen.
+export function captureChartView(chart, series) {
+  if (!chart || !series) return null
+  const timeScale = chart.timeScale()
+  const lastIndex = series.data().length - 1
+  const logical = timeScale.getVisibleLogicalRange()
+  return { followsLive: !logical || lastIndex < 0 || logical.to >= lastIndex - 0.5, range: timeScale.getVisibleRange() }
+}
+
+export function restoreChartView(chart, view) {
+  if (!chart || !view) return
+  const timeScale = chart.timeScale()
+  if (view.followsLive) timeScale.scrollToRealTime()
+  else if (view.range) {
+    try { timeScale.setVisibleRange(view.range) } catch { /* the range may no longer be covered - nothing to fight over */ }
+  }
+}
+
+export function LiveSection({ version, children }) {
+  const wrapperRef = useRef(null)
+  const [onScreen, setOnScreen] = useState(true)
+  useEffect(() => {
+    const target = wrapperRef.current?.firstElementChild
+    if (!target || typeof IntersectionObserver === 'undefined') return
+    const observer = new IntersectionObserver(([entry]) => setOnScreen(entry.isIntersecting), { rootMargin: '300px 0px' })
+    observer.observe(target)
+    return () => observer.disconnect()
+  }, [])
+  return (
+    <div ref={wrapperRef} style={{ display: 'contents' }}>
+      <FrozenWhenHidden frozen={!onScreen} version={version}>{children}</FrozenWhenHidden>
+    </div>
+  )
+}
+
+export function FeedLagTag({ delayMs }) {
+  if (delayMs == null) return null
+  return (
+    <Tooltip title="How far behind the server's live data this screen is, measured when it's painted. Stays well under a second normally - the server only ever sends the newest data, never a backlog, so a slow moment can't pile up.">
+      <Tag color={delayMs >= FEED_LAG_BAD_MS ? 'error' : delayMs >= FEED_LAG_WARN_MS ? 'warning' : 'default'}>
+        Delay {(delayMs / 1000).toFixed(1)}s
+      </Tag>
+    </Tooltip>
+  )
+}
+
+// Shown only when one leg is genuinely behind - says WHICH, since the fix is different for each.
+export function FeedLagAlert({ delayMs, sourceDelayMs }) {
+  if (sourceDelayMs != null && sourceDelayMs >= FEED_LAG_BAD_MS) {
+    return <Alert type="warning" showIcon message={`Dhan's own feed is running ${(sourceDelayMs / 1000).toFixed(1)}s behind right now - the delay is upstream of this app (Dhan -> server), not this screen.`} />
+  }
+  if (delayMs != null && delayMs >= FEED_LAG_BAD_MS) {
+    return <Alert type="warning" showIcon message={`This screen is ${(delayMs / 1000).toFixed(1)}s behind - the connection to the server is slow right now. It catches up to the latest data on its own as soon as the link recovers.`} />
+  }
+  return null
 }
 
 // Constants/components shared between App.jsx's DashboardPage and BacktestPage.jsx - kept in
@@ -684,7 +888,7 @@ export function CeVsPeChart({ ceSeries, peSeries, prevCeSeries = [], prevPeSerie
 
   useEffect(() => {
     if (!ceRef.current || !peRef.current || !prevCeRef.current || !prevPeRef.current) return
-    const preservedRange = hasFitRef.current ? chartRef.current?.timeScale().getVisibleRange() : null
+    const view = hasFitRef.current ? captureChartView(chartRef.current, ceRef.current) : null
     prevCeRef.current.setData(sanitizedPrevCe)
     prevPeRef.current.setData(sanitizedPrevPe)
     ceRef.current.setData(sanitizedCe)
@@ -695,8 +899,8 @@ export function CeVsPeChart({ ceSeries, peSeries, prevCeSeries = [], prevPeSerie
       hasFitRef.current = true
       const chartAtFit = chartRef.current
       registerChartForSyncAfterSettling(syncGroup, chartAtFit, () => chartRef.current !== chartAtFit, (cleanup) => { syncCleanupRef.current = cleanup })
-    } else if (preservedRange) {
-      try { chartRef.current?.timeScale().setVisibleRange(preservedRange) } catch { /* empty */ }
+    } else {
+      restoreChartView(chartRef.current, view)
     }
   }, [sanitizedCe, sanitizedPe, sanitizedPrevCe, sanitizedPrevPe])
 
@@ -782,7 +986,7 @@ export function VolumeVwapChart({ volumeBars, vwapSeries, height = 180, focusTim
 
   useEffect(() => {
     if (!volumeRef.current || !vwapRef.current) return
-    const preservedRange = hasFitRef.current ? chartRef.current?.timeScale().getVisibleRange() : null
+    const view = hasFitRef.current ? captureChartView(chartRef.current, volumeRef.current) : null
     volumeRef.current.setData(sanitizedVolume)
     vwapRef.current.setData(sanitizedVwap)
     const hasAnyData = sanitizedVolume.length > 0 || sanitizedVwap.length > 0
@@ -791,8 +995,8 @@ export function VolumeVwapChart({ volumeBars, vwapSeries, height = 180, focusTim
       hasFitRef.current = true
       const chartAtFit = chartRef.current
       registerChartForSyncAfterSettling(syncGroup, chartAtFit, () => chartRef.current !== chartAtFit, (cleanup) => { syncCleanupRef.current = cleanup })
-    } else if (preservedRange) {
-      try { chartRef.current?.timeScale().setVisibleRange(preservedRange) } catch { /* empty */ }
+    } else {
+      restoreChartView(chartRef.current, view)
     }
   }, [sanitizedVolume, sanitizedVwap])
 

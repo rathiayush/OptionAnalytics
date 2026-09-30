@@ -9,7 +9,11 @@ namespace OptionAnalytics.Server.Models;
 /// Riding this existing per-tick push rather than a separate poll of GET .../vwap-series is what
 /// lets the chart's VWAP line grow live, tick by tick, instead of only catching up once every poll
 /// interval - the same "no artificial waiting" standard every other live series on this page already
-/// holds to.</summary>
+/// holds to.
+///
+/// TimestampUtc is when this server RECEIVED the last tick; ExchangeTimeUtc is the time Dhan stamped
+/// on it. A page compares both against its own clock, so it can tell a slow link to this server
+/// apart from a slow feed into it.</summary>
 public sealed record SpotSnapshot(
     string Underlying,
     int Step,
@@ -17,4 +21,5 @@ public sealed record SpotSnapshot(
     decimal RoundedPrice,
     DateTimeOffset TimestampUtc,
     Candle? CurrentBar,
-    decimal? Vwap = null);
+    decimal? Vwap = null,
+    DateTimeOffset? ExchangeTimeUtc = null);

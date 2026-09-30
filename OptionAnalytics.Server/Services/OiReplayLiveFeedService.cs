@@ -445,29 +445,22 @@ public sealed class OiReplayLiveFeedService : BackgroundService
             var side = leg.IsCall ? "CE" : "PE";
             var group = $"c:{leg.Underlying}:{leg.ExpiryFlag}";
 
-            // Coalesced for the charts (OI Replay) - one entry per leg per 300ms flush, carrying the
-            // window's own high/low so nothing about the price path inside it is lost. Keyed by
-            // minute too, so a window straddling a minute boundary sends one entry per minute
-            // instead of attributing the old minute's high/low to the new one.
-            _batcher.Accumulate<LiveOptionTick>(group, "oiReplayTicks", $"{leg.Strike}:{side}:{minuteKey}", previous => new LiveOptionTick(
+            // Conflated for the charts (see LiveBroadcastBatcher): the newest reading per leg per
+            // minute, folded with any earlier ticks the browser hasn't received yet (keeps their
+            // open and widens high/low). Keyed by minute so a candle never absorbs the previous
+            // minute's range.
+            _batcher.Accumulate(group, "oiReplayTicks", $"{leg.Strike}:{side}:{minuteKey}", new LiveOptionTick(
                 leg.Underlying, leg.ExpiryFlag, leg.Strike, side,
-                Open: previous?.Open ?? tick.LastPrice,
-                Price: tick.LastPrice,
-                High: previous is null ? tick.LastPrice : Math.Max(previous.High, tick.LastPrice),
-                Low: previous is null ? tick.LastPrice : Math.Min(previous.Low, tick.LastPrice),
-                OpenInterest: tick.OpenInterest,
-                Time: observedAt,
-                LastTradeTime: lastTradeTime,
-                DayOpen: tick.Open, DayHigh: tick.High, DayLow: tick.Low,
-                Volume: tick.Volume,
-                BestBidPrice: tick.BestBidPrice, BestAskPrice: tick.BestAskPrice,
-                Ticks: (previous?.Ticks ?? 0) + 1));
+                Open: tick.LastPrice, Price: tick.LastPrice, High: tick.LastPrice, Low: tick.LastPrice,
+                OpenInterest: tick.OpenInterest, Time: observedAt));
 
-            // The raw per-tick tape stays exactly as it was, on its own "t:" group, for the Live
-            // Strike Data page - its whole purpose is to show every individual tick, so it opts in to
-            // that volume explicitly and nothing else pays for it. dayOpen/dayHigh/dayLow are the
-            // CONTRACT's day-so-far O/H/L as Dhan tracks them, not a per-minute range.
-            _ = BroadcastAsync($"t:{leg.Underlying}:{leg.ExpiryFlag}", "oiReplayTick", new
+            // The raw per-tick tape, on its own "t:" group, for the Live Strike Data page - its whole
+            // purpose is to show every individual tick, so only a page that joined it pays for that
+            // volume (skipped outright when nobody has). dayOpen/dayHigh/dayLow are the CONTRACT's
+            // day-so-far O/H/L as Dhan tracks them, not a per-minute range.
+            var tapeGroup = $"t:{leg.Underlying}:{leg.ExpiryFlag}";
+            if (!_batcher.HasMembers(tapeGroup)) continue;
+            _ = BroadcastAsync(tapeGroup, "oiReplayTick", new
             {
                 underlying = leg.Underlying,
                 expiryFlag = leg.ExpiryFlag,
@@ -489,17 +482,11 @@ public sealed class OiReplayLiveFeedService : BackgroundService
         if (_futuresLegsBySecurityId.TryGetValue(tick.SecurityId, out var futuresUnderlying) && tick.LastPrice > 0)
         {
             // Futures has no expiryFlag concept (see FuturesUnderlyings' own doc comment) - the plain
-            // underlying group, same one spotUpdate/cdvUpdate use. Same per-minute keying as above.
-            _batcher.Accumulate<LiveFuturesTick>($"u:{futuresUnderlying}", "futuresTicks", minuteKey.ToString(), previous => new LiveFuturesTick(
+            // underlying group spotUpdate also uses. Same per-minute conflation as above.
+            _batcher.Accumulate($"u:{futuresUnderlying}", "futuresTicks", minuteKey.ToString(), new LiveFuturesTick(
                 futuresUnderlying,
-                Open: previous?.Open ?? tick.LastPrice,
-                High: previous is null ? tick.LastPrice : Math.Max(previous.High, tick.LastPrice),
-                Low: previous is null ? tick.LastPrice : Math.Min(previous.Low, tick.LastPrice),
-                Price: tick.LastPrice,
-                OpenInterest: tick.OpenInterest,
-                Volume: tick.Volume,
-                Time: observedAt,
-                LastTradeTime: lastTradeTime));
+                Open: tick.LastPrice, High: tick.LastPrice, Low: tick.LastPrice, Price: tick.LastPrice,
+                OpenInterest: tick.OpenInterest, Time: observedAt));
         }
     }
 
@@ -521,17 +508,23 @@ public sealed class OiReplayLiveFeedService : BackgroundService
     }
 }
 
-/// <summary>One option leg's coalesced live state for one 300ms flush - see LiveBroadcastBatcher.
-/// Open/High/Low are the leg's own last-traded-price range inside that window; Ticks is how many Dhan
-/// packets it folds.</summary>
+/// <summary>One option leg's conflated live state - the newest reading, plus the open/high/low of
+/// every tick folded into it since the browser last received this leg (see LiveBroadcastBatcher).
+/// Only what the charts use; the full Dhan packet stays on the raw "t:" tape.</summary>
 public sealed record LiveOptionTick(
     string Underlying, string ExpiryFlag, decimal Strike, string Side,
-    decimal Open, decimal Price, decimal High, decimal Low, long OpenInterest,
-    DateTimeOffset Time, DateTimeOffset LastTradeTime,
-    decimal DayOpen, decimal DayHigh, decimal DayLow, long Volume,
-    decimal BestBidPrice, decimal BestAskPrice, int Ticks);
+    decimal Open, decimal Price, decimal High, decimal Low, long OpenInterest, DateTimeOffset Time) : ILiveMergeable
+{
+    public ILiveMergeable MergeAfter(ILiveMergeable older) => older is LiveOptionTick o
+        ? this with { Open = o.Open, High = Math.Max(o.High, High), Low = Math.Min(o.Low, Low) }
+        : this;
+}
 
-/// <summary>The underlying's nearest futures contract, coalesced the same way.</summary>
+/// <summary>The underlying's nearest futures contract, conflated the same way.</summary>
 public sealed record LiveFuturesTick(
-    string Underlying, decimal Open, decimal High, decimal Low, decimal Price,
-    long OpenInterest, long Volume, DateTimeOffset Time, DateTimeOffset LastTradeTime);
+    string Underlying, decimal Open, decimal High, decimal Low, decimal Price, long OpenInterest, DateTimeOffset Time) : ILiveMergeable
+{
+    public ILiveMergeable MergeAfter(ILiveMergeable older) => older is LiveFuturesTick o
+        ? this with { Open = o.Open, High = Math.Max(o.High, High), Low = Math.Min(o.Low, Low) }
+        : this;
+}

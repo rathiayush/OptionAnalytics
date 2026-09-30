@@ -34,6 +34,7 @@ public sealed class SpotUnderlyingState
     public DhanSpotInstrument? Instrument { get; set; }
     public decimal LastPrice { get; private set; }
     public DateTimeOffset LastUpdateUtc { get; private set; }
+    public DateTimeOffset? LastExchangeTimeUtc { get; private set; }
 
     /// <summary>Fired once a 1-minute bar finishes (the moment the NEXT bar starts, not on every
     /// tick) - EmaCrossoverAlertService is the consumer, computing EMA9/21 only against stable,
@@ -94,6 +95,7 @@ public sealed class SpotUnderlyingState
         {
             LastPrice = tick.LastPrice;
             LastUpdateUtc = DateTimeOffset.UtcNow;
+            LastExchangeTimeUtc = tick.ExchangeTimestamp;
 
             var minute = FloorToMinute(tick.ExchangeTimestamp);
 
@@ -232,7 +234,8 @@ public sealed class SpotUnderlyingState
     // the current session's bars are fed to VwapCalculator (session VWAP resets each IST day, so the
     // result is identical) instead of the full HistoryWindow (~45 days, ~17k bars) re-sorted per tick.
     public SpotSnapshot ToSnapshot() => new(Underlying, Step, LastPrice, RoundedPrice, LastUpdateUtc, GetCurrentBar(),
-        VwapCalculator.ComputeSeries(GetCurrentSessionVolumeBars()) is { Count: > 0 } series ? series[^1].Obv : null);
+        VwapCalculator.ComputeSeries(GetCurrentSessionVolumeBars()) is { Count: > 0 } series ? series[^1].Obv : null,
+        LastExchangeTimeUtc);
 
     /// <summary>The volume bars of the latest bar's own IST day only, oldest first - a backward scan
     /// from the end, so the cost is one session's worth of bars regardless of how much history is held.</summary>

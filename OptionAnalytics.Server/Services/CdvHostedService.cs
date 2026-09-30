@@ -1199,11 +1199,17 @@ public sealed class CdvHostedService : BackgroundService
         // expiry keeps its "cdvUpdate" event exactly as before; every other tracked expiry goes out
         // as "cdvExpiryUpdate" instead, which names its Expiry - so a page pinned to a non-default
         // expiry stays live too, and nothing listening to cdvUpdate can mix two chains together.
-        var group = $"u:{state.Underlying}";
+        //
+        // Own "cdv:" groups rather than "u:" - only the Dashboard wants CDV, so OI Replay (which joins
+        // u: for spot/futures) never receives it, and a non-default expiry's snapshot only reaches a
+        // Dashboard actually pinned to that expiry.
         if (_selected.TryGetValue(state.Underlying, out var selected) && ReferenceEquals(selected, state))
-            _batcher.SetLatest(group, "cdvUpdate", "selected", state.ToSnapshot);
+            _batcher.SetLatest($"cdv:{state.Underlying}", "cdvUpdate", "selected", state.ToSnapshot);
         else if (state.Expiry is { } expiry)
-            _batcher.SetLatest(group, "cdvExpiryUpdate", expiry.ToString("yyyy-MM-dd"), state.ToSnapshot);
+        {
+            var expiryKey = expiry.ToString("yyyy-MM-dd");
+            _batcher.SetLatest($"cdv:{state.Underlying}:{expiryKey}", "cdvExpiryUpdate", expiryKey, state.ToSnapshot);
+        }
     }
 
     /// <summary>Fires on every CdvUnderlyingState the moment its aggregate CE/PE bar closes - see
@@ -1217,6 +1223,14 @@ public sealed class CdvHostedService : BackgroundService
     {
         if (!_selected.TryGetValue(underlying, out var selected) || !ReferenceEquals(selected, state)) return;
 
+        // This fires from inside a tick, on the Dhan receive thread every live consumer shares, and
+        // the OBV series is recomputed from the full multi-day history - off-thread, so it can never
+        // hold up the next tick.
+        _ = Task.Run(() => PushAggregateBarClosed(underlying, state));
+    }
+
+    private void PushAggregateBarClosed(string underlying, CdvUnderlyingState state)
+    {
         var ce = state.GetSmoothedCdvSeries(true);
         var pe = state.GetSmoothedCdvSeries(false);
         if (ce.Count == 0 || pe.Count == 0) return;
