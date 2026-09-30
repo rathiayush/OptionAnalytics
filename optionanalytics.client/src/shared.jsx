@@ -172,8 +172,12 @@ const FEED_LAG_WINDOW_MS = 5 * 60_000
 export const FEED_LAG_WARN_MS = 2_000
 export const FEED_LAG_BAD_MS = 5_000
 
+// A reading older than this is dropped rather than shown - otherwise the last value before a feed
+// went quiet (e.g. "Dhan's feed is 27.4s behind") stayed on screen indefinitely as if still current.
+const FEED_LAG_SAMPLE_MAX_AGE_MS = 15_000
+
 export function createFeedLagTracker() {
-  return { windowStart: 0, windowMin: Infinity, prevWindowMin: Infinity, latest: null, peak: -Infinity }
+  return { windowStart: 0, windowMin: Infinity, prevWindowMin: Infinity, latest: null, peak: -Infinity, lastSampleAt: 0 }
 }
 
 export function recordFeedLag(tracker, receivedAt, sentMs) {
@@ -187,12 +191,13 @@ export function recordFeedLag(tracker, receivedAt, sentMs) {
   tracker.windowMin = Math.min(tracker.windowMin, lag)
   tracker.latest = lag
   tracker.peak = Math.max(tracker.peak, lag)
+  tracker.lastSampleAt = Date.now()
 }
 
 // Worst excess lag since the previous summary, rounded to 0.1s so an unchanged reading doesn't
 // re-render the page.
 export function summarizeFeedLag(tracker) {
-  if (tracker.latest == null) return null
+  if (tracker.latest == null || Date.now() - tracker.lastSampleAt > FEED_LAG_SAMPLE_MAX_AGE_MS) return null
   const baseline = Math.min(tracker.windowMin, tracker.prevWindowMin)
   const worst = Number.isFinite(tracker.peak) ? tracker.peak : tracker.latest
   tracker.peak = -Infinity
@@ -200,7 +205,7 @@ export function summarizeFeedLag(tracker) {
 }
 
 export function useFeedLag(active) {
-  const trackersRef = useRef({ link: createFeedLagTracker(), source: createFeedLagTracker(), absolute: { peak: -Infinity, latest: null } })
+  const trackersRef = useRef({ link: createFeedLagTracker(), source: createFeedLagTracker(), absolute: { peak: -Infinity, latest: null, lastSampleAt: 0 } })
   const [lag, setLag] = useState({ delayMs: null, sourceDelayMs: null })
   useEffect(() => {
     if (!active) return
@@ -208,7 +213,8 @@ export function useFeedLag(active) {
       const trackers = trackersRef.current
       const relative = summarizeFeedLag(trackers.link)
       const absolute = trackers.absolute
-      const worst = Number.isFinite(absolute.peak) ? absolute.peak : absolute.latest
+      const fresh = Date.now() - absolute.lastSampleAt <= FEED_LAG_SAMPLE_MAX_AGE_MS
+      const worst = !fresh ? null : Number.isFinite(absolute.peak) ? absolute.peak : absolute.latest
       absolute.peak = -Infinity
       const delayMs = worst != null ? Math.round(Math.max(0, worst) / 100) * 100 : relative
       const next = { delayMs, sourceDelayMs: summarizeFeedLag(trackers.source) }
@@ -226,6 +232,7 @@ export function useFeedLag(active) {
       const lag = now - clockOffsetMs - sentAtMs
       trackers.absolute.latest = lag
       trackers.absolute.peak = Math.max(trackers.absolute.peak, lag)
+      trackers.absolute.lastSampleAt = now
     }
   }, [])
   // Dhan stamped a tick at exchangeMs; the server received it at serverReceivedMs.

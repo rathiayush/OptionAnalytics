@@ -154,12 +154,26 @@ public sealed class SpotFeedHostedService : BackgroundService
     /// comment: "liveness being tracked, not usefulness") - so as long as CdvHostedService/
     /// OiReplayLiveFeedService keep seeing their own ticks, that watchdog never fires, even if
     /// Dhan silently stopped sending just the spot/index token specifically. This is the narrower,
-    /// per-instrument check that catches exactly that case: a live spot index ticks essentially
-    /// continuously during market hours (unlike a deep OTM strike, which can legitimately go quiet
-    /// for a stretch), so 90 seconds of silence on it specifically, while the connection is
-    /// otherwise clearly alive, is a real signal rather than a normal lull.</summary>
-    private static readonly TimeSpan SpotStaleThreshold = TimeSpan.FromSeconds(90);
-    private static readonly TimeSpan StaleCheckInterval = TimeSpan.FromSeconds(30);
+    /// per-instrument check that catches exactly that case.
+    ///
+    /// 10 seconds, checked every 5: an index ticks about once a second through market hours (unlike a
+    /// deep OTM strike), so 10s of silence while the connection is clearly alive is already a real
+    /// signal - and a re-subscribe is cheap and harmless when it wasn't needed. This used to be 90s,
+    /// checked every 30s, which left the spot chart dead for up to two minutes while options kept
+    /// ticking (seen live: "NIFTY spot hasn't ticked for 123s").</summary>
+    private static readonly TimeSpan SpotStaleThreshold = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan StaleCheckInterval = TimeSpan.FromSeconds(5);
+
+    /// <summary>Still silent this long after re-subscribes began: unsubscribe and subscribe the index
+    /// afresh instead - a plain re-send can be ignored for a token Dhan already considers subscribed,
+    /// while a genuine unsubscribe/subscribe makes it start that instrument's stream over. At most once
+    /// per SpotHardResubscribeCooldown per index. Only the spot/index token is touched - nothing else in
+    /// this app subscribes to it (see DhanMarketFeedClient's shared, non-reference-counted registry).</summary>
+    private static readonly TimeSpan SpotHardResubscribeAfter = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan SpotHardResubscribeCooldown = TimeSpan.FromSeconds(60);
+
+    /// <summary>A warning per stale episode (and then at most once a minute), not one every 5s check.</summary>
+    private static readonly TimeSpan StaleWarningInterval = TimeSpan.FromSeconds(60);
 
     // NSE/BSE's regular equity/derivatives session - re-subscribing outside these hours would just
     // manufacture warnings every day for a feed that is silent for the entirely ordinary reason that
@@ -169,29 +183,54 @@ public sealed class SpotFeedHostedService : BackgroundService
 
     private async Task WatchForStaleTicksAsync(CancellationToken stoppingToken)
     {
+        var lastWarnedAt = new Dictionary<uint, DateTimeOffset>();
+        var lastHardResubscribeAt = new Dictionary<uint, DateTimeOffset>();
+
         while (!stoppingToken.IsCancellationRequested)
         {
             if (!await DelayAsync(StaleCheckInterval, stoppingToken)) return;
 
-            var timeOfDayIst = TimeOnly.FromDateTime(DateTimeOffset.UtcNow.ToOffset(IstClock.Offset).DateTime);
+            var now = DateTimeOffset.UtcNow;
+            var timeOfDayIst = TimeOnly.FromDateTime(now.ToOffset(IstClock.Offset).DateTime);
             if (timeOfDayIst < MarketOpen || timeOfDayIst > MarketClose) continue;
 
             var stale = _bySecurityId
-                .Where(kv => DateTimeOffset.UtcNow - kv.Value.LastUpdateUtc > SpotStaleThreshold)
+                .Where(kv => now - kv.Value.LastUpdateUtc > SpotStaleThreshold)
                 .ToArray();
             if (stale.Length == 0) continue;
 
-            _logger.LogWarning(
-                "Spot feed: {Underlyings} had no live tick in over {Seconds}s during market hours while the shared feed connection is otherwise alive - re-sending their subscription in case Dhan silently dropped just these.",
-                string.Join(", ", stale.Select(kv => kv.Value.Underlying)), SpotStaleThreshold.TotalSeconds);
+            foreach (var (securityId, state) in stale)
+            {
+                var silentFor = now - state.LastUpdateUtc;
+                var hard = silentFor >= SpotHardResubscribeAfter
+                    && (!lastHardResubscribeAt.TryGetValue(securityId, out var lastHard) || now - lastHard >= SpotHardResubscribeCooldown);
 
-            try
-            {
-                await _feedClient.ResendSubscriptionsForAsync(stale.Select(kv => kv.Key), stoppingToken);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                _logger.LogWarning(ex, "Spot feed: re-subscribing stale instrument(s) failed - the connection-wide watchdog will still catch a genuinely dead connection.");
+                if (!lastWarnedAt.TryGetValue(securityId, out var warned) || now - warned >= StaleWarningInterval || hard)
+                {
+                    lastWarnedAt[securityId] = now;
+                    _logger.LogWarning(
+                        "Spot feed: {Underlying} has had no live tick for {Seconds:F0}s during market hours while the shared feed connection is otherwise alive - {Action}.",
+                        state.Underlying, silentFor.TotalSeconds,
+                        hard ? "unsubscribing and subscribing it afresh" : "re-sending its subscription in case Dhan silently dropped it");
+                }
+
+                try
+                {
+                    if (hard && state.Instrument is { } instrument)
+                    {
+                        lastHardResubscribeAt[securityId] = now;
+                        await _feedClient.UnsubscribeAsync(new[] { securityId }, stoppingToken);
+                        await _feedClient.SubscribeAsync(new Dictionary<uint, string> { [securityId] = instrument.DhanSegment }, stoppingToken);
+                    }
+                    else
+                    {
+                        await _feedClient.ResendSubscriptionsForAsync(new[] { securityId }, stoppingToken);
+                    }
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogWarning(ex, "Spot feed: re-subscribing {Underlying} failed - the connection-wide watchdog will still catch a genuinely dead connection.", state.Underlying);
+                }
             }
         }
     }
