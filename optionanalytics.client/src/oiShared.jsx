@@ -6,7 +6,7 @@ import * as signalR from '@microsoft/signalr'
 import {
   UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR, RECONNECT_RETRY_POLICY,
   istTimeFormatter, istTickMarkFormatter, toChartTime, TIMEFRAME_OPTIONS,
-  syncSignalRGroups, joinAllSignalRGroups, onLiveBatch,
+  syncSignalRGroups, joinAllSignalRGroups, onLiveBatch, checkForNewDeploy,
 } from './shared.jsx'
 
 const { Text } = Typography
@@ -135,6 +135,7 @@ export function useOiLiveHub(onSpotUpdate, onOiReplayTick, onReconnected, onCdvU
     connection.onreconnected(() => {
       setConnectionState('connected')
       joinAllSignalRGroups(connection, groupsRef.current)
+      checkForNewDeploy()
       reconnectedRef.current?.()
     })
     connection.onclose(() => setConnectionState('disconnected'))

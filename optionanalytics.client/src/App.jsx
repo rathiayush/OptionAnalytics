@@ -12,7 +12,7 @@ import LiveStrikeDataPage from './LiveStrikeDataPage.jsx'
 import TriggersPage from './TriggersPage.jsx'
 import ContractsPage from './ContractsPage.jsx'
 import LoginPage from './LoginPage.jsx'
-import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, RECONNECT_RETRY_POLICY, computeEma, fmtPrice, fmtIstTime, fmtIstDateTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry, AuthContext, useAuth, syncSignalRGroups, joinAllSignalRGroups, useCardOrder, CardDragHandle, onLiveBatch, useFeedLag, FeedLagTag, FeedLagAlert, LiveSection, captureChartView, restoreChartView } from './shared.jsx'
+import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, RECONNECT_RETRY_POLICY, computeEma, fmtPrice, fmtIstTime, fmtIstDateTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry, AuthContext, useAuth, syncSignalRGroups, joinAllSignalRGroups, useCardOrder, CardDragHandle, onLiveBatch, useFeedLag, FeedLagTag, FeedLagAlert, LiveSection, captureChartView, restoreChartView, useReloadOnNewDeploy, checkForNewDeploy } from './shared.jsx'
 import './App.css'
 
 const { Title, Text } = Typography
@@ -463,6 +463,7 @@ function useHub(onSpotUpdate, onCdvUpdate, onConfluenceAlert, onReconnected, onC
     // all, so the CURRENT selection (groupsRef.current) is rejoined here too, not just resynced.
     connection.onreconnected(() => {
       joinAllSignalRGroups(connection, groupsRef.current)
+      checkForNewDeploy()
       reconnectedHandlerRef.current?.()
     })
     connection.start()
@@ -1693,6 +1694,9 @@ export default function App() {
   // {email, role} object = signed in. Kept as one value rather than a separate isLoading flag so
   // there is no window where both "loading" and "no user yet" could disagree with each other.
   const [user, setUser] = useState(undefined)
+
+  // Every page, every tab: pick up a new deploy instead of running stale code against it.
+  useReloadOnNewDeploy()
 
   useEffect(() => {
     fetch('/api/auth/me')
