@@ -1114,6 +1114,9 @@ function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfMs, time
     () => buildOiChangeMatrix(byStrike, strikes, asOfMs, timeframeMinutes),
     [byStrike, strikes, asOfMs, timeframeMinutes],
   )
+  // Newest minute on the LEFT, older minutes running off to the right - the latest activity is
+  // what's read first, right next to the strike labels, instead of at the far end of a long scroll.
+  const columns = useMemo(() => [...buckets].reverse(), [buckets])
   // istTimeFormatter (hour:minute only) reads two distinct 30-second buckets as the identical label -
   // fine at 1 min/3 min, where every column IS a distinct minute, but exactly the "same time shown
   // over and over" look at the 30 sec option unless seconds are shown too.
@@ -1174,7 +1177,7 @@ function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfMs, time
     strikes.forEach((strike, row) => {
       const byBucket = perStrikeChange.get(strike)
       const y = row * HEATMAP_ROW_HEIGHT
-      buckets.forEach((t, col) => {
+      columns.forEach((t, col) => {
         const v = byBucket?.get(t)
         if (v == null || v === 0 || maxAbs === 0) return
         const alpha = HEATMAP_MIN_ALPHA + Math.min(1, Math.abs(v) / maxAbs) * (HEATMAP_MAX_ALPHA - HEATMAP_MIN_ALPHA)
@@ -1190,13 +1193,13 @@ function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfMs, time
       })
     })
 
-    // While live, the newest column is the bucket still filling - outlined so it's obvious which
-    // column is updating right now (a quiet bucket has no colored cells yet, which otherwise reads
-    // as nothing happening).
+    // While live, the newest (leftmost) column is the bucket still filling - outlined so it's
+    // obvious which column is updating right now (a quiet bucket has no colored cells yet, which
+    // otherwise reads as nothing happening).
     if (live) {
       ctx.strokeStyle = LIVE_COLUMN_OUTLINE_COLOR
       ctx.lineWidth = 1
-      ctx.strokeRect((buckets.length - 1) * HEATMAP_CELL_WIDTH + 0.5, 0.5, HEATMAP_CELL_WIDTH - 1, plotHeight - 1)
+      ctx.strokeRect(0.5, 0.5, HEATMAP_CELL_WIDTH - 1, plotHeight - 1)
     }
 
     // Time axis along the bottom - one label roughly every 60px regardless of cell width, so it
@@ -1205,20 +1208,29 @@ function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfMs, time
     ctx.font = '10px system-ui, -apple-system, sans-serif'
     ctx.textAlign = 'center'
     const labelEvery = Math.max(1, Math.round(60 / HEATMAP_CELL_WIDTH))
-    buckets.forEach((t, col) => {
+    // The first (newest) label starts at the left edge instead of centering on its cell, which
+    // would push half of it off the canvas; any label that would then overlap the one before it is
+    // skipped rather than drawn on top of it.
+    ctx.textAlign = 'left'
+    let nextFreeX = -Infinity
+    columns.forEach((t, col) => {
       if (col % labelEvery !== 0) return
-      ctx.fillText(formatBucketTime(t), col * HEATMAP_CELL_WIDTH + HEATMAP_CELL_WIDTH / 2, plotHeight + 14)
+      const text = formatBucketTime(t)
+      const width = ctx.measureText(text).width
+      const x = col === 0 ? 1 : col * HEATMAP_CELL_WIDTH + HEATMAP_CELL_WIDTH / 2 - width / 2
+      if (x < nextFreeX) return
+      ctx.fillText(text, x, plotHeight + 14)
+      nextFreeX = x + width + 6
     })
-  }, [buckets, perStrikeChange, strikes, maxAbs, plotWidth, plotHeight, formatBucketTime, live])
+  }, [columns, perStrikeChange, strikes, maxAbs, plotWidth, plotHeight, formatBucketTime, live])
 
-  // Scrolls to the newest minute once a fresh bucket set first appears (a new day loaded, or the
-  // very first live buckets) - not on every subsequent tick, which would otherwise yank a reader's
-  // own scroll-back position to the right edge on every single update.
+  // Brings the view back to the newest minute (the left edge) whenever a new column appears - not on
+  // every tick within a minute, which would yank a reader's own scroll into history on every update.
   const bucketCountRef = useRef(0)
   useEffect(() => {
     if (buckets.length === 0 || buckets.length === bucketCountRef.current) return
     bucketCountRef.current = buckets.length
-    if (scrollRef.current) scrollRef.current.scrollLeft = scrollRef.current.scrollWidth
+    if (scrollRef.current) scrollRef.current.scrollLeft = 0
   }, [buckets.length])
 
   const handleMouseMove = (e) => {
@@ -1227,9 +1239,9 @@ function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfMs, time
     const y = e.clientY - rect.top
     const col = Math.floor(x / HEATMAP_CELL_WIDTH)
     const row = Math.floor(y / HEATMAP_ROW_HEIGHT)
-    if (y >= plotHeight || col < 0 || col >= buckets.length || row < 0 || row >= strikes.length) { setHover(null); return }
+    if (y >= plotHeight || col < 0 || col >= columns.length || row < 0 || row >= strikes.length) { setHover(null); return }
     const strike = strikes[row]
-    const t = buckets[col]
+    const t = columns[col]
     setHover({ clientX: e.clientX, clientY: e.clientY, strike, time: t, value: perStrikeChange.get(strike)?.get(t) })
   }
 
@@ -3708,9 +3720,9 @@ export default function OiReplayPage() {
                   <Text type="secondary" style={{ fontSize: 12 }}>
                     Every tracked strike's own OI change, bucketed to the timeframe below - color intensity is how much changed
                     (relative to this side's own typical large move today, so one outsized burst doesn't wash everything else
-                    out), not an absolute scale, so a quiet day and a violent one both use the full range. While live, the
-                    outlined column is the one filling right now. Hover a cell for the exact number. Scroll horizontally for earlier in
-                    the day. Blue/orange here, not green/red - the chart's own R/S wall lines already use green/red for a
+                    out), not an absolute scale, so a quiet day and a violent one both use the full range. Newest minute on
+                    the left; while live, the outlined column is the one filling right now. Hover a cell for the exact number. Scroll
+                    right for earlier in the day. Blue/orange here, not green/red - the chart's own R/S wall lines already use green/red for a
                     different meaning (which side, how heavy), so this uses its own separate color language for "added vs
                     removed."
                   </Text>
