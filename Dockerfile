@@ -49,6 +49,15 @@ COPY --from=build /app/publish .
 # Kestrel binds 8080 on all interfaces; Dokploy/Traefik routes to this from the outside.
 ENV ASPNETCORE_URLS=http://+:8080
 ENV ASPNETCORE_ENVIRONMENT=Production
+# Everything the app persists goes under /app/data by default - the same paths docker-compose.yml
+# sets - so a Dokploy "Dockerfile" deployment keeps them too once a volume is mounted at /app/data.
+# Without these, that build type wrote the login cookie's key ring into the container itself, so
+# every redeploy generated new keys and signed everyone out.
+ENV Storage__TriggersPath=/app/data/strategy-triggers.json \
+    Storage__OrderHistoryPath=/app/data/trigger-order-history.json \
+    Storage__HistoricalDataPath=/app/data/historical \
+    Storage__ExpiredOptionDataPath=/app/data/expired-option-data \
+    Storage__DataProtectionKeysPath=/app/data/dataprotection-keys
 EXPOSE 8080
 
 # Create and chown the data directory BEFORE declaring it a volume. Docker discards changes made
@@ -59,9 +68,10 @@ RUN useradd -m -u 1001 optionanalytics \
  && mkdir -p /app/data \
  && chown -R optionanalytics:optionanalytics /app
 
-# Armed strategy triggers are the ONLY thing this app persists - market data is all in memory and
-# refetched from Dhan on every start. Point Storage__TriggersPath at this and mount it, or they are
-# lost on every redeploy.
+# Armed triggers, order history, the historical data caches and the login key ring all live here
+# (see the Storage__* defaults above). Mount a NAMED volume at /app/data - docker-compose.yml does;
+# for a Dokploy "Dockerfile" deployment add one under Advanced > Volumes - or all of it, logins
+# included, is lost on every redeploy: this anonymous VOLUME is recreated with each new container.
 VOLUME ["/app/data"]
 
 USER optionanalytics

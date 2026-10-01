@@ -200,8 +200,14 @@ ring and silently sign everyone out, regardless of the cookie's own 14-day expir
 Create an application pointed at this repository, choose the branch to deploy, and pick either
 build type:
 
-- **Dockerfile** - path `Dockerfile`, port `8080`.
-- **Compose** - path `docker-compose.yml`.
+- **Dockerfile** - path `Dockerfile`, port `8080`. Also add a volume under Advanced > Volumes:
+  a named volume (e.g. `optionanalytics-data`) mounted at `/app/data`. Without it, everything the
+  app persists - armed triggers and the login key ring included - resets on every redeploy, which
+  signs everyone out each time.
+- **Compose** - path `docker-compose.yml` (its `optionanalytics-data` volume already covers this).
+
+The app's header shows when the running build was deployed, and warns admins when the login key
+ring was regenerated at the last restart - the sign that `/app/data` is not on a persistent volume.
 
 Set the variables above in Dokploy's Environment tab (not in a committed file), attach a domain,
 and deploy. Note the first start fetches 30 trading days of history for ~68 option contracts, so

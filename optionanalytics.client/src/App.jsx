@@ -1698,11 +1698,32 @@ export default function App() {
   // Every page, every tab: pick up a new deploy instead of running stale code against it.
   useReloadOnNewDeploy()
 
+  // Only a 401/403 means "not signed in". Anything else - the server restarting for a deploy (a
+  // proxy 502/503/504) or the network dropping - used to be treated the same way and showed the
+  // login screen, so a page opened mid-deploy looked like the deploy had logged you out. Those
+  // are retried instead until the server answers.
+  const [serverUnreachable, setServerUnreachable] = useState(false)
   useEffect(() => {
-    fetch('/api/auth/me')
-      .then((r) => (r.ok ? r.json() : null))
-      .then(setUser)
-      .catch(() => setUser(null))
+    let cancelled = false
+    let timer = null
+    let delayMs = 1000
+    const check = () => {
+      fetch('/api/auth/me')
+        .then(async (r) => {
+          if (r.ok) return r.json()
+          if (r.status === 401 || r.status === 403) return null
+          throw new Error(`HTTP ${r.status}`)
+        })
+        .then((me) => { if (!cancelled) { setServerUnreachable(false); setUser(me) } })
+        .catch(() => {
+          if (cancelled) return
+          setServerUnreachable(true)
+          timer = setTimeout(check, delayMs)
+          delayMs = Math.min(delayMs * 2, 10_000)
+        })
+    }
+    check()
+    return () => { cancelled = true; clearTimeout(timer) }
   }, [])
 
   const login = (email, password) =>
@@ -1727,8 +1748,11 @@ export default function App() {
 
   if (user === undefined) {
     return (
-      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 16, justifyContent: 'center', alignItems: 'center', minHeight: '100vh' }}>
         <Spin size="large" />
+        {serverUnreachable && (
+          <Typography.Text type="secondary">Can't reach the server - it is probably restarting for a new deploy. Reconnecting…</Typography.Text>
+        )}
       </div>
     )
   }
