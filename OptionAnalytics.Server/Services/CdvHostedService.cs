@@ -1225,9 +1225,17 @@ public sealed class CdvHostedService : BackgroundService
 
         // This fires from inside a tick, on the Dhan receive thread every live consumer shares, and
         // the OBV series is recomputed from the full multi-day history - off-thread, so it can never
-        // hold up the next tick.
-        _ = Task.Run(() => PushAggregateBarClosed(underlying, state));
+        // hold up the next tick. At most one recompute per underlying at a time: it reads the state
+        // under the lock every tick needs, so a burst of closes must not queue up a pile of them.
+        if (!_barClosedPushInFlight.TryAdd(underlying, 0)) return;
+        _ = Task.Run(() =>
+        {
+            try { PushAggregateBarClosed(underlying, state); }
+            finally { _barClosedPushInFlight.TryRemove(underlying, out _); }
+        });
     }
+
+    private readonly ConcurrentDictionary<string, byte> _barClosedPushInFlight = new(StringComparer.OrdinalIgnoreCase);
 
     private void PushAggregateBarClosed(string underlying, CdvUnderlyingState state)
     {
