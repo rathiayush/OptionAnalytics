@@ -110,6 +110,7 @@ public sealed class OiReplayLiveFeedService : BackgroundService
     private readonly DhanOptionChainMaster _optionChainMaster;
     private readonly DhanFuturesInstrumentMaster _futuresInstrumentMaster;
     private readonly DhanMarketFeedClient _feedClient;
+    private IDisposable? _tickSubscription;
     private readonly DhanOptionChainQuotes _chainQuotes;
     private readonly IHubContext<SpotHub> _hub;
     private readonly LiveBroadcastBatcher _batcher;
@@ -147,7 +148,7 @@ public sealed class OiReplayLiveFeedService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _feedClient.TickReceived += OnTick;
+        _tickSubscription ??= _feedClient.AddTickConsumer("OI Replay", OnTick);
 
         // Fire-and-forget, its own independent cadence (RestQuoteInterval, not RecenterInterval) -
         // see RestQuoteInterval's own doc comment for why this is safe to just always run rather

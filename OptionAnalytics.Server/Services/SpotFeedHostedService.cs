@@ -34,6 +34,7 @@ public sealed class SpotFeedHostedService : BackgroundService
     private readonly DhanSpotInstrumentMaster _instrumentMaster;
     private readonly DhanHistoricalDataService _historicalData;
     private readonly DhanMarketFeedClient _feedClient;
+    private IDisposable? _tickSubscription;
     private readonly LiveBroadcastBatcher _batcher;
     private readonly ILogger<SpotFeedHostedService> _logger;
 
@@ -119,7 +120,7 @@ public sealed class SpotFeedHostedService : BackgroundService
 
         await BackfillAsync(stoppingToken);
 
-        _feedClient.TickReceived += OnTick;
+        _tickSubscription ??= _feedClient.AddTickConsumer("Spot", OnTick);
 
         var tokenSegments = _bySecurityId.ToDictionary(kv => kv.Key, kv => kv.Value.Instrument!.DhanSegment);
         try
@@ -470,7 +471,8 @@ public sealed class SpotFeedHostedService : BackgroundService
     {
         // DhanMarketFeedClient's connection lifecycle (including disposal) is owned by
         // DhanMarketFeedHostedService, which this service shares the client singleton with.
-        _feedClient.TickReceived -= OnTick;
+        _tickSubscription?.Dispose();
+        _tickSubscription = null;
         return base.StopAsync(cancellationToken);
     }
 }
