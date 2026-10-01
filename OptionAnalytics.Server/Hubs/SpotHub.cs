@@ -1,3 +1,4 @@
+using OptionAnalytics.Server.Auth;
 using Microsoft.AspNetCore.SignalR;
 using OptionAnalytics.Server.Services;
 
@@ -40,6 +41,9 @@ public sealed class SpotHub : Hub
 
     public Task JoinGroup(string groupName)
     {
+        // Live positions and P&L are the account's real money - admins only.
+        if (groupName == LiveTradingService.PositionsGroup && Context.User?.IsInRole(AuthRoles.Admin) != true)
+            return Task.CompletedTask;
         _batcher.Join(Context.ConnectionId, groupName);
         return Groups.AddToGroupAsync(Context.ConnectionId, groupName);
     }

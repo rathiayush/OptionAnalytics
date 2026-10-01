@@ -1880,7 +1880,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         }
     }
 
-    private static decimal RoundToTick(decimal price, decimal tick) =>
+    internal static decimal RoundToTick(decimal price, decimal tick) =>
         tick > 0 ? Math.Round(price / tick, MidpointRounding.AwayFromZero) * tick : price;
 
     /// <summary>ReferencePrice is the entry price every other number here was derived from - the
@@ -1926,7 +1926,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     /// underlying missing from the table fails exactly the way it always would have: at the
     /// exchange, with Dhan's own rejection message, rather than this app silently mis-slicing it
     /// against a made-up number.</summary>
-    private static int FreezeQuantityFor(string underlying) =>
+    internal static int FreezeQuantityFor(string underlying) =>
         FreezeQuantityByUnderlying.TryGetValue(underlying, out var limit) ? limit : int.MaxValue;
 
     /// <summary>Splits <paramref name="totalQuantity"/> into the fewest slices that each stay at or

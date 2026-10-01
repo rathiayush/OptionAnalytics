@@ -1329,7 +1329,7 @@ export function DraggableFloatingPanel({ title, pos, onPosChange, size, onSizeCh
     window.addEventListener('resize', clamp)
     return () => window.removeEventListener('resize', clamp)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pos.x, pos.y])
+  }, [pos.x, pos.y, width, height])
 
   const beginDrag = (clientX, clientY) => {
     dragRef.current = { startX: clientX, startY: clientY, origX: pos.x, origY: pos.y }

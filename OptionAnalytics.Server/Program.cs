@@ -237,6 +237,14 @@ builder.Services.AddSingleton<StrategyTriggerStore>();
 builder.Services.AddSingleton<TriggerOrderHistoryStore>();
 builder.Services.AddHostedService<StrategyTriggerHostedService>();
 
+// Real-money manual trading from the OI Replay trade panel's Live mode, and the account's live
+// positions with event-driven P&L - see LiveTradingService. The order-update socket is what tells it
+// a position changed (fill, target/stop-loss hit) without polling Dhan's REST API.
+builder.Services.AddSingleton<DhanOrderUpdateFeed>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<DhanOrderUpdateFeed>());
+builder.Services.AddSingleton<LiveTradingService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<LiveTradingService>());
+
 // Keeps OI Replay's own "today, live" mode genuinely live over the same shared Dhan WS feed -
 // see OiReplayLiveFeedService's own doc comment.
 builder.Services.AddHostedService<OiReplayLiveFeedService>();
