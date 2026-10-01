@@ -208,6 +208,9 @@ build type:
 
 The app's header shows when the running build was deployed, and warns admins when the login key
 ring was regenerated at the last restart - the sign that `/app/data` is not on a persistent volume.
+For admins it also shows a live **Feed** tag: how far behind live each server-side tick consumer
+(Spot, CDV, OI Replay) has been over the last minute. Each consumer has its own queue, so a slow one
+only delays itself; `CDV_ENABLED=false` (env `Cdv__Enabled`) switches CDV/OBV off entirely.
 
 Set the variables above in Dokploy's Environment tab (not in a committed file), attach a domain,
 and deploy. Note the first start fetches 30 trading days of history for ~68 option contracts, so

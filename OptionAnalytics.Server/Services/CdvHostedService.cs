@@ -103,6 +103,7 @@ public sealed class CdvHostedService : BackgroundService
     private readonly DhanOptionChainMaster _optionChainMaster;
     private readonly DhanOptionChainQuotes _chainQuotes;
     private readonly DhanMarketFeedClient _feedClient;
+    private IDisposable? _tickSubscription;
     private readonly SpotFeedHostedService _spotFeed;
     private readonly DhanHistoricalDataService _historicalData;
     private readonly IHubContext<SpotHub> _hub;
@@ -187,8 +188,10 @@ public sealed class CdvHostedService : BackgroundService
         DhanHistoricalDataService historicalData,
         IHubContext<SpotHub> hub,
         LiveBroadcastBatcher batcher,
-        ILogger<CdvHostedService> logger)
+        ILogger<CdvHostedService> logger,
+        IConfiguration? configuration = null)
     {
+        _enabled = configuration?.GetValue("Cdv:Enabled", true) ?? true;
         _batcher = batcher;
         _optionChainMaster = optionChainMaster;
         _chainQuotes = chainQuotes;
@@ -653,8 +656,19 @@ public sealed class CdvHostedService : BackgroundService
         return candles;
     }
 
+    /// <summary>Cdv:Enabled (env Cdv__Enabled) - false turns CDV/OBV off entirely: no option strikes
+    /// subscribed for it, no tick processing, no pushes. An emergency switch, should it ever be the
+    /// thing holding the live feed back; the Dashboard's CDV/OBV cards then simply stay empty.</summary>
+    private readonly bool _enabled;
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        if (!_enabled)
+        {
+            _logger.LogWarning("CDV/OBV is turned off (Cdv:Enabled = false) - not tracking or processing any CDV strikes.");
+            return;
+        }
+
         try
         {
             await _optionChainMaster.EnsureLoadedAsync(stoppingToken);
@@ -664,7 +678,7 @@ public sealed class CdvHostedService : BackgroundService
             _logger.LogError(ex, "Could not load the Dhan option chain - CDV cannot resolve strikes yet. Will retry on the next re-center.");
         }
 
-        _feedClient.TickReceived += OnTick;
+        _tickSubscription ??= _feedClient.AddTickConsumer("CDV", OnTick);
 
         // One loop rather than a startup phase and then a steady phase, because they want the same
         // thing: recenter, and come back SOON if anything is still missing.
@@ -1266,7 +1280,8 @@ public sealed class CdvHostedService : BackgroundService
 
     public override Task StopAsync(CancellationToken cancellationToken)
     {
-        _feedClient.TickReceived -= OnTick;
+        _tickSubscription?.Dispose();
+        _tickSubscription = null;
         return base.StopAsync(cancellationToken);
     }
 }

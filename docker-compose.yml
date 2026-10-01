@@ -38,6 +38,11 @@ services:
       Dhan__Pin: ${DHAN_PIN:-}
       Dhan__TotpSecret: ${DHAN_TOTP_SECRET:-}
 
+      # CDV/OBV (the Dashboard's cumulative-delta/OBV cards). Set CDV_ENABLED=false to switch it off
+      # entirely - no strikes subscribed or processed for it - should it ever hold the live feed
+      # back. The header's admin-only "Feed" tag shows how each live consumer is keeping up.
+      Cdv__Enabled: ${CDV_ENABLED:-true}
+
       # Telegram alerting for armed strategy triggers - leave Enabled false to run without it.
       Telegram__Enabled: ${TELEGRAM_ENABLED:-false}
       Telegram__BotToken: ${TELEGRAM_BOT_TOKEN:-}

@@ -7,7 +7,8 @@ namespace OptionAnalytics.Server.Dhan;
 
 /// <summary>
 /// Owns the single live connection to Dhan's market feed (wss://api-feed.dhan.co), decodes the
-/// binary packets, and raises TickReceived for each update. Reconnects with exponential backoff
+/// binary packets, and hands each update to every tick consumer (AddTickConsumer) - each on its own
+/// queue and worker, never on this receive loop (see TickConsumerQueue). Reconnects with exponential backoff
 /// and re-subscribes everything on every reconnect. Run as its own hosted service
 /// (DhanMarketFeedHostedService owns the RunAsync loop); SpotFeedHostedService and
 /// CdvHostedService both subscribe/unsubscribe tokens on this same shared instance rather than
@@ -68,7 +69,37 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
     // answered together.
     private readonly ConcurrentDictionary<uint, byte> _loggedFirstTick = new();
 
-    public event Action<SpotTick>? TickReceived;
+    // Copy-on-write so the receive loop reads it without a lock.
+    private volatile TickConsumerQueue[] _consumers = Array.Empty<TickConsumerQueue>();
+    private readonly object _consumersLock = new();
+
+    /// <summary>Delivers every tick to <paramref name="handler"/> on its own worker, in order - see
+    /// TickConsumerQueue for why consumers no longer run on the receive loop. Dispose the result to
+    /// stop.</summary>
+    public IDisposable AddTickConsumer(string name, Action<SpotTick> handler)
+    {
+        var consumer = new TickConsumerQueue(name, handler, _logger);
+        lock (_consumersLock) _consumers = _consumers.Append(consumer).ToArray();
+        return new ConsumerRegistration(this, consumer);
+    }
+
+    /// <summary>How each tick consumer is keeping up - see TickConsumerStats.</summary>
+    public IReadOnlyList<TickConsumerStats> GetConsumerStats() => _consumers.Select(c => c.GetStats()).ToList();
+
+    private void RemoveConsumer(TickConsumerQueue consumer)
+    {
+        lock (_consumersLock) _consumers = _consumers.Where(c => c != consumer).ToArray();
+        consumer.Dispose();
+    }
+
+    private sealed class ConsumerRegistration(DhanMarketFeedClient client, TickConsumerQueue consumer) : IDisposable
+    {
+        private int _disposed;
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) == 0) client.RemoveConsumer(consumer);
+        }
+    }
 
     public DhanMarketFeedClient(IOptions<DhanOptions> options, DhanSession session, ILogger<DhanMarketFeedClient> logger)
     {
@@ -435,7 +466,8 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
             ExchangeTimestamp: packet.ExchangeTimestamp);
 
         _lastTick[packet.SecurityId] = tick;
-        if (tick.LastPrice > 0) TickReceived?.Invoke(tick);
+        if (tick.LastPrice <= 0) return;
+        foreach (var consumer in _consumers) consumer.Enqueue(tick);
     }
 
     private async Task SendAsync(object message, CancellationToken cancellationToken)
@@ -479,5 +511,6 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
             catch { /* best-effort close */ }
         }
         _socket?.Dispose();
+        foreach (var consumer in _consumers) consumer.Dispose();
     }
 }

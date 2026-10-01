@@ -1102,16 +1102,51 @@ const NAV_ITEMS = [
 // "Admin")]), since hiding a link never stops a direct API call.
 // When the running build was deployed, and whether logins survived the last restart - see
 // SystemController. Fetched once per page load and shared by every NavBar instance.
+// pollMs refreshes it (admins watch the live feed's health through it); otherwise it's fetched once.
 let systemInfoPromise = null
-function useSystemInfo() {
+const fetchSystemInfo = () => fetch('/api/system/info').then((r) => (r.ok ? r.json() : null)).catch(() => null)
+function useSystemInfo(pollMs = null) {
   const [info, setInfo] = useState(null)
   useEffect(() => {
     let cancelled = false
-    systemInfoPromise ??= fetch('/api/system/info').then((r) => (r.ok ? r.json() : null)).catch(() => null)
+    systemInfoPromise ??= fetchSystemInfo()
     systemInfoPromise.then((value) => { if (!cancelled) setInfo(value) })
-    return () => { cancelled = true }
-  }, [])
+    const id = pollMs ? setInterval(() => {
+      systemInfoPromise = fetchSystemInfo()
+      systemInfoPromise.then((value) => { if (!cancelled && value) setInfo(value) })
+    }, pollMs) : null
+    return () => { cancelled = true; clearInterval(id) }
+  }, [pollMs])
   return info
+}
+
+const FEED_HEALTH_POLL_MS = 15_000
+const FEED_BEHIND_MS = 2_000
+
+// The server's live-tick consumers (Spot, CDV, OI Replay - see TickConsumerQueue) as one tag: how far
+// behind live the slowest one has been over the last minute, and whether any had to drop ticks.
+function FeedHealthTag({ feed }) {
+  if (!Array.isArray(feed) || feed.length === 0) return null
+  const worst = feed.reduce((a, b) => (b.queueWaitMaxMs > a.queueWaitMaxMs ? b : a))
+  const dropping = feed.filter((c) => c.dropped > 0)
+  const behind = worst.queueWaitMaxMs >= FEED_BEHIND_MS
+  const color = dropping.length > 0 ? 'error' : behind ? 'warning' : 'success'
+  const label = dropping.length > 0 ? `Feed: ${dropping.map((c) => c.name).join(', ')} dropping ticks`
+    : behind ? `Feed: ${worst.name} ${(worst.queueWaitMaxMs / 1000).toFixed(1)}s behind` : 'Feed OK'
+  return (
+    <Tooltip title={(
+      <div>
+        <div>Server-side live tick processing, worst over the last minute:</div>
+        {feed.map((c) => (
+          <div key={c.name}>
+            {c.name}: up to {(c.queueWaitMaxMs / 1000).toFixed(1)}s behind, slowest tick {c.handlerMaxMs}ms, {c.queued} queued, {c.processed.toLocaleString('en-IN')} processed{c.dropped > 0 ? `, ${c.dropped.toLocaleString('en-IN')} dropped` : ''}
+          </div>
+        ))}
+      </div>
+    )}>
+      <Tag color={color}>{label}</Tag>
+    </Tooltip>
+  )
 }
 
 export function NavBar() {
@@ -1120,7 +1155,7 @@ export function NavBar() {
   const auth = useAuth()
   const [drawerOpen, setDrawerOpen] = useState(false)
   const isAdmin = auth?.user?.role === 'Admin'
-  const systemInfo = useSystemInfo()
+  const systemInfo = useSystemInfo(isAdmin ? FEED_HEALTH_POLL_MS : null)
   const items = isAdmin ? NAV_ITEMS : NAV_ITEMS.filter((item) => !ADMIN_ONLY_PATHS.includes(item.key))
 
   const go = (key) => { navigate(key); setDrawerOpen(false) }
@@ -1153,6 +1188,7 @@ export function NavBar() {
               <Typography.Text type="secondary" style={{ fontSize: 11 }}>Deployed {fmtIstDateTime(systemInfo.buildTimeUtc)}</Typography.Text>
             </Tooltip>
           )}
+          {isAdmin && <FeedHealthTag feed={systemInfo?.feed} />}
           {isAdmin && systemInfo?.loginsSurviveRestart === false && (
             <Tooltip title="The login key ring was regenerated when the server last started, so every earlier login stopped working. /app/data is not on a persistent volume - mount a named volume there (Dokploy: Advanced > Volumes) so logins survive deploys.">
               <Tag color="warning">Logins reset at last deploy</Tag>

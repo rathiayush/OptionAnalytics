@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Reflection;
 using Microsoft.AspNetCore.DataProtection.KeyManagement;
 using Microsoft.AspNetCore.Mvc;
+using OptionAnalytics.Server.Dhan;
 
 namespace OptionAnalytics.Server.Controllers;
 
@@ -20,17 +21,23 @@ public sealed class SystemController : ControllerBase
     private static readonly DateTimeOffset StartedUtc = new(Process.GetCurrentProcess().StartTime.ToUniversalTime());
 
     private readonly IKeyManager _keyManager;
+    private readonly DhanMarketFeedClient _feedClient;
 
-    public SystemController(IKeyManager keyManager)
+    public SystemController(IKeyManager keyManager, DhanMarketFeedClient feedClient)
     {
         _keyManager = keyManager;
+        _feedClient = feedClient;
     }
 
+    /// <summary>Feed: how each live-tick consumer (Spot, CDV, OI Replay) is keeping up over roughly
+    /// the last minute - see TickConsumerStats. The header turns this into a "Feed OK / behind" tag.</summary>
     public sealed record SystemInfo(
         string? BuildTimeUtc,
         DateTimeOffset StartedUtc,
         DateTimeOffset? LoginKeysCreatedUtc,
-        bool? LoginsSurviveRestart);
+        bool? LoginsSurviveRestart,
+        int SubscribedInstruments,
+        IReadOnlyList<TickConsumerStats> Feed);
 
     [HttpGet("info")]
     public SystemInfo Info()
@@ -48,7 +55,8 @@ public sealed class SystemController : ControllerBase
         {
             // Diagnostics only - an unreadable key ring just means "unknown" here.
         }
-        return new SystemInfo(buildTimeUtc, StartedUtc, oldestKey, LoginsSurvivedRestart(oldestKey, StartedUtc));
+        return new SystemInfo(buildTimeUtc, StartedUtc, oldestKey, LoginsSurvivedRestart(oldestKey, StartedUtc),
+            _feedClient.SubscribedCount, _feedClient.GetConsumerStats());
     }
 
     /// <summary>True when the key ring predates this process (it was loaded from storage, so logins

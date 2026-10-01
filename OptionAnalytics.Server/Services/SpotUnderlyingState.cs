@@ -32,7 +32,14 @@ public sealed class SpotUnderlyingState
     public string Underlying { get; }
     public int Step { get; }
     public DhanSpotInstrument? Instrument { get; set; }
-    public decimal LastPrice { get; private set; }
+    // Read from other consumers' threads (CDV reads spot on its own tick worker - see
+    // TickConsumerQueue), and a decimal is too wide to read atomically - so behind the lock.
+    private decimal _lastPrice;
+    public decimal LastPrice
+    {
+        get { lock (_lock) return _lastPrice; }
+        private set { lock (_lock) _lastPrice = value; }
+    }
     public DateTimeOffset LastUpdateUtc { get; private set; }
     public DateTimeOffset? LastExchangeTimeUtc { get; private set; }
 
