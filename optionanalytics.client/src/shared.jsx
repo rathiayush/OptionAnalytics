@@ -1100,12 +1100,27 @@ const NAV_ITEMS = [
 // actual security boundary - App.jsx's own route guard covers someone typing the URL directly, and
 // the real enforcement is server-side (TriggersController/CdvController's [Authorize(Roles =
 // "Admin")]), since hiding a link never stops a direct API call.
+// When the running build was deployed, and whether logins survived the last restart - see
+// SystemController. Fetched once per page load and shared by every NavBar instance.
+let systemInfoPromise = null
+function useSystemInfo() {
+  const [info, setInfo] = useState(null)
+  useEffect(() => {
+    let cancelled = false
+    systemInfoPromise ??= fetch('/api/system/info').then((r) => (r.ok ? r.json() : null)).catch(() => null)
+    systemInfoPromise.then((value) => { if (!cancelled) setInfo(value) })
+    return () => { cancelled = true }
+  }, [])
+  return info
+}
+
 export function NavBar() {
   const location = useLocation()
   const navigate = useNavigate()
   const auth = useAuth()
   const [drawerOpen, setDrawerOpen] = useState(false)
   const isAdmin = auth?.user?.role === 'Admin'
+  const systemInfo = useSystemInfo()
   const items = isAdmin ? NAV_ITEMS : NAV_ITEMS.filter((item) => !ADMIN_ONLY_PATHS.includes(item.key))
 
   const go = (key) => { navigate(key); setDrawerOpen(false) }
@@ -1133,6 +1148,16 @@ export function NavBar() {
       </Drawer>
       {auth?.user && (
         <Space size={8}>
+          {systemInfo?.buildTimeUtc && (
+            <Tooltip title={`Server running since ${fmtIstDateTime(systemInfo.startedUtc)} IST`}>
+              <Typography.Text type="secondary" style={{ fontSize: 11 }}>Deployed {fmtIstDateTime(systemInfo.buildTimeUtc)}</Typography.Text>
+            </Tooltip>
+          )}
+          {isAdmin && systemInfo?.loginsSurviveRestart === false && (
+            <Tooltip title="The login key ring was regenerated when the server last started, so every earlier login stopped working. /app/data is not on a persistent volume - mount a named volume there (Dokploy: Advanced > Volumes) so logins survive deploys.">
+              <Tag color="warning">Logins reset at last deploy</Tag>
+            </Tooltip>
+          )}
           <Typography.Text type="secondary" style={{ fontSize: 12 }} className="navbar-email">{auth.user.email}</Typography.Text>
           <Button size="small" onClick={auth.logout}>Log out</Button>
         </Space>
