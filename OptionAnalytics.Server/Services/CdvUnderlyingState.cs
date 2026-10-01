@@ -609,6 +609,13 @@ public sealed class CdvUnderlyingState
     {
         var (ceCdv, peCdv) = TotalsNoLock();
         var minute = new DateTimeOffset(timestamp.Year, timestamp.Month, timestamp.Day, timestamp.Hour, timestamp.Minute, 0, timestamp.Offset);
+        // A tick's timestamp is its contract's LAST TRADE time - a quiet strike's can be minutes old
+        // while its OI/depth keep updating - so ticks from different strikes interleave different
+        // minutes. The aggregate bar only ever moves forward: an older minute belongs to the bar
+        // already forming. Following it backwards "closed" and reopened a past bar on nearly every
+        // tick, firing AggregateBarClosed (a full multi-day recompute under this lock, which the Dhan
+        // receive thread then queued behind) constantly and filling the history with out-of-order bars.
+        if (_currentBar is { } forming && minute < forming.Time) minute = forming.Time;
         CdvBarPoint? justClosed = null;
 
         if (_currentBar is not { } bar || bar.Time != minute)
