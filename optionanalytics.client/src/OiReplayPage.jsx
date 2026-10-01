@@ -1,6 +1,6 @@
 import { Component, useEffect, useMemo, useRef, useState } from 'react'
 import dayjs from 'dayjs'
-import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicker, TimePicker, Alert, Empty, Tooltip, Popconfirm, Slider, Tag, InputNumber, Switch, Table, Segmented, Checkbox, Modal } from 'antd'
+import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicker, TimePicker, Alert, Empty, Tooltip, Popconfirm, Slider, Tag, InputNumber, Switch, Table, Segmented, Checkbox, Modal, message } from 'antd'
 import { PlayCircleOutlined, PauseCircleOutlined, ReloadOutlined, SoundOutlined, ExportOutlined } from '@ant-design/icons'
 import { createChart, createSeriesMarkers, CandlestickSeries, LineSeries, HistogramSeries, CrosshairMode } from 'lightweight-charts'
 import * as signalR from '@microsoft/signalr'
@@ -9,9 +9,10 @@ import {
   UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR,
   istTimeFormatter, istTimeWithSecondsFormatter, istTickMarkFormatter, toBar, toChartTime, fromChartTime, istDateKey, fmtDateOnly,
   NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, STORED_SHOW_VOLUME_PROFILE, usePersistedState,
-  syncSignalRGroups, joinAllSignalRGroups, useCardOrder, CardDragHandle, onLiveBatch, useFeedLag, FeedLagTag, FeedLagAlert, LiveSection, checkForNewDeploy,
+  syncSignalRGroups, joinAllSignalRGroups, useCardOrder, CardDragHandle, onLiveBatch, useFeedLag, FeedLagTag, FeedLagAlert, LiveSection, checkForNewDeploy, useAuth,
 } from './shared.jsx'
 import { PremiumEmaChart, DraggableFloatingPanel, useFitContentAsDataGrows, useChartUserControl, CANDLE_SCALE_MARGINS } from './oiShared.jsx'
+import { LivePositionsView, liveTradingApi } from './LiveTrading.jsx'
 
 const { Text, Title } = Typography
 
@@ -78,7 +79,9 @@ const RECONNECT_RETRY_POLICY = {
 // guards) via the SAME ref-read pattern used here, so a tick arriving while a historical (non-today)
 // day is loaded already safely no-ops - nothing about correctness depended on tearing the
 // connection itself down, only on gating what it's ALLOWED to do once a tick arrives.
-function useOiReplayLiveFeed(onSpotUpdate, onOiReplayTicks, onFuturesTicks, onRestSnapshot, onReconnected, onPainted, underlying, expiryFlag) {
+const EMPTY_GROUPS = []
+
+function useOiReplayLiveFeed(onSpotUpdate, onOiReplayTicks, onFuturesTicks, onRestSnapshot, onReconnected, onPainted, underlying, expiryFlag, onLivePositions = null, extraGroups = EMPTY_GROUPS) {
   const spotRef = useRef(onSpotUpdate)
   const tickRef = useRef(onOiReplayTicks)
   const futuresRef = useRef(onFuturesTicks)
@@ -91,6 +94,10 @@ function useOiReplayLiveFeed(onSpotUpdate, onOiReplayTicks, onFuturesTicks, onRe
   futuresRef.current = onFuturesTicks
   restSnapshotRef.current = onRestSnapshot
   reconnectedRef.current = onReconnected
+  // The trade panel's Live mode: the account's real positions/P&L, pushed by LiveTradingService to
+  // the admin-only "positions" group (passed in extraGroups while Live mode is open).
+  const livePositionsRef = useRef(onLivePositions)
+  livePositionsRef.current = onLivePositions
 
   // The actual SignalR connection state - the page's own "Live" badge used to be purely a date
   // comparison, so it read "Live" (green) even when this connection had failed to negotiate, was
@@ -127,6 +134,7 @@ function useOiReplayLiveFeed(onSpotUpdate, onOiReplayTicks, onFuturesTicks, onRe
       spotUpdate: (snapshot) => spotRef.current(snapshot),
       oiReplayTicks: (ticks) => tickRef.current(ticks ?? []),
       futuresTicks: (ticks) => futuresRef.current?.(ticks ?? []),
+      livePositions: (snapshot) => livePositionsRef.current?.(snapshot),
     }, (sentAtMs, clockOffsetMs) => paintedRef.current?.(sentAtMs, clockOffsetMs))
     // Dhan's option-chain snapshot (every ~30-90s per expiry) - the only live source of IV, since
     // the websocket tick carries none.
@@ -166,10 +174,12 @@ function useOiReplayLiveFeed(onSpotUpdate, onOiReplayTicks, onFuturesTicks, onRe
     const newGroups = [
       underlying ? `u:${underlying}` : null,
       underlying && expiryFlag ? `c:${underlying}:${expiryFlag}` : null,
+      ...extraGroups,
     ].filter(Boolean)
     syncSignalRGroups(connectionRef.current, groupsRef.current, newGroups)
     groupsRef.current = newGroups
-  }, [underlying, expiryFlag])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [underlying, expiryFlag, extraGroups.join('|')])
 
   return connectionState
 }
@@ -1790,11 +1800,20 @@ function clearLiveDayCache() {
 // mix of Buy/Sell, CE/PE) can be open at once with their own live PnL. A Sell position's PnL is the
 // mirror of a Buy's (entryPrice - ltp instead of ltp - entryPrice, since the writer profits as the
 // premium falls) - see the PnL calc in the caller's own enrichedPaperPositions.
+//
+// Live mode (admins, while today is followed live): the same inputs place REAL Dhan orders instead
+// - see LiveTrading.jsx / LiveTradingService. A Super Order priced off the live ask (buy) or bid
+// (sell) plus `liveSlippage`, with this panel's SL/target as its legs; the paper table gives way to
+// the account's real positions and P&L.
 function PaperTradePanel({
   atmStrike, step, side, onSideChange, direction, onDirectionChange, strikeOffset, onStrikeOffsetChange,
   qtyLots, onQtyLotsChange, slPoints, onSlPointsChange, targetPoints, onTargetPointsChange,
   onPunch, canPunch, positions, onExit, onExitAll, onClearAll,
+  mode = 'paper', onModeChange = null, liveAvailable = false, liveUnavailableReason = null,
+  liveSlippage = 1, onLiveSlippageChange = null, onLivePunch = null, canLivePunch = false, liveBusy = false,
+  liveOrderSummary = '', liveContent = null, liveBlockReason = null,
 }) {
+  const isLiveMode = mode === 'live'
   const strikeOptions = useMemo(() => buildStrikeOffsetOptions(atmStrike, step), [atmStrike, step])
 
   const totalPnl = positions.reduce((sum, p) => sum + p.pnl, 0)
@@ -1824,6 +1843,17 @@ function PaperTradePanel({
   return (
     <div style={{ width: '100%' }}>
       <Space direction="vertical" size={10} style={{ width: '100%' }}>
+        {onModeChange && (
+          <Space wrap size={8}>
+            <Tooltip title={liveAvailable ? null : liveUnavailableReason}>
+              <Segmented
+                value={mode} onChange={onModeChange}
+                options={[{ label: 'Paper', value: 'paper' }, { label: 'Live (real orders)', value: 'live', disabled: !liveAvailable && !isLiveMode }]}
+              />
+            </Tooltip>
+            {isLiveMode && <Tag color="error">LIVE - orders go to your Dhan account</Tag>}
+          </Space>
+        )}
         <Space wrap size={8}>
           <Segmented value={direction} onChange={onDirectionChange} options={[{ label: 'Buy', value: 'BUY' }, { label: 'Sell', value: 'SELL' }]} />
           <Segmented value={side} onChange={onSideChange} options={[{ label: 'CE', value: 'CE' }, { label: 'PE', value: 'PE' }]} />
@@ -1837,11 +1867,32 @@ function PaperTradePanel({
             value={targetPoints} onChange={(v) => onTargetPointsChange(v ?? 0)} min={0} step={5} style={{ width: 130 }}
             addonBefore="Target" addonAfter="pts"
           />
-          <Button type="primary" size="small" onClick={onPunch} disabled={!canPunch}>
-            {direction === 'SELL' ? 'Sell' : 'Buy'}
-          </Button>
+          {isLiveMode && (
+            <InputNumber
+              value={liveSlippage} onChange={(v) => onLiveSlippageChange?.(v ?? 0)} min={0} step={0.5} style={{ width: 140 }}
+              addonBefore="Slippage" addonAfter="pts"
+            />
+          )}
+          {isLiveMode ? (
+            <Popconfirm
+              title="Place a REAL order on Dhan?"
+              description={liveOrderSummary}
+              okText={`${direction === 'SELL' ? 'Sell' : 'Buy'} live`} okButtonProps={{ danger: true }}
+              onConfirm={onLivePunch} disabled={!canLivePunch || liveBusy}
+            >
+              <Button type="primary" danger size="small" disabled={!canLivePunch} loading={liveBusy}>
+                {direction === 'SELL' ? 'Sell' : 'Buy'} LIVE
+              </Button>
+            </Popconfirm>
+          ) : (
+            <Button type="primary" size="small" onClick={onPunch} disabled={!canPunch}>
+              {direction === 'SELL' ? 'Sell' : 'Buy'}
+            </Button>
+          )}
         </Space>
-        {positions.length > 0 && (
+        {isLiveMode && liveBlockReason && <Text type="warning" style={{ fontSize: 12 }}>{liveBlockReason}</Text>}
+        {isLiveMode && liveContent}
+        {!isLiveMode && positions.length > 0 && (
           <>
             {/* scroll.x - the panel itself is capped to fit a phone's viewport width (see
                 DraggableFloatingPanel below), narrower than these columns' own combined width, so
@@ -1858,6 +1909,14 @@ function PaperTradePanel({
             </Space>
           </>
         )}
+        {isLiveMode ? (
+          <Text type="secondary" style={{ fontSize: 10 }}>
+            Live: each order is a Dhan Super Order (INTRADAY) - a LIMIT entry at the live ask (buy) or bid (sell)
+            plus the slippage above, with the SL and target measured from that ask/bid as its exit legs, which
+            Dhan itself manages after the fill. Positions are read from your Dhan account, so they come back
+            after a restart and include anything opened elsewhere; P&amp;L moves with the live tick feed.
+          </Text>
+        ) : (
         <Text type="secondary" style={{ fontSize: 10 }}>
           Paper trade only - simulated against this replay's own premium series, no real order is ever placed. Buy (long) or Sell (short/write),
           then Exit; lot size is a fixed per-underlying constant, not fetched live. SL/Target auto-exit an
@@ -1869,6 +1928,7 @@ function PaperTradePanel({
           positions survive a page reload (saved locally in this browser); loading a historical day, a
           different underlying, or clicking Clear all still resets them.
         </Text>
+        )}
       </Space>
     </div>
   )
@@ -2370,6 +2430,16 @@ export default function OiReplayPage() {
   // The whole Spot card (chart, alerts, replay controls) can float too - e.g. beside the heatmap.
   // Remembered in this browser; independent of every other floating panel's own state.
   const [spotFloating, setSpotFloating] = usePersistedState(STORED_SPOT_FLOATING, false)
+  // Trade panel Live mode - REAL Dhan orders (see LiveTrading.jsx). Never persisted: every page load
+  // starts on Paper, and switching to Live asks for confirmation first.
+  const auth = useAuth()
+  const isAdmin = auth?.user?.role === 'Admin'
+  const [tradeMode, setTradeMode] = useState('paper')
+  const [liveSlippage, setLiveSlippage] = usePersistedState('optionanalytics.oiReplay.liveSlippage', 1)
+  const [livePositions, setLivePositions] = useState(null)
+  const [liveBusy, setLiveBusy] = useState(false)
+  const liveTradeActive = tradeMode === 'live' && isAdmin
+  const liveExtraGroups = useMemo(() => (liveTradeActive ? ['positions'] : []), [liveTradeActive])
   const [spotPanelPos, setSpotPanelPos] = useState(() => ({ x: Math.max(24, window.innerWidth - 780), y: 70 }))
   const [spotPanelSize, setSpotPanelSize] = useState({ width: 740 })
 
@@ -2824,7 +2894,7 @@ export default function OiReplayPage() {
   }, [isLive])
 
   const handleLiveReconnected = () => { if (isLive) load() }
-  const liveConnectionState = useOiReplayLiveFeed(handleSpotUpdate, handleOiReplayTicks, handleFuturesTicks, handleRestSnapshot, handleLiveReconnected, isLive ? feedLag.recordPainted : null, underlying, liveExpiryFlag)
+  const liveConnectionState = useOiReplayLiveFeed(handleSpotUpdate, handleOiReplayTicks, handleFuturesTicks, handleRestSnapshot, handleLiveReconnected, isLive ? feedLag.recordPainted : null, underlying, liveExpiryFlag, liveTradeActive ? setLivePositions : null, liveExtraGroups)
 
   // A plain tick, unrelated to any live data - exists ONLY so feedStalled below re-evaluates on a
   // real clock instead of purely as a side effect of the next incoming tick (same reasoning as Live
@@ -3118,6 +3188,63 @@ export default function OiReplayPage() {
   }
 
   const handlePaperClearAll = () => setPaperPositions([])
+
+  // ---- Live mode (real Dhan orders) ----
+  // The expiry the page is showing live (N1 = nearest listed, ...) as the date the order is for.
+  const liveExpiryDate = resolvedExpiries.expiries[Number(liveExpiryFlag.slice(1)) - 1] ?? null
+  const liveUnavailableReason = !isAdmin ? 'Live orders are for admins only.'
+    : !isLive ? "Live orders need today's live view - press Go Live." : null
+
+  useEffect(() => {
+    if (!liveTradeActive) return
+    let cancelled = false
+    liveTradingApi.positions().then((snapshot) => { if (!cancelled && snapshot) setLivePositions(snapshot) })
+    return () => { cancelled = true }
+  }, [liveTradeActive])
+
+  // Leaving today's live view drops back to Paper - live orders only make sense against live prices.
+  useEffect(() => {
+    if (!isLive && tradeMode === 'live') setTradeMode('paper')
+  }, [isLive, tradeMode])
+
+  const handleTradeModeChange = (next) => {
+    if (next !== 'live') { setTradeMode('paper'); return }
+    Modal.confirm({
+      title: 'Switch to LIVE trading?',
+      content: 'Orders from this panel will be placed on your Dhan account with real money, as Super Orders with your SL and target. Positions and P&L shown are your real account.',
+      okText: 'Yes, go live', okButtonProps: { danger: true }, cancelText: 'Stay on paper',
+      onOk: () => {
+        setTradeMode('live')
+        // The live positions table needs more room than the paper one.
+        setPaperPanelSize((size) => (size?.width >= 640 ? size : { ...(size ?? {}), width: 640 }))
+      },
+    })
+  }
+
+  const runLiveAction = async (action) => {
+    setLiveBusy(true)
+    try {
+      const result = await action()
+      message.success(result.message, 6)
+    } catch (err) {
+      message.error(err.message, 10)
+    } finally {
+      setLiveBusy(false)
+    }
+  }
+
+  const handleLivePunch = () => runLiveAction(() => liveTradingApi.place({
+    underlying, expiry: liveExpiryDate, strike: paperStrike, side: paperSide, direction: paperDirection,
+    lots: paperQtyLots, slippagePoints: liveSlippage, stopLossPoints: paperSlPoints, targetPoints: paperTargetPoints,
+  }))
+  const handleLiveClose = (securityId) => runLiveAction(() => liveTradingApi.close(securityId, liveSlippage))
+  const handleLiveCancel = (orderId) => runLiveAction(() => liveTradingApi.cancel(orderId))
+  const handleLiveRefresh = () => liveTradingApi.positions(true).then((snapshot) => { if (snapshot) setLivePositions(snapshot) })
+  const liveBlockReason = paperStrike == null ? 'Waiting for the ATM strike.'
+    : liveExpiryDate == null ? 'Waiting for the listed expiries.'
+      : !(paperSlPoints > 0) || !(paperTargetPoints > 0) ? 'Set both SL and Target - a live order is a Super Order with both legs.'
+        : paperTargetPoints <= liveSlippage ? 'Target must be further than the slippage.' : null
+  const liveOrderSummary = paperStrike == null ? '' : `${paperDirection} ${underlying} ${paperStrike} ${paperSide}${liveExpiryDate ? ` (${fmtDateOnly(liveExpiryDate)})` : ''} x ${paperQtyLots} lot${paperQtyLots === 1 ? '' : 's'} - LIMIT at the live ${paperDirection === 'SELL' ? 'bid' : 'ask'} ${paperDirection === 'SELL' ? '-' : '+'} ${liveSlippage} pts, SL ${paperSlPoints} pts, target ${paperTargetPoints} pts.`
 
   // Exits every currently OPEN position at its own live (as-of-replay) price, rather than deleting
   // them the way Clear all does - a real "flatten everything" action whose exit prices/PnL stay in
@@ -4435,7 +4562,7 @@ export default function OiReplayPage() {
       )}
       {paperPanelOpen && (
         <DraggableFloatingPanel
-          title="Paper trade" pos={paperPanelPos} onPosChange={setPaperPanelPos}
+          title={liveTradeActive ? 'Live trade - real orders' : 'Paper trade'} pos={paperPanelPos} onPosChange={setPaperPanelPos}
           size={paperPanelSize} onSizeChange={setPaperPanelSize}
           onClose={() => setPaperPanelOpen(false)}
         >
@@ -4449,6 +4576,18 @@ export default function OiReplayPage() {
             targetPoints={paperTargetPoints} onTargetPointsChange={setPaperTargetPoints}
             onPunch={handlePaperPunch} canPunch={atmStrike != null && paperEntryPreview?.price != null}
             positions={enrichedPaperPositions} onExit={handlePaperExit} onExitAll={handlePaperExitAll} onClearAll={handlePaperClearAll}
+            mode={liveTradeActive ? 'live' : 'paper'} onModeChange={isAdmin ? handleTradeModeChange : null}
+            liveAvailable={liveUnavailableReason == null} liveUnavailableReason={liveUnavailableReason}
+            liveSlippage={liveSlippage} onLiveSlippageChange={setLiveSlippage}
+            onLivePunch={handleLivePunch} canLivePunch={liveBlockReason == null}
+            liveBlockReason={liveBlockReason}
+            liveBusy={liveBusy} liveOrderSummary={liveOrderSummary}
+            liveContent={(
+              <LivePositionsView
+                snapshot={livePositions} slippage={liveSlippage} busy={liveBusy}
+                onClose={handleLiveClose} onCancel={handleLiveCancel} onRefresh={handleLiveRefresh}
+              />
+            )}
           />
         </DraggableFloatingPanel>
       )}

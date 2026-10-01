@@ -53,6 +53,10 @@ public sealed class DhanOptions
     /// (?version=2&amp;token=...&amp;clientId=...&amp;authType=2).</summary>
     public string WsUrl { get; set; } = "wss://api-feed.dhan.co";
 
+    /// <summary>Dhan's order-update socket - a message per order state change on the account (see
+    /// DhanOrderUpdateFeed). Live trading refreshes positions off it instead of polling.</summary>
+    public string OrderUpdateWsUrl { get; set; } = "wss://api-order-update.dhan.co";
+
     /// <summary>The compact instrument dump - the only one of Dhan's two scrip master files with
     /// a per-contract trading symbol column.</summary>
     public string ScripMasterUrl { get; set; } = "https://images.dhan.co/api-data/api-scrip-master.csv";

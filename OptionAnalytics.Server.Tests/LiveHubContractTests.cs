@@ -62,6 +62,17 @@ public sealed class LiveHubContractTests : IAsyncLifetime
         new("NIFTY", flag, 22700, side, price, price, price, price, oi, DateTimeOffset.UtcNow);
 
     [Fact]
+    public async Task NonAdmin_CannotJoinTheLivePositionsGroup()
+    {
+        // Live positions and P&L are the account's real money - this connection has no Admin role.
+        await _connection.InvokeAsync("JoinGroup", LiveTradingService.PositionsGroup);
+        await _connection.InvokeAsync("JoinGroup", "u:NIFTY");
+
+        Assert.False(Batcher.HasMembers(LiveTradingService.PositionsGroup));
+        Assert.True(Batcher.HasMembers("u:NIFTY"));
+    }
+
+    [Fact]
     public async Task ServerTime_ReturnsTheServerClock()
     {
         var serverTime = await _connection.InvokeAsync<DateTimeOffset>("ServerTime");

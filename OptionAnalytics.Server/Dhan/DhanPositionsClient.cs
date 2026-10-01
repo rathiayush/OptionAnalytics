@@ -16,6 +16,14 @@ public sealed record DhanPosition(
     string PositionType,
     int NetQty)
 {
+    /// <summary>Average prices and today's booked P&L as Dhan reports them - what live P&L is
+    /// computed from (see LiveTradingService). Optional so existing callers need not set them.</summary>
+    public decimal BuyAvg { get; init; }
+    public decimal SellAvg { get; init; }
+    public int BuyQty { get; init; }
+    public int SellQty { get; init; }
+    public decimal RealizedProfit { get; init; }
+
     public bool IsOpen => PositionType != "CLOSED" && NetQty != 0;
 
     /// <summary>Which side closes this position - a LONG position was bought, so it closes by
@@ -67,7 +75,14 @@ public sealed class DhanPositionsClient
                 GetString(element, "exchangeSegment") ?? "",
                 GetString(element, "productType") ?? "",
                 GetString(element, "positionType") ?? "",
-                GetInt(element, "netQty") ?? 0));
+                GetInt(element, "netQty") ?? 0)
+            {
+                BuyAvg = GetDecimal(element, "buyAvg") ?? 0,
+                SellAvg = GetDecimal(element, "sellAvg") ?? 0,
+                BuyQty = GetInt(element, "buyQty") ?? 0,
+                SellQty = GetInt(element, "sellQty") ?? 0,
+                RealizedProfit = GetDecimal(element, "realizedProfit") ?? 0,
+            });
         }
 
         return result;
@@ -75,6 +90,9 @@ public sealed class DhanPositionsClient
 
     private static string? GetString(JsonElement element, string property) =>
         element.TryGetProperty(property, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+
+    private static decimal? GetDecimal(JsonElement element, string property) =>
+        element.TryGetProperty(property, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetDecimal() : null;
 
     private static int? GetInt(JsonElement element, string property) =>
         element.TryGetProperty(property, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetInt32() : null;
