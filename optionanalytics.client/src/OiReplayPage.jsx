@@ -3533,8 +3533,11 @@ export default function OiReplayPage() {
   )
 
   // The Spot card's whole content, shared by its inline and floating placements (see spotFloating).
+  // Built on every render now (it used to sit inside the page's own result-loaded branch), so it
+  // must not assume a loaded day: live candles keep arriving while today's fetch is being redone
+  // or has failed, and reading result.date then crashed the whole page.
   const spotChartHeight = spotFloating ? 440 : 560
-  const spotCardContent = (
+  const spotCardContent = result && (
     <>
       {/* Playback controls, literally inside the same card as the chart, right above
           the canvas itself - the user's own "this bar should be near to chart just on
@@ -3631,11 +3634,11 @@ export default function OiReplayPage() {
       )}
       {oneMinBars.length > 0
         ? (
-          <ChartErrorBoundary key={`${underlying}-${result.date}-${timeframe}`}>
+          <ChartErrorBoundary key={`${underlying}-${result?.date}-${timeframe}`}>
             <ReplayChart
               bars={displayBars}
               ladderRows={ladderRows}
-              dayKey={`${underlying}-${result.date}-${timeframe}`}
+              dayKey={`${underlying}-${result?.date}-${timeframe}`}
               atmStrike={atmStrike}
               step={step}
               top5Only={top5WallsOnly}
