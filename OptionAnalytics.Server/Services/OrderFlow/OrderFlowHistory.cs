@@ -32,13 +32,14 @@ public sealed class OrderFlowHistory
         var contract = await _orderFlow.ResolveContractAsync(underlying, expiry, date, cancellationToken);
         if (contract is null)
             return new Result(null, expiry is null
-                ? $"No listed {underlying.ToUpperInvariant()} futures contract covers {date:dd MMM yyyy} - an expired contract can no longer be looked up on Dhan."
-                : $"No listed {underlying.ToUpperInvariant()} futures contract expires on {expiry:dd MMM yyyy}.");
+                ? $"No {underlying.ToUpperInvariant()} futures contract found for {date:dd MMM yyyy} - NSE's contract list for that week could not be read (SENSEX: only contracts Dhan still lists)."
+                : $"No {underlying.ToUpperInvariant()} futures contract expiring {expiry:dd MMM yyyy} was listed on {date:dd MMM yyyy}.");
         if (contract.Expiry < date) return new Result(null, $"The {contract.TradingSymbol} contract had already expired on {date:dd MMM yyyy}.");
 
-        // Exact: a live engine holding that day, or a day kept in memory.
-        var live = await _orderFlow.EngineForAsync(underlying, contract.Expiry, cancellationToken);
-        var exact = live is not null && live.SecurityId == contract.SecurityId && live.ExportDayDate() == date
+        // Exact: a live engine already holding that day, or a day kept in memory. (Replaying a day never
+        // starts tracking a contract live.)
+        var live = _orderFlow.TrackedEngine(contract.SecurityId);
+        var exact = live is not null && live.ExportDayDate() == date
             ? live
             : _orderFlow.PastDays.EngineFor(underlying, contract.SecurityId, date);
         if (exact is not null)
@@ -56,7 +57,9 @@ public sealed class OrderFlowHistory
             while (_candles.Count > MaxCachedDays) _candles.TryRemove(_candles.OrderBy(kv => kv.Value.FetchedAt).First().Key, out _);
         }
         if (cached.Candles.Count == 0)
-            return new Result(null, $"No {contract.TradingSymbol} trading on {date:dd MMM yyyy} (a holiday or weekend, or the contract was not listed yet).");
+            return new Result(null, contract.Expiry < IstClock.Today()
+                ? $"Dhan returned no candles for {contract.TradingSymbol} (id {contract.SecurityId}, expired {contract.Expiry:dd MMM yyyy}) on {date:dd MMM yyyy} - a holiday, or Dhan does not serve that expired contract's history."
+                : $"No {contract.TradingSymbol} trading on {date:dd MMM yyyy} (a holiday or weekend, or the contract was not listed yet).");
 
         return new Result(OrderFlowEstimator.Build(underlying.ToUpperInvariant(), contract.SecurityId, contract.TradingSymbol, contract.DhanSegment,
             contract.TickSize, contract.LotSize, contract.Expiry, date, cached.Candles, rowSize, Math.Max(1, minTradeLots) * (long)contract.LotSize), null);

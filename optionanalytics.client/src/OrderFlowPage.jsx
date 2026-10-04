@@ -131,12 +131,23 @@ export default function OrderFlowPage() {
 
   const changeUnderlying = (value) => { setUnderlying(value); setExpiry(null) }
 
+  // The contracts listed on the picked date - for a past date that includes contracts that have since
+  // expired (the server reads NSE's contract archive), so a backtest replays the real front month.
+  const pickerKey = pickerDate.format('YYYY-MM-DD')
+  const contractsDate = pickerKey < todayKey() ? pickerKey : null
   useEffect(() => {
     let cancelled = false
     setContracts([])
-    fetchJson(`/api/order-flow/${underlying}/contracts`).then((list) => { if (!cancelled) setContracts(list) }).catch(() => {})
+    fetchJson(`/api/order-flow/${underlying}/contracts${contractsDate ? `?date=${contractsDate}` : ''}`)
+      .then((list) => {
+        if (cancelled) return
+        setContracts(list)
+        // A month that was not listed on this date falls back to the front month.
+        setExpiry((current) => (current && !list.some((c) => c.expiry === current) ? null : current))
+      })
+      .catch(() => {})
     return () => { cancelled = true }
-  }, [underlying])
+  }, [underlying, contractsDate])
 
   // The days the server can replay exactly - marked in the date picker.
   useEffect(() => {
@@ -358,7 +369,10 @@ export default function OrderFlowPage() {
   const shownMinute = replayMs != null ? IST_HHMMSS.format(new Date(Math.max(replayMs - 60_000, range?.start ?? 0))).slice(0, 5) : null
   const contractOptions = [
     { value: 'nearest', label: 'Nearest (auto)' },
-    ...contracts.map((c) => ({ value: c.expiry, label: `${dayjs(c.expiry).format('DD MMM YYYY')} · ${c.tradingSymbol}` })),
+    ...contracts.map((c) => ({
+      value: c.expiry,
+      label: `${dayjs(c.expiry).format('DD MMM YYYY')} · ${c.tradingSymbol}${c.expiry < todayKey() ? ' (expired)' : ''}`,
+    })),
   ]
 
   return (
@@ -380,7 +394,7 @@ export default function OrderFlowPage() {
           <Space wrap size={10} align="center">
             <Button type={isReplay ? 'default' : 'primary'} onClick={goLive} loading={!isReplay && loading}>● Go Live</Button>
             <Select value={underlying} onChange={(v) => { changeUnderlying(v); if (isReplay) sync.userAction() }} style={{ width: 130 }} options={UNDERLYINGS.map((u) => ({ value: u, label: `${u} FUT` }))} />
-            <Tooltip title="Futures contract - the nearest, or any listed month">
+            <Tooltip title="Futures contract on the picked date - the front month, or any month listed then (expired ones included for past dates)">
               <Select value={expiry ?? 'nearest'} onChange={(v) => setExpiry(v === 'nearest' ? null : v)} style={{ width: 230 }} options={contractOptions} />
             </Tooltip>
             <DatePicker
