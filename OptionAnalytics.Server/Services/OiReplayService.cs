@@ -111,6 +111,7 @@ public sealed class OiReplayService
     private readonly DhanSpotInstrumentMaster _instrumentMaster;
     private readonly DhanFuturesInstrumentMaster _futuresInstrumentMaster;
     private readonly NseFuturesContractArchive? _futuresArchive;
+    private readonly NseChartHistory? _nseChart;
     private readonly DhanHistoricalDataService _historicalData;
     private readonly DhanRollingOptionDataService _rollingOption;
     private readonly bool _allowLiveDataFallback;
@@ -119,9 +120,10 @@ public sealed class OiReplayService
         StoredSpotDataService storedSpot, StoredRollingOptionDataService storedRollingOption,
         DhanSpotInstrumentMaster instrumentMaster, DhanFuturesInstrumentMaster futuresInstrumentMaster,
         DhanHistoricalDataService historicalData, DhanRollingOptionDataService rollingOption,
-        AppEnvironment appEnvironment, NseFuturesContractArchive? futuresArchive = null)
+        AppEnvironment appEnvironment, NseFuturesContractArchive? futuresArchive = null, NseChartHistory? nseChart = null)
     {
         _futuresArchive = futuresArchive;
+        _nseChart = nseChart;
         _storedSpot = storedSpot;
         _storedRollingOption = storedRollingOption;
         _instrumentMaster = instrumentMaster;
@@ -275,17 +277,17 @@ public sealed class OiReplayService
             try { listed = await _futuresArchive.ContractsOnAsync(underlying, date, cancellationToken); }
             catch (Exception e) when (e is not OperationCanceledException) { listed = Array.Empty<DhanFuturesInstrument>(); }
         }
-        var fetched = await PastFuturesCandles.FetchAsync(_historicalData, contract, listed, date, cancellationToken);
+        var fetched = await PastFuturesCandles.FetchAsync(_historicalData, contract, listed, date, cancellationToken, _nseChart);
         var (bars, oiFieldPresent, error) = (fetched.Bars, fetched.OiFieldPresent, fetched.Error);
         contract = fetched.Contract;
 
         if (error is not null)
-            return (Array.Empty<FuturesBar>(), contract.Expiry, false, error);
+            return (Array.Empty<FuturesBar>(), contract.Expiry, false, fetched.Note is null ? error : $"No futures data for {date:dd MMM yyyy} - {fetched.Note}");
 
         if (bars.Count == 0)
             return (Array.Empty<FuturesBar>(), contract.Expiry,
                 false, contract.Expiry < IstClock.Today()
-                    ? $"No futures data for {date:dd MMM yyyy} - Dhan returned no candles for the expired {contract.TradingSymbol} (id {contract.SecurityId})."
+                    ? $"No futures data for {date:dd MMM yyyy} (a holiday?) - {contract.TradingSymbol} (id {contract.SecurityId}) has expired. {fetched.Note}"
                     : $"No futures data for {date:dd MMM yyyy} - the {contract.Expiry:dd MMM yyyy} contract was not trading on this date.");
 
         var futuresBars = bars.Select(b => new FuturesBar(b.Bar.Time, b.Bar.Open, b.Bar.High, b.Bar.Low, b.Bar.Close, b.Bar.Volume, b.OpenInterest)).ToList();
