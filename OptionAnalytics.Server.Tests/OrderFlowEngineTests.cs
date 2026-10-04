@@ -424,4 +424,36 @@ public sealed class OrderFlowEngineTests
         Assert.Equal(75 * 10 + 20, parts.Sum());
         Assert.Equal(new long[] { 4 * 75 + 20, 3 * 75, 3 * 75 }, parts); // 10 lots by largest remainder, the odd 20 on the heaviest
     }
+
+    [Fact]
+    public void BuyersLiftingThroughThreeLevelsInABurstIsASweep()
+    {
+        OrderFlowTrade T(long seq, double secs, decimal price, long qty, bool buy) => new(seq, T0.AddSeconds(secs), price, qty, buy);
+        var trades = new[]
+        {
+            T(1, 0, 100.00m, 300, true), T(2, 0.3, 100.10m, 300, true), T(3, 0.6, 100.20m, 300, true), // sweep: 3 levels, 900 = 12 lots
+            T(4, 5, 100.20m, 75, false),
+            T(5, 9, 100.10m, 150, false), T(6, 9.5, 100.00m, 150, false), T(7, 10, 99.90m, 75, false),  // 3 levels but only 5 lots
+            T(8, 20, 99.90m, 750, true), T(9, 22, 100.00m, 750, true), T(10, 24, 100.10m, 750, true),   // gaps over a second - not a burst
+            T(11, 30, 99.00m, 750, false), T(12, 30.9, 98.90m, 750, false), T(13, 31.8, 98.80m, 750, false), T(14, 32.7, 98.70m, 750, false), // a 2.7s grind:
+        };
+
+        var sweeps = OrderFlowEngine.DetectSweeps(trades, OrderFlowEngine.SweepMinLots * 75L);
+        Assert.Equal((1L, true, 100.00m, 100.20m, 900L, 3, 3), (sweeps[0].Id, sweeps[0].Buy, sweeps[0].FromPrice, sweeps[0].ToPrice, sweeps[0].Quantity, sweeps[0].Prints, sweeps[0].Levels));
+        // ... only its first 2 seconds (3 prints, 3 levels) count as the burst.
+        Assert.Equal((11L, 3, 98.80m), (sweeps[1].Id, sweeps[1].Prints, sweeps[1].ToPrice));
+        Assert.Equal(2, sweeps.Count);
+    }
+
+    [Fact]
+    public void TapeReturnsTheLastPrintsUpToTheClock()
+    {
+        var engine = NewEngine();
+        engine.OnTick(Tick(22710.00m, 10_000, 22710.00m, 22710.05m), T0);
+        for (var i = 1; i <= 5; i++) engine.OnTick(Tick(22710.05m, 10_000 + i * 75, 22710.00m, 22710.10m), T0.AddSeconds(i));
+
+        Assert.Equal(5, engine.Tape(null, 100, 1).Count);
+        var upTo3 = engine.Tape(T0.AddSeconds(3), 2, 1);
+        Assert.Equal(new[] { T0.AddSeconds(2), T0.AddSeconds(3) }, upTo3.Select(t => t.Time));
+    }
 }

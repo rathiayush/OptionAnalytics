@@ -7,7 +7,8 @@ import {
   NavBar, TIMEFRAME_OPTIONS, usePersistedState, RECONNECT_RETRY_POLICY, onLiveBatch, syncSignalRGroups, joinAllSignalRGroups,
   checkForNewDeploy, UP_COLOR, DOWN_COLOR, AXIS_COLOR,
 } from './shared.jsx'
-import { aggregateBars, analyzeBars, findWalls, bucketBook, mergeLiveMinutes, volumeProfile, replayView, replayRange, liquiditySignals, orderFlowBias } from './orderFlowMath.js'
+import { aggregateBars, analyzeBars, findWalls, bucketBook, mergeLiveMinutes, volumeProfile, replayView, replayRange, liquiditySignals, orderFlowBias, aggression, sweepSignals, pullStackSignals } from './orderFlowMath.js'
+import { TapeCard } from './OrderFlowTape.jsx'
 import { FootprintChart, DepthHeatmap, CumulativeDeltaChart, BookLadder, formatVolume } from './OrderFlowCharts.jsx'
 import { DomDrawer, useNarrow } from './DomDrawer.jsx'
 import { useReplaySync, useReplaySyncEnabled, ReplaySyncControl, withSpeedOption, SYNC_DRIFT_MS } from './replaySync.jsx'
@@ -39,6 +40,14 @@ const speedOption = (v) => ({ value: v, label: `${Math.round(v * 10) / 10}x` })
 const REPLAY_SPEEDS = [1, 2, 5, 10, 30, 60, 120, 240, 300, 600].map(speedOption)
 const REPLAY_TICK_MS = 200
 const REPLAY_HEATMAP_COLUMNS = 1500
+// Time & Sales prints kept/fetched for the tape (and its aggression windows).
+const TAPE_PRINTS = 1500
+const mergePrints = (a, b) => {
+  const bySeq = new Map()
+  for (const p of a) bySeq.set(p.seq, p)
+  for (const p of b) bySeq.set(p.seq, p)
+  return [...bySeq.values()].sort((x, y) => x.seq - y.seq).slice(-TAPE_PRINTS)
+}
 const IST_HHMMSS = new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' })
 
 // One SignalR connection for the page's lifetime; `group` (the live contract's, or none) follows the
@@ -211,7 +220,7 @@ export default function OrderFlowPage() {
       .then((body) => {
         if (cancelled) return
         setData({
-          meta: body.meta, minuteBars: body.bars, trades: body.trades, icebergs: body.icebergs, book: body.book,
+          meta: body.meta, minuteBars: body.bars, trades: body.trades, icebergs: body.icebergs, book: body.book, sweeps: body.sweeps ?? [],
           heatmap: body.heatmap.map(toColumn), lastSeq: body.trades.at(-1)?.seq ?? 0, source: body.source,
         })
       })
@@ -230,6 +239,8 @@ export default function OrderFlowPage() {
       const trades = freshTrades.length ? [...prev.trades, ...freshTrades].slice(-MAX_TRADES) : prev.trades
       const icebergs = new Map(prev.icebergs.map((i) => [i.id, i]))
       for (const i of payload.icebergs ?? []) icebergs.set(i.id, i)
+      const sweeps = new Map((prev.sweeps ?? []).map((w) => [w.id, w]))
+      for (const w of payload.sweeps ?? []) sweeps.set(w.id, w)
       const lastColumn = prev.heatmap.at(-1)
       // The whole book for the heatmap: "heat" is every level (200 a side) in 0.5-point rows, the
       // "book" only the ladder's top levels.
@@ -241,13 +252,32 @@ export default function OrderFlowPage() {
       return {
         ...prev, meta: payload.meta, book: payload.book, trades, heatmap,
         icebergs: [...icebergs.values()].sort((a, b) => a.id - b.id),
+        sweeps: [...sweeps.values()].sort((a, b) => a.id - b.id).slice(-500),
         minuteBars: mergeLiveMinutes(prev.minuteBars, payload.bars, rows),
         lastSeq: freshTrades.at(-1)?.seq ?? prev.lastSeq,
       }
     })
   }
+  // ---- Time & Sales tape: every print (not only big ones) - live: the latest, then each push's new
+  // prints; replay: the prints up to the replay clock, fetched as the clock moves.
+  const [tape, setTape] = useState({ prints: [], error: null, key: null })
+  useEffect(() => {
+    if (isReplay) return undefined
+    let cancelled = false
+    setTape({ prints: [], error: null, key: 'live' })
+    fetchJson(`/api/order-flow/${underlying}/tape?count=${TAPE_PRINTS}${expiryQuery}`)
+      .then((body) => { if (!cancelled) setTape((prev) => ({ key: 'live', error: body.error, prints: mergePrints(body.prints ?? [], prev.prints) })) })
+      .catch((err) => { if (!cancelled) setTape((prev) => ({ ...prev, error: err.message })) })
+    return () => { cancelled = true }
+  }, [isReplay, underlying, expiryQuery, reloadNonce])
+  const handleLiveTape = (payload) => {
+    if (payload?.meta?.securityId !== contextRef.current.securityId || !payload.trades?.length) return
+    setTape((prev) => (prev.key === 'live' ? { ...prev, prints: mergePrints(prev.prints, payload.trades) } : prev))
+  }
+  const onLive = (payload) => { handleLive(payload); handleLiveTape(payload) }
+
   const liveGroup = isReplay ? null : data?.meta?.expiry ? `of:${underlying}:${data.meta.expiry}` : data ? `of:${underlying}` : null
-  const connectionState = useOrderFlowHub(liveGroup, handleLive)
+  const connectionState = useOrderFlowHub(liveGroup, onLive)
 
   // ---- Replay of a loaded day ----
   const [replayDay, setReplayDay] = useState(null)
@@ -268,7 +298,7 @@ export default function OrderFlowPage() {
         if (cancelled) return
         const day = {
           meta: body.meta, minuteBars: body.bars, trades: body.trades, icebergs: body.icebergs, heatmap: body.heatmap.map(toColumn),
-          source: body.source, note: body.note, date: replayDate, underlying,
+          sweeps: body.sweeps ?? [], source: body.source, note: body.note, date: replayDate, underlying,
         }
         setReplayDay(day)
         // Keep the clock where it was when only the rows / print size changed; a new day starts at its open.
@@ -294,6 +324,24 @@ export default function OrderFlowPage() {
     }, REPLAY_TICK_MS)
     return () => clearInterval(id)
   }, [playing, range, replaySpeed])
+
+  const tapeClockRef = useRef({ fetchedAt: 0, timer: null })
+  useEffect(() => {
+    if (!isReplay || !replayDate || replayMs == null || replayDay?.source === 'estimated') return undefined
+    const state = tapeClockRef.current
+    const key = `${underlying}-${replayDate}-${expiry ?? ''}`
+    let cancelled = false
+    const run = () => {
+      state.fetchedAt = Date.now()
+      fetchJson(`/api/order-flow/${underlying}/tape?date=${replayDate}&until=${encodeURIComponent(new Date(replayMs).toISOString())}&count=${TAPE_PRINTS}${expiryQuery}`)
+        .then((body) => { if (!cancelled) setTape({ key, error: body.error, prints: body.prints ?? [] }) })
+        .catch((err) => { if (!cancelled) setTape({ key, error: err.message, prints: [] }) })
+    }
+    // While playing, at most one fetch every 1.5s; a jump or a pause fetches right away.
+    const wait = playing ? Math.max(0, 1500 - (Date.now() - state.fetchedAt)) : 150
+    const timer = setTimeout(run, wait)
+    return () => { cancelled = true; clearTimeout(timer) }
+  }, [isReplay, underlying, replayDate, expiry, expiryQuery, replayMs, playing, replayDay?.source])
 
   const goLive = () => { setMode('live'); setPlaying(false); setReloadNonce((n) => n + 1) }
   const loadDay = (dateKey = pickerDate.format('YYYY-MM-DD')) => {
@@ -362,7 +410,21 @@ export default function OrderFlowPage() {
     [estimated, view?.heatmap, largeTrades, view?.minuteBars, rowSize, lotSize],
   )
   const nowMs = isReplay ? replayMs ?? Date.now() : view?.heatmap?.at(-1)?.t ?? Date.now()
-  const bias = useMemo(() => orderFlowBias({ bars, liquidity, bigTrades: largeTrades, nowMs }), [bars, liquidity, largeTrades, nowMs])
+  // Tape reading: aggression from the Time & Sales prints, sweeps from the server, pulling/stacking
+  // off the heatmap.
+  const tapePrints = useMemo(() => (isReplay ? tape.prints.filter((p) => new Date(p.time).getTime() <= (replayMs ?? 0)) : tape.prints), [isReplay, tape.prints, replayMs])
+  const tapeNow = isReplay ? replayMs ?? Date.now() : Math.max(nowMs, tapePrints.length ? new Date(tapePrints.at(-1).time).getTime() : 0)
+  const aggressionNow = useMemo(() => (estimated ? null : aggression(tapePrints, tapeNow)), [estimated, tapePrints, tapeNow])
+  const sweeps = useMemo(() => sweepSignals(view?.sweeps, lotSize), [view?.sweeps, lotSize])
+  const pullStack = useMemo(
+    () => (estimated ? { signals: [], pressure: null } : pullStackSignals({ columns: (view?.heatmap ?? []).slice(-1800), rowSize, lotSize })),
+    [estimated, view?.heatmap, rowSize, lotSize],
+  )
+  const heatSignals = useMemo(() => [...liquidity, ...pullStack.signals, ...sweeps], [liquidity, pullStack.signals, sweeps])
+  const bias = useMemo(
+    () => orderFlowBias({ bars, liquidity, bigTrades: largeTrades, nowMs, aggressionNow, sweeps: view?.sweeps ?? [], pullStack: pullStack.signals }),
+    [bars, liquidity, largeTrades, nowMs, aggressionNow, view?.sweeps, pullStack.signals],
+  )
 
   const signals = useMemo(() => {
     const list = []
@@ -384,7 +446,7 @@ export default function OrderFlowPage() {
       list.push({ key: `i-${i.id}`, time: new Date(i.detectedAt).getTime(), bullish: i.isBid, type: 'Iceberg',
         text: `${i.isBid ? 'Hidden buyer at bid' : 'Hidden seller at offer'} ${i.price}: ${formatVolume(i.traded, lotSize, showLots)} traded vs ${formatVolume(i.maxDisplayed, lotSize, showLots)} shown${i.endedAt ? ' (ended)' : ' - active'}` })
     }
-    for (const l of liquidity) {
+    for (const l of [...liquidity, ...pullStack.signals.slice(-60), ...sweeps.slice(-60)]) {
       list.push({ key: l.key, time: l.t, bullish: l.bullish, type: l.kind, text: l.text, confidence: l.confidence })
     }
     // The newest big orders only - plenty to read, without pushing the rarer signals out of the list.
@@ -395,7 +457,7 @@ export default function OrderFlowPage() {
           : `${t.buy ? 'Buy' : 'Sell'} ${formatVolume(t.quantity, lotSize, true)} lots at ${t.price}` })
     }
     return list.sort((a, b) => b.time - a.time).slice(0, 200)
-  }, [bars, view?.icebergs, largeTrades, lotSize, showLots, estimated, bigLabel, liquidity])
+  }, [bars, view?.icebergs, largeTrades, lotSize, showLots, estimated, bigLabel, liquidity, pullStack.signals, sweeps])
 
   const meta = view?.meta
   const lastBar = bars.at(-1)
@@ -564,6 +626,10 @@ export default function OrderFlowPage() {
                   ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No market depth for an estimated day - Dhan keeps no depth history." />
                   : <BookLadder book={view?.book} walls={walls} icebergPrices={activeIcebergs} lotSize={lotSize} showLots={showLots} />}
               </Card>
+              <TapeCard
+                prints={tapePrints} aggression={aggressionNow} pressure={pullStack.pressure} sweeps={view?.sweeps} lotSize={lotSize}
+                largeLots={largeLots} error={tape.error} estimated={estimated}
+              />
               <Card size="small" title="Signals" styles={{ body: { maxHeight: 360, overflowY: 'auto' } }}>
                 {signals.length === 0 ? <Text type="secondary">No signals yet.</Text> : signals.map((s) => (
                   <div key={s.key} style={{ display: 'flex', gap: 8, alignItems: 'baseline', fontSize: 12, padding: '3px 0', borderBottom: '1px solid #ffffff0d' }}>
@@ -583,7 +649,7 @@ export default function OrderFlowPage() {
         <Card size="small" title="Liquidity heatmap" extra={!narrow && <Text type="secondary" style={{ fontSize: 11 }}>resting bids/offers over time (brighter = more) · big dots = big orders · magenta = icebergs</Text>}>
           {estimated
             ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No liquidity heatmap for an estimated day - it needs market depth, which Dhan does not keep. Days the server saw live have it." />
-            : <DepthHeatmap columns={view?.heatmap ?? []} rowSize={rowSize} trades={largeTrades} icebergs={view?.icebergs} signals={liquidity} lotSize={lotSize} showLots={showLots} height={narrow ? 320 : 440} />}
+            : <DepthHeatmap columns={view?.heatmap ?? []} rowSize={rowSize} trades={largeTrades} icebergs={view?.icebergs} signals={heatSignals} lotSize={lotSize} showLots={showLots} height={narrow ? 320 : 440} />}
         </Card>
 
         <Card size="small" title={`Delta & cumulative delta · ${timeframe} min`}>
