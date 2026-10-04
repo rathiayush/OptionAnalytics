@@ -53,6 +53,12 @@ public sealed class DhanTwoHundredDepthClient : BackgroundService
 
     public int ConnectionCount => _subscriptions.Values.Count(s => s.Connected);
 
+    /// <summary>This instrument's 200-level connection - whether it is open, when its book last
+    /// arrived and the last error Dhan gave - or null when it is not on this feed.</summary>
+    public DepthConnectionStatus? Status(uint securityId) => _subscriptions.TryGetValue(securityId, out var s)
+        ? new DepthConnectionStatus(s.Connected, s.LastMessageTicks > 0 ? new DateTimeOffset(Interlocked.Read(ref s.LastMessageTicks), TimeSpan.Zero) : null, s.LastError)
+        : null;
+
     /// <summary>Opens a 200-level connection for this instrument. False when the segment is not
     /// supported or every allowed connection is taken.</summary>
     public bool Subscribe(uint securityId, string exchangeSegment)
@@ -109,6 +115,7 @@ public sealed class DhanTwoHundredDepthClient : BackgroundService
             }
             catch (Exception ex)
             {
+                subscription.LastError = DepthConnectionStatus.Describe(ex);
                 _logger.LogWarning(ex, "Dhan 200-level depth for {SecurityId} disconnected - retrying in {Seconds}s.", subscription.SecurityId, backoff.TotalSeconds);
             }
             finally
@@ -150,6 +157,7 @@ public sealed class DhanTwoHundredDepthClient : BackgroundService
                 result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), cancellationToken);
                 if (result.MessageType == WebSocketMessageType.Close)
                 {
+                    subscription.LastError = $"closed by Dhan ({result.CloseStatus}{(string.IsNullOrWhiteSpace(result.CloseStatusDescription) ? "" : $": {result.CloseStatusDescription}")})";
                     _logger.LogWarning("Dhan 200-level depth for {SecurityId} closed by the server ({Status}: {Description}).",
                         subscription.SecurityId, result.CloseStatus, result.CloseStatusDescription);
                     return;
@@ -161,11 +169,12 @@ public sealed class DhanTwoHundredDepthClient : BackgroundService
             var packets = DhanDepthPacketParser.ParseTwoHundred(message.GetBuffer().AsSpan(0, (int)message.Length), out var disconnect);
             if (disconnect is not null)
             {
+                subscription.LastError = $"Dhan disconnect {disconnect}: {DhanSymbology.DescribeFeedErrorCode(disconnect.Value)}";
                 _logger.LogWarning("Dhan 200-level depth for {SecurityId} sent a disconnect (code {Code}): {Reason}.",
                     subscription.SecurityId, disconnect, DhanSymbology.DescribeFeedErrorCode(disconnect.Value));
                 return;
             }
-            if (packets.Count > 0) Interlocked.Exchange(ref subscription.LastMessageTicks, DateTimeOffset.UtcNow.UtcTicks);
+            if (packets.Count > 0) { Interlocked.Exchange(ref subscription.LastMessageTicks, DateTimeOffset.UtcNow.UtcTicks); subscription.LastError = null; }
             foreach (var packet in packets)
             {
                 try { DepthUpdated?.Invoke(packet); }
@@ -182,5 +191,6 @@ public sealed class DhanTwoHundredDepthClient : BackgroundService
         public CancellationTokenSource Cancel { get; } = new();
         public volatile bool Connected;
         public long LastMessageTicks;
+        public volatile string? LastError;
     }
 }

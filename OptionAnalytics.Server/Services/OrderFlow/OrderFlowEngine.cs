@@ -420,9 +420,14 @@ public sealed class OrderFlowEngine
         }
     }
 
+    /// <summary>Which depth connection this contract is on and its state - set by OrderFlowService. The
+    /// meta's DepthLevels says what book has actually ARRIVED (a closed market sends none, so it shows the
+    /// Full packet's 5 levels); this says what is connected and why a deeper book is missing.</summary>
+    public OrderFlowDepthFeed? DepthFeed { get; set; }
+
     private OrderFlowMeta Meta() => new(
         Underlying, ContractSymbol, SecurityId, ExchangeSegment, LotSize, TickSize, _prevLtp, _lastTradeAt,
-        Fresh(_deepBidAt, _clock) || Fresh(_deepAskAt, _clock) ? _deepDepth : _importedDepth ?? 5, _day == default ? null : _day, Expiry);
+        Fresh(_deepBidAt, _clock) || Fresh(_deepAskAt, _clock) ? _deepDepth : _importedDepth ?? 5, _day == default ? null : _day, Expiry, DepthFeed);
 
     private IReadOnlyList<OrderFlowIceberg> Icebergs() => _icebergs
         .Select(i => new OrderFlowIceberg(i.Id, i.IsBid, i.Price, i.StartedAt, i.DetectedAt, i.LastSeenAt, i.EndedAt, i.Traded, i.MaxDisplayed, i.Refills))
@@ -631,7 +636,12 @@ public sealed record OrderFlowDom(
 /// Expiry: the futures contract's expiry.</summary>
 public sealed record OrderFlowMeta(
     string Underlying, string ContractSymbol, uint SecurityId, string ExchangeSegment, int LotSize, decimal TickSize,
-    decimal LastPrice, DateTimeOffset? LastTradeAt, int DepthLevels, DateOnly? Day = null, DateOnly? Expiry = null);
+    decimal LastPrice, DateTimeOffset? LastTradeAt, int DepthLevels, DateOnly? Day = null, DateOnly? Expiry = null, OrderFlowDepthFeed? DepthFeed = null);
+
+/// <summary>The depth connection a live contract is on: Levels 200 / 20 / 5 (5 = the market feed's Full
+/// packet only), whether it is connected, when its book last arrived, and why it is not deeper / not
+/// streaming (Dhan's error, BSE, all 200-level connections taken).</summary>
+public sealed record OrderFlowDepthFeed(int Levels, bool Connected, DateTimeOffset? LastBookAt, string? Note);
 
 /// <summary>Source: "live" (built from the tick feed and depth - exact) or "estimated" (a past day
 /// rebuilt from Dhan's 1-minute candles - see OrderFlowEstimator); Note explains an estimate.</summary>

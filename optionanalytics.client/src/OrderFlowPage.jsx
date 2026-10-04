@@ -602,11 +602,7 @@ export default function OrderFlowPage() {
               </Tooltip>
             )}
             {meta && <Tag>{meta.contractSymbol} · lot {meta.lotSize}</Tag>}
-            {meta && !estimated && (
-              <Tooltip title={meta.depthLevels >= 200 ? "Dhan's full market depth: 200 levels a side." : meta.depthLevels >= 20 ? "Dhan's 20-level depth (the 200-level feed is not available for this contract right now)." : "No deeper depth for this contract (BSE contracts are not offered by Dhan, or the depth sockets are down) - using the 5 levels in each Full packet."}>
-                <Tag color={meta.depthLevels >= 200 ? 'green' : meta.depthLevels >= 20 ? 'blue' : 'orange'}>{meta.depthLevels}-level depth</Tag>
-              </Tooltip>
-            )}
+            {meta && !estimated && <DepthBadge meta={meta} live={!isReplay} />}
             {meta?.lastPrice > 0 && <Text strong>{meta.lastPrice.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</Text>}
             {lastBar && (
               <Text style={{ fontSize: 12 }}>
@@ -703,5 +699,39 @@ export default function OrderFlowPage() {
         <DomDrawer open={domOpen} onClose={() => setDomOpen(false)} underlying={underlying} />
       </Space>
     </div>
+  )
+}
+
+const HHMMSS = new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' })
+
+/** Which market depth the page has: the book that has ARRIVED (meta.depthLevels) and, live, the
+ *  connection the contract is on (meta.depthFeed) - so a 200-level connection that is open but has no
+ *  book yet (market closed) or that Dhan refused is told apart from a contract with no deeper depth. */
+function DepthBadge({ meta, live }) {
+  const feed = live ? meta.depthFeed : null
+  const got = meta.depthLevels
+  const last = feed?.lastBookAt ? ` Last book ${HHMMSS.format(new Date(feed.lastBookAt))} IST.` : ''
+  let color = got >= 200 ? 'green' : got >= 20 ? 'blue' : 'orange'
+  let label = `${got}-level depth`
+  let tip = got >= 200 ? "Dhan's full market depth: 200 levels a side." : got >= 20 ? "Dhan's 20-level depth." : 'The 5 levels in each market feed packet.'
+  if (feed && feed.levels > got) {
+    if (feed.connected) {
+      color = 'cyan'
+      label = `${feed.levels}-level connected · waiting for the book`
+      tip = `The ${feed.levels}-level depth connection is open, but no book has arrived on it yet - Dhan streams the book while the market trades (09:15-15:30 IST, trading days). Until then the market feed's 5 levels are shown.${last}${feed.note ? ` ${feed.note}` : ''}`
+    } else {
+      color = 'orange'
+      label = `${feed.levels}-level not connected`
+      tip = `The ${feed.levels}-level depth connection is not open - reconnecting.${feed.note ? ` ${feed.note}` : ''}${last} Showing the market feed's ${got} levels meanwhile.`
+    }
+  } else if (feed?.note) {
+    tip = `${tip} ${feed.note}${last}`
+  } else if (last) {
+    tip += last
+  }
+  return (
+    <Tooltip title={tip}>
+      <Tag color={color} aria-label="Depth status">{label}</Tag>
+    </Tooltip>
   )
 }
