@@ -105,6 +105,24 @@ public sealed class LiveTradingPricingTests
     public void OrderAlertDetection(string json, bool expected) =>
         Assert.Equal(expected, DhanOrderUpdateFeed.IsOrderAlert(Encoding.UTF8.GetBytes(json)));
 
+    [Fact]
+    public void OrderAlert_IsParsedIntoTheRestBooksSpelling()
+    {
+        // Shape from https://dhanhq.co/docs/v2/order-update/ - numbers sometimes arrive as strings.
+        const string json = """
+            {"Type":"order_alert","Data":{"Exchange":"NSE","Segment":"D","SecurityId":"40944","OrderNo":"112409","Product":"I",
+             "TxnType":"S","OrderType":"SL","Quantity":195,"TradedQty":"65","RemainingQuantity":130,"Price":78,"TriggerPrice":80,
+             "TradedPrice":79.5,"AvgTradedPrice":79.5,"Status":"Pending","CorrelationId":"OIRP-T15000-101500-1","Remarks":"Super Order",
+             "LegNo":2,"DisplayName":"NIFTY 26000 CALL","ReasonDescription":"CONFIRMED"}}
+            """;
+        var u = DhanOrderUpdateFeed.Parse(Encoding.UTF8.GetBytes(json))!;
+        Assert.Equal(("112409", "40944", "NSE_FNO", "INTRADAY", "SELL", "STOP_LOSS"), (u.OrderNo, u.SecurityId, u.ExchangeSegment, u.ProductType, u.TransactionType, u.OrderType));
+        Assert.Equal((195, 65, 130, 79.5m, 80m), (u.Quantity, u.TradedQty, u.RemainingQuantity, u.AvgTradedPrice, u.TriggerPrice));
+        Assert.Equal(("PART_TRADED", 2, true), (u.Status, u.LegNo, u.IsSuperOrder));
+        Assert.Null(DhanOrderUpdateFeed.Parse(Encoding.UTF8.GetBytes("{\"Type\":\"order_alert\"}")));
+        Assert.Equal("BSE_FNO", DhanOrderUpdateFeed.SegmentName("BSE", "D"));
+    }
+
     [Theory]
     [InlineData(150, 0, 150)]     // nothing working - close it all
     [InlineData(-150, 0, 150)]    // a short closes by buying the same size

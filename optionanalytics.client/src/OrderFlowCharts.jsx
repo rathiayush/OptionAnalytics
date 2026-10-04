@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button, Tag, Typography } from 'antd'
 import { createChart, HistogramSeries, LineSeries, CrosshairMode } from 'lightweight-charts'
 import { UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR, toChartTime, istTickMarkFormatter, istTimeFormatter } from './shared.jsx'
@@ -82,14 +82,38 @@ const FP_TOP = 6
 // the same price scale, with its POC and value area (VAH/VAL) drawn across the bars. `trades` (big
 // orders) are drawn as dots at their price, inside their bar at their time, sized by quantity.
 // Under each bar: its delta, the cumulative delta so far, and its volume.
+const barMs = (bar) => (typeof bar.time === 'number' ? bar.time : new Date(bar.time).getTime())
+
+// The view's right edge (in bars): at least one bar on screen, at most half a screen of empty space
+// past the last bar.
+const clampEnd = (endIdx, n, span) => Math.max(Math.min(1, n), Math.min(n + Math.max(1, span * 0.5), endIdx))
+
+// Rows `factor` times taller (or shorter), keeping the price at canvas height `y` where it is.
+function zoomRows(l, factor, y, step, plotH) {
+  const rowH = Math.max(3, Math.min(140, l.rowH * factor))
+  if (!(l.rowH > 0)) return { top: l.hiPad, rowH }
+  const priceAt = l.hiPad - ((y - FP_TOP) / l.rowH) * step
+  const top = priceAt + ((y - FP_TOP) / rowH) * step
+  return { top, rowH: Math.max(rowH, plotH / 2000) }
+}
+
 export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620, lastPrice, profile = null, trades = [], timeframe = 1, bigLabel = 'Big order' }) {
   const wrapRef = useRef(null)
   const canvasRef = useRef(null)
   const width = useElementWidth(wrapRef)
   const narrow = width > 0 && width < 640
   const [colWidth, setColWidth] = useState(() => (typeof window !== 'undefined' && window.innerWidth < 640 ? 76 : 120))
-  const [offset, setOffset] = useState(0)
+  // Where the view sits - yours once you drag it, never snapped back by new bars:
+  //   pan:   null = follow the latest bar; else { t, f } = the right edge sits f bars after the
+  //          bar that started at time t (anchored to a TIME, so bars arriving on the right - or
+  //          trimmed on the left - do not move what you are looking at). f may run past the last
+  //          bar, leaving empty space on the right.
+  //   vview: null = prices auto-fit the bars on screen; else { top, rowH } = the price at the top
+  //          edge and each row's height - dragged up/down or zoomed (Shift+wheel, price-axis drag).
+  const [pan, setPan] = useState(null)
+  const [vview, setVview] = useState(null)
   const [hover, setHover] = useState(null)
+  const [dragging, setDragging] = useState(false)
   const dragRef = useRef(null)
   const dotsRef = useRef([])
 
@@ -99,25 +123,57 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
   const barsW = Math.max(0, plotW - profileW)
   const plotH = Math.max(50, height - FP_STRIP_H - FP_TIME_H - FP_TOP)
 
+  const span = barsW / Math.max(1, colWidth)
+  const endIndexFor = useCallback((p) => {
+    const n = bars.length
+    if (!p) return n
+    const i = bars.findIndex((b) => barMs(b) === p.t)
+    if (i < 0) return n
+    return clampEnd(i + 1 + p.f, n, span)
+  }, [bars, span])
+  // A pan position for a (fractional) right-edge index - re-anchored on the bar at that edge; back at
+  // the latest bar it follows again.
+  const panFor = useCallback((endIdx) => {
+    const n = bars.length
+    if (n === 0) return null
+    const e = clampEnd(endIdx, n, span)
+    if (Math.abs(e - n) < 0.25) return null
+    const i = Math.max(0, Math.min(n - 1, Math.ceil(e) - 1))
+    return { t: barMs(bars[i]), f: e - (i + 1) }
+  }, [bars, span])
+
   const layout = useMemo(() => {
     if (!width || bars.length === 0) return null
-    const nVisible = Math.max(1, Math.floor(barsW / colWidth))
-    const end = Math.max(1, bars.length - Math.min(offset, bars.length - 1))
-    const start = Math.max(0, end - nVisible)
+    const n = bars.length
+    const endIdx = endIndexFor(pan)
+    const end = Math.max(1, Math.min(n, Math.ceil(endIdx - 1e-9)))
+    const start = Math.max(0, Math.floor(endIdx - span))
     const visible = bars.slice(start, end)
-    let hi = -Infinity
-    let lo = Infinity
-    for (const bar of visible) {
-      for (const level of bar.levels) { hi = Math.max(hi, level.price); lo = Math.min(lo, level.price) }
-      if (!bar.levels.length) { hi = Math.max(hi, bar.high); lo = Math.min(lo, bar.low) }
+    // Bar i's left edge sits at barsW - (endIdx - i) * colWidth; rightPad is the gap (or overhang)
+    // between the last drawn bar and the right edge.
+    const rightPad = (endIdx - end) * colWidth
+    let hiPad, rowH
+    if (vview) {
+      hiPad = vview.top
+      rowH = vview.rowH
+    } else {
+      let hi = -Infinity
+      let lo = Infinity
+      for (const bar of visible) {
+        for (const level of bar.levels) { hi = Math.max(hi, level.price); lo = Math.min(lo, level.price) }
+        if (!bar.levels.length) { hi = Math.max(hi, bar.high); lo = Math.min(lo, bar.low) }
+      }
+      if (!Number.isFinite(hi)) {
+        const last = bars[n - 1]
+        hi = last.high; lo = last.low
+      }
+      if (!Number.isFinite(hi)) return null
+      hiPad = hi + step
+      rowH = plotH / (Math.round((hiPad - (lo - step)) / step) + 1)
     }
-    if (!Number.isFinite(hi)) return null
-    const hiPad = hi + step
-    const loPad = lo - step
-    const nRows = Math.round((hiPad - loPad) / step) + 1
-    const rowH = plotH / nRows
-    return { visible, hiPad, loPad, nRows, rowH, start }
-  }, [bars, width, barsW, plotH, colWidth, offset, step])
+    const nRows = Math.ceil(plotH / rowH) + 1
+    return { visible, hiPad, nRows, rowH, start, end, endIdx, rightPad }
+  }, [bars, width, plotH, colWidth, span, pan, vview, step, endIndexFor])
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -129,9 +185,11 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
       ctx.fillText('Waiting for futures trades…', 16, 30)
       return
     }
-    const { visible, hiPad, nRows, rowH } = layout
-    const rowTop = (price) => FP_TOP + Math.round((hiPad - price) / step) * rowH
+    const { visible, hiPad, rowH, rightPad } = layout
+    const rowTop = (price) => FP_TOP + ((hiPad - price) / step) * rowH
     const yPrice = (price) => FP_TOP + ((hiPad + step - price) / step) * rowH
+    const barX = (k) => barsW - rightPad - (visible.length - k) * colWidth
+    const clip = (x, y, w, h) => { ctx.save(); ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip() }
     const textSize = Math.min(12, Math.floor(rowH - 2))
     const showText = rowH >= 10
 
@@ -139,11 +197,13 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
     ctx.font = `11px ${FONT}`
     ctx.textBaseline = 'middle'
     const labelEvery = niceStep(Math.ceil(18 / Math.max(rowH, 0.1)))
-    for (let i = 0; i < nRows; i++) {
-      const price = Math.round((hiPad - i * step) * 100) / 100
-      const rowIndex = Math.round(price / step)
+    const firstRow = Math.floor(hiPad / step + 1e-9)
+    for (let r = firstRow; rowTop(r * step) < FP_TOP + plotH; r--) {
+      const price = Math.round(r * step * 100) / 100
+      const rowIndex = r
       if (rowIndex % labelEvery !== 0) continue
-      const y = FP_TOP + i * rowH + rowH / 2
+      const y = rowTop(price) + rowH / 2
+      if (y < FP_TOP) continue
       ctx.strokeStyle = GRID_COLOR
       ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(plotW, y); ctx.stroke()
       ctx.fillStyle = AXIS_COLOR
@@ -151,7 +211,9 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
     }
 
     visible.forEach((bar, k) => {
-      const x0 = barsW - (visible.length - k) * colWidth
+      const x0 = barX(k)
+      // Cells, candle and markers stay inside the plot; the strip below only inside the bars' width.
+      clip(0, FP_TOP, barsW, plotH)
       const cellX = x0 + 15
       const cellW = Math.max(8, (colWidth - 19) / 2)
       const maxSide = Math.max(1, ...bar.levels.map((l) => Math.max(l.buy, l.sell)))
@@ -233,8 +295,10 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
       }
       for (const a of bar.absorption ?? []) marker(a.price, a.side, 'ABS', a.side === 'buy' ? UP_COLOR : DOWN_COLOR)
       for (const e of bar.exhaustion ?? []) marker(e.price, e.side, 'EXH', EXH_COLOR)
+      ctx.restore()
 
       // Delta + volume strip and time label.
+      clip(0, 0, barsW, height)
       const stripY = FP_TOP + plotH + 2
       ctx.fillStyle = 'rgba(255,255,255,0.03)'
       ctx.fillRect(x0 + 1, stripY, colWidth - 2, FP_STRIP_H - 4)
@@ -253,6 +317,7 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
       ctx.textAlign = 'left'
       ctx.strokeStyle = GRID_COLOR
       ctx.beginPath(); ctx.moveTo(x0, FP_TOP); ctx.lineTo(x0, FP_TOP + plotH); ctx.stroke()
+      ctx.restore()
     })
 
     // Big orders: a dot at the print's price, placed inside its bar by its time, area ~ quantity.
@@ -268,12 +333,14 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
         if (k == null) continue
         const y = rowTop(Math.round(Math.floor(t.price / step + 1e-9) * step * 100) / 100) + rowH / 2
         if (y < FP_TOP || y > FP_TOP + plotH) continue
-        const x0 = barsW - (visible.length - k) * colWidth
+        const x0 = barX(k)
         const x = x0 + 15 + ((ms - start) / bucketMs) * Math.max(4, colWidth - 30)
+        if (x < 0 || x > barsW) continue
         const r = 4 + 11 * Math.sqrt(t.quantity / maxQty)
         dots.push({ x, y, r, trade: t })
       }
       dots.sort((a, b) => b.r - a.r)
+      clip(0, FP_TOP, barsW, plotH)
       for (const d of dots) {
         ctx.beginPath(); ctx.arc(d.x, d.y, d.r, 0, Math.PI * 2)
         ctx.fillStyle = d.trade.buy ? 'rgba(38,166,154,0.78)' : 'rgba(239,83,80,0.78)'
@@ -283,6 +350,7 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
         ctx.stroke()
         ctx.lineWidth = 1
       }
+      ctx.restore()
     }
     dotsRef.current = dots
 
@@ -294,6 +362,7 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
       ctx.fillRect(barsW, FP_TOP, profileW, plotH)
       ctx.strokeStyle = GRID_COLOR
       ctx.beginPath(); ctx.moveTo(barsW, FP_TOP); ctx.lineTo(barsW, FP_TOP + plotH); ctx.stroke()
+      clip(barsW, FP_TOP, profileW, plotH)
       for (const row of profile.rows) {
         const top = rowTop(row.price)
         if (top + rowH < FP_TOP || top > FP_TOP + plotH) continue
@@ -309,6 +378,7 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
           ctx.strokeRect(px + 0.5, top + 0.5, sellW + buyW, Math.max(1, rowH - 1))
         }
       }
+      ctx.restore()
       const level = (price, label, color) => {
         if (price == null) return
         const y = label === 'VAL' ? rowTop(price) + rowH : label === 'VAH' ? rowTop(price) : rowTop(price) + rowH / 2
@@ -349,25 +419,48 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
     }
   }, [layout, width, height, plotW, barsW, profileW, profile, plotH, colWidth, step, lotSize, showLots, lastPrice, trades, timeframe])
 
+  // The wheel listener is registered once; it reads the latest geometry through this.
+  const geomRef = useRef({})
+  useEffect(() => { geomRef.current = { layout, panFor, colWidth, plotW, plotH, step } })
+
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
+    // Wheel: wider/narrower bars. Shift+wheel (or the wheel over the price axis): taller/shorter rows
+    // around the price under the cursor. A sideways trackpad swipe scrolls through time.
     const onWheel = (e) => {
       e.preventDefault()
-      setColWidth((w) => Math.max(56, Math.min(240, w + (e.deltaY < 0 ? 10 : -10))))
+      const g = geomRef.current
+      const l = g.layout
+      if (!l) return
+      const rect = canvas.getBoundingClientRect()
+      const x = e.clientX - rect.left
+      const y = e.clientY - rect.top
+      if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+        setPan(g.panFor(l.endIdx + e.deltaX / g.colWidth))
+        return
+      }
+      if (e.shiftKey || x > g.plotW) {
+        setVview(zoomRows(l, e.deltaY < 0 ? 1.15 : 1 / 1.15, y, g.step, g.plotH))
+        return
+      }
+      setColWidth((w) => Math.max(40, Math.min(240, w + (e.deltaY < 0 ? 10 : -10))))
     }
     canvas.addEventListener('wheel', onWheel, { passive: false })
     return () => canvas.removeEventListener('wheel', onWheel)
   }, [])
 
+  const resetView = () => { setPan(null); setVview(null) }
+
   const hitTest = (x, y) => {
     const dot = dotsRef.current.find((d) => (d.x - x) ** 2 + (d.y - y) ** 2 <= (d.r + 2) ** 2)
     if (dot) return { dot: dot.trade, x, y }
-    if (!layout || x > barsW) return null
-    const k = layout.visible.length - Math.ceil((barsW - x) / colWidth)
-    const bar = layout.visible[k]
+    if (!layout || x > barsW || y < FP_TOP || y > FP_TOP + plotH) return null
+    const i = Math.floor(layout.endIdx - (barsW - x) / colWidth)
+    if (i < layout.start || i >= layout.end) return null
+    const bar = bars[i]
     if (!bar) return null
-    const row = Math.round((layout.hiPad - Math.floor((y - FP_TOP) / layout.rowH) * step) * 100) / 100
+    const row = Math.round(Math.ceil((layout.hiPad - ((y - FP_TOP) / layout.rowH) * step) / step - 1e-9) * step * 100) / 100
     const level = bar.levels.find((l) => l.price === row)
     return { bar, level, row, x, y }
   }
@@ -376,27 +469,53 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
     <div ref={wrapRef} style={{ position: 'relative', width: '100%', height, userSelect: 'none' }}>
       <canvas
         ref={canvasRef}
-        style={{ cursor: 'crosshair', display: 'block', touchAction: 'none' }}
-        onPointerDown={(e) => { dragRef.current = { x: e.clientX, offset }; e.currentTarget.setPointerCapture(e.pointerId) }}
+        style={{ cursor: dragging ? 'grabbing' : 'crosshair', display: 'block', touchAction: 'none' }}
+        onPointerDown={(e) => {
+          if (!layout) return
+          const rect = e.currentTarget.getBoundingClientRect()
+          dragRef.current = {
+            x: e.clientX, y: e.clientY, endIdx: layout.endIdx, top: layout.hiPad, rowH: layout.rowH,
+            // Dragging on the price axis stretches the rows instead of moving them.
+            axis: e.clientX - rect.left > plotW, vertical: !!vview,
+          }
+          e.currentTarget.setPointerCapture(e.pointerId)
+          setDragging(true)
+        }}
         onPointerMove={(e) => {
           const rect = e.currentTarget.getBoundingClientRect()
-          if (dragRef.current) {
-            const moved = Math.round((e.clientX - dragRef.current.x) / colWidth)
-            setOffset(Math.max(0, Math.min(Math.max(0, bars.length - 1), dragRef.current.offset + moved)))
+          const d = dragRef.current
+          if (d) {
+            const dx = e.clientX - d.x
+            const dy = e.clientY - d.y
             setHover(null)
+            if (d.axis) {
+              setVview(zoomRows({ hiPad: d.top, rowH: d.rowH }, Math.exp(-dy / 120), plotH / 2 + FP_TOP, step, plotH))
+              return
+            }
+            setPan(panFor(d.endIdx - dx / colWidth))
+            // Up/down moves the prices too, once the drag is clearly vertical (a sideways drag with a
+            // little jitter keeps the auto-fit).
+            if (d.vertical || Math.abs(dy) > 8) {
+              d.vertical = true
+              setVview({ top: d.top + (dy / d.rowH) * step, rowH: d.rowH })
+            }
           } else setHover(hitTest(e.clientX - rect.left, e.clientY - rect.top))
         }}
-        onPointerUp={() => { dragRef.current = null }}
+        onPointerUp={() => { dragRef.current = null; setDragging(false) }}
+        onPointerCancel={() => { dragRef.current = null; setDragging(false) }}
         onPointerLeave={() => setHover(null)}
-        onDoubleClick={() => setOffset(0)}
+        onDoubleClick={resetView}
       />
       <div style={{ position: 'absolute', top: 8, left: 8, display: 'flex', gap: 4 }}>
-        <Button size="small" onClick={() => setColWidth((w) => Math.max(56, w - 16))} aria-label="Narrower bars">−</Button>
+        <Button size="small" onClick={() => setColWidth((w) => Math.max(40, w - 16))} aria-label="Narrower bars">−</Button>
         <Button size="small" onClick={() => setColWidth((w) => Math.min(240, w + 16))} aria-label="Wider bars">+</Button>
+        <Button size="small" onClick={() => layout && setVview(zoomRows(layout, 1 / 1.25, FP_TOP + plotH / 2, step, plotH))} aria-label="Shorter rows">↕−</Button>
+        <Button size="small" onClick={() => layout && setVview(zoomRows(layout, 1.25, FP_TOP + plotH / 2, step, plotH))} aria-label="Taller rows">↕+</Button>
       </div>
-      {offset > 0 && (
-        <Button size="small" style={{ position: 'absolute', top: 8, right: FP_AXIS_W + profileW + 8 }} onClick={() => setOffset(0)}>
-          Back to latest ▸
+      {(pan || vview) && (
+        <Button size="small" style={{ position: 'absolute', top: 8, right: FP_AXIS_W + profileW + 8 }} onClick={resetView}
+          title="Follow the latest bar with prices fitted again (or double-click the chart)">
+          {pan ? 'Back to latest ▸' : 'Auto-fit prices'}
         </Button>
       )}
       {hover?.dot && (

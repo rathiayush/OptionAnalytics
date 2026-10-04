@@ -44,6 +44,14 @@ public sealed class OrderFlowController : ControllerBase
         return contracts.Select((c, i) => new OrderFlowContract(c.Expiry, c.TradingSymbol, c.SecurityId, i == 0)).ToList();
     }
 
+    /// <summary>A check of the history behind replays and backtests: the futures contract listed on
+    /// <paramref name="date"/> (expired ones included), and how many 1-minute candles Dhan returns for it
+    /// that day - e.g. /api/order-flow/NIFTY/history-check?date=2025-09-15.</summary>
+    [HttpGet("{underlying}/history-check")]
+    public async Task<ActionResult<OrderFlowHistory.HistoryCheck>> HistoryCheck(string underlying, [FromQuery] DateOnly date, [FromQuery] DateOnly? expiry,
+        CancellationToken cancellationToken) =>
+        await _history.CheckAsync(underlying, date, expiry, cancellationToken);
+
     /// <summary>The days the server can replay EXACTLY, newest first: today (live engines) and the past
     /// days held in memory. Any other day still loads, estimated from Dhan's 1-minute candles.</summary>
     [HttpGet("{underlying}/days")]

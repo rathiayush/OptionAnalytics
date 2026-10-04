@@ -13,9 +13,11 @@ namespace OptionAnalytics.Server.Services;
 ///
 /// Positions are Dhan's own (GET /positions, with each position's super-order legs from
 /// GET /super/orders) - so after a restart they come straight back from Dhan, and any position on
-/// the account shows, whatever opened it. They are refreshed when Dhan's order-update socket reports
-/// a change (DhanOrderUpdateFeed), after this app places or closes anything, and on a slow safety
-/// timer - never polled for P&amp;L. P&amp;L moves with the live tick feed instead: every open position's
+/// the account shows, whatever opened it. They are read from REST once at start-up and whenever Dhan's
+/// order-update socket (re)connects; after that they are EVENT-DRIVEN: each socket message
+/// (DhanOrderUpdateFeed) is applied to the in-memory orders and positions - status, legs, and every new
+/// fill at its price (ApplyOrderUpdate) - with no REST polling (only while the socket is down does a
+/// 30-second fallback read run). P&amp;L moves with the live tick feed: every open position's
 /// contract is subscribed on the shared Dhan feed, and each tick re-prices it and pushes the
 /// "livePositions" snapshot to the admin-only "positions" group through the conflated batcher.
 /// </summary>
@@ -23,8 +25,8 @@ public sealed class LiveTradingService : BackgroundService
 {
     public const string PositionsGroup = "positions";
     private const string ProductType = "INTRADAY";
-    private static readonly TimeSpan SafetyRefreshWhileOpen = TimeSpan.FromSeconds(60);
-    private static readonly TimeSpan SafetyRefreshIdle = TimeSpan.FromMinutes(5);
+    // Only while Dhan's order-update socket is DOWN: with it up, nothing is polled - see ApplyOrderUpdate.
+    private static readonly TimeSpan FallbackRefreshWhileSocketDown = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan QuoteWait = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan SliceCallDelay = TimeSpan.FromMilliseconds(250);
     private static readonly TimeSpan ExitCheckInterval = TimeSpan.FromSeconds(2);
@@ -54,6 +56,12 @@ public sealed class LiveTradingService : BackgroundService
     private Dictionary<uint, List<ProtectionOrder>> _protections = new();
     private readonly HashSet<string> _firingTargets = new();
     private DateTimeOffset? _refreshedUtc;
+    private DateTimeOffset? _lastEventUtc;
+    // Traded quantity (and average price) already counted into positions, per order and super-order leg -
+    // so a socket message moves a position by exactly the NEW fill (see ApplyOrderUpdate).
+    private Dictionary<(string OrderId, int Leg), (int Qty, decimal? Avg)> _fills = new();
+    private bool _refreshing;
+    private bool _eventDuringRefresh;
     private readonly SemaphoreSlim _refreshSignal = new(0, 1);
     private readonly SemaphoreSlim _actionLock = new(1, 1);
     private IDisposable? _tickSubscription;
@@ -80,23 +88,33 @@ public sealed class LiveTradingService : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _tickSubscription = _feed.AddTickConsumer("Positions", OnTick);
-        _orderUpdates.OrderChanged += RequestRefresh;
+        _orderUpdates.OrderUpdated += ApplyOrderUpdate;
+        _orderUpdates.Connected += RequestRefresh;
         try
         {
+            var refresh = true;
             while (!stoppingToken.IsCancellationRequested)
             {
-                try
+                if (refresh)
                 {
-                    await RefreshAsync(stoppingToken);
-                }
-                catch (Exception ex) when (ex is not OperationCanceledException)
-                {
-                    _logger.LogWarning(ex, "Live positions refresh failed.");
+                    try
+                    {
+                        await RefreshAsync(stoppingToken);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        _logger.LogWarning(ex, "Live positions refresh failed.");
+                    }
                 }
 
-                var anyOpen = HasOpenPositionsOrPendingOrders();
-                try { await _refreshSignal.WaitAsync(anyOpen ? SafetyRefreshWhileOpen : SafetyRefreshIdle, stoppingToken); }
+                // Event-driven: the next REST read happens only when asked for - the order-update socket
+                // (re)connecting, an order it reports that is not in memory yet, or a fill that raced a
+                // read. Only while that socket is down does the 30s wake-up read anyway.
+                bool signalled;
+                try { signalled = await _refreshSignal.WaitAsync(FallbackRefreshWhileSocketDown, stoppingToken); }
                 catch (OperationCanceledException) { break; }
+                refresh = signalled || !_orderUpdates.IsConnected;
+                if (!refresh) continue;
                 // Coalesce a burst of order updates (entry + both legs land together) into one refresh.
                 try { await Task.Delay(TimeSpan.FromMilliseconds(400), stoppingToken); }
                 catch (OperationCanceledException) { break; }
@@ -104,7 +122,8 @@ public sealed class LiveTradingService : BackgroundService
         }
         finally
         {
-            _orderUpdates.OrderChanged -= RequestRefresh;
+            _orderUpdates.OrderUpdated -= ApplyOrderUpdate;
+            _orderUpdates.Connected -= RequestRefresh;
             _tickSubscription?.Dispose();
         }
     }
@@ -117,18 +136,33 @@ public sealed class LiveTradingService : BackgroundService
         }
     }
 
-    private bool HasOpenPositionsOrPendingOrders()
+    /// <summary>After this panel's own action: the order-update socket reports what it did (the order
+    /// placed, cancelled, filled), so a REST read is needed only while that socket is down.</summary>
+    private void RefreshUnlessStreaming()
     {
-        lock (_lock)
-            return _currentPositions.Any(p => p.IsOpen) || _currentOrders.Any(o => PendingStatuses.Contains(o.OrderStatus));
+        if (!_orderUpdates.IsConnected) RequestRefresh();
     }
 
+    /// <summary>Reads positions and both order books from Dhan's REST API - at start-up, when the
+    /// order-update socket (re)connects, and when an update can't be applied from memory alone.</summary>
     public async Task RefreshAsync(CancellationToken cancellationToken)
     {
         if (!_session.IsAuthenticated) return;
-        var positions = await _positions.ListAsync(cancellationToken);
-        var orders = await _superOrders.ListAsync(cancellationToken);
-        var plainOrders = await _orders.ListAsync(cancellationToken);
+        lock (_lock) { _refreshing = true; _eventDuringRefresh = false; }
+        IReadOnlyList<DhanPosition> positions;
+        IReadOnlyList<SuperOrderSummary> orders;
+        IReadOnlyList<PlainOrderSummary> plainOrders;
+        try
+        {
+            positions = await _positions.ListAsync(cancellationToken);
+            orders = await _superOrders.ListAsync(cancellationToken);
+            plainOrders = await _orders.ListAsync(cancellationToken);
+        }
+        catch
+        {
+            lock (_lock) _refreshing = false;
+            throw;
+        }
 
         // Every open position's contract streams on the shared feed (Full mode, for bid/ask) - that
         // is what moves its P&L without asking Dhan's REST API.
@@ -142,6 +176,32 @@ public sealed class LiveTradingService : BackgroundService
         }
         if (toSubscribe.Count > 0) await _feed.SubscribeAsync(toSubscribe, cancellationToken, full: true);
 
+        bool raced;
+        lock (_lock)
+        {
+            _currentPositions = positions;
+            _currentOrders = orders;
+            _currentPlainOrders = plainOrders;
+            _trackedSecurityIds = tracked;
+            _protections = BuildProtections(positions, plainOrders);
+            // An order the books do not list yet keeps what the socket already counted for it, so its
+            // next message is not counted twice.
+            var seeded = SeedFills(orders, plainOrders);
+            foreach (var (key, value) in _fills) seeded.TryAdd(key, value);
+            _fills = seeded;
+            _refreshedUtc = DateTimeOffset.UtcNow;
+            raced = _eventDuringRefresh;
+            _refreshing = false;
+        }
+        // An update that arrived while the books were being read may or may not be in them - one more
+        // read once things settle makes the in-memory state exact again.
+        if (raced) RequestRefresh();
+        Push();
+    }
+
+    /// <summary>Protection orders (OIRP-) with a target, for the open positions they guard.</summary>
+    private static Dictionary<uint, List<ProtectionOrder>> BuildProtections(IReadOnlyList<DhanPosition> positions, IReadOnlyList<PlainOrderSummary> plainOrders)
+    {
         var protections = new Dictionary<uint, List<ProtectionOrder>>();
         foreach (var order in plainOrders.Where(o => PendingStatuses.Contains(o.OrderStatus) && IsProtection(o)))
         {
@@ -151,17 +211,210 @@ public sealed class LiveTradingService : BackgroundService
             (protections.TryGetValue(id, out var list) ? list : protections[id] = new()).Add(
                 new ProtectionOrder(order.OrderId, id, position.ExchangeSegment, order.TransactionType == "SELL", target, position.TradingSymbol));
         }
+        return protections;
+    }
 
+    /// <summary>What the REST books say has already traded - the baseline each socket message's traded
+    /// quantity is compared against. Plain orders are leg 0; a super order's entry is leg 1, its
+    /// stop-loss 2 and target 3 (the socket's LegNo).</summary>
+    internal static Dictionary<(string OrderId, int Leg), (int Qty, decimal? Avg)> SeedFills(
+        IReadOnlyList<SuperOrderSummary> orders, IReadOnlyList<PlainOrderSummary> plainOrders)
+    {
+        var fills = new Dictionary<(string, int), (int, decimal?)>();
+        foreach (var o in plainOrders) fills[(o.OrderId, 0)] = (o.FilledQty, null);
+        foreach (var o in orders)
+        {
+            fills[(o.OrderId, 1)] = (o.FilledQty ?? (o.OrderStatus == "TRADED" ? o.Quantity : 0), null);
+            foreach (var leg in o.LegDetails)
+            {
+                var legNo = LegNumber(leg.LegName);
+                if (legNo == 0) continue;
+                fills[(o.OrderId, legNo)] = (leg.OrderStatus == "TRADED" ? leg.TriggeredQuantity ?? o.Quantity : 0, null);
+            }
+        }
+        return fills;
+    }
+
+    private static int LegNumber(string legName) => legName switch { "ENTRY_LEG" => 1, "STOP_LOSS_LEG" => 2, "TARGET_LEG" => 3, _ => 0 };
+    private static string LegName(int legNo) => legNo switch { 2 => "STOP_LOSS_LEG", 3 => "TARGET_LEG", _ => "ENTRY_LEG" };
+
+    /// <summary>
+    /// One message from Dhan's order-update socket, applied straight to the in-memory books - no REST
+    /// call: the order's status, traded and remaining quantity (a super order's entry, stop-loss or target
+    /// leg by LegNo), and any NEW traded quantity moved into its position at the fill's price (worked out
+    /// from the average traded price before and after). P&amp;L then moves on the contract's ticks.
+    /// Only a super order not yet in memory (its legs' prices come from the super-order book) asks for a
+    /// REST read, as does a fill whose price can't be told.
+    /// </summary>
+    internal void ApplyOrderUpdate(DhanOrderUpdate u)
+    {
+        if (string.IsNullOrEmpty(u.OrderNo) || string.IsNullOrEmpty(u.SecurityId)) return;
+        var needsRead = false;
+        KeyValuePair<uint, string>? subscribe = null;
         lock (_lock)
         {
-            _currentPositions = positions;
-            _currentOrders = orders;
-            _currentPlainOrders = plainOrders;
-            _trackedSecurityIds = tracked;
-            _protections = protections;
-            _refreshedUtc = DateTimeOffset.UtcNow;
+            if (_refreshing) _eventDuringRefresh = true;
+            _lastEventUtc = DateTimeOffset.UtcNow;
+
+            // 1. The order books.
+            if (u.IsSuperOrder)
+            {
+                var orders = _currentOrders.ToList();
+                var index = orders.FindIndex(o => o.OrderId == u.OrderNo);
+                if (index < 0) needsRead = true;
+                else
+                {
+                    orders[index] = ApplyToSuperOrder(orders[index], u);
+                    _currentOrders = orders;
+                }
+            }
+            else
+            {
+                var plain = _currentPlainOrders.ToList();
+                var index = plain.FindIndex(o => o.OrderId == u.OrderNo);
+                if (index >= 0)
+                {
+                    var o = plain[index];
+                    plain[index] = o with
+                    {
+                        OrderStatus = u.Status.Length > 0 ? u.Status : o.OrderStatus,
+                        Quantity = u.Quantity > 0 ? u.Quantity : o.Quantity,
+                        FilledQty = Math.Max(o.FilledQty, u.TradedQty),
+                        Price = u.Price > 0 ? u.Price : o.Price,
+                        OmsErrorDescription = u.Status == "REJECTED" ? u.Reason ?? o.OmsErrorDescription : o.OmsErrorDescription,
+                        OrderType = u.OrderType,
+                        TriggerPrice = u.TriggerPrice > 0 ? u.TriggerPrice : o.TriggerPrice,
+                    };
+                }
+                else
+                {
+                    plain.Add(new PlainOrderSummary(u.OrderNo, u.Status, u.SecurityId, u.TransactionType, u.Quantity, u.TradedQty, u.Price,
+                        u.CorrelationId, u.Status == "REJECTED" ? u.Reason : null) { OrderType = u.OrderType, TriggerPrice = u.TriggerPrice > 0 ? u.TriggerPrice : null });
+                }
+                _currentPlainOrders = plain;
+            }
+
+            // 2. New traded quantity into the position.
+            var key = (u.OrderNo, u.IsSuperOrder ? Math.Max(1, u.LegNo) : 0);
+            var seen = _fills.TryGetValue(key, out var s) ? s : (Qty: 0, Avg: (decimal?)null);
+            if (u.TradedQty > seen.Qty)
+            {
+                var quantity = u.TradedQty - seen.Qty;
+                var price = FillPrice(seen.Qty, seen.Avg, u);
+                if (price is { } px)
+                {
+                    var positions = _currentPositions.ToList();
+                    var index = positions.FindIndex(p => p.SecurityId == u.SecurityId && p.ProductType == u.ProductType);
+                    if (index < 0) index = positions.FindIndex(p => p.SecurityId == u.SecurityId);
+                    var existing = index >= 0 ? positions[index] : null;
+                    uint.TryParse(u.SecurityId, out var id);
+                    var symbol = existing?.TradingSymbol ?? _chain.FindBySecurityId(id)?.TradingSymbol ?? u.Symbol ?? u.SecurityId;
+                    var updated = ApplyFill(existing, u, quantity, px, symbol);
+                    if (index >= 0) positions[index] = updated; else positions.Add(updated);
+                    _currentPositions = positions;
+                    if (updated.IsOpen && id != 0)
+                    {
+                        if (_trackedSecurityIds.Add(id) && !_feed.IsSubscribed(id)) subscribe = new(id, updated.ExchangeSegment);
+                    }
+                    else if (!updated.IsOpen) _trackedSecurityIds.Remove(id);
+                    _fills[key] = (u.TradedQty, u.AvgTradedPrice > 0 ? u.AvgTradedPrice : null);
+                }
+                else needsRead = true;
+            }
+            else if (u.AvgTradedPrice > 0 && seen.Avg is null && u.TradedQty == seen.Qty && seen.Qty > 0)
+            {
+                _fills[key] = (seen.Qty, u.AvgTradedPrice);
+            }
+
+            _protections = BuildProtections(_currentPositions, _currentPlainOrders);
         }
+
+        if (subscribe is { } sub)
+        {
+            _ = Task.Run(async () =>
+            {
+                try { await _feed.SubscribeAsync(new Dictionary<uint, string> { [sub.Key] = sub.Value }, CancellationToken.None, full: true); }
+                catch (Exception ex) { _logger.LogWarning(ex, "Subscribing {SecurityId} for live P&L failed.", sub.Key); }
+            });
+        }
+        if (needsRead) RequestRefresh();
         Push();
+    }
+
+    private static SuperOrderSummary ApplyToSuperOrder(SuperOrderSummary order, DhanOrderUpdate u)
+    {
+        if (u.LegNo is 2 or 3)
+        {
+            var name = LegName(u.LegNo);
+            var legs = order.LegDetails.ToList();
+            var index = legs.FindIndex(l => l.LegName == name);
+            // A stop-loss leg's price is its trigger; a target leg's is its limit.
+            var price = u.LegNo == 2 ? (u.TriggerPrice > 0 ? u.TriggerPrice : u.Price) : u.Price;
+            if (index >= 0)
+            {
+                var leg = legs[index];
+                legs[index] = leg with
+                {
+                    OrderStatus = u.Status.Length > 0 ? u.Status : leg.OrderStatus,
+                    Price = price > 0 ? price : leg.Price,
+                    TriggeredQuantity = u.TradedQty > 0 ? u.TradedQty : leg.TriggeredQuantity,
+                };
+            }
+            else legs.Add(new SuperOrderLeg(name, u.Status, u.TransactionType, price > 0 ? price : null, null, u.TradedQty > 0 ? u.TradedQty : null));
+            return order with
+            {
+                LegDetails = legs,
+                TargetPrice = u.LegNo == 3 && price > 0 ? price : order.TargetPrice,
+                StopLossPrice = u.LegNo == 2 && price > 0 ? price : order.StopLossPrice,
+            };
+        }
+        return order with
+        {
+            OrderStatus = u.Status.Length > 0 ? u.Status : order.OrderStatus,
+            Quantity = u.Quantity > 0 ? u.Quantity : order.Quantity,
+            Price = u.Price > 0 ? u.Price : order.Price,
+            FilledQty = Math.Max(order.FilledQty ?? 0, u.TradedQty),
+            OmsErrorDescription = u.Status == "REJECTED" ? u.Reason ?? order.OmsErrorDescription : order.OmsErrorDescription,
+        };
+    }
+
+    /// <summary>The price of the NEW part of a fill: from the average traded price before and after
+    /// (exact for any number of partial fills), else the last traded price, else the average.</summary>
+    internal static decimal? FillPrice(int seenQty, decimal? seenAvg, DhanOrderUpdate u)
+    {
+        var quantity = u.TradedQty - seenQty;
+        if (quantity <= 0) return null;
+        if (u.AvgTradedPrice > 0 && (seenQty == 0 || seenAvg is not null))
+        {
+            var price = (u.AvgTradedPrice * u.TradedQty - (seenAvg ?? 0) * seenQty) / quantity;
+            if (price > 0) return Math.Round(price, 4);
+        }
+        if (u.TradedPrice > 0) return u.TradedPrice;
+        return u.AvgTradedPrice > 0 ? u.AvgTradedPrice : null;
+    }
+
+    /// <summary>A position after a fill of <paramref name="quantity"/> at <paramref name="price"/>: net
+    /// quantity, the day's buy/sell quantities and averages, and booked P&amp;L - which moves by the change
+    /// in matched quantity x (sell average - buy average), on top of what Dhan last reported.</summary>
+    internal static DhanPosition ApplyFill(DhanPosition? position, DhanOrderUpdate u, int quantity, decimal price, string symbol)
+    {
+        var p = position ?? new DhanPosition(u.SecurityId, symbol, u.ExchangeSegment, u.ProductType, "CLOSED", 0);
+        int buyQty = p.BuyQty, sellQty = p.SellQty;
+        decimal buyAvg = p.BuyAvg, sellAvg = p.SellAvg;
+        var bookedBefore = Math.Min(buyQty, sellQty) * (sellAvg - buyAvg);
+        var isBuy = u.TransactionType == "BUY";
+        if (isBuy) { buyAvg = (buyAvg * buyQty + price * quantity) / (buyQty + quantity); buyQty += quantity; }
+        else { sellAvg = (sellAvg * sellQty + price * quantity) / (sellQty + quantity); sellQty += quantity; }
+        var bookedAfter = Math.Min(buyQty, sellQty) * (sellAvg - buyAvg);
+        var net = p.NetQty + (isBuy ? quantity : -quantity);
+        return p with
+        {
+            NetQty = net,
+            PositionType = net > 0 ? "LONG" : net < 0 ? "SHORT" : "CLOSED",
+            BuyQty = buyQty, SellQty = sellQty,
+            BuyAvg = Math.Round(buyAvg, 4), SellAvg = Math.Round(sellAvg, 4),
+            RealizedProfit = Math.Round(p.RealizedProfit + bookedAfter - bookedBefore, 2),
+        };
     }
 
     internal void OnTick(SpotTick tick)
@@ -246,7 +499,7 @@ public sealed class LiveTradingService : BackgroundService
             finally
             {
                 _actionLock.Release();
-                RequestRefresh();
+                RefreshUnlessStreaming();
             }
         }
         catch (Exception ex)
@@ -266,13 +519,14 @@ public sealed class LiveTradingService : BackgroundService
         IReadOnlyList<DhanPosition> positions;
         IReadOnlyList<SuperOrderSummary> orders;
         IReadOnlyList<PlainOrderSummary> plainOrders;
-        DateTimeOffset? refreshed;
+        DateTimeOffset? refreshed, lastEvent;
         lock (_lock)
         {
             positions = _currentPositions;
             orders = _currentOrders;
             plainOrders = _currentPlainOrders;
             refreshed = _refreshedUtc;
+            lastEvent = _lastEventUtc;
         }
 
         var rows = new List<LivePositionRow>(positions.Count);
@@ -320,7 +574,8 @@ public sealed class LiveTradingService : BackgroundService
             rows.Where(r => r.IsOpen).Concat(rows.Where(r => !r.IsOpen)).ToList(),
             pending, rejected,
             rows.Sum(r => r.RealizedPnl + (r.UnrealizedPnl ?? 0)),
-            refreshed, _orderUpdates.IsConnected, _session.IsAuthenticated, _maxLots);
+            refreshed, _orderUpdates.IsConnected, _session.IsAuthenticated, _maxLots)
+        { LastOrderEventUtc = lastEvent };
     }
 
     internal static decimal? UnrealizedPnl(DhanPosition position, decimal? ltp)
@@ -390,7 +645,7 @@ public sealed class LiveTradingService : BackgroundService
                     prices.Limit, prices.Target, prices.StopLoss, $"OIR-{stamp}-{i + 1}", 0, cancellationToken);
                 if (result is null)
                 {
-                    RequestRefresh();
+                    RefreshUnlessStreaming();
                     return ManualOrderResult.Fail(orderIds.Count == 0
                         ? $"Dhan rejected the order: {placeError}"
                         : $"placed {orderIds.Count} of {slices.Count} slices, then Dhan rejected the next: {placeError}", orderIds, prices);
@@ -400,7 +655,7 @@ public sealed class LiveTradingService : BackgroundService
 
             _logger.LogWarning("Manual LIVE order: {Transaction} {Symbol} x{Quantity} LIMIT {Limit} (ref {Reference}), target {Target}, SL {StopLoss} - orders {Orders}.",
                 transactionType, contract.TradingSymbol, quantity, prices.Limit, prices.Reference, prices.Target, prices.StopLoss, string.Join(",", orderIds));
-            RequestRefresh();
+            RefreshUnlessStreaming();
             return new ManualOrderResult(true,
                 $"{transactionType} {contract.TradingSymbol} x{quantity} at LIMIT {prices.Limit:0.##} ({(isSell ? "bid" : "ask")} {prices.Reference:0.##}) · target {prices.Target:0.##} · SL {prices.StopLoss:0.##}",
                 orderIds, prices);
@@ -425,10 +680,12 @@ public sealed class LiveTradingService : BackgroundService
         finally { _actionLock.Release(); }
     }
 
-    /// <summary>Exit all from the trade panel: cancels this panel's own unfilled entries ("OIR-" super
-    /// orders) and closes every open position on the account the same careful way Close does. Unlike
-    /// Dhan's account-wide DELETE /positions (EmergencyExitAllAsync) it never touches other pending
-    /// orders, and every exit is a priced, chased LIMIT order.</summary>
+    /// <summary>Exit all from the trade panel: cancels EVERY pending order on the account first - unfilled
+    /// super orders (cancelling the entry cancels all its legs) and pending plain orders, except this
+    /// panel's own working exits ("OIRX-", already closing) - then closes every open position the same
+    /// careful way Close does: legs and protection cancelled first, a priced, chased LIMIT exit for
+    /// exactly what is open. Unlike Dhan's DELETE /positions (EmergencyExitAllAsync) no exit is a blind
+    /// market order.</summary>
     public async Task<ManualOrderResult> ExitAllAsync(decimal slippagePoints, CancellationToken cancellationToken)
     {
         if (!_session.IsAuthenticated) return ManualOrderResult.Fail("not logged in to Dhan right now");
@@ -439,13 +696,9 @@ public sealed class LiveTradingService : BackgroundService
             var failures = new List<string>();
             var orderIds = new List<string>();
 
-            foreach (var entry in (await _superOrders.ListAsync(cancellationToken))
-                .Where(o => PendingStatuses.Contains(o.OrderStatus) && o.CorrelationId?.StartsWith("OIR-", StringComparison.Ordinal) == true))
-            {
-                var (cancelled, error) = await _superOrders.CancelAsync(entry.OrderId, "ENTRY_LEG", cancellationToken);
-                if (cancelled is null) failures.Add($"could not cancel pending entry {entry.OrderId}: {error}");
-                else messages.Add($"cancelled pending entry {entry.OrderId}");
-            }
+            var (cancelledCount, cancelFailures) = await CancelPendingAsync(null, cancellationToken);
+            failures.AddRange(cancelFailures);
+            if (cancelledCount > 0) messages.Add($"cancelled {cancelledCount} pending order(s)");
 
             var open = (await _positions.ListAsync(cancellationToken)).Where(p => p.IsOpen).ToList();
             foreach (var position in open)
@@ -455,9 +708,9 @@ public sealed class LiveTradingService : BackgroundService
                 orderIds.AddRange(result.OrderIds);
             }
 
-            RequestRefresh();
+            RefreshUnlessStreaming();
             if (open.Count == 0 && messages.Count == 0 && failures.Count == 0)
-                return new ManualOrderResult(true, "nothing to exit - no open positions or pending panel orders", Array.Empty<string>(), null);
+                return new ManualOrderResult(true, "nothing to exit - no open positions or pending orders", Array.Empty<string>(), null);
             var text = string.Join(" · ", failures.Concat(messages));
             return failures.Count == 0 ? new ManualOrderResult(true, text, orderIds, null) : ManualOrderResult.Fail(text, orderIds);
         }
@@ -474,20 +727,53 @@ public sealed class LiveTradingService : BackgroundService
         if (!_session.IsAuthenticated) return ManualOrderResult.Fail("not logged in to Dhan right now");
         var error = await _positions.ExitAllAccountAsync(cancellationToken);
         _logger.LogWarning("EMERGENCY exit-all (Dhan DELETE /positions) requested: {Result}.", error ?? "accepted");
-        RequestRefresh();
+        RefreshUnlessStreaming();
         return error is null
             ? new ManualOrderResult(true, "Dhan accepted exit-all: every position on the account is being closed and every open order cancelled", Array.Empty<string>(), null)
             : ManualOrderResult.Fail($"Dhan rejected exit-all: {error}");
     }
 
+    /// <summary>Cancels pending orders - for one contract, or all of them (null): unfilled super orders
+    /// (ENTRY_LEG cancels the whole super order, legs included) and pending plain orders other than this
+    /// panel's working exits (OIRX-) and protection stop-losses (OIRP-, which CancelProtectionAsync owns).
+    /// Returns how many were cancelled and what failed.</summary>
+    private async Task<(int Cancelled, List<string> Failures)> CancelPendingAsync(string? securityId, CancellationToken cancellationToken)
+    {
+        var failures = new List<string>();
+        var cancelled = 0;
+        var superOrders = await _superOrders.ListAsync(cancellationToken);
+        foreach (var entry in superOrders.Where(o => PendingStatuses.Contains(o.OrderStatus) && (securityId is null || o.SecurityId == securityId)))
+        {
+            var (result, error) = await _superOrders.CancelAsync(entry.OrderId, "ENTRY_LEG", cancellationToken);
+            if (result is null) failures.Add($"could not cancel pending super order {entry.OrderId}: {error}");
+            else cancelled++;
+        }
+        // A super order's own legs can show in the plain order book too - those go with their super order.
+        var superIds = superOrders.Select(o => o.OrderId).ToHashSet();
+        foreach (var order in (await _orders.ListAsync(cancellationToken)).Where(o =>
+                     PendingStatuses.Contains(o.OrderStatus) && (securityId is null || o.SecurityId == securityId) && !superIds.Contains(o.OrderId)
+                     && o.CorrelationId?.StartsWith("OIRX-", StringComparison.Ordinal) != true && !IsProtection(o)))
+        {
+            var (result, error) = await _orders.CancelAsync(order.OrderId, cancellationToken);
+            if (result is null) failures.Add($"could not cancel pending order {order.OrderId}: {error}");
+            else cancelled++;
+        }
+        return (cancelled, failures);
+    }
+
+    /// <summary>Close one position: its unfilled super orders (and other pending orders in the contract)
+    /// are cancelled, its filled super orders' target/stop-loss legs and any protection order too - all
+    /// BEFORE the position is re-read and sized - then one priced, chased exit.</summary>
     private async Task<ManualOrderResult> CloseCoreAsync(string securityId, decimal slippagePoints, CancellationToken cancellationToken)
     {
+        var (_, cancelFailures) = await CancelPendingAsync(securityId, cancellationToken);
+        foreach (var failure in cancelFailures) _logger.LogWarning("Closing {Security}: {Failure}", securityId, failure);
         await CancelProtectionAsync(securityId, cancellationToken);
 
         var position = (await _positions.ListAsync(cancellationToken)).FirstOrDefault(p => p.SecurityId == securityId && p.IsOpen);
         if (position is null)
         {
-            RequestRefresh();
+            RefreshUnlessStreaming();
             return new ManualOrderResult(true, "nothing left to close - the position is already flat", Array.Empty<string>(), null);
         }
 
@@ -495,12 +781,12 @@ public sealed class LiveTradingService : BackgroundService
         var quantity = ExitQuantity(position.NetQty, working);
         if (quantity <= 0)
         {
-            RequestRefresh();
+            RefreshUnlessStreaming();
             return new ManualOrderResult(true, $"{position.TradingSymbol}: exit orders for the whole position are already working", Array.Empty<string>(), null);
         }
 
         var (orderIds, price, error) = await PlaceExitAsync(position, quantity, slippagePoints, cancellationToken);
-        RequestRefresh();
+        RefreshUnlessStreaming();
         if (error is not null) return ManualOrderResult.Fail(error, orderIds);
         return new ManualOrderResult(true, $"{(position.ClosesBySelling ? "SELL" : "BUY")} {position.TradingSymbol} x{quantity} at LIMIT {price:0.##} to close", orderIds, null);
     }
@@ -557,14 +843,14 @@ public sealed class LiveTradingService : BackgroundService
                 // Protect whatever no exit order covers (some slices may have gone out before the failure).
                 var uncovered = (int)ExitQuantity(position.NetQty, await WorkingExitQuantityAsync(position, cancellationToken));
                 var note = await ProtectAsync(position, contract, uncovered, target, stopLoss, slippagePoints, cancellationToken);
-                RequestRefresh();
+                RefreshUnlessStreaming();
                 return ManualOrderResult.Fail($"{error}{(note.Length > 0 ? $" · {note}" : "")}", orderIds);
             }
 
             // 3. Protect the rest.
             var rest = (int)Math.Max(0, available - quantity);
             var protectNote = rest == 0 ? "" : await ProtectAsync(position, contract, rest, target, stopLoss, slippagePoints, cancellationToken);
-            RequestRefresh();
+            RefreshUnlessStreaming();
             _logger.LogWarning("Manual LIVE partial exit: {Symbol} x{Quantity} at LIMIT {Price}, {Rest} left. {Note}", position.TradingSymbol, quantity, price, rest, protectNote);
             return new ManualOrderResult(true,
                 $"{(position.ClosesBySelling ? "SELL" : "BUY")} {position.TradingSymbol} x{quantity} at LIMIT {price:0.##} · {rest} left{(protectNote.Length > 0 ? $" · {protectNote}" : "")}",
@@ -709,13 +995,13 @@ public sealed class LiveTradingService : BackgroundService
             for (var attempt = 1; attempt <= MaxExitAttempts; attempt++)
             {
                 await Task.Delay(ExitCheckInterval);
-                var order = (await _orders.ListAsync(CancellationToken.None)).FirstOrDefault(o => o.OrderId == orderId);
+                var order = await CurrentOrderAsync(orderId);
                 if (order is null) continue;
-                if (order.OrderStatus == "TRADED") { RequestRefresh(); return; }
+                if (order.OrderStatus == "TRADED") { RefreshUnlessStreaming(); return; }
                 if (order.OrderStatus is "CANCELLED" or "REJECTED" or "EXPIRED")
                 {
                     _logger.LogWarning("Manual exit {OrderId} ({Symbol}) ended {Status}: {Reason}", orderId, symbol, order.OrderStatus, order.OmsErrorDescription);
-                    RequestRefresh();
+                    RefreshUnlessStreaming();
                     return;
                 }
                 if (attempt == MaxExitAttempts) break;
@@ -728,12 +1014,27 @@ public sealed class LiveTradingService : BackgroundService
                 else _logger.LogInformation("Re-priced manual exit {OrderId} ({Symbol}) to {Price} for {Remaining} (attempt {Attempt}).", orderId, symbol, price, remaining, attempt);
             }
             _logger.LogWarning("Manual exit {OrderId} ({Symbol}) still not filled after {Attempts} attempts - left resting.", orderId, symbol, MaxExitAttempts);
-            RequestRefresh();
+            RefreshUnlessStreaming();
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Chasing manual exit {OrderId} ({Symbol}) failed.", orderId, symbol);
         }
+    }
+
+    /// <summary>An order's current state: from memory while the order-update socket keeps it current,
+    /// from Dhan's order book only when the socket is down (or has not reported the order yet).</summary>
+    private async Task<PlainOrderSummary?> CurrentOrderAsync(string orderId)
+    {
+        if (_orderUpdates.IsConnected)
+        {
+            lock (_lock)
+            {
+                var known = _currentPlainOrders.FirstOrDefault(o => o.OrderId == orderId);
+                if (known is not null) return known;
+            }
+        }
+        return (await _orders.ListAsync(CancellationToken.None)).FirstOrDefault(o => o.OrderId == orderId);
     }
 
     /// <summary>Cancels an unfilled order: a manual entry (the whole super order) or a working exit.</summary>
@@ -742,7 +1043,7 @@ public sealed class LiveTradingService : BackgroundService
         string? error;
         if (isExitOrder) { var (result, e) = await _orders.CancelAsync(orderId, cancellationToken); error = result is null ? e ?? "no reason given" : null; }
         else { var (result, e) = await _superOrders.CancelAsync(orderId, "ENTRY_LEG", cancellationToken); error = result is null ? e ?? "no reason given" : null; }
-        RequestRefresh();
+        RefreshUnlessStreaming();
         return error is null ? new ManualOrderResult(true, $"order {orderId} cancelled", new[] { orderId }, null) : ManualOrderResult.Fail($"Dhan did not cancel it: {error}");
     }
 
@@ -800,4 +1101,9 @@ public sealed record LivePendingOrder(
 /// position today. OrderUpdatesConnected: whether position changes are arriving by event right now.</summary>
 public sealed record LivePositionsSnapshot(
     IReadOnlyList<LivePositionRow> Positions, IReadOnlyList<LivePendingOrder> PendingOrders, IReadOnlyList<string> RecentRejections,
-    decimal DayPnl, DateTimeOffset? RefreshedUtc, bool OrderUpdatesConnected, bool DhanLoggedIn, int MaxLots);
+    decimal DayPnl, DateTimeOffset? RefreshedUtc, bool OrderUpdatesConnected, bool DhanLoggedIn, int MaxLots)
+{
+    /// <summary>When the order-update socket last changed an order or position (RefreshedUtc is the last
+    /// full read from Dhan's REST API, which now happens only on (re)connect).</summary>
+    public DateTimeOffset? LastOrderEventUtc { get; init; }
+}

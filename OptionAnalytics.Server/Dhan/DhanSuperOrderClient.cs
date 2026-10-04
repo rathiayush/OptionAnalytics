@@ -29,6 +29,8 @@ public sealed record SuperOrderSummary(
 {
     /// <summary>The tag the order was placed with - manual orders from the trade panel start "OIR-".</summary>
     public string? CorrelationId { get; init; }
+    /// <summary>How much of the entry has filled, when Dhan reports it.</summary>
+    public int? FilledQty { get; init; }
 }
 
 /// <summary>Result of a place/modify/cancel call - just what Dhan's own response bodies carry for
@@ -207,6 +209,7 @@ public sealed class DhanSuperOrderClient
                 legs)
             {
                 CorrelationId = GetString(element, "correlationId"),
+                FilledQty = GetInt(element, "filledQty"),
             });
         }
 

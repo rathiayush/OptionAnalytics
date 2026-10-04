@@ -7,8 +7,9 @@ namespace OptionAnalytics.Server.Services.OrderFlow;
 /// <summary>
 /// Any day's order flow for the Order Flow page's Load day: EXACT when the server has the day (the
 /// live engine for today, OrderFlowDayStore for the last few days), otherwise ESTIMATED from Dhan's
-/// 1-minute futures candles (OrderFlowEstimator). Candles are cached in memory - a past day never
-/// changes (kept for the last few days asked for); today's for a minute.
+/// 1-minute futures candles (OrderFlowEstimator). Candles are fetched straight from Dhan and kept in
+/// memory only (never written to disk) for the rest of the IST day - a past day never changes, today's
+/// is re-read after a minute - and the whole lot is dropped when the day changes.
 /// </summary>
 public sealed class OrderFlowHistory
 {
@@ -18,6 +19,7 @@ public sealed class OrderFlowHistory
     private readonly OrderFlowService _orderFlow;
     private readonly DhanHistoricalDataService _historical;
     private readonly ConcurrentDictionary<(uint SecurityId, DateOnly Day), (IReadOnlyList<CandleWithVolume> Candles, DateTimeOffset FetchedAt)> _candles = new();
+    private DateOnly _cacheDay = IstClock.Today();
 
     public OrderFlowHistory(OrderFlowService orderFlow, DhanHistoricalDataService historical)
     {
@@ -47,7 +49,9 @@ public sealed class OrderFlowHistory
 
         // Estimated from Dhan's 1-minute candles.
         var key = (contract.SecurityId, date);
-        var isToday = date == IstClock.Today();
+        var today = IstClock.Today();
+        if (today != _cacheDay) { _candles.Clear(); _cacheDay = today; }
+        var isToday = date == today;
         if (!_candles.TryGetValue(key, out var cached) || (isToday && DateTimeOffset.UtcNow - cached.FetchedAt > TodayCandleTtl))
         {
             var (bars, _, error) = await _historical.GetIntradayFuturesCandlesAsync(contract.SecurityId, contract.DhanSegment, date, date, 1, cancellationToken);
@@ -64,4 +68,25 @@ public sealed class OrderFlowHistory
         return new Result(OrderFlowEstimator.Build(underlying.ToUpperInvariant(), contract.SecurityId, contract.TradingSymbol, contract.DhanSegment,
             contract.TickSize, contract.LotSize, contract.Expiry, date, cached.Candles, rowSize, Math.Max(1, minTradeLots) * (long)contract.LotSize), null);
     }
+
+    /// <summary>Whether Dhan serves a day's 1-minute candles for the futures contract listed then - an
+    /// expired one included (resolved through NSE's contract file). Always asks Dhan afresh.</summary>
+    public async Task<HistoryCheck> CheckAsync(string underlying, DateOnly date, DateOnly? expiry, CancellationToken cancellationToken)
+    {
+        var u = underlying.ToUpperInvariant();
+        var today = IstClock.Today();
+        var contract = await _orderFlow.ResolveContractAsync(underlying, expiry, date, cancellationToken);
+        if (contract is null)
+            return new HistoryCheck(u, date, null, null, null, false, null, 0, null, null, "no contract found for that date (NSE contract file unreachable, or not listed)");
+        var source = date < today && NseFuturesContractArchive.Covers(u) ? "NSE contract file for that date" : "Dhan scrip master";
+        var (bars, _, error) = await _historical.GetIntradayFuturesCandlesAsync(contract.SecurityId, contract.DhanSegment, date, date, 1, cancellationToken);
+        var candles = bars.Select(b => b.Bar).ToList();
+        return new HistoryCheck(u, date, contract.TradingSymbol, contract.SecurityId, contract.Expiry, contract.Expiry < today, source,
+            candles.Count, candles.Count > 0 ? candles[0].Time : null, candles.Count > 0 ? candles[^1].Time : null,
+            error ?? (candles.Count == 0 ? "Dhan returned no candles (holiday, or Dhan does not serve this contract's history)" : null));
+    }
+
+    public sealed record HistoryCheck(
+        string Underlying, DateOnly Date, string? ContractSymbol, uint? SecurityId, DateOnly? Expiry, bool Expired, string? ContractSource,
+        int Candles, DateTimeOffset? FirstCandle, DateTimeOffset? LastCandle, string? Error);
 }
