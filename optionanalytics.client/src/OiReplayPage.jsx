@@ -3712,14 +3712,53 @@ export default function OiReplayPage() {
   const [syncMismatch, setSyncMismatch] = useState(null)
   const pendingSyncRef = useRef(null)
   const syncClockMs = !isLive && currentBar ? fromChartTime(currentBar.time) * 1000 + 60_000 : null
+  // Follows the other page onto its day: loads it here as a replay - switching the underlying first
+  // (the pending message is applied again once it has switched) - or goes live with it. Once per day
+  // asked: the re-applies while that day loads must not restart its load.
+  const followRef = useRef(null)
+  const followDay = (msg) => {
+    if (msg.underlying !== underlying) {
+      pendingSyncRef.current = msg
+      selectUnderlying(msg.underlying)
+      return
+    }
+    const key = msg.live ? `${msg.underlying}:live` : `${msg.underlying}:${msg.date}`
+    if (followRef.current === key) return
+    followRef.current = key
+    setSyncMismatch(null)
+    if (msg.live) { goLive(); return }
+    const day = dayjs(msg.date)
+    setTodayMode('replay')
+    setDate(day)
+    load(day, { live: false })
+  }
   const applySync = (msg) => {
     pendingSyncRef.current = null
-    if (msg.underlying !== underlying || msg.date !== result?.date) {
+    if (!['NIFTY', 'BANKNIFTY', 'SENSEX'].includes(msg.underlying)) return
+    if (msg.type === 'day') {
+      // The other page went live: so does this one.
+      if (msg.live) {
+        if (!isLive || msg.underlying !== underlying) followDay(msg)
+        return
+      }
+      if (!msg.date) return
+      // The user picked (or reloaded) a day there: load it here too - the same day as well, so a Load
+      // day refresh reaches both pages. Its clock follows once it has loaded.
+      pendingSyncRef.current = { ...msg, type: 'state', reason: 'user', ms: null, playing: false }
+      followDay(msg)
+      return
+    }
+    if (!msg.date) return
+    if (isLive || msg.underlying !== underlying || msg.date !== result?.date) {
+      // A heartbeat never moves this page to another day - only the user's pick there (or the reply
+      // when joining) does, so a heartbeat already in flight cannot pull it back to the old day.
+      if (msg.reason === 'tick') return
       pendingSyncRef.current = msg
-      setSyncMismatch({ underlying: msg.underlying, date: msg.date })
+      followDay(msg)
       return
     }
     if (oneMinBars.length === 0) { pendingSyncRef.current = msg; return }
+    followRef.current = null
     setSyncMismatch(null)
     if (msg.speed > 0) setSpeedMs(Math.max(20, Math.round(60_000 / msg.speed)))
     let count = manualVisibleCount
@@ -3733,33 +3772,47 @@ export default function OiReplayPage() {
   }
   const sync = useReplaySync({
     enabled: syncEnabled, active: !isLive, kind: 'oi',
-    state: { underlying, date: result?.date ?? null, ms: syncClockMs, playing, speed: 60_000 / speedMs },
+    // No day while one is loading: until it lands, `result` is still the previous day's.
+    state: { underlying, date: isLive || loading ? null : result?.date ?? null, ms: syncClockMs, playing, speed: 60_000 / speedMs, live: isLive },
     onRemote: applySync,
   })
-  // A sync that arrived before the matching day had loaded.
+  // A sync that arrived before the matching day had loaded (`result` itself, not its date: reloading
+  // the same day must count too).
   useEffect(() => {
     if (pendingSyncRef.current) applySync(pendingSyncRef.current)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [result?.date, oneMinBars.length, underlying])
+  }, [result, oneMinBars.length, underlying])
+  // The day the other page is on could not be loaded here: say so, with a retry.
+  useEffect(() => {
+    const msg = pendingSyncRef.current
+    if (error && msg?.date && followRef.current === `${msg.underlying}:${msg.date}`) setSyncMismatch({ underlying: msg.underlying, date: msg.date })
+  }, [error])
   const loadSyncedDay = () => {
     if (!syncMismatch?.date) return
-    if (syncMismatch.underlying !== underlying) { setUnderlying(syncMismatch.underlying); return }
-    const day = dayjs(syncMismatch.date)
+    followRef.current = null
+    pendingSyncRef.current = { type: 'day', underlying: syncMismatch.underlying, date: syncMismatch.date }
+    followDay(pendingSyncRef.current)
+  }
+  // The user picked a day here (or went live): the Order Flow page loads the same.
+  const ownDay = () => { followRef.current = null; pendingSyncRef.current = null; setSyncMismatch(null) }
+  const goLiveAndAnnounce = () => { ownDay(); goLive(); sync.announceDay({ underlying, live: true }) }
+  const loadDayAndAnnounce = () => { ownDay(); loadForReplay(); sync.announceDay({ underlying, date: date?.format('YYYY-MM-DD') }) }
+  // With Sync on, picking a date loads it straight away - here and on the Order Flow page.
+  const pickDate = (d) => {
+    setDate(d)
+    if (!syncEnabled || !d || !underlying) return
+    ownDay()
     setTodayMode('replay')
-    setDate(day)
-    load(day, { live: false })
+    load(d, { live: false })
+    sync.announceDay({ underlying, date: d.format('YYYY-MM-DD') })
   }
   const syncControl = (
     <>
       <ReplaySyncControl
         enabled={syncEnabled} onChange={setSyncEnabled} sync={sync} kind="oi"
-        mismatch={syncMismatch ? `Order Flow is on ${syncMismatch.underlying} ${syncMismatch.date}` : null}
+        mismatch={syncMismatch ? `Order Flow is on ${syncMismatch.underlying} ${syncMismatch.date} - could not load it here` : null}
       />
-      {syncEnabled && syncMismatch && (
-        <Button size="small" onClick={loadSyncedDay}>
-          {syncMismatch.underlying !== underlying ? `Switch to ${syncMismatch.underlying}` : `Load ${syncMismatch.date}`}
-        </Button>
-      )}
+      {syncEnabled && syncMismatch && <Button size="small" onClick={loadSyncedDay}>Retry {syncMismatch.date}</Button>}
     </>
   )
 
@@ -3959,7 +4012,7 @@ export default function OiReplayPage() {
             </Text>
             <Space wrap size={12}>
               <Button
-                type="primary" onClick={goLive} loading={loading} disabled={!underlying}
+                type="primary" onClick={goLiveAndAnnounce} loading={loading} disabled={!underlying}
                 style={isLive ? { background: UP_COLOR, borderColor: UP_COLOR } : undefined}
               >
                 ● {isLive ? 'Live' : 'Go Live'}
@@ -4000,18 +4053,18 @@ export default function OiReplayPage() {
                   options={[{ value: 'WEEK', label: 'Weekly', disabled: underlying === 'BANKNIFTY' }, { value: 'MONTH', label: 'Monthly' }]}
                 />
               )}
-              <DatePicker value={date} onChange={setDate} format="DD MMM YYYY" placeholder="Trading day" />
+              <DatePicker value={date} onChange={pickDate} format="DD MMM YYYY" placeholder="Trading day" />
               <Select value={timeframe} onChange={setTimeframe} style={{ width: 110 }} options={TIMEFRAME_OPTIONS} />
               <Tooltip title={isTodayDate ? "Replays today's session so far with the Start/Pause/slider - use Go Live to follow it live again" : undefined}>
-                <Button type="primary" onClick={loadForReplay} loading={loading} disabled={!canLoad}>Load day</Button>
+                <Button type="primary" onClick={loadDayAndAnnounce} loading={loading} disabled={!canLoad}>Load day</Button>
               </Tooltip>
               {isTodayDate && !isLive && oneMinBars.length > 0 && (
                 <Tag color="blue">Replaying today up to {istTimeFormatter(oneMinBars.at(-1).time)} - Load day again for the latest</Tag>
               )}
               {isLive && <Checkbox checked={showVwap} onChange={(e) => setShowVwap(e.target.checked)}>VWAP</Checkbox>}
               <Checkbox checked={showVolumeProfile} onChange={(e) => setShowVolumeProfile(e.target.checked)}>Volume Profile</Checkbox>
-              {/* Sync with the Order Flow replay in another tab - only while replaying (today live has no replay clock). */}
-              {!isLive && result && syncControl}
+              {/* Sync with the Order Flow page in another tab - the day always; the replay clock while replaying. */}
+              {syncControl}
               {isLive && (
                 // Today's own run + live ticks are kept in this browser (see LIVE_DAY_CACHE_STORAGE_KEY's
                 // own doc comment) so a reload doesn't have to re-fetch - this is the one way to force a
