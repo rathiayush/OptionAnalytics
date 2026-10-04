@@ -254,6 +254,7 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<DhanDepthFeedClien
 builder.Services.AddSingleton<DhanTwoHundredDepthClient>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<DhanTwoHundredDepthClient>());
 builder.Services.AddSingleton<OptionAnalytics.Server.Services.OrderFlow.OrderFlowDayStore>();
+builder.Services.AddSingleton<OptionAnalytics.Server.Services.OrderFlow.OrderFlowHistory>();
 builder.Services.AddSingleton<OptionAnalytics.Server.Services.OrderFlow.OrderFlowService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<OptionAnalytics.Server.Services.OrderFlow.OrderFlowService>());
 

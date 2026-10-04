@@ -344,8 +344,59 @@ public sealed class OrderFlowEngineTests
         var days = store.Days("nifty");
         Assert.Equal(3, days.Count); // OrderFlow:DaysInMemory default
         Assert.True(days[0].Date > days[2].Date);
-        Assert.NotNull(store.EngineFor("NIFTY", days[0].Date));
-        Assert.Null(store.EngineFor("NIFTY", DateOnly.FromDateTime(T0.ToOffset(IstClock.Offset).DateTime)));
-        Assert.Single(store.EngineFor("NIFTY", days[0].Date)!.Snapshot(1, 75, 900).Bars);
+        Assert.NotNull(store.EngineFor("NIFTY", 35001, days[0].Date));
+        Assert.Null(store.EngineFor("NIFTY", 35001, DateOnly.FromDateTime(T0.ToOffset(IstClock.Offset).DateTime)));
+        Assert.Single(store.EngineFor("NIFTY", 35001, days[0].Date)!.Snapshot(1, 75, 900).Bars);
     }
+
+    // ---- days estimated from 1-minute candles ----------------------------------------------
+
+    private static OptionAnalytics.Server.Models.CandleWithVolume Candle(int minute, decimal open, decimal high, decimal low, decimal close, long volume) =>
+        new(T0.AddMinutes(minute), open, high, low, close, volume);
+
+    [Fact]
+    public void Estimator_SplitsVolumeByPriceMoveAndSpreadsItOverTheRange()
+    {
+        var candles = new[]
+        {
+            Candle(0, 100m, 101m, 99.5m, 100m, 1500),     // flat: half and half
+            Candle(1, 100m, 103m, 100m, 102.9m, 3000),    // big up-minute: mostly buying
+            Candle(2, 102.9m, 103m, 101m, 101.2m, 1500),  // down-minute: mostly selling
+            Candle(3, 101.2m, 101.5m, 101m, 101.3m, 1200),
+        };
+        var snapshot = OrderFlowEstimator.Build("NIFTY", 35001, "NIFTY-FUT", "NSE_FNO", 0.05m, 75, null, new DateOnly(2026, 10, 5), candles, 0.5m, 75);
+
+        Assert.Equal("estimated", snapshot.Source);
+        Assert.Equal(4, snapshot.Bars.Count);
+        Assert.Equal(750, snapshot.Bars[0].Buy);                         // Phi(0) = 0.5
+        Assert.True(snapshot.Bars[1].Buy > 0.8 * 3000);
+        Assert.True(snapshot.Bars[2].Sell > snapshot.Bars[2].Buy);
+        foreach (var bar in snapshot.Bars)
+        {
+            // Rows add up exactly to the bar, and cover its whole range in 0.5-point rows.
+            Assert.Equal(bar.Buy, bar.Levels.Sum(l => l.Buy));
+            Assert.Equal(bar.Sell, bar.Levels.Sum(l => l.Sell));
+            Assert.Equal(OrderFlowEngine.Row(bar.High, 0.5m), bar.Levels[0].Price);
+            Assert.Equal(OrderFlowEngine.Row(bar.Low, 0.5m), bar.Levels[^1].Price);
+        }
+        Assert.Equal(7, snapshot.Bars[1].Levels.Count); // 100.0 to 103.0
+        Assert.Empty(snapshot.Heatmap);
+        Assert.Equal(0, snapshot.Meta.DepthLevels);
+    }
+
+    [Fact]
+    public void Estimator_MarksVolumeSpikesAsBigDots()
+    {
+        var candles = Enumerable.Range(0, 10).Select(i => Candle(i, 100m, 100.5m, 99.5m, 100m, i == 6 ? 9000 : 1000)).ToArray();
+        var snapshot = OrderFlowEstimator.Build("NIFTY", 35001, "NIFTY-FUT", "NSE_FNO", 0.05m, 75, null, new DateOnly(2026, 10, 5), candles, 1m, 75);
+        var spike = Assert.Single(snapshot.Trades);
+        Assert.Equal(9000, spike.Quantity);
+        Assert.Equal(T0.AddMinutes(6).AddSeconds(59), spike.Time);
+    }
+
+    [Theory]
+    [InlineData(0, 0.5)]
+    [InlineData(1.96, 0.975)]
+    [InlineData(-1, 0.1587)]
+    public void NormalCdf_MatchesTheTable(double x, double expected) => Assert.Equal(expected, OrderFlowEstimator.NormalCdf(x), 3);
 }

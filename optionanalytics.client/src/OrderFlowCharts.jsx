@@ -11,6 +11,7 @@ const { Text } = Typography
 // like the rest of the app.
 
 const IST_HHMM = new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' })
+const EXH_COLOR = '#9254de'
 const IST_HHMMSS = new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' })
 const BUY_FILL = 'rgba(38, 166, 154, 0.85)'
 const SELL_FILL = 'rgba(239, 83, 80, 0.85)'
@@ -66,7 +67,7 @@ const priceText = (p) => (Number.isInteger(p) ? p.toLocaleString('en-IN') : p.to
 
 const FP_AXIS_W = 70
 const FP_TIME_H = 18
-const FP_STRIP_H = 36
+const FP_STRIP_H = 52
 const FP_TOP = 6
 
 // Footprint: each bar is a candle plus, per price row, the volume that hit the bid (left, sellers
@@ -75,8 +76,10 @@ const FP_TOP = 6
 // exhaustion (E) marked at their rows, and each bar's delta and volume below it.
 // Drag to scroll back, wheel (or the -/+ buttons) to change bar width, double-click to return to the
 // live edge. `profile` (orderFlowMath.volumeProfile) adds the session volume profile as a column on
-// the same price scale, with its POC and value area (VAH/VAL) drawn across the bars.
-export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620, lastPrice, profile = null }) {
+// the same price scale, with its POC and value area (VAH/VAL) drawn across the bars. `trades` (big
+// orders) are drawn as dots at their price, inside their bar at their time, sized by quantity.
+// Under each bar: its delta, the cumulative delta so far, and its volume.
+export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620, lastPrice, profile = null, trades = [], timeframe = 1, bigLabel = 'Big order' }) {
   const wrapRef = useRef(null)
   const canvasRef = useRef(null)
   const width = useElementWidth(wrapRef)
@@ -85,6 +88,7 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
   const [offset, setOffset] = useState(0)
   const [hover, setHover] = useState(null)
   const dragRef = useRef(null)
+  const dotsRef = useRef([])
 
   const step = rowSize > 0 ? rowSize : 0.05
   const plotW = Math.max(0, width - FP_AXIS_W)
@@ -195,38 +199,83 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
       const bodyBottom = yPrice(Math.min(bar.open, bar.close) + step / 2)
       ctx.fillRect(cx - 3, bodyTop, 6, Math.max(1, bodyBottom - bodyTop))
 
-      // Absorption (A) / exhaustion (E) markers.
-      const marker = (price, side, letter) => {
-        const y = rowTop(price) + rowH / 2
-        const x = x0 + colWidth - 9
-        const r = Math.max(5, Math.min(8, rowH / 2))
-        ctx.fillStyle = side === 'buy' ? UP_COLOR : DOWN_COLOR
-        ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill()
+      // Absorption (ABS, green = bullish / red = bearish) and exhaustion (EXH, purple, arrow = the
+      // expected turn): the row is outlined across the bar and a labelled pill sits on it, pointing
+      // the way the signal reads.
+      const marker = (price, side, label, color) => {
+        const top = rowTop(price)
+        ctx.strokeStyle = color
+        ctx.lineWidth = 2
+        ctx.strokeRect(cellX - 1, top - 0.5, cellW * 2 + 1, Math.max(3, rowH))
+        ctx.lineWidth = 1
+        const text = `${label} ${side === 'buy' ? '▲' : '▼'}`
+        ctx.font = `700 10px ${FONT}`
+        const w = ctx.measureText(text).width + 8
+        const pillY = Math.max(FP_TOP, Math.min(FP_TOP + plotH - 14, top + rowH / 2 - 7))
+        const pillX = Math.min(barsW - w - 1, x0 + colWidth - w - 2)
+        ctx.fillStyle = color
+        ctx.beginPath()
+        if (ctx.roundRect) ctx.roundRect(pillX, pillY, w, 14, 3)
+        else ctx.rect(pillX, pillY, w, 14)
+        ctx.fill()
         ctx.fillStyle = '#fff'
-        ctx.font = `700 ${Math.round(r * 1.3)}px ${FONT}`
-        ctx.textAlign = 'center'
-        ctx.fillText(letter, x, y + 0.5)
-        ctx.textAlign = 'left'
+        ctx.textBaseline = 'middle'
+        ctx.fillText(text, pillX + 4, pillY + 7.5)
       }
-      for (const a of bar.absorption ?? []) marker(a.price, a.side, 'A')
-      for (const e of bar.exhaustion ?? []) marker(e.price, e.side, 'E')
+      for (const a of bar.absorption ?? []) marker(a.price, a.side, 'ABS', a.side === 'buy' ? UP_COLOR : DOWN_COLOR)
+      for (const e of bar.exhaustion ?? []) marker(e.price, e.side, 'EXH', EXH_COLOR)
 
       // Delta + volume strip and time label.
       const stripY = FP_TOP + plotH + 2
       ctx.fillStyle = 'rgba(255,255,255,0.03)'
       ctx.fillRect(x0 + 1, stripY, colWidth - 2, FP_STRIP_H - 4)
       ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
       ctx.font = `600 12px ${FONT}`
       ctx.fillStyle = bar.delta >= 0 ? UP_COLOR : DOWN_COLOR
-      ctx.fillText(`Δ ${bar.delta >= 0 ? '+' : ''}${formatVolume(bar.delta, lotSize, showLots)}`, x0 + colWidth / 2, stripY + 10)
+      ctx.fillText(`Δ ${bar.delta >= 0 ? '+' : ''}${formatVolume(bar.delta, lotSize, showLots)}`, x0 + colWidth / 2, stripY + 9)
+      ctx.font = `600 11px ${FONT}`
+      ctx.fillStyle = (bar.cvd ?? 0) >= 0 ? '#7fd8cf' : '#f4a09e'
+      ctx.fillText(`ΣΔ ${(bar.cvd ?? 0) >= 0 ? '+' : ''}${formatVolume(bar.cvd ?? 0, lotSize, showLots)}`, x0 + colWidth / 2, stripY + 23)
       ctx.font = `11px ${FONT}`
       ctx.fillStyle = AXIS_COLOR
-      ctx.fillText(`Vol ${formatVolume(bar.volume, lotSize, showLots)}`, x0 + colWidth / 2, stripY + 24)
+      ctx.fillText(`Vol ${formatVolume(bar.volume, lotSize, showLots)}`, x0 + colWidth / 2, stripY + 37)
       if (colWidth >= 56 || k % 2 === 0) ctx.fillText(IST_HHMM.format(new Date(bar.time)), x0 + colWidth / 2, height - FP_TIME_H / 2)
       ctx.textAlign = 'left'
       ctx.strokeStyle = GRID_COLOR
       ctx.beginPath(); ctx.moveTo(x0, FP_TOP); ctx.lineTo(x0, FP_TOP + plotH); ctx.stroke()
     })
+
+    // Big orders: a dot at the print's price, placed inside its bar by its time, area ~ quantity.
+    const dots = []
+    if (trades?.length) {
+      const bucketMs = Math.max(1, timeframe) * 60_000
+      const index = new Map(visible.map((bar, k) => [typeof bar.time === 'number' ? bar.time : new Date(bar.time).getTime(), k]))
+      const maxQty = Math.max(1, ...trades.map((t) => t.quantity))
+      for (const t of trades) {
+        const ms = new Date(t.time).getTime()
+        const start = Math.floor(ms / bucketMs) * bucketMs
+        const k = index.get(start)
+        if (k == null) continue
+        const y = rowTop(Math.round(Math.floor(t.price / step + 1e-9) * step * 100) / 100) + rowH / 2
+        if (y < FP_TOP || y > FP_TOP + plotH) continue
+        const x0 = barsW - (visible.length - k) * colWidth
+        const x = x0 + 15 + ((ms - start) / bucketMs) * Math.max(4, colWidth - 30)
+        const r = 4 + 11 * Math.sqrt(t.quantity / maxQty)
+        dots.push({ x, y, r, trade: t })
+      }
+      dots.sort((a, b) => b.r - a.r)
+      for (const d of dots) {
+        ctx.beginPath(); ctx.arc(d.x, d.y, d.r, 0, Math.PI * 2)
+        ctx.fillStyle = d.trade.buy ? 'rgba(38,166,154,0.78)' : 'rgba(239,83,80,0.78)'
+        ctx.fill()
+        ctx.lineWidth = 1.5
+        ctx.strokeStyle = '#ffffffdd'
+        ctx.stroke()
+        ctx.lineWidth = 1
+      }
+    }
+    dotsRef.current = dots
 
     // Session volume profile column, its value area and POC across the bars.
     if (profileW > 0) {
@@ -289,7 +338,7 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
         ctx.fillText(priceText(lastPrice), plotW + 5, y)
       }
     }
-  }, [layout, width, height, plotW, barsW, profileW, profile, plotH, colWidth, step, lotSize, showLots, lastPrice])
+  }, [layout, width, height, plotW, barsW, profileW, profile, plotH, colWidth, step, lotSize, showLots, lastPrice, trades, timeframe])
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -303,6 +352,8 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
   }, [])
 
   const hitTest = (x, y) => {
+    const dot = dotsRef.current.find((d) => (d.x - x) ** 2 + (d.y - y) ** 2 <= (d.r + 2) ** 2)
+    if (dot) return { dot: dot.trade, x, y }
     if (!layout || x > barsW) return null
     const k = layout.visible.length - Math.ceil((barsW - x) / colWidth)
     const bar = layout.visible[k]
@@ -338,6 +389,15 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
         <Button size="small" style={{ position: 'absolute', top: 8, right: FP_AXIS_W + profileW + 8 }} onClick={() => setOffset(0)}>
           Back to latest ▸
         </Button>
+      )}
+      {hover?.dot && (
+        <div style={{
+          position: 'absolute', left: Math.min(hover.x + 14, width - 220), top: Math.max(0, hover.y - 50), pointerEvents: 'none',
+          background: '#141821ee', border: `1px solid ${BORDER_COLOR}`, borderRadius: 6, padding: '6px 9px', fontSize: 12, lineHeight: 1.5, width: 210,
+        }}>
+          <div style={{ color: hover.dot.buy ? UP_COLOR : DOWN_COLOR, fontWeight: 600 }}>{bigLabel}: {hover.dot.buy ? 'BUY' : 'SELL'} {formatVolume(hover.dot.quantity, lotSize, true)} lots</div>
+          <div>at {priceText(hover.dot.price)} · {IST_HHMMSS.format(new Date(hover.dot.time))}</div>
+        </div>
       )}
       {hover?.level && (
         <div style={{
