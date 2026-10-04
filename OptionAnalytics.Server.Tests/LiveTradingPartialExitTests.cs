@@ -190,6 +190,30 @@ public sealed class LiveTradingPartialExitTests
     }
 
     [Fact]
+    public async Task EveryOpenOrderIsListed_AndOneLegCanBeCancelled()
+    {
+        var (service, dhan, _) = await CreateAsync();
+        var manual = await PlacePlainAsync(dhan, "MANUAL-1");
+        await service.PartialExitAsync(SecurityId.ToString(), lots: 1, slippagePoints: 1m, CancellationToken.None);
+        await service.RefreshAsync(CancellationToken.None);
+
+        var pending = service.Snapshot().PendingOrders;
+        Assert.Contains(pending, o => o.OrderId == "S1" && o.Kind == "Target leg" && o.Leg == "TARGET_LEG" && o.TargetPrice == 150m && o.Quantity == 4 * Lot);
+        Assert.Contains(pending, o => o.OrderId == "S1" && o.Kind == "Stop-loss leg" && o.Leg == "STOP_LOSS_LEG" && o.StopLossPrice == 80m);
+        Assert.Contains(pending, o => o.OrderId == manual && o.Kind == "Order" && o.Leg == null);
+        Assert.Contains(pending, o => o.Kind == "Exit"); // the partial exit itself
+
+        var result = await service.CancelAsync("S1", false, CancellationToken.None, "TARGET_LEG");
+
+        Assert.True(result.Success, result.Message);
+        Assert.Contains("DELETE /super/orders/S1/TARGET_LEG", dhan.Requests);
+        Assert.DoesNotContain("DELETE /super/orders/S1/STOP_LOSS_LEG", dhan.Requests);
+        await service.RefreshAsync(CancellationToken.None);
+        Assert.DoesNotContain(service.Snapshot().PendingOrders, o => o.Leg == "TARGET_LEG");
+        Assert.Contains(service.Snapshot().PendingOrders, o => o.Leg == "STOP_LOSS_LEG");
+    }
+
+    [Fact]
     public void FillPrice_IsTheNewPartOfTheAverage()
     {
         Assert.Equal(122m, LiveTradingService.FillPrice(65, 120m, Update("X", "SELL", 130, 130, avg: 121m, status: "TRADED")));
