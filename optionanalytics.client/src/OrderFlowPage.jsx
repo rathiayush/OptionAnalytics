@@ -677,7 +677,7 @@ export default function OrderFlowPage() {
         />
 
         <ProfilesCard prevDate={prevSession.data?.date} prevVp={prevVp} prevTpo={prevTpo} todayTpo={todayTpo} lastPrice={meta?.lastPrice}
-          loading={prevSession.loading} estimatedPrev={prevSession.data?.source === 'estimated'} />
+          loading={prevSession.loading} estimatedPrev={prevSession.data?.source === 'estimated'} lotSize={lotSize} showLots={showLots} height={narrow ? 340 : 440} />
 
         <Card size="small" title="Liquidity heatmap" extra={!narrow && <Text type="secondary" style={{ fontSize: 11 }}>resting bids/offers over time (brighter = more) · big dots = big orders · magenta = icebergs</Text>}>
           {estimated
