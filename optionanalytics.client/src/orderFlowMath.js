@@ -501,8 +501,10 @@ export function liquiditySignals({ columns, trades = [], minuteBars = [], rowSiz
 //   absorption / exhaustion (last 15 bars)                  15
 //   liquidity signals (last 15 min, by confidence)          15
 //   big orders (last 15 min: buy - sell quantity)           10
+//   options OI (near-ATM put vs call writing, PCR, 15 min)   20   - passed in `extra`
+//   futures OI (15-min price / OI regime)                    15   - passed in `extra`
 // Confidence is how far from neutral the total is, scaled by how many parts agree on its side.
-export function orderFlowBias({ bars = [], liquidity = [], bigTrades = [], nowMs = Date.now(), aggressionNow = null, sweeps = [], pullStack = [] }) {
+export function orderFlowBias({ bars = [], liquidity = [], bigTrades = [], nowMs = Date.now(), aggressionNow = null, sweeps = [], pullStack = [], extra = [] }) {
   const parts = []
   const add = (name, weight, score, detail) => { if (Number.isFinite(score)) parts.push({ name, weight, score: Math.max(-1, Math.min(1, score)), detail }) }
   const sum = (xs, f) => xs.reduce((s, x) => s + f(x), 0)
@@ -556,6 +558,9 @@ export function orderFlowBias({ bars = [], liquidity = [], bigTrades = [], nowMs
     const score = sum(recentPull, (x) => (x.bullish ? 1 : -1) * (x.confidence / 100))
     add('Liquidity pulling / stacking', 10, score / Math.max(1, recentPull.length * 0.6), `${recentPull.length} in 10 min`)
   }
+
+  // Options OI and futures OI (strategyEngine's oiBiasParts) - the positioning behind the flow.
+  for (const p of extra) add(p.name, p.weight, p.score, p.detail)
 
   const totalWeight = sum(parts, (p) => p.weight) || 1
   const score = Math.round((sum(parts, (p) => p.weight * p.score) / totalWeight) * 100)
