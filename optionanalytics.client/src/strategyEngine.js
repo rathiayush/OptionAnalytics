@@ -127,17 +127,24 @@ export function maxPainOf(rows) {
 }
 
 /**
- * The OPTIONS OI read every strategy is checked against: near-ATM (7 strikes) put writing vs call
- * writing over `minutes`, and the put-call ratio of those strikes and its change. Put writing ahead =
- * writers expect support (bullish); call writing ahead = resistance (bearish).
- *   lean: net writing as a share of the near-ATM OI (+ = puts written more = bullish).
+ * The OPTIONS OI read every strategy is checked against - over the WHOLE option chain loaded for the
+ * day (every strike, not just the ones near the money), on two clocks: the last `minutes` and since
+ * the open. Put writing ahead of call writing = writers expect support (bullish); call writing ahead =
+ * resistance (bearish).
+ *   lean / leanOpen: (put OI added - call OI added) / (both added), -1..+1 (+ = puts written more =
+ *     bullish) - damped when the change is too small to mean anything (noise).
+ *   combined: 45% the recent lean, 55% the since-open one, nudged by the PCR's move since the open.
+ * `near` (strikes each side of ATM) restricts it to the money - used only as an optional confirmation.
  */
-export function optionOiRead(oi, spot, ms, minutes = 15) {
+export function optionOiRead(oi, spot, ms, minutes = 15, near = null) {
   if (!oi || !spot) return null
   const atm = Math.round(spot / oi.step) * oi.step
-  let peNow = 0, ceNow = 0, peChg = 0, ceChg = 0, seen = 0
-  for (let k = -3; k <= 3; k++) {
-    const strike = atm + k * oi.step
+  const openMs = dayOpenMs(oi, ms)
+  const strikes = near == null
+    ? [...new Set([...oi.ce.keys(), ...oi.pe.keys()])]
+    : Array.from({ length: 2 * near + 1 }, (_, i) => atm + (i - near) * oi.step)
+  let peNow = 0, ceNow = 0, peChg = 0, ceChg = 0, peOpen = 0, ceOpen = 0, seen = 0
+  for (const strike of strikes) {
     const pe = oiOf(oi.pe, strike, ms)
     const ce = oiOf(oi.ce, strike, ms)
     if (pe == null || ce == null) continue
@@ -146,27 +153,49 @@ export function optionOiRead(oi, spot, ms, minutes = 15) {
     ceNow += ce
     peChg += oiChange(oi.pe, strike, ms, minutes) ?? 0
     ceChg += oiChange(oi.ce, strike, ms, minutes) ?? 0
+    peOpen += pe - (openOi(oi.pe, strike, openMs) ?? pe)
+    ceOpen += ce - (openOi(oi.ce, strike, openMs) ?? ce)
   }
   if (!seen || peNow + ceNow <= 0 || ceNow <= 0) return null
+  const total = peNow + ceNow
+  const lean = (pe, ce, floor) => (pe - ce) / Math.max(Math.abs(pe) + Math.abs(ce), floor * total)
   const pcr = peNow / ceNow
   const pcrBefore = ceNow - ceChg > 0 ? (peNow - peChg) / (ceNow - ceChg) : pcr
-  return { atm, minutes, peChg, ceChg, net: peChg - ceChg, lean: (peChg - ceChg) / (peNow + ceNow), pcr, pcrChange: pcr - pcrBefore }
+  const pcrAtOpen = ceNow - ceOpen > 0 ? (peNow - peOpen) / (ceNow - ceOpen) : pcr
+  const recent = lean(peChg, ceChg, 0.003)
+  const sinceOpen = lean(peOpen, ceOpen, 0.01)
+  const combined = Math.max(-1, Math.min(1, 0.45 * recent + 0.55 * sinceOpen + 0.2 * Math.max(-1, Math.min(1, (pcr - pcrAtOpen) / 0.2))))
+  return {
+    atm, minutes, near, strikes: seen, peChg, ceChg, peOpen, ceOpen, net: peChg - ceChg,
+    lean: recent, leanOpen: sinceOpen, combined, pcr, pcrChange: pcr - pcrBefore, pcrOpenChange: pcr - pcrAtOpen,
+  }
+}
+
+// The day's first minute (the open) - from the index series, else the first OI point.
+function dayOpenMs(oi, ms) {
+  const first = oi.spot?.[0]?.t ?? oi.futures?.[0]?.t
+  return first != null && first <= ms ? first : ms
+}
+function openOi(map, strike, openMs) {
+  const series = map.get(strike)
+  return valueAt(series, openMs)?.oi ?? series?.[0]?.oi ?? null
 }
 
 /** Options OI vs a trade's direction: 'agrees', 'neutral' or 'against'. */
 export function optionOiStance(read, dir) {
   if (!read) return 'neutral'
-  const lean = dir * read.lean
-  const pcrMove = dir * read.pcrChange
-  if (lean >= 0.002 || (lean > 0 && pcrMove >= 0.03)) return 'agrees'
-  if (lean <= -0.004 || (lean < 0 && pcrMove <= -0.05)) return 'against'
+  const v = dir * read.combined
+  if (v >= 0.25) return 'agrees'
+  if (v <= -0.35) return 'against'
   return 'neutral'
 }
 
 const lakh = (v) => `${v >= 0 ? '+' : '-'}${(Math.abs(v) / 1e5).toFixed(1)}L`
 export function optionOiText(read) {
   if (!read) return 'no options OI'
-  return `PCR ${read.pcr.toFixed(2)} (${read.pcrChange >= 0 ? '+' : ''}${read.pcrChange.toFixed(2)} in ${read.minutes}m) · near ATM ${read.atm}: puts ${lakh(read.peChg)}, calls ${lakh(read.ceChg)}`
+  const scope = read.near == null ? `chain (${read.strikes} strikes)` : `ATM ${read.atm} ±${read.near}`
+  return `${scope}: since open puts ${lakh(read.peOpen)}, calls ${lakh(read.ceOpen)}, PCR ${read.pcr.toFixed(2)} (${read.pcrOpenChange >= 0 ? '+' : ''}${read.pcrOpenChange.toFixed(2)})`
+    + ` · ${read.minutes}m puts ${lakh(read.peChg)}, calls ${lakh(read.ceChg)}`
 }
 
 // ---- the option to trade a setup with ----------------------------------------------------------------
@@ -204,29 +233,32 @@ export function optionPnlPoints(trade, oi, ms) {
 
 export const optionTradeText = (t) => (t ? `${t.action === 'BUY' ? 'Buy' : 'Sell'} ${t.strike} ${t.side} @ ${t.premium.toFixed(1)}` : null)
 
-/** Options OI and futures OI as two parts of the order flow read (orderFlowBias's `extra`):
- *  options - put writing vs call writing near the money over 15 min, with the PCR change (+ = puts
- *  written = bullish); futures - the 15-min price / OI regime (long build-up strongest bullish, short
- *  covering weaker; short build-up strongest bearish, long unwinding weaker). */
+/** Options OI and futures OI as parts of the order flow read (orderFlowBias's `extra`), each on two
+ *  clocks - the last 15 min and since the open:
+ *  options - put vs call writing over the whole chain, with the PCR's move (+ = puts written = bullish);
+ *  futures - the price / OI regime (long build-up strongest bullish, short covering weaker; short
+ *  build-up strongest bearish, long unwinding weaker). */
 export function oiBiasParts(oi, ms) {
   const parts = []
   const spot = oi ? valueAt(oi.spot, ms)?.close : null
   if (!spot) return parts
   const read = optionOiRead(oi, spot, ms, 15)
   if (read) {
-    const score = Math.max(-1, Math.min(1, read.lean / 0.006 + read.pcrChange / 0.15))
-    parts.push({ name: 'Options OI', weight: 20, score, detail: optionOiText(read) })
+    const pcrNudge = (v) => 0.2 * Math.max(-1, Math.min(1, v / 0.15))
+    parts.push({ name: 'Options OI · since open', weight: 15, score: Math.max(-1, Math.min(1, read.leanOpen + pcrNudge(read.pcrOpenChange))),
+      detail: `chain puts ${lakh(read.peOpen)}, calls ${lakh(read.ceOpen)} · PCR ${read.pcr.toFixed(2)} (${read.pcrOpenChange >= 0 ? '+' : ''}${read.pcrOpenChange.toFixed(2)})` })
+    parts.push({ name: 'Options OI · 15 min', weight: 10, score: Math.max(-1, Math.min(1, read.lean + pcrNudge(read.pcrChange))),
+      detail: `chain puts ${lakh(read.peChg)}, calls ${lakh(read.ceChg)} · PCR ${read.pcrChange >= 0 ? '+' : ''}${read.pcrChange.toFixed(2)}` })
   }
-  const f = futuresChange(oi, ms, 15)
-  if (f?.oiPct != null) {
-    const move = Math.max(-1, Math.min(1, f.pricePct / 0.002))
+  const futuresPart = (name, weight, f, scale, when) => {
+    if (f?.oiPct == null) return
+    const move = Math.max(-1, Math.min(1, f.pricePct / scale))
     const conviction = f.oiPct >= 0 ? 1 : 0.6
     const regime = f.pricePct >= 0 ? (f.oiPct >= 0 ? 'long build-up' : 'short covering') : (f.oiPct >= 0 ? 'short build-up' : 'long unwinding')
-    parts.push({
-      name: 'Futures OI', weight: 15, score: move * conviction,
-      detail: `${regime} · price ${(f.pricePct * 100).toFixed(2)}%, OI ${f.oiPct >= 0 ? '+' : ''}${(f.oiPct * 100).toFixed(2)}% in 15m`,
-    })
+    parts.push({ name, weight, score: move * conviction, detail: `${regime} · price ${(f.pricePct * 100).toFixed(2)}%, OI ${f.oiPct >= 0 ? '+' : ''}${(f.oiPct * 100).toFixed(2)}% ${when}` })
   }
+  futuresPart('Futures OI · since open', 10, futuresSince(oi, ms, dayOpenMs(oi, ms)), 0.005, 'since open')
+  futuresPart('Futures OI · 15 min', 10, futuresChange(oi, ms, 15), 0.002, 'in 15m')
   return parts
 }
 
@@ -249,8 +281,12 @@ export function oiSummary(oi, ms) {
 }
 
 function futuresChange(oi, ms, minutes) {
+  return futuresSince(oi, ms, ms - minutes * MIN)
+}
+
+function futuresSince(oi, ms, fromMs) {
   const now = valueAt(oi.futures, ms)
-  const then = valueAt(oi.futures, ms - minutes * MIN)
+  const then = valueAt(oi.futures, fromMs) ?? (oi.futures?.[0]?.t <= ms ? oi.futures[0] : null)
   if (!now || !then || !then.close) return null
   return {
     pricePct: (now.close - then.close) / then.close,
@@ -384,19 +420,24 @@ export function evaluateStrategies(input) {
   const futuresRead = futuresChange(oi, nowMs, 15)
   const futuresText = futuresRead?.oiPct == null ? 'no futures OI'
     : `futures ${(futuresRead.pricePct * 100).toFixed(2)}% · OI ${futuresRead.oiPct >= 0 ? '+' : ''}${(futuresRead.oiPct * 100).toFixed(2)}% in 15m`
+  // The nearest strikes (ATM ±2) - a confirmation only: they nudge the confidence, never block a trade.
+  const nearRead = optionOiRead(oi, spotNow, nowMs, 15, 2)
   const push = (id, dir, stopPts, targetPts, timeStopMin, confidence, checks) => {
     if (!(stopPts > 0) || !(targetPts > 0)) return
     const stance = optionOiStance(optionRead, dir)
     if (stance === 'against') return
+    const nearStance = optionOiStance(nearRead, dir)
     const timeStop = Math.min(nowMs + timeStopMin * MIN, nowMs + (SQUARE_OFF - minute) * MIN)
     const { OI: wallText, ...rest } = checks
     out.push({
       options: optionTradesFor(oi, dir, spotNow, nowMs),
       id, name: STRATEGY_BY_ID[id].name, side: dir > 0 ? 'LONG' : 'SHORT', t: nowMs, entry: price,
       stop: price - dir * stopPts, target: price + dir * targetPts, timeStopMs: timeStop,
-      confidence: Math.round(Math.max(40, Math.min(92, confidence + (stance === 'agrees' ? 6 : 0)))), estimated: !!estimated,
+      confidence: Math.round(Math.max(40, Math.min(92, confidence + (stance === 'agrees' ? 6 : 0) + (nearStance === 'agrees' ? 4 : nearStance === 'against' ? -4 : 0)))),
+      estimated: !!estimated,
       checks: {
         'Options OI': `${stance === 'agrees' ? 'writers back it' : 'neutral'} - ${optionOiText(optionRead)}`,
+        'Near strikes': `${nearStance === 'agrees' ? 'confirm (+4)' : nearStance === 'against' ? 'lean against (-4, not required)' : 'neutral'} - ${optionOiText(nearRead)}`,
         OI: wallText, 'Futures OI': futuresText, ...rest,
       },
     })
