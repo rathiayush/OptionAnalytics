@@ -104,4 +104,13 @@ public sealed class LiveTradingPricingTests
     [InlineData("[1,2]", false)]
     public void OrderAlertDetection(string json, bool expected) =>
         Assert.Equal(expected, DhanOrderUpdateFeed.IsOrderAlert(Encoding.UTF8.GetBytes(json)));
+
+    [Theory]
+    [InlineData(150, 0, 150)]     // nothing working - close it all
+    [InlineData(-150, 0, 150)]    // a short closes by buying the same size
+    [InlineData(150, 75, 75)]     // a working exit covers half - send only the rest
+    [InlineData(150, 150, 0)]     // already fully covered (double click / Exit all after Close) - send nothing
+    [InlineData(150, 300, 0)]     // never negative
+    public void ExitNeverOverClosesAPositionAlreadyBeingExited(int netQty, long working, int expected) =>
+        Assert.Equal(expected, LiveTradingService.ExitQuantity(netQty, working));
 }

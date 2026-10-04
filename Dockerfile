@@ -57,7 +57,8 @@ ENV Storage__TriggersPath=/app/data/strategy-triggers.json \
     Storage__OrderHistoryPath=/app/data/trigger-order-history.json \
     Storage__HistoricalDataPath=/app/data/historical \
     Storage__ExpiredOptionDataPath=/app/data/expired-option-data \
-    Storage__DataProtectionKeysPath=/app/data/dataprotection-keys
+    Storage__DataProtectionKeysPath=/app/data/dataprotection-keys \
+    Storage__OrderFlowPath=/app/data/order-flow
 EXPOSE 8080
 
 # Create and chown the data directory BEFORE declaring it a volume. Docker discards changes made

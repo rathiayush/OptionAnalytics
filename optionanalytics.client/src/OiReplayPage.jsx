@@ -13,6 +13,10 @@ import {
 } from './shared.jsx'
 import { PremiumEmaChart, DraggableFloatingPanel, useFitContentAsDataGrows, useChartUserControl, CANDLE_SCALE_MARGINS } from './oiShared.jsx'
 import { LivePositionsView, liveTradingApi } from './LiveTrading.jsx'
+import { StrikePicker, moneynessLabel } from './StrikePicker.jsx'
+import { DomDrawer } from './DomDrawer.jsx'
+import { volumeProfileFromCandles } from './orderFlowMath.js'
+import { VolumeProfilePrimitive, setProfileLines } from './volumeProfilePrimitive.js'
 
 const { Text, Title } = Typography
 
@@ -272,9 +276,11 @@ function mergeLiveOptionTicks(prev, ticks, ivByStrike, slotMs = LIVE_POINT_SLOT_
   return next
 }
 
-// Futures entries folded into their own current MINUTE. volume stays null: SpotTick.Volume is Dhan's
-// cumulative day volume, not a per-minute figure - futuresVolumeSoFar's own sum treats null as 0,
-// slightly under-counting the live tail rather than risk wildly over-counting it.
+// Futures entries folded into their own current MINUTE. A tick's dayVolume is Dhan's CUMULATIVE day
+// volume, so a minute's volume is its rise since the minute began: dayVolumeOpen is the cumulative
+// figure at the minute's start (the previous live minute's last one, else the minute's first tick -
+// which misses only the part of that first minute before the page started listening). Without
+// dayVolume (an older server) volume stays null, which futuresVolumeSoFar's own sum treats as 0.
 function mergeLiveFuturesTicks(prev, ticks) {
   if (ticks.length === 0) return prev
   const next = prev.slice()
@@ -284,10 +290,16 @@ function mergeLiveFuturesTicks(prev, ticks) {
     const high = Number.isFinite(tick.high) ? tick.high : tick.price
     const low = Number.isFinite(tick.low) ? tick.low : tick.price
     const last = next[next.length - 1]
+    const dayVolume = tick.dayVolume > 0 ? tick.dayVolume : null
     if (last && last.time === bucketIso) {
-      next[next.length - 1] = { ...last, high: Math.max(last.high, high), low: Math.min(last.low, low), close: tick.price, openInterest: tick.openInterest }
+      const volume = dayVolume != null && last.dayVolumeOpen != null ? Math.max(0, dayVolume - last.dayVolumeOpen) : last.volume
+      next[next.length - 1] = { ...last, high: Math.max(last.high, high), low: Math.min(last.low, low), close: tick.price, openInterest: tick.openInterest, volume, dayVolume: dayVolume ?? last.dayVolume }
     } else if (!last || bucketIso > last.time) {
-      next.push({ time: bucketIso, open: Number.isFinite(tick.open) ? tick.open : tick.price, high, low, close: tick.price, volume: null, openInterest: tick.openInterest })
+      const dayVolumeOpen = dayVolume == null ? null : last?.dayVolume ?? dayVolume
+      next.push({
+        time: bucketIso, open: Number.isFinite(tick.open) ? tick.open : tick.price, high, low, close: tick.price, openInterest: tick.openInterest,
+        volume: dayVolume != null ? Math.max(0, dayVolume - dayVolumeOpen) : null, dayVolume, dayVolumeOpen,
+      })
     }
   }
   return next
@@ -563,18 +575,8 @@ function computeEma(bars, period) {
   return points
 }
 
-// ATM+-10 offset dropdown options, shared by anything that lets the user pick a strike RELATIVE to
-// the currently-drifting ATM (PaperTradePanel's own strike selector, and the option premium
-// chart's CE/PE strike pickers below) - an offset rather than an absolute strike, so "the default
-// stays ATM" holds true all through the session even as ATM itself moves, matching
-// PaperTradePanel's own original reasoning for the same choice.
-function buildStrikeOffsetOptions(atmStrike, step) {
-  if (atmStrike == null || !step) return []
-  return Array.from({ length: 21 }, (_, i) => i - 10).map((offset) => ({
-    value: offset,
-    label: offset === 0 ? `ATM (${atmStrike})` : `ATM${offset > 0 ? '+' : ''}${offset} (${atmStrike + offset * step})`,
-  }))
-}
+// Volume profile row size for the futures chart, per underlying.
+const FUTURES_PROFILE_ROWS = { NIFTY: 5, BANKNIFTY: 10, SENSEX: 10 }
 
 // A short beep via the Web Audio API - no asset file needed. Lazily creates (and reuses) one
 // AudioContext, created on first call rather than at module load, since most browsers refuse to
@@ -1569,12 +1571,16 @@ function classifyFuturesRegime(priceDelta, oiDelta, priceThreshold, oiThreshold)
 // shift actually started, the "show me when what happened" read for a future's own OI - unlike an
 // option strike, a future has no strike chain to draw S/R walls for, so this chart's OI story is
 // entirely about ITS OWN change over time rather than a level.
-function FuturesChart({ bars, oiLine, markers, dayKey, height = 320 }) {
+// profile: the session volume profile (orderFlowMath.volumeProfileFromCandles) in profileRowSize
+// rows - drawn into the chart by VolumeProfilePrimitive, with POC / VAH / VAL price lines.
+function FuturesChart({ bars, oiLine, markers, dayKey, height = 320, profile = null, profileRowSize = 0 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
   const oiSeriesRef = useRef(null)
   const markersRef = useRef(null)
+  const profilePrimitiveRef = useRef(null)
+  const profileLinesRef = useRef([])
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -1600,6 +1606,9 @@ function FuturesChart({ bars, oiLine, markers, dayKey, height = 320 }) {
     // ChartErrorBoundary above then swallows into "This chart could not be rendered" - the exact
     // "futures chart is unable to render" bug.
     markersRef.current = createSeriesMarkers(seriesRef.current, [])
+    profilePrimitiveRef.current = new VolumeProfilePrimitive()
+    seriesRef.current.attachPrimitive(profilePrimitiveRef.current)
+    profileLinesRef.current = []
     // Own (left) price scale and a thin, semi-transparent line - OI's own numbers (lakhs/crores)
     // are a totally different scale than price, so sharing the right-hand axis with candles would
     // otherwise squash one or the other into a flat line.
@@ -1631,8 +1640,16 @@ function FuturesChart({ bars, oiLine, markers, dayKey, height = 320 }) {
       seriesRef.current = null
       oiSeriesRef.current = null
       markersRef.current = null
+      profilePrimitiveRef.current = null
+      profileLinesRef.current = []
     }
   }, [height])
+
+  useEffect(() => {
+    if (!seriesRef.current) return
+    profilePrimitiveRef.current?.setProfile(profile, profileRowSize)
+    profileLinesRef.current = setProfileLines(seriesRef.current, profileLinesRef.current, profile, profileRowSize)
+  }, [profile, profileRowSize, height])
 
   useEffect(() => {
     if (!seriesRef.current) return
@@ -1814,7 +1831,6 @@ function PaperTradePanel({
   liveOrderSummary = '', liveContent = null, liveBlockReason = null,
 }) {
   const isLiveMode = mode === 'live'
-  const strikeOptions = useMemo(() => buildStrikeOffsetOptions(atmStrike, step), [atmStrike, step])
 
   const totalPnl = positions.reduce((sum, p) => sum + p.pnl, 0)
   const hasOpenPosition = positions.some((p) => p.status === 'OPEN')
@@ -1856,8 +1872,12 @@ function PaperTradePanel({
         )}
         <Space wrap size={8}>
           <Segmented value={direction} onChange={onDirectionChange} options={[{ label: 'Buy', value: 'BUY' }, { label: 'Sell', value: 'SELL' }]} />
-          <Segmented value={side} onChange={onSideChange} options={[{ label: 'CE', value: 'CE' }, { label: 'PE', value: 'PE' }]} />
-          <Select value={strikeOffset} onChange={onStrikeOffsetChange} style={{ width: 160 }} options={strikeOptions} disabled={atmStrike == null} />
+          {/* Switching CE <-> PE keeps the moneyness (2 ITM stays 2 ITM), which mirrors the offset. */}
+          <Segmented
+            value={side} options={[{ label: 'CE', value: 'CE' }, { label: 'PE', value: 'PE' }]}
+            onChange={(next) => { if (next !== side && strikeOffset) onStrikeOffsetChange(-strikeOffset); onSideChange(next) }}
+          />
+          <StrikePicker atmStrike={atmStrike} step={step} side={side} offset={strikeOffset} onChange={onStrikeOffsetChange} />
           <InputNumber value={qtyLots} onChange={(v) => onQtyLotsChange(v ?? 1)} min={1} step={1} style={{ width: 100 }} addonAfter="lots" />
           <InputNumber
             value={slPoints} onChange={(v) => onSlPointsChange(v ?? 0)} min={0} step={5} style={{ width: 110 }}
@@ -2290,6 +2310,10 @@ export default function OiReplayPage() {
   const [heatmapTimeframeMinutes, setHeatmapTimeframeMinutes] = useState(1)
   // The Futures chart's own candle timeframe (1/3/5/15), independent of the spot chart's.
   const [futuresTimeframe, setFuturesTimeframe] = usePersistedState('optionanalytics.oiReplay.futuresTimeframe', 5)
+  // The futures DOM (full market depth ladder) drawer - see DomDrawer.jsx.
+  const [domOpen, setDomOpen] = useState(false)
+  // Volume profile on the futures chart (POC / value area lines) - see futuresProfile below.
+  const [futuresProfileOn, setFuturesProfileOn] = usePersistedState('optionanalytics.oiReplay.futuresProfile', true)
   // Which of the two whole-chain OI charts the Day OI Accumulation card shows - see the chart
   // itself, further down, for why this is a switch rather than the per-strike drilldown's own
   // stacked pair (both would double this card's already-tall height, and the day-level numbers
@@ -2300,9 +2324,8 @@ export default function OiReplayPage() {
   const [chartCEma1, setChartCEma1] = useState(9)
   const [chartCEma2, setChartCEma2] = useState(15)
 
-  // Option premium chart's own CE/PE strike pickers - offsets from ATM (see
-  // buildStrikeOffsetOptions' own doc comment), independently selectable, both defaulting to ATM
-  // itself. The user's own "I should be able to choose it +- from dropdown" ask.
+  // Option premium chart's own CE/PE strike pickers - offsets from ATM (see StrikePicker.jsx),
+  // independently selectable, both defaulting to ATM itself.
   const [cePremiumOffset, setCePremiumOffset] = useState(0)
   const [pePremiumOffset, setPePremiumOffset] = useState(0)
   const [cePremiumTimeframe, setCePremiumTimeframe] = useState(1)
@@ -3033,6 +3056,13 @@ export default function OiReplayPage() {
     const cutoff = toChartTime(asOfMs)
     return aggregateBars(futuresBarsChart.filter((b) => b.time <= cutoff), futuresTimeframe)
   }, [futuresBarsChart, asOfMs, futuresTimeframe])
+  // The day's futures volume profile up to the replay time, from each minute's volume spread over its
+  // range (FUTURES_PROFILE_ROWS-point rows).
+  const futuresProfileRow = FUTURES_PROFILE_ROWS[underlying] ?? 5
+  const futuresProfile = useMemo(() => {
+    if (!futuresProfileOn || asOfMs == null) return null
+    return volumeProfileFromCandles(futuresPointsRaw.filter((p) => new Date(p.time).getTime() <= asOfMs), futuresProfileRow)
+  }, [futuresProfileOn, futuresPointsRaw, asOfMs, futuresProfileRow])
   const currentFutures = useMemo(
     () => (asOfMs != null ? latestAtOrBefore(futuresPointsRaw, asOfMs) : null),
     [futuresPointsRaw, asOfMs],
@@ -3161,7 +3191,6 @@ export default function OiReplayPage() {
     () => asOfMs != null && (pePremiumPoints ?? []).some((p) => new Date(p.time).getTime() <= asOfMs),
     [pePremiumPoints, asOfMs],
   )
-  const premiumStrikeOptions = useMemo(() => buildStrikeOffsetOptions(atmStrike, step), [atmStrike, step])
 
   const paperStrike = atmStrike != null ? atmStrike + paperStrikeOffset * step : null
   const paperEntryPreview = useMemo(() => {
@@ -3240,7 +3269,9 @@ export default function OiReplayPage() {
     lots: paperQtyLots, slippagePoints: liveSlippage, stopLossPoints: paperSlPoints, targetPoints: paperTargetPoints,
   }))
   const handleLiveClose = (securityId) => runLiveAction(() => liveTradingApi.close(securityId, liveSlippage))
-  const handleLiveCancel = (orderId) => runLiveAction(() => liveTradingApi.cancel(orderId))
+  const handleLiveCancel = (orderId, isExit) => runLiveAction(() => liveTradingApi.cancel(orderId, isExit))
+  const handleLiveExitAll = () => runLiveAction(() => liveTradingApi.exitAll(liveSlippage))
+  const handleLiveEmergencyExitAll = () => runLiveAction(() => liveTradingApi.emergencyExitAll())
   const handleLiveRefresh = () => liveTradingApi.positions(true).then((snapshot) => { if (snapshot) setLivePositions(snapshot) })
   const liveBlockReason = paperStrike == null ? 'Waiting for the ATM strike.'
     : liveExpiryDate == null ? 'Waiting for the listed expiries.'
@@ -4255,20 +4286,21 @@ export default function OiReplayPage() {
                 <Col span={24} style={{ marginBottom: 8 }}>
                   <Space size={12} wrap>
                     <CardDragHandle {...dragHandleProps('optionPremium')} />
-                    <Text type="secondary" style={{ fontSize: 12 }}>Shift ATM (both)</Text>
-                    <Select
-                      value={cePremiumOffset === pePremiumOffset ? cePremiumOffset : null}
-                      placeholder="Mixed"
-                      onChange={(v) => { setCePremiumOffset(v); setPePremiumOffset(v) }}
-                      style={{ width: 160 }} options={premiumStrikeOptions} disabled={atmStrike == null}
+                    {/* Both legs at the same moneyness: 2 ITM is CE ATM-2 and PE ATM+2. */}
+                    <Text type="secondary" style={{ fontSize: 12 }}>Both CE &amp; PE</Text>
+                    <StrikePicker
+                      atmStrike={atmStrike} step={step} side="CE" size="small" showStrike={false}
+                      offset={cePremiumOffset === -pePremiumOffset ? cePremiumOffset : 0}
+                      onChange={(v) => { setCePremiumOffset(v); setPePremiumOffset(-v) }}
                     />
+                    {cePremiumOffset !== -pePremiumOffset && <Tag>Mixed</Tag>}
                   </Space>
                 </Col>
                 <Col xs={24} md={12}>
                   <Card
                     size="small"
-                    title={`CE premium ${cePremiumStrike ?? ''}`}
-                    extra={<Select value={cePremiumOffset} onChange={setCePremiumOffset} style={{ width: 150 }} options={premiumStrikeOptions} disabled={atmStrike == null} />}
+                    title={`CE premium ${cePremiumStrike ?? ''} ${moneynessLabel(cePremiumOffset, 'CE')}`}
+                    extra={<StrikePicker atmStrike={atmStrike} step={step} side="CE" size="small" showStrike={false} offset={cePremiumOffset} onChange={setCePremiumOffset} />}
                   >
                     {oneMinBars.length === 0
                       ? <Empty description="No spot candles for this day." />
@@ -4292,8 +4324,8 @@ export default function OiReplayPage() {
                 <Col xs={24} md={12}>
                   <Card
                     size="small"
-                    title={`PE premium ${pePremiumStrike ?? ''}`}
-                    extra={<Select value={pePremiumOffset} onChange={setPePremiumOffset} style={{ width: 150 }} options={premiumStrikeOptions} disabled={atmStrike == null} />}
+                    title={`PE premium ${pePremiumStrike ?? ''} ${moneynessLabel(pePremiumOffset, 'PE')}`}
+                    extra={<StrikePicker atmStrike={atmStrike} step={step} side="PE" size="small" showStrike={false} offset={pePremiumOffset} onChange={setPePremiumOffset} />}
                   >
                     {oneMinBars.length === 0
                       ? <Empty description="No spot candles for this day." />
@@ -4350,8 +4382,14 @@ export default function OiReplayPage() {
                     size="small"
                     title={<Space size={4}><CardDragHandle {...dragHandleProps('futures')} />Futures (nearest listed contract - always live from Dhan, never stored)</Space>}
                     extra={
-                      <Space size={8}>
+                      <Space size={8} wrap>
+                        <Tooltip title="Depth of market: the futures' full 200-level book in a side panel">
+                          <Button size="small" onClick={() => setDomOpen(true)}>DOM</Button>
+                        </Tooltip>
                         <Select value={futuresTimeframe} onChange={setFuturesTimeframe} size="small" style={{ width: 90 }} options={TIMEFRAME_OPTIONS} />
+                        <Tooltip title={`Volume profile of the session so far (${futuresProfileRow}-pt rows) with POC and the 70% value area (VAH/VAL)`}>
+                          <Space size={4}><Switch size="small" checked={futuresProfileOn} onChange={setFuturesProfileOn} /><Text style={{ fontSize: 12 }}>Profile</Text></Space>
+                        </Tooltip>
                         {futuresRegimeSinceOpen && futuresRegimeSinceOpen.regime !== 'Neutral' && (
                           <Tag color={futuresRegimeSinceOpen.bias === 'Bullish' ? 'success' : 'error'}>{futuresRegimeSinceOpen.regime}</Tag>
                         )}
@@ -4416,8 +4454,15 @@ export default function OiReplayPage() {
                             markers={futuresRegimeMarkers}
                             dayKey={`futures-${underlying}-${result.date}-${futuresTimeframe}`}
                             height={320}
+                            profile={futuresProfile} profileRowSize={futuresProfileRow}
                           />
                         </ChartErrorBoundary>
+                        {futuresProfile?.poc != null && (
+                          <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>
+                            Volume profile: POC {futuresProfile.poc + futuresProfileRow / 2} · value area {futuresProfile.val}–{futuresProfile.vah + futuresProfileRow} ·
+                            {' '}each minute&apos;s volume is spread over its high-low range (a candle cannot say exactly where it traded - the Order Flow page has the exact profile).
+                          </Text>
+                        )}
                         {result.futuresOiAvailable && (
                           <Text type="secondary" style={{ fontSize: 11 }}>
                             Grey line (left axis) is Open Interest. Arrows mark where a Long Buildup/Short Buildup/Short Covering/Long Unwinding stretch began - green/up = bullish, red/down = bearish.
@@ -4539,6 +4584,7 @@ export default function OiReplayPage() {
           floating spot chart while viewing the heatmap, Paper Trade's P&L, the replay clock. Each
           panel keeps its own open/position/size state, so opening or closing one never touches
           another. */}
+      <DomDrawer open={domOpen} onClose={() => setDomOpen(false)} underlying={underlying} />
       {spotFloating && result && (
         <DraggableFloatingPanel
           title={`Spot - ${underlying}`} pos={spotPanelPos} onPosChange={setSpotPanelPos}
@@ -4589,6 +4635,7 @@ export default function OiReplayPage() {
               <LivePositionsView
                 snapshot={livePositions} slippage={liveSlippage} busy={liveBusy}
                 onClose={handleLiveClose} onCancel={handleLiveCancel} onRefresh={handleLiveRefresh}
+                onExitAll={handleLiveExitAll} onEmergencyExitAll={handleLiveEmergencyExitAll}
               />
             )}
           />

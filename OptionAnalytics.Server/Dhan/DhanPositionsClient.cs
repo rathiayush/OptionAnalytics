@@ -54,6 +54,18 @@ public sealed class DhanPositionsClient
     /// failure, same as DhanSuperOrderClient.ListAsync - already logged here, and a caller using
     /// this as a safety gate would rather fail open (place the order, same as before this check
     /// existed) than fail the whole evaluation over a transient read error.</summary>
+    /// <summary>Dhan's own DELETE /positions: "Exit all active positions and cancel all open orders for
+    /// the current trading day" - EVERYTHING on the account, every product, including positions and
+    /// orders this app's strategy triggers own. The emergency switch only; returns Dhan's error text on
+    /// failure, null on success.</summary>
+    public async Task<string?> ExitAllAccountAsync(CancellationToken cancellationToken)
+    {
+        using var response = await _api.SendAsync(HttpMethod.Delete, "/positions", null, "exiting all positions (account-wide)", cancellationToken);
+        if (response.Success) return null;
+        _logger.LogWarning("Exit-all-positions failed: {Error}", response.ErrorMessage);
+        return response.ErrorMessage ?? "Dhan did not confirm the exit";
+    }
+
     public async Task<IReadOnlyList<DhanPosition>> ListAsync(CancellationToken cancellationToken)
     {
         using var response = await _api.SendAsync(HttpMethod.Get, "/positions", null, "listing positions", cancellationToken);

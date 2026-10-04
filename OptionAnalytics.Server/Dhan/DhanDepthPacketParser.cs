@@ -2,9 +2,9 @@ using System.Buffers.Binary;
 
 namespace OptionAnalytics.Server.Dhan;
 
-/// <summary>One side (bid or ask) of one instrument's 20-level book, as a single packet on Dhan's
-/// 20-level depth socket delivers it.</summary>
-public readonly record struct DepthSidePacket(uint SecurityId, byte ExchangeSegment, bool IsBid, DepthLevel[] Levels);
+/// <summary>One side (bid or ask) of one instrument's book, as a single packet on Dhan's 20-level or
+/// 200-level depth socket delivers it. Depth: which feed it came from (20 or 200).</summary>
+public readonly record struct DepthSidePacket(uint SecurityId, byte ExchangeSegment, bool IsBid, DepthLevel[] Levels, int Depth = 20);
 
 /// <summary>
 /// Decodes Dhan's 20-level market depth feed (https://dhanhq.co/docs/v2/full-market-depth/). Every
@@ -13,6 +13,9 @@ public readonly record struct DepthSidePacket(uint SecurityId, byte ExchangeSegm
 /// be ignored - followed, for a bid/ask packet, by 20 levels of 16 bytes each: price (float64 LE),
 /// quantity (uint32 LE), number of orders (uint32 LE). Bid and ask arrive as separate packets, and a
 /// single WebSocket message can carry several packets back to back.
+///
+/// The 200-level feed (wss://full-depth-api.dhan.co/twohundreddepth) uses the same layout except that
+/// header bytes 9-12 are the NUMBER OF ROWS in the packet instead of a sequence - see ParseTwoHundred.
 /// </summary>
 public static class DhanDepthPacketParser
 {
@@ -24,10 +27,19 @@ public static class DhanDepthPacketParser
     public const byte BidCode = 41;
     public const byte AskCode = 51;
     public const byte DisconnectCode = 50;
+    public const int TwoHundredLevelCount = 200;
 
     /// <summary>Every bid/ask packet in <paramref name="message"/>. A disconnect packet sets
     /// <paramref name="disconnectReason"/> (Dhan's reason code). Empty levels are skipped.</summary>
     public static List<DepthSidePacket> Parse(ReadOnlySpan<byte> message, out int? disconnectReason)
+        => ParseCore(message, rowsInHeader: false, out disconnectReason);
+
+    /// <summary>The 200-level feed's packets: as Parse, with the row count taken from the header
+    /// (at most 200).</summary>
+    public static List<DepthSidePacket> ParseTwoHundred(ReadOnlySpan<byte> message, out int? disconnectReason)
+        => ParseCore(message, rowsInHeader: true, out disconnectReason);
+
+    private static List<DepthSidePacket> ParseCore(ReadOnlySpan<byte> message, bool rowsInHeader, out int? disconnectReason)
     {
         disconnectReason = null;
         var result = new List<DepthSidePacket>();
@@ -56,13 +68,17 @@ public static class DhanDepthPacketParser
                 continue;
             }
 
-            // The declared length is trusted only when it covers all 20 levels and fits; otherwise
-            // the documented fixed size is used.
-            var length = declared >= SidePacketLength && offset + declared <= message.Length ? declared : SidePacketLength;
+            var rows = rowsInHeader
+                ? (int)Math.Min(BinaryPrimitives.ReadUInt32LittleEndian(message.Slice(offset + 8, 4)), TwoHundredLevelCount)
+                : LevelCount;
+            // The declared length is trusted only when it covers every row and fits; otherwise the
+            // rows' own size is used.
+            var minimum = HeaderLength + rows * LevelLength;
+            var length = declared >= minimum && offset + declared <= message.Length ? declared : minimum;
             if (offset + length > message.Length) break;
 
-            var levels = new List<DepthLevel>(LevelCount);
-            for (var i = 0; i < LevelCount; i++)
+            var levels = new List<DepthLevel>(rows);
+            for (var i = 0; i < rows; i++)
             {
                 var at = offset + HeaderLength + i * LevelLength;
                 var price = BinaryPrimitives.ReadDoubleLittleEndian(message.Slice(at, 8));
@@ -72,7 +88,7 @@ public static class DhanDepthPacketParser
                 levels.Add(new DepthLevel(Math.Round((decimal)price, 2), quantity, (int)Math.Min(orders, int.MaxValue)));
             }
 
-            result.Add(new DepthSidePacket(securityId, segment, code == BidCode, levels.ToArray()));
+            result.Add(new DepthSidePacket(securityId, segment, code == BidCode, levels.ToArray(), rowsInHeader ? TwoHundredLevelCount : LevelCount));
             offset += length;
         }
 

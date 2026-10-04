@@ -16,19 +16,28 @@ namespace OptionAnalytics.Server.Services.OrderFlow;
 /// (bid-side) volume. The page re-buckets minutes into its 1/3/5/15-minute bars and price rows, and
 /// derives delta, cumulative delta, imbalances, absorption and exhaustion from them.
 ///
-/// BOOK. The 20-level book from DhanDepthFeedClient when it is streaming, else the Full packet's 5
-/// levels. Sampled every SnapshotInterval for the depth heatmap.
+/// BOOK. The 200-level book (DhanTwoHundredDepthClient) or 20-level book (DhanDepthFeedClient) while
+/// one is streaming, else the Full packet's 5 levels. Sampled every SnapshotInterval for the depth
+/// heatmap - stored bucketed into HeatmapBaseRow rows as compact (row, quantity) pairs, since a day
+/// of 200-level snapshots kept as they arrive would run to well over a hundred MB per contract.
 ///
 /// ICEBERGS. A price level that keeps trading while it stays in the book: once more than IcebergFactor
 /// times the most quantity ever SHOWN at that level has traded there (and at least IcebergMinLots
 /// lots), something larger than the display is resting - a hidden buyer at a bid, seller at an ask.
 /// The episode ends when the level leaves the book (price moved through it).
 ///
-/// Everything is the current IST day only, and resets at the next day's first tick.
+/// Everything is the current IST day only, and resets at the next day's first tick. ExportDay /
+/// ImportDay let OrderFlowRecorder save the day to disk and bring it back after a restart, and replay
+/// a past day through the same Snapshot.
 /// </summary>
 public sealed class OrderFlowEngine
 {
     public static readonly TimeSpan SnapshotInterval = TimeSpan.FromSeconds(2);
+    /// <summary>The heatmap's finest row - every row size the page offers is a multiple of it.</summary>
+    public const decimal HeatmapBaseRow = 0.5m;
+    /// <summary>Levels per side in the live push's book (the ladder); the heatmap gets every level
+    /// bucketed into HeatmapBaseRow rows.</summary>
+    public const int LiveBookLevels = 50;
     private static readonly TimeSpan DeepBookFreshness = TimeSpan.FromSeconds(5);
     public const decimal IcebergFactor = 2m;
     public const int IcebergMinLots = 5;
@@ -43,13 +52,21 @@ public sealed class OrderFlowEngine
     private DepthLevel[] _bids = Array.Empty<DepthLevel>();
     private DepthLevel[] _asks = Array.Empty<DepthLevel>();
     private DateTimeOffset? _deepBidAt, _deepAskAt;
+    private int _deepDepth = 20;
+    // A restored day's depth, reported until live data arrives (a replayed day keeps saying what it had).
+    private int? _importedDepth;
+    // The deepest book seen today - what a saved day says it had.
+    private int _dayDepth = 5;
     private DateTimeOffset _lastSnapshotAt = DateTimeOffset.MinValue;
     private DateTimeOffset? _lastTradeAt;
     // The latest event time seen - what "is the 20-level book still fresh" is judged against.
     private DateTimeOffset _clock;
     private long _sequence;
+    private long _version;
 
     private readonly SortedDictionary<DateTimeOffset, MinuteBar> _bars = new();
+    // The day's volume at each price - the DOM's traded-volume column.
+    private readonly Dictionary<decimal, LevelVolume> _dayVolume = new();
     private readonly List<OrderFlowTrade> _trades = new();
     private readonly List<DepthSnapshot> _snapshots = new();
     private readonly Dictionary<decimal, LevelEpisode> _bidEpisodes = new();
@@ -96,6 +113,7 @@ public sealed class OrderFlowEngine
     {
         lock (_lock)
         {
+            _importedDepth = null;
             RollDay(now);
             var price = tick.LastPrice > 0 ? Normalize(tick.LastPrice) : 0;
 
@@ -129,9 +147,12 @@ public sealed class OrderFlowEngine
         if (packet.Levels.Length == 0) return;
         lock (_lock)
         {
+            _importedDepth = null;
             RollDay(now);
             if (packet.IsBid) { _bids = packet.Levels; _deepBidAt = now; _prevBid = packet.Levels[0].Price; }
             else { _asks = packet.Levels; _deepAskAt = now; _prevAsk = packet.Levels[0].Price; }
+            _deepDepth = packet.Depth;
+            _dayDepth = Math.Max(_dayDepth, packet.Depth);
             UpdateEpisodes(now);
             MaybeSnapshot(now);
         }
@@ -148,6 +169,8 @@ public sealed class OrderFlowEngine
         _prevVolume = null;
         _prevLtp = _prevBid = _prevAsk = 0;
         _bars.Clear();
+        _dayDepth = 5;
+        _dayVolume.Clear();
         _trades.Clear();
         _snapshots.Clear();
         _bidEpisodes.Clear();
@@ -158,6 +181,7 @@ public sealed class OrderFlowEngine
 
     private void AddTrade(DateTimeOffset now, decimal price, long quantity, int side)
     {
+        _version++;
         var minute = IstMinute(now);
         if (!_bars.TryGetValue(minute, out var bar))
             _bars[minute] = bar = new MinuteBar { Time = minute, Open = price, High = price, Low = price, Close = price };
@@ -166,8 +190,9 @@ public sealed class OrderFlowEngine
         bar.Close = price;
         bar.Trades++;
         if (!bar.Levels.TryGetValue(price, out var level)) bar.Levels[price] = level = new LevelVolume();
-        if (side > 0) { level.Buy += quantity; bar.Buy += quantity; }
-        else { level.Sell += quantity; bar.Sell += quantity; }
+        if (!_dayVolume.TryGetValue(price, out var atPrice)) _dayVolume[price] = atPrice = new LevelVolume();
+        if (side > 0) { level.Buy += quantity; bar.Buy += quantity; atPrice.Buy += quantity; }
+        else { level.Sell += quantity; bar.Sell += quantity; atPrice.Sell += quantity; }
         _lastTradeAt = now;
 
         if (quantity >= LotSize)
@@ -243,8 +268,29 @@ public sealed class OrderFlowEngine
     {
         if (now - _lastSnapshotAt < SnapshotInterval || (_bids.Length == 0 && _asks.Length == 0)) return;
         _lastSnapshotAt = now;
-        _snapshots.Add(new DepthSnapshot(now, _bids, _asks));
+        _version++;
+        _snapshots.Add(new DepthSnapshot(now, HeatRows(_bids), HeatRows(_asks)));
     }
+
+    /// <summary>A book side bucketed into HeatmapBaseRow rows, ascending.</summary>
+    internal static HeatRow[] HeatRows(DepthLevel[] levels)
+    {
+        if (levels.Length == 0) return Array.Empty<HeatRow>();
+        var rows = new SortedDictionary<int, long>();
+        foreach (var level in levels)
+        {
+            var row = (int)Math.Floor(level.Price / HeatmapBaseRow);
+            rows.TryGetValue(row, out var quantity);
+            rows[row] = quantity + level.Quantity;
+        }
+        return rows.Select(kv => new HeatRow(kv.Key, (int)Math.Min(kv.Value, int.MaxValue))).ToArray();
+    }
+
+    /// <summary>The IST day this engine holds, or null before its first event.</summary>
+    public DateOnly? ExportDayDate() { lock (_lock) return _day == default ? null : _day; }
+
+    /// <summary>Changes since the start - lets the recorder skip saving a day that has not moved.</summary>
+    public long Version { get { lock (_lock) return _version; } }
 
     /// <summary>Everything the Order Flow page loads: the day's minute footprints bucketed into
     /// <paramref name="rowSize"/>-point rows, prints of at least <paramref name="minTradeQty"/>, icebergs,
@@ -277,21 +323,40 @@ public sealed class OrderFlowEngine
         {
             var recentBars = _bars.Values.TakeLast(2).Select(b => ToDto(b, 0)).ToList();
             return new OrderFlowLive(Meta(), _clock, recentBars, _trades.TakeLast(40).ToList(),
-                Icebergs().TakeLast(30).ToList(), BookDto());
+                Icebergs().TakeLast(30).ToList(), BookDto(LiveBookLevels),
+                new HeatmapColumn(_clock, Bucket(HeatRows(_bids), HeatmapBaseRow), Bucket(HeatRows(_asks), HeatmapBaseRow)));
+        }
+    }
+
+    /// <summary>The DOM push: the whole book (all 200 levels per side when that feed streams), the
+    /// day's traded volume at every price inside the book's range, and the latest prints.</summary>
+    public OrderFlowDom Dom()
+    {
+        lock (_lock)
+        {
+            var book = BookDto();
+            var prices = _bids.Concat(_asks).Select(l => l.Price).ToList();
+            var low = prices.Count > 0 ? prices.Min() : 0;
+            var high = prices.Count > 0 ? prices.Max() : 0;
+            var volume = _dayVolume.Where(kv => kv.Key >= low && kv.Key <= high)
+                .OrderByDescending(kv => kv.Key)
+                .Select(kv => new FootprintLevel(kv.Key, kv.Value.Buy, kv.Value.Sell))
+                .ToList();
+            return new OrderFlowDom(Meta(), _clock, book, volume, _trades.TakeLast(30).ToList());
         }
     }
 
     private OrderFlowMeta Meta() => new(
         Underlying, ContractSymbol, SecurityId, ExchangeSegment, LotSize, TickSize, _prevLtp, _lastTradeAt,
-        Fresh(_deepBidAt, _clock) || Fresh(_deepAskAt, _clock) ? 20 : 5);
+        Fresh(_deepBidAt, _clock) || Fresh(_deepAskAt, _clock) ? _deepDepth : _importedDepth ?? 5, _day == default ? null : _day);
 
     private IReadOnlyList<OrderFlowIceberg> Icebergs() => _icebergs
         .Select(i => new OrderFlowIceberg(i.Id, i.IsBid, i.Price, i.StartedAt, i.DetectedAt, i.LastSeenAt, i.EndedAt, i.Traded, i.MaxDisplayed, i.Refills))
         .ToList();
 
-    private OrderFlowBook BookDto() => new(
-        _bids.Select(l => new BookLevel(l.Price, l.Quantity, l.Orders)).ToList(),
-        _asks.Select(l => new BookLevel(l.Price, l.Quantity, l.Orders)).ToList());
+    private OrderFlowBook BookDto(int maxLevels = int.MaxValue) => new(
+        _bids.Take(maxLevels).Select(l => new BookLevel(l.Price, l.Quantity, l.Orders)).ToList(),
+        _asks.Take(maxLevels).Select(l => new BookLevel(l.Price, l.Quantity, l.Orders)).ToList());
 
     private static OrderFlowBar ToDto(MinuteBar bar, decimal rowSize)
     {
@@ -306,12 +371,12 @@ public sealed class OrderFlowEngine
             levels.Reverse().Select(kv => new FootprintLevel(kv.Key, kv.Value.Buy, kv.Value.Sell)).ToList());
     }
 
-    private static IReadOnlyList<decimal[]> Bucket(DepthLevel[] levels, decimal rowSize)
+    private static IReadOnlyList<decimal[]> Bucket(HeatRow[] levels, decimal rowSize)
     {
         var rows = new SortedDictionary<decimal, long>();
         foreach (var level in levels)
         {
-            var row = Row(level.Price, rowSize);
+            var row = Row(level.Row * HeatmapBaseRow, rowSize);
             rows.TryGetValue(row, out var quantity);
             rows[row] = quantity + level.Quantity;
         }
@@ -348,7 +413,113 @@ public sealed class OrderFlowEngine
         public int Refills;
     }
 
-    private sealed record DepthSnapshot(DateTimeOffset Time, DepthLevel[] Bids, DepthLevel[] Asks);
+    private sealed record DepthSnapshot(DateTimeOffset Time, HeatRow[] Bids, HeatRow[] Asks);
+
+    /// <summary>A copy of the whole day, for OrderFlowRecorder. Null before the first event.</summary>
+    public OrderFlowDay? ExportDay()
+    {
+        lock (_lock)
+        {
+            if (_day == default) return null;
+            return new OrderFlowDay
+            {
+                Underlying = Underlying, SecurityId = SecurityId, ContractSymbol = ContractSymbol, ExchangeSegment = ExchangeSegment,
+                TickSize = TickSize, LotSize = LotSize, Day = _day, Sequence = _sequence, LastPrice = _prevLtp, LastTradeAt = _lastTradeAt,
+                Clock = _clock, DepthLevels = Math.Max(_dayDepth, _importedDepth ?? 5),
+                Bars = _bars.Values.Select(b => new OrderFlowDay.Bar(b.Time, b.Open, b.High, b.Low, b.Close, b.Buy, b.Sell, b.Trades,
+                    b.Levels.Select(kv => new FootprintLevel(kv.Key, kv.Value.Buy, kv.Value.Sell)).ToArray())).ToList(),
+                Trades = _trades.ToList(),
+                Icebergs = Icebergs().ToList(),
+                Snapshots = _snapshots.Select(x => new OrderFlowDay.Snapshot(x.Time, x.Bids, x.Asks)).ToList(),
+            };
+        }
+    }
+
+    /// <summary>Brings back a saved day - ignored unless it is this contract's. The live book and the
+    /// previous tick are NOT restored: the first tick after a restart starts from scratch, so the
+    /// volume traded while the server was down is never booked as one giant print.</summary>
+    public bool ImportDay(OrderFlowDay day)
+    {
+        if (day.SecurityId != SecurityId) return false;
+        lock (_lock)
+        {
+            if (_day != default && _day != day.Day) return false;
+            _day = day.Day;
+            if (day.Clock > _clock) _clock = day.Clock;
+            _sequence = Math.Max(_sequence, day.Sequence);
+            if (_prevLtp == 0) _prevLtp = day.LastPrice;
+            _lastTradeAt ??= day.LastTradeAt;
+            if (_bars.Count == 0 && _snapshots.Count == 0) _importedDepth = day.DepthLevels;
+            _dayDepth = Math.Max(_dayDepth, day.DepthLevels);
+
+            foreach (var saved in day.Bars)
+            {
+                if (_bars.ContainsKey(saved.Time)) continue;
+                var bar = new MinuteBar { Time = saved.Time, Open = saved.Open, High = saved.High, Low = saved.Low, Close = saved.Close, Buy = saved.Buy, Sell = saved.Sell, Trades = saved.Trades };
+                foreach (var level in saved.Levels)
+                {
+                    bar.Levels[level.Price] = new LevelVolume { Buy = level.Buy, Sell = level.Sell };
+                    if (!_dayVolume.TryGetValue(level.Price, out var atPrice)) _dayVolume[level.Price] = atPrice = new LevelVolume();
+                    atPrice.Buy += level.Buy;
+                    atPrice.Sell += level.Sell;
+                }
+                _bars[saved.Time] = bar;
+            }
+
+            var firstLiveTrade = _trades.Count > 0 ? _trades[0].Time : DateTimeOffset.MaxValue;
+            _trades.InsertRange(0, day.Trades.Where(t => t.Time < firstLiveTrade));
+            if (_trades.Count > MaxTradesKept) _trades.RemoveRange(0, _trades.Count - MaxTradesKept);
+
+            var firstLiveSnapshot = _snapshots.Count > 0 ? _snapshots[0].Time : DateTimeOffset.MaxValue;
+            _snapshots.InsertRange(0, day.Snapshots.Where(x => x.Time < firstLiveSnapshot).Select(x => new DepthSnapshot(x.Time, x.Bids, x.Asks)));
+
+            var known = _icebergs.Select(i => i.Id).ToHashSet();
+            _icebergs.InsertRange(0, day.Icebergs.Where(i => !known.Contains(i.Id)).Select(i => new IcebergState
+            {
+                Id = i.Id, IsBid = i.IsBid, Price = i.Price, StartedAt = i.StartedAt, DetectedAt = i.DetectedAt, LastSeenAt = i.LastSeenAt,
+                // An episode still open when the day was saved cannot be followed any more.
+                EndedAt = i.EndedAt ?? i.LastSeenAt, Traded = i.Traded, MaxDisplayed = i.MaxDisplayed, Refills = i.Refills,
+            }));
+            _version++;
+            return true;
+        }
+    }
+
+    /// <summary>An engine holding a saved day - what replay serves a past day's Snapshot from.</summary>
+    public static OrderFlowEngine FromDay(OrderFlowDay day)
+    {
+        var engine = new OrderFlowEngine(day.Underlying, day.SecurityId, day.ContractSymbol, day.ExchangeSegment, day.TickSize, day.LotSize);
+        engine.ImportDay(day);
+        return engine;
+    }
+}
+
+/// <summary>A book side's heatmap row: Row x HeatmapBaseRow is the row's price.</summary>
+public readonly record struct HeatRow(int Row, int Quantity);
+
+/// <summary>One recorded day of a contract's order flow - see OrderFlowEngine.ExportDay and
+/// OrderFlowRecorder.</summary>
+public sealed class OrderFlowDay
+{
+    public required string Underlying { get; init; }
+    public required uint SecurityId { get; init; }
+    public required string ContractSymbol { get; init; }
+    public required string ExchangeSegment { get; init; }
+    public required decimal TickSize { get; init; }
+    public required int LotSize { get; init; }
+    public required DateOnly Day { get; init; }
+    public long Sequence { get; init; }
+    public decimal LastPrice { get; init; }
+    public DateTimeOffset? LastTradeAt { get; init; }
+    public DateTimeOffset Clock { get; init; }
+    public int DepthLevels { get; init; }
+    public List<Bar> Bars { get; init; } = new();
+    public List<OrderFlowTrade> Trades { get; init; } = new();
+    public List<OrderFlowIceberg> Icebergs { get; init; } = new();
+    public List<Snapshot> Snapshots { get; init; } = new();
+
+    public sealed record Bar(DateTimeOffset Time, decimal Open, decimal High, decimal Low, decimal Close, long Buy, long Sell, int Trades, FootprintLevel[] Levels);
+    public sealed record Snapshot(DateTimeOffset Time, HeatRow[] Bids, HeatRow[] Asks);
 }
 
 /// <summary>One inferred print of at least a lot: Buy = the buyer was the aggressor (lifted the offer).</summary>
@@ -373,17 +544,24 @@ public sealed record OrderFlowBook(IReadOnlyList<BookLevel> Bids, IReadOnlyList<
 /// <summary>One heatmap column: every bid/ask row as [price, quantity].</summary>
 public sealed record HeatmapColumn(DateTimeOffset Time, IReadOnlyList<decimal[]> Bids, IReadOnlyList<decimal[]> Asks);
 
-/// <summary>DepthLevels: 20 while the 20-level depth feed is streaming this contract, else 5.</summary>
+/// <summary>The DOM ladder's push - see OrderFlowEngine.Dom.</summary>
+public sealed record OrderFlowDom(
+    OrderFlowMeta Meta, DateTimeOffset Time, OrderFlowBook Book, IReadOnlyList<FootprintLevel> Volume, IReadOnlyList<OrderFlowTrade> Trades);
+
+/// <summary>DepthLevels: 200 or 20 while that depth feed is streaming this contract, else 5. Day: the
+/// IST trading day the data is for.</summary>
 public sealed record OrderFlowMeta(
     string Underlying, string ContractSymbol, uint SecurityId, string ExchangeSegment, int LotSize, decimal TickSize,
-    decimal LastPrice, DateTimeOffset? LastTradeAt, int DepthLevels);
+    decimal LastPrice, DateTimeOffset? LastTradeAt, int DepthLevels, DateOnly? Day = null);
 
 public sealed record OrderFlowSnapshot(
     OrderFlowMeta Meta, decimal RowSize, IReadOnlyList<OrderFlowBar> Bars, IReadOnlyList<OrderFlowTrade> Trades,
     IReadOnlyList<OrderFlowIceberg> Icebergs, IReadOnlyList<HeatmapColumn> Heatmap, OrderFlowBook Book);
 
 /// <summary>Time: the server's time of the latest event - what the page stamps its live heatmap
-/// columns with, so they line up with the loaded history whatever this device's clock says.</summary>
+/// columns with, so they line up with the loaded history whatever this device's clock says. Book: the
+/// top LiveBookLevels per side (the ladder). Heat: the WHOLE book in HeatmapBaseRow rows - the live
+/// heatmap column, much smaller than 200 levels per side as they are.</summary>
 public sealed record OrderFlowLive(
     OrderFlowMeta Meta, DateTimeOffset Time, IReadOnlyList<OrderFlowBar> Bars, IReadOnlyList<OrderFlowTrade> Trades,
-    IReadOnlyList<OrderFlowIceberg> Icebergs, OrderFlowBook Book);
+    IReadOnlyList<OrderFlowIceberg> Icebergs, OrderFlowBook Book, HeatmapColumn? Heat = null);

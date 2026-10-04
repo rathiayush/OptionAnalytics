@@ -25,7 +25,11 @@ public sealed record SuperOrderSummary(
     decimal? TargetPrice,
     decimal? StopLossPrice,
     string? OmsErrorDescription,
-    IReadOnlyList<SuperOrderLeg> LegDetails);
+    IReadOnlyList<SuperOrderLeg> LegDetails)
+{
+    /// <summary>The tag the order was placed with - manual orders from the trade panel start "OIR-".</summary>
+    public string? CorrelationId { get; init; }
+}
 
 /// <summary>Result of a place/modify/cancel call - just what Dhan's own response bodies carry for
 /// those three (an order id and its current status), never a full SuperOrderSummary.</summary>
@@ -200,7 +204,10 @@ public sealed class DhanSuperOrderClient
                 GetDecimal(element, "targetPrice"),
                 GetDecimal(element, "stopLossPrice"),
                 GetString(element, "omsErrorDescription"),
-                legs));
+                legs)
+            {
+                CorrelationId = GetString(element, "correlationId"),
+            });
         }
 
         return result;

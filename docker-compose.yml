@@ -30,6 +30,9 @@ services:
       # everyone stays logged in across a redeploy instead of the whole key ring (and every
       # outstanding session) resetting every time the container restarts.
       Storage__DataProtectionKeysPath: /app/data/dataprotection-keys
+      # Each day's order flow (footprints, prints, depth heatmap) - survives a redeploy and is what
+      # the Order Flow page replays past days from. See OrderFlowRecorder.
+      Storage__OrderFlowPath: /app/data/order-flow
 
       # Dhan. Either supply a long-lived AccessToken, or leave it empty and set Pin + TotpSecret so
       # DhanTotpAutoRenewalHostedService logs in on its own and keeps the token fresh.

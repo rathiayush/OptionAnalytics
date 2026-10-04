@@ -22,7 +22,9 @@ export const liveTradingApi = {
   positions: (refresh = false) => fetch(`/api/live-trading/positions${refresh ? '?refresh=true' : ''}`).then((r) => (r.ok ? r.json() : null)),
   place: (order) => postJson('/api/live-trading/orders', order),
   close: (securityId, slippagePoints) => postJson(`/api/live-trading/positions/${encodeURIComponent(securityId)}/close`, { slippagePoints }),
-  cancel: (orderId) => postJson(`/api/live-trading/orders/${encodeURIComponent(orderId)}`, null, 'DELETE'),
+  cancel: (orderId, isExit = false) => postJson(`/api/live-trading/orders/${encodeURIComponent(orderId)}${isExit ? '?exit=true' : ''}`, null, 'DELETE'),
+  exitAll: (slippagePoints) => postJson('/api/live-trading/exit-all', { slippagePoints }),
+  emergencyExitAll: () => postJson('/api/live-trading/emergency-exit-all', null),
 }
 
 const money = (v) => (v == null ? '—' : `${v >= 0 ? '+' : ''}${Math.round(v).toLocaleString('en-IN')}`)
@@ -31,7 +33,7 @@ const price = (v) => (v == null ? '—' : Number(v).toFixed(2))
 
 // The account's live positions (Dhan's own book, so they survive an app restart), pending entries
 // and today's P&L. P&L moves with the live tick feed - snapshot is pushed by the server, not polled.
-export function LivePositionsView({ snapshot, slippage, busy, onClose, onCancel, onRefresh }) {
+export function LivePositionsView({ snapshot, slippage, busy, onClose, onCancel, onRefresh, onExitAll, onEmergencyExitAll }) {
   if (!snapshot) return <Text type="secondary">Loading live positions from Dhan…</Text>
   const open = snapshot.positions.filter((p) => p.isOpen)
   const closed = snapshot.positions.filter((p) => !p.isOpen)
@@ -98,11 +100,33 @@ export function LivePositionsView({ snapshot, slippage, busy, onClose, onCancel,
           <Text type="secondary" style={{ fontSize: 12 }}>Waiting to fill</Text>
           {snapshot.pendingOrders.map((o) => (
             <Space key={o.orderId} size={8} wrap>
-              <Tag color={o.transactionType === 'BUY' ? 'success' : 'error'}>{o.transactionType}</Tag>
-              <Text style={{ fontSize: 12 }}>{o.tradingSymbol ?? o.securityId} x{o.quantity} @ {price(o.price)} · T {price(o.targetPrice)} · SL {price(o.stopLossPrice)} · {o.status}</Text>
-              <Button size="small" onClick={() => onCancel(o.orderId)} disabled={busy}>Cancel</Button>
+              <Tag color={o.kind === 'Exit' ? 'warning' : o.transactionType === 'BUY' ? 'success' : 'error'}>{o.kind === 'Exit' ? 'EXIT ' : ''}{o.transactionType}</Tag>
+              <Text style={{ fontSize: 12 }}>
+                {o.tradingSymbol ?? o.securityId} x{o.quantity} @ {price(o.price)}
+                {o.kind === 'Exit' ? ' · re-pricing to the live bid/ask until filled' : ` · T ${price(o.targetPrice)} · SL ${price(o.stopLossPrice)}`} · {o.status}
+              </Text>
+              <Button size="small" onClick={() => onCancel(o.orderId, o.kind === 'Exit')} disabled={busy}>Cancel</Button>
             </Space>
           ))}
+        </Space>
+      )}
+
+      {(open.length > 0 || snapshot.pendingOrders.some((o) => o.kind !== 'Exit')) && (
+        <Space wrap size={8}>
+          <Popconfirm
+            title="Exit ALL live positions?"
+            description={`Cancels the panel's unfilled entries, then closes all ${open.length} open position(s) one by one - each one's SL/target cancelled first, exit at the bid/ask with ${slippage} pts slippage, re-priced until filled.`}
+            okText="Exit all now" okButtonProps={{ danger: true }} onConfirm={onExitAll}
+          >
+            <Button danger type="primary" size="small" disabled={busy}>Exit all</Button>
+          </Popconfirm>
+          <Popconfirm
+            title="EMERGENCY: Dhan exit-all for the whole account?"
+            description="Dhan's own exit-everything: closes EVERY position and cancels EVERY open order on your account, including strategy triggers' orders. Use only if Exit all is not enough."
+            okText="Exit everything on Dhan" okButtonProps={{ danger: true }} onConfirm={onEmergencyExitAll}
+          >
+            <Button danger size="small" disabled={busy}>Emergency exit (Dhan)</Button>
+          </Popconfirm>
         </Space>
       )}
 

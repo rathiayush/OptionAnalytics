@@ -184,3 +184,110 @@ export function mergeLiveMinutes(minuteBars, liveBars, rowSize) {
   }
   return next
 }
+
+// Session volume profile: the volume traded at each price row over `bars` (footprint bars, whose
+// levels are already rows), with the POC (the most traded row) and the value area - the rows around
+// the POC holding `valueAreaPct` of the volume, grown one row at a time toward whichever neighbour
+// traded more (the usual CBOT method). VAH / VAL are its top and bottom rows.
+export function volumeProfile(bars, valueAreaPct = 0.7) {
+  const rows = new Map()
+  for (const bar of bars ?? []) {
+    for (const level of bar.levels ?? []) {
+      const row = rows.get(level.price)
+      if (row) { row.buy += level.buy; row.sell += level.sell } else rows.set(level.price, { price: level.price, buy: level.buy, sell: level.sell })
+    }
+  }
+  return finishProfile([...rows.values()], valueAreaPct)
+}
+
+// The same from plain candles (no footprint): each candle's volume spread evenly over the rows its
+// high-low range covers - an approximation, but all a candle can say about where it traded.
+export function volumeProfileFromCandles(candles, rowSize, valueAreaPct = 0.7) {
+  const rows = new Map()
+  if (!(rowSize > 0)) return finishProfile([], valueAreaPct)
+  for (const c of candles ?? []) {
+    const volume = c.volume ?? 0
+    if (!(volume > 0) || !(c.high >= c.low)) continue
+    const top = rowOf(c.high, rowSize)
+    const bottom = rowOf(c.low, rowSize)
+    const n = Math.round((top - bottom) / rowSize) + 1
+    const up = c.close >= c.open
+    for (let i = 0; i < n; i++) {
+      const price = round2(bottom + i * rowSize)
+      const share = volume / n
+      const row = rows.get(price) ?? { price, buy: 0, sell: 0 }
+      if (up) row.buy += share; else row.sell += share
+      rows.set(price, row)
+    }
+  }
+  return finishProfile([...rows.values()], valueAreaPct)
+}
+
+function finishProfile(list, valueAreaPct) {
+  const rows = list.sort((a, b) => a.price - b.price).map((r) => ({ ...r, total: r.buy + r.sell }))
+  const total = rows.reduce((s, r) => s + r.total, 0)
+  if (!rows.length || total <= 0) return { rows: [], poc: null, vah: null, val: null, total: 0, maxRow: 0 }
+  let pocIndex = 0
+  rows.forEach((r, i) => { if (r.total > rows[pocIndex].total) pocIndex = i })
+  let lo = pocIndex
+  let hi = pocIndex
+  let inArea = rows[pocIndex].total
+  while (inArea < valueAreaPct * total && (lo > 0 || hi < rows.length - 1)) {
+    const below = lo > 0 ? rows[lo - 1].total : -1
+    const above = hi < rows.length - 1 ? rows[hi + 1].total : -1
+    if (above >= below) { hi++; inArea += rows[hi].total } else { lo--; inArea += rows[lo].total }
+  }
+  return { rows, poc: rows[pocIndex].price, vah: rows[hi].price, val: rows[lo].price, total, maxRow: rows[pocIndex].total }
+}
+
+// ---- Replay ---------------------------------------------------------------------------------
+
+const msOf = (t) => (typeof t === 'number' ? t : new Date(t).getTime())
+
+// How many items of a time-sorted array are at or before `clockMs`.
+function countUpTo(items, clockMs, timeOf) {
+  let lo = 0
+  let hi = items.length
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1
+    if (timeOf(items[mid]) <= clockMs) lo = mid + 1; else hi = mid
+  }
+  return lo
+}
+
+// A recorded day as it stood at `clockMs`, in the page's live data shape: minutes that had
+// COMPLETED by then (a minute's footprint is only known once it is over), prints, icebergs as they
+// were known then (one that ended later is still active), the heatmap so far, and the book from the
+// latest heatmap snapshot (bucketed into the page's rows - a recording keeps the book that way).
+export function replayView(day, clockMs) {
+  if (!day || clockMs == null) return null
+  const minuteBars = day.minuteBars.slice(0, countUpTo(day.minuteBars, clockMs - 60_000, (b) => msOf(b.time)))
+  const trades = day.trades.slice(0, countUpTo(day.trades, clockMs, (t) => msOf(t.time)))
+  const heatmap = day.heatmap.slice(0, countUpTo(day.heatmap, clockMs, (c) => c.t))
+  const icebergs = day.icebergs
+    .filter((i) => msOf(i.detectedAt) <= clockMs)
+    .map((i) => (i.endedAt && msOf(i.endedAt) > clockMs ? { ...i, endedAt: null } : i))
+  const column = heatmap.at(-1)
+  const book = column
+    ? {
+        bids: [...column.bids].sort((a, b) => b[0] - a[0]).map(([price, quantity]) => ({ price, quantity, orders: 0 })),
+        asks: [...column.asks].sort((a, b) => a[0] - b[0]).map(([price, quantity]) => ({ price, quantity, orders: 0 })),
+      }
+    : { bids: [], asks: [] }
+  const lastTrade = trades.at(-1)
+  const lastBar = minuteBars.at(-1)
+  return {
+    ...day,
+    meta: { ...day.meta, lastPrice: lastTrade?.price ?? lastBar?.close ?? 0, lastTradeAt: lastTrade?.time ?? null },
+    minuteBars, trades, heatmap, icebergs, book,
+  }
+}
+
+// The span a recorded day can be replayed over: [first data, last data].
+export function replayRange(day) {
+  if (!day) return null
+  const starts = [day.minuteBars[0] && msOf(day.minuteBars[0].time), day.heatmap[0]?.t].filter((v) => v != null)
+  const ends = [day.minuteBars.at(-1) && msOf(day.minuteBars.at(-1).time) + 60_000, day.heatmap.at(-1)?.t].filter((v) => v != null)
+  if (!starts.length) return null
+  return { start: Math.min(...starts), end: Math.max(...ends) }
+}

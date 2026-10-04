@@ -215,4 +215,101 @@ public sealed class OrderFlowEngineTests
         engine.OnTick(Tick(100m, 50, 99.95m, 100m), T0.AddDays(1));
         Assert.Empty(engine.Snapshot(0, 1, 10).Bars);
     }
+
+    // ---- 200-level depth, compact heatmap, day save/restore --------------------------------
+
+    private static byte[] TwoHundredPacket(byte code, uint securityId, int rows, int padTo, Func<int, (double Price, uint Qty, uint Orders)> level)
+    {
+        var length = 12 + padTo * 16;
+        var packet = new byte[length];
+        BinaryPrimitives.WriteUInt16LittleEndian(packet, (ushort)length);
+        packet[2] = code;
+        packet[3] = 2;
+        BinaryPrimitives.WriteUInt32LittleEndian(packet.AsSpan(4), securityId);
+        BinaryPrimitives.WriteUInt32LittleEndian(packet.AsSpan(8), (uint)rows);
+        for (var i = 0; i < rows; i++)
+        {
+            var (price, qty, orders) = level(i);
+            var at = 12 + i * 16;
+            BinaryPrimitives.WriteDoubleLittleEndian(packet.AsSpan(at), price);
+            BinaryPrimitives.WriteUInt32LittleEndian(packet.AsSpan(at + 8), qty);
+            BinaryPrimitives.WriteUInt32LittleEndian(packet.AsSpan(at + 12), orders);
+        }
+        return packet;
+    }
+
+    [Fact]
+    public void TwoHundredParser_TakesTheRowCountFromTheHeader()
+    {
+        // A full 200-row bid, then an ask with 120 rows in a packet padded to 200 rows.
+        var bid = TwoHundredPacket(41, 35001, 200, 200, i => (22710.0 - i * 0.05, 75u, 1u));
+        var ask = TwoHundredPacket(51, 35001, 120, 200, i => (22710.05 + i * 0.05, 150u, 2u));
+
+        var packets = DhanDepthPacketParser.ParseTwoHundred(bid.Concat(ask).ToArray(), out var disconnect);
+
+        Assert.Null(disconnect);
+        Assert.Equal(2, packets.Count);
+        Assert.Equal(200, packets[0].Levels.Length);
+        Assert.Equal(200, packets[0].Depth);
+        Assert.Equal(new DepthLevel(22700.05m, 75, 1), packets[0].Levels[199]);
+        Assert.Equal(120, packets[1].Levels.Length);
+        Assert.Equal(22716m, packets[1].Levels[119].Price);
+    }
+
+    [Fact]
+    public void Engine_Reports200LevelsWhileTheFullDepthStreams()
+    {
+        var engine = NewEngine();
+        var levels = Enumerable.Range(0, 200).Select(i => new DepthLevel(22710m - i * 0.05m, 75, 1)).ToArray();
+        engine.OnDepth(new DepthSidePacket(35001, 2, true, levels, 200), T0);
+
+        Assert.Equal(200, engine.Live().Meta.DepthLevels);
+        Assert.Equal(OrderFlowEngine.LiveBookLevels, engine.Live().Book.Bids.Count);
+        Assert.Equal(200, engine.Dom().Book.Bids.Count);
+        // The live heatmap column: 22700.05-22710 in 0.5-point rows is rows 22700 to 22710.
+        Assert.Equal(21, engine.Live().Heat!.Bids.Count);
+    }
+
+    [Fact]
+    public void HeatRows_BucketIntoHalfPointRows()
+    {
+        var rows = OrderFlowEngine.HeatRows(new[] { new DepthLevel(100.45m, 10, 1), new DepthLevel(100.05m, 5, 1), new DepthLevel(100.5m, 7, 1) });
+        Assert.Equal(new[] { new HeatRow(200, 15), new HeatRow(201, 7) }, rows);
+    }
+
+    [Fact]
+    public void DaySurvivesASaveAndRestore()
+    {
+        var engine = NewEngine();
+        engine.OnTick(Tick(22710m, 1000, 22709.95m, 22710m), T0);
+        engine.OnTick(Tick(22710m, 1750, 22709.95m, 22710m), T0.AddSeconds(3));
+        engine.OnTick(Tick(22709.95m, 2500, 22709.95m, 22710m), T0.AddSeconds(65));
+        var before = engine.Snapshot(1, 75, 900);
+
+        using var stream = new MemoryStream();
+        using (var writer = new BinaryWriter(stream, System.Text.Encoding.UTF8, leaveOpen: true)) OrderFlowRecorder.Write(writer, engine.ExportDay()!);
+        stream.Position = 0;
+        var restored = OrderFlowEngine.FromDay(OrderFlowRecorder.Read(new BinaryReader(stream)));
+        var after = restored.Snapshot(1, 75, 900);
+
+        Assert.Equal(before.Bars.Count, after.Bars.Count);
+        Assert.Equal(before.Bars.Select(b => (b.Time, b.Buy, b.Sell, b.Close)), after.Bars.Select(b => (b.Time, b.Buy, b.Sell, b.Close)));
+        Assert.Equal(before.Bars[0].Levels, after.Bars[0].Levels);
+        Assert.Equal(before.Trades.Select(t => (t.Seq, t.Price, t.Quantity, t.Buy)), after.Trades.Select(t => (t.Seq, t.Price, t.Quantity, t.Buy)));
+        Assert.Equal(before.Heatmap.Count, after.Heatmap.Count);
+        Assert.Equal(before.Heatmap[0].Bids.Select(r => (r[0], r[1])), after.Heatmap[0].Bids.Select(r => (r[0], r[1])));
+
+        // The first tick after a restart only re-baselines volume: no giant print for the downtime.
+        restored.OnTick(Tick(22711m, 90_000, 22710.95m, 22711m), T0.AddMinutes(30));
+        Assert.Equal(before.Bars.Sum(b => b.Buy + b.Sell), restored.Snapshot(1, 75, 900).Bars.Sum(b => b.Buy + b.Sell));
+    }
+
+    [Fact]
+    public void ImportIgnoresAnotherContractsDay()
+    {
+        var engine = NewEngine();
+        engine.OnTick(Tick(22710m, 1000, 22709.95m, 22710m), T0);
+        var other = new OrderFlowEngine("NIFTY", 99999, "NIFTY-Nov2026-FUT", "NSE_FNO", 0.05m, 75);
+        Assert.False(other.ImportDay(engine.ExportDay()!));
+    }
 }
