@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import dayjs from 'dayjs'
-import { Alert, Button, Card, Col, DatePicker, Empty, InputNumber, Row, Select, Slider, Space, Switch, Tag, Tooltip, Typography } from 'antd'
+import { Alert, Button, Card, Col, DatePicker, Empty, InputNumber, Row, Select, Slider, Space, Switch, Tag, TimePicker, Tooltip, Typography } from 'antd'
 import { PlayCircleOutlined, PauseCircleOutlined } from '@ant-design/icons'
 import * as signalR from '@microsoft/signalr'
 import {
@@ -346,6 +346,16 @@ export default function OrderFlowPage() {
   const lastBar = bars.at(-1)
   const dayKey = `${underlying}-${timeframe}-${rowSize}-${isReplay ? replayDate : 'live'}-${meta?.securityId ?? ''}`
   const jump = (minutes) => { setReplayMs((ms) => (range ? Math.max(range.start, Math.min(range.end, (ms ?? range.start) + minutes * 60_000)) : ms)); sync.userAction() }
+  // Go to a minute: the replay shows everything up to and including that minute's bar (the clock is
+  // the end of that minute - same as picking that minute on the OI Replay, so a synced pair agree).
+  const goToMinute = (value) => {
+    if (!value || !range || !replayDate) return
+    const ms = Date.parse(`${replayDate}T${value.format('HH:mm')}:00+05:30`) + 60_000
+    setPlaying(false)
+    setReplayMs(Math.max(range.start, Math.min(range.end, ms)))
+    sync.userAction()
+  }
+  const shownMinute = replayMs != null ? IST_HHMMSS.format(new Date(Math.max(replayMs - 60_000, range?.start ?? 0))).slice(0, 5) : null
   const contractOptions = [
     { value: 'nearest', label: 'Nearest (auto)' },
     ...contracts.map((c) => ({ value: c.expiry, label: `${dayjs(c.expiry).format('DD MMM YYYY')} · ${c.tradingSymbol}` })),
@@ -417,6 +427,15 @@ export default function OrderFlowPage() {
                   <Button disabled={!range} onClick={() => jump(1)}>+1m</Button>
                   <Button disabled={!range} onClick={() => jump(15)}>+15m</Button>
                 </Space.Compact>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, whiteSpace: 'nowrap' }}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>Go to</Text>
+                  <TimePicker
+                    format="HH:mm" minuteStep={1} allowClear={false} needConfirm={false} showNow={false} placeholder="HH:mm"
+                    style={{ width: 96 }} disabled={!range} aria-label="Go to minute"
+                    value={shownMinute ? dayjs().hour(Number(shownMinute.slice(0, 2))).minute(Number(shownMinute.slice(3, 5))).second(0) : null} onChange={goToMinute}
+                    disabledTime={() => ({ disabledHours: () => [...Array(24).keys()].filter((h) => h < 9 || h > 15) })}
+                  />
+                </span>
                 {replayMs != null && <Text strong style={{ fontVariantNumeric: 'tabular-nums' }}>{IST_HHMMSS.format(new Date(replayMs))} IST</Text>}
                 {replayLoading && <Text type="secondary">Loading…</Text>}
               </Space>
