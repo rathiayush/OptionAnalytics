@@ -1156,7 +1156,7 @@ export function computeStopTargetHit(series, entryTimeMs, asOfMs, entryPrice, di
 // SEBI periodically revises each index's own lot size - update this if it changes. This feature is
 // paper trading only (no real order is ever placed), so a stale value here only skews the SIMULATED
 // PnL's scale, not anything real.
-export const PAPER_TRADE_LOT_SIZE = { NIFTY: 75, BANKNIFTY: 35, SENSEX: 20 }
+export const PAPER_TRADE_LOT_SIZE = { NIFTY: 65, BANKNIFTY: 30, SENSEX: 20 }
 
 // One simulated position: Buy (long) or Sell (short/write) CE/PE at whatever the live premium series
 // shows right now, then Exit later - entirely client-side, no backend call, no real order.

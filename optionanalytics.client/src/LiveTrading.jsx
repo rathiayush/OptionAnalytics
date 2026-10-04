@@ -28,6 +28,7 @@ export const liveTradingApi = {
     `/api/live-trading/orders/${encodeURIComponent(orderId)}?${new URLSearchParams({ ...(isExit ? { exit: 'true' } : {}), ...(leg ? { leg } : {}) })}`, null, 'DELETE'),
   exitAll: (slippagePoints) => postJson('/api/live-trading/exit-all', { slippagePoints }),
   emergencyExitAll: () => postJson('/api/live-trading/emergency-exit-all', null),
+  cancelAll: () => postJson('/api/live-trading/orders/cancel-all', null),
 }
 
 const money = (v) => (v == null ? '—' : `${v >= 0 ? '+' : ''}${Math.round(v).toLocaleString('en-IN')}`)
@@ -78,7 +79,7 @@ const protectionTag = (r) => (r.legExcessQty > 0
 
 // The account's live positions (Dhan's own book, so they survive an app restart), pending entries
 // and today's P&L. P&L moves with the live tick feed - snapshot is pushed by the server, not polled.
-export function LivePositionsView({ snapshot, slippage, busy, onClose, onPartialExit, onCancel, onRefresh, onExitAll, onEmergencyExitAll }) {
+export function LivePositionsView({ snapshot, slippage, busy, onClose, onPartialExit, onCancel, onCancelAll, onRefresh, onExitAll, onEmergencyExitAll }) {
   if (!snapshot) return <Text type="secondary">Loading live positions from Dhan…</Text>
   const open = snapshot.positions.filter((p) => p.isOpen)
   const closed = snapshot.positions.filter((p) => !p.isOpen)
@@ -148,45 +149,7 @@ export function LivePositionsView({ snapshot, slippage, busy, onClose, onPartial
         <Alert type="error" showIcon message="Recently rejected by Dhan" description={snapshot.recentRejections.join(' · ')} />
       )}
 
-      {snapshot.pendingOrders.length > 0 && (
-        <Space direction="vertical" size={4} style={{ width: '100%' }}>
-          <Text type="secondary" style={{ fontSize: 12 }}>Open orders on Dhan ({snapshot.pendingOrders.length}) - cancel any of them here</Text>
-          {snapshot.pendingOrders.map((o) => {
-            const isLeg = o.kind === 'Target leg' || o.kind === 'Stop-loss leg'
-            const plain = !o.leg
-            const label = {
-              Protection: 'STOP-LOSS', Exit: 'EXIT', 'Target leg': 'TARGET LEG', 'Stop-loss leg': 'SL LEG', Order: o.orderType && o.orderType !== 'LIMIT' ? o.orderType.replace(/_/g, ' ') : 'ORDER', Entry: 'ENTRY',
-            }[o.kind] ?? o.kind
-            const color = o.kind === 'Protection' || o.kind === 'Stop-loss leg' ? 'purple' : o.kind === 'Target leg' ? 'cyan' : o.kind === 'Exit' ? 'warning' : o.transactionType === 'BUY' ? 'success' : 'error'
-            const detail = o.kind === 'Protection'
-              ? ` · triggers at ${price(o.stopLossPrice)} · target ${price(o.targetPrice)} watched`
-              : isLeg
-                ? ` · ${o.kind === 'Target leg' ? `target ${price(o.targetPrice)}` : `stop-loss ${price(o.stopLossPrice)}`} (super order ${o.orderId})`
-                : o.kind === 'Entry'
-                  ? ` @ ${price(o.price)} · T ${price(o.targetPrice)} · SL ${price(o.stopLossPrice)}`
-                  : ` @ ${price(o.price)}${o.stopLossPrice ? ` · trigger ${price(o.stopLossPrice)}` : ''}${o.kind === 'Exit' ? ' · re-pricing to the live bid/ask until filled' : ''}`
-            const risky = o.kind === 'Protection' || isLeg
-            const cancel = () => onCancel(o.orderId, plain, o.leg)
-            return (
-              <Space key={`${o.orderId}-${o.leg ?? ''}`} size={8} wrap>
-                <Tag color={color}>{label} {o.transactionType}</Tag>
-                <Text style={{ fontSize: 12 }}>{o.tradingSymbol ?? o.securityId} x{o.quantity}{detail} · {o.status}</Text>
-                {risky
-                  ? (
-                    <Popconfirm
-                      title={`Cancel this ${o.kind === 'Target leg' ? 'target' : 'stop-loss'}?`}
-                      description={o.kind === 'Target leg' ? 'The position keeps its stop-loss but no target.' : 'The position will have NO stop-loss.'}
-                      okText="Cancel it" okButtonProps={{ danger: true }} onConfirm={cancel}
-                    >
-                      <Button size="small" disabled={busy}>Cancel</Button>
-                    </Popconfirm>
-                  )
-                  : <Button size="small" onClick={cancel} disabled={busy}>Cancel</Button>}
-              </Space>
-            )
-          })}
-        </Space>
-      )}
+      <OpenOrdersTable orders={snapshot.pendingOrders} busy={busy} onCancel={onCancel} onCancelAll={onCancelAll} />
 
       {(open.length > 0 || snapshot.pendingOrders.length > 0) && (
         <Space wrap size={8}>
@@ -210,6 +173,79 @@ export function LivePositionsView({ snapshot, slippage, busy, onClose, onPartial
       {open.length === 0 && closed.length === 0
         ? <Text type="secondary">No positions on the Dhan account today.</Text>
         : <Table dataSource={[...open, ...closed]} columns={columns} rowKey="securityId" size="small" pagination={false} scroll={{ x: 600, y: 260 }} />}
+    </Space>
+  )
+}
+
+const ORDER_LABEL = { Protection: 'STOP-LOSS', Exit: 'EXIT', 'Target leg': 'TARGET LEG', 'Stop-loss leg': 'SL LEG', Entry: 'ENTRY' }
+
+// Every open order on the Dhan account - unfilled super-order entries, the target / stop-loss legs of
+// filled ones, the panel's exits and any other pending order - each cancellable here, or all at once.
+function OpenOrdersTable({ orders, busy, onCancel, onCancelAll }) {
+  const columns = [
+    {
+      title: 'Order', key: 'kind', width: 150,
+      render: (_, o) => {
+        const label = ORDER_LABEL[o.kind] ?? (o.orderType && o.orderType !== 'LIMIT' ? o.orderType.replace(/_/g, ' ') : 'ORDER')
+        const color = o.kind === 'Protection' || o.kind === 'Stop-loss leg' ? 'purple' : o.kind === 'Target leg' ? 'cyan' : o.kind === 'Exit' ? 'warning' : o.transactionType === 'BUY' ? 'success' : 'error'
+        return <Tag color={color} style={{ margin: 0 }}>{label} {o.transactionType}</Tag>
+      },
+    },
+    { title: 'Contract', dataIndex: 'tradingSymbol', render: (v, o) => <span style={{ fontSize: 12 }}>{v ?? o.securityId}</span> },
+    { title: 'Qty', dataIndex: 'quantity', width: 64, align: 'right' },
+    {
+      title: 'Price', key: 'price', width: 170,
+      render: (_, o) => <span style={{ fontSize: 12 }}>{
+        o.kind === 'Target leg' ? `target ${price(o.targetPrice)}`
+          : o.kind === 'Stop-loss leg' ? `stop-loss ${price(o.stopLossPrice)}`
+            : o.kind === 'Protection' ? `trigger ${price(o.stopLossPrice)}${o.targetPrice ? ` · T ${price(o.targetPrice)}` : ''}`
+              : o.kind === 'Entry' ? `${price(o.price)} · T ${price(o.targetPrice)} · SL ${price(o.stopLossPrice)}`
+                : `${price(o.price)}${o.stopLossPrice ? ` · trigger ${price(o.stopLossPrice)}` : ''}`
+      }</span>,
+    },
+    { title: 'Status', dataIndex: 'status', width: 96, render: (v) => <span style={{ fontSize: 11 }}>{v}</span> },
+    {
+      title: '', key: 'cancel', width: 80,
+      render: (_, o) => {
+        const isLeg = o.kind === 'Target leg' || o.kind === 'Stop-loss leg'
+        const cancel = () => onCancel(o.orderId, !o.leg, o.leg)
+        return o.kind === 'Protection' || isLeg
+          ? (
+            <Popconfirm
+              title={`Cancel this ${o.kind === 'Target leg' ? 'target' : 'stop-loss'}?`}
+              description={o.kind === 'Target leg' ? 'The position keeps its stop-loss but no target.' : 'The position will have NO stop-loss.'}
+              okText="Cancel it" okButtonProps={{ danger: true }} onConfirm={cancel}
+            >
+              <Button size="small" danger disabled={busy}>Cancel</Button>
+            </Popconfirm>
+          )
+          : <Button size="small" danger disabled={busy} onClick={cancel}>Cancel</Button>
+      },
+    },
+  ]
+  return (
+    <Space direction="vertical" size={4} style={{ width: '100%' }}>
+      <Space wrap size={8} style={{ justifyContent: 'space-between', width: '100%' }}>
+        <Text strong style={{ fontSize: 13 }}>Open orders on Dhan ({orders.length})</Text>
+        {orders.length > 0 && onCancelAll && (
+          <Popconfirm
+            title="Cancel ALL open orders?"
+            description="Every pending order and every stop-loss / target leg is cancelled. Open positions stay open - with no stop-loss or target."
+            okText="Cancel all" okButtonProps={{ danger: true }} onConfirm={onCancelAll}
+          >
+            <Button size="small" danger disabled={busy}>Cancel all open orders</Button>
+          </Popconfirm>
+        )}
+      </Space>
+      {orders.length === 0
+        ? <Text type="secondary" style={{ fontSize: 12 }}>No open orders on the account.</Text>
+        : (
+          <Table
+            size="small" pagination={false} columns={columns} scroll={{ x: 640 }}
+            dataSource={orders.map((o) => ({ ...o, key: `${o.orderId}-${o.leg ?? ''}` }))}
+            aria-label="Open orders"
+          />
+        )}
     </Space>
   )
 }

@@ -1740,7 +1740,7 @@ function computeStopTargetHit(series, entryTimeMs, asOfMs, entryPrice, direction
 // SEBI periodically revises each index's own lot size - update this if it changes. This feature is
 // paper trading only (no real order is ever placed - see PaperTradePanel's own doc comment), so a
 // stale value here only skews the SIMULATED PnL's scale, not anything real.
-const PAPER_TRADE_LOT_SIZE = { NIFTY: 75, BANKNIFTY: 35, SENSEX: 20 }
+const PAPER_TRADE_LOT_SIZE = { NIFTY: 65, BANKNIFTY: 30, SENSEX: 20 }
 
 // Survives a page reload for TODAY's own live session only - a historical replay day's positions
 // still reset on every load() the same as before (see PaperTradePanel's own doc comment: "a paper
@@ -3336,6 +3336,7 @@ export default function OiReplayPage() {
   const handleLiveCancel = (orderId, isPlain, leg) => runLiveAction(() => liveTradingApi.cancel(orderId, isPlain, leg))
   const handleLiveExitAll = () => runLiveAction(() => liveTradingApi.exitAll(liveSlippage))
   const handleLiveEmergencyExitAll = () => runLiveAction(() => liveTradingApi.emergencyExitAll())
+  const handleLiveCancelAll = () => runLiveAction(() => liveTradingApi.cancelAll())
   const handleLiveRefresh = () => liveTradingApi.positions(true).then((snapshot) => { if (snapshot) setLivePositions(snapshot) })
   const liveBlockReason = paperStrike == null ? 'Waiting for the ATM strike.'
     : liveExpiryDate == null ? 'Waiting for the listed expiries.'
@@ -4774,7 +4775,7 @@ export default function OiReplayPage() {
               <LivePositionsView
                 snapshot={livePositions} slippage={liveSlippage} busy={liveBusy}
                 onClose={handleLiveClose} onPartialExit={handleLivePartialExit} onCancel={handleLiveCancel} onRefresh={handleLiveRefresh}
-                onExitAll={handleLiveExitAll} onEmergencyExitAll={handleLiveEmergencyExitAll}
+                onExitAll={handleLiveExitAll} onEmergencyExitAll={handleLiveEmergencyExitAll} onCancelAll={handleLiveCancelAll}
               />
             )}
           />
