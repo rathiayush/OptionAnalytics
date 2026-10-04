@@ -9,6 +9,7 @@ import {
 } from './shared.jsx'
 import { aggregateBars, analyzeBars, findWalls, bucketBook, mergeLiveMinutes, volumeProfile, replayView, replayRange, liquiditySignals, orderFlowBias, aggression, sweepSignals, pullStackSignals } from './orderFlowMath.js'
 import { TapeCard } from './OrderFlowTape.jsx'
+import { StrategyScanner } from './StrategyScanner.jsx'
 import { FootprintChart, DepthHeatmap, CumulativeDeltaChart, BookLadder, formatVolume } from './OrderFlowCharts.jsx'
 import { DomDrawer, useNarrow } from './DomDrawer.jsx'
 import { useReplaySync, useReplaySyncEnabled, ReplaySyncControl, withSpeedOption, SYNC_DRIFT_MS } from './replaySync.jsx'
@@ -645,6 +646,11 @@ export default function OrderFlowPage() {
             </Space>
           </Col>
         </Row>
+
+        <StrategyScanner
+          underlying={underlying} isReplay={isReplay} date={isReplay ? replayDate : todayKey()} view={view} replayDay={replayDay} replayMs={replayMs} range={range}
+          tapePrints={tapePrints} liquidity={liquidity} pullStack={pullStack.signals} rowSize={rowSize} lotSize={lotSize} largeLots={largeLots} estimated={estimated}
+        />
 
         <Card size="small" title="Liquidity heatmap" extra={!narrow && <Text type="secondary" style={{ fontSize: 11 }}>resting bids/offers over time (brighter = more) · big dots = big orders · magenta = icebergs</Text>}>
           {estimated
