@@ -52,6 +52,8 @@ export const STRATEGIES = [
   { id: 'pocReaction', no: 13, name: 'Previous POC reaction', short: 'POC reaction', group: 'profile' },
   { id: 'lvnRun', no: 14, name: 'LVN run to the next HVN', short: 'LVN run', group: 'profile' },
   { id: 'ibBreakout', no: 15, name: 'Initial balance breakout', short: 'IB breakout', group: 'profile' },
+  // OI + order flow again: a weak secondary wall giving way on its second test.
+  { id: 'weakWall', no: 16, name: 'Weak OI wall - second retest break', short: 'Weak wall retest' },
 ]
 export const STRATEGY_BY_ID = Object.fromEntries(STRATEGIES.map((s) => [s.id, s]))
 // The playbook's own picks, used for alerts until enough trades have been scored to rank them.
@@ -680,6 +682,69 @@ export function evaluateStrategies(input) {
       }
     }
   }
+  // 16. Weak OI wall - second retest break - 09:45-14:30.
+  //   A SECONDARY wall near price (a real wall, but not the biggest on its side) whose OI is not much
+  //   above its neighbours' (no standout strike holding it), tested once already and now a second
+  //   time, while that strike's and its neighbours' OI is being covered (calls) / unwound (puts) over
+  //   the last 15 minutes: the writers are leaving - trade the break through it, with the futures OI
+  //   regime and the order flow behind it.
+  if (minute >= hm(9, 45) && minute <= hm(14, 30)) {
+    const f15 = futuresChange(oi, nowMs, 15)
+    for (const dir of [1, -1]) {
+      const map = dir > 0 ? oi.ce : oi.pe
+      const sideOi = (r) => (dir > 0 ? r.ceOi : r.peOi)
+      const biggest = dir > 0 ? resistance : support
+      if (biggest == null) continue
+      const sideMax = Math.max(0, ...rows.filter((r) => Math.abs(r.strike - spotNow) <= 8 * oi.step).map(sideOi))
+      const level = rows
+        .filter((r) => (dir > 0 ? r.strike >= spotNow - oi.step * 0.25 : r.strike <= spotNow + oi.step * 0.25)
+          && Math.abs(r.strike - spotNow) <= oi.step * 1.5 && r.strike !== biggest && sideOi(r) >= 0.3 * sideMax)
+        .sort((a, b) => Math.abs(a.strike - spotNow) - Math.abs(b.strike - spotNow))[0]
+      if (!level) continue
+      // The biggest wall lies beyond it - the room the break runs into.
+      if (!(dir * (biggest - level.strike) > 0)) continue
+      // Weak: not much above the strikes just below / above it.
+      const levelOi = sideOi(level)
+      const neighbours = [level.strike - oi.step, level.strike + oi.step].map((k) => oiOf(map, k, nowMs) ?? 0)
+      const ratio = levelOi / Math.max(1, ...neighbours)
+      if (ratio > 1.6) continue
+      // Writers leaving it over the last 15 minutes - the strike and around it.
+      const chg = oiChange(map, level.strike, nowMs, 15)
+      const around = [-1, 0, 1].reduce((sum, k) => sum + (oiChange(map, level.strike + k * oi.step, nowMs, 15) ?? 0), 0)
+      if (!(chg < 0) || chg > -0.01 * levelOi || !(around < 0)) continue
+      // Second test of the level (in futures terms): one earlier visit, away, and now back.
+      const L = level.strike + basis
+      const band = Math.max(oi.step * 0.25, pct(0.0006))
+      let touches = 0
+      let away = true
+      for (const b of bars) {
+        const touching = dir > 0 ? b.high >= L - band : b.low <= L + band
+        const gone = dir > 0 ? b.high < L - 2 * band : b.low > L + 2 * band
+        if (touching && away) { touches++; away = false } else if (gone) away = true
+      }
+      const touchingNow = dir > 0 ? last.high >= L - band : last.low <= L + band
+      if (touches !== 2 || !touchingNow || dir * (price - L) > band) continue
+      // Futures OI: the regime must be on the trade's side (build-up strongest, covering weaker).
+      if (!f15 || f15.oiPct == null || !(dir * f15.pricePct > 0)) continue
+      const buildUp = f15.oiPct >= 0
+      // Order flow: aggression and delta through the level, nothing stacked against it.
+      const footprint = dir * last.delta > 0 && (stackWith(dir, 3) || sweepWith(dir) || aggWith(dir, 60)) && !stackAgainst(dir, 2)
+      const tapeOk = aggWith(dir, 55, 'agg30')
+      const c = confirm(dir)
+      if (!footprint || !tapeOk || !c.ok) continue
+      const stopPts = Math.max(pct(0.001), dir * (price - L) + band + pct(0.0006))
+      const room = dir * (biggest + basis - price)
+      if (room < 1.5 * stopPts) continue
+      push('weakWall', dir, stopPts, Math.min(room * 0.9, 2.5 * stopPts), 45,
+        60 + (buildUp ? 6 : 2) + (sweepWith(dir) ? 6 : 0) + (stackWith(dir, 3) ? 4 : 0) + (chg < -0.05 * levelOi ? 4 : 0), {
+          OI: `${dir > 0 ? 'CALL' : 'PUT'} ${level.strike} (not the biggest - that is ${biggest}): OI ${(levelOi / 1e5).toFixed(1)}L vs neighbours ${neighbours.map((n) => (n / 1e5).toFixed(1)).join(' / ')}L, ${lakh(chg)} in 15m (around ${lakh(around)}) - writers ${dir > 0 ? 'covering' : 'unwinding'}`,
+          Retest: `2nd test of ${level.strike} (futures ${L.toFixed(1)})`,
+          'Futures confirm': `${dir > 0 ? (buildUp ? 'long build-up' : 'short covering') : (buildUp ? 'short build-up' : 'long unwinding')}: price ${(f15.pricePct * 100).toFixed(2)}%, OI ${f15.oiPct >= 0 ? '+' : ''}${(f15.oiPct * 100).toFixed(2)}% in 15m`,
+          Footprint: `Δ ${last.delta > 0 ? '+' : ''}${last.delta}${stackWith(dir, 3) ? ', stacked imbalance' : ''}`, Tape: `${sweepWith(dir) ? 'sweep · ' : ''}${tapeText}`, DOM: c.dom, Heatmap: c.heat,
+        })
+    }
+  }
+
   // ---- 11-15: volume profile (previous session) + market profile, with OI and order flow ----------
   const prof = input.profile
   if (prof?.vp?.poc != null) {

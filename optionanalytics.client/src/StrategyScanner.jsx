@@ -536,7 +536,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
 
   return (
     <Card
-      size="small" title="Strategy scanner · OI, order flow, volume & market profile (15 strategies)"
+      size="small" title={`Strategy scanner · OI, order flow, volume & market profile (${STRATEGIES.length} strategies)`}
       extra={(
         <Space size={10} wrap>
           <Space size={4}><Switch size="small" checked={settings.alerts} onChange={(v) => { unlockAudio(); setSettings((s) => ({ ...s, alerts: v })) }} /><Text style={{ fontSize: 12 }}>Alerts</Text></Space>
@@ -597,7 +597,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
               ))}
             </div>
             <Space wrap size={8}>
-              <Tooltip title={isReplay ? 'Runs all 10 strategies over the whole loaded day and scores every setup - adds the day to the stats' : 'Load a past day (Load day) to scan it'}>
+              <Tooltip title={isReplay ? `Runs all ${STRATEGIES.length} strategies over the whole loaded day and scores every setup - adds the day to the stats` : 'Load a past day (Load day) to scan it'}>
                 <Button type="primary" size="small" onClick={scanDay} disabled={!isReplay || !replayDay || !oi || (scan && scan.progress < 100 && !scan.error)}>Scan day</Button>
               </Tooltip>
               {scan && !scan.error && scan.progress < 100 && <Progress percent={scan.progress} size="small" style={{ width: 140, margin: 0 }} />}
