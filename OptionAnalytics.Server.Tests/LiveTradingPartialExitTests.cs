@@ -120,7 +120,123 @@ public sealed class LiveTradingPartialExitTests
         Assert.True(LiveTradingService.TargetReached(false, 50m, 49.5m));
     }
 
+    [Fact]
+    public async Task ATargetLegFillOnTheSocket_ClosesThePositionInMemory_WithoutAnyRestCall()
+    {
+        var (service, dhan, _) = await CreateAsync();
+        await service.RefreshAsync(CancellationToken.None);
+        var requestsBefore = dhan.Requests.Count;
+
+        service.ApplyOrderUpdate(Update("S1", "SELL", 4 * Lot, 4 * Lot, avg: 150m, status: "TRADED", legNo: 3, super: true));
+
+        Assert.Equal(requestsBefore, dhan.Requests.Count); // nothing read from REST
+        var row = Assert.Single(service.Snapshot().Positions);
+        Assert.False(row.IsOpen);
+        Assert.Equal(4 * Lot * (150m - 110m), row.RealizedPnl);
+        Assert.Empty(service.Snapshot().PendingOrders);
+    }
+
+    [Fact]
+    public async Task PartialFillsOnTheSocket_MoveThePositionByExactlyEachNewFill()
+    {
+        var (service, dhan, _) = await CreateAsync();
+        await service.RefreshAsync(CancellationToken.None);
+        var requestsBefore = dhan.Requests.Count;
+
+        // An exit order placed elsewhere: reported pending, then 1 lot at 120, then the 2nd lot at 122 (average 121).
+        service.ApplyOrderUpdate(Update("X1", "SELL", 2 * Lot, 0, avg: 0, status: "PENDING", tag: "OIRX-1-1"));
+        Assert.Contains(service.Snapshot().PendingOrders, o => o.OrderId == "X1" && o.Kind == "Exit");
+        service.ApplyOrderUpdate(Update("X1", "SELL", 2 * Lot, Lot, avg: 120m, status: "PENDING", tag: "OIRX-1-1"));
+        service.ApplyOrderUpdate(Update("X1", "SELL", 2 * Lot, 2 * Lot, avg: 121m, status: "TRADED", tag: "OIRX-1-1"));
+        // A repeated message changes nothing.
+        service.ApplyOrderUpdate(Update("X1", "SELL", 2 * Lot, 2 * Lot, avg: 121m, status: "TRADED", tag: "OIRX-1-1"));
+
+        Assert.Equal(requestsBefore, dhan.Requests.Count);
+        var row = Assert.Single(service.Snapshot().Positions);
+        Assert.Equal(2 * Lot, row.NetQty);
+        Assert.Equal(Lot * (120m - 110m) + Lot * (122m - 110m), row.RealizedPnl);
+        Assert.DoesNotContain(service.Snapshot().PendingOrders, o => o.OrderId == "X1");
+    }
+
+    [Fact]
+    public async Task AFillInANewContract_OpensAPositionFromTheSocketAlone()
+    {
+        var (service, dhan, _) = await CreateAsync();
+        dhan.Positions.Clear();
+        dhan.SuperOrders.Clear();
+        await service.RefreshAsync(CancellationToken.None);
+
+        service.ApplyOrderUpdate(Update("P7", "BUY", Lot, Lot, avg: 95.5m, status: "TRADED"));
+
+        var row = Assert.Single(service.Snapshot().Positions);
+        Assert.Equal((true, Lot, 95.5m, "LONG"), (row.IsOpen, row.NetQty, row.AvgPrice, row.PositionType));
+        Assert.Equal("NIFTY-Test-26000-CE", row.TradingSymbol);
+    }
+
+    [Fact]
+    public async Task ExitAll_CancelsEveryPendingOrder_NotOnlyThePanelsOwn()
+    {
+        var (service, dhan, _) = await CreateAsync();
+        dhan.SuperOrders.Add(PendingSuperOrder("S2", "STRAT-7"));
+        await service.RefreshAsync(CancellationToken.None);
+        var resting = await PlacePlainAsync(dhan, "MANUAL-1");
+
+        var result = await service.ExitAllAsync(1m, CancellationToken.None);
+
+        Assert.True(result.Success, result.Message);
+        Assert.Contains("DELETE /super/orders/S2/ENTRY_LEG", dhan.Requests);
+        Assert.Equal("CANCELLED", dhan.Orders[resting].Status);
+        Assert.Equal(4 * Lot, Assert.Single(dhan.Orders.Values, o => o.Tag.StartsWith("OIRX-")).Quantity);
+    }
+
+    [Fact]
+    public async Task ClosingAPosition_CancelsItsPendingSuperOrders()
+    {
+        var (service, dhan, _) = await CreateAsync();
+        dhan.SuperOrders.Add(PendingSuperOrder("S2", "OIR-test-2"));
+
+        var result = await service.CloseAsync(SecurityId.ToString(), 1m, CancellationToken.None);
+
+        Assert.True(result.Success, result.Message);
+        var cancelAt = dhan.Requests.IndexOf("DELETE /super/orders/S2/ENTRY_LEG");
+        Assert.True(cancelAt >= 0 && cancelAt < dhan.Requests.LastIndexOf("POST /orders"), "the pending super order goes before the exit");
+        Assert.Contains("DELETE /super/orders/S1/TARGET_LEG", dhan.Requests);
+        Assert.Contains("DELETE /super/orders/S1/STOP_LOSS_LEG", dhan.Requests);
+    }
+
+    [Fact]
+    public void FillPrice_IsTheNewPartOfTheAverage()
+    {
+        Assert.Equal(122m, LiveTradingService.FillPrice(65, 120m, Update("X", "SELL", 130, 130, avg: 121m, status: "TRADED")));
+        Assert.Equal(121m, LiveTradingService.FillPrice(0, null, Update("X", "SELL", 130, 130, avg: 121m, status: "TRADED")));
+        Assert.Null(LiveTradingService.FillPrice(130, 121m, Update("X", "SELL", 130, 130, avg: 121m, status: "TRADED")));
+    }
+
     // ---- fixture ---------------------------------------------------------------------------------
+
+    private static DhanOrderUpdate Update(string orderNo, string side, int quantity, int traded, decimal avg, string status,
+        int legNo = 1, bool super = false, string? tag = null) =>
+        new(orderNo, SecurityId.ToString(), "NSE_FNO", "INTRADAY", side, "LIMIT", quantity, traded, quantity - traded,
+            avg, 0, avg, avg, status, tag, legNo, super, null, null);
+
+    private static JsonObject PendingSuperOrder(string id, string tag) => new()
+    {
+        ["orderId"] = id, ["orderStatus"] = "PENDING", ["transactionType"] = "BUY", ["exchangeSegment"] = "NSE_FNO",
+        ["securityId"] = SecurityId.ToString(), ["quantity"] = Lot, ["price"] = 100m, ["targetPrice"] = 130m, ["stopLossPrice"] = 90m,
+        ["correlationId"] = tag, ["legDetails"] = new JsonArray(),
+    };
+
+    private static async Task<string> PlacePlainAsync(FakeDhan dhan, string tag)
+    {
+        using var http = new HttpClient(dhan);
+        var body = new JsonObject
+        {
+            ["transactionType"] = "BUY", ["correlationId"] = tag, ["exchangeSegment"] = "NSE_FNO", ["productType"] = "INTRADAY",
+            ["orderType"] = "LIMIT", ["quantity"] = Lot, ["price"] = 90m,
+        };
+        var response = await http.PostAsync("https://dhan.test/orders", new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json"));
+        return JsonNode.Parse(await response.Content.ReadAsStringAsync())!["orderId"]!.GetValue<string>();
+    }
 
     private static SpotTick Tick(decimal bid, decimal ask, decimal last) =>
         new(SecurityId, last, 0, 0, 0, 0, 1000, bid, ask, 0, DateTimeOffset.UtcNow);
@@ -206,8 +322,10 @@ public sealed class LiveTradingPartialExitTests
             {
                 var parts = path.Split('/');
                 var order = SuperOrders.Single(o => o["orderId"]!.GetValue<string>() == parts[3]);
+                // Cancelling the entry leg cancels the whole super order, legs included.
+                if (parts[4] == "ENTRY_LEG") order["orderStatus"] = "CANCELLED";
                 foreach (var leg in order["legDetails"]!.AsArray())
-                    if (leg!["legName"]!.GetValue<string>() == parts[4]) leg["orderStatus"] = "CANCELLED";
+                    if (parts[4] == "ENTRY_LEG" || leg!["legName"]!.GetValue<string>() == parts[4]) leg!["orderStatus"] = "CANCELLED";
                 return Json(new JsonObject { ["orderId"] = parts[3], ["orderStatus"] = "CANCELLED" });
             }
             if (request.Method == HttpMethod.Get && path == "/orders")

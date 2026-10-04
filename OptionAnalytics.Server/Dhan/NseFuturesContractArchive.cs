@@ -15,8 +15,9 @@ namespace OptionAnalytics.Server.Dhan;
 /// passed straight to Dhan's historical candles. A holiday or weekend has no file, so the nearest
 /// earlier one (up to a week back) is used - the contracts are the same.
 ///
-/// NSE underlyings only (NIFTY, BANKNIFTY, ...); SENSEX trades on BSE. Parsed files are cached in
-/// memory (they never change), including "no file" answers, so each date is fetched at most once.
+/// NSE underlyings only (NIFTY, BANKNIFTY, ...); SENSEX trades on BSE. Files are fetched straight from
+/// NSE and kept in memory only - never written to disk - for the rest of the IST day (including "no
+/// file" answers, so a date is fetched at most once a day); everything is dropped when the day changes.
 /// </summary>
 public sealed class NseFuturesContractArchive
 {
@@ -30,6 +31,7 @@ public sealed class NseFuturesContractArchive
     private readonly HttpClient _http;
     private readonly ILogger<NseFuturesContractArchive> _logger;
     private readonly ConcurrentDictionary<DateOnly, Task<IReadOnlyList<DhanFuturesInstrument>?>> _files = new();
+    private DateOnly _cacheDay = IstClock.Today();
 
     public NseFuturesContractArchive(HttpClient http, ILogger<NseFuturesContractArchive> logger)
     {
@@ -68,6 +70,8 @@ public sealed class NseFuturesContractArchive
     private Task<IReadOnlyList<DhanFuturesInstrument>?> FileAsync(DateOnly day, CancellationToken cancellationToken)
     {
         if (day.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday) return Task.FromResult<IReadOnlyList<DhanFuturesInstrument>?>(null);
+        var today = IstClock.Today();
+        if (today != _cacheDay) { _files.Clear(); _cacheDay = today; }
         var task = _files.GetOrAdd(day, d => DownloadAsync(d));
         // A failed download (network, not a missing file) is not remembered - try again next time.
         _ = task.ContinueWith(t => { if (t.IsFaulted) _files.TryRemove(day, out _); }, TaskScheduler.Default);

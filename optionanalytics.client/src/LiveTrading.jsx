@@ -108,7 +108,7 @@ export function LivePositionsView({ snapshot, slippage, busy, onClose, onPartial
           {onPartialExit && <PartialExitButton row={r} slippage={slippage} busy={busy} onPartialExit={onPartialExit} />}
           <Popconfirm
             title="Close this live position?"
-            description={`Cancels its SL/target, then ${r.netQty > 0 ? 'sells at the bid' : 'buys at the ask'} with ${slippage} pts slippage, for ${Math.abs(r.netQty)} qty.`}
+            description={`Cancels its super orders (SL/target legs and any unfilled entry in this contract), then ${r.netQty > 0 ? 'sells at the bid' : 'buys at the ask'} with ${slippage} pts slippage, for ${Math.abs(r.netQty)} qty.`}
             okText="Close now" okButtonProps={{ danger: true }} onConfirm={() => onClose(r.securityId)}
           >
             <Button size="small" danger disabled={busy}>Close</Button>
@@ -125,8 +125,8 @@ export function LivePositionsView({ snapshot, slippage, busy, onClose, onPartial
         <Space size={6} wrap>
           {!snapshot.dhanLoggedIn && <Tag color="error">Dhan not logged in</Tag>}
           <Tooltip title={snapshot.orderUpdatesConnected
-            ? "Fills and SL/target exits arrive from Dhan's order-update socket the moment they happen; P&L moves with the live tick feed."
-            : "Dhan's order-update socket is not connected - fills and exits still show on the next safety refresh (within a minute) or on Refresh."}
+            ? `Event-driven: every order change and fill from Dhan's order-update socket is applied to positions the moment it arrives, and P&L moves with the live tick feed - nothing is polled.${snapshot.lastOrderEventUtc ? ` Last order event ${fmtIstDateTime(snapshot.lastOrderEventUtc)}.` : ''}`
+            : "Dhan's order-update socket is not connected - until it reconnects, positions are read from Dhan every 30 seconds (or press Refresh)."}
           >
             <Tag color={snapshot.orderUpdatesConnected ? 'success' : 'warning'}>{snapshot.orderUpdatesConnected ? '● Order updates live' : '● Order updates offline'}</Tag>
           </Tooltip>
@@ -166,11 +166,11 @@ export function LivePositionsView({ snapshot, slippage, busy, onClose, onPartial
         </Space>
       )}
 
-      {(open.length > 0 || snapshot.pendingOrders.some((o) => o.kind === 'Entry')) && (
+      {(open.length > 0 || snapshot.pendingOrders.length > 0) && (
         <Space wrap size={8}>
           <Popconfirm
             title="Exit ALL live positions?"
-            description={`Cancels the panel's unfilled entries, then closes all ${open.length} open position(s) one by one - each one's SL/target cancelled first, exit at the bid/ask with ${slippage} pts slippage, re-priced until filled.`}
+            description={`Cancels EVERY pending order (unfilled super orders with their legs, other pending orders), then closes all ${open.length} open position(s) one by one - each one's SL/target cancelled first, exit at the bid/ask with ${slippage} pts slippage, re-priced until filled.`}
             okText="Exit all now" okButtonProps={{ danger: true }} onConfirm={onExitAll}
           >
             <Button danger type="primary" size="small" disabled={busy}>Exit all</Button>
