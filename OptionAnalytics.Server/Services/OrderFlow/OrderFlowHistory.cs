@@ -89,4 +89,30 @@ public sealed class OrderFlowHistory
     public sealed record HistoryCheck(
         string Underlying, DateOnly Date, string? ContractSymbol, uint? SecurityId, DateOnly? Expiry, bool Expired, string? ContractSource,
         int Candles, DateTimeOffset? FirstCandle, DateTimeOffset? LastCandle, string? Error);
+
+    /// <summary>The Time &amp; Sales tape of a day the server holds exactly (today's live engine, or a
+    /// recent day kept in memory): prints at or before <paramref name="until"/>. A day estimated from
+    /// candles has no prints.</summary>
+    public async Task<TapeResult> TapeAsync(string underlying, DateOnly? date, DateOnly? expiry, DateTimeOffset? until, int count, int minLots,
+        CancellationToken cancellationToken)
+    {
+        var day = date ?? IstClock.Today();
+        OrderFlowEngine? engine;
+        if (date is null)
+        {
+            engine = await _orderFlow.EngineForAsync(underlying, expiry, cancellationToken);
+        }
+        else
+        {
+            var contract = await _orderFlow.ResolveContractAsync(underlying, expiry, day, cancellationToken);
+            if (contract is null) return new TapeResult(Array.Empty<OrderFlowTrade>(), $"no {underlying.ToUpperInvariant()} futures contract for {day:dd MMM yyyy}");
+            var live = _orderFlow.TrackedEngine(contract.SecurityId);
+            engine = live is not null && live.ExportDayDate() == day ? live : _orderFlow.PastDays.EngineFor(underlying, contract.SecurityId, day);
+        }
+        if (engine is null)
+            return new TapeResult(Array.Empty<OrderFlowTrade>(), $"no Time & Sales for {day:dd MMM yyyy} - only days recorded live are held (an estimated day has no prints)");
+        return new TapeResult(engine.Tape(until, Math.Clamp(count, 1, 5000), Math.Max(1, minLots) * (long)engine.LotSize), null);
+    }
+
+    public sealed record TapeResult(IReadOnlyList<OrderFlowTrade> Prints, string? Error);
 }

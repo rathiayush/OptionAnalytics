@@ -42,6 +42,14 @@ public sealed class OrderFlowEngine
     private static readonly TimeSpan DeepBookFreshness = TimeSpan.FromSeconds(5);
     public const decimal IcebergFactor = 2m;
     public const int IcebergMinLots = 5;
+    /// <summary>A SWEEP: same-side prints at most SweepGap apart and within SweepMaxDuration in all, each at
+    /// the same or a worse price for the aggressor (buyers paying up, sellers hitting lower), through at
+    /// least SweepMinLevels prices and SweepMinLots lots - market orders eating several levels at once
+    /// (stop runs, breakouts), not a steady grind.</summary>
+    public static readonly TimeSpan SweepGap = TimeSpan.FromSeconds(1);
+    public static readonly TimeSpan SweepMaxDuration = TimeSpan.FromSeconds(2);
+    public const int SweepMinLevels = 3;
+    public const int SweepMinLots = 10;
     private const int MaxTradesKept = 50_000;
     private const int MaxIcebergsKept = 500;
 
@@ -317,8 +325,65 @@ public sealed class OrderFlowEngine
                     heatmap.Add(new HeatmapColumn(snapshot.Time, Bucket(snapshot.Bids, rowSize), Bucket(snapshot.Asks, rowSize)));
                 }
             }
-            return new OrderFlowSnapshot(Meta(), rowSize, bars, trades, Icebergs(), heatmap, BookDto());
+            return new OrderFlowSnapshot(Meta(), rowSize, bars, trades, Icebergs(), heatmap, BookDto())
+            {
+                Sweeps = DetectSweeps(_trades, SweepMinLots * (long)LotSize),
+            };
         }
+    }
+
+    /// <summary>The Time &amp; Sales tape: the last <paramref name="count"/> prints of at least
+    /// <paramref name="minQty"/> at or before <paramref name="until"/> (null = the latest), oldest first.</summary>
+    public IReadOnlyList<OrderFlowTrade> Tape(DateTimeOffset? until, int count, long minQty)
+    {
+        lock (_lock)
+        {
+            var end = _trades.Count;
+            if (until is { } u)
+            {
+                // Prints are in time order - binary search for the first one after `until`.
+                int lo = 0, hi = _trades.Count;
+                while (lo < hi)
+                {
+                    var mid = (lo + hi) / 2;
+                    if (_trades[mid].Time <= u) lo = mid + 1; else hi = mid;
+                }
+                end = lo;
+            }
+            var result = new List<OrderFlowTrade>(Math.Min(count, end));
+            for (var i = end - 1; i >= 0 && result.Count < count; i--)
+                if (_trades[i].Quantity >= minQty) result.Add(_trades[i]);
+            result.Reverse();
+            return result;
+        }
+    }
+
+    /// <summary>Sweeps in a run of prints (see SweepGap): Id = the first print's sequence number, so the
+    /// same sweep keeps its id across pushes.</summary>
+    internal static IReadOnlyList<OrderFlowSweep> DetectSweeps(IReadOnlyList<OrderFlowTrade> trades, long minQty)
+    {
+        var sweeps = new List<OrderFlowSweep>();
+        var start = 0;
+        for (var i = 1; i <= trades.Count; i++)
+        {
+            var continues = i < trades.Count
+                && trades[i].Buy == trades[i - 1].Buy
+                && trades[i].Time - trades[i - 1].Time <= SweepGap
+                && trades[i].Time - trades[start].Time <= SweepMaxDuration
+                && (trades[i].Buy ? trades[i].Price >= trades[i - 1].Price : trades[i].Price <= trades[i - 1].Price);
+            if (continues) continue;
+            if (i - start >= SweepMinLevels)
+            {
+                long quantity = 0;
+                var levels = new HashSet<decimal>();
+                for (var k = start; k < i; k++) { quantity += trades[k].Quantity; levels.Add(trades[k].Price); }
+                if (levels.Count >= SweepMinLevels && quantity >= minQty)
+                    sweeps.Add(new OrderFlowSweep(trades[start].Seq, trades[start].Buy, trades[start].Time, trades[i - 1].Time,
+                        trades[start].Price, trades[i - 1].Price, quantity, i - start, levels.Count));
+            }
+            start = i;
+        }
+        return sweeps;
     }
 
     /// <summary>The live push: the forming and the previous minute (native price levels - the page
@@ -330,7 +395,10 @@ public sealed class OrderFlowEngine
             var recentBars = _bars.Values.TakeLast(2).Select(b => ToDto(b, 0)).ToList();
             return new OrderFlowLive(Meta(), _clock, recentBars, _trades.TakeLast(40).ToList(),
                 Icebergs().TakeLast(30).ToList(), BookDto(LiveBookLevels),
-                new HeatmapColumn(_clock, Bucket(HeatRows(_bids), HeatmapBaseRow), Bucket(HeatRows(_asks), HeatmapBaseRow)));
+                new HeatmapColumn(_clock, Bucket(HeatRows(_bids), HeatmapBaseRow), Bucket(HeatRows(_asks), HeatmapBaseRow)))
+            {
+                Sweeps = DetectSweeps(_trades.Skip(Math.Max(0, _trades.Count - 400)).ToList(), SweepMinLots * (long)LotSize),
+            };
         }
     }
 
@@ -530,6 +598,11 @@ public sealed class OrderFlowDay
 /// <summary>One inferred print of at least a lot: Buy = the buyer was the aggressor (lifted the offer).</summary>
 public sealed record OrderFlowTrade(long Seq, DateTimeOffset Time, decimal Price, long Quantity, bool Buy);
 
+/// <summary>Market orders that ate through Levels prices in one burst (see OrderFlowEngine.SweepGap):
+/// Buy = buyers lifting offers from FromPrice up to ToPrice.</summary>
+public sealed record OrderFlowSweep(
+    long Id, bool Buy, DateTimeOffset StartedAt, DateTimeOffset EndedAt, decimal FromPrice, decimal ToPrice, long Quantity, int Prints, int Levels);
+
 /// <summary>Volume traded at one price row of a bar: Buy = at the ask (buyers aggressive), Sell = at the bid.</summary>
 public sealed record FootprintLevel(decimal Price, long Buy, long Sell);
 
@@ -565,7 +638,10 @@ public sealed record OrderFlowMeta(
 public sealed record OrderFlowSnapshot(
     OrderFlowMeta Meta, decimal RowSize, IReadOnlyList<OrderFlowBar> Bars, IReadOnlyList<OrderFlowTrade> Trades,
     IReadOnlyList<OrderFlowIceberg> Icebergs, IReadOnlyList<HeatmapColumn> Heatmap, OrderFlowBook Book,
-    string Source = "live", string? Note = null);
+    string Source = "live", string? Note = null)
+{
+    public IReadOnlyList<OrderFlowSweep> Sweeps { get; init; } = Array.Empty<OrderFlowSweep>();
+}
 
 /// <summary>Time: the server's time of the latest event - what the page stamps its live heatmap
 /// columns with, so they line up with the loaded history whatever this device's clock says. Book: the
@@ -573,4 +649,7 @@ public sealed record OrderFlowSnapshot(
 /// heatmap column, much smaller than 200 levels per side as they are.</summary>
 public sealed record OrderFlowLive(
     OrderFlowMeta Meta, DateTimeOffset Time, IReadOnlyList<OrderFlowBar> Bars, IReadOnlyList<OrderFlowTrade> Trades,
-    IReadOnlyList<OrderFlowIceberg> Icebergs, OrderFlowBook Book, HeatmapColumn? Heat = null);
+    IReadOnlyList<OrderFlowIceberg> Icebergs, OrderFlowBook Book, HeatmapColumn? Heat = null)
+{
+    public IReadOnlyList<OrderFlowSweep> Sweeps { get; init; } = Array.Empty<OrderFlowSweep>();
+}

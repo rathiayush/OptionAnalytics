@@ -313,6 +313,7 @@ export function replayView(day, clockMs) {
   const minuteBars = day.minuteBars.slice(0, countUpTo(day.minuteBars, clockMs - 60_000, (b) => msOf(b.time)))
   const trades = day.trades.slice(0, countUpTo(day.trades, clockMs, (t) => msOf(t.time)))
   const heatmap = day.heatmap.slice(0, countUpTo(day.heatmap, clockMs, (c) => c.t))
+  const sweeps = (day.sweeps ?? []).filter((w) => msOf(w.endedAt) <= clockMs)
   const icebergs = day.icebergs
     .filter((i) => msOf(i.detectedAt) <= clockMs)
     .map((i) => (i.endedAt && msOf(i.endedAt) > clockMs ? { ...i, endedAt: null } : i))
@@ -328,7 +329,7 @@ export function replayView(day, clockMs) {
   return {
     ...day,
     meta: { ...day.meta, lastPrice: lastTrade?.price ?? lastBar?.close ?? 0, lastTradeAt: lastTrade?.time ?? null },
-    minuteBars, trades, heatmap, icebergs, book,
+    minuteBars, trades, heatmap, icebergs, book, sweeps,
   }
 }
 
@@ -501,7 +502,7 @@ export function liquiditySignals({ columns, trades = [], minuteBars = [], rowSiz
 //   liquidity signals (last 15 min, by confidence)          15
 //   big orders (last 15 min: buy - sell quantity)           10
 // Confidence is how far from neutral the total is, scaled by how many parts agree on its side.
-export function orderFlowBias({ bars = [], liquidity = [], bigTrades = [], nowMs = Date.now() }) {
+export function orderFlowBias({ bars = [], liquidity = [], bigTrades = [], nowMs = Date.now(), aggressionNow = null, sweeps = [], pullStack = [] }) {
   const parts = []
   const add = (name, weight, score, detail) => { if (Number.isFinite(score)) parts.push({ name, weight, score: Math.max(-1, Math.min(1, score)), detail }) }
   const sum = (xs, f) => xs.reduce((s, x) => s + f(x), 0)
@@ -541,6 +542,21 @@ export function orderFlowBias({ bars = [], liquidity = [], bigTrades = [], nowMs
     add('Big orders', 10, (buy - sell) / Math.max(1, buy + sell), `${recentTrades.length} in 15 min`)
   }
 
+  // Tape: who is aggressive over the last minute, and recent sweeps (market orders through levels).
+  const minute = aggressionNow?.find((w) => w.ms === 60_000)
+  if (minute && minute.total > 0) add('Aggressive buyers / sellers', 15, (minute.buyPct - 50) / 25, `${minute.buyPct}% bought at the offer (1 min)`)
+  const recentSweeps = sweeps.filter((w) => nowMs - msOf(w.endedAt) <= 15 * 60_000 && msOf(w.endedAt) <= nowMs)
+  if (recentSweeps.length) {
+    const buy = sum(recentSweeps.filter((w) => w.buy), (w) => w.quantity)
+    const sell = sum(recentSweeps.filter((w) => !w.buy), (w) => w.quantity)
+    add('Sweeps', 10, (buy - sell) / Math.max(1, buy + sell), `${recentSweeps.length} in 15 min`)
+  }
+  const recentPull = pullStack.filter((x) => nowMs - x.t <= 10 * 60_000 && x.t <= nowMs)
+  if (recentPull.length) {
+    const score = sum(recentPull, (x) => (x.bullish ? 1 : -1) * (x.confidence / 100))
+    add('Liquidity pulling / stacking', 10, score / Math.max(1, recentPull.length * 0.6), `${recentPull.length} in 10 min`)
+  }
+
   const totalWeight = sum(parts, (p) => p.weight) || 1
   const score = Math.round((sum(parts, (p) => p.weight * p.score) / totalWeight) * 100)
   const side = Math.sign(score)
@@ -548,4 +564,145 @@ export function orderFlowBias({ bars = [], liquidity = [], bigTrades = [], nowMs
   const confidence = side === 0 || parts.length === 0 ? 0 : Math.round(Math.min(95, Math.abs(score) * (0.5 + 0.5 * agreeing / parts.length) * 1.4))
   const bias = score >= 20 ? 'Bullish' : score <= -20 ? 'Bearish' : 'Neutral'
   return { score, bias, confidence, parts }
+}
+
+// ---- Tape reading: aggressive buyers & sellers, sweeps, liquidity pulling & stacking -------------
+//
+// Aggression: of the prints in each window ending at `nowMs`, how much was BOUGHT at the offer (buyers
+// aggressive - market buy orders) vs SOLD at the bid; plus the tape's speed. Prints: the Time & Sales
+// rows ({ time, price, quantity, buy }), oldest first.
+export const AGGRESSION_WINDOWS = [{ label: '30s', ms: 30_000 }, { label: '1m', ms: 60_000 }, { label: '5m', ms: 300_000 }]
+
+export function aggression(prints, nowMs, windows = AGGRESSION_WINDOWS) {
+  return windows.map(({ label, ms }) => {
+    let buy = 0
+    let sell = 0
+    let count = 0
+    for (let i = (prints?.length ?? 0) - 1; i >= 0; i--) {
+      const t = msOf(prints[i].time)
+      if (t > nowMs) continue
+      if (t < nowMs - ms) break
+      if (prints[i].buy) buy += prints[i].quantity; else sell += prints[i].quantity
+      count++
+    }
+    const total = buy + sell
+    return { label, ms, buy, sell, total, prints: count, buyPct: total > 0 ? Math.round((buy / total) * 100) : 50, perMin: Math.round((count / ms) * 60_000) }
+  })
+}
+
+// Sweeps (detected on the server - see OrderFlowEngine.SweepGap) as signals with a confidence: bigger
+// and through more levels = stronger.
+export function sweepSignals(sweeps, lotSize = 1) {
+  return (sweeps ?? []).map((w) => {
+    const lots = Math.round(w.quantity / Math.max(1, lotSize))
+    const secs = Math.max(0.1, (msOf(w.endedAt) - msOf(w.startedAt)) / 1000)
+    const confidence = Math.round(Math.max(40, Math.min(92, 50 + 14 * Math.log2(Math.max(1, lots / 10)) + 3 * (w.levels - 3))))
+    return {
+      key: `sw-${w.id}`, kind: w.buy ? 'Buy sweep' : 'Sell sweep', t: msOf(w.endedAt), price: w.toPrice, bullish: w.buy, confidence,
+      text: `${lots.toLocaleString('en-IN')} lots ${w.buy ? 'lifted' : 'hit'} through ${w.levels} levels ${w.fromPrice}→${w.toPrice} in ${secs.toFixed(1)}s - aggressive market ${w.buy ? 'buyers' : 'sellers'} (stops / breakout)`,
+    }
+  })
+}
+
+// Liquidity PULLING and STACKING: resting limit orders taken away from, or added to, the book near
+// price - from consecutive heatmap columns. Only rows that stayed away from the touch in both columns
+// count (bids below both best bids, offers above both best offers, up to `bandRows` rows out), so a
+// change there cannot be trading - any drop was cancelled (pulled), any rise was added (stacked).
+// Over `windowMs`, a side whose pulled (or stacked) quantity reaches `factor` x its usual near-touch
+// depth, at least `minLots` lots and `dominance` x the opposite change, is a signal:
+//   bids pulled = support withdrawn (bearish) · offers pulled = resistance withdrawn (bullish)
+//   bids stacked = support building (bullish) · offers stacked = resistance building (bearish)
+// Returns { signals, pressure } - pressure: the last window's added/removed per side vs the usual depth.
+export const PULL_STACK_DEFAULTS = { bandRows: 10, windowMs: 20_000, factor: 0.35, minLots: 20, dominance: 2, maxGapMs: 60_000 }
+
+export function pullStackSignals({ columns, rowSize, lotSize = 1, ...options }) {
+  const { bandRows, windowMs, factor, minLots, dominance, maxGapMs } = { ...PULL_STACK_DEFAULTS, ...options }
+  const step = rowSize > 0 ? rowSize : 0.05
+  const empty = { signals: [], pressure: null }
+  if (!columns || columns.length < 3) return empty
+  const key = (p) => Math.round(p / step)
+  const lots = (q) => Math.round(q / Math.max(1, lotSize))
+  const cols = columns.map((c) => {
+    const bids = new Map()
+    const asks = new Map()
+    for (const [p, q] of c.bids ?? []) if (q > 0) bids.set(key(p), (bids.get(key(p)) ?? 0) + q)
+    for (const [p, q] of c.asks ?? []) if (q > 0) asks.set(key(p), (asks.get(key(p)) ?? 0) + q)
+    return { t: c.t, bids, asks, bestBid: bids.size ? Math.max(...bids.keys()) : null, bestAsk: asks.size ? Math.min(...asks.keys()) : null }
+  }).filter((c) => c.bestBid != null && c.bestAsk != null)
+
+  const side = () => ({ added: 0, removed: 0, addPx: 0, remPx: 0, lo: Infinity, hi: -Infinity })
+  const events = []
+  for (let i = 1; i < cols.length; i++) {
+    const a = cols[i - 1]
+    const b = cols[i]
+    if (b.t - a.t > maxGapMs) continue
+    const ev = { t: b.t, bid: side(), ask: side(), depthBid: 0, depthAsk: 0 }
+    const band = (from, to, aMap, bMap, s, depthKey) => {
+      for (let k = from; k <= to; k++) {
+        const qa = aMap.get(k) ?? 0
+        const qb = bMap.get(k) ?? 0
+        ev[depthKey] += qa
+        if (qb > qa) { s.added += qb - qa; s.addPx += (qb - qa) * k * step }
+        else if (qa > qb) { s.removed += qa - qb; s.remPx += (qa - qb) * k * step; s.lo = Math.min(s.lo, k * step); s.hi = Math.max(s.hi, k * step) }
+      }
+    }
+    const bidCut = Math.min(a.bestBid, b.bestBid)
+    band(bidCut - bandRows, bidCut - 1, a.bids, b.bids, ev.bid, 'depthBid')
+    const askCut = Math.max(a.bestAsk, b.bestAsk)
+    band(askCut + 1, askCut + bandRows, a.asks, b.asks, ev.ask, 'depthAsk')
+    events.push(ev)
+  }
+  if (events.length < 2) return empty
+
+  const median = (xs) => { const v = xs.filter((x) => x > 0).sort((x, y) => x - y); return v.length ? v[Math.floor(v.length / 2)] : 0 }
+  const signals = []
+  const lastEmit = {}
+  const round2 = (v) => Math.round(v * 100) / 100
+  let startIdx = 0
+  const win = { bid: side(), ask: side() }
+  const addTo = (w, s, sign) => { w.added += sign * s.added; w.removed += sign * s.removed; w.addPx += sign * s.addPx; w.remPx += sign * s.remPx }
+  let baseBid = 0
+  let baseAsk = 0
+  for (let j = 0; j < events.length; j++) {
+    const ev = events[j]
+    addTo(win.bid, ev.bid, 1)
+    addTo(win.ask, ev.ask, 1)
+    while (events[startIdx].t < ev.t - windowMs) { addTo(win.bid, events[startIdx].bid, -1); addTo(win.ask, events[startIdx].ask, -1); startIdx++ }
+    // The usual near-touch depth so far (re-measured every 10 columns, over the last 300).
+    if (j % 10 === 0 || !baseBid || !baseAsk) {
+      const recent = events.slice(Math.max(0, j - 300), j + 1)
+      baseBid = median(recent.map((e) => e.depthBid))
+      baseAsk = median(recent.map((e) => e.depthAsk))
+    }
+    if (j < 5) continue
+    for (const [name, w, base] of [['bid', win.bid, baseBid], ['ask', win.ask, baseAsk]]) {
+      if (!(base > 0)) continue
+      for (const kind of ['pulled', 'stacked']) {
+        const amount = kind === 'pulled' ? w.removed : w.added
+        const other = kind === 'pulled' ? w.added : w.removed
+        const ratio = amount / base
+        if (ratio < factor || lots(amount) < minLots || amount < dominance * Math.max(other, 1)) continue
+        const id = `${name}-${kind}`
+        if (lastEmit[id] != null && ev.t - lastEmit[id] < windowMs) continue
+        lastEmit[id] = ev.t
+        const price = round2((kind === 'pulled' ? w.remPx : w.addPx) / amount)
+        const bullish = (name === 'bid') === (kind === 'stacked')
+        const confidence = Math.round(Math.max(40, Math.min(92, 48 + 30 * Math.min(1, (ratio - factor) / (1 - factor)) + 3 * Math.min(4, amount / Math.max(other, 1) - dominance))))
+        const where = name === 'bid' ? 'bids below price' : 'offers above price'
+        const meaning = name === 'bid'
+          ? (kind === 'pulled' ? 'support withdrawn' : 'support building')
+          : (kind === 'pulled' ? 'resistance withdrawn - the way up is thinner' : 'resistance building')
+        signals.push({
+          key: `ps-${id}-${ev.t}`, kind: kind === 'pulled' ? 'Liquidity pulled' : 'Liquidity stacked', side: name, t: ev.t, price, bullish, confidence,
+          text: `${lots(amount).toLocaleString('en-IN')} lots of ${where} ${kind === 'pulled' ? 'pulled' : 'added'} in ${Math.round(windowMs / 1000)}s around ${price} (${Math.round(ratio * 100)}% of the usual near-touch depth) - ${meaning}`,
+        })
+      }
+    }
+  }
+  const pressure = {
+    windowMs,
+    bid: { added: lots(win.bid.added), removed: lots(win.bid.removed), usual: lots(baseBid) },
+    ask: { added: lots(win.ask.added), removed: lots(win.ask.removed), usual: lots(baseAsk) },
+  }
+  return { signals, pressure }
 }

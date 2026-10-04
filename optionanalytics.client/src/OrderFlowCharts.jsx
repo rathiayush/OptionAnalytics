@@ -674,7 +674,10 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
 
     // Liquidity signals: a labelled pill at the signal's price and time (green = bullish, red =
     // bearish), with its confidence.
-    const SHORT = { Magnet: 'MAGNET', 'Wall absorption': 'ABS', 'Exhaustion into wall': 'EXH', Spoofing: 'SPOOF' }
+    const SHORT = {
+      Magnet: 'MAGNET', 'Wall absorption': 'ABS', 'Exhaustion into wall': 'EXH', Spoofing: 'SPOOF',
+      'Liquidity pulled': 'PULL', 'Liquidity stacked': 'STACK', 'Buy sweep': 'SWEEP', 'Sell sweep': 'SWEEP',
+    }
     for (const sig of signals ?? []) {
       if (sig.t < t0 || sig.t > t1) continue
       const x = xTime(sig.t)

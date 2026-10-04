@@ -44,6 +44,14 @@ public sealed class OrderFlowController : ControllerBase
         return contracts.Select((c, i) => new OrderFlowContract(c.Expiry, c.TradingSymbol, c.SecurityId, i == 0)).ToList();
     }
 
+    /// <summary>Time &amp; Sales: the last <paramref name="count"/> prints (of at least
+    /// <paramref name="minTradeLots"/>) at or before <paramref name="until"/> - today's live contract when
+    /// <paramref name="date"/> is omitted, else that day if the server recorded it.</summary>
+    [HttpGet("{underlying}/tape")]
+    public async Task<ActionResult<OrderFlowHistory.TapeResult>> Tape(string underlying, [FromQuery] DateOnly? date, [FromQuery] DateOnly? expiry,
+        [FromQuery] DateTimeOffset? until, [FromQuery] int count = 1500, [FromQuery] int minTradeLots = 1, CancellationToken cancellationToken = default) =>
+        await _history.TapeAsync(underlying, date, expiry, until, count, minTradeLots, cancellationToken);
+
     /// <summary>A check of the history behind replays and backtests: the futures contract listed on
     /// <paramref name="date"/> (expired ones included), and how many 1-minute candles Dhan returns for it
     /// that day - e.g. /api/order-flow/NIFTY/history-check?date=2025-09-15.</summary>
