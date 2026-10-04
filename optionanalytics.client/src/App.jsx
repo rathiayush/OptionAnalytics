@@ -1,6 +1,7 @@
 import { Component, useEffect, useMemo, useRef, useState } from 'react'
 import { Select, Space, Typography, Spin, Card, Button, Modal, Table, Tag, Checkbox } from 'antd'
-import { createChart, createSeriesMarkers, CandlestickSeries, LineSeries, CrosshairMode, LineStyle, TickMarkType } from 'lightweight-charts'
+import { createSeriesMarkers, CandlestickSeries, LineSeries, CrosshairMode, LineStyle, TickMarkType } from 'lightweight-charts'
+import { createZoomableChart } from './chartZoom.js'
 import * as signalR from '@microsoft/signalr'
 import { Routes, Route, Navigate } from 'react-router-dom'
 import BacktestPage from './BacktestPage.jsx'
@@ -523,7 +524,7 @@ function PriceChart({ bars, vwapSeries = EMPTY_ARRAY, showVwap = false, height =
   useEffect(() => {
     if (!containerRef.current) return
 
-    const chart = createChart(containerRef.current, {
+    const chart = createZoomableChart(containerRef.current, {
       width: containerRef.current.clientWidth,
       height,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
@@ -644,7 +645,7 @@ function CeVsPeChart({ ceSeries, peSeries, prevCeSeries = [], prevPeSeries = [],
   useEffect(() => {
     if (!containerRef.current) return
 
-    const chart = createChart(containerRef.current, {
+    const chart = createZoomableChart(containerRef.current, {
       width: containerRef.current.clientWidth,
       height,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },

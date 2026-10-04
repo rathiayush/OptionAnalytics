@@ -2,7 +2,8 @@ import { Component, useEffect, useMemo, useRef, useState } from 'react'
 import dayjs from 'dayjs'
 import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicker, TimePicker, Alert, Empty, Tooltip, Popconfirm, Slider, Tag, InputNumber, Switch, Table, Segmented, Checkbox, Modal, message } from 'antd'
 import { PlayCircleOutlined, PauseCircleOutlined, ReloadOutlined, SoundOutlined, ExportOutlined } from '@ant-design/icons'
-import { createChart, createSeriesMarkers, CandlestickSeries, LineSeries, HistogramSeries, CrosshairMode } from 'lightweight-charts'
+import { createSeriesMarkers, CandlestickSeries, LineSeries, HistogramSeries, CrosshairMode } from 'lightweight-charts'
+import { createZoomableChart } from './chartZoom.js'
 import * as signalR from '@microsoft/signalr'
 import './oiMobile.css'
 import {
@@ -796,7 +797,7 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = tru
 
   useEffect(() => {
     if (!containerRef.current) return
-    const chart = createChart(containerRef.current, {
+    const chart = createZoomableChart(containerRef.current, {
       width: containerRef.current.clientWidth,
       height,
       // A bigger fontSize than the page's other charts - the OI-wall price-line labels here carry
@@ -1016,7 +1017,7 @@ function StrikeOiDrilldownChart({ ceSeries, peSeries, mode, dayKey, height = 320
 
   useEffect(() => {
     if (!containerRef.current) return
-    const chart = createChart(containerRef.current, {
+    const chart = createZoomableChart(containerRef.current, {
       width: containerRef.current.clientWidth,
       height,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
@@ -1432,7 +1433,7 @@ function EmaChart({
 
   useEffect(() => {
     if (!containerRef.current) return
-    const chart = createChart(containerRef.current, {
+    const chart = createZoomableChart(containerRef.current, {
       width: containerRef.current.clientWidth,
       height,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
@@ -1589,7 +1590,7 @@ function FuturesChart({ bars, oiLine, markers, dayKey, height = 320, profile = n
 
   useEffect(() => {
     if (!containerRef.current) return
-    const chart = createChart(containerRef.current, {
+    const chart = createZoomableChart(containerRef.current, {
       width: containerRef.current.clientWidth,
       height,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },

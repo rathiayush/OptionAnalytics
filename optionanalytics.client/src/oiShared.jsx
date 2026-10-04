@@ -1,7 +1,8 @@
 import { Component, useEffect, useMemo, useRef, useState, useId, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
 import { Select, Space, Typography, Button, Row, Col, Tooltip, Tag, InputNumber, Table, Segmented, Empty, Alert } from 'antd'
-import { createChart, CandlestickSeries, LineSeries, CrosshairMode } from 'lightweight-charts'
+import { CandlestickSeries, LineSeries, CrosshairMode } from 'lightweight-charts'
+import { createZoomableChart } from './chartZoom.js'
 import * as signalR from '@microsoft/signalr'
 import {
   UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR, RECONNECT_RETRY_POLICY,
@@ -480,7 +481,7 @@ export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Onl
 
   useEffect(() => {
     if (!containerRef.current) return
-    const chart = createChart(containerRef.current, {
+    const chart = createZoomableChart(containerRef.current, {
       width: containerRef.current.clientWidth,
       height,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 13 },
@@ -657,7 +658,7 @@ export function EmaChart({ oneMinBars, visibleCount, timeframe, onTimeframeChang
 
   useEffect(() => {
     if (!containerRef.current) return
-    const chart = createChart(containerRef.current, {
+    const chart = createZoomableChart(containerRef.current, {
       width: containerRef.current.clientWidth,
       height,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
@@ -758,7 +759,7 @@ export function PremiumLineChart({ points, dayKey, color, height = 320 }) {
 
   useEffect(() => {
     if (!containerRef.current) return
-    const chart = createChart(containerRef.current, {
+    const chart = createZoomableChart(containerRef.current, {
       width: containerRef.current.clientWidth,
       height,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
@@ -938,7 +939,7 @@ export function PremiumCandleChart({ bars, dayKey, height = 320 }) {
 
   useEffect(() => {
     if (!containerRef.current) return
-    const chart = createChart(containerRef.current, {
+    const chart = createZoomableChart(containerRef.current, {
       width: containerRef.current.clientWidth,
       height,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
@@ -1034,7 +1035,7 @@ export function PremiumEmaChart({
 
   useEffect(() => {
     if (!containerRef.current) return
-    const chart = createChart(containerRef.current, {
+    const chart = createZoomableChart(containerRef.current, {
       width: containerRef.current.clientWidth,
       height,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },

@@ -1,7 +1,8 @@
 import { Component, useEffect, useMemo, useRef, useState } from 'react'
 import { Card, Select, InputNumber, Space, Typography, Table, Button, Statistic, Row, Col, Empty, Alert, DatePicker } from 'antd'
 import { ReloadOutlined } from '@ant-design/icons'
-import { createChart, createSeriesMarkers, CandlestickSeries, CrosshairMode } from 'lightweight-charts'
+import { createSeriesMarkers, CandlestickSeries, CrosshairMode } from 'lightweight-charts'
+import { createZoomableChart } from './chartZoom.js'
 import {
   NavBar, STORED_UNDERLYING, usePersistedState, pickUnderlying,
   useExpirySelector, ExpirySelect, withExpiry, fmtPrice, fmtIstTime, fmtIstDateTime, istDateKey,
@@ -29,7 +30,7 @@ function StrikeCandleChart({ bars, height = 420 }) {
   useEffect(() => {
     if (!containerRef.current) return
 
-    const chart = createChart(containerRef.current, {
+    const chart = createZoomableChart(containerRef.current, {
       width: containerRef.current.clientWidth,
       height,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
