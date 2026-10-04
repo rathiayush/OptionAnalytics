@@ -7,9 +7,11 @@ import {
   NavBar, TIMEFRAME_OPTIONS, usePersistedState, RECONNECT_RETRY_POLICY, onLiveBatch, syncSignalRGroups, joinAllSignalRGroups,
   checkForNewDeploy, UP_COLOR, DOWN_COLOR, AXIS_COLOR,
 } from './shared.jsx'
-import { aggregateBars, analyzeBars, findWalls, bucketBook, mergeLiveMinutes, volumeProfile, replayView, replayRange, liquiditySignals, orderFlowBias, aggression, sweepSignals, pullStackSignals } from './orderFlowMath.js'
+import { aggregateBars, analyzeBars, findWalls, bucketBook, mergeLiveMinutes, replayView, replayRange, liquiditySignals, orderFlowBias, aggression, sweepSignals, pullStackSignals } from './orderFlowMath.js'
 import { TapeCard } from './OrderFlowTape.jsx'
 import { StrategyScanner } from './StrategyScanner.jsx'
+import { ProfilesCard } from './ProfilesCard.jsx'
+import { fetchPreviousSession, sessionVolumeProfile, tpoProfile, tpoRowFor } from './profiles.js'
 import { FootprintChart, DepthHeatmap, CumulativeDeltaChart, BookLadder, formatVolume } from './OrderFlowCharts.jsx'
 import { DomDrawer, useNarrow } from './DomDrawer.jsx'
 import { useReplaySync, useReplaySyncEnabled, ReplaySyncControl, withSpeedOption, SYNC_DRIFT_MS } from './replaySync.jsx'
@@ -399,7 +401,24 @@ export default function OrderFlowPage() {
     () => analyzeBars(aggregateBars(view?.minuteBars ?? [], timeframe), { rowSize, minVolume: lotSize, imbalanceRatio, stackedCount, estimated }),
     [view?.minuteBars, timeframe, rowSize, lotSize, imbalanceRatio, stackedCount, estimated],
   )
-  const profile = useMemo(() => (showProfile ? volumeProfile(bars) : null), [showProfile, bars])
+  // Volume profile levels always from the PREVIOUS session (POC, VAH, VAL, HVN, LVN); market profile
+  // (TPO) from the previous session plus today's developing one.
+  const sessionDate = isReplay ? replayDate : todayKey()
+  const [prevSession, setPrevSession] = useState({ key: null, data: null, loading: false })
+  useEffect(() => {
+    if (!sessionDate) return undefined
+    let cancelled = false
+    const key = `${underlying}:${sessionDate}:${rowSize}:${expiryQuery}`
+    setPrevSession({ key, data: null, loading: true })
+    fetchPreviousSession(underlying, sessionDate, rowSize, expiryQuery).then((data) => { if (!cancelled) setPrevSession({ key, data, loading: false }) })
+    return () => { cancelled = true }
+  }, [underlying, sessionDate, rowSize, expiryQuery])
+  const prevVp = useMemo(() => (prevSession.data ? sessionVolumeProfile(prevSession.data.bars) : null), [prevSession.data])
+  const tpoRow = tpoRowFor(underlying, rowSize)
+  const prevTpo = useMemo(() => (prevSession.data ? tpoProfile(prevSession.data.bars, tpoRow) : null), [prevSession.data, tpoRow])
+  const todayTpo = useMemo(() => tpoProfile(view?.minuteBars ?? [], tpoRow), [view?.minuteBars, tpoRow])
+  const scannerProfile = useMemo(() => (prevVp?.poc != null ? { vp: prevVp, tpoPrev: prevTpo } : null), [prevVp, prevTpo])
+  const profile = showProfile ? prevVp : null
   const largeTrades = useMemo(() => (view?.trades ?? []).filter((t) => t.quantity >= largeLots * lotSize), [view?.trades, largeLots, lotSize])
   const walls = useMemo(() => findWalls(view?.book), [view?.book])
   const activeIcebergs = useMemo(() => new Set((view?.icebergs ?? []).filter((i) => !i.endedAt).map((i) => i.price)), [view?.icebergs])
@@ -614,7 +633,8 @@ export default function OrderFlowPage() {
               />
               {profile?.poc != null && (
                 <Text type="secondary" style={{ fontSize: 11 }}>
-                  Volume profile{isReplay ? ' (to the replay time)' : ' (today)'}: POC {profile.poc} · value area {profile.val}–{profile.vah} (70% of volume)
+                  Volume profile of the previous session ({prevSession.data?.date}): POC {profile.poc} · value area {profile.val}–{profile.vah} (70% of volume)
+                  {profile.hvn?.length ? ` · HVN ${profile.hvn.join(', ')}` : ''}{profile.lvn?.length ? ` · LVN ${profile.lvn.join(', ')}` : ''}
                 </Text>
               )}
             </Card>
@@ -650,7 +670,11 @@ export default function OrderFlowPage() {
         <StrategyScanner
           underlying={underlying} isReplay={isReplay} date={isReplay ? replayDate : todayKey()} view={view} replayDay={replayDay} replayMs={replayMs} range={range}
           tapePrints={tapePrints} liquidity={liquidity} pullStack={pullStack.signals} rowSize={rowSize} lotSize={lotSize} largeLots={largeLots} estimated={estimated}
+          profile={scannerProfile}
         />
+
+        <ProfilesCard prevDate={prevSession.data?.date} prevVp={prevVp} prevTpo={prevTpo} todayTpo={todayTpo} lastPrice={meta?.lastPrice}
+          loading={prevSession.loading} estimatedPrev={prevSession.data?.source === 'estimated'} />
 
         <Card size="small" title="Liquidity heatmap" extra={!narrow && <Text type="secondary" style={{ fontSize: 11 }}>resting bids/offers over time (brighter = more) · big dots = big orders · magenta = icebergs</Text>}>
           {estimated

@@ -3,7 +3,7 @@ import { Alert, Button, Card, Checkbox, Col, Popconfirm, Progress, Row, Segmente
 import { SoundOutlined } from '@ant-design/icons'
 import { UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import {
-  STRATEGIES, STRATEGY_BY_ID, buildOiContext, evaluateStrategies, simulateOutcome, strategyStats, topFive, MIN_TRADES_TO_RANK,
+  STRATEGIES, STRATEGY_BY_ID, buildOiContext, evaluateStrategies, simulateOutcome, strategyStats, topFifteen, MIN_TRADES_TO_RANK,
 } from './strategyEngine.js'
 import { aggregateBars, analyzeBars, findWalls, liquiditySignals, pullStackSignals, replayView } from './orderFlowMath.js'
 
@@ -82,8 +82,12 @@ function fmtR(r) {
  * for the chosen ones (the top 5 by default), scores every setup by what the futures did next, and
  * ranks the strategies over every day scored so far. "Scan day" runs a whole loaded day at once.
  */
-export function StrategyScanner({ underlying, isReplay, date, view, replayDay, replayMs, range, tapePrints, liquidity, pullStack, rowSize, lotSize, largeLots, estimated }) {
-  const [settings, setSettings] = useState(() => ({ alerts: true, sound: true, voice: true, pick: 'top5', custom: [], ...readJson(SETTINGS_KEY, {}) }))
+export function StrategyScanner({ underlying, isReplay, date, view, replayDay, replayMs, range, tapePrints, liquidity, pullStack, rowSize, lotSize, largeLots, estimated, profile }) {
+  const [settings, setSettings] = useState(() => {
+    const saved = { alerts: true, sound: true, voice: true, pick: 'top15', custom: [], ...readJson(SETTINGS_KEY, {}) }
+    // Older saved settings used 'top5' (from when there were only the first 10).
+    return saved.pick === 'top5' ? { ...saved, pick: 'top15' } : saved
+  })
   useEffect(() => writeJson(SETTINGS_KEY, settings), [settings])
   const [history, setHistory] = useState(() => readJson(HISTORY_KEY, {}))
   const [oiRun, setOiRun] = useState(null)
@@ -119,7 +123,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     fetch(`/api/oi-replay/${underlying}/expiries`).then((r) => r.json()).then((b) => {
       if (!cancelled) setExpiryDate(underlying === 'BANKNIFTY' ? b?.month ?? null : b?.week ?? null)
     }).catch(() => {})
-    const id = isReplay ? null : setInterval(load, 5 * MIN)
+    const id = isReplay ? null : setInterval(load, 2 * MIN)
     return () => { cancelled = true; if (id) clearInterval(id) }
   }, [underlying, date, isReplay])
   const oi = useMemo(() => buildOiContext(oiRun, expiryDate), [oiRun, expiryDate])
@@ -128,12 +132,14 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   useEffect(() => { firedRef.current = []; setFired([]) }, [dayKey, isReplay])
 
   const stats = useMemo(() => strategyStats(Object.values(history).flatMap((d) => d.setups ?? [])), [history])
-  const top = useMemo(() => topFive(stats), [stats])
-  const alertIds = settings.pick === 'top5' ? top.ids : settings.custom
+  const top = useMemo(() => topFifteen(stats), [stats])
+  const alertIds = settings.pick === 'top15' ? top.ids : settings.pick === 'oi5' ? top.oi.ids : settings.pick === 'profile5' ? top.profile.ids : settings.custom
+  const alertIdsRef = useRef(alertIds)
+  useEffect(() => { alertIdsRef.current = alertIds }, [alertIds])
 
   const liveNow = view?.heatmap?.at(-1)?.t ?? (view?.meta?.lastTradeAt ? msOf(view.meta.lastTradeAt) : Date.now())
   const nowMs = isReplay ? replayMs : liveNow
-  const minuteKey = nowMs ? Math.floor(nowMs / 15_000) : 0 // evaluate at most every 15 s of market time
+  const minuteKey = nowMs ? Math.floor(nowMs / 10_000) : 0 // evaluate every 10 s of market time
 
   useEffect(() => {
     if (!oi || !view?.minuteBars?.length || !nowMs) return
@@ -149,7 +155,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     if (bars.length < 5) return
     const setups = evaluateStrategies({
       nowMs, price: view.meta?.lastPrice || bars.at(-1).close, bars, minuteBars: view.minuteBars, prints: estimated ? null : tapePrints,
-      book: view.book, walls: findWalls(view.book), liquidity, pullStack, sweeps: view.sweeps, icebergs: view.icebergs, oi, estimated, lotSize, bigLots: largeLots,
+      book: view.book, walls: findWalls(view.book), liquidity, pullStack, sweeps: view.sweeps, icebergs: view.icebergs, oi, estimated, lotSize, bigLots: largeLots, profile,
     })
     const fresh = setups.filter((s) => !firedRef.current.some((f) => f.id === s.id && f.side === s.side && s.t - f.t < COOLDOWN_MS))
     if (!fresh.length) return
@@ -157,7 +163,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     setFired(firedRef.current)
     const cfg = settingsRef.current
     for (const s of fresh) {
-      if (!cfg.alerts || !(cfg.pick === 'top5' ? top.ids : cfg.custom).includes(s.id)) continue
+      if (!cfg.alerts || !alertIdsRef.current.includes(s.id)) continue
       const meta = STRATEGY_BY_ID[s.id]
       if (cfg.sound) chime(s.side === 'LONG')
       if (cfg.voice) speak(`${meta.short}. ${s.side === 'LONG' ? 'Long' : 'Short'}.`)
@@ -173,13 +179,42 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       })
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [oi, minuteKey, view?.minuteBars?.length, estimated, tapePrints?.at(-1)?.seq])
+  }, [oi, minuteKey, view?.minuteBars?.length, estimated, tapePrints?.at(-1)?.seq, profile])
 
   // Outcomes for today's setups so far; saved into the day's history as they resolve.
   const withOutcome = useMemo(
     () => fired.map((s) => ({ ...s, outcome: simulateOutcome(s, view?.minuteBars ?? [], nowMs ?? 0) })),
     [fired, view?.minuteBars, nowMs],
   )
+
+  // Every alerted setup is followed to its end: when its target, stop-loss or time stop is hit, another
+  // alert says so (sound, the name spoken, a notification) - a hands-free day-trading loop.
+  const closedRef = useRef(new Set())
+  useEffect(() => { closedRef.current = new Set() }, [dayKey, isReplay])
+  useEffect(() => {
+    const cfg = settingsRef.current
+    for (const s of withOutcome) {
+      const key = `${s.id}-${s.t}`
+      if (s.outcome.status === 'open' || closedRef.current.has(key)) continue
+      closedRef.current.add(key)
+      if (!cfg.alerts || !alertIdsRef.current.includes(s.id)) continue
+      const meta = STRATEGY_BY_ID[s.id]
+      const hit = s.outcome.timeStop ? 'Time exit' : s.outcome.status === 'win' ? 'Target hit' : 'Stop loss hit'
+      const good = s.outcome.r > 0
+      if (cfg.sound) chime(good)
+      if (cfg.voice) speak(`${hit}. ${meta.short}. ${good ? 'Plus' : 'Minus'} ${Math.abs(s.outcome.r).toFixed(1)} R.`)
+      notification.open({
+        key: `${key}-exit`, placement: 'topRight', duration: 15,
+        message: <span style={{ color: good ? UP_COLOR : DOWN_COLOR, fontWeight: 700 }}>{hit} · #{meta.no} {meta.name} · {s.side}</span>,
+        description: (
+          <div style={{ fontSize: 12 }}>
+            entry {s.entry.toFixed(1)} at {IST_HHMM.format(new Date(s.t))} · {s.outcome.exitAt ? `exit ${IST_HHMM.format(new Date(s.outcome.exitAt))} · ` : ''}
+            stop {s.stop.toFixed(1)} · target {s.target.toFixed(1)} · <b>{fmtR(s.outcome.r)}</b>
+          </div>
+        ),
+      })
+    }
+  }, [withOutcome])
   useEffect(() => {
     if (!withOutcome.length || !date) return
     setHistory((prev) => {
@@ -216,7 +251,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
           const ps = estimated ? { signals: [] } : pullStackSignals({ columns: cols.slice(-60), rowSize, lotSize })
           const setups = evaluateStrategies({
             nowMs: clock, price: v.meta.lastPrice || bars.at(-1).close, bars, minuteBars: v.minuteBars, prints: prints ? upTo(prints, clock) : null,
-            book: v.book, liquidity: liq, pullStack: ps.signals, sweeps: v.sweeps, icebergs: v.icebergs, oi, estimated, lotSize, bigLots: largeLots,
+            book: v.book, liquidity: liq, pullStack: ps.signals, sweeps: v.sweeps, icebergs: v.icebergs, oi, estimated, lotSize, bigLots: largeLots, profile,
           })
           for (const s of setups) {
             if (!found.some((f) => f.id === s.id && f.side === s.side && s.t - f.t < COOLDOWN_MS)) found.push(s)
@@ -241,12 +276,12 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
 
   const dayResults = history[dayKey]?.scanned ? history[dayKey].setups : withOutcome
   const days = Object.values(history)
-  const statRows = stats.map((s) => ({ ...s, key: s.id, top: top.ids.includes(s.id) }))
+  const statRows = stats.map((s) => ({ ...s, key: s.id, top: alertIds.includes(s.id) }))
   const statColumns = [
     { title: '#', dataIndex: 'no', width: 34 },
     {
       title: 'Strategy', dataIndex: 'name',
-      render: (name, r) => <span>{r.top && <Tag color="gold" style={{ marginRight: 4 }}>top 5</Tag>}{name}</span>,
+      render: (name, r) => <span>{r.top && <Tag color="gold" style={{ marginRight: 4 }}>alert</Tag>}{name}{r.group === 'profile' && <Tag style={{ marginLeft: 4, fontSize: 10 }}>profile</Tag>}</span>,
     },
     { title: 'Trades', dataIndex: 'trades', width: 64 },
     { title: 'Win %', dataIndex: 'winRate', width: 66, render: (v) => (v == null ? '-' : `${Math.round(v * 100)}%`) },
@@ -259,7 +294,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
 
   return (
     <Card
-      size="small" title="Strategy scanner · OI + order flow playbook"
+      size="small" title="Strategy scanner · OI, order flow, volume & market profile (15 strategies)"
       extra={(
         <Space size={10} wrap>
           <Space size={4}><Switch size="small" checked={settings.alerts} onChange={(v) => { unlockAudio(); setSettings((s) => ({ ...s, alerts: v })) }} /><Text style={{ fontSize: 12 }}>Alerts</Text></Space>
@@ -277,11 +312,16 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
             <Space wrap size={8}>
               <Text style={{ fontSize: 12 }}>Alert on</Text>
               <Segmented size="small" value={settings.pick} onChange={(v) => setSettings((s) => ({ ...s, pick: v }))}
-                options={[{ value: 'top5', label: top.measured ? 'Top 5 (measured)' : 'Top 5 (playbook picks)' }, { value: 'custom', label: 'My choice' }]} />
+                options={[
+                  { value: 'top15', label: `Top 15${top.measured ? ' (measured)' : ''}` },
+                  { value: 'oi5', label: 'Top 5 OI + flow' },
+                  { value: 'profile5', label: 'Top 5 profile' },
+                  { value: 'custom', label: 'My choice' },
+                ]} />
             </Space>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: '2px 10px' }}>
               {STRATEGIES.map((s) => (
-                <Checkbox key={s.id} checked={alertIds.includes(s.id)} disabled={settings.pick === 'top5'} onChange={(e) => toggleCustom(s.id, e.target.checked)} style={{ fontSize: 12 }}>
+                <Checkbox key={s.id} checked={alertIds.includes(s.id)} disabled={settings.pick !== 'custom'} onChange={(e) => toggleCustom(s.id, e.target.checked)} style={{ fontSize: 12 }}>
                   {s.no}. {s.short}
                 </Checkbox>
               ))}
@@ -308,7 +348,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                       <div style={{ display: 'flex', gap: 6, alignItems: 'baseline', fontSize: 12, padding: '3px 0', borderBottom: '1px solid #ffffff0d' }}>
                         <Text type="secondary" style={{ fontSize: 11, minWidth: 38 }}>{IST_HHMM.format(new Date(s.t))}</Text>
                         <Tag color={s.side === 'LONG' ? 'green' : 'red'} style={{ margin: 0, fontSize: 11 }}>{s.side}</Tag>
-                        <span style={{ flex: 1 }}>#{meta.no} {meta.short} <Text type="secondary" style={{ fontSize: 11 }}>@ {s.entry.toFixed(1)} · {s.confidence}%{s.estimated ? ' · est.' : ''}</Text></span>
+                        <span style={{ flex: 1 }}>#{meta.no} {meta.short} <Text type="secondary" style={{ fontSize: 11 }}>@ {s.entry.toFixed(1)} · SL {s.stop.toFixed(1)} · T {s.target.toFixed(1)} · {s.confidence}%{s.estimated ? ' · est.' : ''}</Text></span>
                         <Tag color={o.status === 'win' ? 'success' : o.status === 'loss' ? 'error' : 'processing'} style={{ margin: 0, fontSize: 11 }}>
                           {o.status === 'open' ? `open ${fmtR(o.r)}` : `${o.status} ${fmtR(o.r)}${o.timeStop ? ' (time)' : ''}`}
                         </Tag>
@@ -323,7 +363,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
           <Table size="small" pagination={false} columns={statColumns} dataSource={statRows} scroll={{ x: 560 }} />
           <Text type="secondary" style={{ fontSize: 11 }}>
             {days.length} day(s) scored ({days.filter((d) => d.estimated).length} estimated). Ranked by average R per trade (win rate × size of the wins), shrunk for small samples;
-            {' '}a strategy needs {MIN_TRADES_TO_RANK}+ trades to be ranked - until five are, the playbook&apos;s picks fill the top 5. Outcomes are the FUTURES move to
+            {' '}a strategy needs {MIN_TRADES_TO_RANK}+ trades to be ranked - until enough are, the playbook&apos;s picks fill each group's top 5 (OI + order flow, and profile). A strategy losing on average is never alerted. Every alert carries its stop-loss and target, and a second alert follows when either is hit. Outcomes are the FUTURES move to
             {' '}the setup&apos;s stop / target / time stop (stop counted first when one minute touches both), not option P&amp;L; past results do not promise future ones.
           </Text>
         </Col>

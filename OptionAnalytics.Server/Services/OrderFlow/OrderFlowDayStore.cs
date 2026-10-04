@@ -37,6 +37,23 @@ public sealed class OrderFlowDayStore
             days[day.Day] = engine;
             while (days.Count > _maxDays) days.Remove(days.Keys.First());
         }
+        EvictOlderDates();
+    }
+
+    /// <summary>Keeps only the newest DaysInMemory trading dates across EVERY contract: per-contract
+    /// limits alone would keep an expired contract's last days forever (a new futures contract gets a
+    /// new key each month), growing the server's memory month after month.</summary>
+    private void EvictOlderDates()
+    {
+        var keep = _days.Values.SelectMany(d => { lock (d) return d.Keys.ToList(); }).Distinct().OrderByDescending(d => d).Take(_maxDays).ToHashSet();
+        foreach (var (key, days) in _days)
+        {
+            lock (days)
+            {
+                foreach (var date in days.Keys.Where(d => !keep.Contains(d)).ToList()) days.Remove(date);
+                if (days.Count == 0) _days.TryRemove(key, out _);
+            }
+        }
     }
 
     public OrderFlowEngine? EngineFor(string underlying, uint securityId, DateOnly date)

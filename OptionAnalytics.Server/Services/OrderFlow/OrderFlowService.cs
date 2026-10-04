@@ -137,6 +137,7 @@ public sealed class OrderFlowService : BackgroundService
                 var oldest = _extra.OrderBy(kv => kv.Value.LastAsked).First();
                 _extra.TryRemove(oldest.Key, out _);
                 _bySecurityId.TryRemove(oldest.Key, out _);
+                _depth.Unsubscribe(oldest.Key);
                 oldest.Value.Engine.DayEnded -= _pastDays.Add;
                 if (oldest.Value.Engine.ExportDay() is { } day) _pastDays.Add(day);
                 _logger.LogInformation("Order flow: stopped tracking {Symbol} (least recently viewed).", oldest.Value.Engine.ContractSymbol);
@@ -215,6 +216,7 @@ public sealed class OrderFlowService : BackgroundService
             {
                 _bySecurityId.TryRemove(engine.SecurityId, out _);
                 _fullDepth.Unsubscribe(engine.SecurityId);
+                _depth.Unsubscribe(engine.SecurityId);
                 engine.DayEnded -= _pastDays.Add;
                 // The outgoing contract's day stays replayable.
                 if (engine.ExportDay() is { } last) _pastDays.Add(last);

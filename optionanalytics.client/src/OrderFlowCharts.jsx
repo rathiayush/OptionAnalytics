@@ -183,7 +183,7 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
     if (!layout) {
       ctx.fillStyle = AXIS_COLOR
       ctx.font = `13px ${FONT}`
-      ctx.fillText('Waiting for futures trades…', 16, 30)
+      ctx.fillText('Waiting for futures trades…', 16, 64)
       return
     }
     const { visible, hiPad, rowH, rightPad } = layout
@@ -397,6 +397,8 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
         ctx.fillText(label, barsW + profileW - 3, Math.min(FP_TOP + plotH - 6, Math.max(FP_TOP + 6, y + (label === 'VAL' ? -6 : label === 'VAH' ? 6 : 0))))
         ctx.textAlign = 'left'
       }
+      for (const h of profile.hvn ?? []) level(h, 'HVN', '#ffa940')
+      for (const l of profile.lvn ?? []) level(l, 'LVN', '#69c0ff')
       level(profile.vah, 'VAH', '#9b8cff')
       level(profile.val, 'VAL', '#9b8cff')
       level(profile.poc, 'POC', POC_COLOR)

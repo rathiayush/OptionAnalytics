@@ -268,8 +268,16 @@ public sealed class OiReplayService
         if (contract is null)
             return (Array.Empty<FuturesBar>(), null, false, $"No currently-listed futures contract found for {underlying} - the instrument master may still be loading.");
 
-        var (bars, oiFieldPresent, error) = await _historicalData.GetIntradayFuturesCandlesAsync(
-            contract.SecurityId, contract.DhanSegment, date, date, 1, cancellationToken);
+        // An expired contract has no intraday history at Dhan - fall back to another contract listed that day.
+        IReadOnlyList<DhanFuturesInstrument> listed = Array.Empty<DhanFuturesInstrument>();
+        if (contract.Expiry < IstClock.Today() && _futuresArchive is not null && NseFuturesContractArchive.Covers(underlying))
+        {
+            try { listed = await _futuresArchive.ContractsOnAsync(underlying, date, cancellationToken); }
+            catch (Exception e) when (e is not OperationCanceledException) { listed = Array.Empty<DhanFuturesInstrument>(); }
+        }
+        var fetched = await PastFuturesCandles.FetchAsync(_historicalData, contract, listed, date, cancellationToken);
+        var (bars, oiFieldPresent, error) = (fetched.Bars, fetched.OiFieldPresent, fetched.Error);
+        contract = fetched.Contract;
 
         if (error is not null)
             return (Array.Empty<FuturesBar>(), contract.Expiry, false, error);
