@@ -401,6 +401,13 @@ public sealed class LiveTradingService : BackgroundService
                 };
             }
             else legs.Add(new SuperOrderLeg(name, u.Status, u.TransactionType, price > 0 ? price : null, null, u.TradedQty > 0 ? u.TradedQty : null));
+            // One-cancels-other: once the target (stop-loss) leg has filled, Dhan cancels the other exit leg.
+            if (u.Status == "TRADED")
+            {
+                var other = u.LegNo == 2 ? "TARGET_LEG" : "STOP_LOSS_LEG";
+                var j = legs.FindIndex(l => l.LegName == other && l.OrderStatus == "PENDING");
+                if (j >= 0) legs[j] = legs[j] with { OrderStatus = "CANCELLED" };
+            }
             return order with
             {
                 LegDetails = legs,
@@ -587,19 +594,34 @@ public sealed class LiveTradingService : BackgroundService
             });
         }
 
+        // EVERY open order on the account, so each can be cancelled from the panel: unfilled super orders
+        // (their entry), the pending target / stop-loss legs of filled ones, and every pending plain
+        // order - this panel's exits (OIRX-), protection stop-losses (OIRP-) and anything else.
+        string SymbolOf(string securityId) => uint.TryParse(securityId, out var sid) ? _chain.FindBySecurityId(sid)?.TradingSymbol ?? securityId : securityId;
+        var superIds = orders.Select(o => o.OrderId).ToHashSet();
+        var superTags = orders.Select(o => o.CorrelationId).Where(t => !string.IsNullOrEmpty(t)).ToHashSet();
         var pending = orders
             .Where(o => PendingStatuses.Contains(o.OrderStatus))
-            .Select(o => new LivePendingOrder(o.OrderId, o.SecurityId,
-                uint.TryParse(o.SecurityId, out var pendingId) ? _chain.FindBySecurityId(pendingId)?.TradingSymbol ?? o.SecurityId : o.SecurityId,
-                o.TransactionType, o.Quantity, o.Price, o.TargetPrice, o.StopLossPrice, o.OrderStatus) { Kind = "Entry" })
-            // Working exit orders (this panel's own "OIRX-") and the stop-loss guarding the rest of a
-            // partially exited position ("OIRP-") - visible so neither is ever invisible.
+            .Select(o => new LivePendingOrder(o.OrderId, o.SecurityId, SymbolOf(o.SecurityId),
+                o.TransactionType, o.Quantity - (o.FilledQty ?? 0), o.Price, o.TargetPrice, o.StopLossPrice, o.OrderStatus) { Kind = "Entry", Leg = "ENTRY_LEG" })
+            .Concat(orders
+                .Where(o => o.OrderStatus is "TRADED" or "PART_TRADED")
+                .SelectMany(o => o.LegDetails
+                    .Where(l => l.LegName is "TARGET_LEG" or "STOP_LOSS_LEG" && l.OrderStatus == "PENDING")
+                    .Select(l => new LivePendingOrder(o.OrderId, o.SecurityId, SymbolOf(o.SecurityId),
+                        string.IsNullOrEmpty(l.TransactionType) ? (o.TransactionType == "BUY" ? "SELL" : "BUY") : l.TransactionType,
+                        o.FilledQty is > 0 and var f ? f : o.Quantity, l.Price ?? 0,
+                        l.LegName == "TARGET_LEG" ? l.Price : o.TargetPrice, l.LegName == "STOP_LOSS_LEG" ? l.Price : o.StopLossPrice, l.OrderStatus)
+                    { Kind = l.LegName == "TARGET_LEG" ? "Target leg" : "Stop-loss leg", Leg = l.LegName })))
             .Concat(plainOrders
-                .Where(o => PendingStatuses.Contains(o.OrderStatus) && (o.CorrelationId?.StartsWith("OIRX-", StringComparison.Ordinal) == true || IsProtection(o)))
-                .Select(o => new LivePendingOrder(o.OrderId, o.SecurityId,
-                    uint.TryParse(o.SecurityId, out var exitId) ? _chain.FindBySecurityId(exitId)?.TradingSymbol ?? o.SecurityId : o.SecurityId,
+                .Where(o => PendingStatuses.Contains(o.OrderStatus) && !superIds.Contains(o.OrderId) && (o.CorrelationId is null || !superTags.Contains(o.CorrelationId)))
+                .Select(o => new LivePendingOrder(o.OrderId, o.SecurityId, SymbolOf(o.SecurityId),
                     o.TransactionType, o.Quantity - o.FilledQty, o.Price, IsProtection(o) ? TargetFromTag(o.CorrelationId) : null,
-                    IsProtection(o) ? o.TriggerPrice : null, o.OrderStatus) { Kind = IsProtection(o) ? "Protection" : "Exit" }))
+                    IsProtection(o) ? o.TriggerPrice : o.TriggerPrice is > 0 ? o.TriggerPrice : null, o.OrderStatus)
+                {
+                    Kind = IsProtection(o) ? "Protection" : o.CorrelationId?.StartsWith("OIRX-", StringComparison.Ordinal) == true ? "Exit" : "Order",
+                    OrderType = o.OrderType,
+                }))
             .ToList();
         var rejected = orders
             .Where(o => o.OrderStatus == "REJECTED" && !string.IsNullOrWhiteSpace(o.OmsErrorDescription))
@@ -864,7 +886,9 @@ public sealed class LiveTradingService : BackgroundService
             if (quantity <= 0)
                 return ManualOrderResult.Fail($"{position.TradingSymbol}: exit orders for the whole position are already working");
             var (orderIds, price, error) = await PlaceExitAsync(position, quantity, slippagePoints, cancellationToken);
-            RefreshUnlessStreaming();
+            // Read the order books right away so the new exit (and every leg still working) shows in the
+            // panel at once, ready to cancel.
+            RequestRefresh();
             if (error is not null) return ManualOrderResult.Fail(error, orderIds);
 
             var rest = open - quantity;
@@ -1033,11 +1057,18 @@ public sealed class LiveTradingService : BackgroundService
     }
 
     /// <summary>Cancels an unfilled order: a manual entry (the whole super order) or a working exit.</summary>
-    public async Task<ManualOrderResult> CancelAsync(string orderId, bool isExitOrder, CancellationToken cancellationToken)
+    /// <param name="leg">For a super order: ENTRY_LEG (the whole order), TARGET_LEG or STOP_LOSS_LEG
+    /// (just that leg); null with <paramref name="isExitOrder"/> for a plain order.</param>
+    public async Task<ManualOrderResult> CancelAsync(string orderId, bool isExitOrder, CancellationToken cancellationToken, string? leg = null)
     {
         string? error;
-        if (isExitOrder) { var (result, e) = await _orders.CancelAsync(orderId, cancellationToken); error = result is null ? e ?? "no reason given" : null; }
-        else { var (result, e) = await _superOrders.CancelAsync(orderId, "ENTRY_LEG", cancellationToken); error = result is null ? e ?? "no reason given" : null; }
+        if (isExitOrder && leg is null) { var (result, e) = await _orders.CancelAsync(orderId, cancellationToken); error = result is null ? e ?? "no reason given" : null; }
+        else
+        {
+            var legName = leg is "TARGET_LEG" or "STOP_LOSS_LEG" ? leg : "ENTRY_LEG";
+            var (result, e) = await _superOrders.CancelAsync(orderId, legName, cancellationToken);
+            error = result is null ? e ?? "no reason given" : null;
+        }
         RefreshUnlessStreaming();
         return error is null ? new ManualOrderResult(true, $"order {orderId} cancelled", new[] { orderId }, null) : ManualOrderResult.Fail($"Dhan did not cancel it: {error}");
     }
@@ -1090,6 +1121,11 @@ public sealed record LivePendingOrder(
     string OrderId, string SecurityId, string TradingSymbol, string TransactionType, int Quantity, decimal Price,
     decimal? TargetPrice, decimal? StopLossPrice, string Status)
 {
+    /// <summary>A super order's leg (ENTRY_LEG / TARGET_LEG / STOP_LOSS_LEG) - what cancelling it removes;
+    /// null for a plain order.</summary>
+    public string? Leg { get; init; }
+    /// <summary>A plain order's type (LIMIT, MARKET, STOP_LOSS, STOP_LOSS_MARKET).</summary>
+    public string? OrderType { get; init; }
     /// <summary>"Entry" (an unfilled super order from the panel) or "Exit" (a working exit order).</summary>
     public string Kind { get; init; } = "Entry";
 }

@@ -24,7 +24,8 @@ export const liveTradingApi = {
   place: (order) => postJson('/api/live-trading/orders', order),
   close: (securityId, slippagePoints) => postJson(`/api/live-trading/positions/${encodeURIComponent(securityId)}/close`, { slippagePoints }),
   partialExit: (securityId, lots, slippagePoints) => postJson(`/api/live-trading/positions/${encodeURIComponent(securityId)}/partial-exit`, { lots, slippagePoints }),
-  cancel: (orderId, isExit = false) => postJson(`/api/live-trading/orders/${encodeURIComponent(orderId)}${isExit ? '?exit=true' : ''}`, null, 'DELETE'),
+  cancel: (orderId, isExit = false, leg = null) => postJson(
+    `/api/live-trading/orders/${encodeURIComponent(orderId)}?${new URLSearchParams({ ...(isExit ? { exit: 'true' } : {}), ...(leg ? { leg } : {}) })}`, null, 'DELETE'),
   exitAll: (slippagePoints) => postJson('/api/live-trading/exit-all', { slippagePoints }),
   emergencyExitAll: () => postJson('/api/live-trading/emergency-exit-all', null),
 }
@@ -149,27 +150,41 @@ export function LivePositionsView({ snapshot, slippage, busy, onClose, onPartial
 
       {snapshot.pendingOrders.length > 0 && (
         <Space direction="vertical" size={4} style={{ width: '100%' }}>
-          <Text type="secondary" style={{ fontSize: 12 }}>Waiting to fill</Text>
-          {snapshot.pendingOrders.map((o) => (
-            <Space key={o.orderId} size={8} wrap>
-              <Tag color={o.kind === 'Protection' ? 'purple' : o.kind === 'Exit' ? 'warning' : o.transactionType === 'BUY' ? 'success' : 'error'}>
-                {o.kind === 'Protection' ? 'STOP-LOSS ' : o.kind === 'Exit' ? 'EXIT ' : ''}{o.transactionType}
-              </Tag>
-              <Text style={{ fontSize: 12 }}>
-                {o.tradingSymbol ?? o.securityId} x{o.quantity}
-                {o.kind === 'Protection'
-                  ? ` · triggers at ${price(o.stopLossPrice)} · target ${price(o.targetPrice)} watched · guards the rest after a partial exit`
-                  : ` @ ${price(o.price)}${o.kind === 'Exit' ? ' · re-pricing to the live bid/ask until filled' : ` · T ${price(o.targetPrice)} · SL ${price(o.stopLossPrice)}`}`} · {o.status}
-              </Text>
-              {o.kind === 'Protection'
-                ? (
-                  <Popconfirm title="Cancel the stop-loss guarding this position?" description="The rest of the position will have NO stop-loss and no target." okText="Cancel it" okButtonProps={{ danger: true }} onConfirm={() => onCancel(o.orderId, true)}>
-                    <Button size="small" disabled={busy}>Cancel</Button>
-                  </Popconfirm>
-                )
-                : <Button size="small" onClick={() => onCancel(o.orderId, o.kind === 'Exit')} disabled={busy}>Cancel</Button>}
-            </Space>
-          ))}
+          <Text type="secondary" style={{ fontSize: 12 }}>Open orders on Dhan ({snapshot.pendingOrders.length}) - cancel any of them here</Text>
+          {snapshot.pendingOrders.map((o) => {
+            const isLeg = o.kind === 'Target leg' || o.kind === 'Stop-loss leg'
+            const plain = !o.leg
+            const label = {
+              Protection: 'STOP-LOSS', Exit: 'EXIT', 'Target leg': 'TARGET LEG', 'Stop-loss leg': 'SL LEG', Order: o.orderType && o.orderType !== 'LIMIT' ? o.orderType.replace(/_/g, ' ') : 'ORDER', Entry: 'ENTRY',
+            }[o.kind] ?? o.kind
+            const color = o.kind === 'Protection' || o.kind === 'Stop-loss leg' ? 'purple' : o.kind === 'Target leg' ? 'cyan' : o.kind === 'Exit' ? 'warning' : o.transactionType === 'BUY' ? 'success' : 'error'
+            const detail = o.kind === 'Protection'
+              ? ` · triggers at ${price(o.stopLossPrice)} · target ${price(o.targetPrice)} watched`
+              : isLeg
+                ? ` · ${o.kind === 'Target leg' ? `target ${price(o.targetPrice)}` : `stop-loss ${price(o.stopLossPrice)}`} (super order ${o.orderId})`
+                : o.kind === 'Entry'
+                  ? ` @ ${price(o.price)} · T ${price(o.targetPrice)} · SL ${price(o.stopLossPrice)}`
+                  : ` @ ${price(o.price)}${o.stopLossPrice ? ` · trigger ${price(o.stopLossPrice)}` : ''}${o.kind === 'Exit' ? ' · re-pricing to the live bid/ask until filled' : ''}`
+            const risky = o.kind === 'Protection' || isLeg
+            const cancel = () => onCancel(o.orderId, plain, o.leg)
+            return (
+              <Space key={`${o.orderId}-${o.leg ?? ''}`} size={8} wrap>
+                <Tag color={color}>{label} {o.transactionType}</Tag>
+                <Text style={{ fontSize: 12 }}>{o.tradingSymbol ?? o.securityId} x{o.quantity}{detail} · {o.status}</Text>
+                {risky
+                  ? (
+                    <Popconfirm
+                      title={`Cancel this ${o.kind === 'Target leg' ? 'target' : 'stop-loss'}?`}
+                      description={o.kind === 'Target leg' ? 'The position keeps its stop-loss but no target.' : 'The position will have NO stop-loss.'}
+                      okText="Cancel it" okButtonProps={{ danger: true }} onConfirm={cancel}
+                    >
+                      <Button size="small" disabled={busy}>Cancel</Button>
+                    </Popconfirm>
+                  )
+                  : <Button size="small" onClick={cancel} disabled={busy}>Cancel</Button>}
+              </Space>
+            )
+          })}
         </Space>
       )}
 

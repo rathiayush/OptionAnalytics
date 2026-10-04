@@ -61,11 +61,12 @@ public sealed class LiveTradingController : ControllerBase
         return result.Success ? Ok(result) : UnprocessableEntity(result);
     }
 
-    /// <param name="exit">true for a working exit order (a plain order), false for an unfilled entry (super order).</param>
+    /// <param name="exit">true for a plain order (an exit, a protection stop-loss or any other), false for a super order.</param>
+    /// <param name="leg">A super order's leg to cancel: ENTRY_LEG (the whole order, default), TARGET_LEG or STOP_LOSS_LEG.</param>
     [HttpDelete("orders/{orderId}")]
-    public async Task<ActionResult<ManualOrderResult>> Cancel(string orderId, [FromQuery] bool exit, CancellationToken cancellationToken)
+    public async Task<ActionResult<ManualOrderResult>> Cancel(string orderId, [FromQuery] bool exit, [FromQuery] string? leg, CancellationToken cancellationToken)
     {
-        var result = await _trading.CancelAsync(orderId, exit, CancellationToken.None);
+        var result = await _trading.CancelAsync(orderId, exit, CancellationToken.None, leg);
         return result.Success ? Ok(result) : UnprocessableEntity(result);
     }
 
