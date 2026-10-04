@@ -373,13 +373,14 @@ public sealed class OrderFlowEngineTests
         Assert.True(snapshot.Bars[2].Sell > snapshot.Bars[2].Buy);
         foreach (var bar in snapshot.Bars)
         {
-            // Rows add up exactly to the bar, and cover its whole range in 0.5-point rows.
+            // Rows add up exactly to the bar, stay inside its range, and are whole lots.
             Assert.Equal(bar.Buy, bar.Levels.Sum(l => l.Buy));
             Assert.Equal(bar.Sell, bar.Levels.Sum(l => l.Sell));
-            Assert.Equal(OrderFlowEngine.Row(bar.High, 0.5m), bar.Levels[0].Price);
-            Assert.Equal(OrderFlowEngine.Row(bar.Low, 0.5m), bar.Levels[^1].Price);
+            Assert.All(bar.Levels, l => Assert.InRange(l.Price, OrderFlowEngine.Row(bar.Low, 0.5m), OrderFlowEngine.Row(bar.High, 0.5m)));
         }
-        Assert.Equal(7, snapshot.Bars[1].Levels.Count); // 100.0 to 103.0
+        Assert.All(snapshot.Bars.SelectMany(b => b.Levels), l => { Assert.Equal(0, l.Buy % 75); Assert.Equal(0, l.Sell % 75); });
+        // Not one flat number repeated down the bar: the rows differ.
+        Assert.True(snapshot.Bars[0].Levels.Select(l => (l.Buy, l.Sell)).Distinct().Count() > 1);
         Assert.Empty(snapshot.Heatmap);
         Assert.Equal(0, snapshot.Meta.DepthLevels);
     }
@@ -399,4 +400,28 @@ public sealed class OrderFlowEngineTests
     [InlineData(1.96, 0.975)]
     [InlineData(-1, 0.1587)]
     public void NormalCdf_MatchesTheTable(double x, double expected) => Assert.Equal(expected, OrderFlowEstimator.NormalCdf(x), 3);
+
+    [Fact]
+    public void EstimatedRows_FollowThePathPriceTookInsideTheMinute()
+    {
+        // Down-minute: O 100 -> H 101 -> L 98 -> C 99. The path crosses 99-100 three times
+        // (100->101 up, 101->98 down, 98->99 up): those rows get the most; 98-99 only twice;
+        // 100-101 is crossed up then down.
+        var candle = Candle(0, 100m, 101m, 98m, 99m, 75 * 60);
+        var rows = OrderFlowEstimator.Rows(candle, 75 * 30, 75 * 30, 1m, 75);
+        var byPrice = rows.ToDictionary(l => l.Price);
+        Assert.Equal(new[] { 100m, 99m, 98m }, rows.Select(l => l.Price));
+        Assert.True(byPrice[99m].Sell > 0 && byPrice[99m].Buy == 0);       // 99-100: the down leg only (the up legs end at 99)
+        Assert.True(byPrice[98m].Buy > 0 && byPrice[98m].Sell > 0);        // 98-99: down then back up
+        Assert.Equal(75 * 30, rows.Sum(l => l.Buy));
+        Assert.Equal(75 * 30, rows.Sum(l => l.Sell));
+    }
+
+    [Fact]
+    public void Allocate_GivesWholeLotsThatAddUp()
+    {
+        var parts = OrderFlowEstimator.Allocate(75 * 10 + 20, new[] { 1.0, 1.0, 1.0 }, 75);
+        Assert.Equal(75 * 10 + 20, parts.Sum());
+        Assert.Equal(new long[] { 4 * 75 + 20, 3 * 75, 3 * 75 }, parts); // 10 lots by largest remainder, the odd 20 on the heaviest
+    }
 }
