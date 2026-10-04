@@ -29,6 +29,9 @@ export const liveTradingApi = {
   exitAll: (slippagePoints) => postJson('/api/live-trading/exit-all', { slippagePoints }),
   emergencyExitAll: () => postJson('/api/live-trading/emergency-exit-all', null),
   cancelAll: () => postJson('/api/live-trading/orders/cancel-all', null),
+  // One strategy trade (its super orders) - not the whole position in that contract.
+  exitTrade: (orderIds, slippagePoints) => postJson('/api/live-trading/orders/exit-trade', { orderIds, slippagePoints }),
+  tradeLevels: (orderIds, stopLossPoints, targetPoints) => postJson('/api/live-trading/orders/trade-levels', { orderIds, slippagePoints: 0, stopLossPoints, targetPoints }),
 }
 
 const money = (v) => (v == null ? '—' : `${v >= 0 ? '+' : ''}${Math.round(v).toLocaleString('en-IN')}`)

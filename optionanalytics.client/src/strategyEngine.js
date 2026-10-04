@@ -95,6 +95,7 @@ export function buildOiContext(run, expiryDate = null) {
     futures,
     spot,
     isExpiryDay: expiryDate != null && expiryDate === run.date,
+    expiry: expiryDate,
     date: run.date,
   }
 }

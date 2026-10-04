@@ -1118,9 +1118,6 @@ function StrikeOiDrilldownChart({ ceSeries, peSeries, mode, dayKey, height = 320
 // worst-pair ΔE 26.8 protan / 31.8 normal-vision, both clear of the dataviz method's 8/15 targets.
 const OI_ADDED_COLOR = '#3987e5'
 const OI_REMOVED_COLOR = '#d95926'
-// A strike whose OI did not change that minute - white, so "nothing changed" reads differently from
-// "no data" (left blank).
-const OI_UNCHANGED_COLOR = 'rgba(255, 255, 255, 0.82)'
 
 // One color, opacity-scaled by magnitude, per pole - the diverging encoding: OI_ADDED_COLOR at low
 // alpha for a small change, ramping toward full alpha at the grid's own typical-large |change| (see
@@ -1241,12 +1238,7 @@ function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfMs, time
       const y = row * HEATMAP_ROW_HEIGHT
       columns.forEach((t, col) => {
         const v = byBucket?.get(t)
-        if (v == null) return
-        if (v === 0 || maxAbs === 0) {
-          ctx.fillStyle = OI_UNCHANGED_COLOR
-          ctx.fillRect(col * HEATMAP_CELL_WIDTH, y, HEATMAP_CELL_WIDTH - 1, HEATMAP_ROW_HEIGHT - 1)
-          return
-        }
+        if (v == null || v === 0 || maxAbs === 0) return
         const alpha = HEATMAP_MIN_ALPHA + Math.min(1, Math.abs(v) / maxAbs) * (HEATMAP_MAX_ALPHA - HEATMAP_MIN_ALPHA)
         // Added vs removed, by SIGN - not a fixed per-card color the way the CE/PE identity is
         // encoded elsewhere (Total OI/Since-open Δ charts). Side is already unambiguous here without
@@ -4280,7 +4272,6 @@ export default function OiReplayPage() {
                   <Space size={16} wrap>
                     <Text style={{ color: OI_ADDED_COLOR }}>■ OI added</Text>
                     <Text style={{ color: OI_REMOVED_COLOR }}>■ OI removed</Text>
-                    <Text style={{ color: '#fff' }}>□ OI unchanged</Text>
                     {isLive && (
                       <Tooltip title="When Dhan last reported a changed open interest on any tracked strike. Prices tick constantly; OI only moves when positions are opened or closed, so a column can sit empty for a while in a quiet market.">
                         <Text type="secondary" style={{ fontSize: 12 }}>

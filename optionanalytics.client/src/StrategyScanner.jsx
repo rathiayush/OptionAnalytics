@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Alert, Button, Card, Checkbox, Col, InputNumber, Popconfirm, Progress, Row, Segmented, Space, Switch, Table, Tag, Tooltip, Typography, notification } from 'antd'
+import { Alert, Button, Card, Checkbox, Col, InputNumber, Modal, Popconfirm, Progress, Row, Segmented, Space, Switch, Table, Tag, Tooltip, Typography, notification } from 'antd'
 import { SoundOutlined } from '@ant-design/icons'
 import { UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import { PAPER_TRADE_LOT_SIZE } from './oiShared.jsx'
+import { liveTradingApi } from './LiveTrading.jsx'
 import {
   STRATEGIES, STRATEGY_BY_ID, evaluateStrategies, simulateOutcome, strategyStats, topFifteen, MIN_TRADES_TO_RANK, oiSummary, optionOiText,
   DEFAULT_TRAIL, LAST_ENTRY, SQUARE_OFF, fmtHm, exitLabel, premiumAt, optionPnlPoints, optionTradeText, squareOffMs, optionStopTargetHit,
@@ -89,9 +90,9 @@ function fmtR(r) {
  * for the chosen ones (the top 5 by default), scores every setup by what the futures did next, and
  * ranks the strategies over every day scored so far. "Scan day" runs a whole loaded day at once.
  */
-export function StrategyScanner({ underlying, isReplay, date, view, replayDay, replayMs, range, tapePrints, liquidity, pullStack, rowSize, lotSize, largeLots, estimated, profile, oi, oiError }) {
+export function StrategyScanner({ underlying, isReplay, date, view, replayDay, replayMs, range, tapePrints, liquidity, pullStack, rowSize, lotSize, largeLots, estimated, profile, oi, oiError, canTradeLive = false }) {
   const [settings, setSettings] = useState(() => {
-    const saved = { alerts: true, sound: true, voice: true, pick: 'top15', custom: [], trail: { on: true, ...DEFAULT_TRAIL }, autoPaper: 'sell', paperLots: 1, paperSl: 20, paperTarget: 30, ...readJson(SETTINGS_KEY, {}) }
+    const saved = { alerts: true, sound: true, voice: true, pick: 'top15', custom: [], trail: { on: true, ...DEFAULT_TRAIL }, autoPaper: 'sell', paperLots: 1, paperSl: 20, paperTarget: 30, liveSlippage: 2, maxLiveTrades: 5, maxLiveLoss: 10000, ...readJson(SETTINGS_KEY, {}) }
     // Older saved settings used 'top5' (from when there were only the first 10).
     // Every alert paper-sells its option by default (settings saved before that default had 'off').
     if (!saved.autoPaperSellDefault) Object.assign(saved, { autoPaper: 'sell', autoPaperSellDefault: true })
@@ -111,8 +112,68 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   // it, at that minute's premium - or by hand. Paper only: no order is ever sent.
   const [paperBook, setPaperBook] = useState(() => readJson(PAPER_KEY, {}))
   useEffect(() => writeJson(PAPER_KEY, trimPaper(paperBook)), [paperBook])
+  // Live (Dhan) mode - admins, today's live view only; never remembered across reloads. In it the trades
+  // box holds REAL trades: S / B (confirmed) place a super order, and "Auto-place on alert" (its own
+  // confirmed switch, off by default) places one on every alert within the day's limits.
+  const [tradeMode, setTradeMode] = useState('paper')
+  const [autoLive, setAutoLive] = useState(false)
+  const liveModeRef = useRef({ mode: 'paper', auto: false })
+  useEffect(() => { liveModeRef.current = { mode: canTradeLive ? tradeMode : 'paper', auto: canTradeLive && tradeMode === 'live' && autoLive } }, [canTradeLive, tradeMode, autoLive])
+  useEffect(() => { if (!canTradeLive) { setTradeMode('paper'); setAutoLive(false) } }, [canTradeLive])
+  const paperBookRef = useRef(paperBook)
+  useEffect(() => { paperBookRef.current = paperBook }, [paperBook])
+  const liveLossRef = useRef(0)
+  const placingRef = useRef(new Set())
+  const sameSignal = (p, setup, trade) => p.strategy === setup.id && p.setupSide === setup.side && p.action === trade.action && Math.abs(setupTimeOf(p) - setup.t) < COOLDOWN_MS
+
+  const placeLive = async (setup, which) => {
+    const trade = setup.options?.[which]
+    const cfg = settingsRef.current
+    const fail = (description) => notification.error({ message: 'Live order not placed', description, placement: 'topRight', duration: 10 })
+    if (!trade) return fail('No option premium for this setup yet.')
+    if (!oi?.expiry) return fail('The option expiry is not known yet (OI still loading).')
+    if (!(cfg.paperSl > 0) || !(cfg.paperTarget > 0)) return fail('A live trade is a Dhan super order - set both Max SL and Target above 0.')
+    const list = paperBookRef.current[dayKey]?.positions ?? []
+    const key = `${setup.id}-${setup.t}-${which}`
+    if (list.some((p) => sameSignal(p, setup, trade)) || placingRef.current.has(key)) return
+    const liveCount = list.filter((p) => p.live).length
+    if (liveCount >= (cfg.maxLiveTrades ?? 5)) return fail(`The day's limit of ${cfg.maxLiveTrades} live trades is reached.`)
+    if (liveLossRef.current <= -(cfg.maxLiveLoss ?? 10000)) return fail(`The day's live loss limit (₹${(cfg.maxLiveLoss ?? 10000).toLocaleString('en-IN')}) is reached.`)
+    placingRef.current.add(key)
+    const lots = Math.max(1, cfg.paperLots ?? 1)
+    try {
+      const result = await liveTradingApi.place({
+        underlying, expiry: oi.expiry, strike: trade.strike, side: trade.side, direction: trade.action, lots,
+        slippagePoints: cfg.liveSlippage ?? 2, stopLossPoints: cfg.paperSl, targetPoints: cfg.paperTarget,
+      })
+      const position = {
+        key, setupKey: `${setup.id}-${setup.t}`, setupT: setup.t, strategy: setup.id, setupSide: setup.side, action: trade.action, side: trade.side, strike: trade.strike,
+        lots, lotSize: PAPER_TRADE_LOT_SIZE[underlying] ?? 1, premium: result.prices?.limit ?? trade.premium, slPts: cfg.paperSl, targetPts: cfg.paperTarget,
+        entryTime: nowMsRef.current ?? Date.now(), exitTime: null, exitPremium: null, exitReason: null,
+        live: true, orderIds: result.orderIds ?? [], liveNote: result.message,
+      }
+      setPaperBook((prev) => ({ ...prev, [dayKey]: { date, positions: [...(prev[dayKey]?.positions ?? []), position] } }))
+      notification.success({ message: `LIVE ${trade.action} ${trade.strike} ${trade.side} x${lots} placed on Dhan`, description: result.message, placement: 'topRight', duration: 8 })
+    } catch (err) {
+      fail(err.message)
+    } finally {
+      placingRef.current.delete(key)
+    }
+  }
+
   const punchRef = useRef(null)
-  punchRef.current = (setup, which, atMs) => {
+  punchRef.current = (setup, which, atMs, opts = {}) => {
+    if (liveModeRef.current.mode === 'live') {
+      const trade = setup.options?.[which]
+      if (opts.auto) { placeLive(setup, which); return }
+      Modal.confirm({
+        title: `Place a REAL order on Dhan?`,
+        content: trade ? `${trade.action} ${underlying} ${trade.strike} ${trade.side} x${settingsRef.current.paperLots ?? 1} lot(s) - a super order with SL ${settingsRef.current.paperSl} / target ${settingsRef.current.paperTarget} premium points.` : 'No option for this setup.',
+        okText: 'Place order', okButtonProps: { danger: true }, cancelText: 'Cancel',
+        onOk: () => placeLive(setup, which),
+      })
+      return
+    }
     const trade = setup.options?.[which]
     if (!trade || !oi) return
     const at = atMs ?? setup.t
@@ -124,14 +185,31 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       // ONE paper trade per signal: the same strategy, direction and side (buy / sell) within the
       // alert cooldown is the same signal - a replayed day re-fires its alerts a few seconds apart, and
       // must not open it again.
-      if (list.some((p) => p.strategy === setup.id && p.setupSide === setup.side && p.action === trade.action
-        && Math.abs(setupTimeOf(p) - setup.t) < COOLDOWN_MS)) return prev
+      if (list.some((p) => sameSignal(p, setup, trade))) return prev
       const position = {
         key, setupKey: `${setup.id}-${setup.t}`, setupT: setup.t, strategy: setup.id, setupSide: setup.side, action: trade.action, side: trade.side, strike: trade.strike,
         lots, lotSize: PAPER_TRADE_LOT_SIZE[underlying] ?? 1, premium, slPts: settingsRef.current.paperSl ?? 20, targetPts: settingsRef.current.paperTarget ?? 30, entryTime: at, exitTime: null, exitPremium: null, exitReason: null,
       }
       return { ...prev, [dayKey]: { date, positions: [...list, position] } }
     })
+  }
+  // A live trade's exit: its own super order cancelled (or its legs) and only its quantity closed on
+  // Dhan - see LiveTradingService.ExitTradeAsync. Sent once; the row keeps what Dhan answered.
+  const markPosition = (key, patch) => setPaperBook((prev) => {
+    const day = prev[dayKey]
+    if (!day) return prev
+    return { ...prev, [dayKey]: { ...day, positions: day.positions.map((p) => (p.key === key ? { ...p, ...patch } : p)) } }
+  })
+  const exitLive = (row, reason) => {
+    const atMs = row.exitTime ?? nowMsRef.current ?? Date.now()
+    const premium = row.exitTime ? row.current : premiumAt(oi, row.side, row.strike, atMs) ?? row.current
+    markPosition(row.key, { exitSent: true, exitError: null, exitTime: atMs, exitPremium: premium, exitReason: reason })
+    liveTradingApi.exitTrade(row.orderIds ?? [], settingsRef.current.liveSlippage ?? 2)
+      .then((result) => markPosition(row.key, { liveNote: result.message }))
+      .catch((err) => {
+        markPosition(row.key, { exitError: err.message })
+        notification.error({ message: `Live exit failed: ${row.strike} ${row.side}`, description: `${err.message} - check the Dhan panel and press Exit again.`, placement: 'topRight', duration: 0 })
+      })
   }
   const exitPaper = (key) => setPaperBook((prev) => {
     const list = prev[dayKey]?.positions ?? []
@@ -160,6 +238,8 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   const liveNow = view?.heatmap?.at(-1)?.t ?? (view?.meta?.lastTradeAt ? msOf(view.meta.lastTradeAt) : Date.now())
   const nowMs = isReplay ? replayMs : liveNow
   const minuteKey = nowMs ? Math.floor(nowMs / 10_000) : 0 // evaluate every 10 s of market time
+  const nowMsRef = useRef(nowMs)
+  useEffect(() => { nowMsRef.current = nowMs }, [nowMs])
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const oiNow = useMemo(() => (oi && nowMs ? oiSummary(oi, nowMs) : null), [oi, minuteKey])
 
@@ -188,9 +268,12 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     for (const s of fresh) {
       if (!cfg.alerts || !alertIdsRef.current.includes(s.id)) continue
       const meta = STRATEGY_BY_ID[s.id]
-      // The moment it alerts, the option is paper-punched (the sell side by default).
-      const autoTrade = (cfg.autoPaper === 'buy' || cfg.autoPaper === 'sell') ? s.options?.[cfg.autoPaper] : null
-      if (autoTrade) punchRef.current?.(s, cfg.autoPaper, s.t)
+      // The moment it alerts, the option is punched (the sell side by default): on paper, or - in Live
+      // mode with Auto-place on - as a real Dhan super order.
+      const live = liveModeRef.current
+      const side = cfg.autoPaper === 'buy' || cfg.autoPaper === 'sell' ? cfg.autoPaper : null
+      const autoTrade = side && (live.mode !== 'live' || live.auto) ? s.options?.[side] : null
+      if (autoTrade) punchRef.current?.(s, side, s.t, { auto: true })
       if (cfg.sound) chime(s.side === 'LONG')
       if (cfg.voice) speak(`${meta.short}. ${s.side === 'LONG' ? 'Long' : 'Short'}.${autoTrade ? ` ${autoTrade.action === 'SELL' ? 'Sold' : 'Bought'} ${autoTrade.strike} ${autoTrade.side === 'CE' ? 'call' : 'put'}.` : ''}`)
       notification.open({
@@ -203,11 +286,11 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
             {s.options && (
               <div style={{ margin: '4px 0' }}>
                 <b>Option:</b> {[optionTradeText(s.options.buy), optionTradeText(s.options.sell)].filter(Boolean).join(' · or ')}
-                {autoTrade && <Text strong style={{ fontSize: 11, color: autoTrade.action === 'SELL' ? DOWN_COLOR : UP_COLOR }}> · paper {autoTrade.action === 'SELL' ? 'SOLD' : 'BOUGHT'} {autoTrade.strike} {autoTrade.side}</Text>}
-                {cfg.autoPaper === 'off' && (
+                {autoTrade && <Text strong style={{ fontSize: 11, color: autoTrade.action === 'SELL' ? DOWN_COLOR : UP_COLOR }}> · {live.mode === 'live' ? 'LIVE order sent:' : 'paper'} {autoTrade.action === 'SELL' ? 'SOLD' : 'BOUGHT'} {autoTrade.strike} {autoTrade.side}</Text>}
+                {!autoTrade && (
                   <span style={{ marginLeft: 6 }}>
-                    {s.options.buy && <Button size="small" type="link" style={{ padding: '0 4px', height: 18 }} onClick={() => punchRef.current?.(s, 'buy', s.t)}>Paper buy {s.options.buy.side}</Button>}
-                    {s.options.sell && <Button size="small" type="link" danger style={{ padding: '0 4px', height: 18 }} onClick={() => punchRef.current?.(s, 'sell', s.t)}>Paper sell {s.options.sell.side}</Button>}
+                    {s.options.buy && <Button size="small" type="link" style={{ padding: '0 4px', height: 18 }} onClick={() => punchRef.current?.(s, 'buy', s.t)}>{live.mode === 'live' ? 'LIVE buy' : 'Paper buy'} {s.options.buy.side}</Button>}
+                    {s.options.sell && <Button size="small" type="link" danger style={{ padding: '0 4px', height: 18 }} onClick={() => punchRef.current?.(s, 'sell', s.t)}>{live.mode === 'live' ? 'LIVE sell' : 'Paper sell'} {s.options.sell.side}</Button>}
                   </span>
                 )}
               </div>
@@ -355,6 +438,11 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       let exitPremium = exitTime ? p.exitPremium : null
       let exitReason = exitTime ? p.exitReason : null
       const o = outcomeOf(p)
+      if (p.live && p.exitSent) {
+        // A live trade whose exit has gone to Dhan keeps the exit it was sent with.
+        const points = p.exitPremium == null ? null : p.action === 'BUY' ? p.exitPremium - p.premium : p.premium - p.exitPremium
+        return { ...p, exitTime: p.exitTime, exitReason: p.exitReason, current: p.exitPremium, points, rupees: points == null ? null : points * p.lots * p.lotSize }
+      }
       // The trade's own premium stop / target (positions from before they existed use today's setting),
       // checked up to the setup's exit - whichever comes first closes it.
       const setupExitAt = o && o.status !== 'open' ? (o.exitAt != null ? o.exitAt + MIN : squareOffMs(p.entryTime)) : Infinity
@@ -381,6 +469,54 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     })
   }, [paperBook, dayKey, dayResults, withOutcome, oi, nowMs, settings.paperSl, settings.paperTarget])
   const paperTotal = paperRows.reduce((sum, r) => sum + (r.rupees ?? 0), 0)
+  const liveRows = paperRows.filter((r) => r.live)
+  const liveTotal = liveRows.reduce((sum, r) => sum + (r.rupees ?? 0), 0)
+  useEffect(() => { liveLossRef.current = liveTotal }, [liveTotal])
+  // A live trade reaching its exit (its setup's stop / target / trailing SL / 15:10, or its own Max SL
+  // / Target - which its super order legs also hold on Dhan) is closed on Dhan once. Only while this
+  // page is open; the super order's own legs protect it either way.
+  useEffect(() => {
+    if (isReplay) return
+    for (const r of paperRows) if (r.live && r.exitTime && !r.exitSent) exitLive(r, r.exitReason ?? 'Exit')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [paperRows, isReplay])
+  // A new Max SL / Target applies to every trade still OPEN now (and to new ones); closed trades keep
+  // the levels they closed on.
+  const levelsTimerRef = useRef(null)
+  const changeLimits = (patch) => {
+    setSettings((s) => ({ ...s, ...patch }))
+    const openRows = paperRows.filter((r) => !r.exitTime)
+    const open = new Set(openRows.map((r) => r.key))
+    if (!open.size) return
+    // Open LIVE trades: move their super order legs on Dhan too (once the typing stops).
+    const liveOpen = openRows.filter((r) => r.live && r.orderIds?.length)
+    if (liveOpen.length) {
+      clearTimeout(levelsTimerRef.current)
+      levelsTimerRef.current = setTimeout(() => {
+        const cfg = settingsRef.current
+        for (const r of liveOpen) {
+          liveTradingApi.tradeLevels(r.orderIds, cfg.paperSl ?? 0, cfg.paperTarget ?? 0)
+            .then((result) => markPosition(r.key, { liveNote: result.message }))
+            .catch((err) => notification.error({ message: `Could not move the SL / target on Dhan: ${r.strike} ${r.side}`, description: err.message, placement: 'topRight', duration: 10 }))
+        }
+      }, 900)
+    }
+    setPaperBook((prev) => {
+      const day = prev[dayKey]
+      if (!day) return prev
+      return {
+        ...prev,
+        [dayKey]: {
+          ...day,
+          positions: day.positions.map((p) => (open.has(p.key) ? {
+            ...p,
+            ...(patch.paperSl != null ? { slPts: patch.paperSl } : {}),
+            ...(patch.paperTarget != null ? { targetPts: patch.paperTarget } : {}),
+          } : p)),
+        },
+      }
+    })
+  }
   const days = Object.values(history)
   const statRows = stats.map((s) => ({ ...s, key: s.id, top: alertIds.includes(s.id) }))
   const statColumns = [
@@ -410,7 +546,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
         </Space>
       )}
     >
-      {oiError && <Alert type="warning" showIcon style={{ marginBottom: 8 }} message={`OI for ${date} could not be loaded - the strategies need it: ${oiError}`} />}
+      {oiError && <Alert type="warning" showIcon style={{ marginBottom: 8 }} message={`OI for ${date} could not be loaded${isReplay ? '' : ' yet - retrying automatically'}${oi ? ' (showing the last loaded OI)' : ''} - the strategies need it: ${oiError}`} />}
       {oiNow && (
         <div style={{ fontSize: 12, marginBottom: 8, padding: '6px 8px', border: '1px solid #ffffff1f', borderRadius: 6, display: 'flex', flexWrap: 'wrap', gap: '4px 16px' }} aria-label="OI now">
           <span><Text strong style={{ fontSize: 12 }}>Options OI</Text>{' '}
@@ -473,7 +609,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
             </Space>
             <div style={{ maxHeight: 260, overflowY: 'auto' }} aria-label="Strategy setups">
               {dayResults.length === 0
-                ? <Text type="secondary" style={{ fontSize: 12 }}>{oi ? 'No setup yet today.' : 'Loading OI…'}</Text>
+                ? <Text type="secondary" style={{ fontSize: 12 }}>{oi ? 'No setup yet today.' : oiError ? 'Waiting for OI…' : 'Loading OI…'}</Text>
                 : [...dayResults].reverse().map((s) => {
                   const meta = STRATEGY_BY_ID[s.id]
                   const o = s.outcome
@@ -509,7 +645,20 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
             </div>
             <div aria-label="Paper option trades">
               <Space wrap size={8} style={{ marginBottom: 4 }}>
-                <Text strong style={{ fontSize: 12 }}>Paper option trades</Text>
+                <Text strong style={{ fontSize: 12 }}>Option trades</Text>
+                {canTradeLive && (
+                  <Segmented size="small" value={tradeMode} aria-label="Trade mode"
+                    onChange={(v) => {
+                      if (v !== 'live') { setTradeMode('paper'); setAutoLive(false); return }
+                      Modal.confirm({
+                        title: 'Switch to LIVE trading on Dhan?',
+                        content: 'S / B on a setup or alert will place REAL super orders (with your Max SL and Target as the stop-loss and target legs). Each live trade is closed on Dhan - its own super order cancelled and only its quantity exited - when its setup ends or you press Exit.',
+                        okText: 'Yes, go live', okButtonProps: { danger: true }, cancelText: 'Stay on paper',
+                        onOk: () => setTradeMode('live'),
+                      })
+                    }}
+                    options={[{ value: 'paper', label: 'Paper' }, { value: 'live', label: 'Live (Dhan)' }]} />
+                )}
                 <Text style={{ fontSize: 12 }}>on each alert</Text>
                 <Segmented size="small" value={settings.autoPaper ?? 'sell'} onChange={(v) => setSettings((s) => ({ ...s, autoPaper: v }))}
                   options={[{ value: 'off', label: 'Off' }, { value: 'buy', label: 'Buy option' }, { value: 'sell', label: 'Sell option' }]} />
@@ -518,32 +667,87 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                 <Text style={{ fontSize: 12 }}>lot(s) × {PAPER_TRADE_LOT_SIZE[underlying] ?? 1}</Text>
                 <Text style={{ fontSize: 12 }}>Max SL</Text>
                 <InputNumber size="small" min={0} max={500} step={5} style={{ width: 64 }} value={settings.paperSl ?? 20} aria-label="Paper max SL points"
-                  onChange={(v) => v != null && setSettings((s) => ({ ...s, paperSl: v }))} />
+                  onChange={(v) => v != null && changeLimits({ paperSl: v })} />
                 <Text style={{ fontSize: 12 }}>Target</Text>
                 <InputNumber size="small" min={0} max={1000} step={5} style={{ width: 64 }} value={settings.paperTarget ?? 30} aria-label="Paper target points"
-                  onChange={(v) => v != null && setSettings((s) => ({ ...s, paperTarget: v }))} />
-                <Text type="secondary" style={{ fontSize: 11 }}>premium pts (0 = off)</Text>
+                  onChange={(v) => v != null && changeLimits({ paperTarget: v })} />
+                <Text type="secondary" style={{ fontSize: 11 }}>premium pts (0 = off) · a change applies to open trades too</Text>
                 {paperRows.length > 0 && <Text strong style={{ fontSize: 12, color: paperTotal >= 0 ? UP_COLOR : DOWN_COLOR }}>P&amp;L ₹{Math.round(paperTotal).toLocaleString('en-IN')}</Text>}
-                {paperRows.length > 0 && (
-                  <Popconfirm title="Clear this day's paper trades?" onConfirm={() => setPaperBook((prev) => { const next = { ...prev }; delete next[dayKey]; return next })}>
-                    <Button size="small">Clear</Button>
+                {paperRows.some((r) => !r.live) && (
+                  <Popconfirm title="Clear this day's paper trades? (Live trades stay.)" onConfirm={() => setPaperBook((prev) => {
+                    const day = prev[dayKey]
+                    const keep = (day?.positions ?? []).filter((p) => p.live)
+                    const next = { ...prev }
+                    if (keep.length) next[dayKey] = { ...day, positions: keep }; else delete next[dayKey]
+                    return next
+                  })}>
+                    <Button size="small">Clear paper</Button>
                   </Popconfirm>
                 )}
               </Space>
+              {canTradeLive && tradeMode === 'live' && (
+                <Alert type="error" showIcon style={{ margin: '4px 0 6px', padding: '4px 10px' }} message={(
+                  <Space wrap size={8} style={{ fontSize: 12 }}>
+                    <b>LIVE - real orders on Dhan</b>
+                    <Space size={4}>
+                      <Switch size="small" checked={autoLive} aria-label="Auto-place on alert"
+                        onChange={(v) => {
+                          if (!v) { setAutoLive(false); return }
+                          Modal.confirm({
+                            title: 'Auto-place a REAL order on every alert?',
+                            content: `Every alert you have selected will place a live ${settings.autoPaper === 'buy' ? 'BUY' : 'SELL'} super order on Dhan by itself, up to ${settings.maxLiveTrades ?? 5} trades today, and stops after a ₹${(settings.maxLiveLoss ?? 10000).toLocaleString('en-IN')} loss. Turns off when you leave this page.`,
+                            okText: 'Turn on', okButtonProps: { danger: true }, cancelText: 'Keep off',
+                            onOk: () => setAutoLive(true),
+                          })
+                        }} />
+                      <Text style={{ fontSize: 12 }}>Auto-place on alert</Text>
+                    </Space>
+                    <Text style={{ fontSize: 12 }}>slippage</Text>
+                    <InputNumber size="small" min={0} max={20} step={0.5} style={{ width: 60 }} value={settings.liveSlippage ?? 2} aria-label="Live slippage"
+                      onChange={(v) => v != null && setSettings((s) => ({ ...s, liveSlippage: v }))} />
+                    <Text style={{ fontSize: 12 }}>max trades/day</Text>
+                    <InputNumber size="small" min={1} max={50} style={{ width: 56 }} value={settings.maxLiveTrades ?? 5} aria-label="Max live trades"
+                      onChange={(v) => v != null && setSettings((s) => ({ ...s, maxLiveTrades: v }))} />
+                    <Text style={{ fontSize: 12 }}>stop after loss ₹</Text>
+                    <InputNumber size="small" min={500} max={1000000} step={500} style={{ width: 90 }} value={settings.maxLiveLoss ?? 10000} aria-label="Max live loss"
+                      onChange={(v) => v != null && setSettings((s) => ({ ...s, maxLiveLoss: v }))} />
+                    <Text style={{ fontSize: 12 }}>today: {liveRows.length} trade(s) · <span style={{ color: liveTotal >= 0 ? UP_COLOR : DOWN_COLOR }}>₹{Math.round(liveTotal).toLocaleString('en-IN')}</span> (est.)</Text>
+                  </Space>
+                )} />
+              )}
               {paperRows.length === 0
-                ? <div><Text type="secondary" style={{ fontSize: 11 }}>B / S on a setup (or on its alert) paper-trades its ATM option - Buy the call (LONG) / put (SHORT), or Sell (write) the put (LONG) / call (SHORT). Each closes at its own Max SL / Target (option premium points), or when its setup ends - stop, target, trailing SL or {fmtHm(SQUARE_OFF)} - whichever comes first.</Text></div>
+                ? <div><Text type="secondary" style={{ fontSize: 11 }}>B / S on a setup (or on its alert) trades its ATM option - Buy the call (LONG) / put (SHORT), or Sell (write) the put (LONG) / call (SHORT). Each closes at its own Max SL / Target (option premium points), or when its setup ends - stop, target, trailing SL or {fmtHm(SQUARE_OFF)} - whichever comes first.</Text></div>
                 : paperRows.map((r) => (
                   <div key={r.key} style={{ display: 'flex', gap: 6, alignItems: 'baseline', fontSize: 12, padding: '2px 0', borderBottom: '1px solid #ffffff0d' }}>
-                    <Text type="secondary" style={{ fontSize: 11, minWidth: 38 }}>{IST_HHMM.format(new Date(r.entryTime))}</Text>
+                    <Tooltip title="Entry → exit time (IST)">
+                      <Text style={{ fontSize: 11, minWidth: 92, whiteSpace: 'nowrap' }}>
+                        <Text type="secondary" style={{ fontSize: 10 }}>In</Text> {IST_HHMM.format(new Date(r.entryTime))}{' '}
+                        <Text type="secondary" style={{ fontSize: 10 }}>Out</Text> {r.exitTime ? IST_HHMM.format(new Date(r.exitTime)) : '--:--'}
+                      </Text>
+                    </Tooltip>
+                    {r.live && <Tag color="volcano" style={{ margin: 0, fontSize: 10 }}>LIVE</Tag>}
                     <Tag color={r.action === 'BUY' ? 'green' : 'red'} style={{ margin: 0, fontSize: 11 }}>{r.action}</Tag>
-                    <span style={{ flex: 1 }}>{r.strike} {r.side} × {r.lots} <Text type="secondary" style={{ fontSize: 11 }}>@ {r.premium.toFixed(1)} → {r.current != null ? r.current.toFixed(1) : '-'} · #{STRATEGY_BY_ID[r.strategy]?.no} {STRATEGY_BY_ID[r.strategy]?.short}{r.exitTime ? ` · ${r.exitReason} ${IST_HHMM.format(new Date(r.exitTime))}` : ''}</Text></span>
+                    <span style={{ flex: 1 }}>{r.strike} {r.side} × {r.lots} <Text type="secondary" style={{ fontSize: 11 }}>@ {r.premium.toFixed(1)} → {r.current != null ? r.current.toFixed(1) : '-'} · #{STRATEGY_BY_ID[r.strategy]?.no} {STRATEGY_BY_ID[r.strategy]?.short}{r.exitReason ? ` · ${r.exitReason}` : ''}</Text>
+                      {r.live && (r.exitError || r.liveNote) && (
+                        <Tooltip title={r.exitError ?? r.liveNote}><Text type={r.exitError ? 'danger' : 'secondary'} style={{ fontSize: 10, marginLeft: 4 }}>{r.exitError ? 'exit failed - see Dhan' : 'Dhan ✓'}</Text></Tooltip>
+                      )}
+                    </span>
                     <Text style={{ fontSize: 12, color: (r.points ?? 0) >= 0 ? UP_COLOR : DOWN_COLOR, minWidth: 90, textAlign: 'right' }}>
                       {r.points == null ? '-' : `${r.points >= 0 ? '+' : ''}${r.points.toFixed(1)} · ₹${Math.round(r.rupees).toLocaleString('en-IN')}`}
                     </Text>
-                    {r.exitTime ? <Tag style={{ margin: 0, fontSize: 11 }}>closed</Tag> : <Button size="small" onClick={() => exitPaper(r.key)} style={{ height: 20, fontSize: 11 }}>Exit</Button>}
+                    {r.live
+                      ? (!r.exitSent || r.exitError
+                        ? (
+                          <Popconfirm title="Close this LIVE trade on Dhan?" description="Cancels its super order (or its SL / target legs) and exits only this trade's quantity." okButtonProps={{ danger: true }}
+                            onConfirm={() => exitLive(r, 'Exited by hand')}>
+                            <Button size="small" danger style={{ height: 20, fontSize: 11 }}>Exit</Button>
+                          </Popconfirm>
+                        )
+                        : <Tag style={{ margin: 0, fontSize: 11 }}>closed</Tag>)
+                      : (r.exitTime ? <Tag style={{ margin: 0, fontSize: 11 }}>closed</Tag> : <Button size="small" onClick={() => exitPaper(r.key)} style={{ height: 20, fontSize: 11 }}>Exit</Button>)}
                   </div>
                 ))}
-              {!isReplay && paperRows.length > 0 && <Text type="secondary" style={{ fontSize: 10 }}>Live premiums and OI stream from the Dhan websocket.</Text>}
+              {!isReplay && paperRows.length > 0 && <Text type="secondary" style={{ fontSize: 10 }}>Live premiums and OI stream from the Dhan websocket. Live trades: P&amp;L here is an estimate from the premium - the Dhan panel has the real fills.</Text>}
             </div>
           </Space>
         </Col>

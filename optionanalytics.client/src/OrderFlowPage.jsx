@@ -5,8 +5,7 @@ import { PlayCircleOutlined, PauseCircleOutlined } from '@ant-design/icons'
 import * as signalR from '@microsoft/signalr'
 import {
   NavBar, TIMEFRAME_OPTIONS, usePersistedState, RECONNECT_RETRY_POLICY, onLiveBatch, syncSignalRGroups, joinAllSignalRGroups,
-  checkForNewDeploy, UP_COLOR, DOWN_COLOR, AXIS_COLOR,
-} from './shared.jsx'
+  checkForNewDeploy, UP_COLOR, DOWN_COLOR, AXIS_COLOR, useAuth } from './shared.jsx'
 import { aggregateBars, analyzeBars, findWalls, bucketBook, mergeLiveMinutes, replayView, replayRange, liquiditySignals, orderFlowBias, aggression, sweepSignals, pullStackSignals } from './orderFlowMath.js'
 import { TapeCard } from './OrderFlowTape.jsx'
 import { StrategyScanner } from './StrategyScanner.jsx'
@@ -174,6 +173,9 @@ export default function OrderFlowPage() {
   const [reloadNonce, setReloadNonce] = useState(0)
   const [exactDays, setExactDays] = useState(() => new Set())
   const isReplay = mode === 'replay'
+  // Live (Dhan) trading from the strategy scanner: admins, today's live view only.
+  const auth = useAuth()
+  const canTradeLive = auth?.user?.role === 'Admin' && !isReplay
 
   const changeUnderlying = (value) => { setUnderlying(value); setExpiry(null) }
 
@@ -673,7 +675,7 @@ export default function OrderFlowPage() {
         <StrategyScanner
           underlying={underlying} isReplay={isReplay} date={isReplay ? replayDate : todayKey()} view={view} replayDay={replayDay} replayMs={replayMs} range={range}
           tapePrints={tapePrints} liquidity={liquidity} pullStack={pullStack.signals} rowSize={rowSize} lotSize={lotSize} largeLots={largeLots} estimated={estimated}
-          profile={scannerProfile} oi={dayOi} oiError={dayOiError}
+          profile={scannerProfile} oi={dayOi} oiError={dayOiError} canTradeLive={canTradeLive}
         />
 
         <ProfilesCard prevDate={prevSession.data?.date} prevVp={prevVp} prevTpo={prevTpo} todayTpo={todayTpo} lastPrice={meta?.lastPrice}
