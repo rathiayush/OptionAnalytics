@@ -245,6 +245,13 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<DhanOrderUpdateFee
 builder.Services.AddSingleton<LiveTradingService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<LiveTradingService>());
 
+// Order flow (footprint, delta, depth heatmap, icebergs) for each underlying's nearest futures - see
+// OrderFlowService. DhanDepthFeedClient is Dhan's separate 20-level depth socket.
+builder.Services.AddSingleton<DhanDepthFeedClient>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<DhanDepthFeedClient>());
+builder.Services.AddSingleton<OptionAnalytics.Server.Services.OrderFlow.OrderFlowService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<OptionAnalytics.Server.Services.OrderFlow.OrderFlowService>());
+
 // Keeps OI Replay's own "today, live" mode genuinely live over the same shared Dhan WS feed -
 // see OiReplayLiveFeedService's own doc comment.
 builder.Services.AddHostedService<OiReplayLiveFeedService>();

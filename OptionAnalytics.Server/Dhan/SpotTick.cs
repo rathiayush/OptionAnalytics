@@ -24,4 +24,13 @@ public sealed record SpotTick(
     decimal BestBidPrice,
     decimal BestAskPrice,
     long OpenInterest,
-    DateTimeOffset ExchangeTimestamp);
+    DateTimeOffset ExchangeTimestamp)
+{
+    /// <summary>See DhanPacket's members of the same names. Depth is the Full packet's 5 levels;
+    /// instruments on the 20-level depth socket get their deeper book from DhanDepthFeedClient.</summary>
+    public int LastTradedQty { get; init; }
+    public long TotalBuyQty { get; init; }
+    public long TotalSellQty { get; init; }
+    public DepthLevel[]? Bids { get; init; }
+    public DepthLevel[]? Asks { get; init; }
+}

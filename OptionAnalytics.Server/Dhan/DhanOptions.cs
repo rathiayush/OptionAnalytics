@@ -57,6 +57,9 @@ public sealed class DhanOptions
     /// DhanOrderUpdateFeed). Live trading refreshes positions off it instead of polling.</summary>
     public string OrderUpdateWsUrl { get; set; } = "wss://api-order-update.dhan.co";
 
+    /// <summary>Dhan's 20-level market depth socket - see DhanDepthFeedClient.</summary>
+    public string DepthWsUrl { get; set; } = "wss://depth-api-feed.dhan.co/twentydepth";
+
     /// <summary>The compact instrument dump - the only one of Dhan's two scrip master files with
     /// a per-contract trading symbol column.</summary>
     public string ScripMasterUrl { get; set; } = "https://images.dhan.co/api-data/api-scrip-master.csv";

@@ -30,7 +30,22 @@ public readonly record struct DhanPacket(
     decimal BestAskPrice,
     long OpenInterest,
     DateTimeOffset ExchangeTimestamp,
-    int DisconnectCode);
+    int DisconnectCode)
+{
+    /// <summary>Quantity of the last trade (Quote/Full bytes 12-13). Several trades between two
+    /// packets show only the last one's size - order flow uses the cumulative Volume delta instead and
+    /// this only as a fallback.</summary>
+    public int LastTradedQty { get; init; }
+    /// <summary>Total pending buy / sell quantity across the whole book (Quote/Full bytes 30-33 / 26-29).</summary>
+    public long TotalBuyQty { get; init; }
+    public long TotalSellQty { get; init; }
+    /// <summary>The Full packet's 5-level market depth, best first - null for other packet kinds.</summary>
+    public DepthLevel[]? Bids { get; init; }
+    public DepthLevel[]? Asks { get; init; }
+}
+
+/// <summary>One price level of market depth: price, total resting quantity and number of orders.</summary>
+public readonly record struct DepthLevel(decimal Price, long Quantity, int Orders);
 
 /// <summary>
 /// Parses DhanHQ v2's binary market-data protocol. Ported from LiveSpreadCalculator's
@@ -132,6 +147,9 @@ public static class DhanTickPacketParser
                     LastPrice = ReadPrice(packet.Slice(8, 4)),
                     ExchangeTimestamp = ReadEpoch(packet.Slice(14, 4), now),
                     Volume = BinaryPrimitives.ReadUInt32LittleEndian(packet.Slice(22, 4)),
+                    LastTradedQty = BinaryPrimitives.ReadUInt16LittleEndian(packet.Slice(12, 2)),
+                    TotalSellQty = BinaryPrimitives.ReadUInt32LittleEndian(packet.Slice(26, 4)),
+                    TotalBuyQty = BinaryPrimitives.ReadUInt32LittleEndian(packet.Slice(30, 4)),
                     Open = ReadPrice(packet.Slice(34, 4)),
                     Close = ReadPrice(packet.Slice(38, 4)),
                     High = ReadPrice(packet.Slice(42, 4)),
@@ -150,8 +168,14 @@ public static class DhanTickPacketParser
                 // 34-38 (uint32 LE) are open interest - see this file's own doc comment above.
                 if (packet.Length < 162) return false;
                 var (bid, ask) = ReadBestBidAsk(packet, FullDepthOffset);
+                var (bids, asks) = ReadDepth(packet, FullDepthOffset);
                 result = New(kind, securityId, exchangeSegment) with
                 {
+                    LastTradedQty = BinaryPrimitives.ReadUInt16LittleEndian(packet.Slice(12, 2)),
+                    TotalSellQty = BinaryPrimitives.ReadUInt32LittleEndian(packet.Slice(26, 4)),
+                    TotalBuyQty = BinaryPrimitives.ReadUInt32LittleEndian(packet.Slice(30, 4)),
+                    Bids = bids,
+                    Asks = asks,
                     LastPrice = ReadPrice(packet.Slice(8, 4)),
                     ExchangeTimestamp = ReadEpoch(packet.Slice(14, 4), now),
                     Volume = BinaryPrimitives.ReadUInt32LittleEndian(packet.Slice(22, 4)),
@@ -203,6 +227,25 @@ public static class DhanTickPacketParser
         var bid = ReadPrice(packet.Slice(depthOffset + 12, 4));
         var ask = ReadPrice(packet.Slice(depthOffset + 16, 4));
         return (bid, ask);
+    }
+
+    /// <summary>All 5 depth entries (bidQty uint32, askQty uint32, bidOrders uint16, askOrders uint16,
+    /// bidPrice float32, askPrice float32), skipping empty levels.</summary>
+    private static (DepthLevel[] Bids, DepthLevel[] Asks) ReadDepth(ReadOnlySpan<byte> packet, int depthOffset)
+    {
+        var bids = new List<DepthLevel>(5);
+        var asks = new List<DepthLevel>(5);
+        for (var i = 0; i < 5; i++)
+        {
+            var at = depthOffset + i * DepthEntryLength;
+            if (packet.Length < at + DepthEntryLength) break;
+            var entry = packet.Slice(at, DepthEntryLength);
+            var bidPrice = ReadPrice(entry.Slice(12, 4));
+            var askPrice = ReadPrice(entry.Slice(16, 4));
+            if (bidPrice > 0) bids.Add(new DepthLevel(bidPrice, BinaryPrimitives.ReadUInt32LittleEndian(entry.Slice(0, 4)), BinaryPrimitives.ReadUInt16LittleEndian(entry.Slice(8, 2))));
+            if (askPrice > 0) asks.Add(new DepthLevel(askPrice, BinaryPrimitives.ReadUInt32LittleEndian(entry.Slice(4, 4)), BinaryPrimitives.ReadUInt16LittleEndian(entry.Slice(10, 2))));
+        }
+        return (bids.ToArray(), asks.ToArray());
     }
 
     private static decimal ReadPrice(ReadOnlySpan<byte> bytes)
