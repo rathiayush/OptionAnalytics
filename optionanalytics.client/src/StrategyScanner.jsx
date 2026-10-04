@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Alert, Button, Card, Checkbox, Col, Popconfirm, Progress, Row, Segmented, Space, Switch, Table, Tag, Tooltip, Typography, notification } from 'antd'
+import { Alert, Button, Card, Checkbox, Col, InputNumber, Popconfirm, Progress, Row, Segmented, Space, Switch, Table, Tag, Tooltip, Typography, notification } from 'antd'
 import { SoundOutlined } from '@ant-design/icons'
 import { UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import {
   STRATEGIES, STRATEGY_BY_ID, buildOiContext, evaluateStrategies, simulateOutcome, strategyStats, topFifteen, MIN_TRADES_TO_RANK, oiSummary, optionOiText,
+  DEFAULT_TRAIL, LAST_ENTRY, SQUARE_OFF, fmtHm, exitLabel,
 } from './strategyEngine.js'
 import { aggregateBars, analyzeBars, findWalls, liquiditySignals, pullStackSignals, replayView } from './orderFlowMath.js'
 
@@ -72,6 +73,10 @@ function upTo(prints, ms) {
   return prints.slice(0, lo)
 }
 
+// The trailing stop a new setup gets from the scanner's settings (null = a fixed stop).
+const trailFor = (cfg) => (cfg.trail?.on === false ? null : { startR: cfg.trail?.startR ?? DEFAULT_TRAIL.startR, gapR: cfg.trail?.gapR ?? DEFAULT_TRAIL.gapR })
+const trailText = (trail) => (trail ? `trailing SL: after +${trail.startR}R the stop follows ${trail.gapR}R behind the best price` : 'fixed SL')
+
 function fmtR(r) {
   return r == null ? '-' : `${r >= 0 ? '+' : ''}${r.toFixed(2)}R`
 }
@@ -84,7 +89,7 @@ function fmtR(r) {
  */
 export function StrategyScanner({ underlying, isReplay, date, view, replayDay, replayMs, range, tapePrints, liquidity, pullStack, rowSize, lotSize, largeLots, estimated, profile }) {
   const [settings, setSettings] = useState(() => {
-    const saved = { alerts: true, sound: true, voice: true, pick: 'top15', custom: [], ...readJson(SETTINGS_KEY, {}) }
+    const saved = { alerts: true, sound: true, voice: true, pick: 'top15', custom: [], trail: { on: true, ...DEFAULT_TRAIL }, ...readJson(SETTINGS_KEY, {}) }
     // Older saved settings used 'top5' (from when there were only the first 10).
     return saved.pick === 'top5' ? { ...saved, pick: 'top15' } : saved
   })
@@ -160,6 +165,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       book: view.book, walls: findWalls(view.book), liquidity, pullStack, sweeps: view.sweeps, icebergs: view.icebergs, oi, estimated, lotSize, bigLots: largeLots, profile,
     })
     const fresh = setups.filter((s) => !firedRef.current.some((f) => f.id === s.id && f.side === s.side && s.t - f.t < COOLDOWN_MS))
+      .map((s) => ({ ...s, trail: trailFor(settingsRef.current) }))
     if (!fresh.length) return
     firedRef.current = [...firedRef.current, ...fresh]
     setFired(firedRef.current)
@@ -175,6 +181,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
         description: (
           <div style={{ fontSize: 12 }}>
             <div>{IST_HHMM.format(new Date(s.t))} · futures {s.entry.toFixed(1)} · stop {s.stop.toFixed(1)} · target {s.target.toFixed(1)} · {s.confidence}%</div>
+            <div>{trailText(s.trail)}{s.trail ? ` (from ${(s.entry + (s.side === 'LONG' ? 1 : -1) * s.trail.startR * Math.abs(s.entry - s.stop)).toFixed(1)})` : ''} · closed by {fmtHm(SQUARE_OFF)} at the latest</div>
             {Object.entries(s.checks).map(([k, v]) => <div key={k}><b>{k}:</b> {v}</div>)}
           </div>
         ),
@@ -189,19 +196,45 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     [fired, view?.minuteBars, nowMs],
   )
 
-  // Every alerted setup is followed to its end: when its target, stop-loss or time stop is hit, another
-  // alert says so (sound, the name spoken, a notification) - a hands-free day-trading loop.
+  // Every alerted setup is followed to its end: when its target, stop-loss (fixed or trailed) or time
+  // stop / the 15:10 cut-off is hit, another alert says so (sound, the name spoken, a notification), and
+  // while it runs, each time the trailing stop moves up by half a risk unit or more an alert gives the new
+  // stop - a hands-free day-trading loop.
   const closedRef = useRef(new Set())
-  useEffect(() => { closedRef.current = new Set() }, [dayKey, isReplay])
+  const trailAlertRef = useRef(new Map())
+  useEffect(() => { closedRef.current = new Set(); trailAlertRef.current = new Map() }, [dayKey, isReplay])
   useEffect(() => {
     const cfg = settingsRef.current
     for (const s of withOutcome) {
       const key = `${s.id}-${s.t}`
+      if (s.outcome.status === 'open' && s.outcome.trailed && !closedRef.current.has(key)) {
+        const risk = Math.abs(s.entry - s.stop)
+        const last = trailAlertRef.current.get(key) ?? s.stop
+        if (Math.abs(s.outcome.stop - last) < 0.5 * risk - 1e-9) continue
+        trailAlertRef.current.set(key, s.outcome.stop)
+        if (!cfg.alerts || !alertIdsRef.current.includes(s.id)) continue
+        const meta = STRATEGY_BY_ID[s.id]
+        const dir = s.side === 'LONG' ? 1 : -1
+        const locked = (dir * (s.outcome.stop - s.entry)) / risk
+        const what = Math.abs(locked) < 0.005 ? 'to breakeven' : `to ${s.outcome.stop.toFixed(1)}`
+        if (cfg.sound) chime(true)
+        if (cfg.voice) speak(`Trail stop ${Math.abs(locked) < 0.005 ? 'to breakeven' : ''}. ${meta.short}.`)
+        notification.open({
+          key: `${key}-trail`, placement: 'topRight', duration: 12,
+          message: <span style={{ fontWeight: 700 }}>Move SL {what} · #{meta.no} {meta.name} · {s.side}</span>,
+          description: (
+            <div style={{ fontSize: 12 }}>
+              entry {s.entry.toFixed(1)} · new stop <b>{s.outcome.stop.toFixed(1)}</b> (was {last.toFixed(1)}) · locks {fmtR(locked)} · target {s.target.toFixed(1)}
+            </div>
+          ),
+        })
+        continue
+      }
       if (s.outcome.status === 'open' || closedRef.current.has(key)) continue
       closedRef.current.add(key)
       if (!cfg.alerts || !alertIdsRef.current.includes(s.id)) continue
       const meta = STRATEGY_BY_ID[s.id]
-      const hit = s.outcome.timeStop ? 'Time exit' : s.outcome.status === 'win' ? 'Target hit' : 'Stop loss hit'
+      const hit = exitLabel(s.outcome)
       const good = s.outcome.r > 0
       if (cfg.sound) chime(good)
       if (cfg.voice) speak(`${hit}. ${meta.short}. ${good ? 'Plus' : 'Minus'} ${Math.abs(s.outcome.r).toFixed(1)} R.`)
@@ -211,7 +244,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
         description: (
           <div style={{ fontSize: 12 }}>
             entry {s.entry.toFixed(1)} at {IST_HHMM.format(new Date(s.t))} · {s.outcome.exitAt ? `exit ${IST_HHMM.format(new Date(s.outcome.exitAt))} · ` : ''}
-            stop {s.stop.toFixed(1)} · target {s.target.toFixed(1)} · <b>{fmtR(s.outcome.r)}</b>
+            stop {s.outcome.trailed ? `${s.outcome.stop.toFixed(1)} (trailed from ${s.stop.toFixed(1)})` : s.stop.toFixed(1)} · target {s.target.toFixed(1)} · <b>{fmtR(s.outcome.r)}</b>
           </div>
         ),
       })
@@ -256,7 +289,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
             book: v.book, liquidity: liq, pullStack: ps.signals, sweeps: v.sweeps, icebergs: v.icebergs, oi, estimated, lotSize, bigLots: largeLots, profile,
           })
           for (const s of setups) {
-            if (!found.some((f) => f.id === s.id && f.side === s.side && s.t - f.t < COOLDOWN_MS)) found.push(s)
+            if (!found.some((f) => f.id === s.id && f.side === s.side && s.t - f.t < COOLDOWN_MS)) found.push({ ...s, trail: trailFor(settingsRef.current) })
           }
         }
         if (i % 10 === 0) {
@@ -334,6 +367,21 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                   { value: 'custom', label: 'My choice' },
                 ]} />
             </Space>
+            <Space wrap size={8} aria-label="Exits">
+              <Space size={4}><Switch size="small" checked={settings.trail?.on !== false} onChange={(v) => setSettings((s) => ({ ...s, trail: { ...DEFAULT_TRAIL, ...s.trail, on: v } }))} /><Text style={{ fontSize: 12 }}>Trailing SL</Text></Space>
+              {settings.trail?.on !== false && (
+                <>
+                  <Text style={{ fontSize: 12 }}>after +</Text>
+                  <InputNumber size="small" min={0.25} max={5} step={0.25} style={{ width: 70 }} value={settings.trail?.startR ?? DEFAULT_TRAIL.startR} aria-label="Trail starts at R"
+                    onChange={(v) => v != null && setSettings((s) => ({ ...s, trail: { ...DEFAULT_TRAIL, ...s.trail, startR: v } }))} />
+                  <Text style={{ fontSize: 12 }}>R, follow</Text>
+                  <InputNumber size="small" min={0.25} max={5} step={0.25} style={{ width: 70 }} value={settings.trail?.gapR ?? DEFAULT_TRAIL.gapR} aria-label="Trail distance in R"
+                    onChange={(v) => v != null && setSettings((s) => ({ ...s, trail: { ...DEFAULT_TRAIL, ...s.trail, gapR: v } }))} />
+                  <Text style={{ fontSize: 12 }}>R behind</Text>
+                </>
+              )}
+              <Text type="secondary" style={{ fontSize: 12 }}>Entries 09:30-{fmtHm(LAST_ENTRY)} · every trade closed by <b>{fmtHm(SQUARE_OFF)}</b></Text>
+            </Space>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: '2px 10px' }}>
               {STRATEGIES.map((s) => (
                 <Checkbox key={s.id} checked={alertIds.includes(s.id)} disabled={settings.pick !== 'custom'} onChange={(e) => toggleCustom(s.id, e.target.checked)} style={{ fontSize: 12 }}>
@@ -363,10 +411,12 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                       <div style={{ display: 'flex', gap: 6, alignItems: 'baseline', fontSize: 12, padding: '3px 0', borderBottom: '1px solid #ffffff0d' }}>
                         <Text type="secondary" style={{ fontSize: 11, minWidth: 38 }}>{IST_HHMM.format(new Date(s.t))}</Text>
                         <Tag color={s.side === 'LONG' ? 'green' : 'red'} style={{ margin: 0, fontSize: 11 }}>{s.side}</Tag>
-                        <span style={{ flex: 1 }}>#{meta.no} {meta.short} <Text type="secondary" style={{ fontSize: 11 }}>@ {s.entry.toFixed(1)} · SL {s.stop.toFixed(1)} · T {s.target.toFixed(1)} · {s.confidence}%{s.estimated ? ' · est.' : ''}</Text></span>
-                        <Tag color={o.status === 'win' ? 'success' : o.status === 'loss' ? 'error' : 'processing'} style={{ margin: 0, fontSize: 11 }}>
-                          {o.status === 'open' ? `open ${fmtR(o.r)}` : `${o.status} ${fmtR(o.r)}${o.timeStop ? ' (time)' : ''}`}
-                        </Tag>
+                        <span style={{ flex: 1 }}>#{meta.no} {meta.short} <Text type="secondary" style={{ fontSize: 11 }}>@ {s.entry.toFixed(1)} · SL {o.trailed ? <>{s.stop.toFixed(1)} → <b>{o.stop.toFixed(1)}</b></> : s.stop.toFixed(1)}{s.trail ? ' (trail)' : ''} · T {s.target.toFixed(1)} · {s.confidence}%{s.estimated ? ' · est.' : ''}</Text></span>
+                        <Tooltip title={exitLabel(o)}>
+                          <Tag color={o.status === 'win' ? 'success' : o.status === 'loss' ? 'error' : o.status === 'flat' ? 'default' : 'processing'} style={{ margin: 0, fontSize: 11 }}>
+                            {o.status === 'open' ? `open ${fmtR(o.r)}` : `${o.status} ${fmtR(o.r)}${o.squareOff ? ` (${fmtHm(SQUARE_OFF)})` : o.timeStop ? ' (time)' : o.stopHit && o.trailed ? ' (trail)' : ''}`}
+                          </Tag>
+                        </Tooltip>
                       </div>
                     </Tooltip>
                   )
@@ -378,8 +428,8 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
           <Table size="small" pagination={false} columns={statColumns} dataSource={statRows} scroll={{ x: 560 }} />
           <Text type="secondary" style={{ fontSize: 11 }}>
             {days.length} day(s) scored ({days.filter((d) => d.estimated).length} estimated). Ranked by average R per trade (win rate × size of the wins), shrunk for small samples;
-            {' '}a strategy needs {MIN_TRADES_TO_RANK}+ trades to be ranked - until enough are, the playbook&apos;s picks fill each group's top 5 (OI + order flow, and profile). A strategy losing on average is never alerted. Every alert carries its stop-loss and target, and a second alert follows when either is hit. Outcomes are the FUTURES move to
-            {' '}the setup&apos;s stop / target / time stop (stop counted first when one minute touches both), not option P&amp;L; past results do not promise future ones.
+            {' '}a strategy needs {MIN_TRADES_TO_RANK}+ trades to be ranked - until enough are, the playbook&apos;s picks fill each group's top 5 (OI + order flow, and profile). A strategy losing on average is never alerted. Every alert carries its stop-loss and target, a trailing-SL alert gives each new stop, and another alert follows when the stop, target or the {fmtHm(SQUARE_OFF)} cut-off ends the trade. Outcomes are the FUTURES move to
+            {' '}the setup&apos;s stop (trailed as set when it fired) / target / time stop, closed by {fmtHm(SQUARE_OFF)} at the latest (stop counted first when one minute touches both), not option P&amp;L; past results do not promise future ones.
           </Text>
         </Col>
       </Row>
