@@ -394,8 +394,8 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       {oiNow && (
         <div style={{ fontSize: 12, marginBottom: 8, padding: '6px 8px', border: '1px solid #ffffff1f', borderRadius: 6, display: 'flex', flexWrap: 'wrap', gap: '4px 16px' }} aria-label="OI now">
           <span><Text strong style={{ fontSize: 12 }}>Options OI</Text>{' '}
-            <span style={{ color: oiNow.options?.lean > 0.002 ? UP_COLOR : oiNow.options?.lean < -0.002 ? DOWN_COLOR : undefined }}>
-              {oiNow.options?.lean > 0.002 ? 'put writing leads (bullish)' : oiNow.options?.lean < -0.002 ? 'call writing leads (bearish)' : 'balanced'}
+            <span style={{ color: oiNow.options?.combined >= 0.25 ? UP_COLOR : oiNow.options?.combined <= -0.25 ? DOWN_COLOR : undefined }}>
+              {oiNow.options?.combined >= 0.25 ? 'put writing leads (bullish)' : oiNow.options?.combined <= -0.25 ? 'call writing leads (bearish)' : 'balanced'}
             </span> · {optionOiText(oiNow.options)}</span>
           <span>Walls: support <b style={{ color: UP_COLOR }}>{oiNow.support ?? '-'}</b>{oiNow.supportChg != null ? ` (${oiNow.supportChg >= 0 ? '+' : ''}${(oiNow.supportChg / 1e5).toFixed(1)}L)` : ''}
             {' '}· resistance <b style={{ color: DOWN_COLOR }}>{oiNow.resistance ?? '-'}</b>{oiNow.resistanceChg != null ? ` (${oiNow.resistanceChg >= 0 ? '+' : ''}${(oiNow.resistanceChg / 1e5).toFixed(1)}L)` : ''}

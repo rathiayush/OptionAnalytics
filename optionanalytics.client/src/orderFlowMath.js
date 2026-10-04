@@ -501,8 +501,8 @@ export function liquiditySignals({ columns, trades = [], minuteBars = [], rowSiz
 //   absorption / exhaustion (last 15 bars)                  15
 //   liquidity signals (last 15 min, by confidence)          15
 //   big orders (last 15 min: buy - sell quantity)           10
-//   options OI (near-ATM put vs call writing, PCR, 15 min)   20   - passed in `extra`
-//   futures OI (15-min price / OI regime)                    15   - passed in `extra`
+//   options OI, whole chain (since open 15 + 15 min 10)      25   - passed in `extra`
+//   futures OI (since open 10 + 15 min 10)                   20   - passed in `extra`
 // Confidence is how far from neutral the total is, scaled by how many parts agree on its side.
 export function orderFlowBias({ bars = [], liquidity = [], bigTrades = [], nowMs = Date.now(), aggressionNow = null, sweeps = [], pullStack = [], extra = [] }) {
   const parts = []

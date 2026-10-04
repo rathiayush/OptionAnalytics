@@ -110,7 +110,7 @@ function OrderFlowRead({ bias }) {
         </div>
       ))}
       <Text type="secondary" style={{ fontSize: 10 }}>
-        Weighted: cumulative delta 30, options OI 20 (near-ATM put vs call writing, PCR), futures OI 15 (build-up / covering / unwinding), recent delta 15, stacked imbalances 15, absorption/exhaustion 15, aggression 15, liquidity signals 15, big orders 10, sweeps 10, pulling/stacking 10 - over the parts that have data. Confidence rises when they agree. A read, not advice.
+        Weighted: cumulative delta 30, options OI over the whole chain 25 (since open 15 + last 15 min 10: put vs call writing, PCR), futures OI 20 (since open 10 + 15 min 10: build-up / covering / unwinding), recent delta 15, stacked imbalances 15, absorption/exhaustion 15, aggression 15, liquidity signals 15, big orders 10, sweeps 10, pulling/stacking 10 - over the parts that have data. Confidence rises when they agree. A read, not advice.
       </Text>
     </Card>
   )
