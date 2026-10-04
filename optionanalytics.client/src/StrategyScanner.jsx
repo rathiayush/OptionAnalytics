@@ -91,8 +91,10 @@ function fmtR(r) {
  */
 export function StrategyScanner({ underlying, isReplay, date, view, replayDay, replayMs, range, tapePrints, liquidity, pullStack, rowSize, lotSize, largeLots, estimated, profile, oi, oiError }) {
   const [settings, setSettings] = useState(() => {
-    const saved = { alerts: true, sound: true, voice: true, pick: 'top15', custom: [], trail: { on: true, ...DEFAULT_TRAIL }, autoPaper: 'off', paperLots: 1, ...readJson(SETTINGS_KEY, {}) }
+    const saved = { alerts: true, sound: true, voice: true, pick: 'top15', custom: [], trail: { on: true, ...DEFAULT_TRAIL }, autoPaper: 'sell', paperLots: 1, ...readJson(SETTINGS_KEY, {}) }
     // Older saved settings used 'top5' (from when there were only the first 10).
+    // Every alert paper-sells its option by default (settings saved before that default had 'off').
+    if (!saved.autoPaperSellDefault) Object.assign(saved, { autoPaper: 'sell', autoPaperSellDefault: true })
     return saved.pick === 'top5' ? { ...saved, pick: 'top15' } : saved
   })
   useEffect(() => writeJson(SETTINGS_KEY, settings), [settings])
@@ -182,9 +184,11 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     for (const s of fresh) {
       if (!cfg.alerts || !alertIdsRef.current.includes(s.id)) continue
       const meta = STRATEGY_BY_ID[s.id]
-      if (cfg.autoPaper === 'buy' || cfg.autoPaper === 'sell') punchRef.current?.(s, cfg.autoPaper, s.t)
+      // The moment it alerts, the option is paper-punched (the sell side by default).
+      const autoTrade = (cfg.autoPaper === 'buy' || cfg.autoPaper === 'sell') ? s.options?.[cfg.autoPaper] : null
+      if (autoTrade) punchRef.current?.(s, cfg.autoPaper, s.t)
       if (cfg.sound) chime(s.side === 'LONG')
-      if (cfg.voice) speak(`${meta.short}. ${s.side === 'LONG' ? 'Long' : 'Short'}.`)
+      if (cfg.voice) speak(`${meta.short}. ${s.side === 'LONG' ? 'Long' : 'Short'}.${autoTrade ? ` ${autoTrade.action === 'SELL' ? 'Sold' : 'Bought'} ${autoTrade.strike} ${autoTrade.side === 'CE' ? 'call' : 'put'}.` : ''}`)
       notification.open({
         key: `${s.id}-${s.t}`, placement: 'topRight', duration: 12,
         message: <span style={{ color: s.side === 'LONG' ? UP_COLOR : DOWN_COLOR, fontWeight: 700 }}>#{meta.no} {meta.name} · {s.side}</span>,
@@ -195,7 +199,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
             {s.options && (
               <div style={{ margin: '4px 0' }}>
                 <b>Option:</b> {[optionTradeText(s.options.buy), optionTradeText(s.options.sell)].filter(Boolean).join(' · or ')}
-                {cfg.autoPaper !== 'off' && <Text type="secondary" style={{ fontSize: 11 }}> · paper {cfg.autoPaper === 'sell' ? 'sell' : 'buy'} punched</Text>}
+                {autoTrade && <Text strong style={{ fontSize: 11, color: autoTrade.action === 'SELL' ? DOWN_COLOR : UP_COLOR }}> · paper {autoTrade.action === 'SELL' ? 'SOLD' : 'BOUGHT'} {autoTrade.strike} {autoTrade.side}</Text>}
                 {cfg.autoPaper === 'off' && (
                   <span style={{ marginLeft: 6 }}>
                     {s.options.buy && <Button size="small" type="link" style={{ padding: '0 4px', height: 18 }} onClick={() => punchRef.current?.(s, 'buy', s.t)}>Paper buy {s.options.buy.side}</Button>}
@@ -491,7 +495,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
               <Space wrap size={8} style={{ marginBottom: 4 }}>
                 <Text strong style={{ fontSize: 12 }}>Paper option trades</Text>
                 <Text style={{ fontSize: 12 }}>on each alert</Text>
-                <Segmented size="small" value={settings.autoPaper ?? 'off'} onChange={(v) => setSettings((s) => ({ ...s, autoPaper: v }))}
+                <Segmented size="small" value={settings.autoPaper ?? 'sell'} onChange={(v) => setSettings((s) => ({ ...s, autoPaper: v }))}
                   options={[{ value: 'off', label: 'Off' }, { value: 'buy', label: 'Buy option' }, { value: 'sell', label: 'Sell option' }]} />
                 <InputNumber size="small" min={1} max={100} style={{ width: 64 }} value={settings.paperLots ?? 1} aria-label="Paper lots"
                   onChange={(v) => v != null && setSettings((s) => ({ ...s, paperLots: v }))} />
