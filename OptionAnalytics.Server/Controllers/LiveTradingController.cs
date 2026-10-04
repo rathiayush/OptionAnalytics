@@ -70,6 +70,15 @@ public sealed class LiveTradingController : ControllerBase
         return result.Success ? Ok(result) : UnprocessableEntity(result);
     }
 
+    /// <summary>Cancels every open order (and the open positions' stop-loss / target legs) without closing anything.</summary>
+    [HttpPost("orders/cancel-all")]
+    public async Task<ActionResult<ManualOrderResult>> CancelAll(CancellationToken cancellationToken)
+    {
+        _logger.LogWarning("{User} requested CANCEL ALL open orders.", User.Identity?.Name);
+        var result = await _trading.CancelAllOrdersAsync(CancellationToken.None);
+        return result.Success ? Ok(result) : UnprocessableEntity(result);
+    }
+
     [HttpPost("exit-all")]
     public async Task<ActionResult<ManualOrderResult>> ExitAll([FromBody] CloseRequest request, CancellationToken cancellationToken)
     {

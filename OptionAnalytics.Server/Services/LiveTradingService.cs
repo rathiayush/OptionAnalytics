@@ -32,6 +32,11 @@ public sealed class LiveTradingService : BackgroundService
     private static readonly TimeSpan ExitCheckInterval = TimeSpan.FromSeconds(2);
     private const int MaxExitAttempts = 6;
     private static readonly string[] PendingStatuses = { "PENDING", "TRANSIT", "PART_TRADED" };
+    private static readonly string[] FinishedStatuses = { "TRADED", "CANCELLED", "REJECTED", "EXPIRED", "CLOSED" };
+    /// <summary>Still working at the exchange - anything not finished (a status Dhan adds later, such as a
+    /// triggered stop-loss, still counts as open, so no open order can go missing from the panel).</summary>
+    internal static bool IsOpenStatus(string? status) =>
+        !string.IsNullOrWhiteSpace(status) && !FinishedStatuses.Contains(status.Trim().ToUpperInvariant());
     /// <summary>A stop-loss order an EARLIER version of partial exit placed to protect the rest of a
     /// position, its tag carrying the target ("OIRP-T{target in paise}-..." - see TargetFromTag). No longer
     /// placed (a partial exit now leaves the super order as it is); any still working today keep being
@@ -601,20 +606,20 @@ public sealed class LiveTradingService : BackgroundService
         var superIds = orders.Select(o => o.OrderId).ToHashSet();
         var superTags = orders.Select(o => o.CorrelationId).Where(t => !string.IsNullOrEmpty(t)).ToHashSet();
         var pending = orders
-            .Where(o => PendingStatuses.Contains(o.OrderStatus))
+            .Where(o => IsOpenStatus(o.OrderStatus))
             .Select(o => new LivePendingOrder(o.OrderId, o.SecurityId, SymbolOf(o.SecurityId),
                 o.TransactionType, o.Quantity - (o.FilledQty ?? 0), o.Price, o.TargetPrice, o.StopLossPrice, o.OrderStatus) { Kind = "Entry", Leg = "ENTRY_LEG" })
             .Concat(orders
                 .Where(o => o.OrderStatus is "TRADED" or "PART_TRADED")
                 .SelectMany(o => o.LegDetails
-                    .Where(l => l.LegName is "TARGET_LEG" or "STOP_LOSS_LEG" && l.OrderStatus == "PENDING")
+                    .Where(l => l.LegName is "TARGET_LEG" or "STOP_LOSS_LEG" && IsOpenStatus(l.OrderStatus))
                     .Select(l => new LivePendingOrder(o.OrderId, o.SecurityId, SymbolOf(o.SecurityId),
                         string.IsNullOrEmpty(l.TransactionType) ? (o.TransactionType == "BUY" ? "SELL" : "BUY") : l.TransactionType,
                         o.FilledQty is > 0 and var f ? f : o.Quantity, l.Price ?? 0,
                         l.LegName == "TARGET_LEG" ? l.Price : o.TargetPrice, l.LegName == "STOP_LOSS_LEG" ? l.Price : o.StopLossPrice, l.OrderStatus)
                     { Kind = l.LegName == "TARGET_LEG" ? "Target leg" : "Stop-loss leg", Leg = l.LegName })))
             .Concat(plainOrders
-                .Where(o => PendingStatuses.Contains(o.OrderStatus) && !superIds.Contains(o.OrderId) && (o.CorrelationId is null || !superTags.Contains(o.CorrelationId)))
+                .Where(o => IsOpenStatus(o.OrderStatus) && !superIds.Contains(o.OrderId) && (o.CorrelationId is null || !superTags.Contains(o.CorrelationId)))
                 .Select(o => new LivePendingOrder(o.OrderId, o.SecurityId, SymbolOf(o.SecurityId),
                     o.TransactionType, o.Quantity - o.FilledQty, o.Price, IsProtection(o) ? TargetFromTag(o.CorrelationId) : null,
                     IsProtection(o) ? o.TriggerPrice : o.TriggerPrice is > 0 ? o.TriggerPrice : null, o.OrderStatus)
@@ -779,6 +784,40 @@ public sealed class LiveTradingService : BackgroundService
         }
     }
 
+    /// <summary>Cancels every open order on the account - unfilled super orders (with their legs) and
+    /// pending plain orders - and the target / stop-loss legs and protection orders of open positions,
+    /// WITHOUT closing any position. Positions are left with no stop-loss or target.</summary>
+    public async Task<ManualOrderResult> CancelAllOrdersAsync(CancellationToken cancellationToken)
+    {
+        if (!_session.IsAuthenticated) return ManualOrderResult.Fail("not logged in to Dhan right now");
+        await _actionLock.WaitAsync(cancellationToken);
+        try
+        {
+            var (cancelled, failures) = await CancelPendingAsync(null, cancellationToken);
+            var legs = 0;
+            foreach (var order in (await _superOrders.ListAsync(cancellationToken)).Where(o => o.OrderStatus is "TRADED" or "PART_TRADED"))
+            {
+                foreach (var leg in order.LegDetails.Where(l => l.LegName is "TARGET_LEG" or "STOP_LOSS_LEG" && IsOpenStatus(l.OrderStatus)))
+                {
+                    var (result, error) = await _superOrders.CancelAsync(order.OrderId, leg.LegName, cancellationToken);
+                    if (result is null) failures.Add($"could not cancel {leg.LegName} of {order.OrderId}: {error}"); else legs++;
+                }
+            }
+            foreach (var order in (await _orders.ListAsync(cancellationToken)).Where(o => IsOpenStatus(o.OrderStatus) && (IsProtection(o) || o.CorrelationId?.StartsWith("OIRX-", StringComparison.Ordinal) == true)))
+            {
+                var (result, error) = await _orders.CancelAsync(order.OrderId, cancellationToken);
+                if (result is null) failures.Add($"could not cancel {order.OrderId}: {error}"); else cancelled++;
+            }
+            RequestRefresh();
+            var text = $"cancelled {cancelled} order(s) and {legs} stop-loss / target leg(s)";
+            return failures.Count == 0 ? new ManualOrderResult(true, text, Array.Empty<string>(), null) : ManualOrderResult.Fail($"{string.Join(" · ", failures)} · {text}");
+        }
+        finally
+        {
+            _actionLock.Release();
+        }
+    }
+
     /// <summary>Dhan's own exit-everything (DELETE /positions): every position and every open order on
     /// the account, strategy triggers' included. For when the careful Exit all is not enough.</summary>
     public async Task<ManualOrderResult> EmergencyExitAllAsync(CancellationToken cancellationToken)
@@ -801,7 +840,7 @@ public sealed class LiveTradingService : BackgroundService
         var failures = new List<string>();
         var cancelled = 0;
         var superOrders = await _superOrders.ListAsync(cancellationToken);
-        foreach (var entry in superOrders.Where(o => PendingStatuses.Contains(o.OrderStatus) && (securityId is null || o.SecurityId == securityId)))
+        foreach (var entry in superOrders.Where(o => IsOpenStatus(o.OrderStatus) && (securityId is null || o.SecurityId == securityId)))
         {
             var (result, error) = await _superOrders.CancelAsync(entry.OrderId, "ENTRY_LEG", cancellationToken);
             if (result is null) failures.Add($"could not cancel pending super order {entry.OrderId}: {error}");
@@ -810,7 +849,7 @@ public sealed class LiveTradingService : BackgroundService
         // A super order's own legs can show in the plain order book too - those go with their super order.
         var superIds = superOrders.Select(o => o.OrderId).ToHashSet();
         foreach (var order in (await _orders.ListAsync(cancellationToken)).Where(o =>
-                     PendingStatuses.Contains(o.OrderStatus) && (securityId is null || o.SecurityId == securityId) && !superIds.Contains(o.OrderId)
+                     IsOpenStatus(o.OrderStatus) && (securityId is null || o.SecurityId == securityId) && !superIds.Contains(o.OrderId)
                      && o.CorrelationId?.StartsWith("OIRX-", StringComparison.Ordinal) != true && !IsProtection(o)))
         {
             var (result, error) = await _orders.CancelAsync(order.OrderId, cancellationToken);

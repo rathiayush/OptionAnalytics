@@ -214,6 +214,33 @@ public sealed class LiveTradingPartialExitTests
     }
 
     [Fact]
+    public async Task CancelAll_CancelsEveryOrderAndLeg_ButClosesNothing()
+    {
+        var (service, dhan, _) = await CreateAsync();
+        dhan.SuperOrders.Add(PendingSuperOrder("S2", "STRAT-7"));
+        var manual = await PlacePlainAsync(dhan, "MANUAL-1");
+
+        var result = await service.CancelAllOrdersAsync(CancellationToken.None);
+
+        Assert.True(result.Success, result.Message);
+        Assert.Contains("DELETE /super/orders/S2/ENTRY_LEG", dhan.Requests);
+        Assert.Contains("DELETE /super/orders/S1/TARGET_LEG", dhan.Requests);
+        Assert.Contains("DELETE /super/orders/S1/STOP_LOSS_LEG", dhan.Requests);
+        Assert.Equal("CANCELLED", dhan.Orders[manual].Status);
+        Assert.DoesNotContain(dhan.Orders.Values, o => o.Tag.StartsWith("OIRX-")); // no exit placed
+    }
+
+    [Theory]
+    [InlineData("PENDING", true)]
+    [InlineData("TRIGGERED", true)]   // a status Dhan may add later still counts as open
+    [InlineData("part_traded", true)]
+    [InlineData("TRADED", false)]
+    [InlineData("CANCELLED", false)]
+    [InlineData("REJECTED", false)]
+    [InlineData("", false)]
+    public void OpenStatus(string status, bool open) => Assert.Equal(open, LiveTradingService.IsOpenStatus(status));
+
+    [Fact]
     public void FillPrice_IsTheNewPartOfTheAverage()
     {
         Assert.Equal(122m, LiveTradingService.FillPrice(65, 120m, Update("X", "SELL", 130, 130, avg: 121m, status: "TRADED")));
