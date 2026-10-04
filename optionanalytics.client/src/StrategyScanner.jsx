@@ -17,7 +17,9 @@ const MIN = 60_000
 // One alert per strategy and direction at most every 20 minutes - a setup that stays true is one trade.
 const COOLDOWN_MS = 20 * MIN
 const SETTINGS_KEY = 'optionanalytics.strategyScanner.settings'
-const HISTORY_KEY = 'optionanalytics.strategyScanner.history.v1'
+// v2: results saved before replays took the price at the clock (they entered every setup of a replayed
+// day at one stale price) are not carried over.
+const HISTORY_KEY = 'optionanalytics.strategyScanner.history.v2'
 const PAPER_KEY = 'optionanalytics.strategyScanner.paper.v1'
 const MAX_DAYS_KEPT = 60
 const msOf = (t) => (typeof t === 'number' ? t : new Date(t).getTime())
@@ -67,6 +69,14 @@ function speak(text) {
 function completedBars(minuteBars, nowMs, rowSize, lotSize, estimated) {
   const done = (minuteBars ?? []).filter((b) => msOf(b.time) + MIN <= nowMs)
   return analyzeBars(aggregateBars(done, 1), { rowSize, minVolume: lotSize, estimated })
+}
+
+// The futures price at the clock: the tape's last print (it has every print) when it is recent, else
+// the view's own last price.
+function priceAt(view, prints, ms, bars) {
+  const p = prints?.at(-1)
+  if (p && p.price > 0 && msOf(p.time) <= ms && msOf(p.time) >= ms - 2 * MIN) return p.price
+  return view?.meta?.lastPrice || bars.at(-1).close
 }
 
 function upTo(prints, ms) {
@@ -258,7 +268,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     const bars = completedBars(view.minuteBars, nowMs, rowSize, lotSize, estimated)
     if (bars.length < 5) return
     const setups = evaluateStrategies({
-      nowMs, price: view.meta?.lastPrice || bars.at(-1).close, bars, minuteBars: view.minuteBars, prints: estimated ? null : tapePrints,
+      nowMs, price: priceAt(view, estimated ? null : tapePrints, nowMs, bars), bars, minuteBars: view.minuteBars, prints: estimated ? null : tapePrints,
       book: view.book, walls: findWalls(view.book), liquidity, pullStack, sweeps: view.sweeps, icebergs: view.icebergs, oi, estimated, lotSize, bigLots: largeLots, profile,
     })
     const fresh = setups.filter((s) => !firedRef.current.some((f) => f.id === s.id && f.side === s.side && s.t - f.t < COOLDOWN_MS))
@@ -399,8 +409,9 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
           const cols = v.heatmap.slice(-300)
           const liq = estimated ? [] : liquiditySignals({ columns: cols, trades: v.trades, minuteBars: v.minuteBars, rowSize, lotSize })
           const ps = estimated ? { signals: [] } : pullStackSignals({ columns: cols.slice(-60), rowSize, lotSize })
+          const clockPrints = prints ? upTo(prints, clock) : null
           const setups = evaluateStrategies({
-            nowMs: clock, price: v.meta.lastPrice || bars.at(-1).close, bars, minuteBars: v.minuteBars, prints: prints ? upTo(prints, clock) : null,
+            nowMs: clock, price: priceAt(v, clockPrints, clock, bars), bars, minuteBars: v.minuteBars, prints: clockPrints,
             book: v.book, liquidity: liq, pullStack: ps.signals, sweeps: v.sweeps, icebergs: v.icebergs, oi, estimated, lotSize, bigLots: largeLots, profile,
           })
           for (const s of setups) {
@@ -482,8 +493,8 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     for (const r of paperRows) if (r.live && r.exitTime && !r.exitSent) exitLive(r, r.exitReason ?? 'Exit')
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [paperRows, isReplay])
-  // A new Max SL / Target applies to every trade still OPEN now (and to new ones); closed trades keep
-  // the levels they closed on.
+  // A new Max SL / Target - and lots, on paper - applies to every trade still OPEN now (and to new ones);
+  // closed trades keep what they closed with. A live trade's quantity is a real order: it stays.
   const levelsTimerRef = useRef(null)
   const changeLimits = (patch) => {
     setSettings((s) => ({ ...s, ...patch }))
@@ -491,7 +502,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     const open = new Set(openRows.map((r) => r.key))
     if (!open.size) return
     // Open LIVE trades: move their super order legs on Dhan too (once the typing stops).
-    const liveOpen = openRows.filter((r) => r.live && r.orderIds?.length)
+    const liveOpen = patch.paperSl != null || patch.paperTarget != null ? openRows.filter((r) => r.live && r.orderIds?.length) : []
     if (liveOpen.length) {
       clearTimeout(levelsTimerRef.current)
       levelsTimerRef.current = setTimeout(() => {
@@ -514,6 +525,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
             ...p,
             ...(patch.paperSl != null ? { slPts: patch.paperSl } : {}),
             ...(patch.paperTarget != null ? { targetPts: patch.paperTarget } : {}),
+            ...(patch.paperLots != null && !p.live ? { lots: patch.paperLots } : {}),
           } : p)),
         },
       }
@@ -670,7 +682,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                 <Segmented size="small" value={settings.autoPaper ?? 'sell'} onChange={(v) => setSettings((s) => ({ ...s, autoPaper: v }))}
                   options={[{ value: 'off', label: 'Off' }, { value: 'buy', label: 'Buy option' }, { value: 'sell', label: 'Sell option' }]} />
                 <InputNumber size="small" min={1} max={100} style={{ width: 64 }} value={settings.paperLots ?? 1} aria-label="Paper lots"
-                  onChange={(v) => v != null && setSettings((s) => ({ ...s, paperLots: v }))} />
+                  onChange={(v) => v != null && changeLimits({ paperLots: v })} />
                 <Text style={{ fontSize: 12 }}>lot(s) × {PAPER_TRADE_LOT_SIZE[underlying] ?? 1}</Text>
                 <Text style={{ fontSize: 12 }}>Max SL</Text>
                 <InputNumber size="small" min={0} max={500} step={5} style={{ width: 64 }} value={settings.paperSl ?? 20} aria-label="Paper max SL points"
@@ -678,7 +690,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                 <Text style={{ fontSize: 12 }}>Target</Text>
                 <InputNumber size="small" min={0} max={1000} step={5} style={{ width: 64 }} value={settings.paperTarget ?? 30} aria-label="Paper target points"
                   onChange={(v) => v != null && changeLimits({ paperTarget: v })} />
-                <Text type="secondary" style={{ fontSize: 11 }}>premium pts (0 = off) · a change applies to open trades too</Text>
+                <Text type="secondary" style={{ fontSize: 11 }}>premium pts (0 = off) · a change of lots / SL / target applies to open trades too; closed trades keep theirs</Text>
                 {paperRows.length > 0 && <Text strong style={{ fontSize: 12, color: paperTotal >= 0 ? UP_COLOR : DOWN_COLOR }}>P&amp;L ₹{Math.round(paperTotal).toLocaleString('en-IN')}</Text>}
                 {paperRows.some((r) => !r.live) && (
                   <Popconfirm title="Clear this day's paper trades? (Live trades stay.)" onConfirm={() => setPaperBook((prev) => {
