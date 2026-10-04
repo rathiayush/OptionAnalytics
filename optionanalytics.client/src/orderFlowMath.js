@@ -324,11 +324,17 @@ export function replayView(day, clockMs) {
         asks: [...column.asks].sort((a, b) => a[0] - b[0]).map(([price, quantity]) => ({ price, quantity, orders: 0 })),
       }
     : { bids: [], asks: [] }
+  // The price at the clock: the NEWER of the last print shown and the last completed minute's close. A
+  // replayed day holds only the big prints (an estimated day only its volume-spike minutes), so the
+  // last of those alone can be far behind - every setup would enter at that one old price.
   const lastTrade = trades.at(-1)
   const lastBar = minuteBars.at(-1)
+  const tradeAt = lastTrade ? msOf(lastTrade.time) : -Infinity
+  const barAt = lastBar ? msOf(lastBar.time) + 59_000 : -Infinity
+  const lastPrice = (tradeAt >= barAt ? lastTrade?.price : lastBar?.close) ?? lastBar?.close ?? 0
   return {
     ...day,
-    meta: { ...day.meta, lastPrice: lastTrade?.price ?? lastBar?.close ?? 0, lastTradeAt: lastTrade?.time ?? null },
+    meta: { ...day.meta, lastPrice, lastTradeAt: lastTrade?.time ?? null },
     minuteBars, trades, heatmap, icebergs, book, sweeps,
   }
 }
