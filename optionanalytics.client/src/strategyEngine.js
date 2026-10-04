@@ -77,13 +77,13 @@ export const RANGE_IDS = STRATEGIES.filter((s) => s.group === 'range').map((s) =
 
 // ---- OI context -----------------------------------------------------------------------------------
 
-function sortedSeries(points) {
+function sortedSeries(points, lag = 0) {
   const byStrike = new Map()
   for (const p of points ?? []) {
     if (p.openInterest == null) continue
     const strike = Number(p.strike)
     if (!byStrike.has(strike)) byStrike.set(strike, [])
-    byStrike.get(strike).push({ t: msOf(p.time), oi: p.openInterest, price: p.price, high: p.high ?? p.price, low: p.low ?? p.price })
+    byStrike.get(strike).push({ t: msOf(p.time) + lag, oi: p.openInterest, price: p.price, high: p.high ?? p.price, low: p.low ?? p.price })
   }
   for (const list of byStrike.values()) list.sort((a, b) => a.t - b.t)
   return byStrike
@@ -101,14 +101,23 @@ function valueAt(series, ms) {
 }
 
 // From an /api/oi-replay/{u}/run response (+ the day's expiry date, if known).
-export function buildOiContext(run, expiryDate = null) {
+//
+// Every point of a run is a 1-minute bar stamped at its START but holding its CLOSE (OI, premium,
+// price at the minute's end). A replayed day (`live` false) stamps each point at its END instead
+// (`lag`), so the replay clock - and Scan day - only ever read minutes that are over: at 12:11:00 the
+// latest reading is 12:10's close, never 12:11's, which is a minute in the future. Live, the current
+// minute's point holds the latest tick (useDayOi folds them in), so it is read as it comes.
+export function buildOiContext(run, expiryDate = null, { live = false } = {}) {
   if (!run?.success) return null
-  const futures = (run.futuresBars ?? []).map((b) => ({ t: msOf(b.time), close: b.close, oi: b.openInterest })).sort((a, b) => a.t - b.t)
-  const spot = (run.spotCandlesOneMinute ?? run.spotCandles ?? []).map((c) => ({ t: msOf(c.time), close: c.close })).sort((a, b) => a.t - b.t)
+  const lag = live ? 0 : MIN
+  const futures = (run.futuresBars ?? []).map((b) => ({ t: msOf(b.time) + lag, close: b.close, oi: b.openInterest })).sort((a, b) => a.t - b.t)
+  const spot = (run.spotCandlesOneMinute ?? run.spotCandles ?? []).map((c) => ({ t: msOf(c.time) + lag, close: c.close })).sort((a, b) => a.t - b.t)
   return {
     step: run.step || 50,
-    ce: sortedSeries(run.cePoints),
-    pe: sortedSeries(run.pePoints),
+    lag,
+    live,
+    ce: sortedSeries(run.cePoints, lag),
+    pe: sortedSeries(run.pePoints, lag),
     futures,
     spot,
     isExpiryDay: expiryDate != null && expiryDate === run.date,
@@ -260,15 +269,19 @@ export function optionStopTargetHit(oi, trade, entryMs, untilMs, slPoints, targe
   const sell = trade.action === 'SELL'
   const stop = slPoints > 0 ? (sell ? trade.premium + slPoints : trade.premium - slPoints) : null
   const target = targetPoints > 0 ? (sell ? trade.premium - targetPoints : trade.premium + targetPoints) : null
-  const firstMinute = Math.floor(entryMs / MIN) * MIN + MIN
+  // From the first FULL minute after the entry (a minute already running at the entry partly came
+  // before it); `lag`: a replayed day's points are stamped at their minute's end.
+  const lag = oi?.lag ?? 0
+  const firstMinute = Math.ceil(entryMs / MIN) * MIN
   for (const p of series) {
-    if (p.t < firstMinute) continue
-    if (p.t + MIN > untilMs) break
+    const start = p.t - lag
+    if (start < firstMinute) continue
+    if (start + MIN > untilMs) break
     const high = p.high ?? p.price
     const low = p.low ?? p.price
     if (!(high > 0)) continue
-    if (stop != null && (sell ? high >= stop : low <= stop)) return { at: p.t + MIN, premium: stop, reason: `Max SL ${slPoints} pts hit` }
-    if (target != null && (sell ? low <= target : high >= target)) return { at: p.t + MIN, premium: target, reason: `Target ${targetPoints} pts hit` }
+    if (stop != null && (sell ? high >= stop : low <= stop)) return { at: start + MIN, premium: stop, reason: `Max SL ${slPoints} pts hit` }
+    if (target != null && (sell ? low <= target : high >= target)) return { at: start + MIN, premium: target, reason: `Target ${targetPoints} pts hit` }
   }
   return null
 }
@@ -1360,7 +1373,7 @@ export function evaluateStrategies(input) {
         const ahead = roomAhead(dir)
         if (ahead && ahead.room < 1.5 * stopPts && grew(dir > 0 ? oi.ce : oi.pe, ahead.wall, 15)) continue
         const toOrigin = dir * (start.close - price)
-        const peakAt = fmtHm(istMinute(peak.t))
+        const peakAt = fmtHm(istMinute(peak.t - (oi.lag ?? 0)))
         push('oiSqueeze', dir, stopPts, Math.max(2 * stopPts, Math.min(3.5 * stopPts, toOrigin)), 40,
           64 + (sweepWith(dir) ? 6 : 0) + (stackWith(dir, 3) ? 4 : 0) + (otherChg > 0.003 * otherBase ? 4 : 0) + (fuel >= 0.008 * start.oi ? 4 : 0) + (burnt <= 0.5 ? 2 : 0), {
             OI: `futures OI +${((fuel / start.oi) * 100).toFixed(2)}% built while price went ${dir > 0 ? 'down' : 'up'} ${(Math.abs(peak.close - start.close) / start.close * 100).toFixed(2)}% (${dir > 0 ? 'shorts' : 'longs'} in) to a peak at ${peakAt}, now ${((covered / peak.oi) * 100).toFixed(2)}% off it - ${Math.round(burnt * 100)}% of the build-up covered so far`,
@@ -1415,7 +1428,12 @@ export function squareOffMs(t) {
  *  (the stop as it stood when the bar opened - a trailing stop moves after each completed bar). Closed
  *  at its time stop, and always by the 15:10 cut-off. `dayOver`: the day's data is complete (a scanned
  *  past day) - a trade still running when the data ends is closed at the last price.
- *  Returns { status: 'open' | 'win' | 'loss' | 'flat', r, mfe, stop (in force now), trailed, exitAt, timeStop }. */
+ *  Bars count from the one starting at the entry (a Scan day / Go-to entry is on the minute: the
+ *  previous minute's close); a bar already running at the entry (a live alert mid-minute) is not
+ *  counted - part of its range came before the trade. A bar OPENING beyond the stop fills at its open
+ *  (the gap), not at the stop.
+ *  Returns { status: 'open' | 'win' | 'loss' | 'flat', r, mfe, stop (in force now), trailed, exitAt
+ *  (the exit bar's start), exitPrice, timeStop }. */
 export function simulateOutcome(setup, minuteBars, untilMs, dayOver = false) {
   const dir = setup.side === 'LONG' ? 1 : -1
   const risk = Math.abs(setup.entry - setup.stop)
@@ -1429,26 +1447,27 @@ export function simulateOutcome(setup, minuteBars, untilMs, dayOver = false) {
   const state = () => ({ stop, trailed: stop !== setup.stop })
   for (const b of minuteBars) {
     const t = msOf(b.time)
-    if (t <= setup.t) continue
+    if (t < setup.t) continue
     if (t + MIN > untilMs) return { status: 'open', r: (dir * (lastClose - setup.entry)) / risk, mfe, ...state() }
     const adverse = dir > 0 ? b.low <= stop : b.high >= stop
     const favourable = dir > 0 ? b.high >= setup.target : b.low <= setup.target
     mfe = Math.max(mfe, (dir * ((dir > 0 ? b.high : b.low) - setup.entry)) / risk)
     if (adverse) {
-      const r = (dir * (stop - setup.entry)) / risk
-      return { status: statusOf(r), r, mfe, exitAt: t, stopHit: true, ...state() }
+      const fill = b.open == null ? stop : dir > 0 ? Math.min(stop, b.open) : Math.max(stop, b.open)
+      const r = (dir * (fill - setup.entry)) / risk
+      return { status: statusOf(r), r, mfe, exitAt: t, exitPrice: fill, stopHit: true, ...state() }
     }
-    if (favourable) return { status: 'win', r: rTarget, mfe, exitAt: t, ...state() }
+    if (favourable) return { status: 'win', r: rTarget, mfe, exitAt: t, exitPrice: setup.target, ...state() }
     lastClose = b.close
     best = dir > 0 ? Math.max(best, b.high) : Math.min(best, b.low)
     stop = trailedStop(setup, best)
     if (t + MIN >= timeStopMs) {
       const r = (dir * (b.close - setup.entry)) / risk
-      return { status: statusOf(r), r, mfe, exitAt: t, timeStop: true, squareOff: t + MIN >= squareOffMs(setup.t), ...state() }
+      return { status: statusOf(r), r, mfe, exitAt: t, exitPrice: b.close, timeStop: true, squareOff: t + MIN >= squareOffMs(setup.t), ...state() }
     }
   }
   const r = (dir * (lastClose - setup.entry)) / risk
-  return dayOver ? { status: statusOf(r), r, mfe, timeStop: true, ...state() } : { status: 'open', r, mfe, ...state() }
+  return dayOver ? { status: statusOf(r), r, mfe, exitPrice: lastClose, timeStop: true, ...state() } : { status: 'open', r, mfe, ...state() }
 }
 
 /** How an outcome ended, for alerts and the list. */

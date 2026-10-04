@@ -79,6 +79,17 @@ function priceAt(view, prints, ms, bars) {
   return view?.meta?.lastPrice || bars.at(-1).close
 }
 
+// A paper / live option trade's own premium stop-loss and target levels, as they stand.
+function levelsText(r, settings) {
+  const sell = r.action === 'SELL'
+  const sl = r.slPts ?? settings.paperSl ?? 20
+  const tg = r.targetPts ?? settings.paperTarget ?? 30
+  const targetLevel = sell ? r.premium - tg : r.premium + tg
+  // A SELL can make at most its whole premium: a target bigger than that is never reached.
+  const parts = [sl > 0 && `SL ${(sell ? r.premium + sl : r.premium - sl).toFixed(1)}`, tg > 0 && (targetLevel > 0 ? `T ${targetLevel.toFixed(1)}` : `T unreachable (${tg} pts > premium)`)].filter(Boolean)
+  return parts.length ? ` · ${parts.join(' / ')}` : ''
+}
+
 function upTo(prints, ms) {
   if (!prints?.length) return prints
   let lo = 0
@@ -399,7 +410,9 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
         prints = body?.prints ?? []
       }
       const found = []
-      const start = range.start + 15 * MIN
+      // On whole minutes: each setup enters at the previous minute's close and its outcome counts from
+      // the bar starting at its entry - the same as replaying to that minute.
+      const start = Math.ceil((range.start + 15 * MIN) / MIN) * MIN
       const steps = Math.max(1, Math.floor((range.end - start) / MIN))
       for (let i = 0; i <= steps; i++) {
         const clock = start + i * MIN
@@ -637,7 +650,8 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                       <div style={{ display: 'flex', gap: 6, alignItems: 'baseline', fontSize: 12, padding: '3px 0', borderBottom: '1px solid #ffffff0d' }}>
                         <Text type="secondary" style={{ fontSize: 11, minWidth: 38 }}>{IST_HHMM.format(new Date(s.t))}</Text>
                         <Tag color={s.side === 'LONG' ? 'green' : 'red'} style={{ margin: 0, fontSize: 11 }}>{s.side}</Tag>
-                        <span style={{ flex: 1 }}>#{meta.no} {meta.short} <Text type="secondary" style={{ fontSize: 11 }}>@ {s.entry.toFixed(1)} · SL {o.trailed ? <>{s.stop.toFixed(1)} → <b>{o.stop.toFixed(1)}</b></> : s.stop.toFixed(1)}{s.trail ? ' (trail)' : ''} · T {s.target.toFixed(1)} · {s.confidence}%{s.estimated ? ' · est.' : ''}</Text></span>
+                        <span style={{ flex: 1 }}>#{meta.no} {meta.short} <Text type="secondary" style={{ fontSize: 11 }}>@ {s.entry.toFixed(1)} · SL {o.trailed ? <>{s.stop.toFixed(1)} → <b>{o.stop.toFixed(1)}</b></> : s.stop.toFixed(1)}{s.trail ? ' (trail)' : ''} · T {s.target.toFixed(1)} · {s.confidence}%{s.estimated ? ' · est.' : ''}
+                          {o.status !== 'open' && o.exitPrice != null && <> · <span style={{ whiteSpace: 'nowrap' }}>out {o.exitAt != null ? IST_HHMM.format(new Date(o.exitAt)) : 'end'} @ {o.exitPrice.toFixed(1)} ({exitLabel(o)})</span></>}</Text></span>
                         {s.options && oi && (
                           <span style={{ whiteSpace: 'nowrap' }}>
                             {s.options.buy && (
@@ -746,7 +760,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                     </Tooltip>
                     {r.live && <Tag color="volcano" style={{ margin: 0, fontSize: 10 }}>LIVE</Tag>}
                     <Tag color={r.action === 'BUY' ? 'green' : 'red'} style={{ margin: 0, fontSize: 11 }}>{r.action}</Tag>
-                    <span style={{ flex: 1 }}>{r.strike} {r.side} × {r.lots} <Text type="secondary" style={{ fontSize: 11 }}>@ {r.premium.toFixed(1)} → {r.current != null ? r.current.toFixed(1) : '-'} · #{STRATEGY_BY_ID[r.strategy]?.no} {STRATEGY_BY_ID[r.strategy]?.short}{r.exitReason ? ` · ${r.exitReason}` : ''}</Text>
+                    <span style={{ flex: 1 }}>{r.strike} {r.side} × {r.lots} <Text type="secondary" style={{ fontSize: 11 }}>@ {r.premium.toFixed(1)} → {r.current != null ? r.current.toFixed(1) : '-'} · #{STRATEGY_BY_ID[r.strategy]?.no} {STRATEGY_BY_ID[r.strategy]?.short}{levelsText(r, settings)}{r.exitReason ? ` · ${r.exitReason}` : ''}</Text>
                       {r.live && (r.exitError || r.liveNote) && (
                         <Tooltip title={r.exitError ?? r.liveNote}><Text type={r.exitError ? 'danger' : 'secondary'} style={{ fontSize: 10, marginLeft: 4 }}>{r.exitError ? 'exit failed - see Dhan' : 'Dhan ✓'}</Text></Tooltip>
                       )}

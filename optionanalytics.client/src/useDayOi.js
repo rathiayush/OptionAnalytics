@@ -60,7 +60,8 @@ export function useDayOi(underlying, date, isReplay) {
           return
         }
         const expiryDate = underlying === 'BANKNIFTY' ? expiries?.month ?? null : expiries?.week ?? null
-        ctxRef.current = buildOiContext(body, expiryDate)
+        // A replayed day reads each minute once it is over; live, the current minute is the latest tick.
+        ctxRef.current = buildOiContext(body, expiryDate, { live: !isReplay })
         setState({ key, oi: ctxRef.current, error: null })
       })
       .catch((err) => { if (!cancelled) fail(err.message) })
