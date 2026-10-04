@@ -118,6 +118,67 @@ export function maxPainOf(rows) {
   return best
 }
 
+/**
+ * The OPTIONS OI read every strategy is checked against: near-ATM (7 strikes) put writing vs call
+ * writing over `minutes`, and the put-call ratio of those strikes and its change. Put writing ahead =
+ * writers expect support (bullish); call writing ahead = resistance (bearish).
+ *   lean: net writing as a share of the near-ATM OI (+ = puts written more = bullish).
+ */
+export function optionOiRead(oi, spot, ms, minutes = 15) {
+  if (!oi || !spot) return null
+  const atm = Math.round(spot / oi.step) * oi.step
+  let peNow = 0, ceNow = 0, peChg = 0, ceChg = 0, seen = 0
+  for (let k = -3; k <= 3; k++) {
+    const strike = atm + k * oi.step
+    const pe = oiOf(oi.pe, strike, ms)
+    const ce = oiOf(oi.ce, strike, ms)
+    if (pe == null || ce == null) continue
+    seen++
+    peNow += pe
+    ceNow += ce
+    peChg += oiChange(oi.pe, strike, ms, minutes) ?? 0
+    ceChg += oiChange(oi.ce, strike, ms, minutes) ?? 0
+  }
+  if (!seen || peNow + ceNow <= 0 || ceNow <= 0) return null
+  const pcr = peNow / ceNow
+  const pcrBefore = ceNow - ceChg > 0 ? (peNow - peChg) / (ceNow - ceChg) : pcr
+  return { atm, minutes, peChg, ceChg, net: peChg - ceChg, lean: (peChg - ceChg) / (peNow + ceNow), pcr, pcrChange: pcr - pcrBefore }
+}
+
+/** Options OI vs a trade's direction: 'agrees', 'neutral' or 'against'. */
+export function optionOiStance(read, dir) {
+  if (!read) return 'neutral'
+  const lean = dir * read.lean
+  const pcrMove = dir * read.pcrChange
+  if (lean >= 0.002 || (lean > 0 && pcrMove >= 0.03)) return 'agrees'
+  if (lean <= -0.004 || (lean < 0 && pcrMove <= -0.05)) return 'against'
+  return 'neutral'
+}
+
+const lakh = (v) => `${v >= 0 ? '+' : '-'}${(Math.abs(v) / 1e5).toFixed(1)}L`
+export function optionOiText(read) {
+  if (!read) return 'no options OI'
+  return `PCR ${read.pcr.toFixed(2)} (${read.pcrChange >= 0 ? '+' : ''}${read.pcrChange.toFixed(2)} in ${read.minutes}m) · near ATM ${read.atm}: puts ${lakh(read.peChg)}, calls ${lakh(read.ceChg)}`
+}
+
+/** What the scanner shows as the market's OI picture right now. */
+export function oiSummary(oi, ms) {
+  const spot = oi ? valueAt(oi.spot, ms)?.close : null
+  if (!spot) return null
+  const rows = oiRows(oi, ms)
+  const { support, resistance } = wallsAt(oi, rows, spot)
+  const f = futuresChange(oi, ms, 15)
+  const regime = !f || f.oiPct == null ? null
+    : f.pricePct >= 0 ? (f.oiPct >= 0 ? 'long build-up' : 'short covering') : (f.oiPct >= 0 ? 'short build-up' : 'long unwinding')
+  return {
+    spot, options: optionOiRead(oi, spot, ms, 15),
+    support, supportChg: support != null ? oiChange(oi.pe, support, ms, 15) : null,
+    resistance, resistanceChg: resistance != null ? oiChange(oi.ce, resistance, ms, 15) : null,
+    maxPain: maxPainOf(rows.filter((r) => Math.abs(r.strike - spot) <= 15 * oi.step)),
+    futures: f ? { ...f, regime } : null,
+  }
+}
+
 function futuresChange(oi, ms, minutes) {
   const now = valueAt(oi.futures, ms)
   const then = valueAt(oi.futures, ms - minutes * MIN)
@@ -248,13 +309,26 @@ export function evaluateStrategies(input) {
     }
   }
   const tapeText = `${tape.proxy ? 'est. ' : ''}aggression 30s ${tape.agg30}% / 1m ${tape.agg60}% buy`
+  // Options OI is checked on EVERY strategy: a trade the option writers are clearly positioned
+  // against is dropped; one they back gets a higher confidence.
+  const optionRead = optionOiRead(oi, spotNow, nowMs, 15)
+  const futuresRead = futuresChange(oi, nowMs, 15)
+  const futuresText = futuresRead?.oiPct == null ? 'no futures OI'
+    : `futures ${(futuresRead.pricePct * 100).toFixed(2)}% · OI ${futuresRead.oiPct >= 0 ? '+' : ''}${(futuresRead.oiPct * 100).toFixed(2)}% in 15m`
   const push = (id, dir, stopPts, targetPts, timeStopMin, confidence, checks) => {
     if (!(stopPts > 0) || !(targetPts > 0)) return
+    const stance = optionOiStance(optionRead, dir)
+    if (stance === 'against') return
     const timeStop = Math.min(nowMs + timeStopMin * MIN, nowMs + (EOD - minute) * MIN)
+    const { OI: wallText, ...rest } = checks
     out.push({
       id, name: STRATEGY_BY_ID[id].name, side: dir > 0 ? 'LONG' : 'SHORT', t: nowMs, entry: price,
       stop: price - dir * stopPts, target: price + dir * targetPts, timeStopMs: timeStop,
-      confidence: Math.round(Math.max(40, Math.min(92, confidence))), estimated: !!estimated, checks,
+      confidence: Math.round(Math.max(40, Math.min(92, confidence + (stance === 'agrees' ? 6 : 0)))), estimated: !!estimated,
+      checks: {
+        'Options OI': `${stance === 'agrees' ? 'writers back it' : 'neutral'} - ${optionOiText(optionRead)}`,
+        OI: wallText, 'Futures OI': futuresText, ...rest,
+      },
     })
   }
   const absorbed = (dir) => last3.some((b) => (b.absorption ?? []).some((a) => (a.side === 'buy') === dir > 0))
@@ -360,6 +434,10 @@ export function evaluateStrategies(input) {
     const f = futuresChange(oi, nowMs, 30)
     for (const dir of [1, -1]) {
       if (!f || f.oiPct == null || !(dir * f.pricePct > 0.0015) || !(f.oiPct > 0.003)) continue
+      // The option writers must be building the same way over the 30 minutes (puts written under a
+      // long build-up, calls over a short one) - futures OI alone can be hedges.
+      const options30 = optionOiRead(oi, spotNow, nowMs, 30)
+      if (optionOiStance(options30, dir) !== 'agrees') continue
       const nearVwap = dir * (price - vwap) >= 0 && Math.abs(price - vwap) <= pct(0.0008)
       if (!nearVwap) continue
       const footprint = (absorbed(dir) || stackWith(dir)) && dir * last.delta > 0
@@ -368,7 +446,7 @@ export function evaluateStrategies(input) {
       if (!footprint || !tapeOk || !c.ok) continue
       const stopPts = Math.abs(price - vwap) + pct(0.0008)
       push('buildUp', dir, stopPts, 2.5 * stopPts, 60, 64 + (absorbed(dir) ? 6 : 0), {
-        OI: `futures ${(f.pricePct * 100).toFixed(2)}% with OI +${(f.oiPct * 100).toFixed(2)}% in 30m (${dir > 0 ? 'long' : 'short'} build-up)`,
+        OI: `futures ${(f.pricePct * 100).toFixed(2)}% with OI +${(f.oiPct * 100).toFixed(2)}% in 30m (${dir > 0 ? 'long' : 'short'} build-up), ${dir > 0 ? 'puts' : 'calls'} written: ${optionOiText(options30)}`,
         Footprint: `pullback to VWAP ${vwap.toFixed(1)} with ${absorbed(dir) ? 'absorption' : 'a stack'}`, Tape: tapeText, DOM: c.dom, Heatmap: c.heat,
       })
     }
