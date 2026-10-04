@@ -121,9 +121,13 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     setPaperBook((prev) => {
       const list = prev[dayKey]?.positions ?? []
       const key = `${setup.id}-${setup.t}-${which}`
-      if (list.some((p) => p.key === key && !p.exitTime)) return prev
+      // ONE paper trade per signal: the same strategy, direction and side (buy / sell) within the
+      // alert cooldown is the same signal - a replayed day re-fires its alerts a few seconds apart, and
+      // must not open it again.
+      if (list.some((p) => p.strategy === setup.id && p.setupSide === setup.side && p.action === trade.action
+        && Math.abs(setupTimeOf(p) - setup.t) < COOLDOWN_MS)) return prev
       const position = {
-        key, setupKey: `${setup.id}-${setup.t}`, strategy: setup.id, setupSide: setup.side, action: trade.action, side: trade.side, strike: trade.strike,
+        key, setupKey: `${setup.id}-${setup.t}`, setupT: setup.t, strategy: setup.id, setupSide: setup.side, action: trade.action, side: trade.side, strike: trade.strike,
         lots, lotSize: PAPER_TRADE_LOT_SIZE[underlying] ?? 1, premium, entryTime: at, exitTime: null, exitPremium: null, exitReason: null,
       }
       return { ...prev, [dayKey]: { date, positions: [...list, position] } }
@@ -344,7 +348,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     // the minute, an alert to 10 s).
     const exact = new Map([...dayResults, ...withOutcome].map((s) => [`${s.id}-${s.t}`, s.outcome]))
     const outcomeOf = (p) => exact.get(p.setupKey) ?? [...withOutcome, ...dayResults]
-      .filter((s) => s.id === p.strategy && s.side === p.setupSide && Math.abs(s.t - Number(p.setupKey.split('-').at(-1))) < 2 * MIN)
+      .filter((s) => s.id === p.strategy && s.side === p.setupSide && Math.abs(s.t - setupTimeOf(p)) < 2 * MIN)
       .sort((a, b) => Math.abs(a.t - p.entryTime) - Math.abs(b.t - p.entryTime))[0]?.outcome
     return (paperBook[dayKey]?.positions ?? []).filter((p) => !nowMs || p.entryTime <= nowMs).map((p) => {
       let exitTime = p.exitTime && p.exitTime <= (nowMs ?? Infinity) ? p.exitTime : null
@@ -355,9 +359,14 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
         // Closed by its setup once the clock has passed the setup's exit (a scanned day's outcomes are
         // already known for the whole day; a trade still running when the data ended closes at 15:10).
         const exitAt = o.exitAt != null ? o.exitAt + MIN : squareOffMs(p.entryTime)
-        const at = nowMs == null || exitAt <= nowMs ? exitAt : null
-        const premium = oi && at ? premiumAt(oi, p.side, p.strike, at) : null
-        if (premium != null) { exitTime = at; exitPremium = premium; exitReason = exitLabel(o) }
+        if (exitAt <= p.entryTime) {
+          // Punched after its setup had already ended (older positions): never a trade - flat at entry.
+          exitTime = p.entryTime; exitPremium = p.premium; exitReason = 'Setup had already ended'
+        } else {
+          const at = nowMs == null || exitAt <= nowMs ? exitAt : null
+          const premium = oi && at ? premiumAt(oi, p.side, p.strike, at) : null
+          if (premium != null) { exitTime = at; exitPremium = premium; exitReason = exitLabel(o) }
+        }
       }
       const now = exitTime ? { premium: exitPremium } : oi && nowMs ? { premium: premiumAt(oi, p.side, p.strike, nowMs) } : { premium: null }
       const points = now.premium == null ? null : p.action === 'BUY' ? now.premium - p.premium : p.premium - now.premium
@@ -471,12 +480,12 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                           <span style={{ whiteSpace: 'nowrap' }}>
                             {s.options.buy && (
                               <Tooltip title={`Paper trade: ${optionTradeText(s.options.buy)} (${optionPnlText(s.options.buy, oi, o)})`}>
-                                <Button size="small" type="text" style={{ padding: '0 3px', height: 18, fontSize: 11, color: UP_COLOR }} disabled={nowMs != null && s.t > nowMs} onClick={() => punchRef.current?.(s, 'buy', nowMs)} aria-label={`Paper buy ${s.options.buy.side}`}>B {s.options.buy.side}</Button>
+                                <Button size="small" type="text" style={{ padding: '0 3px', height: 18, fontSize: 11, color: UP_COLOR }} disabled={!punchable(s, o, nowMs)} onClick={() => punchRef.current?.(s, 'buy', nowMs)} aria-label={`Paper buy ${s.options.buy.side}`}>B {s.options.buy.side}</Button>
                               </Tooltip>
                             )}
                             {s.options.sell && (
                               <Tooltip title={`Paper trade: ${optionTradeText(s.options.sell)} (${optionPnlText(s.options.sell, oi, o)})`}>
-                                <Button size="small" type="text" style={{ padding: '0 3px', height: 18, fontSize: 11, color: DOWN_COLOR }} disabled={nowMs != null && s.t > nowMs} onClick={() => punchRef.current?.(s, 'sell', nowMs)} aria-label={`Paper sell ${s.options.sell.side}`}>S {s.options.sell.side}</Button>
+                                <Button size="small" type="text" style={{ padding: '0 3px', height: 18, fontSize: 11, color: DOWN_COLOR }} disabled={!punchable(s, o, nowMs)} onClick={() => punchRef.current?.(s, 'sell', nowMs)} aria-label={`Paper sell ${s.options.sell.side}`}>S {s.options.sell.side}</Button>
                               </Tooltip>
                             )}
                           </span>
@@ -535,6 +544,21 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       </Row>
     </Card>
   )
+}
+
+// When a paper position's signal fired (positions saved before setupT was stored keep it in their key).
+function setupTimeOf(p) {
+  return p.setupT ?? Number(String(p.setupKey).split('-').at(-1))
+}
+
+// A setup can be paper-traded only while it is live at the clock: it has fired, and its stop, target,
+// trailing SL or 15:10 exit has not been reached yet.
+function punchable(setup, outcome, nowMs) {
+  if (nowMs == null) return true
+  if (setup.t > nowMs) return false
+  if (!outcome || outcome.status === 'open') return true
+  const exitAt = outcome.exitAt != null ? outcome.exitAt + MIN : squareOffMs(setup.t)
+  return exitAt > nowMs
 }
 
 function optionPnlText(trade, oi, outcome) {
