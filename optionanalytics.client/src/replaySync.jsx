@@ -8,7 +8,8 @@ import { Space, Switch, Tag, Tooltip, Typography } from 'antd'
 // any drift. Turning Sync on asks the pages already synced where they are and follows them.
 //
 // The ONE switch is global: it is stored in localStorage and followed live across tabs (the
-// "storage" event), so turning it on or off on either page does it on both.
+// "storage" event), so turning it on or off on either page does it on both. A page that is not
+// replaying anything (Order Flow on Live) follows the other onto its day as soon as they connect.
 //
 // Both pages speak in the same terms:
 //   ms      - the replay clock (epoch ms): everything that had happened by then is shown; a minute
@@ -72,7 +73,14 @@ export function useReplaySync({ enabled, active, kind, state, onRemote }) {
     channel.onmessage = ({ data }) => {
       if (!data || data.from === tabId) return
       setPeers((prev) => ({ ...prev, [data.from]: { kind: data.kind, date: data.date, underlying: data.underlying, seen: Date.now() } }))
-      if (data.type === 'hello') { post('reply'); return }
+      // A page joining asks where everyone is. A page with no replay of its own (e.g. Order Flow on
+      // Live) asks the joiner instead - so whichever side is replaying leads the other onto its day.
+      if (data.type === 'hello') {
+        if (stateRef.current?.date) post('reply')
+        else channel.postMessage({ type: 'need', from: tabId, kind })
+        return
+      }
+      if (data.type === 'need') { post('reply'); return }
       if (data.type !== 'state') return
       if (data.reason === 'user') { leadingRef.current = false; setLeading(false) }
       onRemoteRef.current?.(data)

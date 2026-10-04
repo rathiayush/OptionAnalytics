@@ -18,6 +18,11 @@ namespace OptionAnalytics.Server.Services.OrderFlow;
 /// failing) is put on the 20-level feed too, and the 20-level packets are ignored again while the
 /// 200-level book streams. BSE (SENSEX) has neither and stays on 5 levels.
 ///
+/// OTHER CONTRACTS. The page can pick any listed futures contract (next month, far month): EngineForAsync
+/// starts tracking it on demand - Full mode plus the 20-level depth (the 200-level sockets stay on the
+/// nearest contracts) - from that moment on, keeping at most MaxExtraEngines of them. Each engine's
+/// live view goes to "of:{underlying}:{expiry}"; the nearest one's also to the older "of:{underlying}".
+///
 /// REPLAY. Nothing is stored on disk. Today replays straight from the live engine; when an engine
 /// rolls into a new day, or is replaced at a futures rollover, its finished day goes to
 /// OrderFlowDayStore in memory, so the last few days replay too - until the server restarts.
@@ -29,6 +34,7 @@ public sealed class OrderFlowService : BackgroundService
     private static readonly TimeSpan ResolveInterval = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan RetryInterval = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan DepthFallbackAfter = TimeSpan.FromSeconds(90);
+    private const int MaxExtraEngines = 4;
 
     private readonly DhanFuturesInstrumentMaster _futures;
     private readonly DhanMarketFeedClient _feed;
@@ -42,6 +48,9 @@ public sealed class OrderFlowService : BackgroundService
 
     private readonly ConcurrentDictionary<string, OrderFlowEngine> _byUnderlying = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<uint, OrderFlowEngine> _bySecurityId = new();
+    // Contracts other than the nearest, tracked because the page asked for them - with when last asked.
+    private readonly ConcurrentDictionary<uint, (OrderFlowEngine Engine, DateTimeOffset LastAsked)> _extra = new();
+    private readonly SemaphoreSlim _extraLock = new(1, 1);
     private IDisposable? _tickSubscription;
 
     public OrderFlowService(
@@ -60,11 +69,73 @@ public sealed class OrderFlowService : BackgroundService
     }
 
     public static string Group(string underlying) => $"of:{underlying.ToUpperInvariant()}";
+    public static string ContractGroup(string underlying, DateOnly expiry) => $"of:{underlying.ToUpperInvariant()}:{expiry:yyyy-MM-dd}";
     public static string DomGroup(string underlying) => $"dom:{underlying.ToUpperInvariant()}";
 
     public OrderFlowDayStore PastDays => _pastDays;
 
     public OrderFlowEngine? EngineFor(string underlying) => _byUnderlying.TryGetValue(underlying, out var engine) ? engine : null;
+
+    /// <summary>The listed futures contracts for an underlying, nearest first.</summary>
+    public async Task<IReadOnlyList<DhanFuturesInstrument>> ContractsAsync(string underlying, CancellationToken cancellationToken)
+    {
+        await _futures.EnsureLoadedAsync(cancellationToken);
+        var today = IstClock.Today();
+        return _futures.GetExpiries(underlying).Where(e => e >= today)
+            .Select(e => _futures.GetContract(underlying, e)).OfType<DhanFuturesInstrument>().ToList();
+    }
+
+    /// <summary>The contract for an expiry (null = the nearest as of <paramref name="asOf"/>).</summary>
+    public async Task<DhanFuturesInstrument?> ResolveContractAsync(string underlying, DateOnly? expiry, DateOnly asOf, CancellationToken cancellationToken)
+    {
+        await _futures.EnsureLoadedAsync(cancellationToken);
+        return expiry is { } e ? _futures.GetContract(underlying, e) : _futures.GetNearestContract(underlying, asOf);
+    }
+
+    /// <summary>The live engine for a listed contract (null expiry = the nearest), started on demand for
+    /// a contract that is not tracked yet. Null when the contract is unknown or order flow is off.</summary>
+    public async Task<OrderFlowEngine?> EngineForAsync(string underlying, DateOnly? expiry, CancellationToken cancellationToken)
+    {
+        if (!_enabled) return null;
+        var nearest = EngineFor(underlying);
+        if (expiry is null || nearest?.Expiry == expiry) return nearest;
+        var contract = await ResolveContractAsync(underlying, expiry, IstClock.Today(), cancellationToken);
+        if (contract is null) return null;
+        if (_bySecurityId.TryGetValue(contract.SecurityId, out var tracked))
+        {
+            if (_extra.ContainsKey(contract.SecurityId)) _extra[contract.SecurityId] = (tracked, DateTimeOffset.UtcNow);
+            return tracked;
+        }
+
+        await _extraLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (_bySecurityId.TryGetValue(contract.SecurityId, out tracked)) return tracked;
+            while (_extra.Count >= MaxExtraEngines)
+            {
+                var oldest = _extra.OrderBy(kv => kv.Value.LastAsked).First();
+                _extra.TryRemove(oldest.Key, out _);
+                _bySecurityId.TryRemove(oldest.Key, out _);
+                oldest.Value.Engine.DayEnded -= _pastDays.Add;
+                if (oldest.Value.Engine.ExportDay() is { } day) _pastDays.Add(day);
+                _logger.LogInformation("Order flow: stopped tracking {Symbol} (least recently viewed).", oldest.Value.Engine.ContractSymbol);
+            }
+            var engine = new OrderFlowEngine(underlying.ToUpperInvariant(), contract.SecurityId, contract.TradingSymbol, contract.DhanSegment, contract.TickSize, contract.LotSize, contract.Expiry);
+            engine.DayEnded += _pastDays.Add;
+            _extra[contract.SecurityId] = (engine, DateTimeOffset.UtcNow);
+            _bySecurityId[contract.SecurityId] = engine;
+            if (!_feed.IsSubscribed(contract.SecurityId))
+                await _feed.SubscribeAsync(new Dictionary<uint, string> { [contract.SecurityId] = contract.DhanSegment }, cancellationToken, full: true);
+            if (_depthMode != "5" && _depth.Supports(contract.DhanSegment))
+                await _depth.SubscribeAsync(contract.SecurityId, contract.DhanSegment, cancellationToken);
+            _logger.LogInformation("Order flow tracking {Symbol} ({SecurityId}) on request.", contract.TradingSymbol, contract.SecurityId);
+            return engine;
+        }
+        finally
+        {
+            _extraLock.Release();
+        }
+    }
 
     public bool DepthFeedConnected => _depth.IsConnected;
 
@@ -127,8 +198,16 @@ public sealed class OrderFlowService : BackgroundService
                 // The outgoing contract's day stays replayable.
                 if (engine.ExportDay() is { } last) _pastDays.Add(last);
             }
-            engine = new OrderFlowEngine(underlying, contract.SecurityId, contract.TradingSymbol, contract.DhanSegment, contract.TickSize, contract.LotSize);
-            engine.DayEnded += _pastDays.Add;
+            if (_extra.TryRemove(contract.SecurityId, out var promoted))
+            {
+                // A contract the page had asked for became the nearest (rollover) - keep its day.
+                engine = promoted.Engine;
+            }
+            else
+            {
+                engine = new OrderFlowEngine(underlying, contract.SecurityId, contract.TradingSymbol, contract.DhanSegment, contract.TickSize, contract.LotSize, contract.Expiry);
+                engine.DayEnded += _pastDays.Add;
+            }
             _bySecurityId[contract.SecurityId] = engine;
             _byUnderlying[underlying] = engine;
             _logger.LogInformation("Order flow tracking {Underlying} futures {Symbol} ({SecurityId}).", underlying, contract.TradingSymbol, contract.SecurityId);
@@ -166,6 +245,12 @@ public sealed class OrderFlowService : BackgroundService
 
     private void Push(OrderFlowEngine engine)
     {
+        if (engine.Expiry is { } expiry)
+        {
+            var contractGroup = ContractGroup(engine.Underlying, expiry);
+            if (_batcher.HasMembers(contractGroup)) _batcher.SetLatest(contractGroup, "orderFlowLive", contractGroup, engine.Live);
+        }
+        if (!_byUnderlying.TryGetValue(engine.Underlying, out var nearest) || nearest != engine) return;
         var group = Group(engine.Underlying);
         if (_batcher.HasMembers(group)) _batcher.SetLatest(group, "orderFlowLive", engine.Underlying, engine.Live);
         var dom = DomGroup(engine.Underlying);

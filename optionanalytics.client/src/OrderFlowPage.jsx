@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Alert, Button, Card, Col, InputNumber, Row, Segmented, Select, Slider, Space, Switch, Tag, Tooltip, Typography } from 'antd'
-import { ReloadOutlined, PlayCircleOutlined, PauseCircleOutlined } from '@ant-design/icons'
+import dayjs from 'dayjs'
+import { Alert, Button, Card, Col, DatePicker, Empty, InputNumber, Row, Select, Slider, Space, Switch, Tag, Tooltip, Typography } from 'antd'
+import { PlayCircleOutlined, PauseCircleOutlined } from '@ant-design/icons'
 import * as signalR from '@microsoft/signalr'
 import {
   NavBar, TIMEFRAME_OPTIONS, usePersistedState, RECONNECT_RETRY_POLICY, onLiveBatch, syncSignalRGroups, joinAllSignalRGroups,
@@ -13,15 +14,18 @@ import { useReplaySync, useReplaySyncEnabled, ReplaySyncControl, withSpeedOption
 
 const { Title, Text } = Typography
 
-// Order Flow - footprint, delta / cumulative delta, stacked imbalances, absorption, exhaustion, the
-// depth heatmap, icebergs and large orders for each underlying's nearest FUTURES contract, live from
-// Dhan's tick feed and market depth (200 levels where Dhan offers it). See OrderFlowEngine on the
-// server for how trades and their aggressor side are inferred, and orderFlowMath.js for the analysis.
+// Order Flow - footprint (bid x ask), delta / cumulative delta, stacked imbalances, absorption,
+// exhaustion, the depth heatmap, icebergs and big orders for a FUTURES contract (the nearest by
+// default, or any listed one), live from Dhan's tick feed and market depth (200 levels where Dhan
+// offers it). See OrderFlowEngine on the server for how trades and their aggressor side are inferred,
+// and orderFlowMath.js for the analysis.
 //
-// REPLAY: plays a day back from the server's MEMORY - today (still live) and the last few days since
-// the server started (OrderFlowDayStore; nothing is stored on disk, and Dhan has no historical tick
-// or depth data) - showing the footprint, heatmap, prints, icebergs and book exactly as they were
-// known at the replay clock. Sync (replaySync.jsx) keeps it in step with the OI Replay in another tab.
+// Like the OI Replay: Go Live follows the contract live; pick a date and Load day to replay it. A day
+// the server saw live (today, or the last few days in its memory) replays EXACTLY - footprint,
+// heatmap, prints, icebergs and book as they were known at the replay clock. Any other day is
+// ESTIMATED from Dhan's 1-minute candles (Dhan has no historical tick or depth data - see
+// OrderFlowEstimator on the server) and labelled as such. Sync (replaySync.jsx) keeps the replay in
+// step with the OI Replay in another tab.
 
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX']
 const DEFAULT_ROW_SIZES = { NIFTY: 1, BANKNIFTY: 5, SENSEX: 5 }
@@ -37,8 +41,9 @@ const REPLAY_TICK_MS = 200
 const REPLAY_HEATMAP_COLUMNS = 1500
 const IST_HHMMSS = new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' })
 
-// One SignalR connection for the page's lifetime; group "of:{underlying}" follows the selection.
-function useOrderFlowHub(underlying, onLive) {
+// One SignalR connection for the page's lifetime; `group` (the live contract's, or none) follows the
+// selection.
+function useOrderFlowHub(group, onLive) {
   const [state, setState] = useState('connecting')
   const connectionRef = useRef(null)
   const groupsRef = useRef([])
@@ -59,15 +64,46 @@ function useOrderFlowHub(underlying, onLive) {
   }, [])
 
   useEffect(() => {
-    const groups = [`of:${underlying}`]
+    const groups = group ? [group] : []
     syncSignalRGroups(connectionRef.current, groupsRef.current, groups)
     groupsRef.current = groups
-  }, [underlying])
+  }, [group])
 
   return state
 }
 
+// What every mark on the footprint means.
+function FootprintLegend({ estimated, bigLabel }) {
+  const item = (swatch, label) => (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, marginRight: 14, whiteSpace: 'nowrap' }}>{swatch}{label}</span>
+  )
+  const box = (bg, border) => <span style={{ width: 12, height: 10, background: bg, border: border ? `1.5px solid ${border}` : 'none', borderRadius: 2 }} />
+  const pill = (bg, text) => <span style={{ background: bg, color: '#fff', fontSize: 9, fontWeight: 700, borderRadius: 3, padding: '0 4px', lineHeight: '14px' }}>{text}</span>
+  const dot = (color, size) => <span style={{ width: size, height: size, borderRadius: '50%', background: `${color}cc`, border: '1.5px solid #fff' }} />
+  return (
+    <div style={{ fontSize: 11, color: AXIS_COLOR, marginBottom: 6, lineHeight: '20px' }}>
+      {item(box('#ef535055'), 'bid (sell) volume')}
+      {item(box('#26a69a55'), 'ask (buy) volume')}
+      {!estimated && item(box('#26a69a', null), 'buy imbalance')}
+      {!estimated && item(box('#ef5350', null), 'sell imbalance')}
+      {!estimated && item(box('transparent', '#f5c542'), 'POC (most traded)')}
+      {item(pill(UP_COLOR, 'ABS'), 'absorption')}
+      {item(pill('#9254de', 'EXH'), 'exhaustion')}
+      {item(<span style={{ display: 'inline-flex', gap: 2 }}>{dot(UP_COLOR, 9)}{dot(DOWN_COLOR, 13)}</span>, `${bigLabel} (size = quantity)`)}
+      {item(<span style={{ fontWeight: 700 }}>Δ / ΣΔ</span>, 'delta / cumulative delta under each bar')}
+    </div>
+  )
+}
+
 const toColumn = (c) => ({ t: new Date(c.time).getTime(), bids: c.bids, asks: c.asks })
+const todayKey = () => dayjs().format('YYYY-MM-DD')
+
+async function fetchJson(url) {
+  const r = await fetch(url)
+  const body = await r.json().catch(() => null)
+  if (!r.ok) throw new Error(body?.error || `Request failed (HTTP ${r.status})`)
+  return body
+}
 
 export default function OrderFlowPage() {
   const [underlying, setUnderlying] = usePersistedState('optionanalytics.orderFlow.underlying', 'NIFTY')
@@ -78,155 +114,72 @@ export default function OrderFlowPage() {
   const [largeLots, setLargeLots] = usePersistedState('optionanalytics.orderFlow.largeLots', 10)
   const [showLots, setShowLots] = usePersistedState('optionanalytics.orderFlow.showLots', true)
   const [showProfile, setShowProfile] = usePersistedState('optionanalytics.orderFlow.showProfile', true)
-  const [replaySpeed, setReplaySpeed] = usePersistedState('optionanalytics.orderFlow.replaySpeed', 10)
+  const [replaySpeed, setReplaySpeed] = usePersistedState('optionanalytics.orderFlow.replaySpeed', 60)
   const rowSize = rowSizes?.[underlying] ?? DEFAULT_ROW_SIZES[underlying] ?? 1
   const narrow = useNarrow()
   const [domOpen, setDomOpen] = useState(false)
-  const [mode, setMode] = useState('live')
 
+  // ---- What is shown: Go Live (a contract, live) or Load day (a date, replayed) ----
+  const [mode, setMode] = useState('live')
+  const [expiry, setExpiry] = useState(null) // null = the nearest contract
+  const [contracts, setContracts] = useState([])
+  const [pickerDate, setPickerDate] = useState(() => dayjs())
+  const [replayDate, setReplayDate] = useState(null)
+  const [reloadNonce, setReloadNonce] = useState(0)
+  const [exactDays, setExactDays] = useState(() => new Set())
+  const isReplay = mode === 'replay'
+
+  const changeUnderlying = (value) => { setUnderlying(value); setExpiry(null) }
+
+  useEffect(() => {
+    let cancelled = false
+    setContracts([])
+    fetchJson(`/api/order-flow/${underlying}/contracts`).then((list) => { if (!cancelled) setContracts(list) }).catch(() => {})
+    return () => { cancelled = true }
+  }, [underlying])
+
+  // The days the server can replay exactly - marked in the date picker.
+  useEffect(() => {
+    let cancelled = false
+    fetchJson(`/api/order-flow/${underlying}/days`)
+      .then((days) => { if (!cancelled) setExactDays(new Set(days.map((d) => d.date))) })
+      .catch(() => { if (!cancelled) setExactDays(new Set()) })
+    return () => { cancelled = true }
+  }, [underlying, reloadNonce])
+
+  const expiryQuery = expiry ? `&expiry=${expiry}` : ''
+
+  // ---- Live ----
   const [data, setData] = useState(null)
   const [error, setError] = useState(null)
   const [loading, setLoading] = useState(false)
-  const contextRef = useRef({ underlying, rowSize })
-  contextRef.current = { underlying, rowSize }
+  const contextRef = useRef({ securityId: null, rowSize })
+  contextRef.current = { securityId: data?.meta?.securityId ?? null, rowSize }
 
-  const load = () => {
+  useEffect(() => {
+    if (isReplay) return undefined
+    let cancelled = false
+    setData(null)
     setLoading(true)
     setError(null)
-    const requested = { underlying, rowSize }
     // Only prints of the "large" size are needed - fetching every print would cap at the server's
     // newest 5000 and lose the morning's large ones on a busy day.
-    fetch(`/api/order-flow/${underlying}?rowSize=${rowSize}&minTradeLots=${largeLots}&heatmapColumns=900`)
-      .then(async (r) => {
-        const body = await r.json().catch(() => null)
-        if (!r.ok) throw new Error(body?.error || `Request failed (HTTP ${r.status})`)
-        return body
-      })
+    fetchJson(`/api/order-flow/${underlying}?rowSize=${rowSize}&minTradeLots=${largeLots}&heatmapColumns=900${expiryQuery}`)
       .then((body) => {
-        if (contextRef.current.underlying !== requested.underlying || contextRef.current.rowSize !== requested.rowSize) return
+        if (cancelled) return
         setData({
           meta: body.meta, minuteBars: body.bars, trades: body.trades, icebergs: body.icebergs, book: body.book,
-          heatmap: body.heatmap.map(toColumn), lastSeq: body.trades.at(-1)?.seq ?? 0,
+          heatmap: body.heatmap.map(toColumn), lastSeq: body.trades.at(-1)?.seq ?? 0, source: body.source,
         })
       })
-      .catch((err) => { setError(err.message); setData(null) })
-      .finally(() => setLoading(false))
-  }
-
-  useEffect(() => {
-    setData(null)
-    load()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [underlying, rowSize, largeLots])
-
-  // ---- Replay of a day held in the server's memory ----
-  const [replayDays, setReplayDays] = useState(null)
-  const [replayDate, setReplayDate] = useState(null)
-  const [replayDay, setReplayDay] = useState(null)
-  const [replayError, setReplayError] = useState(null)
-  const [replayLoading, setReplayLoading] = useState(false)
-  const [replayMs, setReplayMs] = useState(null)
-  const [playing, setPlaying] = useState(false)
-  const range = useMemo(() => replayRange(replayDay), [replayDay])
-
-  useEffect(() => {
-    if (mode !== 'replay') return undefined
-    let cancelled = false
-    setReplayDays(null)
-    fetch(`/api/order-flow/${underlying}/days`)
-      .then((r) => (r.ok ? r.json() : []))
-      .then((days) => {
-        if (cancelled) return
-        setReplayDays(days)
-        setReplayDate((current) => (days.some((d) => d.date === current) ? current : days[0]?.date ?? null))
-      })
-      .catch(() => { if (!cancelled) setReplayDays([]) })
+      .catch((err) => { if (!cancelled) { setError(err.message); setData(null) } })
+      .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
-  }, [mode, underlying])
-
-  useEffect(() => {
-    if (mode !== 'replay' || !replayDate) { setReplayDay(null); return undefined }
-    let cancelled = false
-    setReplayLoading(true)
-    setReplayError(null)
-    setPlaying(false)
-    fetch(`/api/order-flow/${underlying}/history/${replayDate}?rowSize=${rowSize}&minTradeLots=${largeLots}&heatmapColumns=${REPLAY_HEATMAP_COLUMNS}`)
-      .then(async (r) => {
-        const body = await r.json().catch(() => null)
-        if (!r.ok) throw new Error(body?.error || `Request failed (HTTP ${r.status})`)
-        return body
-      })
-      .then((body) => {
-        if (cancelled) return
-        const day = { meta: body.meta, minuteBars: body.bars, trades: body.trades, icebergs: body.icebergs, heatmap: body.heatmap.map(toColumn) }
-        setReplayDay(day)
-        // Keep the clock where it was when only the rows / print size changed; a new day starts at its open.
-        setReplayMs((ms) => {
-          const next = replayRange(day)
-          if (!next) return null
-          return ms != null && ms >= next.start && ms <= next.end ? ms : next.start
-        })
-      })
-      .catch((err) => { if (!cancelled) { setReplayError(err.message); setReplayDay(null) } })
-      .finally(() => { if (!cancelled) setReplayLoading(false) })
-    return () => { cancelled = true }
-  }, [mode, underlying, replayDate, rowSize, largeLots])
-
-  useEffect(() => {
-    if (!playing || !range) return undefined
-    const id = setInterval(() => {
-      setReplayMs((ms) => {
-        const next = Math.min(range.end, (ms ?? range.start) + REPLAY_TICK_MS * replaySpeed)
-        if (next >= range.end) setPlaying(false)
-        return next
-      })
-    }, REPLAY_TICK_MS)
-    return () => clearInterval(id)
-  }, [playing, range, replaySpeed])
-
-  // ---- Sync with the OI Replay (another tab) ----
-  const [syncEnabled, setSyncEnabled] = useReplaySyncEnabled()
-  const [syncMismatch, setSyncMismatch] = useState(null)
-  const pendingSyncRef = useRef(null)
-  const applySync = (msg) => {
-    pendingSyncRef.current = null
-    if (msg.underlying && msg.underlying !== underlying) {
-      if (!UNDERLYINGS.includes(msg.underlying)) return
-      pendingSyncRef.current = msg
-      setUnderlying(msg.underlying)
-      return
-    }
-    if (msg.date !== replayDate) {
-      if (replayDays == null) { pendingSyncRef.current = msg; return }
-      if (!replayDays.some((d) => d.date === msg.date)) { setSyncMismatch(`OI Replay is on ${msg.date} - not in memory here`); return }
-      pendingSyncRef.current = msg
-      setReplayDate(msg.date)
-      return
-    }
-    if (!replayDay || !range) { pendingSyncRef.current = msg; return }
-    setSyncMismatch(null)
-    if (msg.speed > 0) setReplaySpeed(msg.speed)
-    let ms = replayMs ?? range.start
-    if (msg.ms != null && (msg.reason !== 'tick' || Math.abs(ms - msg.ms) > SYNC_DRIFT_MS)) {
-      ms = Math.max(range.start, Math.min(range.end, msg.ms))
-      setReplayMs(ms)
-    }
-    setPlaying(Boolean(msg.playing) && ms < range.end)
-  }
-  const sync = useReplaySync({
-    enabled: syncEnabled, active: mode === 'replay', kind: 'of',
-    state: { underlying, date: replayDate, ms: replayMs, playing, speed: replaySpeed },
-    onRemote: applySync,
-  })
-  // A sync that had to wait for the underlying, the day list or the day itself to load.
-  useEffect(() => {
-    if (pendingSyncRef.current) applySync(pendingSyncRef.current)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [underlying, replayDays, replayDate, replayDay])
+  }, [isReplay, underlying, expiryQuery, rowSize, largeLots, reloadNonce])
 
   const handleLive = (payload) => {
-    const { underlying: current, rowSize: rows } = contextRef.current
-    if (payload?.meta?.underlying !== current) return
+    const { securityId, rowSize: rows } = contextRef.current
+    if (payload?.meta?.securityId !== securityId) return
     setData((prev) => {
       if (!prev) return prev
       const now = payload.time ? new Date(payload.time).getTime() : Date.now()
@@ -250,21 +203,115 @@ export default function OrderFlowPage() {
       }
     })
   }
-  const connectionState = useOrderFlowHub(underlying, handleLive)
+  const liveGroup = isReplay ? null : data?.meta?.expiry ? `of:${underlying}:${data.meta.expiry}` : data ? `of:${underlying}` : null
+  const connectionState = useOrderFlowHub(liveGroup, handleLive)
+
+  // ---- Replay of a loaded day ----
+  const [replayDay, setReplayDay] = useState(null)
+  const [replayError, setReplayError] = useState(null)
+  const [replayLoading, setReplayLoading] = useState(false)
+  const [replayMs, setReplayMs] = useState(null)
+  const [playing, setPlaying] = useState(false)
+  const range = useMemo(() => replayRange(replayDay), [replayDay])
+
+  useEffect(() => {
+    if (!isReplay || !replayDate) { setReplayDay(null); return undefined }
+    let cancelled = false
+    setReplayLoading(true)
+    setReplayError(null)
+    setPlaying(false)
+    fetchJson(`/api/order-flow/${underlying}/day/${replayDate}?rowSize=${rowSize}&minTradeLots=${largeLots}&heatmapColumns=${REPLAY_HEATMAP_COLUMNS}${expiryQuery}`)
+      .then((body) => {
+        if (cancelled) return
+        const day = {
+          meta: body.meta, minuteBars: body.bars, trades: body.trades, icebergs: body.icebergs, heatmap: body.heatmap.map(toColumn),
+          source: body.source, note: body.note, date: replayDate, underlying,
+        }
+        setReplayDay(day)
+        // Keep the clock where it was when only the rows / print size changed; a new day starts at its open.
+        setReplayMs((ms) => {
+          const next = replayRange(day)
+          if (!next) return null
+          return ms != null && ms >= next.start && ms <= next.end ? ms : next.start
+        })
+      })
+      .catch((err) => { if (!cancelled) { setReplayError(err.message); setReplayDay(null) } })
+      .finally(() => { if (!cancelled) setReplayLoading(false) })
+    return () => { cancelled = true }
+  }, [isReplay, underlying, replayDate, expiryQuery, rowSize, largeLots, reloadNonce])
+
+  useEffect(() => {
+    if (!playing || !range) return undefined
+    const id = setInterval(() => {
+      setReplayMs((ms) => {
+        const next = Math.min(range.end, (ms ?? range.start) + REPLAY_TICK_MS * replaySpeed)
+        if (next >= range.end) setPlaying(false)
+        return next
+      })
+    }, REPLAY_TICK_MS)
+    return () => clearInterval(id)
+  }, [playing, range, replaySpeed])
+
+  const goLive = () => { setMode('live'); setPlaying(false); setReloadNonce((n) => n + 1) }
+  const loadDay = (dateKey = pickerDate.format('YYYY-MM-DD')) => {
+    setPlaying(false)
+    setReplayDate(dateKey)
+    setMode('replay')
+    setReloadNonce((n) => n + 1)
+  }
+
+  // ---- Sync with the OI Replay (another tab) ----
+  const [syncEnabled, setSyncEnabled] = useReplaySyncEnabled()
+  const [syncMismatch, setSyncMismatch] = useState(null)
+  const pendingSyncRef = useRef(null)
+  const applySync = (msg) => {
+    pendingSyncRef.current = null
+    if (!UNDERLYINGS.includes(msg.underlying) || !msg.date) return
+    if (msg.underlying !== underlying || msg.date !== replayDate || !isReplay) {
+      // Follow the other page onto its day - any day loads (exact or estimated).
+      pendingSyncRef.current = msg
+      if (msg.underlying !== underlying) changeUnderlying(msg.underlying)
+      setPickerDate(dayjs(msg.date))
+      setReplayDate(msg.date)
+      setMode('replay')
+      return
+    }
+    if (replayError) { setSyncMismatch(`Could not load ${msg.date}`); return }
+    if (!replayDay || replayDay.date !== msg.date || replayDay.underlying !== msg.underlying || !range) { pendingSyncRef.current = msg; return }
+    setSyncMismatch(null)
+    if (msg.speed > 0) setReplaySpeed(msg.speed)
+    let ms = replayMs ?? range.start
+    if (msg.ms != null && (msg.reason !== 'tick' || Math.abs(ms - msg.ms) > SYNC_DRIFT_MS)) {
+      ms = Math.max(range.start, Math.min(range.end, msg.ms))
+      setReplayMs(ms)
+    }
+    setPlaying(Boolean(msg.playing) && ms < range.end)
+  }
+  const sync = useReplaySync({
+    enabled: syncEnabled, active: true, kind: 'of',
+    state: { underlying, date: isReplay ? replayDate : null, ms: replayMs, playing, speed: replaySpeed },
+    onRemote: applySync,
+  })
+  // A sync that had to wait for the day to load.
+  useEffect(() => {
+    if (pendingSyncRef.current) applySync(pendingSyncRef.current)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [replayDay, replayError])
 
   // Everything below draws `view`: the live data, or the replayed day as of the replay clock.
-  const isReplay = mode === 'replay'
   const view = useMemo(() => (isReplay ? replayView(replayDay, replayMs) : data), [isReplay, replayDay, replayMs, data])
+  const estimated = view?.source === 'estimated'
 
   const lotSize = view?.meta?.lotSize ?? 1
   const bars = useMemo(
-    () => analyzeBars(aggregateBars(view?.minuteBars ?? [], timeframe), { rowSize, minVolume: lotSize, imbalanceRatio, stackedCount }),
-    [view?.minuteBars, timeframe, rowSize, lotSize, imbalanceRatio, stackedCount],
+    () => analyzeBars(aggregateBars(view?.minuteBars ?? [], timeframe), { rowSize, minVolume: lotSize, imbalanceRatio, stackedCount, estimated }),
+    [view?.minuteBars, timeframe, rowSize, lotSize, imbalanceRatio, stackedCount, estimated],
   )
   const profile = useMemo(() => (showProfile ? volumeProfile(bars) : null), [showProfile, bars])
   const largeTrades = useMemo(() => (view?.trades ?? []).filter((t) => t.quantity >= largeLots * lotSize), [view?.trades, largeLots, lotSize])
   const walls = useMemo(() => findWalls(view?.book), [view?.book])
   const activeIcebergs = useMemo(() => new Set((view?.icebergs ?? []).filter((i) => !i.endedAt).map((i) => i.price)), [view?.icebergs])
+  const bigLabel = estimated ? 'Volume spike' : 'Big order'
 
   const signals = useMemo(() => {
     const list = []
@@ -275,11 +322,11 @@ export default function OrderFlowPage() {
       }
       for (const a of bar.absorption) {
         list.push({ key: `a-${bar.time}-${a.side}`, time: bar.time, bullish: a.side === 'buy', type: 'Absorption',
-          text: a.side === 'buy' ? `Selling absorbed at ${a.price} (${formatVolume(a.volume, lotSize, showLots)} hit the bid, bar closed off the low)` : `Buying absorbed at ${a.price} (${formatVolume(a.volume, lotSize, showLots)} lifted, bar closed off the high)` })
+          text: a.text ?? (a.side === 'buy' ? `Selling absorbed at ${a.price} (${formatVolume(a.volume, lotSize, showLots)} hit the bid, bar closed off the low)` : `Buying absorbed at ${a.price} (${formatVolume(a.volume, lotSize, showLots)} lifted, bar closed off the high)`) })
       }
       for (const e of bar.exhaustion) {
         list.push({ key: `e-${bar.time}-${e.side}`, time: bar.time, bullish: e.side === 'buy', type: 'Exhaustion',
-          text: e.side === 'sell' ? `Buying exhausted at the high ${e.price}` : `Selling exhausted at the low ${e.price}` })
+          text: e.text ?? (e.side === 'sell' ? `Buying exhausted at the high ${e.price}` : `Selling exhausted at the low ${e.price}`) })
       }
     }
     for (const i of view?.icebergs ?? []) {
@@ -287,16 +334,22 @@ export default function OrderFlowPage() {
         text: `${i.isBid ? 'Hidden buyer at bid' : 'Hidden seller at offer'} ${i.price}: ${formatVolume(i.traded, lotSize, showLots)} traded vs ${formatVolume(i.maxDisplayed, lotSize, showLots)} shown${i.endedAt ? ' (ended)' : ' - active'}` })
     }
     for (const t of largeTrades.slice(-150)) {
-      list.push({ key: `t-${t.seq}`, time: new Date(t.time).getTime(), bullish: t.buy, type: 'Large print',
-        text: `${t.buy ? 'Buy' : 'Sell'} ${formatVolume(t.quantity, lotSize, true)} lots at ${t.price}` })
+      list.push({ key: `t-${t.seq}`, time: new Date(t.time).getTime(), bullish: t.buy, type: bigLabel,
+        text: estimated
+          ? `${formatVolume(t.quantity, lotSize, true)} lots traded in the minute to ${IST_HHMMSS.format(new Date(t.time)).slice(0, 5)} (est. ${t.buy ? 'buying' : 'selling'}), closed ${t.price}`
+          : `${t.buy ? 'Buy' : 'Sell'} ${formatVolume(t.quantity, lotSize, true)} lots at ${t.price}` })
     }
     return list.sort((a, b) => b.time - a.time).slice(0, 200)
-  }, [bars, view?.icebergs, largeTrades, lotSize, showLots])
+  }, [bars, view?.icebergs, largeTrades, lotSize, showLots, estimated, bigLabel])
 
   const meta = view?.meta
   const lastBar = bars.at(-1)
-  const dayKey = `${underlying}-${timeframe}-${rowSize}-${isReplay ? replayDate : 'live'}`
+  const dayKey = `${underlying}-${timeframe}-${rowSize}-${isReplay ? replayDate : 'live'}-${meta?.securityId ?? ''}`
   const jump = (minutes) => { setReplayMs((ms) => (range ? Math.max(range.start, Math.min(range.end, (ms ?? range.start) + minutes * 60_000)) : ms)); sync.userAction() }
+  const contractOptions = [
+    { value: 'nearest', label: 'Nearest (auto)' },
+    ...contracts.map((c) => ({ value: c.expiry, label: `${dayjs(c.expiry).format('DD MMM YYYY')} · ${c.tradingSymbol}` })),
+  ]
 
   return (
     <div style={{ maxWidth: 2600, margin: '0 auto', padding: '24px 16px' }}>
@@ -309,35 +362,48 @@ export default function OrderFlowPage() {
         <Card
           size="small" title="Order Flow - futures"
           extra={(
-            <Space size={8} wrap>
-              <Segmented value={mode} onChange={(m) => { setMode(m); setPlaying(false) }} options={[{ label: 'Live', value: 'live' }, { label: 'Replay', value: 'replay' }]} />
-              <Tooltip title="Depth of market - the full 200-level book in a side panel (live)">
-                <Button onClick={() => setDomOpen(true)}>DOM</Button>
-              </Tooltip>
-            </Space>
+            <Tooltip title="Depth of market - the nearest contract's full 200-level book in a side panel (live)">
+              <Button onClick={() => setDomOpen(true)}>DOM</Button>
+            </Tooltip>
           )}
         >
-          <Space wrap size={12} align="center">
-            <Select value={underlying} onChange={(v) => { setUnderlying(v); if (isReplay) sync.userAction() }} style={{ width: 130 }} options={UNDERLYINGS.map((u) => ({ value: u, label: `${u} FUT` }))} />
+          <Space wrap size={10} align="center">
+            <Button type={isReplay ? 'default' : 'primary'} onClick={goLive} loading={!isReplay && loading}>● Go Live</Button>
+            <Select value={underlying} onChange={(v) => { changeUnderlying(v); if (isReplay) sync.userAction() }} style={{ width: 130 }} options={UNDERLYINGS.map((u) => ({ value: u, label: `${u} FUT` }))} />
+            <Tooltip title="Futures contract - the nearest, or any listed month">
+              <Select value={expiry ?? 'nearest'} onChange={(v) => setExpiry(v === 'nearest' ? null : v)} style={{ width: 230 }} options={contractOptions} />
+            </Tooltip>
+            <DatePicker
+              value={pickerDate} onChange={(d) => d && setPickerDate(d)} allowClear={false} format="DD MMM YYYY" style={{ width: 140 }}
+              disabledDate={(d) => d.isAfter(dayjs(), 'day') || ((d.day() === 0 || d.day() === 6) && !exactDays.has(d.format('YYYY-MM-DD')))}
+              cellRender={(current, info) => {
+                if (info.type !== 'date') return info.originNode
+                const exact = exactDays.has(current.format('YYYY-MM-DD'))
+                return (
+                  <div className="ant-picker-cell-inner" style={{ position: 'relative' }} title={exact ? 'Exact replay (the server has this day)' : undefined}>
+                    {current.date()}
+                    {exact && <span style={{ position: 'absolute', bottom: 1, left: '50%', width: 4, height: 4, marginLeft: -2, borderRadius: 2, background: UP_COLOR }} />}
+                  </div>
+                )
+              }}
+            />
+            <Button type={isReplay ? 'primary' : 'default'} onClick={() => { loadDay(); sync.userAction() }} loading={replayLoading}>Load day</Button>
+            <ReplaySyncControl enabled={syncEnabled} onChange={setSyncEnabled} sync={sync} kind="of" mismatch={syncMismatch} />
+          </Space>
+          <Space wrap size={12} align="center" style={{ marginTop: 10 }}>
             <Select value={timeframe} onChange={setTimeframe} style={{ width: 110 }} options={TIMEFRAME_OPTIONS} />
             <Select value={rowSize} onChange={(v) => setRowSizes({ ...(rowSizes ?? {}), [underlying]: v })} style={{ width: 120 }} options={ROW_SIZE_OPTIONS} />
             <Tooltip title="Diagonal imbalance: buying at a price vs selling one row below (and the mirror) must be at least this many times larger.">
-              <InputNumber value={imbalanceRatio} onChange={(v) => setImbalanceRatio(v ?? 3)} min={1.5} max={10} step={0.5} style={{ width: 140 }} addonBefore="Imbalance" addonAfter="x" />
+              <InputNumber value={imbalanceRatio} onChange={(v) => setImbalanceRatio(v ?? 3)} min={1.5} max={10} step={0.5} style={{ width: 140 }} addonBefore="Imbalance" addonAfter="x" disabled={estimated} />
             </Tooltip>
-            <InputNumber value={stackedCount} onChange={(v) => setStackedCount(v ?? 3)} min={2} max={8} style={{ width: 130 }} addonBefore="Stack" addonAfter="rows" />
-            <InputNumber value={largeLots} onChange={(v) => setLargeLots(v ?? 10)} min={1} style={{ width: 160 }} addonBefore="Large print ≥" addonAfter="lots" />
+            <InputNumber value={stackedCount} onChange={(v) => setStackedCount(v ?? 3)} min={2} max={8} style={{ width: 130 }} addonBefore="Stack" addonAfter="rows" disabled={estimated} />
+            <InputNumber value={largeLots} onChange={(v) => setLargeLots(v ?? 10)} min={1} style={{ width: 170 }} addonBefore="Big order ≥" addonAfter="lots" />
             <Space size={4}><Switch size="small" checked={showLots} onChange={setShowLots} /><Text style={{ fontSize: 12 }}>Volume in lots</Text></Space>
             <Space size={4}><Switch size="small" checked={showProfile} onChange={setShowProfile} /><Text style={{ fontSize: 12 }}>Volume profile</Text></Space>
-            {!isReplay && <Button size="small" icon={<ReloadOutlined />} onClick={load} loading={loading}>Reload</Button>}
           </Space>
           {isReplay && (
             <div style={{ marginTop: 12, padding: 10, border: '1px solid #ffffff1f', borderRadius: 6 }}>
               <Space wrap size={10} align="center">
-                <Select
-                  value={replayDate} onChange={(v) => { setReplayDate(v); sync.userAction() }} style={{ width: 150 }} loading={replayDays == null}
-                  placeholder={replayDays?.length === 0 ? 'No days in memory' : 'Day'}
-                  options={(replayDays ?? []).map((d) => ({ value: d.date, label: d.live ? `${d.date} (today)` : d.date }))}
-                />
                 <Button
                   type="primary" icon={playing ? <PauseCircleOutlined /> : <PlayCircleOutlined />} disabled={!range}
                   onClick={() => { if (!playing && range && replayMs >= range.end) setReplayMs(range.start); setPlaying(!playing); sync.userAction() }}
@@ -353,7 +419,6 @@ export default function OrderFlowPage() {
                 </Space.Compact>
                 {replayMs != null && <Text strong style={{ fontVariantNumeric: 'tabular-nums' }}>{IST_HHMMSS.format(new Date(replayMs))} IST</Text>}
                 {replayLoading && <Text type="secondary">Loading…</Text>}
-                <ReplaySyncControl enabled={syncEnabled} onChange={setSyncEnabled} sync={sync} kind="of" mismatch={syncMismatch} />
               </Space>
               {range && (
                 <Slider
@@ -362,32 +427,32 @@ export default function OrderFlowPage() {
                   style={{ margin: '12px 6px 0' }}
                 />
               )}
-              {replayDays?.length === 0 && (
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  No {underlying} order flow in memory yet. Replay plays from the server&apos;s memory - today and the last few days since it
-                  started - and nothing is stored on disk, so a restart clears it. Dhan has no historical tick or market-depth data.
-                </Text>
-              )}
             </div>
           )}
           <Space wrap size={8} style={{ marginTop: 10 }}>
             {isReplay
-              ? <Tag color="purple">● Replay{replayDate ? ` · ${replayDate}` : ''}</Tag>
+              ? <Tag color="purple">● Replay{replayDate ? ` · ${dayjs(replayDate).format('DD MMM YYYY')}${replayDate === todayKey() ? ' (today so far)' : ''}` : ''}</Tag>
               : (
                 <Tag color={connectionState === 'connected' ? 'success' : connectionState === 'reconnecting' ? 'warning' : connectionState === 'connecting' ? 'processing' : 'error'}>
                   {connectionState === 'connected' ? '● Live' : connectionState === 'reconnecting' ? '● Reconnecting…' : connectionState === 'connecting' ? '● Connecting…' : '● Disconnected'}
                 </Tag>
               )}
+            {isReplay && replayDay && (
+              <Tooltip title={estimated ? replayDay.note : 'The server saw this day live - footprint, prints, heatmap and book replay exactly.'}>
+                <Tag color={estimated ? 'orange' : 'green'}>{estimated ? 'Estimated from 1-min candles' : 'Exact (tick data)'}</Tag>
+              </Tooltip>
+            )}
             {meta && <Tag>{meta.contractSymbol} · lot {meta.lotSize}</Tag>}
-            {meta && (
-              <Tooltip title={meta.depthLevels >= 200 ? "Streaming Dhan's full market depth: 200 levels a side." : meta.depthLevels >= 20 ? "Streaming Dhan's 20-level depth (the 200-level feed is not available for this contract right now)." : "No deeper depth for this contract (BSE contracts are not offered by Dhan, or the depth sockets are down) - using the 5 levels in each Full packet."}>
+            {meta && !estimated && (
+              <Tooltip title={meta.depthLevels >= 200 ? "Dhan's full market depth: 200 levels a side." : meta.depthLevels >= 20 ? "Dhan's 20-level depth (the 200-level feed is not available for this contract right now)." : "No deeper depth for this contract (BSE contracts are not offered by Dhan, or the depth sockets are down) - using the 5 levels in each Full packet."}>
                 <Tag color={meta.depthLevels >= 200 ? 'green' : meta.depthLevels >= 20 ? 'blue' : 'orange'}>{meta.depthLevels}-level depth</Tag>
               </Tooltip>
             )}
             {meta?.lastPrice > 0 && <Text strong>{meta.lastPrice.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</Text>}
             {lastBar && (
               <Text style={{ fontSize: 12 }}>
-                Cum Δ <span style={{ color: lastBar.cvd >= 0 ? UP_COLOR : DOWN_COLOR, fontWeight: 600 }}>{lastBar.cvd >= 0 ? '+' : ''}{formatVolume(lastBar.cvd, lotSize, showLots)}</span>
+                Δ <span style={{ color: lastBar.delta >= 0 ? UP_COLOR : DOWN_COLOR, fontWeight: 600 }}>{lastBar.delta >= 0 ? '+' : ''}{formatVolume(lastBar.delta, lotSize, showLots)}</span>
+                {' · '}Cum Δ <span style={{ color: lastBar.cvd >= 0 ? UP_COLOR : DOWN_COLOR, fontWeight: 600 }}>{lastBar.cvd >= 0 ? '+' : ''}{formatVolume(lastBar.cvd, lotSize, showLots)}</span>
                 {showLots ? ' lots' : ''}
               </Text>
             )}
@@ -397,11 +462,16 @@ export default function OrderFlowPage() {
 
         {!isReplay && error && <Alert type="warning" showIcon message={error} />}
         {isReplay && replayError && <Alert type="warning" showIcon message={replayError} />}
+        {isReplay && estimated && <Alert type="info" showIcon message="Estimated order flow" description={replayDay?.note} />}
 
         <Row gutter={[16, 16]}>
           <Col xs={24} xl={17}>
-            <Card size="small" title={`Footprint · ${timeframe} min · ${rowSize} pt rows`} extra={!narrow && <Text type="secondary" style={{ fontSize: 11 }}>sell at bid × buy at ask · drag to scroll, wheel to zoom</Text>}>
-              <FootprintChart bars={bars} rowSize={rowSize} lotSize={lotSize} showLots={showLots} lastPrice={meta?.lastPrice} height={narrow ? 470 : 640} profile={profile} />
+            <Card size="small" title={`Footprint · ${timeframe} min · ${rowSize} pt rows${estimated ? ' · estimated' : ''}`} extra={!narrow && <Text type="secondary" style={{ fontSize: 11 }}>bid (sell) × ask (buy) · drag to scroll, wheel or −/+ to zoom</Text>}>
+              <FootprintLegend estimated={estimated} bigLabel={bigLabel} />
+              <FootprintChart
+                bars={bars} rowSize={rowSize} lotSize={lotSize} showLots={showLots} lastPrice={meta?.lastPrice} height={narrow ? 480 : 660}
+                profile={profile} trades={largeTrades} timeframe={timeframe} bigLabel={bigLabel}
+              />
               {profile?.poc != null && (
                 <Text type="secondary" style={{ fontSize: 11 }}>
                   Volume profile{isReplay ? ' (to the replay time)' : ' (today)'}: POC {profile.poc} · value area {profile.val}–{profile.vah} (70% of volume)
@@ -411,8 +481,10 @@ export default function OrderFlowPage() {
           </Col>
           <Col xs={24} xl={7}>
             <Space direction="vertical" size={16} style={{ width: '100%' }}>
-              <Card size="small" title={`Market depth${meta ? ` (${meta.depthLevels} levels)` : ''}`}>
-                <BookLadder book={view?.book} walls={walls} icebergPrices={activeIcebergs} lotSize={lotSize} showLots={showLots} />
+              <Card size="small" title={`Market depth${meta && !estimated ? ` (${meta.depthLevels} levels)` : ''}`}>
+                {estimated
+                  ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No market depth for an estimated day - Dhan keeps no depth history." />
+                  : <BookLadder book={view?.book} walls={walls} icebergPrices={activeIcebergs} lotSize={lotSize} showLots={showLots} />}
               </Card>
               <Card size="small" title="Signals" styles={{ body: { maxHeight: 360, overflowY: 'auto' } }}>
                 {signals.length === 0 ? <Text type="secondary">No signals yet.</Text> : signals.map((s) => (
@@ -427,8 +499,10 @@ export default function OrderFlowPage() {
           </Col>
         </Row>
 
-        <Card size="small" title="Depth heatmap" extra={!narrow && <Text type="secondary" style={{ fontSize: 11 }}>resting liquidity over time · circles = large prints · magenta = icebergs</Text>}>
-          <DepthHeatmap columns={view?.heatmap ?? []} rowSize={rowSize} trades={largeTrades} icebergs={view?.icebergs} lotSize={lotSize} showLots={showLots} height={narrow ? 320 : 440} />
+        <Card size="small" title="Liquidity heatmap" extra={!narrow && <Text type="secondary" style={{ fontSize: 11 }}>resting bids/offers over time (brighter = more) · big dots = big orders · magenta = icebergs</Text>}>
+          {estimated
+            ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No liquidity heatmap for an estimated day - it needs market depth, which Dhan does not keep. Days the server saw live have it." />
+            : <DepthHeatmap columns={view?.heatmap ?? []} rowSize={rowSize} trades={largeTrades} icebergs={view?.icebergs} lotSize={lotSize} showLots={showLots} height={narrow ? 320 : 440} />}
         </Card>
 
         <Card size="small" title={`Delta & cumulative delta · ${timeframe} min`}>
@@ -443,8 +517,11 @@ export default function OrderFlowPage() {
           extreme that failed to push price on (A); exhaustion = almost nothing traded at the extreme (E). An iceberg is a level that keeps
           trading more than twice the most it ever showed while staying in the book. Walls are levels at least 4x the book's median size.
           The volume profile is the traded volume per row over the bars shown, with its point of control (POC) and the 70% value area
-          (VAH-VAL). Replay plays today, or one of the last few days, from the server&apos;s memory - nothing is stored on disk, so a restart
-          clears them (Dhan provides no historical tick or depth data). The heatmap&apos;s book is 200 levels a side for NSE futures, 5 for SENSEX.
+          (VAH-VAL). Load day replays any date: exactly when the server saw it live (today, or the last few days in its memory - green dot in
+          the calendar; nothing is stored on disk), otherwise estimated from Dhan&apos;s 1-minute candles, since Dhan keeps no historical tick or depth
+          data: delta from each minute&apos;s price move, volume spread over its range, absorption = a high-volume minute that failed to move
+          price, exhaustion = a new high/low on thin volume, big dots = volume spikes. The heatmap&apos;s book is 200 levels a side for NSE futures,
+          5 for SENSEX.
         </Text>
         <DomDrawer open={domOpen} onClose={() => setDomOpen(false)} underlying={underlying} />
       </Space>

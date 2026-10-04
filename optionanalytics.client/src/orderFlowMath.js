@@ -78,10 +78,22 @@ export const DEFAULT_ANALYSIS = {
 //   closed off its low (buyers absorbed it - bullish), or the mirror at the top (bearish).
 // - Exhaustion: almost nothing traded at the bar's extreme - the top row under `exhaustionPct` of the
 //   bar's volume means buyers ran out at the high (bearish), the bottom row the same for sellers.
-export function analyzeBars(bars, { rowSize, minVolume = 1, ...options } = {}) {
+//
+// `estimated` bars (a day rebuilt from 1-minute candles - their rows are an even spread, not real
+// trades) get no per-row imbalances, and absorption / exhaustion from the candles instead - see
+// candleSignals.
+export function analyzeBars(bars, { rowSize, minVolume = 1, estimated = false, ...options } = {}) {
   const { imbalanceRatio, stackedCount, absorptionFactor, exhaustionPct } = { ...DEFAULT_ANALYSIS, ...options }
   const step = rowSize > 0 ? rowSize : null
   let cvd = 0
+  if (estimated) {
+    const signals = candleSignals(bars, step)
+    // No per-bar POC either: the rows are an even spread, so no row really traded the most.
+    return bars.map((bar, i) => {
+      cvd += bar.delta
+      return { ...bar, cvd, poc: null, imbalances: new Map(), stacked: [], ...signals[i] }
+    })
+  }
   return bars.map((bar) => {
     cvd += bar.delta
     const ascending = [...bar.levels].sort((a, b) => a.price - b.price)
@@ -146,6 +158,43 @@ export function analyzeBars(bars, { rowSize, minVolume = 1, ...options } = {}) {
     }
 
     return { ...bar, cvd, poc: poc?.price ?? null, imbalances, stacked, absorption, exhaustion }
+  })
+}
+
+// Absorption / exhaustion read from candles alone (volume spread analysis), for estimated days:
+// - Absorption: a heavy bar (volume >= 2x the median) that barely moved (body <= 35% of its range) -
+//   the aggression was soaked up. A longer lower wick = selling absorbed at the low (bullish), a
+//   longer upper wick = buying absorbed at the high (bearish).
+// - Exhaustion: a new high (or low) of the last 10 bars made on thin volume (<= 0.6x the median) and
+//   closing back off it - the push ran out of participants.
+export function candleSignals(bars, step) {
+  const volumes = bars.map((b) => b.volume).filter((v) => v > 0).sort((a, b) => a - b)
+  const median = volumes.length ? volumes[Math.floor(volumes.length / 2)] : 0
+  const row = (price) => (step ? rowOf(price, step) : price)
+  return bars.map((bar, i) => {
+    const absorption = []
+    const exhaustion = []
+    const range = bar.high - bar.low
+    if (median > 0 && range > 0) {
+      const body = Math.abs(bar.close - bar.open)
+      const lowerWick = Math.min(bar.open, bar.close) - bar.low
+      const upperWick = bar.high - Math.max(bar.open, bar.close)
+      if (bar.volume >= 2 * median && body <= 0.35 * range) {
+        const x = (bar.volume / median).toFixed(1)
+        if (lowerWick >= upperWick) absorption.push({ side: 'buy', price: row(bar.low), volume: bar.volume, text: `Selling absorbed at ${bar.low} - ${x}x normal volume but the bar held (est.)` })
+        else absorption.push({ side: 'sell', price: row(bar.high), volume: bar.volume, text: `Buying absorbed at ${bar.high} - ${x}x normal volume but the bar was capped (est.)` })
+      }
+      const prior = bars.slice(Math.max(0, i - 10), i)
+      if (prior.length >= 3 && bar.volume <= 0.6 * median) {
+        if (bar.high > Math.max(...prior.map((b) => b.high)) && bar.close < bar.high - range / 3) {
+          exhaustion.push({ side: 'sell', price: row(bar.high), text: `Buying exhausted at the new high ${bar.high} - thin volume, closed off it (est.)` })
+        }
+        if (bar.low < Math.min(...prior.map((b) => b.low)) && bar.close > bar.low + range / 3) {
+          exhaustion.push({ side: 'buy', price: row(bar.low), text: `Selling exhausted at the new low ${bar.low} - thin volume, closed off it (est.)` })
+        }
+      }
+    }
+    return { absorption, exhaustion }
   })
 }
 

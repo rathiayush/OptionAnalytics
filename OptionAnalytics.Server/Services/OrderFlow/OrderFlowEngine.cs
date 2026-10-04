@@ -73,8 +73,9 @@ public sealed class OrderFlowEngine
     private readonly Dictionary<decimal, LevelEpisode> _askEpisodes = new();
     private readonly List<IcebergState> _icebergs = new();
 
-    public OrderFlowEngine(string underlying, uint securityId, string contractSymbol, string exchangeSegment, decimal tickSize, int lotSize)
+    public OrderFlowEngine(string underlying, uint securityId, string contractSymbol, string exchangeSegment, decimal tickSize, int lotSize, DateOnly? expiry = null)
     {
+        Expiry = expiry;
         Underlying = underlying;
         SecurityId = securityId;
         ContractSymbol = contractSymbol;
@@ -90,6 +91,7 @@ public sealed class OrderFlowEngine
     public string Underlying { get; }
     public uint SecurityId { get; }
     public string ContractSymbol { get; }
+    public DateOnly? Expiry { get; }
     public string ExchangeSegment { get; }
     public decimal TickSize { get; }
     public int LotSize { get; }
@@ -352,7 +354,7 @@ public sealed class OrderFlowEngine
 
     private OrderFlowMeta Meta() => new(
         Underlying, ContractSymbol, SecurityId, ExchangeSegment, LotSize, TickSize, _prevLtp, _lastTradeAt,
-        Fresh(_deepBidAt, _clock) || Fresh(_deepAskAt, _clock) ? _deepDepth : _importedDepth ?? 5, _day == default ? null : _day);
+        Fresh(_deepBidAt, _clock) || Fresh(_deepAskAt, _clock) ? _deepDepth : _importedDepth ?? 5, _day == default ? null : _day, Expiry);
 
     private IReadOnlyList<OrderFlowIceberg> Icebergs() => _icebergs
         .Select(i => new OrderFlowIceberg(i.Id, i.IsBid, i.Price, i.StartedAt, i.DetectedAt, i.LastSeenAt, i.EndedAt, i.Traded, i.MaxDisplayed, i.Refills))
@@ -427,7 +429,7 @@ public sealed class OrderFlowEngine
             if (_day == default) return null;
             return new OrderFlowDay
             {
-                Underlying = Underlying, SecurityId = SecurityId, ContractSymbol = ContractSymbol, ExchangeSegment = ExchangeSegment,
+                Underlying = Underlying, SecurityId = SecurityId, ContractSymbol = ContractSymbol, ExchangeSegment = ExchangeSegment, Expiry = Expiry,
                 TickSize = TickSize, LotSize = LotSize, Day = _day, Sequence = _sequence, LastPrice = _prevLtp, LastTradeAt = _lastTradeAt,
                 Clock = _clock, DepthLevels = Math.Max(_dayDepth, _importedDepth ?? 5),
                 Bars = _bars.Values.Select(b => new OrderFlowDay.Bar(b.Time, b.Open, b.High, b.Low, b.Close, b.Buy, b.Sell, b.Trades,
@@ -491,7 +493,7 @@ public sealed class OrderFlowEngine
     /// <summary>An engine holding a saved day - what replay serves a past day's Snapshot from.</summary>
     public static OrderFlowEngine FromDay(OrderFlowDay day)
     {
-        var engine = new OrderFlowEngine(day.Underlying, day.SecurityId, day.ContractSymbol, day.ExchangeSegment, day.TickSize, day.LotSize);
+        var engine = new OrderFlowEngine(day.Underlying, day.SecurityId, day.ContractSymbol, day.ExchangeSegment, day.TickSize, day.LotSize, day.Expiry);
         engine.ImportDay(day);
         return engine;
     }
@@ -510,6 +512,7 @@ public sealed class OrderFlowDay
     public required decimal TickSize { get; init; }
     public required int LotSize { get; init; }
     public required DateOnly Day { get; init; }
+    public DateOnly? Expiry { get; init; }
     public long Sequence { get; init; }
     public decimal LastPrice { get; init; }
     public DateTimeOffset? LastTradeAt { get; init; }
@@ -550,15 +553,19 @@ public sealed record HeatmapColumn(DateTimeOffset Time, IReadOnlyList<decimal[]>
 public sealed record OrderFlowDom(
     OrderFlowMeta Meta, DateTimeOffset Time, OrderFlowBook Book, IReadOnlyList<FootprintLevel> Volume, IReadOnlyList<OrderFlowTrade> Trades);
 
-/// <summary>DepthLevels: 200 or 20 while that depth feed is streaming this contract, else 5. Day: the
-/// IST trading day the data is for.</summary>
+/// <summary>DepthLevels: 200 or 20 while that depth feed is streaming this contract, else 5 (0 for
+/// a day estimated from candles, which has no book). Day: the IST trading day the data is for.
+/// Expiry: the futures contract's expiry.</summary>
 public sealed record OrderFlowMeta(
     string Underlying, string ContractSymbol, uint SecurityId, string ExchangeSegment, int LotSize, decimal TickSize,
-    decimal LastPrice, DateTimeOffset? LastTradeAt, int DepthLevels, DateOnly? Day = null);
+    decimal LastPrice, DateTimeOffset? LastTradeAt, int DepthLevels, DateOnly? Day = null, DateOnly? Expiry = null);
 
+/// <summary>Source: "live" (built from the tick feed and depth - exact) or "estimated" (a past day
+/// rebuilt from Dhan's 1-minute candles - see OrderFlowEstimator); Note explains an estimate.</summary>
 public sealed record OrderFlowSnapshot(
     OrderFlowMeta Meta, decimal RowSize, IReadOnlyList<OrderFlowBar> Bars, IReadOnlyList<OrderFlowTrade> Trades,
-    IReadOnlyList<OrderFlowIceberg> Icebergs, IReadOnlyList<HeatmapColumn> Heatmap, OrderFlowBook Book);
+    IReadOnlyList<OrderFlowIceberg> Icebergs, IReadOnlyList<HeatmapColumn> Heatmap, OrderFlowBook Book,
+    string Source = "live", string? Note = null);
 
 /// <summary>Time: the server's time of the latest event - what the page stamps its live heatmap
 /// columns with, so they line up with the loaded history whatever this device's clock says. Book: the

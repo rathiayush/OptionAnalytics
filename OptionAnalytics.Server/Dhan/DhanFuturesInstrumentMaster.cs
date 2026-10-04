@@ -112,6 +112,10 @@ public sealed class DhanFuturesInstrumentMaster
     public DhanFuturesInstrument? GetNearestContract(string underlying, DateOnly asOf) =>
         _byUnderlying.TryGetValue(underlying, out var list) ? list.FirstOrDefault(f => f.Expiry >= asOf) : null;
 
+    /// <summary>The listed contract expiring on <paramref name="expiry"/>, if there is one.</summary>
+    public DhanFuturesInstrument? GetContract(string underlying, DateOnly expiry) =>
+        _byUnderlying.TryGetValue(underlying, out var list) ? list.FirstOrDefault(f => f.Expiry == expiry) : null;
+
     // ---- CSV parsing ---------------------------------------------------------------------------
 
     private static class Columns
