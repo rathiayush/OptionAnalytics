@@ -111,7 +111,7 @@ public sealed class OrderFlowHistory
         }
         if (engine is null)
             return new TapeResult(Array.Empty<OrderFlowTrade>(), $"no Time & Sales for {day:dd MMM yyyy} - only days recorded live are held (an estimated day has no prints)");
-        return new TapeResult(engine.Tape(until, Math.Clamp(count, 1, 5000), Math.Max(1, minLots) * (long)engine.LotSize), null);
+        return new TapeResult(engine.Tape(until, Math.Clamp(count, 1, 60_000), Math.Max(1, minLots) * (long)engine.LotSize), null);
     }
 
     public sealed record TapeResult(IReadOnlyList<OrderFlowTrade> Prints, string? Error);
