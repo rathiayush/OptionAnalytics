@@ -3,7 +3,7 @@ import { Alert, Button, Card, Checkbox, Col, Popconfirm, Progress, Row, Segmente
 import { SoundOutlined } from '@ant-design/icons'
 import { UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import {
-  STRATEGIES, STRATEGY_BY_ID, buildOiContext, evaluateStrategies, simulateOutcome, strategyStats, topFifteen, MIN_TRADES_TO_RANK,
+  STRATEGIES, STRATEGY_BY_ID, buildOiContext, evaluateStrategies, simulateOutcome, strategyStats, topFifteen, MIN_TRADES_TO_RANK, oiSummary, optionOiText,
 } from './strategyEngine.js'
 import { aggregateBars, analyzeBars, findWalls, liquiditySignals, pullStackSignals, replayView } from './orderFlowMath.js'
 
@@ -140,6 +140,8 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   const liveNow = view?.heatmap?.at(-1)?.t ?? (view?.meta?.lastTradeAt ? msOf(view.meta.lastTradeAt) : Date.now())
   const nowMs = isReplay ? replayMs : liveNow
   const minuteKey = nowMs ? Math.floor(nowMs / 10_000) : 0 // evaluate every 10 s of market time
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const oiNow = useMemo(() => (oi && nowMs ? oiSummary(oi, nowMs) : null), [oi, minuteKey])
 
   useEffect(() => {
     if (!oi || !view?.minuteBars?.length || !nowMs) return
@@ -305,6 +307,19 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       )}
     >
       {oiError && <Alert type="warning" showIcon style={{ marginBottom: 8 }} message={`OI for ${date} could not be loaded - the strategies need it: ${oiError}`} />}
+      {oiNow && (
+        <div style={{ fontSize: 12, marginBottom: 8, padding: '6px 8px', border: '1px solid #ffffff1f', borderRadius: 6, display: 'flex', flexWrap: 'wrap', gap: '4px 16px' }} aria-label="OI now">
+          <span><Text strong style={{ fontSize: 12 }}>Options OI</Text>{' '}
+            <span style={{ color: oiNow.options?.lean > 0.002 ? UP_COLOR : oiNow.options?.lean < -0.002 ? DOWN_COLOR : undefined }}>
+              {oiNow.options?.lean > 0.002 ? 'put writing leads (bullish)' : oiNow.options?.lean < -0.002 ? 'call writing leads (bearish)' : 'balanced'}
+            </span> · {optionOiText(oiNow.options)}</span>
+          <span>Walls: support <b style={{ color: UP_COLOR }}>{oiNow.support ?? '-'}</b>{oiNow.supportChg != null ? ` (${oiNow.supportChg >= 0 ? '+' : ''}${(oiNow.supportChg / 1e5).toFixed(1)}L)` : ''}
+            {' '}· resistance <b style={{ color: DOWN_COLOR }}>{oiNow.resistance ?? '-'}</b>{oiNow.resistanceChg != null ? ` (${oiNow.resistanceChg >= 0 ? '+' : ''}${(oiNow.resistanceChg / 1e5).toFixed(1)}L)` : ''}
+            {' '}· max pain <b>{oiNow.maxPain ?? '-'}</b></span>
+          <span><Text strong style={{ fontSize: 12 }}>Futures OI</Text> {oiNow.futures?.regime
+            ? `${oiNow.futures.regime} (price ${(oiNow.futures.pricePct * 100).toFixed(2)}%, OI ${(oiNow.futures.oiPct * 100).toFixed(2)}% in 15m)` : '-'}</span>
+        </div>
+      )}
       {estimated && <Alert type="info" showIcon style={{ marginBottom: 8 }} message="Estimated day: no tape, book or heatmap - tape checks use each minute's estimated buy/sell split and the DOM / Heatmap confirmation is waived. Results are marked est." />}
       <Row gutter={[16, 12]}>
         <Col xs={24} xl={10}>
