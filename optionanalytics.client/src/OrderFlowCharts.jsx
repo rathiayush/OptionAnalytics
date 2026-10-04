@@ -4,6 +4,7 @@ import { HistogramSeries, LineSeries, CrosshairMode } from 'lightweight-charts'
 import { createZoomableChart } from './chartZoom.js'
 import { UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR, toChartTime, istTickMarkFormatter, istTimeFormatter } from './shared.jsx'
 import { useFitContentAsDataGrows } from './oiShared.jsx'
+import { useElementWidth, prepareCanvas } from './canvasUtils.js'
 
 const { Text } = Typography
 
@@ -32,32 +33,6 @@ export function formatVolume(quantity, lotSize, showLots) {
   if (abs >= 1e4) return `${(v / 1e3).toFixed(0)}k`
   if (abs >= 1e3) return `${(v / 1e3).toFixed(1)}k`
   return abs < 10 && v % 1 !== 0 ? v.toFixed(1) : String(Math.round(v))
-}
-
-function useElementWidth(ref) {
-  const [width, setWidth] = useState(0)
-  useEffect(() => {
-    if (!ref.current) return
-    const observer = new ResizeObserver(([entry]) => setWidth(Math.floor(entry.contentRect.width)))
-    observer.observe(ref.current)
-    return () => observer.disconnect()
-  }, [ref])
-  return width
-}
-
-// A canvas sized for the device's pixel ratio; returns its 2D context ready to draw in CSS pixels.
-function prepareCanvas(canvas, width, height) {
-  const dpr = window.devicePixelRatio || 1
-  if (canvas.width !== Math.round(width * dpr) || canvas.height !== Math.round(height * dpr)) {
-    canvas.width = Math.round(width * dpr)
-    canvas.height = Math.round(height * dpr)
-    canvas.style.width = `${width}px`
-    canvas.style.height = `${height}px`
-  }
-  const ctx = canvas.getContext('2d')
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-  ctx.clearRect(0, 0, width, height)
-  return ctx
 }
 
 function niceStep(rowsPerLabel) {
