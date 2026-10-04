@@ -17,7 +17,8 @@
 // moved into futures terms with the current basis (futures - spot).
 //
 // Every setup carries an entry (the futures price), a stop and a target in futures points and a time
-// stop; simulateOutcome walks the minute bars after it to see which came first. That is the outcome
+// stop, and can carry a trailing stop; simulateOutcome walks the minute bars after it to see which came
+// first. The day's cut-off: no new setup after 14:45, every trade closed by 15:10 IST. That is the outcome
 // of the futures move the strategy calls - the option you would trade moves with it, but its own
 // P&L (premium, decay) is not modelled.
 
@@ -25,7 +26,14 @@ const MIN = 60_000
 const msOf = (t) => (typeof t === 'number' ? t : new Date(t).getTime())
 const istMinute = (ms) => Math.floor((ms / MIN + 330) % 1440) // minutes since IST midnight
 const hm = (h, m) => h * 60 + m
-const EOD = hm(15, 10)
+/** No new setup after this (IST minutes since midnight)... */
+export const LAST_ENTRY = hm(14, 45)
+/** ...and every trade still open is closed at this cut-off. */
+export const SQUARE_OFF = hm(15, 10)
+/** Trailing stop-loss: once a trade is `startR` in profit, the stop follows the best price `gapR`
+ *  behind it (with the defaults the stop reaches the entry - breakeven - at +1R, and only ever tightens). */
+export const DEFAULT_TRAIL = { startR: 1, gapR: 1 }
+export const fmtHm = (m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`
 
 export const STRATEGIES = [
   { id: 'wallDefence', no: 1, name: 'OI wall defence', short: 'Wall defence' },
@@ -275,7 +283,7 @@ export function evaluateStrategies(input) {
   const price = input.price
   if (!oi || !bars?.length || !(price > 0)) return []
   const minute = istMinute(nowMs)
-  if (minute < hm(9, 30) || minute > hm(14, 45)) return []
+  if (minute < hm(9, 30) || minute > LAST_ENTRY) return []
   const spotNow = valueAt(oi.spot, nowMs)?.close
   if (!spotNow) return []
   const basis = price - spotNow
@@ -319,7 +327,7 @@ export function evaluateStrategies(input) {
     if (!(stopPts > 0) || !(targetPts > 0)) return
     const stance = optionOiStance(optionRead, dir)
     if (stance === 'against') return
-    const timeStop = Math.min(nowMs + timeStopMin * MIN, nowMs + (EOD - minute) * MIN)
+    const timeStop = Math.min(nowMs + timeStopMin * MIN, nowMs + (SQUARE_OFF - minute) * MIN)
     const { OI: wallText, ...rest } = checks
     out.push({
       id, name: STRATEGY_BY_ID[id].name, side: dir > 0 ? 'LONG' : 'SHORT', t: nowMs, entry: price,
@@ -699,32 +707,71 @@ export function evaluateStrategies(input) {
 
 // ---- outcome --------------------------------------------------------------------------------------
 
-/** What happened after a setup, from the minute bars up to `untilMs`: stop first if a bar touches both.
- *  `dayOver`: the day's data is complete (a scanned past day) - a trade still running when it ends is
- *  closed at the last price, like the 15:10 exit. */
+/** The stop-loss in force once price has reached `best` (the most favourable price since entry): the
+ *  original stop until the trade is `trail.startR` in profit, then `trail.gapR` behind `best` - never
+ *  looser than the original. No `setup.trail`: a fixed stop. */
+export function trailedStop(setup, best) {
+  const trail = setup.trail
+  if (!trail) return setup.stop
+  const dir = setup.side === 'LONG' ? 1 : -1
+  const risk = Math.abs(setup.entry - setup.stop)
+  if (!(risk > 0) || dir * (best - setup.entry) < trail.startR * risk) return setup.stop
+  const trailed = best - dir * trail.gapR * risk
+  return dir > 0 ? Math.max(setup.stop, trailed) : Math.min(setup.stop, trailed)
+}
+
+/** The 15:10 cut-off on the setup's own day, in ms. */
+export function squareOffMs(t) {
+  const ms = msOf(t)
+  return ms - (ms % MIN) + (SQUARE_OFF - istMinute(ms)) * MIN
+}
+
+/** What happened after a setup, from the minute bars up to `untilMs`: stop first if a bar touches both
+ *  (the stop as it stood when the bar opened - a trailing stop moves after each completed bar). Closed
+ *  at its time stop, and always by the 15:10 cut-off. `dayOver`: the day's data is complete (a scanned
+ *  past day) - a trade still running when the data ends is closed at the last price.
+ *  Returns { status: 'open' | 'win' | 'loss' | 'flat', r, mfe, stop (in force now), trailed, exitAt, timeStop }. */
 export function simulateOutcome(setup, minuteBars, untilMs, dayOver = false) {
   const dir = setup.side === 'LONG' ? 1 : -1
   const risk = Math.abs(setup.entry - setup.stop)
   const rTarget = Math.abs(setup.target - setup.entry) / risk
+  const timeStopMs = Math.min(setup.timeStopMs ?? Infinity, squareOffMs(setup.t))
+  const statusOf = (r) => (r > 0.005 ? 'win' : r < -0.005 ? 'loss' : 'flat')
   let mfe = 0
   let lastClose = setup.entry
+  let best = setup.entry
+  let stop = setup.stop
+  const state = () => ({ stop, trailed: stop !== setup.stop })
   for (const b of minuteBars) {
     const t = msOf(b.time)
     if (t <= setup.t) continue
-    if (t + MIN > untilMs) return { status: 'open', r: (dir * (lastClose - setup.entry)) / risk, mfe }
-    const adverse = dir > 0 ? b.low <= setup.stop : b.high >= setup.stop
+    if (t + MIN > untilMs) return { status: 'open', r: (dir * (lastClose - setup.entry)) / risk, mfe, ...state() }
+    const adverse = dir > 0 ? b.low <= stop : b.high >= stop
     const favourable = dir > 0 ? b.high >= setup.target : b.low <= setup.target
     mfe = Math.max(mfe, (dir * ((dir > 0 ? b.high : b.low) - setup.entry)) / risk)
-    if (adverse) return { status: 'loss', r: -1, mfe, exitAt: t }
-    if (favourable) return { status: 'win', r: rTarget, mfe, exitAt: t }
+    if (adverse) {
+      const r = (dir * (stop - setup.entry)) / risk
+      return { status: statusOf(r), r, mfe, exitAt: t, stopHit: true, ...state() }
+    }
+    if (favourable) return { status: 'win', r: rTarget, mfe, exitAt: t, ...state() }
     lastClose = b.close
-    if (t + MIN >= setup.timeStopMs) {
+    best = dir > 0 ? Math.max(best, b.high) : Math.min(best, b.low)
+    stop = trailedStop(setup, best)
+    if (t + MIN >= timeStopMs) {
       const r = (dir * (b.close - setup.entry)) / risk
-      return { status: r > 0 ? 'win' : 'loss', r, mfe, exitAt: t, timeStop: true }
+      return { status: statusOf(r), r, mfe, exitAt: t, timeStop: true, squareOff: t + MIN >= squareOffMs(setup.t), ...state() }
     }
   }
   const r = (dir * (lastClose - setup.entry)) / risk
-  return dayOver ? { status: r > 0 ? 'win' : 'loss', r, mfe, timeStop: true } : { status: 'open', r, mfe }
+  return dayOver ? { status: statusOf(r), r, mfe, timeStop: true, ...state() } : { status: 'open', r, mfe, ...state() }
+}
+
+/** How an outcome ended, for alerts and the list. */
+export function exitLabel(outcome) {
+  if (!outcome || outcome.status === 'open') return null
+  if (outcome.timeStop) return outcome.squareOff ? `${fmtHm(SQUARE_OFF)} square-off` : 'Time exit'
+  if (outcome.stopHit) return outcome.trailed ? 'Trailing SL hit' : 'Stop loss hit'
+  return 'Target hit'
 }
 
 // ---- scoring --------------------------------------------------------------------------------------
