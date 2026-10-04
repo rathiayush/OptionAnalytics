@@ -11,11 +11,10 @@ using OptionAnalytics.Server.Services;
 namespace OptionAnalytics.Server.Tests;
 
 /// <summary>
-/// LiveTradingService's partial exit, run against an in-memory fake of Dhan's REST API: the super
-/// order's legs are cancelled, the lots go out as a priced LIMIT exit, the rest is protected by ONE
-/// stop-loss order tagged with the old target, a later full Close cancels that protection before
-/// sizing its exit (so it cannot count it as an exit already working, nor leave it behind to fire
-/// later), and reaching the target turns the same stop-loss order into a limit exit.
+/// LiveTradingService's live order handling, run against an in-memory fake of Dhan's REST API. A
+/// partial exit is ONE priced LIMIT exit and nothing else - the super order and its legs stay as they
+/// are (no extra orders); the panel flags that the legs now cover more than is held, and a later Close
+/// cancels the legs before exiting the rest.
 /// </summary>
 public sealed class LiveTradingPartialExitTests
 {
@@ -23,65 +22,64 @@ public sealed class LiveTradingPartialExitTests
     private const int Lot = 65;
 
     [Fact]
-    public async Task PartialExit_CancelsTheLegs_ExitsTheLots_AndProtectsTheRestWithOneStopLoss()
+    public async Task PartialExit_SendsOnlyTheExit_AndLeavesTheSuperOrderAsItIs()
     {
         var (service, dhan, _) = await CreateAsync();
 
         var result = await service.PartialExitAsync(SecurityId.ToString(), lots: 1, slippagePoints: 1m, CancellationToken.None);
 
         Assert.True(result.Success, result.Message);
-        // 1. Both super-order legs cancelled.
-        Assert.Contains("DELETE /super/orders/S1/TARGET_LEG", dhan.Requests);
-        Assert.Contains("DELETE /super/orders/S1/STOP_LOSS_LEG", dhan.Requests);
-        // 2. One lot out at the bid minus the slippage.
-        var exit = Assert.Single(dhan.Orders.Values, o => o.Tag.StartsWith("OIRX-"));
+        // One lot out at the bid minus the slippage - the only order placed.
+        var exit = Assert.Single(dhan.Orders.Values);
         Assert.Equal(("SELL", "LIMIT", Lot, 119.00m), (exit.Side, exit.Type, exit.Quantity, exit.Price));
-        // 3. The rest (3 lots) behind one stop-loss at the old stop-loss, tagged with the old target.
-        var protection = Assert.Single(dhan.Orders.Values, o => o.Tag.StartsWith("OIRP-"));
-        Assert.Equal(("SELL", "STOP_LOSS", 3 * Lot, 80.00m), (protection.Side, protection.Type, protection.Quantity, protection.Trigger));
-        Assert.Equal(78.00m, protection.Price); // fills beyond the trigger: 80 - max(2 x slippage, 10 ticks) = 80 - 2
-        Assert.Equal(150m, LiveTradingService.TargetFromTag(protection.Tag));
+        Assert.StartsWith("OIRX-", exit.Tag);
+        // The super order is untouched.
+        Assert.DoesNotContain(dhan.Requests, r => r.StartsWith("DELETE /super/orders"));
+        Assert.Contains("still cover", result.Message);
 
-        // The panel shows the rest as managed, with its target and stop-loss.
+        // Once it fills, the panel shows the legs still cover the original 4 lots: one more than is held.
+        dhan.Fill(exit.Id);
         await service.RefreshAsync(CancellationToken.None);
         var row = Assert.Single(service.Snapshot().Positions, p => p.IsOpen);
-        Assert.Equal(("managed", 150m, 80m), (row.Protection, row.TargetPrice, row.StopLossPrice));
+        Assert.Equal(("super", 150m, 80m, 3 * Lot, Lot), (row.Protection, row.TargetPrice, row.StopLossPrice, row.NetQty, row.LegExcessQty));
     }
 
     [Fact]
-    public async Task Close_AfterAPartialExit_CancelsTheProtectionFirst_AndExitsEverythingLeft()
+    public async Task Close_AfterAPartialExit_CancelsTheLegsFirst_AndExitsEverythingLeft()
     {
         var (service, dhan, _) = await CreateAsync();
         await service.PartialExitAsync(SecurityId.ToString(), lots: 1, slippagePoints: 1m, CancellationToken.None);
         dhan.Fill(dhan.Orders.Values.Single(o => o.Tag.StartsWith("OIRX-")).Id); // the partial exit fills: 3 lots left
-        var protectionId = dhan.Orders.Values.Single(o => o.Tag.StartsWith("OIRP-")).Id;
 
         var result = await service.CloseAsync(SecurityId.ToString(), 1m, CancellationToken.None);
 
         Assert.True(result.Success, result.Message);
-        Assert.Equal("CANCELLED", dhan.Orders[protectionId].Status);
-        var cancelAt = dhan.Requests.IndexOf($"DELETE /orders/{protectionId}");
-        var exits = dhan.Orders.Values.Where(o => o.Tag.StartsWith("OIRX-") && o.Status == "PENDING").ToList();
-        var finalExit = Assert.Single(exits);
-        Assert.Equal(3 * Lot, finalExit.Quantity); // not reduced by the (cancelled) protection
-        Assert.True(cancelAt >= 0 && cancelAt < dhan.Requests.LastIndexOf("POST /orders"), "the protection must be cancelled before the exit goes out");
+        var legsCancelled = dhan.Requests.IndexOf("DELETE /super/orders/S1/STOP_LOSS_LEG");
+        Assert.True(legsCancelled >= 0 && dhan.Requests.IndexOf("DELETE /super/orders/S1/TARGET_LEG") >= 0);
+        var finalExit = Assert.Single(dhan.Orders.Values, o => o.Tag.StartsWith("OIRX-") && o.Status == "PENDING");
+        Assert.Equal(3 * Lot, finalExit.Quantity);
+        Assert.True(legsCancelled < dhan.Requests.LastIndexOf("POST /orders"), "the legs must be cancelled before the exit goes out");
     }
 
     [Fact]
-    public async Task ReachingTheTarget_TurnsTheProtectionIntoALimitExit()
+    public async Task ALeftoverProtectionOrder_ReachingItsTarget_BecomesALimitExit()
     {
         var (service, dhan, feed) = await CreateAsync();
-        await service.PartialExitAsync(SecurityId.ToString(), lots: 1, slippagePoints: 1m, CancellationToken.None);
+        // A stop-loss an earlier version of partial exit left behind, tagged with its target (150).
+        dhan.Orders["L1"] = new FakeDhan.PlainOrder
+        {
+            Id = "L1", Side = "SELL", Tag = "OIRP-T15000-101500-1", Segment = "NSE_FNO", Product = "INTRADAY",
+            Type = "STOP_LOSS", Quantity = 3 * Lot, Price = 78m, Trigger = 80m,
+        };
         await service.RefreshAsync(CancellationToken.None);
-        var protection = dhan.Orders.Values.Single(o => o.Tag.StartsWith("OIRP-"));
 
         var atTarget = Tick(bid: 150.50m, ask: 151m, last: 151m);
         feed.SetLastTickForTesting(atTarget);
         service.OnTick(atTarget);
 
-        for (var i = 0; i < 50 && protection.Type != "LIMIT"; i++) await Task.Delay(100);
-        Assert.Equal(("LIMIT", 150.50m, 3 * Lot), (protection.Type, protection.Price, protection.Quantity));
-        Assert.Single(dhan.Orders.Values, o => o.Side == "SELL" && o.Status == "PENDING" && o.Tag.StartsWith("OIRP-")); // still one order for the rest
+        var order = dhan.Orders["L1"];
+        for (var i = 0; i < 50 && order.Type != "LIMIT"; i++) await Task.Delay(100);
+        Assert.Equal(("LIMIT", 150.50m, 3 * Lot), (order.Type, order.Price, order.Quantity));
     }
 
     [Fact]
@@ -92,29 +90,16 @@ public sealed class LiveTradingPartialExitTests
         var result = await service.PartialExitAsync(SecurityId.ToString(), lots: 4, slippagePoints: 1m, CancellationToken.None);
 
         Assert.True(result.Success, result.Message);
-        Assert.DoesNotContain(dhan.Orders.Values, o => o.Tag.StartsWith("OIRP-"));
+        Assert.Contains("DELETE /super/orders/S1/STOP_LOSS_LEG", dhan.Requests);
         Assert.Equal(4 * Lot, Assert.Single(dhan.Orders.Values, o => o.Tag.StartsWith("OIRX-")).Quantity);
     }
 
-    [Theory]
-    [InlineData(150.0, "OIRP-T15000-101500-1")]
-    [InlineData(23.45, "OIRP-T2345-101500-2")]
-    public void ProtectionTag_CarriesTheTarget(double target, string expectedPrefix)
-    {
-        var slice = expectedPrefix.EndsWith("-2") ? 2 : 1;
-        var tag = LiveTradingService.ProtectionTag((decimal)target, "101500", slice);
-        Assert.Equal(expectedPrefix, tag);
-        Assert.True(tag.Length <= 30);
-        Assert.Equal((decimal)target, LiveTradingService.TargetFromTag(tag));
-        Assert.Null(LiveTradingService.TargetFromTag("OIRX-20261004-1"));
-    }
-
     [Fact]
-    public void ProtectionPrices_LeaveRoomToFillBeyondTheTrigger()
+    public void ProtectionTags_CarryTheTarget()
     {
-        Assert.Equal((78.00m, 80.00m), LiveTradingService.ProtectionPrices(closesBySelling: true, 80m, 1m, 0.05m));
-        Assert.Equal((82.00m, 80.00m), LiveTradingService.ProtectionPrices(closesBySelling: false, 80m, 1m, 0.05m));
-        Assert.Equal((79.50m, 80.00m), LiveTradingService.ProtectionPrices(closesBySelling: true, 80m, 0m, 0.05m)); // 10 ticks minimum
+        Assert.Equal(150m, LiveTradingService.TargetFromTag("OIRP-T15000-101500-1"));
+        Assert.Equal(23.45m, LiveTradingService.TargetFromTag("OIRP-T2345-101500-2"));
+        Assert.Null(LiveTradingService.TargetFromTag("OIRX-20261004-1"));
         Assert.True(LiveTradingService.TargetReached(true, 150m, 150m));
         Assert.False(LiveTradingService.TargetReached(true, 150m, 149.95m));
         Assert.True(LiveTradingService.TargetReached(false, 50m, 49.5m));
