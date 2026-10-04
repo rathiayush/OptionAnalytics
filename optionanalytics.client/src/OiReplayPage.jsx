@@ -2288,6 +2288,8 @@ export default function OiReplayPage() {
   // OI change heatmap's own bucket size - see HEATMAP_TIMEFRAME_OPTIONS' own doc comment for why this
   // is independent of every other timeframe picker on the page.
   const [heatmapTimeframeMinutes, setHeatmapTimeframeMinutes] = useState(1)
+  // The Futures chart's own candle timeframe (1/3/5/15), independent of the spot chart's.
+  const [futuresTimeframe, setFuturesTimeframe] = usePersistedState('optionanalytics.oiReplay.futuresTimeframe', 5)
   // Which of the two whole-chain OI charts the Day OI Accumulation card shows - see the chart
   // itself, further down, for why this is a switch rather than the per-strike drilldown's own
   // stacked pair (both would double this card's already-tall height, and the day-level numbers
@@ -3029,8 +3031,8 @@ export default function OiReplayPage() {
   const displayFuturesBars = useMemo(() => {
     if (asOfMs == null) return []
     const cutoff = toChartTime(asOfMs)
-    return aggregateBars(futuresBarsChart.filter((b) => b.time <= cutoff), timeframe)
-  }, [futuresBarsChart, asOfMs, timeframe])
+    return aggregateBars(futuresBarsChart.filter((b) => b.time <= cutoff), futuresTimeframe)
+  }, [futuresBarsChart, asOfMs, futuresTimeframe])
   const currentFutures = useMemo(
     () => (asOfMs != null ? latestAtOrBefore(futuresPointsRaw, asOfMs) : null),
     [futuresPointsRaw, asOfMs],
@@ -4349,6 +4351,7 @@ export default function OiReplayPage() {
                     title={<Space size={4}><CardDragHandle {...dragHandleProps('futures')} />Futures (nearest listed contract - always live from Dhan, never stored)</Space>}
                     extra={
                       <Space size={8}>
+                        <Select value={futuresTimeframe} onChange={setFuturesTimeframe} size="small" style={{ width: 90 }} options={TIMEFRAME_OPTIONS} />
                         {futuresRegimeSinceOpen && futuresRegimeSinceOpen.regime !== 'Neutral' && (
                           <Tag color={futuresRegimeSinceOpen.bias === 'Bullish' ? 'success' : 'error'}>{futuresRegimeSinceOpen.regime}</Tag>
                         )}
@@ -4406,12 +4409,12 @@ export default function OiReplayPage() {
                             />
                           </Col>
                         </Row>
-                        <ChartErrorBoundary key={`futures-${underlying}-${result.date}-${timeframe}`}>
+                        <ChartErrorBoundary key={`futures-${underlying}-${result.date}-${futuresTimeframe}`}>
                           <FuturesChart
                             bars={displayFuturesBars}
                             oiLine={futuresOiLine}
                             markers={futuresRegimeMarkers}
-                            dayKey={`futures-${underlying}-${result.date}-${timeframe}`}
+                            dayKey={`futures-${underlying}-${result.date}-${futuresTimeframe}`}
                             height={320}
                           />
                         </ChartErrorBoundary>

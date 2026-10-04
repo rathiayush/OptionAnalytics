@@ -463,7 +463,14 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
             // Also only ever populated by a Full-mode packet - see BestBidPrice/BestAskPrice's own
             // comment just above, same reasoning.
             OpenInterest: packet.OpenInterest > 0 ? packet.OpenInterest : previous?.OpenInterest ?? 0,
-            ExchangeTimestamp: packet.ExchangeTimestamp);
+            ExchangeTimestamp: packet.ExchangeTimestamp)
+        {
+            LastTradedQty = packet.LastTradedQty,
+            TotalBuyQty = packet.TotalBuyQty > 0 ? packet.TotalBuyQty : previous?.TotalBuyQty ?? 0,
+            TotalSellQty = packet.TotalSellQty > 0 ? packet.TotalSellQty : previous?.TotalSellQty ?? 0,
+            Bids = packet.Bids ?? previous?.Bids,
+            Asks = packet.Asks ?? previous?.Asks,
+        };
 
         _lastTick[packet.SecurityId] = tick;
         if (tick.LastPrice <= 0) return;

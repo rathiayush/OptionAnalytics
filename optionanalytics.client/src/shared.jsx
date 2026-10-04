@@ -1077,6 +1077,7 @@ const NAV_ITEMS = [
   },
   { key: '/expired-backtest', label: 'Expired Backtest' },
   { key: '/oi-replay', label: 'OI Replay' },
+  { key: '/order-flow', label: 'Order Flow' },
   { key: '/live-strike-data', label: 'Live Strike Data' },
   { key: '/triggers', label: 'Triggers' },
   { key: '/contracts', label: 'Contracts' },

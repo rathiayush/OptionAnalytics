@@ -128,4 +128,39 @@ public sealed class DhanTickPacketParserTests
 
         Assert.Empty(parsed);
     }
+
+    [Fact]
+    public void ParseMessage_FullPacket_DecodesTradeQtyTotalsAndAllFiveDepthLevels()
+    {
+        var packet = new byte[FullPacketLength];
+        packet[0] = (byte)DhanPacketKind.Full;
+        BinaryPrimitives.WriteUInt16LittleEndian(packet.AsSpan(1, 2), FullPacketLength);
+        BinaryPrimitives.WriteUInt32LittleEndian(packet.AsSpan(4, 4), 35001);
+        BinaryPrimitives.WriteSingleLittleEndian(packet.AsSpan(8, 4), 22710.5f);
+        BinaryPrimitives.WriteUInt16LittleEndian(packet.AsSpan(12, 2), 150);       // last traded qty
+        BinaryPrimitives.WriteUInt32LittleEndian(packet.AsSpan(26, 4), 410_000);   // total sell qty
+        BinaryPrimitives.WriteUInt32LittleEndian(packet.AsSpan(30, 4), 380_000);   // total buy qty
+        for (var i = 0; i < 4; i++) // the fifth level stays empty
+        {
+            var at = 62 + i * 20;
+            BinaryPrimitives.WriteUInt32LittleEndian(packet.AsSpan(at, 4), (uint)(1000 + i));
+            BinaryPrimitives.WriteUInt32LittleEndian(packet.AsSpan(at + 4, 4), (uint)(2000 + i));
+            BinaryPrimitives.WriteUInt16LittleEndian(packet.AsSpan(at + 8, 2), (ushort)(10 + i));
+            BinaryPrimitives.WriteUInt16LittleEndian(packet.AsSpan(at + 10, 2), (ushort)(20 + i));
+            BinaryPrimitives.WriteSingleLittleEndian(packet.AsSpan(at + 12, 4), 22710f - i * 0.5f);
+            BinaryPrimitives.WriteSingleLittleEndian(packet.AsSpan(at + 16, 4), 22711f + i * 0.5f);
+        }
+
+        var result = Assert.Single(DhanTickPacketParser.ParseMessage(packet));
+
+        Assert.Equal(150, result.LastTradedQty);
+        Assert.Equal(380_000, result.TotalBuyQty);
+        Assert.Equal(410_000, result.TotalSellQty);
+        Assert.Equal(4, result.Bids!.Length);
+        Assert.Equal(4, result.Asks!.Length);
+        Assert.Equal(new DepthLevel(22710m, 1000, 10), result.Bids[0]);
+        Assert.Equal(new DepthLevel(22708.5m, 1003, 13), result.Bids[3]);
+        Assert.Equal(new DepthLevel(22711m, 2000, 20), result.Asks[0]);
+        Assert.Equal(new DepthLevel(22712.5m, 2003, 23), result.Asks[3]);
+    }
 }
