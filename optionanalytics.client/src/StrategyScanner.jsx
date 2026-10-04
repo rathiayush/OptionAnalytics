@@ -5,7 +5,7 @@ import { UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import { PAPER_TRADE_LOT_SIZE } from './oiShared.jsx'
 import {
   STRATEGIES, STRATEGY_BY_ID, evaluateStrategies, simulateOutcome, strategyStats, topFifteen, MIN_TRADES_TO_RANK, oiSummary, optionOiText,
-  DEFAULT_TRAIL, LAST_ENTRY, SQUARE_OFF, fmtHm, exitLabel, premiumAt, optionPnlPoints, optionTradeText, squareOffMs,
+  DEFAULT_TRAIL, LAST_ENTRY, SQUARE_OFF, fmtHm, exitLabel, premiumAt, optionPnlPoints, optionTradeText, squareOffMs, optionStopTargetHit,
 } from './strategyEngine.js'
 import { aggregateBars, analyzeBars, findWalls, liquiditySignals, pullStackSignals, replayView } from './orderFlowMath.js'
 
@@ -91,7 +91,7 @@ function fmtR(r) {
  */
 export function StrategyScanner({ underlying, isReplay, date, view, replayDay, replayMs, range, tapePrints, liquidity, pullStack, rowSize, lotSize, largeLots, estimated, profile, oi, oiError }) {
   const [settings, setSettings] = useState(() => {
-    const saved = { alerts: true, sound: true, voice: true, pick: 'top15', custom: [], trail: { on: true, ...DEFAULT_TRAIL }, autoPaper: 'sell', paperLots: 1, ...readJson(SETTINGS_KEY, {}) }
+    const saved = { alerts: true, sound: true, voice: true, pick: 'top15', custom: [], trail: { on: true, ...DEFAULT_TRAIL }, autoPaper: 'sell', paperLots: 1, paperSl: 20, paperTarget: 30, ...readJson(SETTINGS_KEY, {}) }
     // Older saved settings used 'top5' (from when there were only the first 10).
     // Every alert paper-sells its option by default (settings saved before that default had 'off').
     if (!saved.autoPaperSellDefault) Object.assign(saved, { autoPaper: 'sell', autoPaperSellDefault: true })
@@ -128,7 +128,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
         && Math.abs(setupTimeOf(p) - setup.t) < COOLDOWN_MS)) return prev
       const position = {
         key, setupKey: `${setup.id}-${setup.t}`, setupT: setup.t, strategy: setup.id, setupSide: setup.side, action: trade.action, side: trade.side, strike: trade.strike,
-        lots, lotSize: PAPER_TRADE_LOT_SIZE[underlying] ?? 1, premium, entryTime: at, exitTime: null, exitPremium: null, exitReason: null,
+        lots, lotSize: PAPER_TRADE_LOT_SIZE[underlying] ?? 1, premium, slPts: settingsRef.current.paperSl ?? 20, targetPts: settingsRef.current.paperTarget ?? 30, entryTime: at, exitTime: null, exitPremium: null, exitReason: null,
       }
       return { ...prev, [dayKey]: { date, positions: [...list, position] } }
     })
@@ -355,6 +355,13 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       let exitPremium = exitTime ? p.exitPremium : null
       let exitReason = exitTime ? p.exitReason : null
       const o = outcomeOf(p)
+      // The trade's own premium stop / target (positions from before they existed use today's setting),
+      // checked up to the setup's exit - whichever comes first closes it.
+      const setupExitAt = o && o.status !== 'open' ? (o.exitAt != null ? o.exitAt + MIN : squareOffMs(p.entryTime)) : Infinity
+      const own = oi && setupExitAt > p.entryTime
+        ? optionStopTargetHit(oi, p, p.entryTime, Math.min(setupExitAt, exitTime ?? Infinity, nowMs ?? Infinity), p.slPts ?? settings.paperSl ?? 20, p.targetPts ?? settings.paperTarget ?? 30)
+        : null
+      if (own) { exitTime = own.at; exitPremium = own.premium; exitReason = own.reason }
       if (!exitTime && o && o.status !== 'open') {
         // Closed by its setup once the clock has passed the setup's exit (a scanned day's outcomes are
         // already known for the whole day; a trade still running when the data ended closes at 15:10).
@@ -372,7 +379,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       const points = now.premium == null ? null : p.action === 'BUY' ? now.premium - p.premium : p.premium - now.premium
       return { ...p, exitTime, exitReason, current: now.premium, points, rupees: points == null ? null : points * p.lots * p.lotSize }
     })
-  }, [paperBook, dayKey, dayResults, withOutcome, oi, nowMs])
+  }, [paperBook, dayKey, dayResults, withOutcome, oi, nowMs, settings.paperSl, settings.paperTarget])
   const paperTotal = paperRows.reduce((sum, r) => sum + (r.rupees ?? 0), 0)
   const days = Object.values(history)
   const statRows = stats.map((s) => ({ ...s, key: s.id, top: alertIds.includes(s.id) }))
@@ -509,6 +516,13 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                 <InputNumber size="small" min={1} max={100} style={{ width: 64 }} value={settings.paperLots ?? 1} aria-label="Paper lots"
                   onChange={(v) => v != null && setSettings((s) => ({ ...s, paperLots: v }))} />
                 <Text style={{ fontSize: 12 }}>lot(s) × {PAPER_TRADE_LOT_SIZE[underlying] ?? 1}</Text>
+                <Text style={{ fontSize: 12 }}>Max SL</Text>
+                <InputNumber size="small" min={0} max={500} step={5} style={{ width: 64 }} value={settings.paperSl ?? 20} aria-label="Paper max SL points"
+                  onChange={(v) => v != null && setSettings((s) => ({ ...s, paperSl: v }))} />
+                <Text style={{ fontSize: 12 }}>Target</Text>
+                <InputNumber size="small" min={0} max={1000} step={5} style={{ width: 64 }} value={settings.paperTarget ?? 30} aria-label="Paper target points"
+                  onChange={(v) => v != null && setSettings((s) => ({ ...s, paperTarget: v }))} />
+                <Text type="secondary" style={{ fontSize: 11 }}>premium pts (0 = off)</Text>
                 {paperRows.length > 0 && <Text strong style={{ fontSize: 12, color: paperTotal >= 0 ? UP_COLOR : DOWN_COLOR }}>P&amp;L ₹{Math.round(paperTotal).toLocaleString('en-IN')}</Text>}
                 {paperRows.length > 0 && (
                   <Popconfirm title="Clear this day's paper trades?" onConfirm={() => setPaperBook((prev) => { const next = { ...prev }; delete next[dayKey]; return next })}>
@@ -517,7 +531,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                 )}
               </Space>
               {paperRows.length === 0
-                ? <div><Text type="secondary" style={{ fontSize: 11 }}>B / S on a setup (or on its alert) paper-trades its ATM option - Buy the call (LONG) / put (SHORT), or Sell (write) the put (LONG) / call (SHORT). Each closes when its setup ends: stop, target, trailing SL or {fmtHm(SQUARE_OFF)}.</Text></div>
+                ? <div><Text type="secondary" style={{ fontSize: 11 }}>B / S on a setup (or on its alert) paper-trades its ATM option - Buy the call (LONG) / put (SHORT), or Sell (write) the put (LONG) / call (SHORT). Each closes at its own Max SL / Target (option premium points), or when its setup ends - stop, target, trailing SL or {fmtHm(SQUARE_OFF)} - whichever comes first.</Text></div>
                 : paperRows.map((r) => (
                   <div key={r.key} style={{ display: 'flex', gap: 6, alignItems: 'baseline', fontSize: 12, padding: '2px 0', borderBottom: '1px solid #ffffff0d' }}>
                     <Text type="secondary" style={{ fontSize: 11, minWidth: 38 }}>{IST_HHMM.format(new Date(r.entryTime))}</Text>
