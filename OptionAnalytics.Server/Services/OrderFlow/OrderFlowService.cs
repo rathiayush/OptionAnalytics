@@ -37,6 +37,7 @@ public sealed class OrderFlowService : BackgroundService
     private const int MaxExtraEngines = 4;
 
     private readonly DhanFuturesInstrumentMaster _futures;
+    private readonly NseFuturesContractArchive? _archive;
     private readonly DhanMarketFeedClient _feed;
     private readonly DhanDepthFeedClient _depth;
     private readonly DhanTwoHundredDepthClient _fullDepth;
@@ -55,9 +56,11 @@ public sealed class OrderFlowService : BackgroundService
 
     public OrderFlowService(
         DhanFuturesInstrumentMaster futures, DhanMarketFeedClient feed, DhanDepthFeedClient depth, DhanTwoHundredDepthClient fullDepth,
-        LiveBroadcastBatcher batcher, OrderFlowDayStore pastDays, ILogger<OrderFlowService> logger, IConfiguration? configuration = null)
+        LiveBroadcastBatcher batcher, OrderFlowDayStore pastDays, ILogger<OrderFlowService> logger, IConfiguration? configuration = null,
+        NseFuturesContractArchive? archive = null)
     {
         _futures = futures;
+        _archive = archive;
         _feed = feed;
         _depth = depth;
         _fullDepth = fullDepth;
@@ -76,20 +79,38 @@ public sealed class OrderFlowService : BackgroundService
 
     public OrderFlowEngine? EngineFor(string underlying) => _byUnderlying.TryGetValue(underlying, out var engine) ? engine : null;
 
-    /// <summary>The listed futures contracts for an underlying, nearest first.</summary>
-    public async Task<IReadOnlyList<DhanFuturesInstrument>> ContractsAsync(string underlying, CancellationToken cancellationToken)
+    /// <summary>The live engine already tracking this contract, if any - never starts one.</summary>
+    public OrderFlowEngine? TrackedEngine(uint securityId) => _bySecurityId.TryGetValue(securityId, out var engine) ? engine : null;
+
+    /// <summary>The futures contracts listed on <paramref name="asOf"/> (default today), nearest first. A
+    /// past date comes from NSE's contract archive, so it includes contracts that have since expired.</summary>
+    public async Task<IReadOnlyList<DhanFuturesInstrument>> ContractsAsync(string underlying, CancellationToken cancellationToken, DateOnly? asOf = null)
     {
-        await _futures.EnsureLoadedAsync(cancellationToken);
         var today = IstClock.Today();
-        return _futures.GetExpiries(underlying).Where(e => e >= today)
+        var date = asOf ?? today;
+        if (date < today && _archive is not null && NseFuturesContractArchive.Covers(underlying))
+        {
+            try
+            {
+                var past = await _archive.ContractsOnAsync(underlying, date, cancellationToken);
+                if (past.Count > 0) return past;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex, "Order flow: NSE contract archive for {Date} could not be read.", date);
+            }
+        }
+        await _futures.EnsureLoadedAsync(cancellationToken);
+        return _futures.GetExpiries(underlying).Where(e => e >= date)
             .Select(e => _futures.GetContract(underlying, e)).OfType<DhanFuturesInstrument>().ToList();
     }
 
-    /// <summary>The contract for an expiry (null = the nearest as of <paramref name="asOf"/>).</summary>
+    /// <summary>The contract for an expiry (null = the front month) as listed on <paramref name="asOf"/> -
+    /// for a past date that is the contract that really was the front month then, expired or not.</summary>
     public async Task<DhanFuturesInstrument?> ResolveContractAsync(string underlying, DateOnly? expiry, DateOnly asOf, CancellationToken cancellationToken)
     {
-        await _futures.EnsureLoadedAsync(cancellationToken);
-        return expiry is { } e ? _futures.GetContract(underlying, e) : _futures.GetNearestContract(underlying, asOf);
+        var contracts = await ContractsAsync(underlying, cancellationToken, asOf);
+        return expiry is { } e ? contracts.FirstOrDefault(c => c.Expiry == e) : contracts.FirstOrDefault();
     }
 
     /// <summary>The live engine for a listed contract (null expiry = the nearest), started on demand for

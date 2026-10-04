@@ -408,7 +408,11 @@ public sealed class DhanOptionChainMaster
             // Dhan then rejects it outright for not being a multiple of the contract's real tick size,
             // with nothing in this app's own logs to say why. Drop the row instead of building an
             // order plan around a tick size that was never real.
-            var tickSize = ParseDecimal(Get(fields, tickSizeIndex));
+            // Dhan's scrip master gives the tick in PAISE (5.0000 = Rs 0.05 for an index option,
+            // 10.0000 = Rs 0.10 for NIFTY futures, 10.0000 for RELIANCE whose tick is Rs 0.10) -
+            // used as rupees it rounded every order price to a multiple of Rs 5 and snapped futures
+            // prices to Rs 10. See TickSizeFromScripMaster.
+            var tickSize = DhanSymbology.TickSizeFromScripMaster(ParseDecimal(Get(fields, tickSizeIndex)));
             if (tickSize <= 0)
             {
                 stats.DroppedTickSize++;

@@ -35,11 +35,12 @@ public sealed class OrderFlowController : ControllerBase
         return engine.Snapshot(Math.Clamp(rowSize, 0, 1000), Math.Max(1, minTradeLots) * (long)engine.LotSize, Math.Clamp(heatmapColumns, 50, 3000));
     }
 
-    /// <summary>The listed futures contracts, nearest first.</summary>
+    /// <summary>The futures contracts listed on <paramref name="date"/> (default today), nearest first - a
+    /// past date includes contracts that have since expired (NseFuturesContractArchive).</summary>
     [HttpGet("{underlying}/contracts")]
-    public async Task<ActionResult<IReadOnlyList<OrderFlowContract>>> Contracts(string underlying, CancellationToken cancellationToken)
+    public async Task<ActionResult<IReadOnlyList<OrderFlowContract>>> Contracts(string underlying, [FromQuery] DateOnly? date, CancellationToken cancellationToken)
     {
-        var contracts = await _orderFlow.ContractsAsync(underlying, cancellationToken);
+        var contracts = await _orderFlow.ContractsAsync(underlying, cancellationToken, date);
         return contracts.Select((c, i) => new OrderFlowContract(c.Expiry, c.TradingSymbol, c.SecurityId, i == 0)).ToList();
     }
 

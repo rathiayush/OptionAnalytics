@@ -110,6 +110,7 @@ public sealed class OiReplayService
     private readonly StoredRollingOptionDataService _storedRollingOption;
     private readonly DhanSpotInstrumentMaster _instrumentMaster;
     private readonly DhanFuturesInstrumentMaster _futuresInstrumentMaster;
+    private readonly NseFuturesContractArchive? _futuresArchive;
     private readonly DhanHistoricalDataService _historicalData;
     private readonly DhanRollingOptionDataService _rollingOption;
     private readonly bool _allowLiveDataFallback;
@@ -118,8 +119,9 @@ public sealed class OiReplayService
         StoredSpotDataService storedSpot, StoredRollingOptionDataService storedRollingOption,
         DhanSpotInstrumentMaster instrumentMaster, DhanFuturesInstrumentMaster futuresInstrumentMaster,
         DhanHistoricalDataService historicalData, DhanRollingOptionDataService rollingOption,
-        AppEnvironment appEnvironment)
+        AppEnvironment appEnvironment, NseFuturesContractArchive? futuresArchive = null)
     {
+        _futuresArchive = futuresArchive;
         _storedSpot = storedSpot;
         _storedRollingOption = storedRollingOption;
         _instrumentMaster = instrumentMaster;
@@ -253,7 +255,16 @@ public sealed class OiReplayService
             return (Array.Empty<FuturesBar>(), null, false, $"Could not load the futures instrument master: {ex.Message}");
         }
 
-        var contract = _futuresInstrumentMaster.GetNearestContract(underlying, date);
+        // A past date's real front-month contract - expired or not - from NSE's contract archive (Dhan's
+        // scrip master lists live contracts only, which made an older day show the wrong, later contract
+        // or nothing at all). Falls back to the nearest listed contract.
+        DhanFuturesInstrument? contract = null;
+        if (date < IstClock.Today() && _futuresArchive is not null && NseFuturesContractArchive.Covers(underlying))
+        {
+            try { contract = await _futuresArchive.ContractOnAsync(underlying, date, null, cancellationToken); }
+            catch (Exception e) when (e is not OperationCanceledException) { contract = null; }
+        }
+        contract ??= _futuresInstrumentMaster.GetNearestContract(underlying, date);
         if (contract is null)
             return (Array.Empty<FuturesBar>(), null, false, $"No currently-listed futures contract found for {underlying} - the instrument master may still be loading.");
 
@@ -265,7 +276,9 @@ public sealed class OiReplayService
 
         if (bars.Count == 0)
             return (Array.Empty<FuturesBar>(), contract.Expiry,
-                false, $"No futures data for {date:dd MMM yyyy} - the {contract.Expiry:dd MMM yyyy} contract Dhan currently lists likely did not exist yet on this date (an older contract that has since expired is no longer resolvable at all).");
+                false, contract.Expiry < IstClock.Today()
+                    ? $"No futures data for {date:dd MMM yyyy} - Dhan returned no candles for the expired {contract.TradingSymbol} (id {contract.SecurityId})."
+                    : $"No futures data for {date:dd MMM yyyy} - the {contract.Expiry:dd MMM yyyy} contract was not trading on this date.");
 
         var futuresBars = bars.Select(b => new FuturesBar(b.Bar.Time, b.Bar.Open, b.Bar.High, b.Bar.Low, b.Bar.Close, b.Bar.Volume, b.OpenInterest)).ToList();
         return (futuresBars, contract.Expiry, oiFieldPresent, null);

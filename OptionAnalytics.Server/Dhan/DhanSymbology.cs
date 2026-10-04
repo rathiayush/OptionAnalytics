@@ -7,6 +7,11 @@ namespace OptionAnalytics.Server.Dhan;
 /// </summary>
 public static class DhanSymbology
 {
+    /// <summary>A contract's tick size in RUPEES from the scrip master's SEM_TICK_SIZE, which Dhan gives
+    /// in paise: 5 = Rs 0.05 (index options), 10 = Rs 0.10 (NIFTY futures), 20 = Rs 0.20 (BANKNIFTY
+    /// futures), 1 = Rs 0.01. Zero or negative stays as it is (the callers drop such rows).</summary>
+    public static decimal TickSizeFromScripMaster(decimal paise) => paise > 0 ? paise / 100m : paise;
+
     /// <summary>Dhan's numeric exchange-segment codes, as they appear in the byte at offset 3 of
     /// every binary market-data packet.</summary>
     private static readonly Dictionary<byte, string> FeedSegmentToCanonical = new()

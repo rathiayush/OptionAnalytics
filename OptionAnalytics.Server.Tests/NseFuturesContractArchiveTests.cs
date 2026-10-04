@@ -1,0 +1,51 @@
+using OptionAnalytics.Server.Dhan;
+
+namespace OptionAnalytics.Server.Tests;
+
+/// <summary>NSE's F&amp;O contract master (the source for expired futures) and Dhan's tick-size units.</summary>
+public sealed class NseFuturesContractArchiveTests
+{
+    // Real rows from NSE_FO_contract_01102026.csv.gz: two index futures and one option (ignored).
+    private const string Sample = """
+FinInstrmId,UndrlygFinInstrmId,FinInstrmNm,TckrSymb,XpryDt,StrkPric,OptnTp,PrtdToTrad,MinLot,NewBrdLotQty,BidIntrvl,StartDt,EndDt,MtrtyDt,PdctStartDt,SrsId,AsstCd,UndrlygInstrmAsstClss,StockNm,SttlmMtd,BasePric,DelFlg,ExrcStartDt,ExrcEndDt,IssdCptl,MinPric,MaxPric,MktTpAndId,OffclCorpActnEvtId,AdmssnTp,IssePric,TradgStsNrmlMkt,ElgbltyNrmlMkt,TradgStsOddLotMkt,ElgbltyOddLotMkt,TradgStsSpotMkt,ElgbltySpotMkt,TradgStsAuctnMkt,ElgbltyAuctnMkt,MrgnPctg,MaxTradQty,WrngQty,AdmssnDt,RmvlDt,RadmssnDt,RcrdDt,NoDlvryStartDt,NoDlvryEndDt,SpclExDt,BookClsrStartDt,BookClsrEndDt,StockRcrdDt,TckrSelctn,OdOffclCorpActnEvtId,CdtRatg,Mtg,IntrstOrDvdd,RghtsOrBns,MinFillAllOrNn,AddtlInf,OptnExrcStyle,ExrcAllwd,ExrcRjctAllwd,PLAllwd,CorpAdjstmnt,UndrlygInstrm,DcmlstnPric,PartnIdr,UnqPdctIdr,CpctyGrpId,SctyId,Mltplr,SctyLngNm,UndrlygMkt,CtrctTp,FinInstrmPdctTpCd,FinInstrmTp,TradToTradInd,IndxFlg,Indx,IndxPrtcptnInd,ExtrnlDataSrcFlg,LastUpd,FinInstrmGnlAttrbts,AddtlUndrlygAttrbts,UndrlygAsst,OrgnlXpryDt,SgmtId,UnitOfMeasr,PricQtQty,PricRgTp,InitlMrgnTp,BuyInitlMrgnRate,MaxSnglTxnQty,MaxSnglTxnVal,AsstClss,NearMnthInstrmIdr,FarMnthInstrmIdr,PricNmrtr,Spcfctn,PricDnmtr,GnlNmrtr,GnlDnmtr,LotNmrtr,LotDnmtr,DcmlLctr,SttlmTp,ParVal,CorpActnRsn,FreeFltCptl,ISIN,SellInitlMrgnRate,RatgDtls,FinInstrmClssfctn,SpclMrgnTp,BuySpclMrgnRat,SellSpclMrgnRat,InitlMrgnSprdBnftFlg,InstrmEndDtTm,Ccy,PdctMnth,GrpId,MtchgCrit,SprdTp,ValMtd,SLBMElgblty,PricMtd,InstrmId,XpryPrcDt,MrgnInd,RglrBuyMrgn,RglrSellMrgn,SprdBnftAllwd,DlvryWght,DlvryUnit,Rsvd01,Rsvd02,Rsvd03,Rsvd04,Rsvd05,Rsvd06,Rsvd07,Rsvd08,Rsvd09,Rsvd10,Rsvd11,Rsvd12,Rsvd13,Rsvd14,Rsvd15
+48699,26009,FUTIDX,BANKNIFTY,1477578600,-1,XX,0,30,30,20,1469750400,0,1477578600,,XX,,,BANKNIFTY26OCTFUT,C,5479480,N,0,0,1.000000E+12,4931540,6027420,1,0,0,0,6,1,2,0,2,0,3,0,0,1.441000E+03,0,1469750400,0,0,0,0,0,0,0,0,1475345401,15,1,            ,0,0,0,0,,E,N,N,N,N,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+48704,26000,FUTIDX,NIFTY,1477578600,-1,XX,0,65,65,10,1469750400,0,1477578600,,XX,,,NIFTY26OCTFUT,C,2253030,N,0,0,1.000000E+12,2027730,2478330,1,0,0,0,6,1,2,0,2,0,3,0,0,3.511000E+03,0,1469750400,0,0,0,0,0,0,0,0,1475345401,15,1,            ,0,0,0,0,,E,N,N,N,N,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+35008,26000,OPTIDX,NIFTY,1475764200,1735000,CE,1,65,65,5,1475280000,0,1475764200,,XX,,,NIFTY26O0617350CE,C,507760,N,1475712000,1475764200,1.000000E+12,451955,563565,1,0,0,0,2,1,2,0,2,0,3,0,0,3.511000E+03,0,1475280000,0,0,0,0,0,0,0,0,1475345412,15,1,            ,0,0,0,0,,E,N,N,N,N,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+""";
+
+    [Fact]
+    public void Parse_ReadsIndexFuturesWithTheirTokensExpiriesLotsAndTicks()
+    {
+        var contracts = NseFuturesContractArchive.Parse(new StringReader(Sample));
+
+        Assert.Equal(2, contracts.Count);
+        var bank = contracts.Single(c => c.Underlying == "BANKNIFTY");
+        Assert.Equal(48699u, bank.SecurityId);              // = Dhan's security id for BANKNIFTY-Oct2026-FUT
+        Assert.Equal(new DateOnly(2026, 10, 27), bank.Expiry);
+        Assert.Equal(30, bank.LotSize);
+        Assert.Equal(0.20m, bank.TickSize);                  // BidIntrvl 20 paise
+        Assert.Equal("BANKNIFTY-Oct2026-FUT", bank.TradingSymbol);
+        Assert.Equal("NSE_FNO", bank.DhanSegment);
+        var nifty = contracts.Single(c => c.Underlying == "NIFTY");
+        Assert.Equal(48704u, nifty.SecurityId);
+        Assert.Equal(0.10m, nifty.TickSize);
+        Assert.Equal(65, nifty.LotSize);
+    }
+
+    [Theory]
+    [InlineData(5, 0.05)]    // index option
+    [InlineData(10, 0.10)]   // NIFTY futures, RELIANCE
+    [InlineData(20, 0.20)]   // BANKNIFTY futures
+    [InlineData(1, 0.01)]
+    [InlineData(0, 0)]
+    public void ScripMasterTickSize_IsInPaise(double paise, double rupees) =>
+        Assert.Equal((decimal)rupees, DhanSymbology.TickSizeFromScripMaster((decimal)paise));
+
+    [Fact]
+    public void OnlyNseIndexUnderlyingsAreCovered()
+    {
+        Assert.True(NseFuturesContractArchive.Covers("nifty"));
+        Assert.True(NseFuturesContractArchive.Covers("BANKNIFTY"));
+        Assert.False(NseFuturesContractArchive.Covers("SENSEX"));
+    }
+}
