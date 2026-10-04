@@ -349,6 +349,24 @@ public sealed class OrderFlowEngineTests
         Assert.Single(store.EngineFor("NIFTY", 35001, days[0].Date)!.Snapshot(1, 75, 900).Bars);
     }
 
+    [Fact]
+    public void DayStoreDropsAnOldContractsDaysOnceNewerDatesArrive()
+    {
+        var store = new OrderFlowDayStore();
+        void AddDay(uint securityId, int day)
+        {
+            var engine = new OrderFlowEngine("NIFTY", securityId, $"NIFTY-{securityId}-FUT", "NSE_FNO", 0.05m, 75);
+            engine.OnTick(new SpotTick(securityId, 22710m, 0, 0, 0, 0, 1000, 22709.95m, 22710m, 0, T0), T0.AddDays(day));
+            engine.OnTick(new SpotTick(securityId, 22710m, 0, 0, 0, 0, 1750, 22709.95m, 22710m, 0, T0), T0.AddDays(day).AddSeconds(3));
+            store.Add(engine.ExportDay()!);
+        }
+        AddDay(35001, 0);            // the September contract's last day
+        for (var d = 1; d <= 3; d++) AddDay(35002, d); // then three days of the October contract
+
+        Assert.Equal(3, store.Days("NIFTY").Count);
+        Assert.All(store.Days("NIFTY"), d => Assert.Equal("NIFTY-35002-FUT", d.ContractSymbol));
+    }
+
     // ---- days estimated from 1-minute candles ----------------------------------------------
 
     private static OptionAnalytics.Server.Models.CandleWithVolume Candle(int minute, decimal open, decimal high, decimal low, decimal close, long volume) =>

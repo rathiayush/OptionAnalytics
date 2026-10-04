@@ -62,8 +62,14 @@ public sealed class LiveTradingService : BackgroundService
     // Traded quantity (and average price) already counted into positions, per order and super-order leg -
     // so a socket message moves a position by exactly the NEW fill (see ApplyOrderUpdate).
     private Dictionary<(string OrderId, int Leg), (int Qty, decimal? Avg)> _fills = new();
+    // Keys counted from the socket since the last REST read - the only ones carried over a read that
+    // does not list their order yet (everything else is re-seeded, so nothing outlives the day).
+    private readonly HashSet<(string OrderId, int Leg)> _fillsSinceRefresh = new();
     private bool _refreshing;
     private bool _eventDuringRefresh;
+    private DateOnly _refreshedDay;
+    // Contracts this service subscribed for live P&L, with their expiry - released once expired.
+    private readonly Dictionary<uint, DateOnly> _subscribedForPositions = new();
     private readonly SemaphoreSlim _refreshSignal = new(0, 1);
     private readonly SemaphoreSlim _actionLock = new(1, 1);
     private IDisposable? _tickSubscription;
@@ -115,7 +121,10 @@ public sealed class LiveTradingService : BackgroundService
                 bool signalled;
                 try { signalled = await _refreshSignal.WaitAsync(FallbackRefreshWhileSocketDown, stoppingToken); }
                 catch (OperationCanceledException) { break; }
-                refresh = signalled || !_orderUpdates.IsConnected;
+                bool newDay;
+                lock (_lock) newDay = _refreshedUtc is not null && _refreshedDay != IstClock.Today();
+                refresh = signalled || !_orderUpdates.IsConnected || newDay;
+                if (newDay) await ReleaseExpiredSubscriptionsAsync(stoppingToken);
                 if (!refresh) continue;
                 // Coalesce a burst of order updates (entry + both legs land together) into one refresh.
                 try { await Task.Delay(TimeSpan.FromMilliseconds(400), stoppingToken); }
@@ -175,6 +184,7 @@ public sealed class LiveTradingService : BackgroundService
             if (!uint.TryParse(position.SecurityId, out var id)) continue;
             tracked.Add(id);
             if (!_feed.IsSubscribed(id)) toSubscribe[id] = position.ExchangeSegment;
+            RememberSubscription(id);
         }
         if (toSubscribe.Count > 0) await _feed.SubscribeAsync(toSubscribe, cancellationToken, full: true);
 
@@ -189,8 +199,11 @@ public sealed class LiveTradingService : BackgroundService
             // An order the books do not list yet keeps what the socket already counted for it, so its
             // next message is not counted twice.
             var seeded = SeedFills(orders, plainOrders);
-            foreach (var (key, value) in _fills) seeded.TryAdd(key, value);
+            foreach (var key in _fillsSinceRefresh)
+                if (_fills.TryGetValue(key, out var value)) seeded.TryAdd(key, value);
             _fills = seeded;
+            _fillsSinceRefresh.Clear();
+            _refreshedDay = IstClock.Today();
             _refreshedUtc = DateTimeOffset.UtcNow;
             raced = _eventDuringRefresh;
             _refreshing = false;
@@ -199,6 +212,29 @@ public sealed class LiveTradingService : BackgroundService
         // read once things settle makes the in-memory state exact again.
         if (raced) RequestRefresh();
         Push();
+    }
+
+    private void RememberSubscription(uint id)
+    {
+        lock (_subscribedForPositions)
+            if (!_subscribedForPositions.ContainsKey(id) && _chain.FindBySecurityId(id) is { } contract) _subscribedForPositions[id] = contract.Expiry;
+    }
+
+    /// <summary>At a new IST day, stops streaming the contracts subscribed for live P&amp;L that have expired
+    /// since - nothing else can need a contract that no longer trades, and without this a server that
+    /// stays up for weeks would keep every option it ever held a position in on the shared feed.</summary>
+    private async Task ReleaseExpiredSubscriptionsAsync(CancellationToken cancellationToken)
+    {
+        List<uint> expired;
+        var today = IstClock.Today();
+        lock (_subscribedForPositions)
+        {
+            expired = _subscribedForPositions.Where(kv => kv.Value < today).Select(kv => kv.Key).ToList();
+            foreach (var id in expired) _subscribedForPositions.Remove(id);
+        }
+        if (expired.Count == 0) return;
+        try { await _feed.UnsubscribeAsync(expired, cancellationToken); }
+        catch (Exception ex) when (ex is not OperationCanceledException) { _logger.LogWarning(ex, "Releasing {Count} expired position contract(s) from the feed failed.", expired.Count); }
     }
 
     /// <summary>Protection orders (OIRP-) with a target, for the open positions they guard.</summary>
@@ -317,9 +353,11 @@ public sealed class LiveTradingService : BackgroundService
                     if (updated.IsOpen && id != 0)
                     {
                         if (_trackedSecurityIds.Add(id) && !_feed.IsSubscribed(id)) subscribe = new(id, updated.ExchangeSegment);
+                        RememberSubscription(id);
                     }
                     else if (!updated.IsOpen) _trackedSecurityIds.Remove(id);
                     _fills[key] = (u.TradedQty, u.AvgTradedPrice > 0 ? u.AvgTradedPrice : null);
+                    _fillsSinceRefresh.Add(key);
                 }
                 else needsRead = true;
             }

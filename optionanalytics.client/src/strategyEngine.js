@@ -38,10 +38,17 @@ export const STRATEGIES = [
   { id: 'openingBias', no: 8, name: 'Opening OI bias + range breakout', short: 'Opening bias ORB' },
   { id: 'iceberg', no: 9, name: 'Iceberg on an OI strike', short: 'Iceberg at OI wall' },
   { id: 'maxPain', no: 10, name: 'Expiry-day max-pain pull', short: 'Max-pain pull' },
+  // Volume profile (previous session) and market profile, each confirmed by OI and order flow.
+  { id: 'vaRejection', no: 11, name: 'Previous value-area edge rejection', short: 'Value area rejection', group: 'profile' },
+  { id: 'tpo80', no: 12, name: 'Market profile 80% rule', short: 'Eighty percent rule', group: 'profile' },
+  { id: 'pocReaction', no: 13, name: 'Previous POC reaction', short: 'POC reaction', group: 'profile' },
+  { id: 'lvnRun', no: 14, name: 'LVN run to the next HVN', short: 'LVN run', group: 'profile' },
+  { id: 'ibBreakout', no: 15, name: 'Initial balance breakout', short: 'IB breakout', group: 'profile' },
 ]
 export const STRATEGY_BY_ID = Object.fromEntries(STRATEGIES.map((s) => [s.id, s]))
 // The playbook's own picks, used for alerts until enough trades have been scored to rank them.
 export const DEFAULT_TOP5 = ['wallDefence', 'wallBreak', 'buildUp', 'openingBias', 'iceberg']
+export const DEFAULT_PROFILE_TOP5 = ['vaRejection', 'tpo80', 'pocReaction', 'lvnRun', 'ibBreakout']
 
 // ---- OI context -----------------------------------------------------------------------------------
 
@@ -459,6 +466,156 @@ export function evaluateStrategies(input) {
       }
     }
   }
+  // ---- 11-15: volume profile (previous session) + market profile, with OI and order flow ----------
+  const prof = input.profile
+  if (prof?.vp?.poc != null) {
+    const vp = prof.vp
+    const near = (level, pctBand) => level != null && Math.abs(price - level) <= pct(pctBand)
+    // A strike in futures terms, and the OI wall (if any) within 0.25% of a futures level.
+    const wallNear = (level, side) => {
+      const wall = side === 'put' ? support : resistance
+      return wall != null && Math.abs(wall + basis - level) <= pct(0.0025) ? wall : null
+    }
+    const oiRising = (side, wall, mins = 15) => wall != null && oiChange(side === 'put' ? oi.pe : oi.ce, wall, nowMs, mins) > 0
+
+    // 11. Previous value-area edge rejection - 09:45-14:30: price pokes beyond VAH (VAL) and is pushed
+    //     back inside, at an OI wall, with the order flow turning.
+    if (minute >= hm(9, 45) && minute <= hm(14, 30) && vp.vah != null && vp.val != null) {
+      for (const dir of [1, -1]) {
+        const edge = dir > 0 ? vp.val : vp.vah
+        const poked = bars.slice(-5).some((b) => (dir > 0 ? b.low < edge : b.high > edge))
+        const backInside = dir > 0 ? last.close > edge : last.close < edge
+        if (!poked || !backInside || !near(edge, 0.0015)) continue
+        const wall = wallNear(edge, dir > 0 ? 'put' : 'call')
+        if (wall == null || !oiRising(dir > 0 ? 'put' : 'call', wall)) continue
+        const footprint = (absorbed(dir) || exhausted(dir)) && dir * last.delta > 0
+        const tapeOk = aggWith(dir, 55, 'agg30')
+        const c = confirm(dir)
+        if (!footprint || !tapeOk || !c.ok) continue
+        const extreme = dir > 0 ? Math.min(...bars.slice(-5).map((b) => b.low)) : Math.max(...bars.slice(-5).map((b) => b.high))
+        const stopPts = Math.abs(price - extreme) + pct(0.0005)
+        const toPoc = Math.abs(vp.poc - price)
+        if (toPoc < 1.2 * stopPts) continue
+        push('vaRejection', dir, stopPts, toPoc, 60, 64 + (absorbed(dir) ? 6 : 0), {
+          OI: `${dir > 0 ? 'PUT' : 'CALL'} wall ${wall} at the previous ${dir > 0 ? 'VAL' : 'VAH'} ${edge}, its OI rising`,
+          Profile: `previous session VA ${vp.val}-${vp.vah}, POC ${vp.poc} (target)`,
+          Footprint: `${absorbed(dir) ? 'absorption' : 'exhaustion'} outside the value area, back inside`, Tape: tapeText, DOM: c.dom, Heatmap: c.heat,
+        })
+      }
+    }
+
+    // 12. Market profile 80% rule - 10:00-14:00: opened outside the previous TPO value area, back inside it
+    //     for two 30-minute periods (here: the last 30 completed minutes all inside) -> the other edge.
+    const tpo = prof.tpoPrev
+    if (tpo && minute >= hm(10, 0) && minute <= hm(14, 0)) {
+      const dayOpenMs = nowMs - (minute - hm(9, 15)) * MIN
+      const openBar = minuteBars.find((b) => msOf(b.time) >= dayOpenMs)
+      const last30 = bars.slice(-30)
+      if (openBar && last30.length >= 30) {
+        for (const dir of [1, -1]) {
+          const openedOutside = dir > 0 ? openBar.open < tpo.val : openBar.open > tpo.vah
+          const held = last30.every((b) => b.close >= tpo.val && b.close <= tpo.vah)
+          if (!openedOutside || !held) continue
+          const target = dir > 0 ? tpo.vah : tpo.val
+          const blocking = dir > 0 ? resistance : support
+          if (blocking != null && dir * (blocking + basis - price) > 0 && dir * (blocking + basis - target) < 0 && oiRising(dir > 0 ? 'call' : 'put', blocking, 30)) continue
+          const footprint = dir * (last.cvd - last30[0].cvd) > 0 && !stackAgainst(dir, 3)
+          const tapeOk = aggWith(dir, 55)
+          const c = confirm(dir)
+          if (!footprint || !tapeOk || !c.ok) continue
+          const stopPts = Math.max(pct(0.0012), Math.abs(price - (dir > 0 ? tpo.val : tpo.vah)) + pct(0.0005))
+          if (Math.abs(target - price) < 1.2 * stopPts) continue
+          push('tpo80', dir, stopPts, Math.abs(target - price), 90, 63, {
+            OI: blocking != null ? `no growing ${dir > 0 ? 'CALL' : 'PUT'} wall before the target` : 'no wall in the way',
+            Profile: `opened ${dir > 0 ? 'below' : 'above'} the previous TPO value area ${tpo.val}-${tpo.vah}, 30 min accepted inside`,
+            Footprint: 'ΣΔ toward the far edge', Tape: tapeText, DOM: c.dom, Heatmap: c.heat,
+          })
+        }
+      }
+    }
+
+    // 13. Previous POC reaction - 09:45-14:30: back at the previous session's POC after being away, an OI
+    //     wall there, and the order flow defending it.
+    if (minute >= hm(9, 45) && minute <= hm(14, 30) && near(vp.poc, 0.0006)) {
+      const awayBefore = bars.slice(-30, -5).some((b) => Math.abs(b.close - vp.poc) >= pct(0.003))
+      if (awayBefore) {
+        const dir = bars.at(-6)?.close > vp.poc ? 1 : -1 // came down to it -> support (long); up to it -> resistance
+        const wall = wallNear(vp.poc, dir > 0 ? 'put' : 'call')
+        const footprint = absorbed(dir) && dir * last.delta > 0
+        const tapeOk = aggWith(dir, 55, 'agg30')
+        const c = confirm(dir)
+        if (wall != null && oiRising(dir > 0 ? 'put' : 'call', wall) && footprint && tapeOk && c.ok) {
+          const stopPts = pct(0.0012)
+          const nextHvn = (vp.hvn ?? []).filter((h) => dir * (h - price) > stopPts * 1.5).sort((a, b) => dir * (a - b))[0]
+          push('pocReaction', dir, stopPts, nextHvn != null ? Math.abs(nextHvn - price) : 2 * stopPts, 60, 62, {
+            OI: `${dir > 0 ? 'PUT' : 'CALL'} wall ${wall} at the previous POC ${vp.poc}, OI rising`,
+            Profile: `previous POC ${vp.poc}${nextHvn != null ? `, next HVN ${nextHvn}` : ''}`,
+            Footprint: 'absorption at the POC', Tape: tapeText, DOM: c.dom, Heatmap: c.heat,
+          })
+        }
+      }
+    }
+
+    // 14. LVN run - 09:30-14:30: price breaks through a previous-session low-volume node with
+    //     aggression - thin areas are crossed fast - toward the next high-volume node.
+    if (minute <= hm(14, 30) && vp.lvn?.length) {
+      for (const lvn of vp.lvn) {
+        for (const dir of [1, -1]) {
+          const crossed = prev && (dir > 0 ? prev.close <= lvn && last.close > lvn : prev.close >= lvn && last.close < lvn)
+          if (!crossed) continue
+          const hvn = [...(vp.hvn ?? []), vp.poc].filter((h) => dir * (h - lvn) > 0).sort((a, b) => dir * (a - b))[0]
+          if (hvn == null) continue
+          const wallAhead = dir > 0 ? resistance : support
+          if (wallAhead != null && dir * (wallAhead + basis - price) > 0 && dir * (wallAhead + basis - hvn) < 0 && oiRising(dir > 0 ? 'call' : 'put', wallAhead)) continue
+          const footprint = dir * last.delta > 0 && (stackWith(dir, 2) || cvdNewExtreme(dir, 10))
+          const tapeOk = sweepWith(dir) || aggWith(dir, 65)
+          const c = confirm(dir)
+          if (!footprint || !tapeOk || !c.ok) continue
+          const stopPts = Math.abs(price - lvn) + pct(0.0008)
+          if (Math.abs(hvn - price) < 1.2 * stopPts) continue
+          push('lvnRun', dir, stopPts, Math.abs(hvn - price), 45, 60 + (sweepWith(dir) ? 10 : 0), {
+            OI: wallAhead != null ? `no growing ${dir > 0 ? 'CALL' : 'PUT'} wall before the HVN` : 'no wall ahead',
+            Profile: `crossed the LVN ${lvn} toward the HVN ${hvn}`,
+            Footprint: stackWith(dir, 2) ? 'stacked imbalance through it' : 'ΣΔ new extreme', Tape: `${sweepWith(dir) ? 'sweep · ' : ''}${tapeText}`, DOM: c.dom, Heatmap: c.heat,
+          })
+        }
+      }
+    }
+  }
+
+  // 15. Initial balance breakout (market profile) - 10:15-13:30: a 1-minute close beyond the first hour's
+  //     range, with the option writers and the order flow behind it; target one IB range beyond.
+  if (minute >= hm(10, 15) && minute <= hm(13, 30)) {
+    const dayOpenMs = nowMs - (minute - hm(9, 15)) * MIN
+    const ibBars = minuteBars.filter((b) => msOf(b.time) >= dayOpenMs && msOf(b.time) < dayOpenMs + 60 * MIN)
+    if (ibBars.length >= 45) {
+      const ibHigh = Math.max(...ibBars.map((b) => b.high))
+      const ibLow = Math.min(...ibBars.map((b) => b.low))
+      const range = ibHigh - ibLow
+      const atm = Math.round(spotNow / oi.step) * oi.step
+      let writing = 0
+      for (let k = -3; k <= 3; k++) {
+        const strike = atm + k * oi.step
+        writing += (oiChange(oi.pe, strike, nowMs, 60) ?? 0) - (oiChange(oi.ce, strike, nowMs, 60) ?? 0)
+      }
+      for (const dir of [1, -1]) {
+        const edge = dir > 0 ? ibHigh : ibLow
+        const broke = prev && (dir > 0 ? last.close > edge && prev.close <= edge : last.close < edge && prev.close >= edge)
+        if (!broke || dir * writing <= 0 || range <= 0) continue
+        const footprint = dir * last.delta > 0
+        const tapeOk = sweepWith(dir) || aggWith(dir, 60)
+        const c = confirm(dir)
+        if (!footprint || !tapeOk || !c.ok) continue
+        const stopPts = Math.max(pct(0.001), Math.min(range / 2, pct(0.004)))
+        push('ibBreakout', dir, stopPts, Math.max(range, 1.5 * stopPts), 90, 61 + (sweepWith(dir) ? 8 : 0), {
+          OI: `${dir > 0 ? 'put' : 'call'} writing leads near ATM over the last hour (net ${Math.round(writing).toLocaleString('en-IN')})`,
+          Profile: `initial balance ${ibLow}-${ibHigh} (range ${range.toFixed(1)}), target one range beyond`,
+          Footprint: `close beyond the IB, Δ ${last.delta}`, Tape: `${sweepWith(dir) ? 'sweep · ' : ''}${tapeText}`, DOM: c.dom, Heatmap: c.heat,
+        })
+      }
+    }
+  }
+
   return out
 }
 
@@ -517,13 +674,27 @@ export function strategyStats(trades) {
 
 export const MIN_TRADES_TO_RANK = 5
 
-/** The five strategies to alert on: the best-scoring PROFITABLE ones once enough trades are scored,
- *  topped up with the playbook's picks that have not been measured yet - never a strategy whose
- *  scored trades lose money on average. */
-export function topFive(stats) {
-  const ranked = stats.filter((s) => s.trades >= MIN_TRADES_TO_RANK && s.score > 0).sort((a, b) => b.score - a.score)
-  const losers = new Set(stats.filter((s) => s.trades >= MIN_TRADES_TO_RANK && !(s.score > 0)).map((s) => s.id))
+/** The five strategies to alert on in a group ('oi' = the OI + order flow ten, 'profile' = the
+ *  volume / market profile five): the best-scoring PROFITABLE ones once enough trades are scored,
+ *  topped up with the playbook's picks not measured yet - never one whose scored trades lose money. */
+export function topFive(stats, group = 'oi') {
+  const inGroup = stats.filter((s) => (s.group ?? 'oi') === group)
+  const defaults = group === 'profile' ? DEFAULT_PROFILE_TOP5 : DEFAULT_TOP5
+  const ranked = inGroup.filter((s) => s.trades >= MIN_TRADES_TO_RANK && s.score > 0).sort((a, b) => b.score - a.score)
+  const losers = new Set(inGroup.filter((s) => s.trades >= MIN_TRADES_TO_RANK && !(s.score > 0)).map((s) => s.id))
   const ids = ranked.slice(0, 5).map((s) => s.id)
-  for (const id of DEFAULT_TOP5) if (ids.length < 5 && !ids.includes(id) && !losers.has(id)) ids.push(id)
+  for (const id of defaults) if (ids.length < 5 && !ids.includes(id) && !losers.has(id)) ids.push(id)
   return { ids, measured: ranked.length >= 5 }
+}
+
+/** The top 15: the five best OI + order flow strategies, the five best profile strategies... and the
+ *  next five best of all the rest, so the alert list is always the 15 strongest. */
+export function topFifteen(stats) {
+  const oi = topFive(stats, 'oi')
+  const profile = topFive(stats, 'profile')
+  const chosen = new Set([...oi.ids, ...profile.ids])
+  const rest = stats.filter((s) => !chosen.has(s.id) && !(s.trades >= MIN_TRADES_TO_RANK && !(s.score > 0)))
+    .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+  for (const s of rest) if (chosen.size < 15) chosen.add(s.id)
+  return { ids: [...chosen], measured: oi.measured && profile.measured, oi, profile }
 }

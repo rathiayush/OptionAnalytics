@@ -150,6 +150,10 @@ public sealed class DhanDepthFeedClient : BackgroundService
         }
     }
 
+    /// <summary>Stops tracking an instrument: it is not re-subscribed on the next connect and frees its
+    /// slot (MaxInstruments). Packets Dhan still sends for it until then are ignored by the consumers.</summary>
+    public void Unsubscribe(uint securityId) => _subscriptions.TryRemove(securityId, out _);
+
     private async Task SendSubscribeAsync(IReadOnlyList<(uint SecurityId, string Segment)> instruments, CancellationToken cancellationToken)
     {
         var socket = _socket;

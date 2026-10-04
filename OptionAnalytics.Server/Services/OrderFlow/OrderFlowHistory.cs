@@ -18,7 +18,9 @@ public sealed class OrderFlowHistory
 
     private readonly OrderFlowService _orderFlow;
     private readonly DhanHistoricalDataService _historical;
-    private readonly ConcurrentDictionary<(uint SecurityId, DateOnly Day), (IReadOnlyList<CandleWithVolume> Candles, DateTimeOffset FetchedAt)> _candles = new();
+    // Keyed by the contract asked for; Used / Note say which contract's candles these are when the asked
+    // one had expired (PastFuturesCandles).
+    private readonly ConcurrentDictionary<(uint SecurityId, DateOnly Day), (IReadOnlyList<CandleWithVolume> Candles, DateTimeOffset FetchedAt, DhanFuturesInstrument Used, string? Note)> _candles = new();
     private DateOnly _cacheDay = IstClock.Today();
 
     public OrderFlowHistory(OrderFlowService orderFlow, DhanHistoricalDataService historical)
@@ -54,19 +56,22 @@ public sealed class OrderFlowHistory
         var isToday = date == today;
         if (!_candles.TryGetValue(key, out var cached) || (isToday && DateTimeOffset.UtcNow - cached.FetchedAt > TodayCandleTtl))
         {
-            var (bars, _, error) = await _historical.GetIntradayFuturesCandlesAsync(contract.SecurityId, contract.DhanSegment, date, date, 1, cancellationToken);
-            if (error is not null) return new Result(null, $"Dhan did not return {contract.TradingSymbol} candles for {date:dd MMM yyyy}: {error}");
-            cached = (bars.Select(b => b.Bar).ToList(), DateTimeOffset.UtcNow);
+            var listed = contract.Expiry < today ? await _orderFlow.ContractsAsync(underlying, cancellationToken, date) : Array.Empty<DhanFuturesInstrument>();
+            var fetched = await PastFuturesCandles.FetchAsync(_historical, contract, listed, date, cancellationToken);
+            if (fetched.Error is not null) return new Result(null, $"Dhan did not return {contract.TradingSymbol} candles for {date:dd MMM yyyy}: {fetched.Error}");
+            cached = (fetched.Bars.Select(b => b.Bar).ToList(), DateTimeOffset.UtcNow, fetched.Contract, fetched.Note);
             _candles[key] = cached;
             while (_candles.Count > MaxCachedDays) _candles.TryRemove(_candles.OrderBy(kv => kv.Value.FetchedAt).First().Key, out _);
         }
         if (cached.Candles.Count == 0)
             return new Result(null, contract.Expiry < IstClock.Today()
-                ? $"Dhan returned no candles for {contract.TradingSymbol} (id {contract.SecurityId}, expired {contract.Expiry:dd MMM yyyy}) on {date:dd MMM yyyy} - a holiday, or Dhan does not serve that expired contract's history."
+                ? $"No futures candles for {date:dd MMM yyyy}: Dhan keeps no intraday history for the expired {contract.TradingSymbol} (NSE publishes none for free either), and no other contract listed that day is still live - or it was a holiday."
                 : $"No {contract.TradingSymbol} trading on {date:dd MMM yyyy} (a holiday or weekend, or the contract was not listed yet).");
 
-        return new Result(OrderFlowEstimator.Build(underlying.ToUpperInvariant(), contract.SecurityId, contract.TradingSymbol, contract.DhanSegment,
-            contract.TickSize, contract.LotSize, contract.Expiry, date, cached.Candles, rowSize, Math.Max(1, minTradeLots) * (long)contract.LotSize), null);
+        var used = cached.Used;
+        var snapshot = OrderFlowEstimator.Build(underlying.ToUpperInvariant(), used.SecurityId, used.TradingSymbol, used.DhanSegment,
+            used.TickSize, used.LotSize, used.Expiry, date, cached.Candles, rowSize, Math.Max(1, minTradeLots) * (long)used.LotSize);
+        return new Result(cached.Note is null ? snapshot : snapshot with { Note = $"{cached.Note} {snapshot.Note}" }, null);
     }
 
     /// <summary>Whether Dhan serves a day's 1-minute candles for the futures contract listed then - an
