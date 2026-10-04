@@ -249,6 +249,11 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<LiveTradingService
 // OrderFlowService. DhanDepthFeedClient is Dhan's separate 20-level depth socket.
 builder.Services.AddSingleton<DhanDepthFeedClient>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<DhanDepthFeedClient>());
+// Dhan's 200-level depth (one socket per instrument) for NIFTY/BANKNIFTY futures, and the recorder
+// that keeps each order flow day on disk for restarts and replay.
+builder.Services.AddSingleton<DhanTwoHundredDepthClient>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<DhanTwoHundredDepthClient>());
+builder.Services.AddSingleton<OptionAnalytics.Server.Services.OrderFlow.OrderFlowRecorder>();
 builder.Services.AddSingleton<OptionAnalytics.Server.Services.OrderFlow.OrderFlowService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<OptionAnalytics.Server.Services.OrderFlow.OrderFlowService>());
 

@@ -73,23 +73,28 @@ const FP_TOP = 6
 // aggressive) and lifted the offer (right, buyers aggressive). Imbalanced cells are filled green/red,
 // the POC row outlined, stacked imbalance zones extended to the right as bands, absorption (A) and
 // exhaustion (E) marked at their rows, and each bar's delta and volume below it.
-// Drag to scroll back, wheel to change bar width, double-click to return to the live edge.
-export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620, lastPrice }) {
+// Drag to scroll back, wheel (or the -/+ buttons) to change bar width, double-click to return to the
+// live edge. `profile` (orderFlowMath.volumeProfile) adds the session volume profile as a column on
+// the same price scale, with its POC and value area (VAH/VAL) drawn across the bars.
+export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620, lastPrice, profile = null }) {
   const wrapRef = useRef(null)
   const canvasRef = useRef(null)
   const width = useElementWidth(wrapRef)
-  const [colWidth, setColWidth] = useState(120)
+  const narrow = width > 0 && width < 640
+  const [colWidth, setColWidth] = useState(() => (typeof window !== 'undefined' && window.innerWidth < 640 ? 76 : 120))
   const [offset, setOffset] = useState(0)
   const [hover, setHover] = useState(null)
   const dragRef = useRef(null)
 
   const step = rowSize > 0 ? rowSize : 0.05
   const plotW = Math.max(0, width - FP_AXIS_W)
+  const profileW = profile?.rows?.length ? (narrow ? 54 : 96) : 0
+  const barsW = Math.max(0, plotW - profileW)
   const plotH = Math.max(50, height - FP_STRIP_H - FP_TIME_H - FP_TOP)
 
   const layout = useMemo(() => {
     if (!width || bars.length === 0) return null
-    const nVisible = Math.max(1, Math.floor(plotW / colWidth))
+    const nVisible = Math.max(1, Math.floor(barsW / colWidth))
     const end = Math.max(1, bars.length - Math.min(offset, bars.length - 1))
     const start = Math.max(0, end - nVisible)
     const visible = bars.slice(start, end)
@@ -105,7 +110,7 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
     const nRows = Math.round((hiPad - loPad) / step) + 1
     const rowH = plotH / nRows
     return { visible, hiPad, loPad, nRows, rowH, start }
-  }, [bars, width, plotW, plotH, colWidth, offset, step])
+  }, [bars, width, barsW, plotH, colWidth, offset, step])
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -139,7 +144,7 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
     }
 
     visible.forEach((bar, k) => {
-      const x0 = plotW - (visible.length - k) * colWidth
+      const x0 = barsW - (visible.length - k) * colWidth
       const cellX = x0 + 15
       const cellW = Math.max(8, (colWidth - 19) / 2)
       const maxSide = Math.max(1, ...bar.levels.map((l) => Math.max(l.buy, l.sell)))
@@ -149,7 +154,7 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
         const top = rowTop(zone.high)
         const bottom = rowTop(zone.low) + rowH
         ctx.fillStyle = zone.side === 'buy' ? 'rgba(38,166,154,0.10)' : 'rgba(239,83,80,0.10)'
-        ctx.fillRect(cellX, top, plotW - cellX, bottom - top)
+        ctx.fillRect(cellX, top, barsW - cellX, bottom - top)
         ctx.fillStyle = zone.side === 'buy' ? UP_COLOR : DOWN_COLOR
         ctx.fillRect(cellX, top, 2, bottom - top)
       }
@@ -223,6 +228,51 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
       ctx.beginPath(); ctx.moveTo(x0, FP_TOP); ctx.lineTo(x0, FP_TOP + plotH); ctx.stroke()
     })
 
+    // Session volume profile column, its value area and POC across the bars.
+    if (profileW > 0) {
+      const px = barsW + 2
+      const pw = profileW - 6
+      ctx.fillStyle = 'rgba(255,255,255,0.02)'
+      ctx.fillRect(barsW, FP_TOP, profileW, plotH)
+      ctx.strokeStyle = GRID_COLOR
+      ctx.beginPath(); ctx.moveTo(barsW, FP_TOP); ctx.lineTo(barsW, FP_TOP + plotH); ctx.stroke()
+      for (const row of profile.rows) {
+        const top = rowTop(row.price)
+        if (top + rowH < FP_TOP || top > FP_TOP + plotH) continue
+        const inValue = row.price >= profile.val && row.price <= profile.vah
+        const sellW = (row.sell / profile.maxRow) * pw
+        const buyW = (row.buy / profile.maxRow) * pw
+        ctx.fillStyle = inValue ? 'rgba(239,83,80,0.55)' : 'rgba(239,83,80,0.25)'
+        ctx.fillRect(px, top + 0.5, sellW, Math.max(1, rowH - 1))
+        ctx.fillStyle = inValue ? 'rgba(38,166,154,0.55)' : 'rgba(38,166,154,0.25)'
+        ctx.fillRect(px + sellW, top + 0.5, buyW, Math.max(1, rowH - 1))
+        if (row.price === profile.poc) {
+          ctx.strokeStyle = POC_COLOR
+          ctx.strokeRect(px + 0.5, top + 0.5, sellW + buyW, Math.max(1, rowH - 1))
+        }
+      }
+      const level = (price, label, color) => {
+        if (price == null) return
+        const y = label === 'VAL' ? rowTop(price) + rowH : label === 'VAH' ? rowTop(price) : rowTop(price) + rowH / 2
+        if (y < FP_TOP || y > FP_TOP + plotH) return
+        ctx.setLineDash(label === 'POC' ? [] : [6, 4])
+        ctx.strokeStyle = color
+        ctx.globalAlpha = 0.7
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(barsW, y); ctx.stroke()
+        ctx.globalAlpha = 1
+        ctx.setLineDash([])
+        ctx.fillStyle = color
+        ctx.font = `600 10px ${FONT}`
+        ctx.textBaseline = 'middle'
+        ctx.textAlign = 'right'
+        ctx.fillText(label, barsW + profileW - 3, Math.min(FP_TOP + plotH - 6, Math.max(FP_TOP + 6, y + (label === 'VAL' ? -6 : label === 'VAH' ? 6 : 0))))
+        ctx.textAlign = 'left'
+      }
+      level(profile.vah, 'VAH', '#9b8cff')
+      level(profile.val, 'VAL', '#9b8cff')
+      level(profile.poc, 'POC', POC_COLOR)
+    }
+
     // Last price line.
     if (lastPrice > 0) {
       const y = yPrice(lastPrice + step / 2)
@@ -239,7 +289,7 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
         ctx.fillText(priceText(lastPrice), plotW + 5, y)
       }
     }
-  }, [layout, width, height, plotW, plotH, colWidth, step, lotSize, showLots, lastPrice])
+  }, [layout, width, height, plotW, barsW, profileW, profile, plotH, colWidth, step, lotSize, showLots, lastPrice])
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -253,8 +303,8 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
   }, [])
 
   const hitTest = (x, y) => {
-    if (!layout || x > plotW) return null
-    const k = layout.visible.length - Math.ceil((plotW - x) / colWidth)
+    if (!layout || x > barsW) return null
+    const k = layout.visible.length - Math.ceil((barsW - x) / colWidth)
     const bar = layout.visible[k]
     if (!bar) return null
     const row = Math.round((layout.hiPad - Math.floor((y - FP_TOP) / layout.rowH) * step) * 100) / 100
@@ -280,9 +330,13 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
         onPointerLeave={() => setHover(null)}
         onDoubleClick={() => setOffset(0)}
       />
+      <div style={{ position: 'absolute', top: 8, left: 8, display: 'flex', gap: 4 }}>
+        <Button size="small" onClick={() => setColWidth((w) => Math.max(56, w - 16))} aria-label="Narrower bars">−</Button>
+        <Button size="small" onClick={() => setColWidth((w) => Math.min(240, w + 16))} aria-label="Wider bars">+</Button>
+      </div>
       {offset > 0 && (
-        <Button size="small" style={{ position: 'absolute', top: 8, right: FP_AXIS_W + 8 }} onClick={() => setOffset(0)}>
-          Back to live ▸
+        <Button size="small" style={{ position: 'absolute', top: 8, right: FP_AXIS_W + profileW + 8 }} onClick={() => setOffset(0)}>
+          Back to latest ▸
         </Button>
       )}
       {hover?.level && (
@@ -549,7 +603,7 @@ export function BookLadder({ book, walls, icebergPrices, lotSize, showLots, maxR
           </span>
         </span>
         <span style={{ color: AXIS_COLOR, textAlign: 'right' }}>
-          {icebergPrices?.has(level.price) ? <Tag color="purple" style={{ margin: 0, fontSize: 10, padding: '0 3px', lineHeight: '14px' }}>ICE</Tag> : level.orders}
+          {icebergPrices?.has(level.price) ? <Tag color="purple" style={{ margin: 0, fontSize: 10, padding: '0 3px', lineHeight: '14px' }}>ICE</Tag> : level.orders || ''}
         </span>
       </div>
     )

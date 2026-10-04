@@ -50,10 +50,28 @@ public sealed class LiveTradingController : ControllerBase
         return result.Success ? Ok(result) : UnprocessableEntity(result);
     }
 
+    /// <param name="exit">true for a working exit order (a plain order), false for an unfilled entry (super order).</param>
     [HttpDelete("orders/{orderId}")]
-    public async Task<ActionResult<ManualOrderResult>> Cancel(string orderId, CancellationToken cancellationToken)
+    public async Task<ActionResult<ManualOrderResult>> Cancel(string orderId, [FromQuery] bool exit, CancellationToken cancellationToken)
     {
-        var result = await _trading.CancelAsync(orderId, CancellationToken.None);
+        var result = await _trading.CancelAsync(orderId, exit, CancellationToken.None);
+        return result.Success ? Ok(result) : UnprocessableEntity(result);
+    }
+
+    [HttpPost("exit-all")]
+    public async Task<ActionResult<ManualOrderResult>> ExitAll([FromBody] CloseRequest request, CancellationToken cancellationToken)
+    {
+        _logger.LogWarning("{User} requested EXIT ALL live positions (slippage {Slippage}).", User.Identity?.Name, request.SlippagePoints);
+        var result = await _trading.ExitAllAsync(request.SlippagePoints, CancellationToken.None);
+        return result.Success ? Ok(result) : UnprocessableEntity(result);
+    }
+
+    /// <summary>Dhan's account-wide exit of every position and cancel of every open order.</summary>
+    [HttpPost("emergency-exit-all")]
+    public async Task<ActionResult<ManualOrderResult>> EmergencyExitAll(CancellationToken cancellationToken)
+    {
+        _logger.LogWarning("{User} requested the EMERGENCY account-wide exit-all.", User.Identity?.Name);
+        var result = await _trading.EmergencyExitAllAsync(CancellationToken.None);
         return result.Success ? Ok(result) : UnprocessableEntity(result);
     }
 }

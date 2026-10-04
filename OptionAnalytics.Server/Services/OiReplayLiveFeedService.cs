@@ -549,7 +549,7 @@ public sealed class OiReplayLiveFeedService : BackgroundService
             _batcher.Accumulate($"u:{futuresUnderlying}", "futuresTicks", minuteKey.ToString(), new LiveFuturesTick(
                 futuresUnderlying,
                 Open: tick.LastPrice, High: tick.LastPrice, Low: tick.LastPrice, Price: tick.LastPrice,
-                OpenInterest: tick.OpenInterest, Time: observedAt));
+                OpenInterest: tick.OpenInterest, Time: observedAt, DayVolume: tick.Volume));
         }
     }
 
@@ -583,9 +583,11 @@ public sealed record LiveOptionTick(
         : this;
 }
 
-/// <summary>The underlying's nearest futures contract, conflated the same way.</summary>
+/// <summary>The underlying's nearest futures contract, conflated the same way. DayVolume: Dhan's
+/// cumulative volume for the day - the page turns its rise within a minute into that minute's volume
+/// (for the futures volume profile).</summary>
 public sealed record LiveFuturesTick(
-    string Underlying, decimal Open, decimal High, decimal Low, decimal Price, long OpenInterest, DateTimeOffset Time) : ILiveMergeable
+    string Underlying, decimal Open, decimal High, decimal Low, decimal Price, long OpenInterest, DateTimeOffset Time, long DayVolume = 0) : ILiveMergeable
 {
     public ILiveMergeable MergeAfter(ILiveMergeable older) => older is LiveFuturesTick o
         ? this with { Open = o.Open, High = Math.Max(o.High, High), Low = Math.Min(o.Low, Low) }

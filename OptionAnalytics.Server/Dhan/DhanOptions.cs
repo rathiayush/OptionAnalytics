@@ -60,6 +60,10 @@ public sealed class DhanOptions
     /// <summary>Dhan's 20-level market depth socket - see DhanDepthFeedClient.</summary>
     public string DepthWsUrl { get; set; } = "wss://depth-api-feed.dhan.co/twentydepth";
 
+    /// <summary>Dhan's 200-level market depth socket (one instrument per connection) - see
+    /// DhanTwoHundredDepthClient.</summary>
+    public string FullDepthWsUrl { get; set; } = "wss://full-depth-api.dhan.co/twohundreddepth";
+
     /// <summary>The compact instrument dump - the only one of Dhan's two scrip master files with
     /// a per-contract trading symbol column.</summary>
     public string ScripMasterUrl { get; set; } = "https://images.dhan.co/api-data/api-scrip-master.csv";
