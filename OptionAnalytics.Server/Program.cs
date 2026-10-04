@@ -137,6 +137,18 @@ builder.Services.AddSingleton<DhanFuturesInstrumentMaster>(sp => new DhanFutures
 builder.Services.AddSingleton(sp => new NseFuturesContractArchive(
     sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(NseFuturesContractArchive)),
     sp.GetRequiredService<ILogger<NseFuturesContractArchive>>()));
+// An expired futures contract's past day from NSE's chart data (Dhan has no intraday history for
+// expired contracts) - see NseChartHistory. Keeps NSE's cookies, like the chart page does.
+builder.Services.AddHttpClient(nameof(NseChartHistory))
+    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+    {
+        UseCookies = true,
+        CookieContainer = new System.Net.CookieContainer(),
+        AutomaticDecompression = System.Net.DecompressionMethods.All,
+    });
+builder.Services.AddSingleton(sp => new NseChartHistory(
+    sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(NseChartHistory)),
+    sp.GetRequiredService<ILogger<NseChartHistory>>()));
 builder.Services.AddSingleton<DhanMarketFeedClient>();
 // AddHttpClient<DhanOptionChainMaster>() (the pattern every other typed client here uses) registers
 // it TRANSIENT - a brand new instance, with its own empty in-memory dictionary, for every distinct
