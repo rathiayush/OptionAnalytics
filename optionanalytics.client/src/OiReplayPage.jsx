@@ -3270,6 +3270,7 @@ export default function OiReplayPage() {
     lots: paperQtyLots, slippagePoints: liveSlippage, stopLossPoints: paperSlPoints, targetPoints: paperTargetPoints,
   }))
   const handleLiveClose = (securityId) => runLiveAction(() => liveTradingApi.close(securityId, liveSlippage))
+  const handleLivePartialExit = (securityId, lots) => runLiveAction(() => liveTradingApi.partialExit(securityId, lots, liveSlippage))
   const handleLiveCancel = (orderId, isExit) => runLiveAction(() => liveTradingApi.cancel(orderId, isExit))
   const handleLiveExitAll = () => runLiveAction(() => liveTradingApi.exitAll(liveSlippage))
   const handleLiveEmergencyExitAll = () => runLiveAction(() => liveTradingApi.emergencyExitAll())
@@ -4699,7 +4700,7 @@ export default function OiReplayPage() {
             liveContent={(
               <LivePositionsView
                 snapshot={livePositions} slippage={liveSlippage} busy={liveBusy}
-                onClose={handleLiveClose} onCancel={handleLiveCancel} onRefresh={handleLiveRefresh}
+                onClose={handleLiveClose} onPartialExit={handleLivePartialExit} onCancel={handleLiveCancel} onRefresh={handleLiveRefresh}
                 onExitAll={handleLiveExitAll} onEmergencyExitAll={handleLiveEmergencyExitAll}
               />
             )}

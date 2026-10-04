@@ -86,6 +86,8 @@ function FootprintLegend({ estimated, bigLabel }) {
       {item(box('#26a69a55'), 'ask (buy) volume')}
       {!estimated && item(box('#26a69a', null), 'buy imbalance')}
       {!estimated && item(box('#ef5350', null), 'sell imbalance')}
+      {!estimated && item(box('#8e44d6', null), 'stacked sell imbalance (bid side)')}
+      {!estimated && item(box('#f2f2f2', null), 'stacked buy imbalance (ask side)')}
       {!estimated && item(box('transparent', '#f5c542'), 'POC (most traded)')}
       {item(pill(UP_COLOR, 'ABS'), 'absorption')}
       {item(pill('#9254de', 'EXH'), 'exhaustion')}

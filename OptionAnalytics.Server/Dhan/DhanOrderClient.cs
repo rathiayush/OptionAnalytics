@@ -15,7 +15,13 @@ public sealed record PlainOrderSummary(
     int FilledQty,
     decimal Price,
     string? CorrelationId,
-    string? OmsErrorDescription);
+    string? OmsErrorDescription)
+{
+    /// <summary>LIMIT, MARKET, STOP_LOSS or STOP_LOSS_MARKET.</summary>
+    public string OrderType { get; init; } = "LIMIT";
+    /// <summary>A stop-loss order's trigger (null/0 otherwise).</summary>
+    public decimal? TriggerPrice { get; init; }
+}
 
 public sealed record PlainOrderResult(string OrderId, string OrderStatus);
 
@@ -47,23 +53,27 @@ public sealed class DhanOrderClient
 
     /// <summary>Places a plain order. <paramref name="correlationId"/> mirrors
     /// DhanSuperOrderClient.PlaceAsync's own (max 30 chars, ties the order back to whatever
-    /// triggered it for a later GET /orders lookup or a support ticket).</summary>
+    /// triggered it for a later GET /orders lookup or a support ticket). A STOP_LOSS order also needs
+    /// <paramref name="triggerPrice"/> (it rests until the price trades through the trigger, then works
+    /// as a limit at <paramref name="price"/>).</summary>
     public async Task<(PlainOrderResult? Result, string? Error)> PlaceAsync(
         string transactionType, string exchangeSegment, string productType, string orderType, string validity,
-        string securityId, int quantity, decimal price, string correlationId, CancellationToken cancellationToken)
+        string securityId, int quantity, decimal price, string correlationId, CancellationToken cancellationToken,
+        decimal? triggerPrice = null)
     {
-        var payload = new
+        var payload = new Dictionary<string, object?>
         {
-            correlationId = Truncate(correlationId, 30),
-            transactionType,
-            exchangeSegment,
-            productType,
-            orderType,
-            validity,
-            securityId,
-            quantity,
-            price,
+            ["correlationId"] = Truncate(correlationId, 30),
+            ["transactionType"] = transactionType,
+            ["exchangeSegment"] = exchangeSegment,
+            ["productType"] = productType,
+            ["orderType"] = orderType,
+            ["validity"] = validity,
+            ["securityId"] = securityId,
+            ["quantity"] = quantity,
+            ["price"] = price,
         };
+        if (triggerPrice is not null) payload["triggerPrice"] = triggerPrice;
 
         using var response = await _api.SendAsync(HttpMethod.Post, "/orders", payload,
             $"placing order ({transactionType} {securityId} x{quantity})", cancellationToken);
@@ -145,7 +155,11 @@ public sealed class DhanOrderClient
                 GetInt(element, "filledQty") ?? 0,
                 GetDecimal(element, "price") ?? 0,
                 GetString(element, "correlationId"),
-                GetString(element, "omsErrorDescription")));
+                GetString(element, "omsErrorDescription"))
+            {
+                OrderType = GetString(element, "orderType") ?? "LIMIT",
+                TriggerPrice = GetDecimal(element, "triggerPrice"),
+            });
         }
 
         return result;
