@@ -70,6 +70,25 @@ public sealed class LiveTradingController : ControllerBase
         return result.Success ? Ok(result) : UnprocessableEntity(result);
     }
 
+    public sealed record TradeRequest(IReadOnlyList<string> OrderIds, decimal SlippagePoints, decimal StopLossPoints = 0, decimal TargetPoints = 0);
+
+    /// <summary>Closes ONE trade (its super orders) and nothing else in that contract - see LiveTradingService.ExitTradeAsync.</summary>
+    [HttpPost("orders/exit-trade")]
+    public async Task<ActionResult<ManualOrderResult>> ExitTrade([FromBody] TradeRequest request, CancellationToken cancellationToken)
+    {
+        _logger.LogWarning("{User} requested a LIVE trade exit for super order(s) {Orders}.", User.Identity?.Name, string.Join(",", request.OrderIds ?? Array.Empty<string>()));
+        var result = await _trading.ExitTradeAsync(request.OrderIds ?? Array.Empty<string>(), request.SlippagePoints, CancellationToken.None);
+        return result.Success ? Ok(result) : UnprocessableEntity(result);
+    }
+
+    /// <summary>Moves ONE trade's stop-loss / target legs - see LiveTradingService.UpdateTradeLevelsAsync.</summary>
+    [HttpPost("orders/trade-levels")]
+    public async Task<ActionResult<ManualOrderResult>> TradeLevels([FromBody] TradeRequest request, CancellationToken cancellationToken)
+    {
+        var result = await _trading.UpdateTradeLevelsAsync(request.OrderIds ?? Array.Empty<string>(), request.StopLossPoints, request.TargetPoints, CancellationToken.None);
+        return result.Success ? Ok(result) : UnprocessableEntity(result);
+    }
+
     /// <summary>Cancels every open order (and the open positions' stop-loss / target legs) without closing anything.</summary>
     [HttpPost("orders/cancel-all")]
     public async Task<ActionResult<ManualOrderResult>> CancelAll(CancellationToken cancellationToken)

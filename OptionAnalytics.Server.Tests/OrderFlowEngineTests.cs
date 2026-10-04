@@ -86,6 +86,43 @@ public sealed class OrderFlowEngineTests
     public void ClassifiesTheAggressor(double price, double bid, double ask, double prevLtp, int lastSide, int expected) =>
         Assert.Equal(expected, OrderFlowEngine.Classify((decimal)price, (decimal)bid, (decimal)ask, (decimal)prevLtp, lastSide));
 
+    [Theory]
+    [InlineData(100.15, 100.00, 100.20, 100.20, -1, 1)]   // inside a wide spread, above the mid -> buy (even on a down-tick)
+    [InlineData(100.05, 100.00, 100.20, 100.00, 1, -1)]   // below the mid -> sell (even on an up-tick)
+    public void InsideTheSpread_TheMidpointDecidesBeforeTheTickRule(double price, double bid, double ask, double prevLtp, int lastSide, int expected) =>
+        Assert.Equal(expected, OrderFlowEngine.Classify((decimal)price, (decimal)bid, (decimal)ask, (decimal)prevLtp, lastSide));
+
+    [Fact]
+    public void ABuyerWhoLiftedTheOffer_IsABuy_EvenWhenTheNewBookArrivesBeforeTheTick()
+    {
+        var engine = NewEngine();
+        // Last trade 22710.10; the book has since come down to 22710.00 / 22710.05.
+        engine.OnTick(Tick(22710.10m, 1000, 22710.00m, 22710.05m), T0);
+        // A buyer takes the 22710.05 offer: Dhan's depth socket shows the new ask (22710.10) first...
+        engine.OnDepth(new DepthSidePacket(35001, 2, false, new[] { new DepthLevel(22710.10m, 750, 5) }, 20), T0.AddMilliseconds(300));
+        // ...then the tick with the trade. The latest quote alone would put 22710.05 at the mid and the
+        // tick rule (down from 22710.10) would call it a sell.
+        engine.OnTick(Tick(22710.05m, 1150, 22710.00m, 22710.10m), T0.AddMilliseconds(500));
+
+        var bar = Assert.Single(engine.Snapshot(rowSize: 0, minTradeQty: 1, heatmapColumns: 10).Bars);
+        Assert.Equal(150, bar.Buy);
+        Assert.Equal(0, bar.Sell);
+    }
+
+    [Fact]
+    public void WhenTheBookMovedThroughThePrice_TheLatestQuoteDecides()
+    {
+        var engine = NewEngine();
+        engine.OnTick(Tick(22709.95m, 1000, 22709.95m, 22710.00m), T0);
+        // The book jumps up: bid 22710.05 / ask 22710.10. A trade at 22710.05 hits that bid.
+        engine.OnDepth(new DepthSidePacket(35001, 2, true, new[] { new DepthLevel(22710.05m, 750, 5) }, 20), T0.AddMilliseconds(200));
+        engine.OnDepth(new DepthSidePacket(35001, 2, false, new[] { new DepthLevel(22710.10m, 750, 5) }, 20), T0.AddMilliseconds(200));
+        engine.OnTick(Tick(22710.05m, 1150, 22710.05m, 22710.10m), T0.AddMilliseconds(400));
+
+        var bar = Assert.Single(engine.Snapshot(rowSize: 0, minTradeQty: 1, heatmapColumns: 10).Bars);
+        Assert.Equal(150, bar.Sell);
+    }
+
     [Fact]
     public void VolumeIncreaseBecomesFootprintVolumeOnTheAggressorSide()
     {

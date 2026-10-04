@@ -7,10 +7,14 @@ namespace OptionAnalytics.Server.Services.OrderFlow;
 ///
 /// TRADES. Dhan sends a tick per update, not per trade, so trades are inferred: the increase in the
 /// day's cumulative volume since the previous tick is the volume traded since then, at the tick's
-/// last price. Its aggressor side - did a buyer lift the offer or a seller hit the bid - is the
-/// standard quote rule against the book as it stood BEFORE the trade (at/above the previous best ask =
-/// buy, at/below the previous best bid = sell), falling back to the tick rule (up from the previous
-/// trade price = buy, down = sell, unchanged = same side as the last trade).
+/// last price. Its aggressor side - did a buyer lift the offer or a seller hit the bid - is Lee-Ready:
+///  1. the quote rule against the book as it stood just BEFORE the trade - at/above the best ask = buy,
+///     at/below the best bid = sell. "Before" is the last second of quotes, not only the latest one:
+///     Dhan's depth socket often delivers the post-trade book (the lifted offer already gone) before
+///     the tick that carries the trade, so the offer a buyer just took still counts as the ask;
+///  2. inside the spread, the midpoint - above it = buy, below = sell;
+///  3. at the midpoint, the tick rule - up from the previous trade price = buy, down = sell,
+///     unchanged = same side as the last trade.
 ///
 /// FOOTPRINT. Every trade lands in its IST minute's bar, at its price, as buy (ask-side) or sell
 /// (bid-side) volume. The page re-buckets minutes into its 1/3/5/15-minute bars and price rows, and
@@ -108,9 +112,52 @@ public sealed class OrderFlowEngine
     {
         if (prevAsk > 0 && price >= prevAsk) return 1;
         if (prevBid > 0 && price <= prevBid) return -1;
+        if (prevBid > 0 && prevAsk > prevBid)
+        {
+            var mid = (prevBid + prevAsk) / 2;
+            if (price > mid) return 1;
+            if (price < mid) return -1;
+        }
         if (prevLtp > 0 && price > prevLtp) return 1;
         if (prevLtp > 0 && price < prevLtp) return -1;
         return lastSide;
+    }
+
+    /// <summary>The aggressor side against the quotes of the last QuoteLag (see the class comment): at or
+    /// above any recent best ask (and not at a recent bid) = buy, the mirror = sell; otherwise - the book
+    /// moved through the price within the window - the latest quote, midpoint and tick rule decide.</summary>
+    internal static int Classify(decimal price, decimal recentAskMin, decimal recentBidMax, decimal prevBid, decimal prevAsk, decimal prevLtp, int lastSide)
+    {
+        var atAsk = recentAskMin > 0 && price >= recentAskMin;
+        var atBid = recentBidMax > 0 && price <= recentBidMax;
+        if (atAsk && !atBid) return 1;
+        if (atBid && !atAsk) return -1;
+        return Classify(price, prevBid, prevAsk, prevLtp, lastSide);
+    }
+
+    // The best bid / ask over the last QuoteLag (plus the current one).
+    private static readonly TimeSpan QuoteLag = TimeSpan.FromSeconds(1);
+    private readonly Queue<(DateTimeOffset At, decimal Bid, decimal Ask)> _recentQuotes = new();
+
+    private void RecordQuote(DateTimeOffset now)
+    {
+        if (_recentQuotes.Count == 0 || _recentQuotes.Last() is var last && (last.Bid != _prevBid || last.Ask != _prevAsk))
+            _recentQuotes.Enqueue((now, _prevBid, _prevAsk));
+        while (_recentQuotes.Count > 1 && now - _recentQuotes.Peek().At > QuoteLag) _recentQuotes.Dequeue();
+        while (_recentQuotes.Count > 64) _recentQuotes.Dequeue();
+    }
+
+    private (decimal AskMin, decimal BidMax) RecentQuotes(DateTimeOffset now)
+    {
+        decimal askMin = _prevAsk > 0 ? _prevAsk : decimal.MaxValue;
+        var bidMax = _prevBid;
+        foreach (var q in _recentQuotes)
+        {
+            if (now - q.At > QuoteLag) continue;
+            if (q.Ask > 0) askMin = Math.Min(askMin, q.Ask);
+            bidMax = Math.Max(bidMax, q.Bid);
+        }
+        return (askMin == decimal.MaxValue ? 0 : askMin, bidMax);
     }
 
     public static decimal Row(decimal price, decimal rowSize) => rowSize > 0 ? Math.Floor(price / rowSize) * rowSize : price;
@@ -136,7 +183,8 @@ public sealed class OrderFlowEngine
                 var traded = tick.Volume - prevVolume;
                 if (traded > 0 && price > 0)
                 {
-                    var side = Classify(price, _prevBid, _prevAsk, _prevLtp, _lastSide);
+                    var (askMin, bidMax) = RecentQuotes(now);
+                    var side = Classify(price, askMin, bidMax, _prevBid, _prevAsk, _prevLtp, _lastSide);
                     _lastSide = side;
                     AddTrade(now, price, traded, side);
                 }
@@ -151,6 +199,7 @@ public sealed class OrderFlowEngine
             if (price > 0) _prevLtp = price;
             _prevBid = _bids.Length > 0 ? _bids[0].Price : tick.BestBidPrice;
             _prevAsk = _asks.Length > 0 ? _asks[0].Price : tick.BestAskPrice;
+            RecordQuote(now);
             UpdateEpisodes(now);
             MaybeSnapshot(now);
         }
@@ -165,6 +214,7 @@ public sealed class OrderFlowEngine
             RollDay(now);
             if (packet.IsBid) { _bids = packet.Levels; _deepBidAt = now; _prevBid = packet.Levels[0].Price; }
             else { _asks = packet.Levels; _deepAskAt = now; _prevAsk = packet.Levels[0].Price; }
+            RecordQuote(now);
             _deepDepth = packet.Depth;
             _dayDepth = Math.Max(_dayDepth, packet.Depth);
             UpdateEpisodes(now);
@@ -186,6 +236,7 @@ public sealed class OrderFlowEngine
         _day = day;
         _prevVolume = null;
         _prevLtp = _prevBid = _prevAsk = 0;
+        _recentQuotes.Clear();
         _bars.Clear();
         _dayDepth = 5;
         _dayVolume.Clear();

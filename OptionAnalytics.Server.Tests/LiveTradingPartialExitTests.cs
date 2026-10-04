@@ -230,6 +230,77 @@ public sealed class LiveTradingPartialExitTests
         Assert.DoesNotContain(dhan.Orders.Values, o => o.Tag.StartsWith("OIRX-")); // no exit placed
     }
 
+    // ---- one strategy trade (its super orders), not the whole position ------------------------------
+
+    private static JsonObject TradedSuperOrder(string id, int quantity, decimal price, string target = "PENDING", string stop = "PENDING") => new()
+    {
+        ["orderId"] = id, ["orderStatus"] = "TRADED", ["transactionType"] = "BUY", ["exchangeSegment"] = "NSE_FNO",
+        ["securityId"] = SecurityId.ToString(), ["quantity"] = quantity, ["filledQty"] = quantity, ["price"] = price,
+        ["targetPrice"] = price + 30, ["stopLossPrice"] = price - 20, ["correlationId"] = $"OIR-{id}",
+        ["legDetails"] = new JsonArray(
+            new JsonObject { ["legName"] = "TARGET_LEG", ["orderStatus"] = target, ["transactionType"] = "SELL", ["price"] = price + 30 },
+            new JsonObject { ["legName"] = "STOP_LOSS_LEG", ["orderStatus"] = stop, ["transactionType"] = "SELL", ["price"] = price - 20 }),
+    };
+
+    [Fact]
+    public async Task ExitTrade_CancelsThatTradesLegs_AndExitsOnlyItsQuantity()
+    {
+        var (service, dhan, _) = await CreateAsync();
+        // A second trade in the same contract: 1 lot (S3) on top of S1's 4 - Dhan nets them to 5.
+        dhan.SuperOrders.Add(TradedSuperOrder("S3", Lot, 112m));
+        dhan.Positions[0]["netQty"] = 5 * Lot;
+
+        var result = await service.ExitTradeAsync(new[] { "S3" }, 1m, CancellationToken.None);
+
+        Assert.True(result.Success, result.Message);
+        Assert.Contains("DELETE /super/orders/S3/TARGET_LEG", dhan.Requests);
+        Assert.Contains("DELETE /super/orders/S3/STOP_LOSS_LEG", dhan.Requests);
+        Assert.DoesNotContain(dhan.Requests, r => r.StartsWith("DELETE /super/orders/S1"));
+        var exit = Assert.Single(dhan.Orders.Values);
+        Assert.Equal(("SELL", Lot), (exit.Side, exit.Quantity));
+        Assert.True(dhan.Requests.IndexOf("DELETE /super/orders/S3/STOP_LOSS_LEG") < dhan.Requests.LastIndexOf("POST /orders"), "legs go before the exit");
+    }
+
+    [Fact]
+    public async Task ExitTrade_ForAnUnfilledEntry_CancelsTheSuperOrder_AndPlacesNothing()
+    {
+        var (service, dhan, _) = await CreateAsync();
+        dhan.SuperOrders.Add(PendingSuperOrder("S2", "OIR-S2"));
+
+        var result = await service.ExitTradeAsync(new[] { "S2" }, 1m, CancellationToken.None);
+
+        Assert.True(result.Success, result.Message);
+        Assert.Contains("DELETE /super/orders/S2/ENTRY_LEG", dhan.Requests);
+        Assert.Empty(dhan.Orders);
+    }
+
+    [Fact]
+    public async Task ExitTrade_AlreadyClosedByItsTarget_DoesNothing()
+    {
+        var (service, dhan, _) = await CreateAsync();
+        dhan.SuperOrders.Add(TradedSuperOrder("S3", Lot, 112m, target: "TRADED", stop: "CANCELLED"));
+
+        var result = await service.ExitTradeAsync(new[] { "S3" }, 1m, CancellationToken.None);
+
+        Assert.True(result.Success, result.Message);
+        Assert.Contains("already closed on Dhan by its target", result.Message);
+        Assert.DoesNotContain(dhan.Requests, r => r.StartsWith("DELETE"));
+        Assert.Empty(dhan.Orders);
+    }
+
+    [Fact]
+    public async Task TradeLevels_MoveTheLegsFromTheEntryPrice()
+    {
+        var (service, dhan, _) = await CreateAsync();
+
+        var result = await service.UpdateTradeLevelsAsync(new[] { "S1" }, stopLossPoints: 25m, targetPoints: 35m, CancellationToken.None);
+
+        Assert.True(result.Success, result.Message);
+        // S1 bought at 110: target 145, stop-loss 85.
+        Assert.Contains(dhan.SuperModifies, m => m["legName"]!.GetValue<string>() == "TARGET_LEG" && m["targetPrice"]!.GetValue<decimal>() == 145m);
+        Assert.Contains(dhan.SuperModifies, m => m["legName"]!.GetValue<string>() == "STOP_LOSS_LEG" && m["stopLossPrice"]!.GetValue<decimal>() == 85m);
+    }
+
     [Theory]
     [InlineData("PENDING", true)]
     [InlineData("TRIGGERED", true)]   // a status Dhan may add later still counts as open
@@ -321,6 +392,7 @@ public sealed class LiveTradingPartialExitTests
     {
         public List<JsonObject> Positions { get; } = new();
         public List<JsonObject> SuperOrders { get; } = new();
+        public List<JsonObject> SuperModifies { get; } = new();
         public ConcurrentDictionary<string, PlainOrder> Orders { get; } = new();
         public List<string> Requests { get; } = new();
         private int _next;
@@ -363,6 +435,11 @@ public sealed class LiveTradingPartialExitTests
                 foreach (var leg in order["legDetails"]!.AsArray())
                     if (parts[4] == "ENTRY_LEG" || leg!["legName"]!.GetValue<string>() == parts[4]) leg!["orderStatus"] = "CANCELLED";
                 return Json(new JsonObject { ["orderId"] = parts[3], ["orderStatus"] = "CANCELLED" });
+            }
+            if (request.Method == HttpMethod.Put && path.StartsWith("/super/orders/"))
+            {
+                lock (SuperModifies) SuperModifies.Add(body!);
+                return Json(new JsonObject { ["orderId"] = path.Split('/')[3], ["orderStatus"] = "PENDING" });
             }
             if (request.Method == HttpMethod.Get && path == "/orders")
                 return Json(new JsonArray(Orders.Values.Select(o => (JsonNode)new JsonObject

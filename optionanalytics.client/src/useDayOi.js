@@ -31,26 +31,41 @@ export function useDayOi(underlying, date, isReplay) {
     liveRef.current = { underlying, flag: expiryFlagOf(underlying), live: !isReplay, key: requestKey }
   }, [underlying, isReplay, requestKey])
 
-  // The day so far (REST).
+  // The day so far (REST). A failed or empty load (before 09:15, or a Dhan call that failed) is retried
+  // after 15 s, 30 s, 60 s, then every 2 minutes until it loads - a retry, not a poll: once the day has
+  // loaded, live OI comes from the websocket. The last good OI stays on screen meanwhile.
   useEffect(() => {
     if (!date) return undefined
     let cancelled = false
+    let retryTimer = null
+    let attempt = 0
     const key = requestKey
     const flag = expiryFlagOf(underlying)
     const params = new URLSearchParams({ date, timeframeMinutes: '1', expiryFlag: flag, ...(isReplay ? {} : { forceLive: 'true' }) })
-    Promise.all([
+    const fail = (error) => {
+      setState((prev) => ({ key, oi: prev.key === key ? prev.oi : null, error }))
+      if (isReplay) return // a past day does not change - Load day again to retry
+      const delay = [15_000, 30_000, 60_000][attempt] ?? 120_000
+      attempt += 1
+      retryTimer = setTimeout(load, delay)
+    }
+    const load = () => Promise.all([
       fetch(`/api/oi-replay/${underlying}/run?${params}`).then((r) => r.json()),
       fetch(`/api/oi-replay/${underlying}/expiries`).then((r) => r.json()).catch(() => null),
     ])
       .then(([body, expiries]) => {
         if (cancelled) return
-        if (!body?.success) { setState({ key, oi: null, error: body?.error ?? 'OI data unavailable' }); return }
+        if (!body?.success || !(body.spotCandlesOneMinute ?? body.spotCandles ?? []).length) {
+          fail(body?.success ? 'no index data yet (before the open?)' : body?.error ?? 'OI data unavailable')
+          return
+        }
         const expiryDate = underlying === 'BANKNIFTY' ? expiries?.month ?? null : expiries?.week ?? null
         ctxRef.current = buildOiContext(body, expiryDate)
         setState({ key, oi: ctxRef.current, error: null })
       })
-      .catch((err) => { if (!cancelled) setState((prev) => ({ key, oi: prev.key === key ? prev.oi : null, error: err.message })) })
-    return () => { cancelled = true }
+      .catch((err) => { if (!cancelled) fail(err.message) })
+    load()
+    return () => { cancelled = true; if (retryTimer) clearTimeout(retryTimer) }
   }, [underlying, date, isReplay, requestKey, reloadNonce])
 
   // Live: Dhan websocket ticks via SignalR, folded into the context's minute series.

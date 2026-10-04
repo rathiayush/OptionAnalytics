@@ -946,6 +946,134 @@ public sealed class LiveTradingService : BackgroundService
         }
     }
 
+    /// <summary>
+    /// Closes ONE trade - the super order(s) it was placed as (a strategy trade from the Order Flow page,
+    /// sliced orders included) - and nothing else in that contract. Dhan nets a contract into one
+    /// position, so Close would also close any other trade in the same strike; this works per order:
+    ///  - entry not (fully) filled: cancel its ENTRY_LEG, which cancels the whole super order, legs too;
+    ///  - entry filled: cancel its still-open TARGET_LEG and STOP_LOSS_LEG, then one chased LIMIT exit
+    ///    for exactly the quantity this trade filled (never more than is open, less any exit working);
+    ///  - a target or stop-loss leg already filled: Dhan closed it (and cancelled the other leg) - nothing to do.
+    /// </summary>
+    public async Task<ManualOrderResult> ExitTradeAsync(IReadOnlyList<string> orderIds, decimal slippagePoints, CancellationToken cancellationToken)
+    {
+        if (!_session.IsAuthenticated) return ManualOrderResult.Fail("not logged in to Dhan right now");
+        if (orderIds.Count == 0) return ManualOrderResult.Fail("no orders given");
+        await _actionLock.WaitAsync(cancellationToken);
+        try
+        {
+            var mine = (await _superOrders.ListAsync(cancellationToken)).Where(o => orderIds.Contains(o.OrderId)).ToList();
+            if (mine.Count == 0) return ManualOrderResult.Fail("Dhan does not list these super orders today");
+            var messages = new List<string>();
+            var failures = new List<string>();
+            long toExit = 0;
+            var securityId = mine[0].SecurityId;
+
+            async Task CancelLeg(string orderId, string leg)
+            {
+                var (result, error) = await _superOrders.CancelAsync(orderId, leg, cancellationToken);
+                if (result is null) failures.Add($"{orderId} {leg}: Dhan did not cancel it ({error ?? "no reason given"})");
+                else messages.Add($"{orderId} {leg} cancelled");
+            }
+
+            foreach (var order in mine)
+            {
+                var status = (order.OrderStatus ?? "").Trim().ToUpperInvariant();
+                var filled = order.FilledQty ?? (status == "TRADED" ? order.Quantity : 0);
+                if (status == "TRADED")
+                {
+                    var closedBy = order.LegDetails.FirstOrDefault(l => l.LegName is "TARGET_LEG" or "STOP_LOSS_LEG"
+                        && string.Equals(l.OrderStatus, "TRADED", StringComparison.OrdinalIgnoreCase));
+                    if (closedBy is not null) { messages.Add($"{order.OrderId}: already closed on Dhan by its {(closedBy.LegName == "TARGET_LEG" ? "target" : "stop-loss")}"); continue; }
+                    foreach (var leg in order.LegDetails.Where(l => l.LegName is "TARGET_LEG" or "STOP_LOSS_LEG" && IsOpenStatus(l.OrderStatus)))
+                        await CancelLeg(order.OrderId, leg.LegName);
+                    toExit += filled;
+                }
+                else if (IsOpenStatus(status))
+                {
+                    await CancelLeg(order.OrderId, "ENTRY_LEG");
+                    toExit += filled;
+                }
+                else messages.Add($"{order.OrderId}: {status.ToLowerInvariant()} - nothing to do");
+            }
+
+            var orderIdsOut = new List<string>();
+            if (toExit > 0)
+            {
+                var position = (await _positions.ListAsync(cancellationToken)).FirstOrDefault(p => p.SecurityId == securityId && p.IsOpen);
+                if (position is null) messages.Add("the position is already flat");
+                else
+                {
+                    var working = await WorkingExitQuantityAsync(position, cancellationToken);
+                    var quantity = (int)Math.Min(toExit, ExitQuantity(position.NetQty, working));
+                    if (quantity <= 0) messages.Add("exit orders for it are already working");
+                    else
+                    {
+                        var (ids, price, error) = await PlaceExitAsync(position, quantity, slippagePoints, cancellationToken);
+                        orderIdsOut.AddRange(ids);
+                        if (error is not null) failures.Add(error);
+                        else messages.Add($"{(position.ClosesBySelling ? "SELL" : "BUY")} {position.TradingSymbol} x{quantity} at LIMIT {price:0.##} to close this trade");
+                    }
+                }
+            }
+            _logger.LogWarning("Live trade exit for {Orders}: {Messages} {Failures}", string.Join(",", orderIds), string.Join(" · ", messages), string.Join(" · ", failures));
+            RequestRefresh();
+            var text = string.Join(" · ", failures.Concat(messages));
+            return failures.Count == 0 ? new ManualOrderResult(true, text, orderIdsOut, null) : ManualOrderResult.Fail(text, orderIdsOut);
+        }
+        finally
+        {
+            _actionLock.Release();
+        }
+    }
+
+    /// <summary>Moves ONE trade's stop-loss and target to <paramref name="stopLossPoints"/> /
+    /// <paramref name="targetPoints"/> premium points from its entry price (0 = leave that leg as it is):
+    /// the TARGET_LEG / STOP_LOSS_LEG of a filled entry, or the ENTRY_LEG's own levels while it is still
+    /// pending - the only parts of a super order Dhan lets change.</summary>
+    public async Task<ManualOrderResult> UpdateTradeLevelsAsync(IReadOnlyList<string> orderIds, decimal stopLossPoints, decimal targetPoints, CancellationToken cancellationToken)
+    {
+        if (!_session.IsAuthenticated) return ManualOrderResult.Fail("not logged in to Dhan right now");
+        if (orderIds.Count == 0) return ManualOrderResult.Fail("no orders given");
+        await _actionLock.WaitAsync(cancellationToken);
+        try
+        {
+            var mine = (await _superOrders.ListAsync(cancellationToken)).Where(o => orderIds.Contains(o.OrderId)).ToList();
+            var messages = new List<string>();
+            var failures = new List<string>();
+            foreach (var order in mine)
+            {
+                uint.TryParse(order.SecurityId, out var id);
+                var tick = _chain.FindBySecurityId(id)?.TickSize is > 0 and var t ? t : 0.05m;
+                var isSell = string.Equals(order.TransactionType, "SELL", StringComparison.OrdinalIgnoreCase);
+                decimal? target = targetPoints > 0 ? StrategyTriggerHostedService.RoundToTick(Math.Max(tick, isSell ? order.Price - targetPoints : order.Price + targetPoints), tick) : null;
+                decimal? stop = stopLossPoints > 0 ? StrategyTriggerHostedService.RoundToTick(Math.Max(tick, isSell ? order.Price + stopLossPoints : order.Price - stopLossPoints), tick) : null;
+                var status = (order.OrderStatus ?? "").Trim().ToUpperInvariant();
+                var changes = new List<(string Leg, decimal? Target, decimal? Stop)>();
+                if (status == "TRADED")
+                {
+                    if (target is not null && order.LegDetails.Any(l => l.LegName == "TARGET_LEG" && IsOpenStatus(l.OrderStatus))) changes.Add(("TARGET_LEG", target, null));
+                    if (stop is not null && order.LegDetails.Any(l => l.LegName == "STOP_LOSS_LEG" && IsOpenStatus(l.OrderStatus))) changes.Add(("STOP_LOSS_LEG", null, stop));
+                }
+                else if (IsOpenStatus(status) && (target is not null || stop is not null)) changes.Add(("ENTRY_LEG", target, stop));
+                foreach (var (leg, newTarget, newStop) in changes)
+                {
+                    var (result, error) = await _superOrders.ModifyAsync(order.OrderId, leg, null, null, null, newTarget, newStop, null, cancellationToken);
+                    if (result is null) failures.Add($"{order.OrderId} {leg}: Dhan did not modify it ({error ?? "no reason given"})");
+                    else messages.Add($"{order.OrderId} {leg} -> {(newTarget is { } nt ? $"target {nt:0.##}" : "")}{(newTarget is not null && newStop is not null ? ", " : "")}{(newStop is { } ns ? $"stop-loss {ns:0.##}" : "")}");
+                }
+            }
+            RequestRefresh();
+            if (messages.Count == 0 && failures.Count == 0) return new ManualOrderResult(true, "nothing to change - the trade has no open stop-loss / target legs", Array.Empty<string>(), null);
+            var text = string.Join(" · ", failures.Concat(messages));
+            return failures.Count == 0 ? new ManualOrderResult(true, text, Array.Empty<string>(), null) : ManualOrderResult.Fail(text);
+        }
+        finally
+        {
+            _actionLock.Release();
+        }
+    }
+
     /// <summary>The quantity a contract's filled super orders' still-pending stop-loss (or target) legs
     /// would close if they fired.</summary>
     internal static int LegQuantity(IEnumerable<SuperOrderSummary> superOrders) => superOrders
