@@ -42,6 +42,12 @@ public sealed class DhanDepthFeedClient : BackgroundService
 
     public bool IsConnected => _socket is { State: WebSocketState.Open };
     public DateTimeOffset? LastMessageUtc { get; private set; }
+    private volatile string? _lastError;
+
+    public bool IsSubscribed(uint securityId) => _subscriptions.ContainsKey(securityId);
+
+    /// <summary>The shared 20-level connection: open or not, when a book last arrived, Dhan's last error.</summary>
+    public DepthConnectionStatus Status() => new(IsConnected, LastMessageUtc, _lastError);
 
     /// <summary>Whether this feed can carry <paramref name="exchangeSegment"/> at all (NSE only).</summary>
     public bool Supports(string exchangeSegment) => _enabled && exchangeSegment.StartsWith("NSE_", StringComparison.OrdinalIgnoreCase);
@@ -92,6 +98,7 @@ public sealed class DhanDepthFeedClient : BackgroundService
             }
             catch (Exception ex)
             {
+                _lastError = DepthConnectionStatus.Describe(ex);
                 _logger.LogWarning(ex, "Dhan 20-level depth feed disconnected - retrying in {Seconds}s.", backoff.TotalSeconds);
             }
 
@@ -123,6 +130,7 @@ public sealed class DhanDepthFeedClient : BackgroundService
                     result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), cancellationToken);
                     if (result.MessageType == WebSocketMessageType.Close)
                     {
+                        _lastError = $"closed by Dhan ({result.CloseStatus}{(string.IsNullOrWhiteSpace(result.CloseStatusDescription) ? "" : $": {result.CloseStatusDescription}")})";
                         _logger.LogWarning("Dhan 20-level depth feed closed by the server ({Status}: {Description}).", result.CloseStatus, result.CloseStatusDescription);
                         return;
                     }
@@ -134,9 +142,11 @@ public sealed class DhanDepthFeedClient : BackgroundService
                 var packets = DhanDepthPacketParser.Parse(message.GetBuffer().AsSpan(0, (int)message.Length), out var disconnect);
                 if (disconnect is not null)
                 {
+                    _lastError = $"Dhan disconnect {disconnect}: {DhanSymbology.DescribeFeedErrorCode(disconnect.Value)}";
                     _logger.LogWarning("Dhan 20-level depth feed sent a disconnect (code {Code}): {Reason}.", disconnect, DhanSymbology.DescribeFeedErrorCode(disconnect.Value));
                     return;
                 }
+                if (packets.Count > 0) _lastError = null;
                 foreach (var packet in packets)
                 {
                     try { DepthUpdated?.Invoke(packet); }

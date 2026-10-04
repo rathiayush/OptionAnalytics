@@ -172,6 +172,7 @@ public sealed class OrderFlowService : BackgroundService
         _tickSubscription = _feed.AddTickConsumer("Order flow", OnTick);
         _depth.DepthUpdated += OnDepth;
         _fullDepth.DepthUpdated += OnDepth;
+        var feedStatus = RefreshDepthFeedsAsync(stoppingToken);
         try
         {
             while (!stoppingToken.IsCancellationRequested)
@@ -202,7 +203,54 @@ public sealed class OrderFlowService : BackgroundService
             _depth.DepthUpdated -= OnDepth;
             _fullDepth.DepthUpdated -= OnDepth;
             _tickSubscription?.Dispose();
+            try { await feedStatus; } catch (OperationCanceledException) { }
         }
+    }
+
+    // Every few seconds: each tracked contract's depth connection state onto its engine (and pushed when
+    // it changed), so the page says "200-level connected, waiting for the book" on a closed market - when
+    // no tick arrives to carry it - or what Dhan answered when the connection fails.
+    private async Task RefreshDepthFeedsAsync(CancellationToken cancellationToken)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(cancellationToken))
+            {
+                foreach (var engine in _bySecurityId.Values)
+                {
+                    var feed = DepthFeedFor(engine.SecurityId, engine.ExchangeSegment);
+                    var before = engine.DepthFeed;
+                    if (before is not null && before.Levels == feed.Levels && before.Connected == feed.Connected && before.Note == feed.Note
+                        && (before.LastBookAt is null) == (feed.LastBookAt is null)) { engine.DepthFeed = feed; continue; }
+                    engine.DepthFeed = feed;
+                    Push(engine);
+                }
+            }
+        }
+        catch (OperationCanceledException) { }
+    }
+
+    /// <summary>The depth connection a contract is on, as the page shows it.</summary>
+    internal OrderFlowDepthFeed DepthFeedFor(uint securityId, string segment)
+    {
+        if (!segment.StartsWith("NSE_", StringComparison.OrdinalIgnoreCase))
+            return new OrderFlowDepthFeed(5, true, null, "Dhan's 20- and 200-level depth covers NSE only - BSE contracts have the 5 levels of the market feed.");
+        if (_depthMode == "5")
+            return new OrderFlowDepthFeed(5, true, null, "Deeper depth is turned off (OrderFlow:DepthMode = 5).");
+        var full = _fullDepth.Status(securityId);
+        var onTwenty = _depth.IsSubscribed(securityId);
+        if (full is not null && (full.Connected || !onTwenty))
+            return new OrderFlowDepthFeed(200, full.Connected, full.LastBookAt, full.LastError is { } e ? $"200-level: {e}" : null);
+        if (onTwenty)
+        {
+            var twenty = _depth.Status();
+            var why = full is not null
+                ? $"200-level not streaming{(full.LastError is { } fe ? $" ({fe})" : "")} - on the 20-level feed meanwhile."
+                : _depthMode == "200" ? "All 200-level connections are in use (Dhan allows 5 sockets per account) - on the 20-level feed." : null;
+            return new OrderFlowDepthFeed(20, twenty.Connected, twenty.LastBookAt, twenty.LastError is { } te ? $"{why} 20-level: {te}".Trim() : why);
+        }
+        return new OrderFlowDepthFeed(5, true, null, "No depth connection for this contract.");
     }
 
     private async Task<bool> ResolveAsync(string underlying, CancellationToken cancellationToken)
