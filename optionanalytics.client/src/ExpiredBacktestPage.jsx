@@ -2,7 +2,8 @@ import { Component, useEffect, useMemo, useRef, useState } from 'react'
 import { Select, Space, Typography, Card, Button, Table, Tag, InputNumber, Statistic, Row, Col, DatePicker, TimePicker, Segmented, Alert, Empty, Tooltip, Checkbox } from 'antd'
 import dayjs from 'dayjs'
 import { PlayCircleOutlined, InfoCircleOutlined } from '@ant-design/icons'
-import { createChart, createSeriesMarkers, CandlestickSeries, LineSeries, CrosshairMode } from 'lightweight-charts'
+import { createSeriesMarkers, CandlestickSeries, LineSeries, CrosshairMode } from 'lightweight-charts'
+import { createZoomableChart } from './chartZoom.js'
 import {
   UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, EMA_COLOR, emaLine, srLevelLine, NavBar, DirectionTag, fmtIstDateTime, fmtIstTime, fmtPrice, istDateKey,
   TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState,
@@ -125,7 +126,7 @@ function ExpiredSpotChart({ bars, trades, indicatorLines, height = 420, focusTim
   useEffect(() => {
     if (!containerRef.current) return
 
-    const chart = createChart(containerRef.current, {
+    const chart = createZoomableChart(containerRef.current, {
       width: containerRef.current.clientWidth,
       height,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },

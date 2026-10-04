@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button, Tag, Typography } from 'antd'
-import { createChart, HistogramSeries, LineSeries, CrosshairMode } from 'lightweight-charts'
+import { HistogramSeries, LineSeries, CrosshairMode } from 'lightweight-charts'
+import { createZoomableChart } from './chartZoom.js'
 import { UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR, toChartTime, istTickMarkFormatter, istTimeFormatter } from './shared.jsx'
 import { useFitContentAsDataGrows } from './oiShared.jsx'
 
@@ -572,14 +573,27 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
   const canvasRef = useRef(null)
   const width = useElementWidth(wrapRef)
   const [hover, setHover] = useState(null)
+  // Zoom / pan, both axes - kept until reset (double-click or ⟲):
+  //   hview: null = every column that fits, following the latest; else { cols, endT } = that many
+  //          columns ending at the column stamped endT (null endT = the latest).
+  //   vview: null = prices fitted to the book; else { top, rowH }.
+  const [hview, setHview] = useState(null)
+  const [vview, setVview] = useState(null)
+  const dragRef = useRef(null)
   const step = rowSize > 0 ? rowSize : 0.05
   const plotW = Math.max(0, width - HM_AXIS_W)
   const plotH = Math.max(50, height - HM_TIME_H)
 
   const layout = useMemo(() => {
     if (!width || columns.length === 0) return null
-    const maxCols = Math.max(1, Math.floor(plotW / 2))
-    const visible = columns.slice(-maxCols)
+    const maxCols = Math.max(10, Math.min(columns.length, hview?.cols ?? Math.floor(plotW / 2)))
+    let end = columns.length
+    if (hview?.endT != null) {
+      const i = columns.findLastIndex((c) => c.t <= hview.endT)
+      if (i >= 0) end = i + 1
+    }
+    const start = Math.max(0, end - maxCols)
+    const visible = columns.slice(start, Math.max(start + 1, end))
     const mids = visible.map((c) => {
       const bestBid = c.bids.length ? Math.max(...c.bids.map((b) => b[0])) : null
       const bestAsk = c.asks.length ? Math.min(...c.asks.map((a) => a[0])) : null
@@ -599,10 +613,47 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
     quantities.sort((a, b) => a - b)
     // Linear against the 98th percentile: ordinary liquidity stays blue, walls stand out hot.
     const cap = quantities[Math.floor(quantities.length * 0.98)] || 1
-    const hiPad = hi + step
-    const nRows = Math.round((hiPad - (lo - step)) / step) + 1
-    return { visible, mids, hiPad, nRows, rowH: plotH / nRows, colW: plotW / visible.length, cap, t0: visible[0].t, t1: visible[visible.length - 1].t }
-  }, [columns, width, plotW, plotH, step])
+    let hiPad = hi + step
+    let nRows = Math.round((hiPad - (lo - step)) / step) + 1
+    let rowH = plotH / nRows
+    if (vview) {
+      hiPad = vview.top
+      rowH = vview.rowH
+      nRows = Math.ceil(plotH / rowH) + 1
+    }
+    return { visible, mids, hiPad, nRows, rowH, colW: plotW / visible.length, cap, t0: visible[0].t, t1: visible[visible.length - 1].t, start, end }
+  }, [columns, width, plotW, plotH, step, hview, vview])
+
+  // Rows `factor` times taller around the price at height y (factor > 1 = zoom in); the top stays on a row.
+  const zoomRowsAt = (factor, y = plotH / 2) => {
+    if (!layout) return
+    const rowH = Math.max(1, Math.min(40, layout.rowH * factor))
+    const price = layout.hiPad - (y / layout.rowH) * step
+    setVview({ top: Math.round((price + (y / rowH) * step) / step) * step, rowH })
+  }
+  // `factor` times fewer columns (zoom in), keeping the right edge.
+  const zoomColsBy = (factor) => {
+    if (!layout) return
+    const cols = Math.max(10, Math.min(columns.length, Math.round(layout.visible.length / factor)))
+    setHview((h) => ({ cols, endT: h?.endT ?? null }))
+  }
+  const resetView = () => { setHview(null); setVview(null) }
+  const zoomRef = useRef({})
+  useEffect(() => { zoomRef.current = { zoomRowsAt, zoomColsBy, plotW } })
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return undefined
+    // Wheel = time zoom; Shift+wheel or the wheel over the price axis = price zoom at the cursor.
+    const onWheel = (e) => {
+      e.preventDefault()
+      const rect = canvas.getBoundingClientRect()
+      const z = zoomRef.current
+      if (e.shiftKey || e.clientX - rect.left > z.plotW) z.zoomRowsAt(e.deltaY < 0 ? 1.15 : 1 / 1.15, e.clientY - rect.top)
+      else z.zoomColsBy(e.deltaY < 0 ? 1.15 : 1 / 1.15)
+    }
+    canvas.addEventListener('wheel', onWheel, { passive: false })
+    return () => canvas.removeEventListener('wheel', onWheel)
+  }, [])
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -620,6 +671,9 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
     const rowTop = (p) => Math.round((hiPad - p) / step) * rowH
     const yPrice = (p) => ((hiPad + step - p) / step) * rowH - rowH / 2
     const xTime = (t) => (t1 === t0 ? plotW : ((t - t0) / (t1 - t0)) * (plotW - colW) + colW / 2)
+    // Zoomed or panned, nothing may spill onto the axes.
+    ctx.save()
+    ctx.beginPath(); ctx.rect(0, 0, plotW, plotH); ctx.clip()
 
     visible.forEach((c, i) => {
       const x = i * colW
@@ -700,6 +754,8 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
       ctx.fillText(label, px + 4, py + 7.5)
     }
 
+    ctx.restore()
+
     // Axes
     ctx.font = `11px ${FONT}`
     ctx.textBaseline = 'middle'
@@ -723,12 +779,35 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
     <div ref={wrapRef} style={{ position: 'relative', width: '100%', height }}>
       <canvas
         ref={canvasRef}
-        style={{ display: 'block', cursor: 'crosshair' }}
+        style={{ display: 'block', cursor: 'crosshair', touchAction: 'none' }}
+        onPointerDown={(e) => {
+          if (!layout) return
+          dragRef.current = { x: e.clientX, y: e.clientY, end: layout.end, cols: layout.visible.length, top: layout.hiPad, rowH: layout.rowH, colW: layout.colW, vertical: !!vview }
+          e.currentTarget.setPointerCapture(e.pointerId)
+        }}
+        onPointerUp={() => { dragRef.current = null }}
+        onPointerCancel={() => { dragRef.current = null }}
+        onDoubleClick={resetView}
         onPointerMove={(e) => {
           if (!layout) return
           const rect = e.currentTarget.getBoundingClientRect()
           const x = e.clientX - rect.left
           const y = e.clientY - rect.top
+          const d = dragRef.current
+          if (d) {
+            // Drag sideways through time; up/down through prices once the drag is clearly vertical.
+            setHover(null)
+            const shift = Math.round((e.clientX - d.x) / d.colW)
+            if (shift !== 0 || hview) {
+              const end = Math.max(Math.min(d.cols, columns.length), Math.min(columns.length, d.end - shift))
+              setHview({ cols: d.cols, endT: end >= columns.length ? null : columns[end - 1].t })
+            }
+            if (d.vertical || Math.abs(e.clientY - d.y) > 8) {
+              d.vertical = true
+              setVview({ top: Math.round((d.top + ((e.clientY - d.y) / d.rowH) * step) / step) * step, rowH: d.rowH })
+            }
+            return
+          }
           const col = layout.visible[Math.floor(x / layout.colW)]
           if (!col || y > plotH) { setHover(null); return }
           const row = Math.round((layout.hiPad - Math.floor(y / layout.rowH) * step) * 100) / 100
@@ -738,6 +817,13 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
         }}
         onPointerLeave={() => setHover(null)}
       />
+      <div style={{ position: 'absolute', left: 6, bottom: HM_TIME_H + 4, display: 'flex', gap: 3 }}>
+        <Button size="small" onClick={() => zoomColsBy(1 / 1.25)} aria-label="Heatmap zoom out (time)">⟷−</Button>
+        <Button size="small" onClick={() => zoomColsBy(1.25)} aria-label="Heatmap zoom in (time)">⟷+</Button>
+        <Button size="small" onClick={() => zoomRowsAt(1 / 1.25)} aria-label="Heatmap zoom out (price)">↕−</Button>
+        <Button size="small" onClick={() => zoomRowsAt(1.25)} aria-label="Heatmap zoom in (price)">↕+</Button>
+        {(hview || vview) && <Button size="small" onClick={resetView} aria-label="Heatmap reset zoom">⟲ {hview?.endT != null ? 'Latest' : 'Reset'}</Button>}
+      </div>
       {hover && (hover.bid != null || hover.ask != null) && (
         <div style={{
           position: 'absolute', left: Math.min(hover.x + 14, width - 190), top: Math.max(0, hover.y - 50), pointerEvents: 'none',
@@ -764,7 +850,7 @@ export function CumulativeDeltaChart({ bars, dayKey, lotSize, showLots, height =
 
   useEffect(() => {
     if (!containerRef.current) return
-    const chart = createChart(containerRef.current, {
+    const chart = createZoomableChart(containerRef.current, {
       width: containerRef.current.clientWidth,
       height,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },

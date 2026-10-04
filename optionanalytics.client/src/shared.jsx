@@ -1,7 +1,8 @@
 import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, Button, Drawer, Menu, Select, Space, Tag, Tooltip, Typography } from 'antd'
 import { useLocation, useNavigate } from 'react-router-dom'
-import { createChart, createSeriesMarkers, HistogramSeries, LineSeries, CrosshairMode, LineStyle, TickMarkType } from 'lightweight-charts'
+import { createSeriesMarkers, HistogramSeries, LineSeries, CrosshairMode, LineStyle, TickMarkType } from 'lightweight-charts'
+import { createZoomableChart } from './chartZoom.js'
 import * as signalR from '@microsoft/signalr'
 
 // Provided once, at the app root (App.jsx), after GET /api/auth/me resolves - {email, role} or
@@ -898,7 +899,7 @@ export function CeVsPeChart({ ceSeries, peSeries, prevCeSeries = [], prevPeSerie
   useEffect(() => {
     if (!containerRef.current) return
 
-    const chart = createChart(containerRef.current, {
+    const chart = createZoomableChart(containerRef.current, {
       width: containerRef.current.clientWidth,
       height,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
@@ -1001,7 +1002,7 @@ export function VolumeVwapChart({ volumeBars, vwapSeries, height = 180, focusTim
   useEffect(() => {
     if (!containerRef.current) return
 
-    const chart = createChart(containerRef.current, {
+    const chart = createZoomableChart(containerRef.current, {
       width: containerRef.current.clientWidth,
       height,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },

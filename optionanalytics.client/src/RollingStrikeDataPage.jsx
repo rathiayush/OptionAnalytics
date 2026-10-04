@@ -2,7 +2,8 @@ import { Component, useEffect, useMemo, useRef, useState } from 'react'
 import { Card, Select, InputNumber, Space, Typography, Table, Button, Statistic, Row, Col, Empty, Alert, Segmented, Tooltip } from 'antd'
 import { ReloadOutlined, InfoCircleOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
-import { createChart, createSeriesMarkers, CandlestickSeries, CrosshairMode } from 'lightweight-charts'
+import { createSeriesMarkers, CandlestickSeries, CrosshairMode } from 'lightweight-charts'
+import { createZoomableChart } from './chartZoom.js'
 import {
   NavBar, STORED_UNDERLYING, usePersistedState, fmtPrice, fmtIstTime, fmtIstDateTime, istDateKey,
   CE_COLOR, PE_COLOR, UP_COLOR, DOWN_COLOR,
@@ -55,7 +56,7 @@ function RollingCandleChart({ bars, splices, height = 420 }) {
   useEffect(() => {
     if (!containerRef.current) return
 
-    const chart = createChart(containerRef.current, {
+    const chart = createZoomableChart(containerRef.current, {
       width: containerRef.current.clientWidth,
       height,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
