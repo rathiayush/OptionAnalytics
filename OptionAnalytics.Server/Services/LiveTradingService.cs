@@ -32,8 +32,10 @@ public sealed class LiveTradingService : BackgroundService
     private static readonly TimeSpan ExitCheckInterval = TimeSpan.FromSeconds(2);
     private const int MaxExitAttempts = 6;
     private static readonly string[] PendingStatuses = { "PENDING", "TRANSIT", "PART_TRADED" };
-    /// <summary>The stop-loss order a partial exit leaves protecting the rest of the position - its tag
-    /// also carries the target (see ProtectionTag / TargetFromTag), so nothing needs storing here.</summary>
+    /// <summary>A stop-loss order an EARLIER version of partial exit placed to protect the rest of a
+    /// position, its tag carrying the target ("OIRP-T{target in paise}-..." - see TargetFromTag). No longer
+    /// placed (a partial exit now leaves the super order as it is); any still working today keep being
+    /// shown, watched for their target and cancelled by Close / Exit all.</summary>
     internal const string ProtectionPrefix = "OIRP-";
 
     private readonly DhanPositionsClient _positions;
@@ -443,10 +445,6 @@ public sealed class LiveTradingService : BackgroundService
 
     internal static bool IsProtection(PlainOrderSummary order) => order.CorrelationId?.StartsWith(ProtectionPrefix, StringComparison.Ordinal) == true;
 
-    /// <summary>The tag of a protection order: "OIRP-T{target in paise}-{time}-{slice}" (30 chars max).</summary>
-    internal static string ProtectionTag(decimal? target, string stamp, int slice) =>
-        $"{ProtectionPrefix}T{(long)Math.Round((target ?? 0) * 100)}-{stamp}-{slice}";
-
     /// <summary>The target a protection order's tag carries, or null.</summary>
     internal static decimal? TargetFromTag(string? correlationId)
     {
@@ -536,7 +534,7 @@ public sealed class LiveTradingService : BackgroundService
             var legs = orders.Where(o => o.SecurityId == p.SecurityId && o.OrderStatus is "TRADED" or "PART_TRADED").ToList();
             var target = legs.SelectMany(o => o.LegDetails).FirstOrDefault(l => l.LegName == "TARGET_LEG" && l.OrderStatus == "PENDING");
             var stopLoss = legs.SelectMany(o => o.LegDetails).FirstOrDefault(l => l.LegName == "STOP_LOSS_LEG" && l.OrderStatus == "PENDING");
-            // After a partial exit the rest is guarded by a protection order instead of super-order legs.
+            // A stop-loss order left by an earlier partial exit (legacy - see ProtectionPrefix).
             var protection = plainOrders.FirstOrDefault(o => o.SecurityId == p.SecurityId && IsProtection(o) && PendingStatuses.Contains(o.OrderStatus));
             rows.Add(new LivePositionRow(
                 p.SecurityId, p.TradingSymbol, p.ExchangeSegment, p.ProductType, p.PositionType, p.NetQty, p.IsOpen,
@@ -547,6 +545,7 @@ public sealed class LiveTradingService : BackgroundService
             {
                 Protection = !p.IsOpen ? null : target is not null || stopLoss is not null ? "super" : protection is not null ? "managed" : "none",
                 LotSize = uint.TryParse(p.SecurityId, out var lotId) ? _chain.FindBySecurityId(lotId)?.LotSize ?? 0 : 0,
+                LegExcessQty = p.IsOpen ? Math.Max(0, LegQuantity(legs) - Math.Abs(p.NetQty)) : 0,
             });
         }
 
@@ -792,18 +791,14 @@ public sealed class LiveTradingService : BackgroundService
     }
 
     /// <summary>
-    /// Takes partial profit (or cuts part of a position): exits <paramref name="lots"/> lots and keeps the
-    /// rest protected. Dhan cannot shrink a super order once its entry has filled - only the target and
-    /// stop-loss PRICES can change, and a cancelled leg cannot be added back - so the rest is re-protected
-    /// here instead:
-    ///   1. the super order's target and stop-loss legs (or the protection order left by an earlier
-    ///      partial exit) are cancelled first, so nothing can fire while the position changes;
-    ///   2. the lots go out as a priced, chased LIMIT exit (the same way Close does);
-    ///   3. the remaining quantity gets ONE stop-loss order at the exchange at the old stop-loss price -
-    ///      it protects the position even if this server is down - tagged with the old target, which
-    ///      this server watches on every tick: when price reaches it, that same order is turned into a
-    ///      limit exit (FireTargetAsync). One order for the rest at all times, so it can never be sold
-    ///      twice into a reversed position.
+    /// Takes partial profit (or cuts part of a position): ONE priced, chased LIMIT exit for
+    /// <paramref name="lots"/> lots, nothing else - the position's super order stays exactly as it is, so no
+    /// extra orders (and no extra order cost) come from a partial exit.
+    ///
+    /// Dhan cannot shrink a super order once its entry has filled ("only TARGET_LEG and STOP_LOSS_LEG price
+    /// and trail jump can be modified"), so its target and stop-loss legs keep the ORIGINAL quantity: if one
+    /// fires after a partial exit it closes more than is left - the snapshot flags that (LegExcessQty) and
+    /// Close / Exit all cancel the legs before exiting the rest.
     /// Exiting everything is a plain Close.
     /// </summary>
     public async Task<ManualOrderResult> PartialExitAsync(string securityId, int lots, decimal slippagePoints, CancellationToken cancellationToken)
@@ -826,34 +821,22 @@ public sealed class LiveTradingService : BackgroundService
             if (superOrders.Any(o => o.OrderStatus is "PENDING" or "TRANSIT" or "PART_TRADED"))
                 return ManualOrderResult.Fail($"{position.TradingSymbol}: an entry for this contract is still filling - wait for it (or cancel it) before a partial exit");
 
-            // 1. Capture, then cancel, whatever protects the position now.
-            var (target, stopLoss) = await CancelProtectionAsync(securityId, cancellationToken);
-
-            // 2. The partial exit.
-            position = (await _positions.ListAsync(cancellationToken)).FirstOrDefault(p => p.SecurityId == securityId && p.IsOpen);
-            if (position is null) return new ManualOrderResult(true, "the position closed meanwhile (a target or stop-loss filled) - nothing to exit", Array.Empty<string>(), null);
             var working = await WorkingExitQuantityAsync(position, cancellationToken);
-            var available = ExitQuantity(position.NetQty, working);
-            var quantity = (int)Math.Min(requested, available);
+            var quantity = (int)Math.Min(requested, ExitQuantity(position.NetQty, working));
             if (quantity <= 0)
                 return ManualOrderResult.Fail($"{position.TradingSymbol}: exit orders for the whole position are already working");
             var (orderIds, price, error) = await PlaceExitAsync(position, quantity, slippagePoints, cancellationToken);
-            if (error is not null)
-            {
-                // Protect whatever no exit order covers (some slices may have gone out before the failure).
-                var uncovered = (int)ExitQuantity(position.NetQty, await WorkingExitQuantityAsync(position, cancellationToken));
-                var note = await ProtectAsync(position, contract, uncovered, target, stopLoss, slippagePoints, cancellationToken);
-                RefreshUnlessStreaming();
-                return ManualOrderResult.Fail($"{error}{(note.Length > 0 ? $" · {note}" : "")}", orderIds);
-            }
-
-            // 3. Protect the rest.
-            var rest = (int)Math.Max(0, available - quantity);
-            var protectNote = rest == 0 ? "" : await ProtectAsync(position, contract, rest, target, stopLoss, slippagePoints, cancellationToken);
             RefreshUnlessStreaming();
-            _logger.LogWarning("Manual LIVE partial exit: {Symbol} x{Quantity} at LIMIT {Price}, {Rest} left. {Note}", position.TradingSymbol, quantity, price, rest, protectNote);
+            if (error is not null) return ManualOrderResult.Fail(error, orderIds);
+
+            var rest = open - quantity;
+            var legs = LegQuantity(superOrders);
+            var note = legs > rest
+                ? $" · its super order's SL/target still cover {legs} (Dhan cannot shrink them) - if one fires it closes {legs - rest} more than you hold; Close cancels them"
+                : "";
+            _logger.LogWarning("Manual LIVE partial exit: {Symbol} x{Quantity} at LIMIT {Price}, {Rest} left, super-order legs cover {Legs}.", position.TradingSymbol, quantity, price, rest, legs);
             return new ManualOrderResult(true,
-                $"{(position.ClosesBySelling ? "SELL" : "BUY")} {position.TradingSymbol} x{quantity} at LIMIT {price:0.##} · {rest} left{(protectNote.Length > 0 ? $" · {protectNote}" : "")}",
+                $"{(position.ClosesBySelling ? "SELL" : "BUY")} {position.TradingSymbol} x{quantity} at LIMIT {price:0.##} · {rest} left{note}",
                 orderIds, null);
         }
         finally
@@ -861,6 +844,13 @@ public sealed class LiveTradingService : BackgroundService
             _actionLock.Release();
         }
     }
+
+    /// <summary>The quantity a contract's filled super orders' still-pending stop-loss (or target) legs
+    /// would close if they fired.</summary>
+    internal static int LegQuantity(IEnumerable<SuperOrderSummary> superOrders) => superOrders
+        .Where(o => o.OrderStatus is "TRADED" or "PART_TRADED"
+            && o.LegDetails.Any(l => l.LegName is "STOP_LOSS_LEG" or "TARGET_LEG" && l.OrderStatus == "PENDING"))
+        .Sum(o => o.FilledQty is > 0 and var f ? f : o.Quantity);
 
     /// <summary>Cancels what protects a position - its super orders' pending target/stop-loss legs and any
     /// protection order (OIRP-) - and returns the target and stop-loss they had.</summary>
@@ -887,51 +877,18 @@ public sealed class LiveTradingService : BackgroundService
         return (target, stopLoss);
     }
 
-    /// <summary>Places the stop-loss order(s) protecting <paramref name="quantity"/> of a position at
-    /// <paramref name="stopLoss"/>, tagged with <paramref name="target"/>. Returns a note for the panel.</summary>
-    private async Task<string> ProtectAsync(DhanPosition position, DhanOptionInstrument contract, int quantity, decimal? target, decimal? stopLoss,
-        decimal slippagePoints, CancellationToken cancellationToken)
-    {
-        if (quantity <= 0) return "";
-        if (stopLoss is not { } trigger || trigger <= 0)
-            return target is null ? "no stop-loss/target to carry over" : "no stop-loss to carry over - the rest is unprotected";
-        var closingIsSell = position.ClosesBySelling;
-        var (limit, triggerPrice) = ProtectionPrices(closingIsSell, trigger, slippagePoints, contract.TickSize);
-        var slices = StrategyTriggerHostedService.SliceQuantity(quantity, contract.LotSize, StrategyTriggerHostedService.FreezeQuantityFor(contract.Underlying));
-        var stamp = DateTimeOffset.UtcNow.ToString("HHmmss");
-        var placed = 0;
-        for (var i = 0; i < slices.Count; i++)
-        {
-            if (i > 0) await Task.Delay(SliceCallDelay, cancellationToken);
-            var (result, error) = await _orders.PlaceAsync(closingIsSell ? "SELL" : "BUY", position.ExchangeSegment, position.ProductType, "STOP_LOSS", "DAY",
-                position.SecurityId, slices[i], limit, ProtectionTag(target, stamp, i + 1), cancellationToken, triggerPrice);
-            if (result is null)
-            {
-                _logger.LogError("{Symbol}: protection stop-loss for {Qty} REJECTED - {Error}", position.TradingSymbol, slices[i], error);
-                return $"WARNING: Dhan rejected the stop-loss for the rest ({error}) - it is unprotected";
-            }
-            placed += slices[i];
-        }
-        return $"rest protected: stop-loss {triggerPrice:0.##}{(target is { } t ? $", target {t:0.##} (watched)" : "")}";
-    }
-
-    /// <summary>A protection stop-loss: triggers at the old stop-loss, then works as a limit far enough
-    /// beyond it to fill in a fast market (twice the slippage, at least ten ticks).</summary>
-    internal static (decimal Limit, decimal Trigger) ProtectionPrices(bool closesBySelling, decimal stopLoss, decimal slippage, decimal tickSize)
-    {
-        var tick = tickSize > 0 ? tickSize : 0.05m;
-        var trigger = StrategyTriggerHostedService.RoundToTick(stopLoss, tick);
-        var buffer = Math.Max(slippage * 2, tick * 10);
-        var limit = StrategyTriggerHostedService.RoundToTick(closesBySelling ? trigger - buffer : trigger + buffer, tick);
-        return (Math.Max(tick, limit), trigger);
-    }
-
     /// <summary>Exit quantity already working for a position (pending orders on its closing side).</summary>
     private async Task<long> WorkingExitQuantityAsync(DhanPosition position, CancellationToken cancellationToken)
     {
         var transactionType = position.ClosesBySelling ? "SELL" : "BUY";
+        // A super order's own target/stop-loss legs, if Dhan lists them in the order book too, are not
+        // exits working now - they only fire at their price.
+        var superOrders = await _superOrders.ListAsync(cancellationToken);
+        var superIds = superOrders.Select(o => o.OrderId).ToHashSet();
+        var superTags = superOrders.Select(o => o.CorrelationId).Where(t => !string.IsNullOrEmpty(t)).ToHashSet();
         return (await _orders.ListAsync(cancellationToken))
-            .Where(o => o.SecurityId == position.SecurityId && o.TransactionType == transactionType && PendingStatuses.Contains(o.OrderStatus))
+            .Where(o => o.SecurityId == position.SecurityId && o.TransactionType == transactionType && PendingStatuses.Contains(o.OrderStatus)
+                && !superIds.Contains(o.OrderId) && (o.CorrelationId is null || !superTags.Contains(o.CorrelationId)))
             .Sum(o => (long)Math.Max(0, o.Quantity - o.FilledQty));
     }
 
@@ -1075,8 +1032,9 @@ public sealed record ManualOrderResult(bool Success, string Message, IReadOnlyLi
         new(false, message, orderIds ?? Array.Empty<string>(), prices);
 }
 
-/// <summary>Protection: "super" (the super order's own target/stop-loss legs), "managed" (after a
-/// partial exit: a stop-loss order at the exchange plus a target this server watches), or "none".</summary>
+/// <summary>Protection: "super" (the super order's own target/stop-loss legs), "managed" (a stop-loss
+/// order left by an earlier partial exit, plus a target this server watches), or "none". LegExcessQty:
+/// how much MORE the super order's legs would close than is held (after a partial exit), else 0.</summary>
 public sealed record LivePositionRow(
     string SecurityId, string TradingSymbol, string ExchangeSegment, string ProductType, string PositionType,
     int NetQty, bool IsOpen, decimal? AvgPrice, decimal? Ltp, decimal? UnrealizedPnl, decimal RealizedPnl,
@@ -1084,6 +1042,7 @@ public sealed record LivePositionRow(
 {
     public string? Protection { get; init; }
     public int LotSize { get; init; }
+    public int LegExcessQty { get; init; }
 }
 
 /// <summary>A protection order's target watch - see LiveTradingService.FireTargetAsync.</summary>

@@ -49,9 +49,10 @@ function PartialExitButton({ row, slippage, busy, onPartialExit }) {
             <InputNumber size="small" min={1} max={totalLots - 1} value={value} onChange={(v) => setLots(v ?? 1)} addonAfter={`of ${totalLots} lots`} style={{ width: 150 }} />
           </Space>
           <Text style={{ fontSize: 12 }}>
-            {row.netQty > 0 ? 'Sells' : 'Buys back'} {value * row.lotSize} qty at the {row.netQty > 0 ? 'bid' : 'ask'} with {slippage} pts slippage.
-            Dhan cannot shrink a super order, so its SL/target are cancelled and the remaining {(totalLots - value) * row.lotSize} qty is re-protected
-            with one stop-loss order at {price(row.stopLossPrice)} (held by Dhan) and the target {price(row.targetPrice)} watched by the server.
+            {row.netQty > 0 ? 'Sells' : 'Buys back'} {value * row.lotSize} qty at the {row.netQty > 0 ? 'bid' : 'ask'} with {slippage} pts slippage -
+            one exit order, nothing else. The super order stays as it is (SL {price(row.stopLossPrice)}, target {price(row.targetPrice)}), but Dhan
+            cannot shrink it: if its SL or target fires it acts on its ORIGINAL quantity, more than the {(totalLots - value) * row.lotSize} qty
+            left. Use Close to exit the rest - it cancels the legs first.
           </Text>
         </Space>
       )}
@@ -62,7 +63,13 @@ function PartialExitButton({ row, slippage, busy, onPartialExit }) {
   )
 }
 
-const protectionTag = (r) => (r.protection === 'managed'
+const protectionTag = (r) => (r.legExcessQty > 0
+  ? (
+    <Tooltip title={`After a partial exit the super order's SL/target still cover ${Math.abs(r.netQty) + r.legExcessQty} qty (Dhan cannot shrink them). If one fires it closes ${r.legExcessQty} more than you hold, leaving an opposite position. Close cancels the legs and exits the rest.`}>
+      <Tag color="warning" style={{ fontSize: 10, margin: 0 }}>legs +{r.legExcessQty}</Tag>
+    </Tooltip>
+  )
+  : r.protection === 'managed'
   ? <Tooltip title="After a partial exit: a stop-loss order held by Dhan, and the target watched by the server - when price reaches it, that same order becomes a limit exit."><Tag color="purple" style={{ fontSize: 10, margin: 0 }}>managed</Tag></Tooltip>
   : r.protection === 'none'
     ? <Tooltip title="No stop-loss or target is protecting this position."><Tag color="error" style={{ fontSize: 10, margin: 0 }}>unprotected</Tag></Tooltip>
