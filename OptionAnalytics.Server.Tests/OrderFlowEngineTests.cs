@@ -216,7 +216,7 @@ public sealed class OrderFlowEngineTests
         Assert.Empty(engine.Snapshot(0, 1, 10).Bars);
     }
 
-    // ---- 200-level depth, compact heatmap, day save/restore --------------------------------
+    // ---- 200-level depth, compact heatmap, in-memory replay days -----------------------------
 
     private static byte[] TwoHundredPacket(byte code, uint securityId, int rows, int padTo, Func<int, (double Price, uint Qty, uint Orders)> level)
     {
@@ -278,7 +278,7 @@ public sealed class OrderFlowEngineTests
     }
 
     [Fact]
-    public void DaySurvivesASaveAndRestore()
+    public void ExportedDayReplaysTheSame()
     {
         var engine = NewEngine();
         engine.OnTick(Tick(22710m, 1000, 22709.95m, 22710m), T0);
@@ -286,10 +286,7 @@ public sealed class OrderFlowEngineTests
         engine.OnTick(Tick(22709.95m, 2500, 22709.95m, 22710m), T0.AddSeconds(65));
         var before = engine.Snapshot(1, 75, 900);
 
-        using var stream = new MemoryStream();
-        using (var writer = new BinaryWriter(stream, System.Text.Encoding.UTF8, leaveOpen: true)) OrderFlowRecorder.Write(writer, engine.ExportDay()!);
-        stream.Position = 0;
-        var restored = OrderFlowEngine.FromDay(OrderFlowRecorder.Read(new BinaryReader(stream)));
+        var restored = OrderFlowEngine.FromDay(engine.ExportDay()!);
         var after = restored.Snapshot(1, 75, 900);
 
         Assert.Equal(before.Bars.Count, after.Bars.Count);
@@ -299,7 +296,7 @@ public sealed class OrderFlowEngineTests
         Assert.Equal(before.Heatmap.Count, after.Heatmap.Count);
         Assert.Equal(before.Heatmap[0].Bids.Select(r => (r[0], r[1])), after.Heatmap[0].Bids.Select(r => (r[0], r[1])));
 
-        // The first tick after a restart only re-baselines volume: no giant print for the downtime.
+        // A tick after loading only re-baselines volume: no giant print for the gap.
         restored.OnTick(Tick(22711m, 90_000, 22710.95m, 22711m), T0.AddMinutes(30));
         Assert.Equal(before.Bars.Sum(b => b.Buy + b.Sell), restored.Snapshot(1, 75, 900).Bars.Sum(b => b.Buy + b.Sell));
     }
@@ -311,5 +308,44 @@ public sealed class OrderFlowEngineTests
         engine.OnTick(Tick(22710m, 1000, 22709.95m, 22710m), T0);
         var other = new OrderFlowEngine("NIFTY", 99999, "NIFTY-Nov2026-FUT", "NSE_FNO", 0.05m, 75);
         Assert.False(other.ImportDay(engine.ExportDay()!));
+    }
+
+    [Fact]
+    public void FinishedDayIsHandedOverWhenTheNextDayStarts()
+    {
+        var engine = NewEngine();
+        OrderFlowDay? ended = null;
+        engine.DayEnded += d => ended = d;
+        engine.OnTick(Tick(22710m, 1000, 22709.95m, 22710m), T0);
+        engine.OnTick(Tick(22710m, 1750, 22709.95m, 22710m), T0.AddSeconds(3));
+        Assert.Null(ended);
+
+        engine.OnTick(Tick(22800m, 50, 22799.95m, 22800m), T0.AddDays(1));
+
+        Assert.NotNull(ended);
+        Assert.Equal(DateOnly.FromDateTime(T0.ToOffset(IstClock.Offset).DateTime), ended!.Day);
+        Assert.Equal(750, ended.Bars.Sum(b => b.Buy + b.Sell));
+        Assert.True(ended.Clock < T0.AddDays(1)); // the finished day's own clock, not the new day's
+        Assert.Empty(engine.Snapshot(1, 75, 900).Bars);
+    }
+
+    [Fact]
+    public void DayStoreKeepsTheNewestDaysInMemory()
+    {
+        var store = new OrderFlowDayStore();
+        for (var d = 0; d < 5; d++)
+        {
+            var engine = NewEngine();
+            engine.OnTick(Tick(22710m, 1000, 22709.95m, 22710m), T0.AddDays(d));
+            engine.OnTick(Tick(22710m, 1750, 22709.95m, 22710m), T0.AddDays(d).AddSeconds(3));
+            store.Add(engine.ExportDay()!);
+        }
+
+        var days = store.Days("nifty");
+        Assert.Equal(3, days.Count); // OrderFlow:DaysInMemory default
+        Assert.True(days[0].Date > days[2].Date);
+        Assert.NotNull(store.EngineFor("NIFTY", days[0].Date));
+        Assert.Null(store.EngineFor("NIFTY", DateOnly.FromDateTime(T0.ToOffset(IstClock.Offset).DateTime)));
+        Assert.Single(store.EngineFor("NIFTY", days[0].Date)!.Snapshot(1, 75, 900).Bars);
     }
 }

@@ -17,9 +17,10 @@ const { Title, Text } = Typography
 // Dhan's tick feed and market depth (200 levels where Dhan offers it). See OrderFlowEngine on the
 // server for how trades and their aggressor side are inferred, and orderFlowMath.js for the analysis.
 //
-// REPLAY: the server records every day it tracks (OrderFlowRecorder) - Dhan itself has no historical
-// tick or depth data - and Replay plays a recorded day back: the footprint, heatmap, prints, icebergs
-// and book exactly as they were known at the replay clock.
+// REPLAY: plays a day back from the server's MEMORY - today (still live) and the last few days since
+// the server started (OrderFlowDayStore; nothing is stored on disk, and Dhan has no historical tick
+// or depth data) - showing the footprint, heatmap, prints, icebergs and book exactly as they were
+// known at the replay clock.
 
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX']
 const DEFAULT_ROW_SIZES = { NIFTY: 1, BANKNIFTY: 5, SENSEX: 5 }
@@ -114,7 +115,7 @@ export default function OrderFlowPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [underlying, rowSize, largeLots])
 
-  // ---- Replay of a recorded day ----
+  // ---- Replay of a day held in the server's memory ----
   const [replayDays, setReplayDays] = useState(null)
   const [replayDate, setReplayDate] = useState(null)
   const [replayDay, setReplayDay] = useState(null)
@@ -155,11 +156,11 @@ export default function OrderFlowPage() {
         if (cancelled) return
         const day = { meta: body.meta, minuteBars: body.bars, trades: body.trades, icebergs: body.icebergs, heatmap: body.heatmap.map(toColumn) }
         setReplayDay(day)
-        // Keep the clock where it was when only the rows / print size changed.
+        // Keep the clock where it was when only the rows / print size changed; a new day starts at its open.
         setReplayMs((ms) => {
           const next = replayRange(day)
           if (!next) return null
-          return ms != null && ms >= next.start && ms <= next.end ? ms : next.start + 15 * 60_000
+          return ms != null && ms >= next.start && ms <= next.end ? ms : next.start
         })
       })
       .catch((err) => { if (!cancelled) { setReplayError(err.message); setReplayDay(null) } })
@@ -207,7 +208,7 @@ export default function OrderFlowPage() {
   }
   const connectionState = useOrderFlowHub(underlying, handleLive)
 
-  // Everything below draws `view`: the live data, or the recorded day as of the replay clock.
+  // Everything below draws `view`: the live data, or the replayed day as of the replay clock.
   const isReplay = mode === 'replay'
   const view = useMemo(() => (isReplay ? replayView(replayDay, replayMs) : data), [isReplay, replayDay, replayMs, data])
 
@@ -290,8 +291,8 @@ export default function OrderFlowPage() {
               <Space wrap size={10} align="center">
                 <Select
                   value={replayDate} onChange={setReplayDate} style={{ width: 150 }} loading={replayDays == null}
-                  placeholder={replayDays?.length === 0 ? 'No recorded days' : 'Recorded day'}
-                  options={(replayDays ?? []).map((d) => ({ value: d.date, label: d.date }))}
+                  placeholder={replayDays?.length === 0 ? 'No days in memory' : 'Day'}
+                  options={(replayDays ?? []).map((d) => ({ value: d.date, label: d.live ? `${d.date} (today)` : d.date }))}
                 />
                 <Button
                   type="primary" icon={playing ? <PauseCircleOutlined /> : <PlayCircleOutlined />} disabled={!range}
@@ -318,8 +319,8 @@ export default function OrderFlowPage() {
               )}
               {replayDays?.length === 0 && (
                 <Text type="secondary" style={{ fontSize: 12 }}>
-                  Nothing recorded for {underlying} yet. Dhan has no historical tick or market-depth data, so a day can only be replayed if the server
-                  was running and recording it - every trading day from now on is kept.
+                  No {underlying} order flow in memory yet. Replay plays from the server&apos;s memory - today and the last few days since it
+                  started - and nothing is stored on disk, so a restart clears it. Dhan has no historical tick or market-depth data.
                 </Text>
               )}
             </div>
@@ -397,8 +398,8 @@ export default function OrderFlowPage() {
           extreme that failed to push price on (A); exhaustion = almost nothing traded at the extreme (E). An iceberg is a level that keeps
           trading more than twice the most it ever showed while staying in the book. Walls are levels at least 4x the book's median size.
           The volume profile is the traded volume per row over the bars shown, with its point of control (POC) and the 70% value area
-          (VAH-VAL). Each day is recorded on the server and can be replayed; Dhan provides no historical tick or depth data, so only days the
-          server recorded exist. The heatmap's book is 200 levels a side for NSE futures, 5 for SENSEX.
+          (VAH-VAL). Replay plays today, or one of the last few days, from the server&apos;s memory - nothing is stored on disk, so a restart
+          clears them (Dhan provides no historical tick or depth data). The heatmap&apos;s book is 200 levels a side for NSE futures, 5 for SENSEX.
         </Text>
         <DomDrawer open={domOpen} onClose={() => setDomOpen(false)} underlying={underlying} />
       </Space>

@@ -33,7 +33,6 @@ dataprotection-keys/
 # HistoricalSpotDataPrefetchHostedService's on-disk cache (see Storage:HistoricalDataPath) -
 # regenerated locally the same way, and only ever meaningful on the machine that fetched it.
 historical-data/
-order-flow-data/
 
 # ExpiredOptionDataPrefetchHostedService's own on-disk cache (see Storage:ExpiredOptionDataPath) -
 # same reasoning, just for the rolling-option (CE/PE premium) side instead of spot.

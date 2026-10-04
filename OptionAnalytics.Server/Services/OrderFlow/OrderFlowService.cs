@@ -18,16 +18,16 @@ namespace OptionAnalytics.Server.Services.OrderFlow;
 /// failing) is put on the 20-level feed too, and the 20-level packets are ignored again while the
 /// 200-level book streams. BSE (SENSEX) has neither and stays on 5 levels.
 ///
-/// RECORDING. Every SaveInterval, and on shutdown, each engine's day is saved by OrderFlowRecorder;
-/// a new engine first brings back today's saved day, so a deploy no longer wipes the session, and past
-/// days can be replayed. OrderFlow:Enabled = false turns it all off.
+/// REPLAY. Nothing is stored on disk. Today replays straight from the live engine; when an engine
+/// rolls into a new day, or is replaced at a futures rollover, its finished day goes to
+/// OrderFlowDayStore in memory, so the last few days replay too - until the server restarts.
+/// OrderFlow:Enabled = false turns it all off.
 /// </summary>
 public sealed class OrderFlowService : BackgroundService
 {
     public static readonly string[] Underlyings = { "NIFTY", "BANKNIFTY", "SENSEX" };
     private static readonly TimeSpan ResolveInterval = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan RetryInterval = TimeSpan.FromSeconds(30);
-    private static readonly TimeSpan SaveInterval = TimeSpan.FromMinutes(3);
     private static readonly TimeSpan DepthFallbackAfter = TimeSpan.FromSeconds(90);
 
     private readonly DhanFuturesInstrumentMaster _futures;
@@ -35,12 +35,10 @@ public sealed class OrderFlowService : BackgroundService
     private readonly DhanDepthFeedClient _depth;
     private readonly DhanTwoHundredDepthClient _fullDepth;
     private readonly LiveBroadcastBatcher _batcher;
-    private readonly OrderFlowRecorder _recorder;
+    private readonly OrderFlowDayStore _pastDays;
     private readonly ILogger<OrderFlowService> _logger;
     private readonly bool _enabled;
     private readonly string _depthMode;
-    private readonly ConcurrentDictionary<string, long> _savedVersions = new(StringComparer.OrdinalIgnoreCase);
-    private readonly SemaphoreSlim _saveLock = new(1, 1);
 
     private readonly ConcurrentDictionary<string, OrderFlowEngine> _byUnderlying = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<uint, OrderFlowEngine> _bySecurityId = new();
@@ -48,14 +46,14 @@ public sealed class OrderFlowService : BackgroundService
 
     public OrderFlowService(
         DhanFuturesInstrumentMaster futures, DhanMarketFeedClient feed, DhanDepthFeedClient depth, DhanTwoHundredDepthClient fullDepth,
-        LiveBroadcastBatcher batcher, OrderFlowRecorder recorder, ILogger<OrderFlowService> logger, IConfiguration? configuration = null)
+        LiveBroadcastBatcher batcher, OrderFlowDayStore pastDays, ILogger<OrderFlowService> logger, IConfiguration? configuration = null)
     {
         _futures = futures;
         _feed = feed;
         _depth = depth;
         _fullDepth = fullDepth;
         _batcher = batcher;
-        _recorder = recorder;
+        _pastDays = pastDays;
         _logger = logger;
         _enabled = configuration?.GetValue("OrderFlow:Enabled", true) ?? true;
         _depthMode = configuration?["OrderFlow:DepthMode"]?.Trim() is { Length: > 0 } mode ? mode : "200";
@@ -64,7 +62,7 @@ public sealed class OrderFlowService : BackgroundService
     public static string Group(string underlying) => $"of:{underlying.ToUpperInvariant()}";
     public static string DomGroup(string underlying) => $"dom:{underlying.ToUpperInvariant()}";
 
-    public OrderFlowRecorder Recorder => _recorder;
+    public OrderFlowDayStore PastDays => _pastDays;
 
     public OrderFlowEngine? EngineFor(string underlying) => _byUnderlying.TryGetValue(underlying, out var engine) ? engine : null;
 
@@ -81,9 +79,6 @@ public sealed class OrderFlowService : BackgroundService
         _tickSubscription = _feed.AddTickConsumer("Order flow", OnTick);
         _depth.DepthUpdated += OnDepth;
         _fullDepth.DepthUpdated += OnDepth;
-        var saving = SaveLoopAsync(stoppingToken);
-        try { _recorder.Prune(IstClock.Today()); }
-        catch (Exception ex) { _logger.LogWarning(ex, "Order flow: pruning old recordings failed."); }
         try
         {
             while (!stoppingToken.IsCancellationRequested)
@@ -114,53 +109,6 @@ public sealed class OrderFlowService : BackgroundService
             _depth.DepthUpdated -= OnDepth;
             _fullDepth.DepthUpdated -= OnDepth;
             _tickSubscription?.Dispose();
-            try { await saving; } catch (OperationCanceledException) { }
-        }
-    }
-
-    public override async Task StopAsync(CancellationToken cancellationToken)
-    {
-        await base.StopAsync(cancellationToken);
-        if (_enabled) await SaveAllAsync();
-    }
-
-    private async Task SaveLoopAsync(CancellationToken stoppingToken)
-    {
-        while (!stoppingToken.IsCancellationRequested)
-        {
-            try { await Task.Delay(SaveInterval, stoppingToken); }
-            catch (OperationCanceledException) { return; }
-            await SaveAllAsync();
-        }
-    }
-
-    /// <summary>Saves every engine's day that changed since its last save.</summary>
-    private async Task SaveAllAsync()
-    {
-        await _saveLock.WaitAsync();
-        try
-        {
-            foreach (var engine in _byUnderlying.Values)
-            {
-                var version = engine.Version;
-                var key = $"{engine.Underlying}:{engine.SecurityId}";
-                if (_savedVersions.TryGetValue(key, out var saved) && saved == version) continue;
-                try
-                {
-                    var day = engine.ExportDay();
-                    if (day is null || (day.Bars.Count == 0 && day.Snapshots.Count == 0)) continue;
-                    await Task.Run(() => _recorder.Save(day));
-                    _savedVersions[key] = version;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Order flow: saving the {Underlying} day failed.", engine.Underlying);
-                }
-            }
-        }
-        finally
-        {
-            _saveLock.Release();
         }
     }
 
@@ -175,15 +123,12 @@ public sealed class OrderFlowService : BackgroundService
             {
                 _bySecurityId.TryRemove(engine.SecurityId, out _);
                 _fullDepth.Unsubscribe(engine.SecurityId);
+                engine.DayEnded -= _pastDays.Add;
+                // The outgoing contract's day stays replayable.
+                if (engine.ExportDay() is { } last) _pastDays.Add(last);
             }
             engine = new OrderFlowEngine(underlying, contract.SecurityId, contract.TradingSymbol, contract.DhanSegment, contract.TickSize, contract.LotSize);
-            // Today's saved day first, before any tick can reach the engine.
-            var saved = await Task.Run(() => _recorder.Load(underlying, IstClock.Today()), cancellationToken);
-            if (saved is not null && engine.ImportDay(saved))
-            {
-                _savedVersions[$"{underlying}:{contract.SecurityId}"] = engine.Version;
-                _logger.LogInformation("Order flow: restored today's {Underlying} recording ({Bars} minutes).", underlying, saved.Bars.Count);
-            }
+            engine.DayEnded += _pastDays.Add;
             _bySecurityId[contract.SecurityId] = engine;
             _byUnderlying[underlying] = engine;
             _logger.LogInformation("Order flow tracking {Underlying} futures {Symbol} ({SecurityId}).", underlying, contract.TradingSymbol, contract.SecurityId);
