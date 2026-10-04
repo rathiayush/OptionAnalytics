@@ -7,7 +7,7 @@ import {
   NavBar, TIMEFRAME_OPTIONS, usePersistedState, RECONNECT_RETRY_POLICY, onLiveBatch, syncSignalRGroups, joinAllSignalRGroups,
   checkForNewDeploy, UP_COLOR, DOWN_COLOR, AXIS_COLOR,
 } from './shared.jsx'
-import { aggregateBars, analyzeBars, findWalls, bucketBook, mergeLiveMinutes, volumeProfile, replayView, replayRange } from './orderFlowMath.js'
+import { aggregateBars, analyzeBars, findWalls, bucketBook, mergeLiveMinutes, volumeProfile, replayView, replayRange, liquiditySignals, orderFlowBias } from './orderFlowMath.js'
 import { FootprintChart, DepthHeatmap, CumulativeDeltaChart, BookLadder, formatVolume } from './OrderFlowCharts.jsx'
 import { DomDrawer, useNarrow } from './DomDrawer.jsx'
 import { useReplaySync, useReplaySyncEnabled, ReplaySyncControl, withSpeedOption, SYNC_DRIFT_MS } from './replaySync.jsx'
@@ -70,6 +70,36 @@ function useOrderFlowHub(group, onLive) {
   }, [group])
 
   return state
+}
+
+// The combined read: bias, confidence, and what drove it (see orderFlowBias).
+function OrderFlowRead({ bias }) {
+  const color = bias.bias === 'Bullish' ? UP_COLOR : bias.bias === 'Bearish' ? DOWN_COLOR : AXIS_COLOR
+  return (
+    <Card size="small" title="Order flow read">
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 6 }}>
+        <Text strong style={{ fontSize: 20, color }}>{bias.bias}</Text>
+        <Text type="secondary">{bias.parts.length ? `${bias.confidence}% confidence · score ${bias.score > 0 ? '+' : ''}${bias.score}` : 'not enough data yet'}</Text>
+      </div>
+      {bias.parts.map((p) => (
+        <div key={p.name} style={{ display: 'grid', gridTemplateColumns: '1fr 70px', gap: 8, alignItems: 'center', fontSize: 12, marginBottom: 3 }}>
+          <span>
+            {p.name} <Text type="secondary" style={{ fontSize: 11 }}>· {p.detail}</Text>
+          </span>
+          <span style={{ position: 'relative', height: 8, background: '#ffffff12', borderRadius: 4 }}>
+            <span style={{
+              position: 'absolute', top: 0, bottom: 0, borderRadius: 4, background: p.score >= 0 ? UP_COLOR : DOWN_COLOR,
+              left: p.score >= 0 ? '50%' : `${50 + p.score * 50}%`, width: `${Math.abs(p.score) * 50}%`,
+            }} />
+            <span style={{ position: 'absolute', left: '50%', top: -2, bottom: -2, width: 1, background: AXIS_COLOR }} />
+          </span>
+        </div>
+      ))}
+      <Text type="secondary" style={{ fontSize: 10 }}>
+        Weighted: cumulative delta 30, recent delta 15, stacked imbalances 15, absorption/exhaustion 15, liquidity signals 15, big orders 10. A read, not advice.
+      </Text>
+    </Card>
+  )
 }
 
 // What every mark on the footprint means.
@@ -325,6 +355,14 @@ export default function OrderFlowPage() {
   const walls = useMemo(() => findWalls(view?.book), [view?.book])
   const activeIcebergs = useMemo(() => new Set((view?.icebergs ?? []).filter((i) => !i.endedAt).map((i) => i.price)), [view?.icebergs])
   const bigLabel = estimated ? 'Volume spike' : 'Big order'
+  // Liquidity signals off the heatmap (magnet, wall absorption, exhaustion into a wall, spoofing) -
+  // they need market depth, so none for an estimated day. The last hour of columns is plenty.
+  const liquidity = useMemo(
+    () => (estimated ? [] : liquiditySignals({ columns: (view?.heatmap ?? []).slice(-1800), trades: largeTrades, minuteBars: view?.minuteBars ?? [], rowSize, lotSize })),
+    [estimated, view?.heatmap, largeTrades, view?.minuteBars, rowSize, lotSize],
+  )
+  const nowMs = isReplay ? replayMs ?? Date.now() : view?.heatmap?.at(-1)?.t ?? Date.now()
+  const bias = useMemo(() => orderFlowBias({ bars, liquidity, bigTrades: largeTrades, nowMs }), [bars, liquidity, largeTrades, nowMs])
 
   const signals = useMemo(() => {
     const list = []
@@ -346,14 +384,18 @@ export default function OrderFlowPage() {
       list.push({ key: `i-${i.id}`, time: new Date(i.detectedAt).getTime(), bullish: i.isBid, type: 'Iceberg',
         text: `${i.isBid ? 'Hidden buyer at bid' : 'Hidden seller at offer'} ${i.price}: ${formatVolume(i.traded, lotSize, showLots)} traded vs ${formatVolume(i.maxDisplayed, lotSize, showLots)} shown${i.endedAt ? ' (ended)' : ' - active'}` })
     }
-    for (const t of largeTrades.slice(-150)) {
+    for (const l of liquidity) {
+      list.push({ key: l.key, time: l.t, bullish: l.bullish, type: l.kind, text: l.text, confidence: l.confidence })
+    }
+    // The newest big orders only - plenty to read, without pushing the rarer signals out of the list.
+    for (const t of largeTrades.slice(-40)) {
       list.push({ key: `t-${t.seq}`, time: new Date(t.time).getTime(), bullish: t.buy, type: bigLabel,
         text: estimated
           ? `${formatVolume(t.quantity, lotSize, true)} lots traded in the minute to ${IST_HHMMSS.format(new Date(t.time)).slice(0, 5)} (est. ${t.buy ? 'buying' : 'selling'}), closed ${t.price}`
           : `${t.buy ? 'Buy' : 'Sell'} ${formatVolume(t.quantity, lotSize, true)} lots at ${t.price}` })
     }
     return list.sort((a, b) => b.time - a.time).slice(0, 200)
-  }, [bars, view?.icebergs, largeTrades, lotSize, showLots, estimated, bigLabel])
+  }, [bars, view?.icebergs, largeTrades, lotSize, showLots, estimated, bigLabel, liquidity])
 
   const meta = view?.meta
   const lastBar = bars.at(-1)
@@ -516,6 +558,7 @@ export default function OrderFlowPage() {
           </Col>
           <Col xs={24} xl={7}>
             <Space direction="vertical" size={16} style={{ width: '100%' }}>
+              <OrderFlowRead bias={bias} />
               <Card size="small" title={`Market depth${meta && !estimated ? ` (${meta.depthLevels} levels)` : ''}`}>
                 {estimated
                   ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No market depth for an estimated day - Dhan keeps no depth history." />
@@ -526,7 +569,10 @@ export default function OrderFlowPage() {
                   <div key={s.key} style={{ display: 'flex', gap: 8, alignItems: 'baseline', fontSize: 12, padding: '3px 0', borderBottom: '1px solid #ffffff0d' }}>
                     <Text type="secondary" style={{ fontSize: 11, minWidth: 58 }}>{IST_HHMMSS.format(new Date(s.time))}</Text>
                     <Tag color={s.bullish ? 'green' : 'red'} style={{ margin: 0, fontSize: 11 }}>{s.type}</Tag>
-                    <span>{s.text}</span>
+                    <span>
+                      {s.text}
+                      {s.confidence != null && <Tag color={s.confidence >= 70 ? 'gold' : 'default'} style={{ marginLeft: 6, fontSize: 10 }}>{s.confidence}% confidence</Tag>}
+                    </span>
                   </div>
                 ))}
               </Card>
@@ -537,7 +583,7 @@ export default function OrderFlowPage() {
         <Card size="small" title="Liquidity heatmap" extra={!narrow && <Text type="secondary" style={{ fontSize: 11 }}>resting bids/offers over time (brighter = more) · big dots = big orders · magenta = icebergs</Text>}>
           {estimated
             ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No liquidity heatmap for an estimated day - it needs market depth, which Dhan does not keep. Days the server saw live have it." />
-            : <DepthHeatmap columns={view?.heatmap ?? []} rowSize={rowSize} trades={largeTrades} icebergs={view?.icebergs} lotSize={lotSize} showLots={showLots} height={narrow ? 320 : 440} />}
+            : <DepthHeatmap columns={view?.heatmap ?? []} rowSize={rowSize} trades={largeTrades} icebergs={view?.icebergs} signals={liquidity} lotSize={lotSize} showLots={showLots} height={narrow ? 320 : 440} />}
         </Card>
 
         <Card size="small" title={`Delta & cumulative delta · ${timeframe} min`}>

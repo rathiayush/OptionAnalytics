@@ -340,3 +340,212 @@ export function replayRange(day) {
   if (!starts.length) return null
   return { start: Math.min(...starts), end: Math.max(...ends) }
 }
+
+// ---- Liquidity signals (heatmap + prints + footprint) ------------------------------------------
+//
+// What the depth heatmap shows, read as signals with a confidence (0-100) - from the heatmap
+// columns ({ t, bids, asks } as [price, quantity] rows), the big prints, and the minute footprints:
+//
+// - Magnet (liquidity attraction): price has been closing in on a thick wall that is still there -
+//   price tends to seek liquidity. Confidence from how strong the wall is, how steadily price closed
+//   in, and how near it is now.
+// - Wall absorption (reversal): price reached a wall, big prints hit it, and the wall held - price
+//   turned away by at least 3 rows. Confidence from the prints, the wall's strength and the turn.
+// - Exhaustion into a wall (reversal): price closed in on a wall on shrinking volume and stalled
+//   before touching it. Confidence from how far volume dropped and how close price got.
+// - Spoofing: a wall that sat near price vanished as price came within two rows of it, with little
+//   traded there - pulled, not filled. Confidence from its size, how close price was and how little
+//   of it traded.
+//
+// A wall is a row holding at least WALL_FACTOR x the column's median resting quantity; it must last
+// at least WALL_MIN_MS to count. Each signal: { key, kind, t, price, bullish, confidence, text }.
+export const LIQUIDITY_DEFAULTS = { wallFactor: 4, wallMinMs: 20_000, windowMs: 180_000 }
+
+export function liquiditySignals({ columns, trades = [], minuteBars = [], rowSize, lotSize = 1, ...options }) {
+  const { wallFactor, wallMinMs, windowMs } = { ...LIQUIDITY_DEFAULTS, ...options }
+  const step = rowSize > 0 ? rowSize : 0.05
+  if (!columns?.length || columns.length < 5) return []
+  const lots = (q) => Math.round(q / Math.max(1, lotSize))
+  const rowKey = (p) => Math.round(p / step)
+
+  // Per column: mid, median resting size, and every row's quantity.
+  const cols = columns.map((c) => {
+    const rows = new Map()
+    let bestBid = null
+    let bestAsk = null
+    for (const [p, q] of c.bids ?? []) { rows.set(rowKey(p), (rows.get(rowKey(p)) ?? 0) + q); if (q > 0 && (bestBid == null || p > bestBid)) bestBid = p }
+    for (const [p, q] of c.asks ?? []) { rows.set(rowKey(p), (rows.get(rowKey(p)) ?? 0) + q); if (q > 0 && (bestAsk == null || p < bestAsk)) bestAsk = p }
+    const sizes = [...rows.values()].filter((q) => q > 0).sort((a, b) => a - b)
+    const mid = bestBid != null && bestAsk != null ? (bestBid + bestAsk) / 2 : bestBid ?? bestAsk
+    return { t: c.t, rows, mid, median: sizes.length ? sizes[Math.floor(sizes.length / 2)] : 0 }
+  }).filter((c) => c.mid != null && c.median > 0)
+  if (cols.length < 5) return []
+
+  // Walls tracked over time.
+  const active = new Map()
+  const walls = []
+  for (const c of cols) {
+    for (const [key, q] of c.rows) {
+      if (q < wallFactor * c.median) continue
+      const price = key * step
+      const wall = active.get(key)
+      if (wall) { wall.last = c.t; wall.maxQty = Math.max(wall.maxQty, q); wall.strength = Math.max(wall.strength, q / c.median); wall.seen.push({ t: c.t, mid: c.mid, q }) }
+      else active.set(key, { key, price: Math.round(price * 100) / 100, first: c.t, last: c.t, maxQty: q, strength: q / c.median, side: price < c.mid ? 'bid' : 'ask', seen: [{ t: c.t, mid: c.mid, q }], endedAt: null })
+    }
+    for (const [key, wall] of active) {
+      if (wall.last === c.t) continue
+      const q = c.rows.get(key) ?? 0
+      if (q < 0.3 * wall.maxQty) {
+        wall.endedAt = c.t
+        wall.endMid = c.mid
+        active.delete(key)
+        if (wall.last - wall.first >= wallMinMs) walls.push(wall)
+      }
+    }
+  }
+  const lastCol = cols.at(-1)
+  for (const wall of active.values()) if (wall.last - wall.first >= wallMinMs) walls.push(wall)
+
+  const clamp = (v) => Math.round(Math.max(1, Math.min(95, v)))
+  // How far beyond the wall threshold a wall is, as 0..2 (4x the median = 0, 16x+ = 2).
+  const strengthScore = (wall) => Math.max(0, Math.min(2, Math.log2(wall.strength / wallFactor)))
+  const tradedAt = (price, from, to) => {
+    let volume = 0
+    for (const bar of minuteBars) {
+      const ms = typeof bar.time === 'number' ? bar.time : new Date(bar.time).getTime()
+      if (ms + 60_000 < from || ms > to) continue
+      for (const level of bar.levels ?? []) if (Math.abs(level.price - price) < step / 2) volume += level.buy + level.sell
+    }
+    return volume
+  }
+  const signals = []
+  const rowsAway = (mid, price) => Math.abs(mid - price) / step
+
+  for (const wall of walls) {
+    const sideText = wall.side === 'bid' ? 'bid wall (support)' : 'offer wall (resistance)'
+    const size = `${lots(wall.maxQty).toLocaleString('en-IN')} lots`
+
+    // Spoofing: vanished while price was within two rows, little traded there.
+    if (wall.endedAt != null && rowsAway(wall.endMid, wall.price) <= 2 && wall.strength >= wallFactor * 1.25) {
+      const traded = tradedAt(wall.price, wall.last - 60_000, wall.endedAt)
+      const filledShare = traded / wall.maxQty
+      if (filledShare < 0.3) {
+        const confidence = clamp(35 + 8 * strengthScore(wall) + 25 * (1 - filledShare / 0.3) + 5 * (2 - rowsAway(wall.endMid, wall.price)))
+        signals.push({ key: `spoof-${wall.key}-${wall.first}`, kind: 'Spoofing', t: wall.endedAt, price: wall.price, bullish: wall.side === 'ask', confidence,
+          text: `${size} ${sideText} at ${wall.price} vanished as price came within ${rowsAway(wall.endMid, wall.price).toFixed(0)} row(s) - only ${Math.round(filledShare * 100)}% of it traded: pulled, not filled` })
+      }
+    }
+
+    // Wall absorption: touched, hit by big prints, held, price turned away.
+    const touch = wall.seen.find((s) => rowsAway(s.mid, wall.price) <= 1)
+    if (touch) {
+      const near = trades.filter((t) => {
+        const ms = new Date(t.time).getTime()
+        return Math.abs(ms - touch.t) <= 60_000 && Math.abs(t.price - wall.price) <= step * 1.5
+      })
+      const after = cols.filter((c) => c.t > touch.t && c.t <= touch.t + windowMs)
+      const turned = after.find((c) => (wall.side === 'bid' ? c.mid - wall.price : wall.price - c.mid) >= 3 * step)
+      const brokeBefore = after.some((c) => (turned == null || c.t < turned.t) && (wall.side === 'bid' ? c.mid < wall.price - step : c.mid > wall.price + step))
+      if (near.length >= 2 && turned && !brokeBefore) {
+        const volume = near.reduce((s, t) => s + t.quantity, 0)
+        const confidence = clamp(30 + 5 * Math.min(near.length, 6) + 8 * Math.min(2, volume / wall.maxQty) + 4 * strengthScore(wall) + 2 * Math.min(5, rowsAway(turned.mid, wall.price)))
+        signals.push({ key: `abs-${wall.key}-${touch.t}`, kind: 'Wall absorption', t: turned.t, price: wall.price, bullish: wall.side === 'bid', confidence,
+          text: `${size} ${sideText} at ${wall.price} absorbed ${near.length} big print(s) (${lots(volume).toLocaleString('en-IN')} lots) and held - price turned away` })
+      }
+    }
+
+    // Magnet / exhaustion: price closing in on a wall that is still there.
+    const alive = wall.endedAt == null && wall.last === lastCol.t
+    if (alive) {
+      const window = wall.seen.filter((s) => s.t >= lastCol.t - windowMs)
+      if (window.length >= 5) {
+        const d0 = rowsAway(window[0].mid, wall.price)
+        const d1 = rowsAway(window.at(-1).mid, wall.price)
+        let closer = 0
+        for (let i = 1; i < window.length; i++) if (rowsAway(window[i].mid, wall.price) <= rowsAway(window[i - 1].mid, wall.price)) closer++
+        const steadiness = closer / (window.length - 1)
+        const approaching = d0 >= 4 && d1 <= 0.6 * d0 && d1 >= 1 && steadiness >= 0.6
+        if (approaching) {
+          // Volume while closing in: first half vs second half of the window's minutes.
+          const bars = minuteBars.filter((b) => {
+            const ms = typeof b.time === 'number' ? b.time : new Date(b.time).getTime()
+            return ms >= window[0].t - 60_000 && ms <= lastCol.t
+          })
+          const half = Math.floor(bars.length / 2)
+          const early = half > 0 ? bars.slice(0, half).reduce((s, b) => s + (b.volume ?? b.buy + b.sell), 0) / half : 0
+          const late = bars.length - half > 0 ? bars.slice(half).reduce((s, b) => s + (b.volume ?? b.buy + b.sell), 0) / (bars.length - half) : 0
+          const fading = bars.length >= 3 && early > 0 && late < 0.6 * early
+          const stalled = Math.abs(rowsAway(window.at(-1).mid, wall.price) - rowsAway(window[Math.max(0, window.length - 4)].mid, wall.price)) < 1
+          if (fading && stalled) {
+            const confidence = clamp(30 + 35 * (1 - late / early) + 10 * steadiness + 5 * (d1 <= 2 ? 1 : 0))
+            signals.push({ key: `exh-${wall.key}-${wall.first}`, kind: 'Exhaustion into wall', t: lastCol.t, price: wall.price, bullish: wall.side === 'bid', confidence,
+              text: `Price stalled ${d1.toFixed(0)} row(s) short of the ${size} ${sideText} at ${wall.price} as volume faded ${Math.round((1 - late / early) * 100)}% - momentum running out` })
+          } else {
+            const confidence = clamp(30 + 20 * steadiness + 5 * strengthScore(wall) + 15 * (1 - d1 / d0))
+            signals.push({ key: `mag-${wall.key}-${wall.first}`, kind: 'Magnet', t: lastCol.t, price: wall.price, bullish: wall.side === 'ask', confidence,
+              text: `Price drifting toward the ${size} ${sideText} at ${wall.price} (${d0.toFixed(0)} → ${d1.toFixed(0)} rows away) - liquidity attracting price` })
+          }
+        }
+      }
+    }
+  }
+  return signals.sort((a, b) => b.t - a.t)
+}
+
+// One read of everything on the page: a bias (-100 bearish .. +100 bullish) with what drove it.
+// Each part is scored -1..+1 and weighted:
+//   cumulative delta trend (last 10 bars, vs their volume)  30
+//   recent delta (last 3 bars, vs their volume)             15
+//   stacked imbalances (last 10 bars: buy - sell stacks)     15
+//   absorption / exhaustion (last 15 bars)                  15
+//   liquidity signals (last 15 min, by confidence)          15
+//   big orders (last 15 min: buy - sell quantity)           10
+// Confidence is how far from neutral the total is, scaled by how many parts agree on its side.
+export function orderFlowBias({ bars = [], liquidity = [], bigTrades = [], nowMs = Date.now() }) {
+  const parts = []
+  const add = (name, weight, score, detail) => { if (Number.isFinite(score)) parts.push({ name, weight, score: Math.max(-1, Math.min(1, score)), detail }) }
+  const sum = (xs, f) => xs.reduce((s, x) => s + f(x), 0)
+
+  const last10 = bars.slice(-10)
+  if (last10.length >= 3) {
+    const volume = sum(last10, (b) => b.volume)
+    const cvdChange = last10.at(-1).cvd - (last10[0].cvd - last10[0].delta)
+    add('Cumulative delta', 30, volume > 0 ? (cvdChange / volume) * 4 : 0, `${cvdChange >= 0 ? '+' : ''}${Math.round(cvdChange)} over ${last10.length} bars`)
+  }
+  const last3 = bars.slice(-3)
+  if (last3.length) {
+    const volume = sum(last3, (b) => b.volume)
+    const delta = sum(last3, (b) => b.delta)
+    add('Recent delta', 15, volume > 0 ? (delta / volume) * 4 : 0, `${delta >= 0 ? '+' : ''}${Math.round(delta)} over ${last3.length} bars`)
+  }
+  if (last10.length) {
+    const buy = sum(last10, (b) => (b.stacked ?? []).filter((z) => z.side === 'buy').length)
+    const sell = sum(last10, (b) => (b.stacked ?? []).filter((z) => z.side === 'sell').length)
+    if (buy + sell > 0) add('Stacked imbalances', 15, (buy - sell) / Math.max(2, buy + sell), `${buy} buy / ${sell} sell stacks`)
+  }
+  const last15 = bars.slice(-15)
+  {
+    const bullish = sum(last15, (b) => [...(b.absorption ?? []), ...(b.exhaustion ?? [])].filter((x) => x.side === 'buy').length)
+    const bearish = sum(last15, (b) => [...(b.absorption ?? []), ...(b.exhaustion ?? [])].filter((x) => x.side === 'sell').length)
+    if (bullish + bearish > 0) add('Absorption / exhaustion', 15, (bullish - bearish) / Math.max(2, bullish + bearish), `${bullish} bullish / ${bearish} bearish`)
+  }
+  const recent = liquidity.filter((s) => nowMs - s.t <= 15 * 60_000)
+  if (recent.length) {
+    const score = sum(recent, (s) => (s.bullish ? 1 : -1) * (s.confidence / 100) * (1 - (nowMs - s.t) / (15 * 60_000) * 0.5))
+    add('Liquidity (heatmap)', 15, score / Math.max(1, recent.length * 0.6), `${recent.length} signal(s)`)
+  }
+  const recentTrades = bigTrades.filter((t) => nowMs - new Date(t.time).getTime() <= 15 * 60_000)
+  if (recentTrades.length) {
+    const buy = sum(recentTrades.filter((t) => t.buy), (t) => t.quantity)
+    const sell = sum(recentTrades.filter((t) => !t.buy), (t) => t.quantity)
+    add('Big orders', 10, (buy - sell) / Math.max(1, buy + sell), `${recentTrades.length} in 15 min`)
+  }
+
+  const totalWeight = sum(parts, (p) => p.weight) || 1
+  const score = Math.round((sum(parts, (p) => p.weight * p.score) / totalWeight) * 100)
+  const side = Math.sign(score)
+  const agreeing = parts.filter((p) => Math.sign(p.score) === side && Math.abs(p.score) > 0.1).length
+  const confidence = side === 0 || parts.length === 0 ? 0 : Math.round(Math.min(95, Math.abs(score) * (0.5 + 0.5 * agreeing / parts.length) * 1.4))
+  const bias = score >= 20 ? 'Bullish' : score <= -20 ? 'Bearish' : 'Neutral'
+  return { score, bias, confidence, parts }
+}

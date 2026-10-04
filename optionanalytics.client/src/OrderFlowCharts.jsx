@@ -448,7 +448,7 @@ function heatColor(t) {
 // Depth heatmap: resting liquidity over time - each column is one book snapshot, each cell a price
 // row, brighter = more quantity resting there. The white line is the mid price; circles are large
 // prints (green buy / red sell, size by quantity); magenta lines are detected icebergs.
-export function DepthHeatmap({ columns, rowSize, trades, icebergs, lotSize, showLots, height = 420 }) {
+export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [], lotSize, showLots, height = 420 }) {
   const wrapRef = useRef(null)
   const canvasRef = useRef(null)
   const width = useElementWidth(wrapRef)
@@ -553,6 +553,31 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, lotSize, show
       ctx.beginPath(); ctx.arc(xTime(t), yPrice(trade.price), r, 0, Math.PI * 2); ctx.fill(); ctx.stroke()
     }
 
+    // Liquidity signals: a labelled pill at the signal's price and time (green = bullish, red =
+    // bearish), with its confidence.
+    const SHORT = { Magnet: 'MAGNET', 'Wall absorption': 'ABS', 'Exhaustion into wall': 'EXH', Spoofing: 'SPOOF' }
+    for (const sig of signals ?? []) {
+      if (sig.t < t0 || sig.t > t1) continue
+      const x = xTime(sig.t)
+      const y = yPrice(sig.price)
+      if (y < 0 || y > plotH) continue
+      const label = `${SHORT[sig.kind] ?? sig.kind} ${sig.confidence}%`
+      ctx.font = `700 10px ${FONT}`
+      const w = ctx.measureText(label).width + 8
+      const px = Math.min(plotW - w - 1, Math.max(1, x - w / 2))
+      const py = Math.max(1, Math.min(plotH - 15, y - 20))
+      ctx.fillStyle = sig.bullish ? 'rgba(38,166,154,0.92)' : 'rgba(239,83,80,0.92)'
+      ctx.beginPath()
+      if (ctx.roundRect) ctx.roundRect(px, py, w, 14, 3)
+      else ctx.rect(px, py, w, 14)
+      ctx.fill()
+      ctx.strokeStyle = '#fff'
+      ctx.beginPath(); ctx.moveTo(x, py + 14); ctx.lineTo(x, y); ctx.stroke()
+      ctx.fillStyle = '#fff'
+      ctx.textBaseline = 'middle'
+      ctx.fillText(label, px + 4, py + 7.5)
+    }
+
     // Axes
     ctx.font = `11px ${FONT}`
     ctx.textBaseline = 'middle'
@@ -570,7 +595,7 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, lotSize, show
       ctx.fillText(IST_HHMM.format(new Date(t)), Math.min(plotW - 20, Math.max(20, xTime(t))), plotH + HM_TIME_H / 2)
     }
     ctx.textAlign = 'left'
-  }, [layout, width, height, plotW, plotH, step, trades, icebergs, lotSize])
+  }, [layout, width, height, plotW, plotH, step, trades, icebergs, signals, lotSize])
 
   return (
     <div ref={wrapRef} style={{ position: 'relative', width: '100%', height }}>

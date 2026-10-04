@@ -1574,7 +1574,9 @@ function classifyFuturesRegime(priceDelta, oiDelta, priceThreshold, oiThreshold)
 // entirely about ITS OWN change over time rather than a level.
 // profile: the session volume profile (orderFlowMath.volumeProfileFromCandles) in profileRowSize
 // rows - drawn into the chart by VolumeProfilePrimitive, with POC / VAH / VAL price lines.
-function FuturesChart({ bars, oiLine, markers, dayKey, height = 320, profile = null, profileRowSize = 0 }) {
+// deltaBars: [{ time (chart time), delta, cvd }] per candle - each candle's delta as a histogram and
+// the cumulative delta as a line, in a band under the candles (own scales).
+function FuturesChart({ bars, oiLine, markers, dayKey, height = 320, profile = null, profileRowSize = 0, deltaBars = null }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
@@ -1582,6 +1584,8 @@ function FuturesChart({ bars, oiLine, markers, dayKey, height = 320, profile = n
   const markersRef = useRef(null)
   const profilePrimitiveRef = useRef(null)
   const profileLinesRef = useRef([])
+  const deltaSeriesRef = useRef(null)
+  const cvdSeriesRef = useRef(null)
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -1610,6 +1614,11 @@ function FuturesChart({ bars, oiLine, markers, dayKey, height = 320, profile = n
     profilePrimitiveRef.current = new VolumeProfilePrimitive()
     seriesRef.current.attachPrimitive(profilePrimitiveRef.current)
     profileLinesRef.current = []
+    // Delta (histogram) and cumulative delta (line) share the bottom band of the pane.
+    deltaSeriesRef.current = chart.addSeries(HistogramSeries, { priceScaleId: 'delta', priceLineVisible: false, lastValueVisible: false, title: 'Δ' })
+    cvdSeriesRef.current = chart.addSeries(LineSeries, { priceScaleId: 'cvd', color: '#f5c542', lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: 'ΣΔ' })
+    chart.priceScale('delta').applyOptions({ scaleMargins: { top: 0.8, bottom: 0 }, visible: false })
+    chart.priceScale('cvd').applyOptions({ scaleMargins: { top: 0.8, bottom: 0 }, visible: false })
     // Own (left) price scale and a thin, semi-transparent line - OI's own numbers (lakhs/crores)
     // are a totally different scale than price, so sharing the right-hand axis with candles would
     // otherwise squash one or the other into a flat line.
@@ -1643,8 +1652,19 @@ function FuturesChart({ bars, oiLine, markers, dayKey, height = 320, profile = n
       markersRef.current = null
       profilePrimitiveRef.current = null
       profileLinesRef.current = []
+      deltaSeriesRef.current = null
+      cvdSeriesRef.current = null
     }
   }, [height])
+
+  useEffect(() => {
+    if (!deltaSeriesRef.current || !cvdSeriesRef.current || !seriesRef.current) return
+    const rows = deltaBars ?? []
+    deltaSeriesRef.current.setData(rows.map((d) => ({ time: d.time, value: d.delta, color: d.delta >= 0 ? `${UP_COLOR}aa` : `${DOWN_COLOR}aa` })))
+    cvdSeriesRef.current.setData(rows.map((d) => ({ time: d.time, value: d.cvd })))
+    // Candles keep the top of the pane when there is a delta band under them.
+    seriesRef.current.priceScale().applyOptions({ scaleMargins: rows.length ? { top: 0.12, bottom: 0.28 } : CANDLE_SCALE_MARGINS })
+  }, [deltaBars, height])
 
   useEffect(() => {
     if (!seriesRef.current) return
@@ -2315,6 +2335,10 @@ export default function OiReplayPage() {
   const [domOpen, setDomOpen] = useState(false)
   // Volume profile on the futures chart (POC / value area lines) - see futuresProfile below.
   const [futuresProfileOn, setFuturesProfileOn] = usePersistedState('optionanalytics.oiReplay.futuresProfile', true)
+  // Delta / cumulative delta under the futures candles - from the order flow server: exact for a day it
+  // saw live, else estimated from 1-minute candles (see futuresFlow below).
+  const [futuresDeltaOn, setFuturesDeltaOn] = usePersistedState('optionanalytics.oiReplay.futuresDelta', true)
+  const [futuresFlow, setFuturesFlow] = useState(null)
   // Which of the two whole-chain OI charts the Day OI Accumulation card shows - see the chart
   // itself, further down, for why this is a switch rather than the per-strike drilldown's own
   // stacked pair (both would double this card's already-tall height, and the day-level numbers
@@ -3059,6 +3083,32 @@ export default function OiReplayPage() {
   }, [futuresBarsChart, asOfMs, futuresTimeframe])
   // The day's futures volume profile up to the replay time, from each minute's volume spread over its
   // range (FUTURES_PROFILE_ROWS-point rows).
+  // The day's per-minute buy/sell from the order flow server - refreshed every minute while live.
+  const flowDate = result?.date ?? null
+  useEffect(() => {
+    if (!futuresDeltaOn || !flowDate || !underlying) { setFuturesFlow(null); return undefined }
+    let cancelled = false
+    const load = () => fetch(`/api/order-flow/${underlying}/day/${flowDate}?rowSize=50&minTradeLots=100000&heatmapColumns=50`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((body) => { if (!cancelled) setFuturesFlow(body ? { source: body.source, bars: body.bars.map((b) => ({ ms: new Date(b.time).getTime(), delta: b.buy - b.sell })) } : null) })
+      .catch(() => { if (!cancelled) setFuturesFlow(null) })
+    load()
+    const id = isLive ? setInterval(load, 60_000) : null
+    return () => { cancelled = true; if (id) clearInterval(id) }
+  }, [futuresDeltaOn, flowDate, underlying, isLive])
+  // Delta per futures candle (same buckets as the candles) up to the replay time, and its running sum.
+  const futuresDeltaBars = useMemo(() => {
+    if (!futuresDeltaOn || !futuresFlow?.bars?.length || asOfMs == null) return null
+    const bucketSeconds = Math.max(1, futuresTimeframe) * 60
+    const buckets = new Map()
+    for (const b of futuresFlow.bars) {
+      if (b.ms > asOfMs) continue // minutes revealed so far (a minute shows once the replay reaches its start, like the candles)
+      const t = Math.floor(toChartTime(b.ms) / bucketSeconds) * bucketSeconds
+      buckets.set(t, (buckets.get(t) ?? 0) + b.delta)
+    }
+    let cvd = 0
+    return [...buckets.entries()].sort((a, b) => a[0] - b[0]).map(([time, delta]) => { cvd += delta; return { time, delta, cvd } })
+  }, [futuresDeltaOn, futuresFlow, asOfMs, futuresTimeframe])
   const futuresProfileRow = FUTURES_PROFILE_ROWS[underlying] ?? 5
   const futuresProfile = useMemo(() => {
     if (!futuresProfileOn || asOfMs == null) return null
@@ -4453,6 +4503,9 @@ export default function OiReplayPage() {
                           <Button size="small" onClick={() => setDomOpen(true)}>DOM</Button>
                         </Tooltip>
                         <Select value={futuresTimeframe} onChange={setFuturesTimeframe} size="small" style={{ width: 90 }} options={TIMEFRAME_OPTIONS} />
+                        <Tooltip title="Delta (buy - sell volume) per candle and cumulative delta under the candles - exact for a day the order flow server saw live, else estimated from 1-minute candles">
+                          <Space size={4}><Switch size="small" checked={futuresDeltaOn} onChange={setFuturesDeltaOn} /><Text style={{ fontSize: 12 }}>Δ / ΣΔ</Text></Space>
+                        </Tooltip>
                         <Tooltip title={`Volume profile of the session so far (${futuresProfileRow}-pt rows) with POC and the 70% value area (VAH/VAL)`}>
                           <Space size={4}><Switch size="small" checked={futuresProfileOn} onChange={setFuturesProfileOn} /><Text style={{ fontSize: 12 }}>Profile</Text></Space>
                         </Tooltip>
@@ -4521,8 +4574,15 @@ export default function OiReplayPage() {
                             dayKey={`futures-${underlying}-${result.date}-${futuresTimeframe}`}
                             height={320}
                             profile={futuresProfile} profileRowSize={futuresProfileRow}
+                            deltaBars={futuresDeltaBars}
                           />
                         </ChartErrorBoundary>
+                        {futuresDeltaBars?.length > 0 && (
+                          <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>
+                            Under the candles: delta per candle (green buying / red selling) and cumulative delta (yellow line, ΣΔ {futuresDeltaBars.at(-1).cvd >= 0 ? '+' : ''}{Math.round(futuresDeltaBars.at(-1).cvd).toLocaleString('en-IN')})
+                            {futuresFlow?.source === 'estimated' ? ' - estimated from 1-minute candles (the order flow server did not see this day live)' : ' - from the live tick feed'}.
+                          </Text>
+                        )}
                         {futuresProfile?.poc != null && (
                           <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>
                             Volume profile: POC {futuresProfile.poc + futuresProfileRow / 2} · value area {futuresProfile.val}–{futuresProfile.vah + futuresProfileRow} ·
