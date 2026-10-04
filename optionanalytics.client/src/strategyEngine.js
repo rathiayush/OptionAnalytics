@@ -1,5 +1,5 @@
 // The OI + Order Flow playbook's strategies as objective rules, run on the Order Flow page live and at
-// the replay clock (and over a whole day by "Scan day"): OI + order flow (1-10, 16-21), volume / market
+// the replay clock (and over a whole day by "Scan day"): OI + order flow (1-10, 16-21, 24), volume / market
 // profile (11-15) and range-bound mean reversion (7, 22, 23). Each strategy reads all five screens:
 //
 //   OI        - the OI Replay data for the day (/api/oi-replay/{u}/run): option OI per strike (walls,
@@ -65,6 +65,9 @@ export const STRATEGIES = [
   // Range-bound (mean reversion) - only on a balanced day.
   { id: 'vwapFade', no: 22, name: 'VWAP ±2σ fade on a balanced day', short: 'VWAP band fade', group: 'range' },
   { id: 'ibFade', no: 23, name: 'Failed IB poke fade in a straddle-written range', short: 'IB poke fade', group: 'range' },
+  // Short squeeze (long) and long squeeze (short) from the futures OI read minute by minute - first in
+  // line for alerts until measured.
+  { id: 'oiSqueeze', no: 24, name: 'Trapped-OI squeeze - short & long squeeze', short: 'OI squeeze', priority: 2 },
 ]
 export const STRATEGY_BY_ID = Object.fromEntries(STRATEGIES.map((s) => [s.id, s]))
 // The playbook's own picks, used for alerts until enough trades have been scored to rank them.
@@ -1297,6 +1300,79 @@ export function evaluateStrategies(input) {
     }
   }
 
+  // 24. Trapped-OI squeeze - a short squeeze (LONG) or a long squeeze (SHORT) - 09:45-14:30. The futures
+  //     OI is read minute by minute over the last 75 minutes for two phases:
+  //     FUEL    - positions built AGAINST the coming move up to an OI peak (a short build-up - price
+  //               down, OI up - before a short squeeze; a long build-up before a long squeeze);
+  //     TRIGGER - the OI now coming off that peak (most of it in the last 10 minutes) while price moves
+  //               the other way, back past where they were trapped: they are covering. Part of the
+  //               fuel must be burnt (it has started) and most of it still left (it has room to run).
+  //     The option writers on the trapped side cover at the money too (calls in a short squeeze) while
+  //     the other side's writers stay, and the order flow must show the FORCED buying (selling): delta
+  //     with it two bars running, a stack or a new ΣΔ extreme, fast aggressive tape (a sweep or the
+  //     tape speeding up) and nothing absorbing or exhausting it. Not when already stretched from VWAP.
+  if (minute >= hm(9, 45) && minute <= hm(14, 30) && bars.length >= 10) {
+    const pts = (oi.futures ?? []).filter((p) => p.t >= nowMs - 75 * MIN && p.t <= nowMs && p.oi > 0)
+    const nowPt = valueAt(oi.futures, nowMs)
+    const fuelPts = pts.filter((p) => p.t <= nowMs - 5 * MIN)
+    const f10 = futuresChange(oi, nowMs, 10)
+    if (fuelPts.length >= 30 && nowPt?.oi > 0 && f10?.oiPct != null) {
+      const start = pts[0]
+      const peak = fuelPts.reduce((a, p) => (p.oi > a.oi ? p : a), fuelPts[0])
+      const fuel = peak.oi - start.oi
+      const covered = peak.oi - nowPt.oi
+      const atm = Math.round(spotNow / oi.step) * oi.step
+      const sumChg = (map, ks) => ks.reduce((sum, k) => sum + (oiChange(map, k, nowMs, 10) ?? 0), 0)
+      const sumOi = (map, ks) => ks.reduce((sum, k) => sum + (oiOf(map, k, nowMs) ?? 0), 0)
+      for (const dir of [1, -1]) {
+        // The fuel: 0.4%+ OI built while price went against dir by 0.1%+.
+        if (!(fuel >= 0.004 * start.oi) || !(dir * (peak.close - start.close) <= -pct(0.001))) continue
+        // The trigger: 0.15%+ off the peak, 0.12%+ of it in the last 10 minutes, price 0.1%+ with dir.
+        if (!(covered >= 0.0015 * peak.oi) || !(f10.oiPct <= -0.0012) || !(dir * f10.pricePct >= 0.001)) continue
+        const burnt = covered / fuel
+        if (burnt < 0.15 || burnt > 0.75) continue
+        // The trapped side under water: price back past where the OI peaked.
+        if (!(dir * (price - peak.close) > 0)) continue
+        if (bands?.sd > 0 && dir * (price - bands.vwap) > Math.max(2 * bands.sd, pct(0.004))) continue
+        // Option writers on the trapped side covering at the money (ATM and the next strike the move
+        // runs into); the other side's (ATM and the one behind) not leaving.
+        const trappedMap = dir > 0 ? oi.ce : oi.pe
+        const otherMap = dir > 0 ? oi.pe : oi.ce
+        const trappedStrikes = [atm, atm + dir * oi.step]
+        const otherStrikes = [atm, atm - dir * oi.step]
+        const writersCover = sumChg(trappedMap, trappedStrikes)
+        const trappedBase = sumOi(trappedMap, trappedStrikes)
+        if (!(trappedBase > 0) || writersCover > -0.005 * trappedBase) continue
+        const otherChg = sumChg(otherMap, otherStrikes)
+        const otherBase = sumOi(otherMap, otherStrikes)
+        if (otherChg < -0.005 * otherBase) continue
+        // The forced buying (selling) in the order flow.
+        const footprint = dir * last.delta > 0 && prev && dir * prev.delta > 0 && (stackWith(dir, 3) || cvdNewExtreme(dir, 15)) && !absorbed(-dir) && !exhausted(-dir)
+        const tapeOk = aggWith(dir, 62, 'agg30') && (sweepWith(dir) || tape.speedRatio >= 1.3 || tape.proxy)
+          && (tape.proxy || (dir > 0 ? tape.bigSell <= tape.bigBuy : tape.bigBuy <= tape.bigSell))
+        const c = confirm(dir, sweepWith(dir))
+        if (!footprint || !tapeOk || !c.ok) continue
+        // Stop beyond the last 10 minutes' swing; target back toward where the fuel began (2-3.5R) -
+        // not into a growing wall close ahead.
+        const swing = dir > 0 ? Math.min(...bars.slice(-10).map((b) => b.low)) : Math.max(...bars.slice(-10).map((b) => b.high))
+        const stopPts = Math.max(pct(0.0012), dir * (price - swing) + pct(0.0005))
+        if (stopPts > pct(0.004)) continue
+        const ahead = roomAhead(dir)
+        if (ahead && ahead.room < 1.5 * stopPts && grew(dir > 0 ? oi.ce : oi.pe, ahead.wall, 15)) continue
+        const toOrigin = dir * (start.close - price)
+        const peakAt = fmtHm(istMinute(peak.t))
+        push('oiSqueeze', dir, stopPts, Math.max(2 * stopPts, Math.min(3.5 * stopPts, toOrigin)), 40,
+          64 + (sweepWith(dir) ? 6 : 0) + (stackWith(dir, 3) ? 4 : 0) + (otherChg > 0.003 * otherBase ? 4 : 0) + (fuel >= 0.008 * start.oi ? 4 : 0) + (burnt <= 0.5 ? 2 : 0), {
+            OI: `futures OI +${((fuel / start.oi) * 100).toFixed(2)}% built while price went ${dir > 0 ? 'down' : 'up'} ${(Math.abs(peak.close - start.close) / start.close * 100).toFixed(2)}% (${dir > 0 ? 'shorts' : 'longs'} in) to a peak at ${peakAt}, now ${((covered / peak.oi) * 100).toFixed(2)}% off it - ${Math.round(burnt * 100)}% of the build-up covered so far`,
+            'Option writers': `${dir > 0 ? 'CALL' : 'PUT'} ${trappedStrikes.join(' / ')} ${lakh(writersCover)} in 10m (covering), ${dir > 0 ? 'PUT' : 'CALL'} ${otherStrikes.join(' / ')} ${lakh(otherChg)}`,
+            Squeeze: `futures ${(f10.pricePct * 100).toFixed(2)}% with OI ${(f10.oiPct * 100).toFixed(2)}% in 10m - ${dir > 0 ? 'short covering' : 'long unwinding'}, price ${dir > 0 ? 'above' : 'below'} the ${peak.close.toFixed(1)} where they were trapped`,
+            Footprint: `${stackWith(dir, 3) ? 'stacked imbalance' : 'ΣΔ new extreme'}, Δ ${prev.delta > 0 ? '+' : ''}${prev.delta} / ${last.delta > 0 ? '+' : ''}${last.delta}, nothing absorbing it`,
+            Tape: `${sweepWith(dir) ? 'sweep · ' : ''}${tapeText}${tape.proxy ? '' : ` · speed ${tape.speedRatio.toFixed(1)}x`}`, DOM: c.dom, Heatmap: c.heat,
+          })
+      }
+    }
+  }
+
   return resolveConflicts(out)
 }
 
@@ -1429,7 +1505,7 @@ export function topFifteen(stats) {
   const profile = topFive(stats, 'profile')
   const chosen = new Set([...oi.ids, ...profile.ids])
   const rest = stats.filter((s) => !chosen.has(s.id) && !(s.trades >= MIN_TRADES_TO_RANK && !(s.score > 0)))
-    .sort((a, b) => (b.score ?? 0) - (a.score ?? 0) || (b.priority ? 1 : 0) - (a.priority ? 1 : 0))
+    .sort((a, b) => (b.score ?? 0) - (a.score ?? 0) || (+b.priority || 0) - (+a.priority || 0))
   for (const s of rest) if (chosen.size < 15) chosen.add(s.id)
   return { ids: [...chosen], measured: oi.measured && profile.measured, oi, profile }
 }
