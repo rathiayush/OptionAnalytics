@@ -1,0 +1,252 @@
+using System.Collections.Concurrent;
+using System.Net;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
+using OptionAnalytics.Server.Dhan;
+using OptionAnalytics.Server.Services;
+
+namespace OptionAnalytics.Server.Tests;
+
+/// <summary>
+/// LiveTradingService's partial exit, run against an in-memory fake of Dhan's REST API: the super
+/// order's legs are cancelled, the lots go out as a priced LIMIT exit, the rest is protected by ONE
+/// stop-loss order tagged with the old target, a later full Close cancels that protection before
+/// sizing its exit (so it cannot count it as an exit already working, nor leave it behind to fire
+/// later), and reaching the target turns the same stop-loss order into a limit exit.
+/// </summary>
+public sealed class LiveTradingPartialExitTests
+{
+    private const uint SecurityId = 40944;
+    private const int Lot = 65;
+
+    [Fact]
+    public async Task PartialExit_CancelsTheLegs_ExitsTheLots_AndProtectsTheRestWithOneStopLoss()
+    {
+        var (service, dhan, _) = await CreateAsync();
+
+        var result = await service.PartialExitAsync(SecurityId.ToString(), lots: 1, slippagePoints: 1m, CancellationToken.None);
+
+        Assert.True(result.Success, result.Message);
+        // 1. Both super-order legs cancelled.
+        Assert.Contains("DELETE /super/orders/S1/TARGET_LEG", dhan.Requests);
+        Assert.Contains("DELETE /super/orders/S1/STOP_LOSS_LEG", dhan.Requests);
+        // 2. One lot out at the bid minus the slippage.
+        var exit = Assert.Single(dhan.Orders.Values, o => o.Tag.StartsWith("OIRX-"));
+        Assert.Equal(("SELL", "LIMIT", Lot, 119.00m), (exit.Side, exit.Type, exit.Quantity, exit.Price));
+        // 3. The rest (3 lots) behind one stop-loss at the old stop-loss, tagged with the old target.
+        var protection = Assert.Single(dhan.Orders.Values, o => o.Tag.StartsWith("OIRP-"));
+        Assert.Equal(("SELL", "STOP_LOSS", 3 * Lot, 80.00m), (protection.Side, protection.Type, protection.Quantity, protection.Trigger));
+        Assert.Equal(78.00m, protection.Price); // fills beyond the trigger: 80 - max(2 x slippage, 10 ticks) = 80 - 2
+        Assert.Equal(150m, LiveTradingService.TargetFromTag(protection.Tag));
+
+        // The panel shows the rest as managed, with its target and stop-loss.
+        await service.RefreshAsync(CancellationToken.None);
+        var row = Assert.Single(service.Snapshot().Positions, p => p.IsOpen);
+        Assert.Equal(("managed", 150m, 80m), (row.Protection, row.TargetPrice, row.StopLossPrice));
+    }
+
+    [Fact]
+    public async Task Close_AfterAPartialExit_CancelsTheProtectionFirst_AndExitsEverythingLeft()
+    {
+        var (service, dhan, _) = await CreateAsync();
+        await service.PartialExitAsync(SecurityId.ToString(), lots: 1, slippagePoints: 1m, CancellationToken.None);
+        dhan.Fill(dhan.Orders.Values.Single(o => o.Tag.StartsWith("OIRX-")).Id); // the partial exit fills: 3 lots left
+        var protectionId = dhan.Orders.Values.Single(o => o.Tag.StartsWith("OIRP-")).Id;
+
+        var result = await service.CloseAsync(SecurityId.ToString(), 1m, CancellationToken.None);
+
+        Assert.True(result.Success, result.Message);
+        Assert.Equal("CANCELLED", dhan.Orders[protectionId].Status);
+        var cancelAt = dhan.Requests.IndexOf($"DELETE /orders/{protectionId}");
+        var exits = dhan.Orders.Values.Where(o => o.Tag.StartsWith("OIRX-") && o.Status == "PENDING").ToList();
+        var finalExit = Assert.Single(exits);
+        Assert.Equal(3 * Lot, finalExit.Quantity); // not reduced by the (cancelled) protection
+        Assert.True(cancelAt >= 0 && cancelAt < dhan.Requests.LastIndexOf("POST /orders"), "the protection must be cancelled before the exit goes out");
+    }
+
+    [Fact]
+    public async Task ReachingTheTarget_TurnsTheProtectionIntoALimitExit()
+    {
+        var (service, dhan, feed) = await CreateAsync();
+        await service.PartialExitAsync(SecurityId.ToString(), lots: 1, slippagePoints: 1m, CancellationToken.None);
+        await service.RefreshAsync(CancellationToken.None);
+        var protection = dhan.Orders.Values.Single(o => o.Tag.StartsWith("OIRP-"));
+
+        var atTarget = Tick(bid: 150.50m, ask: 151m, last: 151m);
+        feed.SetLastTickForTesting(atTarget);
+        service.OnTick(atTarget);
+
+        for (var i = 0; i < 50 && protection.Type != "LIMIT"; i++) await Task.Delay(100);
+        Assert.Equal(("LIMIT", 150.50m, 3 * Lot), (protection.Type, protection.Price, protection.Quantity));
+        Assert.Single(dhan.Orders.Values, o => o.Side == "SELL" && o.Status == "PENDING" && o.Tag.StartsWith("OIRP-")); // still one order for the rest
+    }
+
+    [Fact]
+    public async Task ExitingAllTheLots_IsAPlainClose()
+    {
+        var (service, dhan, _) = await CreateAsync();
+
+        var result = await service.PartialExitAsync(SecurityId.ToString(), lots: 4, slippagePoints: 1m, CancellationToken.None);
+
+        Assert.True(result.Success, result.Message);
+        Assert.DoesNotContain(dhan.Orders.Values, o => o.Tag.StartsWith("OIRP-"));
+        Assert.Equal(4 * Lot, Assert.Single(dhan.Orders.Values, o => o.Tag.StartsWith("OIRX-")).Quantity);
+    }
+
+    [Theory]
+    [InlineData(150.0, "OIRP-T15000-101500-1")]
+    [InlineData(23.45, "OIRP-T2345-101500-2")]
+    public void ProtectionTag_CarriesTheTarget(double target, string expectedPrefix)
+    {
+        var slice = expectedPrefix.EndsWith("-2") ? 2 : 1;
+        var tag = LiveTradingService.ProtectionTag((decimal)target, "101500", slice);
+        Assert.Equal(expectedPrefix, tag);
+        Assert.True(tag.Length <= 30);
+        Assert.Equal((decimal)target, LiveTradingService.TargetFromTag(tag));
+        Assert.Null(LiveTradingService.TargetFromTag("OIRX-20261004-1"));
+    }
+
+    [Fact]
+    public void ProtectionPrices_LeaveRoomToFillBeyondTheTrigger()
+    {
+        Assert.Equal((78.00m, 80.00m), LiveTradingService.ProtectionPrices(closesBySelling: true, 80m, 1m, 0.05m));
+        Assert.Equal((82.00m, 80.00m), LiveTradingService.ProtectionPrices(closesBySelling: false, 80m, 1m, 0.05m));
+        Assert.Equal((79.50m, 80.00m), LiveTradingService.ProtectionPrices(closesBySelling: true, 80m, 0m, 0.05m)); // 10 ticks minimum
+        Assert.True(LiveTradingService.TargetReached(true, 150m, 150m));
+        Assert.False(LiveTradingService.TargetReached(true, 150m, 149.95m));
+        Assert.True(LiveTradingService.TargetReached(false, 50m, 49.5m));
+    }
+
+    // ---- fixture ---------------------------------------------------------------------------------
+
+    private static SpotTick Tick(decimal bid, decimal ask, decimal last) =>
+        new(SecurityId, last, 0, 0, 0, 0, 1000, bid, ask, 0, DateTimeOffset.UtcNow);
+
+    private static async Task<(LiveTradingService Service, FakeDhan Dhan, DhanMarketFeedClient Feed)> CreateAsync()
+    {
+        var expiry = DateTime.Today.AddDays(20).ToString("yyyy-MM-dd");
+        var scrip = "SEM_EXM_EXCH_ID,SEM_SEGMENT,SEM_SMST_SECURITY_ID,SEM_INSTRUMENT_NAME,SEM_EXPIRY_CODE,SEM_TRADING_SYMBOL,SEM_LOT_UNITS,SEM_CUSTOM_SYMBOL,SEM_EXPIRY_DATE,SEM_STRIKE_PRICE,SEM_OPTION_TYPE,SEM_TICK_SIZE,SEM_EXPIRY_FLAG,SEM_EXCH_INSTRUMENT_TYPE,SEM_SERIES,SM_SYMBOL_NAME\n" +
+                    $"NSE,D,{SecurityId},OPTIDX,0,NIFTY-Test-26000-CE,{Lot}.0,NIFTY 26000 CALL,{expiry} 14:30:00,26000.00000,CE,5.0000,W,OP,,\n";
+        var dhan = new FakeDhan(scrip);
+        dhan.Positions.Add(new JsonObject
+        {
+            ["securityId"] = SecurityId.ToString(), ["tradingSymbol"] = "NIFTY-Test-26000-CE", ["exchangeSegment"] = "NSE_FNO",
+            ["productType"] = "INTRADAY", ["positionType"] = "LONG", ["netQty"] = 4 * Lot, ["buyAvg"] = 110m, ["buyQty"] = 4 * Lot,
+        });
+        dhan.SuperOrders.Add(new JsonObject
+        {
+            ["orderId"] = "S1", ["orderStatus"] = "TRADED", ["transactionType"] = "BUY", ["exchangeSegment"] = "NSE_FNO",
+            ["securityId"] = SecurityId.ToString(), ["quantity"] = 4 * Lot, ["price"] = 110m, ["targetPrice"] = 150m, ["stopLossPrice"] = 80m,
+            ["correlationId"] = "OIR-test-1",
+            ["legDetails"] = new JsonArray(
+                new JsonObject { ["legName"] = "TARGET_LEG", ["orderStatus"] = "PENDING", ["transactionType"] = "SELL", ["price"] = 150m },
+                new JsonObject { ["legName"] = "STOP_LOSS_LEG", ["orderStatus"] = "PENDING", ["transactionType"] = "SELL", ["price"] = 80m }),
+        });
+
+        var options = Options.Create(new DhanOptions { RestBaseUrl = "https://dhan.test", ScripMasterUrl = "https://dhan.test/scrip.csv", AccessToken = "t", ClientId = "c" });
+        var session = new DhanSession(options);
+        var http = new HttpClient(dhan);
+        var api = new DhanApiClient(http, options, session, NullLogger<DhanApiClient>.Instance);
+        var chain = new DhanOptionChainMaster(http, options, NullLogger<DhanOptionChainMaster>.Instance);
+        await chain.EnsureLoadedAsync(CancellationToken.None);
+        var feed = new DhanMarketFeedClient(options, session, NullLogger<DhanMarketFeedClient>.Instance);
+        feed.SetLastTickForTesting(Tick(bid: 120m, ask: 120.50m, last: 120.25m));
+        var service = new LiveTradingService(
+            new DhanPositionsClient(api, NullLogger<DhanPositionsClient>.Instance),
+            new DhanSuperOrderClient(api, NullLogger<DhanSuperOrderClient>.Instance),
+            new DhanOrderClient(api, NullLogger<DhanOrderClient>.Instance),
+            chain, feed, session, new DhanOrderUpdateFeed(options, session, NullLogger<DhanOrderUpdateFeed>.Instance),
+            new LiveBroadcastBatcher(null, NullLogger<LiveBroadcastBatcher>.Instance), NullLogger<LiveTradingService>.Instance);
+        return (service, dhan, feed);
+    }
+
+    /// <summary>Just enough of Dhan's REST API: positions, super orders (with leg cancel) and plain
+    /// orders (place, modify, cancel), in memory. Requests are recorded as "METHOD /path".</summary>
+    private sealed class FakeDhan(string scripMaster) : HttpMessageHandler
+    {
+        public List<JsonObject> Positions { get; } = new();
+        public List<JsonObject> SuperOrders { get; } = new();
+        public ConcurrentDictionary<string, PlainOrder> Orders { get; } = new();
+        public List<string> Requests { get; } = new();
+        private int _next;
+
+        public sealed class PlainOrder
+        {
+            public required string Id, Side, Tag, Segment, Product;
+            public string Type = "LIMIT", Status = "PENDING";
+            public int Quantity, Filled;
+            public decimal Price;
+            public decimal? Trigger;
+        }
+
+        /// <summary>A plain order fills completely and the position shrinks by it.</summary>
+        public void Fill(string orderId)
+        {
+            var order = Orders[orderId];
+            order.Status = "TRADED";
+            order.Filled = order.Quantity;
+            var position = Positions.Single();
+            var net = position["netQty"]!.GetValue<int>();
+            position["netQty"] = order.Side == "SELL" ? net - order.Quantity : net + order.Quantity;
+        }
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var path = request.RequestUri!.AbsolutePath;
+            lock (Requests) Requests.Add($"{request.Method} {path}");
+            var body = request.Content is null ? null : JsonNode.Parse(await request.Content.ReadAsStringAsync(cancellationToken))?.AsObject();
+
+            if (path == "/scrip.csv") return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(scripMaster) };
+            if (request.Method == HttpMethod.Get && path == "/positions") return Json(new JsonArray(Positions.Select(p => (JsonNode)p.DeepClone()).ToArray()));
+            if (request.Method == HttpMethod.Get && path == "/super/orders") return Json(new JsonArray(SuperOrders.Select(p => (JsonNode)p.DeepClone()).ToArray()));
+            if (request.Method == HttpMethod.Delete && path.StartsWith("/super/orders/"))
+            {
+                var parts = path.Split('/');
+                var order = SuperOrders.Single(o => o["orderId"]!.GetValue<string>() == parts[3]);
+                foreach (var leg in order["legDetails"]!.AsArray())
+                    if (leg!["legName"]!.GetValue<string>() == parts[4]) leg["orderStatus"] = "CANCELLED";
+                return Json(new JsonObject { ["orderId"] = parts[3], ["orderStatus"] = "CANCELLED" });
+            }
+            if (request.Method == HttpMethod.Get && path == "/orders")
+                return Json(new JsonArray(Orders.Values.Select(o => (JsonNode)new JsonObject
+                {
+                    ["orderId"] = o.Id, ["orderStatus"] = o.Status, ["securityId"] = SecurityId.ToString(), ["transactionType"] = o.Side,
+                    ["quantity"] = o.Quantity, ["filledQty"] = o.Filled, ["price"] = o.Price, ["correlationId"] = o.Tag,
+                    ["orderType"] = o.Type, ["triggerPrice"] = o.Trigger ?? 0,
+                }).ToArray()));
+            if (request.Method == HttpMethod.Post && path == "/orders")
+            {
+                var id = $"P{Interlocked.Increment(ref _next)}";
+                Orders[id] = new PlainOrder
+                {
+                    Id = id, Side = body!["transactionType"]!.GetValue<string>(), Tag = body["correlationId"]!.GetValue<string>(),
+                    Segment = body["exchangeSegment"]!.GetValue<string>(), Product = body["productType"]!.GetValue<string>(),
+                    Type = body["orderType"]!.GetValue<string>(), Quantity = body["quantity"]!.GetValue<int>(), Price = body["price"]!.GetValue<decimal>(),
+                    Trigger = body["triggerPrice"]?.GetValue<decimal>(),
+                };
+                return Json(new JsonObject { ["orderId"] = id, ["orderStatus"] = "PENDING" });
+            }
+            if (request.Method == HttpMethod.Put && path.StartsWith("/orders/"))
+            {
+                var order = Orders[path.Split('/')[2]];
+                order.Type = body!["orderType"]!.GetValue<string>();
+                if (body["price"] is { } price) order.Price = price.GetValue<decimal>();
+                if (body["quantity"] is { } quantity) order.Quantity = order.Filled + quantity.GetValue<int>();
+                return Json(new JsonObject { ["orderId"] = order.Id, ["orderStatus"] = order.Status });
+            }
+            if (request.Method == HttpMethod.Delete && path.StartsWith("/orders/"))
+            {
+                var order = Orders[path.Split('/')[2]];
+                order.Status = "CANCELLED";
+                return Json(new JsonObject { ["orderId"] = order.Id, ["orderStatus"] = "CANCELLED" });
+            }
+            return new HttpResponseMessage(HttpStatusCode.NotFound) { Content = new StringContent("{}") };
+        }
+
+        private static HttpResponseMessage Json(JsonNode node) =>
+            new(HttpStatusCode.OK) { Content = new StringContent(node.ToJsonString(), Encoding.UTF8, "application/json") };
+    }
+}

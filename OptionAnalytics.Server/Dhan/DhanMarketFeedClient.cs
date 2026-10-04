@@ -114,6 +114,9 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
     /// master problem.</summary>
     public SpotTick? LastTickFor(uint securityId) => _lastTick.TryGetValue(securityId, out var tick) ? tick : null;
 
+    /// <summary>Tests only: makes <paramref name="tick"/> the latest one for its instrument.</summary>
+    internal void SetLastTickForTesting(SpotTick tick) => _lastTick[tick.SecurityId] = tick;
+
     /// <summary>Whether this token is in the subscribed set right now.</summary>
     public bool IsSubscribed(uint securityId) => _tokenSegments.ContainsKey(securityId);
 

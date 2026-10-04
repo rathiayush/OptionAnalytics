@@ -1,4 +1,5 @@
-import { Alert, Button, Popconfirm, Space, Table, Tag, Tooltip, Typography } from 'antd'
+import { useState } from 'react'
+import { Alert, Button, InputNumber, Popconfirm, Space, Table, Tag, Tooltip, Typography } from 'antd'
 import { ReloadOutlined } from '@ant-design/icons'
 import { UP_COLOR, DOWN_COLOR, fmtIstDateTime } from './shared.jsx'
 
@@ -22,6 +23,7 @@ export const liveTradingApi = {
   positions: (refresh = false) => fetch(`/api/live-trading/positions${refresh ? '?refresh=true' : ''}`).then((r) => (r.ok ? r.json() : null)),
   place: (order) => postJson('/api/live-trading/orders', order),
   close: (securityId, slippagePoints) => postJson(`/api/live-trading/positions/${encodeURIComponent(securityId)}/close`, { slippagePoints }),
+  partialExit: (securityId, lots, slippagePoints) => postJson(`/api/live-trading/positions/${encodeURIComponent(securityId)}/partial-exit`, { lots, slippagePoints }),
   cancel: (orderId, isExit = false) => postJson(`/api/live-trading/orders/${encodeURIComponent(orderId)}${isExit ? '?exit=true' : ''}`, null, 'DELETE'),
   exitAll: (slippagePoints) => postJson('/api/live-trading/exit-all', { slippagePoints }),
   emergencyExitAll: () => postJson('/api/live-trading/emergency-exit-all', null),
@@ -31,9 +33,44 @@ const money = (v) => (v == null ? '—' : `${v >= 0 ? '+' : ''}${Math.round(v).t
 const pnlStyle = (v) => ({ color: v == null ? undefined : v >= 0 ? UP_COLOR : DOWN_COLOR, fontSize: 12 })
 const price = (v) => (v == null ? '—' : Number(v).toFixed(2))
 
+// Take part of a position off: how many lots, then confirm. The rest stays protected - see
+// LiveTradingService.PartialExitAsync on the server.
+function PartialExitButton({ row, slippage, busy, onPartialExit }) {
+  const totalLots = row.lotSize > 0 ? Math.floor(Math.abs(row.netQty) / row.lotSize) : 0
+  const [lots, setLots] = useState(1)
+  if (totalLots < 2) return null
+  const value = Math.min(Math.max(1, lots), totalLots - 1)
+  return (
+    <Popconfirm
+      title="Exit part of this position?"
+      description={(
+        <Space direction="vertical" size={6} style={{ maxWidth: 280 }}>
+          <Space size={6}>
+            <InputNumber size="small" min={1} max={totalLots - 1} value={value} onChange={(v) => setLots(v ?? 1)} addonAfter={`of ${totalLots} lots`} style={{ width: 150 }} />
+          </Space>
+          <Text style={{ fontSize: 12 }}>
+            {row.netQty > 0 ? 'Sells' : 'Buys back'} {value * row.lotSize} qty at the {row.netQty > 0 ? 'bid' : 'ask'} with {slippage} pts slippage.
+            Dhan cannot shrink a super order, so its SL/target are cancelled and the remaining {(totalLots - value) * row.lotSize} qty is re-protected
+            with one stop-loss order at {price(row.stopLossPrice)} (held by Dhan) and the target {price(row.targetPrice)} watched by the server.
+          </Text>
+        </Space>
+      )}
+      okText={`Exit ${value} lot${value > 1 ? 's' : ''}`} okButtonProps={{ danger: true }} onConfirm={() => onPartialExit(row.securityId, value)}
+    >
+      <Button size="small" disabled={busy}>Part</Button>
+    </Popconfirm>
+  )
+}
+
+const protectionTag = (r) => (r.protection === 'managed'
+  ? <Tooltip title="After a partial exit: a stop-loss order held by Dhan, and the target watched by the server - when price reaches it, that same order becomes a limit exit."><Tag color="purple" style={{ fontSize: 10, margin: 0 }}>managed</Tag></Tooltip>
+  : r.protection === 'none'
+    ? <Tooltip title="No stop-loss or target is protecting this position."><Tag color="error" style={{ fontSize: 10, margin: 0 }}>unprotected</Tag></Tooltip>
+    : null)
+
 // The account's live positions (Dhan's own book, so they survive an app restart), pending entries
 // and today's P&L. P&L moves with the live tick feed - snapshot is pushed by the server, not polled.
-export function LivePositionsView({ snapshot, slippage, busy, onClose, onCancel, onRefresh, onExitAll, onEmergencyExitAll }) {
+export function LivePositionsView({ snapshot, slippage, busy, onClose, onPartialExit, onCancel, onRefresh, onExitAll, onEmergencyExitAll }) {
   if (!snapshot) return <Text type="secondary">Loading live positions from Dhan…</Text>
   const open = snapshot.positions.filter((p) => p.isOpen)
   const closed = snapshot.positions.filter((p) => !p.isOpen)
@@ -44,7 +81,12 @@ export function LivePositionsView({ snapshot, slippage, busy, onClose, onCancel,
       render: (s, r) => (
         <Space size={4} direction="vertical" style={{ lineHeight: 1.2 }}>
           <Text style={{ fontSize: 12 }}>{s}</Text>
-          {r.isOpen && <Tag color={r.netQty > 0 ? 'success' : 'error'} style={{ fontSize: 10 }}>{r.netQty > 0 ? 'LONG' : 'SHORT'} {Math.abs(r.netQty)}</Tag>}
+          {r.isOpen && (
+            <Space size={4}>
+              <Tag color={r.netQty > 0 ? 'success' : 'error'} style={{ fontSize: 10, margin: 0 }}>{r.netQty > 0 ? 'LONG' : 'SHORT'} {Math.abs(r.netQty)}</Tag>
+              {protectionTag(r)}
+            </Space>
+          )}
         </Space>
       ),
     },
@@ -60,15 +102,18 @@ export function LivePositionsView({ snapshot, slippage, busy, onClose, onCancel,
       },
     },
     {
-      title: '', key: 'action', width: 70,
+      title: '', key: 'action', width: 112,
       render: (_, r) => (r.isOpen ? (
-        <Popconfirm
-          title="Close this live position?"
-          description={`Cancels its SL/target, then ${r.netQty > 0 ? 'sells at the bid' : 'buys at the ask'} with ${slippage} pts slippage, for ${Math.abs(r.netQty)} qty.`}
-          okText="Close now" okButtonProps={{ danger: true }} onConfirm={() => onClose(r.securityId)}
-        >
-          <Button size="small" danger disabled={busy}>Close</Button>
-        </Popconfirm>
+        <Space size={4}>
+          {onPartialExit && <PartialExitButton row={r} slippage={slippage} busy={busy} onPartialExit={onPartialExit} />}
+          <Popconfirm
+            title="Close this live position?"
+            description={`Cancels its SL/target, then ${r.netQty > 0 ? 'sells at the bid' : 'buys at the ask'} with ${slippage} pts slippage, for ${Math.abs(r.netQty)} qty.`}
+            okText="Close now" okButtonProps={{ danger: true }} onConfirm={() => onClose(r.securityId)}
+          >
+            <Button size="small" danger disabled={busy}>Close</Button>
+          </Popconfirm>
+        </Space>
       ) : <Tag>Closed</Tag>),
     },
   ]
@@ -100,18 +145,28 @@ export function LivePositionsView({ snapshot, slippage, busy, onClose, onCancel,
           <Text type="secondary" style={{ fontSize: 12 }}>Waiting to fill</Text>
           {snapshot.pendingOrders.map((o) => (
             <Space key={o.orderId} size={8} wrap>
-              <Tag color={o.kind === 'Exit' ? 'warning' : o.transactionType === 'BUY' ? 'success' : 'error'}>{o.kind === 'Exit' ? 'EXIT ' : ''}{o.transactionType}</Tag>
+              <Tag color={o.kind === 'Protection' ? 'purple' : o.kind === 'Exit' ? 'warning' : o.transactionType === 'BUY' ? 'success' : 'error'}>
+                {o.kind === 'Protection' ? 'STOP-LOSS ' : o.kind === 'Exit' ? 'EXIT ' : ''}{o.transactionType}
+              </Tag>
               <Text style={{ fontSize: 12 }}>
-                {o.tradingSymbol ?? o.securityId} x{o.quantity} @ {price(o.price)}
-                {o.kind === 'Exit' ? ' · re-pricing to the live bid/ask until filled' : ` · T ${price(o.targetPrice)} · SL ${price(o.stopLossPrice)}`} · {o.status}
+                {o.tradingSymbol ?? o.securityId} x{o.quantity}
+                {o.kind === 'Protection'
+                  ? ` · triggers at ${price(o.stopLossPrice)} · target ${price(o.targetPrice)} watched · guards the rest after a partial exit`
+                  : ` @ ${price(o.price)}${o.kind === 'Exit' ? ' · re-pricing to the live bid/ask until filled' : ` · T ${price(o.targetPrice)} · SL ${price(o.stopLossPrice)}`}`} · {o.status}
               </Text>
-              <Button size="small" onClick={() => onCancel(o.orderId, o.kind === 'Exit')} disabled={busy}>Cancel</Button>
+              {o.kind === 'Protection'
+                ? (
+                  <Popconfirm title="Cancel the stop-loss guarding this position?" description="The rest of the position will have NO stop-loss and no target." okText="Cancel it" okButtonProps={{ danger: true }} onConfirm={() => onCancel(o.orderId, true)}>
+                    <Button size="small" disabled={busy}>Cancel</Button>
+                  </Popconfirm>
+                )
+                : <Button size="small" onClick={() => onCancel(o.orderId, o.kind === 'Exit')} disabled={busy}>Cancel</Button>}
             </Space>
           ))}
         </Space>
       )}
 
-      {(open.length > 0 || snapshot.pendingOrders.some((o) => o.kind !== 'Exit')) && (
+      {(open.length > 0 || snapshot.pendingOrders.some((o) => o.kind === 'Entry')) && (
         <Space wrap size={8}>
           <Popconfirm
             title="Exit ALL live positions?"
@@ -132,7 +187,7 @@ export function LivePositionsView({ snapshot, slippage, busy, onClose, onCancel,
 
       {open.length === 0 && closed.length === 0
         ? <Text type="secondary">No positions on the Dhan account today.</Text>
-        : <Table dataSource={[...open, ...closed]} columns={columns} rowKey="securityId" size="small" pagination={false} scroll={{ x: 560, y: 260 }} />}
+        : <Table dataSource={[...open, ...closed]} columns={columns} rowKey="securityId" size="small" pagination={false} scroll={{ x: 600, y: 260 }} />}
     </Space>
   )
 }

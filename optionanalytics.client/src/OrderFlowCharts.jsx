@@ -12,6 +12,9 @@ const { Text } = Typography
 
 const IST_HHMM = new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' })
 const EXH_COLOR = '#9254de'
+// Stacked imbalances: a sell stack's bid-side (left) cells purple, a buy stack's ask-side (right) cells white.
+const STACK_SELL_FILL = '#8e44d6'
+const STACK_BUY_FILL = '#f2f2f2'
 const IST_HHMMSS = new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' })
 const BUY_FILL = 'rgba(38, 166, 154, 0.85)'
 const SELL_FILL = 'rgba(239, 83, 80, 0.85)'
@@ -153,30 +156,36 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
       const cellW = Math.max(8, (colWidth - 19) / 2)
       const maxSide = Math.max(1, ...bar.levels.map((l) => Math.max(l.buy, l.sell)))
 
-      // Stacked imbalance zones, extended to the right edge.
+      // Stacked imbalance zones: a faint band extended to the right edge (support for a buy stack,
+      // resistance for a sell stack), and the stacked rows themselves marked in the cells below.
+      const stackedSell = new Set()
+      const stackedBuy = new Set()
       for (const zone of bar.stacked ?? []) {
         const top = rowTop(zone.high)
         const bottom = rowTop(zone.low) + rowH
-        ctx.fillStyle = zone.side === 'buy' ? 'rgba(38,166,154,0.10)' : 'rgba(239,83,80,0.10)'
+        ctx.fillStyle = zone.side === 'buy' ? 'rgba(242,242,242,0.07)' : 'rgba(142,68,214,0.12)'
         ctx.fillRect(cellX, top, barsW - cellX, bottom - top)
-        ctx.fillStyle = zone.side === 'buy' ? UP_COLOR : DOWN_COLOR
+        ctx.fillStyle = zone.side === 'buy' ? STACK_BUY_FILL : STACK_SELL_FILL
         ctx.fillRect(cellX, top, 2, bottom - top)
+        for (let p = zone.low; p <= zone.high + 1e-9; p = Math.round((p + step) * 100) / 100) (zone.side === 'buy' ? stackedBuy : stackedSell).add(p)
       }
 
       for (const level of bar.levels) {
         const top = rowTop(level.price)
         const imb = bar.imbalances?.get(level.price)
-        ctx.fillStyle = imb === 'sell' ? SELL_FILL : `rgba(239,83,80,${0.06 + 0.32 * (level.sell / maxSide)})`
+        const sellStack = stackedSell.has(level.price)
+        const buyStack = stackedBuy.has(level.price)
+        ctx.fillStyle = sellStack ? STACK_SELL_FILL : imb === 'sell' ? SELL_FILL : `rgba(239,83,80,${0.06 + 0.32 * (level.sell / maxSide)})`
         ctx.fillRect(cellX, top + 0.5, cellW - 1, rowH - 1)
-        ctx.fillStyle = imb === 'buy' ? BUY_FILL : `rgba(38,166,154,${0.06 + 0.32 * (level.buy / maxSide)})`
+        ctx.fillStyle = buyStack ? STACK_BUY_FILL : imb === 'buy' ? BUY_FILL : `rgba(38,166,154,${0.06 + 0.32 * (level.buy / maxSide)})`
         ctx.fillRect(cellX + cellW, top + 0.5, cellW - 1, rowH - 1)
         if (showText) {
           ctx.font = `${imb ? '600 ' : ''}${textSize}px ${FONT}`
           ctx.textBaseline = 'middle'
-          ctx.fillStyle = imb === 'sell' ? '#fff' : '#e8c6c6'
+          ctx.fillStyle = imb === 'sell' || sellStack ? '#fff' : '#e8c6c6'
           ctx.textAlign = 'right'
           ctx.fillText(formatVolume(level.sell, lotSize, showLots), cellX + cellW - 4, top + rowH / 2)
-          ctx.fillStyle = imb === 'buy' ? '#fff' : '#c4e8e3'
+          ctx.fillStyle = buyStack ? '#111' : imb === 'buy' ? '#fff' : '#c4e8e3'
           ctx.textAlign = 'left'
           ctx.fillText(formatVolume(level.buy, lotSize, showLots), cellX + cellW + 3, top + rowH / 2)
           ctx.textAlign = 'left'

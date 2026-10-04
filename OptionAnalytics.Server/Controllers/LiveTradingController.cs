@@ -50,6 +50,17 @@ public sealed class LiveTradingController : ControllerBase
         return result.Success ? Ok(result) : UnprocessableEntity(result);
     }
 
+    public sealed record PartialExitRequest(int Lots, decimal SlippagePoints);
+
+    /// <summary>Exits some lots of a position and keeps the rest protected - see LiveTradingService.PartialExitAsync.</summary>
+    [HttpPost("positions/{securityId}/partial-exit")]
+    public async Task<ActionResult<ManualOrderResult>> PartialExit(string securityId, [FromBody] PartialExitRequest request)
+    {
+        _logger.LogWarning("Manual LIVE partial exit requested by {User}: {SecurityId} {Lots} lot(s).", User.Identity?.Name, securityId, request.Lots);
+        var result = await _trading.PartialExitAsync(securityId, request.Lots, request.SlippagePoints, CancellationToken.None);
+        return result.Success ? Ok(result) : UnprocessableEntity(result);
+    }
+
     /// <param name="exit">true for a working exit order (a plain order), false for an unfilled entry (super order).</param>
     [HttpDelete("orders/{orderId}")]
     public async Task<ActionResult<ManualOrderResult>> Cancel(string orderId, [FromQuery] bool exit, CancellationToken cancellationToken)
