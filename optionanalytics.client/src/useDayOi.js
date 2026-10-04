@@ -77,7 +77,7 @@ export function useDayOi(underlying, date, isReplay) {
         for (const tick of ticks) {
           if (tick?.underlying !== u || tick?.expiryFlag !== flag) continue
           const map = tick.side === 'CE' ? ctx.ce : ctx.pe
-          if (upsertMinute(map, Number(tick.strike), tick.time, { oi: tick.openInterest, price: tick.price })) changed = true
+          if (upsertMinute(map, Number(tick.strike), tick.time, { oi: tick.openInterest, price: tick.price, high: tick.high ?? tick.price, low: tick.low ?? tick.price })) changed = true
         }
         if (changed) schedule()
       },
@@ -141,7 +141,13 @@ function upsertSeries(series, time, values) {
   const t = Math.floor(ms / MIN) * MIN
   const last = series[series.length - 1]
   const clean = Object.fromEntries(Object.entries(values).filter(([, v]) => v != null && Number.isFinite(v)))
-  if (last && last.t === t) { Object.assign(last, clean); return true }
+  if (last && last.t === t) {
+    // Within the minute the range widens; everything else is the newest reading.
+    if (clean.high != null && last.high != null) clean.high = Math.max(last.high, clean.high)
+    if (clean.low != null && last.low != null) clean.low = Math.min(last.low, clean.low)
+    Object.assign(last, clean)
+    return true
+  }
   if (last && last.t > t) return false
   series.push({ t, ...clean })
   return true

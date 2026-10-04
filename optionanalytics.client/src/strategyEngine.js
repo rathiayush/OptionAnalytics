@@ -66,7 +66,7 @@ function sortedSeries(points) {
     if (p.openInterest == null) continue
     const strike = Number(p.strike)
     if (!byStrike.has(strike)) byStrike.set(strike, [])
-    byStrike.get(strike).push({ t: msOf(p.time), oi: p.openInterest, price: p.price })
+    byStrike.get(strike).push({ t: msOf(p.time), oi: p.openInterest, price: p.price, high: p.high ?? p.price, low: p.low ?? p.price })
   }
   for (const list of byStrike.values()) list.sort((a, b) => a.t - b.t)
   return byStrike
@@ -229,6 +229,30 @@ export function optionPnlPoints(trade, oi, ms) {
   const now = premiumAt(oi, trade.side, trade.strike, ms)
   if (now == null) return null
   return { premium: now, points: trade.action === 'BUY' ? now - trade.premium : trade.premium - now }
+}
+
+/** A paper option trade's own premium stop-loss / target, in premium points (0 = none): the first
+ *  minute after `entryMs` (and before `untilMs`) whose range reaches either level. A SELL loses when the
+ *  premium rises, a BUY when it falls; the stop counts first when one minute touches both. Filled at
+ *  the level itself. Returns { at (ms, the minute's end), premium, reason } or null. */
+export function optionStopTargetHit(oi, trade, entryMs, untilMs, slPoints, targetPoints) {
+  if (!(slPoints > 0) && !(targetPoints > 0)) return null
+  const series = (trade.side === 'CE' ? oi?.ce : oi?.pe)?.get(trade.strike)
+  if (!series?.length) return null
+  const sell = trade.action === 'SELL'
+  const stop = slPoints > 0 ? (sell ? trade.premium + slPoints : trade.premium - slPoints) : null
+  const target = targetPoints > 0 ? (sell ? trade.premium - targetPoints : trade.premium + targetPoints) : null
+  const firstMinute = Math.floor(entryMs / MIN) * MIN + MIN
+  for (const p of series) {
+    if (p.t < firstMinute) continue
+    if (p.t + MIN > untilMs) break
+    const high = p.high ?? p.price
+    const low = p.low ?? p.price
+    if (!(high > 0)) continue
+    if (stop != null && (sell ? high >= stop : low <= stop)) return { at: p.t + MIN, premium: stop, reason: `Max SL ${slPoints} pts hit` }
+    if (target != null && (sell ? low <= target : high >= target)) return { at: p.t + MIN, premium: target, reason: `Target ${targetPoints} pts hit` }
+  }
+  return null
 }
 
 export const optionTradeText = (t) => (t ? `${t.action === 'BUY' ? 'Buy' : 'Sell'} ${t.strike} ${t.side} @ ${t.premium.toFixed(1)}` : null)
