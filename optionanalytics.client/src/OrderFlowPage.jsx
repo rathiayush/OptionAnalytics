@@ -351,8 +351,10 @@ export default function OrderFlowPage() {
   }, [isReplay, underlying, replayDate, expiry, expiryQuery, replayMs, playing, replayDay?.source])
 
   const goLive = () => { setMode('live'); setPlaying(false); setReloadNonce((n) => n + 1) }
+  // Load day (re)starts the replay at the open - as the OI Replay does, so a synced pair start together.
   const loadDay = (dateKey = pickerDate.format('YYYY-MM-DD')) => {
     setPlaying(false)
+    setReplayMs(null)
     setReplayDate(dateKey)
     setMode('replay')
     setReloadNonce((n) => n + 1)
@@ -364,8 +366,28 @@ export default function OrderFlowPage() {
   const pendingSyncRef = useRef(null)
   const applySync = (msg) => {
     pendingSyncRef.current = null
-    if (!UNDERLYINGS.includes(msg.underlying) || !msg.date) return
+    if (!UNDERLYINGS.includes(msg.underlying)) return
+    if (msg.type === 'day') {
+      setSyncMismatch(null)
+      if (msg.underlying !== underlying) changeUnderlying(msg.underlying)
+      // The other page went live: so does this one.
+      if (msg.live) {
+        if (isReplay || msg.underlying !== underlying) { setPickerDate(dayjs()); goLive() }
+        return
+      }
+      if (!msg.date) return
+      // The user picked (or reloaded) a day there: load it here too - the same day as well, so a Load
+      // day refresh reaches both pages. Its clock follows once it has loaded.
+      setPickerDate(dayjs(msg.date))
+      loadDay(msg.date)
+      pendingSyncRef.current = { ...msg, type: 'state', reason: 'user', ms: null, playing: false }
+      return
+    }
+    if (!msg.date) return
     if (msg.underlying !== underlying || msg.date !== replayDate || !isReplay) {
+      // A heartbeat never moves this page to another day - only the user's pick there (or the reply
+      // when joining) does, so a heartbeat already in flight cannot pull it back to the old day.
+      if (msg.reason === 'tick') return
       // Follow the other page onto its day - any day loads (exact or estimated).
       pendingSyncRef.current = msg
       if (msg.underlying !== underlying) changeUnderlying(msg.underlying)
@@ -386,10 +408,15 @@ export default function OrderFlowPage() {
     setPlaying(Boolean(msg.playing) && ms < range.end)
   }
   const sync = useReplaySync({
-    enabled: syncEnabled, active: true, kind: 'of',
-    state: { underlying, date: isReplay ? replayDate : null, ms: replayMs, playing, speed: replaySpeed },
+    enabled: syncEnabled, active: isReplay, kind: 'of',
+    state: { underlying, date: isReplay ? replayDate : null, ms: replayMs, playing, speed: replaySpeed, live: !isReplay },
     onRemote: applySync,
   })
+  // The user picked a day here (or went live): load it, and the OI Replay loads the same.
+  const loadAndAnnounce = (dateKey) => {
+    loadDay(dateKey)
+    sync.announceDay({ underlying, date: dateKey })
+  }
   // A sync that had to wait for the day to load.
   useEffect(() => {
     if (pendingSyncRef.current) applySync(pendingSyncRef.current)
@@ -532,13 +559,18 @@ export default function OrderFlowPage() {
           )}
         >
           <Space wrap size={10} align="center">
-            <Button type={isReplay ? 'default' : 'primary'} onClick={goLive} loading={!isReplay && loading}>● Go Live</Button>
-            <Select value={underlying} onChange={(v) => { changeUnderlying(v); if (isReplay) sync.userAction() }} style={{ width: 130 }} options={UNDERLYINGS.map((u) => ({ value: u, label: `${u} FUT` }))} />
+            <Button type={isReplay ? 'default' : 'primary'} onClick={() => { goLive(); sync.announceDay({ underlying, live: true }) }} loading={!isReplay && loading}>● Go Live</Button>
+            <Select
+              value={underlying} style={{ width: 130 }} options={UNDERLYINGS.map((u) => ({ value: u, label: `${u} FUT` }))}
+              onChange={(v) => { changeUnderlying(v); sync.announceDay(isReplay ? { underlying: v, date: replayDate } : { underlying: v, live: true }) }}
+            />
             <Tooltip title="Futures contract on the picked date - the front month, or any month listed then (expired ones included for past dates)">
               <Select value={expiry ?? 'nearest'} onChange={(v) => setExpiry(v === 'nearest' ? null : v)} style={{ width: 230 }} options={contractOptions} />
             </Tooltip>
+            {/* With Sync on, picking a date loads it straight away - here and on the OI Replay. */}
             <DatePicker
-              value={pickerDate} onChange={(d) => d && setPickerDate(d)} allowClear={false} format="DD MMM YYYY" style={{ width: 140 }}
+              value={pickerDate} allowClear={false} format="DD MMM YYYY" style={{ width: 140 }}
+              onChange={(d) => { if (!d) return; setPickerDate(d); if (syncEnabled) loadAndAnnounce(d.format('YYYY-MM-DD')) }}
               disabledDate={(d) => d.isAfter(dayjs(), 'day') || ((d.day() === 0 || d.day() === 6) && !exactDays.has(d.format('YYYY-MM-DD')))}
               cellRender={(current, info) => {
                 if (info.type !== 'date') return info.originNode
@@ -551,7 +583,7 @@ export default function OrderFlowPage() {
                 )
               }}
             />
-            <Button type={isReplay ? 'primary' : 'default'} onClick={() => { loadDay(); sync.userAction() }} loading={replayLoading}>Load day</Button>
+            <Button type={isReplay ? 'primary' : 'default'} onClick={() => loadAndAnnounce(pickerDate.format('YYYY-MM-DD'))} loading={replayLoading}>Load day</Button>
             <ReplaySyncControl enabled={syncEnabled} onChange={setSyncEnabled} sync={sync} kind="of" mismatch={syncMismatch} />
           </Space>
           <Space wrap size={12} align="center" style={{ marginTop: 10 }}>
