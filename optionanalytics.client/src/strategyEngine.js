@@ -66,7 +66,7 @@ function sortedSeries(points) {
     if (p.openInterest == null) continue
     const strike = Number(p.strike)
     if (!byStrike.has(strike)) byStrike.set(strike, [])
-    byStrike.get(strike).push({ t: msOf(p.time), oi: p.openInterest })
+    byStrike.get(strike).push({ t: msOf(p.time), oi: p.openInterest, price: p.price })
   }
   for (const list of byStrike.values()) list.sort((a, b) => a.t - b.t)
   return byStrike
@@ -167,6 +167,67 @@ const lakh = (v) => `${v >= 0 ? '+' : '-'}${(Math.abs(v) / 1e5).toFixed(1)}L`
 export function optionOiText(read) {
   if (!read) return 'no options OI'
   return `PCR ${read.pcr.toFixed(2)} (${read.pcrChange >= 0 ? '+' : ''}${read.pcrChange.toFixed(2)} in ${read.minutes}m) · near ATM ${read.atm}: puts ${lakh(read.peChg)}, calls ${lakh(read.ceChg)}`
+}
+
+// ---- the option to trade a setup with ----------------------------------------------------------------
+
+/** An option's premium (last traded, from the OI replay series) at `ms`, or null. */
+export function premiumAt(oi, side, strike, ms) {
+  const point = valueAt((side === 'CE' ? oi?.ce : oi?.pe)?.get(strike), ms)
+  return point?.price > 0 ? point.price : null
+}
+
+/** The two ways to trade a setup with options, at the ATM strike: BUY the option that gains with the
+ *  move (LONG: the call, SHORT: the put) or SELL (write) the one that loses value with it (LONG: the put,
+ *  SHORT: the call) - the writer's side, which also earns the time decay. Null when there is no premium. */
+export function optionTradesFor(oi, dir, spot, ms) {
+  if (!oi || !spot) return null
+  const strike = Math.round(spot / oi.step) * oi.step
+  const buySide = dir > 0 ? 'CE' : 'PE'
+  const sellSide = dir > 0 ? 'PE' : 'CE'
+  const buy = premiumAt(oi, buySide, strike, ms)
+  const sell = premiumAt(oi, sellSide, strike, ms)
+  if (buy == null && sell == null) return null
+  return {
+    buy: buy == null ? null : { action: 'BUY', side: buySide, strike, premium: buy },
+    sell: sell == null ? null : { action: 'SELL', side: sellSide, strike, premium: sell },
+  }
+}
+
+/** An option trade's result in premium points at `ms` (or at its exit): BUY gains when the premium
+ *  rises, SELL when it falls. */
+export function optionPnlPoints(trade, oi, ms) {
+  const now = premiumAt(oi, trade.side, trade.strike, ms)
+  if (now == null) return null
+  return { premium: now, points: trade.action === 'BUY' ? now - trade.premium : trade.premium - now }
+}
+
+export const optionTradeText = (t) => (t ? `${t.action === 'BUY' ? 'Buy' : 'Sell'} ${t.strike} ${t.side} @ ${t.premium.toFixed(1)}` : null)
+
+/** Options OI and futures OI as two parts of the order flow read (orderFlowBias's `extra`):
+ *  options - put writing vs call writing near the money over 15 min, with the PCR change (+ = puts
+ *  written = bullish); futures - the 15-min price / OI regime (long build-up strongest bullish, short
+ *  covering weaker; short build-up strongest bearish, long unwinding weaker). */
+export function oiBiasParts(oi, ms) {
+  const parts = []
+  const spot = oi ? valueAt(oi.spot, ms)?.close : null
+  if (!spot) return parts
+  const read = optionOiRead(oi, spot, ms, 15)
+  if (read) {
+    const score = Math.max(-1, Math.min(1, read.lean / 0.006 + read.pcrChange / 0.15))
+    parts.push({ name: 'Options OI', weight: 20, score, detail: optionOiText(read) })
+  }
+  const f = futuresChange(oi, ms, 15)
+  if (f?.oiPct != null) {
+    const move = Math.max(-1, Math.min(1, f.pricePct / 0.002))
+    const conviction = f.oiPct >= 0 ? 1 : 0.6
+    const regime = f.pricePct >= 0 ? (f.oiPct >= 0 ? 'long build-up' : 'short covering') : (f.oiPct >= 0 ? 'short build-up' : 'long unwinding')
+    parts.push({
+      name: 'Futures OI', weight: 15, score: move * conviction,
+      detail: `${regime} · price ${(f.pricePct * 100).toFixed(2)}%, OI ${f.oiPct >= 0 ? '+' : ''}${(f.oiPct * 100).toFixed(2)}% in 15m`,
+    })
+  }
+  return parts
 }
 
 /** What the scanner shows as the market's OI picture right now. */
@@ -330,6 +391,7 @@ export function evaluateStrategies(input) {
     const timeStop = Math.min(nowMs + timeStopMin * MIN, nowMs + (SQUARE_OFF - minute) * MIN)
     const { OI: wallText, ...rest } = checks
     out.push({
+      options: optionTradesFor(oi, dir, spotNow, nowMs),
       id, name: STRATEGY_BY_ID[id].name, side: dir > 0 ? 'LONG' : 'SHORT', t: nowMs, entry: price,
       stop: price - dir * stopPts, target: price + dir * targetPts, timeStopMs: timeStop,
       confidence: Math.round(Math.max(40, Math.min(92, confidence + (stance === 'agrees' ? 6 : 0)))), estimated: !!estimated,

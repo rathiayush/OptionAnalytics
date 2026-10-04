@@ -10,6 +10,8 @@ import {
 import { aggregateBars, analyzeBars, findWalls, bucketBook, mergeLiveMinutes, replayView, replayRange, liquiditySignals, orderFlowBias, aggression, sweepSignals, pullStackSignals } from './orderFlowMath.js'
 import { TapeCard } from './OrderFlowTape.jsx'
 import { StrategyScanner } from './StrategyScanner.jsx'
+import { useDayOi } from './useDayOi.js'
+import { oiBiasParts } from './strategyEngine.js'
 import { ProfilesCard } from './ProfilesCard.jsx'
 import { fetchPreviousSession, sessionVolumeProfile, tpoProfile, tpoRowFor } from './profiles.js'
 import { FootprintChart, DepthHeatmap, CumulativeDeltaChart, BookLadder, formatVolume } from './OrderFlowCharts.jsx'
@@ -108,7 +110,7 @@ function OrderFlowRead({ bias }) {
         </div>
       ))}
       <Text type="secondary" style={{ fontSize: 10 }}>
-        Weighted: cumulative delta 30, recent delta 15, stacked imbalances 15, absorption/exhaustion 15, liquidity signals 15, big orders 10. A read, not advice.
+        Weighted: cumulative delta 30, options OI 20 (near-ATM put vs call writing, PCR), futures OI 15 (build-up / covering / unwinding), recent delta 15, stacked imbalances 15, absorption/exhaustion 15, aggression 15, liquidity signals 15, big orders 10, sweeps 10, pulling/stacking 10 - over the parts that have data. Confidence rises when they agree. A read, not advice.
       </Text>
     </Card>
   )
@@ -441,9 +443,14 @@ export default function OrderFlowPage() {
     [estimated, view?.heatmap, rowSize, lotSize],
   )
   const heatSignals = useMemo(() => [...liquidity, ...pullStack.signals, ...sweeps], [liquidity, pullStack.signals, sweeps])
+  // The day's options + futures OI: part of the order flow read, and what the strategy scanner reads.
+  const { oi: dayOi, error: dayOiError } = useDayOi(underlying, isReplay ? replayDate : todayKey(), isReplay)
+  const oiMinute = Math.floor((nowMs ?? 0) / 60_000)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const oiParts = useMemo(() => (dayOi && nowMs ? oiBiasParts(dayOi, nowMs) : []), [dayOi, oiMinute])
   const bias = useMemo(
-    () => orderFlowBias({ bars, liquidity, bigTrades: largeTrades, nowMs, aggressionNow, sweeps: view?.sweeps ?? [], pullStack: pullStack.signals }),
-    [bars, liquidity, largeTrades, nowMs, aggressionNow, view?.sweeps, pullStack.signals],
+    () => orderFlowBias({ bars, liquidity, bigTrades: largeTrades, nowMs, aggressionNow, sweeps: view?.sweeps ?? [], pullStack: pullStack.signals, extra: oiParts }),
+    [bars, liquidity, largeTrades, nowMs, aggressionNow, view?.sweeps, pullStack.signals, oiParts],
   )
 
   const signals = useMemo(() => {
@@ -666,7 +673,7 @@ export default function OrderFlowPage() {
         <StrategyScanner
           underlying={underlying} isReplay={isReplay} date={isReplay ? replayDate : todayKey()} view={view} replayDay={replayDay} replayMs={replayMs} range={range}
           tapePrints={tapePrints} liquidity={liquidity} pullStack={pullStack.signals} rowSize={rowSize} lotSize={lotSize} largeLots={largeLots} estimated={estimated}
-          profile={scannerProfile}
+          profile={scannerProfile} oi={dayOi} oiError={dayOiError}
         />
 
         <ProfilesCard prevDate={prevSession.data?.date} prevVp={prevVp} prevTpo={prevTpo} todayTpo={todayTpo} lastPrice={meta?.lastPrice}

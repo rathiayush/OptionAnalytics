@@ -2,9 +2,10 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, Button, Card, Checkbox, Col, InputNumber, Popconfirm, Progress, Row, Segmented, Space, Switch, Table, Tag, Tooltip, Typography, notification } from 'antd'
 import { SoundOutlined } from '@ant-design/icons'
 import { UP_COLOR, DOWN_COLOR } from './shared.jsx'
+import { PAPER_TRADE_LOT_SIZE } from './oiShared.jsx'
 import {
-  STRATEGIES, STRATEGY_BY_ID, buildOiContext, evaluateStrategies, simulateOutcome, strategyStats, topFifteen, MIN_TRADES_TO_RANK, oiSummary, optionOiText,
-  DEFAULT_TRAIL, LAST_ENTRY, SQUARE_OFF, fmtHm, exitLabel,
+  STRATEGIES, STRATEGY_BY_ID, evaluateStrategies, simulateOutcome, strategyStats, topFifteen, MIN_TRADES_TO_RANK, oiSummary, optionOiText,
+  DEFAULT_TRAIL, LAST_ENTRY, SQUARE_OFF, fmtHm, exitLabel, premiumAt, optionPnlPoints, optionTradeText, squareOffMs,
 } from './strategyEngine.js'
 import { aggregateBars, analyzeBars, findWalls, liquiditySignals, pullStackSignals, replayView } from './orderFlowMath.js'
 
@@ -15,6 +16,7 @@ const MIN = 60_000
 const COOLDOWN_MS = 20 * MIN
 const SETTINGS_KEY = 'optionanalytics.strategyScanner.settings'
 const HISTORY_KEY = 'optionanalytics.strategyScanner.history.v1'
+const PAPER_KEY = 'optionanalytics.strategyScanner.paper.v1'
 const MAX_DAYS_KEPT = 60
 const msOf = (t) => (typeof t === 'number' ? t : new Date(t).getTime())
 
@@ -87,17 +89,14 @@ function fmtR(r) {
  * for the chosen ones (the top 5 by default), scores every setup by what the futures did next, and
  * ranks the strategies over every day scored so far. "Scan day" runs a whole loaded day at once.
  */
-export function StrategyScanner({ underlying, isReplay, date, view, replayDay, replayMs, range, tapePrints, liquidity, pullStack, rowSize, lotSize, largeLots, estimated, profile }) {
+export function StrategyScanner({ underlying, isReplay, date, view, replayDay, replayMs, range, tapePrints, liquidity, pullStack, rowSize, lotSize, largeLots, estimated, profile, oi, oiError }) {
   const [settings, setSettings] = useState(() => {
-    const saved = { alerts: true, sound: true, voice: true, pick: 'top15', custom: [], trail: { on: true, ...DEFAULT_TRAIL }, ...readJson(SETTINGS_KEY, {}) }
+    const saved = { alerts: true, sound: true, voice: true, pick: 'top15', custom: [], trail: { on: true, ...DEFAULT_TRAIL }, autoPaper: 'off', paperLots: 1, ...readJson(SETTINGS_KEY, {}) }
     // Older saved settings used 'top5' (from when there were only the first 10).
     return saved.pick === 'top5' ? { ...saved, pick: 'top15' } : saved
   })
   useEffect(() => writeJson(SETTINGS_KEY, settings), [settings])
   const [history, setHistory] = useState(() => readJson(HISTORY_KEY, {}))
-  const [oiRun, setOiRun] = useState(null)
-  const [oiError, setOiError] = useState(null)
-  const [expiryDate, setExpiryDate] = useState(null)
   const [fired, setFired] = useState([])
   const [scan, setScan] = useState(null) // { progress, error }
   const dayKey = `${underlying}:${date}`
@@ -105,33 +104,43 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   const settingsRef = useRef(settings)
   useEffect(() => { settingsRef.current = settings }, [settings])
 
-  // OI for the day - the same data OI Replay loads. Live: refreshed every 5 minutes (OI moves slowly;
-  // the strategies read 10-45 minute OI changes).
-  useEffect(() => {
-    if (!date) return undefined
-    let cancelled = false
-    const flag = underlying === 'BANKNIFTY' ? 'MONTH' : 'WEEK'
-    const load = () => {
-      const params = new URLSearchParams({ date, timeframeMinutes: '1', expiryFlag: flag, ...(isReplay ? {} : { forceLive: 'true' }) })
-      fetch(`/api/oi-replay/${underlying}/run?${params}`)
-        .then((r) => r.json())
-        .then((body) => {
-          if (cancelled) return
-          if (!body?.success) { setOiError(body?.error ?? 'OI data unavailable'); return }
-          setOiRun(body)
-          setOiError(null)
-        })
-        .catch((err) => { if (!cancelled) setOiError(err.message) })
+  // Paper option trades punched from setups (by hand, or automatically on each alert), per day. Each
+  // follows its setup: it is closed when the setup's stop / target / trailing SL / 15:10 cut-off ends
+  // it, at that minute's premium - or by hand. Paper only: no order is ever sent.
+  const [paperBook, setPaperBook] = useState(() => readJson(PAPER_KEY, {}))
+  useEffect(() => writeJson(PAPER_KEY, trimPaper(paperBook)), [paperBook])
+  const punchRef = useRef(null)
+  punchRef.current = (setup, which, atMs) => {
+    const trade = setup.options?.[which]
+    if (!trade || !oi) return
+    const at = atMs ?? setup.t
+    const premium = premiumAt(oi, trade.side, trade.strike, at) ?? trade.premium
+    const lots = Math.max(1, settingsRef.current.paperLots ?? 1)
+    setPaperBook((prev) => {
+      const list = prev[dayKey]?.positions ?? []
+      const key = `${setup.id}-${setup.t}-${which}`
+      if (list.some((p) => p.key === key && !p.exitTime)) return prev
+      const position = {
+        key, setupKey: `${setup.id}-${setup.t}`, strategy: setup.id, setupSide: setup.side, action: trade.action, side: trade.side, strike: trade.strike,
+        lots, lotSize: PAPER_TRADE_LOT_SIZE[underlying] ?? 1, premium, entryTime: at, exitTime: null, exitPremium: null, exitReason: null,
+      }
+      return { ...prev, [dayKey]: { date, positions: [...list, position] } }
+    })
+  }
+  const exitPaper = (key) => setPaperBook((prev) => {
+    const list = prev[dayKey]?.positions ?? []
+    return {
+      ...prev,
+      [dayKey]: {
+        date,
+        positions: list.map((p) => {
+          if (p.key !== key || p.exitTime) return p
+          const now = premiumAt(oi, p.side, p.strike, nowMs)
+          return now == null ? p : { ...p, exitTime: nowMs, exitPremium: now, exitReason: 'Exited by hand' }
+        }),
+      },
     }
-    setOiRun(null)
-    load()
-    fetch(`/api/oi-replay/${underlying}/expiries`).then((r) => r.json()).then((b) => {
-      if (!cancelled) setExpiryDate(underlying === 'BANKNIFTY' ? b?.month ?? null : b?.week ?? null)
-    }).catch(() => {})
-    const id = isReplay ? null : setInterval(load, 2 * MIN)
-    return () => { cancelled = true; if (id) clearInterval(id) }
-  }, [underlying, date, isReplay])
-  const oi = useMemo(() => buildOiContext(oiRun, expiryDate), [oiRun, expiryDate])
+  })
 
   // A new day / underlying / mode starts a fresh list (the day's saved results are in `history`).
   useEffect(() => { firedRef.current = []; setFired([]) }, [dayKey, isReplay])
@@ -173,6 +182,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     for (const s of fresh) {
       if (!cfg.alerts || !alertIdsRef.current.includes(s.id)) continue
       const meta = STRATEGY_BY_ID[s.id]
+      if (cfg.autoPaper === 'buy' || cfg.autoPaper === 'sell') punchRef.current?.(s, cfg.autoPaper, s.t)
       if (cfg.sound) chime(s.side === 'LONG')
       if (cfg.voice) speak(`${meta.short}. ${s.side === 'LONG' ? 'Long' : 'Short'}.`)
       notification.open({
@@ -182,6 +192,18 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
           <div style={{ fontSize: 12 }}>
             <div>{IST_HHMM.format(new Date(s.t))} · futures {s.entry.toFixed(1)} · stop {s.stop.toFixed(1)} · target {s.target.toFixed(1)} · {s.confidence}%</div>
             <div>{trailText(s.trail)}{s.trail ? ` (from ${(s.entry + (s.side === 'LONG' ? 1 : -1) * s.trail.startR * Math.abs(s.entry - s.stop)).toFixed(1)})` : ''} · closed by {fmtHm(SQUARE_OFF)} at the latest</div>
+            {s.options && (
+              <div style={{ margin: '4px 0' }}>
+                <b>Option:</b> {[optionTradeText(s.options.buy), optionTradeText(s.options.sell)].filter(Boolean).join(' · or ')}
+                {cfg.autoPaper !== 'off' && <Text type="secondary" style={{ fontSize: 11 }}> · paper {cfg.autoPaper === 'sell' ? 'sell' : 'buy'} punched</Text>}
+                {cfg.autoPaper === 'off' && (
+                  <span style={{ marginLeft: 6 }}>
+                    {s.options.buy && <Button size="small" type="link" style={{ padding: '0 4px', height: 18 }} onClick={() => punchRef.current?.(s, 'buy', s.t)}>Paper buy {s.options.buy.side}</Button>}
+                    {s.options.sell && <Button size="small" type="link" danger style={{ padding: '0 4px', height: 18 }} onClick={() => punchRef.current?.(s, 'sell', s.t)}>Paper sell {s.options.sell.side}</Button>}
+                  </span>
+                )}
+              </div>
+            )}
             {Object.entries(s.checks).map(([k, v]) => <div key={k}><b>{k}:</b> {v}</div>)}
           </div>
         ),
@@ -310,6 +332,35 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   }
 
   const dayResults = history[dayKey]?.scanned ? history[dayKey].setups : withOutcome
+
+  // The day's paper option positions, each closed by its setup's exit (or by hand), with P&L.
+  const paperRows = useMemo(() => {
+    // A position's setup: the alerted one (live / replay outcomes, followed up to the clock), else the
+    // same strategy and side within two minutes in the day's list (a scanned day's setups are timed to
+    // the minute, an alert to 10 s).
+    const exact = new Map([...dayResults, ...withOutcome].map((s) => [`${s.id}-${s.t}`, s.outcome]))
+    const outcomeOf = (p) => exact.get(p.setupKey) ?? [...withOutcome, ...dayResults]
+      .filter((s) => s.id === p.strategy && s.side === p.setupSide && Math.abs(s.t - Number(p.setupKey.split('-').at(-1))) < 2 * MIN)
+      .sort((a, b) => Math.abs(a.t - p.entryTime) - Math.abs(b.t - p.entryTime))[0]?.outcome
+    return (paperBook[dayKey]?.positions ?? []).filter((p) => !nowMs || p.entryTime <= nowMs).map((p) => {
+      let exitTime = p.exitTime && p.exitTime <= (nowMs ?? Infinity) ? p.exitTime : null
+      let exitPremium = exitTime ? p.exitPremium : null
+      let exitReason = exitTime ? p.exitReason : null
+      const o = outcomeOf(p)
+      if (!exitTime && o && o.status !== 'open') {
+        // Closed by its setup once the clock has passed the setup's exit (a scanned day's outcomes are
+        // already known for the whole day; a trade still running when the data ended closes at 15:10).
+        const exitAt = o.exitAt != null ? o.exitAt + MIN : squareOffMs(p.entryTime)
+        const at = nowMs == null || exitAt <= nowMs ? exitAt : null
+        const premium = oi && at ? premiumAt(oi, p.side, p.strike, at) : null
+        if (premium != null) { exitTime = at; exitPremium = premium; exitReason = exitLabel(o) }
+      }
+      const now = exitTime ? { premium: exitPremium } : oi && nowMs ? { premium: premiumAt(oi, p.side, p.strike, nowMs) } : { premium: null }
+      const points = now.premium == null ? null : p.action === 'BUY' ? now.premium - p.premium : p.premium - now.premium
+      return { ...p, exitTime, exitReason, current: now.premium, points, rupees: points == null ? null : points * p.lots * p.lotSize }
+    })
+  }, [paperBook, dayKey, dayResults, withOutcome, oi, nowMs])
+  const paperTotal = paperRows.reduce((sum, r) => sum + (r.rupees ?? 0), 0)
   const days = Object.values(history)
   const statRows = stats.map((s) => ({ ...s, key: s.id, top: alertIds.includes(s.id) }))
   const statColumns = [
@@ -412,6 +463,20 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                         <Text type="secondary" style={{ fontSize: 11, minWidth: 38 }}>{IST_HHMM.format(new Date(s.t))}</Text>
                         <Tag color={s.side === 'LONG' ? 'green' : 'red'} style={{ margin: 0, fontSize: 11 }}>{s.side}</Tag>
                         <span style={{ flex: 1 }}>#{meta.no} {meta.short} <Text type="secondary" style={{ fontSize: 11 }}>@ {s.entry.toFixed(1)} · SL {o.trailed ? <>{s.stop.toFixed(1)} → <b>{o.stop.toFixed(1)}</b></> : s.stop.toFixed(1)}{s.trail ? ' (trail)' : ''} · T {s.target.toFixed(1)} · {s.confidence}%{s.estimated ? ' · est.' : ''}</Text></span>
+                        {s.options && oi && (
+                          <span style={{ whiteSpace: 'nowrap' }}>
+                            {s.options.buy && (
+                              <Tooltip title={`Paper trade: ${optionTradeText(s.options.buy)} (${optionPnlText(s.options.buy, oi, o)})`}>
+                                <Button size="small" type="text" style={{ padding: '0 3px', height: 18, fontSize: 11, color: UP_COLOR }} disabled={nowMs != null && s.t > nowMs} onClick={() => punchRef.current?.(s, 'buy', nowMs)} aria-label={`Paper buy ${s.options.buy.side}`}>B {s.options.buy.side}</Button>
+                              </Tooltip>
+                            )}
+                            {s.options.sell && (
+                              <Tooltip title={`Paper trade: ${optionTradeText(s.options.sell)} (${optionPnlText(s.options.sell, oi, o)})`}>
+                                <Button size="small" type="text" style={{ padding: '0 3px', height: 18, fontSize: 11, color: DOWN_COLOR }} disabled={nowMs != null && s.t > nowMs} onClick={() => punchRef.current?.(s, 'sell', nowMs)} aria-label={`Paper sell ${s.options.sell.side}`}>S {s.options.sell.side}</Button>
+                              </Tooltip>
+                            )}
+                          </span>
+                        )}
                         <Tooltip title={exitLabel(o)}>
                           <Tag color={o.status === 'win' ? 'success' : o.status === 'loss' ? 'error' : o.status === 'flat' ? 'default' : 'processing'} style={{ margin: 0, fontSize: 11 }}>
                             {o.status === 'open' ? `open ${fmtR(o.r)}` : `${o.status} ${fmtR(o.r)}${o.squareOff ? ` (${fmtHm(SQUARE_OFF)})` : o.timeStop ? ' (time)' : o.stopHit && o.trailed ? ' (trail)' : ''}`}
@@ -421,6 +486,37 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                     </Tooltip>
                   )
                 })}
+            </div>
+            <div aria-label="Paper option trades">
+              <Space wrap size={8} style={{ marginBottom: 4 }}>
+                <Text strong style={{ fontSize: 12 }}>Paper option trades</Text>
+                <Text style={{ fontSize: 12 }}>on each alert</Text>
+                <Segmented size="small" value={settings.autoPaper ?? 'off'} onChange={(v) => setSettings((s) => ({ ...s, autoPaper: v }))}
+                  options={[{ value: 'off', label: 'Off' }, { value: 'buy', label: 'Buy option' }, { value: 'sell', label: 'Sell option' }]} />
+                <InputNumber size="small" min={1} max={100} style={{ width: 64 }} value={settings.paperLots ?? 1} aria-label="Paper lots"
+                  onChange={(v) => v != null && setSettings((s) => ({ ...s, paperLots: v }))} />
+                <Text style={{ fontSize: 12 }}>lot(s) × {PAPER_TRADE_LOT_SIZE[underlying] ?? 1}</Text>
+                {paperRows.length > 0 && <Text strong style={{ fontSize: 12, color: paperTotal >= 0 ? UP_COLOR : DOWN_COLOR }}>P&amp;L ₹{Math.round(paperTotal).toLocaleString('en-IN')}</Text>}
+                {paperRows.length > 0 && (
+                  <Popconfirm title="Clear this day's paper trades?" onConfirm={() => setPaperBook((prev) => { const next = { ...prev }; delete next[dayKey]; return next })}>
+                    <Button size="small">Clear</Button>
+                  </Popconfirm>
+                )}
+              </Space>
+              {paperRows.length === 0
+                ? <div><Text type="secondary" style={{ fontSize: 11 }}>B / S on a setup (or on its alert) paper-trades its ATM option - Buy the call (LONG) / put (SHORT), or Sell (write) the put (LONG) / call (SHORT). Each closes when its setup ends: stop, target, trailing SL or {fmtHm(SQUARE_OFF)}.</Text></div>
+                : paperRows.map((r) => (
+                  <div key={r.key} style={{ display: 'flex', gap: 6, alignItems: 'baseline', fontSize: 12, padding: '2px 0', borderBottom: '1px solid #ffffff0d' }}>
+                    <Text type="secondary" style={{ fontSize: 11, minWidth: 38 }}>{IST_HHMM.format(new Date(r.entryTime))}</Text>
+                    <Tag color={r.action === 'BUY' ? 'green' : 'red'} style={{ margin: 0, fontSize: 11 }}>{r.action}</Tag>
+                    <span style={{ flex: 1 }}>{r.strike} {r.side} × {r.lots} <Text type="secondary" style={{ fontSize: 11 }}>@ {r.premium.toFixed(1)} → {r.current != null ? r.current.toFixed(1) : '-'} · #{STRATEGY_BY_ID[r.strategy]?.no} {STRATEGY_BY_ID[r.strategy]?.short}{r.exitTime ? ` · ${r.exitReason} ${IST_HHMM.format(new Date(r.exitTime))}` : ''}</Text></span>
+                    <Text style={{ fontSize: 12, color: (r.points ?? 0) >= 0 ? UP_COLOR : DOWN_COLOR, minWidth: 90, textAlign: 'right' }}>
+                      {r.points == null ? '-' : `${r.points >= 0 ? '+' : ''}${r.points.toFixed(1)} · ₹${Math.round(r.rupees).toLocaleString('en-IN')}`}
+                    </Text>
+                    {r.exitTime ? <Tag style={{ margin: 0, fontSize: 11 }}>closed</Tag> : <Button size="small" onClick={() => exitPaper(r.key)} style={{ height: 20, fontSize: 11 }}>Exit</Button>}
+                  </div>
+                ))}
+              {!isReplay && paperRows.length > 0 && <Text type="secondary" style={{ fontSize: 10 }}>Live premiums come with the OI refresh (every 2 minutes).</Text>}
             </div>
           </Space>
         </Col>
@@ -435,6 +531,17 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       </Row>
     </Card>
   )
+}
+
+function optionPnlText(trade, oi, outcome) {
+  const at = outcome && outcome.status !== 'open' && outcome.exitAt != null ? outcome.exitAt + MIN : null
+  const r = at ? optionPnlPoints(trade, oi, at) : null
+  return r ? `${r.points >= 0 ? '+' : ''}${r.points.toFixed(1)} pts at the setup's exit` : 'open'
+}
+
+function trimPaper(book) {
+  const keys = Object.keys(book).sort((a, b) => (book[a].date < book[b].date ? 1 : -1))
+  return Object.fromEntries(keys.slice(0, 20).map((k) => [k, book[k]]))
 }
 
 function trimHistory(history) {
