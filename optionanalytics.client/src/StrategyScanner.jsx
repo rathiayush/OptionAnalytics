@@ -520,7 +520,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                     {r.exitTime ? <Tag style={{ margin: 0, fontSize: 11 }}>closed</Tag> : <Button size="small" onClick={() => exitPaper(r.key)} style={{ height: 20, fontSize: 11 }}>Exit</Button>}
                   </div>
                 ))}
-              {!isReplay && paperRows.length > 0 && <Text type="secondary" style={{ fontSize: 10 }}>Live premiums come with the OI refresh (every 2 minutes).</Text>}
+              {!isReplay && paperRows.length > 0 && <Text type="secondary" style={{ fontSize: 10 }}>Live premiums and OI stream from the Dhan websocket.</Text>}
             </div>
           </Space>
         </Col>
