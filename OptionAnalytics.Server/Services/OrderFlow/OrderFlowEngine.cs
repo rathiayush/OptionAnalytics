@@ -26,9 +26,10 @@ namespace OptionAnalytics.Server.Services.OrderFlow;
 /// lots), something larger than the display is resting - a hidden buyer at a bid, seller at an ask.
 /// The episode ends when the level leaves the book (price moved through it).
 ///
-/// Everything is the current IST day only, and resets at the next day's first tick. ExportDay /
-/// ImportDay let OrderFlowRecorder save the day to disk and bring it back after a restart, and replay
-/// a past day through the same Snapshot.
+/// Everything is the current IST day only, and resets at the next day's first tick - handing the
+/// finished day to DayEnded first (OrderFlowService keeps it in memory for replay). ExportDay /
+/// FromDay turn a day into a plain OrderFlowDay and back, so a past day replays through the same
+/// Snapshot.
 /// </summary>
 public sealed class OrderFlowEngine
 {
@@ -62,7 +63,6 @@ public sealed class OrderFlowEngine
     // The latest event time seen - what "is the 20-level book still fresh" is judged against.
     private DateTimeOffset _clock;
     private long _sequence;
-    private long _version;
 
     private readonly SortedDictionary<DateTimeOffset, MinuteBar> _bars = new();
     // The day's volume at each price - the DOM's traded-volume column.
@@ -82,6 +82,10 @@ public sealed class OrderFlowEngine
         TickSize = tickSize > 0 ? tickSize : 0.05m;
         LotSize = Math.Max(1, lotSize);
     }
+
+    /// <summary>Raised with the finished day when the next day's first event arrives. Runs under the
+    /// engine's lock - handlers must be quick and must not call back into this engine.</summary>
+    public event Action<OrderFlowDay>? DayEnded;
 
     public string Underlying { get; }
     public uint SecurityId { get; }
@@ -162,8 +166,12 @@ public sealed class OrderFlowEngine
 
     private void RollDay(DateTimeOffset now)
     {
-        if (now > _clock) _clock = now;
         var day = DateOnly.FromDateTime(now.ToOffset(IstClock.Offset).DateTime);
+        if (day != _day && _day != default && DayEnded is { } dayEnded && ExportDay() is { } finished)
+        {
+            try { dayEnded(finished); } catch { /* replay history is best-effort; the live day goes on */ }
+        }
+        if (now > _clock) _clock = now;
         if (day == _day) return;
         _day = day;
         _prevVolume = null;
@@ -181,7 +189,6 @@ public sealed class OrderFlowEngine
 
     private void AddTrade(DateTimeOffset now, decimal price, long quantity, int side)
     {
-        _version++;
         var minute = IstMinute(now);
         if (!_bars.TryGetValue(minute, out var bar))
             _bars[minute] = bar = new MinuteBar { Time = minute, Open = price, High = price, Low = price, Close = price };
@@ -268,7 +275,6 @@ public sealed class OrderFlowEngine
     {
         if (now - _lastSnapshotAt < SnapshotInterval || (_bids.Length == 0 && _asks.Length == 0)) return;
         _lastSnapshotAt = now;
-        _version++;
         _snapshots.Add(new DepthSnapshot(now, HeatRows(_bids), HeatRows(_asks)));
     }
 
@@ -289,8 +295,6 @@ public sealed class OrderFlowEngine
     /// <summary>The IST day this engine holds, or null before its first event.</summary>
     public DateOnly? ExportDayDate() { lock (_lock) return _day == default ? null : _day; }
 
-    /// <summary>Changes since the start - lets the recorder skip saving a day that has not moved.</summary>
-    public long Version { get { lock (_lock) return _version; } }
 
     /// <summary>Everything the Order Flow page loads: the day's minute footprints bucketed into
     /// <paramref name="rowSize"/>-point rows, prints of at least <paramref name="minTradeQty"/>, icebergs,
@@ -415,7 +419,7 @@ public sealed class OrderFlowEngine
 
     private sealed record DepthSnapshot(DateTimeOffset Time, HeatRow[] Bids, HeatRow[] Asks);
 
-    /// <summary>A copy of the whole day, for OrderFlowRecorder. Null before the first event.</summary>
+    /// <summary>A copy of the whole day (for replay once it is over). Null before the first event.</summary>
     public OrderFlowDay? ExportDay()
     {
         lock (_lock)
@@ -435,9 +439,9 @@ public sealed class OrderFlowEngine
         }
     }
 
-    /// <summary>Brings back a saved day - ignored unless it is this contract's. The live book and the
-    /// previous tick are NOT restored: the first tick after a restart starts from scratch, so the
-    /// volume traded while the server was down is never booked as one giant print.</summary>
+    /// <summary>Loads a day (ExportDay's shape) - ignored unless it is this contract's. The live book
+    /// and the previous tick are NOT carried over: a tick arriving afterwards starts from scratch, so a
+    /// gap in the data is never booked as one giant print.</summary>
     public bool ImportDay(OrderFlowDay day)
     {
         if (day.SecurityId != SecurityId) return false;
@@ -480,8 +484,7 @@ public sealed class OrderFlowEngine
                 // An episode still open when the day was saved cannot be followed any more.
                 EndedAt = i.EndedAt ?? i.LastSeenAt, Traded = i.Traded, MaxDisplayed = i.MaxDisplayed, Refills = i.Refills,
             }));
-            _version++;
-            return true;
+                return true;
         }
     }
 
@@ -497,8 +500,7 @@ public sealed class OrderFlowEngine
 /// <summary>A book side's heatmap row: Row x HeatmapBaseRow is the row's price.</summary>
 public readonly record struct HeatRow(int Row, int Quantity);
 
-/// <summary>One recorded day of a contract's order flow - see OrderFlowEngine.ExportDay and
-/// OrderFlowRecorder.</summary>
+/// <summary>One day of a contract's order flow - see OrderFlowEngine.ExportDay and OrderFlowDayStore.</summary>
 public sealed class OrderFlowDay
 {
     public required string Underlying { get; init; }

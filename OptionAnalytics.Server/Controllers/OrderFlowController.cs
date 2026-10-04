@@ -5,7 +5,7 @@ namespace OptionAnalytics.Server.Controllers;
 
 /// <summary>The Order Flow page's initial load - see OrderFlowEngine. After this the page follows
 /// the "orderFlowLive" push on SignalR group "of:{underlying}" (and the DOM "domLive" on
-/// "dom:{underlying}"). Also the recorded days for replay.</summary>
+/// "dom:{underlying}"). Also the in-memory days for replay.</summary>
 [ApiController]
 [Route("api/order-flow")]
 public sealed class OrderFlowController : ControllerBase
@@ -26,20 +26,30 @@ public sealed class OrderFlowController : ControllerBase
         return engine.Snapshot(Math.Clamp(rowSize, 0, 1000), Math.Max(1, minTradeLots) * (long)engine.LotSize, Math.Clamp(heatmapColumns, 50, 3000));
     }
 
-    /// <summary>The days recorded for replay, newest first - see OrderFlowRecorder. Dhan has no
-    /// historical tick or depth data, so only days the server was running for are here.</summary>
+    /// <summary>The days that can be replayed, newest first: today (the live engine) and the past days
+    /// held in memory (OrderFlowDayStore). Nothing is stored on disk, so a restart starts this list
+    /// over - and Dhan has no historical tick or depth data to fill it from.</summary>
     [HttpGet("{underlying}/days")]
-    public ActionResult<IReadOnlyList<RecordedOrderFlowDay>> Days(string underlying) => Ok(_orderFlow.Recorder.Days(underlying));
+    public ActionResult<IReadOnlyList<ReplayableOrderFlowDay>> Days(string underlying)
+    {
+        var days = new List<ReplayableOrderFlowDay>();
+        var live = _orderFlow.EngineFor(underlying);
+        if (live?.ExportDayDate() is { } today) days.Add(new ReplayableOrderFlowDay(today, live.ContractSymbol, true));
+        days.AddRange(_orderFlow.PastDays.Days(underlying).Where(d => days.All(x => x.Date != d.Date)).Select(d => new ReplayableOrderFlowDay(d.Date, d.ContractSymbol, false)));
+        return days.OrderByDescending(d => d.Date).ToList();
+    }
 
-    /// <summary>A recorded day in the same shape as the live load, for replay. The heatmap can be
-    /// asked for in more columns (up to 12000, i.e. every 2s snapshot) so a replay stays detailed.</summary>
+    /// <summary>A day in the same shape as the live load, for replay. The heatmap can be asked for in
+    /// more columns (up to 12000, i.e. every 2s snapshot) so a replay stays detailed.</summary>
     [HttpGet("{underlying}/history/{date}")]
     public ActionResult<OrderFlowSnapshot> History(string underlying, DateOnly date, [FromQuery] decimal rowSize = 1, [FromQuery] int minTradeLots = 1, [FromQuery] int heatmapColumns = 3000)
     {
         var live = _orderFlow.EngineFor(underlying);
-        // Today is the live engine itself - it already holds what was saved earlier today.
-        var engine = live?.ExportDayDate() == date ? live : _orderFlow.Recorder.EngineFor(underlying, date);
-        if (engine is null) return NotFound(new { error = $"No {underlying.ToUpperInvariant()} order flow was recorded on {date:yyyy-MM-dd}." });
+        var engine = live?.ExportDayDate() == date ? live : _orderFlow.PastDays.EngineFor(underlying, date);
+        if (engine is null) return NotFound(new { error = $"{underlying.ToUpperInvariant()} order flow for {date:yyyy-MM-dd} is not in memory (only today and the last few days since the server started are kept)." });
         return engine.Snapshot(Math.Clamp(rowSize, 0, 1000), Math.Max(1, minTradeLots) * (long)engine.LotSize, Math.Clamp(heatmapColumns, 50, 12000));
     }
 }
+
+/// <summary>Live: today, still being built by the live engine.</summary>
+public sealed record ReplayableOrderFlowDay(DateOnly Date, string ContractSymbol, bool Live);
