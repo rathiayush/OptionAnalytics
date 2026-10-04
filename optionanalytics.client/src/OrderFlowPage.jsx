@@ -9,6 +9,7 @@ import {
 import { aggregateBars, analyzeBars, findWalls, bucketBook, mergeLiveMinutes, volumeProfile, replayView, replayRange } from './orderFlowMath.js'
 import { FootprintChart, DepthHeatmap, CumulativeDeltaChart, BookLadder, formatVolume } from './OrderFlowCharts.jsx'
 import { DomDrawer, useNarrow } from './DomDrawer.jsx'
+import { useReplaySync, useReplaySyncEnabled, ReplaySyncControl, withSpeedOption, SYNC_DRIFT_MS } from './replaySync.jsx'
 
 const { Title, Text } = Typography
 
@@ -20,7 +21,7 @@ const { Title, Text } = Typography
 // REPLAY: plays a day back from the server's MEMORY - today (still live) and the last few days since
 // the server started (OrderFlowDayStore; nothing is stored on disk, and Dhan has no historical tick
 // or depth data) - showing the footprint, heatmap, prints, icebergs and book exactly as they were
-// known at the replay clock.
+// known at the replay clock. Sync (replaySync.jsx) keeps it in step with the OI Replay in another tab.
 
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX']
 const DEFAULT_ROW_SIZES = { NIFTY: 1, BANKNIFTY: 5, SENSEX: 5 }
@@ -28,7 +29,10 @@ const ROW_SIZE_OPTIONS = [0.5, 1, 2, 5, 10, 20].map((v) => ({ value: v, label: `
 const HEATMAP_COLUMN_MS = 2000
 const MAX_HEATMAP_COLUMNS = 3000
 const MAX_TRADES = 5000
-const REPLAY_SPEEDS = [1, 2, 5, 10, 30, 60, 120, 300].map((v) => ({ value: v, label: `${v}x` }))
+const speedOption = (v) => ({ value: v, label: `${Math.round(v * 10) / 10}x` })
+// 30/60/120/240/600 are OI Replay's own speeds (0.5x-10x there = minutes per second), so a synced
+// replay runs at exactly the same pace.
+const REPLAY_SPEEDS = [1, 2, 5, 10, 30, 60, 120, 240, 300, 600].map(speedOption)
 const REPLAY_TICK_MS = 200
 const REPLAY_HEATMAP_COLUMNS = 1500
 const IST_HHMMSS = new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' })
@@ -180,6 +184,46 @@ export default function OrderFlowPage() {
     return () => clearInterval(id)
   }, [playing, range, replaySpeed])
 
+  // ---- Sync with the OI Replay (another tab) ----
+  const [syncEnabled, setSyncEnabled] = useReplaySyncEnabled()
+  const [syncMismatch, setSyncMismatch] = useState(null)
+  const pendingSyncRef = useRef(null)
+  const applySync = (msg) => {
+    pendingSyncRef.current = null
+    if (msg.underlying && msg.underlying !== underlying) {
+      if (!UNDERLYINGS.includes(msg.underlying)) return
+      pendingSyncRef.current = msg
+      setUnderlying(msg.underlying)
+      return
+    }
+    if (msg.date !== replayDate) {
+      if (replayDays == null) { pendingSyncRef.current = msg; return }
+      if (!replayDays.some((d) => d.date === msg.date)) { setSyncMismatch(`OI Replay is on ${msg.date} - not in memory here`); return }
+      pendingSyncRef.current = msg
+      setReplayDate(msg.date)
+      return
+    }
+    if (!replayDay || !range) { pendingSyncRef.current = msg; return }
+    setSyncMismatch(null)
+    if (msg.speed > 0) setReplaySpeed(msg.speed)
+    let ms = replayMs ?? range.start
+    if (msg.ms != null && (msg.reason !== 'tick' || Math.abs(ms - msg.ms) > SYNC_DRIFT_MS)) {
+      ms = Math.max(range.start, Math.min(range.end, msg.ms))
+      setReplayMs(ms)
+    }
+    setPlaying(Boolean(msg.playing) && ms < range.end)
+  }
+  const sync = useReplaySync({
+    enabled: syncEnabled, active: mode === 'replay', kind: 'of',
+    state: { underlying, date: replayDate, ms: replayMs, playing, speed: replaySpeed },
+    onRemote: applySync,
+  })
+  // A sync that had to wait for the underlying, the day list or the day itself to load.
+  useEffect(() => {
+    if (pendingSyncRef.current) applySync(pendingSyncRef.current)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [underlying, replayDays, replayDate, replayDay])
+
   const handleLive = (payload) => {
     const { underlying: current, rowSize: rows } = contextRef.current
     if (payload?.meta?.underlying !== current) return
@@ -252,7 +296,7 @@ export default function OrderFlowPage() {
   const meta = view?.meta
   const lastBar = bars.at(-1)
   const dayKey = `${underlying}-${timeframe}-${rowSize}-${isReplay ? replayDate : 'live'}`
-  const jump = (minutes) => setReplayMs((ms) => (range ? Math.max(range.start, Math.min(range.end, (ms ?? range.start) + minutes * 60_000)) : ms))
+  const jump = (minutes) => { setReplayMs((ms) => (range ? Math.max(range.start, Math.min(range.end, (ms ?? range.start) + minutes * 60_000)) : ms)); sync.userAction() }
 
   return (
     <div style={{ maxWidth: 2600, margin: '0 auto', padding: '24px 16px' }}>
@@ -274,7 +318,7 @@ export default function OrderFlowPage() {
           )}
         >
           <Space wrap size={12} align="center">
-            <Select value={underlying} onChange={setUnderlying} style={{ width: 130 }} options={UNDERLYINGS.map((u) => ({ value: u, label: `${u} FUT` }))} />
+            <Select value={underlying} onChange={(v) => { setUnderlying(v); if (isReplay) sync.userAction() }} style={{ width: 130 }} options={UNDERLYINGS.map((u) => ({ value: u, label: `${u} FUT` }))} />
             <Select value={timeframe} onChange={setTimeframe} style={{ width: 110 }} options={TIMEFRAME_OPTIONS} />
             <Select value={rowSize} onChange={(v) => setRowSizes({ ...(rowSizes ?? {}), [underlying]: v })} style={{ width: 120 }} options={ROW_SIZE_OPTIONS} />
             <Tooltip title="Diagonal imbalance: buying at a price vs selling one row below (and the mirror) must be at least this many times larger.">
@@ -290,17 +334,17 @@ export default function OrderFlowPage() {
             <div style={{ marginTop: 12, padding: 10, border: '1px solid #ffffff1f', borderRadius: 6 }}>
               <Space wrap size={10} align="center">
                 <Select
-                  value={replayDate} onChange={setReplayDate} style={{ width: 150 }} loading={replayDays == null}
+                  value={replayDate} onChange={(v) => { setReplayDate(v); sync.userAction() }} style={{ width: 150 }} loading={replayDays == null}
                   placeholder={replayDays?.length === 0 ? 'No days in memory' : 'Day'}
                   options={(replayDays ?? []).map((d) => ({ value: d.date, label: d.live ? `${d.date} (today)` : d.date }))}
                 />
                 <Button
                   type="primary" icon={playing ? <PauseCircleOutlined /> : <PlayCircleOutlined />} disabled={!range}
-                  onClick={() => { if (!playing && range && replayMs >= range.end) setReplayMs(range.start); setPlaying(!playing) }}
+                  onClick={() => { if (!playing && range && replayMs >= range.end) setReplayMs(range.start); setPlaying(!playing); sync.userAction() }}
                 >
                   {playing ? 'Pause' : 'Play'}
                 </Button>
-                <Select value={replaySpeed} onChange={setReplaySpeed} style={{ width: 84 }} options={REPLAY_SPEEDS} />
+                <Select value={replaySpeed} onChange={(v) => { setReplaySpeed(v); sync.userAction() }} style={{ width: 84 }} options={withSpeedOption(REPLAY_SPEEDS, replaySpeed, speedOption)} />
                 <Space.Compact>
                   <Button disabled={!range} onClick={() => jump(-15)}>−15m</Button>
                   <Button disabled={!range} onClick={() => jump(-1)}>−1m</Button>
@@ -309,11 +353,12 @@ export default function OrderFlowPage() {
                 </Space.Compact>
                 {replayMs != null && <Text strong style={{ fontVariantNumeric: 'tabular-nums' }}>{IST_HHMMSS.format(new Date(replayMs))} IST</Text>}
                 {replayLoading && <Text type="secondary">Loading…</Text>}
+                <ReplaySyncControl enabled={syncEnabled} onChange={setSyncEnabled} sync={sync} kind="of" mismatch={syncMismatch} />
               </Space>
               {range && (
                 <Slider
                   min={range.start} max={range.end} step={1000} value={replayMs ?? range.start}
-                  onChange={(v) => setReplayMs(v)} tooltip={{ formatter: (v) => IST_HHMMSS.format(new Date(v)) }}
+                  onChange={(v) => { setReplayMs(v); sync.userAction() }} tooltip={{ formatter: (v) => IST_HHMMSS.format(new Date(v)) }}
                   style={{ margin: '12px 6px 0' }}
                 />
               )}

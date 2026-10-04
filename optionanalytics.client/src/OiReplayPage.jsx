@@ -17,6 +17,7 @@ import { StrikePicker, moneynessLabel } from './StrikePicker.jsx'
 import { DomDrawer } from './DomDrawer.jsx'
 import { volumeProfileFromCandles } from './orderFlowMath.js'
 import { VolumeProfilePrimitive, setProfileLines } from './volumeProfilePrimitive.js'
+import { useReplaySync, useReplaySyncEnabled, ReplaySyncControl, withSpeedOption, SYNC_DRIFT_MS } from './replaySync.jsx'
 
 const { Text, Title } = Typography
 
@@ -3648,24 +3649,85 @@ export default function OiReplayPage() {
     }
   }, [currentBar, ladderRows, pcr, atmStrike, step, oneMinBars, visibleCount, dayStartByStrike])
 
+  // ---- Sync with the Order Flow replay (another tab) - see replaySync.jsx. This replay moves a minute
+  // bar at a time, so its clock is the END of the newest revealed minute (asOfMs + 1 minute), and its
+  // speed (speedMs per minute) is 60000 / speedMs market seconds per second.
+  const [syncEnabled, setSyncEnabled] = useReplaySyncEnabled()
+  const [syncMismatch, setSyncMismatch] = useState(null)
+  const pendingSyncRef = useRef(null)
+  const syncClockMs = !isLive && currentBar ? fromChartTime(currentBar.time) * 1000 + 60_000 : null
+  const applySync = (msg) => {
+    pendingSyncRef.current = null
+    if (msg.underlying !== underlying || msg.date !== result?.date) {
+      pendingSyncRef.current = msg
+      setSyncMismatch({ underlying: msg.underlying, date: msg.date })
+      return
+    }
+    if (oneMinBars.length === 0) { pendingSyncRef.current = msg; return }
+    setSyncMismatch(null)
+    if (msg.speed > 0) setSpeedMs(Math.max(20, Math.round(60_000 / msg.speed)))
+    let count = manualVisibleCount
+    if (msg.ms != null && (msg.reason !== 'tick' || syncClockMs == null || Math.abs(syncClockMs - msg.ms) > SYNC_DRIFT_MS)) {
+      count = 0
+      while (count < oneMinBars.length && fromChartTime(oneMinBars[count].time) * 1000 + 60_000 <= msg.ms) count++
+      count = Math.max(1, count)
+      setManualVisibleCount(count)
+    }
+    setPlaying(Boolean(msg.playing) && count < oneMinBars.length)
+  }
+  const sync = useReplaySync({
+    enabled: syncEnabled, active: !isLive, kind: 'oi',
+    state: { underlying, date: result?.date ?? null, ms: syncClockMs, playing, speed: 60_000 / speedMs },
+    onRemote: applySync,
+  })
+  // A sync that arrived before the matching day had loaded.
+  useEffect(() => {
+    if (pendingSyncRef.current) applySync(pendingSyncRef.current)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [result?.date, oneMinBars.length, underlying])
+  const loadSyncedDay = () => {
+    if (!syncMismatch?.date) return
+    if (syncMismatch.underlying !== underlying) { setUnderlying(syncMismatch.underlying); return }
+    const day = dayjs(syncMismatch.date)
+    setTodayMode('replay')
+    setDate(day)
+    load(day, { live: false })
+  }
+  const syncControl = (
+    <>
+      <ReplaySyncControl
+        enabled={syncEnabled} onChange={setSyncEnabled} sync={sync} kind="oi"
+        mismatch={syncMismatch ? `Order Flow is on ${syncMismatch.underlying} ${syncMismatch.date}` : null}
+      />
+      {syncEnabled && syncMismatch && (
+        <Button size="small" onClick={loadSyncedDay}>
+          {syncMismatch.underlying !== underlying ? `Switch to ${syncMismatch.underlying}` : `Load ${syncMismatch.date}`}
+        </Button>
+      )}
+    </>
+  )
+
   // Shared by the inline and floating placements of the replay controls (see replayControlsFloating).
   const replayButtons = (
     <>
       <Button
         icon={playing ? <PauseCircleOutlined /> : <PlayCircleOutlined />}
-        onClick={() => setPlaying((p) => !p)}
+        onClick={() => { setPlaying((p) => !p); sync.userAction() }}
         disabled={oneMinBars.length === 0 || manualVisibleCount >= oneMinBars.length}
       >
         {playing ? 'Pause' : 'Start'}
       </Button>
       <Button
         icon={<ReloadOutlined />}
-        onClick={() => { setPlaying(false); setManualVisibleCount(oneMinBars.length > 0 ? 1 : 0) }}
+        onClick={() => { setPlaying(false); setManualVisibleCount(oneMinBars.length > 0 ? 1 : 0); sync.userAction() }}
       >
         Reset
       </Button>
       <Text type="secondary" style={{ fontSize: 12 }}>Speed</Text>
-      <Select value={speedMs} onChange={setSpeedMs} style={{ width: 90 }} options={SPEED_OPTIONS} />
+      <Select
+        value={speedMs} onChange={(v) => { setSpeedMs(v); sync.userAction() }} style={{ width: 90 }}
+        options={withSpeedOption(SPEED_OPTIONS, speedMs, (v) => ({ value: v, label: `${Math.round((1000 / v) * 100) / 100}x` }))}
+      />
       {/* A label rather than a hover tooltip: in the compact floating panel a tooltip above the
           picker sat right over the Start button. */}
       <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, whiteSpace: 'nowrap' }}>
@@ -3679,6 +3741,7 @@ export default function OiReplayPage() {
             if (!v) return
             setPlaying(false)
             setManualVisibleCount(replayCountAt(oneMinBars, v.hour(), v.minute()))
+            sync.userAction()
           }}
         />
       </span>
@@ -3687,7 +3750,7 @@ export default function OiReplayPage() {
   const replaySlider = (
     <Slider
       min={0} max={Math.max(0, oneMinBars.length - 1)} value={visibleCount - 1}
-      onChange={(v) => { setPlaying(false); setManualVisibleCount(v + 1) }}
+      onChange={(v) => { setPlaying(false); setManualVisibleCount(v + 1); sync.userAction() }}
       tooltip={{ formatter: (v) => oneMinBars[v] ? istTimeFormatter(oneMinBars[v].time) : '' }}
     />
   )
@@ -3891,6 +3954,8 @@ export default function OiReplayPage() {
               )}
               {isLive && <Checkbox checked={showVwap} onChange={(e) => setShowVwap(e.target.checked)}>VWAP</Checkbox>}
               <Checkbox checked={showVolumeProfile} onChange={(e) => setShowVolumeProfile(e.target.checked)}>Volume Profile</Checkbox>
+              {/* Sync with the Order Flow replay in another tab - only while replaying (today live has no replay clock). */}
+              {!isLive && result && syncControl}
               {isLive && (
                 // Today's own run + live ticks are kept in this browser (see LIVE_DAY_CACHE_STORAGE_KEY's
                 // own doc comment) so a reload doesn't have to re-fetch - this is the one way to force a
