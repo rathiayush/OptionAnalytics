@@ -32,8 +32,9 @@ export function sessionVolumeProfile(bars) {
   const top = [profile.poc, ...hvn]
   const lo = Math.min(...top)
   const hi = Math.max(...top)
-  // LVNs between the high-volume areas are the ones price moves through fast.
-  const lvn = troughs.filter((t) => t.price > lo && t.price < hi).sort((a, b) => a.v - b.v).slice(0, 4).map((t) => t.price).sort((a, b) => a - b)
+  // LVNs between the high-volume areas are the ones price moves through fast - only the two thinnest
+  // are marked (and traded): the rest are noise next to them.
+  const lvn = troughs.filter((t) => t.price > lo && t.price < hi).sort((a, b) => a.v - b.v).slice(0, 2).map((t) => t.price).sort((a, b) => a - b)
   return { ...profile, hvn, lvn }
 }
 

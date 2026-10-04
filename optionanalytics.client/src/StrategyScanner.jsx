@@ -6,11 +6,12 @@ import { PAPER_TRADE_LOT_SIZE } from './oiShared.jsx'
 import { liveTradingApi } from './LiveTrading.jsx'
 import {
   STRATEGIES, STRATEGY_BY_ID, evaluateStrategies, simulateOutcome, strategyStats, topFifteen, MIN_TRADES_TO_RANK, oiSummary, optionOiText,
-  DEFAULT_TRAIL, LAST_ENTRY, SQUARE_OFF, fmtHm, exitLabel, premiumAt, optionPnlPoints, optionTradeText, squareOffMs, optionStopTargetHit,
+  DEFAULT_TRAIL, LAST_ENTRY, SQUARE_OFF, fmtHm, exitLabel, premiumAt, optionPnlPoints, optionTradeText, squareOffMs, optionStopTargetHit, RANGE_IDS,
 } from './strategyEngine.js'
 import { aggregateBars, analyzeBars, findWalls, liquiditySignals, pullStackSignals, replayView } from './orderFlowMath.js'
 
 const { Text } = Typography
+const ALL_IDS = STRATEGIES.map((s) => s.id)
 const IST_HHMM = new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' })
 const MIN = 60_000
 // One alert per strategy and direction at most every 20 minutes - a setup that stays true is one trade.
@@ -231,7 +232,8 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
 
   const stats = useMemo(() => strategyStats(Object.values(history).flatMap((d) => d.setups ?? [])), [history])
   const top = useMemo(() => topFifteen(stats), [stats])
-  const alertIds = settings.pick === 'top15' ? top.ids : settings.pick === 'oi5' ? top.oi.ids : settings.pick === 'profile5' ? top.profile.ids : settings.custom
+  const alertIds = settings.pick === 'top15' ? top.ids : settings.pick === 'oi5' ? top.oi.ids : settings.pick === 'profile5' ? top.profile.ids
+    : settings.pick === 'range' ? RANGE_IDS : settings.pick === 'all' ? ALL_IDS : settings.custom
   const alertIdsRef = useRef(alertIds)
   useEffect(() => { alertIdsRef.current = alertIds }, [alertIds])
 
@@ -523,7 +525,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     { title: '#', dataIndex: 'no', width: 34 },
     {
       title: 'Strategy', dataIndex: 'name',
-      render: (name, r) => <span>{r.top && <Tag color="gold" style={{ marginRight: 4 }}>alert</Tag>}{name}{r.group === 'profile' && <Tag style={{ marginLeft: 4, fontSize: 10 }}>profile</Tag>}</span>,
+      render: (name, r) => <span>{r.top && <Tag color="gold" style={{ marginRight: 4 }}>alert</Tag>}{name}{r.group === 'profile' && <Tag style={{ marginLeft: 4, fontSize: 10 }}>profile</Tag>}{r.group === 'range' && <Tag color="cyan" style={{ marginLeft: 4, fontSize: 10 }}>range</Tag>}{r.priority && <Tag color="purple" style={{ marginLeft: 4, fontSize: 10 }}>institutional</Tag>}</span>,
     },
     { title: 'Trades', dataIndex: 'trades', width: 64 },
     { title: 'Win %', dataIndex: 'winRate', width: 66, render: (v) => (v == null ? '-' : `${Math.round(v * 100)}%`) },
@@ -564,16 +566,21 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       <Row gutter={[16, 12]}>
         <Col xs={24} xl={10}>
           <Space direction="vertical" size={8} style={{ width: '100%' }}>
-            <Space wrap size={8}>
+            {/* The picks scroll sideways inside the card on a phone rather than widening the page. */}
+            <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, minWidth: 0 }}>
               <Text style={{ fontSize: 12 }}>Alert on</Text>
-              <Segmented size="small" value={settings.pick} onChange={(v) => setSettings((s) => ({ ...s, pick: v }))}
-                options={[
-                  { value: 'top15', label: `Top 15${top.measured ? ' (measured)' : ''}` },
-                  { value: 'oi5', label: 'Top 5 OI + flow' },
-                  { value: 'profile5', label: 'Top 5 profile' },
-                  { value: 'custom', label: 'My choice' },
-                ]} />
-            </Space>
+              <div style={{ maxWidth: '100%', overflowX: 'auto' }}>
+                <Segmented size="small" value={settings.pick} onChange={(v) => setSettings((s) => ({ ...s, pick: v }))}
+                  options={[
+                    { value: 'top15', label: `Top 15${top.measured ? ' (measured)' : ''}` },
+                    { value: 'oi5', label: 'Top 5 OI + flow' },
+                    { value: 'profile5', label: 'Top 5 profile' },
+                    { value: 'range', label: `Range-bound (${RANGE_IDS.length})` },
+                    { value: 'all', label: `All ${STRATEGIES.length}` },
+                    { value: 'custom', label: 'My choice' },
+                  ]} />
+              </div>
+            </div>
             <Space wrap size={8} aria-label="Exits">
               <Space size={4}><Switch size="small" checked={settings.trail?.on !== false} onChange={(v) => setSettings((s) => ({ ...s, trail: { ...DEFAULT_TRAIL, ...s.trail, on: v } }))} /><Text style={{ fontSize: 12 }}>Trailing SL</Text></Space>
               {settings.trail?.on !== false && (
@@ -755,7 +762,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
           <Table size="small" pagination={false} columns={statColumns} dataSource={statRows} scroll={{ x: 560 }} />
           <Text type="secondary" style={{ fontSize: 11 }}>
             {days.length} day(s) scored ({days.filter((d) => d.estimated).length} estimated). Ranked by average R per trade (win rate × size of the wins), shrunk for small samples;
-            {' '}a strategy needs {MIN_TRADES_TO_RANK}+ trades to be ranked - until enough are, the playbook&apos;s picks fill each group's top 5 (OI + order flow, and profile). A strategy losing on average is never alerted. Every alert carries its stop-loss and target, a trailing-SL alert gives each new stop, and another alert follows when the stop, target or the {fmtHm(SQUARE_OFF)} cut-off ends the trade. Outcomes are the FUTURES move to
+            {' '}a strategy needs {MIN_TRADES_TO_RANK}+ trades to be ranked - until enough are, the playbook&apos;s picks fill each group's top 5 (OI + order flow, and profile) and the institutional setups (17-21) fill the last five of the top 15. Range-bound fades (7, 22, 23) only fire on a balanced day; pick &quot;Range-bound&quot; to alert on them alone. A strategy losing on average is never alerted. Every alert carries its stop-loss and target, a trailing-SL alert gives each new stop, and another alert follows when the stop, target or the {fmtHm(SQUARE_OFF)} cut-off ends the trade. Outcomes are the FUTURES move to
             {' '}the setup&apos;s stop (trailed as set when it fired) / target / time stop, closed by {fmtHm(SQUARE_OFF)} at the latest (stop counted first when one minute touches both), not option P&amp;L; past results do not promise future ones.
           </Text>
         </Col>

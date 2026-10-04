@@ -421,7 +421,12 @@ export default function OrderFlowPage() {
   const tpoRow = tpoRowFor(underlying, rowSize)
   const prevTpo = useMemo(() => (prevSession.data ? tpoProfile(prevSession.data.bars, tpoRow) : null), [prevSession.data, tpoRow])
   const todayTpo = useMemo(() => tpoProfile(view?.minuteBars ?? [], tpoRow), [view?.minuteBars, tpoRow])
-  const scannerProfile = useMemo(() => (prevVp?.poc != null ? { vp: prevVp, tpoPrev: prevTpo } : null), [prevVp, prevTpo])
+  // The previous session's high / low too: the stops resting beyond them are what a breakout trap runs.
+  const prevRange = useMemo(() => {
+    const bars = (prevSession.data?.bars ?? []).filter((b) => b.high > 0 && b.low > 0)
+    return bars.length ? { prevHigh: Math.max(...bars.map((b) => b.high)), prevLow: Math.min(...bars.map((b) => b.low)) } : null
+  }, [prevSession.data])
+  const scannerProfile = useMemo(() => (prevVp?.poc != null ? { vp: prevVp, tpoPrev: prevTpo, ...prevRange } : null), [prevVp, prevTpo, prevRange])
   const profile = showProfile ? prevVp : null
   const largeTrades = useMemo(() => (view?.trades ?? []).filter((t) => t.quantity >= largeLots * lotSize), [view?.trades, largeLots, lotSize])
   const walls = useMemo(() => findWalls(view?.book), [view?.book])
