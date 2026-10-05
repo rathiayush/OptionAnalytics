@@ -1,6 +1,8 @@
 // Strategies 17-23 (institutional + range-bound) and the gap fixes in 1-16: each fires on its rules and not without them.
 // Run: npm test (node --test) - see CLAUDE.md.
-import { buildOiContext, evaluateStrategies, resolveConflicts, STRATEGIES, RANGE_IDS, vwapBands, vwapCrosses } from '../src/strategyEngine.js'
+import { buildOiContext, evaluateStrategies as evaluate, resolveConflicts, STRATEGIES, RANGE_IDS, vwapBands, vwapCrosses } from '../src/strategyEngine.js'
+// Wall defence (#1, retired) still exercises the shared gates (volatility floor, meaningful OI).
+const evaluateStrategies = (input) => evaluate({ ...input, includeRetired: true })
 const MIN = 60000
 const T915 = Date.parse('2026-10-05T03:45:00Z')
 const at = (m) => T915 + m * MIN

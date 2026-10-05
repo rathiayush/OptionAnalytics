@@ -5,13 +5,13 @@ import { UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import { PAPER_TRADE_LOT_SIZE } from './oiShared.jsx'
 import { liveTradingApi } from './LiveTrading.jsx'
 import {
-  STRATEGIES, STRATEGY_BY_ID, evaluateStrategies, simulateOutcome, strategyStats, topFifteen, MIN_TRADES_TO_RANK, oiSummary, optionOiText,
-  DEFAULT_TRAIL, LAST_ENTRY, SQUARE_OFF, fmtHm, exitLabel, premiumAt, optionPnlPoints, optionTradeText, squareOffMs, optionStopTargetHit, RANGE_IDS,
+  ACTIVE_STRATEGIES, STRATEGY_BY_ID, evaluateStrategies, simulateOutcome, strategyStats, topFifteen, MIN_TRADES_TO_RANK, oiSummary, optionOiText,
+  DEFAULT_TRAIL, LAST_ENTRY, SQUARE_OFF, fmtHm, exitLabel, premiumAt, optionPnlPoints, optionTradeText, squareOffMs, optionStopTargetHit, RANGE_IDS, asReplayContext,
 } from './strategyEngine.js'
-import { aggregateBars, analyzeBars, findWalls, liquiditySignals, pullStackSignals, replayView } from './orderFlowMath.js'
+import { aggregateBars, analyzeBars, findWalls, liquiditySignals, pullStackSignals, replayRange, replayView } from './orderFlowMath.js'
 
 const { Text } = Typography
-const ALL_IDS = STRATEGIES.map((s) => s.id)
+const ALL_IDS = ACTIVE_STRATEGIES.map((s) => s.id)
 const IST_HHMM = new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' })
 const MIN = 60_000
 // One alert per strategy and direction at most every 20 minutes - a setup that stays true is one trade.
@@ -21,6 +21,15 @@ const SETTINGS_KEY = 'optionanalytics.strategyScanner.settings'
 // day at one stale price) are not carried over.
 const HISTORY_KEY = 'optionanalytics.strategyScanner.history.v2'
 const PAPER_KEY = 'optionanalytics.strategyScanner.paper.v1'
+// Today's fired setups (live), so a page refresh shows them again and does not re-alert them.
+const FIRED_KEY = 'optionanalytics.strategyScanner.fired.v1'
+// The trades box's Paper / Live (Dhan) choice, kept across reloads (Auto-place is NOT - it is confirmed again).
+const TRADE_MODE_KEY = 'optionanalytics.strategyScanner.tradeMode'
+
+// A trade punched / placed (and a live trade's exit) to the server's Telegram chat - live view only.
+function telegram(text) {
+  fetch('/api/alerts/telegram', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) }).catch(() => {})
+}
 const MAX_DAYS_KEPT = 60
 const msOf = (t) => (typeof t === 'number' ? t : new Date(t).getTime())
 
@@ -114,7 +123,7 @@ function fmtR(r) {
  */
 export function StrategyScanner({ underlying, isReplay, date, view, replayDay, replayMs, range, tapePrints, liquidity, pullStack, rowSize, lotSize, largeLots, estimated, profile, oi, oiError, canTradeLive = false }) {
   const [settings, setSettings] = useState(() => {
-    const saved = { alerts: true, sound: true, voice: true, pick: 'top15', custom: [], trail: { on: true, ...DEFAULT_TRAIL }, autoPaper: 'sell', paperLots: 1, paperSl: 20, paperTarget: 30, liveSlippage: 2, maxLiveTrades: 5, maxLiveLoss: 10000, ...readJson(SETTINGS_KEY, {}) }
+    const saved = { alerts: true, sound: true, voice: true, telegram: true, pick: 'top15', custom: [], trail: { on: true, ...DEFAULT_TRAIL }, autoPaper: 'sell', paperLots: 1, paperSl: 20, paperTarget: 30, liveSlippage: 2, maxLiveTrades: 5, maxLiveLoss: 10000, ...readJson(SETTINGS_KEY, {}) }
     // Older saved settings used 'top5' (from when there were only the first 10).
     // Every alert paper-sells its option by default (settings saved before that default had 'off').
     if (!saved.autoPaperSellDefault) Object.assign(saved, { autoPaper: 'sell', autoPaperSellDefault: true })
@@ -137,11 +146,14 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   // Live (Dhan) mode - admins, today's live view only; never remembered across reloads. In it the trades
   // box holds REAL trades: S / B (confirmed) place a super order, and "Auto-place on alert" (its own
   // confirmed switch, off by default) places one on every alert within the day's limits.
-  const [tradeMode, setTradeMode] = useState('paper')
+  const [tradeMode, setTradeModeState] = useState(() => { try { return localStorage.getItem(TRADE_MODE_KEY) === 'live' ? 'live' : 'paper' } catch { return 'paper' } })
+  const setTradeMode = (mode) => { try { localStorage.setItem(TRADE_MODE_KEY, mode) } catch { /* convenience only */ } setTradeModeState(mode) }
   const [autoLive, setAutoLive] = useState(false)
   const liveModeRef = useRef({ mode: 'paper', auto: false })
   useEffect(() => { liveModeRef.current = { mode: canTradeLive ? tradeMode : 'paper', auto: canTradeLive && tradeMode === 'live' && autoLive } }, [canTradeLive, tradeMode, autoLive])
-  useEffect(() => { if (!canTradeLive) { setTradeMode('paper'); setAutoLive(false) } }, [canTradeLive])
+  // Not an admin / not today's live view (or still loading who you are): paper - the saved choice stays
+  // for when live trading is available again. Auto-place always needs confirming again.
+  useEffect(() => { if (!canTradeLive) setAutoLive(false) }, [canTradeLive])
   const paperBookRef = useRef(paperBook)
   useEffect(() => { paperBookRef.current = paperBook }, [paperBook])
   const liveLossRef = useRef(0)
@@ -176,6 +188,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       }
       setPaperBook((prev) => ({ ...prev, [dayKey]: { date, positions: [...(prev[dayKey]?.positions ?? []), position] } }))
       notification.success({ message: `LIVE ${trade.action} ${trade.strike} ${trade.side} x${lots} placed on Dhan`, description: result.message, placement: 'topRight', duration: 8 })
+      if (cfg.telegram !== false) telegram(`LIVE order placed: ${trade.action} ${underlying} ${trade.strike} ${trade.side} x${lots} lot(s) @ ~${position.premium.toFixed(1)} - #${STRATEGY_BY_ID[setup.id]?.no} ${STRATEGY_BY_ID[setup.id]?.name} ${setup.side}, futures ${setup.entry.toFixed(1)} (SL ${setup.stop.toFixed(1)}, target ${setup.target.toFixed(1)}); option SL ${cfg.paperSl} / target ${cfg.paperTarget} pts`)
     } catch (err) {
       fail(err.message)
     } finally {
@@ -201,6 +214,11 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     const at = atMs ?? setup.t
     const premium = premiumAt(oi, trade.side, trade.strike, at) ?? trade.premium
     const lots = Math.max(1, settingsRef.current.paperLots ?? 1)
+    const already = (paperBookRef.current[dayKey]?.positions ?? []).some((p) => sameSignal(p, setup, trade))
+    if (!already && !isReplay && settingsRef.current.telegram !== false) {
+      const meta = STRATEGY_BY_ID[setup.id]
+      telegram(`Paper ${trade.action} ${underlying} ${trade.strike} ${trade.side} x${lots} lot(s) @ ${premium.toFixed(1)} - #${meta?.no} ${meta?.name} ${setup.side}, futures ${setup.entry.toFixed(1)} (SL ${setup.stop.toFixed(1)}, target ${setup.target.toFixed(1)}); option SL ${settingsRef.current.paperSl ?? 20} / target ${settingsRef.current.paperTarget ?? 30} pts`)
+    }
     setPaperBook((prev) => {
       const list = prev[dayKey]?.positions ?? []
       const key = `${setup.id}-${setup.t}-${which}`
@@ -226,6 +244,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     const atMs = row.exitTime ?? nowMsRef.current ?? Date.now()
     const premium = row.exitTime ? row.current : premiumAt(oi, row.side, row.strike, atMs) ?? row.current
     markPosition(row.key, { exitSent: true, exitError: null, exitTime: atMs, exitPremium: premium, exitReason: reason })
+    if (settingsRef.current.telegram !== false) telegram(`LIVE exit: ${row.action === 'SELL' ? 'buy back' : 'sell'} ${underlying} ${row.strike} ${row.side} x${row.lots} - ${reason}${premium != null ? ` (~${Number(premium).toFixed(1)})` : ''}`)
     liveTradingApi.exitTrade(row.orderIds ?? [], settingsRef.current.liveSlippage ?? 2)
       .then((result) => markPosition(row.key, { liveNote: result.message }))
       .catch((err) => {
@@ -249,7 +268,19 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   })
 
   // A new day / underlying / mode starts a fresh list (the day's saved results are in `history`).
-  useEffect(() => { firedRef.current = []; setFired([]) }, [dayKey, isReplay])
+  // Live: today's setups so far come back after a page refresh (and are not alerted again); a replay
+  // starts empty.
+  const restoredRef = useRef(new Set())
+  useEffect(() => {
+    const saved = !isReplay ? readJson(FIRED_KEY, {})[dayKey] ?? [] : []
+    restoredRef.current = new Set(saved.map((f) => `${f.id}-${f.t}`))
+    firedRef.current = saved
+    setFired(saved)
+  }, [dayKey, isReplay])
+  useEffect(() => {
+    if (isReplay || !date) return
+    writeJson(FIRED_KEY, { [dayKey]: fired })
+  }, [fired, isReplay, dayKey, date])
 
   const stats = useMemo(() => strategyStats(Object.values(history).flatMap((d) => d.setups ?? [])), [history])
   const top = useMemo(() => topFifteen(stats), [stats])
@@ -338,11 +369,22 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   // stop - a hands-free day-trading loop.
   const closedRef = useRef(new Set())
   const trailAlertRef = useRef(new Map())
-  useEffect(() => { closedRef.current = new Set(); trailAlertRef.current = new Map() }, [dayKey, isReplay])
+  useEffect(() => { closedRef.current = new Set(); trailAlertRef.current = new Map(); primedRef.current = new Set() }, [dayKey, isReplay])
+  const primedRef = useRef(new Set())
   useEffect(() => {
     const cfg = settingsRef.current
     for (const s of withOutcome) {
       const key = `${s.id}-${s.t}`
+      // Brought back after a refresh: what already happened to it was alerted before - only what
+      // happens from now on is.
+      if (restoredRef.current.has(key) && !primedRef.current.has(key)) {
+        // ...judged once the day's bars are in (before that every outcome still reads "open").
+        if (!view?.minuteBars?.length) continue
+        primedRef.current.add(key)
+        if (s.outcome.status !== 'open') closedRef.current.add(key)
+        else if (s.outcome.trailed) trailAlertRef.current.set(key, s.outcome.stop)
+        continue
+      }
       if (s.outcome.status === 'open' && s.outcome.trailed && !closedRef.current.has(key)) {
         const risk = Math.abs(s.entry - s.stop)
         const last = trailAlertRef.current.get(key) ?? s.stop
@@ -385,7 +427,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
         ),
       })
     }
-  }, [withOutcome])
+  }, [withOutcome, view?.minuteBars?.length])
   useEffect(() => {
     if (!withOutcome.length || !date) return
     setHistory((prev) => {
@@ -401,9 +443,25 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
 
   // ---- Scan day: the whole loaded day, minute by minute -------------------------------------------
   const scanDay = async () => {
-    if (!replayDay || !range || !oi) return
+    if (!oi || (isReplay && (!replayDay || !range))) return
     setScan({ progress: 0 })
     try {
+      // Live: today so far - the day as the server holds it now (the live view keeps only its latest
+      // heatmap), read minute by minute like a replay, outcomes followed up to now.
+      let day = replayDay
+      let dayRange = range
+      let scanOi = oi
+      const until = isReplay ? null : nowMsRef.current ?? Date.now()
+      if (!isReplay) {
+        const body = await fetch(`/api/order-flow/${underlying}/day/${date}?rowSize=${rowSize}&minTradeLots=${largeLots}&heatmapColumns=1500`).then((r) => (r.ok ? r.json() : Promise.reject(new Error('today\'s order flow could not be loaded'))))
+        day = {
+          meta: body.meta, minuteBars: body.bars ?? [], trades: body.trades ?? [], icebergs: body.icebergs ?? [], sweeps: body.sweeps ?? [],
+          heatmap: (body.heatmap ?? []).map((c) => ({ t: new Date(c.time).getTime(), bids: c.bids, asks: c.asks })), source: body.source,
+        }
+        dayRange = replayRange(day)
+        if (!dayRange) throw new Error('no trading today yet')
+        scanOi = asReplayContext(oi)
+      }
       let prints = null
       if (!estimated) {
         const body = await fetch(`/api/order-flow/${underlying}/tape?date=${date}&count=60000`).then((r) => r.json())
@@ -412,11 +470,11 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       const found = []
       // On whole minutes: each setup enters at the previous minute's close and its outcome counts from
       // the bar starting at its entry - the same as replaying to that minute.
-      const start = Math.ceil((range.start + 15 * MIN) / MIN) * MIN
-      const steps = Math.max(1, Math.floor((range.end - start) / MIN))
+      const start = Math.ceil((dayRange.start + 15 * MIN) / MIN) * MIN
+      const steps = Math.max(1, Math.floor((dayRange.end - start) / MIN))
       for (let i = 0; i <= steps; i++) {
         const clock = start + i * MIN
-        const v = replayView(replayDay, clock)
+        const v = replayView(day, clock)
         const bars = completedBars(v.minuteBars, clock, rowSize, lotSize, estimated)
         if (bars.length >= 5) {
           const cols = v.heatmap.slice(-300)
@@ -425,7 +483,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
           const clockPrints = prints ? upTo(prints, clock) : null
           const setups = evaluateStrategies({
             nowMs: clock, price: priceAt(v, clockPrints, clock, bars), bars, minuteBars: v.minuteBars, prints: clockPrints,
-            book: v.book, liquidity: liq, pullStack: ps.signals, sweeps: v.sweeps, icebergs: v.icebergs, oi, estimated, lotSize, bigLots: largeLots, profile,
+            book: v.book, liquidity: liq, pullStack: ps.signals, sweeps: v.sweeps, icebergs: v.icebergs, oi: scanOi, estimated, lotSize, bigLots: largeLots, profile,
           })
           for (const s of setups) {
             if (!found.some((f) => f.id === s.id && f.side === s.side && s.t - f.t < COOLDOWN_MS)) found.push({ ...s, trail: trailFor(settingsRef.current) })
@@ -435,6 +493,18 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
           setScan({ progress: Math.round((i / steps) * 100) })
           await new Promise((r) => setTimeout(r, 0))
         }
+      }
+      if (!isReplay) {
+        // Today: the scan's setups join today's list (already over - not alerted), and keep being
+        // followed live like the ones alerted.
+        const merged = [...firedRef.current]
+        for (const s of found) if (!merged.some((f) => f.id === s.id && f.side === s.side && Math.abs(s.t - f.t) < COOLDOWN_MS)) merged.push(s)
+        merged.sort((a, b) => a.t - b.t)
+        firedRef.current = merged
+        for (const s of found) { restoredRef.current.add(`${s.id}-${s.t}`) }
+        setFired(merged)
+        setScan({ progress: 100, done: found.length, until })
+        return
       }
       const setups = found.map((s) => ({ ...s, outcome: simulateOutcome(s, replayDay.minuteBars, range.end + MIN, true) }))
       setHistory((prev) => {
@@ -498,6 +568,8 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       return { ...p, exitTime, exitReason, current: now.premium, points, rupees: points == null ? null : points * p.lots * p.lotSize }
     })
   }, [paperBook, dayKey, dayResults, withOutcome, oi, nowMs, settings.paperSl, settings.paperTarget, settings.paperLots])
+  const paperRowsRef = useRef(paperRows)
+  useEffect(() => { paperRowsRef.current = paperRows }, [paperRows])
   const paperTotal = paperRows.reduce((sum, r) => sum + (r.rupees ?? 0), 0)
   const liveRows = paperRows.filter((r) => r.live)
   const liveTotal = liveRows.reduce((sum, r) => sum + (r.rupees ?? 0), 0)
@@ -510,6 +582,37 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     for (const r of paperRows) if (r.live && r.exitTime && !r.exitSent) exitLive(r, r.exitReason ?? 'Exit')
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [paperRows, isReplay])
+  // A live trade closed OUTSIDE this box - from the OI Replay's live panel, the Dhan app, or its own
+  // super order's stop-loss / target filling on Dhan: once its super order has been seen pending on Dhan
+  // and is then gone from the pending orders on two checks in a row, the row is closed here too (nothing
+  // is sent - it is already closed there).
+  const dhanSeenRef = useRef(new Map()) // row key -> { seen, missing }
+  useEffect(() => {
+    if (isReplay || !canTradeLive) return undefined
+    const check = async () => {
+      const open = paperRowsRef.current.filter((r) => r.live && !r.exitSent && r.orderIds?.length)
+      if (!open.length) return
+      const snap = await liveTradingApi.positions().catch(() => null)
+      if (!snap?.dhanLoggedIn) return
+      const pending = new Set((snap.pendingOrders ?? []).map((o) => String(o.orderId)))
+      for (const r of open) {
+        const st = dhanSeenRef.current.get(r.key) ?? { seen: false, missing: 0 }
+        if (r.orderIds.some((id) => pending.has(String(id)))) { st.seen = true; st.missing = 0 } else if (st.seen) st.missing += 1
+        dhanSeenRef.current.set(r.key, st)
+        if (st.seen && st.missing >= 2) {
+          const atMs = nowMsRef.current ?? Date.now()
+          const premium = premiumAt(oi, r.side, r.strike, atMs) ?? r.current
+          markPosition(r.key, { exitSent: true, exitError: null, exitTime: atMs, exitPremium: premium, exitReason: 'Closed on Dhan (OI panel / its SL or target)', liveNote: 'Its super order is no longer pending on Dhan.' })
+          if (settingsRef.current.telegram !== false) telegram(`LIVE trade closed on Dhan: ${underlying} ${r.strike} ${r.side} x${r.lots} (closed outside the strategy scanner, or its SL / target filled)`)
+        }
+      }
+    }
+    const id = setInterval(check, 10_000)
+    check()
+    return () => clearInterval(id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isReplay, canTradeLive, dayKey])
+
   // A new Max SL / Target applies to every trade still OPEN now (and to new ones); closed trades keep the
   // levels they closed on. (Paper lots are applied to every paper trade in paperRows.)
   const levelsTimerRef = useRef(null)
@@ -566,12 +669,15 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
 
   return (
     <Card
-      size="small" title={`Strategy scanner · OI, order flow, volume & market profile (${STRATEGIES.length} strategies)`}
+      size="small" title={`Strategy scanner · OI, order flow, volume & market profile (${ACTIVE_STRATEGIES.length} strategies)`}
       extra={(
         <Space size={10} wrap>
           <Space size={4}><Switch size="small" checked={settings.alerts} onChange={(v) => { unlockAudio(); setSettings((s) => ({ ...s, alerts: v })) }} /><Text style={{ fontSize: 12 }}>Alerts</Text></Space>
           <Space size={4}><Switch size="small" checked={settings.sound} onChange={(v) => { unlockAudio(); setSettings((s) => ({ ...s, sound: v })) }} /><Text style={{ fontSize: 12 }}>Sound</Text></Space>
           <Space size={4}><Switch size="small" checked={settings.voice} onChange={(v) => setSettings((s) => ({ ...s, voice: v }))} /><Text style={{ fontSize: 12 }}>Speak name</Text></Space>
+          <Tooltip title="Each trade punched (paper) or placed (live) today - and a live trade's exit - is also sent to the server's Telegram chat. Not for replays.">
+            <Space size={4}><Switch size="small" checked={settings.telegram !== false} onChange={(v) => setSettings((s) => ({ ...s, telegram: v }))} aria-label="Telegram" /><Text style={{ fontSize: 12 }}>Telegram</Text></Space>
+          </Tooltip>
           <Button size="small" icon={<SoundOutlined />} onClick={() => { unlockAudio(); chime(true); speak('Alerts are on') }}>Test</Button>
         </Space>
       )}
@@ -604,7 +710,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                     { value: 'oi5', label: 'Top 5 OI + flow' },
                     { value: 'profile5', label: 'Top 5 profile' },
                     { value: 'range', label: `Range-bound (${RANGE_IDS.length})` },
-                    { value: 'all', label: `All ${STRATEGIES.length}` },
+                    { value: 'all', label: `All ${ACTIVE_STRATEGIES.length}` },
                     { value: 'custom', label: 'My choice' },
                   ]} />
               </div>
@@ -625,18 +731,18 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
               <Text type="secondary" style={{ fontSize: 12 }}>Entries 09:30-{fmtHm(LAST_ENTRY)} · every trade closed by <b>{fmtHm(SQUARE_OFF)}</b></Text>
             </Space>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: '2px 10px' }}>
-              {STRATEGIES.map((s) => (
+              {ACTIVE_STRATEGIES.map((s) => (
                 <Checkbox key={s.id} checked={alertIds.includes(s.id)} disabled={settings.pick !== 'custom'} onChange={(e) => toggleCustom(s.id, e.target.checked)} style={{ fontSize: 12 }}>
                   {s.no}. {s.short}
                 </Checkbox>
               ))}
             </div>
             <Space wrap size={8}>
-              <Tooltip title={isReplay ? `Runs all ${STRATEGIES.length} strategies over the whole loaded day and scores every setup - adds the day to the stats` : 'Load a past day (Load day) to scan it'}>
-                <Button type="primary" size="small" onClick={scanDay} disabled={!isReplay || !replayDay || !oi || (scan && scan.progress < 100 && !scan.error)}>Scan day</Button>
+              <Tooltip title={isReplay ? `Runs all ${ACTIVE_STRATEGIES.length} strategies over the whole loaded day and scores every setup - adds the day to the stats` : `Runs all ${ACTIVE_STRATEGIES.length} strategies over today so far, minute by minute - the setups join today's list (not alerted) and are followed live from here`}>
+                <Button type="primary" size="small" onClick={scanDay} disabled={!oi || (isReplay && !replayDay) || (scan && scan.progress < 100 && !scan.error)}>{isReplay ? 'Scan day' : 'Scan today so far'}</Button>
               </Tooltip>
               {scan && !scan.error && scan.progress < 100 && <Progress percent={scan.progress} size="small" style={{ width: 140, margin: 0 }} />}
-              {scan?.done != null && <Text type="secondary" style={{ fontSize: 12 }}>{scan.done} setup(s) scored for {date}</Text>}
+              {scan?.done != null && <Text type="secondary" style={{ fontSize: 12 }}>{scan.until ? `${scan.done} setup(s) found today up to ${IST_HHMM.format(new Date(scan.until))} - in the list below` : `${scan.done} setup(s) scored for ${date}`}</Text>}
               {scan?.error && <Text type="danger" style={{ fontSize: 12 }}>{scan.error}</Text>}
               <Popconfirm title="Clear every saved strategy result?" onConfirm={() => { setHistory({}); writeJson(HISTORY_KEY, {}) }}>
                 <Button size="small" danger>Reset stats</Button>
