@@ -225,9 +225,10 @@ check('28 strategies, numbered 1-27, range group = 7, 22, 23', STRATEGIES.length
 {
   const L = (c, id = 'wallDefence') => ({ id, side: 'LONG', confidence: c, checks: {} })
   const S = (c) => ({ id: 'trap', side: 'SHORT', confidence: c, checks: {} })
-  check('conflict too close to call: neither side traded', resolveConflicts([L(70), S(66)]).length === 0)
-  const kept = resolveConflicts([L(80), S(66), L(60, 'iceberg')])
-  check('conflict: the clearly stronger side kept, with a note', kept.length === 2 && kept.every((s) => s.side === 'LONG' && /Breakout trap/.test(s.checks.Conflict)), JSON.stringify(kept))
+  const both = resolveConflicts([L(70), S(52)])
+  check('conflict within 20 points (70 vs 52): BOTH sides traded, each noting the other', both.length === 2 && both.some((s) => s.side === 'LONG') && both.some((s) => s.side === 'SHORT') && both.every((s) => /both sides are traded/.test(s.checks.Conflict)), JSON.stringify(both.map((s) => s.checks.Conflict)))
+  const kept = resolveConflicts([L(86), S(66), L(60, 'iceberg')])
+  check('conflict 20+ points apart (86 vs 66): only the stronger side kept, with a note', kept.length === 2 && kept.every((s) => s.side === 'LONG' && /Breakout trap/.test(s.checks.Conflict)), JSON.stringify(kept))
   check('no conflict: unchanged', resolveConflicts([L(70), L(60, 'iceberg')]).length === 2)
 }
 {
