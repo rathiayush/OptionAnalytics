@@ -26,7 +26,7 @@
 import { findSuddenWalls, suddenWallText } from './suddenOi.js'
 import { liquidityMap } from './orderFlowMath.js'
 import { optionTrailLevel, tighterStop } from './optionTrail.js'
-import { adaptiveDecision, dayRegime } from './dayRegime.js'
+import { adaptiveDecision, combineRegime, cvdDayVote, dayRegime, oiDayVote, sessionOpenMs } from './dayRegime.js'
 
 const MIN = 60_000
 /** The strategies that wait for a fast run to cool off before entering (coolOffGate) - the ones that
@@ -730,6 +730,10 @@ export function evaluateStrategies(input) {
   if (!oi || !bars?.length || !(price > 0)) return []
   const minute = istMinute(nowMs)
   if (minute < hm(9, 30) || minute > LAST_ENTRY) return []
+  // 09:15:00 IST today - from the clock's MINUTE: a live clock is mid-minute (10:40:10), and without the
+  // rounding "09:15" became 09:15:10, which dropped the 09:15 bar from the IB / opening range and took in
+  // the 10:15 (09:30) one.
+  const sessionStartMs = Math.floor(nowMs / MIN) * MIN - (minute - hm(9, 15)) * MIN
   const spotNow = valueAt(oi.spot, nowMs)?.close
   if (!spotNow) return []
   const basis = price - spotNow
@@ -899,7 +903,7 @@ export function evaluateStrategies(input) {
 
   // 3. Writer migration - 10:00-14:30.
   if (minute >= hm(10, 0) && minute <= hm(14, 30) && vwap != null) {
-    const openMs = nowMs - (minute - hm(9, 15)) * MIN
+    const openMs = sessionStartMs
     for (const dir of [1, -1]) {
       const map = dir > 0 ? oi.pe : oi.ce
       const nowTop = topWriting(map, nowMs, openMs, spotNow, oi.step)
@@ -989,7 +993,7 @@ export function evaluateStrategies(input) {
 
   // 8. Opening OI bias + range breakout - 09:30-11:00, first break only (the caller's cooldown).
   if (minute <= hm(11, 0)) {
-    const dayOpen = nowMs - (minute - hm(9, 15)) * MIN
+    const dayOpen = sessionStartMs
     const rangeEnd = dayOpen + 15 * MIN
     const openBars = minuteBars.filter((b) => msOf(b.time) >= dayOpen && msOf(b.time) < rangeEnd)
     if (openBars.length >= 10) {
@@ -1158,7 +1162,7 @@ export function evaluateStrategies(input) {
     //     for two 30-minute periods (here: the last 30 completed minutes all inside) -> the other edge.
     const tpo = prof.tpoPrev
     if (tpo && minute >= hm(10, 0) && minute <= hm(14, 0)) {
-      const dayOpenMs = nowMs - (minute - hm(9, 15)) * MIN
+      const dayOpenMs = sessionStartMs
       const openBar = minuteBars.find((b) => msOf(b.time) >= dayOpenMs)
       const last30 = bars.slice(-30)
       if (openBar && last30.length >= 30) {
@@ -1245,7 +1249,7 @@ export function evaluateStrategies(input) {
   //     Every threshold here is a filter the trader can tune (STRATEGY_FILTERS.ibBreakout).
   if (minute >= hm(10, 15) && minute <= hm(13, 30)) {
     const f = strategyFilters('ibBreakout', input.filters?.ibBreakout)
-    const dayOpenMs = nowMs - (minute - hm(9, 15)) * MIN
+    const dayOpenMs = sessionStartMs
     const ibBars = minuteBars.filter((b) => msOf(b.time) >= dayOpenMs && msOf(b.time) < dayOpenMs + 60 * MIN)
     if (ibBars.length >= 45) {
       const ibHigh = Math.max(...ibBars.map((b) => b.high))
@@ -1291,7 +1295,7 @@ export function evaluateStrategies(input) {
   }
 
   // ---- 17-21: institutional OI + order flow setups -------------------------------------------------
-  const sessionOpen = nowMs - (minute - hm(9, 15)) * MIN
+  const sessionOpen = sessionStartMs
   const bigQty = (input.bigLots ?? 10) * lot
   // Big prints (block trades) on one side in the last `within` ms - how many, their size and their
   // average price - optionally only those at prices `where` accepts.
@@ -2064,11 +2068,13 @@ export function evaluateStrategies(input) {
   if (!final.length) return final
   // The day type at the clock and what an adaptive scanner would do with each setup - TRACKING ONLY:
   // every setup still fires; this is scored beside the real results (adaptiveStats).
-  const regime = dayRegime(minuteBars, nowMs, sessionOpen)
+  const regime = dayTypeAt(oi, minuteBars, nowMs)
   return final.map((s) => {
-    const adaptive = adaptiveDecision(s, regime)
+    // The adaptive call on the combined day type, and - to measure what the OI / CVD votes add - on the
+    // price read alone.
+    const adaptive = { ...adaptiveDecision(s, regime), priceOnly: adaptiveDecision(s, { type: regime.priceType }).take }
     return {
-      ...s, regime: { type: regime.type, label: regime.label }, adaptive,
+      ...s, regime: { type: regime.type, label: regime.label, priceType: regime.priceType, votes: regime.votes }, adaptive,
       checks: { ...s.checks, 'Day type': `${regime.label} - ${regime.reasons}. Adaptive would ${adaptive.take ? 'TAKE' : 'SKIP'} it (${adaptive.reason}) - tracking only, it fires either way` },
     }
   })
@@ -2093,6 +2099,36 @@ export function resolveConflicts(setups) {
   const [kept, dropped] = bl > bs ? [longs, shorts] : [shorts, longs]
   const note = `opposite ${names(dropped)} at the same time (confidence ${best(dropped)}) - this side is ${CONFLICT_GAP}+ points stronger, the other is not traded`
   return kept.map((s) => ({ ...s, checks: { ...s.checks, Conflict: note } }))
+}
+
+// ---- day type --------------------------------------------------------------------------------------
+
+/** The day type at `nowMs` (dayRegime.js): the price read from the session's completed bars, the OI vote
+ *  (the whole chain's writers since the open and in the last 30 min, the ATM straddle, the futures since
+ *  the open - finished minutes only) and the CVD vote, combined. Tracking only. */
+export function dayTypeAt(oi, minuteBars, nowMs) {
+  const open = sessionOpenMs(nowMs)
+  const price = dayRegime(minuteBars, nowMs, open)
+  let oiVote = { type: null, text: 'no OI' }
+  const spot = oi ? valueAt(oi.spot, nowMs)?.close : null
+  if (oi && spot) {
+    const read = optionOiRead(oi, spot, nowMs, 30)
+    const atm = Math.round(spot / oi.step) * oi.step
+    const openMs = dayOpenMs(oi, nowMs)
+    const added = (map) => {
+      const now = oiOf(map, atm, nowMs)
+      const atOpen = openOi(map, atm, openMs)
+      return now != null && atOpen > 0 ? (now - atOpen) / atOpen : null
+    }
+    const ce = added(oi.ce)
+    const pe = added(oi.pe)
+    oiVote = oiDayVote({
+      options: read ? { leanOpen: read.leanOpen, lean30: read.lean } : null,
+      straddle: ce != null && pe != null ? { ce, pe, ceRising: (oiChange(oi.ce, atm, nowMs, 30) ?? -1) >= 0, peRising: (oiChange(oi.pe, atm, nowMs, 30) ?? -1) >= 0 } : null,
+      futures: futuresSince(oi, nowMs, openMs),
+    })
+  }
+  return combineRegime(price, oiVote, cvdDayVote(minuteBars, nowMs, open))
 }
 
 // ---- outcome --------------------------------------------------------------------------------------

@@ -56,7 +56,10 @@ function ibCase(dir, o = {}) {
     const p = mir(out(m) ? 22722 : inside(m))
     // The break bar heavy (2x the IB's average, 1.2x when weak), the acceptance bar still with the trade.
     const withTrade = m === breakAt ? (o.weak ? 700 : 1500) : m === 84 && out(m) ? 800 : 500
-    return { open: p - dir, high: p + 1, low: p - 1, close: p, buy: dir > 0 ? withTrade : 500, sell: dir > 0 ? 500 : withTrade }
+    const b = { open: p - dir, high: p + 1, low: p - 1, close: p, buy: dir > 0 ? withTrade : 500, sell: dir > 0 ? 500 : withTrade }
+    // The 09:15 bar spikes to 22690 (the mirror 22734 for a short): it sets that IB extreme.
+    if (o.firstBarSpike && m === 0) Object.assign(b, dir > 0 ? { low: 22690 } : { high: mir(22690) })
+    return b
   })
   const price = bs.at(-1).close
   const setups = evaluateStrategies({ nowMs: now, price, bars: bs, minuteBars: bs, prints: tape(now, dir > 0 ? 70 : 30), book: dir > 0 ? { bids: [{ quantity: 600 }], asks: [{ quantity: 400 }] } : { bids: [{ quantity: 400 }], asks: [{ quantity: 600 }] }, liquidity: [], pullStack: [], sweeps: [], icebergs: [], oi, estimated: false, lotSize: 75, bigLots: 10, profile: null, filters: o.filters })
@@ -88,6 +91,11 @@ function runShort(spot) {
   check('not when an earlier break of that side was accepted and failed', !ibCase(1, { earlier: [70, 71] }).ib && !ibCase(-1, { earlier: [70, 71] }).ib)
   check('...but an earlier one-bar poke does not block it', ibCase(1, { earlier: [70] }).ib?.side === 'LONG')
   check('not when the break bar trades under 1.5x the IB\'s average volume', !ibCase(1, { weak: true }).ib && !ibCase(-1, { weak: true }).ib)
+  // A live, mid-minute clock (10:40:10) reads the IB from 09:15:00: the 09:15 bar was once dropped (the
+  // session open taken as 09:15:10) - and the 10:15 bar taken in.
+  const fb = ibCase(1, { firstBarSpike: true }).ib
+  const fbS = ibCase(-1, { firstBarSpike: true }).ib
+  check('a mid-minute clock: the 09:15 bar\'s spike is the IB extreme (LONG and SHORT)', /initial balance 22690-/.test(fb?.checks.Profile ?? '') && new RegExp(`initial balance [\\d.]+-${2 * MID - 22690}`).test(fbS?.checks.Profile ?? ''), `${fb?.checks.Profile} | ${fbS?.checks.Profile}`)
   // The trader's filters (STRATEGY_FILTERS.ibBreakout) - each one loosened lets its case through.
   const ibF = (o) => ({ ibBreakout: o })
   check('filter: 1 close to accept -> the first close beyond fires', ibCase(1, { breakAt: 84, filters: ibF({ closesBeyond: 1 }) }).ib?.side === 'LONG' && ibCase(-1, { breakAt: 84, filters: ibF({ closesBeyond: 1 }) }).ib?.side === 'SHORT')
