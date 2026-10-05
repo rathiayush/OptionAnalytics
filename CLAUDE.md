@@ -38,8 +38,8 @@ All must pass before committing. When adding or changing a strategy:
   fills at its open; target at the target; the trailing stop moves after each completed bar and only
   tightens; time stop and the 15:10 square-off at the bar's close; no entries after 14:45.
 - **Option trades**: entry premium = the last finished minute's; their own Max SL / Target are checked
-  from the first full minute after the entry, at the level; a lots / SL / target change applies to
-  open paper trades only.
+  from the first full minute after the entry, at the level; a SL / target change applies to open
+  trades only; paper trades are all sized by the current lots setting (live trades keep their quantity).
 
 ## Other rules
 

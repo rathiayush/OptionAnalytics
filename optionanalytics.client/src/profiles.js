@@ -49,6 +49,8 @@ export function tpoProfile(bars, rowSize, periodMinutes = 30) {
   let ibHigh = -Infinity
   let ibLow = Infinity
   for (const b of bars) {
+    // A bar without a real range (a zero price from a feed gap) would paint every row from 0 up.
+    if (!(b.low > 0) || !(b.high >= b.low)) continue
     const period = Math.max(0, Math.floor((msOf(b.time) - dayOpen) / (periodMinutes * MIN)))
     const letter = TPO_LETTERS[Math.min(period, TPO_LETTERS.length - 1)]
     if (period < 2) { ibHigh = Math.max(ibHigh, b.high); ibLow = Math.min(ibLow, b.low) }
@@ -59,6 +61,7 @@ export function tpoProfile(bars, rowSize, periodMinutes = 30) {
     }
   }
   const list = [...rows.entries()].map(([price, set]) => ({ price, letters: [...set].sort().join(''), count: set.size })).sort((a, b) => a.price - b.price)
+  if (!list.length) return null
   const total = list.reduce((s, r) => s + r.count, 0)
   const mid = (list[0].price + list.at(-1).price) / 2
   let pocIndex = 0

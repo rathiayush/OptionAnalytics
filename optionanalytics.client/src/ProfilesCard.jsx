@@ -29,10 +29,18 @@ const BG = '#0d111a'
  *     balance (A + B) and single prints.
  * Wheel = zoom prices at the cursor, drag = pan, double-click = fit.
  */
-export function ProfilesCard({ prevDate, prevVp, prevTpo, todayTpo, lastPrice, loading, estimatedPrev, lotSize, showLots, height = 440 }) {
-  const fitted = useMemo(() => fitRange([
-    ...(prevVp?.rows ?? []).map((r) => r.price), ...(prevTpo?.rows ?? []).map((r) => r.price), ...(todayTpo?.rows ?? []).map((r) => r.price), lastPrice,
-  ]), [prevVp, prevTpo, todayTpo, lastPrice])
+export function ProfilesCard({ prevDate, prevVp, prevTpo, todayTpo, lastPrice: rawLastPrice, loading, estimatedPrev, lotSize, showLots, height = 440 }) {
+  // No price yet (0 before the first tick of the day, a replay at its very start) is no price: drawn
+  // and fitted as a price it stretched the shared axis from 0 and flattened both profiles.
+  const lastPrice = rawLastPrice > 0 ? rawLastPrice : null
+  const fitted = useMemo(() => {
+    const levels = [...(prevVp?.rows ?? []).map((r) => r.price), ...(prevTpo?.rows ?? []).map((r) => r.price), ...(todayTpo?.rows ?? []).map((r) => r.price)]
+    const base = fitRange(levels)
+    // The last price is fitted in too, unless it is far from the profiles (another contract month).
+    if (!base || lastPrice == null) return base ?? fitRange([lastPrice])
+    const span = Math.max(base.hi - base.lo, lastPrice * 0.01)
+    return lastPrice > base.lo - span && lastPrice < base.hi + span ? fitRange([...levels, lastPrice]) : base
+  }, [prevVp, prevTpo, todayTpo, lastPrice])
   const [view, setView] = useState(null) // { hi, lo } when zoomed / panned
   const [hoverPrice, setHoverPrice] = useState(null)
   const range = view ?? fitted
@@ -93,7 +101,7 @@ export function ProfilesCard({ prevDate, prevVp, prevTpo, todayTpo, lastPrice, l
 }
 
 function fitRange(prices) {
-  const list = prices.filter((p) => Number.isFinite(p))
+  const list = prices.filter((p) => Number.isFinite(p) && p > 0)
   if (!list.length) return null
   let hi = Math.max(...list)
   let lo = Math.min(...list)
@@ -268,7 +276,7 @@ function VolumeProfileChart({ vp, range, lastPrice, nav, hoverPrice, onHover, lo
     if (vp.vah != null) levelLine(ctx, y(vp.vah), plotW, VA, `VAH ${fmt(vp.vah)}`)
     if (vp.val != null) levelLine(ctx, y(vp.val), plotW, VA, `VAL ${fmt(vp.val)}`)
     if (vp.poc != null) levelLine(ctx, y(vp.poc), plotW, POC, `POC ${fmt(vp.poc)}`, { dash: [] })
-    if (Number.isFinite(lastPrice)) levelLine(ctx, y(lastPrice), plotW, PRICE, null, { dash: [] })
+    if (lastPrice > 0) levelLine(ctx, y(lastPrice), plotW, PRICE, null, { dash: [] })
     if (hoverPrice != null) {
       levelLine(ctx, y(hoverPrice), plotW, '#ffffff66', null, { dash: [3, 3] })
       const row = vp.rows.reduce((best, r) => (Math.abs(r.price - hoverPrice) < Math.abs((best?.price ?? Infinity) - hoverPrice) ? r : best), null)
@@ -282,7 +290,7 @@ function VolumeProfileChart({ vp, range, lastPrice, nav, hoverPrice, onHover, lo
     }
     ctx.restore()
     axisLabels(ctx, range, plotW, plotH, 'labels')
-    if (Number.isFinite(lastPrice) && lastPrice <= range.hi && lastPrice >= range.lo) priceTag(ctx, y(lastPrice), plotW, PRICE, fmt(lastPrice))
+    if (lastPrice > 0 && lastPrice <= range.hi && lastPrice >= range.lo) priceTag(ctx, y(lastPrice), plotW, PRICE, fmt(lastPrice))
     ctx.fillStyle = AXIS_COLOR
     ctx.font = `11px ${FONT}`
     ctx.textAlign = 'left'
@@ -376,11 +384,11 @@ function MarketProfileChart({ prevTpo, todayTpo, range, lastPrice, nav, hoverPri
     }
     ctx.fillStyle = '#ffffff22'
     ctx.fillRect(split, HEAD_H, 1, plotH)
-    if (Number.isFinite(lastPrice)) levelLine(ctx, y(lastPrice), plotW, PRICE, null, { dash: [] })
+    if (lastPrice > 0) levelLine(ctx, y(lastPrice), plotW, PRICE, null, { dash: [] })
     if (hoverPrice != null) levelLine(ctx, y(hoverPrice), plotW, '#ffffff66', null, { dash: [3, 3] })
     ctx.restore()
     axisLabels(ctx, range, plotW, plotH, 'labels')
-    if (Number.isFinite(lastPrice) && lastPrice <= range.hi && lastPrice >= range.lo) priceTag(ctx, y(lastPrice), plotW, PRICE, fmt(lastPrice))
+    if (lastPrice > 0 && lastPrice <= range.hi && lastPrice >= range.lo) priceTag(ctx, y(lastPrice), plotW, PRICE, fmt(lastPrice))
     ctx.fillStyle = AXIS_COLOR
     ctx.font = `11px ${FONT}`
     ctx.textAlign = 'left'

@@ -459,7 +459,11 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     const outcomeOf = (p) => exact.get(p.setupKey) ?? [...withOutcome, ...dayResults]
       .filter((s) => s.id === p.strategy && s.side === p.setupSide && Math.abs(s.t - setupTimeOf(p)) < 2 * MIN)
       .sort((a, b) => Math.abs(a.t - p.entryTime) - Math.abs(b.t - p.entryTime))[0]?.outcome
-    return (paperBook[dayKey]?.positions ?? []).filter((p) => !nowMs || p.entryTime <= nowMs).map((p) => {
+    // Paper trades are a what-if: every one of them - open or closed - is sized by the lots set now, so
+    // the day's P&L is always at one size. A live (Dhan) trade keeps the quantity it was placed with.
+    const paperLots = Math.max(1, settings.paperLots ?? 1)
+    return (paperBook[dayKey]?.positions ?? []).filter((p) => !nowMs || p.entryTime <= nowMs).map((stored) => {
+      const p = stored.live ? stored : { ...stored, lots: paperLots }
       let exitTime = p.exitTime && p.exitTime <= (nowMs ?? Infinity) ? p.exitTime : null
       let exitPremium = exitTime ? p.exitPremium : null
       let exitReason = exitTime ? p.exitReason : null
@@ -493,7 +497,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       const points = now.premium == null ? null : p.action === 'BUY' ? now.premium - p.premium : p.premium - now.premium
       return { ...p, exitTime, exitReason, current: now.premium, points, rupees: points == null ? null : points * p.lots * p.lotSize }
     })
-  }, [paperBook, dayKey, dayResults, withOutcome, oi, nowMs, settings.paperSl, settings.paperTarget])
+  }, [paperBook, dayKey, dayResults, withOutcome, oi, nowMs, settings.paperSl, settings.paperTarget, settings.paperLots])
   const paperTotal = paperRows.reduce((sum, r) => sum + (r.rupees ?? 0), 0)
   const liveRows = paperRows.filter((r) => r.live)
   const liveTotal = liveRows.reduce((sum, r) => sum + (r.rupees ?? 0), 0)
@@ -506,8 +510,8 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     for (const r of paperRows) if (r.live && r.exitTime && !r.exitSent) exitLive(r, r.exitReason ?? 'Exit')
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [paperRows, isReplay])
-  // A new Max SL / Target - and lots, on paper - applies to every trade still OPEN now (and to new ones);
-  // closed trades keep what they closed with. A live trade's quantity is a real order: it stays.
+  // A new Max SL / Target applies to every trade still OPEN now (and to new ones); closed trades keep the
+  // levels they closed on. (Paper lots are applied to every paper trade in paperRows.)
   const levelsTimerRef = useRef(null)
   const changeLimits = (patch) => {
     setSettings((s) => ({ ...s, ...patch }))
@@ -538,7 +542,6 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
             ...p,
             ...(patch.paperSl != null ? { slPts: patch.paperSl } : {}),
             ...(patch.paperTarget != null ? { targetPts: patch.paperTarget } : {}),
-            ...(patch.paperLots != null && !p.live ? { lots: patch.paperLots } : {}),
           } : p)),
         },
       }
@@ -696,7 +699,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                 <Segmented size="small" value={settings.autoPaper ?? 'sell'} onChange={(v) => setSettings((s) => ({ ...s, autoPaper: v }))}
                   options={[{ value: 'off', label: 'Off' }, { value: 'buy', label: 'Buy option' }, { value: 'sell', label: 'Sell option' }]} />
                 <InputNumber size="small" min={1} max={100} style={{ width: 64 }} value={settings.paperLots ?? 1} aria-label="Paper lots"
-                  onChange={(v) => v != null && changeLimits({ paperLots: v })} />
+                  onChange={(v) => v != null && setSettings((s) => ({ ...s, paperLots: v }))} />
                 <Text style={{ fontSize: 12 }}>lot(s) × {PAPER_TRADE_LOT_SIZE[underlying] ?? 1}</Text>
                 <Text style={{ fontSize: 12 }}>Max SL</Text>
                 <InputNumber size="small" min={0} max={500} step={5} style={{ width: 64 }} value={settings.paperSl ?? 20} aria-label="Paper max SL points"
@@ -704,7 +707,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                 <Text style={{ fontSize: 12 }}>Target</Text>
                 <InputNumber size="small" min={0} max={1000} step={5} style={{ width: 64 }} value={settings.paperTarget ?? 30} aria-label="Paper target points"
                   onChange={(v) => v != null && changeLimits({ paperTarget: v })} />
-                <Text type="secondary" style={{ fontSize: 11 }}>premium pts (0 = off) · a change of lots / SL / target applies to open trades too; closed trades keep theirs</Text>
+                <Text type="secondary" style={{ fontSize: 11 }}>premium pts (0 = off) · lots size every paper trade of the day (live trades keep theirs); a SL / target change applies to open trades, closed ones keep theirs</Text>
                 {paperRows.length > 0 && <Text strong style={{ fontSize: 12, color: paperTotal >= 0 ? UP_COLOR : DOWN_COLOR }}>P&amp;L ₹{Math.round(paperTotal).toLocaleString('en-IN')}</Text>}
                 {paperRows.some((r) => !r.live) && (
                   <Popconfirm title="Clear this day's paper trades? (Live trades stay.)" onConfirm={() => setPaperBook((prev) => {

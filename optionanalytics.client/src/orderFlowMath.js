@@ -242,6 +242,7 @@ export function volumeProfile(bars, valueAreaPct = 0.7) {
   const rows = new Map()
   for (const bar of bars ?? []) {
     for (const level of bar.levels ?? []) {
+      if (!(level.price > 0)) continue
       const row = rows.get(level.price)
       if (row) { row.buy += level.buy; row.sell += level.sell } else rows.set(level.price, { price: level.price, buy: level.buy, sell: level.sell })
     }
