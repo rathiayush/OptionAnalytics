@@ -282,6 +282,10 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<DhanDepthFeedClien
 builder.Services.AddSingleton<DhanTwoHundredDepthClient>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<DhanTwoHundredDepthClient>());
 builder.Services.AddSingleton<OptionAnalytics.Server.Services.OrderFlow.OrderFlowDayStore>();
+// TrueData (OFF by default): with TrueData:Enabled true an Order Flow day the server did not record is
+// rebuilt from TrueData's tick history; with it false nothing TrueData is registered or called and
+// OrderFlowHistory runs exactly as before (its TrueData step is null). See TrueDataOptions.
+OptionAnalytics.Server.TrueData.TrueDataRegistration.AddTrueDataIfEnabled(builder.Services, builder.Configuration);
 builder.Services.AddSingleton<OptionAnalytics.Server.Services.OrderFlow.OrderFlowHistory>();
 builder.Services.AddSingleton<OptionAnalytics.Server.Services.OrderFlow.OrderFlowService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<OptionAnalytics.Server.Services.OrderFlow.OrderFlowService>());
