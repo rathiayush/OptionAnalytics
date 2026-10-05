@@ -1165,6 +1165,10 @@ export function evaluateStrategies(input) {
   //     statistics: a narrow IB breaks almost always and extends far, an extremely wide one breaks far
   //     less and barely extends - so not when the IB is already as wide as the previous day's whole range
   //     (the day's range proxy), and more confidence when it is under 40% of it.
+  //     Against the false breaks: the break must be ACCEPTED (two 1-minute closes in a row beyond the IB -
+  //     a one-bar poke that closes back inside is the classic trap), only the FIRST accepted break of that
+  //     side in the day is taken (a second one comes after a failed breakout), and the break bar must trade
+  //     at least 1.5x the IB's average minute volume (real exchange volume, also on estimated days).
   if (minute >= hm(10, 15) && minute <= hm(13, 30)) {
     const dayOpenMs = nowMs - (minute - hm(9, 15)) * MIN
     const ibBars = minuteBars.filter((b) => msOf(b.time) >= dayOpenMs && msOf(b.time) < dayOpenMs + 60 * MIN)
@@ -1175,10 +1179,21 @@ export function evaluateStrategies(input) {
       // The writers' side: the WHOLE chain's put vs call writing over the last hour.
       const read60 = optionOiRead(oi, spotNow, nowMs, 60)
       const writing = read60 ? read60.lean : 0
+      const volOf = (b) => (b.buy ?? 0) + (b.sell ?? 0) || b.volume || 0
+      const ibEndMs = dayOpenMs + 60 * MIN
+      const ibVols = bars.filter((b) => msOf(b.time) >= dayOpenMs && msOf(b.time) < ibEndMs).map(volOf)
+      const ibAvgVol = ibVols.length ? ibVols.reduce((a, v) => a + v, 0) / ibVols.length : 0
+      const before = bars.at(-3)
+      const afterIb = bars.slice(0, -2).filter((b) => msOf(b.time) >= ibEndMs)
       for (const dir of [1, -1]) {
         const edge = dir > 0 ? ibHigh : ibLow
-        const broke = prev && (dir > 0 ? last.close > edge && prev.close <= edge : last.close < edge && prev.close >= edge)
+        const beyond = (b) => dir * (b.close - edge) > 0
+        // The break (prev) and its acceptance (last): two closes beyond, the bar before them inside.
+        const broke = prev && before && beyond(last) && beyond(prev) && !beyond(before)
         if (!broke || dir * writing < 0.15 || range <= 0) continue
+        if (afterIb.some((b, i) => i > 0 && beyond(b) && beyond(afterIb[i - 1]))) continue // not the first break
+        const breakVol = volOf(prev)
+        if (!(ibAvgVol > 0) || breakVol < 1.5 * ibAvgVol) continue
         const prevRange = prof?.prevHigh > 0 && prof?.prevLow > 0 ? prof.prevHigh - prof.prevLow : null
         if (prevRange && range >= prevRange) continue
         const narrow = prevRange != null && range <= 0.4 * prevRange
@@ -1190,7 +1205,7 @@ export function evaluateStrategies(input) {
         push('ibBreakout', dir, stopPts, Math.max(range, 1.5 * stopPts), 90, 61 + (sweepWith(dir) ? 8 : 0) + (narrow ? 6 : 0), {
           OI: `${dir > 0 ? 'put' : 'call'} writing leads across the chain over the last hour - ${optionOiText(read60)}`,
           Profile: `initial balance ${ibLow}-${ibHigh} (range ${range.toFixed(1)}${prevRange ? `, ${Math.round((range / prevRange) * 100)}% of yesterday's range${narrow ? ' - narrow' : ''}` : ''}), target one range beyond`,
-          Footprint: `close beyond the IB, Δ ${last.delta}`, Tape: `${sweepWith(dir) ? 'sweep · ' : ''}${tapeText}`, DOM: c.dom, Heatmap: c.heat,
+          Footprint: `2 closes beyond the IB (first break of the day), break bar ${(breakVol / ibAvgVol).toFixed(1)}x the IB's average volume, Δ ${last.delta}`, Tape: `${sweepWith(dir) ? 'sweep · ' : ''}${tapeText}`, DOM: c.dom, Heatmap: c.heat,
         })
       }
     }
