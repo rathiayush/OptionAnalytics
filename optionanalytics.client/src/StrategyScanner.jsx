@@ -662,36 +662,47 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   const liveTotal = liveRows.reduce((sum, r) => sum + (r.rupees ?? 0), 0)
   useEffect(() => { liveLossRef.current = liveTotal }, [liveTotal])
 
-  // The day's record on the server as CSV (ScannerLogStore): live - today's signals and option trades;
-  // a scanned past day - its signals (a replay clock part-way through a day is not posted). Sent a few
-  // seconds after a signal appears or a signal / trade closes - not on every tick of an open trade -
-  // and resent after a failure.
+  // The day's record on the server - ONE CSV file (ScannerLogStore): a row per signal with the option
+  // trades punched for it. Live - today's signals and trades; a scanned past day - its signals (a replay
+  // clock part-way through a day is not posted). Sent a few seconds after a signal appears or a signal /
+  // trade closes - not on every tick of an open trade - and resent after a failure.
   const scannerLogRef = useRef({ sent: '', timer: null, latest: null })
   useEffect(() => {
     if (!date || !underlying) return
     if (isReplay && !history[dayKey]?.scanned) return
+    const tradeOf = (r) => ({
+      entryTime: r.entryTime, exitTime: r.exitTime ?? null, live: !!r.live, action: r.action, option: r.side, strike: r.strike, lots: r.lots,
+      entryPremium: r.premium, exitPremium: r.exitTime ? r.current ?? null : null, points: r.points ?? null, rupees: r.rupees ?? null, exitReason: r.exitReason ?? null,
+    })
     const signals = dayResults.map((x) => {
       const o = x.outcome ?? {}
       const meta = STRATEGY_BY_ID[x.id]
+      const closed = o.status && o.status !== 'open'
       return {
         time: x.t, strategyNo: meta?.no ?? null, strategyId: x.id, strategy: meta?.name ?? x.id, side: x.side, entry: x.entry, stop: x.stop, target: x.target,
         confidence: x.confidence ?? null, estimated: !!x.estimated, dayType: x.regime?.type ?? null, dayTypePrice: x.regime?.priceType ?? null,
         voteOi: x.regime?.votes?.oi ?? null, voteCvd: x.regime?.votes?.cvd ?? null, adaptiveTake: x.adaptive?.take ?? null,
         adaptivePriceOnly: x.adaptive?.priceOnly ?? null, adaptiveReason: x.adaptive?.reason ?? null, status: o.status ?? null, r: o.r ?? null,
-        exitTime: o.status && o.status !== 'open' ? o.exitAt ?? null : null, exitPrice: o.status && o.status !== 'open' ? o.exitPrice ?? null : null,
-        exitReason: o.status && o.status !== 'open' ? exitLabel(o) : null,
+        exitTime: closed ? o.exitAt ?? null : null, exitPrice: closed ? o.exitPrice ?? null : null, exitReason: closed ? exitLabel(o) : null, trades: [],
       }
     })
-    const trades = isReplay ? [] : paperRows.map((r) => ({
-      key: r.key, entryTime: r.entryTime, exitTime: r.exitTime ?? null, live: !!r.live, action: r.action, option: r.side, strike: r.strike,
-      lots: r.lots, lotSize: r.lotSize, entryPremium: r.premium, exitPremium: r.exitTime ? r.current ?? null : null, points: r.points ?? null,
-      rupees: r.rupees ?? null, exitReason: r.exitReason ?? null, strategyNo: STRATEGY_BY_ID[r.strategy]?.no ?? null, strategyId: r.strategy,
-      signalSide: r.setupSide, dayType: r.regime?.type ?? null, adaptiveTake: r.adaptive?.take ?? null, adaptiveReason: r.adaptive?.reason ?? null,
-    }))
-    if (!signals.length && !trades.length) return
-    const sig = JSON.stringify([dayKey, signals.map((x) => [x.strategyId, x.side, x.time, x.status, x.r]), trades.map((t) => [t.key, t.exitTime, t.exitTime ? t.points : null])])
+    // Each punched trade onto its signal's row: the exact one, else the same strategy and side within two
+    // minutes; a trade whose signal is not in the list gets a row of its own.
+    if (!isReplay) {
+      for (const r of paperRows) {
+        const at = r.setupT ?? r.entryTime
+        const row = signals.find((x) => `${x.strategyId}-${x.time}` === r.setupKey)
+          ?? signals.filter((x) => x.strategyId === r.strategy && x.side === r.setupSide && Math.abs(x.time - at) < 2 * MIN).sort((a, b) => Math.abs(a.time - at) - Math.abs(b.time - at))[0]
+        if (row) { row.trades.push(tradeOf(r)); continue }
+        const meta = STRATEGY_BY_ID[r.strategy]
+        signals.push({ time: at, strategyNo: meta?.no ?? null, strategyId: r.strategy, strategy: meta?.name ?? r.strategy, side: r.setupSide, dayType: r.regime?.type ?? null,
+          adaptiveTake: r.adaptive?.take ?? null, adaptiveReason: r.adaptive?.reason ?? null, trades: [tradeOf(r)] })
+      }
+    }
+    if (!signals.length) return
+    const sig = JSON.stringify([dayKey, signals.map((x) => [x.strategyId, x.side, x.time, x.status, x.r, x.trades.map((t) => [t.entryTime, t.exitTime, t.exitTime ? t.points : null])])])
     const st = scannerLogRef.current
-    st.latest = { sig, body: { underlying, date, source: isReplay ? 'scan' : 'live', signals, trades } }
+    st.latest = { sig, body: { underlying, date, source: isReplay ? 'scan' : 'live', signals } }
     if (sig === st.sent || st.timer) return
     st.timer = setTimeout(() => {
       st.timer = null
@@ -1302,8 +1313,8 @@ function AdaptivePanel({ adaptive, regimeNow }) {
         {better != null && <>Adaptive {better >= 0 ? 'would have added' : 'would have cost'} <b>{fmtR(Math.abs(better))}</b> per trade so far. </>}
         The day type is read at each signal from what was known then - three votes: PRICE (the IB, range, net move, VWAP side / crosses), OI (option writers since the open + futures build-up / covering = trend; ATM straddle sold or nobody leaning = range; writers flipping = two-sided) and CVD (one way = trend, up and down = range). Price is kept unless OI / CVD outvote it (then unclear); OI + CVD agreeing call a trend before price. Trend - adaptive takes only trades with the trend;
         {' '}range / two-sided (inside the IB, or both sides broken / chopping across VWAP) - it takes fades and skips trend / breakout setups; unclear or before 10:15 - it takes everything.
-        {' '}Nothing is blocked - every setup still fires and alerts as before. Every signal and option trade, with its day type and adaptive call, is also saved on the server as CSV:
-        {' '}<a href="/api/scanner-log/all/signals" download>signals.csv</a> · <a href="/api/scanner-log/all/trades" download>trades.csv</a> (every day; per day under /api/scanner-log).{adaptive.untracked ? ` ${adaptive.untracked} setup(s) scored before tracking are not counted - re-run Scan day on those days.` : ''}
+        {' '}Nothing is blocked - every setup still fires and alerts as before. Every signal - its day type, adaptive call and the trades punched for it - is also saved on the server in one CSV file:
+        {' '}<a href="/api/scanner-log" download>scanner-log.csv</a> (every day, every underlying).{adaptive.untracked ? ` ${adaptive.untracked} setup(s) scored before tracking are not counted - re-run Scan day on those days.` : ''}
       </Text>
     </div>
   )

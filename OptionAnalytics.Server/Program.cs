@@ -236,7 +236,7 @@ builder.Services.AddHostedService<HistoricalSpotDataPrefetchHostedService>();
 // FetchAcrossSegmentsAsync reads from - see ExpiredOptionDataStore/
 // ExpiredOptionDataPrefetchHostedService's own doc comments.
 builder.Services.AddSingleton<ExpiredOptionDataStore>();
-// The strategy scanner's signals / option trades (with the day type and the adaptive call) as CSV -
+// The strategy scanner's record as one CSV file - a row per signal with its day type, adaptive call and trades -
 // Storage:ScannerLogPath; see ScannerLogStore.
 builder.Services.AddSingleton<ScannerLogStore>();
 builder.Services.AddHostedService<ExpiredOptionDataPrefetchHostedService>();

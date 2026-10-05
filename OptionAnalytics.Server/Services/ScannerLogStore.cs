@@ -5,41 +5,35 @@ using System.Text.RegularExpressions;
 namespace OptionAnalytics.Server.Services;
 
 /// <summary>
-/// The Order Flow strategy scanner's record on the server, as plain CSV: every signal (its levels, the
-/// day type and the adaptive call when it fired, its outcome) and every option trade punched for it
-/// (paper or live, with the adaptive flag and P&amp;L). The browser keeps its own copy; this one lasts
-/// and is the same for every device.
+/// The Order Flow strategy scanner's record on the server as ONE CSV file - scanner-log.csv under
+/// Storage:ScannerLogPath (env Storage__ScannerLogPath; /app/data/scanner-log on the volume) - every
+/// underlying and every day in it: one row per signal (its levels, the day type and the adaptive call
+/// when it fired, its outcome) with the option trades punched for it (paper or live) on the same row -
+/// how many, live or not, total points and rupees, and each trade spelled out. The browser keeps its
+/// own copy; this one lasts and is the same for every device.
 ///
-/// ONE FILE PER KIND, UNDERLYING AND DAY - signals_NIFTY_2026-10-05.csv, trades_NIFTY_2026-10-05.csv -
-/// under Storage:ScannerLogPath (env Storage__ScannerLogPath; mount a volume in production, like the
-/// other Storage paths). The scanner posts a day's rows as they change (outcomes resolve during the
-/// day); each row has a key, a posted row replaces the stored row with the same key, rows not posted
-/// again are kept, and the file is rewritten atomically (temp file + move) under a lock.
+/// The scanner posts a day's signals as they change (outcomes resolve during the day); each row has a
+/// key (underlying, date, strategy, side, signal time), a posted row replaces the stored row with that
+/// key, every other row is kept, and the file is rewritten atomically (temp file + move) under a lock.
 /// </summary>
 public sealed class ScannerLogStore
 {
+    public const string FileName = "scanner-log.csv";
     public const int MaxSignals = 3000;
-    public const int MaxTrades = 1000;
+    public const int MaxTradesPerSignal = 20;
     private const int MaxText = 400;
     private static readonly Regex UnderlyingPattern = new("^[A-Z]{2,20}$", RegexOptions.Compiled);
-    private static readonly Regex FilePattern = new(@"^(signals|trades)_[A-Z]{2,20}_\d{4}-\d{2}-\d{2}\.csv$", RegexOptions.Compiled);
     private static readonly TimeSpan Ist = TimeSpan.FromMinutes(330);
 
-    public static readonly string[] SignalColumns =
+    public static readonly string[] Columns =
     {
         "key", "date", "underlying", "time_ist", "strategy_no", "strategy_id", "strategy", "side", "entry", "stop", "target",
         "confidence", "estimated", "day_type", "day_type_price", "vote_oi", "vote_cvd", "adaptive_take", "adaptive_price_only",
-        "adaptive_reason", "status", "r", "exit_time_ist", "exit_price", "exit_reason", "source", "user", "updated_utc",
+        "adaptive_reason", "status", "r", "exit_time_ist", "exit_price", "exit_reason",
+        "trades", "trade_live", "trade_points", "trade_rupees", "trade_detail", "source", "user", "updated_utc",
     };
 
-    public static readonly string[] TradeColumns =
-    {
-        "key", "date", "underlying", "entry_time_ist", "exit_time_ist", "live", "action", "option", "strike", "lots", "lot_size",
-        "entry_premium", "exit_premium", "points", "rupees", "exit_reason", "strategy_no", "strategy_id", "signal_side",
-        "day_type", "adaptive_take", "adaptive_reason", "source", "user", "updated_utc",
-    };
-
-    private readonly string _directory;
+    private readonly string _path;
     private readonly SemaphoreSlim _lock = new(1, 1);
     private readonly ILogger<ScannerLogStore> _logger;
 
@@ -47,110 +41,104 @@ public sealed class ScannerLogStore
     {
         var configured = configuration["Storage:ScannerLogPath"];
         var relativeOrAbsolute = string.IsNullOrWhiteSpace(configured) ? "scanner-log" : configured;
-        _directory = Path.IsPathRooted(relativeOrAbsolute) ? relativeOrAbsolute : Path.Combine(environment.ContentRootPath, relativeOrAbsolute);
+        var directory = Path.IsPathRooted(relativeOrAbsolute) ? relativeOrAbsolute : Path.Combine(environment.ContentRootPath, relativeOrAbsolute);
+        Directory.CreateDirectory(directory);
+        _path = Path.Combine(directory, FileName);
         _logger = logger;
-        Directory.CreateDirectory(_directory);
     }
 
-    /// <summary>Validates and upserts one day's signals and trades. Returns the row counts written, or an
-    /// error for a request that is not a valid day.</summary>
-    public async Task<(int Signals, int Trades, string? Error)> UpsertDayAsync(ScannerLogDayRequest request, string? user, CancellationToken cancellationToken)
+    /// <summary>The CSV file's full path.</summary>
+    public string FilePath => _path;
+
+    /// <summary>Validates and upserts one day's signals (with their trades). Returns the rows written,
+    /// or an error for a request that is not a valid day.</summary>
+    public async Task<(int Rows, string? Error)> UpsertDayAsync(ScannerLogDayRequest request, string? user, CancellationToken cancellationToken)
     {
         var underlying = request.Underlying?.Trim().ToUpperInvariant() ?? "";
-        if (!UnderlyingPattern.IsMatch(underlying)) return (0, 0, "Bad underlying.");
+        if (!UnderlyingPattern.IsMatch(underlying)) return (0, "Bad underlying.");
         if (!DateOnly.TryParseExact(request.Date ?? "", "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var date)
             || date.Year < 2020 || date > DateOnly.FromDateTime(DateTime.UtcNow).AddDays(1))
-            return (0, 0, "Bad date.");
+            return (0, "Bad date.");
         var signals = request.Signals ?? new List<ScannerSignalRow>();
-        var trades = request.Trades ?? new List<ScannerTradeRow>();
-        if (signals.Count > MaxSignals || trades.Count > MaxTrades) return (0, 0, "Too many rows.");
+        if (signals.Count > MaxSignals || signals.Any((s) => (s.Trades?.Count ?? 0) > MaxTradesPerSignal)) return (0, "Too many rows.");
         var source = Text(request.Source);
         var who = Text(user);
         var now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
         var day = date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
 
-        var signalRows = signals.Where((s) => s.Time > 0 && !string.IsNullOrWhiteSpace(s.StrategyId)).Select((s) => new Dictionary<string, string>
+        var rows = signals.Where((s) => s.Time > 0 && !string.IsNullOrWhiteSpace(s.StrategyId)).Select((s) =>
         {
-            ["key"] = $"{Text(s.StrategyId)}|{Text(s.Side)}|{s.Time}",
-            ["date"] = day, ["underlying"] = underlying, ["time_ist"] = IstTime(s.Time),
-            ["strategy_no"] = Num(s.StrategyNo), ["strategy_id"] = Text(s.StrategyId), ["strategy"] = Text(s.Strategy), ["side"] = Text(s.Side),
-            ["entry"] = Num(s.Entry), ["stop"] = Num(s.Stop), ["target"] = Num(s.Target), ["confidence"] = Num(s.Confidence),
-            ["estimated"] = Bool(s.Estimated), ["day_type"] = Text(s.DayType), ["day_type_price"] = Text(s.DayTypePrice),
-            ["vote_oi"] = Text(s.VoteOi), ["vote_cvd"] = Text(s.VoteCvd), ["adaptive_take"] = Bool(s.AdaptiveTake),
-            ["adaptive_price_only"] = Bool(s.AdaptivePriceOnly), ["adaptive_reason"] = Text(s.AdaptiveReason),
-            ["status"] = Text(s.Status), ["r"] = Num(s.R), ["exit_time_ist"] = s.ExitTime is > 0 ? IstTime(s.ExitTime.Value) : "",
-            ["exit_price"] = Num(s.ExitPrice), ["exit_reason"] = Text(s.ExitReason), ["source"] = source, ["user"] = who, ["updated_utc"] = now,
-        }).ToList();
-        var tradeRows = trades.Where((t) => !string.IsNullOrWhiteSpace(t.Key) && t.EntryTime > 0).Select((t) => new Dictionary<string, string>
-        {
-            ["key"] = Text(t.Key), ["date"] = day, ["underlying"] = underlying, ["entry_time_ist"] = IstTime(t.EntryTime),
-            ["exit_time_ist"] = t.ExitTime is > 0 ? IstTime(t.ExitTime.Value) : "", ["live"] = Bool(t.Live), ["action"] = Text(t.Action),
-            ["option"] = Text(t.Option), ["strike"] = Num(t.Strike), ["lots"] = Num(t.Lots), ["lot_size"] = Num(t.LotSize),
-            ["entry_premium"] = Num(t.EntryPremium), ["exit_premium"] = Num(t.ExitPremium), ["points"] = Num(t.Points), ["rupees"] = Num(t.Rupees),
-            ["exit_reason"] = Text(t.ExitReason), ["strategy_no"] = Num(t.StrategyNo), ["strategy_id"] = Text(t.StrategyId),
-            ["signal_side"] = Text(t.SignalSide), ["day_type"] = Text(t.DayType), ["adaptive_take"] = Bool(t.AdaptiveTake),
-            ["adaptive_reason"] = Text(t.AdaptiveReason), ["source"] = source, ["user"] = who, ["updated_utc"] = now,
+            var trades = s.Trades ?? new List<ScannerTradeRow>();
+            var points = trades.Where((t) => t.Points is { } p && double.IsFinite(p)).Select((t) => t.Points!.Value).ToList();
+            var rupees = trades.Where((t) => t.Rupees is { } r && double.IsFinite(r)).Select((t) => t.Rupees!.Value).ToList();
+            return new Dictionary<string, string>
+            {
+                ["key"] = $"{underlying}|{day}|{Text(s.StrategyId)}|{Text(s.Side)}|{s.Time}",
+                ["date"] = day, ["underlying"] = underlying, ["time_ist"] = IstTime(s.Time),
+                ["strategy_no"] = Num(s.StrategyNo), ["strategy_id"] = Text(s.StrategyId), ["strategy"] = Text(s.Strategy), ["side"] = Text(s.Side),
+                ["entry"] = Num(s.Entry), ["stop"] = Num(s.Stop), ["target"] = Num(s.Target), ["confidence"] = Num(s.Confidence),
+                ["estimated"] = Bool(s.Estimated), ["day_type"] = Text(s.DayType), ["day_type_price"] = Text(s.DayTypePrice),
+                ["vote_oi"] = Text(s.VoteOi), ["vote_cvd"] = Text(s.VoteCvd), ["adaptive_take"] = Bool(s.AdaptiveTake),
+                ["adaptive_price_only"] = Bool(s.AdaptivePriceOnly), ["adaptive_reason"] = Text(s.AdaptiveReason),
+                ["status"] = Text(s.Status), ["r"] = Num(s.R), ["exit_time_ist"] = s.ExitTime is > 0 ? IstTime(s.ExitTime.Value) : "",
+                ["exit_price"] = Num(s.ExitPrice), ["exit_reason"] = Text(s.ExitReason),
+                ["trades"] = trades.Count > 0 ? trades.Count.ToString(CultureInfo.InvariantCulture) : "",
+                ["trade_live"] = trades.Count > 0 ? Bool(trades.Any((t) => t.Live == true)) : "",
+                ["trade_points"] = points.Count > 0 ? Num(points.Sum()) : "",
+                ["trade_rupees"] = rupees.Count > 0 ? Num(rupees.Sum()) : "",
+                ["trade_detail"] = Text(string.Join(" | ", trades.Select(TradeText))),
+                ["source"] = source, ["user"] = who, ["updated_utc"] = now,
+            };
         }).ToList();
 
+        if (rows.Count == 0) return (0, null);
         await _lock.WaitAsync(cancellationToken);
         try
         {
-            if (signalRows.Count > 0) Upsert(Path.Combine(_directory, $"signals_{underlying}_{day}.csv"), SignalColumns, signalRows, "time_ist");
-            if (tradeRows.Count > 0) Upsert(Path.Combine(_directory, $"trades_{underlying}_{day}.csv"), TradeColumns, tradeRows, "entry_time_ist");
+            Upsert(rows);
         }
         finally
         {
             _lock.Release();
         }
-        return (signalRows.Count, tradeRows.Count, null);
+        return (rows.Count, null);
     }
 
-    /// <summary>The stored files, newest day first.</summary>
-    public IReadOnlyList<ScannerLogFile> ListFiles() =>
-        new DirectoryInfo(_directory).EnumerateFiles("*.csv")
-            .Where((f) => FilePattern.IsMatch(f.Name))
-            .Select((f) => new ScannerLogFile(f.Name, f.Length, f.LastWriteTimeUtc))
-            .OrderByDescending((f) => f.Name[(f.Name.LastIndexOf('_') + 1)..])
-            .ThenBy((f) => f.Name)
-            .ToList();
+    /// <summary>The file as it is now (only the header before anything is stored).</summary>
+    public string ReadAll() => File.Exists(_path) ? File.ReadAllText(_path) : string.Join(',', Columns) + "\n";
 
-    /// <summary>The full path of a stored file by its exact name, or null - only names this store writes
-    /// are accepted, so nothing outside the folder can be reached.</summary>
-    public string? PathOf(string name)
+    // "SELL PE 22650 x1 @100 -> 80 = +20 pts Rs 1500 (Target hit, 10:35-10:55)" - one punched trade.
+    private static string TradeText(ScannerTradeRow t)
     {
-        if (string.IsNullOrEmpty(name) || !FilePattern.IsMatch(name)) return null;
-        var path = Path.Combine(_directory, name);
-        return File.Exists(path) ? path : null;
-    }
-
-    /// <summary>Every stored day of one kind ('signals' / 'trades') as one CSV (one header), oldest first.</summary>
-    public string? Combined(string kind)
-    {
-        if (kind is not ("signals" or "trades")) return null;
-        var columns = kind == "signals" ? SignalColumns : TradeColumns;
         var sb = new StringBuilder();
-        sb.Append(string.Join(',', columns)).Append('\n');
-        foreach (var file in ListFiles().Where((f) => f.Name.StartsWith(kind + "_", StringComparison.Ordinal)).OrderBy((f) => f.Name[(f.Name.LastIndexOf('_') + 1)..]).ThenBy((f) => f.Name))
-        {
-            foreach (var row in Read(Path.Combine(_directory, file.Name)))
-                sb.Append(Line(columns, row)).Append('\n');
-        }
+        if (t.Live == true) sb.Append("LIVE ");
+        sb.Append(t.Action).Append(' ').Append(t.Option).Append(' ').Append(Num(t.Strike)).Append(" x").Append(Num(t.Lots));
+        sb.Append(" @").Append(Num(t.EntryPremium)).Append(" -> ").Append(t.ExitPremium is null ? "open" : Num(t.ExitPremium));
+        if (t.Points is { } p && double.IsFinite(p)) sb.Append(" = ").Append(p >= 0 ? "+" : "").Append(Num(p)).Append(" pts");
+        if (t.Rupees is { } r && double.IsFinite(r)) sb.Append(" Rs ").Append(Num(Math.Round(r)));
+        var when = t.EntryTime > 0 ? IstTime(t.EntryTime)[11..16] + (t.ExitTime is > 0 ? "-" + IstTime(t.ExitTime.Value)[11..16] : "") : "";
+        var why = string.Join(", ", new[] { t.ExitReason, when }.Where((x) => !string.IsNullOrWhiteSpace(x)));
+        if (why.Length > 0) sb.Append(" (").Append(why).Append(')');
         return sb.ToString();
     }
 
-    private void Upsert(string path, string[] columns, List<Dictionary<string, string>> rows, string sortColumn)
+    private void Upsert(List<Dictionary<string, string>> rows)
     {
         var byKey = new Dictionary<string, Dictionary<string, string>>(StringComparer.Ordinal);
-        foreach (var row in Read(path)) if (row.TryGetValue("key", out var k) && k.Length > 0) byKey[k] = row;
+        foreach (var row in Read(_path)) if (row.TryGetValue("key", out var k) && k.Length > 0) byKey[k] = row;
         foreach (var row in rows) byKey[row["key"]] = row;
         var sb = new StringBuilder();
-        sb.Append(string.Join(',', columns)).Append('\n');
-        foreach (var row in byKey.Values.OrderBy((r) => r.GetValueOrDefault(sortColumn, ""), StringComparer.Ordinal).ThenBy((r) => r["key"], StringComparer.Ordinal))
-            sb.Append(Line(columns, row)).Append('\n');
-        var temp = path + ".tmp";
+        sb.Append(string.Join(',', Columns)).Append('\n');
+        // Oldest first: by date, then the time, then the underlying.
+        foreach (var row in byKey.Values
+                     .OrderBy((r) => r.GetValueOrDefault("time_ist", ""), StringComparer.Ordinal)
+                     .ThenBy((r) => r.GetValueOrDefault("underlying", ""), StringComparer.Ordinal)
+                     .ThenBy((r) => r["key"], StringComparer.Ordinal))
+            sb.Append(Line(Columns, row)).Append('\n');
+        var temp = _path + ".tmp";
         File.WriteAllText(temp, sb.ToString(), new UTF8Encoding(false));
-        File.Move(temp, path, overwrite: true);
-        _logger.LogDebug("Scanner log {Path}: {Rows} rows", path, byKey.Count);
+        File.Move(temp, _path, overwrite: true);
+        _logger.LogDebug("Scanner log {Path}: {Rows} rows", _path, byKey.Count);
     }
 
     /// <summary>Rows of a CSV this store wrote (RFC 4180 quoting), as column -> value.</summary>
@@ -217,18 +205,16 @@ public sealed class ScannerLogStore
     private static string IstTime(long ms) => DateTimeOffset.FromUnixTimeMilliseconds(ms).ToOffset(Ist).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
 }
 
-public sealed record ScannerLogFile(string Name, long Bytes, DateTime UpdatedUtc);
-
 /// <summary>One day's scanner record from the browser (times are epoch milliseconds).</summary>
-public sealed record ScannerLogDayRequest(string? Underlying, string? Date, string? Source, List<ScannerSignalRow>? Signals, List<ScannerTradeRow>? Trades);
+public sealed record ScannerLogDayRequest(string? Underlying, string? Date, string? Source, List<ScannerSignalRow>? Signals);
 
 public sealed record ScannerSignalRow(
     long Time, int? StrategyNo, string? StrategyId, string? Strategy, string? Side, double? Entry, double? Stop, double? Target,
     double? Confidence, bool? Estimated, string? DayType, string? DayTypePrice, string? VoteOi, string? VoteCvd,
     bool? AdaptiveTake, bool? AdaptivePriceOnly, string? AdaptiveReason, string? Status, double? R, long? ExitTime,
-    double? ExitPrice, string? ExitReason);
+    double? ExitPrice, string? ExitReason, List<ScannerTradeRow>? Trades = null);
 
+/// <summary>An option trade punched for a signal (paper or live).</summary>
 public sealed record ScannerTradeRow(
-    string? Key, long EntryTime, long? ExitTime, bool? Live, string? Action, string? Option, double? Strike, int? Lots,
-    int? LotSize, double? EntryPremium, double? ExitPremium, double? Points, double? Rupees, string? ExitReason,
-    int? StrategyNo, string? StrategyId, string? SignalSide, string? DayType, bool? AdaptiveTake, string? AdaptiveReason);
+    long EntryTime, long? ExitTime, bool? Live, string? Action, string? Option, double? Strike, int? Lots,
+    double? EntryPremium, double? ExitPremium, double? Points, double? Rupees, string? ExitReason);
