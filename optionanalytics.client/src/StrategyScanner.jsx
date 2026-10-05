@@ -8,11 +8,11 @@ import { chime, speak, telegram, unlockAudio } from './alerts.js'
 import { notifyLiveTradeEvents, notifyTrade } from './tradeNotify.js'
 import { loadTradeLevels, saveTradeLevels } from './tradeDefaults.js'
 import { suddenWallText } from './suddenOi.js'
-import { adaptiveStats, dayRegime, sessionOpenMs } from './dayRegime.js'
+import { adaptiveStats } from './dayRegime.js'
 import {
   ACTIVE_STRATEGIES, STRATEGY_BY_ID, evaluateStrategies, simulateOutcome, strategyStats, topFifteen, MIN_TRADES_TO_RANK, oiSummary, optionOiText,
   DEFAULT_TRAIL, LAST_ENTRY, SQUARE_OFF, fmtHm, exitLabel, premiumAt, optionPnlPoints, optionTradeText, squareOffMs, optionStopTargetHit, RANGE_IDS, asReplayContext,
-  coolOffGate, gradeOf, optionTradeAt, STRATEGY_FILTERS, strategyFilters, changedFilters,
+  coolOffGate, gradeOf, optionTradeAt, dayTypeAt, STRATEGY_FILTERS, strategyFilters, changedFilters,
 } from './strategyEngine.js'
 import { aggregateBars, analyzeBars, findWalls, liquiditySignals, pullStackSignals, replayRange, replayView } from './orderFlowMath.js'
 
@@ -342,7 +342,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   // The day type at the clock (completed bars only) - shown, and tagged on every setup for the adaptive
   // what-if. Tracking only: it never stops a trigger.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  const regimeNow = useMemo(() => (nowMs && view?.minuteBars?.length ? dayRegime(view.minuteBars, nowMs, sessionOpenMs(nowMs)) : null), [minuteKey, view?.minuteBars?.length])
+  const regimeNow = useMemo(() => (nowMs && view?.minuteBars?.length ? dayTypeAt(oi, view.minuteBars, nowMs) : null), [oi, minuteKey, view?.minuteBars?.length])
 
   useEffect(() => {
     if (!oi || !view?.minuteBars?.length || !nowMs) return
@@ -1176,6 +1176,7 @@ function AdaptivePanel({ adaptive, regimeNow }) {
   const rows = [
     { key: 'all', name: 'All signals (what fired)', v: adaptive.all },
     { key: 'take', name: 'Adaptive would take', v: adaptive.take, strong: true },
+    { key: 'price', name: 'Adaptive on price alone', v: adaptive.takePrice },
     { key: 'skip', name: 'Adaptive would skip', v: adaptive.skip },
   ]
   const better = adaptive.take.trades && adaptive.all.trades ? adaptive.take.avgR - adaptive.all.avgR : null
@@ -1186,7 +1187,13 @@ function AdaptivePanel({ adaptive, regimeNow }) {
         <Tag style={{ margin: 0, fontSize: 11 }}>tracking only</Tag>
         {regimeNow && (
           <Tooltip title={regimeNow.reasons}>
-            <Text style={{ fontSize: 12 }}>Now: <b>{regimeNow.label}</b></Text>
+            <Text style={{ fontSize: 12 }}>Now: <b>{regimeNow.label}</b>
+              {regimeNow.votes && regimeNow.priceType !== 'early' && (
+                <Text type="secondary" style={{ fontSize: 11 }}>
+                  {' '}· price {regimeNow.votes.price.replace('-', ' ')} · OI {regimeNow.votes.oi} · CVD {regimeNow.votes.cvd}
+                </Text>
+              )}
+            </Text>
           </Tooltip>
         )}
       </Space>
@@ -1206,7 +1213,7 @@ function AdaptivePanel({ adaptive, regimeNow }) {
       </table>
       <Text type="secondary" style={{ fontSize: 11 }}>
         {better != null && <>Adaptive {better >= 0 ? 'would have added' : 'would have cost'} <b>{fmtR(Math.abs(better))}</b> per trade so far. </>}
-        The day type is read at each signal from the bars up to then: trend (one IB side broken, a wide, efficient day held on one side of VWAP) - adaptive takes only trades with the trend;
+        The day type is read at each signal from what was known then - three votes: PRICE (the IB, range, net move, VWAP side / crosses), OI (option writers since the open + futures build-up / covering = trend; ATM straddle sold or nobody leaning = range; writers flipping = two-sided) and CVD (one way = trend, up and down = range). Price is kept unless OI / CVD outvote it (then unclear); OI + CVD agreeing call a trend before price. Trend - adaptive takes only trades with the trend;
         {' '}range / two-sided (inside the IB, or both sides broken / chopping across VWAP) - it takes fades and skips trend / breakout setups; unclear or before 10:15 - it takes everything.
         {' '}Nothing is blocked - every setup still fires and alerts as before.{adaptive.untracked ? ` ${adaptive.untracked} setup(s) scored before tracking are not counted - re-run Scan day on those days.` : ''}
       </Text>
