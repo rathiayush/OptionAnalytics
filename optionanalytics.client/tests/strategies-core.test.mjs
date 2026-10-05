@@ -105,23 +105,23 @@ const tapeWith = (nowMs, buyPct) => Array.from({ length: 50 }, (_, i) => ({ seq:
 // E. Stats and top 5.
 {
   const mk = (id, rs) => rs.map((r, i) => ({ id, t: i, outcome: { status: r > 0 ? 'win' : 'loss', r } }))
-  // wallBreak / migration are retired: their (old) trades are not counted.
+  // migration is retired: its (old) trades are not counted.
   const trades = [...mk('wallBreak', [2, 2, -1, 2, -1, 2]), ...mk('range', [-1, -1, 0.5, -1, -1]), ...mk('squeeze', [1.3, 1.3, 1.3, -1, 1.3]),
     ...mk('buildUp', [2.5, -1, -1, 2.5, -1]), ...mk('flush', [-1, -1, -1, -1, 1.3]), ...mk('migration', [2, -1, 2, 2, -1])]
   const stats = strategyStats(trades)
-  const sq = stats.find((s) => s.id === 'squeeze')
-  check('win rate / avg R computed', Math.round(sq.winRate * 100) === 80 && Math.abs(sq.avgR - 0.84) < 1e-9, `${sq.winRate} ${sq.avgR}`)
-  check('a retired strategy is not in the stats, whatever trades it has', !stats.some((s) => s.id === 'wallBreak' || s.id === 'migration'))
+  const wb = stats.find((s) => s.id === 'wallBreak')
+  check('win rate / avg R computed', Math.round(wb.winRate * 100) === 67 && Math.abs(wb.avgR - 1) < 1e-9, `${wb.winRate} ${wb.avgR}`)
+  check('a retired strategy is not in the stats, whatever trades it has', !stats.some((s) => s.id === 'migration'))
   const top = topFive(stats)
-  check('top 5: best expectancy first, losing strategies never alerted, unmeasured picks fill in', top.ids[0] === 'squeeze' && !top.ids.includes('flush') && !top.ids.includes('range') && top.ids.includes('openingBias') && !top.measured, top.ids.join())
+  check('top 5: best expectancy first, losing strategies never alerted, unmeasured picks fill in', top.ids[0] === 'wallBreak' && !top.ids.includes('flush') && !top.ids.includes('range') && top.ids.includes('openingBias') && !top.measured, top.ids.join())
   const few = topFive(strategyStats(mk('range', [2, 2])))
-  check('playbook picks until enough trades - never a retired one', !few.measured && few.ids.join() === 'buildUp,openingBias,iceberg', few.ids.join())
+  check('playbook picks until enough trades - never a retired one', !few.measured && few.ids.join() === 'wallBreak,buildUp,openingBias,iceberg', few.ids.join())
 }
-// Retired: the OI wall strategies #1 / #2, writer migration #3, #25, #26, #28, #29 and #30 - not run, listed
-// or scored by default (tests run them with includeRetired). #12 the 80% rule and #27 run.
+// Retired: OI wall defence #1, writer migration #3, #25, #26, #28, #29 and #30 - not run, listed or scored
+// by default (tests run them with includeRetired). #2 OI wall break, #12 the 80% rule and #27 run.
 {
-  const retired = ['wallDefence', 'wallBreak', 'migration', 'suddenWall', 'heatmapOi', 'oiStructure', 'vwapOi', 'ibFailed']
-  check('#1 #2 #3 #25 #26 #28 #29 #30 are retired; #12 and #27 run', ACTIVE_STRATEGIES.some((x) => x.id === 'tpo80') && ACTIVE_STRATEGIES.some((x) => x.id === 'vwapPullback')
+  const retired = ['wallDefence', 'migration', 'suddenWall', 'heatmapOi', 'oiStructure', 'vwapOi', 'ibFailed']
+  check('#1 #3 #25 #26 #28 #29 #30 are retired; #2, #12 and #27 run', ['wallBreak', 'tpo80', 'vwapPullback'].every((id) => ACTIVE_STRATEGIES.some((x) => x.id === id))
     && retired.every((id) => STRATEGIES.find((x) => x.id === id)?.retired && !ACTIVE_STRATEGIES.some((x) => x.id === id) && !strategyStats([]).some((x) => x.id === id)))
 }
 console.log(fails ? `${fails} FAILED` : 'all passed')

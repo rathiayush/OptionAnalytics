@@ -49,7 +49,7 @@ export const STRATEGIES = [
   // retired: not run, alerted or listed; the rules stay (the tests still exercise them) so one can come
   // back by dropping the flag.
   { id: 'wallDefence', no: 1, name: 'OI wall defence', short: 'Wall defence', retired: true },
-  { id: 'wallBreak', no: 2, name: 'OI wall break - writers run', short: 'Wall break', retired: true },
+  { id: 'wallBreak', no: 2, name: 'OI wall break - writers run', short: 'Wall break' },
   { id: 'migration', no: 3, name: 'Writer migration', short: 'Migration', retired: true },
   { id: 'squeeze', no: 4, name: 'Short-covering squeeze', short: 'Squeeze' },
   { id: 'flush', no: 5, name: 'Long-unwinding flush', short: 'Flush' },
@@ -105,7 +105,7 @@ export const STRATEGY_BY_ID = Object.fromEntries(STRATEGIES.map((s) => [s.id, s]
 /** The strategies in use - what the scanner runs, lists, alerts on and scores. */
 export const ACTIVE_STRATEGIES = STRATEGIES.filter((s) => !s.retired)
 // The playbook's own picks, used for alerts until enough trades have been scored to rank them.
-export const DEFAULT_TOP5 = ['buildUp', 'openingBias', 'iceberg']
+export const DEFAULT_TOP5 = ['wallBreak', 'buildUp', 'openingBias', 'iceberg']
 export const DEFAULT_PROFILE_TOP5 = ['vaRejection', 'tpo80', 'pocReaction', 'lvnRun', 'ibBreakout']
 export const RANGE_IDS = ACTIVE_STRATEGIES.filter((s) => s.group === 'range').map((s) => s.id)
 

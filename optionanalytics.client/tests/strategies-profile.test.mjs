@@ -137,8 +137,8 @@ function runShort(spot) {
   check('top 15 (the measured loser left out), profile group led by its best', t.ids.length === 15 && !t.ids.includes('range') && t.profile.ids[0] === 'lvnRun', t.ids.join())
   const inst = ['oiSqueeze', 'trap', 'cvdDivergence', 'blockTrade', 'imbalanceRetest']
   const active = new Set(STRATEGIES.filter((x) => !x.retired).map((x) => x.id))
-  check('unmeasured: top 15 = the 3 OI picks left + profile top 5 + the OI squeeze + the institutional setups, topped up from the rest - nothing retired', inst.every((id) => t.ids.includes(id))
-    && ['buildUp', 'openingBias', 'iceberg'].every((id) => t.ids.includes(id)) && t.ids.length === 15 && t.ids.every((id) => active.has(id)) && !t.ids.includes('wallDefence') && !t.ids.includes('wallBreak') && !t.ids.includes('migration'), t.ids.join())
+  check('unmeasured: top 15 = the 4 OI picks left + profile top 5 + the OI squeeze + the institutional setups, topped up from the rest - nothing retired', inst.every((id) => t.ids.includes(id))
+    && ['wallBreak', 'buildUp', 'openingBias', 'iceberg'].every((id) => t.ids.includes(id)) && t.ids.length === 15 && t.ids.every((id) => active.has(id)) && !t.ids.includes('wallDefence') && !t.ids.includes('migration'), t.ids.join())
   // A measured, profitable range strategy outranks an unmeasured institutional one for the last five.
   const t2 = topFifteen(strategyStats([...mk('vwapFade', [1.5, 1.5, -1, 1.5, 1.5, 1.5])]))
   check('a measured profitable range fade gets into the top 15', t2.ids.includes('vwapFade') && t2.ids.length === 15, t2.ids.join())
