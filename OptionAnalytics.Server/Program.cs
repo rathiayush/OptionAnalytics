@@ -75,11 +75,6 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
         };
     });
 
-// Fallback policy: every endpoint requires SOME signed-in account by default, unless it opts out
-// with [AllowAnonymous] (AuthController's own login/logout/me, plus /health and /api/version below
-// - both hit by Docker's HEALTHCHECK/redeploy checks with no session at all). AdminOnly is the
-// extra bar TriggersController and CdvController's two Contracts-page endpoints add on top - see
-// each controller's own doc comment for why those specifically are gated.
 // Login attempts per client IP: 10 per 5 minutes - the admin account places real orders, so its
 // password must not be guessable by brute force. A rejected attempt gets 429 (LoginPage shows it).
 builder.Services.AddRateLimiter(options =>
@@ -90,6 +85,11 @@ builder.Services.AddRateLimiter(options =>
         _ => new System.Threading.RateLimiting.FixedWindowRateLimiterOptions { PermitLimit = 10, Window = TimeSpan.FromMinutes(5), QueueLimit = 0 }));
 });
 
+// Fallback policy: every endpoint requires SOME signed-in account by default, unless it opts out
+// with [AllowAnonymous] (AuthController's own login/logout/me, plus /health and /api/version below
+// - both hit by Docker's HEALTHCHECK/redeploy checks with no session at all). AdminOnly is the
+// extra bar TriggersController and CdvController's two Contracts-page endpoints add on top - see
+// each controller's own doc comment for why those specifically are gated.
 builder.Services.AddAuthorization(options =>
 {
     options.FallbackPolicy = new AuthorizationPolicyBuilder()
