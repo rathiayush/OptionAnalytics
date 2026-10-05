@@ -85,6 +85,10 @@ public sealed class LiveTradingService : BackgroundService
     // live positions (the pages pop a notification for each new one) and sent to Telegram.
     private readonly List<LiveTradeEvent> _events = new();
     private readonly HashSet<string> _eventKeys = new();
+    // Trailing stop-loss of this app's live trades, per super order (premium points) - see TrailStop.
+    // In memory only: after a restart the stop-loss leg stays where it was last moved (never looser).
+    private readonly Dictionary<string, TrailState> _trails = new();
+    private static readonly TimeSpan TrailModifyInterval = TimeSpan.FromSeconds(2);
     private DateOnly _eventsDay;
     internal const int MaxEvents = 40;
 
@@ -555,7 +559,100 @@ public sealed class LiveTradingService : BackgroundService
             }
         }
         if (due is not null) foreach (var protection in due) _ = FireTargetAsync(protection);
+        if (TrailsDue(tick) is { } moves) foreach (var (orderId, stop) in moves) _ = MoveTrailingStopAsync(orderId, stop);
         if (tracked) Push();
+    }
+
+    /// <summary>Where a trailing stop-loss should be for the best premium so far: once the trade is
+    /// <paramref name="start"/> points in profit, <paramref name="gap"/> points behind the best (a BUY's stop
+    /// below it, a SELL's above), rounded to the tick; null when off or not that far in profit yet. The
+    /// same rule as the paper trades (optionanalytics.client/src/optionTrail.js).</summary>
+    internal static decimal? TrailStop(bool entryIsSell, decimal entry, decimal best, decimal start, decimal gap, decimal tick)
+    {
+        if (gap <= 0 || entry <= 0 || best <= 0) return null;
+        var profit = entryIsSell ? entry - best : best - entry;
+        if (profit < Math.Max(0, start)) return null;
+        var level = StrategyTriggerHostedService.RoundToTick(entryIsSell ? best + gap : best - gap, tick > 0 ? tick : 0.05m);
+        return level > 0 ? level : null;
+    }
+
+    /// <summary>Starts (gap above 0) or stops trailing the stop-loss of these super orders.</summary>
+    public void SetTrail(IReadOnlyList<string> orderIds, decimal startPoints, decimal gapPoints)
+    {
+        lock (_lock)
+        {
+            foreach (var id in orderIds)
+            {
+                if (gapPoints <= 0) { _trails.Remove(id); continue; }
+                if (_trails.TryGetValue(id, out var existing)) { existing.Start = startPoints; existing.Gap = gapPoints; }
+                else _trails[id] = new TrailState { Start = startPoints, Gap = gapPoints };
+            }
+        }
+    }
+
+    /// <summary>The trailing stops this tick moves: for each trailed super order of the tick's contract
+    /// whose entry has filled and whose stop-loss leg is still working, the best premium is updated and,
+    /// when the trailing level is at least a tick tighter than the leg (and still on the right side of
+    /// the market), the leg is moved - at most once per TrailModifyInterval, one request at a time.</summary>
+    private List<(string OrderId, decimal Stop)>? TrailsDue(SpotTick tick)
+    {
+        if (tick.LastPrice <= 0) return null;
+        List<(string, decimal)>? due = null;
+        lock (_lock)
+        {
+            if (_trails.Count == 0) return null;
+            var now = DateTimeOffset.UtcNow;
+            foreach (var (orderId, trail) in _trails)
+            {
+                var order = _currentOrders.FirstOrDefault(o => o.OrderId == orderId);
+                if (order is null || order.SecurityId != tick.SecurityId.ToString() || !string.Equals(order.OrderStatus, "TRADED", StringComparison.OrdinalIgnoreCase)) continue;
+                var leg = order.LegDetails.FirstOrDefault(l => l.LegName == "STOP_LOSS_LEG" && IsOpenStatus(l.OrderStatus));
+                if (leg?.Price is not { } legStop || legStop <= 0) continue;
+                var isSell = string.Equals(order.TransactionType, "SELL", StringComparison.OrdinalIgnoreCase);
+                var entry = _fills.TryGetValue((orderId, 1), out var fill) && fill.Avg is > 0 ? fill.Avg.Value : order.Price;
+                trail.Best = trail.Best <= 0 ? entry : isSell ? Math.Min(trail.Best, tick.LastPrice) : Math.Max(trail.Best, tick.LastPrice);
+                var tickSize = _chain.FindBySecurityId(tick.SecurityId)?.TickSize is > 0 and var t ? t : 0.05m;
+                if (TrailStop(isSell, entry, trail.Best, trail.Start, trail.Gap, tickSize) is not { } stop) continue;
+                var current = trail.LastSent is { } sent ? (isSell ? Math.Min(legStop, sent) : Math.Max(legStop, sent)) : legStop;
+                var tighter = isSell ? stop <= current - tickSize : stop >= current + tickSize;
+                var marketSide = isSell ? stop > tick.LastPrice : stop < tick.LastPrice;
+                if (!tighter || !marketSide || trail.InFlight || now - trail.LastSentAt < TrailModifyInterval) continue;
+                trail.InFlight = true;
+                (due ??= new()).Add((orderId, stop));
+            }
+        }
+        return due;
+    }
+
+    private async Task MoveTrailingStopAsync(string orderId, decimal stop)
+    {
+        try
+        {
+            // Never alongside a Close / Exit / Cancel: if one is running, this move waits for a later tick.
+            if (!await _actionLock.WaitAsync(0)) return;
+            try
+            {
+                var (result, error) = await _superOrders.ModifyAsync(orderId, "STOP_LOSS_LEG", null, null, null, null, stop, null, CancellationToken.None);
+                if (result is null) { _logger.LogWarning("Trailing stop of {Order}: Dhan did not move it to {Stop} - {Error}", orderId, stop, error); return; }
+                lock (_lock)
+                {
+                    if (_trails.TryGetValue(orderId, out var trail)) { trail.LastSent = stop; trail.LastSentAt = DateTimeOffset.UtcNow; }
+                }
+                _logger.LogInformation("Trailing stop of {Order} moved to {Stop}.", orderId, stop);
+            }
+            finally
+            {
+                _actionLock.Release();
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Moving the trailing stop of {Order} failed.", orderId);
+        }
+        finally
+        {
+            lock (_lock) { if (_trails.TryGetValue(orderId, out var trail)) trail.InFlight = false; }
+        }
     }
 
     /// <summary>A long (closed by selling) reaches its target at or above it; a short at or below.</summary>
@@ -788,6 +885,7 @@ public sealed class LiveTradingService : BackgroundService
                 orderIds.Add(result.OrderId);
             }
 
+            if (request.TrailGapPoints > 0) SetTrail(orderIds, request.TrailStartPoints, request.TrailGapPoints);
             _logger.LogWarning("Manual LIVE order: {Transaction} {Symbol} x{Quantity} LIMIT {Limit} (ref {Reference}), target {Target}, SL {StopLoss} - orders {Orders}.",
                 transactionType, contract.TradingSymbol, quantity, prices.Limit, prices.Reference, prices.Target, prices.StopLoss, string.Join(",", orderIds));
             RefreshUnlessStreaming();
@@ -1154,6 +1252,10 @@ public sealed class LiveTradingService : BackgroundService
                 if (status == "TRADED")
                 {
                     if (target is not null && order.LegDetails.Any(l => l.LegName == "TARGET_LEG" && IsOpenStatus(l.OrderStatus))) changes.Add(("TARGET_LEG", target, null));
+                    // A stop that has already trailed past the new level stays where it is - a new Max SL never loosens it.
+                    decimal? trailed;
+                    lock (_lock) trailed = _trails.TryGetValue(order.OrderId, out var tr) ? tr.LastSent : null;
+                    if (stop is { } st && trailed is { } tl && (isSell ? tl < st : tl > st)) stop = null;
                     if (stop is not null && order.LegDetails.Any(l => l.LegName == "STOP_LOSS_LEG" && IsOpenStatus(l.OrderStatus))) changes.Add(("STOP_LOSS_LEG", null, stop));
                 }
                 else if (IsOpenStatus(status) && (target is not null || stop is not null)) changes.Add(("ENTRY_LEG", target, stop));
@@ -1400,9 +1502,21 @@ public sealed class LiveTradingService : BackgroundService
     }
 }
 
+/// <summary>TrailStartPoints / TrailGapPoints: the stop-loss leg trails the best premium TrailGapPoints behind
+/// once the trade is TrailStartPoints in profit (0 gap = no trailing) - LiveTradingService.TrailStop.</summary>
 public sealed record ManualOrderRequest(
     string Underlying, DateOnly Expiry, decimal Strike, string Side, string Direction, int Lots,
-    decimal SlippagePoints, decimal StopLossPoints, decimal TargetPoints);
+    decimal SlippagePoints, decimal StopLossPoints, decimal TargetPoints, decimal TrailStartPoints = 0, decimal TrailGapPoints = 0);
+
+internal sealed class TrailState
+{
+    public decimal Start { get; set; }
+    public decimal Gap { get; set; }
+    public decimal Best { get; set; }
+    public decimal? LastSent { get; set; }
+    public DateTimeOffset LastSentAt { get; set; }
+    public bool InFlight { get; set; }
+}
 
 public sealed record ManualOrderPrices(decimal Reference, decimal Limit, decimal Target, decimal StopLoss);
 

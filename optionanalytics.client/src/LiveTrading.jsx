@@ -37,7 +37,10 @@ export const liveTradingApi = {
   cancelAll: () => postJson('/api/live-trading/orders/cancel-all', null),
   // One strategy trade (its super orders) - not the whole position in that contract.
   exitTrade: (orderIds, slippagePoints) => postJson('/api/live-trading/orders/exit-trade', { orderIds, slippagePoints }),
-  tradeLevels: (orderIds, stopLossPoints, targetPoints) => postJson('/api/live-trading/orders/trade-levels', { orderIds, slippagePoints: 0, stopLossPoints, targetPoints }),
+  // trail: { start, gap } moves the trade's trailing stop too (gap 0 stops it); omitted leaves it as it is.
+  tradeLevels: (orderIds, stopLossPoints, targetPoints, trail = null) => postJson('/api/live-trading/orders/trade-levels', {
+    orderIds, slippagePoints: 0, stopLossPoints, targetPoints, ...(trail ? { trailStartPoints: trail.start ?? 0, trailGapPoints: trail.gap ?? 0 } : {}),
+  }),
 }
 
 const money = (v) => (v == null ? '—' : `${v >= 0 ? '+' : ''}${Math.round(v).toLocaleString('en-IN')}`)

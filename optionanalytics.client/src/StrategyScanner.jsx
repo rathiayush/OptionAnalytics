@@ -64,7 +64,10 @@ function levelsText(r, settings) {
   const tg = r.targetPts ?? settings.paperTarget ?? 30
   const targetLevel = sell ? r.premium - tg : r.premium + tg
   // A SELL can make at most its whole premium: a target bigger than that is never reached.
-  const parts = [sl > 0 && `SL ${(sell ? r.premium + sl : r.premium - sl).toFixed(1)}`, tg > 0 && (targetLevel > 0 ? `T ${targetLevel.toFixed(1)}` : `T unreachable (${tg} pts > premium)`)].filter(Boolean)
+  const trailGap = r.trailGap ?? settings.paperTrailGap ?? 0
+  const trailStart = r.trailStart ?? settings.paperTrailStart ?? 0
+  const parts = [sl > 0 && `SL ${(sell ? r.premium + sl : r.premium - sl).toFixed(1)}`, tg > 0 && (targetLevel > 0 ? `T ${targetLevel.toFixed(1)}` : `T unreachable (${tg} pts > premium)`),
+    trailGap > 0 && `trail ${trailGap} pts after +${trailStart}`].filter(Boolean)
   return parts.length ? ` · ${parts.join(' / ')}` : ''
 }
 
@@ -113,14 +116,15 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     // The option Max SL / Target are per underlying (tradeDefaults.js - BANKNIFTY's premiums move ~2.5x
     // NIFTY's): this underlying's saved levels, else its defaults.
     const levels = loadTradeLevels('scanner', underlying)
-    Object.assign(saved, { paperSl: levels.sl, paperTarget: levels.target })
+    Object.assign(saved, { paperSl: levels.sl, paperTarget: levels.target, paperTrailStart: levels.trailStart, paperTrailGap: levels.trailGap })
     return saved.pick === 'top5' ? { ...saved, pick: 'top15' } : saved
   })
   useEffect(() => writeJson(SETTINGS_KEY, settings), [settings])
   // Another underlying: its own Max SL / Target (open trades keep the levels they have).
   useEffect(() => {
     const levels = loadTradeLevels('scanner', underlying)
-    setSettings((s) => (s.paperSl === levels.sl && s.paperTarget === levels.target ? s : { ...s, paperSl: levels.sl, paperTarget: levels.target }))
+    setSettings((s) => (s.paperSl === levels.sl && s.paperTarget === levels.target && s.paperTrailStart === levels.trailStart && s.paperTrailGap === levels.trailGap
+      ? s : { ...s, paperSl: levels.sl, paperTarget: levels.target, paperTrailStart: levels.trailStart, paperTrailGap: levels.trailGap }))
   }, [underlying])
   const [history, setHistory] = useState(() => readJson(HISTORY_KEY, {}))
   const [fired, setFired] = useState([])
@@ -188,7 +192,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       const position = {
         key, setupKey: `${setup.id}-${setup.t}`, setupT: setup.t, strategy: setup.id, setupSide: setup.side, action: trade.action, side: trade.side, strike: trade.strike,
         // The contract's real lot size from Dhan's contract list (the table is only a fallback).
-        lots, lotSize: result.lotSize ?? PAPER_TRADE_LOT_SIZE[underlying] ?? 1, premium: result.prices?.limit ?? trade.premium, slPts: cfg.paperSl, targetPts: cfg.paperTarget,
+        lots, lotSize: result.lotSize ?? PAPER_TRADE_LOT_SIZE[underlying] ?? 1, premium: result.prices?.limit ?? trade.premium, slPts: cfg.paperSl, targetPts: cfg.paperTarget, trailStart: cfg.paperTrailStart ?? 0, trailGap: cfg.paperTrailGap ?? 0,
         entryTime: nowMsRef.current ?? Date.now(), exitTime: null, exitPremium: null, exitReason: null,
         live: true, orderIds: result.orderIds ?? [], liveNote: note ?? result.message,
       }
@@ -199,6 +203,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       const result = await liveTradingApi.place({
         underlying, expiry: oi.expiry, strike: trade.strike, side: trade.side, direction: trade.action, lots,
         slippagePoints: cfg.liveSlippage ?? 2, stopLossPoints: cfg.paperSl, targetPoints: cfg.paperTarget,
+        trailStartPoints: cfg.paperTrailGap > 0 ? cfg.paperTrailStart ?? 0 : 0, trailGapPoints: cfg.paperTrailGap ?? 0,
       })
       const position = record(result)
       notifyTrade({ kind: 'entry', title: `LIVE ${trade.action} ${trade.strike} ${trade.side} x${lots} placed on Dhan`, text: result.message, sound: cfg.sound !== false })
@@ -253,7 +258,8 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       if (list.some((p) => sameSignal(p, setup, trade))) return prev
       const position = {
         key, setupKey: `${setup.id}-${setup.t}`, setupT: setup.t, strategy: setup.id, setupSide: setup.side, action: trade.action, side: trade.side, strike: trade.strike,
-        lots, lotSize: PAPER_TRADE_LOT_SIZE[underlying] ?? 1, premium, slPts: settingsRef.current.paperSl ?? 20, targetPts: settingsRef.current.paperTarget ?? 30, entryTime: at, exitTime: null, exitPremium: null, exitReason: null,
+        lots, lotSize: PAPER_TRADE_LOT_SIZE[underlying] ?? 1, premium, slPts: settingsRef.current.paperSl ?? 20, targetPts: settingsRef.current.paperTarget ?? 30,
+        trailStart: settingsRef.current.paperTrailStart ?? 0, trailGap: settingsRef.current.paperTrailGap ?? 0, entryTime: at, exitTime: null, exitPremium: null, exitReason: null,
       }
       return { ...prev, [dayKey]: { date, positions: [...list, position] } }
     })
@@ -604,7 +610,8 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       // checked up to the setup's exit - whichever comes first closes it.
       const setupExitAt = o && o.status !== 'open' ? (o.exitAt != null ? o.exitAt + MIN : squareOffMs(p.entryTime)) : Infinity
       const own = oi && setupExitAt > p.entryTime
-        ? optionStopTargetHit(oi, p, p.entryTime, Math.min(setupExitAt, exitTime ?? Infinity, nowMs ?? Infinity), p.slPts ?? settings.paperSl ?? 20, p.targetPts ?? settings.paperTarget ?? 30)
+        ? optionStopTargetHit(oi, p, p.entryTime, Math.min(setupExitAt, exitTime ?? Infinity, nowMs ?? Infinity), p.slPts ?? settings.paperSl ?? 20, p.targetPts ?? settings.paperTarget ?? 30,
+          { start: p.trailStart ?? settings.paperTrailStart ?? 0, gap: p.trailGap ?? settings.paperTrailGap ?? 0 })
         : null
       if (own) { exitTime = own.at; exitPremium = own.premium; exitReason = own.reason }
       if (!exitTime && o && o.status !== 'open') {
@@ -624,7 +631,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       const points = now.premium == null ? null : p.action === 'BUY' ? now.premium - p.premium : p.premium - now.premium
       return { ...p, exitTime, exitReason, current: now.premium, points, rupees: points == null ? null : points * p.lots * p.lotSize }
     })
-  }, [paperBook, dayKey, dayResults, withOutcome, oi, nowMs, settings.paperSl, settings.paperTarget, settings.paperLots])
+  }, [paperBook, dayKey, dayResults, withOutcome, oi, nowMs, settings.paperSl, settings.paperTarget, settings.paperTrailStart, settings.paperTrailGap, settings.paperLots])
   const paperRowsRef = useRef(paperRows)
   useEffect(() => { paperRowsRef.current = paperRows }, [paperRows])
   const paperTotal = paperRows.reduce((sum, r) => sum + (r.rupees ?? 0), 0)
@@ -711,21 +718,25 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   const levelsTimerRef = useRef(null)
   const changeLimits = (patch) => {
     setSettings((s) => ({ ...s, ...patch }))
-    if (patch.paperSl != null || patch.paperTarget != null) {
+    if (patch.paperSl != null || patch.paperTarget != null || patch.paperTrailStart != null || patch.paperTrailGap != null) {
       const cur = settingsRef.current
-      saveTradeLevels('scanner', underlying, { sl: patch.paperSl ?? cur.paperSl, target: patch.paperTarget ?? cur.paperTarget })
+      saveTradeLevels('scanner', underlying, {
+        sl: patch.paperSl ?? cur.paperSl, target: patch.paperTarget ?? cur.paperTarget,
+        trailStart: patch.paperTrailStart ?? cur.paperTrailStart ?? 0, trailGap: patch.paperTrailGap ?? cur.paperTrailGap ?? 0,
+      })
     }
     const openRows = paperRows.filter((r) => !r.exitTime)
     const open = new Set(openRows.map((r) => r.key))
     if (!open.size) return
     // Open LIVE trades: move their super order legs on Dhan too (once the typing stops).
-    const liveOpen = patch.paperSl != null || patch.paperTarget != null ? openRows.filter((r) => r.live && r.orderIds?.length) : []
+    const trailChanged = patch.paperTrailStart != null || patch.paperTrailGap != null
+    const liveOpen = patch.paperSl != null || patch.paperTarget != null || trailChanged ? openRows.filter((r) => r.live && r.orderIds?.length) : []
     if (liveOpen.length) {
       clearTimeout(levelsTimerRef.current)
       levelsTimerRef.current = setTimeout(() => {
         const cfg = settingsRef.current
         for (const r of liveOpen) {
-          liveTradingApi.tradeLevels(r.orderIds, cfg.paperSl ?? 0, cfg.paperTarget ?? 0)
+          liveTradingApi.tradeLevels(r.orderIds, cfg.paperSl ?? 0, cfg.paperTarget ?? 0, { start: cfg.paperTrailStart ?? 0, gap: cfg.paperTrailGap ?? 0 })
             .then((result) => markPosition(r.key, { liveNote: result.message }))
             .catch((err) => notification.error({ message: `Could not move the SL / target on Dhan: ${r.strike} ${r.side}`, description: err.message, placement: 'topRight', duration: 10 }))
         }
@@ -742,6 +753,8 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
             ...p,
             ...(patch.paperSl != null ? { slPts: patch.paperSl } : {}),
             ...(patch.paperTarget != null ? { targetPts: patch.paperTarget } : {}),
+            ...(patch.paperTrailStart != null ? { trailStart: patch.paperTrailStart } : {}),
+            ...(patch.paperTrailGap != null ? { trailGap: patch.paperTrailGap } : {}),
           } : p)),
         },
       }
@@ -955,6 +968,16 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                 <Text style={{ fontSize: 12 }}>Target</Text>
                 <InputNumber size="small" min={0} max={1000} step={5} style={{ width: 64 }} value={settings.paperTarget ?? 30} aria-label="Paper target points"
                   onChange={(v) => v != null && changeLimits({ paperTarget: v })} />
+                <Tooltip title="Trailing stop on the option premium: once a trade is 'Trail after' points in profit, its stop follows the best premium 'Follow' points behind and only tightens (Follow 0 = off). Paper trades here; live trades: the server moves the super order's stop-loss leg on every tick. A change applies to open trades too.">
+                  <Space size={4}>
+                    <Text style={{ fontSize: 12 }}>Trail after</Text>
+                    <InputNumber size="small" min={0} max={1000} step={5} style={{ width: 64 }} value={settings.paperTrailStart ?? 0} aria-label="Trail after points"
+                      onChange={(v) => v != null && changeLimits({ paperTrailStart: v })} />
+                    <Text style={{ fontSize: 12 }}>follow</Text>
+                    <InputNumber size="small" min={0} max={500} step={1} style={{ width: 64 }} value={settings.paperTrailGap ?? 0} aria-label="Trail follow points"
+                      onChange={(v) => v != null && changeLimits({ paperTrailGap: v })} />
+                  </Space>
+                </Tooltip>
                 <Text type="secondary" style={{ fontSize: 11 }}>premium pts (0 = off) · lots size every paper trade of the day (live trades keep theirs); a SL / target change applies to open trades, closed ones keep theirs</Text>
                 {paperRows.length > 0 && <Text strong style={{ fontSize: 12, color: paperTotal >= 0 ? UP_COLOR : DOWN_COLOR }}>P&amp;L ₹{Math.round(paperTotal).toLocaleString('en-IN')}</Text>}
                 {paperRows.some((r) => !r.live) && (

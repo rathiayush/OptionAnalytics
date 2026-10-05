@@ -25,6 +25,7 @@
 
 import { findSuddenWalls, suddenWallText } from './suddenOi.js'
 import { liquidityMap } from './orderFlowMath.js'
+import { optionTrailLevel, tighterStop } from './optionTrail.js'
 
 const MIN = 60_000
 /** The strategies that wait for a fast run to cool off before entering (coolOffGate) - the ones that
@@ -304,8 +305,9 @@ export function optionPnlPoints(trade, oi, ms) {
  *  minute after `entryMs` (and before `untilMs`) whose range reaches either level. A SELL loses when the
  *  premium rises, a BUY when it falls; the stop counts first when one minute touches both. Filled at
  *  the level itself. Returns { at (ms, the minute's end), premium, reason } or null. */
-export function optionStopTargetHit(oi, trade, entryMs, untilMs, slPoints, targetPoints) {
-  if (!(slPoints > 0) && !(targetPoints > 0)) return null
+export function optionStopTargetHit(oi, trade, entryMs, untilMs, slPoints, targetPoints, trail = null) {
+  const trailOn = trail?.gap > 0
+  if (!(slPoints > 0) && !(targetPoints > 0) && !trailOn) return null
   const series = (trade.side === 'CE' ? oi?.ce : oi?.pe)?.get(trade.strike)
   if (!series?.length) return null
   const sell = trade.action === 'SELL'
@@ -315,6 +317,9 @@ export function optionStopTargetHit(oi, trade, entryMs, untilMs, slPoints, targe
   // before it); `lag`: a replayed day's points are stamped at their minute's end.
   const lag = oi?.lag ?? 0
   const firstMinute = Math.ceil(entryMs / MIN) * MIN
+  // Trailing (optionTrail.js): the stop in force in a minute comes from the best premium of the minutes
+  // BEFORE it - it moves after each completed minute, only tightening.
+  let best = trade.premium
   for (const p of series) {
     const start = p.t - lag
     if (start < firstMinute) continue
@@ -322,8 +327,13 @@ export function optionStopTargetHit(oi, trade, entryMs, untilMs, slPoints, targe
     const high = p.high ?? p.price
     const low = p.low ?? p.price
     if (!(high > 0)) continue
-    if (stop != null && (sell ? high >= stop : low <= stop)) return { at: start + MIN, premium: stop, reason: `Max SL ${slPoints} pts hit` }
+    const trailed = trailOn ? optionTrailLevel(trade.action, trade.premium, best, trail.start, trail.gap) : null
+    const inForce = tighterStop(trade.action, stop, trailed)
+    if (inForce != null && (sell ? high >= inForce : low <= inForce)) {
+      return { at: start + MIN, premium: inForce, reason: inForce === trailed && trailed !== stop ? `Trailing SL hit (${trail.gap} pts behind the best ${best.toFixed(1)})` : `Max SL ${slPoints} pts hit` }
+    }
     if (target != null && (sell ? low <= target : high >= target)) return { at: start + MIN, premium: target, reason: `Target ${targetPoints} pts hit` }
+    best = sell ? Math.min(best, low) : Math.max(best, high)
   }
   return null
 }
