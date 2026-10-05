@@ -13,6 +13,7 @@ import {
   NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, STORED_SHOW_VOLUME_PROFILE, usePersistedState,
   syncSignalRGroups, joinAllSignalRGroups, useCardOrder, CardDragHandle, onLiveBatch, useFeedLag, FeedLagTag, FeedLagAlert, LiveSection, checkForNewDeploy, useAuth,
 } from './shared.jsx'
+import { alignToBars, chartVwap, sessionVwapFromBars } from './chartVwap.js'
 import { PremiumEmaChart, DraggableFloatingPanel, useFitContentAsDataGrows, useChartUserControl, CANDLE_SCALE_MARGINS } from './oiShared.jsx'
 import { LivePositionsView, liveTradingApi } from './LiveTrading.jsx'
 import { StrikePicker, moneynessLabel } from './StrikePicker.jsx'
@@ -869,11 +870,11 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = tru
     seriesRef.current.setData(bars)
   }, [bars])
 
-  // Fed only while checked, empty otherwise - see EmaChart's own identical effect for why VWAP is
-  // shown at its own native cadence rather than re-aggregated to match this chart's timeframe.
+  // Fed only while checked, empty otherwise - on the candles' own times (chartVwap): a 1-minute /
+  // multi-day VWAP series adds time points the candles do not have and squeezes them into a corner.
   useEffect(() => {
-    vwapSeriesRef.current?.setData(showVwap ? vwapSeries : EMPTY_ARRAY)
-  }, [vwapSeries, showVwap])
+    vwapSeriesRef.current?.setData(showVwap ? chartVwap(bars, vwapSeries) : EMPTY_ARRAY)
+  }, [vwapSeries, showVwap, bars])
 
   // Re-fits to the WHOLE day so far as it grows, not just once when it first loads - see
   // useFitContentAsDataGrows' own doc comment. Only while the viewer is already at the live edge,
@@ -1481,12 +1482,11 @@ function EmaChart({
   useEffect(() => { if (seriesRef.current) seriesRef.current.setData(displayBars) }, [displayBars])
   useEffect(() => { if (ema1SeriesRef.current) ema1SeriesRef.current.setData(ema1Points) }, [ema1Points])
   useEffect(() => { if (ema2SeriesRef.current) ema2SeriesRef.current.setData(ema2Points) }, [ema2Points])
-  // Own native 1-minute cadence, not re-aggregated to this chart's own timeframe - VWAP is a
-  // session-cumulative value, not a moving average of the visible candles (exactly how TradingView
-  // shows it too).
+  // The session VWAP's value at each candle, on the candle's own time (chartVwap) - its native
+  // 1-minute points on a 5-minute chart added four empty slots between candles (the distortion).
   useEffect(() => {
-    vwapSeriesRef.current?.setData(showVwap ? vwapSeries : EMPTY_ARRAY)
-  }, [vwapSeries, showVwap])
+    vwapSeriesRef.current?.setData(showVwap ? chartVwap(displayBars, vwapSeries) : EMPTY_ARRAY)
+  }, [vwapSeries, showVwap, displayBars])
 
   // Previous-day volume profile - marked on BY DEFAULT (no toggle; the user's own explicit ask), not
   // gated behind isLive the way VWAP is: yesterday's own already-closed levels are just as valid a
@@ -1578,9 +1578,10 @@ function classifyFuturesRegime(priceDelta, oiDelta, priceThreshold, oiThreshold)
 // rows - drawn into the chart by VolumeProfilePrimitive, with POC / VAH / VAL price lines.
 // deltaBars: [{ time (chart time), delta, cvd }] per candle - each candle's delta as a histogram and
 // the cumulative delta as a line, in a band under the candles (own scales).
-function FuturesChart({ bars, oiLine, markers, dayKey, height = 320, profile = null, profileRowSize = 0, deltaBars = null }) {
+function FuturesChart({ bars, oiLine, markers, dayKey, height = 320, profile = null, profileRowSize = 0, deltaBars = null, vwap = EMPTY_ARRAY }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
+  const vwapSeriesRef = useRef(null)
   const seriesRef = useRef(null)
   const oiSeriesRef = useRef(null)
   const markersRef = useRef(null)
@@ -1628,6 +1629,7 @@ function FuturesChart({ bars, oiLine, markers, dayKey, height = 320, profile = n
       color: `${AXIS_COLOR}cc`, lineWidth: 2, priceScaleId: 'left', priceLineVisible: false, lastValueVisible: true,
       title: 'OI (M)',
     })
+    vwapSeriesRef.current = chart.addSeries(LineSeries, { color: VWAP_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: 'VWAP' })
     // The plotted values are already OI/1e6 (see the caller's own futuresOiLine) - format the axis
     // itself to 2 decimals instead of lightweight-charts' own default (which would otherwise round
     // a value like 12.34 down to whole numbers and make small OI moves invisible on the axis).
@@ -1656,8 +1658,11 @@ function FuturesChart({ bars, oiLine, markers, dayKey, height = 320, profile = n
       profileLinesRef.current = []
       deltaSeriesRef.current = null
       cvdSeriesRef.current = null
+      vwapSeriesRef.current = null
     }
   }, [height])
+  // The futures' session VWAP, already on these candles' times (the caller aligns it).
+  useEffect(() => { vwapSeriesRef.current?.setData(vwap) }, [vwap])
 
   useEffect(() => {
     if (!deltaSeriesRef.current || !cvdSeriesRef.current || !seriesRef.current) return
@@ -3104,11 +3109,21 @@ export default function OiReplayPage() {
     return merged
   }, [result, liveFuturesPoints, isLive])
   const futuresBarsChart = useMemo(() => futuresPointsRaw.map(toBar), [futuresPointsRaw])
+  // The futures' session VWAP from its 1-minute bars (they carry volume - toBar drops it), read at each
+  // displayed candle - never past the replay clock (the last candle would otherwise take later VWAP).
+  const futuresVwapMinutes = useMemo(() => sessionVwapFromBars(futuresPointsRaw.map((p) => ({
+    time: toChartTime(p.time), high: p.high, low: p.low, close: p.close, volume: p.volume,
+  }))) ?? [], [futuresPointsRaw])
   const displayFuturesBars = useMemo(() => {
     if (asOfMs == null) return []
     const cutoff = toChartTime(asOfMs)
     return aggregateBars(futuresBarsChart.filter((b) => b.time <= cutoff), futuresTimeframe)
   }, [futuresBarsChart, asOfMs, futuresTimeframe])
+  const futuresVwap = useMemo(() => {
+    if (!showVwap || asOfMs == null) return EMPTY_ARRAY
+    const cutoff = toChartTime(asOfMs)
+    return alignToBars(futuresVwapMinutes.filter((p) => p.time <= cutoff), displayFuturesBars)
+  }, [showVwap, asOfMs, futuresVwapMinutes, displayFuturesBars])
   // The day's futures volume profile up to the replay time, from each minute's volume spread over its
   // range (FUTURES_PROFILE_ROWS-point rows).
   // The day's per-minute buy/sell from the order flow server - refreshed every minute while live.
@@ -4102,7 +4117,9 @@ export default function OiReplayPage() {
               {isTodayDate && !isLive && oneMinBars.length > 0 && (
                 <Tag color="blue">Replaying today up to {istTimeFormatter(oneMinBars.at(-1).time)} - Load day again for the latest</Tag>
               )}
-              {isLive && <Checkbox checked={showVwap} onChange={(e) => setShowVwap(e.target.checked)}>VWAP</Checkbox>}
+              <Tooltip title={isLive ? 'Session VWAP on the spot, EMA and futures charts.' : 'Session VWAP on the futures chart (its bars carry volume). The spot VWAP comes from the live feed - today only.'}>
+                <Checkbox checked={showVwap} onChange={(e) => setShowVwap(e.target.checked)}>VWAP</Checkbox>
+              </Tooltip>
               <Checkbox checked={showVolumeProfile} onChange={(e) => setShowVolumeProfile(e.target.checked)}>Volume Profile</Checkbox>
               {/* Sync with the Order Flow page in another tab - the day always; the replay clock while replaying. */}
               {syncControl}
@@ -4668,6 +4685,7 @@ export default function OiReplayPage() {
                         <ChartErrorBoundary key={`futures-${underlying}-${result.date}-${futuresTimeframe}`}>
                           <FuturesChart
                             bars={displayFuturesBars}
+                            vwap={futuresVwap}
                             oiLine={futuresOiLine}
                             markers={futuresRegimeMarkers}
                             dayKey={`futures-${underlying}-${result.date}-${futuresTimeframe}`}

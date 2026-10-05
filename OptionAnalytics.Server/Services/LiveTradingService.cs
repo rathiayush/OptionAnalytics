@@ -712,7 +712,7 @@ public sealed class LiveTradingService : BackgroundService
                     RefreshUnlessStreaming();
                     return ManualOrderResult.Fail(orderIds.Count == 0
                         ? $"Dhan rejected the order: {placeError}"
-                        : $"placed {orderIds.Count} of {slices.Count} slices, then Dhan rejected the next: {placeError}", orderIds, prices);
+                        : $"placed {orderIds.Count} of {slices.Count} slices, then Dhan rejected the next: {placeError}", orderIds, prices) with { LotSize = contract.LotSize };
                 }
                 orderIds.Add(result.OrderId);
             }
@@ -722,7 +722,7 @@ public sealed class LiveTradingService : BackgroundService
             RefreshUnlessStreaming();
             return new ManualOrderResult(true,
                 $"{transactionType} {contract.TradingSymbol} x{quantity} at LIMIT {prices.Limit:0.##} ({(isSell ? "bid" : "ask")} {prices.Reference:0.##}) · target {prices.Target:0.##} · SL {prices.StopLoss:0.##}",
-                orderIds, prices);
+                orderIds, prices) { LotSize = contract.LotSize };
         }
         finally
         {
@@ -1239,16 +1239,34 @@ public sealed class LiveTradingService : BackgroundService
     /// (just that leg); null with <paramref name="isExitOrder"/> for a plain order.</param>
     public async Task<ManualOrderResult> CancelAsync(string orderId, bool isExitOrder, CancellationToken cancellationToken, string? leg = null)
     {
-        string? error;
-        if (isExitOrder && leg is null) { var (result, e) = await _orders.CancelAsync(orderId, cancellationToken); error = result is null ? e ?? "no reason given" : null; }
-        else
+        await _actionLock.WaitAsync(cancellationToken);
+        try
         {
-            var legName = leg is "TARGET_LEG" or "STOP_LOSS_LEG" ? leg : "ENTRY_LEG";
-            var (result, e) = await _superOrders.CancelAsync(orderId, legName, cancellationToken);
-            error = result is null ? e ?? "no reason given" : null;
+            string? error;
+            var warning = "";
+            if (isExitOrder && leg is null) { var (result, e) = await _orders.CancelAsync(orderId, cancellationToken); error = result is null ? e ?? "no reason given" : null; }
+            else
+            {
+                var legName = leg is "TARGET_LEG" or "STOP_LOSS_LEG" ? leg : "ENTRY_LEG";
+                // Cancelling a PART-filled entry cancels the rest AND its stop-loss / target legs: what did
+                // fill stays open unprotected - say so (the caller should Close it or set levels).
+                SuperOrderSummary? order;
+                lock (_lock) order = _currentOrders.FirstOrDefault(o => o.OrderId == orderId);
+                var filled = order?.FilledQty ?? 0;
+                if (legName == "ENTRY_LEG" && filled > 0)
+                    warning = $" - {filled} qty of it had already filled and stays OPEN without a stop-loss or target: Close it or set its levels";
+                else if (legName == "STOP_LOSS_LEG")
+                    warning = " - the position no longer has a stop-loss on Dhan";
+                var (result, e) = await _superOrders.CancelAsync(orderId, legName, cancellationToken);
+                error = result is null ? e ?? "no reason given" : null;
+            }
+            RefreshUnlessStreaming();
+            return error is null ? new ManualOrderResult(true, $"order {orderId} cancelled{warning}", new[] { orderId }, null) : ManualOrderResult.Fail($"Dhan did not cancel it: {error}");
         }
-        RefreshUnlessStreaming();
-        return error is null ? new ManualOrderResult(true, $"order {orderId} cancelled", new[] { orderId }, null) : ManualOrderResult.Fail($"Dhan did not cancel it: {error}");
+        finally
+        {
+            _actionLock.Release();
+        }
     }
 
     /// <summary>The contract's latest tick with a two-sided book - subscribing it in Full mode first if
@@ -1275,6 +1293,10 @@ public sealed record ManualOrderPrices(decimal Reference, decimal Limit, decimal
 
 public sealed record ManualOrderResult(bool Success, string Message, IReadOnlyList<string> OrderIds, ManualOrderPrices? Prices)
 {
+    /// <summary>The contract's lot size, for an order placed (or partly placed) - what the caller's P&amp;L
+    /// and loss limits must use, not a hard-coded table that NSE's lot-size revisions make stale.</summary>
+    public int? LotSize { get; init; }
+
     public static ManualOrderResult Fail(string message, IReadOnlyList<string>? orderIds = null, ManualOrderPrices? prices = null) =>
         new(false, message, orderIds ?? Array.Empty<string>(), prices);
 }

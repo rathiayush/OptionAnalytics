@@ -1,4 +1,4 @@
-import { volumeProfile } from './orderFlowMath.js'
+import { pocIndexOf, valueAreaOf, volumeProfile } from './orderFlowMath.js'
 
 // Volume profile and market profile (TPO) for the strategy scanner and the Profiles card.
 //
@@ -40,7 +40,7 @@ export function sessionVolumeProfile(bars) {
 
 /** A TPO (market) profile: each `periodMinutes` period puts its letter on every row its range touched.
  *  `rowSize` here is the TPO row (coarser than the footprint row). Value area = 70% of the TPOs around
- *  the POC; initial balance = the first two periods. */
+ *  the POC, added two rows at a time (valueAreaOf); initial balance = the first two periods. */
 export function tpoProfile(bars, rowSize, periodMinutes = 30) {
   if (!bars?.length || !(rowSize > 0)) return null
   const first = msOf(bars[0].time)
@@ -62,21 +62,10 @@ export function tpoProfile(bars, rowSize, periodMinutes = 30) {
   }
   const list = [...rows.entries()].map(([price, set]) => ({ price, letters: [...set].sort().join(''), count: set.size })).sort((a, b) => a.price - b.price)
   if (!list.length) return null
-  const total = list.reduce((s, r) => s + r.count, 0)
-  const mid = (list[0].price + list.at(-1).price) / 2
-  let pocIndex = 0
-  list.forEach((r, i) => {
-    const best = list[pocIndex]
-    if (r.count > best.count || (r.count === best.count && Math.abs(r.price - mid) < Math.abs(best.price - mid))) pocIndex = i
-  })
-  let lo = pocIndex
-  let hi = pocIndex
-  let inside = list[pocIndex].count
-  while (inside < total * 0.7 && (lo > 0 || hi < list.length - 1)) {
-    const up = hi < list.length - 1 ? list[hi + 1].count : -1
-    const down = lo > 0 ? list[lo - 1].count : -1
-    if (up >= down) { hi++; inside += list[hi].count } else { lo--; inside += list[lo].count }
-  }
+  // POC (ties: nearest the middle) and the 70% value area by the standard two-rows-at-a-time rule.
+  const counts = list.map((r) => r.count)
+  const pocIndex = pocIndexOf(counts)
+  const { lo, hi } = valueAreaOf(counts, pocIndex, 0.7)
   // Single prints: rows only one period visited, inside the day's range (fast moves - often revisited).
   const singles = list.filter((r, i) => r.count === 1 && i > 0 && i < list.length - 1).map((r) => r.price)
   return {

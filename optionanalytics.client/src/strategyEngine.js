@@ -77,6 +77,8 @@ export const STRATEGIES = [
   { id: 'suddenWall', no: 25, name: 'Sudden OI wall + DOM imbalance', short: 'Sudden wall + DOM', priority: 3 },
   // The heatmap's wall and the option writers' wall at the same price, with the futures: hold or break.
   { id: 'heatmapOi', no: 26, name: 'OI + liquidity heatmap confluence - hold or break', short: 'Heatmap + OI wall', priority: 3 },
+  // The classic VWAP trend-day pullback, with the option writers / futures and the heatmap behind it.
+  { id: 'vwapPullback', no: 27, name: 'VWAP pullback - trend continuation (OI + heatmap)', short: 'VWAP pullback', priority: 3 },
 ]
 export const STRATEGY_BY_ID = Object.fromEntries(STRATEGIES.map((s) => [s.id, s]))
 /** The strategies in use - what the scanner runs, lists, alerts on and scores. */
@@ -1757,6 +1759,62 @@ export function evaluateStrategies(input) {
             })
         }
       }
+    }
+  }
+
+  // 27. VWAP pullback - trend continuation - 10:00-14:30, exact days with a heatmap. The classic trend-day
+  //     VWAP trade: price has held on one side of a sloping VWAP (80%+ of the last 45 minutes' closes
+  //     above a VWAP that rose 0.05%+ in 30 minutes, for a long) and made the day's high in the last hour;
+  //     the first pullback TAGS VWAP (a low within 0.03% of it in the last 3 bars) without closing
+  //     through it (no close 0.05%+ below in the last 5 bars) and the last bar turns back up off it.
+  //     Confirmed by the OI - the option writers back it (the chain's put writing leads) OR the futures
+  //     are in a long build-up since the open - and by the heatmap: a bid wall that stays in the book
+  //     within 0.1% of VWAP, or an absorption read there. Order flow: delta with it, the 30s tape 55%+,
+  //     nothing stacked against it. Stop under the pullback low; target the day's high (2-3R).
+  //     The mirror for a short.
+  if (!estimated && input.heatmap?.length && vwap != null && minute >= hm(10, 0) && minute <= hm(14, 30) && bars.length >= 45) {
+    const vwapThen = vwapOf(minuteBars, nowMs - 30 * MIN)
+    const session = minuteBars.filter((b) => msOf(b.time) >= sessionOpen && msOf(b.time) + MIN <= nowMs)
+    const map = liquidityMap({ columns: input.heatmap, minuteBars, rowSize: input.rowSize ?? 1, lotSize: lot, price, nowMs })
+    for (const dir of [1, -1]) {
+      if (vwapThen == null || !(dir * (vwap - vwapThen) >= pct(0.0005))) continue
+      const last45 = bars.slice(-45)
+      const held = last45.filter((b) => dir * (b.close - vwapOf(minuteBars, msOf(b.time))) > 0).length
+      if (held < 0.8 * last45.length) continue
+      // The day's extreme on the trade's side made in the last hour (a trend, not an old high).
+      const dayExtreme = dir > 0 ? Math.max(...session.map((b) => b.high)) : Math.min(...session.map((b) => b.low))
+      const lastHour = session.filter((b) => msOf(b.time) >= nowMs - 60 * MIN)
+      if (!lastHour.some((b) => (dir > 0 ? b.high >= dayExtreme : b.low <= dayExtreme))) continue
+      // The pullback: tagged VWAP in the last 3 bars, no close through it in the last 5, turning now.
+      const tagged = last3.some((b) => (dir > 0 ? b.low <= vwap + pct(0.0003) : b.high >= vwap - pct(0.0003)))
+      const brokeThrough = bars.slice(-5).some((b) => dir * (b.close - vwap) < -pct(0.0005))
+      if (!tagged || brokeThrough || !(dir * (last.close - vwap) > 0)) continue
+      // OI: the writers back the trend, or the futures are building positions with it since the open.
+      const stance = optionOiStance(optionRead, dir)
+      const fOpen = futuresSince(oi, nowMs, dayOpenMs(oi, nowMs))
+      const futuresBuild = fOpen?.oiPct != null && dir * fOpen.pricePct > 0 && fOpen.oiPct > 0
+      if (stance !== 'agrees' && !futuresBuild) continue
+      // Heatmap: a wall of the trade's side resting at VWAP, or an absorption read there.
+      const walls = dir > 0 ? map?.support ?? [] : map?.resistance ?? []
+      const wallAtVwap = walls.find((w) => Math.abs(w.price - vwap) <= pct(0.001))
+      const absorbedAtVwap = map?.now?.state === 'absorption' && map.now.bullish === dir > 0 && map.now.level && Math.abs(map.now.level.price - vwap) <= pct(0.001)
+      if (!wallAtVwap && !absorbedAtVwap) continue
+      const flowOk = dir * last.delta > 0 && aggWith(dir, 55, 'agg30') && !stackAgainst(dir, 2) && !sweepWith(-dir)
+      const c = confirm(dir)
+      if (!flowOk || !c.ok) continue
+      const pullbackExtreme = dir > 0 ? Math.min(...last3.map((b) => b.low)) : Math.max(...last3.map((b) => b.high))
+      const stopPts = Math.max(pct(0.001), dir * (price - pullbackExtreme) + pct(0.0006))
+      if (stopPts > pct(0.004)) continue
+      const toExtreme = dir * (dayExtreme - price)
+      const targetPts = Math.max(2 * stopPts, Math.min(3 * stopPts, toExtreme))
+      push('vwapPullback', dir, stopPts, targetPts, 45,
+        62 + (stance === 'agrees' ? 4 : 0) + (futuresBuild ? 4 : 0) + (absorbedAtVwap ? 5 : 0) + (wallAtVwap?.trend === 'building' ? 3 : 0) + (stackWith(dir, 3) ? 3 : 0), {
+          VWAP: `${held}/${last45.length} closes ${dir > 0 ? 'above' : 'below'} VWAP ${vwap.toFixed(1)} (${dir > 0 ? 'up' : 'down'} ${(Math.abs(vwap - vwapThen) / vwapThen * 100).toFixed(2)}% in 30m); pullback tagged it, no close through - turning`,
+          OI: `${stance === 'agrees' ? 'option writers back it' : 'writers neutral'}${futuresBuild ? ` · futures ${dir > 0 ? 'long' : 'short'} build-up since open (price ${(fOpen.pricePct * 100).toFixed(2)}%, OI +${(fOpen.oiPct * 100).toFixed(2)}%)` : ''}`,
+          'Liquidity map': wallAtVwap ? `${dir > 0 ? 'bid' : 'offer'} wall ${wallAtVwap.price} (${wallAtVwap.lots} lots, ${wallAtVwap.trend}) at VWAP` : `absorption at VWAP - ${map.now.text}`,
+          Footprint: `Δ ${last.delta > 0 ? '+' : ''}${last.delta}, nothing stacked against it`, Tape: tapeText, DOM: c.dom, Heatmap: c.heat,
+          Plan: `target the day's ${dir > 0 ? 'high' : 'low'} ${dayExtreme.toFixed(1)}`,
+        }, { rTarget: true })
     }
   }
 

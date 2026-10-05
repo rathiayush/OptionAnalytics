@@ -40,6 +40,7 @@ function niceStep(rowsPerLabel) {
   return 1000
 }
 
+const VWAP_LINE_COLOR = '#e072e8'
 const priceText = (p) => (Number.isInteger(p) ? p.toLocaleString('en-IN') : p.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
 
 // ---- Footprint ------------------------------------------------------------------------------
@@ -73,7 +74,7 @@ function zoomRows(l, factor, y, step, plotH) {
   return { top, rowH: Math.max(rowH, plotH / 2000) }
 }
 
-export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620, lastPrice, profile = null, trades = [], timeframe = 1, bigLabel = 'Big order', alerts = [], levels = [] }) {
+export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620, lastPrice, profile = null, trades = [], timeframe = 1, bigLabel = 'Big order', alerts = [], levels = [], vwap = null }) {
   const wrapRef = useRef(null)
   const canvasRef = useRef(null)
   const width = useElementWidth(wrapRef)
@@ -416,6 +417,37 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
       ctx.fillText(`🔔${priceText(a.price)}`, plotW + 3, y)
     }
 
+    // Session VWAP: one value per bar (`vwap`, aligned with `bars`), a line through the bars' centres.
+    if (vwap?.length) {
+      const { start } = layout
+      ctx.save()
+      ctx.beginPath(); ctx.rect(0, FP_TOP, barsW, plotH); ctx.clip()
+      ctx.strokeStyle = VWAP_LINE_COLOR
+      ctx.lineWidth = 2
+      ctx.beginPath()
+      let drawn = false
+      let lastPoint = null
+      visible.forEach((_, k) => {
+        const v = vwap[start + k]
+        if (!(v > 0)) return
+        const x = barX(k) + colWidth / 2
+        const y = yPrice(v)
+        if (!drawn) { ctx.moveTo(x, y); drawn = true } else ctx.lineTo(x, y)
+        lastPoint = { y, v }
+      })
+      ctx.stroke()
+      ctx.restore()
+      ctx.lineWidth = 1
+      if (lastPoint && lastPoint.y > FP_TOP && lastPoint.y < FP_TOP + plotH) {
+        ctx.fillStyle = VWAP_LINE_COLOR
+        ctx.fillRect(plotW + 1, lastPoint.y - 9, FP_AXIS_W - 2, 18)
+        ctx.fillStyle = '#000'
+        ctx.font = `600 10px ${FONT}`
+        ctx.textBaseline = 'middle'
+        ctx.fillText(`VWAP ${lastPoint.v.toFixed(1)}`, plotW + 3, lastPoint.y)
+      }
+    }
+
     // Last price line.
     if (lastPrice > 0) {
       const y = yPrice(lastPrice + step / 2)
@@ -432,7 +464,7 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
         ctx.fillText(priceText(lastPrice), plotW + 5, y)
       }
     }
-  }, [layout, width, height, plotW, barsW, profileW, profile, plotH, colWidth, step, lotSize, showLots, lastPrice, trades, timeframe, alerts, levels])
+  }, [layout, width, height, plotW, barsW, profileW, profile, plotH, colWidth, step, lotSize, showLots, lastPrice, trades, timeframe, alerts, levels, vwap])
 
   // The wheel listener is registered once; it reads the latest geometry through this.
   const geomRef = useRef({})
@@ -582,7 +614,7 @@ function heatColor(t) {
 // Depth heatmap: resting liquidity over time - each column is one book snapshot, each cell a price
 // row, brighter = more quantity resting there. The white line is the mid price; circles are large
 // prints (green buy / red sell, size by quantity); magenta lines are detected icebergs.
-export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [], marks = [], lotSize, showLots, height = 420 }) {
+export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [], marks = [], vwap = null, lotSize, showLots, height = 420 }) {
   const wrapRef = useRef(null)
   const canvasRef = useRef(null)
   const width = useElementWidth(wrapRef)
@@ -762,6 +794,22 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
       }
     }
 
+    // Session VWAP over time (`vwap`: [{ t (ms), value }]).
+    if (vwap?.length) {
+      ctx.strokeStyle = VWAP_LINE_COLOR
+      ctx.lineWidth = 2
+      ctx.beginPath()
+      let started = false
+      for (const p of vwap) {
+        if (p.t < t0 || p.t > t1 || !(p.value > 0)) continue
+        const x = xTime(p.t)
+        const y = yPrice(p.value)
+        if (!started) { ctx.moveTo(x, y); started = true } else ctx.lineTo(x, y)
+      }
+      ctx.stroke()
+      ctx.lineWidth = 1
+    }
+
     // Large prints
     for (const trade of trades ?? []) {
       const t = new Date(trade.time).getTime()
@@ -819,7 +867,7 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
       ctx.fillText(IST_HHMM.format(new Date(t)), Math.min(plotW - 20, Math.max(20, xTime(t))), plotH + HM_TIME_H / 2)
     }
     ctx.textAlign = 'left'
-  }, [layout, width, height, plotW, plotH, step, trades, icebergs, signals, marks, lotSize])
+  }, [layout, width, height, plotW, plotH, step, trades, icebergs, signals, marks, vwap, lotSize])
 
   return (
     <div ref={wrapRef} style={{ position: 'relative', width: '100%', height }}>

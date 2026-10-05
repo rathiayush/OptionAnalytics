@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import dayjs from 'dayjs'
-import { Alert, Button, Card, Col, DatePicker, Empty, InputNumber, Row, Select, Slider, Space, Switch, Tag, TimePicker, Tooltip, Typography, notification } from 'antd'
+import { Alert, Button, Card, Checkbox, Col, DatePicker, Empty, InputNumber, Row, Select, Slider, Space, Switch, Tag, TimePicker, Tooltip, Typography, notification } from 'antd'
 import { PlayCircleOutlined, PauseCircleOutlined } from '@ant-design/icons'
 import * as signalR from '@microsoft/signalr'
 import {
@@ -14,6 +14,7 @@ import { oiBiasParts, oiSummary, suddenOiWalls, vwapOf } from './strategyEngine.
 import { suddenWallText } from './suddenOi.js'
 import { chime, speak, telegram } from './alerts.js'
 import { LiquidityMapCard } from './LiquidityMap.jsx'
+import { alignToBars, sessionVwapFromBars } from './chartVwap.js'
 import { ProfilesCard } from './ProfilesCard.jsx'
 import { PriceAlertsBar, usePriceAlerts } from './PriceAlerts.jsx'
 import { fetchPreviousSession, sessionVolumeProfile, tpoProfile, tpoRowFor } from './profiles.js'
@@ -167,6 +168,7 @@ export default function OrderFlowPage() {
   const fetchLots = bigMode === 'auto' ? 5 : largeLots
   const [showLots, setShowLots] = usePersistedState('optionanalytics.orderFlow.showLots', true)
   const [showProfile, setShowProfile] = usePersistedState('optionanalytics.orderFlow.showProfile', true)
+  const [showVwap, setShowVwap] = usePersistedState('optionanalytics.orderFlow.showVwap', true)
   const [replaySpeed, setReplaySpeed] = usePersistedState('optionanalytics.orderFlow.replaySpeed', 60)
   const rowSize = rowSizes?.[underlying] ?? DEFAULT_ROW_SIZES[underlying] ?? 1
   const narrow = useNarrow()
@@ -440,6 +442,18 @@ export default function OrderFlowPage() {
     () => analyzeBars(aggregateBars(view?.minuteBars ?? [], timeframe), { rowSize, minVolume: lotSize, imbalanceRatio, stackedCount, estimated }),
     [view?.minuteBars, timeframe, rowSize, lotSize, imbalanceRatio, stackedCount, estimated],
   )
+  // Session VWAP of the futures: from the 1-minute bars (the precise one), read at each footprint bar
+  // (alignToBars - on the bar's own time) for the footprint, and minute by minute for the heatmap.
+  const vwapMinutes = useMemo(() => sessionVwapFromBars((view?.minuteBars ?? []).map((b) => ({
+    time: Math.floor(new Date(b.time).getTime() / 1000) + 19800, high: b.high, low: b.low, close: b.close, volume: (b.buy ?? 0) + (b.sell ?? 0),
+  }))) ?? [], [view?.minuteBars])
+  const footprintVwap = useMemo(() => {
+    if (!showVwap || !vwapMinutes.length) return null
+    const chartBars = bars.map((b) => ({ time: Math.floor(new Date(b.time).getTime() / 1000) + 19800 }))
+    const byTime = new Map(alignToBars(vwapMinutes, chartBars).map((p) => [p.time, p.value]))
+    return chartBars.map((b) => byTime.get(b.time) ?? null)
+  }, [showVwap, vwapMinutes, bars])
+  const heatmapVwap = useMemo(() => (showVwap ? vwapMinutes.map((p) => ({ t: (p.time - 19800) * 1000 + 59_000, value: p.value })) : null), [showVwap, vwapMinutes])
   // Volume profile levels always from the PREVIOUS session (POC, VAH, VAL, HVN, LVN); market profile
   // (TPO) from the previous session plus today's developing one.
   const sessionDate = isReplay ? replayDate : todayKey()
@@ -696,6 +710,7 @@ export default function OrderFlowPage() {
             </Tooltip>
             <Space size={4}><Switch size="small" checked={showLots} onChange={setShowLots} /><Text style={{ fontSize: 12 }}>Volume in lots</Text></Space>
             <Space size={4}><Switch size="small" checked={showProfile} onChange={setShowProfile} /><Text style={{ fontSize: 12 }}>Volume profile</Text></Space>
+            <Checkbox checked={showVwap} onChange={(e) => setShowVwap(e.target.checked)}><Text style={{ fontSize: 12 }}>VWAP</Text></Checkbox>
           </Space>
           {isReplay && (
             <div style={{ marginTop: 12, padding: 10, border: '1px solid #ffffff1f', borderRadius: 6 }}>
@@ -772,7 +787,7 @@ export default function OrderFlowPage() {
               <FootprintLegend estimated={estimated} bigLabel={bigLabel} />
               <FootprintChart
                 bars={bars} rowSize={rowSize} lotSize={lotSize} showLots={showLots} lastPrice={meta?.lastPrice} height={narrow ? 480 : 660}
-                profile={profile} trades={largeTrades} timeframe={timeframe} bigLabel={bigLabel} alerts={priceAlerts.alerts} levels={suddenLevels}
+                profile={profile} trades={largeTrades} timeframe={timeframe} bigLabel={bigLabel} alerts={priceAlerts.alerts} levels={suddenLevels} vwap={footprintVwap}
               />
               {profile?.poc != null && (
                 <Text type="secondary" style={{ fontSize: 11 }}>
@@ -788,7 +803,7 @@ export default function OrderFlowPage() {
                 <Card size="small" title="Liquidity heatmap" extra={!narrow && <Text type="secondary" style={{ fontSize: 11 }}>resting bids/offers over time (brighter = more) · big dots = big orders · magenta = icebergs</Text>}>
                   {estimated
                     ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No liquidity heatmap for an estimated day - it needs market depth, which Dhan does not keep. Days the server saw live have it." />
-                    : <DepthHeatmap columns={view?.heatmap ?? []} rowSize={rowSize} trades={largeTrades} icebergs={view?.icebergs} signals={heatSignals} marks={heatMarks} lotSize={lotSize} showLots={showLots} height={narrow ? 320 : 440} />}
+                    : <DepthHeatmap columns={view?.heatmap ?? []} rowSize={rowSize} trades={largeTrades} icebergs={view?.icebergs} signals={heatSignals} marks={heatMarks} vwap={heatmapVwap} lotSize={lotSize} showLots={showLots} height={narrow ? 320 : 440} />}
                   {!estimated && (
                     <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>
                       How to read: time runs left to right, price bottom to top. The colour is the size of resting limit orders at that price

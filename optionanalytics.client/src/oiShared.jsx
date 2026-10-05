@@ -1,4 +1,5 @@
 import { Component, useEffect, useMemo, useRef, useState, useId, useSyncExternalStore } from 'react'
+import { alignToBars, chartVwap } from './chartVwap.js'
 import { createPortal } from 'react-dom'
 import { Select, Space, Typography, Button, Row, Col, Tooltip, Tag, InputNumber, Table, Segmented, Empty, Alert } from 'antd'
 import { CandlestickSeries, LineSeries, CrosshairMode } from 'lightweight-charts'
@@ -559,8 +560,8 @@ export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Onl
   // option, and it means an unchecked chart never even pays for lightweight-charts re-rendering data
   // nobody asked to see.
   useEffect(() => {
-    vwapSeriesRef.current?.setData(showVwap ? vwapSeries : EMPTY_ARRAY)
-  }, [vwapSeries, showVwap])
+    vwapSeriesRef.current?.setData(showVwap ? chartVwap(bars, vwapSeries) : EMPTY_ARRAY)
+  }, [vwapSeries, showVwap, bars])
 
   useFitContentAsDataGrows(chartRef, bars.length, dayKey)
 
@@ -728,8 +729,8 @@ export function EmaChart({ oneMinBars, visibleCount, timeframe, onTimeframeChang
   // own native 1-minute cadence regardless of what timeframe this chart's OWN candles are aggregated
   // to (exactly how TradingView shows it too).
   useEffect(() => {
-    vwapSeriesRef.current?.setData(showVwap ? vwapSeries : EMPTY_ARRAY)
-  }, [vwapSeries, showVwap])
+    vwapSeriesRef.current?.setData(showVwap ? chartVwap(displayBars, vwapSeries) : EMPTY_ARRAY)
+  }, [vwapSeries, showVwap, displayBars])
 
   useFitContentAsDataGrows(chartRef, displayBars.length, `${dayKey}-${timeframe}`)
 
@@ -1100,7 +1101,9 @@ export function PremiumEmaChart({
   useEffect(() => { if (seriesRef.current) seriesRef.current.setData(displayBars) }, [displayBars])
   useEffect(() => { if (ema1SeriesRef.current) ema1SeriesRef.current.setData(ema1Points) }, [ema1Points])
   useEffect(() => { if (ema2SeriesRef.current) ema2SeriesRef.current.setData(ema2Points) }, [ema2Points])
-  useEffect(() => { vwapSeriesRef.current?.setData(showVwap ? vwapPoints : EMPTY_ARRAY) }, [vwapPoints, showVwap])
+  // The 1-minute VWAP read at each displayed candle, on its time (alignToBars) - 1-minute points on a
+  // 5-minute chart would add empty slots between the candles.
+  useEffect(() => { vwapSeriesRef.current?.setData(showVwap ? alignToBars(vwapPoints, displayBars) : EMPTY_ARRAY) }, [vwapPoints, showVwap, displayBars])
 
   useFitContentAsDataGrows(chartRef, displayBars.length, `${dayKey}-${timeframe}`)
 
