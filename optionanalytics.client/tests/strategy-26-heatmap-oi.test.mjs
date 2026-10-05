@@ -68,7 +68,7 @@ function scenario(d, o = {}) {
 }
 const show = ({ s, all }) => JSON.stringify(s ? { side: s.side, entry: s.entry, stop: +s.stop.toFixed(1), target: +s.target.toFixed(1), checks: s.checks } : all.map((x) => `${x.id}:${x.side}`))
 
-check('28 strategies, #26 is the heatmap + OI confluence (retired since the 05 Oct revert)', STRATEGIES.length === 28 && STRATEGIES.find((x) => x.no === 26)?.id === 'heatmapOi' && STRATEGIES.find((x) => x.no === 26).retired)
+check('29 strategies, #26 is the heatmap + OI confluence (retired since the 05 Oct revert)', STRATEGIES.length === 29 && STRATEGIES.find((x) => x.no === 26)?.id === 'heatmapOi' && STRATEGIES.find((x) => x.no === 26).retired)
 const L = scenario(1)
 check('HOLD long: absorption at the bid wall + PUT 22700 writers adding there -> LONG, stop under the wall, target the CALL wall', L.s?.side === 'LONG' && L.s.stop < 22745 && L.s.target > L.s.entry && /ABSORPTION/.test(L.s.checks['Liquidity map']) && /PUT 22700/.test(L.s.checks.OI) && /adding/.test(L.s.checks.OI), show(L))
 console.log('   ', L.s?.checks['Liquidity map'], '|', L.s?.checks.OI, '|', L.s?.checks.Plan)

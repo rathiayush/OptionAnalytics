@@ -23,6 +23,9 @@ All must pass before committing. When adding or changing a strategy:
 - update the strategy count in the tests (`STRATEGIES.length`) and check what the default Top 15
   alerts on (`topFifteen`, `priority`, the `DEFAULT_*` lists);
 - keep `tests/audit.test.mjs` passing - it is the guard on the rules below.
+- per-strategy filters (`STRATEGY_FILTERS`, the scanner's Filters button): a filter's DEFAULT must be
+  the rule as written and tested (an untouched strategy behaves exactly as before); read them through
+  `strategyFilters(id, input.filters?.[id])`, and test that loosening each one lets its case through;
 - a strategy that measures as losing is RETIRED (`retired: true` in `STRATEGIES`), not deleted: it is
   not run, listed, alerted or scored (`ACTIVE_STRATEGIES`); tests can still run it with `includeRetired`.
 

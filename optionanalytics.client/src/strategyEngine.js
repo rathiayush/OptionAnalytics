@@ -1,5 +1,5 @@
 // The OI + Order Flow playbook's strategies as objective rules, run on the Order Flow page live and at
-// the replay clock (and over a whole day by "Scan day"): OI + order flow (1-10, 16-21, 24-27), pure option OI (28), volume / market
+// the replay clock (and over a whole day by "Scan day"): OI + order flow (1-10, 16-21, 24-27, 29), pure option OI (28), volume / market
 // profile (11-15) and range-bound mean reversion (7, 22, 23). Each strategy reads all five screens:
 //
 //   OI        - the OI Replay data for the day (/api/oi-replay/{u}/run): option OI per strike (walls,
@@ -78,16 +78,22 @@ export const STRATEGIES = [
   // line for alerts until measured.
   { id: 'oiSqueeze', no: 24, name: 'Trapped-OI squeeze - short & long squeeze', short: 'OI squeeze', priority: 2 },
   // 25-28 came after the line-up the trader measured as good (05 Oct 03:13 IST) - kept, but retired
-  // until the trader asks for them back (drop `retired`).
+  // until the trader asks for them back (drop `retired`); #27 is back.
   // A wall that appears suddenly (heavy writing in the last 5 minutes) with the book leaning the same way.
   { id: 'suddenWall', no: 25, name: 'Sudden OI wall + DOM imbalance', short: 'Sudden wall + DOM', priority: 3, retired: true },
   // The heatmap's wall and the option writers' wall at the same price, with the futures: hold or break.
   { id: 'heatmapOi', no: 26, name: 'OI + liquidity heatmap confluence - hold or break', short: 'Heatmap + OI wall', priority: 3, retired: true },
-  // The classic VWAP trend-day pullback, with the option writers / futures and the heatmap behind it.
-  { id: 'vwapPullback', no: 27, name: 'VWAP pullback - trend continuation (OI + heatmap)', short: 'VWAP pullback', priority: 3, retired: true },
+  // The classic VWAP trend-day pullback, with the option writers / futures and the heatmap behind it -
+  // back in the line-up (the trader asked for it with #29, 05 Oct). #27 and #29 carry no priority, so the
+  // default Top 15 stays as measured; they join it once Scan day scores them profitable (or tick them in
+  // Custom / pick All).
+  { id: 'vwapPullback', no: 27, name: 'VWAP pullback - trend continuation (OI + heatmap)', short: 'VWAP pullback' },
   // Pure option OI, minute by minute: the support wall outweighs the resistance wall, the money leans
   // the same way, and the writers keep adding on that side every minute.
   { id: 'oiStructure', no: 28, name: 'OI structure - heavier wall, leaning ATM, writing every minute', short: 'OI structure', priority: 3, retired: true },
+  // The well-known VWAP trade with both OI reads behind it - the option writers AND a futures build-up -
+  // on every day (no heatmap needed; #27 is the same trade with the heatmap wall).
+  { id: 'vwapOi', no: 29, name: 'VWAP + options & futures OI confluence', short: 'VWAP + OI' },
 ]
 export const STRATEGY_BY_ID = Object.fromEntries(STRATEGIES.map((s) => [s.id, s]))
 /** The strategies in use - what the scanner runs, lists, alerts on and scores. */
@@ -96,6 +102,55 @@ export const ACTIVE_STRATEGIES = STRATEGIES.filter((s) => !s.retired)
 export const DEFAULT_TOP5 = ['wallDefence', 'wallBreak', 'buildUp', 'openingBias', 'iceberg']
 export const DEFAULT_PROFILE_TOP5 = ['vaRejection', 'tpo80', 'pocReaction', 'lvnRun', 'ibBreakout']
 export const RANGE_IDS = ACTIVE_STRATEGIES.filter((s) => s.group === 'range').map((s) => s.id)
+
+// ---- per-strategy filters ----------------------------------------------------------------------------
+/**
+ * The filters the trader can tune per strategy (the scanner's Filters button). Each: key, label, type
+ * ('number' | 'switch'), the default - the rule as written and tested, so an untouched strategy behaves
+ * exactly as before - and for numbers min / max / step. More strategies get here by listing their
+ * filters and reading them through strategyFilters() in their block.
+ */
+export const STRATEGY_FILTERS = {
+  ibBreakout: [
+    { key: 'closesBeyond', label: 'Closes in a row beyond the IB to accept the break', type: 'number', default: 2, min: 1, max: 5, step: 1 },
+    { key: 'firstBreakOnly', label: 'First accepted break of each side per day only', type: 'switch', default: true },
+    { key: 'breakVolumeX', label: 'Break bar volume at least x the IB\'s average minute (0 = off)', type: 'number', default: 1.5, min: 0, max: 5, step: 0.1 },
+    { key: 'minWriting', label: 'Option writers\' lean (whole chain, last hour) at least', type: 'number', default: 0.15, min: 0, max: 1, step: 0.05 },
+    { key: 'skipWideIb', label: 'Skip when the IB is as wide as yesterday\'s range', type: 'switch', default: true },
+    { key: 'needFootprint', label: 'Last bar\'s delta with the break', type: 'switch', default: true },
+    { key: 'needTape', label: 'Tape with the break (sweep or 1-min aggression 60%+)', type: 'switch', default: true },
+    { key: 'targetIb', label: 'Target (x the IB range)', type: 'number', default: 1, min: 0.5, max: 3, step: 0.25 },
+    { key: 'timeStopMin', label: 'Time stop (minutes)', type: 'number', default: 90, min: 10, max: 240, step: 5 },
+  ],
+  vwapOi: [
+    { key: 'heldPct', label: 'Of the last 30 closes on the trend side of VWAP (%)', type: 'number', default: 75, min: 50, max: 100, step: 5 },
+    { key: 'slopePct', label: 'VWAP slope in 30 min at least (%)', type: 'number', default: 0.03, min: 0, max: 0.3, step: 0.01 },
+    { key: 'tagPct', label: 'Pullback reaches within (%) of VWAP', type: 'number', default: 0.05, min: 0.01, max: 0.3, step: 0.01 },
+    { key: 'needWriters', label: 'Option writers back it', type: 'switch', default: true },
+    { key: 'needFuturesBuild', label: 'Futures build-up since the open (price and OI with it)', type: 'switch', default: true },
+    { key: 'needFuturesHolding', label: 'Futures OI not falling in the last 15 min', type: 'switch', default: true },
+    { key: 'needDelta', label: 'Last bar\'s delta with the trade', type: 'switch', default: true },
+    { key: 'targetR', label: 'Target (R)', type: 'number', default: 2, min: 1, max: 5, step: 0.5 },
+    { key: 'maxR', label: 'Stretch toward the day\'s high / low up to (R)', type: 'number', default: 3, min: 1, max: 6, step: 0.5 },
+    { key: 'timeStopMin', label: 'Time stop (minutes)', type: 'number', default: 60, min: 10, max: 240, step: 5 },
+  ],
+}
+/** A strategy's filter values: its defaults with the trader's `overrides` on top - numbers clamped to
+ *  their range, wrong types and unknown keys ignored. */
+export function strategyFilters(id, overrides) {
+  const out = {}
+  for (const f of STRATEGY_FILTERS[id] ?? []) {
+    const v = overrides?.[f.key]
+    if (f.type === 'switch') out[f.key] = typeof v === 'boolean' ? v : f.default
+    else out[f.key] = Number.isFinite(v) ? Math.min(f.max, Math.max(f.min, v)) : f.default
+  }
+  return out
+}
+/** The filters of `id` the trader changed from the defaults (for an "edited" mark). */
+export function changedFilters(id, overrides) {
+  const v = strategyFilters(id, overrides)
+  return (STRATEGY_FILTERS[id] ?? []).filter((f) => v[f.key] !== f.default)
+}
 
 // ---- OI context -----------------------------------------------------------------------------------
 
@@ -648,7 +703,8 @@ const recent = (items, ms, within, timeOf) => items.filter((x) => { const t = ti
  * Every strategy whose checklist passes at `nowMs`. Input:
  *   nowMs, price (futures last), bars (1-minute analyzed bars, completed only), minuteBars (raw, up to now),
  *   prints (tape, oldest first, or null), book, liquidity, pullStack (signals), sweeps, icebergs,
- *   oi (buildOiContext), estimated, lotSize, bigLots; heatmap (book snapshots up to nowMs) and rowSize for #26.
+ *   oi (buildOiContext), estimated, lotSize, bigLots; heatmap (book snapshots up to nowMs) and rowSize for #26;
+ *   filters - { [strategy id]: the trader's filter overrides } (STRATEGY_FILTERS; missing = the defaults).
  * Returns setups: { id, name, side, t, entry, stop, target, timeStopMs, confidence, checks: { OI, Footprint, Tape, DOM, Heatmap } }.
  */
 export function evaluateStrategies(input) {
@@ -1165,7 +1221,13 @@ export function evaluateStrategies(input) {
   //     statistics: a narrow IB breaks almost always and extends far, an extremely wide one breaks far
   //     less and barely extends - so not when the IB is already as wide as the previous day's whole range
   //     (the day's range proxy), and more confidence when it is under 40% of it.
+  //     Against the false breaks: the break must be ACCEPTED (two 1-minute closes in a row beyond the IB -
+  //     a one-bar poke that closes back inside is the classic trap), only the FIRST accepted break of that
+  //     side in the day is taken (a second one comes after a failed breakout), and the break bar must trade
+  //     at least 1.5x the IB's average minute volume (real exchange volume, also on estimated days).
+  //     Every threshold here is a filter the trader can tune (STRATEGY_FILTERS.ibBreakout).
   if (minute >= hm(10, 15) && minute <= hm(13, 30)) {
+    const f = strategyFilters('ibBreakout', input.filters?.ibBreakout)
     const dayOpenMs = nowMs - (minute - hm(9, 15)) * MIN
     const ibBars = minuteBars.filter((b) => msOf(b.time) >= dayOpenMs && msOf(b.time) < dayOpenMs + 60 * MIN)
     if (ibBars.length >= 45) {
@@ -1175,22 +1237,37 @@ export function evaluateStrategies(input) {
       // The writers' side: the WHOLE chain's put vs call writing over the last hour.
       const read60 = optionOiRead(oi, spotNow, nowMs, 60)
       const writing = read60 ? read60.lean : 0
+      const volOf = (b) => (b.buy ?? 0) + (b.sell ?? 0) || b.volume || 0
+      const ibEndMs = dayOpenMs + 60 * MIN
+      const ibVols = bars.filter((b) => msOf(b.time) >= dayOpenMs && msOf(b.time) < ibEndMs).map(volOf)
+      const ibAvgVol = ibVols.length ? ibVols.reduce((a, v) => a + v, 0) / ibVols.length : 0
+      const n = f.closesBeyond
+      const run = bars.slice(-n)
+      const before = bars.at(-n - 1)
+      const breakBar = run[0]
+      const afterIb = bars.slice(0, -n).filter((b) => msOf(b.time) >= ibEndMs)
       for (const dir of [1, -1]) {
         const edge = dir > 0 ? ibHigh : ibLow
-        const broke = prev && (dir > 0 ? last.close > edge && prev.close <= edge : last.close < edge && prev.close >= edge)
-        if (!broke || dir * writing < 0.15 || range <= 0) continue
+        const beyond = (b) => dir * (b.close - edge) > 0
+        // The break (the first of the last n bars) and its acceptance: n closes beyond, the bar before inside.
+        const broke = run.length === n && before && run.every(beyond) && !beyond(before)
+        if (!broke || dir * writing < f.minWriting || range <= 0) continue
+        // Not the first break: n closes in a row beyond that edge earlier in the day.
+        if (f.firstBreakOnly && afterIb.some((b, i) => i >= n - 1 && afterIb.slice(i - n + 1, i + 1).every(beyond))) continue
+        const breakVol = volOf(breakBar)
+        if (f.breakVolumeX > 0 && (!(ibAvgVol > 0) || breakVol < f.breakVolumeX * ibAvgVol)) continue
         const prevRange = prof?.prevHigh > 0 && prof?.prevLow > 0 ? prof.prevHigh - prof.prevLow : null
-        if (prevRange && range >= prevRange) continue
+        if (f.skipWideIb && prevRange && range >= prevRange) continue
         const narrow = prevRange != null && range <= 0.4 * prevRange
-        const footprint = dir * last.delta > 0
-        const tapeOk = sweepWith(dir) || aggWith(dir, 60)
+        const footprint = !f.needFootprint || dir * last.delta > 0
+        const tapeOk = !f.needTape || sweepWith(dir) || aggWith(dir, 60)
         const c = confirm(dir)
         if (!footprint || !tapeOk || !c.ok) continue
         const stopPts = Math.max(pct(0.001), Math.min(range / 2, pct(0.004)))
-        push('ibBreakout', dir, stopPts, Math.max(range, 1.5 * stopPts), 90, 61 + (sweepWith(dir) ? 8 : 0) + (narrow ? 6 : 0), {
+        push('ibBreakout', dir, stopPts, Math.max(f.targetIb * range, 1.5 * stopPts), f.timeStopMin, 61 + (sweepWith(dir) ? 8 : 0) + (narrow ? 6 : 0), {
           OI: `${dir > 0 ? 'put' : 'call'} writing leads across the chain over the last hour - ${optionOiText(read60)}`,
-          Profile: `initial balance ${ibLow}-${ibHigh} (range ${range.toFixed(1)}${prevRange ? `, ${Math.round((range / prevRange) * 100)}% of yesterday's range${narrow ? ' - narrow' : ''}` : ''}), target one range beyond`,
-          Footprint: `close beyond the IB, Δ ${last.delta}`, Tape: `${sweepWith(dir) ? 'sweep · ' : ''}${tapeText}`, DOM: c.dom, Heatmap: c.heat,
+          Profile: `initial balance ${ibLow}-${ibHigh} (range ${range.toFixed(1)}${prevRange ? `, ${Math.round((range / prevRange) * 100)}% of yesterday's range${narrow ? ' - narrow' : ''}` : ''}), target ${f.targetIb === 1 ? 'one range' : `${f.targetIb}x the range`} beyond`,
+          Footprint: `${n} close${n > 1 ? 's' : ''} beyond the IB${f.firstBreakOnly ? ' (first break of the day)' : ''}, break bar ${ibAvgVol > 0 ? (breakVol / ibAvgVol).toFixed(1) : '-'}x the IB's average volume, Δ ${last.delta}`, Tape: `${sweepWith(dir) ? 'sweep · ' : ''}${tapeText}`, DOM: c.dom, Heatmap: c.heat,
         })
       }
     }
@@ -1764,6 +1841,54 @@ export function evaluateStrategies(input) {
           'Liquidity map': wallAtVwap ? `${dir > 0 ? 'bid' : 'offer'} wall ${wallAtVwap.price} (${wallAtVwap.lots} lots, ${wallAtVwap.trend}) at VWAP` : `absorption at VWAP - ${map.now.text}`,
           Footprint: `Δ ${last.delta > 0 ? '+' : ''}${last.delta}, nothing stacked against it`, Tape: tapeText, DOM: c.dom, Heatmap: c.heat,
           Plan: `target the day's ${dir > 0 ? 'high' : 'low'} ${dayExtreme.toFixed(1)}`,
+        }, { rTarget: true })
+    }
+  }
+
+  // 29. VWAP + OI confluence - 10:00-14:30, every day (exact or estimated). The well-known intraday
+  //     combination: trade WITH VWAP only when both OI reads agree. For a long (the mirror for a short):
+  //       VWAP     - price has held above a rising VWAP (75%+ of the last 30 closes above it, VWAP up
+  //                  0.03%+ in 30 minutes) and the first pullback tags it (a low within 0.05% of it in the
+  //                  last 3 bars), no close 0.05%+ through it in the last 5, the last bar turning up;
+  //       Options  - the option writers back it (put writing leads the chain - optionOiStance 'agrees');
+  //       Futures  - a long build-up since the open (price up, OI up), the OI not falling in the last 15m.
+  //     Order flow: delta with it, nothing stacked or swept against it. Stop beyond the pullback; target
+  //     2R, out to the day's high if that is further (max 3R). #27 is the same trade with a heatmap wall.
+  //     Every threshold here is a filter the trader can tune (STRATEGY_FILTERS.vwapOi).
+  if (vwap != null && minute >= hm(10, 0) && minute <= hm(14, 30) && bars.length >= 30) {
+    const f = strategyFilters('vwapOi', input.filters?.vwapOi)
+    const vwapThen = vwapOf(minuteBars, nowMs - 30 * MIN)
+    const session = minuteBars.filter((b) => msOf(b.time) >= sessionOpen && msOf(b.time) + MIN <= nowMs)
+    const fOpen = futuresSince(oi, nowMs, dayOpenMs(oi, nowMs))
+    for (const dir of [1, -1]) {
+      if (vwapThen == null || !(dir * (vwap - vwapThen) >= pct(f.slopePct / 100)) || !session.length) continue
+      const last30 = bars.slice(-30)
+      const held = last30.filter((b) => dir * (b.close - vwapOf(minuteBars, msOf(b.time))) > 0).length
+      if (held < (f.heldPct / 100) * last30.length) continue
+      const tagged = last3.some((b) => (dir > 0 ? b.low <= vwap + pct(f.tagPct / 100) : b.high >= vwap - pct(f.tagPct / 100)))
+      const brokeThrough = bars.slice(-5).some((b) => dir * (b.close - vwap) < -pct(0.0005))
+      const turning = dir * (last.close - vwap) > 0 && dir * (last.close - last.open) > 0
+      if (!tagged || brokeThrough || !turning) continue
+      // Both OI reads: the option writers AND the futures positions.
+      const stance = optionOiStance(optionRead, dir)
+      const futuresBuild = fOpen?.oiPct != null && dir * fOpen.pricePct > 0 && fOpen.oiPct > 0
+      const futuresHolding = futuresRead?.oiPct == null || futuresRead.oiPct >= 0
+      if ((f.needWriters && stance !== 'agrees') || (f.needFuturesBuild && !futuresBuild) || (f.needFuturesHolding && !futuresHolding)) continue
+      const flowOk = (!f.needDelta || dir * last.delta > 0) && !stackAgainst(dir, 2) && !sweepWith(-dir)
+      const c = confirm(dir)
+      if (!flowOk || !c.ok) continue
+      const pullbackExtreme = dir > 0 ? Math.min(...last3.map((b) => b.low)) : Math.max(...last3.map((b) => b.high))
+      const stopPts = Math.max(pct(0.001), dir * (price - pullbackExtreme) + pct(0.0005))
+      if (stopPts > pct(0.004)) continue
+      const dayExtreme = dir > 0 ? Math.max(...session.map((b) => b.high)) : Math.min(...session.map((b) => b.low))
+      const targetPts = Math.max(f.targetR * stopPts, Math.min(Math.max(f.targetR, f.maxR) * stopPts, dir * (dayExtreme - price)))
+      const pcrWith = optionRead && (dir > 0 ? optionRead.pcr >= 1 : optionRead.pcr <= 1)
+      push('vwapOi', dir, stopPts, targetPts, f.timeStopMin,
+        62 + (futuresRead?.oiPct > 0 ? 4 : 0) + (pcrWith ? 3 : 0) + (stackWith(dir, 3) ? 3 : 0), {
+          VWAP: `${held}/${last30.length} closes ${dir > 0 ? 'above' : 'below'} VWAP ${vwap.toFixed(1)} (${dir > 0 ? 'up' : 'down'} ${(Math.abs(vwap - vwapThen) / vwapThen * 100).toFixed(2)}% in 30m); pullback tagged it, no close through - turning`,
+          OI: `option writers ${stance === 'agrees' ? 'back it' : `${stance} (filter off)`} · ${futuresBuild ? `futures ${dir > 0 ? 'long' : 'short'} build-up since open (price ${(fOpen.pricePct * 100).toFixed(2)}%, OI +${(fOpen.oiPct * 100).toFixed(2)}%)` : 'no futures build-up (filter off)'}${optionRead ? ` · PCR ${optionRead.pcr.toFixed(2)}` : ''}`,
+          Footprint: `Δ ${last.delta > 0 ? '+' : ''}${last.delta}, nothing stacked or swept against it`, Tape: tapeText, DOM: c.dom, Heatmap: c.heat,
+          Plan: `stop beyond the pullback ${pullbackExtreme.toFixed(1)}, target ${(targetPts / stopPts).toFixed(1)}R (day's ${dir > 0 ? 'high' : 'low'} ${dayExtreme.toFixed(1)})`,
         }, { rTarget: true })
     }
   }

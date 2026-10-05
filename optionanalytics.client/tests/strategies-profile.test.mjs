@@ -8,7 +8,7 @@ const at = (m) => T915 + m * MIN
 const iso = (ms) => new Date(ms).toISOString()
 let fails = 0
 const check = (n, c, x = '') => { console.log(`${c ? 'PASS' : 'FAIL'} ${n} ${x}`); if (!c) fails++ }
-check('28 strategies, 5 in the profile group, 3 range-bound', STRATEGIES.length === 28 && STRATEGIES.filter((s) => s.group === 'profile').length === 5 && STRATEGIES.filter((s) => s.group === 'range').length === 3)
+check('29 strategies, 5 in the profile group, 3 range-bound', STRATEGIES.length === 29 && STRATEGIES.filter((s) => s.group === 'profile').length === 5 && STRATEGIES.filter((s) => s.group === 'range').length === 3)
 
 // Profiles: two humps (HVN around 100 and 110) with a thin area (LVN) at 105.
 {
@@ -24,7 +24,8 @@ check('28 strategies, 5 in the profile group, 3 range-bound', STRATEGIES.length 
   check('TPO profile: letters A.., IB from the first hour, value area around the POC', tpo.rows.some((r) => r.letters.includes('A')) && tpo.ib.high >= 102 && tpo.ib.low <= 100 && tpo.val <= tpo.poc && tpo.vah >= tpo.poc, JSON.stringify({ poc: tpo.poc, va: [tpo.val, tpo.vah], ib: tpo.ib, periods: tpo.periods }))
 }
 
-// IB breakout long at 10:40: put writing near ATM over the last hour, close above the IB high.
+// IB breakout at 10:40 (LONG; the SHORT mirrors it around 22712): writers leaning the trade's way over the
+// last hour, the break ACCEPTED (two closes beyond the IB), the first break of the day, on 1.5x volume.
 function run(spot, pe = {}) {
   const sp = [], fut = [], ce = [], pes = []
   for (let m = 0; m <= 130; m++) {
@@ -40,13 +41,63 @@ function run(spot, pe = {}) {
 }
 function bars(from, to, f) { const out = []; let cvd = 0; for (let m = from; m <= to; m++) { const b = { time: at(m), absorption: [], exhaustion: [], stacked: [], ...f(m) }; b.delta = b.buy - b.sell; cvd += b.delta; b.cvd = cvd; out.push(b) } return out }
 const tape = (now, pct) => Array.from({ length: 50 }, (_, i) => ({ seq: i, time: now - 50000 + i * 1000, price: 1, quantity: 75, buy: ((i * 37) % 100) < pct }))
-{
+const MID = 22712
+function ibCase(dir, o = {}) {
   const now = at(85) + 10000
-  const oi = run((m) => 22650 + (m < 84 ? (m % 5) : 12), { 22650: (m) => 3e6 + m * 20000, 22600: (m) => 3e6 + m * 20000 })
-  const bs = bars(0, 84, (m) => { const p = m < 84 ? 22710 + (m % 5) : 22722; return { open: p - 1, high: p + 1, low: p - 1, close: p, buy: m === 84 ? 1500 : 500, sell: 500 } })
-  const setups = evaluateStrategies({ nowMs: now, price: 22722, bars: bs, minuteBars: bs, prints: tape(now, 70), book: { bids: [{ quantity: 600 }], asks: [{ quantity: 400 }] }, liquidity: [], pullStack: [], sweeps: [], icebergs: [], oi, estimated: false, lotSize: 75, bigLots: 10, profile: null })
-  const ib = setups.find((s) => s.id === 'ibBreakout')
-  check('IB breakout long fires above the first-hour high', ib?.side === 'LONG' && ib.target > ib.entry && ib.stop < ib.entry, JSON.stringify(ib?.checks ?? setups.map((s) => s.id)))
+  const mir = (p) => (dir > 0 ? p : 2 * MID - p)
+  const breakAt = o.breakAt ?? 83
+  const inside = (m) => 22710 + (m % 5)
+  const out = (m) => (o.earlier?.includes(m) ? true : m >= breakAt && !(o.poke && m === 84))
+  const writers = { 22650: (m) => 3e6 + m * 20000, 22600: (m) => 3e6 + m * 20000 }
+  const oi = dir > 0
+    ? run((m) => (out(m) ? 22662 : inside(m) - 60), writers)
+    : runShort((m) => mir(out(m) ? 22722 : inside(m)) - 60)
+  const bs = bars(0, 84, (m) => {
+    const p = mir(out(m) ? 22722 : inside(m))
+    // The break bar heavy (2x the IB's average, 1.2x when weak), the acceptance bar still with the trade.
+    const withTrade = m === breakAt ? (o.weak ? 700 : 1500) : m === 84 && out(m) ? 800 : 500
+    return { open: p - dir, high: p + 1, low: p - 1, close: p, buy: dir > 0 ? withTrade : 500, sell: dir > 0 ? 500 : withTrade }
+  })
+  const price = bs.at(-1).close
+  const setups = evaluateStrategies({ nowMs: now, price, bars: bs, minuteBars: bs, prints: tape(now, dir > 0 ? 70 : 30), book: dir > 0 ? { bids: [{ quantity: 600 }], asks: [{ quantity: 400 }] } : { bids: [{ quantity: 400 }], asks: [{ quantity: 600 }] }, liquidity: [], pullStack: [], sweeps: [], icebergs: [], oi, estimated: false, lotSize: 75, bigLots: 10, profile: null, filters: o.filters })
+  return { ib: setups.find((s) => s.id === 'ibBreakout'), setups }
+}
+// Call writing for the short: the whole chain's calls written over the last hour.
+function runShort(spot) {
+  const sp = [], fut = [], ce = [], pes = []
+  for (let m = 0; m <= 130; m++) {
+    const s = spot(m)
+    sp.push({ time: iso(at(m)), open: s, high: s, low: s, close: s })
+    fut.push({ time: iso(at(m)), open: s + 60, high: s + 60, low: s + 60, close: s + 60, volume: 1, openInterest: 1e7 })
+    for (let k = 22300; k <= 23000; k += 50) {
+      ce.push({ time: iso(at(m)), strike: k, openInterest: k === 22700 || k === 22750 ? 3e6 + m * 20000 : 1e6 })
+      pes.push({ time: iso(at(m)), strike: k, openInterest: 1e6 })
+    }
+  }
+  return buildOiContext({ success: true, date: '2026-10-05', step: 50, spotCandlesOneMinute: sp, futuresBars: fut, cePoints: ce, pePoints: pes })
+}
+{
+  const show = (r) => JSON.stringify(r.ib?.checks ?? r.setups.map((s) => s.id))
+  const L = ibCase(1)
+  check('IB breakout LONG: two closes above the first-hour high, first break, 2x volume', L.ib?.side === 'LONG' && L.ib.target > L.ib.entry && L.ib.stop < L.ib.entry && /2 closes beyond/.test(L.ib.checks.Footprint), show(L))
+  const S = ibCase(-1)
+  check('IB breakout SHORT (the mirror): two closes below the first-hour low', S.ib?.side === 'SHORT' && S.ib.target < S.ib.entry && S.ib.stop > S.ib.entry, show(S))
+  check('not on a one-bar poke (the second close back inside the IB)', !ibCase(1, { poke: true }).ib && !ibCase(-1, { poke: true }).ib)
+  check('not on the first close beyond only (no acceptance yet)', !ibCase(1, { breakAt: 84 }).ib && !ibCase(-1, { breakAt: 84 }).ib)
+  check('not once the break has already been running (third close beyond)', !ibCase(1, { breakAt: 82 }).ib)
+  check('not when an earlier break of that side was accepted and failed', !ibCase(1, { earlier: [70, 71] }).ib && !ibCase(-1, { earlier: [70, 71] }).ib)
+  check('...but an earlier one-bar poke does not block it', ibCase(1, { earlier: [70] }).ib?.side === 'LONG')
+  check('not when the break bar trades under 1.5x the IB\'s average volume', !ibCase(1, { weak: true }).ib && !ibCase(-1, { weak: true }).ib)
+  // The trader's filters (STRATEGY_FILTERS.ibBreakout) - each one loosened lets its case through.
+  const ibF = (o) => ({ ibBreakout: o })
+  check('filter: 1 close to accept -> the first close beyond fires', ibCase(1, { breakAt: 84, filters: ibF({ closesBeyond: 1 }) }).ib?.side === 'LONG' && ibCase(-1, { breakAt: 84, filters: ibF({ closesBeyond: 1 }) }).ib?.side === 'SHORT')
+  check('filter: 3 closes to accept -> two are not enough', !ibCase(1, { filters: ibF({ closesBeyond: 3 }) }).ib)
+  check('filter: first break only off -> fires after an earlier failed break', ibCase(1, { earlier: [70, 71], filters: ibF({ firstBreakOnly: false }) }).ib?.side === 'LONG')
+  check('filter: volume 0 (off) -> fires on a weak break bar; 1.2x lets a 1.2x bar through', ibCase(1, { weak: true, filters: ibF({ breakVolumeX: 0 }) }).ib?.side === 'LONG' && ibCase(1, { weak: true, filters: ibF({ breakVolumeX: 1.2 }) }).ib?.side === 'LONG')
+  check('filter: volume 2.5x -> the 2x break bar is not enough', !ibCase(1, { filters: ibF({ breakVolumeX: 2.5 }) }).ib)
+  const t2 = ibCase(1, { filters: ibF({ targetIb: 2, timeStopMin: 30 }) }).ib
+  // (This IB is ~4 pts, so the 1.5x-stop floor sets the target here; the plan shows the filter.)
+  check('filter: target 2x the IB range (in the plan), 30-min time stop', t2 && /2x the range beyond/.test(t2.checks.Profile) && t2.target - t2.entry >= L.ib.target - L.ib.entry && t2.timeStopMs - t2.t === 30 * MIN, JSON.stringify(t2?.checks.Profile))
 }
 // VA rejection long at the previous VAL with a put wall there.
 {

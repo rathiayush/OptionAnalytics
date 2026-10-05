@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, Button, Card, Checkbox, Col, InputNumber, Modal, Popconfirm, Progress, Row, Segmented, Select, Space, Switch, Table, Tag, Tooltip, Typography, notification } from 'antd'
-import { SoundOutlined } from '@ant-design/icons'
+import { SettingOutlined, SoundOutlined } from '@ant-design/icons'
 import { UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import { PAPER_TRADE_LOT_SIZE } from './oiShared.jsx'
 import { liveTradingApi } from './LiveTrading.jsx'
@@ -11,7 +11,7 @@ import { suddenWallText } from './suddenOi.js'
 import {
   ACTIVE_STRATEGIES, STRATEGY_BY_ID, evaluateStrategies, simulateOutcome, strategyStats, topFifteen, MIN_TRADES_TO_RANK, oiSummary, optionOiText,
   DEFAULT_TRAIL, LAST_ENTRY, SQUARE_OFF, fmtHm, exitLabel, premiumAt, optionPnlPoints, optionTradeText, squareOffMs, optionStopTargetHit, RANGE_IDS, asReplayContext,
-  coolOffGate, gradeOf, optionTradeAt,
+  coolOffGate, gradeOf, optionTradeAt, STRATEGY_FILTERS, strategyFilters, changedFilters,
 } from './strategyEngine.js'
 import { aggregateBars, analyzeBars, findWalls, liquiditySignals, pullStackSignals, replayRange, replayView } from './orderFlowMath.js'
 
@@ -109,7 +109,7 @@ function setupTip(s, o = null) {
 
 export function StrategyScanner({ underlying, isReplay, date, view, replayDay, replayMs, range, tapePrints, liquidity, pullStack, rowSize, lotSize, largeLots, estimated, profile, oi, oiError, canTradeLive = false }) {
   const [settings, setSettings] = useState(() => {
-    const saved = { alerts: true, sound: true, voice: true, telegram: true, pick: 'top15', custom: [], trail: { on: true, ...DEFAULT_TRAIL }, autoPaper: 'sell', paperLots: 1, paperSl: 20, paperTarget: 30, liveSlippage: 2, maxLiveTrades: 5, maxLiveLoss: 10000, ...readJson(SETTINGS_KEY, {}) }
+    const saved = { alerts: true, sound: true, voice: true, telegram: true, pick: 'top15', custom: [], filters: {}, trail: { on: true, ...DEFAULT_TRAIL }, autoPaper: 'sell', paperLots: 1, paperSl: 20, paperTarget: 30, liveSlippage: 2, maxLiveTrades: 5, maxLiveLoss: 10000, ...readJson(SETTINGS_KEY, {}) }
     // Older saved settings used 'top5' (from when there were only the first 10).
     // Every alert paper-sells its option by default (settings saved before that default had 'off').
     if (!saved.autoPaperSellDefault) Object.assign(saved, { autoPaper: 'sell', autoPaperSellDefault: true })
@@ -358,6 +358,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     const setups = evaluateStrategies({
       nowMs, price, bars, minuteBars: view.minuteBars, prints: estimated ? null : tapePrints,
       book: view.book, walls: findWalls(view.book), liquidity, pullStack, sweeps: view.sweeps, icebergs: view.icebergs, oi, estimated, lotSize, bigLots: largeLots, profile, watch: watchNow, heatmap: view.heatmap, rowSize,
+      filters: settingsRef.current.filters,
     })
     const watching = watchNow.filter((w) => w.missing.length)
     setWatch((prev) => (JSON.stringify(prev.map((w) => [w.id, w.side, w.missing])) === JSON.stringify(watching.map((w) => [w.id, w.side, w.missing])) ? prev : watching))
@@ -545,6 +546,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
           const setups = evaluateStrategies({
             nowMs: clock, price, bars, minuteBars: v.minuteBars, prints: clockPrints,
             book: v.book, liquidity: liq, pullStack: ps.signals, sweeps: v.sweeps, icebergs: v.icebergs, oi: scanOi, estimated, lotSize, bigLots: largeLots, profile, heatmap: v.heatmap, rowSize,
+            filters: settingsRef.current.filters,
           })
           const recentlyFound = (s) => found.some((f) => f.id === s.id && f.side === s.side && s.t - f.t < COOLDOWN_MS)
           const gate = coolOffGate(pending, setups.filter((s) => !recentlyFound(s)), { nowMs: clock, price, bars, oi: scanOi })
@@ -766,7 +768,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     { title: '#', dataIndex: 'no', width: 34 },
     {
       title: 'Strategy', dataIndex: 'name',
-      render: (name, r) => <span>{r.top && <Tag color="gold" style={{ marginRight: 4 }}>alert</Tag>}{name}{r.group === 'profile' && <Tag style={{ marginLeft: 4, fontSize: 10 }}>profile</Tag>}{r.group === 'range' && <Tag color="cyan" style={{ marginLeft: 4, fontSize: 10 }}>range</Tag>}{r.priority && <Tag color="purple" style={{ marginLeft: 4, fontSize: 10 }}>institutional</Tag>}</span>,
+      render: (name, r) => <span>{r.top && <Tag color="gold" style={{ marginRight: 4 }}>alert</Tag>}{name}{r.group === 'profile' && <Tag style={{ marginLeft: 4, fontSize: 10 }}>profile</Tag>}{r.group === 'range' && <Tag color="cyan" style={{ marginLeft: 4, fontSize: 10 }}>range</Tag>}{r.priority && <Tag color="purple" style={{ marginLeft: 4, fontSize: 10 }}>institutional</Tag>}{filtersButton(r.id)}</span>,
     },
     { title: 'Trades', dataIndex: 'trades', width: 64 },
     { title: 'Win %', dataIndex: 'winRate', width: 66, render: (v) => (v == null ? '-' : `${Math.round(v * 100)}%`) },
@@ -775,6 +777,20 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     { title: 'Best', dataIndex: 'bestR', width: 64, render: (v, r) => (r.trades ? fmtR(v) : '-') },
     { title: 'PF', dataIndex: 'profitFactor', width: 56, render: (v) => (v == null ? '-' : v === Infinity ? '∞' : v.toFixed(2)) },
   ]
+  // Per-strategy filters (STRATEGY_FILTERS): edited in a dialog, saved with the scanner settings.
+  const [filterFor, setFilterFor] = useState(null)
+  const filtersButton = (id) => {
+    if (!STRATEGY_FILTERS[id]) return null
+    const edited = changedFilters(id, settings.filters?.[id]).length
+    return (
+      <Tooltip title={edited ? `${edited} filter(s) changed from the default` : 'Tune this strategy\'s filters'}>
+        <Button size="small" type={edited ? 'primary' : 'default'} ghost={!!edited} icon={<SettingOutlined />} onClick={() => setFilterFor(id)}
+          style={{ marginLeft: 6, height: 20, fontSize: 11, padding: '0 6px' }} aria-label={`Filters for ${STRATEGY_BY_ID[id].name}`}>
+          {edited ? `Filters · ${edited}` : 'Filters'}
+        </Button>
+      </Tooltip>
+    )
+  }
   const toggleCustom = (id, on) => setSettings((s) => ({ ...s, custom: on ? [...new Set([...s.custom, id])] : s.custom.filter((x) => x !== id) }))
 
   return (
@@ -1060,6 +1076,10 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
         </Col>
         <Col xs={24} xl={14}>
           <Table size="small" pagination={false} columns={statColumns} dataSource={statRows} scroll={{ x: 560 }} />
+          {filterFor && (
+            <StrategyFiltersModal id={filterFor} values={settings.filters?.[filterFor]} onClose={() => setFilterFor(null)}
+              onSave={(v) => { setSettings((s) => ({ ...s, filters: { ...s.filters, [filterFor]: v } })); setFilterFor(null) }} />
+          )}
           <Text type="secondary" style={{ fontSize: 11 }}>
             {days.length} day(s) scored ({days.filter((d) => d.estimated).length} estimated). Ranked by average R per trade (win rate × size of the wins), shrunk for small samples;
             {' '}a strategy needs {MIN_TRADES_TO_RANK}+ trades to be ranked - until enough are, the playbook&apos;s picks fill each group's top 5 (OI + order flow, and profile) and the trapped-OI squeeze (24), then the institutional setups (17-21), fill the last five of the top 15. Range-bound fades (7, 22, 23) only fire on a balanced day; pick &quot;Range-bound&quot; to alert on them alone. A strategy losing on average is never alerted. Every alert carries its stop-loss and target, a trailing-SL alert gives each new stop, and another alert follows when the stop, target or the {fmtHm(SQUARE_OFF)} cut-off ends the trade. Outcomes are the FUTURES move to
@@ -1100,4 +1120,41 @@ function trimPaper(book) {
 function trimHistory(history) {
   const keys = Object.keys(history).sort((a, b) => (history[a].date < history[b].date ? 1 : -1))
   return Object.fromEntries(keys.slice(0, MAX_DAYS_KEPT).map((k) => [k, history[k]]))
+}
+
+/** The filters of one strategy (STRATEGY_FILTERS[id]): a number box or a switch each, defaults marked;
+ *  saved on OK. They apply to the setups found from then on - live, the replay clock and Scan day. */
+function StrategyFiltersModal({ id, values, onClose, onSave }) {
+  const meta = STRATEGY_BY_ID[id]
+  const defs = STRATEGY_FILTERS[id] ?? []
+  const [draft, setDraft] = useState(() => strategyFilters(id, values))
+  const set = (key, v) => setDraft((d) => ({ ...d, [key]: v }))
+  const defaults = strategyFilters(id, {})
+  return (
+    <Modal open title={`Filters · #${meta.no} ${meta.name}`} onCancel={onClose} onOk={() => onSave(strategyFilters(id, draft))} okText="Save"
+      footer={(_, { OkBtn, CancelBtn }) => (
+        <Space>
+          <Button size="small" onClick={() => setDraft(defaults)} disabled={JSON.stringify(draft) === JSON.stringify(defaults)}>Reset to defaults</Button>
+          <CancelBtn /><OkBtn />
+        </Space>
+      )}>
+      <Space direction="vertical" size={8} style={{ width: '100%' }}>
+        {defs.map((f) => (
+          <div key={f.key} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+            <Text style={{ fontSize: 12 }}>
+              {f.label}
+              {draft[f.key] !== f.default && <Text type="secondary" style={{ fontSize: 11 }}>{` (default ${f.type === 'switch' ? (f.default ? 'on' : 'off') : f.default})`}</Text>}
+            </Text>
+            {f.type === 'switch'
+              ? <Switch size="small" checked={draft[f.key]} onChange={(v) => set(f.key, v)} aria-label={f.label} />
+              : <InputNumber size="small" min={f.min} max={f.max} step={f.step} value={draft[f.key]} onChange={(v) => v != null && set(f.key, v)} style={{ width: 86, flex: 'none' }} aria-label={f.label} />}
+          </div>
+        ))}
+        <Text type="secondary" style={{ fontSize: 11 }}>
+          The defaults are the strategy&apos;s tested rules. Changes apply to setups found from now on - live, on the replay clock and in Scan day;
+          {' '}days already scored keep the setups found with the filters they were scanned with, so re-run Scan day to measure a change.
+        </Text>
+      </Space>
+    </Modal>
+  )
 }
