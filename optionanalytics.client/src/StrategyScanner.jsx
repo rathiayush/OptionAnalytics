@@ -7,6 +7,7 @@ import { liveTradingApi } from './LiveTrading.jsx'
 import {
   ACTIVE_STRATEGIES, STRATEGY_BY_ID, evaluateStrategies, simulateOutcome, strategyStats, topFifteen, MIN_TRADES_TO_RANK, oiSummary, optionOiText,
   DEFAULT_TRAIL, LAST_ENTRY, SQUARE_OFF, fmtHm, exitLabel, premiumAt, optionPnlPoints, optionTradeText, squareOffMs, optionStopTargetHit, RANGE_IDS, asReplayContext,
+  coolOffGate, gradeOf,
 } from './strategyEngine.js'
 import { aggregateBars, analyzeBars, findWalls, liquiditySignals, pullStackSignals, replayRange, replayView } from './orderFlowMath.js'
 
@@ -123,6 +124,20 @@ function fmtR(r) {
  * for the chosen ones (the top 5 by default), scores every setup by what the futures did next, and
  * ranks the strategies over every day scored so far. "Scan day" runs a whole loaded day at once.
  */
+// A setup's hover: its levels in bold first, then every check (Confidence with its parts first).
+function setupTip(s, o = null) {
+  const meta = STRATEGY_BY_ID[s.id]
+  return (
+    <div style={{ fontSize: 12 }}>
+      <div style={{ fontSize: 13, marginBottom: 4 }}>
+        #{meta?.no} {meta?.name} · {s.side} @ {s.entry.toFixed(1)}
+        <div><b>SL {s.stop.toFixed(1)}</b>{o?.trailed ? <> → <b>{o.stop.toFixed(1)}</b> (trailed)</> : ''} · <b>Target {s.target.toFixed(1)}</b> · <b>{s.confidence}% {s.grade ?? gradeOf(s.confidence)}</b></div>
+      </div>
+      {Object.entries(s.checks).map(([k, v]) => <div key={k}><b>{k}:</b> {v}</div>)}
+    </div>
+  )
+}
+
 export function StrategyScanner({ underlying, isReplay, date, view, replayDay, replayMs, range, tapePrints, liquidity, pullStack, rowSize, lotSize, largeLots, estimated, profile, oi, oiError, canTradeLive = false }) {
   const [settings, setSettings] = useState(() => {
     const saved = { alerts: true, sound: true, voice: true, telegram: true, pick: 'top15', custom: [], trail: { on: true, ...DEFAULT_TRAIL }, autoPaper: 'sell', paperLots: 1, paperSl: 20, paperTarget: 30, liveSlippage: 2, maxLiveTrades: 5, maxLiveLoss: 10000, ...readJson(SETTINGS_KEY, {}) }
@@ -137,6 +152,9 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   const [scan, setScan] = useState(null) // { progress, error }
   const dayKey = `${underlying}:${date}`
   const firedRef = useRef([])
+  // Setups held while price cools off after running too far too fast into them (coolOffGate).
+  const pendingRef = useRef(new Map())
+  const [cooling, setCooling] = useState([])
   const settingsRef = useRef(settings)
   useEffect(() => { settingsRef.current = settings }, [settings])
 
@@ -277,6 +295,8 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     const saved = !isReplay ? readJson(FIRED_KEY, {})[dayKey] ?? [] : []
     restoredRef.current = new Set(saved.map((f) => `${f.id}-${f.t}`))
     firedRef.current = saved
+    pendingRef.current = new Map()
+    setCooling([])
     setFired(saved)
   }, [dayKey, isReplay])
   useEffect(() => {
@@ -306,16 +326,26 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       firedRef.current = firedRef.current.filter((f) => f.t <= nowMs)
       setFired(firedRef.current)
     }
+    if (isReplay && [...pendingRef.current.values()].some((p) => p.setup.t > nowMs)) {
+      pendingRef.current = new Map()
+      setCooling([])
+    }
     // An exact day's tape must have caught up with the clock (a replay jump fetches it afresh) -
     // judging aggression on a stale tape would be judging the wrong minute.
     if (!estimated && !(tapePrints?.length && msOf(tapePrints.at(-1).time) >= nowMs - 3 * MIN)) return
     const bars = completedBars(view.minuteBars, nowMs, rowSize, lotSize, estimated)
     if (bars.length < 5) return
+    const price = priceAt(view, estimated ? null : tapePrints, nowMs, bars)
     const setups = evaluateStrategies({
-      nowMs, price: priceAt(view, estimated ? null : tapePrints, nowMs, bars), bars, minuteBars: view.minuteBars, prints: estimated ? null : tapePrints,
+      nowMs, price, bars, minuteBars: view.minuteBars, prints: estimated ? null : tapePrints,
       book: view.book, walls: findWalls(view.book), liquidity, pullStack, sweeps: view.sweeps, icebergs: view.icebergs, oi, estimated, lotSize, bigLots: largeLots, profile,
     })
-    const fresh = setups.filter((s) => !firedRef.current.some((f) => f.id === s.id && f.side === s.side && s.t - f.t < COOLDOWN_MS))
+    const recentlyFired = (s) => firedRef.current.some((f) => f.id === s.id && f.side === s.side && s.t - f.t < COOLDOWN_MS)
+    // Price ran too far too fast into a setup: it is held and entered on the pullback / pause.
+    const gate = coolOffGate(pendingRef.current, setups.filter((s) => !recentlyFired(s)), { nowMs, price, bars, oi })
+    const held = [...pendingRef.current.values()].map((p) => p.setup)
+    setCooling((prev) => (prev.map((x) => `${x.id}${x.side}${x.t}`).join() === held.map((x) => `${x.id}${x.side}${x.t}`).join() ? prev : held))
+    const fresh = gate.fire.filter((s) => !recentlyFired(s))
       .map((s) => ({ ...s, trail: trailFor(settingsRef.current) }))
     if (!fresh.length) return
     firedRef.current = [...firedRef.current, ...fresh]
@@ -337,7 +367,8 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
         message: <span style={{ color: s.side === 'LONG' ? UP_COLOR : DOWN_COLOR, fontWeight: 700 }}>#{meta.no} {meta.name} · {s.side}</span>,
         description: (
           <div style={{ fontSize: 12 }}>
-            <div>{IST_HHMM.format(new Date(s.t))} · futures {s.entry.toFixed(1)} · stop {s.stop.toFixed(1)} · target {s.target.toFixed(1)} · {s.confidence}%</div>
+            <div style={{ fontSize: 13 }}>{IST_HHMM.format(new Date(s.t))} · futures {s.entry.toFixed(1)} · <b>SL {s.stop.toFixed(1)}</b> · <b>Target {s.target.toFixed(1)}</b> · <b>{s.confidence}% {s.grade ?? gradeOf(s.confidence)}</b></div>
+            {s.signal && <div>Waited for the cool-off: signal at {IST_HHMM.format(new Date(s.signal.t))} @ {s.signal.entry.toFixed(1)}</div>}
             <div>{trailText(s.trail)}{s.trail ? ` (from ${(s.entry + (s.side === 'LONG' ? 1 : -1) * s.trail.startR * Math.abs(s.entry - s.stop)).toFixed(1)})` : ''} · closed by {fmtHm(SQUARE_OFF)} at the latest</div>
             {s.options && (
               <div style={{ margin: '4px 0' }}>
@@ -475,6 +506,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
         prints = body?.prints ?? []
       }
       const found = []
+      const pending = new Map()
       // On whole minutes: each setup enters at the previous minute's close and its outcome counts from
       // the bar starting at its entry - the same as replaying to that minute.
       const start = Math.ceil((dayRange.start + 15 * MIN) / MIN) * MIN
@@ -488,12 +520,15 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
           const liq = estimated ? [] : liquiditySignals({ columns: cols, trades: v.trades, minuteBars: v.minuteBars, rowSize, lotSize })
           const ps = estimated ? { signals: [] } : pullStackSignals({ columns: cols.slice(-60), rowSize, lotSize })
           const clockPrints = prints ? upTo(prints, clock) : null
+          const price = priceAt(v, clockPrints, clock, bars)
           const setups = evaluateStrategies({
-            nowMs: clock, price: priceAt(v, clockPrints, clock, bars), bars, minuteBars: v.minuteBars, prints: clockPrints,
+            nowMs: clock, price, bars, minuteBars: v.minuteBars, prints: clockPrints,
             book: v.book, liquidity: liq, pullStack: ps.signals, sweeps: v.sweeps, icebergs: v.icebergs, oi: scanOi, estimated, lotSize, bigLots: largeLots, profile,
           })
-          for (const s of setups) {
-            if (!found.some((f) => f.id === s.id && f.side === s.side && s.t - f.t < COOLDOWN_MS)) found.push({ ...s, trail: trailFor(settingsRef.current) })
+          const recentlyFound = (s) => found.some((f) => f.id === s.id && f.side === s.side && s.t - f.t < COOLDOWN_MS)
+          const gate = coolOffGate(pending, setups.filter((s) => !recentlyFound(s)), { nowMs: clock, price, bars, oi: scanOi })
+          for (const s of gate.fire) {
+            if (!recentlyFound(s)) found.push({ ...s, trail: trailFor(settingsRef.current) })
           }
         }
         if (i % 10 === 0) {
@@ -780,6 +815,21 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                 <Button size="small" danger>Reset stats</Button>
               </Popconfirm>
             </Space>
+            {cooling.length > 0 && (
+              <div aria-label="Waiting for cool-off" style={{ marginBottom: 4 }}>
+                {cooling.map((s) => {
+                  const meta = STRATEGY_BY_ID[s.id]
+                  return (
+                    <Tooltip key={`${s.id}-${s.t}`} title={setupTip(s)}>
+                      <div style={{ display: 'flex', gap: 6, alignItems: 'baseline', fontSize: 12, padding: '2px 0' }}>
+                        <Tag color="gold" style={{ margin: 0, fontSize: 11 }}>WAIT</Tag>
+                        <span>#{meta.no} {meta.short} {s.side} <Text type="secondary" style={{ fontSize: 11 }}>since {IST_HHMM.format(new Date(s.t))} @ {s.entry.toFixed(1)} - ran {s.coolOff.run.toFixed(1)} pts in 3 min; enters on a pullback or a pause · <b>SL {s.stop.toFixed(1)}</b> · <b>T {s.target.toFixed(1)}</b></Text></span>
+                      </div>
+                    </Tooltip>
+                  )
+                })}
+              </div>
+            )}
             <div style={{ maxHeight: 260, overflowY: 'auto' }} aria-label="Strategy setups">
               {dayResults.length === 0
                 ? <Text type="secondary" style={{ fontSize: 12 }}>{oi ? 'No setup yet today.' : oiError ? 'Waiting for OI…' : 'Loading OI…'}</Text>
@@ -787,11 +837,11 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                   const meta = STRATEGY_BY_ID[s.id]
                   const o = s.outcome
                   return (
-                    <Tooltip key={`${s.id}-${s.t}`} title={<div style={{ fontSize: 12 }}>{Object.entries(s.checks).map(([k, v]) => <div key={k}><b>{k}:</b> {v}</div>)}</div>}>
+                    <Tooltip key={`${s.id}-${s.t}`} title={setupTip(s, o)}>
                       <div style={{ display: 'flex', gap: 6, alignItems: 'baseline', fontSize: 12, padding: '3px 0', borderBottom: '1px solid #ffffff0d' }}>
                         <Text type="secondary" style={{ fontSize: 11, minWidth: 38 }}>{IST_HHMM.format(new Date(s.t))}</Text>
                         <Tag color={s.side === 'LONG' ? 'green' : 'red'} style={{ margin: 0, fontSize: 11 }}>{s.side}</Tag>
-                        <span style={{ flex: 1 }}>#{meta.no} {meta.short} <Text type="secondary" style={{ fontSize: 11 }}>@ {s.entry.toFixed(1)} · SL {o.trailed ? <>{s.stop.toFixed(1)} → <b>{o.stop.toFixed(1)}</b></> : s.stop.toFixed(1)}{s.trail ? ' (trail)' : ''} · T {s.target.toFixed(1)} · {s.confidence}%{s.estimated ? ' · est.' : ''}
+                        <span style={{ flex: 1 }}>#{meta.no} {meta.short} <Text type="secondary" style={{ fontSize: 11 }}>@ {s.entry.toFixed(1)} · <b>SL {o.trailed ? <>{s.stop.toFixed(1)} → {o.stop.toFixed(1)}</> : s.stop.toFixed(1)}</b>{s.trail ? ' (trail)' : ''} · <b>T {s.target.toFixed(1)}</b> · {s.confidence}% {s.grade ?? gradeOf(s.confidence)}{s.signal ? ' · after cool-off' : ''}{s.estimated ? ' · est.' : ''}
                           {o.status !== 'open' && o.exitPrice != null && <> · <span style={{ whiteSpace: 'nowrap' }}>out {o.exitAt != null ? IST_HHMM.format(new Date(o.exitAt)) : 'end'} @ {o.exitPrice.toFixed(1)} ({exitLabel(o)})</span></>}</Text></span>
                         {s.options && oi && (
                           <span style={{ whiteSpace: 'nowrap' }}>

@@ -70,7 +70,7 @@ const tapeWith = (nowMs, buyPct) => Array.from({ length: 50 }, (_, i) => ({ seq:
   const putWriting = run({ spotPath: (m) => 22700 - Math.min(95, m), futOi: () => 1e7, pe: { 22600: (m) => 5e6 + m * 20000, 22650: (m) => 1e6 + m * 30000, 22700: (m) => 1e6 + m * 30000 }, ce: { 22800: (m) => 4e6 + m * 5000 } })
   const backed = evaluateStrategies({ ...base, oi: buildOiContext(putWriting) }).find((x) => x.id === 'wallDefence')
   const plain = evaluateStrategies({ ...base, oi: buildOiContext(run({ spotPath: (m) => 22700 - Math.min(95, m), futOi: () => 1e7, pe: { 22600: (m) => 5e6 + m * 20000 }, ce: { 22800: (m) => 4e6 + m * 5000, 22650: (m) => 1e6 + m * 20000 } })) }).find((x) => x.id === 'wallDefence') // calls written as fast: neutral
-  check('put writing near ATM backs it: higher confidence than neutral, Options OI shown first', backed && plain && /neutral/.test(plain.checks['Options OI']) && backed.confidence > plain.confidence && Object.keys(backed.checks)[0] === 'Options OI' && /PCR/.test(backed.checks['Options OI']), backed?.checks['Options OI'])
+  check('put writing near ATM backs it: higher confidence than neutral, Confidence then Options OI shown first', backed && plain && /neutral/.test(plain.checks['Options OI']) && backed.confidence > plain.confidence && Object.keys(backed.checks)[0] === 'Confidence' && /options writers back it \+6/.test(backed.checks.Confidence) && Object.keys(backed.checks)[1] === 'Options OI' && /PCR/.test(backed.checks['Options OI']), backed?.checks['Options OI'])
 }
 
 // B. Short-covering squeeze LONG at 11:20: futures +0.2% in 10 min, futures OI -0.5%.
