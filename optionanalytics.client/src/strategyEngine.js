@@ -1,6 +1,6 @@
 // The OI + Order Flow playbook's strategies as objective rules, run on the Order Flow page live and at
 // the replay clock (and over a whole day by "Scan day"): OI + order flow (1-10, 16-21, 24-27, 29), pure option OI (28), volume / market
-// profile (11-15) and range-bound mean reversion (7, 22, 23). Each strategy reads all five screens:
+// profile (11-15, 30) and range-bound mean reversion (7, 22, 23). Each strategy reads all five screens:
 //
 //   OI        - the OI Replay data for the day (/api/oi-replay/{u}/run): option OI per strike (walls,
 //               OI change, writer migration, max pain) and the futures' own OI (build-up / covering).
@@ -26,6 +26,7 @@
 import { findSuddenWalls, suddenWallText } from './suddenOi.js'
 import { liquidityMap } from './orderFlowMath.js'
 import { optionTrailLevel, tighterStop } from './optionTrail.js'
+import { adaptiveDecision, dayRegime } from './dayRegime.js'
 
 const MIN = 60_000
 /** The strategies that wait for a fast run to cool off before entering (coolOffGate) - the ones that
@@ -84,16 +85,20 @@ export const STRATEGIES = [
   // The heatmap's wall and the option writers' wall at the same price, with the futures: hold or break.
   { id: 'heatmapOi', no: 26, name: 'OI + liquidity heatmap confluence - hold or break', short: 'Heatmap + OI wall', priority: 3, retired: true },
   // The classic VWAP trend-day pullback, with the option writers / futures and the heatmap behind it -
-  // back in the line-up (the trader asked for it with #29, 05 Oct). #27 and #29 carry no priority, so the
-  // default Top 15 stays as measured; they join it once Scan day scores them profitable (or tick them in
-  // Custom / pick All).
-  { id: 'vwapPullback', no: 27, name: 'VWAP pullback - trend continuation (OI + heatmap)', short: 'VWAP pullback' },
+  // back in the line-up (the trader asked for it with #29, 05 Oct).
+  // `trial`: a new strategy alerts by default ON TOP of the Top 15 (pushing nothing out) until it has
+  // MIN_TRADES_TO_RANK scored trades - live days are scored as their trades end, so it gets measured
+  // without a Scan day - then it is ranked like the rest (and never alerted once it measures losing).
+  { id: 'vwapPullback', no: 27, name: 'VWAP pullback - trend continuation (OI + heatmap)', short: 'VWAP pullback', trial: true },
   // Pure option OI, minute by minute: the support wall outweighs the resistance wall, the money leans
   // the same way, and the writers keep adding on that side every minute.
   { id: 'oiStructure', no: 28, name: 'OI structure - heavier wall, leaning ATM, writing every minute', short: 'OI structure', priority: 3, retired: true },
   // The well-known VWAP trade with both OI reads behind it - the option writers AND a futures build-up -
   // on every day (no heatmap needed; #27 is the same trade with the heatmap wall).
-  { id: 'vwapOi', no: 29, name: 'VWAP + options & futures OI confluence', short: 'VWAP + OI' },
+  { id: 'vwapOi', no: 29, name: 'VWAP + options & futures OI confluence', short: 'VWAP + OI', trial: true },
+  // Market profile: a break of the initial balance that leaves a tail / sweeps the liquidity out there
+  // and comes back inside - a failed breakout; the range is revisited (toward the other IB edge).
+  { id: 'ibFailed', no: 30, name: 'Failed IB breakout - back inside, revisit the range', short: 'Failed IB break', group: 'profile', trial: true },
 ]
 export const STRATEGY_BY_ID = Object.fromEntries(STRATEGIES.map((s) => [s.id, s]))
 /** The strategies in use - what the scanner runs, lists, alerts on and scores. */
@@ -121,6 +126,18 @@ export const STRATEGY_FILTERS = {
     { key: 'needTape', label: 'Tape with the break (sweep or 1-min aggression 60%+)', type: 'switch', default: true },
     { key: 'targetIb', label: 'Target (x the IB range)', type: 'number', default: 1, min: 0.5, max: 3, step: 0.25 },
     { key: 'timeStopMin', label: 'Time stop (minutes)', type: 'number', default: 90, min: 10, max: 240, step: 5 },
+  ],
+  ibFailed: [
+    { key: 'lookbackMin', label: 'The break beyond the IB happened within the last (minutes)', type: 'number', default: 15, min: 5, max: 60, step: 5 },
+    { key: 'maxClosesBeyond', label: 'At most this many closes beyond the IB (more = an accepted breakout)', type: 'number', default: 5, min: 0, max: 30, step: 1 },
+    { key: 'maxExcursionPct', label: 'How far beyond the IB it went, at most (%)', type: 'number', default: 0.4, min: 0.05, max: 1.5, step: 0.05 },
+    { key: 'needTrapped', label: 'Trapped breakout traders: a tail, a sweep or big prints out there', type: 'switch', default: true },
+    { key: 'tailPct', label: 'Tail: the extreme bar closes back at least (%) of its range', type: 'number', default: 50, min: 20, max: 95, step: 5 },
+    { key: 'needWriters', label: 'Option writers defend the IB edge (adding at the strike past it, 15 min)', type: 'switch', default: true },
+    { key: 'needDelta', label: 'Last bar\'s delta with the trade', type: 'switch', default: true },
+    { key: 'targetFrac', label: 'Target: how far back across the IB (1 = the other edge, 0.5 = the middle)', type: 'number', default: 1, min: 0.25, max: 1.5, step: 0.25 },
+    { key: 'minRR', label: 'Room to the target at least (R)', type: 'number', default: 1.5, min: 0.5, max: 4, step: 0.25 },
+    { key: 'timeStopMin', label: 'Time stop (minutes)', type: 'number', default: 75, min: 10, max: 240, step: 5 },
   ],
   vwapOi: [
     { key: 'heldPct', label: 'Of the last 30 closes on the trend side of VWAP (%)', type: 'number', default: 75, min: 50, max: 100, step: 5 },
@@ -1893,6 +1910,75 @@ export function evaluateStrategies(input) {
     }
   }
 
+  // 30. Failed IB breakout - 10:20-14:15. Price broke beyond the initial balance (the first hour's
+  //     range) in the last 15 minutes but was not accepted out there: it left a TAIL (the extreme bar
+  //     closed back half its range or more) or the breakout side was trapped (a sweep, big prints beyond
+  //     the edge), and it is back inside the IB - value - now. The trapped breakout traders' exits drive
+  //     it back across the range: target the other IB edge. For a LONG after a failed break DOWN (the
+  //     mirror for a SHORT after a failed break UP):
+  //       Break    - a low under the IB low in the last 15 minutes, at most 0.4% under it, at most 5
+  //                  closes under it (more is an accepted breakout), the last bar out there within 3 bars;
+  //       Back in  - the last close back inside by 0.02%+, entry still within 0.2% of the edge;
+  //       OI       - the put writers defend the IB low (the strike just under it added OI in 15 min);
+  //       Flow     - delta with the trade, the book / heatmap not against it.
+  //     Stop beyond the excursion's extreme; target the other IB edge when it is 1.5R+ away.
+  //     Every threshold is a filter the trader can tune (STRATEGY_FILTERS.ibFailed).
+  if (minute >= hm(10, 20) && minute <= hm(14, 15) && bars.length >= 20) {
+    const f = strategyFilters('ibFailed', input.filters?.ibFailed)
+    const ibBars = minuteBars.filter((b) => msOf(b.time) >= sessionOpen && msOf(b.time) < sessionOpen + 60 * MIN)
+    if (ibBars.length >= 45) {
+      const ibHigh = Math.max(...ibBars.map((b) => b.high))
+      const ibLow = Math.min(...ibBars.map((b) => b.low))
+      const ibEndMs = sessionOpen + 60 * MIN
+      const windowBars = bars.filter((b) => msOf(b.time) >= Math.max(ibEndMs, nowMs - f.lookbackMin * MIN))
+      const sweepsIn = recent(input.sweeps ?? [], nowMs, f.lookbackMin * MIN, (w) => msOf(w.endedAt))
+      const vp = input.profile?.vp
+      for (const dir of [1, -1]) {
+        // dir = the trade: LONG after a failed break DOWN through the IB low, SHORT after one UP.
+        const edge = dir > 0 ? ibLow : ibHigh
+        const other = dir > 0 ? ibHigh : ibLow
+        const outside = (b) => (dir > 0 ? b.low < edge : b.high > edge)
+        const out = windowBars.filter(outside)
+        if (!out.length || !bars.slice(-3).some(outside)) continue
+        const extremeBar = out.reduce((a, b) => (dir > 0 ? (b.low < a.low ? b : a) : (b.high > a.high ? b : a)))
+        const extreme = dir > 0 ? extremeBar.low : extremeBar.high
+        if (dir * (edge - extreme) > pct(f.maxExcursionPct / 100)) continue
+        const closesBeyond = windowBars.filter((b) => dir * (b.close - edge) < 0).length
+        if (closesBeyond > f.maxClosesBeyond) continue
+        if (dir * (last.close - edge) < pct(0.0002) || dir * (price - edge) > pct(0.002)) continue
+        // The trapped breakout side: a tail on the extreme bar, a sweep their way, or big prints beyond.
+        const barRange = extremeBar.high - extremeBar.low
+        const tail = barRange > 0 && dir * (extremeBar.close - extreme) >= (f.tailPct / 100) * barRange
+        const sweep = sweepsIn.some((w) => w.buy === dir < 0)
+        const blocks = bigPrints(-dir, f.lookbackMin * MIN, (px) => dir * (edge - px) >= 0)
+        const trapped = tail || sweep || blocks.count >= 2
+        if (f.needTrapped && !trapped) continue
+        // The writers defend the edge: PUT OI added just under a failed low (CALL just over a failed high).
+        const map = dir > 0 ? oi.pe : oi.ce
+        const strike = dir > 0 ? Math.floor((edge - basis) / oi.step) * oi.step : Math.ceil((edge - basis) / oi.step) * oi.step
+        const writersDefend = grew(map, strike, 15)
+        if (f.needWriters && !writersDefend) continue
+        if (f.needDelta && !(dir * last.delta > 0)) continue
+        const c = confirm(dir)
+        if (!c.ok) continue
+        const stopPts = Math.max(pct(0.001), dir * (price - extreme) + pct(0.0005))
+        if (stopPts > pct(0.005)) continue
+        const targetPrice = edge + f.targetFrac * (other - edge)
+        const toTarget = dir * (targetPrice - price)
+        if (toTarget < f.minRR * stopPts) continue
+        const backInVa = vp?.val != null && vp?.vah != null && last.close >= vp.val && last.close <= vp.vah
+        push('ibFailed', dir, stopPts, toTarget, f.timeStopMin,
+          62 + (tail ? 3 : 0) + (sweep ? 4 : 0) + (writersDefend ? 4 : 0) + (backInVa ? 3 : 0), {
+            OI: writersDefend ? `${dir > 0 ? 'put' : 'call'} writers defend the IB ${dir > 0 ? 'low' : 'high'}: ${strike} ${dir > 0 ? 'PE' : 'CE'} OI added in 15 min` : `writers at ${strike} not adding (filter off)`,
+            Profile: `broke the IB ${dir > 0 ? 'low' : 'high'} ${edge} by ${(dir * (edge - extreme)).toFixed(1)} (${closesBeyond} close${closesBeyond === 1 ? '' : 's'} out there) and is back inside the IB ${ibLow}-${ibHigh}${backInVa ? ' and the previous value area' : ''}`,
+            Trapped: trapped ? [tail && `tail - the extreme bar closed back ${Math.round((dir * (extremeBar.close - extreme) / barRange) * 100)}% of its range`, sweep && 'a sweep into the break', blocks.count >= 2 && `${blocks.count} big prints beyond the edge`].filter(Boolean).join(' · ') : 'no tail / sweep (filter off)',
+            Footprint: `Δ ${last.delta > 0 ? '+' : ''}${last.delta}`, Tape: tapeText, DOM: c.dom, Heatmap: c.heat,
+            Plan: `target ${f.targetFrac === 1 ? 'the other IB edge' : f.targetFrac === 0.5 ? 'the IB middle' : `${f.targetFrac}x back across the IB`} ${targetPrice.toFixed(1)}`,
+          })
+      }
+    }
+  }
+
   // 28. OI structure - purely the option OI, read minute by minute - 09:45-14:30. For a LONG (the mirror
   //     for a SHORT):
   //       Walls    - the biggest PUT OI within 6 strikes below the index (support) is at least 1.15x the
@@ -1974,7 +2060,18 @@ export function evaluateStrategies(input) {
   }
 
   // Retired strategies are not traded (input.includeRetired: the tests, which still exercise their rules).
-  return resolveConflicts(input.includeRetired ? out : out.filter((s) => !STRATEGY_BY_ID[s.id]?.retired))
+  const final = resolveConflicts(input.includeRetired ? out : out.filter((s) => !STRATEGY_BY_ID[s.id]?.retired))
+  if (!final.length) return final
+  // The day type at the clock and what an adaptive scanner would do with each setup - TRACKING ONLY:
+  // every setup still fires; this is scored beside the real results (adaptiveStats).
+  const regime = dayRegime(minuteBars, nowMs, sessionOpen)
+  return final.map((s) => {
+    const adaptive = adaptiveDecision(s, regime)
+    return {
+      ...s, regime: { type: regime.type, label: regime.label }, adaptive,
+      checks: { ...s.checks, 'Day type': `${regime.label} - ${regime.reasons}. Adaptive would ${adaptive.take ? 'TAKE' : 'SKIP'} it (${adaptive.reason}) - tracking only, it fires either way` },
+    }
+  })
 }
 
 /** A long and a short at the same moment: when their best confidences are within CONFLICT_GAP points of
@@ -2124,5 +2221,7 @@ export function topFifteen(stats) {
   const rest = stats.filter((s) => !chosen.has(s.id) && !(s.trades >= MIN_TRADES_TO_RANK && !(s.score > 0)))
     .sort((a, b) => (b.score ?? 0) - (a.score ?? 0) || (+b.priority || 0) - (+a.priority || 0))
   for (const s of rest) if (chosen.size < 15) chosen.add(s.id)
-  return { ids: [...chosen], measured: oi.measured && profile.measured, oi, profile }
+  // On trial: new strategies not measured yet, alerted beside the 15.
+  const trial = stats.filter((s) => s.trial && !chosen.has(s.id) && !(s.trades >= MIN_TRADES_TO_RANK)).map((s) => s.id)
+  return { ids: [...chosen], trial, measured: oi.measured && profile.measured, oi, profile }
 }

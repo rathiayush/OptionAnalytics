@@ -8,6 +8,7 @@ import { chime, speak, telegram, unlockAudio } from './alerts.js'
 import { notifyLiveTradeEvents, notifyTrade } from './tradeNotify.js'
 import { loadTradeLevels, saveTradeLevels } from './tradeDefaults.js'
 import { suddenWallText } from './suddenOi.js'
+import { adaptiveStats, dayRegime, sessionOpenMs } from './dayRegime.js'
 import {
   ACTIVE_STRATEGIES, STRATEGY_BY_ID, evaluateStrategies, simulateOutcome, strategyStats, topFifteen, MIN_TRADES_TO_RANK, oiSummary, optionOiText,
   DEFAULT_TRAIL, LAST_ENTRY, SQUARE_OFF, fmtHm, exitLabel, premiumAt, optionPnlPoints, optionTradeText, squareOffMs, optionStopTargetHit, RANGE_IDS, asReplayContext,
@@ -323,8 +324,10 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   }, [fired, isReplay, dayKey, date])
 
   const stats = useMemo(() => strategyStats(Object.values(history).flatMap((d) => d.setups ?? [])), [history])
+  const adaptive = useMemo(() => adaptiveStats(Object.values(history).flatMap((d) => d.setups ?? [])), [history])
   const top = useMemo(() => topFifteen(stats), [stats])
-  const alertIds = settings.pick === 'top15' ? top.ids : settings.pick === 'oi5' ? top.oi.ids : settings.pick === 'profile5' ? top.profile.ids
+  const top15Ids = useMemo(() => [...top.ids, ...top.trial], [top])
+  const alertIds = settings.pick === 'top15' ? top15Ids : settings.pick === 'oi5' ? top.oi.ids : settings.pick === 'profile5' ? top.profile.ids
     : settings.pick === 'range' ? RANGE_IDS : settings.pick === 'all' ? ALL_IDS : settings.custom
   const alertIdsRef = useRef(alertIds)
   useEffect(() => { alertIdsRef.current = alertIds }, [alertIds])
@@ -336,6 +339,10 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   useEffect(() => { nowMsRef.current = nowMs }, [nowMs])
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const oiNow = useMemo(() => (oi && nowMs ? oiSummary(oi, nowMs) : null), [oi, minuteKey])
+  // The day type at the clock (completed bars only) - shown, and tagged on every setup for the adaptive
+  // what-if. Tracking only: it never stops a trigger.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const regimeNow = useMemo(() => (nowMs && view?.minuteBars?.length ? dayRegime(view.minuteBars, nowMs, sessionOpenMs(nowMs)) : null), [minuteKey, view?.minuteBars?.length])
 
   useEffect(() => {
     if (!oi || !view?.minuteBars?.length || !nowMs) return
@@ -768,7 +775,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     { title: '#', dataIndex: 'no', width: 34 },
     {
       title: 'Strategy', dataIndex: 'name',
-      render: (name, r) => <span>{r.top && <Tag color="gold" style={{ marginRight: 4 }}>alert</Tag>}{name}{r.group === 'profile' && <Tag style={{ marginLeft: 4, fontSize: 10 }}>profile</Tag>}{r.group === 'range' && <Tag color="cyan" style={{ marginLeft: 4, fontSize: 10 }}>range</Tag>}{r.priority && <Tag color="purple" style={{ marginLeft: 4, fontSize: 10 }}>institutional</Tag>}{filtersButton(r.id)}</span>,
+      render: (name, r) => <span>{r.top && <Tag color="gold" style={{ marginRight: 4 }}>alert</Tag>}{name}{r.group === 'profile' && <Tag style={{ marginLeft: 4, fontSize: 10 }}>profile</Tag>}{r.group === 'range' && <Tag color="cyan" style={{ marginLeft: 4, fontSize: 10 }}>range</Tag>}{r.priority && <Tag color="purple" style={{ marginLeft: 4, fontSize: 10 }}>institutional</Tag>}{top.trial.includes(r.id) && <Tooltip title={`New - alerted beside the Top 15 until it has ${MIN_TRADES_TO_RANK} scored trades (live days are scored as their trades end), then ranked like the rest`}><Tag color="blue" style={{ marginLeft: 4, fontSize: 10 }}>on trial</Tag></Tooltip>}{filtersButton(r.id)}</span>,
     },
     { title: 'Trades', dataIndex: 'trades', width: 64 },
     { title: 'Win %', dataIndex: 'winRate', width: 66, render: (v) => (v == null ? '-' : `${Math.round(v * 100)}%`) },
@@ -854,7 +861,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
               <div style={{ maxWidth: '100%', overflowX: 'auto' }}>
                 <Segmented size="small" value={settings.pick} onChange={(v) => setSettings((s) => ({ ...s, pick: v }))}
                   options={[
-                    { value: 'top15', label: `Top 15${top.measured ? ' (measured)' : ''}` },
+                    { value: 'top15', label: `Top 15${top.measured ? ' (measured)' : ''}${top.trial.length ? ` + ${top.trial.length} on trial` : ''}` },
                     { value: 'oi5', label: 'Top 5 OI + flow' },
                     { value: 'profile5', label: 'Top 5 profile' },
                     { value: 'range', label: `Range-bound (${RANGE_IDS.length})` },
@@ -926,6 +933,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                         <Text type="secondary" style={{ fontSize: 11, minWidth: 38 }}>{IST_HHMM.format(new Date(s.t))}</Text>
                         <Tag color={s.side === 'LONG' ? 'green' : 'red'} style={{ margin: 0, fontSize: 11 }}>{s.side}</Tag>
                         <span style={{ flex: 1 }}>#{meta.no} {meta.short} <Text type="secondary" style={{ fontSize: 11 }}>@ {s.entry.toFixed(1)} · <b>SL {o.trailed ? <>{s.stop.toFixed(1)} → {o.stop.toFixed(1)}</> : s.stop.toFixed(1)}</b>{s.trail ? ' (trail)' : ''} · <b>T {s.target.toFixed(1)}</b> · {s.confidence}% {s.grade ?? gradeOf(s.confidence)}{s.signal ? ' · after cool-off' : ''}{s.estimated ? ' · est.' : ''}
+                          {s.adaptive && !s.adaptive.take && <Tooltip title={`${s.regime?.label ?? ''}: adaptive would skip it - ${s.adaptive.reason} (tracking only, it fired)`}> · <span style={{ color: '#d48806' }}>adaptive: skip</span></Tooltip>}
                           {o.status !== 'open' && o.exitPrice != null && <> · <span style={{ whiteSpace: 'nowrap' }}>out {o.exitAt != null ? IST_HHMM.format(new Date(o.exitAt)) : 'end'} @ {o.exitPrice.toFixed(1)} ({exitLabel(o)})</span></>}</Text></span>
                         {s.options && oi && (
                           <span style={{ whiteSpace: 'nowrap' }}>
@@ -1076,13 +1084,14 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
         </Col>
         <Col xs={24} xl={14}>
           <Table size="small" pagination={false} columns={statColumns} dataSource={statRows} scroll={{ x: 560 }} />
+          <AdaptivePanel adaptive={adaptive} regimeNow={regimeNow} />
           {filterFor && (
             <StrategyFiltersModal id={filterFor} values={settings.filters?.[filterFor]} onClose={() => setFilterFor(null)}
               onSave={(v) => { setSettings((s) => ({ ...s, filters: { ...s.filters, [filterFor]: v } })); setFilterFor(null) }} />
           )}
           <Text type="secondary" style={{ fontSize: 11 }}>
             {days.length} day(s) scored ({days.filter((d) => d.estimated).length} estimated). Ranked by average R per trade (win rate × size of the wins), shrunk for small samples;
-            {' '}a strategy needs {MIN_TRADES_TO_RANK}+ trades to be ranked - until enough are, the playbook&apos;s picks fill each group's top 5 (OI + order flow, and profile) and the trapped-OI squeeze (24), then the institutional setups (17-21), fill the last five of the top 15. Range-bound fades (7, 22, 23) only fire on a balanced day; pick &quot;Range-bound&quot; to alert on them alone. A strategy losing on average is never alerted. Every alert carries its stop-loss and target, a trailing-SL alert gives each new stop, and another alert follows when the stop, target or the {fmtHm(SQUARE_OFF)} cut-off ends the trade. Outcomes are the FUTURES move to
+            {' '}a strategy needs {MIN_TRADES_TO_RANK}+ trades to be ranked - until enough are, the playbook&apos;s picks fill each group's top 5 (OI + order flow, and profile) and the trapped-OI squeeze (24), then the institutional setups (17-21), fill the last five of the top 15. New strategies (27, 29, 30) are alerted on trial beside the 15 until they have {MIN_TRADES_TO_RANK} scored trades - live days are scored as each trade ends, no Scan day needed. Range-bound fades (7, 22, 23) only fire on a balanced day; pick &quot;Range-bound&quot; to alert on them alone. A strategy losing on average is never alerted. Every alert carries its stop-loss and target, a trailing-SL alert gives each new stop, and another alert follows when the stop, target or the {fmtHm(SQUARE_OFF)} cut-off ends the trade. Outcomes are the FUTURES move to
             {' '}the setup&apos;s stop (trailed as set when it fired) / target / time stop, closed by {fmtHm(SQUARE_OFF)} at the latest (stop counted first when one minute touches both), not option P&amp;L; past results do not promise future ones.
           </Text>
         </Col>
@@ -1156,5 +1165,51 @@ function StrategyFiltersModal({ id, values, onClose, onSave }) {
         </Text>
       </Space>
     </Modal>
+  )
+}
+
+/** The day type now and "what if we had gone adaptive": the real results of every scored setup beside
+ *  the ones an adaptive scanner would have taken / skipped (dayRegime.js) - overall and per day type.
+ *  Tracking only: every setup fires either way. */
+function AdaptivePanel({ adaptive, regimeNow }) {
+  const cell = (x) => (x.trades ? `${x.trades} · ${Math.round(x.winRate * 100)}% · ${fmtR(x.totalR)} (${fmtR(x.avgR)}/trade)` : '-')
+  const rows = [
+    { key: 'all', name: 'All signals (what fired)', v: adaptive.all },
+    { key: 'take', name: 'Adaptive would take', v: adaptive.take, strong: true },
+    { key: 'skip', name: 'Adaptive would skip', v: adaptive.skip },
+  ]
+  const better = adaptive.take.trades && adaptive.all.trades ? adaptive.take.avgR - adaptive.all.avgR : null
+  return (
+    <div aria-label="Adaptive what-if" style={{ marginTop: 8, padding: 8, border: '1px solid #ffffff1a', borderRadius: 6 }}>
+      <Space wrap size={6} style={{ marginBottom: 4 }}>
+        <Text strong style={{ fontSize: 12 }}>Day type &amp; adaptive what-if</Text>
+        <Tag style={{ margin: 0, fontSize: 11 }}>tracking only</Tag>
+        {regimeNow && (
+          <Tooltip title={regimeNow.reasons}>
+            <Text style={{ fontSize: 12 }}>Now: <b>{regimeNow.label}</b></Text>
+          </Tooltip>
+        )}
+      </Space>
+      <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
+        <thead><tr><th style={{ textAlign: 'left', fontWeight: 500 }} /><th style={{ textAlign: 'left', fontWeight: 500 }}>Trades · win % · total R (avg)</th></tr></thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.key}><td style={{ padding: '2px 8px 2px 0', whiteSpace: 'nowrap' }}>{r.strong ? <b>{r.name}</b> : r.name}</td><td>{cell(r.v)}</td></tr>
+          ))}
+          {adaptive.byType.map((t) => (
+            <tr key={t.type}>
+              <td style={{ padding: '2px 8px 2px 0', whiteSpace: 'nowrap' }}><Text type="secondary" style={{ fontSize: 12 }}>{t.label}</Text></td>
+              <td><Text type="secondary" style={{ fontSize: 12 }}>all {cell(t.all)} → adaptive {cell(t.take)}</Text></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <Text type="secondary" style={{ fontSize: 11 }}>
+        {better != null && <>Adaptive {better >= 0 ? 'would have added' : 'would have cost'} <b>{fmtR(Math.abs(better))}</b> per trade so far. </>}
+        The day type is read at each signal from the bars up to then: trend (one IB side broken, a wide, efficient day held on one side of VWAP) - adaptive takes only trades with the trend;
+        {' '}range / two-sided (inside the IB, or both sides broken / chopping across VWAP) - it takes fades and skips trend / breakout setups; unclear or before 10:15 - it takes everything.
+        {' '}Nothing is blocked - every setup still fires and alerts as before.{adaptive.untracked ? ` ${adaptive.untracked} setup(s) scored before tracking are not counted - re-run Scan day on those days.` : ''}
+      </Text>
+    </div>
   )
 }

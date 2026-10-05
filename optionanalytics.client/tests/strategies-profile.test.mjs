@@ -8,7 +8,7 @@ const at = (m) => T915 + m * MIN
 const iso = (ms) => new Date(ms).toISOString()
 let fails = 0
 const check = (n, c, x = '') => { console.log(`${c ? 'PASS' : 'FAIL'} ${n} ${x}`); if (!c) fails++ }
-check('29 strategies, 5 in the profile group, 3 range-bound', STRATEGIES.length === 29 && STRATEGIES.filter((s) => s.group === 'profile').length === 5 && STRATEGIES.filter((s) => s.group === 'range').length === 3)
+check('30 strategies, 6 in the profile group, 3 range-bound', STRATEGIES.length === 30 && STRATEGIES.filter((s) => s.group === 'profile').length === 6 && STRATEGIES.filter((s) => s.group === 'range').length === 3)
 
 // Profiles: two humps (HVN around 100 and 110) with a thin area (LVN) at 105.
 {

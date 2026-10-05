@@ -3,7 +3,7 @@
 ## The strategy scanner is the most important part of the app
 
 The Order Flow page's strategy scanner (`optionanalytics.client/src/strategyEngine.js`,
-`StrategyScanner.jsx`, fed by `useDayOi.js`, `orderFlowMath.js`, `profiles.js` and `suddenOi.js`) decides when a trade
+`StrategyScanner.jsx`, fed by `useDayOi.js`, `orderFlowMath.js`, `profiles.js`, `suddenOi.js` and `dayRegime.js`) decides when a trade
 is signalled, at what entry, stop-loss and target, how a trailing stop moves, when a trade exits and
 what the paper / live option trade does. A mistake there costs real money.
 
