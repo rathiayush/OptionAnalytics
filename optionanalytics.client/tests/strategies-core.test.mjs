@@ -115,11 +115,12 @@ const tapeWith = (nowMs, buyPct) => Array.from({ length: 50 }, (_, i) => ({ seq:
   const few = topFive(strategyStats(mk('range', [2, 2])))
   check('playbook picks until enough trades', !few.measured && few.ids.length === 5 && few.ids.includes('wallDefence'), few.ids.join())
 }
-// #1 wall defence and #12 the 80% rule are back in the line-up (05 Oct revert); #25-#28 are retired:
-// not run, listed or scored by default.
+// #1 wall defence and #12 the 80% rule are back in the line-up (05 Oct revert); #25, #26 and #28 are
+// retired: not run, listed or scored by default. #27 came back with #29.
 {
-  check('#1 and #12 run again; #25-#28 are retired', ACTIVE_STRATEGIES.some((x) => x.id === 'wallDefence') && ACTIVE_STRATEGIES.some((x) => x.id === 'tpo80')
-    && ['suddenWall', 'heatmapOi', 'vwapPullback', 'oiStructure'].every((id) => !ACTIVE_STRATEGIES.some((x) => x.id === id) && !strategyStats([]).some((x) => x.id === id)))
+  check('#1 and #12 run again; #25, #26, #28 are retired; #27 and #29 run', ACTIVE_STRATEGIES.some((x) => x.id === 'wallDefence') && ACTIVE_STRATEGIES.some((x) => x.id === 'tpo80')
+    && ['vwapPullback', 'vwapOi'].every((id) => ACTIVE_STRATEGIES.some((x) => x.id === id) && strategyStats([]).some((x) => x.id === id))
+    && ['suddenWall', 'heatmapOi', 'oiStructure'].every((id) => !ACTIVE_STRATEGIES.some((x) => x.id === id) && !strategyStats([]).some((x) => x.id === id)))
 }
 console.log(fails ? `${fails} FAILED` : 'all passed')
 process.exitCode = fails ? 1 : 0
