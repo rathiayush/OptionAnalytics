@@ -1,16 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import dayjs from 'dayjs'
-import { Alert, Button, Card, Col, DatePicker, Empty, InputNumber, Row, Select, Slider, Space, Switch, Tag, TimePicker, Tooltip, Typography } from 'antd'
+import { Alert, Button, Card, Col, DatePicker, Empty, InputNumber, Row, Select, Slider, Space, Switch, Tag, TimePicker, Tooltip, Typography, notification } from 'antd'
 import { PlayCircleOutlined, PauseCircleOutlined } from '@ant-design/icons'
 import * as signalR from '@microsoft/signalr'
 import {
   NavBar, TIMEFRAME_OPTIONS, usePersistedState, RECONNECT_RETRY_POLICY, onLiveBatch, syncSignalRGroups, joinAllSignalRGroups,
   checkForNewDeploy, UP_COLOR, DOWN_COLOR, AXIS_COLOR, useAuth } from './shared.jsx'
-import { aggregateBars, analyzeBars, findWalls, bucketBook, mergeLiveMinutes, replayView, replayRange, liquiditySignals, orderFlowBias, aggression, sweepSignals, pullStackSignals, autoBigLots } from './orderFlowMath.js'
+import { aggregateBars, analyzeBars, findWalls, bucketBook, mergeLiveMinutes, replayView, replayRange, liquiditySignals, orderFlowBias, aggression, sweepSignals, pullStackSignals, autoBigLots, liquidityMap } from './orderFlowMath.js'
 import { TapeCard } from './OrderFlowTape.jsx'
 import { StrategyScanner } from './StrategyScanner.jsx'
 import { useDayOi } from './useDayOi.js'
-import { oiBiasParts } from './strategyEngine.js'
+import { oiBiasParts, oiSummary, suddenOiWalls, vwapOf } from './strategyEngine.js'
+import { suddenWallText } from './suddenOi.js'
+import { chime, speak, telegram } from './alerts.js'
+import { LiquidityMapCard } from './LiquidityMap.jsx'
 import { ProfilesCard } from './ProfilesCard.jsx'
 import { PriceAlertsBar, usePriceAlerts } from './PriceAlerts.jsx'
 import { fetchPreviousSession, sessionVolumeProfile, tpoProfile, tpoRowFor } from './profiles.js'
@@ -492,6 +495,82 @@ export default function OrderFlowPage() {
   const oiMinute = Math.floor((nowMs ?? 0) / 60_000)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const oiParts = useMemo(() => (dayOi && nowMs ? oiBiasParts(dayOi, nowMs) : []), [dayOi, oiMinute])
+  // The OI picture and the sudden OI walls on the whole chain (suddenOi.js), once a minute.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const oiNow = useMemo(() => (dayOi && nowMs ? oiSummary(dayOi, nowMs) : null), [dayOi, oiMinute])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const sudden = useMemo(() => (dayOi && nowMs ? suddenOiWalls(dayOi, nowMs) : []), [dayOi, oiMinute])
+  const lastPrice = view?.meta?.lastPrice
+  // Futures minus index: an option strike in futures terms (the footprint and heatmap are futures).
+  const basis = oiNow?.spot > 0 && lastPrice > 0 ? Math.round(lastPrice - oiNow.spot) : null
+  const suddenLevels = useMemo(() => (basis == null ? [] : sudden.map((w) => ({
+    price: Math.round((w.strike + basis) / rowSize) * rowSize, color: w.side === 'PE' ? '#73d13d' : '#ff7875',
+    label: `${w.side === 'PE' ? 'PUT' : 'CALL'} ${w.strike} +${(w.add / 1e5).toFixed(1)}L 5m`,
+  }))), [sudden, basis, rowSize])
+  // Each sudden wall once in the Signals list (again after 30 minutes), and - live - an alert: a chime,
+  // the words (Voice on), a notification and Telegram (the scanner's switches).
+  const suddenKey = `${underlying}-${isReplay ? replayDate : 'live'}`
+  const suddenLogRef = useRef([])
+  const [suddenLog, setSuddenLog] = useState([])
+  useEffect(() => { suddenLogRef.current = []; setSuddenLog([]) }, [suddenKey])
+  useEffect(() => {
+    if (!nowMs) return
+    const kept = suddenLogRef.current.filter((p) => p.t <= nowMs) // a replay clock moved back
+    const fresh = sudden.filter((w) => !kept.some((p) => p.side === w.side && p.strike === w.strike && nowMs - p.t < 30 * 60_000))
+    if (!fresh.length && kept.length === suddenLogRef.current.length) return
+    const log = [...kept, ...fresh.map((w) => ({ ...w, t: nowMs, basis }))]
+    suddenLogRef.current = log
+    setSuddenLog(log)
+    if (isReplay || !fresh.length) return
+    let cfg = {}
+    try { cfg = JSON.parse(localStorage.getItem('optionanalytics.strategyScanner.settings')) ?? {} } catch { /* none */ }
+    if (cfg.alerts === false) return
+    for (const w of fresh.slice(0, 3)) {
+      const fut = basis != null ? ` (futures ~${Math.round(w.strike + basis)})` : ''
+      if (cfg.sound !== false) chime(w.side === 'PE')
+      if (cfg.voice !== false) speak(`Sudden ${w.side === 'PE' ? 'put' : 'call'} wall ${w.strike}.`)
+      if (cfg.telegram !== false) telegram(`🧱 Sudden OI wall - ${underlying} ${suddenWallText(w)}${fut}: ${w.side === 'PE' ? 'support' : 'resistance'}`)
+      notification.open({
+        key: `sudden-${w.side}${w.strike}-${nowMs}`, placement: 'topRight', duration: 12,
+        message: <span style={{ color: w.side === 'PE' ? UP_COLOR : DOWN_COLOR, fontWeight: 700 }}>🧱 Sudden {w.side === 'PE' ? 'PUT' : 'CALL'} OI wall {w.strike} · {w.side === 'PE' ? 'support' : 'resistance'}</span>,
+        description: <span style={{ fontSize: 12 }}>{suddenWallText(w)}{fut}</span>,
+      })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sudden])
+  // The heatmap read as a liquidity map, with what lines up at each wall.
+  const mapLevels = useMemo(() => {
+    const out = []
+    if (basis != null) {
+      if (oiNow?.support != null) out.push({ price: oiNow.support + basis, kind: 'oi', label: `PUT OI wall ${oiNow.support}` })
+      if (oiNow?.resistance != null) out.push({ price: oiNow.resistance + basis, kind: 'oi', label: `CALL OI wall ${oiNow.resistance}` })
+      for (const w of sudden) out.push({ price: w.strike + basis, kind: 'suddenOi', label: `sudden ${w.side === 'PE' ? 'PUT' : 'CALL'} OI ${w.strike} +${(w.add / 1e5).toFixed(1)}L` })
+    }
+    if (prevVp?.poc != null) {
+      out.push({ price: prevVp.poc, kind: 'poc', label: 'prev. POC' }, { price: prevVp.vah, kind: 'vah', label: 'prev. VAH' }, { price: prevVp.val, kind: 'val', label: 'prev. VAL' })
+      for (const h of prevVp.hvn ?? []) out.push({ price: h, kind: 'hvn', label: `HVN ${h}` })
+    }
+    const vwap = vwapOf(view?.minuteBars ?? [], nowMs)
+    if (vwap) out.push({ price: vwap, kind: 'vwap', label: `VWAP ${vwap.toFixed(1)}` })
+    if (prevRange) out.push({ price: prevRange.prevHigh, kind: 'prevHigh', label: 'prev. day high' }, { price: prevRange.prevLow, kind: 'prevLow', label: 'prev. day low' })
+    for (const i of view?.icebergs ?? []) if (!i.endedAt) out.push({ price: i.price, kind: 'iceberg', label: `iceberg (${i.isBid ? 'bid' : 'offer'})` })
+    return out
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [oiNow, sudden, basis, prevVp, prevRange, view?.icebergs, oiMinute])
+  const priceRow = lastPrice > 0 ? Math.round(lastPrice / rowSize) : null
+  const liqMap = useMemo(
+    () => (estimated || !view?.heatmap?.length ? null : liquidityMap({ columns: view.heatmap, minuteBars: view?.minuteBars ?? [], rowSize, lotSize, price: lastPrice, nowMs, extraLevels: mapLevels })),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [estimated, view?.heatmap, view?.minuteBars?.length, rowSize, lotSize, priceRow, mapLevels],
+  )
+  const heatMarks = useMemo(() => {
+    const marks = []
+    for (const z of liqMap?.zones ?? []) if (z.kind === 'low') marks.push({ band: true, low: z.low, high: z.high, color: '#597ef7', label: 'THIN' })
+    for (const w of liqMap?.support.slice(0, 3) ?? []) marks.push({ price: w.price, color: '#52c41a', label: `S ${w.price}` })
+    for (const w of liqMap?.resistance.slice(0, 3) ?? []) marks.push({ price: w.price, color: '#ff4d4f', label: `R ${w.price}` })
+    for (const l of suddenLevels) marks.push({ price: l.price, color: '#faad14', label: l.label, dash: [2, 3], width: 2 })
+    return marks
+  }, [liqMap, suddenLevels])
   const bias = useMemo(
     () => orderFlowBias({ bars, liquidity, bigTrades: largeTrades, nowMs, aggressionNow, sweeps: view?.sweeps ?? [], pullStack: pullStack.signals, extra: oiParts }),
     [bars, liquidity, largeTrades, nowMs, aggressionNow, view?.sweeps, pullStack.signals, oiParts],
@@ -520,6 +599,10 @@ export default function OrderFlowPage() {
     for (const l of [...liquidity, ...pullStack.signals.slice(-60), ...sweeps.slice(-60)]) {
       list.push({ key: l.key, time: l.t, bullish: l.bullish, type: l.kind, text: l.text, confidence: l.confidence })
     }
+    for (const w of suddenLog) {
+      list.push({ key: `so-${w.side}${w.strike}-${w.t}`, time: w.t, bullish: w.side === 'PE', type: 'Sudden OI wall',
+        text: `${suddenWallText(w)}${w.basis != null ? ` - futures ~${Math.round(w.strike + w.basis)}` : ''} (${w.side === 'PE' ? 'support' : 'resistance'})` })
+    }
     // The newest big orders only - plenty to read, without pushing the rarer signals out of the list.
     for (const t of largeTrades.slice(-40)) {
       list.push({ key: `t-${t.seq}`, time: new Date(t.time).getTime(), bullish: t.buy, type: bigLabel,
@@ -528,7 +611,7 @@ export default function OrderFlowPage() {
           : `${t.buy ? 'Buy' : 'Sell'} ${formatVolume(t.quantity, lotSize, true)} lots at ${t.price}` })
     }
     return list.sort((a, b) => b.time - a.time).slice(0, 200)
-  }, [bars, view?.icebergs, largeTrades, lotSize, showLots, estimated, bigLabel, liquidity, pullStack.signals, sweeps])
+  }, [bars, view?.icebergs, largeTrades, lotSize, showLots, estimated, bigLabel, liquidity, pullStack.signals, sweeps, suddenLog])
 
   const meta = view?.meta
   const lastBar = bars.at(-1)
@@ -689,7 +772,7 @@ export default function OrderFlowPage() {
               <FootprintLegend estimated={estimated} bigLabel={bigLabel} />
               <FootprintChart
                 bars={bars} rowSize={rowSize} lotSize={lotSize} showLots={showLots} lastPrice={meta?.lastPrice} height={narrow ? 480 : 660}
-                profile={profile} trades={largeTrades} timeframe={timeframe} bigLabel={bigLabel} alerts={priceAlerts.alerts}
+                profile={profile} trades={largeTrades} timeframe={timeframe} bigLabel={bigLabel} alerts={priceAlerts.alerts} levels={suddenLevels}
               />
               {profile?.poc != null && (
                 <Text type="secondary" style={{ fontSize: 11 }}>
@@ -698,30 +781,36 @@ export default function OrderFlowPage() {
                 </Text>
               )}
             </Card>
-            {/* Under the footprint: the column on the right (read, DOM, tape, signals) runs much longer. */}
+            {/* Under the footprint, in reading order: the liquidity heatmap and its read (the map), delta,
+                then the volume / market profiles - the column on the right (read, DOM, tape, signals) runs long. */}
             <Space direction="vertical" size={16} style={{ width: '100%', marginTop: 16 }}>
-                <ProfilesCard prevDate={prevSession.data?.date} prevVp={prevVp} prevTpo={prevTpo} todayTpo={todayTpo} lastPrice={meta?.lastPrice}
-                  loading={prevSession.loading} estimatedPrev={prevSession.data?.source === 'estimated'} lotSize={lotSize} showLots={showLots} height={narrow ? 340 : 440} />
-
                 {/* What the heatmap shows - in one line under it. */}
                 <Card size="small" title="Liquidity heatmap" extra={!narrow && <Text type="secondary" style={{ fontSize: 11 }}>resting bids/offers over time (brighter = more) · big dots = big orders · magenta = icebergs</Text>}>
                   {estimated
                     ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No liquidity heatmap for an estimated day - it needs market depth, which Dhan does not keep. Days the server saw live have it." />
-                    : <DepthHeatmap columns={view?.heatmap ?? []} rowSize={rowSize} trades={largeTrades} icebergs={view?.icebergs} signals={heatSignals} lotSize={lotSize} showLots={showLots} height={narrow ? 320 : 440} />}
+                    : <DepthHeatmap columns={view?.heatmap ?? []} rowSize={rowSize} trades={largeTrades} icebergs={view?.icebergs} signals={heatSignals} marks={heatMarks} lotSize={lotSize} showLots={showLots} height={narrow ? 320 : 440} />}
                   {!estimated && (
                     <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>
                       How to read: time runs left to right, price bottom to top. The colour is the size of resting limit orders at that price
                       (blue = little, yellow to red = a lot) - bids below the price line, offers above. A bright band that price stops at and that STAYS = a real
                       wall (support / resistance); one that vanishes as price gets near = pulled / spoofed (not real). Price eating through a
                       bright band = absorption won - the move usually continues. Dots = big trades (bigger = larger), magenta = icebergs
-                      (hidden size refilling). The Signals list reads these for you (magnet, wall absorption, exhaustion into wall, spoofing).
+                      (hidden size refilling). Drawn on it: S / R = the support / resistance walls that stay, blue bands = low-liquidity
+                      (thin) zones, dotted gold = sudden OI walls. The liquidity map below reads it for you.
                     </Text>
                   )}
+                </Card>
+
+                <Card size="small" title="Liquidity map · support / resistance, zones, confluence, what is happening now" extra={!narrow && <Text type="secondary" style={{ fontSize: 11 }}>from the heatmap, OI walls, profiles and VWAP</Text>}>
+                  <LiquidityMapCard map={liqMap} sudden={sudden} basis={basis} estimated={estimated} />
                 </Card>
 
                 <Card size="small" title={`Delta & cumulative delta · ${timeframe} min`}>
                   <CumulativeDeltaChart bars={bars} dayKey={dayKey} lotSize={lotSize} showLots={showLots} height={narrow ? 200 : 260} />
                 </Card>
+
+                <ProfilesCard prevDate={prevSession.data?.date} prevVp={prevVp} prevTpo={prevTpo} todayTpo={todayTpo} lastPrice={meta?.lastPrice}
+                  loading={prevSession.loading} estimatedPrev={prevSession.data?.source === 'estimated'} lotSize={lotSize} showLots={showLots} height={narrow ? 340 : 440} />
             </Space>
           </Col>
           <Col xs={24} xl={7}>

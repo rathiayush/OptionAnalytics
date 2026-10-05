@@ -5,6 +5,7 @@ import { UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import { PAPER_TRADE_LOT_SIZE } from './oiShared.jsx'
 import { liveTradingApi } from './LiveTrading.jsx'
 import { chime, speak, telegram, unlockAudio } from './alerts.js'
+import { suddenWallText } from './suddenOi.js'
 import {
   ACTIVE_STRATEGIES, STRATEGY_BY_ID, evaluateStrategies, simulateOutcome, strategyStats, topFifteen, MIN_TRADES_TO_RANK, oiSummary, optionOiText,
   DEFAULT_TRAIL, LAST_ENTRY, SQUARE_OFF, fmtHm, exitLabel, premiumAt, optionPnlPoints, optionTradeText, squareOffMs, optionStopTargetHit, RANGE_IDS, asReplayContext,
@@ -724,6 +725,13 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
             {' '}· max pain <b>{oiNow.maxPain ?? '-'}</b></span>
           <span><Text strong style={{ fontSize: 12 }}>Futures OI</Text> {oiNow.futures?.regime
             ? `${oiNow.futures.regime} (price ${(oiNow.futures.pricePct * 100).toFixed(2)}%, OI ${(oiNow.futures.oiPct * 100).toFixed(2)}% in 15m)` : '-'}</span>
+          <span aria-label="Sudden OI walls now"><Text strong style={{ fontSize: 12 }}>Sudden OI walls (5m)</Text>{' '}
+            {oiNow.sudden?.length ? oiNow.sudden.map((w) => (
+              <Tooltip key={`${w.side}${w.strike}`} title={suddenWallText(w)}>
+                <b style={{ color: w.side === 'PE' ? UP_COLOR : DOWN_COLOR, marginRight: 8 }}>{w.side === 'PE' ? 'PUT' : 'CALL'} {w.strike} +{(w.add / 1e5).toFixed(1)}L</b>
+              </Tooltip>
+            )) : <Text type="secondary" style={{ fontSize: 12 }}>none</Text>}
+          </span>
         </div>
       )}
       {estimated && <Alert type="info" showIcon style={{ marginBottom: 8 }} message="Estimated day: no tape, book or heatmap - tape checks use each minute's estimated buy/sell split and the DOM / Heatmap confirmation is waived. Results are marked est." />}
