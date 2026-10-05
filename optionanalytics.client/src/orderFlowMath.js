@@ -61,6 +61,9 @@ export const DEFAULT_ANALYSIS = {
   stackedCount: 3,
   absorptionFactor: 2.5,
   exhaustionPct: 0.03,
+  // An imbalanced row's aggressor volume must also be at least this share of the bar's average row:
+  // 3 lots against nothing in a thin row is not a real imbalance.
+  imbalanceMinShare: 0.5,
 }
 
 // Per bar: POC, diagonal imbalances, stacked imbalance zones, absorption, exhaustion, and the
@@ -69,8 +72,9 @@ export const DEFAULT_ANALYSIS = {
 // - Imbalance (diagonal, as footprint tools compare it): a BUY imbalance at price p when the buying
 //   at p is at least `imbalanceRatio` x the selling one row BELOW (p - row) - buyers lifted offers
 //   far harder than sellers hit the bid beneath; a SELL imbalance at p when the selling at p is at
-//   least that ratio x the buying one row ABOVE. Both need at least `minVolume`, and the row compared
-//   against must exist in the bar.
+//   least that ratio x the buying one row ABOVE. Both need at least `minVolume` AND
+//   `imbalanceMinShare` (half) of the bar's average row volume - a thin row's few lots against nothing
+//   is noise, not an imbalance - and the row compared against must exist in the bar.
 // - Stacked imbalance: `stackedCount`+ consecutive rows imbalanced the same way - a buy stack is
 //   support (aggressive buyers stepped up level after level), a sell stack resistance.
 // - Absorption: heavy aggression into a NEW extreme that failed to move price on. At the low: the
@@ -89,7 +93,7 @@ export const DEFAULT_ANALYSIS = {
 // trades) get no per-row imbalances, and absorption / exhaustion from the candles instead - see
 // candleSignals.
 export function analyzeBars(bars, { rowSize, minVolume = 1, estimated = false, ...options } = {}) {
-  const { imbalanceRatio, stackedCount, absorptionFactor, exhaustionPct } = { ...DEFAULT_ANALYSIS, ...options }
+  const { imbalanceRatio, stackedCount, absorptionFactor, exhaustionPct, imbalanceMinShare } = { ...DEFAULT_ANALYSIS, ...options }
   const step = rowSize > 0 ? rowSize : null
   let cvd = 0
   if (estimated) {
@@ -109,14 +113,15 @@ export function analyzeBars(bars, { rowSize, minVolume = 1, estimated = false, .
 
     let poc = null
     const imbalances = new Map()
+    const minAggressor = Math.max(minVolume, ascending.length ? imbalanceMinShare * ((bar.buy + bar.sell) / ascending.length) : 0)
     for (const level of ascending) {
       if (!poc || level.buy + level.sell > poc.buy + poc.sell) poc = level
       const below = byPrice.get(nextRow(level.price, -1))
       const above = byPrice.get(nextRow(level.price, 1))
       // Only against a row that exists: at a bar's extreme there is nothing diagonal to compare with,
       // and flagging every top/bottom row would be noise.
-      const buyImb = below != null && level.buy >= minVolume && level.buy >= imbalanceRatio * below.sell
-      const sellImb = above != null && level.sell >= minVolume && level.sell >= imbalanceRatio * above.buy
+      const buyImb = below != null && level.buy >= minAggressor && level.buy >= imbalanceRatio * below.sell
+      const sellImb = above != null && level.sell >= minAggressor && level.sell >= imbalanceRatio * above.buy
       if (buyImb && !sellImb) imbalances.set(level.price, 'buy')
       else if (sellImb && !buyImb) imbalances.set(level.price, 'sell')
     }
@@ -747,4 +752,20 @@ export function pullStackSignals({ columns, rowSize, lotSize = 1, ...options }) 
     ask: { added: lots(win.ask.added), removed: lots(win.ask.removed), usual: lots(baseAsk) },
   }
   return { signals, pressure }
+}
+
+// ---- big orders ------------------------------------------------------------------------------------
+
+const NICE_LOTS = [5, 10, 15, 20, 25, 30, 40, 50, 75, 100, 150, 200, 300, 500, 750, 1000]
+/** "Big order" for the day as it trades: the size only the top 2.5% of prints reach, in lots, rounded
+ *  up to a round number (5, 10, 15 ... 1000) and never under 5. A fixed number is wrong most of the
+ *  time - 10 lots is a big print on a quiet afternoon and an ordinary one at the open or on expiry.
+ *  Null with under 200 prints to judge from. */
+export function autoBigLots(prints, lotSize) {
+  const lot = Math.max(1, lotSize || 1)
+  const sizes = (prints ?? []).map((p) => p.quantity / lot).filter((q) => q > 0)
+  if (sizes.length < 200) return null
+  sizes.sort((a, b) => a - b)
+  const p975 = sizes[Math.min(sizes.length - 1, Math.floor(sizes.length * 0.975))]
+  return NICE_LOTS.find((n) => n >= p975) ?? NICE_LOTS.at(-1)
 }

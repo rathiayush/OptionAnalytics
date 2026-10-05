@@ -70,6 +70,8 @@ export const STRATEGIES = [
   // Short squeeze (long) and long squeeze (short) from the futures OI read minute by minute - first in
   // line for alerts until measured.
   { id: 'oiSqueeze', no: 24, name: 'Trapped-OI squeeze - short & long squeeze', short: 'OI squeeze', priority: 2 },
+  // A wall that appears suddenly (heavy writing in the last 5 minutes) with the book leaning the same way.
+  { id: 'suddenWall', no: 25, name: 'Sudden OI wall + DOM imbalance', short: 'Sudden wall + DOM', priority: 3 },
 ]
 export const STRATEGY_BY_ID = Object.fromEntries(STRATEGIES.map((s) => [s.id, s]))
 /** The strategies in use - what the scanner runs, lists, alerts on and scores. */
@@ -1528,6 +1530,66 @@ export function evaluateStrategies(input) {
             Tape: `${sweepWith(dir) ? 'sweep · ' : ''}${tapeText}${tape.proxy ? '' : ` · speed ${tape.speedRatio.toFixed(1)}x`}`, DOM: c.dom, Heatmap: c.heat,
           })
       }
+    }
+  }
+
+  // 25. Sudden OI wall + DOM imbalance - 09:45-14:30. Writers suddenly put a wall right at the price -
+  //     a PUT strike at / just under it (support: LONG) or a CALL strike at / just over it (resistance:
+  //     SHORT) adds 3%+ of its OI in the last 5 minutes, at 3x+ its pace of the 30 minutes before (sudden,
+  //     not a steady build), the biggest add on that side near the money, and it is now a real wall (60%+
+  //     of the biggest OI of its kind within 8 strikes). Not a straddle: the other side is not written as
+  //     hard at the money. The BOOK must lean the same way - bids 60%+ of the top 20 levels for a long
+  //     (asks 60%+ for a short) - and the flow must not fight it (delta or the 30s tape with it, nothing
+  //     absorbing / exhausting / stacking against). Needs the book: not on an estimated day.
+  //     Stop just beyond the wall; target toward the opposite wall (1.5-3R).
+  if (!estimated && share != null && minute >= hm(9, 45) && minute <= hm(14, 30)) {
+    const atm = Math.round(spotNow / oi.step) * oi.step
+    for (const dir of [1, -1]) {
+      const map = dir > 0 ? oi.pe : oi.ce
+      const otherMap = dir > 0 ? oi.ce : oi.pe
+      // Strikes at / just behind the price on the wall's side (up to 3 strikes away).
+      const candidates = [...map.keys()].filter((k) => (dir > 0 ? k <= spotNow + 0.5 * oi.step && k >= spotNow - 3 * oi.step : k >= spotNow - 0.5 * oi.step && k <= spotNow + 3 * oi.step))
+      let best = null
+      for (const k of candidates) {
+        const add5 = oiChange(map, k, nowMs, 5)
+        const base = oiOf(map, k, nowMs - 5 * MIN)
+        const before = oiChange(map, k, nowMs - 5 * MIN, 30)
+        if (add5 == null || !(base > 0) || before == null) continue
+        const pace = Math.max(0, before) / 6 // the average 5 minutes of the half hour before
+        if (add5 < 0.03 * base || add5 < 3 * pace) continue
+        if (!best || add5 > best.add5) best = { k, add5, base, pace }
+      }
+      if (!best) continue
+      const wallOi = oiOf(map, best.k, nowMs)
+      const biggest = Math.max(...[...map.keys()].filter((k) => Math.abs(k - spotNow) <= 8 * oi.step).map((k) => oiOf(map, k, nowMs) ?? 0))
+      if (!(wallOi >= 0.6 * biggest)) continue
+      // Price at the wall, not through it: within 0.25% of it, on the right side (0.05% slack).
+      const gap = dir * (spotNow - best.k)
+      if (gap > spotNow * 0.0025 || gap < -spotNow * 0.0005) continue
+      // Not a straddle being written: the other side at the money adds under half as much.
+      const otherAdd = [atm, atm + dir * oi.step].reduce((sum, k) => sum + Math.max(0, oiChange(otherMap, k, nowMs, 5) ?? 0), 0)
+      if (otherAdd >= 0.5 * best.add5) continue
+      // The book leans the same way.
+      const lean = dir > 0 ? share : 1 - share
+      if (lean < 0.6) continue
+      const flowWith = dir * last.delta > 0 || aggWith(dir, 55, 'agg30')
+      const against = absorbed(-dir) || exhausted(-dir) || stackAgainst(dir, 2) || sweepWith(-dir)
+      const c = confirm(dir)
+      if (!flowWith || against || !c.ok) continue
+      const wallF = best.k + basis
+      const stopPts = Math.max(pct(0.001), dir * (price - wallF) + pct(0.0008))
+      if (stopPts > pct(0.004)) continue
+      const ahead = roomAhead(dir)
+      if (ahead && ahead.room < 1.5 * stopPts) continue
+      const targetPts = ahead ? Math.max(1.5 * stopPts, Math.min(3 * stopPts, ahead.room - pct(0.0003))) : 2 * stopPts
+      const sudden = best.pace > 0 ? best.add5 / best.pace : Infinity
+      push('suddenWall', dir, stopPts, targetPts, 30,
+        62 + (lean >= 0.65 ? 4 : 0) + (sudden >= 5 ? 4 : 0) + (dir * last.delta > 0 && aggWith(dir, 55, 'agg30') ? 4 : 0) + (stackWith(dir, 3) ? 3 : 0), {
+          OI: `${dir > 0 ? 'PUT' : 'CALL'} ${best.k} ${lakh(best.add5)} in 5m (+${((best.add5 / best.base) * 100).toFixed(1)}%, ${Number.isFinite(sudden) ? `${sudden.toFixed(1)}x its pace before` : 'nothing written before'}) - now ${(wallOi / 1e5).toFixed(1)}L, a ${dir > 0 ? 'support' : 'resistance'} wall ${Math.abs(spotNow - best.k).toFixed(0)} pts ${dir > 0 ? 'under' : 'over'} the index; ${dir > 0 ? 'calls' : 'puts'} at the money ${lakh(otherAdd)}`,
+          DOM: `${dir > 0 ? 'bids' : 'asks'} ${Math.round(lean * 100)}% of the top 20 levels - the book leans ${dir > 0 ? 'up' : 'down'}`,
+          Footprint: `Δ ${last.delta > 0 ? '+' : ''}${last.delta}${stackWith(dir, 3) ? ' · stacked imbalance with it' : ''}, nothing absorbing or stacking against it`,
+          Tape: tapeText, Heatmap: c.heat,
+        })
     }
   }
 

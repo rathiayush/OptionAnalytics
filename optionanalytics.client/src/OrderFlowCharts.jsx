@@ -73,7 +73,7 @@ function zoomRows(l, factor, y, step, plotH) {
   return { top, rowH: Math.max(rowH, plotH / 2000) }
 }
 
-export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620, lastPrice, profile = null, trades = [], timeframe = 1, bigLabel = 'Big order' }) {
+export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620, lastPrice, profile = null, trades = [], timeframe = 1, bigLabel = 'Big order', alerts = [] }) {
   const wrapRef = useRef(null)
   const canvasRef = useRef(null)
   const width = useElementWidth(wrapRef)
@@ -379,6 +379,24 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
       level(profile.poc, 'POC', POC_COLOR)
     }
 
+    // Price alerts: gold dashed lines across the chart, the level on the price axis.
+    for (const a of alerts) {
+      const y = yPrice(a.price + step / 2)
+      if (!(y > FP_TOP && y < FP_TOP + plotH)) continue
+      ctx.setLineDash([8, 4])
+      ctx.strokeStyle = '#fadb14'
+      ctx.globalAlpha = 0.85
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(plotW, y); ctx.stroke()
+      ctx.globalAlpha = 1
+      ctx.setLineDash([])
+      ctx.fillStyle = '#ad8b00'
+      ctx.fillRect(plotW + 1, y - 9, FP_AXIS_W - 2, 18)
+      ctx.fillStyle = '#fff'
+      ctx.font = `600 11px ${FONT}`
+      ctx.textBaseline = 'middle'
+      ctx.fillText(`🔔${priceText(a.price)}`, plotW + 3, y)
+    }
+
     // Last price line.
     if (lastPrice > 0) {
       const y = yPrice(lastPrice + step / 2)
@@ -395,7 +413,7 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
         ctx.fillText(priceText(lastPrice), plotW + 5, y)
       }
     }
-  }, [layout, width, height, plotW, barsW, profileW, profile, plotH, colWidth, step, lotSize, showLots, lastPrice, trades, timeframe])
+  }, [layout, width, height, plotW, barsW, profileW, profile, plotH, colWidth, step, lotSize, showLots, lastPrice, trades, timeframe, alerts])
 
   // The wheel listener is registered once; it reads the latest geometry through this.
   const geomRef = useRef({})

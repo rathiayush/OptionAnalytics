@@ -6,12 +6,13 @@ import * as signalR from '@microsoft/signalr'
 import {
   NavBar, TIMEFRAME_OPTIONS, usePersistedState, RECONNECT_RETRY_POLICY, onLiveBatch, syncSignalRGroups, joinAllSignalRGroups,
   checkForNewDeploy, UP_COLOR, DOWN_COLOR, AXIS_COLOR, useAuth } from './shared.jsx'
-import { aggregateBars, analyzeBars, findWalls, bucketBook, mergeLiveMinutes, replayView, replayRange, liquiditySignals, orderFlowBias, aggression, sweepSignals, pullStackSignals } from './orderFlowMath.js'
+import { aggregateBars, analyzeBars, findWalls, bucketBook, mergeLiveMinutes, replayView, replayRange, liquiditySignals, orderFlowBias, aggression, sweepSignals, pullStackSignals, autoBigLots } from './orderFlowMath.js'
 import { TapeCard } from './OrderFlowTape.jsx'
 import { StrategyScanner } from './StrategyScanner.jsx'
 import { useDayOi } from './useDayOi.js'
 import { oiBiasParts } from './strategyEngine.js'
 import { ProfilesCard } from './ProfilesCard.jsx'
+import { PriceAlertsBar, usePriceAlerts } from './PriceAlerts.jsx'
 import { fetchPreviousSession, sessionVolumeProfile, tpoProfile, tpoRowFor } from './profiles.js'
 import { FootprintChart, DepthHeatmap, CumulativeDeltaChart, BookLadder, formatVolume } from './OrderFlowCharts.jsx'
 import { DomDrawer, useNarrow } from './DomDrawer.jsx'
@@ -157,6 +158,10 @@ export default function OrderFlowPage() {
   const [imbalanceRatio, setImbalanceRatio] = usePersistedState('optionanalytics.orderFlow.imbalanceRatio', 3)
   const [stackedCount, setStackedCount] = usePersistedState('optionanalytics.orderFlow.stackedCount', 3)
   const [largeLots, setLargeLots] = usePersistedState('optionanalytics.orderFlow.largeLots', 10)
+  // Big order: 'auto' (default) - the top 2.5% of the day's prints (autoBigLots) - or the fixed lots above.
+  const [bigMode, setBigMode] = usePersistedState('optionanalytics.orderFlow.bigMode', 'auto')
+  // What the server is asked for: in auto mode every print of 5+ lots (the page picks the big ones).
+  const fetchLots = bigMode === 'auto' ? 5 : largeLots
   const [showLots, setShowLots] = usePersistedState('optionanalytics.orderFlow.showLots', true)
   const [showProfile, setShowProfile] = usePersistedState('optionanalytics.orderFlow.showProfile', true)
   const [replaySpeed, setReplaySpeed] = usePersistedState('optionanalytics.orderFlow.replaySpeed', 60)
@@ -223,7 +228,7 @@ export default function OrderFlowPage() {
     setError(null)
     // Only prints of the "large" size are needed - fetching every print would cap at the server's
     // newest 5000 and lose the morning's large ones on a busy day.
-    fetchJson(`/api/order-flow/${underlying}?rowSize=${rowSize}&minTradeLots=${largeLots}&heatmapColumns=900${expiryQuery}`)
+    fetchJson(`/api/order-flow/${underlying}?rowSize=${rowSize}&minTradeLots=${fetchLots}&heatmapColumns=900${expiryQuery}`)
       .then((body) => {
         if (cancelled) return
         setData({
@@ -234,7 +239,7 @@ export default function OrderFlowPage() {
       .catch((err) => { if (!cancelled) { setError(err.message); setData(null) } })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
-  }, [isReplay, underlying, expiryQuery, rowSize, largeLots, reloadNonce])
+  }, [isReplay, underlying, expiryQuery, rowSize, fetchLots, reloadNonce])
 
   const handleLive = (payload) => {
     const { securityId, rowSize: rows } = contextRef.current
@@ -300,7 +305,7 @@ export default function OrderFlowPage() {
     setReplayLoading(true)
     setReplayError(null)
     setPlaying(false)
-    fetchJson(`/api/order-flow/${underlying}/day/${replayDate}?rowSize=${rowSize}&minTradeLots=${largeLots}&heatmapColumns=${REPLAY_HEATMAP_COLUMNS}${expiryQuery}`)
+    fetchJson(`/api/order-flow/${underlying}/day/${replayDate}?rowSize=${rowSize}&minTradeLots=${fetchLots}&heatmapColumns=${REPLAY_HEATMAP_COLUMNS}${expiryQuery}`)
       .then((body) => {
         if (cancelled) return
         const day = {
@@ -318,7 +323,7 @@ export default function OrderFlowPage() {
       .catch((err) => { if (!cancelled) { setReplayError(err.message); setReplayDay(null) } })
       .finally(() => { if (!cancelled) setReplayLoading(false) })
     return () => { cancelled = true }
-  }, [isReplay, underlying, replayDate, expiryQuery, rowSize, largeLots, reloadNonce])
+  }, [isReplay, underlying, replayDate, expiryQuery, rowSize, fetchLots, reloadNonce])
 
   useEffect(() => {
     if (!playing || !range) return undefined
@@ -455,20 +460,25 @@ export default function OrderFlowPage() {
   }, [prevSession.data])
   const scannerProfile = useMemo(() => (prevVp?.poc != null ? { vp: prevVp, tpoPrev: prevTpo, ...prevRange } : null), [prevVp, prevTpo, prevRange])
   const profile = showProfile ? prevVp : null
-  const largeTrades = useMemo(() => (view?.trades ?? []).filter((t) => t.quantity >= largeLots * lotSize), [view?.trades, largeLots, lotSize])
   const walls = useMemo(() => findWalls(view?.book), [view?.book])
   const activeIcebergs = useMemo(() => new Set((view?.icebergs ?? []).filter((i) => !i.endedAt).map((i) => i.price)), [view?.icebergs])
   const bigLabel = estimated ? 'Volume spike' : 'Big order'
+  const nowMs = isReplay ? replayMs ?? Date.now() : view?.heatmap?.at(-1)?.t ?? Date.now()
+  // Tape reading: aggression from the Time & Sales prints, sweeps from the server, pulling/stacking
+  // off the heatmap.
+  const tapePrints = useMemo(() => (isReplay ? tape.prints.filter((p) => new Date(p.time).getTime() <= (replayMs ?? 0)) : tape.prints), [isReplay, tape.prints, replayMs])
+  // Big order threshold: auto from the prints so far (never ones after the replay clock), else 10 lots
+  // until there are enough prints to judge.
+  const autoLots = useMemo(() => autoBigLots(tapePrints, lotSize), [tapePrints, lotSize])
+  const bigLots = bigMode === 'auto' ? autoLots ?? 10 : largeLots
+  const largeTrades = useMemo(() => (view?.trades ?? []).filter((t) => t.quantity >= bigLots * lotSize), [view?.trades, bigLots, lotSize])
+  const priceAlerts = usePriceAlerts(underlying, view?.meta?.lastPrice, !isReplay)
   // Liquidity signals off the heatmap (magnet, wall absorption, exhaustion into a wall, spoofing) -
   // they need market depth, so none for an estimated day. The last hour of columns is plenty.
   const liquidity = useMemo(
     () => (estimated ? [] : liquiditySignals({ columns: (view?.heatmap ?? []).slice(-1800), trades: largeTrades, minuteBars: view?.minuteBars ?? [], rowSize, lotSize })),
     [estimated, view?.heatmap, largeTrades, view?.minuteBars, rowSize, lotSize],
   )
-  const nowMs = isReplay ? replayMs ?? Date.now() : view?.heatmap?.at(-1)?.t ?? Date.now()
-  // Tape reading: aggression from the Time & Sales prints, sweeps from the server, pulling/stacking
-  // off the heatmap.
-  const tapePrints = useMemo(() => (isReplay ? tape.prints.filter((p) => new Date(p.time).getTime() <= (replayMs ?? 0)) : tape.prints), [isReplay, tape.prints, replayMs])
   const tapeNow = isReplay ? replayMs ?? Date.now() : Math.max(nowMs, tapePrints.length ? new Date(tapePrints.at(-1).time).getTime() : 0)
   const aggressionNow = useMemo(() => (estimated ? null : aggression(tapePrints, tapeNow, undefined, view?.minuteBars)), [estimated, tapePrints, tapeNow, view?.minuteBars])
   const sweeps = useMemo(() => sweepSignals(view?.sweeps, lotSize), [view?.sweeps, lotSize])
@@ -593,7 +603,14 @@ export default function OrderFlowPage() {
               <InputNumber value={imbalanceRatio} onChange={(v) => setImbalanceRatio(v ?? 3)} min={1.5} max={10} step={0.5} style={{ width: 140 }} addonBefore="Imbalance" addonAfter="x" disabled={estimated} />
             </Tooltip>
             <InputNumber value={stackedCount} onChange={(v) => setStackedCount(v ?? 3)} min={2} max={8} style={{ width: 130 }} addonBefore="Stack" addonAfter="rows" disabled={estimated} />
-            <InputNumber value={largeLots} onChange={(v) => setLargeLots(v ?? 10)} min={1} style={{ width: 170 }} addonBefore="Big order ≥" addonAfter="lots" />
+            <Tooltip title={bigMode === 'auto'
+              ? `Auto: a big order is a print only the top 2.5% of today's prints reach${autoLots ? ` - ${autoLots} lots now` : ' (10 lots until there are enough prints)'}. It follows the day: bigger at the open and on expiry, smaller on a quiet afternoon.`
+              : 'Fixed: every print of at least this many lots is a big order.'}>
+              <Space.Compact>
+                <Select value={bigMode} onChange={setBigMode} style={{ width: 150 }} options={[{ value: 'auto', label: 'Big order: Auto' }, { value: 'fixed', label: 'Big order: Fixed' }]} />
+                <InputNumber value={bigMode === 'auto' ? bigLots : largeLots} onChange={(v) => setLargeLots(v ?? 10)} min={1} disabled={bigMode === 'auto'} style={{ width: 110 }} addonAfter="lots" aria-label="Big order lots" />
+              </Space.Compact>
+            </Tooltip>
             <Space size={4}><Switch size="small" checked={showLots} onChange={setShowLots} /><Text style={{ fontSize: 12 }}>Volume in lots</Text></Space>
             <Space size={4}><Switch size="small" checked={showProfile} onChange={setShowProfile} /><Text style={{ fontSize: 12 }}>Volume profile</Text></Space>
           </Space>
@@ -668,10 +685,11 @@ export default function OrderFlowPage() {
         <Row gutter={[16, 16]}>
           <Col xs={24} xl={17}>
             <Card size="small" title={`Footprint · ${timeframe} min · ${rowSize} pt rows${estimated ? ' · estimated' : ''}`} extra={!narrow && <Text type="secondary" style={{ fontSize: 11 }}>bid (sell) × ask (buy) · drag to move it anywhere · wheel: bar width · Shift+wheel or price axis: row height · double-click: reset</Text>}>
+              <PriceAlertsBar {...priceAlerts} lastPrice={meta?.lastPrice} live={!isReplay} />
               <FootprintLegend estimated={estimated} bigLabel={bigLabel} />
               <FootprintChart
                 bars={bars} rowSize={rowSize} lotSize={lotSize} showLots={showLots} lastPrice={meta?.lastPrice} height={narrow ? 480 : 660}
-                profile={profile} trades={largeTrades} timeframe={timeframe} bigLabel={bigLabel}
+                profile={profile} trades={largeTrades} timeframe={timeframe} bigLabel={bigLabel} alerts={priceAlerts.alerts}
               />
               {profile?.poc != null && (
                 <Text type="secondary" style={{ fontSize: 11 }}>
@@ -716,7 +734,7 @@ export default function OrderFlowPage() {
               </Card>
               <TapeCard
                 prints={tapePrints} aggression={aggressionNow} pressure={pullStack.pressure} sweeps={view?.sweeps} lotSize={lotSize}
-                largeLots={largeLots} error={tape.error} estimated={estimated}
+                largeLots={bigLots} error={tape.error} estimated={estimated}
               />
               <Card size="small" title="Signals" styles={{ body: { maxHeight: 360, overflowY: 'auto' } }}>
                 {signals.length === 0 ? <Text type="secondary">No signals yet.</Text> : signals.map((s) => (
@@ -736,7 +754,7 @@ export default function OrderFlowPage() {
 
         <StrategyScanner
           underlying={underlying} isReplay={isReplay} date={isReplay ? replayDate : todayKey()} view={view} replayDay={replayDay} replayMs={replayMs} range={range}
-          tapePrints={tapePrints} liquidity={liquidity} pullStack={pullStack.signals} rowSize={rowSize} lotSize={lotSize} largeLots={largeLots} estimated={estimated}
+          tapePrints={tapePrints} liquidity={liquidity} pullStack={pullStack.signals} rowSize={rowSize} lotSize={lotSize} largeLots={bigLots} estimated={estimated}
           profile={scannerProfile} oi={dayOi} oiError={dayOiError} canTradeLive={canTradeLive}
         />
 
