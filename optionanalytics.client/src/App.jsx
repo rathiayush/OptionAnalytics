@@ -14,6 +14,7 @@ import LiveStrikeDataPage from './LiveStrikeDataPage.jsx'
 import TriggersPage from './TriggersPage.jsx'
 import ContractsPage from './ContractsPage.jsx'
 import LoginPage from './LoginPage.jsx'
+import { chartVwap } from './chartVwap.js'
 import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, RECONNECT_RETRY_POLICY, computeEma, fmtPrice, fmtIstTime, fmtIstDateTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry, AuthContext, useAuth, syncSignalRGroups, joinAllSignalRGroups, useCardOrder, CardDragHandle, onLiveBatch, useFeedLag, FeedLagTag, FeedLagAlert, LiveSection, captureChartView, restoreChartView, useReloadOnNewDeploy, checkForNewDeploy } from './shared.jsx'
 import './App.css'
 
@@ -608,11 +609,13 @@ function PriceChart({ bars, vwapSeries = EMPTY_ARRAY, showVwap = false, height =
     // Same setData-resets-the-visible-range reasoning as the candlestick series above. Fed only
     // while checked, empty otherwise - simpler and just as instant as toggling a `visible` option.
     const preservedRange = hasFitRef.current ? chartRef.current?.timeScale().getVisibleRange() : null
-    vwapRef.current.setData(showVwap ? vwapSeries : EMPTY_ARRAY)
+    // On the candles' own times only (chartVwap) - a 1-minute / multi-day VWAP series would add time
+    // points the candles do not have and squeeze them into a corner.
+    vwapRef.current.setData(showVwap ? chartVwap(sanitizedBars, vwapSeries) : EMPTY_ARRAY)
     if (preservedRange) {
       try { chartRef.current?.timeScale().setVisibleRange(preservedRange) } catch { /* empty */ }
     }
-  }, [vwapSeries, showVwap])
+  }, [vwapSeries, showVwap, sanitizedBars])
 
   useEffect(() => {
     markersRef.current?.setMarkers(allMarkers)

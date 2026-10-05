@@ -1,11 +1,12 @@
 import { Component, useEffect, useMemo, useRef, useState } from 'react'
-import { Card, Select, InputNumber, Space, Typography, Table, Button, Statistic, Row, Col, Empty, Alert, Segmented, Tooltip } from 'antd'
+import { Card, Select, InputNumber, Space, Typography, Table, Button, Statistic, Row, Col, Empty, Alert, Segmented, Tooltip, Checkbox } from 'antd'
 import { ReloadOutlined, InfoCircleOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
-import { createSeriesMarkers, CandlestickSeries, CrosshairMode } from 'lightweight-charts'
+import { createSeriesMarkers, CandlestickSeries, CrosshairMode, LineSeries } from 'lightweight-charts'
+import { sessionVwapFromBars } from './chartVwap.js'
 import { createZoomableChart } from './chartZoom.js'
 import {
-  NavBar, STORED_UNDERLYING, usePersistedState, fmtPrice, fmtIstTime, fmtIstDateTime, istDateKey,
+  NavBar, STORED_UNDERLYING, STORED_SHOW_VWAP, usePersistedState, fmtPrice, fmtIstTime, fmtIstDateTime, istDateKey,
   CE_COLOR, PE_COLOR, UP_COLOR, DOWN_COLOR,
   AXIS_COLOR, GRID_COLOR, BORDER_COLOR, istTimeFormatter, istTickMarkFormatter, toBar, toChartTime, dayResetMarkers,
 } from './shared.jsx'
@@ -47,9 +48,10 @@ function spliceMarkers(splices) {
 // splice this app's own DetectPossibleSplices flagged - the whole point of this page is to let one
 // of those be inspected directly against the real candle shape around it, not just read off a
 // trade's own surprising exit price.
-function RollingCandleChart({ bars, splices, height = 420 }) {
+function RollingCandleChart({ bars, splices, height = 420, showVwap = false }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
+  const vwapRef = useRef(null)
   const seriesRef = useRef(null)
   const markersRef = useRef(null)
 
@@ -74,6 +76,7 @@ function RollingCandleChart({ bars, splices, height = 420 }) {
       wickUpColor: UP_COLOR,
       wickDownColor: DOWN_COLOR,
     })
+    vwapRef.current = chart.addSeries(LineSeries, { color: '#e072e8', lineWidth: 2, title: 'VWAP', priceLineVisible: false, crosshairMarkerVisible: false })
     markersRef.current = createSeriesMarkers(seriesRef.current, [])
 
     const onResize = () => {
@@ -85,6 +88,7 @@ function RollingCandleChart({ bars, splices, height = 420 }) {
       window.removeEventListener('resize', onResize)
       chart.remove()
       chartRef.current = null
+      vwapRef.current = null
       seriesRef.current = null
       markersRef.current = null
     }
@@ -147,6 +151,7 @@ export default function RollingStrikeDataPage() {
   // own GetRollingChart doc comment). null means "use the offset below instead".
   const [strike, setStrike] = useState(null)
   const [side, setSide] = usePersistedState(STORED_SIDE, 'CE')
+  const [showVwap, setShowVwap] = usePersistedState(STORED_SHOW_VWAP, false)
   const [lookbackDays, setLookbackDays] = useState(DEFAULT_LOOKBACK_DAYS.WEEK)
 
   const [result, setResult] = useState(null) // null = never loaded yet
@@ -255,7 +260,7 @@ export default function RollingStrikeDataPage() {
     [bars],
   )
 
-  const chartBars = useMemo(() => matchedBars.map(toBar), [matchedBars])
+  const chartBars = useMemo(() => matchedBars.map((b) => ({ ...toBar(b), volume: b.volume })), [matchedBars]) // volume: for the VWAP only
 
   const resolvedStrikes = useMemo(
     () => bars.map((b) => b.resolvedStrike).filter((s) => s != null),
@@ -317,6 +322,9 @@ export default function RollingStrikeDataPage() {
   ]
 
   const hasLoaded = result !== null
+
+  // Session VWAP of this option from its own candles' volume (resets each IST day), on the candles' times.
+  useEffect(() => { vwapRef.current?.setData(showVwap ? sessionVwapFromBars(bars) ?? [] : []) }, [bars, showVwap])
 
   return (
     <div style={{ maxWidth: 1280, margin: '0 auto', padding: '24px 16px' }}>
@@ -479,10 +487,10 @@ export default function RollingStrikeDataPage() {
               </Text>
             </Card>
 
-            <Card size="small" title="Chart">
+            <Card size="small" title="Chart" extra={<Checkbox checked={showVwap} onChange={(e) => setShowVwap(e.target.checked)}>VWAP</Checkbox>}>
               {chartBars.length > 0 ? (
                 <ChartErrorBoundary key={`${underlying}-${expiryDate}-${result.strikeToken}-${result.optionType}`}>
-                  <RollingCandleChart bars={chartBars} splices={splices} height={420} />
+                  <RollingCandleChart bars={chartBars} splices={splices} height={420} showVwap={showVwap} />
                 </ChartErrorBoundary>
               ) : (
                 <Empty description={loading ? 'Loading…' : 'No bars to chart for this contract.'} />

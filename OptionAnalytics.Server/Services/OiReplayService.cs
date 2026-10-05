@@ -473,22 +473,29 @@ public sealed class OiReplayService
 
         decimal BinPrice(int i) => low + (i + 0.5m) * binSize;
 
+        // POC: the bin with the most volume; on a tie, the one nearest the middle of the range (the
+        // standard rule - the same as the Order Flow page's profiles).
         var pocBin = 0;
-        for (var i = 1; i < VolumeProfileBinCount; i++) if (volumeByBin[i] > volumeByBin[pocBin]) pocBin = i;
+        var middle = (VolumeProfileBinCount - 1) / 2m;
+        for (var i = 1; i < VolumeProfileBinCount; i++)
+            if (volumeByBin[i] > volumeByBin[pocBin] || (volumeByBin[i] == volumeByBin[pocBin] && Math.Abs(i - middle) < Math.Abs(pocBin - middle))) pocBin = i;
 
-        // Value area: expand outward from POC one bin at a time, always taking whichever side's next
-        // bin carries more volume, until the accumulated share reaches ValueAreaShare of the day's
-        // total - the textbook algorithm, not an approximation of it.
+        // Value area (CBOT / Steidlmayer): from the POC, compare the volume of the TWO bins above the
+        // area with the TWO bins below it and add the larger pair (one bin when only one is left on that
+        // side; above first on a tie), until ValueAreaShare of the day's total is inside.
         var targetVolume = totalVolume * ValueAreaShare;
         var accumulated = (decimal)volumeByBin[pocBin];
         var lowBin = pocBin;
         var highBin = pocBin;
         while (accumulated < targetVolume && (lowBin > 0 || highBin < VolumeProfileBinCount - 1))
         {
-            var belowVolume = lowBin > 0 ? volumeByBin[lowBin - 1] : -1;
-            var aboveVolume = highBin < VolumeProfileBinCount - 1 ? volumeByBin[highBin + 1] : -1;
-            if (aboveVolume >= belowVolume) { highBin++; accumulated += aboveVolume; }
-            else { lowBin--; accumulated += belowVolume; }
+            var upCount = Math.Min(2, VolumeProfileBinCount - 1 - highBin);
+            var downCount = Math.Min(2, lowBin);
+            long aboveVolume = -1, belowVolume = -1;
+            if (upCount > 0) { aboveVolume = 0; for (var k = 1; k <= upCount; k++) aboveVolume += volumeByBin[highBin + k]; }
+            if (downCount > 0) { belowVolume = 0; for (var k = 1; k <= downCount; k++) belowVolume += volumeByBin[lowBin - k]; }
+            if (aboveVolume >= belowVolume) { highBin += upCount; accumulated += aboveVolume; }
+            else { lowBin -= downCount; accumulated += belowVolume; }
         }
 
         // HVN/LVN: local peaks/troughs in the histogram (strictly higher/lower than BOTH neighbors) -

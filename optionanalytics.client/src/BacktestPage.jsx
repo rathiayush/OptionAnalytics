@@ -3,6 +3,7 @@ import { Select, Space, Typography, Spin, Card, Button, Table, Tag, InputNumber,
 import dayjs from 'dayjs'
 import { ReloadOutlined, PlayCircleOutlined } from '@ant-design/icons'
 import { createSeriesMarkers, CandlestickSeries, LineSeries, CrosshairMode } from 'lightweight-charts'
+import { alignToBars } from './chartVwap.js'
 import { createZoomableChart } from './chartZoom.js'
 import {
   UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, EMA_COLOR, emaLine, srLevelLine, NavBar, DirectionTag, ALERT_KIND_LABEL, fmtIstDateTime, fmtIstTime, fmtPrice, istDateKey,
@@ -573,12 +574,18 @@ export default function BacktestPage() {
 
   // The actual plotted line data - only for whichever of the above are ticked on in
   // visibleIndicators, and only once there is something to plot them against.
+  // Every strategy's chart also offers the session VWAP (the spot's, off its real index volume),
+  // aligned to the candles - one point per candle, so it never adds time points to the axis.
+  const chartIndicatorDefs = useMemo(() => [
+    ...indicatorDefs,
+    { key: 'sessionVwap', label: 'VWAP', color: '#e072e8', compute: (bars) => alignToBars((spotVwapSeries ?? []).map((p) => ({ time: toChartTime(p.time), value: p.obv })), bars) },
+  ], [indicatorDefs, spotVwapSeries])
   const indicatorLines = useMemo(() => {
     if (chartBars.length === 0) return []
-    return indicatorDefs
+    return chartIndicatorDefs
       .filter((def) => visibleIndicators[def.key])
       .map((def) => ({ key: def.key, label: def.label, color: def.color, points: def.compute(chartBars) }))
-  }, [indicatorDefs, visibleIndicators, chartBars])
+  }, [chartIndicatorDefs, visibleIndicators, chartBars])
 
   const summary = useMemo(() => {
     // Open positions are excluded from every stat below - they haven't actually closed, so folding
@@ -811,7 +818,7 @@ export default function BacktestPage() {
           <Space direction="vertical" size={16} style={{ width: '100%' }}>
             {chartBars.length > 0 ? (
               <div>
-                {indicatorDefs.map((def) => (
+                {chartIndicatorDefs.map((def) => (
                   <Checkbox
                     key={def.key}
                     checked={!!visibleIndicators[def.key]}

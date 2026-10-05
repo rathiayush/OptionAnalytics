@@ -8,7 +8,7 @@ const at = (m) => T915 + m * MIN
 const iso = (ms) => new Date(ms).toISOString()
 let fails = 0
 const check = (n, c, x = '') => { console.log(`${c ? 'PASS' : 'FAIL'} ${n} ${x}`); if (!c) fails++ }
-check('26 strategies, 5 in the profile group, 3 range-bound', STRATEGIES.length === 26 && STRATEGIES.filter((s) => s.group === 'profile').length === 5 && STRATEGIES.filter((s) => s.group === 'range').length === 3)
+check('27 strategies, 5 in the profile group, 3 range-bound', STRATEGIES.length === 27 && STRATEGIES.filter((s) => s.group === 'profile').length === 5 && STRATEGIES.filter((s) => s.group === 'range').length === 3)
 
 // Profiles: two humps (HVN around 100 and 110) with a thin area (LVN) at 105.
 {
@@ -65,8 +65,8 @@ const tape = (now, pct) => Array.from({ length: 50 }, (_, i) => ({ seq: i, time:
   const mk = (id, rs) => rs.map((r, i) => ({ id, t: i, outcome: { status: r > 0 ? 'win' : 'loss', r } }))
   const t = topFifteen(strategyStats([...mk('range', [-1, -1, -1, -1, -1]), ...mk('lvnRun', [2, 2, 2, -1, 2])]))
   check('top 15 (the measured loser left out), profile group led by its best', t.ids.length === 15 && !t.ids.includes('range') && t.profile.ids[0] === 'lvnRun', t.ids.join())
-  const inst = ['suddenWall', 'heatmapOi', 'oiSqueeze', 'trap', 'cvdDivergence', 'blockTrade']
-  check('unmeasured: top 15 = OI top 5 + the 4 profile strategies (#12 retired) + the sudden wall, the heatmap + OI wall, the OI squeeze and the institutional setups (#20, #21 wait until measured)', inst.every((id) => t.ids.includes(id)) && !t.ids.includes('tpo80') && !t.ids.includes('wallDefence'), t.ids.join())
+  const inst = ['suddenWall', 'heatmapOi', 'vwapPullback', 'oiSqueeze', 'trap', 'cvdDivergence']
+  check('unmeasured: top 15 = OI top 5 + the 4 profile strategies (#12 retired) + the sudden wall, the heatmap + OI wall, the VWAP pullback, the OI squeeze and the institutional setups (#19-#21 wait until measured)', inst.every((id) => t.ids.includes(id)) && !t.ids.includes('tpo80') && !t.ids.includes('wallDefence'), t.ids.join())
   // A measured, profitable range strategy outranks an unmeasured institutional one for the last five.
   const t2 = topFifteen(strategyStats([...mk('vwapFade', [1.5, 1.5, -1, 1.5, 1.5, 1.5])]))
   check('a measured profitable range fade gets into the top 15', t2.ids.includes('vwapFade') && t2.ids.length === 15, t2.ids.join())

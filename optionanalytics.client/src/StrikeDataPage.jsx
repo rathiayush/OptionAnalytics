@@ -1,10 +1,11 @@
 import { Component, useEffect, useMemo, useRef, useState } from 'react'
-import { Card, Select, InputNumber, Space, Typography, Table, Button, Statistic, Row, Col, Empty, Alert, DatePicker } from 'antd'
+import { Card, Select, InputNumber, Space, Typography, Table, Button, Statistic, Row, Col, Empty, Alert, DatePicker, Checkbox } from 'antd'
 import { ReloadOutlined } from '@ant-design/icons'
-import { createSeriesMarkers, CandlestickSeries, CrosshairMode } from 'lightweight-charts'
+import { createSeriesMarkers, CandlestickSeries, CrosshairMode, LineSeries } from 'lightweight-charts'
+import { sessionVwapFromBars } from './chartVwap.js'
 import { createZoomableChart } from './chartZoom.js'
 import {
-  NavBar, STORED_UNDERLYING, usePersistedState, pickUnderlying,
+  NavBar, STORED_UNDERLYING, STORED_SHOW_VWAP, usePersistedState, pickUnderlying,
   useExpirySelector, ExpirySelect, withExpiry, fmtPrice, fmtIstTime, fmtIstDateTime, istDateKey,
   CE_COLOR, PE_COLOR, UP_COLOR, DOWN_COLOR,
   AXIS_COLOR, GRID_COLOR, BORDER_COLOR, istTimeFormatter, istTickMarkFormatter, toBar, dayResetMarkers,
@@ -20,9 +21,10 @@ const STORED_STRIKE_TYPE = 'optionanalytics.strikeData.optionType'
 // cross-chart pan/zoom sync group meant for several charts on the SAME page moving together, live-
 // tick by live-tick - neither applies here (this page shows one static, already-complete series
 // for one chart), so this is the plain shape lightweight-charts needs without that complexity.
-function StrikeCandleChart({ bars, height = 420 }) {
+function StrikeCandleChart({ bars, height = 420, showVwap = false }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
+  const vwapRef = useRef(null)
   const seriesRef = useRef(null)
   const markersRef = useRef(null)
   const hasFitRef = useRef(false)
@@ -48,6 +50,7 @@ function StrikeCandleChart({ bars, height = 420 }) {
       wickUpColor: UP_COLOR,
       wickDownColor: DOWN_COLOR,
     })
+    vwapRef.current = chart.addSeries(LineSeries, { color: '#e072e8', lineWidth: 2, title: 'VWAP', priceLineVisible: false, crosshairMarkerVisible: false })
     markersRef.current = createSeriesMarkers(seriesRef.current, [])
     hasFitRef.current = false
 
@@ -60,6 +63,7 @@ function StrikeCandleChart({ bars, height = 420 }) {
       window.removeEventListener('resize', onResize)
       chart.remove()
       chartRef.current = null
+      vwapRef.current = null
       seriesRef.current = null
       markersRef.current = null
     }
@@ -126,6 +130,7 @@ export default function StrikeDataPage() {
   const { expiries, selectedExpiry, expiryParam, isManual: expiryIsManual, loading: expiryLoading, selectExpiry } = useExpirySelector(underlying)
   const [strike, setStrike] = useState(null)
   const [optionType, setOptionType] = usePersistedState(STORED_STRIKE_TYPE, 'CE')
+  const [showVwap, setShowVwap] = usePersistedState(STORED_SHOW_VWAP, false)
   const [candles, setCandles] = useState(null) // null = never loaded yet, distinct from [] = loaded and empty
   const [trackedStrikes, setTrackedStrikes] = useState([])
   // null = not fetched (or not yet known whether it's available) - distinct from [] = fetched and
@@ -243,7 +248,7 @@ export default function StrikeDataPage() {
   const chartBars = useMemo(
     () => visibleCandles
       .filter((c) => c.open > 0 && c.open < 100000 && c.high > 0 && c.high < 100000 && c.low > 0 && c.low < 100000 && c.close > 0 && c.close < 100000)
-      .map(toBar),
+      .map((c) => ({ ...toBar(c), volume: c.volume })), // volume: for the VWAP only
     [visibleCandles],
   )
 
@@ -296,6 +301,9 @@ export default function StrikeDataPage() {
   ]
 
   const hasLoaded = candles !== null
+
+  // Session VWAP of this option from its own candles' volume (resets each IST day), on the candles' times.
+  useEffect(() => { vwapRef.current?.setData(showVwap ? sessionVwapFromBars(bars) ?? [] : []) }, [bars, showVwap])
 
   return (
     <div style={{ maxWidth: 1280, margin: '0 auto', padding: '24px 16px' }}>
@@ -379,10 +387,10 @@ export default function StrikeDataPage() {
               )}
             </Card>
 
-            <Card size="small" title="Chart">
+            <Card size="small" title="Chart" extra={<Checkbox checked={showVwap} onChange={(e) => setShowVwap(e.target.checked)}>VWAP</Checkbox>}>
               {chartBars.length > 0 ? (
                 <ChartErrorBoundary key={`${underlying}-${strike}-${optionType}-${selectedExpiry}`}>
-                  <StrikeCandleChart bars={chartBars} height={420} />
+                  <StrikeCandleChart bars={chartBars} height={420} showVwap={showVwap} />
                 </ChartErrorBoundary>
               ) : (
                 <Empty description={loading ? 'Loading…' : 'No candles to chart for this contract.'} />

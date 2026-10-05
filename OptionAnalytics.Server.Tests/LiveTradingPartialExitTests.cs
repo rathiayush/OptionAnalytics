@@ -209,6 +209,23 @@ public sealed class LiveTradingPartialExitTests
     }
 
     [Fact]
+    public async Task CancellingAPartFilledEntry_SaysTheFilledPartIsLeftUnprotected()
+    {
+        var (service, dhan, _) = await CreateAsync();
+        var partial = PendingSuperOrder("S9", "OIR-test-9");
+        partial["orderStatus"] = "PART_TRADED";
+        partial["filledQty"] = Lot;
+        dhan.SuperOrders.Add(partial);
+        await service.RefreshAsync(CancellationToken.None);
+
+        var result = await service.CancelAsync("S9", false, CancellationToken.None);
+
+        Assert.True(result.Success, result.Message);
+        Assert.Contains("DELETE /super/orders/S9/ENTRY_LEG", dhan.Requests);
+        Assert.Contains($"{Lot} qty of it had already filled and stays OPEN without a stop-loss or target", result.Message);
+    }
+
+    [Fact]
     public async Task EveryOpenOrderIsListed_AndOneLegCanBeCancelled()
     {
         var (service, dhan, _) = await CreateAsync();

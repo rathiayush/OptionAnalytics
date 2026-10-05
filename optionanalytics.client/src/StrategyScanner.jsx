@@ -167,7 +167,8 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     const record = (result, note) => {
       const position = {
         key, setupKey: `${setup.id}-${setup.t}`, setupT: setup.t, strategy: setup.id, setupSide: setup.side, action: trade.action, side: trade.side, strike: trade.strike,
-        lots, lotSize: PAPER_TRADE_LOT_SIZE[underlying] ?? 1, premium: result.prices?.limit ?? trade.premium, slPts: cfg.paperSl, targetPts: cfg.paperTarget,
+        // The contract's real lot size from Dhan's contract list (the table is only a fallback).
+        lots, lotSize: result.lotSize ?? PAPER_TRADE_LOT_SIZE[underlying] ?? 1, premium: result.prices?.limit ?? trade.premium, slPts: cfg.paperSl, targetPts: cfg.paperTarget,
         entryTime: nowMsRef.current ?? Date.now(), exitTime: null, exitPremium: null, exitReason: null,
         live: true, orderIds: result.orderIds ?? [], liveNote: note ?? result.message,
       }

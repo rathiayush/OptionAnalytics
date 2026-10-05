@@ -297,17 +297,39 @@ function finishProfile(list, valueAreaPct) {
   const rows = list.sort((a, b) => a.price - b.price).map((r) => ({ ...r, total: r.buy + r.sell }))
   const total = rows.reduce((s, r) => s + r.total, 0)
   if (!rows.length || total <= 0) return { rows: [], poc: null, vah: null, val: null, total: 0, maxRow: 0 }
-  let pocIndex = 0
-  rows.forEach((r, i) => { if (r.total > rows[pocIndex].total) pocIndex = i })
+  const counts = rows.map((r) => r.total)
+  const pocIndex = pocIndexOf(counts)
+  const { lo, hi } = valueAreaOf(counts, pocIndex, valueAreaPct)
+  return { rows, poc: rows[pocIndex].price, vah: rows[hi].price, val: rows[lo].price, total, maxRow: rows[pocIndex].total }
+}
+
+/** The point of control: the row with the most volume (TPOs); on a tie, the one nearest the middle of
+ *  the profile's range (the standard rule). `counts` run from the lowest price row up. */
+export function pocIndexOf(counts) {
+  const mid = (counts.length - 1) / 2
+  let best = 0
+  counts.forEach((c, i) => {
+    if (c > counts[best] || (c === counts[best] && Math.abs(i - mid) < Math.abs(best - mid))) best = i
+  })
+  return best
+}
+
+/** The value area (CBOT / Steidlmayer): from the POC, compare the volume of the TWO rows above the area
+ *  with the TWO rows below it and add the larger pair (one row when only one is left on that side;
+ *  above first on a tie), until `pct` (70%) of the total is inside. Returns the row indexes. */
+export function valueAreaOf(counts, pocIndex, pct = 0.7) {
+  const total = counts.reduce((s, c) => s + c, 0)
   let lo = pocIndex
   let hi = pocIndex
-  let inArea = rows[pocIndex].total
-  while (inArea < valueAreaPct * total && (lo > 0 || hi < rows.length - 1)) {
-    const below = lo > 0 ? rows[lo - 1].total : -1
-    const above = hi < rows.length - 1 ? rows[hi + 1].total : -1
-    if (above >= below) { hi++; inArea += rows[hi].total } else { lo--; inArea += rows[lo].total }
+  let inside = counts[pocIndex]
+  while (inside < pct * total && (lo > 0 || hi < counts.length - 1)) {
+    const upN = Math.min(2, counts.length - 1 - hi)
+    const downN = Math.min(2, lo)
+    const up = upN > 0 ? counts.slice(hi + 1, hi + 1 + upN).reduce((s, c) => s + c, 0) : -1
+    const down = downN > 0 ? counts.slice(lo - downN, lo).reduce((s, c) => s + c, 0) : -1
+    if (up >= down) { hi += upN; inside += up } else { lo -= downN; inside += down }
   }
-  return { rows, poc: rows[pocIndex].price, vah: rows[hi].price, val: rows[lo].price, total, maxRow: rows[pocIndex].total }
+  return { lo, hi }
 }
 
 // ---- Replay ---------------------------------------------------------------------------------

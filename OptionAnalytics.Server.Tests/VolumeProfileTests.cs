@@ -47,13 +47,13 @@ public sealed class VolumeProfileTests
     }
 
     [Fact]
-    public void ComputeVolumeProfile_ValueArea_ExpandsSymmetricallyTowardTheHeavierSideUntilTargetReached()
+    public void ComputeVolumeProfile_ValueArea_AddsTheHeavierPairOfBinsUntilTargetReached()
     {
-        // POC=130 (50), then two roughly-tied neighbors (129:40, 131:40) followed by a much lighter
-        // pair (128:10, 132:10). Total volume (incl. the two edge-setting bars) is 152, target 106.4:
-        // step 1 ties on 129 vs 131 and takes the >= branch (131, the "above" side) for 90; step 2
-        // then correctly prefers 129's own still-larger 40 over 132's 10, reaching 130 and stopping -
-        // pinning down that the loop compares CANDIDATE volumes fresh each step, not stale side totals.
+        // POC=130 (50), then two tied neighbors (129:40, 131:40) followed by a lighter pair (128:10,
+        // 132:10). Total volume (incl. the two edge-setting bars) is 152, target 106.4. The standard
+        // (CBOT / Steidlmayer) value area adds TWO bins at a time: above 131+132 = 50 vs below
+        // 129+128 = 50 - a tie, above first -> 100; then above 133+134 = 0 vs below 129+128 = 50 ->
+        // 150, past the target. Value area 128-132 (one bin at a time would have stopped at 129-131).
         var bars = new List<CandleWithVolume>
         {
             Bar(100, 1), Bar(160, 1),
@@ -64,8 +64,8 @@ public sealed class VolumeProfileTests
 
         Assert.True(result.Success);
         Assert.Equal(130.5m, result.Poc);
-        Assert.Equal(131.5m, result.Vah);
-        Assert.Equal(129.5m, result.Val);
+        Assert.Equal(132.5m, result.Vah);
+        Assert.Equal(128.5m, result.Val);
     }
 
     [Fact]
