@@ -56,7 +56,7 @@ function scenario(d, o = {}) {
 }
 const show = ({ s, all }) => JSON.stringify(s ? { side: s.side, entry: s.entry, stop: +s.stop.toFixed(1), target: +s.target.toFixed(1), checks: s.checks } : all.map((x) => `${x.id}:${x.side}`))
 
-check('29 strategies, #29 is VWAP + OI confluence, in the line-up', STRATEGIES.length === 29 && STRATEGIES.find((x) => x.no === 29)?.id === 'vwapOi' && ACTIVE_STRATEGIES.some((x) => x.id === 'vwapOi'))
+check('30 strategies, #29 is VWAP + OI confluence, in the line-up', STRATEGIES.length === 30 && STRATEGIES.find((x) => x.no === 29)?.id === 'vwapOi' && ACTIVE_STRATEGIES.some((x) => x.id === 'vwapOi'))
 const L = scenario(1)
 check('LONG: above a rising VWAP, the pullback tags it and turns, put writers + futures long build-up', L.s?.side === 'LONG' && L.s.stop < L.s.entry && L.s.target > L.s.entry
   && /writers back it/.test(L.s.checks.OI) && /long build-up/.test(L.s.checks.OI), show(L))

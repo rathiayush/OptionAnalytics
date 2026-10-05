@@ -7,7 +7,7 @@ const at = (m) => T915 + m * MIN
 const iso = (ms) => new Date(ms).toISOString()
 let fails = 0
 const check = (n, c, x = '') => { console.log(`${c ? 'PASS' : 'FAIL'} ${n} ${x}`); if (!c) fails++ }
-check('29 strategies, #16 is the weak wall', STRATEGIES.length === 29 && STRATEGIES.find((s) => s.no === 16)?.id === 'weakWall')
+check('30 strategies, #16 is the weak wall', STRATEGIES.length === 30 && STRATEGIES.find((s) => s.no === 16)?.id === 'weakWall')
 
 const NOW_M = 85
 function oiRun({ levelOi = (m) => (m < 70 ? 4.6e6 : 4.6e6 - (m - 70) * 40000), neighbour = 3e6, futuresUp = true } = {}) {
