@@ -1260,8 +1260,11 @@ const FLOATING_PANEL_MIN_HEIGHT = 160
 // same fixed-440px behavior as before.
 // Floating panels stack in the order they were last used: pressing anywhere on one brings it to the
 // front, so with several open (spot chart, replay controls, paper trade) the one being worked with is
-// never hidden under another. z-indexes stay between 1000 and antd's popups (1050), so a Select or
-// TimePicker inside a panel still opens above every panel.
+// never hidden under another. z-indexes stay at 900-940: above the page, but BELOW every antd
+// overlay - Modal / Drawer / Modal.confirm (1000), message (1010), Popover (1030), Select and
+// TimePicker dropdowns (1050), Tooltip (1070). At 1000+ a panel covered the popup its own content
+// opened (the floating spot chart hid the strike OI-history modal clicking an S/R level opens).
+const FLOATING_PANEL_BASE_Z = 900
 const floatingPanelStack = []
 const floatingPanelListeners = new Set()
 function notifyFloatingPanels() { for (const listener of floatingPanelListeners) listener() }
@@ -1287,7 +1290,7 @@ function useFloatingPanelZIndex() {
     }
   }, [id])
   const position = useSyncExternalStore(subscribeFloatingPanels, () => floatingPanelStack.indexOf(id))
-  return { zIndex: 1000 + Math.min(Math.max(position, 0), 40), raise: () => raiseFloatingPanel(id) }
+  return { zIndex: FLOATING_PANEL_BASE_Z + Math.min(Math.max(position, 0), 40), raise: () => raiseFloatingPanel(id) }
 }
 
 export function DraggableFloatingPanel({ title, pos, onPosChange, size, onSizeChange, onClose, children }) {
