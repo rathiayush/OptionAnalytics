@@ -87,6 +87,8 @@ function upTo(prints, ms) {
 // price" - set per underlying (its points move differently); or in R (x the trade's own risk).
 const DEFAULT_TRAIL_PTS = { NIFTY: { start: 30, gap: 30 }, BANKNIFTY: { start: 75, gap: 75 }, SENSEX: { start: 100, gap: 100 } }
 const FALLBACK_TRAIL_PTS = { start: 30, gap: 30 }
+// Strikes the option trade can use: 5 in the money ... ATM ... 5 out of the money (moneyness +n / -n).
+const STRIKE_CHOICES = [5, 4, 3, 2, 1, 0, -1, -2, -3, -4, -5].map((v) => ({ value: v, label: v === 0 ? 'ATM' : `${Math.abs(v)} ${v > 0 ? 'ITM' : 'OTM'}` }))
 const trailUnit = (cfg) => (cfg.trail?.unit === 'R' ? 'R' : 'pts')
 const trailPtsFor = (cfg, underlying) => {
   const key = String(underlying ?? '').toUpperCase()
@@ -1160,10 +1162,10 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                 <Text style={{ fontSize: 12 }}>on each alert</Text>
                 <Segmented size="small" value={settings.autoPaper ?? 'sell'} onChange={(v) => setSettings((s) => ({ ...s, autoPaper: v }))}
                   options={[{ value: 'off', label: 'Off' }, { value: 'buy', label: 'Buy option' }, { value: 'sell', label: 'Sell option' }]} />
-                <Tooltip title="Which strike each trade uses - paper and live: ATM, or 1-2 strikes in / out of the money for the option being traded (a call's ITM strikes are below the index, a put's above). Only the strike changes - which setups fire does not.">
+                <Tooltip title="Which strike each trade uses - paper and live: ATM, or up to 5 strikes in / out of the money for the option being traded (a call's ITM strikes are below the index, a put's above). Only the strike changes - which setups fire does not.">
                   <Select size="small" style={{ width: 84 }} value={settings.moneyness ?? 0} aria-label="Option strike"
                     onChange={(v) => setSettings((s) => ({ ...s, moneyness: v }))}
-                    options={[{ value: 2, label: '2 ITM' }, { value: 1, label: '1 ITM' }, { value: 0, label: 'ATM' }, { value: -1, label: '1 OTM' }, { value: -2, label: '2 OTM' }]} />
+                    options={STRIKE_CHOICES} />
                 </Tooltip>
                 <InputNumber size="small" min={1} max={100} style={{ width: 64 }} value={settings.paperLots ?? 1} aria-label="Paper lots"
                   onChange={(v) => v != null && setSettings((s) => ({ ...s, paperLots: v }))} />
