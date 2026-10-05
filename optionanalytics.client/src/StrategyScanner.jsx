@@ -4,6 +4,7 @@ import { SoundOutlined } from '@ant-design/icons'
 import { UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import { PAPER_TRADE_LOT_SIZE } from './oiShared.jsx'
 import { liveTradingApi } from './LiveTrading.jsx'
+import { chime, speak, telegram, unlockAudio } from './alerts.js'
 import {
   ACTIVE_STRATEGIES, STRATEGY_BY_ID, evaluateStrategies, simulateOutcome, strategyStats, topFifteen, MIN_TRADES_TO_RANK, oiSummary, optionOiText,
   DEFAULT_TRAIL, LAST_ENTRY, SQUARE_OFF, fmtHm, exitLabel, premiumAt, optionPnlPoints, optionTradeText, squareOffMs, optionStopTargetHit, RANGE_IDS, asReplayContext,
@@ -29,10 +30,6 @@ const TRADE_MODE_KEY = 'optionanalytics.strategyScanner.tradeMode'
 // Paper trades whose exit has gone to Telegram, per day.
 const TG_SENT_KEY = 'optionanalytics.strategyScanner.telegramSent.v1'
 
-// A trade punched / placed (and a live trade's exit) to the server's Telegram chat - live view only.
-function telegram(text) {
-  fetch('/api/alerts/telegram', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) }).catch(() => {})
-}
 const MAX_DAYS_KEPT = 60
 const msOf = (t) => (typeof t === 'number' ? t : new Date(t).getTime())
 
@@ -41,40 +38,6 @@ const readJson = (key, fallback) => {
 }
 const writeJson = (key, value) => {
   try { localStorage.setItem(key, JSON.stringify(value)) } catch { /* storage full / blocked */ }
-}
-
-let audioCtx = null
-function unlockAudio() {
-  try { audioCtx ??= new (window.AudioContext || window.webkitAudioContext)(); audioCtx.resume?.() } catch { /* no audio */ }
-}
-function chime(up) {
-  try {
-    unlockAudio()
-    const ctx = audioCtx
-    const notes = up ? [660, 880, 1100] : [1100, 880, 660]
-    notes.forEach((f, i) => {
-      const osc = ctx.createOscillator()
-      const gain = ctx.createGain()
-      const at = ctx.currentTime + i * 0.16
-      osc.type = 'triangle'
-      osc.frequency.value = f
-      gain.gain.setValueAtTime(0.001, at)
-      gain.gain.exponentialRampToValueAtTime(0.3, at + 0.02)
-      gain.gain.exponentialRampToValueAtTime(0.001, at + 0.15)
-      osc.connect(gain)
-      gain.connect(ctx.destination)
-      osc.start(at)
-      osc.stop(at + 0.16)
-    })
-  } catch { /* audio blocked - the notification still shows */ }
-}
-function speak(text) {
-  try {
-    if (!window.speechSynthesis) return
-    const u = new SpeechSynthesisUtterance(text)
-    u.rate = 1.05
-    window.speechSynthesis.speak(u)
-  } catch { /* no speech */ }
 }
 
 // 1-minute analyzed bars that had COMPLETED by `nowMs`.
@@ -491,7 +454,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       let scanOi = oi
       const until = isReplay ? null : nowMsRef.current ?? Date.now()
       if (!isReplay) {
-        const body = await fetch(`/api/order-flow/${underlying}/day/${date}?rowSize=${rowSize}&minTradeLots=${largeLots}&heatmapColumns=1500`).then((r) => (r.ok ? r.json() : Promise.reject(new Error('today\'s order flow could not be loaded'))))
+        const body = await fetch(`/api/order-flow/${underlying}/day/${date}?rowSize=${rowSize}&minTradeLots=${Math.min(5, largeLots)}&heatmapColumns=1500`).then((r) => (r.ok ? r.json() : Promise.reject(new Error('today\'s order flow could not be loaded'))))
         day = {
           meta: body.meta, minuteBars: body.bars ?? [], trades: body.trades ?? [], icebergs: body.icebergs ?? [], sweeps: body.sweeps ?? [],
           heatmap: (body.heatmap ?? []).map((c) => ({ t: new Date(c.time).getTime(), bids: c.bids, asks: c.asks })), source: body.source,
