@@ -31,7 +31,7 @@ public sealed class ScannerLogStore
     {
         "key", "date", "underlying", "time_ist", "strategy_no", "strategy_id", "strategy", "side", "entry", "stop", "target",
         "confidence", "estimated", "day_type", "day_type_price", "vote_oi", "vote_cvd", "adaptive_take", "adaptive_price_only",
-        "adaptive_reason", "status", "r", "exit_time_ist", "exit_price", "exit_reason", "source", "user", "updated_utc",
+        "adaptive_reason", "status", "r", "points", "exit_time_ist", "exit_price", "exit_reason", "source", "user", "updated_utc",
     };
 
     public static readonly string[] TradeColumns =
@@ -89,7 +89,7 @@ public sealed class ScannerLogStore
             ["estimated"] = Bool(s.Estimated), ["day_type"] = Text(s.DayType), ["day_type_price"] = Text(s.DayTypePrice),
             ["vote_oi"] = Text(s.VoteOi), ["vote_cvd"] = Text(s.VoteCvd), ["adaptive_take"] = Bool(s.AdaptiveTake),
             ["adaptive_price_only"] = Bool(s.AdaptivePriceOnly), ["adaptive_reason"] = Text(s.AdaptiveReason),
-            ["status"] = Text(s.Status), ["r"] = Num(s.R), ["exit_time_ist"] = s.ExitTime is > 0 ? IstTime(s.ExitTime.Value) : "",
+            ["status"] = Text(s.Status), ["r"] = Num(s.R), ["points"] = Num(FuturesPoints(s.Side, s.Entry, s.ExitPrice, s.Status)), ["exit_time_ist"] = s.ExitTime is > 0 ? IstTime(s.ExitTime.Value) : "",
             ["exit_price"] = Num(s.ExitPrice), ["exit_reason"] = Text(s.ExitReason), ["source"] = source, ["user"] = who, ["updated_utc"] = now,
         }).ToList();
         var tradeRows = trades.Where((t) => !string.IsNullOrWhiteSpace(t.Key) && t.EntryTime > 0).Select((t) => new Dictionary<string, string>
@@ -116,6 +116,136 @@ public sealed class ScannerLogStore
             _lock.Release();
         }
         return (signalRows.Count, tradeRows.Count, null);
+    }
+
+    // The futures points a closed signal captured: exit - entry for a LONG, entry - exit for a SHORT.
+    internal static bool IsClosed(string? status) => status is "win" or "loss" or "flat";
+
+    internal static double? FuturesPoints(string? side, double? entry, double? exit, string? status)
+    {
+        if (!IsClosed(status) || entry is not { } e || exit is not { } x || !double.IsFinite(e) || !double.IsFinite(x)) return null;
+        return string.Equals(side, "SHORT", StringComparison.OrdinalIgnoreCase) ? e - x : x - e;
+    }
+
+    /// <summary>The totals of everything stored, per underlying: one row per day and a TOTAL row per
+    /// underlying (see ScannerSummaryRow). Read from the two CSV files, so it is always what the files say.</summary>
+    public async Task<IReadOnlyList<ScannerSummaryRow>> SummaryAsync(CancellationToken cancellationToken)
+    {
+        List<Dictionary<string, string>> signals, trades;
+        await _lock.WaitAsync(cancellationToken);
+        try
+        {
+            signals = Read(Path.Combine(_directory, SignalsFile)).ToList();
+            trades = Read(Path.Combine(_directory, TradesFile)).ToList();
+        }
+        finally
+        {
+            _lock.Release();
+        }
+        return Summarize(signals, trades);
+    }
+
+    internal static IReadOnlyList<ScannerSummaryRow> Summarize(IEnumerable<Dictionary<string, string>> signals, IEnumerable<Dictionary<string, string>> trades)
+    {
+        static string C(Dictionary<string, string> r, string k) => r.GetValueOrDefault(k, "");
+        static double? N(Dictionary<string, string> r, string k) =>
+            double.TryParse(C(r, k), NumberStyles.Float, CultureInfo.InvariantCulture, out var v) && double.IsFinite(v) ? v : null;
+        var acc = new Dictionary<(string Underlying, string Date), Acc>();
+        Acc At(Dictionary<string, string> r) => acc.TryGetValue((C(r, "underlying"), C(r, "date")), out var a) ? a : acc[(C(r, "underlying"), C(r, "date"))] = new Acc();
+        foreach (var r in signals)
+        {
+            var a = At(r);
+            var take = C(r, "adaptive_take") == "true";
+            a.Signals++;
+            if (take) a.AdaptiveSignals++;
+            if (!IsClosed(C(r, "status"))) continue;
+            // The points column; older rows (before it existed) derive it from entry / exit.
+            var pts = N(r, "points") ?? FuturesPoints(C(r, "side"), N(r, "entry"), N(r, "exit_price"), C(r, "status")) ?? 0;
+            var rr = N(r, "r") ?? 0;
+            a.Closed++;
+            if (C(r, "status") == "win") a.Wins++;
+            a.FuturesPoints += pts; a.TotalR += rr;
+            if (take) a.AdaptiveFuturesPoints += pts;
+        }
+        foreach (var r in trades)
+        {
+            var a = At(r);
+            var take = C(r, "adaptive_take") == "true";
+            var pts = N(r, "points") ?? 0;
+            var net = N(r, "net_rupees") ?? N(r, "rupees") ?? 0;
+            a.Trades++;
+            var tag = C(r, "adaptive_take");
+            if (tag == "false") { a.NonAdaptiveTrades++; a.NonAdaptiveOptionPoints += pts; a.NonAdaptiveNet += net; a.NonAdaptiveNetPerLot += N(r, "net_per_lot") ?? 0; }
+            else if (tag != "true") a.UntaggedTrades++;
+            if (C(r, "live") == "true") a.LiveTrades++;
+            if (C(r, "exit_time_ist").Length == 0) a.OpenTrades++;
+            a.OptionPoints += pts;
+            a.Gross += N(r, "rupees") ?? 0;
+            a.Charges += (N(r, "stt") ?? 0) + (N(r, "brokerage") ?? 0) + (N(r, "other_charges") ?? 0);
+            a.Net += net;
+            a.NetPerLot += N(r, "net_per_lot") ?? 0;
+            if (take) { a.AdaptiveTrades++; a.AdaptiveOptionPoints += pts; a.AdaptiveNet += net; a.AdaptiveNetPerLot += N(r, "net_per_lot") ?? 0; }
+        }
+        var rows = new List<ScannerSummaryRow>();
+        foreach (var underlying in acc.Keys.Select(k => k.Underlying).Distinct().OrderBy(u => u, StringComparer.Ordinal))
+        {
+            var total = new Acc();
+            foreach (var ((_, date), a) in acc.Where(kv => kv.Key.Underlying == underlying).OrderBy(kv => kv.Key.Date, StringComparer.Ordinal))
+            {
+                rows.Add(a.ToRow("day", underlying, date));
+                total.Add(a);
+            }
+            rows.Add(total.ToRow("total", underlying, ""));
+        }
+        return rows;
+    }
+
+    private sealed class Acc
+    {
+        public int Signals, Closed, Wins, Trades, LiveTrades, OpenTrades, AdaptiveSignals, AdaptiveTrades, NonAdaptiveTrades, UntaggedTrades;
+        public double FuturesPoints, TotalR, OptionPoints, Gross, Charges, Net, NetPerLot, AdaptiveFuturesPoints, AdaptiveOptionPoints, AdaptiveNet,
+            AdaptiveNetPerLot, NonAdaptiveOptionPoints, NonAdaptiveNet, NonAdaptiveNetPerLot;
+
+        public void Add(Acc o)
+        {
+            Signals += o.Signals; Closed += o.Closed; Wins += o.Wins; Trades += o.Trades; LiveTrades += o.LiveTrades; OpenTrades += o.OpenTrades;
+            AdaptiveSignals += o.AdaptiveSignals; AdaptiveTrades += o.AdaptiveTrades; FuturesPoints += o.FuturesPoints; TotalR += o.TotalR;
+            OptionPoints += o.OptionPoints; Gross += o.Gross; Charges += o.Charges; Net += o.Net; NetPerLot += o.NetPerLot;
+            AdaptiveFuturesPoints += o.AdaptiveFuturesPoints; AdaptiveOptionPoints += o.AdaptiveOptionPoints; AdaptiveNet += o.AdaptiveNet;
+            NonAdaptiveTrades += o.NonAdaptiveTrades; UntaggedTrades += o.UntaggedTrades; AdaptiveNetPerLot += o.AdaptiveNetPerLot;
+            NonAdaptiveOptionPoints += o.NonAdaptiveOptionPoints; NonAdaptiveNet += o.NonAdaptiveNet; NonAdaptiveNetPerLot += o.NonAdaptiveNetPerLot;
+        }
+
+        public ScannerSummaryRow ToRow(string scope, string underlying, string date) => new(scope, underlying, date, Signals, Closed, Wins,
+            Closed > 0 ? Math.Round(100.0 * Wins / Closed, 1) : null, Math.Round(FuturesPoints, 2), Math.Round(TotalR, 2), Trades, LiveTrades, OpenTrades,
+            Math.Round(OptionPoints, 2), Math.Round(Gross, 2), Math.Round(Charges, 2), Math.Round(Net, 2), Math.Round(NetPerLot, 2),
+            AdaptiveSignals, Math.Round(AdaptiveFuturesPoints, 2), AdaptiveTrades, Math.Round(AdaptiveOptionPoints, 2), Math.Round(AdaptiveNet, 2),
+            Math.Round(AdaptiveNetPerLot, 2), NonAdaptiveTrades, Math.Round(NonAdaptiveOptionPoints, 2), Math.Round(NonAdaptiveNet, 2), Math.Round(NonAdaptiveNetPerLot, 2), UntaggedTrades);
+    }
+
+    public static readonly string[] SummaryColumns =
+    {
+        "scope", "underlying", "date", "signals", "closed_signals", "wins", "win_pct", "futures_points", "total_r", "trades", "live_trades", "open_trades",
+        "option_points", "gross_rupees", "charges", "net_rupees", "net_per_lot", "adaptive_signals", "adaptive_futures_points", "adaptive_trades",
+        "adaptive_option_points", "adaptive_net_rupees", "adaptive_net_per_lot", "non_adaptive_trades", "non_adaptive_option_points",
+        "non_adaptive_net_rupees", "non_adaptive_net_per_lot", "untagged_trades",
+    };
+
+    /// <summary>The summary as CSV: a row per underlying and day, then that underlying's TOTAL.</summary>
+    public static string SummaryCsv(IEnumerable<ScannerSummaryRow> rows)
+    {
+        var sb = new StringBuilder();
+        sb.Append(string.Join(',', SummaryColumns)).Append('\n');
+        foreach (var r in rows)
+            sb.Append(string.Join(',', new[]
+            {
+                r.Scope, r.Underlying, r.Date, Num(r.Signals), Num(r.ClosedSignals), Num(r.Wins), Num(r.WinPct), Num(r.FuturesPoints), Num(r.TotalR), Num(r.Trades),
+                Num(r.LiveTrades), Num(r.OpenTrades), Num(r.OptionPoints), Num(r.GrossRupees), Num(r.Charges), Num(r.NetRupees), Num(r.NetPerLot),
+                Num(r.AdaptiveSignals), Num(r.AdaptiveFuturesPoints), Num(r.AdaptiveTrades), Num(r.AdaptiveOptionPoints), Num(r.AdaptiveNetRupees),
+                Num(r.AdaptiveNetPerLot), Num(r.NonAdaptiveTrades), Num(r.NonAdaptiveOptionPoints), Num(r.NonAdaptiveNetRupees), Num(r.NonAdaptiveNetPerLot),
+                Num(r.UntaggedTrades),
+            }.Select(Escape))).Append('\n');
+        return sb.ToString();
     }
 
     /// <summary>A file as it is now ('signals' / 'trades'; only the header before anything is stored), or null.</summary>
@@ -210,6 +340,18 @@ public sealed class ScannerLogStore
 }
 
 /// <summary>One day's scanner record from the browser (times are epoch milliseconds).</summary>
+/// <summary>Totals of the stored signals and trades for one underlying: Scope "day" (one date) or "total"
+/// (every stored day). Futures points = what the closed signals captured on the futures (exit - entry,
+/// reversed for a SHORT); option points = the premium points of the punched option trades (an open trade
+/// at its last posted value); NetPerLot = the P&amp;L after charges of each trade as if done with one lot,
+/// summed. Adaptive* = the same for the trades an adaptive scanner would have taken, NonAdaptive* for the
+/// ones it would have skipped (UntaggedTrades: trades saved with no adaptive call - in neither).</summary>
+public sealed record ScannerSummaryRow(
+    string Scope, string Underlying, string Date, int Signals, int ClosedSignals, int Wins, double? WinPct, double FuturesPoints, double TotalR,
+    int Trades, int LiveTrades, int OpenTrades, double OptionPoints, double GrossRupees, double Charges, double NetRupees, double NetPerLot,
+    int AdaptiveSignals, double AdaptiveFuturesPoints, int AdaptiveTrades, double AdaptiveOptionPoints, double AdaptiveNetRupees,
+    double AdaptiveNetPerLot, int NonAdaptiveTrades, double NonAdaptiveOptionPoints, double NonAdaptiveNetRupees, double NonAdaptiveNetPerLot, int UntaggedTrades);
+
 public sealed record ScannerLogDayRequest(string? Underlying, string? Date, string? Source, List<ScannerSignalRow>? Signals, List<ScannerTradeRow>? Trades);
 
 public sealed record ScannerSignalRow(

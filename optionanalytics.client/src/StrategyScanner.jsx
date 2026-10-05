@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Alert, Button, Card, Checkbox, Col, InputNumber, Modal, Popconfirm, Progress, Row, Segmented, Select, Space, Switch, Table, Tag, Tooltip, Typography, notification } from 'antd'
+import { Alert, Button, Card, Checkbox, Col, InputNumber, Modal, Popconfirm, Popover, Progress, Row, Segmented, Select, Space, Switch, Table, Tag, Tooltip, Typography, notification } from 'antd'
 import { SettingOutlined, SoundOutlined } from '@ant-design/icons'
 import { UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import { PAPER_TRADE_LOT_SIZE } from './oiShared.jsx'
@@ -9,7 +9,7 @@ import { notifyLiveTradeEvents, notifyTrade } from './tradeNotify.js'
 import { loadTradeLevels, saveTradeLevels } from './tradeDefaults.js'
 import { suddenWallText } from './suddenOi.js'
 import { adaptiveStats } from './dayRegime.js'
-import { chargeRates, chargesSummary, tradeCharges } from './tradeCharges.js'
+import { chargeRates, tradeCharges } from './tradeCharges.js'
 import {
   ACTIVE_STRATEGIES, STRATEGY_BY_ID, evaluateStrategies, simulateOutcome, strategyStats, topFifteen, MIN_TRADES_TO_RANK, oiSummary, optionOiText,
   DEFAULT_TRAIL, LAST_ENTRY, SQUARE_OFF, fmtHm, exitLabel, premiumAt, optionPnlPoints, optionTradeText, squareOffMs, optionStopTargetHit, RANGE_IDS, asReplayContext,
@@ -100,6 +100,9 @@ const trailFor = (cfg, underlying) => {
     ...(cfg.trail?.runner ? { runner: true } : {}),
   }
 }
+// The totals per underlying from the server's CSV files (every saved day, every device) - GET /api/scanner-log/summary.
+const loadSummary = (set) => fetch('/api/scanner-log/summary').then((r) => (r.ok ? r.json() : null)).then((j) => { if (j?.totals) set(j.totals) }).catch(() => { /* shown when it loads */ })
+const ptsText = (v) => `${v >= 0 ? '+' : ''}${(v ?? 0).toFixed(1)} pts`
 const trailText = (trail) => (trail
   ? `trailing SL: after +${trail.unit === 'pts' ? `${trail.startPts} pts` : `${trail.startR}R`} the stop follows ${trail.unit === 'pts' ? `${trail.gapPts} pts` : `${trail.gapR}R`} behind the best price${trail.runner ? ' - letting it run (no fixed target / time stop, out on the trail or at 15:10)' : ''}`
   : 'fixed SL')
@@ -677,15 +680,10 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   useEffect(() => { paperRowsRef.current = paperRows }, [paperRows])
   const paperTotal = paperRows.reduce((sum, r) => sum + (r.rupees ?? 0), 0)
   // The same trades as an adaptive scanner would have punched them (tracking only).
-  const adaptiveRows = paperRows.filter((r) => r.adaptive?.take)
-  const adaptiveTotal = adaptiveRows.reduce((sum, r) => sum + (r.rupees ?? 0), 0)
-  const untaggedTrades = paperRows.filter((r) => !r.adaptive).length
   // Costs: STT on the sell leg, brokerage per order, other per trade (tradeCharges.js) - net P&L, net per
   // lot and the points captured, for every trade and for the ones adaptive would have taken.
   const rates = chargeRates(settings.charges)
   const costsOf = (r) => tradeCharges(r, rates)
-  const allCosts = chargesSummary(paperRows, rates)
-  const adaptiveCosts = chargesSummary(adaptiveRows, rates)
   const setRate = (key, v) => setSettings((x) => ({ ...x, charges: { ...chargeRates(x.charges), [key]: v } }))
   const rupee = (v) => `${v < 0 ? '-' : ''}₹${Math.abs(Math.round(v)).toLocaleString('en-IN')}`
   const liveRows = paperRows.filter((r) => r.live)
@@ -697,6 +695,8 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   // replay clock part-way through a day is not posted). Sent a few seconds after a signal appears or a
   // signal / trade closes - not on every tick of an open trade - and resent after a failure.
   const scannerLogRef = useRef({ sent: '', timer: null, latest: null })
+  const [savedTotals, setSavedTotals] = useState(null)
+  useEffect(() => { loadSummary(setSavedTotals) }, [])
   useEffect(() => {
     if (!date || !underlying) return
     if (isReplay && !history[dayKey]?.scanned) return
@@ -734,7 +734,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       st.timer = null
       const { sig: s2, body } = st.latest
       fetch('/api/scanner-log/day', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-        .then((res) => { if (res.ok) st.sent = s2 })
+        .then((res) => { if (res.ok) { st.sent = s2; loadSummary(setSavedTotals) } })
         .catch(() => { /* retried on the next change */ })
     }, 3000)
   }, [date, underlying, dayKey, isReplay, history, dayResults, paperRows])
@@ -1149,35 +1149,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                   </Space>
                 </Tooltip>
                 <Text type="secondary" style={{ fontSize: 11 }}>premium pts (0 = off) · lots size every paper trade of the day (live trades keep theirs); a SL / target change applies to open trades, closed ones keep theirs</Text>
-                <Tooltip title="Charges on every trade (paper and live): STT % of the SELL side's premium value (the entry of a sold option, the exit of a bought one), brokerage per order (one to open + one to close) and a flat amount per trade for the rest (exchange, SEBI, stamp, GST). Net P&L = gross - all of them.">
-                  <Space size={4} aria-label="Charges">
-                    <Text style={{ fontSize: 12 }}>STT</Text>
-                    <InputNumber size="small" min={0} max={5} step={0.01} style={{ width: 66 }} value={rates.sttPct} aria-label="STT percent" onChange={(v) => v != null && setRate('sttPct', v)} />
-                    <Text style={{ fontSize: 12 }}>% · brokerage ₹</Text>
-                    <InputNumber size="small" min={0} max={500} step={1} style={{ width: 60 }} value={rates.brokeragePerOrder} aria-label="Brokerage per order" onChange={(v) => v != null && setRate('brokeragePerOrder', v)} />
-                    <Text style={{ fontSize: 12 }}>/order · other ₹</Text>
-                    <InputNumber size="small" min={0} max={500} step={1} style={{ width: 60 }} value={rates.otherPerTrade} aria-label="Other charges per trade" onChange={(v) => v != null && setRate('otherPerTrade', v)} />
-                    <Text style={{ fontSize: 12 }}>/trade</Text>
-                  </Space>
-                </Tooltip>
                 {paperRows.length > 0 && <Text strong style={{ fontSize: 12, color: paperTotal >= 0 ? UP_COLOR : DOWN_COLOR }}>P&amp;L ₹{Math.round(paperTotal).toLocaleString('en-IN')}</Text>}
-                {allCosts.trades > 0 && (
-                  <Tooltip title={`${allCosts.trades} trade(s) with a price: gross ${rupee(allCosts.gross)} - STT ${rupee(allCosts.stt)} - brokerage ${rupee(allCosts.brokerage)} - other ${rupee(allCosts.other)} = net ${rupee(allCosts.net)}. Per lot: each trade as if done with 1 lot, summed. Points: premium points captured, summed over the trades.`}>
-                    <Text style={{ fontSize: 12 }} aria-label="Net P&L">
-                      Net <b style={{ color: allCosts.net >= 0 ? UP_COLOR : DOWN_COLOR }}>{rupee(allCosts.net)}</b> (charges {rupee(allCosts.charges)})
-                      {' '}· per lot <b style={{ color: allCosts.netPerLot >= 0 ? UP_COLOR : DOWN_COLOR }}>{rupee(allCosts.netPerLot)}</b>
-                      {' '}· {allCosts.points >= 0 ? '+' : ''}{allCosts.points.toFixed(1)} pts
-                    </Text>
-                  </Tooltip>
-                )}
-                {paperRows.length > 0 && (
-                  <Tooltip title={`The trades an adaptive scanner would have punched - its day type at each signal (tracking only: every trade above was punched).${untaggedTrades ? ` ${untaggedTrades} trade(s) have no day type and are left out.` : ''}`}>
-                    <Text style={{ fontSize: 12 }} aria-label="Adaptive P&L">
-                      Adaptive: {adaptiveRows.length} trade{adaptiveRows.length === 1 ? '' : 's'} · <span style={{ color: adaptiveTotal >= 0 ? UP_COLOR : DOWN_COLOR }}>₹{Math.round(adaptiveTotal).toLocaleString('en-IN')}</span>
-                      {adaptiveCosts.trades > 0 && <> · net <span style={{ color: adaptiveCosts.net >= 0 ? UP_COLOR : DOWN_COLOR }}>{rupee(adaptiveCosts.net)}</span> · per lot {rupee(adaptiveCosts.netPerLot)} · {adaptiveCosts.points >= 0 ? '+' : ''}{adaptiveCosts.points.toFixed(1)} pts</>}
-                    </Text>
-                  </Tooltip>
-                )}
                 {paperRows.some((r) => !r.live) && (
                   <Popconfirm title="Clear this day's paper trades? (Live trades stay.)" onConfirm={() => setPaperBook((prev) => {
                     const day = prev[dayKey]
@@ -1248,7 +1220,6 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                         <Tooltip title={c ? `${r.lots} lot(s) × ${r.lotSize}: gross ${rupee(c.gross)} - STT ${rupee(c.stt)} - brokerage ${rupee(c.brokerage)} - other ${rupee(c.other)} = net ${rupee(c.net)} (1 lot: ${rupee(c.netPerLot)})${r.exitTime ? '' : ' - open: at the current premium'}` : 'No premium yet'}>
                           <Text style={{ fontSize: 12, color: (r.points ?? 0) >= 0 ? UP_COLOR : DOWN_COLOR, minWidth: 90, textAlign: 'right' }}>
                             {r.points == null ? '-' : `${r.points >= 0 ? '+' : ''}${r.points.toFixed(1)} · ₹${Math.round(r.rupees).toLocaleString('en-IN')}`}
-                            {c && <span style={{ display: 'block', fontSize: 11, color: c.net >= 0 ? UP_COLOR : DOWN_COLOR }}>net {rupee(c.net)}</span>}
                           </Text>
                         </Tooltip>
                       )
@@ -1273,8 +1244,70 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
           <Table size="small" pagination={false} columns={statColumns} dataSource={statRows} scroll={{ x: 560 }} />
           <Text type="secondary" style={{ fontSize: 11 }} aria-label="Saved data">
             Every signal (with its day type and adaptive call) and every option trade is saved on the server, every day in one file each:
-            {' '}<a href="/api/scanner-log/signals" download>signals.csv</a> · <a href="/api/scanner-log/trades" download>trades.csv</a>.
+            {' '}<a href="/api/scanner-log/signals" download>signals.csv</a> · <a href="/api/scanner-log/trades" download>trades.csv</a>
+            {' '}· totals per underlying: <a href="/api/scanner-log/summary/csv" download>summary.csv</a>.
           </Text>
+          <div aria-label="Points captured" style={{ fontSize: 12, margin: '6px 0' }}>
+            <Space wrap size={6} style={{ marginBottom: 2 }}>
+              <Text strong style={{ fontSize: 12 }}>Total P&amp;L per lot, every saved day</Text>
+              <Popover trigger="click" placement="bottomLeft" title="Charges taken off every trade"
+                content={(
+                  <Space direction="vertical" size={6} style={{ fontSize: 12 }}>
+                    <span>STT <InputNumber size="small" min={0} max={5} step={0.01} style={{ width: 70 }} value={rates.sttPct} aria-label="STT percent" onChange={(v) => v != null && setRate('sttPct', v)} /> % of the SELL side's premium value</span>
+                    <span>Brokerage ₹ <InputNumber size="small" min={0} max={500} step={1} style={{ width: 64 }} value={rates.brokeragePerOrder} aria-label="Brokerage per order" onChange={(v) => v != null && setRate('brokeragePerOrder', v)} /> per order (open + close)</span>
+                    <span>Other ₹ <InputNumber size="small" min={0} max={500} step={1} style={{ width: 64 }} value={rates.otherPerTrade} aria-label="Other charges per trade" onChange={(v) => v != null && setRate('otherPerTrade', v)} /> per trade</span>
+                    <Text type="secondary" style={{ fontSize: 11 }}>Applies to trades saved from now on; ones already saved keep the charges they were saved with.</Text>
+                  </Space>
+                )}>
+                <Button size="small" icon={<SettingOutlined />} style={{ height: 20, fontSize: 11, padding: '0 6px' }}>Charges</Button>
+              </Popover>
+              <Text type="secondary" style={{ fontSize: 11 }}>after STT {rates.sttPct}% · brokerage ₹{rates.brokeragePerOrder} × 2 · other ₹{rates.otherPerTrade} per trade; per lot = each trade as if done with 1 lot, added up</Text>
+            </Space>
+            {!savedTotals?.length
+              ? <div><Text type="secondary" style={{ fontSize: 12 }}>Nothing saved on the server yet.</Text></div>
+              : savedTotals.map((t) => {
+                const rows = [
+                  { key: 'all', name: 'All trades', n: t.trades, pts: t.optionPoints, perLot: t.netPerLot, net: t.netRupees, strong: true },
+                  { key: 'adaptive', name: 'Adaptive trades', n: t.adaptiveTrades, pts: t.adaptiveOptionPoints, perLot: t.adaptiveNetPerLot, net: t.adaptiveNetRupees },
+                  { key: 'non', name: 'Non-adaptive trades', n: t.nonAdaptiveTrades, pts: t.nonAdaptiveOptionPoints, perLot: t.nonAdaptiveNetPerLot, net: t.nonAdaptiveNetRupees },
+                ]
+                const color = (v) => (v >= 0 ? UP_COLOR : DOWN_COLOR)
+                return (
+                  <div key={t.underlying} style={{ margin: '4px 0 8px' }}>
+                    <b>{t.underlying}</b>
+                    <Text type="secondary" style={{ fontSize: 12 }}> · {t.signals} signal{t.signals === 1 ? '' : 's'} ({t.closedSignals} closed{t.winPct != null ? `, ${Math.round(t.winPct)}% won` : ''}) · futures </Text>
+                    <b style={{ color: color(t.futuresPoints) }}>{ptsText(t.futuresPoints)}</b><Text type="secondary" style={{ fontSize: 12 }}> ({fmtR(t.totalR)})</Text>
+                    <div style={{ overflowX: 'auto', maxWidth: '100%' }}>
+                    <table style={{ borderCollapse: 'collapse', marginTop: 2 }}>
+                      <thead>
+                        <tr style={{ textAlign: 'right', fontWeight: 500 }}>
+                          <th style={{ textAlign: 'left', fontWeight: 500, paddingRight: 14 }} />
+                          <th style={{ fontWeight: 500, padding: '0 10px' }}>Trades</th><th style={{ fontWeight: 500, padding: '0 10px' }}>Points captured</th>
+                          <th style={{ fontWeight: 500, padding: '0 10px' }}>P&amp;L per lot</th><th style={{ fontWeight: 500, padding: '0 10px' }}>P&amp;L (all lots)</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {rows.map((r) => (
+                          <tr key={r.key} style={{ textAlign: 'right' }}>
+                            <td style={{ textAlign: 'left', paddingRight: 14, whiteSpace: 'nowrap' }}>{r.strong ? <b>{r.name}</b> : r.name}</td>
+                            <td style={{ padding: '0 10px' }}>{r.n}</td>
+                            <td style={{ padding: '0 10px', color: r.n ? color(r.pts) : undefined }}>{r.n ? ptsText(r.pts) : '-'}</td>
+                            <td style={{ padding: '0 10px', color: r.n ? color(r.perLot) : undefined }}>{r.n ? <b>{rupee(r.perLot)}</b> : '-'}</td>
+                            <td style={{ padding: '0 10px', color: r.n ? color(r.net) : undefined }}>{r.n ? rupee(r.net) : '-'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    </div>
+                    {(t.openTrades > 0 || t.untaggedTrades > 0) && (
+                      <Text type="secondary" style={{ fontSize: 11 }}>
+                        {t.openTrades > 0 ? `${t.openTrades} trade(s) still open, counted at their last value. ` : ''}{t.untaggedTrades > 0 ? `${t.untaggedTrades} trade(s) were saved with no adaptive call: in All only.` : ''}
+                      </Text>
+                    )}
+                  </div>
+                )
+              })}
+          </div>
           {filterFor && (
             <StrategyFiltersModal id={filterFor} values={settings.filters?.[filterFor]} onClose={() => setFilterFor(null)}
               onSave={(v) => { setSettings((s) => ({ ...s, filters: { ...s.filters, [filterFor]: v } })); setFilterFor(null) }} />

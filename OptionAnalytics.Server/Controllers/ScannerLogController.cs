@@ -27,6 +27,22 @@ public sealed class ScannerLogController : ControllerBase
         return error is null ? Ok(new { signals, trades }) : BadRequest(new { error });
     }
 
+    /// <summary>GET /api/scanner-log/summary - the totals per underlying (NIFTY, BANKNIFTY ...): how many
+    /// signals and trades, the futures points and option premium points captured, the P&amp;L net of
+    /// charges - for each stored day and in total - as JSON (totals / days).</summary>
+    [HttpGet("summary")]
+    public async Task<IActionResult> Summary(CancellationToken cancellationToken)
+    {
+        var rows = await _store.SummaryAsync(cancellationToken);
+        return Ok(new { totals = rows.Where(r => r.Scope == "total"), days = rows.Where(r => r.Scope == "day") });
+    }
+
+    /// <summary>GET /api/scanner-log/summary/csv - the same totals as a CSV: a row per underlying and day,
+    /// then that underlying's TOTAL row.</summary>
+    [HttpGet("summary/csv")]
+    public async Task<IActionResult> SummaryCsv(CancellationToken cancellationToken) =>
+        File(Encoding.UTF8.GetBytes(ScannerLogStore.SummaryCsv(await _store.SummaryAsync(cancellationToken))), "text/csv", "summary.csv");
+
     /// <summary>GET /api/scanner-log/signals or /api/scanner-log/trades - that whole file (every underlying,
     /// every day).</summary>
     [HttpGet("{kind}")]
