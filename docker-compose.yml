@@ -26,7 +26,7 @@ services:
       # Same idea for the rolling-option (CE/PE premium) prefetch's own per-expiry CSVs - see
       # ExpiredOptionDataPrefetchHostedService.
       Storage__ExpiredOptionDataPath: /app/data/expired-option-data
-      # The strategy scanner's record - one CSV file, scanner-log.csv (ScannerLogStore).
+      # The strategy scanner's record - signals.csv and trades.csv (ScannerLogStore).
       Storage__ScannerLogPath: /app/data/scanner-log
       # Keeps the login cookie's signing/encryption key ring on the same persistent volume, so
       # everyone stays logged in across a redeploy instead of the whole key ring (and every
