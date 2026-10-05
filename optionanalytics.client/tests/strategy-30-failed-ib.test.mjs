@@ -73,6 +73,8 @@ console.log('   ', L.s?.checks.Profile, '|', L.s?.checks.Trapped, '|', L.s?.chec
 const S = scenario(-1)
 check('SHORT (the mirror): broke over the IB high, a tail, back inside, call writers defend - target the IB low', S.s?.side === 'SHORT' && S.s.stop > 2 * C - 22630 && Math.abs(S.s.target - 22650) < 0.01
   && /call writers defend/.test(S.s.checks.OI), show(S))
+check('every setup carries the day type and the adaptive what-if (tracking only - it fires either way)', !!L.s?.regime?.type && typeof L.s.adaptive?.take === 'boolean' && /tracking only/.test(L.s.checks['Day type']), JSON.stringify(L.s?.checks['Day type']))
+console.log('   ', L.s?.checks['Day type'])
 check('fires on an estimated day too (the tail is in the candles)', scenario(1, { estimated: true }).s?.side === 'LONG')
 check('a sweep counts as trapped traders without a tail', scenario(1, { noTail: true, sweep: true }).s?.side === 'LONG' && scenario(-1, { noTail: true, sweep: true }).s?.side === 'SHORT')
 check('not without a tail, sweep or big prints (nobody trapped)', !scenario(1, { noTail: true }).s && !scenario(-1, { noTail: true }).s)

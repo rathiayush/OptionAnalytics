@@ -26,6 +26,7 @@
 import { findSuddenWalls, suddenWallText } from './suddenOi.js'
 import { liquidityMap } from './orderFlowMath.js'
 import { optionTrailLevel, tighterStop } from './optionTrail.js'
+import { adaptiveDecision, dayRegime } from './dayRegime.js'
 
 const MIN = 60_000
 /** The strategies that wait for a fast run to cool off before entering (coolOffGate) - the ones that
@@ -2058,7 +2059,18 @@ export function evaluateStrategies(input) {
   }
 
   // Retired strategies are not traded (input.includeRetired: the tests, which still exercise their rules).
-  return resolveConflicts(input.includeRetired ? out : out.filter((s) => !STRATEGY_BY_ID[s.id]?.retired))
+  const final = resolveConflicts(input.includeRetired ? out : out.filter((s) => !STRATEGY_BY_ID[s.id]?.retired))
+  if (!final.length) return final
+  // The day type at the clock and what an adaptive scanner would do with each setup - TRACKING ONLY:
+  // every setup still fires; this is scored beside the real results (adaptiveStats).
+  const regime = dayRegime(minuteBars, nowMs, sessionOpen)
+  return final.map((s) => {
+    const adaptive = adaptiveDecision(s, regime)
+    return {
+      ...s, regime: { type: regime.type, label: regime.label }, adaptive,
+      checks: { ...s.checks, 'Day type': `${regime.label} - ${regime.reasons}. Adaptive would ${adaptive.take ? 'TAKE' : 'SKIP'} it (${adaptive.reason}) - tracking only, it fires either way` },
+    }
+  })
 }
 
 /** A long and a short at the same moment: when their best confidences are within CONFLICT_GAP points of
