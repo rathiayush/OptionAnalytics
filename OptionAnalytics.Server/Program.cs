@@ -273,6 +273,8 @@ builder.Services.AddHostedService<StrategyTriggerHostedService>();
 // a position changed (fill, target/stop-loss hit) without polling Dhan's REST API.
 builder.Services.AddSingleton<DhanOrderUpdateFeed>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<DhanOrderUpdateFeed>());
+// The live trades the server closes itself at a set time (the scanner's time stop / 15:10), kept on disk.
+builder.Services.AddSingleton<LiveTimeExitStore>();
 builder.Services.AddSingleton<LiveTradingService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<LiveTradingService>());
 

@@ -205,6 +205,9 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
         underlying, expiry: oi.expiry, strike: trade.strike, side: trade.side, direction: trade.action, lots,
         slippagePoints: cfg.liveSlippage ?? 2, stopLossPoints: cfg.paperSl, targetPoints: cfg.paperTarget,
         trailStartPoints: cfg.paperTrailGap > 0 ? cfg.paperTrailStart ?? 0 : 0, trailGapPoints: cfg.paperTrailGap ?? 0,
+        // The server closes it itself at the setup's time stop (15:10 at the latest) - even with this page
+        // closed; the page's own exits (stop, target, trailing SL) still close it sooner when they come.
+        exitAtMs: Math.min(setup.timeStopMs ?? squareOffMs(setup.t), squareOffMs(setup.t)), exitReason: `time stop of #${STRATEGY_BY_ID[setup.id]?.no} ${STRATEGY_BY_ID[setup.id]?.short ?? setup.id}`,
       })
       const position = record(result)
       notifyTrade({ kind: 'entry', title: `LIVE ${trade.action} ${trade.strike} ${trade.side} x${lots} placed on Dhan`, text: result.message, sound: cfg.sound !== false })
