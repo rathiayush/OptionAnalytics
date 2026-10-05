@@ -103,6 +103,55 @@ export const DEFAULT_TOP5 = ['wallDefence', 'wallBreak', 'buildUp', 'openingBias
 export const DEFAULT_PROFILE_TOP5 = ['vaRejection', 'tpo80', 'pocReaction', 'lvnRun', 'ibBreakout']
 export const RANGE_IDS = ACTIVE_STRATEGIES.filter((s) => s.group === 'range').map((s) => s.id)
 
+// ---- per-strategy filters ----------------------------------------------------------------------------
+/**
+ * The filters the trader can tune per strategy (the scanner's Filters button). Each: key, label, type
+ * ('number' | 'switch'), the default - the rule as written and tested, so an untouched strategy behaves
+ * exactly as before - and for numbers min / max / step. More strategies get here by listing their
+ * filters and reading them through strategyFilters() in their block.
+ */
+export const STRATEGY_FILTERS = {
+  ibBreakout: [
+    { key: 'closesBeyond', label: 'Closes in a row beyond the IB to accept the break', type: 'number', default: 2, min: 1, max: 5, step: 1 },
+    { key: 'firstBreakOnly', label: 'First accepted break of each side per day only', type: 'switch', default: true },
+    { key: 'breakVolumeX', label: 'Break bar volume at least x the IB\'s average minute (0 = off)', type: 'number', default: 1.5, min: 0, max: 5, step: 0.1 },
+    { key: 'minWriting', label: 'Option writers\' lean (whole chain, last hour) at least', type: 'number', default: 0.15, min: 0, max: 1, step: 0.05 },
+    { key: 'skipWideIb', label: 'Skip when the IB is as wide as yesterday\'s range', type: 'switch', default: true },
+    { key: 'needFootprint', label: 'Last bar\'s delta with the break', type: 'switch', default: true },
+    { key: 'needTape', label: 'Tape with the break (sweep or 1-min aggression 60%+)', type: 'switch', default: true },
+    { key: 'targetIb', label: 'Target (x the IB range)', type: 'number', default: 1, min: 0.5, max: 3, step: 0.25 },
+    { key: 'timeStopMin', label: 'Time stop (minutes)', type: 'number', default: 90, min: 10, max: 240, step: 5 },
+  ],
+  vwapOi: [
+    { key: 'heldPct', label: 'Of the last 30 closes on the trend side of VWAP (%)', type: 'number', default: 75, min: 50, max: 100, step: 5 },
+    { key: 'slopePct', label: 'VWAP slope in 30 min at least (%)', type: 'number', default: 0.03, min: 0, max: 0.3, step: 0.01 },
+    { key: 'tagPct', label: 'Pullback reaches within (%) of VWAP', type: 'number', default: 0.05, min: 0.01, max: 0.3, step: 0.01 },
+    { key: 'needWriters', label: 'Option writers back it', type: 'switch', default: true },
+    { key: 'needFuturesBuild', label: 'Futures build-up since the open (price and OI with it)', type: 'switch', default: true },
+    { key: 'needFuturesHolding', label: 'Futures OI not falling in the last 15 min', type: 'switch', default: true },
+    { key: 'needDelta', label: 'Last bar\'s delta with the trade', type: 'switch', default: true },
+    { key: 'targetR', label: 'Target (R)', type: 'number', default: 2, min: 1, max: 5, step: 0.5 },
+    { key: 'maxR', label: 'Stretch toward the day\'s high / low up to (R)', type: 'number', default: 3, min: 1, max: 6, step: 0.5 },
+    { key: 'timeStopMin', label: 'Time stop (minutes)', type: 'number', default: 60, min: 10, max: 240, step: 5 },
+  ],
+}
+/** A strategy's filter values: its defaults with the trader's `overrides` on top - numbers clamped to
+ *  their range, wrong types and unknown keys ignored. */
+export function strategyFilters(id, overrides) {
+  const out = {}
+  for (const f of STRATEGY_FILTERS[id] ?? []) {
+    const v = overrides?.[f.key]
+    if (f.type === 'switch') out[f.key] = typeof v === 'boolean' ? v : f.default
+    else out[f.key] = Number.isFinite(v) ? Math.min(f.max, Math.max(f.min, v)) : f.default
+  }
+  return out
+}
+/** The filters of `id` the trader changed from the defaults (for an "edited" mark). */
+export function changedFilters(id, overrides) {
+  const v = strategyFilters(id, overrides)
+  return (STRATEGY_FILTERS[id] ?? []).filter((f) => v[f.key] !== f.default)
+}
+
 // ---- OI context -----------------------------------------------------------------------------------
 
 function sortedSeries(points, lag = 0) {
@@ -654,7 +703,8 @@ const recent = (items, ms, within, timeOf) => items.filter((x) => { const t = ti
  * Every strategy whose checklist passes at `nowMs`. Input:
  *   nowMs, price (futures last), bars (1-minute analyzed bars, completed only), minuteBars (raw, up to now),
  *   prints (tape, oldest first, or null), book, liquidity, pullStack (signals), sweeps, icebergs,
- *   oi (buildOiContext), estimated, lotSize, bigLots; heatmap (book snapshots up to nowMs) and rowSize for #26.
+ *   oi (buildOiContext), estimated, lotSize, bigLots; heatmap (book snapshots up to nowMs) and rowSize for #26;
+ *   filters - { [strategy id]: the trader's filter overrides } (STRATEGY_FILTERS; missing = the defaults).
  * Returns setups: { id, name, side, t, entry, stop, target, timeStopMs, confidence, checks: { OI, Footprint, Tape, DOM, Heatmap } }.
  */
 export function evaluateStrategies(input) {
@@ -1175,7 +1225,9 @@ export function evaluateStrategies(input) {
   //     a one-bar poke that closes back inside is the classic trap), only the FIRST accepted break of that
   //     side in the day is taken (a second one comes after a failed breakout), and the break bar must trade
   //     at least 1.5x the IB's average minute volume (real exchange volume, also on estimated days).
+  //     Every threshold here is a filter the trader can tune (STRATEGY_FILTERS.ibBreakout).
   if (minute >= hm(10, 15) && minute <= hm(13, 30)) {
+    const f = strategyFilters('ibBreakout', input.filters?.ibBreakout)
     const dayOpenMs = nowMs - (minute - hm(9, 15)) * MIN
     const ibBars = minuteBars.filter((b) => msOf(b.time) >= dayOpenMs && msOf(b.time) < dayOpenMs + 60 * MIN)
     if (ibBars.length >= 45) {
@@ -1189,29 +1241,33 @@ export function evaluateStrategies(input) {
       const ibEndMs = dayOpenMs + 60 * MIN
       const ibVols = bars.filter((b) => msOf(b.time) >= dayOpenMs && msOf(b.time) < ibEndMs).map(volOf)
       const ibAvgVol = ibVols.length ? ibVols.reduce((a, v) => a + v, 0) / ibVols.length : 0
-      const before = bars.at(-3)
-      const afterIb = bars.slice(0, -2).filter((b) => msOf(b.time) >= ibEndMs)
+      const n = f.closesBeyond
+      const run = bars.slice(-n)
+      const before = bars.at(-n - 1)
+      const breakBar = run[0]
+      const afterIb = bars.slice(0, -n).filter((b) => msOf(b.time) >= ibEndMs)
       for (const dir of [1, -1]) {
         const edge = dir > 0 ? ibHigh : ibLow
         const beyond = (b) => dir * (b.close - edge) > 0
-        // The break (prev) and its acceptance (last): two closes beyond, the bar before them inside.
-        const broke = prev && before && beyond(last) && beyond(prev) && !beyond(before)
-        if (!broke || dir * writing < 0.15 || range <= 0) continue
-        if (afterIb.some((b, i) => i > 0 && beyond(b) && beyond(afterIb[i - 1]))) continue // not the first break
-        const breakVol = volOf(prev)
-        if (!(ibAvgVol > 0) || breakVol < 1.5 * ibAvgVol) continue
+        // The break (the first of the last n bars) and its acceptance: n closes beyond, the bar before inside.
+        const broke = run.length === n && before && run.every(beyond) && !beyond(before)
+        if (!broke || dir * writing < f.minWriting || range <= 0) continue
+        // Not the first break: n closes in a row beyond that edge earlier in the day.
+        if (f.firstBreakOnly && afterIb.some((b, i) => i >= n - 1 && afterIb.slice(i - n + 1, i + 1).every(beyond))) continue
+        const breakVol = volOf(breakBar)
+        if (f.breakVolumeX > 0 && (!(ibAvgVol > 0) || breakVol < f.breakVolumeX * ibAvgVol)) continue
         const prevRange = prof?.prevHigh > 0 && prof?.prevLow > 0 ? prof.prevHigh - prof.prevLow : null
-        if (prevRange && range >= prevRange) continue
+        if (f.skipWideIb && prevRange && range >= prevRange) continue
         const narrow = prevRange != null && range <= 0.4 * prevRange
-        const footprint = dir * last.delta > 0
-        const tapeOk = sweepWith(dir) || aggWith(dir, 60)
+        const footprint = !f.needFootprint || dir * last.delta > 0
+        const tapeOk = !f.needTape || sweepWith(dir) || aggWith(dir, 60)
         const c = confirm(dir)
         if (!footprint || !tapeOk || !c.ok) continue
         const stopPts = Math.max(pct(0.001), Math.min(range / 2, pct(0.004)))
-        push('ibBreakout', dir, stopPts, Math.max(range, 1.5 * stopPts), 90, 61 + (sweepWith(dir) ? 8 : 0) + (narrow ? 6 : 0), {
+        push('ibBreakout', dir, stopPts, Math.max(f.targetIb * range, 1.5 * stopPts), f.timeStopMin, 61 + (sweepWith(dir) ? 8 : 0) + (narrow ? 6 : 0), {
           OI: `${dir > 0 ? 'put' : 'call'} writing leads across the chain over the last hour - ${optionOiText(read60)}`,
-          Profile: `initial balance ${ibLow}-${ibHigh} (range ${range.toFixed(1)}${prevRange ? `, ${Math.round((range / prevRange) * 100)}% of yesterday's range${narrow ? ' - narrow' : ''}` : ''}), target one range beyond`,
-          Footprint: `2 closes beyond the IB (first break of the day), break bar ${(breakVol / ibAvgVol).toFixed(1)}x the IB's average volume, Δ ${last.delta}`, Tape: `${sweepWith(dir) ? 'sweep · ' : ''}${tapeText}`, DOM: c.dom, Heatmap: c.heat,
+          Profile: `initial balance ${ibLow}-${ibHigh} (range ${range.toFixed(1)}${prevRange ? `, ${Math.round((range / prevRange) * 100)}% of yesterday's range${narrow ? ' - narrow' : ''}` : ''}), target ${f.targetIb === 1 ? 'one range' : `${f.targetIb}x the range`} beyond`,
+          Footprint: `${n} close${n > 1 ? 's' : ''} beyond the IB${f.firstBreakOnly ? ' (first break of the day)' : ''}, break bar ${ibAvgVol > 0 ? (breakVol / ibAvgVol).toFixed(1) : '-'}x the IB's average volume, Δ ${last.delta}`, Tape: `${sweepWith(dir) ? 'sweep · ' : ''}${tapeText}`, DOM: c.dom, Heatmap: c.heat,
         })
       }
     }
@@ -1798,16 +1854,18 @@ export function evaluateStrategies(input) {
   //       Futures  - a long build-up since the open (price up, OI up), the OI not falling in the last 15m.
   //     Order flow: delta with it, nothing stacked or swept against it. Stop beyond the pullback; target
   //     2R, out to the day's high if that is further (max 3R). #27 is the same trade with a heatmap wall.
+  //     Every threshold here is a filter the trader can tune (STRATEGY_FILTERS.vwapOi).
   if (vwap != null && minute >= hm(10, 0) && minute <= hm(14, 30) && bars.length >= 30) {
+    const f = strategyFilters('vwapOi', input.filters?.vwapOi)
     const vwapThen = vwapOf(minuteBars, nowMs - 30 * MIN)
     const session = minuteBars.filter((b) => msOf(b.time) >= sessionOpen && msOf(b.time) + MIN <= nowMs)
     const fOpen = futuresSince(oi, nowMs, dayOpenMs(oi, nowMs))
     for (const dir of [1, -1]) {
-      if (vwapThen == null || !(dir * (vwap - vwapThen) >= pct(0.0003)) || !session.length) continue
+      if (vwapThen == null || !(dir * (vwap - vwapThen) >= pct(f.slopePct / 100)) || !session.length) continue
       const last30 = bars.slice(-30)
       const held = last30.filter((b) => dir * (b.close - vwapOf(minuteBars, msOf(b.time))) > 0).length
-      if (held < 0.75 * last30.length) continue
-      const tagged = last3.some((b) => (dir > 0 ? b.low <= vwap + pct(0.0005) : b.high >= vwap - pct(0.0005)))
+      if (held < (f.heldPct / 100) * last30.length) continue
+      const tagged = last3.some((b) => (dir > 0 ? b.low <= vwap + pct(f.tagPct / 100) : b.high >= vwap - pct(f.tagPct / 100)))
       const brokeThrough = bars.slice(-5).some((b) => dir * (b.close - vwap) < -pct(0.0005))
       const turning = dir * (last.close - vwap) > 0 && dir * (last.close - last.open) > 0
       if (!tagged || brokeThrough || !turning) continue
@@ -1815,20 +1873,20 @@ export function evaluateStrategies(input) {
       const stance = optionOiStance(optionRead, dir)
       const futuresBuild = fOpen?.oiPct != null && dir * fOpen.pricePct > 0 && fOpen.oiPct > 0
       const futuresHolding = futuresRead?.oiPct == null || futuresRead.oiPct >= 0
-      if (stance !== 'agrees' || !futuresBuild || !futuresHolding) continue
-      const flowOk = dir * last.delta > 0 && !stackAgainst(dir, 2) && !sweepWith(-dir)
+      if ((f.needWriters && stance !== 'agrees') || (f.needFuturesBuild && !futuresBuild) || (f.needFuturesHolding && !futuresHolding)) continue
+      const flowOk = (!f.needDelta || dir * last.delta > 0) && !stackAgainst(dir, 2) && !sweepWith(-dir)
       const c = confirm(dir)
       if (!flowOk || !c.ok) continue
       const pullbackExtreme = dir > 0 ? Math.min(...last3.map((b) => b.low)) : Math.max(...last3.map((b) => b.high))
       const stopPts = Math.max(pct(0.001), dir * (price - pullbackExtreme) + pct(0.0005))
       if (stopPts > pct(0.004)) continue
       const dayExtreme = dir > 0 ? Math.max(...session.map((b) => b.high)) : Math.min(...session.map((b) => b.low))
-      const targetPts = Math.max(2 * stopPts, Math.min(3 * stopPts, dir * (dayExtreme - price)))
+      const targetPts = Math.max(f.targetR * stopPts, Math.min(Math.max(f.targetR, f.maxR) * stopPts, dir * (dayExtreme - price)))
       const pcrWith = optionRead && (dir > 0 ? optionRead.pcr >= 1 : optionRead.pcr <= 1)
-      push('vwapOi', dir, stopPts, targetPts, 60,
+      push('vwapOi', dir, stopPts, targetPts, f.timeStopMin,
         62 + (futuresRead?.oiPct > 0 ? 4 : 0) + (pcrWith ? 3 : 0) + (stackWith(dir, 3) ? 3 : 0), {
           VWAP: `${held}/${last30.length} closes ${dir > 0 ? 'above' : 'below'} VWAP ${vwap.toFixed(1)} (${dir > 0 ? 'up' : 'down'} ${(Math.abs(vwap - vwapThen) / vwapThen * 100).toFixed(2)}% in 30m); pullback tagged it, no close through - turning`,
-          OI: `option writers back it · futures ${dir > 0 ? 'long' : 'short'} build-up since open (price ${(fOpen.pricePct * 100).toFixed(2)}%, OI +${(fOpen.oiPct * 100).toFixed(2)}%)${optionRead ? ` · PCR ${optionRead.pcr.toFixed(2)}` : ''}`,
+          OI: `option writers ${stance === 'agrees' ? 'back it' : `${stance} (filter off)`} · ${futuresBuild ? `futures ${dir > 0 ? 'long' : 'short'} build-up since open (price ${(fOpen.pricePct * 100).toFixed(2)}%, OI +${(fOpen.oiPct * 100).toFixed(2)}%)` : 'no futures build-up (filter off)'}${optionRead ? ` · PCR ${optionRead.pcr.toFixed(2)}` : ''}`,
           Footprint: `Δ ${last.delta > 0 ? '+' : ''}${last.delta}, nothing stacked or swept against it`, Tape: tapeText, DOM: c.dom, Heatmap: c.heat,
           Plan: `stop beyond the pullback ${pullbackExtreme.toFixed(1)}, target ${(targetPts / stopPts).toFixed(1)}R (day's ${dir > 0 ? 'high' : 'low'} ${dayExtreme.toFixed(1)})`,
         }, { rTarget: true })

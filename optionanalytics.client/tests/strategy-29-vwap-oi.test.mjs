@@ -51,7 +51,7 @@ function scenario(d, o = {}) {
   const buyPct = d > 0 ? 70 : 30
   const prints = Array.from({ length: 50 }, (_, i) => ({ seq: i, time: NOW - 50_000 + i * 1000, price: 1, quantity: 75, buy: ((i * 37) % 100) < buyPct }))
   const setups = evaluateStrategies({ nowMs: NOW, price, bars, minuteBars: bars, prints: o.estimated ? null : prints, book: o.estimated ? null : { bids: [{ quantity: d > 0 ? 600 : 400 }], asks: [{ quantity: d > 0 ? 400 : 600 }] },
-    liquidity: [], pullStack: [], sweeps: [], icebergs: [], oi, estimated: !!o.estimated, lotSize: 75, bigLots: 10, profile: null })
+    liquidity: [], pullStack: [], sweeps: [], icebergs: [], oi, estimated: !!o.estimated, lotSize: 75, bigLots: 10, profile: null, filters: o.filters })
   return { s: setups.find((x) => x.id === 'vwapOi'), all: setups, vwap }
 }
 const show = ({ s, all }) => JSON.stringify(s ? { side: s.side, entry: s.entry, stop: +s.stop.toFixed(1), target: +s.target.toFixed(1), checks: s.checks } : all.map((x) => `${x.id}:${x.side}`))
@@ -74,6 +74,17 @@ check('not after a close through VWAP (the pullback broke it)', !scenario(1, { b
 check('not on a flat day (VWAP not sloping, no trend)', !scenario(1, { flat: true }).s)
 check('not before the last bar turns back with the trend', !scenario(1, { noTurn: true }).s)
 check('not with the delta against it', !scenario(1, { deltaAgainst: true }).s)
+// The trader's filters (STRATEGY_FILTERS.vwapOi) - each requirement switched off lets its case through.
+const vF = (o) => ({ vwapOi: o })
+check('filter: writers off -> fires on the futures build-up alone', scenario(1, { noWriters: true, filters: vF({ needWriters: false }) }).s?.side === 'LONG' && scenario(-1, { noWriters: true, filters: vF({ needWriters: false }) }).s?.side === 'SHORT')
+check('filter: futures build-up off -> fires with the OI down since the open', scenario(1, { oiDownSinceOpen: true, filters: vF({ needFuturesBuild: false }) }).s?.side === 'LONG')
+check('filter: futures OI holding off -> fires with the OI falling in the last 15 min', scenario(1, { oiFallingLately: true, filters: vF({ needFuturesHolding: false }) }).s?.side === 'LONG')
+check('filter: delta off -> fires with the delta against it', scenario(1, { deltaAgainst: true, filters: vF({ needDelta: false }) }).s?.side === 'LONG')
+check('filter: VWAP slope 0.2% -> this trend (0.06%) is too flat', !scenario(1, { filters: vF({ slopePct: 0.2 }) }).s)
+{
+  const r = scenario(1, { filters: vF({ targetR: 1, maxR: 1, timeStopMin: 30 }) }).s
+  check('filter: target 1R (no stretch), 30-min time stop', r && Math.abs((r.target - r.entry) - (r.entry - r.stop)) < 0.01 && r.timeStopMs - r.t === 30 * MIN, show({ s: r, all: [] }))
+}
 {
   const mk = (id, rs) => rs.map((r, i) => ({ id, t: i, outcome: { status: r > 0 ? 'win' : 'loss', r } }))
   const unmeasured = topFifteen(strategyStats([]))

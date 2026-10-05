@@ -59,7 +59,7 @@ function ibCase(dir, o = {}) {
     return { open: p - dir, high: p + 1, low: p - 1, close: p, buy: dir > 0 ? withTrade : 500, sell: dir > 0 ? 500 : withTrade }
   })
   const price = bs.at(-1).close
-  const setups = evaluateStrategies({ nowMs: now, price, bars: bs, minuteBars: bs, prints: tape(now, dir > 0 ? 70 : 30), book: dir > 0 ? { bids: [{ quantity: 600 }], asks: [{ quantity: 400 }] } : { bids: [{ quantity: 400 }], asks: [{ quantity: 600 }] }, liquidity: [], pullStack: [], sweeps: [], icebergs: [], oi, estimated: false, lotSize: 75, bigLots: 10, profile: null })
+  const setups = evaluateStrategies({ nowMs: now, price, bars: bs, minuteBars: bs, prints: tape(now, dir > 0 ? 70 : 30), book: dir > 0 ? { bids: [{ quantity: 600 }], asks: [{ quantity: 400 }] } : { bids: [{ quantity: 400 }], asks: [{ quantity: 600 }] }, liquidity: [], pullStack: [], sweeps: [], icebergs: [], oi, estimated: false, lotSize: 75, bigLots: 10, profile: null, filters: o.filters })
   return { ib: setups.find((s) => s.id === 'ibBreakout'), setups }
 }
 // Call writing for the short: the whole chain's calls written over the last hour.
@@ -88,6 +88,16 @@ function runShort(spot) {
   check('not when an earlier break of that side was accepted and failed', !ibCase(1, { earlier: [70, 71] }).ib && !ibCase(-1, { earlier: [70, 71] }).ib)
   check('...but an earlier one-bar poke does not block it', ibCase(1, { earlier: [70] }).ib?.side === 'LONG')
   check('not when the break bar trades under 1.5x the IB\'s average volume', !ibCase(1, { weak: true }).ib && !ibCase(-1, { weak: true }).ib)
+  // The trader's filters (STRATEGY_FILTERS.ibBreakout) - each one loosened lets its case through.
+  const ibF = (o) => ({ ibBreakout: o })
+  check('filter: 1 close to accept -> the first close beyond fires', ibCase(1, { breakAt: 84, filters: ibF({ closesBeyond: 1 }) }).ib?.side === 'LONG' && ibCase(-1, { breakAt: 84, filters: ibF({ closesBeyond: 1 }) }).ib?.side === 'SHORT')
+  check('filter: 3 closes to accept -> two are not enough', !ibCase(1, { filters: ibF({ closesBeyond: 3 }) }).ib)
+  check('filter: first break only off -> fires after an earlier failed break', ibCase(1, { earlier: [70, 71], filters: ibF({ firstBreakOnly: false }) }).ib?.side === 'LONG')
+  check('filter: volume 0 (off) -> fires on a weak break bar; 1.2x lets a 1.2x bar through', ibCase(1, { weak: true, filters: ibF({ breakVolumeX: 0 }) }).ib?.side === 'LONG' && ibCase(1, { weak: true, filters: ibF({ breakVolumeX: 1.2 }) }).ib?.side === 'LONG')
+  check('filter: volume 2.5x -> the 2x break bar is not enough', !ibCase(1, { filters: ibF({ breakVolumeX: 2.5 }) }).ib)
+  const t2 = ibCase(1, { filters: ibF({ targetIb: 2, timeStopMin: 30 }) }).ib
+  // (This IB is ~4 pts, so the 1.5x-stop floor sets the target here; the plan shows the filter.)
+  check('filter: target 2x the IB range (in the plan), 30-min time stop', t2 && /2x the range beyond/.test(t2.checks.Profile) && t2.target - t2.entry >= L.ib.target - L.ib.entry && t2.timeStopMs - t2.t === 30 * MIN, JSON.stringify(t2?.checks.Profile))
 }
 // VA rejection long at the previous VAL with a put wall there.
 {
