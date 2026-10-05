@@ -1,4 +1,4 @@
-import { Component, useEffect, useMemo, useRef, useState } from 'react'
+import { Component, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import dayjs from 'dayjs'
 import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicker, TimePicker, Alert, Empty, Tooltip, Popconfirm, Slider, Tag, InputNumber, Switch, Table, Segmented, Checkbox, Modal, message } from 'antd'
 import { findSuddenWalls, suddenWallText } from './suddenOi.js'
@@ -14,6 +14,7 @@ import {
   syncSignalRGroups, joinAllSignalRGroups, useCardOrder, CardDragHandle, onLiveBatch, useFeedLag, FeedLagTag, FeedLagAlert, LiveSection, checkForNewDeploy, useAuth,
 } from './shared.jsx'
 import { alignToBars, chartVwap, sessionVwapFromBars } from './chartVwap.js'
+import { notifyLiveTradeEvents, notifyTrade } from './tradeNotify.js'
 import { PremiumEmaChart, DraggableFloatingPanel, useFitContentAsDataGrows, useChartUserControl, CANDLE_SCALE_MARGINS } from './oiShared.jsx'
 import { LivePositionsView, liveTradingApi } from './LiveTrading.jsx'
 import { StrikePicker, moneynessLabel } from './StrikePicker.jsx'
@@ -2520,6 +2521,12 @@ export default function OiReplayPage() {
   const [tradeMode, setTradeMode] = useState('paper')
   const [liveSlippage, setLiveSlippage] = usePersistedState('optionanalytics.oiReplay.liveSlippage', 1)
   const [livePositions, setLivePositions] = useState(null)
+  // Every live positions snapshot (pushed, or read after an action) carries the day's trade events -
+  // entry filled, stop-loss / target hit, exit filled, rejected - each notified once.
+  const applyLivePositions = useCallback((snapshot) => {
+    setLivePositions(snapshot)
+    notifyLiveTradeEvents(snapshot?.events)
+  }, [])
   const [liveBusy, setLiveBusy] = useState(false)
   const liveTradeActive = tradeMode === 'live' && isAdmin
   const liveExtraGroups = useMemo(() => (liveTradeActive ? ['positions'] : []), [liveTradeActive])
@@ -2977,7 +2984,7 @@ export default function OiReplayPage() {
   }, [isLive])
 
   const handleLiveReconnected = () => { if (isLive) load() }
-  const liveConnectionState = useOiReplayLiveFeed(handleSpotUpdate, handleOiReplayTicks, handleFuturesTicks, handleRestSnapshot, handleLiveReconnected, isLive ? feedLag.recordPainted : null, underlying, liveExpiryFlag, liveTradeActive ? setLivePositions : null, liveExtraGroups)
+  const liveConnectionState = useOiReplayLiveFeed(handleSpotUpdate, handleOiReplayTicks, handleFuturesTicks, handleRestSnapshot, handleLiveReconnected, isLive ? feedLag.recordPainted : null, underlying, liveExpiryFlag, liveTradeActive ? applyLivePositions : null, liveExtraGroups)
 
   // A plain tick, unrelated to any live data - exists ONLY so feedStalled below re-evaluates on a
   // real clock instead of purely as a side effect of the next incoming tick (same reasoning as Live
@@ -3307,8 +3314,13 @@ export default function OiReplayPage() {
     return latestAtOrBefore(series ?? [], asOfMs)
   }, [paperSide, paperStrike, ceByStrike, peByStrike, asOfMs])
 
+  // Paper trades are announced like real ones (Telegram only on today's live view, never a replay).
+  const paperTradeText = (p, price) => `${p.direction} ${underlying} ${p.strike} ${p.side} x${p.qtyLots} lot${p.qtyLots === 1 ? '' : 's'} @ ${Number(price).toFixed(1)}`
   const handlePaperPunch = () => {
     if (paperStrike == null || paperEntryPreview?.price == null) return
+    const text = paperTradeText({ direction: paperDirection, strike: paperStrike, side: paperSide, qtyLots: paperQtyLots }, paperEntryPreview.price)
+    notifyTrade({ kind: 'entry', title: 'Paper order punched', text: `${text}${paperSlPoints > 0 ? ` · SL ${paperSlPoints} pts` : ''}${paperTargetPoints > 0 ? ` · target ${paperTargetPoints} pts` : ''}`,
+      telegramText: isLive ? `Paper ${text}` : null })
     setPaperPositions((prev) => [...prev, {
       id: `${Date.now()}-${Math.random()}`,
       side: paperSide, direction: paperDirection, strike: paperStrike, qtyLots: paperQtyLots,
@@ -3317,7 +3329,21 @@ export default function OiReplayPage() {
     }])
   }
 
+  const announcePaperExit = (p, exitPrice, reason) => {
+    const points = p.direction === 'SELL' ? p.entryPrice - exitPrice : exitPrice - p.entryPrice
+    const rupees = points * p.qtyLots * p.lotSize
+    const text = `${paperTradeText(p, p.entryPrice)} -> ${Number(exitPrice).toFixed(1)} = ${points >= 0 ? '+' : ''}${points.toFixed(1)} pts (Rs ${Math.round(rupees).toLocaleString('en-IN')})`
+    const kind = reason === 'SL' ? 'stopLoss' : reason === 'Target' ? 'target' : 'exit'
+    notifyTrade({ kind, good: points >= 0, key: `paper-exit-${p.id}`, title: reason === 'SL' ? 'Paper stop-loss hit' : reason === 'Target' ? 'Paper target hit' : 'Paper position exited',
+      text, telegramText: isLive ? `Paper ${reason === 'SL' ? 'SL hit' : reason === 'Target' ? 'target hit' : 'exit'}: ${text}` : null })
+  }
   const handlePaperExit = (id) => {
+    const open = paperPositions.find((p) => p.id === id && p.status === 'OPEN')
+    if (open) {
+      const series = (open.side === 'CE' ? ceByStrike : peByStrike).get(open.strike)
+      const point = asOfMs != null ? latestAtOrBefore(series ?? [], asOfMs) : null
+      announcePaperExit(open, point?.price ?? open.entryPrice, 'Manual')
+    }
     setPaperPositions((prev) => prev.map((p) => {
       if (p.id !== id || p.status !== 'OPEN') return p
       const series = (p.side === 'CE' ? ceByStrike : peByStrike).get(p.strike)
@@ -3337,7 +3363,7 @@ export default function OiReplayPage() {
   useEffect(() => {
     if (!liveTradeActive) return
     let cancelled = false
-    liveTradingApi.positions().then((snapshot) => { if (!cancelled && snapshot) setLivePositions(snapshot) })
+    liveTradingApi.positions().then((snapshot) => { if (!cancelled && snapshot) applyLivePositions(snapshot) })
     return () => { cancelled = true }
   }, [liveTradeActive])
 
@@ -3360,32 +3386,41 @@ export default function OiReplayPage() {
     })
   }
 
-  const runLiveAction = async (action) => {
+  // One live action at a time: a second click (or a second button) while one is still on its way to
+  // Dhan is dropped - a double-clicked Place must never send two orders. (The server runs its actions
+  // one at a time too.) `notify`: announce the result as a trade notification (and Telegram).
+  const liveActionRef = useRef(false)
+  const runLiveAction = async (action, notify = null) => {
+    if (liveActionRef.current) { message.warning('The previous live action is still on its way to Dhan - wait for it.', 4); return }
+    liveActionRef.current = true
     setLiveBusy(true)
     try {
       const result = await action()
-      message.success(result.message, 6)
+      if (notify) notifyTrade({ kind: 'entry', title: notify.title, text: result.message, telegramText: `${notify.title}: ${result.message}` })
+      else message.success(result.message, 6)
     } catch (err) {
-      message.error(err.message, 10)
+      if (notify) notifyTrade({ kind: 'failed', title: `${notify.title} - FAILED`, text: err.message, duration: 0 })
+      else message.error(err.message, 10)
     } finally {
+      liveActionRef.current = false
       setLiveBusy(false)
       // Read Dhan's books straight away after any action (a partial exit, a cancel, a close) so every
       // open order shows - ready to cancel - without waiting for the next update.
-      liveTradingApi.positions(true).then((snapshot) => { if (snapshot) setLivePositions(snapshot) }).catch(() => {})
+      liveTradingApi.positions(true).then((snapshot) => { if (snapshot) applyLivePositions(snapshot) }).catch(() => {})
     }
   }
 
   const handleLivePunch = () => runLiveAction(() => liveTradingApi.place({
     underlying, expiry: liveExpiryDate, strike: paperStrike, side: paperSide, direction: paperDirection,
     lots: paperQtyLots, slippagePoints: liveSlippage, stopLossPoints: paperSlPoints, targetPoints: paperTargetPoints,
-  }))
-  const handleLiveClose = (securityId) => runLiveAction(() => liveTradingApi.close(securityId, liveSlippage))
+  }), { title: 'LIVE order placed' })
+  const handleLiveClose = (securityId) => runLiveAction(() => liveTradingApi.close(securityId, liveSlippage), { title: 'LIVE close sent' })
   const handleLivePartialExit = (securityId, lots) => runLiveAction(() => liveTradingApi.partialExit(securityId, lots, liveSlippage))
   const handleLiveCancel = (orderId, isPlain, leg) => runLiveAction(() => liveTradingApi.cancel(orderId, isPlain, leg))
-  const handleLiveExitAll = () => runLiveAction(() => liveTradingApi.exitAll(liveSlippage))
+  const handleLiveExitAll = () => runLiveAction(() => liveTradingApi.exitAll(liveSlippage), { title: 'LIVE exit all sent' })
   const handleLiveEmergencyExitAll = () => runLiveAction(() => liveTradingApi.emergencyExitAll())
   const handleLiveCancelAll = () => runLiveAction(() => liveTradingApi.cancelAll())
-  const handleLiveRefresh = () => liveTradingApi.positions(true).then((snapshot) => { if (snapshot) setLivePositions(snapshot) })
+  const handleLiveRefresh = () => liveTradingApi.positions(true).then((snapshot) => { if (snapshot) applyLivePositions(snapshot) })
   const liveBlockReason = paperStrike == null ? 'Waiting for the ATM strike.'
     : liveExpiryDate == null ? 'Waiting for the listed expiries.'
       : !(paperSlPoints > 0) || !(paperTargetPoints > 0) ? 'Set both SL and Target - a live order is a Super Order with both legs.'
@@ -3396,6 +3431,12 @@ export default function OiReplayPage() {
   // them the way Clear all does - a real "flatten everything" action whose exit prices/PnL stay in
   // the table afterward, distinct from Clear all's "wipe the list" ask.
   const handlePaperExitAll = () => {
+    for (const p of paperPositions) {
+      if (p.status !== 'OPEN') continue
+      const series = (p.side === 'CE' ? ceByStrike : peByStrike).get(p.strike)
+      const point = asOfMs != null ? latestAtOrBefore(series ?? [], asOfMs) : null
+      announcePaperExit(p, point?.price ?? p.entryPrice, 'Manual')
+    }
     setPaperPositions((prev) => prev.map((p) => {
       if (p.status !== 'OPEN') return p
       const series = (p.side === 'CE' ? ceByStrike : peByStrike).get(p.strike)
@@ -3425,6 +3466,7 @@ export default function OiReplayPage() {
   // never "sees" a bar it hasn't played yet. The user's own "are you actually calculating SL... with
   // high low" correction - the stored rolling_option_bars_1m data genuinely has OHLC per minute, not
   // just a close, so a real touch-check is possible for historical days, not just live ticks.
+  const paperAnnouncedRef = useRef(new Set())
   useEffect(() => {
     if ((!paperSlPoints || paperSlPoints <= 0) && (!paperTargetPoints || paperTargetPoints <= 0)) return
     const hits = new Map()
@@ -3435,10 +3477,17 @@ export default function OiReplayPage() {
       if (hit) hits.set(p.id, hit)
     }
     if (hits.size === 0) return
+    for (const p of paperPositions) {
+      const hit = hits.get(p.id)
+      if (!hit || paperAnnouncedRef.current.has(p.id)) continue
+      paperAnnouncedRef.current.add(p.id)
+      announcePaperExit(p, hit.fillPrice, hit.kind === 'sl' ? 'SL' : 'Target')
+    }
     setPaperPositions((prev) => prev.map((p) => {
       const hit = hits.get(p.id)
       return hit && p.status === 'OPEN' ? { ...p, status: 'CLOSED', exitPrice: hit.fillPrice, exitReason: hit.kind === 'sl' ? 'SL' : 'Target' } : p
     }))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [paperPositions, ceByStrike, peByStrike, asOfMs, paperSlPoints, paperTargetPoints])
 
   // Regime-change markers stamped on the exact candle where a Long Buildup/Short Buildup/Short

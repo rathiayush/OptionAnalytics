@@ -59,7 +59,7 @@ function scenario(dir, o = {}) {
 }
 const show = ({ s, all }) => JSON.stringify(s ? { side: s.side, entry: s.entry, stop: +s.stop.toFixed(1), target: +s.target.toFixed(1), conf: s.confidence, checks: s.checks } : all.map((x) => `${x.id}:${x.side}`))
 
-check('27 strategies, #24 is the OI squeeze', STRATEGIES.length === 27 && STRATEGIES.find((s) => s.no === 24)?.id === 'oiSqueeze')
+check('28 strategies, #24 is the OI squeeze', STRATEGIES.length === 28 && STRATEGIES.find((s) => s.no === 24)?.id === 'oiSqueeze')
 const L = scenario(1)
 check('short squeeze -> LONG: shorts built, now covering, calls covering at ATM, forced buying', L.s?.side === 'LONG' && L.s.stop < L.s.entry && L.s.target > L.s.entry && /shorts in/.test(L.s.checks.OI) && /short covering/.test(L.s.checks.Squeeze), show(L))
 console.log('   ', show(L).slice(0, 900))

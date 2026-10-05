@@ -122,6 +122,22 @@ public sealed class LiveTradingPartialExitTests
     }
 
     [Fact]
+    public async Task ATargetLegFill_IsOneTargetHitEvent_TaggedFromItsSuperOrder()
+    {
+        var (service, _, _) = await CreateAsync();
+        await service.RefreshAsync(CancellationToken.None);
+
+        // The leg's own message carries no tag - it is the super order's (OIR-test-1).
+        service.ApplyOrderUpdate(Update("S1", "SELL", 4 * Lot, 4 * Lot, avg: 150m, status: "TRADED", legNo: 3, super: true));
+        service.ApplyOrderUpdate(Update("S1", "SELL", 4 * Lot, 4 * Lot, avg: 150m, status: "TRADED", legNo: 3, super: true));
+
+        var e = Assert.Single(service.Snapshot().Events);
+        Assert.Equal("target", e.Kind);
+        Assert.Equal("Target hit", e.Title);
+        Assert.Contains("@ 150", e.Text);
+    }
+
+    [Fact]
     public async Task PartialFillsOnTheSocket_MoveThePositionByExactlyEachNewFill()
     {
         var (service, dhan, _) = await CreateAsync();
@@ -223,6 +239,23 @@ public sealed class LiveTradingPartialExitTests
         Assert.True(result.Success, result.Message);
         Assert.Contains("DELETE /super/orders/S9/ENTRY_LEG", dhan.Requests);
         Assert.Contains($"{Lot} qty of it had already filled and stays OPEN without a stop-loss or target", result.Message);
+    }
+
+    [Fact]
+    public async Task ExitingATradeWhoseEntryIsStillFilling_ExitsWhatItFilledUntilTheCancelLanded()
+    {
+        var (service, dhan, _) = await CreateAsync();
+        var partial = PendingSuperOrder("S9", "OIR-test-9");
+        partial["orderStatus"] = "PART_TRADED";
+        partial["filledQty"] = Lot;
+        dhan.SuperOrders.Add(partial);
+        dhan.FillsBeforeCancel["S9"] = Lot; // one more lot fills while the cancel is on its way
+
+        var result = await service.ExitTradeAsync(new[] { "S9" }, 1m, CancellationToken.None);
+
+        Assert.True(result.Success, result.Message);
+        Assert.Contains("DELETE /super/orders/S9/ENTRY_LEG", dhan.Requests);
+        Assert.Contains($"x{2 * Lot} at LIMIT", result.Message);
     }
 
     [Fact]
@@ -428,6 +461,7 @@ public sealed class LiveTradingPartialExitTests
     {
         public List<JsonObject> Positions { get; } = new();
         public List<JsonObject> SuperOrders { get; } = new();
+        public Dictionary<string, int> FillsBeforeCancel { get; } = new();
         public List<JsonObject> SuperModifies { get; } = new();
         public ConcurrentDictionary<string, PlainOrder> Orders { get; } = new();
         public List<string> Requests { get; } = new();
@@ -466,6 +500,9 @@ public sealed class LiveTradingPartialExitTests
             {
                 var parts = path.Split('/');
                 var order = SuperOrders.Single(o => o["orderId"]!.GetValue<string>() == parts[3]);
+                // An entry still filling can fill more before its cancel lands.
+                if (parts[4] == "ENTRY_LEG" && FillsBeforeCancel.TryGetValue(parts[3], out var extra))
+                    order["filledQty"] = (order["filledQty"]?.GetValue<int>() ?? 0) + extra;
                 // Cancelling the entry leg cancels the whole super order, legs included.
                 if (parts[4] == "ENTRY_LEG") order["orderStatus"] = "CANCELLED";
                 foreach (var leg in order["legDetails"]!.AsArray())

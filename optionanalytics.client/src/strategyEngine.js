@@ -1,5 +1,5 @@
 // The OI + Order Flow playbook's strategies as objective rules, run on the Order Flow page live and at
-// the replay clock (and over a whole day by "Scan day"): OI + order flow (1-10, 16-21, 24), volume / market
+// the replay clock (and over a whole day by "Scan day"): OI + order flow (1-10, 16-21, 24-27), pure option OI (28), volume / market
 // profile (11-15) and range-bound mean reversion (7, 22, 23). Each strategy reads all five screens:
 //
 //   OI        - the OI Replay data for the day (/api/oi-replay/{u}/run): option OI per strike (walls,
@@ -79,6 +79,9 @@ export const STRATEGIES = [
   { id: 'heatmapOi', no: 26, name: 'OI + liquidity heatmap confluence - hold or break', short: 'Heatmap + OI wall', priority: 3 },
   // The classic VWAP trend-day pullback, with the option writers / futures and the heatmap behind it.
   { id: 'vwapPullback', no: 27, name: 'VWAP pullback - trend continuation (OI + heatmap)', short: 'VWAP pullback', priority: 3 },
+  // Pure option OI, minute by minute: the support wall outweighs the resistance wall, the money leans
+  // the same way, and the writers keep adding on that side every minute.
+  { id: 'oiStructure', no: 28, name: 'OI structure - heavier wall, leaning ATM, writing every minute', short: 'OI structure', priority: 3 },
 ]
 export const STRATEGY_BY_ID = Object.fromEntries(STRATEGIES.map((s) => [s.id, s]))
 /** The strategies in use - what the scanner runs, lists, alerts on and scores. */
@@ -993,10 +996,20 @@ export function evaluateStrategies(input) {
     }
   }
 
-  // 10. Expiry-day max-pain pull - 13:00-14:30 entries.
+  // 10. Expiry-day max-pain pull - 13:00-14:30 entries. Max pain alone is a weak magnet: the writers
+  //     must be defending it - the straddle AT the max-pain strike (CE + PE OI) still growing over the
+  //     last 30 minutes - and the strikes in the way not being written against the pull (calls above the
+  //     index for a pull up, puts below it for a pull down: their OI not up 2%+ in 30 minutes).
   if (oi.isExpiryDay && minute >= hm(13, 0) && minute <= hm(14, 30)) {
     const mp = maxPainOf(rows.filter((r) => Math.abs(r.strike - spotNow) <= 15 * oi.step))
-    if (mp != null && Math.abs(mp - spotNow) >= spotNow * 0.003) {
+    const straddleGrew = (k) => {
+      const now = (oiOf(oi.ce, k, nowMs) ?? 0) + (oiOf(oi.pe, k, nowMs) ?? 0)
+      const then = (oiOf(oi.ce, k, nowMs - 30 * MIN) ?? 0) + (oiOf(oi.pe, k, nowMs - 30 * MIN) ?? 0)
+      return then > 0 && now >= then * 1.01
+    }
+    const pathWritten = (dir) => rows.some((r) => (dir > 0 ? r.strike > spotNow && r.strike < mp : r.strike < spotNow && r.strike > mp)
+      && grew(dir > 0 ? oi.ce : oi.pe, r.strike, 30, 0.02))
+    if (mp != null && Math.abs(mp - spotNow) >= spotNow * 0.003 && straddleGrew(mp) && !pathWritten(mp > spotNow ? 1 : -1)) {
       const dir = mp > spotNow ? 1 : -1
       const drift = bars.length > 10 ? last.cvd - bars.at(-11).cvd : 0
       const footprint = dir * drift > 0 && !stackAgainst(dir, 5)
@@ -1006,7 +1019,7 @@ export function evaluateStrategies(input) {
         const stopPts = pct(0.0015)
         const timeLeft = hm(14, 55) - minute
         push('maxPain', dir, stopPts, Math.abs(mp - spotNow) * 0.8, timeLeft, 56, {
-          OI: `expiry day, max pain ${mp} vs index ${spotNow.toFixed(0)}`, Footprint: 'ΣΔ drifting toward max pain', Tape: tapeText, DOM: c.dom, Heatmap: c.heat,
+          OI: `expiry day, max pain ${mp} vs index ${spotNow.toFixed(0)} - its straddle still being written, nothing written against the pull in the way`, Footprint: 'ΣΔ drifting toward max pain', Tape: tapeText, DOM: c.dom, Heatmap: c.heat,
         })
       }
     }
@@ -1815,6 +1828,86 @@ export function evaluateStrategies(input) {
           Footprint: `Δ ${last.delta > 0 ? '+' : ''}${last.delta}, nothing stacked against it`, Tape: tapeText, DOM: c.dom, Heatmap: c.heat,
           Plan: `target the day's ${dir > 0 ? 'high' : 'low'} ${dayExtreme.toFixed(1)}`,
         }, { rTarget: true })
+    }
+  }
+
+  // 28. OI structure - purely the option OI, read minute by minute - 09:45-14:30. For a LONG (the mirror
+  //     for a SHORT):
+  //       Walls    - the biggest PUT OI within 6 strikes below the index (support) is at least 1.15x the
+  //                  biggest CALL OI within 6 strikes above it (resistance): the floor is heavier than
+  //                  the ceiling;
+  //       Middle   - at the money (ATM ±1) puts outweigh calls - (PE - CE) / (PE + CE) of +0.15 or more -
+  //                  and by more than the rest of the near chain (ATM ±2..6) does: the money itself leans
+  //                  long, not just the far strikes;
+  //       Writing  - near the money (ATM ±3) the net writing (puts added - calls added, so call covering
+  //                  counts too) is with the trade in at least 3 of the last 5 one-minute changes,
+  //                  including the last one, against it in none of them by more than a sliver, adds up
+  //                  to 0.2%+ of the near OI over 5 minutes, and is with it over 15 minutes as well.
+  //     The index must still be above its support strike, with room to the resistance wall. Stop under
+  //     the support strike (in futures terms; 0.15-0.5%), target the resistance wall (1.5-3R). No
+  //     footprint / tape / book needed - it is the writers' positioning - but every trade still gets the
+  //     options-OI stance, futures OI and price-action confidence parts (push).
+  if (minute >= hm(9, 45) && minute <= hm(14, 30)) {
+    const step = oi.step
+    const atm = Math.round(spotNow / step) * step
+    const near6 = rows.filter((r) => Math.abs(r.strike - spotNow) <= 6 * step + step * 0.5)
+    const putWall = near6.filter((r) => r.strike <= spotNow).reduce((a, r) => (r.peOi > (a?.peOi ?? 0) ? r : a), null)
+    const callWall = near6.filter((r) => r.strike >= spotNow).reduce((a, r) => (r.ceOi > (a?.ceOi ?? 0) ? r : a), null)
+    const both = (k, t = nowMs) => { const pe = oiOf(oi.pe, k, t); const ce = oiOf(oi.ce, k, t); return pe == null || ce == null ? null : { pe, ce } }
+    const leanOf = (strikes) => {
+      let pe = 0, ce = 0
+      for (const k of strikes) { const v = both(k); if (v) { pe += v.pe; ce += v.ce } }
+      return pe + ce > 0 ? (pe - ce) / (pe + ce) : null
+    }
+    const middle = leanOf([atm - step, atm, atm + step])
+    const others = leanOf([2, 3, 4, 5, 6].flatMap((i) => [atm - i * step, atm + i * step]))
+    const nearK = [-3, -2, -1, 0, 1, 2, 3].map((i) => atm + i * step)
+    // Net writing (puts added - calls added) near the money between two moments.
+    const netWriting = (from, to) => {
+      let net = 0, seen = 0
+      for (const k of nearK) {
+        const a = both(k, from); const b = both(k, to)
+        if (!a || !b) continue
+        net += (b.pe - a.pe) - (b.ce - a.ce)
+        seen++
+      }
+      return seen ? net : null
+    }
+    const nearTotal = nearK.reduce((sum, k) => { const v = both(k); return sum + (v ? v.pe + v.ce : 0) }, 0)
+    const perMinute = [0, 1, 2, 3, 4].map((i) => netWriting(nowMs - (i + 1) * MIN, nowMs - i * MIN))
+    const net15 = netWriting(nowMs - 15 * MIN, nowMs)
+    if (putWall && callWall && middle != null && others != null && nearTotal > 0 && perMinute.every((m) => m != null) && net15 != null) {
+      const fOpen = futuresSince(oi, nowMs, dayOpenMs(oi, nowMs))
+      for (const dir of [1, -1]) {
+        const ownWall = dir > 0 ? putWall : callWall
+        const otherWall = dir > 0 ? callWall : putWall
+        const ownOi = dir > 0 ? putWall.peOi : callWall.ceOi
+        const otherOi = dir > 0 ? callWall.ceOi : putWall.peOi
+        if (!(ownOi >= 1.15 * otherOi)) continue
+        const lean = dir * middle
+        if (!(lean >= 0.15) || !(lean > dir * others)) continue
+        const sliver = 0.0005 * nearTotal
+        const withUs = perMinute.filter((m) => dir * m > 0).length
+        const sum5 = perMinute.reduce((a, b) => a + b, 0)
+        if (withUs < 3 || !(dir * perMinute[0] > 0) || perMinute.some((m) => dir * m < -sliver)) continue
+        if (!(dir * sum5 >= 0.002 * nearTotal) || !(dir * net15 > 0)) continue
+        // The index on its side of its own wall, with room to the other one.
+        if (dir * (spotNow - ownWall.strike) < 0) continue
+        const stopRaw = dir * (price - (ownWall.strike + basis)) + pct(0.0008)
+        if (stopRaw > pct(0.005)) continue
+        const stopPts = Math.max(pct(0.0015), stopRaw)
+        const room = dir * (otherWall.strike + basis - price) - pct(0.0005)
+        if (room < 1.5 * stopPts) continue
+        const futuresWith = fOpen?.oiPct != null && dir * fOpen.pricePct > 0 && fOpen.oiPct > 0
+        push('oiStructure', dir, stopPts, Math.min(room, 3 * stopPts), 60,
+          60 + (withUs === 5 ? 5 : withUs === 4 ? 3 : 0) + (ownOi >= 1.5 * otherOi ? 4 : 0) + (lean >= 0.3 ? 4 : 0) + (futuresWith ? 4 : 0), {
+            OI: `${dir > 0 ? 'PUT' : 'CALL'} wall ${ownWall.strike} ${(ownOi / 1e5).toFixed(1)}L vs ${dir > 0 ? 'CALL' : 'PUT'} wall ${otherWall.strike} ${(otherOi / 1e5).toFixed(1)}L (${(ownOi / otherOi).toFixed(2)}x)`,
+            Middle: `ATM ${atm} ±1: ${dir > 0 ? 'puts' : 'calls'} lead ${(lean * 100).toFixed(0)}% (rest of the chain ${(dir * others * 100).toFixed(0)}%)`,
+            Writing: `net ${dir > 0 ? 'put' : 'call'} writing near the money in ${withUs}/5 minutes (${perMinute.map((m) => lakh(dir * m)).join(' ')}), ${lakh(dir * sum5)} in 5m, ${lakh(dir * net15)} in 15m`,
+            ...(futuresWith ? { 'Futures confirm': `${dir > 0 ? 'long' : 'short'} build-up since open (price ${(fOpen.pricePct * 100).toFixed(2)}%, OI +${(fOpen.oiPct * 100).toFixed(2)}%)` } : {}),
+            Plan: `stop beyond ${ownWall.strike}, target the ${dir > 0 ? 'call' : 'put'} wall ${otherWall.strike}`,
+          })
+      }
     }
   }
 
