@@ -30,6 +30,7 @@ const HISTORY_KEY = 'optionanalytics.strategyScanner.history.v2'
 const PAPER_KEY = 'optionanalytics.strategyScanner.paper.v1'
 // Today's fired setups (live), so a page refresh shows them again and does not re-alert them.
 const FIRED_KEY = 'optionanalytics.strategyScanner.fired.v1'
+const TRAIL_LOG_KEY = 'optionanalytics.strategyScanner.trailLog.v1'
 // The trades box's Paper / Live (Dhan) choice, kept across reloads (Auto-place is NOT - it is confirmed again).
 const TRADE_MODE_KEY = 'optionanalytics.strategyScanner.tradeMode'
 // Paper trades whose exit has gone to Telegram, per day.
@@ -86,6 +87,8 @@ function upTo(prints, ms) {
 // price" - set per underlying (its points move differently); or in R (x the trade's own risk).
 const DEFAULT_TRAIL_PTS = { NIFTY: { start: 30, gap: 30 }, BANKNIFTY: { start: 75, gap: 75 }, SENSEX: { start: 100, gap: 100 } }
 const FALLBACK_TRAIL_PTS = { start: 30, gap: 30 }
+// Strikes the option trade can use: 5 in the money ... ATM ... 5 out of the money (moneyness +n / -n).
+const STRIKE_CHOICES = [5, 4, 3, 2, 1, 0, -1, -2, -3, -4, -5].map((v) => ({ value: v, label: v === 0 ? 'ATM' : `${Math.abs(v)} ${v > 0 ? 'ITM' : 'OTM'}` }))
 const trailUnit = (cfg) => (cfg.trail?.unit === 'R' ? 'R' : 'pts')
 const trailPtsFor = (cfg, underlying) => {
   const key = String(underlying ?? '').toUpperCase()
@@ -349,6 +352,30 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     writeJson(FIRED_KEY, { [dayKey]: fired })
   }, [fired, isReplay, dayKey, date])
 
+  // Changing the trailing SL (on / off, points, R) mid-day applies to the signals still OPEN, from that moment:
+  // each change is logged with the clock (floored to the minute) and simulateOutcome follows it - the stop in
+  // force moves at once (it only ever tightens), and nothing that already happened is rewritten. Signals that
+  // fire later carry the setting they fired with.
+  const [trailLog, setTrailLog] = useState([])
+  const trailJson = JSON.stringify(trailFor(settings, underlying))
+  const lastTrailRef = useRef(null)
+  const trailJsonRef = useRef(trailJson)
+  trailJsonRef.current = trailJson
+  useEffect(() => {
+    lastTrailRef.current = trailJsonRef.current
+    setTrailLog(!isReplay ? readJson(TRAIL_LOG_KEY, {})[dayKey] ?? [] : [])
+  }, [dayKey, isReplay])
+  useEffect(() => {
+    if (lastTrailRef.current === trailJson) return
+    lastTrailRef.current = trailJson
+    const t = Math.floor((nowMsRef.current ?? Date.now()) / MIN) * MIN
+    setTrailLog((log) => [...log.filter((c) => c.t < t), { t, trail: JSON.parse(trailJson) }])
+  }, [trailJson])
+  useEffect(() => {
+    if (isReplay || !date) return
+    writeJson(TRAIL_LOG_KEY, { [dayKey]: trailLog })
+  }, [trailLog, isReplay, dayKey, date])
+
   const stats = useMemo(() => strategyStats(Object.values(history).flatMap((d) => d.setups ?? [])), [history])
   const top = useMemo(() => topFifteen(stats), [stats])
   const top15Ids = useMemo(() => [...top.ids, ...top.trial], [top])
@@ -446,8 +473,11 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
 
   // Outcomes for today's setups so far; saved into the day's history as they resolve.
   const withOutcome = useMemo(
-    () => fired.map((s) => ({ ...s, outcome: simulateOutcome(s, view?.minuteBars ?? [], nowMs ?? 0) })),
-    [fired, view?.minuteBars, nowMs],
+    () => fired.map((s) => {
+      const withLog = trailLog.some((c) => c.t > s.t) ? { ...s, trailLog: trailLog.filter((c) => c.t > s.t) } : s
+      return { ...withLog, outcome: simulateOutcome(withLog, view?.minuteBars ?? [], nowMs ?? 0) }
+    }),
+    [fired, trailLog, view?.minuteBars, nowMs],
   )
 
   // Every alerted setup is followed to its end: when its target, stop-loss (fixed or trailed) or time
@@ -655,7 +685,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       const setupExitAt = o && o.status !== 'open' ? (o.exitAt != null ? o.exitAt + MIN : squareOffMs(p.entryTime)) : Infinity
       const own = oi && setupExitAt > p.entryTime
         ? optionStopTargetHit(oi, p, p.entryTime, Math.min(setupExitAt, exitTime ?? Infinity, nowMs ?? Infinity), p.slPts ?? settings.paperSl ?? 20, p.targetPts ?? settings.paperTarget ?? 30,
-          { start: p.trailStart ?? settings.paperTrailStart ?? 0, gap: p.trailGap ?? settings.paperTrailGap ?? 0 })
+          { start: p.trailStart ?? settings.paperTrailStart ?? 0, gap: p.trailGap ?? settings.paperTrailGap ?? 0 }, p.levelLog)
         : null
       if (own) { exitTime = own.at; exitPremium = own.premium; exitReason = own.reason }
       if (!exitTime && o && o.status !== 'open') {
@@ -829,6 +859,9 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     const openRows = paperRows.filter((r) => !r.exitTime)
     const open = new Set(openRows.map((r) => r.key))
     if (!open.size) return
+    const cur = settingsRef.current
+    // From the minute the change was made (the clock: market time live, the replay clock in a replay).
+    const changeAt = Math.floor((nowMsRef.current ?? Date.now()) / MIN) * MIN
     // Open LIVE trades: move their super order legs on Dhan too (once the typing stops).
     const trailChanged = patch.paperTrailStart != null || patch.paperTrailGap != null
     const liveOpen = patch.paperSl != null || patch.paperTarget != null || trailChanged ? openRows.filter((r) => r.live && r.orderIds?.length) : []
@@ -852,6 +885,11 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
           ...day,
           positions: day.positions.map((p) => (open.has(p.key) ? {
             ...p,
+            // The levels it had until now, then the new ones from this minute on (optionStopTargetHit).
+            levelLog: [
+              ...(p.levelLog?.length ? p.levelLog.filter((c) => c.t < changeAt) : [{ t: p.entryTime, sl: p.slPts ?? cur.paperSl ?? 20, target: p.targetPts ?? cur.paperTarget ?? 30, trailStart: p.trailStart ?? cur.paperTrailStart ?? 0, trailGap: p.trailGap ?? cur.paperTrailGap ?? 0 }]),
+              { t: changeAt, sl: patch.paperSl ?? p.slPts ?? cur.paperSl ?? 20, target: patch.paperTarget ?? p.targetPts ?? cur.paperTarget ?? 30, trailStart: patch.paperTrailStart ?? p.trailStart ?? cur.paperTrailStart ?? 0, trailGap: patch.paperTrailGap ?? p.trailGap ?? cur.paperTrailGap ?? 0 },
+            ],
             ...(patch.paperSl != null ? { slPts: patch.paperSl } : {}),
             ...(patch.paperTarget != null ? { targetPts: patch.paperTarget } : {}),
             ...(patch.paperTrailStart != null ? { trailStart: patch.paperTrailStart } : {}),
@@ -1124,10 +1162,10 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                 <Text style={{ fontSize: 12 }}>on each alert</Text>
                 <Segmented size="small" value={settings.autoPaper ?? 'sell'} onChange={(v) => setSettings((s) => ({ ...s, autoPaper: v }))}
                   options={[{ value: 'off', label: 'Off' }, { value: 'buy', label: 'Buy option' }, { value: 'sell', label: 'Sell option' }]} />
-                <Tooltip title="Which strike each trade uses - paper and live: ATM, or 1-2 strikes in / out of the money for the option being traded (a call's ITM strikes are below the index, a put's above). Only the strike changes - which setups fire does not.">
+                <Tooltip title="Which strike each trade uses - paper and live: ATM, or up to 5 strikes in / out of the money for the option being traded (a call's ITM strikes are below the index, a put's above). Only the strike changes - which setups fire does not.">
                   <Select size="small" style={{ width: 84 }} value={settings.moneyness ?? 0} aria-label="Option strike"
                     onChange={(v) => setSettings((s) => ({ ...s, moneyness: v }))}
-                    options={[{ value: 2, label: '2 ITM' }, { value: 1, label: '1 ITM' }, { value: 0, label: 'ATM' }, { value: -1, label: '1 OTM' }, { value: -2, label: '2 OTM' }]} />
+                    options={STRIKE_CHOICES} />
                 </Tooltip>
                 <InputNumber size="small" min={1} max={100} style={{ width: 64 }} value={settings.paperLots ?? 1} aria-label="Paper lots"
                   onChange={(v) => v != null && setSettings((s) => ({ ...s, paperLots: v }))} />

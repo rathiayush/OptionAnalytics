@@ -34,5 +34,31 @@ ok(optionStopTargetHit(oi, sell, t0 + 10000, t0 + 3 * 60000, 20, 30) === null, '
   const hs = optionStopTargetHit(oi3, { ...buy, action: 'SELL' }, t0 + 10000, until, 20, 0, { start: 10, gap: 8 })
   ok(hs && hs.premium === 105 && /Trailing SL hit/.test(hs.reason), `sold call: trailed down to 105 (best 97 + 8), out on the bounce: ${hs?.reason} @ ${hs?.premium}`)
 }
+
+// Levels changed while the trade is OPEN (levelLog): each minute is judged with the levels in force when it
+// started - a change applies from its minute on and never rewrites what already passed.
+{
+  const lv = (t, sl, target, trailStart = 0, trailGap = 0) => ({ t, sl, target, trailStart, trailGap })
+  const first = [lv(t0 + 10000, 20, 30)]
+  // The SELL's premium path 124.5 -> 166.5 is stopped at 144.5 at minute 5 with a 20-pt SL.
+  let h = optionStopTargetHit(oi, sell, t0 + 10000, until, 20, 30, null, first)
+  ok(h?.premium === 144.5 && h.at === t0 + 5 * 60000, 'a one-entry log is the same as no log')
+  // Widened to 60 from minute 3: the 144.5 level is not the stop any more - it holds to the end (166.5 < 184.5).
+  h = optionStopTargetHit(oi, sell, t0 + 10000, until, 60, 30, null, [...first, lv(t0 + 3 * 60000, 60, 30)])
+  ok(h === null, 'SL widened to 60 at minute 3: the trade is still open')
+  // Tightened to 10 from minute 3: stopped at 134.5 as soon as the next minute starts (premium by then 139).
+  h = optionStopTargetHit(oi, sell, t0 + 10000, until, 10, 30, null, [...first, lv(t0 + 3 * 60000, 10, 30)])
+  ok(h?.premium === 134.5 && h.at === t0 + 4 * 60000 && /Max SL 10/.test(h.reason), `SL tightened to 10 at minute 3: out at 134.5 in the next minute, not back at minute 1-2: ${JSON.stringify(h)}`)
+  // A tighter SL set at minute 5 cannot reach back: minutes 0-4 were judged with 20 (and 20 hits at minute 5 first).
+  h = optionStopTargetHit(oi, sell, t0 + 10000, until, 5, 30, null, [...first, lv(t0 + 5 * 60000, 5, 30)])
+  ok(h?.premium === 129.5 || h?.premium === 144.5, `a change at minute 5 applies from minute 5 on: ${JSON.stringify(h)}`)
+  // Target moved closer from minute 2 on a BUY: +10 instead of +30.
+  const buy = { ...sell, action: 'BUY' }
+  h = optionStopTargetHit(oi, buy, t0 + 10000, until, 20, 30, null, [...first, lv(t0 + 2 * 60000, 20, 10)])
+  ok(h?.premium === 134.5 && /Target 10/.test(h.reason), `target moved to +10 at minute 2: ${JSON.stringify(h)}`)
+  // Trail switched on from minute 2: starts after +10, follows 5 behind.
+  h = optionStopTargetHit(oi, buy, t0 + 10000, until, 0, 0, null, [lv(t0 + 10000, 0, 0), lv(t0 + 2 * 60000, 0, 0, 10, 5)])
+  ok(h === null, 'a trail on a premium that only rises never stops a BUY')
+}
 console.log(fails ? `${fails} FAILED` : 'all passed')
 process.exitCode = fails ? 1 : 0

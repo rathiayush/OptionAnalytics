@@ -56,5 +56,43 @@ ok(o.status === 'win' && Math.abs(o.r - 3) < 1e-9, 'without it: the same move en
   ok(trailedStop({ ...base, trail: { unit: 'pts', startPts: 5, gapPts: 0 } }, 130) === 90, 'points with no distance: a fixed stop')
   ok(trailedStop({ ...base, trail: { startR: 10, gapR: 8 } }, 200) === 120, 'R over the old 5 limit (start 10R, follow 8R)')
 }
+// 8. The trail changed MID-TRADE (setup.trailLog): it applies from the change on, the stop only tightens, and
+// what already happened is not rewritten.
+{
+  const pts = { unit: 'pts', startPts: 8, gapPts: 3 }
+  const tight = { unit: 'pts', startPts: 8, gapPts: 1 }
+  const wide = { unit: 'pts', startPts: 8, gapPts: 6 }
+  // Best 115 by 10:02 with a 3-pt trail (stop 112). At 10:03 the trader tightens it to 1 pt: the stop is 114 at once.
+  const bars8 = [bar(at(10,1),100,108,99,107), bar(at(10,2),107,115,106,114)]
+  const change = (trail) => [{ t: at(10, 3), trail }]
+  o = run({ ...base, trail: pts }, bars8, at(10, 3) + 20000, false)
+  ok(o.status === 'open' && o.stop === 112, `before the change: stop 112: ${JSON.stringify(o)}`)
+  o = run({ ...base, trail: pts, trailLog: change(tight) }, bars8, at(10, 3) + 20000, false)
+  ok(o.status === 'open' && o.stop === 114 && o.trailed, `tightened to 1 pt at 10:03: the stop is 114 at once: ${JSON.stringify(o)}`)
+  // ...and the next bar's dip to 113.5 now stops it at 114 (the old 3-pt trail, stop 112, would have held).
+  const more = [...bars8, bar(at(10,3),114,114.5,113.5,114)]
+  o = run({ ...base, trail: pts, trailLog: change(tight) }, more)
+  ok(o.stopHit && o.stop === 114 && Math.abs(o.r - 1.4) < 1e-9, `the tighter trail closes it at 114 (+1.4R): ${JSON.stringify(o)}`)
+  o = run({ ...base, trail: pts }, more, at(10, 4), false)
+  ok(o.status === 'open' && o.stop === 112, 'without the change the same bar leaves it open (stop 112)')
+  // A change made at 10:02 tightens the stop at once (107 = best 108 - 1) - the 10:02 bar's dip to 106 stops it.
+  o = run({ ...base, trail: pts, trailLog: [{ t: at(10, 2), trail: tight }] }, [bar(at(10,1),100,108,99,107), bar(at(10,2),107,107.5,106,107)], at(10, 4), false)
+  ok(o.stopHit && o.stop === 107, `tightened at 10:02: stop 107 at once, hit by the 10:02 bar: ${JSON.stringify(o)}`)
+  // Made at 10:03 instead, the same 10:02 bar is judged with the old 3-pt trail (stop 105): not closed.
+  o = run({ ...base, trail: pts, trailLog: [{ t: at(10, 3), trail: tight }] }, [bar(at(10,1),100,108,99,107), bar(at(10,2),107,107.5,106,107)], at(10, 3), false)
+  ok(o.status === 'open', `tightened at 10:03: the earlier bar is not judged again with it: ${JSON.stringify(o)}`)
+  // Widening never loosens a stop already earned.
+  o = run({ ...base, trail: pts, trailLog: change(wide) }, bars8, at(10, 3) + 20000, false)
+  ok(o.stop === 112, `widened to 6 pts: the stop stays 112, never loosens: ${JSON.stringify(o)}`)
+  // Trail off (null) from 10:03: the earned stop stays, nothing more is trailed.
+  o = run({ ...base, trail: pts, trailLog: change(null) }, [...bars8, bar(at(10,3),114,129,113,128)], at(10, 4), false)
+  ok(o.status === 'open' && o.stop === 112, `trail turned off: stop stays 112 while price runs to 130: ${JSON.stringify(o)}`)
+  // Turned ON mid-trade for a setup that fired without one.
+  o = run({ ...base, trail: undefined, trailLog: change(pts) }, bars8, at(10, 3) + 20000, false)
+  ok(o.stop === 112 && o.trailed, `turned on at 10:03: the stop moves to 112 at once: ${JSON.stringify(o)}`)
+  // A change dated before the setup, or after the replay clock, is ignored.
+  o = run({ ...base, trail: pts, trailLog: [{ t: at(9, 0), trail: tight }, { t: at(10, 30), trail: tight }] }, bars8, at(10, 3), false)
+  ok(o.stop === 112, 'changes before the signal / after the clock do nothing')
+}
 console.log(fails ? `${fails} FAILED` : 'all passed')
 process.exitCode = fails ? 1 : 0

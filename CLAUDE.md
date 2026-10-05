@@ -43,8 +43,10 @@ All must pass before committing. When adding or changing a strategy:
   fills at its open; target at the target; the trailing stop moves after each completed bar and only
   tightens; time stop and the 15:10 square-off at the bar's close; no entries after 14:45.
 - **Option trades**: entry premium = the last finished minute's; their own Max SL / Target are checked
-  from the first full minute after the entry, at the level; a SL / target change applies to open
-  trades only; paper trades are all sized by the current lots setting (live trades keep their quantity).
+  from the first full minute after the entry, at the level; a SL / target / trail change applies to
+  open trades only, FROM the minute it is made (`levelLog` on the position, `trailLog` for the futures
+  signals' trailing SL; `optionStopTargetHit` / `simulateOutcome` follow them - what already passed is
+  never rewritten and a trailing stop is never loosened by a change); paper trades are all sized by the current lots setting (live trades keep their quantity).
 
 ## Other rules
 
