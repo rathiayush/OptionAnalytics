@@ -236,6 +236,9 @@ builder.Services.AddHostedService<HistoricalSpotDataPrefetchHostedService>();
 // FetchAcrossSegmentsAsync reads from - see ExpiredOptionDataStore/
 // ExpiredOptionDataPrefetchHostedService's own doc comments.
 builder.Services.AddSingleton<ExpiredOptionDataStore>();
+// The strategy scanner's signals / option trades (with the day type and the adaptive call) as CSV -
+// Storage:ScannerLogPath; see ScannerLogStore.
+builder.Services.AddSingleton<ScannerLogStore>();
 builder.Services.AddHostedService<ExpiredOptionDataPrefetchHostedService>();
 
 // Every registered IBacktestStrategy is picked up automatically by BacktestService's

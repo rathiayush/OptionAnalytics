@@ -191,7 +191,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     const record = (result, note) => {
       placedRef.current.add(key)
       const position = {
-        key, setupKey: `${setup.id}-${setup.t}`, setupT: setup.t, strategy: setup.id, setupSide: setup.side, action: trade.action, side: trade.side, strike: trade.strike,
+        key, setupKey: `${setup.id}-${setup.t}`, setupT: setup.t, strategy: setup.id, setupSide: setup.side, adaptive: setup.adaptive ?? null, regime: setup.regime ?? null, action: trade.action, side: trade.side, strike: trade.strike,
         // The contract's real lot size from Dhan's contract list (the table is only a fallback).
         lots, lotSize: result.lotSize ?? PAPER_TRADE_LOT_SIZE[underlying] ?? 1, premium: result.prices?.limit ?? trade.premium, slPts: cfg.paperSl, targetPts: cfg.paperTarget, trailStart: cfg.paperTrailStart ?? 0, trailGap: cfg.paperTrailGap ?? 0,
         entryTime: nowMsRef.current ?? Date.now(), exitTime: null, exitPremium: null, exitReason: null,
@@ -258,7 +258,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       // must not open it again.
       if (list.some((p) => sameSignal(p, setup, trade))) return prev
       const position = {
-        key, setupKey: `${setup.id}-${setup.t}`, setupT: setup.t, strategy: setup.id, setupSide: setup.side, action: trade.action, side: trade.side, strike: trade.strike,
+        key, setupKey: `${setup.id}-${setup.t}`, setupT: setup.t, strategy: setup.id, setupSide: setup.side, adaptive: setup.adaptive ?? null, regime: setup.regime ?? null, action: trade.action, side: trade.side, strike: trade.strike,
         lots, lotSize: PAPER_TRADE_LOT_SIZE[underlying] ?? 1, premium, slPts: settingsRef.current.paperSl ?? 20, targetPts: settingsRef.current.paperTarget ?? 30,
         trailStart: settingsRef.current.paperTrailStart ?? 0, trailGap: settingsRef.current.paperTrailGap ?? 0, entryTime: at, exitTime: null, exitPremium: null, exitReason: null,
       }
@@ -603,15 +603,19 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     // A position's setup: the alerted one (live / replay outcomes, followed up to the clock), else the
     // same strategy and side within two minutes in the day's list (a scanned day's setups are timed to
     // the minute, an alert to 10 s).
-    const exact = new Map([...dayResults, ...withOutcome].map((s) => [`${s.id}-${s.t}`, s.outcome]))
-    const outcomeOf = (p) => exact.get(p.setupKey) ?? [...withOutcome, ...dayResults]
+    const exact = new Map([...dayResults, ...withOutcome].map((s) => [`${s.id}-${s.t}`, s]))
+    const setupOf = (p) => exact.get(p.setupKey) ?? [...withOutcome, ...dayResults]
       .filter((s) => s.id === p.strategy && s.side === p.setupSide && Math.abs(s.t - setupTimeOf(p)) < 2 * MIN)
-      .sort((a, b) => Math.abs(a.t - p.entryTime) - Math.abs(b.t - p.entryTime))[0]?.outcome
+      .sort((a, b) => Math.abs(a.t - p.entryTime) - Math.abs(b.t - p.entryTime))[0]
+    const outcomeOf = (p) => setupOf(p)?.outcome
     // Paper trades are a what-if: every one of them - open or closed - is sized by the lots set now, so
     // the day's P&L is always at one size. A live (Dhan) trade keeps the quantity it was placed with.
     const paperLots = Math.max(1, settings.paperLots ?? 1)
     return (paperBook[dayKey]?.positions ?? []).filter((p) => !nowMs || p.entryTime <= nowMs).map((stored) => {
-      const p = stored.live ? stored : { ...stored, lots: paperLots }
+      // The adaptive call of the trade's signal (stored when punched; older trades look it up).
+      const sig = stored.adaptive ? null : setupOf(stored)
+      const tagged = { ...stored, adaptive: stored.adaptive ?? sig?.adaptive ?? null, regime: stored.regime ?? sig?.regime ?? null }
+      const p = tagged.live ? tagged : { ...tagged, lots: paperLots }
       let exitTime = p.exitTime && p.exitTime <= (nowMs ?? Infinity) ? p.exitTime : null
       let exitPremium = exitTime ? p.exitPremium : null
       let exitReason = exitTime ? p.exitReason : null
@@ -650,9 +654,54 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   const paperRowsRef = useRef(paperRows)
   useEffect(() => { paperRowsRef.current = paperRows }, [paperRows])
   const paperTotal = paperRows.reduce((sum, r) => sum + (r.rupees ?? 0), 0)
+  // The same trades as an adaptive scanner would have punched them (tracking only).
+  const adaptiveRows = paperRows.filter((r) => r.adaptive?.take)
+  const adaptiveTotal = adaptiveRows.reduce((sum, r) => sum + (r.rupees ?? 0), 0)
+  const untaggedTrades = paperRows.filter((r) => !r.adaptive).length
   const liveRows = paperRows.filter((r) => r.live)
   const liveTotal = liveRows.reduce((sum, r) => sum + (r.rupees ?? 0), 0)
   useEffect(() => { liveLossRef.current = liveTotal }, [liveTotal])
+
+  // The day's record on the server as CSV (ScannerLogStore): live - today's signals and option trades;
+  // a scanned past day - its signals (a replay clock part-way through a day is not posted). Sent a few
+  // seconds after a signal appears or a signal / trade closes - not on every tick of an open trade -
+  // and resent after a failure.
+  const scannerLogRef = useRef({ sent: '', timer: null, latest: null })
+  useEffect(() => {
+    if (!date || !underlying) return
+    if (isReplay && !history[dayKey]?.scanned) return
+    const signals = dayResults.map((x) => {
+      const o = x.outcome ?? {}
+      const meta = STRATEGY_BY_ID[x.id]
+      return {
+        time: x.t, strategyNo: meta?.no ?? null, strategyId: x.id, strategy: meta?.name ?? x.id, side: x.side, entry: x.entry, stop: x.stop, target: x.target,
+        confidence: x.confidence ?? null, estimated: !!x.estimated, dayType: x.regime?.type ?? null, dayTypePrice: x.regime?.priceType ?? null,
+        voteOi: x.regime?.votes?.oi ?? null, voteCvd: x.regime?.votes?.cvd ?? null, adaptiveTake: x.adaptive?.take ?? null,
+        adaptivePriceOnly: x.adaptive?.priceOnly ?? null, adaptiveReason: x.adaptive?.reason ?? null, status: o.status ?? null, r: o.r ?? null,
+        exitTime: o.status && o.status !== 'open' ? o.exitAt ?? null : null, exitPrice: o.status && o.status !== 'open' ? o.exitPrice ?? null : null,
+        exitReason: o.status && o.status !== 'open' ? exitLabel(o) : null,
+      }
+    })
+    const trades = isReplay ? [] : paperRows.map((r) => ({
+      key: r.key, entryTime: r.entryTime, exitTime: r.exitTime ?? null, live: !!r.live, action: r.action, option: r.side, strike: r.strike,
+      lots: r.lots, lotSize: r.lotSize, entryPremium: r.premium, exitPremium: r.exitTime ? r.current ?? null : null, points: r.points ?? null,
+      rupees: r.rupees ?? null, exitReason: r.exitReason ?? null, strategyNo: STRATEGY_BY_ID[r.strategy]?.no ?? null, strategyId: r.strategy,
+      signalSide: r.setupSide, dayType: r.regime?.type ?? null, adaptiveTake: r.adaptive?.take ?? null, adaptiveReason: r.adaptive?.reason ?? null,
+    }))
+    if (!signals.length && !trades.length) return
+    const sig = JSON.stringify([dayKey, signals.map((x) => [x.strategyId, x.side, x.time, x.status, x.r]), trades.map((t) => [t.key, t.exitTime, t.exitTime ? t.points : null])])
+    const st = scannerLogRef.current
+    st.latest = { sig, body: { underlying, date, source: isReplay ? 'scan' : 'live', signals, trades } }
+    if (sig === st.sent || st.timer) return
+    st.timer = setTimeout(() => {
+      st.timer = null
+      const { sig: s2, body } = st.latest
+      fetch('/api/scanner-log/day', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+        .then((res) => { if (res.ok) st.sent = s2 })
+        .catch(() => { /* retried on the next change */ })
+    }, 3000)
+  }, [date, underlying, dayKey, isReplay, history, dayResults, paperRows])
+  useEffect(() => () => clearTimeout(scannerLogRef.current.timer), [])
   // A live trade reaching its exit (its setup's stop / target / trailing SL / 15:10, or its own Max SL
   // / Target - which its super order legs also hold on Dhan) is closed on Dhan once. Only while this
   // page is open; the super order's own legs protect it either way.
@@ -1030,6 +1079,13 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                 </Tooltip>
                 <Text type="secondary" style={{ fontSize: 11 }}>premium pts (0 = off) · lots size every paper trade of the day (live trades keep theirs); a SL / target change applies to open trades, closed ones keep theirs</Text>
                 {paperRows.length > 0 && <Text strong style={{ fontSize: 12, color: paperTotal >= 0 ? UP_COLOR : DOWN_COLOR }}>P&amp;L ₹{Math.round(paperTotal).toLocaleString('en-IN')}</Text>}
+                {paperRows.length > 0 && (
+                  <Tooltip title={`The trades an adaptive scanner would have punched - its day type at each signal (tracking only: every trade above was punched).${untaggedTrades ? ` ${untaggedTrades} trade(s) have no day type and are left out.` : ''}`}>
+                    <Text style={{ fontSize: 12 }} aria-label="Adaptive P&L">
+                      Adaptive: {adaptiveRows.length} trade{adaptiveRows.length === 1 ? '' : 's'} · <span style={{ color: adaptiveTotal >= 0 ? UP_COLOR : DOWN_COLOR }}>₹{Math.round(adaptiveTotal).toLocaleString('en-IN')}</span>
+                    </Text>
+                  </Tooltip>
+                )}
                 {paperRows.some((r) => !r.live) && (
                   <Popconfirm title="Clear this day's paper trades? (Live trades stay.)" onConfirm={() => setPaperBook((prev) => {
                     const day = prev[dayKey]
@@ -1084,6 +1140,11 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                     </Tooltip>
                     {r.live && <Tag color="volcano" style={{ margin: 0, fontSize: 10 }}>LIVE</Tag>}
                     <Tag color={r.action === 'BUY' ? 'green' : 'red'} style={{ margin: 0, fontSize: 11 }}>{r.action}</Tag>
+                    {r.adaptive && (
+                      <Tooltip title={`${r.regime?.label ?? 'Day type'}: adaptive would ${r.adaptive.take ? 'take' : 'skip'} it (${r.adaptive.reason})`}>
+                        <Tag color={r.adaptive.take ? 'green' : 'orange'} style={{ margin: 0, fontSize: 10 }}>{r.adaptive.take ? 'ADAPTIVE' : 'NOT ADAPTIVE'}</Tag>
+                      </Tooltip>
+                    )}
                     <span style={{ flex: 1 }}>{r.strike} {r.side} × {r.lots} <Text type="secondary" style={{ fontSize: 11 }}>@ {r.premium.toFixed(1)} → {r.current != null ? r.current.toFixed(1) : '-'} · #{STRATEGY_BY_ID[r.strategy]?.no} {STRATEGY_BY_ID[r.strategy]?.short}{levelsText(r, settings)}{r.exitReason ? ` · ${r.exitReason}` : ''}</Text>
                       {r.live && (r.exitError || r.liveNote) && (
                         <Tooltip title={r.exitError ?? r.liveNote}><Text type={r.exitError ? 'danger' : 'secondary'} style={{ fontSize: 10, marginLeft: 4 }}>{r.exitError ? 'exit failed - see Dhan' : 'Dhan ✓'}</Text></Tooltip>
@@ -1241,7 +1302,8 @@ function AdaptivePanel({ adaptive, regimeNow }) {
         {better != null && <>Adaptive {better >= 0 ? 'would have added' : 'would have cost'} <b>{fmtR(Math.abs(better))}</b> per trade so far. </>}
         The day type is read at each signal from what was known then - three votes: PRICE (the IB, range, net move, VWAP side / crosses), OI (option writers since the open + futures build-up / covering = trend; ATM straddle sold or nobody leaning = range; writers flipping = two-sided) and CVD (one way = trend, up and down = range). Price is kept unless OI / CVD outvote it (then unclear); OI + CVD agreeing call a trend before price. Trend - adaptive takes only trades with the trend;
         {' '}range / two-sided (inside the IB, or both sides broken / chopping across VWAP) - it takes fades and skips trend / breakout setups; unclear or before 10:15 - it takes everything.
-        {' '}Nothing is blocked - every setup still fires and alerts as before.{adaptive.untracked ? ` ${adaptive.untracked} setup(s) scored before tracking are not counted - re-run Scan day on those days.` : ''}
+        {' '}Nothing is blocked - every setup still fires and alerts as before. Every signal and option trade, with its day type and adaptive call, is also saved on the server as CSV:
+        {' '}<a href="/api/scanner-log/all/signals" download>signals.csv</a> · <a href="/api/scanner-log/all/trades" download>trades.csv</a> (every day; per day under /api/scanner-log).{adaptive.untracked ? ` ${adaptive.untracked} setup(s) scored before tracking are not counted - re-run Scan day on those days.` : ''}
       </Text>
     </div>
   )
