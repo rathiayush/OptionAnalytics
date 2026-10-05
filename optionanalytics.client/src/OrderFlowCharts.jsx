@@ -5,6 +5,7 @@ import { createZoomableChart } from './chartZoom.js'
 import { UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR, toChartTime, istTickMarkFormatter, istTimeFormatter } from './shared.jsx'
 import { useFitContentAsDataGrows } from './oiShared.jsx'
 import { useElementWidth, prepareCanvas } from './canvasUtils.js'
+import { PREV_PROFILE, RUNNING_PROFILE } from './profileColors.js'
 
 const { Text } = Typography
 
@@ -74,7 +75,7 @@ function zoomRows(l, factor, y, step, plotH) {
   return { top, rowH: Math.max(rowH, plotH / 2000) }
 }
 
-export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620, lastPrice, profile = null, trades = [], timeframe = 1, bigLabel = 'Big order', alerts = [], levels = [], vwap = null }) {
+export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620, lastPrice, profile = null, runningProfile = null, trades = [], timeframe = 1, bigLabel = 'Big order', alerts = [], levels = [], vwap = null }) {
   const wrapRef = useRef(null)
   const canvasRef = useRef(null)
   const width = useElementWidth(wrapRef)
@@ -358,9 +359,11 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
       ctx.restore()
       const level = (price, label, color) => {
         if (price == null) return
-        const y = label === 'VAL' ? rowTop(price) + rowH : label === 'VAH' ? rowTop(price) : rowTop(price) + rowH / 2
+        const isVal = label.endsWith('VAL')
+        const isVah = label.endsWith('VAH')
+        const y = isVal ? rowTop(price) + rowH : isVah ? rowTop(price) : rowTop(price) + rowH / 2
         if (y < FP_TOP || y > FP_TOP + plotH) return
-        ctx.setLineDash(label === 'POC' ? [] : [6, 4])
+        ctx.setLineDash(label.endsWith('POC') ? [] : [6, 4])
         ctx.strokeStyle = color
         ctx.globalAlpha = 0.7
         ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(barsW, y); ctx.stroke()
@@ -370,14 +373,23 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
         ctx.font = `600 10px ${FONT}`
         ctx.textBaseline = 'middle'
         ctx.textAlign = 'right'
-        ctx.fillText(label, barsW + profileW - 3, Math.min(FP_TOP + plotH - 6, Math.max(FP_TOP + 6, y + (label === 'VAL' ? -6 : label === 'VAH' ? 6 : 0))))
+        ctx.fillText(label, barsW + profileW - 3, Math.min(FP_TOP + plotH - 6, Math.max(FP_TOP + 6, y + (isVal ? -6 : isVah ? 6 : 0))))
         ctx.textAlign = 'left'
       }
-      for (const h of profile.hvn ?? []) level(h, 'HVN', '#ffa940')
-      for (const l of profile.lvn ?? []) level(l, 'LVN', '#69c0ff')
-      level(profile.vah, 'VAH', '#9b8cff')
-      level(profile.val, 'VAL', '#9b8cff')
+      // ONE HVN (the strongest after the POC) and ONE LVN (the thinnest) - the previous session's.
+      level(profile.hvnTop, 'HVN', PREV_PROFILE.hvn)
+      level(profile.lvnTop, 'LVN', PREV_PROFILE.lvn)
+      level(profile.vah, 'VAH', PREV_PROFILE.va)
+      level(profile.val, 'VAL', PREV_PROFILE.va)
       level(profile.poc, 'POC', POC_COLOR)
+      // Today's running profile in its own colours.
+      if (runningProfile?.poc != null) {
+        level(runningProfile.hvnTop, 'today HVN', RUNNING_PROFILE.hvn)
+        level(runningProfile.lvnTop, 'today LVN', RUNNING_PROFILE.lvn)
+        level(runningProfile.vah, 'today VAH', RUNNING_PROFILE.va)
+        level(runningProfile.val, 'today VAL', RUNNING_PROFILE.va)
+        level(runningProfile.poc, 'today POC', RUNNING_PROFILE.poc)
+      }
     }
 
     // Marked levels (sudden OI walls): a dashed line across the bars, labelled at the left.
@@ -464,7 +476,7 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
         ctx.fillText(priceText(lastPrice), plotW + 5, y)
       }
     }
-  }, [layout, width, height, plotW, barsW, profileW, profile, plotH, colWidth, step, lotSize, showLots, lastPrice, trades, timeframe, alerts, levels, vwap])
+  }, [layout, width, height, plotW, barsW, profileW, profile, runningProfile, plotH, colWidth, step, lotSize, showLots, lastPrice, trades, timeframe, alerts, levels, vwap])
 
   // The wheel listener is registered once; it reads the latest geometry through this.
   const geomRef = useRef({})

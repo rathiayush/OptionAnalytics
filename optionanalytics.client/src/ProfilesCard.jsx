@@ -3,6 +3,7 @@ import { Button, Card, Col, Row, Tag, Typography } from 'antd'
 import { UP_COLOR, DOWN_COLOR, AXIS_COLOR } from './shared.jsx'
 import { formatVolume } from './OrderFlowCharts.jsx'
 import { useElementWidth, prepareCanvas } from './canvasUtils.js'
+import { PREV_PROFILE, RUNNING_PROFILE } from './profileColors.js'
 
 const { Text } = Typography
 const fmt = (v) => (v == null ? '-' : Number(v).toLocaleString('en-IN', { maximumFractionDigits: 2 }))
@@ -11,11 +12,12 @@ const FONT = '"Segoe UI", system-ui, sans-serif'
 const MONO = 'ui-monospace, Menlo, Consolas, monospace'
 const AXIS_W = 64
 const HEAD_H = 20
-const POC = '#fadb14'
-const VA = '#9b8cff'
+const POC = PREV_PROFILE.poc
+const VA = PREV_PROFILE.va
 const TPO_VA = '#b37feb'
-const HVN = '#ffa940'
-const LVN = '#69c0ff'
+const HVN = PREV_PROFILE.hvn
+const LVN = PREV_PROFILE.lvn
+const RUN = RUNNING_PROFILE
 const PRICE = '#2f80ed'
 const BG = '#0d111a'
 
@@ -29,18 +31,18 @@ const BG = '#0d111a'
  *     balance (A + B) and single prints.
  * Wheel = zoom prices at the cursor, drag = pan, double-click = fit.
  */
-export function ProfilesCard({ prevDate, prevVp, prevTpo, todayTpo, lastPrice: rawLastPrice, loading, estimatedPrev, lotSize, showLots, height = 440 }) {
+export function ProfilesCard({ prevDate, prevVp, todayVp, prevTpo, todayTpo, lastPrice: rawLastPrice, loading, estimatedPrev, lotSize, showLots, height = 440 }) {
   // No price yet (0 before the first tick of the day, a replay at its very start) is no price: drawn
   // and fitted as a price it stretched the shared axis from 0 and flattened both profiles.
   const lastPrice = rawLastPrice > 0 ? rawLastPrice : null
   const fitted = useMemo(() => {
-    const levels = [...(prevVp?.rows ?? []).map((r) => r.price), ...(prevTpo?.rows ?? []).map((r) => r.price), ...(todayTpo?.rows ?? []).map((r) => r.price)]
+    const levels = [...(prevVp?.rows ?? []).map((r) => r.price), ...(todayVp?.rows ?? []).map((r) => r.price), ...(prevTpo?.rows ?? []).map((r) => r.price), ...(todayTpo?.rows ?? []).map((r) => r.price)]
     const base = fitRange(levels)
     // The last price is fitted in too, unless it is far from the profiles (another contract month).
     if (!base || lastPrice == null) return base ?? fitRange([lastPrice])
     const span = Math.max(base.hi - base.lo, lastPrice * 0.01)
     return lastPrice > base.lo - span && lastPrice < base.hi + span ? fitRange([...levels, lastPrice]) : base
-  }, [prevVp, prevTpo, todayTpo, lastPrice])
+  }, [prevVp, todayVp, prevTpo, todayTpo, lastPrice])
   const [view, setView] = useState(null) // { hi, lo } when zoomed / panned
   const [hoverPrice, setHoverPrice] = useState(null)
   const range = view ?? fitted
@@ -67,16 +69,21 @@ export function ProfilesCard({ prevDate, prevVp, prevTpo, todayTpo, lastPrice: r
       <Row gutter={[12, 12]}>
         <Col xs={24} lg={12}>
           <div style={{ fontSize: 12, marginBottom: 4, minHeight: 36 }}>
-            <Text strong style={{ fontSize: 12 }}>Volume profile · previous session</Text>{estimatedPrev && <Tag style={{ marginLeft: 6 }}>estimated</Tag>}
+            <Text strong style={{ fontSize: 12 }}>Volume profile · previous session | <span style={{ color: RUN.bar }}>today (running)</span></Text>{estimatedPrev && <Tag style={{ marginLeft: 6 }}>estimated</Tag>}
             {prevVp?.poc != null && (
               <div>
-                <span style={{ color: POC }}>POC {fmt(prevVp.poc)}</span> · <span style={{ color: VA }}>VAH {fmt(prevVp.vah)} · VAL {fmt(prevVp.val)}</span>
-                {' '}· <span style={{ color: HVN }}>HVN {prevVp.hvn?.length ? prevVp.hvn.map(fmt).join(', ') : '-'}</span>
-                {' '}· <span style={{ color: LVN }}>LVN {prevVp.lvn?.length ? prevVp.lvn.map(fmt).join(', ') : '-'}</span>
+                prev: <span style={{ color: POC }}>POC {fmt(prevVp.poc)}</span> · <span style={{ color: VA }}>VAH {fmt(prevVp.vah)} · VAL {fmt(prevVp.val)}</span>
+                {' '}· <span style={{ color: HVN }}>HVN {fmt(prevVp.hvnTop)}</span> · <span style={{ color: LVN }}>LVN {fmt(prevVp.lvnTop)}</span>
+              </div>
+            )}
+            {todayVp?.poc != null && (
+              <div>
+                today: <span style={{ color: RUN.poc }}>POC {fmt(todayVp.poc)}</span> · <span style={{ color: RUN.va }}>VAH {fmt(todayVp.vah)} · VAL {fmt(todayVp.val)}</span>
+                {' '}· <span style={{ color: RUN.hvn }}>HVN {fmt(todayVp.hvnTop)}</span> · <span style={{ color: RUN.lvn }}>LVN {fmt(todayVp.lvnTop)}</span>
               </div>
             )}
           </div>
-          <VolumeProfileChart vp={prevVp} range={range} lastPrice={lastPrice} nav={nav} hoverPrice={hoverPrice} onHover={setHoverPrice}
+          <VolumeProfileChart vp={prevVp} todayVp={todayVp} range={range} lastPrice={lastPrice} nav={nav} hoverPrice={hoverPrice} onHover={setHoverPrice}
             lotSize={lotSize} showLots={showLots} height={height} />
         </Col>
         <Col xs={24} lg={12}>
@@ -218,7 +225,7 @@ function rowStepOf(rows) {
   return Number.isFinite(step) && step > 0 ? step : 1
 }
 
-function VolumeProfileChart({ vp, range, lastPrice, nav, hoverPrice, onHover, lotSize, showLots, height }) {
+function VolumeProfileChart({ vp, todayVp, range, lastPrice, nav, hoverPrice, onHover, lotSize, showLots, height }) {
   const wrapRef = useRef(null)
   const canvasRef = useRef(null)
   const width = useElementWidth(wrapRef)
@@ -232,15 +239,16 @@ function VolumeProfileChart({ vp, range, lastPrice, nav, hoverPrice, onHover, lo
     const ctx = prepareCanvas(canvas, width, height)
     ctx.fillStyle = BG
     ctx.fillRect(0, HEAD_H, plotW, plotH)
-    if (!range || !vp?.rows?.length) {
+    if (!range || !(vp?.rows?.length || todayVp?.rows?.length)) {
       ctx.fillStyle = AXIS_COLOR
       ctx.font = `13px ${FONT}`
-      ctx.fillText('No previous session volume profile.', 12, HEAD_H + 24)
+      ctx.fillText('No volume profile yet.', 12, HEAD_H + 24)
       return
     }
+    vp = vp?.rows?.length ? vp : { rows: [] }
     const span = range.hi - range.lo
     const y = (p) => HEAD_H + ((range.hi - p) / span) * plotH
-    const step = rowStepOf(vp.rows)
+    const step = rowStepOf(vp.rows.length ? vp.rows : todayVp.rows)
     const rowPx = Math.max(1, (step / span) * plotH)
     const barH = Math.max(1, rowPx - (rowPx > 3 ? 1 : 0))
     const maxRow = vp.maxRow || Math.max(...vp.rows.map((r) => r.total)) || 1
@@ -271,11 +279,33 @@ function VolumeProfileChart({ vp, range, lastPrice, nav, hoverPrice, onHover, lo
         ctx.fillRect(sellW, top, w - sellW, barH)
       }
     }
-    for (const h of vp.hvn ?? []) levelLine(ctx, y(h), plotW, HVN, `HVN ${fmt(h)}`, { dash: [2, 3] })
-    for (const l of vp.lvn ?? []) levelLine(ctx, y(l), plotW, LVN, `LVN ${fmt(l)}`, { dash: [2, 3] })
-    if (vp.vah != null) levelLine(ctx, y(vp.vah), plotW, VA, `VAH ${fmt(vp.vah)}`)
-    if (vp.val != null) levelLine(ctx, y(vp.val), plotW, VA, `VAL ${fmt(vp.val)}`)
-    if (vp.poc != null) levelLine(ctx, y(vp.poc), plotW, POC, `POC ${fmt(vp.poc)}`, { dash: [] })
+    // Today's running profile: its own colour, bars drawn from the right edge so the two shapes never
+    // hide each other.
+    if (todayVp?.rows?.length) {
+      const todayStep = rowStepOf(todayVp.rows)
+      const todayRowPx = Math.max(1, (todayStep / span) * plotH)
+      const todayBarH = Math.max(1, todayRowPx - (todayRowPx > 3 ? 1 : 0))
+      const todayMax = todayVp.maxRow || Math.max(...todayVp.rows.map((r) => r.total)) || 1
+      for (const r of todayVp.rows) {
+        const top = y(r.price + todayStep / 2) + (todayRowPx - todayBarH) / 2
+        if (top > HEAD_H + plotH || top + todayBarH < HEAD_H) continue
+        const w = (r.total / todayMax) * (plotW * 0.45)
+        const inVa = r.price >= todayVp.val && r.price <= todayVp.vah
+        ctx.fillStyle = r.price === todayVp.poc ? RUN.poc : `${RUN.bar}${inVa ? '90' : '45'}`
+        ctx.fillRect(plotW - w, top, w, todayBarH)
+      }
+    }
+    // ONE HVN (the strongest after the POC) and ONE LVN (the thinnest) per profile.
+    const levels = (p, c, prefix, labelX) => {
+      if (!p?.rows?.length) return
+      if (p.hvnTop != null) levelLine(ctx, y(p.hvnTop), plotW, c.hvn, `${prefix}HVN ${fmt(p.hvnTop)}`, { dash: [2, 3], labelX })
+      if (p.lvnTop != null) levelLine(ctx, y(p.lvnTop), plotW, c.lvn, `${prefix}LVN ${fmt(p.lvnTop)}`, { dash: [2, 3], labelX })
+      if (p.vah != null) levelLine(ctx, y(p.vah), plotW, c.va, `${prefix}VAH ${fmt(p.vah)}`, { labelX })
+      if (p.val != null) levelLine(ctx, y(p.val), plotW, c.va, `${prefix}VAL ${fmt(p.val)}`, { labelX })
+      if (p.poc != null) levelLine(ctx, y(p.poc), plotW, c.poc, `${prefix}POC ${fmt(p.poc)}`, { dash: [], labelX })
+    }
+    levels(vp, PREV_PROFILE, '', null)
+    levels(todayVp, RUNNING_PROFILE, 'today ', plotW * 0.5)
     if (lastPrice > 0) levelLine(ctx, y(lastPrice), plotW, PRICE, null, { dash: [] })
     if (hoverPrice != null) {
       levelLine(ctx, y(hoverPrice), plotW, '#ffffff66', null, { dash: [3, 3] })
@@ -296,7 +326,7 @@ function VolumeProfileChart({ vp, range, lastPrice, nav, hoverPrice, onHover, lo
     ctx.textAlign = 'left'
     ctx.textBaseline = 'middle'
     ctx.fillText(`volume (${showLots ? 'lots' : 'qty'}) - sell | buy`, 4, HEAD_H / 2)
-  }, [vp, range, lastPrice, hoverPrice, width, height, plotW, plotH, lotSize, showLots])
+  }, [vp, todayVp, range, lastPrice, hoverPrice, width, height, plotW, plotH, lotSize, showLots])
 
   return (
     <div ref={wrapRef} style={{ width: '100%', cursor: 'ns-resize' }} aria-label="Volume profile chart">

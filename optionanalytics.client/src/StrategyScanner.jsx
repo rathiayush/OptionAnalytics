@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Alert, Button, Card, Checkbox, Col, InputNumber, Modal, Popconfirm, Progress, Row, Segmented, Space, Switch, Table, Tag, Tooltip, Typography, notification } from 'antd'
+import { Alert, Button, Card, Checkbox, Col, InputNumber, Modal, Popconfirm, Progress, Row, Segmented, Select, Space, Switch, Table, Tag, Tooltip, Typography, notification } from 'antd'
 import { SoundOutlined } from '@ant-design/icons'
 import { UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import { PAPER_TRADE_LOT_SIZE } from './oiShared.jsx'
@@ -11,7 +11,7 @@ import { suddenWallText } from './suddenOi.js'
 import {
   ACTIVE_STRATEGIES, STRATEGY_BY_ID, evaluateStrategies, simulateOutcome, strategyStats, topFifteen, MIN_TRADES_TO_RANK, oiSummary, optionOiText,
   DEFAULT_TRAIL, LAST_ENTRY, SQUARE_OFF, fmtHm, exitLabel, premiumAt, optionPnlPoints, optionTradeText, squareOffMs, optionStopTargetHit, RANGE_IDS, asReplayContext,
-  coolOffGate, gradeOf,
+  coolOffGate, gradeOf, optionTradeAt,
 } from './strategyEngine.js'
 import { aggregateBars, analyzeBars, findWalls, liquiditySignals, pullStackSignals, replayRange, replayView } from './orderFlowMath.js'
 
@@ -77,8 +77,8 @@ function upTo(prints, ms) {
 }
 
 // The trailing stop a new setup gets from the scanner's settings (null = a fixed stop).
-const trailFor = (cfg) => (cfg.trail?.on === false ? null : { startR: cfg.trail?.startR ?? DEFAULT_TRAIL.startR, gapR: cfg.trail?.gapR ?? DEFAULT_TRAIL.gapR })
-const trailText = (trail) => (trail ? `trailing SL: after +${trail.startR}R the stop follows ${trail.gapR}R behind the best price` : 'fixed SL')
+const trailFor = (cfg) => (cfg.trail?.on === false ? null : { startR: cfg.trail?.startR ?? DEFAULT_TRAIL.startR, gapR: cfg.trail?.gapR ?? DEFAULT_TRAIL.gapR, ...(cfg.trail?.runner ? { runner: true } : {}) })
+const trailText = (trail) => (trail ? `trailing SL: after +${trail.startR}R the stop follows ${trail.gapR}R behind the best price${trail.runner ? ' - letting it run (no fixed target / time stop, out on the trail or at 15:10)' : ''}` : 'fixed SL')
 
 function fmtR(r) {
   return r == null ? '-' : `${r >= 0 ? '+' : ''}${r.toFixed(2)}R`
@@ -162,8 +162,10 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   useEffect(() => { placedRef.current = new Set() }, [dayKey])
   const sameSignal = (p, setup, trade) => p.strategy === setup.id && p.setupSide === setup.side && p.action === trade.action && Math.abs(setupTimeOf(p) - setup.t) < COOLDOWN_MS
 
+  // The option a setup is traded with: ATM, or the strike the trader picked (ITM / OTM) - paper and live.
+  const tradeOf = (setup, which) => optionTradeAt(oi, setup, which, settingsRef.current.moneyness ?? 0)
   const placeLive = async (setup, which) => {
-    const trade = setup.options?.[which]
+    const trade = tradeOf(setup, which)
     const cfg = settingsRef.current
     const fail = (description) => notification.error({ message: 'Live order not placed', description, placement: 'topRight', duration: 10 })
     if (!trade) return fail('No option premium for this setup yet.')
@@ -216,7 +218,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   const punchRef = useRef(null)
   punchRef.current = (setup, which, atMs, opts = {}) => {
     if (liveModeRef.current.mode === 'live') {
-      const trade = setup.options?.[which]
+      const trade = tradeOf(setup, which)
       if (opts.auto) { placeLive(setup, which); return }
       Modal.confirm({
         title: `Place a REAL order on Dhan?`,
@@ -226,7 +228,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       })
       return
     }
-    const trade = setup.options?.[which]
+    const trade = tradeOf(setup, which)
     if (!trade || !oi) return
     const at = atMs ?? setup.t
     const premium = premiumAt(oi, trade.side, trade.strike, at) ?? trade.premium
@@ -371,7 +373,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       // mode with Auto-place on - as a real Dhan super order.
       const live = liveModeRef.current
       const side = cfg.autoPaper === 'buy' || cfg.autoPaper === 'sell' ? cfg.autoPaper : null
-      const autoTrade = side && (live.mode !== 'live' || live.auto) ? s.options?.[side] : null
+      const autoTrade = side && (live.mode !== 'live' || live.auto) ? tradeOf(s, side) : null
       if (autoTrade) punchRef.current?.(s, side, s.t, { auto: true })
       if (cfg.sound) chime(s.side === 'LONG')
       if (cfg.voice) speak(`${meta.short}. ${s.side === 'LONG' ? 'Long' : 'Short'}.${autoTrade ? ` ${autoTrade.action === 'SELL' ? 'Sold' : 'Bought'} ${autoTrade.strike} ${autoTrade.side === 'CE' ? 'call' : 'put'}.` : ''}`)
@@ -385,7 +387,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
             <div>{trailText(s.trail)}{s.trail ? ` (from ${(s.entry + (s.side === 'LONG' ? 1 : -1) * s.trail.startR * Math.abs(s.entry - s.stop)).toFixed(1)})` : ''} · closed by {fmtHm(SQUARE_OFF)} at the latest</div>
             {s.options && (
               <div style={{ margin: '4px 0' }}>
-                <b>Option:</b> {[optionTradeText(s.options.buy), optionTradeText(s.options.sell)].filter(Boolean).join(' · or ')}
+                <b>Option:</b> {[optionTradeText(tradeOf(s, 'buy')), optionTradeText(tradeOf(s, 'sell'))].filter(Boolean).join(' · or ')}
                 {autoTrade && <Text strong style={{ fontSize: 11, color: autoTrade.action === 'SELL' ? DOWN_COLOR : UP_COLOR }}> · {live.mode === 'live' ? 'LIVE order sent:' : 'paper'} {autoTrade.action === 'SELL' ? 'SOLD' : 'BOUGHT'} {autoTrade.strike} {autoTrade.side}</Text>}
                 {!autoTrade && (
                   <span style={{ marginLeft: 6 }}>
@@ -843,6 +845,9 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                   <InputNumber size="small" min={0.25} max={5} step={0.25} style={{ width: 70 }} value={settings.trail?.gapR ?? DEFAULT_TRAIL.gapR} aria-label="Trail distance in R"
                     onChange={(v) => v != null && setSettings((s) => ({ ...s, trail: { ...DEFAULT_TRAIL, ...s.trail, gapR: v } }))} />
                   <Text style={{ fontSize: 12 }}>R behind</Text>
+                  <Tooltip title="Off (default): a trade ends at its target, its stop / trailing stop, its time stop or 15:10 - the rules the stats were measured with. On: no fixed target and no time stop - the trailing stop follows the move and only it (or 15:10) ends the trade, so a trend can pay several R. Applies to new alerts. For the paper / live OPTION trades set Target 0 too, or their own premium target still closes them.">
+                    <Space size={4}><Switch size="small" checked={!!settings.trail?.runner} onChange={(v) => setSettings((s) => ({ ...s, trail: { ...DEFAULT_TRAIL, ...s.trail, runner: v } }))} aria-label="Let winners run" /><Text style={{ fontSize: 12 }}>Let winners run</Text></Space>
+                  </Tooltip>
                 </>
               )}
               <Text type="secondary" style={{ fontSize: 12 }}>Entries 09:30-{fmtHm(LAST_ENTRY)} · every trade closed by <b>{fmtHm(SQUARE_OFF)}</b></Text>
@@ -936,6 +941,11 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                 <Text style={{ fontSize: 12 }}>on each alert</Text>
                 <Segmented size="small" value={settings.autoPaper ?? 'sell'} onChange={(v) => setSettings((s) => ({ ...s, autoPaper: v }))}
                   options={[{ value: 'off', label: 'Off' }, { value: 'buy', label: 'Buy option' }, { value: 'sell', label: 'Sell option' }]} />
+                <Tooltip title="Which strike each trade uses - paper and live: ATM, or 1-2 strikes in / out of the money for the option being traded (a call's ITM strikes are below the index, a put's above). Only the strike changes - which setups fire does not.">
+                  <Select size="small" style={{ width: 84 }} value={settings.moneyness ?? 0} aria-label="Option strike"
+                    onChange={(v) => setSettings((s) => ({ ...s, moneyness: v }))}
+                    options={[{ value: 2, label: '2 ITM' }, { value: 1, label: '1 ITM' }, { value: 0, label: 'ATM' }, { value: -1, label: '1 OTM' }, { value: -2, label: '2 OTM' }]} />
+                </Tooltip>
                 <InputNumber size="small" min={1} max={100} style={{ width: 64 }} value={settings.paperLots ?? 1} aria-label="Paper lots"
                   onChange={(v) => v != null && setSettings((s) => ({ ...s, paperLots: v }))} />
                 <Text style={{ fontSize: 12 }}>lot(s) × {PAPER_TRADE_LOT_SIZE[underlying] ?? 1}</Text>

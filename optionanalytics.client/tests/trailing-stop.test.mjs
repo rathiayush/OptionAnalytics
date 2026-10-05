@@ -37,5 +37,11 @@ o = run(late, lateBars)
 ok(o.timeStop && o.squareOff && o.exitAt === at(15, 9) && exitLabel(o) === '15:10 square-off', `closed at 15:10: ${JSON.stringify({ ...o, exitAt: new Date(o.exitAt).toISOString() })}`)
 ok(squareOffMs(at(11, 23) + 17000) === at(15, 10), 'squareOffMs is 15:10 of the same day')
 ok(LAST_ENTRY === 14 * 60 + 45 && SQUARE_OFF === 15 * 60 + 10, 'last entry 14:45, square-off 15:10')
+// 6. "Let winners run" (trail.runner): past the 130 target and the 12:00 time stop, out only on the trail.
+const runBars = [bar(at(10,1),100,131,99,130), bar(at(10,2),130,150,129,149), bar(at(12,30),149,160,150,158), bar(at(12,31),158,158,148,149)]
+o = run({ ...base, trail: { ...trail, runner: true } }, runBars)
+ok(o.stopHit && o.trailed && o.stop === 150 && Math.abs(o.r - 5) < 1e-9 && exitLabel(o) === 'Trailing SL hit', `runner: through the target and the time stop, out on the trail at +5R: ${JSON.stringify(o)}`)
+o = run({ ...base, trail }, runBars)
+ok(o.status === 'win' && Math.abs(o.r - 3) < 1e-9, 'without it: the same move ends at the 130 target (+3R)')
 console.log(fails ? `${fails} FAILED` : 'all passed')
 process.exitCode = fails ? 1 : 0

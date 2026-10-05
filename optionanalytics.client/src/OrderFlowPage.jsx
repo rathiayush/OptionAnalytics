@@ -475,6 +475,8 @@ export default function OrderFlowPage() {
   const tpoRow = tpoRowFor(underlying, rowSize)
   const prevTpo = useMemo(() => (prevSession.data ? tpoProfile(prevSession.data.bars, tpoRow) : null), [prevSession.data, tpoRow])
   const todayTpo = useMemo(() => tpoProfile(view?.minuteBars ?? [], tpoRow), [view?.minuteBars, tpoRow])
+  // Today's running (developing) volume profile - up to the clock on a replay - in its own colours.
+  const todayVp = useMemo(() => (view?.minuteBars?.length ? sessionVolumeProfile(view.minuteBars) : null), [view?.minuteBars])
   // The previous session's high / low too: the stops resting beyond them are what a breakout trap runs.
   const prevRange = useMemo(() => {
     const bars = (prevSession.data?.bars ?? []).filter((b) => b.high > 0 && b.low > 0)
@@ -567,7 +569,7 @@ export default function OrderFlowPage() {
     }
     if (prevVp?.poc != null) {
       out.push({ price: prevVp.poc, kind: 'poc', label: 'prev. POC' }, { price: prevVp.vah, kind: 'vah', label: 'prev. VAH' }, { price: prevVp.val, kind: 'val', label: 'prev. VAL' })
-      for (const h of prevVp.hvn ?? []) out.push({ price: h, kind: 'hvn', label: `HVN ${h}` })
+      if (prevVp.hvnTop != null) out.push({ price: prevVp.hvnTop, kind: 'hvn', label: `HVN ${prevVp.hvnTop}` })
     }
     const vwap = vwapOf(view?.minuteBars ?? [], nowMs)
     if (vwap) out.push({ price: vwap, kind: 'vwap', label: `VWAP ${vwap.toFixed(1)}` })
@@ -793,12 +795,13 @@ export default function OrderFlowPage() {
               <FootprintLegend estimated={estimated} bigLabel={bigLabel} />
               <FootprintChart
                 bars={bars} rowSize={rowSize} lotSize={lotSize} showLots={showLots} lastPrice={meta?.lastPrice} height={narrow ? 480 : 660}
-                profile={profile} trades={largeTrades} timeframe={timeframe} bigLabel={bigLabel} alerts={priceAlerts.alerts} levels={suddenLevels} vwap={footprintVwap}
+                profile={profile} runningProfile={showProfile ? todayVp : null} trades={largeTrades} timeframe={timeframe} bigLabel={bigLabel} alerts={priceAlerts.alerts} levels={suddenLevels} vwap={footprintVwap}
               />
               {profile?.poc != null && (
                 <Text type="secondary" style={{ fontSize: 11 }}>
                   Volume profile of the previous session ({prevSession.data?.date}): POC {profile.poc} · value area {profile.val}–{profile.vah} (70% of volume)
-                  {profile.hvn?.length ? ` · HVN ${profile.hvn.join(', ')}` : ''}{profile.lvn?.length ? ` · LVN ${profile.lvn.join(', ')}` : ''}
+                  {profile.hvnTop != null ? ` · HVN ${profile.hvnTop}` : ''}{profile.lvnTop != null ? ` · LVN ${profile.lvnTop}` : ''}
+                  {todayVp?.poc != null ? ` · today (running, pink / teal lines): POC ${todayVp.poc} · VA ${todayVp.val}–${todayVp.vah}` : ''}
                 </Text>
               )}
             </Card>
@@ -830,7 +833,7 @@ export default function OrderFlowPage() {
                   <CumulativeDeltaChart bars={bars} dayKey={dayKey} lotSize={lotSize} showLots={showLots} height={narrow ? 200 : 260} />
                 </Card>
 
-                <ProfilesCard prevDate={prevSession.data?.date} prevVp={prevVp} prevTpo={prevTpo} todayTpo={todayTpo} lastPrice={meta?.lastPrice}
+                <ProfilesCard prevDate={prevSession.data?.date} prevVp={prevVp} todayVp={todayVp} prevTpo={prevTpo} todayTpo={todayTpo} lastPrice={meta?.lastPrice}
                   loading={prevSession.loading} estimatedPrev={prevSession.data?.source === 'estimated'} lotSize={lotSize} showLots={showLots} height={narrow ? 340 : 440} />
             </Space>
           </Col>

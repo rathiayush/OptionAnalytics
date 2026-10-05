@@ -16,6 +16,7 @@ import {
 import { alignToBars, chartVwap, sessionVwapFromBars } from './chartVwap.js'
 import { notifyLiveTradeEvents, notifyTrade } from './tradeNotify.js'
 import { loadTradeLevels, saveTradeLevels } from './tradeDefaults.js'
+import { PREV_PROFILE } from './profileColors.js'
 import { PremiumEmaChart, DraggableFloatingPanel, useFitContentAsDataGrows, useChartUserControl, CANDLE_SCALE_MARGINS } from './oiShared.jsx'
 import { LivePositionsView, liveTradingApi } from './LiveTrading.jsx'
 import { StrikePicker, moneynessLabel } from './StrikePicker.jsx'
@@ -1393,10 +1394,12 @@ const VWAP_COLOR = '#e072e8'
 // main chart's own red/green R/S wall convention, so five more lines on the SAME chart never get
 // mistaken for one of those. POC is the boldest (the single most important level); VAH/VAL a step
 // down; HVN/LVN dotted and muted - genuinely useful reference points, but secondary to POC/VA.
-const VOLUME_PROFILE_POC_COLOR = '#14b8a6'
-const VOLUME_PROFILE_VA_COLOR = '#8b5cf6'
-const VOLUME_PROFILE_HVN_COLOR = '#facc15'
-const VOLUME_PROFILE_LVN_COLOR = '#64748b'
+// The previous session's levels - the same colours as everywhere else (profileColors.js); today's running
+// profile (the futures chart) has its own.
+const VOLUME_PROFILE_POC_COLOR = PREV_PROFILE.poc
+const VOLUME_PROFILE_VA_COLOR = PREV_PROFILE.va
+const VOLUME_PROFILE_HVN_COLOR = PREV_PROFILE.hvn
+const VOLUME_PROFILE_LVN_COLOR = PREV_PROFILE.lvn
 
 // Index 0 = the single strongest HVN/LVN (ComputeVolumeProfile's own OrderByDescending/OrderBy
 // already ranks them this way, backend-side) - shown at near-full strength; each one after it fades
@@ -1520,8 +1523,9 @@ function EmaChart({
     const addRankedLines = (levels, color, title) => {
       levels?.forEach((price, i) => addLine(price, hexToRgba(color, VOLUME_PROFILE_NODE_SHADE_ALPHAS[i] ?? VOLUME_PROFILE_NODE_SHADE_ALPHAS.at(-1)), title, 1, 1))
     }
-    addRankedLines(volumeProfile.hvn, VOLUME_PROFILE_HVN_COLOR, 'HVN')
-    addRankedLines(volumeProfile.lvn, VOLUME_PROFILE_LVN_COLOR, 'LVN')
+    // ONE of each: the strongest HVN and the thinnest LVN (the server ranks them strongest first).
+    addRankedLines(volumeProfile.hvn?.slice(0, 1), VOLUME_PROFILE_HVN_COLOR, 'HVN')
+    addRankedLines(volumeProfile.lvn?.slice(0, 1), VOLUME_PROFILE_LVN_COLOR, 'LVN')
   }, [volumeProfile, showVolumeProfile])
 
   // Unconditional re-fit on a brand new day AND whenever this chart's OWN timeframe changes (unlike

@@ -59,13 +59,13 @@ function scenario(d, o = {}) {
   const oi = buildOiContext({ success: true, date: '2026-10-05', step: 50, spotCandlesOneMinute: spot, futuresBars: futures, cePoints, pePoints })
   const buyPct = d > 0 ? 70 : 30
   const prints = Array.from({ length: 50 }, (_, i) => ({ seq: i, time: NOW - 50_000 + i * 1000, price: 1, quantity: 75, buy: ((i * 37) % 100) < buyPct }))
-  const setups = evaluateStrategies({ nowMs: NOW, price, bars, minuteBars: bars, prints, book: { bids: [{ quantity: d > 0 ? 600 : 400 }], asks: [{ quantity: d > 0 ? 400 : 600 }] },
+  const setups = evaluateStrategies({ includeRetired: true,  nowMs: NOW, price, bars, minuteBars: bars, prints, book: { bids: [{ quantity: d > 0 ? 600 : 400 }], asks: [{ quantity: d > 0 ? 400 : 600 }] },
     liquidity: [], pullStack: [], sweeps: [], icebergs: [], oi, estimated: !!o.estimated, lotSize: 75, bigLots: 10, profile: null, heatmap: columns, rowSize: 1 })
   return { s: setups.find((x) => x.id === 'vwapPullback'), all: setups, vwap }
 }
 const show = ({ s, all }) => JSON.stringify(s ? { side: s.side, entry: s.entry, stop: +s.stop.toFixed(1), target: +s.target.toFixed(1), checks: s.checks } : all.map((x) => `${x.id}:${x.side}`))
 
-check('28 strategies, #27 is the VWAP pullback, alerted by default', STRATEGIES.length === 28 && STRATEGIES.find((x) => x.no === 27)?.id === 'vwapPullback' && topFifteen(strategyStats([])).ids.includes('vwapPullback'))
+check('28 strategies, #27 is the VWAP pullback (retired since the 05 Oct revert)', STRATEGIES.length === 28 && STRATEGIES.find((x) => x.no === 27)?.id === 'vwapPullback' && STRATEGIES.find((x) => x.no === 27).retired)
 const L = scenario(1)
 check('LONG: trend above a rising VWAP, the pullback tags it and turns, writers + futures back it, a bid wall at VWAP', L.s?.side === 'LONG' && L.s.stop < L.s.entry && L.s.target > L.s.entry && /bid wall/.test(L.s.checks['Liquidity map']) && /writers back it/.test(L.s.checks.OI), show(L))
 console.log('   ', L.s?.checks.VWAP, '|', L.s?.checks['Liquidity map'], '|', L.s?.checks.Plan)
