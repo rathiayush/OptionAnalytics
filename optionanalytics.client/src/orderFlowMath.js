@@ -73,11 +73,17 @@ export const DEFAULT_ANALYSIS = {
 //   against must exist in the bar.
 // - Stacked imbalance: `stackedCount`+ consecutive rows imbalanced the same way - a buy stack is
 //   support (aggressive buyers stepped up level after level), a sell stack resistance.
-// - Absorption: heavy aggression into a bar's extreme that failed to move price - selling at the
-//   bottom two rows of at least `absorptionFactor` x the bar's average row volume while the bar
-//   closed off its low (buyers absorbed it - bullish), or the mirror at the top (bearish).
-// - Exhaustion: almost nothing traded at the bar's extreme - the top row under `exhaustionPct` of the
-//   bar's volume means buyers ran out at the high (bearish), the bottom row the same for sellers.
+// - Absorption: heavy aggression into a NEW extreme that failed to move price on. At the low: the
+//   bar traded below the previous bar's low, its bottom two rows took selling of at least
+//   `absorptionFactor` x the bar's average row AND a quarter of all the bar's selling, more selling
+//   than buying there, and it closed at least 30% of its range off the low (passive buyers absorbed
+//   it - bullish). The mirror at the high (bearish).
+// - Exhaustion: the aggressive side running OUT at a new extreme. At the high: the bar pushed above
+//   the previous bar's high, buying at the top row is tiny - at most a quarter of the average buying
+//   on the three rows under it and under `exhaustionPct` of the bar - and the bar closed at least 25%
+//   of its range off the high (buyers gave up - bearish). The mirror at the low (bullish).
+//   (A bar spanning many thin rows has a small top / bottom row almost every time - that alone is not
+//   exhaustion, nor is a bar that did not reach past the one before.)
 //
 // `estimated` bars (a day rebuilt from 1-minute candles - their rows are an even spread, not real
 // trades) get no per-row imbalances, and absorption / exhaustion from the candles instead - see
@@ -94,8 +100,9 @@ export function analyzeBars(bars, { rowSize, minVolume = 1, estimated = false, .
       return { ...bar, cvd, poc: null, imbalances: new Map(), stacked: [], ...signals[i] }
     })
   }
-  return bars.map((bar) => {
+  return bars.map((bar, barIndex) => {
     cvd += bar.delta
+    const prevBar = barIndex > 0 ? bars[barIndex - 1] : null
     const ascending = [...bar.levels].sort((a, b) => a.price - b.price)
     const byPrice = new Map(ascending.map((l) => [l.price, l]))
     const nextRow = (price, dir) => (step ? round2(price + dir * step) : null)
@@ -132,7 +139,11 @@ export function analyzeBars(bars, { rowSize, minVolume = 1, estimated = false, .
     const absorption = []
     const exhaustion = []
     const rows = ascending.length
-    if (rows >= 3 && bar.volume > 0) {
+    const range = bar.high - bar.low
+    // A new extreme: past the previous bar's (the first bar of the list always counts).
+    const newHigh = !prevBar || bar.high > prevBar.high
+    const newLow = !prevBar || bar.low < prevBar.low
+    if (rows >= 3 && bar.volume > 0 && range > 0) {
       const avgRow = bar.volume / rows
       const bottom = ascending.slice(0, 2)
       const top = ascending.slice(-2)
@@ -140,21 +151,25 @@ export function analyzeBars(bars, { rowSize, minVolume = 1, estimated = false, .
       const buyLow = bottom.reduce((s, l) => s + l.buy, 0)
       const buyHigh = top.reduce((s, l) => s + l.buy, 0)
       const sellHigh = top.reduce((s, l) => s + l.sell, 0)
-      const lowRow = ascending[0].price
-      const highRow = ascending[rows - 1].price
-      const closeRow = step ? rowOf(bar.close, step) : bar.close
-      if (sellLow >= absorptionFactor * avgRow && sellLow > buyLow && closeRow > (step ? round2(lowRow + step) : lowRow)) {
-        absorption.push({ side: 'buy', price: lowRow, volume: sellLow })
+      if (newLow && sellLow >= absorptionFactor * avgRow && sellLow >= 0.25 * (bar.sell ?? 0) && sellLow > buyLow && bar.close - bar.low >= 0.3 * range) {
+        absorption.push({ side: 'buy', price: ascending[0].price, volume: sellLow })
       }
-      if (buyHigh >= absorptionFactor * avgRow && buyHigh > sellHigh && closeRow < (step ? round2(highRow - step) : highRow)) {
-        absorption.push({ side: 'sell', price: highRow, volume: buyHigh })
+      if (newHigh && buyHigh >= absorptionFactor * avgRow && buyHigh >= 0.25 * (bar.buy ?? 0) && buyHigh > sellHigh && bar.high - bar.close >= 0.3 * range) {
+        absorption.push({ side: 'sell', price: ascending[rows - 1].price, volume: buyHigh })
       }
     }
-    if (rows >= 4 && bar.volume >= minVolume * 10) {
+    if (rows >= 5 && bar.volume >= minVolume * 10 && range > 0) {
       const topRow = ascending[rows - 1]
       const bottomRow = ascending[0]
-      if (topRow.buy + topRow.sell <= exhaustionPct * bar.volume) exhaustion.push({ side: 'sell', price: topRow.price })
-      if (bottomRow.buy + bottomRow.sell <= exhaustionPct * bar.volume) exhaustion.push({ side: 'buy', price: bottomRow.price })
+      const avg = (list, key) => list.reduce((sum, l) => sum + l[key], 0) / Math.max(1, list.length)
+      const underTop = avg(ascending.slice(-4, -1), 'buy')
+      const overBottom = avg(ascending.slice(1, 4), 'sell')
+      if (newHigh && topRow.buy + topRow.sell <= exhaustionPct * bar.volume && topRow.buy <= 0.25 * underTop && underTop > 0 && bar.high - bar.close >= 0.25 * range) {
+        exhaustion.push({ side: 'sell', price: topRow.price })
+      }
+      if (newLow && bottomRow.buy + bottomRow.sell <= exhaustionPct * bar.volume && bottomRow.sell <= 0.25 * overBottom && overBottom > 0 && bar.close - bar.low >= 0.25 * range) {
+        exhaustion.push({ side: 'buy', price: bottomRow.price })
+      }
     }
 
     return { ...bar, cvd, poc: poc?.price ?? null, imbalances, stacked, absorption, exhaustion }
