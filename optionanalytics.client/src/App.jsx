@@ -1735,6 +1735,7 @@ export default function App() {
       body: JSON.stringify({ email, password }),
     }).then(async (r) => {
       const body = await r.json().catch(() => null)
+      if (r.status === 429) throw new Error('Too many login attempts - wait a few minutes and try again.')
       if (!r.ok) throw new Error(body?.error || 'Login failed')
       setUser(body)
       return body

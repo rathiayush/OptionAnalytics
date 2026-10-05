@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.RateLimiting;
 using System.Reflection;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.DataProtection;
@@ -73,6 +74,16 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
             return Task.CompletedTask;
         };
     });
+
+// Login attempts per client IP: 10 per 5 minutes - the admin account places real orders, so its
+// password must not be guessable by brute force. A rejected attempt gets 429 (LoginPage shows it).
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.AddPolicy("login", context => System.Threading.RateLimiting.RateLimitPartition.GetFixedWindowLimiter(
+        context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        _ => new System.Threading.RateLimiting.FixedWindowRateLimiterOptions { PermitLimit = 10, Window = TimeSpan.FromMinutes(5), QueueLimit = 0 }));
+});
 
 // Fallback policy: every endpoint requires SOME signed-in account by default, unless it opts out
 // with [AllowAnonymous] (AuthController's own login/logout/me, plus /health and /api/version below
@@ -315,6 +326,7 @@ app.UseStaticFiles();
 
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseRateLimiter();
 
 // Container liveness, for Docker's HEALTHCHECK and Dokploy/Traefik. Deliberately says nothing
 // about Dhan: the feed is legitimately unauthenticated outside market hours or while a token
