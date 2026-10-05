@@ -1,6 +1,7 @@
 import { Component, useEffect, useMemo, useRef, useState } from 'react'
 import dayjs from 'dayjs'
 import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicker, TimePicker, Alert, Empty, Tooltip, Popconfirm, Slider, Tag, InputNumber, Switch, Table, Segmented, Checkbox, Modal, message } from 'antd'
+import { findSuddenWalls, suddenWallText } from './suddenOi.js'
 import { PlayCircleOutlined, PauseCircleOutlined, ReloadOutlined, SoundOutlined, ExportOutlined } from '@ant-design/icons'
 import { createSeriesMarkers, CandlestickSeries, LineSeries, HistogramSeries, CrosshairMode } from 'lightweight-charts'
 import { createZoomableChart } from './chartZoom.js'
@@ -1982,7 +1983,7 @@ function PaperTradePanel({
 // alongside. The row(s) actually carrying the MOST OI on each side are called out as the current
 // resistance (CE)/support (PE) read, since a wall only means something relative to the rest of the
 // chain, not in isolation.
-function OiLadder({ rows, atmStrike }) {
+function OiLadder({ rows, atmStrike, sudden = [] }) {
   if (rows.length === 0) return <Empty description="No stored OI/IV data yet at this point in the replay." />
 
   // ONE shared max across BOTH sides, not one independently computed per side - the exact same bug
@@ -1993,6 +1994,7 @@ function OiLadder({ rows, atmStrike }) {
   const maxOi = Math.max(1, ...rows.map((r) => r.ceOi ?? 0), ...rows.map((r) => r.peOi ?? 0))
   const resistanceStrike = rows.reduce((best, r) => ((r.ceOi ?? 0) > (best?.ceOi ?? -1) ? r : best), null)?.strike
   const supportStrike = rows.reduce((best, r) => ((r.peOi ?? 0) > (best?.peOi ?? -1) ? r : best), null)?.strike
+  const suddenAt = new Map(sudden.map((w) => [`${w.side}${w.strike}`, w]))
 
   return (
     // Every row packs several fixed-width pieces (bars, OI text, IV text) into the 10/4/10 split
@@ -2042,7 +2044,9 @@ function OiLadder({ rows, atmStrike }) {
               </div>
             </Col>
             <Col span={4} style={{ textAlign: 'center' }}>
+              {suddenAt.has(`PE${row.strike}`) && <Tooltip title={`Sudden PUT wall: ${suddenWallText(suddenAt.get(`PE${row.strike}`))}`}><span style={{ color: UP_COLOR, marginRight: 2 }} aria-label="Sudden PUT wall">🧱</span></Tooltip>}
               <Text strong={isAtm} style={{ fontSize: 'clamp(10px, 2.8vw, 12px)', color: isAtm ? '#fff' : undefined }}>{row.strike.toLocaleString()}</Text>
+              {suddenAt.has(`CE${row.strike}`) && <Tooltip title={`Sudden CALL wall: ${suddenWallText(suddenAt.get(`CE${row.strike}`))}`}><span style={{ color: DOWN_COLOR, marginLeft: 2 }} aria-label="Sudden CALL wall">🧱</span></Tooltip>}
             </Col>
             <Col span={10} style={{ display: 'flex', alignItems: 'center', gap: 4, opacity: row.ceStale ? 0.45 : 1 }}>
               <div style={{ width: 'clamp(44px, 13vw, 70px)' }}>
@@ -2101,7 +2105,7 @@ function biasTagColor(bias) {
 // This is a mechanical relabeling of numbers already shown elsewhere on this page (the ladder, the
 // chart, Market Read) into one glanceable table, not a new prediction - see the summary row below
 // the table for the plain "nearest wall each way" read of "where price can likely go".
-function LiquidityMapTable({ rows, atmStrike, currentPrice }) {
+function LiquidityMapTable({ rows, atmStrike, currentPrice, sudden = [] }) {
   if (rows.length === 0) return <Empty description="No stored OI/IV data yet at this point in the replay." />
 
   const bandMaxOi = Math.max(1, ...rows.map((r) => r.ceOi ?? 0), ...rows.map((r) => r.peOi ?? 0))
@@ -2150,6 +2154,17 @@ function LiquidityMapTable({ rows, atmStrike, currentPrice }) {
     { title: 'Zone', dataIndex: 'zone', key: 'zone', width: 100, render: (z) => <Tag color={z === 'Resistance' ? 'error' : z === 'Support' ? 'success' : 'default'}>{z}</Tag> },
     { title: 'Liquidity', dataIndex: 'liquidity', key: 'liquidity', width: 90, render: (l) => <Tag color={l === 'Strong' ? 'red' : l === 'Medium' ? 'orange' : 'default'}>{l}</Tag> },
     { title: 'Bias', dataIndex: 'bias', key: 'bias', width: 90, render: (b) => <Tag color={biasTagColor(b)}>{b}</Tag> },
+    {
+      title: <Tooltip title="A sudden OI wall in the last 5 minutes: the strike added 3%+ of its OI at 3x+ its pace before.">Sudden (5m)</Tooltip>, key: 'sudden', width: 150,
+      render: (_, r) => {
+        const here = sudden.filter((w) => w.strike === r.strike)
+        return here.length ? here.map((w) => (
+          <Tooltip key={w.side} title={suddenWallText(w)}>
+            <Tag color={w.side === 'PE' ? 'green' : 'red'} style={{ marginBottom: 2 }}>🧱 {w.side === 'PE' ? 'PUT' : 'CALL'} +{(w.add / 1e5).toFixed(1)}L</Tag>
+          </Tooltip>
+        )) : null
+      },
+    },
   ]
 
   return (
@@ -2172,11 +2187,23 @@ function LiquidityMapTable({ rows, atmStrike, currentPrice }) {
           {nearestSupport && <Text type="secondary" style={{ fontSize: 11 }}>{nearestSupport.liquidity} liquidity, {nearestSupport.bias.toLowerCase()} bias</Text>}
         </Col>
       </Row>
+      <div aria-label="Sudden OI walls">
+        <Text strong style={{ fontSize: 12 }}>Sudden OI walls (last 5 min): </Text>
+        {sudden.length === 0 && <Text type="secondary" style={{ fontSize: 12 }}>none</Text>}
+        {sudden.map((w) => (
+          <Tooltip key={`${w.side}${w.strike}`} title={suddenWallText(w)}>
+            <Tag color={w.side === 'PE' ? 'green' : 'red'} style={{ marginBottom: 4 }}>
+              🧱 {w.side === 'PE' ? 'PUT' : 'CALL'} {w.strike} +{(w.add / 1e5).toFixed(1)}L ({(w.pct * 100).toFixed(1)}%) · {w.side === 'PE' ? 'support' : 'resistance'}
+            </Tag>
+          </Tooltip>
+        ))}
+      </div>
       {/* scroll.x - these columns' own widths sum past a phone's viewport, so the table needs to
           scroll horizontally there rather than squash columns or overflow the page. */}
       <Table
         dataSource={enriched} columns={columns} rowKey="strike" size="small" pagination={false}
-        scroll={{ x: 770, y: 360 }}
+        scroll={{ x: 920, y: 360 }}
+        onRow={(r) => (sudden.some((w) => w.strike === r.strike) ? { style: { background: '#faad1418' } } : {})}
       />
       <Text type="secondary" style={{ fontSize: 11 }}>
         Zone/Liquidity/Bias are a mechanical read of the OI already shown in the ladder above (CE vs PE at each strike, and how that compares to the
@@ -3206,6 +3233,20 @@ export default function OiReplayPage() {
 
   const step = result?.step || 50
   const atmStrike = currentBar ? Math.round(currentBar.close / step) * step : null
+
+  // Sudden OI walls as of the replay's current point (suddenOi.js - the same rule as the Order Flow
+  // page and strategy #25): a strike adding 3%+ of its OI in 5 minutes at 3x+ its pace before. Read
+  // once a minute; none in the session's first 10 minutes (the open reshuffles OI everywhere).
+  const suddenMinute = asOfMs == null ? null : Math.floor(asOfMs / 60_000)
+  const spotNow = currentBar?.close ?? null
+  const suddenWalls = useMemo(() => {
+    if (suddenMinute == null || !(spotNow > 0)) return []
+    const ms = suddenMinute * 60_000 + 59_999
+    if ((Math.floor(ms / 60_000) + 330) % 1440 < 9 * 60 + 25) return []
+    const strikes = [...new Set([...ceByStrike.keys(), ...peByStrike.keys()])]
+    const oiAt = (side, k, t) => latestAtOrBefore((side === 'CE' ? ceByStrike : peByStrike).get(k) ?? [], t)?.openInterest ?? null
+    return findSuddenWalls({ strikes, oiAt, ms, spot: spotNow, step })
+  }, [ceByStrike, peByStrike, suddenMinute, spotNow, step])
 
   // ATM OI change over the last N bars, bucketed to chart B's OWN timeframe (chartBTimeframe) - see
   // the state declaration above. Filtered to asOfMs first so this never reveals a tick beyond what
@@ -4531,7 +4572,7 @@ export default function OiReplayPage() {
                   title={<Space size={4}><CardDragHandle {...dragHandleProps('ladder')} />OI / IV ladder (nearest expiry, as of the current candle)</Space>}
                   bodyStyle={{ maxHeight: 460, overflowY: 'auto' }}
                 >
-                  <OiLadder rows={ladderRows} atmStrike={atmStrike} />
+                  <OiLadder rows={ladderRows} atmStrike={atmStrike} sudden={suddenWalls} />
                 </Card>
               </Col>
             </Row>
@@ -4541,7 +4582,7 @@ export default function OiReplayPage() {
               <Row gutter={16} style={{ marginTop: 16 }} {...orderedDropProps('liquidityMap')}>
                 <Col span={24}>
                   <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('liquidityMap')} />Liquidity map (imbalance &amp; likely levels, whole band)</Space>}>
-                    <LiquidityMapTable rows={ladderRows} atmStrike={atmStrike} currentPrice={currentBar?.close} />
+                    <LiquidityMapTable rows={ladderRows} atmStrike={atmStrike} currentPrice={currentBar?.close} sudden={suddenWalls} />
                   </Card>
                 </Col>
               </Row>

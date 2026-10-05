@@ -73,7 +73,7 @@ function zoomRows(l, factor, y, step, plotH) {
   return { top, rowH: Math.max(rowH, plotH / 2000) }
 }
 
-export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620, lastPrice, profile = null, trades = [], timeframe = 1, bigLabel = 'Big order', alerts = [] }) {
+export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620, lastPrice, profile = null, trades = [], timeframe = 1, bigLabel = 'Big order', alerts = [], levels = [] }) {
   const wrapRef = useRef(null)
   const canvasRef = useRef(null)
   const width = useElementWidth(wrapRef)
@@ -379,6 +379,25 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
       level(profile.poc, 'POC', POC_COLOR)
     }
 
+    // Marked levels (sudden OI walls): a dashed line across the bars, labelled at the left.
+    for (const l of levels) {
+      const y = yPrice(l.price + step / 2)
+      if (!(y > FP_TOP && y < FP_TOP + plotH)) continue
+      ctx.setLineDash([3, 3])
+      ctx.strokeStyle = l.color
+      ctx.lineWidth = 2
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(barsW, y); ctx.stroke()
+      ctx.setLineDash([])
+      ctx.lineWidth = 1
+      ctx.font = `700 10px ${FONT}`
+      ctx.textBaseline = 'middle'
+      const w = ctx.measureText(l.label).width + 8
+      ctx.fillStyle = l.color
+      ctx.fillRect(2, y - 7, w, 14)
+      ctx.fillStyle = '#000'
+      ctx.fillText(l.label, 6, y)
+    }
+
     // Price alerts: gold dashed lines across the chart, the level on the price axis.
     for (const a of alerts) {
       const y = yPrice(a.price + step / 2)
@@ -413,7 +432,7 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
         ctx.fillText(priceText(lastPrice), plotW + 5, y)
       }
     }
-  }, [layout, width, height, plotW, barsW, profileW, profile, plotH, colWidth, step, lotSize, showLots, lastPrice, trades, timeframe, alerts])
+  }, [layout, width, height, plotW, barsW, profileW, profile, plotH, colWidth, step, lotSize, showLots, lastPrice, trades, timeframe, alerts, levels])
 
   // The wheel listener is registered once; it reads the latest geometry through this.
   const geomRef = useRef({})
@@ -563,7 +582,7 @@ function heatColor(t) {
 // Depth heatmap: resting liquidity over time - each column is one book snapshot, each cell a price
 // row, brighter = more quantity resting there. The white line is the mid price; circles are large
 // prints (green buy / red sell, size by quantity); magenta lines are detected icebergs.
-export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [], lotSize, showLots, height = 420 }) {
+export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [], marks = [], lotSize, showLots, height = 420 }) {
   const wrapRef = useRef(null)
   const canvasRef = useRef(null)
   const width = useElementWidth(wrapRef)
@@ -711,6 +730,38 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
       ctx.beginPath(); ctx.moveTo(dx, y - 6); ctx.lineTo(dx + 6, y); ctx.lineTo(dx, y + 6); ctx.lineTo(dx - 6, y); ctx.closePath(); ctx.fill()
     }
 
+    // Liquidity map marks: zones as translucent bands, levels as dashed lines, labelled at the right.
+    for (const m of marks) {
+      ctx.font = `700 10px ${FONT}`
+      ctx.textBaseline = 'middle'
+      if (m.band) {
+        const yTop = yPrice(m.high) - rowH / 2
+        const yBottom = yPrice(m.low) + rowH / 2
+        if (yBottom < 0 || yTop > plotH) continue
+        ctx.fillStyle = m.color
+        ctx.globalAlpha = 0.18
+        ctx.fillRect(0, yTop, plotW, yBottom - yTop)
+        ctx.globalAlpha = 1
+        if (m.label) { ctx.fillStyle = m.color; ctx.fillText(m.label, 4, Math.max(8, Math.min(plotH - 8, (yTop + yBottom) / 2))) }
+        continue
+      }
+      const y = yPrice(m.price)
+      if (y < 0 || y > plotH) continue
+      ctx.setLineDash(m.dash ?? [6, 4])
+      ctx.strokeStyle = m.color
+      ctx.lineWidth = m.width ?? 1.5
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(plotW, y); ctx.stroke()
+      ctx.setLineDash([])
+      ctx.lineWidth = 1
+      if (m.label) {
+        const w = ctx.measureText(m.label).width + 8
+        ctx.fillStyle = m.color
+        ctx.fillRect(plotW - w - 2, y - 7, w, 14)
+        ctx.fillStyle = '#000'
+        ctx.fillText(m.label, plotW - w + 2, y)
+      }
+    }
+
     // Large prints
     for (const trade of trades ?? []) {
       const t = new Date(trade.time).getTime()
@@ -768,7 +819,7 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
       ctx.fillText(IST_HHMM.format(new Date(t)), Math.min(plotW - 20, Math.max(20, xTime(t))), plotH + HM_TIME_H / 2)
     }
     ctx.textAlign = 'left'
-  }, [layout, width, height, plotW, plotH, step, trades, icebergs, signals, lotSize])
+  }, [layout, width, height, plotW, plotH, step, trades, icebergs, signals, marks, lotSize])
 
   return (
     <div ref={wrapRef} style={{ position: 'relative', width: '100%', height }}>
