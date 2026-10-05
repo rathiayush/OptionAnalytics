@@ -165,6 +165,99 @@ public sealed class ScannerLogStoreTests : IDisposable
         Assert.Equal(("262.5", "2026-10-05 11:00:00"), (Assert.Single(ScannerLogStore.Read(TradesPath))["rupees"], ScannerLogStore.Read(TradesPath).Single()["signal_time_ist"]));
     }
 
+    // ---- totals per underlying ---------------------------------------------------------------------
+
+    private static ScannerSignalRow Closed(long time, string side, double entry, double exit, string status, double r, bool take = true) =>
+        new(time, 15, "ibBreakout", "Initial balance breakout", side, entry, entry - 20, entry + 40, 67, false, "trend-up", "trend-up", "agrees", "no view",
+            take, true, "x", status, r, time + 20 * 60_000, exit, "Target hit");
+
+    private static ScannerTradeRow TradeOf(string key, long at, double points, double net, bool take = true, bool live = false, bool open = false) =>
+        new(key, at, open ? null : at + 600_000, live, "SELL", "PE", 22650, 1, 75, 100, open ? null : 100 - points, points, points * 75, "t", T1040, 15, "ibBreakout", "LONG", "trend-up", take, "x",
+            11.25, 40, 7, net, net);
+
+    [Fact]
+    public async Task TheSummary_TotalsEachUnderlyingSeparately_PointsTradesAndNet()
+    {
+        var store = Store();
+        long day2 = T1040 + 86_400_000L; // 6 Oct
+        // NIFTY 5 Oct: a LONG 22700 -> 22740 (+40, win 2R, adaptive), a SHORT 22800 -> 22830 (-30, loss -1.5R, not adaptive), an open one.
+        await store.UpsertDayAsync(new ScannerLogDayRequest("NIFTY", "2026-10-05", "live", new()
+        {
+            Closed(T1040, "LONG", 22700, 22740, "win", 2),
+            Closed(T1040 + 60_000, "SHORT", 22800, 22830, "loss", -1.5, take: false),
+            new ScannerSignalRow(T1040 + 120_000, 15, "ibBreakout", "IB", "LONG", 22710, 22690, 22750, 60, false, "range", "range", "no view", "no view", false, true, "x", "open", 0.2, null, null, null),
+        }, new() { TradeOf("p1", T1040, 20, 1441.75), TradeOf("p2", T1040 + 60_000, -10, -807.25, take: false, live: true), TradeOf("p3", T1040 + 120_000, 3.5, 204.25, open: true) }), null, CancellationToken.None);
+        // NIFTY 6 Oct and BANKNIFTY 5 Oct.
+        await store.UpsertDayAsync(new ScannerLogDayRequest("NIFTY", "2026-10-06", "live", new() { Closed(day2, "SHORT", 22800, 22760, "win", 1) }, null), null, CancellationToken.None);
+        await store.UpsertDayAsync(new ScannerLogDayRequest("BANKNIFTY", "2026-10-05", "live", new() { Closed(T1040, "LONG", 51000, 51120, "win", 1.2) }, new() { TradeOf("b1", T1040, 80, 5000) }), null, CancellationToken.None);
+
+        var rows = await store.SummaryAsync(CancellationToken.None);
+
+        Assert.Equal(new[] { "BANKNIFTY|day|2026-10-05", "BANKNIFTY|total|", "NIFTY|day|2026-10-05", "NIFTY|day|2026-10-06", "NIFTY|total|" },
+            rows.Select(r => $"{r.Underlying}|{r.Scope}|{r.Date}"));
+        var nifty = rows.Single(r => r.Underlying == "NIFTY" && r.Scope == "total");
+        Assert.Equal((4, 3, 2, 66.7), (nifty.Signals, nifty.ClosedSignals, nifty.Wins, nifty.WinPct));   // 4 signals, 3 closed, 2 wins
+        Assert.Equal(50.0, nifty.FuturesPoints);          // +40 - 30 + 40
+        Assert.Equal(1.5, nifty.TotalR);                  // 2 - 1.5 + 1
+        Assert.Equal((3, 1, 1), (nifty.Trades, nifty.LiveTrades, nifty.OpenTrades));
+        Assert.Equal(13.5, nifty.OptionPoints);           // 20 - 10 + 3.5
+        Assert.Equal(838.75, nifty.NetRupees);            // 1441.75 - 807.25 + 204.25
+        // What an adaptive scanner would have taken: signals 1 and day 2's; trades p1 and p3 (p2 was not).
+        Assert.Equal((2, 80.0, 2, 23.5, 1646.0), (nifty.AdaptiveSignals, nifty.AdaptiveFuturesPoints, nifty.AdaptiveTrades, nifty.AdaptiveOptionPoints, nifty.AdaptiveNetRupees));
+        var bank = rows.Single(r => r.Underlying == "BANKNIFTY" && r.Scope == "total");
+        Assert.Equal((1, 120.0, 80.0, 5000.0), (bank.Signals, bank.FuturesPoints, bank.OptionPoints, bank.NetRupees));
+        var day = rows.Single(r => r.Underlying == "NIFTY" && r.Date == "2026-10-06");
+        Assert.Equal((1, 40.0), (day.Signals, day.FuturesPoints));
+    }
+
+    [Fact]
+    public async Task TheSignalsFile_CarriesTheFuturesPointsCaptured_OfEachClosedSignal()
+    {
+        var store = Store();
+        await store.UpsertDayAsync(new ScannerLogDayRequest("NIFTY", "2026-10-05", "live", new()
+        {
+            Closed(T1040, "LONG", 22700, 22740, "win", 2), Closed(T1040 + 60_000, "SHORT", 22800, 22830, "loss", -1.5),
+            new ScannerSignalRow(T1040 + 120_000, 15, "ibBreakout", "IB", "LONG", 22710, 22690, 22750, 60, false, "range", "range", "no view", "no view", false, true, "x", "open", 0.2, null, null, null),
+        }, null), null, CancellationToken.None);
+
+        var rows = ScannerLogStore.Read(SignalsPath).ToList();
+        Assert.Equal(("40", "-30", ""), (rows[0]["points"], rows[1]["points"], rows[2]["points"]));
+        Assert.Contains("points", File.ReadLines(SignalsPath).First().Split(','));
+    }
+
+    [Fact]
+    public void RowsWrittenBeforeThePointsColumnExisted_StillTotal_FromTheirEntryAndExit()
+    {
+        var old = new Dictionary<string, string> { ["underlying"] = "NIFTY", ["date"] = "2026-10-05", ["side"] = "SHORT", ["entry"] = "22800", ["exit_price"] = "22760", ["status"] = "win", ["r"] = "1", ["adaptive_take"] = "true" };
+        var rows = ScannerLogStore.Summarize(new[] { old }, Array.Empty<Dictionary<string, string>>());
+        Assert.Equal(40.0, rows.Single(r => r.Scope == "total").FuturesPoints);
+    }
+
+    [Fact]
+    public async Task TheSummaryCsv_HasAHeader_ADayRowAndATotalRowPerUnderlying()
+    {
+        var store = Store();
+        await store.UpsertDayAsync(new ScannerLogDayRequest("NIFTY", "2026-10-05", "live", new() { Closed(T1040, "LONG", 22700, 22740, "win", 2) }, new() { TradeOf("p1", T1040, 20, 1441.75) }), null, CancellationToken.None);
+
+        var csv = ScannerLogStore.Parse(ScannerLogStore.SummaryCsv(await store.SummaryAsync(CancellationToken.None)));
+
+        Assert.Equal(ScannerLogStore.SummaryColumns, csv[0]);
+        Assert.Equal(3, csv.Count);
+        var total = csv[2];
+        Assert.Equal(("total", "NIFTY", ""), (total[0], total[1], total[2]));
+        Assert.Equal("40", total[Array.IndexOf(ScannerLogStore.SummaryColumns, "futures_points")]);
+        Assert.Equal("20", total[Array.IndexOf(ScannerLogStore.SummaryColumns, "option_points")]);
+        Assert.Equal("1441.75", total[Array.IndexOf(ScannerLogStore.SummaryColumns, "net_rupees")]);
+    }
+
+    [Fact]
+    public async Task NothingStored_MeansAnEmptySummary_AndAHeaderOnlyCsv()
+    {
+        var store = Store();
+        Assert.Empty(await store.SummaryAsync(CancellationToken.None));
+        Assert.Equal(string.Join(',', ScannerLogStore.SummaryColumns) + "\n", ScannerLogStore.SummaryCsv(Array.Empty<ScannerSummaryRow>()));
+    }
+
     public void Dispose()
     {
         try { Directory.Delete(_dir, recursive: true); } catch { /* best effort */ }

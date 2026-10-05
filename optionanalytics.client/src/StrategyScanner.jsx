@@ -100,6 +100,9 @@ const trailFor = (cfg, underlying) => {
     ...(cfg.trail?.runner ? { runner: true } : {}),
   }
 }
+// The totals per underlying from the server's CSV files (every saved day, every device) - GET /api/scanner-log/summary.
+const loadSummary = (set) => fetch('/api/scanner-log/summary').then((r) => (r.ok ? r.json() : null)).then((j) => { if (j?.totals) set(j.totals) }).catch(() => { /* shown when it loads */ })
+const ptsText = (v) => `${v >= 0 ? '+' : ''}${(v ?? 0).toFixed(1)} pts`
 const trailText = (trail) => (trail
   ? `trailing SL: after +${trail.unit === 'pts' ? `${trail.startPts} pts` : `${trail.startR}R`} the stop follows ${trail.unit === 'pts' ? `${trail.gapPts} pts` : `${trail.gapR}R`} behind the best price${trail.runner ? ' - letting it run (no fixed target / time stop, out on the trail or at 15:10)' : ''}`
   : 'fixed SL')
@@ -697,6 +700,8 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   // replay clock part-way through a day is not posted). Sent a few seconds after a signal appears or a
   // signal / trade closes - not on every tick of an open trade - and resent after a failure.
   const scannerLogRef = useRef({ sent: '', timer: null, latest: null })
+  const [savedTotals, setSavedTotals] = useState(null)
+  useEffect(() => { loadSummary(setSavedTotals) }, [])
   useEffect(() => {
     if (!date || !underlying) return
     if (isReplay && !history[dayKey]?.scanned) return
@@ -734,7 +739,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       st.timer = null
       const { sig: s2, body } = st.latest
       fetch('/api/scanner-log/day', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-        .then((res) => { if (res.ok) st.sent = s2 })
+        .then((res) => { if (res.ok) { st.sent = s2; loadSummary(setSavedTotals) } })
         .catch(() => { /* retried on the next change */ })
     }, 3000)
   }, [date, underlying, dayKey, isReplay, history, dayResults, paperRows])
@@ -1273,8 +1278,22 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
           <Table size="small" pagination={false} columns={statColumns} dataSource={statRows} scroll={{ x: 560 }} />
           <Text type="secondary" style={{ fontSize: 11 }} aria-label="Saved data">
             Every signal (with its day type and adaptive call) and every option trade is saved on the server, every day in one file each:
-            {' '}<a href="/api/scanner-log/signals" download>signals.csv</a> · <a href="/api/scanner-log/trades" download>trades.csv</a>.
+            {' '}<a href="/api/scanner-log/signals" download>signals.csv</a> · <a href="/api/scanner-log/trades" download>trades.csv</a>
+            {' '}· totals per underlying: <a href="/api/scanner-log/summary/csv" download>summary.csv</a>.
           </Text>
+          <div aria-label="Points captured" style={{ fontSize: 12, margin: '4px 0' }}>
+            <Text strong style={{ fontSize: 12 }}>Captured, every saved day</Text>
+            {!savedTotals?.length
+              ? <Text type="secondary" style={{ fontSize: 12 }}> · nothing saved on the server yet</Text>
+              : savedTotals.map((t) => (
+                <div key={t.underlying}>
+                  <b>{t.underlying}</b>: {t.signals} signal{t.signals === 1 ? '' : 's'} ({t.closedSignals} closed{t.winPct != null ? `, ${Math.round(t.winPct)}% won` : ''}) · futures <b style={{ color: t.futuresPoints >= 0 ? UP_COLOR : DOWN_COLOR }}>{ptsText(t.futuresPoints)}</b> ({fmtR(t.totalR)})
+                  {' '}· {t.trades} option trade{t.trades === 1 ? '' : 's'}{t.liveTrades ? ` (${t.liveTrades} live)` : ''}{t.openTrades ? `, ${t.openTrades} open` : ''} · premium <b style={{ color: t.optionPoints >= 0 ? UP_COLOR : DOWN_COLOR }}>{ptsText(t.optionPoints)}</b>
+                  {' '}· net <b style={{ color: t.netRupees >= 0 ? UP_COLOR : DOWN_COLOR }}>{rupee(t.netRupees)}</b> after charges (per lot {rupee(t.netPerLot)})
+                  {t.adaptiveSignals > 0 || t.adaptiveTrades > 0 ? <Text type="secondary" style={{ fontSize: 12 }}> · adaptive: {t.adaptiveSignals} signals {ptsText(t.adaptiveFuturesPoints)} · {t.adaptiveTrades} trades {ptsText(t.adaptiveOptionPoints)} · net {rupee(t.adaptiveNetRupees)}</Text> : null}
+                </div>
+              ))}
+          </div>
           {filterFor && (
             <StrategyFiltersModal id={filterFor} values={settings.filters?.[filterFor]} onClose={() => setFilterFor(null)}
               onSave={(v) => { setSettings((s) => ({ ...s, filters: { ...s.filters, [filterFor]: v } })); setFilterFor(null) }} />
