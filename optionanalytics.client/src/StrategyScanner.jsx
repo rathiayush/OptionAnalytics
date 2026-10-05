@@ -5,6 +5,7 @@ import { UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import { PAPER_TRADE_LOT_SIZE } from './oiShared.jsx'
 import { liveTradingApi } from './LiveTrading.jsx'
 import { chime, speak, telegram, unlockAudio } from './alerts.js'
+import { notifyLiveTradeEvents, notifyTrade } from './tradeNotify.js'
 import { suddenWallText } from './suddenOi.js'
 import {
   ACTIVE_STRATEGIES, STRATEGY_BY_ID, evaluateStrategies, simulateOutcome, strategyStats, topFifteen, MIN_TRADES_TO_RANK, oiSummary, optionOiText,
@@ -144,6 +145,11 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   useEffect(() => { paperBookRef.current = paperBook }, [paperBook])
   const liveLossRef = useRef(0)
   const placingRef = useRef(new Set())
+  // Keys of live orders already placed - set the moment Dhan answers, before the paper book (and its
+  // ref, updated after the next render) shows the position: a second alert for the same signal in
+  // that gap must not place it again.
+  const placedRef = useRef(new Set())
+  useEffect(() => { placedRef.current = new Set() }, [dayKey])
   const sameSignal = (p, setup, trade) => p.strategy === setup.id && p.setupSide === setup.side && p.action === trade.action && Math.abs(setupTimeOf(p) - setup.t) < COOLDOWN_MS
 
   const placeLive = async (setup, which) => {
@@ -155,9 +161,10 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     if (!(cfg.paperSl > 0) || !(cfg.paperTarget > 0)) return fail('A live trade is a Dhan super order - set both Max SL and Target above 0.')
     const list = paperBookRef.current[dayKey]?.positions ?? []
     const key = `${setup.id}-${setup.t}-${which}`
-    if (list.some((p) => sameSignal(p, setup, trade)) || placingRef.current.has(key)) return
+    if (list.some((p) => sameSignal(p, setup, trade)) || placingRef.current.has(key) || placedRef.current.has(key)) return
     // Orders still on their way count too - two alerts in the same moment must not both pass the limit.
-    const liveCount = list.filter((p) => p.live).length + placingRef.current.size
+    // ...and so do orders Dhan took whose positions the book has not shown yet.
+    const liveCount = list.filter((p) => p.live).length + placingRef.current.size + [...placedRef.current].filter((k) => !list.some((p) => p.key === k)).length
     if (liveCount >= (cfg.maxLiveTrades ?? 5)) return fail(`The day's limit of ${cfg.maxLiveTrades} live trades is reached.`)
     if (liveLossRef.current <= -(cfg.maxLiveLoss ?? 10000)) return fail(`The day's live loss limit (₹${(cfg.maxLiveLoss ?? 10000).toLocaleString('en-IN')}) is reached.`)
     placingRef.current.add(key)
@@ -165,6 +172,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     // A trade Dhan took (all of it, or the slices before a rejection) is recorded, so the setup's exit
     // closes it - an untracked live position would never be exited by the scanner.
     const record = (result, note) => {
+      placedRef.current.add(key)
       const position = {
         key, setupKey: `${setup.id}-${setup.t}`, setupT: setup.t, strategy: setup.id, setupSide: setup.side, action: trade.action, side: trade.side, strike: trade.strike,
         // The contract's real lot size from Dhan's contract list (the table is only a fallback).
@@ -181,7 +189,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
         slippagePoints: cfg.liveSlippage ?? 2, stopLossPoints: cfg.paperSl, targetPoints: cfg.paperTarget,
       })
       const position = record(result)
-      notification.success({ message: `LIVE ${trade.action} ${trade.strike} ${trade.side} x${lots} placed on Dhan`, description: result.message, placement: 'topRight', duration: 8 })
+      notifyTrade({ kind: 'entry', title: `LIVE ${trade.action} ${trade.strike} ${trade.side} x${lots} placed on Dhan`, text: result.message, sound: cfg.sound !== false })
       if (cfg.telegram !== false) telegram(`LIVE order placed: ${trade.action} ${underlying} ${trade.strike} ${trade.side} x${lots} lot(s) @ ~${position.premium.toFixed(1)} - #${STRATEGY_BY_ID[setup.id]?.no} ${STRATEGY_BY_ID[setup.id]?.name} ${setup.side}, futures ${setup.entry.toFixed(1)} (SL ${setup.stop.toFixed(1)}, target ${setup.target.toFixed(1)}); option SL ${cfg.paperSl} / target ${cfg.paperTarget} pts`)
     } catch (err) {
       if (err.result?.orderIds?.length) {
@@ -214,6 +222,12 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     const premium = premiumAt(oi, trade.side, trade.strike, at) ?? trade.premium
     const lots = Math.max(1, settingsRef.current.paperLots ?? 1)
     const already = (paperBookRef.current[dayKey]?.positions ?? []).some((p) => sameSignal(p, setup, trade))
+    if (!already) {
+      const meta = STRATEGY_BY_ID[setup.id]
+      notifyTrade({ kind: 'entry', key: `paper-${setup.id}-${setup.t}-${which}`, sound: false,
+        title: `Paper ${trade.action} ${trade.strike} ${trade.side} x${lots} @ ${premium.toFixed(1)}`,
+        text: `#${meta?.no} ${meta?.name} ${setup.side} · option SL ${settingsRef.current.paperSl ?? 20} / target ${settingsRef.current.paperTarget ?? 30} pts` })
+    }
     if (!already && !isReplay && settingsRef.current.telegram !== false) {
       const meta = STRATEGY_BY_ID[setup.id]
       telegram(`Paper ${trade.action} ${underlying} ${trade.strike} ${trade.side} x${lots} lot(s) @ ${premium.toFixed(1)} - #${meta?.no} ${meta?.name} ${setup.side}, futures ${setup.entry.toFixed(1)} (SL ${setup.stop.toFixed(1)}, target ${setup.target.toFixed(1)}); option SL ${settingsRef.current.paperSl ?? 20} / target ${settingsRef.current.paperTarget ?? 30} pts`)
@@ -239,7 +253,12 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     if (!day) return prev
     return { ...prev, [dayKey]: { ...day, positions: day.positions.map((p) => (p.key === key ? { ...p, ...patch } : p)) } }
   })
+  // A live trade's exit goes to Dhan once: the exit effect, the Exit button and the Dhan check can all
+  // reach it in the same moment (before the row shows exitSent).
+  const exitingRef = useRef(new Set())
   const exitLive = (row, reason) => {
+    if (exitingRef.current.has(row.key)) return
+    exitingRef.current.add(row.key)
     const atMs = row.exitTime ?? nowMsRef.current ?? Date.now()
     const premium = row.exitTime ? row.current : premiumAt(oi, row.side, row.strike, atMs) ?? row.current
     markPosition(row.key, { exitSent: true, exitError: null, exitTime: atMs, exitPremium: premium, exitReason: reason })
@@ -247,6 +266,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     liveTradingApi.exitTrade(row.orderIds ?? [], settingsRef.current.liveSlippage ?? 2)
       .then((result) => markPosition(row.key, { liveNote: result.message }))
       .catch((err) => {
+        exitingRef.current.delete(row.key) // failed: Exit can be pressed again
         markPosition(row.key, { exitError: err.message })
         notification.error({ message: `Live exit failed: ${row.strike} ${row.side}`, description: `${err.message} - check the Dhan panel and press Exit again.`, placement: 'topRight', duration: 0 })
       })
@@ -608,18 +628,24 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [paperRows, isReplay])
   const tgPrimedRef = useRef(null)
-  // Telegram when a paper trade closes - its own Max SL / Target, or its setup's stop / target /
-  // trailing SL / time exit - once per trade (kept per day, so a refresh does not send it again). Live
-  // trades send theirs when the exit goes to Dhan (exitLive).
+  const exitNotifiedRef = useRef({ day: null, keys: new Set() })
+  // A paper trade closing - its own Max SL / Target, or its setup's stop / target / trailing SL / time
+  // exit - is announced once per trade: a notification with a chime (replays too) and, live, Telegram.
+  // Kept per day, so a refresh does not announce it again. Live trades announce their exit when it goes
+  // to Dhan (exitLive), and Dhan's own fills (SL / target legs) come as live trade events.
   useEffect(() => {
-    if (isReplay || settingsRef.current.telegram === false) return
-    let sent
-    try { sent = JSON.parse(localStorage.getItem(TG_SENT_KEY) ?? '{}') } catch { sent = {} }
-    const today = new Set(sent[dayKey] ?? [])
+    if (!(oi && view?.minuteBars?.length) && tgPrimedRef.current !== dayKey) return // exits are not known yet
+    const mem = exitNotifiedRef.current
+    if (mem.day !== dayKey) {
+      let stored = []
+      if (!isReplay) { try { stored = JSON.parse(localStorage.getItem(TG_SENT_KEY) ?? '{}')[dayKey] ?? [] } catch { stored = [] } }
+      exitNotifiedRef.current = { day: dayKey, keys: new Set(stored) }
+    }
+    const today = exitNotifiedRef.current.keys
     // The first look after the page opens: trades already closed by then are not news.
-    if (tgPrimedRef.current !== dayKey && !(oi && view?.minuteBars?.length)) return // exits are not known yet
     const opening = tgPrimedRef.current !== dayKey
     if (opening) tgPrimedRef.current = dayKey
+    const cfg = settingsRef.current
     let changed = false
     for (const r of paperRows) {
       if (r.live || !r.exitTime || !r.exitReason || today.has(r.key)) continue
@@ -627,9 +653,14 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       changed = true
       if (opening) continue
       const meta = STRATEGY_BY_ID[r.strategy]
-      telegram(`Paper exit - ${r.exitReason}: ${r.action === 'SELL' ? 'sold' : 'bought'} ${underlying} ${r.strike} ${r.side} x${r.lots} @ ${r.premium.toFixed(1)} -> ${r.current != null ? r.current.toFixed(1) : '-'} = ${r.points != null ? `${r.points >= 0 ? '+' : ''}${r.points.toFixed(1)} pts, Rs ${Math.round(r.rupees).toLocaleString('en-IN')}` : '-'} (#${meta?.no} ${meta?.name})`)
+      const result = `${r.action === 'SELL' ? 'sold' : 'bought'} ${underlying} ${r.strike} ${r.side} x${r.lots} @ ${r.premium.toFixed(1)} -> ${r.current != null ? r.current.toFixed(1) : '-'} = ${r.points != null ? `${r.points >= 0 ? '+' : ''}${r.points.toFixed(1)} pts, Rs ${Math.round(r.rupees).toLocaleString('en-IN')}` : '-'}`
+      const reason = String(r.exitReason)
+      const kind = /target/i.test(reason) ? 'target' : /\bSL\b|stop/i.test(reason) ? 'stopLoss' : 'exit'
+      notifyTrade({ kind, good: (r.points ?? 0) >= 0, key: `paper-exit-${r.key}`, sound: cfg.sound !== false,
+        title: `Paper exit - ${reason}`, text: `${result} (#${meta?.no} ${meta?.name})`,
+        telegramText: !isReplay && cfg.telegram !== false ? `Paper exit - ${reason}: ${result} (#${meta?.no} ${meta?.name})` : null })
     }
-    if (changed) { try { localStorage.setItem(TG_SENT_KEY, JSON.stringify({ [dayKey]: [...today] })) } catch { /* convenience only */ } }
+    if (changed && !isReplay) { try { localStorage.setItem(TG_SENT_KEY, JSON.stringify({ [dayKey]: [...today] })) } catch { /* convenience only */ } }
   }, [paperRows, isReplay, dayKey, underlying, oi, view?.minuteBars?.length])
 
   // A live trade closed OUTSIDE this box - from the OI Replay's live panel, the Dhan app, or its own
@@ -644,6 +675,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       if (!open.length) return
       const snap = await liveTradingApi.positions().catch(() => null)
       if (!snap?.dhanLoggedIn) return
+      notifyLiveTradeEvents(snap.events, { sound: settingsRef.current.sound !== false })
       const pending = new Set((snap.pendingOrders ?? []).map((o) => String(o.orderId)))
       for (const r of open) {
         const st = dhanSeenRef.current.get(r.key) ?? { seen: false, missing: 0 }
@@ -653,7 +685,6 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
           const atMs = nowMsRef.current ?? Date.now()
           const premium = premiumAt(oi, r.side, r.strike, atMs) ?? r.current
           markPosition(r.key, { exitSent: true, exitError: null, exitTime: atMs, exitPremium: premium, exitReason: 'Closed on Dhan (OI panel / its SL or target)', liveNote: 'Its super order is no longer pending on Dhan.' })
-          if (settingsRef.current.telegram !== false) telegram(`LIVE trade closed on Dhan: ${underlying} ${r.strike} ${r.side} x${r.lots} (closed outside the strategy scanner, or its SL / target filled)`)
         }
       }
     }
