@@ -134,8 +134,11 @@ function reference(setup, bars, untilMs, dayOver) {
     if (hitTarget) return { exitAt: b.time, exitPrice: setup.target, r: Math.abs(setup.target - setup.entry) / risk }
     last = b.close
     best = dir > 0 ? Math.max(best, b.high) : Math.min(best, b.low)
-    if (setup.trail && dir * (best - setup.entry) >= setup.trail.startR * risk) {
-      const trailed = best - dir * setup.trail.gapR * risk
+    // The trail in R (x the risk) or, unit 'pts', in futures points.
+    const trailStart = setup.trail?.unit === 'pts' ? setup.trail.startPts : setup.trail?.startR * risk
+    const trailGap = setup.trail?.unit === 'pts' ? setup.trail.gapPts : setup.trail?.gapR * risk
+    if (setup.trail && dir * (best - setup.entry) >= trailStart) {
+      const trailed = best - dir * trailGap
       stop = dir > 0 ? Math.max(stop, trailed) : Math.min(stop, trailed)
     }
     if (b.time + MIN >= end) return { exitAt: b.time, exitPrice: b.close, r: (dir * (b.close - setup.entry)) / risk }
@@ -156,7 +159,7 @@ function reference(setup, bars, untilMs, dayOver) {
       const riskPts = 5 + rnd() * 40
       const setup = {
         side: dir > 0 ? 'LONG' : 'SHORT', t, entry, stop: entry - dir * riskPts, target: entry + dir * riskPts * (1 + rnd() * 2.5),
-        timeStopMs: t + (20 + Math.floor(rnd() * 70)) * MIN, trail: rnd() < 0.6 ? { startR: 0.5 + rnd() * 1.5, gapR: 0.5 + rnd() * 1.5 } : null,
+        timeStopMs: t + (20 + Math.floor(rnd() * 70)) * MIN, trail: rnd() < 0.4 ? { startR: 0.5 + rnd() * 1.5, gapR: 0.5 + rnd() * 1.5 } : rnd() < 0.5 ? { unit: 'pts', startR: 1, gapR: 1, startPts: 2 + rnd() * 15, gapPts: 1 + rnd() * 10 } : null,
       }
       const until = rnd() < 0.3 ? t + Math.floor(rnd() * 60) * MIN : Infinity
       const dayOver = until === Infinity

@@ -12,7 +12,7 @@ import { adaptiveStats } from './dayRegime.js'
 import {
   ACTIVE_STRATEGIES, STRATEGY_BY_ID, evaluateStrategies, simulateOutcome, strategyStats, topFifteen, MIN_TRADES_TO_RANK, oiSummary, optionOiText,
   DEFAULT_TRAIL, LAST_ENTRY, SQUARE_OFF, fmtHm, exitLabel, premiumAt, optionPnlPoints, optionTradeText, squareOffMs, optionStopTargetHit, RANGE_IDS, asReplayContext,
-  coolOffGate, gradeOf, optionTradeAt, dayTypeAt, STRATEGY_FILTERS, strategyFilters, changedFilters,
+  coolOffGate, gradeOf, optionTradeAt, dayTypeAt, trailPoints, STRATEGY_FILTERS, strategyFilters, changedFilters,
 } from './strategyEngine.js'
 import { aggregateBars, analyzeBars, findWalls, liquiditySignals, pullStackSignals, replayRange, replayView } from './orderFlowMath.js'
 
@@ -81,8 +81,27 @@ function upTo(prints, ms) {
 }
 
 // The trailing stop a new setup gets from the scanner's settings (null = a fixed stop).
-const trailFor = (cfg) => (cfg.trail?.on === false ? null : { startR: cfg.trail?.startR ?? DEFAULT_TRAIL.startR, gapR: cfg.trail?.gapR ?? DEFAULT_TRAIL.gapR, ...(cfg.trail?.runner ? { runner: true } : {}) })
-const trailText = (trail) => (trail ? `trailing SL: after +${trail.startR}R the stop follows ${trail.gapR}R behind the best price${trail.runner ? ' - letting it run (no fixed target / time stop, out on the trail or at 15:10)' : ''}` : 'fixed SL')
+// Trailing SL in futures (index) POINTS by default - "after +start pts, follow gap pts behind the best
+// price" - set per underlying (its points move differently); or in R (x the trade's own risk).
+const DEFAULT_TRAIL_PTS = { NIFTY: { start: 30, gap: 30 }, BANKNIFTY: { start: 75, gap: 75 }, SENSEX: { start: 100, gap: 100 } }
+const FALLBACK_TRAIL_PTS = { start: 30, gap: 30 }
+const trailUnit = (cfg) => (cfg.trail?.unit === 'R' ? 'R' : 'pts')
+const trailPtsFor = (cfg, underlying) => {
+  const key = String(underlying ?? '').toUpperCase()
+  return { ...(DEFAULT_TRAIL_PTS[key] ?? FALLBACK_TRAIL_PTS), ...cfg.trail?.pts?.[key] }
+}
+const trailFor = (cfg, underlying) => {
+  if (cfg.trail?.on === false) return null
+  const pts = trailPtsFor(cfg, underlying)
+  return {
+    startR: cfg.trail?.startR ?? DEFAULT_TRAIL.startR, gapR: cfg.trail?.gapR ?? DEFAULT_TRAIL.gapR,
+    ...(trailUnit(cfg) === 'pts' ? { unit: 'pts', startPts: pts.start, gapPts: pts.gap } : {}),
+    ...(cfg.trail?.runner ? { runner: true } : {}),
+  }
+}
+const trailText = (trail) => (trail
+  ? `trailing SL: after +${trail.unit === 'pts' ? `${trail.startPts} pts` : `${trail.startR}R`} the stop follows ${trail.unit === 'pts' ? `${trail.gapPts} pts` : `${trail.gapR}R`} behind the best price${trail.runner ? ' - letting it run (no fixed target / time stop, out on the trail or at 15:10)' : ''}`
+  : 'fixed SL')
 
 function fmtR(r) {
   return r == null ? '-' : `${r >= 0 ? '+' : ''}${r.toFixed(2)}R`
@@ -378,7 +397,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     const held = [...pendingRef.current.values()].map((p) => p.setup)
     setCooling((prev) => (prev.map((x) => `${x.id}${x.side}${x.t}`).join() === held.map((x) => `${x.id}${x.side}${x.t}`).join() ? prev : held))
     const fresh = gate.fire.filter((s) => !recentlyFired(s))
-      .map((s) => ({ ...s, trail: trailFor(settingsRef.current) }))
+      .map((s) => ({ ...s, trail: trailFor(settingsRef.current, underlying) }))
     if (!fresh.length) return
     firedRef.current = [...firedRef.current, ...fresh]
     setFired(firedRef.current)
@@ -401,7 +420,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
           <div style={{ fontSize: 12 }}>
             <div style={{ fontSize: 13 }}>{IST_HHMM.format(new Date(s.t))} · futures {s.entry.toFixed(1)} · <b>SL {s.stop.toFixed(1)}</b> · <b>Target {s.target.toFixed(1)}</b> · <b>{s.confidence}% {s.grade ?? gradeOf(s.confidence)}</b></div>
             {s.signal && <div>Waited for the cool-off: signal at {IST_HHMM.format(new Date(s.signal.t))} @ {s.signal.entry.toFixed(1)}</div>}
-            <div>{trailText(s.trail)}{s.trail ? ` (from ${(s.entry + (s.side === 'LONG' ? 1 : -1) * s.trail.startR * Math.abs(s.entry - s.stop)).toFixed(1)})` : ''} · closed by {fmtHm(SQUARE_OFF)} at the latest</div>
+            <div>{trailText(s.trail)}{s.trail ? ` (from ${(s.entry + (s.side === 'LONG' ? 1 : -1) * trailPoints(s.trail, Math.abs(s.entry - s.stop)).start).toFixed(1)})` : ''} · closed by {fmtHm(SQUARE_OFF)} at the latest</div>
             {s.options && (
               <div style={{ margin: '4px 0' }}>
                 <b>Option:</b> {[optionTradeText(tradeOf(s, 'buy')), optionTradeText(tradeOf(s, 'sell'))].filter(Boolean).join(' · or ')}
@@ -561,7 +580,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
           const recentlyFound = (s) => found.some((f) => f.id === s.id && f.side === s.side && s.t - f.t < COOLDOWN_MS)
           const gate = coolOffGate(pending, setups.filter((s) => !recentlyFound(s)), { nowMs: clock, price, bars, oi: scanOi })
           for (const s of gate.fire) {
-            if (!recentlyFound(s)) found.push({ ...s, trail: trailFor(settingsRef.current) })
+            if (!recentlyFound(s)) found.push({ ...s, trail: trailFor(settingsRef.current, underlying) })
           }
         }
         if (i % 10 === 0) {
@@ -862,6 +881,12 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       </Tooltip>
     )
   }
+  // The trailing SL's points for this underlying (kept per underlying with the scanner settings).
+  const setTrailPts = (patch) => setSettings((s) => {
+    const key = String(underlying ?? '').toUpperCase()
+    const pts = { ...s.trail?.pts, [key]: { ...trailPtsFor(s, underlying), ...patch } }
+    return { ...s, trail: { ...DEFAULT_TRAIL, ...s.trail, pts } }
+  })
   const toggleCustom = (id, on) => setSettings((s) => ({ ...s, custom: on ? [...new Set([...s.custom, id])] : s.custom.filter((x) => x !== id) }))
 
   return (
@@ -938,13 +963,32 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
               <Space size={4}><Switch size="small" checked={settings.trail?.on !== false} onChange={(v) => setSettings((s) => ({ ...s, trail: { ...DEFAULT_TRAIL, ...s.trail, on: v } }))} /><Text style={{ fontSize: 12 }}>Trailing SL</Text></Space>
               {settings.trail?.on !== false && (
                 <>
+                  <Tooltip title="pts = futures (index) points, set per underlying; R = multiples of the trade's own risk (entry to stop). Applies to new signals.">
+                    <Segmented size="small" value={trailUnit(settings)} aria-label="Trailing SL unit"
+                      onChange={(v) => setSettings((s) => ({ ...s, trail: { ...DEFAULT_TRAIL, ...s.trail, unit: v === 'R' ? 'R' : 'pts' } }))}
+                      options={[{ value: 'pts', label: 'pts' }, { value: 'R', label: 'R' }]} />
+                  </Tooltip>
                   <Text style={{ fontSize: 12 }}>after +</Text>
-                  <InputNumber size="small" min={0.25} max={5} step={0.25} style={{ width: 70 }} value={settings.trail?.startR ?? DEFAULT_TRAIL.startR} aria-label="Trail starts at R"
-                    onChange={(v) => v != null && setSettings((s) => ({ ...s, trail: { ...DEFAULT_TRAIL, ...s.trail, startR: v } }))} />
-                  <Text style={{ fontSize: 12 }}>R, follow</Text>
-                  <InputNumber size="small" min={0.25} max={5} step={0.25} style={{ width: 70 }} value={settings.trail?.gapR ?? DEFAULT_TRAIL.gapR} aria-label="Trail distance in R"
-                    onChange={(v) => v != null && setSettings((s) => ({ ...s, trail: { ...DEFAULT_TRAIL, ...s.trail, gapR: v } }))} />
-                  <Text style={{ fontSize: 12 }}>R behind</Text>
+                  {trailUnit(settings) === 'pts'
+                    ? (
+                      <InputNumber size="small" min={1} max={5000} step={5} style={{ width: 76 }} value={trailPtsFor(settings, underlying).start} aria-label="Trail starts after points"
+                        onChange={(v) => v != null && setTrailPts({ start: v })} />
+                    )
+                    : (
+                      <InputNumber size="small" min={0.25} max={20} step={0.25} style={{ width: 70 }} value={settings.trail?.startR ?? DEFAULT_TRAIL.startR} aria-label="Trail starts at R"
+                        onChange={(v) => v != null && setSettings((s) => ({ ...s, trail: { ...DEFAULT_TRAIL, ...s.trail, startR: v } }))} />
+                    )}
+                  <Text style={{ fontSize: 12 }}>{trailUnit(settings) === 'pts' ? 'pts, follow' : 'R, follow'}</Text>
+                  {trailUnit(settings) === 'pts'
+                    ? (
+                      <InputNumber size="small" min={1} max={5000} step={5} style={{ width: 76 }} value={trailPtsFor(settings, underlying).gap} aria-label="Trail distance in points"
+                        onChange={(v) => v != null && setTrailPts({ gap: v })} />
+                    )
+                    : (
+                      <InputNumber size="small" min={0.25} max={20} step={0.25} style={{ width: 70 }} value={settings.trail?.gapR ?? DEFAULT_TRAIL.gapR} aria-label="Trail distance in R"
+                        onChange={(v) => v != null && setSettings((s) => ({ ...s, trail: { ...DEFAULT_TRAIL, ...s.trail, gapR: v } }))} />
+                    )}
+                  <Text style={{ fontSize: 12 }}>{trailUnit(settings) === 'pts' ? `pts behind (${underlying} futures)` : 'R behind'}</Text>
                   <Tooltip title="Off (default): a trade ends at its target, its stop / trailing stop, its time stop or 15:10 - the rules the stats were measured with. On: no fixed target and no time stop - the trailing stop follows the move and only it (or 15:10) ends the trade, so a trend can pay several R. Applies to new alerts. For the paper / live OPTION trades set Target 0 too, or their own premium target still closes them.">
                     <Space size={4}><Switch size="small" checked={!!settings.trail?.runner} onChange={(v) => setSettings((s) => ({ ...s, trail: { ...DEFAULT_TRAIL, ...s.trail, runner: v } }))} aria-label="Let winners run" /><Text style={{ fontSize: 12 }}>Let winners run</Text></Space>
                   </Tooltip>

@@ -40,7 +40,8 @@ export const LAST_ENTRY = hm(14, 45)
 /** ...and every trade still open is closed at this cut-off. */
 export const SQUARE_OFF = hm(15, 10)
 /** Trailing stop-loss: once a trade is `startR` in profit, the stop follows the best price `gapR`
- *  behind it (with the defaults the stop reaches the entry - breakeven - at +1R, and only ever tightens). */
+ *  behind it (with the defaults the stop reaches the entry - breakeven - at +1R, and only ever tightens).
+ *  The trader can set it in futures points instead (`unit: 'pts'`, `startPts` / `gapPts` - trailPoints). */
 export const DEFAULT_TRAIL = { startR: 1, gapR: 1 }
 export const fmtHm = (m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`
 
@@ -2133,16 +2134,25 @@ export function dayTypeAt(oi, minuteBars, nowMs) {
 
 // ---- outcome --------------------------------------------------------------------------------------
 
+/** A trail's start and distance in futures points for a trade risking `risk` points: in R (`startR` /
+ *  `gapR` x the risk) or, with `unit: 'pts'`, in points as set (`startPts` / `gapPts`). */
+export function trailPoints(trail, risk) {
+  return trail.unit === 'pts'
+    ? { start: Number(trail.startPts) || 0, gap: Number(trail.gapPts) || 0 }
+    : { start: trail.startR * risk, gap: trail.gapR * risk }
+}
+
 /** The stop-loss in force once price has reached `best` (the most favourable price since entry): the
- *  original stop until the trade is `trail.startR` in profit, then `trail.gapR` behind `best` - never
- *  looser than the original. No `setup.trail`: a fixed stop. */
+ *  original stop until the trade is the trail's start in profit, then the trail's distance behind `best`
+ *  - never looser than the original. No `setup.trail`: a fixed stop. */
 export function trailedStop(setup, best) {
   const trail = setup.trail
   if (!trail) return setup.stop
   const dir = setup.side === 'LONG' ? 1 : -1
   const risk = Math.abs(setup.entry - setup.stop)
-  if (!(risk > 0) || dir * (best - setup.entry) < trail.startR * risk) return setup.stop
-  const trailed = best - dir * trail.gapR * risk
+  const { start, gap } = trailPoints(trail, risk)
+  if (!(risk > 0) || !(gap > 0) || dir * (best - setup.entry) < start) return setup.stop
+  const trailed = best - dir * gap
   return dir > 0 ? Math.max(setup.stop, trailed) : Math.min(setup.stop, trailed)
 }
 
