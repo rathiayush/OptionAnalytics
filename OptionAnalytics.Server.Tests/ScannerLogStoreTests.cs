@@ -204,6 +204,9 @@ public sealed class ScannerLogStoreTests : IDisposable
         Assert.Equal(838.75, nifty.NetRupees);            // 1441.75 - 807.25 + 204.25
         // What an adaptive scanner would have taken: signals 1 and day 2's; trades p1 and p3 (p2 was not).
         Assert.Equal((2, 80.0, 2, 23.5, 1646.0), (nifty.AdaptiveSignals, nifty.AdaptiveFuturesPoints, nifty.AdaptiveTrades, nifty.AdaptiveOptionPoints, nifty.AdaptiveNetRupees));
+        // P&L per lot: every trade as if done with one lot, summed - all, the adaptive ones (p1 + p3) and the non-adaptive one (p2).
+        Assert.Equal((838.75, 1646.0), (nifty.NetPerLot, nifty.AdaptiveNetPerLot));
+        Assert.Equal((1, -10.0, -807.25, -807.25, 0), (nifty.NonAdaptiveTrades, nifty.NonAdaptiveOptionPoints, nifty.NonAdaptiveNetRupees, nifty.NonAdaptiveNetPerLot, nifty.UntaggedTrades));
         var bank = rows.Single(r => r.Underlying == "BANKNIFTY" && r.Scope == "total");
         Assert.Equal((1, 120.0, 80.0, 5000.0), (bank.Signals, bank.FuturesPoints, bank.OptionPoints, bank.NetRupees));
         var day = rows.Single(r => r.Underlying == "NIFTY" && r.Date == "2026-10-06");
@@ -223,6 +226,14 @@ public sealed class ScannerLogStoreTests : IDisposable
         var rows = ScannerLogStore.Read(SignalsPath).ToList();
         Assert.Equal(("40", "-30", ""), (rows[0]["points"], rows[1]["points"], rows[2]["points"]));
         Assert.Contains("points", File.ReadLines(SignalsPath).First().Split(','));
+    }
+
+    [Fact]
+    public void ATradeSavedWithNoAdaptiveCall_IsInTheTotal_ButInNeitherGroup()
+    {
+        var trade = new Dictionary<string, string> { ["underlying"] = "NIFTY", ["date"] = "2026-10-05", ["points"] = "10", ["net_rupees"] = "500", ["net_per_lot"] = "500", ["adaptive_take"] = "" };
+        var total = ScannerLogStore.Summarize(Array.Empty<Dictionary<string, string>>(), new[] { trade }).Single(r => r.Scope == "total");
+        Assert.Equal((1, 500.0, 0, 0, 1), (total.Trades, total.NetPerLot, total.AdaptiveTrades, total.NonAdaptiveTrades, total.UntaggedTrades));
     }
 
     [Fact]

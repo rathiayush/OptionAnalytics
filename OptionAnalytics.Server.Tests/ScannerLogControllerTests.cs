@@ -102,7 +102,7 @@ public sealed class ScannerLogControllerTests : IAsyncLifetime
         Assert.Equal("text/csv", csv.Content.Headers.ContentType?.MediaType);
         var lines = (await csv.Content.ReadAsStringAsync()).Split('\n', StringSplitOptions.RemoveEmptyEntries);
         Assert.Equal(string.Join(',', ScannerLogStore.SummaryColumns), lines[0]);
-        Assert.StartsWith("total,NIFTY,,1,1,1,100,40,2,1,0,0,20,1500,58.25,1441.75", lines[^1]);
+        Assert.StartsWith("total,NIFTY,,1,1,1,100,40,2,1,0,0,20,1500,58.25,1441.75,1441.75,1,40,1,20,1441.75,1441.75,0,0,0,0,0", lines[^1]);
 
         var signals = await (await _client.GetAsync("/api/scanner-log/signals")).Content.ReadAsStringAsync();
         Assert.Contains(",points,", signals.Split('\n')[0]);
