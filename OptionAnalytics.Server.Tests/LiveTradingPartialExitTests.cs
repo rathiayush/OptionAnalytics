@@ -189,6 +189,25 @@ public sealed class LiveTradingPartialExitTests
         Assert.Contains("DELETE /super/orders/S1/STOP_LOSS_LEG", dhan.Requests);
     }
 
+    [Theory]
+    [InlineData("TRIGGERED")]
+    [InlineData("TRANSIT")]
+    [InlineData("PART_TRADED")]
+    public async Task ClosingAPosition_CancelsAWorkingLegThatIsNotPlainPending(string legStatus)
+    {
+        // A stop-loss leg already triggered (or in transit / part-filled) is still working: left alone, it
+        // would fire after the exit and reverse the position - Close cancels it BEFORE exiting.
+        var (service, dhan, _) = await CreateAsync();
+        var s1 = dhan.SuperOrders.Single(o => o["orderId"]!.GetValue<string>() == "S1");
+        s1["legDetails"]![1]!["orderStatus"] = legStatus;
+
+        var result = await service.CloseAsync(SecurityId.ToString(), 1m, CancellationToken.None);
+
+        Assert.True(result.Success, result.Message);
+        var cancelAt = dhan.Requests.IndexOf("DELETE /super/orders/S1/STOP_LOSS_LEG");
+        Assert.True(cancelAt >= 0 && cancelAt < dhan.Requests.LastIndexOf("POST /orders"), $"the {legStatus} stop-loss leg is cancelled before the exit");
+    }
+
     [Fact]
     public async Task EveryOpenOrderIsListed_AndOneLegCanBeCancelled()
     {

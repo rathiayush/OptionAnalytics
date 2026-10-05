@@ -410,7 +410,7 @@ public sealed class LiveTradingService : BackgroundService
             if (u.Status == "TRADED")
             {
                 var other = u.LegNo == 2 ? "TARGET_LEG" : "STOP_LOSS_LEG";
-                var j = legs.FindIndex(l => l.LegName == other && l.OrderStatus == "PENDING");
+                var j = legs.FindIndex(l => l.LegName == other && IsOpenStatus(l.OrderStatus));
                 if (j >= 0) legs[j] = legs[j] with { OrderStatus = "CANCELLED" };
             }
             return order with
@@ -582,8 +582,8 @@ public sealed class LiveTradingService : BackgroundService
         {
             decimal? ltp = uint.TryParse(p.SecurityId, out var id) && _feed.LastTickFor(id) is { LastPrice: > 0 } tick ? tick.LastPrice : null;
             var legs = orders.Where(o => o.SecurityId == p.SecurityId && o.OrderStatus is "TRADED" or "PART_TRADED").ToList();
-            var target = legs.SelectMany(o => o.LegDetails).FirstOrDefault(l => l.LegName == "TARGET_LEG" && l.OrderStatus == "PENDING");
-            var stopLoss = legs.SelectMany(o => o.LegDetails).FirstOrDefault(l => l.LegName == "STOP_LOSS_LEG" && l.OrderStatus == "PENDING");
+            var target = legs.SelectMany(o => o.LegDetails).FirstOrDefault(l => l.LegName == "TARGET_LEG" && IsOpenStatus(l.OrderStatus));
+            var stopLoss = legs.SelectMany(o => o.LegDetails).FirstOrDefault(l => l.LegName == "STOP_LOSS_LEG" && IsOpenStatus(l.OrderStatus));
             // A stop-loss order left by an earlier partial exit (legacy - see ProtectionPrefix).
             var protection = plainOrders.FirstOrDefault(o => o.SecurityId == p.SecurityId && IsProtection(o) && PendingStatuses.Contains(o.OrderStatus));
             rows.Add(new LivePositionRow(
@@ -917,7 +917,7 @@ public sealed class LiveTradingService : BackgroundService
             if (requested >= open) return await CloseCoreAsync(securityId, slippagePoints, cancellationToken);
 
             var superOrders = (await _superOrders.ListAsync(cancellationToken)).Where(o => o.SecurityId == securityId).ToList();
-            if (superOrders.Any(o => o.OrderStatus is "PENDING" or "TRANSIT" or "PART_TRADED"))
+            if (superOrders.Any(o => IsOpenStatus(o.OrderStatus)))
                 return ManualOrderResult.Fail($"{position.TradingSymbol}: an entry for this contract is still filling - wait for it (or cancel it) before a partial exit");
 
             var working = await WorkingExitQuantityAsync(position, cancellationToken);
@@ -1028,7 +1028,8 @@ public sealed class LiveTradingService : BackgroundService
     }
 
     /// <summary>Moves ONE trade's stop-loss and target to <paramref name="stopLossPoints"/> /
-    /// <paramref name="targetPoints"/> premium points from its entry price (0 = leave that leg as it is):
+    /// <paramref name="targetPoints"/> premium points from its entry price - the actual fill once known,
+    /// else the entry's limit (0 = leave that leg as it is):
     /// the TARGET_LEG / STOP_LOSS_LEG of a filled entry, or the ENTRY_LEG's own levels while it is still
     /// pending - the only parts of a super order Dhan lets change.</summary>
     public async Task<ManualOrderResult> UpdateTradeLevelsAsync(IReadOnlyList<string> orderIds, decimal stopLossPoints, decimal targetPoints, CancellationToken cancellationToken)
@@ -1046,9 +1047,17 @@ public sealed class LiveTradingService : BackgroundService
                 uint.TryParse(order.SecurityId, out var id);
                 var tick = _chain.FindBySecurityId(id)?.TickSize is > 0 and var t ? t : 0.05m;
                 var isSell = string.Equals(order.TransactionType, "SELL", StringComparison.OrdinalIgnoreCase);
-                decimal? target = targetPoints > 0 ? StrategyTriggerHostedService.RoundToTick(Math.Max(tick, isSell ? order.Price - targetPoints : order.Price + targetPoints), tick) : null;
-                decimal? stop = stopLossPoints > 0 ? StrategyTriggerHostedService.RoundToTick(Math.Max(tick, isSell ? order.Price + stopLossPoints : order.Price - stopLossPoints), tick) : null;
                 var status = (order.OrderStatus ?? "").Trim().ToUpperInvariant();
+                // From the entry's actual fill (its average traded price, known from the order-update
+                // socket) once it has filled - the order's own price is only its LIMIT (bid/ask plus the
+                // slippage), so levels measured from it would sit off by the slippage.
+                decimal entry = order.Price;
+                lock (_lock)
+                {
+                    if (status == "TRADED" && _fills.TryGetValue((order.OrderId, 1), out var fill) && fill.Avg is > 0) entry = fill.Avg.Value;
+                }
+                decimal? target = targetPoints > 0 ? StrategyTriggerHostedService.RoundToTick(Math.Max(tick, isSell ? entry - targetPoints : entry + targetPoints), tick) : null;
+                decimal? stop = stopLossPoints > 0 ? StrategyTriggerHostedService.RoundToTick(Math.Max(tick, isSell ? entry + stopLossPoints : entry - stopLossPoints), tick) : null;
                 var changes = new List<(string Leg, decimal? Target, decimal? Stop)>();
                 if (status == "TRADED")
                 {
@@ -1078,17 +1087,19 @@ public sealed class LiveTradingService : BackgroundService
     /// would close if they fired.</summary>
     internal static int LegQuantity(IEnumerable<SuperOrderSummary> superOrders) => superOrders
         .Where(o => o.OrderStatus is "TRADED" or "PART_TRADED"
-            && o.LegDetails.Any(l => l.LegName is "STOP_LOSS_LEG" or "TARGET_LEG" && l.OrderStatus == "PENDING"))
+            && o.LegDetails.Any(l => l.LegName is "STOP_LOSS_LEG" or "TARGET_LEG" && IsOpenStatus(l.OrderStatus)))
         .Sum(o => o.FilledQty is > 0 and var f ? f : o.Quantity);
 
-    /// <summary>Cancels what protects a position - its super orders' pending target/stop-loss legs and any
+    /// <summary>Cancels what protects a position - its super orders' working target/stop-loss legs (any
+    /// status not finished: PENDING, but also TRANSIT / TRIGGERED / PART_TRADED - a leg left working
+    /// would fire after the exit and reverse the position) and any
     /// protection order (OIRP-) - and returns the target and stop-loss they had.</summary>
     private async Task<(decimal? Target, decimal? StopLoss)> CancelProtectionAsync(string securityId, CancellationToken cancellationToken)
     {
         decimal? target = null, stopLoss = null;
         foreach (var order in (await _superOrders.ListAsync(cancellationToken)).Where(o => o.SecurityId == securityId && o.OrderStatus is "TRADED" or "PART_TRADED"))
         {
-            foreach (var leg in order.LegDetails.Where(l => l.LegName is "TARGET_LEG" or "STOP_LOSS_LEG" && l.OrderStatus == "PENDING"))
+            foreach (var leg in order.LegDetails.Where(l => l.LegName is "TARGET_LEG" or "STOP_LOSS_LEG" && IsOpenStatus(l.OrderStatus)))
             {
                 if (leg.LegName == "TARGET_LEG") target ??= leg.Price ?? order.TargetPrice;
                 else stopLoss ??= leg.Price ?? order.StopLossPrice;

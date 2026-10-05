@@ -156,27 +156,39 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     const list = paperBookRef.current[dayKey]?.positions ?? []
     const key = `${setup.id}-${setup.t}-${which}`
     if (list.some((p) => sameSignal(p, setup, trade)) || placingRef.current.has(key)) return
-    const liveCount = list.filter((p) => p.live).length
+    // Orders still on their way count too - two alerts in the same moment must not both pass the limit.
+    const liveCount = list.filter((p) => p.live).length + placingRef.current.size
     if (liveCount >= (cfg.maxLiveTrades ?? 5)) return fail(`The day's limit of ${cfg.maxLiveTrades} live trades is reached.`)
     if (liveLossRef.current <= -(cfg.maxLiveLoss ?? 10000)) return fail(`The day's live loss limit (₹${(cfg.maxLiveLoss ?? 10000).toLocaleString('en-IN')}) is reached.`)
     placingRef.current.add(key)
     const lots = Math.max(1, cfg.paperLots ?? 1)
+    // A trade Dhan took (all of it, or the slices before a rejection) is recorded, so the setup's exit
+    // closes it - an untracked live position would never be exited by the scanner.
+    const record = (result, note) => {
+      const position = {
+        key, setupKey: `${setup.id}-${setup.t}`, setupT: setup.t, strategy: setup.id, setupSide: setup.side, action: trade.action, side: trade.side, strike: trade.strike,
+        lots, lotSize: PAPER_TRADE_LOT_SIZE[underlying] ?? 1, premium: result.prices?.limit ?? trade.premium, slPts: cfg.paperSl, targetPts: cfg.paperTarget,
+        entryTime: nowMsRef.current ?? Date.now(), exitTime: null, exitPremium: null, exitReason: null,
+        live: true, orderIds: result.orderIds ?? [], liveNote: note ?? result.message,
+      }
+      setPaperBook((prev) => ({ ...prev, [dayKey]: { date, positions: [...(prev[dayKey]?.positions ?? []), position] } }))
+      return position
+    }
     try {
       const result = await liveTradingApi.place({
         underlying, expiry: oi.expiry, strike: trade.strike, side: trade.side, direction: trade.action, lots,
         slippagePoints: cfg.liveSlippage ?? 2, stopLossPoints: cfg.paperSl, targetPoints: cfg.paperTarget,
       })
-      const position = {
-        key, setupKey: `${setup.id}-${setup.t}`, setupT: setup.t, strategy: setup.id, setupSide: setup.side, action: trade.action, side: trade.side, strike: trade.strike,
-        lots, lotSize: PAPER_TRADE_LOT_SIZE[underlying] ?? 1, premium: result.prices?.limit ?? trade.premium, slPts: cfg.paperSl, targetPts: cfg.paperTarget,
-        entryTime: nowMsRef.current ?? Date.now(), exitTime: null, exitPremium: null, exitReason: null,
-        live: true, orderIds: result.orderIds ?? [], liveNote: result.message,
-      }
-      setPaperBook((prev) => ({ ...prev, [dayKey]: { date, positions: [...(prev[dayKey]?.positions ?? []), position] } }))
+      const position = record(result)
       notification.success({ message: `LIVE ${trade.action} ${trade.strike} ${trade.side} x${lots} placed on Dhan`, description: result.message, placement: 'topRight', duration: 8 })
       if (cfg.telegram !== false) telegram(`LIVE order placed: ${trade.action} ${underlying} ${trade.strike} ${trade.side} x${lots} lot(s) @ ~${position.premium.toFixed(1)} - #${STRATEGY_BY_ID[setup.id]?.no} ${STRATEGY_BY_ID[setup.id]?.name} ${setup.side}, futures ${setup.entry.toFixed(1)} (SL ${setup.stop.toFixed(1)}, target ${setup.target.toFixed(1)}); option SL ${cfg.paperSl} / target ${cfg.paperTarget} pts`)
     } catch (err) {
-      fail(err.message)
+      if (err.result?.orderIds?.length) {
+        // Part of it went through: keep it (so it is exited with its setup) and say so loudly.
+        record(err.result, `PARTLY placed - ${err.message}`)
+        notification.warning({ message: `LIVE order only partly placed: ${trade.action} ${trade.strike} ${trade.side}`, description: `${err.message} - the placed part is tracked and exits with its setup; check the Dhan panel.`, placement: 'topRight', duration: 0 })
+        if (cfg.telegram !== false) telegram(`LIVE order PARTLY placed: ${trade.action} ${underlying} ${trade.strike} ${trade.side} - ${err.message}`)
+      } else fail(err.message)
     } finally {
       placingRef.current.delete(key)
     }

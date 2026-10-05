@@ -15,7 +15,13 @@ async function postJson(url, body, method = 'POST') {
     body: body == null ? undefined : JSON.stringify(body),
   })
   const result = await response.json().catch(() => null)
-  if (!response.ok || !result?.success) throw new Error(result?.message || `Request failed (HTTP ${response.status})`)
+  if (!response.ok || !result?.success) {
+    // The server's answer rides on the error: a failure can still carry orders that DID go through (a
+    // sliced order Dhan rejected half-way) - the caller must keep track of those.
+    const error = new Error(result?.message || `Request failed (HTTP ${response.status})`)
+    error.result = result
+    throw error
+  }
   return result
 }
 
