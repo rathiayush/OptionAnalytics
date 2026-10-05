@@ -24,6 +24,7 @@
 // P&L (premium, decay) is not modelled.
 
 import { findSuddenWalls, suddenWallText } from './suddenOi.js'
+import { liquidityMap } from './orderFlowMath.js'
 
 const MIN = 60_000
 const msOf = (t) => (typeof t === 'number' ? t : new Date(t).getTime())
@@ -74,6 +75,8 @@ export const STRATEGIES = [
   { id: 'oiSqueeze', no: 24, name: 'Trapped-OI squeeze - short & long squeeze', short: 'OI squeeze', priority: 2 },
   // A wall that appears suddenly (heavy writing in the last 5 minutes) with the book leaning the same way.
   { id: 'suddenWall', no: 25, name: 'Sudden OI wall + DOM imbalance', short: 'Sudden wall + DOM', priority: 3 },
+  // The heatmap's wall and the option writers' wall at the same price, with the futures: hold or break.
+  { id: 'heatmapOi', no: 26, name: 'OI + liquidity heatmap confluence - hold or break', short: 'Heatmap + OI wall', priority: 3 },
 ]
 export const STRATEGY_BY_ID = Object.fromEntries(STRATEGIES.map((s) => [s.id, s]))
 /** The strategies in use - what the scanner runs, lists, alerts on and scores. */
@@ -210,7 +213,7 @@ export function optionOiRead(oi, spot, ms, minutes = 15, near = null) {
   const sinceOpen = lean(peOpen, ceOpen, 0.01)
   const combined = Math.max(-1, Math.min(1, 0.45 * recent + 0.55 * sinceOpen + 0.2 * Math.max(-1, Math.min(1, (pcr - pcrAtOpen) / 0.2))))
   return {
-    atm, minutes, near, strikes: seen, peChg, ceChg, peOpen, ceOpen, net: peChg - ceChg,
+    atm, minutes, near, strikes: seen, peNow, ceNow, peChg, ceChg, peOpen, ceOpen, net: peChg - ceChg,
     lean: recent, leanOpen: sinceOpen, combined, pcr, pcrChange: pcr - pcrBefore, pcrOpenChange: pcr - pcrAtOpen,
   }
 }
@@ -457,7 +460,8 @@ export function confidenceText(confidence, parts) {
 
 /**
  * Wait for a cool-off: a setup whose price ran too far too fast into it (setup.coolOff, see paceOf) is
- * not entered at the spike - it is held, and entered once price has pulled back (35% of the run) or
+ * not entered at the spike - it is held, and entered once price has pulled back (35% of the run - 20%
+ * for a squeeze, setup.coolOff.pullback) or
  * paused (2 completed bars without a new extreme) - only from what is known at `nowMs`.
  * The stop stays at the setup's level but at least 1.2x the 1-min range from the new entry, the target
  * at its level; it is dropped when price reaches the target or the stop first, when under 1.2R is left,
@@ -486,7 +490,7 @@ export function coolOffGate(pending, setups, { nowMs, price, bars, oi }) {
     if (dir * (price - s.target) >= 0) { drop('ran to the target without cooling off'); continue }
     if (dir * (price - s.stop) <= 0) { drop('fell back through the stop'); continue }
     if (nowMs - s.t > COOL_OFF_MAX_MS || istMinute(nowMs) > LAST_ENTRY) { drop('no cool-off in time'); continue }
-    const pulledBack = dir * (p.peak - price) >= 0.35 * s.coolOff.run
+    const pulledBack = dir * (p.peak - price) >= (s.coolOff.pullback ?? 0.35) * s.coolOff.run
     let paused = false
     if (after.length >= 2) {
       const before = after.slice(0, -2)
@@ -612,7 +616,7 @@ const recent = (items, ms, within, timeOf) => items.filter((x) => { const t = ti
  * Every strategy whose checklist passes at `nowMs`. Input:
  *   nowMs, price (futures last), bars (1-minute analyzed bars, completed only), minuteBars (raw, up to now),
  *   prints (tape, oldest first, or null), book, liquidity, pullStack (signals), sweeps, icebergs,
- *   oi (buildOiContext), estimated, lotSize, bigLots.
+ *   oi (buildOiContext), estimated, lotSize, bigLots; heatmap (book snapshots up to nowMs) and rowSize for #26.
  * Returns setups: { id, name, side, t, entry, stop, target, timeStopMs, confidence, checks: { OI, Footprint, Tape, DOM, Heatmap } }.
  */
 export function evaluateStrategies(input) {
@@ -664,15 +668,24 @@ export function evaluateStrategies(input) {
   const nearRead = optionOiRead(oi, spotNow, nowMs, 15, 2)
   // Volatility: the average 1-minute range of the last 14 bars.
   const atr = atrOf(bars)
-  const push = (id, dir, plannedStop, targetPts, timeStopMin, confidence, checks) => {
+  // opts: rTarget - the target is a multiple of the stop (it widens with a volatility-widened stop);
+  //       stance 'recent' - judge the options OI on its last 15 minutes only (a squeeze: the since-open
+  //       writing IS the trapped side now covering); coolPullback - the pullback a fast run waits for.
+  const push = (id, dir, plannedStop, targetPts, timeStopMin, confidence, checks, opts = {}) => {
     if (!(plannedStop > 0) || !(targetPts > 0)) return
-    // Volatility floor: a stop inside 1.2x the average 1-minute range is hit by noise - widen it, and
-    // drop the setup when its target is then under 1.2R.
+    // Volatility floor: a stop inside 1.2x the average 1-minute range is hit by noise - widen it. An
+    // R-based target widens with it; a structural one (a wall, VWAP, the POC) stays, and the setup is
+    // dropped when it is then under 1.2R.
     const stopPts = atr != null && plannedStop < 1.2 * atr ? 1.2 * atr : plannedStop
-    if (stopPts !== plannedStop && targetPts < 1.2 * stopPts) return
-    const stance = optionOiStance(optionRead, dir)
+    let target = targetPts
+    if (stopPts !== plannedStop) {
+      if (opts.rTarget) target = targetPts * (stopPts / plannedStop)
+      else if (targetPts < 1.2 * stopPts) return
+    }
+    const readFor = (r) => (r && opts.stance === 'recent' ? { ...r, combined: r.lean } : r)
+    const stance = optionOiStance(readFor(optionRead), dir)
     if (stance === 'against') return
-    const nearStance = optionOiStance(nearRead, dir)
+    const nearStance = optionOiStance(readFor(nearRead), dir)
     const timeStop = Math.min(nowMs + timeStopMin * MIN, nowMs + (SQUARE_OFF - minute) * MIN)
     const { OI: wallText, ...rest } = checks
     // Smart confidence: the strategy's own score, then what the options OI, the futures OI and the
@@ -688,15 +701,15 @@ export function evaluateStrategies(input) {
     out.push({
       options: optionTradesFor(oi, dir, spotNow, nowMs),
       id, name: STRATEGY_BY_ID[id].name, side: dir > 0 ? 'LONG' : 'SHORT', t: nowMs, entry: price,
-      stop: price - dir * stopPts, target: price + dir * targetPts, timeStopMs: timeStop,
+      stop: price - dir * stopPts, target: price + dir * target, timeStopMs: timeStop,
       confidence: conf, grade: gradeOf(conf), confidenceParts: parts,
       // Price ran too far too fast into the signal: the scanner waits for it to cool off (coolOffGate).
-      ...(pace.fast ? { coolOff: { run: pace.run, atr: pace.atr, extreme: pace.extreme } } : {}),
+      ...(pace.fast ? { coolOff: { run: pace.run, atr: pace.atr, extreme: pace.extreme, pullback: opts.coolPullback ?? 0.35 } } : {}),
       estimated: !!estimated,
       checks: {
         Confidence: confidenceText(conf, parts),
         ...(pace.fast ? { Pace: `ran ${pace.run.toFixed(1)} pts (${(pace.run / pace.atr).toFixed(1)}x the 1-min range) in 3 min - wait for it to cool off` } : {}),
-        'Options OI': `${stance === 'agrees' ? 'writers back it' : 'neutral'} - ${optionOiText(optionRead)}`,
+        'Options OI': `${stance === 'agrees' ? 'writers back it' : 'neutral'}${opts.stance === 'recent' ? ' (last 15 min)' : ''} - ${optionOiText(optionRead)}`,
         'Near strikes': `${nearStance === 'agrees' ? 'confirm (+4)' : nearStance === 'against' ? 'lean against (-4, not required)' : 'neutral'} - ${optionOiText(nearRead)}`,
         OI: wallText, 'Futures OI': futuresText, ...rest,
       },
@@ -796,26 +809,84 @@ export function evaluateStrategies(input) {
     }
   }
 
-  // 4 / 5. Short-covering squeeze (long) / long-unwinding flush (short) - 10:00-14:45.
-  if (minute >= hm(10, 0)) {
+  // 4 / 5. Short-covering squeeze (LONG) / long-unwinding flush (SHORT) - 09:30-14:45. The trapped side
+  //     covering, read from the futures OR the options OI ("price up + OI down = short covering"; "falling
+  //     call OI at the strike price runs into = writers capitulating"):
+  //       F - futures: OI down 0.1%+ in 10 min while price moves 0.1%+ (short covering / long unwinding);
+  //       C - the writers in the move's way (CALLs at ATM, +1, +2 strikes for a squeeze; PUTs at ATM, -1,
+  //           -2 for a flush) covering 1.5%+ of their OI in 10 min after writing there since the open
+  //           (trapped);
+  //       T - the whole chain: that side's OI down 0.5%+ in 10 min while the other side's is not (the PCR
+  //           jumping).
+  //     Any of them with price 0.1%+ with the move in 10 min, on its side of VWAP and not stretched (2.5σ
+  //     / 0.5%), no wall just ahead being ADDED to; the order flow showing the forced buying (selling):
+  //     delta with it, a second bar / a stack / a new ΣΔ extreme, the 30s tape 60%+ with it, nothing
+  //     absorbing or exhausting against it, the book / heatmap not against it. The options OI check reads
+  //     its last 15 minutes. Stop beyond the last 5 bars' swing (0.12-0.4%), target 2R (3R when the
+  //     futures AND the writers cover) - widening with a volatility-widened stop; a fast run waits for a
+  //     20% pullback. While the OI shows the squeeze, what is still missing goes to input.watch.
+  if (minute >= hm(9, 30)) {
     const f = futuresChange(oi, nowMs, 10)
+    const spot10 = valueAt(oi.spot, nowMs - 10 * MIN)?.close
+    const movePct = f?.pricePct ?? (spot10 ? (spotNow - spot10) / spot10 : null)
+    const atm = Math.round(spotNow / oi.step) * oi.step
+    const openMs = dayOpenMs(oi, nowMs)
+    const chain = optionOiRead(oi, spotNow, nowMs, 10)
     for (const dir of [1, -1]) {
-      if (!f || f.oiPct == null || !(dir * f.pricePct > 0.001) || !(f.oiPct < -0.001)) continue
-      // Not chasing: already stretched beyond 2 sigma AND 0.4% from VWAP is late (on a quiet day the
-      // 2-sigma band alone is only a few points).
-      if (bands?.sd > 0 && dir * (price - bands.vwap) > Math.max(2 * bands.sd, pct(0.004))) continue
+      if (movePct == null || !(dir * movePct >= 0.001)) continue
+      const F = f?.oiPct != null && f.oiPct <= -0.001
+      const trappedMap = dir > 0 ? oi.ce : oi.pe
+      const ks = [0, 1, 2].map((i) => atm + dir * i * oi.step)
+      let cover = 0
+      let base = 0
+      let built = 0
+      for (const k of ks) {
+        const now = oiOf(trappedMap, k, nowMs)
+        const chg = oiChange(trappedMap, k, nowMs, 10)
+        if (now == null || chg == null) continue
+        cover += chg
+        base += now - chg
+        const open = openOi(trappedMap, k, openMs)
+        if (open != null) built += now - chg - open
+      }
+      const C = base > 0 && cover <= -0.015 * base && built > 0
+      const sideChg = chain ? (dir > 0 ? chain.ceChg : chain.peChg) : null
+      const sideNow = chain ? (dir > 0 ? chain.ceNow : chain.peNow) : null
+      const otherChg = chain ? (dir > 0 ? chain.peChg : chain.ceChg) : null
+      const T = sideChg != null && sideNow > 0 && sideChg <= -0.005 * sideNow && otherChg >= 0
+      const evidence = [
+        F && `futures ${(f.pricePct * 100).toFixed(2)}% with OI ${(f.oiPct * 100).toFixed(2)}% in 10m (${dir > 0 ? 'short covering' : 'long unwinding'})`,
+        C && `${dir > 0 ? 'CALL' : 'PUT'} ${ks.join(' / ')} ${lakh(cover)} in 10m after ${lakh(built)} written since open - trapped writers covering`,
+        T && `chain ${dir > 0 ? 'calls' : 'puts'} ${lakh(sideChg)} vs ${dir > 0 ? 'puts' : 'calls'} ${lakh(otherChg)} in 10m (PCR ${chain.pcrChange >= 0 ? '+' : ''}${chain.pcrChange.toFixed(2)})`,
+      ].filter(Boolean)
+      if (!evidence.length) continue
+      // The OI shows the squeeze - from here on, each condition still missing is reported.
+      const missing = []
+      if (vwap != null && dir * (price - vwap) <= 0) missing.push(`price ${dir > 0 ? 'above' : 'below'} VWAP ${vwap.toFixed(1)}`)
+      if (bands?.sd > 0 && dir * (price - bands.vwap) > Math.max(2.5 * bands.sd, pct(0.005))) missing.push('not already stretched 2.5σ / 0.5% from VWAP')
       const wall = dir > 0 ? resistance : support
-      const wallChg = wall != null ? oiChange(dir > 0 ? oi.ce : oi.pe, wall, nowMs, 10) : null
-      if (wallChg != null && wallChg > 0) continue
-      const footprint = dir * last.delta > 0 && prev && dir * prev.delta > 0 && !exhausted(-dir)
-      const tapeOk = aggWith(dir, 70) && (sweepWith(dir) || tape.speedRatio >= 1.5 || tape.proxy)
-      const c = confirm(dir)
-      if (!footprint || !tapeOk || !c.ok) continue
-      const stopPts = pct(0.0012)
-      push(dir > 0 ? 'squeeze' : 'flush', dir, stopPts, 1.3 * stopPts, 20, 58 + (sweepWith(dir) ? 10 : 0), {
-        OI: `futures ${dir > 0 ? '+' : ''}${(f.pricePct * 100).toFixed(2)}% with OI ${(f.oiPct * 100).toFixed(2)}% (${dir > 0 ? 'short covering' : 'long unwinding'})`,
-        Footprint: 'two bars of Δ with the move, no exhaustion', Tape: `${sweepWith(dir) ? 'sweep · ' : ''}${tapeText}`, DOM: c.dom, Heatmap: c.heat,
-      })
+      const wallChg = wall != null ? oiChange(trappedMap, wall, nowMs, 10) : null
+      const wallOi = wall != null ? oiOf(trappedMap, wall, nowMs) : null
+      if (wall != null && wallChg != null && wallOi > 0 && wallChg > 0.005 * wallOi && dir * (wall + basis - price) < pct(0.003)) missing.push(`the ${dir > 0 ? 'CALL' : 'PUT'} wall ${wall} just ahead is being added to (${lakh(wallChg)} in 10m)`)
+      if (!(dir * last.delta > 0)) missing.push(`delta ${dir > 0 ? 'buying' : 'selling'} on the last bar (Δ ${last.delta > 0 ? '+' : ''}${last.delta})`)
+      else if (!((prev && dir * prev.delta > 0) || stackWith(dir, 3) || cvdNewExtreme(dir, 15))) missing.push('a second bar of delta, a stack or a new ΣΔ extreme')
+      if (absorbed(-dir) || exhausted(-dir)) missing.push(`no ${absorbed(-dir) ? 'absorption' : 'exhaustion'} against it`)
+      if (!aggWith(dir, 60, 'agg30')) missing.push(`30s tape 60%+ ${dir > 0 ? 'buying' : 'selling'} (now ${dir > 0 ? tape.agg30 : 100 - tape.agg30}%)`)
+      const c = confirm(dir, sweepWith(dir))
+      if (!c.ok) missing.push(`book / heatmap not against it (${c.dom}; ${c.heat})`)
+      const swing = dir > 0 ? Math.min(...bars.slice(-5).map((b) => b.low)) : Math.max(...bars.slice(-5).map((b) => b.high))
+      const stopPts = Math.max(pct(0.0012), dir * (price - swing) + pct(0.0005))
+      if (stopPts > pct(0.004)) missing.push(`a stop within 0.4% (the 5-bar swing is ${(stopPts / price * 100).toFixed(2)}% away)`)
+      input.watch?.push({ id: dir > 0 ? 'squeeze' : 'flush', side: dir > 0 ? 'LONG' : 'SHORT', t: nowMs, evidence, missing })
+      if (missing.length) continue
+      const strong = F && (C || T)
+      const freshOther = otherChg != null && otherChg > 0
+      push(dir > 0 ? 'squeeze' : 'flush', dir, stopPts, (strong ? 3 : 2) * stopPts, 30,
+        58 + (F ? 6 : 0) + (C ? 8 : 0) + (T ? 4 : 0) + (sweepWith(dir) ? 6 : 0) + (freshOther ? 4 : 0) + (tape.speedRatio >= 1.5 ? 2 : 0), {
+          OI: evidence.join(' · '),
+          Footprint: `Δ ${prev ? `${prev.delta > 0 ? '+' : ''}${prev.delta} / ` : ''}${last.delta > 0 ? '+' : ''}${last.delta}${stackWith(dir, 3) ? ' · stacked imbalance' : ''}, nothing absorbing it`,
+          Tape: `${sweepWith(dir) ? 'sweep · ' : ''}${tapeText}${tape.proxy ? '' : ` · speed ${tape.speedRatio.toFixed(1)}x`}`, DOM: c.dom, Heatmap: c.heat,
+        }, { stance: 'recent', rTarget: true, coolPullback: 0.2 })
     }
   }
 
@@ -865,7 +936,10 @@ export function evaluateStrategies(input) {
     }
   }
 
-  // 8. Opening OI bias + range breakout - 09:30-11:00, first break only (the caller's cooldown).
+  // 8. Opening OI bias + range breakout - 09:30-11:00, first break only (the caller's cooldown). As the
+  //    ORB studies have it: a 1-minute CLOSE beyond the 15-minute opening range (not a wick), on volume -
+  //    the breakout bar at least 1.2x the opening bars' average (2x+ adds confidence: ~64% vs ~44% win
+  //    rate for low-volume breaks) - stop at the range middle, target 1.5x the range (2-3R).
   if (minute <= hm(11, 0)) {
     const dayOpen = nowMs - (minute - hm(9, 15)) * MIN
     const rangeEnd = dayOpen + 15 * MIN
@@ -878,16 +952,20 @@ export function evaluateStrategies(input) {
       const read = spotAtEnd ? optionOiRead(oi, spotAtEnd, rangeEnd, 15) : null
       const dir = read && Math.abs(read.combined) >= 0.2 ? Math.sign(read.combined) : 0
       const broke = dir > 0 ? last.close > hi && (prev?.close ?? hi) <= hi : dir < 0 && last.close < lo && (prev?.close ?? lo) >= lo
-      if (dir !== 0 && broke) {
+      const volOf = (b) => b.volume ?? (b.buy ?? 0) + (b.sell ?? 0)
+      const openAvg = openBars.reduce((sum, b) => sum + volOf(b), 0) / openBars.length
+      const volX = openAvg > 0 ? volOf(last) / openAvg : 1
+      if (dir !== 0 && broke && volX >= 1.2) {
         const footprint = dir * last.delta > 0
         const tapeOk = sweepWith(dir) || aggWith(dir, 65)
         const c = confirm(dir)
         if (footprint && tapeOk && c.ok) {
           const stopPts = Math.max(pct(0.001), Math.min(pct(0.0035), Math.abs(price - (hi + lo) / 2)))
-          push('openingBias', dir, stopPts, 2 * stopPts, 60, 60 + (sweepWith(dir) ? 10 : 0), {
+          const targetPts = Math.max(2 * stopPts, Math.min(3 * stopPts, 1.5 * (hi - lo)))
+          push('openingBias', dir, stopPts, targetPts, 60, 60 + (sweepWith(dir) ? 10 : 0) + (volX >= 2 ? 6 : 0), {
             OI: `09:15-09:30 ${dir > 0 ? 'put' : 'call'} writing led across the chain - ${optionOiText(read)}`,
-            Footprint: `close beyond the opening range ${lo}-${hi}, Δ ${last.delta}`, Tape: `${sweepWith(dir) ? 'sweep · ' : ''}${tapeText}`, DOM: c.dom, Heatmap: c.heat,
-          })
+            Footprint: `close beyond the opening range ${lo}-${hi} on ${volX.toFixed(1)}x the opening bars' volume, Δ ${last.delta}`, Tape: `${sweepWith(dir) ? 'sweep · ' : ''}${tapeText}`, DOM: c.dom, Heatmap: c.heat,
+          }, { rTarget: true })
         }
       }
     }
@@ -1032,17 +1110,27 @@ export function evaluateStrategies(input) {
       }
     }
 
-    // 12. Market profile 80% rule - 10:00-14:00: opened outside the previous TPO value area, back inside it
-    //     for two 30-minute periods (here: the last 30 completed minutes all inside) -> the other edge.
+    // 12. Market profile 80% rule (Dalton) - 10:15-14:00: opened outside the previous TPO value area, then
+    //     accepted back inside it for TWO consecutive 30-minute TPO periods (09:15-09:45, 09:45-10:15, ...;
+    //     each completed period closing inside, 80%+ of its minutes closed inside) -> the other edge.
+    //     Entered within the first 15 minutes of the period after the second one.
     const tpo = prof.tpoPrev
-    if (tpo && minute >= hm(10, 0) && minute <= hm(14, 0)) {
+    if (tpo && minute >= hm(10, 15) && minute <= hm(14, 0)) {
       const dayOpenMs = nowMs - (minute - hm(9, 15)) * MIN
       const openBar = minuteBars.find((b) => msOf(b.time) >= dayOpenMs)
+      const period = (ms) => Math.floor((ms - dayOpenMs) / (30 * MIN))
+      const nowPeriod = period(nowMs)
+      const inside = (b) => b.close >= tpo.val && b.close <= tpo.vah
+      const accepted = (k) => {
+        const list = bars.filter((b) => period(msOf(b.time)) === k)
+        return list.length >= 25 && inside(list.at(-1)) && list.filter(inside).length >= 0.8 * list.length
+      }
+      const fresh = nowMs - (dayOpenMs + nowPeriod * 30 * MIN) <= 15 * MIN
       const last30 = bars.slice(-30)
-      if (openBar && last30.length >= 30) {
+      if (openBar && last30.length >= 30 && nowPeriod >= 2 && fresh) {
         for (const dir of [1, -1]) {
           const openedOutside = dir > 0 ? openBar.open < tpo.val : openBar.open > tpo.vah
-          const held = last30.every((b) => b.close >= tpo.val && b.close <= tpo.vah)
+          const held = accepted(nowPeriod - 1) && accepted(nowPeriod - 2)
           if (!openedOutside || !held) continue
           const target = dir > 0 ? tpo.vah : tpo.val
           const blocking = dir > 0 ? resistance : support
@@ -1055,7 +1143,7 @@ export function evaluateStrategies(input) {
           if (Math.abs(target - price) < 1.2 * stopPts) continue
           push('tpo80', dir, stopPts, Math.abs(target - price), 90, 63, {
             OI: blocking != null ? `no growing ${dir > 0 ? 'CALL' : 'PUT'} wall before the target` : 'no wall in the way',
-            Profile: `opened ${dir > 0 ? 'below' : 'above'} the previous TPO value area ${tpo.val}-${tpo.vah}, 30 min accepted inside`,
+            Profile: `opened ${dir > 0 ? 'below' : 'above'} the previous TPO value area ${tpo.val}-${tpo.vah}, two 30-minute periods accepted inside`,
             Footprint: 'ΣΔ toward the far edge', Tape: tapeText, DOM: c.dom, Heatmap: c.heat,
           })
         }
@@ -1112,7 +1200,10 @@ export function evaluateStrategies(input) {
   }
 
   // 15. Initial balance breakout (market profile) - 10:15-13:30: a 1-minute close beyond the first hour's
-  //     range, with the option writers and the order flow behind it; target one IB range beyond.
+  //     range, with the option writers and the order flow behind it; target one IB range beyond. The IB
+  //     statistics: a narrow IB breaks almost always and extends far, an extremely wide one breaks far
+  //     less and barely extends - so not when the IB is already as wide as the previous day's whole range
+  //     (the day's range proxy), and more confidence when it is under 40% of it.
   if (minute >= hm(10, 15) && minute <= hm(13, 30)) {
     const dayOpenMs = nowMs - (minute - hm(9, 15)) * MIN
     const ibBars = minuteBars.filter((b) => msOf(b.time) >= dayOpenMs && msOf(b.time) < dayOpenMs + 60 * MIN)
@@ -1127,14 +1218,17 @@ export function evaluateStrategies(input) {
         const edge = dir > 0 ? ibHigh : ibLow
         const broke = prev && (dir > 0 ? last.close > edge && prev.close <= edge : last.close < edge && prev.close >= edge)
         if (!broke || dir * writing < 0.15 || range <= 0) continue
+        const prevRange = prof?.prevHigh > 0 && prof?.prevLow > 0 ? prof.prevHigh - prof.prevLow : null
+        if (prevRange && range >= prevRange) continue
+        const narrow = prevRange != null && range <= 0.4 * prevRange
         const footprint = dir * last.delta > 0
         const tapeOk = sweepWith(dir) || aggWith(dir, 60)
         const c = confirm(dir)
         if (!footprint || !tapeOk || !c.ok) continue
         const stopPts = Math.max(pct(0.001), Math.min(range / 2, pct(0.004)))
-        push('ibBreakout', dir, stopPts, Math.max(range, 1.5 * stopPts), 90, 61 + (sweepWith(dir) ? 8 : 0), {
+        push('ibBreakout', dir, stopPts, Math.max(range, 1.5 * stopPts), 90, 61 + (sweepWith(dir) ? 8 : 0) + (narrow ? 6 : 0), {
           OI: `${dir > 0 ? 'put' : 'call'} writing leads across the chain over the last hour - ${optionOiText(read60)}`,
-          Profile: `initial balance ${ibLow}-${ibHigh} (range ${range.toFixed(1)}), target one range beyond`,
+          Profile: `initial balance ${ibLow}-${ibHigh} (range ${range.toFixed(1)}${prevRange ? `, ${Math.round((range / prevRange) * 100)}% of yesterday's range${narrow ? ' - narrow' : ''}` : ''}), target one range beyond`,
           Footprint: `close beyond the IB, Δ ${last.delta}`, Tape: `${sweepWith(dir) ? 'sweep · ' : ''}${tapeText}`, DOM: c.dom, Heatmap: c.heat,
         })
       }
@@ -1481,8 +1575,10 @@ export function evaluateStrategies(input) {
   //               fuel must be burnt (it has started) and most of it still left (it has room to run).
   //     The option writers on the trapped side cover at the money too (calls in a short squeeze) while
   //     the other side's writers stay, and the order flow must show the FORCED buying (selling): delta
-  //     with it two bars running, a stack or a new ΣΔ extreme, fast aggressive tape (a sweep or the
-  //     tape speeding up) and nothing absorbing or exhausting it. Not when already stretched from VWAP.
+  //     with it two bars running, a stack or a new ΣΔ extreme, the 30s tape 60%+ with it (a sweep or the
+  //     tape speeding up adds confidence) and nothing absorbing or exhausting it. Not when already
+  //     stretched from VWAP. The options OI check reads its last 15 minutes; the target widens with a
+  //     volatility-widened stop; a fast run waits for a 20% pullback. What is missing goes to input.watch.
   if (minute >= hm(9, 45) && minute <= hm(14, 30) && bars.length >= 10) {
     const pts = (oi.futures ?? []).filter((p) => p.t >= nowMs - 75 * MIN && p.t <= nowMs && p.oi > 0)
     const nowPt = valueAt(oi.futures, nowMs)
@@ -1518,29 +1614,36 @@ export function evaluateStrategies(input) {
         const otherChg = sumChg(otherMap, otherStrikes)
         const otherBase = sumOi(otherMap, otherStrikes)
         if (otherChg < -0.005 * otherBase) continue
-        // The forced buying (selling) in the order flow.
-        const footprint = dir * last.delta > 0 && prev && dir * prev.delta > 0 && (stackWith(dir, 3) || cvdNewExtreme(dir, 15)) && !absorbed(-dir) && !exhausted(-dir)
-        const tapeOk = aggWith(dir, 62, 'agg30') && (sweepWith(dir) || tape.speedRatio >= 1.3 || tape.proxy)
-          && (tape.proxy || (dir > 0 ? tape.bigSell <= tape.bigBuy : tape.bigBuy <= tape.bigSell))
+        // The forced buying (selling) in the order flow - each condition still missing is reported
+        // (input.watch) while the OI shows the squeeze.
+        const missing = []
+        if (!(dir * last.delta > 0 && prev && dir * prev.delta > 0)) missing.push(`delta ${dir > 0 ? 'buying' : 'selling'} on the last two bars`)
+        else if (!(stackWith(dir, 3) || cvdNewExtreme(dir, 15))) missing.push('a stack or a new ΣΔ extreme')
+        if (absorbed(-dir) || exhausted(-dir)) missing.push(`no ${absorbed(-dir) ? 'absorption' : 'exhaustion'} against it`)
+        if (!aggWith(dir, 60, 'agg30')) missing.push(`30s tape 60%+ ${dir > 0 ? 'buying' : 'selling'} (now ${dir > 0 ? tape.agg30 : 100 - tape.agg30}%)`)
+        if (!tape.proxy && (dir > 0 ? tape.bigSell > tape.bigBuy : tape.bigBuy > tape.bigSell)) missing.push(`big prints not against it (${tape.bigBuy} buy / ${tape.bigSell} sell)`)
         const c = confirm(dir, sweepWith(dir))
-        if (!footprint || !tapeOk || !c.ok) continue
+        if (!c.ok) missing.push(`book / heatmap not against it (${c.dom}; ${c.heat})`)
         // Stop beyond the last 10 minutes' swing; target back toward where the fuel began (2-3.5R) -
         // not into a growing wall close ahead.
         const swing = dir > 0 ? Math.min(...bars.slice(-10).map((b) => b.low)) : Math.max(...bars.slice(-10).map((b) => b.high))
         const stopPts = Math.max(pct(0.0012), dir * (price - swing) + pct(0.0005))
-        if (stopPts > pct(0.004)) continue
+        if (stopPts > pct(0.004)) missing.push(`a stop within 0.4% (the 10-bar swing is ${(stopPts / price * 100).toFixed(2)}% away)`)
         const ahead = roomAhead(dir)
-        if (ahead && ahead.room < 1.5 * stopPts && grew(dir > 0 ? oi.ce : oi.pe, ahead.wall, 15)) continue
+        if (ahead && ahead.room < 1.5 * stopPts && grew(dir > 0 ? oi.ce : oi.pe, ahead.wall, 15)) missing.push(`room before the growing ${dir > 0 ? 'CALL' : 'PUT'} wall ${ahead.wall}`)
+        input.watch?.push({ id: 'oiSqueeze', side: dir > 0 ? 'LONG' : 'SHORT', t: nowMs, missing,
+          evidence: [`futures OI +${((fuel / start.oi) * 100).toFixed(2)}% built against the move, ${Math.round(burnt * 100)}% covered`, `${dir > 0 ? 'CALL' : 'PUT'} ${trappedStrikes.join(' / ')} ${lakh(writersCover)} in 10m`] })
+        if (missing.length) continue
         const toOrigin = dir * (start.close - price)
         const peakAt = fmtHm(istMinute(peak.t - (oi.lag ?? 0)))
         push('oiSqueeze', dir, stopPts, Math.max(2 * stopPts, Math.min(3.5 * stopPts, toOrigin)), 40,
-          64 + (sweepWith(dir) ? 6 : 0) + (stackWith(dir, 3) ? 4 : 0) + (otherChg > 0.003 * otherBase ? 4 : 0) + (fuel >= 0.008 * start.oi ? 4 : 0) + (burnt <= 0.5 ? 2 : 0), {
+          64 + (sweepWith(dir) ? 6 : 0) + (tape.speedRatio >= 1.3 ? 2 : 0) + (stackWith(dir, 3) ? 4 : 0) + (otherChg > 0.003 * otherBase ? 4 : 0) + (fuel >= 0.008 * start.oi ? 4 : 0) + (burnt <= 0.5 ? 2 : 0), {
             OI: `futures OI +${((fuel / start.oi) * 100).toFixed(2)}% built while price went ${dir > 0 ? 'down' : 'up'} ${(Math.abs(peak.close - start.close) / start.close * 100).toFixed(2)}% (${dir > 0 ? 'shorts' : 'longs'} in) to a peak at ${peakAt}, now ${((covered / peak.oi) * 100).toFixed(2)}% off it - ${Math.round(burnt * 100)}% of the build-up covered so far`,
             'Option writers': `${dir > 0 ? 'CALL' : 'PUT'} ${trappedStrikes.join(' / ')} ${lakh(writersCover)} in 10m (covering), ${dir > 0 ? 'PUT' : 'CALL'} ${otherStrikes.join(' / ')} ${lakh(otherChg)}`,
             Squeeze: `futures ${(f10.pricePct * 100).toFixed(2)}% with OI ${(f10.oiPct * 100).toFixed(2)}% in 10m - ${dir > 0 ? 'short covering' : 'long unwinding'}, price ${dir > 0 ? 'above' : 'below'} the ${peak.close.toFixed(1)} where they were trapped`,
             Footprint: `${stackWith(dir, 3) ? 'stacked imbalance' : 'ΣΔ new extreme'}, Δ ${prev.delta > 0 ? '+' : ''}${prev.delta} / ${last.delta > 0 ? '+' : ''}${last.delta}, nothing absorbing it`,
             Tape: `${sweepWith(dir) ? 'sweep · ' : ''}${tapeText}${tape.proxy ? '' : ` · speed ${tape.speedRatio.toFixed(1)}x`}`, DOM: c.dom, Heatmap: c.heat,
-          })
+          }, { stance: 'recent', rTarget: true, coolPullback: 0.2 })
       }
     }
   }
@@ -1593,6 +1696,67 @@ export function evaluateStrategies(input) {
           Footprint: `Δ ${last.delta > 0 ? '+' : ''}${last.delta}${stackWith(dir, 3) ? ' · stacked imbalance with it' : ''}, nothing absorbing or stacking against it`,
           Tape: tapeText, Heatmap: c.heat,
         })
+    }
+  }
+
+  // 26. OI + liquidity heatmap confluence - 09:45-14:30, exact days with a heatmap. The heatmap's read of
+  //     the wall price is at (orderFlowMath.liquidityMap: walls that STAY in the book, last 10 min) and
+  //     the option writers at the same price (strike + basis within 0.25%) tell the same story:
+  //     HOLD  - ABSORPTION or EXHAUSTION at the wall, an option wall of that side there (a PUT wall at a
+  //             bid wall, a CALL wall at an offer wall: 50%+ of the biggest of its kind within 8
+  //             strikes, or a sudden OI wall) whose writers are still ADDING (15 min), and the futures
+  //             not building against it (no short build-up into a support, no long build-up into a
+  //             resistance) -> the bounce, stop beyond the wall;
+  //     BREAK - the wall BREAKING (eaten) or PULLED, the option writers at that strike COVERING (15 min)
+  //             and the futures moving with the break -> the continuation, stop back beyond the wall.
+  //     Both: delta with the trade on the last bar, the 30s tape 55%+ with it, nothing stacked or
+  //     sweeping against it, the book not against it. Target the next wall (heatmap or OI) 1.5R+ away,
+  //     at most 3R (2R when there is none).
+  if (!estimated && input.heatmap?.length && minute >= hm(9, 45) && minute <= hm(14, 30)) {
+    const read = liquidityMap({ columns: input.heatmap, minuteBars, rowSize: input.rowSize ?? 1, lotSize: lot, price, nowMs })?.now
+    const w = read?.level
+    if (w && ['absorption', 'exhaustion', 'break', 'pulled'].includes(read.state)) {
+      const hold = read.state === 'absorption' || read.state === 'exhaustion'
+      const atSupport = w.kind === 'support'
+      const dir = hold ? (atSupport ? 1 : -1) : (atSupport ? -1 : 1)
+      const side = atSupport ? 'PE' : 'CE'
+      const map = atSupport ? oi.pe : oi.ce
+      const tol = pct(0.0025)
+      const biggest = Math.max(0, ...[...map.keys()].filter((k) => Math.abs(k - spotNow) <= 8 * oi.step).map((k) => oiOf(map, k, nowMs) ?? 0))
+      const sudden = suddenOiWalls(oi, nowMs).find((x) => x.side === side && Math.abs(x.strike + basis - w.price) <= tol)
+      const strike = [...map.keys()].filter((k) => Math.abs(k + basis - w.price) <= tol)
+        .sort((a, b) => (oiOf(map, b, nowMs) ?? 0) - (oiOf(map, a, nowMs) ?? 0))[0] ?? sudden?.strike
+      const strikeOi = strike != null ? oiOf(map, strike, nowMs) : null
+      const chg = strike != null ? oiChange(map, strike, nowMs, 15) : null
+      const isWall = strikeOi > 0 && (strikeOi >= 0.5 * biggest || !!sudden)
+      const writersOk = chg != null && strikeOi > 0 && (hold ? chg >= 0.005 * strikeOi || !!sudden : chg <= -0.005 * strikeOi)
+      const f = futuresRead
+      const futuresOk = hold
+        ? !(f?.oiPct != null && dir * f.pricePct < 0 && f.oiPct > 0.002)
+        : f != null && dir * f.pricePct > 0
+      const flowOk = dir * last.delta > 0 && aggWith(dir, 55, 'agg30') && !stackAgainst(dir, 2) && !sweepWith(-dir)
+      const c = confirm(dir)
+      if (isWall && writersOk && futuresOk && flowOk && c.ok) {
+        const edge = dir > 0 ? w.low : w.high // the wall's far side from the trade
+        const stopPts = Math.max(pct(0.001), dir * (price - edge) + pct(0.0006))
+        if (stopPts <= pct(0.004)) {
+          // The next wall in the trade's direction, 1.5R+ away: an OI wall (in futures terms) or one more
+          // heatmap level beyond this one.
+          const levels = [resistance != null ? resistance + basis : null, support != null ? support + basis : null]
+            .filter((x) => x != null && dir * (x - price) >= 1.5 * stopPts)
+          const targetAt = levels.sort((a, b) => dir * (a - b))[0]
+          const targetPts = targetAt != null ? Math.min(3 * stopPts, dir * (targetAt - price)) : 2 * stopPts
+          const fWith = f?.oiPct != null && dir * f.pricePct > 0
+          push('heatmapOi', dir, stopPts, targetPts, 45,
+            62 + (read.state === 'absorption' ? 6 : read.state === 'break' ? 4 : 0) + (sudden ? 5 : 0) + (w.strength >= 5 ? 3 : 0) + (fWith ? 4 : 0) + (hold && w.trend === 'building' ? 3 : 0), {
+              'Liquidity map': `${read.state.toUpperCase()} - ${read.text}`,
+              OI: `${side === 'PE' ? 'PUT' : 'CALL'} ${strike} (${((strikeOi ?? 0) / 1e5).toFixed(1)}L${sudden ? ', a sudden wall' : ''}) at the ${atSupport ? 'bid' : 'offer'} wall ${w.price} - writers ${hold ? 'adding' : 'covering'} ${lakh(chg ?? 0)} in 15m`,
+              'Futures OI': futuresText,
+              Footprint: `Δ ${last.delta > 0 ? '+' : ''}${last.delta}, nothing stacked against it`, Tape: tapeText, DOM: c.dom, Heatmap: c.heat,
+              Plan: `${hold ? 'hold: bounce off' : 'break: continuation through'} the wall${targetAt != null ? `, target the wall at ${targetAt.toFixed(0)}` : ''}`,
+            })
+        }
+      }
     }
   }
 

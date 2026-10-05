@@ -93,7 +93,8 @@ export function useDayOi(underlying, date, isReplay) {
         for (const tick of ticks) {
           if (tick?.underlying !== u || tick?.expiryFlag !== flag) continue
           const map = tick.side === 'CE' ? ctx.ce : ctx.pe
-          if (upsertMinute(map, Number(tick.strike), tick.time, { oi: tick.openInterest, price: tick.price, high: tick.high ?? tick.price, low: tick.low ?? tick.price })) changed = true
+          // A packet without OI reads 0 - never let it wipe the minute's real OI.
+          if (upsertMinute(map, Number(tick.strike), tick.time, { oi: tick.openInterest > 0 ? tick.openInterest : null, price: tick.price, high: tick.high ?? tick.price, low: tick.low ?? tick.price })) changed = true
         }
         if (changed) schedule()
       },
@@ -104,7 +105,7 @@ export function useDayOi(underlying, date, isReplay) {
         let changed = false
         for (const tick of ticks) {
           if (tick?.underlying !== u) continue
-          if (upsertSeries(ctx.futures, tick.time, { close: tick.price, oi: tick.openInterest })) changed = true
+          if (upsertSeries(ctx.futures, tick.time, { close: tick.price, oi: tick.openInterest > 0 ? tick.openInterest : null })) changed = true
         }
         if (changed) schedule()
       },

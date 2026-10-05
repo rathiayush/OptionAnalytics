@@ -119,6 +119,8 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   // Setups held while price cools off after running too far too fast into them (coolOffGate).
   const pendingRef = useRef(new Map())
   const [cooling, setCooling] = useState([])
+  // Squeezes the OI shows that have not fired yet, with what is still missing (input.watch).
+  const [watch, setWatch] = useState([])
   const settingsRef = useRef(settings)
   useEffect(() => { settingsRef.current = settings }, [settings])
 
@@ -261,6 +263,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     firedRef.current = saved
     pendingRef.current = new Map()
     setCooling([])
+    setWatch([])
     setFired(saved)
   }, [dayKey, isReplay])
   useEffect(() => {
@@ -300,10 +303,13 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     const bars = completedBars(view.minuteBars, nowMs, rowSize, lotSize, estimated)
     if (bars.length < 5) return
     const price = priceAt(view, estimated ? null : tapePrints, nowMs, bars)
+    const watchNow = []
     const setups = evaluateStrategies({
       nowMs, price, bars, minuteBars: view.minuteBars, prints: estimated ? null : tapePrints,
-      book: view.book, walls: findWalls(view.book), liquidity, pullStack, sweeps: view.sweeps, icebergs: view.icebergs, oi, estimated, lotSize, bigLots: largeLots, profile,
+      book: view.book, walls: findWalls(view.book), liquidity, pullStack, sweeps: view.sweeps, icebergs: view.icebergs, oi, estimated, lotSize, bigLots: largeLots, profile, watch: watchNow, heatmap: view.heatmap, rowSize,
     })
+    const watching = watchNow.filter((w) => w.missing.length)
+    setWatch((prev) => (JSON.stringify(prev.map((w) => [w.id, w.side, w.missing])) === JSON.stringify(watching.map((w) => [w.id, w.side, w.missing])) ? prev : watching))
     const recentlyFired = (s) => firedRef.current.some((f) => f.id === s.id && f.side === s.side && s.t - f.t < COOLDOWN_MS)
     // Price ran too far too fast into a setup: it is held and entered on the pullback / pause.
     const gate = coolOffGate(pendingRef.current, setups.filter((s) => !recentlyFired(s)), { nowMs, price, bars, oi })
@@ -487,7 +493,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
           const price = priceAt(v, clockPrints, clock, bars)
           const setups = evaluateStrategies({
             nowMs: clock, price, bars, minuteBars: v.minuteBars, prints: clockPrints,
-            book: v.book, liquidity: liq, pullStack: ps.signals, sweeps: v.sweeps, icebergs: v.icebergs, oi: scanOi, estimated, lotSize, bigLots: largeLots, profile,
+            book: v.book, liquidity: liq, pullStack: ps.signals, sweeps: v.sweeps, icebergs: v.icebergs, oi: scanOi, estimated, lotSize, bigLots: largeLots, profile, heatmap: v.heatmap, rowSize,
           })
           const recentlyFound = (s) => found.some((f) => f.id === s.id && f.side === s.side && s.t - f.t < COOLDOWN_MS)
           const gate = coolOffGate(pending, setups.filter((s) => !recentlyFound(s)), { nowMs: clock, price, bars, oi: scanOi })
@@ -732,6 +738,21 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
               </Tooltip>
             )) : <Text type="secondary" style={{ fontSize: 12 }}>none</Text>}
           </span>
+        </div>
+      )}
+      {watch.length > 0 && (
+        <div aria-label="Squeeze watch" style={{ fontSize: 12, marginBottom: 8, padding: '6px 8px', border: '1px solid #fa8c1666', borderRadius: 6, background: '#fa8c160d' }}>
+          {watch.map((w) => {
+            const meta = STRATEGY_BY_ID[w.id]
+            return (
+              <div key={`${w.id}${w.side}`}>
+                <Tag color="orange" style={{ margin: '0 6px 0 0', fontSize: 11 }}>WATCH</Tag>
+                <b style={{ color: w.side === 'LONG' ? UP_COLOR : DOWN_COLOR }}>#{meta?.no} {meta?.short} {w.side}</b>
+                <Text style={{ fontSize: 12 }}> - the OI shows it: {w.evidence.join(' · ')}</Text>
+                <div style={{ marginLeft: 8 }}><Text type="secondary" style={{ fontSize: 12 }}>Not called yet - waiting for: </Text>{w.missing.join(' · ')}</div>
+              </div>
+            )
+          })}
         </div>
       )}
       {estimated && <Alert type="info" showIcon style={{ marginBottom: 8 }} message="Estimated day: no tape, book or heatmap - tape checks use each minute's estimated buy/sell split and the DOM / Heatmap confirmation is waived. Results are marked est." />}

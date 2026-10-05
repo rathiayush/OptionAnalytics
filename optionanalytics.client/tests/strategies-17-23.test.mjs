@@ -45,7 +45,7 @@ const run = (now, bars, oi, o = {}) => evaluateStrategies({
 const find = (setups, id) => setups.find((s) => s.id === id)
 const show = (s, all) => JSON.stringify(s ? { side: s.side, entry: s.entry, stop: +s.stop.toFixed(1), target: +s.target.toFixed(1), conf: s.confidence, checks: s.checks } : all.map((x) => `${x.id}:${x.side}`))
 
-check('25 strategies, numbered 1-25, range group = 7, 22, 23', STRATEGIES.length === 25 && STRATEGIES.every((s, i) => s.no === i + 1) && RANGE_IDS.join() === 'range,vwapFade,ibFade', RANGE_IDS.join())
+check('26 strategies, numbered 1-26, range group = 7, 22, 23', STRATEGIES.length === 26 && STRATEGIES.every((s, i) => s.no === i + 1) && RANGE_IDS.join() === 'range,vwapFade,ibFade', RANGE_IDS.join())
 
 // ---- 17. Failed breakout trap ---------------------------------------------------------------------
 {
