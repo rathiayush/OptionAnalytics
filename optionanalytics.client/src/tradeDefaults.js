@@ -18,23 +18,23 @@ export function defaultTradeLevels(underlying) {
 
 const KEY = (page) => `optionanalytics.tradeLevels.${page}.v1`
 
-/** The levels saved for `underlying` on `page`, else its defaults. A saved 0 stays 0 (switched off). */
+/** The levels saved for `underlying` on `page`, else its defaults. A saved 0 stays 0 (switched off).
+ *  trailStart / trailGap: the option's trailing stop (optionTrail.js) - off (0) unless the trader sets it. */
 export function loadTradeLevels(page, underlying) {
   const d = defaultTradeLevels(underlying)
+  const num = (v, fallback) => (Number.isFinite(v) ? v : fallback)
   try {
     const saved = JSON.parse(localStorage.getItem(KEY(page)) ?? '{}')[String(underlying ?? '').toUpperCase()]
-    return {
-      sl: Number.isFinite(saved?.sl) ? saved.sl : d.sl,
-      target: Number.isFinite(saved?.target) ? saved.target : d.target,
-    }
-  } catch { return { ...d } }
+    return { sl: num(saved?.sl, d.sl), target: num(saved?.target, d.target), trailStart: num(saved?.trailStart, 0), trailGap: num(saved?.trailGap, 0) }
+  } catch { return { ...d, trailStart: 0, trailGap: 0 } }
 }
 
 /** Remembers `levels` for `underlying` on `page` (this browser only). */
 export function saveTradeLevels(page, underlying, levels) {
   try {
     const all = JSON.parse(localStorage.getItem(KEY(page)) ?? '{}')
-    all[String(underlying ?? '').toUpperCase()] = { sl: levels.sl, target: levels.target }
+    const key = String(underlying ?? '').toUpperCase()
+    all[key] = { ...all[key], ...levels }
     localStorage.setItem(KEY(page), JSON.stringify(all))
   } catch { /* convenience only */ }
 }

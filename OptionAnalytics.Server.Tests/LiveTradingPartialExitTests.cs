@@ -258,6 +258,52 @@ public sealed class LiveTradingPartialExitTests
         Assert.Contains($"x{2 * Lot} at LIMIT", result.Message);
     }
 
+    [Theory]
+    // BUY at 110: 10 pts in profit at 125 -> stop 8 behind the best = 117.
+    [InlineData(false, 110, 125, 10, 8, 117.0)]
+    // Not 10 in profit yet: no trailing.
+    [InlineData(false, 110, 118, 10, 8, null)]
+    // SELL at 110: best 95 -> stop 103.
+    [InlineData(true, 110, 95, 10, 8, 103.0)]
+    // Gap 0 = off.
+    [InlineData(false, 110, 140, 10, 0, null)]
+    public void TrailStop_FollowsTheBestPremiumOnceInProfit(bool sell, double entry, double best, double start, double gap, double? expected)
+    {
+        var stop = LiveTradingService.TrailStop(sell, (decimal)entry, (decimal)best, (decimal)start, (decimal)gap, 0.05m);
+        Assert.Equal(expected is null ? null : (decimal?)expected, stop);
+    }
+
+    [Fact]
+    public async Task ATrailedTrade_MovesItsStopLossLegUpWithThePremium_NeverDown()
+    {
+        var (service, dhan, _) = await CreateAsync();
+        await service.RefreshAsync(CancellationToken.None);
+        // S1: BUY filled at 110, stop-loss leg at 80. Trail: after +10, 8 behind the best.
+        service.SetTrail(new[] { "S1" }, 10m, 8m);
+        var t = DateTimeOffset.UtcNow;
+        service.OnTick(new SpotTick(SecurityId, 110m, 0, 0, 0, 0, 0, 109.9m, 110m, 0, t));
+        service.OnTick(new SpotTick(SecurityId, 118m, 0, 0, 0, 0, 0, 117.9m, 118m, 0, t)); // +8: not yet
+        Assert.DoesNotContain(dhan.SuperModifies, m => m["legName"]!.GetValue<string>() == "STOP_LOSS_LEG");
+        service.OnTick(new SpotTick(SecurityId, 125m, 0, 0, 0, 0, 0, 124.9m, 125m, 0, t)); // +15: trail to 117
+        await WaitFor(() => dhan.SuperModifies.Any(m => m["legName"]!.GetValue<string>() == "STOP_LOSS_LEG"));
+        var moved = Assert.Single(dhan.SuperModifies, m => m["legName"]!.GetValue<string>() == "STOP_LOSS_LEG");
+        Assert.Equal(117m, moved["stopLossPrice"]!.GetValue<decimal>());
+
+        // The premium falls back: the stop never moves down.
+        await Task.Delay(50);
+        service.OnTick(new SpotTick(SecurityId, 119m, 0, 0, 0, 0, 0, 118.9m, 119m, 0, t));
+        Assert.Single(dhan.SuperModifies, m => m["legName"]!.GetValue<string>() == "STOP_LOSS_LEG");
+
+        // A new (wider) Max SL does not loosen the trailed stop either.
+        await service.UpdateTradeLevelsAsync(new[] { "S1" }, stopLossPoints: 25m, targetPoints: 0m, CancellationToken.None);
+        Assert.Single(dhan.SuperModifies, m => m["legName"]!.GetValue<string>() == "STOP_LOSS_LEG");
+    }
+
+    private static async Task WaitFor(Func<bool> condition)
+    {
+        for (var i = 0; i < 100 && !condition(); i++) await Task.Delay(20);
+    }
+
     [Fact]
     public async Task EveryOpenOrderIsListed_AndOneLegCanBeCancelled()
     {

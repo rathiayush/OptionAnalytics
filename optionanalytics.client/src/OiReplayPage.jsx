@@ -17,6 +17,7 @@ import { alignToBars, chartVwap, sessionVwapFromBars } from './chartVwap.js'
 import { notifyLiveTradeEvents, notifyTrade } from './tradeNotify.js'
 import { loadTradeLevels, saveTradeLevels } from './tradeDefaults.js'
 import { PREV_PROFILE } from './profileColors.js'
+import { optionTrailLevel, tighterStop } from './optionTrail.js'
 import { PremiumEmaChart, DraggableFloatingPanel, useFitContentAsDataGrows, useChartUserControl, CANDLE_SCALE_MARGINS } from './oiShared.jsx'
 import { LivePositionsView, liveTradingApi } from './LiveTrading.jsx'
 import { StrikePicker, moneynessLabel } from './StrikePicker.jsx'
@@ -1720,12 +1721,16 @@ function FuturesChart({ bars, oiLine, markers, dayKey, height = 320, profile = n
 // range spans BOTH levels at once (a large bar engulfing both), the stop-loss is assumed to have
 // been touched first - the standard, conservative convention, since OHLC alone can't say which one
 // price actually reached first.
-function computeStopTargetHit(series, entryTimeMs, asOfMs, entryPrice, direction, slPoints, targetPoints) {
+function computeStopTargetHit(series, entryTimeMs, asOfMs, entryPrice, direction, slPoints, targetPoints, trailStart = 0, trailGap = 0) {
   const hasSl = slPoints > 0
   const hasTarget = targetPoints > 0
-  if ((!hasSl && !hasTarget) || !series) return null
-  const slLevel = direction === 'SELL' ? entryPrice + slPoints : entryPrice - slPoints
+  const hasTrail = trailGap > 0
+  if ((!hasSl && !hasTarget && !hasTrail) || !series) return null
+  const slLevel = hasSl ? (direction === 'SELL' ? entryPrice + slPoints : entryPrice - slPoints) : null
   const targetLevel = direction === 'SELL' ? entryPrice - targetPoints : entryPrice + targetPoints
+  // Trailing (optionTrail.js): the stop in force in a bar comes from the best premium of the bars BEFORE
+  // it - it moves after each bar, only tightening.
+  let best = entryPrice
   for (const p of series) {
     const t = new Date(p.time).getTime()
     if (t <= entryTimeMs) continue
@@ -1733,10 +1738,13 @@ function computeStopTargetHit(series, entryTimeMs, asOfMs, entryPrice, direction
     const high = p.high ?? p.price
     const low = p.low ?? p.price
     if (high == null || low == null) continue
-    const slHit = hasSl && (direction === 'SELL' ? high >= slLevel : low <= slLevel)
+    const trailed = hasTrail ? optionTrailLevel(direction, entryPrice, best, trailStart, trailGap) : null
+    const stop = tighterStop(direction, slLevel, trailed)
+    const slHit = stop != null && (direction === 'SELL' ? high >= stop : low <= stop)
     const targetHit = hasTarget && (direction === 'SELL' ? low <= targetLevel : high >= targetLevel)
-    if (slHit) return { kind: 'sl', fillPrice: slLevel }
+    if (slHit) return { kind: stop === trailed && trailed !== slLevel ? 'trail' : 'sl', fillPrice: stop }
     if (targetHit) return { kind: 'target', fillPrice: targetLevel }
+    best = direction === 'SELL' ? Math.min(best, low) : Math.max(best, high)
   }
   return null
 }
@@ -1859,6 +1867,7 @@ function clearLiveDayCache() {
 function PaperTradePanel({
   atmStrike, step, side, onSideChange, direction, onDirectionChange, strikeOffset, onStrikeOffsetChange,
   qtyLots, onQtyLotsChange, slPoints, onSlPointsChange, targetPoints, onTargetPointsChange,
+  trailStart = 0, onTrailStartChange, trailGap = 0, onTrailGapChange,
   onPunch, canPunch, positions, onExit, onExitAll, onClearAll,
   mode = 'paper', onModeChange = null, liveAvailable = false, liveUnavailableReason = null,
   liveSlippage = 1, onLiveSlippageChange = null, onLivePunch = null, canLivePunch = false, liveBusy = false,
@@ -1921,6 +1930,14 @@ function PaperTradePanel({
             value={targetPoints} onChange={(v) => onTargetPointsChange(v ?? 0)} min={0} step={5} style={{ width: 130 }}
             addonBefore="Target" addonAfter="pts"
           />
+          {onTrailGapChange && (
+            <Tooltip title="Trailing stop on the premium: once the trade is 'Trail after' points in profit, the stop follows the best premium 'Follow' points behind and only tightens. Follow 0 = off. Paper here; live, the server moves the super order's stop-loss leg.">
+              <Space size={4}>
+                <InputNumber value={trailStart} onChange={(v) => onTrailStartChange?.(v ?? 0)} min={0} step={5} style={{ width: 130 }} addonBefore="Trail after" addonAfter="pts" aria-label="Trail after points" />
+                <InputNumber value={trailGap} onChange={(v) => onTrailGapChange(v ?? 0)} min={0} step={1} style={{ width: 120 }} addonBefore="Follow" addonAfter="pts" aria-label="Trail follow points" />
+              </Space>
+            </Tooltip>
+          )}
           {isLiveMode && (
             <InputNumber
               value={liveSlippage} onChange={(v) => onLiveSlippageChange?.(v ?? 0)} min={0} step={0.5} style={{ width: 140 }}
@@ -2502,6 +2519,17 @@ export default function OiReplayPage() {
     setPaperSlPointsState(levels.sl)
     setPaperTargetPointsState(levels.target)
   }, [underlying])
+  // Trailing stop on the premium: after `trailStart` pts of profit the stop follows the best premium
+  // `trailGap` pts behind (0 = off) - paper here, and the live super order's stop-loss leg on the server.
+  const [paperTrailStart, setPaperTrailStartState] = useState(() => loadTradeLevels('oiReplay', underlying).trailStart)
+  const [paperTrailGap, setPaperTrailGapState] = useState(() => loadTradeLevels('oiReplay', underlying).trailGap)
+  useEffect(() => {
+    const levels = loadTradeLevels('oiReplay', underlying)
+    setPaperTrailStartState(levels.trailStart)
+    setPaperTrailGapState(levels.trailGap)
+  }, [underlying])
+  const setPaperTrailStart = (v) => { setPaperTrailStartState(v); saveTradeLevels('oiReplay', underlying, { trailStart: v }) }
+  const setPaperTrailGap = (v) => { setPaperTrailGapState(v); saveTradeLevels('oiReplay', underlying, { trailGap: v }) }
   const setPaperSlPoints = (v) => { setPaperSlPointsState(v); saveTradeLevels('oiReplay', underlying, { sl: v, target: paperTargetPoints }) }
   const setPaperTargetPoints = (v) => { setPaperTargetPointsState(v); saveTradeLevels('oiReplay', underlying, { sl: paperSlPoints, target: v }) }
   const [paperPositions, setPaperPositions] = useState([])
@@ -3346,7 +3374,7 @@ export default function OiReplayPage() {
     const rupees = points * p.qtyLots * p.lotSize
     const text = `${paperTradeText(p, p.entryPrice)} -> ${Number(exitPrice).toFixed(1)} = ${points >= 0 ? '+' : ''}${points.toFixed(1)} pts (Rs ${Math.round(rupees).toLocaleString('en-IN')})`
     const kind = reason === 'SL' ? 'stopLoss' : reason === 'Target' ? 'target' : 'exit'
-    notifyTrade({ kind, good: points >= 0, key: `paper-exit-${p.id}`, title: reason === 'SL' ? 'Paper stop-loss hit' : reason === 'Target' ? 'Paper target hit' : 'Paper position exited',
+    notifyTrade({ kind, good: points >= 0, key: `paper-exit-${p.id}`, title: reason === 'SL' ? 'Paper stop-loss hit' : reason === 'Target' ? 'Paper target hit' : reason === 'Trailing SL' ? 'Paper trailing SL hit' : 'Paper position exited',
       text, telegramText: isLive ? `Paper ${reason === 'SL' ? 'SL hit' : reason === 'Target' ? 'target hit' : 'exit'}: ${text}` : null })
   }
   const handlePaperExit = (id) => {
@@ -3425,6 +3453,7 @@ export default function OiReplayPage() {
   const handleLivePunch = () => runLiveAction(() => liveTradingApi.place({
     underlying, expiry: liveExpiryDate, strike: paperStrike, side: paperSide, direction: paperDirection,
     lots: paperQtyLots, slippagePoints: liveSlippage, stopLossPoints: paperSlPoints, targetPoints: paperTargetPoints,
+    trailStartPoints: paperTrailGap > 0 ? paperTrailStart ?? 0 : 0, trailGapPoints: paperTrailGap ?? 0,
   }), { title: 'LIVE order placed' })
   const handleLiveClose = (securityId) => runLiveAction(() => liveTradingApi.close(securityId, liveSlippage), { title: 'LIVE close sent' })
   const handleLivePartialExit = (securityId, lots) => runLiveAction(() => liveTradingApi.partialExit(securityId, lots, liveSlippage))
@@ -3437,7 +3466,7 @@ export default function OiReplayPage() {
     : liveExpiryDate == null ? 'Waiting for the listed expiries.'
       : !(paperSlPoints > 0) || !(paperTargetPoints > 0) ? 'Set both SL and Target - a live order is a Super Order with both legs.'
         : paperTargetPoints <= liveSlippage ? 'Target must be further than the slippage.' : null
-  const liveOrderSummary = paperStrike == null ? '' : `${paperDirection} ${underlying} ${paperStrike} ${paperSide}${liveExpiryDate ? ` (${fmtDateOnly(liveExpiryDate)})` : ''} x ${paperQtyLots} lot${paperQtyLots === 1 ? '' : 's'} - LIMIT at the live ${paperDirection === 'SELL' ? 'bid' : 'ask'} ${paperDirection === 'SELL' ? '-' : '+'} ${liveSlippage} pts, SL ${paperSlPoints} pts, target ${paperTargetPoints} pts.`
+  const liveOrderSummary = paperStrike == null ? '' : `${paperDirection} ${underlying} ${paperStrike} ${paperSide}${liveExpiryDate ? ` (${fmtDateOnly(liveExpiryDate)})` : ''} x ${paperQtyLots} lot${paperQtyLots === 1 ? '' : 's'} - LIMIT at the live ${paperDirection === 'SELL' ? 'bid' : 'ask'} ${paperDirection === 'SELL' ? '-' : '+'} ${liveSlippage} pts, SL ${paperSlPoints} pts, target ${paperTargetPoints} pts${paperTrailGap > 0 ? `, trailing ${paperTrailGap} pts behind the best after +${paperTrailStart ?? 0} pts` : ''}.`
 
   // Exits every currently OPEN position at its own live (as-of-replay) price, rather than deleting
   // them the way Clear all does - a real "flatten everything" action whose exit prices/PnL stay in
@@ -3480,12 +3509,12 @@ export default function OiReplayPage() {
   // just a close, so a real touch-check is possible for historical days, not just live ticks.
   const paperAnnouncedRef = useRef(new Set())
   useEffect(() => {
-    if ((!paperSlPoints || paperSlPoints <= 0) && (!paperTargetPoints || paperTargetPoints <= 0)) return
+    if ((!paperSlPoints || paperSlPoints <= 0) && (!paperTargetPoints || paperTargetPoints <= 0) && !(paperTrailGap > 0)) return
     const hits = new Map()
     for (const p of paperPositions) {
       if (p.status !== 'OPEN' || p.entryTime == null) continue
       const series = (p.side === 'CE' ? ceByStrike : peByStrike).get(p.strike)
-      const hit = computeStopTargetHit(series, p.entryTime, asOfMs, p.entryPrice, p.direction, paperSlPoints, paperTargetPoints)
+      const hit = computeStopTargetHit(series, p.entryTime, asOfMs, p.entryPrice, p.direction, paperSlPoints, paperTargetPoints, paperTrailStart, paperTrailGap)
       if (hit) hits.set(p.id, hit)
     }
     if (hits.size === 0) return
@@ -3493,14 +3522,14 @@ export default function OiReplayPage() {
       const hit = hits.get(p.id)
       if (!hit || paperAnnouncedRef.current.has(p.id)) continue
       paperAnnouncedRef.current.add(p.id)
-      announcePaperExit(p, hit.fillPrice, hit.kind === 'sl' ? 'SL' : 'Target')
+      announcePaperExit(p, hit.fillPrice, hit.kind === 'sl' ? 'SL' : hit.kind === 'trail' ? 'Trailing SL' : 'Target')
     }
     setPaperPositions((prev) => prev.map((p) => {
       const hit = hits.get(p.id)
-      return hit && p.status === 'OPEN' ? { ...p, status: 'CLOSED', exitPrice: hit.fillPrice, exitReason: hit.kind === 'sl' ? 'SL' : 'Target' } : p
+      return hit && p.status === 'OPEN' ? { ...p, status: 'CLOSED', exitPrice: hit.fillPrice, exitReason: hit.kind === 'sl' ? 'SL' : hit.kind === 'trail' ? 'Trailing SL' : 'Target' } : p
     }))
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [paperPositions, ceByStrike, peByStrike, asOfMs, paperSlPoints, paperTargetPoints])
+  }, [paperPositions, ceByStrike, peByStrike, asOfMs, paperSlPoints, paperTargetPoints, paperTrailStart, paperTrailGap])
 
   // Regime-change markers stamped on the exact candle where a Long Buildup/Short Buildup/Short
   // Covering/Long Unwinding stretch actually started - "show me when what happened" on the chart
@@ -4927,6 +4956,7 @@ export default function OiReplayPage() {
             qtyLots={paperQtyLots} onQtyLotsChange={setPaperQtyLots}
             slPoints={paperSlPoints} onSlPointsChange={setPaperSlPoints}
             targetPoints={paperTargetPoints} onTargetPointsChange={setPaperTargetPoints}
+            trailStart={paperTrailStart} onTrailStartChange={setPaperTrailStart} trailGap={paperTrailGap} onTrailGapChange={setPaperTrailGap}
             onPunch={handlePaperPunch} canPunch={atmStrike != null && paperEntryPreview?.price != null}
             positions={enrichedPaperPositions} onExit={handlePaperExit} onExitAll={handlePaperExitAll} onClearAll={handlePaperClearAll}
             mode={liveTradeActive ? 'live' : 'paper'} onModeChange={isAdmin ? handleTradeModeChange : null}

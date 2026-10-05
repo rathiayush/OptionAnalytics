@@ -70,7 +70,10 @@ public sealed class LiveTradingController : ControllerBase
         return result.Success ? Ok(result) : UnprocessableEntity(result);
     }
 
-    public sealed record TradeRequest(IReadOnlyList<string> OrderIds, decimal SlippagePoints, decimal StopLossPoints = 0, decimal TargetPoints = 0);
+    /// <summary>TrailStartPoints / TrailGapPoints (trade-levels only): null leaves the trade's trailing as it
+    /// is; a gap of 0 stops it.</summary>
+    public sealed record TradeRequest(IReadOnlyList<string> OrderIds, decimal SlippagePoints, decimal StopLossPoints = 0, decimal TargetPoints = 0,
+        decimal? TrailStartPoints = null, decimal? TrailGapPoints = null);
 
     /// <summary>Closes ONE trade (its super orders) and nothing else in that contract - see LiveTradingService.ExitTradeAsync.</summary>
     [HttpPost("orders/exit-trade")]
@@ -85,6 +88,7 @@ public sealed class LiveTradingController : ControllerBase
     [HttpPost("orders/trade-levels")]
     public async Task<ActionResult<ManualOrderResult>> TradeLevels([FromBody] TradeRequest request, CancellationToken cancellationToken)
     {
+        if (request.TrailGapPoints is { } gap) _trading.SetTrail(request.OrderIds ?? Array.Empty<string>(), request.TrailStartPoints ?? 0, gap);
         var result = await _trading.UpdateTradeLevelsAsync(request.OrderIds ?? Array.Empty<string>(), request.StopLossPoints, request.TargetPoints, CancellationToken.None);
         return result.Success ? Ok(result) : UnprocessableEntity(result);
     }
