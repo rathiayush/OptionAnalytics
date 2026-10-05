@@ -82,7 +82,7 @@ function AggressionMeter({ windows, lotSize }) {
         const net = w.buy - w.sell
         const verdict = w.total === 0 ? 'no prints' : w.buyPct >= 60 ? 'buyers aggressive' : w.buyPct <= 40 ? 'sellers aggressive' : 'balanced'
         return (
-          <Tooltip key={w.label} title={`${w.label}: ${formatVolume(w.buy, lotSize, true)} lots bought at the offer, ${formatVolume(w.sell, lotSize, true)} sold at the bid · ${w.prints} prints (${w.perMin}/min)`}>
+          <Tooltip key={w.label} title={`${w.label}: ${formatVolume(w.buy, lotSize, true)} lots bought at the offer, ${formatVolume(w.sell, lotSize, true)} sold at the bid · ${w.fromBars ? 'from the minute bars (longer than the tape kept here)' : `${w.prints} prints (${w.perMin}/min)`}`}>
             <div style={{ display: 'grid', gridTemplateColumns: '28px minmax(70px, 1fr) auto', gap: 8, alignItems: 'center', fontSize: 12, marginBottom: 4 }}>
               <Text type="secondary" style={{ fontSize: 11 }}>{w.label}</Text>
               <div style={{ display: 'flex', height: 12, borderRadius: 3, overflow: 'hidden', background: '#ffffff14' }} aria-label={`Aggression ${w.label}`}>

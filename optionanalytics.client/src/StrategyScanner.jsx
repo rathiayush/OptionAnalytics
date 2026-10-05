@@ -25,6 +25,8 @@ const PAPER_KEY = 'optionanalytics.strategyScanner.paper.v1'
 const FIRED_KEY = 'optionanalytics.strategyScanner.fired.v1'
 // The trades box's Paper / Live (Dhan) choice, kept across reloads (Auto-place is NOT - it is confirmed again).
 const TRADE_MODE_KEY = 'optionanalytics.strategyScanner.tradeMode'
+// Paper trades whose exit has gone to Telegram, per day.
+const TG_SENT_KEY = 'optionanalytics.strategyScanner.telegramSent.v1'
 
 // A trade punched / placed (and a live trade's exit) to the server's Telegram chat - live view only.
 function telegram(text) {
@@ -414,6 +416,11 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       const meta = STRATEGY_BY_ID[s.id]
       const hit = exitLabel(s.outcome)
       const good = s.outcome.r > 0
+      // Telegram: a setup with an option trade is reported by that trade's own exit message (below).
+      const traded = (paperBookRef.current[dayKey]?.positions ?? []).some((p) => p.setupKey === key || (p.strategy === s.id && p.setupSide === s.side && Math.abs(setupTimeOf(p) - s.t) < 2 * MIN))
+      if (!isReplay && cfg.telegram !== false && !traded) {
+        telegram(`${hit}: #${meta.no} ${meta.name} ${s.side} - entry ${s.entry.toFixed(1)}, out ${s.outcome.exitPrice != null ? s.outcome.exitPrice.toFixed(1) : '-'} (${good ? '+' : ''}${s.outcome.r.toFixed(2)}R)`)
+      }
       if (cfg.sound) chime(good)
       if (cfg.voice) speak(`${hit}. ${meta.short}. ${good ? 'Plus' : 'Minus'} ${Math.abs(s.outcome.r).toFixed(1)} R.`)
       notification.open({
@@ -427,7 +434,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
         ),
       })
     }
-  }, [withOutcome, view?.minuteBars?.length])
+  }, [withOutcome, view?.minuteBars?.length, dayKey, isReplay])
   useEffect(() => {
     if (!withOutcome.length || !date) return
     setHistory((prev) => {
@@ -582,6 +589,31 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     for (const r of paperRows) if (r.live && r.exitTime && !r.exitSent) exitLive(r, r.exitReason ?? 'Exit')
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [paperRows, isReplay])
+  const tgPrimedRef = useRef(null)
+  // Telegram when a paper trade closes - its own Max SL / Target, or its setup's stop / target /
+  // trailing SL / time exit - once per trade (kept per day, so a refresh does not send it again). Live
+  // trades send theirs when the exit goes to Dhan (exitLive).
+  useEffect(() => {
+    if (isReplay || settingsRef.current.telegram === false) return
+    let sent
+    try { sent = JSON.parse(localStorage.getItem(TG_SENT_KEY) ?? '{}') } catch { sent = {} }
+    const today = new Set(sent[dayKey] ?? [])
+    // The first look after the page opens: trades already closed by then are not news.
+    if (tgPrimedRef.current !== dayKey && !(oi && view?.minuteBars?.length)) return // exits are not known yet
+    const opening = tgPrimedRef.current !== dayKey
+    if (opening) tgPrimedRef.current = dayKey
+    let changed = false
+    for (const r of paperRows) {
+      if (r.live || !r.exitTime || !r.exitReason || today.has(r.key)) continue
+      today.add(r.key)
+      changed = true
+      if (opening) continue
+      const meta = STRATEGY_BY_ID[r.strategy]
+      telegram(`Paper exit - ${r.exitReason}: ${r.action === 'SELL' ? 'sold' : 'bought'} ${underlying} ${r.strike} ${r.side} x${r.lots} @ ${r.premium.toFixed(1)} -> ${r.current != null ? r.current.toFixed(1) : '-'} = ${r.points != null ? `${r.points >= 0 ? '+' : ''}${r.points.toFixed(1)} pts, Rs ${Math.round(r.rupees).toLocaleString('en-IN')}` : '-'} (#${meta?.no} ${meta?.name})`)
+    }
+    if (changed) { try { localStorage.setItem(TG_SENT_KEY, JSON.stringify({ [dayKey]: [...today] })) } catch { /* convenience only */ } }
+  }, [paperRows, isReplay, dayKey, underlying, oi, view?.minuteBars?.length])
+
   // A live trade closed OUTSIDE this box - from the OI Replay's live panel, the Dhan app, or its own
   // super order's stop-loss / target filling on Dhan: once its super order has been seen pending on Dhan
   // and is then gone from the pending orders on two checks in a row, the row is closed here too (nothing

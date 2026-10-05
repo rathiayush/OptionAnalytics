@@ -470,7 +470,7 @@ export default function OrderFlowPage() {
   // off the heatmap.
   const tapePrints = useMemo(() => (isReplay ? tape.prints.filter((p) => new Date(p.time).getTime() <= (replayMs ?? 0)) : tape.prints), [isReplay, tape.prints, replayMs])
   const tapeNow = isReplay ? replayMs ?? Date.now() : Math.max(nowMs, tapePrints.length ? new Date(tapePrints.at(-1).time).getTime() : 0)
-  const aggressionNow = useMemo(() => (estimated ? null : aggression(tapePrints, tapeNow)), [estimated, tapePrints, tapeNow])
+  const aggressionNow = useMemo(() => (estimated ? null : aggression(tapePrints, tapeNow, undefined, view?.minuteBars)), [estimated, tapePrints, tapeNow, view?.minuteBars])
   const sweeps = useMemo(() => sweepSignals(view?.sweeps, lotSize), [view?.sweeps, lotSize])
   const pullStack = useMemo(
     () => (estimated ? { signals: [], pressure: null } : pullStackSignals({ columns: (view?.heatmap ?? []).slice(-1800), rowSize, lotSize })),
