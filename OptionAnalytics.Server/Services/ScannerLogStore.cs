@@ -37,7 +37,8 @@ public sealed class ScannerLogStore
     public static readonly string[] TradeColumns =
     {
         "key", "date", "underlying", "entry_time_ist", "exit_time_ist", "live", "action", "option", "strike", "lots", "lot_size",
-        "entry_premium", "exit_premium", "points", "rupees", "exit_reason", "signal_time_ist", "strategy_no", "strategy_id",
+        "entry_premium", "exit_premium", "points", "rupees", "stt", "brokerage", "other_charges", "net_rupees", "net_per_lot",
+        "exit_reason", "signal_time_ist", "strategy_no", "strategy_id",
         "signal_side", "day_type", "adaptive_take", "adaptive_reason", "source", "user", "updated_utc",
     };
 
@@ -97,6 +98,7 @@ public sealed class ScannerLogStore
             ["exit_time_ist"] = t.ExitTime is > 0 ? IstTime(t.ExitTime.Value) : "", ["live"] = Bool(t.Live), ["action"] = Text(t.Action),
             ["option"] = Text(t.Option), ["strike"] = Num(t.Strike), ["lots"] = Num(t.Lots), ["lot_size"] = Num(t.LotSize),
             ["entry_premium"] = Num(t.EntryPremium), ["exit_premium"] = Num(t.ExitPremium), ["points"] = Num(t.Points), ["rupees"] = Num(t.Rupees),
+            ["stt"] = Num(t.Stt), ["brokerage"] = Num(t.Brokerage), ["other_charges"] = Num(t.OtherCharges), ["net_rupees"] = Num(t.NetRupees), ["net_per_lot"] = Num(t.NetPerLot),
             ["exit_reason"] = Text(t.ExitReason), ["signal_time_ist"] = t.SignalTime is > 0 ? IstTime(t.SignalTime.Value) : "",
             ["strategy_no"] = Num(t.StrategyNo), ["strategy_id"] = Text(t.StrategyId), ["signal_side"] = Text(t.SignalSide),
             ["day_type"] = Text(t.DayType), ["adaptive_take"] = Bool(t.AdaptiveTake), ["adaptive_reason"] = Text(t.AdaptiveReason),
@@ -217,8 +219,10 @@ public sealed record ScannerSignalRow(
     double? ExitPrice, string? ExitReason);
 
 /// <summary>An option trade punched for a signal (paper or live) - SignalTime / StrategyId / SignalSide name
-/// the signal it came from.</summary>
+/// the signal it came from. Stt / Brokerage / OtherCharges / NetRupees / NetPerLot: its costs and net P&amp;L
+/// as the scanner works them out (rupees).</summary>
 public sealed record ScannerTradeRow(
     string? Key, long EntryTime, long? ExitTime, bool? Live, string? Action, string? Option, double? Strike, int? Lots,
     int? LotSize, double? EntryPremium, double? ExitPremium, double? Points, double? Rupees, string? ExitReason,
-    long? SignalTime, int? StrategyNo, string? StrategyId, string? SignalSide, string? DayType, bool? AdaptiveTake, string? AdaptiveReason);
+    long? SignalTime, int? StrategyNo, string? StrategyId, string? SignalSide, string? DayType, bool? AdaptiveTake, string? AdaptiveReason,
+    double? Stt = null, double? Brokerage = null, double? OtherCharges = null, double? NetRupees = null, double? NetPerLot = null);

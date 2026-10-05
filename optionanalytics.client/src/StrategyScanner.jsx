@@ -9,6 +9,7 @@ import { notifyLiveTradeEvents, notifyTrade } from './tradeNotify.js'
 import { loadTradeLevels, saveTradeLevels } from './tradeDefaults.js'
 import { suddenWallText } from './suddenOi.js'
 import { adaptiveStats } from './dayRegime.js'
+import { chargeRates, chargesSummary, tradeCharges } from './tradeCharges.js'
 import {
   ACTIVE_STRATEGIES, STRATEGY_BY_ID, evaluateStrategies, simulateOutcome, strategyStats, topFifteen, MIN_TRADES_TO_RANK, oiSummary, optionOiText,
   DEFAULT_TRAIL, LAST_ENTRY, SQUARE_OFF, fmtHm, exitLabel, premiumAt, optionPnlPoints, optionTradeText, squareOffMs, optionStopTargetHit, RANGE_IDS, asReplayContext,
@@ -680,6 +681,14 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   const adaptiveRows = paperRows.filter((r) => r.adaptive?.take)
   const adaptiveTotal = adaptiveRows.reduce((sum, r) => sum + (r.rupees ?? 0), 0)
   const untaggedTrades = paperRows.filter((r) => !r.adaptive).length
+  // Costs: STT on the sell leg, brokerage per order, other per trade (tradeCharges.js) - net P&L, net per
+  // lot and the points captured, for every trade and for the ones adaptive would have taken.
+  const rates = chargeRates(settings.charges)
+  const costsOf = (r) => tradeCharges(r, rates)
+  const allCosts = chargesSummary(paperRows, rates)
+  const adaptiveCosts = chargesSummary(adaptiveRows, rates)
+  const setRate = (key, v) => setSettings((x) => ({ ...x, charges: { ...chargeRates(x.charges), [key]: v } }))
+  const rupee = (v) => `${v < 0 ? '-' : ''}₹${Math.abs(Math.round(v)).toLocaleString('en-IN')}`
   const liveRows = paperRows.filter((r) => r.live)
   const liveTotal = liveRows.reduce((sum, r) => sum + (r.rupees ?? 0), 0)
   useEffect(() => { liveLossRef.current = liveTotal }, [liveTotal])
@@ -714,6 +723,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
         lotSize: r.lotSize ?? null, entryPremium: r.premium, exitPremium: r.exitTime ? r.current ?? null : null, points: r.points ?? null, rupees: r.rupees ?? null,
         exitReason: r.exitReason ?? null, signalTime: sig?.time ?? at, strategyNo: STRATEGY_BY_ID[r.strategy]?.no ?? null, strategyId: r.strategy,
         signalSide: r.setupSide, dayType: r.regime?.type ?? null, adaptiveTake: r.adaptive?.take ?? null, adaptiveReason: r.adaptive?.reason ?? null,
+        ...(() => { const c = tradeCharges(r, chargeRates(settingsRef.current.charges)); return c ? { stt: c.stt, brokerage: c.brokerage, otherCharges: c.other, netRupees: c.net, netPerLot: c.netPerLot } : {} })(),
       }
     })
     if (!signals.length && !trades.length) return
@@ -1131,11 +1141,32 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                   </Space>
                 </Tooltip>
                 <Text type="secondary" style={{ fontSize: 11 }}>premium pts (0 = off) · lots size every paper trade of the day (live trades keep theirs); a SL / target change applies to open trades, closed ones keep theirs</Text>
+                <Tooltip title="Charges on every trade (paper and live): STT % of the SELL side's premium value (the entry of a sold option, the exit of a bought one), brokerage per order (one to open + one to close) and a flat amount per trade for the rest (exchange, SEBI, stamp, GST). Net P&L = gross - all of them.">
+                  <Space size={4} aria-label="Charges">
+                    <Text style={{ fontSize: 12 }}>STT</Text>
+                    <InputNumber size="small" min={0} max={5} step={0.01} style={{ width: 66 }} value={rates.sttPct} aria-label="STT percent" onChange={(v) => v != null && setRate('sttPct', v)} />
+                    <Text style={{ fontSize: 12 }}>% · brokerage ₹</Text>
+                    <InputNumber size="small" min={0} max={500} step={1} style={{ width: 60 }} value={rates.brokeragePerOrder} aria-label="Brokerage per order" onChange={(v) => v != null && setRate('brokeragePerOrder', v)} />
+                    <Text style={{ fontSize: 12 }}>/order · other ₹</Text>
+                    <InputNumber size="small" min={0} max={500} step={1} style={{ width: 60 }} value={rates.otherPerTrade} aria-label="Other charges per trade" onChange={(v) => v != null && setRate('otherPerTrade', v)} />
+                    <Text style={{ fontSize: 12 }}>/trade</Text>
+                  </Space>
+                </Tooltip>
                 {paperRows.length > 0 && <Text strong style={{ fontSize: 12, color: paperTotal >= 0 ? UP_COLOR : DOWN_COLOR }}>P&amp;L ₹{Math.round(paperTotal).toLocaleString('en-IN')}</Text>}
+                {allCosts.trades > 0 && (
+                  <Tooltip title={`${allCosts.trades} trade(s) with a price: gross ${rupee(allCosts.gross)} - STT ${rupee(allCosts.stt)} - brokerage ${rupee(allCosts.brokerage)} - other ${rupee(allCosts.other)} = net ${rupee(allCosts.net)}. Per lot: each trade as if done with 1 lot, summed. Points: premium points captured, summed over the trades.`}>
+                    <Text style={{ fontSize: 12 }} aria-label="Net P&L">
+                      Net <b style={{ color: allCosts.net >= 0 ? UP_COLOR : DOWN_COLOR }}>{rupee(allCosts.net)}</b> (charges {rupee(allCosts.charges)})
+                      {' '}· per lot <b style={{ color: allCosts.netPerLot >= 0 ? UP_COLOR : DOWN_COLOR }}>{rupee(allCosts.netPerLot)}</b>
+                      {' '}· {allCosts.points >= 0 ? '+' : ''}{allCosts.points.toFixed(1)} pts
+                    </Text>
+                  </Tooltip>
+                )}
                 {paperRows.length > 0 && (
                   <Tooltip title={`The trades an adaptive scanner would have punched - its day type at each signal (tracking only: every trade above was punched).${untaggedTrades ? ` ${untaggedTrades} trade(s) have no day type and are left out.` : ''}`}>
                     <Text style={{ fontSize: 12 }} aria-label="Adaptive P&L">
                       Adaptive: {adaptiveRows.length} trade{adaptiveRows.length === 1 ? '' : 's'} · <span style={{ color: adaptiveTotal >= 0 ? UP_COLOR : DOWN_COLOR }}>₹{Math.round(adaptiveTotal).toLocaleString('en-IN')}</span>
+                      {adaptiveCosts.trades > 0 && <> · net <span style={{ color: adaptiveCosts.net >= 0 ? UP_COLOR : DOWN_COLOR }}>{rupee(adaptiveCosts.net)}</span> · per lot {rupee(adaptiveCosts.netPerLot)} · {adaptiveCosts.points >= 0 ? '+' : ''}{adaptiveCosts.points.toFixed(1)} pts</>}
                     </Text>
                   </Tooltip>
                 )}
@@ -1203,9 +1234,17 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                         <Tooltip title={r.exitError ?? r.liveNote}><Text type={r.exitError ? 'danger' : 'secondary'} style={{ fontSize: 10, marginLeft: 4 }}>{r.exitError ? 'exit failed - see Dhan' : 'Dhan ✓'}</Text></Tooltip>
                       )}
                     </span>
-                    <Text style={{ fontSize: 12, color: (r.points ?? 0) >= 0 ? UP_COLOR : DOWN_COLOR, minWidth: 90, textAlign: 'right' }}>
-                      {r.points == null ? '-' : `${r.points >= 0 ? '+' : ''}${r.points.toFixed(1)} · ₹${Math.round(r.rupees).toLocaleString('en-IN')}`}
-                    </Text>
+                    {(() => {
+                      const c = costsOf(r)
+                      return (
+                        <Tooltip title={c ? `${r.lots} lot(s) × ${r.lotSize}: gross ${rupee(c.gross)} - STT ${rupee(c.stt)} - brokerage ${rupee(c.brokerage)} - other ${rupee(c.other)} = net ${rupee(c.net)} (1 lot: ${rupee(c.netPerLot)})${r.exitTime ? '' : ' - open: at the current premium'}` : 'No premium yet'}>
+                          <Text style={{ fontSize: 12, color: (r.points ?? 0) >= 0 ? UP_COLOR : DOWN_COLOR, minWidth: 90, textAlign: 'right' }}>
+                            {r.points == null ? '-' : `${r.points >= 0 ? '+' : ''}${r.points.toFixed(1)} · ₹${Math.round(r.rupees).toLocaleString('en-IN')}`}
+                            {c && <span style={{ display: 'block', fontSize: 11, color: c.net >= 0 ? UP_COLOR : DOWN_COLOR }}>net {rupee(c.net)}</span>}
+                          </Text>
+                        </Tooltip>
+                      )
+                    })()}
                     {r.live
                       ? (!r.exitSent || r.exitError
                         ? (
