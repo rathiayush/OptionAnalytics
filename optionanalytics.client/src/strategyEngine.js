@@ -85,19 +85,20 @@ export const STRATEGIES = [
   // The heatmap's wall and the option writers' wall at the same price, with the futures: hold or break.
   { id: 'heatmapOi', no: 26, name: 'OI + liquidity heatmap confluence - hold or break', short: 'Heatmap + OI wall', priority: 3, retired: true },
   // The classic VWAP trend-day pullback, with the option writers / futures and the heatmap behind it -
-  // back in the line-up (the trader asked for it with #29, 05 Oct). #27 and #29 carry no priority, so the
-  // default Top 15 stays as measured; they join it once Scan day scores them profitable (or tick them in
-  // Custom / pick All).
-  { id: 'vwapPullback', no: 27, name: 'VWAP pullback - trend continuation (OI + heatmap)', short: 'VWAP pullback' },
+  // back in the line-up (the trader asked for it with #29, 05 Oct).
+  // `trial`: a new strategy alerts by default ON TOP of the Top 15 (pushing nothing out) until it has
+  // MIN_TRADES_TO_RANK scored trades - live days are scored as their trades end, so it gets measured
+  // without a Scan day - then it is ranked like the rest (and never alerted once it measures losing).
+  { id: 'vwapPullback', no: 27, name: 'VWAP pullback - trend continuation (OI + heatmap)', short: 'VWAP pullback', trial: true },
   // Pure option OI, minute by minute: the support wall outweighs the resistance wall, the money leans
   // the same way, and the writers keep adding on that side every minute.
   { id: 'oiStructure', no: 28, name: 'OI structure - heavier wall, leaning ATM, writing every minute', short: 'OI structure', priority: 3, retired: true },
   // The well-known VWAP trade with both OI reads behind it - the option writers AND a futures build-up -
   // on every day (no heatmap needed; #27 is the same trade with the heatmap wall).
-  { id: 'vwapOi', no: 29, name: 'VWAP + options & futures OI confluence', short: 'VWAP + OI' },
+  { id: 'vwapOi', no: 29, name: 'VWAP + options & futures OI confluence', short: 'VWAP + OI', trial: true },
   // Market profile: a break of the initial balance that leaves a tail / sweeps the liquidity out there
   // and comes back inside - a failed breakout; the range is revisited (toward the other IB edge).
-  { id: 'ibFailed', no: 30, name: 'Failed IB breakout - back inside, revisit the range', short: 'Failed IB break', group: 'profile' },
+  { id: 'ibFailed', no: 30, name: 'Failed IB breakout - back inside, revisit the range', short: 'Failed IB break', group: 'profile', trial: true },
 ]
 export const STRATEGY_BY_ID = Object.fromEntries(STRATEGIES.map((s) => [s.id, s]))
 /** The strategies in use - what the scanner runs, lists, alerts on and scores. */
@@ -2220,5 +2221,7 @@ export function topFifteen(stats) {
   const rest = stats.filter((s) => !chosen.has(s.id) && !(s.trades >= MIN_TRADES_TO_RANK && !(s.score > 0)))
     .sort((a, b) => (b.score ?? 0) - (a.score ?? 0) || (+b.priority || 0) - (+a.priority || 0))
   for (const s of rest) if (chosen.size < 15) chosen.add(s.id)
-  return { ids: [...chosen], measured: oi.measured && profile.measured, oi, profile }
+  // On trial: new strategies not measured yet, alerted beside the 15.
+  const trial = stats.filter((s) => s.trial && !chosen.has(s.id) && !(s.trades >= MIN_TRADES_TO_RANK)).map((s) => s.id)
+  return { ids: [...chosen], trial, measured: oi.measured && profile.measured, oi, profile }
 }

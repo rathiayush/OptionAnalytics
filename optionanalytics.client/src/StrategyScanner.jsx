@@ -326,7 +326,8 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   const stats = useMemo(() => strategyStats(Object.values(history).flatMap((d) => d.setups ?? [])), [history])
   const adaptive = useMemo(() => adaptiveStats(Object.values(history).flatMap((d) => d.setups ?? [])), [history])
   const top = useMemo(() => topFifteen(stats), [stats])
-  const alertIds = settings.pick === 'top15' ? top.ids : settings.pick === 'oi5' ? top.oi.ids : settings.pick === 'profile5' ? top.profile.ids
+  const top15Ids = useMemo(() => [...top.ids, ...top.trial], [top])
+  const alertIds = settings.pick === 'top15' ? top15Ids : settings.pick === 'oi5' ? top.oi.ids : settings.pick === 'profile5' ? top.profile.ids
     : settings.pick === 'range' ? RANGE_IDS : settings.pick === 'all' ? ALL_IDS : settings.custom
   const alertIdsRef = useRef(alertIds)
   useEffect(() => { alertIdsRef.current = alertIds }, [alertIds])
@@ -774,7 +775,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     { title: '#', dataIndex: 'no', width: 34 },
     {
       title: 'Strategy', dataIndex: 'name',
-      render: (name, r) => <span>{r.top && <Tag color="gold" style={{ marginRight: 4 }}>alert</Tag>}{name}{r.group === 'profile' && <Tag style={{ marginLeft: 4, fontSize: 10 }}>profile</Tag>}{r.group === 'range' && <Tag color="cyan" style={{ marginLeft: 4, fontSize: 10 }}>range</Tag>}{r.priority && <Tag color="purple" style={{ marginLeft: 4, fontSize: 10 }}>institutional</Tag>}{filtersButton(r.id)}</span>,
+      render: (name, r) => <span>{r.top && <Tag color="gold" style={{ marginRight: 4 }}>alert</Tag>}{name}{r.group === 'profile' && <Tag style={{ marginLeft: 4, fontSize: 10 }}>profile</Tag>}{r.group === 'range' && <Tag color="cyan" style={{ marginLeft: 4, fontSize: 10 }}>range</Tag>}{r.priority && <Tag color="purple" style={{ marginLeft: 4, fontSize: 10 }}>institutional</Tag>}{top.trial.includes(r.id) && <Tooltip title={`New - alerted beside the Top 15 until it has ${MIN_TRADES_TO_RANK} scored trades (live days are scored as their trades end), then ranked like the rest`}><Tag color="blue" style={{ marginLeft: 4, fontSize: 10 }}>on trial</Tag></Tooltip>}{filtersButton(r.id)}</span>,
     },
     { title: 'Trades', dataIndex: 'trades', width: 64 },
     { title: 'Win %', dataIndex: 'winRate', width: 66, render: (v) => (v == null ? '-' : `${Math.round(v * 100)}%`) },
@@ -860,7 +861,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
               <div style={{ maxWidth: '100%', overflowX: 'auto' }}>
                 <Segmented size="small" value={settings.pick} onChange={(v) => setSettings((s) => ({ ...s, pick: v }))}
                   options={[
-                    { value: 'top15', label: `Top 15${top.measured ? ' (measured)' : ''}` },
+                    { value: 'top15', label: `Top 15${top.measured ? ' (measured)' : ''}${top.trial.length ? ` + ${top.trial.length} on trial` : ''}` },
                     { value: 'oi5', label: 'Top 5 OI + flow' },
                     { value: 'profile5', label: 'Top 5 profile' },
                     { value: 'range', label: `Range-bound (${RANGE_IDS.length})` },
@@ -1090,7 +1091,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
           )}
           <Text type="secondary" style={{ fontSize: 11 }}>
             {days.length} day(s) scored ({days.filter((d) => d.estimated).length} estimated). Ranked by average R per trade (win rate × size of the wins), shrunk for small samples;
-            {' '}a strategy needs {MIN_TRADES_TO_RANK}+ trades to be ranked - until enough are, the playbook&apos;s picks fill each group's top 5 (OI + order flow, and profile) and the trapped-OI squeeze (24), then the institutional setups (17-21), fill the last five of the top 15. Range-bound fades (7, 22, 23) only fire on a balanced day; pick &quot;Range-bound&quot; to alert on them alone. A strategy losing on average is never alerted. Every alert carries its stop-loss and target, a trailing-SL alert gives each new stop, and another alert follows when the stop, target or the {fmtHm(SQUARE_OFF)} cut-off ends the trade. Outcomes are the FUTURES move to
+            {' '}a strategy needs {MIN_TRADES_TO_RANK}+ trades to be ranked - until enough are, the playbook&apos;s picks fill each group's top 5 (OI + order flow, and profile) and the trapped-OI squeeze (24), then the institutional setups (17-21), fill the last five of the top 15. New strategies (27, 29, 30) are alerted on trial beside the 15 until they have {MIN_TRADES_TO_RANK} scored trades - live days are scored as each trade ends, no Scan day needed. Range-bound fades (7, 22, 23) only fire on a balanced day; pick &quot;Range-bound&quot; to alert on them alone. A strategy losing on average is never alerted. Every alert carries its stop-loss and target, a trailing-SL alert gives each new stop, and another alert follows when the stop, target or the {fmtHm(SQUARE_OFF)} cut-off ends the trade. Outcomes are the FUTURES move to
             {' '}the setup&apos;s stop (trailed as set when it fired) / target / time stop, closed by {fmtHm(SQUARE_OFF)} at the latest (stop counted first when one minute touches both), not option P&amp;L; past results do not promise future ones.
           </Text>
         </Col>

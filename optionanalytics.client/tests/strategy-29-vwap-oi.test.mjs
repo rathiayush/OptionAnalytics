@@ -88,9 +88,15 @@ check('filter: VWAP slope 0.2% -> this trend (0.06%) is too flat', !scenario(1, 
 {
   const mk = (id, rs) => rs.map((r, i) => ({ id, t: i, outcome: { status: r > 0 ? 'win' : 'loss', r } }))
   const unmeasured = topFifteen(strategyStats([]))
-  check('unmeasured, #27 / #29 do not push a measured setup out of the default Top 15', !unmeasured.ids.includes('vwapOi') && !unmeasured.ids.includes('vwapPullback') && unmeasured.ids.includes('blockTrade') && unmeasured.ids.includes('imbalanceRetest'), unmeasured.ids.join())
+  check('unmeasured, #27 / #29 / #30 are alerted ON TRIAL beside the Top 15, pushing nothing out', ['vwapPullback', 'vwapOi', 'ibFailed'].every((id) => unmeasured.trial.includes(id) && !unmeasured.ids.includes(id))
+    && unmeasured.ids.length === 15 && unmeasured.ids.includes('blockTrade') && unmeasured.ids.includes('imbalanceRetest'), JSON.stringify({ ids: unmeasured.ids, trial: unmeasured.trial }))
+  const few = topFifteen(strategyStats(mk('vwapOi', [-1, -1, -1])))
+  check('...still on trial with fewer than 5 scored trades (even losing ones)', few.trial.includes('vwapOi'))
   const measured = topFifteen(strategyStats(mk('vwapOi', [2, 2, -1, 2, 2, 2])))
-  check('...and #29 joins it once it is measured profitable', measured.ids.includes('vwapOi') && measured.ids.length === 15, measured.ids.join())
+  check('...off trial at 5+ trades: measured profitable it joins the Top 15', measured.ids.includes('vwapOi') && !measured.trial.includes('vwapOi') && measured.ids.length === 15, measured.ids.join())
+  const losing = topFifteen(strategyStats(mk('vwapOi', [-1, -1, 1, -1, -1, -1])))
+  check('...measured losing it is alerted nowhere', !losing.ids.includes('vwapOi') && !losing.trial.includes('vwapOi'))
+  check('only #27, #29, #30 are on trial', unmeasured.trial.slice().sort().join() === 'ibFailed,vwapOi,vwapPullback', unmeasured.trial.join())
 }
 console.log(fails ? `${fails} FAILED` : 'all passed')
 process.exitCode = fails ? 1 : 0

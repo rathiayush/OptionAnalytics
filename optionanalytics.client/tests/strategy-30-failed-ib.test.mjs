@@ -95,6 +95,6 @@ check('filter: delta off -> fires with the delta against it', scenario(1, { delt
 const mid = scenario(1, { filters: F({ targetFrac: 0.5, minRR: 0.5, timeStopMin: 30 }) }).s
 check('filter: target the IB middle, 30-min time stop', mid && Math.abs(mid.target - 22700) < 0.01 && mid.timeStopMs - mid.t === 30 * MIN, show({ s: mid, all: [] }))
 check('filter: 3R room required -> 2R to the other edge is not enough', !scenario(1, { filters: F({ minRR: 3 }) }).s)
-check('unmeasured, #30 does not change the default Top 15', !topFifteen(strategyStats([])).ids.includes('ibFailed'))
+check('unmeasured, #30 is alerted on trial beside the Top 15 (which it does not change)', !topFifteen(strategyStats([])).ids.includes('ibFailed') && topFifteen(strategyStats([])).trial.includes('ibFailed'))
 console.log(fails ? `${fails} FAILED` : 'all passed')
 process.exitCode = fails ? 1 : 0
