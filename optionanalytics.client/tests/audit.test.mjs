@@ -74,8 +74,9 @@ function scrambledFrom(day, T) {
 const evalAt = (day, run, T) => {
   const done = day.bars.filter((b) => b.time + MIN <= T) // completed minutes, as the scanner passes them
   const prints = day.prints.filter((p) => p.time <= T)
+  // Retired strategies keep their code, so the look-ahead check covers them too (includeRetired).
   return evaluateStrategies({
-    nowMs: T, price: prints.at(-1)?.price ?? done.at(-1).close, bars: done, minuteBars: done, prints, book: { bids: [{ quantity: 600 }], asks: [{ quantity: 400 }] },
+    includeRetired: true, nowMs: T, price: prints.at(-1)?.price ?? done.at(-1).close, bars: done, minuteBars: done, prints, book: { bids: [{ quantity: 600 }], asks: [{ quantity: 400 }] },
     liquidity: [], pullStack: [], sweeps: [], icebergs: [], oi: buildOiContext(run), estimated: false, lotSize: 75, bigLots: 10,
     profile: { vp: { poc: 22760, vah: 22800, val: 22720, hvn: [22740, 22790], lvn: [22770] }, tpoPrev: { poc: 22760, vah: 22800, val: 22720 }, prevHigh: 22840, prevLow: 22680 },
   })

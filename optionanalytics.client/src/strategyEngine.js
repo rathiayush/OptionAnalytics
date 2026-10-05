@@ -118,9 +118,9 @@ export const RANGE_IDS = ACTIVE_STRATEGIES.filter((s) => s.group === 'range').ma
  */
 export const STRATEGY_FILTERS = {
   ibBreakout: [
-    { key: 'closesBeyond', label: 'Closes in a row beyond the IB to accept the break', type: 'number', default: 1, min: 1, max: 5, step: 1 },
-    { key: 'firstBreakOnly', label: 'First accepted break of each side per day only', type: 'switch', default: false },
-    { key: 'breakVolumeX', label: 'Break bar volume at least x the IB\'s average minute (0 = off)', type: 'number', default: 0, min: 0, max: 5, step: 0.1 },
+    { key: 'closesBeyond', label: 'Closes in a row beyond the IB to accept the break', type: 'number', default: 2, min: 1, max: 5, step: 1 },
+    { key: 'firstBreakOnly', label: 'First accepted break of each side per day only', type: 'switch', default: true },
+    { key: 'breakVolumeX', label: 'Break bar volume at least x the IB\'s average minute (0 = off)', type: 'number', default: 1.5, min: 0, max: 5, step: 0.1 },
     { key: 'minWriting', label: 'Option writers\' lean (whole chain, last hour) at least', type: 'number', default: 0.15, min: 0, max: 1, step: 0.05 },
     { key: 'skipWideIb', label: 'Skip when the IB is as wide as yesterday\'s range', type: 'switch', default: true },
     { key: 'needFootprint', label: 'Last bar\'s delta with the break', type: 'switch', default: true },
@@ -1243,11 +1243,11 @@ export function evaluateStrategies(input) {
   //     statistics: a narrow IB breaks almost always and extends far, an extremely wide one breaks far
   //     less and barely extends - so not when the IB is already as wide as the previous day's whole range
   //     (the day's range proxy), and more confidence when it is under 40% of it.
-  //     The rule as it was (one close beyond the edge, the bar before inside) is the DEFAULT. Stricter
-  //     options against false breaks are there for the trader to switch on in Filters, off by default:
-  //     the break accepted by N closes in a row (a one-bar poke that closes back inside is the classic
-  //     trap), only the first accepted break of a side per day, and a break bar of at least x times the
-  //     IB's average minute volume. Every threshold is a filter (STRATEGY_FILTERS.ibBreakout).
+  //     Against the false breaks (the defaults; each can be loosened in Filters): the break must be ACCEPTED
+  //     (two 1-minute closes in a row beyond the IB - a one-bar poke that closes back inside is the classic
+  //     trap), only the FIRST accepted break of that side in the day is taken (a second one comes after a
+  //     failed breakout), and the break bar must trade at least 1.5x the IB's average minute volume (real
+  //     exchange volume, also on estimated days). Every threshold is a filter (STRATEGY_FILTERS.ibBreakout).
   if (minute >= hm(10, 15) && minute <= hm(13, 30)) {
     const f = strategyFilters('ibBreakout', input.filters?.ibBreakout)
     const dayOpenMs = sessionStartMs
