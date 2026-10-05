@@ -1,3 +1,4 @@
+import { RUNNING_PROFILE } from './profileColors.js'
 // A volume profile drawn inside a lightweight-charts pane, attached to a candle series as a series
 // primitive (so the chart itself redraws it on every scroll, zoom, price-scale drag and resize):
 // one horizontal bar per price row, anchored to the right edge of the plot and at most `widthPct` of
@@ -78,7 +79,8 @@ export class VolumeProfilePrimitive {
   }
 }
 
-const LINE_STYLES = { POC: { color: '#fadb14', lineStyle: 0 }, VAH: { color: '#9b8cff', lineStyle: 2 }, VAL: { color: '#9b8cff', lineStyle: 2 } }
+// The futures chart's profile is TODAY's running one - its own colours, never the previous session's.
+const LINE_STYLES = { POC: { color: RUNNING_PROFILE.poc, lineStyle: 0 }, VAH: { color: RUNNING_PROFILE.va, lineStyle: 2 }, VAL: { color: RUNNING_PROFILE.va, lineStyle: 2 } }
 
 // Replaces the POC / VAH / VAL price lines on `series`; returns the new lines for the next call.
 // A row's line sits at the row's middle (POC) or its outer edge (VAH top, VAL bottom).

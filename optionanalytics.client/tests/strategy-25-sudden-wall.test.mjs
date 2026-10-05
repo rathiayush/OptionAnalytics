@@ -49,7 +49,7 @@ function scenario(dir, o = {}) {
   const flow = dir > 0 ? { buy: 700, sell: 400 } : { buy: 400, sell: 700 }
   const bars = mkBars(120, (m) => ({ c: level, ...(m >= 118 ? flow : {}), absorption: m === 119 && o.absorbed ? [{ side: dir > 0 ? 'sell' : 'buy', price: level }] : [] }))
   const bids = o.bids ?? (dir > 0 ? 650 : 350)
-  const setups = evaluateStrategies({ nowMs: now, price: level, bars, minuteBars: bars, prints: o.estimated ? null : tapeWith(now, dir > 0 ? 60 : 40),
+  const setups = evaluateStrategies({ includeRetired: true,  nowMs: now, price: level, bars, minuteBars: bars, prints: o.estimated ? null : tapeWith(now, dir > 0 ? 60 : 40),
     book: { bids: [{ quantity: bids }], asks: [{ quantity: 1000 - bids }] }, liquidity: [], pullStack: [], sweeps: [], icebergs: [], oi: ctx, estimated: !!o.estimated, lotSize: 75, bigLots: 10, profile: null })
   return { s: setups.find((x) => x.id === 'suddenWall'), all: setups }
 }
@@ -70,7 +70,5 @@ check('not when it is not the wall (a much bigger put strike next to it)', !scen
 check('not when price is far above the wall (index 100 pts over it)', !scenario(1, { level: 22860 }).s)
 check('not when the buying is absorbed', !scenario(1, { absorbed: true }).s)
 check('not on an estimated day (no book)', !scenario(1, { estimated: true }).s)
-const t = topFifteen(strategyStats([]))
-check('alerted (and auto-punched on paper) by default: in the unmeasured top 15', t.ids.includes('suddenWall') && t.ids.length === 15, t.ids.join())
 console.log(fails ? `${fails} FAILED` : 'all passed')
 process.exitCode = fails ? 1 : 0

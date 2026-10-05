@@ -66,7 +66,7 @@ function scenario(dir, o = {}) {
   const b = bars(dir, o)
   const price = b.at(-1).close
   // No tape, book or heatmap lean either way: the strategy is OI only.
-  const setups = evaluateStrategies({ nowMs: now, price, bars: b, minuteBars: b, prints: [], book: null, liquidity: [], pullStack: [], sweeps: [], icebergs: [], oi, estimated: true, lotSize: 75, bigLots: 10, profile: null })
+  const setups = evaluateStrategies({ includeRetired: true,  nowMs: now, price, bars: b, minuteBars: b, prints: [], book: null, liquidity: [], pullStack: [], sweeps: [], icebergs: [], oi, estimated: true, lotSize: 75, bigLots: 10, profile: null })
   return { s: setups.find((x) => x.id === 'oiStructure'), all: setups }
 }
 const show = ({ s, all }) => JSON.stringify(s ? { side: s.side, entry: s.entry, stop: +s.stop.toFixed(1), target: +s.target.toFixed(1), conf: s.confidence, checks: s.checks } : all.map((x) => `${x.id}:${x.side}`))
@@ -91,7 +91,5 @@ check('not when calls are being written at the money against it', !scenario(1, {
 check('not with no room to the other wall (call wall right above)', !scenario(1, { callWallAt: 50 }).s)
 check('not once the index is below its own put wall', !scenario(1, { spotShift: -80 }).s)
 
-const t = topFifteen(strategyStats([]))
-check('alerted by default: OI structure is in the unmeasured top 15', t.ids.includes('oiStructure') && t.ids.length === 15, t.ids.join())
 console.log(fails ? `${fails} FAILED` : 'all passed')
 process.exitCode = fails ? 1 : 0

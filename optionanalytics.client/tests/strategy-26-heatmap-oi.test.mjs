@@ -61,14 +61,14 @@ function scenario(d, o = {}) {
   const buyPct = o.buyPct ?? (o.breakFlow ? (d > 0 ? 30 : 70) : (d > 0 ? 70 : 30))
   const prints = Array.from({ length: 50 }, (_, i) => ({ seq: i, time: NOW - 50_000 + i * 1000, price: 1, quantity: 75, buy: ((i * 37) % 100) < buyPct }))
   const bookBids = o.breakFlow ? (d > 0 ? 400 : 600) : (d > 0 ? 600 : 400)
-  const setups = evaluateStrategies({ nowMs: NOW, price, bars, minuteBars: bars, prints, book: { bids: [{ quantity: bookBids }], asks: [{ quantity: 1000 - bookBids }] },
+  const setups = evaluateStrategies({ includeRetired: true,  nowMs: NOW, price, bars, minuteBars: bars, prints, book: { bids: [{ quantity: bookBids }], asks: [{ quantity: 1000 - bookBids }] },
     liquidity: [], pullStack: [], sweeps: [], icebergs: [], oi, estimated: !!o.estimated, lotSize: 75, bigLots: 10, profile: null,
     heatmap: o.noHeatmap ? null : columns, rowSize: 1 })
   return { s: setups.find((x) => x.id === 'heatmapOi'), all: setups, columns, bars, price }
 }
 const show = ({ s, all }) => JSON.stringify(s ? { side: s.side, entry: s.entry, stop: +s.stop.toFixed(1), target: +s.target.toFixed(1), checks: s.checks } : all.map((x) => `${x.id}:${x.side}`))
 
-check('28 strategies, #26 is the heatmap + OI confluence, alerted by default', STRATEGIES.length === 28 && STRATEGIES.find((x) => x.no === 26)?.id === 'heatmapOi' && topFifteen(strategyStats([])).ids.includes('heatmapOi'))
+check('28 strategies, #26 is the heatmap + OI confluence (retired since the 05 Oct revert)', STRATEGIES.length === 28 && STRATEGIES.find((x) => x.no === 26)?.id === 'heatmapOi' && STRATEGIES.find((x) => x.no === 26).retired)
 const L = scenario(1)
 check('HOLD long: absorption at the bid wall + PUT 22700 writers adding there -> LONG, stop under the wall, target the CALL wall', L.s?.side === 'LONG' && L.s.stop < 22745 && L.s.target > L.s.entry && /ABSORPTION/.test(L.s.checks['Liquidity map']) && /PUT 22700/.test(L.s.checks.OI) && /adding/.test(L.s.checks.OI), show(L))
 console.log('   ', L.s?.checks['Liquidity map'], '|', L.s?.checks.OI, '|', L.s?.checks.Plan)

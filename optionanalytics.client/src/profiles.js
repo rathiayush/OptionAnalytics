@@ -17,7 +17,7 @@ export const TPO_LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
  *  (footprint levels bucketed to the row size). */
 export function sessionVolumeProfile(bars) {
   const profile = volumeProfile(bars)
-  if (!profile.rows.length) return { ...profile, hvn: [], lvn: [] }
+  if (!profile.rows.length) return { ...profile, hvn: [], lvn: [], hvnTop: null, lvnTop: null }
   const rows = profile.rows
   // Smooth over three rows so a single thin row inside a busy area is not called a node.
   const smooth = rows.map((r, i) => (rows[i - 1]?.total ?? r.total) / 4 + r.total / 2 + (rows[i + 1]?.total ?? r.total) / 4)
@@ -28,14 +28,18 @@ export function sessionVolumeProfile(bars) {
     if (smooth[i] >= smooth[i - 1] && smooth[i] >= smooth[i + 1] && smooth[i] >= 1.3 * mean) peaks.push({ price: rows[i].price, v: smooth[i] })
     if (smooth[i] <= smooth[i - 1] && smooth[i] <= smooth[i + 1] && smooth[i] <= 0.6 * mean) troughs.push({ price: rows[i].price, v: smooth[i] })
   }
-  const hvn = peaks.filter((p) => p.price !== profile.poc).sort((a, b) => b.v - a.v).slice(0, 4).map((p) => p.price).sort((a, b) => a - b)
+  const byVolume = peaks.filter((p) => p.price !== profile.poc).sort((a, b) => b.v - a.v)
+  const hvn = byVolume.slice(0, 4).map((p) => p.price).sort((a, b) => a - b)
   const top = [profile.poc, ...hvn]
   const lo = Math.min(...top)
   const hi = Math.max(...top)
   // LVNs between the high-volume areas are the ones price moves through fast - only the two thinnest
   // are marked (and traded): the rest are noise next to them.
-  const lvn = troughs.filter((t) => t.price > lo && t.price < hi).sort((a, b) => a.v - b.v).slice(0, 2).map((t) => t.price).sort((a, b) => a - b)
-  return { ...profile, hvn, lvn }
+  const thinnest = troughs.filter((t) => t.price > lo && t.price < hi).sort((a, b) => a.v - b.v)
+  const lvn = thinnest.slice(0, 2).map((t) => t.price).sort((a, b) => a - b)
+  // What the charts show: ONE of each - the strongest HVN after the POC (the highest-volume node) and
+  // the thinnest LVN (the lowest-volume node). The lists above stay for the strategies.
+  return { ...profile, hvn, lvn, hvnTop: byVolume[0]?.price ?? null, lvnTop: thinnest[0]?.price ?? null }
 }
 
 /** A TPO (market) profile: each `periodMinutes` period puts its letter on every row its range touched.
