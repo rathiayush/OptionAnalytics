@@ -1842,17 +1842,24 @@ export function evaluateStrategies(input) {
   return resolveConflicts(input.includeRetired ? out : out.filter((s) => !STRATEGY_BY_ID[s.id]?.retired))
 }
 
-/** A long and a short at the same moment: keep the side whose best setup is clearly stronger (8+
- *  confidence points ahead), noted on each kept setup; too close to call - neither is traded. */
+/** A long and a short at the same moment: when their best confidences are within CONFLICT_GAP points of
+ *  each other (no clear winner) BOTH are traded, each noting the other; when one side is CONFLICT_GAP+
+ *  points ahead, only that side is traded. */
+export const CONFLICT_GAP = 20
 export function resolveConflicts(setups) {
   const longs = setups.filter((s) => s.side === 'LONG')
   const shorts = setups.filter((s) => s.side === 'SHORT')
   if (!longs.length || !shorts.length) return setups
   const best = (list) => Math.max(...list.map((s) => s.confidence))
   const [bl, bs] = [best(longs), best(shorts)]
-  if (Math.abs(bl - bs) < 8) return []
+  const names = (list) => list.map((s) => STRATEGY_BY_ID[s.id]?.short ?? s.id).join(', ')
+  if (Math.abs(bl - bs) < CONFLICT_GAP) {
+    // Too close to call: both sides are punched - the trader's choice (a hedge of two option trades).
+    const noteFor = (other) => `opposite ${names(other)} at the same time (confidence ${best(other)}) - within ${CONFLICT_GAP} points, so both sides are traded`
+    return setups.map((s) => ({ ...s, checks: { ...s.checks, Conflict: noteFor(s.side === 'LONG' ? shorts : longs) } }))
+  }
   const [kept, dropped] = bl > bs ? [longs, shorts] : [shorts, longs]
-  const note = `opposite ${dropped.map((s) => STRATEGY_BY_ID[s.id]?.short ?? s.id).join(', ')} at the same time (confidence ${best(dropped)}) - this side is stronger`
+  const note = `opposite ${names(dropped)} at the same time (confidence ${best(dropped)}) - this side is ${CONFLICT_GAP}+ points stronger, the other is not traded`
   return kept.map((s) => ({ ...s, checks: { ...s.checks, Conflict: note } }))
 }
 
