@@ -591,6 +591,12 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   }
 
   const dayResults = history[dayKey]?.scanned ? history[dayKey].setups : withOutcome
+  // Today's signals as fired vs what an adaptive scanner would have taken (tracking only).
+  const dayAdaptive = useMemo(() => adaptiveStats(dayResults), [dayResults])
+  const dayTaken = dayResults.filter((s) => s.adaptive?.take).length
+  const dayTagged = dayResults.filter((s) => s.adaptive).length
+  const adaptiveView = settings.signalView === 'adaptive'
+  const shownResults = adaptiveView ? dayResults.filter((s) => s.adaptive?.take !== false) : dayResults
 
   // The day's paper option positions, each closed by its setup's exit (or by hand), with P&L.
   const paperRows = useMemo(() => {
@@ -921,10 +927,26 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                 })}
               </div>
             )}
+            {dayResults.length > 0 && (
+              <div aria-label="Today adaptive" style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '4px 10px', fontSize: 12 }}>
+                <Segmented size="small" value={adaptiveView ? 'adaptive' : 'all'} onChange={(v) => setSettings((x) => ({ ...x, signalView: v }))}
+                  options={[{ value: 'all', label: `All signals (${dayResults.length})` }, { value: 'adaptive', label: `Adaptive would take (${dayTaken})` }]} />
+                <Tooltip title="Closed trades only; the adaptive call is the day type known at each signal. Tracking only - every signal still fires and alerts.">
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    Today: all {dayAdaptive.all.trades ? `${dayAdaptive.all.trades} closed ${fmtR(dayAdaptive.all.totalR)}` : 'none closed'}
+                    {' '}→ adaptive {dayAdaptive.take.trades ? `${dayAdaptive.take.trades} closed ${fmtR(dayAdaptive.take.totalR)}` : 'none closed'}
+                    {dayAdaptive.skip.trades ? <> (skipped {dayAdaptive.skip.trades}: {fmtR(dayAdaptive.skip.totalR)})</> : null}
+                    {dayTagged < dayResults.length ? ` · ${dayResults.length - dayTagged} without a day type` : ''}
+                  </Text>
+                </Tooltip>
+              </div>
+            )}
             <div style={{ maxHeight: 260, overflowY: 'auto' }} aria-label="Strategy setups">
               {dayResults.length === 0
                 ? <Text type="secondary" style={{ fontSize: 12 }}>{oi ? 'No setup yet today.' : oiError ? 'Waiting for OI…' : 'Loading OI…'}</Text>
-                : [...dayResults].reverse().map((s) => {
+                : shownResults.length === 0
+                  ? <Text type="secondary" style={{ fontSize: 12 }}>Adaptive would have skipped every signal so far today.</Text>
+                  : [...shownResults].reverse().map((s) => {
                   const meta = STRATEGY_BY_ID[s.id]
                   const o = s.outcome
                   return (
@@ -933,7 +955,11 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                         <Text type="secondary" style={{ fontSize: 11, minWidth: 38 }}>{IST_HHMM.format(new Date(s.t))}</Text>
                         <Tag color={s.side === 'LONG' ? 'green' : 'red'} style={{ margin: 0, fontSize: 11 }}>{s.side}</Tag>
                         <span style={{ flex: 1 }}>#{meta.no} {meta.short} <Text type="secondary" style={{ fontSize: 11 }}>@ {s.entry.toFixed(1)} · <b>SL {o.trailed ? <>{s.stop.toFixed(1)} → {o.stop.toFixed(1)}</> : s.stop.toFixed(1)}</b>{s.trail ? ' (trail)' : ''} · <b>T {s.target.toFixed(1)}</b> · {s.confidence}% {s.grade ?? gradeOf(s.confidence)}{s.signal ? ' · after cool-off' : ''}{s.estimated ? ' · est.' : ''}
-                          {s.adaptive && !s.adaptive.take && <Tooltip title={`${s.regime?.label ?? ''}: adaptive would skip it - ${s.adaptive.reason} (tracking only, it fired)`}> · <span style={{ color: '#d48806' }}>adaptive: skip</span></Tooltip>}
+                          {s.adaptive && (
+                            <Tooltip title={`Day type at the signal: ${s.regime?.label ?? '-'} - adaptive would ${s.adaptive.take ? 'take' : 'skip'} it (${s.adaptive.reason}). Tracking only - it fired either way.`}>
+                              {' · '}<span style={{ color: s.adaptive.take ? '#52c41a' : '#d48806', whiteSpace: 'nowrap' }}>{s.adaptive.take ? '✓' : '✗'} adaptive {s.adaptive.take ? 'take' : 'skip'} · {s.regime?.label ?? ''}</span>
+                            </Tooltip>
+                          )}
                           {o.status !== 'open' && o.exitPrice != null && <> · <span style={{ whiteSpace: 'nowrap' }}>out {o.exitAt != null ? IST_HHMM.format(new Date(o.exitAt)) : 'end'} @ {o.exitPrice.toFixed(1)} ({exitLabel(o)})</span></>}</Text></span>
                         {s.options && oi && (
                           <span style={{ whiteSpace: 'nowrap' }}>
