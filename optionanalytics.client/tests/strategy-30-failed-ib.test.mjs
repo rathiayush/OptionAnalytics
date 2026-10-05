@@ -58,14 +58,14 @@ function scenario(d, o = {}) {
     }
   }
   const oi = buildOiContext({ success: true, date: '2026-10-05', step: 50, spotCandlesOneMinute: spot, futuresBars: futures, cePoints, pePoints })
-  const setups = evaluateStrategies({ nowMs: NOW, price, bars, minuteBars: bars, prints: null, book: { bids: [{ quantity: d > 0 ? 600 : 400 }], asks: [{ quantity: d > 0 ? 400 : 600 }] },
+  const setups = evaluateStrategies({ includeRetired: true, nowMs: NOW, price, bars, minuteBars: bars, prints: null, book: { bids: [{ quantity: d > 0 ? 600 : 400 }], asks: [{ quantity: d > 0 ? 400 : 600 }] },
     liquidity: [], pullStack: [], sweeps: o.sweep ? [{ buy: d < 0, endedAt: iso(NOW - 3 * MIN) }] : [], icebergs: [], oi, estimated: !!o.estimated, lotSize: 75, bigLots: 10, profile: null, filters: o.filters })
   return { s: setups.find((x) => x.id === 'ibFailed'), all: setups }
 }
 const show = ({ s, all }) => JSON.stringify(s ? { side: s.side, entry: s.entry, stop: +s.stop.toFixed(1), target: +s.target.toFixed(1), checks: s.checks } : all.map((x) => `${x.id}:${x.side}`))
 
-check('30 strategies, #30 is the failed IB breakout, a profile strategy in the line-up', STRATEGIES.length === 30 && STRATEGIES.find((x) => x.no === 30)?.id === 'ibFailed'
-  && STRATEGIES.find((x) => x.no === 30).group === 'profile' && ACTIVE_STRATEGIES.some((x) => x.id === 'ibFailed'))
+check('30 strategies, #30 is the failed IB breakout, a profile strategy - retired (the rules stay tested)', STRATEGIES.length === 30 && STRATEGIES.find((x) => x.no === 30)?.id === 'ibFailed'
+  && STRATEGIES.find((x) => x.no === 30).group === 'profile' && STRATEGIES.find((x) => x.no === 30).retired && !ACTIVE_STRATEGIES.some((x) => x.id === 'ibFailed'))
 const L = scenario(1)
 check('LONG: broke under the IB low, a tail, back inside, put writers defend - target the IB high', L.s?.side === 'LONG' && L.s.stop < 22630 && Math.abs(L.s.target - 22750) < 0.01
   && /tail/.test(L.s.checks.Trapped) && /put writers defend/.test(L.s.checks.OI), show(L))
@@ -95,6 +95,6 @@ check('filter: delta off -> fires with the delta against it', scenario(1, { delt
 const mid = scenario(1, { filters: F({ targetFrac: 0.5, minRR: 0.5, timeStopMin: 30 }) }).s
 check('filter: target the IB middle, 30-min time stop', mid && Math.abs(mid.target - 22700) < 0.01 && mid.timeStopMs - mid.t === 30 * MIN, show({ s: mid, all: [] }))
 check('filter: 3R room required -> 2R to the other edge is not enough', !scenario(1, { filters: F({ minRR: 3 }) }).s)
-check('unmeasured, #30 is alerted on trial beside the Top 15 (which it does not change)', !topFifteen(strategyStats([])).ids.includes('ibFailed') && topFifteen(strategyStats([])).trial.includes('ibFailed'))
+check('retired: never in the Top 15 or on trial', !topFifteen(strategyStats([])).ids.includes('ibFailed') && !topFifteen(strategyStats([])).trial.includes('ibFailed'))
 console.log(fails ? `${fails} FAILED` : 'all passed')
 process.exitCode = fails ? 1 : 0

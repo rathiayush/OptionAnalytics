@@ -347,7 +347,6 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   }, [fired, isReplay, dayKey, date])
 
   const stats = useMemo(() => strategyStats(Object.values(history).flatMap((d) => d.setups ?? [])), [history])
-  const adaptive = useMemo(() => adaptiveStats(Object.values(history).flatMap((d) => d.setups ?? [])), [history])
   const top = useMemo(() => topFifteen(stats), [stats])
   const top15Ids = useMemo(() => [...top.ids, ...top.trial], [top])
   const alertIds = settings.pick === 'top15' ? top15Ids : settings.pick === 'oi5' ? top.oi.ids : settings.pick === 'profile5' ? top.profile.ids
@@ -1039,18 +1038,27 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                 })}
               </div>
             )}
-            {dayResults.length > 0 && (
+            {(dayResults.length > 0 || regimeNow) && (
               <div aria-label="Today adaptive" style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '4px 10px', fontSize: 12 }}>
-                <Segmented size="small" value={adaptiveView ? 'adaptive' : 'all'} onChange={(v) => setSettings((x) => ({ ...x, signalView: v }))}
-                  options={[{ value: 'all', label: `All signals (${dayResults.length})` }, { value: 'adaptive', label: `Adaptive would take (${dayTaken})` }]} />
-                <Tooltip title="Closed trades only; the adaptive call is the day type known at each signal. Tracking only - every signal still fires and alerts.">
+                {regimeNow && (
+                  <Tooltip title={`${regimeNow.reasons}. The day type is read from three votes - price, OI (options + futures) and CVD - and adaptive takes only the trades that suit it: trend days with the trend, range / two-sided days fades. Tracking only: every signal still fires and alerts.`}>
+                    <Text style={{ fontSize: 12 }} aria-label="Day type now">Day type now: <b>{regimeNow.label}</b>
+                      {regimeNow.votes && regimeNow.priceType !== 'early' && (
+                        <Text type="secondary" style={{ fontSize: 11 }}>{' '}· price {regimeNow.votes.price.replace('-', ' ')} · OI {regimeNow.votes.oi} · CVD {regimeNow.votes.cvd}</Text>
+                      )}
+                    </Text>
+                  </Tooltip>
+                )}
+                {dayResults.length > 0 && <Segmented size="small" value={adaptiveView ? 'adaptive' : 'all'} onChange={(v) => setSettings((x) => ({ ...x, signalView: v }))}
+                  options={[{ value: 'all', label: `All signals (${dayResults.length})` }, { value: 'adaptive', label: `Adaptive would take (${dayTaken})` }]} />}
+                {dayResults.length > 0 && <Tooltip title="Closed trades only; the adaptive call is the day type known at each signal. Tracking only - every signal still fires and alerts.">
                   <Text type="secondary" style={{ fontSize: 12 }}>
                     Today: all {dayAdaptive.all.trades ? `${dayAdaptive.all.trades} closed ${fmtR(dayAdaptive.all.totalR)}` : 'none closed'}
                     {' '}→ adaptive {dayAdaptive.take.trades ? `${dayAdaptive.take.trades} closed ${fmtR(dayAdaptive.take.totalR)}` : 'none closed'}
                     {dayAdaptive.skip.trades ? <> (skipped {dayAdaptive.skip.trades}: {fmtR(dayAdaptive.skip.totalR)})</> : null}
                     {dayTagged < dayResults.length ? ` · ${dayResults.length - dayTagged} without a day type` : ''}
                   </Text>
-                </Tooltip>
+                </Tooltip>}
               </div>
             )}
             <div style={{ maxHeight: 260, overflowY: 'auto' }} aria-label="Strategy setups">
@@ -1263,7 +1271,10 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
         </Col>
         <Col xs={24} xl={14}>
           <Table size="small" pagination={false} columns={statColumns} dataSource={statRows} scroll={{ x: 560 }} />
-          <AdaptivePanel adaptive={adaptive} regimeNow={regimeNow} />
+          <Text type="secondary" style={{ fontSize: 11 }} aria-label="Saved data">
+            Every signal (with its day type and adaptive call) and every option trade is saved on the server, every day in one file each:
+            {' '}<a href="/api/scanner-log/signals" download>signals.csv</a> · <a href="/api/scanner-log/trades" download>trades.csv</a>.
+          </Text>
           {filterFor && (
             <StrategyFiltersModal id={filterFor} values={settings.filters?.[filterFor]} onClose={() => setFilterFor(null)}
               onSave={(v) => { setSettings((s) => ({ ...s, filters: { ...s.filters, [filterFor]: v } })); setFilterFor(null) }} />
@@ -1344,59 +1355,5 @@ function StrategyFiltersModal({ id, values, onClose, onSave }) {
         </Text>
       </Space>
     </Modal>
-  )
-}
-
-/** The day type now and "what if we had gone adaptive": the real results of every scored setup beside
- *  the ones an adaptive scanner would have taken / skipped (dayRegime.js) - overall and per day type.
- *  Tracking only: every setup fires either way. */
-function AdaptivePanel({ adaptive, regimeNow }) {
-  const cell = (x) => (x.trades ? `${x.trades} · ${Math.round(x.winRate * 100)}% · ${fmtR(x.totalR)} (${fmtR(x.avgR)}/trade)` : '-')
-  const rows = [
-    { key: 'all', name: 'All signals (what fired)', v: adaptive.all },
-    { key: 'take', name: 'Adaptive would take', v: adaptive.take, strong: true },
-    { key: 'price', name: 'Adaptive on price alone', v: adaptive.takePrice },
-    { key: 'skip', name: 'Adaptive would skip', v: adaptive.skip },
-  ]
-  const better = adaptive.take.trades && adaptive.all.trades ? adaptive.take.avgR - adaptive.all.avgR : null
-  return (
-    <div aria-label="Adaptive what-if" style={{ marginTop: 8, padding: 8, border: '1px solid #ffffff1a', borderRadius: 6 }}>
-      <Space wrap size={6} style={{ marginBottom: 4 }}>
-        <Text strong style={{ fontSize: 12 }}>Day type &amp; adaptive what-if</Text>
-        <Tag style={{ margin: 0, fontSize: 11 }}>tracking only</Tag>
-        {regimeNow && (
-          <Tooltip title={regimeNow.reasons}>
-            <Text style={{ fontSize: 12 }}>Now: <b>{regimeNow.label}</b>
-              {regimeNow.votes && regimeNow.priceType !== 'early' && (
-                <Text type="secondary" style={{ fontSize: 11 }}>
-                  {' '}· price {regimeNow.votes.price.replace('-', ' ')} · OI {regimeNow.votes.oi} · CVD {regimeNow.votes.cvd}
-                </Text>
-              )}
-            </Text>
-          </Tooltip>
-        )}
-      </Space>
-      <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
-        <thead><tr><th style={{ textAlign: 'left', fontWeight: 500 }} /><th style={{ textAlign: 'left', fontWeight: 500 }}>Trades · win % · total R (avg)</th></tr></thead>
-        <tbody>
-          {rows.map((r) => (
-            <tr key={r.key}><td style={{ padding: '2px 8px 2px 0', whiteSpace: 'nowrap' }}>{r.strong ? <b>{r.name}</b> : r.name}</td><td>{cell(r.v)}</td></tr>
-          ))}
-          {adaptive.byType.map((t) => (
-            <tr key={t.type}>
-              <td style={{ padding: '2px 8px 2px 0', whiteSpace: 'nowrap' }}><Text type="secondary" style={{ fontSize: 12 }}>{t.label}</Text></td>
-              <td><Text type="secondary" style={{ fontSize: 12 }}>all {cell(t.all)} → adaptive {cell(t.take)}</Text></td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      <Text type="secondary" style={{ fontSize: 11 }}>
-        {better != null && <>Adaptive {better >= 0 ? 'would have added' : 'would have cost'} <b>{fmtR(Math.abs(better))}</b> per trade so far. </>}
-        The day type is read at each signal from what was known then - three votes: PRICE (the IB, range, net move, VWAP side / crosses), OI (option writers since the open + futures build-up / covering = trend; ATM straddle sold or nobody leaning = range; writers flipping = two-sided) and CVD (one way = trend, up and down = range). Price is kept unless OI / CVD outvote it (then unclear); OI + CVD agreeing call a trend before price. Trend - adaptive takes only trades with the trend;
-        {' '}range / two-sided (inside the IB, or both sides broken / chopping across VWAP) - it takes fades and skips trend / breakout setups; unclear or before 10:15 - it takes everything.
-        {' '}Nothing is blocked - every setup still fires and alerts as before. Every signal (with its day type and adaptive call) and every option trade is also saved on the server, every day in one file each:
-        {' '}<a href="/api/scanner-log/signals" download>signals.csv</a> · <a href="/api/scanner-log/trades" download>trades.csv</a>.{adaptive.untracked ? ` ${adaptive.untracked} setup(s) scored before tracking are not counted - re-run Scan day on those days.` : ''}
-      </Text>
-    </div>
   )
 }

@@ -42,6 +42,9 @@ function run(spot, pe = {}) {
 function bars(from, to, f) { const out = []; let cvd = 0; for (let m = from; m <= to; m++) { const b = { time: at(m), absorption: [], exhaustion: [], stacked: [], ...f(m) }; b.delta = b.buy - b.sell; cvd += b.delta; b.cvd = cvd; out.push(b) } return out }
 const tape = (now, pct) => Array.from({ length: 50 }, (_, i) => ({ seq: i, time: now - 50000 + i * 1000, price: 1, quantity: 75, buy: ((i * 37) % 100) < pct }))
 const MID = 22712
+// #15's stricter options, off by default (the old rule: one close beyond the edge): two closes in a row to
+// accept the break, the first break of a side per day, and a break bar of 1.5x the IB's average volume.
+const STRICT_IB = { closesBeyond: 2, firstBreakOnly: true, breakVolumeX: 1.5 }
 function ibCase(dir, o = {}) {
   const now = at(85) + 10000
   const mir = (p) => (dir > 0 ? p : 2 * MID - p)
@@ -62,7 +65,9 @@ function ibCase(dir, o = {}) {
     return b
   })
   const price = bs.at(-1).close
-  const setups = evaluateStrategies({ nowMs: now, price, bars: bs, minuteBars: bs, prints: tape(now, dir > 0 ? 70 : 30), book: dir > 0 ? { bids: [{ quantity: 600 }], asks: [{ quantity: 400 }] } : { bids: [{ quantity: 400 }], asks: [{ quantity: 600 }] }, liquidity: [], pullStack: [], sweeps: [], icebergs: [], oi, estimated: false, lotSize: 75, bigLots: 10, profile: null, filters: o.filters })
+  const setups = evaluateStrategies({ nowMs: now, price, bars: bs, minuteBars: bs, prints: tape(now, dir > 0 ? 70 : 30), book: dir > 0 ? { bids: [{ quantity: 600 }], asks: [{ quantity: 400 }] } : { bids: [{ quantity: 400 }], asks: [{ quantity: 600 }] }, liquidity: [], pullStack: [], sweeps: [], icebergs: [], oi, estimated: false, lotSize: 75, bigLots: 10, profile: null,
+    // The stricter options (Filters) are switched on here unless the case is about the DEFAULT rule.
+    filters: o.defaults ? o.filters : { ibBreakout: { ...STRICT_IB, ...o.filters?.ibBreakout } } })
   return { ib: setups.find((s) => s.id === 'ibBreakout'), setups }
 }
 // Call writing for the short: the whole chain's calls written over the last hour.
@@ -81,10 +86,16 @@ function runShort(spot) {
 }
 {
   const show = (r) => JSON.stringify(r.ib?.checks ?? r.setups.map((s) => s.id))
+  // The DEFAULT is the old rule: a close beyond the edge with the bar before inside - one close is enough,
+  // no first-break-only, no volume test.
+  const dflt = (dir, o = {}) => ibCase(dir, { ...o, defaults: true }).ib
+  check('default (the old rule): one close beyond the first-hour edge fires, LONG and SHORT', dflt(1, { breakAt: 84 })?.side === 'LONG' && dflt(-1, { breakAt: 84 })?.side === 'SHORT')
+  check('default: a weak break bar and a re-break after a failed one still fire (those are the optional filters)', dflt(1, { breakAt: 84, weak: true })?.side === 'LONG' && dflt(1, { breakAt: 84, earlier: [70, 71] })?.side === 'LONG')
+  check('default: not once the break is a bar old (the bar before is already beyond)', !dflt(1, { breakAt: 83 }) && !dflt(-1, { breakAt: 83 }))
   const L = ibCase(1)
-  check('IB breakout LONG: two closes above the first-hour high, first break, 2x volume', L.ib?.side === 'LONG' && L.ib.target > L.ib.entry && L.ib.stop < L.ib.entry && /2 closes beyond/.test(L.ib.checks.Footprint), show(L))
+  check('IB breakout LONG (strict options on): two closes above the first-hour high, first break, 2x volume', L.ib?.side === 'LONG' && L.ib.target > L.ib.entry && L.ib.stop < L.ib.entry && /2 closes beyond/.test(L.ib.checks.Footprint), show(L))
   const S = ibCase(-1)
-  check('IB breakout SHORT (the mirror): two closes below the first-hour low', S.ib?.side === 'SHORT' && S.ib.target < S.ib.entry && S.ib.stop > S.ib.entry, show(S))
+  check('IB breakout SHORT (strict options on, the mirror): two closes below the first-hour low', S.ib?.side === 'SHORT' && S.ib.target < S.ib.entry && S.ib.stop > S.ib.entry, show(S))
   check('not on a one-bar poke (the second close back inside the IB)', !ibCase(1, { poke: true }).ib && !ibCase(-1, { poke: true }).ib)
   check('not on the first close beyond only (no acceptance yet)', !ibCase(1, { breakAt: 84 }).ib && !ibCase(-1, { breakAt: 84 }).ib)
   check('not once the break has already been running (third close beyond)', !ibCase(1, { breakAt: 82 }).ib)
@@ -125,7 +136,9 @@ function runShort(spot) {
   const t = topFifteen(strategyStats([...mk('range', [-1, -1, -1, -1, -1]), ...mk('lvnRun', [2, 2, 2, -1, 2])]))
   check('top 15 (the measured loser left out), profile group led by its best', t.ids.length === 15 && !t.ids.includes('range') && t.profile.ids[0] === 'lvnRun', t.ids.join())
   const inst = ['oiSqueeze', 'trap', 'cvdDivergence', 'blockTrade', 'imbalanceRetest']
-  check('unmeasured: top 15 = OI top 5 + profile top 5 + the OI squeeze and institutional setups', inst.every((id) => t.ids.includes(id)) && !t.ids.includes('atmFlip'), t.ids.join())
+  const active = new Set(STRATEGIES.filter((x) => !x.retired).map((x) => x.id))
+  check('unmeasured: top 15 = the 3 OI picks left + profile top 5 + the OI squeeze + the institutional setups, topped up from the rest - nothing retired', inst.every((id) => t.ids.includes(id))
+    && ['buildUp', 'openingBias', 'iceberg'].every((id) => t.ids.includes(id)) && t.ids.length === 15 && t.ids.every((id) => active.has(id)) && !t.ids.includes('wallDefence') && !t.ids.includes('wallBreak') && !t.ids.includes('migration'), t.ids.join())
   // A measured, profitable range strategy outranks an unmeasured institutional one for the last five.
   const t2 = topFifteen(strategyStats([...mk('vwapFade', [1.5, 1.5, -1, 1.5, 1.5, 1.5])]))
   check('a measured profitable range fade gets into the top 15', t2.ids.includes('vwapFade') && t2.ids.length === 15, t2.ids.join())

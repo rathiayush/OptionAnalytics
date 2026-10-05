@@ -50,13 +50,13 @@ function scenario(d, o = {}) {
   const oi = buildOiContext({ success: true, date: '2026-10-05', step: 50, spotCandlesOneMinute: spot, futuresBars: futures, cePoints, pePoints })
   const buyPct = d > 0 ? 70 : 30
   const prints = Array.from({ length: 50 }, (_, i) => ({ seq: i, time: NOW - 50_000 + i * 1000, price: 1, quantity: 75, buy: ((i * 37) % 100) < buyPct }))
-  const setups = evaluateStrategies({ nowMs: NOW, price, bars, minuteBars: bars, prints: o.estimated ? null : prints, book: o.estimated ? null : { bids: [{ quantity: d > 0 ? 600 : 400 }], asks: [{ quantity: d > 0 ? 400 : 600 }] },
+  const setups = evaluateStrategies({ includeRetired: true, nowMs: NOW, price, bars, minuteBars: bars, prints: o.estimated ? null : prints, book: o.estimated ? null : { bids: [{ quantity: d > 0 ? 600 : 400 }], asks: [{ quantity: d > 0 ? 400 : 600 }] },
     liquidity: [], pullStack: [], sweeps: [], icebergs: [], oi, estimated: !!o.estimated, lotSize: 75, bigLots: 10, profile: null, filters: o.filters })
   return { s: setups.find((x) => x.id === 'vwapOi'), all: setups, vwap }
 }
 const show = ({ s, all }) => JSON.stringify(s ? { side: s.side, entry: s.entry, stop: +s.stop.toFixed(1), target: +s.target.toFixed(1), checks: s.checks } : all.map((x) => `${x.id}:${x.side}`))
 
-check('30 strategies, #29 is VWAP + OI confluence, in the line-up', STRATEGIES.length === 30 && STRATEGIES.find((x) => x.no === 29)?.id === 'vwapOi' && ACTIVE_STRATEGIES.some((x) => x.id === 'vwapOi'))
+check('30 strategies, #29 is VWAP + OI confluence - retired (not run, listed, alerted or scored; the rules stay tested)', STRATEGIES.length === 30 && STRATEGIES.find((x) => x.no === 29)?.id === 'vwapOi' && STRATEGIES.find((x) => x.no === 29).retired && !ACTIVE_STRATEGIES.some((x) => x.id === 'vwapOi'))
 const L = scenario(1)
 check('LONG: above a rising VWAP, the pullback tags it and turns, put writers + futures long build-up', L.s?.side === 'LONG' && L.s.stop < L.s.entry && L.s.target > L.s.entry
   && /writers back it/.test(L.s.checks.OI) && /long build-up/.test(L.s.checks.OI), show(L))
@@ -88,15 +88,10 @@ check('filter: VWAP slope 0.2% -> this trend (0.06%) is too flat', !scenario(1, 
 {
   const mk = (id, rs) => rs.map((r, i) => ({ id, t: i, outcome: { status: r > 0 ? 'win' : 'loss', r } }))
   const unmeasured = topFifteen(strategyStats([]))
-  check('unmeasured, #27 / #29 / #30 are alerted ON TRIAL beside the Top 15, pushing nothing out', ['vwapPullback', 'vwapOi', 'ibFailed'].every((id) => unmeasured.trial.includes(id) && !unmeasured.ids.includes(id))
+  check('only #27 is on trial now (#29 / #30 are retired): beside the Top 15, pushing nothing out', unmeasured.trial.join() === 'vwapPullback' && !unmeasured.ids.includes('vwapPullback')
     && unmeasured.ids.length === 15 && unmeasured.ids.includes('blockTrade') && unmeasured.ids.includes('imbalanceRetest'), JSON.stringify({ ids: unmeasured.ids, trial: unmeasured.trial }))
-  const few = topFifteen(strategyStats(mk('vwapOi', [-1, -1, -1])))
-  check('...still on trial with fewer than 5 scored trades (even losing ones)', few.trial.includes('vwapOi'))
-  const measured = topFifteen(strategyStats(mk('vwapOi', [2, 2, -1, 2, 2, 2])))
-  check('...off trial at 5+ trades: measured profitable it joins the Top 15', measured.ids.includes('vwapOi') && !measured.trial.includes('vwapOi') && measured.ids.length === 15, measured.ids.join())
-  const losing = topFifteen(strategyStats(mk('vwapOi', [-1, -1, 1, -1, -1, -1])))
-  check('...measured losing it is alerted nowhere', !losing.ids.includes('vwapOi') && !losing.trial.includes('vwapOi'))
-  check('only #27, #29, #30 are on trial', unmeasured.trial.slice().sort().join() === 'ibFailed,vwapOi,vwapPullback', unmeasured.trial.join())
+  const measured = topFifteen(strategyStats([...mk('vwapOi', [2, 2, -1, 2, 2, 2]), ...mk('ibFailed', [2, 2, -1, 2, 2, 2])]))
+  check('a retired strategy is never alerted, whatever trades it was scored with', !measured.ids.includes('vwapOi') && !measured.trial.includes('vwapOi') && !measured.ids.includes('ibFailed') && !measured.ids.includes('wallDefence'))
 }
 console.log(fails ? `${fails} FAILED` : 'all passed')
 process.exitCode = fails ? 1 : 0

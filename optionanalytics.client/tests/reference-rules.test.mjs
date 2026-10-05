@@ -28,8 +28,8 @@ const evalAt = (now, price, bs, oi, o = {}) => evaluateStrategies({ nowMs: now, 
 // #15 IB breakout: the IB's width against yesterday's range.
 {
   const now = at(85) + 10000
-  const oi = run((m) => 22650 + (m < 83 ? (m % 5) : 12), 85, { 22650: (m) => 3e6 + m * 20000, 22600: (m) => 3e6 + m * 20000 })
-  const bs = bars(0, 84, (m) => { const p = m < 83 ? 22710 + (m % 5) : 22722; return { open: p - 1, high: p + 1, low: p - 1, close: p, buy: m === 83 ? 1500 : m === 84 ? 800 : 500, sell: 500 } })
+  const oi = run((m) => 22650 + (m < 84 ? (m % 5) : 12), 85, { 22650: (m) => 3e6 + m * 20000, 22600: (m) => 3e6 + m * 20000 })
+  const bs = bars(0, 84, (m) => { const p = m < 84 ? 22710 + (m % 5) : 22722; return { open: p - 1, high: p + 1, low: p - 1, close: p, buy: m === 84 ? 1500 : 500, sell: 500 } })
   const ib = (prevRange) => evalAt(now, 22722, bs, oi, { buyPct: 70, profile: prevRange ? { prevHigh: 22700 + prevRange, prevLow: 22700 } : null }).find((s) => s.id === 'ibBreakout')
   const narrow = ib(20)
   check('#15 IB (6 pts) narrow against yesterday\'s 20-pt range: fires, noted narrow, more confidence', narrow?.side === 'LONG' && /narrow/.test(narrow.checks.Profile) && narrow.confidenceParts[0].points > ib(10).confidenceParts[0].points, JSON.stringify(narrow?.checks.Profile))
