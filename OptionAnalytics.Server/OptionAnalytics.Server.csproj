@@ -21,6 +21,7 @@
     <PackageReference Include="Npgsql" Version="8.0.5" />
     <PackageReference Include="Skender.Stock.Indicators" Version="2.7.3" />
     <PackageReference Include="Swashbuckle.AspNetCore" Version="6.6.2" />
+    <PackageReference Include="TrueData-DotNet" Version="1.4.7" />
   </ItemGroup>
 
   <!-- appsettings.Local.json is a LOCAL credentials overlay (see Program.cs and .gitignore). It

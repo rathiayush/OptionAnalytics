@@ -15,6 +15,7 @@ import {
 } from './shared.jsx'
 import { alignToBars, chartVwap, sessionVwapFromBars } from './chartVwap.js'
 import { notifyLiveTradeEvents, notifyTrade } from './tradeNotify.js'
+import { loadTradeLevels, saveTradeLevels } from './tradeDefaults.js'
 import { PremiumEmaChart, DraggableFloatingPanel, useFitContentAsDataGrows, useChartUserControl, CANDLE_SCALE_MARGINS } from './oiShared.jsx'
 import { LivePositionsView, liveTradingApi } from './LiveTrading.jsx'
 import { StrikePicker, moneynessLabel } from './StrikePicker.jsx'
@@ -2487,11 +2488,18 @@ export default function OiReplayPage() {
   const [paperDirection, setPaperDirection] = useState('BUY')
   const [paperStrikeOffset, setPaperStrikeOffset] = useState(0)
   const [paperQtyLots, setPaperQtyLots] = useState(10)
-  // Auto stop-loss/target, in premium points - SL defaults to 30 (the user's own explicit ask),
-  // target has no natural default so it starts disabled; both editable per session. 0/blank
-  // disables either one (see the effect that reads these below).
-  const [paperSlPoints, setPaperSlPoints] = useState(30)
-  const [paperTargetPoints, setPaperTargetPoints] = useState(0)
+  // Auto stop-loss/target, in premium points - on by default with each underlying's own levels
+  // (tradeDefaults.js: NIFTY 20/30, BANKNIFTY 50/75, SENSEX 60/90), what the trader sets kept per
+  // underlying in this browser. 0/blank disables either one (see the effect that reads these below).
+  const [paperSlPoints, setPaperSlPointsState] = useState(() => loadTradeLevels('oiReplay', underlying).sl)
+  const [paperTargetPoints, setPaperTargetPointsState] = useState(() => loadTradeLevels('oiReplay', underlying).target)
+  useEffect(() => {
+    const levels = loadTradeLevels('oiReplay', underlying)
+    setPaperSlPointsState(levels.sl)
+    setPaperTargetPointsState(levels.target)
+  }, [underlying])
+  const setPaperSlPoints = (v) => { setPaperSlPointsState(v); saveTradeLevels('oiReplay', underlying, { sl: v, target: paperTargetPoints }) }
+  const setPaperTargetPoints = (v) => { setPaperTargetPointsState(v); saveTradeLevels('oiReplay', underlying, { sl: paperSlPoints, target: v }) }
   const [paperPositions, setPaperPositions] = useState([])
   // Toggled by the trigger button/tag and the panel's own close button only - never by clicking
   // elsewhere (it's a portal-rendered DraggableFloatingPanel, not an antd Popover, so there is no

@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using OptionAnalytics.Server.Dhan;
 using OptionAnalytics.Server.Models;
+using OptionAnalytics.Server.TrueData;
 
 namespace OptionAnalytics.Server.Services.OrderFlow;
 
@@ -20,16 +21,20 @@ public sealed class OrderFlowHistory
     private readonly OrderFlowService _orderFlow;
     private readonly DhanHistoricalDataService _historical;
     private readonly NseChartHistory? _nseChart;
+    // Only when TrueData:Enabled (registered in Program.cs); null = the TrueData step does not exist.
+    private readonly TrueDataOrderFlowSource? _trueData;
     // Keyed by the contract asked for; Used / Note say which contract's candles these are when the asked
     // one had expired (PastFuturesCandles).
     private readonly ConcurrentDictionary<(uint SecurityId, DateOnly Day), (IReadOnlyList<CandleWithVolume> Candles, DateTimeOffset FetchedAt, DhanFuturesInstrument Used, string? Note)> _candles = new();
     private DateOnly _cacheDay = IstClock.Today();
 
-    public OrderFlowHistory(OrderFlowService orderFlow, DhanHistoricalDataService historical, NseChartHistory? nseChart = null)
+    public OrderFlowHistory(OrderFlowService orderFlow, DhanHistoricalDataService historical, NseChartHistory? nseChart = null,
+        TrueDataOrderFlowSource? trueData = null)
     {
         _orderFlow = orderFlow;
         _historical = historical;
         _nseChart = nseChart;
+        _trueData = trueData;
     }
 
     public sealed record Result(OrderFlowSnapshot? Snapshot, string? Error);
@@ -51,6 +56,24 @@ public sealed class OrderFlowHistory
             : _orderFlow.PastDays.EngineFor(underlying, contract.SecurityId, date);
         if (exact is not null)
             return new Result(exact.Snapshot(rowSize, Math.Max(1, minTradeLots) * (long)exact.LotSize, heatmapColumns), null);
+
+        // Rebuilt from TrueData's tick history (TrueData:Enabled only, recent days only) - else the estimate.
+        string? trueDataNote = null;
+        if (_trueData is not null && _trueData.Covers(date, IstClock.Today()))
+        {
+            var rebuilt = await _trueData.DayAsync(contract, date, frontMonth: expiry is null, cancellationToken);
+            if (rebuilt.Engine is { } engine)
+            {
+                var snap = engine.Snapshot(rowSize, Math.Max(1, minTradeLots) * (long)engine.LotSize, heatmapColumns);
+                return new Result(snap with
+                {
+                    Meta = snap.Meta with { DepthLevels = 0, DepthFeed = null },
+                    Source = "truedata",
+                    Note = $"Rebuilt from TrueData's tick history ({rebuilt.Symbol}): every tick's trade classified against the best bid / ask before it - footprint, delta and tape; TrueData has no NSE market depth, so no heatmap or DOM.",
+                }, null);
+            }
+            trueDataNote = $"TrueData could not rebuild it ({rebuilt.Error}).";
+        }
 
         // Estimated from Dhan's 1-minute candles.
         var key = (contract.SecurityId, date);
@@ -76,7 +99,8 @@ public sealed class OrderFlowHistory
         var used = cached.Used;
         var snapshot = OrderFlowEstimator.Build(underlying.ToUpperInvariant(), used.SecurityId, used.TradingSymbol, used.DhanSegment,
             used.TickSize, used.LotSize, used.Expiry, date, cached.Candles, rowSize, Math.Max(1, minTradeLots) * (long)used.LotSize);
-        return new Result(cached.Note is null ? snapshot : snapshot with { Note = $"{cached.Note} {snapshot.Note}" }, null);
+        var note = string.Join(" ", new[] { trueDataNote, cached.Note, snapshot.Note }.Where(n => !string.IsNullOrWhiteSpace(n)));
+        return new Result(snapshot with { Note = note }, null);
     }
 
     /// <summary>Whether Dhan serves a day's 1-minute candles for the futures contract listed then - an
@@ -129,7 +153,8 @@ public sealed class OrderFlowHistory
             var contract = await _orderFlow.ResolveContractAsync(underlying, expiry, day, cancellationToken);
             if (contract is null) return new TapeResult(Array.Empty<OrderFlowTrade>(), $"no {underlying.ToUpperInvariant()} futures contract for {day:dd MMM yyyy}");
             var live = _orderFlow.TrackedEngine(contract.SecurityId);
-            engine = live is not null && live.ExportDayDate() == day ? live : _orderFlow.PastDays.EngineFor(underlying, contract.SecurityId, day);
+            engine = live is not null && live.ExportDayDate() == day ? live
+                : _orderFlow.PastDays.EngineFor(underlying, contract.SecurityId, day) ?? _trueData?.Cached(contract.SecurityId, day);
         }
         if (engine is null)
             return new TapeResult(Array.Empty<OrderFlowTrade>(), $"no Time & Sales for {day:dd MMM yyyy} - only days recorded live are held (an estimated day has no prints)");

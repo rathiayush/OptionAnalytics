@@ -6,6 +6,7 @@ import { PAPER_TRADE_LOT_SIZE } from './oiShared.jsx'
 import { liveTradingApi } from './LiveTrading.jsx'
 import { chime, speak, telegram, unlockAudio } from './alerts.js'
 import { notifyLiveTradeEvents, notifyTrade } from './tradeNotify.js'
+import { loadTradeLevels, saveTradeLevels } from './tradeDefaults.js'
 import { suddenWallText } from './suddenOi.js'
 import {
   ACTIVE_STRATEGIES, STRATEGY_BY_ID, evaluateStrategies, simulateOutcome, strategyStats, topFifteen, MIN_TRADES_TO_RANK, oiSummary, optionOiText,
@@ -109,9 +110,18 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     // Older saved settings used 'top5' (from when there were only the first 10).
     // Every alert paper-sells its option by default (settings saved before that default had 'off').
     if (!saved.autoPaperSellDefault) Object.assign(saved, { autoPaper: 'sell', autoPaperSellDefault: true })
+    // The option Max SL / Target are per underlying (tradeDefaults.js - BANKNIFTY's premiums move ~2.5x
+    // NIFTY's): this underlying's saved levels, else its defaults.
+    const levels = loadTradeLevels('scanner', underlying)
+    Object.assign(saved, { paperSl: levels.sl, paperTarget: levels.target })
     return saved.pick === 'top5' ? { ...saved, pick: 'top15' } : saved
   })
   useEffect(() => writeJson(SETTINGS_KEY, settings), [settings])
+  // Another underlying: its own Max SL / Target (open trades keep the levels they have).
+  useEffect(() => {
+    const levels = loadTradeLevels('scanner', underlying)
+    setSettings((s) => (s.paperSl === levels.sl && s.paperTarget === levels.target ? s : { ...s, paperSl: levels.sl, paperTarget: levels.target }))
+  }, [underlying])
   const [history, setHistory] = useState(() => readJson(HISTORY_KEY, {}))
   const [fired, setFired] = useState([])
   const [scan, setScan] = useState(null) // { progress, error }
@@ -699,6 +709,10 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   const levelsTimerRef = useRef(null)
   const changeLimits = (patch) => {
     setSettings((s) => ({ ...s, ...patch }))
+    if (patch.paperSl != null || patch.paperTarget != null) {
+      const cur = settingsRef.current
+      saveTradeLevels('scanner', underlying, { sl: patch.paperSl ?? cur.paperSl, target: patch.paperTarget ?? cur.paperTarget })
+    }
     const openRows = paperRows.filter((r) => !r.exitTime)
     const open = new Set(openRows.map((r) => r.key))
     if (!open.size) return

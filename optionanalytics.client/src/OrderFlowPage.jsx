@@ -436,6 +436,11 @@ export default function OrderFlowPage() {
   // Everything below draws `view`: the live data, or the replayed day as of the replay clock.
   const view = useMemo(() => (isReplay ? replayView(replayDay, replayMs) : data), [isReplay, replayDay, replayMs, data])
   const estimated = view?.source === 'estimated'
+  // A day rebuilt from TrueData's tick history (server TrueData:Enabled): real classified ticks - full
+  // footprint and tape - but TrueData has no NSE depth, so no book / heatmap: the scanner treats it like
+  // any day without depth (DOM / heatmap confirmation waived, aggression from each minute's split).
+  const rebuilt = view?.source === 'truedata'
+  const noDepth = estimated || rebuilt
 
   const lotSize = view?.meta?.lotSize ?? 1
   const bars = useMemo(
@@ -758,12 +763,12 @@ export default function OrderFlowPage() {
                 </Tag>
               )}
             {isReplay && replayDay && (
-              <Tooltip title={estimated ? replayDay.note : 'The server saw this day live - footprint, prints, heatmap and book replay exactly.'}>
-                <Tag color={estimated ? 'orange' : 'green'}>{estimated ? 'Estimated from 1-min candles' : 'Exact (tick data)'}</Tag>
+              <Tooltip title={noDepth ? replayDay.note : 'The server saw this day live - footprint, prints, heatmap and book replay exactly.'}>
+                <Tag color={estimated ? 'orange' : rebuilt ? 'blue' : 'green'}>{estimated ? 'Estimated from 1-min candles' : rebuilt ? 'Rebuilt from TrueData ticks (no depth)' : 'Exact (tick data)'}</Tag>
               </Tooltip>
             )}
             {meta && <Tag>{meta.contractSymbol} · lot {meta.lotSize}</Tag>}
-            {meta && !estimated && <DepthBadge meta={meta} live={!isReplay} />}
+            {meta && !noDepth && <DepthBadge meta={meta} live={!isReplay} />}
             {meta?.lastPrice > 0 && <Text strong>{meta.lastPrice.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</Text>}
             {lastBar && (
               <Text style={{ fontSize: 12 }}>
@@ -779,6 +784,7 @@ export default function OrderFlowPage() {
         {!isReplay && error && <Alert type="warning" showIcon message={error} />}
         {isReplay && replayError && <Alert type="warning" showIcon message={replayError} />}
         {isReplay && estimated && <Alert type="info" showIcon message="Estimated order flow" description={replayDay?.note} />}
+        {isReplay && rebuilt && <Alert type="info" showIcon message="Order flow rebuilt from TrueData's tick history" description={replayDay?.note} />}
 
         <Row gutter={[16, 16]}>
           <Col xs={24} xl={17}>
@@ -858,7 +864,7 @@ export default function OrderFlowPage() {
 
         <StrategyScanner
           underlying={underlying} isReplay={isReplay} date={isReplay ? replayDate : todayKey()} view={view} replayDay={replayDay} replayMs={replayMs} range={range}
-          tapePrints={tapePrints} liquidity={liquidity} pullStack={pullStack.signals} rowSize={rowSize} lotSize={lotSize} largeLots={bigLots} estimated={estimated}
+          tapePrints={tapePrints} liquidity={liquidity} pullStack={pullStack.signals} rowSize={rowSize} lotSize={lotSize} largeLots={bigLots} estimated={noDepth}
           profile={scannerProfile} oi={dayOi} oiError={dayOiError} canTradeLive={canTradeLive}
         />
 
