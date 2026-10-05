@@ -583,22 +583,37 @@ export function orderFlowBias({ bars = [], liquidity = [], bigTrades = [], nowMs
 // Aggression: of the prints in each window ending at `nowMs`, how much was BOUGHT at the offer (buyers
 // aggressive - market buy orders) vs SOLD at the bid; plus the tape's speed. Prints: the Time & Sales
 // rows ({ time, price, quantity, buy }), oldest first.
-export const AGGRESSION_WINDOWS = [{ label: '30s', ms: 30_000 }, { label: '1m', ms: 60_000 }, { label: '5m', ms: 300_000 }]
+export const AGGRESSION_WINDOWS = [{ label: '1m', ms: 60_000 }, { label: '3m', ms: 180_000 }, { label: '5m', ms: 300_000 }, { label: '15m', ms: 900_000 }]
 
-export function aggression(prints, nowMs, windows = AGGRESSION_WINDOWS) {
+/** Buying vs selling aggression over each window. From the prints when the tape held reaches back that
+ *  far; a longer window than the tape covers (it keeps the latest prints only) is read from the minute
+ *  bars' buy / sell volume instead (`fromBars`) - the same aggressor split, a minute at a time. */
+export function aggression(prints, nowMs, windows = AGGRESSION_WINDOWS, minuteBars = null) {
+  const oldest = prints?.length ? msOf(prints[0].time) : Infinity
   return windows.map(({ label, ms }) => {
     let buy = 0
     let sell = 0
     let count = 0
-    for (let i = (prints?.length ?? 0) - 1; i >= 0; i--) {
-      const t = msOf(prints[i].time)
-      if (t > nowMs) continue
-      if (t < nowMs - ms) break
-      if (prints[i].buy) buy += prints[i].quantity; else sell += prints[i].quantity
-      count++
+    const fromBars = oldest > nowMs - ms && minuteBars?.length > 0
+    if (fromBars) {
+      for (let i = minuteBars.length - 1; i >= 0; i--) {
+        const t = msOf(minuteBars[i].time)
+        if (t > nowMs) continue
+        if (t + 60_000 <= nowMs - ms) break
+        buy += minuteBars[i].buy ?? 0
+        sell += minuteBars[i].sell ?? 0
+      }
+    } else {
+      for (let i = (prints?.length ?? 0) - 1; i >= 0; i--) {
+        const t = msOf(prints[i].time)
+        if (t > nowMs) continue
+        if (t < nowMs - ms) break
+        if (prints[i].buy) buy += prints[i].quantity; else sell += prints[i].quantity
+        count++
+      }
     }
     const total = buy + sell
-    return { label, ms, buy, sell, total, prints: count, buyPct: total > 0 ? Math.round((buy / total) * 100) : 50, perMin: Math.round((count / ms) * 60_000) }
+    return { label, ms, buy, sell, total, prints: count, fromBars, buyPct: total > 0 ? Math.round((buy / total) * 100) : 50, perMin: Math.round((count / ms) * 60_000) }
   })
 }
 
