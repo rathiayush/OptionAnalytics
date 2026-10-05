@@ -377,21 +377,23 @@ export function optionPnlPoints(trade, oi, ms) {
 /** A paper option trade's own premium stop-loss / target, in premium points (0 = none): the first
  *  minute after `entryMs` (and before `untilMs`) whose range reaches either level. A SELL loses when the
  *  premium rises, a BUY when it falls; the stop counts first when one minute touches both. Filled at
- *  the level itself. Returns { at (ms, the minute's end), premium, reason } or null. */
-export function optionStopTargetHit(oi, trade, entryMs, untilMs, slPoints, targetPoints, trail = null) {
+ *  the level itself. Returns { at (ms, the minute's end), premium, reason } or null.
+ *  `levelLog` ([{ t, sl, target, trailStart, trailGap }], oldest first): the trader changed the levels
+ *  while the trade was open - each minute is judged with the levels in force when it STARTED (a change
+ *  applies from its minute on, never to what already passed). */
+export function optionStopTargetHit(oi, trade, entryMs, untilMs, slPoints, targetPoints, trail = null, levelLog = null) {
+  const logged = levelLog?.length > 0
   const trailOn = trail?.gap > 0
-  if (!(slPoints > 0) && !(targetPoints > 0) && !trailOn) return null
+  if (!logged && !(slPoints > 0) && !(targetPoints > 0) && !trailOn) return null
   const series = (trade.side === 'CE' ? oi?.ce : oi?.pe)?.get(trade.strike)
   if (!series?.length) return null
   const sell = trade.action === 'SELL'
-  const stop = slPoints > 0 ? (sell ? trade.premium + slPoints : trade.premium - slPoints) : null
-  const target = targetPoints > 0 ? (sell ? trade.premium - targetPoints : trade.premium + targetPoints) : null
   // From the first FULL minute after the entry (a minute already running at the entry partly came
   // before it); `lag`: a replayed day's points are stamped at their minute's end.
   const lag = oi?.lag ?? 0
   const firstMinute = Math.ceil(entryMs / MIN) * MIN
   // Trailing (optionTrail.js): the stop in force in a minute comes from the best premium of the minutes
-  // BEFORE it - it moves after each completed minute, only tightening.
+  // BEFORE it - it moves after each completed minute, only tightening (for one trail setting).
   let best = trade.premium
   for (const p of series) {
     const start = p.t - lag
@@ -400,12 +402,18 @@ export function optionStopTargetHit(oi, trade, entryMs, untilMs, slPoints, targe
     const high = p.high ?? p.price
     const low = p.low ?? p.price
     if (!(high > 0)) continue
-    const trailed = trailOn ? optionTrailLevel(trade.action, trade.premium, best, trail.start, trail.gap) : null
+    let sl = slPoints
+    let tgt = targetPoints
+    let tr = trail
+    if (logged) for (const c of levelLog) if (c.t <= start) { sl = c.sl; tgt = c.target; tr = { start: c.trailStart ?? 0, gap: c.trailGap ?? 0 } }
+    const stop = sl > 0 ? (sell ? trade.premium + sl : trade.premium - sl) : null
+    const target = tgt > 0 ? (sell ? trade.premium - tgt : trade.premium + tgt) : null
+    const trailed = tr?.gap > 0 ? optionTrailLevel(trade.action, trade.premium, best, tr.start, tr.gap) : null
     const inForce = tighterStop(trade.action, stop, trailed)
     if (inForce != null && (sell ? high >= inForce : low <= inForce)) {
-      return { at: start + MIN, premium: inForce, reason: inForce === trailed && trailed !== stop ? `Trailing SL hit (${trail.gap} pts behind the best ${best.toFixed(1)})` : `Max SL ${slPoints} pts hit` }
+      return { at: start + MIN, premium: inForce, reason: inForce === trailed && trailed !== stop ? `Trailing SL hit (${tr.gap} pts behind the best ${best.toFixed(1)})` : `Max SL ${sl} pts hit` }
     }
-    if (target != null && (sell ? low <= target : high >= target)) return { at: start + MIN, premium: target, reason: `Target ${targetPoints} pts hit` }
+    if (target != null && (sell ? low <= target : high >= target)) return { at: start + MIN, premium: target, reason: `Target ${tgt} pts hit` }
     best = sell ? Math.min(best, low) : Math.max(best, high)
   }
   return null
@@ -2162,6 +2170,14 @@ export function squareOffMs(t) {
   return ms - (ms % MIN) + (SQUARE_OFF - istMinute(ms)) * MIN
 }
 
+/** The trailing SL in force at `ms` for a setup: the one it fired with, then each change in `setup.trailLog`
+ *  ([{ t, trail }], oldest first, t after the setup's own time) whose time has come. */
+export function trailIn(setup, ms) {
+  let trail = setup.trail
+  for (const c of setup.trailLog ?? []) if (c.t > setup.t && c.t <= ms) trail = c.trail
+  return trail
+}
+
 /** What happened after a setup, from the minute bars up to `untilMs`: stop first if a bar touches both
  *  (the stop as it stood when the bar opened - a trailing stop moves after each completed bar). Closed
  *  at its time stop, and always by the 15:10 cut-off. `dayOver`: the day's data is complete (a scanned
@@ -2201,7 +2217,15 @@ export function simulateOutcome(setup, minuteBars, untilMs, dayOver = false) {
     if (favourable) return { status: 'win', r: rTarget, mfe, exitAt: t, exitPrice: setup.target, ...state() }
     lastClose = b.close
     best = dir > 0 ? Math.max(best, b.high) : Math.min(best, b.low)
-    stop = trailedStop(setup, best)
+    // The trail in force once this bar is done: the one the setup fired with, or the latest change (setup.trailLog,
+    // [{ t, trail }]) up to then - a mid-trade change of the trailing SL applies from its time on, the stop only
+    // ever tightening.
+    // A change made just as this bar closed is applied to it too, but never loosens what the previous trail had
+    // just earned (widening or switching it off keeps the stop; the new distance rules from the next bar).
+    for (const trail of new Set([trailIn(setup, t + MIN), trailIn(setup, t + MIN - 1)])) {
+      const trailed = trail === setup.trail ? trailedStop(setup, best) : trailedStop({ ...setup, trail }, best)
+      stop = dir > 0 ? Math.max(stop, trailed) : Math.min(stop, trailed)
+    }
     if (t + MIN >= timeStopMs) {
       const r = (dir * (b.close - setup.entry)) / risk
       return { status: statusOf(r), r, mfe, exitAt: t, exitPrice: b.close, timeStop: true, squareOff: t + MIN >= squareOffMs(setup.t), ...state() }
