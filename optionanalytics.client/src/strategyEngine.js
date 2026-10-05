@@ -40,16 +40,17 @@ export const LAST_ENTRY = hm(14, 45)
 /** ...and every trade still open is closed at this cut-off. */
 export const SQUARE_OFF = hm(15, 10)
 /** Trailing stop-loss: once a trade is `startR` in profit, the stop follows the best price `gapR`
- *  behind it (with the defaults the stop reaches the entry - breakeven - at +1R, and only ever tightens). */
+ *  behind it (with the defaults the stop reaches the entry - breakeven - at +1R, and only ever tightens).
+ *  The trader can set it in futures points instead (`unit: 'pts'`, `startPts` / `gapPts` - trailPoints). */
 export const DEFAULT_TRAIL = { startR: 1, gapR: 1 }
 export const fmtHm = (m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`
 
 export const STRATEGIES = [
   // retired: not run, alerted or listed; the rules stay (the tests still exercise them) so one can come
   // back by dropping the flag.
-  { id: 'wallDefence', no: 1, name: 'OI wall defence', short: 'Wall defence' },
+  { id: 'wallDefence', no: 1, name: 'OI wall defence', short: 'Wall defence', retired: true },
   { id: 'wallBreak', no: 2, name: 'OI wall break - writers run', short: 'Wall break' },
-  { id: 'migration', no: 3, name: 'Writer migration', short: 'Migration' },
+  { id: 'migration', no: 3, name: 'Writer migration', short: 'Migration', retired: true },
   { id: 'squeeze', no: 4, name: 'Short-covering squeeze', short: 'Squeeze' },
   { id: 'flush', no: 5, name: 'Long-unwinding flush', short: 'Flush' },
   { id: 'buildUp', no: 6, name: 'Fresh build-up trend', short: 'Build-up trend' },
@@ -95,16 +96,16 @@ export const STRATEGIES = [
   { id: 'oiStructure', no: 28, name: 'OI structure - heavier wall, leaning ATM, writing every minute', short: 'OI structure', priority: 3, retired: true },
   // The well-known VWAP trade with both OI reads behind it - the option writers AND a futures build-up -
   // on every day (no heatmap needed; #27 is the same trade with the heatmap wall).
-  { id: 'vwapOi', no: 29, name: 'VWAP + options & futures OI confluence', short: 'VWAP + OI', trial: true },
+  { id: 'vwapOi', no: 29, name: 'VWAP + options & futures OI confluence', short: 'VWAP + OI', trial: true, retired: true },
   // Market profile: a break of the initial balance that leaves a tail / sweeps the liquidity out there
   // and comes back inside - a failed breakout; the range is revisited (toward the other IB edge).
-  { id: 'ibFailed', no: 30, name: 'Failed IB breakout - back inside, revisit the range', short: 'Failed IB break', group: 'profile', trial: true },
+  { id: 'ibFailed', no: 30, name: 'Failed IB breakout - back inside, revisit the range', short: 'Failed IB break', group: 'profile', trial: true, retired: true },
 ]
 export const STRATEGY_BY_ID = Object.fromEntries(STRATEGIES.map((s) => [s.id, s]))
 /** The strategies in use - what the scanner runs, lists, alerts on and scores. */
 export const ACTIVE_STRATEGIES = STRATEGIES.filter((s) => !s.retired)
 // The playbook's own picks, used for alerts until enough trades have been scored to rank them.
-export const DEFAULT_TOP5 = ['wallDefence', 'wallBreak', 'buildUp', 'openingBias', 'iceberg']
+export const DEFAULT_TOP5 = ['wallBreak', 'buildUp', 'openingBias', 'iceberg']
 export const DEFAULT_PROFILE_TOP5 = ['vaRejection', 'tpo80', 'pocReaction', 'lvnRun', 'ibBreakout']
 export const RANGE_IDS = ACTIVE_STRATEGIES.filter((s) => s.group === 'range').map((s) => s.id)
 
@@ -1242,11 +1243,11 @@ export function evaluateStrategies(input) {
   //     statistics: a narrow IB breaks almost always and extends far, an extremely wide one breaks far
   //     less and barely extends - so not when the IB is already as wide as the previous day's whole range
   //     (the day's range proxy), and more confidence when it is under 40% of it.
-  //     Against the false breaks: the break must be ACCEPTED (two 1-minute closes in a row beyond the IB -
-  //     a one-bar poke that closes back inside is the classic trap), only the FIRST accepted break of that
-  //     side in the day is taken (a second one comes after a failed breakout), and the break bar must trade
-  //     at least 1.5x the IB's average minute volume (real exchange volume, also on estimated days).
-  //     Every threshold here is a filter the trader can tune (STRATEGY_FILTERS.ibBreakout).
+  //     Against the false breaks (the defaults; each can be loosened in Filters): the break must be ACCEPTED
+  //     (two 1-minute closes in a row beyond the IB - a one-bar poke that closes back inside is the classic
+  //     trap), only the FIRST accepted break of that side in the day is taken (a second one comes after a
+  //     failed breakout), and the break bar must trade at least 1.5x the IB's average minute volume (real
+  //     exchange volume, also on estimated days). Every threshold is a filter (STRATEGY_FILTERS.ibBreakout).
   if (minute >= hm(10, 15) && minute <= hm(13, 30)) {
     const f = strategyFilters('ibBreakout', input.filters?.ibBreakout)
     const dayOpenMs = sessionStartMs
@@ -2133,16 +2134,25 @@ export function dayTypeAt(oi, minuteBars, nowMs) {
 
 // ---- outcome --------------------------------------------------------------------------------------
 
+/** A trail's start and distance in futures points for a trade risking `risk` points: in R (`startR` /
+ *  `gapR` x the risk) or, with `unit: 'pts'`, in points as set (`startPts` / `gapPts`). */
+export function trailPoints(trail, risk) {
+  return trail.unit === 'pts'
+    ? { start: Number(trail.startPts) || 0, gap: Number(trail.gapPts) || 0 }
+    : { start: trail.startR * risk, gap: trail.gapR * risk }
+}
+
 /** The stop-loss in force once price has reached `best` (the most favourable price since entry): the
- *  original stop until the trade is `trail.startR` in profit, then `trail.gapR` behind `best` - never
- *  looser than the original. No `setup.trail`: a fixed stop. */
+ *  original stop until the trade is the trail's start in profit, then the trail's distance behind `best`
+ *  - never looser than the original. No `setup.trail`: a fixed stop. */
 export function trailedStop(setup, best) {
   const trail = setup.trail
   if (!trail) return setup.stop
   const dir = setup.side === 'LONG' ? 1 : -1
   const risk = Math.abs(setup.entry - setup.stop)
-  if (!(risk > 0) || dir * (best - setup.entry) < trail.startR * risk) return setup.stop
-  const trailed = best - dir * trail.gapR * risk
+  const { start, gap } = trailPoints(trail, risk)
+  if (!(risk > 0) || !(gap > 0) || dir * (best - setup.entry) < start) return setup.stop
+  const trailed = best - dir * gap
   return dir > 0 ? Math.max(setup.stop, trailed) : Math.min(setup.stop, trailed)
 }
 
@@ -2239,7 +2249,8 @@ export const MIN_TRADES_TO_RANK = 5
  *  topped up with the playbook's picks not measured yet - never one whose scored trades lose money. */
 export function topFive(stats, group = 'oi') {
   const inGroup = stats.filter((s) => (s.group ?? 'oi') === group)
-  const defaults = group === 'profile' ? DEFAULT_PROFILE_TOP5 : DEFAULT_TOP5
+  // (never a retired strategy, whatever the default list says)
+  const defaults = (group === 'profile' ? DEFAULT_PROFILE_TOP5 : DEFAULT_TOP5).filter((id) => ACTIVE_STRATEGIES.some((a) => a.id === id))
   const ranked = inGroup.filter((s) => s.trades >= MIN_TRADES_TO_RANK && s.score > 0).sort((a, b) => b.score - a.score)
   const losers = new Set(inGroup.filter((s) => s.trades >= MIN_TRADES_TO_RANK && !(s.score > 0)).map((s) => s.id))
   const ids = ranked.slice(0, 5).map((s) => s.id)

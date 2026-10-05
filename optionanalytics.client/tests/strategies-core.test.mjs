@@ -1,6 +1,6 @@
 // Strategies 1-10: setups fire on their rules, outcomes, stats and the top 5.
 // Run: npm test (node --test) - see CLAUDE.md.
-import { buildOiContext, evaluateStrategies as evaluate, simulateOutcome, strategyStats, topFive, ACTIVE_STRATEGIES } from '../src/strategyEngine.js'
+import { buildOiContext, evaluateStrategies as evaluate, simulateOutcome, strategyStats, topFive, ACTIVE_STRATEGIES, STRATEGIES } from '../src/strategyEngine.js'
 // Retired strategies still get exercised by these scenarios (includeRetired).
 const evaluateStrategies = (input) => evaluate({ ...input, includeRetired: true })
 const MIN = 60000
@@ -105,22 +105,24 @@ const tapeWith = (nowMs, buyPct) => Array.from({ length: 50 }, (_, i) => ({ seq:
 // E. Stats and top 5.
 {
   const mk = (id, rs) => rs.map((r, i) => ({ id, t: i, outcome: { status: r > 0 ? 'win' : 'loss', r } }))
+  // migration is retired: its (old) trades are not counted.
   const trades = [...mk('wallBreak', [2, 2, -1, 2, -1, 2]), ...mk('range', [-1, -1, 0.5, -1, -1]), ...mk('squeeze', [1.3, 1.3, 1.3, -1, 1.3]),
     ...mk('buildUp', [2.5, -1, -1, 2.5, -1]), ...mk('flush', [-1, -1, -1, -1, 1.3]), ...mk('migration', [2, -1, 2, 2, -1])]
   const stats = strategyStats(trades)
   const wb = stats.find((s) => s.id === 'wallBreak')
   check('win rate / avg R computed', Math.round(wb.winRate * 100) === 67 && Math.abs(wb.avgR - 1) < 1e-9, `${wb.winRate} ${wb.avgR}`)
+  check('a retired strategy is not in the stats, whatever trades it has', !stats.some((s) => s.id === 'migration'))
   const top = topFive(stats)
-  check('top 5: best expectancy first, losing strategies never alerted, unmeasured picks fill in', top.ids[0] === 'wallBreak' && !top.ids.includes('flush') && !top.ids.includes('range') && top.ids.includes('wallDefence') && !top.measured, top.ids.join())
+  check('top 5: best expectancy first, losing strategies never alerted, unmeasured picks fill in', top.ids[0] === 'wallBreak' && !top.ids.includes('flush') && !top.ids.includes('range') && top.ids.includes('openingBias') && !top.measured, top.ids.join())
   const few = topFive(strategyStats(mk('range', [2, 2])))
-  check('playbook picks until enough trades', !few.measured && few.ids.length === 5 && few.ids.includes('wallDefence'), few.ids.join())
+  check('playbook picks until enough trades - never a retired one', !few.measured && few.ids.join() === 'wallBreak,buildUp,openingBias,iceberg', few.ids.join())
 }
-// #1 wall defence and #12 the 80% rule are back in the line-up (05 Oct revert); #25, #26 and #28 are
-// retired: not run, listed or scored by default. #27 came back with #29.
+// Retired: OI wall defence #1, writer migration #3, #25, #26, #28, #29 and #30 - not run, listed or scored
+// by default (tests run them with includeRetired). #2 OI wall break, #12 the 80% rule and #27 run.
 {
-  check('#1 and #12 run again; #25, #26, #28 are retired; #27 and #29 run', ACTIVE_STRATEGIES.some((x) => x.id === 'wallDefence') && ACTIVE_STRATEGIES.some((x) => x.id === 'tpo80')
-    && ['vwapPullback', 'vwapOi'].every((id) => ACTIVE_STRATEGIES.some((x) => x.id === id) && strategyStats([]).some((x) => x.id === id))
-    && ['suddenWall', 'heatmapOi', 'oiStructure'].every((id) => !ACTIVE_STRATEGIES.some((x) => x.id === id) && !strategyStats([]).some((x) => x.id === id)))
+  const retired = ['wallDefence', 'migration', 'suddenWall', 'heatmapOi', 'oiStructure', 'vwapOi', 'ibFailed']
+  check('#1 #3 #25 #26 #28 #29 #30 are retired; #2, #12 and #27 run', ['wallBreak', 'tpo80', 'vwapPullback'].every((id) => ACTIVE_STRATEGIES.some((x) => x.id === id))
+    && retired.every((id) => STRATEGIES.find((x) => x.id === id)?.retired && !ACTIVE_STRATEGIES.some((x) => x.id === id) && !strategyStats([]).some((x) => x.id === id)))
 }
 console.log(fails ? `${fails} FAILED` : 'all passed')
 process.exitCode = fails ? 1 : 0

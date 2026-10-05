@@ -389,6 +389,124 @@ public sealed class LiveTradingPartialExitTests
         Assert.Empty(dhan.Orders);
     }
 
+    // ---- the server's own time exit (the scanner's time stop / 15:10) ---------------------------------
+
+    private static readonly DateTimeOffset Ist1030 = IstClock.AtIstTime(IstClock.Today(), 10 * 60 + 30);
+
+    [Fact]
+    public async Task ATimeExit_IsCappedAt1510Ist_AndNotSetForAPastTimeOrNoOrders()
+    {
+        var (service, _, _) = await CreateAsync();
+        service.UtcNow = () => Ist1030;
+
+        Assert.Equal(IstClock.AtIstTime(IstClock.Today(), 15 * 60 + 10), service.SetTimeExit(new[] { "S1" }, IstClock.AtIstTime(IstClock.Today(), 15 * 60 + 25), 1m, "time stop"));
+        Assert.Equal(Ist1030.AddMinutes(45), service.SetTimeExit(new[] { "S1" }, Ist1030.AddMinutes(45), 1m, "time stop"));
+        Assert.Single(service.TimeExits()); // replaced, not added
+        Assert.Null(service.SetTimeExit(new[] { "S2" }, Ist1030.AddMinutes(-1), 1m, "time stop"));
+        Assert.Null(service.SetTimeExit(Array.Empty<string>(), Ist1030.AddMinutes(5), 1m, "time stop"));
+    }
+
+    [Fact]
+    public async Task ADueTimeExit_CancelsThatTradesLegs_AndExitsOnlyItsQuantity_WithNoBrowser()
+    {
+        var (service, dhan, _) = await CreateAsync();
+        service.UtcNow = () => Ist1030;
+        dhan.SuperOrders.Add(TradedSuperOrder("S3", Lot, 112m));
+        dhan.Positions[0]["netQty"] = 5 * Lot;
+        var exitAt = service.SetTimeExit(new[] { "S3" }, Ist1030.AddMinutes(30), 1m, "time stop")!.Value;
+
+        await service.RunDueTimeExitsAsync(exitAt.AddSeconds(-1), CancellationToken.None);
+        Assert.DoesNotContain(dhan.Requests, r => r.StartsWith("DELETE /super/orders/S3"));
+
+        await service.RunDueTimeExitsAsync(exitAt.AddSeconds(1), CancellationToken.None);
+        Assert.Contains("DELETE /super/orders/S3/TARGET_LEG", dhan.Requests);
+        Assert.Contains("DELETE /super/orders/S3/STOP_LOSS_LEG", dhan.Requests);
+        Assert.DoesNotContain(dhan.Requests, r => r.StartsWith("DELETE /super/orders/S1"));
+        var exit = Assert.Single(dhan.Orders.Values);
+        Assert.Equal(("SELL", Lot), (exit.Side, exit.Quantity));
+        Assert.Empty(service.TimeExits());
+    }
+
+    [Fact]
+    public async Task ATimeExit_ForATradeAlreadyClosedByHand_PlacesNothing_EvenWithANewerPositionOpen()
+    {
+        var (service, dhan, _) = await CreateAsync();
+        service.UtcNow = () => Ist1030;
+        // S3's legs were cancelled when it was closed by hand; the contract's position (S1, 4 lots) is someone else's.
+        dhan.SuperOrders.Add(TradedSuperOrder("S3", Lot, 112m, target: "CANCELLED", stop: "CANCELLED"));
+        var exitAt = service.SetTimeExit(new[] { "S3" }, Ist1030.AddMinutes(30), 1m, "time stop")!.Value;
+
+        await service.RunDueTimeExitsAsync(exitAt.AddSeconds(1), CancellationToken.None);
+
+        Assert.Empty(dhan.Orders);
+        Assert.Empty(service.TimeExits());
+    }
+
+    [Fact]
+    public async Task AFailedTimeExit_IsRetried_NotSoonerThanTheRetryInterval()
+    {
+        var (service, dhan, _) = await CreateAsync();
+        service.UtcNow = () => Ist1030;
+        dhan.SuperOrders.Add(TradedSuperOrder("S3", Lot, 112m));
+        dhan.Positions[0]["netQty"] = 5 * Lot;
+        dhan.RefuseCancel.Add("S3/TARGET_LEG");
+        var exitAt = service.SetTimeExit(new[] { "S3" }, Ist1030.AddMinutes(30), 1m, "time stop")!.Value;
+
+        await service.RunDueTimeExitsAsync(exitAt.AddSeconds(1), CancellationToken.None);
+        var pending = Assert.Single(service.TimeExits());
+        Assert.Equal(1, pending.Attempts);
+        var tries = dhan.Requests.Count(r => r == "DELETE /super/orders/S3/TARGET_LEG");
+
+        await service.RunDueTimeExitsAsync(exitAt.AddSeconds(5), CancellationToken.None);
+        Assert.Equal(tries, dhan.Requests.Count(r => r == "DELETE /super/orders/S3/TARGET_LEG")); // too soon
+
+        dhan.RefuseCancel.Clear();
+        await service.RunDueTimeExitsAsync(exitAt.AddSeconds(1) + LiveTradingService.TimeExitRetryInterval, CancellationToken.None);
+        Assert.Empty(service.TimeExits());
+        Assert.Contains("DELETE /super/orders/S3/TARGET_LEG", dhan.Requests);
+    }
+
+    [Fact]
+    public async Task TimeExits_SurviveARestart()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "oa-time-exits-" + Guid.NewGuid().ToString("n"));
+        try
+        {
+            LiveTimeExitStore Store() => new(new TimeExitHost { ContentRootPath = dir },
+                new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build(), NullLogger<LiveTimeExitStore>.Instance);
+            var (first, _, _) = await CreateAsync(Store());
+            first.UtcNow = () => Ist1030;
+            var exitAt = first.SetTimeExit(new[] { "S3" }, Ist1030.AddMinutes(30), 1.5m, "time stop");
+
+            var (second, _, _) = await CreateAsync(Store());
+
+            var loaded = Assert.Single(second.TimeExits());
+            Assert.Equal(new[] { "S3" }, loaded.OrderIds);
+            Assert.Equal((exitAt, 1.5m), ((DateTimeOffset?)loaded.ExitAt, loaded.SlippagePoints));
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { /* best effort */ }
+        }
+    }
+
+    [Fact]
+    public void ThePagesOrderJson_CarriesTheExitTime()
+    {
+        const string body = "{\"underlying\":\"NIFTY\",\"expiry\":\"2026-10-06\",\"strike\":22650,\"side\":\"PE\",\"direction\":\"SELL\",\"lots\":1,"
+            + "\"slippagePoints\":2,\"stopLossPoints\":20,\"targetPoints\":30,\"trailStartPoints\":0,\"trailGapPoints\":0,\"exitAtMs\":1791180000000,\"exitReason\":\"time stop of #15 IB breakout\"}";
+        var request = System.Text.Json.JsonSerializer.Deserialize<ManualOrderRequest>(body, new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web))!;
+        Assert.Equal((1791180000000L, "time stop of #15 IB breakout"), (request.ExitAtMs, request.ExitReason));
+    }
+
+    private sealed class TimeExitHost : Microsoft.Extensions.Hosting.IHostEnvironment
+    {
+        public string EnvironmentName { get; set; } = "Test";
+        public string ApplicationName { get; set; } = "Tests";
+        public string ContentRootPath { get; set; } = "";
+        public Microsoft.Extensions.FileProviders.IFileProvider ContentRootFileProvider { get; set; } = null!;
+    }
+
     [Fact]
     public async Task ExitTrade_AlreadyClosedByItsTarget_DoesNothing()
     {
@@ -463,7 +581,7 @@ public sealed class LiveTradingPartialExitTests
     private static SpotTick Tick(decimal bid, decimal ask, decimal last) =>
         new(SecurityId, last, 0, 0, 0, 0, 1000, bid, ask, 0, DateTimeOffset.UtcNow);
 
-    private static async Task<(LiveTradingService Service, FakeDhan Dhan, DhanMarketFeedClient Feed)> CreateAsync()
+    private static async Task<(LiveTradingService Service, FakeDhan Dhan, DhanMarketFeedClient Feed)> CreateAsync(LiveTimeExitStore? timeExitStore = null)
     {
         var expiry = DateTime.Today.AddDays(20).ToString("yyyy-MM-dd");
         var scrip = "SEM_EXM_EXCH_ID,SEM_SEGMENT,SEM_SMST_SECURITY_ID,SEM_INSTRUMENT_NAME,SEM_EXPIRY_CODE,SEM_TRADING_SYMBOL,SEM_LOT_UNITS,SEM_CUSTOM_SYMBOL,SEM_EXPIRY_DATE,SEM_STRIKE_PRICE,SEM_OPTION_TYPE,SEM_TICK_SIZE,SEM_EXPIRY_FLAG,SEM_EXCH_INSTRUMENT_TYPE,SEM_SERIES,SM_SYMBOL_NAME\n" +
@@ -497,7 +615,7 @@ public sealed class LiveTradingPartialExitTests
             new DhanSuperOrderClient(api, NullLogger<DhanSuperOrderClient>.Instance),
             new DhanOrderClient(api, NullLogger<DhanOrderClient>.Instance),
             chain, feed, session, new DhanOrderUpdateFeed(options, session, NullLogger<DhanOrderUpdateFeed>.Instance),
-            new LiveBroadcastBatcher(null, NullLogger<LiveBroadcastBatcher>.Instance), NullLogger<LiveTradingService>.Instance);
+            new LiveBroadcastBatcher(null, NullLogger<LiveBroadcastBatcher>.Instance), NullLogger<LiveTradingService>.Instance, timeExitStore: timeExitStore);
         return (service, dhan, feed);
     }
 
@@ -511,6 +629,8 @@ public sealed class LiveTradingPartialExitTests
         public List<JsonObject> SuperModifies { get; } = new();
         public ConcurrentDictionary<string, PlainOrder> Orders { get; } = new();
         public List<string> Requests { get; } = new();
+        /// <summary>Super order leg cancels Dhan refuses ("S3/TARGET_LEG").</summary>
+        public HashSet<string> RefuseCancel { get; } = new();
         private int _next;
 
         public sealed class PlainOrder
@@ -545,6 +665,8 @@ public sealed class LiveTradingPartialExitTests
             if (request.Method == HttpMethod.Delete && path.StartsWith("/super/orders/"))
             {
                 var parts = path.Split('/');
+                if (RefuseCancel.Contains($"{parts[3]}/{parts[4]}"))
+                    return new HttpResponseMessage(HttpStatusCode.BadRequest) { Content = new StringContent("{\"errorMessage\":\"refused\"}") };
                 var order = SuperOrders.Single(o => o["orderId"]!.GetValue<string>() == parts[3]);
                 // An entry still filling can fill more before its cancel lands.
                 if (parts[4] == "ENTRY_LEG" && FillsBeforeCancel.TryGetValue(parts[3], out var extra))

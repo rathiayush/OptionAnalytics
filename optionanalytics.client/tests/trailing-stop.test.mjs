@@ -43,5 +43,18 @@ o = run({ ...base, trail: { ...trail, runner: true } }, runBars)
 ok(o.stopHit && o.trailed && o.stop === 150 && Math.abs(o.r - 5) < 1e-9 && exitLabel(o) === 'Trailing SL hit', `runner: through the target and the time stop, out on the trail at +5R: ${JSON.stringify(o)}`)
 o = run({ ...base, trail }, runBars)
 ok(o.status === 'win' && Math.abs(o.r - 3) < 1e-9, 'without it: the same move ends at the 130 target (+3R)')
+// 7. The trail in futures POINTS (unit 'pts'): LONG 100, stop 90 - after +8 pts it follows 3 pts behind.
+{
+  const pts = { unit: 'pts', startPts: 8, gapPts: 3 }
+  ok(trailedStop({ ...base, trail: pts }, 107) === 90 && trailedStop({ ...base, trail: pts }, 108) === 105 && trailedStop({ ...base, trail: pts }, 115) === 112, 'points: none before +8, then 3 pts behind the best')
+  const b7 = [bar(at(10,1),100,108,99,107), bar(at(10,2),107,115,106,114), bar(at(10,3),114,114,104,105)]
+  o = run({ ...base, trail: pts }, b7)
+  ok(o.stopHit && o.trailed && o.stop === 112 && Math.abs(o.r - 1.2) < 1e-9, `points trail locks +12 pts (1.2R): ${JSON.stringify(o)}`)
+  const sp = { side: 'SHORT', t: at(10,0), entry: 100, stop: 110, target: 70, timeStopMs: at(12,0), trail: pts }
+  ok(trailedStop(sp, 93) === 110 && trailedStop(sp, 90) === 93, 'points: short mirror')
+  ok(trailedStop({ ...base, trail: { unit: 'pts', startPts: 20, gapPts: 25 } }, 125) === 100, 'points over the old 5 limit work (start 20, follow 25)')
+  ok(trailedStop({ ...base, trail: { unit: 'pts', startPts: 5, gapPts: 0 } }, 130) === 90, 'points with no distance: a fixed stop')
+  ok(trailedStop({ ...base, trail: { startR: 10, gapR: 8 } }, 200) === 120, 'R over the old 5 limit (start 10R, follow 8R)')
+}
 console.log(fails ? `${fails} FAILED` : 'all passed')
 process.exitCode = fails ? 1 : 0

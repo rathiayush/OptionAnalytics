@@ -81,8 +81,14 @@ public sealed class LiveTradingController : ControllerBase
     {
         _logger.LogWarning("{User} requested a LIVE trade exit for super order(s) {Orders}.", User.Identity?.Name, string.Join(",", request.OrderIds ?? Array.Empty<string>()));
         var result = await _trading.ExitTradeAsync(request.OrderIds ?? Array.Empty<string>(), request.SlippagePoints, CancellationToken.None);
+        // Closed: the server's own time exit for it is no longer needed (a failed exit keeps it as the fallback).
+        if (result.Success) _trading.ClearTimeExit(request.OrderIds ?? Array.Empty<string>());
         return result.Success ? Ok(result) : UnprocessableEntity(result);
     }
+
+    /// <summary>GET /api/live-trading/time-exits - the live trades the server will close itself, and when.</summary>
+    [HttpGet("time-exits")]
+    public IActionResult TimeExits() => Ok(_trading.TimeExits());
 
     /// <summary>Moves ONE trade's stop-loss / target legs - see LiveTradingService.UpdateTradeLevelsAsync.</summary>
     [HttpPost("orders/trade-levels")]

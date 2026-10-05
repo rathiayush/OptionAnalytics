@@ -9,10 +9,11 @@ import { notifyLiveTradeEvents, notifyTrade } from './tradeNotify.js'
 import { loadTradeLevels, saveTradeLevels } from './tradeDefaults.js'
 import { suddenWallText } from './suddenOi.js'
 import { adaptiveStats } from './dayRegime.js'
+import { chargeRates, chargesSummary, tradeCharges } from './tradeCharges.js'
 import {
   ACTIVE_STRATEGIES, STRATEGY_BY_ID, evaluateStrategies, simulateOutcome, strategyStats, topFifteen, MIN_TRADES_TO_RANK, oiSummary, optionOiText,
   DEFAULT_TRAIL, LAST_ENTRY, SQUARE_OFF, fmtHm, exitLabel, premiumAt, optionPnlPoints, optionTradeText, squareOffMs, optionStopTargetHit, RANGE_IDS, asReplayContext,
-  coolOffGate, gradeOf, optionTradeAt, dayTypeAt, STRATEGY_FILTERS, strategyFilters, changedFilters,
+  coolOffGate, gradeOf, optionTradeAt, dayTypeAt, trailPoints, STRATEGY_FILTERS, strategyFilters, changedFilters,
 } from './strategyEngine.js'
 import { aggregateBars, analyzeBars, findWalls, liquiditySignals, pullStackSignals, replayRange, replayView } from './orderFlowMath.js'
 
@@ -81,8 +82,27 @@ function upTo(prints, ms) {
 }
 
 // The trailing stop a new setup gets from the scanner's settings (null = a fixed stop).
-const trailFor = (cfg) => (cfg.trail?.on === false ? null : { startR: cfg.trail?.startR ?? DEFAULT_TRAIL.startR, gapR: cfg.trail?.gapR ?? DEFAULT_TRAIL.gapR, ...(cfg.trail?.runner ? { runner: true } : {}) })
-const trailText = (trail) => (trail ? `trailing SL: after +${trail.startR}R the stop follows ${trail.gapR}R behind the best price${trail.runner ? ' - letting it run (no fixed target / time stop, out on the trail or at 15:10)' : ''}` : 'fixed SL')
+// Trailing SL in futures (index) POINTS by default - "after +start pts, follow gap pts behind the best
+// price" - set per underlying (its points move differently); or in R (x the trade's own risk).
+const DEFAULT_TRAIL_PTS = { NIFTY: { start: 30, gap: 30 }, BANKNIFTY: { start: 75, gap: 75 }, SENSEX: { start: 100, gap: 100 } }
+const FALLBACK_TRAIL_PTS = { start: 30, gap: 30 }
+const trailUnit = (cfg) => (cfg.trail?.unit === 'R' ? 'R' : 'pts')
+const trailPtsFor = (cfg, underlying) => {
+  const key = String(underlying ?? '').toUpperCase()
+  return { ...(DEFAULT_TRAIL_PTS[key] ?? FALLBACK_TRAIL_PTS), ...cfg.trail?.pts?.[key] }
+}
+const trailFor = (cfg, underlying) => {
+  if (cfg.trail?.on === false) return null
+  const pts = trailPtsFor(cfg, underlying)
+  return {
+    startR: cfg.trail?.startR ?? DEFAULT_TRAIL.startR, gapR: cfg.trail?.gapR ?? DEFAULT_TRAIL.gapR,
+    ...(trailUnit(cfg) === 'pts' ? { unit: 'pts', startPts: pts.start, gapPts: pts.gap } : {}),
+    ...(cfg.trail?.runner ? { runner: true } : {}),
+  }
+}
+const trailText = (trail) => (trail
+  ? `trailing SL: after +${trail.unit === 'pts' ? `${trail.startPts} pts` : `${trail.startR}R`} the stop follows ${trail.unit === 'pts' ? `${trail.gapPts} pts` : `${trail.gapR}R`} behind the best price${trail.runner ? ' - letting it run (no fixed target / time stop, out on the trail or at 15:10)' : ''}`
+  : 'fixed SL')
 
 function fmtR(r) {
   return r == null ? '-' : `${r >= 0 ? '+' : ''}${r.toFixed(2)}R`
@@ -205,6 +225,9 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
         underlying, expiry: oi.expiry, strike: trade.strike, side: trade.side, direction: trade.action, lots,
         slippagePoints: cfg.liveSlippage ?? 2, stopLossPoints: cfg.paperSl, targetPoints: cfg.paperTarget,
         trailStartPoints: cfg.paperTrailGap > 0 ? cfg.paperTrailStart ?? 0 : 0, trailGapPoints: cfg.paperTrailGap ?? 0,
+        // The server closes it itself at the setup's time stop (15:10 at the latest) - even with this page
+        // closed; the page's own exits (stop, target, trailing SL) still close it sooner when they come.
+        exitAtMs: Math.min(setup.timeStopMs ?? squareOffMs(setup.t), squareOffMs(setup.t)), exitReason: `time stop of #${STRATEGY_BY_ID[setup.id]?.no} ${STRATEGY_BY_ID[setup.id]?.short ?? setup.id}`,
       })
       const position = record(result)
       notifyTrade({ kind: 'entry', title: `LIVE ${trade.action} ${trade.strike} ${trade.side} x${lots} placed on Dhan`, text: result.message, sound: cfg.sound !== false })
@@ -324,7 +347,6 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   }, [fired, isReplay, dayKey, date])
 
   const stats = useMemo(() => strategyStats(Object.values(history).flatMap((d) => d.setups ?? [])), [history])
-  const adaptive = useMemo(() => adaptiveStats(Object.values(history).flatMap((d) => d.setups ?? [])), [history])
   const top = useMemo(() => topFifteen(stats), [stats])
   const top15Ids = useMemo(() => [...top.ids, ...top.trial], [top])
   const alertIds = settings.pick === 'top15' ? top15Ids : settings.pick === 'oi5' ? top.oi.ids : settings.pick === 'profile5' ? top.profile.ids
@@ -375,7 +397,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     const held = [...pendingRef.current.values()].map((p) => p.setup)
     setCooling((prev) => (prev.map((x) => `${x.id}${x.side}${x.t}`).join() === held.map((x) => `${x.id}${x.side}${x.t}`).join() ? prev : held))
     const fresh = gate.fire.filter((s) => !recentlyFired(s))
-      .map((s) => ({ ...s, trail: trailFor(settingsRef.current) }))
+      .map((s) => ({ ...s, trail: trailFor(settingsRef.current, underlying) }))
     if (!fresh.length) return
     firedRef.current = [...firedRef.current, ...fresh]
     setFired(firedRef.current)
@@ -398,7 +420,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
           <div style={{ fontSize: 12 }}>
             <div style={{ fontSize: 13 }}>{IST_HHMM.format(new Date(s.t))} · futures {s.entry.toFixed(1)} · <b>SL {s.stop.toFixed(1)}</b> · <b>Target {s.target.toFixed(1)}</b> · <b>{s.confidence}% {s.grade ?? gradeOf(s.confidence)}</b></div>
             {s.signal && <div>Waited for the cool-off: signal at {IST_HHMM.format(new Date(s.signal.t))} @ {s.signal.entry.toFixed(1)}</div>}
-            <div>{trailText(s.trail)}{s.trail ? ` (from ${(s.entry + (s.side === 'LONG' ? 1 : -1) * s.trail.startR * Math.abs(s.entry - s.stop)).toFixed(1)})` : ''} · closed by {fmtHm(SQUARE_OFF)} at the latest</div>
+            <div>{trailText(s.trail)}{s.trail ? ` (from ${(s.entry + (s.side === 'LONG' ? 1 : -1) * trailPoints(s.trail, Math.abs(s.entry - s.stop)).start).toFixed(1)})` : ''} · closed by {fmtHm(SQUARE_OFF)} at the latest</div>
             {s.options && (
               <div style={{ margin: '4px 0' }}>
                 <b>Option:</b> {[optionTradeText(tradeOf(s, 'buy')), optionTradeText(tradeOf(s, 'sell'))].filter(Boolean).join(' · or ')}
@@ -558,7 +580,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
           const recentlyFound = (s) => found.some((f) => f.id === s.id && f.side === s.side && s.t - f.t < COOLDOWN_MS)
           const gate = coolOffGate(pending, setups.filter((s) => !recentlyFound(s)), { nowMs: clock, price, bars, oi: scanOi })
           for (const s of gate.fire) {
-            if (!recentlyFound(s)) found.push({ ...s, trail: trailFor(settingsRef.current) })
+            if (!recentlyFound(s)) found.push({ ...s, trail: trailFor(settingsRef.current, underlying) })
           }
         }
         if (i % 10 === 0) {
@@ -658,6 +680,14 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   const adaptiveRows = paperRows.filter((r) => r.adaptive?.take)
   const adaptiveTotal = adaptiveRows.reduce((sum, r) => sum + (r.rupees ?? 0), 0)
   const untaggedTrades = paperRows.filter((r) => !r.adaptive).length
+  // Costs: STT on the sell leg, brokerage per order, other per trade (tradeCharges.js) - net P&L, net per
+  // lot and the points captured, for every trade and for the ones adaptive would have taken.
+  const rates = chargeRates(settings.charges)
+  const costsOf = (r) => tradeCharges(r, rates)
+  const allCosts = chargesSummary(paperRows, rates)
+  const adaptiveCosts = chargesSummary(adaptiveRows, rates)
+  const setRate = (key, v) => setSettings((x) => ({ ...x, charges: { ...chargeRates(x.charges), [key]: v } }))
+  const rupee = (v) => `${v < 0 ? '-' : ''}₹${Math.abs(Math.round(v)).toLocaleString('en-IN')}`
   const liveRows = paperRows.filter((r) => r.live)
   const liveTotal = liveRows.reduce((sum, r) => sum + (r.rupees ?? 0), 0)
   useEffect(() => { liveLossRef.current = liveTotal }, [liveTotal])
@@ -692,6 +722,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
         lotSize: r.lotSize ?? null, entryPremium: r.premium, exitPremium: r.exitTime ? r.current ?? null : null, points: r.points ?? null, rupees: r.rupees ?? null,
         exitReason: r.exitReason ?? null, signalTime: sig?.time ?? at, strategyNo: STRATEGY_BY_ID[r.strategy]?.no ?? null, strategyId: r.strategy,
         signalSide: r.setupSide, dayType: r.regime?.type ?? null, adaptiveTake: r.adaptive?.take ?? null, adaptiveReason: r.adaptive?.reason ?? null,
+        ...(() => { const c = tradeCharges(r, chargeRates(settingsRef.current.charges)); return c ? { stt: c.stt, brokerage: c.brokerage, otherCharges: c.other, netRupees: c.net, netPerLot: c.netPerLot } : {} })(),
       }
     })
     if (!signals.length && !trades.length) return
@@ -859,6 +890,12 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       </Tooltip>
     )
   }
+  // The trailing SL's points for this underlying (kept per underlying with the scanner settings).
+  const setTrailPts = (patch) => setSettings((s) => {
+    const key = String(underlying ?? '').toUpperCase()
+    const pts = { ...s.trail?.pts, [key]: { ...trailPtsFor(s, underlying), ...patch } }
+    return { ...s, trail: { ...DEFAULT_TRAIL, ...s.trail, pts } }
+  })
   const toggleCustom = (id, on) => setSettings((s) => ({ ...s, custom: on ? [...new Set([...s.custom, id])] : s.custom.filter((x) => x !== id) }))
 
   return (
@@ -935,13 +972,32 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
               <Space size={4}><Switch size="small" checked={settings.trail?.on !== false} onChange={(v) => setSettings((s) => ({ ...s, trail: { ...DEFAULT_TRAIL, ...s.trail, on: v } }))} /><Text style={{ fontSize: 12 }}>Trailing SL</Text></Space>
               {settings.trail?.on !== false && (
                 <>
+                  <Tooltip title="pts = futures (index) points, set per underlying; R = multiples of the trade's own risk (entry to stop). Applies to new signals.">
+                    <Segmented size="small" value={trailUnit(settings)} aria-label="Trailing SL unit"
+                      onChange={(v) => setSettings((s) => ({ ...s, trail: { ...DEFAULT_TRAIL, ...s.trail, unit: v === 'R' ? 'R' : 'pts' } }))}
+                      options={[{ value: 'pts', label: 'pts' }, { value: 'R', label: 'R' }]} />
+                  </Tooltip>
                   <Text style={{ fontSize: 12 }}>after +</Text>
-                  <InputNumber size="small" min={0.25} max={5} step={0.25} style={{ width: 70 }} value={settings.trail?.startR ?? DEFAULT_TRAIL.startR} aria-label="Trail starts at R"
-                    onChange={(v) => v != null && setSettings((s) => ({ ...s, trail: { ...DEFAULT_TRAIL, ...s.trail, startR: v } }))} />
-                  <Text style={{ fontSize: 12 }}>R, follow</Text>
-                  <InputNumber size="small" min={0.25} max={5} step={0.25} style={{ width: 70 }} value={settings.trail?.gapR ?? DEFAULT_TRAIL.gapR} aria-label="Trail distance in R"
-                    onChange={(v) => v != null && setSettings((s) => ({ ...s, trail: { ...DEFAULT_TRAIL, ...s.trail, gapR: v } }))} />
-                  <Text style={{ fontSize: 12 }}>R behind</Text>
+                  {trailUnit(settings) === 'pts'
+                    ? (
+                      <InputNumber size="small" min={1} max={5000} step={5} style={{ width: 76 }} value={trailPtsFor(settings, underlying).start} aria-label="Trail starts after points"
+                        onChange={(v) => v != null && setTrailPts({ start: v })} />
+                    )
+                    : (
+                      <InputNumber size="small" min={0.25} max={20} step={0.25} style={{ width: 70 }} value={settings.trail?.startR ?? DEFAULT_TRAIL.startR} aria-label="Trail starts at R"
+                        onChange={(v) => v != null && setSettings((s) => ({ ...s, trail: { ...DEFAULT_TRAIL, ...s.trail, startR: v } }))} />
+                    )}
+                  <Text style={{ fontSize: 12 }}>{trailUnit(settings) === 'pts' ? 'pts, follow' : 'R, follow'}</Text>
+                  {trailUnit(settings) === 'pts'
+                    ? (
+                      <InputNumber size="small" min={1} max={5000} step={5} style={{ width: 76 }} value={trailPtsFor(settings, underlying).gap} aria-label="Trail distance in points"
+                        onChange={(v) => v != null && setTrailPts({ gap: v })} />
+                    )
+                    : (
+                      <InputNumber size="small" min={0.25} max={20} step={0.25} style={{ width: 70 }} value={settings.trail?.gapR ?? DEFAULT_TRAIL.gapR} aria-label="Trail distance in R"
+                        onChange={(v) => v != null && setSettings((s) => ({ ...s, trail: { ...DEFAULT_TRAIL, ...s.trail, gapR: v } }))} />
+                    )}
+                  <Text style={{ fontSize: 12 }}>{trailUnit(settings) === 'pts' ? `pts behind (${underlying} futures)` : 'R behind'}</Text>
                   <Tooltip title="Off (default): a trade ends at its target, its stop / trailing stop, its time stop or 15:10 - the rules the stats were measured with. On: no fixed target and no time stop - the trailing stop follows the move and only it (or 15:10) ends the trade, so a trend can pay several R. Applies to new alerts. For the paper / live OPTION trades set Target 0 too, or their own premium target still closes them.">
                     <Space size={4}><Switch size="small" checked={!!settings.trail?.runner} onChange={(v) => setSettings((s) => ({ ...s, trail: { ...DEFAULT_TRAIL, ...s.trail, runner: v } }))} aria-label="Let winners run" /><Text style={{ fontSize: 12 }}>Let winners run</Text></Space>
                   </Tooltip>
@@ -982,18 +1038,27 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                 })}
               </div>
             )}
-            {dayResults.length > 0 && (
+            {(dayResults.length > 0 || regimeNow) && (
               <div aria-label="Today adaptive" style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '4px 10px', fontSize: 12 }}>
-                <Segmented size="small" value={adaptiveView ? 'adaptive' : 'all'} onChange={(v) => setSettings((x) => ({ ...x, signalView: v }))}
-                  options={[{ value: 'all', label: `All signals (${dayResults.length})` }, { value: 'adaptive', label: `Adaptive would take (${dayTaken})` }]} />
-                <Tooltip title="Closed trades only; the adaptive call is the day type known at each signal. Tracking only - every signal still fires and alerts.">
+                {regimeNow && (
+                  <Tooltip title={`${regimeNow.reasons}. The day type is read from three votes - price, OI (options + futures) and CVD - and adaptive takes only the trades that suit it: trend days with the trend, range / two-sided days fades. Tracking only: every signal still fires and alerts.`}>
+                    <Text style={{ fontSize: 12 }} aria-label="Day type now">Day type now: <b>{regimeNow.label}</b>
+                      {regimeNow.votes && regimeNow.priceType !== 'early' && (
+                        <Text type="secondary" style={{ fontSize: 11 }}>{' '}· price {regimeNow.votes.price.replace('-', ' ')} · OI {regimeNow.votes.oi} · CVD {regimeNow.votes.cvd}</Text>
+                      )}
+                    </Text>
+                  </Tooltip>
+                )}
+                {dayResults.length > 0 && <Segmented size="small" value={adaptiveView ? 'adaptive' : 'all'} onChange={(v) => setSettings((x) => ({ ...x, signalView: v }))}
+                  options={[{ value: 'all', label: `All signals (${dayResults.length})` }, { value: 'adaptive', label: `Adaptive would take (${dayTaken})` }]} />}
+                {dayResults.length > 0 && <Tooltip title="Closed trades only; the adaptive call is the day type known at each signal. Tracking only - every signal still fires and alerts.">
                   <Text type="secondary" style={{ fontSize: 12 }}>
                     Today: all {dayAdaptive.all.trades ? `${dayAdaptive.all.trades} closed ${fmtR(dayAdaptive.all.totalR)}` : 'none closed'}
                     {' '}→ adaptive {dayAdaptive.take.trades ? `${dayAdaptive.take.trades} closed ${fmtR(dayAdaptive.take.totalR)}` : 'none closed'}
                     {dayAdaptive.skip.trades ? <> (skipped {dayAdaptive.skip.trades}: {fmtR(dayAdaptive.skip.totalR)})</> : null}
                     {dayTagged < dayResults.length ? ` · ${dayResults.length - dayTagged} without a day type` : ''}
                   </Text>
-                </Tooltip>
+                </Tooltip>}
               </div>
             )}
             <div style={{ maxHeight: 260, overflowY: 'auto' }} aria-label="Strategy setups">
@@ -1084,11 +1149,32 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                   </Space>
                 </Tooltip>
                 <Text type="secondary" style={{ fontSize: 11 }}>premium pts (0 = off) · lots size every paper trade of the day (live trades keep theirs); a SL / target change applies to open trades, closed ones keep theirs</Text>
+                <Tooltip title="Charges on every trade (paper and live): STT % of the SELL side's premium value (the entry of a sold option, the exit of a bought one), brokerage per order (one to open + one to close) and a flat amount per trade for the rest (exchange, SEBI, stamp, GST). Net P&L = gross - all of them.">
+                  <Space size={4} aria-label="Charges">
+                    <Text style={{ fontSize: 12 }}>STT</Text>
+                    <InputNumber size="small" min={0} max={5} step={0.01} style={{ width: 66 }} value={rates.sttPct} aria-label="STT percent" onChange={(v) => v != null && setRate('sttPct', v)} />
+                    <Text style={{ fontSize: 12 }}>% · brokerage ₹</Text>
+                    <InputNumber size="small" min={0} max={500} step={1} style={{ width: 60 }} value={rates.brokeragePerOrder} aria-label="Brokerage per order" onChange={(v) => v != null && setRate('brokeragePerOrder', v)} />
+                    <Text style={{ fontSize: 12 }}>/order · other ₹</Text>
+                    <InputNumber size="small" min={0} max={500} step={1} style={{ width: 60 }} value={rates.otherPerTrade} aria-label="Other charges per trade" onChange={(v) => v != null && setRate('otherPerTrade', v)} />
+                    <Text style={{ fontSize: 12 }}>/trade</Text>
+                  </Space>
+                </Tooltip>
                 {paperRows.length > 0 && <Text strong style={{ fontSize: 12, color: paperTotal >= 0 ? UP_COLOR : DOWN_COLOR }}>P&amp;L ₹{Math.round(paperTotal).toLocaleString('en-IN')}</Text>}
+                {allCosts.trades > 0 && (
+                  <Tooltip title={`${allCosts.trades} trade(s) with a price: gross ${rupee(allCosts.gross)} - STT ${rupee(allCosts.stt)} - brokerage ${rupee(allCosts.brokerage)} - other ${rupee(allCosts.other)} = net ${rupee(allCosts.net)}. Per lot: each trade as if done with 1 lot, summed. Points: premium points captured, summed over the trades.`}>
+                    <Text style={{ fontSize: 12 }} aria-label="Net P&L">
+                      Net <b style={{ color: allCosts.net >= 0 ? UP_COLOR : DOWN_COLOR }}>{rupee(allCosts.net)}</b> (charges {rupee(allCosts.charges)})
+                      {' '}· per lot <b style={{ color: allCosts.netPerLot >= 0 ? UP_COLOR : DOWN_COLOR }}>{rupee(allCosts.netPerLot)}</b>
+                      {' '}· {allCosts.points >= 0 ? '+' : ''}{allCosts.points.toFixed(1)} pts
+                    </Text>
+                  </Tooltip>
+                )}
                 {paperRows.length > 0 && (
                   <Tooltip title={`The trades an adaptive scanner would have punched - its day type at each signal (tracking only: every trade above was punched).${untaggedTrades ? ` ${untaggedTrades} trade(s) have no day type and are left out.` : ''}`}>
                     <Text style={{ fontSize: 12 }} aria-label="Adaptive P&L">
                       Adaptive: {adaptiveRows.length} trade{adaptiveRows.length === 1 ? '' : 's'} · <span style={{ color: adaptiveTotal >= 0 ? UP_COLOR : DOWN_COLOR }}>₹{Math.round(adaptiveTotal).toLocaleString('en-IN')}</span>
+                      {adaptiveCosts.trades > 0 && <> · net <span style={{ color: adaptiveCosts.net >= 0 ? UP_COLOR : DOWN_COLOR }}>{rupee(adaptiveCosts.net)}</span> · per lot {rupee(adaptiveCosts.netPerLot)} · {adaptiveCosts.points >= 0 ? '+' : ''}{adaptiveCosts.points.toFixed(1)} pts</>}
                     </Text>
                   </Tooltip>
                 )}
@@ -1156,9 +1242,17 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                         <Tooltip title={r.exitError ?? r.liveNote}><Text type={r.exitError ? 'danger' : 'secondary'} style={{ fontSize: 10, marginLeft: 4 }}>{r.exitError ? 'exit failed - see Dhan' : 'Dhan ✓'}</Text></Tooltip>
                       )}
                     </span>
-                    <Text style={{ fontSize: 12, color: (r.points ?? 0) >= 0 ? UP_COLOR : DOWN_COLOR, minWidth: 90, textAlign: 'right' }}>
-                      {r.points == null ? '-' : `${r.points >= 0 ? '+' : ''}${r.points.toFixed(1)} · ₹${Math.round(r.rupees).toLocaleString('en-IN')}`}
-                    </Text>
+                    {(() => {
+                      const c = costsOf(r)
+                      return (
+                        <Tooltip title={c ? `${r.lots} lot(s) × ${r.lotSize}: gross ${rupee(c.gross)} - STT ${rupee(c.stt)} - brokerage ${rupee(c.brokerage)} - other ${rupee(c.other)} = net ${rupee(c.net)} (1 lot: ${rupee(c.netPerLot)})${r.exitTime ? '' : ' - open: at the current premium'}` : 'No premium yet'}>
+                          <Text style={{ fontSize: 12, color: (r.points ?? 0) >= 0 ? UP_COLOR : DOWN_COLOR, minWidth: 90, textAlign: 'right' }}>
+                            {r.points == null ? '-' : `${r.points >= 0 ? '+' : ''}${r.points.toFixed(1)} · ₹${Math.round(r.rupees).toLocaleString('en-IN')}`}
+                            {c && <span style={{ display: 'block', fontSize: 11, color: c.net >= 0 ? UP_COLOR : DOWN_COLOR }}>net {rupee(c.net)}</span>}
+                          </Text>
+                        </Tooltip>
+                      )
+                    })()}
                     {r.live
                       ? (!r.exitSent || r.exitError
                         ? (
@@ -1177,7 +1271,10 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
         </Col>
         <Col xs={24} xl={14}>
           <Table size="small" pagination={false} columns={statColumns} dataSource={statRows} scroll={{ x: 560 }} />
-          <AdaptivePanel adaptive={adaptive} regimeNow={regimeNow} />
+          <Text type="secondary" style={{ fontSize: 11 }} aria-label="Saved data">
+            Every signal (with its day type and adaptive call) and every option trade is saved on the server, every day in one file each:
+            {' '}<a href="/api/scanner-log/signals" download>signals.csv</a> · <a href="/api/scanner-log/trades" download>trades.csv</a>.
+          </Text>
           {filterFor && (
             <StrategyFiltersModal id={filterFor} values={settings.filters?.[filterFor]} onClose={() => setFilterFor(null)}
               onSave={(v) => { setSettings((s) => ({ ...s, filters: { ...s.filters, [filterFor]: v } })); setFilterFor(null) }} />
@@ -1258,59 +1355,5 @@ function StrategyFiltersModal({ id, values, onClose, onSave }) {
         </Text>
       </Space>
     </Modal>
-  )
-}
-
-/** The day type now and "what if we had gone adaptive": the real results of every scored setup beside
- *  the ones an adaptive scanner would have taken / skipped (dayRegime.js) - overall and per day type.
- *  Tracking only: every setup fires either way. */
-function AdaptivePanel({ adaptive, regimeNow }) {
-  const cell = (x) => (x.trades ? `${x.trades} · ${Math.round(x.winRate * 100)}% · ${fmtR(x.totalR)} (${fmtR(x.avgR)}/trade)` : '-')
-  const rows = [
-    { key: 'all', name: 'All signals (what fired)', v: adaptive.all },
-    { key: 'take', name: 'Adaptive would take', v: adaptive.take, strong: true },
-    { key: 'price', name: 'Adaptive on price alone', v: adaptive.takePrice },
-    { key: 'skip', name: 'Adaptive would skip', v: adaptive.skip },
-  ]
-  const better = adaptive.take.trades && adaptive.all.trades ? adaptive.take.avgR - adaptive.all.avgR : null
-  return (
-    <div aria-label="Adaptive what-if" style={{ marginTop: 8, padding: 8, border: '1px solid #ffffff1a', borderRadius: 6 }}>
-      <Space wrap size={6} style={{ marginBottom: 4 }}>
-        <Text strong style={{ fontSize: 12 }}>Day type &amp; adaptive what-if</Text>
-        <Tag style={{ margin: 0, fontSize: 11 }}>tracking only</Tag>
-        {regimeNow && (
-          <Tooltip title={regimeNow.reasons}>
-            <Text style={{ fontSize: 12 }}>Now: <b>{regimeNow.label}</b>
-              {regimeNow.votes && regimeNow.priceType !== 'early' && (
-                <Text type="secondary" style={{ fontSize: 11 }}>
-                  {' '}· price {regimeNow.votes.price.replace('-', ' ')} · OI {regimeNow.votes.oi} · CVD {regimeNow.votes.cvd}
-                </Text>
-              )}
-            </Text>
-          </Tooltip>
-        )}
-      </Space>
-      <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
-        <thead><tr><th style={{ textAlign: 'left', fontWeight: 500 }} /><th style={{ textAlign: 'left', fontWeight: 500 }}>Trades · win % · total R (avg)</th></tr></thead>
-        <tbody>
-          {rows.map((r) => (
-            <tr key={r.key}><td style={{ padding: '2px 8px 2px 0', whiteSpace: 'nowrap' }}>{r.strong ? <b>{r.name}</b> : r.name}</td><td>{cell(r.v)}</td></tr>
-          ))}
-          {adaptive.byType.map((t) => (
-            <tr key={t.type}>
-              <td style={{ padding: '2px 8px 2px 0', whiteSpace: 'nowrap' }}><Text type="secondary" style={{ fontSize: 12 }}>{t.label}</Text></td>
-              <td><Text type="secondary" style={{ fontSize: 12 }}>all {cell(t.all)} → adaptive {cell(t.take)}</Text></td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      <Text type="secondary" style={{ fontSize: 11 }}>
-        {better != null && <>Adaptive {better >= 0 ? 'would have added' : 'would have cost'} <b>{fmtR(Math.abs(better))}</b> per trade so far. </>}
-        The day type is read at each signal from what was known then - three votes: PRICE (the IB, range, net move, VWAP side / crosses), OI (option writers since the open + futures build-up / covering = trend; ATM straddle sold or nobody leaning = range; writers flipping = two-sided) and CVD (one way = trend, up and down = range). Price is kept unless OI / CVD outvote it (then unclear); OI + CVD agreeing call a trend before price. Trend - adaptive takes only trades with the trend;
-        {' '}range / two-sided (inside the IB, or both sides broken / chopping across VWAP) - it takes fades and skips trend / breakout setups; unclear or before 10:15 - it takes everything.
-        {' '}Nothing is blocked - every setup still fires and alerts as before. Every signal (with its day type and adaptive call) and every option trade is also saved on the server, every day in one file each:
-        {' '}<a href="/api/scanner-log/signals" download>signals.csv</a> · <a href="/api/scanner-log/trades" download>trades.csv</a>.{adaptive.untracked ? ` ${adaptive.untracked} setup(s) scored before tracking are not counted - re-run Scan day on those days.` : ''}
-      </Text>
-    </div>
   )
 }

@@ -89,6 +89,17 @@ public sealed class LiveTradingService : BackgroundService
     // In memory only: after a restart the stop-loss leg stays where it was last moved (never looser).
     private readonly Dictionary<string, TrailState> _trails = new();
     private static readonly TimeSpan TrailModifyInterval = TimeSpan.FromSeconds(2);
+    // Live trades the server closes itself at a set time - the strategy scanner's time stop / 15:10
+    // square-off - with or without a browser open (SetTimeExit, RunDueTimeExitsAsync). Kept on disk.
+    private readonly List<LiveTimeExit> _timeExits = new();
+    private readonly LiveTimeExitStore? _timeExitStore;
+    /// <summary>The latest a time exit runs: 15:10 IST, before the broker's own intraday square-off.</summary>
+    internal const int TimeExitCutoffMinute = 15 * 60 + 10;
+    internal static readonly TimeSpan TimeExitRetryInterval = TimeSpan.FromSeconds(10);
+    /// <summary>A failing time exit (Dhan down, logged out) is retried this many times - about five minutes.</summary>
+    internal const int MaxTimeExitAttempts = 30;
+    /// <summary>The clock time exits are set against (tests pin it).</summary>
+    internal Func<DateTimeOffset> UtcNow { get; set; } = () => DateTimeOffset.UtcNow;
     private DateOnly _eventsDay;
     internal const int MaxEvents = 40;
 
@@ -96,9 +107,12 @@ public sealed class LiveTradingService : BackgroundService
         DhanPositionsClient positions, DhanSuperOrderClient superOrders, DhanOrderClient orders,
         DhanOptionChainMaster chain, DhanMarketFeedClient feed, DhanSession session, DhanOrderUpdateFeed orderUpdates,
         LiveBroadcastBatcher batcher, ILogger<LiveTradingService> logger, IConfiguration? configuration = null,
-        TelegramAlertService? telegram = null)
+        TelegramAlertService? telegram = null, LiveTimeExitStore? timeExitStore = null)
     {
         _telegram = telegram;
+        _timeExitStore = timeExitStore;
+        // Today's time exits come back after a restart; older days' are dropped.
+        if (timeExitStore is not null) _timeExits.AddRange(timeExitStore.Load().Where(e => IstClock.IstDate(e.ExitAt) == IstClock.Today()));
         _positions = positions;
         _superOrders = superOrders;
         _orders = orders;
@@ -116,6 +130,7 @@ public sealed class LiveTradingService : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _tickSubscription = _feed.AddTickConsumer("Positions", OnTick);
+        _ = RunTimeExitLoopAsync(stoppingToken);
         _orderUpdates.OrderUpdated += ApplyOrderUpdate;
         _orderUpdates.Connected += RequestRefresh;
         try
@@ -590,6 +605,91 @@ public sealed class LiveTradingService : BackgroundService
         }
     }
 
+    /// <summary>Has the server close these super orders' trade at <paramref name="exitAt"/> (no later than
+    /// 15:10 IST that day) - cancel its legs and exit its quantity, ExitTradeAsync - whether or not a
+    /// browser is open. Replaces any time exit already set for them. Returns the time set, or null for
+    /// no orders / a time already past.</summary>
+    public DateTimeOffset? SetTimeExit(IReadOnlyList<string> orderIds, DateTimeOffset exitAt, decimal slippagePoints, string reason)
+    {
+        if (orderIds.Count == 0) return null;
+        var cutoff = IstClock.AtIstTime(IstClock.IstDate(exitAt), TimeExitCutoffMinute);
+        if (exitAt > cutoff) exitAt = cutoff;
+        if (exitAt <= UtcNow()) return null;
+        lock (_lock)
+        {
+            _timeExits.RemoveAll(e => e.OrderIds.Intersect(orderIds).Any());
+            _timeExits.Add(new LiveTimeExit(orderIds.ToArray(), exitAt, slippagePoints, reason));
+            SaveTimeExits();
+        }
+        _logger.LogInformation("Time exit set for {Orders} at {At:HH:mm:ss} IST ({Reason}).", string.Join(",", orderIds), exitAt.ToOffset(IstClock.Offset), reason);
+        return exitAt;
+    }
+
+    /// <summary>Drops the time exit of these super orders (their trade was closed some other way).</summary>
+    public void ClearTimeExit(IReadOnlyList<string> orderIds)
+    {
+        lock (_lock)
+        {
+            if (_timeExits.RemoveAll(e => e.OrderIds.Intersect(orderIds).Any()) > 0) SaveTimeExits();
+        }
+    }
+
+    /// <summary>The time exits waiting, soonest first.</summary>
+    public IReadOnlyList<LiveTimeExit> TimeExits()
+    {
+        lock (_lock) return _timeExits.OrderBy(e => e.ExitAt).ToList();
+    }
+
+    private void SaveTimeExits() => _timeExitStore?.Save(_timeExits.ToList());
+
+    private async Task RunTimeExitLoopAsync(CancellationToken stoppingToken)
+    {
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            try { await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken); }
+            catch (OperationCanceledException) { break; }
+            try { await RunDueTimeExitsAsync(UtcNow(), stoppingToken); }
+            catch (Exception ex) when (ex is not OperationCanceledException) { _logger.LogWarning(ex, "Running the time exits failed."); }
+        }
+    }
+
+    /// <summary>Closes every trade whose time exit is due at <paramref name="now"/>: ExitTradeAsync with
+    /// <c>onlyWithWorkingLegs</c> - a trade already closed by hand, by its own legs or by the page is left
+    /// alone (never an exit of a newer position in the same contract). A failure is retried every
+    /// TimeExitRetryInterval, up to MaxTimeExitAttempts; each outcome is logged and sent to Telegram.</summary>
+    internal async Task RunDueTimeExitsAsync(DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        List<LiveTimeExit> due;
+        lock (_lock) due = _timeExits.Where(e => e.ExitAt <= now && e.NextTry <= now).ToList();
+        foreach (var exit in due)
+        {
+            var result = await ExitTradeAsync(exit.OrderIds, exit.SlippagePoints, cancellationToken, onlyWithWorkingLegs: true);
+            var attempts = exit.Attempts + 1;
+            var done = result.Success || result.Message.Contains("does not list these super orders", StringComparison.Ordinal) || attempts >= MaxTimeExitAttempts;
+            lock (_lock)
+            {
+                var index = _timeExits.IndexOf(exit);
+                if (index < 0) continue; // cleared meanwhile
+                if (done) _timeExits.RemoveAt(index);
+                else _timeExits[index] = exit with { Attempts = attempts, NextTry = now + TimeExitRetryInterval };
+                SaveTimeExits();
+            }
+            var at = exit.ExitAt.ToOffset(IstClock.Offset).ToString("HH:mm");
+            var text = result.Success
+                ? $"Server time exit ({exit.Reason}, {at} IST) of {string.Join(",", exit.OrderIds)}: {result.Message}"
+                : done
+                    ? $"Server time exit ({exit.Reason}, {at} IST) of {string.Join(",", exit.OrderIds)} FAILED after {attempts} tries - check Dhan: {result.Message}"
+                    : null;
+            if (result.Success) _logger.LogWarning("{Text}", text);
+            else _logger.LogWarning("Time exit of {Orders} (try {Attempt}) failed: {Message}", string.Join(",", exit.OrderIds), attempts, result.Message);
+            if (text is not null && _telegram is not null)
+            {
+                try { await _telegram.SendAsync(System.Net.WebUtility.HtmlEncode(text), CancellationToken.None); }
+                catch (Exception ex) { _logger.LogWarning(ex, "Telegram for a time exit failed."); }
+            }
+        }
+    }
+
     /// <summary>The trailing stops this tick moves: for each trailed super order of the tick's contract
     /// whose entry has filled and whose stop-loss leg is still working, the best premium is updated and,
     /// when the trailing level is at least a tick tighter than the leg (and still on the right side of
@@ -878,6 +978,7 @@ public sealed class LiveTradingService : BackgroundService
                 if (result is null)
                 {
                     RefreshUnlessStreaming();
+                    if (request.ExitAtMs > 0) SetTimeExit(orderIds, DateTimeOffset.FromUnixTimeMilliseconds(request.ExitAtMs), request.SlippagePoints, request.ExitReason ?? "time stop");
                     return ManualOrderResult.Fail(orderIds.Count == 0
                         ? $"Dhan rejected the order: {placeError}"
                         : $"placed {orderIds.Count} of {slices.Count} slices, then Dhan rejected the next: {placeError}", orderIds, prices) with { LotSize = contract.LotSize };
@@ -886,11 +987,13 @@ public sealed class LiveTradingService : BackgroundService
             }
 
             if (request.TrailGapPoints > 0) SetTrail(orderIds, request.TrailStartPoints, request.TrailGapPoints);
+            var exitAt = request.ExitAtMs > 0 ? SetTimeExit(orderIds, DateTimeOffset.FromUnixTimeMilliseconds(request.ExitAtMs), request.SlippagePoints, request.ExitReason ?? "time stop") : null;
             _logger.LogWarning("Manual LIVE order: {Transaction} {Symbol} x{Quantity} LIMIT {Limit} (ref {Reference}), target {Target}, SL {StopLoss} - orders {Orders}.",
                 transactionType, contract.TradingSymbol, quantity, prices.Limit, prices.Reference, prices.Target, prices.StopLoss, string.Join(",", orderIds));
             RefreshUnlessStreaming();
             return new ManualOrderResult(true,
-                $"{transactionType} {contract.TradingSymbol} x{quantity} at LIMIT {prices.Limit:0.##} ({(isSell ? "bid" : "ask")} {prices.Reference:0.##}) · target {prices.Target:0.##} · SL {prices.StopLoss:0.##}",
+                $"{transactionType} {contract.TradingSymbol} x{quantity} at LIMIT {prices.Limit:0.##} ({(isSell ? "bid" : "ask")} {prices.Reference:0.##}) · target {prices.Target:0.##} · SL {prices.StopLoss:0.##}"
+                + (exitAt is { } t ? $" · the server closes it at {t.ToOffset(IstClock.Offset):HH:mm} IST" : ""),
                 orderIds, prices) { LotSize = contract.LotSize };
         }
         finally
@@ -1130,7 +1233,11 @@ public sealed class LiveTradingService : BackgroundService
     ///    for exactly the quantity this trade filled (never more than is open, less any exit working);
     ///  - a target or stop-loss leg already filled: Dhan closed it (and cancelled the other leg) - nothing to do.
     /// </summary>
-    public async Task<ManualOrderResult> ExitTradeAsync(IReadOnlyList<string> orderIds, decimal slippagePoints, CancellationToken cancellationToken)
+    /// <param name="onlyWithWorkingLegs">For a filled entry, exit only while its stop-loss or target leg is
+    /// still working - legs gone means the trade was already closed (by hand, an exit-all, a partial exit's
+    /// own protection), so nothing is placed. The server's time exit uses it, so a later position in the
+    /// same contract is never closed in the trade's name.</param>
+    public async Task<ManualOrderResult> ExitTradeAsync(IReadOnlyList<string> orderIds, decimal slippagePoints, CancellationToken cancellationToken, bool onlyWithWorkingLegs = false)
     {
         if (!_session.IsAuthenticated) return ManualOrderResult.Fail("not logged in to Dhan right now");
         if (orderIds.Count == 0) return ManualOrderResult.Fail("no orders given");
@@ -1161,7 +1268,9 @@ public sealed class LiveTradingService : BackgroundService
                     var closedBy = order.LegDetails.FirstOrDefault(l => l.LegName is "TARGET_LEG" or "STOP_LOSS_LEG"
                         && string.Equals(l.OrderStatus, "TRADED", StringComparison.OrdinalIgnoreCase));
                     if (closedBy is not null) { messages.Add($"{order.OrderId}: already closed on Dhan by its {(closedBy.LegName == "TARGET_LEG" ? "target" : "stop-loss")}"); continue; }
-                    foreach (var leg in order.LegDetails.Where(l => l.LegName is "TARGET_LEG" or "STOP_LOSS_LEG" && IsOpenStatus(l.OrderStatus)))
+                    var workingLegs = order.LegDetails.Where(l => l.LegName is "TARGET_LEG" or "STOP_LOSS_LEG" && IsOpenStatus(l.OrderStatus)).ToList();
+                    if (onlyWithWorkingLegs && workingLegs.Count == 0) { messages.Add($"{order.OrderId}: no working stop-loss / target - already closed, nothing to do"); continue; }
+                    foreach (var leg in workingLegs)
                         await CancelLeg(order.OrderId, leg.LegName);
                     toExit += filled;
                 }
@@ -1503,10 +1612,13 @@ public sealed class LiveTradingService : BackgroundService
 }
 
 /// <summary>TrailStartPoints / TrailGapPoints: the stop-loss leg trails the best premium TrailGapPoints behind
-/// once the trade is TrailStartPoints in profit (0 gap = no trailing) - LiveTradingService.TrailStop.</summary>
+/// once the trade is TrailStartPoints in profit (0 gap = no trailing) - LiveTradingService.TrailStop.
+/// ExitAtMs (epoch ms, 0 = none): the server closes the trade itself then (no later than 15:10 IST) -
+/// LiveTradingService.SetTimeExit; ExitReason names it (e.g. "time stop").</summary>
 public sealed record ManualOrderRequest(
     string Underlying, DateOnly Expiry, decimal Strike, string Side, string Direction, int Lots,
-    decimal SlippagePoints, decimal StopLossPoints, decimal TargetPoints, decimal TrailStartPoints = 0, decimal TrailGapPoints = 0);
+    decimal SlippagePoints, decimal StopLossPoints, decimal TargetPoints, decimal TrailStartPoints = 0, decimal TrailGapPoints = 0,
+    long ExitAtMs = 0, string? ExitReason = null);
 
 internal sealed class TrailState
 {

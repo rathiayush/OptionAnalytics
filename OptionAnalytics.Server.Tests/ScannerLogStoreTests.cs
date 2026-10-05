@@ -37,7 +37,8 @@ public sealed class ScannerLogStoreTests : IDisposable
 
     private static ScannerTradeRow Trade(string key, long at, double? exit = 80, bool take = true) =>
         new(key, at, exit is null ? null : at + 20 * 60_000, false, "SELL", "PE", 22650, 1, 75, 100, exit, exit is null ? 3.5 : 100 - exit,
-            exit is null ? 262.5 : (100 - exit.Value) * 75, exit is null ? null : "Target hit", T1040, 15, "ibBreakout", "LONG", "trend-up", take, "with the up trend");
+            exit is null ? 262.5 : (100 - exit.Value) * 75, exit is null ? null : "Target hit", T1040, 15, "ibBreakout", "LONG", "trend-up", take, "with the up trend",
+            11.25, 40, 7, exit is null ? 204.25 : (100 - exit.Value) * 75 - 58.25, exit is null ? 204.25 : (100 - exit.Value) * 75 - 58.25);
 
     private static ScannerLogDayRequest Day(string date, ScannerSignalRow[] signals, ScannerTradeRow[]? trades = null) => new("NIFTY", date, "live", signals.ToList(), trades?.ToList());
 
@@ -71,6 +72,7 @@ public sealed class ScannerLogStoreTests : IDisposable
         Assert.Equal(("SELL", "PE", "100", "80", "20", "1500", "Target hit"), (row["action"], row["option"], row["entry_premium"], row["exit_premium"], row["points"], row["rupees"], row["exit_reason"]));
         Assert.Equal(("2026-10-05 10:40:00", "ibBreakout", "LONG", "true"), (row["signal_time_ist"], row["strategy_id"], row["signal_side"], row["adaptive_take"]));
         Assert.Equal(("2026-10-05 10:40:05", "2026-10-05 11:00:05"), (row["entry_time_ist"], row["exit_time_ist"]));
+        Assert.Equal(("11.25", "40", "7", "1441.75", "1441.75"), (row["stt"], row["brokerage"], row["other_charges"], row["net_rupees"], row["net_per_lot"]));
         Assert.False(File.Exists(SignalsPath));
     }
 
