@@ -38,6 +38,9 @@ historical-data/
 # same reasoning, just for the rolling-option (CE/PE premium) side instead of spot.
 expired-option-data/
 
+# ScannerLogStore's CSVs (see Storage:ScannerLogPath) - the scanner's record, kept on the server.
+scanner-log/
+
 # Local deployment env (never commit)
 .env
 .env.*

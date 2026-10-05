@@ -57,6 +57,7 @@ ENV Storage__TriggersPath=/app/data/strategy-triggers.json \
     Storage__OrderHistoryPath=/app/data/trigger-order-history.json \
     Storage__HistoricalDataPath=/app/data/historical \
     Storage__ExpiredOptionDataPath=/app/data/expired-option-data \
+    Storage__ScannerLogPath=/app/data/scanner-log \
     Storage__DataProtectionKeysPath=/app/data/dataprotection-keys
 EXPOSE 8080
 
