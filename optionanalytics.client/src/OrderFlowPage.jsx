@@ -680,6 +680,31 @@ export default function OrderFlowPage() {
                 </Text>
               )}
             </Card>
+            {/* Under the footprint: the column on the right (read, DOM, tape, signals) runs much longer. */}
+            <Space direction="vertical" size={16} style={{ width: '100%', marginTop: 16 }}>
+                <ProfilesCard prevDate={prevSession.data?.date} prevVp={prevVp} prevTpo={prevTpo} todayTpo={todayTpo} lastPrice={meta?.lastPrice}
+                  loading={prevSession.loading} estimatedPrev={prevSession.data?.source === 'estimated'} lotSize={lotSize} showLots={showLots} height={narrow ? 340 : 440} />
+
+                {/* What the heatmap shows - in one line under it. */}
+                <Card size="small" title="Liquidity heatmap" extra={!narrow && <Text type="secondary" style={{ fontSize: 11 }}>resting bids/offers over time (brighter = more) · big dots = big orders · magenta = icebergs</Text>}>
+                  {estimated
+                    ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No liquidity heatmap for an estimated day - it needs market depth, which Dhan does not keep. Days the server saw live have it." />
+                    : <DepthHeatmap columns={view?.heatmap ?? []} rowSize={rowSize} trades={largeTrades} icebergs={view?.icebergs} signals={heatSignals} lotSize={lotSize} showLots={showLots} height={narrow ? 320 : 440} />}
+                  {!estimated && (
+                    <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>
+                      How to read: time runs left to right, price bottom to top. The colour is the size of resting limit orders at that price
+                      (blue = little, yellow to red = a lot) - bids below the price line, offers above. A bright band that price stops at and that STAYS = a real
+                      wall (support / resistance); one that vanishes as price gets near = pulled / spoofed (not real). Price eating through a
+                      bright band = absorption won - the move usually continues. Dots = big trades (bigger = larger), magenta = icebergs
+                      (hidden size refilling). The Signals list reads these for you (magnet, wall absorption, exhaustion into wall, spoofing).
+                    </Text>
+                  )}
+                </Card>
+
+                <Card size="small" title={`Delta & cumulative delta · ${timeframe} min`}>
+                  <CumulativeDeltaChart bars={bars} dayKey={dayKey} lotSize={lotSize} showLots={showLots} height={narrow ? 200 : 260} />
+                </Card>
+            </Space>
           </Col>
           <Col xs={24} xl={7}>
             <Space direction="vertical" size={16} style={{ width: '100%' }}>
@@ -714,19 +739,6 @@ export default function OrderFlowPage() {
           tapePrints={tapePrints} liquidity={liquidity} pullStack={pullStack.signals} rowSize={rowSize} lotSize={lotSize} largeLots={largeLots} estimated={estimated}
           profile={scannerProfile} oi={dayOi} oiError={dayOiError} canTradeLive={canTradeLive}
         />
-
-        <ProfilesCard prevDate={prevSession.data?.date} prevVp={prevVp} prevTpo={prevTpo} todayTpo={todayTpo} lastPrice={meta?.lastPrice}
-          loading={prevSession.loading} estimatedPrev={prevSession.data?.source === 'estimated'} lotSize={lotSize} showLots={showLots} height={narrow ? 340 : 440} />
-
-        <Card size="small" title="Liquidity heatmap" extra={!narrow && <Text type="secondary" style={{ fontSize: 11 }}>resting bids/offers over time (brighter = more) · big dots = big orders · magenta = icebergs</Text>}>
-          {estimated
-            ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No liquidity heatmap for an estimated day - it needs market depth, which Dhan does not keep. Days the server saw live have it." />
-            : <DepthHeatmap columns={view?.heatmap ?? []} rowSize={rowSize} trades={largeTrades} icebergs={view?.icebergs} signals={heatSignals} lotSize={lotSize} showLots={showLots} height={narrow ? 320 : 440} />}
-        </Card>
-
-        <Card size="small" title={`Delta & cumulative delta · ${timeframe} min`}>
-          <CumulativeDeltaChart bars={bars} dayKey={dayKey} lotSize={lotSize} showLots={showLots} height={narrow ? 200 : 260} />
-        </Card>
 
         <Text type="secondary" style={{ fontSize: 11, color: AXIS_COLOR }}>
           Trades are inferred from Dhan's tick feed: the rise in the day's volume between two ticks is the volume traded, at the tick's price, and

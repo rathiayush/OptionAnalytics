@@ -1,6 +1,8 @@
 // Strategies 1-10: setups fire on their rules, outcomes, stats and the top 5.
 // Run: npm test (node --test) - see CLAUDE.md.
-import { buildOiContext, evaluateStrategies, simulateOutcome, strategyStats, topFive } from '../src/strategyEngine.js'
+import { buildOiContext, evaluateStrategies as evaluate, simulateOutcome, strategyStats, topFive, ACTIVE_STRATEGIES } from '../src/strategyEngine.js'
+// Wall defence (#1) is retired, but these scenarios still exercise its rules and the shared gates.
+const evaluateStrategies = (input) => evaluate({ ...input, includeRetired: true })
 const MIN = 60000
 const T915 = Date.parse('2026-10-05T03:45:00Z')
 const at = (m) => T915 + m * MIN // minutes after 09:15 IST
@@ -109,9 +111,19 @@ const tapeWith = (nowMs, buyPct) => Array.from({ length: 50 }, (_, i) => ({ seq:
   const wb = stats.find((s) => s.id === 'wallBreak')
   check('win rate / avg R computed', Math.round(wb.winRate * 100) === 67 && Math.abs(wb.avgR - 1) < 1e-9, `${wb.winRate} ${wb.avgR}`)
   const top = topFive(stats)
-  check('top 5: best expectancy first, losing strategies never alerted, unmeasured picks fill in', top.ids[0] === 'wallBreak' && !top.ids.includes('flush') && !top.ids.includes('range') && top.ids.includes('wallDefence') && !top.measured, top.ids.join())
+  check('top 5: best expectancy first, losing strategies never alerted, unmeasured picks fill in', top.ids[0] === 'wallBreak' && !top.ids.includes('flush') && !top.ids.includes('range') && top.ids.includes('weakWall') && !top.ids.includes('wallDefence') && !top.measured, top.ids.join())
   const few = topFive(strategyStats(mk('range', [2, 2])))
-  check('playbook picks until enough trades', !few.measured && few.ids.length === 5 && few.ids.includes('wallDefence'), few.ids.join())
+  check('playbook picks until enough trades', !few.measured && few.ids.length === 5 && few.ids.includes('weakWall'), few.ids.join())
+}
+// Retired strategies (#1 wall defence, #12 80% rule) are not run, listed or scored by default.
+{
+  const now = at(100) + 30_000
+  const r = run({ spotPath: (m) => 22700 - Math.min(95, m), futOi: () => 1e7, pe: { 22600: (m) => 5e6 + m * 20000 }, ce: { 22800: (m) => 4e6 + m * 5000 } })
+  const bs = bars(0, 99, (m) => ({ open: 22760 - Math.min(95, m), high: 22762 - Math.min(95, m), low: 22758 - Math.min(95, m), close: 22760 - Math.min(95, m), buy: m >= 98 ? 900 : 500, sell: 600 }))
+  bs[bs.length - 1].absorption = [{ side: 'buy', price: 22665 }]
+  const input = { nowMs: now, price: 22665, bars: bs, minuteBars: bs, prints: tapeWith(now, 70), book: { bids: [{ quantity: 600 }], asks: [{ quantity: 400 }] }, liquidity: [], pullStack: [], sweeps: [], icebergs: [], oi: buildOiContext(r), estimated: false, lotSize: 75, bigLots: 10 }
+  check('a retired strategy does not fire by default', evaluate(input).every((x) => x.id !== 'wallDefence') && evaluate({ ...input, includeRetired: true }).some((x) => x.id === 'wallDefence'))
+  check('retired strategies are not listed or scored', !ACTIVE_STRATEGIES.some((x) => x.id === 'wallDefence' || x.id === 'tpo80') && !strategyStats([]).some((x) => x.id === 'wallDefence' || x.id === 'tpo80'))
 }
 console.log(fails ? `${fails} FAILED` : 'all passed')
 process.exitCode = fails ? 1 : 0

@@ -23,6 +23,8 @@ All must pass before committing. When adding or changing a strategy:
 - update the strategy count in the tests (`STRATEGIES.length`) and check what the default Top 15
   alerts on (`topFifteen`, `priority`, the `DEFAULT_*` lists);
 - keep `tests/audit.test.mjs` passing - it is the guard on the rules below.
+- a strategy that measures as losing is RETIRED (`retired: true` in `STRATEGIES`), not deleted: it is
+  not run, listed, alerted or scored (`ACTIVE_STRATEGIES`); tests can still run it with `includeRetired`.
 
 ### Rules the scanner must keep (checked by `tests/audit.test.mjs`)
 

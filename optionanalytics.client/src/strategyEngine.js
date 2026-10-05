@@ -37,7 +37,9 @@ export const DEFAULT_TRAIL = { startR: 1, gapR: 1 }
 export const fmtHm = (m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`
 
 export const STRATEGIES = [
-  { id: 'wallDefence', no: 1, name: 'OI wall defence', short: 'Wall defence' },
+  // retired: measured losing (scored days: average R below zero) - no longer run, alerted or listed;
+  // the rules stay (the tests still exercise them) so one can come back by dropping the flag.
+  { id: 'wallDefence', no: 1, name: 'OI wall defence', short: 'Wall defence', retired: true },
   { id: 'wallBreak', no: 2, name: 'OI wall break - writers run', short: 'Wall break' },
   { id: 'migration', no: 3, name: 'Writer migration', short: 'Migration' },
   { id: 'squeeze', no: 4, name: 'Short-covering squeeze', short: 'Squeeze' },
@@ -49,7 +51,7 @@ export const STRATEGIES = [
   { id: 'maxPain', no: 10, name: 'Expiry-day max-pain pull', short: 'Max-pain pull' },
   // Volume profile (previous session) and market profile, each confirmed by OI and order flow.
   { id: 'vaRejection', no: 11, name: 'Previous value-area edge rejection', short: 'Value area rejection', group: 'profile' },
-  { id: 'tpo80', no: 12, name: 'Market profile 80% rule', short: 'Eighty percent rule', group: 'profile' },
+  { id: 'tpo80', no: 12, name: 'Market profile 80% rule', short: 'Eighty percent rule', group: 'profile', retired: true },
   { id: 'pocReaction', no: 13, name: 'Previous POC reaction', short: 'POC reaction', group: 'profile' },
   { id: 'lvnRun', no: 14, name: 'LVN run to the next HVN', short: 'LVN run', group: 'profile' },
   { id: 'ibBreakout', no: 15, name: 'Initial balance breakout', short: 'IB breakout', group: 'profile' },
@@ -70,10 +72,12 @@ export const STRATEGIES = [
   { id: 'oiSqueeze', no: 24, name: 'Trapped-OI squeeze - short & long squeeze', short: 'OI squeeze', priority: 2 },
 ]
 export const STRATEGY_BY_ID = Object.fromEntries(STRATEGIES.map((s) => [s.id, s]))
+/** The strategies in use - what the scanner runs, lists, alerts on and scores. */
+export const ACTIVE_STRATEGIES = STRATEGIES.filter((s) => !s.retired)
 // The playbook's own picks, used for alerts until enough trades have been scored to rank them.
-export const DEFAULT_TOP5 = ['wallDefence', 'wallBreak', 'buildUp', 'openingBias', 'iceberg']
-export const DEFAULT_PROFILE_TOP5 = ['vaRejection', 'tpo80', 'pocReaction', 'lvnRun', 'ibBreakout']
-export const RANGE_IDS = STRATEGIES.filter((s) => s.group === 'range').map((s) => s.id)
+export const DEFAULT_TOP5 = ['wallBreak', 'weakWall', 'buildUp', 'openingBias', 'iceberg']
+export const DEFAULT_PROFILE_TOP5 = ['vaRejection', 'pocReaction', 'lvnRun', 'ibBreakout']
+export const RANGE_IDS = ACTIVE_STRATEGIES.filter((s) => s.group === 'range').map((s) => s.id)
 
 // ---- OI context -----------------------------------------------------------------------------------
 
@@ -124,6 +128,15 @@ export function buildOiContext(run, expiryDate = null, { live = false } = {}) {
     expiry: expiryDate,
     date: run.date,
   }
+}
+
+/** Today's LIVE context read the way a replay is (each minute once it is over) - for scanning today so
+ *  far, minute by minute, without a minute's look-ahead. A replayed day's context is returned as is. */
+export function asReplayContext(oi) {
+  if (!oi || oi.lag === MIN) return oi
+  const shift = (list) => list.map((p) => ({ ...p, t: p.t + MIN }))
+  const shiftMap = (map) => new Map([...map].map(([k, list]) => [k, shift(list)]))
+  return { ...oi, lag: MIN, live: false, ce: shiftMap(oi.ce), pe: shiftMap(oi.pe), futures: shift(oi.futures), spot: shift(oi.spot) }
 }
 
 function oiOf(map, strike, ms) {
@@ -944,7 +957,7 @@ export function evaluateStrategies(input) {
           if (Math.abs(hvn - price) < 1.2 * stopPts) continue
           push('lvnRun', dir, stopPts, Math.abs(hvn - price), 45, 60 + (sweepWith(dir) ? 10 : 0), {
             OI: wallAhead != null ? `no growing ${dir > 0 ? 'CALL' : 'PUT'} wall before the HVN` : 'no wall ahead',
-            Profile: `crossed the LVN ${lvn} toward the HVN ${hvn}`,
+            Profile: `crossed ${dir > 0 ? 'UP' : 'DOWN'} through the LVN ${lvn} - the next HVN ${dir > 0 ? 'above' : 'below'} is ${hvn} (target)`,
             Footprint: stackWith(dir, 2) ? 'stacked imbalance through it' : 'ΣΔ new extreme', Tape: `${sweepWith(dir) ? 'sweep · ' : ''}${tapeText}`, DOM: c.dom, Heatmap: c.heat,
           })
         }
@@ -1386,7 +1399,8 @@ export function evaluateStrategies(input) {
     }
   }
 
-  return resolveConflicts(out)
+  // Retired strategies are not traded (input.includeRetired: the tests, which still exercise their rules).
+  return resolveConflicts(input.includeRetired ? out : out.filter((s) => !STRATEGY_BY_ID[s.id]?.retired))
 }
 
 /** A long and a short at the same moment: keep the side whose best setup is clearly stronger (8+
@@ -1481,7 +1495,7 @@ export function exitLabel(outcome) {
 // ---- scoring --------------------------------------------------------------------------------------
 
 export function strategyStats(trades) {
-  const by = Object.fromEntries(STRATEGIES.map((s) => [s.id, { id: s.id, trades: 0, wins: 0, totalR: 0, bestR: 0, grossWin: 0, grossLoss: 0 }]))
+  const by = Object.fromEntries(ACTIVE_STRATEGIES.map((s) => [s.id, { id: s.id, trades: 0, wins: 0, totalR: 0, bestR: 0, grossWin: 0, grossLoss: 0 }]))
   for (const t of trades) {
     const s = by[t.id]
     if (!s || t.outcome?.status === 'open' || !t.outcome) continue
@@ -1490,7 +1504,7 @@ export function strategyStats(trades) {
     s.bestR = Math.max(s.bestR, t.outcome.r)
     if (t.outcome.r > 0) { s.wins++; s.grossWin += t.outcome.r } else s.grossLoss += -t.outcome.r
   }
-  return STRATEGIES.map((meta) => {
+  return ACTIVE_STRATEGIES.map((meta) => {
     const s = by[meta.id]
     const winRate = s.trades ? s.wins / s.trades : null
     const avgR = s.trades ? s.totalR / s.trades : null
