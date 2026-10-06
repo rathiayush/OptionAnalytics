@@ -56,7 +56,8 @@ export const STRATEGIES = [
   { id: 'buildUp', no: 6, name: 'Fresh build-up trend', short: 'Build-up trend' },
   { id: 'range', no: 7, name: 'Range between two growing walls', short: 'Range fade', group: 'range' },
   { id: 'openingBias', no: 8, name: 'Opening OI bias + range breakout', short: 'Opening bias ORB' },
-  { id: 'iceberg', no: 9, name: 'Iceberg on an OI strike', short: 'Iceberg at OI wall' },
+  // retired: heavy icebergs are sent to Telegram instead (Order Flow page, "Iceberg Telegram"); the rules stay tested.
+  { id: 'iceberg', no: 9, name: 'Iceberg on an OI strike', short: 'Iceberg at OI wall', retired: true },
   { id: 'maxPain', no: 10, name: 'Expiry-day max-pain pull', short: 'Max-pain pull' },
   // Volume profile (previous session) and market profile, each confirmed by OI and order flow.
   { id: 'vaRejection', no: 11, name: 'Previous value-area edge rejection', short: 'Value area rejection', group: 'profile' },
@@ -105,7 +106,7 @@ export const STRATEGY_BY_ID = Object.fromEntries(STRATEGIES.map((s) => [s.id, s]
 /** The strategies in use - what the scanner runs, lists, alerts on and scores. */
 export const ACTIVE_STRATEGIES = STRATEGIES.filter((s) => !s.retired)
 // The playbook's own picks, used for alerts until enough trades have been scored to rank them.
-export const DEFAULT_TOP5 = ['wallBreak', 'buildUp', 'openingBias', 'iceberg']
+export const DEFAULT_TOP5 = ['wallBreak', 'buildUp', 'openingBias']
 export const DEFAULT_PROFILE_TOP5 = ['vaRejection', 'tpo80', 'pocReaction', 'lvnRun', 'ibBreakout']
 export const RANGE_IDS = ACTIVE_STRATEGIES.filter((s) => s.group === 'range').map((s) => s.id)
 
