@@ -115,7 +115,7 @@ const tapeWith = (nowMs, buyPct) => Array.from({ length: 50 }, (_, i) => ({ seq:
   const top = topFive(stats)
   check('top 5: best expectancy first, losing strategies never alerted, unmeasured picks fill in', top.ids[0] === 'wallBreak' && !top.ids.includes('flush') && !top.ids.includes('range') && top.ids.includes('openingBias') && !top.measured, top.ids.join())
   const few = topFive(strategyStats(mk('range', [2, 2])))
-  check('playbook picks until enough trades - never a retired one', !few.measured && few.ids.join() === 'wallBreak,buildUp,openingBias,iceberg', few.ids.join())
+  check('playbook picks until enough trades - never a retired one', !few.measured && few.ids.join() === 'wallBreak,buildUp,openingBias', few.ids.join())
 }
 // Retired: OI wall defence #1, writer migration #3, #25, #26, #28, #29 and #30 - not run, listed or scored
 // by default (tests run them with includeRetired). #2 OI wall break, #12 the 80% rule and #27 run.

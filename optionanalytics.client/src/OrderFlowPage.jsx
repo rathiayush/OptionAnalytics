@@ -57,6 +57,8 @@ const mergePrints = (a, b) => {
   for (const p of b) bySeq.set(p.seq, p)
   return [...bySeq.values()].sort((x, y) => x.seq - y.seq).slice(-TAPE_PRINTS)
 }
+const ICE_SENT_KEY = 'optionanalytics.orderFlow.iceTelegramSent.v1'
+const IST_DATE = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' })
 const IST_HHMMSS = new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' })
 
 // One SignalR connection for the page's lifetime; `group` (the live contract's, or none) follows the
@@ -167,6 +169,10 @@ export default function OrderFlowPage() {
   // What the server is asked for: in auto mode every print of 5+ lots (the page picks the big ones).
   const fetchLots = bigMode === 'auto' ? 5 : largeLots
   const [showLots, setShowLots] = usePersistedState('optionanalytics.orderFlow.showLots', true)
+  // Telegram for a HEAVY iceberg (live view only): a hidden order that has traded at least this many lots in total.
+  // (The server marks a level an iceberg from 5 lots; those small ones are only shown on the chart.)
+  const [iceAlertOn, setIceAlertOn] = usePersistedState('optionanalytics.orderFlow.iceAlertOn', true)
+  const [iceAlertLots, setIceAlertLots] = usePersistedState('optionanalytics.orderFlow.iceAlertLots', 100)
   const [showProfile, setShowProfile] = usePersistedState('optionanalytics.orderFlow.showProfile', true)
   const [showVwap, setShowVwap] = usePersistedState('optionanalytics.orderFlow.showVwap', true)
   const [replaySpeed, setReplaySpeed] = usePersistedState('optionanalytics.orderFlow.replaySpeed', 60)
@@ -486,6 +492,33 @@ export default function OrderFlowPage() {
   const profile = showProfile ? prevVp : null
   const walls = useMemo(() => findWalls(view?.book), [view?.book])
   const activeIcebergs = useMemo(() => new Set((view?.icebergs ?? []).filter((i) => !i.endedAt).map((i) => i.price)), [view?.icebergs])
+  // Each heavy iceberg is sent once, the moment its traded quantity reaches the threshold (kept per day, so
+  // a refresh does not send it again).
+  const iceSentRef = useRef(null)
+  useEffect(() => {
+    if (isReplay || !iceAlertOn || !(lotSize > 0) || view?.meta?.underlying !== underlying) return
+    const day = IST_DATE.format(new Date())
+    if (iceSentRef.current?.day !== day) {
+      let keys = []
+      try { const saved = JSON.parse(localStorage.getItem(ICE_SENT_KEY) ?? 'null'); if (saved?.day === day) keys = saved.keys ?? [] } catch { /* convenience only */ }
+      iceSentRef.current = { day, keys: new Set(keys), primed: null }
+    }
+    const sent = iceSentRef.current.keys
+    // The first look after the page opens: icebergs that already ended are history, not news.
+    const opening = iceSentRef.current.primed !== underlying
+    if (view?.icebergs) iceSentRef.current.primed = underlying
+    let changed = false
+    for (const i of view?.icebergs ?? []) {
+      if (!(i.traded >= iceAlertLots * lotSize)) continue
+      const key = `${underlying}-${i.isBid ? 'b' : 'a'}-${i.price}-${i.startedAt}`
+      if (sent.has(key)) continue
+      sent.add(key)
+      changed = true
+      if (opening && i.endedAt) continue
+      telegram(`Heavy iceberg ${underlying}: hidden ${i.isBid ? 'BUYER at the bid' : 'SELLER at the offer'} ${i.price} - ${formatVolume(i.traded, lotSize, true)} lots traded there (${formatVolume(i.maxDisplayed, lotSize, true)} shown at most)${i.refills > 0 ? `, ${i.refills} refills` : ''}${i.endedAt ? ' - ended' : ' - still active'}`)
+    }
+    if (changed) { try { localStorage.setItem(ICE_SENT_KEY, JSON.stringify({ day, keys: [...sent] })) } catch { /* convenience only */ } }
+  }, [view?.icebergs, view?.meta?.underlying, underlying, isReplay, iceAlertOn, iceAlertLots, lotSize])
   const bigLabel = estimated ? 'Volume spike' : 'Big order'
   const nowMs = isReplay ? replayMs ?? Date.now() : view?.heatmap?.at(-1)?.t ?? Date.now()
   // Tape reading: aggression from the Time & Sales prints, sweeps from the server, pulling/stacking
@@ -713,6 +746,12 @@ export default function OrderFlowPage() {
               <Space.Compact>
                 <Select value={bigMode} onChange={setBigMode} style={{ width: 150 }} options={[{ value: 'auto', label: 'Big order: Auto' }, { value: 'fixed', label: 'Big order: Fixed' }]} />
                 <InputNumber value={bigMode === 'auto' ? bigLots : largeLots} onChange={(v) => setLargeLots(v ?? 10)} min={1} disabled={bigMode === 'auto'} style={{ width: 110 }} addonAfter="lots" aria-label="Big order lots" />
+              </Space.Compact>
+            </Tooltip>
+            <Tooltip title="Telegram when an iceberg (a hidden order that keeps refilling at one price) has traded at least this many lots in total - big ones only; the small ones just show on the chart. Live view only, once per iceberg.">
+              <Space.Compact>
+                <Space size={4} style={{ marginRight: 8 }}><Switch size="small" checked={iceAlertOn} onChange={setIceAlertOn} aria-label="Telegram heavy icebergs" /><Text style={{ fontSize: 12 }}>Iceberg Telegram</Text></Space>
+                <InputNumber value={iceAlertLots} onChange={(v) => setIceAlertLots(v ?? 100)} min={5} max={100000} disabled={!iceAlertOn} style={{ width: 118 }} addonBefore="from" addonAfter="lots" aria-label="Heavy iceberg lots" />
               </Space.Compact>
             </Tooltip>
             <Space size={4}><Switch size="small" checked={showLots} onChange={setShowLots} /><Text style={{ fontSize: 12 }}>Volume in lots</Text></Space>
