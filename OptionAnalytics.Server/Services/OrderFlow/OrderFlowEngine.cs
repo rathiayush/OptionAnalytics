@@ -60,6 +60,7 @@ public sealed class OrderFlowEngine
     private readonly object _lock = new();
     private DateOnly _day;
     private long? _prevVolume;
+    private DateTimeOffset? _recordedFrom;
     private decimal _prevLtp, _prevBid, _prevAsk;
     private int _lastSide = 1;
     private DepthLevel[] _bids = Array.Empty<DepthLevel>();
@@ -195,6 +196,8 @@ public sealed class OrderFlowEngine
             if (tick.Bids is { Length: > 0 } bids && !Fresh(_deepBidAt, now)) _bids = bids;
             if (tick.Asks is { Length: > 0 } asks && !Fresh(_deepAskAt, now)) _asks = asks;
 
+            // The first tick only sets the volume baseline - nothing before it is in the day's bars.
+            _recordedFrom ??= now;
             _prevVolume = tick.Volume;
             if (price > 0) _prevLtp = price;
             _prevBid = _bids.Length > 0 ? _bids[0].Price : tick.BestBidPrice;
@@ -235,6 +238,7 @@ public sealed class OrderFlowEngine
         if (day == _day) return;
         _day = day;
         _prevVolume = null;
+        _recordedFrom = null;
         _prevLtp = _prevBid = _prevAsk = 0;
         _recentQuotes.Clear();
         _bars.Clear();
@@ -352,6 +356,10 @@ public sealed class OrderFlowEngine
         }
         return rows.Select(kv => new HeatRow(kv.Key, (int)Math.Min(kv.Value, int.MaxValue))).ToArray();
     }
+
+    /// <summary>When this day's trades start being recorded (the first tick after the engine - or the
+    /// server - started); everything traded before is NOT in the bars. Null before the first tick.</summary>
+    public DateTimeOffset? RecordedFrom() { lock (_lock) return _recordedFrom; }
 
     /// <summary>The IST day this engine holds, or null before its first event.</summary>
     public DateOnly? ExportDayDate() { lock (_lock) return _day == default ? null : _day; }
@@ -555,7 +563,7 @@ public sealed class OrderFlowEngine
             {
                 Underlying = Underlying, SecurityId = SecurityId, ContractSymbol = ContractSymbol, ExchangeSegment = ExchangeSegment, Expiry = Expiry,
                 TickSize = TickSize, LotSize = LotSize, Day = _day, Sequence = _sequence, LastPrice = _prevLtp, LastTradeAt = _lastTradeAt,
-                Clock = _clock, DepthLevels = Math.Max(_dayDepth, _importedDepth ?? 5),
+                Clock = _clock, DepthLevels = Math.Max(_dayDepth, _importedDepth ?? 5), RecordedFrom = _recordedFrom,
                 Bars = _bars.Values.Select(b => new OrderFlowDay.Bar(b.Time, b.Open, b.High, b.Low, b.Close, b.Buy, b.Sell, b.Trades,
                     b.Levels.Select(kv => new FootprintLevel(kv.Key, kv.Value.Buy, kv.Value.Sell)).ToArray())).ToList(),
                 Trades = _trades.ToList(),
@@ -576,6 +584,7 @@ public sealed class OrderFlowEngine
             if (_day != default && _day != day.Day) return false;
             _day = day.Day;
             if (day.Clock > _clock) _clock = day.Clock;
+            if (day.RecordedFrom is { } from && (_recordedFrom is null || from < _recordedFrom)) _recordedFrom = from;
             _sequence = Math.Max(_sequence, day.Sequence);
             if (_prevLtp == 0) _prevLtp = day.LastPrice;
             _lastTradeAt ??= day.LastTradeAt;
@@ -641,6 +650,7 @@ public sealed class OrderFlowDay
     public decimal LastPrice { get; init; }
     public DateTimeOffset? LastTradeAt { get; init; }
     public DateTimeOffset Clock { get; init; }
+    public DateTimeOffset? RecordedFrom { get; init; }
     public int DepthLevels { get; init; }
     public List<Bar> Bars { get; init; } = new();
     public List<OrderFlowTrade> Trades { get; init; } = new();
@@ -678,6 +688,9 @@ public sealed record OrderFlowBook(IReadOnlyList<BookLevel> Bids, IReadOnlyList<
 /// <summary>One heatmap column: every bid/ask row as [price, quantity].</summary>
 public sealed record HeatmapColumn(DateTimeOffset Time, IReadOnlyList<decimal[]> Bids, IReadOnlyList<decimal[]> Asks);
 
+/// <summary>One minute of the estimated backfill (see OrderFlowSnapshot.Backfill).</summary>
+public sealed record OrderFlowBackfillMinute(DateTimeOffset Time, long Buy, long Sell);
+
 /// <summary>The DOM ladder's push - see OrderFlowEngine.Dom.</summary>
 public sealed record OrderFlowDom(
     OrderFlowMeta Meta, DateTimeOffset Time, OrderFlowBook Book, IReadOnlyList<FootprintLevel> Volume, IReadOnlyList<OrderFlowTrade> Trades);
@@ -701,6 +714,12 @@ public sealed record OrderFlowSnapshot(
     IReadOnlyList<OrderFlowIceberg> Icebergs, IReadOnlyList<HeatmapColumn> Heatmap, OrderFlowBook Book,
     string Source = "live", string? Note = null)
 {
+    /// <summary>A live day the server only started recording partway through: the minutes from the open
+    /// up to then, ESTIMATED from Dhan's 1-minute candles (OrderFlowEstimator). Not part of Bars - only
+    /// the delta / cumulative delta views use them, so they start at 09:15 like a chart that saw the
+    /// whole session.</summary>
+    public IReadOnlyList<OrderFlowBackfillMinute> Backfill { get; init; } = Array.Empty<OrderFlowBackfillMinute>();
+    public DateTimeOffset? RecordedFrom { get; init; }
     public IReadOnlyList<OrderFlowSweep> Sweeps { get; init; } = Array.Empty<OrderFlowSweep>();
 }
 

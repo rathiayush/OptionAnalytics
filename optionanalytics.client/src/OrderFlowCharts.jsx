@@ -977,7 +977,7 @@ export function CumulativeDeltaChart({ bars, dayKey, lotSize, showLots, height =
 
   useEffect(() => {
     if (!deltaRef.current || !cvdRef.current) return
-    deltaRef.current.setData(bars.map((b) => ({ time: toChartTime(new Date(b.time)), value: b.delta * scale, color: b.delta >= 0 ? UP_COLOR : DOWN_COLOR })))
+    deltaRef.current.setData(bars.map((b) => ({ time: toChartTime(new Date(b.time)), value: b.delta * scale, color: `${b.delta >= 0 ? UP_COLOR : DOWN_COLOR}${b.estimated ? '73' : ''}` })))
     cvdRef.current.setData(bars.map((b) => ({ time: toChartTime(new Date(b.time)), value: b.cvd * scale })))
   }, [bars, scale])
 

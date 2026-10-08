@@ -18,6 +18,7 @@ import { alignToBars, sessionVwapFromBars } from './chartVwap.js'
 import { ProfilesCard } from './ProfilesCard.jsx'
 import { PriceAlertsBar, usePriceAlerts } from './PriceAlerts.jsx'
 import { fetchPreviousSession, sessionVolumeProfile, tpoProfile, tpoRowFor } from './profiles.js'
+import { withBackfill } from './cvdBackfill.js'
 import { FootprintChart, DepthHeatmap, CumulativeDeltaChart, BookLadder, formatVolume } from './OrderFlowCharts.jsx'
 import { DomDrawer, useNarrow } from './DomDrawer.jsx'
 import { useReplaySync, useReplaySyncEnabled, ReplaySyncControl, withSpeedOption, SYNC_DRIFT_MS } from './replaySync.jsx'
@@ -245,6 +246,7 @@ export default function OrderFlowPage() {
         setData({
           meta: body.meta, minuteBars: body.bars, trades: body.trades, icebergs: body.icebergs, book: body.book, sweeps: body.sweeps ?? [],
           heatmap: body.heatmap.map(toColumn), lastSeq: body.trades.at(-1)?.seq ?? 0, source: body.source,
+          backfill: body.backfill ?? [], recordedFrom: body.recordedFrom ?? null,
         })
       })
       .catch((err) => { if (!cancelled) { setError(err.message); setData(null) } })
@@ -322,6 +324,7 @@ export default function OrderFlowPage() {
         const day = {
           meta: body.meta, minuteBars: body.bars, trades: body.trades, icebergs: body.icebergs, heatmap: body.heatmap.map(toColumn),
           sweeps: body.sweeps ?? [], source: body.source, note: body.note, date: replayDate, underlying,
+          backfill: body.backfill ?? [], recordedFrom: body.recordedFrom ?? null,
         }
         setReplayDay(day)
         // Keep the clock where it was when only the rows / print size changed; a new day starts at its open.
@@ -453,6 +456,9 @@ export default function OrderFlowPage() {
     () => analyzeBars(aggregateBars(view?.minuteBars ?? [], timeframe), { rowSize, minVolume: lotSize, imbalanceRatio, stackedCount, estimated }),
     [view?.minuteBars, timeframe, rowSize, lotSize, imbalanceRatio, stackedCount, estimated],
   )
+  // Delta / cumulative delta from the 09:15 open: when the server started recording after the open, the
+  // minutes before are an estimate from candles (display only - see cvdBackfill.js).
+  const shown = useMemo(() => withBackfill(bars, view?.backfill, timeframe), [bars, view?.backfill, timeframe])
   // Session VWAP of the futures: from the 1-minute bars (the precise one), read at each footprint bar
   // (alignToBars - on the bar's own time) for the footprint, and minute by minute for the heatmap.
   const vwapMinutes = useMemo(() => sessionVwapFromBars((view?.minuteBars ?? []).map((b) => ({
@@ -814,7 +820,7 @@ export default function OrderFlowPage() {
             {lastBar && (
               <Text style={{ fontSize: 12 }}>
                 Δ <span style={{ color: lastBar.delta >= 0 ? UP_COLOR : DOWN_COLOR, fontWeight: 600 }}>{lastBar.delta >= 0 ? '+' : ''}{formatVolume(lastBar.delta, lotSize, showLots)}</span>
-                {' · '}Cum Δ <span style={{ color: lastBar.cvd >= 0 ? UP_COLOR : DOWN_COLOR, fontWeight: 600 }}>{lastBar.cvd >= 0 ? '+' : ''}{formatVolume(lastBar.cvd, lotSize, showLots)}</span>
+                {' · '}Cum Δ <span style={{ color: (shown.bars.at(-1)?.cvd ?? lastBar.cvd) >= 0 ? UP_COLOR : DOWN_COLOR, fontWeight: 600 }}>{(shown.bars.at(-1)?.cvd ?? lastBar.cvd) >= 0 ? '+' : ''}{formatVolume(shown.bars.at(-1)?.cvd ?? lastBar.cvd, lotSize, showLots)}</span>
                 {showLots ? ' lots' : ''}
               </Text>
             )}
@@ -833,7 +839,7 @@ export default function OrderFlowPage() {
               <PriceAlertsBar {...priceAlerts} lastPrice={meta?.lastPrice} live={!isReplay} />
               <FootprintLegend estimated={estimated} bigLabel={bigLabel} />
               <FootprintChart
-                bars={bars} rowSize={rowSize} lotSize={lotSize} showLots={showLots} lastPrice={meta?.lastPrice} height={narrow ? 480 : 660}
+                bars={shown.bars} rowSize={rowSize} lotSize={lotSize} showLots={showLots} lastPrice={meta?.lastPrice} height={narrow ? 480 : 660}
                 profile={profile} runningProfile={showProfile ? todayVp : null} trades={largeTrades} timeframe={timeframe} bigLabel={bigLabel} alerts={priceAlerts.alerts} levels={suddenLevels} vwap={footprintVwap}
               />
               {profile?.poc != null && (
@@ -868,8 +874,9 @@ export default function OrderFlowPage() {
                   <LiquidityMapCard map={liqMap} sudden={sudden} basis={basis} estimated={estimated} />
                 </Card>
 
-                <Card size="small" title={`Delta & cumulative delta · ${timeframe} min`}>
-                  <CumulativeDeltaChart bars={bars} dayKey={dayKey} lotSize={lotSize} showLots={showLots} height={narrow ? 200 : 260} />
+                <Card size="small" title={`Delta & cumulative delta · ${timeframe} min`}
+                  extra={shown.priorCount > 0 && <Tooltip title="The server started recording after the 09:15 open, so the minutes before it are estimated from Dhan's 1-minute candles (dimmed bars). Everything after is exact tick data."><Tag color="orange">09:15 → start estimated</Tag></Tooltip>}>
+                  <CumulativeDeltaChart bars={shown.chartBars} dayKey={dayKey} lotSize={lotSize} showLots={showLots} height={narrow ? 200 : 260} />
                 </Card>
 
                 <ProfilesCard prevDate={prevSession.data?.date} prevVp={prevVp} todayVp={todayVp} prevTpo={prevTpo} todayTpo={todayTpo} lastPrice={meta?.lastPrice}

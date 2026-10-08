@@ -32,7 +32,8 @@ public sealed class OrderFlowController : ControllerBase
         var engine = await _orderFlow.EngineForAsync(underlying, expiry, cancellationToken);
         if (engine is null)
             return NotFound(new { error = $"No {underlying.ToUpperInvariant()} futures contract{(expiry is null ? "" : $" expiring {expiry:dd MMM yyyy}")} is being tracked - the futures list may still be loading, or order flow is turned off." });
-        return engine.Snapshot(Math.Clamp(rowSize, 0, 1000), Math.Max(1, minTradeLots) * (long)engine.LotSize, Math.Clamp(heatmapColumns, 50, 3000));
+        var snapshot = engine.Snapshot(Math.Clamp(rowSize, 0, 1000), Math.Max(1, minTradeLots) * (long)engine.LotSize, Math.Clamp(heatmapColumns, 50, 3000));
+        return await _history.WithBackfillAsync(engine, snapshot, cancellationToken);
     }
 
     /// <summary>The futures contracts listed on <paramref name="date"/> (default today), nearest first - a

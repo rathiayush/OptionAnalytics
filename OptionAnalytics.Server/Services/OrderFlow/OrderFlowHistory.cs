@@ -55,7 +55,7 @@ public sealed class OrderFlowHistory
             ? live
             : _orderFlow.PastDays.EngineFor(underlying, contract.SecurityId, date);
         if (exact is not null)
-            return new Result(exact.Snapshot(rowSize, Math.Max(1, minTradeLots) * (long)exact.LotSize, heatmapColumns), null);
+            return new Result(await WithBackfillAsync(exact, exact.Snapshot(rowSize, Math.Max(1, minTradeLots) * (long)exact.LotSize, heatmapColumns), cancellationToken), null);
 
         // Rebuilt from TrueData's tick history (TrueData:Enabled only, recent days only) - else the estimate.
         string? trueDataNote = null;
@@ -101,6 +101,49 @@ public sealed class OrderFlowHistory
             used.TickSize, used.LotSize, used.Expiry, date, cached.Candles, rowSize, Math.Max(1, minTradeLots) * (long)used.LotSize);
         var note = string.Join(" ", new[] { trueDataNote, cached.Note, snapshot.Note }.Where(n => !string.IsNullOrWhiteSpace(n)));
         return new Result(snapshot with { Note = note }, null);
+    }
+
+    // The estimated minutes before the engine started recording, per contract day. The cut-off never
+    // moves for an engine run, so what was fetched stays right for the rest of the day.
+    private readonly ConcurrentDictionary<(uint SecurityId, DateOnly Day), (DateTimeOffset RecordedFrom, IReadOnlyList<OrderFlowBackfillMinute> Minutes)> _backfill = new();
+
+    /// <summary>The exact snapshot of a day the server only started recording partway through (a restart,
+    /// a deploy, a late start), plus the minutes from the 09:15 open up to then ESTIMATED from Dhan's
+    /// 1-minute candles, so delta and cumulative delta can run from the open. The bars themselves are
+    /// untouched - the estimate rides separately in Backfill. If the candles cannot be had the snapshot is
+    /// returned as it was.</summary>
+    public async Task<OrderFlowSnapshot> WithBackfillAsync(OrderFlowEngine engine, OrderFlowSnapshot snapshot, CancellationToken cancellationToken)
+    {
+        if (engine.RecordedFrom() is not { } recordedFrom || engine.ExportDayDate() is not { } day) return snapshot;
+        var ist = recordedFrom.ToOffset(IstClock.Offset);
+        var open = new DateTimeOffset(day.Year, day.Month, day.Day, 9, 15, 0, IstClock.Offset);
+        // A minute the engine joined part-way is incomplete too, so the estimate runs up to the next one.
+        var minuteStart = new DateTimeOffset(ist.Year, ist.Month, ist.Day, ist.Hour, ist.Minute, 0, IstClock.Offset);
+        var cutoff = ist - minuteStart < TimeSpan.FromSeconds(2) ? minuteStart : minuteStart.AddMinutes(1);
+        if (cutoff <= open) return snapshot;
+
+        var key = (engine.SecurityId, day);
+        if (!_backfill.TryGetValue(key, out var cached) || cached.RecordedFrom != recordedFrom)
+        {
+            try
+            {
+                var contract = await _orderFlow.ResolveContractAsync(engine.Underlying, engine.Expiry, day, cancellationToken);
+                if (contract is null) return snapshot;
+                var fetched = await PastFuturesCandles.FetchAsync(_historical, contract, Array.Empty<DhanFuturesInstrument>(), day, cancellationToken, _nseChart);
+                if (fetched.Error is not null) return snapshot;
+                var candles = fetched.Bars.Select(b => b.Bar).Where(c => c.Time >= open && c.Time < cutoff).ToList();
+                var estimate = OrderFlowEstimator.Build(engine.Underlying, contract.SecurityId, contract.TradingSymbol, contract.DhanSegment,
+                    contract.TickSize, contract.LotSize, contract.Expiry, day, candles, 1, long.MaxValue);
+                cached = (recordedFrom, estimate.Bars.Select(b => new OrderFlowBackfillMinute(b.Time, b.Buy, b.Sell)).ToList());
+                // Nothing yet (candles not published) is asked again next time.
+                if (cached.Minutes.Count > 0) _backfill[key] = cached;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                return snapshot;
+            }
+        }
+        return snapshot with { Backfill = cached.Minutes, RecordedFrom = recordedFrom };
     }
 
     /// <summary>Whether Dhan serves a day's 1-minute candles for the futures contract listed then - an
