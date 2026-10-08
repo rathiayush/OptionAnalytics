@@ -1421,6 +1421,60 @@ const OI_TOTALS_ROW_HEIGHT = 24
 const OI_TOTALS_GAP = 6
 const OI_TOTALS_LABEL_WIDTH = 190
 
+// OI as a compact number for the totals table: lakh (L) from 1,00,000, else thousand (K) - one minute's
+// change is often a few thousand, which "0.01M" hides. The exact figure is the cell's tooltip.
+function fmtOiNum(v) {
+  if (v == null || !Number.isFinite(v)) return '—'
+  if (v === 0) return '0'
+  const a = Math.abs(v)
+  const text = a >= 1e5 ? `${(a / 1e5).toFixed(2)}L` : `${(a / 1e3).toFixed(1)}K`
+  return `${v > 0 ? '+' : '−'}${text}`
+}
+
+// The totals as NUMBERS: the same six rows as the heatmap below it (CE, PE and net CE − PE; each bucket's
+// change and the running total), one column per time bucket, newest on the left - read off the figures
+// instead of a colour.
+function OiTotalsNumbers({ ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes, live = false, windowMinutes = null }) {
+  const { buckets, rows } = useMemo(() => {
+    const ce = sliceMatrixWindow(buildOiChangeMatrix(ceByStrike, strikes, asOfMs, timeframeMinutes), windowMinutes).perStrikeChange
+    const pe = sliceMatrixWindow(buildOiChangeMatrix(peByStrike, strikes, asOfMs, timeframeMinutes), windowMinutes).perStrikeChange
+    return buildOiTotalsRows(ce, pe)
+  }, [ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes, windowMinutes])
+  const columns = useMemo(() => [...buckets].reverse(), [buckets])
+  if (buckets.length === 0) return <Empty description="No OI data yet." />
+  const colour = (v) => (!v ? AXIS_COLOR : v > 0 ? OI_ADDED_COLOR : OI_REMOVED_COLOR)
+  const head = { position: 'sticky', top: 0, background: '#161a22', color: AXIS_COLOR, fontWeight: 400, padding: '3px 8px', textAlign: 'right', whiteSpace: 'nowrap', fontSize: 11 }
+  const sticky = { position: 'sticky', left: 0, background: '#161a22', padding: '3px 8px', whiteSpace: 'nowrap', textAlign: 'left', zIndex: 1 }
+  return (
+    <div style={{ overflowX: 'auto', border: `1px solid ${BORDER_COLOR}`, borderRadius: 4 }} aria-label="OI totals as numbers">
+      <table style={{ borderCollapse: 'collapse', fontVariantNumeric: 'tabular-nums', fontSize: 12, width: 'max-content', minWidth: '100%' }}>
+        <thead>
+          <tr>
+            <th style={{ ...head, ...sticky, textAlign: 'left', zIndex: 2 }}>OI (CE / PE / net)</th>
+            {columns.map((t, i) => <th key={t} style={{ ...head, color: i === 0 && live ? '#fff' : AXIS_COLOR }}>{istTimeFormatter(t)}</th>)}
+          </tr>
+        </thead>
+        <tbody>
+          {OI_TOTALS_ROWS.map((r) => (
+            <tr key={r.key} style={{ borderTop: r.gap ? `6px solid #0d0e12` : undefined, background: r.cum ? 'rgba(255,255,255,0.03)' : undefined }}>
+              <td style={{ ...sticky, color: r.cum ? AXIS_COLOR : '#e6e6e6', fontWeight: r.cum ? 400 : 700 }}>{r.label}</td>
+              {columns.map((t, i) => {
+                const v = rows[r.key].get(t)
+                return (
+                  <td key={t} title={v == null ? undefined : `${r.label}: ${Math.round(v).toLocaleString('en-IN')}`}
+                    style={{ padding: '3px 8px', textAlign: 'right', color: colour(v), fontWeight: r.cum ? 400 : 600, outline: i === 0 && live ? '1px solid rgba(255,255,255,0.4)' : undefined, outlineOffset: -1 }}>
+                    {fmtOiNum(v)}
+                  </td>
+                )
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
 function OiTotalsHeatmap({ ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes, live = false, windowMinutes = null }) {
   const canvasRef = useRef(null)
   const scrollRef = useRef(null)
@@ -2640,7 +2694,7 @@ function PreTradeReview({
               <Text style={{ color: OI_REMOVED_COLOR, fontSize: 12 }}>■ OI removed</Text>
             </Space>
             <Text strong style={{ fontSize: 12 }}>Totals · CE, PE and Net (CE − PE) - Δ and cumulative Δ</Text>
-            <OiTotalsHeatmap ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={strikes} asOfMs={asOfMs} timeframeMinutes={1} windowMinutes={windowMinutes} live={isLive} />
+            <OiTotalsNumbers ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={strikes} asOfMs={asOfMs} timeframeMinutes={1} windowMinutes={windowMinutes} live={isLive} />
             <Text strong style={{ fontSize: 12 }}>CE by strike</Text>
             <OiChangeHeatmapPlot label="CE" byStrike={ceByStrike} strikes={strikes} atmStrike={atmStrike} asOfMs={asOfMs} timeframeMinutes={1} windowMinutes={windowMinutes} live={isLive} />
             <Text strong style={{ fontSize: 12 }}>PE by strike</Text>
@@ -2748,6 +2802,8 @@ export default function OiReplayPage() {
   // OI change heatmap's own bucket size - see HEATMAP_TIMEFRAME_OPTIONS' own doc comment for why this
   // is independent of every other timeframe picker on the page.
   const [heatmapTimeframeMinutes, setHeatmapTimeframeMinutes] = useState(1)
+  // The totals (CE / PE / net) as numbers (default) or as a heatmap.
+  const [totalsView, setTotalsView] = usePersistedState('optionanalytics.oiReplay.totalsView', 'numbers')
   // The Futures chart's own candle timeframe (1/3/5/15), independent of the spot chart's.
   const [futuresTimeframe, setFuturesTimeframe] = usePersistedState('optionanalytics.oiReplay.futuresTimeframe', 5)
   // The futures DOM (full market depth ladder) drawer - see DomDrawer.jsx.
@@ -4892,10 +4948,14 @@ export default function OiReplayPage() {
                     <OiChangeHeatmapPlot label="PE" byStrike={peByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} live={isLive} />
                   </div>
                   <div>
+                    <Segmented size="small" value={totalsView} onChange={setTotalsView} options={[{ value: 'numbers', label: 'Numbers' }, { value: 'heatmap', label: 'Heatmap' }]} style={{ marginBottom: 6 }} aria-label="Totals as numbers or heatmap" />
+                    <br />
                     <Tooltip title="Whole band summed per bucket. Δ = OI added (blue) or removed (orange) in that bucket; cumulative = running total since the first bucket. Net = CE − PE: blue means CE OI grew more than PE (call-heavy), orange means PE grew more (put-heavy).">
                       <Text strong style={{ fontSize: 12 }}>Totals: CE, PE and Net (CE − PE) — Δ and cumulative Δ</Text>
                     </Tooltip>
-                    <OiTotalsHeatmap ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={heatmapStrikes} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} live={isLive} />
+                    {totalsView === 'numbers'
+                      ? <OiTotalsNumbers ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={heatmapStrikes} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} live={isLive} />
+                      : <OiTotalsHeatmap ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={heatmapStrikes} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} live={isLive} />}
                   </div>
                 </Space>
               </Card>
