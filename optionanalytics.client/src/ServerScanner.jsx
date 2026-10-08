@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Alert, Card, Space, Switch, Table, Tag, Tooltip, Typography } from 'antd'
 import { UP_COLOR, DOWN_COLOR } from './shared.jsx'
+import { refreshTradeSettings } from './tradeDefaults.js'
 
 const { Text } = Typography
 const POLL_MS = 10_000
@@ -28,7 +29,7 @@ export function ServerScannerCard({ isAdmin, focus }) {
 
   const setEnabled = (underlying, on) => fetch('/api/scanner-runner/config', {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: { [underlying]: on } }),
-  }).then(load).catch(() => {})
+  }).then(() => { load(); refreshTradeSettings() }).catch(() => {})
 
   const process = state?.process
   const indices = state?.status?.indices ?? []
@@ -60,8 +61,9 @@ export function ServerScannerCard({ isAdmin, focus }) {
     >
       <Space direction="vertical" size={10} style={{ width: '100%' }}>
         <Text type="secondary" style={{ fontSize: 12 }}>
-          The same scanner as above, run by the server for all three indices - with no browser open. It uses this page&apos;s scanner settings
-          (strategies, filters, trailing, option side and lots, SL / target per index){isAdmin ? ', synced from here as you change them' : ''}. Its alerts and paper
+          The same scanner as above, run by the server for all three indices - with no browser open. Which indices it scans, their lots,
+          SL / target / trail and what it does on an alert are on the <a href="/trade-settings">Trade settings</a> page; the strategies, their
+          filters and the futures trailing stop follow this page&apos;s scanner settings{isAdmin ? ', synced from here as you change them' : ''}. Its alerts and paper
           trades go to Telegram tagged [Server]; its record is kept apart from this page&apos;s (
           <a href="/api/scanner-log/server-signals">server-signals.csv</a>, <a href="/api/scanner-log/server-trades">server-trades.csv</a>) so the two can be compared.
           It places no real orders.

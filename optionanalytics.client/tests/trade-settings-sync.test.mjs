@@ -1,0 +1,39 @@
+// The per-index trade settings kept on the server (trade-settings.csv) and copied into the browser
+// (tradeDefaults.js). Run: npm test (node --test) - see CLAUDE.md.
+import test from 'node:test'
+import assert from 'node:assert/strict'
+
+const store = new Map()
+globalThis.localStorage = { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)), removeItem: (k) => store.delete(k) }
+const calls = []
+let serverRows = [
+  { underlying: 'NIFTY', lots: 4, slPoints: 15, targetPoints: 25, trailStart: 10, trailGap: 5, slippagePoints: 1.5, scannerEnabled: false, autoTrade: 'buy' },
+  { underlying: 'BANKNIFTY', lots: 1, slPoints: 50, targetPoints: 75, trailStart: 0, trailGap: 0, slippagePoints: 2, scannerEnabled: true, autoTrade: 'sell' },
+]
+globalThis.fetch = async (url, opts = {}) => {
+  calls.push({ url, ...opts })
+  if (url === '/api/trade-settings' && !opts.method) return { ok: true, json: async () => ({ settings: serverRows }) }
+  return { ok: true, json: async () => ({}) }
+}
+const { refreshTradeSettings, loadTradeDefaults, loadTradeLevels, saveTradeDefaults, defaultTradeLevels } = await import('../src/tradeDefaults.js')
+
+test('the server\'s settings become every page\'s defaults', async () => {
+  assert.equal(loadTradeDefaults('NIFTY').lots, 1, 'before: the built-in default')
+  await refreshTradeSettings()
+  const n = loadTradeDefaults('NIFTY')
+  assert.deepEqual({ lots: n.lots, sl: n.sl, target: n.target, trailStart: n.trailStart, trailGap: n.trailGap, slippage: n.slippage, scannerEnabled: n.scannerEnabled, autoTrade: n.autoTrade },
+    { lots: 4, sl: 15, target: 25, trailStart: 10, trailGap: 5, slippage: 1.5, scannerEnabled: false, autoTrade: 'buy' })
+  assert.deepEqual(loadTradeLevels('scanner', 'NIFTY'), { sl: 15, target: 25, trailStart: 10, trailGap: 5 })
+  assert.equal(loadTradeDefaults('SENSEX').sl, defaultTradeLevels('SENSEX').sl, 'an index the server did not send keeps its defaults')
+})
+
+test('a change is saved on the server as the whole row, once the typing stops', async () => {
+  saveTradeDefaults('NIFTY', { lots: 6 })
+  saveTradeDefaults('NIFTY', { lots: 7 })
+  assert.equal(loadTradeDefaults('NIFTY').lots, 7, 'the browser has it at once')
+  await new Promise((r) => setTimeout(r, 900))
+  const puts = calls.filter((c) => c.method === 'PUT')
+  assert.equal(puts.length, 1, 'one save for the burst')
+  assert.equal(puts[0].url, '/api/trade-settings/NIFTY')
+  assert.deepEqual(JSON.parse(puts[0].body), { underlying: 'NIFTY', lots: 7, slPoints: 15, targetPoints: 25, trailStart: 10, trailGap: 5, slippagePoints: 1.5, scannerEnabled: false, autoTrade: 'buy' })
+})

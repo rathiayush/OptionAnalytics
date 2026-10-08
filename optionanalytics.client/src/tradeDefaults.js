@@ -1,8 +1,10 @@
-// Default option stop-loss / target (premium points) per underlying, for the OI Replay trade panel and the
-// Order Flow strategy scanner. Premiums scale with the index: a BANKNIFTY ATM option moves ~2.5x a NIFTY
-// one, SENSEX ~3x - one flat number is too tight on one and too loose on the other. A trade always starts
-// with BOTH set (a live order is a Dhan super order, which needs both legs); what the trader sets is kept
-// per underlying in this browser.
+// The trade settings per index - the option stop-loss / target (premium points) and trailing stop, the
+// default lots and live slippage, and whether the server scanner trades the index - for the OI Replay trade
+// panel, the Order Flow strategy scanner and the Trade settings page. Premiums scale with the index: a
+// BANKNIFTY ATM option moves ~2.5x a NIFTY one, SENSEX ~3x - one flat number is too tight on one and too
+// loose on the other. A trade always starts with BOTH SL and target set (a live order is a Dhan super order,
+// which needs both legs). The master copy is the server's trade-settings.csv (TradeSettingsStore); this
+// browser keeps a copy, so a page reads it at once and works offline.
 
 export const DEFAULT_TRADE_LEVELS = {
   NIFTY: { sl: 20, target: 30 },
@@ -46,16 +48,82 @@ export function loadTradeLevels(_page, underlying) {
   return { sl: num(saved?.sl, d.sl), target: num(saved?.target, d.target), trailStart: num(saved?.trailStart, 0), trailGap: num(saved?.trailGap, 0) }
 }
 
-/** Remembers `levels` for `underlying` (this browser), and tells every other page / tab that has the
- *  app open so they pick it up straight away. */
+// Everything else kept per index with the levels: the default lots and live slippage, whether the server
+// scanner runs it and what an alert trades there ('sell' / 'buy' the option, or 'off').
+export const DEFAULT_LOTS = 1
+export const DEFAULT_SLIPPAGE = 2
+
+/** One index's full trade settings: its levels plus lots, slippage, scanner on/off and auto trade. */
+export function loadTradeDefaults(underlying) {
+  const saved = readAll()[String(underlying ?? '').toUpperCase()] ?? {}
+  const num = (v, fallback) => (Number.isFinite(v) ? v : fallback)
+  return {
+    ...loadTradeLevels('settings', underlying),
+    lots: Math.max(1, num(saved.lots, DEFAULT_LOTS)), slippage: num(saved.slippage, DEFAULT_SLIPPAGE),
+    scannerEnabled: saved.scannerEnabled !== false, autoTrade: ['sell', 'buy', 'off'].includes(saved.autoTrade) ? saved.autoTrade : 'sell',
+  }
+}
+
+/** Remembers `levels` for `underlying` (this browser), tells every other page / tab that has the app open
+ *  so they pick it up straight away, and saves them on the server (trade-settings.csv - for every device
+ *  and the server scanner; an admin's change only). */
 export function saveTradeLevels(_page, underlying, levels) {
+  const key = String(underlying ?? '').toUpperCase()
   try {
     const all = readAll()
-    const key = String(underlying ?? '').toUpperCase()
     all[key] = { ...all[key], ...levels }
     localStorage.setItem(KEY, JSON.stringify(all))
   } catch { /* convenience only */ }
   try { globalThis.dispatchEvent?.(new Event(TRADE_LEVELS_EVENT)) } catch { /* no window */ }
+  sendToServer(key)
+}
+
+/** The same for lots / slippage / scanner on-off / auto trade (any of them, with or without levels). */
+export const saveTradeDefaults = (underlying, patch) => saveTradeLevels('settings', underlying, patch)
+
+// ---- The server copy (GET / PUT /api/trade-settings) ------------------------------------------------
+
+const toServer = (underlying, d) => ({
+  underlying, lots: d.lots, slPoints: d.sl, targetPoints: d.target, trailStart: d.trailStart, trailGap: d.trailGap,
+  slippagePoints: d.slippage, scannerEnabled: d.scannerEnabled, autoTrade: d.autoTrade,
+})
+const fromServer = (row) => ({
+  sl: row.slPoints, target: row.targetPoints, trailStart: row.trailStart, trailGap: row.trailGap, lots: row.lots,
+  slippage: row.slippagePoints, scannerEnabled: row.scannerEnabled, autoTrade: row.autoTrade,
+})
+
+const pending = new Map()
+function sendToServer(key) {
+  if (typeof globalThis.fetch !== 'function' || !['NIFTY', 'BANKNIFTY', 'SENSEX'].includes(key)) return
+  clearTimeout(pending.get(key))
+  // Typing 1, 15, 150 in a box is one save, not three.
+  pending.set(key, setTimeout(() => {
+    pending.delete(key)
+    globalThis.fetch(`/api/trade-settings/${key}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(toServer(key, loadTradeDefaults(key))) })
+      .catch(() => { /* kept in this browser; saved again on the next change */ })
+  }, 800))
+}
+
+/** Loads the server's trade settings into this browser (every page then reads them) - on sign-in and
+ *  when the tab comes back. Returns the rows, or null when the server could not be read. */
+export async function refreshTradeSettings() {
+  if (typeof globalThis.fetch !== 'function') return null
+  try {
+    const res = await globalThis.fetch('/api/trade-settings')
+    if (!res.ok) return null
+    const body = await res.json()
+    const all = readAll()
+    for (const row of body?.settings ?? []) {
+      // A box being typed into right now keeps what is being typed.
+      if (pending.has(row.underlying)) continue
+      all[row.underlying] = { ...all[row.underlying], ...fromServer(row) }
+    }
+    localStorage.setItem(KEY, JSON.stringify(all))
+    try { globalThis.dispatchEvent?.(new Event(TRADE_LEVELS_EVENT)) } catch { /* no window */ }
+    return body.settings
+  } catch {
+    return null
+  }
 }
 
 /** Calls `onChange()` whenever the levels are saved - on this page or in another tab. Returns the unsubscribe. */

@@ -3,7 +3,7 @@ import dayjs from 'dayjs'
 import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicker, TimePicker, Alert, Empty, Tooltip, Popconfirm, Slider, Tag, InputNumber, Switch, Table, Segmented, Checkbox, Modal, Steps, message, notification } from 'antd'
 import { findSuddenWalls, suddenWallText } from './suddenOi.js'
 import { chime, speak } from './alerts.js'
-import { buildOiTotalsRows } from './oiTotalsHeatmap.js'
+import { buildOiTotalsRows, oiTotalsTrend } from './oiTotalsHeatmap.js'
 import { PlayCircleOutlined, PauseCircleOutlined, ReloadOutlined, SoundOutlined, ExportOutlined } from '@ant-design/icons'
 import { createSeriesMarkers, CandlestickSeries, LineSeries, HistogramSeries, CrosshairMode } from 'lightweight-charts'
 import { createZoomableChart } from './chartZoom.js'
@@ -17,7 +17,7 @@ import {
 } from './shared.jsx'
 import { alignToBars, chartVwap, sessionVwapFromBars } from './chartVwap.js'
 import { notifyLiveTradeEvents, notifyTrade } from './tradeNotify.js'
-import { loadTradeLevels, saveTradeLevels, subscribeTradeLevels } from './tradeDefaults.js'
+import { loadTradeLevels, saveTradeLevels, subscribeTradeLevels, loadTradeDefaults, saveTradeDefaults } from './tradeDefaults.js'
 import { PREV_PROFILE } from './profileColors.js'
 import { optionTrailLevel, tighterStop } from './optionTrail.js'
 import { PremiumEmaChart, DraggableFloatingPanel, useFitContentAsDataGrows, useChartUserControl, CANDLE_SCALE_MARGINS } from './oiShared.jsx'
@@ -1142,6 +1142,10 @@ function StrikeOiDrilldownChart({ ceSeries, peSeries, mode, dayKey, height = 320
 // worst-pair ΔE 26.8 protan / 31.8 normal-vision, both clear of the dataviz method's 8/15 targets.
 const OI_ADDED_COLOR = '#3987e5'
 const OI_REMOVED_COLOR = '#d95926'
+// The OI totals (CE / PE / net, delta and cumulative): a bucket in which the series DECLINED is orange,
+// one in which it rose is OI_ADDED_COLOR - so a cumulative that is still positive but falling shows.
+const OI_DECLINED_COLOR = '#fa8c16'
+const OI_DECLINED_TINT = 'rgba(250, 140, 22, 0.2)'
 
 // One color, opacity-scaled by magnitude, per pole - the diverging encoding: OI_ADDED_COLOR at low
 // alpha for a small change, ramping toward full alpha at the grid's own typical-large |change| (see
@@ -1442,8 +1446,10 @@ function OiTotalsNumbers({ ceByStrike, peByStrike, strikes, asOfMs, timeframeMin
   }, [ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes, windowMinutes])
   const columns = useMemo(() => [...buckets].reverse(), [buckets])
   if (buckets.length === 0) return <Empty description="No OI data yet." />
-  const colour = (v) => (!v ? AXIS_COLOR : v > 0 ? OI_ADDED_COLOR : OI_REMOVED_COLOR)
-  const head = { position: 'sticky', top: 0, background: '#161a22', color: AXIS_COLOR, fontWeight: 400, padding: '3px 8px', textAlign: 'right', whiteSpace: 'nowrap', fontSize: 11 }
+  // Coloured by what the series did in that bucket: rose (blue), DECLINED (orange, on an orange tint) or
+  // unchanged (grey) - the figure itself keeps its sign.
+  const colour = (trend) => (trend > 0 ? OI_ADDED_COLOR : trend < 0 ? OI_DECLINED_COLOR : AXIS_COLOR)
+  const head ={ position: 'sticky', top: 0, background: '#161a22', color: AXIS_COLOR, fontWeight: 400, padding: '3px 8px', textAlign: 'right', whiteSpace: 'nowrap', fontSize: 11 }
   const sticky = { position: 'sticky', left: 0, background: '#161a22', padding: '3px 8px', whiteSpace: 'nowrap', textAlign: 'left', zIndex: 1 }
   return (
     <div style={{ overflowX: 'auto', border: `1px solid ${BORDER_COLOR}`, borderRadius: 4 }} aria-label="OI totals as numbers">
@@ -1460,9 +1466,11 @@ function OiTotalsNumbers({ ceByStrike, peByStrike, strikes, asOfMs, timeframeMin
               <td style={{ ...sticky, color: r.cum ? AXIS_COLOR : '#e6e6e6', fontWeight: r.cum ? 400 : 700 }}>{r.label}</td>
               {columns.map((t, i) => {
                 const v = rows[r.key].get(t)
+                const trend = oiTotalsTrend(rows, r.key, t)
                 return (
-                  <td key={t} title={v == null ? undefined : `${r.label}: ${Math.round(v).toLocaleString('en-IN')}`}
-                    style={{ padding: '3px 8px', textAlign: 'right', color: colour(v), fontWeight: r.cum ? 400 : 600, outline: i === 0 && live ? '1px solid rgba(255,255,255,0.4)' : undefined, outlineOffset: -1 }}>
+                  <td key={t} data-declined={trend < 0 ? 'true' : undefined}
+                    title={v == null ? undefined : `${r.label}: ${Math.round(v).toLocaleString('en-IN')}${trend < 0 ? ' - declined' : ''}`}
+                    style={{ padding: '3px 8px', textAlign: 'right', color: colour(trend), background: trend < 0 ? OI_DECLINED_TINT : undefined, fontWeight: r.cum ? 400 : 600, outline: i === 0 && live ? '1px solid rgba(255,255,255,0.4)' : undefined, outlineOffset: -1 }}>
                     {fmtOiNum(v)}
                   </td>
                 )
@@ -1471,6 +1479,10 @@ function OiTotalsNumbers({ ceByStrike, peByStrike, strikes, asOfMs, timeframeMin
           ))}
         </tbody>
       </table>
+      <div style={{ padding: '3px 8px', fontSize: 11, color: AXIS_COLOR }}>
+        <span style={{ color: OI_DECLINED_COLOR, background: OI_DECLINED_TINT, padding: '0 4px' }}>orange</span> = CE / PE / net declined in that column
+        (a cumulative falling, even while still positive) · <span style={{ color: OI_ADDED_COLOR }}>blue</span> = rose
+      </div>
     </div>
   )
 }
@@ -1516,9 +1528,11 @@ function OiTotalsHeatmap({ ceByStrike, peByStrike, strikes, asOfMs, timeframeMin
       const y = rowY(i)
       columns.forEach((t, col) => {
         const v = rows[r.key].get(t)
-        if (v == null || v === 0 || scales[r.key] === 0) return
+        const trend = oiTotalsTrend(rows, r.key, t)
+        if (v == null || v === 0 || trend === 0 || scales[r.key] === 0) return
+        // Colour = what the series did in this bucket (declined = orange), strength = the row's value.
         const alpha = HEATMAP_MIN_ALPHA + Math.min(1, Math.abs(v) / scales[r.key]) * (HEATMAP_MAX_ALPHA - HEATMAP_MIN_ALPHA)
-        ctx.fillStyle = hexToRgba(v > 0 ? OI_ADDED_COLOR : OI_REMOVED_COLOR, alpha)
+        ctx.fillStyle = hexToRgba(trend > 0 ? OI_ADDED_COLOR : OI_DECLINED_COLOR, alpha)
         ctx.fillRect(col * HEATMAP_CELL_WIDTH, y, HEATMAP_CELL_WIDTH - 1, OI_TOTALS_ROW_HEIGHT - 1)
       })
     })
@@ -1559,8 +1573,9 @@ function OiTotalsHeatmap({ ceByStrike, peByStrike, strikes, asOfMs, timeframeMin
     const index = OI_TOTALS_ROWS.findIndex((_, i) => y >= rowY(i) && y < rowY(i) + OI_TOTALS_ROW_HEIGHT)
     if (col < 0 || col >= columns.length || index < 0) { setHover(null); return }
     const r = OI_TOTALS_ROWS[index]
-    setHover({ clientX: e.clientX, clientY: e.clientY, label: r.label, time: columns[col], value: rows[r.key].get(columns[col]) })
+    setHover({ clientX: e.clientX, clientY: e.clientY, label: r.label, time: columns[col], value: rows[r.key].get(columns[col]), trend: oiTotalsTrend(rows, r.key, columns[col]) })
   }
+  const trendColour = (trend) => (trend > 0 ? OI_ADDED_COLOR : trend < 0 ? OI_DECLINED_COLOR : AXIS_COLOR)
 
   if (buckets.length === 0) return <Empty description="No OI data yet." />
 
@@ -1580,7 +1595,7 @@ function OiTotalsHeatmap({ ceByStrike, peByStrike, strikes, asOfMs, timeframeMin
               }}
             >
               <span>{r.label}</span>
-              <span style={{ color: !v ? AXIS_COLOR : v > 0 ? OI_ADDED_COLOR : OI_REMOVED_COLOR }}>{v == null ? '—' : formatOiMillions(v, { signed: true })}</span>
+              <span style={{ color: trendColour(columns.length ? oiTotalsTrend(rows, r.key, columns[0]) : 0) }}>{v == null ? '—' : formatOiMillions(v, { signed: true })}</span>
             </div>
           )
         })}
@@ -1602,8 +1617,8 @@ function OiTotalsHeatmap({ ceByStrike, peByStrike, strikes, asOfMs, timeframeMin
           }}
         >
           {hover.label} @ {formatBucketTime(hover.time)}:{' '}
-          <Text strong style={{ color: !hover.value ? '#fff' : hover.value > 0 ? OI_ADDED_COLOR : OI_REMOVED_COLOR }}>
-            {hover.value == null ? '—' : formatOiMillions(hover.value, { signed: true })}
+          <Text strong style={{ color: hover.trend ? trendColour(hover.trend) : '#fff' }}>
+            {hover.value == null ? '—' : formatOiMillions(hover.value, { signed: true })}{hover.trend < 0 ? ' · declined' : ''}
           </Text>
         </div>
       )}
@@ -2202,6 +2217,7 @@ function PaperTradePanel({
           )}
         </Space>
         {isLiveMode && liveBlockReason && <Text type="warning" style={{ fontSize: 12 }}>{liveBlockReason}</Text>}
+        <Text type="secondary" style={{ fontSize: 11 }}>Keyboard: B or F1 buy · S or F2 sell - a quick ticket (Lots → SL → Target → Place)</Text>
         {isLiveMode && liveContent}
         {!isLiveMode && positions.length > 0 && (
           <>
@@ -2569,6 +2585,76 @@ function biasColor(bias) {
   return bias === 'Bullish' ? 'success' : bias === 'Bearish' ? 'error' : 'default'
 }
 
+// ---- Keyboard order ticket ----------------------------------------------------------------------------
+// Opened with B / F1 (buy) or S / F2 (sell). The cursor starts in Lots; Enter (or Tab) moves to Stop-loss,
+// Target and Place order; Esc closes. C / P switch the option and the arrow keys its strike - only before
+// the cursor is in a box. Values start from the panel (the index's trade settings).
+function OrderTicket({ ticket, onClose, onPlace, underlying, atmStrike, step, live, initial, premiumOf, slippage, blockReason }) {
+  const [side, setSide] = useState(initial.side)
+  const [offset, setOffset] = useState(initial.offset)
+  const [lots, setLots] = useState(initial.lots)
+  const [sl, setSl] = useState(initial.sl)
+  const [target, setTarget] = useState(initial.target)
+  const lotsRef = useRef(null)
+  const slRef = useRef(null)
+  const targetRef = useRef(null)
+  const placeRef = useRef(null)
+  const direction = ticket.direction
+  const strike = atmStrike != null ? atmStrike + offset * step : null
+  const premium = premiumOf(side, strike)
+  const problem = strike == null ? 'Waiting for the ATM strike.'
+    : premium == null ? `No ${side} premium at ${strike} yet.`
+      : !(lots >= 1) ? 'Enter the lots.'
+        : live && (!(sl > 0) || !(target > 0)) ? 'A live order is a super order - set both stop-loss and target.'
+          : live && target <= slippage ? 'Target must be further than the slippage.'
+            : live ? blockReason : null
+  useEffect(() => {
+    const id = setTimeout(() => { lotsRef.current?.focus(); lotsRef.current?.select?.() }, 50)
+    return () => clearTimeout(id)
+  }, [])
+  // Enter moves on: Lots -> Stop-loss -> Target -> Place order.
+  const enterTo = (e, field) => {
+    if (e.key !== 'Enter') return
+    e.preventDefault()
+    const el = { sl: slRef, target: targetRef, place: placeRef }[field]?.current
+    el?.focus()
+    el?.select?.()
+  }
+  const place = () => { if (!problem) onPlace({ direction, side, offset, strike, lots, sl, target }) }
+  const sideKeys = (e) => {
+    if (e.target?.tagName === 'INPUT') return
+    if (e.key === 'c' || e.key === 'C') setSide('CE')
+    else if (e.key === 'p' || e.key === 'P') setSide('PE')
+    else if (e.key === 'ArrowUp') setOffset((o) => o + 1)
+    else if (e.key === 'ArrowDown') setOffset((o) => o - 1)
+  }
+  const buy = direction === 'BUY'
+  return (
+    <Modal
+      open onCancel={onClose} footer={null} width={420} destroyOnClose keyboard
+      title={<Space size={6}><Tag color={buy ? 'success' : 'error'} style={{ fontSize: 13 }}>{direction}</Tag><span>{underlying} {strike ?? '-'} {side}</span>{live ? <Tag color="error">LIVE</Tag> : <Tag>paper</Tag>}</Space>}
+    >
+      <div onKeyDown={sideKeys} tabIndex={-1} style={{ outline: 'none' }}>
+        <Space direction="vertical" size={10} style={{ width: '100%' }}>
+          <Space wrap size={8}>
+            <Segmented size="small" value={side} onChange={setSide} options={[{ value: 'CE', label: 'CE' }, { value: 'PE', label: 'PE' }]} />
+            <StrikePicker atmStrike={atmStrike} step={step} side={side} offset={offset} onChange={setOffset} size="small" />
+            <Text type="secondary" style={{ fontSize: 12 }}>LTP {premium != null ? premium.toFixed(1) : '-'}</Text>
+          </Space>
+          <InputNumber ref={lotsRef} value={lots} onChange={(v) => setLots(v ?? 1)} min={1} step={1} style={{ width: '100%' }} addonBefore="Lots" onKeyDown={(e) => enterTo(e, 'sl')} aria-label="Ticket lots" />
+          <InputNumber ref={slRef} value={sl} onChange={(v) => setSl(v ?? 0)} min={0} step={5} style={{ width: '100%' }} addonBefore="Stop-loss" addonAfter="pts" onKeyDown={(e) => enterTo(e, 'target')} aria-label="Ticket stop-loss" />
+          <InputNumber ref={targetRef} value={target} onChange={(v) => setTarget(v ?? 0)} min={0} step={5} style={{ width: '100%' }} addonBefore="Target" addonAfter="pts" onKeyDown={(e) => enterTo(e, 'place')} aria-label="Ticket target" />
+          {problem && <Text type="warning" style={{ fontSize: 12 }}>{problem}</Text>}
+          <Button ref={placeRef} type="primary" danger={!buy} block disabled={Boolean(problem)} onClick={place} aria-label="Place order">
+            {live ? 'Place LIVE order' : 'Place paper order'} · {direction} {lots} lot{lots === 1 ? '' : 's'} {strike ?? ''} {side}{premium != null ? ` @ ~${premium.toFixed(1)}` : ''}
+          </Button>
+          <Text type="secondary" style={{ fontSize: 11 }}>Enter / Tab: next box · C / P: CE / PE · ↑ ↓: strike · Esc: close{live ? ` · limit at the ${buy ? 'ask +' : 'bid -'} ${slippage} pts` : ''}</Text>
+        </Space>
+      </div>
+    </Modal>
+  )
+}
+
 // ---- Pre-trade review ------------------------------------------------------------------------
 // Every Buy / Sell opens this first, so a trade is placed after looking at the picture and not on impulse:
 // total CE / PE OI, the change since the open, the last 15-25 minutes of OI change as a heatmap, the spot
@@ -2927,7 +3013,9 @@ export default function OiReplayPage() {
   const [paperSide, setPaperSide] = useState('CE')
   const [paperDirection, setPaperDirection] = useState('BUY')
   const [paperStrikeOffset, setPaperStrikeOffset] = useState(0)
-  const [paperQtyLots, setPaperQtyLots] = useState(10)
+  // Lots and the live slippage are per index too (Trade settings - trade-settings.csv on the server).
+  const [paperQtyLots, setPaperQtyLotsState] = useState(() => loadTradeDefaults(underlying).lots)
+  const setPaperQtyLots = (v) => { setPaperQtyLotsState(v); if (v >= 1) saveTradeDefaults(underlying, { lots: v }) }
   // Auto stop-loss/target, in premium points - on by default with each underlying's own levels
   // (tradeDefaults.js: NIFTY 20/30, BANKNIFTY 50/75, SENSEX 60/90), what the trader sets kept per
   // underlying in this browser. 0/blank disables either one (see the effect that reads these below).
@@ -2948,13 +3036,19 @@ export default function OiReplayPage() {
     setPaperTrailGapState(levels.trailGap)
   }, [underlying])
   // The levels are one global setting per underlying: a change made on another page / tab lands here too.
-  useEffect(() => subscribeTradeLevels(() => {
-    const levels = loadTradeLevels('oiReplay', underlying)
-    setPaperSlPointsState(levels.sl)
-    setPaperTargetPointsState(levels.target)
-    setPaperTrailStartState(levels.trailStart)
-    setPaperTrailGapState(levels.trailGap)
-  }), [underlying])
+  useEffect(() => {
+    const readAll = () => {
+      const d = loadTradeDefaults(underlying)
+      setPaperSlPointsState(d.sl)
+      setPaperTargetPointsState(d.target)
+      setPaperTrailStartState(d.trailStart)
+      setPaperTrailGapState(d.trailGap)
+      setPaperQtyLotsState(d.lots)
+      setLiveSlippageState(d.slippage)
+    }
+    readAll()
+    return subscribeTradeLevels(readAll)
+  }, [underlying])
   const setPaperTrailStart = (v) => { setPaperTrailStartState(v); saveTradeLevels('oiReplay', underlying, { trailStart: v }) }
   const setPaperTrailGap = (v) => { setPaperTrailGapState(v); saveTradeLevels('oiReplay', underlying, { trailGap: v }) }
   const setPaperSlPoints = (v) => { setPaperSlPointsState(v); saveTradeLevels('oiReplay', underlying, { sl: v, target: paperTargetPoints }) }
@@ -2986,7 +3080,8 @@ export default function OiReplayPage() {
   const auth = useAuth()
   const isAdmin = auth?.user?.role === 'Admin'
   const [tradeMode, setTradeMode] = useState('paper')
-  const [liveSlippage, setLiveSlippage] = usePersistedState('optionanalytics.oiReplay.liveSlippage', 1)
+  const [liveSlippage, setLiveSlippageState] = useState(() => loadTradeDefaults(underlying).slippage)
+  const setLiveSlippage = (v) => { setLiveSlippageState(v); if (v >= 0) saveTradeDefaults(underlying, { slippage: v }) }
   const [livePositions, setLivePositions] = useState(null)
   // Every live positions snapshot (pushed, or read after an action) carries the day's trade events -
   // entry filled, stop-loss / target hit, exit filled, rejected - each notified once.
@@ -3799,16 +3894,28 @@ export default function OiReplayPage() {
 
   // Paper trades are announced like real ones (Telegram only on today's live view, never a replay).
   const paperTradeText = (p, price) => `${p.direction} ${underlying} ${p.strike} ${p.side} x${p.qtyLots} lot${p.qtyLots === 1 ? '' : 's'} @ ${Number(price).toFixed(1)}`
-  const handlePaperPunch = () => {
-    if (paperStrike == null || paperEntryPreview?.price == null) return
-    const text = paperTradeText({ direction: paperDirection, strike: paperStrike, side: paperSide, qtyLots: paperQtyLots }, paperEntryPreview.price)
-    notifyTrade({ kind: 'entry', title: 'Paper order punched', text: `${text}${paperSlPoints > 0 ? ` · SL ${paperSlPoints} pts` : ''}${paperTargetPoints > 0 ? ` · target ${paperTargetPoints} pts` : ''}`,
+  // `overrides` (the keyboard ticket): { direction, side, strike, lots, slPts, targetPts } for this one order;
+  // anything not given is the panel's. A button's click event is not overrides.
+  const tradeOf = (overrides) => {
+    const o = overrides && !overrides.nativeEvent ? overrides : {}
+    return {
+      direction: o.direction ?? paperDirection, side: o.side ?? paperSide, strike: o.strike ?? paperStrike, lots: o.lots ?? paperQtyLots,
+      sl: o.slPts ?? paperSlPoints, target: o.targetPts ?? paperTargetPoints,
+    }
+  }
+  const premiumOf = (side, strike) => (strike == null || asOfMs == null ? null : latestAtOrBefore((side === 'CE' ? ceByStrike : peByStrike).get(strike) ?? [], asOfMs)?.price ?? null)
+  const handlePaperPunch = (overrides) => {
+    const t = tradeOf(overrides)
+    const entryPrice = premiumOf(t.side, t.strike)
+    if (t.strike == null || entryPrice == null) return
+    const text = paperTradeText({ direction: t.direction, strike: t.strike, side: t.side, qtyLots: t.lots }, entryPrice)
+    notifyTrade({ kind: 'entry', title: 'Paper order punched', text: `${text}${t.sl > 0 ? ` · SL ${t.sl} pts` : ''}${t.target > 0 ? ` · target ${t.target} pts` : ''}`,
       telegramText: isLive ? `Paper ${text}` : null })
     setPaperPositions((prev) => [...prev, {
       id: `${Date.now()}-${Math.random()}`,
-      side: paperSide, direction: paperDirection, strike: paperStrike, qtyLots: paperQtyLots,
+      side: t.side, direction: t.direction, strike: t.strike, qtyLots: t.lots,
       lotSize: PAPER_TRADE_LOT_SIZE[underlying] ?? 1,
-      entryPrice: paperEntryPreview.price, entryTime: asOfMs, status: 'OPEN', exitPrice: null, exitReason: null,
+      entryPrice, entryTime: asOfMs, status: 'OPEN', exitPrice: null, exitReason: null,
     }])
   }
 
@@ -3893,17 +4000,52 @@ export default function OiReplayPage() {
     }
   }
 
-  const handleLivePunch = () => runLiveAction(() => liveTradingApi.place({
-    underlying, expiry: liveExpiryDate, strike: paperStrike, side: paperSide, direction: paperDirection,
-    lots: paperQtyLots, slippagePoints: liveSlippage, stopLossPoints: paperSlPoints, targetPoints: paperTargetPoints,
-    trailStartPoints: paperTrailGap > 0 ? paperTrailStart ?? 0 : 0, trailGapPoints: paperTrailGap ?? 0,
-  }), { title: 'LIVE order placed' })
+  const handleLivePunch = (overrides) => {
+    const t = tradeOf(overrides)
+    return runLiveAction(() => liveTradingApi.place({
+      underlying, expiry: liveExpiryDate, strike: t.strike, side: t.side, direction: t.direction,
+      lots: t.lots, slippagePoints: liveSlippage, stopLossPoints: t.sl, targetPoints: t.target,
+      trailStartPoints: paperTrailGap > 0 ? paperTrailStart ?? 0 : 0, trailGapPoints: paperTrailGap ?? 0,
+    }), { title: 'LIVE order placed' })
+  }
+
   // Buy / Sell open the pre-trade review first; its last step places the order.
   const [reviewOpen, setReviewOpen] = useState(false)
+  const reviewOpenRef = useRef(false)
+  reviewOpenRef.current = reviewOpen
   const handleReviewPlace = () => {
     setReviewOpen(false)
     if (liveTradeActive) handleLivePunch()
     else handlePaperPunch()
+  }
+  // ---- Keyboard order ticket - like a broker terminal: B or F1 buys, S or F2 sells (not while typing in a
+  // box). It opens on Lots; Enter (or Tab) goes on to SL, Target and Place order; Esc closes it. The order goes
+  // straight out from the ticket - paper, or LIVE when the panel is in Live mode.
+  const [ticket, setTicket] = useState(null)
+  const ticketBlockedRef = useRef(false)
+  ticketBlockedRef.current = Boolean(ticket) || reviewOpenRef.current
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.ctrlKey || e.metaKey || e.altKey || ticketBlockedRef.current) return
+      const el = e.target
+      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable)) return
+      const direction = e.key === 'F1' || e.key === 'b' || e.key === 'B' ? 'BUY' : e.key === 'F2' || e.key === 's' || e.key === 'S' ? 'SELL' : null
+      if (!direction) return
+      e.preventDefault()
+      setTicket({ direction })
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+  const placeFromTicket = (values) => {
+    setTicket(null)
+    // The panel shows what was just traded.
+    setPaperDirection(values.direction)
+    setPaperSide(values.side)
+    setPaperStrikeOffset(values.offset)
+    const overrides = { direction: values.direction, side: values.side, strike: values.strike, lots: values.lots, slPts: values.sl, targetPts: values.target }
+    if (liveTradeActive) handleLivePunch(overrides)
+    else handlePaperPunch(overrides)
   }
   const handleLiveClose = (securityId) => runLiveAction(() => liveTradingApi.close(securityId, liveSlippage), { title: 'LIVE close sent' })
   const handleLiveProtect = (securityId, stopLossPrice, targetPrice) => runLiveAction(() => liveTradingApi.protect(securityId, stopLossPrice, targetPrice, liveSlippage))
@@ -4950,7 +5092,7 @@ export default function OiReplayPage() {
                   <div>
                     <Segmented size="small" value={totalsView} onChange={setTotalsView} options={[{ value: 'numbers', label: 'Numbers' }, { value: 'heatmap', label: 'Heatmap' }]} style={{ marginBottom: 6 }} aria-label="Totals as numbers or heatmap" />
                     <br />
-                    <Tooltip title="Whole band summed per bucket. Δ = OI added (blue) or removed (orange) in that bucket; cumulative = running total since the first bucket. Net = CE − PE: blue means CE OI grew more than PE (call-heavy), orange means PE grew more (put-heavy).">
+                    <Tooltip title="Whole band summed per bucket. Δ = OI added or removed in that bucket; cumulative = running total since the first bucket; Net = CE − PE. Orange = that row DECLINED in the bucket (OI removed, or a cumulative / net falling - even while it is still positive); blue = it rose.">
                       <Text strong style={{ fontSize: 12 }}>Totals: CE, PE and Net (CE − PE) — Δ and cumulative Δ</Text>
                     </Tooltip>
                     {totalsView === 'numbers'
@@ -5379,6 +5521,14 @@ export default function OiReplayPage() {
           panel keeps its own open/position/size state, so opening or closing one never touches
           another. */}
       <DomDrawer open={domOpen} onClose={() => setDomOpen(false)} underlying={underlying} />
+      {ticket && (
+        <OrderTicket
+          ticket={ticket} onClose={() => setTicket(null)} onPlace={placeFromTicket} underlying={underlying} atmStrike={atmStrike} step={step}
+          live={liveTradeActive} premiumOf={premiumOf} slippage={liveSlippage}
+          blockReason={liveExpiryDate == null ? 'Waiting for the listed expiries.' : null}
+          initial={{ side: paperSide, offset: paperStrikeOffset, lots: paperQtyLots, sl: paperSlPoints, target: paperTargetPoints }}
+        />
+      )}
       {reviewOpen && (
         <PreTradeReview
           open={reviewOpen} onCancel={() => setReviewOpen(false)} onPlace={handleReviewPlace}

@@ -5,7 +5,7 @@ import { UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import { liveTradingApi } from './LiveTrading.jsx'
 import { chime, speak, telegram, unlockAudio } from './alerts.js'
 import { notifyLiveTradeEvents, notifyTrade } from './tradeNotify.js'
-import { loadTradeLevels, saveTradeLevels, subscribeTradeLevels } from './tradeDefaults.js'
+import { loadTradeLevels, saveTradeLevels, subscribeTradeLevels, loadTradeDefaults, saveTradeDefaults } from './tradeDefaults.js'
 import { syncServerScanner } from './ServerScanner.jsx'
 import { suddenWallText } from './suddenOi.js'
 import { adaptiveStats } from './dayRegime.js'
@@ -100,16 +100,17 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     if (!saved.autoPaperSellDefault) Object.assign(saved, { autoPaper: 'sell', autoPaperSellDefault: true })
     // The option Max SL / Target are per underlying (tradeDefaults.js - BANKNIFTY's premiums move ~2.5x
     // NIFTY's): this underlying's saved levels, else its defaults.
-    const levels = loadTradeLevels('scanner', underlying)
-    Object.assign(saved, { paperSl: levels.sl, paperTarget: levels.target, paperTrailStart: levels.trailStart, paperTrailGap: levels.trailGap })
+    const levels = loadTradeDefaults(underlying)
+    // ...and so are the lots and the live slippage (Trade settings).
+    Object.assign(saved, { paperSl: levels.sl, paperTarget: levels.target, paperTrailStart: levels.trailStart, paperTrailGap: levels.trailGap, paperLots: levels.lots, liveSlippage: levels.slippage })
     return saved.pick === 'top5' ? { ...saved, pick: 'top15' } : saved
   })
   useEffect(() => writeJson(SETTINGS_KEY, settings), [settings])
   // Another underlying: its own Max SL / Target (open trades keep the levels they have).
   useEffect(() => {
-    const levels = loadTradeLevels('scanner', underlying)
-    setSettings((s) => (s.paperSl === levels.sl && s.paperTarget === levels.target && s.paperTrailStart === levels.trailStart && s.paperTrailGap === levels.trailGap
-      ? s : { ...s, paperSl: levels.sl, paperTarget: levels.target, paperTrailStart: levels.trailStart, paperTrailGap: levels.trailGap }))
+    const levels = loadTradeDefaults(underlying)
+    setSettings((s) => (s.paperSl === levels.sl && s.paperTarget === levels.target && s.paperTrailStart === levels.trailStart && s.paperTrailGap === levels.trailGap && s.paperLots === levels.lots && s.liveSlippage === levels.slippage
+      ? s : { ...s, paperSl: levels.sl, paperTarget: levels.target, paperTrailStart: levels.trailStart, paperTrailGap: levels.trailGap, paperLots: levels.lots, liveSlippage: levels.slippage }))
   }, [underlying])
   const [history, setHistory] = useState(() => readJson(HISTORY_KEY, {}))
   const [fired, setFired] = useState([])
@@ -743,6 +744,9 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   useEffect(() => subscribeTradeLevels(() => {
     const levels = loadTradeLevels('scanner', underlying)
     const cur = settingsRef.current
+    // Lots / slippage changed elsewhere (Trade settings, the OI Replay panel): taken as they are.
+    const d = loadTradeDefaults(underlying)
+    if (cur.paperLots !== d.lots || cur.liveSlippage !== d.slippage) setSettings((s) => ({ ...s, paperLots: d.lots, liveSlippage: d.slippage }))
     if (cur.paperSl === levels.sl && cur.paperTarget === levels.target && (cur.paperTrailStart ?? 0) === levels.trailStart && (cur.paperTrailGap ?? 0) === levels.trailGap) return
     changeLimitsRef.current?.({ paperSl: levels.sl, paperTarget: levels.target, paperTrailStart: levels.trailStart, paperTrailGap: levels.trailGap })
   }), [underlying])
@@ -1015,7 +1019,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                     options={STRIKE_CHOICES} />
                 </Tooltip>
                 <InputNumber size="small" min={1} max={100} style={{ width: 64 }} value={settings.paperLots ?? 1} aria-label="Paper lots"
-                  onChange={(v) => v != null && setSettings((s) => ({ ...s, paperLots: v }))} />
+                  onChange={(v) => { if (v != null) { setSettings((s) => ({ ...s, paperLots: v })); saveTradeDefaults(underlying, { lots: v }) } }} />
                 <Text style={{ fontSize: 12 }}>lot(s) × {PAPER_TRADE_LOT_SIZE[underlying] ?? 1}</Text>
                 <Text style={{ fontSize: 12 }}>Max SL</Text>
                 <InputNumber size="small" min={0} max={500} step={5} style={{ width: 64 }} value={settings.paperSl ?? 20} aria-label="Paper max SL points"
@@ -1066,7 +1070,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                     </Space>
                     <Text style={{ fontSize: 12 }}>slippage</Text>
                     <InputNumber size="small" min={0} max={20} step={0.5} style={{ width: 60 }} value={settings.liveSlippage ?? 2} aria-label="Live slippage"
-                      onChange={(v) => v != null && setSettings((s) => ({ ...s, liveSlippage: v }))} />
+                      onChange={(v) => { if (v != null) { setSettings((s) => ({ ...s, liveSlippage: v })); saveTradeDefaults(underlying, { slippage: v }) } }} />
                     <Text style={{ fontSize: 12 }}>max trades/day</Text>
                     <InputNumber size="small" min={1} max={50} style={{ width: 56 }} value={settings.maxLiveTrades ?? 5} aria-label="Max live trades"
                       onChange={(v) => v != null && setSettings((s) => ({ ...s, maxLiveTrades: v }))} />

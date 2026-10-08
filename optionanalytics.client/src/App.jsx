@@ -14,6 +14,8 @@ import LiveStrikeDataPage from './LiveStrikeDataPage.jsx'
 import TriggersPage from './TriggersPage.jsx'
 import ContractsPage from './ContractsPage.jsx'
 import LoginPage from './LoginPage.jsx'
+import TradeSettingsPage from './TradeSettingsPage.jsx'
+import { refreshTradeSettings } from './tradeDefaults.js'
 import { chartVwap } from './chartVwap.js'
 import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, RECONNECT_RETRY_POLICY, computeEma, fmtPrice, fmtIstTime, fmtIstDateTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry, AuthContext, useAuth, syncSignalRGroups, joinAllSignalRGroups, useCardOrder, CardDragHandle, onLiveBatch, useFeedLag, FeedLagTag, FeedLagAlert, LiveSection, captureChartView, restoreChartView, useReloadOnNewDeploy, checkForNewDeploy } from './shared.jsx'
 import './App.css'
@@ -1703,6 +1705,16 @@ export default function App() {
   // Every page, every tab: pick up a new deploy instead of running stale code against it.
   useReloadOnNewDeploy()
 
+  // The trade settings per index (lots, SL / target / trail, slippage - trade-settings.csv on the server)
+  // into this browser once signed in, and again whenever the tab comes back.
+  useEffect(() => {
+    if (!user) return undefined
+    refreshTradeSettings()
+    const onVisible = () => { if (document.visibilityState === 'visible') refreshTradeSettings() }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => document.removeEventListener('visibilitychange', onVisible)
+  }, [user])
+
   // Only a 401/403 means "not signed in". Anything else - the server restarting for a deploy (a
   // proxy 502/503/504) or the network dropping - used to be treated the same way and showed the
   // login screen, so a page opened mid-deploy looked like the deploy had logged you out. Those
@@ -1780,6 +1792,7 @@ export default function App() {
         <Route path="/rolling-strike-data" element={<RollingStrikeDataPage />} />
         <Route path="/triggers" element={<RequireAdmin><TriggersPage /></RequireAdmin>} />
         <Route path="/contracts" element={<RequireAdmin><ContractsPage /></RequireAdmin>} />
+        <Route path="/trade-settings" element={<TradeSettingsPage />} />
       </Routes>
     </AuthContext.Provider>
   )

@@ -36,6 +36,8 @@ services:
       Storage__DataProtectionKeysPath: /app/data/dataprotection-keys
       # The server-side strategy scanner's config (the page's synced settings) and each day's state.
       Storage__ScannerRunnerPath: /app/data/scanner-runner
+      # Lots, SL / target / trail, slippage and server scanner on/off per index - the Trade settings page.
+      Storage__TradeSettingsPath: /app/data/trade-settings.csv
       # SCANNER_RUNNER_ENABLED=false keeps it from starting (no server-side signals / paper trades).
       ScannerRunner__Enabled: ${SCANNER_RUNNER_ENABLED:-true}
 

@@ -1082,6 +1082,7 @@ const NAV_ITEMS = [
   { key: '/live-strike-data', label: 'Live Strike Data' },
   { key: '/triggers', label: 'Triggers' },
   { key: '/contracts', label: 'Contracts' },
+  { key: '/trade-settings', label: 'Trade settings' },
 ]
 
 // Shared between EVERY page (all nine currently render it) - a proper horizontal menu (not just

@@ -67,7 +67,12 @@ export class IndexScanner {
   settings() {
     const s = { ...DEFAULT_SETTINGS, ...(this.config.settings ?? {}) }
     const levels = { ...defaultTradeLevels(this.underlying), trailStart: 0, trailGap: 0, ...(this.config.levels?.[this.underlying] ?? {}) }
-    return { ...s, paperSl: levels.sl, paperTarget: levels.target, paperTrailStart: levels.trailStart ?? 0, paperTrailGap: levels.trailGap ?? 0 }
+    // The index's own trade settings (trade-settings.csv): its lots and what an alert trades.
+    const trade = this.config.trade?.[this.underlying] ?? {}
+    return {
+      ...s, paperSl: levels.sl, paperTarget: levels.target, paperTrailStart: levels.trailStart ?? 0, paperTrailGap: levels.trailGap ?? 0,
+      ...(trade.lots > 0 ? { paperLots: trade.lots } : {}), ...(trade.autoTrade ? { autoPaper: trade.autoTrade } : {}),
+    }
   }
 
   rowSize() { return this.config.settings?.orderFlow?.rowSizes?.[this.underlying] ?? DEFAULT_ROW_SIZES[this.underlying] ?? 1 }

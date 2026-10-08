@@ -34,3 +34,18 @@ export function buildOiTotalsRows(cePerStrike, pePerStrike) {
   }
   return { buckets, rows }
 }
+
+// Did this row's series DECLINE in bucket t - CE, PE or net OI falling in that bucket? A delta row: its
+// change is negative. A cumulative row: it fell from the bucket before, which is the same thing as its
+// delta row being negative (the cumulative of a positive day can still be falling).
+const DELTA_OF = { ceDelta: 'ceDelta', ceCum: 'ceDelta', peDelta: 'peDelta', peCum: 'peDelta', netDelta: 'netDelta', netCum: 'netDelta' }
+export function oiTotalsDeclined(rows, key, t) {
+  const v = rows[DELTA_OF[key]]?.get(t)
+  return Number.isFinite(v) && v < 0
+}
+
+// Rose / declined / unchanged in bucket t, for colouring a cell.
+export function oiTotalsTrend(rows, key, t) {
+  const v = rows[DELTA_OF[key]]?.get(t)
+  return !Number.isFinite(v) || v === 0 ? 0 : v > 0 ? 1 : -1
+}
