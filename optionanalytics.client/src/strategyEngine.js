@@ -789,13 +789,15 @@ export function evaluateStrategies(input) {
   const atr = atrOf(bars)
   // opts: rTarget - the target is a multiple of the stop (it widens with a volatility-widened stop);
   //       stance 'recent' - judge the options OI on its last 15 minutes only (a squeeze: the since-open
-  //       writing IS the trapped side now covering); coolPullback - the pullback a fast run waits for.
+  //       writing IS the trapped side now covering); coolPullback - the pullback a fast run waits for;
+  //       firstRules - a strategy back on the rules it was first written with (#4): its own stop and
+  //       target as planned (no volatility floor) and no options-OI veto (the read is still shown).
   const push = (id, dir, plannedStop, targetPts, timeStopMin, confidence, checks, opts = {}) => {
     if (!(plannedStop > 0) || !(targetPts > 0)) return
     // Volatility floor: a stop inside 1.2x the average 1-minute range is hit by noise - widen it. An
     // R-based target widens with it; a structural one (a wall, VWAP, the POC) stays, and the setup is
     // dropped when it is then under 1.2R.
-    const stopPts = atr != null && plannedStop < 1.2 * atr ? 1.2 * atr : plannedStop
+    const stopPts = !opts.firstRules && atr != null && plannedStop < 1.2 * atr ? 1.2 * atr : plannedStop
     let target = targetPts
     if (stopPts !== plannedStop) {
       if (opts.rTarget) target = targetPts * (stopPts / plannedStop)
@@ -803,7 +805,7 @@ export function evaluateStrategies(input) {
     }
     const readFor = (r) => (r && opts.stance === 'recent' ? { ...r, combined: r.lean } : r)
     const stance = optionOiStance(readFor(optionRead), dir)
-    if (stance === 'against') return
+    if (stance === 'against' && !opts.firstRules) return
     const nearStance = optionOiStance(readFor(nearRead), dir)
     const timeStop = Math.min(nowMs + timeStopMin * MIN, nowMs + (SQUARE_OFF - minute) * MIN)
     const { OI: wallText, ...rest } = checks
@@ -830,7 +832,7 @@ export function evaluateStrategies(input) {
       checks: {
         Confidence: confidenceText(conf, parts),
         ...(pace.fast ? { Pace: `ran ${pace.run.toFixed(1)} pts (${(pace.run / pace.atr).toFixed(1)}x the 1-min range) in 3 min - wait for it to cool off` } : {}),
-        'Options OI': `${stance === 'agrees' ? 'writers back it' : 'neutral'}${opts.stance === 'recent' ? ' (last 15 min)' : ''} - ${optionOiText(optionRead)}`,
+        'Options OI': `${stance === 'agrees' ? 'writers back it' : stance === 'against' ? 'writers lean against (not a veto on this strategy)' : 'neutral'}${opts.stance === 'recent' ? ' (last 15 min)' : ''} - ${optionOiText(optionRead)}`,
         'Near strikes': `${nearStance === 'agrees' ? 'confirm (+4)' : nearStance === 'against' ? 'lean against (-4, not required)' : 'neutral'} - ${optionOiText(nearRead)}`,
         OI: wallText, 'Futures OI': futuresText,
         ...(marketRead.length ? { 'Market read': `${marketRead.map((x) => `${x.name} ${x.points > 0 ? '+' : ''}${x.points}`).join(' · ')} (shown only - not in the confidence)` } : {}),
@@ -933,13 +935,19 @@ export function evaluateStrategies(input) {
   }
 
   // 4 / 5. Short-covering squeeze (long) / long-unwinding flush (short) - 10:00-14:45.
+  //     #4 (the squeeze) is back to its FIRST rules (04 Oct, 1a5a95b - the trader's call, 08 Oct: it was
+  //     not firing): none of the three gates added after it - the VWAP-stretch skip below, the
+  //     volatility floor that widened its 0.12% stop and then dropped its 1.3R target, and the
+  //     options-OI veto (in a short squeeze the calls written since the open ARE the trapped side now
+  //     covering, which that read takes as against the long). #5 (the flush) keeps them.
   if (minute >= hm(10, 0)) {
     const f = futuresChange(oi, nowMs, 10)
     for (const dir of [1, -1]) {
       if (!f || f.oiPct == null || !(dir * f.pricePct > 0.001) || !(f.oiPct < -0.001)) continue
+      const firstRules = dir > 0
       // Not chasing: already stretched beyond 2 sigma AND 0.4% from VWAP is late (on a quiet day the
       // 2-sigma band alone is only a few points).
-      if (bands?.sd > 0 && dir * (price - bands.vwap) > Math.max(2 * bands.sd, pct(0.004))) continue
+      if (!firstRules && bands?.sd > 0 && dir * (price - bands.vwap) > Math.max(2 * bands.sd, pct(0.004))) continue
       const wall = dir > 0 ? resistance : support
       const wallChg = wall != null ? oiChange(dir > 0 ? oi.ce : oi.pe, wall, nowMs, 10) : null
       if (wallChg != null && wallChg > 0) continue
@@ -951,7 +959,7 @@ export function evaluateStrategies(input) {
       push(dir > 0 ? 'squeeze' : 'flush', dir, stopPts, 1.3 * stopPts, 20, 58 + (sweepWith(dir) ? 10 : 0), {
         OI: `futures ${dir > 0 ? '+' : ''}${(f.pricePct * 100).toFixed(2)}% with OI ${(f.oiPct * 100).toFixed(2)}% (${dir > 0 ? 'short covering' : 'long unwinding'})`,
         Footprint: 'two bars of Δ with the move, no exhaustion', Tape: `${sweepWith(dir) ? 'sweep · ' : ''}${tapeText}`, DOM: c.dom, Heatmap: c.heat,
-      })
+      }, { firstRules })
     }
   }
 
