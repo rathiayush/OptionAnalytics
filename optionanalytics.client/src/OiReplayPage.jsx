@@ -2,6 +2,7 @@ import { Component, useCallback, useEffect, useMemo, useRef, useState } from 're
 import dayjs from 'dayjs'
 import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicker, TimePicker, Alert, Empty, Tooltip, Popconfirm, Slider, Tag, InputNumber, Switch, Table, Segmented, Checkbox, Modal, message } from 'antd'
 import { findSuddenWalls, suddenWallText } from './suddenOi.js'
+import { buildOiTotalsRows } from './oiTotalsHeatmap.js'
 import { PlayCircleOutlined, PauseCircleOutlined, ReloadOutlined, SoundOutlined, ExportOutlined } from '@ant-design/icons'
 import { createSeriesMarkers, CandlestickSeries, LineSeries, HistogramSeries, CrosshairMode } from 'lightweight-charts'
 import { createZoomableChart } from './chartZoom.js'
@@ -1384,6 +1385,158 @@ function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfMs, time
       </Text>
     </Space>
     </>
+  )
+}
+
+// Rows of the OI totals heatmap: the whole band's OI added/removed per bucket (delta) and its running
+// sum (cumulative), for CE, PE and the net CE - PE. `cum` rows scale to their own largest value, delta
+// rows to their own 95th percentile (same reasoning as heatmapScale), so a small row isn't washed out
+// by a big one.
+const OI_TOTALS_ROWS = [
+  { key: 'ceDelta', label: 'CE Δ', cum: false, gap: false },
+  { key: 'ceCum', label: 'CE cumulative Δ', cum: true, gap: false },
+  { key: 'peDelta', label: 'PE Δ', cum: false, gap: true },
+  { key: 'peCum', label: 'PE cumulative Δ', cum: true, gap: false },
+  { key: 'netDelta', label: 'Net Δ (CE − PE)', cum: false, gap: true },
+  { key: 'netCum', label: 'Net cumulative (CE − PE)', cum: true, gap: false },
+]
+const OI_TOTALS_ROW_HEIGHT = 24
+const OI_TOTALS_GAP = 6
+const OI_TOTALS_LABEL_WIDTH = 190
+
+function OiTotalsHeatmap({ ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes, live = false }) {
+  const canvasRef = useRef(null)
+  const scrollRef = useRef(null)
+  const [hover, setHover] = useState(null)
+  const { buckets, rows } = useMemo(() => {
+    const ce = buildOiChangeMatrix(ceByStrike, strikes, asOfMs, timeframeMinutes).perStrikeChange
+    const pe = buildOiChangeMatrix(peByStrike, strikes, asOfMs, timeframeMinutes).perStrikeChange
+    return buildOiTotalsRows(ce, pe)
+  }, [ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes])
+  const columns = useMemo(() => [...buckets].reverse(), [buckets])
+  const formatBucketTime = istTimeFormatter
+
+  const scales = useMemo(() => {
+    const out = {}
+    for (const r of OI_TOTALS_ROWS) {
+      const mags = [...rows[r.key].values()].filter((v) => Number.isFinite(v) && v !== 0).map(Math.abs).sort((a, b) => a - b)
+      out[r.key] = mags.length === 0 ? 0 : r.cum ? mags[mags.length - 1] : mags[Math.min(mags.length - 1, Math.floor(mags.length * HEATMAP_SCALE_PERCENTILE))]
+    }
+    return out
+  }, [rows])
+
+  const rowY = (index) => index * OI_TOTALS_ROW_HEIGHT + OI_TOTALS_ROWS.slice(0, index + 1).filter((r) => r.gap).length * OI_TOTALS_GAP
+  const plotWidth = buckets.length * HEATMAP_CELL_WIDTH
+  const plotHeight = rowY(OI_TOTALS_ROWS.length - 1) + OI_TOTALS_ROW_HEIGHT
+
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas || buckets.length === 0) return
+    const dpr = window.devicePixelRatio || 1
+    const totalHeight = plotHeight + HEATMAP_AXIS_HEIGHT
+    canvas.width = plotWidth * dpr
+    canvas.height = totalHeight * dpr
+    canvas.style.width = `${plotWidth}px`
+    canvas.style.height = `${totalHeight}px`
+    const ctx = canvas.getContext('2d')
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    ctx.clearRect(0, 0, plotWidth, totalHeight)
+    OI_TOTALS_ROWS.forEach((r, i) => {
+      const y = rowY(i)
+      columns.forEach((t, col) => {
+        const v = rows[r.key].get(t)
+        if (v == null || v === 0 || scales[r.key] === 0) return
+        const alpha = HEATMAP_MIN_ALPHA + Math.min(1, Math.abs(v) / scales[r.key]) * (HEATMAP_MAX_ALPHA - HEATMAP_MIN_ALPHA)
+        ctx.fillStyle = hexToRgba(v > 0 ? OI_ADDED_COLOR : OI_REMOVED_COLOR, alpha)
+        ctx.fillRect(col * HEATMAP_CELL_WIDTH, y, HEATMAP_CELL_WIDTH - 1, OI_TOTALS_ROW_HEIGHT - 1)
+      })
+    })
+    if (live) {
+      ctx.strokeStyle = LIVE_COLUMN_OUTLINE_COLOR
+      ctx.lineWidth = 1
+      ctx.strokeRect(0.5, 0.5, HEATMAP_CELL_WIDTH - 1, plotHeight - 1)
+    }
+    ctx.fillStyle = AXIS_COLOR
+    ctx.font = '10px system-ui, -apple-system, sans-serif'
+    ctx.textAlign = 'left'
+    const labelEvery = Math.max(1, Math.round(60 / HEATMAP_CELL_WIDTH))
+    let nextFreeX = -Infinity
+    columns.forEach((t, col) => {
+      if (col % labelEvery !== 0) return
+      const text = formatBucketTime(t)
+      const width = ctx.measureText(text).width
+      const x = col === 0 ? 1 : col * HEATMAP_CELL_WIDTH + HEATMAP_CELL_WIDTH / 2 - width / 2
+      if (x < nextFreeX) return
+      ctx.fillText(text, x, plotHeight + 14)
+      nextFreeX = x + width + 6
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [columns, rows, scales, plotWidth, plotHeight, formatBucketTime, live])
+
+  const bucketCountRef = useRef(0)
+  useEffect(() => {
+    if (buckets.length === 0 || buckets.length === bucketCountRef.current) return
+    bucketCountRef.current = buckets.length
+    if (scrollRef.current) scrollRef.current.scrollLeft = 0
+  }, [buckets.length])
+
+  const handleMouseMove = (e) => {
+    const rect = canvasRef.current.getBoundingClientRect()
+    const x = e.clientX - rect.left
+    const y = e.clientY - rect.top
+    const col = Math.floor(x / HEATMAP_CELL_WIDTH)
+    const index = OI_TOTALS_ROWS.findIndex((_, i) => y >= rowY(i) && y < rowY(i) + OI_TOTALS_ROW_HEIGHT)
+    if (col < 0 || col >= columns.length || index < 0) { setHover(null); return }
+    const r = OI_TOTALS_ROWS[index]
+    setHover({ clientX: e.clientX, clientY: e.clientY, label: r.label, time: columns[col], value: rows[r.key].get(columns[col]) })
+  }
+
+  if (buckets.length === 0) return <Empty description="No OI data yet." />
+
+  const latest = (key) => (columns.length ? rows[key].get(columns[0]) : null)
+  return (
+    <div style={{ display: 'flex', border: `1px solid ${BORDER_COLOR}`, borderRadius: 4, overflow: 'hidden' }}>
+      <div style={{ flexShrink: 0, width: OI_TOTALS_LABEL_WIDTH, background: '#161a22', position: 'relative' }}>
+        {OI_TOTALS_ROWS.map((r, i) => {
+          const v = latest(r.key)
+          return (
+            <div
+              key={r.key}
+              style={{
+                position: 'absolute', transform: `translateY(${rowY(i)}px)`, width: OI_TOTALS_LABEL_WIDTH, height: OI_TOTALS_ROW_HEIGHT,
+                lineHeight: `${OI_TOTALS_ROW_HEIGHT}px`, display: 'flex', justifyContent: 'space-between', padding: '0 8px', fontSize: 11, boxSizing: 'border-box',
+                color: AXIS_COLOR, fontWeight: r.cum ? 400 : 700,
+              }}
+            >
+              <span>{r.label}</span>
+              <span style={{ color: !v ? AXIS_COLOR : v > 0 ? OI_ADDED_COLOR : OI_REMOVED_COLOR }}>{v == null ? '—' : formatOiMillions(v, { signed: true })}</span>
+            </div>
+          )
+        })}
+        <div style={{ height: plotHeight + HEATMAP_AXIS_HEIGHT }} />
+      </div>
+      <div ref={scrollRef} style={{ overflowX: 'auto', overflowY: 'hidden' }} onMouseLeave={() => setHover(null)}>
+        <canvas ref={canvasRef} onMouseMove={handleMouseMove} style={{ display: 'block' }} />
+      </div>
+      {hover && (
+        <div
+          style={{
+            position: 'fixed',
+            ...(hover.clientX > window.innerWidth - 260
+              ? { left: hover.clientX - 14, transform: 'translateX(-100%)' }
+              : { left: hover.clientX + 14 }),
+            top: hover.clientY + 14, zIndex: 1000,
+            background: '#161a22', border: `1px solid ${BORDER_COLOR}`, borderRadius: 4, padding: '4px 8px',
+            fontSize: 11, color: '#fff', pointerEvents: 'none', whiteSpace: 'nowrap',
+          }}
+        >
+          {hover.label} @ {formatBucketTime(hover.time)}:{' '}
+          <Text strong style={{ color: !hover.value ? '#fff' : hover.value > 0 ? OI_ADDED_COLOR : OI_REMOVED_COLOR }}>
+            {hover.value == null ? '—' : formatOiMillions(hover.value, { signed: true })}
+          </Text>
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -4495,6 +4648,12 @@ export default function OiReplayPage() {
                   <div>
                     <Text strong style={{ fontSize: 12 }}>PE</Text>
                     <OiChangeHeatmapPlot label="PE" byStrike={peByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} live={isLive} />
+                  </div>
+                  <div>
+                    <Tooltip title="Whole band summed per bucket. Δ = OI added (blue) or removed (orange) in that bucket; cumulative = running total since the first bucket. Net = CE − PE: blue means CE OI grew more than PE (call-heavy), orange means PE grew more (put-heavy).">
+                      <Text strong style={{ fontSize: 12 }}>Totals: CE, PE and Net (CE − PE) — Δ and cumulative Δ</Text>
+                    </Tooltip>
+                    <OiTotalsHeatmap ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={heatmapStrikes} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} live={isLive} />
                   </div>
                 </Space>
               </Card>
