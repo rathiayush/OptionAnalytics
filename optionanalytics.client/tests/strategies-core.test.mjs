@@ -59,7 +59,7 @@ const tapeWith = (nowMs, buyPct) => Array.from({ length: 50 }, (_, i) => ({ seq:
   check('no trade when the DOM is against it', !against.some((x) => x.id === 'wallDefence'))
 }
 
-// A2. Options OI on every strategy: heavy CALL writing near ATM blocks the same long; put writing adds confidence.
+// A2. Options OI on every strategy: heavy CALL writing near ATM blocks the same long; put writing is shown as backing it.
 {
   const now = at(100) + 30_000
   const bs = bars(0, 99, (m) => ({ open: 22760 - Math.min(95, m), high: 22762 - Math.min(95, m), low: 22758 - Math.min(95, m), close: 22760 - Math.min(95, m), buy: m >= 98 ? 900 : 500, sell: 600 }))
@@ -70,7 +70,7 @@ const tapeWith = (nowMs, buyPct) => Array.from({ length: 50 }, (_, i) => ({ seq:
   const putWriting = run({ spotPath: (m) => 22700 - Math.min(95, m), futOi: () => 1e7, pe: { 22600: (m) => 5e6 + m * 20000, 22650: (m) => 1e6 + m * 30000, 22700: (m) => 1e6 + m * 30000 }, ce: { 22800: (m) => 4e6 + m * 5000 } })
   const backed = evaluateStrategies({ ...base, oi: buildOiContext(putWriting) }).find((x) => x.id === 'wallDefence')
   const plain = evaluateStrategies({ ...base, oi: buildOiContext(run({ spotPath: (m) => 22700 - Math.min(95, m), futOi: () => 1e7, pe: { 22600: (m) => 5e6 + m * 20000 }, ce: { 22800: (m) => 4e6 + m * 5000, 22650: (m) => 1e6 + m * 20000 } })) }).find((x) => x.id === 'wallDefence') // calls written as fast: neutral
-  check('put writing near ATM backs it: higher confidence than neutral, Confidence then Options OI shown first', backed && plain && /neutral/.test(plain.checks['Options OI']) && backed.confidence > plain.confidence && Object.keys(backed.checks)[0] === 'Confidence' && /options writers back it \+6/.test(backed.checks.Confidence) && Object.keys(backed.checks)[1] === 'Options OI' && /PCR/.test(backed.checks['Options OI']), backed?.checks['Options OI'])
+  check('put writing near ATM backs it: shown on the setup, no confidence on it', backed && plain && /neutral/.test(plain.checks['Options OI']) && /writers back it/.test(backed.checks['Options OI']) && /PCR/.test(backed.checks['Options OI']) && !('confidence' in backed) && !('Confidence' in backed.checks), backed?.checks['Options OI'])
 }
 
 // B. Short-covering squeeze LONG at 11:20: futures +0.2% in 10 min, futures OI -0.5%.

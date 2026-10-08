@@ -13,7 +13,7 @@ import { chargeRates, tradeCharges } from './tradeCharges.js'
 import {
   ACTIVE_STRATEGIES, STRATEGY_BY_ID, evaluateStrategies, simulateOutcome, strategyStats, topFifteen, MIN_TRADES_TO_RANK, oiSummary, optionOiText,
   DEFAULT_TRAIL, LAST_ENTRY, SQUARE_OFF, fmtHm, exitLabel, premiumAt, optionPnlPoints, optionTradeText, squareOffMs, RANGE_IDS, asReplayContext,
-  coolOffGate, gradeOf, optionTradeAt, dayTypeAt, trailPoints, STRATEGY_FILTERS, strategyFilters, changedFilters,
+  optionTradeAt, dayTypeAt, trailPoints, STRATEGY_FILTERS, strategyFilters, changedFilters,
 } from './strategyEngine.js'
 import { liquiditySignals, pullStackSignals, replayRange, replayView } from './orderFlowMath.js'
 import {
@@ -78,14 +78,14 @@ function fmtR(r) {
  * for the chosen ones (the top 5 by default), scores every setup by what the futures did next, and
  * ranks the strategies over every day scored so far. "Scan day" runs a whole loaded day at once.
  */
-// A setup's hover: its levels in bold first, then every check (Confidence with its parts first).
+// A setup's hover: its levels in bold first, then every check.
 function setupTip(s, o = null) {
   const meta = STRATEGY_BY_ID[s.id]
   return (
     <div style={{ fontSize: 12 }}>
       <div style={{ fontSize: 13, marginBottom: 4 }}>
         #{meta?.no} {meta?.name} · {s.side} @ {s.entry.toFixed(1)}
-        <div><b>SL {s.stop.toFixed(1)}</b>{o?.trailed ? <> → <b>{o.stop.toFixed(1)}</b> (trailed)</> : ''} · <b>Target {s.target.toFixed(1)}</b> · <b>{s.confidence}% {s.grade ?? gradeOf(s.confidence)}</b></div>
+        <div><b>SL {s.stop.toFixed(1)}</b>{o?.trailed ? <> → <b>{o.stop.toFixed(1)}</b> (trailed)</> : ''} · <b>Target {s.target.toFixed(1)}</b></div>
       </div>
       {Object.entries(s.checks).map(([k, v]) => <div key={k}><b>{k}:</b> {v}</div>)}
     </div>
@@ -117,9 +117,6 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   const [scan, setScan] = useState(null) // { progress, error }
   const dayKey = `${underlying}:${date}`
   const firedRef = useRef([])
-  // Setups held while price cools off after running too far too fast into them (coolOffGate).
-  const pendingRef = useRef(new Map())
-  const [cooling, setCooling] = useState([])
   // Squeezes the OI shows that have not fired yet, with what is still missing (input.watch).
   const [watch, setWatch] = useState([])
   const settingsRef = useRef(settings)
@@ -292,8 +289,6 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     const saved = !isReplay ? readJson(FIRED_KEY, {})[dayKey] ?? [] : []
     restoredRef.current = new Set(saved.map((f) => `${f.id}-${f.t}`))
     firedRef.current = saved
-    pendingRef.current = new Map()
-    setCooling([])
     setWatch([])
     setFired(saved)
   }, [dayKey, isReplay])
@@ -362,18 +357,13 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       firedRef.current = firedRef.current.filter((f) => f.t <= nowMs)
       setFired(firedRef.current)
     }
-    if (isReplay && [...pendingRef.current.values()].some((p) => p.setup.t > nowMs)) {
-      pendingRef.current = new Map()
-      setCooling([])
-    }
     const tick = scanTick({
       nowMs, view, tapePrints, liquidity, pullStack, oi, estimated, lotSize, largeLots, profile, rowSize,
       filters: settingsRef.current.filters, trail: trailFor(settingsRef.current, underlying),
-    }, { fired: firedRef.current, pending: pendingRef.current })
+    }, { fired: firedRef.current })
     if (!tick) return
-    const { watching, held, fresh } = tick
+    const { watching, fresh } = tick
     setWatch((prev) => (JSON.stringify(prev.map((w) => [w.id, w.side, w.missing])) === JSON.stringify(watching.map((w) => [w.id, w.side, w.missing])) ? prev : watching))
-    setCooling((prev) => (prev.map((x) => `${x.id}${x.side}${x.t}`).join() === held.map((x) => `${x.id}${x.side}${x.t}`).join() ? prev : held))
     if (!fresh.length) return
     firedRef.current = tick.fired
     setFired(firedRef.current)
@@ -394,8 +384,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
         message: <span style={{ color: s.side === 'LONG' ? UP_COLOR : DOWN_COLOR, fontWeight: 700 }}>#{meta.no} {meta.name} · {s.side}</span>,
         description: (
           <div style={{ fontSize: 12 }}>
-            <div style={{ fontSize: 13 }}>{IST_HHMM.format(new Date(s.t))} · futures {s.entry.toFixed(1)} · <b>SL {s.stop.toFixed(1)}</b> · <b>Target {s.target.toFixed(1)}</b> · <b>{s.confidence}% {s.grade ?? gradeOf(s.confidence)}</b></div>
-            {s.signal && <div>Waited for the cool-off: signal at {IST_HHMM.format(new Date(s.signal.t))} @ {s.signal.entry.toFixed(1)}</div>}
+            <div style={{ fontSize: 13 }}>{IST_HHMM.format(new Date(s.t))} · futures {s.entry.toFixed(1)} · <b>SL {s.stop.toFixed(1)}</b> · <b>Target {s.target.toFixed(1)}</b></div>
             <div>{trailText(s.trail)}{s.trail ? ` (from ${(s.entry + (s.side === 'LONG' ? 1 : -1) * trailPoints(s.trail, Math.abs(s.entry - s.stop)).start).toFixed(1)})` : ''} · closed by {fmtHm(SQUARE_OFF)} at the latest</div>
             {s.options && (
               <div style={{ margin: '4px 0' }}>
@@ -510,7 +499,6 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
         prints = body?.prints ?? []
       }
       const found = []
-      const pending = new Map()
       // On whole minutes: each setup enters at the previous minute's close and its outcome counts from
       // the bar starting at its entry - the same as replaying to that minute.
       const start = Math.ceil((dayRange.start + 15 * MIN) / MIN) * MIN
@@ -531,8 +519,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
             filters: settingsRef.current.filters,
           })
           const recentlyFound = (s) => found.some((f) => f.id === s.id && f.side === s.side && s.t - f.t < COOLDOWN_MS)
-          const gate = coolOffGate(pending, setups.filter((s) => !recentlyFound(s)), { nowMs: clock, price, bars, oi: scanOi })
-          for (const s of gate.fire) {
+          for (const s of setups) {
             if (!recentlyFound(s)) found.push({ ...s, trail: trailFor(settingsRef.current, underlying) })
           }
         }
@@ -912,21 +899,6 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                 <Button size="small" danger>Reset stats</Button>
               </Popconfirm>
             </Space>
-            {cooling.length > 0 && (
-              <div aria-label="Waiting for cool-off" style={{ marginBottom: 4 }}>
-                {cooling.map((s) => {
-                  const meta = STRATEGY_BY_ID[s.id]
-                  return (
-                    <Tooltip key={`${s.id}-${s.t}`} title={setupTip(s)}>
-                      <div style={{ display: 'flex', gap: 6, alignItems: 'baseline', fontSize: 12, padding: '2px 0' }}>
-                        <Tag color="gold" style={{ margin: 0, fontSize: 11 }}>WAIT</Tag>
-                        <span>#{meta.no} {meta.short} {s.side} <Text type="secondary" style={{ fontSize: 11 }}>since {IST_HHMM.format(new Date(s.t))} @ {s.entry.toFixed(1)} - ran {s.coolOff.run.toFixed(1)} pts in 3 min; enters on a pullback or a pause · <b>SL {s.stop.toFixed(1)}</b> · <b>T {s.target.toFixed(1)}</b></Text></span>
-                      </div>
-                    </Tooltip>
-                  )
-                })}
-              </div>
-            )}
             {(dayResults.length > 0 || regimeNow) && (
               <div aria-label="Today adaptive" style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '4px 10px', fontSize: 12 }}>
                 {regimeNow && (
@@ -963,7 +935,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                       <div style={{ display: 'flex', gap: 6, alignItems: 'baseline', fontSize: 12, padding: '3px 0', borderBottom: '1px solid #ffffff0d' }}>
                         <Text type="secondary" style={{ fontSize: 11, minWidth: 38 }}>{IST_HHMM.format(new Date(s.t))}</Text>
                         <Tag color={s.side === 'LONG' ? 'green' : 'red'} style={{ margin: 0, fontSize: 11 }}>{s.side}</Tag>
-                        <span style={{ flex: 1 }}>#{meta.no} {meta.short} <Text type="secondary" style={{ fontSize: 11 }}>@ {s.entry.toFixed(1)} · <b>SL {o.trailed ? <>{s.stop.toFixed(1)} → {o.stop.toFixed(1)}</> : s.stop.toFixed(1)}</b>{s.trail ? ' (trail)' : ''} · <b>T {s.target.toFixed(1)}</b> · {s.confidence}% {s.grade ?? gradeOf(s.confidence)}{s.signal ? ' · after cool-off' : ''}{s.estimated ? ' · est.' : ''}
+                        <span style={{ flex: 1 }}>#{meta.no} {meta.short} <Text type="secondary" style={{ fontSize: 11 }}>@ {s.entry.toFixed(1)} · <b>SL {o.trailed ? <>{s.stop.toFixed(1)} → {o.stop.toFixed(1)}</> : s.stop.toFixed(1)}</b>{s.trail ? ' (trail)' : ''} · <b>T {s.target.toFixed(1)}</b>{s.estimated ? ' · est.' : ''}
                           {s.adaptive && (
                             <Tooltip title={`Day type at the signal: ${s.regime?.label ?? '-'} - adaptive would ${s.adaptive.take ? 'take' : 'skip'} it (${s.adaptive.reason}). Tracking only - it fired either way.`}>
                               {' · '}<span style={{ color: s.adaptive.take ? '#52c41a' : '#d48806', whiteSpace: 'nowrap' }}>{s.adaptive.take ? '✓' : '✗'} adaptive {s.adaptive.take ? 'take' : 'skip'} · {s.regime?.label ?? ''}</span>

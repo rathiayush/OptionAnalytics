@@ -29,9 +29,6 @@ import { optionTrailLevel, tighterStop } from './optionTrail.js'
 import { adaptiveDecision, combineRegime, cvdDayVote, dayRegime, oiDayVote, sessionOpenMs } from './dayRegime.js'
 
 const MIN = 60_000
-/** The strategies that wait for a fast run to cool off before entering (coolOffGate) - the ones that
- *  measured better with it (05 Oct): range between two walls, CVD divergence, IB breakout. */
-export const COOL_OFF_IDS = new Set(['range', 'cvdDivergence', 'ibBreakout'])
 const msOf = (t) => (typeof t === 'number' ? t : new Date(t).getTime())
 const istMinute = (ms) => Math.floor((ms / MIN + 330) % 1440) // minutes since IST midnight
 const hm = (h, m) => h * 60 + m
@@ -527,117 +524,6 @@ export function atrOf(bars) {
   return last.reduce((sum, b) => sum + (b.high - b.low), 0) / last.length
 }
 
-/** How fast price ran INTO a `dir` trade: the move from the other end of the last 3 completed bars to
- *  the price now. `fast` - at least 3x the average 1-minute range (and 0.1% of price): chasing it buys
- *  the top of a spike, so the entry waits for a pullback or a pause (coolOffGate). */
-export const PACE_ATR = 3
-export function paceOf(bars, price, dir, atr = atrOf(bars)) {
-  const last3 = bars?.slice(-3) ?? []
-  if (!last3.length || !(atr > 0) || !(price > 0)) return { fast: false, run: 0, atr }
-  const from = dir > 0 ? Math.min(...last3.map((b) => b.low)) : Math.max(...last3.map((b) => b.high))
-  const run = dir * (price - from)
-  const extreme = dir > 0 ? Math.max(price, ...last3.map((b) => b.high)) : Math.min(price, ...last3.map((b) => b.low))
-  return { fast: run >= PACE_ATR * atr && run >= 0.001 * price, run, atr, extreme }
-}
-
-/** Confidence parts beyond the strategy's own rules, for a `dir` trade now: the futures' price / OI
- *  regime over 15 min and the price action (side of VWAP, the last 3 bars' structure). */
-export function confluenceParts(dir, { futures, price, vwap, bars }) {
-  const parts = []
-  if (futures?.oiPct != null && Math.abs(futures.pricePct) >= 0.0005) {
-    const up = futures.pricePct > 0
-    const oiUp = futures.oiPct >= 0
-    const regime = up ? (oiUp ? 'long build-up' : 'short covering') : (oiUp ? 'short build-up' : 'long unwinding')
-    const withDir = up === dir > 0
-    // Fresh positions (OI up) are the strong read; covering / unwinding (OI down) the weaker one.
-    const points = withDir ? (oiUp ? 6 : 3) : (oiUp ? -6 : -3)
-    parts.push({ name: `futures ${regime}`, points })
-  }
-  if (vwap > 0 && price > 0) parts.push(dir * (price - vwap) > 0 ? { name: `price ${dir > 0 ? 'above' : 'below'} VWAP`, points: 3 } : { name: `price on the wrong side of VWAP`, points: -3 })
-  const last3 = bars?.slice(-3) ?? []
-  if (last3.length === 3) {
-    const [a, b, c] = last3
-    const higher = b.low >= a.low && c.low >= b.low && c.close > a.close
-    const lower = b.high <= a.high && c.high <= b.high && c.close < a.close
-    if (dir > 0 ? higher : lower) parts.push({ name: dir > 0 ? 'higher lows' : 'lower highs', points: 3 })
-    else if (dir > 0 ? lower : higher) parts.push({ name: dir > 0 ? 'bars making lower highs' : 'bars making higher lows', points: -3 })
-  }
-  return parts
-}
-
-export const gradeOf = (confidence) => (confidence >= 75 ? 'High' : confidence >= 60 ? 'Medium' : 'Low')
-export function confidenceText(confidence, parts) {
-  const [base, ...rest] = parts
-  const sign = (p) => `${p.points > 0 ? '+' : ''}${p.points}`
-  return `${confidence}% ${gradeOf(confidence)} - strategy ${base.points}${rest.map((p) => ` · ${p.name} ${sign(p)}`).join('')}`
-}
-
-/**
- * Wait for a cool-off: a setup whose price ran too far too fast into it (setup.coolOff, see paceOf) is
- * not entered at the spike - it is held, and entered once price has pulled back (35% of the run - 20%
- * for a squeeze, setup.coolOff.pullback) or
- * paused (2 completed bars without a new extreme) - only from what is known at `nowMs`.
- * The stop stays at the setup's level but at least 1.2x the 1-min range from the new entry, the target
- * at its level; it is dropped when price reaches the target or the stop first, when under 1.2R is left,
- * after 10 minutes or after 14:45.
- * `pending` - the held setups (a Map, updated in place); `setups` - evaluateStrategies' output now.
- * Returns { fire: setups to enter now, dropped: [{ setup, reason }] }.
- */
-export const COOL_OFF_MAX_MS = 10 * MIN
-export function coolOffGate(pending, setups, { nowMs, price, bars, oi }) {
-  const fire = []
-  const dropped = []
-  const keyOf = (s) => `${s.id}:${s.side}`
-  for (const s of setups) {
-    if (!s.coolOff) { pending.delete(keyOf(s)); fire.push(s); continue }
-    if (!pending.has(keyOf(s))) pending.set(keyOf(s), { setup: s, peak: s.coolOff.extreme })
-  }
-  const atr = atrOf(bars)
-  for (const [key, p] of [...pending]) {
-    const s = p.setup
-    if (s.t === nowMs) continue // held this moment
-    const dir = s.side === 'LONG' ? 1 : -1
-    const drop = (reason) => { pending.delete(key); dropped.push({ setup: s, reason }) }
-    const after = bars.filter((b) => msOf(b.time) >= Math.floor(s.t / MIN) * MIN)
-    const best = (list) => (dir > 0 ? Math.max(...list.map((b) => b.high)) : Math.min(...list.map((b) => b.low)))
-    if (after.length) p.peak = dir > 0 ? Math.max(p.peak, best(after)) : Math.min(p.peak, best(after))
-    if (dir * (price - s.target) >= 0) { drop('ran to the target without cooling off'); continue }
-    if (dir * (price - s.stop) <= 0) { drop('fell back through the stop'); continue }
-    if (nowMs - s.t > COOL_OFF_MAX_MS || istMinute(nowMs) > LAST_ENTRY) { drop('no cool-off in time'); continue }
-    const pulledBack = dir * (p.peak - price) >= (s.coolOff.pullback ?? 0.35) * s.coolOff.run
-    let paused = false
-    if (after.length >= 2) {
-      const before = after.slice(0, -2)
-      const peakBefore = before.length ? (dir > 0 ? Math.max(s.coolOff.extreme, best(before)) : Math.min(s.coolOff.extreme, best(before))) : s.coolOff.extreme
-      paused = dir * (best(after.slice(-2)) - peakBefore) <= 0
-    }
-    if (!pulledBack && !paused) continue
-    if (paceOf(bars, price, dir, atr).fast) continue // running again
-    const stopPts = Math.max(dir * (price - s.stop), 1.2 * (atr ?? 0))
-    const targetPts = dir * (s.target - price)
-    if (targetPts < 1.2 * stopPts) { drop('not enough room left after the cool-off'); continue }
-    pending.delete(key)
-    const spot = oi ? valueAt(oi.spot, nowMs)?.close : null
-    const parts = [...(s.confidenceParts ?? [{ name: 'strategy', points: s.confidence }]), { name: 'entered after a cool-off', points: 3 }]
-    const total = parts.reduce((sum, x) => sum + x.points, 0)
-    const confidence = Math.round(Math.max(40, Math.min(92, total)))
-    const { coolOff, ...rest } = s
-    fire.push({
-      ...rest, t: nowMs, entry: price, stop: price - dir * stopPts, target: s.target,
-      timeStopMs: Math.min(s.timeStopMs + (nowMs - s.t), squareOffMs(nowMs)),
-      options: spot ? optionTradesFor(oi, dir, spot, nowMs) : s.options,
-      confidence, grade: gradeOf(confidence), confidenceParts: parts,
-      signal: { t: s.t, entry: s.entry },
-      checks: {
-        ...s.checks,
-        Confidence: confidenceText(confidence, parts),
-        Pace: `signal at ${fmtClock(s.t)} @ ${s.entry.toFixed(1)} ran ${coolOff.run.toFixed(1)} pts in 3 min - waited, entered on a ${pulledBack ? `pullback of ${(dir * (p.peak - price)).toFixed(1)} pts` : 'pause (2 bars, no new extreme)'}`,
-      },
-    })
-  }
-  return { fire, dropped }
-}
-const fmtClock = (ms) => fmtHm(istMinute(ms))
 
 export function vwapOf(minuteBars, ms) {
   let pv = 0
@@ -732,7 +618,7 @@ const recent = (items, ms, within, timeOf) => items.filter((x) => { const t = ti
  *   prints (tape, oldest first, or null), book, liquidity, pullStack (signals), sweeps, icebergs,
  *   oi (buildOiContext), estimated, lotSize, bigLots; heatmap (book snapshots up to nowMs) and rowSize for #26;
  *   filters - { [strategy id]: the trader's filter overrides } (STRATEGY_FILTERS; missing = the defaults).
- * Returns setups: { id, name, side, t, entry, stop, target, timeStopMs, confidence, checks: { OI, Footprint, Tape, DOM, Heatmap } }.
+ * Returns setups: { id, name, side, t, entry, stop, target, timeStopMs, checks: { OI, Footprint, Tape, DOM, Heatmap } }.
  */
 export function evaluateStrategies(input) {
   const { nowMs, bars, minuteBars, oi, estimated } = input
@@ -778,21 +664,23 @@ export function evaluateStrategies(input) {
   }
   const tapeText = `${tape.proxy ? 'est. ' : ''}aggression 30s ${tape.agg30}% / 1m ${tape.agg60}% buy`
   // Options OI is checked on EVERY strategy: a trade the option writers are clearly positioned
-  // against is dropped; one they back gets a higher confidence.
+  // against is dropped (the read is shown on every setup).
   const optionRead = optionOiRead(oi, spotNow, nowMs, 15)
   const futuresRead = futuresChange(oi, nowMs, 15)
   const futuresText = futuresRead?.oiPct == null ? 'no futures OI'
     : `futures ${(futuresRead.pricePct * 100).toFixed(2)}% · OI ${futuresRead.oiPct >= 0 ? '+' : ''}${(futuresRead.oiPct * 100).toFixed(2)}% in 15m`
-  // The nearest strikes (ATM ±2) - a confirmation only: they nudge the confidence, never block a trade.
+  // The nearest strikes (ATM ±2) - shown only, they never block a trade.
   const nearRead = optionOiRead(oi, spotNow, nowMs, 15, 2)
   // Volatility: the average 1-minute range of the last 14 bars.
   const atr = atrOf(bars)
   // opts: rTarget - the target is a multiple of the stop (it widens with a volatility-widened stop);
   //       stance 'recent' - judge the options OI on its last 15 minutes only (a squeeze: the since-open
-  //       writing IS the trapped side now covering); coolPullback - the pullback a fast run waits for;
+  //       writing IS the trapped side now covering);
   //       firstRules - a strategy back on the rules it was first written with (#4): its own stop and
   //       target as planned (no volatility floor) and no options-OI veto (the read is still shown).
-  const push = (id, dir, plannedStop, targetPts, timeStopMin, confidence, checks, opts = {}) => {
+  // Every strategy still passes its old confidence score (the 6th argument); it is not used - no setup
+  // carries a confidence any more (the trader's call, 08 Oct), and none waits for a cool-off.
+  const push = (id, dir, plannedStop, targetPts, timeStopMin, _score, checks, opts = {}) => {
     if (!(plannedStop > 0) || !(targetPts > 0)) return
     // Volatility floor: a stop inside 1.2x the average 1-minute range is hit by noise - widen it. An
     // R-based target widens with it; a structural one (a wall, VWAP, the POC) stays, and the setup is
@@ -809,33 +697,15 @@ export function evaluateStrategies(input) {
     const nearStance = optionOiStance(readFor(nearRead), dir)
     const timeStop = Math.min(nowMs + timeStopMin * MIN, nowMs + (SQUARE_OFF - minute) * MIN)
     const { OI: wallText, ...rest } = checks
-    // Confidence: the strategy's own score, the options writers (+6) and the near strikes (+4 / -4) - the
-    // one the trader measured as good, and all that it decides is which side wins when a LONG and a
-    // SHORT fire at once (resolveConflicts). No setup is ever dropped for its confidence. What the
-    // futures OI, VWAP and price action say is shown beside it as a read only (it changes nothing).
-    const parts = [{ name: 'strategy', points: confidence }]
-    if (stance === 'agrees') parts.push({ name: 'options writers back it', points: 6 })
-    if (nearStance === 'agrees') parts.push({ name: 'near strikes confirm', points: 4 })
-    else if (nearStance === 'against') parts.push({ name: 'near strikes lean against', points: -4 })
-    const marketRead = confluenceParts(dir, { futures: futuresRead, price, vwap, bars })
-    const conf = Math.round(Math.max(40, Math.min(92, parts.reduce((sum, x) => sum + x.points, 0))))
-    // Cool-off before chasing a fast run: only for the strategies that measured better with it.
-    const pace = COOL_OFF_IDS.has(id) ? paceOf(bars, price, dir, atr) : { fast: false }
     out.push({
       options: optionTradesFor(oi, dir, spotNow, nowMs),
       id, name: STRATEGY_BY_ID[id].name, side: dir > 0 ? 'LONG' : 'SHORT', t: nowMs, entry: price,
       stop: price - dir * stopPts, target: price + dir * target, timeStopMs: timeStop,
-      confidence: conf, grade: gradeOf(conf), confidenceParts: parts,
-      // Price ran too far too fast into the signal: the scanner waits for it to cool off (coolOffGate).
-      ...(pace.fast ? { coolOff: { run: pace.run, atr: pace.atr, extreme: pace.extreme, pullback: opts.coolPullback ?? 0.35 } } : {}),
       estimated: !!estimated,
       checks: {
-        Confidence: confidenceText(conf, parts),
-        ...(pace.fast ? { Pace: `ran ${pace.run.toFixed(1)} pts (${(pace.run / pace.atr).toFixed(1)}x the 1-min range) in 3 min - wait for it to cool off` } : {}),
         'Options OI': `${stance === 'agrees' ? 'writers back it' : stance === 'against' ? 'writers lean against (not a veto on this strategy)' : 'neutral'}${opts.stance === 'recent' ? ' (last 15 min)' : ''} - ${optionOiText(optionRead)}`,
-        'Near strikes': `${nearStance === 'agrees' ? 'confirm (+4)' : nearStance === 'against' ? 'lean against (-4, not required)' : 'neutral'} - ${optionOiText(nearRead)}`,
+        'Near strikes': `${nearStance === 'agrees' ? 'confirm' : nearStance === 'against' ? 'lean against (not required)' : 'neutral'} - ${optionOiText(nearRead)}`,
         OI: wallText, 'Futures OI': futuresText,
-        ...(marketRead.length ? { 'Market read': `${marketRead.map((x) => `${x.name} ${x.points > 0 ? '+' : ''}${x.points}`).join(' · ')} (shown only - not in the confidence)` } : {}),
         ...rest,
       },
     })
@@ -1259,7 +1129,7 @@ export function evaluateStrategies(input) {
   //     range, with the option writers and the order flow behind it; target one IB range beyond. The IB
   //     statistics: a narrow IB breaks almost always and extends far, an extremely wide one breaks far
   //     less and barely extends - so not when the IB is already as wide as the previous day's whole range
-  //     (the day's range proxy), and more confidence when it is under 40% of it.
+  //     (the day's range proxy).
   //     Against the false breaks (the defaults; each can be loosened in Filters): the break must be ACCEPTED
   //     (two 1-minute closes in a row beyond the IB - a one-bar poke that closes back inside is the classic
   //     trap), only the FIRST accepted break of that side in the day is taken (a second one comes after a
@@ -2016,7 +1886,7 @@ export function evaluateStrategies(input) {
   //     The index must still be above its support strike, with room to the resistance wall. Stop under
   //     the support strike (in futures terms; 0.15-0.5%), target the resistance wall (1.5-3R). No
   //     footprint / tape / book needed - it is the writers' positioning - but every trade still gets the
-  //     options-OI stance, futures OI and price-action confidence parts (push).
+  //     options-OI stance (push).
   if (minute >= hm(9, 45) && minute <= hm(14, 30)) {
     const step = oi.step
     const atm = Math.round(spotNow / step) * step
@@ -2098,25 +1968,14 @@ export function evaluateStrategies(input) {
   })
 }
 
-/** A long and a short at the same moment: when their best confidences are within CONFLICT_GAP points of
- *  each other (no clear winner) BOTH are traded, each noting the other; when one side is CONFLICT_GAP+
- *  points ahead, only that side is traded. */
-export const CONFLICT_GAP = 20
+/** A long and a short at the same moment: both are traded (no confidence to pick one by), each noting
+ *  the other. */
 export function resolveConflicts(setups) {
   const longs = setups.filter((s) => s.side === 'LONG')
   const shorts = setups.filter((s) => s.side === 'SHORT')
   if (!longs.length || !shorts.length) return setups
-  const best = (list) => Math.max(...list.map((s) => s.confidence))
-  const [bl, bs] = [best(longs), best(shorts)]
   const names = (list) => list.map((s) => STRATEGY_BY_ID[s.id]?.short ?? s.id).join(', ')
-  if (Math.abs(bl - bs) < CONFLICT_GAP) {
-    // Too close to call: both sides are punched - the trader's choice (a hedge of two option trades).
-    const noteFor = (other) => `opposite ${names(other)} at the same time (confidence ${best(other)}) - within ${CONFLICT_GAP} points, so both sides are traded`
-    return setups.map((s) => ({ ...s, checks: { ...s.checks, Conflict: noteFor(s.side === 'LONG' ? shorts : longs) } }))
-  }
-  const [kept, dropped] = bl > bs ? [longs, shorts] : [shorts, longs]
-  const note = `opposite ${names(dropped)} at the same time (confidence ${best(dropped)}) - this side is ${CONFLICT_GAP}+ points stronger, the other is not traded`
-  return kept.map((s) => ({ ...s, checks: { ...s.checks, Conflict: note } }))
+  return setups.map((s) => ({ ...s, checks: { ...s.checks, Conflict: `opposite ${names(s.side === 'LONG' ? shorts : longs)} at the same time - both sides are traded` } }))
 }
 
 // ---- day type --------------------------------------------------------------------------------------

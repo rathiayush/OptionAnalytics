@@ -3,7 +3,7 @@
 // Everything here is pure: no storage, no timers, no network; the caller owns state and side effects.
 
 import {
-  ACTIVE_STRATEGIES, STRATEGY_BY_ID, evaluateStrategies, simulateOutcome, coolOffGate, DEFAULT_TRAIL, RANGE_IDS,
+  ACTIVE_STRATEGIES, STRATEGY_BY_ID, evaluateStrategies, simulateOutcome, DEFAULT_TRAIL, RANGE_IDS,
   exitLabel, premiumAt, optionStopTargetHit, squareOffMs,
 } from './strategyEngine.js'
 import { aggregateBars, analyzeBars, findWalls } from './orderFlowMath.js'
@@ -91,10 +91,10 @@ export function setupTimeOf(p) {
 export const sameSignal = (p, setup, trade) => p.strategy === setup.id && p.setupSide === setup.side && p.action === trade.action && Math.abs(setupTimeOf(p) - setup.t) < COOLDOWN_MS
 
 /**
- * One look at the market at the clock - the live loop's body. `memory` is the caller's { fired, pending }
- * (pending is the cool-off Map and is updated in place, as coolOffGate does). Returns null when there is
- * nothing to judge yet (no OI, too few bars, a tape that has not caught up); otherwise what is being
- * watched, what is held for the cool-off, the setups that fire now and the day's fired list with them.
+ * One look at the market at the clock - the live loop's body. `memory` is the caller's { fired }. Returns
+ * null when there is nothing to judge yet (no OI, too few bars, a tape that has not caught up); otherwise
+ * what is being watched, the setups that fire now and the day's fired list with them. A setup fires at
+ * once - no strategy waits for a cool-off.
  */
 export function scanTick(input, memory) {
   const { nowMs, view, tapePrints, liquidity, pullStack, oi, estimated, lotSize, largeLots, profile, rowSize, filters, trail } = input
@@ -113,11 +113,8 @@ export function scanTick(input, memory) {
   })
   const watching = watchNow.filter((w) => w.missing.length)
   const recentlyFired = (s) => memory.fired.some((f) => f.id === s.id && f.side === s.side && s.t - f.t < COOLDOWN_MS)
-  // Price ran too far too fast into a setup: it is held and entered on the pullback / pause.
-  const gate = coolOffGate(memory.pending, setups.filter((s) => !recentlyFired(s)), { nowMs, price, bars, oi })
-  const held = [...memory.pending.values()].map((p) => p.setup)
-  const fresh = gate.fire.filter((s) => !recentlyFired(s)).map((s) => ({ ...s, trail }))
-  return { price, watching, held, fresh, fired: fresh.length ? [...memory.fired, ...fresh] : memory.fired }
+  const fresh = setups.filter((s) => !recentlyFired(s)).map((s) => ({ ...s, trail }))
+  return { price, watching, fresh, fired: fresh.length ? [...memory.fired, ...fresh] : memory.fired }
 }
 
 // Each fired setup with its outcome so far (its trailing stop following any change logged after it fired).
@@ -287,7 +284,7 @@ export function scannerLogBody({ underlying, date, source, dayResults, rows, cha
     const closed = o.status && o.status !== 'open'
     return {
       time: x.t, strategyNo: meta?.no ?? null, strategyId: x.id, strategy: meta?.name ?? x.id, side: x.side, entry: x.entry, stop: x.stop, target: x.target,
-      confidence: x.confidence ?? null, estimated: !!x.estimated, dayType: x.regime?.type ?? null, dayTypePrice: x.regime?.priceType ?? null,
+      estimated: !!x.estimated, dayType: x.regime?.type ?? null, dayTypePrice: x.regime?.priceType ?? null,
       voteOi: x.regime?.votes?.oi ?? null, voteCvd: x.regime?.votes?.cvd ?? null, adaptiveTake: x.adaptive?.take ?? null,
       adaptivePriceOnly: x.adaptive?.priceOnly ?? null, adaptiveReason: x.adaptive?.reason ?? null, status: o.status ?? null, r: o.r ?? null,
       exitTime: closed ? o.exitAt ?? null : null, exitPrice: closed ? o.exitPrice ?? null : null, exitReason: closed ? exitLabel(o) : null,

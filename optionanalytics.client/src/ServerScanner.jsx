@@ -79,7 +79,6 @@ export function ServerScannerCard({ isAdmin, focus }) {
               {ix.enabled && (ix.ready ? <Tag color="success">data live{ix.clockUtc ? ` · ${hhmm(Date.parse(ix.clockUtc))}` : ''}</Tag> : <Tag color="warning">waiting for data</Tag>)}
               {ix.contract && <Text type="secondary" style={{ fontSize: 11 }}>{ix.contract}</Text>}
               <Text style={{ fontSize: 12 }}>{ix.signals?.length ?? 0} signal(s) · {ix.trades?.length ?? 0} paper trade(s) · <Text strong style={{ color: (ix.pnl ?? 0) >= 0 ? UP_COLOR : DOWN_COLOR }}>{rupee(ix.pnl)}</Text></Text>
-              {ix.coolingOff > 0 && <Tag>{ix.coolingOff} cooling off</Tag>}
             </Space>
             {ix.error && <Text type="warning" style={{ fontSize: 11, display: 'block' }}>{ix.error}</Text>}
             {ix.signals?.length > 0 && <Table size="small" pagination={false} rowKey={(s) => `${s.id}-${s.t}`} columns={signalColumns} dataSource={[...ix.signals].reverse()} scroll={{ y: 180 }} />}

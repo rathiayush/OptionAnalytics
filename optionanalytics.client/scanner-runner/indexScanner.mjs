@@ -44,14 +44,13 @@ export class IndexScanner {
   reset(date) {
     this.date = date
     this.data = null
-    this.memory = { fired: [], pending: new Map() }
+    this.memory = { fired: [] }
     this.events = newSetupEventMemory()
     this.positions = []
     this.trailLog = []
     this.notified = new Set()
     this.primedExits = false
     this.watching = []
-    this.held = []
     this.appliedLevels = null
     this.appliedTrail = null
     this.dirty = false
@@ -229,7 +228,6 @@ export class IndexScanner {
     }, this.memory)
     if (tick) {
       this.watching = tick.watching
-      this.held = tick.held
       if (tick.fresh.length) {
         this.memory.fired = tick.fired
         this.dirty = true
@@ -243,7 +241,7 @@ export class IndexScanner {
 
   async onFired(s, cfg) {
     const meta = STRATEGY_BY_ID[s.id]
-    this.io.log(`${this.underlying}: #${meta?.no} ${meta?.name} ${s.side} @ ${s.entry.toFixed(1)} (SL ${s.stop.toFixed(1)}, target ${s.target.toFixed(1)}, ${s.confidence}%)`)
+    this.io.log(`${this.underlying}: #${meta?.no} ${meta?.name} ${s.side} @ ${s.entry.toFixed(1)} (SL ${s.stop.toFixed(1)}, target ${s.target.toFixed(1)})`)
     if (!cfg.alerts || !this.alertIds().includes(s.id)) return
     // The moment it alerts, the option is paper-traded (the sell side by default) - as on the page.
     const side = cfg.autoPaper === 'buy' || cfg.autoPaper === 'sell' ? cfg.autoPaper : null
@@ -260,7 +258,7 @@ export class IndexScanner {
     }
     // Not traded: the signal itself goes out.
     if (cfg.telegram !== false) {
-      await this.io.telegram(`${TAG} ${this.underlying} #${meta?.no} ${meta?.name} ${s.side} - futures ${s.entry.toFixed(1)} (SL ${s.stop.toFixed(1)}, target ${s.target.toFixed(1)}), ${s.confidence}%`)
+      await this.io.telegram(`${TAG} ${this.underlying} #${meta?.no} ${meta?.name} ${s.side} - futures ${s.entry.toFixed(1)} (SL ${s.stop.toFixed(1)}, target ${s.target.toFixed(1)})`)
     }
   }
 
@@ -328,9 +326,9 @@ export class IndexScanner {
     return {
       underlying: this.underlying, enabled: this.enabled, date: this.date, ready: !!this.data, error: this.error,
       clockUtc: nowMs ? new Date(nowMs).toISOString() : null, contract: this.data?.view?.meta?.contractSymbol ?? null,
-      watching: this.watching.length, coolingOff: this.held.length,
+      watching: this.watching.length,
       signals: outcomes.map((s) => ({
-        id: s.id, no: meta(s.id)?.no, name: meta(s.id)?.name, side: s.side, t: s.t, entry: s.entry, stop: s.stop, target: s.target, confidence: s.confidence,
+        id: s.id, no: meta(s.id)?.no, name: meta(s.id)?.name, side: s.side, t: s.t, entry: s.entry, stop: s.stop, target: s.target,
         alerted: this.alertIds().includes(s.id), status: s.outcome?.status, r: s.outcome?.r ?? null, exitAt: s.outcome?.exitAt ?? null,
       })),
       trades: rows.map((r) => ({

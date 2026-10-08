@@ -8,7 +8,7 @@ const iso = (ms) => new Date(ms).toISOString()
 let seed = 1
 const rnd = () => { seed = (seed * 16807) % 2147483647; return (seed - 1) / 2147483646 }
 const counts = Object.fromEntries(STRATEGIES.map((s) => [s.id, 0]))
-let bad = 0, total = 0, errors = 0, held = 0
+let bad = 0, total = 0, errors = 0
 const t0 = Date.now()
 for (let day = 1; day <= 24; day++) {
   seed = day * 7919
@@ -63,16 +63,14 @@ for (let day = 1; day <= 24; day++) {
         total++
         counts[s.id]++
         const dir = s.side === 'LONG' ? 1 : -1
-        const ok = [s.entry, s.stop, s.target, s.confidence, s.timeStopMs].every(Number.isFinite) && dir * (s.entry - s.stop) > 0 && dir * (s.target - s.entry) > 0 && s.confidence >= 40 && s.confidence <= 92
-          // the confidence is its parts (clamped 40-92), graded, and shown first in the checks
-          && s.confidence === Math.round(Math.max(40, Math.min(92, s.confidenceParts.reduce((a, x) => a + x.points, 0)))) && ['High', 'Medium', 'Low'].includes(s.grade) && Object.keys(s.checks)[0] === 'Confidence'
-          && (!s.coolOff || (s.coolOff.run > 0 && /cool off/.test(s.checks.Pace)))
-        if (s.coolOff) held++
+        const ok = [s.entry, s.stop, s.target, s.timeStopMs].every(Number.isFinite) && dir * (s.entry - s.stop) > 0 && dir * (s.target - s.entry) > 0
+          // no confidence and no cool-off on any setup (08 Oct)
+          && !('confidence' in s) && !('grade' in s) && !('confidenceParts' in s) && !('coolOff' in s) && !('Confidence' in s.checks) && !('Pace' in s.checks)
         if (!ok) { bad++; if (bad < 5) console.log('BAD', JSON.stringify(s).slice(0, 400)) }
       }
     } catch (err) { errors++; if (errors < 5) console.log('ERROR day', day, 'm', m, err.stack.split('\n').slice(0, 3).join(' | ')) }
   }
 }
-console.log(`evaluations ok in ${Date.now() - t0} ms; setups ${total} (${held} waiting for a cool-off), invalid ${bad}, exceptions ${errors}`)
+console.log(`evaluations ok in ${Date.now() - t0} ms; setups ${total} invalid ${bad}, exceptions ${errors}`)
 console.log(Object.entries(counts).map(([k, v]) => `${k}:${v}`).join('  '))
 process.exitCode = bad || errors ? 1 : 0

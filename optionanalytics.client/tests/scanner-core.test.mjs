@@ -1,10 +1,10 @@
 // The scanner's shared core (scannerCore.js) - what the Order Flow page and the server runner both run.
-// The live loop is checked against the loop as it was written in StrategyScanner.jsx before it moved, on a
-// synthetic day, so the move changed nothing; then the outcome events, the option positions and the feeds.
+// The live loop is checked against a plain reference loop on a synthetic day (every setup fires the minute
+// it is found - no cool-off since 08 Oct); then the outcome events, the option positions and the feeds.
 // Run: npm test (node --test) - see CLAUDE.md.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { evaluateStrategies, coolOffGate, simulateOutcome } from '../src/strategyEngine.js'
+import { evaluateStrategies, simulateOutcome } from '../src/strategyEngine.js'
 import { findWalls } from '../src/orderFlowMath.js'
 import {
   scanTick, completedBars, priceAt, trailFor, followSetups, setupEvents, newSetupEventMemory, newPosition, positionRows, COOLDOWN_MS, MIN,
@@ -20,8 +20,8 @@ const viewAt = (t) => ({
 })
 const msOf = (x) => (typeof x === 'number' ? x : new Date(x).getTime())
 
-// The live loop exactly as StrategyScanner.jsx had it before scannerCore.js existed.
-function oldLoop(input, firedRef, pendingRef) {
+// The live loop as StrategyScanner.jsx had it before scannerCore.js existed, without the cool-off gate.
+function oldLoop(input, firedRef) {
   const { nowMs, view, tapePrints, liquidity, pullStack, estimated, lotSize, largeLots, profile, rowSize, filters, trail } = input
   if (!(!estimated && !(tapePrints?.length && msOf(tapePrints.at(-1).time) >= nowMs - 3 * MIN))) {
     const bars = completedBars(view.minuteBars, nowMs, rowSize, lotSize, estimated)
@@ -34,31 +34,27 @@ function oldLoop(input, firedRef, pendingRef) {
     })
     const watching = watchNow.filter((w) => w.missing.length)
     const recentlyFired = (s) => firedRef.current.some((f) => f.id === s.id && f.side === s.side && s.t - f.t < COOLDOWN_MS)
-    const gate = coolOffGate(pendingRef.current, setups.filter((s) => !recentlyFired(s)), { nowMs, price, bars, oi })
-    const held = [...pendingRef.current.values()].map((p) => p.setup)
-    const fresh = gate.fire.filter((s) => !recentlyFired(s)).map((s) => ({ ...s, trail }))
+    const fresh = setups.filter((s) => !recentlyFired(s)).map((s) => ({ ...s, trail }))
     if (fresh.length) firedRef.current = [...firedRef.current, ...fresh]
-    return { watching, held, fresh }
+    return { watching, fresh }
   }
   return null
 }
 
 test('the shared live loop fires exactly what the page\'s own loop fired, minute after minute', () => {
   const trail = trailFor({}, 'NIFTY')
-  const memory = { fired: [], pending: new Map() }
+  const memory = { fired: [] }
   const firedRef = { current: [] }
-  const pendingRef = { current: new Map() }
   let fires = 0
   for (let t = at(15); t <= at(300); t += 30_000) {
     const input = { nowMs: t, view: viewAt(t), tapePrints: prints.filter((x) => x.time <= t), liquidity: [], pullStack: [], oi, estimated: false, lotSize: 75, largeLots: 10, profile: null, rowSize: 1, filters: {}, trail }
     const now = scanTick(input, memory)
-    const before = oldLoop(input, firedRef, pendingRef)
+    const before = oldLoop(input, firedRef)
     assert.equal(now === null, before === null, `at ${new Date(t).toISOString()}`)
     if (!now) continue
     if (now.fresh.length) memory.fired = now.fired
     fires += now.fresh.length
     assert.deepEqual(now.fresh, before.fresh)
-    assert.deepEqual(now.held, before.held)
     assert.deepEqual(now.watching, before.watching)
   }
   assert.deepEqual(memory.fired, firedRef.current)
@@ -68,12 +64,12 @@ test('the shared live loop fires exactly what the page\'s own loop fired, minute
 test('nothing is judged on a tape that has not caught up, or without OI', () => {
   const t = at(120)
   const base = { nowMs: t, view: viewAt(t), liquidity: [], pullStack: [], oi, estimated: false, lotSize: 75, largeLots: 10, rowSize: 1, filters: {}, trail: null }
-  assert.equal(scanTick({ ...base, tapePrints: prints.filter((x) => x.time <= t - 5 * MIN) }, { fired: [], pending: new Map() }), null)
-  assert.equal(scanTick({ ...base, oi: null, tapePrints: prints.filter((x) => x.time <= t) }, { fired: [], pending: new Map() }), null)
+  assert.equal(scanTick({ ...base, tapePrints: prints.filter((x) => x.time <= t - 5 * MIN) }, { fired: [] }), null)
+  assert.equal(scanTick({ ...base, oi: null, tapePrints: prints.filter((x) => x.time <= t) }, { fired: [] }), null)
 })
 
 test('a setup that stays true fires once per cooldown', () => {
-  const memory = { fired: [], pending: new Map() }
+  const memory = { fired: [] }
   for (let t = at(15); t <= at(300); t += 30_000) {
     const r = scanTick({ nowMs: t, view: viewAt(t), tapePrints: prints.filter((x) => x.time <= t), liquidity: [], pullStack: [], oi, estimated: false, lotSize: 75, largeLots: 10, rowSize: 1, filters: {}, trail: null }, memory)
     if (r?.fresh.length) memory.fired = r.fired
@@ -84,7 +80,7 @@ test('a setup that stays true fires once per cooldown', () => {
 })
 
 // A setup with a known outcome: LONG from 100, stop 90, target 120.
-const setup = { id: 'wallDefence', side: 'LONG', t: at(60), entry: 100, stop: 90, target: 120, confidence: 70, checks: {}, trail: null }
+const setup = { id: 'wallDefence', side: 'LONG', t: at(60), entry: 100, stop: 90, target: 120, checks: {}, trail: null }
 const barsUpTo = (closes) => closes.map((c, i) => ({ time: new Date(at(60) + i * MIN).toISOString(), open: c, high: c + 1, low: c - 1, close: c }))
 
 test('outcome events: an exit is reported once, and a restored setup does not re-report its past', () => {

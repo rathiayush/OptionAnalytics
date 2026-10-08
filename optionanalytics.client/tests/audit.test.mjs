@@ -81,7 +81,7 @@ const evalAt = (day, run, T) => {
     profile: { vp: { poc: 22760, vah: 22800, val: 22720, hvn: [22740, 22790], lvn: [22770] }, tpoPrev: { poc: 22760, vah: 22800, val: 22720 }, prevHigh: 22840, prevLow: 22680 },
   })
 }
-const sig = (setups) => setups.map((s) => `${s.id}:${s.side}:${s.entry}:${s.stop.toFixed(2)}:${s.target.toFixed(2)}:${s.confidence}:${s.options?.sell?.premium?.toFixed(2)}`).sort().join('|')
+const sig = (setups) => setups.map((s) => `${s.id}:${s.side}:${s.entry}:${s.stop.toFixed(2)}:${s.target.toFixed(2)}:${s.options?.sell?.premium?.toFixed(2)}`).sort().join('|')
 
 // ---- 1. no look-ahead -------------------------------------------------------------------------------
 {
