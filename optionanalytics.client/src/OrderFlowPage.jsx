@@ -954,7 +954,7 @@ export default function OrderFlowPage() {
         <Text type="secondary" style={{ fontSize: 11, color: AXIS_COLOR }}>
           Trades are inferred from Dhan's tick feed: the rise in the day's volume between two ticks is the volume traded, at the tick's price, and
           its side comes from the book just before it - at or above the best offer = buyers aggressive, at or below the best bid = sellers
-          aggressive, otherwise by tick direction. Several trades between two ticks count as one print. Imbalance compares diagonally (buying
+          aggressive, otherwise by tick direction. Dhan itself says its WebSocket is event-based snapshot data delivered second by second, not tick-by-tick, so several trades between two snapshots count as one print (at the last price, on one side) - the footprint rows and delta can therefore differ from a tick-by-tick chart such as GoCharting. Imbalance compares diagonally (buying
           at a price vs selling one row below); a stack is that many imbalanced rows in a row. Absorption = heavy aggression at a bar's
           extreme that failed to push price on (A); exhaustion = almost nothing traded at the extreme (E). An iceberg is a level that keeps
           trading more than twice the most it ever showed while staying in the book. Walls are levels at least 4x the book's median size.

@@ -1,6 +1,6 @@
 import { Component, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import dayjs from 'dayjs'
-import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicker, TimePicker, Alert, Empty, Tooltip, Popconfirm, Slider, Tag, InputNumber, Switch, Table, Segmented, Checkbox, Modal, message } from 'antd'
+import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicker, TimePicker, Alert, Empty, Tooltip, Popconfirm, Slider, Tag, InputNumber, Switch, Table, Segmented, Checkbox, Modal, Steps, message } from 'antd'
 import { findSuddenWalls, suddenWallText } from './suddenOi.js'
 import { buildOiTotalsRows } from './oiTotalsHeatmap.js'
 import { PlayCircleOutlined, PauseCircleOutlined, ReloadOutlined, SoundOutlined, ExportOutlined } from '@ant-design/icons'
@@ -23,7 +23,9 @@ import { PremiumEmaChart, DraggableFloatingPanel, useFitContentAsDataGrows, useC
 import { LivePositionsView, liveTradingApi } from './LiveTrading.jsx'
 import { StrikePicker, moneynessLabel } from './StrikePicker.jsx'
 import { DomDrawer } from './DomDrawer.jsx'
-import { volumeProfileFromCandles } from './orderFlowMath.js'
+import { volumeProfileFromCandles, aggregateBars as aggregateFootprintBars, analyzeBars } from './orderFlowMath.js'
+import { withBackfill } from './cvdBackfill.js'
+import { FootprintChart } from './OrderFlowCharts.jsx'
 import { VolumeProfilePrimitive, setProfileLines } from './volumeProfilePrimitive.js'
 import { useReplaySync, useReplaySyncEnabled, ReplaySyncControl, withSpeedOption, SYNC_DRIFT_MS } from './replaySync.jsx'
 
@@ -507,6 +509,16 @@ function buildOiChangeMatrix(byStrike, strikes, asOfMs, timeframeMinutes) {
     perStrikeChange.set(strike, byBucket)
   }
   return { buckets: [...bucketSet].sort((a, b) => a - b), perStrikeChange }
+}
+
+// The last `windowMinutes` of a matrix from buildOiChangeMatrix (null = all of it): the pre-trade review
+// shows the recent 15-25 minutes, not the whole day. Bucket times are chart seconds.
+function sliceMatrixWindow(matrix, windowMinutes) {
+  if (!(windowMinutes > 0) || matrix.buckets.length === 0) return matrix
+  const from = matrix.buckets[matrix.buckets.length - 1] - windowMinutes * 60
+  const perStrikeChange = new Map()
+  for (const [strike, byBucket] of matrix.perStrikeChange) perStrikeChange.set(strike, new Map([...byBucket].filter(([t]) => t > from)))
+  return { buckets: matrix.buckets.filter((t) => t > from), perStrikeChange }
 }
 
 function bucketOf(chartTime, minutes) {
@@ -1172,13 +1184,13 @@ const HEATMAP_AXIS_HEIGHT = 20
 // real heatmap out of a library with no native heatmap series type, and the cheapest to render at
 // this cell count. The strike-label column is plain HTML (not baked into the canvas) so it can stay
 // visually fixed while only the canvas itself scrolls horizontally through the day.
-function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfMs, timeframeMinutes, live = false }) {
+function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfMs, timeframeMinutes, live = false, windowMinutes = null }) {
   const canvasRef = useRef(null)
   const scrollRef = useRef(null)
   const [hover, setHover] = useState(null)
   const { buckets, perStrikeChange } = useMemo(
-    () => buildOiChangeMatrix(byStrike, strikes, asOfMs, timeframeMinutes),
-    [byStrike, strikes, asOfMs, timeframeMinutes],
+    () => sliceMatrixWindow(buildOiChangeMatrix(byStrike, strikes, asOfMs, timeframeMinutes), windowMinutes),
+    [byStrike, strikes, asOfMs, timeframeMinutes, windowMinutes],
   )
   // Newest minute on the LEFT, older minutes running off to the right - the latest activity is
   // what's read first, right next to the strike labels, instead of at the far end of a long scroll.
@@ -1404,15 +1416,15 @@ const OI_TOTALS_ROW_HEIGHT = 24
 const OI_TOTALS_GAP = 6
 const OI_TOTALS_LABEL_WIDTH = 190
 
-function OiTotalsHeatmap({ ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes, live = false }) {
+function OiTotalsHeatmap({ ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes, live = false, windowMinutes = null }) {
   const canvasRef = useRef(null)
   const scrollRef = useRef(null)
   const [hover, setHover] = useState(null)
   const { buckets, rows } = useMemo(() => {
-    const ce = buildOiChangeMatrix(ceByStrike, strikes, asOfMs, timeframeMinutes).perStrikeChange
-    const pe = buildOiChangeMatrix(peByStrike, strikes, asOfMs, timeframeMinutes).perStrikeChange
+    const ce = sliceMatrixWindow(buildOiChangeMatrix(ceByStrike, strikes, asOfMs, timeframeMinutes), windowMinutes).perStrikeChange
+    const pe = sliceMatrixWindow(buildOiChangeMatrix(peByStrike, strikes, asOfMs, timeframeMinutes), windowMinutes).perStrikeChange
     return buildOiTotalsRows(ce, pe)
-  }, [ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes])
+  }, [ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes, windowMinutes])
   const columns = useMemo(() => [...buckets].reverse(), [buckets])
   const formatBucketTime = istTimeFormatter
 
@@ -2025,7 +2037,7 @@ function PaperTradePanel({
   mode = 'paper', onModeChange = null, liveAvailable = false, liveUnavailableReason = null,
   liveSlippage = 1, onLiveSlippageChange = null, onLivePunch = null, canLivePunch = false, liveBusy = false,
   liveOrderSummary = '', liveContent = null, liveBlockReason = null,
-  underlying = null, onUnderlyingChange = null,
+  underlying = null, onUnderlyingChange = null, onReview = null,
 }) {
   const isLiveMode = mode === 'live'
 
@@ -2107,18 +2119,25 @@ function PaperTradePanel({
             />
           )}
           {isLiveMode ? (
-            <Popconfirm
-              title="Place a REAL order on Dhan?"
-              description={liveOrderSummary}
-              okText={`${direction === 'SELL' ? 'Sell' : 'Buy'} live`} okButtonProps={{ danger: true }}
-              onConfirm={onLivePunch} disabled={!canLivePunch || liveBusy}
-            >
-              <Button type="primary" danger size="small" disabled={!canLivePunch} loading={liveBusy}>
+            onReview ? (
+              // The pre-trade review ends in the order itself, which is where a live order is confirmed.
+              <Button type="primary" danger size="small" disabled={!canLivePunch} loading={liveBusy} onClick={onReview}>
                 {direction === 'SELL' ? 'Sell' : 'Buy'} LIVE
               </Button>
-            </Popconfirm>
+            ) : (
+              <Popconfirm
+                title="Place a REAL order on Dhan?"
+                description={liveOrderSummary}
+                okText={`${direction === 'SELL' ? 'Sell' : 'Buy'} live`} okButtonProps={{ danger: true }}
+                onConfirm={onLivePunch} disabled={!canLivePunch || liveBusy}
+              >
+                <Button type="primary" danger size="small" disabled={!canLivePunch} loading={liveBusy}>
+                  {direction === 'SELL' ? 'Sell' : 'Buy'} LIVE
+                </Button>
+              </Popconfirm>
+            )
           ) : (
-            <Button type="primary" size="small" onClick={onPunch} disabled={!canPunch}>
+            <Button type="primary" size="small" onClick={onReview ?? onPunch} disabled={!canPunch}>
               {direction === 'SELL' ? 'Sell' : 'Buy'}
             </Button>
           )}
@@ -2489,6 +2508,183 @@ function OiChangeStack({ changeValue, sinceOpenValue }) {
 
 function biasColor(bias) {
   return bias === 'Bullish' ? 'success' : bias === 'Bearish' ? 'error' : 'default'
+}
+
+// ---- Pre-trade review ------------------------------------------------------------------------
+// Every Buy / Sell opens this first, so a trade is placed after looking at the picture and not on impulse:
+// total CE / PE OI, the change since the open, the last 15-25 minutes of OI change as a heatmap, the spot
+// chart with its OI support / resistance, and the futures footprint with delta and cumulative delta. The
+// last step is the order itself - the only place it is placed from. "Skip" jumps straight to that step.
+const REVIEW_STEPS = ['Total OI', 'Since open', 'OI heatmap', 'Spot chart', 'Footprint', 'Order']
+const REVIEW_HEATMAP_WINDOWS = [15, 20, 25]
+const REVIEW_FOOTPRINT_BARS = 18
+const DEFAULT_FOOTPRINT_ROWS = { NIFTY: 1, BANKNIFTY: 5, SENSEX: 5 }
+
+function footprintRowSize(underlying) {
+  try {
+    const saved = JSON.parse(localStorage.getItem('optionanalytics.orderFlow.rowSizes') ?? 'null')
+    if (saved?.[underlying] > 0) return saved[underlying]
+  } catch { /* use the default */ }
+  return DEFAULT_FOOTPRINT_ROWS[underlying] ?? 1
+}
+
+// The futures day from the Order Flow server (footprint rows with the buy / sell split), as of the clock.
+function useReviewFootprint(open, underlying, dateKey) {
+  const [state, setState] = useState({ loading: false, error: null, day: null })
+  useEffect(() => {
+    if (!open || !underlying || !dateKey) return undefined
+    let cancelled = false
+    setState({ loading: true, error: null, day: null })
+    const rowSize = footprintRowSize(underlying)
+    fetch(`/api/order-flow/${underlying}/day/${dateKey}?rowSize=${rowSize}&minTradeLots=100000&heatmapColumns=50`)
+      .then((r) => (r.ok ? r.json() : r.json().then((b) => Promise.reject(new Error(b?.error ?? `HTTP ${r.status}`)))))
+      .then((body) => { if (!cancelled) setState({ loading: false, error: null, day: { ...body, rowSize } }) })
+      .catch((err) => { if (!cancelled) setState({ loading: false, error: err.message, day: null }) })
+    return () => { cancelled = true }
+  }, [open, underlying, dateKey])
+  return state
+}
+
+function ReviewFootprint({ state, asOfMs, isLive }) {
+  const [timeframe, setTimeframe] = useState(1)
+  const day = state.day
+  const estimated = day?.source === 'estimated'
+  const lotSize = day?.meta?.lotSize ?? 1
+  const shown = useMemo(() => {
+    if (!day) return null
+    // Up to the clock only (a replay must not show minutes after it); the live day is shown as it stands.
+    const minuteBars = isLive || asOfMs == null ? day.bars : day.bars.filter((b) => new Date(b.time).getTime() < asOfMs)
+    const analysed = analyzeBars(aggregateFootprintBars(minuteBars, timeframe), { rowSize: day.rowSize, minVolume: lotSize, estimated })
+    const withCvd = withBackfill(analysed, day.backfill, timeframe)
+    return { all: withCvd.bars, last: withCvd.bars.slice(-REVIEW_FOOTPRINT_BARS) }
+  }, [day, asOfMs, isLive, timeframe, lotSize, estimated])
+  if (state.loading) return <Text type="secondary">Loading the futures footprint…</Text>
+  if (state.error) return <Alert type="warning" showIcon message="The futures footprint is not available" description={state.error} />
+  if (!shown || shown.last.length === 0) return <Empty description="No futures footprint yet for this day." />
+  const last = shown.last[shown.last.length - 1]
+  return (
+    <Space direction="vertical" size={8} style={{ width: '100%' }}>
+      <Space wrap size={12}>
+        <Segmented size="small" value={timeframe} onChange={setTimeframe} options={[1, 3, 5].map((v) => ({ value: v, label: `${v} min` }))} />
+        <Text style={{ fontSize: 12 }}>Last bar Δ <Text strong style={{ color: last.delta >= 0 ? UP_COLOR : DOWN_COLOR }}>{last.delta >= 0 ? '+' : ''}{Math.round(last.delta / lotSize)}</Text> lots</Text>
+        <Text style={{ fontSize: 12 }}>Cumulative Δ (from the open) <Text strong style={{ color: last.cvd >= 0 ? UP_COLOR : DOWN_COLOR }}>{last.cvd >= 0 ? '+' : ''}{Math.round(last.cvd / lotSize)}</Text> lots</Text>
+        {estimated && <Tag color="orange">estimated from 1-min candles</Tag>}
+      </Space>
+      <FootprintChart bars={shown.last} rowSize={day.rowSize} lotSize={lotSize} showLots lastPrice={day.meta?.lastPrice} height={420} timeframe={timeframe} />
+      <Text type="secondary" style={{ fontSize: 11 }}>
+        Each bar's rows are sell (at the bid) × buy (at the ask); Δ is the bar's buy minus sell and ΣΔ the running total. Built from Dhan's per-second snapshot ticks, so it can differ from a tick-by-tick chart.
+      </Text>
+    </Space>
+  )
+}
+
+function PreTradeReview({
+  open, onCancel, onPlace, order, underlying, dateKey, asOfMs, isLive,
+  totals, dayOi, ceByStrike, peByStrike, strikes, atmStrike, step,
+  spotBars, ladderRows, vwapSeries, showVwap, top5Only, dayKey,
+}) {
+  const [current, setCurrent] = useState(0)
+  const [windowMinutes, setWindowMinutes] = useState(20)
+  const footprint = useReviewFootprint(open && current === 4, underlying, dateKey)
+  const last = REVIEW_STEPS.length - 1
+  const live = order.mode === 'live'
+  const color = (v) => (v == null || v === 0 ? AXIS_COLOR : v > 0 ? UP_COLOR : DOWN_COLOR)
+
+  const content = (() => {
+    switch (current) {
+      case 0: {
+        const heavier = totals.totalPeOi === totals.totalCeOi ? null : totals.totalPeOi > totals.totalCeOi ? 'PE' : 'CE'
+        return (
+          <Space direction="vertical" size={10} style={{ width: '100%' }}>
+            <Row gutter={16}>
+              <Col span={8}><Statistic title="Total CE OI" value={formatOiMillions(totals.totalCeOi)} /></Col>
+              <Col span={8}><Statistic title="Total PE OI" value={formatOiMillions(totals.totalPeOi)} /></Col>
+              <Col span={8}><Statistic title="PCR (PE ÷ CE)" value={totals.pcr != null ? totals.pcr.toFixed(2) : '—'} /></Col>
+            </Row>
+            <Text style={{ fontSize: 12 }}>
+              {heavier ? `${heavier} OI is heavier (${formatOiMillions(Math.abs(totals.totalPeOi - totals.totalCeOi))} more) - ` : ''}
+              {heavier === 'PE' ? 'more puts written: support is the bigger side.' : heavier === 'CE' ? 'more calls written: resistance is the bigger side.' : ''}
+              {totals.maxPain != null && ` Max pain ${totals.maxPain}.`}
+            </Text>
+          </Space>
+        )
+      }
+      case 1:
+        return dayOi ? (
+          <Space direction="vertical" size={10} style={{ width: '100%' }}>
+            <Row gutter={16}>
+              <Col span={12}><Statistic title="CE OI since the open" value={formatOiMillions(dayOi.ceDayChange, { signed: true })} valueStyle={{ color: color(dayOi.ceDayChange) }} /></Col>
+              <Col span={12}><Statistic title="PE OI since the open" value={formatOiMillions(dayOi.peDayChange, { signed: true })} valueStyle={{ color: color(dayOi.peDayChange) }} /></Col>
+            </Row>
+            <Text style={{ fontSize: 12 }}>{dayOi.dayReason}</Text>
+            {(dayOi.added.length > 0 || dayOi.removed.length > 0) && (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                Most added: {dayOi.added.map((m) => `${m.strike} ${m.side} ${formatOiMillions(m.change, { signed: true })}`).join(' · ') || '—'}
+                {' · '}Most removed: {dayOi.removed.map((m) => `${m.strike} ${m.side} ${formatOiMillions(m.change, { signed: true })}`).join(' · ') || '—'}
+              </Text>
+            )}
+          </Space>
+        ) : <Empty description="No since-open figures yet." />
+      case 2:
+        return (
+          <Space direction="vertical" size={10} style={{ width: '100%' }}>
+            <Space size={8}>
+              <Text type="secondary" style={{ fontSize: 12 }}>Last</Text>
+              <Segmented size="small" value={windowMinutes} onChange={setWindowMinutes} options={REVIEW_HEATMAP_WINDOWS.map((v) => ({ value: v, label: `${v} min` }))} />
+              <Text style={{ color: OI_ADDED_COLOR, fontSize: 12 }}>■ OI added</Text>
+              <Text style={{ color: OI_REMOVED_COLOR, fontSize: 12 }}>■ OI removed</Text>
+            </Space>
+            <Text strong style={{ fontSize: 12 }}>Totals · CE, PE and Net (CE − PE) - Δ and cumulative Δ</Text>
+            <OiTotalsHeatmap ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={strikes} asOfMs={asOfMs} timeframeMinutes={1} windowMinutes={windowMinutes} live={isLive} />
+            <Text strong style={{ fontSize: 12 }}>CE by strike</Text>
+            <OiChangeHeatmapPlot label="CE" byStrike={ceByStrike} strikes={strikes} atmStrike={atmStrike} asOfMs={asOfMs} timeframeMinutes={1} windowMinutes={windowMinutes} live={isLive} />
+            <Text strong style={{ fontSize: 12 }}>PE by strike</Text>
+            <OiChangeHeatmapPlot label="PE" byStrike={peByStrike} strikes={strikes} atmStrike={atmStrike} asOfMs={asOfMs} timeframeMinutes={1} windowMinutes={windowMinutes} live={isLive} />
+          </Space>
+        )
+      case 3:
+        return spotBars.length > 0 ? (
+          <ChartErrorBoundary key={`review-${dayKey}`}>
+            <ReplayChart bars={spotBars} ladderRows={ladderRows} dayKey={`review-${dayKey}`} atmStrike={atmStrike} step={step} top5Only={top5Only} vwapSeries={vwapSeries} showVwap={showVwap} height={380} />
+          </ChartErrorBoundary>
+        ) : <Empty description="No spot chart yet." />
+      case 4:
+        return <ReviewFootprint state={footprint} asOfMs={asOfMs} isLive={isLive} />
+      default:
+        return (
+          <Space direction="vertical" size={10} style={{ width: '100%' }}>
+            {live && <Alert type="error" showIcon message="LIVE - this places a real order on your Dhan account" />}
+            <div style={{ fontSize: 15 }}>
+              <Tag color={order.direction === 'BUY' ? 'success' : 'error'} style={{ fontSize: 14 }}>{order.direction}</Tag>
+              <Text strong>{underlying} {order.strike} {order.side}</Text> × {order.qtyLots} lot{order.qtyLots === 1 ? '' : 's'}
+            </div>
+            <Text type="secondary" style={{ fontSize: 12 }}>{order.summary}</Text>
+            <Text style={{ fontSize: 12 }}>Stop-loss {order.sl > 0 ? `${order.sl} pts` : 'off'} · Target {order.target > 0 ? `${order.target} pts` : 'off'}{order.trailGap > 0 ? ` · trailing ${order.trailGap} pts after +${order.trailStart} pts` : ''}</Text>
+          </Space>
+        )
+    }
+  })()
+
+  return (
+    <Modal
+      open={open} onCancel={onCancel} destroyOnClose width={Math.min(980, typeof window === 'undefined' ? 980 : window.innerWidth - 24)}
+      styles={{ body: { maxHeight: '72vh', overflowY: 'auto' } }}
+      title={`Before you ${order.direction === 'SELL' ? 'sell' : 'buy'} · ${underlying} ${order.strike} ${order.side}`}
+      footer={(
+        <Space>
+          {current < last && <Button onClick={() => setCurrent(last)}>Skip</Button>}
+          {current > 0 && <Button onClick={() => setCurrent(current - 1)}>Back</Button>}
+          {current < last
+            ? <Button type="primary" onClick={() => setCurrent(current + 1)}>Next</Button>
+            : <Button type="primary" danger={live} onClick={onPlace}>{live ? `${order.direction === 'SELL' ? 'Sell' : 'Buy'} LIVE - place order` : `${order.direction === 'SELL' ? 'Sell' : 'Buy'} - place paper order`}</Button>}
+        </Space>
+      )}
+    >
+      <Steps size="small" current={current} items={REVIEW_STEPS.map((title) => ({ title }))} style={{ marginBottom: 14 }} responsive={false} />
+      {/* A step that fails to draw must never stop the order: the buttons below stay outside the boundary. */}
+      {open && <ChartErrorBoundary key={current}>{content}</ChartErrorBoundary>}
+    </Modal>
+  )
 }
 
 const SPEED_OPTIONS = [
@@ -3625,6 +3821,13 @@ export default function OiReplayPage() {
     lots: paperQtyLots, slippagePoints: liveSlippage, stopLossPoints: paperSlPoints, targetPoints: paperTargetPoints,
     trailStartPoints: paperTrailGap > 0 ? paperTrailStart ?? 0 : 0, trailGapPoints: paperTrailGap ?? 0,
   }), { title: 'LIVE order placed' })
+  // Buy / Sell open the pre-trade review first; its last step places the order.
+  const [reviewOpen, setReviewOpen] = useState(false)
+  const handleReviewPlace = () => {
+    setReviewOpen(false)
+    if (liveTradeActive) handleLivePunch()
+    else handlePaperPunch()
+  }
   const handleLiveClose = (securityId) => runLiveAction(() => liveTradingApi.close(securityId, liveSlippage), { title: 'LIVE close sent' })
   const handleLiveProtect = (securityId, stopLossPrice, targetPrice) => runLiveAction(() => liveTradingApi.protect(securityId, stopLossPrice, targetPrice, liveSlippage))
   const handleLivePartialExit = (securityId, lots) => runLiveAction(() => liveTradingApi.partialExit(securityId, lots, liveSlippage))
@@ -5095,6 +5298,22 @@ export default function OiReplayPage() {
           panel keeps its own open/position/size state, so opening or closing one never touches
           another. */}
       <DomDrawer open={domOpen} onClose={() => setDomOpen(false)} underlying={underlying} />
+      {reviewOpen && (
+        <PreTradeReview
+          open={reviewOpen} onCancel={() => setReviewOpen(false)} onPlace={handleReviewPlace}
+          order={{
+            mode: liveTradeActive ? 'live' : 'paper', direction: paperDirection, strike: paperStrike, side: paperSide, qtyLots: paperQtyLots,
+            sl: paperSlPoints, target: paperTargetPoints, trailStart: paperTrailStart, trailGap: paperTrailGap,
+            summary: liveTradeActive ? liveOrderSummary : paperEntryPreview?.price != null
+              ? paperTradeText({ direction: paperDirection, strike: paperStrike, side: paperSide, qtyLots: paperQtyLots }, paperEntryPreview.price) : '',
+          }}
+          underlying={underlying} dateKey={result?.date} asOfMs={asOfMs} isLive={isLive}
+          totals={{ totalCeOi, totalPeOi, pcr, maxPain }} dayOi={dayOiSummary}
+          ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} step={step}
+          spotBars={displayBars} ladderRows={ladderRows} vwapSeries={vwapSeries} showVwap={showVwap} top5Only={top5WallsOnly}
+          dayKey={`${underlying}-${result?.date}-${timeframe}`}
+        />
+      )}
       {spotFloating && result && (
         <DraggableFloatingPanel
           title={`Spot - ${underlying}`} pos={spotPanelPos} onPosChange={setSpotPanelPos}
@@ -5136,6 +5355,7 @@ export default function OiReplayPage() {
             targetPoints={paperTargetPoints} onTargetPointsChange={setPaperTargetPoints}
             trailStart={paperTrailStart} onTrailStartChange={setPaperTrailStart} trailGap={paperTrailGap} onTrailGapChange={setPaperTrailGap}
             onPunch={handlePaperPunch} canPunch={atmStrike != null && paperEntryPreview?.price != null}
+            onReview={() => setReviewOpen(true)}
             positions={enrichedPaperPositions} onExit={handlePaperExit} onExitAll={handlePaperExitAll} onClearAll={handlePaperClearAll}
             mode={liveTradeActive ? 'live' : 'paper'} onModeChange={isAdmin ? handleTradeModeChange : null}
             liveAvailable={liveUnavailableReason == null} liveUnavailableReason={liveUnavailableReason}
