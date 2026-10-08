@@ -293,6 +293,10 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<OptionAnalytics.Se
 
 // Keeps OI Replay's own "today, live" mode genuinely live over the same shared Dhan WS feed -
 // see OiReplayLiveFeedService's own doc comment.
+// Price falls / rises for 3 minutes while the nearest strike's OI does not give way -> Telegram + a
+// notification on the OI Replay page, with or without a browser open. See OiDivergenceMonitor.
+builder.Services.AddSingleton<OiDivergenceMonitor>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<OiDivergenceMonitor>());
 builder.Services.AddHostedService<OiReplayLiveFeedService>();
 
 builder.Services.AddSignalR();

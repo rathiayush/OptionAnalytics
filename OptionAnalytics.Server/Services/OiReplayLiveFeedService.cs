@@ -115,6 +115,7 @@ public sealed class OiReplayLiveFeedService : BackgroundService
     private readonly IHubContext<SpotHub> _hub;
     private readonly LiveBroadcastBatcher _batcher;
     private readonly ILogger<OiReplayLiveFeedService> _logger;
+    private readonly OiDivergenceMonitor? _divergence;
 
     /// <summary>Every leg this service has resolved and subscribed, across every recenter - see this
     /// class's own doc comment for why entries are never removed when a strike merely drifts out of
@@ -134,8 +135,9 @@ public sealed class OiReplayLiveFeedService : BackgroundService
     public OiReplayLiveFeedService(
         SpotFeedHostedService spotFeed, DhanOptionChainMaster optionChainMaster, DhanFuturesInstrumentMaster futuresInstrumentMaster,
         DhanMarketFeedClient feedClient, DhanOptionChainQuotes chainQuotes, IHubContext<SpotHub> hub, LiveBroadcastBatcher batcher,
-        ILogger<OiReplayLiveFeedService> logger)
+        ILogger<OiReplayLiveFeedService> logger, OiDivergenceMonitor? divergence = null)
     {
+        _divergence = divergence;
         _batcher = batcher;
         _spotFeed = spotFeed;
         _optionChainMaster = optionChainMaster;
@@ -506,6 +508,9 @@ public sealed class OiReplayLiveFeedService : BackgroundService
         {
             var side = leg.IsCall ? "CE" : "PE";
             var group = $"c:{leg.Underlying}:{leg.ExpiryFlag}";
+
+            // The nearest listed expiry's OI feeds the price-vs-OI divergence alert (OiDivergenceMonitor).
+            if (leg.ExpiryFlag == "N1") _divergence?.RecordOi(leg.Underlying, side, leg.Strike, observedAt, tick.OpenInterest);
 
             // Conflated for the charts (see LiveBroadcastBatcher): the newest reading per leg per
             // minute, folded with any earlier ticks the browser hasn't received yet (keeps their

@@ -1,7 +1,8 @@
 import { Component, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import dayjs from 'dayjs'
-import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicker, TimePicker, Alert, Empty, Tooltip, Popconfirm, Slider, Tag, InputNumber, Switch, Table, Segmented, Checkbox, Modal, Steps, message } from 'antd'
+import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicker, TimePicker, Alert, Empty, Tooltip, Popconfirm, Slider, Tag, InputNumber, Switch, Table, Segmented, Checkbox, Modal, Steps, message, notification } from 'antd'
 import { findSuddenWalls, suddenWallText } from './suddenOi.js'
+import { chime, speak } from './alerts.js'
 import { buildOiTotalsRows } from './oiTotalsHeatmap.js'
 import { PlayCircleOutlined, PauseCircleOutlined, ReloadOutlined, SoundOutlined, ExportOutlined } from '@ant-design/icons'
 import { createSeriesMarkers, CandlestickSeries, LineSeries, HistogramSeries, CrosshairMode } from 'lightweight-charts'
@@ -96,7 +97,7 @@ const RECONNECT_RETRY_POLICY = {
 // connection itself down, only on gating what it's ALLOWED to do once a tick arrives.
 const EMPTY_GROUPS = []
 
-function useOiReplayLiveFeed(onSpotUpdate, onOiReplayTicks, onFuturesTicks, onRestSnapshot, onReconnected, onPainted, underlying, expiryFlag, onLivePositions = null, extraGroups = EMPTY_GROUPS) {
+function useOiReplayLiveFeed(onSpotUpdate, onOiReplayTicks, onFuturesTicks, onRestSnapshot, onReconnected, onPainted, underlying, expiryFlag, onLivePositions = null, extraGroups = EMPTY_GROUPS, onDivergence = null) {
   const spotRef = useRef(onSpotUpdate)
   const tickRef = useRef(onOiReplayTicks)
   const futuresRef = useRef(onFuturesTicks)
@@ -113,6 +114,9 @@ function useOiReplayLiveFeed(onSpotUpdate, onOiReplayTicks, onFuturesTicks, onRe
   // the admin-only "positions" group (passed in extraGroups while Live mode is open).
   const livePositionsRef = useRef(onLivePositions)
   livePositionsRef.current = onLivePositions
+  // The server's price-vs-OI divergence alert (OiDivergenceMonitor) - sent to every open page.
+  const divergenceRef = useRef(onDivergence)
+  divergenceRef.current = onDivergence
 
   // The actual SignalR connection state - the page's own "Live" badge used to be purely a date
   // comparison, so it read "Live" (green) even when this connection had failed to negotiate, was
@@ -154,6 +158,7 @@ function useOiReplayLiveFeed(onSpotUpdate, onOiReplayTicks, onFuturesTicks, onRe
     // Dhan's option-chain snapshot (every ~30-90s per expiry) - the only live source of IV, since
     // the websocket tick carries none.
     connection.on('oiRestSnapshot', (snapshot) => restSnapshotRef.current?.(snapshot))
+    connection.on('oiDivergenceAlert', (alert) => divergenceRef.current?.(alert))
     connection.onreconnecting(() => setConnectionState('reconnecting'))
     // A reconnect gets a brand-new server-side connection with no group membership at all - rejoin
     // the CURRENT selection (groupsRef.current), not whatever it was when this connection object was
@@ -3389,8 +3394,24 @@ export default function OiReplayPage() {
     return () => clearInterval(id)
   }, [isLive])
 
+  // Price moved for 3 minutes but the nearest strike's OI did not give way (the server's OiDivergenceMonitor,
+  // which also sends it to Telegram): a notification, a chime and the words - the scanner's switches apply.
+  const handleDivergenceAlert = (alert) => {
+    if (!alert?.zone) return
+    let cfg = {}
+    try { cfg = JSON.parse(localStorage.getItem('optionanalytics.strategyScanner.settings')) ?? {} } catch { /* none */ }
+    if (cfg.alerts === false) return
+    const discount = alert.zone === 'Discount'
+    if (cfg.sound !== false) chime(discount)
+    if (cfg.voice !== false) speak(`${alert.underlying} ${discount ? 'discount' : 'premium'} zone. ${alert.side === 'PE' ? 'Put' : 'Call'} OI holding at ${alert.strike}.`)
+    notification.open({
+      key: `divergence-${alert.underlying}-${alert.zone}-${alert.barTime}`, placement: 'topRight', duration: 25,
+      message: <span style={{ color: discount ? UP_COLOR : DOWN_COLOR, fontWeight: 700 }}>⚖ {alert.underlying} · {discount ? 'discount zone' : 'premium zone'} · {alert.side} {alert.strike}</span>,
+      description: <span style={{ fontSize: 12 }}>{alert.message}</span>,
+    })
+  }
   const handleLiveReconnected = () => { if (isLive) load() }
-  const liveConnectionState = useOiReplayLiveFeed(handleSpotUpdate, handleOiReplayTicks, handleFuturesTicks, handleRestSnapshot, handleLiveReconnected, isLive ? feedLag.recordPainted : null, underlying, liveExpiryFlag, liveTradeActive ? applyLivePositions : null, liveExtraGroups)
+  const liveConnectionState = useOiReplayLiveFeed(handleSpotUpdate, handleOiReplayTicks, handleFuturesTicks, handleRestSnapshot, handleLiveReconnected, isLive ? feedLag.recordPainted : null, underlying, liveExpiryFlag, liveTradeActive ? applyLivePositions : null, liveExtraGroups, handleDivergenceAlert)
 
   // A plain tick, unrelated to any live data - exists ONLY so feedStalled below re-evaluates on a
   // real clock instead of purely as a side effect of the next incoming tick (same reasoning as Live
