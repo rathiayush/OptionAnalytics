@@ -2025,6 +2025,7 @@ function PaperTradePanel({
   mode = 'paper', onModeChange = null, liveAvailable = false, liveUnavailableReason = null,
   liveSlippage = 1, onLiveSlippageChange = null, onLivePunch = null, canLivePunch = false, liveBusy = false,
   liveOrderSummary = '', liveContent = null, liveBlockReason = null,
+  underlying = null, onUnderlyingChange = null,
 }) {
   const isLiveMode = mode === 'live'
 
@@ -2055,6 +2056,14 @@ function PaperTradePanel({
   return (
     <div style={{ width: '100%' }}>
       <Space direction="vertical" size={10} style={{ width: '100%' }}>
+        {onUnderlyingChange && (
+          <Tooltip title="Pick the index to trade - the panel then uses that index's ATM strike, expiry and premium. An open position in another index stays where it is.">
+            <Segmented
+              value={underlying} onChange={onUnderlyingChange} aria-label="Index to trade"
+              options={['NIFTY', 'BANKNIFTY', 'SENSEX'].map((u) => ({ label: u, value: u }))}
+            />
+          </Tooltip>
+        )}
         {onModeChange && (
           <Space wrap size={8}>
             <Tooltip title={liveAvailable ? null : liveUnavailableReason}>
@@ -3617,6 +3626,7 @@ export default function OiReplayPage() {
     trailStartPoints: paperTrailGap > 0 ? paperTrailStart ?? 0 : 0, trailGapPoints: paperTrailGap ?? 0,
   }), { title: 'LIVE order placed' })
   const handleLiveClose = (securityId) => runLiveAction(() => liveTradingApi.close(securityId, liveSlippage), { title: 'LIVE close sent' })
+  const handleLiveProtect = (securityId, stopLossPrice, targetPrice) => runLiveAction(() => liveTradingApi.protect(securityId, stopLossPrice, targetPrice, liveSlippage))
   const handleLivePartialExit = (securityId, lots) => runLiveAction(() => liveTradingApi.partialExit(securityId, lots, liveSlippage))
   const handleLiveCancel = (orderId, isPlain, leg) => runLiveAction(() => liveTradingApi.cancel(orderId, isPlain, leg))
   const handleLiveExitAll = () => runLiveAction(() => liveTradingApi.exitAll(liveSlippage), { title: 'LIVE exit all sent' })
@@ -5117,6 +5127,7 @@ export default function OiReplayPage() {
         >
           <PaperTradePanel
             atmStrike={atmStrike} step={step}
+            underlying={underlying} onUnderlyingChange={selectUnderlying}
             side={paperSide} onSideChange={setPaperSide}
             direction={paperDirection} onDirectionChange={setPaperDirection}
             strikeOffset={paperStrikeOffset} onStrikeOffsetChange={setPaperStrikeOffset}
@@ -5135,7 +5146,7 @@ export default function OiReplayPage() {
             liveContent={(
               <LivePositionsView
                 snapshot={livePositions} slippage={liveSlippage} busy={liveBusy}
-                onClose={handleLiveClose} onPartialExit={handleLivePartialExit} onCancel={handleLiveCancel} onRefresh={handleLiveRefresh}
+                onClose={handleLiveClose} onProtect={handleLiveProtect} onPartialExit={handleLivePartialExit} onCancel={handleLiveCancel} onRefresh={handleLiveRefresh}
                 onExitAll={handleLiveExitAll} onEmergencyExitAll={handleLiveEmergencyExitAll} onCancelAll={handleLiveCancelAll}
               />
             )}

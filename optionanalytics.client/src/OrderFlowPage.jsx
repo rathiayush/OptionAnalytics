@@ -59,6 +59,9 @@ const mergePrints = (a, b) => {
   for (const p of b) bySeq.set(p.seq, p)
   return [...bySeq.values()].sort((x, y) => x.seq - y.seq).slice(-TAPE_PRINTS)
 }
+// A sudden OI wall is only ALERTED (chime / voice / popup / Telegram) when the strike's OI grew by more than this
+// share inside the window; smaller ones are still listed in Signals.
+const OI_ALERT_MIN_PCT = 0.2
 const ICE_SENT_KEY = 'optionanalytics.orderFlow.iceTelegramSent.v1'
 const IST_DATE = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' })
 const IST_HHMMSS = new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' })
@@ -585,10 +588,14 @@ export default function OrderFlowPage() {
     suddenLogRef.current = log
     setSuddenLog(log)
     if (isReplay || !fresh.length) return
+    // Only a big change is worth an alert (chime, voice, popup, Telegram): the strike's OI up by more than
+    // OI_ALERT_MIN_PCT in the window. The rest still show in the Signals list.
+    const alertable = fresh.filter((w) => w.pct > OI_ALERT_MIN_PCT)
+    if (!alertable.length) return
     let cfg = {}
     try { cfg = JSON.parse(localStorage.getItem('optionanalytics.strategyScanner.settings')) ?? {} } catch { /* none */ }
     if (cfg.alerts === false) return
-    for (const w of fresh.slice(0, 3)) {
+    for (const w of alertable.slice(0, 3)) {
       const fut = basis != null ? ` (futures ~${Math.round(w.strike + basis)})` : ''
       if (cfg.sound !== false) chime(w.side === 'PE')
       if (cfg.voice !== false) speak(`Sudden ${w.side === 'PE' ? 'put' : 'call'} wall ${w.strike}.`)
@@ -675,6 +682,16 @@ export default function OrderFlowPage() {
     }
     return list.sort((a, b) => b.time - a.time).slice(0, 200)
   }, [bars, view?.icebergs, largeTrades, lotSize, showLots, estimated, bigLabel, liquidity, pullStack.signals, sweeps, suddenLog])
+
+  // Filter the Signals list: by type, by direction, by minimum confidence (kept across reloads).
+  const [signalTypes, setSignalTypes] = usePersistedState('optionanalytics.orderFlow.signalTypes', [])
+  const [signalSide, setSignalSide] = usePersistedState('optionanalytics.orderFlow.signalSide', 'all')
+  const [signalMinConfidence, setSignalMinConfidence] = usePersistedState('optionanalytics.orderFlow.signalMinConfidence', 0)
+  const signalTypeOptions = useMemo(() => [...new Set(signals.map((x) => x.type))].sort().map((t) => ({ value: t, label: t })), [signals])
+  const shownSignals = useMemo(() => signals.filter((x) => (signalTypes.length === 0 || signalTypes.includes(x.type))
+    && (signalSide === 'all' || (signalSide === 'bullish') === Boolean(x.bullish))
+    // A signal with no confidence of its own (a stack, an iceberg, a big order) is not hidden by this.
+    && (!(signalMinConfidence > 0) || x.confidence == null || x.confidence >= signalMinConfidence)), [signals, signalTypes, signalSide, signalMinConfidence])
 
   const meta = view?.meta
   const lastBar = bars.at(-1)
@@ -899,8 +916,21 @@ export default function OrderFlowPage() {
                 prints={tapePrints} aggression={aggressionNow} pressure={pullStack.pressure} sweeps={view?.sweeps} lotSize={lotSize}
                 largeLots={bigLots} error={tape.error} estimated={estimated}
               />
-              <Card size="small" title="Signals" styles={{ body: { maxHeight: 360, overflowY: 'auto' } }}>
-                {signals.length === 0 ? <Text type="secondary">No signals yet.</Text> : signals.map((s) => (
+              <Card size="small" title={`Signals${shownSignals.length !== signals.length ? ` · ${shownSignals.length}/${signals.length}` : ''}`} styles={{ body: { maxHeight: 360, overflowY: 'auto' } }}
+                extra={(
+                  <Space size={6} wrap style={{ justifyContent: 'flex-end' }}>
+                    <Select
+                      mode="multiple" size="small" allowClear maxTagCount="responsive" placeholder="All types" style={{ minWidth: 150, maxWidth: 240 }}
+                      value={signalTypes} onChange={setSignalTypes} options={signalTypeOptions} aria-label="Signal types"
+                    />
+                    <Select
+                      size="small" value={signalSide} onChange={setSignalSide} style={{ width: 96 }} aria-label="Signal direction"
+                      options={[{ value: 'all', label: 'Both' }, { value: 'bullish', label: 'Bullish' }, { value: 'bearish', label: 'Bearish' }]}
+                    />
+                    <InputNumber size="small" min={0} max={100} step={10} value={signalMinConfidence} onChange={(v) => setSignalMinConfidence(v ?? 0)} style={{ width: 118 }} addonBefore="≥" addonAfter="%" aria-label="Minimum confidence" />
+                  </Space>
+                )}>
+                {signals.length === 0 ? <Text type="secondary">No signals yet.</Text> : shownSignals.length === 0 ? <Text type="secondary">No signals match the filter.</Text> : shownSignals.map((s) => (
                   <div key={s.key} style={{ display: 'flex', gap: 8, alignItems: 'baseline', fontSize: 12, padding: '3px 0', borderBottom: '1px solid #ffffff0d' }}>
                     <Text type="secondary" style={{ fontSize: 11, minWidth: 58 }}>{IST_HHMMSS.format(new Date(s.time))}</Text>
                     <Tag color={s.bullish ? 'green' : 'red'} style={{ margin: 0, fontSize: 11 }}>{s.type}</Tag>

@@ -1434,6 +1434,117 @@ public sealed class LiveTradingService : BackgroundService
         }
     }
 
+    /// <summary>Puts a stop-loss and/or target (ABSOLUTE option prices, 0 = leave that one alone) on an open
+    /// position, whatever opened it. If the position has a super order's working legs those are moved to the
+    /// new prices (a trailing stop continues from the new level, tightening only); a position with no
+    /// stop-loss leg - a manual entry, one outside this app, or one left bare - gets a STOP_LOSS order on
+    /// Dhan (trigger = the stop, limit <paramref name="slippagePoints"/> beyond it) whose tag carries the
+    /// target for the server to watch, exactly like the protection order a partial exit used to place. An
+    /// earlier protection order is replaced. A stop must sit on the losing side of the live price and a
+    /// target on the winning side, or the order would fire at once.</summary>
+    public async Task<ManualOrderResult> SetPositionProtectionAsync(string securityId, decimal stopLossPrice, decimal targetPrice, decimal slippagePoints, CancellationToken cancellationToken)
+    {
+        if (!_session.IsAuthenticated) return ManualOrderResult.Fail("not logged in to Dhan right now");
+        if (stopLossPrice <= 0 && targetPrice <= 0) return ManualOrderResult.Fail("give a stop-loss and/or a target price");
+        await _actionLock.WaitAsync(cancellationToken);
+        try
+        {
+            var position = (await _positions.ListAsync(cancellationToken)).FirstOrDefault(p => p.SecurityId == securityId && p.IsOpen);
+            if (position is null) return ManualOrderResult.Fail("no open position in that contract");
+            if (!uint.TryParse(securityId, out var id)) return ManualOrderResult.Fail("unknown contract");
+            var tick = _chain.FindBySecurityId(id)?.TickSize is > 0 and var t ? t : 0.05m;
+            var sells = position.ClosesBySelling;
+            decimal? stop = stopLossPrice > 0 ? StrategyTriggerHostedService.RoundToTick(stopLossPrice, tick) : null;
+            decimal? target = targetPrice > 0 ? StrategyTriggerHostedService.RoundToTick(targetPrice, tick) : null;
+            if (_feed.LastTickFor(id) is { LastPrice: > 0 } last)
+            {
+                var ltp = last.LastPrice;
+                if (stop is { } sl && (sells ? sl >= ltp : sl <= ltp))
+                    return ManualOrderResult.Fail($"{position.TradingSymbol}: the stop-loss {sl:0.##} must be {(sells ? "below" : "above")} the live price {ltp:0.##} - it would fire at once");
+                if (target is { } tg && (sells ? tg <= ltp : tg >= ltp))
+                    return ManualOrderResult.Fail($"{position.TradingSymbol}: the target {tg:0.##} must be {(sells ? "above" : "below")} the live price {ltp:0.##}");
+            }
+
+            var messages = new List<string>();
+            var failures = new List<string>();
+            var superOrders = (await _superOrders.ListAsync(cancellationToken))
+                .Where(o => o.SecurityId == securityId && o.OrderStatus is "TRADED" or "PART_TRADED").ToList();
+            var slLegQty = 0;
+            var hasTargetLeg = false;
+            foreach (var order in superOrders)
+            {
+                var slLeg = order.LegDetails.FirstOrDefault(l => l.LegName == "STOP_LOSS_LEG" && IsOpenStatus(l.OrderStatus));
+                var tgLeg = order.LegDetails.FirstOrDefault(l => l.LegName == "TARGET_LEG" && IsOpenStatus(l.OrderStatus));
+                if (slLeg is not null)
+                {
+                    slLegQty += order.FilledQty is > 0 and var f ? f : order.Quantity;
+                    if (stop is { } newStop)
+                    {
+                        var (result, error) = await _superOrders.ModifyAsync(order.OrderId, "STOP_LOSS_LEG", null, null, null, null, newStop, null, cancellationToken);
+                        if (result is null) failures.Add($"{order.OrderId} stop-loss: Dhan did not modify it ({error ?? "no reason given"})");
+                        else
+                        {
+                            messages.Add($"{order.OrderId} stop-loss -> {newStop:0.##}");
+                            // A trailing stop carries on from the new level, tightening only.
+                            lock (_lock) { if (_trails.TryGetValue(order.OrderId, out var trail)) { trail.LastSent = newStop; trail.LastSentAt = DateTimeOffset.UtcNow; } }
+                        }
+                    }
+                }
+                if (tgLeg is not null)
+                {
+                    hasTargetLeg = true;
+                    if (target is { } newTarget)
+                    {
+                        var (result, error) = await _superOrders.ModifyAsync(order.OrderId, "TARGET_LEG", null, null, null, newTarget, null, null, cancellationToken);
+                        if (result is null) failures.Add($"{order.OrderId} target: Dhan did not modify it ({error ?? "no reason given"})");
+                        else messages.Add($"{order.OrderId} target -> {newTarget:0.##}");
+                    }
+                }
+            }
+
+            // The part of the position no stop-loss leg covers gets a protection order.
+            var uncovered = Math.Abs(position.NetQty) - slLegQty;
+            var existing = (await _orders.ListAsync(cancellationToken)).Where(o => o.SecurityId == securityId && IsProtection(o) && IsOpenStatus(o.OrderStatus)).ToList();
+            var needOrder = uncovered > 0 && (stop is not null || (target is not null && !hasTargetLeg && existing.Count > 0));
+            if (target is not null && !hasTargetLeg && stop is null && existing.Count == 0 && slLegQty < Math.Abs(position.NetQty))
+                failures.Add($"{position.TradingSymbol}: a target on its own needs a stop-loss too - the target is watched on the stop-loss order; add a stop-loss as well");
+            if (needOrder)
+            {
+                // Keep what the old protection order held when only one of the two is being changed.
+                var keepStop = stop ?? existing.Select(o => o.TriggerPrice).FirstOrDefault(v => v is > 0);
+                var keepTarget = target ?? existing.Select(o => TargetFromTag(o.CorrelationId)).FirstOrDefault(v => v is not null);
+                if (keepStop is not { } trigger)
+                    failures.Add($"{position.TradingSymbol}: no stop-loss to place");
+                else
+                {
+                    foreach (var old in existing)
+                    {
+                        var (cancelled, cancelError) = await _orders.CancelAsync(old.OrderId, cancellationToken);
+                        if (cancelled is null) failures.Add($"could not replace the old protection order {old.OrderId}: {cancelError}");
+                    }
+                    if (failures.Count == 0)
+                    {
+                        var slip = Math.Max(0, slippagePoints);
+                        var limit = StrategyTriggerHostedService.RoundToTick(Math.Max(tick, sells ? trigger - slip : trigger + slip), tick);
+                        var tag = keepTarget is { } tg ? $"{ProtectionPrefix}T{(long)Math.Round(tg * 100)}-{DateTimeOffset.UtcNow:HHmmss}" : $"{ProtectionPrefix}{DateTimeOffset.UtcNow:HHmmss}";
+                        var (placed, placeError) = await _orders.PlaceAsync(sells ? "SELL" : "BUY", position.ExchangeSegment, position.ProductType, "STOP_LOSS", "DAY",
+                            securityId, uncovered, limit, tag, cancellationToken, triggerPrice: trigger);
+                        if (placed is null) failures.Add($"{position.TradingSymbol}: Dhan rejected the stop-loss order ({placeError ?? "no reason given"})");
+                        else messages.Add($"{position.TradingSymbol}: stop-loss order at trigger {trigger:0.##}{(keepTarget is { } kt ? $", target {kt:0.##} watched by the server" : "")} for {uncovered}");
+                    }
+                }
+            }
+            RequestRefresh();
+            if (messages.Count == 0 && failures.Count == 0) return new ManualOrderResult(true, "nothing to change", Array.Empty<string>(), null);
+            var text = string.Join(" · ", failures.Concat(messages));
+            return failures.Count == 0 ? new ManualOrderResult(true, text, Array.Empty<string>(), null) : ManualOrderResult.Fail(text);
+        }
+        finally
+        {
+            _actionLock.Release();
+        }
+    }
+
     /// <summary>The quantity a contract's filled super orders' still-pending stop-loss (or target) legs
     /// would close if they fired.</summary>
     internal static int LegQuantity(IEnumerable<SuperOrderSummary> superOrders) => superOrders

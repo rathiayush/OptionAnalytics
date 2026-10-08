@@ -50,6 +50,18 @@ public sealed class LiveTradingController : ControllerBase
         return result.Success ? Ok(result) : UnprocessableEntity(result);
     }
 
+    public sealed record ProtectRequest(decimal StopLossPrice, decimal TargetPrice, decimal SlippagePoints = 2);
+
+    /// <summary>Adds or moves the stop-loss / target (absolute option prices) of ANY open position - see
+    /// LiveTradingService.SetPositionProtectionAsync.</summary>
+    [HttpPost("positions/{securityId}/protect")]
+    public async Task<ActionResult<ManualOrderResult>> Protect(string securityId, [FromBody] ProtectRequest request)
+    {
+        _logger.LogWarning("{User} set protection on LIVE position {SecurityId}: SL {Sl}, target {Target}.", User.Identity?.Name, securityId, request.StopLossPrice, request.TargetPrice);
+        var result = await _trading.SetPositionProtectionAsync(securityId, request.StopLossPrice, request.TargetPrice, request.SlippagePoints, CancellationToken.None);
+        return result.Success ? Ok(result) : UnprocessableEntity(result);
+    }
+
     public sealed record PartialExitRequest(int Lots, decimal SlippagePoints);
 
     /// <summary>Exits some lots of a position and keeps the rest protected - see LiveTradingService.PartialExitAsync.</summary>

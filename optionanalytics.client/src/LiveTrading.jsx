@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Alert, Button, InputNumber, Popconfirm, Space, Table, Tag, Tooltip, Typography } from 'antd'
+import { Alert, Button, InputNumber, Popconfirm, Popover, Space, Table, Tag, Tooltip, Typography } from 'antd'
 import { ReloadOutlined } from '@ant-design/icons'
 import { UP_COLOR, DOWN_COLOR, fmtIstDateTime } from './shared.jsx'
 
@@ -29,6 +29,8 @@ export const liveTradingApi = {
   positions: (refresh = false) => fetch(`/api/live-trading/positions${refresh ? '?refresh=true' : ''}`).then((r) => (r.ok ? r.json() : null)),
   place: (order) => postJson('/api/live-trading/orders', order),
   close: (securityId, slippagePoints) => postJson(`/api/live-trading/positions/${encodeURIComponent(securityId)}/close`, { slippagePoints }),
+  // Adds or moves the stop-loss / target (absolute option prices, 0 = leave) of ANY open position.
+  protect: (securityId, stopLossPrice, targetPrice, slippagePoints) => postJson(`/api/live-trading/positions/${encodeURIComponent(securityId)}/protect`, { stopLossPrice, targetPrice, slippagePoints }),
   partialExit: (securityId, lots, slippagePoints) => postJson(`/api/live-trading/positions/${encodeURIComponent(securityId)}/partial-exit`, { lots, slippagePoints }),
   cancel: (orderId, isExit = false, leg = null) => postJson(
     `/api/live-trading/orders/${encodeURIComponent(orderId)}?${new URLSearchParams({ ...(isExit ? { exit: 'true' } : {}), ...(leg ? { leg } : {}) })}`, null, 'DELETE'),
@@ -46,6 +48,37 @@ export const liveTradingApi = {
 const money = (v) => (v == null ? '—' : `${v >= 0 ? '+' : ''}${Math.round(v).toLocaleString('en-IN')}`)
 const pnlStyle = (v) => ({ color: v == null ? undefined : v >= 0 ? UP_COLOR : DOWN_COLOR, fontSize: 12 })
 const price = (v) => (v == null ? '—' : Number(v).toFixed(2))
+
+// Add a stop-loss to a position that has none, or move its stop-loss / target - whatever opened it.
+// Prices are the option's own premium. Blank / 0 leaves that one as it is.
+function ProtectButton({ row, slippage, busy, onProtect }) {
+  const [open, setOpen] = useState(false)
+  const [sl, setSl] = useState(null)
+  const [target, setTarget] = useState(null)
+  const sells = row.netQty > 0
+  const save = () => { setOpen(false); onProtect(row.securityId, sl ?? 0, target ?? 0) }
+  return (
+    <Popover
+      open={open}
+      onOpenChange={(next) => { setOpen(next); if (next) { setSl(row.stopLossPrice ?? null); setTarget(row.targetPrice ?? null) } }}
+      trigger="click" title={`Stop-loss / target · ${row.tradingSymbol}`}
+      content={(
+        <Space direction="vertical" size={8} style={{ width: 230 }}>
+          <InputNumber value={sl} onChange={setSl} min={0} step={0.5} style={{ width: '100%' }} addonBefore="Stop-loss" placeholder={row.avgPrice ? `below ${Number(row.ltp ?? row.avgPrice).toFixed(1)}` : 'price'} aria-label="Stop-loss price" />
+          <InputNumber value={target} onChange={setTarget} min={0} step={0.5} style={{ width: '100%' }} addonBefore="Target" placeholder="price" aria-label="Target price" />
+          <Text type="secondary" style={{ fontSize: 11 }}>
+            Option prices. {sells ? 'Stop below, target above' : 'Stop above, target below'} the live price{row.ltp ? ` (${Number(row.ltp).toFixed(2)})` : ''}.
+            A position with no stop-loss gets a STOP_LOSS order (limit {slippage} pts beyond the trigger); the target is watched by the server.
+            An existing stop-loss / target is moved.
+          </Text>
+          <Button type="primary" size="small" onClick={save} disabled={busy || !((sl ?? 0) > 0 || (target ?? 0) > 0)}>Save</Button>
+        </Space>
+      )}
+    >
+      <Button size="small" disabled={busy}>SL/TGT</Button>
+    </Popover>
+  )
+}
 
 // Take part of a position off: how many lots, then confirm. The rest stays protected - see
 // LiveTradingService.PartialExitAsync on the server.
@@ -91,7 +124,7 @@ const protectionTag = (r) => (r.legExcessQty > 0
 
 // The account's live positions (Dhan's own book, so they survive an app restart), pending entries
 // and today's P&L. P&L moves with the live tick feed - snapshot is pushed by the server, not polled.
-export function LivePositionsView({ snapshot, slippage, busy, onClose, onPartialExit, onCancel, onCancelAll, onRefresh, onExitAll, onEmergencyExitAll }) {
+export function LivePositionsView({ snapshot, slippage, busy, onClose, onProtect, onPartialExit, onCancel, onCancelAll, onRefresh, onExitAll, onEmergencyExitAll }) {
   if (!snapshot) return <Text type="secondary">Loading live positions from Dhan…</Text>
   const open = snapshot.positions.filter((p) => p.isOpen)
   const closed = snapshot.positions.filter((p) => !p.isOpen)
@@ -123,9 +156,10 @@ export function LivePositionsView({ snapshot, slippage, busy, onClose, onPartial
       },
     },
     {
-      title: '', key: 'action', width: 112,
+      title: '', key: 'action', width: 170,
       render: (_, r) => (r.isOpen ? (
         <Space size={4}>
+          {onProtect && <ProtectButton row={r} slippage={slippage} busy={busy} onProtect={onProtect} />}
           {onPartialExit && <PartialExitButton row={r} slippage={slippage} busy={busy} onPartialExit={onPartialExit} />}
           <Popconfirm
             title="Close this live position?"
