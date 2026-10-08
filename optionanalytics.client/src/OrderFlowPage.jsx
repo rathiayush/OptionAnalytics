@@ -6,7 +6,7 @@ import * as signalR from '@microsoft/signalr'
 import {
   NavBar, TIMEFRAME_OPTIONS, usePersistedState, RECONNECT_RETRY_POLICY, onLiveBatch, syncSignalRGroups, joinAllSignalRGroups,
   checkForNewDeploy, UP_COLOR, DOWN_COLOR, AXIS_COLOR, useAuth } from './shared.jsx'
-import { aggregateBars, analyzeBars, findWalls, bucketBook, mergeLiveMinutes, replayView, replayRange, liquiditySignals, orderFlowBias, aggression, sweepSignals, pullStackSignals, autoBigLots, liquidityMap } from './orderFlowMath.js'
+import { aggregateBars, analyzeBars, findWalls, replayView, replayRange, liquiditySignals, orderFlowBias, aggression, sweepSignals, pullStackSignals, autoBigLots, liquidityMap } from './orderFlowMath.js'
 import { TapeCard } from './OrderFlowTape.jsx'
 import { StrategyScanner } from './StrategyScanner.jsx'
 import { useDayOi } from './useDayOi.js'
@@ -20,6 +20,7 @@ import { PriceAlertsBar, usePriceAlerts } from './PriceAlerts.jsx'
 import { ProfileAlertsBar, useProfileAlerts } from './ProfileAlerts.jsx'
 import { fetchPreviousSession, sessionVolumeProfile, tpoProfile, tpoRowFor } from './profiles.js'
 import { withBackfill } from './cvdBackfill.js'
+import { TAPE_PRINTS, applyOrderFlowPush, mergePrints, orderFlowFromSnapshot, toColumn } from './liveFeeds.js'
 import { FootprintChart, DepthHeatmap, CumulativeDeltaChart, BookLadder, formatVolume } from './OrderFlowCharts.jsx'
 import { DomDrawer, useNarrow } from './DomDrawer.jsx'
 import { useReplaySync, useReplaySyncEnabled, ReplaySyncControl, withSpeedOption, SYNC_DRIFT_MS } from './replaySync.jsx'
@@ -42,23 +43,12 @@ const { Title, Text } = Typography
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX']
 const DEFAULT_ROW_SIZES = { NIFTY: 1, BANKNIFTY: 5, SENSEX: 5 }
 const ROW_SIZE_OPTIONS = [0.5, 1, 2, 5, 10, 20].map((v) => ({ value: v, label: `${v} pt row` }))
-const HEATMAP_COLUMN_MS = 2000
-const MAX_HEATMAP_COLUMNS = 3000
-const MAX_TRADES = 5000
 const speedOption = (v) => ({ value: v, label: `${Math.round(v * 10) / 10}x` })
 // 30/60/120/240/600 are OI Replay's own speeds (0.5x-10x there = minutes per second), so a synced
 // replay runs at exactly the same pace.
 const REPLAY_SPEEDS = [1, 2, 5, 10, 30, 60, 120, 240, 300, 600].map(speedOption)
 const REPLAY_TICK_MS = 200
 const REPLAY_HEATMAP_COLUMNS = 1500
-// Time & Sales prints kept/fetched for the tape (and its aggression windows).
-const TAPE_PRINTS = 1500
-const mergePrints = (a, b) => {
-  const bySeq = new Map()
-  for (const p of a) bySeq.set(p.seq, p)
-  for (const p of b) bySeq.set(p.seq, p)
-  return [...bySeq.values()].sort((x, y) => x.seq - y.seq).slice(-TAPE_PRINTS)
-}
 // A sudden OI wall is only ALERTED (chime / voice / popup / Telegram) when the strike's OI grew by more than this
 // share inside the window; smaller ones are still listed in Signals.
 const OI_ALERT_MIN_PCT = 0.2
@@ -152,7 +142,6 @@ function FootprintLegend({ estimated, bigLabel }) {
   )
 }
 
-const toColumn = (c) => ({ t: new Date(c.time).getTime(), bids: c.bids, asks: c.asks })
 const todayKey = () => dayjs().format('YYYY-MM-DD')
 
 async function fetchJson(url) {
@@ -247,11 +236,7 @@ export default function OrderFlowPage() {
     fetchJson(`/api/order-flow/${underlying}?rowSize=${rowSize}&minTradeLots=${fetchLots}&heatmapColumns=900${expiryQuery}`)
       .then((body) => {
         if (cancelled) return
-        setData({
-          meta: body.meta, minuteBars: body.bars, trades: body.trades, icebergs: body.icebergs, book: body.book, sweeps: body.sweeps ?? [],
-          heatmap: body.heatmap.map(toColumn), lastSeq: body.trades.at(-1)?.seq ?? 0, source: body.source,
-          backfill: body.backfill ?? [], recordedFrom: body.recordedFrom ?? null,
-        })
+        setData(orderFlowFromSnapshot(body))
       })
       .catch((err) => { if (!cancelled) { setError(err.message); setData(null) } })
       .finally(() => { if (!cancelled) setLoading(false) })
@@ -261,31 +246,7 @@ export default function OrderFlowPage() {
   const handleLive = (payload) => {
     const { securityId, rowSize: rows } = contextRef.current
     if (payload?.meta?.securityId !== securityId) return
-    setData((prev) => {
-      if (!prev) return prev
-      const now = payload.time ? new Date(payload.time).getTime() : Date.now()
-      const freshTrades = (payload.trades ?? []).filter((t) => t.seq > prev.lastSeq)
-      const trades = freshTrades.length ? [...prev.trades, ...freshTrades].slice(-MAX_TRADES) : prev.trades
-      const icebergs = new Map(prev.icebergs.map((i) => [i.id, i]))
-      for (const i of payload.icebergs ?? []) icebergs.set(i.id, i)
-      const sweeps = new Map((prev.sweeps ?? []).map((w) => [w.id, w]))
-      for (const w of payload.sweeps ?? []) sweeps.set(w.id, w)
-      const lastColumn = prev.heatmap.at(-1)
-      // The whole book for the heatmap: "heat" is every level (200 a side) in 0.5-point rows, the
-      // "book" only the ladder's top levels.
-      const heatBids = payload.heat?.bids ?? payload.book?.bids
-      const heatAsks = payload.heat?.asks ?? payload.book?.asks
-      const heatmap = !lastColumn || now - lastColumn.t >= HEATMAP_COLUMN_MS
-        ? [...prev.heatmap, { t: now, bids: bucketBook(heatBids, rows), asks: bucketBook(heatAsks, rows) }].slice(-MAX_HEATMAP_COLUMNS)
-        : prev.heatmap
-      return {
-        ...prev, meta: payload.meta, book: payload.book, trades, heatmap,
-        icebergs: [...icebergs.values()].sort((a, b) => a.id - b.id),
-        sweeps: [...sweeps.values()].sort((a, b) => a.id - b.id).slice(-500),
-        minuteBars: mergeLiveMinutes(prev.minuteBars, payload.bars, rows),
-        lastSeq: freshTrades.at(-1)?.seq ?? prev.lastSeq,
-      }
-    })
+    setData((prev) => applyOrderFlowPush(prev, payload, rows))
   }
   // ---- Time & Sales tape: every print (not only big ones) - live: the latest, then each push's new
   // prints; replay: the prints up to the replay clock, fetched as the clock moves.

@@ -12,17 +12,17 @@ import { adaptiveStats } from './dayRegime.js'
 import { chargeRates, tradeCharges } from './tradeCharges.js'
 import {
   ACTIVE_STRATEGIES, STRATEGY_BY_ID, evaluateStrategies, simulateOutcome, strategyStats, topFifteen, MIN_TRADES_TO_RANK, oiSummary, optionOiText,
-  DEFAULT_TRAIL, LAST_ENTRY, SQUARE_OFF, fmtHm, exitLabel, premiumAt, optionPnlPoints, optionTradeText, squareOffMs, optionStopTargetHit, RANGE_IDS, asReplayContext,
+  DEFAULT_TRAIL, LAST_ENTRY, SQUARE_OFF, fmtHm, exitLabel, premiumAt, optionPnlPoints, optionTradeText, squareOffMs, RANGE_IDS, asReplayContext,
   coolOffGate, gradeOf, optionTradeAt, dayTypeAt, trailPoints, STRATEGY_FILTERS, strategyFilters, changedFilters,
 } from './strategyEngine.js'
-import { aggregateBars, analyzeBars, findWalls, liquiditySignals, pullStackSignals, replayRange, replayView } from './orderFlowMath.js'
+import { liquiditySignals, pullStackSignals, replayRange, replayView } from './orderFlowMath.js'
+import {
+  MIN, COOLDOWN_MS, msOf, completedBars, priceAt, upTo, trailUnit, trailPtsFor, trailFor, alertIdsFor, sameSignal,
+  scanTick, followSetups, setupEvents, newPosition, positionRows, paperEntryText, setupExitText, paperExitResult, setupWasTraded, scannerLogBody, scannerLogSig,
+} from './scannerCore.js'
 
 const { Text } = Typography
-const ALL_IDS = ACTIVE_STRATEGIES.map((s) => s.id)
 const IST_HHMM = new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' })
-const MIN = 60_000
-// One alert per strategy and direction at most every 20 minutes - a setup that stays true is one trade.
-const COOLDOWN_MS = 20 * MIN
 const SETTINGS_KEY = 'optionanalytics.strategyScanner.settings'
 // v2: results saved before replays took the price at the clock (they entered every setup of a replayed
 // day at one stale price) are not carried over.
@@ -37,27 +37,12 @@ const TRADE_MODE_KEY = 'optionanalytics.strategyScanner.tradeMode'
 const TG_SENT_KEY = 'optionanalytics.strategyScanner.telegramSent.v1'
 
 const MAX_DAYS_KEPT = 60
-const msOf = (t) => (typeof t === 'number' ? t : new Date(t).getTime())
 
 const readJson = (key, fallback) => {
   try { return JSON.parse(localStorage.getItem(key)) ?? fallback } catch { return fallback }
 }
 const writeJson = (key, value) => {
   try { localStorage.setItem(key, JSON.stringify(value)) } catch { /* storage full / blocked */ }
-}
-
-// 1-minute analyzed bars that had COMPLETED by `nowMs`.
-function completedBars(minuteBars, nowMs, rowSize, lotSize, estimated) {
-  const done = (minuteBars ?? []).filter((b) => msOf(b.time) + MIN <= nowMs)
-  return analyzeBars(aggregateBars(done, 1), { rowSize, minVolume: lotSize, estimated })
-}
-
-// The futures price at the clock: the tape's last print (it has every print) when it is recent, else
-// the view's own last price.
-function priceAt(view, prints, ms, bars) {
-  const p = prints?.at(-1)
-  if (p && p.price > 0 && msOf(p.time) <= ms && msOf(p.time) >= ms - 2 * MIN) return p.price
-  return view?.meta?.lastPrice || bars.at(-1).close
 }
 
 // A paper / live option trade's own premium stop-loss and target levels, as they stand.
@@ -74,35 +59,8 @@ function levelsText(r, settings) {
   return parts.length ? ` · ${parts.join(' / ')}` : ''
 }
 
-function upTo(prints, ms) {
-  if (!prints?.length) return prints
-  let lo = 0
-  let hi = prints.length
-  while (lo < hi) { const mid = (lo + hi) >> 1; if (msOf(prints[mid].time) <= ms) lo = mid + 1; else hi = mid }
-  return prints.slice(0, lo)
-}
-
-// The trailing stop a new setup gets from the scanner's settings (null = a fixed stop).
-// Trailing SL in futures (index) POINTS by default - "after +start pts, follow gap pts behind the best
-// price" - set per underlying (its points move differently); or in R (x the trade's own risk).
-const DEFAULT_TRAIL_PTS = { NIFTY: { start: 30, gap: 30 }, BANKNIFTY: { start: 75, gap: 75 }, SENSEX: { start: 100, gap: 100 } }
-const FALLBACK_TRAIL_PTS = { start: 30, gap: 30 }
 // Strikes the option trade can use: 5 in the money ... ATM ... 5 out of the money (moneyness +n / -n).
 const STRIKE_CHOICES = [5, 4, 3, 2, 1, 0, -1, -2, -3, -4, -5].map((v) => ({ value: v, label: v === 0 ? 'ATM' : `${Math.abs(v)} ${v > 0 ? 'ITM' : 'OTM'}` }))
-const trailUnit = (cfg) => (cfg.trail?.unit === 'R' ? 'R' : 'pts')
-const trailPtsFor = (cfg, underlying) => {
-  const key = String(underlying ?? '').toUpperCase()
-  return { ...(DEFAULT_TRAIL_PTS[key] ?? FALLBACK_TRAIL_PTS), ...cfg.trail?.pts?.[key] }
-}
-const trailFor = (cfg, underlying) => {
-  if (cfg.trail?.on === false) return null
-  const pts = trailPtsFor(cfg, underlying)
-  return {
-    startR: cfg.trail?.startR ?? DEFAULT_TRAIL.startR, gapR: cfg.trail?.gapR ?? DEFAULT_TRAIL.gapR,
-    ...(trailUnit(cfg) === 'pts' ? { unit: 'pts', startPts: pts.start, gapPts: pts.gap } : {}),
-    ...(cfg.trail?.runner ? { runner: true } : {}),
-  }
-}
 // The totals per underlying from the server's CSV files (every saved day, every device) - GET /api/scanner-log/summary.
 const loadSummary = (set) => fetch('/api/scanner-log/summary').then((r) => (r.ok ? r.json() : null)).then((j) => { if (j?.totals) set(j.totals) }).catch(() => { /* shown when it loads */ })
 const ptsText = (v) => `${v >= 0 ? '+' : ''}${(v ?? 0).toFixed(1)} pts`
@@ -191,7 +149,6 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   // that gap must not place it again.
   const placedRef = useRef(new Set())
   useEffect(() => { placedRef.current = new Set() }, [dayKey])
-  const sameSignal = (p, setup, trade) => p.strategy === setup.id && p.setupSide === setup.side && p.action === trade.action && Math.abs(setupTimeOf(p) - setup.t) < COOLDOWN_MS
 
   // The option a setup is traded with: ATM, or the strike the trader picked (ITM / OTM) - paper and live.
   const tradeOf = (setup, which) => optionTradeAt(oi, setup, which, settingsRef.current.moneyness ?? 0)
@@ -217,10 +174,8 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     const record = (result, note) => {
       placedRef.current.add(key)
       const position = {
-        key, setupKey: `${setup.id}-${setup.t}`, setupT: setup.t, strategy: setup.id, setupSide: setup.side, adaptive: setup.adaptive ?? null, regime: setup.regime ?? null, action: trade.action, side: trade.side, strike: trade.strike,
         // The contract's real lot size from Dhan's contract list (the table is only a fallback).
-        lots, lotSize: result.lotSize ?? PAPER_TRADE_LOT_SIZE[underlying] ?? 1, premium: result.prices?.limit ?? trade.premium, slPts: cfg.paperSl, targetPts: cfg.paperTarget, trailStart: cfg.paperTrailStart ?? 0, trailGap: cfg.paperTrailGap ?? 0,
-        entryTime: nowMsRef.current ?? Date.now(), exitTime: null, exitPremium: null, exitReason: null,
+        ...newPosition({ setup, trade, which, lots, lotSize: result.lotSize ?? PAPER_TRADE_LOT_SIZE[underlying] ?? 1, premium: result.prices?.limit ?? trade.premium, cfg, at: nowMsRef.current ?? Date.now() }),
         live: true, orderIds: result.orderIds ?? [], liveNote: note ?? result.message,
       }
       setPaperBook((prev) => ({ ...prev, [dayKey]: { date, positions: [...(prev[dayKey]?.positions ?? []), position] } }))
@@ -276,21 +231,15 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
         text: `#${meta?.no} ${meta?.name} ${setup.side} · option SL ${settingsRef.current.paperSl ?? 20} / target ${settingsRef.current.paperTarget ?? 30} pts` })
     }
     if (!already && !isReplay && settingsRef.current.telegram !== false) {
-      const meta = STRATEGY_BY_ID[setup.id]
-      telegram(`Paper ${trade.action} ${underlying} ${trade.strike} ${trade.side} x${lots} lot(s) @ ${premium.toFixed(1)} - #${meta?.no} ${meta?.name} ${setup.side}, futures ${setup.entry.toFixed(1)} (SL ${setup.stop.toFixed(1)}, target ${setup.target.toFixed(1)}); option SL ${settingsRef.current.paperSl ?? 20} / target ${settingsRef.current.paperTarget ?? 30} pts`)
+      telegram(paperEntryText({ underlying, trade, lots, premium, setup, cfg: settingsRef.current }))
     }
     setPaperBook((prev) => {
       const list = prev[dayKey]?.positions ?? []
-      const key = `${setup.id}-${setup.t}-${which}`
       // ONE paper trade per signal: the same strategy, direction and side (buy / sell) within the
       // alert cooldown is the same signal - a replayed day re-fires its alerts a few seconds apart, and
       // must not open it again.
       if (list.some((p) => sameSignal(p, setup, trade))) return prev
-      const position = {
-        key, setupKey: `${setup.id}-${setup.t}`, setupT: setup.t, strategy: setup.id, setupSide: setup.side, adaptive: setup.adaptive ?? null, regime: setup.regime ?? null, action: trade.action, side: trade.side, strike: trade.strike,
-        lots, lotSize: PAPER_TRADE_LOT_SIZE[underlying] ?? 1, premium, slPts: settingsRef.current.paperSl ?? 20, targetPts: settingsRef.current.paperTarget ?? 30,
-        trailStart: settingsRef.current.paperTrailStart ?? 0, trailGap: settingsRef.current.paperTrailGap ?? 0, entryTime: at, exitTime: null, exitPremium: null, exitReason: null,
-      }
+      const position = newPosition({ setup, trade, which, lots, lotSize: PAPER_TRADE_LOT_SIZE[underlying] ?? 1, premium, cfg: settingsRef.current, at })
       return { ...prev, [dayKey]: { date, positions: [...list, position] } }
     })
   }
@@ -378,9 +327,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
 
   const stats = useMemo(() => strategyStats(Object.values(history).flatMap((d) => d.setups ?? [])), [history])
   const top = useMemo(() => topFifteen(stats), [stats])
-  const top15Ids = useMemo(() => [...top.ids, ...top.trial], [top])
-  const alertIds = settings.pick === 'top15' ? top15Ids : settings.pick === 'oi5' ? top.oi.ids : settings.pick === 'profile5' ? top.profile.ids
-    : settings.pick === 'range' ? RANGE_IDS : settings.pick === 'all' ? ALL_IDS : settings.custom
+  const alertIds = alertIdsFor(settings, top)
   const alertIdsRef = useRef(alertIds)
   useEffect(() => { alertIdsRef.current = alertIds }, [alertIds])
 
@@ -407,29 +354,16 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       pendingRef.current = new Map()
       setCooling([])
     }
-    // An exact day's tape must have caught up with the clock (a replay jump fetches it afresh) -
-    // judging aggression on a stale tape would be judging the wrong minute.
-    if (!estimated && !(tapePrints?.length && msOf(tapePrints.at(-1).time) >= nowMs - 3 * MIN)) return
-    const bars = completedBars(view.minuteBars, nowMs, rowSize, lotSize, estimated)
-    if (bars.length < 5) return
-    const price = priceAt(view, estimated ? null : tapePrints, nowMs, bars)
-    const watchNow = []
-    const setups = evaluateStrategies({
-      nowMs, price, bars, minuteBars: view.minuteBars, prints: estimated ? null : tapePrints,
-      book: view.book, walls: findWalls(view.book), liquidity, pullStack, sweeps: view.sweeps, icebergs: view.icebergs, oi, estimated, lotSize, bigLots: largeLots, profile, watch: watchNow, heatmap: view.heatmap, rowSize,
-      filters: settingsRef.current.filters,
-    })
-    const watching = watchNow.filter((w) => w.missing.length)
+    const tick = scanTick({
+      nowMs, view, tapePrints, liquidity, pullStack, oi, estimated, lotSize, largeLots, profile, rowSize,
+      filters: settingsRef.current.filters, trail: trailFor(settingsRef.current, underlying),
+    }, { fired: firedRef.current, pending: pendingRef.current })
+    if (!tick) return
+    const { watching, held, fresh } = tick
     setWatch((prev) => (JSON.stringify(prev.map((w) => [w.id, w.side, w.missing])) === JSON.stringify(watching.map((w) => [w.id, w.side, w.missing])) ? prev : watching))
-    const recentlyFired = (s) => firedRef.current.some((f) => f.id === s.id && f.side === s.side && s.t - f.t < COOLDOWN_MS)
-    // Price ran too far too fast into a setup: it is held and entered on the pullback / pause.
-    const gate = coolOffGate(pendingRef.current, setups.filter((s) => !recentlyFired(s)), { nowMs, price, bars, oi })
-    const held = [...pendingRef.current.values()].map((p) => p.setup)
     setCooling((prev) => (prev.map((x) => `${x.id}${x.side}${x.t}`).join() === held.map((x) => `${x.id}${x.side}${x.t}`).join() ? prev : held))
-    const fresh = gate.fire.filter((s) => !recentlyFired(s))
-      .map((s) => ({ ...s, trail: trailFor(settingsRef.current, underlying) }))
     if (!fresh.length) return
-    firedRef.current = [...firedRef.current, ...fresh]
+    firedRef.current = tick.fired
     setFired(firedRef.current)
     const cfg = settingsRef.current
     for (const s of fresh) {
@@ -472,13 +406,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   }, [oi, minuteKey, view?.minuteBars?.length, estimated, tapePrints?.at(-1)?.seq, profile])
 
   // Outcomes for today's setups so far; saved into the day's history as they resolve.
-  const withOutcome = useMemo(
-    () => fired.map((s) => {
-      const withLog = trailLog.some((c) => c.t > s.t) ? { ...s, trailLog: trailLog.filter((c) => c.t > s.t) } : s
-      return { ...withLog, outcome: simulateOutcome(withLog, view?.minuteBars ?? [], nowMs ?? 0) }
-    }),
-    [fired, trailLog, view?.minuteBars, nowMs],
-  )
+  const withOutcome = useMemo(() => followSetups(fired, trailLog, view?.minuteBars, nowMs), [fired, trailLog, view?.minuteBars, nowMs])
 
   // Every alerted setup is followed to its end: when its target, stop-loss (fixed or trailed) or time
   // stop / the 15:10 cut-off is hit, another alert says so (sound, the name spoken, a notification), and
@@ -490,27 +418,13 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   const primedRef = useRef(new Set())
   useEffect(() => {
     const cfg = settingsRef.current
-    for (const s of withOutcome) {
-      const key = `${s.id}-${s.t}`
-      // Brought back after a refresh: what already happened to it was alerted before - only what
-      // happens from now on is.
-      if (restoredRef.current.has(key) && !primedRef.current.has(key)) {
-        // ...judged once the day's bars are in (before that every outcome still reads "open").
-        if (!view?.minuteBars?.length) continue
-        primedRef.current.add(key)
-        if (s.outcome.status !== 'open') closedRef.current.add(key)
-        else if (s.outcome.trailed) trailAlertRef.current.set(key, s.outcome.stop)
-        continue
-      }
-      if (s.outcome.status === 'open' && s.outcome.trailed && !closedRef.current.has(key)) {
-        const risk = Math.abs(s.entry - s.stop)
-        const last = trailAlertRef.current.get(key) ?? s.stop
-        if (Math.abs(s.outcome.stop - last) < 0.5 * risk - 1e-9) continue
-        trailAlertRef.current.set(key, s.outcome.stop)
-        if (!cfg.alerts || !alertIdsRef.current.includes(s.id)) continue
-        const meta = STRATEGY_BY_ID[s.id]
-        const dir = s.side === 'LONG' ? 1 : -1
-        const locked = (dir * (s.outcome.stop - s.entry)) / risk
+    const memory = { closed: closedRef.current, trail: trailAlertRef.current, primed: primedRef.current, restored: restoredRef.current }
+    for (const event of setupEvents(withOutcome, memory, !!view?.minuteBars?.length)) {
+      const { s, key } = event
+      if (!cfg.alerts || !alertIdsRef.current.includes(s.id)) continue
+      const meta = STRATEGY_BY_ID[s.id]
+      if (event.type === 'trail') {
+        const { last, locked } = event
         const what = Math.abs(locked) < 0.005 ? 'to breakeven' : `to ${s.outcome.stop.toFixed(1)}`
         if (cfg.sound) chime(true)
         if (cfg.voice) speak(`Trail stop ${Math.abs(locked) < 0.005 ? 'to breakeven' : ''}. ${meta.short}.`)
@@ -525,17 +439,11 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
         })
         continue
       }
-      if (s.outcome.status === 'open' || closedRef.current.has(key)) continue
-      closedRef.current.add(key)
-      if (!cfg.alerts || !alertIdsRef.current.includes(s.id)) continue
-      const meta = STRATEGY_BY_ID[s.id]
       const hit = exitLabel(s.outcome)
       const good = s.outcome.r > 0
       // Telegram: a setup with an option trade is reported by that trade's own exit message (below).
-      const traded = (paperBookRef.current[dayKey]?.positions ?? []).some((p) => p.setupKey === key || (p.strategy === s.id && p.setupSide === s.side && Math.abs(setupTimeOf(p) - s.t) < 2 * MIN))
-      if (!isReplay && cfg.telegram !== false && !traded) {
-        telegram(`${hit}: #${meta.no} ${meta.name} ${s.side} - entry ${s.entry.toFixed(1)}, out ${s.outcome.exitPrice != null ? s.outcome.exitPrice.toFixed(1) : '-'} (${good ? '+' : ''}${s.outcome.r.toFixed(2)}R)`)
-      }
+      const traded = setupWasTraded(paperBookRef.current[dayKey]?.positions, s)
+      if (!isReplay && cfg.telegram !== false && !traded) telegram(setupExitText(s))
       if (cfg.sound) chime(good)
       if (cfg.voice) speak(`${hit}. ${meta.short}. ${good ? 'Plus' : 'Minus'} ${Math.abs(s.outcome.r).toFixed(1)} R.`)
       notification.open({
@@ -654,58 +562,11 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   const shownResults = adaptiveView ? dayResults.filter((s) => s.adaptive?.take !== false) : dayResults
 
   // The day's paper option positions, each closed by its setup's exit (or by hand), with P&L.
-  const paperRows = useMemo(() => {
-    // A position's setup: the alerted one (live / replay outcomes, followed up to the clock), else the
-    // same strategy and side within two minutes in the day's list (a scanned day's setups are timed to
-    // the minute, an alert to 10 s).
-    const exact = new Map([...dayResults, ...withOutcome].map((s) => [`${s.id}-${s.t}`, s]))
-    const setupOf = (p) => exact.get(p.setupKey) ?? [...withOutcome, ...dayResults]
-      .filter((s) => s.id === p.strategy && s.side === p.setupSide && Math.abs(s.t - setupTimeOf(p)) < 2 * MIN)
-      .sort((a, b) => Math.abs(a.t - p.entryTime) - Math.abs(b.t - p.entryTime))[0]
-    const outcomeOf = (p) => setupOf(p)?.outcome
-    // Paper trades are a what-if: every one of them - open or closed - is sized by the lots set now, so
-    // the day's P&L is always at one size. A live (Dhan) trade keeps the quantity it was placed with.
-    const paperLots = Math.max(1, settings.paperLots ?? 1)
-    return (paperBook[dayKey]?.positions ?? []).filter((p) => !nowMs || p.entryTime <= nowMs).map((stored) => {
-      // The adaptive call of the trade's signal (stored when punched; older trades look it up).
-      const sig = stored.adaptive ? null : setupOf(stored)
-      const tagged = { ...stored, adaptive: stored.adaptive ?? sig?.adaptive ?? null, regime: stored.regime ?? sig?.regime ?? null }
-      const p = tagged.live ? tagged : { ...tagged, lots: paperLots }
-      let exitTime = p.exitTime && p.exitTime <= (nowMs ?? Infinity) ? p.exitTime : null
-      let exitPremium = exitTime ? p.exitPremium : null
-      let exitReason = exitTime ? p.exitReason : null
-      const o = outcomeOf(p)
-      if (p.live && p.exitSent) {
-        // A live trade whose exit has gone to Dhan keeps the exit it was sent with.
-        const points = p.exitPremium == null ? null : p.action === 'BUY' ? p.exitPremium - p.premium : p.premium - p.exitPremium
-        return { ...p, exitTime: p.exitTime, exitReason: p.exitReason, current: p.exitPremium, points, rupees: points == null ? null : points * p.lots * p.lotSize }
-      }
-      // The trade's own premium stop / target (positions from before they existed use today's setting),
-      // checked up to the setup's exit - whichever comes first closes it.
-      const setupExitAt = o && o.status !== 'open' ? (o.exitAt != null ? o.exitAt + MIN : squareOffMs(p.entryTime)) : Infinity
-      const own = oi && setupExitAt > p.entryTime
-        ? optionStopTargetHit(oi, p, p.entryTime, Math.min(setupExitAt, exitTime ?? Infinity, nowMs ?? Infinity), p.slPts ?? settings.paperSl ?? 20, p.targetPts ?? settings.paperTarget ?? 30,
-          { start: p.trailStart ?? settings.paperTrailStart ?? 0, gap: p.trailGap ?? settings.paperTrailGap ?? 0 }, p.levelLog)
-        : null
-      if (own) { exitTime = own.at; exitPremium = own.premium; exitReason = own.reason }
-      if (!exitTime && o && o.status !== 'open') {
-        // Closed by its setup once the clock has passed the setup's exit (a scanned day's outcomes are
-        // already known for the whole day; a trade still running when the data ended closes at 15:10).
-        const exitAt = o.exitAt != null ? o.exitAt + MIN : squareOffMs(p.entryTime)
-        if (exitAt <= p.entryTime) {
-          // Punched after its setup had already ended (older positions): never a trade - flat at entry.
-          exitTime = p.entryTime; exitPremium = p.premium; exitReason = 'Setup had already ended'
-        } else {
-          const at = nowMs == null || exitAt <= nowMs ? exitAt : null
-          const premium = oi && at ? premiumAt(oi, p.side, p.strike, at) : null
-          if (premium != null) { exitTime = at; exitPremium = premium; exitReason = exitLabel(o) }
-        }
-      }
-      const now = exitTime ? { premium: exitPremium } : oi && nowMs ? { premium: premiumAt(oi, p.side, p.strike, nowMs) } : { premium: null }
-      const points = now.premium == null ? null : p.action === 'BUY' ? now.premium - p.premium : p.premium - now.premium
-      return { ...p, exitTime, exitReason, current: now.premium, points, rupees: points == null ? null : points * p.lots * p.lotSize }
-    })
-  }, [paperBook, dayKey, dayResults, withOutcome, oi, nowMs, settings.paperSl, settings.paperTarget, settings.paperTrailStart, settings.paperTrailGap, settings.paperLots])
+  const paperRows = useMemo(
+    () => positionRows({ positions: paperBook[dayKey]?.positions, dayResults, withOutcome, oi, nowMs, settings }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [paperBook, dayKey, dayResults, withOutcome, oi, nowMs, settings.paperSl, settings.paperTarget, settings.paperTrailStart, settings.paperTrailGap, settings.paperLots],
+  )
   const paperRowsRef = useRef(paperRows)
   useEffect(() => { paperRowsRef.current = paperRows }, [paperRows])
   const paperTotal = paperRows.reduce((sum, r) => sum + (r.rupees ?? 0), 0)
@@ -730,35 +591,11 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   useEffect(() => {
     if (!date || !underlying) return
     if (isReplay && !history[dayKey]?.scanned) return
-    const signals = dayResults.map((x) => {
-      const o = x.outcome ?? {}
-      const meta = STRATEGY_BY_ID[x.id]
-      const closed = o.status && o.status !== 'open'
-      return {
-        time: x.t, strategyNo: meta?.no ?? null, strategyId: x.id, strategy: meta?.name ?? x.id, side: x.side, entry: x.entry, stop: x.stop, target: x.target,
-        confidence: x.confidence ?? null, estimated: !!x.estimated, dayType: x.regime?.type ?? null, dayTypePrice: x.regime?.priceType ?? null,
-        voteOi: x.regime?.votes?.oi ?? null, voteCvd: x.regime?.votes?.cvd ?? null, adaptiveTake: x.adaptive?.take ?? null,
-        adaptivePriceOnly: x.adaptive?.priceOnly ?? null, adaptiveReason: x.adaptive?.reason ?? null, status: o.status ?? null, r: o.r ?? null,
-        exitTime: closed ? o.exitAt ?? null : null, exitPrice: closed ? o.exitPrice ?? null : null, exitReason: closed ? exitLabel(o) : null,
-      }
-    })
-    // Each trade names its signal: the exact one, else the same strategy and side within two minutes.
-    const trades = isReplay ? [] : paperRows.map((r) => {
-      const at = r.setupT ?? r.entryTime
-      const sig = signals.find((x) => `${x.strategyId}-${x.time}` === r.setupKey)
-        ?? signals.filter((x) => x.strategyId === r.strategy && x.side === r.setupSide && Math.abs(x.time - at) < 2 * MIN).sort((a, b) => Math.abs(a.time - at) - Math.abs(b.time - at))[0]
-      return {
-        key: r.key, entryTime: r.entryTime, exitTime: r.exitTime ?? null, live: !!r.live, action: r.action, option: r.side, strike: r.strike, lots: r.lots,
-        lotSize: r.lotSize ?? null, entryPremium: r.premium, exitPremium: r.exitTime ? r.current ?? null : null, points: r.points ?? null, rupees: r.rupees ?? null,
-        exitReason: r.exitReason ?? null, signalTime: sig?.time ?? at, strategyNo: STRATEGY_BY_ID[r.strategy]?.no ?? null, strategyId: r.strategy,
-        signalSide: r.setupSide, dayType: r.regime?.type ?? null, adaptiveTake: r.adaptive?.take ?? null, adaptiveReason: r.adaptive?.reason ?? null,
-        ...(() => { const c = tradeCharges(r, chargeRates(settingsRef.current.charges)); return c ? { stt: c.stt, brokerage: c.brokerage, otherCharges: c.other, netRupees: c.net, netPerLot: c.netPerLot } : {} })(),
-      }
-    })
-    if (!signals.length && !trades.length) return
-    const sig = JSON.stringify([dayKey, signals.map((x) => [x.strategyId, x.side, x.time, x.status, x.r]), trades.map((t) => [t.key, t.exitTime, t.exitTime ? t.points : null])])
+    const body = scannerLogBody({ underlying, date, source: isReplay ? 'scan' : 'live', dayResults, rows: isReplay ? [] : paperRows, charges: settingsRef.current.charges })
+    if (!body.signals.length && !body.trades.length) return
+    const sig = scannerLogSig(dayKey, body)
     const st = scannerLogRef.current
-    st.latest = { sig, body: { underlying, date, source: isReplay ? 'scan' : 'live', signals, trades } }
+    st.latest = { sig, body }
     if (sig === st.sent || st.timer) return
     st.timer = setTimeout(() => {
       st.timer = null
@@ -803,7 +640,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       changed = true
       if (opening) continue
       const meta = STRATEGY_BY_ID[r.strategy]
-      const result = `${r.action === 'SELL' ? 'sold' : 'bought'} ${underlying} ${r.strike} ${r.side} x${r.lots} @ ${r.premium.toFixed(1)} -> ${r.current != null ? r.current.toFixed(1) : '-'} = ${r.points != null ? `${r.points >= 0 ? '+' : ''}${r.points.toFixed(1)} pts, Rs ${Math.round(r.rupees).toLocaleString('en-IN')}` : '-'}`
+      const result = paperExitResult(r, underlying)
       const reason = String(r.exitReason)
       const kind = /target/i.test(reason) ? 'target' : /\bSL\b|stop/i.test(reason) ? 'stopLoss' : 'exit'
       notifyTrade({ kind, good: (r.points ?? 0) >= 0, key: `paper-exit-${r.key}`, sound: cfg.sound !== false,
@@ -1372,10 +1209,6 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
 }
 
 // When a paper position's signal fired (positions saved before setupT was stored keep it in their key).
-function setupTimeOf(p) {
-  return p.setupT ?? Number(String(p.setupKey).split('-').at(-1))
-}
-
 // A setup can be paper-traded only while it is live at the clock: it has fired, and its stop, target,
 // trailing SL or 15:10 exit has not been reached yet.
 function punchable(setup, outcome, nowMs) {
