@@ -34,6 +34,10 @@ services:
       # everyone stays logged in across a redeploy instead of the whole key ring (and every
       # outstanding session) resetting every time the container restarts.
       Storage__DataProtectionKeysPath: /app/data/dataprotection-keys
+      # The server-side strategy scanner's config (the page's synced settings) and each day's state.
+      Storage__ScannerRunnerPath: /app/data/scanner-runner
+      # SCANNER_RUNNER_ENABLED=false keeps it from starting (no server-side signals / paper trades).
+      ScannerRunner__Enabled: ${SCANNER_RUNNER_ENABLED:-true}
 
       # Dhan. Either supply a long-lived AccessToken, or leave it empty and set Pin + TotpSecret so
       # DhanTotpAutoRenewalHostedService logs in on its own and keeps the token fresh.

@@ -18,6 +18,7 @@ import { alignToBars, sessionVwapFromBars } from './chartVwap.js'
 import { ProfilesCard } from './ProfilesCard.jsx'
 import { PriceAlertsBar, usePriceAlerts } from './PriceAlerts.jsx'
 import { ProfileAlertsBar, useProfileAlerts } from './ProfileAlerts.jsx'
+import { ServerScannerCard } from './ServerScanner.jsx'
 import { fetchPreviousSession, sessionVolumeProfile, tpoProfile, tpoRowFor } from './profiles.js'
 import { withBackfill } from './cvdBackfill.js'
 import { TAPE_PRINTS, applyOrderFlowPush, mergePrints, orderFlowFromSnapshot, toColumn } from './liveFeeds.js'
@@ -160,6 +161,8 @@ export default function OrderFlowPage() {
   const [largeLots, setLargeLots] = usePersistedState('optionanalytics.orderFlow.largeLots', 10)
   // Big order: 'auto' (default) - the top 2.5% of the day's prints (autoBigLots) - or the fixed lots above.
   const [bigMode, setBigMode] = usePersistedState('optionanalytics.orderFlow.bigMode', 'auto')
+  // What the server scanner needs from this page's own settings to read the order flow the same way.
+  const orderFlowSettings = useMemo(() => ({ rowSizes, bigMode, largeLots }), [rowSizes, bigMode, largeLots])
   // What the server is asked for: in auto mode every print of 5+ lots (the page picks the big ones).
   const fetchLots = bigMode === 'auto' ? 5 : largeLots
   const [showLots, setShowLots] = usePersistedState('optionanalytics.orderFlow.showLots', true)
@@ -910,7 +913,10 @@ export default function OrderFlowPage() {
           underlying={underlying} isReplay={isReplay} date={isReplay ? replayDate : todayKey()} view={view} replayDay={replayDay} replayMs={replayMs} range={range}
           tapePrints={tapePrints} liquidity={liquidity} pullStack={pullStack.signals} rowSize={rowSize} lotSize={lotSize} largeLots={bigLots} estimated={noDepth}
           profile={scannerProfile} oi={dayOi} oiError={dayOiError} canTradeLive={canTradeLive}
+          isAdmin={auth?.user?.role === 'Admin'} orderFlowSettings={orderFlowSettings}
         />
+
+        <ServerScannerCard isAdmin={auth?.user?.role === 'Admin'} focus={underlying} />
 
         <Text type="secondary" style={{ fontSize: 11, color: AXIS_COLOR }}>
           Trades are inferred from Dhan's tick feed: the rise in the day's volume between two ticks is the volume traded, at the tick's price, and

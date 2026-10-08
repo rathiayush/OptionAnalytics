@@ -1,6 +1,7 @@
 # Single self-contained image: the React client is built into the server's wwwroot and served by
-# ASP.NET Core itself (Program.cs's UseStaticFiles + MapFallbackToFile), so there is no separate
-# Node process at runtime and no reverse-proxy config needed beyond routing one port.
+# ASP.NET Core itself (Program.cs's UseStaticFiles + MapFallbackToFile), with no reverse-proxy config
+# needed beyond routing one port. The only Node process at runtime is the server-side strategy scanner,
+# which the app starts and watches itself (ScannerRunnerHostedService).
 #
 # The client build is driven by the csproj's BeforeTargets="Publish" target rather than by a
 # separate stage here, so `docker build` and a plain `dotnet publish` produce the same thing - which
@@ -39,8 +40,17 @@ FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime
 # The aspnet runtime image ships no HTTP client at all, and the HEALTHCHECK below needs one to
 # actually hit the app - without this it could only test that the dotnet binary exists, which tells
 # you nothing about whether the app is serving.
+# Node runs the server-side strategy scanner (scanner-runner/runner.mjs, started by the app itself - see
+# ScannerRunnerHostedService): the Order Flow page's scanner for NIFTY, BANKNIFTY and SENSEX with no
+# browser open.
+ARG NODE_MAJOR=20
 RUN apt-get update \
- && apt-get install -y --no-install-recommends curl \
+ && apt-get install -y --no-install-recommends curl ca-certificates gnupg \
+ && mkdir -p /etc/apt/keyrings \
+ && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+ && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" > /etc/apt/sources.list.d/nodesource.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends nodejs \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -59,7 +69,8 @@ ENV Storage__TriggersPath=/app/data/strategy-triggers.json \
     Storage__ExpiredOptionDataPath=/app/data/expired-option-data \
     Storage__ScannerLogPath=/app/data/scanner-log \
     Storage__LiveTimeExitsPath=/app/data/live-time-exits.json \
-    Storage__DataProtectionKeysPath=/app/data/dataprotection-keys
+    Storage__DataProtectionKeysPath=/app/data/dataprotection-keys \
+    Storage__ScannerRunnerPath=/app/data/scanner-runner
 EXPOSE 8080
 
 # Create and chown the data directory BEFORE declaring it a volume. Docker discards changes made

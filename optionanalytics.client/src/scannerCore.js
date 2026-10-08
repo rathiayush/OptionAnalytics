@@ -8,6 +8,7 @@ import {
 } from './strategyEngine.js'
 import { aggregateBars, analyzeBars, findWalls } from './orderFlowMath.js'
 import { chargeRates, tradeCharges } from './tradeCharges.js'
+import { sessionVolumeProfile, tpoProfile, tpoRowFor } from './profiles.js'
 
 export const MIN = 60_000
 // One alert per strategy and direction at most every 20 minutes - a setup that stays true is one trade.
@@ -64,6 +65,21 @@ export function alertIdsFor(settings, top) {
   const top15Ids = [...top.ids, ...top.trial]
   return settings.pick === 'top15' ? top15Ids : settings.pick === 'oi5' ? top.oi.ids : settings.pick === 'profile5' ? top.profile.ids
     : settings.pick === 'range' ? RANGE_IDS : settings.pick === 'all' ? ALL_IDS : settings.custom ?? []
+}
+
+// Paper trades' lot size per index (a live trade takes the contract's real lot size from Dhan).
+export const PAPER_TRADE_LOT_SIZE = { NIFTY: 65, BANKNIFTY: 30, SENSEX: 20 }
+
+// The scanner's profile input from the previous session's bars: its volume profile (POC, value area,
+// HVN / LVN), its TPO profile and its high / low - null without a volume profile.
+export function scannerProfileOf(prevBars, underlying, rowSize) {
+  if (!prevBars?.length) return null
+  const vp = sessionVolumeProfile(prevBars)
+  if (vp?.poc == null) return null
+  const tpoPrev = tpoProfile(prevBars, tpoRowFor(underlying, rowSize))
+  const bars = prevBars.filter((b) => b.high > 0 && b.low > 0)
+  const range = bars.length ? { prevHigh: Math.max(...bars.map((b) => b.high)), prevLow: Math.min(...bars.map((b) => b.low)) } : null
+  return { vp, tpoPrev, ...range }
 }
 
 // When a paper / live position's setup fired (older positions only carry it in their key).
@@ -156,6 +172,26 @@ export function newPosition({ setup, trade, which, lots, lotSize, premium, cfg, 
     lots, lotSize, premium, slPts: cfg.paperSl ?? 20, targetPts: cfg.paperTarget ?? 30,
     trailStart: cfg.paperTrailStart ?? 0, trailGap: cfg.paperTrailGap ?? 0, entryTime: at, exitTime: null, exitPremium: null, exitReason: null,
   }
+}
+
+/**
+ * A new Max SL / Target / trail applied to the positions still OPEN (keys in `openKeys`) from the minute
+ * `changeAt`: each keeps a levelLog - the levels it had until now, then the new ones - which
+ * optionStopTargetHit follows, so what already happened is never rewritten. `cur` is the settings before
+ * the change; `patch` holds paperSl / paperTarget / paperTrailStart / paperTrailGap (any of them).
+ */
+export function withLevelChange(positions, openKeys, patch, changeAt, cur) {
+  return positions.map((p) => (openKeys.has(p.key) ? {
+    ...p,
+    levelLog: [
+      ...(p.levelLog?.length ? p.levelLog.filter((c) => c.t < changeAt) : [{ t: p.entryTime, sl: p.slPts ?? cur.paperSl ?? 20, target: p.targetPts ?? cur.paperTarget ?? 30, trailStart: p.trailStart ?? cur.paperTrailStart ?? 0, trailGap: p.trailGap ?? cur.paperTrailGap ?? 0 }]),
+      { t: changeAt, sl: patch.paperSl ?? p.slPts ?? cur.paperSl ?? 20, target: patch.paperTarget ?? p.targetPts ?? cur.paperTarget ?? 30, trailStart: patch.paperTrailStart ?? p.trailStart ?? cur.paperTrailStart ?? 0, trailGap: patch.paperTrailGap ?? p.trailGap ?? cur.paperTrailGap ?? 0 },
+    ],
+    ...(patch.paperSl != null ? { slPts: patch.paperSl } : {}),
+    ...(patch.paperTarget != null ? { targetPts: patch.paperTarget } : {}),
+    ...(patch.paperTrailStart != null ? { trailStart: patch.paperTrailStart } : {}),
+    ...(patch.paperTrailGap != null ? { trailGap: patch.paperTrailGap } : {}),
+  } : p))
 }
 
 /**

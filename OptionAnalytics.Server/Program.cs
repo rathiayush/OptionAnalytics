@@ -48,7 +48,20 @@ builder.Services.AddDataProtection()
 // overridden to plain 401/403 status codes: the framework's own default behaviour for both is a
 // 302 redirect to a login PAGE, which is wrong for a pure API + SPA - a fetch() would just follow
 // the redirect and read back index.html as if the call had succeeded.
-builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
+// The server-side scanner (ScannerRunnerHostedService) signs in with its own per-start key instead of a
+// cookie: a request carrying the X-Runner-Key header goes to that scheme, everything else to the cookie.
+builder.Services.AddSingleton<OptionAnalytics.Server.Auth.ScannerRunnerKey>();
+builder.Services.AddAuthentication(options =>
+    {
+        options.DefaultScheme = "AppAuth";
+        options.DefaultChallengeScheme = CookieAuthenticationDefaults.AuthenticationScheme;
+    })
+    .AddPolicyScheme("AppAuth", "Cookie or the scanner runner's key", options => options.ForwardDefaultSelector = context =>
+        context.Request.Headers.ContainsKey(OptionAnalytics.Server.Auth.ScannerRunnerKey.Header)
+            ? OptionAnalytics.Server.Auth.ScannerRunnerKey.Scheme
+            : CookieAuthenticationDefaults.AuthenticationScheme)
+    .AddScheme<Microsoft.AspNetCore.Authentication.AuthenticationSchemeOptions, OptionAnalytics.Server.Auth.ScannerRunnerAuthenticationHandler>(
+        OptionAnalytics.Server.Auth.ScannerRunnerKey.Scheme, _ => { })
     .AddCookie(options =>
     {
         options.Cookie.Name = "oa_session";
@@ -298,6 +311,11 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<OptionAnalytics.Se
 builder.Services.AddSingleton<OiDivergenceMonitor>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<OiDivergenceMonitor>());
 builder.Services.AddHostedService<OiReplayLiveFeedService>();
+
+// The strategy scanner run on the server for NIFTY, BANKNIFTY and SENSEX (alerts + paper trades), with or
+// without a browser open - a Node process started and watched here. See ScannerRunnerHostedService.
+builder.Services.AddSingleton<ScannerRunnerStore>();
+builder.Services.AddHostedService<ScannerRunnerHostedService>();
 
 builder.Services.AddSignalR();
 builder.Services.AddControllers();

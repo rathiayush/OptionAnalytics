@@ -3,7 +3,7 @@
 ## The strategy scanner is the most important part of the app
 
 The Order Flow page's strategy scanner (`optionanalytics.client/src/strategyEngine.js`,
-`StrategyScanner.jsx`, fed by `useDayOi.js`, `orderFlowMath.js`, `profiles.js`, `suddenOi.js` and `dayRegime.js`) decides when a trade
+`StrategyScanner.jsx`, `scannerCore.js`, fed by `useDayOi.js`, `liveFeeds.js`, `orderFlowMath.js`, `profiles.js`, `suddenOi.js` and `dayRegime.js`) decides when a trade
 is signalled, at what entry, stop-loss and target, how a trailing stop moves, when a trade exits and
 what the paper / live option trade does. A mistake there costs real money.
 
@@ -16,7 +16,13 @@ npm run lint
 npx vite build
 ```
 
-All must pass before committing. When adding or changing a strategy:
+All must pass before committing. The SAME scanner also runs on the server for NIFTY, BANKNIFTY and SENSEX
+(`optionanalytics.client/scanner-runner/`, bundled by `npm run build:runner`, started by the server's
+`ScannerRunnerHostedService`): the page and the runner share `scannerCore.js` / `liveFeeds.js`, so a change
+there changes both - `tests/scanner-core.test.mjs` and `tests/scanner-runner.test.mjs` cover them. The runner is
+paper only: its "Runner" role cannot reach the live-trading API.
+
+When adding or changing a strategy:
 
 - add a scenario test in `optionanalytics.client/tests/` - it fires on its rules (LONG and SHORT where
   it trades both) and does NOT fire when each key condition is missing;

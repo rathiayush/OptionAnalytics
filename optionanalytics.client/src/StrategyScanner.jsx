@@ -2,11 +2,11 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, Button, Card, Checkbox, Col, InputNumber, Modal, Popconfirm, Popover, Progress, Row, Segmented, Select, Space, Switch, Table, Tag, Tooltip, Typography, notification } from 'antd'
 import { SettingOutlined, SoundOutlined } from '@ant-design/icons'
 import { UP_COLOR, DOWN_COLOR } from './shared.jsx'
-import { PAPER_TRADE_LOT_SIZE } from './oiShared.jsx'
 import { liveTradingApi } from './LiveTrading.jsx'
 import { chime, speak, telegram, unlockAudio } from './alerts.js'
 import { notifyLiveTradeEvents, notifyTrade } from './tradeNotify.js'
 import { loadTradeLevels, saveTradeLevels, subscribeTradeLevels } from './tradeDefaults.js'
+import { syncServerScanner } from './ServerScanner.jsx'
 import { suddenWallText } from './suddenOi.js'
 import { adaptiveStats } from './dayRegime.js'
 import { chargeRates, tradeCharges } from './tradeCharges.js'
@@ -18,7 +18,7 @@ import {
 import { liquiditySignals, pullStackSignals, replayRange, replayView } from './orderFlowMath.js'
 import {
   MIN, COOLDOWN_MS, msOf, completedBars, priceAt, upTo, trailUnit, trailPtsFor, trailFor, alertIdsFor, sameSignal,
-  scanTick, followSetups, setupEvents, newPosition, positionRows, paperEntryText, setupExitText, paperExitResult, setupWasTraded, scannerLogBody, scannerLogSig,
+  scanTick, followSetups, setupEvents, newPosition, positionRows, withLevelChange, PAPER_TRADE_LOT_SIZE, paperEntryText, setupExitText, paperExitResult, setupWasTraded, scannerLogBody, scannerLogSig,
 } from './scannerCore.js'
 
 const { Text } = Typography
@@ -92,7 +92,7 @@ function setupTip(s, o = null) {
   )
 }
 
-export function StrategyScanner({ underlying, isReplay, date, view, replayDay, replayMs, range, tapePrints, liquidity, pullStack, rowSize, lotSize, largeLots, estimated, profile, oi, oiError, canTradeLive = false }) {
+export function StrategyScanner({ underlying, isReplay, date, view, replayDay, replayMs, range, tapePrints, liquidity, pullStack, rowSize, lotSize, largeLots, estimated, profile, oi, oiError, canTradeLive = false, isAdmin = false, orderFlowSettings = null }) {
   const [settings, setSettings] = useState(() => {
     const saved = { alerts: true, sound: true, voice: true, telegram: true, pick: 'top15', custom: [], filters: {}, trail: { on: true, ...DEFAULT_TRAIL }, autoPaper: 'sell', paperLots: 1, paperSl: 20, paperTarget: 30, liveSlippage: 2, maxLiveTrades: 5, maxLiveLoss: 10000, ...readJson(SETTINGS_KEY, {}) }
     // Older saved settings used 'top5' (from when there were only the first 10).
@@ -328,6 +328,17 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   const stats = useMemo(() => strategyStats(Object.values(history).flatMap((d) => d.setups ?? [])), [history])
   const top = useMemo(() => topFifteen(stats), [stats])
   const alertIds = alertIdsFor(settings, top)
+  // The server scanner (NIFTY, BANKNIFTY, SENSEX with no browser) runs with these same settings: an admin's
+  // are saved to it as they change - the strategies alerted, filters, trailing, option side / lots, each
+  // index's SL / target / trail and this page's row size / big-order setting.
+  const [levelsVersion, setLevelsVersion] = useState(0)
+  useEffect(() => subscribeTradeLevels(() => setLevelsVersion((v) => v + 1)), [])
+  const alertIdsJson = JSON.stringify(alertIds)
+  useEffect(() => {
+    if (!isAdmin) return
+    const levels = Object.fromEntries(['NIFTY', 'BANKNIFTY', 'SENSEX'].map((u) => [u, loadTradeLevels('scanner', u)]))
+    syncServerScanner({ settings: { ...settings, orderFlow: orderFlowSettings }, levels, alertIds: JSON.parse(alertIdsJson) })
+  }, [isAdmin, settings, orderFlowSettings, alertIdsJson, levelsVersion])
   const alertIdsRef = useRef(alertIds)
   useEffect(() => { alertIdsRef.current = alertIds }, [alertIds])
 
@@ -721,18 +732,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
         ...prev,
         [dayKey]: {
           ...day,
-          positions: day.positions.map((p) => (open.has(p.key) ? {
-            ...p,
-            // The levels it had until now, then the new ones from this minute on (optionStopTargetHit).
-            levelLog: [
-              ...(p.levelLog?.length ? p.levelLog.filter((c) => c.t < changeAt) : [{ t: p.entryTime, sl: p.slPts ?? cur.paperSl ?? 20, target: p.targetPts ?? cur.paperTarget ?? 30, trailStart: p.trailStart ?? cur.paperTrailStart ?? 0, trailGap: p.trailGap ?? cur.paperTrailGap ?? 0 }]),
-              { t: changeAt, sl: patch.paperSl ?? p.slPts ?? cur.paperSl ?? 20, target: patch.paperTarget ?? p.targetPts ?? cur.paperTarget ?? 30, trailStart: patch.paperTrailStart ?? p.trailStart ?? cur.paperTrailStart ?? 0, trailGap: patch.paperTrailGap ?? p.trailGap ?? cur.paperTrailGap ?? 0 },
-            ],
-            ...(patch.paperSl != null ? { slPts: patch.paperSl } : {}),
-            ...(patch.paperTarget != null ? { targetPts: patch.paperTarget } : {}),
-            ...(patch.paperTrailStart != null ? { trailStart: patch.paperTrailStart } : {}),
-            ...(patch.paperTrailGap != null ? { trailGap: patch.paperTrailGap } : {}),
-          } : p)),
+          positions: withLevelChange(day.positions, open, patch, changeAt, cur),
         },
       }
     })

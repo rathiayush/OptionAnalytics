@@ -31,9 +31,9 @@ public sealed class ScannerLogController : ControllerBase
     /// signals and trades, the futures points and option premium points captured, the P&amp;L net of
     /// charges - for each stored day and in total - as JSON (totals / days).</summary>
     [HttpGet("summary")]
-    public async Task<IActionResult> Summary(CancellationToken cancellationToken)
+    public async Task<IActionResult> Summary(CancellationToken cancellationToken, [FromQuery] string? source = null)
     {
-        var rows = await _store.SummaryAsync(cancellationToken);
+        var rows = await _store.SummaryAsync(cancellationToken, source);
         return Ok(new { totals = rows.Where(r => r.Scope == "total"), days = rows.Where(r => r.Scope == "day") });
     }
 

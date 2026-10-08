@@ -269,6 +269,25 @@ public sealed class ScannerLogStoreTests : IDisposable
         Assert.Equal(string.Join(',', ScannerLogStore.SummaryColumns) + "\n", ScannerLogStore.SummaryCsv(Array.Empty<ScannerSummaryRow>()));
     }
 
+
+    [Fact]
+    public async Task TheServerScannersRows_GoToTheirOwnFiles_AndLeaveThePagesRowsAlone()
+    {
+        var store = Store();
+        await store.UpsertDayAsync(Day("2026-10-05", new[] { Signal(T1040) }, new[] { Trade("p1", T1040 + 5000) }), null, CancellationToken.None);
+        await store.UpsertDayAsync(Day("2026-10-05", new[] { Signal(T1040, status: "win", r: 2) }, new[] { Trade("p1", T1040 + 5000) }) with { Source = "server" }, "scanner-runner", CancellationToken.None);
+
+        var page = File.ReadAllText(SignalsPath);
+        Assert.Contains(",open,", page);
+        Assert.DoesNotContain(",win,", page);
+        var server = File.ReadAllText(Path.Combine(_dir, ScannerLogStore.ServerPrefix + ScannerLogStore.SignalsFile));
+        Assert.Contains(",win,", server);
+        Assert.Contains("server", server);
+        Assert.True(File.Exists(Path.Combine(_dir, ScannerLogStore.ServerPrefix + ScannerLogStore.TradesFile)));
+        Assert.Equal(1, (await store.SummaryAsync(CancellationToken.None, "server")).Single(r => r.Scope == "total").Wins);
+        Assert.NotNull(store.ReadAll("server-signals"));
+    }
+
     public void Dispose()
     {
         try { Directory.Delete(_dir, recursive: true); } catch { /* best effort */ }

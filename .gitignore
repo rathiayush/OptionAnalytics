@@ -51,3 +51,6 @@ live-time-exits.json
 # other than .gitkeep is a leftover from a local build.
 OptionAnalytics.Server/wwwroot/*
 !OptionAnalytics.Server/wwwroot/.gitkeep
+
+# The server-side scanner bundle (npm run build:runner) - published next to the server, never committed.
+optionanalytics.client/dist-runner/

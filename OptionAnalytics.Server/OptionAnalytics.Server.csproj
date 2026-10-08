@@ -48,13 +48,29 @@
   <Target Name="BuildAndCopyClient" BeforeTargets="ComputeFilesToPublish">
     <Exec Command="npm ci" WorkingDirectory="../optionanalytics.client" />
     <Exec Command="npm run build" WorkingDirectory="../optionanalytics.client" />
+    <Exec Command="npm run build:runner" WorkingDirectory="../optionanalytics.client" />
     <ItemGroup>
       <ClientDist Include="../optionanalytics.client/dist/**" />
       <ResolvedFileToPublish Include="@(ClientDist)">
         <RelativePath>wwwroot/%(ClientDist.RecursiveDir)%(ClientDist.Filename)%(ClientDist.Extension)</RelativePath>
         <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
       </ResolvedFileToPublish>
+      <!-- The server-side scanner (ScannerRunnerHostedService runs it with Node): its bundle and the
+           package.json of its one runtime dependency, installed by InstallScannerRunner below. -->
+      <ResolvedFileToPublish Include="../optionanalytics.client/dist-runner/runner.mjs">
+        <RelativePath>scanner-runner/runner.mjs</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+      <ResolvedFileToPublish Include="../optionanalytics.client/scanner-runner/package.json">
+        <RelativePath>scanner-runner/package.json</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
     </ItemGroup>
+  </Target>
+
+  <!-- @microsoft/signalr (and its Node transports) for the published scanner runner. -->
+  <Target Name="InstallScannerRunner" AfterTargets="Publish">
+    <Exec Command="npm install --omit=dev --no-audit --no-fund" WorkingDirectory="$(PublishDir)scanner-runner" />
   </Target>
 
 </Project>

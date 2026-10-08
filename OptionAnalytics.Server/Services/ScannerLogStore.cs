@@ -21,6 +21,10 @@ public sealed class ScannerLogStore
 {
     public const string SignalsFile = "signals.csv";
     public const string TradesFile = "trades.csv";
+    /// <summary>The server-side scanner (source "server") keeps its own two files beside these - run side by side
+    /// with the page, the same signal must not overwrite the page's row.</summary>
+    public const string ServerPrefix = "server-";
+    public static string FilePrefix(string? source) => source == "server" ? ServerPrefix : "";
     public const int MaxSignals = 3000;
     public const int MaxTrades = 1000;
     private const int MaxText = 400;
@@ -60,6 +64,8 @@ public sealed class ScannerLogStore
     {
         "signals" => Path.Combine(_directory, SignalsFile),
         "trades" => Path.Combine(_directory, TradesFile),
+        "server-signals" => Path.Combine(_directory, ServerPrefix + SignalsFile),
+        "server-trades" => Path.Combine(_directory, ServerPrefix + TradesFile),
         _ => null,
     };
 
@@ -108,8 +114,9 @@ public sealed class ScannerLogStore
         await _lock.WaitAsync(cancellationToken);
         try
         {
-            if (signalRows.Count > 0) Upsert(Path.Combine(_directory, SignalsFile), SignalColumns, signalRows, "time_ist");
-            if (tradeRows.Count > 0) Upsert(Path.Combine(_directory, TradesFile), TradeColumns, tradeRows, "entry_time_ist");
+            var prefix = FilePrefix(request.Source);
+            if (signalRows.Count > 0) Upsert(Path.Combine(_directory, prefix + SignalsFile), SignalColumns, signalRows, "time_ist");
+            if (tradeRows.Count > 0) Upsert(Path.Combine(_directory, prefix + TradesFile), TradeColumns, tradeRows, "entry_time_ist");
         }
         finally
         {
@@ -129,14 +136,15 @@ public sealed class ScannerLogStore
 
     /// <summary>The totals of everything stored, per underlying: one row per day and a TOTAL row per
     /// underlying (see ScannerSummaryRow). Read from the two CSV files, so it is always what the files say.</summary>
-    public async Task<IReadOnlyList<ScannerSummaryRow>> SummaryAsync(CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<ScannerSummaryRow>> SummaryAsync(CancellationToken cancellationToken, string? source = null)
     {
         List<Dictionary<string, string>> signals, trades;
+        var prefix = FilePrefix(source);
         await _lock.WaitAsync(cancellationToken);
         try
         {
-            signals = Read(Path.Combine(_directory, SignalsFile)).ToList();
-            trades = Read(Path.Combine(_directory, TradesFile)).ToList();
+            signals = Read(Path.Combine(_directory, prefix + SignalsFile)).ToList();
+            trades = Read(Path.Combine(_directory, prefix + TradesFile)).ToList();
         }
         finally
         {
@@ -253,7 +261,7 @@ public sealed class ScannerLogStore
     {
         var path = PathOf(kind);
         if (path is null) return null;
-        return File.Exists(path) ? File.ReadAllText(path) : string.Join(',', kind == "signals" ? SignalColumns : TradeColumns) + "\n";
+        return File.Exists(path) ? File.ReadAllText(path) : string.Join(',', kind.EndsWith("signals") ? SignalColumns : TradeColumns) + "\n";
     }
 
     private void Upsert(string path, string[] columns, List<Dictionary<string, string>> rows, string timeColumn)
