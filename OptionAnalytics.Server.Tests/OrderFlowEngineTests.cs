@@ -511,4 +511,71 @@ public sealed class OrderFlowEngineTests
         var upTo3 = engine.Tape(T0.AddSeconds(3), 2, 1);
         Assert.Equal(new[] { T0.AddSeconds(2), T0.AddSeconds(3) }, upTo3.Select(t => t.Time));
     }
+
+    // The footprint and the tape are two views of the same inferred prints: every minute's rows must add up
+    // exactly to the prints the tape lists for that minute (same price row, same side), and the day's volume
+    // to the rise in the feed's cumulative volume - for any row size.
+    [Theory]
+    [InlineData(0)]
+    [InlineData(0.5)]
+    [InlineData(1)]
+    [InlineData(5)]
+    public void FootprintRowsAddUpToTheTapePrintsAndTheFeedsVolume(double rowSize)
+    {
+        var engine = NewEngine();
+        var random = new Random(7);
+        var price = 22710.00m;
+        long volume = 10_000;
+        engine.OnTick(Tick(price, volume, price - 0.05m, price + 0.05m), T0);
+        long traded = 0;
+        for (var i = 1; i <= 400; i++)
+        {
+            price += (random.Next(-4, 5)) * 0.05m;
+            var add = random.Next(0, 6) * 75L;
+            volume += add;
+            traded += add;
+            engine.OnTick(Tick(price, volume, price - 0.05m, price + 0.05m), T0.AddMilliseconds(i * 700));
+        }
+
+        var snapshot = engine.Snapshot(rowSize: (decimal)rowSize, minTradeQty: 1, heatmapColumns: 10);
+        var prints = engine.Tape(null, 100_000, 1);
+        var row = (decimal)rowSize;
+        decimal RowOf(decimal p) => row > 0 ? Math.Floor(p / row) * row : p;
+
+        Assert.Equal(traded, snapshot.Bars.Sum(b => b.Buy + b.Sell));
+        Assert.Equal(traded, prints.Sum(t => t.Quantity));
+        Assert.True(snapshot.Bars.Count > 1);
+        foreach (var bar in snapshot.Bars)
+        {
+            var end = bar.Time.AddMinutes(1);
+            var inMinute = prints.Where(t => t.Time.ToOffset(bar.Time.Offset) >= bar.Time && t.Time.ToOffset(bar.Time.Offset) < end).ToList();
+            Assert.Equal(inMinute.Where(t => t.Buy).Sum(t => t.Quantity), bar.Buy);
+            Assert.Equal(inMinute.Where(t => !t.Buy).Sum(t => t.Quantity), bar.Sell);
+            Assert.Equal(bar.Buy, bar.Levels.Sum(l => l.Buy));
+            Assert.Equal(bar.Sell, bar.Levels.Sum(l => l.Sell));
+            foreach (var level in bar.Levels)
+            {
+                Assert.Equal(inMinute.Where(t => t.Buy && RowOf(t.Price) == level.Price).Sum(t => t.Quantity), level.Buy);
+                Assert.Equal(inMinute.Where(t => !t.Buy && RowOf(t.Price) == level.Price).Sum(t => t.Quantity), level.Sell);
+            }
+        }
+    }
+
+    // Nothing traded before the engine's first tick is in its bars - RecordedFrom says where the day starts
+    // (the page backfills the minutes before it as an estimate), and it survives an export / import.
+    [Fact]
+    public void RecordedFromIsTheFirstTickAndTravelsWithTheDay()
+    {
+        var engine = NewEngine();
+        Assert.Null(engine.RecordedFrom());
+        engine.OnTick(Tick(22710.00m, 10_000, 22709.95m, 22710.05m), T0);
+        engine.OnTick(Tick(22710.05m, 10_150, 22710.00m, 22710.10m), T0.AddMinutes(1));
+        Assert.Equal(T0, engine.RecordedFrom());
+
+        var copy = OrderFlowEngine.FromDay(engine.ExportDay()!);
+        Assert.Equal(T0, copy.RecordedFrom());
+
+        engine.OnTick(Tick(22711.00m, 20_000, 22710.95m, 22711.05m), T0.AddDays(1));
+        Assert.Equal(T0.AddDays(1), engine.RecordedFrom());
+    }
 }
