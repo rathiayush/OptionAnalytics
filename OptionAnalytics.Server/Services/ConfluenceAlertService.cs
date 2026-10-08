@@ -10,11 +10,9 @@ namespace OptionAnalytics.Server.Services;
 /// three legs - spot, ATM CE, ATM PE - continuously up to date (EmaCrossoverDetector.
 /// ConfirmedDirection, recomputed on every closed bar - see its own doc comment for why "confirmed"
 /// means the bar's close actually finished beyond both EMAs, not just their relationship flipping),
-/// and fires two kinds of alert off that live state:
-///
-///   1. An individual alert the moment any ONE leg's bias flips (Kind: "Spot"/"AtmCe"/"AtmPe") -
-///      the lightweight "something just changed" signal.
-///   2. A stronger "Confluence" alert only when all three confirm the same move at once:
+/// and sends ONE kind of alert off that live state - a single leg flipping, or the spot-only EMA
+/// crossover, is deliberately not an alert any more. The "Confluence" alert fires only when all
+/// three confirm the same move at once:
 ///
 ///        BULLISH  - spot is UP, ATM CE is UP, ATM PE is DOWN
 ///        BEARISH  - spot is DOWN, ATM PE is UP, ATM CE is DOWN
@@ -49,11 +47,8 @@ namespace OptionAnalytics.Server.Services;
 /// restart still shows a real "where do things stand" rather than three blanks waiting for the
 /// next bar.
 ///
-/// Both alert kinds go out over SignalR ("confluenceAlert" on SpotHub, for live display) and a
-/// bounded in-memory history (GetRecentAlerts / GET /api/alerts). Only the stronger Confluence
-/// alert goes to Telegram - individual leg flips would otherwise double up with
-/// EmaCrossoverAlertService's own existing spot-crossover Telegram alert and turn the channel into
-/// noise for a signal that isn't yet confirmed.
+/// The alert goes out over SignalR ("confluenceAlert" on SpotHub, for live display), Telegram and a
+/// bounded in-memory history (GetRecentAlerts / GET /api/alerts).
 /// </summary>
 public sealed class ConfluenceAlertService : BackgroundService
 {
@@ -169,37 +164,18 @@ public sealed class ConfluenceAlertService : BackgroundService
     {
         var state = GetOrCreateState(underlying);
         bool changed;
-        bool hadPrevious;
         lock (state)
         {
             var previous = getLeg(state);
-            hadPrevious = previous is not null;
             changed = previous is not { } prev || prev.Direction != direction;
             setLeg(state, (direction, barTime));
             state.LastUpdatedUtc = DateTimeOffset.UtcNow;
             if (changed) state.ConfluenceAlerted = false; // a leg just moved - allow a fresh confluence alert if the new combination aligns
         }
 
-        // The first reading ever recorded for THIS leg is a baseline, not a flip worth alerting on
-        // - see EvaluateConfluence's EverComplete check for why this can legitimately still be the
-        // first reading even when announce is true (this call came from a real bar close, not the
-        // startup seed pass, because backfill for this leg hadn't finished by the time the seed
-        // pass ran).
-        if (announce && changed && hadPrevious) RaiseIndividualAlert(underlying, kind, direction, barTime, cancellationToken);
+        // A single leg flipping is NOT an alert - only the three-way Confluence is (see the class
+        // comment). The leg's bias is still tracked for the confluence check and GetCurrentStates.
         EvaluateConfluence(underlying, state, announce, cancellationToken);
-    }
-
-    private void RaiseIndividualAlert(string underlying, string kind, string direction, DateTimeOffset barTime, CancellationToken cancellationToken)
-    {
-        var spotPrice = _spotFeed.States.TryGetValue(underlying, out var spotState) ? spotState.LastPrice : 0;
-        var atmStrike = _cdv.States.TryGetValue(underlying, out var cdvState) ? cdvState.AtmStrike : null;
-        var legLabel = kind switch { "Spot" => "Spot", "AtmCe" => "ATM CE", "AtmPe" => "ATM PE", _ => kind };
-
-        var message = $"<b>{underlying}</b> {legLabel} EMA 9/21 turned {direction}\nSpot: {spotPrice:N2} · ATM {atmStrike}\nBar: {barTime:yyyy-MM-dd HH:mm} UTC";
-        var alert = new ConfluenceAlert(underlying, DateTimeOffset.UtcNow, kind, direction, spotPrice, atmStrike, message);
-        _logger.LogInformation("{Kind} bias change for {Underlying}: {Direction} at spot {Spot}.", kind, underlying, direction, spotPrice);
-
-        RecordAndBroadcast(alert, sendTelegram: false, cancellationToken);
     }
 
     private void EvaluateConfluence(string underlying, UnderlyingConfluenceState state, bool announce, CancellationToken cancellationToken)

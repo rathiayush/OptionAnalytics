@@ -20,9 +20,10 @@ line chart for the 17-strike (8 ITM + ATM + 8 OTM) window around the current ATM
   - CDV is a tick-rule-classified, sigmoid-moneyness-delta-weighted running total per side (see
     `CdvUnderlyingState`), re-centered on the ATM strike every 30 minutes as spot moves.
   - EMA9/EMA21 (via `Skender.Stock.Indicators`) is computed both client-side (for the chart
-    overlay) and server-side (`EmaCrossoverAlertService`, reacting to each bar's close) - the
-    server-side copy is what drives Telegram alerts, since those need to fire even with nobody
-    looking at the page.
+    overlay) and server-side (`ConfluenceAlertService`, reacting to each bar's close) - the
+    server-side copy drives the Telegram alert, which fires only when spot, the ATM CE and the ATM PE
+    all confirm the same move (a single leg flipping is not an alert), even with nobody looking at
+    the page.
   - Pushes updates to the browser over SignalR (`/hubs/spot`, both `spotUpdate` and `cdvUpdate`
     events) and also serves them over REST (`/api/spot/...`, `/api/cdv/...`).
 - `optionanalytics.client` - Vite + React frontend (antd + lightweight-charts).

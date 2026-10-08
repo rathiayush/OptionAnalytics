@@ -16,7 +16,7 @@ import {
 } from './shared.jsx'
 import { alignToBars, chartVwap, sessionVwapFromBars } from './chartVwap.js'
 import { notifyLiveTradeEvents, notifyTrade } from './tradeNotify.js'
-import { loadTradeLevels, saveTradeLevels } from './tradeDefaults.js'
+import { loadTradeLevels, saveTradeLevels, subscribeTradeLevels } from './tradeDefaults.js'
 import { PREV_PROFILE } from './profileColors.js'
 import { optionTrailLevel, tighterStop } from './optionTrail.js'
 import { PremiumEmaChart, DraggableFloatingPanel, useFitContentAsDataGrows, useChartUserControl, CANDLE_SCALE_MARGINS } from './oiShared.jsx'
@@ -2681,6 +2681,14 @@ export default function OiReplayPage() {
     setPaperTrailStartState(levels.trailStart)
     setPaperTrailGapState(levels.trailGap)
   }, [underlying])
+  // The levels are one global setting per underlying: a change made on another page / tab lands here too.
+  useEffect(() => subscribeTradeLevels(() => {
+    const levels = loadTradeLevels('oiReplay', underlying)
+    setPaperSlPointsState(levels.sl)
+    setPaperTargetPointsState(levels.target)
+    setPaperTrailStartState(levels.trailStart)
+    setPaperTrailGapState(levels.trailGap)
+  }), [underlying])
   const setPaperTrailStart = (v) => { setPaperTrailStartState(v); saveTradeLevels('oiReplay', underlying, { trailStart: v }) }
   const setPaperTrailGap = (v) => { setPaperTrailGapState(v); saveTradeLevels('oiReplay', underlying, { trailGap: v }) }
   const setPaperSlPoints = (v) => { setPaperSlPointsState(v); saveTradeLevels('oiReplay', underlying, { sl: v, target: paperTargetPoints }) }

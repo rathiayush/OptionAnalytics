@@ -19,7 +19,7 @@ check('nothing saved: the defaults, trailing off', JSON.stringify(loadTradeLevel
 saveTradeLevels('scanner', 'BANKNIFTY', { sl: 40, target: 0 })
 check('what the trader sets is kept per underlying (a target of 0 = off stays 0)', JSON.stringify(loadTradeLevels('scanner', 'BANKNIFTY')) === JSON.stringify({ sl: 40, target: 0, trailStart: 0, trailGap: 0 }))
 check('...without touching another underlying', JSON.stringify(loadTradeLevels('scanner', 'NIFTY')) === JSON.stringify({ ...n, trailStart: 0, trailGap: 0 }))
-check('...or the other page', JSON.stringify(loadTradeLevels('oiReplay', 'BANKNIFTY')) === JSON.stringify({ ...b, trailStart: 0, trailGap: 0 }))
+check('...and the same levels are used by the other page (one global setting per underlying)', JSON.stringify(loadTradeLevels('oiReplay', 'BANKNIFTY')) === JSON.stringify({ sl: 40, target: 0, trailStart: 0, trailGap: 0 }))
 saveTradeLevels('oiReplay', 'NIFTY', { sl: null, target: 45 })
 check('a cleared box falls back to the default for that level only', JSON.stringify(loadTradeLevels('oiReplay', 'NIFTY')) === JSON.stringify({ sl: n.sl, target: 45, trailStart: 0, trailGap: 0 }))
 saveTradeLevels('oiReplay', 'NIFTY', { trailStart: 10, trailGap: 8 })

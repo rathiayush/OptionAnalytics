@@ -1044,6 +1044,12 @@ public sealed class LiveTradingService : BackgroundService
                 orderIds.AddRange(result.OrderIds);
             }
 
+            // Whatever is still open once the positions are being closed - legs and protection orders of
+            // positions that were already flat, orders that appeared meanwhile. The exits just placed stay.
+            var (leftover, leftoverLegs, sweepFailures) = await SweepOpenOrdersAsync(includeWorkingExits: false, cancellationToken);
+            failures.AddRange(sweepFailures);
+            if (leftover + leftoverLegs > 0) messages.Add($"cancelled {leftover} leftover order(s) and {leftoverLegs} stop-loss / target leg(s)");
+
             RefreshUnlessStreaming();
             if (open.Count == 0 && messages.Count == 0 && failures.Count == 0)
                 return new ManualOrderResult(true, "nothing to exit - no open positions or pending orders", Array.Empty<string>(), null);
@@ -1065,21 +1071,7 @@ public sealed class LiveTradingService : BackgroundService
         await _actionLock.WaitAsync(cancellationToken);
         try
         {
-            var (cancelled, failures) = await CancelPendingAsync(null, cancellationToken);
-            var legs = 0;
-            foreach (var order in (await _superOrders.ListAsync(cancellationToken)).Where(o => o.OrderStatus is "TRADED" or "PART_TRADED"))
-            {
-                foreach (var leg in order.LegDetails.Where(l => l.LegName is "TARGET_LEG" or "STOP_LOSS_LEG" && IsOpenStatus(l.OrderStatus)))
-                {
-                    var (result, error) = await _superOrders.CancelAsync(order.OrderId, leg.LegName, cancellationToken);
-                    if (result is null) failures.Add($"could not cancel {leg.LegName} of {order.OrderId}: {error}"); else legs++;
-                }
-            }
-            foreach (var order in (await _orders.ListAsync(cancellationToken)).Where(o => IsOpenStatus(o.OrderStatus) && (IsProtection(o) || o.CorrelationId?.StartsWith("OIRX-", StringComparison.Ordinal) == true)))
-            {
-                var (result, error) = await _orders.CancelAsync(order.OrderId, cancellationToken);
-                if (result is null) failures.Add($"could not cancel {order.OrderId}: {error}"); else cancelled++;
-            }
+            var (cancelled, legs, failures) = await SweepOpenOrdersAsync(includeWorkingExits: true, cancellationToken);
             RequestRefresh();
             var text = $"cancelled {cancelled} order(s) and {legs} stop-loss / target leg(s)";
             return failures.Count == 0 ? new ManualOrderResult(true, text, Array.Empty<string>(), null) : ManualOrderResult.Fail($"{string.Join(" · ", failures)} · {text}");
@@ -1090,6 +1082,32 @@ public sealed class LiveTradingService : BackgroundService
         }
     }
 
+    /// <summary>Cancels EVERYTHING still open on the account: unfilled super orders (with their legs), pending
+    /// plain orders, the target / stop-loss legs of filled super orders and protection stop-losses -
+    /// and, with <paramref name="includeWorkingExits"/>, this panel's own working exits (OIRX-) too. The
+    /// last step of Exit all and Emergency exit, so no order is left behind for a position that is
+    /// already flat (or that Dhan closed itself).</summary>
+    private async Task<(int Cancelled, int Legs, List<string> Failures)> SweepOpenOrdersAsync(bool includeWorkingExits, CancellationToken cancellationToken)
+    {
+        var (cancelled, failures) = await CancelPendingAsync(null, cancellationToken);
+        var legs = 0;
+        foreach (var order in (await _superOrders.ListAsync(cancellationToken)).Where(o => o.OrderStatus is "TRADED" or "PART_TRADED"))
+        {
+            foreach (var leg in order.LegDetails.Where(l => l.LegName is "TARGET_LEG" or "STOP_LOSS_LEG" && IsOpenStatus(l.OrderStatus)))
+            {
+                var (result, error) = await _superOrders.CancelAsync(order.OrderId, leg.LegName, cancellationToken);
+                if (result is null) failures.Add($"could not cancel {leg.LegName} of {order.OrderId}: {error}"); else legs++;
+            }
+        }
+        foreach (var order in (await _orders.ListAsync(cancellationToken)).Where(o => IsOpenStatus(o.OrderStatus)
+                     && (IsProtection(o) || (includeWorkingExits && o.CorrelationId?.StartsWith("OIRX-", StringComparison.Ordinal) == true))))
+        {
+            var (result, error) = await _orders.CancelAsync(order.OrderId, cancellationToken);
+            if (result is null) failures.Add($"could not cancel {order.OrderId}: {error}"); else cancelled++;
+        }
+        return (cancelled, legs, failures);
+    }
+
     /// <summary>Dhan's own exit-everything (DELETE /positions): every position and every open order on
     /// the account, strategy triggers' included. For when the careful Exit all is not enough.</summary>
     public async Task<ManualOrderResult> EmergencyExitAllAsync(CancellationToken cancellationToken)
@@ -1097,10 +1115,40 @@ public sealed class LiveTradingService : BackgroundService
         if (!_session.IsAuthenticated) return ManualOrderResult.Fail("not logged in to Dhan right now");
         var error = await _positions.ExitAllAccountAsync(cancellationToken);
         _logger.LogWarning("EMERGENCY exit-all (Dhan DELETE /positions) requested: {Result}.", error ?? "accepted");
+        // Dhan's call does not reliably clear every open order (target / stop-loss legs and pending orders
+        // can stay behind), so after it - even when it failed - every order still open is cancelled here.
+        // Dhan needs a moment to book the exits before the legs of the closed positions show as open.
+        var failures = new List<string>();
+        var swept = 0;
+        try { await Task.Delay(TimeSpan.FromSeconds(1.5), cancellationToken); } catch (OperationCanceledException) { }
+        await _actionLock.WaitAsync(CancellationToken.None);
+        try
+        {
+            for (var pass = 0; pass < 2; pass++)
+            {
+                var (cancelled, legs, passFailures) = await SweepOpenOrdersAsync(includeWorkingExits: true, CancellationToken.None);
+                swept += cancelled + legs;
+                failures = passFailures;
+                if (cancelled + legs == 0 && passFailures.Count == 0) break;
+                await Task.Delay(TimeSpan.FromSeconds(1), CancellationToken.None);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Emergency exit: the sweep of leftover orders failed.");
+            failures.Add($"leftover-order sweep failed: {ex.Message}");
+        }
+        finally
+        {
+            _actionLock.Release();
+        }
         RefreshUnlessStreaming();
-        return error is null
-            ? new ManualOrderResult(true, "Dhan accepted exit-all: every position on the account is being closed and every open order cancelled", Array.Empty<string>(), null)
-            : ManualOrderResult.Fail($"Dhan rejected exit-all: {error}");
+        var sweepText = swept > 0 ? $" · {swept} leftover order(s) / leg(s) cancelled" : "";
+        var failureText = failures.Count > 0 ? $" · {string.Join(" · ", failures)}" : "";
+        if (error is not null) return ManualOrderResult.Fail($"Dhan rejected exit-all: {error}{sweepText}{failureText}");
+        return failures.Count == 0
+            ? new ManualOrderResult(true, $"Dhan accepted exit-all: every position on the account is being closed and every open order cancelled{sweepText}", Array.Empty<string>(), null)
+            : ManualOrderResult.Fail($"Dhan accepted exit-all, but some orders could not be cancelled{failureText}{sweepText}");
     }
 
     /// <summary>Cancels pending orders - for one contract, or all of them (null): unfilled super orders

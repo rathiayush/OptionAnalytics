@@ -217,10 +217,6 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<SpotFeedHostedServ
 builder.Services.AddSingleton<CdvHostedService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<CdvHostedService>());
 
-// No-op (logs at Debug and returns) when Telegram:Enabled/BotToken/ChatId aren't set - see
-// TelegramAlertService.
-builder.Services.AddHostedService<EmaCrossoverAlertService>();
-
 // Same singleton+hosted pattern as SpotFeedHostedService/CdvHostedService - AlertsController reads
 // its recent-alert history directly.
 builder.Services.AddSingleton<ConfluenceAlertService>();

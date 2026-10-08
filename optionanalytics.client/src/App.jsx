@@ -1372,7 +1372,7 @@ function DashboardPage() {
       setAlerts((prev) => [alert, ...prev].slice(0, 50))
 
       const legKey = alert.kind === 'Spot' ? 'spot' : alert.kind === 'AtmCe' ? 'atmCe' : alert.kind === 'AtmPe' ? 'atmPe' : null
-      if (!legKey) return // Confluence alerts don't change any leg's own state, just confirm it
+      if (!legKey) { refetchCrossoverStates(); return } // single-leg flips are no longer alerts, so the leg tags are re-read when a confluence fires
       setCrossoverStates((prev) => {
         const existing = prev.find((s) => s.underlying === alert.underlying)
         if (existing) return prev.map((s) => (s.underlying === alert.underlying ? { ...s, [legKey]: alert.direction, updatedUtc: alert.timeUtc } : s))

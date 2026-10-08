@@ -17,6 +17,7 @@ import { LiquidityMapCard } from './LiquidityMap.jsx'
 import { alignToBars, sessionVwapFromBars } from './chartVwap.js'
 import { ProfilesCard } from './ProfilesCard.jsx'
 import { PriceAlertsBar, usePriceAlerts } from './PriceAlerts.jsx'
+import { ProfileAlertsBar, useProfileAlerts } from './ProfileAlerts.jsx'
 import { fetchPreviousSession, sessionVolumeProfile, tpoProfile, tpoRowFor } from './profiles.js'
 import { withBackfill } from './cvdBackfill.js'
 import { FootprintChart, DepthHeatmap, CumulativeDeltaChart, BookLadder, formatVolume } from './OrderFlowCharts.jsx'
@@ -563,6 +564,8 @@ export default function OrderFlowPage() {
   const lastPrice = view?.meta?.lastPrice
   // Futures minus index: an option strike in futures terms (the footprint and heatmap are futures).
   const basis = oiNow?.spot > 0 && lastPrice > 0 ? Math.round(lastPrice - oiNow.spot) : null
+  // Alerts at the previous session's volume / market profile levels, futures and spot separately.
+  const profileAlerts = useProfileAlerts({ underlying, vp: prevVp, tpo: prevTpo, tpoRow, futuresPrice: lastPrice, spotPrice: oiNow?.spot, basis, live: !isReplay })
   const suddenLevels = useMemo(() => (basis == null ? [] : sudden.map((w) => ({
     price: Math.round((w.strike + basis) / rowSize) * rowSize, color: w.side === 'PE' ? '#73d13d' : '#ff7875',
     label: `${w.side === 'PE' ? 'PUT' : 'CALL'} ${w.strike} +${(w.add / 1e5).toFixed(1)}L 5m`,
@@ -837,6 +840,7 @@ export default function OrderFlowPage() {
           <Col xs={24} xl={17}>
             <Card size="small" title={`Footprint · ${timeframe} min · ${rowSize} pt rows${estimated ? ' · estimated' : ''}`} extra={!narrow && <Text type="secondary" style={{ fontSize: 11 }}>bid (sell) × ask (buy) · drag to move it anywhere · wheel: bar width · Shift+wheel or price axis: row height · double-click: reset</Text>}>
               <PriceAlertsBar {...priceAlerts} lastPrice={meta?.lastPrice} live={!isReplay} />
+              <ProfileAlertsBar {...profileAlerts} live={!isReplay} />
               <FootprintLegend estimated={estimated} bigLabel={bigLabel} />
               <FootprintChart
                 bars={shown.bars} rowSize={rowSize} lotSize={lotSize} showLots={showLots} lastPrice={meta?.lastPrice} height={narrow ? 480 : 660}

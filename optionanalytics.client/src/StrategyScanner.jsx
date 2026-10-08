@@ -6,7 +6,7 @@ import { PAPER_TRADE_LOT_SIZE } from './oiShared.jsx'
 import { liveTradingApi } from './LiveTrading.jsx'
 import { chime, speak, telegram, unlockAudio } from './alerts.js'
 import { notifyLiveTradeEvents, notifyTrade } from './tradeNotify.js'
-import { loadTradeLevels, saveTradeLevels } from './tradeDefaults.js'
+import { loadTradeLevels, saveTradeLevels, subscribeTradeLevels } from './tradeDefaults.js'
 import { suddenWallText } from './suddenOi.js'
 import { adaptiveStats } from './dayRegime.js'
 import { chargeRates, tradeCharges } from './tradeCharges.js'
@@ -847,6 +847,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   // A new Max SL / Target applies to every trade still OPEN now (and to new ones); closed trades keep the
   // levels they closed on. (Paper lots are applied to every paper trade in paperRows.)
   const levelsTimerRef = useRef(null)
+  const changeLimitsRef = useRef(null)
   const changeLimits = (patch) => {
     setSettings((s) => ({ ...s, ...patch }))
     if (patch.paperSl != null || patch.paperTarget != null || patch.paperTrailStart != null || patch.paperTrailGap != null) {
@@ -899,6 +900,15 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       }
     })
   }
+  // The Max SL / Target / trail are one global setting per underlying: a change made on another page / tab
+  // goes through the same path as typing it here (so open trades pick it up from this minute).
+  changeLimitsRef.current = changeLimits
+  useEffect(() => subscribeTradeLevels(() => {
+    const levels = loadTradeLevels('scanner', underlying)
+    const cur = settingsRef.current
+    if (cur.paperSl === levels.sl && cur.paperTarget === levels.target && (cur.paperTrailStart ?? 0) === levels.trailStart && (cur.paperTrailGap ?? 0) === levels.trailGap) return
+    changeLimitsRef.current?.({ paperSl: levels.sl, paperTarget: levels.target, paperTrailStart: levels.trailStart, paperTrailGap: levels.trailGap })
+  }), [underlying])
   const days = Object.values(history)
   const statRows = stats.map((s) => ({ ...s, key: s.id, top: alertIds.includes(s.id) }))
   const statColumns = [
