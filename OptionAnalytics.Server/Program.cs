@@ -322,6 +322,8 @@ builder.Services.AddSingleton<TradeSettingsStore>();
 builder.Services.AddSingleton<RiskSettingsStore>();
 // GoCharting's per-bar order flow, posted by a Lipi alert's webhook (GoChartingStore / GoChartingController).
 builder.Services.AddSingleton<GoChartingStore>();
+// The strategy tuning job (scanner-runner/tune.mjs) - StrategyTuningService / StrategyTuningController.
+builder.Services.AddSingleton<StrategyTuningService>();
 builder.Services.AddSingleton<DhanTradersControlClient>();
 builder.Services.AddSingleton<KillSwitchService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<KillSwitchService>());

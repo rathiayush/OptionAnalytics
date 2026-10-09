@@ -129,8 +129,11 @@ public sealed class ScannerRunnerHostedService : BackgroundService
 
     // This server's own address as the runner should call it: the first address Kestrel listens on,
     // with a wildcard host made loopback.
-    private string BaseUrl()
+    private string BaseUrl() => BaseUrlOf(_server);
+
+    internal static string BaseUrlOf(IServer server)
     {
+        var _server = server;
         var address = _server.Features.Get<IServerAddressesFeature>()?.Addresses.FirstOrDefault(a => a.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
             ?? _server.Features.Get<IServerAddressesFeature>()?.Addresses.FirstOrDefault()
             ?? "http://127.0.0.1:8080";

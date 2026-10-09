@@ -11,20 +11,21 @@ import { suddenWallText } from './suddenOi.js'
 import { adaptiveStats } from './dayRegime.js'
 import { chargeRates, tradeCharges } from './tradeCharges.js'
 import {
-  ACTIVE_STRATEGIES, STRATEGY_BY_ID, evaluateStrategies, simulateOutcome, strategyStats, topFifteen, MIN_TRADES_TO_RANK, oiSummary, optionOiText,
+  ACTIVE_STRATEGIES, STRATEGY_BY_ID, strategyStats, topFifteen, MIN_TRADES_TO_RANK, oiSummary, optionOiText,
   DEFAULT_TRAIL, LAST_ENTRY, SQUARE_OFF, fmtHm, exitLabel, premiumAt, optionPnlPoints, optionTradeText, squareOffMs, RANGE_IDS, asReplayContext,
   optionTradeAt, dayTypeAt, trailPoints, STRATEGY_FILTERS, strategyFilters, changedFilters,
 } from './strategyEngine.js'
-import { liquiditySignals, pullStackSignals, replayRange, replayView } from './orderFlowMath.js'
-import { withGoChartingDelta } from './goCharting.js'
+import { replayRange } from './orderFlowMath.js'
+import { scanDaySetups, withDayOutcomes } from './scanDay.js'
+import { SCANNER_SETTINGS_KEY } from './scannerSettings.js'
 import {
-  MIN, COOLDOWN_MS, msOf, completedBars, priceAt, upTo, trailUnit, trailPtsFor, trailFor, alertIdsFor, sameSignal,
+  MIN, COOLDOWN_MS, msOf, trailUnit, trailPtsFor, trailFor, alertIdsFor, sameSignal,
   scanTick, followSetups, setupEvents, newPosition, positionRows, withLevelChange, PAPER_TRADE_LOT_SIZE, paperEntryText, setupExitText, paperExitResult, setupWasTraded, scannerLogBody, scannerLogSig,
 } from './scannerCore.js'
 
 const { Text } = Typography
 const IST_HHMM = new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' })
-const SETTINGS_KEY = 'optionanalytics.strategyScanner.settings'
+const SETTINGS_KEY = SCANNER_SETTINGS_KEY
 // v2: results saved before replays took the price at the clock (they entered every setup of a replayed
 // day at one stale price) are not carried over.
 const HISTORY_KEY = 'optionanalytics.strategyScanner.history.v2'
@@ -107,6 +108,18 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     return saved.pick === 'top5' ? { ...saved, pick: 'top15' } : saved
   })
   useEffect(() => writeJson(SETTINGS_KEY, settings), [settings])
+  // Settings changed in another tab (the Strategy tuning page's Apply writes a strategy's filters here).
+  useEffect(() => {
+    const onStorage = (e) => {
+      if (e.key !== SETTINGS_KEY || !e.newValue) return
+      try {
+        const next = JSON.parse(e.newValue)
+        setSettings((cur) => (JSON.stringify(cur) === e.newValue ? cur : { ...cur, ...next }))
+      } catch { /* not ours */ }
+    }
+    window.addEventListener('storage', onStorage)
+    return () => window.removeEventListener('storage', onStorage)
+  }, [])
   // Another underlying: its own Max SL / Target (open trades keep the levels they have).
   useEffect(() => {
     const levels = loadTradeDefaults(underlying)
@@ -504,38 +517,15 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
         const body = await fetch(`/api/order-flow/${underlying}/tape?date=${date}&count=60000`).then((r) => r.json())
         prints = body?.prints ?? []
       }
-      const found = []
       // On whole minutes: each setup enters at the previous minute's close and its outcome counts from
-      // the bar starting at its entry - the same as replaying to that minute.
-      const start = Math.ceil((dayRange.start + 15 * MIN) / MIN) * MIN
-      const steps = Math.max(1, Math.floor((dayRange.end - start) / MIN))
-      for (let i = 0; i <= steps; i++) {
-        const clock = start + i * MIN
-        const v = replayView(day, clock)
-        const own = completedBars(v.minuteBars, clock, rowSize, lotSize, estimated)
-        const gcIn = goChartingInput()
-        const bars = gcIn ? withGoChartingDelta(own, gcIn.bars, clock, { scale: gcIn.scale }).bars : own
-        if (bars.length >= 5) {
-          const cols = v.heatmap.slice(-300)
-          const liq = estimated ? [] : liquiditySignals({ columns: cols, trades: v.trades, minuteBars: v.minuteBars, rowSize, lotSize })
-          const ps = estimated ? { signals: [] } : pullStackSignals({ columns: cols.slice(-60), rowSize, lotSize })
-          const clockPrints = prints ? upTo(prints, clock) : null
-          const price = priceAt(v, clockPrints, clock, bars)
-          const setups = evaluateStrategies({
-            nowMs: clock, price, bars, minuteBars: v.minuteBars, prints: clockPrints,
-            book: v.book, liquidity: liq, pullStack: ps.signals, sweeps: v.sweeps, icebergs: v.icebergs, oi: scanOi, estimated, lotSize, bigLots: largeLots, profile, heatmap: v.heatmap, rowSize,
-            filters: settingsRef.current.filters,
-          })
-          const recentlyFound = (s) => found.some((f) => f.id === s.id && f.side === s.side && s.t - f.t < COOLDOWN_MS)
-          for (const s of setups) {
-            if (!recentlyFound(s)) found.push({ ...s, trail: trailFor(settingsRef.current, underlying) })
-          }
-        }
-        if (i % 10 === 0) {
-          setScan({ progress: Math.round((i / steps) * 100) })
-          await new Promise((r) => setTimeout(r, 0))
-        }
-      }
+      // the bar starting at its entry - the same as replaying to that minute (scanDay.js).
+      const found = await scanDaySetups({
+        day, prints, oi: scanOi, profile, rowSize, lotSize, largeLots, estimated, filters: settingsRef.current.filters,
+        trail: trailFor(settingsRef.current, underlying), goCharting: goChartingInput(), until: dayRange.end,
+      }, async (i, steps) => {
+        setScan({ progress: Math.round((i / steps) * 100) })
+        await new Promise((r) => setTimeout(r, 0))
+      })
       if (!isReplay) {
         // Today: the scan's setups join today's list (already over - not alerted), and keep being
         // followed live like the ones alerted.
@@ -548,7 +538,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
         setScan({ progress: 100, done: found.length, until })
         return
       }
-      const setups = found.map((s) => ({ ...s, outcome: simulateOutcome(s, replayDay.minuteBars, range.end + MIN, true) }))
+      const setups = withDayOutcomes(found, replayDay)
       setHistory((prev) => {
         const next = { ...prev, [dayKey]: { underlying, date, estimated, scanned: true, setups } }
         writeJson(HISTORY_KEY, trimHistory(next))
@@ -1222,7 +1212,7 @@ function trimHistory(history) {
   return Object.fromEntries(keys.slice(0, MAX_DAYS_KEPT).map((k) => [k, history[k]]))
 }
 
-/** The filters of one strategy (STRATEGY_FILTERS[id]): a number box or a switch each, defaults marked;
+/** The filters of one strategy (STRATEGY_FILTERS[id]): a number box, a switch or a choice each, defaults marked;
  *  saved on OK. They apply to the setups found from then on - live, the replay clock and Scan day. */
 function StrategyFiltersModal({ id, values, onClose, onSave }) {
   const meta = STRATEGY_BY_ID[id]
@@ -1243,11 +1233,13 @@ function StrategyFiltersModal({ id, values, onClose, onSave }) {
           <div key={f.key} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
             <Text style={{ fontSize: 12 }}>
               {f.label}
-              {draft[f.key] !== f.default && <Text type="secondary" style={{ fontSize: 11 }}>{` (default ${f.type === 'switch' ? (f.default ? 'on' : 'off') : f.default})`}</Text>}
+              {draft[f.key] !== f.default && <Text type="secondary" style={{ fontSize: 11 }}>{` (default ${f.type === 'switch' ? (f.default ? 'on' : 'off') : f.type === 'select' ? f.options.find((o) => o.value === f.default)?.label : f.default})`}</Text>}
             </Text>
             {f.type === 'switch'
               ? <Switch size="small" checked={draft[f.key]} onChange={(v) => set(f.key, v)} aria-label={f.label} />
-              : <InputNumber size="small" min={f.min} max={f.max} step={f.step} value={draft[f.key]} onChange={(v) => v != null && set(f.key, v)} style={{ width: 86, flex: 'none' }} aria-label={f.label} />}
+              : f.type === 'select'
+                ? <Select size="small" value={draft[f.key]} onChange={(v) => set(f.key, v)} options={f.options} style={{ width: 190, flex: 'none' }} aria-label={f.label} />
+                : <InputNumber size="small" min={f.min} max={f.max} step={f.step} value={draft[f.key]} onChange={(v) => v != null && set(f.key, v)} style={{ width: 86, flex: 'none' }} aria-label={f.label} />}
           </div>
         ))}
         <Text type="secondary" style={{ fontSize: 11 }}>

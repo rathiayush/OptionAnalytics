@@ -119,10 +119,14 @@ export function scanTick(input, memory) {
   const watching = watchNow.filter((w) => w.missing.length)
   const recentlyFired = (s) => memory.fired.some((f) => f.id === s.id && f.side === s.side && s.t - f.t < COOLDOWN_MS)
   const fresh = setups.filter((s) => !recentlyFired(s)).map((s) => (gc?.used
-    ? { ...s, trail, deltaSource: 'gocharting', checks: { ...s.checks, 'Order flow': 'bar delta and cumulative delta from GoCharting' } }
-    : { ...s, trail }))
+    ? { ...s, trail: trailOf(s, trail), deltaSource: 'gocharting', checks: { ...s.checks, 'Order flow': 'bar delta and cumulative delta from GoCharting' } }
+    : { ...s, trail: trailOf(s, trail) }))
   return { price, watching, fresh, fired: fresh.length ? [...memory.fired, ...fresh] : memory.fired, deltaSource: gc?.used ? 'gocharting' : 'own', goChartingNote: gc && !gc.used ? gc.reason : null }
 }
+
+// A setup's trailing stop: its strategy's own (the tradeTrail filter - applyTradeFilter's trailOverride, null =
+// none), else the scanner's.
+export const trailOf = (s, trail) => (s.trailOverride !== undefined ? s.trailOverride : trail)
 
 // Each fired setup with its outcome so far (its trailing stop following any change logged after it fired).
 export function followSetups(fired, trailLog, minuteBars, nowMs) {

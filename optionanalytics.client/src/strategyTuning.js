@@ -1,0 +1,147 @@
+// Strategy tuning: at what settings does a strategy do best? Each day is scanned ONCE with the strategies'
+// rules (scanDaySetups, keepAll - every setup of every minute); then for each strategy every combination of
+// its trade filters (TRADE_FILTERS: sides, entry window, stop / target size, time stop, trailing stop) is taken
+// through exactly what the scanner does - applyTradeFilter, first per cooldown, the trailing stop, simulateOutcome
+// on the day's bars - and scored in R.
+//
+// Against fitting the past: the days are split in time - the first 70% choose (train), the last 30% check
+// (test, days the choice never saw). A combination needs a minimum number of trades, is ranked by a cautious
+// score (average R minus one standard error), and is only recommended when it also beats the strategy as
+// written on the test days.
+
+import { ACTIVE_STRATEGIES, STRATEGY_BY_ID, TRADE_FILTERS, applyTradeFilter, simulateOutcome } from './strategyEngine.js'
+import { replayRange } from './orderFlowMath.js'
+import { MIN } from './scannerCore.js'
+import { firstPerCooldown } from './scanDay.js'
+
+/** The combinations tried (each strategy): 3 x 6 x 4 x 5 x 4 x 5 = 7,200. */
+export const TUNING_GRID = {
+  tradeSide: ['both', 'long', 'short'],
+  window: [[930, 1445], [930, 1100], [930, 1230], [1000, 1300], [1100, 1445], [1230, 1445]],
+  tradeStopX: [0.75, 1, 1.25, 1.5],
+  tradeTargetX: [0.75, 1, 1.5, 2, 2.5],
+  tradeTimeStop: [0, 30, 60, 120],
+  tradeTrail: ['scanner', 'off', '0.5/0.5', '1/1', '2/1'],
+}
+export const DEFAULT_VARIANT = Object.fromEntries(TRADE_FILTERS.map((f) => [f.key, f.default]))
+
+export function* variants(grid = TUNING_GRID) {
+  for (const tradeSide of grid.tradeSide)
+    for (const [tradeFrom, tradeTo] of grid.window)
+      for (const tradeStopX of grid.tradeStopX)
+        for (const tradeTargetX of grid.tradeTargetX)
+          for (const tradeTimeStop of grid.tradeTimeStop)
+            for (const tradeTrail of grid.tradeTrail)
+              yield { tradeSide, tradeFrom, tradeTo, tradeStopX, tradeTargetX, tradeTimeStop, tradeTrail }
+}
+
+/** The R of each trade strategy `id` takes on a scanned day with trade filters `variant` - as the scanner
+ *  would take them. `day` = { setups (every setup of every minute), minuteBars, endMs }, `trail` = the
+ *  scanner's trailing stop. */
+export function dayTrades(day, id, variant, trail) {
+  if (!day.byId) {
+    day.byId = new Map()
+    for (const s of day.setups) day.byId.set(s.id, [...(day.byId.get(s.id) ?? []), s])
+  }
+  const own = day.byId.get(id) ?? []
+  const taken = firstPerCooldown(own.map((s) => applyTradeFilter(s, variant)).filter(Boolean))
+  return taken.map((s) => {
+    const withTrail = { ...s, trail: s.trailOverride !== undefined ? s.trailOverride : trail }
+    return simulateOutcome(withTrail, day.minuteBars, day.endMs, true).r
+  }).filter(Number.isFinite)
+}
+
+/** Trades in R -> n, total, average, win rate, profit factor, worst run (max drawdown), and the cautious score
+ *  (average minus one standard error; null under 2 trades). */
+export function scoreR(rs) {
+  const n = rs.length
+  if (!n) return { n: 0, total: 0, avg: null, winRate: null, pf: null, maxDD: 0, score: null }
+  const total = rs.reduce((a, r) => a + r, 0)
+  const avg = total / n
+  const wins = rs.filter((r) => r > 0)
+  const gain = wins.reduce((a, r) => a + r, 0)
+  const loss = -rs.filter((r) => r < 0).reduce((a, r) => a + r, 0)
+  let peak = 0, eq = 0, maxDD = 0
+  for (const r of rs) { eq += r; peak = Math.max(peak, eq); maxDD = Math.max(maxDD, peak - eq) }
+  const sd = n > 1 ? Math.sqrt(rs.reduce((a, r) => a + (r - avg) ** 2, 0) / (n - 1)) : null
+  return { n, total, avg, winRate: wins.length / n, pf: loss > 0 ? gain / loss : gain > 0 ? Infinity : null, maxDD, score: sd != null ? avg - sd / Math.sqrt(n) : null }
+}
+
+/** Days in date order split into train (the first `trainFraction`) and test (the rest) - no test under 5 days. */
+export function splitDays(days, trainFraction = 0.7) {
+  const sorted = [...days].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
+  if (sorted.length < 5) return { train: sorted, test: [] }
+  const cut = Math.max(1, Math.min(sorted.length - 1, Math.round(sorted.length * trainFraction)))
+  return { train: sorted.slice(0, cut), test: sorted.slice(cut) }
+}
+
+const run = (days, id, variant, trail) => days.flatMap((d) => dayTrades(d, id, variant, trail))
+
+/** The strategies as written (default trade filters), ranked by their cautious score on all the days -
+ *  the "top" to tune first. Strategies with fewer than `minTrades` trades are listed after, unranked. */
+export function rankStrategies(days, { trail = null, minTrades = 8, ids = ACTIVE_STRATEGIES.map((s) => s.id) } = {}) {
+  return ids.map((id) => ({ id, ...scoreR(run(days, id, DEFAULT_VARIANT, trail)) }))
+    .sort((a, b) => ((b.n >= minTrades) - (a.n >= minTrades)) || ((b.score ?? -Infinity) - (a.score ?? -Infinity)) || (b.total - a.total))
+}
+
+/**
+ * Every combination of trade filters for strategy `id` on the scanned `days`. Returns the strategy as written
+ * (baseline) and the best combination - chosen on the train days, checked on the test days - with the top
+ * `keep` combinations, and whether the best one is worth applying.
+ */
+export function tuneStrategy(days, id, { trail = null, minTrades = 8, trainFraction = 0.7, grid = TUNING_GRID, keep = 10 } = {}) {
+  const { train, test } = splitDays(days, trainFraction)
+  const baseline = { params: DEFAULT_VARIANT, train: scoreR(run(train, id, DEFAULT_VARIANT, trail)), test: scoreR(run(test, id, DEFAULT_VARIANT, trail)) }
+  const rows = []
+  let tried = 0
+  for (const v of variants(grid)) {
+    tried++
+    const tr = scoreR(run(train, id, v, trail))
+    if (tr.n < minTrades || tr.score == null) continue
+    rows.push({ params: v, train: tr })
+  }
+  rows.sort((a, b) => b.train.score - a.train.score || b.train.total - a.train.total)
+  const top = rows.slice(0, keep).map((r) => ({ ...r, test: scoreR(run(test, id, r.params, trail)) }))
+  const best = top[0] ?? null
+  let recommend = false
+  let reason
+  if (!best) reason = `no combination had ${minTrades}+ trades on the ${train.length} train day(s)`
+  else if (!test.length) reason = `only ${days.length} day(s) - too few to check on unseen days (need 5+); not recommended yet`
+  else if (best.test.n < 3) reason = `the best combination took only ${best.test.n} trade(s) on the ${test.length} test day(s) - not enough to trust`
+  else if (!(best.test.total > 0)) reason = `the best combination lost on the test days (${best.test.total.toFixed(2)}R) - it fitted the past`
+  else if (baseline.test.n && !(best.test.avg > (baseline.test.avg ?? -Infinity))) reason = `on the test days it did not beat the strategy as written (${best.test.avg.toFixed(2)}R vs ${baseline.test.avg.toFixed(2)}R a trade)`
+  else { recommend = true; reason = `better on the train days and on the ${test.length} unseen test day(s)` }
+  return {
+    id, name: STRATEGY_BY_ID[id]?.name ?? id, no: STRATEGY_BY_ID[id]?.no ?? null,
+    days: days.length, trainDays: train.map((d) => d.date), testDays: test.map((d) => d.date),
+    tried, qualified: rows.length, baseline, best, top, recommend, reason,
+  }
+}
+
+/** A scanned day for the tuning: its setups (every minute) and the bars / end its outcomes are read to. */
+export function tuningDay(date, setups, replayDay) {
+  const range = replayRange(replayDay)
+  return { date, setups, minuteBars: replayDay.minuteBars, endMs: (range?.end ?? 0) + MIN }
+}
+
+/** The filters to save for a tuned strategy: its own entry filters kept, the tuned trade filters on top (only
+ *  the ones that differ from the default). */
+export function filtersFromTuning(current, params) {
+  const out = { ...(current ?? {}) }
+  for (const f of TRADE_FILTERS) {
+    if (params[f.key] === undefined || params[f.key] === f.default) delete out[f.key]
+    else out[f.key] = params[f.key]
+  }
+  return out
+}
+
+/** One line for a combination. */
+export function variantText(v) {
+  const hm = (x) => `${String(Math.floor(x / 100)).padStart(2, '0')}:${String(x % 100).padStart(2, '0')}`
+  const parts = [v.tradeSide === 'both' ? 'long & short' : `${v.tradeSide} only`, `${hm(v.tradeFrom)}-${hm(v.tradeTo)}`]
+  if (v.tradeStopX !== 1) parts.push(`stop x${v.tradeStopX}`)
+  if (v.tradeTargetX !== 1) parts.push(`target x${v.tradeTargetX}`)
+  if (v.tradeTimeStop > 0) parts.push(`time stop ${v.tradeTimeStop}m`)
+  if (v.tradeTrail !== 'scanner') parts.push(v.tradeTrail === 'off' ? 'no trail' : `trail ${v.tradeTrail}R`)
+  return parts.join(' · ')
+}

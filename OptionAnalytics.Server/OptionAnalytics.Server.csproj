@@ -61,6 +61,10 @@
         <RelativePath>scanner-runner/runner.mjs</RelativePath>
         <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
       </ResolvedFileToPublish>
+      <ResolvedFileToPublish Include="../optionanalytics.client/dist-runner/tune.mjs">
+        <RelativePath>scanner-runner/tune.mjs</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
       <ResolvedFileToPublish Include="../optionanalytics.client/scanner-runner/package.json">
         <RelativePath>scanner-runner/package.json</RelativePath>
         <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>

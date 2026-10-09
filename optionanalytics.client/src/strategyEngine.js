@@ -151,16 +151,64 @@ export const STRATEGY_FILTERS = {
     { key: 'timeStopMin', label: 'Time stop (minutes)', type: 'number', default: 60, min: 10, max: 240, step: 5 },
   ],
 }
+// How any strategy's trades are taken (every strategy has these, after its own): long / short only, the
+// entry time window, the stop-loss and target as a multiple of the strategy's own, a time stop, a trailing
+// stop of its own. The defaults are the strategy exactly as written; the strategy tuning measures them.
+const HHMM_OPTIONS = []
+for (let m = 9 * 60 + 30; m <= 14 * 60 + 45; m += 15) HHMM_OPTIONS.push({ value: Math.floor(m / 60) * 100 + (m % 60), label: `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}` })
+export const TRAIL_CHOICES = { '0.5/0.5': { startR: 0.5, gapR: 0.5 }, '1/1': { startR: 1, gapR: 1 }, '1.5/1': { startR: 1.5, gapR: 1 }, '2/1': { startR: 2, gapR: 1 } }
+export const TRADE_FILTERS = [
+  { key: 'tradeSide', label: 'Trade (any strategy): sides', type: 'select', default: 'both', options: [{ value: 'both', label: 'Long and short' }, { value: 'long', label: 'Long only' }, { value: 'short', label: 'Short only' }] },
+  { key: 'tradeFrom', label: 'Trade: entries from (IST)', type: 'select', default: 930, options: HHMM_OPTIONS },
+  { key: 'tradeTo', label: 'Trade: entries until (IST)', type: 'select', default: 1445, options: HHMM_OPTIONS },
+  { key: 'tradeStopX', label: 'Trade: stop-loss distance (x the strategy\'s own)', type: 'number', default: 1, min: 0.5, max: 2, step: 0.25 },
+  { key: 'tradeTargetX', label: 'Trade: target distance (x the strategy\'s own)', type: 'number', default: 1, min: 0.5, max: 3, step: 0.25 },
+  { key: 'tradeTimeStop', label: 'Trade: time stop in minutes (0 = the strategy\'s own)', type: 'number', default: 0, min: 0, max: 330, step: 5 },
+  { key: 'tradeTrail', label: 'Trade: trailing stop', type: 'select', default: 'scanner', options: [{ value: 'scanner', label: 'The scanner\'s setting' }, { value: 'off', label: 'Off' }, ...Object.keys(TRAIL_CHOICES).map((k) => ({ value: k, label: `After ${k.split('/')[0]}R, ${k.split('/')[1]}R behind` }))] },
+]
+for (const st of STRATEGIES) STRATEGY_FILTERS[st.id] = [...(STRATEGY_FILTERS[st.id] ?? []), ...TRADE_FILTERS]
+
 /** A strategy's filter values: its defaults with the trader's `overrides` on top - numbers clamped to
- *  their range, wrong types and unknown keys ignored. */
+ *  their range, a choice not in the list, wrong types and unknown keys ignored. */
 export function strategyFilters(id, overrides) {
   const out = {}
   for (const f of STRATEGY_FILTERS[id] ?? []) {
     const v = overrides?.[f.key]
     if (f.type === 'switch') out[f.key] = typeof v === 'boolean' ? v : f.default
+    else if (f.type === 'select') out[f.key] = f.options.some((o) => o.value === v) ? v : f.default
     else out[f.key] = Number.isFinite(v) ? Math.min(f.max, Math.max(f.min, v)) : f.default
   }
   return out
+}
+
+/** A setup taken the way the strategy's trade filters say (TRADE_FILTERS, values `f`): null when its side or
+ *  its time is not traded; else with its stop / target scaled, its time stop and trailing stop - unchanged
+ *  with the defaults. The scanner and the strategy tuning both use this, so a tuned setting trades as tested. */
+export function applyTradeFilter(s, f) {
+  if (!f) return s
+  if ((f.tradeSide === 'long' && s.side !== 'LONG') || (f.tradeSide === 'short' && s.side !== 'SHORT')) return null
+  const minute = istMinute(s.t)
+  const hhmm = Math.floor(minute / 60) * 100 + (minute % 60)
+  if (hhmm < (f.tradeFrom ?? 930) || hhmm > (f.tradeTo ?? 1445)) return null
+  const stopX = f.tradeStopX ?? 1
+  const targetX = f.tradeTargetX ?? 1
+  const timeStop = f.tradeTimeStop ?? 0
+  const trail = f.tradeTrail ?? 'scanner'
+  if (stopX === 1 && targetX === 1 && !(timeStop > 0) && trail === 'scanner') return s
+  const dir = s.side === 'LONG' ? 1 : -1
+  const parts = []
+  if (stopX !== 1) parts.push(`stop x${stopX}`)
+  if (targetX !== 1) parts.push(`target x${targetX}`)
+  if (timeStop > 0) parts.push(`time stop ${timeStop} min`)
+  if (trail !== 'scanner') parts.push(trail === 'off' ? 'no trailing stop' : `trailing after ${trail.split('/')[0]}R, ${trail.split('/')[1]}R behind`)
+  return {
+    ...s,
+    stop: s.entry - dir * Math.abs(s.entry - s.stop) * stopX,
+    target: s.entry + dir * Math.abs(s.target - s.entry) * targetX,
+    timeStopMs: timeStop > 0 ? Math.min(s.t + timeStop * MIN, s.t + (SQUARE_OFF - minute) * MIN) : s.timeStopMs,
+    ...(trail !== 'scanner' ? { trailOverride: trail === 'off' ? null : { ...TRAIL_CHOICES[trail] } } : {}),
+    checks: { ...s.checks, Trade: parts.join(' · ') },
+  }
 }
 /** The filters of `id` the trader changed from the defaults (for an "edited" mark). */
 export function changedFilters(id, overrides) {
@@ -1952,7 +2000,9 @@ export function evaluateStrategies(input) {
   }
 
   // Retired strategies are not traded (input.includeRetired: the tests, which still exercise their rules).
-  const final = resolveConflicts(input.includeRetired ? out : out.filter((s) => !STRATEGY_BY_ID[s.id]?.retired))
+  // Each strategy's trade filters (sides, entry window, stop / target / time stop / trailing) - the defaults change nothing.
+  const traded = out.map((s) => applyTradeFilter(s, strategyFilters(s.id, input.filters?.[s.id]))).filter(Boolean)
+  const final = resolveConflicts(input.includeRetired ? traded : traded.filter((s) => !STRATEGY_BY_ID[s.id]?.retired))
   if (!final.length) return final
   // The day type at the clock and what an adaptive scanner would do with each setup - TRACKING ONLY:
   // every setup still fires; this is scored beside the real results (adaptiveStats).

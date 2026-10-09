@@ -32,6 +32,10 @@ When adding or changing a strategy:
 - per-strategy filters (`STRATEGY_FILTERS`, the scanner's Filters button): a filter's DEFAULT must be
   the rule as written and tested (an untouched strategy behaves exactly as before); read them through
   `strategyFilters(id, input.filters?.[id])`, and test that loosening each one lets its case through;
+- every strategy also has the TRADE filters (`TRADE_FILTERS`: sides, entry window, stop / target size, time stop,
+  trailing stop), applied by `applyTradeFilter` - defaults change nothing. The strategy tuning (`strategyTuning.js`,
+  `scanDay.js`, `scanner-runner/tune.mjs`, the Strategy tuning page) measures settings through the same function and
+  the same day scan as the scanner; keep `tests/strategy-tuning.test.mjs` (tuning == scanner) passing;
 - a strategy that measures as losing is RETIRED (`retired: true` in `STRATEGIES`), not deleted: it is
   not run, listed, alerted or scored (`ACTIVE_STRATEGIES`); tests can still run it with `includeRetired`.
 
