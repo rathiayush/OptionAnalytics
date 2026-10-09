@@ -940,8 +940,13 @@ public sealed class LiveTradingService : BackgroundService
         return (new ManualOrderPrices(reference, limit, target, stopLoss), null);
     }
 
+    /// <summary>Why no new order may go out now - the daily loss limit's kill switch (KillSwitchService) -
+    /// else null. Checked before every new order; exits are never blocked.</summary>
+    public Func<string?>? NewOrderBlock { get; set; }
+
     public async Task<ManualOrderResult> PlaceAsync(ManualOrderRequest request, CancellationToken cancellationToken)
     {
+        if (NewOrderBlock?.Invoke() is { } blocked) return ManualOrderResult.Fail($"Blocked: {blocked}.");
         if (!_session.IsAuthenticated) return ManualOrderResult.Fail("not logged in to Dhan right now");
         if (request.Lots <= 0) return ManualOrderResult.Fail("quantity must be at least one lot");
         if (request.Lots > _maxLots) return ManualOrderResult.Fail($"{request.Lots} lots is over the {_maxLots}-lot limit for one manual order (ManualTrading__MaxLots)");

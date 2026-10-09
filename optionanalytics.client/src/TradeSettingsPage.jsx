@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { Alert, Button, Card, InputNumber, Segmented, Space, Switch, Table, Tag, Tooltip, Typography, message } from 'antd'
+import { useEffect, useRef, useState } from 'react'
+import { Alert, Button, Card, InputNumber, Popconfirm, Segmented, Space, Switch, Table, Tag, Tooltip, Typography, message } from 'antd'
 import { NavBar, useAuth } from './shared.jsx'
 import { loadTradeDefaults, refreshTradeSettings, subscribeTradeLevels } from './tradeDefaults.js'
 
@@ -17,6 +17,88 @@ const fromDefaults = (u) => {
  * not there) and used by every page - the OI Replay trade panel and its keyboard ticket, the Order Flow
  * scanner - and by the server scanner, which runs these indices with no page open.
  */
+const rupees = (v) => (v == null ? '-' : `${v < 0 ? '-' : ''}₹${Math.abs(Math.round(v)).toLocaleString('en-IN')}`)
+const istTime = (iso) => (iso ? new Date(iso).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' }) : '')
+
+/**
+ * The daily loss limit on the whole Dhan account (default ₹20,000) and its kill switch: set on Dhan every day
+ * as its P&L based exit, and watched by the server - at the limit everything is exited, no new order goes
+ * out and Dhan's kill switch is turned on for the day. Changed here once a day (risk-settings.csv).
+ */
+function KillSwitchCard({ isAdmin }) {
+  const [st, setSt] = useState(null)
+  const [limit, setLimit] = useState(null)
+  const [enabled, setEnabled] = useState(true)
+  const [saving, setSaving] = useState(false)
+  // The boxes start from the server's values once; later polls only refresh the status (an unsaved edit stays).
+  const loadedRef = useRef(false)
+  const load = () => fetch('/api/risk').then((r) => (r.ok ? r.json() : null)).then((x) => {
+    if (!x) return
+    setSt(x)
+    if (!loadedRef.current) { loadedRef.current = true; setLimit(x.dailyLossLimit); setEnabled(x.enabled) }
+  }).catch(() => {})
+  useEffect(() => {
+    load()
+    const id = setInterval(load, 10_000)
+    return () => clearInterval(id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+  const changed = st && (limit !== st.dailyLossLimit || enabled !== st.enabled)
+  const save = async () => {
+    setSaving(true)
+    try {
+      const res = await fetch('/api/risk', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dailyLossLimit: limit, enabled }) })
+      const body = await res.json().catch(() => null)
+      if (!res.ok) throw new Error(body?.error ?? `HTTP ${res.status}`)
+      setSt(body)
+      setLimit(body.dailyLossLimit)
+      setEnabled(body.enabled)
+      message.success('Daily loss limit saved')
+    } catch (err) {
+      message.error(`Not saved: ${err.message}`)
+    } finally {
+      setSaving(false)
+    }
+  }
+  const locked = !isAdmin || !st?.canChangeToday || st?.trippedToday
+  return (
+    <Card size="small" title={<Space size={8}><span>Daily loss limit · kill switch</span>
+      {st?.trippedToday ? <Tag color="error">TRIPPED{st.trippedAtUtc ? ` at ${istTime(st.trippedAtUtc)}` : ''}</Tag> : st?.enabled ? <Tag color="success">on</Tag> : st ? <Tag>off</Tag> : null}</Space>}>
+      <Space direction="vertical" size={10} style={{ width: '100%' }}>
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          The whole Dhan account&apos;s loss for the day. Every morning it is set on Dhan as its P&amp;L based exit (with the kill switch), so Dhan itself
+          exits everything at that loss even if this server is down; the server also watches the live P&amp;L - at the limit it exits every position,
+          cancels every order, blocks new orders from this app and turns Dhan&apos;s kill switch on (no more trading today). It can be changed once a day.
+        </Text>
+        {st?.trippedToday && (
+          <Alert type="error" showIcon message={`Daily loss limit hit${st.trippedPnl != null ? ` (P&L ${rupees(st.trippedPnl)})` : ''} - no more trading today.`}
+            description={<>{st.exitResult && <div>Exit-all: {st.exitResult}</div>}<div>Dhan kill switch: {st.dhanKillSwitchOn ? 'ON' : `not on yet${st.dhanKillSwitchError ? ` - ${st.dhanKillSwitchError} (retrying)` : ' (retrying)'}`}</div></>} />
+        )}
+        <Space wrap size={16} align="center">
+          <Space size={6}>
+            <Text>Limit</Text>
+            <InputNumber value={limit} min={1000} max={1000000} step={1000} disabled={locked} onChange={(v) => v != null && setLimit(v)} prefix="₹" style={{ width: 150 }} aria-label="Daily loss limit" />
+          </Space>
+          <Space size={6}><Switch checked={enabled} disabled={locked} onChange={setEnabled} aria-label="Kill switch on" /><Text>Kill switch on</Text></Space>
+          {isAdmin && (
+            <Popconfirm title="Save the daily loss limit?" description="It can be changed only once a day." okText="Save" onConfirm={save} disabled={!changed || locked}>
+              <Button type="primary" size="small" disabled={!changed || locked} loading={saving}>Save</Button>
+            </Popconfirm>
+          )}
+          {st && !st.canChangeToday && !st.trippedToday && <Text type="secondary" style={{ fontSize: 12 }}>Changed today - can be changed again tomorrow.</Text>}
+        </Space>
+        {st && (
+          <Space wrap size={16} style={{ fontSize: 12 }}>
+            <Text style={{ fontSize: 12 }}>Today&apos;s P&amp;L: <Text strong style={{ fontSize: 12, color: (st.dayPnl ?? 0) < 0 ? '#ff4d4f' : '#52c41a' }}>{rupees(st.dayPnl)}</Text>{st.dayPnl != null && st.enabled ? ` (limit -${rupees(st.dailyLossLimit)})` : ''}</Text>
+            <Text style={{ fontSize: 12 }}>Set on Dhan today: {st.dhanPnlExitSet ? <Tag color="success">yes</Tag> : <Tag color={st.dhanPnlExitError ? 'warning' : 'default'}>{st.dhanPnlExitError ? `no - ${st.dhanPnlExitError}` : st.dhanLoggedIn ? 'not yet' : 'not logged in to Dhan'}</Tag>}</Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>Saved in {st.file}</Text>
+          </Space>
+        )}
+      </Space>
+    </Card>
+  )
+}
+
 export default function TradeSettingsPage() {
   const auth = useAuth()
   const isAdmin = auth?.user?.role === 'Admin'
@@ -83,6 +165,7 @@ export default function TradeSettingsPage() {
           <Title level={3} style={{ margin: 0 }}>Option Analytics</Title>
           <NavBar />
         </Space>
+        <KillSwitchCard isAdmin={isAdmin} />
         <Card size="small" title="Trade settings · per index">
           <Space direction="vertical" size={12} style={{ width: '100%' }}>
             <Text type="secondary" style={{ fontSize: 12 }}>

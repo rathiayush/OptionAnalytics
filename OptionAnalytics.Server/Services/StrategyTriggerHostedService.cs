@@ -132,13 +132,16 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     /// handler left attached would keep firing into a stopped service.</summary>
     private readonly List<(SpotUnderlyingState State, Action<Candle> Handler)> _barClosedHandlers = new();
 
+    private readonly RiskSettingsStore? _risk;
+
     public StrategyTriggerHostedService(
         StrategyTriggerStore store, BacktestService backtest, TelegramAlertService telegram,
         SpotFeedHostedService spotFeed, CdvHostedService cdv, DhanOptionChainMaster optionChainMaster,
         DhanSuperOrderClient superOrders, DhanPositionsClient positions, DhanOrderClient orders,
         DhanMarketFeedClient feedClient, TriggerOrderHistoryStore orderHistory,
-        IHubContext<SpotHub> hub, ILogger<StrategyTriggerHostedService> logger)
+        IHubContext<SpotHub> hub, ILogger<StrategyTriggerHostedService> logger, RiskSettingsStore? risk = null)
     {
+        _risk = risk;
         _store = store;
         _backtest = backtest;
         _telegram = telegram;
@@ -1463,6 +1466,9 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     /// naked sell otherwise" - the one substitution real money can never make silently.</summary>
     private async Task<string> PlaceOrderAsync(StrategyTrigger trigger, BacktestTrade trade, SuperOrderPlan plan, HedgePlan? hedge, CancellationToken cancellationToken)
     {
+        // The daily loss limit's kill switch tripped today (KillSwitchService): no new entry.
+        if (_risk?.Get() is { Enabled: true } risk && risk.TrippedOn == IstClock.Today())
+            return $"\n\n[NOT PLACED] the daily loss limit (₹{risk.DailyLossLimit:N0}) was reached today - the kill switch is on.";
         var freezeLimit = FreezeQuantityFor(trigger.Underlying);
         string? hedgeNote = null;
 
