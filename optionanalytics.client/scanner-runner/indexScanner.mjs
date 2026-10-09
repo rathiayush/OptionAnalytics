@@ -14,6 +14,8 @@ import {
 } from '../src/scannerCore.js'
 import { orderFlowFromSnapshot, applyOrderFlowPush, mergePrints, applyOiTicks, applyFuturesTicks, applySpotUpdate, expiryFlagOf, TAPE_PRINTS } from '../src/liveFeeds.js'
 import { defaultTradeLevels } from '../src/tradeDefaults.js'
+import { newProfileWatch, profileAlertText, profileLevels, spotLevelsOf, spotProfileLevels, watchProfiles } from '../src/profileAlerts.js'
+import { tpoRowFor } from '../src/profiles.js'
 
 // The page's own defaults (StrategyScanner / OrderFlowPage) for anything the config does not say.
 export const DEFAULT_SETTINGS = { alerts: true, telegram: true, pick: 'top15', custom: [], filters: {}, trail: { on: true, ...DEFAULT_TRAIL }, autoPaper: 'sell', paperLots: 1, moneyness: 0 }
@@ -51,6 +53,8 @@ export class IndexScanner {
     this.notified = new Set()
     this.primedExits = false
     this.watching = []
+    this.profileWatch = newProfileWatch()
+    this.profileLevelsOf = { futures: [], spotOwn: [] }
     this.appliedLevels = null
     this.appliedTrail = null
     this.dirty = false
@@ -142,12 +146,14 @@ export class IndexScanner {
     const fetchLots = this.bigMode() === 'auto' ? 5 : this.largeLotsSetting()
     try {
       const flag = expiryFlagOf(u)
-      const [snapshot, tape, run, expiries, prev] = await Promise.all([
+      const [snapshot, tape, run, expiries, prev, spotVp] = await Promise.all([
         this.io.api(`/api/order-flow/${u}?rowSize=${rowSize}&minTradeLots=${fetchLots}&heatmapColumns=900`),
         this.io.api(`/api/order-flow/${u}/tape?count=${TAPE_PRINTS}`),
         this.io.api(`/api/oi-replay/${u}/run?${new URLSearchParams({ date: today, timeframeMinutes: '1', expiryFlag: flag, forceLive: 'true' })}`),
         this.io.api(`/api/oi-replay/${u}/expiries`).catch(() => null),
         this.io.previousSession(u, today, rowSize).catch(() => null),
+        // The previous day's spot volume profile - the lines on the OI Replay charts (profile alerts on spot).
+        this.io.api(`/api/oi-replay/${u}/previous-day-volume-profile?date=${today}`).catch(() => null),
       ])
       if (!run?.success || !(run.spotCandlesOneMinute ?? run.spotCandles ?? []).length) throw new Error(run?.success ? 'no index data yet (before the open?)' : run?.error ?? 'OI data unavailable')
       const expiryDate = u === 'BANKNIFTY' ? expiries?.month ?? null : expiries?.week ?? null
@@ -156,6 +162,7 @@ export class IndexScanner {
         prints: tape?.prints ?? [],
         oi: buildOiContext(run, expiryDate, { live: true }),
         profile: scannerProfileOf(prev?.bars, u, rowSize),
+        spotVp: spotVp?.success ? spotVp : null,
       })
       this.error = null
       this.io.log(`${u}: day ${today} loaded (${snapshot.bars?.length ?? 0} bars, ${tape?.prints?.length ?? 0} prints)`)
@@ -168,6 +175,11 @@ export class IndexScanner {
   setData(data) {
     this.data = data
     this.oiVersion = 0
+    // Profile-level alerts: the previous session's futures volume / market profile levels, and the previous
+    // day's spot volume profile; nothing is armed until price is away from a level.
+    const tpoRow = tpoRowFor(this.underlying, this.rowSize())
+    this.profileLevelsOf = { futures: profileLevels(data.profile?.vp, data.profile?.tpoPrev, tpoRow), spotOwn: spotProfileLevels(data.spotVp, tpoRow) }
+    this.profileWatch = newProfileWatch()
     this.applySettingChanges()
   }
 
@@ -201,6 +213,26 @@ export class IndexScanner {
     return positionRows({ positions: this.positions, dayResults: withOutcome, withOutcome, oi: this.data?.oi, nowMs, settings: this.settings() })
   }
 
+  // Which indices' profile alerts the server sends: the page's switches (config.profileAlerts), on by default.
+  profileAlertsOn() { return { futures: true, spot: true, ...(this.config.profileAlerts ?? {}) } }
+
+  // Price reaching a profile level - futures: the previous session's volume / market profile; spot: those less
+  // the futures premium, and the previous day's spot volume profile. Telegram, tagged [Server] - with no page open.
+  async checkProfileLevels(d) {
+    const futures = d.prints.at(-1)?.price ?? d.view.meta?.lastPrice ?? null
+    const spot = d.oi?.spot?.at(-1)?.close ?? null
+    const basis = futures > 0 && spot > 0 ? Math.round(futures - spot) : null
+    const levels = { futures: this.profileLevelsOf.futures, spot: spotLevelsOf(this.profileLevelsOf.futures, basis, this.profileLevelsOf.spotOwn) }
+    const hits = watchProfiles(this.profileWatch, { levels, prices: { futures, spot }, enabled: this.profileAlertsOn(), tpoRow: tpoRowFor(this.underlying, this.rowSize()) })
+    if (!hits.length) return
+    const cfg = this.settings()
+    for (const { market, level, price } of hits) {
+      const text = profileAlertText(level, price, `${this.underlying} ${market}`)
+      this.io.log(`${this.underlying}: ${text}`)
+      if (cfg.telegram !== false) await this.io.telegram(`${TAG} 📊 ${text}`)
+    }
+  }
+
   async evaluate() {
     const d = this.data
     if (!this.enabled || !d?.view || !d.oi) return
@@ -208,6 +240,7 @@ export class IndexScanner {
     if (d.view.meta?.day && d.view.meta.day !== this.date) return
     const nowMs = this.clock()
     if (!nowMs || istDate(nowMs) !== this.date) return
+    await this.checkProfileLevels(d)
     const look = [Math.floor(nowMs / 10_000), d.view.minuteBars?.length ?? 0, d.prints.at(-1)?.seq ?? 0, this.oiVersion, !!d.profile].join()
     if (look === this.lastLook) return
     this.lastLook = look
@@ -327,6 +360,11 @@ export class IndexScanner {
       underlying: this.underlying, enabled: this.enabled, date: this.date, ready: !!this.data, error: this.error,
       clockUtc: nowMs ? new Date(nowMs).toISOString() : null, contract: this.data?.view?.meta?.contractSymbol ?? null,
       watching: this.watching.length,
+      profileAlerts: {
+        futures: this.profileAlertsOn().futures && this.profileLevelsOf.futures.length > 0,
+        spot: this.profileAlertsOn().spot && (this.profileLevelsOf.futures.length > 0 || this.profileLevelsOf.spotOwn.length > 0),
+        levels: this.profileLevelsOf.futures.length + this.profileLevelsOf.spotOwn.length,
+      },
       signals: outcomes.map((s) => ({
         id: s.id, no: meta(s.id)?.no, name: meta(s.id)?.name, side: s.side, t: s.t, entry: s.entry, stop: s.stop, target: s.target,
         alerted: this.alertIds().includes(s.id), status: s.outcome?.status, r: s.outcome?.r ?? null, exitAt: s.outcome?.exitAt ?? null,

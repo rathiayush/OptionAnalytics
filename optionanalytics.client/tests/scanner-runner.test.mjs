@@ -117,6 +117,76 @@ test('a new SL / target reaches the open paper trades from that minute', async (
   assert.equal(changed.levelLog[0].sl, 20)
 })
 
+// Spot from 22420 up to the previous day's spot POC (22473.98 - the OI Replay chart's line), ticking around
+// it, away to 22520 and back: two hits, each sent once. `oi.spot` holds only the minutes up to the clock.
+function spotAt(t) {
+  const m = (t - T915) / MIN
+  if (m <= 40) return 22420 + (m - 15) * 2
+  if (m <= 60) return Math.round(m * 2) % 2 ? 22470.8 : 22471.5
+  if (m <= 80) return 22471 + (m - 60) * 2.5
+  return Math.max(22476, 22520 - (m - 80) * 2.5)
+}
+async function runSpot(scanner, io, from, to) {
+  for (let t = from; t <= to; t += 30_000) {
+    io.clock = t
+    const spot = []
+    for (let s = at(15); s <= t; s += 30_000) spot.push({ t: s, close: spotAt(s) })
+    scanner.data = { ...dataAt(t), oi: { ...oi, spot } }
+    await scanner.evaluate()
+  }
+}
+const SPOT_VP = { success: true, poc: 22473.98, vah: 22610.5, val: 22350.25, hvn: [22560], lvn: [22300], profileDate: '2026-10-04T00:00:00' }
+
+test('the server sends a profile-level alert when spot reaches the previous day\'s spot POC - once per touch', async () => {
+  const io = fakeIo()
+  const scanner = new IndexScanner('NIFTY', io)
+  scanner.reset(DATE)
+  scanner.setConfig({ settings: { telegram: true } })
+  scanner.setData({ ...dataAt(at(15)), spotVp: SPOT_VP })
+  assert.equal(scanner.status().profileAlerts.spot, true, 'the page sees the server covers spot')
+  assert.equal(scanner.status().profileAlerts.futures, false, 'no futures levels without the previous session')
+  await runSpot(scanner, io, at(15), at(110))
+  const alerts = io.telegrams.filter((m) => m.startsWith(`${TAG} 📊`))
+  assert.equal(alerts.length, 2, alerts.join('\n'))
+  assert.match(alerts[0], /^\[Server\] 📊 NIFTY spot 2247\d\.\d reached Spot VP POC 22474\.0 \(2026-10-04\)/)
+  assert.ok(alerts.every((m) => m.includes('Spot VP POC')))
+})
+
+test('the server\'s profile alerts follow the page\'s switches and the Telegram switch', async () => {
+  const off = fakeIo()
+  const spotOff = new IndexScanner('NIFTY', off)
+  spotOff.reset(DATE)
+  spotOff.setConfig({ settings: { telegram: true }, profileAlerts: { spot: false } })
+  spotOff.setData({ ...dataAt(at(15)), spotVp: SPOT_VP })
+  assert.equal(spotOff.status().profileAlerts.spot, false)
+  await runSpot(spotOff, off, at(15), at(110))
+  assert.equal(off.telegrams.filter((m) => m.includes('📊')).length, 0)
+
+  const quiet = fakeIo()
+  const noTelegram = new IndexScanner('NIFTY', quiet)
+  noTelegram.reset(DATE)
+  noTelegram.setConfig({ settings: { telegram: false } })
+  noTelegram.setData({ ...dataAt(at(15)), spotVp: SPOT_VP })
+  await runSpot(noTelegram, quiet, at(15), at(110))
+  assert.equal(quiet.telegrams.length, 0)
+  assert.equal(quiet.logs.filter((m) => m.includes('Spot VP POC')).length, 2, 'still logged')
+})
+
+test('the server sends a profile-level alert when the futures reach the previous session\'s volume profile POC', async () => {
+  const io = fakeIo()
+  const scanner = new IndexScanner('NIFTY', io)
+  scanner.reset(DATE)
+  scanner.setConfig({ settings: { telegram: true }, profileAlerts: { spot: false } })
+  const top = Math.max(...path.slice(15, 120))
+  // The levels come with the day's load; the pushes after it carry no profile of their own.
+  scanner.setData({ ...dataAt(at(15)), profile: { vp: { poc: top - 2, vah: null, val: null, hvn: [], lvn: [] }, tpoPrev: null } })
+  assert.equal(scanner.status().profileAlerts.futures, true)
+  await runDay(scanner, io, at(15), at(300))
+  const alerts = io.telegrams.filter((m) => m.startsWith(`${TAG} 📊`))
+  assert.equal(alerts.length, 1, alerts.join('\n'))
+  assert.match(alerts[0], new RegExp(`^\\[Server\\] 📊 NIFTY futures \\d+\\.\\d reached VP POC ${(top - 2).toFixed(1)} \\(profile level\\)`))
+})
+
 test('the Top 15 from the scanner log\'s signals', () => {
   const csv = ['key,date,underlying,strategy_id,status,r', 'a,d,NIFTY,wallBreak,win,2', 'b,d,NIFTY,wallBreak,loss,-1', 'c,d,NIFTY,buildUp,open,'].join('\n')
   const top = topFromSignalsCsv(csv)

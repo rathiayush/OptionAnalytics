@@ -17,7 +17,7 @@ import { LiquidityMapCard } from './LiquidityMap.jsx'
 import { alignToBars, sessionVwapFromBars } from './chartVwap.js'
 import { ProfilesCard } from './ProfilesCard.jsx'
 import { PriceAlertsBar, usePriceAlerts } from './PriceAlerts.jsx'
-import { ProfileAlertsBar, useProfileAlerts } from './ProfileAlerts.jsx'
+import { ProfileAlertsBar, usePreviousSpotProfile, useProfileAlerts } from './ProfileAlerts.jsx'
 import { ServerScannerCard } from './ServerScanner.jsx'
 import { fetchPreviousSession, sessionVolumeProfile, tpoProfile, tpoRowFor } from './profiles.js'
 import { withBackfill } from './cvdBackfill.js'
@@ -532,7 +532,8 @@ export default function OrderFlowPage() {
   // Futures minus index: an option strike in futures terms (the footprint and heatmap are futures).
   const basis = oiNow?.spot > 0 && lastPrice > 0 ? Math.round(lastPrice - oiNow.spot) : null
   // Alerts at the previous session's volume / market profile levels, futures and spot separately.
-  const profileAlerts = useProfileAlerts({ underlying, vp: prevVp, tpo: prevTpo, tpoRow, futuresPrice: lastPrice, spotPrice: oiNow?.spot, basis, live: !isReplay })
+  const prevSpotVp = usePreviousSpotProfile(underlying, sessionDate)
+  const profileAlerts = useProfileAlerts({ underlying, vp: prevVp, tpo: prevTpo, tpoRow, futuresPrice: lastPrice, spotPrice: oiNow?.spot, basis, spotVp: prevSpotVp, live: !isReplay })
   const suddenLevels = useMemo(() => (basis == null ? [] : sudden.map((w) => ({
     price: Math.round((w.strike + basis) / rowSize) * rowSize, color: w.side === 'PE' ? '#73d13d' : '#ff7875',
     label: `${w.side === 'PE' ? 'PUT' : 'CALL'} ${w.strike} +${(w.add / 1e5).toFixed(1)}L 5m`,

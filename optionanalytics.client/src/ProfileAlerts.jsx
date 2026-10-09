@@ -1,84 +1,120 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Space, Switch, Tooltip, Typography, notification } from 'antd'
+import { Space, Switch, Tag, Tooltip, Typography, notification } from 'antd'
 import { UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import { chime, speak, telegram } from './alerts.js'
-import { profileAlertText, profileHits, profileLevels, shiftLevels } from './profileAlerts.js'
+import { newProfileWatch, profileAlertText, profileLevels, spotLevelsOf, spotProfileLevels, watchProfiles } from './profileAlerts.js'
 
 const { Text } = Typography
 const SETTINGS_KEY = 'optionanalytics.orderFlow.profileAlerts.v1'
 const SCANNER_SETTINGS_KEY = 'optionanalytics.strategyScanner.settings'
+const STATUS_POLL_MS = 60_000
 
 const readJson = (key, fallback) => {
   try { return JSON.parse(localStorage.getItem(key)) ?? fallback } catch { return fallback }
 }
 
-/** Alerts when price reaches a level of the previous session's volume profile (POC / VAH / VAL / HVN /
- *  LVN) or market profile (POC / VAH / VAL) - the two profiles' levels at the same price are flagged as a
- *  confluence. Futures and spot are separate switches: futures against the futures' own profiles, spot
- *  against the same levels less the futures' premium over spot (an index has no volume of its own to
- *  profile). Live only - a replay shows nothing. Chime, spoken words, notification and Telegram follow
- *  the scanner's Voice / Telegram switches, like the price alerts. */
-export function useProfileAlerts({ underlying, vp, tpo, tpoRow, futuresPrice, spotPrice, basis, live }) {
+/** The previous day's spot volume profile (the server's - what the OI Replay charts draw) for `date`. */
+export function usePreviousSpotProfile(underlying, date) {
+  const [vp, setVp] = useState(null)
+  useEffect(() => {
+    if (!underlying || !date) return undefined
+    let cancelled = false
+    fetch(`/api/oi-replay/${underlying}/previous-day-volume-profile?date=${date}`)
+      .then((r) => (r.ok ? r.json() : null)).then((body) => { if (!cancelled) setVp(body?.success ? body : null) })
+      .catch(() => { if (!cancelled) setVp(null) })
+    return () => { cancelled = true }
+  }, [underlying, date])
+  return vp
+}
+
+/** Whether the server scanner is sending this index's profile alerts to Telegram right now (then the page
+ *  does not send them again - it only chimes, speaks and shows them). */
+export function useServerProfileAlerts(underlying) {
+  const [covers, setCovers] = useState({ futures: false, spot: false })
+  useEffect(() => {
+    let cancelled = false
+    const load = () => fetch('/api/scanner-runner/status').then((r) => (r.ok ? r.json() : null)).then((s) => {
+      if (cancelled || !s) return
+      const running = s.process?.state === 'running' && !s.stale
+      const ix = (s.status?.indices ?? []).find((i) => i.underlying === underlying)
+      setCovers({ futures: !!(running && ix?.enabled && ix?.profileAlerts?.futures), spot: !!(running && ix?.enabled && ix?.profileAlerts?.spot) })
+    }).catch(() => {})
+    load()
+    const id = setInterval(load, STATUS_POLL_MS)
+    return () => { cancelled = true; clearInterval(id) }
+  }, [underlying])
+  return covers
+}
+
+/** Alerts when price reaches a level of the previous session's profiles - futures: its volume profile (POC /
+ *  VAH / VAL / HVN / LVN) and market profile (POC / VAH / VAL), confluences flagged; spot: those levels less
+ *  the futures' premium over spot, AND the previous day's spot volume profile (`spotVp` - the lines on the
+ *  OI Replay charts). Futures and spot are separate switches (synced to the server scanner, which sends the
+ *  same alerts to Telegram with no page open). Live only. Chime, spoken words and notification follow the
+ *  scanner's Voice switch; Telegram is sent from here only when the server is not already sending it. */
+export function useProfileAlerts({ underlying, vp, tpo, tpoRow, futuresPrice, spotPrice, basis, spotVp = null, live }) {
   const [on, setOn] = useState(() => ({ futures: true, spot: true, ...readJson(SETTINGS_KEY, {}) }))
   const change = (market, value) => setOn((prev) => {
     const next = { ...prev, [market]: value }
     try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(next)) } catch { /* convenience only */ }
+    // The server scanner follows the same switches (an admin's change; others get 403 and keep their own).
+    fetch('/api/scanner-runner/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ profileAlerts: next }) }).catch(() => {})
     return next
   })
+  const serverCovers = useServerProfileAlerts(underlying)
 
   const futuresLevels = useMemo(() => profileLevels(vp, tpo, tpoRow), [vp, tpo, tpoRow])
-  const spotLevels = useMemo(() => (basis == null ? [] : shiftLevels(futuresLevels, -basis)), [futuresLevels, basis])
-  const opts = useMemo(() => ({ tolerance: tpoRow / 2, rearmDistance: tpoRow * 3 }), [tpoRow])
-
-  const run = (market, levels, price, enabled) => ({ market, levels, price, enabled })
-  const watchers = [run('futures', futuresLevels, futuresPrice, on.futures), run('spot', spotLevels, spotPrice, on.spot)]
-  const state = useRef({})
+  const spotOwn = useMemo(() => spotProfileLevels(spotVp, tpoRow), [spotVp, tpoRow])
+  const spotLevels = useMemo(() => spotLevelsOf(futuresLevels, basis, spotOwn), [futuresLevels, basis, spotOwn])
+  const watch = useRef(newProfileWatch())
   // A new underlying or a new set of levels starts from scratch: nothing is armed until price is away from a level.
-  const resetKey = `${underlying}|${futuresLevels.map((l) => l.key).join(',')}`
-  useEffect(() => { state.current = {} }, [resetKey])
+  const resetKey = `${underlying}|${futuresLevels.map((l) => l.id).join(',')}|${spotOwn.map((l) => l.id).join(',')}`
+  useEffect(() => { watch.current = newProfileWatch() }, [resetKey])
 
   useEffect(() => {
     if (!live) return
-    for (const { market, levels, price, enabled } of watchers) {
-      const s = (state.current[market] ??= { armed: new Set(), previous: 0 })
-      if (!(price > 0)) continue
-      // Tracked even while switched off, so switching on does not alert on a level price is already sitting at.
-      const hits = profileHits(levels, s.previous, price, s.armed, opts)
-      s.previous = price
-      if (!enabled) continue
-      const cfg = readJson(SCANNER_SETTINGS_KEY, {})
-      for (const level of hits) {
-        const label = market === 'futures' ? `${underlying} futures` : `${underlying} spot`
-        const text = profileAlertText(level, price, label)
-        const up = price >= level.price
-        chime(up)
-        if (cfg.voice !== false) speak(`${level.confluence ? 'Profile confluence' : 'Profile level'}. ${label} at ${level.labels.join(' and ')} ${Math.round(level.price)}.`)
-        if (cfg.telegram !== false) telegram(`📊 ${text}`)
-        notification.open({
-          key: `profile-${market}-${underlying}-${level.key}`, placement: 'topRight', duration: 20,
-          message: <span style={{ color: up ? UP_COLOR : DOWN_COLOR, fontWeight: 700 }}>📊 {label} · {level.labels.join(' + ')} {level.price.toFixed(1)}{level.confluence ? ' · confluence' : ''}</span>,
-          description: <span style={{ fontSize: 12 }}>{market === 'futures' ? 'Futures' : 'Spot'} now {price.toFixed(1)}</span>,
-        })
-      }
+    const hits = watchProfiles(watch.current, { levels: { futures: futuresLevels, spot: spotLevels }, prices: { futures: futuresPrice, spot: spotPrice }, enabled: on, tpoRow })
+    if (!hits.length) return
+    const cfg = readJson(SCANNER_SETTINGS_KEY, {})
+    for (const { market, level, price } of hits) {
+      const label = market === 'futures' ? `${underlying} futures` : `${underlying} spot`
+      const text = profileAlertText(level, price, label)
+      const up = price >= level.price
+      chime(up)
+      if (cfg.voice !== false) speak(`${level.confluence ? 'Profile confluence' : 'Profile level'}. ${label} at ${level.labels.join(' and ')} ${Math.round(level.price)}.`)
+      if (cfg.telegram !== false && !serverCovers[market]) telegram(`📊 ${text}`)
+      notification.open({
+        key: `profile-${market}-${underlying}-${level.id}`, placement: 'topRight', duration: 20,
+        message: <span style={{ color: up ? UP_COLOR : DOWN_COLOR, fontWeight: 700 }}>📊 {label} · {level.labels.join(' + ')} {level.price.toFixed(1)}{level.confluence ? ' · confluence' : ''}</span>,
+        description: <span style={{ fontSize: 12 }}>{market === 'futures' ? 'Futures' : 'Spot'} now {price.toFixed(1)}{level.date ? ` · profile of ${level.date}` : ''}</span>,
+      })
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [futuresPrice, spotPrice, live, underlying, futuresLevels, spotLevels, on.futures, on.spot])
 
-  return { on, change, levelCount: futuresLevels.length, confluences: futuresLevels.filter((l) => l.confluence).length, hasSpot: basis != null }
+  return {
+    on, change, levelCount: futuresLevels.length + spotOwn.length, confluences: futuresLevels.filter((l) => l.confluence).length,
+    hasSpot: basis != null || spotOwn.length > 0, spotProfileLevels: spotOwn.length, serverCovers,
+  }
 }
 
-/** Two switches under the price alerts: profile-level alerts on the futures, and on spot. */
-export function ProfileAlertsBar({ on, change, levelCount, confluences, hasSpot, live }) {
+/** Two switches: profile-level alerts on the futures, and on spot. */
+export function ProfileAlertsBar({ on, change, levelCount, confluences, hasSpot, spotProfileLevels = 0, serverCovers, live, spotOnly = false }) {
   if (!levelCount) return null
   return (
     <Space wrap size={10} align="center" style={{ marginBottom: 6 }} aria-label="Profile level alerts">
-      <Tooltip title={`Alert when price reaches the previous session's volume-profile or market-profile POC / VAH / VAL (and the volume profile's HVN / LVN). ${confluences} level${confluences === 1 ? '' : 's'} where both profiles agree are marked as a confluence.${live ? '' : ' Replay: alerts fire only live.'}`}>
+      <Tooltip title={`Alert when price reaches the previous session's volume-profile or market-profile POC / VAH / VAL (and the volume profile's HVN / LVN)${spotProfileLevels ? ', and on spot the previous day\'s spot volume profile (the lines on the OI Replay charts)' : ''}. ${confluences} level${confluences === 1 ? '' : 's'} where both profiles agree are marked as a confluence.${live ? '' : ' Replay: alerts fire only live.'}`}>
         <Text style={{ fontSize: 12 }}>📊 Profile level alerts</Text>
       </Tooltip>
-      <Space size={4}><Switch size="small" checked={on.futures} onChange={(v) => change('futures', v)} /><Text style={{ fontSize: 12 }}>Futures</Text></Space>
-      <Tooltip title={hasSpot ? 'Spot: the same levels less the futures premium over spot.' : 'Needs the spot price from the OI data to place the levels on spot.'}>
-        <Space size={4}><Switch size="small" checked={on.spot} onChange={(v) => change('spot', v)} disabled={!hasSpot} /><Text style={{ fontSize: 12 }}>Spot</Text></Space>
+      {!spotOnly && <Space size={4}><Switch size="small" checked={on.futures} onChange={(v) => change('futures', v)} aria-label="Profile alerts futures" /><Text style={{ fontSize: 12 }}>Futures</Text></Space>}
+      <Tooltip title={hasSpot ? 'Spot: the futures levels less the futures premium over spot, and the spot volume profile\'s own levels.' : 'Needs the spot price from the OI data to place the levels on spot.'}>
+        <Space size={4}><Switch size="small" checked={on.spot} onChange={(v) => change('spot', v)} disabled={!hasSpot} aria-label="Profile alerts spot" /><Text style={{ fontSize: 12 }}>Spot</Text></Space>
       </Tooltip>
+      {(serverCovers?.futures || serverCovers?.spot) && (
+        <Tooltip title="The server scanner sends these alerts to Telegram even with no page open - this page only chimes and shows them.">
+          <Tag color="success" style={{ fontSize: 11 }}>Telegram from the server</Tag>
+        </Tooltip>
+      )}
     </Space>
   )
 }

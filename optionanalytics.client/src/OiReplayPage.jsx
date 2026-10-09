@@ -19,6 +19,8 @@ import { alignToBars, chartVwap, sessionVwapFromBars } from './chartVwap.js'
 import { notifyLiveTradeEvents, notifyTrade } from './tradeNotify.js'
 import { loadTradeLevels, saveTradeLevels, subscribeTradeLevels, loadTradeDefaults, saveTradeDefaults } from './tradeDefaults.js'
 import { PREV_PROFILE } from './profileColors.js'
+import { ProfileAlertsBar, useProfileAlerts } from './ProfileAlerts.jsx'
+import { tpoRowFor } from './profiles.js'
 import { optionTrailLevel, tighterStop } from './optionTrail.js'
 import { PremiumEmaChart, DraggableFloatingPanel, useFitContentAsDataGrows, useChartUserControl, CANDLE_SCALE_MARGINS } from './oiShared.jsx'
 import { LivePositionsView, liveTradingApi } from './LiveTrading.jsx'
@@ -3839,6 +3841,9 @@ export default function OiReplayPage() {
   // once a minute; none in the session's first 10 minutes (the open reshuffles OI everywhere).
   const suddenMinute = asOfMs == null ? null : Math.floor(asOfMs / 60_000)
   const spotNow = currentBar?.close ?? null
+  // Spot reaching the previous day's spot volume profile (the POC / VAH / VAL / HVN / LVN lines on these
+  // charts) - live only; the server scanner sends the same alerts to Telegram with no page open.
+  const spotProfileAlerts = useProfileAlerts({ underlying, vp: null, tpo: null, tpoRow: tpoRowFor(underlying, 1), futuresPrice: null, spotPrice: isLive ? spotNow : null, basis: null, spotVp: volumeProfile, live: isLive })
   const suddenWalls = useMemo(() => {
     if (suddenMinute == null || !(spotNow > 0)) return []
     const ms = suddenMinute * 60_000 + 59_999
@@ -4804,6 +4809,7 @@ export default function OiReplayPage() {
                 <Checkbox checked={showVwap} onChange={(e) => setShowVwap(e.target.checked)}>VWAP</Checkbox>
               </Tooltip>
               <Checkbox checked={showVolumeProfile} onChange={(e) => setShowVolumeProfile(e.target.checked)}>Volume Profile</Checkbox>
+              {isLive && <ProfileAlertsBar {...spotProfileAlerts} live={isLive} spotOnly />}
               {/* Sync with the Order Flow page in another tab - the day always; the replay clock while replaying. */}
               {syncControl}
               {isLive && (
