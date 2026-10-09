@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { profileLevels, shiftLevels, profileHits, profileAlertText, spotProfileLevels, alertOptions, newProfileWatch, watchProfiles, spotLevelsOf } from '../src/profileAlerts.js'
+import { lowNodeGaps, profileGaps, sessionVolumeProfile, singlePrintGaps, tpoProfile } from '../src/profiles.js'
 
 const vp = { poc: 24500, vah: 24600, val: 24400, hvn: [24700], lvn: [24550] }
 const tpo = { poc: 24502, vah: 24650, val: 24400 }
@@ -93,4 +94,123 @@ test('a market switched off is still tracked, so switching it on next to a level
   watchProfiles(watch, { levels: { futures }, prices: { futures: 24450 }, enabled: { futures: false }, tpoRow: 5 })
   assert.deepEqual(watchProfiles(watch, { levels: { futures }, prices: { futures: 24500 }, enabled: { futures: false }, tpoRow: 5 }), [])
   assert.deepEqual(watchProfiles(watch, { levels: { futures }, prices: { futures: 24501 }, enabled: { futures: true }, tpoRow: 5 }), [])
+})
+
+// ---- Gaps: LVN gaps (volume and market profile) and single prints ------------------------------------
+
+// A previous session with a fast move: a morning range 22502-22538, ten minutes straight up 22540 -> 22600 on
+// thin volume, an afternoon range 22602-22638. Footprint rows of 1 point (the futures' volume profile) and
+// OHLC for the market profile.
+const T915 = Date.parse('2026-10-08T03:45:00Z')
+function gapBar(m, low, high, volume) {
+  const levels = []
+  for (let p = Math.ceil(low); p <= Math.floor(high); p++) levels.push({ price: p, buy: volume / 2, sell: volume / 2 })
+  return { time: new Date(T915 + m * 60_000).toISOString(), open: low, high, low, close: high, volume: volume * levels.length, levels }
+}
+function gapDay(offset = 0) {
+  const bars = []
+  for (let m = 0; m < 120; m++) { const c = 22520 + offset + 15 * Math.sin(m / 7); bars.push(gapBar(m, c - 3, c + 3, 100)) }
+  for (let m = 120; m < 130; m++) { const lo = 22540 + offset + (m - 120) * 6; bars.push(gapBar(m, lo, lo + 6, 20)) }
+  for (let m = 130; m < 375; m++) { const c = 22620 + offset + 15 * Math.sin(m / 9); bars.push(gapBar(m, c - 3, c + 3, 100)) }
+  return bars
+}
+const gapLevels = () => { const bars = gapDay(); return profileLevels(sessionVolumeProfile(bars), tpoProfile(bars, 5), 5) }
+const gapOf = (levels) => levels.find((l) => l.gap)
+
+test('a fast move leaves a gap: the volume profile\'s LVN gap and the market profile\'s single prints, one confluence zone', () => {
+  const levels = gapLevels()
+  const gap = gapOf(levels)
+  assert.ok(gap, levels.map((l) => l.labels.join('+')).join(' | '))
+  assert.deepEqual(gap.labels, ['VP LVN gap', 'TPO single prints'])
+  assert.equal(gap.confluence, true)
+  assert.ok(gap.low >= 22535 && gap.low <= 22542, `low ${gap.low}`)
+  assert.ok(gap.high >= 22595 && gap.high <= 22605, `high ${gap.high}`)
+  assert.equal(levels.filter((l) => l.gap).length, 1, 'one zone, not one per LVN')
+  assert.ok(levels.some((l) => l.labels.includes('VP POC')) && levels.some((l) => l.labels.includes('TPO VAH')), 'POC / VAH / VAL still alert')
+  assert.ok(!levels.some((l) => l.labels.includes('VP LVN')), 'the LVNs are their gap')
+  assert.match(profileAlertText(gap, 22603.5, 'NIFTY futures'), /^NIFTY futures 22603\.5 entered VP LVN gap \+ TPO single prints 225\d\d\.0-22\d\d\d\.0 \(volume \+ market profile confluence\)$/)
+})
+
+test('entering a gap alerts once, from above or below - not again while price moves through it', () => {
+  const levels = gapLevels()
+  const gap = gapOf(levels)
+  const watch = newProfileWatch()
+  const gapHits = (futures) => watchProfiles(watch, { levels: { futures: levels }, prices: { futures }, tpoRow: 5 }).filter((h) => h.level.gap)
+  assert.deepEqual(gapHits(22640), []) // away: armed
+  assert.deepEqual(gapHits(22625), [])
+  assert.equal(gapHits(gap.high + 2).length, 1, 'entered from above')
+  for (const p of [22590, 22570, 22550, 22541]) assert.deepEqual(gapHits(p), [], `inside at ${p}`)
+  assert.deepEqual(gapHits(22520), []) // out below, far enough to re-arm
+  assert.deepEqual(gapHits(22505), [])
+  assert.equal(gapHits(gap.low - 1).length, 1, 'entered from below')
+  // A jump clean over the whole gap still counts.
+  const jump = newProfileWatch()
+  watchProfiles(jump, { levels: { futures: levels }, prices: { futures: 22500 }, tpoRow: 5 })
+  assert.ok(watchProfiles(jump, { levels: { futures: levels }, prices: { futures: 22640 }, tpoRow: 5 }).some((h) => h.level.gap))
+})
+
+test('single prints at the day\'s high or low are a tail, not a gap; a gap needs more than one period on both sides', () => {
+  const rows = [1, 1, 3, 4, 1, 1, 5, 4, 1, 0, 1, 6, 2, 1, 1].map((count, i) => ({ price: 100 + i * 5, count }))
+  assert.deepEqual(singlePrintGaps({ rows }), [{ low: 120, high: 125 }, { low: 140, high: 150 }])
+  assert.deepEqual(singlePrintGaps({ rows: [1, 1, 2, 3, 1].map((count, i) => ({ price: i * 5, count })) }), [])
+})
+
+test('an LVN whose row is not thin is a level at its row, not a gap', () => {
+  const rows = [20, 22, 21, 23, 18, 22, 21, 20, 24, 20].map((total, i) => ({ price: 22500 + i, total }))
+  assert.deepEqual(lowNodeGaps(rows, [22504]), [{ low: 22504, high: 22504 }])
+  const gaps = profileGaps({ rows, lvn: [22504] }, null)
+  assert.deepEqual(gaps[0].labels, ['VP LVN'])
+  const level = profileLevels({ poc: 22508, rows, lvn: [22504] }, null, 1).find((l) => l.labels.includes('VP LVN'))
+  assert.equal(level.gap, false)
+  assert.match(profileAlertText(level, 22504.5, 'NIFTY futures'), /reached VP LVN 22504\.0 \(profile level\)/)
+})
+
+// The server's previous-day spot profile (OiReplayService.ComputeVolumeProfile): 60 bins over the day's range,
+// each bar's volume in its close's bin, the two deepest strict dips as LVNs - plus the bins and the bars.
+function serverSpotProfile(bars, profileDate) {
+  const low = Math.min(...bars.map((b) => b.low))
+  const size = (Math.max(...bars.map((b) => b.high)) - low) / 60
+  const volume = Array(60).fill(0)
+  for (const b of bars) volume[Math.max(0, Math.min(59, Math.floor((b.close - low) / size)))] += b.volume
+  const price = (i) => low + (i + 0.5) * size
+  const poc = volume.indexOf(Math.max(...volume))
+  const dips = []
+  for (let i = 1; i < 59; i++) if (i !== poc && volume[i] < volume[i - 1] && volume[i] < volume[i + 1]) dips.push(i)
+  const lvn = dips.sort((a, b) => volume[a] - volume[b]).slice(0, 2).map(price)
+  return {
+    success: true, poc: price(poc), vah: price(Math.min(59, poc + 3)), val: price(Math.max(0, poc - 3)), hvn: [], lvn, profileDate,
+    bins: volume.map((v, i) => ({ price: Math.round(price(i) * 100) / 100, volume: v })),
+    bars: bars.map(({ time, open, high, low: l, close, volume: v }) => ({ time, open, high, low: l, close, volume: v })),
+  }
+}
+
+test('spot: the server\'s spot volume profile gives LVN gaps from its bins, its bars the spot market profile', () => {
+  const spotVp = serverSpotProfile(gapDay(-60), '2026-10-08T00:00:00')
+  const levels = spotProfileLevels(spotVp, 5)
+  assert.ok(levels.every((l) => l.id.startsWith('spot:') && l.date === '2026-10-08'))
+  assert.ok(levels.some((l) => l.labels.includes('Spot VP POC')))
+  assert.ok(levels.some((l) => l.labels.includes('Spot TPO POC') || l.labels.includes('Spot TPO VAH')), 'the spot market profile')
+  const gap = gapOf(levels)
+  assert.ok(gap, levels.map((l) => l.labels.join('+')).join(' | '))
+  assert.ok(gap.labels.includes('Spot VP LVN gap') && gap.labels.includes('Spot TPO single prints'), gap.labels.join('+'))
+  assert.equal(gap.confluence, true)
+  assert.ok(gap.low <= 22482 && gap.high >= 22535, `${gap.low}-${gap.high}`)
+  assert.match(profileAlertText(gap, gap.high + 1, 'NIFTY spot'), /^NIFTY spot \d+\.\d entered Spot VP LVN gap \+ Spot TPO single prints \d+\.\d-\d+\.\d \(2026-10-08\) \(volume \+ market profile confluence\)$/)
+  // An older server (no bins / bars): its levels as before - one LVN, no market profile.
+  const old = spotProfileLevels({ ...spotVp, bins: undefined, bars: undefined }, 5)
+  assert.ok(!old.some((l) => l.gap || l.labels.some((x) => x.startsWith('Spot TPO'))))
+})
+
+test('spot uses its own profiles when it has them; the futures levels moved onto spot only without them', () => {
+  const futures = gapLevels()
+  const own = spotProfileLevels(serverSpotProfile(gapDay(-60), '2026-10-08'), 5)
+  assert.equal(spotLevelsOf(futures, 60, own), own)
+  const moved = spotLevelsOf(futures, 60, [])
+  assert.equal(moved.length, futures.length)
+  const gap = gapOf(moved)
+  // A gap moved onto spot keeps its width and its identity, whatever the premium.
+  assert.equal(gap.high - gap.low, gapOf(futures).high - gapOf(futures).low)
+  assert.equal(gap.low, gapOf(futures).low - 60)
+  assert.equal(gapOf(spotLevelsOf(futures, 61, [])).id, gap.id)
+  assert.deepEqual(spotLevelsOf(futures, null, []), [])
 })

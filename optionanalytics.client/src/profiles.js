@@ -78,6 +78,119 @@ export function tpoProfile(bars, rowSize, periodMinutes = 30) {
   }
 }
 
+// ---- Gaps: the thin parts of a profile, where price tends to move fast --------------------------------
+
+/** A profile's rows on a full price grid - a price nobody traded (or no period visited) is a row of 0.
+ *  `valueOf` reads a row's volume or TPO count. */
+function gridOf(rows, valueOf) {
+  const list = (rows ?? []).filter((r) => Number.isFinite(r.price)).sort((a, b) => a.price - b.price)
+  if (list.length < 3) return null
+  const diffs = list.slice(1).map((r, i) => r.price - list[i].price)
+  const minStep = Math.min(...diffs)
+  if (!(minStep > 1e-9)) return null
+  let prices
+  let values
+  let step
+  if (diffs.every((d) => d < 1.5 * minStep)) {
+    // Already every row (the server's bins: one width, rounded to the paisa) - their own prices, the mean width.
+    prices = list.map((r) => r.price)
+    values = list.map(valueOf)
+    step = (list.at(-1).price - list[0].price) / (list.length - 1)
+  } else {
+    step = minStep
+    const n = Math.round((list.at(-1).price - list[0].price) / step) + 1
+    if (n > 5000) return null // not a profile's grid
+    const byIndex = new Map(list.map((r) => [Math.round((r.price - list[0].price) / step), valueOf(r)]))
+    prices = Array.from({ length: n }, (_, i) => round2(list[0].price + i * step))
+    values = prices.map((_, i) => byIndex.get(i) ?? 0)
+  }
+  const n = prices.length
+  // Smoothed over three rows, as the node rule (sessionVolumeProfile) - one thin row inside a busy area is not a gap.
+  const smooth = values.map((v, i) => (values[i - 1] ?? v) / 4 + v / 2 + (values[i + 1] ?? v) / 4)
+  const mean = smooth.reduce((s, v) => s + v, 0) / n
+  return { prices, values, smooth, mean, step }
+}
+
+/** Zones overlapping or touching (within `join`) as one, labels kept once each. */
+function mergeZones(zones, join = 0) {
+  const sorted = [...zones].sort((a, b) => a.low - b.low)
+  const out = []
+  for (const z of sorted) {
+    const last = out.at(-1)
+    if (last && z.low <= last.high + join) { last.high = Math.max(last.high, z.high); for (const l of z.labels ?? []) if (!last.labels.includes(l)) last.labels.push(l) }
+    else out.push({ ...z, labels: [...(z.labels ?? [])] })
+  }
+  return out
+}
+
+/** The low-volume gap around each low node (`lows`: prices, e.g. a profile's LVNs) as a zone { low, high }:
+ *  the node's row and its neighbours that are thin too (smoothed value at most 0.6 x the mean - the LVN rule),
+ *  the stretch price crosses fast. A node on a row that is not thin is a zone of its own row. */
+export function lowNodeGaps(rows, lows, valueOf = (r) => r.total) {
+  const g = gridOf(rows, valueOf)
+  if (!g || !(g.mean > 0)) return []
+  const thin = (i) => g.smooth[i] <= 0.6 * g.mean
+  const zones = []
+  for (const p of lows ?? []) {
+    if (!Number.isFinite(p)) continue
+    let i = Math.round((p - g.prices[0]) / g.step)
+    if (i < 0 || i >= g.prices.length) continue
+    let a = i
+    let b = i
+    if (thin(i)) { while (a > 0 && thin(a - 1)) a--; while (b < g.prices.length - 1 && thin(b + 1)) b++ }
+    zones.push({ low: g.prices[a], high: g.prices[b] })
+  }
+  return mergeZones(zones).map(({ low, high }) => ({ low, high }))
+}
+
+/** A market profile's own low nodes: its two thinnest TPO-count troughs between its POC and its high-count
+ *  areas - the volume profile's LVN rule (sessionVolumeProfile) on TPO counts. */
+export function tpoLowNodes(tpo) {
+  const g = gridOf(tpo?.rows, (r) => r.count)
+  if (!g || !(g.mean > 0)) return []
+  const peaks = []
+  const troughs = []
+  for (let i = 1; i < g.prices.length - 1; i++) {
+    if (g.smooth[i] >= g.smooth[i - 1] && g.smooth[i] >= g.smooth[i + 1] && g.smooth[i] >= 1.3 * g.mean) peaks.push(g.prices[i])
+    if (g.smooth[i] <= g.smooth[i - 1] && g.smooth[i] <= g.smooth[i + 1] && g.smooth[i] <= 0.6 * g.mean) troughs.push({ price: g.prices[i], v: g.smooth[i] })
+  }
+  const top = [tpo.poc, ...peaks]
+  const lo = Math.min(...top)
+  const hi = Math.max(...top)
+  return troughs.filter((t) => t.price > lo && t.price < hi).sort((a, b) => a.v - b.v).slice(0, 2).map((t) => t.price).sort((a, b) => a - b)
+}
+
+/** A market profile's single-print gaps: runs of rows only one period visited (or none - a jump), with more
+ *  than one period on BOTH sides. A single-print run at the day's high or low is a tail, not a gap. */
+export function singlePrintGaps(tpo) {
+  const g = gridOf(tpo?.rows, (r) => r.count)
+  if (!g) return []
+  const zones = []
+  let start = -1
+  for (let i = 0; i < g.values.length; i++) {
+    if (g.values[i] <= 1) { if (start < 0) start = i; continue }
+    if (start > 0) zones.push({ low: g.prices[start], high: g.prices[i - 1] })
+    start = -1
+  }
+  return zones
+}
+
+/** The gaps of the previous session's profiles, as zones { low, high, labels }: the volume profile's LVN gaps
+ *  (`vp.rows` and `vp.lvn`) and the market profile's LVN gaps and single prints (`tpo.rows`) - zones that
+ *  overlap or are within `join` of each other are one (both profiles in it: a confluence). A node whose row
+ *  is not thin is a zone one row wide, labelled as the node (LVN) rather than a gap. */
+export function profileGaps(vp, tpo, join = 0) {
+  const out = []
+  const label = (z, node, gap) => ({ ...z, labels: [z.high > z.low ? gap : node] })
+  if (vp?.rows?.length && vp.lvn?.length) for (const z of lowNodeGaps(vp.rows, vp.lvn, (r) => r.total ?? r.volume ?? 0)) out.push(label(z, 'VP LVN', 'VP LVN gap'))
+  if (tpo?.rows?.length) {
+    for (const z of lowNodeGaps(tpo.rows, tpoLowNodes(tpo), (r) => r.count)) out.push(label(z, 'TPO LVN', 'TPO LVN gap'))
+    for (const z of singlePrintGaps(tpo)) out.push({ ...z, labels: ['TPO single prints'] })
+  }
+  // The volume profile's part named first, whichever zone starts lower.
+  return mergeZones(out, join).map((z) => ({ ...z, labels: z.labels.sort((a, b) => a.startsWith('TPO') - b.startsWith('TPO')) }))
+}
+
 /** The TPO row size for an underlying's futures: coarse enough to read as a profile. */
 export const tpoRowFor = (underlying, rowSize) => Math.max(rowSize, underlying === 'BANKNIFTY' || underlying === 'SENSEX' ? 10 : 5)
 

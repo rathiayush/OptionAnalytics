@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Space, Switch, Tag, Tooltip, Typography, notification } from 'antd'
 import { UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import { chime, speak, telegram } from './alerts.js'
-import { newProfileWatch, profileAlertText, profileLevels, spotLevelsOf, spotProfileLevels, watchProfiles } from './profileAlerts.js'
+import { levelWhere, newProfileWatch, profileAlertText, profileLevels, spotLevelsOf, spotProfileLevels, watchProfiles } from './profileAlerts.js'
 
 const { Text } = Typography
 const SETTINGS_KEY = 'optionanalytics.orderFlow.profileAlerts.v1'
@@ -46,12 +46,13 @@ export function useServerProfileAlerts(underlying) {
   return covers
 }
 
-/** Alerts when price reaches a level of the previous session's profiles - futures: its volume profile (POC /
- *  VAH / VAL / HVN / LVN) and market profile (POC / VAH / VAL), confluences flagged; spot: those levels less
- *  the futures' premium over spot, AND the previous day's spot volume profile (`spotVp` - the lines on the
- *  OI Replay charts). Futures and spot are separate switches (synced to the server scanner, which sends the
- *  same alerts to Telegram with no page open). Live only. Chime, spoken words and notification follow the
- *  scanner's Voice switch; Telegram is sent from here only when the server is not already sending it. */
+/** Alerts when price reaches a level of the previous session's profiles, or enters one of their gaps -
+ *  futures: its volume profile (POC / VAH / VAL / HVN, LVN gaps) and market profile (POC / VAH / VAL, LVN gaps,
+ *  single prints), confluences flagged; spot: the previous day's spot volume and market profiles (`spotVp` -
+ *  the lines on the OI Replay charts), else the futures levels less the premium. Futures and spot are separate
+ *  switches (synced to the server scanner, which sends the same alerts to Telegram with no page open). Live
+ *  only. Chime, spoken words and notification follow the scanner's Voice switch; Telegram is sent from here
+ *  only when the server is not already sending it. */
 export function useProfileAlerts({ underlying, vp, tpo, tpoRow, futuresPrice, spotPrice, basis, spotVp = null, live }) {
   const [on, setOn] = useState(() => ({ futures: true, spot: true, ...readJson(SETTINGS_KEY, {}) }))
   const change = (market, value) => setOn((prev) => {
@@ -81,19 +82,20 @@ export function useProfileAlerts({ underlying, vp, tpo, tpoRow, futuresPrice, sp
       const text = profileAlertText(level, price, label)
       const up = price >= level.price
       chime(up)
-      if (cfg.voice !== false) speak(`${level.confluence ? 'Profile confluence' : 'Profile level'}. ${label} at ${level.labels.join(' and ')} ${Math.round(level.price)}.`)
+      const spoken = level.gap ? `${Math.round(level.low)} to ${Math.round(level.high)}` : Math.round(level.price)
+      if (cfg.voice !== false) speak(`${level.confluence ? 'Profile confluence' : level.gap ? 'Profile gap' : 'Profile level'}. ${label} ${level.gap ? 'entered' : 'at'} ${level.labels.join(' and ')} ${spoken}.`)
       if (cfg.telegram !== false && !serverCovers[market]) telegram(`📊 ${text}`)
       notification.open({
         key: `profile-${market}-${underlying}-${level.id}`, placement: 'topRight', duration: 20,
-        message: <span style={{ color: up ? UP_COLOR : DOWN_COLOR, fontWeight: 700 }}>📊 {label} · {level.labels.join(' + ')} {level.price.toFixed(1)}{level.confluence ? ' · confluence' : ''}</span>,
-        description: <span style={{ fontSize: 12 }}>{market === 'futures' ? 'Futures' : 'Spot'} now {price.toFixed(1)}{level.date ? ` · profile of ${level.date}` : ''}</span>,
+        message: <span style={{ color: up ? UP_COLOR : DOWN_COLOR, fontWeight: 700 }}>📊 {label} · {level.gap ? 'entered ' : ''}{level.labels.join(' + ')} {levelWhere(level)}{level.confluence ? ' · confluence' : ''}</span>,
+        description: <span style={{ fontSize: 12 }}>{market === 'futures' ? 'Futures' : 'Spot'} now {price.toFixed(1)}{level.gap ? ' · a thin stretch - price tends to move through it fast' : ''}{level.date ? ` · profile of ${level.date}` : ''}</span>,
       })
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [futuresPrice, spotPrice, live, underlying, futuresLevels, spotLevels, on.futures, on.spot])
 
   return {
-    on, change, levelCount: futuresLevels.length + spotOwn.length, confluences: futuresLevels.filter((l) => l.confluence).length,
+    on, change, levelCount: futuresLevels.length + spotOwn.length, confluences: [...futuresLevels, ...spotOwn].filter((l) => l.confluence).length,
     hasSpot: basis != null || spotOwn.length > 0, spotProfileLevels: spotOwn.length, serverCovers,
   }
 }
@@ -103,11 +105,11 @@ export function ProfileAlertsBar({ on, change, levelCount, confluences, hasSpot,
   if (!levelCount) return null
   return (
     <Space wrap size={10} align="center" style={{ marginBottom: 6 }} aria-label="Profile level alerts">
-      <Tooltip title={`Alert when price reaches the previous session's volume-profile or market-profile POC / VAH / VAL (and the volume profile's HVN / LVN)${spotProfileLevels ? ', and on spot the previous day\'s spot volume profile (the lines on the OI Replay charts)' : ''}. ${confluences} level${confluences === 1 ? '' : 's'} where both profiles agree are marked as a confluence.${live ? '' : ' Replay: alerts fire only live.'}`}>
+      <Tooltip title={`Alert when price reaches the previous session's volume-profile or market-profile POC / VAH / VAL (and the volume profile's HVN), or enters a gap: the volume profile's LVN gaps, the market profile's LVN gaps and single prints${spotProfileLevels ? '; on spot, the previous day\'s spot volume and market profiles (the volume profile is the lines on the OI Replay charts)' : ''}. ${confluences} level${confluences === 1 ? '' : 's'} where both profiles agree are marked as a confluence.${live ? '' : ' Replay: alerts fire only live.'}`}>
         <Text style={{ fontSize: 12 }}>📊 Profile level alerts</Text>
       </Tooltip>
       {!spotOnly && <Space size={4}><Switch size="small" checked={on.futures} onChange={(v) => change('futures', v)} aria-label="Profile alerts futures" /><Text style={{ fontSize: 12 }}>Futures</Text></Space>}
-      <Tooltip title={hasSpot ? 'Spot: the futures levels less the futures premium over spot, and the spot volume profile\'s own levels.' : 'Needs the spot price from the OI data to place the levels on spot.'}>
+      <Tooltip title={hasSpot ? (spotProfileLevels ? 'Spot: the previous day\'s spot volume and market profiles - their levels and gaps.' : 'Spot: the futures levels less the futures premium over spot.') : 'Needs the spot price from the OI data to place the levels on spot.'}>
         <Space size={4}><Switch size="small" checked={on.spot} onChange={(v) => change('spot', v)} disabled={!hasSpot} aria-label="Profile alerts spot" /><Text style={{ fontSize: 12 }}>Spot</Text></Space>
       </Tooltip>
       {(serverCovers?.futures || serverCovers?.spot) && (

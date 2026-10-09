@@ -514,6 +514,10 @@ public sealed class OiReplayService
         var hvn = hvnCandidates.OrderByDescending(c => c.Volume).Take(2).Select(c => BinPrice(c.Bin)).ToList();
         var lvn = lvnCandidates.OrderBy(c => c.Volume).Take(2).Select(c => BinPrice(c.Bin)).ToList();
 
-        return new VolumeProfileResult(true, null, underlying, date, BinPrice(pocBin), BinPrice(highBin), BinPrice(lowBin), hvn, lvn);
+        return new VolumeProfileResult(true, null, underlying, date, BinPrice(pocBin), BinPrice(highBin), BinPrice(lowBin), hvn, lvn)
+        {
+            Bins = volumeByBin.Select((volume, i) => new VolumeProfileBin(Math.Round(BinPrice(i), 2), volume)).ToList(),
+            Bars = bars,
+        };
     }
 }

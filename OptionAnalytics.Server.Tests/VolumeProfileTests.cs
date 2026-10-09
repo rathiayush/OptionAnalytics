@@ -119,6 +119,24 @@ public sealed class VolumeProfileTests
     }
 
     [Fact]
+    public void ComputeVolumeProfile_ReturnsItsBinsAndBars_ForTheClientsGapsAndMarketProfile()
+    {
+        // The client finds each LVN's gap (the thin run of bins around it) from Bins, and builds the
+        // day's TPO from Bars - so both must be exactly what the levels were computed from.
+        var bars = new List<CandleWithVolume> { Bar(100, 1), Bar(160, 1) };
+        for (var i = 0; i < 20; i++) bars.Add(Bar(130, 100));
+
+        var result = OiReplayService.ComputeVolumeProfile("NIFTY", Day, bars);
+
+        Assert.Equal(60, result.Bins.Count);
+        Assert.Equal(2002, result.Bins.Sum(b => b.Volume));
+        Assert.Equal(100.5m, result.Bins[0].Price);
+        Assert.Equal(result.Poc, result.Bins.MaxBy(b => b.Volume)!.Price);
+        Assert.True(result.Bins.Zip(result.Bins.Skip(1)).All(p => p.First.Price < p.Second.Price), "low to high");
+        Assert.Same(bars, result.Bars);
+    }
+
+    [Fact]
     public void ComputeVolumeProfile_FlatRange_ReturnsFailure()
     {
         var bars = new List<CandleWithVolume> { Bar(100, 50), Bar(100, 30) };

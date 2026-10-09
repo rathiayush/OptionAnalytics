@@ -59,9 +59,20 @@ public sealed record VolumeProfileResult(
     IReadOnlyList<decimal> Hvn,
     IReadOnlyList<decimal> Lvn)
 {
+    /// <summary>The histogram the levels come from - every bin's middle price and volume, low to high - so
+    /// the client can find the thin run of bins around each LVN (the gap price tends to cross fast).</summary>
+    public IReadOnlyList<VolumeProfileBin> Bins { get; init; } = Array.Empty<VolumeProfileBin>();
+
+    /// <summary>That day's one-minute spot bars - the client builds the day's market profile (TPO) from
+    /// them with the same code as the futures' (profiles.js tpoProfile).</summary>
+    public IReadOnlyList<CandleWithVolume> Bars { get; init; } = Array.Empty<CandleWithVolume>();
+
     public static VolumeProfileResult Failed(string underlying, string error) =>
         new(false, error, underlying, null, null, null, null, Array.Empty<decimal>(), Array.Empty<decimal>());
 }
+
+/// <summary>One bin of the previous day's volume profile: its middle price and the volume traded in it.</summary>
+public sealed record VolumeProfileBin(decimal Price, long Volume);
 
 public sealed record OiReplayResult(
     bool Success,
