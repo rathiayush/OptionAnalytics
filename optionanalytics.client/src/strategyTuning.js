@@ -25,18 +25,30 @@ export const TUNING_GRID = {
   tradeTimeStop: [0, 30, 60, 120],
   tradeTrail: ['scanner', 'off', '0.5/0.5', '1/1', '2/1'],
 }
-/** The OI confirmation tried (each strategy): 4 timeframes x 3 x 3 x 4 x 3 = 432 (405 once the combinations
- *  where the timeframe changes nothing are left out) - the trade settings as they are. */
+/** The OI confirmation tried (each strategy): the options OI and futures OI each on 1 / 3 / 5 / 15 minutes, the
+ *  options OI change and since the open, the futures OI, the support / resistance OI (shrinking / growing) and the
+ *  room to it - the combinations where a timeframe changes nothing are tried once (oiVariantRedundant); the trade
+ *  settings as they are. */
 export const OI_GRID = {
   tradeOiWindow: [15, 1, 3, 5],
+  tradeFutWindow: [15, 1, 3, 5],
+  tradeWallOi: ['any', 'shrinking', 'growing'],
   tradeOiFlow: ['any', 'notAgainst', 'with'],
   tradeOiCum: ['any', 'notAgainst', 'with'],
   tradeFutOi: ['any', 'notAgainst', 'withMove', 'buildUp'],
   tradeWallRoom: ['any', 'oneR', 'target'],
 }
+/** A combination whose timeframe changes nothing: the options OI timeframe with neither an options OI change nor
+ *  a wall OI filter on, the futures OI timeframe with no futures OI filter on - tried once, at 15. */
+export const oiVariantRedundant = (v) =>
+  (v.tradeOiWindow !== 15 && (v.tradeOiFlow ?? 'any') === 'any' && (v.tradeWallOi ?? 'any') === 'any')
+  || (v.tradeFutWindow !== 15 && (v.tradeFutOi ?? 'any') === 'any')
+
 /** The OI inputs the tuning can use (a subset of OI_GRID's keys) - what the Strategy tuning page lists. */
 export const OI_FACTORS = [
-  { key: 'tradeOiWindow', label: 'Timeframe: 1, 3, 5 and 15 minutes (for the OI change and futures OI below)' },
+  { key: 'tradeOiWindow', label: 'Options OI timeframe: 1, 3, 5, 15 minutes (for the OI change and the wall OI)' },
+  { key: 'tradeFutWindow', label: 'Futures OI timeframe: 1, 3, 5, 15 minutes' },
+  { key: 'tradeWallOi', label: 'Support / resistance OI: the wall in the way shrinking or growing' },
   { key: 'tradeOiFlow', label: 'Options OI change (CE / PE delta, last 15 min)' },
   { key: 'tradeOiCum', label: 'Options OI cumulative change (CE / PE since the open, net CE - PE)' },
   { key: 'tradeFutOi', label: 'Futures OI (build-up / covering with price)' },
@@ -130,7 +142,7 @@ export function tuneStrategy(days, id, { trail = null, minTrades = 8, trainFract
   for (const v of variants(grid, base)) {
     // The timeframe only means something with an OI change or futures OI filter on; without one, 1 / 3 / 5 / 15
     // are the same trades - tried once (at 15).
-    if (v.tradeOiWindow !== 15 && (v.tradeOiFlow ?? 'any') === 'any' && (v.tradeFutOi ?? 'any') === 'any') continue
+    if (oiVariantRedundant(v)) continue
     tried++
     const tr = scoreR(run(train, id, v, trail))
     if (tr.n < minTrades || tr.score == null) continue

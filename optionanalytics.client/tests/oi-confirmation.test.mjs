@@ -6,7 +6,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { applyTradeFilter, futuresOiStance, oiGatePasses, optionOiRead, strategyFilters } from '../src/strategyEngine.js'
 import { scanDaySetups, withDayOutcomes } from '../src/scanDay.js'
-import { DEFAULT_VARIANT, OI_GRID, TUNING_GRID, dayTrades, filtersFromTuning, tuneStrategy, tuningDay, variantText, variants } from '../src/strategyTuning.js'
+import { DEFAULT_VARIANT, OI_GRID, oiVariantRedundant, TUNING_GRID, dayTrades, filtersFromTuning, tuneStrategy, tuningDay, variantText, variants } from '../src/strategyTuning.js'
 import { day } from './synthetic-day.mjs'
 
 const MIN = 60_000
@@ -127,8 +127,9 @@ test('the tuning measures the OI confirmation exactly as the scanner takes it', 
   }
 })
 
-test('the OI grid (432, 405 tried), OI then trade (405 + 7,200), and the filters saved', async () => {
-  assert.equal([...variants(OI_GRID)].length, 432)
+test('the OI grid (5,184, 3,861 tried), OI then trade (3,861 + 7,200), and the filters saved', async () => {
+  assert.equal([...variants(OI_GRID)].length, 5184)
+  assert.equal([...variants(OI_GRID)].filter((v) => !oiVariantRedundant(v)).length, 3861)
   assert.equal([...variants(TUNING_GRID)].length, 7200)
   // A grid keeps what it does not tune from its base.
   assert.ok([...variants(TUNING_GRID, { ...DEFAULT_VARIANT, tradeOiFlow: 'with' })].every((v) => v.tradeOiFlow === 'with'))
@@ -137,7 +138,7 @@ test('the OI grid (432, 405 tried), OI then trade (405 + 7,200), and the filters
   const id = all[0].id
   const both = tuneStrategy(days, id, { what: 'both', minTrades: 2, grid: undefined })
   assert.equal(both.what, 'both')
-  assert.equal(both.tried, 405 + 7200, 'the timeframe is not tried where it changes nothing')
+  assert.equal(both.tried, 3861 + 7200, 'a timeframe is not tried where it changes nothing')
   if (both.best && both.oiStage.best) for (const k of Object.keys(OI_GRID)) assert.equal(both.best.params[k], both.oiStage.best.params[k], 'the trade settings tuned on top of the chosen OI confirmation')
   assert.deepEqual(filtersFromTuning({ closesBeyond: 3 }, { ...DEFAULT_VARIANT, tradeOiFlow: 'with', tradeFutOi: 'buildUp' }), { closesBeyond: 3, tradeOiFlow: 'with', tradeFutOi: 'buildUp' })
 })
@@ -146,7 +147,7 @@ test('the tuning page can choose which OI inputs are tuned; the rest stay at the
   const { OI_FACTORS, oiGridOf } = await import('../src/strategyTuning.js')
   assert.deepEqual(OI_FACTORS.map((f) => f.key), Object.keys(OI_GRID))
   assert.deepEqual(Object.keys(oiGridOf(['tradeFutOi', 'nonsense'])), ['tradeFutOi'])
-  assert.equal(Object.keys(oiGridOf(null)).length, 5, 'none chosen = all of them')
+  assert.equal(Object.keys(oiGridOf(null)).length, 7, 'none chosen = all of them')
   assert.equal([...variants(oiGridOf(['tradeOiFlow', 'tradeOiCum']))].length, 9)
   const all = await scanDaySetups({ ...base, filters: {}, keepAll: true })
   const days = Array.from({ length: 6 }, (_, i) => tuningDay(`2026-09-1${i}`, all, replayDay))
@@ -171,8 +172,11 @@ test('OI timeframe 1 / 3 / 5 / 15: each setup records the shorter reads, and the
   assert.equal(futuresOiStance(l().oiCtx, 1, 3), 'buildUp')
   assert.equal(futuresOiStance(l().oiCtx, 1, 1), 'unwinding', 'OI and price both falling for a long')
   assert.equal(futuresOiStance(l().oiCtx, 1, 5), 'flat', '0.02% of OI in 5 min is under the scaled bar (0.1% x 5/15 = 0.033%)')
-  assert.equal(applyTradeFilter(l(), f({ tradeFutOi: 'buildUp', tradeOiWindow: 3 })) !== null, true)
-  assert.equal(applyTradeFilter(l(), f({ tradeFutOi: 'buildUp', tradeOiWindow: 1 })), null)
+  assert.equal(applyTradeFilter(l(), f({ tradeFutOi: 'buildUp', tradeFutWindow: 3 })) !== null, true)
+  assert.equal(applyTradeFilter(l(), f({ tradeFutOi: 'buildUp', tradeFutWindow: 1 })), null)
+  // The options OI and the futures OI have their own timeframe: options on 3 min (writers with), futures on 1 min (against).
+  assert.equal(applyTradeFilter(l(), f({ tradeOiFlow: 'with', tradeOiWindow: 3, tradeFutOi: 'buildUp', tradeFutWindow: 1 })), null)
+  assert.ok(applyTradeFilter(l(), f({ tradeOiFlow: 'with', tradeOiWindow: 3, tradeFutOi: 'buildUp', tradeFutWindow: 3 })))
   // SHORT mirror on 1 minute: calls written, futures short build-up.
   const sh = { ...l(), side: 'SHORT', stop: 22510, target: 22480 }
   assert.ok(applyTradeFilter(sh, f({ tradeOiFlow: 'with', tradeOiWindow: 1 })))
@@ -195,4 +199,38 @@ test('every setup records its OI on 1, 3 and 5 minutes as well as 15 - nothing a
     }
   }
   assert.ok(all.some((s) => s.oiCtx.byWindow[1].flow !== s.oiCtx.byWindow[5].flow), 'the windows read differently')
+})
+
+test('support / resistance OI: the wall in the way shrinking or growing, on the options OI timeframe', () => {
+  const f = (o) => strategyFilters('wallBreak', o)
+  // 15 min: the call wall above shrank 2%, the put wall below grew 3%; 1 min: the call wall grew 1%.
+  const mk = (side, extra) => ({ id: 'wallBreak', side, t: at(60), entry: 22500, stop: side === 'LONG' ? 22490 : 22510, target: side === 'LONG' ? 22520 : 22480, checks: {},
+    oiCtx: { ...ctx, resChg: -0.02, supChg: 0.03, byWindow: { 1: { resChg: 0.01, supChg: -0.01 }, 3: { resChg: null, supChg: null }, 5: { resChg: -0.0005, supChg: 0.0005 } }, ...extra } })
+  assert.ok(applyTradeFilter(mk('LONG'), f({ tradeWallOi: 'shrinking' })), 'LONG: the call wall above is leaving')
+  assert.equal(applyTradeFilter(mk('LONG'), f({ tradeWallOi: 'growing' })), null)
+  assert.ok(applyTradeFilter(mk('SHORT'), f({ tradeWallOi: 'growing' })), 'SHORT: the put wall below is growing')
+  assert.equal(applyTradeFilter(mk('SHORT'), f({ tradeWallOi: 'shrinking' })), null)
+  assert.equal(applyTradeFilter(mk('LONG'), f({ tradeWallOi: 'shrinking', tradeOiWindow: 1 })), null, '1 min: it grew')
+  assert.ok(applyTradeFilter(mk('LONG'), f({ tradeWallOi: 'growing', tradeOiWindow: 1 })))
+  assert.equal(applyTradeFilter(mk('LONG'), f({ tradeWallOi: 'shrinking', tradeOiWindow: 5 })), null, '-0.05% in 5 min is under the bar (0.5% x 5/15)')
+  assert.equal(applyTradeFilter(mk('LONG'), f({ tradeWallOi: 'shrinking', tradeOiWindow: 3 })), null, 'no read: it needs evidence')
+  assert.ok(applyTradeFilter(mk('LONG'), f({})), 'default: not checked')
+  assert.match(applyTradeFilter(mk('LONG'), f({ tradeWallOi: 'shrinking' })).checks.Trade, /wall OI shrinking/)
+})
+
+test('every setup records the OI of the walls ahead on each timeframe, nothing after its own minute', async () => {
+  const all = await scanDaySetups({ ...base, filters: {}, keepAll: true })
+  let seen = 0
+  for (const s of all.slice(0, 40)) {
+    const c = s.oiCtx
+    assert.ok('resChg' in c && 'supChg' in c)
+    for (const m of [1, 3, 5]) assert.ok('resChg' in c.byWindow[m] && 'supChg' in c.byWindow[m], `${m} min`)
+    if (c.resistanceAhead != null) {
+      const now = syn.oi.ce.get(c.resistanceAhead)
+      const at15 = (t) => { let v = null; for (const p of now) if (p.t <= t) v = p; return v }
+      const a = at15(s.t), b = at15(s.t - 15 * MIN)
+      if (a && b && b.oi > 0) { assert.ok(Math.abs(c.resChg - (a.oi - b.oi) / b.oi) < 1e-9); seen++ }
+    }
+  }
+  assert.ok(seen > 0)
 })
