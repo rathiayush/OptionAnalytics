@@ -6,7 +6,8 @@
 //
 // Environment (from the server):
 //   RUNNER_BASE_URL, RUNNER_KEY   this server and the key it accepts from local processes
-//   TUNE_JOB                      { underlying, strategies: 'top3' | 'top5' | 'all' | [ids], days, includeEstimated, minTrades }
+//   TUNE_JOB                      { underlying, strategies: 'top3' | 'top5' | 'all' | [ids], days, includeEstimated, minTrades,
+//                                   what: 'trade' | 'oi' | 'both' (the trade settings, the OI confirmation, or the OI first then the trade) }
 //   TUNE_OUT                      the result file
 // Progress goes to stdout as lines "PROGRESS {json}".
 
@@ -17,7 +18,7 @@ import { scannerProfileOf, trailFor } from '../src/scannerCore.js'
 import { fetchPreviousSession } from '../src/profiles.js'
 import { expiryFlagOf } from '../src/liveFeeds.js'
 import { dayFromOrderFlow, scanDaySetups } from '../src/scanDay.js'
-import { rankStrategies, tuneStrategy, tuningDay, TUNING_GRID } from '../src/strategyTuning.js'
+import { OI_GRID, rankStrategies, tuneStrategy, tuningDay, TUNING_GRID } from '../src/strategyTuning.js'
 import { DEFAULT_ROW_SIZES } from './indexScanner.mjs'
 
 const BASE = (process.env.RUNNER_BASE_URL ?? 'http://127.0.0.1:8080').replace(/\/$/, '')
@@ -27,6 +28,7 @@ const job = JSON.parse(process.env.TUNE_JOB ?? '{}')
 const U = String(job.underlying ?? 'NIFTY').toUpperCase()
 const MAX_DAYS = Math.max(1, Math.min(250, Number(job.days) || 30))
 const MIN_TRADES = Math.max(2, Math.min(100, Number(job.minTrades) || 8))
+const WHAT = ['trade', 'oi', 'both'].includes(job.what) ? job.what : 'trade'
 const startedUtc = new Date().toISOString()
 
 const nativeFetch = globalThis.fetch
@@ -119,10 +121,11 @@ async function main() {
   const results = []
   for (let i = 0; i < ids.length; i++) {
     progress({ stage: 'tune', strategy: ids[i], done: i, total: ids.length })
-    results.push(tuneStrategy(days, ids[i], { trail, minTrades: MIN_TRADES }))
+    results.push(tuneStrategy(days, ids[i], { trail, minTrades: MIN_TRADES, what: WHAT }))
   }
   write({
-    ok: true, underlying: U, job, startedUtc, finishedUtc: new Date().toISOString(), rowSize, trail, minTrades: MIN_TRADES, grid: TUNING_GRID,
+    ok: true, underlying: U, job, startedUtc, finishedUtc: new Date().toISOString(), rowSize, trail, minTrades: MIN_TRADES, what: WHAT,
+    grid: WHAT === 'trade' ? TUNING_GRID : WHAT === 'oi' ? OI_GRID : { ...OI_GRID, ...TUNING_GRID },
     days: days.map((d) => ({ date: d.date, estimated: d.estimated, setups: d.setups.length })), skipped, ranked, results,
     strategies: ACTIVE_STRATEGIES.length,
   })

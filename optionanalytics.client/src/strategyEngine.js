@@ -157,6 +157,57 @@ export const STRATEGY_FILTERS = {
 const HHMM_OPTIONS = []
 for (let m = 9 * 60 + 30; m <= 14 * 60 + 45; m += 15) HHMM_OPTIONS.push({ value: Math.floor(m / 60) * 100 + (m % 60), label: `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}` })
 export const TRAIL_CHOICES = { '0.5/0.5': { startR: 0.5, gapR: 0.5 }, '1/1': { startR: 1, gapR: 1 }, '1.5/1': { startR: 1.5, gapR: 1 }, '2/1': { startR: 2, gapR: 1 } }
+const OI_LEAN_OPTIONS = [{ value: 'any', label: 'Any' }, { value: 'notAgainst', label: 'Not against the trade' }, { value: 'with', label: 'With the trade (puts written for a long, calls for a short)' }]
+
+/** The OI at a setup's minute, as numbers (`push` puts it on every setup): `flow` / `cum` - the whole chain's
+ *  options OI lean over the last 15 minutes / since the open, -1..+1, + = puts written more than calls
+ *  (bullish; net CE - PE negative); `futOiPct` / `futPricePct` - the futures' OI and price change over 15
+ *  minutes; `support` / `resistance` - the biggest put / call OI strikes around the index (`spot`). */
+const OI_LEAN = 0.2 // a lean this strong (either way) counts as with / against
+const FUT_OI_MOVE = 0.001 // 0.1% of futures OI in 15 minutes - positions really added or closed
+const FUT_PRICE_MOVE = 0.0005 // 0.05% in 15 minutes - the price really moved (~12 NIFTY points)
+
+/** Futures OI over the last 15 minutes against the trade's direction `dir`: 'buildUp' (fresh positions its
+ *  way: price with it, OI up), 'covering' (the other side closing: price with it, OI down), 'against'
+ *  (fresh positions the other way: price against it, OI up), 'unwinding' (its side closing) or 'flat'. */
+export function futuresOiStance(ctx, dir) {
+  const oi = ctx?.futOiPct
+  const price = ctx?.futPricePct
+  if (!Number.isFinite(oi) || !Number.isFinite(price) || Math.abs(oi) < FUT_OI_MOVE || Math.abs(price) < FUT_PRICE_MOVE) return 'flat'
+  const withIt = dir * price > 0
+  if (oi > 0) return withIt ? 'buildUp' : 'against'
+  return withIt ? 'covering' : 'unwinding'
+}
+
+/** Whether a setup passes the OI confirmation filters (TRADE_FILTERS tradeOiFlow / tradeOiCum / tradeFutOi /
+ *  tradeWallRoom, values `f`) - all 'any' (the defaults) pass everything. A read the setup has no data for
+ *  passes 'notAgainst' and fails 'with'; no wall that way is all the room in the world. */
+export function oiGatePasses(s, f) {
+  const dir = s.side === 'LONG' ? 1 : -1
+  const ctx = s.oiCtx ?? null
+  const lean = (v, mode) => mode === 'any' || mode == null || (Number.isFinite(v)
+    ? (mode === 'with' ? dir * v >= OI_LEAN : dir * v > -OI_LEAN)
+    : mode === 'notAgainst')
+  if (!lean(ctx?.flow, f.tradeOiFlow) || !lean(ctx?.cum, f.tradeOiCum)) return false
+  const fut = f.tradeFutOi ?? 'any'
+  if (fut !== 'any') {
+    const st = futuresOiStance(ctx, dir)
+    if (fut === 'notAgainst' && st === 'against') return false
+    if (fut === 'withMove' && st !== 'buildUp' && st !== 'covering') return false
+    if (fut === 'buildUp' && st !== 'buildUp') return false
+  }
+  const room = f.tradeWallRoom ?? 'any'
+  if (room !== 'any') {
+    const wall = dir > 0 ? ctx?.resistance : ctx?.support
+    if (Number.isFinite(wall) && Number.isFinite(ctx?.spot)) {
+      const space = dir * (wall - ctx.spot)
+      const need = room === 'target' ? Math.abs(s.target - s.entry) : Math.abs(s.entry - s.stop)
+      if (space < need) return false
+    }
+  }
+  return true
+}
+
 export const TRADE_FILTERS = [
   { key: 'tradeSide', label: 'Trade (any strategy): sides', type: 'select', default: 'both', options: [{ value: 'both', label: 'Long and short' }, { value: 'long', label: 'Long only' }, { value: 'short', label: 'Short only' }] },
   { key: 'tradeFrom', label: 'Trade: entries from (IST)', type: 'select', default: 930, options: HHMM_OPTIONS },
@@ -165,6 +216,11 @@ export const TRADE_FILTERS = [
   { key: 'tradeTargetX', label: 'Trade: target distance (x the strategy\'s own)', type: 'number', default: 1, min: 0.5, max: 3, step: 0.25 },
   { key: 'tradeTimeStop', label: 'Trade: time stop in minutes (0 = the strategy\'s own)', type: 'number', default: 0, min: 0, max: 330, step: 5 },
   { key: 'tradeTrail', label: 'Trade: trailing stop', type: 'select', default: 'scanner', options: [{ value: 'scanner', label: 'The scanner\'s setting' }, { value: 'off', label: 'Off' }, ...Object.keys(TRAIL_CHOICES).map((k) => ({ value: k, label: `After ${k.split('/')[0]}R, ${k.split('/')[1]}R behind` }))] },
+  // OI confirmation (oiGatePasses) - read at the setup's own minute (its `oiCtx`); 'any' = not checked.
+  { key: 'tradeOiFlow', label: 'Trade: options OI change, last 15 min (whole chain)', type: 'select', default: 'any', options: OI_LEAN_OPTIONS },
+  { key: 'tradeOiCum', label: 'Trade: options OI since the open (cumulative, net CE - PE)', type: 'select', default: 'any', options: OI_LEAN_OPTIONS },
+  { key: 'tradeFutOi', label: 'Trade: futures OI, last 15 min', type: 'select', default: 'any', options: [{ value: 'any', label: 'Any' }, { value: 'notAgainst', label: 'Not a fresh build-up against it' }, { value: 'withMove', label: 'Moving with it (build-up or covering)' }, { value: 'buildUp', label: 'Fresh build-up with it' }] },
+  { key: 'tradeWallRoom', label: 'Trade: room to the next OI wall (support / resistance)', type: 'select', default: 'any', options: [{ value: 'any', label: 'Any' }, { value: 'oneR', label: 'At least 1R' }, { value: 'target', label: 'Not inside the target' }] },
 ]
 for (const st of STRATEGIES) STRATEGY_FILTERS[st.id] = [...(STRATEGY_FILTERS[st.id] ?? []), ...TRADE_FILTERS]
 
@@ -190,18 +246,20 @@ export function applyTradeFilter(s, f) {
   const minute = istMinute(s.t)
   const hhmm = Math.floor(minute / 60) * 100 + (minute % 60)
   if (hhmm < (f.tradeFrom ?? 930) || hhmm > (f.tradeTo ?? 1445)) return null
+  const oiGated = ['tradeOiFlow', 'tradeOiCum', 'tradeFutOi', 'tradeWallRoom'].some((k) => (f[k] ?? 'any') !== 'any')
   const stopX = f.tradeStopX ?? 1
   const targetX = f.tradeTargetX ?? 1
   const timeStop = f.tradeTimeStop ?? 0
   const trail = f.tradeTrail ?? 'scanner'
-  if (stopX === 1 && targetX === 1 && !(timeStop > 0) && trail === 'scanner') return s
+  if (stopX === 1 && targetX === 1 && !(timeStop > 0) && trail === 'scanner') return !oiGated ? s : oiGatePasses(s, f) ? { ...s, checks: { ...s.checks, Trade: oiGateText(f) } } : null
   const dir = s.side === 'LONG' ? 1 : -1
   const parts = []
   if (stopX !== 1) parts.push(`stop x${stopX}`)
   if (targetX !== 1) parts.push(`target x${targetX}`)
   if (timeStop > 0) parts.push(`time stop ${timeStop} min`)
   if (trail !== 'scanner') parts.push(trail === 'off' ? 'no trailing stop' : `trailing after ${trail.split('/')[0]}R, ${trail.split('/')[1]}R behind`)
-  return {
+  if (oiGated) parts.push(oiGateText(f))
+  const taken = {
     ...s,
     stop: s.entry - dir * Math.abs(s.entry - s.stop) * stopX,
     target: s.entry + dir * Math.abs(s.target - s.entry) * targetX,
@@ -209,6 +267,19 @@ export function applyTradeFilter(s, f) {
     ...(trail !== 'scanner' ? { trailOverride: trail === 'off' ? null : { ...TRAIL_CHOICES[trail] } } : {}),
     checks: { ...s.checks, Trade: parts.join(' · ') },
   }
+  // The wall room is judged against the stop / target as traded (scaled above).
+  return !oiGated || oiGatePasses(taken, f) ? taken : null
+}
+
+/** The OI confirmation filters in force, in words. */
+export function oiGateText(f) {
+  const words = { with: 'with it', notAgainst: 'not against', withMove: 'moving with it', buildUp: 'fresh build-up with it', oneR: '1R+', target: 'beyond the target' }
+  const parts = []
+  if ((f.tradeOiFlow ?? 'any') !== 'any') parts.push(`options OI 15m ${words[f.tradeOiFlow]}`)
+  if ((f.tradeOiCum ?? 'any') !== 'any') parts.push(`options OI since open ${words[f.tradeOiCum]}`)
+  if ((f.tradeFutOi ?? 'any') !== 'any') parts.push(`futures OI ${words[f.tradeFutOi]}`)
+  if ((f.tradeWallRoom ?? 'any') !== 'any') parts.push(`OI wall ${words[f.tradeWallRoom]}`)
+  return parts.length ? `OI: ${parts.join(', ')}` : ''
 }
 /** The filters of `id` the trader changed from the defaults (for an "edited" mark). */
 export function changedFilters(id, overrides) {
@@ -750,6 +821,12 @@ export function evaluateStrategies(input) {
       id, name: STRATEGY_BY_ID[id].name, side: dir > 0 ? 'LONG' : 'SHORT', t: nowMs, entry: price,
       stop: price - dir * stopPts, target: price + dir * target, timeStopMs: timeStop,
       estimated: !!estimated,
+      // The OI at this minute as numbers - what the OI confirmation filters (oiGatePasses) read.
+      oiCtx: {
+        flow: optionRead?.lean ?? null, cum: optionRead?.leanOpen ?? null,
+        futOiPct: futuresRead?.oiPct ?? null, futPricePct: futuresRead?.pricePct ?? null,
+        support, resistance, spot: spotNow,
+      },
       checks: {
         'Options OI': `${stance === 'agrees' ? 'writers back it' : stance === 'against' ? 'writers lean against (not a veto on this strategy)' : 'neutral'}${opts.stance === 'recent' ? ' (last 15 min)' : ''} - ${optionOiText(optionRead)}`,
         'Near strikes': `${nearStance === 'agrees' ? 'confirm' : nearStance === 'against' ? 'lean against (not required)' : 'neutral'} - ${optionOiText(nearRead)}`,

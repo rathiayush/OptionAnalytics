@@ -38,6 +38,7 @@ export default function StrategyTuningPage() {
   const [days, setDays] = useState(30)
   const [includeEstimated, setIncludeEstimated] = useState(false)
   const [minTrades, setMinTrades] = useState(8)
+  const [what, setWhat] = useState('both')
   const [status, setStatus] = useState(null)
   const [result, setResult] = useState(null)
   const [resultError, setResultError] = useState(null)
@@ -63,7 +64,7 @@ export default function StrategyTuningPage() {
 
   const running = status?.state === 'running'
   const start = async () => {
-    const body = { underlying, strategies: pick === 'custom' ? custom : pick, days, includeEstimated, minTrades }
+    const body = { underlying, strategies: pick === 'custom' ? custom : pick, days, includeEstimated, minTrades, what }
     const res = await fetch('/api/strategy-tuning/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     const json = await res.json().catch(() => null)
     if (!res.ok) { message.error(json?.error ?? `HTTP ${res.status}`); return }
@@ -110,9 +111,10 @@ export default function StrategyTuningPage() {
         <Card size="small" title="Strategy tuning">
           <Space direction="vertical" size={12} style={{ width: '100%' }}>
             <Text type="secondary" style={{ fontSize: 12 }}>
-              Finds the settings each strategy does best with: every past day is scanned once with the strategies&apos; rules, then 7,200 combinations of how its
-              trades are taken - long / short only, the entry time window, stop-loss and target size, a time stop, the trailing stop - are tried on those
-              signals exactly as the scanner would take them, scored in R on the futures. To avoid fitting the past, a setting is chosen on the older 70% of
+              Finds the settings each strategy does best with: every past day is scanned once with the strategies&apos; rules, then the ways its
+              trades can be taken are tried on those signals exactly as the scanner would take them, scored in R on the futures - the OI confirmation
+              (108: options OI change in the last 15 min and since the open, futures OI build-up, room to the next OI wall) and the trade settings
+              (7,200: long / short only, the entry time window, stop-loss and target size, a time stop, the trailing stop). To avoid fitting the past, a setting is chosen on the older 70% of
               the days and checked on the newest 30% it never saw; it is recommended only when it also wins there and beats the strategy as written.
               The strategy&apos;s entry rules are not changed. Runs on the server - you can leave the page.
             </Text>
@@ -125,6 +127,11 @@ export default function StrategyTuningPage() {
                     options={ACTIVE_STRATEGIES.map((s) => ({ value: s.id, label: `#${s.no} ${s.name}` }))} />
                 </Col>
               )}
+              <Col><Space size={6}><Text>Tune</Text><Segmented value={what} onChange={setWhat} disabled={running} options={[
+                { value: 'both', label: <Tooltip title="The OI confirmation first, then the trade settings on top of the best one">OI, then trade</Tooltip> },
+                { value: 'oi', label: <Tooltip title="Options OI change (15 min) and since the open, futures OI, room to the next OI wall - the trade settings as they are">OI confirmation</Tooltip> },
+                { value: 'trade', label: <Tooltip title="Sides, entry window, stop / target size, time stop, trailing stop">Trade settings</Tooltip> },
+              ]} /></Space></Col>
               <Col><Space size={6}><Tooltip title="The most recent past days the server can replay"><Text>Days</Text></Tooltip><InputNumber min={1} max={250} value={days} onChange={(v) => v && setDays(v)} style={{ width: 80 }} disabled={running} /></Space></Col>
               <Col><Space size={6}><Tooltip title="A setting needs at least this many trades on the train days to be considered"><Text>Min trades</Text></Tooltip><InputNumber min={2} max={100} value={minTrades} onChange={(v) => v && setMinTrades(v)} style={{ width: 70 }} disabled={running} /></Space></Col>
               <Col><Tooltip title="Also use days the server did not record live, rebuilt from 1-minute candles (no tape or market depth - the order-flow checks are estimated). More days, less exact."><Space size={6}><Switch size="small" checked={includeEstimated} onChange={setIncludeEstimated} disabled={running} /><Text>Include estimated days</Text></Space></Tooltip></Col>
@@ -149,7 +156,7 @@ export default function StrategyTuningPage() {
         {result && (
           <>
             <Card size="small" title={`${result.underlying} · ${result.days?.length ?? 0} day(s) · finished ${when(result.finishedUtc)}`}
-              extra={<Text type="secondary" style={{ fontSize: 11 }}>{result.days?.filter((d) => d.estimated).length ? `${result.days.filter((d) => d.estimated).length} estimated day(s) · ` : ''}min {result.minTrades} trades · {result.days?.[result.days.length - 1]?.date} to {result.days?.[0]?.date}</Text>}>
+              extra={<Text type="secondary" style={{ fontSize: 11 }}>{result.what ? `tuned: ${{ both: 'OI, then trade', oi: 'OI confirmation', trade: 'trade settings' }[result.what] ?? result.what} · ` : ''}{result.days?.filter((d) => d.estimated).length ? `${result.days.filter((d) => d.estimated).length} estimated day(s) · ` : ''}min {result.minTrades} trades · {result.days?.[result.days.length - 1]?.date} to {result.days?.[0]?.date}</Text>}>
               {result.skipped?.length > 0 && <Alert type="warning" showIcon style={{ marginBottom: 8 }} message={`${result.skipped.length} day(s) could not be scanned`} description={result.skipped.slice(0, 5).map((s) => `${s.date}: ${s.reason}`).join(' · ')} />}
               <Table size="small" rowKey="id" columns={rankedColumns} dataSource={result.ranked ?? []} pagination={false} scroll={{ y: 320 }} />
             </Card>

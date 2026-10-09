@@ -1,15 +1,17 @@
 // Strategy tuning: at what settings does a strategy do best? Each day is scanned ONCE with the strategies'
 // rules (scanDaySetups, keepAll - every setup of every minute); then for each strategy every combination of
-// its trade filters (TRADE_FILTERS: sides, entry window, stop / target size, time stop, trailing stop) is taken
-// through exactly what the scanner does - applyTradeFilter, first per cooldown, the trailing stop, simulateOutcome
-// on the day's bars - and scored in R.
+// its trade filters (TRADE_FILTERS: sides, entry window, stop / target size, time stop, trailing stop - and the
+// OI confirmation: options OI change and since the open, futures OI, room to the OI wall) is taken through
+// exactly what the scanner does - applyTradeFilter, first per cooldown, the trailing stop, simulateOutcome on
+// the day's bars - and scored in R. What is tuned (`what`): 'trade' the trade settings (TUNING_GRID), 'oi' the
+// OI confirmation (OI_GRID), 'both' the OI confirmation first, then the trade settings on top of the best one.
 //
 // Against fitting the past: the days are split in time - the first 70% choose (train), the last 30% check
 // (test, days the choice never saw). A combination needs a minimum number of trades, is ranked by a cautious
 // score (average R minus one standard error), and is only recommended when it also beats the strategy as
 // written on the test days.
 
-import { ACTIVE_STRATEGIES, STRATEGY_BY_ID, TRADE_FILTERS, applyTradeFilter, simulateOutcome } from './strategyEngine.js'
+import { ACTIVE_STRATEGIES, STRATEGY_BY_ID, TRADE_FILTERS, applyTradeFilter, oiGateText, simulateOutcome } from './strategyEngine.js'
 import { replayRange } from './orderFlowMath.js'
 import { MIN } from './scannerCore.js'
 import { firstPerCooldown } from './scanDay.js'
@@ -23,16 +25,25 @@ export const TUNING_GRID = {
   tradeTimeStop: [0, 30, 60, 120],
   tradeTrail: ['scanner', 'off', '0.5/0.5', '1/1', '2/1'],
 }
+/** The OI confirmation tried (each strategy): 3 x 3 x 4 x 3 = 108 - the trade settings as they are. */
+export const OI_GRID = {
+  tradeOiFlow: ['any', 'notAgainst', 'with'],
+  tradeOiCum: ['any', 'notAgainst', 'with'],
+  tradeFutOi: ['any', 'notAgainst', 'withMove', 'buildUp'],
+  tradeWallRoom: ['any', 'oneR', 'target'],
+}
 export const DEFAULT_VARIANT = Object.fromEntries(TRADE_FILTERS.map((f) => [f.key, f.default]))
 
-export function* variants(grid = TUNING_GRID) {
-  for (const tradeSide of grid.tradeSide)
-    for (const [tradeFrom, tradeTo] of grid.window)
-      for (const tradeStopX of grid.tradeStopX)
-        for (const tradeTargetX of grid.tradeTargetX)
-          for (const tradeTimeStop of grid.tradeTimeStop)
-            for (const tradeTrail of grid.tradeTrail)
-              yield { tradeSide, tradeFrom, tradeTo, tradeStopX, tradeTargetX, tradeTimeStop, tradeTrail }
+/** Every combination of `grid` (key -> values; 'window' -> [from, to] pairs), each on top of `base` (the
+ *  trade filters not in the grid). */
+export function* variants(grid = TUNING_GRID, base = DEFAULT_VARIANT) {
+  const keys = Object.keys(grid)
+  function* walk(i, acc) {
+    if (i === keys.length) { yield { ...base, ...acc }; return }
+    const key = keys[i]
+    for (const v of grid[key]) yield* walk(i + 1, key === 'window' ? { ...acc, tradeFrom: v[0], tradeTo: v[1] } : { ...acc, [key]: v })
+  }
+  yield* walk(0, {})
 }
 
 /** The R of each trade strategy `id` takes on a scanned day with trade filters `variant` - as the scanner
@@ -89,12 +100,19 @@ export function rankStrategies(days, { trail = null, minTrades = 8, ids = ACTIVE
  * (baseline) and the best combination - chosen on the train days, checked on the test days - with the top
  * `keep` combinations, and whether the best one is worth applying.
  */
-export function tuneStrategy(days, id, { trail = null, minTrades = 8, trainFraction = 0.7, grid = TUNING_GRID, keep = 10 } = {}) {
+export function tuneStrategy(days, id, { trail = null, minTrades = 8, trainFraction = 0.7, grid = null, keep = 10, what = 'trade', base = DEFAULT_VARIANT } = {}) {
+  if (what === 'both') {
+    // The OI confirmation first (chosen on the train days only), then the trade settings on top of it.
+    const oi = tuneStrategy(days, id, { trail, minTrades, trainFraction, keep, what: 'oi', base })
+    const onTop = tuneStrategy(days, id, { trail, minTrades, trainFraction, keep, what: 'trade', base: oi.best?.params ?? base })
+    return { ...onTop, what, tried: oi.tried + onTop.tried, qualified: oi.qualified + onTop.qualified, oiStage: { best: oi.best, reason: oi.reason } }
+  }
+  grid = grid ?? (what === 'oi' ? OI_GRID : TUNING_GRID)
   const { train, test } = splitDays(days, trainFraction)
   const baseline = { params: DEFAULT_VARIANT, train: scoreR(run(train, id, DEFAULT_VARIANT, trail)), test: scoreR(run(test, id, DEFAULT_VARIANT, trail)) }
   const rows = []
   let tried = 0
-  for (const v of variants(grid)) {
+  for (const v of variants(grid, base)) {
     tried++
     const tr = scoreR(run(train, id, v, trail))
     if (tr.n < minTrades || tr.score == null) continue
@@ -112,7 +130,7 @@ export function tuneStrategy(days, id, { trail = null, minTrades = 8, trainFract
   else if (baseline.test.n && !(best.test.avg > (baseline.test.avg ?? -Infinity))) reason = `on the test days it did not beat the strategy as written (${best.test.avg.toFixed(2)}R vs ${baseline.test.avg.toFixed(2)}R a trade)`
   else { recommend = true; reason = `better on the train days and on the ${test.length} unseen test day(s)` }
   return {
-    id, name: STRATEGY_BY_ID[id]?.name ?? id, no: STRATEGY_BY_ID[id]?.no ?? null,
+    id, name: STRATEGY_BY_ID[id]?.name ?? id, no: STRATEGY_BY_ID[id]?.no ?? null, what,
     days: days.length, trainDays: train.map((d) => d.date), testDays: test.map((d) => d.date),
     tried, qualified: rows.length, baseline, best, top, recommend, reason,
   }
@@ -143,5 +161,7 @@ export function variantText(v) {
   if (v.tradeTargetX !== 1) parts.push(`target x${v.tradeTargetX}`)
   if (v.tradeTimeStop > 0) parts.push(`time stop ${v.tradeTimeStop}m`)
   if (v.tradeTrail !== 'scanner') parts.push(v.tradeTrail === 'off' ? 'no trail' : `trail ${v.tradeTrail}R`)
+  const oi = oiGateText(v)
+  if (oi) parts.push(oi)
   return parts.join(' · ')
 }
