@@ -113,8 +113,8 @@ export default function StrategyTuningPage() {
           <Space direction="vertical" size={12} style={{ width: '100%' }}>
             <Text type="secondary" style={{ fontSize: 12 }}>
               Finds the settings each strategy does best with: every past day is scanned once with the strategies&apos; rules, then the ways its
-              trades can be taken are tried on those signals exactly as the scanner would take them, scored in R on the futures - the OI confirmation
-              (options OI change, the wall OI and futures OI each on 1, 3, 5 or 15 minutes, options OI since the open, whether the support / resistance OI is shrinking or growing, room to it) and the trade settings
+              trades can be taken are tried on those signals exactly as the scanner would take them, scored in R on the futures - the OI confirmation,
+              step by step (options OI change, CE and PE each rising or falling, since the open, futures OI and short squeeze, move size, day type, the support / resistance OI and room to it, on 1, 3, 5 or 15 minutes) and the trade settings
               (7,200: long / short only, the entry time window, stop-loss and target size, a time stop, the trailing stop). To avoid fitting the past, a setting is chosen on the older 70% of
               the days and checked on the newest 30% it never saw; it is recommended only when it also wins there and beats the strategy as written.
               The strategy&apos;s entry rules are not changed. Runs on the server - you can leave the page.

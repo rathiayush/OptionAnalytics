@@ -6,7 +6,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { applyTradeFilter, futuresOiStance, oiGatePasses, optionOiRead, strategyFilters } from '../src/strategyEngine.js'
 import { scanDaySetups, withDayOutcomes } from '../src/scanDay.js'
-import { DEFAULT_VARIANT, OI_GRID, oiVariantRedundant, TUNING_GRID, dayTrades, filtersFromTuning, tuneStrategy, tuningDay, variantText, variants } from '../src/strategyTuning.js'
+import { DEFAULT_VARIANT, OI_GRID, oiVariantRedundant, stepSearch, TUNING_GRID, dayTrades, filtersFromTuning, tuneStrategy, tuningDay, variantText, variants } from '../src/strategyTuning.js'
 import { day } from './synthetic-day.mjs'
 
 const MIN = 60_000
@@ -127,35 +127,57 @@ test('the tuning measures the OI confirmation exactly as the scanner takes it', 
   }
 })
 
-test('the OI grid (5,184, 3,861 tried), OI then trade (3,861 + 7,200), and the filters saved', async () => {
-  assert.equal([...variants(OI_GRID)].length, 5184)
-  assert.equal([...variants(OI_GRID)].filter((v) => !oiVariantRedundant(v)).length, 3861)
+test('the OI grid is searched step by step, OI then trade tunes the trade on top, and the filters saved', async () => {
+  const full = [...variants(OI_GRID)].length
+  assert.ok(full > 1_000_000, `the full OI grid is far too big to try (${full})`)
   assert.equal([...variants(TUNING_GRID)].length, 7200)
-  // A grid keeps what it does not tune from its base.
-  assert.ok([...variants(TUNING_GRID, { ...DEFAULT_VARIANT, tradeOiFlow: 'with' })].every((v) => v.tradeOiFlow === 'with'))
+  assert.ok([...variants(TUNING_GRID, { ...DEFAULT_VARIANT, tradeOiFlow: 'with' })].every((v) => v.tradeOiFlow === 'with'), 'a grid keeps what it does not tune')
   const all = await scanDaySetups({ ...base, filters: {}, keepAll: true })
   const days = Array.from({ length: 6 }, (_, i) => ({ ...tuningDay(`2026-09-1${i}`, all, replayDay) }))
   const id = all[0].id
-  const both = tuneStrategy(days, id, { what: 'both', minTrades: 2, grid: undefined })
+  const both = tuneStrategy(days, id, { what: 'both', minTrades: 2 })
   assert.equal(both.what, 'both')
-  assert.equal(both.tried, 3861 + 7200, 'a timeframe is not tried where it changes nothing')
+  const oiTried = both.tried - 7200
+  assert.ok(oiTried >= 1 && oiTried < 400, `the OI part tried ${oiTried} combinations, not millions`)
   if (both.best && both.oiStage.best) for (const k of Object.keys(OI_GRID)) assert.equal(both.best.params[k], both.oiStage.best.params[k], 'the trade settings tuned on top of the chosen OI confirmation')
   assert.deepEqual(filtersFromTuning({ closesBeyond: 3 }, { ...DEFAULT_VARIANT, tradeOiFlow: 'with', tradeFutOi: 'buildUp' }), { closesBeyond: 3, tradeOiFlow: 'with', tradeFutOi: 'buildUp' })
+})
+
+test('step search: each filter takes the value that scores best given the others, windows only once their filter is on', () => {
+  // A planted world: the score is 1 for the right futures OI, +1 for the right CE/PE pattern, +1 for 3-minute timeframe
+  // but only while an options OI change filter is on.
+  const grid = { tradeOiFlow: ['any', 'with'], tradeSideOi: ['any', 'lean', 'both'], tradeFutOi: ['any', 'buildUp', 'squeeze'], tradeOiWindow: [15, 1, 3] }
+  const seenParams = []
+  const scoreOf = (v) => {
+    seenParams.push(v)
+    const total = (v.tradeFutOi === 'squeeze' ? 1 : 0) + (v.tradeSideOi === 'both' ? 1 : 0) + (v.tradeOiFlow === 'with' && v.tradeOiWindow === 3 ? 1 : 0)
+    return { n: 10, total, avg: total / 10, score: total / 10 }
+  }
+  const { rows, tried } = stepSearch(grid, { ...DEFAULT_VARIANT }, scoreOf, { minTrades: 5 })
+  assert.equal(rows[0].params.tradeFutOi, 'squeeze')
+  assert.equal(rows[0].params.tradeSideOi, 'both')
+  assert.equal(rows[0].params.tradeOiFlow, 'with')
+  assert.equal(rows[0].params.tradeOiWindow, 3, 'the timeframe is tried once the filter that reads it is on')
+  assert.ok(tried < 30, `${tried} combinations tried, out of ${[...variants(grid)].length}`)
+  assert.ok(seenParams.every((v) => !oiVariantRedundant(v) || JSON.stringify(v) === JSON.stringify(DEFAULT_VARIANT)), 'no combination where the timeframe changes nothing')
+  // Too few trades: nothing qualifies, nothing moves.
+  const none = stepSearch(grid, { ...DEFAULT_VARIANT }, () => ({ n: 2, total: 5, avg: 2.5, score: 2.5 }), { minTrades: 5 })
+  assert.deepEqual(none.rows, [])
 })
 
 test('the tuning page can choose which OI inputs are tuned; the rest stay at their defaults', async () => {
   const { OI_FACTORS, oiGridOf } = await import('../src/strategyTuning.js')
   assert.deepEqual(OI_FACTORS.map((f) => f.key), Object.keys(OI_GRID))
   assert.deepEqual(Object.keys(oiGridOf(['tradeFutOi', 'nonsense'])), ['tradeFutOi'])
-  assert.equal(Object.keys(oiGridOf(null)).length, 7, 'none chosen = all of them')
-  assert.equal([...variants(oiGridOf(['tradeOiFlow', 'tradeOiCum']))].length, 9)
+  assert.equal(Object.keys(oiGridOf(null)).length, Object.keys(OI_GRID).length, 'none chosen = all of them')
   const all = await scanDaySetups({ ...base, filters: {}, keepAll: true })
   const days = Array.from({ length: 6 }, (_, i) => tuningDay(`2026-09-1${i}`, all, replayDay))
   const id = all[0].id
   const only = tuneStrategy(days, id, { what: 'oi', minTrades: 2, oiKeys: ['tradeFutOi'] })
-  assert.equal(only.tried, 4)
-  for (const row of only.top) for (const k of ['tradeOiFlow', 'tradeOiCum', 'tradeWallRoom']) assert.equal(row.params[k], 'any', `${k} untouched`)
-  assert.equal(tuneStrategy(days, id, { what: 'oi', minTrades: 2, oiKeys: ['tradeOiFlow', 'tradeOiCum'] }).tried, 9)
+  assert.equal(only.tried, OI_GRID.tradeFutOi.length, 'the base and every other value of the one filter')
+  for (const row of only.top) for (const k of Object.keys(OI_GRID).filter((x) => x !== 'tradeFutOi')) assert.equal(row.params[k], DEFAULT_VARIANT[k], `${k} untouched`)
+  const two = tuneStrategy(days, id, { what: 'oi', minTrades: 2, oiKeys: ['tradeOiFlow', 'tradeOiCum'] })
+  assert.ok(two.tried <= 9 && two.tried >= 5, `${two.tried}`)
 })
 
 test('OI timeframe 1 / 3 / 5 / 15: each setup records the shorter reads, and the filters read the chosen one', () => {
@@ -233,4 +255,77 @@ test('every setup records the OI of the walls ahead on each timeframe, nothing a
     }
   }
   assert.ok(seen > 0)
+})
+
+test('CE and PE each rising / falling: delta on the timeframe and since the open, LONG and SHORT', () => {
+  const f = (o) => strategyFilters('wallBreak', o)
+  const mk = (side, extra) => ({ id: 'wallBreak', side, t: at(60), entry: 22500, stop: side === 'LONG' ? 22490 : 22510, target: side === 'LONG' ? 22520 : 22480, checks: {},
+    oiCtx: { ...ctx, ceD: -0.01, peD: 0.01, ceC: -0.05, peC: 0.04, byWindow: { 3: { ceD: 0.01, peD: 0.01 }, 1: { ceD: null, peD: null } }, ...extra } })
+  // PE rising + CE falling = both sides bullish.
+  assert.ok(applyTradeFilter(mk('LONG'), f({ tradeSideOi: 'both' })))
+  assert.equal(applyTradeFilter(mk('SHORT'), f({ tradeSideOi: 'lean' })), null, 'both sides are against a short')
+  assert.equal(applyTradeFilter(mk('SHORT'), f({ tradeSideOi: 'notAgainst' })), null)
+  // CE rising + PE falling = both bearish: the SHORT mirror.
+  const bear = { ceD: 0.01, peD: -0.01, ceC: 0.05, peC: -0.04 }
+  assert.ok(applyTradeFilter(mk('SHORT', bear), f({ tradeSideOi: 'both', tradeSideCum: 'both' })))
+  assert.equal(applyTradeFilter(mk('LONG', bear), f({ tradeSideOi: 'notAgainst' })), null)
+  // One side with it, the other flat: "lean" passes, "both" does not. One with, one against: only "notAgainst".
+  assert.ok(applyTradeFilter(mk('LONG', { ceD: 0, peD: 0.01 }), f({ tradeSideOi: 'lean' })))
+  assert.equal(applyTradeFilter(mk('LONG', { ceD: 0, peD: 0.01 }), f({ tradeSideOi: 'both' })), null)
+  assert.equal(applyTradeFilter(mk('LONG', { ceD: 0.01, peD: 0.01 }), f({ tradeSideOi: 'lean' })), null, 'PE rising but CE rising too: they cancel')
+  assert.ok(applyTradeFilter(mk('LONG', { ceD: 0.01, peD: 0.01 }), f({ tradeSideOi: 'notAgainst' })))
+  // The timeframe: 3 min has both rising (cancelling); 1 min has no read.
+  assert.equal(applyTradeFilter(mk('LONG'), f({ tradeSideOi: 'lean', tradeOiWindow: 3 })), null)
+  assert.ok(applyTradeFilter(mk('LONG'), f({ tradeSideOi: 'notAgainst', tradeOiWindow: 1 })), 'no read passes "not against"')
+  assert.equal(applyTradeFilter(mk('LONG'), f({ tradeSideOi: 'lean', tradeOiWindow: 1 })), null, 'no read fails "lean"')
+  // Since the open (a 1% bar); small moves do not count.
+  assert.equal(applyTradeFilter(mk('LONG', { ceC: 0.004, peC: 0.004 }), f({ tradeSideCum: 'lean' })), null, 'both under 1%: flat')
+  assert.ok(applyTradeFilter(mk('LONG'), f({ tradeSideCum: 'both' })))
+  assert.ok(applyTradeFilter(mk('LONG', { ceD: -0.01, peD: 0.01 }), f({})), 'default: not checked')
+})
+
+test('short squeeze, small move and day type', () => {
+  const f = (o) => strategyFilters('wallBreak', o)
+  const mk = (side, extra) => ({ id: 'wallBreak', side, t: at(60), entry: 22500, stop: side === 'LONG' ? 22490 : 22510, target: side === 'LONG' ? 22520 : 22480, checks: {},
+    oiCtx: { ...ctx, dayType: 'trend-up', byWindow: {}, ...extra } })
+  // Short squeeze for a long: price up on falling futures OI. Long unwinding for a short: price down on falling OI.
+  assert.ok(applyTradeFilter(mk('LONG', { futOiPct: -0.004, futPricePct: 0.002 }), f({ tradeFutOi: 'squeeze' })))
+  assert.equal(applyTradeFilter(mk('LONG', { futOiPct: 0.004, futPricePct: 0.002 }), f({ tradeFutOi: 'squeeze' })), null, 'a fresh build-up is not a squeeze')
+  assert.ok(applyTradeFilter(mk('SHORT', { futOiPct: -0.004, futPricePct: -0.002 }), f({ tradeFutOi: 'squeeze' })))
+  assert.equal(applyTradeFilter(mk('SHORT', { futOiPct: -0.004, futPricePct: 0.002 }), f({ tradeFutOi: 'squeeze' })), null)
+  // Move size on the futures timeframe: under 0.1% in 15 min is small.
+  assert.ok(applyTradeFilter(mk('LONG', { futPricePct: 0.0007 }), f({ tradeMoveSize: 'small' })))
+  assert.equal(applyTradeFilter(mk('LONG', { futPricePct: 0.0007 }), f({ tradeMoveSize: 'large' })), null)
+  assert.ok(applyTradeFilter(mk('SHORT', { futPricePct: -0.002 }), f({ tradeMoveSize: 'large' })), 'a fall counts by its size')
+  assert.equal(applyTradeFilter(mk('LONG', { futPricePct: 0.0004, byWindow: { 5: { futPricePct: 0.0002 } } }), f({ tradeMoveSize: 'large', tradeFutWindow: 5 })), null, '0.02% in 5 min is small (the bar is 0.033%)')
+  assert.ok(applyTradeFilter(mk('LONG', { futPricePct: 0.0004, byWindow: { 5: { futPricePct: 0.0004 } } }), f({ tradeMoveSize: 'large', tradeFutWindow: 5 })), '0.04% in 5 min is a real move')
+  assert.equal(applyTradeFilter(mk('LONG', { futPricePct: null }), f({ tradeMoveSize: 'small' })), null, 'no read')
+  // Day type: a trending day my way / against / a range.
+  assert.ok(applyTradeFilter(mk('LONG'), f({ tradeDayType: 'withTrend' })))
+  assert.equal(applyTradeFilter(mk('SHORT'), f({ tradeDayType: 'withTrend' })), null)
+  assert.equal(applyTradeFilter(mk('SHORT'), f({ tradeDayType: 'notAgainstTrend' })), null)
+  assert.ok(applyTradeFilter(mk('LONG'), f({ tradeDayType: 'trend' })))
+  assert.ok(applyTradeFilter(mk('SHORT', { dayType: 'trend-down' }), f({ tradeDayType: 'withTrend' })))
+  assert.equal(applyTradeFilter(mk('LONG', { dayType: 'range' }), f({ tradeDayType: 'trend' })), null)
+  assert.ok(applyTradeFilter(mk('LONG', { dayType: 'range' }), f({ tradeDayType: 'range' })))
+  assert.ok(applyTradeFilter(mk('LONG', { dayType: 'two-sided' }), f({ tradeDayType: 'range' })))
+  assert.ok(applyTradeFilter(mk('LONG', { dayType: 'unclear' }), f({ tradeDayType: 'notAgainstTrend' })))
+  assert.equal(applyTradeFilter(mk('LONG', { dayType: null }), f({ tradeDayType: 'withTrend' })), null, 'no read')
+  assert.ok(applyTradeFilter(mk('LONG', { dayType: null }), f({ tradeDayType: 'notAgainstTrend' })))
+  assert.match(applyTradeFilter(mk('LONG', { futOiPct: -0.004, futPricePct: 0.002 }), f({ tradeDayType: 'withTrend', tradeFutOi: 'squeeze' })).checks.Trade, /day: trending my way/)
+})
+
+test('every setup records CE / PE rising or falling, the day type, up to its own minute', async () => {
+  const all = await scanDaySetups({ ...base, filters: {}, keepAll: true })
+  assert.ok(all.length > 0)
+  for (const s of all.slice(0, 40)) {
+    const c = s.oiCtx
+    const r = optionOiRead(syn.oi, c.spot, s.t, 15)
+    assert.equal(c.peD, r.peChg / r.peNow)
+    assert.equal(c.ceD, r.ceChg / r.ceNow)
+    assert.equal(c.ceC, r.ceOpen / r.ceNow)
+    assert.equal(c.peC, r.peOpen / r.peNow)
+    for (const m of [1, 3, 5]) { const rm = optionOiRead(syn.oi, c.spot, s.t, m); assert.equal(c.byWindow[m].ceD, rm.ceChg / rm.ceNow, `${m} min`) }
+    assert.equal(c.dayType, s.regime.type, 'the same day type the setup is tagged with')
+  }
 })

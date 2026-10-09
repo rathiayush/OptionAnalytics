@@ -26,32 +26,42 @@ export const TUNING_GRID = {
   tradeTrail: ['scanner', 'off', '0.5/0.5', '1/1', '2/1'],
 }
 /** The OI confirmation tried (each strategy): the options OI and futures OI each on 1 / 3 / 5 / 15 minutes, the
- *  options OI change and since the open, the futures OI, the support / resistance OI (shrinking / growing) and the
- *  room to it - the combinations where a timeframe changes nothing are tried once (oiVariantRedundant); the trade
- *  settings as they are. */
+ *  options OI change and since the open (net CE - PE, and CE and PE each rising / falling), the futures OI (with
+ *  short squeeze), the futures move size, the day type, the support / resistance OI (shrinking / growing) and the
+ *  room to it. Far too many to try every combination (and a lucky one would win), so the OI is tuned step by step
+ *  (stepSearch); the trade settings as they are. A combination whose timeframe changes nothing is skipped
+ *  (oiVariantRedundant). */
 export const OI_GRID = {
   tradeOiWindow: [15, 1, 3, 5],
   tradeFutWindow: [15, 1, 3, 5],
   tradeWallOi: ['any', 'shrinking', 'growing'],
   tradeOiFlow: ['any', 'notAgainst', 'with'],
   tradeOiCum: ['any', 'notAgainst', 'with'],
-  tradeFutOi: ['any', 'notAgainst', 'withMove', 'buildUp'],
+  tradeSideOi: ['any', 'notAgainst', 'lean', 'both'],
+  tradeSideCum: ['any', 'notAgainst', 'lean', 'both'],
+  tradeFutOi: ['any', 'notAgainst', 'withMove', 'buildUp', 'squeeze'],
+  tradeMoveSize: ['any', 'small', 'large'],
+  tradeDayType: ['any', 'trend', 'withTrend', 'notAgainstTrend', 'range'],
   tradeWallRoom: ['any', 'oneR', 'target'],
 }
 /** A combination whose timeframe changes nothing: the options OI timeframe with neither an options OI change nor
  *  a wall OI filter on, the futures OI timeframe with no futures OI filter on - tried once, at 15. */
 export const oiVariantRedundant = (v) =>
   (v.tradeOiWindow !== 15 && (v.tradeOiFlow ?? 'any') === 'any' && (v.tradeWallOi ?? 'any') === 'any')
-  || (v.tradeFutWindow !== 15 && (v.tradeFutOi ?? 'any') === 'any')
+  || (v.tradeFutWindow !== 15 && (v.tradeFutOi ?? 'any') === 'any' && (v.tradeMoveSize ?? 'any') === 'any')
 
 /** The OI inputs the tuning can use (a subset of OI_GRID's keys) - what the Strategy tuning page lists. */
 export const OI_FACTORS = [
   { key: 'tradeOiWindow', label: 'Options OI timeframe: 1, 3, 5, 15 minutes (for the OI change and the wall OI)' },
-  { key: 'tradeFutWindow', label: 'Futures OI timeframe: 1, 3, 5, 15 minutes' },
+  { key: 'tradeFutWindow', label: 'Futures OI timeframe: 1, 3, 5, 15 minutes (for the futures OI and the move size)' },
   { key: 'tradeWallOi', label: 'Support / resistance OI: the wall in the way shrinking or growing' },
-  { key: 'tradeOiFlow', label: 'Options OI change (CE / PE delta, last 15 min)' },
-  { key: 'tradeOiCum', label: 'Options OI cumulative change (CE / PE since the open, net CE - PE)' },
-  { key: 'tradeFutOi', label: 'Futures OI (build-up / covering with price)' },
+  { key: 'tradeOiFlow', label: 'Options OI change: net CE vs PE (delta on the timeframe)' },
+  { key: 'tradeOiCum', label: 'Options OI cumulative: net CE - PE since the open' },
+  { key: 'tradeSideOi', label: 'CE and PE each rising / falling (delta on the timeframe)' },
+  { key: 'tradeSideCum', label: 'CE and PE each rising / falling since the open (cumulative)' },
+  { key: 'tradeFutOi', label: 'Futures OI (build-up, covering, short squeeze)' },
+  { key: 'tradeMoveSize', label: 'Futures move size: small move or real move' },
+  { key: 'tradeDayType', label: 'Day type: trending (my way), range, not against a trend' },
   { key: 'tradeWallRoom', label: 'Room to the next OI wall (support / resistance)' },
 ]
 /** OI_GRID restricted to `keys` (unknown keys ignored; none given = all of them). */
@@ -105,6 +115,54 @@ export function scoreR(rs) {
   return { n, total, avg, winRate: wins.length / n, pf: loss > 0 ? gain / loss : gain > 0 ? Infinity : null, maxDD, score: sd != null ? avg - sd / Math.sqrt(n) : null }
 }
 
+/**
+ * Tunes the OI confirmation step by step instead of trying every combination: starting from `base`, each filter
+ * in turn takes the value that scores best on the train days (cautious score, at least `minTrades` trades) given
+ * the others as they are now; a second pass revisits them (a timeframe only matters once the filter it reads is
+ * on, so the timeframes come last). Far fewer combinations are tried than the full grid - and far fewer chances
+ * for a lucky one to win. Returns every combination it scored, best first, and how many it tried.
+ */
+const WINDOW_OF = { tradeOiFlow: 'tradeOiWindow', tradeSideOi: 'tradeOiWindow', tradeWallOi: 'tradeOiWindow', tradeFutOi: 'tradeFutWindow', tradeMoveSize: 'tradeFutWindow' }
+export function stepSearch(grid, base, scoreOf, { passes = 2, minTrades = 0 } = {}) {
+  const keys = Object.keys(grid)
+  const order = [...keys.filter((k) => !/Window$/.test(k)), ...keys.filter((k) => /Window$/.test(k))]
+  const seen = new Map()
+  const evaluate = (v) => {
+    const id = JSON.stringify(order.map((k) => v[k]))
+    if (!seen.has(id)) seen.set(id, { params: v, train: scoreOf(v) })
+    return seen.get(id)
+  }
+  const qualifies = (r) => r.train.score != null && r.train.n >= minTrades
+  let current = { ...base }
+  const first = evaluate(current)
+  let currentScore = first.train.score ?? -Infinity
+  for (let pass = 0; pass < passes; pass++) {
+    let moved = false
+    for (const key of order) {
+      let bestV = null
+      for (const value of grid[key]) {
+        // A filter that reads a timeframe is tried on each of them together - one that only helps on 3 minutes
+        // would show nothing on the 15 it starts from.
+        const dep = WINDOW_OF[key]
+        const windows = dep && grid[dep] && value !== 'any' ? grid[dep] : [undefined]
+        for (const w of windows) {
+          if (value === current[key] && w === undefined) continue
+          const cand = { ...current, [key]: value, ...(w !== undefined ? { [dep]: w } : {}) }
+          if (oiVariantRedundant(cand)) continue
+          const r = evaluate(cand)
+          if (!qualifies(r)) continue
+          if (r.train.score > currentScore + 1e-9 && (!bestV || r.train.score > bestV.train.score)) bestV = r
+        }
+      }
+      if (bestV) { current = bestV.params; currentScore = bestV.train.score; moved = true }
+    }
+    if (!moved) break
+  }
+  const rows = [...seen.values()].filter(qualifies)
+  rows.sort((a, b) => b.train.score - a.train.score || b.train.total - a.train.total)
+  return { rows, tried: seen.size }
+}
+
 /** Days in date order split into train (the first `trainFraction`) and test (the rest) - no test under 5 days. */
 export function splitDays(days, trainFraction = 0.7) {
   const sorted = [...days].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
@@ -134,19 +192,27 @@ export function tuneStrategy(days, id, { trail = null, minTrades = 8, trainFract
     const onTop = tuneStrategy(days, id, { trail, minTrades, trainFraction, keep, what: 'trade', base: oi.best?.params ?? base })
     return { ...onTop, what, tried: oi.tried + onTop.tried, qualified: oi.qualified + onTop.qualified, oiStage: { best: oi.best, reason: oi.reason } }
   }
+  const explicitGrid = grid != null
   grid = grid ?? (what === 'oi' ? oiGridOf(oiKeys) : TUNING_GRID)
   const { train, test } = splitDays(days, trainFraction)
   const baseline = { params: DEFAULT_VARIANT, train: scoreR(run(train, id, DEFAULT_VARIANT, trail)), test: scoreR(run(test, id, DEFAULT_VARIANT, trail)) }
-  const rows = []
+  let rows = []
   let tried = 0
-  for (const v of variants(grid, base)) {
-    // The timeframe only means something with an OI change or futures OI filter on; without one, 1 / 3 / 5 / 15
-    // are the same trades - tried once (at 15).
-    if (oiVariantRedundant(v)) continue
-    tried++
-    const tr = scoreR(run(train, id, v, trail))
-    if (tr.n < minTrades || tr.score == null) continue
-    rows.push({ params: v, train: tr })
+  if (what === 'oi' && !explicitGrid) {
+    // Step by step (stepSearch): each OI filter takes its best value given the others, then a second pass.
+    const found = stepSearch(grid, base, (v) => scoreR(run(train, id, v, trail)), { minTrades })
+    rows = found.rows
+    tried = found.tried
+  } else {
+    for (const v of variants(grid, base)) {
+      // The timeframe only means something with an OI change or futures OI filter on; without one, 1 / 3 / 5 / 15
+      // are the same trades - tried once (at 15).
+      if (oiVariantRedundant(v)) continue
+      tried++
+      const tr = scoreR(run(train, id, v, trail))
+      if (tr.n < minTrades || tr.score == null) continue
+      rows.push({ params: v, train: tr })
+    }
   }
   rows.sort((a, b) => b.train.score - a.train.score || b.train.total - a.train.total)
   const top = rows.slice(0, keep).map((r) => ({ ...r, test: scoreR(run(test, id, r.params, trail)) }))

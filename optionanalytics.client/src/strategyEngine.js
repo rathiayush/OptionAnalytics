@@ -157,6 +157,7 @@ export const STRATEGY_FILTERS = {
 const HHMM_OPTIONS = []
 for (let m = 9 * 60 + 30; m <= 14 * 60 + 45; m += 15) HHMM_OPTIONS.push({ value: Math.floor(m / 60) * 100 + (m % 60), label: `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}` })
 export const TRAIL_CHOICES = { '0.5/0.5': { startR: 0.5, gapR: 0.5 }, '1/1': { startR: 1, gapR: 1 }, '1.5/1': { startR: 1.5, gapR: 1 }, '2/1': { startR: 2, gapR: 1 } }
+const SIDE_OI_OPTIONS = [{ value: 'any', label: 'Any' }, { value: 'notAgainst', label: 'The two sides not against the trade' }, { value: 'lean', label: 'At least one side with it, none against (PE rising / CE falling for a long)' }, { value: 'both', label: 'Both sides with it' }]
 const OI_LEAN_OPTIONS = [{ value: 'any', label: 'Any' }, { value: 'notAgainst', label: 'Not against the trade' }, { value: 'with', label: 'With the trade (puts written for a long, calls for a short)' }]
 
 /** The OI at a setup's minute, as numbers (`push` puts it on every setup): `flow` / `cum` - the whole chain's
@@ -165,6 +166,8 @@ const OI_LEAN_OPTIONS = [{ value: 'any', label: 'Any' }, { value: 'notAgainst', 
  *  minutes; `support` / `resistance` - the biggest put / call OI strikes around the index (`spot`). */
 const OI_LEAN = 0.2 // a lean this strong (either way) counts as with / against
 const FUT_OI_MOVE = 0.001 // 0.1% of futures OI in 15 minutes - positions really added or closed
+const SIDE_OI_MOVE = 0.003 // 0.3% of a side's (CE or PE) OI in 15 minutes - that side really rising or falling
+const SIDE_OI_CUM_MOVE = 0.01 // 1% of it since the open
 const WALL_OI_MOVE = 0.005 // 0.5% of a wall's OI in 15 minutes - writers really adding or leaving
 const FUT_PRICE_MOVE = 0.0005 // 0.05% in 15 minutes - the price really moved (~12 NIFTY points)
 
@@ -205,12 +208,45 @@ export function oiGatePasses(s, f) {
     : mode === 'notAgainst')
   const window = oiWindowOf(f.tradeOiWindow)
   if (!lean(windowRead(ctx, window)?.flow, f.tradeOiFlow) || !lean(ctx?.cum, f.tradeOiCum)) return false
+  // CE and PE each rising or falling (a side's OI change as a fraction of its total): PE rising and CE falling are
+  // both bullish, PE falling and CE rising both bearish. delta: on the options OI timeframe; cum: since the open.
+  const sideOk = (mode, ce, pe, bar) => {
+    if (mode === 'any' || mode == null) return true
+    if (!Number.isFinite(ce) || !Number.isFinite(pe)) return mode === 'notAgainst'
+    const st = (x) => (x >= bar ? 1 : x <= -bar ? -1 : 0)
+    const score = dir * (st(pe) - st(ce)) // -2 .. 2, + = the two sides back the trade
+    return mode === 'both' ? score === 2 : mode === 'lean' ? score >= 1 : score >= 0
+  }
+  const wr = windowRead(ctx, window)
+  if (!sideOk(f.tradeSideOi, wr?.ceD, wr?.peD, SIDE_OI_MOVE * Math.max(0.2, window / OI_WINDOW))) return false
+  if (!sideOk(f.tradeSideCum, ctx?.ceC, ctx?.peC, SIDE_OI_CUM_MOVE)) return false
   const fut = f.tradeFutOi ?? 'any'
+  const futWindow = oiWindowOf(f.tradeFutWindow)
   if (fut !== 'any') {
-    const st = futuresOiStance(ctx, dir, oiWindowOf(f.tradeFutWindow))
+    const st = futuresOiStance(ctx, dir, futWindow)
     if (fut === 'notAgainst' && st === 'against') return false
     if (fut === 'withMove' && st !== 'buildUp' && st !== 'covering') return false
     if (fut === 'buildUp' && st !== 'buildUp') return false
+    // The other side closing with the move: a short squeeze for a long, a long unwinding for a short.
+    if (fut === 'squeeze' && st !== 'covering') return false
+  }
+  // How far futures moved on its timeframe: a small move is under twice the bar a real move needs.
+  const move = f.tradeMoveSize ?? 'any'
+  if (move !== 'any') {
+    const pct = windowRead(ctx, futWindow)?.futPricePct
+    const bar = 2 * FUT_PRICE_MOVE * Math.max(0.2, futWindow / OI_WINDOW)
+    if (!Number.isFinite(pct) || (move === 'small' ? Math.abs(pct) >= bar : Math.abs(pct) < bar)) return false
+  }
+  // The day type at the setup's minute (dayRegime.js: price + OI + CVD votes).
+  const dayType = f.tradeDayType ?? 'any'
+  if (dayType !== 'any') {
+    const dt = ctx?.dayType
+    const upDay = dt === 'trend-up'
+    const downDay = dt === 'trend-down'
+    if (dayType === 'notAgainstTrend') { if (dir > 0 ? downDay : upDay) return false }
+    else if (dayType === 'trend') { if (!upDay && !downDay) return false }
+    else if (dayType === 'withTrend') { if (dir > 0 ? !upDay : !downDay) return false }
+    else if (dayType === 'range' && dt !== 'range' && dt !== 'two-sided') return false
   }
   // The OI of the wall in the trade's way (the biggest call strike above for a long, put strike below for a short)
   // on the options OI timeframe: shrinking = its writers are leaving, growing = more being written. Needs a read.
@@ -249,7 +285,11 @@ export const TRADE_FILTERS = [
   { key: 'tradeOiFlow', label: 'Trade: options OI change on its timeframe (whole chain)', type: 'select', default: 'any', options: OI_LEAN_OPTIONS },
   { key: 'tradeOiCum', label: 'Trade: options OI since the open (cumulative, net CE - PE)', type: 'select', default: 'any', options: OI_LEAN_OPTIONS },
   { key: 'tradeWallOi', label: 'Trade: OI of the wall in the way (call strike above a long, put strike below a short)', type: 'select', default: 'any', options: [{ value: 'any', label: 'Any' }, { value: 'shrinking', label: 'Shrinking (its writers are leaving)' }, { value: 'growing', label: 'Growing (more being written)' }] },
-  { key: 'tradeFutOi', label: 'Trade: futures OI on its timeframe', type: 'select', default: 'any', options: [{ value: 'any', label: 'Any' }, { value: 'notAgainst', label: 'Not a fresh build-up against it' }, { value: 'withMove', label: 'Moving with it (build-up or covering)' }, { value: 'buildUp', label: 'Fresh build-up with it' }] },
+  { key: 'tradeSideOi', label: 'Trade: CE and PE OI each rising / falling on the options OI timeframe', type: 'select', default: 'any', options: SIDE_OI_OPTIONS },
+  { key: 'tradeSideCum', label: 'Trade: CE and PE OI each rising / falling since the open (cumulative)', type: 'select', default: 'any', options: SIDE_OI_OPTIONS },
+  { key: 'tradeFutOi', label: 'Trade: futures OI on its timeframe', type: 'select', default: 'any', options: [{ value: 'any', label: 'Any' }, { value: 'notAgainst', label: 'Not a fresh build-up against it' }, { value: 'withMove', label: 'Moving with it (build-up or covering)' }, { value: 'buildUp', label: 'Fresh build-up with it' }, { value: 'squeeze', label: 'Other side closing with the move (short squeeze for a long, long unwinding for a short)' }] },
+  { key: 'tradeMoveSize', label: 'Trade: futures price move on its timeframe', type: 'select', default: 'any', options: [{ value: 'any', label: 'Any' }, { value: 'small', label: 'Small move' }, { value: 'large', label: 'Real move' }] },
+  { key: 'tradeDayType', label: 'Trade: day type at the signal', type: 'select', default: 'any', options: [{ value: 'any', label: 'Any' }, { value: 'trend', label: 'Trending day (up or down)' }, { value: 'withTrend', label: 'Trending day, my way' }, { value: 'notAgainstTrend', label: 'Not against a trend' }, { value: 'range', label: 'Range / two-sided day' }] },
   { key: 'tradeWallRoom', label: 'Trade: room to the next OI wall (support / resistance)', type: 'select', default: 'any', options: [{ value: 'any', label: 'Any' }, { value: 'oneR', label: 'At least 1R' }, { value: 'target', label: 'Not inside the target' }] },
 ]
 for (const st of STRATEGIES) STRATEGY_FILTERS[st.id] = [...(STRATEGY_FILTERS[st.id] ?? []), ...TRADE_FILTERS]
@@ -276,7 +316,7 @@ export function applyTradeFilter(s, f) {
   const minute = istMinute(s.t)
   const hhmm = Math.floor(minute / 60) * 100 + (minute % 60)
   if (hhmm < (f.tradeFrom ?? 930) || hhmm > (f.tradeTo ?? 1445)) return null
-  const oiGated = ['tradeOiFlow', 'tradeOiCum', 'tradeFutOi', 'tradeWallRoom', 'tradeWallOi'].some((k) => (f[k] ?? 'any') !== 'any')
+  const oiGated = ['tradeOiFlow', 'tradeOiCum', 'tradeFutOi', 'tradeWallRoom', 'tradeWallOi', 'tradeSideOi', 'tradeSideCum', 'tradeMoveSize', 'tradeDayType'].some((k) => (f[k] ?? 'any') !== 'any')
   const stopX = f.tradeStopX ?? 1
   const targetX = f.tradeTargetX ?? 1
   const timeStop = f.tradeTimeStop ?? 0
@@ -303,13 +343,17 @@ export function applyTradeFilter(s, f) {
 
 /** The OI confirmation filters in force, in words. */
 export function oiGateText(f) {
-  const words = { with: 'with it', notAgainst: 'not against', withMove: 'moving with it', buildUp: 'fresh build-up with it', oneR: '1R+', target: 'beyond the target', shrinking: 'shrinking', growing: 'growing' }
+  const words = { with: 'with it', notAgainst: 'not against', withMove: 'moving with it', buildUp: 'fresh build-up with it', oneR: '1R+', target: 'beyond the target', shrinking: 'shrinking', growing: 'growing', lean: 'one side with it', both: 'both sides with it', squeeze: 'squeeze / unwinding', small: 'small', large: 'real', trend: 'trending', withTrend: 'trending my way', notAgainstTrend: 'not against a trend', range: 'range / two-sided' }
   const parts = []
   const w = oiWindowOf(f.tradeOiWindow)
   const fw = oiWindowOf(f.tradeFutWindow)
   if ((f.tradeOiFlow ?? 'any') !== 'any') parts.push(`options OI ${w}m ${words[f.tradeOiFlow]}`)
   if ((f.tradeOiCum ?? 'any') !== 'any') parts.push(`options OI since open ${words[f.tradeOiCum]}`)
   if ((f.tradeFutOi ?? 'any') !== 'any') parts.push(`futures OI${fw === OI_WINDOW ? '' : ` ${fw}m`} ${words[f.tradeFutOi]}`)
+  if ((f.tradeSideOi ?? 'any') !== 'any') parts.push(`CE / PE ${w}m ${words[f.tradeSideOi]}`)
+  if ((f.tradeSideCum ?? 'any') !== 'any') parts.push(`CE / PE since open ${words[f.tradeSideCum]}`)
+  if ((f.tradeMoveSize ?? 'any') !== 'any') parts.push(`${words[f.tradeMoveSize]} futures move${fw === OI_WINDOW ? '' : ` ${fw}m`}`)
+  if ((f.tradeDayType ?? 'any') !== 'any') parts.push(`day: ${words[f.tradeDayType]}`)
   if ((f.tradeWallOi ?? 'any') !== 'any') parts.push(`wall OI${w === OI_WINDOW ? '' : ` ${w}m`} ${words[f.tradeWallOi]}`)
   if ((f.tradeWallRoom ?? 'any') !== 'any') parts.push(`OI wall ${words[f.tradeWallRoom]}`)
   return parts.length ? `OI: ${parts.join(', ')}` : ''
@@ -666,6 +710,14 @@ function wallsAhead(oi, rows, spot) {
   return { resistanceAhead: resistance?.strike ?? null, supportAhead: support?.strike ?? null }
 }
 
+// A side's (CE / PE) OI change as a fraction of its OI - over the read's window, or since the open.
+function sideOiChanges(read, sinceOpen) {
+  const f = (chg, now) => (read && now > 0 ? chg / now : null)
+  return sinceOpen
+    ? { ceC: f(read?.ceOpen, read?.ceNow), peC: f(read?.peOpen, read?.peNow) }
+    : { ceD: f(read?.ceChg, read?.ceNow), peD: f(read?.peChg, read?.peNow) }
+}
+
 // How much the OI of the walls ahead (wallsAhead) changed over `minutes`, as a fraction of what it was:
 // { resChg } the call wall above, { supChg } the put wall below; null when there is no wall or no OI then.
 function wallOiChanges(oi, ahead, ms, minutes) {
@@ -858,6 +910,9 @@ export function evaluateStrategies(input) {
   // Every strategy still passes its old confidence score (the 6th argument); it is not used - no setup
   // carries a confidence any more (the trader's call, 08 Oct), and none waits for a cool-off.
   const wallAheadStrikes = wallsAhead(oi, rows, spotNow)
+  // The day type is read once a minute, and only when a setup is there to carry it.
+  let regimeMemo
+  const regimeNow = () => (regimeMemo ??= dayTypeAt(oi, minuteBars, nowMs))
   const push = (id, dir, plannedStop, targetPts, timeStopMin, _score, checks, opts = {}) => {
     if (!(plannedStop > 0) || !(targetPts > 0)) return
     // Volatility floor: a stop inside 1.2x the average 1-minute range is hit by noise - widen it. An
@@ -885,11 +940,14 @@ export function evaluateStrategies(input) {
         flow: optionRead?.lean ?? null, cum: optionRead?.leanOpen ?? null,
         futOiPct: futuresRead?.oiPct ?? null, futPricePct: futuresRead?.pricePct ?? null,
         ...wallOiChanges(oi, wallAheadStrikes, nowMs, 15),
+        // CE and PE each: OI change on the timeframe (ceD / peD) and since the open (ceC / peC), as a fraction of its OI.
+        ...sideOiChanges(optionRead, false), ...sideOiChanges(optionRead, true),
+        dayType: regimeNow()?.type ?? null,
         // The same read on the shorter timeframes (3 / 5 / 1 min) - what the OI timeframe filter chooses between.
         byWindow: Object.fromEntries(OI_WINDOWS.filter((m) => m !== OI_WINDOW).map((m) => {
           const r = optionOiRead(oi, spotNow, nowMs, m)
           const fu = futuresChange(oi, nowMs, m)
-          return [m, { flow: r?.lean ?? null, futOiPct: fu?.oiPct ?? null, futPricePct: fu?.pricePct ?? null, ...wallOiChanges(oi, wallAheadStrikes, nowMs, m) }]
+          return [m, { flow: r?.lean ?? null, futOiPct: fu?.oiPct ?? null, futPricePct: fu?.pricePct ?? null, ...wallOiChanges(oi, wallAheadStrikes, nowMs, m), ...sideOiChanges(r, false) }]
         })),
         support, resistance, spot: spotNow, ...wallAheadStrikes,
       },
@@ -2149,7 +2207,7 @@ export function evaluateStrategies(input) {
   if (!final.length) return final
   // The day type at the clock and what an adaptive scanner would do with each setup - TRACKING ONLY:
   // every setup still fires; this is scored beside the real results (adaptiveStats).
-  const regime = dayTypeAt(oi, minuteBars, nowMs)
+  const regime = regimeNow()
   return final.map((s) => {
     // The adaptive call on the combined day type, and - to measure what the OI / CVD votes add - on the
     // price read alone.
