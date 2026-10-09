@@ -20,6 +20,23 @@ depth / heatmap for BSE SENSEX futures and for BANKNIFTY? Strategies needing the
 by row size or by lot) and add a test that the strategy fires at BANKNIFTY and SENSEX scale.
 Order suggested: weakWall, wallBreak, buildUp, then the rest.
 
+Findings so far (read from the code, 9 Oct):
+- SENSEX (BSE): Dhan's 20-level and 200-level depth are NSE-only, so SENSEX futures have only the Full packet's 5 book levels
+  (`DhanDepthFeedClient`, `OrderFlowService`). The heatmap / liquidity / pull-stack signals and the 20-level `bookShare` are thin or absent
+  there, so strategies that need them (`confirm()`, `liquiditySignals`, `pullStackSignals`: wallBreak, trap, cvdDivergence, the wall-absorption
+  ones) fire far less on SENSEX. BANKNIFTY is NSE: by default `OrderFlow:MaxTwoHundredDepth` = 2 sockets, so NIFTY and BANKNIFTY get the
+  200-level book - depth is NOT the BANKNIFTY cause.
+- SENSEX OI / spot are live-only (NiftyDataCollector never stored SENSEX): past-day OI for SENSEX always calls Dhan (`OiReplayService`).
+- BANKNIFTY options are MONTHLY only (`expiryFlagOf`); `indexScanner.load()` uses `expiries.month` for it - check the OI chain loaded is the
+  monthly one, and that weekly-based assumptions (days to expiry, `isExpiryDay`, max pain) hold.
+- `weakWall` mixes percent bands with strike steps (SENSEX needs the spot 23+ pts under the level; 5 setups vs 15 at NIFTY scale on the test day).
+  Candidate fix keeping NIFTY identical: cap `pct(0.0006)` at ~0.35 x the strike step (NIFTY ~13.6 < 17.5 unchanged, BANKNIFTY 31 < 35 unchanged,
+  SENSEX 49 -> 35). Needs the scaled scenario test first.
+- STILL NEEDED to name the cause: what exactly the trader sees as "4" (which 4 strategies, on the page's list or on the server scanner's
+  signals / alerts) - and whether profile strategies (vaRejection, tpo80, pocReaction, lvnRun, ibBreakout) are the missing ones: they need the
+  previous session's bars (`fetchPreviousSession`), which are held in memory only ("Nothing is stored on disk" - OrderFlowService) so a restart
+  or a BSE contract Dhan no longer lists leaves `profile` null and kills all five.
+
 ### Part 2 - two more strategies
 Judge's inputs were not collected (workflow stopped to save limit). Ideas worth a scenario test each, spot + options engine
 (`src/spotEngine.js`, ids spot*, registered in `SPOT_STRATEGIES` in strategyEngine.js):
