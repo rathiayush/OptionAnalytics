@@ -163,6 +163,6 @@ public sealed class StrategyTuningService
 
 /// <summary>What to tune: one index; strategies "top3" / "top5" / "all" or a list of ids; how many past days;
 /// whether days rebuilt from 1-minute candles count; the fewest trades a setting needs.</summary>
-public sealed record TuningJob(string Underlying, JsonNode? Strategies, int Days, bool IncludeEstimated, int MinTrades, string What = "trade", IReadOnlyList<string>? OiFactors = null, string Search = "step", string Data = "futures");
+public sealed record TuningJob(string Underlying, JsonNode? Strategies, int Days, bool IncludeEstimated, int MinTrades, string What = "trade", IReadOnlyList<string>? OiFactors = null, string Search = "step", string Data = "futures", string? From = null, string? To = null);
 
 public sealed record TuningStatus(string State, TuningJob? Job, DateTimeOffset? StartedUtc, DateTimeOffset? FinishedUtc, string? Error, JsonNode? Progress, int? Pid);

@@ -27,7 +27,14 @@ const KEY = process.env.RUNNER_KEY ?? ''
 const OUT = process.env.TUNE_OUT ?? 'tuning-result.json'
 const job = JSON.parse(process.env.TUNE_JOB ?? '{}')
 const U = String(job.underlying ?? 'NIFTY').toUpperCase()
-const MAX_DAYS = Math.max(1, Math.min(250, Number(job.days) || 30))
+// A date range (from / to, YYYY-MM-DD, either may be left open) picks the days instead of "the last N": every day
+// in it is used, up to 250.
+const isDate = (s) => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s)
+const FROM = isDate(job.from) ? job.from : null
+const TO = isDate(job.to) ? job.to : null
+const RANGED = !!(FROM || TO)
+const inRange = (date) => (!FROM || date >= FROM) && (!TO || date <= TO)
+const MAX_DAYS = RANGED ? 250 : Math.max(1, Math.min(250, Number(job.days) || 30))
 const MIN_TRADES = Math.max(2, Math.min(100, Number(job.minTrades) || 8))
 const WHAT = ['trade', 'oi', 'both', 'option', 'all'].includes(job.what) ? job.what : 'trade'
 const DATA = job.data === 'spot' ? 'spot' : 'futures' // spot: the index candles + the option chain's OI only - no futures, no order flow
@@ -53,6 +60,20 @@ const write = (body) => {
   renameSync(`${OUT}.tmp`, OUT)
 }
 const istToday = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date())
+
+// The weekdays to try, newest first: in the date range when there is one (up to yesterday), else the last `n` before today.
+function candidateWeekdays(n) {
+  if (!RANGED) return pastWeekdays(n)
+  const out = []
+  const last = TO && TO < istToday ? TO : new Date(Date.parse(`${istToday}T00:00:00Z`) - 86_400_000).toISOString().slice(0, 10)
+  for (let t = Date.parse(`${last}T00:00:00Z`); out.length < 400; t -= 86_400_000) {
+    const day = new Date(t)
+    const date = day.toISOString().slice(0, 10)
+    if (FROM && date < FROM) break
+    if (day.getUTCDay() !== 0 && day.getUTCDay() !== 6) out.push(date)
+  }
+  return out
+}
 
 // The past weekdays before today, newest first.
 function pastWeekdays(n) {
@@ -80,18 +101,21 @@ async function main() {
 
   // The days: the recorded (exact) ones, newest first; with includeEstimated, other weekdays too (rebuilt from 1-minute candles).
   // Spot + options needs no order flow: the past weekdays that have OI data are the days (holidays fail and are skipped).
-  const recorded = DATA === 'spot' ? [] : ((await api(`/api/order-flow/${U}/days`)) ?? []).filter((d) => !d.isLive && d.date < istToday)
+  const recorded = DATA === 'spot' ? [] : ((await api(`/api/order-flow/${U}/days`)) ?? []).filter((d) => !d.isLive && d.date < istToday && inRange(d.date))
   let plan = recorded.slice(0, MAX_DAYS).map((d) => ({ date: d.date, expiry: d.expiry ?? null, exact: true }))
-  if (DATA === 'spot') plan = pastWeekdays(MAX_DAYS + Math.ceil(MAX_DAYS / 4) + 6).map((date) => ({ date, expiry: null, exact: false }))
+  if (DATA === 'spot') plan = candidateWeekdays(MAX_DAYS + Math.ceil(MAX_DAYS / 4) + 6).map((date) => ({ date, expiry: null, exact: false }))
   else if (job.includeEstimated && plan.length < MAX_DAYS) {
-    for (const date of pastWeekdays(MAX_DAYS * 2)) {
+    for (const date of candidateWeekdays(MAX_DAYS * 2)) {
       if (plan.length >= MAX_DAYS) break
       if (!plan.some((p) => p.date === date)) plan.push({ date, expiry: null, exact: false })
     }
   }
   plan.sort((a, b) => (a.date < b.date ? 1 : -1))
   if (DATA !== 'spot') plan = plan.slice(0, MAX_DAYS)
-  if (!plan.length) throw new Error(job.includeEstimated ? 'no past days could be listed' : 'no recorded past days on the server - include estimated days to tune on days rebuilt from 1-minute candles')
+  if (!plan.length) {
+    const range = RANGED ? ` between ${FROM ?? 'the start'} and ${TO ?? 'yesterday'}` : ''
+    throw new Error(job.includeEstimated || DATA === 'spot' ? `no past days could be listed${range}` : `no recorded past days on the server${range} - include estimated days to tune on days rebuilt from 1-minute candles`)
+  }
 
   const expiries = await api(`/api/oi-replay/${U}/expiries`).catch(() => null)
   const expiryDate = U === 'BANKNIFTY' ? expiries?.month ?? null : expiries?.week ?? null
@@ -155,7 +179,7 @@ async function main() {
     }))
   }
   write({
-    ok: true, underlying: U, job, startedUtc, finishedUtc: new Date().toISOString(), rowSize, trail, minTrades: MIN_TRADES, what: WHAT, search: SEARCH, data: DATA, oiFactors: OI_KEYS ?? OI_FACTORS.map((f) => f.key),
+    ok: true, underlying: U, job, startedUtc, finishedUtc: new Date().toISOString(), rowSize, trail, minTrades: MIN_TRADES, what: WHAT, search: SEARCH, data: DATA, from: FROM, to: TO, oiFactors: OI_KEYS ?? OI_FACTORS.map((f) => f.key),
     grid: WHAT === 'trade' ? TUNING_GRID : WHAT === 'oi' ? oiGridOf(OI_KEYS) : WHAT === 'option' ? OPTION_GRID : WHAT === 'all' ? { ...oiGridOf(OI_KEYS), ...TUNING_GRID, ...OPTION_GRID } : { ...oiGridOf(OI_KEYS), ...TUNING_GRID },
     days: days.map((d) => ({ date: d.date, estimated: d.estimated, setups: d.setups.length })), skipped, ranked, results,
     strategies: ACTIVE_STRATEGIES.length,

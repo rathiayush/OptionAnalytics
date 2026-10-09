@@ -100,3 +100,24 @@ test('nothing recorded: a clear failure, written to the result', { timeout: 60_0
     server.close()
   }
 })
+
+test('a date range picks the days: only the recorded days inside it, both ends included', { timeout: 300_000 }, async () => {
+  const days = ['2026-09-28', '2026-09-29', '2026-09-30', '2026-10-01', '2026-10-02', '2026-10-05']
+  const { server, base } = await fakeServer(days)
+  try {
+    const { code, result } = await runJob(base, { underlying: 'NIFTY', strategies: ['weakWall'], days: 2, minTrades: 2, what: 'trade', from: '2026-09-29', to: '2026-10-02' })
+    assert.equal(code, 0, JSON.stringify(result))
+    assert.deepEqual(result.days.map((d) => d.date), ['2026-10-02', '2026-10-01', '2026-09-30', '2026-09-29'], 'the range wins over "the last 2 days"')
+    assert.equal(result.from, '2026-09-29')
+    assert.equal(result.to, '2026-10-02')
+    // An open start: everything up to the end date.
+    const upTo = await runJob(base, { underlying: 'NIFTY', strategies: ['weakWall'], minTrades: 2, what: 'trade', to: '2026-09-30' })
+    assert.deepEqual(upTo.result.days.map((d) => d.date), ['2026-09-30', '2026-09-29', '2026-09-28'])
+    // Nothing in the range: a clear failure naming it.
+    const none = await runJob(base, { underlying: 'NIFTY', strategies: ['weakWall'], from: '2026-08-01', to: '2026-08-31' })
+    assert.equal(none.code, 1)
+    assert.match(none.result.error, /no recorded past days on the server between 2026-08-01 and 2026-08-31/)
+  } finally {
+    server.close()
+  }
+})

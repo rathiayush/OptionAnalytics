@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Alert, Button, Card, Checkbox, Col, InputNumber, Popconfirm, Progress, Row, Segmented, Select, Space, Switch, Table, Tag, Tooltip, Typography, message } from 'antd'
+import dayjs from 'dayjs'
+import { Alert, Button, Card, Checkbox, Col, DatePicker, InputNumber, Popconfirm, Progress, Row, Segmented, Select, Space, Switch, Table, Tag, Tooltip, Typography, message } from 'antd'
 import { NavBar, useAuth, UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import { ACTIVE_STRATEGIES, SPOT_STRATEGIES, STRATEGY_BY_ID } from './strategyEngine.js'
 import { OI_COMBO_CAP, OI_FACTORS, countOiCombinations, optionText, variantText } from './strategyTuning.js'
@@ -113,6 +114,8 @@ export default function StrategyTuningPage() {
   const [includeEstimated, setIncludeEstimated] = useState(false)
   const [minTrades, setMinTrades] = useState(8)
   const [what, setWhat] = useState('both')
+  const [dayMode, setDayMode] = useState('last') // 'last' N days, or a date 'range'
+  const [range, setRange] = useState(null) // [dayjs, dayjs] from / to
   const [data, setData] = useState('futures')
   const spot = data === 'spot'
   const [oiFactors, setOiFactors] = useState(OI_FACTORS.map((f) => f.key))
@@ -145,7 +148,8 @@ export default function StrategyTuningPage() {
 
   const running = status?.state === 'running'
   const start = async () => {
-    const body = { underlying, strategies: pick === 'custom' ? custom : pick, days, includeEstimated, minTrades, what, oiFactors, search, data }
+    const body = { underlying, strategies: pick === 'custom' ? custom : pick, days, includeEstimated, minTrades, what, oiFactors, search, data,
+      ...(dayMode === 'range' && range ? { from: range[0]?.format('YYYY-MM-DD') ?? null, to: range[1]?.format('YYYY-MM-DD') ?? null } : {}) }
     const res = await fetch('/api/strategy-tuning/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     const json = await res.json().catch(() => null)
     if (!res.ok) { message.error(json?.error ?? `HTTP ${res.status}`); return }
@@ -239,13 +243,22 @@ export default function StrategyTuningPage() {
                   </div>
                 </Col>
               )}
-              <Col><Space size={6}><Tooltip title="The most recent past days the server can replay"><Text>Days</Text></Tooltip><InputNumber min={1} max={250} value={days} onChange={(v) => v && setDays(v)} style={{ width: 80 }} disabled={running} /></Space></Col>
+              <Col>
+                <Space size={6} wrap>
+                  <Text>Days</Text>
+                  <Segmented size="small" value={dayMode} onChange={setDayMode} disabled={running} options={[{ value: 'last', label: 'Last N' }, { value: 'range', label: 'Date range' }]} />
+                  {dayMode === 'last'
+                    ? <Tooltip title="The most recent past days the server can replay"><InputNumber min={1} max={250} value={days} onChange={(v) => v && setDays(v)} style={{ width: 80 }} disabled={running} aria-label="Number of days" /></Tooltip>
+                    : <Tooltip title="Every past day in this range is used (up to 250); the older 70% choose, the newest 30% check"><DatePicker.RangePicker value={range} onChange={setRange} format="DD MMM YYYY" disabled={running} allowEmpty={[true, true]}
+                        disabledDate={(d) => d && !d.isBefore(dayjs().startOf('day'))} aria-label="Tuning date range" /></Tooltip>}
+                </Space>
+              </Col>
               <Col><Space size={6}><Tooltip title="A setting needs at least this many trades on the train days to be recommended. When none reach it, the best found with fewer is still shown, marked 'below the minimum trades' and never recommended."><Text>Min trades</Text></Tooltip><InputNumber min={2} max={100} value={minTrades} onChange={(v) => v && setMinTrades(v)} style={{ width: 70 }} disabled={running} /></Space></Col>
               {!spot && <Col><Tooltip title="Also use days the server did not record live, rebuilt from 1-minute candles (no tape or market depth - the order-flow checks are estimated). More days, less exact."><Space size={6}><Switch size="small" checked={includeEstimated} onChange={setIncludeEstimated} disabled={running} /><Text>Include estimated days</Text></Space></Tooltip></Col>}
               <Col>
                 {running
                   ? <Popconfirm title="Stop the tuning job?" onConfirm={cancel} disabled={!isAdmin}><Button danger disabled={!isAdmin}>Stop</Button></Popconfirm>
-                  : <Button type="primary" onClick={start} disabled={!isAdmin || (pick === 'custom' && !custom.length) || (tunesOi && !oiFactors.length) || tooMany}>Run tuning</Button>}
+                  : <Button type="primary" onClick={start} disabled={!isAdmin || (pick === 'custom' && !custom.length) || (tunesOi && !oiFactors.length) || tooMany || (dayMode === 'range' && !range?.[0] && !range?.[1])}>Run tuning</Button>}
               </Col>
             </Row>
             {!isAdmin && <Alert type="info" showIcon message="Only an admin can run a tuning job or apply a result." />}
@@ -263,7 +276,7 @@ export default function StrategyTuningPage() {
         {result && (
           <>
             <Card size="small" title={`${result.underlying} · ${result.days?.length ?? 0} day(s) · finished ${when(result.finishedUtc)}`}
-              extra={<Text type="secondary" style={{ fontSize: 11 }}>{result.what ? `tuned: ${{ both: 'OI, then trade', oi: 'OI confirmation', trade: 'trade settings', option: 'option trade', all: 'everything' }[result.what] ?? result.what} · ` : ''}{result.days?.filter((d) => d.estimated).length ? `${result.days.filter((d) => d.estimated).length} estimated day(s) · ` : ''}min {result.minTrades} trades · {result.days?.[result.days.length - 1]?.date} to {result.days?.[0]?.date}</Text>}>
+              extra={<Text type="secondary" style={{ fontSize: 11 }}>{result.what ? `tuned: ${{ both: 'OI, then trade', oi: 'OI confirmation', trade: 'trade settings', option: 'option trade', all: 'everything' }[result.what] ?? result.what} · ` : ''}{result.days?.filter((d) => d.estimated).length ? `${result.days.filter((d) => d.estimated).length} estimated day(s) · ` : ''}min {result.minTrades} trades · {result.days?.[result.days.length - 1]?.date} to {result.days?.[0]?.date}{result.from || result.to ? ` (range asked: ${result.from ?? 'start'} to ${result.to ?? 'yesterday'})` : ''}</Text>}>
               {result.data === 'spot' && <Alert type="info" showIcon style={{ marginBottom: 8 }} message="Spot + options only: the index candles and the option chain's OI, no futures and no order flow. Points are index points; the option bought and sold are priced beside them. The live scanner does not run these strategies yet, so there is nothing to apply - this measures what they would have done." />}
               {result.skipped?.length > 0 && <Alert type="warning" showIcon style={{ marginBottom: 8 }} message={`${result.skipped.length} day(s) could not be scanned`} description={result.skipped.slice(0, 5).map((s) => `${s.date}: ${s.reason}`).join(' · ')} />}
               <Table size="small" rowKey="id" columns={rankedColumns} dataSource={result.ranked ?? []} pagination={false} scroll={{ y: 320 }} />
