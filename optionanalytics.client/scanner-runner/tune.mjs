@@ -12,7 +12,8 @@
 // Progress goes to stdout as lines "PROGRESS {json}".
 
 import { writeFileSync, renameSync } from 'node:fs'
-import { buildOiContext, ACTIVE_STRATEGIES, STRATEGY_BY_ID, TRADE_FILTERS } from '../src/strategyEngine.js'
+import { buildOiContext, ACTIVE_STRATEGIES, SPOT_STRATEGIES, STRATEGY_BY_ID, TRADE_FILTERS } from '../src/strategyEngine.js'
+import { scanSpotDay, spotBarsOf } from '../src/spotEngine.js'
 import { autoBigLots } from '../src/orderFlowMath.js'
 import { scannerProfileOf, trailFor } from '../src/scannerCore.js'
 import { fetchPreviousSession } from '../src/profiles.js'
@@ -29,6 +30,7 @@ const U = String(job.underlying ?? 'NIFTY').toUpperCase()
 const MAX_DAYS = Math.max(1, Math.min(250, Number(job.days) || 30))
 const MIN_TRADES = Math.max(2, Math.min(100, Number(job.minTrades) || 8))
 const WHAT = ['trade', 'oi', 'both'].includes(job.what) ? job.what : 'trade'
+const DATA = job.data === 'spot' ? 'spot' : 'futures' // spot: the index candles + the option chain's OI only - no futures, no order flow
 const SEARCH = job.search === 'full' ? 'full' : 'step'
 const OI_KEYS = Array.isArray(job.oiFactors) && job.oiFactors.length ? job.oiFactors.filter((k) => OI_FACTORS.some((f) => f.key === k)) : null
 const startedUtc = new Date().toISOString()
@@ -77,16 +79,18 @@ async function main() {
   const entryFilters = Object.fromEntries(Object.entries(cfg.filters ?? {}).map(([id, f]) => [id, Object.fromEntries(Object.entries(f ?? {}).filter(([k]) => !tradeKeys.has(k)))]))
 
   // The days: the recorded (exact) ones, newest first; with includeEstimated, other weekdays too (rebuilt from 1-minute candles).
-  const recorded = ((await api(`/api/order-flow/${U}/days`)) ?? []).filter((d) => !d.isLive && d.date < istToday)
+  // Spot + options needs no order flow: the past weekdays that have OI data are the days (holidays fail and are skipped).
+  const recorded = DATA === 'spot' ? [] : ((await api(`/api/order-flow/${U}/days`)) ?? []).filter((d) => !d.isLive && d.date < istToday)
   let plan = recorded.slice(0, MAX_DAYS).map((d) => ({ date: d.date, expiry: d.expiry ?? null, exact: true }))
-  if (job.includeEstimated && plan.length < MAX_DAYS) {
+  if (DATA === 'spot') plan = pastWeekdays(MAX_DAYS + Math.ceil(MAX_DAYS / 4) + 6).map((date) => ({ date, expiry: null, exact: false }))
+  else if (job.includeEstimated && plan.length < MAX_DAYS) {
     for (const date of pastWeekdays(MAX_DAYS * 2)) {
       if (plan.length >= MAX_DAYS) break
       if (!plan.some((p) => p.date === date)) plan.push({ date, expiry: null, exact: false })
     }
   }
   plan.sort((a, b) => (a.date < b.date ? 1 : -1))
-  plan = plan.slice(0, MAX_DAYS)
+  if (DATA !== 'spot') plan = plan.slice(0, MAX_DAYS)
   if (!plan.length) throw new Error(job.includeEstimated ? 'no past days could be listed' : 'no recorded past days on the server - include estimated days to tune on days rebuilt from 1-minute candles')
 
   const expiries = await api(`/api/oi-replay/${U}/expiries`).catch(() => null)
@@ -95,8 +99,18 @@ async function main() {
   const skipped = []
   for (let i = 0; i < plan.length; i++) {
     const p = plan[i]
+    if (DATA === 'spot' && days.length >= MAX_DAYS) break
     progress({ stage: 'scan', day: p.date, done: i, total: plan.length })
     try {
+      if (DATA === 'spot') {
+        const run = await api(`/api/oi-replay/${U}/run?${new URLSearchParams({ date: p.date, timeframeMinutes: '1', expiryFlag: expiryFlagOf(U) })}`)
+        if (!run?.success) throw new Error(run?.error ?? 'no OI for the day')
+        const bars = spotBarsOf(run.spotCandlesOneMinute ?? run.spotCandles)
+        if (bars.length < 60) throw new Error('no spot candles')
+        const oi = buildOiContext(run, expiryDate, { live: false })
+        days.push({ ...tuningDay(p.date, scanSpotDay({ bars, oi, filters: entryFilters }), { minuteBars: bars, heatmap: [] }, oi), estimated: false })
+        continue
+      }
       const expiryQuery = p.expiry ? `&expiry=${p.expiry}` : ''
       const body = await api(`/api/order-flow/${U}/day/${p.date}?rowSize=${rowSize}&minTradeLots=5&heatmapColumns=1500${expiryQuery}`)
       if (!body?.bars?.length) throw new Error('no bars')
@@ -119,9 +133,10 @@ async function main() {
   if (!days.length) throw new Error(`none of the ${plan.length} day(s) could be scanned (${skipped[0]?.reason ?? 'unknown'})`)
 
   progress({ stage: 'rank', done: days.length, total: days.length })
-  const ranked = rankStrategies(days, { trail, minTrades: MIN_TRADES }).map((r) => ({ ...r, name: STRATEGY_BY_ID[r.id]?.name, no: STRATEGY_BY_ID[r.id]?.no }))
+  const spotIds = SPOT_STRATEGIES.map((s) => s.id)
+  const ranked = rankStrategies(days, { trail, minTrades: MIN_TRADES, ids: DATA === 'spot' ? spotIds : ACTIVE_STRATEGIES.map((s) => s.id) }).map((r) => ({ ...r, name: STRATEGY_BY_ID[r.id]?.name, no: STRATEGY_BY_ID[r.id]?.no }))
   const pick = job.strategies
-  const ids = Array.isArray(pick) ? pick.filter((id) => STRATEGY_BY_ID[id] && !STRATEGY_BY_ID[id].retired)
+  const ids = Array.isArray(pick) ? pick.filter((id) => STRATEGY_BY_ID[id] && !STRATEGY_BY_ID[id].retired && (DATA === 'spot') === !!STRATEGY_BY_ID[id].spot)
     : pick === 'all' ? ranked.filter((r) => r.n > 0).map((r) => r.id)
       : ranked.filter((r) => r.n >= MIN_TRADES).slice(0, pick === 'top5' ? 5 : 3).map((r) => r.id)
   const results = []
@@ -133,7 +148,7 @@ async function main() {
     }))
   }
   write({
-    ok: true, underlying: U, job, startedUtc, finishedUtc: new Date().toISOString(), rowSize, trail, minTrades: MIN_TRADES, what: WHAT, search: SEARCH, oiFactors: OI_KEYS ?? OI_FACTORS.map((f) => f.key),
+    ok: true, underlying: U, job, startedUtc, finishedUtc: new Date().toISOString(), rowSize, trail, minTrades: MIN_TRADES, what: WHAT, search: SEARCH, data: DATA, oiFactors: OI_KEYS ?? OI_FACTORS.map((f) => f.key),
     grid: WHAT === 'trade' ? TUNING_GRID : WHAT === 'oi' ? oiGridOf(OI_KEYS) : { ...oiGridOf(OI_KEYS), ...TUNING_GRID },
     days: days.map((d) => ({ date: d.date, estimated: d.estimated, setups: d.setups.length })), skipped, ranked, results,
     strategies: ACTIVE_STRATEGIES.length,

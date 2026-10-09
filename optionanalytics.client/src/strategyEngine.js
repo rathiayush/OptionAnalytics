@@ -99,7 +99,16 @@ export const STRATEGIES = [
   // and comes back inside - a failed breakout; the range is revisited (toward the other IB edge).
   { id: 'ibFailed', no: 30, name: 'Failed IB breakout - back inside, revisit the range', short: 'Failed IB break', group: 'profile', trial: true, retired: true },
 ]
-export const STRATEGY_BY_ID = Object.fromEntries(STRATEGIES.map((s) => [s.id, s]))
+/** The SPOT + OPTIONS strategies (spotEngine.js): they trade the index price itself - spot candles and the option
+ *  chain's OI, no futures and no order flow. Measured by the Strategy tuning ("Spot + options only"); the live
+ *  scanner does not run them, so they are not in STRATEGIES / ACTIVE_STRATEGIES. */
+export const SPOT_STRATEGIES = [
+  { id: 'spotWallBreak', no: 101, name: 'Spot: OI wall break - writers leaving', short: 'Spot wall break', spot: true },
+  { id: 'spotWallHold', no: 102, name: 'Spot: OI wall holds - rejection at a growing wall', short: 'Spot wall hold', spot: true },
+  { id: 'spotSides', no: 103, name: 'Spot: CE and PE sides with the move - range breakout', short: 'Spot CE/PE sides', spot: true },
+  { id: 'spotAvgPullback', no: 104, name: 'Spot: pullback to the day\'s average on a trending day', short: 'Spot average pullback', spot: true },
+]
+export const STRATEGY_BY_ID = Object.fromEntries([...STRATEGIES, ...SPOT_STRATEGIES].map((s) => [s.id, s]))
 /** The strategies in use - what the scanner runs, lists, alerts on and scores. */
 export const ACTIVE_STRATEGIES = STRATEGIES.filter((s) => !s.retired)
 // The playbook's own picks, used for alerts until enough trades have been scored to rank them.
@@ -292,7 +301,7 @@ export const TRADE_FILTERS = [
   { key: 'tradeDayType', label: 'Trade: day type at the signal', type: 'select', default: 'any', options: [{ value: 'any', label: 'Any' }, { value: 'trend', label: 'Trending day (up or down)' }, { value: 'withTrend', label: 'Trending day, my way' }, { value: 'notAgainstTrend', label: 'Not against a trend' }, { value: 'range', label: 'Range / two-sided day' }] },
   { key: 'tradeWallRoom', label: 'Trade: room to the next OI wall (support / resistance)', type: 'select', default: 'any', options: [{ value: 'any', label: 'Any' }, { value: 'oneR', label: 'At least 1R' }, { value: 'target', label: 'Not inside the target' }] },
 ]
-for (const st of STRATEGIES) STRATEGY_FILTERS[st.id] = [...(STRATEGY_FILTERS[st.id] ?? []), ...TRADE_FILTERS]
+for (const st of [...STRATEGIES, ...SPOT_STRATEGIES]) STRATEGY_FILTERS[st.id] = [...(STRATEGY_FILTERS[st.id] ?? []), ...TRADE_FILTERS]
 
 /** A strategy's filter values: its defaults with the trader's `overrides` on top - numbers clamped to
  *  their range, a choice not in the list, wrong types and unknown keys ignored. */
@@ -379,7 +388,7 @@ function sortedSeries(points, lag = 0) {
   return byStrike
 }
 
-function valueAt(series, ms) {
+export function valueAt(series, ms) {
   if (!series?.length || series[0].t > ms) return null
   let lo = 0
   let hi = series.length - 1
@@ -425,18 +434,18 @@ export function asReplayContext(oi) {
   return { ...oi, lag: MIN, live: false, ce: shiftMap(oi.ce), pe: shiftMap(oi.pe), futures: shift(oi.futures), spot: shift(oi.spot) }
 }
 
-function oiOf(map, strike, ms) {
+export function oiOf(map, strike, ms) {
   return valueAt(map.get(strike), ms)?.oi ?? null
 }
 
-function oiChange(map, strike, ms, minutes) {
+export function oiChange(map, strike, ms, minutes) {
   const now = oiOf(map, strike, ms)
   const then = oiOf(map, strike, ms - minutes * MIN)
   return now != null && then != null ? now - then : null
 }
 
 // Strike rows (CE / PE OI) as of `ms`.
-function oiRows(oi, ms) {
+export function oiRows(oi, ms) {
   const strikes = new Set([...oi.ce.keys(), ...oi.pe.keys()])
   return [...strikes].sort((a, b) => a - b).map((strike) => ({ strike, ceOi: oiOf(oi.ce, strike, ms) ?? 0, peOi: oiOf(oi.pe, strike, ms) ?? 0 }))
 }
@@ -690,7 +699,7 @@ function futuresSince(oi, ms, fromMs) {
 
 // Walls around the index price: the biggest PUT OI strike at / below it (support) and the biggest
 // CALL OI strike at / above it (resistance), within 8 strikes.
-function wallsAt(oi, rows, spot) {
+export function wallsAt(oi, rows, spot) {
   const near = rows.filter((r) => Math.abs(r.strike - spot) <= 8 * oi.step)
   const below = near.filter((r) => r.strike <= spot + oi.step * 0.5)
   const above = near.filter((r) => r.strike >= spot - oi.step * 0.5)
@@ -701,7 +710,7 @@ function wallsAt(oi, rows, spot) {
 
 // The biggest CALL OI strike strictly above the spot and the biggest PUT OI strike strictly below it (within
 // 8 strikes) - the walls in a trade's way, whatever wall the price has just broken.
-function wallsAhead(oi, rows, spot) {
+export function wallsAhead(oi, rows, spot) {
   const near = rows.filter((r) => Math.abs(r.strike - spot) <= 8 * oi.step)
   const above = near.filter((r) => r.strike > spot)
   const below = near.filter((r) => r.strike < spot)
@@ -711,7 +720,7 @@ function wallsAhead(oi, rows, spot) {
 }
 
 // A side's (CE / PE) OI change as a fraction of its OI - over the read's window, or since the open.
-function sideOiChanges(read, sinceOpen) {
+export function sideOiChanges(read, sinceOpen) {
   const f = (chg, now) => (read && now > 0 ? chg / now : null)
   return sinceOpen
     ? { ceC: f(read?.ceOpen, read?.ceNow), peC: f(read?.peOpen, read?.peNow) }
@@ -720,7 +729,7 @@ function sideOiChanges(read, sinceOpen) {
 
 // How much the OI of the walls ahead (wallsAhead) changed over `minutes`, as a fraction of what it was:
 // { resChg } the call wall above, { supChg } the put wall below; null when there is no wall or no OI then.
-function wallOiChanges(oi, ahead, ms, minutes) {
+export function wallOiChanges(oi, ahead, ms, minutes) {
   const pct = (map, strike) => {
     if (strike == null) return null
     const now = oiOf(map, strike, ms)

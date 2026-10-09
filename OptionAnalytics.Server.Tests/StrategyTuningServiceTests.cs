@@ -102,6 +102,9 @@ public sealed class StrategyTuningServiceTests : IDisposable
         Assert.Equal("http://127.0.0.1:5099", result["base"]!.GetValue<string>());
         Assert.Equal(30, result["days"]!.GetValue<int>());
         Assert.Null(s.Result("NIFTY"));
+        Assert.Null(s.Result("SENSEX", "spot")); // the spot + options mode keeps its own result
+        Assert.NotEqual(s.ResultPath("SENSEX"), s.ResultPath("SENSEX", "spot"));
+        Assert.EndsWith("SENSEX-spot-latest.json", s.ResultPath("sensex", "spot"));
         Assert.Equal(2, Directory.GetFiles(Path.Combine(_dir, "runner", "tuning"), "SENSEX-*.json").Length); // latest + a dated copy
     }
 

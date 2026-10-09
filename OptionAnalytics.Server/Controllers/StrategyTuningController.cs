@@ -18,7 +18,7 @@ public sealed class StrategyTuningController : ControllerBase
 
     /// <summary>`What`: what is tuned - "trade" (the trade settings), "oi" (the OI confirmation) or "both"
     /// (the OI confirmation first, then the trade settings on top of it).</summary>
-    public sealed record RunRequest(string Underlying, JsonNode? Strategies, int Days = 30, bool IncludeEstimated = false, int MinTrades = 8, string? What = null, string[]? OiFactors = null, string? Search = null);
+    public sealed record RunRequest(string Underlying, JsonNode? Strategies, int Days = 30, bool IncludeEstimated = false, int MinTrades = 8, string? What = null, string[]? OiFactors = null, string? Search = null, string? Data = null);
     private static readonly HashSet<string> OiFactorKeys = new() { "tradeOiWindow", "tradeFutWindow", "tradeOiFlow", "tradeOiCum", "tradeSideOi", "tradeSideCum", "tradeFutOi", "tradeMoveSize", "tradeDayType", "tradeWallRoom", "tradeWallOi" };
     private static readonly HashSet<string> TuneWhat = new() { "trade", "oi", "both" };
 
@@ -41,9 +41,11 @@ public sealed class StrategyTuningController : ControllerBase
         if (!TuneWhat.Contains(what)) return BadRequest(new { error = "What must be trade, oi or both." });
         var search = string.IsNullOrWhiteSpace(request.Search) ? "step" : request.Search.Trim().ToLowerInvariant();
         if (search is not ("step" or "full")) return BadRequest(new { error = "Search must be step or full." });
+        var data = string.IsNullOrWhiteSpace(request.Data) ? "futures" : request.Data.Trim().ToLowerInvariant();
+        if (data is not ("futures" or "spot")) return BadRequest(new { error = "Data must be futures or spot." });
         var factors = (request.OiFactors ?? Array.Empty<string>()).Distinct().ToList();
         if (factors.Any(f => !OiFactorKeys.Contains(f))) return BadRequest(new { error = "OiFactors must be one of tradeOiWindow, tradeFutWindow, tradeOiFlow, tradeOiCum, tradeSideOi, tradeSideCum, tradeFutOi, tradeMoveSize, tradeDayType, tradeWallRoom, tradeWallOi." });
-        var error = _tuning.Start(new TuningJob(u, strategies.DeepClone(), Math.Clamp(request.Days, 1, 250), request.IncludeEstimated, Math.Clamp(request.MinTrades, 2, 100), what, factors, search));
+        var error = _tuning.Start(new TuningJob(u, strategies.DeepClone(), Math.Clamp(request.Days, 1, 250), request.IncludeEstimated, Math.Clamp(request.MinTrades, 2, 100), what, factors, search, data));
         return error is null ? Ok(_tuning.Status()) : Conflict(new { error });
     }
 
@@ -60,5 +62,9 @@ public sealed class StrategyTuningController : ControllerBase
 
     /// <summary>GET /api/strategy-tuning/result/{underlying} - the last finished job for that index.</summary>
     [HttpGet("result/{underlying}")]
-    public IActionResult Result(string underlying) => _tuning.Result(underlying) is { } r ? Ok(r) : NotFound(new { error = $"No tuning result for {underlying.ToUpperInvariant()} yet." });
+    public IActionResult Result(string underlying, [FromQuery] string? data = null)
+    {
+        var d = string.Equals(data, "spot", StringComparison.OrdinalIgnoreCase) ? "spot" : "futures";
+        return _tuning.Result(underlying, d) is { } r ? Ok(r) : NotFound(new { error = $"No {(d == "spot" ? "spot + options " : "")}tuning result for {underlying.ToUpperInvariant()} yet." });
+    }
 }

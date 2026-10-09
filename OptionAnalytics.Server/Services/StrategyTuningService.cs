@@ -39,12 +39,13 @@ public sealed class StrategyTuningService
 
     public TuningStatus Status() { lock (_lock) return _status; }
 
-    public string ResultPath(string underlying) => Path.Combine(_dir, $"{underlying.ToUpperInvariant()}-latest.json");
+    /// <summary>The latest result file; the spot + options mode ("spot") keeps its own, so it never overwrites the futures one.</summary>
+    public string ResultPath(string underlying, string data = "futures") => Path.Combine(_dir, $"{underlying.ToUpperInvariant()}{(data == "spot" ? "-spot" : "")}-latest.json");
 
     /// <summary>The last result for an index (null when none).</summary>
-    public JsonNode? Result(string underlying)
+    public JsonNode? Result(string underlying, string data = "futures")
     {
-        var path = ResultPath(underlying);
+        var path = ResultPath(underlying, data);
         try { return File.Exists(path) ? JsonNode.Parse(File.ReadAllText(path)) : null; }
         catch (Exception ex) { _logger.LogWarning(ex, "Tuning result {Path} could not be read.", path); return null; }
     }
@@ -59,7 +60,7 @@ public sealed class StrategyTuningService
         lock (_lock)
         {
             if (_status.State == "running") return $"a tuning job for {_status.Job?.Underlying} is already running";
-            var output = ResultPath(job.Underlying);
+            var output = ResultPath(job.Underlying, job.Data);
             var node = _configuration["ScannerRunner:NodePath"] is { Length: > 0 } n ? n : "node";
             var info = new ProcessStartInfo(node)
             {
@@ -131,7 +132,7 @@ public sealed class StrategyTuningService
                 var body = JsonNode.Parse(File.ReadAllText(running));
                 if (body?["ok"]?.GetValue<bool>() == true)
                 {
-                    File.Copy(running, Path.Combine(_dir, $"{job.Underlying}-{DateTimeOffset.UtcNow:yyyyMMdd-HHmmss}.json"), overwrite: true);
+                    File.Copy(running, Path.Combine(_dir, $"{job.Underlying}{(job.Data == "spot" ? "-spot" : "")}-{DateTimeOffset.UtcNow:yyyyMMdd-HHmmss}.json"), overwrite: true);
                     File.Move(running, output, overwrite: true);
                 }
                 else
@@ -162,6 +163,6 @@ public sealed class StrategyTuningService
 
 /// <summary>What to tune: one index; strategies "top3" / "top5" / "all" or a list of ids; how many past days;
 /// whether days rebuilt from 1-minute candles count; the fewest trades a setting needs.</summary>
-public sealed record TuningJob(string Underlying, JsonNode? Strategies, int Days, bool IncludeEstimated, int MinTrades, string What = "trade", IReadOnlyList<string>? OiFactors = null, string Search = "step");
+public sealed record TuningJob(string Underlying, JsonNode? Strategies, int Days, bool IncludeEstimated, int MinTrades, string What = "trade", IReadOnlyList<string>? OiFactors = null, string Search = "step", string Data = "futures");
 
 public sealed record TuningStatus(string State, TuningJob? Job, DateTimeOffset? StartedUtc, DateTimeOffset? FinishedUtc, string? Error, JsonNode? Progress, int? Pid);

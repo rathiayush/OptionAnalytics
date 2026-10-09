@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, Button, Card, Checkbox, Col, InputNumber, Popconfirm, Progress, Row, Segmented, Select, Space, Switch, Table, Tag, Tooltip, Typography, message } from 'antd'
 import { NavBar, useAuth, UP_COLOR, DOWN_COLOR } from './shared.jsx'
-import { ACTIVE_STRATEGIES, STRATEGY_BY_ID } from './strategyEngine.js'
+import { ACTIVE_STRATEGIES, SPOT_STRATEGIES, STRATEGY_BY_ID } from './strategyEngine.js'
 import { OI_COMBO_CAP, OI_FACTORS, countOiCombinations, variantText } from './strategyTuning.js'
 import { applyTunedFilters } from './scannerSettings.js'
 
@@ -93,6 +93,8 @@ export default function StrategyTuningPage() {
   const [includeEstimated, setIncludeEstimated] = useState(false)
   const [minTrades, setMinTrades] = useState(8)
   const [what, setWhat] = useState('both')
+  const [data, setData] = useState('futures')
+  const spot = data === 'spot'
   const [oiFactors, setOiFactors] = useState(OI_FACTORS.map((f) => f.key))
   const [search, setSearch] = useState('step')
   const combos = useMemo(() => countOiCombinations(oiFactors), [oiFactors])
@@ -101,12 +103,12 @@ export default function StrategyTuningPage() {
   const [result, setResult] = useState(null)
   const [resultError, setResultError] = useState(null)
 
-  const loadResult = (u = underlying) => fetch(`/api/strategy-tuning/result/${u}`)
+  const loadResult = (u = underlying) => fetch(`/api/strategy-tuning/result/${u}${spot ? '?data=spot' : ''}`)
     .then(async (r) => (r.ok ? r.json() : Promise.reject(new Error((await r.json().catch(() => null))?.error ?? `HTTP ${r.status}`))))
     .then((x) => { setResult(x); setResultError(null) })
     .catch((err) => { setResult(null); setResultError(err.message) })
   const loadStatus = () => fetch('/api/strategy-tuning/status').then((r) => (r.ok ? r.json() : null)).then((s) => { if (s) setStatus(s) }).catch(() => {})
-  useEffect(() => { loadResult(underlying) }, [underlying]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { loadResult(underlying) }, [underlying, data]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     loadStatus()
     const id = setInterval(loadStatus, POLL_MS)
@@ -122,7 +124,7 @@ export default function StrategyTuningPage() {
 
   const running = status?.state === 'running'
   const start = async () => {
-    const body = { underlying, strategies: pick === 'custom' ? custom : pick, days, includeEstimated, minTrades, what, oiFactors, search }
+    const body = { underlying, strategies: pick === 'custom' ? custom : pick, days, includeEstimated, minTrades, what, oiFactors, search, data }
     const res = await fetch('/api/strategy-tuning/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     const json = await res.json().catch(() => null)
     if (!res.ok) { message.error(json?.error ?? `HTTP ${res.status}`); return }
@@ -178,11 +180,15 @@ export default function StrategyTuningPage() {
             </Text>
             <Row gutter={[16, 8]} align="middle">
               <Col><Space size={6}><Text>Index</Text><Select value={underlying} onChange={setUnderlying} options={UNDERLYINGS.map((u) => ({ value: u, label: u }))} style={{ width: 130 }} disabled={running} /></Space></Col>
+              <Col><Space size={6}><Text>Data</Text><Segmented value={data} onChange={(v) => { setData(v); setCustom([]); setResult(null) }} disabled={running} options={[
+                { value: 'futures', label: <Tooltip title="The futures order flow (footprint, tape, depth) and the OI - the scanner's strategies">Futures + OI</Tooltip> },
+                { value: 'spot', label: <Tooltip title="Only the index candles and the option chain's OI - no futures, no order flow. The spot + options strategies; any past day with OI data">Spot + options only</Tooltip> },
+              ]} /></Space></Col>
               <Col><Space size={6}><Text>Strategies</Text><Segmented value={pick} onChange={setPick} disabled={running} options={[{ value: 'top3', label: 'Top 3' }, { value: 'top5', label: 'Top 5' }, { value: 'all', label: 'All' }, { value: 'custom', label: 'Pick' }]} /></Space></Col>
               {pick === 'custom' && (
                 <Col flex="1 1 320px">
                   <Select mode="multiple" value={custom} onChange={setCustom} placeholder="Strategies to tune" style={{ width: '100%' }} disabled={running} maxTagCount="responsive"
-                    options={ACTIVE_STRATEGIES.map((s) => ({ value: s.id, label: `#${s.no} ${s.name}` }))} />
+                    options={(spot ? SPOT_STRATEGIES : ACTIVE_STRATEGIES).map((s) => ({ value: s.id, label: `#${s.no} ${s.name}` }))} />
                 </Col>
               )}
               <Col><Space size={6}><Text>Tune</Text><Segmented value={what} onChange={setWhat} disabled={running} options={[
@@ -212,7 +218,7 @@ export default function StrategyTuningPage() {
               )}
               <Col><Space size={6}><Tooltip title="The most recent past days the server can replay"><Text>Days</Text></Tooltip><InputNumber min={1} max={250} value={days} onChange={(v) => v && setDays(v)} style={{ width: 80 }} disabled={running} /></Space></Col>
               <Col><Space size={6}><Tooltip title="A setting needs at least this many trades on the train days to be considered"><Text>Min trades</Text></Tooltip><InputNumber min={2} max={100} value={minTrades} onChange={(v) => v && setMinTrades(v)} style={{ width: 70 }} disabled={running} /></Space></Col>
-              <Col><Tooltip title="Also use days the server did not record live, rebuilt from 1-minute candles (no tape or market depth - the order-flow checks are estimated). More days, less exact."><Space size={6}><Switch size="small" checked={includeEstimated} onChange={setIncludeEstimated} disabled={running} /><Text>Include estimated days</Text></Space></Tooltip></Col>
+              {!spot && <Col><Tooltip title="Also use days the server did not record live, rebuilt from 1-minute candles (no tape or market depth - the order-flow checks are estimated). More days, less exact."><Space size={6}><Switch size="small" checked={includeEstimated} onChange={setIncludeEstimated} disabled={running} /><Text>Include estimated days</Text></Space></Tooltip></Col>}
               <Col>
                 {running
                   ? <Popconfirm title="Stop the tuning job?" onConfirm={cancel} disabled={!isAdmin}><Button danger disabled={!isAdmin}>Stop</Button></Popconfirm>
@@ -235,13 +241,14 @@ export default function StrategyTuningPage() {
           <>
             <Card size="small" title={`${result.underlying} · ${result.days?.length ?? 0} day(s) · finished ${when(result.finishedUtc)}`}
               extra={<Text type="secondary" style={{ fontSize: 11 }}>{result.what ? `tuned: ${{ both: 'OI, then trade', oi: 'OI confirmation', trade: 'trade settings' }[result.what] ?? result.what} · ` : ''}{result.days?.filter((d) => d.estimated).length ? `${result.days.filter((d) => d.estimated).length} estimated day(s) · ` : ''}min {result.minTrades} trades · {result.days?.[result.days.length - 1]?.date} to {result.days?.[0]?.date}</Text>}>
+              {result.data === 'spot' && <Alert type="info" showIcon style={{ marginBottom: 8 }} message="Spot + options only: the index candles and the option chain's OI, no futures and no order flow. Points are index points; the option bought and sold are priced beside them. The live scanner does not run these strategies yet, so there is nothing to apply - this measures what they would have done." />}
               {result.skipped?.length > 0 && <Alert type="warning" showIcon style={{ marginBottom: 8 }} message={`${result.skipped.length} day(s) could not be scanned`} description={result.skipped.slice(0, 5).map((s) => `${s.date}: ${s.reason}`).join(' · ')} />}
               <Table size="small" rowKey="id" columns={rankedColumns} dataSource={result.ranked ?? []} pagination={false} scroll={{ y: 320 }} />
             </Card>
             {(result.results ?? []).map((r) => (
               <Card key={r.id} size="small"
                 title={<Space size={8} wrap><span>#{r.no} {r.name}</span>{r.recommend ? <Tag color="success">recommended</Tag> : <Tag color="warning">keep as written</Tag>}</Space>}
-                extra={isAdmin && r.best && (
+                extra={isAdmin && r.best && !spot && (
                   <Popconfirm title={`Apply to #${r.no} ${r.name}?`} description={r.recommend ? variantText(r.best.params) : `Not recommended: ${r.reason}. Apply anyway?`} okText="Apply" onConfirm={() => apply(r)}>
                     <Button size="small" type={r.recommend ? 'primary' : 'default'}>Apply to the scanner</Button>
                   </Popconfirm>
