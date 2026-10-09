@@ -111,7 +111,7 @@ async function main() {
       const prev = await fetchPreviousSession(U, p.date, rowSize).catch(() => null)
       const largeLots = cfg.orderFlow?.bigMode === 'auto' || cfg.orderFlow?.bigMode == null ? autoBigLots(prints ?? [], lotSize) ?? 10 : cfg.orderFlow?.largeLots?.[U] ?? 10
       const setups = await scanDaySetups({ day, prints, oi, profile: scannerProfileOf(prev?.bars, U, rowSize), rowSize, lotSize, largeLots, estimated, filters: entryFilters, keepAll: true })
-      days.push({ ...tuningDay(p.date, setups, day), estimated })
+      days.push({ ...tuningDay(p.date, setups, day, oi), estimated })
     } catch (err) {
       skipped.push({ date: p.date, reason: err.message })
     }
@@ -128,7 +128,7 @@ async function main() {
   for (let i = 0; i < ids.length; i++) {
     progress({ stage: 'tune', strategy: ids[i], done: i, total: ids.length })
     results.push(tuneStrategy(days, ids[i], {
-      trail, minTrades: MIN_TRADES, what: WHAT, oiKeys: OI_KEYS, search: SEARCH,
+      trail, minTrades: MIN_TRADES, what: WHAT, oiKeys: OI_KEYS, search: SEARCH, underlying: U,
       onProgress: (p) => progress({ stage: 'tune', strategy: ids[i], done: i, total: ids.length, ...p }),
     }))
   }

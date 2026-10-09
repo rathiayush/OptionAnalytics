@@ -11,6 +11,50 @@ const POLL_MS = 3_000
 const fmtR = (v) => (v == null || !Number.isFinite(v) ? '-' : `${v >= 0 ? '+' : ''}${v.toFixed(2)}R`)
 const colR = (v) => (v == null ? undefined : v > 0 ? UP_COLOR : v < 0 ? DOWN_COLOR : undefined)
 const pct = (v) => (v == null ? '-' : `${Math.round(v * 100)}%`)
+const pts = (v) => (v == null || !Number.isFinite(v) ? '-' : `${v >= 0 ? '+' : ''}${v.toFixed(1)}`)
+const ist = (ms, opts) => (ms ? new Date(ms).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false, ...opts }) : '-')
+const timeOf = (ms) => ist(ms, { hour: '2-digit', minute: '2-digit' })
+
+/** One option leg of a trade: what it was, the premium it was entered at, the premium at the exit, and the points. */
+function Leg({ leg }) {
+  if (!leg) return <Text type="secondary">-</Text>
+  return (
+    <span style={{ whiteSpace: 'nowrap', fontSize: 12 }}>
+      {leg.label} · {leg.entry?.toFixed(1)} → {leg.exit == null ? '?' : leg.exit.toFixed(1)} · <b style={{ color: colR(leg.points) }}>{pts(leg.points)}</b>
+    </span>
+  )
+}
+
+/** The points a setting captured: the futures (the index) and each option, per trade and in total. */
+function PointsSummary({ rows, index }) {
+  const cell = (leg) => (leg?.n ? <span>{pts(leg.avg)}/trade · <b style={{ color: colR(leg.total) }}>{pts(leg.total)}</b> <Text type="secondary" style={{ fontSize: 11 }}>({leg.n})</Text></span> : <Text type="secondary">-</Text>)
+  return (
+    <Table size="small" pagination={false} rowKey="k" dataSource={rows} columns={[
+      { title: 'Points captured', dataIndex: 'k', width: 120, render: (k) => <b>{k}</b> },
+      { title: `${index ?? 'Index'} futures`, key: 'f', render: (_, r) => (r.points?.n ? <span>{pts(r.points.avg)}/trade · <b style={{ color: colR(r.points.total) }}>{pts(r.points.total)}</b> <Text type="secondary" style={{ fontSize: 11 }}>({r.points.n} trades)</Text></span> : '-') },
+      { title: 'Option bought (premium points)', key: 'b', render: (_, r) => cell(r.points?.buy) },
+      { title: 'Option sold (premium points)', key: 's', render: (_, r) => cell(r.points?.sell) },
+    ]} />
+  )
+}
+
+/** Every trade of the best setting: the index, the futures entry and exit, the points, and both options' prices. */
+function TradesTable({ trades }) {
+  return (
+    <Table size="small" rowKey={(t) => `${t.date}-${t.t}`} dataSource={trades} pagination={{ pageSize: 10, size: 'small', hideOnSinglePage: true }} scroll={{ x: 1000 }} columns={[
+      { title: 'Day', dataIndex: 'date', width: 110 },
+      { title: 'Time', key: 't', width: 130, render: (_, t) => `${timeOf(t.t)} → ${t.exitT ? timeOf(t.exitT) : 'day end'}` },
+      { title: 'Index', dataIndex: 'index', width: 90 },
+      { title: 'Side', dataIndex: 'side', width: 70, render: (v) => <span style={{ color: v === 'LONG' ? UP_COLOR : DOWN_COLOR }}>{v}</span> },
+      { title: 'Futures in → out', key: 'f', width: 150, render: (_, t) => `${t.entry.toFixed(1)} → ${t.exit.toFixed(1)}` },
+      { title: 'Points', dataIndex: 'points', width: 80, render: (v) => <b style={{ color: colR(v) }}>{pts(v)}</b> },
+      { title: 'R', dataIndex: 'r', width: 70, render: (v) => <span style={{ color: colR(v) }}>{fmtR(v)}</span> },
+      { title: 'Option bought: price in → out', key: 'b', render: (_, t) => <Leg leg={t.buy} /> },
+      { title: 'Option sold: price in → out', key: 's', render: (_, t) => <Leg leg={t.sell} /> },
+    ]} />
+  )
+}
+
 const when = (iso) => (iso ? new Date(iso).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '-')
 
 /** n · avg · total · win% of one side of a result. */
@@ -200,6 +244,13 @@ export default function StrategyTuningPage() {
                     { title: 'Train (older days)', key: 'tr', render: (_, row) => <Score s={row.train} /> },
                     { title: 'Test (newest days)', key: 'te', render: (_, row) => <Score s={row.test} /> },
                   ]} dataSource={[{ k: 'As written', ...r.baseline }, ...(r.best ? [{ k: 'Best setting', ...r.best }] : [])]} />
+                  <PointsSummary index={result.underlying} rows={[{ k: 'As written', points: r.baseline?.points }, ...(r.best ? [{ k: 'Best setting', points: r.best.points }] : [])]} />
+                  {r.best?.trades?.length > 0 && (
+                    <details>
+                      <summary style={{ cursor: 'pointer', fontSize: 12 }}>The {r.best.trades.length} trades of the best setting: index, futures and option prices in and out, points</summary>
+                      <div style={{ marginTop: 6 }}><TradesTable trades={r.best.trades} /></div>
+                    </details>
+                  )}
                   {r.top?.length > 1 && (
                     <details>
                       <summary style={{ cursor: 'pointer', fontSize: 12 }}>The {r.top.length} best settings on the train days</summary>

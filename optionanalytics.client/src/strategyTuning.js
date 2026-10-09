@@ -11,7 +11,7 @@
 // score (average R minus one standard error), and is only recommended when it also beats the strategy as
 // written on the test days.
 
-import { ACTIVE_STRATEGIES, STRATEGY_BY_ID, TRADE_FILTERS, applyTradeFilter, oiGateText, simulateOutcome } from './strategyEngine.js'
+import { ACTIVE_STRATEGIES, STRATEGY_BY_ID, TRADE_FILTERS, applyTradeFilter, oiGateText, premiumAt, simulateOutcome } from './strategyEngine.js'
 import { replayRange } from './orderFlowMath.js'
 import { MIN } from './scannerCore.js'
 import { firstPerCooldown } from './scanDay.js'
@@ -101,6 +101,11 @@ export function* variants(grid = TUNING_GRID, base = DEFAULT_VARIANT) {
  *  would take them. `day` = { setups (every setup of every minute), minuteBars, endMs }, `trail` = the
  *  scanner's trailing stop. */
 export function dayTrades(day, id, variant, trail) {
+  return takenTrades(day, id, variant, trail).map((t) => t.outcome.r).filter(Number.isFinite)
+}
+
+/** The trades strategy `id` takes on a scanned day with `variant` - each { s (the setup as traded), outcome }. */
+function takenTrades(day, id, variant, trail) {
   if (!day.byId) {
     day.byId = new Map()
     for (const s of day.setups) day.byId.set(s.id, [...(day.byId.get(s.id) ?? []), s])
@@ -109,8 +114,50 @@ export function dayTrades(day, id, variant, trail) {
   const taken = firstPerCooldown(own.map((s) => applyTradeFilter(s, variant)).filter(Boolean))
   return taken.map((s) => {
     const withTrail = { ...s, trail: s.trailOverride !== undefined ? s.trailOverride : trail }
-    return simulateOutcome(withTrail, day.minuteBars, day.endMs, true).r
-  }).filter(Number.isFinite)
+    return { s, outcome: simulateOutcome(withTrail, day.minuteBars, day.endMs, true) }
+  })
+}
+
+/**
+ * The trades of strategy `id` with `variant` over `days`, each with what it captured in POINTS as well as R: the
+ * index, the futures entry and exit and the points (in the trade's direction), and the two options the setup
+ * carries - BUY (the one that gains with the move) and SELL (the writer's side) - with the option's entry premium,
+ * its premium at the exit minute and the points that made. Premiums are the replay's finished-minute premiums
+ * (the day's `oi`); an option with no premium at the exit is null.
+ */
+export function tradeDetails(days, id, variant, trail, underlying) {
+  const out = []
+  for (const day of days) {
+    for (const { s, outcome } of takenTrades(day, id, variant, trail)) {
+      if (!Number.isFinite(outcome.r)) continue
+      const dir = s.side === 'LONG' ? 1 : -1
+      const risk = Math.abs(s.entry - s.stop)
+      const exitPrice = Number.isFinite(outcome.exitPrice) ? outcome.exitPrice : s.entry + dir * outcome.r * risk
+      const exitMs = (outcome.exitAt ?? (day.endMs - MIN)) + MIN // the exit bar has finished
+      const leg = (o) => {
+        if (!o) return null
+        const exit = day.oi ? premiumAt(day.oi, o.side, o.strike, exitMs) : null
+        return { label: `${o.action} ${o.strike} ${o.side}`, entry: o.premium, exit, points: exit == null ? null : o.action === 'BUY' ? exit - o.premium : o.premium - exit }
+      }
+      out.push({
+        date: day.date, t: s.t, exitT: outcome.exitAt ?? null, index: underlying ?? null, side: s.side,
+        entry: s.entry, exit: exitPrice, points: dir * (exitPrice - s.entry), r: outcome.r, status: outcome.status,
+        buy: leg(s.options?.buy), sell: leg(s.options?.sell),
+      })
+    }
+  }
+  return out
+}
+
+/** Points captured over trades: the futures' total and average, and each option leg's (BUY / SELL) over the
+ *  trades that have its premiums. */
+export function pointsSummary(trades) {
+  const sum = (xs) => xs.reduce((a, b) => a + b, 0)
+  const leg = (key) => {
+    const pts = trades.map((t) => t[key]?.points).filter(Number.isFinite)
+    return { n: pts.length, total: sum(pts), avg: pts.length ? sum(pts) / pts.length : null }
+  }
+  return { n: trades.length, total: sum(trades.map((t) => t.points)), avg: trades.length ? sum(trades.map((t) => t.points)) / trades.length : null, buy: leg('buy'), sell: leg('sell') }
 }
 
 /** Trades in R -> n, total, average, win rate, profit factor, worst run (max drawdown), and the cautious score
@@ -199,11 +246,11 @@ export function rankStrategies(days, { trail = null, minTrades = 8, ids = ACTIVE
  * (baseline) and the best combination - chosen on the train days, checked on the test days - with the top
  * `keep` combinations, and whether the best one is worth applying.
  */
-export function tuneStrategy(days, id, { trail = null, minTrades = 8, trainFraction = 0.7, grid = null, keep = 10, what = 'trade', base = DEFAULT_VARIANT, oiKeys = null, search = 'step', onProgress = null } = {}) {
+export function tuneStrategy(days, id, { trail = null, minTrades = 8, trainFraction = 0.7, grid = null, keep = 10, what = 'trade', base = DEFAULT_VARIANT, oiKeys = null, search = 'step', onProgress = null, underlying = null } = {}) {
   if (what === 'both') {
     // The OI confirmation first (chosen on the train days only), then the trade settings on top of it.
-    const oi = tuneStrategy(days, id, { trail, minTrades, trainFraction, keep, what: 'oi', base, oiKeys, search, onProgress })
-    const onTop = tuneStrategy(days, id, { trail, minTrades, trainFraction, keep, what: 'trade', base: oi.best?.params ?? base })
+    const oi = tuneStrategy(days, id, { trail, minTrades, trainFraction, keep, what: 'oi', base, oiKeys, search, onProgress, underlying })
+    const onTop = tuneStrategy(days, id, { trail, minTrades, trainFraction, keep, what: 'trade', base: oi.best?.params ?? base, underlying })
     return { ...onTop, what, tried: oi.tried + onTop.tried, qualified: oi.qualified + onTop.qualified, oiStage: { best: oi.best, reason: oi.reason } }
   }
   const explicitGrid = grid != null
@@ -238,7 +285,11 @@ export function tuneStrategy(days, id, { trail = null, minTrades = 8, trainFract
   }
   rows.sort((a, b) => b.train.score - a.train.score || b.train.total - a.train.total)
   const top = rows.slice(0, keep).map((r) => ({ ...r, test: scoreR(run(test, id, r.params, trail)) }))
-  const best = top[0] ?? null
+  let best = top[0] ?? null
+  // What the best setting and the strategy as written captured, in points, on all the days.
+  const detail = (params) => { const trades = tradeDetails(days, id, params, trail, underlying); return { points: pointsSummary(trades), trades } }
+  if (best) best = { ...best, ...detail(best.params) }
+  baseline.points = pointsSummary(tradeDetails(days, id, DEFAULT_VARIANT, trail, underlying))
   let recommend = false
   let reason
   if (!best) reason = `no combination had ${minTrades}+ trades on the ${train.length} train day(s)`
@@ -255,9 +306,9 @@ export function tuneStrategy(days, id, { trail = null, minTrades = 8, trainFract
 }
 
 /** A scanned day for the tuning: its setups (every minute) and the bars / end its outcomes are read to. */
-export function tuningDay(date, setups, replayDay) {
+export function tuningDay(date, setups, replayDay, oi = null) {
   const range = replayRange(replayDay)
-  return { date, setups, minuteBars: replayDay.minuteBars, endMs: (range?.end ?? 0) + MIN }
+  return { date, setups, minuteBars: replayDay.minuteBars, endMs: (range?.end ?? 0) + MIN, oi }
 }
 
 /** The filters to save for a tuned strategy: its own entry filters kept, the tuned trade filters on top (only

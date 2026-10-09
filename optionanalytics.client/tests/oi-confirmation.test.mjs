@@ -355,3 +355,45 @@ test('every combination: counts, the cap, and it finds at least what step by ste
   assert.equal(tuneStrategy(days, id, { what: 'trade', minTrades: 2, grid: { tradeSide: ['both', 'long'] } }).tried, 2)
   void seen
 })
+
+test('points captured: the index, futures in and out, and the option prices in and out', async () => {
+  const { tradeDetails, pointsSummary } = await import('../src/strategyTuning.js')
+  const { premiumAt, simulateOutcome } = await import('../src/strategyEngine.js')
+  const all = await scanDaySetups({ ...base, filters: {}, keepAll: true })
+  const id = all[0].id
+  const day = tuningDay('2026-09-10', all, replayDay, syn.oi)
+  const trades = tradeDetails([day], id, DEFAULT_VARIANT, null, 'NIFTY')
+  assert.ok(trades.length > 0)
+  const MIN = 60_000
+  for (const t of trades) {
+    const dir = t.side === 'LONG' ? 1 : -1
+    assert.equal(t.index, 'NIFTY')
+    assert.ok(Math.abs(t.points - dir * (t.exit - t.entry)) < 1e-9, 'points are the futures move in the trade\'s direction')
+    // The setup, replayed on its own, gives the same exit price and R.
+    const setup = all.find((s) => s.id === id && s.t === t.t)
+    const o = simulateOutcome({ ...setup, trail: null }, day.minuteBars, day.endMs, true)
+    assert.equal(o.r, t.r)
+    assert.equal(o.exitPrice, t.exit)
+    for (const [key, which] of [['buy', 'buy'], ['sell', 'sell']]) {
+      const opt = setup.options?.[which]
+      if (!opt) { assert.equal(t[key], null); continue }
+      assert.equal(t[key].entry, opt.premium, 'the option\'s entry premium is the setup\'s')
+      const exit = premiumAt(syn.oi, opt.side, opt.strike, (o.exitAt ?? day.endMs - MIN) + MIN)
+      assert.equal(t[key].exit, exit, 'its exit premium is the premium at the exit minute')
+      if (exit != null) assert.ok(Math.abs(t[key].points - (which === 'buy' ? exit - opt.premium : opt.premium - exit)) < 1e-9)
+      assert.match(t[key].label, new RegExp(`^${which.toUpperCase()} ${opt.strike} ${opt.side}$`))
+    }
+  }
+  const sum = pointsSummary(trades)
+  assert.equal(sum.n, trades.length)
+  assert.ok(Math.abs(sum.total - trades.reduce((a, t) => a + t.points, 0)) < 1e-9)
+  assert.equal(sum.buy.n + 0, trades.filter((t) => Number.isFinite(t.buy?.points)).length)
+  // No OI on the day: the options have no exit premium, the futures points are still there.
+  const noOi = tradeDetails([{ ...day, oi: null }], id, DEFAULT_VARIANT, null, 'NIFTY')
+  assert.ok(noOi.every((t) => (t.buy == null || t.buy.exit == null) && Number.isFinite(t.points)))
+  // The tuning result carries them for the best setting and the strategy as written.
+  const days = Array.from({ length: 6 }, (_, i) => tuningDay(`2026-09-1${i}`, all, replayDay, syn.oi))
+  const r = tuneStrategy(days, id, { what: 'trade', minTrades: 2, grid: { tradeSide: ['both', 'long'] }, underlying: 'NIFTY' })
+  assert.equal(r.baseline.points.n, tradeDetails(days, id, DEFAULT_VARIANT, null, 'NIFTY').length)
+  if (r.best) { assert.ok(r.best.trades.length > 0 && r.best.points.n === r.best.trades.length); assert.equal(r.best.trades[0].index, 'NIFTY') }
+})
