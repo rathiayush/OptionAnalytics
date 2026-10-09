@@ -9,7 +9,7 @@
 // does not run them yet, so applying a tuned spot setting only records it.
 
 import {
-  SPOT_STRATEGIES, SQUARE_OFF, applyTradeFilter, dayTypeAt, optionOiRead, optionTradesFor, oiRows, sideOiChanges, strategyFilters,
+  SPOT_STRATEGIES, SQUARE_OFF, applyTradeFilter, dayTypeAt, oiChange, oiOf, optionOiRead, optionTradesFor, oiRows, sideOiChanges, strategyFilters,
   valueAt, wallOiChanges, wallsAhead, wallsAt,
 } from './strategyEngine.js'
 
@@ -20,6 +20,11 @@ const FIRST_ENTRY = 9 * 60 + 30
 const LAST_ENTRY = 14 * 60 + 45
 const SIDE_BAR = 0.003 // a side's OI really rising / falling: 0.3% of its OI in 15 minutes (as the filters)
 const WALL_BAR = 0.005 // a wall's OI really growing / shrinking: 0.5% in 15 minutes
+const WRITING_BAR = 0.02 // fresh writing at a strike: its OI up 2% in 15 minutes (a hot cell of the OI heatmap)
+const COVERING_BAR = 0.01 // the other side covering: its OI near the price down 1% in 15 minutes
+const FLIP_BAR = 0.002 // a since-open lead worth reading: 0.2% of the chain's OI
+const LADDER_RATIO = 1.3 // support (or resistance) this much bigger than the other side, in the 3 strikes each side
+const LADDER_RISE = 0.1 // ... and that lead grown 10% in 15 minutes
 const BY_ID = Object.fromEntries(SPOT_STRATEGIES.map((s) => [s.id, s]))
 
 /** Spot candles as the engine reads them: { t (start, ms), time, open, high, low, close }. */
@@ -135,6 +140,80 @@ export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {} }) {
       })
     }
   }
+  // ---- the option chain, strike by strike (the OI heatmap and the S/R ladder) ----
+  const step = oi.step
+  const atmK = Math.round(spotNow / step) * step
+  const near = rows.filter((r) => Math.abs(r.strike - atmK) <= 3 * step)
+  const chgPct = (map, k, mins = 15) => {
+    const then = oiOf(map, k, nowMs - mins * MIN)
+    const d = oiChange(map, k, nowMs, mins)
+    return then > 0 && d != null ? d / then : null
+  }
+  // Since the open: total CE added minus total PE added (> 0 = calls written more; < 0 = puts), as a share of the chain.
+  const lead = (ms) => {
+    const r = optionOiRead(oi, valueAt(oi.spot, ms)?.close ?? spotNow, ms, 15)
+    return r && r.ceNow + r.peNow > 0 ? (r.ceOpen - r.peOpen) / (r.ceNow + r.peNow) : null
+  }
+  // The S/R ladder: the PE OI on the 3 strikes at / under the price against the CE OI on the 3 at / over it.
+  const ladderAt = (ms) => {
+    const below = rows.filter((r) => r.strike <= spotNow).slice(-3).map((r) => r.strike)
+    const above = rows.filter((r) => r.strike >= spotNow).slice(0, 3).map((r) => r.strike)
+    const sum = (map, ks) => ks.reduce((s, k) => s + (oiOf(map, k, ms) ?? 0), 0)
+    const pe = sum(oi.pe, below)
+    const ce = sum(oi.ce, above)
+    return pe > 0 && ce > 0 ? pe / ce : null
+  }
+  const leadNow = lead(nowMs)
+  const leadThen = lead(nowMs - 10 * MIN)
+  const ladderNow = ladderAt(nowMs)
+  const ladderThen = ladderAt(nowMs - 15 * MIN)
+
+  for (const dir of [1, -1]) {
+    const rejection = dir > 0 ? last.close > last.open : last.close < last.open
+    // 5. Fresh writing (the OI heatmap): the strike near the money with the most fresh writing on the trade's side -
+    //    puts for a long - sits at / under the price, added 2%+ in 15 minutes, while the other side's OI on the two
+    //    strikes over the price (calls) is being covered; the price ticks on with it.
+    const writeMap = dir > 0 ? oi.pe : oi.ce
+    const coverMap = dir > 0 ? oi.ce : oi.pe
+    const hottest = near.map((r) => ({ k: r.strike, chg: chgPct(writeMap, r.strike) })).filter((x) => x.chg != null).sort((a, b) => b.chg - a.chg)[0]
+    const coverKs = (dir > 0 ? near.filter((r) => r.strike > spotNow) : near.filter((r) => r.strike < spotNow).reverse()).slice(0, 2).map((r) => r.strike)
+    const coverNow = coverKs.reduce((s, k) => s + (oiOf(coverMap, k, nowMs) ?? 0), 0)
+    const coverThen = coverKs.reduce((s, k) => s + (oiOf(coverMap, k, nowMs - 15 * MIN) ?? 0), 0)
+    const covered = coverKs.length === 2 && coverThen > 0 ? (coverNow - coverThen) / coverThen : null
+    if (hottest && hottest.chg >= WRITING_BAR && dir * (spotNow - hottest.k) >= 0 && covered != null && covered <= -COVERING_BAR && prev && dir * (spotNow - prev.close) > 0) {
+      const stopPts = Math.max(1.2 * atr, Math.abs(spotNow - hottest.k) + 0.5 * atr)
+      push('spotFreshWriting', dir, stopPts, 2 * stopPts, 45, {
+        OI: `${dir > 0 ? 'puts' : 'calls'} written at ${hottest.k} (${pct(hottest.chg)} in 15m, the hottest strike near the money); ${dir > 0 ? 'calls' : 'puts'} at ${coverKs.join(' / ')} ${pct(covered)} (covering)`,
+      })
+    }
+
+    // 6. Since-open flip: total PE added since the open has just overtaken total CE added (a long), or the reverse,
+    //    within the last 10 minutes, by a lead worth reading; the price on the right side of the day's open.
+    const dayOpen = bars[0].open
+    if (leadNow != null && leadThen != null && dir * leadNow <= -FLIP_BAR && dir * leadThen >= 0 && dir * (spotNow - dayOpen) > 0) {
+      push('spotCumFlip', dir, 1.5 * atr, 3 * atr, 60, {
+        OI: `since the open ${dir > 0 ? 'puts' : 'calls'} added now lead ${dir > 0 ? 'calls' : 'puts'} by ${pct(Math.abs(leadNow))} of the chain (10 min ago ${pct(leadThen)}); spot ${dir > 0 ? 'above' : 'below'} the open ${dayOpen.toFixed(1)}`,
+      })
+    }
+
+    // 7. S/R OI ladder: the OI holding the price up (puts on the 3 strikes under it) is 1.3x+ the OI capping it (calls
+    //    on the 3 over it) and grew 10%+ relative to it in 15 minutes - for a long; the price in the lower half
+    //    between the put wall and the call wall, a candle turning up. Target: the opposite wall.
+    const ratio = ladderNow == null ? null : dir > 0 ? ladderNow : 1 / ladderNow
+    const ratioThen = ladderThen == null ? null : dir > 0 ? ladderThen : 1 / ladderThen
+    if (ratio != null && ratioThen != null && support != null && resistance != null && resistance > support
+      && ratio >= LADDER_RATIO && ratio >= ratioThen * (1 + LADDER_RISE) && rejection
+      && (dir > 0 ? spotNow - support <= (resistance - support) / 2 : resistance - spotNow <= (resistance - support) / 2)) {
+      const stopPts = Math.max(1.2 * atr, Math.abs(spotNow - (dir > 0 ? support : resistance)) + 0.5 * atr)
+      const targetPts = Math.abs((dir > 0 ? resistance : support) - spotNow) - 0.2 * atr
+      if (targetPts >= 1.2 * stopPts) {
+        push('spotLadder', dir, stopPts, targetPts, 60, {
+          OI: `${dir > 0 ? 'support' : 'resistance'} OI ${ratio.toFixed(2)}x the other side (15 min ago ${ratioThen.toFixed(2)}x); between the put wall ${support} and the call wall ${resistance}`,
+        })
+      }
+    }
+  }
+
   // The trade filters (sides, entry window, stop / target size, time stop, trailing, OI filters) - defaults change nothing.
   return out.map((s) => applyTradeFilter(s, strategyFilters(s.id, filters?.[s.id]))).filter(Boolean)
 }

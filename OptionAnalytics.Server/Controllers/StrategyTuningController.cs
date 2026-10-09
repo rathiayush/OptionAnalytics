@@ -20,7 +20,7 @@ public sealed class StrategyTuningController : ControllerBase
     /// (the OI confirmation first, then the trade settings on top of it).</summary>
     public sealed record RunRequest(string Underlying, JsonNode? Strategies, int Days = 30, bool IncludeEstimated = false, int MinTrades = 8, string? What = null, string[]? OiFactors = null, string? Search = null, string? Data = null);
     private static readonly HashSet<string> OiFactorKeys = new() { "tradeOiWindow", "tradeFutWindow", "tradeOiFlow", "tradeOiCum", "tradeSideOi", "tradeSideCum", "tradeFutOi", "tradeMoveSize", "tradeDayType", "tradeWallRoom", "tradeWallOi" };
-    private static readonly HashSet<string> TuneWhat = new() { "trade", "oi", "both" };
+    private static readonly HashSet<string> TuneWhat = new() { "trade", "oi", "both", "option", "all" };
 
     /// <summary>POST /api/strategy-tuning/run - starts a job (one at a time).</summary>
     [HttpPost("run")]
@@ -38,7 +38,7 @@ public sealed class StrategyTuningController : ControllerBase
         };
         if (strategies is null) return BadRequest(new { error = "Strategies must be top3, top5, all or a list of strategy ids." });
         var what = string.IsNullOrWhiteSpace(request.What) ? "trade" : request.What.Trim().ToLowerInvariant();
-        if (!TuneWhat.Contains(what)) return BadRequest(new { error = "What must be trade, oi or both." });
+        if (!TuneWhat.Contains(what)) return BadRequest(new { error = "What must be trade, oi, both, option or all." });
         var search = string.IsNullOrWhiteSpace(request.Search) ? "step" : request.Search.Trim().ToLowerInvariant();
         if (search is not ("step" or "full")) return BadRequest(new { error = "Search must be step or full." });
         var data = string.IsNullOrWhiteSpace(request.Data) ? "futures" : request.Data.Trim().ToLowerInvariant();

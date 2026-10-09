@@ -11,7 +11,7 @@
 // score (average R minus one standard error), and is only recommended when it also beats the strategy as
 // written on the test days.
 
-import { ACTIVE_STRATEGIES, STRATEGY_BY_ID, TRADE_FILTERS, applyTradeFilter, oiGateText, premiumAt, simulateOutcome } from './strategyEngine.js'
+import { ACTIVE_STRATEGIES, STRATEGY_BY_ID, TRADE_FILTERS, applyTradeFilter, oiGateText, optionStopTargetHit, optionTradeAt, premiumAt, simulateOutcome } from './strategyEngine.js'
 import { replayRange } from './orderFlowMath.js'
 import { MIN } from './scannerCore.js'
 import { firstPerCooldown } from './scanDay.js'
@@ -64,6 +64,88 @@ export const OI_FACTORS = [
   { key: 'tradeDayType', label: 'Day type: trending (my way), range, not against a trend' },
   { key: 'tradeWallRoom', label: 'Room to the next OI wall (support / resistance)' },
 ]
+// ---- the option trade ------------------------------------------------------------------------------------
+/**
+ * How the trade is taken in options (tuned by `what: 'option'`), on top of the index trade the signal gives:
+ *   optLeg        'sell' (write the option that loses value with the move - the scanner's default) or 'buy' (the one
+ *                 that gains with it);
+ *   optMoneyness  0 = ATM, +n = n strikes in the money, -n = n out of the money (optionTradeAt);
+ *   optExit       'index' - out when the index trade exits (stop / target / trail / time stop): what the tuning did
+ *                 before; 'first' - the option's own SL / target, or the index trade's exit, whichever comes first;
+ *                 'option' - only the option's own SL / target (else the 15:10 square-off);
+ *   optSlPct / optTargetPct - the option's SL / target as a % of its entry premium, so they scale with moneyness.
+ * The option's levels are checked minute by minute on its premium from the first full minute after the entry, filled
+ * at the level (optionStopTargetHit - the scanner's own rule). Scored in premium points.
+ */
+export const OPTION_GRID = {
+  optLeg: ['sell', 'buy'],
+  optMoneyness: [0, 1, -1, 2, -2],
+  optExit: ['index', 'first', 'option'],
+  optSlPct: [20, 15, 25, 30, 40],
+  optTargetPct: [30, 20, 50, 75, 100],
+}
+export const OPTION_DEFAULT = { optLeg: 'sell', optMoneyness: 0, optExit: 'index', optSlPct: 20, optTargetPct: 30 }
+/** Out with the index trade: the option's SL / target are not used - tried once. */
+export const optionVariantRedundant = (v) => (v.optExit ?? 'index') === 'index' && ((v.optSlPct ?? 20) !== 20 || (v.optTargetPct ?? 30) !== 30)
+
+const SQUARE_OFF_MIN = 15 * 60 + 10
+const istMinuteOf = (ms) => Math.floor((ms / MIN + 330) % 1440)
+
+/** One setup traded in options as `v` says: the option, its entry and exit premium, the points and why it closed - or
+ *  null when the option has no premium (that strike was not traded / not loaded). */
+export function optionOutcome(day, s, outcome, v) {
+  if (!day.oi) return null
+  const trade = optionTradeAt(day.oi, s, v.optLeg ?? 'sell', v.optMoneyness ?? 0, s.t)
+  if (!trade?.premium) return null
+  const indexExit = (outcome.exitAt ?? (day.endMs - MIN)) + MIN // the index trade's exit bar has finished
+  const squareOff = Math.min(day.endMs, Math.floor(s.t / MIN) * MIN + (SQUARE_OFF_MIN - istMinuteOf(s.t)) * MIN)
+  const exitMode = v.optExit ?? 'index'
+  let exitMs = exitMode === 'option' ? squareOff : indexExit
+  let exitPremium = null
+  let reason = exitMode === 'option' ? 'square-off 15:10' : 'the index trade exited'
+  if (exitMode !== 'index') {
+    const hit = optionStopTargetHit(day.oi, trade, s.t, exitMs, trade.premium * (v.optSlPct ?? 20) / 100, trade.premium * (v.optTargetPct ?? 30) / 100)
+    if (hit) { exitMs = hit.at; exitPremium = hit.premium; reason = hit.reason }
+  }
+  if (exitPremium == null) exitPremium = premiumAt(day.oi, trade.side, trade.strike, exitMs)
+  if (exitPremium == null) return null
+  return { trade, exitMs, exitPremium, reason, points: trade.action === 'BUY' ? exitPremium - trade.premium : trade.premium - exitPremium }
+}
+
+/** The premium points of strategy `id`'s trades over `days`, taken with trade filters + option settings `v`. */
+export function optionRun(days, id, v, trail) {
+  return days.flatMap((day) => takenTrades(day, id, v, trail).map(({ s, outcome }) => optionOutcome(day, s, outcome, v)?.points)).filter(Number.isFinite)
+}
+
+/** Every option trade of `id` with `v` over `days`: the index trade (as tradeDetails) and the option - name, moneyness,
+ *  premium in / out, the points (`points` is the option's here, `indexPoints` the index's), when and why it closed. */
+export function optionDetails(days, id, v, trail, underlying) {
+  const out = []
+  for (const day of days) {
+    for (const { s, outcome } of takenTrades(day, id, v, trail)) {
+      const o = optionOutcome(day, s, outcome, v)
+      if (!o || !Number.isFinite(outcome.r)) continue
+      const dir = s.side === 'LONG' ? 1 : -1
+      const exitPrice = Number.isFinite(outcome.exitPrice) ? outcome.exitPrice : s.entry + dir * outcome.r * Math.abs(s.entry - s.stop)
+      out.push({
+        date: day.date, t: s.t, exitT: o.exitMs - MIN, index: underlying ?? null, side: s.side, entry: s.entry, exit: exitPrice,
+        indexPoints: dir * (exitPrice - s.entry), r: outcome.r, points: o.points, stopHit: /SL/.test(o.reason) && o.points < 0,
+        opt: { label: `${o.trade.action} ${o.trade.strike} ${o.trade.side}`, moneyness: v.optMoneyness ?? 0, entry: o.trade.premium, exit: o.exitPremium, points: o.points, reason: o.reason },
+      })
+    }
+  }
+  return out
+}
+
+/** One line for an option setting. */
+export function optionText(v) {
+  const m = v.optMoneyness ?? 0
+  const where = m === 0 ? 'ATM' : `${Math.abs(m)} ${m > 0 ? 'ITM' : 'OTM'}`
+  const exit = (v.optExit ?? 'index') === 'index' ? 'out with the index trade'
+    : `SL ${v.optSlPct}% / target ${v.optTargetPct}% of the premium${v.optExit === 'first' ? ', or the index trade\'s exit first' : ''}`
+  return `${(v.optLeg ?? 'sell').toUpperCase()} ${where} · ${exit}`
+}
+
 /** The most OI combinations one "every combination" search will try (each is a pass over the train days). */
 export const OI_COMBO_CAP = 50_000
 
@@ -253,6 +335,13 @@ export function rankStrategies(days, { trail = null, minTrades = 8, ids = ACTIVE
  * `keep` combinations, and whether the best one is worth applying.
  */
 export function tuneStrategy(days, id, { trail = null, minTrades = 8, trainFraction = 0.7, grid = null, keep = 10, what = 'trade', base = DEFAULT_VARIANT, oiKeys = null, search = 'step', onProgress = null, underlying = null } = {}) {
+  if (what === 'all') {
+    // Everything in turn: the OI confirmation, the trade settings on top, then how it is taken in options.
+    const oi = tuneStrategy(days, id, { trail, minTrades, trainFraction, keep, what: 'oi', base, oiKeys, search, onProgress, underlying })
+    const tr = tuneStrategy(days, id, { trail, minTrades, trainFraction, keep, what: 'trade', base: oi.best?.params ?? base, underlying })
+    const op = tuneStrategy(days, id, { trail, minTrades, trainFraction, keep, what: 'option', base: tr.best?.params ?? oi.best?.params ?? base, underlying })
+    return { ...op, what, tried: oi.tried + tr.tried + op.tried, oiStage: { best: oi.best, reason: oi.reason }, tradeStage: { best: tr.best, reason: tr.reason } }
+  }
   if (what === 'both') {
     // The OI confirmation first (chosen on the train days only), then the trade settings on top of it.
     const oi = tuneStrategy(days, id, { trail, minTrades, trainFraction, keep, what: 'oi', base, oiKeys, search, onProgress, underlying })
@@ -260,14 +349,19 @@ export function tuneStrategy(days, id, { trail = null, minTrades = 8, trainFract
     return { ...onTop, what, tried: oi.tried + onTop.tried, qualified: oi.qualified + onTop.qualified, oiStage: { best: oi.best, reason: oi.reason } }
   }
   const explicitGrid = grid != null
-  grid = grid ?? (what === 'oi' ? oiGridOf(oiKeys) : TUNING_GRID)
+  const isOpt = what === 'option'
+  grid = grid ?? (what === 'oi' ? oiGridOf(oiKeys) : isOpt ? OPTION_GRID : TUNING_GRID)
+  if (isOpt) base = { ...OPTION_DEFAULT, ...base }
+  // Scored in R on the index trade, or - the option trade - in premium points.
+  const score = (ds, v) => (isOpt ? optionRun(ds, id, v, trail) : run(ds, id, v, trail))
+  const asWritten = isOpt ? { ...DEFAULT_VARIANT, ...OPTION_DEFAULT } : DEFAULT_VARIANT
   const { train, test } = splitDays(days, trainFraction)
-  const baseline = { params: DEFAULT_VARIANT, train: scoreR(run(train, id, DEFAULT_VARIANT, trail)), test: scoreR(run(test, id, DEFAULT_VARIANT, trail)) }
+  const baseline = { params: asWritten, train: scoreR(score(train, asWritten)), test: scoreR(score(test, asWritten)) }
   let rows = []
   let tried = 0
   if (what === 'oi' && !explicitGrid && search !== 'full') {
     // Step by step (stepSearch): each OI filter takes its best value given the others, then a second pass.
-    const found = stepSearch(grid, base, (v) => scoreR(run(train, id, v, trail)), { minTrades })
+    const found = stepSearch(grid, base, (v) => scoreR(score(train, v)), { minTrades })
     rows = found.rows
     tried = found.tried
   } else {
@@ -281,16 +375,16 @@ export function tuneStrategy(days, id, { trail = null, minTrades = 8, trainFract
     for (const v of variants(grid, base)) {
       // The timeframe only means something with an OI change or futures OI filter on; without one, 1 / 3 / 5 / 15
       // are the same trades - tried once (at 15).
-      if (oiVariantRedundant(v)) continue
+      if (oiVariantRedundant(v) || (isOpt && optionVariantRedundant(v))) continue
       tried++
       if (onProgress && tried % 250 === 0) onProgress({ tried, of })
-      const tr = scoreR(run(train, id, v, trail))
+      const tr = scoreR(score(train, v))
       if (tr.n < minTrades || tr.score == null) continue
       rows.push({ params: v, train: tr })
     }
   }
   rows.sort((a, b) => b.train.score - a.train.score || b.train.total - a.train.total)
-  const top = rows.slice(0, keep).map((r) => ({ ...r, test: scoreR(run(test, id, r.params, trail)) }))
+  const top = rows.slice(0, keep).map((r) => ({ ...r, test: scoreR(score(test, r.params)) }))
   // Nothing reached the minimum trades: show what there is anyway - the best setting with even a couple of trades -
   // marked "below the minimum", never recommended. (Under 2 trades there is no score to rank by.)
   if (!top.length && minTrades > 2) {
@@ -299,19 +393,27 @@ export function tuneStrategy(days, id, { trail = null, minTrades = 8, trainFract
   }
   let best = top[0] ?? null
   // What the best setting and the strategy as written captured, in points, on all the days.
-  const detail = (params) => { const trades = tradeDetails(days, id, params, trail, underlying); return { points: pointsSummary(trades), trades } }
+  const details = (params) => (isOpt ? optionDetails(days, id, params, trail, underlying) : tradeDetails(days, id, params, trail, underlying))
+  const detail = (params) => { const trades = details(params); return { points: pointsSummary(trades), trades } }
   if (best) best = { ...best, ...detail(best.params) }
-  baseline.points = pointsSummary(tradeDetails(days, id, DEFAULT_VARIANT, trail, underlying))
+  baseline.points = pointsSummary(details(asWritten))
+  // The option setting in the scanner's terms: its SL / target in premium points on a typical (median) entry premium.
+  if (best && isOpt && best.trades.length && (best.params.optExit ?? 'index') !== 'index') {
+    const premiums = best.trades.map((t) => t.opt.entry).sort((a, b) => a - b)
+    const median = premiums[Math.floor(premiums.length / 2)]
+    best = { ...best, suggest: { premium: median, slPoints: median * best.params.optSlPct / 100, targetPoints: median * best.params.optTargetPct / 100, moneyness: best.params.optMoneyness, leg: best.params.optLeg } }
+  }
+  const unit = isOpt ? ' pts' : 'R'
   let recommend = false
   let reason
   if (!best) reason = `no combination had ${minTrades}+ trades on the ${train.length} train day(s)`
   else if (!test.length) reason = `only ${days.length} day(s) - too few to check on unseen days (need 5+); not recommended yet`
   else if (best.test.n < 3) reason = `the best combination took only ${best.test.n} trade(s) on the ${test.length} test day(s) - not enough to trust`
-  else if (!(best.test.total > 0)) reason = `the best combination lost on the test days (${best.test.total.toFixed(2)}R) - it fitted the past`
-  else if (baseline.test.n && !(best.test.avg > (baseline.test.avg ?? -Infinity))) reason = `on the test days it did not beat the strategy as written (${best.test.avg.toFixed(2)}R vs ${baseline.test.avg.toFixed(2)}R a trade)`
+  else if (!(best.test.total > 0)) reason = `the best combination lost on the test days (${best.test.total.toFixed(2)}${unit}) - it fitted the past`
+  else if (baseline.test.n && !(best.test.avg > (baseline.test.avg ?? -Infinity))) reason = `on the test days it did not beat the ${isOpt ? 'option taken as before (ATM sell, out with the index trade)' : 'strategy as written'} (${best.test.avg.toFixed(2)}${unit} vs ${baseline.test.avg.toFixed(2)}${unit} a trade)`
   else { recommend = true; reason = `better on the train days and on the ${test.length} unseen test day(s)` }
   return {
-    id, name: STRATEGY_BY_ID[id]?.name ?? id, no: STRATEGY_BY_ID[id]?.no ?? null, what,
+    id, name: STRATEGY_BY_ID[id]?.name ?? id, no: STRATEGY_BY_ID[id]?.no ?? null, what, unit: isOpt ? 'pts' : 'R',
     days: days.length, trainDays: train.map((d) => d.date), testDays: test.map((d) => d.date),
     tried, qualified: rows.length, baseline, best, top, recommend, reason,
   }

@@ -107,6 +107,9 @@ export const SPOT_STRATEGIES = [
   { id: 'spotWallHold', no: 102, name: 'Spot: OI wall holds - rejection at a growing wall', short: 'Spot wall hold', spot: true },
   { id: 'spotSides', no: 103, name: 'Spot: CE and PE sides with the move - range breakout', short: 'Spot CE/PE sides', spot: true },
   { id: 'spotAvgPullback', no: 104, name: 'Spot: pullback to the day\'s average on a trending day', short: 'Spot average pullback', spot: true },
+  { id: 'spotFreshWriting', no: 105, name: 'Spot: fresh writing under the price, the other side covering (OI heatmap)', short: 'Spot fresh writing', spot: true },
+  { id: 'spotCumFlip', no: 106, name: 'Spot: CE / PE added since the open flips sides', short: 'Spot since-open flip', spot: true },
+  { id: 'spotLadder', no: 107, name: 'Spot: S/R OI ladder - support outgrowing resistance', short: 'Spot OI ladder', spot: true },
 ]
 export const STRATEGY_BY_ID = Object.fromEntries([...STRATEGIES, ...SPOT_STRATEGIES].map((s) => [s.id, s]))
 /** The strategies in use - what the scanner runs, lists, alerts on and scores. */

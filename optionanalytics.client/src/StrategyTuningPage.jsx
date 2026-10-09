@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, Button, Card, Checkbox, Col, InputNumber, Popconfirm, Progress, Row, Segmented, Select, Space, Switch, Table, Tag, Tooltip, Typography, message } from 'antd'
 import { NavBar, useAuth, UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import { ACTIVE_STRATEGIES, SPOT_STRATEGIES, STRATEGY_BY_ID } from './strategyEngine.js'
-import { OI_COMBO_CAP, OI_FACTORS, countOiCombinations, variantText } from './strategyTuning.js'
+import { OI_COMBO_CAP, OI_FACTORS, countOiCombinations, optionText, variantText } from './strategyTuning.js'
 import { applyTunedFilters } from './scannerSettings.js'
 
 const { Title, Text } = Typography
@@ -27,7 +27,7 @@ function Leg({ leg }) {
 
 /** The points a setting captured on its winning trades, lost on its losing ones (stop-loss) and the net - for the
  *  index futures and for the option bought and the option sold. */
-function PointsSummary({ rows, index }) {
+function PointsSummary({ rows, index, option = false }) {
   const group = (title, pick) => ({
     title,
     children: [
@@ -40,10 +40,10 @@ function PointsSummary({ rows, index }) {
   return (
     <Table size="small" pagination={false} rowKey="k" dataSource={rows} scroll={{ x: 900 }} columns={[
       { title: 'Points', dataIndex: 'k', width: 110, fixed: 'left', render: (k) => <b>{k}</b> },
-      group(`${index ?? 'Index'} futures`, (p) => p),
-      group('Option bought', (p) => p?.buy),
-      group('Option sold', (p) => p?.sell),
-      { title: 'Stop-loss', key: 'sl', width: 150, render: (_, r) => (r.points?.slN ? <span>{r.points.slN} hit · <b style={{ color: DOWN_COLOR }}>{pts(r.points.slPoints)}</b> futures</span> : <Text type="secondary">none</Text>) },
+      ...(option
+        ? [group('Option traded (premium points)', (p) => p)]
+        : [group(`${index ?? 'Index'} futures`, (p) => p), group('Option bought', (p) => p?.buy), group('Option sold', (p) => p?.sell)]),
+      { title: 'Stop-loss', key: 'sl', width: 150, render: (_, r) => (r.points?.slN ? <span>{r.points.slN} hit · <b style={{ color: DOWN_COLOR }}>{pts(r.points.slPoints)}</b> {option ? 'premium' : 'futures'}</span> : <Text type="secondary">none</Text>) },
     ]} />
   )
 }
@@ -65,14 +65,34 @@ function TradesTable({ trades }) {
   )
 }
 
+/** Every option trade of the best option setting: the index trade, and the option - its name, premium in / out, the
+ *  points and why it closed (its own SL / target, the index trade's exit, or the 15:10 square-off). */
+function OptionTradesTable({ trades }) {
+  return (
+    <Table size="small" rowKey={(t) => `${t.date}-${t.t}`} dataSource={trades} pagination={{ pageSize: 10, size: 'small', hideOnSinglePage: true }} scroll={{ x: 1000 }} columns={[
+      { title: 'Day', dataIndex: 'date', width: 110 },
+      { title: 'Time', key: 't', width: 130, render: (_, t) => `${timeOf(t.t)} → ${timeOf(t.exitT)}` },
+      { title: 'Index', dataIndex: 'index', width: 90 },
+      { title: 'Side', dataIndex: 'side', width: 70, render: (v) => <span style={{ color: v === 'LONG' ? UP_COLOR : DOWN_COLOR }}>{v}</span> },
+      { title: 'Index in → out', key: 'f', width: 150, render: (_, t) => `${t.entry.toFixed(1)} → ${t.exit.toFixed(1)} (${pts(t.indexPoints)})` },
+      { title: 'Option: premium in → out', key: 'o', render: (_, t) => <Leg leg={t.opt} /> },
+      { title: 'Closed by', key: 'why', width: 210, render: (_, t) => <Text style={{ fontSize: 12 }}>{t.opt.reason}</Text> },
+    ]} />
+  )
+}
+
+/** A tuned setting in words: the trade / OI filters, and the option when it was tuned. */
+const settingText = (params, unit) => (params ? `${variantText(params)}${unit === 'pts' ? ` · ${optionText(params)}` : ''}` : '-')
+
 const when = (iso) => (iso ? new Date(iso).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '-')
 
 /** n · avg · total · win% of one side of a result. */
-function Score({ s }) {
+function Score({ s, unit = 'R' }) {
   if (!s?.n) return <Text type="secondary">no trades</Text>
+  const f = unit === 'pts' ? (v) => `${pts(v)} pts` : fmtR
   return (
     <span style={{ whiteSpace: 'nowrap' }}>
-      {s.n} trades · <b style={{ color: colR(s.avg) }}>{fmtR(s.avg)}</b>/trade · <span style={{ color: colR(s.total) }}>{fmtR(s.total)}</span> · win {pct(s.winRate)}
+      {s.n} trades · <b style={{ color: colR(s.avg) }}>{f(s.avg)}</b>/trade · <span style={{ color: colR(s.total) }}>{f(s.total)}</span> · win {pct(s.winRate)}
     </span>
   )
 }
@@ -98,7 +118,8 @@ export default function StrategyTuningPage() {
   const [oiFactors, setOiFactors] = useState(OI_FACTORS.map((f) => f.key))
   const [search, setSearch] = useState('step')
   const combos = useMemo(() => countOiCombinations(oiFactors), [oiFactors])
-  const tooMany = what !== 'trade' && search === 'full' && combos.over
+  const tunesOi = what !== 'trade' && what !== 'option' // the OI inputs are tuned (OI, OI then trade, everything)
+  const tooMany = tunesOi && search === 'full' && combos.over
   const [status, setStatus] = useState(null)
   const [result, setResult] = useState(null)
   const [resultError, setResultError] = useState(null)
@@ -155,10 +176,10 @@ export default function StrategyTuningPage() {
     { title: 'Win %', dataIndex: 'winRate', width: 66, render: pct },
     { title: <Tooltip title="Average R minus one standard error - rewards strategies that win consistently, not on one lucky day">Score</Tooltip>, dataIndex: 'score', width: 80, render: (v) => fmtR(v) },
   ]
-  const topColumns = [
-    { title: 'Setting', key: 'p', render: (_, row) => <span style={{ fontSize: 12 }}>{variantText(row.params)}</span> },
-    { title: 'Train (older days)', key: 'tr', render: (_, row) => <Score s={row.train} /> },
-    { title: 'Test (newest days)', key: 'te', render: (_, row) => <Score s={row.test} /> },
+  const topColumns = (unit) => [
+    { title: 'Setting', key: 'p', render: (_, row) => <span style={{ fontSize: 12 }}>{settingText(row.params, unit)}</span> },
+    { title: 'Train (older days)', key: 'tr', render: (_, row) => <Score s={row.train} unit={unit} /> },
+    { title: 'Test (newest days)', key: 'te', render: (_, row) => <Score s={row.test} unit={unit} /> },
   ]
 
   return (
@@ -195,8 +216,10 @@ export default function StrategyTuningPage() {
                 { value: 'both', label: <Tooltip title="The OI confirmation first, then the trade settings on top of the best one">OI, then trade</Tooltip> },
                 { value: 'oi', label: <Tooltip title="Options OI change (15 min) and since the open, futures OI, room to the next OI wall - the trade settings as they are">OI confirmation</Tooltip> },
                 { value: 'trade', label: <Tooltip title="Sides, entry window, stop / target size, time stop, trailing stop">Trade settings</Tooltip> },
+                { value: 'option', label: <Tooltip title="How it is taken in options: buy or sell, moneyness (ATM, 1-2 ITM, 1-2 OTM), and the option's own SL / target as a % of its premium - checked minute by minute on the premium, scored in premium points">Option trade</Tooltip> },
+                { value: 'all', label: <Tooltip title="The OI confirmation, then the trade settings on top, then the option trade on top of those">Everything</Tooltip> },
               ]} /></Space></Col>
-              {what !== 'trade' && (
+              {tunesOi && (
                 <Col flex="1 1 100%">
                   <Space size={6} wrap align="start">
                     <Text>OI to tune</Text>
@@ -222,7 +245,7 @@ export default function StrategyTuningPage() {
               <Col>
                 {running
                   ? <Popconfirm title="Stop the tuning job?" onConfirm={cancel} disabled={!isAdmin}><Button danger disabled={!isAdmin}>Stop</Button></Popconfirm>
-                  : <Button type="primary" onClick={start} disabled={!isAdmin || (pick === 'custom' && !custom.length) || (what !== 'trade' && !oiFactors.length) || tooMany}>Run tuning</Button>}
+                  : <Button type="primary" onClick={start} disabled={!isAdmin || (pick === 'custom' && !custom.length) || (tunesOi && !oiFactors.length) || tooMany}>Run tuning</Button>}
               </Col>
             </Row>
             {!isAdmin && <Alert type="info" showIcon message="Only an admin can run a tuning job or apply a result." />}
@@ -240,7 +263,7 @@ export default function StrategyTuningPage() {
         {result && (
           <>
             <Card size="small" title={`${result.underlying} · ${result.days?.length ?? 0} day(s) · finished ${when(result.finishedUtc)}`}
-              extra={<Text type="secondary" style={{ fontSize: 11 }}>{result.what ? `tuned: ${{ both: 'OI, then trade', oi: 'OI confirmation', trade: 'trade settings' }[result.what] ?? result.what} · ` : ''}{result.days?.filter((d) => d.estimated).length ? `${result.days.filter((d) => d.estimated).length} estimated day(s) · ` : ''}min {result.minTrades} trades · {result.days?.[result.days.length - 1]?.date} to {result.days?.[0]?.date}</Text>}>
+              extra={<Text type="secondary" style={{ fontSize: 11 }}>{result.what ? `tuned: ${{ both: 'OI, then trade', oi: 'OI confirmation', trade: 'trade settings', option: 'option trade', all: 'everything' }[result.what] ?? result.what} · ` : ''}{result.days?.filter((d) => d.estimated).length ? `${result.days.filter((d) => d.estimated).length} estimated day(s) · ` : ''}min {result.minTrades} trades · {result.days?.[result.days.length - 1]?.date} to {result.days?.[0]?.date}</Text>}>
               {result.data === 'spot' && <Alert type="info" showIcon style={{ marginBottom: 8 }} message="Spot + options only: the index candles and the option chain's OI, no futures and no order flow. Points are index points; the option bought and sold are priced beside them. The live scanner does not run these strategies yet, so there is nothing to apply - this measures what they would have done." />}
               {result.skipped?.length > 0 && <Alert type="warning" showIcon style={{ marginBottom: 8 }} message={`${result.skipped.length} day(s) could not be scanned`} description={result.skipped.slice(0, 5).map((s) => `${s.date}: ${s.reason}`).join(' · ')} />}
               <Table size="small" rowKey="id" columns={rankedColumns} dataSource={result.ranked ?? []} pagination={false} scroll={{ y: 320 }} />
@@ -249,7 +272,7 @@ export default function StrategyTuningPage() {
               <Card key={r.id} size="small"
                 title={<Space size={8} wrap><span>#{r.no} {r.name}</span>{r.belowMin ? <Tag color="default">below the minimum trades</Tag> : r.recommend ? <Tag color="success">recommended</Tag> : <Tag color="warning">keep as written</Tag>}</Space>}
                 extra={isAdmin && r.best && !spot && (
-                  <Popconfirm title={`Apply to #${r.no} ${r.name}?`} description={r.recommend ? variantText(r.best.params) : `Not recommended: ${r.reason}. Apply anyway?`} okText="Apply" onConfirm={() => apply(r)}>
+                  <Popconfirm title={`Apply to #${r.no} ${r.name}?`} description={`${r.recommend ? variantText(r.best.params) : `Not recommended: ${r.reason}. Apply anyway?`}${r.unit === 'pts' ? ' (The option part - moneyness, SL / target - is set in Trade settings; see the line under the table.)' : ''}`} okText="Apply" onConfirm={() => apply(r)}>
                     <Button size="small" type={r.recommend ? 'primary' : 'default'}>Apply to the scanner</Button>
                   </Popconfirm>
                 )}>
@@ -257,21 +280,24 @@ export default function StrategyTuningPage() {
                   <Text style={{ fontSize: 12 }}>{r.reason}. Chosen on {r.trainDays?.length} day(s) ({r.trainDays?.[0]} to {r.trainDays?.at(-1)}), checked on {r.testDays?.length} ({r.testDays?.[0] ?? '-'} to {r.testDays?.at(-1) ?? '-'}). {r.belowMin ? `${r.qualified} of ${r.tried} settings had 2+ trades; none had ${r.minTradesWanted ?? result.minTrades}+.` : `${r.qualified} of ${r.tried} settings had ${result.minTrades}+ trades.`}</Text>
                   <Table size="small" pagination={false} rowKey="k" columns={[
                     { title: '', dataIndex: 'k', width: 120, render: (k) => <b>{k}</b> },
-                    { title: 'Setting', key: 'p', render: (_, row) => <span style={{ fontSize: 12 }}>{row.params ? variantText(row.params) : '-'}</span> },
-                    { title: 'Train (older days)', key: 'tr', render: (_, row) => <Score s={row.train} /> },
-                    { title: 'Test (newest days)', key: 'te', render: (_, row) => <Score s={row.test} /> },
+                    { title: 'Setting', key: 'p', render: (_, row) => <span style={{ fontSize: 12 }}>{settingText(row.params, r.unit)}</span> },
+                    { title: 'Train (older days)', key: 'tr', render: (_, row) => <Score s={row.train} unit={r.unit} /> },
+                    { title: 'Test (newest days)', key: 'te', render: (_, row) => <Score s={row.test} unit={r.unit} /> },
                   ]} dataSource={[{ k: 'As written', ...r.baseline }, ...(r.best ? [{ k: 'Best setting', ...r.best }] : [])]} />
-                  <PointsSummary index={result.underlying} rows={[{ k: 'As written', points: r.baseline?.points }, ...(r.best ? [{ k: 'Best setting', points: r.best.points }] : [])]} />
+                  <PointsSummary index={result.underlying} option={r.unit === 'pts'} rows={[{ k: r.unit === 'pts' ? 'As before' : 'As written', points: r.baseline?.points }, ...(r.best ? [{ k: 'Best setting', points: r.best.points }] : [])]} />
+                  {r.best?.suggest && (
+                    <Alert type="info" showIcon message={`To trade it like this: ${r.best.suggest.leg.toUpperCase()} ${r.best.suggest.moneyness === 0 ? 'ATM' : `${Math.abs(r.best.suggest.moneyness)} strike(s) ${r.best.suggest.moneyness > 0 ? 'ITM' : 'OTM'}`}, option SL about ${r.best.suggest.slPoints.toFixed(1)} and target about ${r.best.suggest.targetPoints.toFixed(1)} premium points (on a typical entry premium of ${r.best.suggest.premium.toFixed(1)}) - set them in Trade settings.`} />
+                  )}
                   {r.best?.trades?.length > 0 && (
                     <details>
                       <summary style={{ cursor: 'pointer', fontSize: 12 }}>The {r.best.trades.length} trades of the best setting: index, futures and option prices in and out, points</summary>
-                      <div style={{ marginTop: 6 }}><TradesTable trades={r.best.trades} /></div>
+                      <div style={{ marginTop: 6 }}>{r.unit === 'pts' ? <OptionTradesTable trades={r.best.trades} /> : <TradesTable trades={r.best.trades} />}</div>
                     </details>
                   )}
                   {r.top?.length > 1 && (
                     <details>
                       <summary style={{ cursor: 'pointer', fontSize: 12 }}>The {r.top.length} best settings on the train days</summary>
-                      <Table size="small" pagination={false} rowKey={(row) => variantText(row.params)} columns={topColumns} dataSource={r.top} style={{ marginTop: 6 }} />
+                      <Table size="small" pagination={false} rowKey={(row) => settingText(row.params, r.unit)} columns={topColumns(r.unit)} dataSource={r.top} style={{ marginTop: 6 }} />
                     </details>
                   )}
                 </Space>
