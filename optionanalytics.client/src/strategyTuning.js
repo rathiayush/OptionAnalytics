@@ -64,6 +64,20 @@ export const OI_FACTORS = [
   { key: 'tradeDayType', label: 'Day type: trending (my way), range, not against a trend' },
   { key: 'tradeWallRoom', label: 'Room to the next OI wall (support / resistance)' },
 ]
+/** The most OI combinations one "every combination" search will try (each is a pass over the train days). */
+export const OI_COMBO_CAP = 50_000
+
+/** How many OI combinations "every combination" would try with the OI inputs `keys` ticked (the combinations where a
+ *  timeframe changes nothing left out) - counted up to `cap`, `over` when there are more. */
+export function countOiCombinations(keys, cap = OI_COMBO_CAP) {
+  let count = 0
+  for (const v of variants(oiGridOf(keys), DEFAULT_VARIANT)) {
+    if (oiVariantRedundant(v)) continue
+    if (++count > cap) return { count: cap, over: true }
+  }
+  return { count, over: false }
+}
+
 /** OI_GRID restricted to `keys` (unknown keys ignored; none given = all of them). */
 export const oiGridOf = (keys) => {
   const chosen = Array.isArray(keys) ? OI_FACTORS.map((f) => f.key).filter((k) => keys.includes(k)) : OI_FACTORS.map((f) => f.key)
@@ -185,10 +199,10 @@ export function rankStrategies(days, { trail = null, minTrades = 8, ids = ACTIVE
  * (baseline) and the best combination - chosen on the train days, checked on the test days - with the top
  * `keep` combinations, and whether the best one is worth applying.
  */
-export function tuneStrategy(days, id, { trail = null, minTrades = 8, trainFraction = 0.7, grid = null, keep = 10, what = 'trade', base = DEFAULT_VARIANT, oiKeys = null } = {}) {
+export function tuneStrategy(days, id, { trail = null, minTrades = 8, trainFraction = 0.7, grid = null, keep = 10, what = 'trade', base = DEFAULT_VARIANT, oiKeys = null, search = 'step', onProgress = null } = {}) {
   if (what === 'both') {
     // The OI confirmation first (chosen on the train days only), then the trade settings on top of it.
-    const oi = tuneStrategy(days, id, { trail, minTrades, trainFraction, keep, what: 'oi', base, oiKeys })
+    const oi = tuneStrategy(days, id, { trail, minTrades, trainFraction, keep, what: 'oi', base, oiKeys, search, onProgress })
     const onTop = tuneStrategy(days, id, { trail, minTrades, trainFraction, keep, what: 'trade', base: oi.best?.params ?? base })
     return { ...onTop, what, tried: oi.tried + onTop.tried, qualified: oi.qualified + onTop.qualified, oiStage: { best: oi.best, reason: oi.reason } }
   }
@@ -198,17 +212,25 @@ export function tuneStrategy(days, id, { trail = null, minTrades = 8, trainFract
   const baseline = { params: DEFAULT_VARIANT, train: scoreR(run(train, id, DEFAULT_VARIANT, trail)), test: scoreR(run(test, id, DEFAULT_VARIANT, trail)) }
   let rows = []
   let tried = 0
-  if (what === 'oi' && !explicitGrid) {
+  if (what === 'oi' && !explicitGrid && search !== 'full') {
     // Step by step (stepSearch): each OI filter takes its best value given the others, then a second pass.
     const found = stepSearch(grid, base, (v) => scoreR(run(train, id, v, trail)), { minTrades })
     rows = found.rows
     tried = found.tried
   } else {
+    // Every combination (the trade settings always; the OI inputs when asked: search 'full').
+    let of = null
+    if (what === 'oi' && !explicitGrid) {
+      const n = countOiCombinations(oiKeys)
+      if (n.over) throw new Error(`more than ${OI_COMBO_CAP.toLocaleString('en-IN')} OI combinations - untick some OI inputs, or search step by step`)
+      of = n.count
+    }
     for (const v of variants(grid, base)) {
       // The timeframe only means something with an OI change or futures OI filter on; without one, 1 / 3 / 5 / 15
       // are the same trades - tried once (at 15).
       if (oiVariantRedundant(v)) continue
       tried++
+      if (onProgress && tried % 250 === 0) onProgress({ tried, of })
       const tr = scoreR(run(train, id, v, trail))
       if (tr.n < minTrades || tr.score == null) continue
       rows.push({ params: v, train: tr })

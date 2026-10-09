@@ -329,3 +329,29 @@ test('every setup records CE / PE rising or falling, the day type, up to its own
     assert.equal(c.dayType, s.regime.type, 'the same day type the setup is tagged with')
   }
 })
+
+test('every combination: counts, the cap, and it finds at least what step by step finds', async () => {
+  const { countOiCombinations, OI_COMBO_CAP } = await import('../src/strategyTuning.js')
+  assert.deepEqual(countOiCombinations(['tradeFutOi']), { count: OI_GRID.tradeFutOi.length, over: false })
+  assert.deepEqual(countOiCombinations(['tradeOiFlow', 'tradeOiCum']), { count: 9, over: false })
+  // A timeframe changes nothing alone: flow (3) x window (4) is 1 + 2 x 4 = 9, not 12.
+  assert.equal(countOiCombinations(['tradeOiFlow', 'tradeOiWindow']).count, 9)
+  const all = countOiCombinations(null)
+  assert.equal(all.over, true)
+  assert.equal(all.count, OI_COMBO_CAP)
+  const days0 = await scanDaySetups({ ...base, filters: {}, keepAll: true })
+  const days = Array.from({ length: 6 }, (_, i) => tuningDay(`2026-09-1${i}`, days0, replayDay))
+  const id = days0[0].id
+  const keys = ['tradeOiFlow', 'tradeSideOi', 'tradeFutOi', 'tradeOiWindow']
+  const seen = []
+  const full = tuneStrategy(days, id, { what: 'oi', minTrades: 2, oiKeys: keys, search: 'full', onProgress: (p) => seen.push(p) })
+  const step = tuneStrategy(days, id, { what: 'oi', minTrades: 2, oiKeys: keys })
+  assert.equal(full.tried, countOiCombinations(keys).count, 'every combination was tried')
+  assert.ok(step.tried < full.tried)
+  assert.ok((full.top[0]?.train.score ?? -Infinity) >= (step.top[0]?.train.score ?? -Infinity), 'the full search finds at least as good on the train days')
+  // Too many: refuses, naming what to do.
+  assert.throws(() => tuneStrategy(days, id, { what: 'oi', minTrades: 2, search: 'full' }), /untick some OI inputs/)
+  // The trade-only tuning never takes the OI search path.
+  assert.equal(tuneStrategy(days, id, { what: 'trade', minTrades: 2, grid: { tradeSide: ['both', 'long'] } }).tried, 2)
+  void seen
+})

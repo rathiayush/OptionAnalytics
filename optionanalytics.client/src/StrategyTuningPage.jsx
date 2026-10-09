@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, Button, Card, Checkbox, Col, InputNumber, Popconfirm, Progress, Row, Segmented, Select, Space, Switch, Table, Tag, Tooltip, Typography, message } from 'antd'
 import { NavBar, useAuth, UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import { ACTIVE_STRATEGIES, STRATEGY_BY_ID } from './strategyEngine.js'
-import { OI_FACTORS, variantText } from './strategyTuning.js'
+import { OI_COMBO_CAP, OI_FACTORS, countOiCombinations, variantText } from './strategyTuning.js'
 import { applyTunedFilters } from './scannerSettings.js'
 
 const { Title, Text } = Typography
@@ -40,6 +40,9 @@ export default function StrategyTuningPage() {
   const [minTrades, setMinTrades] = useState(8)
   const [what, setWhat] = useState('both')
   const [oiFactors, setOiFactors] = useState(OI_FACTORS.map((f) => f.key))
+  const [search, setSearch] = useState('step')
+  const combos = useMemo(() => countOiCombinations(oiFactors), [oiFactors])
+  const tooMany = what !== 'trade' && search === 'full' && combos.over
   const [status, setStatus] = useState(null)
   const [result, setResult] = useState(null)
   const [resultError, setResultError] = useState(null)
@@ -65,7 +68,7 @@ export default function StrategyTuningPage() {
 
   const running = status?.state === 'running'
   const start = async () => {
-    const body = { underlying, strategies: pick === 'custom' ? custom : pick, days, includeEstimated, minTrades, what, oiFactors }
+    const body = { underlying, strategies: pick === 'custom' ? custom : pick, days, includeEstimated, minTrades, what, oiFactors, search }
     const res = await fetch('/api/strategy-tuning/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     const json = await res.json().catch(() => null)
     if (!res.ok) { message.error(json?.error ?? `HTTP ${res.status}`); return }
@@ -83,8 +86,8 @@ export default function StrategyTuningPage() {
   }
 
   const p = status?.progress
-  const progressText = !p ? 'starting…' : p.stage === 'scan' ? `scanning ${p.day} (${p.done + 1} of ${p.total} days)` : p.stage === 'rank' ? 'ranking the strategies' : p.stage === 'tune' ? `tuning #${STRATEGY_BY_ID[p.strategy]?.no} ${STRATEGY_BY_ID[p.strategy]?.name ?? p.strategy} (${p.done + 1} of ${p.total})` : p.stage
-  const percent = !p ? 0 : p.stage === 'scan' ? Math.round((p.done / Math.max(1, p.total)) * 80) : p.stage === 'rank' ? 80 : p.stage === 'tune' ? 80 + Math.round((p.done / Math.max(1, p.total)) * 20) : 100
+  const progressText = !p ? 'starting…' : p.stage === 'scan' ? `scanning ${p.day} (${p.done + 1} of ${p.total} days)` : p.stage === 'rank' ? 'ranking the strategies' : p.stage === 'tune' ? `tuning #${STRATEGY_BY_ID[p.strategy]?.no} ${STRATEGY_BY_ID[p.strategy]?.name ?? p.strategy} (${p.done + 1} of ${p.total})${p.of ? `, ${p.tried.toLocaleString('en-IN')} of ${p.of.toLocaleString('en-IN')} OI combinations` : ''}` : p.stage
+  const percent = !p ? 0 : p.stage === 'scan' ? Math.round((p.done / Math.max(1, p.total)) * 80) : p.stage === 'rank' ? 80 : p.stage === 'tune' ? 80 + Math.round(((p.done + (p.of ? Math.min(1, p.tried / p.of) : 0)) / Math.max(1, p.total)) * 20) : 100
 
   const tuned = new Set((result?.results ?? []).map((r) => r.id))
   const rankedColumns = [
@@ -139,6 +142,18 @@ export default function StrategyTuningPage() {
                     <Text>OI to tune</Text>
                     <Checkbox.Group value={oiFactors} onChange={setOiFactors} disabled={running} options={OI_FACTORS.map((f) => ({ value: f.key, label: f.label }))} />
                   </Space>
+                  <div style={{ marginTop: 6 }}>
+                    <Space size={8} wrap>
+                      <Text>Search</Text>
+                      <Segmented value={search} onChange={setSearch} disabled={running} options={[
+                        { value: 'step', label: <Tooltip title="Each OI filter takes its best value given the others, then a second pass - a few hundred combinations, little chance of a lucky one">Step by step</Tooltip> },
+                        { value: 'full', label: <Tooltip title="Every combination of the ticked OI inputs, nothing skipped - slower, and with this many tries one can win by luck: trust it only where it also wins on the unseen days">Every combination</Tooltip> },
+                      ]} />
+                      {search === 'full' && (tooMany
+                        ? <Text type="danger">more than {OI_COMBO_CAP.toLocaleString('en-IN')} combinations - untick some OI inputs</Text>
+                        : <Text type="secondary">{combos.count.toLocaleString('en-IN')} OI combinations per strategy</Text>)}
+                    </Space>
+                  </div>
                 </Col>
               )}
               <Col><Space size={6}><Tooltip title="The most recent past days the server can replay"><Text>Days</Text></Tooltip><InputNumber min={1} max={250} value={days} onChange={(v) => v && setDays(v)} style={{ width: 80 }} disabled={running} /></Space></Col>
@@ -147,7 +162,7 @@ export default function StrategyTuningPage() {
               <Col>
                 {running
                   ? <Popconfirm title="Stop the tuning job?" onConfirm={cancel} disabled={!isAdmin}><Button danger disabled={!isAdmin}>Stop</Button></Popconfirm>
-                  : <Button type="primary" onClick={start} disabled={!isAdmin || (pick === 'custom' && !custom.length) || (what !== 'trade' && !oiFactors.length)}>Run tuning</Button>}
+                  : <Button type="primary" onClick={start} disabled={!isAdmin || (pick === 'custom' && !custom.length) || (what !== 'trade' && !oiFactors.length) || tooMany}>Run tuning</Button>}
               </Col>
             </Row>
             {!isAdmin && <Alert type="info" showIcon message="Only an admin can run a tuning job or apply a result." />}

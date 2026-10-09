@@ -18,7 +18,7 @@ import { scannerProfileOf, trailFor } from '../src/scannerCore.js'
 import { fetchPreviousSession } from '../src/profiles.js'
 import { expiryFlagOf } from '../src/liveFeeds.js'
 import { dayFromOrderFlow, scanDaySetups } from '../src/scanDay.js'
-import { OI_FACTORS, oiGridOf, rankStrategies, tuneStrategy, tuningDay, TUNING_GRID } from '../src/strategyTuning.js'
+import { OI_COMBO_CAP, OI_FACTORS, countOiCombinations, oiGridOf, rankStrategies, tuneStrategy, tuningDay, TUNING_GRID } from '../src/strategyTuning.js'
 import { DEFAULT_ROW_SIZES } from './indexScanner.mjs'
 
 const BASE = (process.env.RUNNER_BASE_URL ?? 'http://127.0.0.1:8080').replace(/\/$/, '')
@@ -29,6 +29,7 @@ const U = String(job.underlying ?? 'NIFTY').toUpperCase()
 const MAX_DAYS = Math.max(1, Math.min(250, Number(job.days) || 30))
 const MIN_TRADES = Math.max(2, Math.min(100, Number(job.minTrades) || 8))
 const WHAT = ['trade', 'oi', 'both'].includes(job.what) ? job.what : 'trade'
+const SEARCH = job.search === 'full' ? 'full' : 'step'
 const OI_KEYS = Array.isArray(job.oiFactors) && job.oiFactors.length ? job.oiFactors.filter((k) => OI_FACTORS.some((f) => f.key === k)) : null
 const startedUtc = new Date().toISOString()
 
@@ -63,6 +64,10 @@ function pastWeekdays(n) {
 }
 
 async function main() {
+  // "Every combination" of the ticked OI inputs must be a size that can be run - say so before scanning any day.
+  if (WHAT !== 'trade' && SEARCH === 'full' && countOiCombinations(OI_KEYS).over) {
+    throw new Error(`more than ${OI_COMBO_CAP.toLocaleString('en-IN')} OI combinations with those OI inputs - untick some, or search step by step`)
+  }
   const config = await api('/api/scanner-runner/config').catch(() => ({}))
   const cfg = { ...(config?.settings ?? {}) }
   const rowSize = cfg.orderFlow?.rowSizes?.[U] ?? DEFAULT_ROW_SIZES[U] ?? 1
@@ -122,10 +127,13 @@ async function main() {
   const results = []
   for (let i = 0; i < ids.length; i++) {
     progress({ stage: 'tune', strategy: ids[i], done: i, total: ids.length })
-    results.push(tuneStrategy(days, ids[i], { trail, minTrades: MIN_TRADES, what: WHAT, oiKeys: OI_KEYS }))
+    results.push(tuneStrategy(days, ids[i], {
+      trail, minTrades: MIN_TRADES, what: WHAT, oiKeys: OI_KEYS, search: SEARCH,
+      onProgress: (p) => progress({ stage: 'tune', strategy: ids[i], done: i, total: ids.length, ...p }),
+    }))
   }
   write({
-    ok: true, underlying: U, job, startedUtc, finishedUtc: new Date().toISOString(), rowSize, trail, minTrades: MIN_TRADES, what: WHAT, oiFactors: OI_KEYS ?? OI_FACTORS.map((f) => f.key),
+    ok: true, underlying: U, job, startedUtc, finishedUtc: new Date().toISOString(), rowSize, trail, minTrades: MIN_TRADES, what: WHAT, search: SEARCH, oiFactors: OI_KEYS ?? OI_FACTORS.map((f) => f.key),
     grid: WHAT === 'trade' ? TUNING_GRID : WHAT === 'oi' ? oiGridOf(OI_KEYS) : { ...oiGridOf(OI_KEYS), ...TUNING_GRID },
     days: days.map((d) => ({ date: d.date, estimated: d.estimated, setups: d.setups.length })), skipped, ranked, results,
     strategies: ACTIVE_STRATEGIES.length,
