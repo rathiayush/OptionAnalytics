@@ -22,9 +22,26 @@ public sealed class GoChartingTests : IDisposable
         public IFileProvider ContentRootFileProvider { get; set; } = null!;
     }
 
-    private GoChartingStore Store(string? token = null) => new(new FakeHostEnvironment { ContentRootPath = _dir },
-        new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["Storage:GoChartingPath"] = _dir, ["GoCharting:WebhookToken"] = token }).Build(),
+    private GoChartingStore Store(string? token = null, string? sdkKey = null) => new(new FakeHostEnvironment { ContentRootPath = _dir },
+        new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["Storage:GoChartingPath"] = _dir, ["GoCharting:WebhookToken"] = token, ["GoCharting:SdkLicenseKey"] = sdkKey }).Build(),
         NullLogger<GoChartingStore>.Instance);
+
+    [Fact]
+    public void TheSdkLicenseKey_IsSavedOnce_ConfigWins_AndBadKeysAreRefused()
+    {
+        var store = Store();
+        Assert.Null(store.SdkLicenseKey);
+        Assert.NotNull(store.SaveSdkLicenseKey("bad key with spaces"));
+        Assert.NotNull(store.SaveSdkLicenseKey("short"));
+        Assert.Null(store.SaveSdkLicenseKey(" abcd1234-ef56-7890 "));
+        Assert.Equal("abcd1234-ef56-7890", Store().SdkLicenseKey);
+        Assert.False(store.SdkLicenseKeyFromConfig);
+        Assert.Equal("cfg-key-12345678", Store(sdkKey: "cfg-key-12345678").SdkLicenseKey);
+        Assert.True(Store(sdkKey: "cfg-key-12345678").SdkLicenseKeyFromConfig);
+        Assert.Null(store.SaveSdkLicenseKey(""));
+        Assert.Null(Store().SdkLicenseKey);
+        Assert.Equal("https://gocharting.com/sdk/library/abcd1234-ef56/index.umd.js", GoChartingStore.SdkScriptUrl("abcd1234-ef56"));
+    }
 
     [Fact]
     public void TheScriptsMessage_IsParsed()

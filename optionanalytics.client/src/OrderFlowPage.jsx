@@ -20,7 +20,7 @@ import { PriceAlertsBar, usePriceAlerts } from './PriceAlerts.jsx'
 import { ProfileAlertsBar, useProfileAlerts } from './ProfileAlerts.jsx'
 import { ServerScannerCard } from './ServerScanner.jsx'
 import { GoChartingPanel, useGoCharting } from './GoChartingPanel.jsx'
-import { goChartingByBar } from './goCharting.js'
+import { GoChartingFootprint } from './GoChartingFootprint.jsx'
 import { fetchPreviousSession, sessionVolumeProfile, tpoProfile, tpoRowFor } from './profiles.js'
 import { withBackfill } from './cvdBackfill.js'
 import { TAPE_PRINTS, applyOrderFlowPush, mergePrints, orderFlowFromSnapshot, toColumn } from './liveFeeds.js'
@@ -447,7 +447,6 @@ export default function OrderFlowPage() {
   // (TPO) from the previous session plus today's developing one.
   const sessionDate = isReplay ? replayDate : todayKey()
   const goCharting = useGoCharting(underlying, sessionDate, goChartingOn, !isReplay, view?.minuteBars, lotSize)
-  const goChartingBars = useMemo(() => (goChartingOn ? goChartingByBar(shown.bars, goCharting.bars, timeframe, goCharting.scale) : null), [goChartingOn, shown.bars, goCharting.bars, timeframe, goCharting.scale])
   const [prevSession, setPrevSession] = useState({ key: null, data: null, loading: false })
   useEffect(() => {
     if (!sessionDate) return undefined
@@ -827,18 +826,31 @@ export default function OrderFlowPage() {
           <Col xs={24} xl={17}>
             <Card size="small" title={`Footprint · ${timeframe} min · ${rowSize} pt rows${estimated ? ' · estimated' : ''}`}
               extra={<Space size={10}>
-                <Tooltip title="Show GoCharting's own delta and cumulative delta under each bar (sent by its alert webhook), with ours vs theirs below"><Checkbox checked={goChartingOn} onChange={(e) => setGoChartingOn(e.target.checked)} aria-label="GoCharting">GoCharting</Checkbox></Tooltip>
+                <Tooltip title="Show GoCharting's footprint chart (their chart, fed with our data) in place of ours"><Checkbox checked={goChartingOn} onChange={(e) => setGoChartingOn(e.target.checked)} aria-label="GoCharting">GoCharting</Checkbox></Tooltip>
                 {!narrow && <Text type="secondary" style={{ fontSize: 11 }}>bid (sell) × ask (buy) · drag to move it anywhere · wheel: bar width · Shift+wheel or price axis: row height · double-click: reset</Text>}
               </Space>}>
               <PriceAlertsBar {...priceAlerts} lastPrice={meta?.lastPrice} live={!isReplay} />
               <ProfileAlertsBar {...profileAlerts} live={!isReplay} />
               <FootprintLegend estimated={estimated} bigLabel={bigLabel} />
-              <FootprintChart
-                bars={shown.bars} rowSize={rowSize} lotSize={lotSize} showLots={showLots} lastPrice={meta?.lastPrice} height={narrow ? 480 : 660}
-                profile={profile} runningProfile={showProfile ? todayVp : null} trades={largeTrades} timeframe={timeframe} bigLabel={bigLabel} alerts={priceAlerts.alerts} levels={suddenLevels} vwap={footprintVwap}
-                external={goChartingBars}
-              />
-              {goChartingOn && <GoChartingPanel gc={goCharting} bars={shown.bars} timeframe={timeframe} lotSize={lotSize} showLots={showLots} isAdmin={auth?.user?.role === 'Admin'} underlying={underlying} />}
+              {goChartingOn
+                ? (
+                  <GoChartingFootprint
+                    underlying={underlying} meta={meta} minuteBars={view?.minuteBars} prints={tapePrints} nowMs={isReplay ? replayMs : null} isReplay={isReplay}
+                    isAdmin={auth?.user?.role === 'Admin'} height={narrow ? 480 : 660} chartKey={`${underlying}:${meta?.contractSymbol ?? ''}:${isReplay ? replayDate : 'live'}`}
+                  />
+                )
+                : (
+                  <FootprintChart
+                    bars={shown.bars} rowSize={rowSize} lotSize={lotSize} showLots={showLots} lastPrice={meta?.lastPrice} height={narrow ? 480 : 660}
+                    profile={profile} runningProfile={showProfile ? todayVp : null} trades={largeTrades} timeframe={timeframe} bigLabel={bigLabel} alerts={priceAlerts.alerts} levels={suddenLevels} vwap={footprintVwap}
+                  />
+                )}
+              {goChartingOn && (
+                <details style={{ marginTop: 8 }}>
+                  <summary style={{ cursor: 'pointer', fontSize: 12 }}>GoCharting alert bridge (optional) - GoCharting&apos;s own per-bar delta vs ours</summary>
+                  <GoChartingPanel gc={goCharting} bars={shown.bars} timeframe={timeframe} lotSize={lotSize} showLots={showLots} isAdmin={auth?.user?.role === 'Admin'} underlying={underlying} />
+                </details>
+              )}
               {profile?.poc != null && (
                 <Text type="secondary" style={{ fontSize: 11 }}>
                   Volume profile of the previous session ({prevSession.data?.date}): POC {profile.poc} · value area {profile.val}–{profile.vah} (70% of volume)

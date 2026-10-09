@@ -23,9 +23,11 @@ public sealed class GoChartingStore
     private readonly Dictionary<(string U, DateOnly Day), SortedDictionary<long, GoChartingBar>> _days = new();
     private readonly ILogger<GoChartingStore> _logger;
     private readonly string _token;
+    private readonly IConfiguration _configuration;
 
     public GoChartingStore(IHostEnvironment environment, IConfiguration configuration, ILogger<GoChartingStore> logger)
     {
+        _configuration = configuration;
         var configured = configuration["Storage:GoChartingPath"];
         var path = string.IsNullOrWhiteSpace(configured) ? "gocharting" : configured;
         _dir = Path.IsPathRooted(path) ? path : Path.Combine(environment.ContentRootPath, path);
@@ -33,6 +35,38 @@ public sealed class GoChartingStore
         Directory.CreateDirectory(_dir);
         _token = configuration["GoCharting:WebhookToken"] is { Length: >= 16 } fromConfig ? fromConfig : LoadOrCreateToken();
     }
+
+    /// <summary>The GoCharting chart SDK license key (the Order Flow page loads GoCharting's footprint chart with it):
+    /// GoCharting:SdkLicenseKey, else the one an admin saved (sdk-license.txt). Null when there is none. The key is
+    /// not a secret from the browser - it is in the script URL GoCharting hosts the SDK at.</summary>
+    public string? SdkLicenseKey
+    {
+        get
+        {
+            if (_configuration["GoCharting:SdkLicenseKey"] is { Length: > 0 } configured) return configured.Trim();
+            var file = Path.Combine(_dir, "sdk-license.txt");
+            try { return File.Exists(file) && File.ReadAllText(file).Trim() is { Length: > 0 } saved ? saved : null; }
+            catch { return null; }
+        }
+    }
+
+    public bool SdkLicenseKeyFromConfig => _configuration["GoCharting:SdkLicenseKey"] is { Length: > 0 };
+
+    public static bool IsValidSdkLicenseKey(string? key) => key is { Length: >= 8 and <= 120 } && Regex.IsMatch(key, "^[A-Za-z0-9_-]+$");
+
+    /// <summary>Saves (or with null / empty clears) the SDK license key an admin entered. Returns an error or null.</summary>
+    public string? SaveSdkLicenseKey(string? key)
+    {
+        var file = Path.Combine(_dir, "sdk-license.txt");
+        if (string.IsNullOrWhiteSpace(key)) { if (File.Exists(file)) File.Delete(file); return null; }
+        key = key.Trim();
+        if (!IsValidSdkLicenseKey(key)) return "That does not look like a GoCharting SDK license key (letters, digits and dashes, 8-120 characters).";
+        File.WriteAllText(file, key);
+        return null;
+    }
+
+    /// <summary>Where GoCharting hosts the SDK for a license key.</summary>
+    public static string SdkScriptUrl(string key) => $"https://gocharting.com/sdk/library/{Uri.EscapeDataString(key)}/index.umd.js";
 
     /// <summary>The secret in the webhook URL (GoCharting cannot send a login) - GoCharting:WebhookToken, else
     /// generated once and kept in webhook-token.txt.</summary>

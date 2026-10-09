@@ -56,6 +56,29 @@ public sealed class GoChartingController : ControllerBase
     public IActionResult Day(string underlying, DateOnly date) =>
         Ok(new { underlying = underlying.ToUpperInvariant(), date, bars = _store.Day(underlying, date), lastReceivedUtc = _store.LastReceivedUtc });
 
+    /// <summary>GET /api/gocharting/sdk - GoCharting's chart SDK for the Order Flow page's GoCharting footprint:
+    /// its license key and script URL, or configured=false.</summary>
+    [HttpGet("sdk")]
+    public IActionResult Sdk()
+    {
+        var key = _store.SdkLicenseKey;
+        return Ok(key is null
+            ? new { configured = false, licenseKey = (string?)null, scriptUrl = (string?)null, fromConfig = false }
+            : new { configured = true, licenseKey = (string?)key, scriptUrl = (string?)GoChartingStore.SdkScriptUrl(key), fromConfig = _store.SdkLicenseKeyFromConfig });
+    }
+
+    public sealed record SdkKeyRequest(string? LicenseKey);
+
+    /// <summary>PUT /api/gocharting/sdk - an admin saves (or clears) the SDK license key GoCharting issued.</summary>
+    [HttpPut("sdk")]
+    [Authorize(Roles = AuthRoles.Admin)]
+    public IActionResult SaveSdk([FromBody] SdkKeyRequest request)
+    {
+        if (_store.SdkLicenseKeyFromConfig) return Conflict(new { error = "The key is set in the server configuration (GoCharting:SdkLicenseKey) - change it there." });
+        var error = _store.SaveSdkLicenseKey(request?.LicenseKey);
+        return error is null ? Sdk() : BadRequest(new { error });
+    }
+
     /// <summary>GET /api/gocharting/setup - what to paste into GoCharting: the webhook URL and the Lipi script.</summary>
     [HttpGet("setup")]
     [Authorize(Roles = AuthRoles.Admin)]
