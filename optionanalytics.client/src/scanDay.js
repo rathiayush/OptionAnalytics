@@ -5,7 +5,6 @@
 import { evaluateStrategies, simulateOutcome } from './strategyEngine.js'
 import { liquiditySignals, pullStackSignals, replayRange, replayView } from './orderFlowMath.js'
 import { MIN, COOLDOWN_MS, completedBars, priceAt, upTo, trailOf } from './scannerCore.js'
-import { withGoChartingDelta } from './goCharting.js'
 import { toColumn } from './liveFeeds.js'
 
 /** The replay day the Order Flow page builds from GET /api/order-flow/{u}/day/{date}. */
@@ -23,7 +22,7 @@ export function dayFromOrderFlow(body, date, underlying) {
  * trailing stop (`trail`, or its strategy's own). `until` - stop at that clock (today so far).
  * Returns the setups (no outcomes).
  */
-export async function scanDaySetups({ day, prints, oi, profile, rowSize, lotSize, largeLots, estimated, filters, trail = null, goCharting = null, until = null, keepAll = false }, onProgress = null) {
+export async function scanDaySetups({ day, prints, oi, profile, rowSize, lotSize, largeLots, estimated, filters, trail = null, until = null, keepAll = false }, onProgress = null) {
   const range = replayRange(day)
   if (!range) return []
   const found = []
@@ -33,8 +32,7 @@ export async function scanDaySetups({ day, prints, oi, profile, rowSize, lotSize
   for (let i = 0; i <= steps; i++) {
     const clock = start + i * MIN
     const v = replayView(day, clock)
-    const own = completedBars(v.minuteBars, clock, rowSize, lotSize, estimated)
-    const bars = goCharting?.bars?.length ? withGoChartingDelta(own, goCharting.bars, clock, { scale: goCharting.scale ?? 1 }).bars : own
+    const bars = completedBars(v.minuteBars, clock, rowSize, lotSize, estimated)
     if (bars.length >= 5) {
       const cols = v.heatmap.slice(-300)
       const liq = estimated ? [] : liquiditySignals({ columns: cols, trades: v.trades, minuteBars: v.minuteBars, rowSize, lotSize })

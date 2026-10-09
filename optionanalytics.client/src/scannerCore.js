@@ -2,7 +2,6 @@
 // server-side scanner runner (scanner-runner/), so both fire, trade and close exactly the same way.
 // Everything here is pure: no storage, no timers, no network; the caller owns state and side effects.
 
-import { withGoChartingDelta } from './goCharting.js'
 import {
   ACTIVE_STRATEGIES, STRATEGY_BY_ID, evaluateStrategies, simulateOutcome, DEFAULT_TRAIL, RANGE_IDS,
   exitLabel, premiumAt, optionStopTargetHit, squareOffMs,
@@ -98,17 +97,13 @@ export const sameSignal = (p, setup, trade) => p.strategy === setup.id && p.setu
  * once - no strategy waits for a cool-off.
  */
 export function scanTick(input, memory) {
-  const { nowMs, view, tapePrints, liquidity, pullStack, oi, estimated, lotSize, largeLots, profile, rowSize, filters, trail, goCharting } = input
+  const { nowMs, view, tapePrints, liquidity, pullStack, oi, estimated, lotSize, largeLots, profile, rowSize, filters, trail } = input
   if (!oi || !view?.minuteBars?.length || !nowMs) return null
   // An exact day's tape must have caught up with the clock (a replay jump fetches it afresh) -
   // judging aggression on a stale tape would be judging the wrong minute.
   if (!estimated && !(tapePrints?.length && msOf(tapePrints.at(-1).time) >= nowMs - 3 * MIN)) return null
-  const own = completedBars(view.minuteBars, nowMs, rowSize, lotSize, estimated)
-  if (own.length < 5) return null
-  // "Delta from GoCharting" (input.goCharting = its 1-minute bars): its delta / cumulative delta replace ours
-  // while it has every recent bar; otherwise ours, unchanged.
-  const gc = goCharting?.bars?.length ? withGoChartingDelta(own, goCharting.bars, nowMs, { scale: goCharting.scale ?? 1 }) : null
-  const bars = gc?.used ? gc.bars : own
+  const bars = completedBars(view.minuteBars, nowMs, rowSize, lotSize, estimated)
+  if (bars.length < 5) return null
   const price = priceAt(view, estimated ? null : tapePrints, nowMs, bars)
   const watchNow = []
   const setups = evaluateStrategies({
@@ -118,10 +113,8 @@ export function scanTick(input, memory) {
   })
   const watching = watchNow.filter((w) => w.missing.length)
   const recentlyFired = (s) => memory.fired.some((f) => f.id === s.id && f.side === s.side && s.t - f.t < COOLDOWN_MS)
-  const fresh = setups.filter((s) => !recentlyFired(s)).map((s) => (gc?.used
-    ? { ...s, trail: trailOf(s, trail), deltaSource: 'gocharting', checks: { ...s.checks, 'Order flow': 'bar delta and cumulative delta from GoCharting' } }
-    : { ...s, trail: trailOf(s, trail) }))
-  return { price, watching, fresh, fired: fresh.length ? [...memory.fired, ...fresh] : memory.fired, deltaSource: gc?.used ? 'gocharting' : 'own', goChartingNote: gc && !gc.used ? gc.reason : null }
+  const fresh = setups.filter((s) => !recentlyFired(s)).map((s) => ({ ...s, trail: trailOf(s, trail) }))
+  return { price, watching, fresh, fired: fresh.length ? [...memory.fired, ...fresh] : memory.fired }
 }
 
 // A setup's trailing stop: its strategy's own (the tradeTrail filter - applyTradeFilter's trailOverride, null =

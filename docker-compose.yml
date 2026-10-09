@@ -39,7 +39,6 @@ services:
       # Lots, SL / target / trail, slippage and server scanner on/off per index - the Trade settings page.
       Storage__TradeSettingsPath: /app/data/trade-settings.csv
       Storage__RiskSettingsPath: /app/data/risk-settings.csv
-      Storage__GoChartingPath: /app/data/gocharting
       # SCANNER_RUNNER_ENABLED=false keeps it from starting (no server-side signals / paper trades).
       ScannerRunner__Enabled: ${SCANNER_RUNNER_ENABLED:-true}
 

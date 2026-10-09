@@ -75,7 +75,7 @@ function zoomRows(l, factor, y, step, plotH) {
   return { top, rowH: Math.max(rowH, plotH / 2000) }
 }
 
-export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620, lastPrice, profile = null, runningProfile = null, trades = [], timeframe = 1, bigLabel = 'Big order', alerts = [], levels = [], vwap = null, external = null }) {
+export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620, lastPrice, profile = null, runningProfile = null, trades = [], timeframe = 1, bigLabel = 'Big order', alerts = [], levels = [], vwap = null }) {
   const wrapRef = useRef(null)
   const canvasRef = useRef(null)
   const width = useElementWidth(wrapRef)
@@ -99,9 +99,7 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
   const plotW = Math.max(0, width - FP_AXIS_W)
   const profileW = profile?.rows?.length ? (narrow ? 54 : 96) : 0
   const barsW = Math.max(0, plotW - profileW)
-  // GoCharting's own delta / cumulative delta per bar (`external`, Map<bar start ms, { delta, cvd }>) - two more lines.
-  const stripH = external ? FP_STRIP_H + 28 : FP_STRIP_H
-  const plotH = Math.max(50, height - stripH - FP_TIME_H - FP_TOP)
+  const plotH = Math.max(50, height - FP_STRIP_H - FP_TIME_H - FP_TOP)
 
   const span = barsW / Math.max(1, colWidth)
   const endIndexFor = useCallback((p) => {
@@ -281,7 +279,7 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
       clip(0, 0, barsW, height)
       const stripY = FP_TOP + plotH + 2
       ctx.fillStyle = 'rgba(255,255,255,0.03)'
-      ctx.fillRect(x0 + 1, stripY, colWidth - 2, stripH - 4)
+      ctx.fillRect(x0 + 1, stripY, colWidth - 2, FP_STRIP_H - 4)
       ctx.textAlign = 'center'
       ctx.textBaseline = 'middle'
       ctx.font = `600 12px ${FONT}`
@@ -293,14 +291,6 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
       ctx.font = `11px ${FONT}`
       ctx.fillStyle = AXIS_COLOR
       ctx.fillText(`Vol ${formatVolume(bar.volume, lotSize, showLots)}`, x0 + colWidth / 2, stripY + 37)
-      if (external) {
-        const g = external.get(Math.floor(barMs(bar) / 60_000) * 60_000)
-        ctx.font = `600 11px ${FONT}`
-        ctx.fillStyle = g?.delta == null ? AXIS_COLOR : g.delta >= 0 ? UP_COLOR : DOWN_COLOR
-        ctx.fillText(g?.delta == null ? 'GC Δ -' : `GC Δ ${g.delta >= 0 ? '+' : ''}${formatVolume(g.delta, lotSize, showLots)}`, x0 + colWidth / 2, stripY + 51)
-        ctx.fillStyle = g?.cvd == null ? AXIS_COLOR : g.cvd >= 0 ? '#7fd8cf' : '#f4a09e'
-        ctx.fillText(g?.cvd == null ? 'GC ΣΔ -' : `GC ΣΔ ${g.cvd >= 0 ? '+' : ''}${formatVolume(g.cvd, lotSize, showLots)}`, x0 + colWidth / 2, stripY + 65)
-      }
       if (colWidth >= 56 || k % 2 === 0) ctx.fillText(IST_HHMM.format(new Date(bar.time)), x0 + colWidth / 2, height - FP_TIME_H / 2)
       ctx.textAlign = 'left'
       ctx.strokeStyle = GRID_COLOR
@@ -486,7 +476,7 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
         ctx.fillText(priceText(lastPrice), plotW + 5, y)
       }
     }
-  }, [layout, width, height, plotW, barsW, profileW, profile, runningProfile, plotH, colWidth, step, lotSize, showLots, lastPrice, trades, timeframe, alerts, levels, vwap, external, stripH])
+  }, [layout, width, height, plotW, barsW, profileW, profile, runningProfile, plotH, colWidth, step, lotSize, showLots, lastPrice, trades, timeframe, alerts, levels, vwap])
 
   // The wheel listener is registered once; it reads the latest geometry through this.
   const geomRef = useRef({})
