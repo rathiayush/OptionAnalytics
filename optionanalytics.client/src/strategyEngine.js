@@ -198,7 +198,10 @@ export function oiGatePasses(s, f) {
   }
   const room = f.tradeWallRoom ?? 'any'
   if (room !== 'any') {
-    const wall = dir > 0 ? ctx?.resistance : ctx?.support
+    // The biggest wall strictly AHEAD of the price (a wall just broken sits behind it and is no obstacle);
+    // an older setup without it falls back to the wall the strategy saw.
+    const ahead = dir > 0 ? ctx?.resistanceAhead : ctx?.supportAhead
+    const wall = ahead !== undefined ? ahead : dir > 0 ? ctx?.resistance : ctx?.support
     if (Number.isFinite(wall) && Number.isFinite(ctx?.spot)) {
       const space = dir * (wall - ctx.spot)
       const need = room === 'target' ? Math.abs(s.target - s.entry) : Math.abs(s.entry - s.stop)
@@ -292,7 +295,8 @@ export function changedFilters(id, overrides) {
 function sortedSeries(points, lag = 0) {
   const byStrike = new Map()
   for (const p of points ?? []) {
-    if (p.openInterest == null) continue
+    // 0 is the feed's "no OI" reading, not an empty strike - a real one would read as everything unwound.
+    if (!(p.openInterest > 0)) continue
     const strike = Number(p.strike)
     if (!byStrike.has(strike)) byStrike.set(strike, [])
     byStrike.get(strike).push({ t: msOf(p.time) + lag, oi: p.openInterest, price: p.price, high: p.high ?? p.price, low: p.low ?? p.price })
@@ -517,8 +521,9 @@ export function optionStopTargetHit(oi, trade, entryMs, untilMs, slPoints, targe
     if (start < firstMinute) continue
     if (start + MIN > untilMs) break
     const high = p.high ?? p.price
-    const low = p.low ?? p.price
-    if (!(high > 0)) continue
+    // A 0 low is a packet without a price, never a premium that fell to nothing (it would hit every BUY stop).
+    const low = p.low > 0 ? p.low : p.price
+    if (!(high > 0) || !(low > 0)) continue
     let sl = slPoints
     let tgt = targetPoints
     let tr = trail
@@ -618,6 +623,17 @@ function wallsAt(oi, rows, spot) {
   const support = below.reduce((a, r) => (r.peOi > (a?.peOi ?? 0) ? r : a), null)
   const resistance = above.reduce((a, r) => (r.ceOi > (a?.ceOi ?? 0) ? r : a), null)
   return { support: support?.strike ?? null, resistance: resistance?.strike ?? null }
+}
+
+// The biggest CALL OI strike strictly above the spot and the biggest PUT OI strike strictly below it (within
+// 8 strikes) - the walls in a trade's way, whatever wall the price has just broken.
+function wallsAhead(oi, rows, spot) {
+  const near = rows.filter((r) => Math.abs(r.strike - spot) <= 8 * oi.step)
+  const above = near.filter((r) => r.strike > spot)
+  const below = near.filter((r) => r.strike < spot)
+  const resistance = above.reduce((a, r) => (r.ceOi > (a?.ceOi ?? 0) ? r : a), null)
+  const support = below.reduce((a, r) => (r.peOi > (a?.peOi ?? 0) ? r : a), null)
+  return { resistanceAhead: resistance?.strike ?? null, supportAhead: support?.strike ?? null }
 }
 
 // The strike with the biggest PUT (or CALL) OI ADDED since the open, as of `ms`.
@@ -825,7 +841,7 @@ export function evaluateStrategies(input) {
       oiCtx: {
         flow: optionRead?.lean ?? null, cum: optionRead?.leanOpen ?? null,
         futOiPct: futuresRead?.oiPct ?? null, futPricePct: futuresRead?.pricePct ?? null,
-        support, resistance, spot: spotNow,
+        support, resistance, spot: spotNow, ...wallsAhead(oi, rows, spotNow),
       },
       checks: {
         'Options OI': `${stance === 'agrees' ? 'writers back it' : stance === 'against' ? 'writers lean against (not a veto on this strategy)' : 'neutral'}${opts.stance === 'recent' ? ' (last 15 min)' : ''} - ${optionOiText(optionRead)}`,

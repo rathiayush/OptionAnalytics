@@ -110,7 +110,11 @@ export function upsertSeries(series, time, values) {
   if (!Number.isFinite(ms)) return false
   const t = Math.floor(ms / MIN) * MIN
   const last = series[series.length - 1]
-  const clean = Object.fromEntries(Object.entries(values).filter(([, v]) => v != null && Number.isFinite(v)))
+  // A price of 0 is a packet without one (never a premium at nothing) - it must not become a minute's low or close.
+  const PRICE_KEYS = ['price', 'close', 'high', 'low']
+  const clean = Object.fromEntries(Object.entries(values).filter(([k, v]) => v != null && Number.isFinite(v) && !(PRICE_KEYS.includes(k) && v <= 0)))
+  // A tick without OI that starts a new minute carries the last known OI - else the strike has no OI that minute.
+  if ('oi' in values && clean.oi == null && last?.oi != null && !(last.t === t)) clean.oi = last.oi
   if (last && last.t === t) {
     // Within the minute the range widens; everything else is the newest reading.
     if (clean.high != null && last.high != null) clean.high = Math.max(last.high, clean.high)
