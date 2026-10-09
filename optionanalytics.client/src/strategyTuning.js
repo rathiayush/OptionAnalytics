@@ -291,6 +291,12 @@ export function tuneStrategy(days, id, { trail = null, minTrades = 8, trainFract
   }
   rows.sort((a, b) => b.train.score - a.train.score || b.train.total - a.train.total)
   const top = rows.slice(0, keep).map((r) => ({ ...r, test: scoreR(run(test, id, r.params, trail)) }))
+  // Nothing reached the minimum trades: show what there is anyway - the best setting with even a couple of trades -
+  // marked "below the minimum", never recommended. (Under 2 trades there is no score to rank by.)
+  if (!top.length && minTrades > 2) {
+    const loose = tuneStrategy(days, id, { trail, minTrades: 2, trainFraction, grid: explicitGrid ? grid : null, keep, what, base, oiKeys, search, onProgress, underlying })
+    if (loose.best) return { ...loose, belowMin: true, minTradesWanted: minTrades, recommend: false, reason: `only ${loose.best.train.n} trade(s) on the ${train.length} train day(s), below the minimum of ${minTrades} - shown for information, not enough to trust` }
+  }
   let best = top[0] ?? null
   // What the best setting and the strategy as written captured, in points, on all the days.
   const detail = (params) => { const trades = tradeDetails(days, id, params, trail, underlying); return { points: pointsSummary(trades), trades } }

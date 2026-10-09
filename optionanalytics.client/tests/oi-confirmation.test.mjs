@@ -417,3 +417,26 @@ test('points captured: the index, futures in and out, and the option prices in a
   assert.equal(r.baseline.points.n, tradeDetails(days, id, DEFAULT_VARIANT, null, 'NIFTY').length)
   if (r.best) { assert.ok(r.best.trades.length > 0 && r.best.points.n === r.best.trades.length); assert.equal(r.best.trades[0].index, 'NIFTY') }
 })
+
+test('min trades: when no setting reaches it, the best found with fewer is shown, marked, never recommended', async () => {
+  const all = await scanDaySetups({ ...base, filters: {}, keepAll: true })
+  const id = all[0].id
+  const days = Array.from({ length: 6 }, (_, i) => tuningDay(`2026-09-1${i}`, all, replayDay, syn.oi))
+  const grid = { tradeSide: ['both', 'long', 'short'] }
+  const strict = tuneStrategy(days, id, { what: 'trade', minTrades: 500, grid, underlying: 'NIFTY' })
+  assert.equal(strict.belowMin, true)
+  assert.ok(strict.best, 'something is shown')
+  assert.ok(strict.best.train.n >= 2 && strict.best.train.n < 500)
+  assert.equal(strict.recommend, false)
+  assert.match(strict.reason, /below the minimum of 500/)
+  assert.equal(strict.minTradesWanted, 500)
+  assert.ok(strict.best.trades.length > 0 && strict.best.points.n === strict.best.trades.length, 'the trades and points are there')
+  // With a minimum it can meet, nothing changes: not marked, and recommended as before.
+  const ok = tuneStrategy(days, id, { what: 'trade', minTrades: 2, grid, underlying: 'NIFTY' })
+  assert.ok(!ok.belowMin)
+  assert.ok(ok.best)
+  // The same for the OI search, with a strategy that fired only a little.
+  const oi = tuneStrategy(days, id, { what: 'oi', minTrades: 500, underlying: 'NIFTY' })
+  assert.equal(oi.belowMin, true)
+  assert.equal(oi.recommend, false)
+})

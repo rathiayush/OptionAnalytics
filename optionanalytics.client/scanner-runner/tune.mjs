@@ -138,7 +138,14 @@ async function main() {
   const pick = job.strategies
   const ids = Array.isArray(pick) ? pick.filter((id) => STRATEGY_BY_ID[id] && !STRATEGY_BY_ID[id].retired && (DATA === 'spot') === !!STRATEGY_BY_ID[id].spot)
     : pick === 'all' ? ranked.filter((r) => r.n > 0).map((r) => r.id)
-      : ranked.filter((r) => r.n >= MIN_TRADES).slice(0, pick === 'top5' ? 5 : 3).map((r) => r.id)
+      : (() => {
+        // The top ones with at least the minimum trades; when fewer than asked reach it, the next ones that traded at all
+        // (marked below the minimum in the result) rather than showing nothing.
+        const want = pick === 'top5' ? 5 : 3
+        const enough = ranked.filter((r) => r.n >= MIN_TRADES)
+        const rest = ranked.filter((r) => r.n > 0 && r.n < MIN_TRADES)
+        return [...enough, ...rest].slice(0, want).map((r) => r.id)
+      })()
   const results = []
   for (let i = 0; i < ids.length; i++) {
     progress({ stage: 'tune', strategy: ids[i], done: i, total: ids.length })

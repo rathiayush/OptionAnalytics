@@ -217,7 +217,7 @@ export default function StrategyTuningPage() {
                 </Col>
               )}
               <Col><Space size={6}><Tooltip title="The most recent past days the server can replay"><Text>Days</Text></Tooltip><InputNumber min={1} max={250} value={days} onChange={(v) => v && setDays(v)} style={{ width: 80 }} disabled={running} /></Space></Col>
-              <Col><Space size={6}><Tooltip title="A setting needs at least this many trades on the train days to be considered"><Text>Min trades</Text></Tooltip><InputNumber min={2} max={100} value={minTrades} onChange={(v) => v && setMinTrades(v)} style={{ width: 70 }} disabled={running} /></Space></Col>
+              <Col><Space size={6}><Tooltip title="A setting needs at least this many trades on the train days to be recommended. When none reach it, the best found with fewer is still shown, marked 'below the minimum trades' and never recommended."><Text>Min trades</Text></Tooltip><InputNumber min={2} max={100} value={minTrades} onChange={(v) => v && setMinTrades(v)} style={{ width: 70 }} disabled={running} /></Space></Col>
               {!spot && <Col><Tooltip title="Also use days the server did not record live, rebuilt from 1-minute candles (no tape or market depth - the order-flow checks are estimated). More days, less exact."><Space size={6}><Switch size="small" checked={includeEstimated} onChange={setIncludeEstimated} disabled={running} /><Text>Include estimated days</Text></Space></Tooltip></Col>}
               <Col>
                 {running
@@ -247,14 +247,14 @@ export default function StrategyTuningPage() {
             </Card>
             {(result.results ?? []).map((r) => (
               <Card key={r.id} size="small"
-                title={<Space size={8} wrap><span>#{r.no} {r.name}</span>{r.recommend ? <Tag color="success">recommended</Tag> : <Tag color="warning">keep as written</Tag>}</Space>}
+                title={<Space size={8} wrap><span>#{r.no} {r.name}</span>{r.belowMin ? <Tag color="default">below the minimum trades</Tag> : r.recommend ? <Tag color="success">recommended</Tag> : <Tag color="warning">keep as written</Tag>}</Space>}
                 extra={isAdmin && r.best && !spot && (
                   <Popconfirm title={`Apply to #${r.no} ${r.name}?`} description={r.recommend ? variantText(r.best.params) : `Not recommended: ${r.reason}. Apply anyway?`} okText="Apply" onConfirm={() => apply(r)}>
                     <Button size="small" type={r.recommend ? 'primary' : 'default'}>Apply to the scanner</Button>
                   </Popconfirm>
                 )}>
                 <Space direction="vertical" size={8} style={{ width: '100%' }}>
-                  <Text style={{ fontSize: 12 }}>{r.reason}. Chosen on {r.trainDays?.length} day(s) ({r.trainDays?.[0]} to {r.trainDays?.at(-1)}), checked on {r.testDays?.length} ({r.testDays?.[0] ?? '-'} to {r.testDays?.at(-1) ?? '-'}). {r.qualified} of {r.tried} settings had {result.minTrades}+ trades.</Text>
+                  <Text style={{ fontSize: 12 }}>{r.reason}. Chosen on {r.trainDays?.length} day(s) ({r.trainDays?.[0]} to {r.trainDays?.at(-1)}), checked on {r.testDays?.length} ({r.testDays?.[0] ?? '-'} to {r.testDays?.at(-1) ?? '-'}). {r.belowMin ? `${r.qualified} of ${r.tried} settings had 2+ trades; none had ${r.minTradesWanted ?? result.minTrades}+.` : `${r.qualified} of ${r.tried} settings had ${result.minTrades}+ trades.`}</Text>
                   <Table size="small" pagination={false} rowKey="k" columns={[
                     { title: '', dataIndex: 'k', width: 120, render: (k) => <b>{k}</b> },
                     { title: 'Setting', key: 'p', render: (_, row) => <span style={{ fontSize: 12 }}>{row.params ? variantText(row.params) : '-'}</span> },
