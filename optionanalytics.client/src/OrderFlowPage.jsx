@@ -19,6 +19,8 @@ import { ProfilesCard } from './ProfilesCard.jsx'
 import { PriceAlertsBar, usePriceAlerts } from './PriceAlerts.jsx'
 import { ProfileAlertsBar, useProfileAlerts } from './ProfileAlerts.jsx'
 import { ServerScannerCard } from './ServerScanner.jsx'
+import { GoChartingPanel, useGoCharting } from './GoChartingPanel.jsx'
+import { goChartingByBar } from './goCharting.js'
 import { fetchPreviousSession, sessionVolumeProfile, tpoProfile, tpoRowFor } from './profiles.js'
 import { withBackfill } from './cvdBackfill.js'
 import { TAPE_PRINTS, applyOrderFlowPush, mergePrints, orderFlowFromSnapshot, toColumn } from './liveFeeds.js'
@@ -155,6 +157,8 @@ async function fetchJson(url) {
 export default function OrderFlowPage() {
   const [underlying, setUnderlying] = usePersistedState('optionanalytics.orderFlow.underlying', 'NIFTY')
   const [timeframe, setTimeframe] = usePersistedState('optionanalytics.orderFlow.timeframe', 1)
+  // GoCharting's own per-bar order flow (its Lipi alert's webhook) beside ours on the footprint.
+  const [goChartingOn, setGoChartingOn] = usePersistedState('optionanalytics.orderFlow.goCharting', false)
   const [rowSizes, setRowSizes] = usePersistedState('optionanalytics.orderFlow.rowSizes', DEFAULT_ROW_SIZES)
   const [imbalanceRatio, setImbalanceRatio] = usePersistedState('optionanalytics.orderFlow.imbalanceRatio', 3)
   const [stackedCount, setStackedCount] = usePersistedState('optionanalytics.orderFlow.stackedCount', 3)
@@ -442,6 +446,8 @@ export default function OrderFlowPage() {
   // Volume profile levels always from the PREVIOUS session (POC, VAH, VAL, HVN, LVN); market profile
   // (TPO) from the previous session plus today's developing one.
   const sessionDate = isReplay ? replayDate : todayKey()
+  const goCharting = useGoCharting(underlying, sessionDate, goChartingOn, !isReplay, view?.minuteBars, lotSize)
+  const goChartingBars = useMemo(() => (goChartingOn ? goChartingByBar(shown.bars, goCharting.bars, timeframe, goCharting.scale) : null), [goChartingOn, shown.bars, goCharting.bars, timeframe, goCharting.scale])
   const [prevSession, setPrevSession] = useState({ key: null, data: null, loading: false })
   useEffect(() => {
     if (!sessionDate) return undefined
@@ -819,14 +825,20 @@ export default function OrderFlowPage() {
 
         <Row gutter={[16, 16]}>
           <Col xs={24} xl={17}>
-            <Card size="small" title={`Footprint · ${timeframe} min · ${rowSize} pt rows${estimated ? ' · estimated' : ''}`} extra={!narrow && <Text type="secondary" style={{ fontSize: 11 }}>bid (sell) × ask (buy) · drag to move it anywhere · wheel: bar width · Shift+wheel or price axis: row height · double-click: reset</Text>}>
+            <Card size="small" title={`Footprint · ${timeframe} min · ${rowSize} pt rows${estimated ? ' · estimated' : ''}`}
+              extra={<Space size={10}>
+                <Tooltip title="Show GoCharting's own delta and cumulative delta under each bar (sent by its alert webhook), with ours vs theirs below"><Checkbox checked={goChartingOn} onChange={(e) => setGoChartingOn(e.target.checked)} aria-label="GoCharting">GoCharting</Checkbox></Tooltip>
+                {!narrow && <Text type="secondary" style={{ fontSize: 11 }}>bid (sell) × ask (buy) · drag to move it anywhere · wheel: bar width · Shift+wheel or price axis: row height · double-click: reset</Text>}
+              </Space>}>
               <PriceAlertsBar {...priceAlerts} lastPrice={meta?.lastPrice} live={!isReplay} />
               <ProfileAlertsBar {...profileAlerts} live={!isReplay} />
               <FootprintLegend estimated={estimated} bigLabel={bigLabel} />
               <FootprintChart
                 bars={shown.bars} rowSize={rowSize} lotSize={lotSize} showLots={showLots} lastPrice={meta?.lastPrice} height={narrow ? 480 : 660}
                 profile={profile} runningProfile={showProfile ? todayVp : null} trades={largeTrades} timeframe={timeframe} bigLabel={bigLabel} alerts={priceAlerts.alerts} levels={suddenLevels} vwap={footprintVwap}
+                external={goChartingBars}
               />
+              {goChartingOn && <GoChartingPanel gc={goCharting} bars={shown.bars} timeframe={timeframe} lotSize={lotSize} showLots={showLots} isAdmin={auth?.user?.role === 'Admin'} underlying={underlying} />}
               {profile?.poc != null && (
                 <Text type="secondary" style={{ fontSize: 11 }}>
                   Volume profile of the previous session ({prevSession.data?.date}): POC {profile.poc} · value area {profile.val}–{profile.vah} (70% of volume)
@@ -914,6 +926,7 @@ export default function OrderFlowPage() {
           tapePrints={tapePrints} liquidity={liquidity} pullStack={pullStack.signals} rowSize={rowSize} lotSize={lotSize} largeLots={bigLots} estimated={noDepth}
           profile={scannerProfile} oi={dayOi} oiError={dayOiError} canTradeLive={canTradeLive}
           isAdmin={auth?.user?.role === 'Admin'} orderFlowSettings={orderFlowSettings}
+          goCharting={goChartingOn ? goCharting : null}
         />
 
         <ServerScannerCard isAdmin={auth?.user?.role === 'Admin'} focus={underlying} />

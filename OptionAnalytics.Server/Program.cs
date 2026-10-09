@@ -320,6 +320,8 @@ builder.Services.AddSingleton<TradeSettingsStore>();
 // The daily loss limit (default ₹20,000) - Dhan's P&L based exit set every day, plus a watch here that exits
 // everything and turns Dhan's kill switch on at the limit (KillSwitchService; risk-settings.csv).
 builder.Services.AddSingleton<RiskSettingsStore>();
+// GoCharting's per-bar order flow, posted by a Lipi alert's webhook (GoChartingStore / GoChartingController).
+builder.Services.AddSingleton<GoChartingStore>();
 builder.Services.AddSingleton<DhanTradersControlClient>();
 builder.Services.AddSingleton<KillSwitchService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<KillSwitchService>());

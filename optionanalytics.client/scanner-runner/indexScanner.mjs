@@ -14,6 +14,7 @@ import {
 } from '../src/scannerCore.js'
 import { orderFlowFromSnapshot, applyOrderFlowPush, mergePrints, applyOiTicks, applyFuturesTicks, applySpotUpdate, expiryFlagOf, TAPE_PRINTS } from '../src/liveFeeds.js'
 import { defaultTradeLevels } from '../src/tradeDefaults.js'
+import { goChartingScale } from '../src/goCharting.js'
 
 // The page's own defaults (StrategyScanner / OrderFlowPage) for anything the config does not say.
 export const DEFAULT_SETTINGS = { alerts: true, telegram: true, pick: 'top15', custom: [], filters: {}, trail: { on: true, ...DEFAULT_TRAIL }, autoPaper: 'sell', paperLots: 1, moneyness: 0 }
@@ -201,6 +202,16 @@ export class IndexScanner {
     return positionRows({ positions: this.positions, dayResults: withOutcome, withOutcome, oi: this.data?.oi, nowMs, settings: this.settings() })
   }
 
+  // GoCharting's 1-minute bars for today (its alert webhook, stored by the server) - re-read every 30 s,
+  // for "Delta from GoCharting" (the page's scanner setting, synced here).
+  async goChartingBars(nowMs, minuteBars, lotSize) {
+    if (!this.gc || this.gc.date !== this.date || nowMs - this.gc.at >= 30_000) {
+      const body = await this.io.api(`/api/gocharting/${this.underlying}/day/${this.date}`).catch(() => null)
+      this.gc = { date: this.date, at: nowMs, bars: body?.bars ?? this.gc?.bars ?? [] }
+    }
+    return this.gc.bars.length ? { bars: this.gc.bars, scale: goChartingScale(minuteBars, this.gc.bars, lotSize) } : null
+  }
+
   async evaluate() {
     const d = this.data
     if (!this.enabled || !d?.view || !d.oi) return
@@ -224,7 +235,7 @@ export class IndexScanner {
 
     const tick = scanTick({
       nowMs, view: d.view, tapePrints: d.prints, liquidity, pullStack, oi: d.oi, estimated, lotSize, largeLots: bigLots, profile: d.profile, rowSize,
-      filters: cfg.filters, trail: trailFor(cfg, this.underlying),
+      filters: cfg.filters, trail: trailFor(cfg, this.underlying), goCharting: cfg.goChartingDelta ? await this.goChartingBars(nowMs, d.view.minuteBars, lotSize) : null,
     }, this.memory)
     if (tick) {
       this.watching = tick.watching

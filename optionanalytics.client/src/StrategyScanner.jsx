@@ -16,6 +16,7 @@ import {
   optionTradeAt, dayTypeAt, trailPoints, STRATEGY_FILTERS, strategyFilters, changedFilters,
 } from './strategyEngine.js'
 import { liquiditySignals, pullStackSignals, replayRange, replayView } from './orderFlowMath.js'
+import { withGoChartingDelta } from './goCharting.js'
 import {
   MIN, COOLDOWN_MS, msOf, completedBars, priceAt, upTo, trailUnit, trailPtsFor, trailFor, alertIdsFor, sameSignal,
   scanTick, followSetups, setupEvents, newPosition, positionRows, withLevelChange, PAPER_TRADE_LOT_SIZE, paperEntryText, setupExitText, paperExitResult, setupWasTraded, scannerLogBody, scannerLogSig,
@@ -92,7 +93,7 @@ function setupTip(s, o = null) {
   )
 }
 
-export function StrategyScanner({ underlying, isReplay, date, view, replayDay, replayMs, range, tapePrints, liquidity, pullStack, rowSize, lotSize, largeLots, estimated, profile, oi, oiError, canTradeLive = false, isAdmin = false, orderFlowSettings = null }) {
+export function StrategyScanner({ underlying, isReplay, date, view, replayDay, replayMs, range, tapePrints, liquidity, pullStack, rowSize, lotSize, largeLots, estimated, profile, oi, oiError, canTradeLive = false, isAdmin = false, orderFlowSettings = null, goCharting = null }) {
   const [settings, setSettings] = useState(() => {
     const saved = { alerts: true, sound: true, voice: true, telegram: true, pick: 'top15', custom: [], filters: {}, trail: { on: true, ...DEFAULT_TRAIL }, autoPaper: 'sell', paperLots: 1, paperSl: 20, paperTarget: 30, liveSlippage: 2, maxLiveTrades: 5, maxLiveLoss: 10000, ...readJson(SETTINGS_KEY, {}) }
     // Older saved settings used 'top5' (from when there were only the first 10).
@@ -121,6 +122,11 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   const [watch, setWatch] = useState([])
   const settingsRef = useRef(settings)
   useEffect(() => { settingsRef.current = settings }, [settings])
+  // GoCharting's 1-minute bars (when its view is on): with "Delta from GoCharting", the strategies read its
+  // bar delta / cumulative delta instead of ours (scanTick, withGoChartingDelta).
+  const goChartingRef = useRef(goCharting)
+  useEffect(() => { goChartingRef.current = goCharting }, [goCharting])
+  const goChartingInput = () => (settingsRef.current.goChartingDelta && goChartingRef.current?.bars?.length ? { bars: goChartingRef.current.bars, scale: goChartingRef.current.scale ?? 1 } : null)
 
   // Paper option trades punched from setups (by hand, or automatically on each alert), per day. Each
   // follows its setup: it is closed when the setup's stop / target / trailing SL / 15:10 cut-off ends
@@ -359,7 +365,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     }
     const tick = scanTick({
       nowMs, view, tapePrints, liquidity, pullStack, oi, estimated, lotSize, largeLots, profile, rowSize,
-      filters: settingsRef.current.filters, trail: trailFor(settingsRef.current, underlying),
+      filters: settingsRef.current.filters, trail: trailFor(settingsRef.current, underlying), goCharting: goChartingInput(),
     }, { fired: firedRef.current })
     if (!tick) return
     const { watching, fresh } = tick
@@ -506,7 +512,9 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       for (let i = 0; i <= steps; i++) {
         const clock = start + i * MIN
         const v = replayView(day, clock)
-        const bars = completedBars(v.minuteBars, clock, rowSize, lotSize, estimated)
+        const own = completedBars(v.minuteBars, clock, rowSize, lotSize, estimated)
+        const gcIn = goChartingInput()
+        const bars = gcIn ? withGoChartingDelta(own, gcIn.bars, clock, { scale: gcIn.scale }).bars : own
         if (bars.length >= 5) {
           const cols = v.heatmap.slice(-300)
           const liq = estimated ? [] : liquiditySignals({ columns: cols, trades: v.trades, minuteBars: v.minuteBars, rowSize, lotSize })
@@ -784,6 +792,9 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
           <Space size={4}><Switch size="small" checked={settings.voice} onChange={(v) => setSettings((s) => ({ ...s, voice: v }))} /><Text style={{ fontSize: 12 }}>Speak name</Text></Space>
           <Tooltip title="Each trade punched (paper) or placed (live) today - and a live trade's exit - is also sent to the server's Telegram chat. Not for replays.">
             <Space size={4}><Switch size="small" checked={settings.telegram !== false} onChange={(v) => setSettings((s) => ({ ...s, telegram: v }))} aria-label="Telegram" /><Text style={{ fontSize: 12 }}>Telegram</Text></Space>
+          </Tooltip>
+          <Tooltip title="The strategies read the bar delta and cumulative delta from GoCharting (its tick-by-tick feed, sent by its alert webhook) instead of ours - while GoCharting has every one of the last 20 bars; otherwise ours. The per-price reads (stacks, absorption, exhaustion) stay ours. Turn on the GoCharting view on the footprint for the page to load its bars.">
+            <Space size={4}><Switch size="small" checked={!!settings.goChartingDelta} onChange={(v) => setSettings((s) => ({ ...s, goChartingDelta: v }))} aria-label="Delta from GoCharting" /><Text style={{ fontSize: 12 }}>Delta from GoCharting{settings.goChartingDelta && !goCharting?.bars?.length ? ' (no bars yet)' : ''}</Text></Space>
           </Tooltip>
           <Button size="small" icon={<SoundOutlined />} onClick={() => { unlockAudio(); chime(true); speak('Alerts are on') }}>Test</Button>
         </Space>
