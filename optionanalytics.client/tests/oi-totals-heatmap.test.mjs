@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { buildOiTotalsRows, oiTotalsDeclined, oiTotalsTrend } from '../src/oiTotalsHeatmap.js'
+import { buildOiTotalsRows, oiMeaning, oiTotalsDeclined, oiTotalsFlowMeaning, oiTotalsMeaning, oiTotalsTrend } from '../src/oiTotalsHeatmap.js'
 
 const m = (o) => new Map(Object.entries(o).map(([k, v]) => [Number(k), new Map(Object.entries(v).map(([t, x]) => [Number(t), x]))]))
 
@@ -47,4 +47,28 @@ test('declined: a negative delta, and a cumulative that fell from the bucket bef
 
 test('empty input gives no buckets', () => {
   assert.deepEqual(buildOiTotalsRows(new Map(), new Map()).buckets, [])
+})
+
+test('market meaning: PE added / CE removed bullish, CE added / PE removed bearish, net negative bullish', () => {
+  assert.equal(oiMeaning('peDelta', 5), 1, 'PE rose: green')
+  assert.equal(oiMeaning('peDelta', -5), -1, 'PE fell: red')
+  assert.equal(oiMeaning('ceDelta', 5), -1, 'CE rose: red')
+  assert.equal(oiMeaning('ceDelta', -5), 1, 'CE fell: green')
+  assert.equal(oiMeaning('netCum', -871e5), 1, 'net negative: PE writers dominate - green')
+  assert.equal(oiMeaning('netCum', 10e5), -1, 'net positive: CE writers dominate - red')
+  assert.equal(oiMeaning('peCum', 0), 0)
+  assert.equal(oiMeaning('ceDelta', null), 0)
+
+  // The screenshot's 10:57: PE -6.12L in the bucket while PE cumulative is still +821L and net cumulative -812L.
+  const ce = m({ 100: { 60: 9e5, 120: 4.54e5 } })
+  const pe = m({ 100: { 60: 827.34e5, 120: -6.12e5 } })
+  const { rows } = buildOiTotalsRows(ce, pe)
+  assert.equal(oiTotalsMeaning(rows, 'peDelta', 120), -1, 'PE removed: bearish bucket')
+  assert.equal(oiTotalsMeaning(rows, 'peCum', 120), 1, 'PE still ahead on the day: bullish')
+  assert.equal(oiTotalsFlowMeaning(rows, 'peCum', 120), -1, '... but it fell in that bucket')
+  assert.equal(oiTotalsMeaning(rows, 'ceCum', 120), -1, 'CE added on the day: bearish')
+  assert.equal(oiTotalsMeaning(rows, 'netCum', 120), 1, 'net cumulative negative: bullish')
+  assert.equal(oiTotalsMeaning(rows, 'netDelta', 120), -1, 'net rose in the bucket (CE +4.54L, PE -6.12L): bearish')
+  assert.equal(oiTotalsFlowMeaning(rows, 'netCum', 120), -1)
+  assert.equal(oiTotalsFlowMeaning(rows, 'netDelta', 60), 1)
 })

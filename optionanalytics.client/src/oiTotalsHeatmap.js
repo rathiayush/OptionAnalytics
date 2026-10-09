@@ -49,3 +49,26 @@ export function oiTotalsTrend(rows, key, t) {
   const v = rows[DELTA_OF[key]]?.get(t)
   return !Number.isFinite(v) || v === 0 ? 0 : v > 0 ? 1 : -1
 }
+
+// What a figure MEANS for the market: +1 bullish (green), -1 bearish (red), 0 nothing. PE OI added is put
+// writers supporting the market - bullish - and PE removed bearish; CE OI added is call writers capping it -
+// bearish - and CE removed bullish. Net = CE - PE: negative means the PE writers dominate - bullish; positive
+// the CE writers - bearish. The same for a bucket's change (delta rows) and for the running total (who is
+// ahead on the day: cumulative rows).
+const BULLISH_WHEN = { ce: -1, pe: 1, net: -1 }
+const SIDE_OF = { ceDelta: 'ce', ceCum: 'ce', peDelta: 'pe', peCum: 'pe', netDelta: 'net', netCum: 'net' }
+export function oiMeaning(key, v) {
+  if (!Number.isFinite(v) || v === 0 || !SIDE_OF[key]) return 0
+  return Math.sign(v) * BULLISH_WHEN[SIDE_OF[key]]
+}
+
+// The cell's own figure: for a delta row what that bucket did, for a cumulative row who is ahead.
+export function oiTotalsMeaning(rows, key, t) {
+  return oiMeaning(key, rows[key]?.get(t))
+}
+
+// What happened IN bucket t, for any row: the meaning of that row's change - so a cumulative that is still
+// bullish but fell in the bucket (PE removed, say) shows a bearish bucket.
+export function oiTotalsFlowMeaning(rows, key, t) {
+  return oiMeaning(DELTA_OF[key], rows[DELTA_OF[key]]?.get(t))
+}

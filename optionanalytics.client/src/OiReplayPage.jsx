@@ -3,7 +3,7 @@ import dayjs from 'dayjs'
 import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicker, TimePicker, Alert, Empty, Tooltip, Popconfirm, Slider, Tag, InputNumber, Switch, Table, Segmented, Checkbox, Modal, Steps, message, notification } from 'antd'
 import { findSuddenWalls, suddenWallText } from './suddenOi.js'
 import { chime, speak } from './alerts.js'
-import { buildOiTotalsRows, oiTotalsTrend } from './oiTotalsHeatmap.js'
+import { buildOiTotalsRows, oiTotalsFlowMeaning, oiTotalsMeaning, oiTotalsTrend } from './oiTotalsHeatmap.js'
 import { PlayCircleOutlined, PauseCircleOutlined, ReloadOutlined, SoundOutlined, ExportOutlined } from '@ant-design/icons'
 import { createSeriesMarkers, CandlestickSeries, LineSeries, HistogramSeries, CrosshairMode } from 'lightweight-charts'
 import { createZoomableChart } from './chartZoom.js'
@@ -1144,10 +1144,24 @@ function StrikeOiDrilldownChart({ ceSeries, peSeries, mode, dayKey, height = 320
 // worst-pair ΔE 26.8 protan / 31.8 normal-vision, both clear of the dataviz method's 8/15 targets.
 const OI_ADDED_COLOR = '#3987e5'
 const OI_REMOVED_COLOR = '#d95926'
-// The OI totals (CE / PE / net, delta and cumulative): a bucket in which the series DECLINED is orange,
-// one in which it rose is OI_ADDED_COLOR - so a cumulative that is still positive but falling shows.
-const OI_DECLINED_COLOR = '#fa8c16'
-const OI_DECLINED_TINT = 'rgba(250, 140, 22, 0.2)'
+// The OI totals (CE / PE / net, delta and cumulative) by what each figure MEANS (oiTotalsMeaning): green
+// bullish - PE added, CE removed, net (CE - PE) negative - and red bearish - CE added, PE removed, net positive.
+const OI_BULLISH_COLOR = '#3fcf6d'
+const OI_BEARISH_COLOR = '#ff5c5c'
+const OI_BULLISH_TINT = 'rgba(63, 207, 109, 0.16)'
+const OI_BEARISH_TINT = 'rgba(255, 92, 92, 0.18)'
+const oiMeaningColour = (m) => (m > 0 ? OI_BULLISH_COLOR : m < 0 ? OI_BEARISH_COLOR : AXIS_COLOR)
+const oiMeaningTint = (m) => (m > 0 ? OI_BULLISH_TINT : m < 0 ? OI_BEARISH_TINT : undefined)
+const OI_MEANING_WORD = { 1: 'bullish', [-1]: 'bearish' }
+
+// A totals cell's tooltip: the exact figure, what it means, and for a cumulative what that column did to it.
+function oiTotalsCellTitle(row, v, meaning, flow, trend) {
+  const head = `${row.label}: ${Math.round(v).toLocaleString('en-IN')}`
+  if (!row.cum) return meaning ? `${head} - ${OI_MEANING_WORD[meaning]}` : head
+  const ahead = meaning ? ` - ${OI_MEANING_WORD[meaning]} on the day` : ''
+  const moved = trend ? `; ${trend > 0 ? 'rose' : 'fell'} in this column (${OI_MEANING_WORD[flow]})` : ''
+  return head + ahead + moved
+}
 
 // One color, opacity-scaled by magnitude, per pole - the diverging encoding: OI_ADDED_COLOR at low
 // alpha for a small change, ramping toward full alpha at the grid's own typical-large |change| (see
@@ -1448,9 +1462,9 @@ function OiTotalsNumbers({ ceByStrike, peByStrike, strikes, asOfMs, timeframeMin
   }, [ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes, windowMinutes])
   const columns = useMemo(() => [...buckets].reverse(), [buckets])
   if (buckets.length === 0) return <Empty description="No OI data yet." />
-  // Coloured by what the series did in that bucket: rose (blue), DECLINED (orange, on an orange tint) or
-  // unchanged (grey) - the figure itself keeps its sign.
-  const colour = (trend) => (trend > 0 ? OI_ADDED_COLOR : trend < 0 ? OI_DECLINED_COLOR : AXIS_COLOR)
+  // Green bullish / red bearish (oiTotalsMeaning). The figure's colour is its own meaning - a delta: what that
+  // column did; a cumulative: who is ahead on the day - and the shade is what that column did, so a cumulative
+  // still green but falling this minute sits on a red shade (weakening). The figure keeps its sign.
   const head ={ position: 'sticky', top: 0, background: '#161a22', color: AXIS_COLOR, fontWeight: 400, padding: '3px 8px', textAlign: 'right', whiteSpace: 'nowrap', fontSize: 11 }
   const sticky = { position: 'sticky', left: 0, background: '#161a22', padding: '3px 8px', whiteSpace: 'nowrap', textAlign: 'left', zIndex: 1 }
   return (
@@ -1468,11 +1482,12 @@ function OiTotalsNumbers({ ceByStrike, peByStrike, strikes, asOfMs, timeframeMin
               <td style={{ ...sticky, color: r.cum ? AXIS_COLOR : '#e6e6e6', fontWeight: r.cum ? 400 : 700 }}>{r.label}</td>
               {columns.map((t, i) => {
                 const v = rows[r.key].get(t)
-                const trend = oiTotalsTrend(rows, r.key, t)
+                const meaning = oiTotalsMeaning(rows, r.key, t)
+                const flow = oiTotalsFlowMeaning(rows, r.key, t)
                 return (
-                  <td key={t} data-declined={trend < 0 ? 'true' : undefined}
-                    title={v == null ? undefined : `${r.label}: ${Math.round(v).toLocaleString('en-IN')}${trend < 0 ? ' - declined' : ''}`}
-                    style={{ padding: '3px 8px', textAlign: 'right', color: colour(trend), background: trend < 0 ? OI_DECLINED_TINT : undefined, fontWeight: r.cum ? 400 : 600, outline: i === 0 && live ? '1px solid rgba(255,255,255,0.4)' : undefined, outlineOffset: -1 }}>
+                  <td key={t} data-meaning={OI_MEANING_WORD[meaning]} data-flow={OI_MEANING_WORD[flow]}
+                    title={v == null ? undefined : oiTotalsCellTitle(r, v, meaning, flow, oiTotalsTrend(rows, r.key, t))}
+                    style={{ padding: '3px 8px', textAlign: 'right', color: oiMeaningColour(meaning), background: oiMeaningTint(flow), fontWeight: r.cum ? 400 : 600, outline: i === 0 && live ? '1px solid rgba(255,255,255,0.4)' : undefined, outlineOffset: -1 }}>
                     {fmtOiNum(v)}
                   </td>
                 )
@@ -1482,8 +1497,9 @@ function OiTotalsNumbers({ ceByStrike, peByStrike, strikes, asOfMs, timeframeMin
         </tbody>
       </table>
       <div style={{ padding: '3px 8px', fontSize: 11, color: AXIS_COLOR }}>
-        <span style={{ color: OI_DECLINED_COLOR, background: OI_DECLINED_TINT, padding: '0 4px' }}>orange</span> = CE / PE / net declined in that column
-        (a cumulative falling, even while still positive) · <span style={{ color: OI_ADDED_COLOR }}>blue</span> = rose
+        <span style={{ color: OI_BULLISH_COLOR, background: OI_BULLISH_TINT, padding: '0 4px' }}>green</span> = bullish (PE added, CE removed, net CE − PE negative: PE writers ahead)
+        · <span style={{ color: OI_BEARISH_COLOR, background: OI_BEARISH_TINT, padding: '0 4px' }}>red</span> = bearish (CE added, PE removed, net positive)
+        · figure = its own meaning (a cumulative: who is ahead on the day), shade = what that column did - green on a red shade is weakening
       </div>
     </div>
   )
@@ -1530,11 +1546,11 @@ function OiTotalsHeatmap({ ceByStrike, peByStrike, strikes, asOfMs, timeframeMin
       const y = rowY(i)
       columns.forEach((t, col) => {
         const v = rows[r.key].get(t)
-        const trend = oiTotalsTrend(rows, r.key, t)
-        if (v == null || v === 0 || trend === 0 || scales[r.key] === 0) return
-        // Colour = what the series did in this bucket (declined = orange), strength = the row's value.
+        const meaning = oiTotalsMeaning(rows, r.key, t)
+        if (v == null || meaning === 0 || scales[r.key] === 0) return
+        // Colour = what the figure means (green bullish / red bearish - a cumulative: who is ahead), strength = its size.
         const alpha = HEATMAP_MIN_ALPHA + Math.min(1, Math.abs(v) / scales[r.key]) * (HEATMAP_MAX_ALPHA - HEATMAP_MIN_ALPHA)
-        ctx.fillStyle = hexToRgba(trend > 0 ? OI_ADDED_COLOR : OI_DECLINED_COLOR, alpha)
+        ctx.fillStyle = hexToRgba(meaning > 0 ? OI_BULLISH_COLOR : OI_BEARISH_COLOR, alpha)
         ctx.fillRect(col * HEATMAP_CELL_WIDTH, y, HEATMAP_CELL_WIDTH - 1, OI_TOTALS_ROW_HEIGHT - 1)
       })
     })
@@ -1575,9 +1591,9 @@ function OiTotalsHeatmap({ ceByStrike, peByStrike, strikes, asOfMs, timeframeMin
     const index = OI_TOTALS_ROWS.findIndex((_, i) => y >= rowY(i) && y < rowY(i) + OI_TOTALS_ROW_HEIGHT)
     if (col < 0 || col >= columns.length || index < 0) { setHover(null); return }
     const r = OI_TOTALS_ROWS[index]
-    setHover({ clientX: e.clientX, clientY: e.clientY, label: r.label, time: columns[col], value: rows[r.key].get(columns[col]), trend: oiTotalsTrend(rows, r.key, columns[col]) })
+    const t = columns[col]
+    setHover({ clientX: e.clientX, clientY: e.clientY, row: r, time: t, value: rows[r.key].get(t), meaning: oiTotalsMeaning(rows, r.key, t), flow: oiTotalsFlowMeaning(rows, r.key, t), trend: oiTotalsTrend(rows, r.key, t) })
   }
-  const trendColour = (trend) => (trend > 0 ? OI_ADDED_COLOR : trend < 0 ? OI_DECLINED_COLOR : AXIS_COLOR)
 
   if (buckets.length === 0) return <Empty description="No OI data yet." />
 
@@ -1597,7 +1613,7 @@ function OiTotalsHeatmap({ ceByStrike, peByStrike, strikes, asOfMs, timeframeMin
               }}
             >
               <span>{r.label}</span>
-              <span style={{ color: trendColour(columns.length ? oiTotalsTrend(rows, r.key, columns[0]) : 0) }}>{v == null ? '—' : formatOiMillions(v, { signed: true })}</span>
+              <span style={{ color: oiMeaningColour(columns.length ? oiTotalsMeaning(rows, r.key, columns[0]) : 0) }}>{v == null ? '—' : formatOiMillions(v, { signed: true })}</span>
             </div>
           )
         })}
@@ -1618,10 +1634,14 @@ function OiTotalsHeatmap({ ceByStrike, peByStrike, strikes, asOfMs, timeframeMin
             fontSize: 11, color: '#fff', pointerEvents: 'none', whiteSpace: 'nowrap',
           }}
         >
-          {hover.label} @ {formatBucketTime(hover.time)}:{' '}
-          <Text strong style={{ color: hover.trend ? trendColour(hover.trend) : '#fff' }}>
-            {hover.value == null ? '—' : formatOiMillions(hover.value, { signed: true })}{hover.trend < 0 ? ' · declined' : ''}
+          {hover.row.label} @ {formatBucketTime(hover.time)}:{' '}
+          <Text strong style={{ color: hover.meaning ? oiMeaningColour(hover.meaning) : '#fff' }}>
+            {hover.value == null ? '—' : formatOiMillions(hover.value, { signed: true })}
+            {hover.meaning ? ` · ${OI_MEANING_WORD[hover.meaning]}${hover.row.cum ? ' on the day' : ''}` : ''}
           </Text>
+          {hover.row.cum && hover.trend !== 0 && (
+            <Text style={{ color: oiMeaningColour(hover.flow) }}> · {hover.trend > 0 ? 'rose' : 'fell'} in this column ({OI_MEANING_WORD[hover.flow]})</Text>
+          )}
         </div>
       )}
     </div>
@@ -5098,7 +5118,7 @@ export default function OiReplayPage() {
                   <div>
                     <Segmented size="small" value={totalsView} onChange={setTotalsView} options={[{ value: 'numbers', label: 'Numbers' }, { value: 'heatmap', label: 'Heatmap' }]} style={{ marginBottom: 6 }} aria-label="Totals as numbers or heatmap" />
                     <br />
-                    <Tooltip title="Whole band summed per bucket. Δ = OI added or removed in that bucket; cumulative = running total since the first bucket; Net = CE − PE. Orange = that row DECLINED in the bucket (OI removed, or a cumulative / net falling - even while it is still positive); blue = it rose.">
+                    <Tooltip title="Whole band summed per bucket. Δ = OI added or removed in that bucket; cumulative = running total since the first bucket; Net = CE − PE. Green = bullish: PE added, CE removed, net negative (PE writers ahead). Red = bearish: CE added, PE removed, net positive (CE writers ahead). A cumulative's figure shows who is ahead on the day, its shade what that column did - green on a red shade is weakening.">
                       <Text strong style={{ fontSize: 12 }}>Totals: CE, PE and Net (CE − PE) — Δ and cumulative Δ</Text>
                     </Tooltip>
                     {totalsView === 'numbers'
