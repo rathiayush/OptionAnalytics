@@ -167,13 +167,26 @@ const OI_LEAN = 0.2 // a lean this strong (either way) counts as with / against
 const FUT_OI_MOVE = 0.001 // 0.1% of futures OI in 15 minutes - positions really added or closed
 const FUT_PRICE_MOVE = 0.0005 // 0.05% in 15 minutes - the price really moved (~12 NIFTY points)
 
+/** The timeframes (minutes) the OI read is recorded on, and the one the scanner has always used. */
+export const OI_WINDOWS = [1, 3, 5, 15]
+export const OI_WINDOW = 15
+/** A setup's OI read on `window` minutes: { flow, futOiPct, futPricePct } - null when that window was not recorded.
+ *  15 minutes is the top-level oiCtx; the shorter ones are in oiCtx.byWindow. */
+function windowRead(ctx, window) {
+  if (!ctx) return null
+  return window === OI_WINDOW ? ctx : ctx.byWindow?.[window] ?? null
+}
+
 /** Futures OI over the last 15 minutes against the trade's direction `dir`: 'buildUp' (fresh positions its
  *  way: price with it, OI up), 'covering' (the other side closing: price with it, OI down), 'against'
  *  (fresh positions the other way: price against it, OI up), 'unwinding' (its side closing) or 'flat'. */
-export function futuresOiStance(ctx, dir) {
-  const oi = ctx?.futOiPct
-  const price = ctx?.futPricePct
-  if (!Number.isFinite(oi) || !Number.isFinite(price) || Math.abs(oi) < FUT_OI_MOVE || Math.abs(price) < FUT_PRICE_MOVE) return 'flat'
+export function futuresOiStance(ctx, dir, window = OI_WINDOW) {
+  const r = windowRead(ctx, window)
+  const oi = r?.futOiPct
+  const price = r?.futPricePct
+  // The moves that count scale with the window (0.1% OI / 0.05% price are the 15-minute bars).
+  const scale = Math.max(0.2, window / OI_WINDOW)
+  if (!Number.isFinite(oi) || !Number.isFinite(price) || Math.abs(oi) < FUT_OI_MOVE * scale || Math.abs(price) < FUT_PRICE_MOVE * scale) return 'flat'
   const withIt = dir * price > 0
   if (oi > 0) return withIt ? 'buildUp' : 'against'
   return withIt ? 'covering' : 'unwinding'
@@ -188,10 +201,11 @@ export function oiGatePasses(s, f) {
   const lean = (v, mode) => mode === 'any' || mode == null || (Number.isFinite(v)
     ? (mode === 'with' ? dir * v >= OI_LEAN : dir * v > -OI_LEAN)
     : mode === 'notAgainst')
-  if (!lean(ctx?.flow, f.tradeOiFlow) || !lean(ctx?.cum, f.tradeOiCum)) return false
+  const window = OI_WINDOWS.includes(f.tradeOiWindow) ? f.tradeOiWindow : OI_WINDOW
+  if (!lean(windowRead(ctx, window)?.flow, f.tradeOiFlow) || !lean(ctx?.cum, f.tradeOiCum)) return false
   const fut = f.tradeFutOi ?? 'any'
   if (fut !== 'any') {
-    const st = futuresOiStance(ctx, dir)
+    const st = futuresOiStance(ctx, dir, window)
     if (fut === 'notAgainst' && st === 'against') return false
     if (fut === 'withMove' && st !== 'buildUp' && st !== 'covering') return false
     if (fut === 'buildUp' && st !== 'buildUp') return false
@@ -220,9 +234,10 @@ export const TRADE_FILTERS = [
   { key: 'tradeTimeStop', label: 'Trade: time stop in minutes (0 = the strategy\'s own)', type: 'number', default: 0, min: 0, max: 330, step: 5 },
   { key: 'tradeTrail', label: 'Trade: trailing stop', type: 'select', default: 'scanner', options: [{ value: 'scanner', label: 'The scanner\'s setting' }, { value: 'off', label: 'Off' }, ...Object.keys(TRAIL_CHOICES).map((k) => ({ value: k, label: `After ${k.split('/')[0]}R, ${k.split('/')[1]}R behind` }))] },
   // OI confirmation (oiGatePasses) - read at the setup's own minute (its `oiCtx`); 'any' = not checked.
-  { key: 'tradeOiFlow', label: 'Trade: options OI change, last 15 min (whole chain)', type: 'select', default: 'any', options: OI_LEAN_OPTIONS },
+  { key: 'tradeOiWindow', label: 'Trade: OI timeframe for the options OI change and futures OI (minutes)', type: 'select', default: 15, options: OI_WINDOWS.map((m) => ({ value: m, label: `${m} min` })) },
+  { key: 'tradeOiFlow', label: 'Trade: options OI change on that timeframe (whole chain)', type: 'select', default: 'any', options: OI_LEAN_OPTIONS },
   { key: 'tradeOiCum', label: 'Trade: options OI since the open (cumulative, net CE - PE)', type: 'select', default: 'any', options: OI_LEAN_OPTIONS },
-  { key: 'tradeFutOi', label: 'Trade: futures OI, last 15 min', type: 'select', default: 'any', options: [{ value: 'any', label: 'Any' }, { value: 'notAgainst', label: 'Not a fresh build-up against it' }, { value: 'withMove', label: 'Moving with it (build-up or covering)' }, { value: 'buildUp', label: 'Fresh build-up with it' }] },
+  { key: 'tradeFutOi', label: 'Trade: futures OI on that timeframe', type: 'select', default: 'any', options: [{ value: 'any', label: 'Any' }, { value: 'notAgainst', label: 'Not a fresh build-up against it' }, { value: 'withMove', label: 'Moving with it (build-up or covering)' }, { value: 'buildUp', label: 'Fresh build-up with it' }] },
   { key: 'tradeWallRoom', label: 'Trade: room to the next OI wall (support / resistance)', type: 'select', default: 'any', options: [{ value: 'any', label: 'Any' }, { value: 'oneR', label: 'At least 1R' }, { value: 'target', label: 'Not inside the target' }] },
 ]
 for (const st of STRATEGIES) STRATEGY_FILTERS[st.id] = [...(STRATEGY_FILTERS[st.id] ?? []), ...TRADE_FILTERS]
@@ -278,9 +293,10 @@ export function applyTradeFilter(s, f) {
 export function oiGateText(f) {
   const words = { with: 'with it', notAgainst: 'not against', withMove: 'moving with it', buildUp: 'fresh build-up with it', oneR: '1R+', target: 'beyond the target' }
   const parts = []
-  if ((f.tradeOiFlow ?? 'any') !== 'any') parts.push(`options OI 15m ${words[f.tradeOiFlow]}`)
+  const w = OI_WINDOWS.includes(f.tradeOiWindow) ? f.tradeOiWindow : OI_WINDOW
+  if ((f.tradeOiFlow ?? 'any') !== 'any') parts.push(`options OI ${w}m ${words[f.tradeOiFlow]}`)
   if ((f.tradeOiCum ?? 'any') !== 'any') parts.push(`options OI since open ${words[f.tradeOiCum]}`)
-  if ((f.tradeFutOi ?? 'any') !== 'any') parts.push(`futures OI ${words[f.tradeFutOi]}`)
+  if ((f.tradeFutOi ?? 'any') !== 'any') parts.push(`futures OI${w === OI_WINDOW ? '' : ` ${w}m`} ${words[f.tradeFutOi]}`)
   if ((f.tradeWallRoom ?? 'any') !== 'any') parts.push(`OI wall ${words[f.tradeWallRoom]}`)
   return parts.length ? `OI: ${parts.join(', ')}` : ''
 }
@@ -841,6 +857,12 @@ export function evaluateStrategies(input) {
       oiCtx: {
         flow: optionRead?.lean ?? null, cum: optionRead?.leanOpen ?? null,
         futOiPct: futuresRead?.oiPct ?? null, futPricePct: futuresRead?.pricePct ?? null,
+        // The same read on the shorter timeframes (3 / 5 / 1 min) - what the OI timeframe filter chooses between.
+        byWindow: Object.fromEntries(OI_WINDOWS.filter((m) => m !== OI_WINDOW).map((m) => {
+          const r = optionOiRead(oi, spotNow, nowMs, m)
+          const fu = futuresChange(oi, nowMs, m)
+          return [m, { flow: r?.lean ?? null, futOiPct: fu?.oiPct ?? null, futPricePct: fu?.pricePct ?? null }]
+        })),
         support, resistance, spot: spotNow, ...wallsAhead(oi, rows, spotNow),
       },
       checks: {
