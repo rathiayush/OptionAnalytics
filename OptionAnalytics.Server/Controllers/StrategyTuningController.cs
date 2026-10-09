@@ -18,7 +18,8 @@ public sealed class StrategyTuningController : ControllerBase
 
     /// <summary>`What`: what is tuned - "trade" (the trade settings), "oi" (the OI confirmation) or "both"
     /// (the OI confirmation first, then the trade settings on top of it).</summary>
-    public sealed record RunRequest(string Underlying, JsonNode? Strategies, int Days = 30, bool IncludeEstimated = false, int MinTrades = 8, string? What = null);
+    public sealed record RunRequest(string Underlying, JsonNode? Strategies, int Days = 30, bool IncludeEstimated = false, int MinTrades = 8, string? What = null, string[]? OiFactors = null);
+    private static readonly HashSet<string> OiFactorKeys = new() { "tradeOiFlow", "tradeOiCum", "tradeFutOi", "tradeWallRoom" };
     private static readonly HashSet<string> TuneWhat = new() { "trade", "oi", "both" };
 
     /// <summary>POST /api/strategy-tuning/run - starts a job (one at a time).</summary>
@@ -38,7 +39,9 @@ public sealed class StrategyTuningController : ControllerBase
         if (strategies is null) return BadRequest(new { error = "Strategies must be top3, top5, all or a list of strategy ids." });
         var what = string.IsNullOrWhiteSpace(request.What) ? "trade" : request.What.Trim().ToLowerInvariant();
         if (!TuneWhat.Contains(what)) return BadRequest(new { error = "What must be trade, oi or both." });
-        var error = _tuning.Start(new TuningJob(u, strategies.DeepClone(), Math.Clamp(request.Days, 1, 250), request.IncludeEstimated, Math.Clamp(request.MinTrades, 2, 100), what));
+        var factors = (request.OiFactors ?? Array.Empty<string>()).Distinct().ToList();
+        if (factors.Any(f => !OiFactorKeys.Contains(f))) return BadRequest(new { error = "OiFactors must be tradeOiFlow, tradeOiCum, tradeFutOi or tradeWallRoom." });
+        var error = _tuning.Start(new TuningJob(u, strategies.DeepClone(), Math.Clamp(request.Days, 1, 250), request.IncludeEstimated, Math.Clamp(request.MinTrades, 2, 100), what, factors));
         return error is null ? Ok(_tuning.Status()) : Conflict(new { error });
     }
 

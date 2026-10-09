@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
-import { Alert, Button, Card, Col, InputNumber, Popconfirm, Progress, Row, Segmented, Select, Space, Switch, Table, Tag, Tooltip, Typography, message } from 'antd'
+import { Alert, Button, Card, Checkbox, Col, InputNumber, Popconfirm, Progress, Row, Segmented, Select, Space, Switch, Table, Tag, Tooltip, Typography, message } from 'antd'
 import { NavBar, useAuth, UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import { ACTIVE_STRATEGIES, STRATEGY_BY_ID } from './strategyEngine.js'
-import { variantText } from './strategyTuning.js'
+import { OI_FACTORS, variantText } from './strategyTuning.js'
 import { applyTunedFilters } from './scannerSettings.js'
 
 const { Title, Text } = Typography
@@ -39,6 +39,7 @@ export default function StrategyTuningPage() {
   const [includeEstimated, setIncludeEstimated] = useState(false)
   const [minTrades, setMinTrades] = useState(8)
   const [what, setWhat] = useState('both')
+  const [oiFactors, setOiFactors] = useState(OI_FACTORS.map((f) => f.key))
   const [status, setStatus] = useState(null)
   const [result, setResult] = useState(null)
   const [resultError, setResultError] = useState(null)
@@ -64,7 +65,7 @@ export default function StrategyTuningPage() {
 
   const running = status?.state === 'running'
   const start = async () => {
-    const body = { underlying, strategies: pick === 'custom' ? custom : pick, days, includeEstimated, minTrades, what }
+    const body = { underlying, strategies: pick === 'custom' ? custom : pick, days, includeEstimated, minTrades, what, oiFactors }
     const res = await fetch('/api/strategy-tuning/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     const json = await res.json().catch(() => null)
     if (!res.ok) { message.error(json?.error ?? `HTTP ${res.status}`); return }
@@ -132,13 +133,21 @@ export default function StrategyTuningPage() {
                 { value: 'oi', label: <Tooltip title="Options OI change (15 min) and since the open, futures OI, room to the next OI wall - the trade settings as they are">OI confirmation</Tooltip> },
                 { value: 'trade', label: <Tooltip title="Sides, entry window, stop / target size, time stop, trailing stop">Trade settings</Tooltip> },
               ]} /></Space></Col>
+              {what !== 'trade' && (
+                <Col flex="1 1 100%">
+                  <Space size={6} wrap align="start">
+                    <Text>OI to tune</Text>
+                    <Checkbox.Group value={oiFactors} onChange={setOiFactors} disabled={running} options={OI_FACTORS.map((f) => ({ value: f.key, label: f.label }))} />
+                  </Space>
+                </Col>
+              )}
               <Col><Space size={6}><Tooltip title="The most recent past days the server can replay"><Text>Days</Text></Tooltip><InputNumber min={1} max={250} value={days} onChange={(v) => v && setDays(v)} style={{ width: 80 }} disabled={running} /></Space></Col>
               <Col><Space size={6}><Tooltip title="A setting needs at least this many trades on the train days to be considered"><Text>Min trades</Text></Tooltip><InputNumber min={2} max={100} value={minTrades} onChange={(v) => v && setMinTrades(v)} style={{ width: 70 }} disabled={running} /></Space></Col>
               <Col><Tooltip title="Also use days the server did not record live, rebuilt from 1-minute candles (no tape or market depth - the order-flow checks are estimated). More days, less exact."><Space size={6}><Switch size="small" checked={includeEstimated} onChange={setIncludeEstimated} disabled={running} /><Text>Include estimated days</Text></Space></Tooltip></Col>
               <Col>
                 {running
                   ? <Popconfirm title="Stop the tuning job?" onConfirm={cancel} disabled={!isAdmin}><Button danger disabled={!isAdmin}>Stop</Button></Popconfirm>
-                  : <Button type="primary" onClick={start} disabled={!isAdmin || (pick === 'custom' && !custom.length)}>Run tuning</Button>}
+                  : <Button type="primary" onClick={start} disabled={!isAdmin || (pick === 'custom' && !custom.length) || (what !== 'trade' && !oiFactors.length)}>Run tuning</Button>}
               </Col>
             </Row>
             {!isAdmin && <Alert type="info" showIcon message="Only an admin can run a tuning job or apply a result." />}

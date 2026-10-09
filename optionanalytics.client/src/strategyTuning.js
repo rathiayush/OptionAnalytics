@@ -32,6 +32,18 @@ export const OI_GRID = {
   tradeFutOi: ['any', 'notAgainst', 'withMove', 'buildUp'],
   tradeWallRoom: ['any', 'oneR', 'target'],
 }
+/** The OI inputs the tuning can use (a subset of OI_GRID's keys) - what the Strategy tuning page lists. */
+export const OI_FACTORS = [
+  { key: 'tradeOiFlow', label: 'Options OI change (CE / PE delta, last 15 min)' },
+  { key: 'tradeOiCum', label: 'Options OI cumulative change (CE / PE since the open, net CE - PE)' },
+  { key: 'tradeFutOi', label: 'Futures OI (build-up / covering with price)' },
+  { key: 'tradeWallRoom', label: 'Room to the next OI wall (support / resistance)' },
+]
+/** OI_GRID restricted to `keys` (unknown keys ignored; none given = all of them). */
+export const oiGridOf = (keys) => {
+  const chosen = Array.isArray(keys) ? OI_FACTORS.map((f) => f.key).filter((k) => keys.includes(k)) : OI_FACTORS.map((f) => f.key)
+  return Object.fromEntries(chosen.map((k) => [k, OI_GRID[k]]))
+}
 export const DEFAULT_VARIANT = Object.fromEntries(TRADE_FILTERS.map((f) => [f.key, f.default]))
 
 /** Every combination of `grid` (key -> values; 'window' -> [from, to] pairs), each on top of `base` (the
@@ -100,14 +112,14 @@ export function rankStrategies(days, { trail = null, minTrades = 8, ids = ACTIVE
  * (baseline) and the best combination - chosen on the train days, checked on the test days - with the top
  * `keep` combinations, and whether the best one is worth applying.
  */
-export function tuneStrategy(days, id, { trail = null, minTrades = 8, trainFraction = 0.7, grid = null, keep = 10, what = 'trade', base = DEFAULT_VARIANT } = {}) {
+export function tuneStrategy(days, id, { trail = null, minTrades = 8, trainFraction = 0.7, grid = null, keep = 10, what = 'trade', base = DEFAULT_VARIANT, oiKeys = null } = {}) {
   if (what === 'both') {
     // The OI confirmation first (chosen on the train days only), then the trade settings on top of it.
-    const oi = tuneStrategy(days, id, { trail, minTrades, trainFraction, keep, what: 'oi', base })
+    const oi = tuneStrategy(days, id, { trail, minTrades, trainFraction, keep, what: 'oi', base, oiKeys })
     const onTop = tuneStrategy(days, id, { trail, minTrades, trainFraction, keep, what: 'trade', base: oi.best?.params ?? base })
     return { ...onTop, what, tried: oi.tried + onTop.tried, qualified: oi.qualified + onTop.qualified, oiStage: { best: oi.best, reason: oi.reason } }
   }
-  grid = grid ?? (what === 'oi' ? OI_GRID : TUNING_GRID)
+  grid = grid ?? (what === 'oi' ? oiGridOf(oiKeys) : TUNING_GRID)
   const { train, test } = splitDays(days, trainFraction)
   const baseline = { params: DEFAULT_VARIANT, train: scoreR(run(train, id, DEFAULT_VARIANT, trail)), test: scoreR(run(test, id, DEFAULT_VARIANT, trail)) }
   const rows = []

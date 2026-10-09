@@ -141,3 +141,18 @@ test('the OI grid (108), OI then trade (108 + 7,200), and the filters saved', as
   if (both.best && both.oiStage.best) for (const k of Object.keys(OI_GRID)) assert.equal(both.best.params[k], both.oiStage.best.params[k], 'the trade settings tuned on top of the chosen OI confirmation')
   assert.deepEqual(filtersFromTuning({ closesBeyond: 3 }, { ...DEFAULT_VARIANT, tradeOiFlow: 'with', tradeFutOi: 'buildUp' }), { closesBeyond: 3, tradeOiFlow: 'with', tradeFutOi: 'buildUp' })
 })
+
+test('the tuning page can choose which OI inputs are tuned; the rest stay at their defaults', async () => {
+  const { OI_FACTORS, oiGridOf } = await import('../src/strategyTuning.js')
+  assert.deepEqual(OI_FACTORS.map((f) => f.key), Object.keys(OI_GRID))
+  assert.deepEqual(Object.keys(oiGridOf(['tradeFutOi', 'nonsense'])), ['tradeFutOi'])
+  assert.equal(Object.keys(oiGridOf(null)).length, 4, 'none chosen = all of them')
+  assert.equal([...variants(oiGridOf(['tradeOiFlow', 'tradeOiCum']))].length, 9)
+  const all = await scanDaySetups({ ...base, filters: {}, keepAll: true })
+  const days = Array.from({ length: 6 }, (_, i) => tuningDay(`2026-09-1${i}`, all, replayDay))
+  const id = all[0].id
+  const only = tuneStrategy(days, id, { what: 'oi', minTrades: 2, oiKeys: ['tradeFutOi'] })
+  assert.equal(only.tried, 4)
+  for (const row of only.top) for (const k of ['tradeOiFlow', 'tradeOiCum', 'tradeWallRoom']) assert.equal(row.params[k], 'any', `${k} untouched`)
+  assert.equal(tuneStrategy(days, id, { what: 'oi', minTrades: 2, oiKeys: ['tradeOiFlow', 'tradeOiCum'] }).tried, 9)
+})
