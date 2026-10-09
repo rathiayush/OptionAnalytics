@@ -25,15 +25,25 @@ function Leg({ leg }) {
   )
 }
 
-/** The points a setting captured: the futures (the index) and each option, per trade and in total. */
+/** The points a setting captured on its winning trades, lost on its losing ones (stop-loss) and the net - for the
+ *  index futures and for the option bought and the option sold. */
 function PointsSummary({ rows, index }) {
-  const cell = (leg) => (leg?.n ? <span>{pts(leg.avg)}/trade · <b style={{ color: colR(leg.total) }}>{pts(leg.total)}</b> <Text type="secondary" style={{ fontSize: 11 }}>({leg.n})</Text></span> : <Text type="secondary">-</Text>)
+  const group = (title, pick) => ({
+    title,
+    children: [
+      { title: 'Captured', key: `${title}-c`, width: 88, render: (_, r) => { const s = pick(r.points); return s?.n ? <span style={{ color: UP_COLOR }}>{pts(s.captured)}</span> : '-' } },
+      { title: 'Lost', key: `${title}-l`, width: 88, render: (_, r) => { const s = pick(r.points); return s?.n ? <span style={{ color: s.lost < 0 ? DOWN_COLOR : undefined }}>{pts(s.lost)}</span> : '-' } },
+      { title: 'Net', key: `${title}-n`, width: 96, render: (_, r) => { const s = pick(r.points); return s?.n ? <b style={{ color: colR(s.total) }}>{pts(s.total)}</b> : '-' } },
+      { title: 'Trades', key: `${title}-t`, width: 90, render: (_, r) => { const s = pick(r.points); return s?.n ? <Text type="secondary" style={{ fontSize: 11 }}>{s.wins}W {s.losses}L</Text> : '-' } },
+    ],
+  })
   return (
-    <Table size="small" pagination={false} rowKey="k" dataSource={rows} columns={[
-      { title: 'Points captured', dataIndex: 'k', width: 120, render: (k) => <b>{k}</b> },
-      { title: `${index ?? 'Index'} futures`, key: 'f', render: (_, r) => (r.points?.n ? <span>{pts(r.points.avg)}/trade · <b style={{ color: colR(r.points.total) }}>{pts(r.points.total)}</b> <Text type="secondary" style={{ fontSize: 11 }}>({r.points.n} trades)</Text></span> : '-') },
-      { title: 'Option bought (premium points)', key: 'b', render: (_, r) => cell(r.points?.buy) },
-      { title: 'Option sold (premium points)', key: 's', render: (_, r) => cell(r.points?.sell) },
+    <Table size="small" pagination={false} rowKey="k" dataSource={rows} scroll={{ x: 900 }} columns={[
+      { title: 'Points', dataIndex: 'k', width: 110, fixed: 'left', render: (k) => <b>{k}</b> },
+      group(`${index ?? 'Index'} futures`, (p) => p),
+      group('Option bought', (p) => p?.buy),
+      group('Option sold', (p) => p?.sell),
+      { title: 'Stop-loss', key: 'sl', width: 150, render: (_, r) => (r.points?.slN ? <span>{r.points.slN} hit · <b style={{ color: DOWN_COLOR }}>{pts(r.points.slPoints)}</b> futures</span> : <Text type="secondary">none</Text>) },
     ]} />
   )
 }

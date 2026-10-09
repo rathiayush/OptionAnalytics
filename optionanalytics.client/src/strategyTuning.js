@@ -141,7 +141,7 @@ export function tradeDetails(days, id, variant, trail, underlying) {
       }
       out.push({
         date: day.date, t: s.t, exitT: outcome.exitAt ?? null, index: underlying ?? null, side: s.side,
-        entry: s.entry, exit: exitPrice, points: dir * (exitPrice - s.entry), r: outcome.r, status: outcome.status,
+        entry: s.entry, exit: exitPrice, points: dir * (exitPrice - s.entry), r: outcome.r, status: outcome.status, stopHit: !!outcome.stopHit,
         buy: leg(s.options?.buy), sell: leg(s.options?.sell),
       })
     }
@@ -153,11 +153,17 @@ export function tradeDetails(days, id, variant, trail, underlying) {
  *  trades that have its premiums. */
 export function pointsSummary(trades) {
   const sum = (xs) => xs.reduce((a, b) => a + b, 0)
-  const leg = (key) => {
-    const pts = trades.map((t) => t[key]?.points).filter(Number.isFinite)
-    return { n: pts.length, total: sum(pts), avg: pts.length ? sum(pts) / pts.length : null }
+  // captured: the points of the winning trades; lost: of the losing ones; net = captured + lost (lost is negative).
+  // slN / slPoints: the trades the futures stop-loss ended at a loss (a trailing stop that locked a profit is not one).
+  const stats = (rows) => {
+    const pts = rows.map((r) => r.points)
+    const captured = sum(pts.filter((p) => p > 0))
+    const lost = sum(pts.filter((p) => p < 0))
+    return { n: rows.length, total: captured + lost, avg: rows.length ? (captured + lost) / rows.length : null, captured, lost, wins: pts.filter((p) => p > 0).length, losses: pts.filter((p) => p < 0).length }
   }
-  return { n: trades.length, total: sum(trades.map((t) => t.points)), avg: trades.length ? sum(trades.map((t) => t.points)) / trades.length : null, buy: leg('buy'), sell: leg('sell') }
+  const leg = (key) => stats(trades.filter((t) => Number.isFinite(t[key]?.points)).map((t) => ({ points: t[key].points })))
+  const sl = trades.filter((t) => t.stopHit && t.points < 0)
+  return { ...stats(trades), slN: sl.length, slPoints: sum(sl.map((t) => t.points)), buy: leg('buy'), sell: leg('sell') }
 }
 
 /** Trades in R -> n, total, average, win rate, profit factor, worst run (max drawdown), and the cautious score

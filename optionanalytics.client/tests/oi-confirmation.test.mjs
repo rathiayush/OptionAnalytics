@@ -388,6 +388,26 @@ test('points captured: the index, futures in and out, and the option prices in a
   assert.equal(sum.n, trades.length)
   assert.ok(Math.abs(sum.total - trades.reduce((a, t) => a + t.points, 0)) < 1e-9)
   assert.equal(sum.buy.n + 0, trades.filter((t) => Number.isFinite(t.buy?.points)).length)
+  // Captured (winners) + lost (losers) = net, for the futures and each option; the stop-loss part is the futures
+  // trades the stop ended at a loss.
+  for (const [name, s, pts] of [['futures', sum, trades.map((t) => t.points)], ['buy', sum.buy, trades.map((t) => t.buy?.points).filter(Number.isFinite)], ['sell', sum.sell, trades.map((t) => t.sell?.points).filter(Number.isFinite)]]) {
+    assert.ok(Math.abs(s.captured - pts.filter((p) => p > 0).reduce((x, y) => x + y, 0)) < 1e-9, `${name} captured`)
+    assert.ok(Math.abs(s.lost - pts.filter((p) => p < 0).reduce((x, y) => x + y, 0)) < 1e-9, `${name} lost`)
+    assert.ok(Math.abs(s.total - (s.captured + s.lost)) < 1e-9, `${name} net`)
+    assert.equal(s.wins + s.losses <= s.n, true)
+  }
+  const slTrades = trades.filter((t) => t.stopHit && t.points < 0)
+  assert.equal(sum.slN, slTrades.length)
+  assert.ok(Math.abs(sum.slPoints - slTrades.reduce((x, t) => x + t.points, 0)) < 1e-9)
+  assert.ok(sum.slPoints >= sum.lost - 1e-9 && sum.slPoints <= 0, 'the stop-loss points are part of what was lost')
+  // Hand-made trades: two winners (one ended by a trailing stop in profit), a stop-loss, a time-stop loss.
+  const mk = (points, extra) => ({ points, buy: { points: points * 0.4 }, sell: { points: -points * 0.4 }, ...extra })
+  const hand = pointsSummary([mk(30), mk(12, { stopHit: true }), mk(-10, { stopHit: true }), mk(-6)])
+  assert.deepEqual([hand.n, hand.captured, hand.lost, hand.total, hand.wins, hand.losses], [4, 42, -16, 26, 2, 2])
+  assert.deepEqual([hand.slN, hand.slPoints], [1, -10], 'a trailing stop that locked a profit is not a stop-loss')
+  assert.deepEqual([hand.buy.captured, hand.buy.lost], [16.8, -6.4], 'the bought option moves with the trade')
+  assert.deepEqual([hand.sell.captured.toFixed(1), hand.sell.lost.toFixed(1)], ['6.4', '-16.8'], 'the sold option moves against it')
+  assert.deepEqual(pointsSummary([]).total, 0)
   // No OI on the day: the options have no exit premium, the futures points are still there.
   const noOi = tradeDetails([{ ...day, oi: null }], id, DEFAULT_VARIANT, null, 'NIFTY')
   assert.ok(noOi.every((t) => (t.buy == null || t.buy.exit == null) && Number.isFinite(t.points)))
