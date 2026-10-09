@@ -34,6 +34,8 @@ const FROM = isDate(job.from) ? job.from : null
 const TO = isDate(job.to) ? job.to : null
 const RANGED = !!(FROM || TO)
 const inRange = (date) => (!FROM || date >= FROM) && (!TO || date <= TO)
+// Saturdays and Sundays have no trading: never fetched, whatever lists them.
+const isWeekend = (date) => [0, 6].includes(new Date(`${date}T00:00:00Z`).getUTCDay())
 const MAX_DAYS = RANGED ? 250 : Math.max(1, Math.min(250, Number(job.days) || 30))
 const MIN_TRADES = Math.max(2, Math.min(100, Number(job.minTrades) || 8))
 const WHAT = ['trade', 'oi', 'both', 'option', 'all'].includes(job.what) ? job.what : 'trade'
@@ -110,6 +112,7 @@ async function main() {
       if (!plan.some((p) => p.date === date)) plan.push({ date, expiry: null, exact: false })
     }
   }
+  plan = plan.filter((p) => !isWeekend(p.date))
   plan.sort((a, b) => (a.date < b.date ? 1 : -1))
   if (DATA !== 'spot') plan = plan.slice(0, MAX_DAYS)
   if (!plan.length) {

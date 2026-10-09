@@ -121,3 +121,21 @@ test('a date range picks the days: only the recorded days inside it, both ends i
     server.close()
   }
 })
+
+test('Saturdays and Sundays are never fetched, even when a listing has them', { timeout: 300_000 }, async () => {
+  // 2026-10-03 is a Saturday and 2026-10-04 a Sunday.
+  const days = ['2026-10-02', '2026-10-03', '2026-10-04', '2026-10-05']
+  const { server, seen, base } = await fakeServer(days)
+  try {
+    const { code, result } = await runJob(base, { underlying: 'NIFTY', strategies: ['weakWall'], minTrades: 2, what: 'trade', from: '2026-10-01', to: '2026-10-05' })
+    assert.equal(code, 0, JSON.stringify(result))
+    assert.deepEqual(result.days.map((d) => d.date), ['2026-10-05', '2026-10-02'])
+    const fetched = seen.map((s) => s.path).filter((p) => /\/day\/2026-10-0[34]$/.test(p))
+    assert.deepEqual(fetched, [], 'no request for a Saturday or Sunday')
+    // The estimated days a range adds are weekdays only too.
+    const est = await runJob(base, { underlying: 'NIFTY', strategies: ['weakWall'], minTrades: 2, what: 'trade', includeEstimated: true, from: '2026-09-30', to: '2026-10-05' })
+    assert.ok(est.result.days.every((d) => ![0, 6].includes(new Date(`${d.date}T00:00:00Z`).getUTCDay())))
+  } finally {
+    server.close()
+  }
+})

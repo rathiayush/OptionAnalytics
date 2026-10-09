@@ -249,8 +249,8 @@ export default function StrategyTuningPage() {
                   <Segmented size="small" value={dayMode} onChange={setDayMode} disabled={running} options={[{ value: 'last', label: 'Last N' }, { value: 'range', label: 'Date range' }]} />
                   {dayMode === 'last'
                     ? <Tooltip title="The most recent past days the server can replay"><InputNumber min={1} max={250} value={days} onChange={(v) => v && setDays(v)} style={{ width: 80 }} disabled={running} aria-label="Number of days" /></Tooltip>
-                    : <Tooltip title="Every past day in this range is used (up to 250); the older 70% choose, the newest 30% check"><DatePicker.RangePicker value={range} onChange={setRange} format="DD MMM YYYY" disabled={running} allowEmpty={[true, true]}
-                        disabledDate={(d) => d && !d.isBefore(dayjs().startOf('day'))} aria-label="Tuning date range" /></Tooltip>}
+                    : <Tooltip title="Every past trading day in this range is used (up to 250; Saturdays and Sundays are never fetched); the older 70% choose, the newest 30% check"><DatePicker.RangePicker value={range} onChange={setRange} format="DD MMM YYYY" disabled={running} allowEmpty={[true, true]}
+                        disabledDate={(d) => d && (!d.isBefore(dayjs().startOf('day')) || d.day() === 0 || d.day() === 6)} aria-label="Tuning date range" /></Tooltip>}
                 </Space>
               </Col>
               <Col><Space size={6}><Tooltip title="A setting needs at least this many trades on the train days to be recommended. When none reach it, the best found with fewer is still shown, marked 'below the minimum trades' and never recommended."><Text>Min trades</Text></Tooltip><InputNumber min={2} max={100} value={minTrades} onChange={(v) => v && setMinTrades(v)} style={{ width: 70 }} disabled={running} /></Space></Col>
