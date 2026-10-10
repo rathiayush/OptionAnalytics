@@ -122,6 +122,64 @@ public sealed class StrategyTuningServiceTests : IDisposable
         Assert.Equal(1, failing.Result("NIFTY")!["n"]!.GetValue<int>());
     }
 
+    // ---- the tuning HISTORY: every run kept as CSV (no database) -------------------------------------------------
+    private void WriteRun(StrategyTuningService s, string runId, string index, string finished)
+    {
+        Directory.CreateDirectory(s.HistoryDirectory);
+        var runs = Path.Combine(s.HistoryDirectory, "runs.csv");
+        if (!File.Exists(runs)) File.WriteAllText(runs, "run_id,finished_ist,index,data,tuned,days_used,trades\n");
+        File.AppendAllText(runs, $"{runId},{finished},{index},futures,both,6,1\n");
+        File.WriteAllText(Path.Combine(s.HistoryDirectory, $"{runId}-trades.csv"),
+            "run_id,date,entry_time_ist,index,strategy_id,setting,points,why\n" +
+            $"{runId},2026-09-10,2026-09-10 10:16:00,{index},wallBreak,as written,45.0,\"OI: wall break, writers run · Tape: 63% buy\"\n");
+        File.WriteAllText(Path.Combine(s.HistoryDirectory, $"{runId}-settings.csv"),
+            "run_id,index,strategy_id,which,tradeSide,train_avg\n" + $"{runId},{index},wallBreak,fine-tuned,long,1.25\n");
+    }
+
+    [Fact]
+    public void History_ListsTheRunsNewestFirst_AndReadsEachRunsTradesAndSettings()
+    {
+        var s = Service(Script("process.exit(0)"));
+        Assert.Empty(s.HistoryRuns()); // nothing tuned yet
+        WriteRun(s, "NIFTY-futures-20261009-103000", "NIFTY", "2026-10-09 10:30:00");
+        WriteRun(s, "BANKNIFTY-futures-20261009-113000", "BANKNIFTY", "2026-10-09 11:30:00");
+
+        Assert.Equal(new[] { "BANKNIFTY", "NIFTY" }, s.HistoryRuns().Select(r => r["index"]));
+        var t = Assert.Single(s.HistoryRows("NIFTY-futures-20261009-103000", "trades")!);
+        Assert.Equal(("2026-09-10", "NIFTY", "45.0"), (t["date"], t["index"], t["points"]));
+        Assert.Equal("OI: wall break, writers run · Tape: 63% buy", t["why"]); // a quoted field keeps its commas
+        Assert.Equal("fine-tuned", Assert.Single(s.HistoryRows("NIFTY-futures-20261009-103000", "settings")!)["which"]);
+    }
+
+    [Fact]
+    public void History_RefusesARunIdThisServerDidNotWrite()
+    {
+        var s = Service(Script("process.exit(0)"));
+        WriteRun(s, "NIFTY-futures-20261009-103000", "NIFTY", "2026-10-09 10:30:00");
+        foreach (var bad in new[] { "../../appsettings", "NIFTY-futures-20261009-103000/../../secret", "..", "NIFTY-futures-2026", "" })
+        {
+            Assert.Null(s.HistoryPath(bad, "trades"));
+            Assert.Null(s.HistoryRows(bad, "trades"));
+        }
+        Assert.Null(s.HistoryPath("NIFTY-futures-20261009-103000", "../runs")); // only trades / settings
+        Assert.Null(s.HistoryPath("NIFTY-futures-20261009-999999", "trades")); // well formed, but no such run
+        Assert.NotNull(s.HistoryPath("NIFTY-futures-20261009-103000", "trades"));
+    }
+
+    [Fact]
+    public void History_PruningKeepsTheNewestRuns_AndTakesTheOldOnesFilesWithThem()
+    {
+        var s = Service(Script("process.exit(0)"));
+        for (var i = 1; i <= 5; i++) WriteRun(s, $"NIFTY-futures-2026100{i}-103000", "NIFTY", $"2026-10-0{i} 10:30:00");
+        s.PruneHistory(3);
+
+        Assert.Equal(new[] { "2026-10-05 10:30:00", "2026-10-04 10:30:00", "2026-10-03 10:30:00" }, s.HistoryRuns().Select(r => r["finished_ist"]));
+        Assert.Null(s.HistoryPath("NIFTY-futures-20261002-103000", "trades")); // the old run's files went with its row
+        Assert.Single(s.HistoryRows("NIFTY-futures-20261005-103000", "trades")!);
+        s.PruneHistory(10); // nothing left to drop
+        Assert.Equal(3, s.HistoryRuns().Count);
+    }
+
     public void Dispose()
     {
         try { Directory.Delete(_dir, true); } catch { /* temp */ }

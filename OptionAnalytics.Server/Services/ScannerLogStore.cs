@@ -329,7 +329,7 @@ public sealed class ScannerLogStore
         return records;
     }
 
-    private static string Line(string[] columns, Dictionary<string, string> row) =>
+    internal static string Line(string[] columns, Dictionary<string, string> row) =>
         string.Join(',', columns.Select((c) => Escape(row.GetValueOrDefault(c, ""))));
 
     private static string Escape(string value) =>

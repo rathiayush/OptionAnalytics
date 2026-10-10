@@ -1,6 +1,8 @@
 using System.Diagnostics;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Hosting.Server;
 using OptionAnalytics.Server.Auth;
 
@@ -61,16 +63,66 @@ public sealed class StrategyTuningService
     /// <summary>The latest result file; the spot + options mode ("spot") keeps its own, so it never overwrites the futures one.</summary>
     public string ResultPath(string underlying, string data = "futures") => Path.Combine(_dir, $"{underlying.ToUpperInvariant()}{(data == "spot" ? "-spot" : "")}-latest.json");
 
-    /// <summary>Every trade of the last job (each strategy as written over every day scanned, and each tuned strategy's
-    /// best setting) - kept beside the result so the result stays small; read by the Trades page.</summary>
-    public string TradesPath(string underlying, string data = "futures") => Path.Combine(_dir, $"{underlying.ToUpperInvariant()}{(data == "spot" ? "-spot" : "")}-trades-latest.json");
+    /// <summary>The tuning HISTORY, as CSV (no database - scanner-runner/tuneHistory.mjs): runs.csv, and per run
+    /// {run_id}-trades.csv and {run_id}-settings.csv. A run is never overwritten, so a strategy can be compared run by
+    /// run and the Trades page can club several runs' trades (any index) by date and time.</summary>
+    public string HistoryDirectory => Path.Combine(_dir, "history");
 
-    /// <summary>The last job's trades for an index (null when none).</summary>
-    public JsonNode? Trades(string underlying, string data = "futures")
+    private static readonly Regex RunIdPattern = new("^[A-Z0-9]{1,20}-(futures|spot)-[0-9]{8}-[0-9]{6}$", RegexOptions.Compiled);
+
+    /// <summary>One history file's full path, or null for an id this server did not write (never a path from the URL).</summary>
+    public string? HistoryPath(string runId, string kind)
     {
-        var path = TradesPath(underlying, data);
-        try { return File.Exists(path) ? JsonNode.Parse(File.ReadAllText(path)) : null; }
-        catch (Exception ex) { _logger.LogWarning(ex, "Tuning trades {Path} could not be read.", path); return null; }
+        if (!RunIdPattern.IsMatch(runId ?? "") || kind is not ("trades" or "settings")) return null;
+        var path = Path.Combine(HistoryDirectory, $"{runId}-{kind}.csv");
+        return File.Exists(path) ? path : null;
+    }
+
+    /// <summary>Every run, newest first (runs.csv) - empty when none has finished yet.</summary>
+    public List<Dictionary<string, string>> HistoryRuns()
+    {
+        var path = Path.Combine(HistoryDirectory, "runs.csv");
+        try
+        {
+            if (!File.Exists(path)) return new();
+            var rows = ScannerLogStore.Read(path).ToList();
+            rows.Reverse();
+            return rows;
+        }
+        catch (Exception ex) { _logger.LogWarning(ex, "The tuning history {Path} could not be read.", path); return new(); }
+    }
+
+    /// <summary>One run's trades or settings as rows, or null when there is no such file.</summary>
+    public List<Dictionary<string, string>>? HistoryRows(string runId, string kind)
+    {
+        var path = HistoryPath(runId, kind);
+        try { return path is null ? null : ScannerLogStore.Read(path).ToList(); }
+        catch (Exception ex) { _logger.LogWarning(ex, "The tuning history {Path} could not be read.", path); return null; }
+    }
+
+    /// <summary>Keeps the newest `keep` runs - an older run's files are removed with its row.</summary>
+    public void PruneHistory(int keep)
+    {
+        try
+        {
+            var runs = HistoryRuns();
+            if (keep <= 0 || runs.Count <= keep) return;
+            var drop = runs.Skip(keep).Select(r => r.GetValueOrDefault("run_id", "")).Where(id => RunIdPattern.IsMatch(id)).ToHashSet(StringComparer.Ordinal);
+            foreach (var id in drop)
+                foreach (var kind in new[] { "trades", "settings" })
+                {
+                    var path = Path.Combine(HistoryDirectory, $"{id}-{kind}.csv");
+                    if (File.Exists(path)) File.Delete(path);
+                }
+            var kept = runs.Take(keep).Reverse().ToList(); // runs.csv is oldest-first on disk
+            var runsPath = Path.Combine(HistoryDirectory, "runs.csv");
+            var columns = ScannerLogStore.Parse(File.ReadAllText(runsPath))[0].ToArray();
+            var sb = new StringBuilder(string.Join(',', columns)).Append('\n');
+            foreach (var row in kept) sb.Append(ScannerLogStore.Line(columns, row)).Append('\n');
+            File.WriteAllText(runsPath, sb.ToString());
+            _logger.LogInformation("Tuning history: {Dropped} old run(s) removed, {Kept} kept.", drop.Count, kept.Count);
+        }
+        catch (Exception ex) { _logger.LogWarning(ex, "The tuning history could not be pruned."); }
     }
 
     /// <summary>The last result for an index (null when none).</summary>
@@ -106,7 +158,7 @@ public sealed class StrategyTuningService
             info.Environment["RUNNER_KEY"] = _key.Value;
             info.Environment["TUNE_JOB"] = JsonSerializer.Serialize(job, new JsonSerializerOptions(JsonSerializerDefaults.Web));
             info.Environment["TUNE_OUT"] = output + ".running";
-            info.Environment["TUNE_TRADES_OUT"] = TradesPath(job.Underlying, job.Data) + ".running";
+            info.Environment["TUNE_HISTORY_DIR"] = HistoryDirectory;
             info.Environment["TUNE_CACHE_DIR"] = CacheDirectory;
             info.Environment["TUNE_CACHE_MAX_MB"] = Math.Max(0, _configuration.GetValue("StrategyTuning:CacheMaxMb", 4096)).ToString(System.Globalization.CultureInfo.InvariantCulture);
             info.Environment["TUNE_PACE_MS"] = Math.Max(0, _configuration.GetValue("StrategyTuning:PaceMs", 0)).ToString(System.Globalization.CultureInfo.InvariantCulture);
@@ -175,7 +227,6 @@ public sealed class StrategyTuningService
         {
             await process.WaitForExitAsync();
             var running = output + ".running";
-            var tradesRunning = TradesPath(job.Underlying, job.Data) + ".running";
             string? error = null;
             if (File.Exists(running))
             {
@@ -184,7 +235,6 @@ public sealed class StrategyTuningService
                 {
                     File.Copy(running, Path.Combine(_dir, $"{job.Underlying}{(job.Data == "spot" ? "-spot" : "")}-{DateTimeOffset.UtcNow:yyyyMMdd-HHmmss}.json"), overwrite: true);
                     File.Move(running, output, overwrite: true);
-                    if (File.Exists(tradesRunning)) File.Move(tradesRunning, TradesPath(job.Underlying, job.Data), overwrite: true);
                 }
                 else
                 {
@@ -193,7 +243,7 @@ public sealed class StrategyTuningService
                 }
             }
             else if (process.ExitCode != 0) error = $"the job exited with code {process.ExitCode}";
-            if (File.Exists(tradesRunning)) File.Delete(tradesRunning); // a failed / stopped job's partial trades
+            PruneHistory(_configuration.GetValue("StrategyTuning:HistoryRuns", 100));
             lock (_lock)
             {
                 // Finished, failed or stopped from the page: nothing to resume. Killed by a server stop: kept.

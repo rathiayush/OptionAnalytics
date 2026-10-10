@@ -6,7 +6,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { spawn } from 'node:child_process'
-import { mkdtempSync, readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -67,6 +67,27 @@ function fakeServer(recordedDays, faults = {}) {
     return json({ error: 'not found' }, 404)
   })
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve({ server, seen, base: `http://127.0.0.1:${server.address().port}` })))
+}
+
+/** A CSV file as rows (the files the tuning history writes - quoted fields included). */
+function rows(path) {
+  const text = readFileSync(path, 'utf8')
+  const out = []
+  let row = [], field = '', quoted = false
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]
+    if (quoted) {
+      if (c === '"' && text[i + 1] === '"') { field += '"'; i++ }
+      else if (c === '"') quoted = false
+      else field += c
+    } else if (c === '"') quoted = true
+    else if (c === ',') { row.push(field); field = '' }
+    else if (c === '\n') { row.push(field); out.push(row); row = []; field = '' }
+    else if (c !== '\r') field += c
+  }
+  if (field.length || row.length) { row.push(field); out.push(row) }
+  const header = out[0]
+  return out.slice(1).filter((r) => r.length === header.length).map((r) => Object.fromEntries(header.map((h, i) => [h, r[i]])))
 }
 
 function runJob(base, job, env = {}) {
@@ -163,8 +184,8 @@ test('a long job rides out a busy Dhan, leaves out a partial day, re-uses the di
   const days = ['2026-09-28', '2026-09-29', '2026-09-30', '2026-10-01', '2026-10-02', '2026-10-05']
   const { server, seen, base } = await fakeServer(days, { rateLimit: 2, busyOi: true, partial: '2026-09-30' })
   const dir = mkdtempSync(join(tmpdir(), 'oa-tune-cache-'))
-  const trades = join(dir, 'trades.json')
-  const env = { TUNE_CACHE_DIR: join(dir, 'cache'), TUNE_TRADES_OUT: trades, TUNE_RETRY_SCALE: '0.001', TUNE_BUSY_PAUSE_MS: '5', TUNE_PRIORITY: 'background' }
+  const history = join(dir, 'history')
+  const env = { TUNE_CACHE_DIR: join(dir, 'cache'), TUNE_HISTORY_DIR: history, TUNE_RETRY_SCALE: '0.001', TUNE_BUSY_PAUSE_MS: '5', TUNE_PRIORITY: 'background' }
   try {
     const { code, result, lines } = await runJob(base, { underlying: 'NIFTY', strategies: ['weakWall'], days: 30, minTrades: 2, what: 'trade' }, env)
     assert.equal(code, 0, JSON.stringify(result))
@@ -179,12 +200,30 @@ test('a long job rides out a busy Dhan, leaves out a partial day, re-uses the di
     assert.ok(result.days.every((d) => d.minutes >= 300 && d.oiMinutes >= 300 && d.source === 'live' && d.prints > 0))
     // Every request was sent at background priority (the server then keeps Dhan's interactive lane for the live app).
     assert.ok(seen.filter((x) => x.path.startsWith('/api/')).every((x) => x.priority === 'background'))
-    // Every trade written, with its date / time, levels and why it fired.
-    const t = JSON.parse(readFileSync(trades, 'utf8'))
-    assert.ok(t.trades.length > 0 && t.trades.every((x) => x.date && x.t && x.setting && Number.isFinite(x.entry) && Number.isFinite(x.stop)))
-    assert.ok(t.trades.some((x) => x.setting === 'as written' && x.checks && Object.keys(x.checks).length > 0))
-    assert.ok(t.trades.some((x) => x.setting === 'best'))
-    assert.deepEqual(t.skipped.map((x) => x.date), ['2026-09-30'])
+    // Every trade written to the run's own history CSV, with its date / time, levels and why it fired.
+    const files = readdirSync(history)
+    const runId = files.find((f) => f.endsWith('-trades.csv')).replace('-trades.csv', '')
+    assert.match(runId, /^NIFTY-futures-\d{8}-\d{6}$/)
+    const t = rows(join(history, `${runId}-trades.csv`))
+    assert.ok(t.length > 0 && t.every((x) => /^\d{4}-\d{2}-\d{2}$/.test(x.date) && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(x.entry_time_ist) && x.index === 'NIFTY' && x.entry && x.stop))
+    assert.ok(t.some((x) => x.setting === 'as written' && x.why.length > 10), 'why it fired is kept')
+    assert.ok(t.some((x) => x.setting === 'fine-tuned' && x.setting_text), 'the fine-tuned trades and the setting they used')
+    assert.deepEqual([...new Set(t.map((x) => x.run_id))], [runId])
+    // Sorted by date then time, as the page shows them.
+    const keys = t.map((x) => `${x.date} ${x.entry_time_ist}`)
+    assert.deepEqual(keys, [...keys].sort(), 'the file is in date / time order')
+    // The settings of that run: each strategy as written and fine-tuned, with every parameter.
+    const st = rows(join(history, `${runId}-settings.csv`))
+    assert.deepEqual([...new Set(st.map((x) => x.which))].sort(), ['as written', 'fine-tuned'])
+    assert.ok(st.every((x) => x.strategy_id && x.tradeSide && x.tradeFrom && x.train_trades !== undefined))
+    // runs.csv: a row for the run, with the days and trades it holds.
+    const runs = rows(join(history, 'runs.csv'))
+    assert.equal(runs.length, 1)
+    assert.equal(runs[0].run_id, runId)
+    assert.equal(runs[0].index, 'NIFTY')
+    assert.equal(Number(runs[0].days_used), result.days.length)
+    assert.equal(Number(runs[0].days_skipped), 1)
+    assert.equal(Number(runs[0].trades), t.length)
 
     // A second run (a rerun, or a job resumed after a restart): every full day comes from the disk cache.
     const before = seen.length
@@ -195,6 +234,11 @@ test('a long job rides out a busy Dhan, leaves out a partial day, re-uses the di
     assert.ok(fetchedAgain.every((p) => p.endsWith('/day/2026-09-30')), `only the partial day is asked again: ${fetchedAgain.join(', ')}`)
     assert.ok(again.result.fetched.cacheHits >= 15)
     assert.deepEqual(again.result.ranked.map((x) => [x.id, x.n, x.total]), result.ranked.map((x) => [x.id, x.n, x.total]), 'the same result from the cache')
+    // The second run is its OWN history entry - an earlier run is never overwritten, so runs can be compared.
+    const runsAfter = rows(join(history, 'runs.csv'))
+    assert.equal(runsAfter.length, 2, 'two runs kept')
+    assert.equal(new Set(runsAfter.map((r) => r.run_id)).size, 2)
+    assert.ok(readdirSync(history).filter((f) => f.endsWith('-trades.csv')).length === 2)
   } finally {
     server.close()
   }
