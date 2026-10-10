@@ -127,10 +127,20 @@ export function optionDetails(days, id, v, trail, underlying) {
       if (!o || !Number.isFinite(outcome.r)) continue
       const dir = s.side === 'LONG' ? 1 : -1
       const exitPrice = Number.isFinite(outcome.exitPrice) ? outcome.exitPrice : s.entry + dir * outcome.r * Math.abs(s.entry - s.stop)
+      // The option's own SL / target premiums (used unless it goes out with the index trade).
+      const own = (v.optExit ?? 'index') !== 'index'
+      const slPrem = o.trade.premium * (v.optSlPct ?? 20) / 100
+      const tgPrem = o.trade.premium * (v.optTargetPct ?? 30) / 100
+      const buy = o.trade.action === 'BUY'
       out.push({
         date: day.date, t: s.t, exitT: o.exitMs - MIN, index: underlying ?? null, side: s.side, entry: s.entry, exit: exitPrice,
         indexPoints: dir * (exitPrice - s.entry), r: outcome.r, points: o.points, stopHit: /SL/.test(o.reason) && o.points < 0,
-        opt: { label: `${o.trade.action} ${o.trade.strike} ${o.trade.side}`, moneyness: v.optMoneyness ?? 0, entry: o.trade.premium, exit: o.exitPremium, points: o.points, reason: o.reason },
+        ...levelsOf(s, outcome),
+        opt: {
+          label: `${o.trade.action} ${o.trade.strike} ${o.trade.side}`, moneyness: v.optMoneyness ?? 0, entry: o.trade.premium, exit: o.exitPremium, points: o.points, reason: o.reason,
+          sl: own ? o.trade.premium + (buy ? -slPrem : slPrem) : null, target: own ? o.trade.premium + (buy ? tgPrem : -tgPrem) : null,
+          slPts: own ? slPrem : null, targetPts: own ? tgPrem : null,
+        },
       })
     }
   }
@@ -224,11 +234,24 @@ export function tradeDetails(days, id, variant, trail, underlying) {
       out.push({
         date: day.date, t: s.t, exitT: outcome.exitAt ?? null, index: underlying ?? null, side: s.side,
         entry: s.entry, exit: exitPrice, points: dir * (exitPrice - s.entry), r: outcome.r, status: outcome.status, stopHit: !!outcome.stopHit,
+        ...levelsOf(s, outcome),
         buy: leg(s.options?.buy), sell: leg(s.options?.sell),
       })
     }
   }
   return out
+}
+
+/** A trade's stop-loss and target as traded (after the trade filters' stop / target size), their distance in points,
+ *  the stop where it stood at the exit (moved by the trailing stop) and why it closed. */
+function levelsOf(s, outcome) {
+  const dir = s.side === 'LONG' ? 1 : -1
+  const finalStop = Number.isFinite(outcome.stop) ? outcome.stop : s.stop
+  return {
+    stop: s.stop, target: s.target, slPts: Math.abs(s.entry - s.stop), targetPts: Number.isFinite(s.target) ? Math.abs(s.target - s.entry) : null,
+    finalStop, trailed: !!outcome.trailed, lockedPts: outcome.trailed ? dir * (finalStop - s.entry) : null,
+    exitReason: outcome.timeStop ? (outcome.squareOff ? 'square-off 15:10' : 'time stop') : outcome.stopHit ? (outcome.trailed ? 'trailing SL' : 'stop-loss') : outcome.status === 'open' ? 'open' : 'target',
+  }
 }
 
 /** Points captured over trades: the futures' total and average, and each option leg's (BUY / SELL) over the
@@ -340,13 +363,13 @@ export function tuneStrategy(days, id, { trail = null, minTrades = 8, trainFract
     const oi = tuneStrategy(days, id, { trail, minTrades, trainFraction, keep, what: 'oi', base, oiKeys, search, onProgress, underlying })
     const tr = tuneStrategy(days, id, { trail, minTrades, trainFraction, keep, what: 'trade', base: oi.best?.params ?? base, underlying })
     const op = tuneStrategy(days, id, { trail, minTrades, trainFraction, keep, what: 'option', base: tr.best?.params ?? oi.best?.params ?? base, underlying })
-    return { ...op, what, tried: oi.tried + tr.tried + op.tried, oiStage: { best: oi.best, reason: oi.reason }, tradeStage: { best: tr.best, reason: tr.reason } }
+    return { ...op, what, tried: oi.tried + tr.tried + op.tried, factors: [...(oi.factors ?? []), ...(tr.factors ?? []), ...(op.factors ?? [])], oiStage: { best: oi.best, reason: oi.reason }, tradeStage: { best: tr.best, reason: tr.reason } }
   }
   if (what === 'both') {
     // The OI confirmation first (chosen on the train days only), then the trade settings on top of it.
     const oi = tuneStrategy(days, id, { trail, minTrades, trainFraction, keep, what: 'oi', base, oiKeys, search, onProgress, underlying })
     const onTop = tuneStrategy(days, id, { trail, minTrades, trainFraction, keep, what: 'trade', base: oi.best?.params ?? base, underlying })
-    return { ...onTop, what, tried: oi.tried + onTop.tried, qualified: oi.qualified + onTop.qualified, oiStage: { best: oi.best, reason: oi.reason } }
+    return { ...onTop, what, tried: oi.tried + onTop.tried, qualified: oi.qualified + onTop.qualified, factors: [...(oi.factors ?? []), ...(onTop.factors ?? [])], oiStage: { best: oi.best, reason: oi.reason } }
   }
   const explicitGrid = grid != null
   const isOpt = what === 'option'
@@ -357,11 +380,13 @@ export function tuneStrategy(days, id, { trail = null, minTrades = 8, trainFract
   const asWritten = isOpt ? { ...DEFAULT_VARIANT, ...OPTION_DEFAULT } : DEFAULT_VARIANT
   const { train, test } = splitDays(days, trainFraction)
   const baseline = { params: asWritten, train: scoreR(score(train, asWritten)), test: scoreR(score(test, asWritten)) }
+  // What each tuned input did: for every value it was tried at, the best train score of a combination with it.
+  const tally = new FactorTally(grid, base, minTrades)
   let rows = []
   let tried = 0
   if (what === 'oi' && !explicitGrid && search !== 'full') {
     // Step by step (stepSearch): each OI filter takes its best value given the others, then a second pass.
-    const found = stepSearch(grid, base, (v) => scoreR(score(train, v)), { minTrades })
+    const found = stepSearch(grid, base, (v) => tally.add(v, scoreR(score(train, v))), { minTrades })
     rows = found.rows
     tried = found.tried
   } else {
@@ -378,7 +403,7 @@ export function tuneStrategy(days, id, { trail = null, minTrades = 8, trainFract
       if (oiVariantRedundant(v) || (isOpt && optionVariantRedundant(v))) continue
       tried++
       if (onProgress && tried % 250 === 0) onProgress({ tried, of })
-      const tr = scoreR(score(train, v))
+      const tr = tally.add(v, scoreR(score(train, v)))
       if (tr.n < minTrades || tr.score == null) continue
       rows.push({ params: v, train: tr })
     }
@@ -415,7 +440,43 @@ export function tuneStrategy(days, id, { trail = null, minTrades = 8, trainFract
   return {
     id, name: STRATEGY_BY_ID[id]?.name ?? id, no: STRATEGY_BY_ID[id]?.no ?? null, what, unit: isOpt ? 'pts' : 'R',
     days: days.length, trainDays: train.map((d) => d.date), testDays: test.map((d) => d.date),
-    tried, qualified: rows.length, baseline, best, top, recommend, reason,
+    tried, qualified: rows.length, baseline, best, top, recommend, reason, factors: tally.report(best?.params),
+  }
+}
+
+/** The best train score each value of each tuned input reached (over the combinations tried with that value), so the
+ *  result can show that every ticked input was tried - and what it did - even when it stays at Any. 'window' is the
+ *  entry window (tradeFrom / tradeTo). */
+const factorValue = (key, v) => (key === 'window' ? `${v.tradeFrom}-${v.tradeTo}` : v[key])
+const gridValue = (key, x) => (key === 'window' ? `${x[0]}-${x[1]}` : x)
+class FactorTally {
+  constructor(grid, base, minTrades) {
+    this.minTrades = minTrades
+    this.keys = Object.keys(grid)
+    this.grid = grid
+    this.base = base
+    this.by = new Map(this.keys.map((k) => [k, new Map()]))
+  }
+  add(v, s) {
+    const ok = s.score != null && s.n >= this.minTrades
+    for (const k of this.keys) {
+      const val = factorValue(k, v)
+      const m = this.by.get(k)
+      const cur = m.get(val) ?? { tried: 0, best: null, maxN: 0 }
+      cur.tried++
+      cur.maxN = Math.max(cur.maxN, s.n)
+      if (ok && (!cur.best || s.score > cur.best.score)) cur.best = { n: s.n, avg: s.avg, total: s.total, winRate: s.winRate, score: s.score }
+      m.set(val, cur)
+    }
+    return s
+  }
+  report(bestParams) {
+    return this.keys.map((key) => ({
+      key,
+      start: factorValue(key, this.base),
+      chosen: bestParams ? factorValue(key, bestParams) : null,
+      values: this.grid[key].map((x) => ({ value: gridValue(key, x), ...(this.by.get(key).get(gridValue(key, x)) ?? { tried: 0, best: null, maxN: 0 }) })),
+    }))
   }
 }
 

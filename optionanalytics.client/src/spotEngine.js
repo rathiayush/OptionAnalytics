@@ -1,5 +1,6 @@
 // The SPOT + OPTIONS strategies: they trade the index price itself - the 1-minute spot candles - read against the
-// option chain's OI (the S/R OI walls, CE and PE rising or falling, delta and since the open, the day type). No
+// option chain's OI (the S/R OI walls, CE and PE rising or falling, delta and since the open, the day type) and its
+// premiums (the ATM straddle, the ATM call / put against the spot's new high / low). No
 // futures, no footprint, tape or order book: spot has none. Entry = the last finished spot minute's close,
 // stop / target in spot points; the options each setup carries (BUY / SELL at the ATM strike) are priced from the
 // OI replay like the futures strategies'. No look-ahead: a setup at clock T uses only spot minutes and OI points
@@ -9,7 +10,7 @@
 // does not run them yet, so applying a tuned spot setting only records it.
 
 import {
-  SPOT_STRATEGIES, SQUARE_OFF, applyTradeFilter, dayTypeAt, oiChange, oiOf, optionOiRead, optionTradesFor, oiRows, sideOiChanges, strategyFilters,
+  SPOT_STRATEGIES, SQUARE_OFF, applyTradeFilter, dayTypeAt, oiChange, oiOf, optionOiRead, optionTradesFor, oiRows, premiumAt, sideOiChanges, strategyFilters,
   valueAt, wallOiChanges, wallsAhead, wallsAt,
 } from './strategyEngine.js'
 
@@ -25,6 +26,7 @@ const COVERING_BAR = 0.01 // the other side covering: its OI near the price down
 const FLIP_BAR = 0.002 // a since-open lead worth reading: 0.2% of the chain's OI
 const LADDER_RATIO = 1.3 // support (or resistance) this much bigger than the other side, in the 3 strikes each side
 const LADDER_RISE = 0.1 // ... and that lead grown 10% in 15 minutes
+const STRADDLE_FALL = 0.005 // the ATM straddle decaying: down 0.5% in 10 minutes (same strike)
 const BY_ID = Object.fromEntries(SPOT_STRATEGIES.map((s) => [s.id, s]))
 
 /** Spot candles as the engine reads them: { t (start, ms), time, open, high, low, close }. */
@@ -209,6 +211,94 @@ export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {} }) {
       if (targetPts >= 1.2 * stopPts) {
         push('spotLadder', dir, stopPts, targetPts, 60, {
           OI: `${dir > 0 ? 'support' : 'resistance'} OI ${ratio.toFixed(2)}x the other side (15 min ago ${ratioThen.toFixed(2)}x); between the put wall ${support} and the call wall ${resistance}`,
+        })
+      }
+    }
+  }
+
+  // ---- the option premiums and the walls moving (#108 - #110) ----
+  // Premiums are the replay's last traded prices, read like the OI: a point counts once its minute is over.
+  const straddleAt = (k, ms) => {
+    const ce = premiumAt(oi, 'CE', k, ms)
+    const pe = premiumAt(oi, 'PE', k, ms)
+    return ce != null && pe != null ? ce + pe : null
+  }
+  // The session's ATM straddle: each finished minute's ATM strike (from its close) priced at that minute's end.
+  const straddles = bars.map((b) => straddleAt(Math.round(b.close / step) * step, b.t + MIN)).filter((v) => v != null)
+  const straddleAvg = straddles.length >= 15 ? straddles.reduce((s, v) => s + v, 0) / straddles.length : null
+  const straddleNow = straddleAt(atmK, nowMs)
+  const straddleThen = straddleAt(atmK, nowMs - 10 * MIN) // the same strike 10 minutes ago
+  const decaying = straddleAvg != null && straddleNow != null && straddleThen != null
+    && straddleNow < straddleAvg && straddleNow <= straddleThen * (1 - STRADDLE_FALL)
+  const atmCeChg = chgPct(oi.ce, atmK)
+  const atmPeChg = chgPct(oi.pe, atmK)
+  const atmWritten = atmCeChg != null && atmPeChg != null && atmCeChg >= WALL_BAR && atmPeChg >= WALL_BAR
+  // The walls 15 minutes ago, read with the spot then.
+  const spotThen = valueAt(oi.spot, nowMs - 15 * MIN)?.close
+  const wallsThen = spotThen > 0 ? wallsAt(oi, oiRows(oi, nowMs - 15 * MIN), spotThen) : null
+  const early = bars.slice(0, -10) // the session before the last 10 minutes (bars >= 15, so 5+ minutes)
+  const last3 = bars.slice(-3)
+  const last10 = bars.slice(-10)
+
+  for (const dir of [1, -1]) {
+    const rejection = dir > 0 ? last.close > last.open : last.close < last.open
+    // 8. ATM straddle decay - the range regime: the ATM CE + PE premium is under its session average and down 0.5%+
+    //    in 10 minutes while CE AND PE OI are both being written at the ATM strike (1-strike bar: +0.5% in 15m). The
+    //    price runs to an edge - the put wall below for a long, the call wall above for a short - and turns back off
+    //    it; faded toward the middle of the walls. Unlike #102 the wall's own OI need not grow: the regime does it.
+    const edge = dir > 0 ? support : resistance
+    const tol = 0.5 * step
+    const atEdge = edge != null && (dir > 0 ? last.low <= edge + tol && spotNow > edge : last.high >= edge - tol && spotNow < edge)
+    if (decaying && atmWritten && atEdge && rejection && support != null && resistance != null && resistance - support >= 2 * step) {
+      const mid = (support + resistance) / 2
+      const stopPts = Math.max(1.2 * atr, Math.abs(spotNow - edge) + 0.8 * atr)
+      const targetPts = dir * (mid - spotNow)
+      if (targetPts >= stopPts) {
+        push('spotStraddleFade', dir, stopPts, targetPts, 45, {
+          OI: `ATM ${atmK} straddle ${straddleNow.toFixed(1)} under the session average ${straddleAvg.toFixed(1)}, ${pct(straddleNow / straddleThen - 1)} in 10m; ATM CE ${pct(atmCeChg)} / PE ${pct(atmPeChg)} in 15m (both written); turned at the ${dir > 0 ? 'put' : 'call'} wall ${edge}, target the middle ${mid}`,
+        })
+      }
+    }
+
+    // 9. Writer migration: the biggest put wall (a long) steps UP one strike in 15 minutes - or the biggest call
+    //    wall (a short) steps DOWN one - the new wall's OI grew 0.5%+ in 15m, the price followed half a strike or
+    //    more, sits on the trade's side of the new wall (within 2 strikes) and the last candle goes with it.
+    const wallNow = dir > 0 ? support : resistance
+    const wallWas = wallsThen == null ? null : dir > 0 ? wallsThen.support : wallsThen.resistance
+    const shifted = wallNow != null && wallWas != null && Math.abs(wallNow - wallWas - dir * step) < 1e-6
+    const newWallChg = wallNow == null ? null : chgPct(dir > 0 ? oi.pe : oi.ce, wallNow)
+    const off = wallNow == null ? null : dir * (spotNow - wallNow)
+    if (shifted && newWallChg != null && newWallChg >= WALL_BAR && dir * (spotNow - spotThen) >= 0.5 * step
+      && off > 0 && off <= 2 * step && rejection) {
+      const stopPts = Math.max(1.2 * atr, off + 0.8 * atr)
+      push('spotWallShift', dir, stopPts, 2 * stopPts, 45, {
+        OI: `the ${dir > 0 ? 'put' : 'call'} wall moved ${wallWas} -> ${wallNow} in 15m (its OI ${pct(newWallChg)}); spot ${spotThen.toFixed(1)} -> ${spotNow.toFixed(1)}`,
+      })
+    }
+
+    // 10. Premium divergence: the spot makes a new session high (a short) in the last 3 minutes, above the high set
+    //    before the last 10, and closes at or above the close of that earlier high - but the ATM call's premium is
+    //    NOT above what the same strike was at then (the calls are not paying for the new high), the call writers at
+    //    ATM and the strike above are not covering (OI not falling in 15m) and the last candle turns down. Mirror
+    //    for a new low, the ATM put's premium, the put writers at ATM and the strike below, a candle turning up.
+    if (early.length >= 5) {
+      const ext = (list) => (dir > 0 ? Math.min(...list.map((b) => b.low)) : Math.max(...list.map((b) => b.high)))
+      const prior = early.reduce((a, b) => (dir > 0 ? (b.low < a.low ? b : a) : (b.high > a.high ? b : a)))
+      const priorExt = dir > 0 ? prior.low : prior.high
+      const newExt = ext(last3)
+      const made = dir * (priorExt - newExt) > 0 && dir * (ext(last10) - newExt) >= 0
+      const side = dir > 0 ? 'PE' : 'CE'
+      const premNow = premiumAt(oi, side, atmK, nowMs)
+      const premThen = premiumAt(oi, side, atmK, prior.t + MIN)
+      const writersKs = [atmK, atmK - dir * step]
+      const wMap = dir > 0 ? oi.pe : oi.ce
+      const wNow = writersKs.map((k) => oiOf(wMap, k, nowMs))
+      const wThen = writersKs.map((k) => oiOf(wMap, k, nowMs - 15 * MIN))
+      const holding = wNow.every((v) => v != null) && wThen.every((v) => v > 0) ? wNow[0] + wNow[1] >= wThen[0] + wThen[1] : false
+      if (made && dir * (prior.close - spotNow) >= 0 && premNow != null && premThen != null && premNow <= premThen && holding && rejection) {
+        const stopPts = Math.max(1.2 * atr, dir * (spotNow - newExt) + 0.5 * atr)
+        push('spotPremDiverge', dir, stopPts, 2 * stopPts, 45, {
+          OI: `new session ${dir > 0 ? 'low' : 'high'} ${newExt.toFixed(1)} past ${priorExt.toFixed(1)}, but the ATM ${atmK} ${side} premium ${premNow.toFixed(1)} is not above its ${premThen.toFixed(1)} then; ${side} OI at ${writersKs.join(' / ')} not falling`,
         })
       }
     }
