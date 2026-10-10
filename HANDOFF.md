@@ -83,6 +83,13 @@ tuner honesty items (min days, day-clustered error, held-out final check), `open
   estimated days (1-minute candles, no tape / depth); estimated futures older than ~2.5 months need NSE's chart service (blocked from
   some hosting IPs) - those days are skipped with the reason; SENSEX futures only for the current contract. Spot + options mode needs
   no futures and covers the whole range. Ideas: persist recorded order-flow days to disk; reuse `ExpiredOptionDataStore` for `/run`.
+- Fine-tune HISTORY, CSV only (10 Oct): every run is kept under `{tuning}/history/` - `runs.csv` (a row per run),
+  `{run_id}-trades.csv` and `{run_id}-settings.csv` (`scanner-runner/tuneHistory.mjs`; run_id = `{INDEX}-{data}-{yyyyMMdd-HHmmss}` IST).
+  A run is never overwritten, so a strategy can be compared run by run; the Trades page lists the runs, defaults to the newest
+  per index and clubs the picked runs' trades (any index) by date then time, with a "Tuned settings" view of each run's
+  parameters and scores. Server: `HistoryRuns` / `HistoryRows` / `HistoryPath` (a run id from the URL is checked against a
+  pattern AND must exist - no path escapes), `PruneHistory` keeps `StrategyTuning:HistoryRuns` (100). The old
+  `{U}-trades-latest.json` is gone.
 - Trades page (`/trades`, `TradesPage.jsx`): the latest tuning run's trades (every strategy as written on every day, with why it fired;
   the tuned ones' best setting) and the scanner's record (`/api/scanner-log/rows/{kind}`: signals and live / paper option trades, page and
   server), filters, totals, CSV.

@@ -79,13 +79,21 @@ public sealed class StrategyTuningController : ControllerBase
         return Ok(new { day = day.ToString("yyyy-MM-dd"), calls, dailyLimit = limit });
     }
 
-    /// <summary>GET /api/strategy-tuning/trades/{underlying} - every trade of the last finished job for that index (each
-    /// strategy as written on every day scanned, and each tuned strategy's best setting) - the Trades page.</summary>
-    [HttpGet("trades/{underlying}")]
-    public IActionResult Trades(string underlying, [FromQuery] string? data = null)
+    /// <summary>GET /api/strategy-tuning/history - every tuning run kept (runs.csv), newest first: when, which index,
+    /// what was tuned, how many days and trades. The Trades page lists these and reads the ones picked.</summary>
+    [HttpGet("history")]
+    public IActionResult History() => Ok(_tuning.HistoryRuns());
+
+    /// <summary>GET /api/strategy-tuning/history/{runId}/{kind} - one run's trades or settings (kind: trades, settings)
+    /// as rows; `?format=csv` downloads the CSV file itself.</summary>
+    [HttpGet("history/{runId}/{kind}")]
+    public IActionResult HistoryFile(string runId, string kind, [FromQuery] string? format = null)
     {
-        var d = string.Equals(data, "spot", StringComparison.OrdinalIgnoreCase) ? "spot" : "futures";
-        return _tuning.Trades(underlying, d) is { } r ? Ok(r) : NotFound(new { error = $"No {(d == "spot" ? "spot + options " : "")}tuning trades for {underlying.ToUpperInvariant()} yet - run a tuning job (Strategy tuning page)." });
+        if (string.Equals(format, "csv", StringComparison.OrdinalIgnoreCase))
+            return _tuning.HistoryPath(runId, kind) is { } path
+                ? File(System.IO.File.ReadAllBytes(path), "text/csv", $"{runId}-{kind}.csv")
+                : NotFound(new { error = $"No {kind} for run {runId}." });
+        return _tuning.HistoryRows(runId, kind) is { } rows ? Ok(rows) : NotFound(new { error = $"No {kind} for run {runId}." });
     }
 
     /// <summary>GET /api/strategy-tuning/result/{underlying} - the last finished job for that index.</summary>

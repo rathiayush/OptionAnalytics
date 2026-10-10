@@ -9,12 +9,14 @@
 //   TUNE_JOB                      { underlying, strategies: 'top3' | 'top5' | 'all' | [ids], days, includeEstimated, minTrades,
 //                                   what: 'trade' | 'oi' | 'both' (the trade settings, the OI confirmation, or the OI first then the trade) }
 //   TUNE_OUT                      the result file
-//   TUNE_TRADES_OUT               every trade (each strategy as written on every day, each tuned one's best setting) - the Trades page
+//   TUNE_HISTORY_DIR              the history kept as CSV (tuneHistory.mjs): runs.csv, {run}-trades.csv, {run}-settings.csv -
+//                                 every run's trades and tuned settings, per index, read by the Trades page
 //   TUNE_CACHE_DIR                where each past day's fetched data is kept (tuneFetch.mjs): a rerun / resume / longer range
 //                                 reads it from disk - no Dhan call; TUNE_PACE_MS the pause between requests that reach the server
 // Progress goes to stdout as lines "PROGRESS {json}".
 
-import { writeFileSync, renameSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, writeFileSync, renameSync } from 'node:fs'
+import { join } from 'node:path'
 import { buildOiContext, ACTIVE_STRATEGIES, SPOT_STRATEGIES, STRATEGY_BY_ID, TRADE_FILTERS } from '../src/strategyEngine.js'
 import { scanSpotDay, spotBarsOf } from '../src/spotEngine.js'
 import { autoBigLots } from '../src/orderFlowMath.js'
@@ -24,11 +26,12 @@ import { dayFromOrderFlow, scanDaySetups } from '../src/scanDay.js'
 import { DEFAULT_VARIANT, OI_COMBO_CAP, OI_FACTORS, OPTION_GRID, countOiCombinations, oiGridOf, optionText, rankStrategies, tradeDetails, tuneStrategy, tuningDay, TUNING_GRID, variantText } from '../src/strategyTuning.js'
 import { DEFAULT_ROW_SIZES } from './indexScanner.mjs'
 import { createFetcher, isTransientText, pruneCache } from './tuneFetch.mjs'
+import { RUN_COLUMNS, SETTING_COLUMNS, TRADE_COLUMNS, historyOf, toCsv } from './tuneHistory.mjs'
 
 const BASE = (process.env.RUNNER_BASE_URL ?? 'http://127.0.0.1:8080').replace(/\/$/, '')
 const KEY = process.env.RUNNER_KEY ?? ''
 const OUT = process.env.TUNE_OUT ?? 'tuning-result.json'
-const TRADES_OUT = process.env.TUNE_TRADES_OUT ?? null
+const HISTORY_DIR = process.env.TUNE_HISTORY_DIR ?? null
 const job = JSON.parse(process.env.TUNE_JOB ?? '{}')
 const U = String(job.underlying ?? 'NIFTY').toUpperCase()
 // A date range (from / to, YYYY-MM-DD, either may be left open) picks the days instead of "the last N": every day
@@ -63,8 +66,9 @@ const fetcher = createFetcher({
   onWait: (w) => progress({ ...(lastScan ?? { stage: 'scan' }), wait: { ...w, until: new Date(Date.now() + w.waitMs).toISOString() } }),
 })
 const api = (path) => fetcher.api(path)
-const writeJson = (path, body) => {
-  writeFileSync(`${path}.tmp`, JSON.stringify(body))
+/** Written beside the final name and moved onto it, so a reader never sees half a file. */
+const writeJson = (path, body, text = null) => {
+  writeFileSync(`${path}.tmp`, text ?? JSON.stringify(body))
   renameSync(`${path}.tmp`, path)
 }
 const write = (body) => writeJson(OUT, body)
@@ -300,17 +304,28 @@ async function main() {
       onProgress: (p) => progress({ stage: 'tune', strategy: ids[i], done: i, total: ids.length, ...p }),
     }))
   }
-  // Every trade, for the Trades page: each strategy as written on every day scanned (with its checks - why it fired),
-  // and each tuned strategy's best setting. Written before the result, so a result always has its trades beside it.
-  if (TRADES_OUT) {
-    const trades = [...asWritten]
-    for (const res of results) {
-      if (!res.best?.trades?.length) continue
-      const text = `${variantText(res.best.params)}${res.unit === 'pts' ? ` · ${optionText(res.best.params)}` : ''}`
-      for (const t of res.best.trades) trades.push({ id: res.id, no: res.no, name: res.name, setting: 'best', settingText: text, recommend: res.recommend, ...t })
-    }
-    trades.sort((a, b) => a.t - b.t || (a.no ?? 0) - (b.no ?? 0))
-    writeJson(TRADES_OUT, { underlying: U, data: DATA, startedUtc, finishedUtc: new Date().toISOString(), days: days.map((d) => ({ date: d.date, estimated: d.estimated, ...d.quality })), skipped, trades })
+  // The run's own place in the HISTORY, as CSV (no database): its trades - each strategy as written on every day
+  // scanned, with why it fired, and each fine-tuned strategy's best setting - and the settings themselves, so a
+  // strategy can be compared run by run. Written before the result, so a result always has its history beside it.
+  const trades = [...asWritten]
+  for (const res of results) {
+    res.settingText = res.best ? `${variantText(res.best.params)}${res.unit === 'pts' ? ` · ${optionText(res.best.params)}` : ''}` : null
+    for (const t of res.best?.trades ?? []) trades.push({ id: res.id, no: res.no, name: res.name, setting: 'best', settingText: res.settingText, recommend: res.recommend, ...t })
+  }
+  trades.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0) || a.t - b.t || (a.no ?? 0) - (b.no ?? 0))
+  if (HISTORY_DIR) {
+    const h = historyOf({
+      underlying: U, data: DATA, finishedMs: Date.now(), what: WHAT, search: SEARCH, minTrades: MIN_TRADES, from: FROM, to: TO,
+      days: days.map((d) => ({ date: d.date, estimated: d.estimated })), skipped, results, trades, fetched: fetcher.stats,
+    })
+    mkdirSync(HISTORY_DIR, { recursive: true })
+    writeJson(join(HISTORY_DIR, `${h.run_id}-trades.csv`), null, toCsv(TRADE_COLUMNS, h.trades))
+    writeJson(join(HISTORY_DIR, `${h.run_id}-settings.csv`), null, toCsv(SETTING_COLUMNS, h.settings))
+    // runs.csv: the header once, then a line per run (appended - an older run is never rewritten).
+    const runsPath = join(HISTORY_DIR, 'runs.csv')
+    const line = toCsv(RUN_COLUMNS, [h.run])
+    appendFileSync(runsPath, existsSync(runsPath) ? line.slice(line.indexOf('\n') + 1) : line)
+    console.log(`HISTORY ${h.run_id} (${h.trades.length} trades, ${h.settings.length} settings)`)
   }
   write({
     ok: true, underlying: U, job, startedUtc, finishedUtc: new Date().toISOString(), rowSize, trail, minTrades: MIN_TRADES, what: WHAT, search: SEARCH, data: DATA, from: FROM, to: TO, oiFactors: OI_KEYS ?? OI_FACTORS.map((f) => f.key),

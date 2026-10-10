@@ -10,7 +10,6 @@ const f1 = (v) => (v == null || !Number.isFinite(v) ? '-' : v.toFixed(1))
 const pts = (v) => (v == null || !Number.isFinite(v) ? '-' : `${v >= 0 ? '+' : ''}${v.toFixed(1)}`)
 const fmtR = (v) => (v == null || !Number.isFinite(v) ? '-' : `${v >= 0 ? '+' : ''}${v.toFixed(2)}R`)
 const col = (v) => (v == null || !Number.isFinite(v) ? undefined : v > 0 ? UP_COLOR : v < 0 ? DOWN_COLOR : undefined)
-const ist = (ms) => (ms ? new Date(ms).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false, hour: '2-digit', minute: '2-digit' }) : '-')
 const hhmm = (s) => (s ? String(s).slice(11, 16) : '-') // "yyyy-MM-dd HH:mm:ss" (IST) -> HH:mm
 const sideTag = (s) => <span style={{ color: s === 'LONG' ? UP_COLOR : DOWN_COLOR }}>{s}</span>
 
@@ -53,111 +52,161 @@ const byTime = (order, timeOf) => (a, b) => (order === 'desc' ? -1 : 1) * (Strin
 const OrderToggle = ({ value, onChange }) => <Segmented value={value} onChange={onChange} options={[{ value: 'asc', label: 'Oldest first' }, { value: 'desc', label: 'Newest first' }]} />
 const istMs = (s) => (s ? Date.parse(`${String(s).replace(' ', 'T')}+05:30`) : null) // "yyyy-MM-dd HH:mm:ss" (IST) -> ms
 
-/** A trade of an option-tuned (Option trade / Everything) best setting carries its option in `opt` and the option's premium
- *  points in `points`: shown like the others - the index points as Points, the option in its bought / sold column. */
-const normalise = (t) => {
-  if (!t.opt) return t
-  const leg = { label: t.opt.label, entry: t.opt.entry, exit: t.opt.exit, points: t.opt.points }
-  return { ...t, points: t.indexPoints ?? t.points, optionPoints: t.opt.points, ...(String(t.opt.label).startsWith('BUY') ? { buy: leg } : { sell: leg }) }
-}
-
 const inDates = (date, range) => (!range?.[0] || date >= range[0].format('YYYY-MM-DD')) && (!range?.[1] || date <= range[1].format('YYYY-MM-DD'))
 const strategyOptions = (rows, idOf, label) => [...new Map(rows.map((r) => [idOf(r), label(r)])).entries()].filter(([id]) => id).sort((a, b) => String(a[1]).localeCompare(String(b[1]), 'en', { numeric: true })).map(([value, l]) => ({ value, label: l }))
 
-// ---- Backtest: every trade of the latest tuning run ---------------------------------------------------------------
+// ---- Backtest: the tuning HISTORY - every run kept as CSV, the picked runs' trades clubbed by date and time -------
+const runLabel = (r) => `${r.index}${r.data === 'spot' ? ' spot' : ''} · ${r.finished_ist?.slice(8, 10)}/${r.finished_ist?.slice(5, 7)} ${r.finished_ist?.slice(11, 16)} · ${r.days_used}d · ${r.tuned}`
+/** The newest run of each index (for the data mode) - what the page shows until runs are picked. */
+const latestPerIndex = (runs, data) => {
+  const seen = new Map()
+  for (const r of runs.filter((x) => x.data === data)) if (!seen.has(r.index)) seen.set(r.index, r.run_id) // runs come newest first
+  return [...seen.values()]
+}
+
 function BacktestTrades() {
-  const [underlying, setUnderlying] = useState('all')
   const [data, setData] = useState('futures')
-  const [body, setBody] = useState(null)
+  const [runs, setRuns] = useState(null)
+  const [picked, setPicked] = useState([])
+  const [touched, setTouched] = useState(false) // the trader chose the runs themselves
+  const [loaded, setLoaded] = useState({}) // run_id -> rows
   const [error, setError] = useState(null)
+  const [view, setView] = useState('trades')
   const [setting, setSetting] = useState('all')
   const [order, setOrder] = useState('asc')
   const [ids, setIds] = useState([])
   const [side, setSide] = useState('all')
   const [outcome, setOutcome] = useState('all')
   const [range, setRange] = useState(null)
-  // A new index / data mode: clear what was shown, then load its trades.
-  const reset = (fn) => (v) => { setBody(null); setError(null); setIds([]); fn(v) }
-  // Every index's latest tuning run (or one index's): its trades merged into one list.
+
   useEffect(() => {
-    const list = underlying === 'all' ? UNDERLYINGS : [underlying]
-    Promise.all(list.map((u) => fetch(`/api/strategy-tuning/trades/${u}${data === 'spot' ? '?data=spot' : ''}`)
-      .then(async (r) => (r.ok ? r.json() : r.status === 404 ? null : Promise.reject(new Error((await r.json().catch(() => null))?.error ?? `HTTP ${r.status}`))))))
-      .then((bodies) => {
-        const runs = bodies.filter(Boolean)
-        if (!runs.length) throw new Error(`No ${data === 'spot' ? 'spot + options ' : ''}tuning run${underlying === 'all' ? ' for any index' : ` for ${underlying}`} yet - run one on the Strategy tuning page; its trades are listed here.`)
-        setBody({ runs, trades: runs.flatMap((b) => (b.trades ?? []).map((t) => normalise({ ...t, index: t.index ?? b.underlying }))) })
-      })
-      .catch((e) => setError(e.message))
-  }, [underlying, data])
-  const all = useMemo(() => body?.trades ?? [], [body])
-  const rows = useMemo(() => all.filter((t) => (setting === 'all' || t.setting === setting) && (!ids.length || ids.includes(t.id))
-    && (side === 'all' || t.side === side) && (outcome === 'all' || (outcome === 'win' ? t.points > 0 : outcome === 'loss' ? t.points < 0 : t.stopHit))
-    && inDates(t.date, range)).sort(byTime(order, (t) => t.t)), [all, setting, ids, side, outcome, range, order])
-  const priceLabel = data === 'spot' ? 'Index' : 'Futures'
-  const csvColumns = [
-    { title: 'date', value: (t) => t.date }, { title: 'entry_time_ist', value: (t) => ist(t.t) }, { title: 'exit_time_ist', value: (t) => (t.exitT ? ist(t.exitT) : 'day end') },
-    { title: 'index', value: (t) => t.index }, { title: 'strategy_no', value: (t) => t.no }, { title: 'strategy', value: (t) => t.name }, { title: 'setting', value: (t) => t.setting === 'best' ? `fine-tuned: ${t.settingText}` : 'as written' },
-    { title: 'side', value: (t) => t.side }, { title: 'entry', value: (t) => t.entry }, { title: 'stop', value: (t) => t.stop }, { title: 'target', value: (t) => t.target },
-    { title: 'exit', value: (t) => t.exit }, { title: 'closed_by', value: (t) => t.exitReason }, { title: 'points', value: (t) => t.points?.toFixed(2) }, { title: 'r', value: (t) => t.r?.toFixed(3) },
-    { title: 'option_bought', value: (t) => t.buy ? `${t.buy.label} ${f1(t.buy.entry)}->${f1(t.buy.exit)}` : '' }, { title: 'bought_points', value: (t) => t.buy?.points?.toFixed(2) ?? '' },
-    { title: 'option_sold', value: (t) => t.sell ? `${t.sell.label} ${f1(t.sell.entry)}->${f1(t.sell.exit)}` : '' }, { title: 'sold_points', value: (t) => t.sell?.points?.toFixed(2) ?? '' },
-    { title: 'estimated_day', value: (t) => (t.estimated ? 'yes' : '') },
-  ]
-  const leg = (l) => (l ? <span style={{ whiteSpace: 'nowrap', fontSize: 12 }}>{l.label} {f1(l.entry)} → {l.exit == null ? '?' : f1(l.exit)} <b style={{ color: col(l.points) }}>{pts(l.points)}</b></span> : <Text type="secondary">-</Text>)
+    fetch('/api/strategy-tuning/history').then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then(setRuns).catch((e) => setError(e.message))
+  }, [])
+  // Until runs are picked by hand, show the newest run of each index.
+  useEffect(() => { if (runs && !touched) setPicked(latestPerIndex(runs, data)) }, [runs, data, touched])
+  // Each picked run's file is read once and kept (a run never changes).
+  useEffect(() => {
+    for (const id of picked) {
+      for (const kind of ['trades', 'settings']) {
+        const key = `${id}:${kind}`
+        if (loaded[key]) continue
+        setLoaded((m) => ({ ...m, [key]: 'loading' }))
+        fetch(`/api/strategy-tuning/history/${id}/${kind}`).then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+          .then((rows) => setLoaded((m) => ({ ...m, [key]: rows })))
+          .catch(() => setLoaded((m) => ({ ...m, [key]: [] })))
+      }
+    }
+  }, [picked]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const pickedRuns = useMemo(() => (runs ?? []).filter((r) => picked.includes(r.run_id)), [runs, picked])
+  const rowsOf = (kind) => picked.flatMap((id) => (Array.isArray(loaded[`${id}:${kind}`]) ? loaded[`${id}:${kind}`] : []))
+  const waiting = picked.some((id) => loaded[`${id}:trades`] === 'loading')
+  const all = useMemo(() => rowsOf('trades'), [picked, loaded]) // eslint-disable-line react-hooks/exhaustive-deps
+  const settings = useMemo(() => rowsOf('settings'), [picked, loaded]) // eslint-disable-line react-hooks/exhaustive-deps
+  const shown = useMemo(() => all
+    .filter((t) => (setting === 'all' || t.setting === setting) && (!ids.length || ids.includes(t.strategy_id))
+      && (side === 'all' || t.side === side)
+      && (outcome === 'all' || (outcome === 'win' ? num(t.points) > 0 : outcome === 'loss' ? num(t.points) < 0 : /stop|SL/i.test(t.closed_by)))
+      && inDates(t.date, range))
+    .map((t) => ({ ...t, _t: istMs(t.entry_time_ist), _p: num(t.points) }))
+    .sort(byTime(order, (t) => t._t)), [all, setting, ids, side, outcome, range, order])
+
+  const csvColumns = Object.keys(all[0] ?? {}).map((k) => ({ title: k, value: (r) => r[k] }))
+  const leg = (label, inp, out, p) => (label ? <span style={{ whiteSpace: 'nowrap', fontSize: 12 }}>{label} {f1(num(inp))} → {f1(num(out))} <b style={{ color: col(num(p)) }}>{pts(num(p))}</b></span> : <Text type="secondary">-</Text>)
+  const spot = data === 'spot'
+
   return (
     <Space direction="vertical" size={10} style={{ width: '100%' }}>
       <Row gutter={[12, 8]} align="middle">
-        <Col><Select value={underlying} onChange={reset(setUnderlying)} options={[{ value: 'all', label: 'All indices' }, ...UNDERLYINGS.map((u) => ({ value: u, label: u }))]} style={{ width: 130 }} /></Col>
-        <Col><Segmented value={data} onChange={reset(setData)} options={[{ value: 'futures', label: 'Futures + OI' }, { value: 'spot', label: 'Spot + options' }]} /></Col>
-        <Col><Segmented value={setting} onChange={setSetting} options={[{ value: 'all', label: <Tooltip title="Every trade of the run: each strategy as written and each fine-tuned strategy with its best setting">All trades</Tooltip> }, { value: 'as written', label: <Tooltip title="Every strategy with its rules as written, on every day the run scanned">As written</Tooltip> }, { value: 'best', label: <Tooltip title="The fine-tuned strategies with the best setting the tuning found">Fine-tuned</Tooltip> }]} /></Col>
-        <Col><OrderToggle value={order} onChange={setOrder} /></Col>
-        <Col flex="1 1 260px"><Select mode="multiple" allowClear value={ids} onChange={setIds} placeholder="All strategies" style={{ width: '100%' }} maxTagCount="responsive" options={strategyOptions(all, (t) => t.id, (t) => `#${t.no} ${t.name}`)} /></Col>
-        <Col><Segmented value={side} onChange={setSide} options={[{ value: 'all', label: 'Both sides' }, { value: 'LONG', label: 'Long' }, { value: 'SHORT', label: 'Short' }]} /></Col>
-        <Col><Segmented value={outcome} onChange={setOutcome} options={[{ value: 'all', label: 'All' }, { value: 'win', label: 'Winners' }, { value: 'loss', label: 'Losers' }, { value: 'sl', label: 'SL hit' }]} /></Col>
-        <Col><DatePicker.RangePicker value={range} onChange={setRange} format="DD MMM YYYY" allowEmpty={[true, true]} /></Col>
-        <Col><Button onClick={() => downloadCsv(`${underlying === 'all' ? 'all-indices' : underlying}${data === 'spot' ? '-spot' : ''}-backtest-trades.csv`, csvColumns, rows)} disabled={!rows.length}>Download CSV</Button></Col>
+        <Col><Segmented value={data} onChange={(v) => { setData(v); setTouched(false); setIds([]) }} options={[{ value: 'futures', label: 'Futures + OI' }, { value: 'spot', label: 'Spot + options' }]} /></Col>
+        <Col flex="1 1 420px">
+          <Tooltip title="Every tuning run is kept. Pick any - of any index - and their trades are listed together by date and time.">
+            <Select mode="multiple" allowClear value={picked} onChange={(v) => { setPicked(v); setTouched(true) }} style={{ width: '100%' }} maxTagCount="responsive"
+              placeholder="Tuning runs" options={(runs ?? []).filter((r) => r.data === data).map((r) => ({ value: r.run_id, label: runLabel(r) }))} />
+          </Tooltip>
+        </Col>
+        <Col><Segmented value={view} onChange={setView} options={[{ value: 'trades', label: 'Trades' }, { value: 'settings', label: <Tooltip title="What each strategy was tuned to in these runs - every parameter, and what it scored">Tuned settings</Tooltip> }]} /></Col>
+        {!touched && runs?.length > 0 && <Col><Text type="secondary" style={{ fontSize: 12 }}>showing the newest run of each index</Text></Col>}
       </Row>
-      {error && <Alert type="info" showIcon message={error} />}
-      {body && (
+      {error && <Alert type="error" showIcon message={`The tuning history could not be read: ${error}`} />}
+      {runs?.length === 0 && <Alert type="info" showIcon message="No tuning run yet - run one on the Strategy tuning page. Every run is kept here afterwards: its trades and the settings it found." />}
+      {pickedRuns.length > 0 && (
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          {pickedRuns.map((r) => `${r.index}: ${r.finished_ist?.slice(0, 16)}, ${r.days_used} day(s) ${r.first_day} to ${r.last_day}${Number(r.days_skipped) ? `, ${r.days_skipped} left out` : ''}${Number(r.days_estimated) ? `, ${r.days_estimated} estimated` : ''}`).join(' · ')}
+        </Text>
+      )}
+      {view === 'trades' ? (
         <>
-          {body.runs.map((b) => (
-            <Text key={`${b.underlying}-${b.data}`} type="secondary" style={{ fontSize: 12, display: 'block' }}>
-              <b>{b.underlying}</b>: tuning run of {new Date(b.finishedUtc).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })} ·
-              {' '}{b.days?.length ?? 0} day(s) scanned ({b.days?.at(-1)?.date} to {b.days?.[0]?.date}){b.days?.some((d) => d.estimated) ? `, ${b.days.filter((d) => d.estimated).length} estimated from 1-minute candles` : ''}
-              {b.skipped?.length ? <Tooltip title={b.skipped.map((x) => `${x.date}: ${x.reason}`).join(' · ')}> · <u>{b.skipped.length} day(s) left out</u></Tooltip> : ''}
-            </Text>
-          ))}
-          <Text type="secondary" style={{ fontSize: 12 }}>Every trade of every strategy in one list by date and time - each taken exactly as the scanner would (first per cooldown, its stop / target / trailing stop on the minute bars, the 15:10 square-off). Fine-tuned rows use the best setting the tuning found; expand a row for why it fired.</Text>
-          <Totals rows={rows} points={(t) => t.points} r={(t) => t.r} />
-          <Table size="small" rowKey={(t) => `${t.setting}-${t.id}-${t.date}-${t.t}`} dataSource={rows} pagination={{ pageSize: 50, size: 'small', showSizeChanger: true, pageSizeOptions: [50, 100, 500] }} scroll={{ x: 1500 }}
-            expandable={{ rowExpandable: (t) => !!t.checks, expandedRowRender: (t) => (
+          <Row gutter={[12, 8]} align="middle">
+            <Col><Segmented value={setting} onChange={setSetting} options={[{ value: 'all', label: 'All trades' }, { value: 'as written', label: 'As written' }, { value: 'fine-tuned', label: 'Fine-tuned' }]} /></Col>
+            <Col><OrderToggle value={order} onChange={setOrder} /></Col>
+            <Col flex="1 1 240px"><Select mode="multiple" allowClear value={ids} onChange={setIds} placeholder="All strategies" style={{ width: '100%' }} maxTagCount="responsive"
+              options={strategyOptions(all, (t) => t.strategy_id, (t) => `#${t.strategy_no} ${t.strategy}`)} /></Col>
+            <Col><Segmented value={side} onChange={setSide} options={[{ value: 'all', label: 'Both sides' }, { value: 'LONG', label: 'Long' }, { value: 'SHORT', label: 'Short' }]} /></Col>
+            <Col><Segmented value={outcome} onChange={setOutcome} options={[{ value: 'all', label: 'All' }, { value: 'win', label: 'Winners' }, { value: 'loss', label: 'Losers' }, { value: 'sl', label: 'SL hit' }]} /></Col>
+            <Col><DatePicker.RangePicker value={range} onChange={setRange} format="DD MMM YYYY" allowEmpty={[true, true]} /></Col>
+            <Col><Button onClick={() => downloadCsv(`tuning-trades.csv`, csvColumns, shown)} disabled={!shown.length}>Download CSV</Button></Col>
+          </Row>
+          <Totals rows={shown} points={(t) => t._p} r={(t) => num(t.r)} />
+          <Table size="small" loading={waiting} rowKey={(t) => `${t.run_id}-${t.strategy_id}-${t.setting}-${t.date}-${t.entry_time_ist}`} dataSource={shown}
+            pagination={{ pageSize: 50, size: 'small', showSizeChanger: true, pageSizeOptions: [50, 100, 500] }} scroll={{ x: 1500 }}
+            expandable={{ rowExpandable: (t) => !!t.why, expandedRowRender: (t) => (
               <Space direction="vertical" size={2} style={{ fontSize: 12 }}>
-                {t.setting === 'best' && <Text style={{ fontSize: 12 }}><b>Setting:</b> {t.settingText}</Text>}
-                {Object.entries(t.checks ?? {}).map(([k, v]) => <Text key={k} style={{ fontSize: 12 }}><b>{k}:</b> {String(v)}</Text>)}
+                {t.setting_text && <Text style={{ fontSize: 12 }}><b>Setting:</b> {t.setting_text}</Text>}
+                {t.why.split(' · ').map((w, i) => <Text key={i} style={{ fontSize: 12 }}>{w}</Text>)}
               </Space>
             ) }}
             columns={[
               { title: 'Date', dataIndex: 'date', width: 105, fixed: 'left' },
-              { title: 'In → out (IST)', key: 'time', width: 120, render: (_, t) => `${ist(t.t)} → ${t.exitT ? ist(t.exitT) : 'end'}` },
+              { title: 'In → out (IST)', key: 'time', width: 120, render: (_, t) => `${t.entry_time_ist?.slice(11, 16)} → ${t.exit_time_ist ? t.exit_time_ist.slice(11, 16) : 'end'}` },
               { title: 'Index', dataIndex: 'index', width: 110 },
-              { title: 'Strategy', key: 's', width: 220, render: (_, t) => <span style={{ fontSize: 12 }}>#{t.no} {t.name}{t.setting === 'best' && <Tooltip title={t.settingText}><Tag color="blue" style={{ marginLeft: 4 }}>fine-tuned</Tag></Tooltip>}{t.estimated && <Tooltip title="A day rebuilt from 1-minute candles (no tape / depth)"><Tag style={{ marginLeft: 4 }}>est.</Tag></Tooltip>}</span> },
+              { title: 'Strategy', key: 's', width: 220, render: (_, t) => <span style={{ fontSize: 12 }}>#{t.strategy_no} {t.strategy}
+                {t.setting === 'fine-tuned' && <Tooltip title={t.setting_text}><Tag color="blue" style={{ marginLeft: 4 }}>fine-tuned</Tag></Tooltip>}
+                {t.estimated_day === 'yes' && <Tooltip title="A day rebuilt from 1-minute candles (no tape / depth)"><Tag style={{ marginLeft: 4 }}>est.</Tag></Tooltip>}</span> },
               { title: 'Side', dataIndex: 'side', width: 70, render: sideTag },
-              { title: `${priceLabel} in`, dataIndex: 'entry', width: 90, render: f1 },
-              { title: 'SL', dataIndex: 'stop', width: 90, render: (v, t) => <span style={{ fontSize: 12 }}>{f1(v)}<br /><Text type="secondary" style={{ fontSize: 11 }}>{f1(t.slPts)} pts{t.trailed ? ` · trailed ${f1(t.finalStop)}` : ''}</Text></span> },
-              { title: 'Target', dataIndex: 'target', width: 90, render: (v, t) => <span style={{ fontSize: 12 }}>{f1(v)}<br /><Text type="secondary" style={{ fontSize: 11 }}>{f1(t.targetPts)} pts</Text></span> },
-              { title: `${priceLabel} out`, dataIndex: 'exit', width: 90, render: f1 },
-              { title: 'Closed by', dataIndex: 'exitReason', width: 105 },
-              { title: 'Points', dataIndex: 'points', width: 80, sorter: (a, b) => a.points - b.points, render: (v) => <b style={{ color: col(v) }}>{pts(v)}</b> },
-              { title: 'R', dataIndex: 'r', width: 75, sorter: (a, b) => a.r - b.r, render: (v) => <span style={{ color: col(v) }}>{fmtR(v)}</span> },
-              { title: 'Option bought: in → out', key: 'b', width: 230, render: (_, t) => leg(t.buy) },
-              { title: 'Option sold: in → out', key: 'sl', width: 230, render: (_, t) => leg(t.sell) },
+              { title: `${spot ? 'Index' : 'Futures'} in`, dataIndex: 'entry', width: 90, render: (v) => f1(num(v)) },
+              { title: 'SL', key: 'sl', width: 95, render: (_, t) => <span style={{ fontSize: 12 }}>{f1(num(t.stop))}<br /><Text type="secondary" style={{ fontSize: 11 }}>{f1(num(t.sl_points))} pts{t.trailed_stop ? ` · trailed ${f1(num(t.trailed_stop))}` : ''}</Text></span> },
+              { title: 'Target', key: 'tg', width: 95, render: (_, t) => <span style={{ fontSize: 12 }}>{f1(num(t.target))}<br /><Text type="secondary" style={{ fontSize: 11 }}>{f1(num(t.target_points))} pts</Text></span> },
+              { title: `${spot ? 'Index' : 'Futures'} out`, dataIndex: 'exit', width: 90, render: (v) => f1(num(v)) },
+              { title: 'Closed by', dataIndex: 'closed_by', width: 105 },
+              { title: 'Points', key: 'points', width: 80, sorter: (a, b) => a._p - b._p, render: (_, t) => <b style={{ color: col(t._p) }}>{pts(t._p)}</b> },
+              { title: 'R', dataIndex: 'r', width: 75, sorter: (a, b) => num(a.r) - num(b.r), render: (v) => <span style={{ color: col(num(v)) }}>{fmtR(num(v))}</span> },
+              { title: 'Option traded', key: 'ot', width: 230, render: (_, t) => (t.option_traded ? leg(t.option_traded, t.option_in, t.option_out, t.option_points) : <Text type="secondary">-</Text>) },
+              { title: 'Option bought: in → out', key: 'b', width: 230, render: (_, t) => leg(t.option_bought, t.bought_in, t.bought_out, t.bought_points) },
+              { title: 'Option sold: in → out', key: 'so', width: 230, render: (_, t) => leg(t.option_sold, t.sold_in, t.sold_out, t.sold_points) },
+            ]} />
+        </>
+      ) : (
+        <>
+          <Row gutter={[12, 8]} align="middle">
+            <Col flex="1 1 240px"><Select mode="multiple" allowClear value={ids} onChange={setIds} placeholder="All strategies" style={{ width: '100%' }} maxTagCount="responsive"
+              options={strategyOptions(settings, (r) => r.strategy_id, (r) => `#${r.strategy_no} ${r.strategy}`)} /></Col>
+            <Col><Button onClick={() => downloadCsv('tuning-settings.csv', Object.keys(settings[0] ?? {}).map((k) => ({ title: k, value: (r) => r[k] })), settings.filter((r) => !ids.length || ids.includes(r.strategy_id)))} disabled={!settings.length}>Download CSV</Button></Col>
+          </Row>
+          <Text type="secondary" style={{ fontSize: 12 }}>What each strategy was tuned to in the runs above, and what it scored - the strategy as written beside the setting the tuning chose. Every run is kept, so the same strategy can be compared run by run.</Text>
+          <Table size="small" rowKey={(r) => `${r.run_id}-${r.strategy_id}-${r.which}`} dataSource={settings.filter((r) => !ids.length || ids.includes(r.strategy_id))}
+            pagination={{ pageSize: 25, size: 'small', hideOnSinglePage: true }} scroll={{ x: 1200 }}
+            expandable={{ expandedRowRender: (r) => (
+              <Space size={[6, 4]} wrap>
+                {Object.entries(r).filter(([k]) => k.startsWith('trade') || k.startsWith('opt')).filter(([, v]) => v !== '').map(([k, v]) => <Tag key={k} style={{ fontSize: 11 }}>{k}: <b>{v}</b></Tag>)}
+              </Space>
+            ) }}
+            columns={[
+              { title: 'Run', key: 'run', width: 150, render: (_, r) => <span style={{ fontSize: 12 }}>{r.index}<br /><Text type="secondary" style={{ fontSize: 11 }}>{r.finished_ist?.slice(0, 16)}</Text></span> },
+              { title: 'Strategy', key: 's', width: 210, render: (_, r) => <span style={{ fontSize: 12 }}>#{r.strategy_no} {r.strategy}</span> },
+              { title: 'Which', dataIndex: 'which', width: 110, render: (v, r) => (v === 'fine-tuned' ? <Tag color={r.recommended === 'yes' ? 'success' : 'blue'}>{r.recommended === 'yes' ? 'recommended' : 'fine-tuned'}</Tag> : <Tag>as written</Tag>) },
+              { title: 'Setting', key: 'p', render: (_, r) => <span style={{ fontSize: 12 }}>{r.setting_text || <Text type="secondary">the strategy as written</Text>}</span> },
+              { title: 'Train (older days)', key: 'tr', width: 190, render: (_, r) => <Text style={{ fontSize: 12 }}>{r.train_trades || 0} trades · <b style={{ color: col(num(r.train_avg)) }}>{num(r.train_avg) == null ? '-' : `${pts(num(r.train_avg))}${r.unit === 'pts' ? ' pts' : 'R'}`}</b>/trade · win {r.train_win_pct || '-'}%</Text> },
+              { title: 'Test (newest days)', key: 'te', width: 190, render: (_, r) => <Text style={{ fontSize: 12 }}>{r.test_trades || 0} trades · <b style={{ color: col(num(r.test_avg)) }}>{num(r.test_avg) == null ? '-' : `${pts(num(r.test_avg))}${r.unit === 'pts' ? ' pts' : 'R'}`}</b>/trade · win {r.test_win_pct || '-'}%</Text> },
+              { title: 'Points (all days)', key: 'pt', width: 200, render: (_, r) => <Text style={{ fontSize: 12 }}>net <b style={{ color: col(num(r.points_net)) }}>{pts(num(r.points_net))}</b> · {r.wins}W {r.losses}L{Number(r.sl_hits) ? ` · ${r.sl_hits} SL ${pts(num(r.sl_points))}` : ''}</Text> },
             ]} />
         </>
       )}
     </Space>
   )
 }
+
 
 // ---- The scanner's record: its signals (futures trades) and option trades, live and paper -----------------------
 function ScannerRecord() {
