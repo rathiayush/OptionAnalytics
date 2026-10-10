@@ -92,7 +92,9 @@ public sealed class DhanDataApiRateLimiter : IDisposable
     /// background work (a tuning job) a little longer - it has time, a waiting person does not.</summary>
     public static int RateLimitRetries => IsBackgroundRequest ? 3 : 2;
 
-    private static readonly TimeSpan BackgroundPoll = TimeSpan.FromMilliseconds(100);
+    // How often background work looks again for a free permit: short, so it keeps the allowed rate rather than
+    // losing a slice of every second to polling.
+    private static readonly TimeSpan BackgroundPoll = TimeSpan.FromMilliseconds(20);
     private readonly RateLimiter _interactive;
     private readonly RateLimiter _background;
     private readonly ILogger<DhanDataApiRateLimiter> _logger;
@@ -140,14 +142,18 @@ public sealed class DhanDataApiRateLimiter : IDisposable
         {
             while (true)
             {
-                // A spare interactive permit, but never the last one: one is always left free so a page load that arrives
-                // a moment later is served at once rather than waiting out the window behind background work.
-                if (_interactive.GetStatistics()?.CurrentAvailablePermits > 1)
+                // A spare interactive permit. While the live app is in use, never the LAST one: it is left free so a page
+                // load arriving a moment later is served at once rather than waiting out the window. Once nothing
+                // interactive has asked for a while (a night, a weekend - when a long tuning job runs), that reservation
+                // is pointless and background work uses the whole 5/s Dhan allows.
+                var keepOneFree = !InteractiveIdle;
+                if (_interactive.GetStatistics()?.CurrentAvailablePermits > (keepOneFree ? 1 : 0))
                     using (var spare = _interactive.AttemptAcquire(1)) if (spare.IsAcquired) { Count(); return; }
                 using (var own = _background.AttemptAcquire(1)) if (own.IsAcquired) { Count(); return; }
                 await Task.Delay(BackgroundPoll, cancellationToken);
             }
         }
+        Volatile.Write(ref _lastInteractiveTicks, Environment.TickCount64);
         while (true)
         {
             using var lease = await _interactive.AcquireAsync(1, cancellationToken);
@@ -156,6 +162,13 @@ public sealed class DhanDataApiRateLimiter : IDisposable
             await Task.Delay(BackgroundPoll, cancellationToken);
         }
     }
+
+    /// <summary>How long after the last interactive call background work still leaves a permit free for the live app.</summary>
+    private static readonly long InteractiveQuietMs = 5_000;
+    private long _lastInteractiveTicks = long.MinValue / 2;
+
+    /// <summary>Whether nothing interactive has asked for a Dhan call recently (so a long job may use the full rate).</summary>
+    public bool InteractiveIdle => Environment.TickCount64 - Volatile.Read(ref _lastInteractiveTicks) > InteractiveQuietMs;
 
     // Dhan's documented daily Data-API limit (100,000/day), counted per IST day in this process (a restart starts the count
     // again; another process on the same account is not seen). Shown on the Strategy tuning page; a tuning job stops

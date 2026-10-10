@@ -247,21 +247,27 @@ async function main() {
     return u.calls < u.dailyLimit * (1 - reserve) ? null : `Dhan's daily Data-API limit nearly used (${u.calls.toLocaleString('en-IN')} of ${u.dailyLimit.toLocaleString('en-IN')} calls today) - stopped to leave the rest to the live app; run the job again tomorrow (the days already fetched come from the cache)`
   }
   let stopped = null
+  // A few days are fetched at once (the server still holds Dhan to its 5 calls a second): while one day's setups are
+  // being worked out - that is this process's own CPU, with nothing in flight - the next days' data is already on its
+  // way, instead of the job going quiet between days.
+  const AT_ONCE = Math.max(1, Math.min(8, Number(process.env.TUNE_DAYS_AT_ONCE) || 3))
   const busy = []
-  for (let i = 0; i < plan.length; i++) {
-    const p = plan[i]
+  for (let i = 0; i < plan.length; i += AT_ONCE) {
     if (DATA === 'spot' && days.length >= MAX_DAYS) break
-    lastScan = { stage: 'scan', day: p.date, done: i, total: plan.length, scanned: days.length, skipped: skipped.length }
+    lastScan = { stage: 'scan', day: plan[i].date, done: i, total: plan.length, scanned: days.length, skipped: skipped.length }
     progress(lastScan)
     if ((stopped = await dhanBudgetLeft())) {
       // (Spot + options lists spare weekdays for holidays: only as many as the days still wanted.)
       for (const rest of plan.slice(i, DATA === 'spot' ? i + Math.max(0, MAX_DAYS - days.length) : undefined)) skipped.push({ date: rest.date, reason: stopped, busy: true })
       break
     }
-    try {
-      keepDay(await scanOne(p))
-    } catch (err) {
-      if (err.transient) busy.push({ p, err })
+    const batch = plan.slice(i, i + AT_ONCE)
+    const done = await Promise.all(batch.map(async (p) => {
+      try { return { p, day: await scanOne(p) } } catch (err) { return { p, err } }
+    }))
+    for (const { p, day, err } of done) {
+      if (day) keepDay(day)
+      else if (err.transient) busy.push({ p, err })
       else skipped.push({ date: p.date, reason: err.message })
     }
   }
@@ -279,6 +285,9 @@ async function main() {
     }
   }
   days.sort((a, b) => (a.date < b.date ? 1 : -1))
+  // Spot + options counts the days that worked (holidays fail), and a batch can finish one or two past the number
+  // asked for: the newest MAX_DAYS are kept.
+  if (DATA === 'spot' && days.length > MAX_DAYS) days.length = MAX_DAYS
   skipped.sort((a, b) => (a.date < b.date ? 1 : -1))
   if (!days.length) throw new Error(`none of the ${plan.length} day(s) could be scanned (${skipped[0]?.reason ?? 'unknown'})`)
 
