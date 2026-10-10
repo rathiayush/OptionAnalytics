@@ -94,16 +94,15 @@ public sealed class DhanHistoricalDataService
                 _logger.LogWarning("Dhan call timed out after {Seconds}s with no response ({Context}).", CallTimeout.TotalSeconds, context);
                 return (null, $"Dhan did not respond within {CallTimeout.TotalSeconds:0}s - it may be slow or unreachable right now.");
             }
-            if (response.Success || attempt >= MaxRateLimitRetries || !DhanDataApiRateLimiter.IsRateLimited((int)response.StatusCode, response.ErrorMessage))
+            if (response.Success || attempt >= DhanDataApiRateLimiter.RateLimitRetries || !DhanDataApiRateLimiter.IsRateLimited((int)response.StatusCode, response.ErrorMessage))
                 return (response, null);
             var delay = DhanDataApiRateLimiter.RateLimitBackoff(attempt);
-            _logger.LogInformation("Rate-limited on {Context} (attempt {Attempt}/{Max}) - waiting {Delay} before retrying.", context, attempt + 1, MaxRateLimitRetries, delay);
+            _logger.LogInformation("Rate-limited on {Context} (attempt {Attempt}/{Max}) - waiting {Delay} before retrying.", context, attempt + 1, DhanDataApiRateLimiter.RateLimitRetries, delay);
             response.Dispose();
             await Task.Delay(delay, cancellationToken);
         }
     }
 
-    private const int MaxRateLimitRetries = 3;
 
     /// <summary>Every candle Dhan has for [fromDay, toDay] inclusive (both IST calendar dates) -
     /// spans weekends/holidays fine, since Dhan simply has no data for those and they contribute

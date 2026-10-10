@@ -12,16 +12,57 @@ public sealed class DhanRateLimitTests
     [InlineData(400, "DH-904: Too many requests", true)]
     [InlineData(400, "Rate limit exceeded", true)]
     [InlineData(500, "too many requests, slow down", true)]
+    [InlineData(400, "805: Too many requests or connections. Further requests may result in the user being blocked.", true)]
+    [InlineData(400, "{\"errorCode\":\"805\"}", true)]
     [InlineData(400, "DH-905: Missing required fields", false)]
+    [InlineData(400, "Invalid SecurityId 8050", false)]
     [InlineData(400, "No data present", false)]
     [InlineData(401, "Invalid token", false)]
     public void IsRateLimited_StatusOrDhansOwnWords(int status, string? message, bool expected) =>
         Assert.Equal(expected, DhanDataApiRateLimiter.IsRateLimited(status, message));
 
     [Fact]
-    public void Backoff_Grows_2_4_8_Seconds()
+    public void Backoff_IsShort_HalfASecondToTwo_AndAWaitingPageRetriesLess()
     {
-        Assert.Equal(new[] { 2, 4, 8 }, new[] { 0, 1, 2 }.Select(i => (int)DhanDataApiRateLimiter.RateLimitBackoff(i).TotalSeconds));
+        // Dhan's limit is per second: half a second already clears most of the window. A page load (or the live scanner)
+        // waits ~1.5 s in all before it gives up; background work, which nobody is waiting on, ~3.5 s.
+        Assert.Equal(new[] { 500, 1_000, 2_000 }, new[] { 0, 1, 2 }.Select(i => (int)DhanDataApiRateLimiter.RateLimitBackoff(i).TotalMilliseconds));
+        Assert.Equal(2, DhanDataApiRateLimiter.RateLimitRetries);
+        using (DhanDataApiRateLimiter.BackgroundScope()) Assert.Equal(3, DhanDataApiRateLimiter.RateLimitRetries);
+        var waited = new[] { 0, 1 }.Sum(i => DhanDataApiRateLimiter.RateLimitBackoff(i).TotalMilliseconds);
+        Assert.True(waited <= 1_500, $"a waiting page would be held up {waited} ms");
+    }
+
+    private static DhanDataApiRateLimiter Limiter() => new(Microsoft.Extensions.Options.Options.Create(new DhanOptions { DataApiRequestsPerSecond = 5, DataApiRequestsPerDay = 100_000 }),
+        Microsoft.Extensions.Logging.Abstractions.NullLogger<DhanDataApiRateLimiter>.Instance);
+
+    [Fact]
+    public async Task Background_UsesThePermitsTheLiveAppIsNotUsing_ButNeverTheLastOne()
+    {
+        using var limiter = Limiter();
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        // Four background calls while nothing interactive runs: three spare interactive permits (never the last one) plus
+        // the background lane's own, all inside the first second - at the old fixed 1/s share they took 3+ s.
+        await Task.WhenAll(Enumerable.Range(0, 4).Select(_ => limiter.WaitForPermitAsync(interactive: false, CancellationToken.None)));
+        Assert.True(watch.ElapsedMilliseconds < 900, $"took {watch.ElapsedMilliseconds} ms");
+        // A page load arriving right after is served at once - background work never takes the last free permit.
+        var page = System.Diagnostics.Stopwatch.StartNew();
+        await limiter.WaitForPermitAsync(interactive: true, CancellationToken.None);
+        Assert.True(page.ElapsedMilliseconds < 250, $"the page waited {page.ElapsedMilliseconds} ms behind background work");
+        // Never over 5 a second in all.
+        await Task.WhenAll(Enumerable.Range(0, 5).Select(_ => limiter.WaitForPermitAsync(interactive: false, CancellationToken.None)));
+        Assert.True(watch.ElapsedMilliseconds >= 700, $"10 calls in {watch.ElapsedMilliseconds} ms - over 5/s");
+    }
+
+    [Fact]
+    public async Task EveryPermit_IsCountedAgainstDhansDailyLimit()
+    {
+        using var limiter = Limiter();
+        Assert.Equal((0L, 100_000), (limiter.Usage().Calls, limiter.Usage().DailyLimit));
+        await limiter.WaitForPermitAsync(interactive: true, CancellationToken.None);
+        using (DhanDataApiRateLimiter.BackgroundScope()) await limiter.WaitForPermitAsync(interactive: true, CancellationToken.None);
+        await limiter.WaitForPermitAsync(interactive: false, CancellationToken.None);
+        Assert.Equal(3L, limiter.Usage().Calls);
     }
 
     [Fact]

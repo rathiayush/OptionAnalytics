@@ -72,6 +72,13 @@ tuner honesty items (min days, day-clustered error, held-out final check), `open
   and a timeout is a plain failure (was: an unhandled 500, stuck in the cache). StrategyTuningService: `--max-old-space-size`
   (`StrategyTuning:MaxMemoryMb`, 4096), a job interrupted by a server stop is resumed after the restart (`current-job.json`,
   `StrategyTuningResumeHostedService`); the Stop button forgets it.
+- Dhan limits (https://dhanhq.co/docs/v2/ - Data APIs 5/s and 100,000/day, no minute / hour cap; DH-904 / 805 = rate limit,
+  805 warns of blocking): the server never sends over 5/s (a full queue waits), background work uses interactive permits nobody
+  is waiting for (up to 5/s when the app is quiet), rate limits are retried after 1 / 2 / 4 s (job: 2 / 4 / 8 / 16 / 30 s; longer
+  only for a renewing session / network), calls are counted per IST day (`/api/strategy-tuning/dhan-usage`) and a job stops before
+  the last 10%. Possible next step (needs a check against real Dhan first): `/charts/rollingoption` serves up to 30 days a call -
+  one call per strike per expiry cycle instead of per day; `expiryCode` counts from fromDate, so only within one cycle, and the
+  expiry day itself may differ from today's per-day call.
 - Data limits that remain (not code): the server keeps only the last 3 recorded order-flow days in memory, so a long futures run uses
   estimated days (1-minute candles, no tape / depth); estimated futures older than ~2.5 months need NSE's chart service (blocked from
   some hosting IPs) - those days are skipped with the reason; SENSEX futures only for the current contract. Spot + options mode needs

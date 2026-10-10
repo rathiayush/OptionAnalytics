@@ -7,8 +7,8 @@
 //    not change, so a rerun, a resumed job or a longer range reads it from disk and asks Dhan nothing. Today and later
 //    are never cached (still changing); a response that fails its check is never cached (fetched again next time).
 //  - `pace`: a pause between the requests that do reach the server, so a long job leaves Dhan's limits to the live app;
-//  - `priority()` 'background' (tune.mjs: during market hours) sends "X-Request-Priority: background": the server then
-//    serves the request's Dhan calls from its background lane, never from the live pages' / server scanner's;
+//  - `priority()` 'background' (the default - tune.mjs always) sends "X-Request-Priority: background": the server then
+//    gives the live pages and the server scanner first call on Dhan and the job what they leave (up to 5/s when quiet);
 //  - the cache is kept under `cacheMaxBytes`: the least recently read days are removed first.
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
@@ -30,25 +30,34 @@ export function isTransient(status, text) {
   return status == null ? true : TRANSIENT_TEXT.test(text ?? '')
 }
 
-/** The wait before try `i` (0 = the first retry): 5 s, 15 s, 45 s, 2 min 15, 5 min, 5 min ... or the server's Retry-After. */
-export function retryDelayMs(i, retryAfter = null, baseMs = 5_000) {
+// Dhan's Data-API limit is per second (5/s, 100,000/day - https://dhanhq.co/docs/v2/), and the server itself already
+// retries a rate limit (1 s, 2 s): what still reaches the job clears within seconds. Waiting longer only makes a long job
+// slower, so every ladder is short; only the Dhan session renewing (TOTP - about two minutes) is waited out longer.
+const RATE_LIMIT_TEXT = /rate.?limit|too many|DH-904|(^|\D)805(\D|$)|HTTP 429/i
+const AUTH_TEXT = /not authenticated|invalid token|token expired|access token|DH-901/i
+export const isRateLimitText = (text) => RATE_LIMIT_TEXT.test(text ?? '')
+
+/** What kind of busy an error is: 'rate' (Dhan's rate limit), 'auth' (the server's Dhan session renewing) or 'busy'
+ *  (a 5xx / timeout / network error). */
+export const busyKind = (status, text) => (status === 429 || isRateLimitText(text) ? 'rate' : AUTH_TEXT.test(text ?? '') ? 'auth' : 'busy')
+
+/** The waits before each retry, by kind (then it fails - the day is listed as skipped and tried once more at the end). */
+export const RETRY_LADDER = { rate: [2_000, 4_000, 8_000], auth: [20_000, 40_000, 80_000], busy: [2_000, 5_000] }
+
+/** The wait before retry `i` (0 = the first) of a `kind` error, or null when its ladder is used up. A server Retry-After is
+ *  followed, up to 30 s. `scale` shrinks every wait (tests). */
+export function retryDelayMs(i, retryAfter = null, kind = 'busy', scale = 1) {
+  const ladder = RETRY_LADDER[kind] ?? RETRY_LADDER.busy
+  if (i >= ladder.length) return null
   const after = Number(retryAfter)
-  if (Number.isFinite(after) && after > 0) return Math.min(600_000, after * 1000)
-  return Math.min(60 * baseMs, baseMs * 3 ** i)
+  if (Number.isFinite(after) && after > 0) return Math.round(Math.min(30_000, after * 1000) * scale)
+  return Math.round(ladder[i] * scale)
 }
 
 const sleepReal = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 /** Whether an error TEXT (no status - e.g. a day's "success: false" reason, or one strike's error) is the load, not the day. */
 export const isTransientText = (text) => TRANSIENT_TEXT.test(text ?? '')
-
-/** Market hours (IST, Monday - Friday, 09:00 - 15:45): when the live pages and the server scanner use Dhan. */
-export function inMarketHours(ms = Date.now()) {
-  const ist = new Date(ms + 330 * 60_000)
-  const day = ist.getUTCDay()
-  const minute = ist.getUTCHours() * 60 + ist.getUTCMinutes()
-  return day >= 1 && day <= 5 && minute >= 9 * 60 && minute <= 15 * 60 + 45
-}
 
 /** Keeps the cache directory under `maxBytes`, removing the least recently read files first (reads touch the file). */
 export function pruneCache(dir, maxBytes) {
@@ -65,7 +74,7 @@ export function pruneCache(dir, maxBytes) {
   return { removed, bytes }
 }
 
-export function createFetcher({ base = '', key = '', cacheDir = null, today, attempts = 6, paceMs = 0, timeoutMs = 300_000, fetchImpl = globalThis.fetch, sleep = sleepReal, onWait = () => {}, now = () => Date.now(), priority = () => 'interactive', retryBaseMs = 5_000 } = {}) {
+export function createFetcher({ base = '', key = '', cacheDir = null, today, attempts = 6, paceMs = 0, timeoutMs = 120_000, fetchImpl = globalThis.fetch, sleep = sleepReal, onWait = () => {}, now = () => Date.now(), priority = () => 'background', retryScale = 1 } = {}) {
   const stats = { requests: 0, retries: 0, cacheHits: 0, cacheWrites: 0, waitedMs: 0 }
   let lastRequest = -Infinity
 
@@ -102,20 +111,24 @@ export function createFetcher({ base = '', key = '', cacheDir = null, today, att
     return text ? JSON.parse(text) : null
   }
 
-  /** GET `path` from the server, trying again while it is busy. */
+  /** GET `path` from the server, trying again while it is busy: each kind of busy walks its OWN ladder (a rate limit
+   *  clears in seconds, a renewing Dhan session takes a couple of minutes), and `attempts` caps the tries in all. */
   async function api(path, { label = path.split('?')[0] } = {}) {
+    const tries = { rate: 0, auth: 0, busy: 0 }
     for (let i = 0; ; i++) {
       try {
         return await once(path)
       } catch (err) {
-        if (!err.transient || i + 1 >= attempts) {
-          if (err.transient) err.message = `${err.message} (still failing after ${attempts} tries)`
+        const kind = busyKind(err.status, err.message)
+        const wait = err.transient && i + 1 < attempts ? retryDelayMs(tries[kind], err.retryAfter, kind, retryScale) : null
+        if (wait == null) {
+          if (err.transient) err.message = `${err.message} (still failing after ${i + 1} tries)`
           throw err
         }
-        const wait = retryDelayMs(i, err.retryAfter, retryBaseMs)
+        tries[kind]++
         stats.retries++
         stats.waitedMs += wait
-        onWait({ label, attempt: i + 2, of: attempts, waitMs: wait, reason: err.message })
+        onWait({ label, attempt: i + 2, of: Math.min(attempts, i + 2 + (RETRY_LADDER[kind].length - tries[kind])), waitMs: wait, reason: err.message })
         await sleep(wait)
       }
     }

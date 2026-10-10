@@ -252,7 +252,11 @@ export default function StrategyTuningPage() {
     .then(async (r) => (r.ok ? r.json() : Promise.reject(new Error((await r.json().catch(() => null))?.error ?? `HTTP ${r.status}`))))
     .then((x) => { setResult(x); setResultError(null) })
     .catch((err) => { setResult(null); setResultError(err.message) })
-  const loadStatus = () => fetch('/api/strategy-tuning/status').then((r) => (r.ok ? r.json() : null)).then((s) => { if (s) setStatus(s) }).catch(() => {})
+  const [dhanUsage, setDhanUsage] = useState(null)
+  const loadStatus = () => {
+    fetch('/api/strategy-tuning/status').then((r) => (r.ok ? r.json() : null)).then((s) => { if (s) setStatus(s) }).catch(() => {})
+    fetch('/api/strategy-tuning/dhan-usage').then((r) => (r.ok ? r.json() : null)).then((u) => { if (u) setDhanUsage(u) }).catch(() => {})
+  }
   useEffect(() => { loadResult(underlying) }, [underlying, data]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     loadStatus()
@@ -387,7 +391,7 @@ export default function StrategyTuningPage() {
               <Alert type="warning" showIcon message="Only the recorded days will be used - the server keeps just the last few (in memory)."
                 description="For a long run (30, 120, 250 days) switch on Include estimated days: the other days are rebuilt from 1-minute futures candles (no tape or market depth - the order-flow checks are estimated, and each is marked 'est.'). Or use Spot + options only, which needs no futures order flow." />
             )}
-            {!running && <Text type="secondary" style={{ fontSize: 12 }}>Long runs: each past day is fetched once and kept on the server&apos;s disk, so a rerun, a longer range or a job resumed after a restart asks Dhan only for days it has not seen. Dhan&apos;s rate limits are waited out (in market hours the job uses the server&apos;s background share, leaving the live pages and the scanner theirs); a day that is incomplete - partial session, missing strikes - is left out and listed with the reason, never scored as a whole day.</Text>}
+            {!running && <Text type="secondary" style={{ fontSize: 12 }}>Long runs: each past day is fetched once and kept on the server&apos;s disk, so a rerun, a longer range or a job resumed after a restart asks Dhan only for days it has not seen. Dhan allows 5 data calls a second and 1,00,000 a day: the server keeps to that, a rate limit is waited out in seconds, and in market hours the live pages and the scanner always go first (the job uses what they leave); the job stops before the last 10% of the day&apos;s allowance; a day that is incomplete - partial session, missing strikes - is left out and listed with the reason, never scored as a whole day.</Text>}
             {running && (
               <div>
                 <Text style={{ fontSize: 12 }}>{status.job?.underlying}: {progressText} · started {when(status.startedUtc)}{status.job?.resumed ? ' · resumed after a server restart' : ''}</Text>
@@ -395,6 +399,7 @@ export default function StrategyTuningPage() {
                 <Progress percent={percent} size="small" status="active" />
               </div>
             )}
+            {dhanUsage && <Text type="secondary" style={{ fontSize: 12 }}>Dhan data calls today (this server): <b style={{ color: dhanUsage.calls >= 0.9 * dhanUsage.dailyLimit ? DOWN_COLOR : undefined }}>{dhanUsage.calls.toLocaleString('en-IN')}</b> of {dhanUsage.dailyLimit.toLocaleString('en-IN')} · 5 a second at most</Text>}
             {status?.state === 'failed' && <Alert type="error" showIcon message={`The last tuning job failed: ${status.error}`} />}
             {status?.state === 'cancelled' && <Alert type="warning" showIcon message="The last tuning job was stopped." />}
           </Space>
