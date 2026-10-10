@@ -6,7 +6,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { applyTradeFilter, strategyFilters, simulateOutcome } from '../src/strategyEngine.js'
 import { scanDaySetups, firstPerCooldown, withDayOutcomes } from '../src/scanDay.js'
-import { DEFAULT_VARIANT, OI_GRID, dayTrades, scoreR, splitDays, tuneStrategy, rankStrategies, filtersFromTuning, variants, tuningDay, variantText } from '../src/strategyTuning.js'
+import { DEFAULT_VARIANT, OI_GRID, dayTrades, outcomeKey, tradeDetails, scoreR, splitDays, tuneStrategy, rankStrategies, filtersFromTuning, variants, tuningDay, variantText } from '../src/strategyTuning.js'
 import { day } from './synthetic-day.mjs'
 
 const MIN = 60_000
@@ -166,4 +166,26 @@ test('the OI stage reports every ticked OI input - an input that stays at Any wa
   for (const f of r.factors) assert.deepEqual(f.values.map((x) => x.value), OI_GRID[f.key])
   const both = tuneStrategy(days, 'wallBreak', { what: 'both', oiKeys: ['tradeOiFlow'], minTrades: 2 })
   assert.ok(both.factors.some((f) => f.key === 'tradeOiFlow') && both.factors.some((f) => f.key === 'tradeStopX'), 'OI, then trade: both stages reported')
+})
+
+test('the outcome cache: what a taken trade does depends only on its stop / target / time stop / trailing stop', () => {
+  // The sides, the entry window and the OI confirmation decide WHICH setups are taken, never what a taken one then
+  // does - which is why one answer can be shared by the combinations that differ only in those (see outcomeKey).
+  const v = (o) => ({ ...DEFAULT_VARIANT, ...o })
+  const same = [v({ tradeSide: 'long' }), v({ tradeSide: 'short' }), v({ tradeFrom: 1100, tradeTo: 1230 }), v({ tradeOiFlow: 'with', tradeDayType: 'trend', tradeWallRoom: 'oneR' })]
+  assert.equal(new Set(same.map((x) => outcomeKey(x, null))).size, 1, 'sides / window / OI do not change the outcome')
+  const differ = [v({ tradeStopX: 1.5 }), v({ tradeTargetX: 2 }), v({ tradeTimeStop: 30 }), v({ tradeTrail: '1/1' })]
+  assert.equal(new Set([...differ, same[0]].map((x) => outcomeKey(x, null))).size, 5, 'each of the four does')
+  assert.notEqual(outcomeKey(same[0], null), outcomeKey(same[0], { startR: 1, gapR: 1 }), 'the scanner\'s own trailing stop too')
+
+  // And in practice: a setup taken by two combinations that differ only in the sides ends exactly the same way.
+  const days = Array.from({ length: 6 }, (_, i) => fakeDay(`2026-09-1${i}`))
+  const both = tradeDetails(days, 'wallBreak', v({}), null, 'NIFTY')
+  const longOnly = tradeDetails(days, 'wallBreak', v({ tradeSide: 'long' }), null, 'NIFTY')
+  const key = (t) => `${t.date}-${t.t}`
+  for (const t of longOnly) {
+    const twin = both.find((x) => key(x) === key(t))
+    assert.deepEqual([twin.exit, twin.points, twin.r, twin.exitReason], [t.exit, t.points, t.r, t.exitReason], key(t))
+  }
+  assert.ok(longOnly.length && longOnly.length < both.length)
 })
