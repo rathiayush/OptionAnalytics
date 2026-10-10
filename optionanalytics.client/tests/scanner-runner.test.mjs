@@ -193,3 +193,40 @@ test('the Top 15 from the scanner log\'s signals', () => {
   assert.ok(top.ids.length > 0)
   assert.deepEqual(topFromSignalsCsv('').ids, topFromSignalsCsv(null).ids)
 })
+
+test('a strategy tuned to BUY its option: the server scanner trades that - unless a side was chosen, which wins', async () => {
+  // What "Apply to the scanner" writes for one strategy, and who decides when it fires. The server scanner runs on
+  // 'strategy' (nobody is there to choose); the Order Flow page sends its own 'buy' / 'sell', which always wins.
+  const io = fakeIo()
+  const scanner = new IndexScanner('NIFTY', io)
+  scanner.reset(DATE)
+  scanner.setConfig({ alertIds: ALL_IDS, settings: { autoPaper: 'sell', paperSl: 20, paperTarget: 30, paperLots: 1 } })
+  await runDay(scanner, io, at(15), at(300))
+  const sold = scanner.positions
+  assert.ok(sold.length, 'the scanner traded')
+  assert.ok(sold.every((p) => p.action === 'SELL' && p.slPts === 20 && p.targetPts === 30))
+
+  const id = sold[0].strategy
+  const tunedToBuy = { [id]: { tradeOptLeg: 'buy', tradeOptMoneyness: -1, tradeOptSlPct: 25, tradeOptTargetPct: 50 } }
+  const run = async (autoPaper) => {
+    const s = new IndexScanner('NIFTY', fakeIo())
+    s.reset(DATE)
+    s.setConfig({ alertIds: ALL_IDS, settings: { autoPaper, paperSl: 20, paperTarget: 30, paperLots: 1, filters: tunedToBuy } })
+    await runDay(s, fakeIo(), at(15), at(300))
+    return s.positions
+  }
+
+  // Left to the strategies: this one buys, 1 out of the money, with its own SL / target off the premium paid.
+  const mine = (await run('strategy')).filter((p) => p.strategy === id)
+  const others = (await run('strategy')).filter((p) => p.strategy !== id)
+  assert.ok(mine.length && mine.every((p) => p.action === 'BUY'), 'the tuned strategy buys')
+  for (const p of mine) {
+    assert.ok(Math.abs(p.slPts - p.premium * 0.25) < 1e-6, `SL is 25% of the ${p.premium} premium, not ${p.slPts}`)
+    assert.ok(Math.abs(p.targetPts - p.premium * 0.5) < 1e-6)
+  }
+  assert.ok(others.every((p) => p.action === 'SELL' && p.slPts === 20), 'a strategy with no setting of its own still sells')
+
+  // A side chosen where the trading happens is the last word - the tuned BUY does not override it.
+  const chosen = (await run('sell')).filter((p) => p.strategy === id)
+  assert.ok(chosen.length && chosen.every((p) => p.action === 'SELL'), 'the chosen side wins over the strategy')
+})

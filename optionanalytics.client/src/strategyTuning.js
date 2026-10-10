@@ -11,7 +11,7 @@
 // score (average R minus one standard error), and is only recommended when it also beats the strategy as
 // written on the test days.
 
-import { ACTIVE_STRATEGIES, STRATEGY_BY_ID, TRADE_FILTERS, applyTradeFilter, oiGateText, optionStopTargetHit, optionTradeAt, premiumAt, simulateOutcome } from './strategyEngine.js'
+import { ACTIVE_STRATEGIES, OPTION_TRADE_FILTERS, STRATEGY_BY_ID, TRADE_FILTERS, applyTradeFilter, oiGateText, optionStopTargetHit, optionTradeAt, premiumAt, simulateOutcome } from './strategyEngine.js'
 import { replayRange } from './orderFlowMath.js'
 import { MIN } from './scannerCore.js'
 import { firstPerCooldown } from './scanDay.js'
@@ -541,11 +541,28 @@ export function tuningDay(date, setups, replayDay, oi = null) {
 
 /** The filters to save for a tuned strategy: its own entry filters kept, the tuned trade filters on top (only
  *  the ones that differ from the default). */
-export function filtersFromTuning(current, params) {
+export function filtersFromTuning(current, params, { option = false } = {}) {
   const out = { ...(current ?? {}) }
+  // Every trade filter is either set to what was tuned or removed, so applying a new result REPLACES the last one
+  // rather than leaving half of it behind. The strategy's own entry filters (its rules) are untouched.
   for (const f of TRADE_FILTERS) {
     if (params[f.key] === undefined || params[f.key] === f.default) delete out[f.key]
     else out[f.key] = params[f.key]
+  }
+  // How it is taken in OPTIONS. The option tuning speaks in optLeg / optMoneyness / optSlPct / optTargetPct; the
+  // scanner reads tradeOptLeg / tradeOptMoneyness / tradeOptSlPct / tradeOptTargetPct (optionPlanFor), so they are
+  // carried across here - otherwise "buy instead of sell" was found and then never actually used.
+  for (const key of OPTION_TRADE_FILTERS) delete out[key]
+  // ... but only when the option itself was tuned. A run that only tuned the trade settings carries the option
+  // defaults along for the ride, and applying those would pin the strategy to "sell ATM" the trader never chose.
+  if (!option) return out
+  if (params.optLeg === 'buy' || params.optLeg === 'sell') out.tradeOptLeg = params.optLeg
+  if (Number.isFinite(params.optMoneyness)) out.tradeOptMoneyness = params.optMoneyness
+  // The option's own SL / target only apply when the tuning chose to use them ('first' or 'option'); with 'index' the
+  // option simply goes out with the index trade, which is the scanner's own behaviour.
+  if ((params.optExit === 'first' || params.optExit === 'option')) {
+    if (params.optSlPct > 0) out.tradeOptSlPct = params.optSlPct
+    if (params.optTargetPct > 0) out.tradeOptTargetPct = params.optTargetPct
   }
   return out
 }

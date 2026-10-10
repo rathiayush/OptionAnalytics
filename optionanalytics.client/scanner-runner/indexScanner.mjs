@@ -6,7 +6,7 @@
 // Everything outside (HTTP, Telegram, the state file, the clock) comes in through `io`, so the tests can
 // drive a whole day through it.
 
-import { buildOiContext, optionTradeAt, premiumAt, strategyStats, topFifteen, STRATEGY_BY_ID, DEFAULT_TRAIL } from '../src/strategyEngine.js'
+import { buildOiContext, optionTradeAt, premiumAt, strategyStats, topFifteen, STRATEGY_BY_ID, DEFAULT_TRAIL, optionPlanFor } from '../src/strategyEngine.js'
 import { liquiditySignals, pullStackSignals, autoBigLots } from '../src/orderFlowMath.js'
 import {
   MIN, msOf, scanTick, trailFor, alertIdsFor, followSetups, setupEvents, newSetupEventMemory, newPosition, positionRows, sameSignal,
@@ -18,7 +18,10 @@ import { newProfileWatch, profileAlertText, profileLevels, spotLevelsOf, spotPro
 import { tpoRowFor } from '../src/profiles.js'
 
 // The page's own defaults (StrategyScanner / OrderFlowPage) for anything the config does not say.
-export const DEFAULT_SETTINGS = { alerts: true, telegram: true, pick: 'top15', custom: [], filters: {}, trail: { on: true, ...DEFAULT_TRAIL }, autoPaper: 'sell', paperLots: 1, moneyness: 0 }
+// autoPaper 'strategy': each strategy buys or sells what its own tuned setting says (Apply to the scanner), falling
+// back to selling where there is none - nobody is sitting here to choose, unlike the Order Flow page, where the
+// trader's own Buy / Sell always wins.
+export const DEFAULT_SETTINGS = { alerts: true, telegram: true, pick: 'top15', custom: [], filters: {}, trail: { on: true, ...DEFAULT_TRAIL }, autoPaper: 'strategy', paperLots: 1, moneyness: 0 }
 export const DEFAULT_ROW_SIZES = { NIFTY: 1, BANKNIFTY: 5, SENSEX: 5 }
 const RETRY_MS = 30_000
 const LOG_EVERY_MS = 3_000
@@ -277,13 +280,17 @@ export class IndexScanner {
     this.io.log(`${this.underlying}: #${meta?.no} ${meta?.name} ${s.side} @ ${s.entry.toFixed(1)} (SL ${s.stop.toFixed(1)}, target ${s.target.toFixed(1)})`)
     if (!cfg.alerts || !this.alertIds().includes(s.id)) return
     // The moment it alerts, the option is paper-traded (the sell side by default) - as on the page.
-    const side = cfg.autoPaper === 'buy' || cfg.autoPaper === 'sell' ? cfg.autoPaper : null
-    const trade = side ? optionTradeAt(this.data.oi, s, side, cfg.moneyness ?? 0) : null
+    // Buy or sell, which strike, and the SL / target - this strategy's own if it was tuned and applied, else the
+    // scanner's own setting (optionPlanFor).
+    const plan = optionPlanFor(s.id, cfg.filters, cfg)
+    const side = plan.leg
+    const trade = side ? optionTradeAt(this.data.oi, s, side, plan.moneyness) : null
     if (trade) {
       const premium = premiumAt(this.data.oi, trade.side, trade.strike, s.t) ?? trade.premium
+      const levels = optionPlanFor(s.id, cfg.filters, cfg, premium) // a % SL / target needs the premium
       const lots = Math.max(1, cfg.paperLots ?? 1)
       if (!this.positions.some((p) => sameSignal(p, s, trade))) {
-        this.positions.push(newPosition({ setup: s, trade, which: side, lots, lotSize: PAPER_TRADE_LOT_SIZE[this.underlying] ?? 1, premium, cfg, at: s.t }))
+        this.positions.push(newPosition({ setup: s, trade, which: side, lots, lotSize: PAPER_TRADE_LOT_SIZE[this.underlying] ?? 1, premium, cfg: { ...cfg, paperSl: levels.slPts, paperTarget: levels.targetPts }, at: s.t }))
         this.dirty = true
         if (cfg.telegram !== false) await this.io.telegram(`${TAG} ${paperEntryText({ underlying: this.underlying, trade, lots, premium, setup: s, cfg })}`)
       }

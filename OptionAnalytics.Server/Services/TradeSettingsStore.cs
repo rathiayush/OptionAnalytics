@@ -16,7 +16,9 @@ public sealed class TradeSettingsStore
 {
     public static readonly string[] Underlyings = { "NIFTY", "BANKNIFTY", "SENSEX" };
     public static readonly string[] Columns = { "underlying", "lots", "sl_points", "target_points", "trail_start", "trail_gap", "slippage_points", "scanner_enabled", "auto_trade", "updated_utc" };
-    public static readonly string[] AutoTrades = { "sell", "buy", "off" };
+    // "strategy": each strategy buys or sells what its own tuned setting says (Strategy tuning - Apply to the
+    // scanner), selling where it has none. "sell" / "buy" are a choice for the whole index and override that.
+    public static readonly string[] AutoTrades = { "sell", "buy", "off", "strategy" };
 
     // The premiums of BANKNIFTY / SENSEX move ~2.5x / ~3x NIFTY's - their stops and targets are wider.
     public static TradeSettings Default(string underlying) => underlying switch
@@ -69,7 +71,7 @@ public sealed class TradeSettingsStore
         if (request.TrailStart is < 0 or > 5000 || request.TrailGap is < 0 or > 5000) return (null, "Trailing must be 0 to 5000 points.");
         if (request.SlippagePoints is < 0 or > 100) return (null, "Slippage must be 0 to 100 points.");
         var auto = (request.AutoTrade ?? "sell").Trim().ToLowerInvariant();
-        if (!AutoTrades.Contains(auto)) return (null, "Auto trade must be sell, buy or off.");
+        if (!AutoTrades.Contains(auto)) return (null, "Auto trade must be sell, buy, off or strategy.");
         var saved = request with { Underlying = u, AutoTrade = auto, UpdatedUtc = DateTimeOffset.UtcNow };
         lock (_lock)
         {
@@ -135,7 +137,8 @@ public sealed class TradeSettingsStore
 }
 
 /// <summary>One index's trade settings - see TradeSettingsStore. Points are option premium points;
-/// AutoTrade is what the server scanner does on an alert: "sell" or "buy" the option (paper), or "off".</summary>
+/// AutoTrade is what the server scanner does on an alert: "sell" or "buy" the option (paper), "strategy" (each
+/// strategy's own tuned setting), or "off".</summary>
 public sealed record TradeSettings(
     string Underlying, int Lots, decimal SlPoints, decimal TargetPoints, decimal TrailStart, decimal TrailGap, decimal SlippagePoints,
     bool ScannerEnabled, string AutoTrade, DateTimeOffset? UpdatedUtc);

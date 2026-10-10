@@ -308,8 +308,13 @@ export default function StrategyTuningPage() {
   const cancel = () => fetch('/api/strategy-tuning/cancel', { method: 'POST' }).then(loadStatus)
   const apply = async (r) => {
     try {
-      const filters = await applyTunedFilters(r.id, r.best.params)
-      message.success(`#${r.no} ${r.name}: ${Object.keys(filters).length ? variantText(r.best.params) : 'back to its defaults'} - saved to the scanner (this browser and the server scanner)`)
+      // `pts` means the option itself was tuned, so the buy / sell, the strike and its SL / target go across too.
+      const option = r.unit === 'pts'
+      const filters = await applyTunedFilters(r.id, r.best.params, { option })
+      message.success({
+        content: `#${r.no} ${r.name}: ${Object.keys(filters).length ? `${variantText(r.best.params)}${option ? ` · ${optionText(r.best.params)}` : ''}` : 'back to its defaults'} - in force now for this browser's scanner and the server scanner, replacing whatever was applied before`,
+        duration: 8,
+      })
     } catch (err) {
       message.error(err.message)
     }
@@ -463,7 +468,7 @@ export default function StrategyTuningPage() {
               <Card key={r.id} size="small"
                 title={<Space size={8} wrap><span>#{r.no} {r.name}</span>{r.belowMin ? <Tag color="default">below the minimum trades</Tag> : r.recommend ? <Tag color="success">recommended</Tag> : <Tag color="warning">keep as written</Tag>}</Space>}
                 extra={isAdmin && r.best && !spot && (
-                  <Popconfirm title={`Apply to #${r.no} ${r.name}?`} description={`${r.recommend ? variantText(r.best.params) : `Not recommended: ${r.reason}. Apply anyway?`}${r.unit === 'pts' ? ' (The option part - moneyness, SL / target - is set in Trade settings; see the line under the table.)' : ''}`} okText="Apply" onConfirm={() => apply(r)}>
+                  <Popconfirm title={`Apply to #${r.no} ${r.name}?`} description={`${r.recommend ? variantText(r.best.params) : `Not recommended: ${r.reason}. Apply anyway?`}${r.unit === 'pts' ? ' The option part - buy or sell, the strike and its SL / target - is applied to this strategy as well.' : ''} Whatever was applied to this strategy before is replaced.`} okText="Apply" onConfirm={() => apply(r)}>
                     <Button size="small" type={r.recommend ? 'primary' : 'default'}>Apply to the scanner</Button>
                   </Popconfirm>
                 )}>
@@ -483,7 +488,7 @@ export default function StrategyTuningPage() {
                     </details>
                   )}
                   {r.best?.suggest && (
-                    <Alert type="info" showIcon message={`To trade it like this: ${r.best.suggest.leg.toUpperCase()} ${r.best.suggest.moneyness === 0 ? 'ATM' : `${Math.abs(r.best.suggest.moneyness)} strike(s) ${r.best.suggest.moneyness > 0 ? 'ITM' : 'OTM'}`}, option SL about ${r.best.suggest.slPoints.toFixed(1)} and target about ${r.best.suggest.targetPoints.toFixed(1)} premium points (on a typical entry premium of ${r.best.suggest.premium.toFixed(1)}) - set them in Trade settings.`} />
+                    <Alert type="info" showIcon message={`To trade it like this: ${r.best.suggest.leg.toUpperCase()} ${r.best.suggest.moneyness === 0 ? 'ATM' : `${Math.abs(r.best.suggest.moneyness)} strike(s) ${r.best.suggest.moneyness > 0 ? 'ITM' : 'OTM'}`}, option SL about ${r.best.suggest.slPoints.toFixed(1)} and target about ${r.best.suggest.targetPoints.toFixed(1)} premium points (on a typical entry premium of ${r.best.suggest.premium.toFixed(1)}). Apply to the scanner sets all of this for this strategy - no need to change Trade settings by hand.`} />
                   )}
                   {r.best?.trades?.length > 0 && (
                     <details>

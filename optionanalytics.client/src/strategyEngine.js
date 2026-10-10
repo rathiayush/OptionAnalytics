@@ -342,7 +342,52 @@ export const TRADE_FILTERS = [
   { key: 'tradeMoveSize', label: 'Trade: futures price move on its timeframe', type: 'select', default: 'any', options: [{ value: 'any', label: 'Any' }, { value: 'small', label: 'Small move' }, { value: 'large', label: 'Real move' }] },
   { key: 'tradeDayType', label: 'Trade: day type at the signal', type: 'select', default: 'any', options: [{ value: 'any', label: 'Any' }, { value: 'trend', label: 'Trending day (up or down)' }, { value: 'withTrend', label: 'Trending day, my way' }, { value: 'notAgainstTrend', label: 'Not against a trend' }, { value: 'range', label: 'Range / two-sided day' }] },
   { key: 'tradeWallRoom', label: 'Trade: room to the next OI wall (support / resistance)', type: 'select', default: 'any', options: [{ value: 'any', label: 'Any' }, { value: 'oneR', label: 'At least 1R' }, { value: 'target', label: 'Not inside the target' }] },
+  // How THIS strategy is taken in options, when it fires. 'default' / 0 means "whatever the scanner is set to", so a
+  // strategy nobody has tuned behaves exactly as before. These are what the Strategy tuning page applies, and what the
+  // paper trade - and a live order, when Auto-place is on - actually uses (optionPlanFor).
+  { key: 'tradeOptLeg', label: 'Option: buy or sell when this strategy fires', type: 'select', default: 'default', options: [{ value: 'default', label: 'The scanner\'s setting' }, { value: 'buy', label: 'BUY the option that gains with the move' }, { value: 'sell', label: 'SELL (write) the one that loses value' }] },
+  { key: 'tradeOptMoneyness', label: 'Option: which strike', type: 'select', default: 'default', options: [{ value: 'default', label: 'The scanner\'s setting' }, { value: 0, label: 'ATM' }, { value: 1, label: '1 in the money' }, { value: 2, label: '2 in the money' }, { value: -1, label: '1 out of the money' }, { value: -2, label: '2 out of the money' }] },
+  { key: 'tradeOptSlPct', label: 'Option: SL as a % of the premium paid / received (0 = the index\'s own points)', type: 'number', default: 0, min: 0, max: 90, step: 5 },
+  { key: 'tradeOptTargetPct', label: 'Option: target as a % of the premium (0 = the index\'s own points)', type: 'number', default: 0, min: 0, max: 300, step: 5 },
 ]
+
+/** The keys above that decide how a strategy is taken in OPTIONS (not which setups it takes). */
+export const OPTION_TRADE_FILTERS = ['tradeOptLeg', 'tradeOptMoneyness', 'tradeOptSlPct', 'tradeOptTargetPct']
+
+/**
+ * How one strategy's signal should be taken in options: the leg (buy / sell), the strike (moneyness) and the SL /
+ * target in PREMIUM POINTS for this trade. A strategy that was never tuned carries the defaults, which mean "whatever
+ * the scanner is set to" - so nothing changes for it. `cfg` is the scanner's own settings (autoPaper, moneyness,
+ * paperSl, paperTarget), `filters` the trader's per-strategy values (scannerSettings / the server config).
+ */
+export function optionPlanFor(id, filters, cfg = {}, premium = null) {
+  const f = strategyFilters(id, filters?.[id])
+  // WHO DECIDES. A buy / sell chosen where the trading happens WINS - on the Order Flow page the trader is sitting
+  // there and their choice is the last word, whatever a strategy was tuned to. Choosing "per strategy" (what the
+  // server scanner runs on, since nobody is there to choose) hands the decision to the strategy's own tuned setting,
+  // and falls back to selling when it has none. The strike and the SL / target follow the same rule.
+  const chosen = cfg.autoPaper === 'buy' || cfg.autoPaper === 'sell' ? cfg.autoPaper : null
+  const perStrategy = cfg.autoPaper === 'strategy'
+  const tunedLeg = f.tradeOptLeg === 'buy' || f.tradeOptLeg === 'sell' ? f.tradeOptLeg : null
+  const leg = perStrategy ? tunedLeg ?? 'sell' : chosen
+  const overrode = !!(chosen && tunedLeg && tunedLeg !== chosen)
+  const tunedMoneyness = f.tradeOptMoneyness === 'default' || f.tradeOptMoneyness == null ? null : f.tradeOptMoneyness
+  const moneyness = perStrategy ? tunedMoneyness ?? (cfg.moneyness ?? 0) : (cfg.moneyness ?? tunedMoneyness ?? 0)
+  // A percentage is of the premium actually paid / received, so it only becomes points once that is known; until then
+  // (and whenever it is 0) the index's own points setting stands.
+  const pct = (p, fallback) => (p > 0 && premium > 0 ? (premium * p) / 100 : fallback)
+  return {
+    leg,
+    moneyness,
+    slPts: pct(f.tradeOptSlPct, cfg.paperSl ?? 20),
+    targetPts: pct(f.tradeOptTargetPct, cfg.paperTarget ?? 30),
+    // Whether this strategy has a tuned option setting at all, and whether the trader's own choice has just overruled
+    // it (so the page can say so rather than quietly doing something else than the strategy was tuned for).
+    fromStrategy: f.tradeOptLeg !== 'default' || f.tradeOptMoneyness !== 'default' || f.tradeOptSlPct > 0 || f.tradeOptTargetPct > 0,
+    tunedLeg,
+    overrode,
+  }
+}
 for (const st of [...STRATEGIES, ...SPOT_STRATEGIES]) STRATEGY_FILTERS[st.id] = [...(STRATEGY_FILTERS[st.id] ?? []), ...TRADE_FILTERS]
 
 /** A strategy's filter values: its defaults with the trader's `overrides` on top - numbers clamped to

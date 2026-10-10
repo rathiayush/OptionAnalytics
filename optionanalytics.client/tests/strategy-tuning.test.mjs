@@ -4,9 +4,9 @@
 // Run: npm test (node --test) - see CLAUDE.md.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { applyTradeFilter, strategyFilters, simulateOutcome } from '../src/strategyEngine.js'
+import { applyTradeFilter, optionPlanFor, strategyFilters, simulateOutcome } from '../src/strategyEngine.js'
 import { scanDaySetups, firstPerCooldown, withDayOutcomes } from '../src/scanDay.js'
-import { DEFAULT_VARIANT, OI_GRID, dayTrades, outcomeKey, tradeDetails, scoreR, splitDays, tuneStrategy, rankStrategies, filtersFromTuning, variants, tuningDay, variantText } from '../src/strategyTuning.js'
+import { DEFAULT_VARIANT, OI_GRID, OPTION_DEFAULT, dayTrades, outcomeKey, tradeDetails, scoreR, splitDays, tuneStrategy, rankStrategies, filtersFromTuning, variants, tuningDay, variantText } from '../src/strategyTuning.js'
 import { day } from './synthetic-day.mjs'
 
 const MIN = 60_000
@@ -188,4 +188,42 @@ test('the outcome cache: what a taken trade does depends only on its stop / targ
     assert.deepEqual([twin.exit, twin.points, twin.r, twin.exitReason], [t.exit, t.points, t.r, t.exitReason], key(t))
   }
   assert.ok(longOnly.length && longOnly.length < both.length)
+})
+
+test('Apply to the scanner: the whole setting goes across, options included, and it replaces the last one', () => {
+  const v = (o) => ({ ...DEFAULT_VARIANT, ...OPTION_DEFAULT, ...o })
+  // A strategy's own entry rules are never touched; the trade filters are set or removed, so nothing of a previous
+  // apply is left behind.
+  const entryRules = { closesBeyond: 3 }
+  const tuned = filtersFromTuning(entryRules, v({ tradeSide: 'long', tradeStopX: 0.75, tradeOiFlow: 'with' }))
+  assert.deepEqual(tuned, { closesBeyond: 3, tradeSide: 'long', tradeStopX: 0.75, tradeOiFlow: 'with' })
+  assert.deepEqual(filtersFromTuning(tuned, v({ tradeSide: 'short' })), { closesBeyond: 3, tradeSide: 'short' }, 'a new apply replaces the old one')
+
+  // The option part only when the OPTION was tuned - otherwise a trade-only run would pin the strategy to the option
+  // defaults ("sell ATM") the trader never chose.
+  assert.equal(filtersFromTuning({}, v({ optLeg: 'buy' })).tradeOptLeg, undefined)
+  const opt = filtersFromTuning({}, v({ optLeg: 'buy', optMoneyness: -1, optExit: 'first', optSlPct: 25, optTargetPct: 50 }), { option: true })
+  assert.deepEqual(opt, { tradeOptLeg: 'buy', tradeOptMoneyness: -1, tradeOptSlPct: 25, tradeOptTargetPct: 50 })
+  // Out with the index trade: the option's own SL / target are not used, so they are not applied either.
+  assert.deepEqual(filtersFromTuning({}, v({ optLeg: 'sell', optExit: 'index', optSlPct: 25 }), { option: true }), { tradeOptLeg: 'sell', tradeOptMoneyness: 0 })
+
+  // And what the scanner then does with it. WHO DECIDES: a side chosen where the trading happens (the Order Flow
+  // page's Buy / Sell) is the last word; 'strategy' - what the server scanner runs on, with nobody there to choose -
+  // hands it to the strategy's own tuned setting.
+  const chose = (autoPaper) => ({ autoPaper, moneyness: 0, paperSl: 20, paperTarget: 30 })
+  const plain = optionPlanFor('wallBreak', {}, chose('sell'), 100)
+  assert.deepEqual([plain.leg, plain.moneyness, plain.slPts, plain.targetPts, plain.fromStrategy], ['sell', 0, 20, 30, false])
+  const mine = optionPlanFor('wallBreak', { wallBreak: opt }, chose('strategy'), 100)
+  assert.deepEqual([mine.leg, mine.moneyness, mine.slPts, mine.targetPts, mine.fromStrategy], ['buy', -1, 25, 50, true])
+  // A % SL / target is of the premium actually paid, so a bigger premium means more points.
+  assert.equal(optionPlanFor('wallBreak', { wallBreak: opt }, chose('strategy'), 200).slPts, 50)
+  // The trader's own choice overrides the tuned side, and says that it did.
+  const overridden = optionPlanFor('wallBreak', { wallBreak: opt }, chose('sell'), 100)
+  assert.equal(overridden.leg, 'sell')
+  assert.equal(overridden.overrode, true)
+  assert.equal(optionPlanFor('wallBreak', { wallBreak: opt }, chose('buy'), 100).overrode, false, 'agreeing is not overriding')
+  // Off is off, whatever a strategy says.
+  assert.equal(optionPlanFor('wallBreak', { wallBreak: opt }, chose('off'), 100).leg, null)
+  // Nonsense saved by hand is ignored rather than traded on.
+  assert.equal(optionPlanFor('wallBreak', { wallBreak: { tradeOptLeg: 'nonsense', tradeOptMoneyness: 99 } }, chose('strategy'), 100).leg, 'sell')
 })
