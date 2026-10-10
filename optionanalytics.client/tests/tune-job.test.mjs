@@ -164,7 +164,7 @@ test('a long job rides out a busy Dhan, leaves out a partial day, re-uses the di
   const { server, seen, base } = await fakeServer(days, { rateLimit: 2, busyOi: true, partial: '2026-09-30' })
   const dir = mkdtempSync(join(tmpdir(), 'oa-tune-cache-'))
   const trades = join(dir, 'trades.json')
-  const env = { TUNE_CACHE_DIR: join(dir, 'cache'), TUNE_TRADES_OUT: trades, TUNE_RETRY_BASE_MS: '5', TUNE_BUSY_PAUSE_MS: '5', TUNE_PRIORITY: 'background' }
+  const env = { TUNE_CACHE_DIR: join(dir, 'cache'), TUNE_TRADES_OUT: trades, TUNE_RETRY_SCALE: '0.001', TUNE_BUSY_PAUSE_MS: '5', TUNE_PRIORITY: 'background' }
   try {
     const { code, result, lines } = await runJob(base, { underlying: 'NIFTY', strategies: ['weakWall'], days: 30, minTrades: 2, what: 'trade' }, env)
     assert.equal(code, 0, JSON.stringify(result))

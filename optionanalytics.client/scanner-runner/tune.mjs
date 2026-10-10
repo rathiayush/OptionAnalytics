@@ -23,7 +23,7 @@ import { expiryFlagOf } from '../src/liveFeeds.js'
 import { dayFromOrderFlow, scanDaySetups } from '../src/scanDay.js'
 import { DEFAULT_VARIANT, OI_COMBO_CAP, OI_FACTORS, OPTION_GRID, countOiCombinations, oiGridOf, optionText, rankStrategies, tradeDetails, tuneStrategy, tuningDay, TUNING_GRID, variantText } from '../src/strategyTuning.js'
 import { DEFAULT_ROW_SIZES } from './indexScanner.mjs'
-import { createFetcher, inMarketHours, isTransientText, pruneCache } from './tuneFetch.mjs'
+import { createFetcher, isTransientText, pruneCache } from './tuneFetch.mjs'
 
 const BASE = (process.env.RUNNER_BASE_URL ?? 'http://127.0.0.1:8080').replace(/\/$/, '')
 const KEY = process.env.RUNNER_KEY ?? ''
@@ -56,10 +56,10 @@ const CACHE_DIR = process.env.TUNE_CACHE_DIR || null
 const fetcher = createFetcher({
   base: BASE, key: KEY, today: istToday, cacheDir: CACHE_DIR,
   paceMs: Math.max(0, Number(process.env.TUNE_PACE_MS) || 0),
-  retryBaseMs: Math.max(1, Number(process.env.TUNE_RETRY_BASE_MS) || 5_000),
-  // In market hours the job's Dhan calls wait in the server's background lane - the live pages and the server scanner
-  // keep theirs; after hours it uses the normal lane (nothing else is asking).
-  priority: () => (process.env.TUNE_PRIORITY === 'background' || (process.env.TUNE_PRIORITY !== 'interactive' && inMarketHours()) ? 'background' : 'interactive'),
+  retryScale: Math.max(0.0001, Number(process.env.TUNE_RETRY_SCALE) || 1),
+  // Always background priority: the live pages and the server scanner get Dhan first, the job what they leave (up to the
+  // full 5/s while they are quiet) - a running job never slows the app down. (TUNE_PRIORITY=interactive overrides.)
+  priority: () => (process.env.TUNE_PRIORITY === 'interactive' ? 'interactive' : 'background'),
   onWait: (w) => progress({ ...(lastScan ?? { stage: 'scan' }), wait: { ...w, until: new Date(Date.now() + w.waitMs).toISOString() } }),
 })
 const api = (path) => fetcher.api(path)
@@ -178,15 +178,15 @@ async function main() {
     }
     return (run.optionErrors ?? []).length ? run.optionErrors : null
   }
-  // The day's OI, fetched again (after 3 s, then 10 s) while it comes back incomplete for the load - the server has
-  // already retried each strike; Dhan's limit is per second, so a short pause clears it.
+  // The day's OI, fetched once more (after 3 s) when it comes back incomplete for the load - the server has already
+  // retried each strike; Dhan's limit is per second, so a short pause clears it.
   async function fetchRun(date) {
     for (let i = 0; ; i++) {
       const run = await fetcher.dayApi('oi', date, oiQuery(date), oiValid)
       const busy = run?.success ? busyStrikes(run).length : isTransientText(run?.error) ? 1 : 0
-      if (!busy || i >= 2) return run
-      const waitMs = [3_000, 10_000][i] // the server already retried each strike (1 + 2 + 4 s): a short pause clears it
-      progress({ ...(lastScan ?? { stage: 'scan' }), wait: { label: 'option OI', attempt: i + 2, of: 3, waitMs, until: new Date(Date.now() + waitMs).toISOString(), reason: run?.success ? `${busy} strike series failed - fetching the day again` : run?.error } })
+      if (!busy || i >= 1) return run
+      const waitMs = 3_000 // once: the server already retried each strike; still incomplete -> skipped, tried once more at the end
+      progress({ ...(lastScan ?? { stage: 'scan' }), wait: { label: 'option OI', attempt: i + 2, of: 2, waitMs, until: new Date(Date.now() + waitMs).toISOString(), reason: run?.success ? `${busy} strike series failed - fetching the day again` : run?.error } })
       await new Promise((resolve) => setTimeout(resolve, Number(process.env.TUNE_BUSY_PAUSE_MS ?? waitMs)))
     }
   }
@@ -263,8 +263,8 @@ async function main() {
   }
   // Days the server / Dhan was too busy for, even after the retries: once more after a pause, then listed as skipped.
   if (busy.length) {
-    progress({ stage: 'scan', day: busy[0].p.date, done: plan.length, total: plan.length, retrying: busy.length, wait: { label: 'busy days', waitMs: 30_000, until: new Date(Date.now() + 30_000).toISOString(), reason: `${busy.length} day(s) the server was too busy for - trying them again` } })
-    await new Promise((resolve) => setTimeout(resolve, Number(process.env.TUNE_BUSY_PAUSE_MS ?? 30_000)))
+    progress({ stage: 'scan', day: busy[0].p.date, done: plan.length, total: plan.length, retrying: busy.length, wait: { label: 'busy days', waitMs: 10_000, until: new Date(Date.now() + 10_000).toISOString(), reason: `${busy.length} day(s) the server was too busy for - trying them again` } })
+    await new Promise((resolve) => setTimeout(resolve, Number(process.env.TUNE_BUSY_PAUSE_MS ?? 10_000)))
     for (const { p } of busy) {
       if (DATA === 'spot' && days.length >= MAX_DAYS) break
       lastScan = { stage: 'scan', day: p.date, done: plan.length, total: plan.length, retrying: busy.length, scanned: days.length, skipped: skipped.length }

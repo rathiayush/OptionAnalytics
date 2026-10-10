@@ -7,7 +7,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createFetcher, isTransient, retryDelayMs } from '../scanner-runner/tuneFetch.mjs'
+import { busyKind, createFetcher, isTransient, retryDelayMs } from '../scanner-runner/tuneFetch.mjs'
 
 /** A fake server: `script` is a list of responses ({ status, body, retryAfter } or 'network'), served in turn. */
 function fakeServer(script) {
@@ -30,11 +30,24 @@ test('what is worth trying again: busy / rate-limited, not a fact about the day'
   assert.equal(isTransient(404, 'no bars'), false)
   assert.equal(isTransient(400, 'rate limit exceeded'), true)
   assert.equal(isTransient(null, 'fetch failed'), true, 'a network error')
-  // A rate limit clears within seconds (Dhan's limit is per second): short waits. Other busy states (the Dhan session
-  // renewing, a network error) need longer.
-  assert.deepEqual([0, 1, 2, 3, 4, 5].map((i) => retryDelayMs(i, null, 5_000, true)), [2_000, 4_000, 8_000, 16_000, 30_000, 30_000])
-  assert.deepEqual([0, 1, 2, 3, 4, 5].map((i) => retryDelayMs(i)), [5_000, 15_000, 45_000, 135_000, 300_000, 300_000])
+  // What kind of busy, and how long each waits. Dhan's limit is per second and the server has already retried, so the
+  // ladders are short and END (null = give up, skip the day, try it once more at the end of the job) - a long job must
+  // never sit for minutes on one day. Only the Dhan session renewing (TOTP, about two minutes) waits longer.
+  assert.deepEqual(['rate', 'auth', 'busy'].map((k) => [0, 1, 2, 3].map((i) => retryDelayMs(i, null, k))), [
+    [2_000, 4_000, 8_000, null],
+    [20_000, 40_000, 80_000, null],
+    [2_000, 5_000, null, null],
+  ])
+  assert.equal(busyKind(429, ''), 'rate')
+  assert.equal(busyKind(500, 'DH-904: Too many requests'), 'rate')
+  assert.equal(busyKind(500, '805: too many requests or connections'), 'rate')
+  assert.equal(busyKind(503, 'Dhan is not authenticated'), 'auth')
+  assert.equal(busyKind(503, 'busy'), 'busy')
   assert.equal(retryDelayMs(0, '20'), 20_000, 'Retry-After wins')
+  assert.equal(retryDelayMs(0, '600'), 30_000, 'but never more than 30 s')
+  // The longest a single request can hold a job up: under a minute, except a renewing session (under 2 1/2).
+  const total = (k) => [0, 1, 2, 3].map((i) => retryDelayMs(i, null, k) ?? 0).reduce((a, b) => a + b, 0)
+  assert.ok(total('rate') <= 15_000 && total('busy') <= 10_000 && total('auth') <= 150_000, JSON.stringify(['rate', 'auth', 'busy'].map(total)))
 })
 
 test('a rate limit is waited out and the request goes through', async () => {
@@ -44,16 +57,19 @@ test('a rate limit is waited out and the request goes through', async () => {
   const f = createFetcher({ fetchImpl, sleep, today: '2026-10-10', onWait: (w) => seen.push(w) })
   assert.deepEqual(await f.api('/api/x'), { ok: 1 })
   assert.equal(calls.length, 4)
-  assert.deepEqual(waits, [7_000, 4_000, 45_000], 'Retry-After; a rate limit - short (2nd retry: 4 s); a network error - longer (3rd: 45 s)')
+  assert.deepEqual(waits, [7_000, 4_000, 2_000], 'Retry-After, the rate-limit ladder, then a network error on its own ladder - seconds, never minutes')
   assert.deepEqual(seen.map((w) => w.attempt), [2, 3, 4])
   assert.equal(f.stats.retries, 3)
 })
 
-test('it gives up after the set tries, and never retries a fact about the day', async () => {
+test('it gives up when the ladder ends, and never retries a fact about the day', async () => {
   const busy = fakeServer([{ status: 503, body: { error: 'busy' } }])
-  const f = createFetcher({ fetchImpl: busy.fetchImpl, sleep: noSleep().sleep, today: '2026-10-10', attempts: 4 })
-  await assert.rejects(f.api('/api/x'), /busy \(still failing after 4 tries\)/)
-  assert.equal(busy.calls.length, 4)
+  const { waits, sleep } = noSleep()
+  const f = createFetcher({ fetchImpl: busy.fetchImpl, sleep, today: '2026-10-10' })
+  await assert.rejects(f.api('/api/x'), /busy \(still failing after 3 tries\)/)
+  assert.equal(busy.calls.length, 3, 'a 5xx: two retries, then the day is skipped')
+  assert.deepEqual(waits, [2_000, 5_000])
+  assert.ok(waits.reduce((a, b) => a + b, 0) <= 10_000, 'at most ~7 s held up by one request')
   const holiday = fakeServer([{ status: 500, body: { error: 'no OI for the day' } }])
   const g = createFetcher({ fetchImpl: holiday.fetchImpl, sleep: noSleep().sleep, today: '2026-10-10' })
   await assert.rejects(g.api('/api/oi'), /no OI for the day$/)

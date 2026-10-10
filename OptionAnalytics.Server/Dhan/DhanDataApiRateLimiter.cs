@@ -82,10 +82,15 @@ public sealed class DhanDataApiRateLimiter : IDisposable
             || m.Contains("too many", StringComparison.OrdinalIgnoreCase)
             || (m.Contains("rate", StringComparison.OrdinalIgnoreCase) && m.Contains("limit", StringComparison.OrdinalIgnoreCase))));
 
-    /// <summary>The wait before retry <paramref name="attempt"/> (0-based) after a rate limit: 1 s, 2 s, 4 s. Dhan's Data-API
-    /// limit is per second (5/s), so a second clears the window - a longer wait only makes a job slower; none at all risks
-    /// the blocking Dhan's 805 warns of ("Further requests may result in the user being blocked").</summary>
-    public static TimeSpan RateLimitBackoff(int attempt) => TimeSpan.FromSeconds(1 << Math.Clamp(attempt, 0, 4));
+    /// <summary>The wait before retry <paramref name="attempt"/> (0-based) after a rate limit: 0.5 s, 1 s, 2 s. Dhan's
+    /// Data-API limit is per second (5/s), so half a second already clears most of the window and a second clears it all -
+    /// a longer wait would just hold up the page (or the job) that is waiting; none at all risks the blocking Dhan's 805
+    /// warns of ("Further requests may result in the user being blocked").</summary>
+    public static TimeSpan RateLimitBackoff(int attempt) => TimeSpan.FromMilliseconds(500 * (1 << Math.Clamp(attempt, 0, 3)));
+
+    /// <summary>How many times a rate-limited call is retried: a page load or the live scanner waits at most ~1.5 s in all,
+    /// background work (a tuning job) a little longer - it has time, a waiting person does not.</summary>
+    public static int RateLimitRetries => IsBackgroundRequest ? 3 : 2;
 
     private static readonly TimeSpan BackgroundPoll = TimeSpan.FromMilliseconds(100);
     private readonly RateLimiter _interactive;
@@ -124,9 +129,9 @@ public sealed class DhanDataApiRateLimiter : IDisposable
     /// picks the lane: true for a call made for a waiting user (a page load, the server scanner), false for background
     /// work (a hosted service's backfill, or any call inside a request that asked for background priority - the strategy
     /// tuning job in market hours). A background call takes a permit the interactive lane is not using at that moment -
-    /// never one an interactive call is already queued for (oldest-first order refuses a non-waiting acquire while anyone
-    /// waits) - else one of its own lane; so a long job runs at up to the full 5/s while the live app is quiet and at its
-    /// 1/s share while it is busy, and an interactive call waits at most one window behind it. A full queue is waited out,
+    /// never the last free one and never one an interactive call is already queued for (oldest-first order refuses a
+    /// non-waiting acquire while anyone waits) - else one of its own lane; so a long job runs at up to 4/s while the live
+    /// app is quiet and at its 1/s share while it is busy, and a page load always finds a permit free. A full queue is waited out,
     /// never sent over the limit: Dhan's 805 warns that further requests may get the user blocked.</summary>
     public async Task WaitForPermitAsync(bool interactive, CancellationToken cancellationToken)
     {
@@ -135,7 +140,10 @@ public sealed class DhanDataApiRateLimiter : IDisposable
         {
             while (true)
             {
-                using (var spare = _interactive.AttemptAcquire(1)) if (spare.IsAcquired) { Count(); return; }
+                // A spare interactive permit, but never the last one: one is always left free so a page load that arrives
+                // a moment later is served at once rather than waiting out the window behind background work.
+                if (_interactive.GetStatistics()?.CurrentAvailablePermits > 1)
+                    using (var spare = _interactive.AttemptAcquire(1)) if (spare.IsAcquired) { Count(); return; }
                 using (var own = _background.AttemptAcquire(1)) if (own.IsAcquired) { Count(); return; }
                 await Task.Delay(BackgroundPoll, cancellationToken);
             }

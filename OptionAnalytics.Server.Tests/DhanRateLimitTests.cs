@@ -22,24 +22,34 @@ public sealed class DhanRateLimitTests
         Assert.Equal(expected, DhanDataApiRateLimiter.IsRateLimited(status, message));
 
     [Fact]
-    public void Backoff_IsShort_1_2_4_Seconds_DhansLimitIsPerSecond()
+    public void Backoff_IsShort_HalfASecondToTwo_AndAWaitingPageRetriesLess()
     {
-        Assert.Equal(new[] { 1, 2, 4 }, new[] { 0, 1, 2 }.Select(i => (int)DhanDataApiRateLimiter.RateLimitBackoff(i).TotalSeconds));
+        // Dhan's limit is per second: half a second already clears most of the window. A page load (or the live scanner)
+        // waits ~1.5 s in all before it gives up; background work, which nobody is waiting on, ~3.5 s.
+        Assert.Equal(new[] { 500, 1_000, 2_000 }, new[] { 0, 1, 2 }.Select(i => (int)DhanDataApiRateLimiter.RateLimitBackoff(i).TotalMilliseconds));
+        Assert.Equal(2, DhanDataApiRateLimiter.RateLimitRetries);
+        using (DhanDataApiRateLimiter.BackgroundScope()) Assert.Equal(3, DhanDataApiRateLimiter.RateLimitRetries);
+        var waited = new[] { 0, 1 }.Sum(i => DhanDataApiRateLimiter.RateLimitBackoff(i).TotalMilliseconds);
+        Assert.True(waited <= 1_500, $"a waiting page would be held up {waited} ms");
     }
 
     private static DhanDataApiRateLimiter Limiter() => new(Microsoft.Extensions.Options.Options.Create(new DhanOptions { DataApiRequestsPerSecond = 5, DataApiRequestsPerDay = 100_000 }),
         Microsoft.Extensions.Logging.Abstractions.NullLogger<DhanDataApiRateLimiter>.Instance);
 
     [Fact]
-    public async Task Background_UsesThePermitsTheLiveAppIsNotUsing_UpToTheFull5PerSecond()
+    public async Task Background_UsesThePermitsTheLiveAppIsNotUsing_ButNeverTheLastOne()
     {
         using var limiter = Limiter();
         var watch = System.Diagnostics.Stopwatch.StartNew();
-        // Five background calls while nothing interactive runs: the interactive lane's 4 spare + the background's own 1,
-        // all inside the first second (at the old fixed 1/s share they took 4+ s).
-        await Task.WhenAll(Enumerable.Range(0, 5).Select(_ => limiter.WaitForPermitAsync(interactive: false, CancellationToken.None)));
+        // Four background calls while nothing interactive runs: three spare interactive permits (never the last one) plus
+        // the background lane's own, all inside the first second - at the old fixed 1/s share they took 3+ s.
+        await Task.WhenAll(Enumerable.Range(0, 4).Select(_ => limiter.WaitForPermitAsync(interactive: false, CancellationToken.None)));
         Assert.True(watch.ElapsedMilliseconds < 900, $"took {watch.ElapsedMilliseconds} ms");
-        // Never more than 5 a second in all: the next five wait for the window to move on.
+        // A page load arriving right after is served at once - background work never takes the last free permit.
+        var page = System.Diagnostics.Stopwatch.StartNew();
+        await limiter.WaitForPermitAsync(interactive: true, CancellationToken.None);
+        Assert.True(page.ElapsedMilliseconds < 250, $"the page waited {page.ElapsedMilliseconds} ms behind background work");
+        // Never over 5 a second in all.
         await Task.WhenAll(Enumerable.Range(0, 5).Select(_ => limiter.WaitForPermitAsync(interactive: false, CancellationToken.None)));
         Assert.True(watch.ElapsedMilliseconds >= 700, $"10 calls in {watch.ElapsedMilliseconds} ms - over 5/s");
     }
