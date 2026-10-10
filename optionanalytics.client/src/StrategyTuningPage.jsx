@@ -171,6 +171,7 @@ function JobDetail({ p, startedUtc }) {
   useEffect(() => { const id = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(id) }, [])
   if (!p) return null
   const f = p.fetched
+  const pre = p.prefetch
   const elapsed = startedUtc ? now - Date.parse(startedUtc) : null
   const left = p.stage === 'scan' && p.done > 2 && elapsed ? (elapsed / p.done) * (p.total - p.done) : null
   const secs = (ms) => (ms >= 3_600_000 ? `${Math.floor(ms / 3_600_000)} h ${Math.round((ms % 3_600_000) / 60_000)} min` : ms >= 90_000 ? `${Math.round(ms / 60_000)} min` : `${Math.max(0, Math.round(ms / 1000))} s`)
@@ -182,6 +183,8 @@ function JobDetail({ p, startedUtc }) {
         {f && ` · ${f.cacheHits} read from the disk cache (no Dhan call), ${f.requests} fetched${f.retries ? `, ${f.retries} retried` : ''}`}
         {left != null && ` · about ${secs(left)} of scanning left`}
       </Text>
+      {pre && <Text type="secondary" style={{ fontSize: 12 }}>fetching the option chain a cycle at a time: {pre.from} to {pre.to} ({pre.seeded} of {pre.of} day(s) so far)</Text>}
+      {p.fastOi && !p.fastOi.used && p.fastOi.reason && <Alert type="info" showIcon style={{ padding: '2px 8px' }} message={<span style={{ fontSize: 12 }}>Fetching a day at a time: {p.fastOi.reason}</span>} />}
       {wait && <Alert type="warning" showIcon style={{ padding: '2px 8px' }} message={<span style={{ fontSize: 12 }}>The server / Dhan is busy - waiting {secs(Date.parse(wait.until) - now)} before try {wait.attempt} of {wait.of} ({wait.label}): {wait.reason}</span>} />}
     </Space>
   )
@@ -413,7 +416,7 @@ export default function StrategyTuningPage() {
               {result.skipped?.length > 0 && <Alert type="warning" showIcon style={{ marginBottom: 8 }} message={`${result.skipped.length} day(s) could not be scanned`} description={result.skipped.slice(0, 5).map((s) => `${s.date}: ${s.reason}`).join(' · ')} />}
               <Table size="small" rowKey="id" columns={rankedColumns} dataSource={result.ranked ?? []} pagination={false} scroll={{ y: 320 }} />
               <details style={{ marginTop: 8 }}>
-                <summary style={{ cursor: 'pointer', fontSize: 12 }}>The {result.days?.length ?? 0} day(s) used{result.skipped?.length ? ` and ${result.skipped.length} left out` : ''}: where each came from and how complete it was{result.fetched ? ` · ${result.fetched.cacheHits} read from the disk cache, ${result.fetched.requests} fetched${result.fetched.retries ? `, ${result.fetched.retries} retried` : ''}` : ''}</summary>
+                <summary style={{ cursor: 'pointer', fontSize: 12 }}>The {result.days?.length ?? 0} day(s) used{result.skipped?.length ? ` and ${result.skipped.length} left out` : ''}: where each came from and how complete it was{result.fetched ? ` · ${result.fetched.cacheHits} read from the disk cache, ${result.fetched.requests} fetched${result.fetched.retries ? `, ${result.fetched.retries} retried` : ''}` : ''}{result.fastOi?.used ? ` · option chain fetched a cycle at a time (${result.fastOi.seeded} day(s), checked against a day fetched on its own)` : result.fastOi?.reason ? ` · option chain fetched a day at a time: ${result.fastOi.reason}` : ''}</summary>
                 <div style={{ marginTop: 6 }}><DaysTable days={result.days} skipped={result.skipped} /></div>
               </details>
               <Text type="secondary" style={{ fontSize: 12 }}>Every trade of this run, with its date and time: <a href="/trades">Trades page</a>.</Text>
