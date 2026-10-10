@@ -78,7 +78,7 @@ export function createFetcher({ base = '', key = '', cacheDir = null, today, att
   const stats = { requests: 0, retries: 0, cacheHits: 0, cacheWrites: 0, shared: 0, waitedMs: 0 }
   let lastRequest = -Infinity
 
-  async function once(path) {
+  async function once(path, perCallTimeoutMs = timeoutMs) {
     if (paceMs > 0) {
       const gap = lastRequest + paceMs - now()
       if (gap > 0) { stats.waitedMs += gap; await sleep(gap) }
@@ -86,13 +86,13 @@ export function createFetcher({ base = '', key = '', cacheDir = null, today, att
     lastRequest = now()
     stats.requests++
     const controller = typeof AbortController === 'function' ? new AbortController() : null
-    const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null
+    const timer = controller ? setTimeout(() => controller.abort(), perCallTimeoutMs) : null
     let res
     try {
       const headers = { 'X-Runner-Key': key, ...(priority() === 'background' ? { 'X-Request-Priority': 'background' } : {}) }
       res = await fetchImpl(path.startsWith('/') ? `${base}${path}` : path, { headers, signal: controller?.signal })
     } catch (err) {
-      const e = new Error(`${path.split('?')[0]}: ${err.name === 'AbortError' ? `no answer in ${Math.round(timeoutMs / 1000)} s (timed out)` : err.message}`)
+      const e = new Error(`${path.split('?')[0]}: ${err.name === 'AbortError' ? `no answer in ${Math.round(perCallTimeoutMs / 1000)} s (timed out)` : err.message}`)
       e.transient = true
       throw e
     } finally {
@@ -113,14 +113,14 @@ export function createFetcher({ base = '', key = '', cacheDir = null, today, att
 
   /** GET `path` from the server, trying again while it is busy: each kind of busy walks its OWN ladder (a rate limit
    *  clears in seconds, a renewing Dhan session takes a couple of minutes), and `attempts` caps the tries in all. */
-  async function api(path, { label = path.split('?')[0] } = {}) {
+  async function api(path, { label = path.split('?')[0], attempts: tryAtMost = attempts, timeoutMs: ms = timeoutMs } = {}) {
     const tries = { rate: 0, auth: 0, busy: 0 }
     for (let i = 0; ; i++) {
       try {
-        return await once(path)
+        return await once(path, ms)
       } catch (err) {
         const kind = busyKind(err.status, err.message)
-        const wait = err.transient && i + 1 < attempts ? retryDelayMs(tries[kind], err.retryAfter, kind, retryScale) : null
+        const wait = err.transient && i + 1 < tryAtMost ? retryDelayMs(tries[kind], err.retryAfter, kind, retryScale) : null
         if (wait == null) {
           if (err.transient) err.message = `${err.message} (still failing after ${i + 1} tries)`
           throw err
@@ -128,7 +128,7 @@ export function createFetcher({ base = '', key = '', cacheDir = null, today, att
         tries[kind]++
         stats.retries++
         stats.waitedMs += wait
-        onWait({ label, attempt: i + 2, of: Math.min(attempts, i + 2 + (RETRY_LADDER[kind].length - tries[kind])), waitMs: wait, reason: err.message })
+        onWait({ label, attempt: i + 2, of: Math.min(tryAtMost, i + 2 + (RETRY_LADDER[kind].length - tries[kind])), waitMs: wait, reason: err.message })
         await sleep(wait)
       }
     }

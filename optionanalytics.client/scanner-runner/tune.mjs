@@ -63,7 +63,7 @@ const fetcher = createFetcher({
   // Always background priority: the live pages and the server scanner get Dhan first, the job what they leave (up to the
   // full 5/s while they are quiet) - a running job never slows the app down. (TUNE_PRIORITY=interactive overrides.)
   priority: () => (process.env.TUNE_PRIORITY === 'interactive' ? 'interactive' : 'background'),
-  onWait: (w) => progress({ ...(lastScan ?? { stage: 'scan' }), wait: { ...w, until: new Date(Date.now() + w.waitMs).toISOString() } }),
+  onWait: (w) => progress({ ...(lastScan ?? { stage: 'scan', day: null, done: 0, total: 0 }), wait: { ...w, until: new Date(Date.now() + w.waitMs).toISOString() } }),
 })
 const api = (path) => fetcher.api(path)
 /** Written beside the final name and moved onto it, so a reader never sees half a file. */
@@ -263,26 +263,36 @@ async function main() {
     if (!CACHE_DIR) return (fastOi.reason = 'no cache directory to put the days in')
     const dates = plan.map((p) => p.date).filter((d) => d < istToday).sort()
     if (dates.length < 4) return (fastOi.reason = 'too few days to be worth it')
+    // However this goes, the job must get on with scanning: the whole prefetch is given a budget, and whatever is not
+    // fetched by then is simply fetched a day at a time later.
+    const until = Date.now() + Math.max(30_000, Number(process.env.TUNE_PREFETCH_BUDGET_MS) || 480_000)
+    const left = () => Math.max(0, until - Date.now())
     // Proof first, on a day this job actually wants.
     const mid = dates[Math.floor(dates.length / 2)]
     const flag = expiryFlagOf(U)
+    lastScan = { stage: 'prefetch', day: mid, done: 0, total: dates.length, checking: true }
+    progress(lastScan)
     let check
     try {
-      check = await api(`/api/oi-replay/${U}/range-check?${new URLSearchParams({ date: mid, timeframeMinutes: '1', expiryFlag: flag })}`)
+      check = await api(`/api/oi-replay/${U}/range-check?${new URLSearchParams({ date: mid, timeframeMinutes: '1', expiryFlag: flag })}`,
+        { attempts: 1, timeoutMs: Math.max(30_000, Math.min(left(), Number(process.env.TUNE_CHECK_TIMEOUT_MS) || 150_000)) })
     } catch (err) {
       return (fastOi.reason = `the check could not be run (${err.message})`)
     }
     fastOi.checked = { date: mid, match: !!check?.match, windowDays: check?.windowDays ?? null, differences: check?.comparison?.differences?.slice(0, 3) ?? [], error: check?.error ?? null }
     if (!check?.match) return (fastOi.reason = `a day fetched a cycle at a time did not match the same day fetched on its own${check?.error ? ` (${check.error})` : ''} - every day fetched the proven way instead`)
     // Proven on this job: bring the days back in chunks, oldest first.
-    const CHUNK = Math.max(2, Math.min(28, Number(process.env.TUNE_RANGE_DAYS) || 7))
+    const CHUNK = Math.max(2, Math.min(28, Number(process.env.TUNE_RANGE_DAYS) || 5))
     for (let i = 0; i < dates.length; i += CHUNK) {
       const from = dates[i]
       const to = dates[Math.min(i + CHUNK - 1, dates.length - 1)]
-      progress({ stage: 'scan', day: from, done: 0, total: plan.length, prefetch: { from, to, seeded: fastOi.seeded, of: dates.length } })
+      if (!left()) { fastOi.reason = `took too long after ${fastOi.seeded} of ${dates.length} day(s) - the rest fetched a day at a time`; break }
+      lastScan = { stage: 'prefetch', day: from, done: fastOi.seeded, total: dates.length, prefetch: { from, to, seeded: fastOi.seeded, of: dates.length } }
+      progress(lastScan)
       let body
       try {
-        body = await api(`/api/oi-replay/${U}/range?${new URLSearchParams({ from, to, timeframeMinutes: '1', expiryFlag: flag })}`)
+        body = await api(`/api/oi-replay/${U}/range?${new URLSearchParams({ from, to, timeframeMinutes: '1', expiryFlag: flag })}`,
+          { attempts: 2, timeoutMs: Math.max(60_000, Math.min(left(), Number(process.env.TUNE_RANGE_TIMEOUT_MS) || 300_000)) })
       } catch (err) {
         fastOi.reason = `stopped after ${fastOi.seeded} day(s): ${err.message} - the rest fetched a day at a time`
         break
@@ -300,6 +310,7 @@ async function main() {
     return fastOi.reason
   }
   await prefetchOi()
+  lastScan = null
   progress({ stage: 'scan', day: plan[0]?.date, done: 0, total: plan.length, fastOi })
 
   const busy = []
