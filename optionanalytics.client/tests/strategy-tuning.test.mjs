@@ -207,12 +207,23 @@ test('Apply to the scanner: the whole setting goes across, options included, and
   // Out with the index trade: the option's own SL / target are not used, so they are not applied either.
   assert.deepEqual(filtersFromTuning({}, v({ optLeg: 'sell', optExit: 'index', optSlPct: 25 }), { option: true }), { tradeOptLeg: 'sell', tradeOptMoneyness: 0 })
 
-  // And what the scanner then does with it: an untouched strategy follows the scanner's own setting, a tuned one its own.
-  const cfg = { autoPaper: 'sell', moneyness: 0, paperSl: 20, paperTarget: 30 }
-  assert.deepEqual(optionPlanFor('wallBreak', {}, cfg, 100), { leg: 'sell', moneyness: 0, slPts: 20, targetPts: 30, fromStrategy: false })
-  assert.deepEqual(optionPlanFor('wallBreak', { wallBreak: opt }, cfg, 100), { leg: 'buy', moneyness: -1, slPts: 25, targetPts: 50, fromStrategy: true })
+  // And what the scanner then does with it. WHO DECIDES: a side chosen where the trading happens (the Order Flow
+  // page's Buy / Sell) is the last word; 'strategy' - what the server scanner runs on, with nobody there to choose -
+  // hands it to the strategy's own tuned setting.
+  const chose = (autoPaper) => ({ autoPaper, moneyness: 0, paperSl: 20, paperTarget: 30 })
+  const plain = optionPlanFor('wallBreak', {}, chose('sell'), 100)
+  assert.deepEqual([plain.leg, plain.moneyness, plain.slPts, plain.targetPts, plain.fromStrategy], ['sell', 0, 20, 30, false])
+  const mine = optionPlanFor('wallBreak', { wallBreak: opt }, chose('strategy'), 100)
+  assert.deepEqual([mine.leg, mine.moneyness, mine.slPts, mine.targetPts, mine.fromStrategy], ['buy', -1, 25, 50, true])
   // A % SL / target is of the premium actually paid, so a bigger premium means more points.
-  assert.equal(optionPlanFor('wallBreak', { wallBreak: opt }, cfg, 200).slPts, 50)
+  assert.equal(optionPlanFor('wallBreak', { wallBreak: opt }, chose('strategy'), 200).slPts, 50)
+  // The trader's own choice overrides the tuned side, and says that it did.
+  const overridden = optionPlanFor('wallBreak', { wallBreak: opt }, chose('sell'), 100)
+  assert.equal(overridden.leg, 'sell')
+  assert.equal(overridden.overrode, true)
+  assert.equal(optionPlanFor('wallBreak', { wallBreak: opt }, chose('buy'), 100).overrode, false, 'agreeing is not overriding')
+  // Off is off, whatever a strategy says.
+  assert.equal(optionPlanFor('wallBreak', { wallBreak: opt }, chose('off'), 100).leg, null)
   // Nonsense saved by hand is ignored rather than traded on.
-  assert.deepEqual(optionPlanFor('wallBreak', { wallBreak: { tradeOptLeg: 'nonsense', tradeOptMoneyness: 99 } }, cfg, 100).leg, 'sell')
+  assert.equal(optionPlanFor('wallBreak', { wallBreak: { tradeOptLeg: 'nonsense', tradeOptMoneyness: 99 } }, chose('strategy'), 100).leg, 'sell')
 })

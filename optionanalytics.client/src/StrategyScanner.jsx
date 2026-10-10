@@ -980,7 +980,8 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                 )}
                 <Text style={{ fontSize: 12 }}>on each alert</Text>
                 <Segmented size="small" value={settings.autoPaper ?? 'sell'} onChange={(v) => setSettings((s) => ({ ...s, autoPaper: v }))}
-                  options={[{ value: 'off', label: 'Off' }, { value: 'buy', label: 'Buy option' }, { value: 'sell', label: 'Sell option' }]} />
+                  options={[{ value: 'off', label: 'Off' }, { value: 'buy', label: 'Buy option' }, { value: 'sell', label: 'Sell option' },
+                    { value: 'strategy', label: <Tooltip title="Each strategy buys or sells whatever its own tuned setting says (Strategy tuning · Apply to the scanner), and its own strike and option SL / target with it. Choosing Buy or Sell above overrides that - your choice here always wins.">Per strategy</Tooltip> }]} />
                 <Tooltip title="Which strike each trade uses - paper and live: ATM, or up to 5 strikes in / out of the money for the option being traded (a call's ITM strikes are below the index, a put's above). Only the strike changes - which setups fire does not.">
                   <Select size="small" style={{ width: 84 }} value={settings.moneyness ?? 0} aria-label="Option strike"
                     onChange={(v) => setSettings((s) => ({ ...s, moneyness: v }))}

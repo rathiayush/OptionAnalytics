@@ -362,9 +362,17 @@ export const OPTION_TRADE_FILTERS = ['tradeOptLeg', 'tradeOptMoneyness', 'tradeO
  */
 export function optionPlanFor(id, filters, cfg = {}, premium = null) {
   const f = strategyFilters(id, filters?.[id])
-  const scannerLeg = cfg.autoPaper === 'buy' || cfg.autoPaper === 'sell' ? cfg.autoPaper : null
-  const leg = f.tradeOptLeg === 'buy' || f.tradeOptLeg === 'sell' ? f.tradeOptLeg : scannerLeg
-  const moneyness = f.tradeOptMoneyness === 'default' || f.tradeOptMoneyness == null ? (cfg.moneyness ?? 0) : f.tradeOptMoneyness
+  // WHO DECIDES. A buy / sell chosen where the trading happens WINS - on the Order Flow page the trader is sitting
+  // there and their choice is the last word, whatever a strategy was tuned to. Choosing "per strategy" (what the
+  // server scanner runs on, since nobody is there to choose) hands the decision to the strategy's own tuned setting,
+  // and falls back to selling when it has none. The strike and the SL / target follow the same rule.
+  const chosen = cfg.autoPaper === 'buy' || cfg.autoPaper === 'sell' ? cfg.autoPaper : null
+  const perStrategy = cfg.autoPaper === 'strategy'
+  const tunedLeg = f.tradeOptLeg === 'buy' || f.tradeOptLeg === 'sell' ? f.tradeOptLeg : null
+  const leg = perStrategy ? tunedLeg ?? 'sell' : chosen
+  const overrode = !!(chosen && tunedLeg && tunedLeg !== chosen)
+  const tunedMoneyness = f.tradeOptMoneyness === 'default' || f.tradeOptMoneyness == null ? null : f.tradeOptMoneyness
+  const moneyness = perStrategy ? tunedMoneyness ?? (cfg.moneyness ?? 0) : (cfg.moneyness ?? tunedMoneyness ?? 0)
   // A percentage is of the premium actually paid / received, so it only becomes points once that is known; until then
   // (and whenever it is 0) the index's own points setting stands.
   const pct = (p, fallback) => (p > 0 && premium > 0 ? (premium * p) / 100 : fallback)
@@ -373,7 +381,11 @@ export function optionPlanFor(id, filters, cfg = {}, premium = null) {
     moneyness,
     slPts: pct(f.tradeOptSlPct, cfg.paperSl ?? 20),
     targetPts: pct(f.tradeOptTargetPct, cfg.paperTarget ?? 30),
+    // Whether this strategy has a tuned option setting at all, and whether the trader's own choice has just overruled
+    // it (so the page can say so rather than quietly doing something else than the strategy was tuned for).
     fromStrategy: f.tradeOptLeg !== 'default' || f.tradeOptMoneyness !== 'default' || f.tradeOptSlPct > 0 || f.tradeOptTargetPct > 0,
+    tunedLeg,
+    overrode,
   }
 }
 for (const st of [...STRATEGIES, ...SPOT_STRATEGIES]) STRATEGY_FILTERS[st.id] = [...(STRATEGY_FILTERS[st.id] ?? []), ...TRADE_FILTERS]

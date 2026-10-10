@@ -18,7 +18,10 @@ import { newProfileWatch, profileAlertText, profileLevels, spotLevelsOf, spotPro
 import { tpoRowFor } from '../src/profiles.js'
 
 // The page's own defaults (StrategyScanner / OrderFlowPage) for anything the config does not say.
-export const DEFAULT_SETTINGS = { alerts: true, telegram: true, pick: 'top15', custom: [], filters: {}, trail: { on: true, ...DEFAULT_TRAIL }, autoPaper: 'sell', paperLots: 1, moneyness: 0 }
+// autoPaper 'strategy': each strategy buys or sells what its own tuned setting says (Apply to the scanner), falling
+// back to selling where there is none - nobody is sitting here to choose, unlike the Order Flow page, where the
+// trader's own Buy / Sell always wins.
+export const DEFAULT_SETTINGS = { alerts: true, telegram: true, pick: 'top15', custom: [], filters: {}, trail: { on: true, ...DEFAULT_TRAIL }, autoPaper: 'strategy', paperLots: 1, moneyness: 0 }
 export const DEFAULT_ROW_SIZES = { NIFTY: 1, BANKNIFTY: 5, SENSEX: 5 }
 const RETRY_MS = 30_000
 const LOG_EVERY_MS = 3_000
