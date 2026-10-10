@@ -165,6 +165,44 @@ function ParamsTable({ r, minTrades }) {
   )
 }
 
+/** A running job's detail: days scanned / skipped, how many came from the disk cache, a wait for a busy Dhan, time left. */
+function JobDetail({ p, startedUtc }) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => { const id = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(id) }, [])
+  if (!p) return null
+  const f = p.fetched
+  const elapsed = startedUtc ? now - Date.parse(startedUtc) : null
+  const left = p.stage === 'scan' && p.done > 2 && elapsed ? (elapsed / p.done) * (p.total - p.done) : null
+  const secs = (ms) => (ms >= 3_600_000 ? `${Math.floor(ms / 3_600_000)} h ${Math.round((ms % 3_600_000) / 60_000)} min` : ms >= 90_000 ? `${Math.round(ms / 60_000)} min` : `${Math.max(0, Math.round(ms / 1000))} s`)
+  const wait = p.wait && Date.parse(p.wait.until) > now ? p.wait : null
+  return (
+    <Space direction="vertical" size={2} style={{ width: '100%' }}>
+      <Text type="secondary" style={{ fontSize: 12 }}>
+        {p.scanned != null && `${p.scanned} day(s) scanned`}{p.skipped ? `, ${p.skipped} skipped` : ''}
+        {f && ` · ${f.cacheHits} read from the disk cache (no Dhan call), ${f.requests} fetched${f.retries ? `, ${f.retries} retried` : ''}`}
+        {left != null && ` · about ${secs(left)} of scanning left`}
+      </Text>
+      {wait && <Alert type="warning" showIcon style={{ padding: '2px 8px' }} message={<span style={{ fontSize: 12 }}>The server / Dhan is busy - waiting {secs(Date.parse(wait.until) - now)} before try {wait.attempt} of {wait.of} ({wait.label}): {wait.reason}</span>} />}
+    </Space>
+  )
+}
+
+/** The days a result was measured on - where each came from and how complete it was - and the days left out, with why. */
+function DaysTable({ days, skipped }) {
+  const rows = [...(days ?? []).map((d) => ({ ...d, used: true })), ...(skipped ?? []).map((d) => ({ ...d, used: false }))].sort((a, b) => (a.date < b.date ? 1 : -1))
+  return (
+    <Table size="small" rowKey="date" dataSource={rows} pagination={{ pageSize: 20, size: 'small', hideOnSinglePage: true }} scroll={{ x: 900 }} columns={[
+      { title: 'Day', dataIndex: 'date', width: 110 },
+      { title: 'Used', dataIndex: 'used', width: 70, render: (v, d) => (v ? <Tag color="success">used</Tag> : <Tooltip title={d.busy ? 'The server / Dhan stayed busy after every retry - run the job again (the days already fetched come from the cache)' : null}><Tag color={d.busy ? 'warning' : 'default'}>skipped</Tag></Tooltip>) },
+      { title: 'Source', key: 'src', width: 150, render: (_, d) => (!d.used ? '-' : d.source === 'spot' ? 'spot + option chain' : d.estimated ? <Tooltip title="Rebuilt from 1-minute futures candles: no tape, no market depth - the order-flow checks are estimated">estimated (1-min candles)</Tooltip> : 'recorded (exact)') },
+      { title: 'Minutes', key: 'm', width: 150, render: (_, d) => (d.used ? `${d.minutes ?? '-'} bars · OI ${d.oiMinutes ?? '-'}` : '-') },
+      { title: 'Tape prints', dataIndex: 'prints', width: 100, render: (v, d) => (!d.used || d.estimated || d.source === 'spot' ? '-' : v ? v.toLocaleString('en-IN') : <Text type="warning">none</Text>) },
+      { title: 'Previous session', dataIndex: 'previousSession', width: 130, render: (v, d) => (!d.used || d.source === 'spot' ? '-' : v ?? <Tooltip title="No previous session: the profile strategies (#11 - #14) could not trade this day"><Text type="warning">none</Text></Tooltip>) },
+      { title: 'Notes', key: 'n', render: (_, d) => <Text style={{ fontSize: 12 }} type={d.used ? 'secondary' : undefined}>{d.used ? [d.futuresOi === false && d.source !== 'spot' ? 'no futures OI' : null, d.optionErrors?.length ? `${d.optionErrors.length} strike series empty: ${d.optionErrors[0]}` : null].filter(Boolean).join(' · ') || '-' : d.reason}</Text> },
+    ]} />
+  )
+}
+
 /** A tuned setting in words: the trade / OI filters, and the option when it was tuned. */
 const settingText = (params, unit) => (params ? `${variantText(params)}${unit === 'pts' ? ` · ${optionText(params)}` : ''}` : '-')
 
@@ -250,7 +288,7 @@ export default function StrategyTuningPage() {
   }
 
   const p = status?.progress
-  const progressText = !p ? 'starting…' : p.stage === 'scan' ? `scanning ${p.day} (${p.done + 1} of ${p.total} days)` : p.stage === 'rank' ? 'ranking the strategies' : p.stage === 'tune' ? `tuning #${STRATEGY_BY_ID[p.strategy]?.no} ${STRATEGY_BY_ID[p.strategy]?.name ?? p.strategy} (${p.done + 1} of ${p.total})${p.of ? `, ${p.tried.toLocaleString('en-IN')} of ${p.of.toLocaleString('en-IN')} OI combinations` : ''}` : p.stage
+  const progressText = !p ? 'starting…' : p.stage === 'scan' ? (p.retrying ? `trying again ${p.day} (${p.retrying} day(s) the server was busy for)` : `scanning ${p.day} (${Math.min(p.done + 1, p.total)} of ${p.total} days)`) : p.stage === 'rank' ? 'ranking the strategies' : p.stage === 'tune' ? `tuning #${STRATEGY_BY_ID[p.strategy]?.no} ${STRATEGY_BY_ID[p.strategy]?.name ?? p.strategy} (${p.done + 1} of ${p.total})${p.of ? `, ${p.tried.toLocaleString('en-IN')} of ${p.of.toLocaleString('en-IN')} OI combinations` : ''}` : p.stage
   const percent = !p ? 0 : p.stage === 'scan' ? Math.round((p.done / Math.max(1, p.total)) * 80) : p.stage === 'rank' ? 80 : p.stage === 'tune' ? 80 + Math.round(((p.done + (p.of ? Math.min(1, p.tried / p.of) : 0)) / Math.max(1, p.total)) * 20) : 100
 
   const tuned = new Set((result?.results ?? []).map((r) => r.id))
@@ -345,9 +383,15 @@ export default function StrategyTuningPage() {
               </Col>
             </Row>
             {!isAdmin && <Alert type="info" showIcon message="Only an admin can run a tuning job or apply a result." />}
+            {!spot && !includeEstimated && (dayMode === 'range' || days > 3) && (
+              <Alert type="warning" showIcon message="Only the recorded days will be used - the server keeps just the last few (in memory)."
+                description="For a long run (30, 120, 250 days) switch on Include estimated days: the other days are rebuilt from 1-minute futures candles (no tape or market depth - the order-flow checks are estimated, and each is marked 'est.'). Or use Spot + options only, which needs no futures order flow." />
+            )}
+            {!running && <Text type="secondary" style={{ fontSize: 12 }}>Long runs: each past day is fetched once and kept on the server&apos;s disk, so a rerun, a longer range or a job resumed after a restart asks Dhan only for days it has not seen. Dhan&apos;s rate limits are waited out (in market hours the job uses the server&apos;s background share, leaving the live pages and the scanner theirs); a day that is incomplete - partial session, missing strikes - is left out and listed with the reason, never scored as a whole day.</Text>}
             {running && (
               <div>
-                <Text style={{ fontSize: 12 }}>{status.job?.underlying}: {progressText} · started {when(status.startedUtc)}</Text>
+                <Text style={{ fontSize: 12 }}>{status.job?.underlying}: {progressText} · started {when(status.startedUtc)}{status.job?.resumed ? ' · resumed after a server restart' : ''}</Text>
+                <JobDetail p={p} startedUtc={status.startedUtc} />
                 <Progress percent={percent} size="small" status="active" />
               </div>
             )}
@@ -363,6 +407,11 @@ export default function StrategyTuningPage() {
               {result.data === 'spot' && <Alert type="info" showIcon style={{ marginBottom: 8 }} message="Spot + options only: the index candles and the option chain's OI, no futures and no order flow. Points are index points; the option bought and sold are priced beside them. The live scanner does not run these strategies yet, so there is nothing to apply - this measures what they would have done." />}
               {result.skipped?.length > 0 && <Alert type="warning" showIcon style={{ marginBottom: 8 }} message={`${result.skipped.length} day(s) could not be scanned`} description={result.skipped.slice(0, 5).map((s) => `${s.date}: ${s.reason}`).join(' · ')} />}
               <Table size="small" rowKey="id" columns={rankedColumns} dataSource={result.ranked ?? []} pagination={false} scroll={{ y: 320 }} />
+              <details style={{ marginTop: 8 }}>
+                <summary style={{ cursor: 'pointer', fontSize: 12 }}>The {result.days?.length ?? 0} day(s) used{result.skipped?.length ? ` and ${result.skipped.length} left out` : ''}: where each came from and how complete it was{result.fetched ? ` · ${result.fetched.cacheHits} read from the disk cache, ${result.fetched.requests} fetched${result.fetched.retries ? `, ${result.fetched.retries} retried` : ''}` : ''}</summary>
+                <div style={{ marginTop: 6 }}><DaysTable days={result.days} skipped={result.skipped} /></div>
+              </details>
+              <Text type="secondary" style={{ fontSize: 12 }}>Every trade of this run, with its date and time: <a href="/trades">Trades page</a>.</Text>
             </Card>
             {(result.results ?? []).map((r) => (
               <Card key={r.id} size="small"

@@ -23,7 +23,10 @@ public sealed class NseFuturesContractArchive
 {
     public const string UrlFormat = "https://nsearchives.nseindia.com/content/fo/NSE_FO_contract_{0}.csv.gz";
     private const int MaxDaysBack = 7;
-    private const int MaxCachedFiles = 40;
+    // Each entry is only that day's index futures rows (a few dozen), so a long strategy-tuning range (250 weekdays)
+    // fits; the least recently used goes first - evicting the OLDEST date threw away the file just downloaded in a
+    // newest-first scan, so every older day re-downloaded NSE's contract master several times.
+    private const int MaxCachedFiles = 400;
     // NSE's contract master counts time in seconds since 1980-01-01.
     private static readonly DateTime Epoch1980 = new(1980, 1, 1, 0, 0, 0, DateTimeKind.Utc);
     public static readonly string[] NseUnderlyings = { "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50" };
@@ -32,6 +35,8 @@ public sealed class NseFuturesContractArchive
     private readonly ILogger<NseFuturesContractArchive> _logger;
     private readonly ConcurrentDictionary<DateOnly, Task<IReadOnlyList<DhanFuturesInstrument>?>> _files = new();
     private DateOnly _cacheDay = IstClock.Today();
+    private readonly ConcurrentDictionary<DateOnly, long> _used = new();
+    private long _clock;
 
     public NseFuturesContractArchive(HttpClient http, ILogger<NseFuturesContractArchive> logger)
     {
@@ -71,18 +76,35 @@ public sealed class NseFuturesContractArchive
     {
         if (day.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday) return Task.FromResult<IReadOnlyList<DhanFuturesInstrument>?>(null);
         var today = IstClock.Today();
-        if (today != _cacheDay) { _files.Clear(); _cacheDay = today; }
+        if (today != _cacheDay) { _files.Clear(); _used.Clear(); _cacheDay = today; }
         var task = _files.GetOrAdd(day, d => DownloadAsync(d));
-        // A failed download (network, not a missing file) is not remembered - try again next time.
-        _ = task.ContinueWith(t => { if (t.IsFaulted) _files.TryRemove(day, out _); }, TaskScheduler.Default);
-        while (_files.Count > MaxCachedFiles) _files.TryRemove(_files.Keys.Min(), out _);
+        _used[day] = Interlocked.Increment(ref _clock);
+        // A failed download (network, a timeout - not a missing file) is not remembered - try again next time.
+        _ = task.ContinueWith(t => { if (t.IsFaulted || t.IsCanceled) { _files.TryRemove(day, out _); _used.TryRemove(day, out _); } }, TaskScheduler.Default);
+        while (_files.Count > MaxCachedFiles && _used.Count > 0)
+        {
+            var oldest = _used.MinBy(kv => kv.Value).Key;
+            _files.TryRemove(oldest, out _);
+            _used.TryRemove(oldest, out _);
+        }
         return task.WaitAsync(cancellationToken);
     }
 
     private async Task<IReadOnlyList<DhanFuturesInstrument>?> DownloadAsync(DateOnly day)
     {
         var url = string.Format(CultureInfo.InvariantCulture, UrlFormat, day.ToString("ddMMyyyy", CultureInfo.InvariantCulture));
-        using var response = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
+        HttpResponseMessage responseMessage;
+        try
+        {
+            responseMessage = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
+        }
+        catch (TaskCanceledException ex)
+        {
+            // HttpClient's own timeout (no caller token here): a plain failure, so callers' "not a cancellation" catches
+            // handle it (it used to escape them as an unhandled 500) and the cache forgets it.
+            throw new TimeoutException($"NSE contract master {day:yyyy-MM-dd} did not answer within {_http.Timeout.TotalSeconds:0} s.", ex);
+        }
+        using var response = responseMessage;
         if (response.StatusCode is System.Net.HttpStatusCode.NotFound or System.Net.HttpStatusCode.Forbidden) return null;
         response.EnsureSuccessStatusCode();
         await using var stream = await response.Content.ReadAsStreamAsync();

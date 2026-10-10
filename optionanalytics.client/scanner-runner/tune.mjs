@@ -9,6 +9,9 @@
 //   TUNE_JOB                      { underlying, strategies: 'top3' | 'top5' | 'all' | [ids], days, includeEstimated, minTrades,
 //                                   what: 'trade' | 'oi' | 'both' (the trade settings, the OI confirmation, or the OI first then the trade) }
 //   TUNE_OUT                      the result file
+//   TUNE_TRADES_OUT               every trade (each strategy as written on every day, each tuned one's best setting) - the Trades page
+//   TUNE_CACHE_DIR                where each past day's fetched data is kept (tuneFetch.mjs): a rerun / resume / longer range
+//                                 reads it from disk - no Dhan call; TUNE_PACE_MS the pause between requests that reach the server
 // Progress goes to stdout as lines "PROGRESS {json}".
 
 import { writeFileSync, renameSync } from 'node:fs'
@@ -16,15 +19,16 @@ import { buildOiContext, ACTIVE_STRATEGIES, SPOT_STRATEGIES, STRATEGY_BY_ID, TRA
 import { scanSpotDay, spotBarsOf } from '../src/spotEngine.js'
 import { autoBigLots } from '../src/orderFlowMath.js'
 import { scannerProfileOf, trailFor } from '../src/scannerCore.js'
-import { fetchPreviousSession } from '../src/profiles.js'
 import { expiryFlagOf } from '../src/liveFeeds.js'
 import { dayFromOrderFlow, scanDaySetups } from '../src/scanDay.js'
-import { OI_COMBO_CAP, OI_FACTORS, OPTION_GRID, countOiCombinations, oiGridOf, rankStrategies, tuneStrategy, tuningDay, TUNING_GRID } from '../src/strategyTuning.js'
+import { DEFAULT_VARIANT, OI_COMBO_CAP, OI_FACTORS, OPTION_GRID, countOiCombinations, oiGridOf, optionText, rankStrategies, tradeDetails, tuneStrategy, tuningDay, TUNING_GRID, variantText } from '../src/strategyTuning.js'
 import { DEFAULT_ROW_SIZES } from './indexScanner.mjs'
+import { createFetcher, inMarketHours, isTransientText, pruneCache } from './tuneFetch.mjs'
 
 const BASE = (process.env.RUNNER_BASE_URL ?? 'http://127.0.0.1:8080').replace(/\/$/, '')
 const KEY = process.env.RUNNER_KEY ?? ''
 const OUT = process.env.TUNE_OUT ?? 'tuning-result.json'
+const TRADES_OUT = process.env.TUNE_TRADES_OUT ?? null
 const job = JSON.parse(process.env.TUNE_JOB ?? '{}')
 const U = String(job.underlying ?? 'NIFTY').toUpperCase()
 // A date range (from / to, YYYY-MM-DD, either may be left open) picks the days instead of "the last N": every day
@@ -44,24 +48,52 @@ const SEARCH = job.search === 'full' ? 'full' : 'step'
 const OI_KEYS = Array.isArray(job.oiFactors) && job.oiFactors.length ? job.oiFactors.filter((k) => OI_FACTORS.some((f) => f.key === k)) : null
 const startedUtc = new Date().toISOString()
 
-const nativeFetch = globalThis.fetch
-globalThis.fetch = (url, options = {}) => nativeFetch(String(url).startsWith('/') ? `${BASE}${url}` : url, { ...options, headers: { ...(options.headers ?? {}), 'X-Runner-Key': KEY } })
-async function api(path) {
-  const res = await fetch(path)
-  const text = await res.text()
-  if (!res.ok) {
-    let reason = text.slice(0, 200)
-    try { reason = JSON.parse(text)?.error ?? reason } catch { /* not JSON */ }
-    throw new Error(`${path.split('?')[0]}: ${reason || `HTTP ${res.status}`}`)
-  }
-  return text ? JSON.parse(text) : null
-}
-const progress = (p) => console.log(`PROGRESS ${JSON.stringify(p)}`)
-const write = (body) => {
-  writeFileSync(`${OUT}.tmp`, JSON.stringify(body))
-  renameSync(`${OUT}.tmp`, OUT)
-}
+const progress = (p) => console.log(`PROGRESS ${JSON.stringify({ ...p, startedUtc, fetched: fetcher?.stats })}`)
 const istToday = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date())
+// The server (and through it Dhan) is read with retries while it is busy, and each past day's data is kept on disk.
+let lastScan = null
+const CACHE_DIR = process.env.TUNE_CACHE_DIR || null
+const fetcher = createFetcher({
+  base: BASE, key: KEY, today: istToday, cacheDir: CACHE_DIR,
+  paceMs: Math.max(0, Number(process.env.TUNE_PACE_MS) || 0),
+  retryBaseMs: Math.max(1, Number(process.env.TUNE_RETRY_BASE_MS) || 5_000),
+  // In market hours the job's Dhan calls wait in the server's background lane - the live pages and the server scanner
+  // keep theirs; after hours it uses the normal lane (nothing else is asking).
+  priority: () => (process.env.TUNE_PRIORITY === 'background' || (process.env.TUNE_PRIORITY !== 'interactive' && inMarketHours()) ? 'background' : 'interactive'),
+  onWait: (w) => progress({ ...(lastScan ?? { stage: 'scan' }), wait: { ...w, until: new Date(Date.now() + w.waitMs).toISOString() } }),
+})
+const api = (path) => fetcher.api(path)
+const writeJson = (path, body) => {
+  writeFileSync(`${path}.tmp`, JSON.stringify(body))
+  renameSync(`${path}.tmp`, path)
+}
+const write = (body) => writeJson(OUT, body)
+
+// A full session is 375 minutes (09:15 - 15:30); a day with much less (a special / Muhurat session, a feed that started
+// late, a gap in the archive) would be scored as if it were a whole day - it is left out and listed with the reason.
+export const MIN_SESSION_MINUTES = 300
+const minutesOf = (points) => new Set((points ?? []).map((p) => String(p.time ?? p.t ?? '').slice(0, 16))).size
+
+// The previous session's bars (the profile strategies' levels): the weekday before, read the same way as a scanned day
+// (and from the same cache entry - the previous day is usually a scanned day too).
+async function previousSession(date, rowSize, plan) {
+  const d = new Date(`${date}T00:00:00Z`)
+  for (let back = 1; back <= 7; back++) {
+    const day = new Date(d.getTime() - back * 86_400_000)
+    if (day.getUTCDay() === 0 || day.getUTCDay() === 6) continue
+    const key = day.toISOString().slice(0, 10)
+    try {
+      // That day's own contract when it is a scanned day (the same request, so the same cache entry), else the default.
+      const own = plan.find((x) => x.date === key)?.expiry
+      const body = await fetcher.dayApi('flow', key, dayPath(key, rowSize, own ? `&expiry=${own}` : ''), (b) => b?.bars?.length > 0)
+      if (body?.bars?.length) return { date: key, bars: body.bars }
+    } catch (err) {
+      if (err.transient) throw err // busy: the day is tried again later, not scanned without its profile
+    }
+  }
+  return null
+}
+const dayPath = (date, rowSize, expiryQuery) => `/api/order-flow/${U}/day/${date}?rowSize=${rowSize}&minTradeLots=5&heatmapColumns=1500${expiryQuery}`
 
 // The weekdays to try, newest first: in the date range when there is one (up to yesterday), else the last `n` before today.
 function candidateWeekdays(n) {
@@ -89,6 +121,7 @@ function pastWeekdays(n) {
 }
 
 async function main() {
+  if (CACHE_DIR) pruneCache(CACHE_DIR, Math.max(0, Number(process.env.TUNE_CACHE_MAX_MB ?? 4096)) * 1_000_000)
   // "Every combination" of the ticked OI inputs must be a size that can be run - say so before scanning any day.
   if (WHAT !== 'trade' && WHAT !== 'option' && SEARCH === 'full' && countOiCombinations(OI_KEYS).over) {
     throw new Error(`more than ${OI_COMBO_CAP.toLocaleString('en-IN')} OI combinations with those OI inputs - untick some, or search step by step`)
@@ -103,7 +136,7 @@ async function main() {
 
   // The days: the recorded (exact) ones, newest first; with includeEstimated, other weekdays too (rebuilt from 1-minute candles).
   // Spot + options needs no order flow: the past weekdays that have OI data are the days (holidays fail and are skipped).
-  const recorded = DATA === 'spot' ? [] : ((await api(`/api/order-flow/${U}/days`)) ?? []).filter((d) => !d.isLive && d.date < istToday && inRange(d.date))
+  const recorded = DATA === 'spot' ? [] : ((await api(`/api/order-flow/${U}/days`)) ?? []).filter((d) => !(d.isLive ?? d.live) && d.date < istToday && inRange(d.date))
   let plan = recorded.slice(0, MAX_DAYS).map((d) => ({ date: d.date, expiry: d.expiry ?? null, exact: true }))
   if (DATA === 'spot') plan = candidateWeekdays(MAX_DAYS + Math.ceil(MAX_DAYS / 4) + 6).map((date) => ({ date, expiry: null, exact: false }))
   else if (job.includeEstimated && plan.length < MAX_DAYS) {
@@ -124,39 +157,107 @@ async function main() {
   const expiryDate = U === 'BANKNIFTY' ? expiries?.month ?? null : expiries?.week ?? null
   const days = []
   const skipped = []
+  const asWritten = [] // every strategy's trades as written, per day as it is scanned (with its checks - why it fired)
+  const oiQuery = (date) => `/api/oi-replay/${U}/run?${new URLSearchParams({ date, timeframeMinutes: '1', expiryFlag: expiryFlagOf(U) })}`
+  // A strike whose Dhan call failed for the load (rate limit, timeout, the session renewing) leaves a hole in the day's
+  // OI: such a run is never cached and the day is tried again; any other strike error is noted on the day.
+  const busyStrikes = (run) => (run?.optionErrors ?? []).filter((e) => isTransientText(e))
+  const oiValid = (run) => run?.success === true && minutesOf(run.spotCandlesOneMinute ?? run.spotCandles) >= MIN_SESSION_MINUTES && busyStrikes(run).length === 0
+  const checkRun = (run) => {
+    if (!run?.success) {
+      const e = new Error(run?.error ?? 'no OI for the day')
+      e.transient = isTransientText(run?.error)
+      throw e
+    }
+    const busy = busyStrikes(run)
+    if (busy.length) {
+      const e = new Error(`option OI incomplete - ${busy.length} strike series failed (${busy[0]})`)
+      e.transient = true
+      throw e
+    }
+    return (run.optionErrors ?? []).length ? run.optionErrors : null
+  }
+  // The day's OI, fetched again (after 30 s, then 90 s) while it comes back incomplete for the load - the server has
+  // already retried each strike; a short pause usually clears it.
+  async function fetchRun(date) {
+    for (let i = 0; ; i++) {
+      const run = await fetcher.dayApi('oi', date, oiQuery(date), oiValid)
+      const busy = run?.success ? busyStrikes(run).length : isTransientText(run?.error) ? 1 : 0
+      if (!busy || i >= 2) return run
+      const waitMs = 30_000 * 3 ** i
+      progress({ ...(lastScan ?? { stage: 'scan' }), wait: { label: 'option OI', attempt: i + 2, of: 3, waitMs, until: new Date(Date.now() + waitMs).toISOString(), reason: run?.success ? `${busy} strike series failed - fetching the day again` : run?.error } })
+      await new Promise((resolve) => setTimeout(resolve, Number(process.env.TUNE_BUSY_PAUSE_MS ?? waitMs)))
+    }
+  }
+  // One day: fetched (from disk when it was fetched before), checked, scanned. Throws with the reason it cannot be used;
+  // `err.transient` when the server / Dhan was busy (tried again at the end).
+  async function scanOne(p) {
+    if (DATA === 'spot') {
+      const run = await fetchRun(p.date)
+      const optionErrors = checkRun(run)
+      const bars = spotBarsOf(run.spotCandlesOneMinute ?? run.spotCandles)
+      if (bars.length < MIN_SESSION_MINUTES) throw new Error(`spot candles for only ${bars.length} of 375 minutes - a partial day`)
+      const oiMinutes = minutesOf(run.cePoints)
+      if (oiMinutes < MIN_SESSION_MINUTES) throw new Error(`option OI for only ${oiMinutes} of 375 minutes - a partial day`)
+      const oi = buildOiContext(run, expiryDate, { live: false })
+      return { ...tuningDay(p.date, scanSpotDay({ bars, oi, filters: entryFilters }), { minuteBars: bars, heatmap: [] }, oi), estimated: false, quality: { minutes: bars.length, oiMinutes, source: 'spot', ...(optionErrors ? { optionErrors } : {}) } }
+    }
+    const expiryQuery = p.expiry ? `&expiry=${p.expiry}` : ''
+    const body = await fetcher.dayApi('flow', p.date, dayPath(p.date, rowSize, expiryQuery), (b) => b?.bars?.length >= MIN_SESSION_MINUTES)
+    if (!body?.bars?.length) throw new Error('no bars')
+    const day = dayFromOrderFlow(body, p.date, U)
+    if (day.minuteBars.length < MIN_SESSION_MINUTES) throw new Error(`futures bars for only ${day.minuteBars.length} of 375 minutes - a partial day`)
+    const estimated = day.source === 'estimated' || day.source === 'truedata'
+    const lotSize = day.meta?.lotSize ?? 1
+    const tape = estimated ? null : await fetcher.dayApi('tape', p.date, `/api/order-flow/${U}/tape?date=${p.date}&count=60000${expiryQuery}`, (t) => Array.isArray(t?.prints) && t.prints.length > 0)
+    const prints = estimated ? null : tape?.prints ?? []
+    const run = await fetchRun(p.date)
+    const optionErrors = checkRun(run)
+    const oiMinutes = minutesOf(run.cePoints)
+    if (oiMinutes < MIN_SESSION_MINUTES) throw new Error(`option OI for only ${oiMinutes} of 375 minutes - a partial day`)
+    const oi = buildOiContext(run, expiryDate, { live: false })
+    const prev = await previousSession(p.date, rowSize, plan)
+    const largeLots = cfg.orderFlow?.bigMode === 'auto' || cfg.orderFlow?.bigMode == null ? autoBigLots(prints ?? [], lotSize) ?? 10 : cfg.orderFlow?.largeLots?.[U] ?? 10
+    const setups = await scanDaySetups({ day, prints, oi, profile: scannerProfileOf(prev?.bars, U, rowSize), rowSize, lotSize, largeLots, estimated, filters: entryFilters, keepAll: true })
+    return { ...tuningDay(p.date, setups, day, oi), estimated, quality: { minutes: day.minuteBars.length, oiMinutes, prints: prints?.length ?? null, previousSession: prev?.date ?? null, source: day.source ?? null, futuresOi: !!run.futuresOiAvailable, ...(optionErrors ? { optionErrors } : {}) } }
+  }
+  // The day's trades as written, kept now (with why each fired); the setups then drop their check texts - a 250-day
+  // job holds every day in memory, and the tuning needs only the numbers.
+  const keepDay = (day) => {
+    const ids = [...new Set(day.setups.map((s) => s.id))].filter((id) => STRATEGY_BY_ID[id] && !STRATEGY_BY_ID[id].retired)
+    for (const id of ids) {
+      for (const t of tradeDetails([day], id, DEFAULT_VARIANT, trail, U, { checks: true })) asWritten.push({ id, no: STRATEGY_BY_ID[id].no, name: STRATEGY_BY_ID[id].name, setting: 'as written', ...t })
+    }
+    day.setups = day.setups.map((s) => (s.checks ? { ...s, checks: null } : s))
+    delete day.byId
+    days.push(day)
+  }
+  const busy = []
   for (let i = 0; i < plan.length; i++) {
     const p = plan[i]
     if (DATA === 'spot' && days.length >= MAX_DAYS) break
-    progress({ stage: 'scan', day: p.date, done: i, total: plan.length })
+    lastScan = { stage: 'scan', day: p.date, done: i, total: plan.length, scanned: days.length, skipped: skipped.length }
+    progress(lastScan)
     try {
-      if (DATA === 'spot') {
-        const run = await api(`/api/oi-replay/${U}/run?${new URLSearchParams({ date: p.date, timeframeMinutes: '1', expiryFlag: expiryFlagOf(U) })}`)
-        if (!run?.success) throw new Error(run?.error ?? 'no OI for the day')
-        const bars = spotBarsOf(run.spotCandlesOneMinute ?? run.spotCandles)
-        if (bars.length < 60) throw new Error('no spot candles')
-        const oi = buildOiContext(run, expiryDate, { live: false })
-        days.push({ ...tuningDay(p.date, scanSpotDay({ bars, oi, filters: entryFilters }), { minuteBars: bars, heatmap: [] }, oi), estimated: false })
-        continue
-      }
-      const expiryQuery = p.expiry ? `&expiry=${p.expiry}` : ''
-      const body = await api(`/api/order-flow/${U}/day/${p.date}?rowSize=${rowSize}&minTradeLots=5&heatmapColumns=1500${expiryQuery}`)
-      if (!body?.bars?.length) throw new Error('no bars')
-      const day = dayFromOrderFlow(body, p.date, U)
-      const estimated = day.source === 'estimated' || day.source === 'truedata'
-      const lotSize = day.meta?.lotSize ?? 1
-      const tape = estimated ? null : await api(`/api/order-flow/${U}/tape?date=${p.date}&count=60000${expiryQuery}`).catch(() => null)
-      const prints = estimated ? null : tape?.prints ?? []
-      const run = await api(`/api/oi-replay/${U}/run?${new URLSearchParams({ date: p.date, timeframeMinutes: '1', expiryFlag: expiryFlagOf(U) })}`)
-      if (!run?.success) throw new Error(run?.error ?? 'no OI for the day')
-      const oi = buildOiContext(run, expiryDate, { live: false })
-      const prev = await fetchPreviousSession(U, p.date, rowSize).catch(() => null)
-      const largeLots = cfg.orderFlow?.bigMode === 'auto' || cfg.orderFlow?.bigMode == null ? autoBigLots(prints ?? [], lotSize) ?? 10 : cfg.orderFlow?.largeLots?.[U] ?? 10
-      const setups = await scanDaySetups({ day, prints, oi, profile: scannerProfileOf(prev?.bars, U, rowSize), rowSize, lotSize, largeLots, estimated, filters: entryFilters, keepAll: true })
-      days.push({ ...tuningDay(p.date, setups, day, oi), estimated })
+      keepDay(await scanOne(p))
     } catch (err) {
-      skipped.push({ date: p.date, reason: err.message })
+      if (err.transient) busy.push({ p, err })
+      else skipped.push({ date: p.date, reason: err.message })
     }
   }
+  // Days the server / Dhan was too busy for, even after the retries: once more after a pause, then listed as skipped.
+  if (busy.length) {
+    progress({ stage: 'scan', day: busy[0].p.date, done: plan.length, total: plan.length, retrying: busy.length, wait: { label: 'busy days', waitMs: 120_000, until: new Date(Date.now() + 120_000).toISOString(), reason: `${busy.length} day(s) the server was too busy for - trying them again` } })
+    await new Promise((resolve) => setTimeout(resolve, Number(process.env.TUNE_BUSY_PAUSE_MS ?? 120_000)))
+    for (const { p } of busy) {
+      if (DATA === 'spot' && days.length >= MAX_DAYS) break
+      lastScan = { stage: 'scan', day: p.date, done: plan.length, total: plan.length, retrying: busy.length, scanned: days.length, skipped: skipped.length }
+      progress(lastScan)
+      try { keepDay(await scanOne(p)) } catch (err) { skipped.push({ date: p.date, reason: err.message, busy: !!err.transient }) }
+    }
+  }
+  days.sort((a, b) => (a.date < b.date ? 1 : -1))
+  skipped.sort((a, b) => (a.date < b.date ? 1 : -1))
   if (!days.length) throw new Error(`none of the ${plan.length} day(s) could be scanned (${skipped[0]?.reason ?? 'unknown'})`)
 
   progress({ stage: 'rank', done: days.length, total: days.length })
@@ -181,10 +282,22 @@ async function main() {
       onProgress: (p) => progress({ stage: 'tune', strategy: ids[i], done: i, total: ids.length, ...p }),
     }))
   }
+  // Every trade, for the Trades page: each strategy as written on every day scanned (with its checks - why it fired),
+  // and each tuned strategy's best setting. Written before the result, so a result always has its trades beside it.
+  if (TRADES_OUT) {
+    const trades = [...asWritten]
+    for (const res of results) {
+      if (!res.best?.trades?.length) continue
+      const text = `${variantText(res.best.params)}${res.unit === 'pts' ? ` · ${optionText(res.best.params)}` : ''}`
+      for (const t of res.best.trades) trades.push({ id: res.id, no: res.no, name: res.name, setting: 'best', settingText: text, recommend: res.recommend, ...t })
+    }
+    trades.sort((a, b) => a.t - b.t || (a.no ?? 0) - (b.no ?? 0))
+    writeJson(TRADES_OUT, { underlying: U, data: DATA, startedUtc, finishedUtc: new Date().toISOString(), days: days.map((d) => ({ date: d.date, estimated: d.estimated, ...d.quality })), skipped, trades })
+  }
   write({
     ok: true, underlying: U, job, startedUtc, finishedUtc: new Date().toISOString(), rowSize, trail, minTrades: MIN_TRADES, what: WHAT, search: SEARCH, data: DATA, from: FROM, to: TO, oiFactors: OI_KEYS ?? OI_FACTORS.map((f) => f.key),
     grid: WHAT === 'trade' ? TUNING_GRID : WHAT === 'oi' ? oiGridOf(OI_KEYS) : WHAT === 'option' ? OPTION_GRID : WHAT === 'all' ? { ...oiGridOf(OI_KEYS), ...TUNING_GRID, ...OPTION_GRID } : { ...oiGridOf(OI_KEYS), ...TUNING_GRID },
-    days: days.map((d) => ({ date: d.date, estimated: d.estimated, setups: d.setups.length })), skipped, ranked, results,
+    days: days.map((d) => ({ date: d.date, estimated: d.estimated, setups: d.setups.length, ...d.quality })), skipped, ranked, results, fetched: fetcher.stats,
     strategies: ACTIVE_STRATEGIES.length,
   })
   progress({ stage: 'done', done: ids.length, total: ids.length })

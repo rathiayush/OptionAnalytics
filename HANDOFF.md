@@ -60,6 +60,26 @@ the previous session's profile (memory only); #27 needs the heatmap (thin on SEN
 OI plan (in the earlier synthesis): richer `oiCtx` fields into the audit `sig`, a `keepVetoed` measurement of the options-OI veto, the
 tuner honesty items (min days, day-clustered error, held-out final check), `openingBias` live-vs-replay mismatch, expiry calendar.
 
+## Long tuning jobs and the Trades page (10 Oct) - built
+- `scanner-runner/tuneFetch.mjs`: retries (429 / 5xx / timeouts / DH-904 / "not authenticated" while TOTP renews; 5 s x3 up to 6 tries,
+  Retry-After honoured), a gzip disk cache of each PAST day's raw data (`{tuning}/cache/v1/...`, size-capped `StrategyTuning:CacheMaxMb`,
+  least-recently-read pruned), `X-Request-Priority: background` in market hours (server: `DhanDataApiRateLimiter.BackgroundScope`, middleware
+  in Program.cs - the job's Dhan calls use the background lane). `tune.mjs`: per-day checks (>= 300 of 375 minutes of bars / spot / option OI,
+  else skipped with the reason), an incomplete OI day (a strike series failed for the load - `/run`'s new `optionErrors`) fetched again
+  (30 s, 90 s) and never cached, busy days retried once at the end, every trade written to `{U}-trades-latest.json` (Trades page).
+- Server: `OiReplayResult.OptionErrors` (a failed strike fetch is reported, not passed off as empty), intraday + rolling-option calls retry
+  Dhan's rate limit (429 status too, 2/4/8 s), NSE contract-master / chart caches evict least-recently-used (was: the file just fetched)
+  and a timeout is a plain failure (was: an unhandled 500, stuck in the cache). StrategyTuningService: `--max-old-space-size`
+  (`StrategyTuning:MaxMemoryMb`, 4096), a job interrupted by a server stop is resumed after the restart (`current-job.json`,
+  `StrategyTuningResumeHostedService`); the Stop button forgets it.
+- Data limits that remain (not code): the server keeps only the last 3 recorded order-flow days in memory, so a long futures run uses
+  estimated days (1-minute candles, no tape / depth); estimated futures older than ~2.5 months need NSE's chart service (blocked from
+  some hosting IPs) - those days are skipped with the reason; SENSEX futures only for the current contract. Spot + options mode needs
+  no futures and covers the whole range. Ideas: persist recorded order-flow days to disk; reuse `ExpiredOptionDataStore` for `/run`.
+- Trades page (`/trades`, `TradesPage.jsx`): the latest tuning run's trades (every strategy as written on every day, with why it fired;
+  the tuned ones' best setting) and the scanner's record (`/api/scanner-log/rows/{kind}`: signals and live / paper option trades, page and
+  server), filters, totals, CSV.
+
 ## Security - needs the trader
 `NiftyDataCollector/appsettings.json` is tracked in git with a Dhan PIN, a TOTP secret and a database password. Rotate the PIN / TOTP /
 password yourself, then remove the file from the repo (move the values to an ignored `appsettings.Local.json`). Never commit credentials.

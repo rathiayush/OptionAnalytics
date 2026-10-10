@@ -76,20 +76,34 @@ public sealed class DhanHistoricalDataService
     private async Task<(DhanApiResponse? Response, string? Error)> SendDataApiCallAsync(
         string path, object payload, string context, bool interactive, CancellationToken cancellationToken)
     {
-        await _rateLimiter.WaitForPermitAsync(interactive, cancellationToken);
+        // Dhan's rate limit (429 / DH-904) is waited out and tried again (2 s, 4 s, 8 s) - one busy moment used to fail
+        // the whole call (a past day's spot / futures, so the day). Anything else returns at once.
+        for (var attempt = 0; ; attempt++)
+        {
+            await _rateLimiter.WaitForPermitAsync(interactive, cancellationToken);
 
-        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeoutCts.CancelAfter(CallTimeout);
-        try
-        {
-            return (await _api.SendAsync(HttpMethod.Post, path, payload, context, timeoutCts.Token), null);
-        }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-        {
-            _logger.LogWarning("Dhan call timed out after {Seconds}s with no response ({Context}).", CallTimeout.TotalSeconds, context);
-            return (null, $"Dhan did not respond within {CallTimeout.TotalSeconds:0}s - it may be slow or unreachable right now.");
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeoutCts.CancelAfter(CallTimeout);
+            DhanApiResponse response;
+            try
+            {
+                response = await _api.SendAsync(HttpMethod.Post, path, payload, context, timeoutCts.Token);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                _logger.LogWarning("Dhan call timed out after {Seconds}s with no response ({Context}).", CallTimeout.TotalSeconds, context);
+                return (null, $"Dhan did not respond within {CallTimeout.TotalSeconds:0}s - it may be slow or unreachable right now.");
+            }
+            if (response.Success || attempt >= MaxRateLimitRetries || !DhanDataApiRateLimiter.IsRateLimited((int)response.StatusCode, response.ErrorMessage))
+                return (response, null);
+            var delay = DhanDataApiRateLimiter.RateLimitBackoff(attempt);
+            _logger.LogInformation("Rate-limited on {Context} (attempt {Attempt}/{Max}) - waiting {Delay} before retrying.", context, attempt + 1, MaxRateLimitRetries, delay);
+            response.Dispose();
+            await Task.Delay(delay, cancellationToken);
         }
     }
+
+    private const int MaxRateLimitRetries = 3;
 
     /// <summary>Every candle Dhan has for [fromDay, toDay] inclusive (both IST calendar dates) -
     /// spans weekends/holidays fine, since Dhan simply has no data for those and they contribute

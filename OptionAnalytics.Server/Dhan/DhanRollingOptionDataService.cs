@@ -100,7 +100,6 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
     // multi-chunk backtest doesn't queue every one of its own chunks on the shared limiter at once.
     private static readonly TimeSpan ChunkDelay = TimeSpan.FromMilliseconds(350);
     private const int MaxRateLimitRetries = 3;
-    private static readonly TimeSpan RateLimitRetryDelay = TimeSpan.FromSeconds(2);
 
     // Bounds how long a single chunk call may hang waiting for Dhan before giving up - see
     // DhanHistoricalDataService.CallTimeout's own doc comment for the full reasoning (same value,
@@ -265,16 +264,17 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
             }
             if (response.Success) return (response, null);
 
-            var isRateLimited = response.ErrorMessage?.Contains("rate", StringComparison.OrdinalIgnoreCase) == true
-                && response.ErrorMessage.Contains("limit", StringComparison.OrdinalIgnoreCase);
-            var error = response.ErrorMessage;
+            // HTTP 429 counts too (a 429 with an empty / HTML body used to fail unretried, leaving a hole in the day's OI).
+            var isRateLimited = DhanDataApiRateLimiter.IsRateLimited((int)response.StatusCode, response.ErrorMessage);
+            var error = string.IsNullOrWhiteSpace(response.ErrorMessage) ? $"HTTP {(int)response.StatusCode}" : response.ErrorMessage;
             response.Dispose();
 
             if (!isRateLimited || attempt >= MaxRateLimitRetries) return (null, error);
 
+            var delay = DhanDataApiRateLimiter.RateLimitBackoff(attempt);
             _logger.LogInformation("Rate-limited on {Context} (attempt {Attempt}/{Max}) - waiting {Delay} before retrying.",
-                context, attempt + 1, MaxRateLimitRetries, RateLimitRetryDelay);
-            await Task.Delay(RateLimitRetryDelay, cancellationToken);
+                context, attempt + 1, MaxRateLimitRetries, delay);
+            await Task.Delay(delay, cancellationToken);
         }
     }
 

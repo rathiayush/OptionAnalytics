@@ -49,6 +49,39 @@ namespace OptionAnalytics.Server.Dhan;
 /// </summary>
 public sealed class DhanDataApiRateLimiter : IDisposable
 {
+    /// <summary>Set for the length of a request that asked to be served at background priority (header
+    /// "X-Request-Priority: background" - the strategy tuning job during market hours): every Dhan Data-API call made
+    /// on its behalf, including the concurrent strike fetches it starts, waits in the background lane, so a long job
+    /// never takes the interactive lane's permits from the live pages and the server scanner.</summary>
+    private static readonly AsyncLocal<bool> BackgroundRequest = new();
+
+    /// <summary>Whether the current request asked for background priority.</summary>
+    public static bool IsBackgroundRequest => BackgroundRequest.Value;
+
+    /// <summary>Marks the current async flow (one request) as background priority until disposed.</summary>
+    public static IDisposable BackgroundScope()
+    {
+        var before = BackgroundRequest.Value;
+        BackgroundRequest.Value = true;
+        return new Restore(before);
+    }
+
+    private sealed class Restore(bool before) : IDisposable
+    {
+        public void Dispose() => BackgroundRequest.Value = before;
+    }
+
+    /// <summary>Whether a failed Dhan response is Dhan's rate limit (HTTP 429, DH-904, "too many requests", "rate
+    /// limit") - worth waiting and trying again, unlike a bad parameter or a window with no data.</summary>
+    public static bool IsRateLimited(int statusCode, string? message) =>
+        statusCode == 429
+        || (message is { Length: > 0 } m && (m.Contains("DH-904", StringComparison.OrdinalIgnoreCase)
+            || m.Contains("too many", StringComparison.OrdinalIgnoreCase)
+            || (m.Contains("rate", StringComparison.OrdinalIgnoreCase) && m.Contains("limit", StringComparison.OrdinalIgnoreCase))));
+
+    /// <summary>The wait before retry <paramref name="attempt"/> (0-based) after a rate limit: 2 s, 4 s, 8 s.</summary>
+    public static TimeSpan RateLimitBackoff(int attempt) => TimeSpan.FromSeconds(2 << Math.Clamp(attempt, 0, 4));
+
     private readonly RateLimiter _interactive;
     private readonly RateLimiter _background;
     private readonly ILogger<DhanDataApiRateLimiter> _logger;
@@ -91,11 +124,12 @@ public sealed class DhanDataApiRateLimiter : IDisposable
     /// through.</summary>
     public async Task WaitForPermitAsync(bool interactive, CancellationToken cancellationToken)
     {
-        var limiter = interactive ? _interactive : _background;
+        var lane = interactive && !BackgroundRequest.Value;
+        var limiter = lane ? _interactive : _background;
         using var lease = await limiter.AcquireAsync(1, cancellationToken);
         if (!lease.IsAcquired)
             _logger.LogDebug("Dhan data-API rate limiter's {Lane} queue was full - proceeding without a permit; Dhan's own rate-limit-retry fallback covers this.",
-                interactive ? "interactive" : "background");
+                lane ? "interactive" : "background");
     }
 
     public void Dispose()

@@ -217,7 +217,7 @@ function takenTrades(day, id, variant, trail) {
  * its premium at the exit minute and the points that made. Premiums are the replay's finished-minute premiums
  * (the day's `oi`); an option with no premium at the exit is null.
  */
-export function tradeDetails(days, id, variant, trail, underlying) {
+export function tradeDetails(days, id, variant, trail, underlying, { checks = false } = {}) {
   const out = []
   for (const day of days) {
     for (const { s, outcome } of takenTrades(day, id, variant, trail)) {
@@ -236,6 +236,7 @@ export function tradeDetails(days, id, variant, trail, underlying) {
         entry: s.entry, exit: exitPrice, points: dir * (exitPrice - s.entry), r: outcome.r, status: outcome.status, stopHit: !!outcome.stopHit,
         ...levelsOf(s, outcome),
         buy: leg(s.options?.buy), sell: leg(s.options?.sell),
+        ...(checks ? { estimated: !!day.estimated, checks: s.checks ?? null } : {}),
       })
     }
   }

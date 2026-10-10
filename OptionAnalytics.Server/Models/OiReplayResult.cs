@@ -113,6 +113,11 @@ public sealed record OiReplayResult(
     /// shown on the page instead of an empty chart with no explanation.</summary>
     string? FuturesError)
 {
+    /// <summary>The strike / side series whose live fetch FAILED (rate limit, timeout, auth - Dhan's own error), e.g.
+    /// "ATM+3 CALL: Too many requests". Empty when every series came back (a strike with no trades is empty, not an
+    /// error). A day with any is incomplete: the strategy tuning tries it again rather than score it with holes.</summary>
+    public IReadOnlyList<string> OptionErrors { get; init; } = Array.Empty<string>();
+
     public static OiReplayResult Failed(string underlying, DateOnly date, int timeframeMinutes, string error) =>
         new(false, error, underlying, date, timeframeMinutes, 0, "", 0, Array.Empty<Candle>(), Array.Empty<Candle>(), Array.Empty<OiReplayPoint>(), Array.Empty<OiReplayPoint>(),
             Array.Empty<FuturesBar>(), null, false, null);

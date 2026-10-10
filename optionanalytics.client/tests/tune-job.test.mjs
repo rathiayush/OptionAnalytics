@@ -34,29 +34,41 @@ function oiRun(date) {
   return { ...r, date, spotCandlesOneMinute: sh(r.spotCandlesOneMinute), futuresBars: sh(r.futuresBars), cePoints: sh(r.cePoints), pePoints: sh(r.pePoints) }
 }
 
-function fakeServer(recordedDays) {
+// faults: rateLimit - the first N requests for each day's futures answer HTTP 429; busyOi - each day's first OI replay
+// comes back with a strike series that failed for Dhan's rate limit; partial - a day with only 200 minutes of bars.
+function fakeServer(recordedDays, faults = {}) {
   const seen = []
+  const count = new Map()
+  const nth = (key) => { const n = (count.get(key) ?? 0) + 1; count.set(key, n); return n }
   const server = createServer((req, res) => {
     const url = new URL(req.url, 'http://x')
-    seen.push({ path: url.pathname, key: req.headers['x-runner-key'] })
+    seen.push({ path: url.pathname, key: req.headers['x-runner-key'], priority: req.headers['x-request-priority'] ?? null })
     const json = (body, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body)) }
     let m
     if (url.pathname === '/api/scanner-runner/config') return json({ settings: {} })
-    if (url.pathname === '/api/order-flow/NIFTY/days') return json(recordedDays.map((date) => ({ date, contractSymbol: 'NIFTY-FUT', expiry: '2026-10-27', isLive: false })))
-    if ((m = url.pathname.match(/^\/api\/order-flow\/NIFTY\/day\/(\d{4}-\d{2}-\d{2})$/))) return json(orderFlowDay(m[1]))
+    if (url.pathname === '/api/order-flow/NIFTY/days') return json(recordedDays.map((date) => ({ date, contractSymbol: 'NIFTY-FUT', expiry: '2026-10-27', live: false })))
+    if ((m = url.pathname.match(/^\/api\/order-flow\/NIFTY\/day\/(\d{4}-\d{2}-\d{2})$/))) {
+      if (faults.rateLimit && nth(`day-${m[1]}`) <= faults.rateLimit) return json({ error: 'Too many requests' }, 429)
+      const body = orderFlowDay(m[1])
+      return json(m[1] === faults.partial ? { ...body, bars: body.bars.slice(0, 200) } : body)
+    }
     if (url.pathname === '/api/order-flow/NIFTY/tape') return json({ prints: syn.prints.map((p) => ({ ...p, time: new Date(p.time + offset(url.searchParams.get('date')) * DAY_MS).toISOString() })) })
-    if (url.pathname === '/api/oi-replay/NIFTY/run') return json(oiRun(url.searchParams.get('date')))
+    if (url.pathname === '/api/oi-replay/NIFTY/run') {
+      const date = url.searchParams.get('date')
+      if (faults.busyOi && nth(`oi-${date}`) === 1) return json({ ...oiRun(date), optionErrors: ['ATM+4 CALL: Too many requests'] })
+      return json(oiRun(date))
+    }
     if (url.pathname === '/api/oi-replay/NIFTY/expiries') return json({ week: '2026-10-08', month: '2026-10-27' })
     return json({ error: 'not found' }, 404)
   })
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve({ server, seen, base: `http://127.0.0.1:${server.address().port}` })))
 }
 
-function runJob(base, job) {
+function runJob(base, job, env = {}) {
   const out = join(mkdtempSync(join(tmpdir(), 'oa-tune-')), 'result.json')
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [join(HERE, '..', 'scanner-runner', 'tune.mjs')], {
-      env: { ...process.env, RUNNER_BASE_URL: base, RUNNER_KEY: 'k123', TUNE_JOB: JSON.stringify(job), TUNE_OUT: out },
+      env: { ...process.env, RUNNER_BASE_URL: base, RUNNER_KEY: 'k123', TUNE_JOB: JSON.stringify(job), TUNE_OUT: out, ...env },
     })
     const lines = []
     child.stdout.on('data', (d) => lines.push(...String(d).split('\n').filter(Boolean)))
@@ -137,6 +149,47 @@ test('Saturdays and Sundays are never fetched, even when a listing has them', { 
     // The estimated days a range adds are weekdays only too.
     const est = await runJob(base, { underlying: 'NIFTY', strategies: ['weakWall'], minTrades: 2, what: 'trade', includeEstimated: true, from: '2026-09-30', to: '2026-10-05' })
     assert.ok(est.result.days.every((d) => ![0, 6].includes(new Date(`${d.date}T00:00:00Z`).getUTCDay())))
+  } finally {
+    server.close()
+  }
+})
+
+test('a long job rides out a busy Dhan, leaves out a partial day, re-uses the disk cache and writes every trade', { timeout: 300_000 }, async () => {
+  const days = ['2026-09-28', '2026-09-29', '2026-09-30', '2026-10-01', '2026-10-02', '2026-10-05']
+  const { server, seen, base } = await fakeServer(days, { rateLimit: 2, busyOi: true, partial: '2026-09-30' })
+  const dir = mkdtempSync(join(tmpdir(), 'oa-tune-cache-'))
+  const trades = join(dir, 'trades.json')
+  const env = { TUNE_CACHE_DIR: join(dir, 'cache'), TUNE_TRADES_OUT: trades, TUNE_RETRY_BASE_MS: '5', TUNE_BUSY_PAUSE_MS: '5', TUNE_PRIORITY: 'background' }
+  try {
+    const { code, result, lines } = await runJob(base, { underlying: 'NIFTY', strategies: ['weakWall'], days: 30, minTrades: 2, what: 'trade' }, env)
+    assert.equal(code, 0, JSON.stringify(result))
+    // Every 429 was waited out and every first (incomplete) OI fetched again: all full days used.
+    assert.deepEqual(result.days.map((d) => d.date), ['2026-10-05', '2026-10-02', '2026-10-01', '2026-09-29', '2026-09-28'])
+    assert.ok(result.fetched.retries >= 5 * 2, JSON.stringify(result.fetched))
+    assert.ok(lines.some((l) => /"wait":\{"label":"option OI"/.test(l)), 'the wait for an incomplete OI day is reported')
+    // The partial day is left out with its reason - never scored as a whole day.
+    assert.deepEqual(result.skipped.map((x) => x.date), ['2026-09-30'])
+    assert.match(result.skipped[0].reason, /only 200 of 375 minutes - a partial day/)
+    // Each day says where it came from and how complete it was.
+    assert.ok(result.days.every((d) => d.minutes >= 300 && d.oiMinutes >= 300 && d.source === 'live' && d.prints > 0))
+    // Every request was sent at background priority (the server then keeps Dhan's interactive lane for the live app).
+    assert.ok(seen.filter((x) => x.path.startsWith('/api/')).every((x) => x.priority === 'background'))
+    // Every trade written, with its date / time, levels and why it fired.
+    const t = JSON.parse(readFileSync(trades, 'utf8'))
+    assert.ok(t.trades.length > 0 && t.trades.every((x) => x.date && x.t && x.setting && Number.isFinite(x.entry) && Number.isFinite(x.stop)))
+    assert.ok(t.trades.some((x) => x.setting === 'as written' && x.checks && Object.keys(x.checks).length > 0))
+    assert.ok(t.trades.some((x) => x.setting === 'best'))
+    assert.deepEqual(t.skipped.map((x) => x.date), ['2026-09-30'])
+
+    // A second run (a rerun, or a job resumed after a restart): every full day comes from the disk cache.
+    const before = seen.length
+    const again = await runJob(base, { underlying: 'NIFTY', strategies: ['weakWall'], days: 30, minTrades: 2, what: 'trade' }, env)
+    assert.equal(again.code, 0, JSON.stringify(again.result))
+    assert.deepEqual(again.result.days.map((d) => d.date), result.days.map((d) => d.date))
+    const fetchedAgain = seen.slice(before).map((x) => x.path).filter((p) => /\/day\/|\/tape|\/run/.test(p))
+    assert.ok(fetchedAgain.every((p) => p.endsWith('/day/2026-09-30')), `only the partial day is asked again: ${fetchedAgain.join(', ')}`)
+    assert.ok(again.result.fetched.cacheHits >= 15)
+    assert.deepEqual(again.result.ranked.map((x) => [x.id, x.n, x.total]), result.ranked.map((x) => [x.id, x.n, x.total]), 'the same result from the cache')
   } finally {
     server.close()
   }

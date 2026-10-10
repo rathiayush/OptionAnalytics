@@ -322,6 +322,7 @@ builder.Services.AddSingleton<TradeSettingsStore>();
 builder.Services.AddSingleton<RiskSettingsStore>();
 // The strategy tuning job (scanner-runner/tune.mjs) - StrategyTuningService / StrategyTuningController.
 builder.Services.AddSingleton<StrategyTuningService>();
+builder.Services.AddHostedService<StrategyTuningResumeHostedService>();
 builder.Services.AddSingleton<DhanTradersControlClient>();
 builder.Services.AddSingleton<KillSwitchService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<KillSwitchService>());
@@ -364,6 +365,19 @@ app.UseStaticFiles();
 app.UseAuthentication();
 app.UseAuthorization();
 app.UseRateLimiter();
+
+// A request may ask to be served at background priority ("X-Request-Priority: background" - the strategy tuning job
+// sends it during market hours): its Dhan Data-API calls then wait in the rate limiter's background lane, never taking
+// the interactive lane from the live pages and the server scanner. Lowering one's own priority needs no permission.
+app.Use(async (context, next) =>
+{
+    if (string.Equals(context.Request.Headers["X-Request-Priority"], "background", StringComparison.OrdinalIgnoreCase))
+    {
+        using (OptionAnalytics.Server.Dhan.DhanDataApiRateLimiter.BackgroundScope()) await next();
+        return;
+    }
+    await next();
+});
 
 // Container liveness, for Docker's HEALTHCHECK and Dokploy/Traefik. Deliberately says nothing
 // about Dhan: the feed is legitimately unauthenticated outside market hours or while a token

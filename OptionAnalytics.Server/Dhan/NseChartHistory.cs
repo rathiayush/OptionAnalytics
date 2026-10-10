@@ -25,7 +25,9 @@ public sealed class NseChartHistory
 {
     public const string HistoryUrl = "https://charting.nseindia.com/v1/charts/symbolHistoricalData";
     private const string WarmUpUrl = "https://charting.nseindia.com/";
-    private const int MaxCachedDays = 20;
+    // One contract-day of 1-minute bars each; least recently used goes first (evicting the oldest date threw away the
+    // day just fetched in a newest-first strategy-tuning scan).
+    private const int MaxCachedDays = 400;
     private static readonly TimeSpan Ist = TimeSpan.FromMinutes(330);
     private static readonly TimeSpan WarmUpEvery = TimeSpan.FromMinutes(10);
 
@@ -33,6 +35,8 @@ public sealed class NseChartHistory
     private readonly ILogger<NseChartHistory> _logger;
     private readonly ConcurrentDictionary<(uint SecurityId, DateOnly Day), Task<Result>> _days = new();
     private DateOnly _cacheDay = IstClock.Today();
+    private readonly ConcurrentDictionary<(uint SecurityId, DateOnly Day), long> _used = new();
+    private long _clock;
     private DateTimeOffset _warmedAt = DateTimeOffset.MinValue;
 
     public sealed record Result(IReadOnlyList<CandleWithVolume> Bars, string? Error);
@@ -58,12 +62,18 @@ public sealed class NseChartHistory
         if (!contract.DhanSegment.Equals("NSE_FNO", StringComparison.OrdinalIgnoreCase))
             return Task.FromResult(new Result(Array.Empty<CandleWithVolume>(), "NSE charts cover NSE contracts only"));
         var today = IstClock.Today();
-        if (today != _cacheDay) { _days.Clear(); _cacheDay = today; }
+        if (today != _cacheDay) { _days.Clear(); _used.Clear(); _cacheDay = today; }
         var key = (contract.SecurityId, date);
         var task = _days.GetOrAdd(key, _ => FetchAsync(contract, date));
+        _used[key] = Interlocked.Increment(ref _clock);
         // A network failure is not remembered - asked again next time. "No candles" is.
-        _ = task.ContinueWith(t => { if (t.IsFaulted || t.Result.Error is not null) _days.TryRemove(key, out _); }, TaskScheduler.Default);
-        while (_days.Count > MaxCachedDays) _days.TryRemove(_days.Keys.MinBy(k => k.Day), out _);
+        _ = task.ContinueWith(t => { if (t.IsFaulted || t.IsCanceled || t.Result.Error is not null) { _days.TryRemove(key, out _); _used.TryRemove(key, out _); } }, TaskScheduler.Default);
+        while (_days.Count > MaxCachedDays && _used.Count > 0)
+        {
+            var oldest = _used.MinBy(kv => kv.Value).Key;
+            _days.TryRemove(oldest, out _);
+            _used.TryRemove(oldest, out _);
+        }
         return task.WaitAsync(cancellationToken);
     }
 
