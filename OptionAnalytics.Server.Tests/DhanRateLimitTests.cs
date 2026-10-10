@@ -37,15 +37,30 @@ public sealed class DhanRateLimitTests
         Microsoft.Extensions.Logging.Abstractions.NullLogger<DhanDataApiRateLimiter>.Instance);
 
     [Fact]
+    public async Task Background_UsesTheWholeAllowedRate_WhileTheLiveAppIsIdle()
+    {
+        using var limiter = Limiter();
+        Assert.True(limiter.InteractiveIdle, "nothing interactive has asked yet");
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        // Dhan allows 5 a second: with the app idle a long job uses all five inside the first second.
+        await Task.WhenAll(Enumerable.Range(0, 5).Select(_ => limiter.WaitForPermitAsync(interactive: false, CancellationToken.None)));
+        Assert.True(watch.ElapsedMilliseconds < 900, $"5 background calls took {watch.ElapsedMilliseconds} ms - not the full 5/s");
+        // Never more than 5 a second, though.
+        await Task.WhenAll(Enumerable.Range(0, 5).Select(_ => limiter.WaitForPermitAsync(interactive: false, CancellationToken.None)));
+        Assert.True(watch.ElapsedMilliseconds >= 700, $"10 calls in {watch.ElapsedMilliseconds} ms - over 5/s");
+    }
+
+    [Fact]
     public async Task Background_UsesThePermitsTheLiveAppIsNotUsing_ButNeverTheLastOne()
     {
         using var limiter = Limiter();
+        // The live app has just asked for something: the reservation is in force.
+        await limiter.WaitForPermitAsync(interactive: true, CancellationToken.None);
+        Assert.False(limiter.InteractiveIdle);
         var watch = System.Diagnostics.Stopwatch.StartNew();
-        // Four background calls while nothing interactive runs: three spare interactive permits (never the last one) plus
-        // the background lane's own, all inside the first second - at the old fixed 1/s share they took 3+ s.
-        await Task.WhenAll(Enumerable.Range(0, 4).Select(_ => limiter.WaitForPermitAsync(interactive: false, CancellationToken.None)));
-        Assert.True(watch.ElapsedMilliseconds < 900, $"took {watch.ElapsedMilliseconds} ms");
-        // A page load arriving right after is served at once - background work never takes the last free permit.
+        // Background work takes the spare permits but leaves the last one, so a page load arriving right after is served
+        // at once instead of waiting out the window behind a long job.
+        await Task.WhenAll(Enumerable.Range(0, 3).Select(_ => limiter.WaitForPermitAsync(interactive: false, CancellationToken.None)));
         var page = System.Diagnostics.Stopwatch.StartNew();
         await limiter.WaitForPermitAsync(interactive: true, CancellationToken.None);
         Assert.True(page.ElapsedMilliseconds < 250, $"the page waited {page.ElapsedMilliseconds} ms behind background work");
