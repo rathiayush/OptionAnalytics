@@ -201,12 +201,14 @@ public sealed class OiReplayService
         // collecting via Task.WhenAll's own results sidesteps needing a lock entirely.
         using var throttle = new SemaphoreSlim(MaxConcurrentStrikeFetches);
 
+        var optionErrors = new System.Collections.Concurrent.ConcurrentBag<string>();
         async Task<List<OiReplayPoint>> FetchPointsAsync(string strikeToken, string drvOptionType)
         {
             await throttle.WaitAsync(cancellationToken);
             try
             {
-                var bars = await GetSeriesAsync(underlying, expiryFlag, strikeToken, drvOptionType, date, ResolveInstrumentAsync, cancellationToken, forceLive);
+                var (bars, error) = await GetSeriesAsync(underlying, expiryFlag, strikeToken, drvOptionType, date, ResolveInstrumentAsync, cancellationToken, forceLive);
+                if (error is not null) optionErrors.Add($"{strikeToken} {drvOptionType}: {error}");
                 var points = new List<OiReplayPoint>(bars.Count);
                 foreach (var bar in bars)
                     if (bar.Strike is { } strike)
@@ -237,7 +239,10 @@ public sealed class OiReplayService
         var (futuresBars, futuresExpiry, futuresOiAvailable, futuresError) = await GetFuturesAsync(underlying, date, cancellationToken);
 
         return new OiReplayResult(true, null, underlying, date, timeframe, step, expiryFlag, NearestExpiryCode,
-            spotCandlesTf, spotBars1m, cePoints, pePoints, futuresBars, futuresExpiry, futuresOiAvailable, futuresError);
+            spotCandlesTf, spotBars1m, cePoints, pePoints, futuresBars, futuresExpiry, futuresOiAvailable, futuresError)
+        {
+            OptionErrors = optionErrors.OrderBy(e => e, StringComparer.Ordinal).ToList(),
+        };
     }
 
     /// <summary>The day's futures contract, OHLC + (best-effort) OI - ALWAYS a live Dhan call, per
@@ -302,7 +307,7 @@ public sealed class OiReplayService
     /// in principle lag by different amounts. Skips straight to the live call, unconditionally, for
     /// an AlwaysLiveUnderlyings member (SENSEX) - there is no stored series to prefer for those at
     /// all.</summary>
-    private async Task<IReadOnlyList<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)>> GetSeriesAsync(
+    private async Task<(IReadOnlyList<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)> Bars, string? Error)> GetSeriesAsync(
         string underlying, string expiryFlag, string strikeToken, string drvOptionType, DateOnly date,
         Func<Task<DhanSpotInstrument?>> resolveInstrument, CancellationToken cancellationToken, bool forceLive = false)
     {
@@ -312,17 +317,19 @@ public sealed class OiReplayService
             ? (await _storedRollingOption.GetRollingOptionCandlesAsync(underlying, 0, expiryFlag, NearestExpiryCode, strikeToken, drvOptionType, date, date, 1, cancellationToken)).Bars
             : Array.Empty<(CandleWithVolume, decimal?, decimal?, long?, decimal?)>();
 
-        if (!isAlwaysLive && !_allowLiveDataFallback) return storedBars;
+        if (!isAlwaysLive && !_allowLiveDataFallback) return (storedBars, null);
 
         var latest = storedBars.Count > 0 ? storedBars[^1].Item1.Time : (DateTimeOffset?)null;
-        if (!isAlwaysLive && IsFreshEnough(date, latest)) return storedBars;
+        if (!isAlwaysLive && IsFreshEnough(date, latest)) return (storedBars, null);
 
         var instrument = await resolveInstrument();
-        if (instrument is null) return storedBars;
+        if (instrument is null) return (storedBars, null);
 
-        var (liveBars, _) = await _rollingOption.GetRollingOptionCandlesAsync(
+        var (liveBars, liveError) = await _rollingOption.GetRollingOptionCandlesAsync(
             underlying, instrument.SecurityId, expiryFlag, NearestExpiryCode, strikeToken, drvOptionType, date, date, 1, cancellationToken);
-        return liveBars.Count > 0 ? liveBars : storedBars;
+        // A live call that FAILED (rate limit, timeout, auth) is reported, not passed off as an empty strike - the
+        // caller says which strikes are missing instead of returning a day with silent holes in its OI.
+        return liveBars.Count > 0 ? (liveBars, null) : (storedBars, storedBars.Count > 0 ? null : liveError);
     }
 
     /// <summary>Whether a stored result for `date` is trustworthy enough to skip a live Dhan

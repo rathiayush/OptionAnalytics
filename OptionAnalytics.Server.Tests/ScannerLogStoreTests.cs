@@ -63,6 +63,21 @@ public sealed class ScannerLogStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task ReadRows_GivesEachFileAsRows_ForTheTradesPage()
+    {
+        var store = Store();
+        Assert.Empty(store.ReadRows("signals")!);
+        await store.UpsertDayAsync(Day("2026-10-05", new[] { Signal(T1040) }, new[] { Trade("p1", T1040 + 5000) }), null, CancellationToken.None);
+
+        var signal = Assert.Single(store.ReadRows("signals")!);
+        Assert.Equal(("2026-10-05", "NIFTY", "2026-10-05 10:40:00", "ibBreakout"), (signal["date"], signal["underlying"], signal["time_ist"], signal["strategy_id"]));
+        var trade = Assert.Single(store.ReadRows("trades")!);
+        Assert.Equal(("SELL", "PE", "2026-10-05 10:40:05"), (trade["action"], trade["option"], trade["entry_time_ist"]));
+        Assert.Empty(store.ReadRows("server-trades")!);
+        Assert.Null(store.ReadRows("../appsettings"));
+    }
+
+    [Fact]
     public async Task ATrade_NamesItsSignal_AndCarriesTheAdaptiveFlagAndPnl()
     {
         var store = Store();

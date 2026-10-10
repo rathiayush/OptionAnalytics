@@ -1084,6 +1084,7 @@ const NAV_ITEMS = [
   { key: '/contracts', label: 'Contracts' },
   { key: '/trade-settings', label: 'Trade settings' },
   { key: '/strategy-tuning', label: 'Strategy tuning' },
+  { key: '/trades', label: 'Trades' },
 ]
 
 // Shared between EVERY page (all nine currently render it) - a proper horizontal menu (not just

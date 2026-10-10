@@ -43,6 +43,15 @@ public sealed class ScannerLogController : ControllerBase
     public async Task<IActionResult> SummaryCsv(CancellationToken cancellationToken) =>
         File(Encoding.UTF8.GetBytes(ScannerLogStore.SummaryCsv(await _store.SummaryAsync(cancellationToken))), "text/csv", "summary.csv");
 
+    /// <summary>GET /api/scanner-log/rows/{kind} - the same file as rows (JSON: column -> value) for the Trades page:
+    /// signals / trades (the page's record) or server-signals / server-trades (the server scanner's).</summary>
+    [HttpGet("rows/{kind}")]
+    public IActionResult Rows(string kind)
+    {
+        var rows = _store.ReadRows(kind);
+        return rows is null ? NotFound(new { error = "kind must be signals, trades, server-signals or server-trades." }) : Ok(rows);
+    }
+
     /// <summary>GET /api/scanner-log/signals or /api/scanner-log/trades - that whole file (every underlying,
     /// every day).</summary>
     [HttpGet("{kind}")]

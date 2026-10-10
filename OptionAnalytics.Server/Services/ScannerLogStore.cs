@@ -264,6 +264,9 @@ public sealed class ScannerLogStore
         return File.Exists(path) ? File.ReadAllText(path) : string.Join(',', kind.EndsWith("signals") ? SignalColumns : TradeColumns) + "\n";
     }
 
+    /// <summary>One file's rows (column -> value), or null for an unknown kind; an empty list when nothing is stored yet.</summary>
+    public List<Dictionary<string, string>>? ReadRows(string kind) => PathOf(kind) is { } path ? Read(path).ToList() : null;
+
     private void Upsert(string path, string[] columns, List<Dictionary<string, string>> rows, string timeColumn)
     {
         var byKey = new Dictionary<string, Dictionary<string, string>>(StringComparer.Ordinal);

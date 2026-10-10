@@ -64,6 +64,15 @@ public sealed class StrategyTuningController : ControllerBase
     [HttpGet("status")]
     public TuningStatus Status() => _tuning.Status();
 
+    /// <summary>GET /api/strategy-tuning/trades/{underlying} - every trade of the last finished job for that index (each
+    /// strategy as written on every day scanned, and each tuned strategy's best setting) - the Trades page.</summary>
+    [HttpGet("trades/{underlying}")]
+    public IActionResult Trades(string underlying, [FromQuery] string? data = null)
+    {
+        var d = string.Equals(data, "spot", StringComparison.OrdinalIgnoreCase) ? "spot" : "futures";
+        return _tuning.Trades(underlying, d) is { } r ? Ok(r) : NotFound(new { error = $"No {(d == "spot" ? "spot + options " : "")}tuning trades for {underlying.ToUpperInvariant()} yet - run a tuning job (Strategy tuning page)." });
+    }
+
     /// <summary>GET /api/strategy-tuning/result/{underlying} - the last finished job for that index.</summary>
     [HttpGet("result/{underlying}")]
     public IActionResult Result(string underlying, [FromQuery] string? data = null)
