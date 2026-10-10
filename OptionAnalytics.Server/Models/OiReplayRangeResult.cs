@@ -1,0 +1,59 @@
+namespace OptionAnalytics.Server.Models;
+
+/// <summary>One Dhan window the range fetch actually used, reported back so a caller can SEE how its
+/// request was split and check the split itself rather than trust it: From..To (inclusive, IST dates),
+/// the real Expiry every day in it belongs to and the ExpiryCode sent with it (see
+/// OiReplayRangeWindows' own doc comment - a window never crosses an expiry, which is what guarantees
+/// one contract per call). Strikes is how many strike/side series were fetched for it (42 for a full
+/// ATM+-10 band), Error whatever Dhan said when the window itself failed - a window that failed is a
+/// window whose days fell back to the per-day path, never one quietly returned with holes.</summary>
+public sealed record OiReplayRangeWindow(
+    DateOnly From, DateOnly To, DateOnly Expiry, int ExpiryCode, int Strikes, string? Error);
+
+/// <summary>
+/// Every trading day in one requested date range, each in the EXACT shape the per-day endpoint
+/// (OiReplayService.RunAsync / GET /api/oi-replay/{u}/run) returns - so a caller builds its OI
+/// context from a day here with the same code, unchanged, as from a day fetched one at a time.
+///
+/// The point of this endpoint is call count, not shape: the days come from one Dhan call per strike
+/// per EXPIRY CYCLE instead of 42 calls per day (see OiReplayRangeWindows). Windows/FallbackDays/
+/// OptionSeriesCalls are the self-check: they say how the range was split, which days could not be
+/// served from a window and were fetched the old way instead, and how many Dhan option-series calls
+/// the whole request actually cost.
+/// </summary>
+public sealed record OiReplayRangeResult(
+    bool Success,
+    string? Error,
+    string Underlying,
+    DateOnly From,
+    DateOnly To,
+    int TimeframeMinutes,
+    string ExpiryFlag,
+    /// <summary>One entry per candidate trading day in the range, ascending. A day the market was
+    /// closed on (a holiday) is still here, as an unsuccessful day carrying its own reason - empty,
+    /// never missing, so a caller walking the range cannot silently skip a day it asked for.</summary>
+    IReadOnlyList<OiReplayResult> Days,
+    IReadOnlyList<OiReplayRangeWindow> Windows)
+{
+    /// <summary>The days that did NOT come from a window fetch - a window error, or a day a window
+    /// returned no option data for at all - and were fetched through the ordinary per-day path
+    /// instead (see OiReplayService.RunRangeAsync). Each such day costs the old 42 calls, so a long
+    /// list here means the range path is not earning its keep and is worth looking into; the data
+    /// itself is as good as the per-day endpoint's, because it IS the per-day endpoint's.</summary>
+    public IReadOnlyList<DateOnly> FallbackDays { get; init; } = Array.Empty<DateOnly>();
+
+    /// <summary>How many Dhan option-series (/charts/rollingoption) calls this request made, window
+    /// calls and per-day fallback calls together - what a caller comparing "the range way" against
+    /// "the per-day way" for the same stretch of days actually wants to compare. Counts calls this
+    /// app made, not chunks Dhan internally split a window into.</summary>
+    public int OptionSeriesCalls { get; init; }
+
+    /// <summary>Why NO window was used at all and every day came from the ordinary per-day path -
+    /// the server setting StrategyTuning:FastOiRange being off, or an underlying whose expiry cadence
+    /// this app's own expiry calendar cannot establish (SENSEX). Null when the fast path was in use.
+    /// The days are still here and still correct either way; only the call count differs.</summary>
+    public string? FastPathDisabled { get; init; }
+
+    public static OiReplayRangeResult Failed(string underlying, DateOnly from, DateOnly to, int timeframeMinutes, string expiryFlag, string error) =>
+        new(false, error, underlying, from, to, timeframeMinutes, expiryFlag, Array.Empty<OiReplayResult>(), Array.Empty<OiReplayRangeWindow>());
+}

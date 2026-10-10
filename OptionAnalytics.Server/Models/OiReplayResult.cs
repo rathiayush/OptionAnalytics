@@ -118,6 +118,13 @@ public sealed record OiReplayResult(
     /// error). A day with any is incomplete: the strategy tuning tries it again rather than score it with holes.</summary>
     public IReadOnlyList<string> OptionErrors { get; init; } = Array.Empty<string>();
 
+    /// <summary>Only set by the RANGE endpoint (GET /api/oi-replay/{u}/range - OiReplayService.RunRangeAsync),
+    /// which fetches many days per Dhan call: "range" for a day cut out of a multi-day window fetch, "day" for one
+    /// that fell back to the ordinary per-day path (a window error, or a window with no option data for it). Null on
+    /// a plain per-day /run response - that endpoint is unchanged, and a null here means nobody asked the question,
+    /// not that the day came from a window.</summary>
+    public string? FetchSource { get; init; }
+
     public static OiReplayResult Failed(string underlying, DateOnly date, int timeframeMinutes, string error) =>
         new(false, error, underlying, date, timeframeMinutes, 0, "", 0, Array.Empty<Candle>(), Array.Empty<Candle>(), Array.Empty<OiReplayPoint>(), Array.Empty<OiReplayPoint>(),
             Array.Empty<FuturesBar>(), null, false, null);

@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Options;
 using OptionAnalytics.Server.Dhan;
 using OptionAnalytics.Server.Models;
 using OptionAnalytics.Server.Services.Backtesting;
@@ -115,12 +116,18 @@ public sealed class OiReplayService
     private readonly DhanHistoricalDataService _historicalData;
     private readonly DhanRollingOptionDataService _rollingOption;
     private readonly bool _allowLiveDataFallback;
+    /// <summary>StrategyTuning:FastOiRange - see StrategyTuningOptions. Only RunRangeAsync reads it;
+    /// the per-day path never does.</summary>
+    private readonly bool _fastOiRange;
+    private readonly ILogger<OiReplayService>? _logger;
 
     public OiReplayService(
         StoredSpotDataService storedSpot, StoredRollingOptionDataService storedRollingOption,
         DhanSpotInstrumentMaster instrumentMaster, DhanFuturesInstrumentMaster futuresInstrumentMaster,
         DhanHistoricalDataService historicalData, DhanRollingOptionDataService rollingOption,
-        AppEnvironment appEnvironment, NseFuturesContractArchive? futuresArchive = null, NseChartHistory? nseChart = null)
+        AppEnvironment appEnvironment, IOptions<StrategyTuningOptions>? tuningOptions = null,
+        NseFuturesContractArchive? futuresArchive = null, NseChartHistory? nseChart = null,
+        ILogger<OiReplayService>? logger = null)
     {
         _futuresArchive = futuresArchive;
         _nseChart = nseChart;
@@ -131,6 +138,11 @@ public sealed class OiReplayService
         _historicalData = historicalData;
         _rollingOption = rollingOption;
         _allowLiveDataFallback = !appEnvironment.IsLocal;
+        // Defaults to ON when the setting (or the whole options object) is absent - the same value
+        // StrategyTuningOptions' own default carries; read once here, since a range request must not
+        // be able to change which path a job is already using halfway through.
+        _fastOiRange = tuningOptions?.Value.FastOiRange ?? true;
+        _logger = logger;
     }
 
     public async Task<OiReplayResult> RunAsync(
@@ -177,7 +189,7 @@ public sealed class OiReplayService
         }
         Task<DhanSpotInstrument?> ResolveInstrumentAsync() => Task.FromResult(instrument);
 
-        var (spotBarsRaw, spotError) = await FetchSpotBarsWithVolumeAsync(underlying, date, isAlwaysLive, ResolveInstrumentAsync, cancellationToken);
+        var (spotBarsRaw, spotError) = await FetchSpotBarsWithVolumeAsync(underlying, date, date, isAlwaysLive, ResolveInstrumentAsync, cancellationToken);
 
         if (spotBarsRaw.Count == 0)
             return OiReplayResult.Failed(underlying, date, timeframe,
@@ -207,7 +219,7 @@ public sealed class OiReplayService
             await throttle.WaitAsync(cancellationToken);
             try
             {
-                var (bars, error) = await GetSeriesAsync(underlying, expiryFlag, strikeToken, drvOptionType, date, ResolveInstrumentAsync, cancellationToken, forceLive);
+                var (bars, error) = await GetSeriesAsync(underlying, expiryFlag, NearestExpiryCode, strikeToken, drvOptionType, date, date, ResolveInstrumentAsync, cancellationToken, forceLive);
                 if (error is not null) optionErrors.Add($"{strikeToken} {drvOptionType}: {error}");
                 var points = new List<OiReplayPoint>(bars.Count);
                 foreach (var bar in bars)
@@ -253,27 +265,9 @@ public sealed class OiReplayService
     private async Task<(IReadOnlyList<FuturesBar> Bars, DateOnly? Expiry, bool OiAvailable, string? Error)> GetFuturesAsync(
         string underlying, DateOnly date, CancellationToken cancellationToken)
     {
-        try
-        {
-            await _futuresInstrumentMaster.EnsureLoadedAsync(cancellationToken);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            return (Array.Empty<FuturesBar>(), null, false, $"Could not load the futures instrument master: {ex.Message}");
-        }
-
-        // A past date's real front-month contract - expired or not - from NSE's contract archive (Dhan's
-        // scrip master lists live contracts only, which made an older day show the wrong, later contract
-        // or nothing at all). Falls back to the nearest listed contract.
-        DhanFuturesInstrument? contract = null;
-        if (date < IstClock.Today() && _futuresArchive is not null && NseFuturesContractArchive.Covers(underlying))
-        {
-            try { contract = await _futuresArchive.ContractOnAsync(underlying, date, null, cancellationToken); }
-            catch (Exception e) when (e is not OperationCanceledException) { contract = null; }
-        }
-        contract ??= _futuresInstrumentMaster.GetNearestContract(underlying, date);
-        if (contract is null)
-            return (Array.Empty<FuturesBar>(), null, false, $"No currently-listed futures contract found for {underlying} - the instrument master may still be loading.");
+        var (resolved, resolveError) = await ResolveFuturesContractAsync(underlying, date, cancellationToken);
+        if (resolved is null) return (Array.Empty<FuturesBar>(), null, false, resolveError);
+        var contract = resolved;
 
         // An expired contract has no intraday history at Dhan - fall back to another contract listed that day.
         IReadOnlyList<DhanFuturesInstrument> listed = Array.Empty<DhanFuturesInstrument>();
@@ -299,6 +293,455 @@ public sealed class OiReplayService
         return (futuresBars, contract.Expiry, oiFieldPresent, null);
     }
 
+    /// <summary>Which futures contract a date's bars should come from, and why there is none when
+    /// there isn't - lifted VERBATIM out of GetFuturesAsync (same order, same fallbacks, same
+    /// messages) so the range path can ask the same question per day without a second copy of it.
+    /// Both the archive lookup and the instrument master are cached/in-memory after the first call,
+    /// so asking it for every day of a window is not a Dhan call per day.</summary>
+    private async Task<(DhanFuturesInstrument? Contract, string? Error)> ResolveFuturesContractAsync(
+        string underlying, DateOnly date, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _futuresInstrumentMaster.EnsureLoadedAsync(cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return (null, $"Could not load the futures instrument master: {ex.Message}");
+        }
+
+        // A past date's real front-month contract - expired or not - from NSE's contract archive (Dhan's
+        // scrip master lists live contracts only, which made an older day show the wrong, later contract
+        // or nothing at all). Falls back to the nearest listed contract.
+        DhanFuturesInstrument? contract = null;
+        if (date < IstClock.Today() && _futuresArchive is not null && NseFuturesContractArchive.Covers(underlying))
+        {
+            try { contract = await _futuresArchive.ContractOnAsync(underlying, date, null, cancellationToken); }
+            catch (Exception e) when (e is not OperationCanceledException) { contract = null; }
+        }
+        contract ??= _futuresInstrumentMaster.GetNearestContract(underlying, date);
+        return contract is null
+            ? (null, $"No currently-listed futures contract found for {underlying} - the instrument master may still be loading.")
+            : (contract, null);
+    }
+
+
+    // ---- The range path: many days per Dhan call ------------------------------------------------
+    //
+    // Everything below is ADDITIONAL to the per-day path above - RunAsync and everything it calls
+    // behaves exactly as it always has, and nothing here runs unless a caller asks for the range
+    // endpoint specifically. When in doubt, this code falls back to RunAsync for the day rather than
+    // return anything it is not sure of: a slow job is an inconvenience, a wrong OI point prices a
+    // real trade wrongly.
+
+    /// <summary>Underlyings whose expiry cadence this app can establish with CERTAINTY from code it
+    /// already has, and so the only ones a multi-day window is ever built for:
+    ///   - NIFTY (weekly or monthly) and BANKNIFTY (monthly only - NSE discontinued its weekly) are
+    ///     exactly what ExpiryCalendar documents and ExpiredOptionBacktestService already fetches
+    ///     expired contracts for every day, against real Dhan responses.
+    ///   - SENSEX is deliberately absent. It is a BSE contract, and ExpiryCalendar is explicitly an
+    ///     NSE calendar (see its own doc comment - "every NSE index option expires on TUESDAY"), so
+    ///     this app cannot say which day a SENSEX cycle ends on, and a window that cut on the wrong
+    ///     day would splice two contracts together. A SENSEX range is still served - every day the
+    ///     ordinary per-day way, at the ordinary cost, which is exactly what it costs today.
+    /// A new underlying belongs here only once its real cadence is in ExpiryCalendar.</summary>
+    private static readonly HashSet<string> FastRangeUnderlyings = new(StringComparer.OrdinalIgnoreCase) { "NIFTY", "BANKNIFTY" };
+
+    /// <summary>How short a day's own OI may be, against the SAME day's spot, before the window's
+    /// answer for it is thrown away and the day is fetched the per-day way instead: fewer than 90% of
+    /// the minutes spot has is "a hole", not "a quiet strike". The tuning job's own floor is 300 of a
+    /// session's 375 minutes (80%), so this is deliberately stricter than the thing downstream - a
+    /// hole gets caught here, by refetching, rather than there, by discarding the day.</summary>
+    private const int MinOiMinutesPercentOfSpot = 90;
+
+    /// <summary>
+    /// Every trading day in [from,to], each in the SAME shape RunAsync returns for one day - but
+    /// fetched with ONE Dhan call per strike per EXPIRY CYCLE instead of 42 calls per day (see
+    /// OiReplayRangeWindows for the window maths and why a window can never cross an expiry).
+    ///
+    /// What this will NOT do, by design:
+    ///   - It will not return a day with holes. A window whose own strike calls reported ANY error,
+    ///     a day a window returned no CE or no PE for, and a day whose OI covers materially fewer
+    ///     minutes than its own spot does, are all fetched again the ordinary per-day way
+    ///     (RunAsync) - the result's FallbackDays says which days those were. A strike that is
+    ///     missing for one day of a window while other days in the same window have it is reported
+    ///     in that day's own OptionErrors, exactly as a failed per-day strike always has been.
+    ///   - It will not use a window for an underlying whose expiry cadence this app cannot establish
+    ///     (see FastRangeUnderlyings), for a day that IS an expiry day (see OiReplayRangeWindows),
+    ///     or at all when StrategyTuning:FastOiRange is off - each of those just means every
+    ///     affected day comes from RunAsync, i.e. exactly today's behavior.
+    ///   - It will not serve a range wider than OiReplayRangeWindows.MaxRangeDays, or one in the
+    ///     future: it says so instead (Dhan serves at most 30 days of expired-option data per call,
+    ///     so a wider range saves nothing anyway).
+    /// </summary>
+    public async Task<OiReplayRangeResult> RunRangeAsync(
+        string underlying, DateOnly from, DateOnly to, int timeframeMinutes, string expiryFlag, CancellationToken cancellationToken)
+    {
+        var timeframe = Math.Max(1, timeframeMinutes);
+
+        // The same guards RunAsync applies, in the same order and with the same messages - a range
+        // request must never reach a combination one day could not.
+        if (!StrikeStepByUnderlying.ContainsKey(underlying))
+            return OiReplayRangeResult.Failed(underlying, from, to, timeframe, expiryFlag, $"'{underlying}' is not supported - only NIFTY, BANKNIFTY, and SENSEX.");
+        if (string.Equals(underlying, "BANKNIFTY", StringComparison.OrdinalIgnoreCase) && string.Equals(expiryFlag, "WEEK", StringComparison.OrdinalIgnoreCase))
+            return OiReplayRangeResult.Failed(underlying, from, to, timeframe, expiryFlag, "BANKNIFTY has no weekly expiry - NSE discontinued it. Use Monthly instead.");
+
+        if (!AlwaysLiveUnderlyings.Contains(underlying) && !_storedSpot.IsConfigured && !_allowLiveDataFallback)
+            return OiReplayRangeResult.Failed(underlying, from, to, timeframe, expiryFlag,
+                "Stored data is not configured on this server (no NiftyDataCollector database connection) - see ConnectionStrings:NiftyDataCollectorTimescale.");
+
+        var today = IstClock.Today();
+        var days = OiReplayRangeWindows.TradingDayCandidates(from, to, today);
+        if (days.Count == 0)
+            return OiReplayRangeResult.Failed(underlying, from, to, timeframe, expiryFlag,
+                $"No weekday between {from:dd MMM yyyy} and {to:dd MMM yyyy} is a past or current trading day - nothing to fetch.");
+
+        // Validated even when the fast path is off, so the endpoint's own contract (a bounded range)
+        // does not change with a setting.
+        var (windows, buildError) = OiReplayRangeWindows.Build(expiryFlag, from, to, today);
+        if (buildError is not null) return OiReplayRangeResult.Failed(underlying, from, to, timeframe, expiryFlag, buildError);
+
+        // A cadence this app's own expiry calendar does not cover is never guessed at: the OI Replay
+        // page can also ask for positional expiry flags ("N1".."N5" - see
+        // OiReplayLiveFeedService.ResolveNearestExpiryCore), and nothing here can say which calendar
+        // date those resolve to, so a window must not be built for them either.
+        var isKnownCadence = string.Equals(expiryFlag, "WEEK", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(expiryFlag, "MONTH", StringComparison.OrdinalIgnoreCase);
+        var fastPathDisabled =
+            !_fastOiRange
+                ? "StrategyTuning:FastOiRange is off - every day was fetched the ordinary per-day way."
+                : !FastRangeUnderlyings.Contains(underlying)
+                    ? $"{underlying}'s expiry cadence is not in this app's own expiry calendar (an NSE calendar) - every day was fetched the ordinary per-day way rather than guess where a contract's cycle ends."
+                    : !isKnownCadence
+                        ? $"'{expiryFlag}' is not a WEEK/MONTH cadence this app's own expiry calendar can place - every day was fetched the ordinary per-day way."
+                        : null;
+        if (fastPathDisabled is not null) windows = new List<OiReplayRangeWindows.Window>();
+
+        var isAlwaysLive = AlwaysLiveUnderlyings.Contains(underlying);
+        var fromWindow = new Dictionary<DateOnly, DayFromWindow>();
+        var windowReports = new List<OiReplayRangeWindow>();
+        var optionSeriesCalls = 0;
+
+        if (windows.Count > 0)
+        {
+            // Resolved once, eagerly, before any concurrent work starts - the same reasoning (and
+            // the same race it avoids) as RunAsync's own instrument resolution.
+            DhanSpotInstrument? instrument = null;
+            if (isAlwaysLive || _allowLiveDataFallback)
+            {
+                await _instrumentMaster.EnsureLoadedAsync(cancellationToken);
+                instrument = _instrumentMaster.FindSpot(underlying);
+            }
+            Task<DhanSpotInstrument?> ResolveInstrumentAsync() => Task.FromResult(instrument);
+
+            // The whole span's spot in ONE call (Dhan's /charts/intraday takes a date range and
+            // documents 90 days per call; the stored source is a plain BETWEEN), then cut per day -
+            // instead of one spot call per day.
+            var spanFrom = windows[0].From;
+            var spanTo = windows[^1].To;
+            var (spotBars, spotError) = await FetchSpotBarsWithVolumeAsync(underlying, spanFrom, spanTo, isAlwaysLive, ResolveInstrumentAsync, cancellationToken);
+            var spanDays = OiReplayRangeWindows.TradingDayCandidates(spanFrom, spanTo, today);
+            var spotByDay = OiReplayRangeWindows.ByDay(spotBars, b => b.Time, spanDays);
+            // One call covered every day of the span, so "nothing at all" is the CALL having failed,
+            // not the market having been closed for the whole span - in that case nothing here is
+            // trusted and every day goes back to the per-day path (which fetches its own spot).
+            var spotUsable = spotBars.Count > 0;
+            if (!spotUsable)
+                _logger?.LogWarning("OI range fetch for {Underlying} {From}..{To} got no spot bars at all ({Error}) - falling back to the per-day path for every day.",
+                    underlying, spanFrom, spanTo, spotError ?? "no error reported");
+
+            foreach (var window in windows)
+            {
+                var windowDays = OiReplayRangeWindows.TradingDayCandidates(window.From, window.To, today);
+                var (series, calls) = await FetchWindowBandAsync(underlying, expiryFlag, window, ResolveInstrumentAsync, cancellationToken);
+                optionSeriesCalls += calls;
+
+                var windowErrors = series.Where(s => s.Error is not null).Select(s => $"{s.Token} {s.Side}: {s.Error}").ToList();
+                windowReports.Add(new OiReplayRangeWindow(window.From, window.To, window.Expiry, window.ExpiryCode, calls,
+                    windowErrors.Count == 0 ? null : string.Join("; ", windowErrors)));
+
+                // A window with ANY failed strike is not trusted for ANY of its days: a partial band
+                // is exactly the silently-incomplete day this endpoint must never produce. Those days
+                // are simply left unassigned here and fetched the per-day way below, which reports
+                // its own OptionErrors if the failure is still there.
+                if (windowErrors.Count > 0)
+                {
+                    _logger?.LogWarning("OI range window {From}..{To} ({Underlying} {Flag}+{Code}) had {Count} failed strike series - its {Days} day(s) fall back to the per-day path. First: {First}",
+                        window.From, window.To, underlying, expiryFlag, window.ExpiryCode, windowErrors.Count, windowDays.Count, windowErrors[0]);
+                    continue;
+                }
+                if (!spotUsable) continue;
+
+                var perSeriesByDay = series.Select(s => (s.Token, s.Side, ByDay: OiReplayRangeWindows.ByDay(s.Points, p => p.Time, windowDays), Any: s.Points.Count > 0)).ToList();
+
+                foreach (var day in windowDays)
+                {
+                    var daySpot = spotByDay[day];
+                    var ce = perSeriesByDay.Where(s => s.Side == "CALL").SelectMany(s => s.ByDay[day]).ToList();
+                    var pe = perSeriesByDay.Where(s => s.Side == "PUT").SelectMany(s => s.ByDay[day]).ToList();
+
+                    if (daySpot.Count == 0)
+                    {
+                        // A closed market (a holiday): the window's one spot call covered this day and
+                        // found nothing, so there is nothing to fetch again - reported as the per-day
+                        // path reports it, present in the range rather than missing from it.
+                        fromWindow[day] = new DayFromWindow(day, daySpot, ce, pe, Array.Empty<string>(), Closed: true);
+                        continue;
+                    }
+
+                    // No CE or no PE at all on a day the market was open means the window simply did
+                    // not answer for this day - never treated as "the strikes were quiet".
+                    if (ce.Count == 0 || pe.Count == 0) continue;
+
+                    // A hole in TIME is the dangerous kind of incompleteness (a strategy reads OI
+                    // minute by minute), so a day whose OI covers materially fewer minutes than its
+                    // own spot is refetched rather than reported.
+                    var spotMinutes = daySpot.Select(b => b.Time).Distinct().Count();
+                    var oiMinutes = ce.Concat(pe).Select(p => p.Time).Distinct().Count();
+                    if (oiMinutes * 100 < spotMinutes * MinOiMinutesPercentOfSpot) continue;
+
+                    // A strike the window HAS data for on other days but not on this one: kept, and
+                    // said out loud on the day itself - the same channel a failed per-day strike has
+                    // always been reported through, so a caller that rejects an incomplete day
+                    // (the strategy tuning does) keeps rejecting it.
+                    var gaps = perSeriesByDay
+                        .Where(s => s.Any && s.ByDay[day].Count == 0)
+                        .Select(s => $"{s.Token} {s.Side}: no bars for {day:dd MMM yyyy} in the {window.From:dd MMM}..{window.To:dd MMM} window, though other days in it have them")
+                        .ToList();
+
+                    fromWindow[day] = new DayFromWindow(day, daySpot, ce, pe, gaps, Closed: false);
+                }
+            }
+        }
+
+        // Futures for the days the window path actually produced, grouped so one Dhan intraday call
+        // can cover a run of days on the same contract (see GetFuturesForDaysAsync) - the fallback
+        // days get theirs from RunAsync, exactly as always.
+        var futuresByDay = await GetFuturesForDaysAsync(underlying, fromWindow.Values.Where(d => !d.Closed).Select(d => d.Date).OrderBy(d => d).ToList(), cancellationToken);
+
+        var results = new List<OiReplayResult>(days.Count);
+        var fellBack = new List<DateOnly>();
+        foreach (var day in days)
+        {
+            if (fromWindow.TryGetValue(day, out var built))
+            {
+                results.Add(BuildDayResult(underlying, built, timeframe, expiryFlag, futuresByDay));
+                continue;
+            }
+
+            // The proven path, unchanged, for every day a window did not (or must not) answer for.
+            var perDay = await RunAsync(underlying, day, timeframe, expiryFlag, cancellationToken);
+            optionSeriesCalls += (StrikeBandSteps * 2 + 1) * 2;
+            fellBack.Add(day);
+            results.Add(perDay with { FetchSource = "day" });
+        }
+
+        return new OiReplayRangeResult(true, null, underlying, from, to, timeframe, expiryFlag, results, windowReports)
+        {
+            FallbackDays = fellBack,
+            OptionSeriesCalls = optionSeriesCalls,
+            FastPathDisabled = fastPathDisabled,
+        };
+    }
+
+    /// <summary>One day's worth of a window fetch, before it becomes an OiReplayResult. Closed marks
+    /// a day the window's own spot call covered and found nothing for (a holiday) - reported as an
+    /// unsuccessful day, not refetched.</summary>
+    private sealed record DayFromWindow(
+        DateOnly Date, IReadOnlyList<CandleWithVolume> SpotBars, List<OiReplayPoint> CePoints, List<OiReplayPoint> PePoints,
+        IReadOnlyList<string> OptionErrors, bool Closed);
+
+    /// <summary>Turns one day cut out of a window into the exact shape RunAsync returns - the same
+    /// aggregation (BacktestUtil.AggregateCandles), the same fields, the same OptionErrors channel,
+    /// plus FetchSource "range" so a caller can see where the day came from.</summary>
+    private static OiReplayResult BuildDayResult(
+        string underlying, DayFromWindow day, int timeframe, string expiryFlag,
+        IReadOnlyDictionary<DateOnly, (IReadOnlyList<FuturesBar> Bars, DateOnly? Expiry, bool OiAvailable, string? Error)> futuresByDay)
+    {
+        var step = StrikeStepByUnderlying[underlying];
+        if (day.Closed)
+            return (OiReplayResult.Failed(underlying, day.Date, timeframe,
+                $"No spot data for {underlying} on {day.Date:dd MMM yyyy} - a market holiday, or not backfilled yet.")) with { FetchSource = "range" };
+
+        var spot1m = day.SpotBars.Select(b => b.ToCandle()).ToList();
+        var futures = futuresByDay.TryGetValue(day.Date, out var f)
+            ? f
+            : (Bars: (IReadOnlyList<FuturesBar>)Array.Empty<FuturesBar>(), Expiry: (DateOnly?)null, OiAvailable: false,
+                Error: (string?)$"No futures data for {day.Date:dd MMM yyyy}.");
+
+        return new OiReplayResult(true, null, underlying, day.Date, timeframe, step, expiryFlag, NearestExpiryCode,
+            BacktestUtil.AggregateCandles(spot1m, timeframe), spot1m,
+            // NOT re-sorted: the window's series are collected strike by strike (ATM-10..ATM+10),
+            // each one time-ascending, which is the EXACT order RunAsync's own concurrent band fetch
+            // produces - so a caller reading these lists sees the same sequence either way, not just
+            // the same set.
+            day.CePoints, day.PePoints,
+            futures.Bars, futures.Expiry, futures.OiAvailable, futures.Error)
+        {
+            OptionErrors = day.OptionErrors.OrderBy(e => e, StringComparer.Ordinal).ToList(),
+            FetchSource = "range",
+        };
+    }
+
+    /// <summary>The whole ATM+-StrikeBandSteps band for ONE window - 42 series (21 strikes x CE/PE),
+    /// one Dhan call each covering every day of the window, fetched with the same bounded concurrency
+    /// (MaxConcurrentStrikeFetches) and through the same GetSeriesAsync the per-day path uses, so the
+    /// same stored-first rule, the same rate limiter lane and the same error reporting apply. Returns
+    /// each series separately (not one flattened list) because "which strike is missing for which
+    /// day" is exactly what the caller has to be able to see.</summary>
+    private async Task<(List<(string Token, string Side, List<OiReplayPoint> Points, string? Error)> Series, int Calls)> FetchWindowBandAsync(
+        string underlying, string expiryFlag, OiReplayRangeWindows.Window window,
+        Func<Task<DhanSpotInstrument?>> resolveInstrument, CancellationToken cancellationToken)
+    {
+        using var throttle = new SemaphoreSlim(MaxConcurrentStrikeFetches);
+
+        async Task<(string Token, string Side, List<OiReplayPoint> Points, string? Error)> FetchAsync(string strikeToken, string drvOptionType)
+        {
+            await throttle.WaitAsync(cancellationToken);
+            try
+            {
+                var (bars, error) = await GetSeriesAsync(underlying, expiryFlag, window.ExpiryCode, strikeToken, drvOptionType,
+                    window.From, window.To, resolveInstrument, cancellationToken);
+                var points = new List<OiReplayPoint>(bars.Count);
+                foreach (var bar in bars)
+                    if (bar.Strike is { } strike)
+                        points.Add(new OiReplayPoint(bar.Bar.Time, strike, bar.OpenInterest, bar.ImpliedVolatility, bar.Bar.Close, bar.Bar.Open, bar.Bar.High, bar.Bar.Low, bar.Bar.Volume));
+                return (strikeToken, drvOptionType, points, error);
+            }
+            finally
+            {
+                throttle.Release();
+            }
+        }
+
+        var tasks = new List<Task<(string, string, List<OiReplayPoint>, string?)>>();
+        for (var steps = -StrikeBandSteps; steps <= StrikeBandSteps; steps++)
+        {
+            var token = ExpiredOptionBacktestService.StrikeToken(steps);
+            tasks.Add(FetchAsync(token, "CALL"));
+            tasks.Add(FetchAsync(token, "PUT"));
+        }
+        await Task.WhenAll(tasks);
+
+        return (tasks.Select(t => t.Result).ToList(), tasks.Count);
+    }
+
+    /// <summary>Each day's futures, for a run of days, in as few calls as the contracts allow: days
+    /// sharing one contract are fetched in ONE /charts/intraday range call (that endpoint takes a
+    /// date range and documents 90 days per call) and cut per day. A day the range call returned
+    /// nothing for is fetched again through GetFuturesAsync - the per-day path with all of its own
+    /// fallbacks (an expired contract's NSE chart data, another contract listed that day), which a
+    /// range call cannot reproduce. FuturesError / FuturesOiAvailable stay per day either way.</summary>
+    private async Task<Dictionary<DateOnly, (IReadOnlyList<FuturesBar> Bars, DateOnly? Expiry, bool OiAvailable, string? Error)>> GetFuturesForDaysAsync(
+        string underlying, IReadOnlyList<DateOnly> days, CancellationToken cancellationToken)
+    {
+        var byDay = new Dictionary<DateOnly, (IReadOnlyList<FuturesBar> Bars, DateOnly? Expiry, bool OiAvailable, string? Error)>();
+        if (days.Count == 0) return byDay;
+
+        // Which contract each day belongs to - cached lookups, not a Dhan call per day (see
+        // ResolveFuturesContractAsync).
+        var contracts = new Dictionary<DateOnly, DhanFuturesInstrument?>();
+        string? resolveError = null;
+        foreach (var day in days)
+        {
+            var (contract, error) = await ResolveFuturesContractAsync(underlying, day, cancellationToken);
+            contracts[day] = contract;
+            resolveError ??= error;
+        }
+
+        var groups = new List<(DhanFuturesInstrument Contract, List<DateOnly> Days)>();
+        foreach (var day in days)
+        {
+            if (contracts[day] is not { } contract)
+            {
+                byDay[day] = (Array.Empty<FuturesBar>(), null, false, resolveError);
+                continue;
+            }
+            if (groups.Count > 0 && groups[^1].Contract.SecurityId == contract.SecurityId) groups[^1].Days.Add(day);
+            else groups.Add((contract, new List<DateOnly> { day }));
+        }
+
+        foreach (var (contract, groupDays) in groups)
+        {
+            var sliced = new Dictionary<DateOnly, List<(CandleWithVolume Bar, long? OpenInterest)>>();
+            var oiFieldPresent = false;
+            if (groupDays.Count > 1)
+            {
+                var (bars, oiPresent, error) = await _historicalData.GetIntradayFuturesCandlesAsync(
+                    contract.SecurityId, contract.DhanSegment, groupDays[0], groupDays[^1], 1, cancellationToken);
+                oiFieldPresent = oiPresent;
+                if (error is null && bars.Count > 0) sliced = OiReplayRangeWindows.ByDay(bars, b => b.Bar.Time, groupDays);
+            }
+
+            foreach (var day in groupDays)
+            {
+                if (sliced.TryGetValue(day, out var dayBars) && dayBars.Count > 0)
+                {
+                    byDay[day] = (dayBars.Select(b => new FuturesBar(b.Bar.Time, b.Bar.Open, b.Bar.High, b.Bar.Low, b.Bar.Close, b.Bar.Volume, b.OpenInterest)).ToList(),
+                        contract.Expiry, oiFieldPresent, null);
+                    continue;
+                }
+                byDay[day] = await GetFuturesAsync(underlying, day, cancellationToken);
+            }
+        }
+
+        return byDay;
+    }
+
+    /// <summary>
+    /// Fetches ONE day both ways - cut out of a real multi-day window, and through the per-day path
+    /// this app has always used - and compares every OI point (see OiReplayDayComparer). The proof
+    /// the range path is worth trusting, meant to be run for real before a long job leans on it: on
+    /// any difference the caller should use the per-day path for the whole job, and the difference is
+    /// logged here as a warning too, so it is visible on the server even if nobody reads the
+    /// response.
+    ///
+    /// The window used is deliberately a REAL one, several days wide where the cycle allows, not the
+    /// requested day alone - a one-day window would send Dhan exactly the per-day request and prove
+    /// nothing about slicing a multi-day answer. WindowFrom/WindowTo in the result say how wide it
+    /// actually was.
+    /// </summary>
+    public async Task<(OiReplayDayComparison? Comparison, DateOnly WindowFrom, DateOnly WindowTo, string? Error)> CheckDayAsync(
+        string underlying, DateOnly date, int timeframeMinutes, string expiryFlag, CancellationToken cancellationToken)
+    {
+        var timeframe = Math.Max(1, timeframeMinutes);
+        var today = IstClock.Today();
+        if (date > today) return (null, date, date, $"{date:dd MMM yyyy} is in the future - there is nothing to compare yet.");
+
+        // The widest window that still contains `date`, stays inside the date's own expiry cycle and
+        // inside one request's cap - built by the same code the endpoint itself uses, so the check
+        // exercises the real thing.
+        var probeFrom = date.AddDays(-(OiReplayRangeWindows.MaxRangeDays / 3));
+        var probeTo = date.AddDays(OiReplayRangeWindows.MaxRangeDays / 3);
+        if (probeTo > today) probeTo = today;
+        var (windows, buildError) = OiReplayRangeWindows.Build(expiryFlag, probeFrom, probeTo, today);
+        if (buildError is not null) return (null, probeFrom, probeTo, buildError);
+        var found = windows.Where(w => w.From <= date && date <= w.To).Cast<OiReplayRangeWindows.Window?>().FirstOrDefault();
+        if (found is not { } window)
+            return (null, probeFrom, probeTo,
+                $"{date:dd MMM yyyy} is not inside any multi-day window - an expiry day is always fetched the per-day way (see OiReplayRangeWindows), so there is nothing to compare for it.");
+
+        var range = await RunRangeAsync(underlying, window.From, window.To, timeframe, expiryFlag, cancellationToken);
+        if (!range.Success) return (null, window.From, window.To, range.Error);
+        var rangeDay = range.Days.FirstOrDefault(d => d.Date == date);
+        if (rangeDay is null) return (null, window.From, window.To, $"The range fetch returned no day for {date:dd MMM yyyy}.");
+        if (range.FallbackDays.Contains(date))
+            return (null, window.From, window.To,
+                $"{date:dd MMM yyyy} itself fell back to the per-day path inside the range fetch, so there is nothing to compare - " +
+                (range.FastPathDisabled ?? range.Windows.FirstOrDefault(w => w.From <= date && date <= w.To)?.Error ?? "no reason reported, which itself is worth looking into"));
+
+        var perDay = await RunAsync(underlying, date, timeframe, expiryFlag, cancellationToken);
+        var comparison = OiReplayDayComparer.Compare(date, rangeDay, perDay);
+        if (!comparison.Match)
+            _logger?.LogWarning("OI range self-check FAILED for {Underlying} {Date} (window {From}..{To}): {Differences}",
+                underlying, date, window.From, window.To, string.Join(" | ", comparison.Differences));
+        else
+            _logger?.LogInformation("OI range self-check passed for {Underlying} {Date} (window {From}..{To}): {Points} CE / {PePoints} PE points identical both ways.",
+                underlying, date, window.From, window.To, comparison.RangeCePoints, comparison.RangePePoints);
+
+        return (comparison, window.From, window.To, null);
+    }
+
     /// <summary>One CE or PE series for one relative strike: stored first (when configured), then a
     /// live Dhan call over it ONLY when live fallback is allowed and the stored result isn't fresh
     /// enough (see IsFreshEnough) - the exact same "prefer stored, fall through when it's not good
@@ -306,27 +749,35 @@ public sealed class OiReplayService
     /// series here instead of once per whole request, since different strikes' own stored rows can
     /// in principle lag by different amounts. Skips straight to the live call, unconditionally, for
     /// an AlwaysLiveUnderlyings member (SENSEX) - there is no stored series to prefer for those at
-    /// all.</summary>
+    /// all.
+    ///
+    /// Takes a DATE RANGE and an expiryCode rather than a single date and a fixed code 1, so the
+    /// range endpoint (RunRangeAsync) fetches a whole expiry cycle of days per call through THIS
+    /// method - the same stored-first decision, the same live call, the same error reporting - rather
+    /// than a second copy of it that could drift. The per-day path passes (date, date) and
+    /// NearestExpiryCode, which is exactly what it always sent.</summary>
     private async Task<(IReadOnlyList<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)> Bars, string? Error)> GetSeriesAsync(
-        string underlying, string expiryFlag, string strikeToken, string drvOptionType, DateOnly date,
+        string underlying, string expiryFlag, int expiryCode, string strikeToken, string drvOptionType, DateOnly fromDay, DateOnly toDay,
         Func<Task<DhanSpotInstrument?>> resolveInstrument, CancellationToken cancellationToken, bool forceLive = false)
     {
         var isAlwaysLive = forceLive || AlwaysLiveUnderlyings.Contains(underlying);
 
         var storedBars = !isAlwaysLive && _storedRollingOption.IsConfigured
-            ? (await _storedRollingOption.GetRollingOptionCandlesAsync(underlying, 0, expiryFlag, NearestExpiryCode, strikeToken, drvOptionType, date, date, 1, cancellationToken)).Bars
+            ? (await _storedRollingOption.GetRollingOptionCandlesAsync(underlying, 0, expiryFlag, expiryCode, strikeToken, drvOptionType, fromDay, toDay, 1, cancellationToken)).Bars
             : Array.Empty<(CandleWithVolume, decimal?, decimal?, long?, decimal?)>();
 
         if (!isAlwaysLive && !_allowLiveDataFallback) return (storedBars, null);
 
         var latest = storedBars.Count > 0 ? storedBars[^1].Item1.Time : (DateTimeOffset?)null;
-        if (!isAlwaysLive && IsFreshEnough(date, latest)) return (storedBars, null);
+        // Judged against the LAST day of the window - the only day whose freshness can be in
+        // question, since "today" is the one date IsFreshEnough treats as still forming.
+        if (!isAlwaysLive && IsFreshEnough(toDay, latest)) return (storedBars, null);
 
         var instrument = await resolveInstrument();
         if (instrument is null) return (storedBars, null);
 
         var (liveBars, liveError) = await _rollingOption.GetRollingOptionCandlesAsync(
-            underlying, instrument.SecurityId, expiryFlag, NearestExpiryCode, strikeToken, drvOptionType, date, date, 1, cancellationToken);
+            underlying, instrument.SecurityId, expiryFlag, expiryCode, strikeToken, drvOptionType, fromDay, toDay, 1, cancellationToken);
         // A live call that FAILED (rate limit, timeout, auth) is reported, not passed off as an empty strike - the
         // caller says which strikes are missing instead of returning a day with silent holes in its OI.
         return liveBars.Count > 0 ? (liveBars, null) : (storedBars, storedBars.Count > 0 ? null : liveError);
@@ -351,22 +802,28 @@ public sealed class OiReplayService
     /// AlwaysLiveUnderlyings member, then a live Dhan call over it when isAlwaysLive OR the stored
     /// result isn't fresh enough (see IsFreshEnough). Reused by GetPreviousDayVolumeProfileAsync
     /// below so "how spot bars for a date get fetched" has exactly one implementation, not two
-    /// silently drifting copies.</summary>
+    /// silently drifting copies.
+    ///
+    /// Takes a DATE RANGE (the per-day callers pass the same date twice, exactly what they always
+    /// sent) because both sources already serve one: Dhan's /charts/intraday takes a date range and
+    /// documents 90 days per call, and the stored query is a plain BETWEEN. So the range endpoint
+    /// gets a whole window's spot in ONE call here instead of one call per day, through the same
+    /// stored-first logic.</summary>
     private async Task<(IReadOnlyList<CandleWithVolume> Bars, string? Error)> FetchSpotBarsWithVolumeAsync(
-        string underlying, DateOnly date, bool isAlwaysLive, Func<Task<DhanSpotInstrument?>> resolveInstrument, CancellationToken cancellationToken)
+        string underlying, DateOnly fromDay, DateOnly toDay, bool isAlwaysLive, Func<Task<DhanSpotInstrument?>> resolveInstrument, CancellationToken cancellationToken)
     {
         var spotBarsRaw = !isAlwaysLive && _storedSpot.IsConfigured
-            ? (await _storedSpot.GetSpotCandlesAsync(underlying, date, date, cancellationToken)).Bars
+            ? (await _storedSpot.GetSpotCandlesAsync(underlying, fromDay, toDay, cancellationToken)).Bars
             : Array.Empty<CandleWithVolume>();
         var spotError = (string?)null;
 
-        if (isAlwaysLive || (_allowLiveDataFallback && !IsFreshEnough(date, spotBarsRaw.Count > 0 ? spotBarsRaw[^1].Time : null)))
+        if (isAlwaysLive || (_allowLiveDataFallback && !IsFreshEnough(toDay, spotBarsRaw.Count > 0 ? spotBarsRaw[^1].Time : null)))
         {
             var liveInstrument = await resolveInstrument();
             if (liveInstrument is not null)
             {
                 var (liveSpotBars, liveSpotError) = await _historicalData.GetIntradayCandlesAsync(
-                    liveInstrument.SecurityId, liveInstrument.DhanSegment, date, date, 1, cancellationToken);
+                    liveInstrument.SecurityId, liveInstrument.DhanSegment, fromDay, toDay, 1, cancellationToken);
                 // Only trust the live call over whatever's already stored if it actually found
                 // something - a live error (auth, market holiday) should never blank out a
                 // perfectly good, merely slightly-stale stored result.
@@ -416,7 +873,7 @@ public sealed class OiReplayService
         IReadOnlyList<CandleWithVolume> foundBars = Array.Empty<CandleWithVolume>();
         var resolvedDate = await ResolvePreviousTradingDayAsync(onOrBeforeDate, async candidate =>
         {
-            var (bars, _) = await FetchSpotBarsWithVolumeAsync(underlying, candidate, isAlwaysLive, ResolveInstrumentAsync, cancellationToken);
+            var (bars, _) = await FetchSpotBarsWithVolumeAsync(underlying, candidate, candidate, isAlwaysLive, ResolveInstrumentAsync, cancellationToken);
             if (bars.Count == 0) return false;
             foundBars = bars;
             return true;
