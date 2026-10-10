@@ -13,8 +13,7 @@ import { chargeRates, tradeCharges } from './tradeCharges.js'
 import {
   ACTIVE_STRATEGIES, STRATEGY_BY_ID, strategyStats, topFifteen, MIN_TRADES_TO_RANK, oiSummary, optionOiText,
   DEFAULT_TRAIL, LAST_ENTRY, SQUARE_OFF, fmtHm, exitLabel, premiumAt, optionPnlPoints, optionTradeText, squareOffMs, RANGE_IDS, asReplayContext,
-  optionTradeAt, dayTypeAt, trailPoints, STRATEGY_FILTERS, strategyFilters, changedFilters,
-} from './strategyEngine.js'
+  optionTradeAt, dayTypeAt, trailPoints, STRATEGY_FILTERS, strategyFilters, changedFilters, optionPlanFor } from './strategyEngine.js'
 import { replayRange } from './orderFlowMath.js'
 import { scanDaySetups, withDayOutcomes } from './scanDay.js'
 import { SCANNER_SETTINGS_KEY } from './scannerSettings.js'
@@ -163,7 +162,10 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   useEffect(() => { placedRef.current = new Set() }, [dayKey])
 
   // The option a setup is traded with: ATM, or the strike the trader picked (ITM / OTM) - paper and live.
-  const tradeOf = (setup, which) => optionTradeAt(oi, setup, which, settingsRef.current.moneyness ?? 0)
+  // Which strike, and the SL / target in premium points: this strategy's own if it was tuned and applied, else the
+  // scanner's setting (optionPlanFor - the same rule the server scanner uses).
+  const planOf = (setup, premium = null) => optionPlanFor(setup.id, settingsRef.current.filters, settingsRef.current, premium)
+  const tradeOf = (setup, which) => optionTradeAt(oi, setup, which, planOf(setup).moneyness)
   const placeLive = async (setup, which) => {
     const trade = tradeOf(setup, which)
     const cfg = settingsRef.current
@@ -240,7 +242,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       const meta = STRATEGY_BY_ID[setup.id]
       notifyTrade({ kind: 'entry', key: `paper-${setup.id}-${setup.t}-${which}`, sound: false,
         title: `Paper ${trade.action} ${trade.strike} ${trade.side} x${lots} @ ${premium.toFixed(1)}`,
-        text: `#${meta?.no} ${meta?.name} ${setup.side} · option SL ${settingsRef.current.paperSl ?? 20} / target ${settingsRef.current.paperTarget ?? 30} pts` })
+        text: `#${meta?.no} ${meta?.name} ${setup.side} · option SL ${planOf(setup, premium).slPts.toFixed(1)} / target ${planOf(setup, premium).targetPts.toFixed(1)} pts` })
     }
     if (!already && !isReplay && settingsRef.current.telegram !== false) {
       telegram(paperEntryText({ underlying, trade, lots, premium, setup, cfg: settingsRef.current }))
@@ -251,7 +253,8 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       // alert cooldown is the same signal - a replayed day re-fires its alerts a few seconds apart, and
       // must not open it again.
       if (list.some((p) => sameSignal(p, setup, trade))) return prev
-      const position = newPosition({ setup, trade, which, lots, lotSize: PAPER_TRADE_LOT_SIZE[underlying] ?? 1, premium, cfg: settingsRef.current, at })
+      const levels = planOf(setup, premium)
+      const position = newPosition({ setup, trade, which, lots, lotSize: PAPER_TRADE_LOT_SIZE[underlying] ?? 1, premium, cfg: { ...settingsRef.current, paperSl: levels.slPts, paperTarget: levels.targetPts }, at })
       return { ...prev, [dayKey]: { date, positions: [...list, position] } }
     })
   }
@@ -388,7 +391,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       // The moment it alerts, the option is punched (the sell side by default): on paper, or - in Live
       // mode with Auto-place on - as a real Dhan super order.
       const live = liveModeRef.current
-      const side = cfg.autoPaper === 'buy' || cfg.autoPaper === 'sell' ? cfg.autoPaper : null
+      const side = optionPlanFor(s.id, cfg.filters, cfg).leg
       const autoTrade = side && (live.mode !== 'live' || live.auto) ? tradeOf(s, side) : null
       if (autoTrade) punchRef.current?.(s, side, s.t, { auto: true })
       if (cfg.sound) chime(s.side === 'LONG')

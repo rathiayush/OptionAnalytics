@@ -193,3 +193,35 @@ test('the Top 15 from the scanner log\'s signals', () => {
   assert.ok(top.ids.length > 0)
   assert.deepEqual(topFromSignalsCsv('').ids, topFromSignalsCsv(null).ids)
 })
+
+test('a strategy tuned to BUY its option: the server scanner trades that, with its own SL / target', async () => {
+  // What "Apply to the scanner" writes for one strategy (filtersFromTuning), and what the scanner must then do when
+  // that strategy fires: buy instead of sell, at the strike chosen, with the option SL / target as a % of the premium.
+  const io = fakeIo()
+  const scanner = new IndexScanner('NIFTY', io)
+  scanner.reset(DATE)
+  scanner.setConfig({ alertIds: ALL_IDS, settings: { autoPaper: 'sell', paperSl: 20, paperTarget: 30, paperLots: 1 } })
+  await runDay(scanner, io, at(15), at(300))
+  const sold = scanner.positions
+  assert.ok(sold.length, 'the scanner traded on its own setting')
+  assert.ok(sold.every((p) => p.action === 'SELL'), 'the scanner is set to sell')
+  assert.ok(sold.every((p) => p.slPts === 20 && p.targetPts === 30))
+
+  // The same day, with one strategy applied as BUY, 1 out of the money, SL 25% / target 50% of the premium.
+  const id = sold[0].strategy
+  const tuned = new IndexScanner('NIFTY', fakeIo())
+  tuned.reset(DATE)
+  tuned.setConfig({ alertIds: ALL_IDS, settings: { autoPaper: 'sell', paperSl: 20, paperTarget: 30, paperLots: 1,
+    filters: { [id]: { tradeOptLeg: 'buy', tradeOptMoneyness: -1, tradeOptSlPct: 25, tradeOptTargetPct: 50 } } } })
+  await runDay(tuned, fakeIo(), at(15), at(300))
+  const mine = tuned.positions.filter((p) => p.strategy === id)
+  const others = tuned.positions.filter((p) => p.strategy !== id)
+  assert.ok(mine.length, 'the tuned strategy still trades')
+  assert.ok(mine.every((p) => p.action === 'BUY'), 'and it BUYS now, as applied')
+  for (const p of mine) {
+    assert.ok(Math.abs(p.slPts - p.premium * 0.25) < 1e-6, `SL is 25% of the ${p.premium} premium, not ${p.slPts}`)
+    assert.ok(Math.abs(p.targetPts - p.premium * 0.5) < 1e-6)
+  }
+  // Every other strategy is untouched by one strategy's setting.
+  assert.ok(others.every((p) => p.action === 'SELL' && p.slPts === 20 && p.targetPts === 30), 'the rest follow the scanner')
+})

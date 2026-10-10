@@ -4,9 +4,9 @@
 // Run: npm test (node --test) - see CLAUDE.md.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { applyTradeFilter, strategyFilters, simulateOutcome } from '../src/strategyEngine.js'
+import { applyTradeFilter, optionPlanFor, strategyFilters, simulateOutcome } from '../src/strategyEngine.js'
 import { scanDaySetups, firstPerCooldown, withDayOutcomes } from '../src/scanDay.js'
-import { DEFAULT_VARIANT, OI_GRID, dayTrades, outcomeKey, tradeDetails, scoreR, splitDays, tuneStrategy, rankStrategies, filtersFromTuning, variants, tuningDay, variantText } from '../src/strategyTuning.js'
+import { DEFAULT_VARIANT, OI_GRID, OPTION_DEFAULT, dayTrades, outcomeKey, tradeDetails, scoreR, splitDays, tuneStrategy, rankStrategies, filtersFromTuning, variants, tuningDay, variantText } from '../src/strategyTuning.js'
 import { day } from './synthetic-day.mjs'
 
 const MIN = 60_000
@@ -188,4 +188,31 @@ test('the outcome cache: what a taken trade does depends only on its stop / targ
     assert.deepEqual([twin.exit, twin.points, twin.r, twin.exitReason], [t.exit, t.points, t.r, t.exitReason], key(t))
   }
   assert.ok(longOnly.length && longOnly.length < both.length)
+})
+
+test('Apply to the scanner: the whole setting goes across, options included, and it replaces the last one', () => {
+  const v = (o) => ({ ...DEFAULT_VARIANT, ...OPTION_DEFAULT, ...o })
+  // A strategy's own entry rules are never touched; the trade filters are set or removed, so nothing of a previous
+  // apply is left behind.
+  const entryRules = { closesBeyond: 3 }
+  const tuned = filtersFromTuning(entryRules, v({ tradeSide: 'long', tradeStopX: 0.75, tradeOiFlow: 'with' }))
+  assert.deepEqual(tuned, { closesBeyond: 3, tradeSide: 'long', tradeStopX: 0.75, tradeOiFlow: 'with' })
+  assert.deepEqual(filtersFromTuning(tuned, v({ tradeSide: 'short' })), { closesBeyond: 3, tradeSide: 'short' }, 'a new apply replaces the old one')
+
+  // The option part only when the OPTION was tuned - otherwise a trade-only run would pin the strategy to the option
+  // defaults ("sell ATM") the trader never chose.
+  assert.equal(filtersFromTuning({}, v({ optLeg: 'buy' })).tradeOptLeg, undefined)
+  const opt = filtersFromTuning({}, v({ optLeg: 'buy', optMoneyness: -1, optExit: 'first', optSlPct: 25, optTargetPct: 50 }), { option: true })
+  assert.deepEqual(opt, { tradeOptLeg: 'buy', tradeOptMoneyness: -1, tradeOptSlPct: 25, tradeOptTargetPct: 50 })
+  // Out with the index trade: the option's own SL / target are not used, so they are not applied either.
+  assert.deepEqual(filtersFromTuning({}, v({ optLeg: 'sell', optExit: 'index', optSlPct: 25 }), { option: true }), { tradeOptLeg: 'sell', tradeOptMoneyness: 0 })
+
+  // And what the scanner then does with it: an untouched strategy follows the scanner's own setting, a tuned one its own.
+  const cfg = { autoPaper: 'sell', moneyness: 0, paperSl: 20, paperTarget: 30 }
+  assert.deepEqual(optionPlanFor('wallBreak', {}, cfg, 100), { leg: 'sell', moneyness: 0, slPts: 20, targetPts: 30, fromStrategy: false })
+  assert.deepEqual(optionPlanFor('wallBreak', { wallBreak: opt }, cfg, 100), { leg: 'buy', moneyness: -1, slPts: 25, targetPts: 50, fromStrategy: true })
+  // A % SL / target is of the premium actually paid, so a bigger premium means more points.
+  assert.equal(optionPlanFor('wallBreak', { wallBreak: opt }, cfg, 200).slPts, 50)
+  // Nonsense saved by hand is ignored rather than traded on.
+  assert.deepEqual(optionPlanFor('wallBreak', { wallBreak: { tradeOptLeg: 'nonsense', tradeOptMoneyness: 99 } }, cfg, 100).leg, 'sell')
 })
