@@ -173,7 +173,7 @@ function JobDetail({ p, startedUtc }) {
   const f = p.fetched
   const pre = p.prefetch
   const elapsed = startedUtc ? now - Date.parse(startedUtc) : null
-  const left = p.stage === 'scan' && p.done > 2 && elapsed ? (elapsed / p.done) * (p.total - p.done) : null
+  const left = p.stage === 'scan' && p.done > 2 && elapsed && Number.isFinite(p.total) ? (elapsed / p.done) * (p.total - p.done) : null
   const secs = (ms) => (ms >= 3_600_000 ? `${Math.floor(ms / 3_600_000)} h ${Math.round((ms % 3_600_000) / 60_000)} min` : ms >= 90_000 ? `${Math.round(ms / 60_000)} min` : `${Math.max(0, Math.round(ms / 1000))} s`)
   const wait = p.wait && Date.parse(p.wait.until) > now ? p.wait : null
   return (
@@ -295,8 +295,23 @@ export default function StrategyTuningPage() {
   }
 
   const p = status?.progress
-  const progressText = !p ? 'starting…' : p.stage === 'scan' ? (p.retrying ? `trying again ${p.day} (${p.retrying} day(s) the server was busy for)` : `scanning ${p.day} (${Math.min(p.done + 1, p.total)} of ${p.total} days)`) : p.stage === 'rank' ? 'ranking the strategies' : p.stage === 'tune' ? `tuning #${STRATEGY_BY_ID[p.strategy]?.no} ${STRATEGY_BY_ID[p.strategy]?.name ?? p.strategy} (${p.done + 1} of ${p.total})${p.of ? `, ${p.tried.toLocaleString('en-IN')} of ${p.of.toLocaleString('en-IN')} OI combinations` : ''}` : p.stage
-  const percent = !p ? 0 : p.stage === 'scan' ? Math.round((p.done / Math.max(1, p.total)) * 80) : p.stage === 'rank' ? 80 : p.stage === 'tune' ? 80 + Math.round(((p.done + (p.of ? Math.min(1, p.tried / p.of) : 0)) / Math.max(1, p.total)) * 20) : 100
+  // Each stage says where it is; a missing number never prints as "undefined" or "NaN".
+  const nOf = (v) => (Number.isFinite(v) ? v : null)
+  const ofDays = (done, total) => (nOf(total) ? ` (${Math.min((nOf(done) ?? 0) + 1, total)} of ${total} days)` : '')
+  const progressText = !p ? 'starting…'
+    : p.stage === 'prefetch' ? (p.checking
+      ? `checking the option chain can be fetched a cycle at a time (${p.day ?? ''})`
+      : `fetching the option chain a cycle at a time: ${p.prefetch?.from ?? p.day ?? ''} to ${p.prefetch?.to ?? ''}${nOf(p.total) ? ` (${nOf(p.done) ?? 0} of ${p.total} days so far)` : ''}`)
+    : p.stage === 'scan' ? (p.retrying ? `trying again ${p.day ?? ''} (${p.retrying} day(s) the server was busy for)` : `scanning ${p.day ?? ''}${ofDays(p.done, p.total)}`)
+    : p.stage === 'rank' ? 'ranking the strategies'
+    : p.stage === 'tune' ? `tuning #${STRATEGY_BY_ID[p.strategy]?.no} ${STRATEGY_BY_ID[p.strategy]?.name ?? p.strategy}${nOf(p.total) ? ` (${(nOf(p.done) ?? 0) + 1} of ${p.total})` : ''}${p.of ? `, ${p.tried.toLocaleString('en-IN')} of ${p.of.toLocaleString('en-IN')} OI combinations` : ''}`
+    : p.stage
+  const percent = !p ? 0
+    : p.stage === 'prefetch' ? Math.round((nOf(p.done) ?? 0) / Math.max(1, nOf(p.total) ?? 1) * 10)
+    : p.stage === 'scan' ? 10 + Math.round(((nOf(p.done) ?? 0) / Math.max(1, nOf(p.total) ?? 1)) * 70)
+    : p.stage === 'rank' ? 80
+    : p.stage === 'tune' ? 80 + Math.round((((nOf(p.done) ?? 0) + (p.of ? Math.min(1, p.tried / p.of) : 0)) / Math.max(1, nOf(p.total) ?? 1)) * 20)
+    : 100
 
   const tuned = new Set((result?.results ?? []).map((r) => r.id))
   const rankedColumns = [
