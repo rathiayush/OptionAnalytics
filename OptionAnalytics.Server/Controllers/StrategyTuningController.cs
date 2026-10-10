@@ -13,8 +13,13 @@ public sealed class StrategyTuningController : ControllerBase
 {
     private static readonly string[] Underlyings = { "NIFTY", "BANKNIFTY", "SENSEX" };
     private readonly StrategyTuningService _tuning;
+    private readonly OptionAnalytics.Server.Dhan.DhanDataApiRateLimiter _dhanLimiter;
 
-    public StrategyTuningController(StrategyTuningService tuning) => _tuning = tuning;
+    public StrategyTuningController(StrategyTuningService tuning, OptionAnalytics.Server.Dhan.DhanDataApiRateLimiter dhanLimiter)
+    {
+        _tuning = tuning;
+        _dhanLimiter = dhanLimiter;
+    }
 
     /// <summary>`What`: what is tuned - "trade" (the trade settings), "oi" (the OI confirmation) or "both"
     /// (the OI confirmation first, then the trade settings on top of it).</summary>
@@ -63,6 +68,16 @@ public sealed class StrategyTuningController : ControllerBase
 
     [HttpGet("status")]
     public TuningStatus Status() => _tuning.Status();
+
+    /// <summary>GET /api/strategy-tuning/dhan-usage - Dhan Data-API calls this server made today (IST) against Dhan's
+    /// documented 100,000/day: shown on the page, and read by the tuning job before each day so it never takes the last of
+    /// the day's allowance from the live app.</summary>
+    [HttpGet("dhan-usage")]
+    public IActionResult DhanUsage()
+    {
+        var (day, calls, limit) = _dhanLimiter.Usage();
+        return Ok(new { day = day.ToString("yyyy-MM-dd"), calls, dailyLimit = limit });
+    }
 
     /// <summary>GET /api/strategy-tuning/trades/{underlying} - every trade of the last finished job for that index (each
     /// strategy as written on every day scanned, and each tuned strategy's best setting) - the Trades page.</summary>

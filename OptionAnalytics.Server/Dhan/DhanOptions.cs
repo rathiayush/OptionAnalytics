@@ -82,6 +82,10 @@ public sealed class DhanOptions
     /// limits and are not affected by this setting at all.</summary>
     public int DataApiRequestsPerSecond { get; set; } = 5;
 
+    /// <summary>Dhan's documented daily Data-API limit (https://dhanhq.co/docs/v2/ - 100,000/day). Counted by
+    /// DhanDataApiRateLimiter; a strategy tuning job stops before it would use the last of it.</summary>
+    public int DataApiRequestsPerDay { get; set; } = 100_000;
+
     public bool HasSession => !string.IsNullOrWhiteSpace(ClientId) && !string.IsNullOrWhiteSpace(AccessToken);
 
     /// <summary>True when everything TOTP auto-login needs is configured. Checked before

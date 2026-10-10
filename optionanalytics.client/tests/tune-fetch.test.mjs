@@ -30,20 +30,23 @@ test('what is worth trying again: busy / rate-limited, not a fact about the day'
   assert.equal(isTransient(404, 'no bars'), false)
   assert.equal(isTransient(400, 'rate limit exceeded'), true)
   assert.equal(isTransient(null, 'fetch failed'), true, 'a network error')
+  // A rate limit clears within seconds (Dhan's limit is per second): short waits. Other busy states (the Dhan session
+  // renewing, a network error) need longer.
+  assert.deepEqual([0, 1, 2, 3, 4, 5].map((i) => retryDelayMs(i, null, 5_000, true)), [2_000, 4_000, 8_000, 16_000, 30_000, 30_000])
   assert.deepEqual([0, 1, 2, 3, 4, 5].map((i) => retryDelayMs(i)), [5_000, 15_000, 45_000, 135_000, 300_000, 300_000])
   assert.equal(retryDelayMs(0, '20'), 20_000, 'Retry-After wins')
 })
 
 test('a rate limit is waited out and the request goes through', async () => {
-  const { calls, fetchImpl } = fakeServer([{ status: 429, body: { error: 'Too many requests' }, retryAfter: '7' }, 'network', { status: 200, body: { ok: 1 } }])
+  const { calls, fetchImpl } = fakeServer([{ status: 429, body: { error: 'Too many requests' }, retryAfter: '7' }, { status: 500, body: { error: 'DH-904: Too many requests on server from single user breaching rate limits' } }, 'network', { status: 200, body: { ok: 1 } }])
   const { waits, sleep } = noSleep()
   const seen = []
   const f = createFetcher({ fetchImpl, sleep, today: '2026-10-10', onWait: (w) => seen.push(w) })
   assert.deepEqual(await f.api('/api/x'), { ok: 1 })
-  assert.equal(calls.length, 3)
-  assert.deepEqual(waits, [7_000, 15_000])
-  assert.deepEqual(seen.map((w) => w.attempt), [2, 3])
-  assert.equal(f.stats.retries, 2)
+  assert.equal(calls.length, 4)
+  assert.deepEqual(waits, [7_000, 4_000, 45_000], 'Retry-After; a rate limit - short (2nd retry: 4 s); a network error - longer (3rd: 45 s)')
+  assert.deepEqual(seen.map((w) => w.attempt), [2, 3, 4])
+  assert.equal(f.stats.retries, 3)
 })
 
 test('it gives up after the set tries, and never retries a fact about the day', async () => {

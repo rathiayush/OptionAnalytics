@@ -40,7 +40,9 @@ namespace OptionAnalytics.Server.Dhan;
 /// reverse-proxy timeout in front of the app and surface to the browser as a bare "Load failed"
 /// rather than any error this app itself produced. Giving background callers their own smaller,
 /// separate lane means an interactive request's own permits are never behind a background job's
-/// queue - it only ever waits on its OWN lane's per-second ceiling.
+/// queue. A background call may also use an interactive permit nobody is waiting for (see
+/// WaitForPermitAsync) - never one an interactive call is queued for, so at worst an interactive
+/// request that arrives just after waits one 1-second window.
 ///
 /// Both lanes are still derived from the SAME configured DataApiRequestsPerSecond total (not a
 /// second config knob), so their COMBINED worst-case simultaneous rate never exceeds the one
@@ -51,8 +53,7 @@ public sealed class DhanDataApiRateLimiter : IDisposable
 {
     /// <summary>Set for the length of a request that asked to be served at background priority (header
     /// "X-Request-Priority: background" - the strategy tuning job during market hours): every Dhan Data-API call made
-    /// on its behalf, including the concurrent strike fetches it starts, waits in the background lane, so a long job
-    /// never takes the interactive lane's permits from the live pages and the server scanner.</summary>
+    /// on its behalf, including the concurrent strike fetches it starts, is background work (see WaitForPermitAsync).</summary>
     private static readonly AsyncLocal<bool> BackgroundRequest = new();
 
     /// <summary>Whether the current request asked for background priority.</summary>
@@ -71,29 +72,35 @@ public sealed class DhanDataApiRateLimiter : IDisposable
         public void Dispose() => BackgroundRequest.Value = before;
     }
 
-    /// <summary>Whether a failed Dhan response is Dhan's rate limit (HTTP 429, DH-904, "too many requests", "rate
-    /// limit") - worth waiting and trying again, unlike a bad parameter or a window with no data.</summary>
+    /// <summary>Whether a failed Dhan response is Dhan's rate limit - HTTP 429, DH-904 ("Too many requests on server from
+    /// single user breaching rate limits") or the Data APIs' 805 ("Too many requests or connections"), per Dhan's annexure
+    /// (https://dhanhq.co/docs/v2/annexure/) - worth a short wait and another try, unlike a bad parameter or no data.</summary>
     public static bool IsRateLimited(int statusCode, string? message) =>
         statusCode == 429
         || (message is { Length: > 0 } m && (m.Contains("DH-904", StringComparison.OrdinalIgnoreCase)
+            || System.Text.RegularExpressions.Regex.IsMatch(m, @"(^|\D)805(\D|$)")
             || m.Contains("too many", StringComparison.OrdinalIgnoreCase)
             || (m.Contains("rate", StringComparison.OrdinalIgnoreCase) && m.Contains("limit", StringComparison.OrdinalIgnoreCase))));
 
-    /// <summary>The wait before retry <paramref name="attempt"/> (0-based) after a rate limit: 2 s, 4 s, 8 s.</summary>
-    public static TimeSpan RateLimitBackoff(int attempt) => TimeSpan.FromSeconds(2 << Math.Clamp(attempt, 0, 4));
+    /// <summary>The wait before retry <paramref name="attempt"/> (0-based) after a rate limit: 1 s, 2 s, 4 s. Dhan's Data-API
+    /// limit is per second (5/s), so a second clears the window - a longer wait only makes a job slower; none at all risks
+    /// the blocking Dhan's 805 warns of ("Further requests may result in the user being blocked").</summary>
+    public static TimeSpan RateLimitBackoff(int attempt) => TimeSpan.FromSeconds(1 << Math.Clamp(attempt, 0, 4));
 
+    private static readonly TimeSpan BackgroundPoll = TimeSpan.FromMilliseconds(100);
     private readonly RateLimiter _interactive;
     private readonly RateLimiter _background;
     private readonly ILogger<DhanDataApiRateLimiter> _logger;
+    private readonly int _dailyLimit;
 
     public DhanDataApiRateLimiter(IOptions<DhanOptions> options, ILogger<DhanDataApiRateLimiter> logger)
     {
         _logger = logger;
+        _dailyLimit = Math.Max(1, options.Value.DataApiRequestsPerDay);
         var total = Math.Max(1, options.Value.DataApiRequestsPerSecond);
-        // Background gets a small, fixed slice (never more than 1/5th of the total, floor 1) -
-        // enough that a recenter/backfill loop still makes steady progress, never enough to starve
-        // an interactive page load waiting in its own, separate queue. Interactive gets whatever is
-        // left, so the two lanes' combined ceiling still equals the configured total exactly.
+        // Background gets a small, fixed slice of its own (1/5th of the total, floor 1) - enough that a recenter/backfill
+        // loop always makes progress; it may also use whatever the interactive lane leaves unused (WaitForPermitAsync).
+        // The two lanes' permits still add up to the configured total exactly.
         var backgroundPermits = Math.Max(1, total / 5);
         var interactivePermits = Math.Max(1, total - backgroundPermits);
         _interactive = CreateLimiter(interactivePermits);
@@ -112,24 +119,60 @@ public sealed class DhanDataApiRateLimiter : IDisposable
         QueueLimit = 200,
     });
 
-    /// <summary>Waits until Dhan's own documented per-second Data-API ceiling allows one more
-    /// call on the given lane, then returns - the caller sends its actual HTTP request immediately
-    /// after this returns. <paramref name="interactive"/> selects the lane: true for a call made
-    /// directly on behalf of a waiting user (a page load, a "Run" click), false for a hosted
-    /// background service's own prefetch/backfill/recenter work - see this class's own doc comment
-    /// for why that split exists. Never throws on a lease that could not be queued (each lane's own
-    /// generous QueueLimit already makes that rare) - callers still fire immediately rather than
-    /// blocking forever, since DhanRollingOptionDataService's own SendWithRateLimitRetryAsync
-    /// already retries on Dhan's own rate-limit rejection as a graceful fallback for whatever slips
-    /// through.</summary>
+    /// <summary>Waits until Dhan's documented per-second Data-API ceiling (5/s, account-wide - https://dhanhq.co/docs/v2/)
+    /// allows one more call, then returns - the caller sends its request immediately after. <paramref name="interactive"/>
+    /// picks the lane: true for a call made for a waiting user (a page load, the server scanner), false for background
+    /// work (a hosted service's backfill, or any call inside a request that asked for background priority - the strategy
+    /// tuning job in market hours). A background call takes a permit the interactive lane is not using at that moment -
+    /// never one an interactive call is already queued for (oldest-first order refuses a non-waiting acquire while anyone
+    /// waits) - else one of its own lane; so a long job runs at up to the full 5/s while the live app is quiet and at its
+    /// 1/s share while it is busy, and an interactive call waits at most one window behind it. A full queue is waited out,
+    /// never sent over the limit: Dhan's 805 warns that further requests may get the user blocked.</summary>
     public async Task WaitForPermitAsync(bool interactive, CancellationToken cancellationToken)
     {
         var lane = interactive && !BackgroundRequest.Value;
-        var limiter = lane ? _interactive : _background;
-        using var lease = await limiter.AcquireAsync(1, cancellationToken);
-        if (!lease.IsAcquired)
-            _logger.LogDebug("Dhan data-API rate limiter's {Lane} queue was full - proceeding without a permit; Dhan's own rate-limit-retry fallback covers this.",
-                lane ? "interactive" : "background");
+        if (!lane)
+        {
+            while (true)
+            {
+                using (var spare = _interactive.AttemptAcquire(1)) if (spare.IsAcquired) { Count(); return; }
+                using (var own = _background.AttemptAcquire(1)) if (own.IsAcquired) { Count(); return; }
+                await Task.Delay(BackgroundPoll, cancellationToken);
+            }
+        }
+        while (true)
+        {
+            using var lease = await _interactive.AcquireAsync(1, cancellationToken);
+            if (lease.IsAcquired) { Count(); return; }
+            _logger.LogDebug("Dhan data-API rate limiter's interactive queue was full - waiting rather than sending over the limit.");
+            await Task.Delay(BackgroundPoll, cancellationToken);
+        }
+    }
+
+    // Dhan's documented daily Data-API limit (100,000/day), counted per IST day in this process (a restart starts the count
+    // again; another process on the same account is not seen). Shown on the Strategy tuning page; a tuning job stops
+    // scanning before it would take the last of the day's allowance (tune.mjs).
+    private readonly object _countLock = new();
+    private DateOnly _countDay;
+    private long _countToday;
+
+    private static DateOnly IstToday() => DateOnly.FromDateTime(DateTime.UtcNow.AddMinutes(330));
+
+    private void Count()
+    {
+        var today = IstToday();
+        lock (_countLock)
+        {
+            if (today != _countDay) { _countDay = today; _countToday = 0; }
+            _countToday++;
+        }
+    }
+
+    /// <summary>Dhan Data-API calls made today (IST) by this server, and the documented daily limit.</summary>
+    public (DateOnly Day, long Calls, int DailyLimit) Usage()
+    {
+        var today = IstToday();
+        lock (_countLock) return (today, _countDay == today ? _countToday : 0, _dailyLimit);
     }
 
     public void Dispose()

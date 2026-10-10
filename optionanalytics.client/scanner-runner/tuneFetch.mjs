@@ -30,10 +30,19 @@ export function isTransient(status, text) {
   return status == null ? true : TRANSIENT_TEXT.test(text ?? '')
 }
 
-/** The wait before try `i` (0 = the first retry): 5 s, 15 s, 45 s, 2 min 15, 5 min, 5 min ... or the server's Retry-After. */
-export function retryDelayMs(i, retryAfter = null, baseMs = 5_000) {
+// Dhan's Data-API limit is per second (5/s, 100,000/day - https://dhanhq.co/docs/v2/), and the server already waits
+// 1 + 2 + 4 s on a rate limit before it gives up: a rate limit that still reaches the job clears within seconds.
+const RATE_LIMIT_TEXT = /rate.?limit|too many|DH-904|(^|\D)805(\D|$)|HTTP 429/i
+export const isRateLimitText = (text) => RATE_LIMIT_TEXT.test(text ?? '')
+
+/** The wait before try `i` (0 = the first retry), or the server's Retry-After:
+ *  - a rate limit: 2 s, 4 s, 8 s, 16 s, 30 s - Dhan's window is one second, a longer wait only makes the job slower;
+ *  - anything else busy (the server's Dhan session renewing - a few minutes -, a network error, a timeout): 5 s, 15 s,
+ *    45 s, 2 min 15, 5 min - long enough to outlast a token renewal. */
+export function retryDelayMs(i, retryAfter = null, baseMs = 5_000, rateLimited = false) {
   const after = Number(retryAfter)
   if (Number.isFinite(after) && after > 0) return Math.min(600_000, after * 1000)
+  if (rateLimited) return Math.min(6 * baseMs, Math.round(0.4 * baseMs) * 2 ** i)
   return Math.min(60 * baseMs, baseMs * 3 ** i)
 }
 
@@ -112,7 +121,7 @@ export function createFetcher({ base = '', key = '', cacheDir = null, today, att
           if (err.transient) err.message = `${err.message} (still failing after ${attempts} tries)`
           throw err
         }
-        const wait = retryDelayMs(i, err.retryAfter, retryBaseMs)
+        const wait = retryDelayMs(i, err.retryAfter, retryBaseMs, err.status === 429 || isRateLimitText(err.message))
         stats.retries++
         stats.waitedMs += wait
         onWait({ label, attempt: i + 2, of: attempts, waitMs: wait, reason: err.message })

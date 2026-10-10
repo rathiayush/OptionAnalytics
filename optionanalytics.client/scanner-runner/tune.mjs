@@ -170,21 +170,22 @@ async function main() {
       throw e
     }
     const busy = busyStrikes(run)
-    if (busy.length) {
+    if (busy.length && stopped) for (const { p } of busy) skipped.push({ date: p.date, reason: stopped, busy: true })
+  else if (busy.length) {
       const e = new Error(`option OI incomplete - ${busy.length} strike series failed (${busy[0]})`)
       e.transient = true
       throw e
     }
     return (run.optionErrors ?? []).length ? run.optionErrors : null
   }
-  // The day's OI, fetched again (after 30 s, then 90 s) while it comes back incomplete for the load - the server has
-  // already retried each strike; a short pause usually clears it.
+  // The day's OI, fetched again (after 3 s, then 10 s) while it comes back incomplete for the load - the server has
+  // already retried each strike; Dhan's limit is per second, so a short pause clears it.
   async function fetchRun(date) {
     for (let i = 0; ; i++) {
       const run = await fetcher.dayApi('oi', date, oiQuery(date), oiValid)
       const busy = run?.success ? busyStrikes(run).length : isTransientText(run?.error) ? 1 : 0
       if (!busy || i >= 2) return run
-      const waitMs = 30_000 * 3 ** i
+      const waitMs = [3_000, 10_000][i] // the server already retried each strike (1 + 2 + 4 s): a short pause clears it
       progress({ ...(lastScan ?? { stage: 'scan' }), wait: { label: 'option OI', attempt: i + 2, of: 3, waitMs, until: new Date(Date.now() + waitMs).toISOString(), reason: run?.success ? `${busy} strike series failed - fetching the day again` : run?.error } })
       await new Promise((resolve) => setTimeout(resolve, Number(process.env.TUNE_BUSY_PAUSE_MS ?? waitMs)))
     }
@@ -232,12 +233,27 @@ async function main() {
     delete day.byId
     days.push(day)
   }
+  // Dhan allows 100,000 Data-API calls a day (https://dhanhq.co/docs/v2/), shared with the live pages and the server
+  // scanner: the job stops scanning before it would take the last 10% (TUNE_DHAN_RESERVE) - the days it did not reach are
+  // listed with the reason; run it again tomorrow (the days already fetched come from the disk cache).
+  const reserve = Math.min(0.9, Math.max(0, Number(process.env.TUNE_DHAN_RESERVE ?? 0.1)))
+  const dhanBudgetLeft = async () => {
+    const u = await api(`/api/strategy-tuning/dhan-usage`).catch(() => null)
+    if (!(u?.dailyLimit > 0)) return null
+    return u.calls < u.dailyLimit * (1 - reserve) ? null : `Dhan's daily Data-API limit nearly used (${u.calls.toLocaleString('en-IN')} of ${u.dailyLimit.toLocaleString('en-IN')} calls today) - stopped to leave the rest to the live app; run the job again tomorrow (the days already fetched come from the cache)`
+  }
+  let stopped = null
   const busy = []
   for (let i = 0; i < plan.length; i++) {
     const p = plan[i]
     if (DATA === 'spot' && days.length >= MAX_DAYS) break
     lastScan = { stage: 'scan', day: p.date, done: i, total: plan.length, scanned: days.length, skipped: skipped.length }
     progress(lastScan)
+    if ((stopped = await dhanBudgetLeft())) {
+      // (Spot + options lists spare weekdays for holidays: only as many as the days still wanted.)
+      for (const rest of plan.slice(i, DATA === 'spot' ? i + Math.max(0, MAX_DAYS - days.length) : undefined)) skipped.push({ date: rest.date, reason: stopped, busy: true })
+      break
+    }
     try {
       keepDay(await scanOne(p))
     } catch (err) {
@@ -247,12 +263,14 @@ async function main() {
   }
   // Days the server / Dhan was too busy for, even after the retries: once more after a pause, then listed as skipped.
   if (busy.length) {
-    progress({ stage: 'scan', day: busy[0].p.date, done: plan.length, total: plan.length, retrying: busy.length, wait: { label: 'busy days', waitMs: 120_000, until: new Date(Date.now() + 120_000).toISOString(), reason: `${busy.length} day(s) the server was too busy for - trying them again` } })
-    await new Promise((resolve) => setTimeout(resolve, Number(process.env.TUNE_BUSY_PAUSE_MS ?? 120_000)))
+    progress({ stage: 'scan', day: busy[0].p.date, done: plan.length, total: plan.length, retrying: busy.length, wait: { label: 'busy days', waitMs: 30_000, until: new Date(Date.now() + 30_000).toISOString(), reason: `${busy.length} day(s) the server was too busy for - trying them again` } })
+    await new Promise((resolve) => setTimeout(resolve, Number(process.env.TUNE_BUSY_PAUSE_MS ?? 30_000)))
     for (const { p } of busy) {
       if (DATA === 'spot' && days.length >= MAX_DAYS) break
       lastScan = { stage: 'scan', day: p.date, done: plan.length, total: plan.length, retrying: busy.length, scanned: days.length, skipped: skipped.length }
       progress(lastScan)
+      const out = stopped ?? await dhanBudgetLeft()
+      if (out) { stopped = out; skipped.push({ date: p.date, reason: out, busy: true }); continue }
       try { keepDay(await scanOne(p)) } catch (err) { skipped.push({ date: p.date, reason: err.message, busy: !!err.transient }) }
     }
   }

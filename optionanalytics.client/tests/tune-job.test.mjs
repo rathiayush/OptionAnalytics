@@ -35,17 +35,22 @@ function oiRun(date) {
 }
 
 // faults: rateLimit - the first N requests for each day's futures answer HTTP 429; busyOi - each day's first OI replay
-// comes back with a strike series that failed for Dhan's rate limit; partial - a day with only 200 minutes of bars.
+// comes back with a strike series that failed for Dhan's rate limit; partial - a day with only 200 minutes of bars;
+// usageAfter - after N days fetched, the server reports Dhan's daily Data-API limit nearly used.
 function fakeServer(recordedDays, faults = {}) {
   const seen = []
   const count = new Map()
   const nth = (key) => { const n = (count.get(key) ?? 0) + 1; count.set(key, n); return n }
   const server = createServer((req, res) => {
     const url = new URL(req.url, 'http://x')
-    seen.push({ path: url.pathname, key: req.headers['x-runner-key'], priority: req.headers['x-request-priority'] ?? null })
+    seen.push({ path: url.pathname, key: req.headers['x-runner-key'], priority: req.headers['x-request-priority'] ?? null, date: url.searchParams.get('date') })
     const json = (body, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body)) }
     let m
     if (url.pathname === '/api/scanner-runner/config') return json({ settings: {} })
+    if (url.pathname === '/api/strategy-tuning/dhan-usage') {
+      const fetchedDays = new Set(seen.filter((x) => /\/run$/.test(x.path)).map((x) => x.date)).size
+      return json({ day: '2026-10-10', calls: faults.usageAfter != null && fetchedDays >= faults.usageAfter ? 95_000 : 1_200, dailyLimit: 100_000 })
+    }
     if (url.pathname === '/api/order-flow/NIFTY/days') return json(recordedDays.map((date) => ({ date, contractSymbol: 'NIFTY-FUT', expiry: '2026-10-27', live: false })))
     if ((m = url.pathname.match(/^\/api\/order-flow\/NIFTY\/day\/(\d{4}-\d{2}-\d{2})$/))) {
       if (faults.rateLimit && nth(`day-${m[1]}`) <= faults.rateLimit) return json({ error: 'Too many requests' }, 429)
@@ -190,6 +195,20 @@ test('a long job rides out a busy Dhan, leaves out a partial day, re-uses the di
     assert.ok(fetchedAgain.every((p) => p.endsWith('/day/2026-09-30')), `only the partial day is asked again: ${fetchedAgain.join(', ')}`)
     assert.ok(again.result.fetched.cacheHits >= 15)
     assert.deepEqual(again.result.ranked.map((x) => [x.id, x.n, x.total]), result.ranked.map((x) => [x.id, x.n, x.total]), 'the same result from the cache')
+  } finally {
+    server.close()
+  }
+})
+
+test('the job stops before Dhan\'s daily limit: the days it reached are tuned, the rest listed with the reason', { timeout: 300_000 }, async () => {
+  const days = ['2026-09-28', '2026-09-29', '2026-09-30', '2026-10-01', '2026-10-02', '2026-10-05']
+  const { server, base } = await fakeServer(days, { usageAfter: 3 })
+  try {
+    const { code, result } = await runJob(base, { underlying: 'NIFTY', strategies: ['weakWall'], days: 30, minTrades: 2, what: 'trade' })
+    assert.equal(code, 0, JSON.stringify(result))
+    assert.deepEqual(result.days.map((d) => d.date), ['2026-10-05', '2026-10-02', '2026-10-01'])
+    assert.deepEqual(result.skipped.map((x) => x.date), ['2026-09-30', '2026-09-29', '2026-09-28'])
+    assert.ok(result.skipped.every((x) => /Dhan's daily Data-API limit nearly used \(95,000 of 1,00,000 calls today\)/.test(x.reason)), result.skipped[0].reason)
   } finally {
     server.close()
   }
