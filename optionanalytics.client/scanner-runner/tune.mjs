@@ -13,9 +13,32 @@
 //                                 every run's trades and tuned settings, per index, read by the Trades page
 //   TUNE_CACHE_DIR                where each past day's fetched data is kept (tuneFetch.mjs): a rerun / resume / longer range
 //                                 reads it from disk - no Dhan call; TUNE_PACE_MS the pause between requests that reach the server
+//   TUNE_JOB_BUDGET_MS            the whole job's time (see below); TUNE_MAX_FETCHES_PER_DAY how many times one day's
+//                                 data of one kind may be fetched in a whole job
 // Progress goes to stdout as lines "PROGRESS {json}".
+//
+// A JOB ALWAYS ENDS, AND ALWAYS WITH A RESULT. Three things see to that, because a job that never finishes is the one
+// fault a trader cannot work around:
+//   - TUNE_JOB_BUDGET_MS (StrategyTuning:JobBudgetMinutes, 90 minutes by default) is the whole job's time. Past it the
+//     job STOPS scanning, gives up on the strategy it is fine-tuning and starts no further one, lists the days it did
+//     not reach with that reason in plain words, and writes its result and history with the days it did get -
+//     `budget` in the result says how many that was. (A strategy's fine-tuning is pure CPU that no timer can
+//     interrupt, so the budget is checked in its own progress callback, every 250 combinations.)
+//   - no single stretch can outlast it either: past the budget a busy server is no longer waited out (tuneFetch's
+//     `deadline`), and one day's data of one kind is fetched at most TUNE_MAX_FETCHES_PER_DAY times in a whole job
+//     (tuneFetch's `maxPerDay`) however many retry rounds would like to - what used to be up to eight fetches of one
+//     day (two per attempt x four attempts) is now three.
+//   - a last-resort watchdog: if the job is somehow still stuck a quarter past its budget (inside one request that
+//     never returns, say), it writes an unsuccessful result naming the stage it was in and exits. There is no path out
+//     of this script that leaves no result file behind.
+//
+// WHAT EACH DAY COST, COUNTED. `calls` in the result is the job's own HTTP requests by endpoint and by the part of the
+// job that asked for them (range windows, per-day option chain, the busy retries, the previous session, futures, the
+// tape), plus `dhan` - the server's own Dhan Data-API counter read before and after the job, so the Dhan calls the job
+// caused are a measured number rather than an assertion. (The server's counter is account-wide: anything the live app
+// did at the same time is in that delta too, which is why the per-endpoint counts are there beside it.)
 
-import { appendFileSync, existsSync, mkdirSync, writeFileSync, renameSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
 import { buildOiContext, ACTIVE_STRATEGIES, SPOT_STRATEGIES, STRATEGY_BY_ID, TRADE_FILTERS } from '../src/strategyEngine.js'
 import { scanSpotDay, spotBarsOf } from '../src/spotEngine.js'
@@ -27,7 +50,7 @@ import { dayFromOrderFlow, scanDaySetups } from '../src/scanDay.js'
 import { DEFAULT_VARIANT, OI_COMBO_CAP, OI_FACTORS, OPTION_GRID, countOiCombinations, oiFactorsFor, oiGridOf, optionText, rankStrategies, tradeDetails, tuneStrategy, tuningDay, TUNING_GRID, variantText } from '../src/strategyTuning.js'
 import { DEFAULT_ROW_SIZES } from './indexScanner.mjs'
 import { createFetcher, isTransientText, pruneCache } from './tuneFetch.mjs'
-import { RUN_COLUMNS, SETTING_COLUMNS, TRADE_COLUMNS, historyOf, toCsv } from './tuneHistory.mjs'
+import { RUN_COLUMNS, SETTING_COLUMNS, TRADE_COLUMNS, historyOf, runsCsvWith, toCsv } from './tuneHistory.mjs'
 
 const BASE = (process.env.RUNNER_BASE_URL ?? 'http://127.0.0.1:8080').replace(/\/$/, '')
 const KEY = process.env.RUNNER_KEY ?? ''
@@ -55,6 +78,20 @@ const OI_KEYS = Array.isArray(job.oiFactors) && job.oiFactors.length
   ? job.oiFactors.filter((k) => USABLE_OI.includes(k))
   : (DATA === 'spot' ? USABLE_OI : null)
 const startedUtc = new Date().toISOString()
+// The whole job's time budget. Generous by default - a 250-day job on a quiet night is meant to finish inside it - but
+// hard: see the header. 0 / a negative value is not accepted; the floor is a second (the server itself never passes
+// less than a whole minute - StrategyTuning:JobBudgetMinutes - but a test needs a budget it can run out of).
+const BUDGET_MS = Math.max(1_000, Number(process.env.TUNE_JOB_BUDGET_MS) || 90 * 60_000)
+const START_MS = Date.now()
+const DEADLINE_MS = START_MS + BUDGET_MS
+const overBudget = () => Date.now() >= DEADLINE_MS
+const budgetMinutes = Math.round(BUDGET_MS / 60_000)
+const budgetText = BUDGET_MS >= 60_000 ? `${budgetMinutes} minute(s)` : `${Math.round(BUDGET_MS / 1_000)} second(s)`
+/** Where the job is, for the watchdog - the one thing it can report when nothing else can. */
+const state = { stage: 'starting', scanned: 0, skipped: 0, planned: 0, tuned: 0 }
+/** Why the job stopped early, in plain words, once it has. */
+let budgetStop = null
+const budgetReason = () => `the job's own time budget of ${budgetText} ran out after ${state.scanned} of ${state.planned} day(s) - the result holds those days; run the job again and the days already fetched come from the cache (no Dhan call for them)`
 
 const progress = (p) => console.log(`PROGRESS ${JSON.stringify({ ...p, startedUtc, fetched: fetcher?.stats })}`)
 const istToday = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date())
@@ -65,18 +102,63 @@ const fetcher = createFetcher({
   base: BASE, key: KEY, today: istToday, cacheDir: CACHE_DIR,
   paceMs: Math.max(0, Number(process.env.TUNE_PACE_MS) || 0),
   retryScale: Math.max(0.0001, Number(process.env.TUNE_RETRY_SCALE) || 1),
+  // One day's data of one kind, at most this many fetches in a whole job - the hard stop on the retry rounds
+  // multiplying a day's 42 Dhan option-series calls. 2 covers the ordinary case (an incomplete OI day fetched once
+  // more), the third is the one retry round a genuinely busy server earns.
+  maxPerDay: Math.max(1, Math.min(10, Number(process.env.TUNE_MAX_FETCHES_PER_DAY) || 3)),
+  deadline: overBudget,
   // Always background priority: the live pages and the server scanner get Dhan first, the job what they leave (up to the
   // full 5/s while they are quiet) - a running job never slows the app down. (TUNE_PRIORITY=interactive overrides.)
   priority: () => (process.env.TUNE_PRIORITY === 'interactive' ? 'interactive' : 'background'),
   onWait: (w) => progress({ ...(lastScan ?? { stage: 'scan', day: null, done: 0, total: 0 }), wait: { ...w, until: new Date(Date.now() + w.waitMs).toISOString() } }),
 })
-const api = (path) => fetcher.api(path)
+const api = (path, opts = {}) => fetcher.api(path, { source: 'other', ...opts })
 /** Written beside the final name and moved onto it, so a reader never sees half a file. */
 const writeJson = (path, body, text = null) => {
   writeFileSync(`${path}.tmp`, text ?? JSON.stringify(body))
   renameSync(`${path}.tmp`, path)
 }
 const write = (body) => writeJson(OUT, body)
+/** What the job did, for the result and the history row - the whole point being that "it made N calls, these are
+ *  where they went" is countable afterwards instead of argued about. The per-endpoint and per-source counts are the
+ *  job's OWN requests to this server (exact); `dhan` is the server's account-wide Dhan counter read before and after
+ *  (so the live app's own calls during the job are in that delta too, which is why both are here). */
+const callReport = (stats, perKind, fast, dhan) => {
+  const oiFetches = perKind.oi?.fetches ?? 0
+  return {
+    note: 'byEndpoint / bySource count this job\'s own HTTP requests to this server, by endpoint (dates folded together) and by the part of the job that asked. optionChain turns the option-chain ones into Dhan option-series calls at the known 42 per per-day fetch; dhan is the server\'s own counter before and after, which is account-wide.',
+    requests: stats.requests, retries: stats.retries, cacheHits: stats.cacheHits, sharedInFlight: stats.shared,
+    daysSeededIntoCache: stats.seeded, waitedMs: stats.waitedMs,
+    maxFetchesPerDay: stats.maxPerDay, repeatFetches: stats.repeats, refusedOverThatLimit: stats.refused,
+    byEndpoint: stats.byEndpoint, bySource: stats.bySource, perKind,
+    optionChain: {
+      rangeWindowCalls: fast.windowCalls, serverPerDayFallbackCalls: fast.fallbackCalls,
+      daysSeededByRange: fast.seeded, daysFromWindows: fast.fromWindows, daysTheServerFellBackFor: fast.fromFallback,
+      perDayFetches: oiFetches, perDayCalls: oiFetches * 42,
+      total: fast.windowCalls + fast.fallbackCalls + oiFetches * 42,
+    },
+    dhan: {
+      atStart: dhan.first, atEnd: dhan.last, dailyLimit: dhan.dailyLimit,
+      caused: dhan.first != null && dhan.last != null ? dhan.last - dhan.first : null,
+      causedBackground: dhan.backgroundFirst != null && dhan.background != null ? dhan.background - dhan.backgroundFirst : null,
+    },
+  }
+}
+// Last resort. The cooperative checks above end a job inside its budget; this one covers the case none of them can -
+// the job stuck inside a single request that never returns at all. It writes a result naming the stage it was in and
+// stops, so there is no path out of this script that leaves no result behind. Unref'd: it never holds a job open.
+const WATCHDOG_MS = BUDGET_MS + Math.max(60_000, Math.round(BUDGET_MS * 0.25))
+const watchdog = setTimeout(() => {
+  try {
+    write({
+      ok: false, underlying: U, job, startedUtc, finishedUtc: new Date().toISOString(),
+      error: `the job was stopped: ${Math.round(WATCHDOG_MS / 60_000)} minute(s) in it was still in the "${state.stage}" stage, past its own ${budgetText} budget - ${state.scanned} of ${state.planned} day(s) scanned, ${state.skipped} left out, ${state.tuned} strategy(s) fine-tuned. Run it again (the days already fetched come from the cache) or with a shorter range.`,
+      budget: { minutes: budgetMinutes, stoppedBy: 'watchdog', ...state },
+    })
+  } catch { /* nothing further can be done */ }
+  process.exit(1)
+}, WATCHDOG_MS)
+watchdog.unref()
 
 // A full session is 375 minutes (09:15 - 15:30); a day with much less (a special / Muhurat session, a feed that started
 // late, a gap in the archive) would be scored as if it were a whole day - it is left out and listed with the reason.
@@ -94,7 +176,9 @@ async function previousSession(date, rowSize, plan) {
     try {
       // That day's own contract when it is a scanned day (the same request, so the same cache entry), else the default.
       const own = plan.find((x) => x.date === key)?.expiry
-      const body = await fetcher.dayApi('flow', key, dayPath(key, rowSize, own ? `&expiry=${own}` : ''), (b) => b?.bars?.length > 0)
+      // The same request a scanned day makes for itself, so one in-flight fetch is shared and a later day reads it
+      // from the disk cache - a neighbouring day is never a second Dhan fetch of the same day.
+      const body = await fetcher.dayApi('flow', key, dayPath(key, rowSize, own ? `&expiry=${own}` : ''), (b) => b?.bars?.length > 0, { source: 'previous-session' })
       if (body?.bars?.length) return { date: key, bars: body.bars }
     } catch (err) {
       if (err.transient) throw err // busy: the day is tried again later, not scanned without its profile
@@ -135,7 +219,7 @@ async function main() {
   if (WHAT !== 'trade' && WHAT !== 'option' && SEARCH === 'full' && countOiCombinations(OI_KEYS).over) {
     throw new Error(`more than ${OI_COMBO_CAP.toLocaleString('en-IN')} OI combinations with those OI inputs - untick some, or search step by step`)
   }
-  const config = await api('/api/scanner-runner/config').catch(() => ({}))
+  const config = await api('/api/scanner-runner/config', { source: 'config' }).catch(() => ({}))
   const cfg = { ...(config?.settings ?? {}) }
   const rowSize = cfg.orderFlow?.rowSizes?.[U] ?? DEFAULT_ROW_SIZES[U] ?? 1
   const trail = trailFor(cfg, U)
@@ -148,7 +232,7 @@ async function main() {
 
   // The days: the recorded (exact) ones, newest first; with includeEstimated, other weekdays too (rebuilt from 1-minute candles).
   // Spot + options needs no order flow: the past weekdays that have OI data are the days (holidays fail and are skipped).
-  const recorded = DATA === 'spot' ? [] : ((await api(`/api/order-flow/${U}/days`)) ?? []).filter((d) => !(d.isLive ?? d.live) && d.date < istToday && inRange(d.date))
+  const recorded = DATA === 'spot' ? [] : ((await api(`/api/order-flow/${U}/days`, { source: 'days' })) ?? []).filter((d) => !(d.isLive ?? d.live) && d.date < istToday && inRange(d.date))
   let plan = recorded.slice(0, MAX_DAYS).map((d) => ({ date: d.date, expiry: d.expiry ?? null, exact: true }))
   if (DATA === 'spot') plan = candidateWeekdays(MAX_DAYS + Math.ceil(MAX_DAYS / 4) + 6).map((date) => ({ date, expiry: null, exact: false }))
   else if (job.includeEstimated && plan.length < MAX_DAYS) {
@@ -165,7 +249,8 @@ async function main() {
     throw new Error(job.includeEstimated || DATA === 'spot' ? `no past days could be listed${range}` : `no recorded past days on the server${range} - include estimated days to tune on days rebuilt from 1-minute candles`)
   }
 
-  const expiries = await api(`/api/oi-replay/${U}/expiries`).catch(() => null)
+  state.planned = plan.length
+  const expiries = await api(`/api/oi-replay/${U}/expiries`, { source: 'expiries' }).catch(() => null)
   const expiryDate = U === 'BANKNIFTY' ? expiries?.month ?? null : expiries?.week ?? null
   const days = []
   const skipped = []
@@ -194,7 +279,7 @@ async function main() {
   // retried each strike; Dhan's limit is per second, so a short pause clears it.
   async function fetchRun(date) {
     for (let i = 0; ; i++) {
-      const run = await fetcher.dayApi('oi', date, oiQuery(date), oiValid)
+      const run = await fetcher.dayApi('oi', date, oiQuery(date), oiValid, { source: i === 0 ? 'option-chain-day' : 'option-chain-refetch' })
       const busy = run?.success ? busyStrikes(run).length : isTransientText(run?.error) ? 1 : 0
       if (!busy || i >= 1) return run
       const waitMs = 3_000 // once: the server already retried each strike; still incomplete -> skipped, tried once more at the end
@@ -216,13 +301,13 @@ async function main() {
       return { ...tuningDay(p.date, scanSpotDay({ bars, oi, filters: entryFilters }), { minuteBars: bars, heatmap: [] }, oi), estimated: false, quality: { minutes: bars.length, oiMinutes, source: 'spot', ...(optionErrors ? { optionErrors } : {}) } }
     }
     const expiryQuery = p.expiry ? `&expiry=${p.expiry}` : ''
-    const body = await fetcher.dayApi('flow', p.date, dayPath(p.date, rowSize, expiryQuery), (b) => b?.bars?.length >= MIN_SESSION_MINUTES)
+    const body = await fetcher.dayApi('flow', p.date, dayPath(p.date, rowSize, expiryQuery), (b) => b?.bars?.length >= MIN_SESSION_MINUTES, { source: 'futures-day' })
     if (!body?.bars?.length) throw new Error('no bars')
     const day = dayFromOrderFlow(body, p.date, U)
     if (day.minuteBars.length < MIN_SESSION_MINUTES) throw new Error(`futures bars for only ${day.minuteBars.length} of 375 minutes - a partial day`)
     const estimated = day.source === 'estimated' || day.source === 'truedata'
     const lotSize = day.meta?.lotSize ?? 1
-    const tape = estimated ? null : await fetcher.dayApi('tape', p.date, `/api/order-flow/${U}/tape?date=${p.date}&count=60000${expiryQuery}`, (t) => Array.isArray(t?.prints) && t.prints.length > 0)
+    const tape = estimated ? null : await fetcher.dayApi('tape', p.date, `/api/order-flow/${U}/tape?date=${p.date}&count=60000${expiryQuery}`, (t) => Array.isArray(t?.prints) && t.prints.length > 0, { source: 'tape' })
     const prints = estimated ? null : tape?.prints ?? []
     const run = await fetchRun(p.date)
     const optionErrors = checkRun(run)
@@ -244,16 +329,29 @@ async function main() {
     day.setups = day.setups.map((s) => (s.checks ? { ...s, checks: null } : s))
     delete day.byId
     days.push(day)
+    state.scanned = days.length
   }
   // Dhan allows 100,000 Data-API calls a day (https://dhanhq.co/docs/v2/), shared with the live pages and the server
   // scanner: the job stops scanning before it would take the last 10% (TUNE_DHAN_RESERVE) - the days it did not reach are
   // listed with the reason; run it again tomorrow (the days already fetched come from the disk cache).
   const reserve = Math.min(0.9, Math.max(0, Number(process.env.TUNE_DHAN_RESERVE ?? 0.1)))
+  // The server's own Dhan Data-API counter, read as the job goes: the FIRST and LAST readings are what make "this job
+  // caused N Dhan calls" a measured number in the result rather than a claim. (Account-wide, so the live app's own
+  // calls are in the delta too - `calls.byEndpoint` beside it is the job's own, exact.)
+  const dhan = { first: null, last: null, background: null, backgroundFirst: null, dailyLimit: null }
   const dhanBudgetLeft = async () => {
-    const u = await api(`/api/strategy-tuning/dhan-usage`).catch(() => null)
+    const u = await api(`/api/strategy-tuning/dhan-usage`, { source: 'dhan-usage' }).catch(() => null)
     if (!(u?.dailyLimit > 0)) return null
+    dhan.dailyLimit = u.dailyLimit
+    if (dhan.first == null) dhan.first = u.calls
+    dhan.last = u.calls
+    if (typeof u.backgroundCalls === 'number') {
+      if (dhan.backgroundFirst == null) dhan.backgroundFirst = u.backgroundCalls
+      dhan.background = u.backgroundCalls
+    }
     return u.calls < u.dailyLimit * (1 - reserve) ? null : `Dhan's daily Data-API limit nearly used (${u.calls.toLocaleString('en-IN')} of ${u.dailyLimit.toLocaleString('en-IN')} calls today) - stopped to leave the rest to the live app; run the job again tomorrow (the days already fetched come from the cache)`
   }
+  await dhanBudgetLeft().catch(() => null) // the first reading, before anything is fetched
   let stopped = null
   // A few days are fetched at once (the server still holds Dhan to its 5 calls a second): while one day's setups are
   // being worked out - that is this process's own CPU, with nothing in flight - the next days' data is already on its
@@ -265,36 +363,73 @@ async function main() {
   // point compared (range-check). Anything short of a match - or any trouble while prefetching - and the job carries
   // on exactly as before, a day at a time. The days it does bring back are put in the same cache the per-day path
   // reads, so nothing else about the job changes.
-  const fastOi = { used: false, reason: null, detail: null, checked: null, seeded: 0, windows: 0, calls: 0 }
+  const fastOi = {
+    used: false, reason: null, detail: null, checked: null, proof: null,
+    // seeded = days put in the cache the scan loop reads, so it never fetches them again. fromWindows / fromFallback
+    // split those by how the SERVER got them: out of a cycle window, or per-day inside the range request because a
+    // window could not answer. BOTH are seeded - a day the server already paid per-day for inside /range used to be
+    // the one the scan loop could still go and pay for a second time if it came back anything less than perfect.
+    seeded: 0, fromWindows: 0, fromFallback: 0, unusable: 0, unusableDays: [],
+    windows: 0, chunks: 0, calls: 0, windowCalls: 0, fallbackCalls: 0, serverFallbackDays: 0, unservedByServer: 0,
+  }
+  // The proof is kept beside the cache, so a rerun / a resumed job / tomorrow's job does not spend it again: the
+  // check costs a whole window of strike calls plus the same day fetched per-day (~84 Dhan calls) and proves a thing
+  // about this server and this Dhan account, which does not change between two jobs an hour apart.
+  const PROOF_TTL_MS = Math.max(0, Number(process.env.TUNE_CHECK_TTL_DAYS ?? 7)) * 86_400_000
+  const proofPath = CACHE_DIR ? join(CACHE_DIR, `range-check-${U}-${expiryFlagOf(U)}.json`) : null
+  const readProof = () => {
+    if (!proofPath || !PROOF_TTL_MS || !existsSync(proofPath)) return null
+    try {
+      const kept = JSON.parse(readFileSync(proofPath, 'utf8'))
+      return Date.parse(kept.at) > Date.now() - PROOF_TTL_MS ? kept : null
+    } catch { return null }
+  }
   async function prefetchOi() {
     if (process.env.TUNE_FAST_OI === 'off') return (fastOi.reason = 'switched off for this job')
     if (!CACHE_DIR) return (fastOi.reason = 'no cache directory to put the days in')
     const dates = plan.map((p) => p.date).filter((d) => d < istToday).sort()
     if (dates.length < 4) return (fastOi.reason = 'too few days to be worth it')
-    // However this goes, the job must get on with scanning: the whole prefetch is given a budget, and whatever is not
-    // fetched by then is simply fetched a day at a time later.
-    const until = Date.now() + Math.max(30_000, Number(process.env.TUNE_PREFETCH_BUDGET_MS) || 480_000)
+    // However this goes, the job must get on with scanning: the whole prefetch is given a budget - its own, and never
+    // past the job's overall one - and whatever is not fetched by then is simply fetched a day at a time later.
+    const own = Math.max(30_000, Number(process.env.TUNE_PREFETCH_BUDGET_MS) || 480_000)
+    const until = Math.min(Date.now() + own, DEADLINE_MS)
     const left = () => Math.max(0, until - Date.now())
-    // Proof first, on a day this job actually wants.
-    const mid = dates[Math.floor(dates.length / 2)]
     const flag = expiryFlagOf(U)
-    lastScan = { stage: 'prefetch', day: mid, done: 0, total: dates.length, checking: true }
-    progress(lastScan)
+    // Proof first - from disk when this server proved it recently, else on a day this job actually wants.
+    const kept = readProof()
     let check
-    try {
-      check = await api(`/api/oi-replay/${U}/range-check?${new URLSearchParams({ date: mid, timeframeMinutes: '1', expiryFlag: flag })}`,
-        { attempts: 1, timeoutMs: Math.max(30_000, Math.min(left(), Number(process.env.TUNE_CHECK_TIMEOUT_MS) || 150_000)) })
-    } catch (err) {
-      fastOi.detail = err.message
-      return (fastOi.reason = 'the check did not come back in time - every day fetched the proven way instead')
+    if (kept) {
+      fastOi.proof = `proved on ${kept.date} at ${kept.at} and kept for ${PROOF_TTL_MS / 86_400_000} day(s) - not proved again (a proof costs a window of strike calls plus the same day fetched per-day)`
+      check = kept
+    } else {
+      const mid = dates[Math.floor(dates.length / 2)]
+      lastScan = { stage: 'prefetch', day: mid, done: 0, total: dates.length, checking: true }
+      progress(lastScan)
+      try {
+        check = await api(`/api/oi-replay/${U}/range-check?${new URLSearchParams({ date: mid, timeframeMinutes: '1', expiryFlag: flag })}`,
+          { attempts: 1, timeoutMs: Math.max(30_000, Math.min(left(), Number(process.env.TUNE_CHECK_TIMEOUT_MS) || 150_000)), source: 'range-check' })
+      } catch (err) {
+        fastOi.detail = err.message
+        return (fastOi.reason = 'the check did not come back in time - every day fetched the proven way instead')
+      }
+      check = { ...check, date: mid, at: new Date().toISOString() }
+      fastOi.proof = 'proved on this job'
+      try {
+        mkdirSync(CACHE_DIR, { recursive: true })
+        writeJson(proofPath, { date: mid, at: check.at, match: !!check.match, windowDays: check.windowDays ?? null, differences: check?.comparison?.differences?.slice(0, 3) ?? [] })
+      }
+      catch { /* nowhere to keep it: proved again next job */ }
     }
-    fastOi.checked = { date: mid, match: !!check?.match, windowDays: check?.windowDays ?? null, differences: check?.comparison?.differences?.slice(0, 3) ?? [], error: check?.error ?? null }
+    fastOi.checked = { date: check.date, match: !!check?.match, windowDays: check?.windowDays ?? null, differences: check?.comparison?.differences?.slice(0, 3) ?? check?.differences ?? [], error: check?.error ?? null }
     if (!check?.match) {
-      fastOi.detail = check?.error ?? check?.comparison?.differences?.slice(0, 3).join(' · ') ?? null
+      fastOi.detail = check?.error ?? fastOi.checked.differences?.slice(0, 3).join(' · ') ?? null
       return (fastOi.reason = 'a day fetched a cycle at a time did not match the same day fetched on its own - every day fetched the proven way instead')
     }
-    // Proven on this job: bring the days back in chunks, oldest first.
-    const CHUNK = Math.max(2, Math.min(28, Number(process.env.TUNE_RANGE_DAYS) || 5))
+    // Proven: bring the days back in chunks, oldest first. A chunk is asked for as WIDE as one request may be (the
+    // server's own cap), not in little 5-day pieces: the server cuts a range at every real expiry itself, so a wide
+    // chunk becomes whole, properly-anchored cycle windows, while a narrow chunk cut across a cycle turned one
+    // window into two - 42 strike calls each - for the very same days.
+    const CHUNK = Math.max(2, Math.min(31, Number(process.env.TUNE_RANGE_DAYS) || 28))
     for (let i = 0; i < dates.length; i += CHUNK) {
       const from = dates[i]
       const to = dates[Math.min(i + CHUNK - 1, dates.length - 1)]
@@ -303,27 +438,46 @@ async function main() {
       progress(lastScan)
       let body
       try {
-        body = await api(`/api/oi-replay/${U}/range?${new URLSearchParams({ from, to, timeframeMinutes: '1', expiryFlag: flag })}`,
-          { attempts: 2, timeoutMs: Math.max(60_000, Math.min(left(), Number(process.env.TUNE_RANGE_TIMEOUT_MS) || 300_000)) })
+        // perDayFallback=false: a day no window could answer for is NOT fetched per-day inside this request. Those
+        // days come back named, and the scan loop fetches each one once, through the cache, at the job's own pace -
+        // instead of one huge request whose timeout would throw away every per-day call it had already made.
+        body = await api(`/api/oi-replay/${U}/range?${new URLSearchParams({ from, to, timeframeMinutes: '1', expiryFlag: flag, perDayFallback: 'false' })}`,
+          { attempts: 2, timeoutMs: Math.max(60_000, Math.min(left(), Number(process.env.TUNE_RANGE_TIMEOUT_MS) || 300_000)), source: 'range-window' })
       } catch (err) {
         fastOi.detail = err.message
         fastOi.reason = `${fastOi.seeded} day(s) came back this way; the rest fetched a day at a time`
         break
       }
+      fastOi.chunks++
       fastOi.windows += body?.windows?.length ?? 0
       fastOi.calls += body?.optionSeriesCalls ?? 0
+      fastOi.windowCalls += body?.windowOptionSeriesCalls ?? body?.optionSeriesCalls ?? 0
+      fastOi.fallbackCalls += body?.fallbackOptionSeriesCalls ?? 0
+      fastOi.serverFallbackDays += (body?.fallbackDays ?? []).length
+      fastOi.unservedByServer += (body?.unservedDays ?? []).length
       for (const run of body?.days ?? []) {
         const date = String(run?.date ?? '').slice(0, 10)
-        // Only a whole, healthy day is kept - the same test the per-day path applies (oiValid). Anything else is
-        // simply not cached, so the day loop fetches it the old way.
-        if (date && fetcher.putDay('oi', date, oiQuery(date), run, oiValid)) fastOi.seeded++
+        if (!date) continue
+        // EVERY day the range returned that is usable is kept - a window day and a day the server itself fell back
+        // per-day alike (the same test the per-day path applies, oiValid). A day that is not usable is named here,
+        // and the scan loop fetches it the old way, once.
+        if (fetcher.putDay('oi', date, oiQuery(date), run, oiValid)) {
+          fastOi.seeded++
+          if (run?.fetchSource === 'day') fastOi.fromFallback++
+          else fastOi.fromWindows++
+        } else {
+          fastOi.unusable++
+          if (fastOi.unusableDays.length < 20) fastOi.unusableDays.push(date)
+        }
       }
     }
     fastOi.used = fastOi.seeded > 0
     return fastOi.reason
   }
+  state.stage = 'prefetch'
   await prefetchOi()
   lastScan = null
+  state.stage = 'scan'
   progress({ stage: 'scan', day: plan[0]?.date, done: 0, total: plan.length, fastOi })
 
   const busy = []
@@ -331,9 +485,13 @@ async function main() {
     if (DATA === 'spot' && days.length >= MAX_DAYS) break
     lastScan = { stage: 'scan', day: plan[i].date, done: i, total: plan.length, scanned: days.length, skipped: skipped.length }
     progress(lastScan)
-    if ((stopped = await dhanBudgetLeft())) {
+    // Two hard stops before each batch, both of which END the job with a result rather than going quiet: Dhan's
+    // daily allowance running low, and the job's own time budget running out.
+    if (overBudget()) stopped = budgetStop = budgetReason()
+    if (stopped || (stopped = await dhanBudgetLeft())) {
       // (Spot + options lists spare weekdays for holidays: only as many as the days still wanted.)
       for (const rest of plan.slice(i, DATA === 'spot' ? i + Math.max(0, MAX_DAYS - days.length) : undefined)) skipped.push({ date: rest.date, reason: stopped, busy: true })
+      state.skipped = skipped.length
       break
     }
     const batch = plan.slice(i, i + AT_ONCE)
@@ -345,12 +503,16 @@ async function main() {
       else if (err.transient) busy.push({ p, err })
       else skipped.push({ date: p.date, reason: err.message })
     }
+    state.skipped = skipped.length
   }
   // Days the server or Dhan was too busy for: tried again, in rounds, with a pause between them. Being busy is a
   // passing thing - a day is only given up on after several rounds, and then it says so plainly rather than showing
   // whatever the server said.
   const ROUNDS = Math.max(1, Math.min(10, Number(process.env.TUNE_BUSY_ROUNDS) || 3))
-  for (let round = 1; busy.length && round <= ROUNDS; round++) {
+  state.stage = 'retry'
+  // A round is only entered while there is budget left for it - and a day is only fetched again at all while its own
+  // fetch ledger allows it (tuneFetch's maxPerDay), so the rounds cannot multiply one day's 42 option-series calls.
+  for (let round = 1; busy.length && round <= ROUNDS && !overBudget(); round++) {
     const waitMs = Number(process.env.TUNE_BUSY_PAUSE_MS ?? 10_000 * round)
     lastScan = { stage: 'retry', day: busy[0].p.date, done: 0, total: busy.length, round, rounds: ROUNDS, waitUntil: new Date(Date.now() + waitMs).toISOString() }
     progress(lastScan)
@@ -361,21 +523,27 @@ async function main() {
       if (DATA === 'spot' && days.length >= MAX_DAYS) break
       lastScan = { stage: 'retry', day: p.date, done: i, total: again.length, round, rounds: ROUNDS, scanned: days.length, skipped: skipped.length }
       progress(lastScan)
-      const out = stopped ?? await dhanBudgetLeft()
-      if (out) { stopped = out; skipped.push({ date: p.date, reason: out, busy: true }); continue }
+      const out = stopped ?? (overBudget() ? (budgetStop = budgetReason()) : await dhanBudgetLeft())
+      if (out) { stopped = out; skipped.push({ date: p.date, reason: out, busy: true }); state.skipped = skipped.length; continue }
       try { keepDay(await scanOne(p)) } catch (err) {
         if (err.transient && round < ROUNDS) busy.push({ p, err })
         else skipped.push({ date: p.date, reason: err.transient ? `the server stayed busy over ${ROUNDS} rounds - run the job again and the days already fetched come from the cache` : err.message, busy: !!err.transient })
       }
     }
   }
+  // Nothing is ever left in limbo: a day still waiting for a retry round that the budget (or the round count) ended
+  // is listed with its reason, so `days` + `skipped` always covers every day the job planned.
+  for (const { p, err } of busy.splice(0, busy.length)) {
+    skipped.push({ date: p.date, reason: budgetStop ?? stopped ?? `the server stayed busy over ${ROUNDS} rounds (${err?.message ?? 'busy'}) - run the job again and the days already fetched come from the cache`, busy: true })
+  }
+  state.skipped = skipped.length
   lastScan = null
   days.sort((a, b) => (a.date < b.date ? 1 : -1))
   // Spot + options counts the days that worked (holidays fail), and a batch can finish one or two past the number
   // asked for: the newest MAX_DAYS are kept.
   if (DATA === 'spot' && days.length > MAX_DAYS) days.length = MAX_DAYS
   skipped.sort((a, b) => (a.date < b.date ? 1 : -1))
-  if (!days.length) throw new Error(`none of the ${plan.length} day(s) could be scanned (${skipped[0]?.reason ?? 'unknown'})`)
+  if (!days.length) throw new Error(budgetStop ? `no day was scanned before ${budgetStop}` : `none of the ${plan.length} day(s) could be scanned (${skipped[0]?.reason ?? 'unknown'})`)
 
   progress({ stage: 'rank', done: days.length, total: days.length })
   const spotIds = SPOT_STRATEGIES.map((s) => s.id)
@@ -392,12 +560,35 @@ async function main() {
         return [...enough, ...rest].slice(0, want).map((r) => r.id)
       })()
   const results = []
+  state.stage = 'tune'
+  let tuneStop = null
   for (let i = 0; i < ids.length; i++) {
+    // Every combination of one strategy's filters is this process's own CPU and can run for minutes: no NEW strategy
+    // is started past the budget. The ones already measured are kept and written - a partial result, said plainly.
+    if (overBudget()) {
+      tuneStop = `the job's own time budget of ${budgetText} ran out after ${i} of ${ids.length} strategy(s) were fine-tuned - the rest were not started`
+      budgetStop ??= tuneStop
+      break
+    }
     progress({ stage: 'tune', strategy: ids[i], done: i, total: ids.length })
-    results.push(tuneStrategy(days, ids[i], {
-      trail, minTrades: MIN_TRADES, what: WHAT, oiKeys: OI_KEYS, search: SEARCH, underlying: U,
-      onProgress: (p) => progress({ stage: 'tune', strategy: ids[i], done: i, total: ids.length, ...p }),
-    }))
+    try {
+      results.push(tuneStrategy(days, ids[i], {
+        trail, minTrades: MIN_TRADES, what: WHAT, oiKeys: OI_KEYS, search: SEARCH, underlying: U,
+        // One strategy's own fine-tuning is this process's own CPU - tens of thousands of combinations, which no
+        // timer can interrupt. It reports every 250 of them, so that is where the budget is checked: past it this
+        // strategy is given up on from inside, and the strategies already measured are still written.
+        onProgress: (p) => {
+          if (overBudget()) throw Object.assign(new Error('over the job budget'), { overBudget: true })
+          progress({ stage: 'tune', strategy: ids[i], done: i, total: ids.length, ...p })
+        },
+      }))
+    } catch (err) {
+      if (!err.overBudget) throw err
+      tuneStop = `the job's own time budget of ${budgetText} ran out while fine-tuning ${STRATEGY_BY_ID[ids[i]]?.name ?? ids[i]} (${i} of ${ids.length} strategy(s) finished) - that one and the rest were left`
+      budgetStop ??= tuneStop
+      break
+    }
+    state.tuned = results.length
   }
   // The run's own place in the HISTORY, as CSV (no database): its trades - each strategy as written on every day
   // scanned, with why it fired, and each fine-tuned strategy's best setting - and the settings themselves, so a
@@ -408,31 +599,52 @@ async function main() {
     for (const t of res.best?.trades ?? []) trades.push({ id: res.id, no: res.no, name: res.name, setting: 'best', settingText: res.settingText, recommend: res.recommend, ...t })
   }
   trades.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0) || a.t - b.t || (a.no ?? 0) - (b.no ?? 0))
+  // The last reading of the server's Dhan counter, so the report's own before/after covers the whole job.
+  await dhanBudgetLeft().catch(() => null)
+  const calls = callReport(fetcher.stats, fetcher.perKind(), fastOi, dhan)
+  const budget = {
+    minutes: budgetMinutes, elapsedMinutes: Math.round((Date.now() - START_MS) / 60_000),
+    stoppedBy: budgetStop ? 'budget' : stopped ? 'dhan-limit' : null, reason: budgetStop ?? stopped ?? null,
+    daysPlanned: plan.length, daysScanned: days.length, daysLeftOut: skipped.length,
+    strategiesTuned: results.length, strategiesAsked: ids.length, tuningStopped: tuneStop,
+  }
   if (HISTORY_DIR) {
     const h = historyOf({
       underlying: U, data: DATA, finishedMs: Date.now(), what: WHAT, search: SEARCH, minTrades: MIN_TRADES, from: FROM, to: TO,
       days: days.map((d) => ({ date: d.date, estimated: d.estimated })), skipped, results, trades, fetched: fetcher.stats,
+      calls, budget,
     })
     mkdirSync(HISTORY_DIR, { recursive: true })
     writeJson(join(HISTORY_DIR, `${h.run_id}-trades.csv`), null, toCsv(TRADE_COLUMNS, h.trades))
     writeJson(join(HISTORY_DIR, `${h.run_id}-settings.csv`), null, toCsv(SETTING_COLUMNS, h.settings))
-    // runs.csv: the header once, then a line per run (appended - an older run is never rewritten).
+    // runs.csv: the header once, then a line per run (appended - an older run's own values are never rewritten).
+    // When a column has been ADDED since the file was written, the file is rebuilt with the new header and the old
+    // rows keep what they have - otherwise the new row would have more fields than the header and be dropped.
     const runsPath = join(HISTORY_DIR, 'runs.csv')
-    const line = toCsv(RUN_COLUMNS, [h.run])
-    appendFileSync(runsPath, existsSync(runsPath) ? line.slice(line.indexOf('\n') + 1) : line)
+    const next = runsCsvWith(existsSync(runsPath) ? readFileSync(runsPath, 'utf8') : null, RUN_COLUMNS, h.run)
+    if (next.append) appendFileSync(runsPath, next.append)
+    else writeJson(runsPath, null, next.text)
     console.log(`HISTORY ${h.run_id} (${h.trades.length} trades, ${h.settings.length} settings)`)
   }
   write({
     ok: true, underlying: U, job, startedUtc, finishedUtc: new Date().toISOString(), rowSize, trail, minTrades: MIN_TRADES, what: WHAT, search: SEARCH, data: DATA, from: FROM, to: TO, oiFactors: OI_KEYS ?? OI_FACTORS.map((f) => f.key),
     grid: WHAT === 'trade' ? TUNING_GRID : WHAT === 'oi' ? oiGridOf(OI_KEYS) : WHAT === 'option' ? OPTION_GRID : WHAT === 'all' ? { ...oiGridOf(OI_KEYS), ...TUNING_GRID, ...OPTION_GRID } : { ...oiGridOf(OI_KEYS), ...TUNING_GRID },
     days: days.map((d) => ({ date: d.date, estimated: d.estimated, setups: d.setups.length, ...d.quality })), skipped, ranked, results, fetched: fetcher.stats, fastOi,
-    strategies: ACTIVE_STRATEGIES.length,
+    strategies: ACTIVE_STRATEGIES.length, calls, budget,
   })
-  progress({ stage: 'done', done: ids.length, total: ids.length })
+  clearTimeout(watchdog)
+  state.stage = 'done'
+  progress({ stage: 'done', done: results.length, total: ids.length, budget })
 }
 
 main().catch((err) => {
   console.error(err.stack ?? err.message)
-  write({ ok: false, underlying: U, job, startedUtc, finishedUtc: new Date().toISOString(), error: err.message })
+  clearTimeout(watchdog)
+  // A failure writes a result too, with the stage it failed in and what it had got through - never a silent exit.
+  write({
+    ok: false, underlying: U, job, startedUtc, finishedUtc: new Date().toISOString(), error: err.message,
+    budget: { minutes: budgetMinutes, elapsedMinutes: Math.round((Date.now() - START_MS) / 60_000), stoppedBy: budgetStop ? 'budget' : 'error', reason: budgetStop, ...state },
+    calls: callReport(fetcher.stats, fetcher.perKind(), { windowCalls: 0, fallbackCalls: 0, seeded: 0, fromWindows: 0, fromFallback: 0 }, { first: null, last: null, background: null, backgroundFirst: null, dailyLimit: null }),
+  })
   process.exit(1)
 })

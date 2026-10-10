@@ -144,6 +144,9 @@ builder.Services.AddSingleton<StoredRollingOptionDataService>();
 builder.Services.AddSingleton<StoredSpotDataService>();
 // Backs the OI Replay page - stored-data-first for spot/options, with a live Dhan fallback outside
 // local development, and futures ALWAYS a live Dhan call (see its own doc comment for all three).
+// One past day's futures candles, fetched once however many endpoints want them: OI Replay's own futures fetch and
+// the Order Flow page's Load day both ask for the same contract-day (see PastFuturesCandleCache).
+builder.Services.AddSingleton<OptionAnalytics.Server.Dhan.PastFuturesCandleCache>();
 builder.Services.AddSingleton<OiReplayService>();
 // Backs the Strike Data page's own OI/IV columns - stored-only (NiftyDataCollectorTimescale), no
 // live Dhan fallback, and unavailable for SENSEX - see its own doc comment for why.

@@ -74,9 +74,15 @@ public sealed class OiReplayController : ControllerBase
         [FromQuery] DateOnly to,
         [FromQuery] int timeframeMinutes,
         [FromQuery] string expiryFlag,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        // Defaults to true, so every existing caller behaves exactly as before. false instead: a day no window could
+        // answer for is returned as an unsuccessful day naming that, listed in unservedDays, and NO Dhan call is spent
+        // on it inside this request - the caller fetches it through .../run itself. The strategy tuning job asks for
+        // that, so one range request timing out can never throw away per-day calls already made inside it (and so the
+        // calls it did make are split in the response: windowOptionSeriesCalls vs fallbackOptionSeriesCalls).
+        [FromQuery] bool perDayFallback = true)
     {
-        var result = await _service.RunRangeAsync(underlying.ToUpperInvariant(), from, to, timeframeMinutes, expiryFlag.ToUpperInvariant(), cancellationToken);
+        var result = await _service.RunRangeAsync(underlying.ToUpperInvariant(), from, to, timeframeMinutes, expiryFlag.ToUpperInvariant(), cancellationToken, perDayFallback);
         // A refusal is the caller's own mistake to fix (too wide a range, an unsupported underlying,
         // a future date), so it answers 400 with the reason rather than a 200 nobody checks.
         return result.Success ? Ok(result) : BadRequest(result);
