@@ -321,6 +321,9 @@ builder.Services.AddSingleton<TradeSettingsStore>();
 // everything and turns Dhan's kill switch on at the limit (KillSwitchService; risk-settings.csv).
 builder.Services.AddSingleton<RiskSettingsStore>();
 // The strategy tuning job (scanner-runner/tune.mjs) - StrategyTuningService / StrategyTuningController.
+// FastOiRange (default true) is the one switch that turns the OI range endpoint's many-days-per-Dhan-call
+// path off and puts every day back on the proven per-day fetch - see StrategyTuningOptions.
+builder.Services.Configure<StrategyTuningOptions>(builder.Configuration.GetSection(StrategyTuningOptions.SectionName));
 builder.Services.AddSingleton<StrategyTuningService>();
 builder.Services.AddHostedService<StrategyTuningResumeHostedService>();
 builder.Services.AddSingleton<DhanTradersControlClient>();
