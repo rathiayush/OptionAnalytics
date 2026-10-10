@@ -257,7 +257,7 @@ async function main() {
   // point compared (range-check). Anything short of a match - or any trouble while prefetching - and the job carries
   // on exactly as before, a day at a time. The days it does bring back are put in the same cache the per-day path
   // reads, so nothing else about the job changes.
-  const fastOi = { used: false, reason: null, checked: null, seeded: 0, windows: 0, calls: 0 }
+  const fastOi = { used: false, reason: null, detail: null, checked: null, seeded: 0, windows: 0, calls: 0 }
   async function prefetchOi() {
     if (process.env.TUNE_FAST_OI === 'off') return (fastOi.reason = 'switched off for this job')
     if (!CACHE_DIR) return (fastOi.reason = 'no cache directory to put the days in')
@@ -277,10 +277,14 @@ async function main() {
       check = await api(`/api/oi-replay/${U}/range-check?${new URLSearchParams({ date: mid, timeframeMinutes: '1', expiryFlag: flag })}`,
         { attempts: 1, timeoutMs: Math.max(30_000, Math.min(left(), Number(process.env.TUNE_CHECK_TIMEOUT_MS) || 150_000)) })
     } catch (err) {
-      return (fastOi.reason = `the check could not be run (${err.message})`)
+      fastOi.detail = err.message
+      return (fastOi.reason = 'the check did not come back in time - every day fetched the proven way instead')
     }
     fastOi.checked = { date: mid, match: !!check?.match, windowDays: check?.windowDays ?? null, differences: check?.comparison?.differences?.slice(0, 3) ?? [], error: check?.error ?? null }
-    if (!check?.match) return (fastOi.reason = `a day fetched a cycle at a time did not match the same day fetched on its own${check?.error ? ` (${check.error})` : ''} - every day fetched the proven way instead`)
+    if (!check?.match) {
+      fastOi.detail = check?.error ?? check?.comparison?.differences?.slice(0, 3).join(' · ') ?? null
+      return (fastOi.reason = 'a day fetched a cycle at a time did not match the same day fetched on its own - every day fetched the proven way instead')
+    }
     // Proven on this job: bring the days back in chunks, oldest first.
     const CHUNK = Math.max(2, Math.min(28, Number(process.env.TUNE_RANGE_DAYS) || 5))
     for (let i = 0; i < dates.length; i += CHUNK) {
@@ -294,7 +298,8 @@ async function main() {
         body = await api(`/api/oi-replay/${U}/range?${new URLSearchParams({ from, to, timeframeMinutes: '1', expiryFlag: flag })}`,
           { attempts: 2, timeoutMs: Math.max(60_000, Math.min(left(), Number(process.env.TUNE_RANGE_TIMEOUT_MS) || 300_000)) })
       } catch (err) {
-        fastOi.reason = `stopped after ${fastOi.seeded} day(s): ${err.message} - the rest fetched a day at a time`
+        fastOi.detail = err.message
+        fastOi.reason = `${fastOi.seeded} day(s) came back this way; the rest fetched a day at a time`
         break
       }
       fastOi.windows += body?.windows?.length ?? 0
@@ -333,19 +338,30 @@ async function main() {
       else skipped.push({ date: p.date, reason: err.message })
     }
   }
-  // Days the server / Dhan was too busy for, even after the retries: once more after a pause, then listed as skipped.
-  if (busy.length) {
-    progress({ stage: 'scan', day: busy[0].p.date, done: plan.length, total: plan.length, retrying: busy.length, wait: { label: 'busy days', waitMs: 10_000, until: new Date(Date.now() + 10_000).toISOString(), reason: `${busy.length} day(s) the server was too busy for - trying them again` } })
-    await new Promise((resolve) => setTimeout(resolve, Number(process.env.TUNE_BUSY_PAUSE_MS ?? 10_000)))
-    for (const { p } of busy) {
+  // Days the server or Dhan was too busy for: tried again, in rounds, with a pause between them. Being busy is a
+  // passing thing - a day is only given up on after several rounds, and then it says so plainly rather than showing
+  // whatever the server said.
+  const ROUNDS = Math.max(1, Math.min(10, Number(process.env.TUNE_BUSY_ROUNDS) || 3))
+  for (let round = 1; busy.length && round <= ROUNDS; round++) {
+    const waitMs = Number(process.env.TUNE_BUSY_PAUSE_MS ?? 10_000 * round)
+    lastScan = { stage: 'retry', day: busy[0].p.date, done: 0, total: busy.length, round, rounds: ROUNDS, waitUntil: new Date(Date.now() + waitMs).toISOString() }
+    progress(lastScan)
+    await new Promise((resolve) => setTimeout(resolve, waitMs))
+    const again = busy.splice(0, busy.length)
+    for (let i = 0; i < again.length; i++) {
+      const { p } = again[i]
       if (DATA === 'spot' && days.length >= MAX_DAYS) break
-      lastScan = { stage: 'scan', day: p.date, done: plan.length, total: plan.length, retrying: busy.length, scanned: days.length, skipped: skipped.length }
+      lastScan = { stage: 'retry', day: p.date, done: i, total: again.length, round, rounds: ROUNDS, scanned: days.length, skipped: skipped.length }
       progress(lastScan)
       const out = stopped ?? await dhanBudgetLeft()
       if (out) { stopped = out; skipped.push({ date: p.date, reason: out, busy: true }); continue }
-      try { keepDay(await scanOne(p)) } catch (err) { skipped.push({ date: p.date, reason: err.message, busy: !!err.transient }) }
+      try { keepDay(await scanOne(p)) } catch (err) {
+        if (err.transient && round < ROUNDS) busy.push({ p, err })
+        else skipped.push({ date: p.date, reason: err.transient ? `the server stayed busy over ${ROUNDS} rounds - run the job again and the days already fetched come from the cache` : err.message, busy: !!err.transient })
+      }
     }
   }
+  lastScan = null
   days.sort((a, b) => (a.date < b.date ? 1 : -1))
   // Spot + options counts the days that worked (holidays fail), and a batch can finish one or two past the number
   // asked for: the newest MAX_DAYS are kept.

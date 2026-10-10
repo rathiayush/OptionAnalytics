@@ -184,10 +184,27 @@ function JobDetail({ p, startedUtc }) {
         {left != null && ` · about ${secs(left)} of scanning left`}
       </Text>
       {pre && <Text type="secondary" style={{ fontSize: 12 }}>fetching the option chain a cycle at a time: {pre.from} to {pre.to} ({pre.seeded} of {pre.of} day(s) so far)</Text>}
-      {p.fastOi && !p.fastOi.used && p.fastOi.reason && <Alert type="info" showIcon style={{ padding: '2px 8px' }} message={<span style={{ fontSize: 12 }}>Fetching a day at a time: {p.fastOi.reason}</span>} />}
-      {wait && <Alert type="warning" showIcon style={{ padding: '2px 8px' }} message={<span style={{ fontSize: 12 }}>The server / Dhan is busy - waiting {secs(Date.parse(wait.until) - now)} before try {wait.attempt} of {wait.of} ({wait.label}): {wait.reason}</span>} />}
+      {p.fastOi && !p.fastOi.used && p.fastOi.reason && <Text type="secondary" style={{ fontSize: 12 }}>Fetching a day at a time: {p.fastOi.reason}{p.fastOi.detail ? <Tooltip title={p.fastOi.detail}> <u>why</u></Tooltip> : null}</Text>}
+      {wait && <Text type="secondary" style={{ fontSize: 12 }}>the data service is busy - trying again in {secs(Date.parse(wait.until) - now)} (this is handled; the job carries on by itself)</Text>}
     </Space>
   )
+}
+
+/** The days left out, by cause - the market having no data for a day is ordinary and not a fault; the data service
+ *  staying busy is the only one worth acting on, and then only by running the job again. The day-by-day reasons are
+ *  in the days table below rather than shouted here. */
+function SkippedDays({ skipped }) {
+  const busy = skipped.filter((s) => s.busy)
+  const noData = skipped.filter((s) => !s.busy)
+  const part = noData.filter((s) => /partial day/.test(s.reason ?? ''))
+  const missing = noData.filter((s) => !/partial day/.test(s.reason ?? ''))
+  const bits = [
+    missing.length && `${missing.length} the market or the archive has no data for (a holiday, or a contract that has expired)`,
+    part.length && `${part.length} that only part of the session was there for`,
+    busy.length && `${busy.length} the data service stayed busy for - run the job again and the days already fetched come straight from the cache`,
+  ].filter(Boolean)
+  return <Alert type={busy.length ? 'warning' : 'info'} showIcon style={{ marginBottom: 8 }}
+    message={`${skipped.length} day(s) left out of this run`} description={<span style={{ fontSize: 12 }}>{bits.join(' · ')}. Each one is listed with its own reason under the days below.</span>} />
 }
 
 /** The days a result was measured on - where each came from and how complete it was - and the days left out, with why. */
@@ -302,12 +319,14 @@ export default function StrategyTuningPage() {
     : p.stage === 'prefetch' ? (p.checking
       ? `checking the option chain can be fetched a cycle at a time (${p.day ?? ''})`
       : `fetching the option chain a cycle at a time: ${p.prefetch?.from ?? p.day ?? ''} to ${p.prefetch?.to ?? ''}${nOf(p.total) ? ` (${nOf(p.done) ?? 0} of ${p.total} days so far)` : ''}`)
+    : p.stage === 'retry' ? `coming back to ${nOf(p.total) ?? ''} day(s) the data service was busy for (round ${p.round} of ${p.rounds})`
     : p.stage === 'scan' ? (p.retrying ? `trying again ${p.day ?? ''} (${p.retrying} day(s) the server was busy for)` : `scanning ${p.day ?? ''}${ofDays(p.done, p.total)}`)
     : p.stage === 'rank' ? 'ranking the strategies'
     : p.stage === 'tune' ? `tuning #${STRATEGY_BY_ID[p.strategy]?.no} ${STRATEGY_BY_ID[p.strategy]?.name ?? p.strategy}${nOf(p.total) ? ` (${(nOf(p.done) ?? 0) + 1} of ${p.total})` : ''}${p.of ? `, ${p.tried.toLocaleString('en-IN')} of ${p.of.toLocaleString('en-IN')} OI combinations` : ''}`
     : p.stage
   const percent = !p ? 0
     : p.stage === 'prefetch' ? Math.round((nOf(p.done) ?? 0) / Math.max(1, nOf(p.total) ?? 1) * 10)
+    : p.stage === 'retry' ? 80
     : p.stage === 'scan' ? 10 + Math.round(((nOf(p.done) ?? 0) / Math.max(1, nOf(p.total) ?? 1)) * 70)
     : p.stage === 'rank' ? 80
     : p.stage === 'tune' ? 80 + Math.round((((nOf(p.done) ?? 0) + (p.of ? Math.min(1, p.tried / p.of) : 0)) / Math.max(1, nOf(p.total) ?? 1)) * 20)
@@ -428,7 +447,7 @@ export default function StrategyTuningPage() {
             <Card size="small" title={`${result.underlying} · ${result.days?.length ?? 0} day(s) · finished ${when(result.finishedUtc)}`}
               extra={<Text type="secondary" style={{ fontSize: 11 }}>{result.what ? `tuned: ${{ both: 'OI, then trade', oi: 'OI confirmation', trade: 'trade settings', option: 'option trade', all: 'everything' }[result.what] ?? result.what}${['both', 'oi', 'all'].includes(result.what) && result.oiFactors ? ` (${result.oiFactors.length} OI input(s), ${result.search === 'full' ? 'every combination' : 'step by step'})` : ''} · ` : ''}{result.days?.filter((d) => d.estimated).length ? `${result.days.filter((d) => d.estimated).length} estimated day(s) · ` : ''}min {result.minTrades} trades · {result.days?.[result.days.length - 1]?.date} to {result.days?.[0]?.date}{result.from || result.to ? ` (range asked: ${result.from ?? 'start'} to ${result.to ?? 'yesterday'})` : ''}</Text>}>
               {result.data === 'spot' && <Alert type="info" showIcon style={{ marginBottom: 8 }} message="Spot + options only: the index candles and the option chain's OI, no futures and no order flow. Points are index points; the option bought and sold are priced beside them. The live scanner does not run these strategies yet, so there is nothing to apply - this measures what they would have done." />}
-              {result.skipped?.length > 0 && <Alert type="warning" showIcon style={{ marginBottom: 8 }} message={`${result.skipped.length} day(s) could not be scanned`} description={result.skipped.slice(0, 5).map((s) => `${s.date}: ${s.reason}`).join(' · ')} />}
+              {result.skipped?.length > 0 && <SkippedDays skipped={result.skipped} />}
               <Table size="small" rowKey="id" columns={rankedColumns} dataSource={result.ranked ?? []} pagination={false} scroll={{ y: 320 }} />
               <details style={{ marginTop: 8 }}>
                 <summary style={{ cursor: 'pointer', fontSize: 12 }}>The {result.days?.length ?? 0} day(s) used{result.skipped?.length ? ` and ${result.skipped.length} left out` : ''}: where each came from and how complete it was{result.fetched ? ` · ${result.fetched.cacheHits} read from the disk cache, ${result.fetched.requests} fetched${result.fetched.retries ? `, ${result.fetched.retries} retried` : ''}` : ''}{result.fastOi?.used ? ` · option chain fetched a cycle at a time (${result.fastOi.seeded} day(s), checked against a day fetched on its own)` : result.fastOi?.reason ? ` · option chain fetched a day at a time: ${result.fastOi.reason}` : ''}</summary>
