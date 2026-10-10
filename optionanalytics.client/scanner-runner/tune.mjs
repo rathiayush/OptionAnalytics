@@ -251,6 +251,57 @@ async function main() {
   // being worked out - that is this process's own CPU, with nothing in flight - the next days' data is already on its
   // way, instead of the job going quiet between days.
   const AT_ONCE = Math.max(1, Math.min(8, Number(process.env.TUNE_DAYS_AT_ONCE) || 3))
+  // ---- the option chain, a whole expiry cycle per Dhan call -----------------------------------------------------
+  // Dhan serves up to 30 days of a strike's history in ONE call, so a cycle of days costs 42 calls instead of 42 a
+  // day. It is used only once the server has PROVED it on this very job: one day is fetched both ways and every OI
+  // point compared (range-check). Anything short of a match - or any trouble while prefetching - and the job carries
+  // on exactly as before, a day at a time. The days it does bring back are put in the same cache the per-day path
+  // reads, so nothing else about the job changes.
+  const fastOi = { used: false, reason: null, checked: null, seeded: 0, windows: 0, calls: 0 }
+  async function prefetchOi() {
+    if (process.env.TUNE_FAST_OI === 'off') return (fastOi.reason = 'switched off for this job')
+    if (!CACHE_DIR) return (fastOi.reason = 'no cache directory to put the days in')
+    const dates = plan.map((p) => p.date).filter((d) => d < istToday).sort()
+    if (dates.length < 4) return (fastOi.reason = 'too few days to be worth it')
+    // Proof first, on a day this job actually wants.
+    const mid = dates[Math.floor(dates.length / 2)]
+    const flag = expiryFlagOf(U)
+    let check
+    try {
+      check = await api(`/api/oi-replay/${U}/range-check?${new URLSearchParams({ date: mid, timeframeMinutes: '1', expiryFlag: flag })}`)
+    } catch (err) {
+      return (fastOi.reason = `the check could not be run (${err.message})`)
+    }
+    fastOi.checked = { date: mid, match: !!check?.match, windowDays: check?.windowDays ?? null, differences: check?.comparison?.differences?.slice(0, 3) ?? [], error: check?.error ?? null }
+    if (!check?.match) return (fastOi.reason = `a day fetched a cycle at a time did not match the same day fetched on its own${check?.error ? ` (${check.error})` : ''} - every day fetched the proven way instead`)
+    // Proven on this job: bring the days back in chunks, oldest first.
+    const CHUNK = Math.max(2, Math.min(28, Number(process.env.TUNE_RANGE_DAYS) || 7))
+    for (let i = 0; i < dates.length; i += CHUNK) {
+      const from = dates[i]
+      const to = dates[Math.min(i + CHUNK - 1, dates.length - 1)]
+      progress({ stage: 'scan', day: from, done: 0, total: plan.length, prefetch: { from, to, seeded: fastOi.seeded, of: dates.length } })
+      let body
+      try {
+        body = await api(`/api/oi-replay/${U}/range?${new URLSearchParams({ from, to, timeframeMinutes: '1', expiryFlag: flag })}`)
+      } catch (err) {
+        fastOi.reason = `stopped after ${fastOi.seeded} day(s): ${err.message} - the rest fetched a day at a time`
+        break
+      }
+      fastOi.windows += body?.windows?.length ?? 0
+      fastOi.calls += body?.optionSeriesCalls ?? 0
+      for (const run of body?.days ?? []) {
+        const date = String(run?.date ?? '').slice(0, 10)
+        // Only a whole, healthy day is kept - the same test the per-day path applies (oiValid). Anything else is
+        // simply not cached, so the day loop fetches it the old way.
+        if (date && fetcher.putDay('oi', date, oiQuery(date), run, oiValid)) fastOi.seeded++
+      }
+    }
+    fastOi.used = fastOi.seeded > 0
+    return fastOi.reason
+  }
+  await prefetchOi()
+  progress({ stage: 'scan', day: plan[0]?.date, done: 0, total: plan.length, fastOi })
+
   const busy = []
   for (let i = 0; i < plan.length; i += AT_ONCE) {
     if (DATA === 'spot' && days.length >= MAX_DAYS) break
@@ -339,7 +390,7 @@ async function main() {
   write({
     ok: true, underlying: U, job, startedUtc, finishedUtc: new Date().toISOString(), rowSize, trail, minTrades: MIN_TRADES, what: WHAT, search: SEARCH, data: DATA, from: FROM, to: TO, oiFactors: OI_KEYS ?? OI_FACTORS.map((f) => f.key),
     grid: WHAT === 'trade' ? TUNING_GRID : WHAT === 'oi' ? oiGridOf(OI_KEYS) : WHAT === 'option' ? OPTION_GRID : WHAT === 'all' ? { ...oiGridOf(OI_KEYS), ...TUNING_GRID, ...OPTION_GRID } : { ...oiGridOf(OI_KEYS), ...TUNING_GRID },
-    days: days.map((d) => ({ date: d.date, estimated: d.estimated, setups: d.setups.length, ...d.quality })), skipped, ranked, results, fetched: fetcher.stats,
+    days: days.map((d) => ({ date: d.date, estimated: d.estimated, setups: d.setups.length, ...d.quality })), skipped, ranked, results, fetched: fetcher.stats, fastOi,
     strategies: ACTIVE_STRATEGIES.length,
   })
   progress({ stage: 'done', done: ids.length, total: ids.length })

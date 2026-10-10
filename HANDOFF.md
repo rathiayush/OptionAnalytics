@@ -83,6 +83,22 @@ tuner honesty items (min days, day-clustered error, held-out final check), `open
   estimated days (1-minute candles, no tape / depth); estimated futures older than ~2.5 months need NSE's chart service (blocked from
   some hosting IPs) - those days are skipped with the reason; SENSEX futures only for the current contract. Spot + options mode needs
   no futures and covers the whole range. Ideas: persist recorded order-flow days to disk; reuse `ExpiredOptionDataStore` for `/run`.
+- SPEED (10 Oct). Measured on 120 days: tuning one strategy's trade settings took 53-97 s; the 7,200 combinations hold
+  only 400 different answers (sides / window / OI pick WHICH setups are taken, never what a taken one does), so an
+  outcome cache keyed by `outcomeKey` (stop, target, time stop, trail) + walking combinations in that order gives
+  ~4.4x (13.5 / 22 s). Each combination keeps its place (`at`) so ties still resolve as before; old vs new compared
+  over 32 runs, identical. Limiter: background work uses the whole 5/s while nothing interactive asked in the last 5 s,
+  else leaves one permit free. The job scans `TUNE_DAYS_AT_ONCE` (3) days at once, shares identical in-flight fetches
+  and writes cache files under a unique temp name.
+- OPTION CHAIN A CYCLE AT A TIME (10 Oct): `GET /api/oi-replay/{U}/range?from&to` returns each day in the same shape
+  as `/run`, fetched one Dhan call per strike per EXPIRY CYCLE (windows never cross an expiry; the expiry day itself
+  stays per-day). `GET .../range-check?date=` fetches one day BOTH ways and compares every OI point. `/run` is
+  unchanged (`viaRange=true` is opt-in). Off switch `StrategyTuning:FastOiRange`. The job (`prefetchOi` in tune.mjs)
+  runs range-check on a day of ITS OWN plan first and only then prefetches, putting each healthy day into the same
+  disk cache the per-day path reads (`fetcher.putDay`) - so any day not seeded is simply fetched the old way.
+  `TUNE_FAST_OI=off`, `TUNE_RANGE_DAYS` (7). NOT verified against real Dhan: that a multi-day window returns the same
+  per-minute values as a single-day call (that is what range-check is for), per-day ATM+-K resolution inside a window,
+  holiday-shifted expiries, multi-day futures `oi:true`.
 - Fine-tune HISTORY, CSV only (10 Oct): every run is kept under `{tuning}/history/` - `runs.csv` (a row per run),
   `{run_id}-trades.csv` and `{run_id}-settings.csv` (`scanner-runner/tuneHistory.mjs`; run_id = `{INDEX}-{data}-{yyyyMMdd-HHmmss}` IST).
   A run is never overwritten, so a strategy can be compared run by run; the Trades page lists the runs, defaults to the newest

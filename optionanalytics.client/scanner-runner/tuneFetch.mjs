@@ -177,5 +177,21 @@ export function createFetcher({ base = '', key = '', cacheDir = null, today, att
     try { return await pending } finally { inFlight.delete(path) }
   }
 
-  return { api, dayApi, stats }
+  /** Puts a PAST day's body into the cache as if it had been fetched for `path` - so a later `dayApi` for that day
+   *  reads it from disk and asks the server nothing. Used by a range fetch that brought many days back at once; a body
+   *  that fails `valid` is not kept. Returns whether it was kept. */
+  function putDay(name, date, path, body, valid = (b) => b != null) {
+    if (!cacheDir || typeof date !== 'string' || !(date < today) || !valid(body)) return false
+    const file = fileOf(name, date, path)
+    try {
+      mkdirSync(dirname(file), { recursive: true })
+      const tmp = `${file}.${process.pid}.p${(stats.cacheWrites + 1).toString(36)}.tmp`
+      writeFileSync(tmp, gzipSync(JSON.stringify(body)))
+      renameSync(tmp, file)
+      stats.cacheWrites++
+      return true
+    } catch { return false }
+  }
+
+  return { api, dayApi, putDay, stats }
 }
