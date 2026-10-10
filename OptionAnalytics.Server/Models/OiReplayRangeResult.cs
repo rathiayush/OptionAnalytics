@@ -48,6 +48,29 @@ public sealed record OiReplayRangeResult(
     /// app made, not chunks Dhan internally split a window into.</summary>
     public int OptionSeriesCalls { get; init; }
 
+    /// <summary>Of OptionSeriesCalls, the ones spent on WINDOW fetches (a whole expiry cycle of days
+    /// per call - the point of this endpoint).</summary>
+    public int WindowOptionSeriesCalls { get; init; }
+
+    /// <summary>Of OptionSeriesCalls, the ones spent falling back to the per-day path INSIDE this
+    /// request (42 per day). Always 0 when PerDayFallback is false. Reported separately because a
+    /// window's own calls being spent AND its days' per-day calls being spent on top is exactly the
+    /// doubling a caller counting Dhan calls needs to be able to see.</summary>
+    public int FallbackOptionSeriesCalls { get; init; }
+
+    /// <summary>Whether this request was allowed to fetch a day the per-day way itself (the default,
+    /// and what every existing caller gets). False: a day no window could answer for is returned as
+    /// an unsuccessful day carrying that reason and named in UnservedDays, with NO Dhan call spent on
+    /// it - the caller fetches it through the per-day endpoint itself, once, through its own cache
+    /// and at its own pace. The strategy tuning job asks for that, so one range request's own
+    /// timeout can never throw away per-day calls it had already made inside it.</summary>
+    public bool PerDayFallback { get; init; } = true;
+
+    /// <summary>With PerDayFallback false: the days a window did not answer for and that this request
+    /// therefore did NOT fetch at all. Always empty when PerDayFallback is true (those days are in
+    /// FallbackDays instead, fetched).</summary>
+    public IReadOnlyList<DateOnly> UnservedDays { get; init; } = Array.Empty<DateOnly>();
+
     /// <summary>Why NO window was used at all and every day came from the ordinary per-day path -
     /// the server setting StrategyTuning:FastOiRange being off, or an underlying whose expiry cadence
     /// this app's own expiry calendar cannot establish (SENSEX). Null when the fast path was in use.

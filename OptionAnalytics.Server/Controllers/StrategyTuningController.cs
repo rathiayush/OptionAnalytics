@@ -71,12 +71,14 @@ public sealed class StrategyTuningController : ControllerBase
 
     /// <summary>GET /api/strategy-tuning/dhan-usage - Dhan Data-API calls this server made today (IST) against Dhan's
     /// documented 100,000/day: shown on the page, and read by the tuning job before each day so it never takes the last of
-    /// the day's allowance from the live app.</summary>
+    /// the day's allowance from the live app. backgroundCalls is how many of those were background calls (every request a
+    /// tuning job makes is one), which the job reads before and after itself so its result can say how many Dhan calls it
+    /// caused as a measured number rather than an estimate.</summary>
     [HttpGet("dhan-usage")]
     public IActionResult DhanUsage()
     {
-        var (day, calls, limit) = _dhanLimiter.Usage();
-        return Ok(new { day = day.ToString("yyyy-MM-dd"), calls, dailyLimit = limit });
+        var (day, calls, backgroundCalls, limit) = _dhanLimiter.Usage();
+        return Ok(new { day = day.ToString("yyyy-MM-dd"), calls, backgroundCalls, dailyLimit = limit });
     }
 
     /// <summary>GET /api/strategy-tuning/history - every tuning run kept (runs.csv), newest first: when, which index,

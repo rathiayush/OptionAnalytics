@@ -17,6 +17,42 @@ export const csvField = (v) => {
 export const toCsv = (columns, rows) =>
   [columns.map((c) => c.key).join(','), ...rows.map((r) => columns.map((c) => csvField(c.value(r))).join(','))].join('\n') + '\n'
 
+/** A CSV file's rows as objects keyed by its own header (quoted fields included) - the reader for runs.csv when its
+ *  columns have to be brought up to date. */
+export function fromCsv(text) {
+  const out = []
+  let row = [], field = '', quoted = false
+  for (let i = 0; i < (text ?? '').length; i++) {
+    const c = text[i]
+    if (quoted) {
+      if (c === '"' && text[i + 1] === '"') { field += '"'; i++ }
+      else if (c === '"') quoted = false
+      else field += c
+    } else if (c === '"') quoted = true
+    else if (c === ',') { row.push(field); field = '' }
+    else if (c === '\n') { row.push(field); out.push(row); row = []; field = '' }
+    else if (c !== '\r') field += c
+  }
+  if (field.length || row.length) { row.push(field); out.push(row) }
+  if (!out.length) return { header: [], rows: [] }
+  const header = out[0]
+  return { header, rows: out.slice(1).filter((r) => r.length > 1).map((r) => Object.fromEntries(header.map((h, i) => [h, r[i] ?? '']))) }
+}
+
+/** runs.csv with one more run appended. A run already in the file is never rewritten or dropped - but when the
+ *  COLUMNS have changed since it was written (a new column added to RUN_COLUMNS), the whole file is rebuilt with the
+ *  new header and the old rows keep their values under the columns they do have, blank under the new ones. Without
+ *  that, a new row would simply have more fields than the header and every reader would drop it. */
+export function runsCsvWith(existingText, columns, run) {
+  const keys = columns.map((c) => c.key)
+  const line = toCsv(columns, [run])
+  if (!existingText) return { text: line, rebuilt: false }
+  const { header, rows } = fromCsv(existingText)
+  if (header.join(',') === keys.join(',')) return { append: line.slice(line.indexOf('\n') + 1), rebuilt: false }
+  const kept = rows.map((r) => keys.map((k) => csvField(r[k] ?? '')).join(','))
+  return { text: [keys.join(','), ...kept, line.trimEnd().split('\n')[1]].join('\n') + '\n', rebuilt: true }
+}
+
 const ist = (ms) => (ms ? new Date(ms).toLocaleString('sv-SE', { timeZone: 'Asia/Kolkata', hour12: false }).replace(' ', ' ') : '')
 const n = (v, d = 2) => (Number.isFinite(v) ? v.toFixed(d) : '')
 /** The strategy's own checks (why it fired) in one field: "OI: ... · Tape: ...". */
@@ -138,10 +174,26 @@ export const RUN_COLUMNS = [
   { key: 'trades', value: (r) => r.trades },
   { key: 'dhan_calls', value: (r) => r.dhanCalls ?? '' },
   { key: 'cache_hits', value: (r) => r.cacheHits ?? '' },
+  // What the run actually cost and whether it ran to the end - so "it made 10,000 calls" is a number in a row here
+  // instead of a guess. option_chain_* are Dhan option-series calls (42 per per-day fetch, the window calls as the
+  // server counted them); dhan_measured is the server's own account-wide counter, after minus before.
+  { key: 'option_chain_window_calls', value: (r) => r.calls?.optionChain?.rangeWindowCalls ?? '' },
+  { key: 'option_chain_server_fallback_calls', value: (r) => r.calls?.optionChain?.serverPerDayFallbackCalls ?? '' },
+  { key: 'option_chain_per_day_fetches', value: (r) => r.calls?.optionChain?.perDayFetches ?? '' },
+  { key: 'option_chain_per_day_calls', value: (r) => r.calls?.optionChain?.perDayCalls ?? '' },
+  { key: 'option_chain_calls_total', value: (r) => r.calls?.optionChain?.total ?? '' },
+  { key: 'days_seeded_by_range', value: (r) => r.calls?.optionChain?.daysSeededByRange ?? '' },
+  { key: 'repeat_day_fetches', value: (r) => r.calls?.repeatFetches ?? '' },
+  { key: 'http_requests', value: (r) => r.calls?.requests ?? '' },
+  { key: 'dhan_measured', value: (r) => r.calls?.dhan?.caused ?? '' },
+  { key: 'budget_minutes', value: (r) => r.budget?.minutes ?? '' },
+  { key: 'elapsed_minutes', value: (r) => r.budget?.elapsedMinutes ?? '' },
+  { key: 'stopped_by', value: (r) => r.budget?.stoppedBy ?? '' },
+  { key: 'stopped_reason', value: (r) => r.budget?.reason ?? '' },
 ]
 
 /** The rows a finished run adds to its history files. */
-export function historyOf({ underlying, data, finishedMs, job, what, search, minTrades, from, to, days, skipped, results, ranked, trades, fetched }) {
+export function historyOf({ underlying, data, finishedMs, job, what, search, minTrades, from, to, days, skipped, results, ranked, trades, fetched, calls, budget }) {
   const run_id = runIdOf(underlying, data, finishedMs)
   const finished_ist = ist(finishedMs)
   const settings = []
@@ -157,6 +209,7 @@ export function historyOf({ underlying, data, finishedMs, job, what, search, min
     daysUsed: days?.length ?? 0, daysEstimated: (days ?? []).filter((d) => d.estimated).length, daysSkipped: skipped?.length ?? 0,
     strategiesTuned: (results ?? []).length, trades: (trades ?? []).length,
     dhanCalls: fetched?.requests, cacheHits: fetched?.cacheHits,
+    calls, budget,
   }
   return { run_id, run, settings, trades: (trades ?? []).map((t) => ({ ...t, run_id })) }
 }

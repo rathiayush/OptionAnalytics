@@ -6,7 +6,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { spawn } from 'node:child_process'
-import { mkdtempSync, readFileSync, readdirSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -36,7 +36,13 @@ function oiRun(date) {
 
 // faults: rateLimit - the first N requests for each day's futures answer HTTP 429; busyOi - each day's first OI replay
 // comes back with a strike series that failed for Dhan's rate limit; partial - a day with only 200 minutes of bars;
-// usageAfter - after N days fetched, the server reports Dhan's daily Data-API limit nearly used.
+// usageAfter - after N days fetched, the server reports Dhan's daily Data-API limit nearly used;
+// busyOiAlways - these days' OI ALWAYS comes back incomplete, however often it is asked for (a day the job must give
+// up on rather than keep paying 42 Dhan calls for); rangeFallback - the range fetch serves these days but says the
+// SERVER itself fell back to the per-day path for them (fetchSource "day"), which the job must still seed so it never
+// pays for them again; rangeUnserved - the range fetch refuses these days without fetching them (perDayFallback=false),
+// so the job fetches each exactly once; dayDelayMs / listDelayMs - a day request / the day listing takes this long, so
+// a time budget can run out mid-job or before any day at all.
 const isWeekendDate = (d) => [0, 6].includes(new Date(`${d}T00:00:00Z`).getUTCDay())
 function fakeServer(recordedDays, faults = {}) {
   const seen = []
@@ -52,11 +58,17 @@ function fakeServer(recordedDays, faults = {}) {
       const fetchedDays = new Set(seen.filter((x) => /\/run$/.test(x.path)).map((x) => x.date)).size
       return json({ day: '2026-10-10', calls: faults.usageAfter != null && fetchedDays >= faults.usageAfter ? 95_000 : 1_200, dailyLimit: 100_000 })
     }
-    if (url.pathname === '/api/order-flow/NIFTY/days') return json(recordedDays.map((date) => ({ date, contractSymbol: 'NIFTY-FUT', expiry: '2026-10-27', live: false })))
+    if (url.pathname === '/api/order-flow/NIFTY/days') {
+      const list = () => json(recordedDays.map((date) => ({ date, contractSymbol: 'NIFTY-FUT', expiry: '2026-10-27', live: false })))
+      if (faults.listDelayMs) return void setTimeout(list, faults.listDelayMs)
+      return list()
+    }
     if ((m = url.pathname.match(/^\/api\/order-flow\/NIFTY\/day\/(\d{4}-\d{2}-\d{2})$/))) {
       if (faults.rateLimit && nth(`day-${m[1]}`) <= faults.rateLimit) return json({ error: 'Too many requests' }, 429)
       const body = orderFlowDay(m[1])
-      return json(m[1] === faults.partial ? { ...body, bars: body.bars.slice(0, 200) } : body)
+      const send = () => json(m[1] === faults.partial ? { ...body, bars: body.bars.slice(0, 200) } : body)
+      if (faults.dayDelayMs) return void setTimeout(send, faults.dayDelayMs)
+      return send()
     }
     if (url.pathname === '/api/order-flow/NIFTY/tape') return json({ prints: syn.prints.map((p) => ({ ...p, time: new Date(p.time + offset(url.searchParams.get('date')) * DAY_MS).toISOString() })) })
     // The cycle-at-a-time option-chain fetch and its proof (faults.rangeMismatch: the server says the two ways differ;
@@ -67,11 +79,24 @@ function fakeServer(recordedDays, faults = {}) {
     if (url.pathname === '/api/oi-replay/NIFTY/range') {
       if (faults.rangeError) return json({ error: 'the window failed' }, 500)
       const from = url.searchParams.get('from'), to = url.searchParams.get('to')
+      const unserved = faults.rangeUnserved ?? []
+      const fellBack = faults.rangeFallback ?? []
       const wanted = recordedDays.filter((d) => d >= from && d <= to && !isWeekendDate(d))
-      return json({ success: true, days: wanted.map((d) => oiRun(d)), windows: [{ from, to, strikes: 42 }], optionSeriesCalls: 42, fallbackDays: [] })
+      // A day the server could not serve from a window: with perDayFallback=false it comes back named and unfetched.
+      const days = wanted.map((d) => (unserved.includes(d)
+        ? { success: false, date: d, error: 'No window answered for it and this request was asked not to fetch it.', fetchSource: 'unserved' }
+        // A day the server itself fell back per-day for inside the request: the whole, usable day, marked as such.
+        : fellBack.includes(d) ? { ...oiRun(d), fetchSource: 'day' } : { ...oiRun(d), fetchSource: 'range' }))
+      return json({
+        success: true, days, windows: [{ from, to, strikes: 42 }],
+        optionSeriesCalls: 42 + fellBack.length * 42, windowOptionSeriesCalls: 42,
+        fallbackOptionSeriesCalls: fellBack.length * 42,
+        fallbackDays: wanted.filter((d) => fellBack.includes(d)), unservedDays: wanted.filter((d) => unserved.includes(d)),
+      })
     }
     if (url.pathname === '/api/oi-replay/NIFTY/run') {
       const date = url.searchParams.get('date')
+      if ((faults.busyOiAlways ?? []).includes(date)) return json({ ...oiRun(date), optionErrors: ['ATM+4 CALL: Too many requests'] })
       if (faults.busyOi && nth(`oi-${date}`) === 1) return json({ ...oiRun(date), optionErrors: ['ATM+4 CALL: Too many requests'] })
       return json(oiRun(date))
     }
@@ -316,4 +341,261 @@ test('the option chain a cycle at a time: proved on this job first, and the job 
   assert.equal(off.result.fastOi.used, false)
   assert.match(off.result.fastOi.reason, /switched off/)
   assert.equal(off.ranges, 0, 'not even the check is run')
+})
+
+// ---------------------------------------------------------------------------------------------------------------
+// EVERY DAY'S DATA IS PAID FOR AT MOST ONCE, AND A JOB ALWAYS ENDS.
+// The two faults these cover: a 95-day job making ~10,000 Dhan calls instead of ~4,300 (the same day's option chain
+// fetched again and again), and a job that "keeps on trying and never ending". Both are checked by COUNTING the
+// job's own requests per endpoint against a stated bound, not by reading the result's own claims.
+// ---------------------------------------------------------------------------------------------------------------
+
+/** How many times each endpoint was asked, with the dates folded together (the job's own report does the same). */
+const perPath = (seen, from = 0) => {
+  const out = {}
+  for (const x of seen.slice(from)) {
+    const key = x.path.replace(/\d{4}-\d{2}-\d{2}/g, '{date}')
+    out[key] = (out[key] ?? 0) + 1
+  }
+  return out
+}
+
+test('every day is fetched at most once per kind, and the result counts the calls by source', { timeout: 300_000 }, async () => {
+  const days = ['2026-09-28', '2026-09-29', '2026-09-30', '2026-10-01', '2026-10-02', '2026-10-05']
+  const { server, seen, base } = await fakeServer(days)
+  const dir = mkdtempSync(join(tmpdir(), 'oa-once-'))
+  try {
+    const { code, result } = await runJob(base, { underlying: 'NIFTY', strategies: ['weakWall'], days: 30, minTrades: 2, what: 'trade' },
+      { TUNE_CACHE_DIR: join(dir, 'cache'), TUNE_RETRY_SCALE: '0.001', TUNE_BUSY_PAUSE_MS: '5' })
+    assert.equal(code, 0, JSON.stringify(result))
+    const n = perPath(seen)
+
+    // The option chain: served by the cycle fetch, so the per-day endpoint is not called ONCE for these days.
+    assert.equal(n['/api/oi-replay/NIFTY/run'] ?? 0, 0, JSON.stringify(n))
+    assert.equal(n['/api/oi-replay/NIFTY/range'], 1, 'one wide range request, not one per 5 days')
+    // Futures and tape: once per day, never twice. The one extra is the day BEFORE the oldest scanned day - the
+    // profile strategies' previous session, which is not itself a scanned day; every scanned day's own previous
+    // session is another day of the job and shares its one request.
+    assert.equal(n['/api/order-flow/NIFTY/day/{date}'], days.length + 1)
+    assert.equal(n['/api/order-flow/NIFTY/tape'], days.length)
+    const dayDates = seen.filter((x) => /\/day\/\d{4}-\d{2}-\d{2}$/.test(x.path)).map((x) => x.path.slice(-10))
+    assert.equal(new Set(dayDates).size, dayDates.length, `a day was asked for twice: ${dayDates.join(', ')}`)
+
+    // And the result says so, by source, so this is provable from a real run too.
+    assert.equal(result.calls.bySource['option-chain-day'] ?? 0, 0)
+    assert.equal(result.calls.bySource['range-window'], 1)
+    // Which of the two sources paid for a day depends on which batch reached it first (a day fetched as another
+    // day's previous session is then read from the cache as its own day) - the TOTAL is what matters, and the
+    // unique-dates check above is what says none of them was a second fetch.
+    assert.equal(result.calls.bySource['futures-day'] + result.calls.bySource['previous-session'], days.length + 1)
+    assert.equal(result.calls.bySource.tape, days.length)
+    assert.equal(result.calls.repeatFetches, 0, 'no day of any kind was fetched twice')
+    assert.equal(result.calls.optionChain.perDayFetches, 0)
+    assert.equal(result.calls.optionChain.perDayCalls, 0)
+    assert.equal(result.calls.optionChain.rangeWindowCalls, 42)
+    assert.equal(result.calls.optionChain.total, 42, 'the whole job\'s option chain: one cycle of 42 Dhan calls')
+    assert.equal(result.calls.perKind.oi, undefined, 'the per-day option chain was never reached')
+    assert.equal(result.calls.perKind.flow.most, 1)
+    assert.equal(result.calls.maxFetchesPerDay, 3)
+    // The measured Dhan counter, read before and after.
+    assert.equal(typeof result.calls.dhan.caused, 'number')
+  } finally {
+    server.close()
+  }
+})
+
+test('a day the SERVER itself fell back per-day for inside the range is still seeded - never paid for twice', { timeout: 300_000 }, async () => {
+  // This was the doubling: the range request spent its window calls AND the per-day calls for such a day, and the
+  // scan loop could then go and spend them a third time. Every usable day a range returns is now kept.
+  const days = ['2026-09-28', '2026-09-29', '2026-09-30', '2026-10-01', '2026-10-02', '2026-10-05']
+  const { server, seen, base } = await fakeServer(days, { rangeFallback: ['2026-09-29', '2026-10-01'] })
+  const dir = mkdtempSync(join(tmpdir(), 'oa-fb-'))
+  try {
+    const { code, result } = await runJob(base, { underlying: 'NIFTY', strategies: ['weakWall'], days: 30, minTrades: 2, what: 'trade' },
+      { TUNE_CACHE_DIR: join(dir, 'cache'), TUNE_RETRY_SCALE: '0.001', TUNE_BUSY_PAUSE_MS: '5' })
+    assert.equal(code, 0, JSON.stringify(result))
+    assert.equal(result.days.length, days.length, 'every day still scanned')
+    assert.equal(perPath(seen)['/api/oi-replay/NIFTY/run'] ?? 0, 0, 'not one per-day option-chain call')
+    assert.equal(result.fastOi.seeded, days.length)
+    assert.equal(result.fastOi.fromFallback, 2, 'the two days the server fell back for were seeded as well')
+    assert.equal(result.fastOi.fromWindows, days.length - 2)
+  } finally {
+    server.close()
+  }
+})
+
+test('a day the range would not serve is fetched the old way exactly once', { timeout: 300_000 }, async () => {
+  const days = ['2026-09-28', '2026-09-29', '2026-09-30', '2026-10-01', '2026-10-02', '2026-10-05']
+  const { server, seen, base } = await fakeServer(days, { rangeUnserved: ['2026-09-30'] })
+  const dir = mkdtempSync(join(tmpdir(), 'oa-uns-'))
+  try {
+    const { code, result } = await runJob(base, { underlying: 'NIFTY', strategies: ['weakWall'], days: 30, minTrades: 2, what: 'trade' },
+      { TUNE_CACHE_DIR: join(dir, 'cache'), TUNE_RETRY_SCALE: '0.001', TUNE_BUSY_PAUSE_MS: '5' })
+    assert.equal(code, 0, JSON.stringify(result))
+    assert.equal(result.days.length, days.length, 'the unserved day is still scanned, just fetched its own way')
+    const asked = seen.filter((x) => x.path === '/api/oi-replay/NIFTY/run')
+    assert.deepEqual(asked.map((x) => x.date), ['2026-09-30'], 'only the unserved day, and only once')
+    assert.equal(result.fastOi.unservedByServer, 1)
+    assert.equal(result.calls.optionChain.perDayFetches, 1)
+    assert.equal(result.calls.optionChain.total, 42 + 42)
+  } finally {
+    server.close()
+  }
+})
+
+test('the proof of the cycle fetch is kept, so a second job does not pay for it again', { timeout: 300_000 }, async () => {
+  const days = ['2026-09-28', '2026-09-29', '2026-09-30', '2026-10-01', '2026-10-02', '2026-10-05']
+  const { server, seen, base } = await fakeServer(days)
+  const dir = mkdtempSync(join(tmpdir(), 'oa-proof-'))
+  const env = { TUNE_CACHE_DIR: join(dir, 'cache'), TUNE_RETRY_SCALE: '0.001', TUNE_BUSY_PAUSE_MS: '5' }
+  const job = { underlying: 'NIFTY', strategies: ['weakWall'], days: 30, minTrades: 2, what: 'trade' }
+  try {
+    const first = await runJob(base, job, env)
+    assert.equal(first.code, 0, JSON.stringify(first.result))
+    assert.match(first.result.fastOi.proof, /proved on this job/)
+    assert.equal(perPath(seen)['/api/oi-replay/NIFTY/range-check'], 1)
+
+    const before = seen.length
+    const second = await runJob(base, job, env)
+    assert.equal(second.code, 0, JSON.stringify(second.result))
+    assert.match(second.result.fastOi.proof, /not proved again/)
+    assert.equal(perPath(seen, before)['/api/oi-replay/NIFTY/range-check'] ?? 0, 0, 'the proof came from disk')
+    assert.equal(second.result.fastOi.checked.match, true)
+  } finally {
+    server.close()
+  }
+})
+
+test('a day that stays broken is given up on - never fetched again and again', { timeout: 300_000 }, async () => {
+  // One day's OI comes back incomplete EVERY time. It used to cost up to eight fetches (two per attempt x the
+  // initial pass plus three retry rounds) = eight x 42 Dhan calls for one unusable day. The job still finishes, the
+  // day is listed with a plain reason, and the fetch ledger caps what it cost.
+  const days = ['2026-09-28', '2026-09-29', '2026-09-30', '2026-10-01', '2026-10-02', '2026-10-05']
+  const { server, seen, base } = await fakeServer(days, { busyOiAlways: ['2026-09-30'] })
+  const dir = mkdtempSync(join(tmpdir(), 'oa-broken-'))
+  try {
+    const { code, result } = await runJob(base, { underlying: 'NIFTY', strategies: ['weakWall'], days: 30, minTrades: 2, what: 'trade' },
+      { TUNE_CACHE_DIR: join(dir, 'cache'), TUNE_RETRY_SCALE: '0.001', TUNE_BUSY_PAUSE_MS: '5', TUNE_FAST_OI: 'off', TUNE_MAX_FETCHES_PER_DAY: '3' })
+    assert.equal(code, 0, JSON.stringify(result))
+    // Every other day used; the broken one listed, not retried for ever.
+    assert.deepEqual(result.days.map((d) => d.date), ['2026-10-05', '2026-10-02', '2026-10-01', '2026-09-29', '2026-09-28'])
+    assert.deepEqual(result.skipped.map((x) => x.date), ['2026-09-30'])
+    const asked = seen.filter((x) => x.path === '/api/oi-replay/NIFTY/run' && x.date === '2026-09-30').length
+    assert.equal(asked, 3, `the broken day was fetched ${asked} times - the limit is 3`)
+    assert.equal(result.calls.perKind.oi.most, 3)
+    assert.ok(result.calls.refusedOverThatLimit >= 1, JSON.stringify(result.calls))
+    // Every good day still cost exactly one fetch.
+    assert.equal(seen.filter((x) => x.path === '/api/oi-replay/NIFTY/run' && x.date === '2026-10-05').length, 1)
+  } finally {
+    server.close()
+  }
+})
+
+test('a job where nothing works still finishes and writes a result saying why', { timeout: 300_000 }, async () => {
+  const days = ['2026-09-28', '2026-09-29', '2026-09-30', '2026-10-01', '2026-10-02', '2026-10-05']
+  const { server, seen, base } = await fakeServer(days, { busyOiAlways: days })
+  const dir = mkdtempSync(join(tmpdir(), 'oa-nothing-'))
+  try {
+    const { code, result } = await runJob(base, { underlying: 'NIFTY', strategies: ['weakWall'], days: 30, minTrades: 2, what: 'trade' },
+      { TUNE_CACHE_DIR: join(dir, 'cache'), TUNE_RETRY_SCALE: '0.001', TUNE_BUSY_PAUSE_MS: '5', TUNE_FAST_OI: 'off', TUNE_MAX_FETCHES_PER_DAY: '2' })
+    // It FINISHES - with a result file and a reason, never a hang and never a silent exit.
+    assert.equal(code, 1)
+    assert.equal(result.ok, false)
+    assert.match(result.error, /none of the 6 day\(s\) could be scanned/)
+    assert.ok(result.calls.requests > 0, JSON.stringify(result.calls))
+    // And no day cost more than the limit, however hard it kept failing.
+    for (const date of days) {
+      assert.ok(seen.filter((x) => x.path === '/api/oi-replay/NIFTY/run' && x.date === date).length <= 2, `${date} fetched over the limit`)
+    }
+  } finally {
+    server.close()
+  }
+})
+
+test('the job\'s own time budget stops it, and the result says how many days it got to', { timeout: 300_000 }, async () => {
+  const days = ['2026-09-28', '2026-09-29', '2026-09-30', '2026-10-01', '2026-10-02', '2026-10-05']
+  const { server, base } = await fakeServer(days, { dayDelayMs: 700 })
+  const dir = mkdtempSync(join(tmpdir(), 'oa-budget-'))
+  try {
+    const { code, result } = await runJob(base, { underlying: 'NIFTY', strategies: ['weakWall'], days: 30, minTrades: 2, what: 'trade' },
+      { TUNE_CACHE_DIR: join(dir, 'cache'), TUNE_DAYS_AT_ONCE: '1', TUNE_JOB_BUDGET_MS: '1500', TUNE_FAST_OI: 'off', TUNE_RETRY_SCALE: '0.001', TUNE_BUSY_PAUSE_MS: '5' })
+    assert.equal(code, 0, JSON.stringify(result))
+    assert.equal(result.ok, true, 'the days it DID get are tuned and written')
+    assert.ok(result.days.length >= 1 && result.days.length < days.length, `${result.days.length} of ${days.length} days`)
+    assert.equal(result.budget.stoppedBy, 'budget')
+    assert.match(result.budget.reason, /time budget of \d+ (minute|second)\(s\) ran out after \d+ of \d+ day\(s\)/)
+    assert.equal(result.budget.daysScanned, result.days.length)
+    assert.equal(result.days.length + result.skipped.length, result.budget.daysPlanned, 'every planned day is either used or listed')
+    // The days it did not reach say so in plain words, not "unknown".
+    assert.ok(result.skipped.length >= 1)
+    assert.ok(result.skipped.every((x) => /time budget/.test(x.reason)), JSON.stringify(result.skipped))
+  } finally {
+    server.close()
+  }
+})
+
+test('a budget that runs out before any day: still a result, with the budget as the reason', { timeout: 300_000 }, async () => {
+  const days = ['2026-09-28', '2026-09-29', '2026-09-30', '2026-10-01', '2026-10-02', '2026-10-05']
+  const { server, base } = await fakeServer(days, { listDelayMs: 1_500 })
+  const dir = mkdtempSync(join(tmpdir(), 'oa-budget0-'))
+  try {
+    const { code, result } = await runJob(base, { underlying: 'NIFTY', strategies: ['weakWall'], days: 30, minTrades: 2, what: 'trade' },
+      { TUNE_CACHE_DIR: join(dir, 'cache'), TUNE_DAYS_AT_ONCE: '1', TUNE_JOB_BUDGET_MS: '1000', TUNE_FAST_OI: 'off', TUNE_RETRY_SCALE: '0.001', TUNE_BUSY_PAUSE_MS: '5' })
+    assert.equal(code, 1)
+    assert.equal(result.ok, false)
+    assert.match(result.error, /no day was scanned before the job's own time budget/)
+    assert.equal(result.budget.stoppedBy, 'budget')
+  } finally {
+    server.close()
+  }
+})
+
+test('the run\'s history row carries what it cost and whether it ran to the end', { timeout: 300_000 }, async () => {
+  const days = ['2026-09-28', '2026-09-29', '2026-09-30', '2026-10-01', '2026-10-02', '2026-10-05']
+  const { server, base } = await fakeServer(days)
+  const dir = mkdtempSync(join(tmpdir(), 'oa-hist-'))
+  const history = join(dir, 'history')
+  try {
+    const { code, result } = await runJob(base, { underlying: 'NIFTY', strategies: ['weakWall'], days: 30, minTrades: 2, what: 'trade' },
+      { TUNE_CACHE_DIR: join(dir, 'cache'), TUNE_HISTORY_DIR: history, TUNE_RETRY_SCALE: '0.001', TUNE_BUSY_PAUSE_MS: '5' })
+    assert.equal(code, 0, JSON.stringify(result))
+    const run = rows(join(history, 'runs.csv'))[0]
+    assert.equal(Number(run.option_chain_window_calls), 42)
+    assert.equal(Number(run.option_chain_per_day_calls), 0)
+    assert.equal(Number(run.option_chain_calls_total), 42)
+    assert.equal(Number(run.days_seeded_by_range), days.length)
+    assert.equal(Number(run.repeat_day_fetches), 0)
+    assert.ok(Number(run.http_requests) > 0)
+    assert.equal(Number(run.budget_minutes), 90)
+    assert.equal(run.stopped_by, '', 'it ran to the end')
+  } finally {
+    server.close()
+  }
+})
+
+test('an older runs.csv with fewer columns is brought up to date, keeping every run already in it', { timeout: 300_000 }, async () => {
+  // Adding a column to the history used to make every NEW row longer than the file's own header, so a reader would
+  // drop it. The file is rebuilt instead, and no earlier run is lost.
+  const days = ['2026-09-28', '2026-09-29', '2026-09-30', '2026-10-01', '2026-10-02', '2026-10-05']
+  const { server, base } = await fakeServer(days)
+  const dir = mkdtempSync(join(tmpdir(), 'oa-oldcsv-'))
+  const history = join(dir, 'history')
+  try {
+    mkdirSync(history, { recursive: true })
+    writeFileSync(join(history, 'runs.csv'),
+      'run_id,finished_ist,index,data,tuned,days_used,trades\nNIFTY-futures-20260101-100000,2026-01-01 10:00:00,NIFTY,futures,trade,4,9\n')
+
+    const { code, result } = await runJob(base, { underlying: 'NIFTY', strategies: ['weakWall'], days: 30, minTrades: 2, what: 'trade' },
+      { TUNE_CACHE_DIR: join(dir, 'cache'), TUNE_HISTORY_DIR: history, TUNE_RETRY_SCALE: '0.001', TUNE_BUSY_PAUSE_MS: '5' })
+    assert.equal(code, 0, JSON.stringify(result))
+
+    const runs = rows(join(history, 'runs.csv'))
+    assert.equal(runs.length, 2, 'the old run is still there and the new one was added')
+    assert.equal(runs[0].run_id, 'NIFTY-futures-20260101-100000')
+    assert.equal(runs[0].days_used, '4', 'the old run keeps its own values')
+    assert.equal(runs[0].option_chain_calls_total, '', 'and is blank under the columns it never had')
+    assert.equal(Number(runs[1].option_chain_calls_total), 42)
+  } finally {
+    server.close()
+  }
 })

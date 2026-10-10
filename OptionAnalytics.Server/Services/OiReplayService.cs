@@ -114,6 +114,10 @@ public sealed class OiReplayService
     private readonly NseFuturesContractArchive? _futuresArchive;
     private readonly NseChartHistory? _nseChart;
     private readonly DhanHistoricalDataService _historicalData;
+    /// <summary>So a past day's futures candles are fetched once even though this endpoint AND
+    /// /api/order-flow/{u}/day/{date} both want them (see PastFuturesCandleCache). Optional: without
+    /// it every fetch goes straight to PastFuturesCandles, exactly as before.</summary>
+    private readonly PastFuturesCandleCache? _pastFutures;
     private readonly DhanRollingOptionDataService _rollingOption;
     private readonly bool _allowLiveDataFallback;
     /// <summary>StrategyTuning:FastOiRange - see StrategyTuningOptions. Only RunRangeAsync reads it;
@@ -127,7 +131,7 @@ public sealed class OiReplayService
         DhanHistoricalDataService historicalData, DhanRollingOptionDataService rollingOption,
         AppEnvironment appEnvironment, IOptions<StrategyTuningOptions>? tuningOptions = null,
         NseFuturesContractArchive? futuresArchive = null, NseChartHistory? nseChart = null,
-        ILogger<OiReplayService>? logger = null)
+        ILogger<OiReplayService>? logger = null, PastFuturesCandleCache? pastFutures = null)
     {
         _futuresArchive = futuresArchive;
         _nseChart = nseChart;
@@ -143,6 +147,7 @@ public sealed class OiReplayService
         // be able to change which path a job is already using halfway through.
         _fastOiRange = tuningOptions?.Value.FastOiRange ?? true;
         _logger = logger;
+        _pastFutures = pastFutures;
     }
 
     public async Task<OiReplayResult> RunAsync(
@@ -276,7 +281,9 @@ public sealed class OiReplayService
             try { listed = await _futuresArchive.ContractsOnAsync(underlying, date, cancellationToken); }
             catch (Exception e) when (e is not OperationCanceledException) { listed = Array.Empty<DhanFuturesInstrument>(); }
         }
-        var fetched = await PastFuturesCandles.FetchAsync(_historicalData, contract, listed, date, cancellationToken, _nseChart);
+        var fetched = _pastFutures is null
+            ? await PastFuturesCandles.FetchAsync(_historicalData, contract, listed, date, cancellationToken, _nseChart)
+            : await _pastFutures.FetchAsync(_historicalData, contract, listed, date, cancellationToken, _nseChart);
         var (bars, oiFieldPresent, error) = (fetched.Bars, fetched.OiFieldPresent, fetched.Error);
         contract = fetched.Contract;
 
@@ -375,7 +382,8 @@ public sealed class OiReplayService
     ///     so a wider range saves nothing anyway).
     /// </summary>
     public async Task<OiReplayRangeResult> RunRangeAsync(
-        string underlying, DateOnly from, DateOnly to, int timeframeMinutes, string expiryFlag, CancellationToken cancellationToken)
+        string underlying, DateOnly from, DateOnly to, int timeframeMinutes, string expiryFlag, CancellationToken cancellationToken,
+        bool perDayFallback = true)
     {
         var timeframe = Math.Max(1, timeframeMinutes);
 
@@ -420,7 +428,8 @@ public sealed class OiReplayService
         var isAlwaysLive = AlwaysLiveUnderlyings.Contains(underlying);
         var fromWindow = new Dictionary<DateOnly, DayFromWindow>();
         var windowReports = new List<OiReplayRangeWindow>();
-        var optionSeriesCalls = 0;
+        var windowCalls = 0;
+        var fallbackCalls = 0;
 
         if (windows.Count > 0)
         {
@@ -454,7 +463,7 @@ public sealed class OiReplayService
             {
                 var windowDays = OiReplayRangeWindows.TradingDayCandidates(window.From, window.To, today);
                 var (series, calls) = await FetchWindowBandAsync(underlying, expiryFlag, window, ResolveInstrumentAsync, cancellationToken);
-                optionSeriesCalls += calls;
+                windowCalls += calls;
 
                 var windowErrors = series.Where(s => s.Error is not null).Select(s => $"{s.Token} {s.Side}: {s.Error}").ToList();
                 windowReports.Add(new OiReplayRangeWindow(window.From, window.To, window.Expiry, window.ExpiryCode, calls,
@@ -521,6 +530,7 @@ public sealed class OiReplayService
 
         var results = new List<OiReplayResult>(days.Count);
         var fellBack = new List<DateOnly>();
+        var unserved = new List<DateOnly>();
         foreach (var day in days)
         {
             if (fromWindow.TryGetValue(day, out var built))
@@ -529,9 +539,20 @@ public sealed class OiReplayService
                 continue;
             }
 
+            // A day no window answered for. With perDayFallback off it is NAMED and not fetched - no Dhan call is
+            // spent on it here, and the caller fetches it through the per-day endpoint itself, once (see
+            // OiReplayRangeResult.PerDayFallback for why a caller would want that).
+            if (!perDayFallback)
+            {
+                unserved.Add(day);
+                results.Add(OiReplayResult.Failed(underlying, day, timeframe,
+                    $"No window answered for {day:dd MMM yyyy} and this request was asked not to fetch a day the per-day way - fetch it through /api/oi-replay/{underlying}/run.") with { FetchSource = "unserved" });
+                continue;
+            }
+
             // The proven path, unchanged, for every day a window did not (or must not) answer for.
             var perDay = await RunAsync(underlying, day, timeframe, expiryFlag, cancellationToken);
-            optionSeriesCalls += (StrikeBandSteps * 2 + 1) * 2;
+            fallbackCalls += (StrikeBandSteps * 2 + 1) * 2;
             fellBack.Add(day);
             results.Add(perDay with { FetchSource = "day" });
         }
@@ -539,7 +560,11 @@ public sealed class OiReplayService
         return new OiReplayRangeResult(true, null, underlying, from, to, timeframe, expiryFlag, results, windowReports)
         {
             FallbackDays = fellBack,
-            OptionSeriesCalls = optionSeriesCalls,
+            UnservedDays = unserved,
+            PerDayFallback = perDayFallback,
+            OptionSeriesCalls = windowCalls + fallbackCalls,
+            WindowOptionSeriesCalls = windowCalls,
+            FallbackOptionSeriesCalls = fallbackCalls,
             FastPathDisabled = fastPathDisabled,
         };
     }

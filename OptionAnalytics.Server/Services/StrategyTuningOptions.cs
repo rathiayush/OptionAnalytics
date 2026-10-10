@@ -21,4 +21,18 @@ public sealed class StrategyTuningOptions
     /// Default true. It changes NOTHING about the per-day endpoint itself either way: GET
     /// /api/oi-replay/{u}/run never consults this.</summary>
     public bool FastOiRange { get; set; } = true;
+
+    // The three settings below are READ WITH IConfiguration, not through this class (StrategyTuningService
+    // and the job script need them as plain environment values), and are listed here so the whole
+    // "StrategyTuning" section is documented in one place:
+    //
+    //   JobBudgetMinutes (default 90, 1 .. 1440) - the whole job's time. Past it the job stops scanning and
+    //     stops starting new strategies, writes its result and history with the days it got to, and says how
+    //     many that was. Passed to the job as TUNE_JOB_BUDGET_MS; a job is never started without one.
+    //   MaxFetchesPerDay (default 3, 1 .. 10) - how many times one day's data of one kind may be fetched in a
+    //     whole job. One day's option chain is 42 Dhan calls, and the busy-retry rounds used to multiply that
+    //     by up to eight for a day that stayed broken. Passed as TUNE_MAX_FETCHES_PER_DAY.
+    //   MaxResumes (default 2, 0 .. 10) - how many times a job interrupted by a server stop may be started
+    //     again (StrategyTuningService.ResumeInterrupted / current-job.json) before it is given up on with a
+    //     reason, instead of being restarted after every restart for ever.
 }

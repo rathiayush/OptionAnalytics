@@ -28,14 +28,26 @@ public sealed class OrderFlowHistory
     private readonly ConcurrentDictionary<(uint SecurityId, DateOnly Day), (IReadOnlyList<CandleWithVolume> Candles, DateTimeOffset FetchedAt, DhanFuturesInstrument Used, string? Note)> _candles = new();
     private DateOnly _cacheDay = IstClock.Today();
 
+    /// <summary>Shared with OI Replay's own futures fetch, so a past day's candles are fetched once however many
+    /// endpoints want them (see PastFuturesCandleCache) - the tuning job in Futures + OI mode asks for the same
+    /// contract-day through both. Optional: without it every fetch goes straight to PastFuturesCandles, as before.</summary>
+    private readonly PastFuturesCandleCache? _pastFutures;
+
     public OrderFlowHistory(OrderFlowService orderFlow, DhanHistoricalDataService historical, NseChartHistory? nseChart = null,
-        TrueDataOrderFlowSource? trueData = null)
+        TrueDataOrderFlowSource? trueData = null, PastFuturesCandleCache? pastFutures = null)
     {
         _orderFlow = orderFlow;
         _historical = historical;
         _nseChart = nseChart;
         _trueData = trueData;
+        _pastFutures = pastFutures;
     }
+
+    private Task<PastFuturesCandles.Result> FetchCandlesAsync(DhanFuturesInstrument contract, IEnumerable<DhanFuturesInstrument> listedThatDay,
+        DateOnly date, CancellationToken cancellationToken) =>
+        _pastFutures is null
+            ? PastFuturesCandles.FetchAsync(_historical, contract, listedThatDay, date, cancellationToken, _nseChart)
+            : _pastFutures.FetchAsync(_historical, contract, listedThatDay, date, cancellationToken, _nseChart);
 
     public sealed record Result(OrderFlowSnapshot? Snapshot, string? Error);
 
@@ -83,7 +95,7 @@ public sealed class OrderFlowHistory
         if (!_candles.TryGetValue(key, out var cached) || (isToday && DateTimeOffset.UtcNow - cached.FetchedAt > TodayCandleTtl))
         {
             var listed = contract.Expiry < today ? await _orderFlow.ContractsAsync(underlying, cancellationToken, date) : Array.Empty<DhanFuturesInstrument>();
-            var fetched = await PastFuturesCandles.FetchAsync(_historical, contract, listed, date, cancellationToken, _nseChart);
+            var fetched = await FetchCandlesAsync(contract, listed, date, cancellationToken);
             if (fetched.Error is not null)
                 return new Result(null, $"No {contract.TradingSymbol} candles for {date:dd MMM yyyy}: {fetched.Note ?? $"Dhan: {fetched.Error}"}");
             cached = (fetched.Bars.Select(b => b.Bar).ToList(), DateTimeOffset.UtcNow, fetched.Contract, fetched.Note);
@@ -129,7 +141,7 @@ public sealed class OrderFlowHistory
             {
                 var contract = await _orderFlow.ResolveContractAsync(engine.Underlying, engine.Expiry, day, cancellationToken);
                 if (contract is null) return snapshot;
-                var fetched = await PastFuturesCandles.FetchAsync(_historical, contract, Array.Empty<DhanFuturesInstrument>(), day, cancellationToken, _nseChart);
+                var fetched = await FetchCandlesAsync(contract, Array.Empty<DhanFuturesInstrument>(), day, cancellationToken);
                 if (fetched.Error is not null) return snapshot;
                 var candles = fetched.Bars.Select(b => b.Bar).Where(c => c.Time >= open && c.Time < cutoff).ToList();
                 var estimate = OrderFlowEstimator.Build(engine.Underlying, contract.SecurityId, contract.TradingSymbol, contract.DhanSegment,

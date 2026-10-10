@@ -10,6 +10,16 @@
 //  - `priority()` 'background' (the default - tune.mjs always) sends "X-Request-Priority: background": the server then
 //    gives the live pages and the server scanner first call on Dhan and the job what they leave (up to 5/s when quiet);
 //  - the cache is kept under `cacheMaxBytes`: the least recently read days are removed first.
+//  - `maxPerDay`: ONE day's data of one kind is fetched at most this many times in a whole job. Every multiplier the
+//    job has (the second fetch of an incomplete OI day, the busy-retry rounds) used to compound - four attempts x two
+//    fetches = eight x 42 Dhan option-series calls for a single day - so the ledger below is the hard stop on it: past
+//    the cap the day fails with a plain, NON-transient reason and is listed as skipped instead of fetched again.
+//  - `deadline`: once the job's own overall budget is past, a retry ladder is not entered at all - no request can hold
+//    a job beyond its budget waiting for a server that is staying busy.
+//  - the call ledger (`stats.byEndpoint` / `stats.bySource`, and `perKind()` for the per-day counts) counts the
+//    job's OWN HTTP requests, so "which part of the job spent the calls" is countable from the result instead of
+//    guessed at. The per-(kind, day) counts are kept OUT of `stats` on purpose: `stats` is written to every progress
+//    line, and a 250-day job's ledger would be hundreds of keys on each of them.
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -74,17 +84,30 @@ export function pruneCache(dir, maxBytes) {
   return { removed, bytes }
 }
 
-export function createFetcher({ base = '', key = '', cacheDir = null, today, attempts = 6, paceMs = 0, timeoutMs = 120_000, fetchImpl = globalThis.fetch, sleep = sleepReal, onWait = () => {}, now = () => Date.now(), priority = () => 'background', retryScale = 1 } = {}) {
-  const stats = { requests: 0, retries: 0, cacheHits: 0, cacheWrites: 0, shared: 0, waitedMs: 0 }
+export function createFetcher({ base = '', key = '', cacheDir = null, today, attempts = 6, paceMs = 0, timeoutMs = 120_000, fetchImpl = globalThis.fetch, sleep = sleepReal, onWait = () => {}, now = () => Date.now(), priority = () => 'background', retryScale = 1, maxPerDay = 0, deadline = () => false } = {}) {
+  // byEndpoint / bySource: every request this job sent, by the endpoint it went to and by the part of the job that
+  // asked for it. `repeats` is how many fetches were a second or later fetch of a day already paid for, which is
+  // exactly the waste to watch; `refused` how many the per-day cap turned away.
+  const stats = {
+    requests: 0, retries: 0, cacheHits: 0, cacheWrites: 0, shared: 0, waitedMs: 0, seeded: 0,
+    byEndpoint: {}, bySource: {}, repeats: 0, refused: 0, maxPerDay,
+  }
+  /** How many times each (kind, day) was really fetched - the ledger the cap is enforced from. */
+  const dayCount = new Map()
   let lastRequest = -Infinity
+  /** An endpoint without its query or its dates, so requests for different days add up under one name. */
+  const endpointOf = (path) => path.split('?')[0].replace(/\d{4}-\d{2}-\d{2}/g, '{date}')
+  const bump = (where, key) => { if (key) where[key] = (where[key] ?? 0) + 1 }
 
-  async function once(path, perCallTimeoutMs = timeoutMs) {
+  async function once(path, perCallTimeoutMs = timeoutMs, source = null) {
     if (paceMs > 0) {
       const gap = lastRequest + paceMs - now()
       if (gap > 0) { stats.waitedMs += gap; await sleep(gap) }
     }
     lastRequest = now()
     stats.requests++
+    bump(stats.byEndpoint, endpointOf(path))
+    bump(stats.bySource, source ?? 'other')
     const controller = typeof AbortController === 'function' ? new AbortController() : null
     const timer = controller ? setTimeout(() => controller.abort(), perCallTimeoutMs) : null
     let res
@@ -113,14 +136,15 @@ export function createFetcher({ base = '', key = '', cacheDir = null, today, att
 
   /** GET `path` from the server, trying again while it is busy: each kind of busy walks its OWN ladder (a rate limit
    *  clears in seconds, a renewing Dhan session takes a couple of minutes), and `attempts` caps the tries in all. */
-  async function api(path, { label = path.split('?')[0], attempts: tryAtMost = attempts, timeoutMs: ms = timeoutMs } = {}) {
+  async function api(path, { label = path.split('?')[0], attempts: tryAtMost = attempts, timeoutMs: ms = timeoutMs, source = null } = {}) {
     const tries = { rate: 0, auth: 0, busy: 0 }
     for (let i = 0; ; i++) {
       try {
-        return await once(path, ms)
+        return await once(path, ms, source)
       } catch (err) {
         const kind = busyKind(err.status, err.message)
-        const wait = err.transient && i + 1 < tryAtMost ? retryDelayMs(tries[kind], err.retryAfter, kind, retryScale) : null
+        // Past the job's overall budget, a busy server is not waited out any longer: the job is finishing.
+        const wait = err.transient && i + 1 < tryAtMost && !deadline() ? retryDelayMs(tries[kind], err.retryAfter, kind, retryScale) : null
         if (wait == null) {
           if (err.transient) err.message = `${err.message} (still failing after ${i + 1} tries)`
           throw err
@@ -145,7 +169,7 @@ export function createFetcher({ base = '', key = '', cacheDir = null, today, att
   const inFlight = new Map()
 
   /** `api(path)` for a PAST day's data, kept on disk once fetched and `valid(body)`. */
-  async function dayApi(name, date, path, valid = (b) => b != null) {
+  async function dayApi(name, date, path, valid = (b) => b != null, { source = name } = {}) {
     const cacheable = !!cacheDir && typeof date === 'string' && date < today
     const file = cacheable ? fileOf(name, date, path) : null
     if (file && existsSync(file)) {
@@ -158,8 +182,19 @@ export function createFetcher({ base = '', key = '', cacheDir = null, today, att
     }
     const already = inFlight.get(path)
     if (already) { stats.shared++; return already }
+    // The ledger, and the hard cap on it: one day of one kind is never fetched more than `maxPerDay` times in a job,
+    // however many retry rounds would like to. The refusal is deliberately NOT transient - the day is given up on and
+    // listed, which is what "always finishes" needs.
+    const ledger = `${name}:${date}`
+    const spent = dayCount.get(ledger) ?? 0
+    if (maxPerDay > 0 && spent >= maxPerDay) {
+      stats.refused++
+      throw new Error(`${date}: its ${name} data was already fetched ${spent} time(s) in this job (the limit is ${maxPerDay}) - given up on rather than fetched again; run the job again and it comes from the cache`)
+    }
+    dayCount.set(ledger, spent + 1)
+    if (spent > 0) stats.repeats++
     const pending = (async () => {
-      const body = await api(path)
+      const body = await api(path, { source })
       if (file && valid(body)) {
         try {
           mkdirSync(dirname(file), { recursive: true })
@@ -189,9 +224,26 @@ export function createFetcher({ base = '', key = '', cacheDir = null, today, att
       writeFileSync(tmp, gzipSync(JSON.stringify(body)))
       renameSync(tmp, file)
       stats.cacheWrites++
+      stats.seeded++
       return true
     } catch { return false }
   }
 
-  return { api, dayApi, putDay, stats }
+  /** How many times the job fetched that day's data of that kind already. */
+  const dayFetches = (name, date) => dayCount.get(`${name}:${date}`) ?? 0
+  /** The ledger summed per kind: how many days, how many fetches, the most any one day took, and how many days took
+   *  more than one - small enough for a result file, which the ledger itself is not. */
+  const perKind = () => {
+    const out = {}
+    for (const [key, n] of dayCount) {
+      const kind = key.slice(0, key.indexOf(':'))
+      const e = (out[kind] ??= { days: 0, fetches: 0, most: 0, daysFetchedMoreThanOnce: 0 })
+      e.days++
+      e.fetches += n
+      e.most = Math.max(e.most, n)
+      if (n > 1) e.daysFetchedMoreThanOnce++
+    }
+    return out
+  }
+  return { api, dayApi, putDay, stats, dayFetches, perKind }
 }
