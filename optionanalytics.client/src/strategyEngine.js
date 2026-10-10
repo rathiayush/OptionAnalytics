@@ -49,13 +49,15 @@ export const STRATEGIES = [
   { id: 'wallBreak', no: 2, name: 'OI wall break - writers run', short: 'Wall break' },
   { id: 'migration', no: 3, name: 'Writer migration', short: 'Migration', retired: true },
   { id: 'squeeze', no: 4, name: 'Short-covering squeeze', short: 'Squeeze' },
-  { id: 'flush', no: 5, name: 'Long-unwinding flush', short: 'Flush' },
+  // `trial` (see #27 below) on 5, 7, 10, 16, 22 and 23: they never made the default Top 15 (nothing scored
+  // yet), so they were listed but never alerted - on trial they alert beside the 15 until measured.
+  { id: 'flush', no: 5, name: 'Long-unwinding flush', short: 'Flush', trial: true },
   { id: 'buildUp', no: 6, name: 'Fresh build-up trend', short: 'Build-up trend' },
-  { id: 'range', no: 7, name: 'Range between two growing walls', short: 'Range fade', group: 'range' },
+  { id: 'range', no: 7, name: 'Range between two growing walls', short: 'Range fade', group: 'range', trial: true },
   { id: 'openingBias', no: 8, name: 'Opening OI bias + range breakout', short: 'Opening bias ORB' },
   // retired: heavy icebergs are sent to Telegram instead (Order Flow page, "Iceberg Telegram"); the rules stay tested.
   { id: 'iceberg', no: 9, name: 'Iceberg on an OI strike', short: 'Iceberg at OI wall', retired: true },
-  { id: 'maxPain', no: 10, name: 'Expiry-day max-pain pull', short: 'Max-pain pull' },
+  { id: 'maxPain', no: 10, name: 'Expiry-day max-pain pull', short: 'Max-pain pull', trial: true },
   // Volume profile (previous session) and market profile, each confirmed by OI and order flow.
   { id: 'vaRejection', no: 11, name: 'Previous value-area edge rejection', short: 'Value area rejection', group: 'profile' },
   { id: 'tpo80', no: 12, name: 'Market profile 80% rule', short: 'Eighty percent rule', group: 'profile' },
@@ -63,7 +65,7 @@ export const STRATEGIES = [
   { id: 'lvnRun', no: 14, name: 'LVN run to the next HVN', short: 'LVN run', group: 'profile' },
   { id: 'ibBreakout', no: 15, name: 'Initial balance breakout', short: 'IB breakout', group: 'profile' },
   // OI + order flow again: a weak secondary wall giving way on its second test.
-  { id: 'weakWall', no: 16, name: 'Weak OI wall - second retest break', short: 'Weak wall retest' },
+  { id: 'weakWall', no: 16, name: 'Weak OI wall - second retest break', short: 'Weak wall retest', trial: true },
   // Institutional OI + order flow setups: every one needs the option writers, the futures OI and the
   // footprint / tape / DOM-heatmap on the same side. Alerted by default until they are measured.
   { id: 'trap', no: 17, name: 'Failed breakout trap - liquidity sweep reversal', short: 'Breakout trap', priority: true },
@@ -72,8 +74,8 @@ export const STRATEGIES = [
   { id: 'imbalanceRetest', no: 20, name: 'Stacked-imbalance zone retest', short: 'Imbalance retest', priority: true },
   { id: 'atmFlip', no: 21, name: 'ATM OI crossover + VWAP reclaim', short: 'ATM OI flip', priority: true },
   // Range-bound (mean reversion) - only on a balanced day.
-  { id: 'vwapFade', no: 22, name: 'VWAP ±2σ fade on a balanced day', short: 'VWAP band fade', group: 'range' },
-  { id: 'ibFade', no: 23, name: 'Failed IB poke fade in a straddle-written range', short: 'IB poke fade', group: 'range' },
+  { id: 'vwapFade', no: 22, name: 'VWAP ±2σ fade on a balanced day', short: 'VWAP band fade', group: 'range', trial: true },
+  { id: 'ibFade', no: 23, name: 'Failed IB poke fade in a straddle-written range', short: 'IB poke fade', group: 'range', trial: true },
   // Short squeeze (long) and long squeeze (short) from the futures OI read minute by minute - first in
   // line for alerts until measured.
   { id: 'oiSqueeze', no: 24, name: 'Trapped-OI squeeze - short & long squeeze', short: 'OI squeeze', priority: 2 },
@@ -422,10 +424,37 @@ export function buildOiContext(run, expiryDate = null, { live = false } = {}) {
     pe: sortedSeries(run.pePoints, lag),
     futures,
     spot,
-    isExpiryDay: expiryDate != null && expiryDate === run.date,
+    // Live: the listed expiry is today. A replayed day: whether THAT date was an expiry (wasExpiryDay) -
+    // the listed expiry is a later date there, so the expiry-day strategy (#10) never ran on a past day.
+    isExpiryDay: (expiryDate != null && expiryDate === run.date) || (!live && wasExpiryDay(run, expiryDate)),
     expiry: expiryDate,
     date: run.date,
   }
+}
+
+/** Whether a REPLAYED date was an options expiry day. The expiry calendar is known before the day (it is the
+ *  contracts' own date, not market data), so this is no look-ahead. `expiryDate` is the expiry listed NOW (a
+ *  later date for a past day); the run carries the futures contract that was the front month on that date
+ *  (`futuresExpiry`) and the options cycle (`expiryFlag`). Conservative - a day only counts when the dates agree:
+ *  - the date IS its front-month futures expiry (monthly options expire with the futures, every index); or
+ *  - weekly options (NIFTY, SENSEX): the date falls on the weekly expiry's weekday - the listed weekly expiry's
+ *    AND that month's futures expiry's weekday (so a holiday-shifted expiry, or a day from before an exchange
+ *    moved its expiry day, is not counted) - with that futures contract within 35 days (that date's own front
+ *    month, not a much later contract the instrument master fell back to).
+ *  Anything missing -> false (as before). */
+export function wasExpiryDay(run, expiryDate) {
+  const date = run?.date
+  if (typeof date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return false
+  if (expiryDate != null && expiryDate === date) return true
+  const fut = typeof run.futuresExpiry === 'string' ? run.futuresExpiry.slice(0, 10) : null
+  if (fut == null) return false
+  if (fut === date) return true
+  if (run.expiryFlag !== 'WEEK' || typeof expiryDate !== 'string') return false
+  const day = (d) => Date.parse(`${d.slice(0, 10)}T00:00:00Z`)
+  const gap = (day(fut) - day(date)) / 86_400_000
+  if (!(gap > 0 && gap <= 35)) return false
+  const dow = (d) => new Date(day(d)).getUTCDay()
+  return dow(date) === dow(expiryDate) && dow(date) === dow(fut)
 }
 
 /** Today's LIVE context read the way a replay is (each minute once it is over) - for scanning today so
@@ -1248,9 +1277,11 @@ export function evaluateStrategies(input) {
       }
       const touchingNow = dir > 0 ? last.high >= L - band : last.low <= L + band
       if (touches !== 2 || !touchingNow || dir * (price - L) > band) continue
-      // Futures OI: the regime must be on the trade's side (build-up strongest, covering weaker).
-      if (!f15 || f15.oiPct == null || !(dir * f15.pricePct > 0)) continue
-      const buildUp = f15.oiPct >= 0
+      // Futures OI: the regime must be on the trade's side (build-up strongest, covering weaker). Without
+      // futures OI (a past day after its contract expired) the futures price direction alone.
+      if (!f15 || !(dir * f15.pricePct > 0)) continue
+      const futOi = f15.oiPct != null
+      const buildUp = futOi && f15.oiPct >= 0
       // Order flow: aggression and delta through the level, nothing stacked against it.
       const footprint = dir * last.delta > 0 && (stackWith(dir, 3) || sweepWith(dir) || aggWith(dir, 60)) && !stackAgainst(dir, 2)
       const tapeOk = aggWith(dir, 55, 'agg30')
@@ -1263,7 +1294,9 @@ export function evaluateStrategies(input) {
         60 + (buildUp ? 6 : 2) + (sweepWith(dir) ? 6 : 0) + (stackWith(dir, 3) ? 4 : 0) + (chg < -0.05 * levelOi ? 4 : 0), {
           OI: `${dir > 0 ? 'CALL' : 'PUT'} ${level.strike} (not the biggest - that is ${biggest}): OI ${(levelOi / 1e5).toFixed(1)}L vs neighbours ${neighbours.map((n) => (n / 1e5).toFixed(1)).join(' / ')}L, ${lakh(chg)} in 15m (around ${lakh(around)}) - writers ${dir > 0 ? 'covering' : 'unwinding'}`,
           Retest: `2nd test of ${level.strike} (futures ${L.toFixed(1)})`,
-          'Futures confirm': `${dir > 0 ? (buildUp ? 'long build-up' : 'short covering') : (buildUp ? 'short build-up' : 'long unwinding')}: price ${(f15.pricePct * 100).toFixed(2)}%, OI ${f15.oiPct >= 0 ? '+' : ''}${(f15.oiPct * 100).toFixed(2)}% in 15m`,
+          'Futures confirm': futOi
+            ? `${dir > 0 ? (buildUp ? 'long build-up' : 'short covering') : (buildUp ? 'short build-up' : 'long unwinding')}: price ${(f15.pricePct * 100).toFixed(2)}%, OI ${f15.oiPct >= 0 ? '+' : ''}${(f15.oiPct * 100).toFixed(2)}% in 15m`
+            : `futures price ${(f15.pricePct * 100).toFixed(2)}% in 15m (no futures OI - the price direction alone)`,
           Footprint: `Δ ${last.delta > 0 ? '+' : ''}${last.delta}${stackWith(dir, 3) ? ', stacked imbalance' : ''}`, Tape: `${sweepWith(dir) ? 'sweep · ' : ''}${tapeText}`, DOM: c.dom, Heatmap: c.heat,
         })
     }

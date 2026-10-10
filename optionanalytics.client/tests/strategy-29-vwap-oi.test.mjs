@@ -88,7 +88,9 @@ check('filter: VWAP slope 0.2% -> this trend (0.06%) is too flat', !scenario(1, 
 {
   const mk = (id, rs) => rs.map((r, i) => ({ id, t: i, outcome: { status: r > 0 ? 'win' : 'loss', r } }))
   const unmeasured = topFifteen(strategyStats([]))
-  check('only #27 is on trial now (#29 / #30 are retired): beside the Top 15, pushing nothing out', unmeasured.trial.join() === 'vwapPullback' && !unmeasured.ids.includes('vwapPullback')
+  // On trial (#29 / #30 retired): #27, and the never-alerted 5, 7, 10, 16, 22, 23 - beside the Top 15, pushing nothing out.
+  check('on trial: #27 and 5 / 7 / 10 / 16 / 22 / 23, beside the Top 15, pushing nothing out', unmeasured.trial.join() === 'flush,range,maxPain,weakWall,vwapFade,ibFade,vwapPullback'
+    && unmeasured.trial.every((id) => !unmeasured.ids.includes(id))
     && unmeasured.ids.length === 15 && unmeasured.ids.includes('blockTrade') && unmeasured.ids.includes('imbalanceRetest'), JSON.stringify({ ids: unmeasured.ids, trial: unmeasured.trial }))
   const measured = topFifteen(strategyStats([...mk('vwapOi', [2, 2, -1, 2, 2, 2]), ...mk('ibFailed', [2, 2, -1, 2, 2, 2])]))
   check('a retired strategy is never alerted, whatever trades it was scored with', !measured.ids.includes('vwapOi') && !measured.trial.includes('vwapOi') && !measured.ids.includes('ibFailed') && !measured.ids.includes('wallDefence'))
