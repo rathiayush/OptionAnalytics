@@ -120,3 +120,32 @@ test('requests are paced: a pause between the ones that reach the server', async
   await f.api('/c')
   assert.deepEqual(waits, [1_300, 1_500])
 })
+
+test('the same day asked for twice at once is fetched once - several days are scanned together', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tune-cache-'))
+  try {
+    let resolve
+    const gate = new Promise((r) => { resolve = r })
+    const calls = []
+    const fetchImpl = async (url) => {
+      calls.push(url)
+      await gate // both callers are in flight together
+      return { ok: true, status: 200, text: async () => JSON.stringify({ bars: [1, 2, 3] }), headers: { get: () => null } }
+    }
+    const f = createFetcher({ fetchImpl, sleep: async () => {}, today: '2026-10-10', cacheDir: dir })
+    const both = Promise.all([f.dayApi('flow', '2026-10-08', '/api/day/2026-10-08', (b) => b?.bars?.length > 0),
+      f.dayApi('flow', '2026-10-08', '/api/day/2026-10-08', (b) => b?.bars?.length > 0)])
+    resolve()
+    const [a, b] = await both
+    assert.deepEqual(a, { bars: [1, 2, 3] })
+    assert.deepEqual(b, a)
+    assert.equal(calls.length, 1, 'asked of the server once, not twice')
+    assert.equal(f.stats.shared, 1)
+    assert.equal(f.stats.cacheWrites, 1, 'one writer, one whole file')
+    // And it is on disk, readable - not a half-written file from two writers.
+    const again = createFetcher({ fetchImpl: async () => { throw new Error('must not be called') }, today: '2026-10-10', cacheDir: dir })
+    assert.deepEqual(await again.dayApi('flow', '2026-10-08', '/api/day/2026-10-08', (b) => b?.bars?.length > 0), { bars: [1, 2, 3] })
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
