@@ -46,14 +46,16 @@ public sealed class StrategyTuningServiceTests : IDisposable
         public void StopApplication() { }
     }
 
-    private StrategyTuningService Service(string script)
+    private StrategyTuningService Service(string script, int? maxResumes = null)
     {
         Directory.CreateDirectory(_dir);
-        var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        var settings = new Dictionary<string, string?>
         {
             ["Storage:ScannerRunnerPath"] = Path.Combine(_dir, "runner"),
             ["StrategyTuning:ScriptPath"] = script,
-        }).Build();
+        };
+        if (maxResumes is { } max) settings["StrategyTuning:MaxResumes"] = max.ToString();
+        var config = new ConfigurationBuilder().AddInMemoryCollection(settings).Build();
         var env = new FakeHostEnvironment { ContentRootPath = _dir };
         return new StrategyTuningService(config, env, new FakeServer(), new ScannerRunnerKey(), new ScannerRunnerStore(env, config), new FakeLifetime(), NullLogger<StrategyTuningService>.Instance);
     }
@@ -120,6 +122,84 @@ public sealed class StrategyTuningServiceTests : IDisposable
         Assert.Equal("failed", status.State);
         Assert.Equal("no recorded past days", status.Error);
         Assert.Equal(1, failing.Result("NIFTY")!["n"]!.GetValue<int>());
+    }
+
+    // ---- a job the server was stopped in the middle of: resumed, but not for ever ----------------
+
+    private string CurrentJobPath => Path.Combine(_dir, "runner", "tuning", "current-job.json");
+
+    [Fact]
+    public async Task AnInterruptedJob_IsResumed_AndToldWhichAttemptItIs()
+    {
+        var s = Service(Script("import { writeFileSync } from 'node:fs'\nwriteFileSync(process.env.TUNE_OUT, JSON.stringify({ ok: true, underlying: 'NIFTY', attempt: JSON.parse(process.env.TUNE_JOB).attempt, resumed: JSON.parse(process.env.TUNE_JOB).resumed }))"));
+        // A job the server was stopped in the middle of: its record left behind on disk.
+        Directory.CreateDirectory(Path.GetDirectoryName(CurrentJobPath)!);
+        File.WriteAllText(CurrentJobPath, """{"underlying":"NIFTY","strategies":"top3","days":30,"includeEstimated":false,"minTrades":8}""");
+
+        Assert.Null(s.ResumeInterrupted());
+        await UntilDone(s);
+
+        var result = s.Result("NIFTY")!;
+        Assert.Equal(1, result["attempt"]!.GetValue<int>());
+        Assert.True(result["resumed"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public void AResumedJobsOwnRecordKeepsTheAttemptCount_WhichIsWhatEndsARestartLoop()
+    {
+        // THE fault: Start rewrote the record from scratch each time, so the attempt count never
+        // survived the restart that used it and a job that kept dying kept being started again.
+        var s = Service(Script("setTimeout(() => {}, 30_000)")); // stays alive, so its record is still there to read
+        Directory.CreateDirectory(Path.GetDirectoryName(CurrentJobPath)!);
+        File.WriteAllText(CurrentJobPath, """{"underlying":"NIFTY","strategies":"top3","days":30,"includeEstimated":false,"minTrades":8,"attempt":1}""");
+
+        Assert.Null(s.ResumeInterrupted());
+
+        var kept = JsonNode.Parse(File.ReadAllText(CurrentJobPath))!;
+        Assert.Equal(2, kept["attempt"]!.GetValue<int>());
+        Assert.False(kept["resumed"]!.GetValue<bool>()); // the next start is its own, but it is the 2nd attempt
+        s.Cancel(); // from the page: forgotten
+        Assert.False(File.Exists(CurrentJobPath));
+    }
+
+    [Fact]
+    public void AJobThatKeepsDyingIsGivenUpOn_NotStartedAgainForEver()
+    {
+        // The actual fault: Start used to rewrite the record with a clean slate, so a job that died
+        // the moment it started was started again after EVERY restart, for ever.
+        var s = Service(Script("process.exit(1)"), maxResumes: 2);
+        Directory.CreateDirectory(Path.GetDirectoryName(CurrentJobPath)!);
+        File.WriteAllText(CurrentJobPath, """{"underlying":"NIFTY","strategies":"top3","days":30,"includeEstimated":false,"minTrades":8,"attempt":2}""");
+
+        var reason = s.ResumeInterrupted();
+
+        Assert.NotNull(reason);
+        Assert.Contains("is not being started again", reason);
+        Assert.Contains("2 time(s) already", reason);
+        Assert.Equal("failed", s.Status().State);
+        Assert.Equal(reason, s.Status().Error);
+        // The record is gone, so the NEXT restart does not try either.
+        Assert.False(File.Exists(CurrentJobPath));
+        Assert.Null(s.ResumeInterrupted());
+    }
+
+    [Fact]
+    public void NoInterruptedJob_IsNothingToResume()
+    {
+        Assert.Null(Service(Script("process.exit(0)")).ResumeInterrupted());
+    }
+
+    [Fact]
+    public async Task TheJobIsToldItsOwnTimeBudgetAndItsPerDayFetchLimit()
+    {
+        // Both hard stops reach the job as environment: a job with no budget is the fault being fixed.
+        var s = Service(Script("import { writeFileSync } from 'node:fs'\nwriteFileSync(process.env.TUNE_OUT, JSON.stringify({ ok: true, underlying: 'NIFTY', budget: process.env.TUNE_JOB_BUDGET_MS, perDay: process.env.TUNE_MAX_FETCHES_PER_DAY }))"));
+        Assert.Null(s.Start(Job()));
+        await UntilDone(s);
+
+        var result = s.Result("NIFTY")!;
+        Assert.Equal((90 * 60_000).ToString(), result["budget"]!.GetValue<string>());
+        Assert.Equal("3", result["perDay"]!.GetValue<string>());
     }
 
     // ---- the tuning HISTORY: every run kept as CSV (no database) -------------------------------------------------

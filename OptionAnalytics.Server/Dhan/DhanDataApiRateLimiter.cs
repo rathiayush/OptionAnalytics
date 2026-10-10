@@ -153,8 +153,8 @@ public sealed class DhanDataApiRateLimiter : IDisposable
                 // is pointless and background work uses the whole 5/s Dhan allows.
                 var keepOneFree = !InteractiveIdle;
                 if (_interactive.GetStatistics()?.CurrentAvailablePermits > (keepOneFree ? 1 : 0))
-                    using (var spare = _interactive.AttemptAcquire(1)) if (spare.IsAcquired) { Count(); return; }
-                using (var own = _background.AttemptAcquire(1)) if (own.IsAcquired) { Count(); return; }
+                    using (var spare = _interactive.AttemptAcquire(1)) if (spare.IsAcquired) { Count(background: true); return; }
+                using (var own = _background.AttemptAcquire(1)) if (own.IsAcquired) { Count(background: true); return; }
                 await Task.Delay(waitMs, cancellationToken);
                 waitMs = Math.Min(MaxBackgroundPollMs, waitMs + BackgroundPollMs);
             }
@@ -163,7 +163,7 @@ public sealed class DhanDataApiRateLimiter : IDisposable
         while (true)
         {
             using var lease = await _interactive.AcquireAsync(1, cancellationToken);
-            if (lease.IsAcquired) { Count(); return; }
+            if (lease.IsAcquired) { Count(background: false); return; }
             _logger.LogDebug("Dhan data-API rate limiter's interactive queue was full - waiting rather than sending over the limit.");
             await Task.Delay(BackgroundPoll, cancellationToken);
         }
@@ -182,24 +182,31 @@ public sealed class DhanDataApiRateLimiter : IDisposable
     private readonly object _countLock = new();
     private DateOnly _countDay;
     private long _countToday;
+    // Of those, the ones made for BACKGROUND work - a hosted service's backfill, or any call inside a request that
+    // asked for background priority, which the strategy tuning job's every request does (tuneFetch.mjs always sends
+    // X-Request-Priority: background). Counted so a long job can say how many Dhan calls IT caused - the plain total
+    // is account-wide and moves with whatever the live app is doing at the same time.
+    private long _backgroundToday;
 
     private static DateOnly IstToday() => DateOnly.FromDateTime(DateTime.UtcNow.AddMinutes(330));
 
-    private void Count()
+    private void Count(bool background)
     {
         var today = IstToday();
         lock (_countLock)
         {
-            if (today != _countDay) { _countDay = today; _countToday = 0; }
+            if (today != _countDay) { _countDay = today; _countToday = 0; _backgroundToday = 0; }
             _countToday++;
+            if (background) _backgroundToday++;
         }
     }
 
-    /// <summary>Dhan Data-API calls made today (IST) by this server, and the documented daily limit.</summary>
-    public (DateOnly Day, long Calls, int DailyLimit) Usage()
+    /// <summary>Dhan Data-API calls made today (IST) by this server, how many of those were background calls (see
+    /// _backgroundToday), and the documented daily limit.</summary>
+    public (DateOnly Day, long Calls, long BackgroundCalls, int DailyLimit) Usage()
     {
         var today = IstToday();
-        lock (_countLock) return (today, _countDay == today ? _countToday : 0, _dailyLimit);
+        lock (_countLock) return (today, _countDay == today ? _countToday : 0, _countDay == today ? _backgroundToday : 0, _dailyLimit);
     }
 
     public void Dispose()

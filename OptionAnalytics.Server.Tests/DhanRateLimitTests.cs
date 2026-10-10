@@ -81,6 +81,24 @@ public sealed class DhanRateLimitTests
     }
 
     [Fact]
+    public async Task BackgroundCalls_AreCountedSeparately_SoALongJobCanSayHowManyItCaused()
+    {
+        // A tuning job's every request asks for background priority, so the background counter read
+        // before and after it is how many Dhan calls the job itself caused - the plain total is
+        // account-wide and moves with whatever the live app is doing at the same time.
+        using var limiter = Limiter();
+        Assert.Equal((0L, 0L), (limiter.Usage().Calls, limiter.Usage().BackgroundCalls));
+
+        await limiter.WaitForPermitAsync(interactive: true, CancellationToken.None);     // a page load
+        await limiter.WaitForPermitAsync(interactive: false, CancellationToken.None);    // a hosted service
+        using (DhanDataApiRateLimiter.BackgroundScope())                                 // a request that asked for background
+            await limiter.WaitForPermitAsync(interactive: true, CancellationToken.None);
+
+        Assert.Equal(3L, limiter.Usage().Calls);
+        Assert.Equal(2L, limiter.Usage().BackgroundCalls);
+    }
+
+    [Fact]
     public async Task BackgroundScope_FlowsIntoTheRequestsOwnTasks_AndEndsWithIt()
     {
         Assert.False(DhanDataApiRateLimiter.IsBackgroundRequest);

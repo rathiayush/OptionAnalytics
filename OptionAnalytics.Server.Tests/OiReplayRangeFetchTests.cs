@@ -370,6 +370,85 @@ public sealed class OiReplayRangeFetchTests
         });
     }
 
+    // ---- Counting the calls, and not paying for a day twice -------------------------------------
+
+    [Fact]
+    public async Task AFallenBackWindow_ReportsItsWindowCallsAndItsPerDayCallsSeparately()
+    {
+        // The doubling a caller counting Dhan calls has to be able to SEE: the window's own 42 calls
+        // are spent AND every one of its days then costs 42 more, inside the one request.
+        var (service, dhan) = Service();
+        dhan.RefuseMultiDayOptionWindows = true;
+
+        var result = await service.RunRangeAsync("NIFTY", D(2), D(7), 1, "WEEK", CancellationToken.None);
+
+        Assert.Equal(BandSeries, result.WindowOptionSeriesCalls);
+        Assert.Equal(4 * BandSeries, result.FallbackOptionSeriesCalls);
+        Assert.Equal(result.WindowOptionSeriesCalls + result.FallbackOptionSeriesCalls, result.OptionSeriesCalls);
+        Assert.True(result.PerDayFallback);
+        Assert.Empty(result.UnservedDays);
+    }
+
+    [Fact]
+    public async Task AGoodWindow_SpendsNothingOnThePerDayPath()
+    {
+        var (service, fake) = Service();
+
+        var result = await service.RunRangeAsync("NIFTY", D(2), D(7), 1, "WEEK", CancellationToken.None);
+
+        Assert.Equal(BandSeries, result.WindowOptionSeriesCalls);
+        Assert.Equal(0, result.FallbackOptionSeriesCalls);
+        Assert.Equal(BandSeries, OptionCalls(fake).Count);
+    }
+
+    [Fact]
+    public async Task PerDayFallbackOff_NamesTheDaysItCouldNotServe_AndSpendsNoCallOnThem()
+    {
+        // What the strategy tuning job asks for: a day no window answered for comes back NAMED and
+        // unfetched, so the job fetches it once itself (through its own disk cache and its own pace)
+        // rather than inside one huge request whose timeout would throw those calls away.
+        var (service, dhan) = Service();
+        dhan.RefuseMultiDayOptionWindows = true;
+
+        var result = await service.RunRangeAsync("NIFTY", D(2), D(7), 1, "WEEK", CancellationToken.None, perDayFallback: false);
+
+        Assert.True(result.Success);
+        Assert.False(result.PerDayFallback);
+        Assert.Equal(new[] { D(2), D(3), D(4), D(7) }, result.UnservedDays);
+        Assert.Empty(result.FallbackDays);
+        Assert.All(result.Days, day =>
+        {
+            Assert.False(day.Success);
+            Assert.Equal("unserved", day.FetchSource);
+            Assert.Contains("asked not to fetch a day the per-day way", day.Error);
+        });
+        // ONLY the window's own calls - not one per-day call was made.
+        Assert.Equal(BandSeries, OptionCalls(dhan).Count);
+        Assert.Equal(BandSeries, result.WindowOptionSeriesCalls);
+        Assert.Equal(0, result.FallbackOptionSeriesCalls);
+        Assert.Equal(BandSeries, result.OptionSeriesCalls);
+    }
+
+    [Fact]
+    public async Task PerDayFallbackOff_StillServesEveryDayAWindowCouldAnswerFor()
+    {
+        // Only the unserved day is held back - the rest come back exactly as they always did, so the
+        // caller can seed every one of them and never ask for them again.
+        var (service, dhan) = Service();
+        dhan.NoOptionWindowDays.Add(D(7));
+
+        var result = await service.RunRangeAsync("NIFTY", D(2), D(7), 1, "WEEK", CancellationToken.None, perDayFallback: false);
+
+        Assert.Equal(new[] { D(7) }, result.UnservedDays);
+        Assert.All(result.Days.Where(d => d.Date != D(7)), day =>
+        {
+            Assert.True(day.Success);
+            Assert.Equal("range", day.FetchSource);
+            Assert.Equal(21 * MinutesPerDay, day.CePoints.Count);
+        });
+        Assert.Equal(BandSeries, OptionCalls(dhan).Count);
+    }
+
     // ---- Plumbing ---------------------------------------------------------------------------------
 
     private sealed record OptionCall(DateOnly From, DateOnly ToExclusive, string Strike, string Side, int ExpiryCode, string ExpiryFlag);

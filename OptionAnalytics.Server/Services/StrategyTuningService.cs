@@ -47,15 +47,35 @@ public sealed class StrategyTuningService
     private string CurrentJobPath => Path.Combine(_dir, "current-job.json");
     private static readonly JsonSerializerOptions JobJson = new(JsonSerializerDefaults.Web);
 
-    /// <summary>A job the server was stopped in the middle of (a restart / redeploy) - started again; null if none.</summary>
+    /// <summary>How many times a job interrupted by a server stop may be started again before it is given up on.
+    /// A job that dies the moment it starts - out of memory on a big range response, a crash - used to be started
+    /// again after EVERY restart for ever, because the attempt was never recorded anywhere: the record was rewritten
+    /// with a clean slate each time it started. The attempt is now carried in the record itself (TuningJob.Attempt),
+    /// so the loop ends and says why.</summary>
+    private int MaxResumes => Math.Clamp(_configuration.GetValue("StrategyTuning:MaxResumes", 2), 0, 10);
+
+    /// <summary>A job the server was stopped in the middle of (a restart / redeploy) - started again; null if none,
+    /// or the reason it was not.</summary>
     public string? ResumeInterrupted()
     {
         TuningJob? job;
         try { job = File.Exists(CurrentJobPath) ? JsonSerializer.Deserialize<TuningJob>(File.ReadAllText(CurrentJobPath), JobJson) : null; }
-        catch (Exception ex) { _logger.LogWarning(ex, "The interrupted tuning job could not be read - dropped."); File.Delete(CurrentJobPath); return null; }
+        catch (Exception ex) { _logger.LogWarning(ex, "The interrupted tuning job could not be read - dropped."); TryDelete(CurrentJobPath); return null; }
         if (job is null) return null;
-        _logger.LogInformation("Resuming the strategy tuning job for {Underlying} that the last stop interrupted.", job.Underlying);
-        return Start(job with { Resumed = true });
+        var attempt = job.Attempt + 1;
+        if (attempt > MaxResumes)
+        {
+            // Given up on, out loud, and the record removed so the next restart does not try again: a job that keeps
+            // dying is a thing to look at, not a thing to keep restarting.
+            var reason = $"the {job.Underlying} tuning job was interrupted and started again {job.Attempt} time(s) already (the limit is {MaxResumes}) - it is not being started again. Something is making it die: look at the server log for it, then start it again from the Strategy tuning page (the days already fetched come from the cache).";
+            _logger.LogError("Strategy tuning: {Reason}", reason);
+            TryDelete(CurrentJobPath);
+            lock (_lock) _status = new TuningStatus("failed", job, null, DateTimeOffset.UtcNow, reason, null, null);
+            return reason;
+        }
+        _logger.LogInformation("Resuming the strategy tuning job for {Underlying} that the last stop interrupted (attempt {Attempt} of {Max}).",
+            job.Underlying, attempt, MaxResumes);
+        return Start(job with { Resumed = true, Attempt = attempt });
     }
 
     public TuningStatus Status() { lock (_lock) return _status; }
@@ -162,6 +182,14 @@ public sealed class StrategyTuningService
             info.Environment["TUNE_CACHE_DIR"] = CacheDirectory;
             info.Environment["TUNE_CACHE_MAX_MB"] = Math.Max(0, _configuration.GetValue("StrategyTuning:CacheMaxMb", 4096)).ToString(System.Globalization.CultureInfo.InvariantCulture);
             info.Environment["TUNE_PACE_MS"] = Math.Max(0, _configuration.GetValue("StrategyTuning:PaceMs", 0)).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            // The job's own hard end (see tune.mjs's header): past this it stops scanning, writes its result and
+            // history with the days it got to, and says how many that was. Generous by default, but never absent.
+            info.Environment["TUNE_JOB_BUDGET_MS"] =
+                (Math.Clamp(_configuration.GetValue("StrategyTuning:JobBudgetMinutes", 90), 1, 24 * 60) * 60_000L).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            // And the hard end on one day being fetched over and over by the retry rounds (42 Dhan option-series
+            // calls every time): a day's data of one kind is fetched at most this many times in a whole job.
+            info.Environment["TUNE_MAX_FETCHES_PER_DAY"] =
+                Math.Clamp(_configuration.GetValue("StrategyTuning:MaxFetchesPerDay", 3), 1, 10).ToString(System.Globalization.CultureInfo.InvariantCulture);
             var process = new Process { StartInfo = info, EnableRaisingEvents = true };
             process.OutputDataReceived += (_, e) => OnOutput(e.Data);
             process.ErrorDataReceived += (_, e) => { if (e.Data is { Length: > 0 } line) _logger.LogWarning("[tuning] {Line}", line); };
@@ -178,6 +206,7 @@ public sealed class StrategyTuningService
             process.BeginErrorReadLine();
             _process = process;
             _status = new TuningStatus("running", job, DateTimeOffset.UtcNow, null, null, null, process.Id);
+            // Resumed is cleared (the next start is its own), but Attempt is NOT - it is what ends a restart loop.
             try { File.WriteAllText(CurrentJobPath, JsonSerializer.Serialize(job with { Resumed = false }, JobJson)); }
             catch (Exception ex) { _logger.LogWarning(ex, "The tuning job could not be recorded for a resume after a restart."); }
             _logger.LogInformation("Strategy tuning started for {Underlying} (pid {Pid}).", job.Underlying, process.Id);
@@ -280,7 +309,11 @@ public sealed class StrategyTuningResumeHostedService(StrategyTuningService tuni
 }
 
 /// <summary>What to tune: one index; strategies "top3" / "top5" / "all" or a list of ids; how many past days;
-/// whether days rebuilt from 1-minute candles count; the fewest trades a setting needs.</summary>
-public sealed record TuningJob(string Underlying, JsonNode? Strategies, int Days, bool IncludeEstimated, int MinTrades, string What = "trade", IReadOnlyList<string>? OiFactors = null, string Search = "step", string Data = "futures", string? From = null, string? To = null, bool Resumed = false);
+/// whether days rebuilt from 1-minute candles count; the fewest trades a setting needs.
+///
+/// Attempt is how many times a server restart has already started this same job again - carried in current-job.json
+/// and checked by ResumeInterrupted, so an interrupted job resumes a couple of times and then gives up with a reason
+/// rather than restarting for ever.</summary>
+public sealed record TuningJob(string Underlying, JsonNode? Strategies, int Days, bool IncludeEstimated, int MinTrades, string What = "trade", IReadOnlyList<string>? OiFactors = null, string Search = "step", string Data = "futures", string? From = null, string? To = null, bool Resumed = false, int Attempt = 0);
 
 public sealed record TuningStatus(string State, TuningJob? Job, DateTimeOffset? StartedUtc, DateTimeOffset? FinishedUtc, string? Error, JsonNode? Progress, int? Pid);
