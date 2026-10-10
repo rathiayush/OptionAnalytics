@@ -196,6 +196,13 @@ export function dayTrades(day, id, variant, trail) {
   return takenTrades(day, id, variant, trail).map((t) => t.outcome.r).filter(Number.isFinite)
 }
 
+/** What a setup's OUTCOME depends on: the stop / target size, the time stop and the trailing stop. The sides, the entry
+ *  window and the OI confirmation decide only WHICH setups are taken, never what a taken one then does - so the same
+ *  setup at the same four settings always ends the same way, and is worked out once (outcomeKey / the day's cache)
+ *  instead of once per combination. 7,200 trade combinations hold only 400 different answers. */
+export const outcomeKey = (v, trail) =>
+  `${v.tradeStopX ?? 1}|${v.tradeTargetX ?? 1}|${v.tradeTimeStop ?? 0}|${v.tradeTrail ?? 'scanner'}|${trail ? `${trail.startR}/${trail.gapR}` : 'none'}`
+
 /** The trades strategy `id` takes on a scanned day with `variant` - each { s (the setup as traded), outcome }. */
 function takenTrades(day, id, variant, trail) {
   if (!day.byId) {
@@ -203,10 +210,30 @@ function takenTrades(day, id, variant, trail) {
     for (const s of day.setups) day.byId.set(s.id, [...(day.byId.get(s.id) ?? []), s])
   }
   const own = day.byId.get(id) ?? []
-  const taken = firstPerCooldown(own.map((s) => applyTradeFilter(s, variant)).filter(Boolean))
-  return taken.map((s) => {
-    const withTrail = { ...s, trail: s.trailOverride !== undefined ? s.trailOverride : trail }
-    return { s, outcome: simulateOutcome(withTrail, day.minuteBars, day.endMs, true) }
+  // The setups this combination takes, and which setup each came from (the filter returns a copy with the scaled
+  // stop / target).
+  const from = new Map()
+  const passed = []
+  for (const s of own) {
+    const f = applyTradeFilter(s, variant)
+    if (!f) continue
+    from.set(f, s)
+    passed.push(f)
+  }
+  // One answer per setup per outcome setting, kept while that setting is being tried (the caller walks the
+  // combinations in that order, so this holds one setting's worth of a day, not every combination's).
+  const key = outcomeKey(variant, trail)
+  let cache = day.outcomeCache
+  if (!cache || cache.key !== key) { cache = { key, map: new Map() }; day.outcomeCache = cache }
+  return firstPerCooldown(passed).map((s) => {
+    const origin = from.get(s) ?? s
+    let outcome = cache.map.get(origin)
+    if (outcome === undefined) {
+      const withTrail = { ...s, trail: s.trailOverride !== undefined ? s.trailOverride : trail }
+      outcome = simulateOutcome(withTrail, day.minuteBars, day.endMs, true)
+      cache.map.set(origin, outcome)
+    }
+    return { s, outcome }
   })
 }
 
@@ -398,18 +425,27 @@ export function tuneStrategy(days, id, { trail = null, minTrades = 8, trainFract
       if (n.over) throw new Error(`more than ${OI_COMBO_CAP.toLocaleString('en-IN')} OI combinations - untick some OI inputs, or search step by step`)
       of = n.count
     }
+    // Walked in the order the outcome cache wants - every combination that ends its trades the same way together (see
+    // outcomeKey), so each day works a setup's outcome out once instead of once per combination. `at` keeps each
+    // combination's place in the plain order, so the same one still wins a tie as before.
+    const list = []
+    let at = 0
     for (const v of variants(grid, base)) {
       // The timeframe only means something with an OI change or futures OI filter on; without one, 1 / 3 / 5 / 15
       // are the same trades - tried once (at 15).
       if (oiVariantRedundant(v) || (isOpt && optionVariantRedundant(v))) continue
+      list.push({ v, at: at++, key: isOpt ? '' : outcomeKey(v, trail) })
+    }
+    list.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0) || a.at - b.at)
+    for (const { v, at: i } of list) {
       tried++
       if (onProgress && tried % 250 === 0) onProgress({ tried, of })
       const tr = tally.add(v, scoreR(score(train, v)))
       if (tr.n < minTrades || tr.score == null) continue
-      rows.push({ params: v, train: tr })
+      rows.push({ params: v, train: tr, at: i })
     }
   }
-  rows.sort((a, b) => b.train.score - a.train.score || b.train.total - a.train.total)
+  rows.sort((a, b) => b.train.score - a.train.score || b.train.total - a.train.total || (a.at ?? 0) - (b.at ?? 0))
   const top = rows.slice(0, keep).map((r) => ({ ...r, test: scoreR(score(test, r.params)) }))
   // Nothing reached the minimum trades: show what there is anyway - the best setting with even a couple of trades -
   // marked "below the minimum", never recommended. (Under 2 trades there is no score to rank by.)
