@@ -3,7 +3,7 @@ import dayjs from 'dayjs'
 import { Alert, Button, Card, Checkbox, Col, DatePicker, InputNumber, Popconfirm, Progress, Row, Segmented, Select, Space, Switch, Table, Tag, Tooltip, Typography, message } from 'antd'
 import { NavBar, useAuth, UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import { ACTIVE_STRATEGIES, SPOT_STRATEGIES, STRATEGY_BY_ID, TRADE_FILTERS } from './strategyEngine.js'
-import { OI_COMBO_CAP, OI_FACTORS, OPTION_DEFAULT, countOiCombinations, optionText, variantText } from './strategyTuning.js'
+import { OI_COMBO_CAP, OI_FACTORS, OPTION_DEFAULT, countOiCombinations, oiFactorsFor, optionText, variantText } from './strategyTuning.js'
 import { applyTunedFilters } from './scannerSettings.js'
 
 const { Title, Text } = Typography
@@ -260,6 +260,10 @@ export default function StrategyTuningPage() {
   const [data, setData] = useState('futures')
   const spot = data === 'spot'
   const [oiFactors, setOiFactors] = useState(OI_FACTORS.map((f) => f.key))
+  // Spot + options has no futures at all, so the futures OI inputs are not offered there (they could only block a
+  // trade, never confirm one) and any already ticked is dropped.
+  const oiChoices = useMemo(() => oiFactorsFor(data), [data])
+  useEffect(() => { setOiFactors((cur) => { const ok = oiChoices.map((f) => f.key); return cur.every((k) => ok.includes(k)) ? cur : cur.filter((k) => ok.includes(k)) }) }, [oiChoices])
   const [search, setSearch] = useState('step')
   const combos = useMemo(() => countOiCombinations(oiFactors), [oiFactors])
   const tunesOi = what !== 'trade' && what !== 'option' // the OI inputs are tuned (OI, OI then trade, everything)
@@ -389,7 +393,7 @@ export default function StrategyTuningPage() {
                 <Col flex="1 1 100%">
                   <Space size={6} wrap align="start">
                     <Text>OI to tune</Text>
-                    <Checkbox.Group value={oiFactors} onChange={setOiFactors} disabled={running} options={OI_FACTORS.map((f) => ({ value: f.key, label: f.label }))} />
+                    <Checkbox.Group value={oiFactors} onChange={setOiFactors} disabled={running} options={oiChoices.map((f) => ({ value: f.key, label: f.label }))} />
                   </Space>
                   <div style={{ marginTop: 6 }}>
                     <Space size={8} wrap>

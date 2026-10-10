@@ -21,9 +21,10 @@ import { buildOiContext, ACTIVE_STRATEGIES, SPOT_STRATEGIES, STRATEGY_BY_ID, TRA
 import { scanSpotDay, spotBarsOf } from '../src/spotEngine.js'
 import { autoBigLots } from '../src/orderFlowMath.js'
 import { scannerProfileOf, trailFor } from '../src/scannerCore.js'
+import { defaultTradeLevels } from '../src/tradeDefaults.js'
 import { expiryFlagOf } from '../src/liveFeeds.js'
 import { dayFromOrderFlow, scanDaySetups } from '../src/scanDay.js'
-import { DEFAULT_VARIANT, OI_COMBO_CAP, OI_FACTORS, OPTION_GRID, countOiCombinations, oiGridOf, optionText, rankStrategies, tradeDetails, tuneStrategy, tuningDay, TUNING_GRID, variantText } from '../src/strategyTuning.js'
+import { DEFAULT_VARIANT, OI_COMBO_CAP, OI_FACTORS, OPTION_GRID, countOiCombinations, oiFactorsFor, oiGridOf, optionText, rankStrategies, tradeDetails, tuneStrategy, tuningDay, TUNING_GRID, variantText } from '../src/strategyTuning.js'
 import { DEFAULT_ROW_SIZES } from './indexScanner.mjs'
 import { createFetcher, isTransientText, pruneCache } from './tuneFetch.mjs'
 import { RUN_COLUMNS, SETTING_COLUMNS, TRADE_COLUMNS, historyOf, toCsv } from './tuneHistory.mjs'
@@ -48,7 +49,11 @@ const MIN_TRADES = Math.max(2, Math.min(100, Number(job.minTrades) || 8))
 const WHAT = ['trade', 'oi', 'both', 'option', 'all'].includes(job.what) ? job.what : 'trade'
 const DATA = job.data === 'spot' ? 'spot' : 'futures' // spot: the index candles + the option chain's OI only - no futures, no order flow
 const SEARCH = job.search === 'full' ? 'full' : 'step'
-const OI_KEYS = Array.isArray(job.oiFactors) && job.oiFactors.length ? job.oiFactors.filter((k) => OI_FACTORS.some((f) => f.key === k)) : null
+// Spot + options has no futures, so a futures OI input is dropped here too - whatever the page sent.
+const USABLE_OI = oiFactorsFor(DATA).map((f) => f.key)
+const OI_KEYS = Array.isArray(job.oiFactors) && job.oiFactors.length
+  ? job.oiFactors.filter((k) => USABLE_OI.includes(k))
+  : (DATA === 'spot' ? USABLE_OI : null)
 const startedUtc = new Date().toISOString()
 
 const progress = (p) => console.log(`PROGRESS ${JSON.stringify({ ...p, startedUtc, fetched: fetcher?.stats })}`)
@@ -134,6 +139,9 @@ async function main() {
   const cfg = { ...(config?.settings ?? {}) }
   const rowSize = cfg.orderFlow?.rowSizes?.[U] ?? DEFAULT_ROW_SIZES[U] ?? 1
   const trail = trailFor(cfg, U)
+  // The option SL / target this index is actually traded with (Trade settings), so each trade can say what the option
+  // bought and the option sold would have done - its own stop, its own target, or out with the index trade.
+  const optionLevels = { ...defaultTradeLevels(U), ...(cfg.levels?.[U] ?? {}) }
   // The strategies' own entry filters as the trader set them; the trade filters are what is tuned (from their defaults).
   const tradeKeys = new Set(TRADE_FILTERS.map((f) => f.key))
   const entryFilters = Object.fromEntries(Object.entries(cfg.filters ?? {}).map(([id, f]) => [id, Object.fromEntries(Object.entries(f ?? {}).filter(([k]) => !tradeKeys.has(k)))]))
@@ -231,7 +239,7 @@ async function main() {
   const keepDay = (day) => {
     const ids = [...new Set(day.setups.map((s) => s.id))].filter((id) => STRATEGY_BY_ID[id] && !STRATEGY_BY_ID[id].retired)
     for (const id of ids) {
-      for (const t of tradeDetails([day], id, DEFAULT_VARIANT, trail, U, { checks: true })) asWritten.push({ id, no: STRATEGY_BY_ID[id].no, name: STRATEGY_BY_ID[id].name, setting: 'as written', ...t })
+      for (const t of tradeDetails([day], id, DEFAULT_VARIANT, trail, U, { checks: true, optionLevels })) asWritten.push({ id, no: STRATEGY_BY_ID[id].no, name: STRATEGY_BY_ID[id].name, setting: 'as written', ...t })
     }
     day.setups = day.setups.map((s) => (s.checks ? { ...s, checks: null } : s))
     delete day.byId

@@ -605,9 +605,22 @@ export function optionOiText(read) {
 // ---- the option to trade a setup with ----------------------------------------------------------------
 
 /** An option's premium (last traded, from the OI replay series) at `ms`, or null. */
-export function premiumAt(oi, side, strike, ms) {
-  const point = valueAt((side === 'CE' ? oi?.ce : oi?.pe)?.get(strike), ms)
-  return point?.price > 0 ? point.price : null
+export function premiumAt(oi, side, strike, ms, maxStaleMs = 5 * MIN) {
+  const series = (side === 'CE' ? oi?.ce : oi?.pe)?.get(strike)
+  if (!series?.length || series[0].t > ms) return null
+  // The last price AT OR BEFORE `ms`. A minute in which the strike did not trade carries no price (0), which is not
+  // "no option" - it is "no trade in that minute", and the option is still worth its last traded price. So the last
+  // real price is used, as long as it is recent (maxStaleMs): without this a trade whose exit minute happened to be
+  // quiet showed no premium at all, and an option trade priced at that minute was dropped. A strike that has not
+  // traded for longer than that is genuinely unknown, and still reads null rather than inventing a price.
+  let i = 0
+  for (let lo = 0, hi = series.length - 1; lo < hi;) {
+    const mid = (lo + hi + 1) >> 1
+    if (series[mid].t <= ms) lo = mid; else hi = mid - 1
+    i = lo
+  }
+  for (; i >= 0 && ms - series[i].t <= maxStaleMs; i--) if (series[i].price > 0) return series[i].price
+  return null
 }
 
 /** The two ways to trade a setup with options, at the ATM strike: BUY the option that gains with the

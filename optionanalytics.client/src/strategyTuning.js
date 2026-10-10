@@ -53,17 +53,23 @@ export const oiVariantRedundant = (v) =>
 /** The OI inputs the tuning can use (a subset of OI_GRID's keys) - what the Strategy tuning page lists. */
 export const OI_FACTORS = [
   { key: 'tradeOiWindow', label: 'Options OI timeframe: 1, 3, 5, 15 minutes (for the OI change and the wall OI)' },
-  { key: 'tradeFutWindow', label: 'Futures OI timeframe: 1, 3, 5, 15 minutes (for the futures OI and the move size)' },
+  { key: 'tradeFutWindow', label: 'Futures OI timeframe: 1, 3, 5, 15 minutes (for the futures OI and the move size)', futures: true },
   { key: 'tradeWallOi', label: 'Support / resistance OI: the wall in the way shrinking or growing' },
   { key: 'tradeOiFlow', label: 'Options OI change: net CE vs PE (delta on the timeframe)' },
   { key: 'tradeOiCum', label: 'Options OI cumulative: net CE - PE since the open' },
   { key: 'tradeSideOi', label: 'CE and PE each rising / falling (delta on the timeframe)' },
   { key: 'tradeSideCum', label: 'CE and PE each rising / falling since the open (cumulative)' },
-  { key: 'tradeFutOi', label: 'Futures OI (build-up, covering, short squeeze)' },
-  { key: 'tradeMoveSize', label: 'Futures move size: small move or real move' },
+  { key: 'tradeFutOi', label: 'Futures OI (build-up, covering, short squeeze)', futures: true },
+  { key: 'tradeMoveSize', label: 'Futures move size: small move or real move', futures: true },
   { key: 'tradeDayType', label: 'Day type: trending (my way), range, not against a trend' },
   { key: 'tradeWallRoom', label: 'Room to the next OI wall (support / resistance)' },
 ]
+
+/** The OI inputs worth tuning for a data mode. Spot + options has no futures at all - its setups carry no futures OI
+ *  and no futures move (spotEngine leaves both null), so a futures filter there could only ever block a trade, never
+ *  confirm one. Those inputs are left out rather than offered and silently wasted. */
+export const oiFactorsFor = (data) => (data === 'spot' ? OI_FACTORS.filter((f) => !f.futures) : OI_FACTORS)
+
 // ---- the option trade ------------------------------------------------------------------------------------
 /**
  * How the trade is taken in options (tuned by `what: 'option'`), on top of the index trade the signal gives:
@@ -244,7 +250,7 @@ function takenTrades(day, id, variant, trail) {
  * its premium at the exit minute and the points that made. Premiums are the replay's finished-minute premiums
  * (the day's `oi`); an option with no premium at the exit is null.
  */
-export function tradeDetails(days, id, variant, trail, underlying, { checks = false } = {}) {
+export function tradeDetails(days, id, variant, trail, underlying, { checks = false, optionLevels = null } = {}) {
   const out = []
   for (const day of days) {
     for (const { s, outcome } of takenTrades(day, id, variant, trail)) {
@@ -253,10 +259,20 @@ export function tradeDetails(days, id, variant, trail, underlying, { checks = fa
       const risk = Math.abs(s.entry - s.stop)
       const exitPrice = Number.isFinite(outcome.exitPrice) ? outcome.exitPrice : s.entry + dir * outcome.r * risk
       const exitMs = (outcome.exitAt ?? (day.endMs - MIN)) + MIN // the exit bar has finished
+      // Each option the setup carries, as the trade would have gone in it: held until the index trade exited, and -
+      // when an option SL / target is set (Trade settings) - whether its OWN stop or target came first, which is what
+      // a trade taken in options actually does. `points` is the net on that leg either way.
       const leg = (o) => {
         if (!o) return null
-        const exit = day.oi ? premiumAt(day.oi, o.side, o.strike, exitMs) : null
-        return { label: `${o.action} ${o.strike} ${o.side}`, entry: o.premium, exit, points: exit == null ? null : o.action === 'BUY' ? exit - o.premium : o.premium - exit }
+        const held = day.oi ? premiumAt(day.oi, o.side, o.strike, exitMs) : null
+        const net = (px) => (px == null ? null : o.action === 'BUY' ? px - o.premium : o.premium - px)
+        const base = { label: `${o.action} ${o.strike} ${o.side}`, entry: o.premium, exit: held, points: net(held), closedBy: held == null ? null : 'index exit' }
+        const sl = optionLevels?.sl > 0 ? optionLevels.sl : null
+        const target = optionLevels?.target > 0 ? optionLevels.target : null
+        if (!day.oi || (!sl && !target)) return base
+        const hit = optionStopTargetHit(day.oi, o, s.t, exitMs, sl, target)
+        if (!hit) return { ...base, sl, target, closedBy: held == null ? null : 'index exit (neither its SL nor its target)' }
+        return { ...base, sl, target, exit: hit.premium, points: net(hit.premium), at: hit.at, closedBy: /SL/i.test(hit.reason) ? 'its SL' : 'its target' }
       }
       out.push({
         date: day.date, t: s.t, exitT: outcome.exitAt ?? null, index: underlying ?? null, side: s.side,

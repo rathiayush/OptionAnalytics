@@ -108,3 +108,55 @@ test('tuning the option trade: premium points, the option as before as the basel
   assert.ok(e.oiStage && e.tradeStage)
   if (e.best && e.tradeStage.best) for (const k of ['tradeSide', 'tradeStopX', 'tradeTargetX', 'tradeTrail']) assert.equal(e.best.params[k], e.tradeStage.best.params[k], 'the option tuned on top of the chosen trade settings')
 })
+
+test('both options of a trade: the net on each, and whether its own SL or target came first', () => {
+  // Each setup carries the option to BUY and the option to SELL. With the index's option SL / target set (Trade
+  // settings), each leg says what it would have done: out at its own stop, at its own target, or with the index trade.
+  const plain = tradeDetails([d], id, v({}), null, 'NIFTY')
+  const withLevels = tradeDetails([d], id, v({}), null, 'NIFTY', { optionLevels: { sl: 20, target: 30 } })
+  assert.equal(plain.length, withLevels.length)
+  assert.ok(plain.length)
+  for (const t of plain) {
+    for (const key of ['buy', 'sell']) {
+      if (!t[key]) continue
+      assert.equal(t[key].sl, undefined, 'no levels set: no SL / target claimed')
+      assert.equal(t[key].closedBy, t[key].exit == null ? null : 'index exit')
+    }
+  }
+  for (const t of withLevels) {
+    for (const key of ['buy', 'sell']) {
+      const o = t[key]
+      if (!o) continue
+      assert.equal(o.sl, 20)
+      assert.equal(o.target, 30)
+      assert.ok(['its SL', 'its target', 'index exit (neither its SL nor its target)', null].includes(o.closedBy), String(o.closedBy))
+      // The net always follows the premium it actually came out at.
+      if (o.exit != null) assert.ok(Math.abs(o.points - (o.label.startsWith('BUY') ? o.exit - o.entry : o.entry - o.exit)) < 1e-9)
+      if (o.closedBy === 'its SL') assert.ok(o.points <= 1e-6, `an SL is not a profit: ${o.points}`)
+      if (o.closedBy === 'its target') assert.ok(o.points > 0, `a target is a profit: ${o.points}`)
+    }
+  }
+  // Levels the day actually reaches: now each leg comes out at its own target, earlier and for exactly that much.
+  const tight = tradeDetails([d], id, v({}), null, 'NIFTY', { optionLevels: { sl: 40, target: 8 } })
+  const hits = tight.flatMap((t) => [t.buy, t.sell]).filter((o) => o?.closedBy === 'its target')
+  assert.ok(hits.length, 'a target of 8 premium points is hit on this day')
+  for (const o of hits) assert.ok(o.points >= 8 - 1e-6, `out at its target: ${o.points}`)
+  // And the same trade held to the index exit made less often than not - the point of showing both.
+  const held = tradeDetails([d], id, v({}), null, 'NIFTY')
+  assert.equal(held.length, tight.length)
+})
+
+test('a premium is the last traded one: a quiet minute no longer leaves an option blank', () => {
+  // A minute the strike did not trade in carries no price. That is not "no option" - it is still worth its last
+  // traded price, so the net on the leg is shown instead of a blank (and an option trade priced at that minute is
+  // no longer dropped). Too old, though, and it stays unknown.
+  const MIN5 = 5 * MIN
+  const series = [{ t: 1e12, price: 50 }, { t: 1e12 + MIN, price: 0 }, { t: 1e12 + 8 * MIN, price: 0 }]
+  const fake = { ce: new Map([[100, series]]), pe: new Map() }
+  assert.equal(premiumAt(fake, 'CE', 100, 1e12), 50)
+  assert.equal(premiumAt(fake, 'CE', 100, 1e12 + MIN), 50, 'a quiet minute keeps the last traded price')
+  assert.equal(premiumAt(fake, 'CE', 100, 1e12 + MIN5), 50)
+  assert.equal(premiumAt(fake, 'CE', 100, 1e12 + 8 * MIN), null, 'but not for ever')
+  assert.equal(premiumAt(fake, 'CE', 100, 1e12 - MIN), null, 'nor before it started')
+  assert.equal(premiumAt(fake, 'PE', 100, 1e12), null, 'nor a strike with no series')
+})

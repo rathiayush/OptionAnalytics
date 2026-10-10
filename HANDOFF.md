@@ -110,6 +110,12 @@ tuner honesty items (min days, day-clustered error, held-out final check), `open
   the tuned ones' best setting) and the scanner's record (`/api/scanner-log/rows/{kind}`: signals and live / paper option trades, page and
   server), filters, totals, CSV.
 
+## Open: a rare server-test flake
+A full `dotnet test` has failed with exactly 1 of 616 twice (10 Oct), both times on the FIRST run after a build, and
+has never failed again - 20+ reruns since, including 4 more fresh-build runs, all green, and no failing test name was
+ever captured in a trx. Timing-sensitive and first-run-after-build-ish; the name is still unknown. Next time it
+happens, capture it: `dotnet test --logger "trx;LogFileName=/tmp/x.trx"` on a cold build and read the trx.
+
 ## Security - needs the trader
 `NiftyDataCollector/appsettings.json` is tracked in git with a Dhan PIN, a TOTP secret and a database password. Rotate the PIN / TOTP /
 password yourself, then remove the file from the repo (move the values to an ignored `appsettings.Local.json`). Never commit credentials.

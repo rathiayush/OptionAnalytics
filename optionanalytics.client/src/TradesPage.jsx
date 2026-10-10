@@ -78,6 +78,7 @@ function BacktestTrades() {
   const [side, setSide] = useState('all')
   const [outcome, setOutcome] = useState('all')
   const [range, setRange] = useState(null)
+  const [optionsOnly, setOptionsOnly] = useState(null) // null: follow the data mode
 
   useEffect(() => {
     fetch('/api/strategy-tuning/history').then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
@@ -113,7 +114,25 @@ function BacktestTrades() {
     .sort(byTime(order, (t) => t._t)), [all, setting, ids, side, outcome, range, order])
 
   const csvColumns = Object.keys(all[0] ?? {}).map((k) => ({ title: k, value: (r) => r[k] }))
-  const leg = (label, inp, out, p) => (label ? <span style={{ whiteSpace: 'nowrap', fontSize: 12 }}>{label} {f1(num(inp))} → {f1(num(out))} <b style={{ color: col(num(p)) }}>{pts(num(p))}</b></span> : <Text type="secondary">-</Text>)
+  // Trading options only: the index entry / stop / target are what the signal was, not what was traded - they can be
+  // put away. On by default for Spot + options, off for Futures + OI (where the futures trade is the trade).
+  const justOptions = optionsOnly ?? (data === 'spot')
+  // An option leg: what it was, the premium in and out, the net on it, and what closed it - its own SL, its own
+  // target, or the index trade's exit.
+  const leg = (label, inp, out, p, sl, target, closedBy) => {
+    if (!label) return <Text type="secondary">-</Text>
+    const net = num(p)
+    const by = closedBy === 'its SL' ? <Tag color="red" style={{ marginInlineEnd: 0 }}>SL hit</Tag>
+      : closedBy === 'its target' ? <Tag color="green" style={{ marginInlineEnd: 0 }}>target hit</Tag>
+      : closedBy ? <Tag style={{ marginInlineEnd: 0 }}>index exit</Tag> : null
+    return (
+      <span style={{ fontSize: 12 }}>
+        {label} {f1(num(inp))} → {num(out) == null ? <Tooltip title="that strike had no traded price near the exit minute"><Text type="secondary">?</Text></Tooltip> : f1(num(out))}
+        {' '}<b style={{ color: col(net) }}>{pts(net)}</b> {by}
+        {(num(sl) || num(target)) ? <><br /><Text type="secondary" style={{ fontSize: 11 }}>SL {f1(num(sl))} · target {f1(num(target))}</Text></> : null}
+      </span>
+    )
+  }
   const spot = data === 'spot'
 
   return (
@@ -146,6 +165,7 @@ function BacktestTrades() {
             <Col><Segmented value={side} onChange={setSide} options={[{ value: 'all', label: 'Both sides' }, { value: 'LONG', label: 'Long' }, { value: 'SHORT', label: 'Short' }]} /></Col>
             <Col><Segmented value={outcome} onChange={setOutcome} options={[{ value: 'all', label: 'All' }, { value: 'win', label: 'Winners' }, { value: 'loss', label: 'Losers' }, { value: 'sl', label: 'SL hit' }]} /></Col>
             <Col><DatePicker.RangePicker value={range} onChange={setRange} format="DD MMM YYYY" allowEmpty={[true, true]} /></Col>
+            <Col><Tooltip title="Show only what an option trade did - the index entry, stop, target and exit are the signal behind it, not the trade"><Segmented value={justOptions ? 'options' : 'both'} onChange={(v) => setOptionsOnly(v === 'options')} options={[{ value: 'options', label: 'Options only' }, { value: 'both', label: `With the ${spot ? 'index' : 'futures'}` }]} /></Tooltip></Col>
             <Col><Button onClick={() => downloadCsv(`tuning-trades.csv`, csvColumns, shown)} disabled={!shown.length}>Download CSV</Button></Col>
           </Row>
           <Totals rows={shown} points={(t) => t._p} r={(t) => num(t.r)} />
@@ -165,6 +185,7 @@ function BacktestTrades() {
                 {t.setting === 'fine-tuned' && <Tooltip title={t.setting_text}><Tag color="blue" style={{ marginLeft: 4 }}>fine-tuned</Tag></Tooltip>}
                 {t.estimated_day === 'yes' && <Tooltip title="A day rebuilt from 1-minute candles (no tape / depth)"><Tag style={{ marginLeft: 4 }}>est.</Tag></Tooltip>}</span> },
               { title: 'Side', dataIndex: 'side', width: 70, render: sideTag },
+              ...(justOptions ? [] : [
               { title: `${spot ? 'Index' : 'Futures'} in`, dataIndex: 'entry', width: 90, render: (v) => f1(num(v)) },
               { title: 'SL', key: 'sl', width: 95, render: (_, t) => <span style={{ fontSize: 12 }}>{f1(num(t.stop))}<br /><Text type="secondary" style={{ fontSize: 11 }}>{f1(num(t.sl_points))} pts{t.trailed_stop ? ` · trailed ${f1(num(t.trailed_stop))}` : ''}</Text></span> },
               { title: 'Target', key: 'tg', width: 95, render: (_, t) => <span style={{ fontSize: 12 }}>{f1(num(t.target))}<br /><Text type="secondary" style={{ fontSize: 11 }}>{f1(num(t.target_points))} pts</Text></span> },
@@ -172,9 +193,10 @@ function BacktestTrades() {
               { title: 'Closed by', dataIndex: 'closed_by', width: 105 },
               { title: 'Points', key: 'points', width: 80, sorter: (a, b) => a._p - b._p, render: (_, t) => <b style={{ color: col(t._p) }}>{pts(t._p)}</b> },
               { title: 'R', dataIndex: 'r', width: 75, sorter: (a, b) => num(a.r) - num(b.r), render: (v) => <span style={{ color: col(num(v)) }}>{fmtR(num(v))}</span> },
-              { title: 'Option traded', key: 'ot', width: 230, render: (_, t) => (t.option_traded ? leg(t.option_traded, t.option_in, t.option_out, t.option_points) : <Text type="secondary">-</Text>) },
-              { title: 'Option bought: in → out', key: 'b', width: 230, render: (_, t) => leg(t.option_bought, t.bought_in, t.bought_out, t.bought_points) },
-              { title: 'Option sold: in → out', key: 'so', width: 230, render: (_, t) => leg(t.option_sold, t.sold_in, t.sold_out, t.sold_points) },
+              ]),
+              { title: 'Option traded', key: 'ot', width: 250, render: (_, t) => (t.option_traded ? leg(t.option_traded, t.option_in, t.option_out, t.option_points, t.option_sl, t.option_target, t.option_closed_by) : <Text type="secondary">-</Text>) },
+              { title: 'If I BOUGHT the option', key: 'b', width: 260, render: (_, t) => leg(t.option_bought, t.bought_in, t.bought_out, t.bought_points, t.bought_sl, t.bought_target, t.bought_closed_by) },
+              { title: 'If I SOLD the option', key: 'so', width: 260, render: (_, t) => leg(t.option_sold, t.sold_in, t.sold_out, t.sold_points, t.sold_sl, t.sold_target, t.sold_closed_by) },
             ]} />
         </>
       ) : (
