@@ -56,7 +56,7 @@ function scenario(d, o = {}) {
 }
 const show = ({ s, all }) => JSON.stringify(s ? { side: s.side, entry: s.entry, stop: +s.stop.toFixed(1), target: +s.target.toFixed(1), checks: s.checks } : all.map((x) => `${x.id}:${x.side}`))
 
-check('30 strategies, #29 is VWAP + OI confluence - retired (not run, listed, alerted or scored; the rules stay tested)', STRATEGIES.length === 30 && STRATEGIES.find((x) => x.no === 29)?.id === 'vwapOi' && STRATEGIES.find((x) => x.no === 29).retired && !ACTIVE_STRATEGIES.some((x) => x.id === 'vwapOi'))
+check('33 strategies, #29 is VWAP + OI confluence - retired (not run, listed, alerted or scored; the rules stay tested)', STRATEGIES.length === 33 && STRATEGIES.find((x) => x.no === 29)?.id === 'vwapOi' && STRATEGIES.find((x) => x.no === 29).retired && !ACTIVE_STRATEGIES.some((x) => x.id === 'vwapOi'))
 const L = scenario(1)
 check('LONG: above a rising VWAP, the pullback tags it and turns, put writers + futures long build-up', L.s?.side === 'LONG' && L.s.stop < L.s.entry && L.s.target > L.s.entry
   && /writers back it/.test(L.s.checks.OI) && /long build-up/.test(L.s.checks.OI), show(L))
@@ -88,7 +88,7 @@ check('filter: VWAP slope 0.2% -> this trend (0.06%) is too flat', !scenario(1, 
 {
   const mk = (id, rs) => rs.map((r, i) => ({ id, t: i, outcome: { status: r > 0 ? 'win' : 'loss', r } }))
   const unmeasured = topFifteen(strategyStats([]))
-  check('only #27 is on trial now (#29 / #30 are retired): beside the Top 15, pushing nothing out', unmeasured.trial.join() === 'vwapPullback' && !unmeasured.ids.includes('vwapPullback')
+  check('on trial now: #27 and #31-33 (#29 / #30 are retired) - beside the Top 15, pushing nothing out', unmeasured.trial.join() === 'vwapPullback,straddleFade,wallShift,cumFlip' && !unmeasured.ids.includes('vwapPullback')
     && unmeasured.ids.length === 15 && unmeasured.ids.includes('blockTrade') && unmeasured.ids.includes('imbalanceRetest'), JSON.stringify({ ids: unmeasured.ids, trial: unmeasured.trial }))
   const measured = topFifteen(strategyStats([...mk('vwapOi', [2, 2, -1, 2, 2, 2]), ...mk('ibFailed', [2, 2, -1, 2, 2, 2])]))
   check('a retired strategy is never alerted, whatever trades it was scored with', !measured.ids.includes('vwapOi') && !measured.trial.includes('vwapOi') && !measured.ids.includes('ibFailed') && !measured.ids.includes('wallDefence'))

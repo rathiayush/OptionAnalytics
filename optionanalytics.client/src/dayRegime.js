@@ -192,6 +192,7 @@ export const STRATEGY_STYLE = {
   weakWall: 'trend', trap: 'fade', cvdDivergence: 'fade', blockTrade: 'trend', imbalanceRetest: 'trend', atmFlip: 'trend',
   vwapFade: 'fade', ibFade: 'fade', oiSqueeze: 'trend', suddenWall: 'any', heatmapOi: 'any', vwapPullback: 'trend',
   oiStructure: 'any', vwapOi: 'trend', ibFailed: 'fade',
+  straddleFade: 'fade', wallShift: 'trend', cumFlip: 'trend',
 }
 
 /**
