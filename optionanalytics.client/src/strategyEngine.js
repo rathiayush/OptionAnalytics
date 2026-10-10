@@ -110,6 +110,9 @@ export const SPOT_STRATEGIES = [
   { id: 'spotFreshWriting', no: 105, name: 'Spot: fresh writing under the price, the other side covering (OI heatmap)', short: 'Spot fresh writing', spot: true },
   { id: 'spotCumFlip', no: 106, name: 'Spot: CE / PE added since the open flips sides', short: 'Spot since-open flip', spot: true },
   { id: 'spotLadder', no: 107, name: 'Spot: S/R OI ladder - support outgrowing resistance', short: 'Spot OI ladder', spot: true },
+  { id: 'spotStraddleFade', no: 108, name: 'Spot: ATM straddle decaying, both sides written - fade the wall back to the middle', short: 'Spot straddle fade', spot: true },
+  { id: 'spotWallShift', no: 109, name: 'Spot: writers migrating - the OI wall steps one strike with the price', short: 'Spot wall shift', spot: true },
+  { id: 'spotPremDiverge', no: 110, name: 'Spot: new high / low the ATM premium does not confirm', short: 'Spot premium divergence', spot: true },
 ]
 export const STRATEGY_BY_ID = Object.fromEntries([...STRATEGIES, ...SPOT_STRATEGIES].map((s) => [s.id, s]))
 /** The strategies in use - what the scanner runs, lists, alerts on and scores. */
