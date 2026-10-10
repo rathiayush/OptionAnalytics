@@ -1238,7 +1238,12 @@ export function evaluateStrategies(input) {
       if (!(chg < 0) || chg > -0.01 * levelOi || !(around < 0)) continue
       // Second test of the level (in futures terms): one earlier visit, away, and now back.
       const L = level.strike + basis
-      const band = Math.max(oi.step * 0.25, pct(0.0006))
+      // The band and the stop's buffer / floor are a % of price but the level window and the room are in
+      // strikes: capped at a fraction of the strike step so they keep their size in strikes at every index
+      // (SENSEX ~82,000 on a 100 step: 0.06% = 49 pts made "away" a full strike and the stop outgrow the
+      // room). The caps sit above NIFTY's values (<= 16.2 / 27 pts up to 27,000; step 50), so NIFTY is unchanged.
+      const buffer = Math.min(pct(0.0006), oi.step * 0.35)
+      const band = Math.max(oi.step * 0.25, buffer)
       let touches = 0
       let away = true
       for (const b of bars) {
@@ -1256,7 +1261,7 @@ export function evaluateStrategies(input) {
       const tapeOk = aggWith(dir, 55, 'agg30')
       const c = confirm(dir)
       if (!footprint || !tapeOk || !c.ok) continue
-      const stopPts = Math.max(pct(0.001), dir * (price - L) + band + pct(0.0006))
+      const stopPts = Math.max(Math.min(pct(0.001), oi.step * 0.6), dir * (price - L) + band + buffer)
       const room = dir * (biggest + basis - price)
       if (room < 1.5 * stopPts) continue
       push('weakWall', dir, stopPts, Math.min(room * 0.9, 2.5 * stopPts), 45,
