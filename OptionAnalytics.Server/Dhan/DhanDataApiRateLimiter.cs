@@ -92,9 +92,11 @@ public sealed class DhanDataApiRateLimiter : IDisposable
     /// background work (a tuning job) a little longer - it has time, a waiting person does not.</summary>
     public static int RateLimitRetries => IsBackgroundRequest ? 3 : 2;
 
-    // How often background work looks again for a free permit: short, so it keeps the allowed rate rather than
-    // losing a slice of every second to polling.
-    private static readonly TimeSpan BackgroundPoll = TimeSpan.FromMilliseconds(20);
+    // How often background work looks again for a free permit: short, so it keeps the allowed rate rather than losing a
+    // slice of every second to polling, growing to MaxBackgroundPollMs while nothing is free.
+    private const int BackgroundPollMs = 20;
+    private const int MaxBackgroundPollMs = 100;
+    private static readonly TimeSpan BackgroundPoll = TimeSpan.FromMilliseconds(BackgroundPollMs);
     private readonly RateLimiter _interactive;
     private readonly RateLimiter _background;
     private readonly ILogger<DhanDataApiRateLimiter> _logger;
@@ -140,6 +142,9 @@ public sealed class DhanDataApiRateLimiter : IDisposable
         var lane = interactive && !BackgroundRequest.Value;
         if (!lane)
         {
+            // Backs off a little while nothing is free, so a job's many waiting calls do not spin: a permit comes free
+            // every fifth of a second at most, which a 20 - 100 ms look still catches at once.
+            var waitMs = BackgroundPollMs;
             while (true)
             {
                 // A spare interactive permit. While the live app is in use, never the LAST one: it is left free so a page
@@ -150,7 +155,8 @@ public sealed class DhanDataApiRateLimiter : IDisposable
                 if (_interactive.GetStatistics()?.CurrentAvailablePermits > (keepOneFree ? 1 : 0))
                     using (var spare = _interactive.AttemptAcquire(1)) if (spare.IsAcquired) { Count(); return; }
                 using (var own = _background.AttemptAcquire(1)) if (own.IsAcquired) { Count(); return; }
-                await Task.Delay(BackgroundPoll, cancellationToken);
+                await Task.Delay(waitMs, cancellationToken);
+                waitMs = Math.Min(MaxBackgroundPollMs, waitMs + BackgroundPollMs);
             }
         }
         Volatile.Write(ref _lastInteractiveTicks, Environment.TickCount64);

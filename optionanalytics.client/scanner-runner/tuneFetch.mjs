@@ -75,7 +75,7 @@ export function pruneCache(dir, maxBytes) {
 }
 
 export function createFetcher({ base = '', key = '', cacheDir = null, today, attempts = 6, paceMs = 0, timeoutMs = 120_000, fetchImpl = globalThis.fetch, sleep = sleepReal, onWait = () => {}, now = () => Date.now(), priority = () => 'background', retryScale = 1 } = {}) {
-  const stats = { requests: 0, retries: 0, cacheHits: 0, cacheWrites: 0, waitedMs: 0 }
+  const stats = { requests: 0, retries: 0, cacheHits: 0, cacheWrites: 0, shared: 0, waitedMs: 0 }
   let lastRequest = -Infinity
 
   async function once(path) {
@@ -140,6 +140,10 @@ export function createFetcher({ base = '', key = '', cacheDir = null, today, att
     return join(cacheDir, `v${CACHE_VERSION}`, date.slice(0, 7), `${date}-${name}-${(h >>> 0).toString(36)}.json.gz`)
   }
 
+  // The same thing asked for twice at once (several days are scanned together, and one day's "previous session" is
+  // often another day of the batch) is fetched once and shared - no double Dhan call, and no two writers on one file.
+  const inFlight = new Map()
+
   /** `api(path)` for a PAST day's data, kept on disk once fetched and `valid(body)`. */
   async function dayApi(name, date, path, valid = (b) => b != null) {
     const cacheable = !!cacheDir && typeof date === 'string' && date < today
@@ -152,16 +156,25 @@ export function createFetcher({ base = '', key = '', cacheDir = null, today, att
         return body
       } catch { /* a damaged file: fetch it again */ }
     }
-    const body = await api(path)
-    if (file && valid(body)) {
-      try {
-        mkdirSync(dirname(file), { recursive: true })
-        writeFileSync(`${file}.tmp`, gzipSync(JSON.stringify(body)))
-        renameSync(`${file}.tmp`, file)
-        stats.cacheWrites++
-      } catch { /* no room on disk: the job goes on uncached */ }
-    }
-    return body
+    const already = inFlight.get(path)
+    if (already) { stats.shared++; return already }
+    const pending = (async () => {
+      const body = await api(path)
+      if (file && valid(body)) {
+        try {
+          mkdirSync(dirname(file), { recursive: true })
+          // A name of its own, so two writers can never be in one temporary file; the rename onto the final name is
+          // atomic, so a reader sees either the old file or a whole new one.
+          const tmp = `${file}.${process.pid}.${(stats.cacheWrites + 1).toString(36)}.tmp`
+          writeFileSync(tmp, gzipSync(JSON.stringify(body)))
+          renameSync(tmp, file)
+          stats.cacheWrites++
+        } catch { /* no room on disk: the job goes on uncached */ }
+      }
+      return body
+    })()
+    inFlight.set(path, pending)
+    try { return await pending } finally { inFlight.delete(path) }
   }
 
   return { api, dayApi, stats }
