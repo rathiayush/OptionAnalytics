@@ -39,8 +39,8 @@ const c = (open, close, pad = 3) => ({ open, close, high: Math.max(open, close) 
 const around = (level, last) => (m) => (m < 89 ? c(level + ((m % 4) - 1.5), level + (((m + 1) % 4) - 1.5)) : last)
 
 test('the spot strategies are not in the futures scanner\'s list, and every one has the trade filters', () => {
-  assert.equal(STRATEGIES.length, 30)
-  assert.equal(ACTIVE_STRATEGIES.length, 22)
+  assert.equal(STRATEGIES.length, 33)
+  assert.equal(ACTIVE_STRATEGIES.length, 25)
   for (const s of SPOT_STRATEGIES) {
     assert.ok(!ACTIVE_STRATEGIES.some((a) => a.id === s.id))
     assert.equal(strategyFilters(s.id, {}).tradeSide, 'both')

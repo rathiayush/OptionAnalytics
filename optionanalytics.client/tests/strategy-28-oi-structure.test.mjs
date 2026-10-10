@@ -71,7 +71,7 @@ function scenario(dir, o = {}) {
 }
 const show = ({ s, all }) => JSON.stringify(s ? { side: s.side, entry: s.entry, stop: +s.stop.toFixed(1), target: +s.target.toFixed(1), conf: s.confidence, checks: s.checks } : all.map((x) => `${x.id}:${x.side}`))
 
-check('30 strategies, #28 is OI structure', STRATEGIES.length === 30 && STRATEGIES.find((s) => s.no === 28)?.id === 'oiStructure')
+check('33 strategies, #28 is OI structure', STRATEGIES.length === 33 && STRATEGIES.find((s) => s.no === 28)?.id === 'oiStructure')
 
 const L = scenario(1)
 check('LONG: put wall 1.5x the call wall, puts lead at the money, put writing every minute', L.s?.side === 'LONG'

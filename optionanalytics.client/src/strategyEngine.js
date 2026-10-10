@@ -1,5 +1,5 @@
 // The OI + Order Flow playbook's strategies as objective rules, run on the Order Flow page live and at
-// the replay clock (and over a whole day by "Scan day"): OI + order flow (1-10, 16-21, 24-27, 29), pure option OI (28), volume / market
+// the replay clock (and over a whole day by "Scan day"): OI + order flow (1-10, 16-21, 24-27, 29), pure option OI (28; 31-33 with the futures OI / VWAP), volume / market
 // profile (11-15, 30) and range-bound mean reversion (7, 22, 23). Each strategy reads all five screens:
 //
 //   OI        - the OI Replay data for the day (/api/oi-replay/{u}/run): option OI per strike (walls,
@@ -100,6 +100,13 @@ export const STRATEGIES = [
   // Market profile: a break of the initial balance that leaves a tail / sweeps the liquidity out there
   // and comes back inside - a failed breakout; the range is revisited (toward the other IB edge).
   { id: 'ibFailed', no: 30, name: 'Failed IB breakout - back inside, revisit the range', short: 'Failed IB break', group: 'profile', trial: true, retired: true },
+  // 31-33: the option chain read the trader values - CE / PE OI per strike, the S/R OI walls, the CE / PE added since
+  // the open, the ATM straddle's premium - with the futures' price / OI and VWAP. No book, heatmap or tape needed
+  // (SENSEX has only 5 depth levels) and every size in strike steps or % of price, so they read the same on NIFTY,
+  // BANKNIFTY and SENSEX. On trial: alerted beside the Top 15 (pushing nothing out) until measured.
+  { id: 'straddleFade', no: 31, name: 'ATM straddle decay - fade the OI wall back to the middle', short: 'Straddle decay fade', trial: true },
+  { id: 'wallShift', no: 32, name: 'S/R OI wall shift - writers rolling with the price', short: 'Wall shift', trial: true },
+  { id: 'cumFlip', no: 33, name: 'Since-open CE / PE flip + futures build-up on the VWAP side', short: 'Since-open OI flip', trial: true },
 ]
 /** The SPOT + OPTIONS strategies (spotEngine.js): they trade the index price itself - spot candles and the option
  *  chain's OI, no futures and no order flow. Measured by the Strategy tuning ("Spot + options only"); the live
@@ -165,6 +172,33 @@ export const STRATEGY_FILTERS = {
     { key: 'needDelta', label: 'Last bar\'s delta with the trade', type: 'switch', default: true },
     { key: 'targetR', label: 'Target (R)', type: 'number', default: 2, min: 1, max: 5, step: 0.5 },
     { key: 'maxR', label: 'Stretch toward the day\'s high / low up to (R)', type: 'number', default: 3, min: 1, max: 6, step: 0.5 },
+    { key: 'timeStopMin', label: 'Time stop (minutes)', type: 'number', default: 60, min: 10, max: 240, step: 5 },
+  ],
+  straddleFade: [
+    { key: 'fallPct', label: 'ATM straddle premium down at least (%) in 15 min', type: 'number', default: 2, min: 0, max: 10, step: 0.5 },
+    { key: 'needBelowAvg', label: 'ATM straddle under its session average', type: 'switch', default: true },
+    { key: 'oiRisePct', label: 'CE and PE OI at ATM ±1 each up at least (%) in 15 min', type: 'number', default: 0.5, min: 0, max: 5, step: 0.1 },
+    { key: 'edgeStrikes', label: 'Futures within (strikes) of the wall', type: 'number', default: 0.5, min: 0.25, max: 1.5, step: 0.25 },
+    { key: 'minRR', label: 'Room to the middle at least (R)', type: 'number', default: 1.2, min: 0.5, max: 3, step: 0.1 },
+    { key: 'timeStopMin', label: 'Time stop (minutes)', type: 'number', default: 45, min: 10, max: 240, step: 5 },
+  ],
+  wallShift: [
+    { key: 'withinMin', label: 'The wall moved within the last (minutes)', type: 'number', default: 15, min: 5, max: 30, step: 5 },
+    { key: 'maxStrikes', label: 'Moved by at most (strikes)', type: 'number', default: 1, min: 1, max: 3, step: 1 },
+    { key: 'newAddPct', label: 'OI added at the new wall strike in that time at least (%)', type: 'number', default: 1, min: 0, max: 10, step: 0.5 },
+    { key: 'leadX', label: 'New wall\'s OI at least x the old strike\'s', type: 'number', default: 1.05, min: 1, max: 2, step: 0.05 },
+    { key: 'followPct', label: 'Futures moved with it in that time at least (%)', type: 'number', default: 0.05, min: 0, max: 0.5, step: 0.01 },
+    { key: 'maxAwayStrikes', label: 'Futures at most (strikes) past the new wall', type: 'number', default: 1, min: 0.5, max: 3, step: 0.25 },
+    { key: 'targetR', label: 'Target (R)', type: 'number', default: 2, min: 1, max: 4, step: 0.5 },
+    { key: 'timeStopMin', label: 'Time stop (minutes)', type: 'number', default: 45, min: 10, max: 240, step: 5 },
+  ],
+  cumFlip: [
+    { key: 'withinMin', label: 'Flipped within the last (minutes)', type: 'number', default: 15, min: 5, max: 30, step: 5 },
+    { key: 'flipPct', label: 'Lead after the flip at least (% of the chain\'s OI)', type: 'number', default: 0.2, min: 0.05, max: 1, step: 0.05 },
+    { key: 'needBuildUp', label: 'Futures build-up with it in 15 min (price and OI up for a long)', type: 'switch', default: true },
+    { key: 'maxFromVwapPct', label: 'Futures at most (%) past VWAP', type: 'number', default: 0.3, min: 0.05, max: 1, step: 0.05 },
+    { key: 'needDelta', label: 'Last bar\'s delta with the trade', type: 'switch', default: true },
+    { key: 'targetR', label: 'Target (R)', type: 'number', default: 2, min: 1, max: 4, step: 0.5 },
     { key: 'timeStopMin', label: 'Time stop (minutes)', type: 'number', default: 60, min: 10, max: 240, step: 5 },
   ],
 }
@@ -2250,6 +2284,181 @@ export function evaluateStrategies(input) {
             Plan: `stop beyond ${ownWall.strike}, target the ${dir > 0 ? 'call' : 'put'} wall ${otherWall.strike}`,
           })
       }
+    }
+  }
+
+  // ---- 31-33: the option chain + futures OI + VWAP (no book / heatmap / tape) ---------------------------
+  // Sizes in strike steps (walls sit on strikes) or % of price, so NIFTY (step 50), BANKNIFTY and SENSEX (step 100)
+  // read alike. The stop's buffer beyond a wall: 0.06% of price, capped at 0.35 of a strike (as #16).
+  const kStep = oi.step
+  const wallBuffer = Math.min(pct(0.0006), kStep * 0.35)
+
+  // 31. ATM straddle decay - fade the OI wall back to the middle - 10:15-14:30. The option sellers own the day: the
+  //     ATM straddle (CE + PE premium at the strike nearest the index, minute by minute, finished minutes only) is
+  //     under its session average and still falling (2%+ in 15 minutes) while the CE AND the PE OI at the money
+  //     (ATM ±1) both rise (0.5%+ each in 15 minutes) - premium sold on both sides, the writers expect a range.
+  //     A move to the edge of that range fades:
+  //       SHORT - the futures within half a strike of the biggest CALL wall above (at most a quarter strike
+  //               through it), the last bar turning down off it, that wall's writers not leaving (its OI not
+  //               down 0.5%+ in 15 minutes);
+  //       LONG  - the mirror at the biggest PUT wall below.
+  //     Stop beyond the wall / the last 3 bars' extreme (+ the buffer); target the middle between the two walls,
+  //     1.2R+ away. Every threshold is a filter (STRATEGY_FILTERS.straddleFade).
+  if (minute >= hm(10, 15) && minute <= hm(14, 30) && support != null && resistance != null && resistance > support && bars.length >= 3) {
+    const f = strategyFilters('straddleFade', input.filters?.straddleFade)
+    const atm = Math.round(spotNow / kStep) * kStep
+    const atmK = [atm - kStep, atm, atm + kStep]
+    // A side's OI at ATM ±1: its change in 15 minutes as a fraction of what it was.
+    const rise = (map) => {
+      let chg = 0, base = 0
+      for (const k of atmK) {
+        const c = oiChange(map, k, nowMs, 15)
+        const was = oiOf(map, k, nowMs - 15 * MIN)
+        if (c == null || !(was > 0)) return null
+        chg += c
+        base += was
+      }
+      return base > 0 ? chg / base : null
+    }
+    const ceRise = rise(oi.ce)
+    const peRise = rise(oi.pe)
+    const bothWritten = ceRise != null && peRise != null && ceRise >= f.oiRisePct / 100 && peRise >= f.oiRisePct / 100
+    // The ATM straddle at `t`: at the strike nearest the index THEN (a straddle chart); null without both premiums.
+    const straddleAt = (t) => {
+      const idx = valueAt(oi.spot, t)?.close
+      if (!idx) return null
+      const k = Math.round(idx / kStep) * kStep
+      const ce = premiumAt(oi, 'CE', k, t)
+      const pe = premiumAt(oi, 'PE', k, t)
+      return ce != null && pe != null ? ce + pe : null
+    }
+    const band = f.edgeStrikes * kStep
+    for (const dir of bothWritten ? [1, -1] : []) {
+      // dir = the fade: LONG off the PUT wall below, SHORT off the CALL wall above.
+      const wall = dir > 0 ? support : resistance
+      const wallF = wall + basis
+      const inside = dir * (price - wallF) // > 0: on the range side of the wall
+      if (inside > band || inside < -0.25 * kStep) continue
+      if (!last3.some((b) => (dir > 0 ? b.low <= wallF + band : b.high >= wallF - band))) continue
+      if (!(dir * (last.close - last.open) > 0)) continue
+      const map = dir > 0 ? oi.pe : oi.ce
+      const wallOi = oiOf(map, wall, nowMs)
+      const wallChg = oiChange(map, wall, nowMs, 15)
+      if (!(wallOi > 0) || (wallChg != null && wallChg <= -0.005 * wallOi)) continue
+      // The straddle: falling, and under its session average (every finished minute since the open).
+      const straddle = straddleAt(nowMs)
+      const before = straddleAt(nowMs - 15 * MIN)
+      if (straddle == null || before == null || straddle > before * (1 - f.fallPct / 100)) continue
+      let sum = 0, n = 0
+      for (let t = dayOpenMs(oi, nowMs); t <= nowMs; t += MIN) { const v = straddleAt(t); if (v != null) { sum += v; n++ } }
+      if (n < 30) continue
+      const avg = sum / n
+      if (f.needBelowAvg && !(straddle < avg)) continue
+      const extreme = dir > 0 ? Math.min(...last3.map((b) => b.low)) : Math.max(...last3.map((b) => b.high))
+      const stopLevel = dir > 0 ? Math.min(extreme, wallF) - wallBuffer : Math.max(extreme, wallF) + wallBuffer
+      const stopPts = Math.max(Math.min(pct(0.001), kStep * 0.6), dir * (price - stopLevel))
+      if (stopPts > pct(0.004)) continue
+      const mid = (support + resistance) / 2 + basis
+      const toMid = dir * (mid - price)
+      if (toMid < f.minRR * stopPts) continue
+      push('straddleFade', dir, stopPts, toMid, f.timeStopMin, 0, {
+        OI: `ATM ${atmK[0]}-${atmK[2]} written on both sides: CE ${ceRise >= 0 ? '+' : ''}${(ceRise * 100).toFixed(2)}%, PE ${peRise >= 0 ? '+' : ''}${(peRise * 100).toFixed(2)}% in 15m; ${dir > 0 ? 'PUT' : 'CALL'} wall ${wall} ${(wallOi / 1e5).toFixed(1)}L${wallChg != null ? ` (${lakh(wallChg)} in 15m)` : ''} holding`,
+        Straddle: `ATM straddle ${straddle.toFixed(1)} vs ${before.toFixed(1)} 15 min ago (${(((straddle - before) / before) * 100).toFixed(1)}%), session average ${avg.toFixed(1)} - premium decaying, a range`,
+        Range: `futures ${price.toFixed(1)} at the ${dir > 0 ? 'PUT' : 'CALL'} wall ${wall} (futures ${wallF.toFixed(1)}), last bar turning ${dir > 0 ? 'up' : 'down'}; walls ${support}-${resistance}`,
+        Plan: `stop beyond ${stopLevel.toFixed(1)}, target the middle ${mid.toFixed(1)} (${(toMid / stopPts).toFixed(1)}R)`,
+      })
+    }
+  }
+
+  // 32. S/R OI wall shift - writers rolling with the price - 09:45-14:30. The biggest PUT wall (support: the biggest
+  //     PE OI at / below the index, within 8 strikes) moved UP one strike in the last 15 minutes - the put writers
+  //     rolled up behind the price - and the futures followed (up 0.05%+ in those 15 minutes): LONG. The mirror -
+  //     the biggest CALL wall (resistance) moved DOWN one strike and the futures fell - is a SHORT. A real roll:
+  //     the new strike added 1%+ of its OI in that time and more than the old one did, and is now the bigger of
+  //     the two (1.05x+); the other wall is not moving against it (the CALL wall not coming down under a long).
+  //     The futures on the trade's side of the new wall, at most a strike past it. Stop beyond the new wall
+  //     (+ the buffer); target 2R, short of the next wall ahead (no trade with under 1.7R of room to it).
+  //     Every threshold is a filter (STRATEGY_FILTERS.wallShift).
+  if (minute >= hm(9, 45) && minute <= hm(14, 30)) {
+    const f = strategyFilters('wallShift', input.filters?.wallShift)
+    const thenMs = nowMs - f.withinMin * MIN
+    const spotThen = valueAt(oi.spot, thenMs)?.close
+    const fW = futuresChange(oi, nowMs, f.withinMin)
+    const wallsThen = spotThen ? wallsAt(oi, oiRows(oi, thenMs), spotThen) : null
+    for (const dir of wallsThen && fW ? [1, -1] : []) {
+      const map = dir > 0 ? oi.pe : oi.ce
+      const nowK = dir > 0 ? support : resistance
+      const thenK = dir > 0 ? wallsThen.support : wallsThen.resistance
+      if (nowK == null || thenK == null) continue
+      const moved = Math.round((dir * (nowK - thenK)) / kStep)
+      if (moved < 1 || moved > f.maxStrikes) continue
+      const newOi = oiOf(map, nowK, nowMs)
+      const oldOi = oiOf(map, thenK, nowMs) ?? 0
+      const newChg = oiChange(map, nowK, nowMs, f.withinMin)
+      const oldChg = oiChange(map, thenK, nowMs, f.withinMin)
+      if (!(newOi > 0) || newChg == null || !(newChg > 0) || newChg < (f.newAddPct / 100) * (newOi - newChg)) continue
+      if (oldChg != null && oldChg >= newChg) continue
+      if (newOi < f.leadX * oldOi) continue
+      // The other wall not moving against the trade.
+      const otherNow = dir > 0 ? resistance : support
+      const otherThen = dir > 0 ? wallsThen.resistance : wallsThen.support
+      if (otherNow != null && otherThen != null && dir * (otherNow - otherThen) < 0) continue
+      // The futures followed the writers.
+      if (!(dir * fW.pricePct > 0) || dir * fW.pricePct < f.followPct / 100) continue
+      const wallF = nowK + basis
+      const past = dir * (price - wallF)
+      if (!(past > 0) || past > f.maxAwayStrikes * kStep) continue
+      const stopPts = Math.max(Math.min(pct(0.001), kStep * 0.6), past + wallBuffer)
+      if (stopPts > pct(0.004)) continue
+      const aheadK = dir > 0 ? wallAheadStrikes.resistanceAhead : wallAheadStrikes.supportAhead
+      const room = aheadK != null ? dir * (aheadK + basis - price) : null
+      if (room != null && room < 1.7 * stopPts) continue
+      const targetPts = Math.min(f.targetR * stopPts, room != null ? 0.9 * room : Infinity)
+      const futOi = fW.oiPct == null ? 'no futures OI' : `futures OI ${fW.oiPct >= 0 ? '+' : ''}${(fW.oiPct * 100).toFixed(2)}% (${Math.abs(fW.oiPct) < FUT_OI_MOVE ? 'flat' : dir > 0 ? (fW.oiPct > 0 ? 'long build-up' : 'short covering') : (fW.oiPct > 0 ? 'short build-up' : 'long unwinding')})`
+      push('wallShift', dir, stopPts, targetPts, f.timeStopMin, 0, {
+        OI: `${dir > 0 ? 'PUT' : 'CALL'} wall moved ${thenK} → ${nowK} in ${f.withinMin}m: ${nowK} ${lakh(newChg)} (now ${(newOi / 1e5).toFixed(1)}L), ${thenK} ${oldChg != null ? lakh(oldChg) : '-'} (now ${(oldOi / 1e5).toFixed(1)}L) - writers rolling ${dir > 0 ? 'up' : 'down'}; ${dir > 0 ? 'CALL' : 'PUT'} wall ${otherThen ?? '-'} → ${otherNow ?? '-'}`,
+        'Futures confirm': `futures ${(fW.pricePct * 100).toFixed(2)}% in ${f.withinMin}m - following the writers; ${futOi}`,
+        Plan: `futures ${past.toFixed(1)} past the new wall (${wallF.toFixed(1)}); stop beyond it, target ${(targetPts / stopPts).toFixed(1)}R${aheadK != null ? ` (next wall ${aheadK})` : ''}`,
+      })
+    }
+  }
+
+  // 33. Since-open CE / PE flip + futures build-up on the VWAP side - 10:00-14:30. Over the whole chain, the OI added
+  //     since the open: puts added minus calls added was negative 15 minutes ago (call writers leading) and now
+  //     leads the other way by 0.2%+ of the chain's OI - the writers changed sides - with a fresh futures long
+  //     build-up in the last 15 minutes (price up 0.05%+, OI up 0.1%+), the futures above VWAP (at most 0.3% above)
+  //     and the last bar's delta with it: LONG. The mirror (calls now leading after puts did, a short build-up,
+  //     below VWAP) is a SHORT. Stop behind VWAP (0.1%+); target 2R, short of the next wall ahead (no trade with
+  //     under 1.5R of room). Every threshold is a filter (STRATEGY_FILTERS.cumFlip).
+  if (minute >= hm(10, 0) && minute <= hm(14, 30) && vwap != null && optionRead) {
+    const f = strategyFilters('cumFlip', input.filters?.cumFlip)
+    const thenMs = nowMs - f.withinMin * MIN
+    const spotThen = valueAt(oi.spot, thenMs)?.close
+    const readThen = spotThen ? optionOiRead(oi, spotThen, thenMs, 15) : null
+    const total = optionRead.peNow + optionRead.ceNow
+    const netNow = optionRead.peOpen - optionRead.ceOpen
+    const netThen = readThen ? readThen.peOpen - readThen.ceOpen : null
+    for (const dir of netThen != null && futuresRead && total > 0 ? [1, -1] : []) {
+      if (!(dir * netThen < 0) || dir * netNow < (f.flipPct / 100) * total) continue
+      const buildUp = futuresRead.oiPct != null && dir * futuresRead.pricePct >= FUT_PRICE_MOVE && futuresRead.oiPct >= FUT_OI_MOVE
+      if (!(dir * futuresRead.pricePct > 0) || (f.needBuildUp && !buildUp)) continue
+      const fromVwap = dir * (price - vwap)
+      if (!(fromVwap > 0) || fromVwap > pct(f.maxFromVwapPct / 100)) continue
+      if (f.needDelta && !(dir * last.delta > 0)) continue
+      const stopPts = Math.max(pct(0.001), fromVwap + pct(0.0005))
+      if (stopPts > pct(0.004)) continue
+      const aheadK = dir > 0 ? wallAheadStrikes.resistanceAhead : wallAheadStrikes.supportAhead
+      const room = aheadK != null ? dir * (aheadK + basis - price) : null
+      if (room != null && room < 1.5 * stopPts) continue
+      const targetPts = Math.min(f.targetR * stopPts, room != null ? 0.9 * room : Infinity)
+      const ofChain = (v) => `${v >= 0 ? '+' : ''}${((v / total) * 100).toFixed(2)}%`
+      push('cumFlip', dir, stopPts, targetPts, f.timeStopMin, 0, {
+        OI: `since the open puts ${lakh(optionRead.peOpen)} vs calls ${lakh(optionRead.ceOpen)}: net ${ofChain(netNow)} of the chain now vs ${ofChain(netThen)} ${f.withinMin} min ago - ${dir > 0 ? 'put' : 'call'} writers took the lead`,
+        'Futures confirm': `${buildUp ? `${dir > 0 ? 'long' : 'short'} build-up` : 'price with it (build-up filter off)'}: ${futuresText}`,
+        VWAP: `futures ${price.toFixed(1)} ${dir > 0 ? 'above' : 'below'} VWAP ${vwap.toFixed(1)} by ${fromVwap.toFixed(1)}`,
+        Footprint: `Δ ${last.delta > 0 ? '+' : ''}${last.delta}`,
+        Plan: `stop behind VWAP, target ${(targetPts / stopPts).toFixed(1)}R${aheadK != null ? ` (next wall ${aheadK})` : ''}`,
+      })
     }
   }
 
