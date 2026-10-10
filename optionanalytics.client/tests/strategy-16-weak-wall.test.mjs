@@ -10,19 +10,20 @@ const check = (n, c, x = '') => { console.log(`${c ? 'PASS' : 'FAIL'} ${n} ${x}`
 check('30 strategies, #16 is the weak wall', STRATEGIES.length === 30 && STRATEGIES.find((s) => s.no === 16)?.id === 'weakWall')
 
 const NOW_M = 85
-function oiRun({ levelOi = (m) => (m < 70 ? 4.6e6 : 4.6e6 - (m - 70) * 40000), neighbour = 3e6, futuresUp = true } = {}) {
+function oiRun(opts = {}) { return buildOiContext(rawRun(opts)) }
+function rawRun({ levelOi = (m) => (m < 70 ? 4.6e6 : 4.6e6 - (m - 70) * 40000), neighbour = 3e6, futuresUp = true, futuresOi = true } = {}) {
   const sp = [], fut = [], ce = [], pe = []
   for (let m = 0; m <= NOW_M + 5; m++) {
     const s = 22630 + (m >= 70 ? (m - 70) * 0.5 : 0)
     sp.push({ time: iso(at(m)), open: s, high: s, low: s, close: s })
-    fut.push({ time: iso(at(m)), open: s + 60, high: s + 60, low: s + 60, close: s + 60 + (futuresUp ? 0 : -(m >= 70 ? (m - 70) * 1.2 : 0)), volume: 1, openInterest: 1e7 + m * 4000 })
+    fut.push({ time: iso(at(m)), open: s + 60, high: s + 60, low: s + 60, close: s + 60 + (futuresUp ? 0 : -(m >= 70 ? (m - 70) * 1.2 : 0)), volume: 1, openInterest: futuresOi ? 1e7 + m * 4000 : null })
     for (let k = 22400; k <= 22900; k += 50) {
       const ceOi = k === 22800 ? 10e6 : k === 22650 ? levelOi(m) : (k === 22600 || k === 22700) ? neighbour : 1e6
       ce.push({ time: iso(at(m)), strike: k, openInterest: ceOi, price: 50 })
       pe.push({ time: iso(at(m)), strike: k, openInterest: k === 22550 ? 6e6 : 1e6, price: 50 })
     }
   }
-  return buildOiContext({ success: true, date: '2026-10-05', step: 50, spotCandlesOneMinute: sp, futuresBars: fut, cePoints: ce, pePoints: pe })
+  return { success: true, date: '2026-10-05', step: 50, spotCandlesOneMinute: sp, futuresBars: fut, cePoints: ce, pePoints: pe }
 }
 // Futures bars: first test of 22710 (=22650 + basis 60) around m 40, away, back now at m 85.
 function futBars({ secondTest = true } = {}) {
@@ -116,5 +117,37 @@ for (const [name, ix] of INDICES) {
 check('NIFTY (scaled builder): fires LONG and SHORT', scaled({ f: 1, step: 50, K: 22650, lot: 75, move: 'price' })?.side === 'LONG'
   && scaled({ f: 1, step: 50, K: 22600, lot: 75, move: 'price', dir: -1 })?.side === 'SHORT')
 
+
+// No futures OI (a past day after its contract expired: Dhan / the archive give the bars without OI) - the
+// futures PRICE direction alone confirms it; with futures OI nothing changes.
+const brief = (x) => x && { side: x.side, entry: x.entry, stop: x.stop, target: x.target, timeStopMs: x.timeStopMs }
+const noOi = run(oiRun({ futuresOi: false }), futBars()).find((x) => x.id === 'weakWall')
+check('no futures OI: still fires LONG on the futures price direction alone (same entry, stop, target)', noOi?.side === 'LONG' && JSON.stringify(brief(noOi)) === JSON.stringify(brief(s)) && /no futures OI/.test(noOi.checks['Futures confirm']), JSON.stringify(noOi?.checks['Futures confirm']))
+check('no futures OI: not when the futures price is falling', !run(oiRun({ futuresOi: false, futuresUp: false }), futBars()).some((x) => x.id === 'weakWall'))
+check('with futures OI the setup is unchanged (build-up read shown)', /long build-up: price/.test(s?.checks['Futures confirm'] ?? ''), s?.checks['Futures confirm'])
+// The SHORT mirror (around 22650 for the index, 22710 for the futures - the basis stays +60): a weak PUT wall
+// being unwound, tested twice from above, the futures falling.
+const C = 22650
+const mirrorPts = (list, fn) => list.map((p) => fn(p))
+function mirrorRun(raw) {
+  const sp = mirrorPts(raw.spotCandlesOneMinute, (c) => ({ ...c, open: 2 * C - c.open, high: 2 * C - c.low, low: 2 * C - c.high, close: 2 * C - c.close }))
+  const F = 2 * (C + 60)
+  const fut = mirrorPts(raw.futuresBars, (b) => ({ ...b, open: F - b.open, high: F - b.low, low: F - b.high, close: F - b.close }))
+  const flip = (list) => mirrorPts(list, (p) => ({ ...p, strike: 2 * C - p.strike }))
+  return { ...raw, spotCandlesOneMinute: sp, futuresBars: fut, cePoints: flip(raw.pePoints), pePoints: flip(raw.cePoints) }
+}
+function mirrorBars(bars) {
+  const F = 2 * (C + 60)
+  return bars.map((b) => ({ ...b, open: F - b.open, high: F - b.low, low: F - b.high, close: F - b.close, buy: b.sell, sell: b.buy, delta: -b.delta, cvd: -b.cvd }))
+}
+const runShort = (oi, bars) => {
+  const now = at(NOW_M) + 10000
+  return evaluateStrategies({ nowMs: now, price: bars.at(-1).close, bars, minuteBars: bars, prints: tape(now, 30), book: { bids: [{ quantity: 400 }], asks: [{ quantity: 600 }] }, liquidity: [], pullStack: [], sweeps: [], icebergs: [], oi, estimated: false, lotSize: 75, bigLots: 10, profile: null })
+}
+const sh = runShort(buildOiContext(mirrorRun(rawRun())), mirrorBars(futBars())).find((x) => x.id === 'weakWall')
+check('fires SHORT on the mirror (a weak PUT wall unwound, futures falling)', sh?.side === 'SHORT' && sh.target < sh.entry && sh.stop > sh.entry, JSON.stringify(brief(sh)))
+const shNoOi = runShort(buildOiContext(mirrorRun(rawRun({ futuresOi: false }))), mirrorBars(futBars())).find((x) => x.id === 'weakWall')
+check('no futures OI: the SHORT still fires on the price direction alone (same levels)', shNoOi?.side === 'SHORT' && JSON.stringify(brief(shNoOi)) === JSON.stringify(brief(sh)), JSON.stringify(brief(shNoOi)))
+check('no futures OI: the SHORT not when the futures price is rising', !runShort(buildOiContext(mirrorRun(rawRun({ futuresOi: false, futuresUp: false }))), mirrorBars(futBars())).some((x) => x.id === 'weakWall'))
 console.log(fails ? `${fails} FAILED` : 'all passed')
 process.exitCode = fails ? 1 : 0

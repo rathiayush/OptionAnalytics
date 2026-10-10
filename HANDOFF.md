@@ -50,6 +50,11 @@ Each: LONG and SHORT, fires on its rules, does not fire when each key condition 
 trade / Telegram until one wins). Fix = mark them `trial: true` like `vwapPullback` (alerted beside the 15). Also `weakWall` needs futures OI
 (`f15.oiPct == null -> continue`, strategyEngine.js ~1116): on past days after a contract expires there is none - accept price direction alone.
 `range` (#7) has no scenario test (CLAUDE.md requires one); `maxPain` (#10) has none and never runs on past days (isExpiryDay is false).
+DONE on branch `claude/never-fire-fixes` (not merged): the six are `trial: true`; weakWall takes the futures price alone when there is
+no futures OI; a replayed day knows it was an expiry (`wasExpiryDay`: its front-month futures expiry, or the weekly weekday agreed by
+the listed weekly expiry and that month's futures expiry); scenario tests for #6, #7, #10, #12, #13, #14 (none fired in a test before).
+Still open (data, not rules): #4 / #5 / #6 / #19 / #24 need futures OI (none on a past day after the contract expired); #11-#14 need
+the previous session's profile (memory only); #27 needs the heatmap (thin on SENSEX's 5-level book).
 
 ### Part 4 - the rest of the "never fire" audit (16 strategies not yet audited) and the OI plan items not built
 OI plan (in the earlier synthesis): richer `oiCtx` fields into the audit `sig`, a `keepVetoed` measurement of the options-OI veto, the
