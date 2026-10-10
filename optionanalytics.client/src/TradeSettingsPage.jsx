@@ -152,8 +152,9 @@ export default function TradeSettingsPage() {
       render: (v, r) => <Switch size="small" checked={v} disabled={!isAdmin} onChange={(x) => edit(r.underlying, { scannerEnabled: x })} aria-label={`${r.underlying} server scanner`} />,
     },
     {
-      title: <Tooltip title="What the server scanner does on an alert: paper-sell or paper-buy the option, or only alert">On an alert</Tooltip>, dataIndex: 'autoTrade', width: 230,
-      render: (v, r) => <Segmented size="small" value={v} disabled={!isAdmin} onChange={(x) => edit(r.underlying, { autoTrade: x })} options={[{ value: 'sell', label: 'Sell option' }, { value: 'buy', label: 'Buy option' }, { value: 'off', label: 'Alert only' }]} />,
+      title: <Tooltip title="What the server scanner does on an alert for this index: paper-sell or paper-buy the option (your choice here wins for every strategy), leave it to each strategy's own tuned setting, or only alert">On an alert</Tooltip>, dataIndex: 'autoTrade', width: 300,
+      render: (v, r) => <Segmented size="small" value={v} disabled={!isAdmin} onChange={(x) => edit(r.underlying, { autoTrade: x })} options={[{ value: 'sell', label: 'Sell option' }, { value: 'buy', label: 'Buy option' },
+        { value: 'strategy', label: <Tooltip title="Each strategy buys or sells what its own tuned setting says (Strategy tuning - Apply to the scanner), at its own strike and with its own option SL / target; one with no setting of its own sells.">Per strategy</Tooltip> }, { value: 'off', label: 'Alert only' }]} />,
     },
     { title: '', key: 'save', width: 90, render: (_, r) => isAdmin && <Button size="small" type="primary" disabled={!changed(r)} loading={saving === r.underlying} onClick={() => save(r)}>Save</Button> },
   ]
