@@ -6,7 +6,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { applyTradeFilter, strategyFilters, simulateOutcome } from '../src/strategyEngine.js'
 import { scanDaySetups, firstPerCooldown, withDayOutcomes } from '../src/scanDay.js'
-import { DEFAULT_VARIANT, dayTrades, scoreR, splitDays, tuneStrategy, rankStrategies, filtersFromTuning, variants, tuningDay, variantText } from '../src/strategyTuning.js'
+import { DEFAULT_VARIANT, OI_GRID, dayTrades, scoreR, splitDays, tuneStrategy, rankStrategies, filtersFromTuning, variants, tuningDay, variantText } from '../src/strategyTuning.js'
 import { day } from './synthetic-day.mjs'
 
 const MIN = 60_000
@@ -137,4 +137,33 @@ test('ranking, the grid size, and the filters to save', () => {
   assert.deepEqual(filtersFromTuning({ closesBeyond: 3, tradeStopX: 2 }, { ...DEFAULT_VARIANT, tradeSide: 'long' }), { closesBeyond: 3, tradeSide: 'long' })
   // simulateOutcome on a fake day: the long hits its target.
   assert.equal(simulateOutcome(days[0].setups[0], days[0].minuteBars, days[0].endMs, true).r, 2)
+})
+
+test('the result lists every tuned input with what each of its values did, and each trade its SL / target', () => {
+  const days = Array.from({ length: 12 }, (_, i) => fakeDay(`2026-09-${String(10 + i).padStart(2, '0')}`))
+  const grid = { tradeSide: ['both', 'long', 'short'], window: [[930, 1445], [930, 1230]], tradeStopX: [1, 1.5], tradeTargetX: [1], tradeTimeStop: [0], tradeTrail: ['scanner'] }
+  const r = tuneStrategy(days, 'wallBreak', { grid, minTrades: 4 })
+  assert.deepEqual(r.factors.map((f) => f.key), Object.keys(grid), 'every input tuned is reported')
+  const side = r.factors.find((f) => f.key === 'tradeSide')
+  assert.deepEqual(side.values.map((x) => x.value), ['both', 'long', 'short'])
+  assert.equal(side.chosen, r.best.params.tradeSide)
+  assert.equal(side.values.find((x) => x.value === 'long').best.avg, 2, 'long only: +2R a trade')
+  assert.equal(side.values.find((x) => x.value === 'short').best.avg, 0, 'short only: at best 0R (stop x1.5 rides out the loss) - tried and shown, not chosen')
+  assert.ok(side.values.every((x) => x.tried > 0))
+  assert.equal(r.factors.find((f) => f.key === 'window').chosen, `${r.best.params.tradeFrom}-${r.best.params.tradeTo}`)
+  // Each trade: its stop-loss and target as traded, their points, why it closed.
+  const t = r.best.trades[0]
+  assert.equal(t.slPts, Math.abs(t.entry - t.stop))
+  assert.equal(t.targetPts, Math.abs(t.target - t.entry))
+  assert.ok(['target', 'stop-loss', 'trailing SL', 'time stop', 'square-off 15:10'].includes(t.exitReason), t.exitReason)
+  if (r.best.params.tradeStopX === 1.5) assert.equal(t.slPts, 15)
+})
+
+test('the OI stage reports every ticked OI input - an input that stays at Any was still tried at each value', () => {
+  const days = Array.from({ length: 8 }, (_, i) => tuningDay(`2026-09-1${i}`, [], replayDay, syn.oi))
+  const r = tuneStrategy(days, 'wallBreak', { what: 'oi', oiKeys: ['tradeOiFlow', 'tradeDayType'], minTrades: 2 })
+  assert.deepEqual(r.factors.map((f) => f.key), ['tradeOiFlow', 'tradeDayType'], 'only the ticked inputs, all of them')
+  for (const f of r.factors) assert.deepEqual(f.values.map((x) => x.value), OI_GRID[f.key])
+  const both = tuneStrategy(days, 'wallBreak', { what: 'both', oiKeys: ['tradeOiFlow'], minTrades: 2 })
+  assert.ok(both.factors.some((f) => f.key === 'tradeOiFlow') && both.factors.some((f) => f.key === 'tradeStopX'), 'OI, then trade: both stages reported')
 })

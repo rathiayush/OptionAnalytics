@@ -2,8 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import dayjs from 'dayjs'
 import { Alert, Button, Card, Checkbox, Col, DatePicker, InputNumber, Popconfirm, Progress, Row, Segmented, Select, Space, Switch, Table, Tag, Tooltip, Typography, message } from 'antd'
 import { NavBar, useAuth, UP_COLOR, DOWN_COLOR } from './shared.jsx'
-import { ACTIVE_STRATEGIES, SPOT_STRATEGIES, STRATEGY_BY_ID } from './strategyEngine.js'
-import { OI_COMBO_CAP, OI_FACTORS, countOiCombinations, optionText, variantText } from './strategyTuning.js'
+import { ACTIVE_STRATEGIES, SPOT_STRATEGIES, STRATEGY_BY_ID, TRADE_FILTERS } from './strategyEngine.js'
+import { OI_COMBO_CAP, OI_FACTORS, OPTION_DEFAULT, countOiCombinations, optionText, variantText } from './strategyTuning.js'
 import { applyTunedFilters } from './scannerSettings.js'
 
 const { Title, Text } = Typography
@@ -49,6 +49,22 @@ function PointsSummary({ rows, index, option = false }) {
   )
 }
 
+/** A trade's stop-loss and target as traded, with their distance in points, and where the trailing stop had moved it. */
+function Levels({ t }) {
+  if (!Number.isFinite(t.stop)) return <Text type="secondary">-</Text>
+  return (
+    <span style={{ whiteSpace: 'nowrap', fontSize: 12 }}>
+      SL <span style={{ color: DOWN_COLOR }}>{t.stop.toFixed(1)}</span> ({t.slPts?.toFixed(1)}) · Tgt <span style={{ color: UP_COLOR }}>{Number.isFinite(t.target) ? t.target.toFixed(1) : '-'}</span>{t.targetPts != null && ` (${t.targetPts.toFixed(1)})`}
+      {t.trailed && <><br /><Text type="secondary" style={{ fontSize: 11 }}>trailed to {t.finalStop.toFixed(1)} ({pts(t.lockedPts)})</Text></>}
+    </span>
+  )
+}
+/** The option's own SL / target premiums (none when it goes out with the index trade). */
+function OptLevels({ o }) {
+  if (o?.sl == null) return <Text type="secondary" style={{ fontSize: 12 }}>with the index trade</Text>
+  return <span style={{ whiteSpace: 'nowrap', fontSize: 12 }}>SL <span style={{ color: DOWN_COLOR }}>{o.sl.toFixed(1)}</span> ({o.slPts.toFixed(1)}) · Tgt <span style={{ color: UP_COLOR }}>{o.target.toFixed(1)}</span> ({o.targetPts.toFixed(1)})</span>
+}
+
 /** Every trade of the best setting: the index, the futures entry and exit, the points, and both options' prices. */
 function TradesTable({ trades }) {
   return (
@@ -58,6 +74,8 @@ function TradesTable({ trades }) {
       { title: 'Index', dataIndex: 'index', width: 90 },
       { title: 'Side', dataIndex: 'side', width: 70, render: (v) => <span style={{ color: v === 'LONG' ? UP_COLOR : DOWN_COLOR }}>{v}</span> },
       { title: 'Futures in → out', key: 'f', width: 150, render: (_, t) => `${t.entry.toFixed(1)} → ${t.exit.toFixed(1)}` },
+      { title: 'SL / target (points)', key: 'lv', width: 200, render: (_, t) => <Levels t={t} /> },
+      { title: 'Closed by', dataIndex: 'exitReason', width: 100, render: (v) => <Text style={{ fontSize: 12 }}>{v ?? '-'}</Text> },
       { title: 'Points', dataIndex: 'points', width: 80, render: (v) => <b style={{ color: colR(v) }}>{pts(v)}</b> },
       { title: 'R', dataIndex: 'r', width: 70, render: (v) => <span style={{ color: colR(v) }}>{fmtR(v)}</span> },
       { title: 'Option bought: price in → out', key: 'b', render: (_, t) => <Leg leg={t.buy} /> },
@@ -76,8 +94,73 @@ function OptionTradesTable({ trades }) {
       { title: 'Index', dataIndex: 'index', width: 90 },
       { title: 'Side', dataIndex: 'side', width: 70, render: (v) => <span style={{ color: v === 'LONG' ? UP_COLOR : DOWN_COLOR }}>{v}</span> },
       { title: 'Index in → out', key: 'f', width: 150, render: (_, t) => `${t.entry.toFixed(1)} → ${t.exit.toFixed(1)} (${pts(t.indexPoints)})` },
+      { title: 'Index SL / target', key: 'lv', width: 200, render: (_, t) => <Levels t={t} /> },
       { title: 'Option: premium in → out', key: 'o', render: (_, t) => <Leg leg={t.opt} /> },
+      { title: 'Option SL / target (premium)', key: 'olv', width: 210, render: (_, t) => <OptLevels o={t.opt} /> },
       { title: 'Closed by', key: 'why', width: 210, render: (_, t) => <Text style={{ fontSize: 12 }}>{t.opt.reason}</Text> },
+    ]} />
+  )
+}
+
+const OPTION_PARAMS = [
+  { key: 'optLeg', label: 'Option: buy or sell', fmt: (v) => (v === 'buy' ? 'Buy (gains with the move)' : 'Sell (write the losing side)') },
+  { key: 'optMoneyness', label: 'Option: strike', fmt: (v) => (v === 0 ? 'ATM' : `${Math.abs(v)} ${v > 0 ? 'ITM' : 'OTM'}`) },
+  { key: 'optExit', label: 'Option: exit', fmt: (v) => ({ index: 'With the index trade', first: 'Own SL / target or the index exit, first', option: 'Own SL / target only' }[v] ?? v) },
+  { key: 'optSlPct', label: 'Option: SL (% of premium)', fmt: (v) => `${v}%` },
+  { key: 'optTargetPct', label: 'Option: target (% of premium)', fmt: (v) => `${v}%` },
+]
+const hm = (x) => `${String(Math.floor(x / 100)).padStart(2, '0')}:${String(x % 100).padStart(2, '0')}`
+/** One parameter's value in words. */
+function paramText(key, v) {
+  if (v == null) return '-'
+  if (key === 'window') { const [a, b] = String(v).split('-').map(Number); return `${hm(a)} - ${hm(b)}` }
+  const op = OPTION_PARAMS.find((o) => o.key === key)
+  if (op) return op.fmt(v)
+  const f = TRADE_FILTERS.find((x) => x.key === key)
+  if (f?.options) return f.options.find((o) => o.value === v)?.label ?? String(v)
+  if (key === 'tradeStopX' || key === 'tradeTargetX') return `x${v}`
+  if (key === 'tradeTimeStop') return v > 0 ? `${v} min` : 'strategy\'s own'
+  return String(v)
+}
+const PARAM_ROWS = [
+  { key: 'tradeSide' }, { key: 'window', label: 'entry window (IST)' },
+  ...TRADE_FILTERS.filter((f) => !['tradeSide', 'tradeFrom', 'tradeTo'].includes(f.key)).map((f) => ({ key: f.key })),
+]
+const labelOf = (key, fallback) => fallback ?? OPTION_PARAMS.find((o) => o.key === key)?.label ?? TRADE_FILTERS.find((f) => f.key === key)?.label?.replace(/^Trade( \(any strategy\))?: /, '') ?? key
+const valueOf = (params, key) => (key === 'window' ? (params ? `${params.tradeFrom}-${params.tradeTo}` : null) : params?.[key])
+
+/** Every parameter of the best setting next to the strategy as written - and, for each input tuned in this run, what
+ *  each of its values did on the train days (the best combination with it), so an input left at Any shows it was
+ *  tried and did not help. Inputs not tuned in this run (not ticked / not in this kind of tuning) say so. */
+function ParamsTable({ r, minTrades }) {
+  const factors = new Map((r.factors ?? []).map((f) => [f.key, f]))
+  const rows = [...PARAM_ROWS, ...(r.unit === 'pts' ? OPTION_PARAMS : [])].map((p) => ({ key: p.key, label: labelOf(p.key, p.label), factor: factors.get(p.key) }))
+  const asWritten = r.unit === 'pts' ? { ...r.baseline?.params, ...OPTION_DEFAULT } : r.baseline?.params
+  const unit = r.unit ?? 'R'
+  const f = unit === 'pts' ? (v) => `${pts(v)} pts` : fmtR
+  return (
+    <Table size="small" pagination={false} rowKey="key" dataSource={rows} scroll={{ x: 900 }} columns={[
+      { title: 'Parameter', dataIndex: 'label', width: 260, render: (v) => <span style={{ fontSize: 12 }}>{v}</span> },
+      { title: 'As written', key: 'aw', width: 160, render: (_, row) => <span style={{ fontSize: 12 }}>{paramText(row.key, valueOf(asWritten, row.key))}</span> },
+      { title: 'Best setting', key: 'b', width: 180, render: (_, row) => {
+        const v = valueOf(r.best?.params, row.key)
+        const changed = r.best && String(v) !== String(valueOf(asWritten, row.key))
+        return <span style={{ fontSize: 12, fontWeight: changed ? 600 : 400 }}>{r.best ? paramText(row.key, v) : '-'}{changed && <Tag color="blue" style={{ marginLeft: 6 }}>changed</Tag>}</span>
+      } },
+      { title: 'Each value tried (train days: best combination with it)', key: 'tr', render: (_, row) => {
+        if (!row.factor) return <Text type="secondary" style={{ fontSize: 11 }}>not tuned in this run</Text>
+        return (
+          <Space size={[4, 2]} wrap>
+            {row.factor.values.map((x) => (
+              <Tooltip key={String(x.value)} title={x.best ? `${x.best.n} trades · win ${pct(x.best.winRate)} · total ${f(x.best.total)}` : x.tried ? `tried ${x.tried}x, at most ${x.maxN} trade(s) - below the minimum` : 'not reached by the step-by-step search'}>
+                <Tag color={String(x.value) === String(row.factor.chosen) ? 'blue' : undefined} style={{ fontSize: 11, marginInlineEnd: 0 }}>
+                  {paramText(row.key, x.value)}: {x.best ? <span style={{ color: colR(x.best.avg) }}>{f(x.best.avg)}</span> : <Text type="secondary" style={{ fontSize: 11 }}>{x.tried ? `under ${r.minTradesWanted ?? minTrades} trades` : 'skipped'}</Text>}
+                </Tag>
+              </Tooltip>
+            ))}
+          </Space>
+        )
+      } },
     ]} />
   )
 }
@@ -276,7 +359,7 @@ export default function StrategyTuningPage() {
         {result && (
           <>
             <Card size="small" title={`${result.underlying} · ${result.days?.length ?? 0} day(s) · finished ${when(result.finishedUtc)}`}
-              extra={<Text type="secondary" style={{ fontSize: 11 }}>{result.what ? `tuned: ${{ both: 'OI, then trade', oi: 'OI confirmation', trade: 'trade settings', option: 'option trade', all: 'everything' }[result.what] ?? result.what} · ` : ''}{result.days?.filter((d) => d.estimated).length ? `${result.days.filter((d) => d.estimated).length} estimated day(s) · ` : ''}min {result.minTrades} trades · {result.days?.[result.days.length - 1]?.date} to {result.days?.[0]?.date}{result.from || result.to ? ` (range asked: ${result.from ?? 'start'} to ${result.to ?? 'yesterday'})` : ''}</Text>}>
+              extra={<Text type="secondary" style={{ fontSize: 11 }}>{result.what ? `tuned: ${{ both: 'OI, then trade', oi: 'OI confirmation', trade: 'trade settings', option: 'option trade', all: 'everything' }[result.what] ?? result.what}${['both', 'oi', 'all'].includes(result.what) && result.oiFactors ? ` (${result.oiFactors.length} OI input(s), ${result.search === 'full' ? 'every combination' : 'step by step'})` : ''} · ` : ''}{result.days?.filter((d) => d.estimated).length ? `${result.days.filter((d) => d.estimated).length} estimated day(s) · ` : ''}min {result.minTrades} trades · {result.days?.[result.days.length - 1]?.date} to {result.days?.[0]?.date}{result.from || result.to ? ` (range asked: ${result.from ?? 'start'} to ${result.to ?? 'yesterday'})` : ''}</Text>}>
               {result.data === 'spot' && <Alert type="info" showIcon style={{ marginBottom: 8 }} message="Spot + options only: the index candles and the option chain's OI, no futures and no order flow. Points are index points; the option bought and sold are priced beside them. The live scanner does not run these strategies yet, so there is nothing to apply - this measures what they would have done." />}
               {result.skipped?.length > 0 && <Alert type="warning" showIcon style={{ marginBottom: 8 }} message={`${result.skipped.length} day(s) could not be scanned`} description={result.skipped.slice(0, 5).map((s) => `${s.date}: ${s.reason}`).join(' · ')} />}
               <Table size="small" rowKey="id" columns={rankedColumns} dataSource={result.ranked ?? []} pagination={false} scroll={{ y: 320 }} />
@@ -298,12 +381,18 @@ export default function StrategyTuningPage() {
                     { title: 'Test (newest days)', key: 'te', render: (_, row) => <Score s={row.test} unit={r.unit} /> },
                   ]} dataSource={[{ k: 'As written', ...r.baseline }, ...(r.best ? [{ k: 'Best setting', ...r.best }] : [])]} />
                   <PointsSummary index={result.underlying} option={r.unit === 'pts'} rows={[{ k: r.unit === 'pts' ? 'As before' : 'As written', points: r.baseline?.points }, ...(r.best ? [{ k: 'Best setting', points: r.best.points }] : [])]} />
+                  {r.best && (
+                    <details open>
+                      <summary style={{ cursor: 'pointer', fontSize: 12 }}>Every parameter: as written, the best setting, and what each value of the tuned inputs did (blue = chosen; avg per trade on the train days)</summary>
+                      <div style={{ marginTop: 6 }}><ParamsTable r={r} minTrades={result.minTrades} /></div>
+                    </details>
+                  )}
                   {r.best?.suggest && (
                     <Alert type="info" showIcon message={`To trade it like this: ${r.best.suggest.leg.toUpperCase()} ${r.best.suggest.moneyness === 0 ? 'ATM' : `${Math.abs(r.best.suggest.moneyness)} strike(s) ${r.best.suggest.moneyness > 0 ? 'ITM' : 'OTM'}`}, option SL about ${r.best.suggest.slPoints.toFixed(1)} and target about ${r.best.suggest.targetPoints.toFixed(1)} premium points (on a typical entry premium of ${r.best.suggest.premium.toFixed(1)}) - set them in Trade settings.`} />
                   )}
                   {r.best?.trades?.length > 0 && (
                     <details>
-                      <summary style={{ cursor: 'pointer', fontSize: 12 }}>The {r.best.trades.length} trades of the best setting: index, futures and option prices in and out, points</summary>
+                      <summary style={{ cursor: 'pointer', fontSize: 12 }}>The {r.best.trades.length} trades of the best setting: index, SL and target, futures and option prices in and out, points</summary>
                       <div style={{ marginTop: 6 }}>{r.unit === 'pts' ? <OptionTradesTable trades={r.best.trades} /> : <TradesTable trades={r.best.trades} />}</div>
                     </details>
                   )}
