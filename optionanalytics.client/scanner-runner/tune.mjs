@@ -429,7 +429,11 @@ async function main() {
     // server's own cap), not in little 5-day pieces: the server cuts a range at every real expiry itself, so a wide
     // chunk becomes whole, properly-anchored cycle windows, while a narrow chunk cut across a cycle turned one
     // window into two - 42 strike calls each - for the very same days.
-    const CHUNK = Math.max(2, Math.min(31, Number(process.env.TUNE_RANGE_DAYS) || 28))
+    // Wide enough that a request covers whole expiry cycles (a chunk that splits one costs an extra window), narrow
+    // enough that the answer is a size that comes back: a day is ~15,750 OI points, so 14 days is already tens of
+    // megabytes of JSON for the server to build and this process to read. A request that times out wastes everything
+    // it had fetched, so a smaller chunk also loses less when one does.
+    const CHUNK = Math.max(2, Math.min(31, Number(process.env.TUNE_RANGE_DAYS) || 14))
     for (let i = 0; i < dates.length; i += CHUNK) {
       const from = dates[i]
       const to = dates[Math.min(i + CHUNK - 1, dates.length - 1)]
