@@ -107,7 +107,7 @@ function OptionTradesTable({ trades }) {
 const OPTION_PARAMS = [
   { key: 'optLeg', label: 'Option: buy or sell', fmt: (v) => (v === 'buy' ? 'Buy (gains with the move)' : 'Sell (write the losing side)') },
   { key: 'optMoneyness', label: 'Option: strike', fmt: (v) => (v === 0 ? 'ATM' : `${Math.abs(v)} ${v > 0 ? 'ITM' : 'OTM'}`) },
-  { key: 'optExit', label: 'Option: exit', fmt: (v) => ({ index: 'With the index trade', first: 'Own SL / target or the index exit, first', option: 'Own SL / target only' }[v] ?? v) },
+  { key: 'optExit', label: 'Option: exit', fmt: (v) => ({ index: 'With the index trade', indexSl: 'With the index trade, capped at a Max SL', first: 'Own SL / target or the index exit, first', option: 'Own SL / target only' }[v] ?? v) },
   { key: 'optSlPct', label: 'Option: SL (% of premium)', fmt: (v) => `${v}%` },
   { key: 'optTargetPct', label: 'Option: target (% of premium)', fmt: (v) => `${v}%` },
 ]
@@ -315,7 +315,7 @@ const TuningResult = memo(function TuningResult({ result, isAdmin, spot, applyRe
                     </LazyDetails>
                   )}
                   {r.best?.suggest && (
-                    <Alert type="info" showIcon message={`To trade it like this: ${r.best.suggest.leg.toUpperCase()} ${r.best.suggest.moneyness === 0 ? 'ATM' : `${Math.abs(r.best.suggest.moneyness)} strike(s) ${r.best.suggest.moneyness > 0 ? 'ITM' : 'OTM'}`}, option SL about ${r.best.suggest.slPoints.toFixed(1)} and target about ${r.best.suggest.targetPoints.toFixed(1)} premium points (on a typical entry premium of ${r.best.suggest.premium.toFixed(1)}). Apply to the scanner sets all of this for this strategy - no need to change Trade settings by hand.`} />
+                    <Alert type="info" showIcon message={`To trade it like this: ${r.best.suggest.leg.toUpperCase()} ${r.best.suggest.moneyness === 0 ? 'ATM' : `${Math.abs(r.best.suggest.moneyness)} strike(s) ${r.best.suggest.moneyness > 0 ? 'ITM' : 'OTM'}`}, option SL about ${r.best.suggest.slPoints.toFixed(1)}${r.best.suggest.targetPoints != null ? ` and target about ${r.best.suggest.targetPoints.toFixed(1)}` : ' (a Max SL only - out with the index trade, no option target)'} premium points (on a typical entry premium of ${r.best.suggest.premium.toFixed(1)}). Apply to the scanner sets all of this for this strategy - no need to change Trade settings by hand.`} />
                   )}
                   {r.best?.trades?.length > 0 && (
                     <LazyDetails summary={`The ${r.best.trades.length} trades of the best setting: index, SL and target, futures and option prices in and out, points`}>

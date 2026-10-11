@@ -8,7 +8,7 @@ import { optionStopTargetHit, optionTradeAt, premiumAt } from '../src/strategyEn
 import { scanDaySetups } from '../src/scanDay.js'
 import {
   DEFAULT_VARIANT, OPTION_DEFAULT, OPTION_GRID, optionDetails, optionOutcome, optionRun, optionText, optionVariantRedundant,
-  tradeDetails, tuneStrategy, tuningDay, variants,
+  filtersFromTuning, tradeDetails, tuneStrategy, tuningDay, variants,
 } from '../src/strategyTuning.js'
 import { day } from './synthetic-day.mjs'
 
@@ -81,9 +81,46 @@ test('the option\'s own SL / target: checked on its premium from the first full 
   assert.ok(checked > 5)
 })
 
-test('the option grid: 510 combinations (out with the index trade has no SL / target to try)', () => {
+test('out with the index trade, capped at a Max SL: the option\'s stop only - never its target, never past the index exit', () => {
+  let checked = 0
+  let stopped = 0
+  for (const s of all.filter((x) => x.id === id).slice(0, 30)) {
+    for (const [leg, sl] of [['buy', 1], ['sell', 1], ['buy', 3], ['sell', 15]]) {
+      const outcome = { exitAt: s.t + 20 * MIN, r: 0 }
+      const o = optionOutcome(d, s, outcome, v({ optLeg: leg, optExit: 'indexSl', optSlPct: sl, optTargetPct: 20 }))
+      if (!o) continue
+      const until = s.t + 21 * MIN
+      const hit = optionStopTargetHit(syn.oi, o.trade, s.t, until, o.trade.premium * sl / 100, null)
+      if (hit) {
+        stopped++
+        assert.match(o.reason, /Max SL/)
+        assert.ok(Math.abs(o.points + o.trade.premium * sl / 100) < 1e-9, 'never loses more than the Max SL')
+      } else {
+        assert.equal(o.reason, 'the index trade exited', 'no option target: it rides with the index trade')
+        assert.equal(o.exitPremium, premiumAt(syn.oi, o.trade.side, o.trade.strike, until))
+      }
+      assert.ok(o.exitMs <= until)
+      // Without the cap it is the plain index exit, the same or a bigger loss when the cap hit.
+      const plain = optionOutcome(d, s, outcome, v({ optLeg: leg, optExit: 'index' }))
+      if (hit && plain) assert.ok(plain.exitMs >= o.exitMs)
+      if (!hit && plain) assert.equal(plain.points, o.points)
+      checked++
+    }
+  }
+  assert.ok(checked > 5, `${checked}`)
+  assert.ok(stopped > 0, 'the cap was hit at least once on the synthetic days')
+  assert.match(optionText(v({ optLeg: 'buy', optExit: 'indexSl', optSlPct: 30 })), /^BUY ATM · out with the index trade, Max SL 30% of the premium$/)
+  // Applied to the scanner as the option's SL only - its target stays the Trade settings one.
+  assert.deepEqual(filtersFromTuning({}, v({ optLeg: 'buy', optExit: 'indexSl', optSlPct: 30, optTargetPct: 50 }), { option: true }), { tradeOptLeg: 'buy', tradeOptMoneyness: 0, tradeOptSlPct: 30 })
+  const det = optionDetails(days, id, v({ optLeg: 'buy', optExit: 'indexSl', optSlPct: 15 }), null, 'NIFTY')
+  assert.ok(det.length > 0 && det.every((t) => t.opt.slPts > 0 && t.opt.target == null && t.opt.rr == null && Number.isFinite(t.opt.r)))
+})
+
+test('the option grid: 560 combinations (out with the index trade has no SL / target to try, with a Max SL no target)', () => {
   const n = [...variants(OPTION_GRID, OPTION_DEFAULT)].filter((x) => !optionVariantRedundant(x)).length
-  assert.equal(n, 2 * 5 * (1 + 25 + 25))
+  assert.equal(n, 2 * 5 * (1 + 5 + 25 + 25))
+  assert.equal(optionVariantRedundant(v({ optExit: 'indexSl', optSlPct: 30 })), false)
+  assert.equal(optionVariantRedundant(v({ optExit: 'indexSl', optTargetPct: 50 })), true)
   assert.equal(optionVariantRedundant(v({ optExit: 'index', optSlPct: 30 })), true)
   assert.equal(optionVariantRedundant(v({ optExit: 'first', optSlPct: 30 })), false)
 })
@@ -91,13 +128,13 @@ test('the option grid: 510 combinations (out with the index trade has no SL / ta
 test('tuning the option trade: premium points, the option as before as the baseline, a suggestion in premium points', () => {
   const r = tuneStrategy(days, id, { what: 'option', minTrades: 2, underlying: 'NIFTY' })
   assert.equal(r.unit, 'pts')
-  assert.equal(r.tried, 510)
+  assert.equal(r.tried, 560)
   assert.deepEqual({ leg: r.baseline.params.optLeg, m: r.baseline.params.optMoneyness, exit: r.baseline.params.optExit }, { leg: 'sell', m: 0, exit: 'index' })
   assert.deepEqual(r.baseline.train.total, optionRun(days.slice(0, 4), id, v({}), null).reduce((a, b) => a + b, 0), 'scored in premium points')
   if (r.best) {
     assert.ok(r.best.trades.every((t) => t.opt && Number.isFinite(t.points)))
     if (r.best.params.optExit !== 'index') {
-      assert.ok(r.best.suggest && r.best.suggest.slPoints > 0 && r.best.suggest.targetPoints > 0)
+      assert.ok(r.best.suggest && r.best.suggest.slPoints > 0 && (r.best.params.optExit === 'indexSl' ? r.best.suggest.targetPoints == null : r.best.suggest.targetPoints > 0))
       assert.ok(Math.abs(r.best.suggest.slPoints - r.best.suggest.premium * r.best.params.optSlPct / 100) < 1e-9)
     }
   }

@@ -91,6 +91,8 @@ export const oiFactorsFor = (data) => (data === 'spot' ? OI_FACTORS.filter((f) =
  *   optExit       'index' - out when the index trade exits (stop / target / trail / time stop): what the tuning did
  *                 before; 'first' - the option's own SL / target, or the index trade's exit, whichever comes first;
  *                 'option' - only the option's own SL / target (else the 15:10 square-off);
+ *                 'indexSl' - out with the index trade, but never losing more than the option's Max SL (optSlPct) on
+ *                 the way: a cap on a long loss in the premium, with no option target;
  *   optSlPct / optTargetPct - the option's SL / target as a % of its entry premium, so they scale with moneyness.
  * The option's levels are checked minute by minute on its premium from the first full minute after the entry, filled
  * at the level (optionStopTargetHit - the scanner's own rule). Scored in premium points.
@@ -98,13 +100,19 @@ export const oiFactorsFor = (data) => (data === 'spot' ? OI_FACTORS.filter((f) =
 export const OPTION_GRID = {
   optLeg: ['sell', 'buy'],
   optMoneyness: [0, 1, -1, 2, -2],
-  optExit: ['index', 'first', 'option'],
+  optExit: ['index', 'indexSl', 'first', 'option'],
   optSlPct: [20, 15, 25, 30, 40],
   optTargetPct: [30, 20, 50, 75, 100],
 }
 export const OPTION_DEFAULT = { optLeg: 'sell', optMoneyness: 0, optExit: 'index', optSlPct: 20, optTargetPct: 30 }
-/** Out with the index trade: the option's SL / target are not used - tried once. */
-export const optionVariantRedundant = (v) => (v.optExit ?? 'index') === 'index' && ((v.optSlPct ?? 20) !== 20 || (v.optTargetPct ?? 30) !== 30)
+/** Out with the index trade: the option's SL / target are not used - tried once; with the Max SL only, no target. */
+export const optionVariantRedundant = (v) => {
+  const exit = v.optExit ?? 'index'
+  if (exit === 'index') return (v.optSlPct ?? 20) !== 20 || (v.optTargetPct ?? 30) !== 30
+  return exit === 'indexSl' && (v.optTargetPct ?? 30) !== 30
+}
+/** Does the option's own target apply (its Max SL applies in every mode but 'index')? */
+const ownTarget = (exit) => exit === 'first' || exit === 'option'
 
 const SQUARE_OFF_MIN = 15 * 60 + 10
 const istMinuteOf = (ms) => Math.floor((ms / MIN + 330) % 1440)
@@ -122,7 +130,7 @@ export function optionOutcome(day, s, outcome, v) {
   let exitPremium = null
   let reason = exitMode === 'option' ? 'square-off 15:10' : 'the index trade exited'
   if (exitMode !== 'index') {
-    const hit = optionStopTargetHit(day.oi, trade, s.t, exitMs, trade.premium * (v.optSlPct ?? 20) / 100, trade.premium * (v.optTargetPct ?? 30) / 100)
+    const hit = optionStopTargetHit(day.oi, trade, s.t, exitMs, trade.premium * (v.optSlPct ?? 20) / 100, ownTarget(exitMode) ? trade.premium * (v.optTargetPct ?? 30) / 100 : null)
     if (hit) { exitMs = hit.at; exitPremium = hit.premium; reason = hit.reason }
   }
   if (exitPremium == null) exitPremium = premiumAt(day.oi, trade.side, trade.strike, exitMs)
@@ -148,7 +156,7 @@ export function optionDetails(days, id, v, trail, underlying) {
       // The option's own SL / target premiums (used unless it goes out with the index trade).
       const own = (v.optExit ?? 'index') !== 'index'
       const slPrem = o.trade.premium * (v.optSlPct ?? 20) / 100
-      const tgPrem = o.trade.premium * (v.optTargetPct ?? 30) / 100
+      const tgPrem = ownTarget(v.optExit) ? o.trade.premium * (v.optTargetPct ?? 30) / 100 : null
       const buy = o.trade.action === 'BUY'
       out.push({
         date: day.date, t: s.t, exitT: o.exitMs - MIN, index: underlying ?? null, side: s.side, entry: s.entry, exit: exitPrice,
@@ -156,10 +164,10 @@ export function optionDetails(days, id, v, trail, underlying) {
         ...levelsOf(s, outcome),
         opt: {
           label: `${o.trade.action} ${o.trade.strike} ${o.trade.side}`, moneyness: v.optMoneyness ?? 0, entry: o.trade.premium, exit: o.exitPremium, points: o.points, reason: o.reason,
-          sl: own ? o.trade.premium + (buy ? -slPrem : slPrem) : null, target: own ? o.trade.premium + (buy ? tgPrem : -tgPrem) : null,
+          sl: own ? o.trade.premium + (buy ? -slPrem : slPrem) : null, target: own && tgPrem != null ? o.trade.premium + (buy ? tgPrem : -tgPrem) : null,
           slPts: own ? slPrem : null, targetPts: own ? tgPrem : null,
           // R: premium points made over the premium points risked (its own SL); none when it only exits with the index.
-          r: own && slPrem > 0 ? o.points / slPrem : null, rr: own && slPrem > 0 ? tgPrem / slPrem : null,
+          r: own && slPrem > 0 ? o.points / slPrem : null, rr: own && slPrem > 0 && tgPrem != null ? tgPrem / slPrem : null,
         },
       })
     }
@@ -172,6 +180,7 @@ export function optionText(v) {
   const m = v.optMoneyness ?? 0
   const where = m === 0 ? 'ATM' : `${Math.abs(m)} ${m > 0 ? 'ITM' : 'OTM'}`
   const exit = (v.optExit ?? 'index') === 'index' ? 'out with the index trade'
+    : v.optExit === 'indexSl' ? `out with the index trade, Max SL ${v.optSlPct}% of the premium`
     : `SL ${v.optSlPct}% / target ${v.optTargetPct}% of the premium${v.optExit === 'first' ? ', or the index trade\'s exit first' : ''}`
   return `${(v.optLeg ?? 'sell').toUpperCase()} ${where} · ${exit}`
 }
@@ -499,7 +508,7 @@ export function tuneStrategy(days, id, { trail = null, minTrades = 8, trainFract
   if (best && isOpt && best.trades.length && (best.params.optExit ?? 'index') !== 'index') {
     const premiums = best.trades.map((t) => t.opt.entry).sort((a, b) => a - b)
     const median = premiums[Math.floor(premiums.length / 2)]
-    best = { ...best, suggest: { premium: median, slPoints: median * best.params.optSlPct / 100, targetPoints: median * best.params.optTargetPct / 100, moneyness: best.params.optMoneyness, leg: best.params.optLeg } }
+    best = { ...best, suggest: { premium: median, slPoints: median * best.params.optSlPct / 100, targetPoints: ownTarget(best.params.optExit) ? median * best.params.optTargetPct / 100 : null, moneyness: best.params.optMoneyness, leg: best.params.optLeg } }
   }
   const unit = isOpt ? ' pts' : 'R'
   let recommend = false
@@ -578,11 +587,11 @@ export function filtersFromTuning(current, params, { option = false } = {}) {
   if (!option) return out
   if (params.optLeg === 'buy' || params.optLeg === 'sell') out.tradeOptLeg = params.optLeg
   if (Number.isFinite(params.optMoneyness)) out.tradeOptMoneyness = params.optMoneyness
-  // The option's own SL / target only apply when the tuning chose to use them ('first' or 'option'); with 'index' the
-  // option simply goes out with the index trade, which is the scanner's own behaviour.
-  if ((params.optExit === 'first' || params.optExit === 'option')) {
+  // The option's own SL / target only apply when the tuning chose to use them ('first' or 'option'; 'indexSl' - the
+  // Max SL only); with 'index' the option simply goes out with the index trade, which is the scanner's own behaviour.
+  if (ownTarget(params.optExit) || params.optExit === 'indexSl') {
     if (params.optSlPct > 0) out.tradeOptSlPct = params.optSlPct
-    if (params.optTargetPct > 0) out.tradeOptTargetPct = params.optTargetPct
+    if (ownTarget(params.optExit) && params.optTargetPct > 0) out.tradeOptTargetPct = params.optTargetPct
   }
   return out
 }
