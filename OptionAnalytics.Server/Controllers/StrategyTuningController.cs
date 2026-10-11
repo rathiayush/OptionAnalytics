@@ -187,6 +187,32 @@ public sealed class StrategyTuningController : ControllerBase
         return Ok(TuningPerformance.Trades(_tuning.HistoryRuns(), _tuning.HistoryRows, d, strategy.Trim(), s, i));
     }
 
+    /// <summary>GET /api/strategy-tuning/performance/all-trades - EVERY strategy's trades across all runs (each counted
+    /// once), in one stream by date and time: data, index (all / one), setting (as written / fine-tuned), strategies
+    /// (comma-separated ids), side (LONG / SHORT), from / to (yyyy-MM-dd), order (asc / desc - newest first by
+    /// default), skip / take (a page, at most 5,000 rows). Returns the page, how many match, and the totals over all of
+    /// them.</summary>
+    [HttpGet("performance/all-trades")]
+    public IActionResult AllTrades([FromQuery] string? data = null, [FromQuery] string? index = null, [FromQuery] string? setting = null,
+        [FromQuery] string? strategies = null, [FromQuery] string? side = null, [FromQuery] string? from = null, [FromQuery] string? to = null,
+        [FromQuery] string? order = null, [FromQuery] int skip = 0, [FromQuery] int take = 100)
+    {
+        var d = string.Equals(data, "spot", StringComparison.OrdinalIgnoreCase) ? "spot" : "futures";
+        var s = setting is "as written" or "fine-tuned" ? setting : null;
+        var i = string.IsNullOrWhiteSpace(index) || index == "all" ? null : index.Trim().ToUpperInvariant();
+        var ids = string.IsNullOrWhiteSpace(strategies) ? null : strategies.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToHashSet(StringComparer.Ordinal);
+        var sd = side?.Trim().ToUpperInvariant() is "LONG" or "SHORT" ? side.Trim().ToUpperInvariant() : null;
+        var all = TuningPerformance.Trades(_tuning.HistoryRuns(), _tuning.HistoryRows, d, null, s, i)
+            .Where(t => (ids is null || ids.Contains(t.GetValueOrDefault("strategy_id", "")))
+                && (sd is null || t.GetValueOrDefault("side") == sd)
+                && (string.IsNullOrEmpty(from) || string.CompareOrdinal(t.GetValueOrDefault("date", ""), from) >= 0)
+                && (string.IsNullOrEmpty(to) || string.CompareOrdinal(t.GetValueOrDefault("date", ""), to) <= 0))
+            .ToList();
+        if (!string.Equals(order, "asc", StringComparison.OrdinalIgnoreCase)) all.Reverse();
+        var page = all.Skip(Math.Max(0, skip)).Take(Math.Clamp(take, 1, 5000)).ToList();
+        return Ok(new { total = all.Count, totals = TuningPerformance.Totals(all), trades = page });
+    }
+
     /// <summary>What to clear: the tuning results and history, the fetched-days cache, the scanner's record.</summary>
     public sealed record ClearRequest(bool Tuning, bool Cache, bool ScannerRecord);
 

@@ -43,6 +43,18 @@ export const liveTradingApi = {
   tradeLevels: (orderIds, stopLossPoints, targetPoints, trail = null) => postJson('/api/live-trading/orders/trade-levels', {
     orderIds, slippagePoints: 0, stopLossPoints, targetPoints, ...(trail ? { trailStartPoints: trail.start ?? 0, trailGapPoints: trail.gap ?? 0 } : {}),
   }),
+  // A live trade the strategy scanner placed: the server watches its INDEX stop-loss / target from then on and exits it
+  // on Dhan (with Telegram) when one is hit - even with this page closed (ServerLiveService.WatchPageTrade).
+  watchIndex: (watch) => plainPost('/api/live-trading/index-watch', watch),
+  // Its trailing stop moved the index stop (the server keeps it only ever tighter).
+  moveIndexStop: (underlying, key, stop) => plainPost('/api/live-trading/index-watch/stop', { underlying, key, stop }),
+}
+
+async function plainPost(url, body) {
+  const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+  const result = await response.json().catch(() => null)
+  if (!response.ok) throw new Error(result?.error || `Request failed (HTTP ${response.status})`)
+  return result
 }
 
 const money = (v) => (v == null ? '—' : `${v >= 0 ? '+' : ''}${Math.round(v).toLocaleString('en-IN')}`)

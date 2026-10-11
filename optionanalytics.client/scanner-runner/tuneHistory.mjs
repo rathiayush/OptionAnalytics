@@ -9,6 +9,7 @@
 //                                run's days it was not chosen on, beside the strategy as written (tuneChecks.mjs).
 // A run is never overwritten, so a strategy can be compared across runs; the Trades page lists the runs and clubs the
 // trades of the ones picked (any index) by date and time. run_id = {INDEX}-{data}-{yyyyMMdd-HHmmss} (IST).
+import { TUNED_SETTING_KEYS } from '../src/strategyTuning.js'
 
 /** A CSV field: quoted when it holds a comma, a quote or a newline; null / undefined as empty. */
 export const csvField = (v) => {
@@ -128,13 +129,9 @@ export const TRADE_COLUMNS = [
   { key: 'why', value: (t) => why(t.checks) },
 ]
 
-/** The parameters a setting is made of - the trade filters and the option settings, in one column each. */
-export const SETTING_KEYS = [
-  'tradeSide', 'tradeFrom', 'tradeTo', 'tradeStopX', 'tradeTargetX', 'tradeTimeStop', 'tradeTrail',
-  'tradeOiWindow', 'tradeFutWindow', 'tradeOiFlow', 'tradeOiCum', 'tradeWallOi', 'tradeSideOi', 'tradeSideCum',
-  'tradeFutOi', 'tradeMoveSize', 'tradeDayType', 'tradeWallRoom',
-  'optLeg', 'optMoneyness', 'optExit', 'optSlPct', 'optTargetPct',
-]
+/** The parameters a setting is made of - the trade filters and the option settings, in one column each (the list lives
+ *  with the tuning itself, strategyTuning.js TUNED_SETTING_KEYS, so an applied setting can name its identity too). */
+export const SETTING_KEYS = TUNED_SETTING_KEYS
 
 const score = (s, key) => [
   { key: `${key}_trades`, value: (r) => r[key]?.n ?? '' },

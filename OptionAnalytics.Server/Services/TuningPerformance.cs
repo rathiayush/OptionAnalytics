@@ -158,7 +158,7 @@ public static class TuningPerformance
 
     /// <summary>The parameters of a settings row (every non-empty trade* / opt* column) - two runs that chose the same
     /// setting share it, whichever columns their files had; a cross-check row carries the same columns.</summary>
-    private static string SignatureOf(Dictionary<string, string> row) =>
+    public static string SignatureOf(Dictionary<string, string> row) =>
         string.Join('|', row.Where(kv => (kv.Key.StartsWith("trade", StringComparison.Ordinal) || kv.Key.StartsWith("opt", StringComparison.Ordinal)) && kv.Value.Length > 0)
             .OrderBy(kv => kv.Key, StringComparer.Ordinal).Select(kv => $"{kv.Key}={kv.Value}"));
 
@@ -268,10 +268,11 @@ public static class TuningPerformance
         return (result, usedRuns, trades);
     }
 
-    /// <summary>Every trade of one strategy across all runs - counted once like Build (the newest run's copy of a trade two
-    /// runs both scanned) - optionally only one setting ("as written" / "fine-tuned") and one index; oldest first.</summary>
+    /// <summary>Every trade of one strategy (null = EVERY strategy) across all runs - counted once like Build (the newest
+    /// run's copy of a trade two runs both scanned) - optionally only one setting ("as written" / "fine-tuned") and one
+    /// index; oldest first by date and time (then index, then strategy number).</summary>
     public static List<Dictionary<string, string>> Trades(IReadOnlyList<Dictionary<string, string>> runs,
-        Func<string, string, List<Dictionary<string, string>>?> readRows, string? data, string strategyId, string? setting = null, string? index = null)
+        Func<string, string, List<Dictionary<string, string>>?> readRows, string? data, string? strategyId, string? setting = null, string? index = null)
     {
         var seen = new HashSet<string>(StringComparer.Ordinal);
         var list = new List<Dictionary<string, string>>();
@@ -281,16 +282,32 @@ public static class TuningPerformance
             if (data is not null && runData != data) continue;
             foreach (var t in readRows(run.GetValueOrDefault("run_id", ""), "trades") ?? new())
             {
-                if (t.GetValueOrDefault("strategy_id") != strategyId) continue;
+                var id = t.GetValueOrDefault("strategy_id", "");
+                if (id.Length == 0 || (strategyId is not null && id != strategyId)) continue;
                 var s = t.GetValueOrDefault("setting", "as written");
                 var i = t.GetValueOrDefault("index", run.GetValueOrDefault("index", ""));
                 if (setting is not null && s != setting) continue;
                 if (index is not null && i != index) continue;
-                if (!seen.Add($"{runData}|{i}|{strategyId}|{s}|{t.GetValueOrDefault("date", "")}|{t.GetValueOrDefault("entry_time_ist", "")}")) continue;
+                if (!seen.Add($"{runData}|{i}|{id}|{s}|{t.GetValueOrDefault("date", "")}|{t.GetValueOrDefault("entry_time_ist", "")}")) continue;
                 list.Add(t);
             }
         }
-        return list.OrderBy(t => t.GetValueOrDefault("entry_time_ist", ""), StringComparer.Ordinal).ToList();
+        return list.OrderBy(t => t.GetValueOrDefault("entry_time_ist", ""), StringComparer.Ordinal)
+            .ThenBy(t => t.GetValueOrDefault("index", ""), StringComparer.Ordinal)
+            .ThenBy(t => int.TryParse(t.GetValueOrDefault("strategy_no"), out var n) ? n : int.MaxValue)
+            .ToList();
+    }
+
+    /// <summary>Totals over a list of trades: how many, wins / losses (by points), the R added up and the points of the
+    /// index trade, the option bought and the option sold (points only add up within one index).</summary>
+    public sealed record TradeTotals(int Trades, int Wins, int Losses, double TotalR, double Points, double BoughtPoints, double SoldPoints, int Days, string? FirstDay, string? LastDay);
+
+    public static TradeTotals Totals(IReadOnlyList<Dictionary<string, string>> trades)
+    {
+        var p = trades.Select(t => Num(t, "points")).Where(v => v is not null).Select(v => v!.Value).ToList();
+        var days = trades.Select(t => t.GetValueOrDefault("date", "")).Where(d => d.Length > 0).Distinct().OrderBy(d => d, StringComparer.Ordinal).ToList();
+        return new TradeTotals(trades.Count, p.Count(x => x > 0), p.Count(x => x < 0), Math.Round(trades.Sum(t => Num(t, "r") ?? 0), 3), Math.Round(p.Sum(), 1),
+            Math.Round(trades.Sum(t => Num(t, "bought_points") ?? 0), 1), Math.Round(trades.Sum(t => Num(t, "sold_points") ?? 0), 1), days.Count, days.FirstOrDefault(), days.LastOrDefault());
     }
 
     /// <summary>One day of one index across every run that looked at it: Status "used" when any run scanned it (else

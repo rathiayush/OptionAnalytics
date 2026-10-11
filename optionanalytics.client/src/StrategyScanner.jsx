@@ -220,7 +220,25 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
         live: true, orderIds: result.orderIds ?? [], liveNote: note ?? result.message,
       }
       setPaperBook((prev) => ({ ...prev, [dayKey]: { date, positions: [...(prev[dayKey]?.positions ?? []), position] } }))
+      watchOnServer(position, result)
       return position
+    }
+    // The server watches the signal's INDEX stop-loss / target from now on and exits the trade on Dhan itself (with
+    // Telegram) when one is hit - so they hold with this page closed, like its option SL / target legs, trailing SL and
+    // time exit already do. Not watched: said loudly - only this page's own exits would then close it.
+    const watchOnServer = (position, result) => {
+      if (!result.orderIds?.length) return
+      liveTradingApi.watchIndex({
+        underlying, key: position.key, orderIds: result.orderIds, indexStop: setup.stop, indexTarget: setup.target, indexSide: setup.side,
+        strategy: `#${STRATEGY_BY_ID[setup.id]?.no} ${STRATEGY_BY_ID[setup.id]?.name ?? setup.id}`, contract: `${trade.action} ${trade.strike} ${trade.side}`,
+        lots, lotSize: result.lotSize ?? null, entryPrice: result.prices?.limit ?? null,
+        exitAtMs: Math.min(setup.timeStopMs ?? squareOffMs(setup.t), squareOffMs(setup.t)),
+      }).then(() => markPosition(position.key, { indexStopSent: setup.stop, serverWatch: true }))
+        .catch((err) => {
+          markPosition(position.key, { serverWatch: false })
+          notification.warning({ message: 'The server is NOT watching this trade\'s index stop-loss', description: `${err.message} - its option SL / target legs on Dhan still protect it; keep this page open for the index stop.`, placement: 'topRight', duration: 0 })
+          if (cfg.telegram !== false) telegram(`LIVE ${trade.action} ${underlying} ${trade.strike} ${trade.side}: the server could NOT take over its index SL (${err.message}) - keep the Order Flow page open`)
+        })
     }
     try {
       const result = await liveTradingApi.place({
@@ -233,7 +251,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       })
       const position = record(result)
       notifyTrade({ kind: 'entry', title: `LIVE ${trade.action} ${trade.strike} ${trade.side} x${lots} placed on Dhan`, text: result.message, sound: cfg.sound !== false })
-      if (cfg.telegram !== false) telegram(`LIVE order placed: ${trade.action} ${underlying} ${trade.strike} ${trade.side} x${lots} lot(s) @ ~${position.premium.toFixed(1)} - #${STRATEGY_BY_ID[setup.id]?.no} ${STRATEGY_BY_ID[setup.id]?.name} ${setup.side}, futures ${setup.entry.toFixed(1)} (SL ${setup.stop.toFixed(1)}, target ${setup.target.toFixed(1)}); option SL ${cfg.paperSl} / target ${cfg.paperTarget} pts`)
+      if (cfg.telegram !== false) telegram(`LIVE order placed: ${trade.action} ${underlying} ${trade.strike} ${trade.side} x${lots} lot(s) @ ~${position.premium.toFixed(1)} - #${STRATEGY_BY_ID[setup.id]?.no} ${STRATEGY_BY_ID[setup.id]?.name} ${setup.side}, futures ${setup.entry.toFixed(1)} (SL ${setup.stop.toFixed(1)}, target ${setup.target.toFixed(1)} - the server exits it there too, even with this page closed); option SL ${cfg.paperSl} / target ${cfg.paperTarget} pts`)
     } catch (err) {
       if (err.result?.orderIds?.length) {
         // Part of it went through: keep it (so it is exited with its setup) and say so loudly.
@@ -636,6 +654,26 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     for (const r of paperRows) if (r.live && r.exitTime && !r.exitSent) exitLive(r, r.exitReason ?? 'Exit')
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [paperRows, isReplay])
+  // A live trade whose setup's trailing stop moved its index stop tighter: the server is told, so its own index stop
+  // check (which holds with this page closed) follows the trail - as the server scanner does for its trades.
+  const stopSendingRef = useRef(new Set())
+  useEffect(() => {
+    if (isReplay) return
+    for (const r of paperRows) {
+      if (!r.live || r.exitTime || r.exitSent || !r.serverWatch || stopSendingRef.current.has(r.key)) continue
+      const sig = withOutcome.find((x) => `${x.id}-${x.t}` === r.setupKey)
+      const stop = sig?.outcome?.stop
+      if (!Number.isFinite(stop) || sig.outcome.status !== 'open') continue
+      const dir = r.setupSide === 'LONG' ? 1 : -1
+      if (r.indexStopSent != null && !(dir * (stop - r.indexStopSent) > 0)) continue
+      stopSendingRef.current.add(r.key)
+      liveTradingApi.moveIndexStop(underlying, r.key, stop)
+        .then(() => markPosition(r.key, { indexStopSent: stop }))
+        .catch(() => { /* sent again on the next change */ })
+        .finally(() => stopSendingRef.current.delete(r.key))
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [paperRows, withOutcome, isReplay])
   const tgPrimedRef = useRef(null)
   const exitNotifiedRef = useRef({ day: null, keys: new Set() })
   // A paper trade closing - its own Max SL / Target, or its setup's stop / target / trailing SL / time

@@ -104,6 +104,69 @@ public sealed class ServerLiveServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task ALiveTradeTheOrderFlowPagePlaced_IsWatchedByTheServer_ItsIndexStopAndTargetExitIt_WithThePageClosed()
+    {
+        var orders = new FakeOrders();
+        var live = Live(orders);
+        // The page placed two live trades (its own Dhan super orders) and hands them to the server to watch.
+        Assert.Null(live.WatchPageTrade(new PageLiveWatchRequest("NIFTY", "vwap-1-sell", new[] { "p1" }, 24980, "LONG", 25040, "#27 VWAP", "SELL 25000 PE"), At10));
+        Assert.Null(live.WatchPageTrade(new PageLiveWatchRequest("NIFTY", "wall-2-sell", new[] { "p2" }, 25060, "SHORT", 24990, "#2 Wall", "SELL 25000 CE"), At10));
+        // Bad requests are refused, never guessed.
+        Assert.NotNull(live.WatchPageTrade(new PageLiveWatchRequest("NIFTY", "x", Array.Empty<string>(), 24980, "LONG"), At10));
+        Assert.NotNull(live.WatchPageTrade(new PageLiveWatchRequest("NIFTY", "x", new[] { "p9" }, 24980, "UP"), At10));
+        Assert.NotNull(live.WatchPageTrade(new PageLiveWatchRequest("NIFTY", "x", new[] { "p9" }, 24980, "LONG", 24970), At10)); // target below a LONG's stop
+        // They are not the server scanner's trades: its limits (one open at a time) do not see them.
+        live.Set("NIFTY", true, null, null, "admin", At10);
+        var status = live.Status(At10).Single(x => x.Underlying == "NIFTY");
+        Assert.Equal((0, 0, 2), (status.TradesToday, status.OpenToday, status.Trades.Count));
+        Assert.True((await live.PlaceAsync("NIFTY", Order("server-1-sell"), At10, default)).Placed);
+        orders.Placed.Clear();
+
+        decimal? nifty = 25010;
+        decimal? PriceOf(string u) => u == "NIFTY" ? nifty : null;
+        Assert.Equal(0, await live.CheckIndexStopsAsync(PriceOf, At10.AddMinutes(1), default));
+        // The page's trailing stop tightens the LONG's stop; a looser one is ignored.
+        Assert.True(live.MovePageIndexStop("NIFTY", "vwap-1-sell", 25000));
+        Assert.True(live.MovePageIndexStop("NIFTY", "vwap-1-sell", 24950));
+        nifty = 24999; // through the LONG's trailed stop (25000), not the SHORT's target (24990)
+        Assert.Equal(1, await live.CheckIndexStopsAsync(PriceOf, At10.AddMinutes(2), default));
+        Assert.Equal(new[] { "p1" }, orders.Exits.Single().Ids);
+        Assert.True(orders.Exits.Single().OnlyWorking, "only while its legs still work on Dhan");
+        var trades = live.Status(At10).Single(x => x.Underlying == "NIFTY").Trades;
+        Assert.Contains("index SL 25000", trades.Single(t => t.Key == "page:vwap-1-sell").ExitReason);
+        // The SHORT's INDEX TARGET (24990): exited there too.
+        nifty = 24985;
+        Assert.Equal(1, await live.CheckIndexStopsAsync(PriceOf, At10.AddMinutes(3), default));
+        Assert.Equal(new[] { "p2" }, orders.Exits.Last().Ids);
+        Assert.Contains("index target 24990", live.Status(At10).Single(x => x.Underlying == "NIFTY").Trades.Single(t => t.Key == "page:wall-2-sell").ExitReason);
+        Assert.Empty(orders.Placed); // the page's trades never place anything here
+    }
+
+    [Fact]
+    public async Task APageTradeExitedFromThePage_IsNoLongerWatched()
+    {
+        var orders = new FakeOrders();
+        var live = Live(orders);
+        Assert.Null(live.WatchPageTrade(new PageLiveWatchRequest("BANKNIFTY", "k-1-buy", new[] { "a", "b" }, 51000, "LONG"), At10));
+        Assert.Equal(1, live.ClosedByOrders(new[] { "b" }, "exited from the page", At10.AddMinutes(1)));
+        Assert.Equal(0, await live.CheckIndexStopsAsync(_ => 50000, At10.AddMinutes(2), default)); // far through the stop: already closed
+        Assert.Empty(orders.Exits);
+        Assert.Equal(0, live.ClosedByOrders(new[] { "b" }, "again", At10.AddMinutes(3)));
+    }
+
+    [Fact]
+    public async Task TheServerScannersOwnTrade_ExitsAtItsIndexTarget_Too()
+    {
+        var orders = new FakeOrders();
+        var live = Live(orders);
+        live.Set("NIFTY", true, null, null, "admin", At10);
+        await live.PlaceAsync("NIFTY", new ServerLiveOrderRequest("long-1-sell", null, Expiry, 25000, "PE", "SELL", IndexStop: 24980, IndexSide: "LONG", IndexTarget: 25040), At10, default);
+        Assert.Equal(0, await live.CheckIndexStopsAsync(_ => 25039, At10.AddMinutes(1), default));
+        Assert.Equal(1, await live.CheckIndexStopsAsync(_ => 25040, At10.AddMinutes(2), default));
+        Assert.Contains("index target 25040", live.Status(At10).Single(x => x.Underlying == "NIFTY").Trades.Single().ExitReason);
+    }
+
+    [Fact]
     public async Task OnPaper_NothingIsEverSent()
     {
         var orders = new FakeOrders();

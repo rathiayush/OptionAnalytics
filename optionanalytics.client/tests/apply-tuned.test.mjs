@@ -96,6 +96,35 @@ test('a server that keeps something else fails loudly; a learning filter reaches
   assert.equal(JSON.parse(store.get(SCANNER_SETTINGS_KEY)).filters.absorption.tradeTape, 'with')
 })
 
+test('an applied setting carries its identity - the same the server makes from the history row - and the scanner ignores it', async () => {
+  const { settingSignature, settingParams } = await import('../src/strategyTuning.js')
+  const { strategyFilters } = await import('../src/strategyEngine.js')
+  // The settings CSV row of a tuned setting (strings, every column; empty = not set) and the same setting as tuned.
+  const row = { run_id: 'R1', which: 'fine-tuned', strategy_id: 'absorption', tradeSide: 'long', tradeFrom: '930', tradeTo: '1445', tradeStopX: '1.5', tradeOiWindow: '', optLeg: 'buy', optMoneyness: '-1', optExit: 'indexSl', optSlPct: '30', optTargetPct: '30', setting_text: 'x', test_trades: '6' }
+  const params = { ...DEFAULT_VARIANT, ...OPTION_DEFAULT, tradeSide: 'long', tradeFrom: 930, tradeTo: 1445, tradeStopX: 1.5, optLeg: 'buy', optMoneyness: -1, optExit: 'indexSl', optSlPct: 30, optTargetPct: 30 }
+  // Server: TuningPerformance.SignatureOf - every non-empty trade* / opt* column, sorted, "k=v" joined by "|".
+  const server = Object.keys(row).filter((k) => /^(trade|opt)/.test(k) && row[k] !== '').sort().map((k) => `${k}=${row[k]}`).join('|')
+  assert.equal(settingSignature(row), server)
+  assert.ok(settingSignature(params).includes('tradeSide=long') && settingSignature(params).includes('optExit=indexSl'))
+  store.clear()
+  const srv = fakeServer()
+  await applyTunedFilters('absorption', params, { option: true, index: 'NIFTY', tuned: settingSignature(row) })
+  assert.equal(srv.config.filtersByIndex.NIFTY.absorption._tuned, server)
+  assert.equal(strategyFilters('absorption', srv.config.filtersByIndex.NIFTY.absorption)._tuned, undefined, 'never a filter the scanner reads')
+  // Applying another setting replaces the identity; one applied without (an older caller) carries none.
+  await applyTunedFilters('absorption', { ...params, tradeSide: 'short' }, { option: true, index: 'NIFTY', tuned: 'tradeSide=short' })
+  assert.equal(srv.config.filtersByIndex.NIFTY.absorption._tuned, 'tradeSide=short')
+  await applyTunedFilters('absorption', params, { option: true, index: 'NIFTY' })
+  assert.equal(srv.config.filtersByIndex.NIFTY.absorption._tuned, undefined)
+  // Every parameter, the changed ones marked - from the row, as tuned, or as applied.
+  const fromRow = settingParams(row, 'row')
+  assert.equal(fromRow.find((p) => p.key === 'tradeSide').changed, true)
+  assert.equal(fromRow.find((p) => p.key === 'tradeTo').changed, false)
+  assert.deepEqual(fromRow.filter((p) => p.key.startsWith('opt')).map((p) => [p.key, p.value]), [['optLeg', 'BUY'], ['optMoneyness', '1 OTM'], ['optExit', 'with the index trade, capped at a Max SL'], ['optSl', '30%']])
+  const fromFilters = settingParams(srv.config.filtersByIndex.NIFTY.absorption, 'filters')
+  assert.deepEqual(fromFilters.filter((p) => p.key.startsWith('opt')).map((p) => [p.key, p.value]), [['optLeg', 'BUY'], ['optMoneyness', '1 OTM'], ['optSl', '30%']])
+})
+
 test('without an index (older callers): the all-index filters, as before', async () => {
   store.clear()
   const srv = fakeServer()

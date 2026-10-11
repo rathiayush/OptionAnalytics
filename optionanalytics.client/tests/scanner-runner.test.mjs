@@ -116,6 +116,7 @@ test('an index switched to Live: each alert asks the server for a real order onc
   const fired = scanner.memory.fired.find((x) => first.key.startsWith(`${x.id}-${x.t}`))
   assert.equal(first.indexStop, fired.stop)
   assert.equal(first.indexSide, fired.side)
+  assert.equal(first.indexTarget, fired.target, 'and its index target - the server exits there too')
   // A trailed stop is only ever sent tighter than the last one sent.
   for (let i = 1; i < stops.length; i++) if (stops[i].key === stops[i - 1].key) assert.ok(fired.side === 'LONG' ? stops[i].stop > stops[i - 1].stop : stops[i].stop < stops[i - 1].stop)
   assert.ok(first.expiry && first.strike > 0 && ['CE', 'PE'].includes(first.side) && first.action === 'SELL' && first.stopLossPoints > 0 && first.targetPoints > 0 && first.exitAtMs > 0, JSON.stringify(first))
