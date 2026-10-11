@@ -81,17 +81,14 @@ public sealed class OiReplayController : ControllerBase
         // that, so one range request timing out can never throw away per-day calls already made inside it (and so the
         // calls it did make are split in the response: windowOptionSeriesCalls vs fallbackOptionSeriesCalls).
         [FromQuery] bool perDayFallback = true,
-        // spanExpiries: ONE Dhan call per strike for the whole span (up to 31 days) straight across the expiries,
-        // instead of one per expiry cycle - only for a caller that has the proof (.../range-span-check). spanFrom /
-        // spanTo name that span when this request asks for a slice of it (the band is fetched once and kept a few
-        // minutes); includeExpiryDays lets the expiry days come out of it too (otherwise they are per-day days).
+        // spanExpiries: ONE Dhan call per strike for the whole range (up to 31 days) straight across the expiries,
+        // instead of one per expiry cycle - only for a caller that has the proof (.../range-span-check).
+        // includeExpiryDays lets the expiry days come out of it too (otherwise they are per-day days).
         [FromQuery] bool spanExpiries = false,
-        [FromQuery] bool includeExpiryDays = false,
-        [FromQuery] DateOnly? spanFrom = null,
-        [FromQuery] DateOnly? spanTo = null)
+        [FromQuery] bool includeExpiryDays = false)
     {
         var result = await _service.RunRangeAsync(underlying.ToUpperInvariant(), from, to, timeframeMinutes, expiryFlag.ToUpperInvariant(), cancellationToken, perDayFallback,
-            spanExpiries, includeExpiryDays, spanFrom, spanTo);
+            spanExpiries, includeExpiryDays);
         // A refusal is the caller's own mistake to fix (too wide a range, an unsupported underlying,
         // a future date), so it answers 400 with the reason rather than a 200 nobody checks.
         return result.Success ? Ok(result) : BadRequest(result);

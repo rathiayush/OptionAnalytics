@@ -147,9 +147,6 @@ builder.Services.AddSingleton<StoredSpotDataService>();
 // One past day's futures candles, fetched once however many endpoints want them: OI Replay's own futures fetch and
 // the Order Flow page's Load day both ask for the same contract-day (see PastFuturesCandleCache).
 builder.Services.AddSingleton<OptionAnalytics.Server.Dhan.PastFuturesCandleCache>();
-// Each OI day is 42 Dhan rolling-option calls: a complete past day is kept (memory, and Storage:OiDayCachePath on
-// disk), today is shared for 30 s - see OiDayCache.
-builder.Services.AddSingleton<OiDayCache>();
 builder.Services.AddSingleton<OiReplayService>();
 // Backs the Strike Data page's own OI/IV columns - stored-only (NiftyDataCollectorTimescale), no
 // live Dhan fallback, and unavailable for SENSEX - see its own doc comment for why.

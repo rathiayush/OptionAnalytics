@@ -607,14 +607,14 @@ test('an older runs.csv with fewer columns is brought up to date, keeping every 
   }
 })
 
-test('the option chain 30 days per Dhan call: only once a window across an expiry is proved, expiry days only when they match too', { timeout: 300_000 }, async () => {
+test('the option chain a whole span per Dhan call: only once a window across an expiry is proved, expiry days only when they match too', { timeout: 300_000 }, async () => {
   const days = ['2026-09-28', '2026-09-29', '2026-09-30', '2026-10-01', '2026-10-02', '2026-10-05']
   const job = { underlying: 'NIFTY', strategies: ['weakWall'], days: 30, minTrades: 2, what: 'trade' }
   const run = async (faults, env = {}) => {
     const { server, seen, base: url } = await fakeServer(days, faults)
     const dir = mkdtempSync(join(tmpdir(), 'oa-span-'))
     try {
-      const out = await runJob(url, job, { TUNE_RETRY_SCALE: '0.001', TUNE_BUSY_PAUSE_MS: '5', TUNE_CACHE_DIR: join(dir, 'cache'), TUNE_SLICE_DAYS: '3', ...env })
+      const out = await runJob(url, job, { TUNE_RETRY_SCALE: '0.001', TUNE_BUSY_PAUSE_MS: '5', TUNE_CACHE_DIR: join(dir, 'cache'), TUNE_SPAN_DAYS: '4', ...env })
       const ranges = seen.filter((x) => x.path === '/api/oi-replay/NIFTY/range')
       return { ...out, ranges, perDayRuns: seen.filter((x) => x.path === '/api/oi-replay/NIFTY/run').length, spanChecks: seen.filter((x) => x.path === '/api/oi-replay/NIFTY/range-span-check').length }
     } finally { server.close() }
@@ -624,8 +624,8 @@ test('the option chain 30 days per Dhan call: only once a window across an expir
   assert.equal(span.code, 0, JSON.stringify(span.result))
   assert.equal(span.result.fastOi.span.used, true, JSON.stringify(span.result.fastOi.span))
   assert.equal(span.result.fastOi.span.includeExpiryDays, true)
-  assert.ok(span.ranges.length >= 2, 'read in slices')
-  assert.ok(span.ranges.every((r) => r.query.spanExpiries === 'true' && r.query.includeExpiryDays === 'true' && r.query.spanFrom === days[0] && r.query.spanTo === days.at(-1)), JSON.stringify(span.ranges.map((r) => r.query)))
+  assert.deepEqual(span.ranges.map((r) => [r.query.from, r.query.to]), [['2026-09-28', '2026-10-01'], ['2026-10-02', '2026-10-05']], 'one request per span')
+  assert.ok(span.ranges.every((r) => r.query.spanExpiries === 'true' && r.query.includeExpiryDays === 'true'), JSON.stringify(span.ranges.map((r) => r.query)))
   assert.equal(span.perDayRuns, 0)
   assert.equal(span.spanChecks, 1)
 

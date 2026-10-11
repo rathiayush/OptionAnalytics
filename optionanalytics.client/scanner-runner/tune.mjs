@@ -429,7 +429,7 @@ async function main() {
       fastOi.detail = check?.error ?? fastOi.checked.differences?.slice(0, 3).join(' · ') ?? null
       return (fastOi.reason = 'a day fetched a cycle at a time did not match the same day fetched on its own - every day fetched the proven way instead')
     }
-    // One step further, proved the same way and kept the same way: a whole 30-day span per Dhan call, straight
+    // One step further, proved the same way and kept the same way: a whole span of days per Dhan call, straight
     // across the expiries, instead of a window per cycle (NIFTY's weekly cycle made that ~84 calls a week).
     await proveSpan(dates, left, flag)
     if (fastOi.span.used) return prefetchSpans(dates, left, flag)
@@ -524,36 +524,31 @@ async function main() {
     span.includeExpiryDays = !!check.expiryDayMatch
     return null
   }
-  // Proved: 30-day spans, oldest first, each read in slices of a few days (a whole span of minute OI is too big for
-  // one answer) - the server fetches a span's band from Dhan once and serves every slice of it.
+  // Proved: spans straight across the expiries, oldest first, ONE request (one Dhan call per strike) each. 15 days by
+  // default - Dhan allows 30, but a whole month of minute OI is too big to send back in one answer.
   async function prefetchSpans(dates, left, flag) {
-    const SPAN = Math.max(2, Math.min(31, Number(process.env.TUNE_SPAN_DAYS) || 30))
-    const SLICE = Math.max(1, Math.min(31, Number(process.env.TUNE_SLICE_DAYS) || 8))
+    const SPAN = Math.max(2, Math.min(31, Number(process.env.TUNE_SPAN_DAYS) || 15))
     const addDays = (d, n) => new Date(Date.parse(`${d}T00:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10)
     let i = 0
-    outer: while (i < dates.length) {
-      const spanFrom = dates[i]
-      const limit = addDays(spanFrom, SPAN - 1)
-      const inSpan = []
-      while (i < dates.length && dates[i] <= limit) inSpan.push(dates[i++])
-      const spanTo = inSpan.at(-1)
-      for (let j = 0; j < inSpan.length; j += SLICE) {
-        const slice = inSpan.slice(j, j + SLICE)
-        if (!left()) { fastOi.reason = `took too long after ${fastOi.seeded} of ${dates.length} day(s) - the rest fetched a day at a time`; break outer }
-        lastScan = { stage: 'prefetch', day: slice[0], done: fastOi.seeded, total: dates.length, prefetch: { from: slice[0], to: slice.at(-1), span: [spanFrom, spanTo], seeded: fastOi.seeded, of: dates.length } }
-        progress(lastScan)
-        let body
-        try {
-          body = await api(`/api/oi-replay/${U}/range?${new URLSearchParams({ from: slice[0], to: slice.at(-1), timeframeMinutes: '1', expiryFlag: flag, perDayFallback: 'false',
-            spanExpiries: 'true', includeExpiryDays: String(fastOi.span.includeExpiryDays), spanFrom, spanTo })}`,
-          { attempts: 2, timeoutMs: Math.max(60_000, Math.min(left(), Number(process.env.TUNE_RANGE_TIMEOUT_MS) || 300_000)), source: 'range-span' })
-        } catch (err) {
-          fastOi.detail = err.message
-          fastOi.reason = `${fastOi.seeded} day(s) came back this way; the rest fetched a day at a time`
-          break outer
-        }
-        seedRange(body)
+    while (i < dates.length) {
+      const from = dates[i]
+      const limit = addDays(from, SPAN - 1)
+      let to = from
+      while (i < dates.length && dates[i] <= limit) to = dates[i++]
+      if (!left()) { fastOi.reason = `took too long after ${fastOi.seeded} of ${dates.length} day(s) - the rest fetched a day at a time`; break }
+      lastScan = { stage: 'prefetch', day: from, done: fastOi.seeded, total: dates.length, prefetch: { from, to, span: true, seeded: fastOi.seeded, of: dates.length } }
+      progress(lastScan)
+      let body
+      try {
+        body = await api(`/api/oi-replay/${U}/range?${new URLSearchParams({ from, to, timeframeMinutes: '1', expiryFlag: flag, perDayFallback: 'false',
+          spanExpiries: 'true', includeExpiryDays: String(fastOi.span.includeExpiryDays) })}`,
+        { attempts: 2, timeoutMs: Math.max(60_000, Math.min(left(), Number(process.env.TUNE_RANGE_TIMEOUT_MS) || 300_000)), source: 'range-span' })
+      } catch (err) {
+        fastOi.detail = err.message
+        fastOi.reason = `${fastOi.seeded} day(s) came back this way; the rest fetched a day at a time`
+        break
       }
+      seedRange(body)
     }
     fastOi.used = fastOi.seeded > 0
     return fastOi.reason

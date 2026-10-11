@@ -118,7 +118,6 @@ public sealed class OiReplayService
     /// /api/order-flow/{u}/day/{date} both want them (see PastFuturesCandleCache). Optional: without
     /// it every fetch goes straight to PastFuturesCandles, exactly as before.</summary>
     private readonly PastFuturesCandleCache? _pastFutures;
-    private readonly OiDayCache? _dayCache;
     private readonly DhanRollingOptionDataService _rollingOption;
     private readonly bool _allowLiveDataFallback;
     /// <summary>StrategyTuning:FastOiRange - see StrategyTuningOptions. Only RunRangeAsync reads it;
@@ -132,9 +131,8 @@ public sealed class OiReplayService
         DhanHistoricalDataService historicalData, DhanRollingOptionDataService rollingOption,
         AppEnvironment appEnvironment, IOptions<StrategyTuningOptions>? tuningOptions = null,
         NseFuturesContractArchive? futuresArchive = null, NseChartHistory? nseChart = null,
-        ILogger<OiReplayService>? logger = null, PastFuturesCandleCache? pastFutures = null, OiDayCache? dayCache = null)
+        ILogger<OiReplayService>? logger = null, PastFuturesCandleCache? pastFutures = null)
     {
-        _dayCache = dayCache;
         _futuresArchive = futuresArchive;
         _nseChart = nseChart;
         _storedSpot = storedSpot;
@@ -152,16 +150,7 @@ public sealed class OiReplayService
         _pastFutures = pastFutures;
     }
 
-    public Task<OiReplayResult> RunAsync(
-        string underlying, DateOnly date, int timeframeMinutes, string expiryFlag, CancellationToken cancellationToken, bool forceLive = false) =>
-        // Through the day cache (OiDayCache): a complete past day is fetched once, today at most once per 30 s, and
-        // identical requests in flight share one fetch - each fetch is 42 Dhan rolling-option calls.
-        _dayCache is null
-            ? RunUncachedAsync(underlying, date, timeframeMinutes, expiryFlag, cancellationToken, forceLive)
-            : _dayCache.GetAsync(underlying, date, Math.Max(1, timeframeMinutes), expiryFlag, forceLive,
-                ct => RunUncachedAsync(underlying, date, timeframeMinutes, expiryFlag, ct, forceLive), cancellationToken);
-
-    private async Task<OiReplayResult> RunUncachedAsync(
+    public async Task<OiReplayResult> RunAsync(
         string underlying, DateOnly date, int timeframeMinutes, string expiryFlag, CancellationToken cancellationToken, bool forceLive = false)
     {
         var timeframe = Math.Max(1, timeframeMinutes);
@@ -394,7 +383,7 @@ public sealed class OiReplayService
     /// </summary>
     public async Task<OiReplayRangeResult> RunRangeAsync(
         string underlying, DateOnly from, DateOnly to, int timeframeMinutes, string expiryFlag, CancellationToken cancellationToken,
-        bool perDayFallback = true, bool spanExpiries = false, bool includeExpiryDays = false, DateOnly? spanFrom = null, DateOnly? spanTo = null)
+        bool perDayFallback = true, bool spanExpiries = false, bool includeExpiryDays = false)
     {
         var timeframe = Math.Max(1, timeframeMinutes);
 
@@ -436,20 +425,13 @@ public sealed class OiReplayService
                         : null;
         if (fastPathDisabled is not null) windows = new List<OiReplayRangeWindows.Window>();
 
-        // spanExpiries: ONE window straight across the expiries of [spanFrom, spanTo] (default: the request
-        // itself) instead of one per cycle - see OiReplayRangeWindows.BuildSpanning, and CheckSpanAsync for the
-        // proof a caller must have before asking for it. The span's band is fetched once and kept a few
-        // minutes (SpanBandAsync), so a caller can read a 30-day span in slices that each come back a
-        // manageable size while Dhan is still asked for it only once.
+        // spanExpiries: ONE window straight across the expiries of the requested range instead of one per cycle - see
+        // OiReplayRangeWindows.BuildSpanning, and CheckSpanAsync for the proof a caller must have before asking for it.
         var skipDays = new HashSet<DateOnly>();
         var spanning = spanExpiries && fastPathDisabled is null;
         if (spanning)
         {
-            var sf = spanFrom ?? from;
-            var st = spanTo ?? to;
-            if (sf > from || st < to)
-                return OiReplayRangeResult.Failed(underlying, from, to, timeframe, expiryFlag, $"The span {sf:dd MMM yyyy}..{st:dd MMM yyyy} must contain the requested days {from:dd MMM yyyy}..{to:dd MMM yyyy}.");
-            var (spanWindow, skip, spanError) = OiReplayRangeWindows.BuildSpanning(expiryFlag, sf, st, today, includeExpiryDays);
+            var (spanWindow, skip, spanError) = OiReplayRangeWindows.BuildSpanning(expiryFlag, from, to, today, includeExpiryDays);
             if (spanError is not null) return OiReplayRangeResult.Failed(underlying, from, to, timeframe, expiryFlag, spanError);
             windows = spanWindow is { } one ? new List<OiReplayRangeWindows.Window> { one } : new List<OiReplayRangeWindows.Window>();
             skipDays = skip;
@@ -494,9 +476,7 @@ public sealed class OiReplayService
             {
                 var windowDays = OiReplayRangeWindows.TradingDayCandidates(window.From, window.To, today)
                     .Where(d => d >= from && d <= to && !skipDays.Contains(d)).ToList();
-                var (series, calls) = spanning
-                    ? await SpanBandAsync(underlying, expiryFlag, window, ResolveInstrumentAsync, cancellationToken)
-                    : await FetchWindowBandAsync(underlying, expiryFlag, window, ResolveInstrumentAsync, cancellationToken);
+                var (series, calls) = await FetchWindowBandAsync(underlying, expiryFlag, window, ResolveInstrumentAsync, cancellationToken);
                 windowCalls += calls;
 
                 var windowErrors = series.Where(s => s.Error is not null).Select(s => $"{s.Token} {s.Side}: {s.Error}").ToList();
@@ -604,43 +584,6 @@ public sealed class OiReplayService
             ExpiryDaysLeftOut = skipDays.Where(d => d >= from && d <= to).OrderBy(d => d).ToList(),
         };
     }
-
-    /// <summary>A spanning window's band, fetched once and kept SpanBandTtl: the strategy tuning job reads a
-    /// 30-day span in slices (a whole 30 days of minute OI is too big to send back in one response), and every
-    /// slice must not cost another 42 Dhan calls. A band with any failed series is not kept - the next slice
-    /// asks again - and at most MaxSpanBands are held. Calls = 0 for a band served from here.</summary>
-    private async Task<(List<(string Token, string Side, List<OiReplayPoint> Points, string? Error)> Series, int Calls)> SpanBandAsync(
-        string underlying, string expiryFlag, OiReplayRangeWindows.Window window,
-        Func<Task<DhanSpotInstrument?>> resolveInstrument, CancellationToken cancellationToken)
-    {
-        var key = $"{underlying}|{expiryFlag}|{window.From:yyyy-MM-dd}|{window.To:yyyy-MM-dd}".ToUpperInvariant();
-        var now = DateTimeOffset.UtcNow;
-        Task<(List<(string Token, string Side, List<OiReplayPoint> Points, string? Error)> Series, int Calls)> band;
-        bool fresh;
-        lock (_spanBands)
-        {
-            foreach (var stale in _spanBands.Where(kv => now - kv.Value.At > SpanBandTtl || kv.Value.Band.IsFaulted || kv.Value.Band.IsCanceled).Select(kv => kv.Key).ToList())
-                _spanBands.Remove(stale);
-            fresh = !_spanBands.TryGetValue(key, out var held);
-            if (fresh)
-            {
-                while (_spanBands.Count >= MaxSpanBands) _spanBands.Remove(_spanBands.OrderBy(kv => kv.Value.At).First().Key);
-                // Not tied to this request's token: a slice request cancelled mid-fetch must not spoil the band
-                // for the slices after it.
-                band = FetchWindowBandAsync(underlying, expiryFlag, window, resolveInstrument, CancellationToken.None);
-                _spanBands[key] = (now, band);
-            }
-            else band = held.Band;
-        }
-        var result = await band.WaitAsync(cancellationToken);
-        if (result.Series.Any(s => s.Error is not null))
-            lock (_spanBands) { if (_spanBands.TryGetValue(key, out var held) && held.Band == band) _spanBands.Remove(key); }
-        return (result.Series, fresh ? result.Calls : 0);
-    }
-
-    private static readonly TimeSpan SpanBandTtl = TimeSpan.FromMinutes(10);
-    private const int MaxSpanBands = 3;
-    private readonly Dictionary<string, (DateTimeOffset At, Task<(List<(string Token, string Side, List<OiReplayPoint> Points, string? Error)> Series, int Calls)> Band)> _spanBands = new();
 
     /// <summary>One day's worth of a window fetch, before it becomes an OiReplayResult. Closed marks
     /// a day the window's own spot call covered and found nothing for (a holiday) - reported as an
