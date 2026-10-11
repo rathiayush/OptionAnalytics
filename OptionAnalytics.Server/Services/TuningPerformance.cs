@@ -29,6 +29,12 @@ public static class TuningPerformance
         public int SoldTrades { get; set; }
         public double OptionPoints { get; set; }
         public int OptionTrades { get; set; }
+        /// <summary>Each way of taking the trades - the index (futures / spot) and the option bought / sold (and the tuned
+        /// option trade) - with its points, the points risked, R and the planned risk : reward.</summary>
+        public Leg Futures { get; } = new();
+        public Leg Bought { get; } = new();
+        public Leg Sold { get; } = new();
+        public Leg Option { get; } = new();
         [JsonIgnore] public HashSet<string> Days { get; } = new();
         [JsonIgnore] public HashSet<string> Runs { get; } = new();
         public string? FirstDay { get; set; }
@@ -54,6 +60,13 @@ public static class TuningPerformance
             if (Num(t, "bought_points") is { } b) { BoughtPoints += b; BoughtTrades++; }
             if (Num(t, "sold_points") is { } s) { SoldPoints += s; SoldTrades++; }
             if (Num(t, "option_points") is { } o) { OptionPoints += o; OptionTrades++; }
+            Futures.Add(Num(t, "points"), Num(t, "sl_points"), Num(t, "target_points"), Num(t, "r"));
+            Bought.Add(Num(t, "bought_points"), Num(t, "bought_sl"), Num(t, "bought_target"), Num(t, "bought_r"));
+            Sold.Add(Num(t, "sold_points"), Num(t, "sold_sl"), Num(t, "sold_target"), Num(t, "sold_r"));
+            // The tuned option trade: option_sl is its SL premium level; its distance from the entry is the risk.
+            var optRisk = Num(t, "option_sl_points") ?? (Num(t, "option_in") is { } inP && Num(t, "option_sl") is { } slP ? Math.Abs(inP - slP) : null);
+            var optReward = Num(t, "option_in") is { } inT && Num(t, "option_target") is { } tgP ? Math.Abs(tgP - inT) : (double?)null;
+            Option.Add(Num(t, "option_points"), optRisk, optReward, Num(t, "option_r"));
             var day = t.GetValueOrDefault("date", "");
             Days.Add($"{t.GetValueOrDefault("index", "")}|{day}");
             Runs.Add(t.GetValueOrDefault("run_id", ""));
@@ -62,6 +75,37 @@ public static class TuningPerformance
                 if (FirstDay is null || string.CompareOrdinal(day, FirstDay) < 0) FirstDay = day;
                 if (LastDay is null || string.CompareOrdinal(day, LastDay) > 0) LastDay = day;
             }
+        }
+    }
+
+    /// <summary>One way of taking the trades. R = the points made over the points risked (its SL distance) - a trade
+    /// without a stop has no R; risk : reward = 1 : target / SL as planned. Worked out from the trade rows, so runs
+    /// written before the r columns existed get it too (their SL / target / points are in the rows).</summary>
+    public sealed class Leg
+    {
+        public int Trades { get; set; }
+        public int Wins { get; set; }
+        public double Points { get; set; }
+        public int RTrades { get; set; }
+        public double TotalR { get; set; }
+        public double Risked { get; set; }
+        public double RiskReward { get; set; }
+        public int RiskRewardTrades { get; set; }
+        public double? AvgR => RTrades > 0 ? TotalR / RTrades : null;
+        public double? AvgRiskReward => RiskRewardTrades > 0 ? RiskReward / RiskRewardTrades : null;
+        public double? WinRate => Trades > 0 ? (double)Wins / Trades : null;
+
+        internal void Add(double? points, double? sl, double? target, double? r)
+        {
+            if (points is not { } p) return;
+            Trades++;
+            Points += p;
+            if (p > 0) Wins++;
+            var risk = sl is > 0 ? sl : null;
+            var rr = r ?? (risk is { } k ? p / k : null);
+            if (rr is { } x && risk is { } k2) { TotalR += x; RTrades++; Risked += k2; }
+            else if (rr is { } y && risk is null) { TotalR += y; RTrades++; }
+            if (risk is { } k3 && target is > 0) { RiskReward += target.Value / k3; RiskRewardTrades++; }
         }
     }
 
