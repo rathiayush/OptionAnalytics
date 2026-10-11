@@ -111,6 +111,61 @@ public sealed class StrategyTuningServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task DeletingAFinishedJob_RemovesItsRunResultAndCachedDays_AndNothingElse()
+    {
+        // A fake tuning job: writes its history run, a result naming it, its cached days (NIFTY's folder + an older file
+        // with no index folder for one of its dates), and prints the run id as tune.mjs does. Another run and another
+        // index's cache are there beside it and must stay.
+        const string runId = "NIFTY-futures-20261010-153000";
+        var script = Script($$"""
+            import { writeFileSync, mkdirSync, appendFileSync } from 'node:fs'
+            import { join } from 'node:path'
+            const h = process.env.TUNE_HISTORY_DIR, c = process.env.TUNE_CACHE_DIR
+            mkdirSync(h, { recursive: true })
+            writeFileSync(join(h, 'runs.csv'), 'run_id,finished_ist,index,data,from,to,first_day,last_day\nNIFTY-futures-20261001-100000,2026-10-01 10:00:00,NIFTY,futures,,,2026-09-01,2026-09-02\n{{runId}},2026-10-10 15:30:00,NIFTY,futures,,,2026-10-06,2026-10-07\n')
+            for (const k of ['trades', 'settings', 'days']) writeFileSync(join(h, '{{runId}}-' + k + '.csv'), k === 'days' ? 'run_id,index,date,status\n{{runId}},NIFTY,2026-10-06,used\n{{runId}},NIFTY,2026-10-07,left out\n' : 'x\n1\n')
+            writeFileSync(join(h, 'NIFTY-futures-20261001-100000-trades.csv'), 'x\n1\n')
+            for (const [dir, name] of [['v1/NIFTY/2026-10', '2026-10-06-oi-a.json.gz'], ['v1/NIFTY/2026-10', '2026-10-07-flow-b.json.gz'], ['v1/NIFTY/2026-10', '2026-10-01-oi-c.json.gz'],
+              ['v1/BANKNIFTY/2026-10', '2026-10-06-oi-d.json.gz'], ['v1/2026-10', '2026-10-06-oi-e.json.gz'], ['v1/2026-10', '2026-10-02-oi-f.json.gz']]) {
+              mkdirSync(join(c, dir), { recursive: true }); writeFileSync(join(c, dir, name), 'x')
+            }
+            console.log('HISTORY {{runId}} (1 trades, 1 settings)')
+            writeFileSync(process.env.TUNE_OUT, JSON.stringify({ ok: true, runId: '{{runId}}', underlying: 'NIFTY' }))
+            """);
+        var s = Service(script);
+        var queue = new StrategyTuningQueue(s, NullLogger<StrategyTuningQueue>.Instance);
+        var item = queue.Add(Job(), null, false);
+        queue.Tick(DateTimeOffset.UtcNow);
+        await UntilDone(s);
+        queue.Tick(DateTimeOffset.UtcNow);
+        var finished = queue.Items().Single(i => i.Id == item.Id);
+        Assert.Equal(("done", runId), (finished.State, finished.RunId));
+        var tuning = Path.Combine(_dir, "runner", "tuning");
+        var cache = Path.Combine(tuning, "cache", "v1");
+        // An older result of another run stays (it names its own run).
+        File.WriteAllText(Path.Combine(tuning, "NIFTY-20261001-100000.json"), "{\"runId\":\"NIFTY-futures-20261001-100000\",\"underlying\":\"NIFTY\"}");
+
+        var (deleted, error) = queue.Delete(item.Id);
+
+        Assert.Null(error);
+        Assert.Equal((3, 2, 3, true), (deleted!.HistoryFiles, deleted.ResultFiles, deleted.CacheFiles, deleted.RunRow)); // latest + dated copy; 2 NIFTY days + the older file of 06 Oct
+        Assert.Empty(Directory.GetFiles(Path.Combine(tuning, "history"), runId + "*"));
+        Assert.DoesNotContain(runId, File.ReadAllText(Path.Combine(tuning, "history", "runs.csv")));
+        Assert.Contains("NIFTY-futures-20261001-100000", File.ReadAllText(Path.Combine(tuning, "history", "runs.csv")));
+        Assert.True(File.Exists(Path.Combine(tuning, "history", "NIFTY-futures-20261001-100000-trades.csv")));
+        Assert.True(File.Exists(Path.Combine(tuning, "NIFTY-20261001-100000.json")));
+        Assert.Null(s.Result("NIFTY"));
+        Assert.Equal(new[] { "2026-10-01-oi-c.json.gz" }, Directory.GetFiles(Path.Combine(cache, "NIFTY", "2026-10")).Select(Path.GetFileName));
+        Assert.True(File.Exists(Path.Combine(cache, "BANKNIFTY", "2026-10", "2026-10-06-oi-d.json.gz"))); // another index's day stays
+        Assert.Equal(new[] { "2026-10-02-oi-f.json.gz" }, Directory.GetFiles(Path.Combine(cache, "2026-10")).Select(Path.GetFileName));
+        Assert.DoesNotContain(queue.Items(), i => i.Id == item.Id);
+        // A queued job: just taken off; an unknown one: said so.
+        var queued = queue.Add(Job(), DateTimeOffset.UtcNow.AddDays(1), false);
+        Assert.Null(queue.Delete(queued.Id).Error);
+        Assert.NotNull(queue.Delete("nope").Error);
+    }
+
+    [Fact]
     public async Task AJobThatFails_SaysWhy_AndLeavesTheLastResult()
     {
         var ok = Service(Script("import { writeFileSync } from 'node:fs'\nwriteFileSync(process.env.TUNE_OUT, JSON.stringify({ ok: true, underlying: 'NIFTY', n: 1 }))"));

@@ -10,6 +10,9 @@
 //  - `priority()` 'background' (the default - tune.mjs always) sends "X-Request-Priority: background": the server then
 //    gives the live pages and the server scanner first call on Dhan and the job what they leave (up to 5/s when quiet);
 //  - the cache is kept under `cacheMaxBytes`: the least recently read days are removed first.
+//  - `scope` (the index): its files go in a folder of their own (v1/{INDEX}/{yyyy-MM}/...), so one index's days - or
+//    one job's - can be found and removed (the Strategy tuning page's Delete). A file from before that (no index
+//    folder) is still read, and moved into its index's folder when it is.
 //  - `maxPerDay`: ONE day's data of one kind is fetched at most this many times in a whole job. Every multiplier the
 //    job has (the second fetch of an incomplete OI day, the busy-retry rounds) used to compound - four attempts x two
 //    fetches = eight x 42 Dhan option-series calls for a single day - so the ledger below is the hard stop on it: past
@@ -84,7 +87,7 @@ export function pruneCache(dir, maxBytes) {
   return { removed, bytes }
 }
 
-export function createFetcher({ base = '', key = '', cacheDir = null, today, attempts = 6, paceMs = 0, timeoutMs = 120_000, fetchImpl = globalThis.fetch, sleep = sleepReal, onWait = () => {}, now = () => Date.now(), priority = () => 'background', retryScale = 1, maxPerDay = 0, deadline = () => false } = {}) {
+export function createFetcher({ base = '', key = '', cacheDir = null, scope = null, today, attempts = 6, paceMs = 0, timeoutMs = 120_000, fetchImpl = globalThis.fetch, sleep = sleepReal, onWait = () => {}, now = () => Date.now(), priority = () => 'background', retryScale = 1, maxPerDay = 0, deadline = () => false } = {}) {
   // byEndpoint / bySource: every request this job sent, by the endpoint it went to and by the part of the job that
   // asked for it. `repeats` is how many fetches were a second or later fetch of a day already paid for, which is
   // exactly the waste to watch; `refused` how many the per-day cap turned away.
@@ -158,11 +161,14 @@ export function createFetcher({ base = '', key = '', cacheDir = null, today, att
     }
   }
 
-  const fileOf = (name, date, path) => {
+  const nameOf = (name, date, path) => {
     let h = 0
     for (const ch of path) h = (Math.imul(h, 31) + ch.charCodeAt(0)) | 0
-    return join(cacheDir, `v${CACHE_VERSION}`, date.slice(0, 7), `${date}-${name}-${(h >>> 0).toString(36)}.json.gz`)
+    return `${date}-${name}-${(h >>> 0).toString(36)}.json.gz`
   }
+  const fileOf = (name, date, path) => join(cacheDir, `v${CACHE_VERSION}`, ...(scope ? [String(scope).toUpperCase()] : []), date.slice(0, 7), nameOf(name, date, path))
+  // Where the file was before the index folders (read once, then moved into its index's folder).
+  const legacyOf = (name, date, path) => join(cacheDir, `v${CACHE_VERSION}`, date.slice(0, 7), nameOf(name, date, path))
 
   // The same thing asked for twice at once (several days are scanned together, and one day's "previous session" is
   // often another day of the batch) is fetched once and shared - no double Dhan call, and no two writers on one file.
@@ -172,6 +178,10 @@ export function createFetcher({ base = '', key = '', cacheDir = null, today, att
   async function dayApi(name, date, path, valid = (b) => b != null, { source = name } = {}) {
     const cacheable = !!cacheDir && typeof date === 'string' && date < today
     const file = cacheable ? fileOf(name, date, path) : null
+    if (file && scope && !existsSync(file)) {
+      const old = legacyOf(name, date, path)
+      if (existsSync(old)) { try { mkdirSync(dirname(file), { recursive: true }); renameSync(old, file) } catch { /* left where it is */ } }
+    }
     if (file && existsSync(file)) {
       try {
         const body = JSON.parse(gunzipSync(readFileSync(file)).toString('utf8'))

@@ -409,6 +409,18 @@ export default function StrategyTuningPage() {
     loadQueue()
   }
   const unschedule = (id) => fetch(`/api/strategy-tuning/queue/${id}`, { method: 'DELETE' }).then(loadQueue)
+  // A finished job and everything it produced: its run (trades, settings, days), its result and its cached days.
+  const deleteJob = async (q) => {
+    const res = await fetch(`/api/strategy-tuning/queue/${q.id}/delete-all`, { method: 'POST' })
+    const json = await res.json().catch(() => null)
+    if (!res.ok) { message.error(json?.error ?? `HTTP ${res.status}`); return }
+    const d = json?.deleted
+    message.success(d?.runId
+      ? `Deleted ${q.job?.underlying}'s job: its run (${d.historyFiles} file(s)${d.runRow ? ', its row in the history' : ''}), ${d.resultFiles} result file(s), ${d.cacheFiles} cached day file(s)`
+      : 'Deleted - it had no run of its own (nothing else to remove)')
+    if (json?.queue) setQueue(json.queue); else loadQueue()
+    loadResult(underlying)
+  }
   const clearFinished = () => fetch('/api/strategy-tuning/queue/clear-finished', { method: 'POST' }).then(loadQueue)
   const start = async () => {
     const body = jobBody()
@@ -558,7 +570,14 @@ export default function StrategyTuningPage() {
                   { title: 'Job', key: 'j', render: (_, q) => <span style={{ fontSize: 12 }}>{q.job?.data === 'spot' ? 'spot + options · ' : ''}{Array.isArray(q.job?.strategies) ? `${q.job.strategies.length} strategies` : q.job?.strategies} · {{ both: 'OI, then trade', oi: 'OI', trade: 'trade settings', option: 'option trade', all: 'everything' }[q.job?.what] ?? q.job?.what} · {q.job?.from || q.job?.to ? `${q.job.from ?? 'start'} to ${q.job.to ?? 'yesterday'}` : `${q.job?.days} day(s)`}</span> },
                   { title: 'Start', key: 'at', width: 150, render: (_, q) => <span style={{ fontSize: 12 }}>{q.runAtUtc ? when(q.runAtUtc) : 'as soon as free'}{q.repeatDaily ? <Tag style={{ marginLeft: 4 }}>daily</Tag> : null}</span> },
                   { title: 'State', key: 's', width: 220, render: (_, q) => <span style={{ fontSize: 12 }}><Tag color={{ queued: 'default', running: 'processing', done: 'success', failed: 'error', cancelled: 'warning' }[q.state]}>{q.state}</Tag>{q.finishedUtc ? when(q.finishedUtc) : q.startedUtc ? `since ${when(q.startedUtc)}` : ''}{q.error ? <><br /><Text type="danger" style={{ fontSize: 11 }}>{q.error}</Text></> : null}</span> },
-                  { title: '', key: 'x', width: 80, render: (_, q) => (isAdmin && q.state === 'queued' ? <Button size="small" type="link" danger onClick={() => unschedule(q.id)}>Remove</Button> : null) },
+                  { title: '', key: 'x', width: 90, render: (_, q) => (!isAdmin ? null : q.state === 'queued' ? <Button size="small" type="link" danger onClick={() => unschedule(q.id)}>Remove</Button>
+                    : q.state === 'running' ? null : (
+                      <Popconfirm title={`Delete this ${q.job?.underlying} job and all its data?`}
+                        description="Its tuning run (trades, settings, the days list), its result and the days it fetched into the cache are removed - Strategy performance, the live list and What wins stop counting it. Those days cost Dhan calls to fetch again."
+                        okText="Delete" okButtonProps={{ danger: true }} onConfirm={() => deleteJob(q)}>
+                        <Button size="small" type="link" danger>Delete</Button>
+                      </Popconfirm>
+                    )) },
                 ]} />
               </div>
             )}

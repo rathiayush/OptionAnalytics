@@ -129,6 +129,25 @@ public sealed class StrategyTuningController : ControllerBase
     [Authorize(Roles = AuthRoles.Admin)]
     public IActionResult ClearFinished() { _queue.ClearFinished(); return Ok(_queue.Items()); }
 
+    /// <summary>POST /api/strategy-tuning/queue/{id}/delete-all - a job and everything it produced: its tuning run
+    /// (trades, settings, days), its result and the days it fetched into the cache. Not while it runs.</summary>
+    [HttpPost("queue/{id}/delete-all")]
+    [Authorize(Roles = AuthRoles.Admin)]
+    public IActionResult DeleteJobAndData(string id)
+    {
+        var (deleted, error) = _queue.Delete(id);
+        return error is null ? Ok(new { deleted, queue = _queue.Items() }) : BadRequest(new { error });
+    }
+
+    /// <summary>DELETE /api/strategy-tuning/history/{runId} - one tuning run and everything it produced (as above).</summary>
+    [HttpDelete("history/{runId}")]
+    [Authorize(Roles = AuthRoles.Admin)]
+    public IActionResult DeleteRun(string runId)
+    {
+        var (deleted, error) = _tuning.DeleteRun(runId);
+        return error is null ? Ok(deleted) : BadRequest(new { error });
+    }
+
     /// <summary>GET /api/strategy-tuning/performance - every run's trades added up per strategy, across all indices
     /// (TuningPerformance); `data` = futures / spot.</summary>
     [HttpGet("performance")]

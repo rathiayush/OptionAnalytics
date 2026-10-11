@@ -149,3 +149,26 @@ test('the same day asked for twice at once is fetched once - several days are sc
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('with an index (scope) each day is kept in that index\'s folder; an older file without one is read and moved there', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tune-cache-scope-'))
+  try {
+    const valid = (b) => b?.bars?.length > 0
+    // An older job's file, from before the index folders.
+    const old = createFetcher({ fetchImpl: fakeServer([{ status: 200, body: { bars: [7] } }]).fetchImpl, sleep: noSleep().sleep, today: '2026-10-10', cacheDir: dir })
+    await old.dayApi('day', '2026-10-06', '/api/order-flow/NIFTY/day/2026-10-06', valid)
+    assert.equal(readdirSync(join(dir, 'v1', '2026-10')).filter((n) => n.endsWith('.json.gz')).length, 1)
+    // Now a NIFTY job: the new day goes under NIFTY, and the older file is read (no server call) and moved there.
+    const srv = fakeServer([{ status: 200, body: { bars: [1] } }])
+    const f = createFetcher({ fetchImpl: srv.fetchImpl, sleep: noSleep().sleep, today: '2026-10-10', cacheDir: dir, scope: 'nifty' })
+    assert.deepEqual(await f.dayApi('day', '2026-10-06', '/api/order-flow/NIFTY/day/2026-10-06', valid), { bars: [7] })
+    await f.dayApi('day', '2026-10-08', '/api/order-flow/NIFTY/day/2026-10-08', valid)
+    assert.equal(srv.calls.length, 1, 'only the new day was fetched')
+    const files = readdirSync(join(dir, 'v1', 'NIFTY', '2026-10')).sort()
+    assert.equal(files.length, 2)
+    assert.ok(files[0].startsWith('2026-10-06') && files[1].startsWith('2026-10-08'))
+    assert.equal(readdirSync(join(dir, 'v1', '2026-10')).filter((n) => n.endsWith('.json.gz')).length, 0, 'the older file was moved, not copied')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
