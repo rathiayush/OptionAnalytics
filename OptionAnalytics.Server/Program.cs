@@ -147,6 +147,9 @@ builder.Services.AddSingleton<StoredSpotDataService>();
 // One past day's futures candles, fetched once however many endpoints want them: OI Replay's own futures fetch and
 // the Order Flow page's Load day both ask for the same contract-day (see PastFuturesCandleCache).
 builder.Services.AddSingleton<OptionAnalytics.Server.Dhan.PastFuturesCandleCache>();
+// Each OI day is 42 Dhan rolling-option calls: a complete past day is kept (memory, and Storage:OiDayCachePath on
+// disk), today is shared for 30 s - see OiDayCache.
+builder.Services.AddSingleton<OiDayCache>();
 builder.Services.AddSingleton<OiReplayService>();
 // Backs the Strike Data page's own OI/IV columns - stored-only (NiftyDataCollectorTimescale), no
 // live Dhan fallback, and unavailable for SENSEX - see its own doc comment for why.
@@ -383,6 +386,17 @@ app.Use(async (context, next) =>
         return;
     }
     await next();
+});
+
+// Who each request's Dhan Data-API calls are for, counted per Dhan endpoint (GET /api/strategy-tuning/dhan-usage ->
+// bySource): the route, and whether it came from a browser page, the server's scanner runner or a tuning job.
+app.Use(async (context, next) =>
+{
+    if (!context.Request.Path.StartsWithSegments("/api")) { await next(); return; }
+    var route = (context.GetEndpoint() as Microsoft.AspNetCore.Routing.RouteEndpoint)?.RoutePattern.RawText ?? context.Request.Path.Value ?? "";
+    var who = !context.Request.Headers.ContainsKey(OptionAnalytics.Server.Auth.ScannerRunnerKey.Header) ? "page"
+        : OptionAnalytics.Server.Dhan.DhanDataApiRateLimiter.IsBackgroundRequest || context.Request.Headers.ContainsKey("X-Tune-Job") ? "tuning job" : "scanner runner";
+    using (OptionAnalytics.Server.Dhan.DhanDataApiRateLimiter.SourceScope($"{who}: {context.Request.Method} /{route.TrimStart('/')}")) await next();
 });
 
 // Container liveness, for Docker's HEALTHCHECK and Dokploy/Traefik. Deliberately says nothing

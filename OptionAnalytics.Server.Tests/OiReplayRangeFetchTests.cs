@@ -559,6 +559,78 @@ public sealed class OiReplayRangeFetchTests
         Assert.Empty(OptionCalls(dhan));
     }
 
+    // ---- The day cache: the same day is not paid for twice ----------------------------------------
+
+    private static OiDayCache Cache(string? dir = null) =>
+        new(dir is null ? null : new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["Storage:OiDayCachePath"] = dir }).Build(),
+            null, MinutesPerDay);
+
+    [Fact]
+    public async Task APastDay_IsFetchedFromDhanOnce_ThenServedFromTheCache()
+    {
+        var cache = Cache();
+        var (service, dhan) = Service(dayCache: cache);
+
+        var first = await service.RunAsync("NIFTY", D(3), 1, "WEEK", CancellationToken.None);
+        var second = await service.RunAsync("NIFTY", D(3), 1, "WEEK", CancellationToken.None);
+
+        Assert.True(first.Success);
+        Assert.Equal(BandSeries, OptionCalls(dhan).Count);
+        Assert.Same(first, second);
+        Assert.Equal(1, cache.Hits);
+    }
+
+    [Fact]
+    public async Task IdenticalRequestsAtOnce_ShareOneFetch()
+    {
+        var (service, dhan) = Service(dayCache: Cache());
+        var all = await Task.WhenAll(Enumerable.Range(0, 5).Select(_ => service.RunAsync("NIFTY", D(4), 1, "WEEK", CancellationToken.None)));
+        Assert.All(all, r => Assert.True(r.Success));
+        Assert.Equal(BandSeries, OptionCalls(dhan).Count);
+    }
+
+    [Fact]
+    public async Task AnIncompleteDay_IsNotKept_AndIsFetchedAgain()
+    {
+        var cache = Cache();
+        var (service, dhan) = Service(dayCache: cache);
+        dhan.RefuseSeries.Add(("ATM+4", "CALL")); // one strike series fails: the day comes back with an OptionError
+
+        var first = await service.RunAsync("NIFTY", D(3), 1, "WEEK", CancellationToken.None);
+        Assert.NotEmpty(first.OptionErrors);
+        dhan.RefuseSeries.Clear();
+        var second = await service.RunAsync("NIFTY", D(3), 1, "WEEK", CancellationToken.None);
+
+        Assert.Equal(0, cache.Hits);
+        Assert.Equal(2 * BandSeries, OptionCalls(dhan).Count);
+        Assert.Empty(second.OptionErrors);
+    }
+
+    [Fact]
+    public async Task ACompletePastDay_IsKeptOnDisk_AndSurvivesARestart()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "oa-oi-days-" + Guid.NewGuid().ToString("n"));
+        try
+        {
+            var dhan = new FakeDhan();
+            var (before, _) = Service(dayCache: Cache(dir), sharedDhan: dhan);
+            var original = await before.RunAsync("NIFTY", D(3), 1, "WEEK", CancellationToken.None);
+            Assert.Single(Directory.GetFiles(dir, "*.json.gz"));
+
+            // A new server (a new cache, nothing in memory): read from disk, no Dhan call.
+            var (after, _) = Service(dayCache: Cache(dir), sharedDhan: dhan);
+            var restored = await after.RunAsync("NIFTY", D(3), 1, "WEEK", CancellationToken.None);
+
+            Assert.Equal(BandSeries, OptionCalls(dhan).Count);
+            Assert.Equal(original.CePoints, restored.CePoints);
+            Assert.Equal(original.PePoints, restored.PePoints);
+            Assert.Equal(original.SpotCandlesOneMinute, restored.SpotCandlesOneMinute);
+            Assert.Equal(original.FuturesBars, restored.FuturesBars);
+            Assert.Equal((original.Date, original.Step, original.ExpiryCode, original.ExpiryFlag), (restored.Date, restored.Step, restored.ExpiryCode, restored.ExpiryFlag));
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+
     private static List<OptionCall> OptionCalls(FakeDhan dhan) =>
         dhan.Snapshot()
             .Where(r => r.Path.EndsWith("/charts/rollingoption", StringComparison.Ordinal) && r.Body is not null)
@@ -580,9 +652,9 @@ public sealed class OiReplayRangeFetchTests
                 r.Body["instrument"]!.GetValue<string>()))
             .ToList();
 
-    private static (OiReplayService Service, FakeDhan Dhan) Service(bool fastOiRange = true)
+    private static (OiReplayService Service, FakeDhan Dhan) Service(bool fastOiRange = true, OiDayCache? dayCache = null, FakeDhan? sharedDhan = null)
     {
-        var dhan = new FakeDhan();
+        var dhan = sharedDhan ?? new FakeDhan();
         var options = Options.Create(new DhanOptions
         {
             RestBaseUrl = "https://dhan.test",
@@ -607,7 +679,7 @@ public sealed class OiReplayRangeFetchTests
             new DhanHistoricalDataService(api, limiter, NullLogger<DhanHistoricalDataService>.Instance),
             new DhanRollingOptionDataService(api, limiter, NullLogger<DhanRollingOptionDataService>.Instance),
             new AppEnvironment(new FakeHostEnvironment(), Options.Create(new AppEnvironmentOptions { IsLocal = false })),
-            Options.Create(new StrategyTuningOptions { FastOiRange = fastOiRange }));
+            Options.Create(new StrategyTuningOptions { FastOiRange = fastOiRange }), dayCache: dayCache);
         return (service, dhan);
     }
 
@@ -649,6 +721,9 @@ public sealed class OiReplayRangeFetchTests
         /// <summary>Makes a multi-day window answer with DIFFERENT open interest than the per-day
         /// call for the same minute - the disagreement the runtime self-check has to catch.</summary>
         public long ShiftWindowOiBy { get; set; }
+
+        /// <summary>(strike token, side) series refused outright, for every request - a strike that failed.</summary>
+        public HashSet<(string Strike, string Side)> RefuseSeries { get; } = new();
 
         /// <summary>Each bar's open interest also carries WHICH contract (weekly expiry) it came from, and a
         /// multi-day window resolves that contract the way the switches below say - so "one window straight
@@ -709,6 +784,12 @@ public sealed class OiReplayRangeFetchTests
             var strikeToken = body["strike"]!.GetValue<string>();
             var side = body["drvOptionType"]!.GetValue<string>();
             var isWindow = toExclusive.DayNumber - from.DayNumber > 1;
+
+            if (RefuseSeries.Contains((strikeToken, side)))
+                return new HttpResponseMessage(HttpStatusCode.BadRequest)
+                {
+                    Content = new StringContent("{\"errorMessage\":\"Input_Exception: refused\"}", Encoding.UTF8, "application/json"),
+                };
 
             if (isWindow && RefuseMultiDayOptionWindows)
                 return new HttpResponseMessage(HttpStatusCode.BadRequest)

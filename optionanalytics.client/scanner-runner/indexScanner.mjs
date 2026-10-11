@@ -24,6 +24,16 @@ import { tpoRowFor } from '../src/profiles.js'
 export const DEFAULT_SETTINGS = { alerts: true, telegram: true, pick: 'top15', custom: [], filters: {}, trail: { on: true, ...DEFAULT_TRAIL }, autoPaper: 'strategy', paperLots: 1, moneyness: 0 }
 export const DEFAULT_ROW_SIZES = { NIFTY: 1, BANKNIFTY: 5, SENSEX: 5 }
 const RETRY_MS = 30_000
+// A failed load waits longer each time (30 s, 1 min, 2 min, then every 5 min): each try costs Dhan calls, and a
+// failure that repeats (a holiday, a long outage) must not keep paying for them every 30 s all day.
+const MAX_RETRY_MS = 5 * 60_000
+// Before the open and at weekends there is no day to load yet: not even tried. 09:14 IST so the seed is ready as the
+// first minute closes.
+const LOAD_FROM_MINUTE = 9 * 60 + 14
+const istClock = (ms) => {
+  const d = new Date(ms + 330 * 60_000)
+  return { minute: d.getUTCHours() * 60 + d.getUTCMinutes(), weekday: d.getUTCDay() }
+}
 const LOG_EVERY_MS = 3_000
 export const TAG = '[Server]'
 
@@ -139,6 +149,8 @@ export class IndexScanner {
       if (saved) this.restore(saved)
     }
     if (this.data || this.loading || this.io.now() < this.nextLoadAt) return
+    const clock = istClock(this.io.now())
+    if (clock.weekday === 0 || clock.weekday === 6 || clock.minute < LOAD_FROM_MINUTE) return
     this.loading = this.load(today).finally(() => { this.loading = null })
     await this.loading
   }
@@ -168,10 +180,12 @@ export class IndexScanner {
         spotVp: spotVp?.success ? spotVp : null,
       })
       this.error = null
+      this.failedLoads = 0
       this.io.log(`${u}: day ${today} loaded (${snapshot.bars?.length ?? 0} bars, ${tape?.prints?.length ?? 0} prints)`)
     } catch (err) {
       this.error = err.message
-      this.nextLoadAt = this.io.now() + RETRY_MS
+      this.failedLoads = (this.failedLoads ?? 0) + 1
+      this.nextLoadAt = this.io.now() + Math.min(MAX_RETRY_MS, RETRY_MS * 2 ** (this.failedLoads - 1))
     }
   }
 

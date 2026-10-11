@@ -118,6 +118,7 @@ public sealed class OiReplayService
     /// /api/order-flow/{u}/day/{date} both want them (see PastFuturesCandleCache). Optional: without
     /// it every fetch goes straight to PastFuturesCandles, exactly as before.</summary>
     private readonly PastFuturesCandleCache? _pastFutures;
+    private readonly OiDayCache? _dayCache;
     private readonly DhanRollingOptionDataService _rollingOption;
     private readonly bool _allowLiveDataFallback;
     /// <summary>StrategyTuning:FastOiRange - see StrategyTuningOptions. Only RunRangeAsync reads it;
@@ -131,8 +132,9 @@ public sealed class OiReplayService
         DhanHistoricalDataService historicalData, DhanRollingOptionDataService rollingOption,
         AppEnvironment appEnvironment, IOptions<StrategyTuningOptions>? tuningOptions = null,
         NseFuturesContractArchive? futuresArchive = null, NseChartHistory? nseChart = null,
-        ILogger<OiReplayService>? logger = null, PastFuturesCandleCache? pastFutures = null)
+        ILogger<OiReplayService>? logger = null, PastFuturesCandleCache? pastFutures = null, OiDayCache? dayCache = null)
     {
+        _dayCache = dayCache;
         _futuresArchive = futuresArchive;
         _nseChart = nseChart;
         _storedSpot = storedSpot;
@@ -150,7 +152,16 @@ public sealed class OiReplayService
         _pastFutures = pastFutures;
     }
 
-    public async Task<OiReplayResult> RunAsync(
+    public Task<OiReplayResult> RunAsync(
+        string underlying, DateOnly date, int timeframeMinutes, string expiryFlag, CancellationToken cancellationToken, bool forceLive = false) =>
+        // Through the day cache (OiDayCache): a complete past day is fetched once, today at most once per 30 s, and
+        // identical requests in flight share one fetch - each fetch is 42 Dhan rolling-option calls.
+        _dayCache is null
+            ? RunUncachedAsync(underlying, date, timeframeMinutes, expiryFlag, cancellationToken, forceLive)
+            : _dayCache.GetAsync(underlying, date, Math.Max(1, timeframeMinutes), expiryFlag, forceLive,
+                ct => RunUncachedAsync(underlying, date, timeframeMinutes, expiryFlag, ct, forceLive), cancellationToken);
+
+    private async Task<OiReplayResult> RunUncachedAsync(
         string underlying, DateOnly date, int timeframeMinutes, string expiryFlag, CancellationToken cancellationToken, bool forceLive = false)
     {
         var timeframe = Math.Max(1, timeframeMinutes);

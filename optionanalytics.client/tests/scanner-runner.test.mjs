@@ -230,3 +230,31 @@ test('a strategy tuned to BUY its option: the server scanner trades that - unles
   const chosen = (await run('sell')).filter((p) => p.strategy === id)
   assert.ok(chosen.length && chosen.every((p) => p.action === 'SELL'), 'the chosen side wins over the strategy')
 })
+
+test('today is not loaded at weekends or before the open, and a failing load backs off (each try costs Dhan calls)', async () => {
+  const io = fakeIo()
+  const tries = []
+  io.api = async (path) => { tries.push([io.clock, path]); throw new Error('no index data yet') }
+  const ist = (date, hhmm) => Date.parse(`${date}T${hhmm}:00+05:30`)
+  const scanner = new IndexScanner('NIFTY', io)
+
+  io.clock = ist('2026-10-11', '10:00') // a Sunday
+  await scanner.ensureDay('2026-10-11')
+  io.clock = ist('2026-10-12', '08:30') // Monday, before the open
+  await scanner.ensureDay('2026-10-12')
+  assert.equal(tries.length, 0, 'no load attempted')
+
+  io.clock = ist('2026-10-12', '09:20')
+  await scanner.ensureDay('2026-10-12')
+  const first = tries.length
+  assert.ok(first > 0, 'tried once the market is open')
+  // Retries at 30 s, then 60 s, then 120 s after each failure - not every 30 s.
+  const attemptsAt = []
+  for (let s = 0; s <= 600; s += 10) {
+    io.clock = ist('2026-10-12', '09:20') + s * 1000
+    const before = tries.length
+    await scanner.ensureDay('2026-10-12')
+    if (tries.length > before) attemptsAt.push(s)
+  }
+  assert.deepEqual(attemptsAt.slice(0, 3), [30, 90, 210], attemptsAt.join())
+})

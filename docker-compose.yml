@@ -28,6 +28,7 @@ services:
       Storage__ExpiredOptionDataPath: /app/data/expired-option-data
       # The strategy scanner's record - signals.csv and trades.csv (ScannerLogStore).
       Storage__ScannerLogPath: /app/data/scanner-log
+      Storage__OiDayCachePath: /app/data/oi-days
       # Live trades the server closes itself at the scanner's time stop / 15:10 (LiveTimeExitStore).
       Storage__LiveTimeExitsPath: /app/data/live-time-exits.json
       # Keeps the login cookie's signing/encryption key ring on the same persistent volume, so
