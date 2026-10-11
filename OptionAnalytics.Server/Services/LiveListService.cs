@@ -152,11 +152,14 @@ public sealed class LiveListService
                     0, null, null, null, Math.Round(cost, 2), 0, null, null, false, false, false, "", 0);
                 if (t is null) { entries[row.StrategyId] = e with { Tuned = "applied setting not in the tuning history" }; continue; }
                 var avgNet = t.Unit == "pts" && t.TestAvg is { } a ? a - cost : t.TestAvg;
-                var proven = t.TestTrades >= rules.MinTrades && TuningPerformance.CanBeBest(t) && avgNet > 0;
+                // Each rule it does not meet yet, in plain words - so "not proven yet" says what is missing.
+                var missing = TuningPerformance.WhyNotBest(t);
+                if (t.TestTrades > 0 && t.TestTrades < rules.MinTrades) missing.Add($"{t.TestTrades} unseen trade(s) - the live list needs {rules.MinTrades}");
+                if (t.Unit == "pts" && t.TestAvg is > 0 && !(avgNet > 0)) missing.Add($"{t.TestAvg:+0.00} pts a trade does not clear the {cost:0.##} pts of costs");
                 entries[row.StrategyId] = e with
                 {
                     Tuned = t.Row.GetValueOrDefault("setting_text", ""), TunedTrades = t.TestTrades, TunedAvg = avgNet is { } x ? Math.Round(x, 3) : null,
-                    TunedUnit = t.Unit, TunedPeriods = t.Periods, TunedPeriodsWon = t.PeriodsWon, TunedProven = proven,
+                    TunedUnit = t.Unit, TunedPeriods = t.Periods, TunedPeriodsWon = t.PeriodsWon, TunedProven = missing.Count == 0, TunedMissing = missing,
                 };
             }
         }
@@ -176,7 +179,7 @@ public sealed class LiveListService
             var byTuned = fail is not null && e.TunedProven && !(liveDecides && e.LiveNetPerLot is <= 0);
             var tunedText = $"its applied fine-tuned setting is proven: {e.TunedAvg:+0.00;-0.00}{(e.TunedUnit == "pts" ? " pts after costs" : "R")} a trade over {e.TunedTrades} unseen trades, won {e.TunedPeriodsWon} of {e.TunedPeriods} month(s)";
             if (byTuned) fail = null;
-            else if (fail is not null && e.Tuned is { Length: > 0 } && !e.TunedProven && e.TunedTrades > 0) fail += $"; its applied fine-tuned setting is not proven yet ({e.TunedTrades} unseen trades, {e.TunedAvg:+0.00;-0.00}{(e.TunedUnit == "pts" ? " pts" : "R")} a trade)";
+            else if (fail is not null && e.Tuned is { Length: > 0 } && !e.TunedProven && e.TunedMissing.Count > 0) fail += $"; its applied fine-tuned setting is not proven yet: {string.Join("; ", e.TunedMissing)}";
             var on = forcedOut ? false : forcedIn || fail is null;
             var proven = byTuned ? tunedText : "proven: enough trades, positive R after costs, win rate met";
             var why = forcedOut ? "taken off by hand" : forcedIn ? (fail is null ? $"{proven}, and added by hand" : $"added by hand ({fail})") : fail ?? proven;
@@ -238,6 +241,8 @@ public sealed record LiveListEntry(string StrategyId, string StrategyNo, string 
     public int TunedPeriods { get; init; }
     public int TunedPeriodsWon { get; init; }
     public bool TunedProven { get; init; }
+    /// <summary>What the applied fine-tuned setting still misses to be proven (empty when it is).</summary>
+    public List<string> TunedMissing { get; init; } = new();
 }
 
 public sealed record LiveListSetRequest(LiveListRules? Rules, string? Underlying, string? StrategyId, string? Mode);

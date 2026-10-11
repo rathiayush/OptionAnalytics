@@ -23,10 +23,10 @@ export function SettingParamsTable({ source, from = 'params' }) {
 }
 
 /** A "Parameters" link that opens every parameter of the setting. */
-export function ParamsPopover({ source, from = 'params', label = 'Parameters' }) {
+export function ParamsPopover({ source, from = 'params', label = 'Parameters', action = null }) {
   return (
     <Popover trigger="click" placement="left" title="Every parameter (blue = changed by the tuning; the rest are the defaults)"
-      content={<div style={{ maxHeight: 420, overflow: 'auto' }}><SettingParamsTable source={source} from={from} /></div>}>
+      content={<div style={{ maxHeight: 460, overflow: 'auto' }}><SettingParamsTable source={source} from={from} />{action && <div style={{ marginTop: 8 }}>{action}</div>}</div>}>
       <Button size="small" type="link" style={{ padding: '0 4px', height: 'auto' }}>{label}</Button>
     </Popover>
   )

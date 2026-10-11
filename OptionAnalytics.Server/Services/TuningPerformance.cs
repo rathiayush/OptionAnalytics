@@ -132,7 +132,11 @@ public static class TuningPerformance
     /// run). Row = the newest run's row, which is what Apply sends to the scanner.</summary>
     public sealed record TunedSetting(Dictionary<string, string> Row, int Runs, int Recommended, int TestTrades, double? TestAvg,
         int TrainTrades, double? TrainAvg, double PointsNet, string Unit, double? Score, bool Best,
-        int Periods = 0, int PeriodsWon = 0, double? BaseAvg = null, int CheckedRuns = 0, double? CheckAvg = null);
+        int Periods = 0, int PeriodsWon = 0, double? BaseAvg = null, int CheckedRuns = 0, double? CheckAvg = null)
+    {
+        /// <summary>Why it cannot be called best yet (WhyNotBest) - empty when it can.</summary>
+        public List<string> NotBestBecause => WhyNotBest(this);
+    }
 
     private sealed class TunedAcc
     {
@@ -407,8 +411,24 @@ public static class TuningPerformance
     /// <summary>A setting that can be called best: it made money on its unseen days (shrunk score above 0), it beat the
     /// strategy as written on the same cross-checked days, and it did not just fit one stretch - checked over two or more
     /// months, it won in at least half of them; with only one month, its own run recommended it.</summary>
-    public static bool CanBeBest(TunedSetting x) =>
-        x.Score > 0
-        && (x.BaseAvg is not { } b || x.CheckAvg is not { } m || m > b)
-        && (x.Periods >= 2 ? x.PeriodsWon * 2 >= x.Periods : x.Recommended > 0);
+    public static bool CanBeBest(TunedSetting x) => WhyNotBest(x).Count == 0;
+
+    /// <summary>Each rule of CanBeBest the setting does not meet yet, in plain words with its numbers and what to do -
+    /// empty when it can be best. Shown beside "not proven yet" (the Trades page and the live list).</summary>
+    public static List<string> WhyNotBest(TunedSetting x)
+    {
+        var u = x.Unit == "pts" ? " pts" : "R";
+        var why = new List<string>();
+        if (x.TestTrades == 0)
+        {
+            why.Add("no trade yet on a day it was not chosen on - run a Re-check (Strategy tuning → Tune: Re-check settings) over other months, or tune another month");
+            return why;
+        }
+        if (!(x.Score > 0)) why.Add($"loses on its unseen days ({x.TestAvg:+0.00;-0.00}{u} a trade over {x.TestTrades})");
+        if (x.BaseAvg is { } b && x.CheckAvg is { } m && !(m > b)) why.Add($"no better than the strategy as written on the same days ({m:+0.00;-0.00}{u} vs {b:+0.00;-0.00}{u} a trade)");
+        if (x.Periods >= 2 && x.PeriodsWon * 2 < x.Periods) why.Add($"won in only {x.PeriodsWon} of {x.Periods} months");
+        if (x.Periods < 2 && x.Recommended == 0)
+            why.Add($"checked in only {(x.Periods == 1 ? "one month" : "no full month")} and its run did not recommend it - a Re-check over other months (or tuning more months) gives it more unseen days");
+        return why;
+    }
 }
