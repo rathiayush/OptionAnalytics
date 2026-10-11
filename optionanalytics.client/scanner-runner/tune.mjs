@@ -50,7 +50,8 @@ import { dayFromOrderFlow, scanDaySetups } from '../src/scanDay.js'
 import { DEFAULT_VARIANT, splitDays, OI_COMBO_CAP, OI_FACTORS, OPTION_GRID, countOiCombinations, oiFactorsFor, oiGridOf, optionText, rankStrategies, tradeDetails, tuneStrategy, tuningDay, TUNING_GRID, variantText } from '../src/strategyTuning.js'
 import { DEFAULT_ROW_SIZES } from './indexScanner.mjs'
 import { createFetcher, isTransientText, pruneCache } from './tuneFetch.mjs'
-import { DAY_COLUMNS, RUN_COLUMNS, SETTING_COLUMNS, TRADE_COLUMNS, historyOf, runsCsvWith, toCsv } from './tuneHistory.mjs'
+import { CHECK_COLUMNS, DAY_COLUMNS, RUN_COLUMNS, SETTING_COLUMNS, TRADE_COLUMNS, historyOf, runsCsvWith, toCsv } from './tuneHistory.mjs'
+import { candidatesFrom, candidatesOfResults, crossCheck, mergeCandidates } from './tuneChecks.mjs'
 
 const BASE = (process.env.RUNNER_BASE_URL ?? 'http://127.0.0.1:8080').replace(/\/$/, '')
 const KEY = process.env.RUNNER_KEY ?? ''
@@ -69,7 +70,8 @@ const inRange = (date) => (!FROM || date >= FROM) && (!TO || date <= TO)
 const isWeekend = (date) => [0, 6].includes(new Date(`${date}T00:00:00Z`).getUTCDay())
 const MAX_DAYS = RANGED ? 250 : Math.max(1, Math.min(250, Number(job.days) || 30))
 const MIN_TRADES = Math.max(2, Math.min(100, Number(job.minTrades) || 8))
-const WHAT = ['trade', 'oi', 'both', 'option', 'all'].includes(job.what) ? job.what : 'trade'
+// 'check': no new tuning - only the cross-check of every setting found so far on these days (tuneChecks.mjs).
+const WHAT = ['trade', 'oi', 'both', 'option', 'all', 'check'].includes(job.what) ? job.what : 'trade'
 const DATA = job.data === 'spot' ? 'spot' : 'futures' // spot: the index candles + the option chain's OI only - no futures, no order flow
 const SEARCH = job.search === 'full' ? 'full' : 'step'
 // Spot + options has no futures, so a futures OI input is dropped here too - whatever the page sent.
@@ -628,7 +630,7 @@ async function main() {
   const spotIds = SPOT_STRATEGIES.map((s) => s.id)
   const ranked = rankStrategies(days, { trail, minTrades: MIN_TRADES, ids: DATA === 'spot' ? spotIds : ACTIVE_STRATEGIES.map((s) => s.id) }).map((r) => ({ ...r, name: STRATEGY_BY_ID[r.id]?.name, no: STRATEGY_BY_ID[r.id]?.no }))
   const pick = job.strategies
-  const ids = Array.isArray(pick) ? pick.filter((id) => STRATEGY_BY_ID[id] && !STRATEGY_BY_ID[id].retired && (DATA === 'spot') === !!STRATEGY_BY_ID[id].spot)
+  const ids = WHAT === 'check' ? [] : Array.isArray(pick) ? pick.filter((id) => STRATEGY_BY_ID[id] && !STRATEGY_BY_ID[id].retired && (DATA === 'spot') === !!STRATEGY_BY_ID[id].spot)
     : pick === 'all' ? ranked.filter((r) => r.n > 0).map((r) => r.id)
       : (() => {
         // The top ones with at least the minimum trades; when fewer than asked reach it, the next ones that traded at all
@@ -678,6 +680,15 @@ async function main() {
     for (const t of res.best?.trades ?? []) trades.push({ id: res.id, no: res.no, name: res.name, setting: 'best', settingText: res.settingText, recommend: res.recommend, ...t })
   }
   trades.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0) || a.t - b.t || (a.no ?? 0) - (b.no ?? 0))
+  // THE CROSS-CHECK (tuneChecks.mjs): every setting found so far for this index - this run's own and every earlier
+  // run's - measured on this run's days it was not chosen on, so settings tuned on different months are compared on
+  // days none of them was fitted to. Cheap: the days are already scanned; it only re-applies each setting's filters.
+  // Past the time budget it stops and keeps what it checked.
+  state.stage = 'check'
+  progress({ stage: 'check', done: 0, total: 1 })
+  const candidates = mergeCandidates(DATA === 'spot' ? [] : candidatesFrom(HISTORY_DIR, { underlying: U, data: DATA }), candidatesOfResults(results))
+  const checks = DATA === 'spot' ? [] : crossCheck(days, candidates, trail, { stop: overBudget })
+  const checkSummary = { settings: candidates.length, rows: checks.length, fromEarlierRuns: candidates.filter((c) => c.runs.some((r) => r !== 'this run')).length }
   // The last reading of the server's Dhan counter, so the report's own before/after covers the whole job.
   await dhanBudgetLeft().catch(() => null)
   const calls = callReport(fetcher.stats, fetcher.perKind(), fastOi, dhan)
@@ -694,9 +705,10 @@ async function main() {
     const h = historyOf({
       underlying: U, data: DATA, finishedMs: Date.now(), what: WHAT, search: SEARCH, minTrades: MIN_TRADES, from: FROM, to: TO,
       days: days.map((d) => ({ date: d.date, estimated: d.estimated, role: testDays.has(d.date) ? 'test' : 'train' })), skipped, results, trades, fetched: fetcher.stats,
-      calls, budget,
+      calls, budget, checks,
     })
     mkdirSync(HISTORY_DIR, { recursive: true })
+    writeJson(join(HISTORY_DIR, `${h.run_id}-checks.csv`), null, toCsv(CHECK_COLUMNS, h.checks))
     writeJson(join(HISTORY_DIR, `${h.run_id}-trades.csv`), null, toCsv(TRADE_COLUMNS, h.trades))
     writeJson(join(HISTORY_DIR, `${h.run_id}-settings.csv`), null, toCsv(SETTING_COLUMNS, h.settings))
     writeJson(join(HISTORY_DIR, `${h.run_id}-days.csv`), null, toCsv(DAY_COLUMNS, h.days))
@@ -713,8 +725,8 @@ async function main() {
   write({
     // runId: the history run this result belongs to - so deleting the run (Strategy tuning page) removes this too.
     ok: true, runId, underlying: U, job, startedUtc, finishedUtc: new Date().toISOString(), rowSize, trail, minTrades: MIN_TRADES, what: WHAT, search: SEARCH, data: DATA, from: FROM, to: TO, oiFactors: OI_KEYS ?? OI_FACTORS.map((f) => f.key),
-    grid: WHAT === 'trade' ? TUNING_GRID : WHAT === 'oi' ? oiGridOf(OI_KEYS) : WHAT === 'option' ? OPTION_GRID : WHAT === 'all' ? { ...oiGridOf(OI_KEYS), ...TUNING_GRID, ...OPTION_GRID } : { ...oiGridOf(OI_KEYS), ...TUNING_GRID },
-    days: days.map((d) => ({ date: d.date, estimated: d.estimated, setups: d.setups.length, ...d.quality })), skipped, ranked, results, fetched: fetcher.stats, fastOi,
+    grid: WHAT === 'check' ? null : WHAT === 'trade' ? TUNING_GRID : WHAT === 'oi' ? oiGridOf(OI_KEYS) : WHAT === 'option' ? OPTION_GRID : WHAT === 'all' ? { ...oiGridOf(OI_KEYS), ...TUNING_GRID, ...OPTION_GRID } : { ...oiGridOf(OI_KEYS), ...TUNING_GRID },
+    days: days.map((d) => ({ date: d.date, estimated: d.estimated, setups: d.setups.length, ...d.quality })), skipped, ranked, results, checks: checkSummary, fetched: fetcher.stats, fastOi,
     strategies: ACTIVE_STRATEGIES.length, calls, budget,
   })
   clearTimeout(watchdog)

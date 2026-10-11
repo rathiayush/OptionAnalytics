@@ -118,23 +118,48 @@ public static class TuningPerformance
     }
 
     /// <summary>One fine-tuned setting (the same parameters) across every run that chose it: how many runs, how many of them
-    /// recommended it, and its scores added up - Test is the days each run held back and never chose on (the honest
-    /// number), Train the days it was chosen on. Score = the test average shrunk toward 0 for few trades
-    /// (avg x n / (n + 10)), so a setting proven over many unseen trades beats a lucky one. Row = the newest run's row,
-    /// which is what Apply sends to the scanner.</summary>
+    /// recommended it, and its record on UNSEEN days - days it was never chosen on. That record is the CROSS-CHECK
+    /// ({run}-checks.csv, scanner-runner/tuneChecks.mjs): every run measures every setting found so far for its index on
+    /// its own days that setting was not chosen on, so a setting tuned on one month is also judged on every other month
+    /// tuned (and on its own month's held-back days); a day two runs both checked counts once. Runs written before the
+    /// cross-check add their held-back (test) days as before. Test = that unseen record; Train = the days it was chosen on.
+    /// Periods / PeriodsWon = the months (an older run's test days: one period) it traded in on unseen days / made money
+    /// in; BaseAvg = the strategy as written on the same unseen days (null when there are no cross-check days);
+    /// CheckedRuns = how many runs other than the ones that chose it checked it. Score = the unseen average shrunk toward
+    /// 0 for few trades (avg x n / (n + 10)), so a setting proven over many unseen trades beats a lucky one.
+    /// Best (see Rank) = the highest score that is above 0, beats the strategy as written on the same days, and - once
+    /// it has been checked over two or more months - won in at least half of them (with one month: recommended by its
+    /// run). Row = the newest run's row, which is what Apply sends to the scanner.</summary>
     public sealed record TunedSetting(Dictionary<string, string> Row, int Runs, int Recommended, int TestTrades, double? TestAvg,
-        int TrainTrades, double? TrainAvg, double PointsNet, string Unit, double? Score, bool Best);
+        int TrainTrades, double? TrainAvg, double PointsNet, string Unit, double? Score, bool Best,
+        int Periods = 0, int PeriodsWon = 0, double? BaseAvg = null, int CheckedRuns = 0, double? CheckAvg = null);
 
     private sealed class TunedAcc
     {
         public Dictionary<string, string> Row = null!;
         public int Runs, Recommended, TestTrades, TrainTrades;
         public double TestSum, TrainSum, PointsNet;
+        /// <summary>Held-back days of runs that have no cross-check file (counted as before), one period each.</summary>
+        public int LegacyTrades;
+        public double LegacySum;
+        public List<double> LegacyPeriods = new();
+        public HashSet<string> ChosenBy = new(StringComparer.Ordinal);
+        public CheckAcc? Check;
     }
 
-    /// <summary>The parameters of a settings row (every trade* / opt* column) - two runs that chose the same setting share it.</summary>
+    /// <summary>A setting's cross-check rows added up (each day once - the newest run's row).</summary>
+    private sealed class CheckAcc
+    {
+        public int N, Wins, BaseN;
+        public double Sum, BaseSum;
+        public Dictionary<string, (int N, double Sum)> Months = new(StringComparer.Ordinal);
+        public HashSet<string> Runs = new(StringComparer.Ordinal);
+    }
+
+    /// <summary>The parameters of a settings row (every non-empty trade* / opt* column) - two runs that chose the same
+    /// setting share it, whichever columns their files had; a cross-check row carries the same columns.</summary>
     private static string SignatureOf(Dictionary<string, string> row) =>
-        string.Join('|', row.Where(kv => kv.Key.StartsWith("trade", StringComparison.Ordinal) || kv.Key.StartsWith("opt", StringComparison.Ordinal))
+        string.Join('|', row.Where(kv => (kv.Key.StartsWith("trade", StringComparison.Ordinal) || kv.Key.StartsWith("opt", StringComparison.Ordinal)) && kv.Value.Length > 0)
             .OrderBy(kv => kv.Key, StringComparer.Ordinal).Select(kv => $"{kv.Key}={kv.Value}"));
 
     private static double? Num(Dictionary<string, string> row, string key) =>
@@ -149,6 +174,8 @@ public static class TuningPerformance
         var groups = new Dictionary<(string Data, string Id, string Setting), (Dictionary<string, string> First, Stats All, Dictionary<string, Stats> ByIndex)>();
         var latestTuned = new Dictionary<(string Data, string Id), Dictionary<string, Dictionary<string, string>>>();
         var tuned = new Dictionary<(string Data, string Id), Dictionary<string, Dictionary<string, TunedAcc>>>();
+        var checks = new Dictionary<(string Data, string Id, string Index, string Sig), CheckAcc>();
+        var checkSeen = new HashSet<string>(StringComparer.Ordinal);
         var usedRuns = 0;
         var trades = 0;
         foreach (var run in runs) // newest first: a trade seen in a newer run is not counted again from an older one
@@ -173,6 +200,31 @@ public static class TuningPerformance
                 s.Add(t);
                 trades++;
             }
+            // The cross-check: every setting found so far, per day of this run it was not chosen on. A day two runs both
+            // checked counts once (the newest run's row - runs come newest first).
+            var checkRows = readRows(runId, "checks");
+            foreach (var c in checkRows ?? new())
+            {
+                var id = c.GetValueOrDefault("strategy_id", "");
+                var index = c.GetValueOrDefault("index", run.GetValueOrDefault("index", ""));
+                var date = c.GetValueOrDefault("date", "");
+                if (id.Length == 0 || date.Length < 7) continue;
+                var sig = SignatureOf(c);
+                if (!checkSeen.Add($"{runData}|{index}|{id}|{sig}|{date}")) continue;
+                var key = (runData, id, index, sig);
+                if (!checks.TryGetValue(key, out var acc)) checks[key] = acc = new CheckAcc();
+                var n = (int)(Num(c, "n") ?? 0);
+                var total = Num(c, "total") ?? 0;
+                acc.N += n; acc.Sum += total; acc.Wins += (int)(Num(c, "wins") ?? 0);
+                acc.BaseN += (int)(Num(c, "base_n") ?? 0); acc.BaseSum += Num(c, "base_total") ?? 0;
+                if (n > 0)
+                {
+                    var month = date[..7];
+                    var m = acc.Months.GetValueOrDefault(month);
+                    acc.Months[month] = (m.N + n, m.Sum + total);
+                }
+                acc.Runs.Add(runId);
+            }
             foreach (var st in readRows(runId, "settings") ?? new())
             {
                 if (st.GetValueOrDefault("which") != "fine-tuned") continue;
@@ -185,14 +237,24 @@ public static class TuningPerformance
                 var sig = SignatureOf(st);
                 if (!bySig.TryGetValue(sig, out var acc)) bySig[sig] = acc = new TunedAcc { Row = st }; // newest run's row
                 acc.Runs++;
+                acc.ChosenBy.Add(runId);
                 if (st.GetValueOrDefault("recommended") == "yes") acc.Recommended++;
                 var testN = (int)(Num(st, "test_trades") ?? 0);
                 var trainN = (int)(Num(st, "train_trades") ?? 0);
-                acc.TestTrades += testN; acc.TestSum += (Num(st, "test_avg") ?? 0) * testN;
+                // A run with a cross-check file has its own held-back days in it; an older run's count as they were.
+                if (checkRows is null && testN > 0)
+                {
+                    var avg = Num(st, "test_avg") ?? 0;
+                    acc.LegacyTrades += testN; acc.LegacySum += avg * testN; acc.LegacyPeriods.Add(avg);
+                }
                 acc.TrainTrades += trainN; acc.TrainSum += (Num(st, "train_avg") ?? 0) * trainN;
                 acc.PointsNet += Num(st, "points_net") ?? 0;
             }
         }
+        foreach (var ((d, id), byIndex) in tuned)
+            foreach (var (index, bySig) in byIndex)
+                foreach (var (sig, acc) in bySig)
+                    acc.Check = checks.GetValueOrDefault((d, id, index, sig));
         var tunedOut = tuned.ToDictionary(kv => kv.Key, kv => (IReadOnlyDictionary<string, List<TunedSetting>>)kv.Value.ToDictionary(x => x.Key, x => Rank(x.Value.Values)));
         var result = groups
             .Select(kv => new Row(kv.Key.Data, kv.Key.Id, kv.Value.First.GetValueOrDefault("strategy_no", ""), kv.Value.First.GetValueOrDefault("strategy", kv.Key.Id),
@@ -299,18 +361,37 @@ public static class TuningPerformance
     private static string? MaxDay(string? a, string? b) =>
         string.IsNullOrEmpty(a) ? (string.IsNullOrEmpty(b) ? null : b) : string.IsNullOrEmpty(b) || string.CompareOrdinal(a, b) >= 0 ? a : b;
 
-    /// <summary>The settings best first by Score; Best marks the top one any run recommended (else none).</summary>
+    /// <summary>The settings best first by Score (on unseen days, every run's cross-check added up); Best marks the top one
+    /// that can be trusted (CanBeBest), else none.</summary>
     private static List<TunedSetting> Rank(IEnumerable<TunedAcc> accs)
     {
         var list = accs.Select(a =>
         {
-            double? testAvg = a.TestTrades > 0 ? a.TestSum / a.TestTrades : null;
-            double? score = testAvg is { } t ? t * a.TestTrades / (a.TestTrades + 10.0) : null;
-            return new TunedSetting(a.Row, a.Runs, a.Recommended, a.TestTrades, testAvg, a.TrainTrades,
-                a.TrainTrades > 0 ? a.TrainSum / a.TrainTrades : null, a.PointsNet, a.Row.GetValueOrDefault("unit", "R"), score, false);
+            var c = a.Check;
+            var n = (c?.N ?? 0) + a.LegacyTrades;
+            var sum = (c?.Sum ?? 0) + a.LegacySum;
+            double? unseenAvg = n > 0 ? sum / n : null;
+            double? score = unseenAvg is { } t ? t * n / (n + 10.0) : null;
+            var months = c?.Months.Values.Where(m => m.N > 0).ToList() ?? new();
+            var periods = months.Count + a.LegacyPeriods.Count;
+            var won = months.Count(m => m.Sum > 0) + a.LegacyPeriods.Count(x => x > 0);
+            double? baseAvg = c is { BaseN: > 0 } ? c.BaseSum / c.BaseN : null;
+            double? checkAvg = c is { N: > 0 } ? c.Sum / c.N : null;
+            var checkedRuns = c?.Runs.Count(r => !a.ChosenBy.Contains(r)) ?? 0;
+            return new TunedSetting(a.Row, a.Runs, a.Recommended, n, unseenAvg, a.TrainTrades,
+                a.TrainTrades > 0 ? a.TrainSum / a.TrainTrades : null, a.PointsNet, a.Row.GetValueOrDefault("unit", "R"), score, false,
+                periods, won, baseAvg, checkedRuns, checkAvg);
         }).OrderByDescending(x => x.Score ?? double.MinValue).ThenByDescending(x => x.Runs).ToList();
-        var best = list.FindIndex(x => x.Recommended > 0 && x.Score > 0);
+        var best = list.FindIndex(CanBeBest);
         if (best >= 0) list[best] = list[best] with { Best = true };
         return list;
     }
+
+    /// <summary>A setting that can be called best: it made money on its unseen days (shrunk score above 0), it beat the
+    /// strategy as written on the same cross-checked days, and it did not just fit one stretch - checked over two or more
+    /// months, it won in at least half of them; with only one month, its own run recommended it.</summary>
+    public static bool CanBeBest(TunedSetting x) =>
+        x.Score > 0
+        && (x.BaseAvg is not { } b || x.CheckAvg is not { } m || m > b)
+        && (x.Periods >= 2 ? x.PeriodsWon * 2 >= x.Periods : x.Recommended > 0);
 }

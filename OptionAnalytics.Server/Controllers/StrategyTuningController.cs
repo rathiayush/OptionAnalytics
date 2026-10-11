@@ -26,10 +26,11 @@ public sealed class StrategyTuningController : ControllerBase
     }
 
     /// <summary>`What`: what is tuned - "trade" (the trade settings), "oi" (the OI confirmation) or "both"
-    /// (the OI confirmation first, then the trade settings on top of it).</summary>
+    /// (the OI confirmation first, then the trade settings on top of it), "option", "all" - or "check": no new tuning,
+    /// only every setting found so far re-checked on the job's days it was not chosen on (the cross-check).</summary>
     public sealed record RunRequest(string Underlying, JsonNode? Strategies, int Days = 30, bool IncludeEstimated = false, int MinTrades = 8, string? What = null, string[]? OiFactors = null, string? Search = null, string? Data = null, string? From = null, string? To = null);
     private static readonly HashSet<string> OiFactorKeys = new() { "tradeOiWindow", "tradeFutWindow", "tradeOiFlow", "tradeOiCum", "tradeSideOi", "tradeSideCum", "tradeFutOi", "tradeMoveSize", "tradeDayType", "tradeWallRoom", "tradeWallOi" };
-    private static readonly HashSet<string> TuneWhat = new() { "trade", "oi", "both", "option", "all" };
+    private static readonly HashSet<string> TuneWhat = new() { "trade", "oi", "both", "option", "all", "check" };
 
     /// <summary>POST /api/strategy-tuning/run - starts a job (one at a time).</summary>
     [HttpPost("run")]
@@ -59,7 +60,7 @@ public sealed class StrategyTuningController : ControllerBase
         };
         if (strategies is null) return (null, "Strategies must be top3, top5, all or a list of strategy ids.");
         var what = string.IsNullOrWhiteSpace(request.What) ? "trade" : request.What.Trim().ToLowerInvariant();
-        if (!TuneWhat.Contains(what)) return (null, "What must be trade, oi, both, option or all.");
+        if (!TuneWhat.Contains(what)) return (null, "What must be trade, oi, both, option, all or check.");
         var search = string.IsNullOrWhiteSpace(request.Search) ? "step" : request.Search.Trim().ToLowerInvariant();
         if (search is not ("step" or "full")) return (null, "Search must be step or full.");
         var data = string.IsNullOrWhiteSpace(request.Data) ? "futures" : request.Data.Trim().ToLowerInvariant();

@@ -4,7 +4,9 @@
 //                                fine-tuned strategy's best setting - with the date and time, the levels and why it fired;
 //   {run_id}-settings.csv        each strategy's tuned setting of that run: every parameter, and what it scored;
 //   {run_id}-days.csv            every day the run looked at: used (train - the days settings were chosen on - or test -
-//                                the newest days held back to check them) or left out, and why.
+//                                the newest days held back to check them) or left out, and why;
+//   {run_id}-checks.csv          the cross-check: every tuned setting found so far for the index, measured per day on this
+//                                run's days it was not chosen on, beside the strategy as written (tuneChecks.mjs).
 // A run is never overwritten, so a strategy can be compared across runs; the Trades page lists the runs and clubs the
 // trades of the ones picked (any index) by date and time. run_id = {INDEX}-{data}-{yyyyMMdd-HHmmss} (IST).
 
@@ -214,8 +216,31 @@ export const DAY_COLUMNS = [
   { key: 'reason', value: (r) => r.reason ?? '' },
 ]
 
+/** {run_id}-checks.csv: the cross-check (tuneChecks.mjs) - per tuned setting found so far (this run's and every earlier
+ *  run's for the index) and per day of this run it was NOT chosen on: its trades (n, total, wins - R, or premium points
+ *  for unit pts) and the strategy as written's on the same day (base_n, base_total), with the setting's own parameter
+ *  columns so the server can tell which setting it is. No other column starts with "trade" or "opt". */
+const num = (v) => (Number.isFinite(v) ? String(Math.round(v * 10000) / 10000) : '')
+export const CHECK_COLUMNS = [
+  { key: 'run_id', value: (r) => r.run_id },
+  { key: 'index', value: (r) => r.index },
+  { key: 'data', value: (r) => r.data },
+  { key: 'strategy_no', value: (r) => r.no ?? '' },
+  { key: 'strategy_id', value: (r) => r.id },
+  { key: 'strategy', value: (r) => r.name ?? '' },
+  { key: 'unit', value: (r) => r.unit ?? 'R' },
+  { key: 'setting_text', value: (r) => r.settingText ?? '' },
+  { key: 'date', value: (r) => r.date },
+  { key: 'n', value: (r) => r.n },
+  { key: 'total', value: (r) => num(r.total) },
+  { key: 'wins', value: (r) => r.wins },
+  { key: 'base_n', value: (r) => r.baseN },
+  { key: 'base_total', value: (r) => num(r.baseTotal) },
+  ...SETTING_KEYS.map((k) => ({ key: k, value: (r) => r.raw?.[k] ?? '' })),
+]
+
 /** The rows a finished run adds to its history files. */
-export function historyOf({ underlying, data, finishedMs, job, what, search, minTrades, from, to, days, skipped, results, ranked, trades, fetched, calls, budget }) {
+export function historyOf({ underlying, data, finishedMs, job, what, search, minTrades, from, to, days, skipped, results, ranked, trades, fetched, calls, budget, checks }) {
   const run_id = runIdOf(underlying, data, finishedMs)
   const finished_ist = ist(finishedMs)
   const settings = []
@@ -239,5 +264,5 @@ export function historyOf({ underlying, data, finishedMs, job, what, search, min
     ...(days ?? []).map((d) => ({ run_id, index: underlying, date: d.date, status: 'used', role: d.role, estimated: d.estimated })),
     ...(skipped ?? []).map((d) => ({ run_id, index: underlying, date: d.date, status: 'left out', reason: d.reason })),
   ].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
-  return { run_id, run, settings, days: dayRows, trades: (trades ?? []).map((t) => ({ ...t, run_id })) }
+  return { run_id, run, settings, days: dayRows, trades: (trades ?? []).map((t) => ({ ...t, run_id })), checks: (checks ?? []).map((c) => ({ ...c, run_id, index: underlying, data })) }
 }
