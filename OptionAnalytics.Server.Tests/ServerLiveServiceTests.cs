@@ -212,6 +212,22 @@ public sealed class ServerLiveServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task TheOiReplayPagesSpotTrade_IsWatchedOnTheSpotPrice()
+    {
+        var orders = new FakeOrders();
+        var live = Live(orders);
+        // Placed by the OI Replay page's spot + options scanner: its index levels are spot prices.
+        Assert.Null(live.WatchPageTrade(new PageLiveWatchRequest("NIFTY", "spotLadder-1-sell", new[] { "p1" }, 24980, "LONG", 25040, "#107 Spot ladder", "SELL 25000 PE", PriceBasis: "spot"), At10));
+        var t = live.Status(At10).Single(x => x.Underlying == "NIFTY").Trades.Single();
+        Assert.Equal("spot", t.PriceBasis);
+        Assert.True(t.IsPageTrade);
+        Assert.Equal(0, await live.CheckIndexStopsAsync((u, basis) => basis == "spot" ? 25039 : 24900, At10.AddMinutes(1), default)); // the futures are not its price
+        Assert.Equal(1, await live.CheckIndexStopsAsync((u, basis) => basis == "spot" ? 25041 : 24900, At10.AddMinutes(2), default));
+        Assert.Contains("index target 25040", live.Status(At10).Single(x => x.Underlying == "NIFTY").Trades.Single().ExitReason);
+        Assert.Single(orders.Exits);
+    }
+
+    [Fact]
     public async Task OnPaper_NothingIsEverSent()
     {
         var orders = new FakeOrders();

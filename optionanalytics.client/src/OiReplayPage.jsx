@@ -31,6 +31,8 @@ import { withBackfill } from './cvdBackfill.js'
 import { FootprintChart } from './OrderFlowCharts.jsx'
 import { VolumeProfilePrimitive, setProfileLines } from './volumeProfilePrimitive.js'
 import { useReplaySync, useReplaySyncEnabled, ReplaySyncControl, withSpeedOption, SYNC_DRIFT_MS } from './replaySync.jsx'
+import { SpotStrategyScanner } from './SpotStrategyScanner.jsx'
+import { buildOiContext, STRATEGY_BY_ID } from './strategyEngine.js'
 
 const { Text, Title } = Typography
 
@@ -672,6 +674,7 @@ const SECTION_OPTIONS = [
   { value: 'optionPremium', label: 'Option premium (CE/PE)' },
   { value: 'liquidityMap', label: 'Liquidity map' },
   { value: 'futures', label: 'Futures' },
+  { value: 'spotStrategies', label: 'Spot + options strategies' },
 ]
 const ALL_SECTION_VALUES = SECTION_OPTIONS.map((o) => o.value)
 
@@ -681,7 +684,7 @@ const ALL_SECTION_VALUES = SECTION_OPTIONS.map((o) => o.value)
 // toggles visibility) - 'spotAndEntry' bundles three individually-titled Cards (Spot/Entry B/Entry
 // C) that already share one responsive Row (see its own doc comment on the wide-monitor 3-up
 // layout), and 'ladder' is never hidden by SECTION_OPTIONS at all but is still reorderable.
-const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'dayOi', 'oiHeatmap', 'spotAndEntry', 'optionPremium', 'ladder', 'liquidityMap', 'futures']
+const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'dayOi', 'oiHeatmap', 'spotAndEntry', 'spotStrategies', 'optionPremium', 'ladder', 'liquidityMap', 'futures']
 
 // How many strikes on EACH side get an actual line drawn on the chart - the ladder already shows
 // every strike; the chart would just be noise at that density, so only the strongest few (by OI)
@@ -768,11 +771,15 @@ const SUPPORT_DARK = '#0a5c1f'
 // Long enough for the second click of a double-click to arrive (see ReplayChart's click handler).
 const STRIKE_CLICK_DELAY_MS = 300
 
-function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = true, vwapSeries = EMPTY_ARRAY, showVwap = false, onStrikeClick, height = 440 }) {
+function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = true, vwapSeries = EMPTY_ARRAY, showVwap = false, onStrikeClick, height = 440, markers = EMPTY_ARRAY }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
   const vwapSeriesRef = useRef(null)
+  // The spot + options strategies' signals (SpotStrategyScanner) on the candle each fired on.
+  const markersRef = useRef(null)
+  const markersPropRef = useRef(markers)
+  markersPropRef.current = markers
   // Refs, not effect dependencies - clicking is wired up once in the chart-creation effect below
   // ([height] only), so a new onStrikeClick/step on every render (step rarely changes; onStrikeClick
   // is an inline arrow function at the call site) must not tear down and recreate the whole chart.
@@ -841,6 +848,7 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = tru
       upColor: UP_COLOR, downColor: DOWN_COLOR, borderVisible: false, wickUpColor: UP_COLOR, wickDownColor: DOWN_COLOR,
     })
     vwapSeriesRef.current = chart.addSeries(LineSeries, { color: VWAP_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: 'VWAP' })
+    markersRef.current = createSeriesMarkers(seriesRef.current, markersPropRef.current)
 
     // Click-to-drill-down: rounds whatever price was clicked to the nearest tracked strike (the same
     // step every other strike-rounding on this page uses), regardless of whether that exact level
@@ -885,6 +893,7 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = tru
       chartRef.current = null
       seriesRef.current = null
       vwapSeriesRef.current = null
+      markersRef.current = null
       priceLinesRef.current = [] // the series they belonged to is gone along with the chart
     }
   }, [height])
@@ -893,6 +902,7 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = tru
     if (!seriesRef.current) return
     seriesRef.current.setData(bars)
   }, [bars])
+  useEffect(() => { markersRef.current?.setMarkers(markers) }, [markers])
 
   // Fed only while checked, empty otherwise - on the candles' own times (chartVwap): a 1-minute /
   // multi-day VWAP series adds time points the candles do not have and squeezes them into a corner.
@@ -3975,6 +3985,38 @@ export default function OiReplayPage() {
   const liveUnavailableReason = !isAdmin ? 'Live orders are for admins only.'
     : !isLive ? "Live orders need today's live view - press Go Live." : null
 
+  // ---- The spot + options strategies (SpotStrategyScanner) ----
+  // The day's spot minutes in real time, the scanner's clock - today live, a replay the END of the last minute shown
+  // (its candle, and its OI point - stamped at its start, holding its close - are on screen) - and the OI context: the
+  // replayed day read as the tuning reads it (live: false), today's with the live ticks (rebuilt every 10 s).
+  const spotScanBars = useMemo(() => oneMinBars.map((b) => {
+    const t = fromChartTime(b.time) * 1000
+    return { t, time: t, open: b.open, high: b.high, low: b.low, close: b.close }
+  }), [oneMinBars])
+  const spotScanClock = isLive ? asOfMs : (currentBar ? fromChartTime(currentBar.time) * 1000 + 60_000 : null)
+  const spotOiInputsRef = useRef(null)
+  spotOiInputsRef.current = { liveCePoints, livePePoints, futuresPointsRaw, spotScanBars }
+  const spotOiTick = isLive ? Math.floor((asOfMs ?? 0) / 10_000) : 0
+  const spotOi = useMemo(() => {
+    if (!result) return null
+    if (!isLive) return buildOiContext({ ...result, success: true }, null, { live: false })
+    const { liveCePoints: ce, livePePoints: pe, futuresPointsRaw: fut, spotScanBars: spotBars } = spotOiInputsRef.current
+    return buildOiContext({
+      ...result, success: true, cePoints: [...(result.cePoints ?? []), ...ce], pePoints: [...(result.pePoints ?? []), ...pe], futuresBars: fut,
+      spotCandlesOneMinute: spotBars.map((b) => ({ time: new Date(b.t).toISOString(), open: b.open, high: b.high, low: b.low, close: b.close })),
+    }, liveExpiryDate, { live: true })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [result, isLive, spotOiTick, liveExpiryDate])
+  // Its signals on the spot chart: an arrow on the candle whose close fired it.
+  const [spotSignals, setSpotSignals] = useState([])
+  useEffect(() => { setSpotSignals([]) }, [underlying, result])
+  const spotMarkers = useMemo(() => spotSignals
+    .map((s) => ({
+      time: bucketOf(toChartTime(s.t - 60_000), timeframe), position: s.side === 'LONG' ? 'belowBar' : 'aboveBar', shape: s.side === 'LONG' ? 'arrowUp' : 'arrowDown',
+      color: s.side === 'LONG' ? UP_COLOR : DOWN_COLOR, text: `#${STRATEGY_BY_ID[s.id]?.no ?? ''}${s.outcome?.status && s.outcome.status !== 'open' ? ` ${s.outcome.status}` : ''}`,
+    }))
+    .sort((a, b) => a.time - b.time), [spotSignals, timeframe])
+
   useEffect(() => {
     if (!liveTradeActive) return
     let cancelled = false
@@ -4742,6 +4784,7 @@ export default function OiReplayPage() {
               showVwap={showVwap}
               onStrikeClick={setDrilldownStrike}
               height={spotChartHeight}
+              markers={spotMarkers}
             />
           </ChartErrorBoundary>
         )
@@ -5230,6 +5273,21 @@ export default function OiReplayPage() {
               </Row>
             </div>
             </LiveSection>
+
+            {/* Never frozen off-screen (no LiveSection) and never unmounted when hidden: it alerts and trades. */}
+            {(() => {
+              const { style, ...handlers } = orderedDropProps('spotStrategies')
+              return (
+                <div {...handlers} style={{ ...style, marginTop: 16, display: visibleSections.includes('spotStrategies') ? undefined : 'none' }}>
+                  <SpotStrategyScanner
+                    underlying={underlying} date={result?.date ?? (date ? date.format('YYYY-MM-DD') : null)} isReplay={!isLive}
+                    bars={spotScanBars} clockMs={spotScanClock} oi={spotOi} expiry={liveExpiryDate}
+                    canTradeLive={isAdmin && isLive} isAdmin={isAdmin} onSignals={setSpotSignals}
+                    dragHandle={<CardDragHandle {...dragHandleProps('spotStrategies')} />}
+                  />
+                </div>
+              )
+            })()}
 
             {visibleSections.includes('optionPremium') && (
               <LiveSection version={sectionVersion}>

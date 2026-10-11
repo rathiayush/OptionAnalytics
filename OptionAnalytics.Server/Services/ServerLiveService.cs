@@ -212,7 +212,8 @@ public sealed class ServerLiveService
     private static string? NormaliseSide(string? side) => side?.Trim().ToUpperInvariant() is "LONG" or "SHORT" ? side.Trim().ToUpperInvariant() : null;
 
     /// <summary>
-    /// A live trade the ORDER FLOW PAGE placed ("Auto-place on alert" in Live mode, or a confirmed punch): kept here so
+    /// A live trade a PAGE placed - the Order Flow page's strategy scanner, or the OI Replay page's spot + options one
+    /// ("Auto-place on alert" in Live mode, or a confirmed punch): kept here so
     /// the server watches its INDEX stop-loss and target too (CheckIndexStopsAsync) - the page's own exits only run while
     /// the page is open; its option SL / target legs (Dhan), trailing SL and time exit are the server's already. Not
     /// counted in the server scanner's limits (the page keeps its own). The same key again replaces it. Null, or why not.
@@ -235,10 +236,10 @@ public sealed class ServerLiveService
             _state.Trades.RemoveAll(t => t.Underlying == u && t.Key == key && t.ExitedUtc is null);
             _state.Trades.Add(new ServerLiveTrade(u, Day(now), key, request.Strategy ?? "", request.Contract ?? "", ids, Math.Max(1, request.Lots), request.LotSize,
                 request.EntryPrice, now, null, null, null, null)
-            { ExitAtMs = request.ExitAtMs, IndexStop = request.IndexStop, IndexTarget = request.IndexTarget is > 0 ? request.IndexTarget : null, IndexSide = side, Source = "page" });
+            { ExitAtMs = request.ExitAtMs, IndexStop = request.IndexStop, IndexTarget = request.IndexTarget is > 0 ? request.IndexTarget : null, IndexSide = side, Source = "page", PriceBasis = NormaliseBasis(request.PriceBasis) });
             Save();
         }
-        _logger.LogInformation("Watching the page's live {Underlying} {Contract} ({Key}): index SL {Stop}, target {Target}.", u, request.Contract, request.Key, request.IndexStop, request.IndexTarget);
+        _logger.LogInformation("Watching the page's live {Underlying} {Contract} ({Key}): index SL {Stop}, target {Target} on the {Basis}.", u, request.Contract, request.Key, request.IndexStop, request.IndexTarget, NormaliseBasis(request.PriceBasis) ?? FuturesBasis);
         return null;
     }
 
@@ -454,7 +455,8 @@ public sealed record ServerLiveTrade(string Underlying, string Day, string Key, 
 /// <summary>What the Order Flow page sends after it placed a live order: the trade, its Dhan super order ids, and the
 /// signal's index stop / target / side - so the server watches them (ServerLiveService.WatchPageTrade).</summary>
 public sealed record PageLiveWatchRequest(string Underlying, string Key, IReadOnlyList<string>? OrderIds, decimal? IndexStop, string? IndexSide,
-    decimal? IndexTarget = null, string? Strategy = null, string? Contract = null, int Lots = 1, int? LotSize = null, decimal? EntryPrice = null, long ExitAtMs = 0);
+    decimal? IndexTarget = null, string? Strategy = null, string? Contract = null, int Lots = 1, int? LotSize = null, decimal? EntryPrice = null, long ExitAtMs = 0,
+    string? PriceBasis = null);
 
 public sealed record PageLiveStopRequest(string Underlying, string Key, decimal Stop);
 

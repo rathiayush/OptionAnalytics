@@ -11,6 +11,7 @@ import { scanSpotDay, spotBarsOf } from '../src/spotEngine.js'
 import { firstPerCooldown } from '../src/scanDay.js'
 import { tuningDay } from '../src/strategyTuning.js'
 import { crossCheck } from '../scanner-runner/tuneChecks.mjs'
+import { spotScanTick, followAllSetups } from '../src/scannerCore.js'
 
 const MIN = 60_000
 const DATE = '2026-10-09'
@@ -173,4 +174,25 @@ test('the tuning cross-checks spot settings too: a spot setting is measured on t
   assert.ok(!rows.some((r) => r.settingText === 'short only' && r.n > 0), 'no short wall break that day')
   // Chosen on that day: not checked there.
   assert.equal(crossCheck([day], [{ ...longOnly, trainDates: new Set([DATE]) }]).length, 0)
+})
+
+test('spotScanTick (the server scanner and the OI Replay page both use it): the minute\'s candle must be in, once per cooldown', () => {
+  const minute = T + 90 * MIN
+  const done = bars.filter((b) => b.t + MIN <= minute)
+  assert.equal(spotScanTick({ minute, bars: done.slice(0, -1), oi, filters: {}, trail: null }, { fired: [] }), null, 'the 10:44 candle not in yet: look again')
+  const first = spotScanTick({ minute, bars: done, oi, filters: {}, trail: { startR: 1, gapR: 1 } }, { fired: [] })
+  assert.ok(first.fresh.some((s) => s.id === 'spotWallBreak' && s.spot && s.trail?.startR === 1 && s.market === null))
+  // A running minute handed over by mistake is never read.
+  const withRunning = [...done, { ...bars[90], close: 99999, high: 99999 }]
+  assert.equal(spotScanTick({ minute, bars: withRunning, oi, filters: {}, trail: null }, { fired: [] }), null)
+  // Fired a minute ago: not again within the cooldown.
+  const again = spotScanTick({ minute: minute + MIN, bars: bars.filter((b) => b.t + MIN <= minute + MIN), oi, filters: {}, trail: null }, { fired: first.fired })
+  assert.ok(!again || !again.fresh.some((s) => s.id === 'spotWallBreak'))
+  // Outcomes: spot setups on the spot candles, futures ones on the futures candles.
+  const futuresSetup = { id: 'wallBreak', side: 'LONG', t: minute, entry: 100, stop: 90, target: 120, timeStopMs: minute + 60 * MIN }
+  const futuresBars = [{ time: new Date(minute).toISOString(), open: 100, high: 125, low: 99, close: 121 }]
+  const all = followAllSetups([futuresSetup, ...first.fresh], [], futuresBars, bars, T + 130 * MIN)
+  assert.equal(all.find((s) => s.id === 'wallBreak').outcome.status, 'win')
+  assert.equal(all.find((s) => s.id === 'spotWallBreak').outcome.status, 'win')
+  assert.deepEqual(all.map((s) => s.t), [...all.map((s) => s.t)].sort((a, b) => a - b))
 })

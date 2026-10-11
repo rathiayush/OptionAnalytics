@@ -17,10 +17,10 @@
 // drive a whole day through it.
 
 import { buildOiContext, optionTradeAt, premiumAt, strategyStats, topFifteen, STRATEGY_BY_ID, DEFAULT_TRAIL, optionPlanFor, squareOffMs, filtersForIndex, lotsFor } from '../src/strategyEngine.js'
-import { evaluateSpotStrategies, spotBarsOf } from '../src/spotEngine.js'
+import { spotBarsOf } from '../src/spotEngine.js'
 import { liquiditySignals, pullStackSignals, autoBigLots } from '../src/orderFlowMath.js'
 import {
-  MIN, COOLDOWN_MS, msOf, scanTick, trailFor, trailOf, alertIdsFor, followSetups, setupEvents, newSetupEventMemory, newPosition, positionRows, sameSignal,
+  MIN, msOf, scanTick, spotScanTick, followAllSetups, trailFor, alertIdsFor, setupEvents, newSetupEventMemory, newPosition, positionRows, sameSignal,
   withLevelChange, setupWasTraded, paperEntryText, setupExitText, paperExitText, scannerLogBody, scannerLogSig, scannerProfileOf, PAPER_TRADE_LOT_SIZE,
 } from '../src/scannerCore.js'
 import { orderFlowFromSnapshot, applyOrderFlowPush, mergePrints, applyOiTicks, applyFuturesTicks, applySpotUpdate, expiryFlagOf, TAPE_PRINTS } from '../src/liveFeeds.js'
@@ -269,11 +269,7 @@ export class IndexScanner {
   // Every fired setup with its outcome so far: the futures ones on the futures minutes, the spot ones on the spot
   // minutes (their stop / target are spot prices).
   followAll(nowMs) {
-    const fired = this.memory.fired
-    const futures = followSetups(fired.filter((s) => !s.spot), this.trailLog, this.data?.view?.minuteBars, nowMs)
-    const spot = fired.filter((s) => s.spot)
-    if (!spot.length) return futures
-    return [...futures, ...followSetups(spot, this.trailLog, this.spotBars, nowMs)].sort((a, b) => a.t - b.t)
+    return followAllSetups(this.memory.fired, this.trailLog, this.data?.view?.minuteBars, this.spotBars, nowMs)
   }
 
   rows(nowMs) {
@@ -366,10 +362,7 @@ export class IndexScanner {
       return []
     }
     this.spotMinute = minute
-    const trail = trailFor(cfg, this.underlying)
-    const setups = evaluateSpotStrategies({ nowMs: minute, bars, oi: this.data.oi, filters: cfg.filters })
-    const recentlyFired = (s) => this.memory.fired.some((f) => f.id === s.id && f.side === s.side && s.t - f.t < COOLDOWN_MS)
-    return setups.filter((s) => !recentlyFired(s)).map((s) => ({ ...s, trail: trailOf(s, trail), market: null }))
+    return spotScanTick({ minute, bars, oi: this.data.oi, filters: cfg.filters, trail: trailFor(cfg, this.underlying) }, this.memory)?.fresh ?? []
   }
 
   // Today's finished spot minutes by `minute`: the server's own 1-minute spot candles (its live feed, every tick), over

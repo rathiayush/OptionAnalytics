@@ -11,6 +11,7 @@ export { marketAt, MARKET_KEYS } from './strategyEngine.js'
 import { aggregateBars, analyzeBars, findWalls } from './orderFlowMath.js'
 import { chargeRates, tradeCharges } from './tradeCharges.js'
 import { sessionVolumeProfile, tpoProfile, tpoRowFor } from './profiles.js'
+import { evaluateSpotStrategies } from './spotEngine.js'
 
 export const MIN = 60_000
 // One alert per strategy and direction at most every 20 minutes - a setup that stays true is one trade.
@@ -135,6 +136,50 @@ export function followSetups(fired, trailLog, minuteBars, nowMs) {
   })
 }
 
+/**
+ * The SPOT + OPTIONS strategies' look at the start of `minute` (a whole minute): `bars` - the day's FINISHED 1-minute
+ * spot candles by then (spotBarsOf; the last one must be the minute that just ended - its close is the entry), `oi` -
+ * the OI context. The setups evaluateSpotStrategies gives the Strategy tuning for the same minute, each strategy and
+ * side at most once per COOLDOWN_MS (the tuning's firstPerCooldown). The server scanner and the OI Replay page both
+ * judge them with this. Null when the minute's candle is not in yet (look again).
+ */
+export function spotScanTick({ minute, bars, oi, filters, trail }, memory) {
+  if (!oi || !bars?.length || bars.at(-1).t !== minute - MIN) return null
+  const done = bars.at(-1).t + MIN <= minute ? bars : bars.filter((b) => b.t + MIN <= minute)
+  const setups = evaluateSpotStrategies({ nowMs: minute, bars: done, oi, filters })
+  const recentlyFired = (s) => memory.fired.some((f) => f.id === s.id && f.side === s.side && s.t - f.t < COOLDOWN_MS)
+  const fresh = setups.filter((s) => !recentlyFired(s)).map((s) => ({ ...s, trail: trailOf(s, trail), market: null }))
+  return { fresh, fired: fresh.length ? [...memory.fired, ...fresh] : memory.fired }
+}
+
+/**
+ * The spot strategies at every whole minute in (`from`, `to`] - each on the spot candles finished by it (`bars`, the
+ * day's, oldest first) and `oi` (a context, or (minute) => context). What a replay that moved several minutes, or a
+ * page opened part-way through today, has not judged yet. Returns { fresh, fired } like spotScanTick.
+ */
+export function spotScanMinutes({ from, to, bars, oi, filters, trail }, memory) {
+  let fired = memory.fired
+  const fresh = []
+  let done = 0
+  for (let minute = Math.floor(from / MIN) * MIN + MIN; minute <= to; minute += MIN) {
+    while (done < bars.length && bars[done].t + MIN <= minute) done++
+    const tick = spotScanTick({ minute, bars: bars.slice(0, done), oi: typeof oi === 'function' ? oi(minute) : oi, filters, trail }, { fired })
+    if (!tick?.fresh.length) continue
+    fired = tick.fired
+    fresh.push(...tick.fresh)
+  }
+  return { fresh, fired }
+}
+
+/** Every fired setup with its outcome so far: the futures ones on the futures minutes, the spot ones on the spot
+ *  minutes (their stop / target are spot prices) - in time order when both are there. */
+export function followAllSetups(fired, trailLog, futuresBars, spotBars, nowMs) {
+  const spot = fired.filter((s) => s.spot)
+  if (!spot.length) return followSetups(fired, trailLog, futuresBars, nowMs)
+  const futures = fired.filter((s) => !s.spot)
+  return [...followSetups(futures, trailLog, futuresBars, nowMs), ...followSetups(spot, trailLog, spotBars, nowMs)].sort((a, b) => a.t - b.t)
+}
+
 export const newSetupEventMemory = () => ({ closed: new Set(), trail: new Map(), primed: new Set(), restored: new Set() })
 
 /**
@@ -251,6 +296,9 @@ export function positionRows({ positions, dayResults, withOutcome, oi, nowMs, se
         const at = nowMs == null || exitAt <= nowMs ? exitAt : null
         const premium = oi && at ? premiumAt(oi, p.side, p.strike, at) : null
         if (premium != null) { exitTime = at; exitPremium = premium; exitReason = exitLabel(o) }
+        // A LIVE trade whose signal has ended is closed even when its option's premium is not known then (a strike with no
+        // fresh tick) - it is closed on Dhan at the market; only its P&L here waits for a price.
+        else if (at && p.live) { exitTime = at; exitPremium = null; exitReason = exitLabel(o) }
       }
     }
     const now = exitTime ? { premium: exitPremium } : oi && nowMs ? { premium: premiumAt(oi, p.side, p.strike, nowMs) } : { premium: null }
