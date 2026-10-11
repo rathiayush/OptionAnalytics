@@ -535,6 +535,36 @@ public sealed class StrategyTuningServiceTests : IDisposable
     }
 
     [Fact]
+    public void AllTrades_EveryStrategy_OneStreamByDateAndTime_EachCountedOnce_WithTotals()
+    {
+        static Dictionary<string, string> T(string index, string id, string no, string setting, string date, string time, string points, string r) => new()
+        {
+            ["index"] = index, ["strategy_id"] = id, ["strategy_no"] = no, ["setting"] = setting, ["date"] = date, ["entry_time_ist"] = $"{date} {time}",
+            ["points"] = points, ["r"] = r, ["sold_points"] = "2",
+        };
+        var runs = new List<Dictionary<string, string>>
+        {
+            new() { ["run_id"] = "R2", ["index"] = "NIFTY", ["data"] = "futures" }, // newest first
+            new() { ["run_id"] = "R1", ["index"] = "NIFTY", ["data"] = "futures" },
+        };
+        var files = new Dictionary<string, List<Dictionary<string, string>>>
+        {
+            ["R2:trades"] = new() { T("NIFTY", "b", "2", "as written", "2026-10-06", "10:00:00", "20", "1"), T("NIFTY", "a", "1", "fine-tuned", "2026-10-06", "10:00:00", "-10", "-0.5") },
+            // The older run scanned 06 Oct's "b" again (counted once) and an older day; another index the same minute.
+            ["R1:trades"] = new() { T("NIFTY", "b", "2", "as written", "2026-10-06", "10:00:00", "20", "1"), T("NIFTY", "a", "1", "as written", "2026-10-05", "11:30:00", "15", "0.75"),
+                                    T("BANKNIFTY", "a", "1", "as written", "2026-10-06", "10:00:00", "40", "1") },
+        };
+        var all = TuningPerformance.Trades(runs, (id, kind) => files.GetValueOrDefault($"{id}:{kind}"), "futures", null);
+        // Oldest first by date and time, then index, then strategy number.
+        Assert.Equal(new[] { "05 a NIFTY", "06 a BANKNIFTY", "06 a NIFTY", "06 b NIFTY" },
+            all.Select(t => $"{t["date"][8..]} {t["strategy_id"]} {t["index"]}"));
+        Assert.Equal(2, TuningPerformance.Trades(runs, (id, kind) => files.GetValueOrDefault($"{id}:{kind}"), "futures", null, "as written", "NIFTY").Count);
+        var totals = TuningPerformance.Totals(all);
+        Assert.Equal((4, 3, 1, 2.25, 65.0, 8.0, 2, "2026-10-05", "2026-10-06"),
+            (totals.Trades, totals.Wins, totals.Losses, totals.TotalR, totals.Points, totals.SoldPoints, totals.Days, totals.FirstDay, totals.LastDay));
+    }
+
+    [Fact]
     public void ALongRange_IsSplitIntoConsecutivePieces_OldestFirst()
     {
         var pieces = OptionAnalytics.Server.Controllers.StrategyTuningController.Chunks("2026-07-01", "2026-08-14", 15);

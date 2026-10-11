@@ -22,6 +22,7 @@ public sealed class LiveListService
 {
     private readonly StrategyTuningService? _tuning;
     private readonly ScannerLogStore? _log;
+    private readonly ScannerRunnerStore? _runner;
     private readonly TradeSettingsStore _trade;
     private readonly ILogger<LiveListService> _logger;
     private readonly string _path;
@@ -30,13 +31,14 @@ public sealed class LiveListService
     private (DateTimeOffset At, Dictionary<string, List<LiveListEntry>> Lists)? _cache;
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { WriteIndented = true };
 
-    public LiveListService(StrategyTuningService tuning, ScannerLogStore log, TradeSettingsStore trade, IHostEnvironment environment, IConfiguration configuration, ILogger<LiveListService> logger)
-        : this(tuning, log, trade, PathOf(environment, configuration), logger) { }
+    public LiveListService(StrategyTuningService tuning, ScannerLogStore log, TradeSettingsStore trade, IHostEnvironment environment, IConfiguration configuration, ILogger<LiveListService> logger, ScannerRunnerStore runner)
+        : this(tuning, log, trade, PathOf(environment, configuration), logger, runner) { }
 
-    internal LiveListService(StrategyTuningService? tuning, ScannerLogStore? log, TradeSettingsStore trade, string path, ILogger<LiveListService> logger)
+    internal LiveListService(StrategyTuningService? tuning, ScannerLogStore? log, TradeSettingsStore trade, string path, ILogger<LiveListService> logger, ScannerRunnerStore? runner = null)
     {
         _tuning = tuning;
         _log = log;
+        _runner = runner;
         _trade = trade;
         _path = path;
         _logger = logger;
@@ -61,7 +63,11 @@ public sealed class LiveListService
         var live = _log?.PathOf("server-trades") is { } p ? ScannerLogStore.Read(p).ToList() : new List<Dictionary<string, string>>();
         State state;
         lock (_lock) state = _state;
-        var lists = TradeSettingsStore.Underlyings.ToDictionary(u => u, u => Compute(u, perf, live, _trade.Get(u), state));
+        // Which tuned setting is applied to each strategy on each index (the `_tuned` the Apply buttons store with it).
+        var applied = _runner?.Config()["filtersByIndex"] as System.Text.Json.Nodes.JsonObject;
+        string? AppliedOf(string u, string id) =>
+            applied?[u]?[id]?["_tuned"] is System.Text.Json.Nodes.JsonValue v && v.TryGetValue<string>(out var sig) && sig.Length > 0 ? sig : null;
+        var lists = TradeSettingsStore.Underlyings.ToDictionary(u => u, u => Compute(u, perf, live, _trade.Get(u), state, id => AppliedOf(u, id)));
         lock (_lock) _cache = (DateTimeOffset.UtcNow, lists);
         return lists;
     }
@@ -102,8 +108,10 @@ public sealed class LiveListService
         return null;
     }
 
-    /// <summary>One index's list - pure, for the tests.</summary>
-    internal static List<LiveListEntry> Compute(string u, IReadOnlyList<TuningPerformance.Row> perf, IReadOnlyList<Dictionary<string, string>> liveTrades, TradeSettings trade, State state)
+    /// <summary>One index's list - pure, for the tests. <paramref name="appliedTuned"/>: strategy id -> the signature of the
+    /// fine-tuned setting applied to it on this index (null = none).</summary>
+    internal static List<LiveListEntry> Compute(string u, IReadOnlyList<TuningPerformance.Row> perf, IReadOnlyList<Dictionary<string, string>> liveTrades, TradeSettings trade, State state,
+        Func<string, string?>? appliedTuned = null)
     {
         var rules = state.Rules;
         var sold = trade.AutoTrade != "buy";
@@ -130,6 +138,28 @@ public sealed class LiveListService
             var e = entries.GetValueOrDefault(g.Key) ?? new LiveListEntry(g.Key, g.First().GetValueOrDefault("strategy_no", ""), g.Key, sold ? "option sold" : "option bought", 0, null, null, null, Math.Round(cost, 2), 0, null, null, false, false, false, "", 0);
             entries[g.Key] = e with { LiveTrades = nets.Count, LiveWinPct = nets.Count > 0 ? Math.Round(100.0 * nets.Count(v => v > 0) / nets.Count, 1) : null, LiveNetPerLot = nets.Count > 0 ? Math.Round(nets.Sum(), 0) : null };
         }
+        // A strategy FINE-TUNED and applied on this index runs with that setting, not as written - so that setting's own
+        // record counts too: its trades on days it was never chosen on (TuningPerformance's cross-check), proven when it
+        // can be called best there (made money, beat the strategy as written on the same days, won in at least half the
+        // months) over at least the minimum trades; a setting in option premium points must also clear the costs.
+        if (appliedTuned is not null)
+        {
+            foreach (var row in perf.Where(r => r.Setting == "fine-tuned"))
+            {
+                if (appliedTuned(row.StrategyId) is not { } sig) continue;
+                var t = row.TunedSettings.GetValueOrDefault(u)?.FirstOrDefault(x => TuningPerformance.SignatureOf(x.Row) == sig);
+                var e = entries.GetValueOrDefault(row.StrategyId) ?? new LiveListEntry(row.StrategyId, row.StrategyNo, row.Strategy, sold ? "option sold" : "option bought",
+                    0, null, null, null, Math.Round(cost, 2), 0, null, null, false, false, false, "", 0);
+                if (t is null) { entries[row.StrategyId] = e with { Tuned = "applied setting not in the tuning history" }; continue; }
+                var avgNet = t.Unit == "pts" && t.TestAvg is { } a ? a - cost : t.TestAvg;
+                var proven = t.TestTrades >= rules.MinTrades && TuningPerformance.CanBeBest(t) && avgNet > 0;
+                entries[row.StrategyId] = e with
+                {
+                    Tuned = t.Row.GetValueOrDefault("setting_text", ""), TunedTrades = t.TestTrades, TunedAvg = avgNet is { } x ? Math.Round(x, 3) : null,
+                    TunedUnit = t.Unit, TunedPeriods = t.Periods, TunedPeriodsWon = t.PeriodsWon, TunedProven = proven,
+                };
+            }
+        }
         var list = new List<LiveListEntry>();
         foreach (var e in entries.Values)
         {
@@ -142,10 +172,20 @@ public sealed class LiveListService
             else if (e.Trades < rules.MinTrades) fail = $"{e.Trades} tuning trade(s) - needs {rules.MinTrades}";
             else if (!(e.AvgR > 0)) fail = $"average {e.AvgR:0.00}R after costs";
             else if (e.WinPct < rules.MinWinPct) fail = $"win rate {e.WinPct:0.#}% under {rules.MinWinPct}%";
+            // As written it fails, but its applied fine-tuned setting is proven (the live record, when long enough, still decides).
+            var byTuned = fail is not null && e.TunedProven && !(liveDecides && e.LiveNetPerLot is <= 0);
+            var tunedText = $"its applied fine-tuned setting is proven: {e.TunedAvg:+0.00;-0.00}{(e.TunedUnit == "pts" ? " pts after costs" : "R")} a trade over {e.TunedTrades} unseen trades, won {e.TunedPeriodsWon} of {e.TunedPeriods} month(s)";
+            if (byTuned) fail = null;
+            else if (fail is not null && e.Tuned is { Length: > 0 } && !e.TunedProven && e.TunedTrades > 0) fail += $"; its applied fine-tuned setting is not proven yet ({e.TunedTrades} unseen trades, {e.TunedAvg:+0.00;-0.00}{(e.TunedUnit == "pts" ? " pts" : "R")} a trade)";
             var on = forcedOut ? false : forcedIn || fail is null;
-            var why = forcedOut ? "taken off by hand" : forcedIn ? (fail is null ? "proven, and added by hand" : $"added by hand ({fail})") : fail ?? "proven: enough trades, positive R after costs, win rate met";
-            // Best first: the average R after costs, shrunk for few trades (n / (n + 20)) - plus the live record's say.
-            var score = (e.AvgR ?? -1) * e.Trades / (e.Trades + 20.0) + (e.LiveTrades > 0 && e.LiveNetPerLot is { } net ? Math.Sign(net) * Math.Min(1, e.LiveTrades / (double)rules.MinLiveTrades) * 0.2 : 0);
+            var proven = byTuned ? tunedText : "proven: enough trades, positive R after costs, win rate met";
+            var why = forcedOut ? "taken off by hand" : forcedIn ? (fail is null ? $"{proven}, and added by hand" : $"added by hand ({fail})") : fail ?? proven;
+            // Best first: the average R after costs, shrunk for few trades (n / (n + 20)) - plus the live record's say. On
+            // the list by its fine-tuned setting: that record's (in R; a premium-points one counts as a small plus).
+            var baseScore = byTuned
+                ? (e.TunedUnit == "pts" ? 0.1 : e.TunedAvg ?? 0) * e.TunedTrades / (e.TunedTrades + 20.0)
+                : (e.AvgR ?? -1) * e.Trades / (e.Trades + 20.0);
+            var score = baseScore + (e.LiveTrades > 0 && e.LiveNetPerLot is { } net ? Math.Sign(net) * Math.Min(1, e.LiveTrades / (double)rules.MinLiveTrades) * 0.2 : 0);
             list.Add(e with { OnList = on, ForcedIn = forcedIn, ForcedOut = forcedOut, Why = why, Score = Math.Round(score, 4) });
         }
         return list.OrderByDescending(e => e.OnList).ThenByDescending(e => e.Score).ToList();
@@ -187,6 +227,17 @@ public sealed record LiveListRules(int MinTrades = 20, double MinWinPct = 45, do
 /// record, whether it is on the list and why.</summary>
 public sealed record LiveListEntry(string StrategyId, string StrategyNo, string Strategy, string Measured,
     int Trades, double? WinPct, double? AvgR, double? NetPoints, double CostPoints,
-    int LiveTrades, double? LiveWinPct, double? LiveNetPerLot, bool OnList, bool ForcedIn, bool ForcedOut, string Why, double Score);
+    int LiveTrades, double? LiveWinPct, double? LiveNetPerLot, bool OnList, bool ForcedIn, bool ForcedOut, string Why, double Score)
+{
+    /// <summary>The fine-tuned setting applied to it on this index (its text), and that setting's record on unseen days:
+    /// trades, average (R, or premium points after costs), months won - Proven when it puts the strategy on the list.</summary>
+    public string? Tuned { get; init; }
+    public int TunedTrades { get; init; }
+    public double? TunedAvg { get; init; }
+    public string? TunedUnit { get; init; }
+    public int TunedPeriods { get; init; }
+    public int TunedPeriodsWon { get; init; }
+    public bool TunedProven { get; init; }
+}
 
 public sealed record LiveListSetRequest(LiveListRules? Rules, string? Underlying, string? StrategyId, string? Mode);

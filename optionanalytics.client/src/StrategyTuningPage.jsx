@@ -3,7 +3,7 @@ import dayjs from 'dayjs'
 import { Alert, Button, Card, Checkbox, Col, DatePicker, InputNumber, Popconfirm, Progress, Row, Segmented, Select, Space, Switch, Table, Tag, Tooltip, Typography, message } from 'antd'
 import { NavBar, useAuth, UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import { ACTIVE_STRATEGIES, SPOT_STRATEGIES, STRATEGY_BY_ID, TRADE_FILTERS } from './strategyEngine.js'
-import { OI_COMBO_CAP, OI_FACTORS, OPTION_DEFAULT, countOiCombinations, oiFactorsFor, optionText, variantText } from './strategyTuning.js'
+import { OI_COMBO_CAP, OI_FACTORS, OPTION_DEFAULT, countOiCombinations, oiFactorsFor, optionText, settingSignature, variantText } from './strategyTuning.js'
 import { applyTunedFilters, putOnLiveList } from './scannerSettings.js'
 import { AppliedSettingsCard, ApplyTunedButton } from './ApplyTuned.jsx'
 import ClearData from './ClearData.jsx'
@@ -447,7 +447,7 @@ export default function StrategyTuningPage() {
       // `pts` means the option itself was tuned, so the buy / sell, the strike and its SL / target go across too.
       const option = r.unit === 'pts'
       // For the index it was tuned on (that index only).
-      const filters = await applyTunedFilters(r.id, r.best.params, { option, index })
+      const filters = await applyTunedFilters(r.id, r.best.params, { option, index, tuned: settingSignature(r.best.params) })
       if (addToLive && index) await putOnLiveList(index, r.id)
       setAppliedKey((k) => k + 1)
       message.success({
@@ -623,7 +623,7 @@ export default function StrategyTuningPage() {
               Tick &quot;Also put it on the live list&quot; in the confirm to let it trade live once the index is switched to Live today. What is applied shows in <b>Applied now</b> below (✕ takes it off).
             </span>} />
         )}
-        <AppliedSettingsCard isAdmin={isAdmin} reloadKey={appliedKey} />
+        <AppliedSettingsCard isAdmin={isAdmin} reloadKey={appliedKey} withSetup />
         {shownResult && <TuningResult result={shownResult} isAdmin={isAdmin} spot={shownResult.data === 'spot'} applyRef={applyRef} />}
         {!result && resultError && !running && <Alert type="info" showIcon message={resultError} description="Run a tuning job to see which settings each strategy does best with." />}
       </Space>

@@ -125,6 +125,13 @@ export function LiveListCard({ isAdmin }) {
         <b>#{e.strategyNo} {e.strategy}</b>
         <Text type="secondary" style={{ fontSize: 12 }}>{e.measured}: {e.trades} trades · win {pct(e.winPct)} · <span style={{ color: e.avgR > 0 ? UP_COLOR : e.avgR < 0 ? DOWN_COLOR : undefined }}>{r2(e.avgR)}</span>/trade after {e.costPoints} pts costs</Text>
         {e.liveTrades > 0 && <Text type="secondary" style={{ fontSize: 12 }}>· live record {e.liveTrades} trades, win {pct(e.liveWinPct)}, <span style={{ color: e.liveNetPerLot > 0 ? UP_COLOR : DOWN_COLOR }}>{rupees(e.liveNetPerLot)}</span> a lot</Text>}
+        {e.tuned && (
+          <Tooltip title="The fine-tuned setting applied to this strategy on this index - it trades with it, so its record on the days it was never chosen on counts too">
+            <Tag color={e.tunedProven ? 'blue' : 'default'} style={{ margin: 0 }}>
+              fine-tuned: {e.tuned}{e.tunedTrades ? ` · ${e.tunedTrades} unseen trades ${e.tunedAvg >= 0 ? '+' : ''}${e.tunedAvg?.toFixed(2)}${e.tunedUnit === 'pts' ? ' pts' : 'R'} · won ${e.tunedPeriodsWon} of ${e.tunedPeriods} month(s)` : ''}
+            </Tag>
+          </Tooltip>
+        )}
       </Space>
       <div><Text type={e.onList ? 'success' : 'secondary'} style={{ fontSize: 11 }}>{e.why}</Text></div>
       {isAdmin && (
@@ -146,7 +153,8 @@ export function LiveListCard({ isAdmin }) {
         Only the strategies on an index&apos;s live list place real orders when it is Live; every other one still alerts and paper-trades, and earns its
         place as its record grows. On the list: enough strategy-tuning trades on that index, a positive average R after costs (2 x the slippage + the
         charges, on the option the index trades) and the win rate met - and, once the server scanner&apos;s own live record has enough trades, not losing
-        there. When two fire together, the one higher on the list goes first. It is worked out again as new tuning runs and live trades come in.
+        there. A strategy with a fine-tuned setting applied on the index is also on the list when THAT setting is proven on the days it was never chosen on
+        (made money, beat the strategy as written there, won in at least half the months, enough trades). When two fire together, the one higher on the list goes first. It is worked out again as new tuning runs and live trades come in.
       </Text>
       {error && <div><Text type="danger">{error}</Text></div>}
       {rules && (

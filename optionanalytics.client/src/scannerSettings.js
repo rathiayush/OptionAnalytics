@@ -42,11 +42,16 @@ export async function saveIndexFilters(index, id, filters) {
  *  from the tuning pages) it is stored for THAT index only (saveIndexFilters; the scanner reads it through
  *  filtersForIndex), so NIFTY's best never overwrites BANKNIFTY's and a page saving its settings never wipes it.
  *  Without, for every index, in the scanner settings (this browser's and the server scanner's). Returns the filters. */
-export async function applyTunedFilters(id, params, { option = false, index = null } = {}) {
+export async function applyTunedFilters(id, params, { option = false, index = null, tuned = null } = {}) {
   if (index) {
     const config = await getConfig()
     const base = filtersForIndex({ filters: config?.settings?.filters ?? readSettings().filters, filtersByIndex: config?.filtersByIndex ?? readFiltersByIndex() }, index)[id]
-    return saveIndexFilters(index, id, filtersFromTuning(base, params, { option }))
+    const next = filtersFromTuning(base, params, { option })
+    // Which tuned setting this is (settingSignature) - the live list judges the strategy by that setting's own record
+    // on unseen days. The scanner ignores the key (strategyFilters keeps only real filters).
+    delete next._tuned
+    if (tuned) next._tuned = tuned
+    return saveIndexFilters(index, id, next)
   }
   const local = readSettings()
   const filters = filtersFromTuning(local.filters?.[id], params, { option })

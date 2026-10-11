@@ -81,6 +81,58 @@ public sealed class LiveListServiceTests
     }
 
     [Fact]
+    public void AStrategyRunningWithAnAppliedFineTunedSetting_IsJudgedByThatSettingsUnseenRecord_Too()
+    {
+        // "tuned": as written it loses after costs. Its fine-tuned setting (long only) was checked on 26 unseen days over
+        // two months: +0.4R a trade, the strategy as written -0.2R on the same days.
+        var asWritten = Trades("tuned", 30, _ => -5).ToList();
+        var fineTrade = new Dictionary<string, string> { ["index"] = "NIFTY", ["strategy_id"] = "tuned", ["strategy_no"] = "7", ["strategy"] = "tuned", ["setting"] = "fine-tuned",
+            ["date"] = "2026-09-01", ["entry_time_ist"] = "2026-09-01 10:00:00", ["points"] = "10", ["r"] = "0.5" };
+        Dictionary<string, string> Setting(string unit) => new() { ["which"] = "fine-tuned", ["strategy_id"] = "tuned", ["index"] = "NIFTY", ["recommended"] = "yes", ["unit"] = unit,
+            ["test_trades"] = "5", ["test_avg"] = "0.4", ["tradeSide"] = "long", ["tradeFrom"] = "930", ["setting_text"] = "long only" };
+        List<Dictionary<string, string>> Checks(double each) => Enumerable.Range(0, 26).Select(i => new Dictionary<string, string>
+        {
+            ["index"] = "NIFTY", ["strategy_id"] = "tuned", ["unit"] = "R", ["date"] = i < 13 ? $"2026-09-{i + 1:00}" : $"2026-10-{i - 12:00}",
+            ["n"] = "1", ["total"] = each.ToString(System.Globalization.CultureInfo.InvariantCulture), ["wins"] = each > 0 ? "1" : "0", ["base_n"] = "1", ["base_total"] = "-0.2",
+            ["tradeSide"] = "long", ["tradeFrom"] = "930",
+        }).ToList();
+        List<TuningPerformance.Row> PerfWith(string unit, double each)
+        {
+            var runs = new List<Dictionary<string, string>> { new() { ["run_id"] = "R1", ["index"] = "NIFTY", ["data"] = "futures" } };
+            var trades = asWritten.Append(fineTrade).ToList();
+            return TuningPerformance.Build(runs, (id, kind) => kind switch { "trades" => trades, "settings" => new() { Setting(unit) }, "checks" => Checks(each), _ => null }).Rows;
+        }
+        const string sig = "tradeFrom=930|tradeSide=long";
+        var perf = PerfWith("R", 0.4);
+
+        // Not applied: as written decides - off.
+        Assert.False(E(LiveListService.Compute("NIFTY", perf, new List<Dictionary<string, string>>(), Nifty, new LiveListService.State()), "tuned").OnList);
+        // Applied: its own unseen record puts it on the list, and says so.
+        var on = E(LiveListService.Compute("NIFTY", perf, new List<Dictionary<string, string>>(), Nifty, new LiveListService.State(), id => id == "tuned" ? sig : null), "tuned");
+        Assert.True(on.OnList, on.Why);
+        Assert.True(on.TunedProven);
+        Assert.Equal((26, 0.4, 2, 2), (on.TunedTrades, on.TunedAvg!.Value, on.TunedPeriods, on.TunedPeriodsWon));
+        Assert.Contains("applied fine-tuned setting is proven", on.Why);
+        // Applied, but a setting the history does not have: no say.
+        var lost = E(LiveListService.Compute("NIFTY", perf, new List<Dictionary<string, string>>(), Nifty, new LiveListService.State(), _ => "tradeSide=short"), "tuned");
+        Assert.False(lost.OnList);
+        Assert.Equal("applied setting not in the tuning history", lost.Tuned);
+        // The applied setting losing on unseen days: off, and why.
+        var losing = E(LiveListService.Compute("NIFTY", PerfWith("R", -0.1), new List<Dictionary<string, string>>(), Nifty, new LiveListService.State(), _ => sig), "tuned");
+        Assert.False(losing.OnList);
+        Assert.Contains("not proven yet", losing.Why);
+        // In option premium points it must also clear the costs (2 x slippage 1 + charges 1 = 3 pts): +2 pts a trade does not.
+        var pts = E(LiveListService.Compute("NIFTY", PerfWith("pts", 2), new List<Dictionary<string, string>>(), Nifty, new LiveListService.State(), _ => sig), "tuned");
+        Assert.False(pts.OnList);
+        Assert.Equal(-1, pts.TunedAvg!.Value, 6);
+        // ...+5 pts a trade does.
+        Assert.True(E(LiveListService.Compute("NIFTY", PerfWith("pts", 5), new List<Dictionary<string, string>>(), Nifty, new LiveListService.State(), _ => sig), "tuned").OnList);
+        // A losing live record still takes it off.
+        var liveLosing = Enumerable.Range(0, 12).Select(i => new Dictionary<string, string> { ["underlying"] = "NIFTY", ["strategy_id"] = "tuned", ["exit_time_ist"] = "2026-10-20 11:00:00", ["net_per_lot"] = "-500" }).ToList();
+        Assert.False(E(LiveListService.Compute("NIFTY", perf, liveLosing, Nifty, new LiveListService.State(), _ => sig), "tuned").OnList);
+    }
+
+    [Fact]
     public void RulesAndByHandChanges_AreValidatedAndKept()
     {
         var path = Path.Combine(Path.GetTempPath(), "oa-live-list-" + Guid.NewGuid().ToString("n") + ".json");

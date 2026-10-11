@@ -643,6 +643,48 @@ export function variantText(v) {
   return parts.join(' · ')
 }
 
+/** The parameters a tuned setting is made of - one column each in the tuning history's settings CSV
+ *  (scanner-runner/tuneHistory.mjs SETTING_KEYS is this list). */
+export const TUNED_SETTING_KEYS = [
+  'tradeSide', 'tradeFrom', 'tradeTo', 'tradeStopX', 'tradeTargetX', 'tradeTimeStop', 'tradeTrail',
+  'tradeOiWindow', 'tradeFutWindow', 'tradeOiFlow', 'tradeOiCum', 'tradeWallOi', 'tradeSideOi', 'tradeSideCum',
+  'tradeFutOi', 'tradeMoveSize', 'tradeDayType', 'tradeWallRoom',
+  'optLeg', 'optMoneyness', 'optExit', 'optSlPct', 'optTargetPct',
+]
+
+/** A tuned setting's identity, exactly as the server makes it (TuningPerformance.SignatureOf): its non-empty
+ *  parameter columns, sorted, "key=value" joined by "|". From a settings row (strings) or from params as tuned (only
+ *  the columns the history keeps). Applied with the setting (`_tuned` in the strategy's filters), so the live list can
+ *  judge the strategy by that setting's record on unseen days. */
+export function settingSignature(rowOrParams) {
+  return TUNED_SETTING_KEYS.filter((k) => rowOrParams?.[k] != null && String(rowOrParams[k]) !== '')
+    .sort().map((k) => `${k}=${String(rowOrParams[k])}`).join('|')
+}
+
+/** Every parameter of a tuned setting beside its default: [{ key, label, value, changed }] - the trade settings, the
+ *  OI confirmation, and how it is taken in options. `from`: 'row' (a settings CSV row - strings), 'params' (as tuned)
+ *  or 'filters' (a strategy's applied filters: tradeOpt* for the option). */
+export function settingParams(source, from = 'params') {
+  const p = from === 'row' ? paramsFromSettingsRow(source) : (source ?? {})
+  const show = (f, v) => f.options?.find((o) => String(o.value) === String(v))?.label ?? String(v)
+  const out = TRADE_FILTERS.filter((f) => TUNED_SETTING_KEYS.includes(f.key)).map((f) => {
+    const v = p[f.key] ?? f.default
+    return { key: f.key, label: f.label, value: show(f, v), changed: String(v) !== String(f.default) }
+  })
+  const opt = from === 'filters'
+    ? { leg: p.tradeOptLeg, m: p.tradeOptMoneyness, exit: null, sl: p.tradeOptSlPct, tg: p.tradeOptTargetPct }
+    : { leg: p.optLeg, m: p.optMoneyness, exit: p.optExit, sl: p.optExit && p.optExit !== 'index' ? p.optSlPct : null, tg: ownTarget(p.optExit) ? p.optTargetPct : null }
+  if (opt.leg === 'buy' || opt.leg === 'sell') {
+    const m = Number(opt.m) || 0
+    out.push({ key: 'optLeg', label: 'Option: buy or sell', value: opt.leg.toUpperCase(), changed: true })
+    out.push({ key: 'optMoneyness', label: 'Option: strike', value: m === 0 ? 'ATM' : `${Math.abs(m)} ${m > 0 ? 'ITM' : 'OTM'}`, changed: m !== 0 })
+  }
+  if (opt.exit) out.push({ key: 'optExit', label: 'Option: exit', value: { index: 'with the index trade', indexSl: 'with the index trade, capped at a Max SL', first: 'own SL / target or the index exit, first', option: 'own SL / target only' }[opt.exit] ?? opt.exit, changed: opt.exit !== 'index' })
+  if (opt.sl > 0) out.push({ key: 'optSl', label: 'Option: SL (% of the premium)', value: `${opt.sl}%`, changed: true })
+  if (opt.tg > 0) out.push({ key: 'optTarget', label: 'Option: target (% of the premium)', value: `${opt.tg}%`, changed: true })
+  return out
+}
+
 /** A tuned setting read back from the tuning history (a row of {run}-settings.csv: every value a string) as the params
  *  `filtersFromTuning` / `applyTunedFilters` take: a value that is one of the filter's options becomes that option's
  *  own value (930 the number, 'long' the text), a number becomes a number, an empty field is left out. */

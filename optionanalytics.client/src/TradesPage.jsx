@@ -3,9 +3,9 @@ import { Alert, Button, Card, Checkbox, Col, DatePicker, Drawer, InputNumber, Po
 import { NavBar, useAuth, UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import { OPTION_TRADE_FILTERS, STRATEGY_BY_ID, TRADE_FILTERS, filtersForIndex } from './strategyEngine.js'
 import { useNarrow } from './DomDrawer.jsx'
-import { filtersFromTuning, paramsFromSettingsRow } from './strategyTuning.js'
+import { filtersFromTuning, paramsFromSettingsRow, settingSignature } from './strategyTuning.js'
 import { applyFilterValue, applyTunedFilters, putOnLiveList, saveIndexFilters } from './scannerSettings.js'
-import { AppliedSettings, ApplyTunedButton } from './ApplyTuned.jsx'
+import { AppliedSettings, ApplyTunedButton, LiveSetup, ParamsPopover } from './ApplyTuned.jsx'
 import ClearData from './ClearData.jsx'
 import './tuningMobile.css'
 
@@ -298,7 +298,7 @@ function StrategyPerformance({ reloadKey }) {
   const apply = async (r, tuned, addToLive = false) => {
     try {
       const params = paramsFromSettingsRow(tuned)
-      await applyTunedFilters(r.strategyId, params, { option: tuned.unit === 'pts', index: tuned.index })
+      await applyTunedFilters(r.strategyId, params, { option: tuned.unit === 'pts', index: tuned.index, tuned: settingSignature(tuned) })
       if (addToLive) await putOnLiveList(tuned.index, r.strategyId)
       message.success({ content: `#${r.strategyNo} ${r.strategy}: ${tuned.index}'s tuned setting is in force now on ${tuned.index} for the live scanner (this browser and the server scanner)${tuned.setting_text ? ` - ${tuned.setting_text}` : ''}${addToLive ? `; on ${tuned.index}'s live list - it trades live when ${tuned.index} is Live today` : ''}`, duration: 10 })
     } catch (err) {
@@ -350,6 +350,7 @@ function StrategyPerformance({ reloadKey }) {
                 {t.best ? <Tag color="gold">best</Tag> : <Tag>top - not proven yet</Tag>}
               </Tooltip>
               {live ? <Tag color="green">live now</Tag> : applyButton(r, t)}
+              <ParamsPopover source={t.row} from="row" label="params" />
             </span>
           )
         })}
@@ -365,7 +366,7 @@ function StrategyPerformance({ reloadKey }) {
     let done = 0
     try {
       for (const { r, t } of bestPicks(bestFor)) {
-        await applyTunedFilters(r.strategyId, paramsFromSettingsRow(t.row), { option: t.unit === 'pts', index: bestFor })
+        await applyTunedFilters(r.strategyId, paramsFromSettingsRow(t.row), { option: t.unit === 'pts', index: bestFor, tuned: settingSignature(t.row) })
         if (bestLive) await putOnLiveList(bestFor, r.strategyId)
         done++
       }
@@ -396,7 +397,7 @@ function StrategyPerformance({ reloadKey }) {
         {appliedLine}
         {entries.flatMap(([, list]) => list).map((t) => (
           <div key={`${t.row.index}-${t.row.run_id}-${t.row.setting_text}`} style={{ borderTop: '1px solid #ffffff14', paddingTop: 6, fontSize: 12 }}>
-            <div><b>{t.row.index}</b>{t.best && <Tag color="gold" style={{ marginLeft: 6 }}>best</Tag>}{isLive(liveOf(r.strategyId, t.row.index), t.row) && <Tag color="green" style={{ marginLeft: 4 }}>live now</Tag>} {t.row.setting_text || '-'}</div>
+            <div><b>{t.row.index}</b>{t.best && <Tag color="gold" style={{ marginLeft: 6 }}>best</Tag>}{isLive(liveOf(r.strategyId, t.row.index), t.row) && <Tag color="green" style={{ marginLeft: 4 }}>live now</Tag>} {t.row.setting_text || '-'} <ParamsPopover source={t.row} from="row" /></div>
             <Text type="secondary" style={{ fontSize: 12 }}>{t.runs} run(s) · {t.recommended} recommended · unseen {t.testTrades} trades <b style={{ color: col(t.testAvg) }}>{t.testAvg == null ? '-' : `${pts(t.testAvg)}${t.unit === 'pts' ? ' pts' : 'R'}`}</b>/trade · {crossText(t)}</Text>
             <div style={{ marginTop: 4 }}>{applyButton(r, t)}</div>
           </div>
@@ -410,7 +411,7 @@ function StrategyPerformance({ reloadKey }) {
         dataSource={entries.flatMap(([, list]) => list)}
         columns={[
           { title: 'Index', key: 'i', width: 130, render: (_, t) => <span style={{ fontSize: 12 }}>{t.row.index}{t.best && <Tag color="gold" style={{ marginLeft: 4 }}>best</Tag>}{isLive(liveOf(r.strategyId, t.row.index), t.row) && <Tag color="green" style={{ marginLeft: 4 }}>live now</Tag>}</span> },
-          { title: 'Fine-tuned setting', key: 's', render: (_, t) => <span style={{ fontSize: 12 }}>{t.row.setting_text || '-'}</span> },
+          { title: 'Fine-tuned setting', key: 's', render: (_, t) => <span style={{ fontSize: 12 }}>{t.row.setting_text || '-'} <ParamsPopover source={t.row} from="row" /></span> },
           { title: <Tooltip title="How many tuning runs chose this setting, and how many of them recommended it (it also won on the days that run held back)">Chosen / recommended</Tooltip>, key: 'r', width: 150, render: (_, t) => <span style={{ fontSize: 12 }}>{t.runs} run(s) · {t.recommended} recommended</span> },
           { title: <Tooltip title="Days this setting was never chosen on - its own run's held-back days AND every day of every other run for this index (each run re-checks every setting found so far). The honest number: a setting tuned on one month is judged on the other months too.">Unseen days</Tooltip>, key: 'te', width: 170, render: (_, t) => <span style={{ fontSize: 12 }}>{t.testTrades} trades · <b style={{ color: col(t.testAvg) }}>{t.testAvg == null ? '-' : `${pts(t.testAvg)}${t.unit === 'pts' ? ' pts' : 'R'}`}</b>/trade</span> },
           { title: <Tooltip title="On its unseen days: in how many months it traded it made money, the strategy as written on the same days, and how many runs other than the ones that chose it checked it. Best needs: above 0 on unseen days, better than as written there, and - over 2+ months - winning in at least half of them.">Across months</Tooltip>, key: 'pm', width: 190, render: (_, t) => <span style={{ fontSize: 12 }}>{crossText(t)}</span> },
@@ -460,6 +461,7 @@ function StrategyPerformance({ reloadKey }) {
           })}
         </Row>
       )}
+      {isAdmin && data === 'futures' && <LiveSetup cfg={liveCfg} />}
       {isAdmin && data === 'futures' && <AppliedSettings cfg={liveCfg} isAdmin={isAdmin} onChanged={loadLive} />}
       {isAdmin && data === 'futures' && indices.length > 0 && (
         <Space wrap size={8}>
@@ -891,6 +893,131 @@ function ScannerRecord() {
   )
 }
 
+// ---- All trades: every strategy's trades from every tuning run, one stream by date and time ------------------------
+const ALL_TRADE_CSV = ['date', 'entry_time_ist', 'exit_time_ist', 'index', 'strategy_no', 'strategy', 'setting', 'setting_text', 'side', 'entry', 'stop', 'target', 'exit',
+  'trailed_stop', 'closed_by', 'points', 'r', 'option_bought', 'bought_points', 'bought_r', 'option_sold', 'sold_points', 'sold_r', 'option_traded', 'option_points', 'run_id']
+
+/** Every strategy's trades across all tuning runs (a trade two runs both scanned is listed once), newest or oldest
+ *  first by date and time - filtered by index, strategy, setting, side and dates; paged and totalled on the server. */
+function AllTrades() {
+  const narrow = useNarrow()
+  const [data, setData] = useState('futures')
+  const [index, setIndex] = useState('all')
+  const [setting, setSetting] = useState('both')
+  const [ids, setIds] = useState([])
+  const [side, setSide] = useState('both')
+  const [range, setRange] = useState(null)
+  const [order, setOrder] = useState('desc')
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(100)
+  const [body, setBody] = useState(null)
+  const [error, setError] = useState(null)
+  const day = (d) => (d ? d.format('YYYY-MM-DD') : null)
+  const params = (skip, take) => {
+    const q = new URLSearchParams({ data, order, skip: String(skip), take: String(take) })
+    if (index !== 'all') q.set('index', index)
+    if (setting !== 'both') q.set('setting', setting)
+    if (ids.length) q.set('strategies', ids.join(','))
+    if (side !== 'both') q.set('side', side)
+    if (day(range?.[0])) q.set('from', day(range[0]))
+    if (day(range?.[1])) q.set('to', day(range[1]))
+    return q
+  }
+  const key = JSON.stringify([data, index, setting, ids, side, day(range?.[0]), day(range?.[1]), order, page, pageSize])
+  useEffect(() => {
+    fetch(`/api/strategy-tuning/performance/all-trades?${params((page - 1) * pageSize, pageSize)}`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((b) => { setBody({ ...b, key }); setError(null) }).catch((e) => setError(e.message))
+  }, [key]) // eslint-disable-line react-hooks/exhaustive-deps
+  const current = body?.key === key ? body : null
+  // Any filter change goes back to the first page.
+  const change = (set) => (v) => { set(v); setPage(1) }
+  const strategyChoices = Object.values(STRATEGY_BY_ID).filter((s) => !s.retired && !!s.spot === (data === 'spot'))
+    .sort((a, b) => (Number(a.no) || 0) - (Number(b.no) || 0)).map((s) => ({ value: s.id, label: `#${s.no} ${s.name}` }))
+  const rows = (current?.trades ?? []).map((t) => ({ ...t, _p: num(t.points), _r: num(t.r), _br: legR(t, 'bought'), _sr: legR(t, 'sold') }))
+  const tot = current?.totals
+  const one = index !== 'all'
+  const download = async () => {
+    try {
+      const b = await fetch(`/api/strategy-tuning/performance/all-trades?${params(0, 5000)}`).then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      downloadCsv(`all-trades${one ? `-${index}` : ''}.csv`, ALL_TRADE_CSV.map((k) => ({ title: k, value: (r) => r[k] })), b.trades ?? [])
+      if (b.total > 5000) message.info(`The first 5,000 of ${b.total.toLocaleString('en-IN')} trades - narrow the filters (dates, index) for the rest.`)
+    } catch (err) { message.error(err.message) }
+  }
+  const strategyCell = (t) => <span style={{ fontSize: 12 }}>#{t.strategy_no} {t.strategy}</span>
+  const settingTag = (t) => (t.setting === 'fine-tuned' ? <Tooltip title={t.setting_text}><Tag color="blue">fine-tuned</Tag></Tooltip> : <Tag>as written</Tag>)
+  return (
+    <Space direction="vertical" size={10} style={{ width: '100%' }}>
+      <Row gutter={[10, 8]} align="middle">
+        <Col><Segmented value={data} onChange={change((v) => { setData(v); setIds([]) })} options={[{ value: 'futures', label: 'Futures + OI' }, { value: 'spot', label: 'Spot + options' }]} /></Col>
+        <Col><Select value={index} onChange={change(setIndex)} style={{ width: 140 }} options={[{ value: 'all', label: 'All indices' }, ...UNDERLYINGS.map((u) => ({ value: u, label: u }))]} aria-label="Index" /></Col>
+        <Col><Segmented value={setting} onChange={change(setSetting)} options={[{ value: 'both', label: 'All settings' }, { value: 'fine-tuned', label: 'Fine-tuned' }, { value: 'as written', label: 'As written' }]} /></Col>
+        <Col><Segmented value={side} onChange={change(setSide)} options={[{ value: 'both', label: 'Long & short' }, { value: 'LONG', label: 'Long' }, { value: 'SHORT', label: 'Short' }]} /></Col>
+        <Col flex="1 1 260px"><Select mode="multiple" allowClear value={ids} onChange={change(setIds)} placeholder="All strategies" style={{ width: '100%' }} maxTagCount="responsive" options={strategyChoices} aria-label="Strategies" /></Col>
+        <Col><DatePicker.RangePicker value={range} onChange={change(setRange)} format="DD MMM YYYY" allowEmpty={[true, true]} aria-label="Dates" /></Col>
+        <Col><OrderToggle value={order} onChange={change(setOrder)} /></Col>
+        <Col><Button onClick={download} disabled={!current?.total}>Download CSV</Button></Col>
+      </Row>
+      <Text type="secondary" style={{ fontSize: 12 }}>
+        Every strategy&apos;s trades from every tuning run kept, one list by date and time (a trade two runs both scanned is listed once). As written = the strategy&apos;s own rules;
+        fine-tuned = with the setting that run chose (hover the tag). The live and paper trades the scanner took are on Scanner record.
+      </Text>
+      {error && <Alert type="error" showIcon message={`The trades could not be read: ${error}`} />}
+      {tot && (
+        <Space size={16} wrap style={{ fontSize: 13 }}>
+          <span><b>{tot.trades.toLocaleString('en-IN')}</b> trades</span>
+          <span>{tot.wins}W / {tot.losses}L{tot.wins + tot.losses ? ` · win ${Math.round((tot.wins / (tot.wins + tot.losses)) * 100)}%` : ''}</span>
+          <span>total <b style={{ color: col(tot.totalR) }}>{fmtR(tot.totalR)}</b></span>
+          {one ? <>
+            <span>net <b style={{ color: col(tot.points) }}>{pts(tot.points)}</b> index pts</span>
+            <span>option bought <b style={{ color: col(tot.boughtPoints) }}>{pts(tot.boughtPoints)}</b> · sold <b style={{ color: col(tot.soldPoints) }}>{pts(tot.soldPoints)}</b> premium pts</span>
+          </> : <Text type="secondary" style={{ fontSize: 12 }}>(points add up within one index - pick one to see them)</Text>}
+          <span>{tot.days} day(s){tot.firstDay ? ` · ${tot.firstDay} to ${tot.lastDay}` : ''}</span>
+        </Space>
+      )}
+      {narrow ? (
+        <Space direction="vertical" size={6} style={{ width: '100%' }}>
+          {!current && !error && <Text type="secondary">loading…</Text>}
+          {rows.map((t, i) => (
+            <div key={`${t.run_id}-${t.date}-${t.entry_time_ist}-${t.strategy_id}-${t.setting}-${i}`} style={{ borderTop: '1px solid #ffffff14', paddingTop: 6, fontSize: 12 }}>
+              <div><b>{t.date}</b> {hhmm(t.entry_time_ist)} → {t.exit_time_ist ? hhmm(t.exit_time_ist) : 'end'} · {t.index} · {sideTag(t.side)} {settingTag(t)}</div>
+              <div>{strategyCell(t)}</div>
+              <div>{f1(num(t.entry))} → {f1(num(t.exit))} · {t.closed_by || '-'} · <b style={{ color: col(t._p) }}>{pts(t._p)}</b> pts · <span style={{ color: col(t._r) }}>{fmtR(t._r)}</span></div>
+            </div>
+          ))}
+          {current?.total > pageSize && (
+            <Space>
+              <Button size="small" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>Newer</Button>
+              <Text type="secondary" style={{ fontSize: 12 }}>page {page} of {Math.ceil(current.total / pageSize)}</Text>
+              <Button size="small" disabled={page * pageSize >= current.total} onClick={() => setPage((p) => p + 1)}>Older</Button>
+            </Space>
+          )}
+        </Space>
+      ) : (
+        <Table size="small" loading={!current && !error} dataSource={rows} scroll={{ x: 1600 }}
+          rowKey={(t, i) => `${t.run_id}-${t.date}-${t.entry_time_ist}-${t.strategy_id}-${t.setting}-${i}`}
+          pagination={{ current: page, pageSize, total: current?.total ?? 0, size: 'small', showSizeChanger: true, pageSizeOptions: [50, 100, 500, 1000],
+            showTotal: (n) => `${n.toLocaleString('en-IN')} trades`, onChange: (p, s) => { setPage(s !== pageSize ? 1 : p); setPageSize(s) } }}
+          columns={[
+            { title: 'Date', dataIndex: 'date', width: 100, fixed: 'left' },
+            { title: 'In → out', key: 't', width: 110, render: (_, t) => `${hhmm(t.entry_time_ist)} → ${t.exit_time_ist ? hhmm(t.exit_time_ist) : 'end'}` },
+            { title: 'Index', dataIndex: 'index', width: 100 },
+            { title: 'Strategy', key: 'st', width: 230, render: (_, t) => strategyCell(t) },
+            { title: 'Setting', key: 's', width: 110, render: (_, t) => settingTag(t) },
+            { title: 'Side', dataIndex: 'side', width: 70, render: sideTag },
+            { title: 'In → out', key: 'p', width: 140, render: (_, t) => `${f1(num(t.entry))} → ${f1(num(t.exit))}` },
+            { title: <Tooltip title={INDEX_EXIT_TIP}>Index SL / target</Tooltip>, key: 'ix', width: 190, render: (_, t) => indexExit(t) },
+            { title: 'Points', key: 'pt', width: 80, render: (_, t) => <b style={{ color: col(t._p) }}>{pts(t._p)}</b> },
+            { title: 'R', key: 'r', width: 70, render: (_, t) => <span style={{ color: col(t._r) }}>{fmtR(t._r)}</span> },
+            { title: 'Option bought', key: 'b', width: 170, render: (_, t) => (t.option_bought ? <span style={{ fontSize: 12 }}>{t.option_bought} <span style={{ color: col(num(t.bought_points)) }}>{pts(num(t.bought_points))}</span> · <b style={{ color: col(t._br) }}>{fmtR(t._br)}</b></span> : '-') },
+            { title: 'Option sold', key: 'so', width: 170, render: (_, t) => (t.option_sold ? <span style={{ fontSize: 12 }}>{t.option_sold} <span style={{ color: col(num(t.sold_points)) }}>{pts(num(t.sold_points))}</span> · <b style={{ color: col(t._sr) }}>{fmtR(t._sr)}</b></span> : '-') },
+            { title: 'Tuned option', key: 'o', width: 170, render: (_, t) => (t.option_traded ? <span style={{ fontSize: 12 }}>{t.option_traded} <b style={{ color: col(num(t.option_points)) }}>{pts(num(t.option_points))}</b>{t.option_closed_by ? ` · ${t.option_closed_by}` : ''}</span> : '-') },
+          ]} />
+      )}
+    </Space>
+  )
+}
+
 /** Trades: every trade with its date and time in one place - the backtest (each strategy on every day of the latest
  *  tuning run) and the scanner's own record (its signals and the live / paper option trades it took). */
 export default function TradesPage() {
@@ -908,12 +1035,13 @@ export default function TradesPage() {
           <Space size={8} wrap>
             <Segmented value={tab} onChange={setTab} options={[
               { value: 'performance', label: <Tooltip title="Every tuning run of every index added up per strategy - which strategies do best">Strategy performance</Tooltip> },
+              { value: 'all', label: <Tooltip title="Every strategy's trades from every tuning run, in one list by date and time - filter by index, strategy, setting, side and dates">All trades</Tooltip> },
               { value: 'backtest', label: 'Backtest (tuning run)' }, { value: 'record', label: 'Scanner record (live & paper)' },
               { value: 'learning', label: <Tooltip title="Which order-flow conditions at the signal (tape, big orders, order book, delta, volume) went with winning trades, from the live signals">What wins (live)</Tooltip> }]} />
             {auth?.user?.role === 'Admin' && <ClearData onCleared={() => setReloadKey((k) => k + 1)} />}
           </Space>
         )}>
-          {tab === 'performance' ? <StrategyPerformance key={reloadKey} reloadKey={reloadKey} /> : tab === 'backtest' ? <BacktestTrades key={reloadKey} /> : tab === 'learning' ? <Learning key={reloadKey} /> : <ScannerRecord key={reloadKey} />}
+          {tab === 'performance' ? <StrategyPerformance key={reloadKey} reloadKey={reloadKey} /> : tab === 'all' ? <AllTrades key={reloadKey} /> : tab === 'backtest' ? <BacktestTrades key={reloadKey} /> : tab === 'learning' ? <Learning key={reloadKey} /> : <ScannerRecord key={reloadKey} />}
         </Card>
       </Space>
     </div>
