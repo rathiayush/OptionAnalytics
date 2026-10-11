@@ -2,9 +2,11 @@ import { useEffect, useMemo, useState } from 'react'
 import { Alert, Button, Card, Col, DatePicker, InputNumber, Popconfirm, Row, Segmented, Select, Space, Table, Tag, Tooltip, Typography, message } from 'antd'
 import { NavBar, useAuth, UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import { STRATEGY_BY_ID } from './strategyEngine.js'
+import { useNarrow } from './DomDrawer.jsx'
 import { paramsFromSettingsRow } from './strategyTuning.js'
 import { applyTunedFilters } from './scannerSettings.js'
 import ClearData from './ClearData.jsx'
+import './tuningMobile.css'
 
 const { Title, Text } = Typography
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX']
@@ -69,6 +71,8 @@ function StrategyPerformance({ reloadKey }) {
   const [index, setIndex] = useState('all')
   const [minTrades, setMinTrades] = useState(5)
   const [view, setView] = useState('ranking')
+  const narrow = useNarrow()
+  const [openRows, setOpenRows] = useState({}) // phone: which strategy cards show their tuned settings
   const [body, setBody] = useState(null)
   const [error, setError] = useState(null)
   useEffect(() => {
@@ -103,9 +107,25 @@ function StrategyPerformance({ reloadKey }) {
     return (current?.rows ?? []).filter((r) => r.setting === which).map((r) => ({ ...r, key: r.strategyId }))
   }, [current, setting])
   const bestInColumn = Object.fromEntries(indices.map((u) => [u, gridRows.filter((r) => (r.byIndex?.[u]?.trades ?? 0) >= minTrades).sort((a, b) => (b.byIndex[u].avgR ?? -1e9) - (a.byIndex[u].avgR ?? -1e9))[0]?.strategyId]))
+  const applyButton = (r, t) => (isAdmin && data === 'futures' ? (
+    <Popconfirm title={`Apply this ${t.row.index} setting to #${r.strategyNo} ${r.strategy}?`} description={`${t.recommended ? '' : 'No run recommended it. '}The live scanner (this browser and the server scanner) takes it from now; whatever was applied to this strategy before is replaced.`} okText="Apply" onConfirm={() => apply(r, t.row)}>
+      <Button size="small" type={t.best ? 'primary' : 'default'}>Apply to live scanner</Button>
+    </Popconfirm>
+  ) : null)
   const tunedTable = (r) => {
     const entries = Object.entries(r.tunedSettings ?? {})
     if (!entries.length) return <Text type="secondary" style={{ fontSize: 12 }}>No fine-tuned setting for this strategy in the runs kept.</Text>
+    if (narrow) return (
+      <Space direction="vertical" size={8} style={{ width: '100%' }}>
+        {entries.flatMap(([, list]) => list).map((t) => (
+          <div key={`${t.row.index}-${t.row.run_id}-${t.row.setting_text}`} style={{ borderTop: '1px solid #ffffff14', paddingTop: 6, fontSize: 12 }}>
+            <div><b>{t.row.index}</b>{t.best && <Tag color="gold" style={{ marginLeft: 6 }}>best</Tag>} {t.row.setting_text || '-'}</div>
+            <Text type="secondary" style={{ fontSize: 12 }}>{t.runs} run(s) · {t.recommended} recommended · unseen {t.testTrades} trades <b style={{ color: col(t.testAvg) }}>{t.testAvg == null ? '-' : `${pts(t.testAvg)}${t.unit === 'pts' ? ' pts' : 'R'}`}</b>/trade</Text>
+            <div style={{ marginTop: 4 }}>{applyButton(r, t)}</div>
+          </div>
+        ))}
+      </Space>
+    )
     return (
       <Table size="small" pagination={false} rowKey={(t) => `${t.row.index}-${t.row.run_id}-${t.row.setting_text}`}
         dataSource={entries.flatMap(([, list]) => list)}
@@ -116,11 +136,7 @@ function StrategyPerformance({ reloadKey }) {
           { title: <Tooltip title="The days each run held back and never chose on - the honest number">Unseen days</Tooltip>, key: 'te', width: 170, render: (_, t) => <span style={{ fontSize: 12 }}>{t.testTrades} trades · <b style={{ color: col(t.testAvg) }}>{t.testAvg == null ? '-' : `${pts(t.testAvg)}${t.unit === 'pts' ? ' pts' : 'R'}`}</b>/trade</span> },
           { title: 'Chosen on', key: 'tr', width: 150, render: (_, t) => <Text type="secondary" style={{ fontSize: 12 }}>{t.trainTrades} trades · {t.trainAvg == null ? '-' : `${pts(t.trainAvg)}${t.unit === 'pts' ? ' pts' : 'R'}`}</Text> },
           { title: <Tooltip title="Unseen-days average shrunk for few trades (avg x n / (n + 10)) - a setting proven over many unseen trades ranks above a lucky one">Score</Tooltip>, key: 'sc', width: 80, render: (_, t) => <span style={{ color: col(t.score) }}>{t.score == null ? '-' : `${pts(t.score)}${t.unit === 'pts' ? '' : 'R'}`}</span> },
-          { title: '', key: 'a', width: 170, render: (_, t) => (isAdmin && data === 'futures' ? (
-            <Popconfirm title={`Apply this ${t.row.index} setting to #${r.strategyNo} ${r.strategy}?`} description={`${t.recommended ? '' : 'No run recommended it. '}The live scanner (this browser and the server scanner) takes it from now; whatever was applied to this strategy before is replaced.`} okText="Apply" onConfirm={() => apply(r, t.row)}>
-              <Button size="small" type={t.best ? 'primary' : 'default'}>Apply to live scanner</Button>
-            </Popconfirm>
-          ) : null) },
+          { title: '', key: 'a', width: 170, render: (_, t) => applyButton(r, t) },
         ]} />
     )
   }
@@ -166,7 +182,28 @@ function StrategyPerformance({ reloadKey }) {
       </details>
       {error && <Alert type="error" showIcon message={`Could not load the strategy performance: ${error}`} />}
       {current && !current.runs && <Alert type="info" showIcon message="No tuning run yet - schedule or run one on the Strategy tuning page." />}
-      {view === 'grid' ? (
+      {narrow ? (
+        <Space direction="vertical" size={8} style={{ width: '100%' }}>
+          {!current && !error && <Text type="secondary">loading…</Text>}
+          {(view === 'grid' ? gridRows : rows).map((r, i) => {
+            const x = view === 'grid' ? r.all : r.s
+            const open = !!openRows[r.key]
+            return (
+              <Card key={r.key} size="small" styles={{ body: { padding: 10 } }}>
+                <Space direction="vertical" size={4} style={{ width: '100%', fontSize: 12 }}>
+                  <div>{view === 'ranking' && (i < 3 ? <Tag color="gold">{i + 1}</Tag> : <Tag>{i + 1}</Tag>)}<b>#{r.strategyNo} {r.strategy}</b> {r.setting === 'fine-tuned' ? <Tag color="blue">fine-tuned</Tag> : <Tag>as written</Tag>}</div>
+                  <div><b style={{ color: col(x?.avgR) }}>{fmtR(x?.avgR)}</b>/trade · {x?.trades ?? 0} trades · win {pctOf(x?.winRate)} · total <span style={{ color: col(x?.totalR) }}>{fmtR(x?.totalR)}</span>{one && x ? <> · <span style={{ color: col(x.points) }}>{pts(x.points)} pts</span></> : null}</div>
+                  <div>{Object.entries(r.byIndex ?? {}).map(([u, y]) => (
+                    <span key={u} style={{ marginRight: 10, opacity: y.trades < minTrades ? 0.5 : 1 }}>{view === 'grid' && bestInColumn[u] === r.strategyId && <Tag color="gold">best</Tag>}{u} <b style={{ color: col(y.avgR) }}>{fmtR(y.avgR)}</b> ({y.trades})</span>
+                  ))}</div>
+                  <Button size="small" type="link" style={{ padding: 0, height: 'auto', alignSelf: 'flex-start' }} onClick={() => setOpenRows((m) => ({ ...m, [r.key]: !open }))}>{open ? 'Hide' : 'Show'} tuned settings</Button>
+                  {open && tunedTable(r)}
+                </Space>
+              </Card>
+            )
+          })}
+        </Space>
+      ) : view === 'grid' ? (
         <Table size="small" loading={!current && !error} rowKey="key" dataSource={gridRows} pagination={false} scroll={{ x: 900 }}
           expandable={{ expandedRowRender: (r) => tunedTable(r) }}
           columns={[
@@ -477,7 +514,7 @@ export default function TradesPage() {
   const [tab, setTab] = useState('performance')
   const [reloadKey, setReloadKey] = useState(0)
   return (
-    <div style={{ maxWidth: 1600, margin: '0 auto', padding: '24px 16px' }}>
+    <div className="tuning-page" style={{ maxWidth: 1600, margin: '0 auto', padding: '24px 16px' }}>
       <Space direction="vertical" size={16} style={{ width: '100%' }}>
         <Space align="center" size={16} wrap>
           <Title level={3} style={{ margin: 0 }}>Option Analytics</Title>
