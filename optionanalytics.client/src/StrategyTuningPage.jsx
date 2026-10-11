@@ -6,6 +6,7 @@ import { ACTIVE_STRATEGIES, SPOT_STRATEGIES, STRATEGY_BY_ID, TRADE_FILTERS } fro
 import { OI_COMBO_CAP, OI_FACTORS, OPTION_DEFAULT, countOiCombinations, oiFactorsFor, optionText, variantText } from './strategyTuning.js'
 import { applyTunedFilters } from './scannerSettings.js'
 import ClearData from './ClearData.jsx'
+import './tuningMobile.css'
 
 const { Title, Text } = Typography
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX']
@@ -227,6 +228,9 @@ function DaysTable({ days, skipped }) {
 /** A tuned setting in words: the trade / OI filters, and the option when it was tuned. */
 const settingText = (params, unit) => (params ? `${variantText(params)}${unit === 'pts' ? ` · ${optionText(params)}` : ''}` : '-')
 
+/** [from, to] covering the last n calendar days up to yesterday (weekends are never fetched anyway). */
+const lastDays = (n) => [dayjs().subtract(n, 'day').startOf('day'), dayjs().subtract(1, 'day').startOf('day')]
+
 const when = (iso) => (iso ? new Date(iso).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '-')
 
 /** n · avg · total · win% of one side of a result. */
@@ -252,12 +256,11 @@ export default function StrategyTuningPage() {
   const [underlying, setUnderlying] = useState('NIFTY')
   const [pick, setPick] = useState('top3')
   const [custom, setCustom] = useState([])
-  const [days, setDays] = useState(30)
   const [includeEstimated, setIncludeEstimated] = useState(false)
   const [minTrades, setMinTrades] = useState(8)
   const [what, setWhat] = useState('both')
-  const [dayMode, setDayMode] = useState('last') // 'last' N days, or a date 'range'
-  const [range, setRange] = useState(null) // [dayjs, dayjs] from / to
+  // Always a date range (from / to): the last 30 days to yesterday until another is picked.
+  const [range, setRange] = useState(() => lastDays(30))
   const [data, setData] = useState('futures')
   const spot = data === 'spot'
   const [oiFactors, setOiFactors] = useState(OI_FACTORS.map((f) => f.key))
@@ -297,17 +300,22 @@ export default function StrategyTuningPage() {
   }, [status?.state]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const running = status?.state === 'running'
-  const jobBody = () => ({ underlying, strategies: pick === 'custom' ? custom : pick, days, includeEstimated, minTrades, what, oiFactors, search, data,
-    ...(dayMode === 'range' && range ? { from: range[0]?.format('YYYY-MM-DD') ?? null, to: range[1]?.format('YYYY-MM-DD') ?? null } : {}) })
+  const rangeOk = !!(range?.[0] && range?.[1])
+  const jobBody = () => ({ underlying, strategies: pick === 'custom' ? custom : pick, days: 250, includeEstimated, minTrades, what, oiFactors, search, data,
+    from: range?.[0]?.format('YYYY-MM-DD') ?? null, to: range?.[1]?.format('YYYY-MM-DD') ?? null })
   // The schedule: jobs run one after another on the server - for one index or several, now or at a set time, once or daily.
   const [queue, setQueue] = useState([])
   const [schedIndices, setSchedIndices] = useState(null) // null: the index picked above
   const [schedAt, setSchedAt] = useState(null)
   const [schedRepeat, setSchedRepeat] = useState(false)
+  // Split the range into pieces of N days - one job per piece (and index), run one after another, instead of one long job.
+  const [schedChunk, setSchedChunk] = useState(0)
+  const pieceCount = schedChunk > 0 && rangeOk ? Math.ceil((range[1].diff(range[0], 'day') + 1) / schedChunk) : 1
   const loadQueue = () => fetch('/api/strategy-tuning/queue').then((r) => (r.ok ? r.json() : null)).then((q) => { if (q) setQueue(q) }).catch(() => {})
   useEffect(() => { loadQueue(); const id = setInterval(loadQueue, 10_000); return () => clearInterval(id) }, [])
   const schedule = async () => {
-    const body = { job: jobBody(), underlyings: schedIndices?.length ? schedIndices : [underlying], runAtUtc: schedAt ? schedAt.toISOString() : null, repeatDaily: schedRepeat }
+    const body = { job: jobBody(), underlyings: schedIndices?.length ? schedIndices : [underlying], runAtUtc: schedAt ? schedAt.toISOString() : null,
+      repeatDaily: schedChunk > 0 ? false : schedRepeat, chunkDays: schedChunk > 0 ? schedChunk : null }
     const res = await fetch('/api/strategy-tuning/queue', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     const json = await res.json().catch(() => null)
     if (!res.ok) { message.error(json?.error ?? `HTTP ${res.status}`); return }
@@ -377,7 +385,7 @@ export default function StrategyTuningPage() {
   ]
 
   return (
-    <div style={{ maxWidth: 1400, margin: '0 auto', padding: '24px 16px' }}>
+    <div className="tuning-page" style={{ maxWidth: 1400, margin: '0 auto', padding: '24px 16px' }}>
       <Space direction="vertical" size={20} style={{ width: '100%' }}>
         <Space align="center" size={16} wrap>
           <Title level={3} style={{ margin: 0 }}>Option Analytics</Title>
@@ -394,19 +402,19 @@ export default function StrategyTuningPage() {
               The strategy&apos;s entry rules are not changed. Runs on the server - you can leave the page.
             </Text>
             <Row gutter={[16, 8]} align="middle">
-              <Col><Space size={6}><Text>Index</Text><Select value={underlying} onChange={setUnderlying} options={UNDERLYINGS.map((u) => ({ value: u, label: u }))} style={{ width: 130 }} disabled={running} /></Space></Col>
-              <Col><Space size={6}><Text>Data</Text><Segmented value={data} onChange={(v) => { setData(v); setCustom([]); setResult(null) }} disabled={running} options={[
+              <Col><Space size={6}><Text>Index</Text><Select value={underlying} onChange={setUnderlying} options={UNDERLYINGS.map((u) => ({ value: u, label: u }))} style={{ width: 130 }} /></Space></Col>
+              <Col><Space size={6}><Text>Data</Text><Segmented value={data} onChange={(v) => { setData(v); setCustom([]); setResult(null) }} options={[
                 { value: 'futures', label: <Tooltip title="The futures order flow (footprint, tape, depth) and the OI - the scanner's strategies">Futures + OI</Tooltip> },
                 { value: 'spot', label: <Tooltip title="Only the index candles and the option chain's OI - no futures, no order flow. The spot + options strategies; any past day with OI data">Spot + options only</Tooltip> },
               ]} /></Space></Col>
-              <Col><Space size={6}><Text>Strategies</Text><Segmented value={pick} onChange={setPick} disabled={running} options={[{ value: 'top3', label: 'Top 3' }, { value: 'top5', label: 'Top 5' }, { value: 'all', label: 'All' }, { value: 'custom', label: 'Pick' }]} /></Space></Col>
+              <Col><Space size={6}><Text>Strategies</Text><Segmented value={pick} onChange={setPick} options={[{ value: 'top3', label: 'Top 3' }, { value: 'top5', label: 'Top 5' }, { value: 'all', label: 'All' }, { value: 'custom', label: 'Pick' }]} /></Space></Col>
               {pick === 'custom' && (
                 <Col flex="1 1 320px">
-                  <Select mode="multiple" value={custom} onChange={setCustom} placeholder="Strategies to tune" style={{ width: '100%' }} disabled={running} maxTagCount="responsive"
+                  <Select mode="multiple" value={custom} onChange={setCustom} placeholder="Strategies to tune" style={{ width: '100%' }} maxTagCount="responsive"
                     options={(spot ? SPOT_STRATEGIES : ACTIVE_STRATEGIES).map((s) => ({ value: s.id, label: `#${s.no} ${s.name}` }))} />
                 </Col>
               )}
-              <Col><Space size={6}><Text>Tune</Text><Segmented value={what} onChange={setWhat} disabled={running} options={[
+              <Col><Space size={6}><Text>Tune</Text><Segmented value={what} onChange={setWhat} options={[
                 { value: 'both', label: <Tooltip title="The OI confirmation first, then the trade settings on top of the best one">OI, then trade</Tooltip> },
                 { value: 'oi', label: <Tooltip title="Options OI change (15 min) and since the open, futures OI, room to the next OI wall - the trade settings as they are">OI confirmation</Tooltip> },
                 { value: 'trade', label: <Tooltip title="Sides, entry window, stop / target size, time stop, trailing stop">Trade settings</Tooltip> },
@@ -417,12 +425,12 @@ export default function StrategyTuningPage() {
                 <Col flex="1 1 100%">
                   <Space size={6} wrap align="start">
                     <Text>OI to tune</Text>
-                    <Checkbox.Group value={oiFactors} onChange={setOiFactors} disabled={running} options={oiChoices.map((f) => ({ value: f.key, label: f.label }))} />
+                    <Checkbox.Group value={oiFactors} onChange={setOiFactors} options={oiChoices.map((f) => ({ value: f.key, label: f.label }))} />
                   </Space>
                   <div style={{ marginTop: 6 }}>
                     <Space size={8} wrap>
                       <Text>Search</Text>
-                      <Segmented value={search} onChange={setSearch} disabled={running} options={[
+                      <Segmented value={search} onChange={setSearch} options={[
                         { value: 'step', label: <Tooltip title="Each OI filter takes its best value given the others, then a second pass - a few hundred combinations, little chance of a lucky one">Step by step</Tooltip> },
                         { value: 'full', label: <Tooltip title="Every combination of the ticked OI inputs, nothing skipped - slower, and with this many tries one can win by luck: trust it only where it also wins on the unseen days">Every combination</Tooltip> },
                       ]} />
@@ -436,28 +444,32 @@ export default function StrategyTuningPage() {
               <Col>
                 <Space size={6} wrap>
                   <Text>Days</Text>
-                  <Segmented size="small" value={dayMode} onChange={setDayMode} disabled={running} options={[{ value: 'last', label: 'Last N' }, { value: 'range', label: 'Date range' }]} />
-                  {dayMode === 'last'
-                    ? <Tooltip title="The most recent past days the server can replay"><InputNumber min={1} max={250} value={days} onChange={(v) => v && setDays(v)} style={{ width: 80 }} disabled={running} aria-label="Number of days" /></Tooltip>
-                    : <Tooltip title="Every past trading day in this range is used (up to 250; Saturdays and Sundays are never fetched); the older 70% choose, the newest 30% check"><DatePicker.RangePicker value={range} onChange={setRange} format="DD MMM YYYY" disabled={running} allowEmpty={[true, true]}
-                        disabledDate={(d) => d && (!d.isBefore(dayjs().startOf('day')) || d.day() === 0 || d.day() === 6)} aria-label="Tuning date range" /></Tooltip>}
+                  <Tooltip title="Every past trading day in this range is used (up to 250; Saturdays and Sundays are never fetched); the older 70% choose, the newest 30% check"><DatePicker.RangePicker value={range} onChange={setRange} onCalendarChange={(v) => { if (v?.[0] && v?.[1]) setRange(v) }} format="DD MMM YYYY" allowClear={false}
+                    presets={[30, 60, 90, 120, 250].map((n) => ({ label: `Last ${n} days`, value: lastDays(n) }))}
+                    disabledDate={(d) => d && (!d.isBefore(dayjs().startOf('day')) || d.day() === 0 || d.day() === 6)} aria-label="Tuning date range" /></Tooltip>
                 </Space>
               </Col>
-              <Col><Space size={6}><Tooltip title="A setting needs at least this many trades on the train days to be recommended. When none reach it, the best found with fewer is still shown, marked 'below the minimum trades' and never recommended."><Text>Min trades</Text></Tooltip><InputNumber min={2} max={100} value={minTrades} onChange={(v) => v && setMinTrades(v)} style={{ width: 70 }} disabled={running} /></Space></Col>
-              {!spot && <Col><Tooltip title="Also use days the server did not record live, rebuilt from 1-minute candles (no tape or market depth - the order-flow checks are estimated). More days, less exact."><Space size={6}><Switch size="small" checked={includeEstimated} onChange={setIncludeEstimated} disabled={running} /><Text>Include estimated days</Text></Space></Tooltip></Col>}
+              <Col><Space size={6}><Tooltip title="A setting needs at least this many trades on the train days to be recommended. When none reach it, the best found with fewer is still shown, marked 'below the minimum trades' and never recommended."><Text>Min trades</Text></Tooltip><InputNumber min={2} max={100} value={minTrades} onChange={(v) => v && setMinTrades(v)} style={{ width: 70 }} /></Space></Col>
+              {!spot && <Col><Tooltip title="Also use days the server did not record live, rebuilt from 1-minute candles (no tape or market depth - the order-flow checks are estimated). More days, less exact."><Space size={6}><Switch size="small" checked={includeEstimated} onChange={setIncludeEstimated} /><Text>Include estimated days</Text></Space></Tooltip></Col>}
               <Col>
                 {running
                   ? <Popconfirm title="Stop the tuning job?" onConfirm={cancel} disabled={!isAdmin}><Button danger disabled={!isAdmin}>Stop</Button></Popconfirm>
-                  : <Button type="primary" onClick={start} disabled={!isAdmin || (pick === 'custom' && !custom.length) || (tunesOi && !oiFactors.length) || tooMany || (dayMode === 'range' && !range?.[0] && !range?.[1])}>Run tuning</Button>}
+                  : <Button type="primary" onClick={start} disabled={!isAdmin || (pick === 'custom' && !custom.length) || (tunesOi && !oiFactors.length) || tooMany || !rangeOk}>Run tuning</Button>}
               </Col>
             </Row>
             {isAdmin && (
               <Row gutter={[12, 8]} align="middle" style={{ borderTop: '1px solid #ffffff14', paddingTop: 10 }}>
-                <Col><Tooltip title="Add these settings to the schedule instead of running now: the server runs scheduled jobs one after another, so you can line up every index (or several kinds of tuning) and leave them."><Text strong>Schedule</Text></Tooltip></Col>
+                <Col flex="1 1 100%"><Tooltip title="Add these settings to the schedule instead of running now: the server runs scheduled jobs one after another, so you can line up every index (or several kinds of tuning) and leave them."><Text strong>Schedule</Text></Tooltip>
+                  {running && <Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>a job is running - change the settings above and add more; they wait their turn</Text>}</Col>
                 <Col><Space size={6}><Text>Indices</Text><Checkbox.Group value={schedIndices ?? [underlying]} onChange={(v) => setSchedIndices(v)} options={UNDERLYINGS.map((u) => ({ value: u, label: u }))} /></Space></Col>
                 <Col><Space size={6}><Text>Start</Text><DatePicker showTime={{ format: 'HH:mm' }} format="DD MMM YYYY HH:mm" value={schedAt} onChange={setSchedAt} placeholder="As soon as free" aria-label="Scheduled start" /></Space></Col>
-                <Col><Space size={6}><Switch size="small" checked={schedRepeat} onChange={setSchedRepeat} aria-label="Repeat daily" /><Text>Every day</Text></Space></Col>
-                <Col><Button onClick={schedule} disabled={(pick === 'custom' && !custom.length) || (tunesOi && !oiFactors.length) || tooMany || (dayMode === 'range' && !range?.[0] && !range?.[1]) || (schedIndices != null && !schedIndices.length)}>Add to schedule</Button></Col>
+                <Col><Tooltip title="Split the date range above into pieces of this many days: each piece (for each index ticked) is its own job, run one after another - several short jobs instead of one long one. The Trades page's Strategy performance adds them all up.">
+                  <Space size={6}><Text>Split into</Text><Select value={schedChunk} onChange={setSchedChunk} style={{ width: 130 }} aria-label="Split the range"
+                    options={[{ value: 0, label: 'one job' }, { value: 7, label: '7-day pieces' }, { value: 10, label: '10-day pieces' }, { value: 15, label: '15-day pieces' }, { value: 30, label: '30-day pieces' }]} />
+                    {schedChunk > 0 && <Text type="secondary" style={{ fontSize: 12 }}>= {pieceCount * (schedIndices?.length || 1)} job(s)</Text>}</Space>
+                </Tooltip></Col>
+                <Col><Tooltip title={schedChunk > 0 ? 'Not with a split range' : 'Run it again every day at the same time; the date range moves forward a day each time'}><Space size={6}><Switch size="small" checked={schedChunk > 0 ? false : schedRepeat} disabled={schedChunk > 0} onChange={setSchedRepeat} aria-label="Repeat daily" /><Text>Every day</Text></Space></Tooltip></Col>
+                <Col><Button onClick={schedule} disabled={(pick === 'custom' && !custom.length) || (tunesOi && !oiFactors.length) || tooMany || !rangeOk || (schedIndices != null && !schedIndices.length)}>Add to schedule</Button></Col>
                 <Col><ClearData onCleared={() => { setResult(null); loadResult(underlying) }} /></Col>
               </Row>
             )}
@@ -478,7 +490,7 @@ export default function StrategyTuningPage() {
               </div>
             )}
             {!isAdmin && <Alert type="info" showIcon message="Only an admin can run a tuning job or apply a result." />}
-            {!spot && !includeEstimated && (dayMode === 'range' || days > 3) && (
+            {!spot && !includeEstimated && (
               <Alert type="warning" showIcon message="Only the recorded days will be used - the server keeps just the last few (in memory)."
                 description="For a long run (30, 120, 250 days) switch on Include estimated days: the other days are rebuilt from 1-minute futures candles (no tape or market depth - the order-flow checks are estimated, and each is marked 'est.'). Or use Spot + options only, which needs no futures order flow." />
             )}

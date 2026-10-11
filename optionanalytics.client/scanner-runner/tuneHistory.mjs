@@ -2,7 +2,9 @@
 //   runs.csv                     one row per finished run - when, which index, what was tuned, how many days and trades;
 //   {run_id}-trades.csv          every trade of that run: each strategy as written on every day scanned, and each
 //                                fine-tuned strategy's best setting - with the date and time, the levels and why it fired;
-//   {run_id}-settings.csv        each strategy's tuned setting of that run: every parameter, and what it scored.
+//   {run_id}-settings.csv        each strategy's tuned setting of that run: every parameter, and what it scored;
+//   {run_id}-days.csv            every day the run looked at: used (train - the days settings were chosen on - or test -
+//                                the newest days held back to check them) or left out, and why.
 // A run is never overwritten, so a strategy can be compared across runs; the Trades page lists the runs and clubs the
 // trades of the ones picked (any index) by date and time. run_id = {INDEX}-{data}-{yyyyMMdd-HHmmss} (IST).
 
@@ -192,6 +194,17 @@ export const RUN_COLUMNS = [
   { key: 'stopped_reason', value: (r) => r.budget?.reason ?? '' },
 ]
 
+/** {run_id}-days.csv: a row per day the run looked at - status "used" (role train / test) or "left out" (reason). */
+export const DAY_COLUMNS = [
+  { key: 'run_id', value: (r) => r.run_id },
+  { key: 'index', value: (r) => r.index },
+  { key: 'date', value: (r) => r.date },
+  { key: 'status', value: (r) => r.status },
+  { key: 'role', value: (r) => r.role ?? '' },
+  { key: 'estimated', value: (r) => (r.estimated ? 'yes' : '') },
+  { key: 'reason', value: (r) => r.reason ?? '' },
+]
+
 /** The rows a finished run adds to its history files. */
 export function historyOf({ underlying, data, finishedMs, job, what, search, minTrades, from, to, days, skipped, results, ranked, trades, fetched, calls, budget }) {
   const run_id = runIdOf(underlying, data, finishedMs)
@@ -211,5 +224,11 @@ export function historyOf({ underlying, data, finishedMs, job, what, search, min
     dhanCalls: fetched?.requests, cacheHits: fetched?.cacheHits,
     calls, budget,
   }
-  return { run_id, run, settings, trades: (trades ?? []).map((t) => ({ ...t, run_id })) }
+  // Every day looked at, oldest first: the days used (each with its train / test role, when the caller gave it) and
+  // the days left out with the reason - so "which days did the tuning exclude?" has an answer per run.
+  const dayRows = [
+    ...(days ?? []).map((d) => ({ run_id, index: underlying, date: d.date, status: 'used', role: d.role, estimated: d.estimated })),
+    ...(skipped ?? []).map((d) => ({ run_id, index: underlying, date: d.date, status: 'left out', reason: d.reason })),
+  ].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
+  return { run_id, run, settings, days: dayRows, trades: (trades ?? []).map((t) => ({ ...t, run_id })) }
 }

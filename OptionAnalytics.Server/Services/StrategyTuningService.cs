@@ -128,7 +128,8 @@ public sealed class StrategyTuningService
     public string ResultPath(string underlying, string data = "futures") => Path.Combine(_dir, $"{underlying.ToUpperInvariant()}{(data == "spot" ? "-spot" : "")}-latest.json");
 
     /// <summary>The tuning HISTORY, as CSV (no database - scanner-runner/tuneHistory.mjs): runs.csv, and per run
-    /// {run_id}-trades.csv and {run_id}-settings.csv. A run is never overwritten, so a strategy can be compared run by
+    /// {run_id}-trades.csv, {run_id}-settings.csv and {run_id}-days.csv (every day it looked at: used - train / test - or
+    /// left out, and why). A run is never overwritten, so a strategy can be compared run by
     /// run and the Trades page can club several runs' trades (any index) by date and time.</summary>
     public string HistoryDirectory => Path.Combine(_dir, "history");
 
@@ -137,7 +138,7 @@ public sealed class StrategyTuningService
     /// <summary>One history file's full path, or null for an id this server did not write (never a path from the URL).</summary>
     public string? HistoryPath(string runId, string kind)
     {
-        if (!RunIdPattern.IsMatch(runId ?? "") || kind is not ("trades" or "settings")) return null;
+        if (!RunIdPattern.IsMatch(runId ?? "") || kind is not ("trades" or "settings" or "days")) return null;
         var path = Path.Combine(HistoryDirectory, $"{runId}-{kind}.csv");
         return File.Exists(path) ? path : null;
     }
@@ -173,7 +174,7 @@ public sealed class StrategyTuningService
             if (keep <= 0 || runs.Count <= keep) return;
             var drop = runs.Skip(keep).Select(r => r.GetValueOrDefault("run_id", "")).Where(id => RunIdPattern.IsMatch(id)).ToHashSet(StringComparer.Ordinal);
             foreach (var id in drop)
-                foreach (var kind in new[] { "trades", "settings" })
+                foreach (var kind in new[] { "trades", "settings", "days" })
                 {
                     var path = Path.Combine(HistoryDirectory, $"{id}-{kind}.csv");
                     if (File.Exists(path)) File.Delete(path);

@@ -71,8 +71,23 @@ public sealed class StrategyTuningController : ControllerBase
     }
 
     /// <summary>A job to schedule: the Run request, for one index or several (Underlyings), not before RunAtUtc (null:
-    /// as soon as nothing else is running), and optionally again every day.</summary>
-    public sealed record QueueRequest(RunRequest Job, string[]? Underlyings, DateTimeOffset? RunAtUtc, bool RepeatDaily = false);
+    /// as soon as nothing else is running), and optionally again every day.
+    /// ChunkDays: the job's date range split into consecutive pieces of this many calendar days, one job each (and each
+    /// index), oldest first - a long range as several short jobs instead of one long one.</summary>
+    public sealed record QueueRequest(RunRequest Job, string[]? Underlyings, DateTimeOffset? RunAtUtc, bool RepeatDaily = false, int? ChunkDays = null);
+
+    /// <summary>[from, to] (yyyy-MM-dd) cut into consecutive pieces of <paramref name="days"/> calendar days, oldest first.</summary>
+    internal static List<(string From, string To)> Chunks(string from, string to, int days)
+    {
+        var list = new List<(string, string)>();
+        if (!DateOnly.TryParseExact(from, "yyyy-MM-dd", out var f) || !DateOnly.TryParseExact(to, "yyyy-MM-dd", out var t) || f > t || days < 1) return list;
+        for (var start = f; start <= t; start = start.AddDays(days))
+        {
+            var end = start.AddDays(days - 1);
+            list.Add((start.ToString("yyyy-MM-dd"), (end < t ? end : t).ToString("yyyy-MM-dd")));
+        }
+        return list;
+    }
 
     /// <summary>GET /api/strategy-tuning/queue - the scheduled jobs, run one at a time.</summary>
     [HttpGet("queue")]
@@ -85,13 +100,21 @@ public sealed class StrategyTuningController : ControllerBase
     {
         if (request?.Job is null) return BadRequest(new { error = "A job is required." });
         var indices = (request.Underlyings is { Length: > 0 } list ? list : new[] { request.Job.Underlying }).Select(x => (x ?? "").Trim().ToUpperInvariant()).Distinct().ToList();
+        // One piece of the range per job when it is split (oldest first, every index for a piece before the next piece).
+        var pieces = request.ChunkDays is > 0 && !string.IsNullOrWhiteSpace(request.Job.From) && !string.IsNullOrWhiteSpace(request.Job.To)
+            ? Chunks(request.Job.From.Trim(), request.Job.To.Trim(), request.ChunkDays.Value)
+            : new List<(string From, string To)> { (request.Job.From ?? "", request.Job.To ?? "") };
+        if (pieces.Count == 0) return BadRequest(new { error = "From / To must be a valid range to split it." });
+        if (pieces.Count * indices.Count > 100) return BadRequest(new { error = $"That is {pieces.Count * indices.Count} jobs - use bigger pieces or a shorter range (100 at most)." });
         var jobs = new List<TuningJob>();
-        foreach (var index in indices)
-        {
-            var (job, error) = BuildJob(request.Job, index);
-            if (job is null) return BadRequest(new { error });
-            jobs.Add(job);
-        }
+        foreach (var (from, to) in pieces)
+            foreach (var index in indices)
+            {
+                var piece = request.ChunkDays is > 0 ? request.Job with { From = from, To = to } : request.Job;
+                var (job, error) = BuildJob(piece, index);
+                if (job is null) return BadRequest(new { error });
+                jobs.Add(job);
+            }
         var added = jobs.Select(j => _queue.Add(j, request.RunAtUtc, request.RepeatDaily)).ToList();
         return Ok(added);
     }
@@ -112,8 +135,33 @@ public sealed class StrategyTuningController : ControllerBase
     public IActionResult Performance([FromQuery] string? data = null)
     {
         var d = string.Equals(data, "spot", StringComparison.OrdinalIgnoreCase) ? "spot" : string.Equals(data, "futures", StringComparison.OrdinalIgnoreCase) ? "futures" : null;
-        var (rows, runs, trades) = TuningPerformance.Build(_tuning.HistoryRuns(), _tuning.HistoryRows, d);
-        return Ok(new { runs, trades, rows });
+        var history = _tuning.HistoryRuns();
+        var (rows, runs, trades) = TuningPerformance.Build(history, _tuning.HistoryRows, d);
+        // How many days were scanned per index - so "traded on 16 days" can be read against the days looked at.
+        var coverage = TuningPerformance.Days(history, _tuning.HistoryRows, d).Coverage;
+        return Ok(new { runs, trades, rows, coverage });
+    }
+
+    /// <summary>GET /api/strategy-tuning/performance/days?data= - every day the runs looked at, per index: used (and in
+    /// how many runs it was a train / test day) or left out and why, plus the days scanned per index.</summary>
+    [HttpGet("performance/days")]
+    public IActionResult PerformanceDays([FromQuery] string? data = null)
+    {
+        var d = string.Equals(data, "spot", StringComparison.OrdinalIgnoreCase) ? "spot" : string.Equals(data, "futures", StringComparison.OrdinalIgnoreCase) ? "futures" : null;
+        var (coverage, days) = TuningPerformance.Days(_tuning.HistoryRuns(), _tuning.HistoryRows, d);
+        return Ok(new { coverage, days });
+    }
+
+    /// <summary>GET /api/strategy-tuning/performance/trades?strategy=&amp;setting=&amp;index=&amp;data= - every trade of one strategy
+    /// across all runs (each counted once), oldest first.</summary>
+    [HttpGet("performance/trades")]
+    public IActionResult PerformanceTrades([FromQuery] string strategy, [FromQuery] string? setting = null, [FromQuery] string? index = null, [FromQuery] string? data = null)
+    {
+        if (string.IsNullOrWhiteSpace(strategy)) return BadRequest(new { error = "strategy is required." });
+        var d = string.Equals(data, "spot", StringComparison.OrdinalIgnoreCase) ? "spot" : string.Equals(data, "futures", StringComparison.OrdinalIgnoreCase) ? "futures" : null;
+        var s = setting is "as written" or "fine-tuned" ? setting : null;
+        var i = string.IsNullOrWhiteSpace(index) || index == "all" ? null : index.Trim().ToUpperInvariant();
+        return Ok(TuningPerformance.Trades(_tuning.HistoryRuns(), _tuning.HistoryRows, d, strategy.Trim(), s, i));
     }
 
     /// <summary>What to clear: the tuning results and history, the fetched-days cache, the scanner's record.</summary>
@@ -165,7 +213,7 @@ public sealed class StrategyTuningController : ControllerBase
     [HttpGet("history")]
     public IActionResult History() => Ok(_tuning.HistoryRuns());
 
-    /// <summary>GET /api/strategy-tuning/history/{runId}/{kind} - one run's trades or settings (kind: trades, settings)
+    /// <summary>GET /api/strategy-tuning/history/{runId}/{kind} - one run's trades, settings or days (kind: trades, settings, days)
     /// as rows; `?format=csv` downloads the CSV file itself.</summary>
     [HttpGet("history/{runId}/{kind}")]
     public IActionResult HistoryFile(string runId, string kind, [FromQuery] string? format = null)

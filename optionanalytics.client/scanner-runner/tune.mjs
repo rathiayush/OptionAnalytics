@@ -9,7 +9,7 @@
 //   TUNE_JOB                      { underlying, strategies: 'top3' | 'top5' | 'all' | [ids], days, includeEstimated, minTrades,
 //                                   what: 'trade' | 'oi' | 'both' (the trade settings, the OI confirmation, or the OI first then the trade) }
 //   TUNE_OUT                      the result file
-//   TUNE_HISTORY_DIR              the history kept as CSV (tuneHistory.mjs): runs.csv, {run}-trades.csv, {run}-settings.csv -
+//   TUNE_HISTORY_DIR              the history kept as CSV (tuneHistory.mjs): runs.csv, {run}-trades.csv, {run}-settings.csv, {run}-days.csv -
 //                                 every run's trades and tuned settings, per index, read by the Trades page
 //   TUNE_CACHE_DIR                where each past day's fetched data is kept (tuneFetch.mjs): a rerun / resume / longer range
 //                                 reads it from disk - no Dhan call; TUNE_PACE_MS the pause between requests that reach the server
@@ -47,10 +47,10 @@ import { scannerProfileOf, trailFor } from '../src/scannerCore.js'
 import { defaultTradeLevels } from '../src/tradeDefaults.js'
 import { expiryFlagOf } from '../src/liveFeeds.js'
 import { dayFromOrderFlow, scanDaySetups } from '../src/scanDay.js'
-import { DEFAULT_VARIANT, OI_COMBO_CAP, OI_FACTORS, OPTION_GRID, countOiCombinations, oiFactorsFor, oiGridOf, optionText, rankStrategies, tradeDetails, tuneStrategy, tuningDay, TUNING_GRID, variantText } from '../src/strategyTuning.js'
+import { DEFAULT_VARIANT, splitDays, OI_COMBO_CAP, OI_FACTORS, OPTION_GRID, countOiCombinations, oiFactorsFor, oiGridOf, optionText, rankStrategies, tradeDetails, tuneStrategy, tuningDay, TUNING_GRID, variantText } from '../src/strategyTuning.js'
 import { DEFAULT_ROW_SIZES } from './indexScanner.mjs'
 import { createFetcher, isTransientText, pruneCache } from './tuneFetch.mjs'
-import { RUN_COLUMNS, SETTING_COLUMNS, TRADE_COLUMNS, historyOf, runsCsvWith, toCsv } from './tuneHistory.mjs'
+import { DAY_COLUMNS, RUN_COLUMNS, SETTING_COLUMNS, TRADE_COLUMNS, historyOf, runsCsvWith, toCsv } from './tuneHistory.mjs'
 
 const BASE = (process.env.RUNNER_BASE_URL ?? 'http://127.0.0.1:8080').replace(/\/$/, '')
 const KEY = process.env.RUNNER_KEY ?? ''
@@ -688,14 +688,17 @@ async function main() {
     strategiesTuned: results.length, strategiesAsked: ids.length, tuningStopped: tuneStop,
   }
   if (HISTORY_DIR) {
+    // The same split tuneStrategy makes: the newest days are the test (held back), the rest the train.
+    const testDays = new Set(splitDays(days).test.map((d) => d.date))
     const h = historyOf({
       underlying: U, data: DATA, finishedMs: Date.now(), what: WHAT, search: SEARCH, minTrades: MIN_TRADES, from: FROM, to: TO,
-      days: days.map((d) => ({ date: d.date, estimated: d.estimated })), skipped, results, trades, fetched: fetcher.stats,
+      days: days.map((d) => ({ date: d.date, estimated: d.estimated, role: testDays.has(d.date) ? 'test' : 'train' })), skipped, results, trades, fetched: fetcher.stats,
       calls, budget,
     })
     mkdirSync(HISTORY_DIR, { recursive: true })
     writeJson(join(HISTORY_DIR, `${h.run_id}-trades.csv`), null, toCsv(TRADE_COLUMNS, h.trades))
     writeJson(join(HISTORY_DIR, `${h.run_id}-settings.csv`), null, toCsv(SETTING_COLUMNS, h.settings))
+    writeJson(join(HISTORY_DIR, `${h.run_id}-days.csv`), null, toCsv(DAY_COLUMNS, h.days))
     // runs.csv: the header once, then a line per run (appended - an older run's own values are never rewritten).
     // When a column has been ADDED since the file was written, the file is rebuilt with the new header and the old
     // rows keep what they have - otherwise the new row would have more fields than the header and be dropped.
