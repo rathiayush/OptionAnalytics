@@ -232,6 +232,16 @@ const legCell = (l) => (!l?.trades ? <Text type="secondary">-</Text> : (
     <br /><Text type="secondary" style={{ fontSize: 11 }}><span style={{ color: col(l.points) }}>{pts(l.points)}</span> pts on {f1(l.risked)} risked · {rrText(l.avgRiskReward)}</Text>
   </span>
 ))
+/** A tuned setting across months (TuningPerformance cross-check): months won on unseen days, as written on the same
+ *  days, and how many other runs checked it. */
+const crossText = (t) => {
+  const u = t.unit === 'pts' ? ' pts' : 'R'
+  const parts = [t.periods ? `won ${t.periodsWon} of ${t.periods} month(s)` : 'no unseen month yet']
+  if (t.baseAvg != null) parts.push(`as written ${pts(t.baseAvg)}${u}`)
+  parts.push(t.checkedRuns ? `checked by ${t.checkedRuns} other run(s)` : 'not checked by another run yet')
+  return parts.join(' · ')
+}
+
 /** Points are only comparable within one index (BANKNIFTY moves ~2.5x NIFTY): shown per index; R compares across. */
 function StrategyPerformance({ reloadKey }) {
   const auth = useAuth()
@@ -363,7 +373,7 @@ function StrategyPerformance({ reloadKey }) {
         {entries.flatMap(([, list]) => list).map((t) => (
           <div key={`${t.row.index}-${t.row.run_id}-${t.row.setting_text}`} style={{ borderTop: '1px solid #ffffff14', paddingTop: 6, fontSize: 12 }}>
             <div><b>{t.row.index}</b>{t.best && <Tag color="gold" style={{ marginLeft: 6 }}>best</Tag>}{isLive(liveOf(r.strategyId, t.row.index), t.row) && <Tag color="green" style={{ marginLeft: 4 }}>live now</Tag>} {t.row.setting_text || '-'}</div>
-            <Text type="secondary" style={{ fontSize: 12 }}>{t.runs} run(s) · {t.recommended} recommended · unseen {t.testTrades} trades <b style={{ color: col(t.testAvg) }}>{t.testAvg == null ? '-' : `${pts(t.testAvg)}${t.unit === 'pts' ? ' pts' : 'R'}`}</b>/trade</Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>{t.runs} run(s) · {t.recommended} recommended · unseen {t.testTrades} trades <b style={{ color: col(t.testAvg) }}>{t.testAvg == null ? '-' : `${pts(t.testAvg)}${t.unit === 'pts' ? ' pts' : 'R'}`}</b>/trade · {crossText(t)}</Text>
             <div style={{ marginTop: 4 }}>{applyButton(r, t)}</div>
           </div>
         ))}
@@ -378,7 +388,8 @@ function StrategyPerformance({ reloadKey }) {
           { title: 'Index', key: 'i', width: 130, render: (_, t) => <span style={{ fontSize: 12 }}>{t.row.index}{t.best && <Tag color="gold" style={{ marginLeft: 4 }}>best</Tag>}{isLive(liveOf(r.strategyId, t.row.index), t.row) && <Tag color="green" style={{ marginLeft: 4 }}>live now</Tag>}</span> },
           { title: 'Fine-tuned setting', key: 's', render: (_, t) => <span style={{ fontSize: 12 }}>{t.row.setting_text || '-'}</span> },
           { title: <Tooltip title="How many tuning runs chose this setting, and how many of them recommended it (it also won on the days that run held back)">Chosen / recommended</Tooltip>, key: 'r', width: 150, render: (_, t) => <span style={{ fontSize: 12 }}>{t.runs} run(s) · {t.recommended} recommended</span> },
-          { title: <Tooltip title="The days each run held back and never chose on - the honest number">Unseen days</Tooltip>, key: 'te', width: 170, render: (_, t) => <span style={{ fontSize: 12 }}>{t.testTrades} trades · <b style={{ color: col(t.testAvg) }}>{t.testAvg == null ? '-' : `${pts(t.testAvg)}${t.unit === 'pts' ? ' pts' : 'R'}`}</b>/trade</span> },
+          { title: <Tooltip title="Days this setting was never chosen on - its own run's held-back days AND every day of every other run for this index (each run re-checks every setting found so far). The honest number: a setting tuned on one month is judged on the other months too.">Unseen days</Tooltip>, key: 'te', width: 170, render: (_, t) => <span style={{ fontSize: 12 }}>{t.testTrades} trades · <b style={{ color: col(t.testAvg) }}>{t.testAvg == null ? '-' : `${pts(t.testAvg)}${t.unit === 'pts' ? ' pts' : 'R'}`}</b>/trade</span> },
+          { title: <Tooltip title="On its unseen days: in how many months it traded it made money, the strategy as written on the same days, and how many runs other than the ones that chose it checked it. Best needs: above 0 on unseen days, better than as written there, and - over 2+ months - winning in at least half of them.">Across months</Tooltip>, key: 'pm', width: 190, render: (_, t) => <span style={{ fontSize: 12 }}>{crossText(t)}</span> },
           { title: 'Chosen on', key: 'tr', width: 150, render: (_, t) => <Text type="secondary" style={{ fontSize: 12 }}>{t.trainTrades} trades · {t.trainAvg == null ? '-' : `${pts(t.trainAvg)}${t.unit === 'pts' ? ' pts' : 'R'}`}</Text> },
           { title: <Tooltip title="Unseen-days average shrunk for few trades (avg x n / (n + 10)) - a setting proven over many unseen trades ranks above a lucky one">Score</Tooltip>, key: 'sc', width: 80, render: (_, t) => <span style={{ color: col(t.score) }}>{t.score == null ? '-' : `${pts(t.score)}${t.unit === 'pts' ? '' : 'R'}`}</span> },
           { title: '', key: 'a', width: 170, render: (_, t) => applyButton(r, t) },
@@ -427,7 +438,7 @@ function StrategyPerformance({ reloadKey }) {
       )}
       {isAdmin && data === 'futures' && indices.length > 0 && (
         <Space wrap size={8}>
-          <Tooltip title="For every strategy, the setting marked best for this index (the strongest a run recommended, across all runs) goes on the live scanner for this index - one click after each round of tuning. Tick 'also not recommended' to give the strategies no run recommended their top-scored setting too. Any single setting, recommended or not, can still be applied on its own below.">
+          <Tooltip title="For every strategy, the setting marked best for this index (the strongest on the days it was never chosen on, across every run and month - see 'How the fine-tuning works') goes on the live scanner for this index - one click after each round of tuning. Tick 'also not recommended' to give the strategies with no best setting their top-scored one too. Any single setting, recommended or not, can still be applied on its own below.">
             <Text>Apply the best fine-tuned setting of every strategy, for</Text>
           </Tooltip>
           <Select value={indices.includes(bestFor) ? bestFor : indices[0]} onChange={setBestFor} style={{ width: 130 }} options={indices.map((u) => ({ value: u, label: u }))} aria-label="Best settings of index" />
@@ -454,7 +465,7 @@ function StrategyPerformance({ reloadKey }) {
           <div><b>2. Tune.</b> For each strategy it then tries the ways the trade can be taken - long / short only, the entry time window, stop and target size, time stop, trailing stop, the OI confirmation (and the option&apos;s buy / sell, strike and SL / target when asked) - on those same signals. The strategy&apos;s entry rules are never changed.</div>
           <div><b>3. No fitting the past.</b> A setting is chosen on the older 70% of the job&apos;s days and then checked on the newest 30% it never saw. It is <i>recommended</i> only when it also wins there and beats the strategy as written.</div>
           <div><b>4. Many jobs, one answer.</b> Schedule a long range as short pieces (Strategy tuning → Schedule → Split into) for every index. This page adds every run together: a trade two runs both scanned counts once; <i>As written</i> is each strategy untouched, <i>Fine-tuned</i> is with the setting each run chose. R compares across indices; points only within one index.</div>
-          <div><b>5. The best setting.</b> Open a strategy: every setting the runs chose for it, per index, scored on the days each run held back (fewer unseen trades count for less). When a new run finds a different setting it joins the list, and the one marked <Tag color="gold">best</Tag> is always the strongest any run recommended so far. <Tag color="green">live now</Tag> is the one the scanner uses. Apply any setting (recommended or not), or Apply best to every strategy at once. A setting is applied for the index it was tuned on - that index runs the strategy with it, the other indices keep their own - and can also put the strategy on that index's live list, so it trades live once the index is switched to Live today.</div>
+          <div><b>5. The best setting.</b> Open a strategy: every setting the runs chose for it, per index. Tune September and then October and you get two different settings - so every run also re-checks EVERY setting found so far for its index on its own days that setting was not chosen on: September&apos;s setting is measured on all of October, October&apos;s on its own held-back days (and on September too after a <i>Re-check</i> job over September). Each setting is scored on all its unseen days together (fewer unseen trades count for less), and the one marked <Tag color="gold">best</Tag> is the strongest that made money there, beat the strategy as written on the same days and - once checked over two or more months - won in at least half of them. A setting that only fitted its own month drops out as the next months come in. <Tag color="green">live now</Tag> is the one the scanner uses. Apply any setting (recommended or not), or Apply best to every strategy at once. A setting is applied for the index it was tuned on - that index runs the strategy with it, the other indices keep their own - and can also put the strategy on that index's live list, so it trades live once the index is switched to Live today.</div>
           <div><b>R and risk : reward.</b> Every trade is measured three ways - the index (futures / spot) and the option bought and option sold the setup carries. R = the points it made over the points it risked: the index trade over its SL in index points, an option over its own SL in premium points (Trade settings: its SL, target and trailing stop are applied to it). Its SL is -1R; total R adds every trade up. Risk : reward is as planned, 1 : target / SL. Measure by picks which one ranks the strategies - pick Option bought if that is how you trade.</div>
           <div><b>Days.</b> &quot;Days scanned&quot; are the days a job could read (Which days lists those left out, and why, and the newest 30% each run held back as its test). A strategy&apos;s &quot;16 of 120 days&quot; means it fired on 16 of the 120 days scanned - its first and last trade dates are not the scan range.</div>
           <div><b>6. Improve round by round.</b> Schedule more days → the runs add up → apply what is best now → the next runs check it on new days. A setting only stays best while it keeps winning on days it was not chosen on.</div>

@@ -296,6 +296,25 @@ test('a long job rides out a busy Dhan, leaves out a partial day, re-uses the di
     assert.equal(runsAfter.length, 2, 'two runs kept')
     assert.equal(new Set(runsAfter.map((r) => r.run_id)).size, 2)
     assert.ok(readdirSync(history).filter((f) => f.endsWith('-trades.csv')).length === 2)
+
+    // The cross-check (tuneChecks.mjs): the run's own fine-tuned setting measured per day on its held-back days only,
+    // with the setting's own parameter columns.
+    const ck = rows(join(history, `${runId}-checks.csv`))
+    const tuned = st.find((x) => x.which === 'fine-tuned')
+    assert.ok(ck.length > 0, 'checked')
+    assert.ok(ck.every((x) => test.includes(x.date)), 'never on a day the setting was chosen on')
+    assert.ok(ck.every((x) => x.strategy_id === 'weakWall' && x.tradeSide === tuned.tradeSide && x.tradeFrom === tuned.tradeFrom && x.base_n !== ''))
+    assert.equal(ck.reduce((a, x) => a + Number(x.n), 0), Number(tuned.test_trades), 'what the tuning counted on its test days')
+    assert.ok(again.result.checks.fromEarlierRuns >= 1, 'the second run re-checked the first run\'s setting')
+
+    // A re-check job: no new tuning - every setting found so far measured on the days again.
+    const check = await runJob(base, { underlying: 'NIFTY', strategies: 'top3', days: 30, minTrades: 2, what: 'check' }, env)
+    assert.equal(check.code, 0, JSON.stringify(check.result))
+    assert.deepEqual(check.result.results, [], 'nothing tuned')
+    assert.ok(check.result.checks.settings >= 1 && check.result.checks.fromEarlierRuns >= 1)
+    const checkRun = rows(join(history, 'runs.csv')).at(-1).run_id
+    assert.equal(rows(join(history, `${checkRun}-settings.csv`)).length, 0)
+    assert.ok(rows(join(history, `${checkRun}-checks.csv`)).length > 0)
   } finally {
     server.close()
   }

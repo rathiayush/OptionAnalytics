@@ -574,4 +574,80 @@ public sealed class StrategyTuningServiceTests : IDisposable
         Assert.False(tuned[1].Best);
         Assert.Equal("R3", longSetting.Row["run_id"]); // the newest run's row is what Apply sends
     }
+
+    [Fact]
+    public void SettingsTunedOnDifferentMonths_AreJudgedOnEachOthersUnseenDays_AndTheOneThatKeepsWinningIsBest()
+    {
+        // September tuned -> "long" (R1); October tuned -> "short" (R2). Each run's cross-check measures every setting
+        // found so far on its own days that setting was not chosen on.
+        static Dictionary<string, string> S(string run, string side) => new()
+        {
+            ["run_id"] = run, ["which"] = "fine-tuned", ["strategy_id"] = "ibBreakout", ["index"] = "NIFTY", ["recommended"] = "yes", ["unit"] = "R",
+            ["test_trades"] = "2", ["test_avg"] = "0.8", ["train_trades"] = "20", ["train_avg"] = "0.5", ["tradeSide"] = side, ["tradeFrom"] = "930",
+            ["tradeOiWindow"] = "", ["setting_text"] = $"{side} only",
+        };
+        static Dictionary<string, string> C(string run, string side, string date, int n, double total, int baseN, double baseTotal) => new()
+        {
+            ["run_id"] = run, ["index"] = "NIFTY", ["data"] = "futures", ["strategy_id"] = "ibBreakout", ["unit"] = "R", ["date"] = date,
+            ["n"] = n.ToString(), ["total"] = total.ToString(System.Globalization.CultureInfo.InvariantCulture), ["wins"] = "0",
+            ["base_n"] = baseN.ToString(), ["base_total"] = baseTotal.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            ["tradeSide"] = side, ["tradeFrom"] = "930", ["tradeWallRoom"] = "", // a column the older settings file did not have
+        };
+        var runs = new[] { "R2", "R1" }.Select(r => new Dictionary<string, string> { ["run_id"] = r, ["data"] = "futures", ["index"] = "NIFTY" }).ToList();
+        List<TuningPerformance.TunedSetting> Rank(List<Dictionary<string, string>> octChecks)
+        {
+            var files = new Dictionary<string, List<Dictionary<string, string>>>
+            {
+                ["R1:settings"] = new() { S("R1", "long") },
+                ["R2:settings"] = new() { S("R2", "short") },
+                ["R1:trades"] = new() { new() { ["strategy_id"] = "ibBreakout", ["setting"] = "as written", ["index"] = "NIFTY", ["date"] = "2026-09-25", ["entry_time_ist"] = "x", ["r"] = "1" } },
+                ["R2:trades"] = new(),
+                // September's run: "long" on its own held-back day.
+                ["R1:checks"] = new() { C("R1", "long", "2026-09-25", 3, 1.5, 3, 0.3) },
+                ["R2:checks"] = octChecks,
+            };
+            return TuningPerformance.Build(runs, (id, kind) => files.GetValueOrDefault($"{id}:{kind}")).Rows.Single().TunedSettings["NIFTY"];
+        }
+
+        // 1. "long" keeps winning in October (every October day is unseen for it); "short" won its own held-back days only.
+        var keeps = Rank(new()
+        {
+            C("R2", "long", "2026-10-05", 4, 2.0, 4, -0.4),
+            C("R2", "long", "2026-10-06", 3, 1.0, 3, 0.3),
+            C("R2", "short", "2026-10-20", 2, 1.6, 2, 0.2),
+            C("R2", "long", "2026-09-25", 3, 9.9, 3, 9.9), // the same day checked again by a newer run: counted once (the newer row)
+        });
+        var lng = keeps.Single(t => t.Row["tradeSide"] == "long");
+        var sht = keeps.Single(t => t.Row["tradeSide"] == "short");
+        Assert.Equal((10, 2, 2, 1), (lng.TestTrades, lng.Periods, lng.PeriodsWon, lng.CheckedRuns));
+        Assert.Equal((2.0 + 1.0 + 9.9) / 10, lng.TestAvg!.Value, 6);
+        Assert.Equal((-0.4 + 0.3 + 9.9) / 10, lng.BaseAvg!.Value, 6);
+        Assert.True(lng.Best, "proven over two months on days it was not chosen on");
+        Assert.False(sht.Best, "one month's held-back days - higher average, far less proof");
+        Assert.Equal((2, 1, 0), (sht.TestTrades, sht.Periods, sht.CheckedRuns));
+
+        // 2. "long" LOSES in October: it fitted September. "short" is best now.
+        var fitted = Rank(new()
+        {
+            C("R2", "long", "2026-10-05", 6, -3.0, 6, 0.6),
+            C("R2", "long", "2026-10-06", 4, -1.0, 4, 0.2),
+            C("R2", "short", "2026-10-20", 2, 1.6, 2, 0.2),
+        });
+        Assert.False(fitted.Single(t => t.Row["tradeSide"] == "long").Best);
+        Assert.True(fitted.Single(t => t.Row["tradeSide"] == "short").Best);
+        Assert.Equal("short", fitted[0].Row["tradeSide"]); // ranked first too: "long" is below 0 on its unseen days
+
+        // 3. Making money is not enough: it must beat the strategy as written on the same days.
+        var notBetter = Rank(new()
+        {
+            C("R2", "long", "2026-10-05", 6, 0.6, 6, 6.0),
+            C("R2", "short", "2026-10-20", 2, -0.4, 2, 0.2),
+        });
+        Assert.DoesNotContain(notBetter, t => t.Best);
+
+        // 4. Two months, won in only one of them and down overall: never best.
+        Assert.False(TuningPerformance.CanBeBest(lng with { Score = -0.1, PeriodsWon = 1 }));
+        Assert.False(TuningPerformance.CanBeBest(lng with { Periods = 3, PeriodsWon = 1 }));
+        Assert.True(TuningPerformance.CanBeBest(lng with { Periods = 4, PeriodsWon = 2 }));
+    }
 }

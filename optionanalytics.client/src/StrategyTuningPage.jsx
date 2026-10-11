@@ -284,13 +284,19 @@ const TuningResult = memo(function TuningResult({ result, isAdmin, spot, applyRe
   return (
     <>
             <Card size="small" title={`${result.underlying} · ${result.days?.length ?? 0} day(s) · finished ${when(result.finishedUtc)}`}
-              extra={<Text type="secondary" style={{ fontSize: 11 }}>{result.what ? `tuned: ${{ both: 'OI, then trade', oi: 'OI confirmation', trade: 'trade settings', option: 'option trade', all: 'everything' }[result.what] ?? result.what}${['both', 'oi', 'all'].includes(result.what) && result.oiFactors ? ` (${result.oiFactors.length} OI input(s), ${result.search === 'full' ? 'every combination' : 'step by step'})` : ''} · ` : ''}{result.days?.filter((d) => d.estimated).length ? `${result.days.filter((d) => d.estimated).length} estimated day(s) · ` : ''}min {result.minTrades} trades · {result.days?.[result.days.length - 1]?.date} to {result.days?.[0]?.date}{result.from || result.to ? ` (range asked: ${result.from ?? 'start'} to ${result.to ?? 'yesterday'})` : ''}</Text>}>
+              extra={<Text type="secondary" style={{ fontSize: 11 }}>{result.what ? `tuned: ${{ both: 'OI, then trade', oi: 'OI confirmation', trade: 'trade settings', option: 'option trade', all: 'everything', check: 'nothing - re-check of the settings found so far' }[result.what] ?? result.what}${['both', 'oi', 'all'].includes(result.what) && result.oiFactors ? ` (${result.oiFactors.length} OI input(s), ${result.search === 'full' ? 'every combination' : 'step by step'})` : ''} · ` : ''}{result.days?.filter((d) => d.estimated).length ? `${result.days.filter((d) => d.estimated).length} estimated day(s) · ` : ''}min {result.minTrades} trades · {result.days?.[result.days.length - 1]?.date} to {result.days?.[0]?.date}{result.from || result.to ? ` (range asked: ${result.from ?? 'start'} to ${result.to ?? 'yesterday'})` : ''}</Text>}>
               {result.data === 'spot' && <Alert type="info" showIcon style={{ marginBottom: 8 }} message="Spot + options only: the index candles and the option chain's OI, no futures and no order flow. Points are index points; the option bought and sold are priced beside them. The live scanner does not run these strategies yet, so there is nothing to apply - this measures what they would have done." />}
               {result.skipped?.length > 0 && <SkippedDays skipped={result.skipped} />}
               <Table size="small" rowKey="id" columns={rankedColumns} dataSource={result.ranked ?? []} pagination={false} scroll={{ y: 320 }} />
               <LazyDetails style={{ marginTop: 8 }} summary={<>The {result.days?.length ?? 0} day(s) used{result.skipped?.length ? ` and ${result.skipped.length} left out` : ''}: where each came from and how complete it was{result.fetched ? ` · ${result.fetched.cacheHits} read from the disk cache, ${result.fetched.requests} fetched${result.fetched.retries ? `, ${result.fetched.retries} retried` : ''}` : ''}{result.fastOi?.used ? ` · option chain fetched a cycle at a time (${result.fastOi.seeded} day(s), checked against a day fetched on its own)` : result.fastOi?.reason ? ` · option chain fetched a day at a time: ${result.fastOi.reason}` : ''}</>}>
                 <div style={{ marginTop: 6 }}><DaysTable days={result.days} skipped={result.skipped} /></div>
               </LazyDetails>
+              {result.checks && (
+                <Text type="secondary" style={{ display: 'block', fontSize: 12 }}>
+                  Cross-check: {result.checks.settings} tuned setting(s) re-measured on this run&apos;s days each was not chosen on
+                  {result.checks.fromEarlierRuns ? ` (${result.checks.fromEarlierRuns} found by earlier runs)` : ''} - the Trades page ranks every setting on all its unseen days across runs and months, and marks the best there.
+                </Text>
+              )}
               <Text type="secondary" style={{ fontSize: 12 }}>Every trade of this run, with its date and time: <a href="/trades">Trades page</a>.</Text>
             </Card>
             {(result.results ?? []).map((r) => (
@@ -355,7 +361,7 @@ export default function StrategyTuningPage() {
   useEffect(() => { setOiFactors((cur) => { const ok = oiChoices.map((f) => f.key); return cur.every((k) => ok.includes(k)) ? cur : cur.filter((k) => ok.includes(k)) }) }, [oiChoices])
   const [search, setSearch] = useState('step')
   const combos = useMemo(() => countOiCombinations(oiFactors), [oiFactors])
-  const tunesOi = what !== 'trade' && what !== 'option' // the OI inputs are tuned (OI, OI then trade, everything)
+  const tunesOi = what !== 'trade' && what !== 'option' && what !== 'check' // the OI inputs are tuned (OI, OI then trade, everything)
   const tooMany = tunesOi && search === 'full' && combos.over
   const [status, setStatus] = useState(null)
   const [result, setResult] = useState(null)
@@ -463,6 +469,7 @@ export default function StrategyTuningPage() {
     : p.stage === 'retry' ? `coming back to ${nOf(p.total) ?? ''} day(s) the data service was busy for (round ${p.round} of ${p.rounds})`
     : p.stage === 'scan' ? (p.retrying ? `trying again ${p.day ?? ''} (${p.retrying} day(s) the server was busy for)` : `scanning ${p.day ?? ''}${ofDays(p.done, p.total)}`)
     : p.stage === 'rank' ? 'ranking the strategies'
+    : p.stage === 'check' ? 'cross-checking every setting found so far on the days it was not chosen on'
     : p.stage === 'tune' ? `tuning #${STRATEGY_BY_ID[p.strategy]?.no} ${STRATEGY_BY_ID[p.strategy]?.name ?? p.strategy}${nOf(p.total) ? ` (${(nOf(p.done) ?? 0) + 1} of ${p.total})` : ''}${p.of ? `, ${p.tried.toLocaleString('en-IN')} of ${p.of.toLocaleString('en-IN')} OI combinations` : ''}`
     : p.stage
   const percent = !p ? 0
@@ -470,6 +477,7 @@ export default function StrategyTuningPage() {
     : p.stage === 'retry' ? 80
     : p.stage === 'scan' ? 10 + Math.round(((nOf(p.done) ?? 0) / Math.max(1, nOf(p.total) ?? 1)) * 70)
     : p.stage === 'rank' ? 80
+    : p.stage === 'check' ? 98
     : p.stage === 'tune' ? 80 + Math.round((((nOf(p.done) ?? 0) + (p.of ? Math.min(1, p.tried / p.of) : 0)) / Math.max(1, nOf(p.total) ?? 1)) * 20)
     : 100
 
@@ -509,6 +517,7 @@ export default function StrategyTuningPage() {
                 { value: 'trade', label: <Tooltip title="Sides, entry window, stop / target size, time stop, trailing stop">Trade settings</Tooltip> },
                 { value: 'option', label: <Tooltip title="How it is taken in options: buy or sell, moneyness (ATM, 1-2 ITM, 1-2 OTM), and the option's own SL / target as a % of its premium - checked minute by minute on the premium, scored in premium points">Option trade</Tooltip> },
                 { value: 'all', label: <Tooltip title="The OI confirmation, then the trade settings on top, then the option trade on top of those">Everything</Tooltip> },
+                { value: 'check', label: <Tooltip title="No new tuning: every setting found so far for this index is measured on these days (each only on the days it was not chosen on) - e.g. pick September after tuning October, so October's setting is judged on September too. Every tuning run does this on its own days anyway.">Re-check settings</Tooltip> },
               ]} /></Space></Col>
               {tunesOi && (
                 <Col flex="1 1 100%">

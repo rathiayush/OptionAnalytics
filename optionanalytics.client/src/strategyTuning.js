@@ -418,6 +418,40 @@ export function splitDays(days, trainFraction = 0.7) {
 
 const run = (days, id, variant, trail) => days.flatMap((d) => dayTrades(d, id, variant, trail))
 
+/** Strategy `id`'s trades with `variant` on each day: date -> { n, total, wins } in R (unit 'R', the index trade) or in
+ *  option premium points (unit 'pts', the option trade as tuned) - the same measure the tuning scored it in. */
+export function perDay(days, id, variant, unit = 'R', trail = null) {
+  const out = new Map()
+  for (const day of days) {
+    const xs = unit === 'pts' ? optionRun([day], id, variant, trail) : run([day], id, variant, trail)
+    out.set(day.date, { n: xs.length, total: xs.reduce((a, b) => a + b, 0), wins: xs.filter((x) => x > 0).length })
+  }
+  return out
+}
+
+/** A tuned setting's params as tried (the trade filters' defaults - and for the option trade the option defaults -
+ *  under what was tuned), and the strategy as written in the same measure. */
+export const checkVariant = (params, unit = 'R') => (unit === 'pts' ? { ...DEFAULT_VARIANT, ...OPTION_DEFAULT, ...params } : { ...DEFAULT_VARIANT, ...params })
+export const asWrittenVariant = (unit = 'R') => (unit === 'pts' ? { ...DEFAULT_VARIANT, ...OPTION_DEFAULT } : DEFAULT_VARIANT)
+
+/**
+ * THE CROSS-CHECK. Tuning one month and then another gives two different "best" settings, each judged only on its
+ * own month's held-back days - so they cannot be compared, and either may just fit its own month. Here a setting is
+ * measured on days it was NOT chosen on (`days` - the caller leaves its train days out): per day its trades, and the
+ * strategy as written on the same day. Every run checks every setting found so far for its index this way, so each
+ * one builds up a record on unseen days across months, and the best is the one that keeps winning there.
+ * Rows only for days where either traded.
+ */
+export function checkSetting(days, id, params, unit = 'R', trail = null, asWritten = null) {
+  const mine = perDay(days, id, checkVariant(params, unit), unit, trail)
+  const base = asWritten ?? perDay(days, id, asWrittenVariant(unit), unit, trail)
+  return days.map((d) => {
+    const m = mine.get(d.date) ?? { n: 0, total: 0, wins: 0 }
+    const b = base.get(d.date) ?? { n: 0, total: 0, wins: 0 }
+    return { date: d.date, n: m.n, total: m.total, wins: m.wins, baseN: b.n, baseTotal: b.total }
+  }).filter((r) => r.n > 0 || r.baseN > 0)
+}
+
 /** The strategies as written (default trade filters), ranked by their cautious score on all the days -
  *  the "top" to tune first. Strategies with fewer than `minTrades` trades are listed after, unranked. */
 export function rankStrategies(days, { trail = null, minTrades = 8, ids = ACTIVE_STRATEGIES.map((s) => s.id) } = {}) {
