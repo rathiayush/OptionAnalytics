@@ -350,7 +350,7 @@ export class IndexScanner {
           stopLossPoints: levels.slPts, targetPoints: levels.targetPts,
           // The signal's stop on the INDEX: the server exits the trade itself when the futures go through it - so the
           // index stop holds even if this scanner stops (the option's own SL / target legs are on Dhan already).
-          indexStop: s.stop, indexSide: s.side,
+          indexStop: s.stop, indexSide: s.side, indexTarget: s.target,
           // The server closes it itself at the setup's time stop (15:10 at the latest) - even if this scanner stops.
           exitAtMs: Math.min(s.timeStopMs ?? squareOffMs(s.t), squareOffMs(s.t)), exitReason: `time stop of #${meta?.no} ${meta?.short ?? s.id}`,
         },

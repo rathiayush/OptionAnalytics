@@ -13,12 +13,34 @@ namespace OptionAnalytics.Server.Controllers;
 public sealed class LiveTradingController : ControllerBase
 {
     private readonly LiveTradingService _trading;
+    private readonly ServerLiveService _watch;
     private readonly ILogger<LiveTradingController> _logger;
 
-    public LiveTradingController(LiveTradingService trading, ILogger<LiveTradingController> logger)
+    public LiveTradingController(LiveTradingService trading, ServerLiveService watch, ILogger<LiveTradingController> logger)
     {
         _trading = trading;
+        _watch = watch;
         _logger = logger;
+    }
+
+    /// <summary>POST /api/live-trading/index-watch - the Order Flow page placed a live order for a signal: the server
+    /// watches its INDEX stop-loss and target on the futures price from now on (ServerLiveStopWatcher, every 2 s) and
+    /// exits it on Dhan with a Telegram message when one is hit - even with the page closed.</summary>
+    [HttpPost("index-watch")]
+    public IActionResult WatchIndex([FromBody] PageLiveWatchRequest request)
+    {
+        if (request is null) return BadRequest(new { error = "No body." });
+        var error = _watch.WatchPageTrade(request, DateTimeOffset.UtcNow);
+        return error is null ? Ok(new { watching = true }) : BadRequest(new { error });
+    }
+
+    /// <summary>POST /api/live-trading/index-watch/stop - the page's trailing stop moved the trade's index stop (only
+    /// ever tighter on the server).</summary>
+    [HttpPost("index-watch/stop")]
+    public IActionResult MoveIndexStop([FromBody] PageLiveStopRequest request)
+    {
+        if (request is null) return BadRequest(new { error = "No body." });
+        return _watch.MovePageIndexStop(request.Underlying ?? "", request.Key ?? "", request.Stop) ? Ok(new { moved = true }) : NotFound(new { error = "no such open watched trade" });
     }
 
     /// <summary>The current positions/orders snapshot - what the panel paints first, before the
@@ -93,8 +115,13 @@ public sealed class LiveTradingController : ControllerBase
     {
         _logger.LogWarning("{User} requested a LIVE trade exit for super order(s) {Orders}.", User.Identity?.Name, string.Join(",", request.OrderIds ?? Array.Empty<string>()));
         var result = await _trading.ExitTradeAsync(request.OrderIds ?? Array.Empty<string>(), request.SlippagePoints, CancellationToken.None);
-        // Closed: the server's own time exit for it is no longer needed (a failed exit keeps it as the fallback).
-        if (result.Success) _trading.ClearTimeExit(request.OrderIds ?? Array.Empty<string>());
+        // Closed: the server's own time exit and index stop watch for it are no longer needed (a failed exit keeps both
+        // as the fallback).
+        if (result.Success)
+        {
+            _trading.ClearTimeExit(request.OrderIds ?? Array.Empty<string>());
+            _watch.ClosedByOrders((request.OrderIds ?? Array.Empty<string>()).ToList(), "exited from the page", DateTimeOffset.UtcNow);
+        }
         return result.Success ? Ok(result) : UnprocessableEntity(result);
     }
 

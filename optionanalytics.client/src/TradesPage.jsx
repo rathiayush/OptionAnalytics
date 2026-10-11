@@ -5,7 +5,7 @@ import { OPTION_TRADE_FILTERS, STRATEGY_BY_ID, TRADE_FILTERS, filtersForIndex } 
 import { useNarrow } from './DomDrawer.jsx'
 import { filtersFromTuning, paramsFromSettingsRow } from './strategyTuning.js'
 import { applyFilterValue, applyTunedFilters, putOnLiveList, saveIndexFilters } from './scannerSettings.js'
-import { ApplyTunedButton } from './ApplyTuned.jsx'
+import { AppliedSettings, ApplyTunedButton } from './ApplyTuned.jsx'
 import ClearData from './ClearData.jsx'
 import './tuningMobile.css'
 
@@ -332,6 +332,30 @@ function StrategyPerformance({ reloadKey }) {
       title={`Apply this ${t.row.index} setting to #${r.strategyNo} ${r.strategy}?`}
       description={`${t.recommended ? '' : 'No run recommended it - applied anyway, your call. '}The live scanner (this browser and the server scanner) runs this strategy with it on ${t.row.index} from now - paper, and live when ${t.row.index} is Live today and the strategy is on its live list. What was applied to it on ${t.row.index} before is replaced; other indices keep theirs.`} />
   ) : null)
+  // A fine-tuned strategy's best setting per index, right in its row: the one marked best (else the top-scored, said so),
+  // whether it is live now, and Apply.
+  const quickApply = (r) => {
+    if (r.setting !== 'fine-tuned') return <Text type="secondary" style={{ fontSize: 12 }}>-</Text>
+    const entries = Object.entries(r.tunedSettings ?? {}).filter(([u, list]) => list?.length && (index === 'all' || u === index))
+    if (!entries.length) return <Text type="secondary" style={{ fontSize: 12 }}>no tuned setting yet</Text>
+    return (
+      <Space direction="vertical" size={2}>
+        {entries.map(([u, list]) => {
+          const t = list.find((x) => x.best) ?? list[0]
+          const live = isLive(liveOf(r.strategyId, u), t.row)
+          return (
+            <span key={u} style={{ fontSize: 12 }}>
+              <b>{u}</b>{' '}
+              <Tooltip title={`${t.row.setting_text || '-'} · unseen ${t.testTrades} trades ${t.testAvg == null ? '' : `${pts(t.testAvg)}${t.unit === 'pts' ? ' pts' : 'R'}/trade`} · ${crossText(t)}`}>
+                {t.best ? <Tag color="gold">best</Tag> : <Tag>top - not proven yet</Tag>}
+              </Tooltip>
+              {live ? <Tag color="green">live now</Tag> : applyButton(r, t)}
+            </span>
+          )
+        })}
+      </Space>
+    )
+  }
   // Every strategy's best fine-tuned setting for one index, applied in one go: the marked one (the strongest a run
   // recommended); with "also not recommended", a strategy with none takes its top-scored setting.
   const bestPicks = (u) => (current?.rows ?? []).filter((r) => r.setting === 'fine-tuned')
@@ -436,6 +460,7 @@ function StrategyPerformance({ reloadKey }) {
           })}
         </Row>
       )}
+      {isAdmin && data === 'futures' && <AppliedSettings cfg={liveCfg} isAdmin={isAdmin} onChanged={loadLive} />}
       {isAdmin && data === 'futures' && indices.length > 0 && (
         <Space wrap size={8}>
           <Tooltip title="For every strategy, the setting marked best for this index (the strongest on the days it was never chosen on, across every run and month - see 'How the fine-tuning works') goes on the live scanner for this index - one click after each round of tuning. Tick 'also not recommended' to give the strategies with no best setting their top-scored one too. Any single setting, recommended or not, can still be applied on its own below.">
@@ -488,6 +513,7 @@ function StrategyPerformance({ reloadKey }) {
                   <div>{Object.entries(r.byIndex ?? {}).map(([u, z]) => { const y = legOf(z); return y ? (
                     <span key={u} style={{ marginRight: 10, opacity: y.trades < minTrades ? 0.5 : 1 }}>{view === 'grid' && bestInColumn[u] === r.strategyId && <Tag color="gold">best</Tag>}{u} <b style={{ color: col(y.avgR) }}>{fmtR(y.avgR)}</b> ({y.trades})</span>
                   ) : null })}</div>
+                  {r.setting === 'fine-tuned' && <div>{quickApply(r)}</div>}
                   <Space size={12}>
                     <Button size="small" type="link" style={{ padding: 0, height: 'auto' }} onClick={() => setOpenRows((m) => ({ ...m, [r.key]: !open }))}>{open ? 'Hide' : 'Show'} tuned settings</Button>
                     <Button size="small" type="link" style={{ padding: 0, height: 'auto' }} onClick={() => setTradesOf({ ...r, index, setting: view === 'grid' ? 'both' : r.setting })}>All trades</Button>
@@ -533,6 +559,7 @@ function StrategyPerformance({ reloadKey }) {
         columns={[
           { title: 'Rank', key: 'rank', width: 55, render: (_, __, i) => (i < 3 ? <Tag color="gold">{i + 1}</Tag> : i + 1) },
           { title: 'Strategy', key: 's', render: (_, r) => <span style={{ fontSize: 12 }}>#{r.strategyNo} {r.strategy} {r.setting === 'fine-tuned' ? <Tag color="blue" style={{ marginLeft: 4 }}>fine-tuned</Tag> : <Tag style={{ marginLeft: 4 }}>as written</Tag>}</span> },
+          { title: <Tooltip title="Each index's best setting for this strategy (hover it for the setting and how it did on unseen days) - Apply puts it on the live scanner for that index. Open the row for every setting the runs found.">Best setting · apply</Tooltip>, key: 'best', width: 260, render: (_, r) => quickApply(r) },
           { title: 'Trades', key: 'n', width: 70, sorter: (a, b) => a.l.trades - b.l.trades, render: (_, r) => r.l.trades },
           { title: 'Win %', key: 'w', width: 70, sorter: (a, b) => (a.l.winRate ?? 0) - (b.l.winRate ?? 0), render: (_, r) => pctOf(r.l.winRate) },
           { title: 'Avg R', key: 'ar', width: 80, sorter: (a, b) => (a.l.avgR ?? -1e9) - (b.l.avgR ?? -1e9), render: (_, r) => <b style={{ color: col(r.l.avgR) }}>{fmtR(r.l.avgR)}</b> },

@@ -5,7 +5,7 @@ import { NavBar, useAuth, UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import { ACTIVE_STRATEGIES, SPOT_STRATEGIES, STRATEGY_BY_ID, TRADE_FILTERS } from './strategyEngine.js'
 import { OI_COMBO_CAP, OI_FACTORS, OPTION_DEFAULT, countOiCombinations, oiFactorsFor, optionText, variantText } from './strategyTuning.js'
 import { applyTunedFilters, putOnLiveList } from './scannerSettings.js'
-import { ApplyTunedButton } from './ApplyTuned.jsx'
+import { AppliedSettingsCard, ApplyTunedButton } from './ApplyTuned.jsx'
 import ClearData from './ClearData.jsx'
 import './tuningMobile.css'
 
@@ -441,6 +441,7 @@ export default function StrategyTuningPage() {
   const cancel = () => fetch('/api/strategy-tuning/cancel', { method: 'POST' }).then(loadStatus)
   // Apply, for the result's buttons - through a ref so the (memoised) result is not redrawn on every page change.
   const applyRef = useRef(null)
+  const [appliedKey, setAppliedKey] = useState(0) // the "Applied now" card reloads after an apply
   const apply = async (r, index = null, addToLive = false) => {
     try {
       // `pts` means the option itself was tuned, so the buy / sell, the strike and its SL / target go across too.
@@ -448,6 +449,7 @@ export default function StrategyTuningPage() {
       // For the index it was tuned on (that index only).
       const filters = await applyTunedFilters(r.id, r.best.params, { option, index })
       if (addToLive && index) await putOnLiveList(index, r.id)
+      setAppliedKey((k) => k + 1)
       message.success({
         content: `#${r.no} ${r.name}: ${Object.keys(filters ?? {}).length ? `${variantText(r.best.params)}${option ? ` · ${optionText(r.best.params)}` : ''}` : 'back to its defaults'} - in force now${index ? ` on ${index}` : ''} for this browser's scanner and the server scanner, replacing whatever was applied before${addToLive && index ? `; on ${index}'s live list` : ''}`,
         duration: 8,
@@ -613,6 +615,15 @@ export default function StrategyTuningPage() {
           </Space>
         </Card>
 
+        {isAdmin && (
+          <Alert type="info" showIcon message="How to apply a tuned setting"
+            description={<span style={{ fontSize: 12 }}>
+              1. Here: press <b>Apply to the scanner</b> on a strategy in the result below (that run&apos;s best, for its index).{' '}
+              2. Better - on the <a href="/trades">Trades page</a> (Strategy performance), where every run is added up: the <b>Best setting · apply</b> column has an Apply button per index, or press <b>Apply best to every strategy</b> for a whole index.{' '}
+              Tick &quot;Also put it on the live list&quot; in the confirm to let it trade live once the index is switched to Live today. What is applied shows in <b>Applied now</b> below (✕ takes it off).
+            </span>} />
+        )}
+        <AppliedSettingsCard isAdmin={isAdmin} reloadKey={appliedKey} />
         {shownResult && <TuningResult result={shownResult} isAdmin={isAdmin} spot={shownResult.data === 'spot'} applyRef={applyRef} />}
         {!result && resultError && !running && <Alert type="info" showIcon message={resultError} description="Run a tuning job to see which settings each strategy does best with." />}
       </Space>

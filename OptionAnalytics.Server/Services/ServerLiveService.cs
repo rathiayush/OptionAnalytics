@@ -74,8 +74,10 @@ public sealed class ServerLiveService
             {
                 var s = _state.Indices.GetValueOrDefault(u) ?? new IndexSettings();
                 var trades = _state.Trades.Where(t => t.Underlying == u && t.Day == today).ToList();
-                return new ServerLiveIndexStatus(u, s.LiveDay == today, s.LiveDay, s.MaxTrades, s.MaxLoss, trades.Count,
-                    trades.Count(t => t.ExitedUtc is null && (t.ExitAtMs <= 0 || now.ToUnixTimeMilliseconds() < t.ExitAtMs)), trades.Sum(t => t.Pnl ?? 0), s.ArmedBy, s.ArmedUtc, trades);
+                // The counts are the server scanner's own (its limits); the page's watched trades are listed too.
+                var own = trades.Where(t => !t.IsPageTrade).ToList();
+                return new ServerLiveIndexStatus(u, s.LiveDay == today, s.LiveDay, s.MaxTrades, s.MaxLoss, own.Count,
+                    own.Count(t => t.ExitedUtc is null && (t.ExitAtMs <= 0 || now.ToUnixTimeMilliseconds() < t.ExitAtMs)), own.Sum(t => t.Pnl ?? 0), s.ArmedBy, s.ArmedUtc, trades);
             }).ToList();
         }
     }
@@ -134,7 +136,7 @@ public sealed class ServerLiveService
                 {
                     _state.Trades.Add(new ServerLiveTrade(u, today, request.Key, request.Strategy ?? "", $"{order.Direction} {order.Strike} {order.Side}",
                         result.OrderIds.ToList(), order.Lots, result.LotSize, result.Prices?.Limit, now, null, null, null, result.Success ? null : $"partly placed - {result.Message}")
-                    { ExitAtMs = request.ExitAtMs, IndexStop = request.IndexStop, IndexSide = NormaliseSide(request.IndexSide) });
+                    { ExitAtMs = request.ExitAtMs, IndexStop = request.IndexStop, IndexTarget = request.IndexTarget is > 0 ? request.IndexTarget : null, IndexSide = NormaliseSide(request.IndexSide) });
                     Save();
                 }
             }
@@ -154,7 +156,8 @@ public sealed class ServerLiveService
             var s = _state.Indices.GetValueOrDefault(u);
             if (s?.LiveDay != today) return $"{u} is on paper (not switched to Live today)";
             if (minute < EntryFromMinute || minute > LastEntryMinute) return "outside 09:15 - 14:45 IST - no new live entries";
-            var trades = _state.Trades.Where(t => t.Underlying == u && t.Day == today).ToList();
+            // The server scanner's own trades - the Order Flow page's (watched here for their index stop) have their own limits.
+            var trades = _state.Trades.Where(t => t.Underlying == u && t.Day == today && !t.IsPageTrade).ToList();
             if (trades.Any(t => t.Key == request.Key)) return "this signal was already placed";
             // Open = no exit reported yet and its time stop (the server's own time exit closes it) not passed.
             if (trades.Any(t => t.ExitedUtc is null && (t.ExitAtMs <= 0 || now.ToUnixTimeMilliseconds() < t.ExitAtMs))) return $"a live {u} trade is still open - one at a time";
@@ -200,6 +203,63 @@ public sealed class ServerLiveService
 
     private static string? NormaliseSide(string? side) => side?.Trim().ToUpperInvariant() is "LONG" or "SHORT" ? side.Trim().ToUpperInvariant() : null;
 
+    /// <summary>
+    /// A live trade the ORDER FLOW PAGE placed ("Auto-place on alert" in Live mode, or a confirmed punch): kept here so
+    /// the server watches its INDEX stop-loss and target too (CheckIndexStopsAsync) - the page's own exits only run while
+    /// the page is open; its option SL / target legs (Dhan), trailing SL and time exit are the server's already. Not
+    /// counted in the server scanner's limits (the page keeps its own). The same key again replaces it. Null, or why not.
+    /// </summary>
+    public string? WatchPageTrade(PageLiveWatchRequest request, DateTimeOffset now)
+    {
+        var u = (request.Underlying ?? "").Trim().ToUpperInvariant();
+        if (!TradeSettingsStore.Underlyings.Contains(u)) return $"unknown index {request.Underlying}";
+        if (string.IsNullOrWhiteSpace(request.Key) || request.Key.Length > 120) return "no trade key";
+        var ids = (request.OrderIds ?? Array.Empty<string>()).Where(id => !string.IsNullOrWhiteSpace(id)).Distinct().ToList();
+        if (ids.Count is 0 or > 20) return "no Dhan order ids";
+        var side = NormaliseSide(request.IndexSide);
+        if (side is null) return "the signal's side must be LONG or SHORT";
+        if (request.IndexStop is not > 0) return "no index stop-loss";
+        // A stop on the wrong side of a target would exit at once: refused rather than guessed.
+        if (request.IndexTarget is { } tg && tg > 0 && (side == "LONG" ? tg <= request.IndexStop : tg >= request.IndexStop)) return "the index target is on the wrong side of the stop";
+        var key = PageKey(request.Key);
+        lock (_lock)
+        {
+            _state.Trades.RemoveAll(t => t.Underlying == u && t.Key == key && t.ExitedUtc is null);
+            _state.Trades.Add(new ServerLiveTrade(u, Day(now), key, request.Strategy ?? "", request.Contract ?? "", ids, Math.Max(1, request.Lots), request.LotSize,
+                request.EntryPrice, now, null, null, null, null)
+            { ExitAtMs = request.ExitAtMs, IndexStop = request.IndexStop, IndexTarget = request.IndexTarget is > 0 ? request.IndexTarget : null, IndexSide = side, Source = "page" });
+            Save();
+        }
+        _logger.LogInformation("Watching the page's live {Underlying} {Contract} ({Key}): index SL {Stop}, target {Target}.", u, request.Contract, request.Key, request.IndexStop, request.IndexTarget);
+        return null;
+    }
+
+    /// <summary>A page trade's key here - kept apart from the server scanner's keys (the same signal can be traded by both).</summary>
+    public static string PageKey(string key) => $"page:{key}";
+
+    /// <summary>The page's trailing stop moved a watched trade's index stop - only ever tighter (MoveIndexStop).</summary>
+    public bool MovePageIndexStop(string underlying, string key, decimal stop) => MoveIndexStop(underlying, PageKey(key), stop);
+
+    /// <summary>A live trade closed elsewhere (the page's own exit, the Exit button) - by any of its Dhan order ids: no
+    /// longer watched. Returns how many were open.</summary>
+    public int ClosedByOrders(IReadOnlyCollection<string> orderIds, string reason, DateTimeOffset now)
+    {
+        if (orderIds.Count == 0) return 0;
+        lock (_lock)
+        {
+            var n = 0;
+            for (var i = 0; i < _state.Trades.Count; i++)
+            {
+                var t = _state.Trades[i];
+                if (t.ExitedUtc is not null || !t.OrderIds.Any(orderIds.Contains)) continue;
+                _state.Trades[i] = t with { ExitedUtc = now, ExitReason = t.ExitReason ?? reason };
+                n++;
+            }
+            if (n > 0) Save();
+            return n;
+        }
+    }
+
     /// <summary>The scanner's trailing stop moved the trade's INDEX stop-loss: kept - only ever tighter (a LONG's stop
     /// only up, a SHORT's only down), so a late or repeated report can never loosen it. False when there is no such
     /// open trade.</summary>
@@ -220,31 +280,38 @@ public sealed class ServerLiveService
     }
 
     /// <summary>
-    /// The server's OWN index stop-loss check on every open live trade - so the stop holds even when the scanner is
-    /// down: a LONG whose futures price is at or below its index stop (a SHORT at or above) is exited on Dhan now, like
-    /// the scanner's own exit would. `priceOf` gives an index's current futures price (null when not fresh). The
-    /// option's own SL leg is on Dhan already; this is the index stop on top of it. Returns the trades exited.
+    /// The server's OWN index stop-loss and target check on every open live trade - the server scanner's and the Order
+    /// Flow page's - so they hold even when the scanner is down or the page is closed: a LONG whose futures price is at or
+    /// below its index stop (a SHORT at or above) - or at / beyond its index target - is exited on Dhan now, like the
+    /// scanner's own exit would, and Telegram says so. The stop is checked first. `priceOf` gives an index's current
+    /// futures price (null when not fresh). The option's own SL / target legs are on Dhan already; this is the index
+    /// level on top of them. Returns the trades exited.
     /// </summary>
     public async Task<int> CheckIndexStopsAsync(Func<string, decimal?> priceOf, DateTimeOffset now, CancellationToken cancellationToken)
     {
-        List<ServerLiveTrade> hit;
+        List<(ServerLiveTrade Trade, decimal Price, bool Stop)> hit = new();
         var today = Day(now);
         lock (_lock)
         {
-            hit = _state.Trades.Where(t => t.Day == today && t.ExitedUtc is null && t.IndexStop is > 0 && t.IndexSide is not null
-                    && (t.ExitAtMs <= 0 || now.ToUnixTimeMilliseconds() < t.ExitAtMs)
-                    && priceOf(t.Underlying) is { } p && p > 0 && (t.IndexSide == "LONG" ? p <= t.IndexStop : p >= t.IndexStop))
-                .ToList();
+            foreach (var t in _state.Trades)
+            {
+                if (t.Day != today || t.ExitedUtc is not null || t.IndexSide is null || (t.ExitAtMs > 0 && now.ToUnixTimeMilliseconds() >= t.ExitAtMs)) continue;
+                if (priceOf(t.Underlying) is not { } p || p <= 0) continue;
+                var stopHit = t.IndexStop is > 0 && (t.IndexSide == "LONG" ? p <= t.IndexStop : p >= t.IndexStop);
+                var targetHit = t.IndexTarget is > 0 && (t.IndexSide == "LONG" ? p >= t.IndexTarget : p <= t.IndexTarget);
+                if (stopHit || targetHit) hit.Add((t, p, stopHit));
+            }
         }
-        foreach (var t in hit)
+        foreach (var (t, price, stop) in hit)
         {
-            var price = priceOf(t.Underlying);
-            _logger.LogWarning("Server index SL: {Underlying} {Contract} ({Key}) - futures {Price} through the stop {Stop}; exiting.", t.Underlying, t.Contract, t.Key, price, t.IndexStop);
-            var result = await ExitAsync(t.Underlying, t.Key, $"index SL {t.IndexStop:0.##} (server check, futures {price:0.##})", null, now, cancellationToken);
+            var level = stop ? $"index SL {t.IndexStop:0.##}" : $"index target {t.IndexTarget:0.##}";
+            var who = t.IsPageTrade ? "Order Flow page trade" : "server scanner trade";
+            _logger.LogWarning("Server {Level}: {Underlying} {Contract} ({Key}, {Who}) - futures {Price}; exiting.", level, t.Underlying, t.Contract, t.Key, who, price);
+            var result = await ExitAsync(t.Underlying, t.Key, $"{level} (server check, futures {price:0.##})", null, now, cancellationToken);
             if (_telegram is not null)
                 await _telegram.SendAsync(result.Success
-                    ? $"[Server] LIVE exit - index SL {t.IndexStop:0.##} hit (futures {price:0.##}): {t.Underlying} {t.Contract} closed on Dhan"
-                    : $"[Server] LIVE index SL hit for {t.Underlying} {t.Contract} but the exit FAILED: {result.Message} - check the Dhan panel", CancellationToken.None);
+                    ? $"[Server] LIVE exit - {level} hit (futures {price:0.##}): {t.Underlying} {t.Contract} ({who}) - {result.Message}"
+                    : $"[Server] LIVE {level} hit for {t.Underlying} {t.Contract} ({who}) but the exit FAILED: {result.Message} - check the Dhan panel", CancellationToken.None);
         }
         return hit.Count;
     }
@@ -306,7 +373,7 @@ public sealed class ServerLiveService
 /// <summary>What the scanner sends for one alert: the option and the signal's key (strategy-time-side).</summary>
 public sealed record ServerLiveOrderRequest(string Key, string? Strategy, DateOnly Expiry, decimal Strike, string Side, string Action,
     decimal? StopLossPoints = null, decimal? TargetPoints = null, long ExitAtMs = 0, string? ExitReason = null, string? StrategyId = null,
-    decimal? IndexStop = null, string? IndexSide = null)
+    decimal? IndexStop = null, string? IndexSide = null, decimal? IndexTarget = null)
 {
     /// <summary>The strategy's id - sent, else the key's first part ({id}-{time}-{side}).</summary>
     public string StrategyIdOrFromKey => !string.IsNullOrWhiteSpace(StrategyId) ? StrategyId! : Key.Split('-')[0];
@@ -357,7 +424,19 @@ public sealed record ServerLiveTrade(string Underlying, string Day, string Key, 
     /// trade itself when the futures price goes through it (CheckIndexStopsAsync); moved only tighter by the trail.</summary>
     public decimal? IndexStop { get; init; }
     public string? IndexSide { get; init; }
+    /// <summary>The signal's target on the index - exited there by the server too.</summary>
+    public decimal? IndexTarget { get; init; }
+    /// <summary>"page" - placed by the Order Flow page and only watched here (not in the server scanner's limits); null - the server scanner's.</summary>
+    public string? Source { get; init; }
+    [System.Text.Json.Serialization.JsonIgnore] public bool IsPageTrade => Source == "page";
 }
+
+/// <summary>What the Order Flow page sends after it placed a live order: the trade, its Dhan super order ids, and the
+/// signal's index stop / target / side - so the server watches them (ServerLiveService.WatchPageTrade).</summary>
+public sealed record PageLiveWatchRequest(string Underlying, string Key, IReadOnlyList<string>? OrderIds, decimal? IndexStop, string? IndexSide,
+    decimal? IndexTarget = null, string? Strategy = null, string? Contract = null, int Lots = 1, int? LotSize = null, decimal? EntryPrice = null, long ExitAtMs = 0);
+
+public sealed record PageLiveStopRequest(string Underlying, string Key, decimal Stop);
 
 public sealed record ServerLiveIndexStatus(string Underlying, bool Live, string? LiveDay, int MaxTrades, decimal MaxLoss, int TradesToday,
     int OpenToday, decimal PnlToday, string? ArmedBy, DateTimeOffset? ArmedUtc, List<ServerLiveTrade> Trades);
