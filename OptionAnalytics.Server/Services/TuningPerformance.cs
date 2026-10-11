@@ -162,6 +162,31 @@ public static class TuningPerformance
         return (result, usedRuns, trades);
     }
 
+    /// <summary>Every trade of one strategy across all runs - counted once like Build (the newest run's copy of a trade two
+    /// runs both scanned) - optionally only one setting ("as written" / "fine-tuned") and one index; oldest first.</summary>
+    public static List<Dictionary<string, string>> Trades(IReadOnlyList<Dictionary<string, string>> runs,
+        Func<string, string, List<Dictionary<string, string>>?> readRows, string? data, string strategyId, string? setting = null, string? index = null)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var list = new List<Dictionary<string, string>>();
+        foreach (var run in runs)
+        {
+            var runData = run.GetValueOrDefault("data", "futures");
+            if (data is not null && runData != data) continue;
+            foreach (var t in readRows(run.GetValueOrDefault("run_id", ""), "trades") ?? new())
+            {
+                if (t.GetValueOrDefault("strategy_id") != strategyId) continue;
+                var s = t.GetValueOrDefault("setting", "as written");
+                var i = t.GetValueOrDefault("index", run.GetValueOrDefault("index", ""));
+                if (setting is not null && s != setting) continue;
+                if (index is not null && i != index) continue;
+                if (!seen.Add($"{runData}|{i}|{strategyId}|{s}|{t.GetValueOrDefault("date", "")}|{t.GetValueOrDefault("entry_time_ist", "")}")) continue;
+                list.Add(t);
+            }
+        }
+        return list.OrderBy(t => t.GetValueOrDefault("entry_time_ist", ""), StringComparer.Ordinal).ToList();
+    }
+
     /// <summary>The settings best first by Score; Best marks the top one any run recommended (else none).</summary>
     private static List<TunedSetting> Rank(IEnumerable<TunedAcc> accs)
     {

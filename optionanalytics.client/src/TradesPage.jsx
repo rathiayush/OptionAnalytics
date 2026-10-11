@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Alert, Button, Card, Col, DatePicker, InputNumber, Popconfirm, Row, Segmented, Select, Space, Table, Tag, Tooltip, Typography, message } from 'antd'
+import { Alert, Button, Card, Col, DatePicker, Drawer, InputNumber, Popconfirm, Row, Segmented, Select, Space, Table, Tag, Tooltip, Typography, message } from 'antd'
 import { NavBar, useAuth, UP_COLOR, DOWN_COLOR } from './shared.jsx'
-import { STRATEGY_BY_ID } from './strategyEngine.js'
+import { OPTION_TRADE_FILTERS, STRATEGY_BY_ID, TRADE_FILTERS } from './strategyEngine.js'
 import { useNarrow } from './DomDrawer.jsx'
-import { paramsFromSettingsRow } from './strategyTuning.js'
+import { filtersFromTuning, paramsFromSettingsRow } from './strategyTuning.js'
 import { applyTunedFilters } from './scannerSettings.js'
 import ClearData from './ClearData.jsx'
 import './tuningMobile.css'
@@ -60,6 +60,71 @@ const istMs = (s) => (s ? Date.parse(`${String(s).replace(' ', 'T')}+05:30`) : n
 const inDates = (date, range) => (!range?.[0] || date >= range[0].format('YYYY-MM-DD')) && (!range?.[1] || date <= range[1].format('YYYY-MM-DD'))
 const strategyOptions = (rows, idOf, label) => [...new Map(rows.map((r) => [idOf(r), label(r)])).entries()].filter(([id]) => id).sort((a, b) => String(a[1]).localeCompare(String(b[1]), 'en', { numeric: true })).map(([value, l]) => ({ value, label: l }))
 
+// ---- One strategy's trades across every run ----------------------------------------------------------------------
+const TUNED_KEYS = [...TRADE_FILTERS.map((f) => f.key), ...OPTION_TRADE_FILTERS]
+/** The part of a strategy's scanner filters a tuned setting sets - to tell which tuned setting is live now. */
+const tunedPart = (filters) => Object.fromEntries(TUNED_KEYS.filter((k) => filters?.[k] !== undefined).sort().map((k) => [k, filters[k]]))
+const isLive = (liveFilters, row) => liveFilters != null && JSON.stringify(tunedPart(liveFilters)) === JSON.stringify(tunedPart(filtersFromTuning({}, paramsFromSettingsRow(row), { option: row.unit === 'pts' })))
+
+function StrategyTrades({ target, data, onClose, narrow }) {
+  const [setting, setSetting] = useState(target?.setting ?? 'both')
+  const [index, setIndex] = useState(target?.index ?? 'all')
+  const [rows, setRows] = useState(null)
+  const [error, setError] = useState(null)
+  const id = target?.strategyId
+  useEffect(() => {
+    if (!id) return
+    const q = new URLSearchParams({ strategy: id, data, ...(setting === 'both' ? {} : { setting }), ...(index === 'all' ? {} : { index }) })
+    fetch(`/api/strategy-tuning/performance/trades?${q}`).then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((list) => { setRows({ key: `${id}|${setting}|${index}`, list }); setError(null) }).catch((e) => setError(e.message))
+  }, [id, data, setting, index])
+  const list = rows?.key === `${id}|${setting}|${index}` ? rows.list : null
+  const shown = (list ?? []).map((t) => ({ ...t, _p: num(t.points), _r: num(t.r) }))
+  return (
+    <Drawer open={!!target} onClose={onClose} width={narrow ? '100%' : 1100} title={target ? `#${target.strategyNo} ${target.strategy} - every trade` : ''} destroyOnHidden>
+      {target && (
+        <Space direction="vertical" size={10} style={{ width: '100%' }}>
+          <Space wrap size={8}>
+            <Segmented value={setting} onChange={setSetting} options={[{ value: 'both', label: 'All' }, { value: 'fine-tuned', label: 'Fine-tuned' }, { value: 'as written', label: 'As written' }]} />
+            <Select value={index} onChange={setIndex} style={{ width: 130 }} options={[{ value: 'all', label: 'All indices' }, ...Object.keys(target.byIndex ?? {}).map((u) => ({ value: u, label: u }))]} />
+            <Button size="small" disabled={!shown.length} onClick={() => downloadCsv(`${id}-trades.csv`, Object.keys(shown[0] ?? {}).filter((k) => !k.startsWith('_')).map((k) => ({ title: k, value: (r) => r[k] })), shown)}>Download CSV</Button>
+          </Space>
+          <Text type="secondary" style={{ fontSize: 12 }}>Every trade of this strategy in every tuning run kept (a trade two runs both scanned is listed once). Fine-tuned trades are taken with the setting that run chose.</Text>
+          {error && <Alert type="error" showIcon message={error} />}
+          {list && <Totals rows={shown} points={(t) => t._p} r={(t) => t._r} />}
+          {narrow ? (
+            <Space direction="vertical" size={6} style={{ width: '100%' }}>
+              {!list && !error && <Text type="secondary">loading…</Text>}
+              {shown.map((t, i) => (
+                <div key={i} style={{ borderTop: '1px solid #ffffff14', paddingTop: 6, fontSize: 12 }}>
+                  <div><b>{t.date}</b> {t.entry_time_ist?.slice(11, 16)} → {t.exit_time_ist ? t.exit_time_ist.slice(11, 16) : 'end'} · {t.index} · {sideTag(t.side)} {t.setting === 'fine-tuned' ? <Tag color="blue">fine-tuned</Tag> : <Tag>as written</Tag>}</div>
+                  <div>{f1(num(t.entry))} → {f1(num(t.exit))} · {t.closed_by || '-'} · <b style={{ color: col(t._p) }}>{pts(t._p)}</b> pts · <span style={{ color: col(t._r) }}>{fmtR(t._r)}</span></div>
+                  {(t.option_sold || t.option_bought) && <Text type="secondary" style={{ fontSize: 11 }}>{t.option_sold ? `sold ${t.option_sold} ${pts(num(t.sold_points))}` : ''}{t.option_bought ? ` · bought ${t.option_bought} ${pts(num(t.bought_points))}` : ''}</Text>}
+                </div>
+              ))}
+            </Space>
+          ) : (
+            <Table size="small" loading={!list && !error} rowKey={(t, i) => `${t.run_id}-${t.date}-${t.entry_time_ist}-${t.setting}-${i}`} dataSource={shown} scroll={{ x: 1000 }}
+              pagination={{ pageSize: 50, size: 'small', showSizeChanger: true, pageSizeOptions: [50, 100, 500] }}
+              columns={[
+                { title: 'Date', dataIndex: 'date', width: 100 },
+                { title: 'In → out', key: 't', width: 110, render: (_, t) => `${t.entry_time_ist?.slice(11, 16)} → ${t.exit_time_ist ? t.exit_time_ist.slice(11, 16) : 'end'}` },
+                { title: 'Index', dataIndex: 'index', width: 100 },
+                { title: 'Setting', key: 's', width: 110, render: (_, t) => (t.setting === 'fine-tuned' ? <Tooltip title={t.setting_text}><Tag color="blue">fine-tuned</Tag></Tooltip> : <Tag>as written</Tag>) },
+                { title: 'Side', dataIndex: 'side', width: 70, render: sideTag },
+                { title: 'In → out', key: 'p', width: 140, render: (_, t) => `${f1(num(t.entry))} → ${f1(num(t.exit))}` },
+                { title: 'Closed by', dataIndex: 'closed_by', width: 110 },
+                { title: 'Points', key: 'pt', width: 80, sorter: (a, b) => a._p - b._p, render: (_, t) => <b style={{ color: col(t._p) }}>{pts(t._p)}</b> },
+                { title: 'R', key: 'r', width: 70, sorter: (a, b) => a._r - b._r, render: (_, t) => <span style={{ color: col(t._r) }}>{fmtR(t._r)}</span> },
+                { title: 'Option sold / bought', key: 'o', render: (_, t) => <span style={{ fontSize: 12 }}>{t.option_sold ? <>{t.option_sold} <span style={{ color: col(num(t.sold_points)) }}>{pts(num(t.sold_points))}</span></> : '-'}{t.option_bought ? <> · {t.option_bought} <span style={{ color: col(num(t.bought_points)) }}>{pts(num(t.bought_points))}</span></> : null}</span> },
+              ]} />
+          )}
+        </Space>
+      )}
+    </Drawer>
+  )
+}
+
 // ---- Strategy performance: every tuning run added up per strategy, all indices -----------------------------------
 const pctOf = (v) => (v == null ? '-' : `${Math.round(v * 100)}%`)
 /** Points are only comparable within one index (BANKNIFTY moves ~2.5x NIFTY): shown per index; R compares across. */
@@ -73,6 +138,13 @@ function StrategyPerformance({ reloadKey }) {
   const [view, setView] = useState('ranking')
   const narrow = useNarrow()
   const [openRows, setOpenRows] = useState({}) // phone: which strategy cards show their tuned settings
+  const [tradesOf, setTradesOf] = useState(null) // the strategy whose every trade is open in the drawer
+  // The scanner's filters now - to mark which tuned setting is live (and so whether a better one has been found since).
+  const [liveFilters, setLiveFilters] = useState(null)
+  const loadLive = () => fetch('/api/scanner-runner/config').then((r) => (r.ok ? r.json() : null)).then((c) => setLiveFilters(c?.settings?.filters ?? {})).catch(() => {})
+  useEffect(() => { loadLive() }, [])
+  const [bestFor, setBestFor] = useState('NIFTY')
+  const [applying, setApplying] = useState(false)
   const [body, setBody] = useState(null)
   const [error, setError] = useState(null)
   useEffect(() => {
@@ -92,6 +164,7 @@ function StrategyPerformance({ reloadKey }) {
     try {
       const params = paramsFromSettingsRow(tuned)
       await applyTunedFilters(r.strategyId, params, { option: tuned.unit === 'pts' })
+      loadLive()
       message.success({ content: `#${r.strategyNo} ${r.strategy}: ${tuned.index}'s tuned setting is in force now for the live scanner (this browser and the server scanner)${tuned.setting_text ? ` - ${tuned.setting_text}` : ''}`, duration: 8 })
     } catch (err) {
       message.error(err.message)
@@ -112,6 +185,24 @@ function StrategyPerformance({ reloadKey }) {
       <Button size="small" type={t.best ? 'primary' : 'default'}>Apply to live scanner</Button>
     </Popconfirm>
   ) : null)
+  // Every strategy's best fine-tuned setting for one index (the marked one - the strongest a run recommended), applied in one go.
+  const bestPicks = (u) => (current?.rows ?? []).filter((r) => r.setting === 'fine-tuned').map((r) => ({ r, t: r.tunedSettings?.[u]?.find((x) => x.best) })).filter((x) => x.t)
+  const applyAllBest = async () => {
+    setApplying(true)
+    let done = 0
+    try {
+      for (const { r, t } of bestPicks(bestFor)) {
+        await applyTunedFilters(r.strategyId, paramsFromSettingsRow(t.row), { option: t.unit === 'pts' })
+        done++
+      }
+      message.success({ content: `${done} strateg${done === 1 ? 'y' : 'ies'} now run with ${bestFor}'s best fine-tuned setting on the live scanner`, duration: 8 })
+    } catch (err) {
+      message.error(`${done} applied, then: ${err.message}`)
+    } finally {
+      setApplying(false)
+      loadLive()
+    }
+  }
   const tunedTable = (r) => {
     const entries = Object.entries(r.tunedSettings ?? {})
     if (!entries.length) return <Text type="secondary" style={{ fontSize: 12 }}>No fine-tuned setting for this strategy in the runs kept.</Text>
@@ -119,7 +210,7 @@ function StrategyPerformance({ reloadKey }) {
       <Space direction="vertical" size={8} style={{ width: '100%' }}>
         {entries.flatMap(([, list]) => list).map((t) => (
           <div key={`${t.row.index}-${t.row.run_id}-${t.row.setting_text}`} style={{ borderTop: '1px solid #ffffff14', paddingTop: 6, fontSize: 12 }}>
-            <div><b>{t.row.index}</b>{t.best && <Tag color="gold" style={{ marginLeft: 6 }}>best</Tag>} {t.row.setting_text || '-'}</div>
+            <div><b>{t.row.index}</b>{t.best && <Tag color="gold" style={{ marginLeft: 6 }}>best</Tag>}{isLive(liveFilters?.[r.strategyId], t.row) && <Tag color="green" style={{ marginLeft: 4 }}>live now</Tag>} {t.row.setting_text || '-'}</div>
             <Text type="secondary" style={{ fontSize: 12 }}>{t.runs} run(s) · {t.recommended} recommended · unseen {t.testTrades} trades <b style={{ color: col(t.testAvg) }}>{t.testAvg == null ? '-' : `${pts(t.testAvg)}${t.unit === 'pts' ? ' pts' : 'R'}`}</b>/trade</Text>
             <div style={{ marginTop: 4 }}>{applyButton(r, t)}</div>
           </div>
@@ -130,7 +221,7 @@ function StrategyPerformance({ reloadKey }) {
       <Table size="small" pagination={false} rowKey={(t) => `${t.row.index}-${t.row.run_id}-${t.row.setting_text}`}
         dataSource={entries.flatMap(([, list]) => list)}
         columns={[
-          { title: 'Index', key: 'i', width: 100, render: (_, t) => <span style={{ fontSize: 12 }}>{t.row.index}{t.best && <Tag color="gold" style={{ marginLeft: 4 }}>best</Tag>}</span> },
+          { title: 'Index', key: 'i', width: 130, render: (_, t) => <span style={{ fontSize: 12 }}>{t.row.index}{t.best && <Tag color="gold" style={{ marginLeft: 4 }}>best</Tag>}{isLive(liveFilters?.[r.strategyId], t.row) && <Tag color="green" style={{ marginLeft: 4 }}>live now</Tag>}</span> },
           { title: 'Fine-tuned setting', key: 's', render: (_, t) => <span style={{ fontSize: 12 }}>{t.row.setting_text || '-'}</span> },
           { title: <Tooltip title="How many tuning runs chose this setting, and how many of them recommended it (it also won on the days that run held back)">Chosen / recommended</Tooltip>, key: 'r', width: 150, render: (_, t) => <span style={{ fontSize: 12 }}>{t.runs} run(s) · {t.recommended} recommended</span> },
           { title: <Tooltip title="The days each run held back and never chose on - the honest number">Unseen days</Tooltip>, key: 'te', width: 170, render: (_, t) => <span style={{ fontSize: 12 }}>{t.testTrades} trades · <b style={{ color: col(t.testAvg) }}>{t.testAvg == null ? '-' : `${pts(t.testAvg)}${t.unit === 'pts' ? ' pts' : 'R'}`}</b>/trade</span> },
@@ -170,6 +261,18 @@ function StrategyPerformance({ reloadKey }) {
           })}
         </Row>
       )}
+      {isAdmin && data === 'futures' && indices.length > 0 && (
+        <Space wrap size={8}>
+          <Tooltip title="For every strategy, the setting marked best for this index (the strongest a run recommended, across all runs) goes on the live scanner - one click after each round of tuning. A strategy with no recommended setting is left as it is. Any single setting, recommended or not, can still be applied on its own below.">
+            <Text>Apply the best fine-tuned setting of every strategy, for</Text>
+          </Tooltip>
+          <Select value={indices.includes(bestFor) ? bestFor : indices[0]} onChange={setBestFor} style={{ width: 130 }} options={indices.map((u) => ({ value: u, label: u }))} aria-label="Best settings of index" />
+          <Popconfirm title={`Apply ${bestPicks(indices.includes(bestFor) ? bestFor : indices[0]).length} best setting(s)?`} description="Each strategy with a best setting for this index runs with it on the live scanner (this browser and the server scanner) from now; what was applied to them before is replaced." okText="Apply" onConfirm={applyAllBest} disabled={!bestPicks(indices.includes(bestFor) ? bestFor : indices[0]).length}>
+            <Button type="primary" loading={applying} disabled={!bestPicks(indices.includes(bestFor) ? bestFor : indices[0]).length}>Apply best to every strategy ({bestPicks(indices.includes(bestFor) ? bestFor : indices[0]).length})</Button>
+          </Popconfirm>
+        </Space>
+      )}
+      <StrategyTrades key={tradesOf ? `${tradesOf.strategyId}-${tradesOf.index}-${tradesOf.setting}` : 'none'} target={tradesOf} data={data} narrow={narrow} onClose={() => setTradesOf(null)} />
       <details>
         <summary style={{ cursor: 'pointer', fontSize: 12 }}>How the fine-tuning works, and how to read this page</summary>
         <div style={{ fontSize: 12, marginTop: 6, lineHeight: 1.6 }}>
@@ -177,7 +280,8 @@ function StrategyPerformance({ reloadKey }) {
           <div><b>2. Tune.</b> For each strategy it then tries the ways the trade can be taken - long / short only, the entry time window, stop and target size, time stop, trailing stop, the OI confirmation (and the option&apos;s buy / sell, strike and SL / target when asked) - on those same signals. The strategy&apos;s entry rules are never changed.</div>
           <div><b>3. No fitting the past.</b> A setting is chosen on the older 70% of the job&apos;s days and then checked on the newest 30% it never saw. It is <i>recommended</i> only when it also wins there and beats the strategy as written.</div>
           <div><b>4. Many jobs, one answer.</b> Schedule a long range as short pieces (Strategy tuning → Schedule → Split into) for every index. This page adds every run together: a trade two runs both scanned counts once; <i>As written</i> is each strategy untouched, <i>Fine-tuned</i> is with the setting each run chose. R compares across indices; points only within one index.</div>
-          <div><b>5. The best setting.</b> Open a strategy: every setting the runs chose for it, per index, scored on the days each run held back (fewer unseen trades count for less). The one marked <Tag color="gold">best</Tag> is the strongest that a run recommended - Apply puts it on the live scanner for that strategy.</div>
+          <div><b>5. The best setting.</b> Open a strategy: every setting the runs chose for it, per index, scored on the days each run held back (fewer unseen trades count for less). When a new run finds a different setting it joins the list, and the one marked <Tag color="gold">best</Tag> is always the strongest any run recommended so far. <Tag color="green">live now</Tag> is the one the scanner uses. Apply any setting (recommended or not), or Apply best to every strategy at once.</div>
+          <div><b>6. Improve round by round.</b> Schedule more days → the runs add up → apply what is best now → the next runs check it on new days. A setting only stays best while it keeps winning on days it was not chosen on.</div>
         </div>
       </details>
       {error && <Alert type="error" showIcon message={`Could not load the strategy performance: ${error}`} />}
@@ -196,7 +300,10 @@ function StrategyPerformance({ reloadKey }) {
                   <div>{Object.entries(r.byIndex ?? {}).map(([u, y]) => (
                     <span key={u} style={{ marginRight: 10, opacity: y.trades < minTrades ? 0.5 : 1 }}>{view === 'grid' && bestInColumn[u] === r.strategyId && <Tag color="gold">best</Tag>}{u} <b style={{ color: col(y.avgR) }}>{fmtR(y.avgR)}</b> ({y.trades})</span>
                   ))}</div>
-                  <Button size="small" type="link" style={{ padding: 0, height: 'auto', alignSelf: 'flex-start' }} onClick={() => setOpenRows((m) => ({ ...m, [r.key]: !open }))}>{open ? 'Hide' : 'Show'} tuned settings</Button>
+                  <Space size={12}>
+                    <Button size="small" type="link" style={{ padding: 0, height: 'auto' }} onClick={() => setOpenRows((m) => ({ ...m, [r.key]: !open }))}>{open ? 'Hide' : 'Show'} tuned settings</Button>
+                    <Button size="small" type="link" style={{ padding: 0, height: 'auto' }} onClick={() => setTradesOf({ ...r, index, setting: view === 'grid' ? 'both' : r.setting })}>All trades</Button>
+                  </Space>
                   {open && tunedTable(r)}
                 </Space>
               </Card>
@@ -205,7 +312,7 @@ function StrategyPerformance({ reloadKey }) {
         </Space>
       ) : view === 'grid' ? (
         <Table size="small" loading={!current && !error} rowKey="key" dataSource={gridRows} pagination={false} scroll={{ x: 900 }}
-          expandable={{ expandedRowRender: (r) => tunedTable(r) }}
+          expandable={{ expandedRowRender: (r) => <Space direction="vertical" size={6} style={{ width: '100%' }}><Button size="small" onClick={() => setTradesOf({ ...r, index, setting: 'both' })}>All trades of this strategy</Button>{tunedTable(r)}</Space> }}
           columns={[
             { title: `Strategy (${setting === 'as written' ? 'as written' : 'fine-tuned'})`, key: 's', fixed: 'left', width: 260, render: (_, r) => <span style={{ fontSize: 12 }}>#{r.strategyNo} {r.strategy}</span> },
             ...indices.map((u) => ({
@@ -234,6 +341,7 @@ function StrategyPerformance({ reloadKey }) {
               { title: 'Option sold / bought (premium pts)', key: 'o', render: (_, x) => <span style={{ fontSize: 12 }}>sold <span style={{ color: col(x.soldPoints) }}>{pts(x.soldPoints)}</span> · bought <span style={{ color: col(x.boughtPoints) }}>{pts(x.boughtPoints)}</span>{x.optionTrades ? <> · tuned option <span style={{ color: col(x.optionPoints) }}>{pts(x.optionPoints)}</span></> : null}</span> },
               { title: 'Days', key: 'd', width: 170, render: (_, x) => <Text type="secondary" style={{ fontSize: 12 }}>{x.dayCount} day(s) · {x.firstDay} to {x.lastDay}</Text> },
             ]} />
+            <Button size="small" style={{ alignSelf: 'flex-start' }} onClick={() => setTradesOf({ ...r, index, setting: r.setting })}>All {r.all.trades} trades of this strategy</Button>
             {tunedTable(r)}
           </Space>
         ) }}

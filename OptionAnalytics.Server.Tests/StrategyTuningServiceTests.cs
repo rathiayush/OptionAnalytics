@@ -394,6 +394,13 @@ public sealed class StrategyTuningServiceTests : IDisposable
         Assert.False(asWritten.LatestTuned.ContainsKey("BANKNIFTY"));
 
         Assert.Empty(TuningPerformance.Build(runs, (id, kind) => files.GetValueOrDefault($"{id}:{kind}"), "spot").Rows);
+
+        // Every trade of the strategy, each once, oldest first; by setting and by index.
+        var all = TuningPerformance.Trades(runs, (id, kind) => files.GetValueOrDefault($"{id}:{kind}"), "futures", "ibBreakout");
+        Assert.Equal(4, all.Count);
+        Assert.Equal(new[] { "2026-10-05", "2026-10-06", "2026-10-07", "2026-10-07" }, all.Select(t => t["date"]));
+        Assert.Equal(3, TuningPerformance.Trades(runs, (id, kind) => files.GetValueOrDefault($"{id}:{kind}"), "futures", "ibBreakout", "as written").Count);
+        Assert.Single(TuningPerformance.Trades(runs, (id, kind) => files.GetValueOrDefault($"{id}:{kind}"), "futures", "ibBreakout", "as written", "BANKNIFTY"));
     }
 
     [Fact]

@@ -139,6 +139,18 @@ public sealed class StrategyTuningController : ControllerBase
         return Ok(new { runs, trades, rows });
     }
 
+    /// <summary>GET /api/strategy-tuning/performance/trades?strategy=&amp;setting=&amp;index=&amp;data= - every trade of one strategy
+    /// across all runs (each counted once), oldest first.</summary>
+    [HttpGet("performance/trades")]
+    public IActionResult PerformanceTrades([FromQuery] string strategy, [FromQuery] string? setting = null, [FromQuery] string? index = null, [FromQuery] string? data = null)
+    {
+        if (string.IsNullOrWhiteSpace(strategy)) return BadRequest(new { error = "strategy is required." });
+        var d = string.Equals(data, "spot", StringComparison.OrdinalIgnoreCase) ? "spot" : string.Equals(data, "futures", StringComparison.OrdinalIgnoreCase) ? "futures" : null;
+        var s = setting is "as written" or "fine-tuned" ? setting : null;
+        var i = string.IsNullOrWhiteSpace(index) || index == "all" ? null : index.Trim().ToUpperInvariant();
+        return Ok(TuningPerformance.Trades(_tuning.HistoryRuns(), _tuning.HistoryRows, d, strategy.Trim(), s, i));
+    }
+
     /// <summary>What to clear: the tuning results and history, the fetched-days cache, the scanner's record.</summary>
     public sealed record ClearRequest(bool Tuning, bool Cache, bool ScannerRecord);
 
