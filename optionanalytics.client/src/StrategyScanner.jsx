@@ -1,3 +1,4 @@
+import { ServerLiveSwitch, ServerLiveTrades, useServerLive } from './ServerLive.jsx'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, Button, Card, Checkbox, Col, InputNumber, Modal, Popconfirm, Popover, Progress, Row, Segmented, Select, Space, Switch, Table, Tag, Tooltip, Typography, notification } from 'antd'
 import { SettingOutlined, SoundOutlined } from '@ant-design/icons'
@@ -146,6 +147,12 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   const [tradeMode, setTradeModeState] = useState(() => { try { return localStorage.getItem(TRADE_MODE_KEY) === 'live' ? 'live' : 'paper' } catch { return 'paper' } })
   const setTradeMode = (mode) => { try { localStorage.setItem(TRADE_MODE_KEY, mode) } catch { /* convenience only */ } setTradeModeState(mode) }
   const [autoLive, setAutoLive] = useState(false)
+  // The server scanner's Paper / Live (today) for this index - when it is Live the SERVER places each alert's order,
+  // so this page's own Auto-place stays off (never two orders for one alert).
+  const serverLive = useServerLive()
+  const serverSt = serverLive.list?.find((x) => x.underlying === underlying) ?? null
+  const serverIsLive = !!serverSt?.live
+  useEffect(() => { if (serverIsLive) setAutoLive(false) }, [serverIsLive])
   const liveModeRef = useRef({ mode: 'paper', auto: false })
   useEffect(() => { liveModeRef.current = { mode: canTradeLive ? tradeMode : 'paper', auto: canTradeLive && tradeMode === 'live' && autoLive } }, [canTradeLive, tradeMode, autoLive])
   // Not an admin / not today's live view (or still loading who you are): paper - the saved choice stays
@@ -963,6 +970,17 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                 })}
             </div>
             <div aria-label="Paper option trades">
+              {serverSt && !isReplay && (
+                <div style={{ marginBottom: 4 }}>
+                  <Space wrap size={8} align="center">
+                    <Tooltip title={`What the SERVER scanner does on every ${underlying} alert - with no page open. Paper: paper-trades. Live today: places a real Dhan super order by itself (one open trade at a time, within the day's max trades / loss, the account's loss limit), back to paper tomorrow. Also on the Trade settings page.`}>
+                      <Text strong style={{ fontSize: 12 }}>Server trading ({underlying})</Text>
+                    </Tooltip>
+                    <ServerLiveSwitch underlying={underlying} st={serverSt} isAdmin={isAdmin} set={serverLive.set} compact />
+                  </Space>
+                  <ServerLiveTrades st={serverSt} />
+                </div>
+              )}
               <Space wrap size={8} style={{ marginBottom: 4 }}>
                 <Text strong style={{ fontSize: 12 }}>Option trades</Text>
                 {canTradeLive && (
@@ -1025,7 +1043,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                   <Space wrap size={8} style={{ fontSize: 12 }}>
                     <b>LIVE - real orders on Dhan</b>
                     <Space size={4}>
-                      <Switch size="small" checked={autoLive} aria-label="Auto-place on alert"
+                      <Switch size="small" checked={autoLive && !serverIsLive} disabled={serverIsLive} aria-label="Auto-place on alert"
                         onChange={(v) => {
                           if (!v) { setAutoLive(false); return }
                           Modal.confirm({
@@ -1035,7 +1053,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
                             onOk: () => setAutoLive(true),
                           })
                         }} />
-                      <Text style={{ fontSize: 12 }}>Auto-place on alert</Text>
+                      <Text style={{ fontSize: 12 }}>Auto-place on alert{serverIsLive ? ' (off - the server places them)' : ''}</Text>
                     </Space>
                     <Text style={{ fontSize: 12 }}>slippage</Text>
                     <InputNumber size="small" min={0} max={20} step={0.5} style={{ width: 60 }} value={settings.liveSlippage ?? 2} aria-label="Live slippage"

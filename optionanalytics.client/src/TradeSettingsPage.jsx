@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Alert, Button, Card, InputNumber, Popconfirm, Segmented, Space, Switch, Table, Tag, Tooltip, Typography, message } from 'antd'
 import { NavBar, useAuth } from './shared.jsx'
 import { loadTradeDefaults, refreshTradeSettings, subscribeTradeLevels } from './tradeDefaults.js'
+import { ServerLiveSwitch, ServerLiveTrades, useServerLive } from './ServerLive.jsx'
 
 const { Title, Text } = Typography
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX']
@@ -99,6 +100,35 @@ function KillSwitchCard({ isAdmin }) {
   )
 }
 
+/** The server scanner's Paper / Live choice per index - Live for today only, within each index's limits. */
+function ServerLiveCard({ isAdmin }) {
+  const { list, set } = useServerLive()
+  const anyLive = list?.some((x) => x.live)
+  return (
+    <Card size="small" title={<Space size={8}><span>Server scanner · paper or live</span>{anyLive ? <Tag color="error">LIVE today: {list.filter((x) => x.live).map((x) => x.underlying).join(', ')}</Tag> : list ? <Tag>all on paper</Tag> : null}</Space>}>
+      <Space direction="vertical" size={10} style={{ width: '100%' }}>
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          Paper: the server scanner alerts and paper-trades (Telegram, tagged [Server]). <b>Live today</b>: on every alert it ALSO places a real Dhan super
+          order by itself - no page needs to be open - with the index&apos;s lots, slippage and trailing below and the option SL / target its paper trade
+          uses, and closes it when the trade ends (its stop, target, trailing SL, time stop, 15:10). Only one open live trade per index at a time, at most
+          the max trades a day, no new order after the max loss or after 14:45, and the account&apos;s daily loss limit above always applies.
+          Live lasts until the end of today - every morning each index starts on paper again. Also switchable on the Order Flow page.
+        </Text>
+        {!list && <Text type="secondary">loading…</Text>}
+        {(list ?? []).map((st) => (
+          <div key={st.underlying} style={{ borderTop: '1px solid #ffffff14', paddingTop: 8 }}>
+            <Space wrap size={12} align="center">
+              <Text strong style={{ minWidth: 90, display: 'inline-block' }}>{st.underlying}</Text>
+              <ServerLiveSwitch underlying={st.underlying} st={st} isAdmin={isAdmin} set={set} />
+            </Space>
+            <div style={{ marginTop: 4 }}><ServerLiveTrades st={st} /></div>
+          </div>
+        ))}
+      </Space>
+    </Card>
+  )
+}
+
 export default function TradeSettingsPage() {
   const auth = useAuth()
   const isAdmin = auth?.user?.role === 'Admin'
@@ -167,6 +197,7 @@ export default function TradeSettingsPage() {
           <NavBar />
         </Space>
         <KillSwitchCard isAdmin={isAdmin} />
+        <ServerLiveCard isAdmin={isAdmin} />
         <Card size="small" title="Trade settings · per index">
           <Space direction="vertical" size={12} style={{ width: '100%' }}>
             <Text type="secondary" style={{ fontSize: 12 }}>
@@ -179,8 +210,8 @@ export default function TradeSettingsPage() {
             {!isAdmin && <Alert type="info" showIcon message="Only an admin can change these." />}
             <Table size="small" rowKey="underlying" columns={columns} dataSource={rows} pagination={false} scroll={{ x: 1150 }} />
             <Text type="secondary" style={{ fontSize: 12 }}>
-              The server scanner is paper only: it alerts and paper-trades on Telegram (tagged [Server]) and never places a real order. Which
-              strategies it alerts on, their filters and the trailing stop on the futures signal follow the Order Flow scanner&apos;s settings.
+              The server scanner paper-trades unless an index is switched to Live today (above). Which strategies it alerts on, their filters and
+              the trailing stop on the futures signal follow the Order Flow scanner&apos;s settings.
             </Text>
           </Space>
         </Card>

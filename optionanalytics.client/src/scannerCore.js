@@ -270,7 +270,7 @@ export function paperExitResult(r, underlying) {
 
 export function paperExitText(r, underlying) {
   const meta = STRATEGY_BY_ID[r.strategy]
-  return `Paper exit - ${String(r.exitReason)}: ${paperExitResult(r, underlying)} (#${meta?.no} ${meta?.name})`
+  return `${r.live ? 'LIVE' : 'Paper'} exit - ${String(r.exitReason)}: ${paperExitResult(r, underlying)} (#${meta?.no} ${meta?.name})`
 }
 
 // Was a setup traded as an option (then its exit is reported by the trade's own message)?

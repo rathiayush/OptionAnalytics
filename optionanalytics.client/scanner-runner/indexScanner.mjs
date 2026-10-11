@@ -1,12 +1,15 @@
 // One index (NIFTY, BANKNIFTY or SENSEX) of the server-side strategy scanner: the same data the Order Flow
 // page builds (order flow snapshot + pushes, tape, OI context, previous session profile), the same
 // evaluation (scannerCore.scanTick every 10 s of market time or on new data), the same paper trades, exits
-// and record - with no browser. PAPER ONLY: it never calls the live-trading endpoints.
+// and record - with no browser. Paper, unless an admin switched the index to Live for today (Trade settings or the
+// Order Flow page): then each alert ALSO asks the server for a real order (/api/scanner-runner/live/{index}/order -
+// ServerLiveService checks every limit and places it; the scanner never reaches the manual live-trading API), and
+// its exit closes it there. The paper trade beside it keeps the record either way.
 //
 // Everything outside (HTTP, Telegram, the state file, the clock) comes in through `io`, so the tests can
 // drive a whole day through it.
 
-import { buildOiContext, optionTradeAt, premiumAt, strategyStats, topFifteen, STRATEGY_BY_ID, DEFAULT_TRAIL, optionPlanFor } from '../src/strategyEngine.js'
+import { buildOiContext, optionTradeAt, premiumAt, strategyStats, topFifteen, STRATEGY_BY_ID, DEFAULT_TRAIL, optionPlanFor, squareOffMs } from '../src/strategyEngine.js'
 import { liquiditySignals, pullStackSignals, autoBigLots } from '../src/orderFlowMath.js'
 import {
   MIN, msOf, scanTick, trailFor, alertIdsFor, followSetups, setupEvents, newSetupEventMemory, newPosition, positionRows, sameSignal,
@@ -77,6 +80,8 @@ export class IndexScanner {
   // ---- Configuration -------------------------------------------------------------------------------
 
   get enabled() { return this.config.enabled?.[this.underlying] !== false }
+  // Switched to Live for today (the server says so in the config; it is only ever true for today).
+  get live() { return this.config.live?.[this.underlying] === true }
 
   // The scanner settings as the page would have them for this index: its saved settings, this index's SL /
   // target / trail levels.
@@ -304,9 +309,11 @@ export class IndexScanner {
       const levels = optionPlanFor(s.id, cfg.filters, cfg, premium) // a % SL / target needs the premium
       const lots = Math.max(1, cfg.paperLots ?? 1)
       if (!this.positions.some((p) => sameSignal(p, s, trade))) {
-        this.positions.push(newPosition({ setup: s, trade, which: side, lots, lotSize: PAPER_TRADE_LOT_SIZE[this.underlying] ?? 1, premium, cfg: { ...cfg, paperSl: levels.slPts, paperTarget: levels.targetPts }, at: s.t }))
+        const position = newPosition({ setup: s, trade, which: side, lots, lotSize: PAPER_TRADE_LOT_SIZE[this.underlying] ?? 1, premium, cfg: { ...cfg, paperSl: levels.slPts, paperTarget: levels.targetPts }, at: s.t })
+        this.positions.push(position)
         this.dirty = true
-        if (cfg.telegram !== false) await this.io.telegram(`${TAG} ${paperEntryText({ underlying: this.underlying, trade, lots, premium, setup: s, cfg })}`)
+        if (this.live) await this.placeLive(position, s, trade, levels, cfg)
+        else if (cfg.telegram !== false) await this.io.telegram(`${TAG} ${paperEntryText({ underlying: this.underlying, trade, lots, premium, setup: s, cfg })}`)
       }
       return
     }
@@ -314,6 +321,43 @@ export class IndexScanner {
     if (cfg.telegram !== false) {
       await this.io.telegram(`${TAG} ${this.underlying} #${meta?.no} ${meta?.name} ${s.side} - futures ${s.entry.toFixed(1)} (SL ${s.stop.toFixed(1)}, target ${s.target.toFixed(1)})`)
     }
+  }
+
+  // Live today: the server places the order for this alert - if every limit allows it (one open trade at a time, the
+  // day's max trades / loss, 09:15 - 14:45, the account kill switch). The lots and slippage are the index's Trade
+  // settings; the SL / target the same as the paper trade's. Not placed: the paper trade stays, and says why.
+  async placeLive(position, s, trade, levels, cfg) {
+    const meta = STRATEGY_BY_ID[s.id]
+    const expiry = this.data?.oi?.expiry
+    let res
+    try {
+      if (!expiry) throw new Error('the option expiry is not known yet')
+      res = await this.io.api(`/api/scanner-runner/live/${this.underlying}/order`, {
+        method: 'POST',
+        body: {
+          key: position.key, strategy: `#${meta?.no} ${meta?.name ?? s.id}`, expiry, strike: trade.strike, side: trade.side, action: trade.action,
+          stopLossPoints: levels.slPts, targetPoints: levels.targetPts,
+          // The server closes it itself at the setup's time stop (15:10 at the latest) - even if this scanner stops.
+          exitAtMs: Math.min(s.timeStopMs ?? squareOffMs(s.t), squareOffMs(s.t)), exitReason: `time stop of #${meta?.no} ${meta?.short ?? s.id}`,
+        },
+      })
+    } catch (err) {
+      res = { placed: false, message: err.message }
+    }
+    if (res?.placed) {
+      const o = res.order ?? {}
+      Object.assign(position, {
+        live: true, orderIds: o.orderIds ?? [], liveNote: o.success === false ? `PARTLY placed - ${res.message}` : res.message,
+        lotSize: o.lotSize ?? position.lotSize, premium: o.prices?.limit ?? position.premium, lots: cfg.paperLots ?? position.lots,
+      })
+      this.dirty = true
+      this.io.log(`${this.underlying}: LIVE ${trade.action} ${trade.strike} ${trade.side} placed - ${res.message}`)
+      if (cfg.telegram !== false) await this.io.telegram(`${TAG} LIVE order placed: ${trade.action} ${this.underlying} ${trade.strike} ${trade.side} x${position.lots} lot(s) @ ~${position.premium.toFixed(1)} - #${meta?.no} ${meta?.name} ${s.side}, futures ${s.entry.toFixed(1)}; option SL ${levels.slPts.toFixed(1)} / target ${levels.targetPts.toFixed(1)} pts${o.success === false ? ` - PARTLY placed: ${res.message}` : ''}`)
+      return
+    }
+    position.liveNote = `not placed - ${res?.message ?? 'no answer'}`
+    this.io.log(`${this.underlying}: LIVE order not placed - ${res?.message}`)
+    if (cfg.telegram !== false) await this.io.telegram(`${TAG} LIVE order NOT placed for #${meta?.no} ${meta?.name} ${s.side} (${trade.action} ${trade.strike} ${trade.side}): ${res?.message ?? 'no answer'} - paper trade only`)
   }
 
   // Signals' exits and the paper trades' exits, each announced once.
@@ -329,6 +373,20 @@ export class IndexScanner {
     // The first look after a restart: trades already closed by then are not news.
     const opening = !this.primedExits
     this.primedExits = true
+    // A live trade the scanner closed (its stop, target, trailing SL, time stop or the option's own levels): closed on
+    // Dhan too (if its legs are still working there), once - after a restart as well - with its P&L for the day's limit.
+    for (const r of rows) {
+      const p = this.positions.find((x) => x.key === r.key)
+      if (!p?.live || !r.exitTime || p.liveExitSent) continue
+      p.liveExitSent = true
+      this.dirty = true
+      try {
+        await this.io.api(`/api/scanner-runner/live/${this.underlying}/exit`, { method: 'POST', body: { key: p.key, reason: r.exitReason ?? 'exit', pnl: r.rupees ?? null } })
+      } catch (err) {
+        this.io.log(`${this.underlying}: LIVE exit of ${p.key} failed - ${err.message}`)
+        if (cfg.telegram !== false) await this.io.telegram(`${TAG} LIVE exit FAILED for ${this.underlying} ${p.action} ${p.strike} ${p.side}: ${err.message} - check the Dhan panel`)
+      }
+    }
     for (const r of rows) {
       if (!r.exitTime || !r.exitReason || this.notified.has(r.key)) continue
       this.notified.add(r.key)

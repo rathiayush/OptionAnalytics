@@ -84,6 +84,67 @@ test('a day through the server scanner: alerts paper-traded once each, exits ann
   assert.equal(again.memory.fired.length, fired.length)
 })
 
+test('an index switched to Live: each alert asks the server for a real order once, and its exit closes it there', async () => {
+  const io = fakeIo()
+  const orders = []
+  const exits = []
+  let refuseAfter = 1 // the server places the first and refuses the rest (one open at a time, its limits...)
+  io.api = async (path, opts) => {
+    if (path === '/api/scanner-log/day') { io.posted.push(opts.body); return {} }
+    if (path === '/api/scanner-runner/live/NIFTY/order') {
+      orders.push(opts.body)
+      if (orders.length > refuseAfter) return { placed: false, message: 'a live NIFTY trade is still open - one at a time' }
+      return { placed: true, message: 'placed', order: { success: true, orderIds: [`o${orders.length}`], lotSize: 65, prices: { limit: opts.body.strike > 0 ? 101.5 : 0 } } }
+    }
+    if (path === '/api/scanner-runner/live/NIFTY/exit') { exits.push(opts.body); return { success: true } }
+    throw new Error(`unexpected ${path}`)
+  }
+  const scanner = new IndexScanner('NIFTY', io)
+  scanner.reset(DATE)
+  scanner.setConfig({ alertIds: ALL_IDS, settings: { telegram: true, autoPaper: 'sell', paperLots: 2 }, live: { NIFTY: true } })
+  await runDay(scanner, io, at(15), at(300))
+
+  assert.ok(scanner.positions.length >= 2, 'several alerts')
+  assert.equal(orders.length, scanner.positions.length, 'every alert asked once - the server decides')
+  assert.equal(new Set(orders.map((o) => o.key)).size, orders.length, 'never the same signal twice')
+  const first = orders[0]
+  assert.ok(first.expiry && first.strike > 0 && ['CE', 'PE'].includes(first.side) && first.action === 'SELL' && first.stopLossPoints > 0 && first.targetPoints > 0 && first.exitAtMs > 0, JSON.stringify(first))
+  const live = scanner.positions.filter((p) => p.live)
+  assert.equal(live.length, 1)
+  assert.deepEqual(live[0].orderIds, ['o1'])
+  assert.equal(live[0].lotSize, 65, "the contract's lot size from Dhan")
+  assert.equal(live[0].premium, 101.5, 'the price the order went at')
+  assert.ok(io.telegrams.some((m) => m.startsWith(`${TAG} LIVE order placed: SELL NIFTY`)))
+  assert.ok(io.telegrams.some((m) => m.includes('LIVE order NOT placed') && m.includes('one at a time')), 'a refused order says why')
+  // Its exit went to the server once, with the P&L.
+  const closed = scanner.status().trades.find((r) => r.key === live[0].key)
+  assert.ok(closed?.exitTime, 'the live trade closed during the day')
+  assert.equal(exits.filter((e) => e.key === live[0].key).length, 1)
+  assert.ok(Number.isFinite(exits[0].pnl) && exits[0].reason)
+  assert.ok(io.telegrams.some((m) => m.startsWith(`${TAG} LIVE exit`)))
+  // A restart: nothing is asked again.
+  const asked = orders.length
+  const sentExits = exits.length
+  const again = new IndexScanner('NIFTY', io)
+  again.reset(DATE)
+  again.restore(await io.loadState('NIFTY', DATE))
+  again.setConfig({ alertIds: ALL_IDS, settings: { telegram: true, autoPaper: 'sell', paperLots: 2 }, live: { NIFTY: true } })
+  await runDay(again, io, at(300), at(301))
+  assert.equal(orders.length, asked)
+  assert.equal(exits.length, sentExits)
+  refuseAfter = 99
+})
+
+test('on paper (not switched to Live) the scanner never asks for a live order', async () => {
+  const io = fakeIo() // its api throws on anything but the scanner log
+  const scanner = new IndexScanner('NIFTY', io)
+  scanner.reset(DATE)
+  scanner.setConfig({ alertIds: ALL_IDS, settings: { autoPaper: 'sell' }, live: { NIFTY: false, BANKNIFTY: true } })
+  await runDay(scanner, io, at(15), at(300))
+  assert.ok(scanner.positions.length > 0)
+  assert.ok(scanner.positions.every((p) => !p.live))
+})
+
 test('nothing is scanned before the engine has today\'s data, or for a switched-off index', async () => {
   const io = fakeIo()
   const scanner = new IndexScanner('NIFTY', io)

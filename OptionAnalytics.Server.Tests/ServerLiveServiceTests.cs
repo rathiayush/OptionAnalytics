@@ -1,0 +1,185 @@
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.FileProviders;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging.Abstractions;
+using OptionAnalytics.Server.Services;
+
+namespace OptionAnalytics.Server.Tests;
+
+/// <summary>Live trading by the server scanner (ServerLiveService): Live is for today only, and an alert becomes a real
+/// order only within every limit - checked by the server, never trusted to the scanner.</summary>
+public sealed class ServerLiveServiceTests : IDisposable
+{
+    private readonly string _dir = Path.Combine(Path.GetTempPath(), "oa-server-live-" + Guid.NewGuid().ToString("n"));
+    private static readonly DateOnly Expiry = new(2026, 10, 13);
+    // 10:00 IST on 12 Oct 2026.
+    private static readonly DateTimeOffset At10 = new(2026, 10, 12, 10, 0, 0, TimeSpan.FromHours(5.5));
+
+    public void Dispose() { try { Directory.Delete(_dir, true); } catch { /* temp */ } }
+
+    private sealed class FakeHostEnvironment : IHostEnvironment
+    {
+        public string EnvironmentName { get; set; } = "Test";
+        public string ApplicationName { get; set; } = "Tests";
+        public string ContentRootPath { get; set; } = "";
+        public IFileProvider ContentRootFileProvider { get; set; } = null!;
+    }
+
+    private sealed class FakeOrders : IServerLiveOrders
+    {
+        public List<ManualOrderRequest> Placed { get; } = new();
+        public List<(IReadOnlyList<string> Ids, bool OnlyWorking)> Exits { get; } = new();
+        public bool Fail { get; set; }
+        public Task<ManualOrderResult> PlaceAsync(ManualOrderRequest request, CancellationToken cancellationToken)
+        {
+            if (Fail) return Task.FromResult(ManualOrderResult.Fail("Blocked: the daily loss limit was reached today."));
+            Placed.Add(request);
+            return Task.FromResult(new ManualOrderResult(true, "placed", new[] { $"o{Placed.Count}" }, new ManualOrderPrices(100, 101, 131, 81)) { LotSize = 75 });
+        }
+        public Task<ManualOrderResult> ExitTradeAsync(IReadOnlyList<string> orderIds, decimal slippagePoints, CancellationToken cancellationToken, bool onlyWithWorkingLegs)
+        {
+            Exits.Add((orderIds, onlyWithWorkingLegs));
+            return Task.FromResult(new ManualOrderResult(true, "exited", orderIds, null));
+        }
+    }
+
+    private TradeSettingsStore Trade() => new(new FakeHostEnvironment { ContentRootPath = _dir },
+        new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["Storage:TradeSettingsPath"] = Path.Combine(_dir, "trade-settings.csv") }).Build(),
+        NullLogger<TradeSettingsStore>.Instance);
+
+    private ServerLiveService Live(FakeOrders orders, TradeSettingsStore? trade = null) =>
+        new(trade ?? Trade(), orders, Path.Combine(_dir, "server-live.json"), NullLogger<ServerLiveService>.Instance);
+
+    private static ServerLiveOrderRequest Order(string key = "s1-1-sell", decimal? sl = null, decimal? target = null) =>
+        new(key, "#1 test", Expiry, 25000, "PE", "SELL", sl, target, 0, null);
+
+    [Fact]
+    public async Task OnPaper_NothingIsEverSent()
+    {
+        var orders = new FakeOrders();
+        var r = await Live(orders).PlaceAsync("NIFTY", Order(), At10, default);
+        Assert.False(r.Placed);
+        Assert.Contains("paper", r.Message);
+        Assert.Empty(orders.Placed);
+    }
+
+    [Fact]
+    public async Task LiveIsForTodayOnly_TheNextDayItIsPaperAgain()
+    {
+        var orders = new FakeOrders();
+        var live = Live(orders);
+        Assert.Null(live.Set("NIFTY", true, null, null, "admin", At10));
+        Assert.True(live.IsLive("NIFTY", At10));
+        Assert.False(live.IsLive("BANKNIFTY", At10)); // per index
+        Assert.False(live.IsLive("NIFTY", At10.AddDays(1)));
+        Assert.False((await live.PlaceAsync("NIFTY", Order(), At10.AddDays(1), default)).Placed);
+        // Kept across a restart (the file), still for today only.
+        Assert.True(Live(orders).IsLive("NIFTY", At10));
+        Assert.Null(live.Set("NIFTY", false, null, null, "admin", At10));
+        Assert.False(live.IsLive("NIFTY", At10));
+    }
+
+    [Fact]
+    public async Task ALiveOrder_UsesTheIndexTradeSettings_AndTheScannersOptionLevels()
+    {
+        var trade = Trade();
+        trade.Save("NIFTY", trade.Get("NIFTY") with { Lots = 3, SlippagePoints = 1.5m, TrailStart = 5, TrailGap = 4 });
+        var orders = new FakeOrders();
+        var live = Live(orders, trade);
+        live.Set("NIFTY", true, null, null, "admin", At10);
+        var r = await live.PlaceAsync("NIFTY", Order(sl: 18, target: 27), At10, default);
+        Assert.True(r.Placed, r.Message);
+        var o = Assert.Single(orders.Placed);
+        Assert.Equal((3, 1.5m, 18m, 27m, 5m, 4m, "SELL", "PE", 25000m), (o.Lots, o.SlippagePoints, o.StopLossPoints, o.TargetPoints, o.TrailStartPoints, o.TrailGapPoints, o.Direction, o.Side, o.Strike));
+        // No levels from the scanner: the index's own.
+        live.Set("NIFTY", true, 5, null, "admin", At10);
+        await live.ExitAsync("NIFTY", "s1-1-sell", "target", 500, At10, default);
+        await live.PlaceAsync("NIFTY", Order("s2-1-sell"), At10.AddMinutes(5), default);
+        Assert.Equal((20m, 30m), (orders.Placed[1].StopLossPoints, orders.Placed[1].TargetPoints));
+    }
+
+    [Fact]
+    public async Task OneOpenTradeAtATime_AndTheSameSignalNeverTwice()
+    {
+        var orders = new FakeOrders();
+        var live = Live(orders);
+        live.Set("NIFTY", true, null, null, "admin", At10);
+        Assert.True((await live.PlaceAsync("NIFTY", Order("a"), At10, default)).Placed);
+        var second = await live.PlaceAsync("NIFTY", Order("b"), At10.AddMinutes(1), default);
+        Assert.False(second.Placed);
+        Assert.Contains("still open", second.Message);
+        await live.ExitAsync("NIFTY", "a", "stop", -300, At10.AddMinutes(2), default);
+        Assert.Equal(new[] { "o1" }, orders.Exits.Single().Ids);
+        Assert.True(orders.Exits.Single().OnlyWorking, "never closes a later position in the same contract");
+        Assert.False((await live.PlaceAsync("NIFTY", Order("a"), At10.AddMinutes(3), default)).Placed); // the same signal again
+        Assert.True((await live.PlaceAsync("NIFTY", Order("b"), At10.AddMinutes(3), default)).Placed);
+        // Another index is not held up by NIFTY's open trade - but it must be Live itself.
+        live.Set("BANKNIFTY", true, null, null, "admin", At10);
+        Assert.True((await live.PlaceAsync("BANKNIFTY", Order("c"), At10.AddMinutes(3), default)).Placed);
+    }
+
+    [Fact]
+    public async Task TheMaxTradesAndMaxLossOfTheDay_StopNewOrders()
+    {
+        var orders = new FakeOrders();
+        var live = Live(orders);
+        live.Set("NIFTY", true, 2, 1000, "admin", At10);
+        await live.PlaceAsync("NIFTY", Order("a"), At10, default);
+        await live.ExitAsync("NIFTY", "a", "target", 200, At10, default);
+        await live.PlaceAsync("NIFTY", Order("b"), At10.AddMinutes(1), default);
+        await live.ExitAsync("NIFTY", "b", "target", 100, At10.AddMinutes(1), default);
+        var third = await live.PlaceAsync("NIFTY", Order("c"), At10.AddMinutes(2), default);
+        Assert.False(third.Placed);
+        Assert.Contains("limit of 2", third.Message);
+
+        live.Set("NIFTY", true, 10, 1000, "admin", At10);
+        await live.PlaceAsync("NIFTY", Order("d"), At10.AddMinutes(3), default);
+        await live.ExitAsync("NIFTY", "d", "stop", -1400, At10.AddMinutes(4), default); // day: +300 - 1400 = -1100
+        var afterLoss = await live.PlaceAsync("NIFTY", Order("e"), At10.AddMinutes(5), default);
+        Assert.False(afterLoss.Placed);
+        Assert.Contains("loss", afterLoss.Message);
+        var s = live.Status(At10).Single(x => x.Underlying == "NIFTY");
+        Assert.Equal((3, 0, -1100m), (s.TradesToday, s.OpenToday, s.PnlToday));
+    }
+
+    [Fact]
+    public async Task ATradeNeverReportedClosed_StopsCountingAsOpenAtItsTimeExit()
+    {
+        var orders = new FakeOrders();
+        var live = Live(orders);
+        live.Set("NIFTY", true, null, null, "admin", At10);
+        var exitAt = At10.AddMinutes(30).ToUnixTimeMilliseconds();
+        await live.PlaceAsync("NIFTY", new ServerLiveOrderRequest("a", null, Expiry, 25000, "PE", "SELL", null, null, exitAt), At10, default);
+        Assert.False((await live.PlaceAsync("NIFTY", Order("b"), At10.AddMinutes(10), default)).Placed);
+        Assert.True((await live.PlaceAsync("NIFTY", Order("b"), At10.AddMinutes(31), default)).Placed);
+    }
+
+    [Fact]
+    public async Task NoNewLiveEntry_Before0915OrAfter1445()
+    {
+        var orders = new FakeOrders();
+        var live = Live(orders);
+        live.Set("NIFTY", true, null, null, "admin", At10);
+        var late = new DateTimeOffset(2026, 10, 12, 14, 46, 0, TimeSpan.FromHours(5.5));
+        var early = new DateTimeOffset(2026, 10, 12, 9, 14, 0, TimeSpan.FromHours(5.5));
+        Assert.False((await live.PlaceAsync("NIFTY", Order("a"), late, default)).Placed);
+        Assert.False((await live.PlaceAsync("NIFTY", Order("b"), early, default)).Placed);
+        Assert.Empty(orders.Placed);
+    }
+
+    [Fact]
+    public async Task ARejectedOrder_IsNotRecorded_AndBadOrdersNeverGoOut()
+    {
+        var orders = new FakeOrders { Fail = true };
+        var live = Live(orders);
+        live.Set("NIFTY", true, null, null, "admin", At10);
+        var r = await live.PlaceAsync("NIFTY", Order("a"), At10, default);
+        Assert.False(r.Placed);
+        Assert.Contains("loss limit", r.Message); // the account kill switch's own answer
+        Assert.Equal(0, live.Status(At10).Single(x => x.Underlying == "NIFTY").TradesToday);
+        orders.Fail = false;
+        Assert.False((await live.PlaceAsync("NIFTY", new ServerLiveOrderRequest("x", null, Expiry, 25000, "XX", "SELL"), At10, default)).Placed);
+        Assert.Empty(orders.Placed);
+        Assert.NotNull(live.Set("NIFTY", true, 0, null, "admin", At10)); // limits validated
+    }
+}
