@@ -17,6 +17,17 @@ const fmtR = (v) => (v == null || !Number.isFinite(v) ? '-' : `${v >= 0 ? '+' : 
 const col = (v) => (v == null || !Number.isFinite(v) ? undefined : v > 0 ? UP_COLOR : v < 0 ? DOWN_COLOR : undefined)
 const hhmm = (s) => (s ? String(s).slice(11, 16) : '-') // "yyyy-MM-dd HH:mm:ss" (IST) -> HH:mm
 const sideTag = (s) => <span style={{ color: s === 'LONG' ? UP_COLOR : DOWN_COLOR }}>{s}</span>
+/** Where the trade exits on the INDEX (futures / spot): its stop-loss (and where a trailing stop had moved it), its
+ *  target, and what closed it - the option trade goes out with it (unless the option's own SL / target came first). */
+const indexExit = (t) => (
+  <span style={{ fontSize: 12 }}>
+    SL <b>{f1(num(t.stop))}</b> <Text type="secondary" style={{ fontSize: 11 }}>({f1(num(t.sl_points))} pts)</Text>
+    {t.trailed_stop ? <Text type="secondary" style={{ fontSize: 11 }}> · trailed to {f1(num(t.trailed_stop))}</Text> : null}
+    <br />Target <b>{f1(num(t.target))}</b> <Text type="secondary" style={{ fontSize: 11 }}>({f1(num(t.target_points))} pts)</Text>
+    {t.closed_by ? <><br /><Text type="secondary" style={{ fontSize: 11 }}>closed by {t.closed_by}</Text></> : null}
+  </span>
+)
+const INDEX_EXIT_TIP = 'The index (futures) stop-loss and target the trade exits on: the option is closed when the index trade is - its stop, target, trailing stop, time stop or 15:10 - unless the option\'s own SL / target is hit first'
 
 /** Rows -> a CSV file the browser saves. */
 function downloadCsv(name, columns, rows) {
@@ -110,13 +121,14 @@ function StrategyTrades({ target, data, onClose, narrow }) {
                 <div key={i} style={{ borderTop: '1px solid #ffffff14', paddingTop: 6, fontSize: 12 }}>
                   <div><b>{t.date}</b> {t.entry_time_ist?.slice(11, 16)} → {t.exit_time_ist ? t.exit_time_ist.slice(11, 16) : 'end'} · {t.index} · {sideTag(t.side)} {t.setting === 'fine-tuned' ? <Tag color="blue">fine-tuned</Tag> : <Tag>as written</Tag>}</div>
                   <div>{f1(num(t.entry))} → {f1(num(t.exit))} · {t.closed_by || '-'} · <b style={{ color: col(t._p) }}>{pts(t._p)}</b> pts · <span style={{ color: col(t._r) }}>{fmtR(t._r)}</span></div>
+                  <Text type="secondary" style={{ fontSize: 11 }}>index SL {f1(num(t.stop))} ({f1(num(t.sl_points))} pts){t.trailed_stop ? `, trailed to ${f1(num(t.trailed_stop))}` : ''} · target {f1(num(t.target))} ({f1(num(t.target_points))} pts)</Text><br />
                   <Text type="secondary" style={{ fontSize: 11 }}>risk : reward {rrText(t._rr)}</Text>
                   {(t.option_sold || t.option_bought) && <div style={{ fontSize: 11 }}>{t.option_bought ? <>bought {t.option_bought} <span style={{ color: col(num(t.bought_points)) }}>{pts(num(t.bought_points))}</span> = <b style={{ color: col(t._br) }}>{fmtR(t._br)}</b> ({rrText(t._brr)})</> : null}{t.option_sold ? <>{t.option_bought ? ' · ' : ''}sold {t.option_sold} <span style={{ color: col(num(t.sold_points)) }}>{pts(num(t.sold_points))}</span> = <b style={{ color: col(t._sr) }}>{fmtR(t._sr)}</b> ({rrText(t._srr)})</> : null}</div>}
                 </div>
               ))}
             </Space>
           ) : (
-            <Table size="small" loading={!list && !error} rowKey={(t, i) => `${t.run_id}-${t.date}-${t.entry_time_ist}-${t.setting}-${i}`} dataSource={shown} scroll={{ x: 1300 }}
+            <Table size="small" loading={!list && !error} rowKey={(t, i) => `${t.run_id}-${t.date}-${t.entry_time_ist}-${t.setting}-${i}`} dataSource={shown} scroll={{ x: 1500 }}
               pagination={{ pageSize: 50, size: 'small', showSizeChanger: true, pageSizeOptions: [50, 100, 500] }}
               columns={[
                 { title: 'Date', dataIndex: 'date', width: 100 },
@@ -125,6 +137,7 @@ function StrategyTrades({ target, data, onClose, narrow }) {
                 { title: 'Setting', key: 's', width: 110, render: (_, t) => (t.setting === 'fine-tuned' ? <Tooltip title={t.setting_text}><Tag color="blue">fine-tuned</Tag></Tooltip> : <Tag>as written</Tag>) },
                 { title: 'Side', dataIndex: 'side', width: 70, render: sideTag },
                 { title: 'In → out', key: 'p', width: 140, render: (_, t) => `${f1(num(t.entry))} → ${f1(num(t.exit))}` },
+                { title: <Tooltip title={INDEX_EXIT_TIP}>Index SL / target</Tooltip>, key: 'ix', width: 190, render: (_, t) => indexExit(t) },
                 { title: 'Closed by', dataIndex: 'closed_by', width: 110 },
                 { title: 'Points', key: 'pt', width: 80, sorter: (a, b) => a._p - b._p, render: (_, t) => <b style={{ color: col(t._p) }}>{pts(t._p)}</b> },
                 { title: 'R', key: 'r', width: 70, sorter: (a, b) => a._r - b._r, render: (_, t) => <span style={{ color: col(t._r) }}>{fmtR(t._r)}</span> },
@@ -677,6 +690,7 @@ function BacktestTrades() {
               { title: 'Points', key: 'points', width: 80, sorter: (a, b) => a._p - b._p, render: (_, t) => <b style={{ color: col(t._p) }}>{pts(t._p)}</b> },
               { title: 'R', dataIndex: 'r', width: 75, sorter: (a, b) => num(a.r) - num(b.r), render: (v) => <span style={{ color: col(num(v)) }}>{fmtR(num(v))}</span> },
               ]),
+              ...(justOptions ? [{ title: <Tooltip title={INDEX_EXIT_TIP}>Exits on the {spot ? 'index' : 'futures'}</Tooltip>, key: 'ix', width: 190, render: (_, t) => indexExit(t) }] : []),
               { title: 'Option traded', key: 'ot', width: 250, render: (_, t) => (t.option_traded ? leg(t.option_traded, t.option_in, t.option_out, t.option_points, t.option_sl, t.option_target, t.option_closed_by) : <Text type="secondary">-</Text>) },
               { title: 'If I BOUGHT the option', key: 'b', width: 260, render: (_, t) => leg(t.option_bought, t.bought_in, t.bought_out, t.bought_points, t.bought_sl, t.bought_target, t.bought_closed_by) },
               { title: 'If I SOLD the option', key: 'so', width: 260, render: (_, t) => leg(t.option_sold, t.sold_in, t.sold_out, t.sold_points, t.sold_sl, t.sold_target, t.sold_closed_by) },
