@@ -4,7 +4,7 @@
 
 import {
   ACTIVE_STRATEGIES, STRATEGY_BY_ID, evaluateStrategies, simulateOutcome, DEFAULT_TRAIL, RANGE_IDS,
-  exitLabel, premiumAt, optionStopTargetHit, squareOffMs,
+  exitLabel, premiumAt, optionStopTargetHit, squareOffMs, futuresChange, optionOiRead,
 } from './strategyEngine.js'
 import { aggregateBars, analyzeBars, findWalls } from './orderFlowMath.js'
 import { chargeRates, tradeCharges } from './tradeCharges.js'
@@ -113,8 +113,65 @@ export function scanTick(input, memory) {
   })
   const watching = watchNow.filter((w) => w.missing.length)
   const recentlyFired = (s) => memory.fired.some((f) => f.id === s.id && f.side === s.side && s.t - f.t < COOLDOWN_MS)
-  const fresh = setups.filter((s) => !recentlyFired(s)).map((s) => ({ ...s, trail: trailOf(s, trail) }))
+  const fresh0 = setups.filter((s) => !recentlyFired(s))
+  // What the market looked like at the signal - kept with it in the scanner record, so which conditions win can be
+  // learned from the live signals (only what was known at the clock).
+  const market = fresh0.length ? marketAt({ nowMs, price, bars, tapePrints: estimated ? null : tapePrints, oi, heatmap: view.heatmap, lotSize, largeLots }) : null
+  const fresh = fresh0.map((s) => ({ ...s, trail: trailOf(s, trail), market }))
   return { price, watching, fresh, fired: fresh.length ? [...memory.fired, ...fresh] : memory.fired }
+}
+
+// The market at a signal, in a few numbers (MARKET_KEYS) - each read only from what was known at `nowMs`: the tape up
+// to it, the completed bars, the finished minutes' OI and the last heatmap column at or before it. null where the data
+// is not there (an estimated day has no tape or book). Signed as the market is (+ = buyers / longs / puts written);
+// the learning turns them to "with the trade" by the signal's side.
+//   tape30 / tape60 / tape300  % of the tape's volume bought at the offer, last 30 s / 1 min / 5 min
+//   bigNet / bigCount          big prints (>= the big-order lots) in the last 5 min: net lots bought - sold, how many
+//   cvd15                      the last 15 completed bars' delta, in lots
+//   volX                       the last 15 bars' volume vs the day's 15-minute average so far
+//   futPx15 / futOi15 / futOi5 futures price % and OI % change over 15 / 5 min
+//   writers15 / writersOpen    option writers' lean near the money, 15 min / since the open (+ = puts written)
+//   pcr                        put / call OI near the money
+//   bookImb                    order book near the price (±0.15%): (bids - asks) / (bids + asks)
+//   vwapDist                   price vs the day's VWAP, %
+export const MARKET_KEYS = ['tape30', 'tape60', 'tape300', 'bigNet', 'bigCount', 'cvd15', 'volX', 'futPx15', 'futOi15', 'futOi5', 'writers15', 'writersOpen', 'pcr', 'bookImb', 'vwapDist']
+
+export function marketAt({ nowMs, price, bars, tapePrints, oi, heatmap, lotSize, largeLots }) {
+  const lots = (q) => q / Math.max(1, lotSize || 1)
+  const round = (v, d = 2) => (v == null || !Number.isFinite(v) ? null : Math.round(v * 10 ** d) / 10 ** d)
+  const prints = (tapePrints ?? []).filter((p) => msOf(p.time) <= nowMs)
+  const aggOf = (ms) => {
+    const w = prints.filter((p) => msOf(p.time) > nowMs - ms)
+    const total = w.reduce((a, p) => a + (p.quantity ?? 0), 0)
+    return total > 0 ? (100 * w.filter((p) => p.buy).reduce((a, p) => a + (p.quantity ?? 0), 0)) / total : null
+  }
+  const bigMin = Math.max(1, largeLots || 10) * Math.max(1, lotSize || 1)
+  const big = prints.filter((p) => msOf(p.time) > nowMs - 5 * MIN && (p.quantity ?? 0) >= bigMin)
+  const volOf = (b) => ((b.buy ?? 0) + (b.sell ?? 0)) || b.volume || 0
+  const last15 = (bars ?? []).slice(-15)
+  const dayVol = (bars ?? []).reduce((a, b) => a + volOf(b), 0)
+  const per15 = (bars ?? []).length >= 15 ? dayVol / ((bars ?? []).length / 15) : null
+  let pv = 0, v = 0
+  for (const b of bars ?? []) { const vol = volOf(b); pv += ((b.high + b.low + b.close) / 3) * vol; v += vol }
+  const vwap = v > 0 ? pv / v : null
+  const f15 = oi ? futuresChange(oi, nowMs, 15) : null
+  const f5 = oi ? futuresChange(oi, nowMs, 5) : null
+  const spot = oi?.spot?.length ? oi.spot.filter((x) => x.t <= nowMs).at(-1)?.close : null
+  const read = oi && spot ? optionOiRead(oi, spot, nowMs, 15, 3) : null
+  const col = (heatmap ?? []).filter((c) => msOf(c.t ?? c.time) <= nowMs).at(-1)
+  const near = (rows) => (rows ?? []).reduce((a, r) => (Math.abs(r[0] - price) <= price * 0.0015 ? a + r[1] : a), 0)
+  const bids = col ? near(col.bids) : 0
+  const asks = col ? near(col.asks) : 0
+  return {
+    tape30: round(aggOf(30_000), 0), tape60: round(aggOf(60_000), 0), tape300: round(aggOf(300_000), 0),
+    bigNet: tapePrints ? round(lots(big.reduce((a, p) => a + (p.buy ? 1 : -1) * p.quantity, 0)), 0) : null, bigCount: tapePrints ? big.length : null,
+    cvd15: last15.length ? round(lots(last15.reduce((a, b) => a + (b.delta ?? 0), 0)), 0) : null,
+    volX: per15 > 0 ? round(last15.reduce((a, b) => a + volOf(b), 0) / per15) : null,
+    futPx15: round(f15?.pricePct != null ? f15.pricePct * 100 : null, 3), futOi15: round(f15?.oiPct != null ? f15.oiPct * 100 : null, 3), futOi5: round(f5?.oiPct != null ? f5.oiPct * 100 : null, 3),
+    writers15: round(read?.lean), writersOpen: round(read?.leanOpen), pcr: round(read?.pcr),
+    bookImb: bids + asks > 0 ? round((bids - asks) / (bids + asks)) : null,
+    vwapDist: vwap ? round(((price - vwap) / vwap) * 100, 3) : null,
+  }
 }
 
 // A setup's trailing stop: its strategy's own (the tradeTrail filter - applyTradeFilter's trailOverride, null =
@@ -292,6 +349,7 @@ export function scannerLogBody({ underlying, date, source, dayResults, rows, cha
       voteOi: x.regime?.votes?.oi ?? null, voteCvd: x.regime?.votes?.cvd ?? null, adaptiveTake: x.adaptive?.take ?? null,
       adaptivePriceOnly: x.adaptive?.priceOnly ?? null, adaptiveReason: x.adaptive?.reason ?? null, status: o.status ?? null, r: o.r ?? null,
       exitTime: closed ? o.exitAt ?? null : null, exitPrice: closed ? o.exitPrice ?? null : null, exitReason: closed ? exitLabel(o) : null,
+      market: x.market ?? null,
     }
   })
   // Each trade names its signal: the exact one, else the same strategy and side within two minutes.

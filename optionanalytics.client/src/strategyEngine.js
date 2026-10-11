@@ -833,7 +833,7 @@ export function oiSummary(oi, ms) {
   }
 }
 
-function futuresChange(oi, ms, minutes) {
+export function futuresChange(oi, ms, minutes) {
   return futuresSince(oi, ms, ms - minutes * MIN)
 }
 

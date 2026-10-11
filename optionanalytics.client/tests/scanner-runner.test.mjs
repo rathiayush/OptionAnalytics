@@ -67,6 +67,7 @@ test('a day through the server scanner: alerts paper-traded once each, exits ann
   const last = io.posted.at(-1)
   assert.equal(last.source, 'server')
   assert.equal(last.signals.length, fired.length)
+  assert.ok(last.signals.every((x) => x.market && 'tape60' in x.market && 'futOi15' in x.market && 'bookImb' in x.market), 'each signal keeps the market at its time')
   assert.equal(last.trades.length, scanner.positions.length)
   assert.ok(last.trades.every((t) => t.lots === 2), 'paper trades sized by the lots set')
   const status = scanner.status()
