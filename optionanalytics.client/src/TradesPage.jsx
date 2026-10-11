@@ -207,6 +207,8 @@ function TuningDays({ open, data, onClose, narrow, coverage }) {
 
 // ---- Strategy performance: every tuning run added up per strategy, all indices -----------------------------------
 const pctOf = (v) => (v == null ? '-' : `${Math.round(v * 100)}%`)
+// The market at a signal, as the scanner record keeps it (ScannerLogStore.SignalColumns).
+const MARKET_CSV = ['mkt_tape30', 'mkt_tape60', 'mkt_tape300', 'mkt_big_net', 'mkt_big_count', 'mkt_cvd15', 'mkt_vol_x', 'mkt_fut_px15', 'mkt_fut_oi15', 'mkt_fut_oi5', 'mkt_writers15', 'mkt_writers_open', 'mkt_pcr', 'mkt_book_imb', 'mkt_vwap_dist']
 const rrText = (v) => (v == null || !Number.isFinite(v) ? '-' : `1 : ${v.toFixed(2)}`)
 const LEGS = [['futures', 'Index'], ['bought', 'Option bought'], ['sold', 'Option sold']]
 /** One instrument's numbers: total R (avg per trade), net points over the points risked, risk : reward. */
@@ -763,6 +765,8 @@ function ScannerRecord() {
   ]
   const columns = signals ? signalColumns : tradeColumns
   const csvColumns = columns.map((c) => ({ title: typeof c.title === 'string' ? c.title : c.key, value: (r) => (c.dataIndex ? r[c.dataIndex] : c.key === 't' ? `${(signals ? r.time_ist : r.entry_time_ist) ?? ''} -> ${r.exit_time_ist ?? ''}` : c.key === 's' ? nameOf(r) : c.key === 'o' ? `${r.action} ${r.strike} ${r.option}` : c.key === 'l' ? `${r.lots}x${r.lot_size}` : c.key === 'p' ? `${r.entry_premium}->${r.exit_premium}` : '') }))
+  // Signals: the market at each one too (tape, big orders, futures OI, book... - the mkt_* columns).
+  if (signals) for (const k of MARKET_CSV) csvColumns.push({ title: k, value: (r) => r[k] ?? '' })
   const rupees = shown.map((r) => num(r.net_rupees)).filter(Number.isFinite).reduce((a, b) => a + b, 0)
   return (
     <Space direction="vertical" size={10} style={{ width: '100%' }}>
@@ -781,7 +785,7 @@ function ScannerRecord() {
         <>
           <Totals rows={shown} points={(r) => num(r.points)} r={signals ? (r) => num(r.r) : null} extra={!signals && <span>net <b style={{ color: col(rupees) }}>₹{Math.round(rupees).toLocaleString('en-IN')}</b> after charges</span>} />
           <Table size="small" rowKey="key" dataSource={shown} columns={columns} pagination={{ pageSize: 50, size: 'small', showSizeChanger: true, pageSizeOptions: [50, 100, 500] }} scroll={{ x: 1400 }} />
-          <Text type="secondary" style={{ fontSize: 12 }}>The whole file: <a href={`/api/scanner-log/${file}`} download>{file}.csv</a>.</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>The whole file: <a href={`/api/scanner-log/${file}`} download>{file}.csv</a>{signals ? ' - every signal with the market at its time (tape, big orders, futures OI, option writers, the order book: the mkt_ columns)' : ''}.</Text>
         </>
       )}
     </Space>
