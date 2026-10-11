@@ -6,6 +6,7 @@ import { Button, Card, Checkbox, Col, InputNumber, Popconfirm, Popover, Row, Spa
 import { STRATEGY_BY_ID } from './strategyEngine.js'
 import { DEFAULT_VARIANT, settingParams, variantText } from './strategyTuning.js'
 import { saveIndexFilters, saveIndexLots } from './scannerSettings.js'
+import { ServerLiveSwitch, ServerLiveTrades, useServerLive } from './ServerLive.jsx'
 
 const { Text } = Typography
 
@@ -39,7 +40,21 @@ export function ParamsPopover({ source, from = 'params', label = 'Parameters', a
  * buy / sell and strike are used, (4) the index switched to Live today (back to paper every morning). `cfg` = GET
  * /api/scanner-runner/config.
  */
-export function LiveSetup({ cfg }) {
+/** An index's "what an alert trades" to per strategy (Trade settings), keeping every other setting of it. */
+async function setPerStrategy(u, onChanged) {
+  try {
+    const all = await fetch('/api/trade-settings').then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+    const cur = (all?.settings ?? []).find((x) => x.underlying === u)
+    if (!cur) throw new Error(`no Trade settings for ${u}`)
+    const res = await fetch(`/api/trade-settings/${u}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...cur, autoTrade: 'strategy' }) })
+    const json = await res.json().catch(() => null)
+    if (!res.ok) throw new Error(json?.error ?? `HTTP ${res.status}`)
+    message.success(`${u}: an alert now trades per strategy - each strategy's tuned buy / sell and strike are used`)
+    onChanged?.()
+  } catch (err) { message.error(err.message) }
+}
+
+export function LiveSetup({ cfg, serverLive = null, isAdmin = false, onChanged = null }) {
   if (!cfg) return null
   const indices = ['NIFTY', 'BANKNIFTY', 'SENSEX']
   const name = (id) => `#${STRATEGY_BY_ID[id]?.no ?? '?'} ${STRATEGY_BY_ID[id]?.name ?? id}`
@@ -59,7 +74,8 @@ export function LiveSetup({ cfg }) {
           const list = cfg.liveList?.[u] ?? []
           const trade = cfg.trade?.[u] ?? {}
           const levels = cfg.levels?.[u] ?? {}
-          const live = !!cfg.live?.[u]
+          const st = serverLive?.list?.find((x) => x.underlying === u)
+          const live = st ? !!st.live : !!cfg.live?.[u]
           const tunedLegs = applied.filter((id) => cfg.filtersByIndex[u][id]?.tradeOptLeg)
           const perStrategy = trade.autoTrade === 'strategy'
           const tradesLive = list.map((id) => ({ id, tuned: applied.includes(id) }))
@@ -70,8 +86,20 @@ export function LiveSetup({ cfg }) {
                 {ok(applied.length > 0, `${applied.length} strateg${applied.length === 1 ? 'y' : 'ies'} with a fine-tuned setting applied`)}
                 {ok(list.length > 0, `${list.length} on the live list`)}
                 {ok(trade.lots > 0 && levels.sl > 0 && levels.target > 0, `${trade.lots ?? '-'} lot(s) · option SL ${levels.sl ?? '-'} / target ${levels.target ?? '-'} pts${levels.trailGap > 0 ? ` · trail ${levels.trailGap} pts` : ''}`)}
-                {ok(perStrategy || !tunedLegs.length, `an alert trades: ${trade.autoTrade === 'strategy' ? 'per strategy' : trade.autoTrade ?? '-'}${!perStrategy && tunedLegs.length ? ` - ${tunedLegs.length} tuned buy / sell + strike overruled: set it to "per strategy"` : ''}`)}
+                {ok(perStrategy || !tunedLegs.length, `an alert trades: ${trade.autoTrade === 'strategy' ? 'per strategy' : trade.autoTrade ?? '-'}${!perStrategy && tunedLegs.length ? ` - ${tunedLegs.length} tuned buy / sell + strike overruled` : ''}`)}
+                {!perStrategy && isAdmin && (
+                  <Popconfirm title={`${u}: an alert trades per strategy?`} okText="Set per strategy" onConfirm={() => setPerStrategy(u, onChanged)}
+                    description={<div style={{ maxWidth: 340 }}>Each strategy then buys or sells - and picks the strike and option SL / target - as its applied fine-tuned setting says (sell ATM when it has none), paper and live. Trade settings &rarr; &quot;What an alert trades&quot;.</div>}>
+                    <Button size="small" type="link" style={{ padding: 0, height: 'auto', marginLeft: 26 }}>Set to per strategy</Button>
+                  </Popconfirm>
+                )}
                 {ok(live, live ? 'switched to Live today' : 'on paper - switch to Live today to trade for real')}
+                {st && serverLive?.set && (
+                  <div style={{ margin: '4px 0' }}>
+                    <ServerLiveSwitch underlying={u} st={st} isAdmin={isAdmin} set={serverLive.set} compact />
+                    <ServerLiveTrades st={st} />
+                  </div>
+                )}
                 <div style={{ fontSize: 12, marginTop: 6 }}>
                   <Text type="secondary" style={{ fontSize: 12 }}>Trades live{live ? '' : ' once Live'}:</Text>{' '}
                   {tradesLive.length ? tradesLive.map((x) => <Tag key={x.id} color={x.tuned ? 'blue' : 'default'} style={{ marginBottom: 2 }}>{name(x.id)}{x.tuned ? ' · fine-tuned' : ' · as written'} · {cfg.filtersByIndex?.[u]?.[x.id]?._lots ?? trade.lots ?? '-'} lot(s)</Tag>) : <Text type="secondary" style={{ fontSize: 12 }}>none</Text>}
@@ -180,6 +208,7 @@ function LotsCell({ u, id, lots, indexLots, isAdmin, onChanged }) {
 export function AppliedSettingsCard({ isAdmin, reloadKey = 0, withSetup = false }) {
   const [cfg, setCfg] = useState(null)
   const [tick, setTick] = useState(0)
+  const serverLive = useServerLive()
   useEffect(() => {
     if (!isAdmin) return
     fetch('/api/scanner-runner/config').then((r) => (r.ok ? r.json() : null)).then((c) => setCfg(c ?? {})).catch(() => setCfg({}))
@@ -187,7 +216,7 @@ export function AppliedSettingsCard({ isAdmin, reloadKey = 0, withSetup = false 
   if (!isAdmin) return null
   return (
     <Space direction="vertical" size={10} style={{ width: '100%' }}>
-      {withSetup && <LiveSetup cfg={cfg} />}
+      {withSetup && <LiveSetup cfg={cfg} serverLive={serverLive} isAdmin={isAdmin} onChanged={() => setTick((t) => t + 1)} />}
       <AppliedSettings cfg={cfg} isAdmin={isAdmin} onChanged={() => setTick((t) => t + 1)} />
     </Space>
   )
@@ -197,11 +226,12 @@ export function AppliedSettingsCard({ isAdmin, reloadKey = 0, withSetup = false 
  * Apply with a LOT SIZE: this strategy's own lots on this index (`lots` = the current one, if any; empty = the index's
  * lots from Trade settings, `indexLots`) - its paper and live trades there take that many lots. onApply(live, lots|null).
  */
-export function ApplyTunedButton({ index, title, description, label, primary = false, disabled = false, size = 'small', onApply, lots = null, indexLots = null }) {
+export function ApplyTunedButton({ index, title, description, label, primary = false, disabled = false, size = 'small', onApply, lots = null, indexLots = null, canGoLive = false, isLiveToday = false }) {
   const [live, setLive] = useState(false)
   const [ownLots, setOwnLots] = useState(lots)
+  const [goLive, setGoLive] = useState(false)
   return (
-    <Popconfirm title={title} okText="Apply" disabled={disabled} onConfirm={() => onApply(live, ownLots)} onOpenChange={(open) => { if (open) setOwnLots(lots) }}
+    <Popconfirm title={title} okText="Apply" disabled={disabled} onConfirm={() => onApply(live || goLive, ownLots, goLive)} onOpenChange={(open) => { if (open) { setOwnLots(lots); setGoLive(false) } }}
       description={(
         <div style={{ maxWidth: 380 }}>
           {description}
@@ -217,9 +247,16 @@ export function ApplyTunedButton({ index, title, description, label, primary = f
           )}
           {index && (
             <div style={{ marginTop: 8 }}>
-              <Checkbox checked={live} onChange={(e) => setLive(e.target.checked)}>
+              <Checkbox checked={live || goLive} disabled={goLive} onChange={(e) => setLive(e.target.checked)}>
                 Also put it on {index}&apos;s live list - real orders only once {index} is switched to Live today
               </Checkbox>
+            </div>
+          )}
+          {index && canGoLive && (
+            <div style={{ marginTop: 4 }}>
+              {isLiveToday
+                ? <Text type="danger" style={{ fontSize: 12 }}>{index} is LIVE today - it trades for real from its next alert (once on the live list).</Text>
+                : <Checkbox checked={goLive} onChange={(e) => setGoLive(e.target.checked)}><Text type="danger">and trade it LIVE today</Text> - switches {index} to Live today (you confirm it next; back to paper tomorrow)</Checkbox>}
             </div>
           )}
         </div>
