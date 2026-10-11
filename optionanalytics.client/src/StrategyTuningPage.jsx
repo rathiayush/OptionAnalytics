@@ -302,11 +302,16 @@ const TuningResult = memo(function TuningResult({ result, isAdmin, spot, applyRe
             {(result.results ?? []).map((r) => (
               <Card key={r.id} size="small"
                 title={<Space size={8} wrap><span>#{r.no} {r.name}</span>{r.belowMin ? <Tag color="default">below the minimum trades</Tag> : r.recommend ? <Tag color="success">recommended</Tag> : <Tag color="warning">keep as written</Tag>}</Space>}
-                extra={isAdmin && r.best && !spot && (
+                extra={r.best && (!isAdmin || spot ? (
+                  // Always shown - greyed out with the reason when it cannot be used.
+                  <Tooltip title={!isAdmin ? 'Only an Admin can apply - sign in with the admin login' : 'Spot + options strategies are not run by the live scanner - nothing to apply them to'}>
+                    <Button size="small" disabled>Apply to the scanner</Button>
+                  </Tooltip>
+                ) : (
                   <ApplyTunedButton index={result.underlying} primary={r.recommend} label="Apply to the scanner" onApply={(live) => applyRef.current(r, result.underlying, live)}
                     title={`Apply to #${r.no} ${r.name}${result.underlying ? ` on ${result.underlying}` : ''}?`}
                     description={`${r.recommend ? variantText(r.best.params) : `Not recommended: ${r.reason}. Apply anyway - your call.`}${r.unit === 'pts' ? ' The option part - buy or sell, the strike and its SL / target - is applied to this strategy as well.' : ''} ${result.underlying ? `It runs with it on ${result.underlying} (paper, and live when ${result.underlying} is Live today and the strategy is on its live list); other indices keep theirs.` : ''} Whatever was applied to this strategy${result.underlying ? ` on ${result.underlying}` : ''} before is replaced.`} />
-                )}>
+                ))}>
                 <Space direction="vertical" size={8} style={{ width: '100%' }}>
                   <Text style={{ fontSize: 12 }}>{r.reason}. Chosen on {r.trainDays?.length} day(s) ({r.trainDays?.[0]} to {r.trainDays?.at(-1)}), checked on {r.testDays?.length} ({r.testDays?.[0] ?? '-'} to {r.testDays?.at(-1) ?? '-'}). {r.belowMin ? `${r.qualified} of ${r.tried} settings had 2+ trades; none had ${r.minTradesWanted ?? result.minTrades}+.` : `${r.qualified} of ${r.tried} settings had ${result.minTrades}+ trades.`}</Text>
                   <Table size="small" pagination={false} rowKey="k" columns={[

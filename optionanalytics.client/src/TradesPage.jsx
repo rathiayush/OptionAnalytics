@@ -76,7 +76,15 @@ const strategyOptions = (rows, idOf, label) => [...new Map(rows.map((r) => [idOf
 const TUNED_KEYS = [...TRADE_FILTERS.map((f) => f.key), ...OPTION_TRADE_FILTERS]
 /** The part of a strategy's scanner filters a tuned setting sets - to tell which tuned setting is live now. */
 const tunedPart = (filters) => Object.fromEntries(TUNED_KEYS.filter((k) => filters?.[k] !== undefined).sort().map((k) => [k, filters[k]]))
-const isLive = (liveFilters, row) => liveFilters != null && JSON.stringify(tunedPart(liveFilters)) === JSON.stringify(tunedPart(filtersFromTuning({}, paramsFromSettingsRow(row), { option: row.unit === 'pts' })))
+/** Is this tuned setting the one the scanner runs with now? By the identity stored when it was applied (`_tuned`); a
+ *  setting applied before that existed by its parameters - and never a strategy with nothing applied at all (a tuned
+ *  setting that changed nothing from the defaults is not "live now", it is simply not applied). */
+const isLive = (liveFilters, row) => {
+  if (liveFilters == null) return false
+  if (liveFilters._tuned) return liveFilters._tuned === settingSignature(row)
+  const applied = tunedPart(liveFilters)
+  return Object.keys(applied).length > 0 && JSON.stringify(applied) === JSON.stringify(tunedPart(filtersFromTuning({}, paramsFromSettingsRow(row), { option: row.unit === 'pts' })))
+}
 
 /** A trade row's R on one option leg ('bought' / 'sold'): its column, else its premium points over its SL (older rows). */
 const legR = (t, k) => num(t[`${k}_r`]) ?? (num(t[`${k}_points`]) != null && num(t[`${k}_sl`]) > 0 ? num(t[`${k}_points`]) / num(t[`${k}_sl`]) : null)
@@ -332,11 +340,16 @@ function StrategyPerformance({ reloadKey }) {
     return (current?.rows ?? []).filter((r) => r.setting === which).map((r) => ({ ...r, key: r.strategyId }))
   }, [current, setting])
   const bestInColumn = Object.fromEntries(indices.map((u) => [u, gridRows.filter((r) => (legOf(r.byIndex?.[u])?.trades ?? 0) >= minTrades).sort((a, b) => (legOf(b.byIndex[u]).avgR ?? -1e9) - (legOf(a.byIndex[u]).avgR ?? -1e9))[0]?.strategyId]))
-  const applyButton = (r, t) => (isAdmin && data === 'futures' ? (
-    <ApplyTunedButton index={t.row.index} primary={t.best} label="Apply to live scanner" onApply={(live) => apply(r, t.row, live)}
+  // Always shown - greyed out, with the reason, when it cannot be used (never just missing).
+  const applyBlock = !isAdmin ? `Only an Admin can apply - you are signed in as ${auth?.user?.email ?? '?'} (${auth?.user?.role ?? 'no role'})`
+    : data !== 'futures' ? 'Spot + options strategies are not run by the live scanner - nothing to apply them to' : null
+  const applyButton = (r, t, label = 'Apply to live scanner') => (applyBlock ? (
+    <Tooltip title={applyBlock}><Button size="small" disabled>{label}</Button></Tooltip>
+  ) : (
+    <ApplyTunedButton index={t.row.index} primary={t.best} label={label} onApply={(live) => apply(r, t.row, live)}
       title={`Apply this ${t.row.index} setting to #${r.strategyNo} ${r.strategy}?`}
       description={`${t.recommended ? '' : 'No run recommended it - applied anyway, your call. '}The live scanner (this browser and the server scanner) runs this strategy with it on ${t.row.index} from now - paper, and live when ${t.row.index} is Live today and the strategy is on its live list. What was applied to it on ${t.row.index} before is replaced; other indices keep theirs.`} />
-  ) : null)
+  ))
   // A fine-tuned strategy's best setting per index, right in its row: the one marked best (else the top-scored, said so),
   // whether it is live now, and Apply.
   const quickApply = (r) => {
@@ -355,7 +368,7 @@ function StrategyPerformance({ reloadKey }) {
                 {t.best ? <Tag color="gold">best</Tag> : <Tag>top - not proven yet</Tag>}
               </Tooltip>
               {live ? <Tag color="green">live now</Tag> : applyButton(r, t)}
-              <ParamsPopover source={t.row} from="row" label="params" />
+              <ParamsPopover source={t.row} from="row" label="params" action={applyButton(r, t, live ? 'Apply again' : 'Apply these parameters')} />
             </span>
           )
         })}
@@ -406,7 +419,7 @@ function StrategyPerformance({ reloadKey }) {
         {appliedLine}
         {entries.flatMap(([, list]) => list).map((t) => (
           <div key={`${t.row.index}-${t.row.run_id}-${t.row.setting_text}`} style={{ borderTop: '1px solid #ffffff14', paddingTop: 6, fontSize: 12 }}>
-            <div><b>{t.row.index}</b>{t.best && <Tag color="gold" style={{ marginLeft: 6 }}>best</Tag>}{isLive(liveOf(r.strategyId, t.row.index), t.row) && <Tag color="green" style={{ marginLeft: 4 }}>live now</Tag>} {t.row.setting_text || '-'} <ParamsPopover source={t.row} from="row" /></div>
+            <div><b>{t.row.index}</b>{t.best && <Tag color="gold" style={{ marginLeft: 6 }}>best</Tag>}{isLive(liveOf(r.strategyId, t.row.index), t.row) && <Tag color="green" style={{ marginLeft: 4 }}>live now</Tag>} {t.row.setting_text || '-'} <ParamsPopover source={t.row} from="row" action={applyButton(r, t, 'Apply these parameters')} /></div>
             <Text type="secondary" style={{ fontSize: 12 }}>{t.runs} run(s) · {t.recommended} recommended · unseen {t.testTrades} trades <b style={{ color: col(t.testAvg) }}>{t.testAvg == null ? '-' : `${pts(t.testAvg)}${t.unit === 'pts' ? ' pts' : 'R'}`}</b>/trade · {crossText(t)}</Text>
             {!t.best && t.notBestBecause?.length > 0 && <Text type="warning" style={{ fontSize: 11, display: 'block' }}>not best: {t.notBestBecause.join('; ')}</Text>}
             <div style={{ marginTop: 4 }}>{applyButton(r, t)}</div>
@@ -421,7 +434,7 @@ function StrategyPerformance({ reloadKey }) {
         dataSource={entries.flatMap(([, list]) => list)}
         columns={[
           { title: 'Index', key: 'i', width: 130, render: (_, t) => <span style={{ fontSize: 12 }}>{t.row.index}{t.best && <Tag color="gold" style={{ marginLeft: 4 }}>best</Tag>}{isLive(liveOf(r.strategyId, t.row.index), t.row) && <Tag color="green" style={{ marginLeft: 4 }}>live now</Tag>}</span> },
-          { title: 'Fine-tuned setting', key: 's', render: (_, t) => <span style={{ fontSize: 12 }}>{t.row.setting_text || '-'} <ParamsPopover source={t.row} from="row" /></span> },
+          { title: 'Fine-tuned setting', key: 's', render: (_, t) => <span style={{ fontSize: 12 }}>{t.row.setting_text || '-'} <ParamsPopover source={t.row} from="row" action={applyButton(r, t, 'Apply these parameters')} /></span> },
           { title: <Tooltip title="How many tuning runs chose this setting, and how many of them recommended it (it also won on the days that run held back)">Chosen / recommended</Tooltip>, key: 'r', width: 150, render: (_, t) => <span style={{ fontSize: 12 }}>{t.runs} run(s) · {t.recommended} recommended</span> },
           { title: <Tooltip title="Days this setting was never chosen on - its own run's held-back days AND every day of every other run for this index (each run re-checks every setting found so far). The honest number: a setting tuned on one month is judged on the other months too.">Unseen days</Tooltip>, key: 'te', width: 170, render: (_, t) => <span style={{ fontSize: 12 }}>{t.testTrades} trades · <b style={{ color: col(t.testAvg) }}>{t.testAvg == null ? '-' : `${pts(t.testAvg)}${t.unit === 'pts' ? ' pts' : 'R'}`}</b>/trade</span> },
           { title: <Tooltip title="On its unseen days: in how many months it traded it made money, the strategy as written on the same days, and how many runs other than the ones that chose it checked it. Best needs: above 0 on unseen days, better than as written there, and - over 2+ months - winning in at least half of them.">Across months</Tooltip>, key: 'pm', width: 230, render: (_, t) => <span style={{ fontSize: 12 }}>{crossText(t)}{!t.best && t.notBestBecause?.length > 0 && <Text type="warning" style={{ fontSize: 11, display: 'block' }}>not best: {t.notBestBecause.join('; ')}</Text>}</span> },
@@ -522,6 +535,7 @@ function StrategyPerformance({ reloadKey }) {
       </details>
       {error && <Alert type="error" showIcon message={`Could not load the strategy performance: ${error}`} />}
       {current && !current.runs && <Alert type="info" showIcon message="No tuning run yet - schedule or run one on the Strategy tuning page." />}
+      {applyBlock && current?.runs > 0 && <Alert type="warning" showIcon message={`The Apply buttons are greyed out: ${applyBlock}.`} />}
       {narrow ? (
         <Space direction="vertical" size={8} style={{ width: '100%' }}>
           {!current && !error && <Text type="secondary">loading…</Text>}
