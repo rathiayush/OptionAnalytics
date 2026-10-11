@@ -143,6 +143,23 @@ public sealed class ScannerRunnerController : ControllerBase
         return result.Success ? Ok(result) : UnprocessableEntity(result);
     }
 
+    /// <summary>PUT /api/scanner-runner/applied/{underlying}/{strategyId} - a fine-tuned setting applied to one strategy
+    /// for ONE index (body { filters: {...} }, or { filters: null } to go back to its all-index filters).</summary>
+    [HttpPut("applied/{underlying}/{strategyId}")]
+    [Authorize(Roles = AuthRoles.Admin)]
+    [RequestSizeLimit(50_000)]
+    public IActionResult SetApplied(string underlying, string strategyId, [FromBody] JsonObject body)
+    {
+        var u = underlying.Trim().ToUpperInvariant();
+        if (!TradeSettingsStore.Underlyings.Contains(u)) return BadRequest(new { error = $"Unknown index {underlying}." });
+        if (strategyId.Length is 0 or > 64 || !strategyId.All(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '-'))
+            return BadRequest(new { error = "Bad strategy id." });
+        if (body is null || !body.ContainsKey("filters")) return BadRequest(new { error = "Send { filters: {...} } or { filters: null }." });
+        var filters = body["filters"];
+        if (filters is not null and not JsonObject) return BadRequest(new { error = "filters must be an object or null." });
+        return Ok(WithTradeSettings(_store.SetIndexFilters(u, strategyId, filters as JsonObject)));
+    }
+
     /// <summary>GET /api/scanner-runner/live-list - per index: every strategy with its tuning record (after costs) and live
     /// record, whether it is on the live list and why; plus the rules.</summary>
     [HttpGet("live-list")]

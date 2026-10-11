@@ -385,6 +385,18 @@ export const TRADE_FILTERS = [
 export const OPTION_TRADE_FILTERS = ['tradeOptLeg', 'tradeOptMoneyness', 'tradeOptSlPct', 'tradeOptTargetPct']
 
 /**
+ * The per-strategy filters the scanner runs with on ONE index. A fine-tuned setting is found per index (what wins on
+ * NIFTY is not what wins on BANKNIFTY), so applying one stores it for that index only (`filtersByIndex[U][id]`): there
+ * it replaces the strategy's all-index filters (`filters[id]`) whole; every other strategy, and every other index,
+ * keeps the all-index ones. Nothing applied per index = exactly the all-index filters, as before.
+ */
+export function filtersForIndex(settings, underlying) {
+  const all = settings?.filters ?? {}
+  const own = underlying ? settings?.filtersByIndex?.[underlying] : null
+  return own && Object.keys(own).length ? { ...all, ...own } : all
+}
+
+/**
  * How one strategy's signal should be taken in options: the leg (buy / sell), the strike (moneyness) and the SL /
  * target in PREMIUM POINTS for this trade. A strategy that was never tuned carries the defaults, which mean "whatever
  * the scanner is set to" - so nothing changes for it. `cfg` is the scanner's own settings (autoPaper, moneyness,

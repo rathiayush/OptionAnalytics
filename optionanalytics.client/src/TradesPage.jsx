@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Alert, Button, Card, Col, DatePicker, Drawer, InputNumber, Popconfirm, Row, Segmented, Select, Space, Table, Tag, Tooltip, Typography, message } from 'antd'
+import { Alert, Button, Card, Checkbox, Col, DatePicker, Drawer, InputNumber, Popconfirm, Row, Segmented, Select, Space, Table, Tag, Tooltip, Typography, message } from 'antd'
 import { NavBar, useAuth, UP_COLOR, DOWN_COLOR } from './shared.jsx'
-import { OPTION_TRADE_FILTERS, STRATEGY_BY_ID, TRADE_FILTERS } from './strategyEngine.js'
+import { OPTION_TRADE_FILTERS, STRATEGY_BY_ID, TRADE_FILTERS, filtersForIndex } from './strategyEngine.js'
 import { useNarrow } from './DomDrawer.jsx'
 import { filtersFromTuning, paramsFromSettingsRow } from './strategyTuning.js'
-import { applyFilterValue, applyTunedFilters } from './scannerSettings.js'
+import { applyFilterValue, applyTunedFilters, putOnLiveList, saveIndexFilters } from './scannerSettings.js'
+import { ApplyTunedButton } from './ApplyTuned.jsx'
 import ClearData from './ClearData.jsx'
 import './tuningMobile.css'
 
@@ -247,9 +248,14 @@ function StrategyPerformance({ reloadKey }) {
   const [openRows, setOpenRows] = useState({}) // phone: which strategy cards show their tuned settings
   const [tradesOf, setTradesOf] = useState(null) // the strategy whose every trade is open in the drawer
   const [daysOpen, setDaysOpen] = useState(false)
-  // The scanner's filters now - to mark which tuned setting is live (and so whether a better one has been found since).
-  const [liveFilters, setLiveFilters] = useState(null)
-  const loadLive = () => fetch('/api/scanner-runner/config').then((r) => (r.ok ? r.json() : null)).then((c) => setLiveFilters(c?.settings?.filters ?? {})).catch(() => {})
+  // The scanner's filters now - to mark which tuned setting is live on each index (and so whether a better one has
+  // been found since): the setting applied for that index, else the all-index filters (filtersForIndex).
+  const [liveCfg, setLiveCfg] = useState(null)
+  const loadLive = () => fetch('/api/scanner-runner/config').then((r) => (r.ok ? r.json() : null)).then((c) => setLiveCfg(c ?? {})).catch(() => {})
+  const liveOf = (id, u) => (liveCfg == null ? null : filtersForIndex({ filters: liveCfg.settings?.filters, filtersByIndex: liveCfg.filtersByIndex }, u)[id] ?? {})
+  const appliedFor = (id) => Object.keys(liveCfg?.filtersByIndex ?? {}).filter((u) => liveCfg.filtersByIndex[u]?.[id]).sort()
+  const [bestAll, setBestAll] = useState(false) // Apply best: also the strategies no run recommended (their top-scored setting)
+  const [bestLive, setBestLive] = useState(false) // ... and put them on the index's live list
   useEffect(() => { loadLive() }, [])
   const [bestFor, setBestFor] = useState('NIFTY')
   const [applying, setApplying] = useState(false)
@@ -278,14 +284,27 @@ function StrategyPerformance({ reloadKey }) {
       <span>{x.dayCount}{n ? ` of ${n}` : ''} days</span>
     </Tooltip>
   }
-  const apply = async (r, tuned) => {
+  // Applied for the index it was tuned on (that index only - another index's setting for the same strategy stays).
+  const apply = async (r, tuned, addToLive = false) => {
     try {
       const params = paramsFromSettingsRow(tuned)
-      await applyTunedFilters(r.strategyId, params, { option: tuned.unit === 'pts' })
-      loadLive()
-      message.success({ content: `#${r.strategyNo} ${r.strategy}: ${tuned.index}'s tuned setting is in force now for the live scanner (this browser and the server scanner)${tuned.setting_text ? ` - ${tuned.setting_text}` : ''}`, duration: 8 })
+      await applyTunedFilters(r.strategyId, params, { option: tuned.unit === 'pts', index: tuned.index })
+      if (addToLive) await putOnLiveList(tuned.index, r.strategyId)
+      message.success({ content: `#${r.strategyNo} ${r.strategy}: ${tuned.index}'s tuned setting is in force now on ${tuned.index} for the live scanner (this browser and the server scanner)${tuned.setting_text ? ` - ${tuned.setting_text}` : ''}${addToLive ? `; on ${tuned.index}'s live list - it trades live when ${tuned.index} is Live today` : ''}`, duration: 10 })
     } catch (err) {
       message.error(err.message)
+    } finally {
+      loadLive()
+    }
+  }
+  const removeApplied = async (r, u) => {
+    try {
+      await saveIndexFilters(u, r.strategyId, null)
+      message.success(`#${r.strategyNo} ${r.strategy}: back to its all-index filters on ${u}`)
+    } catch (err) {
+      message.error(err.message)
+    } finally {
+      loadLive()
     }
   }
   const one = index !== 'all'
@@ -299,21 +318,24 @@ function StrategyPerformance({ reloadKey }) {
   }, [current, setting])
   const bestInColumn = Object.fromEntries(indices.map((u) => [u, gridRows.filter((r) => (legOf(r.byIndex?.[u])?.trades ?? 0) >= minTrades).sort((a, b) => (legOf(b.byIndex[u]).avgR ?? -1e9) - (legOf(a.byIndex[u]).avgR ?? -1e9))[0]?.strategyId]))
   const applyButton = (r, t) => (isAdmin && data === 'futures' ? (
-    <Popconfirm title={`Apply this ${t.row.index} setting to #${r.strategyNo} ${r.strategy}?`} description={`${t.recommended ? '' : 'No run recommended it. '}The live scanner (this browser and the server scanner) takes it from now; whatever was applied to this strategy before is replaced.`} okText="Apply" onConfirm={() => apply(r, t.row)}>
-      <Button size="small" type={t.best ? 'primary' : 'default'}>Apply to live scanner</Button>
-    </Popconfirm>
+    <ApplyTunedButton index={t.row.index} primary={t.best} label="Apply to live scanner" onApply={(live) => apply(r, t.row, live)}
+      title={`Apply this ${t.row.index} setting to #${r.strategyNo} ${r.strategy}?`}
+      description={`${t.recommended ? '' : 'No run recommended it - applied anyway, your call. '}The live scanner (this browser and the server scanner) runs this strategy with it on ${t.row.index} from now - paper, and live when ${t.row.index} is Live today and the strategy is on its live list. What was applied to it on ${t.row.index} before is replaced; other indices keep theirs.`} />
   ) : null)
-  // Every strategy's best fine-tuned setting for one index (the marked one - the strongest a run recommended), applied in one go.
-  const bestPicks = (u) => (current?.rows ?? []).filter((r) => r.setting === 'fine-tuned').map((r) => ({ r, t: r.tunedSettings?.[u]?.find((x) => x.best) })).filter((x) => x.t)
+  // Every strategy's best fine-tuned setting for one index, applied in one go: the marked one (the strongest a run
+  // recommended); with "also not recommended", a strategy with none takes its top-scored setting.
+  const bestPicks = (u) => (current?.rows ?? []).filter((r) => r.setting === 'fine-tuned')
+    .map((r) => ({ r, t: r.tunedSettings?.[u]?.find((x) => x.best) ?? (bestAll ? r.tunedSettings?.[u]?.[0] : null) })).filter((x) => x.t)
   const applyAllBest = async () => {
     setApplying(true)
     let done = 0
     try {
       for (const { r, t } of bestPicks(bestFor)) {
-        await applyTunedFilters(r.strategyId, paramsFromSettingsRow(t.row), { option: t.unit === 'pts' })
+        await applyTunedFilters(r.strategyId, paramsFromSettingsRow(t.row), { option: t.unit === 'pts', index: bestFor })
+        if (bestLive) await putOnLiveList(bestFor, r.strategyId)
         done++
       }
-      message.success({ content: `${done} strateg${done === 1 ? 'y' : 'ies'} now run with ${bestFor}'s best fine-tuned setting on the live scanner`, duration: 8 })
+      message.success({ content: `${done} strateg${done === 1 ? 'y' : 'ies'} now run with ${bestFor}'s best fine-tuned setting on ${bestFor} (live scanner)${bestLive ? `, and are on ${bestFor}'s live list` : ''}`, duration: 8 })
     } catch (err) {
       message.error(`${done} applied, then: ${err.message}`)
     } finally {
@@ -324,11 +346,23 @@ function StrategyPerformance({ reloadKey }) {
   const tunedTable = (r) => {
     const entries = Object.entries(r.tunedSettings ?? {})
     if (!entries.length) return <Text type="secondary" style={{ fontSize: 12 }}>No fine-tuned setting for this strategy in the runs kept.</Text>
+    const applied = appliedFor(r.strategyId)
+    const appliedLine = applied.length > 0 && (
+      <Space wrap size={6} style={{ fontSize: 12, marginBottom: 6 }}>
+        <Text type="secondary" style={{ fontSize: 12 }}>Applied per index:</Text>
+        {applied.map((u) => (
+          <Tag key={u} color="green" closable={isAdmin} onClose={(e) => { e.preventDefault(); removeApplied(r, u) }}>
+            <Tooltip title={isAdmin ? `Runs with its ${u} setting on ${u}. ✕ = back to its all-index filters there` : `Runs with its ${u} setting on ${u}`}>{u}</Tooltip>
+          </Tag>
+        ))}
+      </Space>
+    )
     if (narrow) return (
       <Space direction="vertical" size={8} style={{ width: '100%' }}>
+        {appliedLine}
         {entries.flatMap(([, list]) => list).map((t) => (
           <div key={`${t.row.index}-${t.row.run_id}-${t.row.setting_text}`} style={{ borderTop: '1px solid #ffffff14', paddingTop: 6, fontSize: 12 }}>
-            <div><b>{t.row.index}</b>{t.best && <Tag color="gold" style={{ marginLeft: 6 }}>best</Tag>}{isLive(liveFilters?.[r.strategyId], t.row) && <Tag color="green" style={{ marginLeft: 4 }}>live now</Tag>} {t.row.setting_text || '-'}</div>
+            <div><b>{t.row.index}</b>{t.best && <Tag color="gold" style={{ marginLeft: 6 }}>best</Tag>}{isLive(liveOf(r.strategyId, t.row.index), t.row) && <Tag color="green" style={{ marginLeft: 4 }}>live now</Tag>} {t.row.setting_text || '-'}</div>
             <Text type="secondary" style={{ fontSize: 12 }}>{t.runs} run(s) · {t.recommended} recommended · unseen {t.testTrades} trades <b style={{ color: col(t.testAvg) }}>{t.testAvg == null ? '-' : `${pts(t.testAvg)}${t.unit === 'pts' ? ' pts' : 'R'}`}</b>/trade</Text>
             <div style={{ marginTop: 4 }}>{applyButton(r, t)}</div>
           </div>
@@ -336,10 +370,12 @@ function StrategyPerformance({ reloadKey }) {
       </Space>
     )
     return (
+      <>
+      {appliedLine}
       <Table size="small" pagination={false} rowKey={(t) => `${t.row.index}-${t.row.run_id}-${t.row.setting_text}`}
         dataSource={entries.flatMap(([, list]) => list)}
         columns={[
-          { title: 'Index', key: 'i', width: 130, render: (_, t) => <span style={{ fontSize: 12 }}>{t.row.index}{t.best && <Tag color="gold" style={{ marginLeft: 4 }}>best</Tag>}{isLive(liveFilters?.[r.strategyId], t.row) && <Tag color="green" style={{ marginLeft: 4 }}>live now</Tag>}</span> },
+          { title: 'Index', key: 'i', width: 130, render: (_, t) => <span style={{ fontSize: 12 }}>{t.row.index}{t.best && <Tag color="gold" style={{ marginLeft: 4 }}>best</Tag>}{isLive(liveOf(r.strategyId, t.row.index), t.row) && <Tag color="green" style={{ marginLeft: 4 }}>live now</Tag>}</span> },
           { title: 'Fine-tuned setting', key: 's', render: (_, t) => <span style={{ fontSize: 12 }}>{t.row.setting_text || '-'}</span> },
           { title: <Tooltip title="How many tuning runs chose this setting, and how many of them recommended it (it also won on the days that run held back)">Chosen / recommended</Tooltip>, key: 'r', width: 150, render: (_, t) => <span style={{ fontSize: 12 }}>{t.runs} run(s) · {t.recommended} recommended</span> },
           { title: <Tooltip title="The days each run held back and never chose on - the honest number">Unseen days</Tooltip>, key: 'te', width: 170, render: (_, t) => <span style={{ fontSize: 12 }}>{t.testTrades} trades · <b style={{ color: col(t.testAvg) }}>{t.testAvg == null ? '-' : `${pts(t.testAvg)}${t.unit === 'pts' ? ' pts' : 'R'}`}</b>/trade</span> },
@@ -347,6 +383,7 @@ function StrategyPerformance({ reloadKey }) {
           { title: <Tooltip title="Unseen-days average shrunk for few trades (avg x n / (n + 10)) - a setting proven over many unseen trades ranks above a lucky one">Score</Tooltip>, key: 'sc', width: 80, render: (_, t) => <span style={{ color: col(t.score) }}>{t.score == null ? '-' : `${pts(t.score)}${t.unit === 'pts' ? '' : 'R'}`}</span> },
           { title: '', key: 'a', width: 170, render: (_, t) => applyButton(r, t) },
         ]} />
+      </>
     )
   }
   return (
@@ -390,13 +427,23 @@ function StrategyPerformance({ reloadKey }) {
       )}
       {isAdmin && data === 'futures' && indices.length > 0 && (
         <Space wrap size={8}>
-          <Tooltip title="For every strategy, the setting marked best for this index (the strongest a run recommended, across all runs) goes on the live scanner - one click after each round of tuning. A strategy with no recommended setting is left as it is. Any single setting, recommended or not, can still be applied on its own below.">
+          <Tooltip title="For every strategy, the setting marked best for this index (the strongest a run recommended, across all runs) goes on the live scanner for this index - one click after each round of tuning. Tick 'also not recommended' to give the strategies no run recommended their top-scored setting too. Any single setting, recommended or not, can still be applied on its own below.">
             <Text>Apply the best fine-tuned setting of every strategy, for</Text>
           </Tooltip>
           <Select value={indices.includes(bestFor) ? bestFor : indices[0]} onChange={setBestFor} style={{ width: 130 }} options={indices.map((u) => ({ value: u, label: u }))} aria-label="Best settings of index" />
-          <Popconfirm title={`Apply ${bestPicks(indices.includes(bestFor) ? bestFor : indices[0]).length} best setting(s)?`} description="Each strategy with a best setting for this index runs with it on the live scanner (this browser and the server scanner) from now; what was applied to them before is replaced." okText="Apply" onConfirm={applyAllBest} disabled={!bestPicks(indices.includes(bestFor) ? bestFor : indices[0]).length}>
-            <Button type="primary" loading={applying} disabled={!bestPicks(indices.includes(bestFor) ? bestFor : indices[0]).length}>Apply best to every strategy ({bestPicks(indices.includes(bestFor) ? bestFor : indices[0]).length})</Button>
-          </Popconfirm>
+          <Checkbox checked={bestAll} onChange={(e) => setBestAll(e.target.checked)}>also not recommended</Checkbox>
+          <Checkbox checked={bestLive} onChange={(e) => setBestLive(e.target.checked)}>and put them on the live list</Checkbox>
+          {(() => {
+            const u = indices.includes(bestFor) ? bestFor : indices[0]
+            const picks = bestPicks(u)
+            const unrec = picks.filter((x) => !x.t.best).length
+            return (
+              <Popconfirm title={`Apply ${picks.length} best setting(s) on ${u}?`} okText="Apply" onConfirm={applyAllBest} disabled={!picks.length}
+                description={<div style={{ maxWidth: 380 }}>Each strategy with a best setting for {u} runs with it on {u} (this browser and the server scanner) from now - paper, and live when {u} is Live today and the strategy is on its live list; what was applied to them on {u} before is replaced, other indices keep theirs.{unrec ? ` ${unrec} of them no run recommended.` : ''}{bestLive ? ` All ${picks.length} go on ${u}'s live list.` : ''}</div>}>
+                <Button type="primary" loading={applying} disabled={!picks.length}>Apply best to every strategy ({picks.length})</Button>
+              </Popconfirm>
+            )
+          })()}
         </Space>
       )}
       <StrategyTrades key={tradesOf ? `${tradesOf.strategyId}-${tradesOf.index}-${tradesOf.setting}` : 'none'} target={tradesOf} data={data} narrow={narrow} onClose={() => setTradesOf(null)} />
@@ -407,7 +454,7 @@ function StrategyPerformance({ reloadKey }) {
           <div><b>2. Tune.</b> For each strategy it then tries the ways the trade can be taken - long / short only, the entry time window, stop and target size, time stop, trailing stop, the OI confirmation (and the option&apos;s buy / sell, strike and SL / target when asked) - on those same signals. The strategy&apos;s entry rules are never changed.</div>
           <div><b>3. No fitting the past.</b> A setting is chosen on the older 70% of the job&apos;s days and then checked on the newest 30% it never saw. It is <i>recommended</i> only when it also wins there and beats the strategy as written.</div>
           <div><b>4. Many jobs, one answer.</b> Schedule a long range as short pieces (Strategy tuning → Schedule → Split into) for every index. This page adds every run together: a trade two runs both scanned counts once; <i>As written</i> is each strategy untouched, <i>Fine-tuned</i> is with the setting each run chose. R compares across indices; points only within one index.</div>
-          <div><b>5. The best setting.</b> Open a strategy: every setting the runs chose for it, per index, scored on the days each run held back (fewer unseen trades count for less). When a new run finds a different setting it joins the list, and the one marked <Tag color="gold">best</Tag> is always the strongest any run recommended so far. <Tag color="green">live now</Tag> is the one the scanner uses. Apply any setting (recommended or not), or Apply best to every strategy at once.</div>
+          <div><b>5. The best setting.</b> Open a strategy: every setting the runs chose for it, per index, scored on the days each run held back (fewer unseen trades count for less). When a new run finds a different setting it joins the list, and the one marked <Tag color="gold">best</Tag> is always the strongest any run recommended so far. <Tag color="green">live now</Tag> is the one the scanner uses. Apply any setting (recommended or not), or Apply best to every strategy at once. A setting is applied for the index it was tuned on - that index runs the strategy with it, the other indices keep their own - and can also put the strategy on that index's live list, so it trades live once the index is switched to Live today.</div>
           <div><b>R and risk : reward.</b> Every trade is measured three ways - the index (futures / spot) and the option bought and option sold the setup carries. R = the points it made over the points it risked: the index trade over its SL in index points, an option over its own SL in premium points (Trade settings: its SL, target and trailing stop are applied to it). Its SL is -1R; total R adds every trade up. Risk : reward is as planned, 1 : target / SL. Measure by picks which one ranks the strategies - pick Option bought if that is how you trade.</div>
           <div><b>Days.</b> &quot;Days scanned&quot; are the days a job could read (Which days lists those left out, and why, and the newest 30% each run held back as its test). A strategy&apos;s &quot;16 of 120 days&quot; means it fired on 16 of the 120 days scanned - its first and last trade dates are not the scan range.</div>
           <div><b>6. Improve round by round.</b> Schedule more days → the runs add up → apply what is best now → the next runs check it on new days. A setting only stays best while it keeps winning on days it was not chosen on.</div>

@@ -40,7 +40,7 @@
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
-import { buildOiContext, ACTIVE_STRATEGIES, SPOT_STRATEGIES, STRATEGY_BY_ID, TRADE_FILTERS } from '../src/strategyEngine.js'
+import { buildOiContext, ACTIVE_STRATEGIES, SPOT_STRATEGIES, STRATEGY_BY_ID, TRADE_FILTERS, filtersForIndex } from '../src/strategyEngine.js'
 import { scanSpotDay, spotBarsOf } from '../src/spotEngine.js'
 import { autoBigLots } from '../src/orderFlowMath.js'
 import { scannerProfileOf, trailFor } from '../src/scannerCore.js'
@@ -226,9 +226,9 @@ async function main() {
   // The option SL / target this index is actually traded with (Trade settings), so each trade can say what the option
   // bought and the option sold would have done - its own stop, its own target, or out with the index trade.
   const optionLevels = { ...defaultTradeLevels(U), ...(cfg.levels?.[U] ?? {}) }
-  // The strategies' own entry filters as the trader set them; the trade filters are what is tuned (from their defaults).
+  // The strategies' own entry filters as the trader set them (for this index); the trade filters are what is tuned (from their defaults).
   const tradeKeys = new Set(TRADE_FILTERS.map((f) => f.key))
-  const entryFilters = Object.fromEntries(Object.entries(cfg.filters ?? {}).map(([id, f]) => [id, Object.fromEntries(Object.entries(f ?? {}).filter(([k]) => !tradeKeys.has(k)))]))
+  const entryFilters = Object.fromEntries(Object.entries(filtersForIndex({ filters: cfg.filters, filtersByIndex: config?.filtersByIndex }, U)).map(([id, f]) => [id, Object.fromEntries(Object.entries(f ?? {}).filter(([k]) => !tradeKeys.has(k)))]))
 
   // The days: the recorded (exact) ones, newest first; with includeEstimated, other weekdays too (rebuilt from 1-minute candles).
   // Spot + options needs no order flow: the past weekdays that have OI data are the days (holidays fail and are skipped).

@@ -4,7 +4,8 @@ import { Alert, Button, Card, Checkbox, Col, DatePicker, InputNumber, Popconfirm
 import { NavBar, useAuth, UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import { ACTIVE_STRATEGIES, SPOT_STRATEGIES, STRATEGY_BY_ID, TRADE_FILTERS } from './strategyEngine.js'
 import { OI_COMBO_CAP, OI_FACTORS, OPTION_DEFAULT, countOiCombinations, oiFactorsFor, optionText, variantText } from './strategyTuning.js'
-import { applyTunedFilters } from './scannerSettings.js'
+import { applyTunedFilters, putOnLiveList } from './scannerSettings.js'
+import { ApplyTunedButton } from './ApplyTuned.jsx'
 import ClearData from './ClearData.jsx'
 import './tuningMobile.css'
 
@@ -296,9 +297,9 @@ const TuningResult = memo(function TuningResult({ result, isAdmin, spot, applyRe
               <Card key={r.id} size="small"
                 title={<Space size={8} wrap><span>#{r.no} {r.name}</span>{r.belowMin ? <Tag color="default">below the minimum trades</Tag> : r.recommend ? <Tag color="success">recommended</Tag> : <Tag color="warning">keep as written</Tag>}</Space>}
                 extra={isAdmin && r.best && !spot && (
-                  <Popconfirm title={`Apply to #${r.no} ${r.name}?`} description={`${r.recommend ? variantText(r.best.params) : `Not recommended: ${r.reason}. Apply anyway?`}${r.unit === 'pts' ? ' The option part - buy or sell, the strike and its SL / target - is applied to this strategy as well.' : ''} Whatever was applied to this strategy before is replaced.`} okText="Apply" onConfirm={() => applyRef.current(r)}>
-                    <Button size="small" type={r.recommend ? 'primary' : 'default'}>Apply to the scanner</Button>
-                  </Popconfirm>
+                  <ApplyTunedButton index={result.underlying} primary={r.recommend} label="Apply to the scanner" onApply={(live) => applyRef.current(r, result.underlying, live)}
+                    title={`Apply to #${r.no} ${r.name}${result.underlying ? ` on ${result.underlying}` : ''}?`}
+                    description={`${r.recommend ? variantText(r.best.params) : `Not recommended: ${r.reason}. Apply anyway - your call.`}${r.unit === 'pts' ? ' The option part - buy or sell, the strike and its SL / target - is applied to this strategy as well.' : ''} ${result.underlying ? `It runs with it on ${result.underlying} (paper, and live when ${result.underlying} is Live today and the strategy is on its live list); other indices keep theirs.` : ''} Whatever was applied to this strategy${result.underlying ? ` on ${result.underlying}` : ''} before is replaced.`} />
                 )}>
                 <Space direction="vertical" size={8} style={{ width: '100%' }}>
                   <Text style={{ fontSize: 12 }}>{r.reason}. Chosen on {r.trainDays?.length} day(s) ({r.trainDays?.[0]} to {r.trainDays?.at(-1)}), checked on {r.testDays?.length} ({r.testDays?.[0] ?? '-'} to {r.testDays?.at(-1) ?? '-'}). {r.belowMin ? `${r.qualified} of ${r.tried} settings had 2+ trades; none had ${r.minTradesWanted ?? result.minTrades}+.` : `${r.qualified} of ${r.tried} settings had ${result.minTrades}+ trades.`}</Text>
@@ -434,13 +435,15 @@ export default function StrategyTuningPage() {
   const cancel = () => fetch('/api/strategy-tuning/cancel', { method: 'POST' }).then(loadStatus)
   // Apply, for the result's buttons - through a ref so the (memoised) result is not redrawn on every page change.
   const applyRef = useRef(null)
-  const apply = async (r) => {
+  const apply = async (r, index = null, addToLive = false) => {
     try {
       // `pts` means the option itself was tuned, so the buy / sell, the strike and its SL / target go across too.
       const option = r.unit === 'pts'
-      const filters = await applyTunedFilters(r.id, r.best.params, { option })
+      // For the index it was tuned on (that index only).
+      const filters = await applyTunedFilters(r.id, r.best.params, { option, index })
+      if (addToLive && index) await putOnLiveList(index, r.id)
       message.success({
-        content: `#${r.no} ${r.name}: ${Object.keys(filters).length ? `${variantText(r.best.params)}${option ? ` · ${optionText(r.best.params)}` : ''}` : 'back to its defaults'} - in force now for this browser's scanner and the server scanner, replacing whatever was applied before`,
+        content: `#${r.no} ${r.name}: ${Object.keys(filters ?? {}).length ? `${variantText(r.best.params)}${option ? ` · ${optionText(r.best.params)}` : ''}` : 'back to its defaults'} - in force now${index ? ` on ${index}` : ''} for this browser's scanner and the server scanner, replacing whatever was applied before${addToLive && index ? `; on ${index}'s live list` : ''}`,
         duration: 8,
       })
     } catch (err) {

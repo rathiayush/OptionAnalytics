@@ -9,7 +9,7 @@
 // Everything outside (HTTP, Telegram, the state file, the clock) comes in through `io`, so the tests can
 // drive a whole day through it.
 
-import { buildOiContext, optionTradeAt, premiumAt, strategyStats, topFifteen, STRATEGY_BY_ID, DEFAULT_TRAIL, optionPlanFor, squareOffMs } from '../src/strategyEngine.js'
+import { buildOiContext, optionTradeAt, premiumAt, strategyStats, topFifteen, STRATEGY_BY_ID, DEFAULT_TRAIL, optionPlanFor, squareOffMs, filtersForIndex } from '../src/strategyEngine.js'
 import { liquiditySignals, pullStackSignals, autoBigLots } from '../src/orderFlowMath.js'
 import {
   MIN, msOf, scanTick, trailFor, alertIdsFor, followSetups, setupEvents, newSetupEventMemory, newPosition, positionRows, sameSignal,
@@ -99,7 +99,8 @@ export class IndexScanner {
     // The index's own trade settings (trade-settings.csv): its lots and what an alert trades.
     const trade = this.config.trade?.[this.underlying] ?? {}
     return {
-      ...s, paperSl: levels.sl, paperTarget: levels.target, paperTrailStart: levels.trailStart ?? 0, paperTrailGap: levels.trailGap ?? 0,
+      // Each strategy's filters on THIS index: a setting fine-tuned and applied for it, else the all-index ones.
+      ...s, filters: filtersForIndex({ filters: s.filters, filtersByIndex: this.config.filtersByIndex }, this.underlying), paperSl: levels.sl, paperTarget: levels.target, paperTrailStart: levels.trailStart ?? 0, paperTrailGap: levels.trailGap ?? 0,
       ...(trade.lots > 0 ? { paperLots: trade.lots } : {}), ...(trade.autoTrade ? { autoPaper: trade.autoTrade } : {}),
     }
   }

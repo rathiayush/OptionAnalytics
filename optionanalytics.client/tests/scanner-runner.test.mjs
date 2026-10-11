@@ -308,6 +308,40 @@ test('a strategy tuned to BUY its option: the server scanner trades that - unles
   assert.ok(chosen.length && chosen.every((p) => p.action === 'SELL'), 'the chosen side wins over the strategy')
 })
 
+test('a setting applied for ONE index (the tuning pages\' Apply): that index trades with it, the others keep theirs', async () => {
+  // What a NIFTY-tuned "buy 1 OTM, SL 25% / target 50%" applied from the Trades page writes: config.filtersByIndex.NIFTY.
+  const probe = new IndexScanner('NIFTY', fakeIo())
+  probe.reset(DATE)
+  probe.setConfig({ alertIds: ALL_IDS, settings: { autoPaper: 'strategy', paperSl: 20, paperTarget: 30, paperLots: 1 } })
+  await runDay(probe, fakeIo(), at(15), at(300))
+  const id = probe.positions[0]?.strategy
+  assert.ok(id, 'the scanner traded')
+  const config = {
+    alertIds: ALL_IDS,
+    // The all-index filters still say "sell" for it; the NIFTY one replaces them on NIFTY only.
+    settings: { autoPaper: 'strategy', paperSl: 20, paperTarget: 30, paperLots: 1, filters: { [id]: { tradeOptLeg: 'sell' } } },
+    filtersByIndex: { NIFTY: { [id]: { tradeOptLeg: 'buy', tradeOptMoneyness: -1, tradeOptSlPct: 25, tradeOptTargetPct: 50 } } },
+  }
+  const run = async (u) => {
+    const s = new IndexScanner(u, fakeIo())
+    s.reset(DATE)
+    s.setConfig(config)
+    assert.deepEqual(s.settings().filters[id], u === 'NIFTY' ? config.filtersByIndex.NIFTY[id] : config.settings.filters[id])
+    await runDay(s, fakeIo(), at(15), at(300))
+    return s.positions.filter((p) => p.strategy === id)
+  }
+  const nifty = await run('NIFTY')
+  assert.ok(nifty.length && nifty.every((p) => p.action === 'BUY' && Math.abs(p.slPts - p.premium * 0.25) < 1e-6 && Math.abs(p.targetPts - p.premium * 0.5) < 1e-6),
+    'NIFTY buys with the SL / target it was tuned to')
+  // The same strategy on another index: its all-index filters (the scanner settings), not NIFTY's.
+  const other = new IndexScanner('BANKNIFTY', fakeIo())
+  other.setConfig(config)
+  assert.deepEqual(other.settings().filters[id], { tradeOptLeg: 'sell' })
+  // Nothing applied per index: exactly the all-index filters, as before.
+  other.setConfig({ ...config, filtersByIndex: undefined })
+  assert.deepEqual(other.settings().filters, config.settings.filters)
+})
+
 test('today is not loaded at weekends or before the open, and a failing load backs off (each try costs Dhan calls)', async () => {
   const io = fakeIo()
   const tries = []

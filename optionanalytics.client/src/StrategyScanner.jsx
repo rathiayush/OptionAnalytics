@@ -13,11 +13,11 @@ import { adaptiveStats } from './dayRegime.js'
 import { chargeRates, tradeCharges } from './tradeCharges.js'
 import {
   ACTIVE_STRATEGIES, STRATEGY_BY_ID, strategyStats, topFifteen, MIN_TRADES_TO_RANK, oiSummary, optionOiText,
-  DEFAULT_TRAIL, LAST_ENTRY, SQUARE_OFF, fmtHm, exitLabel, premiumAt, optionPnlPoints, optionTradeText, squareOffMs, RANGE_IDS, asReplayContext,
+  filtersForIndex, DEFAULT_TRAIL, LAST_ENTRY, SQUARE_OFF, fmtHm, exitLabel, premiumAt, optionPnlPoints, optionTradeText, squareOffMs, RANGE_IDS, asReplayContext,
   optionTradeAt, dayTypeAt, trailPoints, STRATEGY_FILTERS, strategyFilters, changedFilters, optionPlanFor } from './strategyEngine.js'
 import { replayRange } from './orderFlowMath.js'
 import { scanDaySetups, withDayOutcomes } from './scanDay.js'
-import { SCANNER_SETTINGS_KEY } from './scannerSettings.js'
+import { SCANNER_SETTINGS_KEY, BY_INDEX_KEY, readFiltersByIndex, loadFiltersByIndex, saveIndexFilters } from './scannerSettings.js'
 import {
   MIN, COOLDOWN_MS, msOf, trailUnit, trailPtsFor, trailFor, alertIdsFor, sameSignal,
   scanTick, followSetups, setupEvents, newPosition, positionRows, withLevelChange, PAPER_TRADE_LOT_SIZE, paperEntryText, setupExitText, paperExitResult, setupWasTraded, scannerLogBody, scannerLogSig,
@@ -135,6 +135,26 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   const [watch, setWatch] = useState([])
   const settingsRef = useRef(settings)
   useEffect(() => { settingsRef.current = settings }, [settings])
+  // The settings fine-tuned and applied for ONE index (the tuning pages' Apply): kept on the server apart from the
+  // scanner settings, copied here; on this index they replace a strategy's all-index filters (filtersForIndex).
+  const [filtersByIndex, setFiltersByIndex] = useState(() => readFiltersByIndex())
+  const byIndexRef = useRef(filtersByIndex)
+  useEffect(() => { byIndexRef.current = filtersByIndex }, [filtersByIndex])
+  useEffect(() => {
+    const onStorage = (e) => { if (e.key === BY_INDEX_KEY) setFiltersByIndex(readFiltersByIndex()) }
+    window.addEventListener('storage', onStorage)
+    return () => window.removeEventListener('storage', onStorage)
+  }, [])
+  // The server's copy is the one that counts (an apply from another device or tab lands there): read it now and each minute.
+  useEffect(() => {
+    if (!isAdmin) return undefined
+    let stopped = false
+    const pull = () => loadFiltersByIndex().then((v) => { if (!stopped) setFiltersByIndex((cur) => (JSON.stringify(cur) === JSON.stringify(v) ? cur : v)) }).catch(() => {})
+    pull()
+    const timer = setInterval(pull, 60_000)
+    return () => { stopped = true; clearInterval(timer) }
+  }, [isAdmin])
+  const filtersOf = (cfg) => filtersForIndex({ filters: cfg?.filters, filtersByIndex: byIndexRef.current }, underlying)
 
   // Paper option trades punched from setups (by hand, or automatically on each alert), per day. Each
   // follows its setup: it is closed when the setup's stop / target / trailing SL / 15:10 cut-off ends
@@ -171,7 +191,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   // The option a setup is traded with: ATM, or the strike the trader picked (ITM / OTM) - paper and live.
   // Which strike, and the SL / target in premium points: this strategy's own if it was tuned and applied, else the
   // scanner's setting (optionPlanFor - the same rule the server scanner uses).
-  const planOf = (setup, premium = null) => optionPlanFor(setup.id, settingsRef.current.filters, settingsRef.current, premium)
+  const planOf = (setup, premium = null) => optionPlanFor(setup.id, filtersOf(settingsRef.current), settingsRef.current, premium)
   const tradeOf = (setup, which) => optionTradeAt(oi, setup, which, planOf(setup).moneyness)
   const placeLive = async (setup, which) => {
     const trade = tradeOf(setup, which)
@@ -383,7 +403,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     }
     const tick = scanTick({
       nowMs, view, tapePrints, liquidity, pullStack, oi, estimated, lotSize, largeLots, profile, rowSize,
-      filters: settingsRef.current.filters, trail: trailFor(settingsRef.current, underlying),
+      filters: filtersOf(settingsRef.current), trail: trailFor(settingsRef.current, underlying),
     }, { fired: firedRef.current })
     if (!tick) return
     const { watching, fresh } = tick
@@ -398,7 +418,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       // The moment it alerts, the option is punched (the sell side by default): on paper, or - in Live
       // mode with Auto-place on - as a real Dhan super order.
       const live = liveModeRef.current
-      const side = optionPlanFor(s.id, cfg.filters, cfg).leg
+      const side = optionPlanFor(s.id, filtersOf(cfg), cfg).leg
       const autoTrade = side && (live.mode !== 'live' || live.auto) ? tradeOf(s, side) : null
       if (autoTrade) punchRef.current?.(s, side, s.t, { auto: true })
       if (cfg.sound) chime(s.side === 'LONG')
@@ -525,7 +545,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       // On whole minutes: each setup enters at the previous minute's close and its outcome counts from
       // the bar starting at its entry - the same as replaying to that minute (scanDay.js).
       const found = await scanDaySetups({
-        day, prints, oi: scanOi, profile, rowSize, lotSize, largeLots, estimated, filters: settingsRef.current.filters,
+        day, prints, oi: scanOi, profile, rowSize, lotSize, largeLots, estimated, filters: filtersOf(settingsRef.current),
         trail: trailFor(settingsRef.current, underlying), until: dayRange.end,
       }, async (i, steps) => {
         setScan({ progress: Math.round((i / steps) * 100) })
@@ -759,12 +779,13 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
   const [filterFor, setFilterFor] = useState(null)
   const filtersButton = (id) => {
     if (!STRATEGY_FILTERS[id]) return null
-    const edited = changedFilters(id, settings.filters?.[id]).length
+    const edited = changedFilters(id, filtersOf(settings)[id]).length
+    const perIndex = filtersByIndex?.[underlying]?.[id] != null
     return (
-      <Tooltip title={edited ? `${edited} filter(s) changed from the default` : 'Tune this strategy\'s filters'}>
+      <Tooltip title={`${edited ? `${edited} filter(s) changed from the default` : 'Tune this strategy\'s filters'}${perIndex ? ` - a fine-tuned setting applied for ${underlying} only` : ''}`}>
         <Button size="small" type={edited ? 'primary' : 'default'} ghost={!!edited} icon={<SettingOutlined />} onClick={() => setFilterFor(id)}
           style={{ marginLeft: 6, height: 20, fontSize: 11, padding: '0 6px' }} aria-label={`Filters for ${STRATEGY_BY_ID[id].name}`}>
-          {edited ? `Filters · ${edited}` : 'Filters'}
+          {edited ? `Filters · ${edited}` : 'Filters'}{perIndex ? ` · ${underlying}` : ''}
         </Button>
       </Tooltip>
     )
@@ -1185,8 +1206,17 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
               })}
           </div>
           {filterFor && (
-            <StrategyFiltersModal id={filterFor} values={settings.filters?.[filterFor]} onClose={() => setFilterFor(null)}
-              onSave={(v) => { setSettings((s) => ({ ...s, filters: { ...s.filters, [filterFor]: v } })); setFilterFor(null) }} />
+            <StrategyFiltersModal id={filterFor} values={filtersOf(settings)[filterFor]} onClose={() => setFilterFor(null)}
+              onSave={(v) => {
+                const id = filterFor
+                setFilterFor(null)
+                // A strategy with a setting applied for this index is edited there (this index only, on the server too);
+                // else for every index, with the scanner settings.
+                if (filtersByIndex?.[underlying]?.[id] == null) { setSettings((s) => ({ ...s, filters: { ...s.filters, [id]: v } })); return }
+                saveIndexFilters(underlying, id, v).then(() => setFiltersByIndex(readFiltersByIndex()))
+                  .then(() => notification.success({ message: `${STRATEGY_BY_ID[id]?.name}: filters saved for ${underlying}`, placement: 'topRight' }))
+                  .catch((e) => notification.error({ message: 'Filters not saved', description: e.message, placement: 'topRight' }))
+              }} />
           )}
           <Text type="secondary" style={{ fontSize: 11 }}>
             {days.length} day(s) scored ({days.filter((d) => d.estimated).length} estimated). Ranked by average R per trade (win rate × size of the wins), shrunk for small samples;
