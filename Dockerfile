@@ -73,7 +73,8 @@ ENV Storage__TriggersPath=/app/data/strategy-triggers.json \
     Storage__ScannerRunnerPath=/app/data/scanner-runner \
     Storage__TradeSettingsPath=/app/data/trade-settings.csv \
     Storage__RiskSettingsPath=/app/data/risk-settings.csv \
-    Storage__ServerLivePath=/app/data/server-live.json
+    Storage__ServerLivePath=/app/data/server-live.json \
+    Storage__LiveListPath=/app/data/live-list.json
 EXPOSE 8080
 
 # Create and chown the data directory BEFORE declaring it a volume. Docker discards changes made

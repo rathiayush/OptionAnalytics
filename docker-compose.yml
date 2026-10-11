@@ -41,6 +41,8 @@ services:
       Storage__RiskSettingsPath: /app/data/risk-settings.csv
       # Which index the server scanner trades LIVE today, its limits and its live trades.
       Storage__ServerLivePath: /app/data/server-live.json
+      # Which strategies may trade live per index: the rules and the by-hand changes.
+      Storage__LiveListPath: /app/data/live-list.json
       # SCANNER_RUNNER_ENABLED=false keeps it from starting (no server-side signals / paper trades).
       ScannerRunner__Enabled: ${SCANNER_RUNNER_ENABLED:-true}
 

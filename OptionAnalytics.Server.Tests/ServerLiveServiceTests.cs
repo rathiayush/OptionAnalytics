@@ -54,6 +54,21 @@ public sealed class ServerLiveServiceTests : IDisposable
         new(key, "#1 test", Expiry, 25000, "PE", "SELL", sl, target, 0, null);
 
     [Fact]
+    public async Task AStrategyNotOnTheIndexsLiveList_StaysOnPaper()
+    {
+        var orders = new FakeOrders();
+        var live = new ServerLiveService(Trade(), orders, Path.Combine(_dir, "server-live.json"), NullLogger<ServerLiveService>.Instance, null,
+            (u, id) => u == "NIFTY" && id == "proven" ? null : $"#{id} is not on {u}'s live list");
+        live.Set("NIFTY", true, null, null, "admin", At10);
+        var r = await live.PlaceAsync("NIFTY", Order("trial-1-sell"), At10, default);
+        Assert.False(r.Placed);
+        Assert.Contains("not on NIFTY's live list", r.Message);
+        Assert.Empty(orders.Placed);
+        Assert.True((await live.PlaceAsync("NIFTY", Order("proven-2-sell"), At10, default)).Placed); // the id from the key
+        Assert.Single(orders.Placed);
+    }
+
+    [Fact]
     public async Task OnPaper_NothingIsEverSent()
     {
         var orders = new FakeOrders();

@@ -17,6 +17,7 @@ public interface IServerLiveOrders
 ///  - the index is Live today, it is 09:15 - 14:45 IST, and the scanner has not already placed this signal;
 ///  - no other live trade of the index is still open (one at a time);
 ///  - the index's live trades today are under its max count and its live loss today is under its max loss;
+///  - the strategy is on the index's LIVE LIST (LiveListService: proven on that index after costs, or added by hand);
 ///  - the account's own daily loss limit / kill switch does not block it (LiveTradingService checks that itself).
 /// The lots, slippage and trailing stop are the index's Trade settings - the scanner only names the option; its
 /// SL / target are the ones the paper trade uses (the strategy's tuned plan or Trade settings), checked here.
@@ -31,6 +32,7 @@ public sealed class ServerLiveService
     private readonly IServerLiveOrders _orders;
     private readonly ILogger<ServerLiveService> _logger;
     private readonly TelegramAlertService? _telegram;
+    private readonly Func<string, string, string?>? _listBlock;
     private readonly string _path;
     private readonly object _lock = new();
     private readonly SemaphoreSlim _placing = new(1, 1);
@@ -38,11 +40,14 @@ public sealed class ServerLiveService
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { WriteIndented = true };
 
     public ServerLiveService(TradeSettingsStore trade, LiveTradingService trading, IHostEnvironment environment, IConfiguration configuration,
-        ILogger<ServerLiveService> logger, TelegramAlertService telegram)
-        : this(trade, new Live(trading), PathOf(environment, configuration), logger, telegram) { }
+        ILogger<ServerLiveService> logger, TelegramAlertService telegram, LiveListService list)
+        : this(trade, new Live(trading), PathOf(environment, configuration), logger, telegram, list.BlockReason) { }
 
-    internal ServerLiveService(TradeSettingsStore trade, IServerLiveOrders orders, string path, ILogger<ServerLiveService> logger, TelegramAlertService? telegram = null)
+    /// <param name="listBlock">(index, strategy id) -> why it is not on the live list, else null; null = no list check (tests).</param>
+    internal ServerLiveService(TradeSettingsStore trade, IServerLiveOrders orders, string path, ILogger<ServerLiveService> logger, TelegramAlertService? telegram = null,
+        Func<string, string, string?>? listBlock = null)
     {
+        _listBlock = listBlock;
         _trade = trade;
         _orders = orders;
         _path = path;
@@ -159,6 +164,8 @@ public sealed class ServerLiveService
         }
         if (request.Strike <= 0 || request.Side.ToUpperInvariant() is not ("CE" or "PE") || request.Action.ToUpperInvariant() is not ("BUY" or "SELL"))
             return "not an option order (strike, CE / PE, BUY / SELL)";
+        // Only strategies proven on this index (or added by hand) trade live; the rest stay on paper.
+        if (_listBlock is not null && _listBlock(u, request.StrategyIdOrFromKey) is { } notListed) return notListed;
         return null;
     }
 
@@ -247,7 +254,11 @@ public sealed class ServerLiveService
 
 /// <summary>What the scanner sends for one alert: the option and the signal's key (strategy-time-side).</summary>
 public sealed record ServerLiveOrderRequest(string Key, string? Strategy, DateOnly Expiry, decimal Strike, string Side, string Action,
-    decimal? StopLossPoints = null, decimal? TargetPoints = null, long ExitAtMs = 0, string? ExitReason = null);
+    decimal? StopLossPoints = null, decimal? TargetPoints = null, long ExitAtMs = 0, string? ExitReason = null, string? StrategyId = null)
+{
+    /// <summary>The strategy's id - sent, else the key's first part ({id}-{time}-{side}).</summary>
+    public string StrategyIdOrFromKey => !string.IsNullOrWhiteSpace(StrategyId) ? StrategyId! : Key.Split('-')[0];
+}
 
 public sealed record ServerLiveOrderResult(bool Placed, string Message, ManualOrderResult? Order);
 

@@ -22,7 +22,8 @@ All must pass before committing. The SAME scanner also runs on the server for NI
 there changes both - `tests/scanner-core.test.mjs` and `tests/scanner-runner.test.mjs` cover them. The runner is
 paper unless an admin switches an index to Live for TODAY (Trade settings / Order Flow page - `ServerLiveService`):
 then it asks `/api/scanner-runner/live/{index}/order`, where the server checks every limit (Live today, 09:15 - 14:45,
-one open trade per index, the index's max trades / max loss, the account kill switch) and places it with the index's
+one open trade per index, the index's max trades / max loss, the strategy on the index's live list - `LiveListService`:
+proven after costs on the tuning and live records, or added by hand -, the account kill switch) and places it with the index's
 Trade settings. Its "Runner" role still cannot reach the manual live-trading API; `ServerLiveServiceTests.cs` guards
 the limits.
 

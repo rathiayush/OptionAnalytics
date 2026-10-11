@@ -4,7 +4,7 @@
 // open trades from that minute. Run: npm test (node --test) - see CLAUDE.md.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { IndexScanner, topFromSignalsCsv, TAG } from '../scanner-runner/indexScanner.mjs'
+import { IndexScanner, topFromSignalsCsv, TAG, byLiveList } from '../scanner-runner/indexScanner.mjs'
 import { ALL_IDS, MIN } from '../src/scannerCore.js'
 import { day } from './synthetic-day.mjs'
 
@@ -109,6 +109,7 @@ test('an index switched to Live: each alert asks the server for a real order onc
   assert.equal(orders.length, scanner.positions.length, 'every alert asked once - the server decides')
   assert.equal(new Set(orders.map((o) => o.key)).size, orders.length, 'never the same signal twice')
   const first = orders[0]
+  assert.ok(first.strategyId && first.key.startsWith(first.strategyId), 'the strategy is named, for the live-list check')
   assert.ok(first.expiry && first.strike > 0 && ['CE', 'PE'].includes(first.side) && first.action === 'SELL' && first.stopLossPoints > 0 && first.targetPoints > 0 && first.exitAtMs > 0, JSON.stringify(first))
   const live = scanner.positions.filter((p) => p.live)
   assert.equal(live.length, 1)
@@ -134,6 +135,12 @@ test('an index switched to Live: each alert asks the server for a real order onc
   assert.equal(orders.length, asked)
   assert.equal(exits.length, sentExits)
   refuseAfter = 99
+})
+
+test('two signals at once: the one higher on the live list goes first (it gets the open slot)', () => {
+  const fresh = [{ id: 'a' }, { id: 'b' }, { id: 'c' }, { id: 'd' }]
+  assert.deepEqual(byLiveList(fresh, ['c', 'a']).map((s) => s.id), ['c', 'a', 'b', 'd'])
+  assert.deepEqual(byLiveList(fresh, null).map((s) => s.id), ['a', 'b', 'c', 'd'], 'paper: as they came')
 })
 
 test('on paper (not switched to Live) the scanner never asks for a live order', async () => {
