@@ -152,6 +152,17 @@ public sealed class ScannerRunnerController : ControllerBase
         return error is null ? Ok(new { rules = _list.Rules(), lists = _list.Lists() }) : BadRequest(new { error });
     }
 
+    /// <summary>GET /api/scanner-runner/learning - what the live signals teach (LearningReport): per index and strategy,
+    /// which order-flow conditions at the signal went with winning trades, from both scanner records.</summary>
+    [HttpGet("learning")]
+    [Authorize(Roles = AuthRoles.Admin)]
+    public IActionResult Learning([FromServices] ScannerLogStore log)
+    {
+        var rows = new[] { "server-signals", "signals" }.Select(k => log.PathOf(k)).Where(p => p is not null)
+            .SelectMany(p => ScannerLogStore.Read(p!)).ToList();
+        return Ok(new { minSignals = LearningReport.MinSignals, minLiftR = LearningReport.MinLiftR, strategies = LearningReport.Build(rows) });
+    }
+
     /// <summary>GET /api/scanner-runner/status - whether it is running and what it last reported.</summary>
     [HttpGet("status")]
     public IActionResult GetStatus() => Ok(_store.Status());

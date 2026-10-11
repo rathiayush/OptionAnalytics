@@ -365,6 +365,13 @@ export const TRADE_FILTERS = [
   { key: 'tradeMoveSize', label: 'Trade: futures price move on its timeframe', type: 'select', default: 'any', options: [{ value: 'any', label: 'Any' }, { value: 'small', label: 'Small move' }, { value: 'large', label: 'Real move' }] },
   { key: 'tradeDayType', label: 'Trade: day type at the signal', type: 'select', default: 'any', options: [{ value: 'any', label: 'Any' }, { value: 'trend', label: 'Trending day (up or down)' }, { value: 'withTrend', label: 'Trending day, my way' }, { value: 'notAgainstTrend', label: 'Not against a trend' }, { value: 'range', label: 'Range / two-sided day' }] },
   { key: 'tradeWallRoom', label: 'Trade: room to the next OI wall (support / resistance)', type: 'select', default: 'any', options: [{ value: 'any', label: 'Any' }, { value: 'oneR', label: 'At least 1R' }, { value: 'target', label: 'Not inside the target' }] },
+  // Order flow at the signal (its `market` - marketAt): the tape, big orders, the order book, delta and volume. Where the
+  // data is not there (an estimated day has no tape or book) the filter cannot judge, so it lets the trade through.
+  { key: 'tradeTape', label: 'Order flow: tape aggression (last minute) with the trade', type: 'select', default: 'any', options: [{ value: 'any', label: 'Any' }, { value: 'notAgainst', label: 'Not against it (45%+ my way)' }, { value: 'with', label: 'With it (55%+ my way)' }, { value: 'strong', label: 'Strongly with it (60%+ my way)' }] },
+  { key: 'tradeBig', label: 'Order flow: big orders in the last 5 min', type: 'select', default: 'any', options: [{ value: 'any', label: 'Any' }, { value: 'notAgainst', label: 'Not net against it' }, { value: 'with', label: 'Net with it' }] },
+  { key: 'tradeBook', label: 'Order flow: order book near the price (heatmap)', type: 'select', default: 'any', options: [{ value: 'any', label: 'Any' }, { value: 'notAgainst', label: 'Not leaning against it' }, { value: 'with', label: 'Leaning my way (10%+ more on my side)' }] },
+  { key: 'tradeCvd', label: 'Order flow: delta of the last 15 minutes', type: 'select', default: 'any', options: [{ value: 'any', label: 'Any' }, { value: 'with', label: 'With it' }] },
+  { key: 'tradeVolume', label: 'Order flow: volume of the last 15 minutes vs the day', type: 'select', default: 'any', options: [{ value: 'any', label: 'Any' }, { value: 'above', label: 'Above the day\'s average (1.2x+)' }, { value: 'below', label: 'Quiet (under the average)' }] },
   // How THIS strategy is taken in options, when it fires. 'default' / 0 means "whatever the scanner is set to", so a
   // strategy nobody has tuned behaves exactly as before. These are what the Strategy tuning page applies, and what the
   // paper trade - and a live order, when Auto-place is on - actually uses (optionPlanFor).
@@ -435,6 +442,7 @@ export function applyTradeFilter(s, f) {
   const minute = istMinute(s.t)
   const hhmm = Math.floor(minute / 60) * 100 + (minute % 60)
   if (hhmm < (f.tradeFrom ?? 930) || hhmm > (f.tradeTo ?? 1445)) return null
+  if (!flowGatePasses(s, f)) return null
   const oiGated = ['tradeOiFlow', 'tradeOiCum', 'tradeFutOi', 'tradeWallRoom', 'tradeWallOi', 'tradeSideOi', 'tradeSideCum', 'tradeMoveSize', 'tradeDayType'].some((k) => (f[k] ?? 'any') !== 'any')
   const stopX = f.tradeStopX ?? 1
   const targetX = f.tradeTargetX ?? 1
@@ -458,6 +466,26 @@ export function applyTradeFilter(s, f) {
   }
   // The wall room is judged against the stop / target as traded (scaled above).
   return !oiGated || oiGatePasses(taken, f) ? taken : null
+}
+
+export const FLOW_FILTER_KEYS = ['tradeTape', 'tradeBig', 'tradeBook', 'tradeCvd', 'tradeVolume']
+
+/** The order-flow filters (tape, big orders, book, delta, volume) on the setup's `market` - a number that is not there
+ *  (an estimated day) passes: the filter cannot judge it. */
+export function flowGatePasses(s, f) {
+  const m = s.market
+  if (!m || FLOW_FILTER_KEYS.every((k) => (f[k] ?? 'any') === 'any')) return true
+  const dir = s.side === 'LONG' ? 1 : -1
+  const ok = (v, test) => v == null || !Number.isFinite(v) || test(v)
+  const tape = m.tape60 == null ? null : dir * (m.tape60 - 50) // points my way over 50%
+  const checks = {
+    tradeTape: { notAgainst: () => ok(tape, (v) => v >= -5), with: () => ok(tape, (v) => v >= 5), strong: () => ok(tape, (v) => v >= 10) },
+    tradeBig: { notAgainst: () => ok(m.bigNet, (v) => dir * v >= 0), with: () => ok(m.bigNet, (v) => dir * v > 0) },
+    tradeBook: { notAgainst: () => ok(m.bookImb, (v) => dir * v >= -0.1), with: () => ok(m.bookImb, (v) => dir * v >= 0.1) },
+    tradeCvd: { with: () => ok(m.cvd15, (v) => dir * v > 0) },
+    tradeVolume: { above: () => ok(m.volX, (v) => v >= 1.2), below: () => ok(m.volX, (v) => v < 1) },
+  }
+  return FLOW_FILTER_KEYS.every((k) => { const mode = f[k] ?? 'any'; return mode === 'any' || (checks[k][mode]?.() ?? true) })
 }
 
 /** The OI confirmation filters in force, in words. */
@@ -830,6 +858,59 @@ export function oiSummary(oi, ms) {
     maxPain: maxPainOf(rows.filter((r) => Math.abs(r.strike - spot) <= 15 * oi.step)),
     futures: f ? { ...f, regime } : null,
     sudden: suddenOiWalls(oi, ms).slice(0, 6),
+  }
+}
+
+// The market at a signal, in a few numbers (MARKET_KEYS) - each read only from what was known at `nowMs`: the tape up
+// to it, the completed bars, the finished minutes' OI and the last heatmap column at or before it. null where the data
+// is not there (an estimated day has no tape or book). Signed as the market is (+ = buyers / longs / puts written);
+// the learning turns them to "with the trade" by the signal's side.
+//   tape30 / tape60 / tape300  % of the tape's volume bought at the offer, last 30 s / 1 min / 5 min
+//   bigNet / bigCount          big prints (>= the big-order lots) in the last 5 min: net lots bought - sold, how many
+//   cvd15                      the last 15 completed bars' delta, in lots
+//   volX                       the last 15 bars' volume vs the day's 15-minute average so far
+//   futPx15 / futOi15 / futOi5 futures price % and OI % change over 15 / 5 min
+//   writers15 / writersOpen    option writers' lean near the money, 15 min / since the open (+ = puts written)
+//   pcr                        put / call OI near the money
+//   bookImb                    order book near the price (±0.15%): (bids - asks) / (bids + asks)
+//   vwapDist                   price vs the day's VWAP, %
+export const MARKET_KEYS = ['tape30', 'tape60', 'tape300', 'bigNet', 'bigCount', 'cvd15', 'volX', 'futPx15', 'futOi15', 'futOi5', 'writers15', 'writersOpen', 'pcr', 'bookImb', 'vwapDist']
+
+export function marketAt({ nowMs, price, bars, tapePrints, oi, heatmap, lotSize, largeLots }) {
+  const lots = (q) => q / Math.max(1, lotSize || 1)
+  const round = (v, d = 2) => (v == null || !Number.isFinite(v) ? null : Math.round(v * 10 ** d) / 10 ** d)
+  const prints = (tapePrints ?? []).filter((p) => msOf(p.time) <= nowMs)
+  const aggOf = (ms) => {
+    const w = prints.filter((p) => msOf(p.time) > nowMs - ms)
+    const total = w.reduce((a, p) => a + (p.quantity ?? 0), 0)
+    return total > 0 ? (100 * w.filter((p) => p.buy).reduce((a, p) => a + (p.quantity ?? 0), 0)) / total : null
+  }
+  const bigMin = Math.max(1, largeLots || 10) * Math.max(1, lotSize || 1)
+  const big = prints.filter((p) => msOf(p.time) > nowMs - 5 * MIN && (p.quantity ?? 0) >= bigMin)
+  const volOf = (b) => ((b.buy ?? 0) + (b.sell ?? 0)) || b.volume || 0
+  const last15 = (bars ?? []).slice(-15)
+  const dayVol = (bars ?? []).reduce((a, b) => a + volOf(b), 0)
+  const per15 = (bars ?? []).length >= 15 ? dayVol / ((bars ?? []).length / 15) : null
+  let pv = 0, v = 0
+  for (const b of bars ?? []) { const vol = volOf(b); pv += ((b.high + b.low + b.close) / 3) * vol; v += vol }
+  const vwap = v > 0 ? pv / v : null
+  const f15 = oi ? futuresChange(oi, nowMs, 15) : null
+  const f5 = oi ? futuresChange(oi, nowMs, 5) : null
+  const spot = oi?.spot?.length ? oi.spot.filter((x) => x.t <= nowMs).at(-1)?.close : null
+  const read = oi && spot ? optionOiRead(oi, spot, nowMs, 15, 3) : null
+  const col = (heatmap ?? []).filter((c) => msOf(c.t ?? c.time) <= nowMs).at(-1)
+  const near = (rows) => (rows ?? []).reduce((a, r) => (Math.abs(r[0] - price) <= price * 0.0015 ? a + r[1] : a), 0)
+  const bids = col ? near(col.bids) : 0
+  const asks = col ? near(col.asks) : 0
+  return {
+    tape30: round(aggOf(30_000), 0), tape60: round(aggOf(60_000), 0), tape300: round(aggOf(300_000), 0),
+    bigNet: tapePrints ? round(lots(big.reduce((a, p) => a + (p.buy ? 1 : -1) * p.quantity, 0)), 0) : null, bigCount: tapePrints ? big.length : null,
+    cvd15: last15.length ? round(lots(last15.reduce((a, b) => a + (b.delta ?? 0), 0)), 0) : null,
+    volX: per15 > 0 ? round(last15.reduce((a, b) => a + volOf(b), 0) / per15) : null,
+    futPx15: round(f15?.pricePct != null ? f15.pricePct * 100 : null, 3), futOi15: round(f15?.oiPct != null ? f15.oiPct * 100 : null, 3), futOi5: round(f5?.oiPct != null ? f5.oiPct * 100 : null, 3),
+    writers15: round(read?.lean), writersOpen: round(read?.leanOpen), pcr: round(read?.pcr),
+    bookImb: bids + asks > 0 ? round((bids - asks) / (bids + asks)) : null,
+    vwapDist: vwap ? round(((price - vwap) / vwap) * 100, 3) : null,
   }
 }
 
@@ -2604,7 +2685,9 @@ export function evaluateStrategies(input) {
 
   // Retired strategies are not traded (input.includeRetired: the tests, which still exercise their rules).
   // Each strategy's trade filters (sides, entry window, stop / target / time stop / trailing) - the defaults change nothing.
-  const traded = out.map((s) => applyTradeFilter(s, strategyFilters(s.id, input.filters?.[s.id]))).filter(Boolean)
+  // The market at the clock on every setup (for the order-flow filters, and kept in the scanner record for the learning).
+  const market = out.length ? marketAt({ nowMs, price, bars, tapePrints: input.prints, oi, heatmap: input.heatmap, lotSize: input.lotSize, largeLots: input.bigLots }) : null
+  const traded = out.map((s) => applyTradeFilter({ ...s, market }, strategyFilters(s.id, input.filters?.[s.id]))).filter(Boolean)
   const final = resolveConflicts(input.includeRetired ? traded : traded.filter((s) => !STRATEGY_BY_ID[s.id]?.retired))
   if (!final.length) return final
   // The day type at the clock and what an adaptive scanner would do with each setup - TRACKING ONLY:

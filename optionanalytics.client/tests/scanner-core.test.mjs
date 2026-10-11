@@ -56,10 +56,11 @@ test('the shared live loop fires exactly what the page\'s own loop fired, minute
     fires += now.fresh.length
     // The same setups - each now also carrying the market at its time (a note for the learning, not a decision).
     assert.ok(now.fresh.every((x) => x.market && typeof x.market === 'object'))
-    assert.deepEqual(now.fresh.map(({ market, ...x }) => x), before.fresh) // eslint-disable-line no-unused-vars
+    const noMarket = ({ market, ...x }) => x // eslint-disable-line no-unused-vars
+    assert.deepEqual(now.fresh.map(noMarket), before.fresh.map(noMarket))
     assert.deepEqual(now.watching, before.watching)
   }
-  assert.deepEqual(memory.fired.map(({ market, ...x }) => x), firedRef.current) // eslint-disable-line no-unused-vars
+  assert.deepEqual(memory.fired.map(({ market, ...x }) => x), firedRef.current.map(({ market, ...x }) => x)) // eslint-disable-line no-unused-vars
   assert.ok(fires >= 3, `only ${fires} setups fired - the synthetic day should give a few`)
 })
 

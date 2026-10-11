@@ -4,7 +4,7 @@ import { NavBar, useAuth, UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import { OPTION_TRADE_FILTERS, STRATEGY_BY_ID, TRADE_FILTERS } from './strategyEngine.js'
 import { useNarrow } from './DomDrawer.jsx'
 import { filtersFromTuning, paramsFromSettingsRow } from './strategyTuning.js'
-import { applyTunedFilters } from './scannerSettings.js'
+import { applyFilterValue, applyTunedFilters } from './scannerSettings.js'
 import ClearData from './ClearData.jsx'
 import './tuningMobile.css'
 
@@ -475,6 +475,67 @@ function StrategyPerformance({ reloadKey }) {
   )
 }
 
+// ---- What the live signals teach: which order-flow conditions at the signal win, per strategy and index -------------
+function Learning() {
+  const auth = useAuth()
+  const isAdmin = auth?.user?.role === 'Admin'
+  const narrow = useNarrow()
+  const [body, setBody] = useState(null)
+  const [error, setError] = useState(null)
+  const [index, setIndex] = useState('all')
+  const [onlySuggested, setOnlySuggested] = useState(true)
+  useEffect(() => {
+    fetch('/api/scanner-runner/learning').then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then(setBody).catch((e) => setError(e.message))
+  }, [])
+  const list = (body?.strategies ?? []).filter((x) => index === 'all' || x.underlying === index)
+  const indices = [...new Set((body?.strategies ?? []).map((x) => x.underlying))].sort()
+  const shown = list.map((x) => ({ ...x, findings: onlySuggested ? x.findings.filter((f) => f.suggested) : x.findings })).filter((x) => x.findings.length || !onlySuggested)
+  const g = (x) => `${x.signals} · win ${x.winPct == null ? '-' : `${x.winPct}%`} · ${fmtR(x.avgR)}`
+  const apply = async (s, f) => {
+    try {
+      await applyFilterValue(s.strategyId, f.filter, f.mode)
+      message.success({ content: `#${s.strategyNo} ${s.strategy}: only when "${f.label}" from now on - the live scanner (this browser and the server scanner); every other filter kept. It applies to all indices.`, duration: 8 })
+    } catch (err) { message.error(err.message) }
+  }
+  return (
+    <Space direction="vertical" size={10} style={{ width: '100%' }}>
+      <Text type="secondary" style={{ fontSize: 12 }}>
+        Every signal the scanners fire keeps what the market looked like at that moment - the tape, big orders, the order book (heatmap), delta,
+        volume, futures OI and the option writers. As those signals close, this compares, for each strategy on each index, the ones taken with a
+        condition met against the rest. A condition is suggested only with at least {body?.minSignals ?? 8} signals on each side, +{body?.minLiftR ?? 0.15}R
+        or more a trade, on the older AND the newer signals - so it keeps learning as live days come in. Apply sets it as that strategy&apos;s filter.
+      </Text>
+      <Space wrap size={8}>
+        <Select value={index} onChange={setIndex} style={{ width: 140 }} options={[{ value: 'all', label: 'All indices' }, ...indices.map((u) => ({ value: u, label: u }))]} aria-label="Learning index" />
+        <Segmented value={onlySuggested ? 'suggested' : 'all'} onChange={(v) => setOnlySuggested(v === 'suggested')} options={[{ value: 'suggested', label: 'Suggestions' }, { value: 'all', label: 'Every condition' }]} />
+      </Space>
+      {error && <Alert type="error" showIcon message={error} />}
+      {body && !shown.length && <Alert type="info" showIcon message={onlySuggested ? 'No steady pattern yet - each condition needs enough closed signals on both sides, on older and newer days. It fills in as the scanners run.' : 'No closed signals with the market kept yet.'} />}
+      {shown.map((s) => (
+        <Card key={`${s.underlying}-${s.strategyId}`} size="small" title={<span style={{ fontSize: 13 }}>{s.underlying} · #{s.strategyNo} {s.strategy}</span>}
+          extra={<Text type="secondary" style={{ fontSize: 12 }}>{g({ signals: s.signals, winPct: s.winPct, avgR: s.avgR })} ({s.withMarket} with the market kept)</Text>} styles={{ body: { padding: 10 } }}>
+          {s.findings.map((f) => (
+            <div key={f.condition} style={{ borderTop: '1px solid #ffffff14', padding: '6px 0', fontSize: 12, display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'baseline' }}>
+              {f.suggested ? <Tag color="green" style={{ margin: 0 }}>suggested</Tag> : <Tag style={{ margin: 0 }}>not yet</Tag>}
+              <b>{f.label}</b>
+              <span>met: {g(f.met)}</span>
+              <Text type="secondary" style={{ fontSize: 12 }}>not met: {g(f.notMet)}</Text>
+              {f.liftR != null && <b style={{ color: col(f.liftR) }}>{f.liftR >= 0 ? '+' : ''}{f.liftR.toFixed(2)}R</b>}
+              <Text type="secondary" style={{ fontSize: 11, flexBasis: narrow ? '100%' : 'auto' }}>{f.why}</Text>
+              {isAdmin && f.suggested && (
+                <Popconfirm title={`Only take #${s.strategyNo} ${s.strategy} when "${f.label}"?`} description="Set as this strategy's filter on the live scanner (all indices); its other filters stay." okText="Apply" onConfirm={() => apply(s, f)}>
+                  <Button size="small" type="primary">Apply as filter</Button>
+                </Popconfirm>
+              )}
+            </div>
+          ))}
+        </Card>
+      ))}
+    </Space>
+  )
+}
+
 // ---- Backtest: the tuning HISTORY - every run kept as CSV, the picked runs' trades clubbed by date and time -------
 const runLabel = (r) => `${r.index}${r.data === 'spot' ? ' spot' : ''} · ${r.finished_ist?.slice(8, 10)}/${r.finished_ist?.slice(5, 7)} ${r.finished_ist?.slice(11, 16)} · ${r.days_used}d · ${r.tuned}`
 /** The newest run of each index (for the data mode) - what the page shows until runs are picked. */
@@ -744,11 +805,12 @@ export default function TradesPage() {
           <Space size={8} wrap>
             <Segmented value={tab} onChange={setTab} options={[
               { value: 'performance', label: <Tooltip title="Every tuning run of every index added up per strategy - which strategies do best">Strategy performance</Tooltip> },
-              { value: 'backtest', label: 'Backtest (tuning run)' }, { value: 'record', label: 'Scanner record (live & paper)' }]} />
+              { value: 'backtest', label: 'Backtest (tuning run)' }, { value: 'record', label: 'Scanner record (live & paper)' },
+              { value: 'learning', label: <Tooltip title="Which order-flow conditions at the signal (tape, big orders, order book, delta, volume) went with winning trades, from the live signals">What wins (live)</Tooltip> }]} />
             {auth?.user?.role === 'Admin' && <ClearData onCleared={() => setReloadKey((k) => k + 1)} />}
           </Space>
         )}>
-          {tab === 'performance' ? <StrategyPerformance key={reloadKey} reloadKey={reloadKey} /> : tab === 'backtest' ? <BacktestTrades key={reloadKey} /> : <ScannerRecord key={reloadKey} />}
+          {tab === 'performance' ? <StrategyPerformance key={reloadKey} reloadKey={reloadKey} /> : tab === 'backtest' ? <BacktestTrades key={reloadKey} /> : tab === 'learning' ? <Learning key={reloadKey} /> : <ScannerRecord key={reloadKey} />}
         </Card>
       </Space>
     </div>

@@ -128,7 +128,8 @@ test('the tuning measures the OI confirmation exactly as the scanner takes it', 
 })
 
 test('the OI grid is searched step by step, OI then trade tunes the trade on top, and the filters saved', async () => {
-  const full = [...variants(OI_GRID)].length
+  // (Counted by multiplying - listing them all would not fit in memory, which is the point.)
+  const full = Object.values(OI_GRID).reduce((n, values) => n * values.length, 1)
   assert.ok(full > 1_000_000, `the full OI grid is far too big to try (${full})`)
   assert.equal([...variants(TUNING_GRID)].length, 7200)
   assert.ok([...variants(TUNING_GRID, { ...DEFAULT_VARIANT, tradeOiFlow: 'with' })].every((v) => v.tradeOiFlow === 'with'), 'a grid keeps what it does not tune')
