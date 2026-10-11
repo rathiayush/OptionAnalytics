@@ -124,7 +124,10 @@ public sealed class ServerLiveService
             var sl = request.StopLossPoints is > 0 and <= 5000 ? request.StopLossPoints.Value : t.SlPoints;
             var target = request.TargetPoints is > 0 and <= 5000 ? request.TargetPoints.Value : t.TargetPoints;
             if (sl <= 0 || target <= 0) return new ServerLiveOrderResult(false, "a live trade is a Dhan super order - the index's SL and target must both be above 0", null);
-            var order = new ManualOrderRequest(u, request.Expiry, request.Strike, request.Side.ToUpperInvariant(), request.Action.ToUpperInvariant(), t.Lots,
+            // The strategy's own lot size on this index when one was applied with it (the scanner sends it), else the
+            // index's lots - within Trade settings' own range.
+            var lots = request.Lots is >= 1 and <= 500 ? request.Lots.Value : t.Lots;
+            var order = new ManualOrderRequest(u, request.Expiry, request.Strike, request.Side.ToUpperInvariant(), request.Action.ToUpperInvariant(), lots,
                 t.SlippagePoints, sl, target, t.TrailGap > 0 ? t.TrailStart : 0, t.TrailGap,
                 request.ExitAtMs, request.ExitReason ?? "server scanner time stop");
             _logger.LogWarning("Server scanner LIVE {Action} {Underlying} {Strike}{Side} x{Lots} for {Key}.", order.Direction, u, order.Strike, order.Side, order.Lots, request.Key);
@@ -373,7 +376,7 @@ public sealed class ServerLiveService
 /// <summary>What the scanner sends for one alert: the option and the signal's key (strategy-time-side).</summary>
 public sealed record ServerLiveOrderRequest(string Key, string? Strategy, DateOnly Expiry, decimal Strike, string Side, string Action,
     decimal? StopLossPoints = null, decimal? TargetPoints = null, long ExitAtMs = 0, string? ExitReason = null, string? StrategyId = null,
-    decimal? IndexStop = null, string? IndexSide = null, decimal? IndexTarget = null)
+    decimal? IndexStop = null, string? IndexSide = null, decimal? IndexTarget = null, int? Lots = null)
 {
     /// <summary>The strategy's id - sent, else the key's first part ({id}-{time}-{side}).</summary>
     public string StrategyIdOrFromKey => !string.IsNullOrWhiteSpace(StrategyId) ? StrategyId! : Key.Split('-')[0];

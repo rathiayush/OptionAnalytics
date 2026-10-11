@@ -6,6 +6,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { IndexScanner, topFromSignalsCsv, TAG, byLiveList } from '../scanner-runner/indexScanner.mjs'
 import { ALL_IDS, MIN } from '../src/scannerCore.js'
+import { strategyFilters } from '../src/strategyEngine.js'
 import { day } from './synthetic-day.mjs'
 
 const { minuteBars, prints, oi, path, T915, at } = day()
@@ -120,6 +121,7 @@ test('an index switched to Live: each alert asks the server for a real order onc
   // A trailed stop is only ever sent tighter than the last one sent.
   for (let i = 1; i < stops.length; i++) if (stops[i].key === stops[i - 1].key) assert.ok(fired.side === 'LONG' ? stops[i].stop > stops[i - 1].stop : stops[i].stop < stops[i - 1].stop)
   assert.ok(first.expiry && first.strike > 0 && ['CE', 'PE'].includes(first.side) && first.action === 'SELL' && first.stopLossPoints > 0 && first.targetPoints > 0 && first.exitAtMs > 0, JSON.stringify(first))
+  assert.equal(first.lots, 2, 'the lots go with the order - the index\'s here (no lot size of its own)')
   const live = scanner.positions.filter((p) => p.live)
   assert.equal(live.length, 1)
   assert.deepEqual(live[0].orderIds, ['o1'])
@@ -341,6 +343,34 @@ test('a setting applied for ONE index (the tuning pages\' Apply): that index tra
   // Nothing applied per index: exactly the all-index filters, as before.
   other.setConfig({ ...config, filtersByIndex: undefined })
   assert.deepEqual(other.settings().filters, config.settings.filters)
+})
+
+test('a strategy applied to an index WITH a lot size: its paper and live trades there take that many lots, the rest the index\'s', async () => {
+  const probe = new IndexScanner('NIFTY', fakeIo())
+  probe.reset(DATE)
+  probe.setConfig({ alertIds: ALL_IDS, settings: { autoPaper: 'sell', paperSl: 20, paperTarget: 30 } })
+  await runDay(probe, fakeIo(), at(15), at(300))
+  const id = probe.positions[0]?.strategy
+  assert.ok(id)
+  const orders = []
+  const io = fakeIo()
+  io.api = async (path, opts) => {
+    if (path === '/api/scanner-runner/live/NIFTY/order') { orders.push(opts.body); return { placed: true, message: 'placed', order: { success: true, orderIds: [`o${orders.length}`], lotSize: 65 } } }
+    return {}
+  }
+  const s = new IndexScanner('NIFTY', io)
+  s.reset(DATE)
+  // The index trades 2 lots (Trade settings); this strategy was applied to NIFTY with 5.
+  s.setConfig({ alertIds: ALL_IDS, settings: { autoPaper: 'sell', paperSl: 20, paperTarget: 30 }, trade: { NIFTY: { lots: 2 } }, live: { NIFTY: true },
+    filtersByIndex: { NIFTY: { [id]: { tradeSide: 'both', _lots: 5 } } } })
+  await runDay(s, io, at(15), at(300))
+  const mine = s.positions.filter((p) => p.strategy === id)
+  const others = s.positions.filter((p) => p.strategy !== id)
+  assert.ok(mine.length && mine.every((p) => p.lots === 5), JSON.stringify(mine.map((p) => p.lots)))
+  assert.ok(others.every((p) => p.lots === 2), 'every other strategy: the index\'s lots')
+  assert.ok(orders.filter((o) => o.strategyId === id).every((o) => o.lots === 5) && orders.filter((o) => o.strategyId !== id).every((o) => o.lots === 2), JSON.stringify(orders.map((o) => [o.strategyId, o.lots])))
+  // The lot size never reaches the strategy's filters (the scanner reads only real ones).
+  assert.equal(strategyFilters(id, s.settings().filters[id])._lots, undefined)
 })
 
 test('today is not loaded at weekends or before the open, and a failing load backs off (each try costs Dhan calls)', async () => {

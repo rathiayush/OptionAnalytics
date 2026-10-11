@@ -390,6 +390,16 @@ export const OPTION_TRADE_FILTERS = ['tradeOptLeg', 'tradeOptMoneyness', 'tradeO
  * it replaces the strategy's all-index filters (`filters[id]`) whole; every other strategy, and every other index,
  * keeps the all-index ones. Nothing applied per index = exactly the all-index filters, as before.
  */
+/**
+ * How many lots a strategy's trades take on an index: its own lot size when one was applied with it there (`_lots` in
+ * the strategy's filters for that index - Trades page, Apply with a lot size), else the index's lots (Trade settings).
+ * `filters` = filtersForIndex(...) for that index. Paper and live alike; 1 - 500 (Trade settings' own range).
+ */
+export function lotsFor(id, filters, defaultLots = 1) {
+  const own = Number(filters?.[id]?._lots)
+  return Math.max(1, Math.min(500, Number.isInteger(own) && own >= 1 ? own : (Number(defaultLots) || 1)))
+}
+
 export function filtersForIndex(settings, underlying) {
   const all = settings?.filters ?? {}
   const own = underlying ? settings?.filtersByIndex?.[underlying] : null

@@ -308,7 +308,7 @@ const TuningResult = memo(function TuningResult({ result, isAdmin, spot, applyRe
                     <Button size="small" disabled>Apply to the scanner</Button>
                   </Tooltip>
                 ) : (
-                  <ApplyTunedButton index={result.underlying} primary={r.recommend} label="Apply to the scanner" onApply={(live) => applyRef.current(r, result.underlying, live)}
+                  <ApplyTunedButton index={result.underlying} primary={r.recommend} label="Apply to the scanner" onApply={(live, lots) => applyRef.current(r, result.underlying, live, lots)}
                     title={`Apply to #${r.no} ${r.name}${result.underlying ? ` on ${result.underlying}` : ''}?`}
                     description={`${r.recommend ? variantText(r.best.params) : `Not recommended: ${r.reason}. Apply anyway - your call.`}${r.unit === 'pts' ? ' The option part - buy or sell, the strike and its SL / target - is applied to this strategy as well.' : ''} ${result.underlying ? `It runs with it on ${result.underlying} (paper, and live when ${result.underlying} is Live today and the strategy is on its live list); other indices keep theirs.` : ''} Whatever was applied to this strategy${result.underlying ? ` on ${result.underlying}` : ''} before is replaced.`} />
                 ))}>
@@ -447,12 +447,12 @@ export default function StrategyTuningPage() {
   // Apply, for the result's buttons - through a ref so the (memoised) result is not redrawn on every page change.
   const applyRef = useRef(null)
   const [appliedKey, setAppliedKey] = useState(0) // the "Applied now" card reloads after an apply
-  const apply = async (r, index = null, addToLive = false) => {
+  const apply = async (r, index = null, addToLive = false, lots = null) => {
     try {
       // `pts` means the option itself was tuned, so the buy / sell, the strike and its SL / target go across too.
       const option = r.unit === 'pts'
       // For the index it was tuned on (that index only).
-      const filters = await applyTunedFilters(r.id, r.best.params, { option, index, tuned: settingSignature(r.best.params) })
+      const filters = await applyTunedFilters(r.id, r.best.params, { option, index, tuned: settingSignature(r.best.params), ...(index ? { lots } : {}) })
       if (addToLive && index) await putOnLiveList(index, r.id)
       setAppliedKey((k) => k + 1)
       message.success({

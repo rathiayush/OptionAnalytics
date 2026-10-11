@@ -279,6 +279,7 @@ function StrategyPerformance({ reloadKey }) {
   const appliedFor = (id) => Object.keys(liveCfg?.filtersByIndex ?? {}).filter((u) => liveCfg.filtersByIndex[u]?.[id]).sort()
   const [bestSel, setBestSel] = useState(null) // Apply best: the strategies picked ({ index, ids }); null = the proven ones
   const [bestLive, setBestLive] = useState(false) // ... and put them on the index's live list
+  const [bestLots, setBestLots] = useState(null) // ... with this lot size each (empty = each keeps its own, else the index's)
   useEffect(() => { loadLive() }, [])
   const [bestFor, setBestFor] = useState('NIFTY')
   const [applying, setApplying] = useState(false)
@@ -308,12 +309,12 @@ function StrategyPerformance({ reloadKey }) {
     </Tooltip>
   }
   // Applied for the index it was tuned on (that index only - another index's setting for the same strategy stays).
-  const apply = async (r, tuned, addToLive = false) => {
+  const apply = async (r, tuned, addToLive = false, lots = null) => {
     try {
       const params = paramsFromSettingsRow(tuned)
-      await applyTunedFilters(r.strategyId, params, { option: tuned.unit === 'pts', index: tuned.index, tuned: settingSignature(tuned) })
+      await applyTunedFilters(r.strategyId, params, { option: tuned.unit === 'pts', index: tuned.index, tuned: settingSignature(tuned), lots })
       if (addToLive) await putOnLiveList(tuned.index, r.strategyId)
-      message.success({ content: `#${r.strategyNo} ${r.strategy}: ${tuned.index}'s tuned setting is in force now on ${tuned.index} for the live scanner (this browser and the server scanner)${tuned.setting_text ? ` - ${tuned.setting_text}` : ''}${addToLive ? `; on ${tuned.index}'s live list - it trades live when ${tuned.index} is Live today` : ''}`, duration: 10 })
+      message.success({ content: `#${r.strategyNo} ${r.strategy}: ${tuned.index}'s tuned setting is in force now on ${tuned.index}, ${lots ? `${lots} lot(s)` : `the index's lots`}, for the live scanner (this browser and the server scanner)${tuned.setting_text ? ` - ${tuned.setting_text}` : ''}${addToLive ? `; on ${tuned.index}'s live list - it trades live when ${tuned.index} is Live today` : ''}`, duration: 10 })
     } catch (err) {
       message.error(err.message)
     } finally {
@@ -346,7 +347,8 @@ function StrategyPerformance({ reloadKey }) {
   const applyButton = (r, t, label = 'Apply to live scanner') => (applyBlock ? (
     <Tooltip title={applyBlock}><Button size="small" disabled>{label}</Button></Tooltip>
   ) : (
-    <ApplyTunedButton index={t.row.index} primary={t.best} label={label} onApply={(live) => apply(r, t.row, live)}
+    <ApplyTunedButton index={t.row.index} primary={t.best} label={label} onApply={(live, lots) => apply(r, t.row, live, lots)}
+      lots={liveCfg?.filtersByIndex?.[t.row.index]?.[r.strategyId]?._lots ?? null} indexLots={liveCfg?.trade?.[t.row.index]?.lots ?? null}
       title={`Apply this ${t.row.index} setting to #${r.strategyNo} ${r.strategy}?`}
       description={`${t.recommended ? '' : 'No run recommended it - applied anyway, your call. '}The live scanner (this browser and the server scanner) runs this strategy with it on ${t.row.index} from now - paper, and live when ${t.row.index} is Live today and the strategy is on its live list. What was applied to it on ${t.row.index} before is replaced; other indices keep theirs.`} />
   ))
@@ -388,7 +390,7 @@ function StrategyPerformance({ reloadKey }) {
     let done = 0
     try {
       for (const { r, t } of bestPicks(bestFor)) {
-        await applyTunedFilters(r.strategyId, paramsFromSettingsRow(t.row), { option: t.unit === 'pts', index: bestFor, tuned: settingSignature(t.row) })
+        await applyTunedFilters(r.strategyId, paramsFromSettingsRow(t.row), { option: t.unit === 'pts', index: bestFor, tuned: settingSignature(t.row), ...(bestLots ? { lots: bestLots } : {}) })
         if (bestLive) await putOnLiveList(bestFor, r.strategyId)
         done++
       }
@@ -504,6 +506,7 @@ function StrategyPerformance({ reloadKey }) {
                 <Select mode="multiple" allowClear value={pickedIds(u)} onChange={(ids) => setBestSel({ index: u, ids })} style={{ minWidth: 280, maxWidth: 640 }} maxTagCount="responsive"
                   placeholder={candidates.length ? 'pick strategies' : 'no tuned setting for this index yet'} aria-label="Strategies to apply"
                   options={candidates.map(({ r, t }) => ({ value: r.strategyId, label: `#${r.strategyNo} ${r.strategy} · ${t.best ? 'best' : 'not proven yet'}` }))} />
+                <Space size={4}><Text>lots</Text><Tooltip title={`Each strategy picked takes this many lots on ${u}. Empty: each keeps its own lot size, else the index's (Trade settings: ${liveCfg?.trade?.[u]?.lots ?? '-'}).`}><InputNumber size="small" min={1} max={500} precision={0} value={bestLots} onChange={(v) => setBestLots(v ?? null)} style={{ width: 80 }} placeholder={`${liveCfg?.trade?.[u]?.lots ?? ''} (index)`} aria-label="Lots for the picked strategies" /></Tooltip></Space>
                 <Checkbox checked={bestLive} onChange={(e) => setBestLive(e.target.checked)}>and put them on the live list</Checkbox>
                 <Popconfirm title={`Apply ${picks.length} setting(s) on ${u}?`} okText="Apply" onConfirm={applyAllBest} disabled={!picks.length}
                   description={<div style={{ maxWidth: 380 }}>Each strategy picked runs with its best fine-tuned setting on {u} (this browser and the server scanner) from now - paper, and live when {u} is Live today and the strategy is on its live list; what was applied to them on {u} before is replaced, other indices keep theirs.{unproven ? ` ${unproven} of them are not proven yet - their top-scored setting is applied.` : ''}{bestLive ? ` All ${picks.length} go on ${u}'s live list.` : ''}</div>}>
