@@ -56,6 +56,23 @@ public sealed class DhanDataApiRateLimiter : IDisposable
     /// on its behalf, including the concurrent strike fetches it starts, is background work (see WaitForPermitAsync).</summary>
     private static readonly AsyncLocal<bool> BackgroundRequest = new();
 
+    /// <summary>Who the current async flow's Dhan calls are made for (an API route, the scanner runner, a tuning job) -
+    /// set per request by Program's middleware; unset means a hosted service's own background work.</summary>
+    private static readonly AsyncLocal<string?> Source = new();
+
+    /// <summary>Names who the Dhan calls made in this async flow are for, until disposed (see UsageBySource).</summary>
+    public static IDisposable SourceScope(string source)
+    {
+        var before = Source.Value;
+        Source.Value = source;
+        return new RestoreSource(before);
+    }
+
+    private sealed class RestoreSource(string? before) : IDisposable
+    {
+        public void Dispose() => Source.Value = before;
+    }
+
     /// <summary>Whether the current request asked for background priority.</summary>
     public static bool IsBackgroundRequest => BackgroundRequest.Value;
 
@@ -137,7 +154,7 @@ public sealed class DhanDataApiRateLimiter : IDisposable
     /// non-waiting acquire while anyone waits) - else one of its own lane; so a long job runs at up to 4/s while the live
     /// app is quiet and at its 1/s share while it is busy, and a page load always finds a permit free. A full queue is waited out,
     /// never sent over the limit: Dhan's 805 warns that further requests may get the user blocked.</summary>
-    public async Task WaitForPermitAsync(bool interactive, CancellationToken cancellationToken)
+    public async Task WaitForPermitAsync(bool interactive, CancellationToken cancellationToken, string endpoint = "data")
     {
         var lane = interactive && !BackgroundRequest.Value;
         if (!lane)
@@ -153,8 +170,8 @@ public sealed class DhanDataApiRateLimiter : IDisposable
                 // is pointless and background work uses the whole 5/s Dhan allows.
                 var keepOneFree = !InteractiveIdle;
                 if (_interactive.GetStatistics()?.CurrentAvailablePermits > (keepOneFree ? 1 : 0))
-                    using (var spare = _interactive.AttemptAcquire(1)) if (spare.IsAcquired) { Count(background: true); return; }
-                using (var own = _background.AttemptAcquire(1)) if (own.IsAcquired) { Count(background: true); return; }
+                    using (var spare = _interactive.AttemptAcquire(1)) if (spare.IsAcquired) { Count(background: true, endpoint); return; }
+                using (var own = _background.AttemptAcquire(1)) if (own.IsAcquired) { Count(background: true, endpoint); return; }
                 await Task.Delay(waitMs, cancellationToken);
                 waitMs = Math.Min(MaxBackgroundPollMs, waitMs + BackgroundPollMs);
             }
@@ -163,7 +180,7 @@ public sealed class DhanDataApiRateLimiter : IDisposable
         while (true)
         {
             using var lease = await _interactive.AcquireAsync(1, cancellationToken);
-            if (lease.IsAcquired) { Count(background: false); return; }
+            if (lease.IsAcquired) { Count(background: false, endpoint); return; }
             _logger.LogDebug("Dhan data-API rate limiter's interactive queue was full - waiting rather than sending over the limit.");
             await Task.Delay(BackgroundPoll, cancellationToken);
         }
@@ -190,15 +207,30 @@ public sealed class DhanDataApiRateLimiter : IDisposable
 
     private static DateOnly IstToday() => DateOnly.FromDateTime(DateTime.UtcNow.AddMinutes(330));
 
-    private void Count(bool background)
+    // Today's calls by (Dhan endpoint, who for) - so "why so many rolling-option calls" has a measured answer.
+    private readonly Dictionary<(string Endpoint, string Source), long> _bySourceToday = new();
+
+    private void Count(bool background, string endpoint)
+    {
+        var today = IstToday();
+        var source = Source.Value ?? "background service";
+        lock (_countLock)
+        {
+            if (today != _countDay) { _countDay = today; _countToday = 0; _backgroundToday = 0; _bySourceToday.Clear(); }
+            _countToday++;
+            if (background) _backgroundToday++;
+            _bySourceToday[(endpoint, source)] = _bySourceToday.GetValueOrDefault((endpoint, source)) + 1;
+        }
+    }
+
+    /// <summary>Today's (IST) Dhan Data-API calls by endpoint ("rollingoption", "intraday") and by who they were for, most
+    /// first.</summary>
+    public IReadOnlyList<(string Endpoint, string Source, long Calls)> UsageBySource()
     {
         var today = IstToday();
         lock (_countLock)
-        {
-            if (today != _countDay) { _countDay = today; _countToday = 0; _backgroundToday = 0; }
-            _countToday++;
-            if (background) _backgroundToday++;
-        }
+            return _countDay != today ? Array.Empty<(string, string, long)>()
+                : _bySourceToday.OrderByDescending(kv => kv.Value).Select(kv => (kv.Key.Endpoint, kv.Key.Source, kv.Value)).ToList();
     }
 
     /// <summary>Dhan Data-API calls made today (IST) by this server, how many of those were background calls (see

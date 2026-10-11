@@ -385,6 +385,17 @@ app.Use(async (context, next) =>
     await next();
 });
 
+// Who each request's Dhan Data-API calls are for, counted per Dhan endpoint (GET /api/strategy-tuning/dhan-usage ->
+// bySource): the route, and whether it came from a browser page, the server's scanner runner or a tuning job.
+app.Use(async (context, next) =>
+{
+    if (!context.Request.Path.StartsWithSegments("/api")) { await next(); return; }
+    var route = (context.GetEndpoint() as Microsoft.AspNetCore.Routing.RouteEndpoint)?.RoutePattern.RawText ?? context.Request.Path.Value ?? "";
+    var who = !context.Request.Headers.ContainsKey(OptionAnalytics.Server.Auth.ScannerRunnerKey.Header) ? "page"
+        : OptionAnalytics.Server.Dhan.DhanDataApiRateLimiter.IsBackgroundRequest || context.Request.Headers.ContainsKey("X-Tune-Job") ? "tuning job" : "scanner runner";
+    using (OptionAnalytics.Server.Dhan.DhanDataApiRateLimiter.SourceScope($"{who}: {context.Request.Method} /{route.TrimStart('/')}")) await next();
+});
+
 // Container liveness, for Docker's HEALTHCHECK and Dokploy/Traefik. Deliberately says nothing
 // about Dhan: the feed is legitimately unauthenticated outside market hours or while a token
 // renews, and a container killed for that would never finish starting - the 15-day backfill of ~68

@@ -112,6 +112,35 @@ internal static class OiReplayRangeWindows
         return (windows, null);
     }
 
+    /// <summary>ONE window for the whole span [spanFrom, spanTo] (at most MaxRangeDays), straight across
+    /// any expiries inside it - one Dhan call per strike covers every day of it ("upto 30 days of data in a
+    /// single API call"). Each call is sent exactly as a per-day call for spanFrom would be (fromDate =
+    /// spanFrom, expiryCode 1); every later day then rests on Dhan rolling its "nearest expiry" series onto
+    /// the next contract at each expiry, the way the per-day path's fromDate = that day would resolve it.
+    /// That is NOT documented by Dhan, so it is only ever used once OiReplayService.CheckSpanAsync has
+    /// shown it on this server (a day before an expiry, the expiry day and a day after it, each identical
+    /// to the per-day fetch) - the strategy tuning job asks for it only then.
+    ///
+    /// SkipDays: the expiry days inside the span, when <paramref name="includeExpiryDays"/> is false - the
+    /// one day the roll could land on either contract. Those days are left to the per-day path, exactly as
+    /// the per-cycle windows (Build) always leave them.</summary>
+    internal static (Window? Window, HashSet<DateOnly> SkipDays, string? Error) BuildSpanning(
+        string expiryFlag, DateOnly spanFrom, DateOnly spanTo, DateOnly today, bool includeExpiryDays)
+    {
+        var skip = new HashSet<DateOnly>();
+        if (spanTo < spanFrom) return (null, skip, "'to' date must not be before 'from' date.");
+        var span = spanTo.DayNumber - spanFrom.DayNumber + 1;
+        if (span > MaxRangeDays)
+            return (null, skip, $"{span} days is too wide for one request - ask for at most {MaxRangeDays} calendar days at a time " +
+                                "(Dhan serves at most 30 days of expired-option data per call), then ask again for the next stretch.");
+        if (spanFrom > today) return (null, skip, $"{spanFrom:dd MMM yyyy} is in the future - there is nothing to fetch yet.");
+        var to = spanTo > today ? today : spanTo;
+        if (!includeExpiryDays)
+            for (var expiry = NextExpiryOnOrAfter(expiryFlag, spanFrom); expiry <= to; expiry = NextExpiryOnOrAfter(expiryFlag, expiry.AddDays(1)))
+                skip.Add(expiry);
+        return (new Window(spanFrom, to, NextExpiryOnOrAfter(expiryFlag, spanFrom), 1), skip, null);
+    }
+
     /// <summary>The first real expiry of this cadence at or after <paramref name="day"/> - the
     /// contract every option bar stamped that day belongs to, by the same "nearest expiry" rule the
     /// OI Replay page itself reads OI from (OiReplayService's own doc comment). From

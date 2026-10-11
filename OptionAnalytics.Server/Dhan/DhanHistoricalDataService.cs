@@ -80,7 +80,7 @@ public sealed class DhanHistoricalDataService
         // the whole call (a past day's spot / futures, so the day). Anything else returns at once.
         for (var attempt = 0; ; attempt++)
         {
-            await _rateLimiter.WaitForPermitAsync(interactive, cancellationToken);
+            await _rateLimiter.WaitForPermitAsync(interactive, cancellationToken, "intraday");
 
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeoutCts.CancelAfter(CallTimeout);

@@ -42,6 +42,14 @@ public sealed record OiReplayRangeResult(
     /// itself is as good as the per-day endpoint's, because it IS the per-day endpoint's.</summary>
     public IReadOnlyList<DateOnly> FallbackDays { get; init; } = Array.Empty<DateOnly>();
 
+    /// <summary>True when the days came from ONE window straight across the expiries (spanExpiries - see
+    /// OiReplayRangeWindows.BuildSpanning) rather than one window per expiry cycle.</summary>
+    public bool SpanExpiries { get; init; }
+
+    /// <summary>With SpanExpiries: the expiry days in the requested range the spanning window left to the
+    /// per-day path (includeExpiryDays was not asked for).</summary>
+    public IReadOnlyList<DateOnly> ExpiryDaysLeftOut { get; init; } = Array.Empty<DateOnly>();
+
     /// <summary>How many Dhan option-series (/charts/rollingoption) calls this request made, window
     /// calls and per-day fallback calls together - what a caller comparing "the range way" against
     /// "the per-day way" for the same stretch of days actually wants to compare. Counts calls this
@@ -80,3 +88,14 @@ public sealed record OiReplayRangeResult(
     public static OiReplayRangeResult Failed(string underlying, DateOnly from, DateOnly to, int timeframeMinutes, string expiryFlag, string error) =>
         new(false, error, underlying, from, to, timeframeMinutes, expiryFlag, Array.Empty<OiReplayResult>(), Array.Empty<OiReplayRangeWindow>());
 }
+
+/// <summary>OiReplayService.CheckSpanAsync's answer: whether one window straight across an expiry gives the
+/// same days as the per-day path (AcrossMatch - a day before and a day after the expiry), and whether the expiry
+/// day itself does too (ExpiryDayMatch). Error says why nothing could be compared - never a pass.</summary>
+public sealed record OiReplaySpanCheck(
+    bool AcrossMatch, bool ExpiryDayMatch, DateOnly? Expiry, DateOnly WindowFrom, DateOnly WindowTo,
+    IReadOnlyList<OiReplaySpanCheckDay> Days, string? Error, int OptionSeriesCalls);
+
+/// <summary>One day of a span check: Role "before" / "expiry" / "after", whether it matched, and the first
+/// differences when it did not.</summary>
+public sealed record OiReplaySpanCheckDay(DateOnly Date, string Role, bool Match, IReadOnlyList<string> Differences);

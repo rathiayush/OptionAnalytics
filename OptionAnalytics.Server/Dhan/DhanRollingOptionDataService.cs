@@ -241,7 +241,7 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
     {
         for (var attempt = 0; ; attempt++)
         {
-            await _rateLimiter.WaitForPermitAsync(interactive, cancellationToken);
+            await _rateLimiter.WaitForPermitAsync(interactive, cancellationToken, "rollingoption");
 
             // CallTimeout bounds a single call, separately from the caller's own cancellationToken -
             // see DhanHistoricalDataService.CallTimeout's own doc comment for why this can't just be

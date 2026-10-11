@@ -112,7 +112,7 @@ export function createFetcher({ base = '', key = '', cacheDir = null, today, att
     const timer = controller ? setTimeout(() => controller.abort(), perCallTimeoutMs) : null
     let res
     try {
-      const headers = { 'X-Runner-Key': key, ...(priority() === 'background' ? { 'X-Request-Priority': 'background' } : {}) }
+      const headers = { 'X-Runner-Key': key, 'X-Tune-Job': '1', ...(priority() === 'background' ? { 'X-Request-Priority': 'background' } : {}) }
       res = await fetchImpl(path.startsWith('/') ? `${base}${path}` : path, { headers, signal: controller?.signal })
     } catch (err) {
       const e = new Error(`${path.split('?')[0]}: ${err.name === 'AbortError' ? `no answer in ${Math.round(perCallTimeoutMs / 1000)} s (timed out)` : err.message}`)

@@ -371,6 +371,10 @@ async function main() {
     // the one the scan loop could still go and pay for a second time if it came back anything less than perfect.
     seeded: 0, fromWindows: 0, fromFallback: 0, unusable: 0, unusableDays: [],
     windows: 0, chunks: 0, calls: 0, windowCalls: 0, fallbackCalls: 0, serverFallbackDays: 0, unservedByServer: 0,
+    // span: whether ONE Dhan call per strike may cover a whole 30-day span straight across the expiries (Dhan serves
+    // "upto 30 days of data in a single API call") - only once the server has shown, across a real expiry, that the
+    // days come back identical to the per-day fetch (range-span-check). Otherwise one window per expiry cycle.
+    span: { used: false, proof: null, checked: null, includeExpiryDays: false, reason: null },
   }
   // The proof is kept beside the cache, so a rerun / a resumed job / tomorrow's job does not spend it again: the
   // check costs a whole window of strike calls plus the same day fetched per-day (~84 Dhan calls) and proves a thing
@@ -425,6 +429,10 @@ async function main() {
       fastOi.detail = check?.error ?? fastOi.checked.differences?.slice(0, 3).join(' · ') ?? null
       return (fastOi.reason = 'a day fetched a cycle at a time did not match the same day fetched on its own - every day fetched the proven way instead')
     }
+    // One step further, proved the same way and kept the same way: a whole span of days per Dhan call, straight
+    // across the expiries, instead of a window per cycle (NIFTY's weekly cycle made that ~84 calls a week).
+    await proveSpan(dates, left, flag)
+    if (fastOi.span.used) return prefetchSpans(dates, left, flag)
     // Proven: bring the days back in chunks, oldest first. A chunk is asked for as WIDE as one request may be (the
     // server's own cap), not in little 5-day pieces: the server cuts a range at every real expiry itself, so a wide
     // chunk becomes whole, properly-anchored cycle windows, while a narrow chunk cut across a cycle turned one
@@ -452,28 +460,95 @@ async function main() {
         fastOi.reason = `${fastOi.seeded} day(s) came back this way; the rest fetched a day at a time`
         break
       }
-      fastOi.chunks++
-      fastOi.windows += body?.windows?.length ?? 0
-      fastOi.calls += body?.optionSeriesCalls ?? 0
-      fastOi.windowCalls += body?.windowOptionSeriesCalls ?? body?.optionSeriesCalls ?? 0
-      fastOi.fallbackCalls += body?.fallbackOptionSeriesCalls ?? 0
-      fastOi.serverFallbackDays += (body?.fallbackDays ?? []).length
-      fastOi.unservedByServer += (body?.unservedDays ?? []).length
-      for (const run of body?.days ?? []) {
-        const date = String(run?.date ?? '').slice(0, 10)
-        if (!date) continue
-        // EVERY day the range returned that is usable is kept - a window day and a day the server itself fell back
-        // per-day alike (the same test the per-day path applies, oiValid). A day that is not usable is named here,
-        // and the scan loop fetches it the old way, once.
-        if (fetcher.putDay('oi', date, oiQuery(date), run, oiValid)) {
-          fastOi.seeded++
-          if (run?.fetchSource === 'day') fastOi.fromFallback++
-          else fastOi.fromWindows++
-        } else {
-          fastOi.unusable++
-          if (fastOi.unusableDays.length < 20) fastOi.unusableDays.push(date)
-        }
+      seedRange(body)
+    }
+    fastOi.used = fastOi.seeded > 0
+    return fastOi.reason
+  }
+  // One range answer into the cache the scan loop reads.
+  function seedRange(body) {
+    fastOi.chunks++
+    fastOi.windows += body?.windows?.length ?? 0
+    fastOi.calls += body?.optionSeriesCalls ?? 0
+    fastOi.windowCalls += body?.windowOptionSeriesCalls ?? body?.optionSeriesCalls ?? 0
+    fastOi.fallbackCalls += body?.fallbackOptionSeriesCalls ?? 0
+    fastOi.serverFallbackDays += (body?.fallbackDays ?? []).length
+    fastOi.unservedByServer += (body?.unservedDays ?? []).length
+    for (const run of body?.days ?? []) {
+      const date = String(run?.date ?? '').slice(0, 10)
+      if (!date) continue
+      // EVERY day the range returned that is usable is kept - a window day and a day the server itself fell back
+      // per-day alike (the same test the per-day path applies, oiValid). A day that is not usable is named here,
+      // and the scan loop fetches it the old way, once.
+      if (fetcher.putDay('oi', date, oiQuery(date), run, oiValid)) {
+        fastOi.seeded++
+        if (run?.fetchSource === 'day') fastOi.fromFallback++
+        else fastOi.fromWindows++
+      } else {
+        fastOi.unusable++
+        if (fastOi.unusableDays.length < 20) fastOi.unusableDays.push(date)
       }
+    }
+  }
+  // The span proof (range-span-check), from disk when this server proved it recently.
+  const spanProofPath = CACHE_DIR ? join(CACHE_DIR, `range-span-check-${U}-${expiryFlagOf(U)}.json`) : null
+  async function proveSpan(dates, left, flag) {
+    const span = fastOi.span
+    if (process.env.TUNE_SPAN_OI === 'off') return (span.reason = 'switched off for this job')
+    let check = null
+    try {
+      if (spanProofPath && PROOF_TTL_MS && existsSync(spanProofPath)) {
+        const kept = JSON.parse(readFileSync(spanProofPath, 'utf8'))
+        if (Date.parse(kept.at) > Date.now() - PROOF_TTL_MS) { check = kept; span.proof = `proved on ${kept.at} and kept - not proved again` }
+      }
+    } catch { check = null }
+    if (!check) {
+      const mid = dates[Math.floor(dates.length / 2)]
+      lastScan = { stage: 'prefetch', day: mid, done: 0, total: dates.length, checking: 'span' }
+      progress(lastScan)
+      try {
+        const body = await api(`/api/oi-replay/${U}/range-span-check?${new URLSearchParams({ date: mid, timeframeMinutes: '1', expiryFlag: flag })}`,
+          { attempts: 1, timeoutMs: Math.max(30_000, Math.min(left(), Number(process.env.TUNE_CHECK_TIMEOUT_MS) || 150_000)), source: 'range-span-check' })
+        check = { acrossMatch: !!body?.acrossMatch, expiryDayMatch: !!body?.expiryDayMatch, expiry: body?.expiry ?? null, error: body?.error ?? null,
+          differences: (body?.days ?? []).filter((d) => !d.match).flatMap((d) => d.differences ?? []).slice(0, 3), at: new Date().toISOString() }
+        span.proof = 'proved on this job'
+        // Only a real answer is kept (an error / no comparison is asked again next job).
+        if (spanProofPath && !check.error) { try { mkdirSync(CACHE_DIR, { recursive: true }); writeJson(spanProofPath, check) } catch { /* proved again next job */ } }
+      } catch (err) {
+        return (span.reason = `the span check did not come back (${err.message}) - one window per expiry cycle instead`)
+      }
+    }
+    span.checked = { acrossMatch: !!check.acrossMatch, expiryDayMatch: !!check.expiryDayMatch, expiry: check.expiry ?? null, differences: check.differences ?? [], error: check.error ?? null }
+    if (!check.acrossMatch) return (span.reason = `${check.error ?? 'a window across an expiry did not match the per-day fetch'} - one window per expiry cycle instead`)
+    span.used = true
+    span.includeExpiryDays = !!check.expiryDayMatch
+    return null
+  }
+  // Proved: spans straight across the expiries, oldest first, ONE request (one Dhan call per strike) each. 15 days by
+  // default - Dhan allows 30, but a whole month of minute OI is too big to send back in one answer.
+  async function prefetchSpans(dates, left, flag) {
+    const SPAN = Math.max(2, Math.min(31, Number(process.env.TUNE_SPAN_DAYS) || 15))
+    const addDays = (d, n) => new Date(Date.parse(`${d}T00:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10)
+    let i = 0
+    while (i < dates.length) {
+      const from = dates[i]
+      const limit = addDays(from, SPAN - 1)
+      let to = from
+      while (i < dates.length && dates[i] <= limit) to = dates[i++]
+      if (!left()) { fastOi.reason = `took too long after ${fastOi.seeded} of ${dates.length} day(s) - the rest fetched a day at a time`; break }
+      lastScan = { stage: 'prefetch', day: from, done: fastOi.seeded, total: dates.length, prefetch: { from, to, span: true, seeded: fastOi.seeded, of: dates.length } }
+      progress(lastScan)
+      let body
+      try {
+        body = await api(`/api/oi-replay/${U}/range?${new URLSearchParams({ from, to, timeframeMinutes: '1', expiryFlag: flag, perDayFallback: 'false',
+          spanExpiries: 'true', includeExpiryDays: String(fastOi.span.includeExpiryDays) })}`,
+        { attempts: 2, timeoutMs: Math.max(60_000, Math.min(left(), Number(process.env.TUNE_RANGE_TIMEOUT_MS) || 300_000)), source: 'range-span' })
+      } catch (err) {
+        fastOi.detail = err.message
+        fastOi.reason = `${fastOi.seeded} day(s) came back this way; the rest fetched a day at a time`
+        break
+      }
+      seedRange(body)
     }
     fastOi.used = fastOi.seeded > 0
     return fastOi.reason

@@ -80,9 +80,15 @@ public sealed class OiReplayController : ControllerBase
         // on it inside this request - the caller fetches it through .../run itself. The strategy tuning job asks for
         // that, so one range request timing out can never throw away per-day calls already made inside it (and so the
         // calls it did make are split in the response: windowOptionSeriesCalls vs fallbackOptionSeriesCalls).
-        [FromQuery] bool perDayFallback = true)
+        [FromQuery] bool perDayFallback = true,
+        // spanExpiries: ONE Dhan call per strike for the whole range (up to 31 days) straight across the expiries,
+        // instead of one per expiry cycle - only for a caller that has the proof (.../range-span-check).
+        // includeExpiryDays lets the expiry days come out of it too (otherwise they are per-day days).
+        [FromQuery] bool spanExpiries = false,
+        [FromQuery] bool includeExpiryDays = false)
     {
-        var result = await _service.RunRangeAsync(underlying.ToUpperInvariant(), from, to, timeframeMinutes, expiryFlag.ToUpperInvariant(), cancellationToken, perDayFallback);
+        var result = await _service.RunRangeAsync(underlying.ToUpperInvariant(), from, to, timeframeMinutes, expiryFlag.ToUpperInvariant(), cancellationToken, perDayFallback,
+            spanExpiries, includeExpiryDays);
         // A refusal is the caller's own mistake to fix (too wide a range, an unsupported underlying,
         // a future date), so it answers 400 with the reason rather than a 200 nobody checks.
         return result.Success ? Ok(result) : BadRequest(result);
@@ -117,6 +123,18 @@ public sealed class OiReplayController : ControllerBase
             error,
         });
     }
+
+    /// <summary>The proof behind .../range?spanExpiries=true: one window straight across a real expiry near
+    /// `date`, and the day before it, the expiry day and the day after it each compared point for point with the
+    /// per-day fetch (OiReplayService.CheckSpanAsync). acrossMatch=false: stay on per-cycle windows.</summary>
+    [HttpGet("{underlying}/range-span-check")]
+    public async Task<ActionResult> RangeSpanCheck(
+        string underlying,
+        [FromQuery] DateOnly date,
+        [FromQuery] int timeframeMinutes,
+        [FromQuery] string expiryFlag,
+        CancellationToken cancellationToken) =>
+        Ok(await _service.CheckSpanAsync(underlying.ToUpperInvariant(), date, timeframeMinutes, expiryFlag.ToUpperInvariant(), cancellationToken));
 
     /// <summary>The previous trading day's volume profile (POC/VAH/VAL/HVN/LVN) relative to
     /// `date` - see OiReplayService.GetPreviousDayVolumeProfileAsync's own doc comment for exactly

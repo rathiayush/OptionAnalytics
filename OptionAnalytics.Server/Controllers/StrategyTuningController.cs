@@ -78,7 +78,10 @@ public sealed class StrategyTuningController : ControllerBase
     public IActionResult DhanUsage()
     {
         var (day, calls, backgroundCalls, limit) = _dhanLimiter.Usage();
-        return Ok(new { day = day.ToString("yyyy-MM-dd"), calls, backgroundCalls, dailyLimit = limit });
+        // bySource: today's calls by Dhan endpoint and by who made them (page route / scanner runner / tuning job /
+        // background service) - where the calls are going.
+        var bySource = _dhanLimiter.UsageBySource().Select(x => new { endpoint = x.Endpoint, source = x.Source, calls = x.Calls });
+        return Ok(new { day = day.ToString("yyyy-MM-dd"), calls, backgroundCalls, dailyLimit = limit, bySource });
     }
 
     /// <summary>GET /api/strategy-tuning/history - every tuning run kept (runs.csv), newest first: when, which index,
