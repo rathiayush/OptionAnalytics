@@ -307,10 +307,14 @@ export default function StrategyTuningPage() {
   const [schedIndices, setSchedIndices] = useState(null) // null: the index picked above
   const [schedAt, setSchedAt] = useState(null)
   const [schedRepeat, setSchedRepeat] = useState(false)
+  // Split the range into pieces of N days - one job per piece (and index), run one after another, instead of one long job.
+  const [schedChunk, setSchedChunk] = useState(0)
+  const pieceCount = schedChunk > 0 && rangeOk ? Math.ceil((range[1].diff(range[0], 'day') + 1) / schedChunk) : 1
   const loadQueue = () => fetch('/api/strategy-tuning/queue').then((r) => (r.ok ? r.json() : null)).then((q) => { if (q) setQueue(q) }).catch(() => {})
   useEffect(() => { loadQueue(); const id = setInterval(loadQueue, 10_000); return () => clearInterval(id) }, [])
   const schedule = async () => {
-    const body = { job: jobBody(), underlyings: schedIndices?.length ? schedIndices : [underlying], runAtUtc: schedAt ? schedAt.toISOString() : null, repeatDaily: schedRepeat }
+    const body = { job: jobBody(), underlyings: schedIndices?.length ? schedIndices : [underlying], runAtUtc: schedAt ? schedAt.toISOString() : null,
+      repeatDaily: schedChunk > 0 ? false : schedRepeat, chunkDays: schedChunk > 0 ? schedChunk : null }
     const res = await fetch('/api/strategy-tuning/queue', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     const json = await res.json().catch(() => null)
     if (!res.ok) { message.error(json?.error ?? `HTTP ${res.status}`); return }
@@ -457,7 +461,12 @@ export default function StrategyTuningPage() {
                 <Col><Tooltip title="Add these settings to the schedule instead of running now: the server runs scheduled jobs one after another, so you can line up every index (or several kinds of tuning) and leave them."><Text strong>Schedule</Text></Tooltip></Col>
                 <Col><Space size={6}><Text>Indices</Text><Checkbox.Group value={schedIndices ?? [underlying]} onChange={(v) => setSchedIndices(v)} options={UNDERLYINGS.map((u) => ({ value: u, label: u }))} /></Space></Col>
                 <Col><Space size={6}><Text>Start</Text><DatePicker showTime={{ format: 'HH:mm' }} format="DD MMM YYYY HH:mm" value={schedAt} onChange={setSchedAt} placeholder="As soon as free" aria-label="Scheduled start" /></Space></Col>
-                <Col><Space size={6}><Switch size="small" checked={schedRepeat} onChange={setSchedRepeat} aria-label="Repeat daily" /><Text>Every day</Text></Space></Col>
+                <Col><Tooltip title="Split the date range above into pieces of this many days: each piece (for each index ticked) is its own job, run one after another - several short jobs instead of one long one. The Trades page's Strategy performance adds them all up.">
+                  <Space size={6}><Text>Split into</Text><Select value={schedChunk} onChange={setSchedChunk} style={{ width: 130 }} aria-label="Split the range"
+                    options={[{ value: 0, label: 'one job' }, { value: 7, label: '7-day pieces' }, { value: 10, label: '10-day pieces' }, { value: 15, label: '15-day pieces' }, { value: 30, label: '30-day pieces' }]} />
+                    {schedChunk > 0 && <Text type="secondary" style={{ fontSize: 12 }}>= {pieceCount * (schedIndices?.length || 1)} job(s)</Text>}</Space>
+                </Tooltip></Col>
+                <Col><Tooltip title={schedChunk > 0 ? 'Not with a split range' : 'Run it again every day at the same time; the date range moves forward a day each time'}><Space size={6}><Switch size="small" checked={schedChunk > 0 ? false : schedRepeat} disabled={schedChunk > 0} onChange={setSchedRepeat} aria-label="Repeat daily" /><Text>Every day</Text></Space></Tooltip></Col>
                 <Col><Button onClick={schedule} disabled={(pick === 'custom' && !custom.length) || (tunesOi && !oiFactors.length) || tooMany || !rangeOk || (schedIndices != null && !schedIndices.length)}>Add to schedule</Button></Col>
                 <Col><ClearData onCleared={() => { setResult(null); loadResult(underlying) }} /></Col>
               </Row>

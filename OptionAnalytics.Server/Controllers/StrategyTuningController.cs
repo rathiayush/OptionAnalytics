@@ -71,8 +71,23 @@ public sealed class StrategyTuningController : ControllerBase
     }
 
     /// <summary>A job to schedule: the Run request, for one index or several (Underlyings), not before RunAtUtc (null:
-    /// as soon as nothing else is running), and optionally again every day.</summary>
-    public sealed record QueueRequest(RunRequest Job, string[]? Underlyings, DateTimeOffset? RunAtUtc, bool RepeatDaily = false);
+    /// as soon as nothing else is running), and optionally again every day.
+    /// ChunkDays: the job's date range split into consecutive pieces of this many calendar days, one job each (and each
+    /// index), oldest first - a long range as several short jobs instead of one long one.</summary>
+    public sealed record QueueRequest(RunRequest Job, string[]? Underlyings, DateTimeOffset? RunAtUtc, bool RepeatDaily = false, int? ChunkDays = null);
+
+    /// <summary>[from, to] (yyyy-MM-dd) cut into consecutive pieces of <paramref name="days"/> calendar days, oldest first.</summary>
+    internal static List<(string From, string To)> Chunks(string from, string to, int days)
+    {
+        var list = new List<(string, string)>();
+        if (!DateOnly.TryParseExact(from, "yyyy-MM-dd", out var f) || !DateOnly.TryParseExact(to, "yyyy-MM-dd", out var t) || f > t || days < 1) return list;
+        for (var start = f; start <= t; start = start.AddDays(days))
+        {
+            var end = start.AddDays(days - 1);
+            list.Add((start.ToString("yyyy-MM-dd"), (end < t ? end : t).ToString("yyyy-MM-dd")));
+        }
+        return list;
+    }
 
     /// <summary>GET /api/strategy-tuning/queue - the scheduled jobs, run one at a time.</summary>
     [HttpGet("queue")]
@@ -85,13 +100,21 @@ public sealed class StrategyTuningController : ControllerBase
     {
         if (request?.Job is null) return BadRequest(new { error = "A job is required." });
         var indices = (request.Underlyings is { Length: > 0 } list ? list : new[] { request.Job.Underlying }).Select(x => (x ?? "").Trim().ToUpperInvariant()).Distinct().ToList();
+        // One piece of the range per job when it is split (oldest first, every index for a piece before the next piece).
+        var pieces = request.ChunkDays is > 0 && !string.IsNullOrWhiteSpace(request.Job.From) && !string.IsNullOrWhiteSpace(request.Job.To)
+            ? Chunks(request.Job.From.Trim(), request.Job.To.Trim(), request.ChunkDays.Value)
+            : new List<(string From, string To)> { (request.Job.From ?? "", request.Job.To ?? "") };
+        if (pieces.Count == 0) return BadRequest(new { error = "From / To must be a valid range to split it." });
+        if (pieces.Count * indices.Count > 100) return BadRequest(new { error = $"That is {pieces.Count * indices.Count} jobs - use bigger pieces or a shorter range (100 at most)." });
         var jobs = new List<TuningJob>();
-        foreach (var index in indices)
-        {
-            var (job, error) = BuildJob(request.Job, index);
-            if (job is null) return BadRequest(new { error });
-            jobs.Add(job);
-        }
+        foreach (var (from, to) in pieces)
+            foreach (var index in indices)
+            {
+                var piece = request.ChunkDays is > 0 ? request.Job with { From = from, To = to } : request.Job;
+                var (job, error) = BuildJob(piece, index);
+                if (job is null) return BadRequest(new { error });
+                jobs.Add(job);
+            }
         var added = jobs.Select(j => _queue.Add(j, request.RunAtUtc, request.RepeatDaily)).ToList();
         return Ok(added);
     }

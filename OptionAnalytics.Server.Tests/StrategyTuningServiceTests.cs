@@ -395,4 +395,45 @@ public sealed class StrategyTuningServiceTests : IDisposable
 
         Assert.Empty(TuningPerformance.Build(runs, (id, kind) => files.GetValueOrDefault($"{id}:{kind}"), "spot").Rows);
     }
+
+    [Fact]
+    public void ALongRange_IsSplitIntoConsecutivePieces_OldestFirst()
+    {
+        var pieces = OptionAnalytics.Server.Controllers.StrategyTuningController.Chunks("2026-07-01", "2026-08-14", 15);
+        Assert.Equal(new[] { ("2026-07-01", "2026-07-15"), ("2026-07-16", "2026-07-30"), ("2026-07-31", "2026-08-14") }, pieces);
+        Assert.Equal(new[] { ("2026-07-01", "2026-07-03") }, OptionAnalytics.Server.Controllers.StrategyTuningController.Chunks("2026-07-01", "2026-07-03", 30));
+        Assert.Empty(OptionAnalytics.Server.Controllers.StrategyTuningController.Chunks("2026-07-10", "2026-07-01", 15));
+    }
+
+    [Fact]
+    public void TheTunedSettings_OfEveryRun_AreScoredTogether_AndTheBestRecommendedOneIsMarked()
+    {
+        static Dictionary<string, string> S(string run, string side, string rec, string testN, string testAvg, string trainN = "20", string trainAvg = "0.5") => new()
+        {
+            ["run_id"] = run, ["which"] = "fine-tuned", ["strategy_id"] = "ibBreakout", ["index"] = "NIFTY", ["recommended"] = rec, ["unit"] = "R",
+            ["test_trades"] = testN, ["test_avg"] = testAvg, ["train_trades"] = trainN, ["train_avg"] = trainAvg, ["points_net"] = "10",
+            ["tradeSide"] = side, ["tradeFrom"] = "930", ["setting_text"] = $"{side} only",
+        };
+        var runs = new[] { "R3", "R2", "R1" }.Select(r => new Dictionary<string, string> { ["run_id"] = r, ["data"] = "futures", ["index"] = "NIFTY" }).ToList();
+        var files = new Dictionary<string, List<Dictionary<string, string>>>
+        {
+            // "long" chosen by two runs (6 + 4 unseen trades, avg 0.5 and 0.25 -> 0.4 over 10); "short" by one, +1R but on only 2.
+            ["R3:settings"] = new() { S("R3", "long", "yes", "6", "0.5") },
+            ["R2:settings"] = new() { S("R2", "short", "yes", "2", "1.0") },
+            ["R1:settings"] = new() { S("R1", "long", "no", "4", "0.25") },
+            ["R3:trades"] = new() { new() { ["strategy_id"] = "ibBreakout", ["setting"] = "fine-tuned", ["index"] = "NIFTY", ["date"] = "2026-10-01", ["entry_time_ist"] = "x", ["points"] = "5", ["r"] = "1" } },
+            ["R2:trades"] = new(), ["R1:trades"] = new(),
+        };
+        var row = TuningPerformance.Build(runs, (id, kind) => files.GetValueOrDefault($"{id}:{kind}")).Rows.Single();
+        var tuned = row.TunedSettings["NIFTY"];
+        Assert.Equal(2, tuned.Count);
+        var longSetting = tuned[0];
+        Assert.Equal("long", longSetting.Row["tradeSide"]);
+        Assert.Equal((2, 1, 10), (longSetting.Runs, longSetting.Recommended, longSetting.TestTrades));
+        Assert.Equal(0.4, longSetting.TestAvg!.Value, 6);
+        Assert.Equal(0.4 * 10 / 20, longSetting.Score!.Value, 6); // shrunk for few trades: beats "short"'s 1.0 x 2 / 12
+        Assert.True(longSetting.Best);
+        Assert.False(tuned[1].Best);
+        Assert.Equal("R3", longSetting.Row["run_id"]); // the newest run's row is what Apply sends
+    }
 }

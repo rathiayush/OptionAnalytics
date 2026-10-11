@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.Json.Serialization;
 
 namespace OptionAnalytics.Server.Services;
 
@@ -28,8 +29,8 @@ public static class TuningPerformance
         public int SoldTrades { get; set; }
         public double OptionPoints { get; set; }
         public int OptionTrades { get; set; }
-        public HashSet<string> Days { get; } = new();
-        public HashSet<string> Runs { get; } = new();
+        [JsonIgnore] public HashSet<string> Days { get; } = new();
+        [JsonIgnore] public HashSet<string> Runs { get; } = new();
         public string? FirstDay { get; set; }
         public string? LastDay { get; set; }
 
@@ -65,7 +66,32 @@ public static class TuningPerformance
     }
 
     public sealed record Row(string Data, string StrategyId, string StrategyNo, string Strategy, string Setting,
-        Stats All, IReadOnlyDictionary<string, Stats> ByIndex, IReadOnlyDictionary<string, Dictionary<string, string>> LatestTuned);
+        Stats All, IReadOnlyDictionary<string, Stats> ByIndex, IReadOnlyDictionary<string, Dictionary<string, string>> LatestTuned)
+    {
+        /// <summary>Per index: every distinct fine-tuned setting the runs found for this strategy, scored across all of them,
+        /// best first (see TunedSetting).</summary>
+        public IReadOnlyDictionary<string, List<TunedSetting>> TunedSettings { get; init; } = new Dictionary<string, List<TunedSetting>>();
+    }
+
+    /// <summary>One fine-tuned setting (the same parameters) across every run that chose it: how many runs, how many of them
+    /// recommended it, and its scores added up - Test is the days each run held back and never chose on (the honest
+    /// number), Train the days it was chosen on. Score = the test average shrunk toward 0 for few trades
+    /// (avg x n / (n + 10)), so a setting proven over many unseen trades beats a lucky one. Row = the newest run's row,
+    /// which is what Apply sends to the scanner.</summary>
+    public sealed record TunedSetting(Dictionary<string, string> Row, int Runs, int Recommended, int TestTrades, double? TestAvg,
+        int TrainTrades, double? TrainAvg, double PointsNet, string Unit, double? Score, bool Best);
+
+    private sealed class TunedAcc
+    {
+        public Dictionary<string, string> Row = null!;
+        public int Runs, Recommended, TestTrades, TrainTrades;
+        public double TestSum, TrainSum, PointsNet;
+    }
+
+    /// <summary>The parameters of a settings row (every trade* / opt* column) - two runs that chose the same setting share it.</summary>
+    private static string SignatureOf(Dictionary<string, string> row) =>
+        string.Join('|', row.Where(kv => kv.Key.StartsWith("trade", StringComparison.Ordinal) || kv.Key.StartsWith("opt", StringComparison.Ordinal))
+            .OrderBy(kv => kv.Key, StringComparer.Ordinal).Select(kv => $"{kv.Key}={kv.Value}"));
 
     private static double? Num(Dictionary<string, string> row, string key) =>
         row.TryGetValue(key, out var s) && double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var v) ? v : null;
@@ -78,6 +104,7 @@ public static class TuningPerformance
         var seen = new HashSet<string>(StringComparer.Ordinal);
         var groups = new Dictionary<(string Data, string Id, string Setting), (Dictionary<string, string> First, Stats All, Dictionary<string, Stats> ByIndex)>();
         var latestTuned = new Dictionary<(string Data, string Id), Dictionary<string, Dictionary<string, string>>>();
+        var tuned = new Dictionary<(string Data, string Id), Dictionary<string, Dictionary<string, TunedAcc>>>();
         var usedRuns = 0;
         var trades = 0;
         foreach (var run in runs) // newest first: a trade seen in a newer run is not counted again from an older one
@@ -109,14 +136,44 @@ public static class TuningPerformance
                 if (!latestTuned.TryGetValue(key, out var byIndex)) latestTuned[key] = byIndex = new();
                 var index = st.GetValueOrDefault("index", "");
                 if (!byIndex.ContainsKey(index)) byIndex[index] = st; // newest run first
+                if (!tuned.TryGetValue(key, out var tunedByIndex)) tuned[key] = tunedByIndex = new();
+                if (!tunedByIndex.TryGetValue(index, out var bySig)) tunedByIndex[index] = bySig = new();
+                var sig = SignatureOf(st);
+                if (!bySig.TryGetValue(sig, out var acc)) bySig[sig] = acc = new TunedAcc { Row = st }; // newest run's row
+                acc.Runs++;
+                if (st.GetValueOrDefault("recommended") == "yes") acc.Recommended++;
+                var testN = (int)(Num(st, "test_trades") ?? 0);
+                var trainN = (int)(Num(st, "train_trades") ?? 0);
+                acc.TestTrades += testN; acc.TestSum += (Num(st, "test_avg") ?? 0) * testN;
+                acc.TrainTrades += trainN; acc.TrainSum += (Num(st, "train_avg") ?? 0) * trainN;
+                acc.PointsNet += Num(st, "points_net") ?? 0;
             }
         }
+        var tunedOut = tuned.ToDictionary(kv => kv.Key, kv => (IReadOnlyDictionary<string, List<TunedSetting>>)kv.Value.ToDictionary(x => x.Key, x => Rank(x.Value.Values)));
         var result = groups
             .Select(kv => new Row(kv.Key.Data, kv.Key.Id, kv.Value.First.GetValueOrDefault("strategy_no", ""), kv.Value.First.GetValueOrDefault("strategy", kv.Key.Id),
                 kv.Key.Setting, kv.Value.All, kv.Value.ByIndex,
-                latestTuned.TryGetValue((kv.Key.Data, kv.Key.Id), out var lt) ? lt : new Dictionary<string, Dictionary<string, string>>()))
+                latestTuned.TryGetValue((kv.Key.Data, kv.Key.Id), out var lt) ? lt : new Dictionary<string, Dictionary<string, string>>())
+            {
+                TunedSettings = tunedOut.TryGetValue((kv.Key.Data, kv.Key.Id), out var ts) ? ts : new Dictionary<string, List<TunedSetting>>(),
+            })
             .OrderByDescending(r => r.All.AvgR ?? double.MinValue).ThenByDescending(r => r.All.Points)
             .ToList();
         return (result, usedRuns, trades);
+    }
+
+    /// <summary>The settings best first by Score; Best marks the top one any run recommended (else none).</summary>
+    private static List<TunedSetting> Rank(IEnumerable<TunedAcc> accs)
+    {
+        var list = accs.Select(a =>
+        {
+            double? testAvg = a.TestTrades > 0 ? a.TestSum / a.TestTrades : null;
+            double? score = testAvg is { } t ? t * a.TestTrades / (a.TestTrades + 10.0) : null;
+            return new TunedSetting(a.Row, a.Runs, a.Recommended, a.TestTrades, testAvg, a.TrainTrades,
+                a.TrainTrades > 0 ? a.TrainSum / a.TrainTrades : null, a.PointsNet, a.Row.GetValueOrDefault("unit", "R"), score, false);
+        }).OrderByDescending(x => x.Score ?? double.MinValue).ThenByDescending(x => x.Runs).ToList();
+        var best = list.FindIndex(x => x.Recommended > 0 && x.Score > 0);
+        if (best >= 0) list[best] = list[best] with { Best = true };
+        return list;
     }
 }
