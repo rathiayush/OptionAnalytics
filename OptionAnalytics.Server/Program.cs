@@ -324,6 +324,8 @@ builder.Services.AddSingleton<TradeSettingsStore>();
 // Which strategies may trade live per index - proven after costs on the tuning and live records (live-list.json).
 builder.Services.AddSingleton<LiveListService>();
 builder.Services.AddSingleton<ServerLiveService>();
+// The server's own index stop-loss check on live trades - holds even when the scanner is down.
+builder.Services.AddHostedService<ServerLiveStopWatcher>();
 // The daily loss limit (default ₹20,000) - Dhan's P&L based exit set every day, plus a watch here that exits
 // everything and turns Dhan's kill switch on at the limit (KillSwitchService; risk-settings.csv).
 builder.Services.AddSingleton<RiskSettingsStore>();

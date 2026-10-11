@@ -89,6 +89,7 @@ test('an index switched to Live: each alert asks the server for a real order onc
   const io = fakeIo()
   const orders = []
   const exits = []
+  const stops = []
   let refuseAfter = 1 // the server places the first and refuses the rest (one open at a time, its limits...)
   io.api = async (path, opts) => {
     if (path === '/api/scanner-log/day') { io.posted.push(opts.body); return {} }
@@ -98,6 +99,7 @@ test('an index switched to Live: each alert asks the server for a real order onc
       return { placed: true, message: 'placed', order: { success: true, orderIds: [`o${orders.length}`], lotSize: 65, prices: { limit: opts.body.strike > 0 ? 101.5 : 0 } } }
     }
     if (path === '/api/scanner-runner/live/NIFTY/exit') { exits.push(opts.body); return { success: true } }
+    if (path === '/api/scanner-runner/live/NIFTY/index-stop') { stops.push(opts.body); return {} }
     throw new Error(`unexpected ${path}`)
   }
   const scanner = new IndexScanner('NIFTY', io)
@@ -110,6 +112,12 @@ test('an index switched to Live: each alert asks the server for a real order onc
   assert.equal(new Set(orders.map((o) => o.key)).size, orders.length, 'never the same signal twice')
   const first = orders[0]
   assert.ok(first.strategyId && first.key.startsWith(first.strategyId), 'the strategy is named, for the live-list check')
+  // The index stop goes with the order (the server's own index SL check), and on the right side of the entry.
+  const fired = scanner.memory.fired.find((x) => first.key.startsWith(`${x.id}-${x.t}`))
+  assert.equal(first.indexStop, fired.stop)
+  assert.equal(first.indexSide, fired.side)
+  // A trailed stop is only ever sent tighter than the last one sent.
+  for (let i = 1; i < stops.length; i++) if (stops[i].key === stops[i - 1].key) assert.ok(fired.side === 'LONG' ? stops[i].stop > stops[i - 1].stop : stops[i].stop < stops[i - 1].stop)
   assert.ok(first.expiry && first.strike > 0 && ['CE', 'PE'].includes(first.side) && first.action === 'SELL' && first.stopLossPoints > 0 && first.targetPoints > 0 && first.exitAtMs > 0, JSON.stringify(first))
   const live = scanner.positions.filter((p) => p.live)
   assert.equal(live.length, 1)

@@ -69,6 +69,41 @@ public sealed class ServerLiveServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task TheServersOwnIndexStopCheck_ExitsALiveTrade_EvenWithoutTheScanner()
+    {
+        var orders = new FakeOrders();
+        var live = Live(orders);
+        live.Set("NIFTY", true, null, null, "admin", At10);
+        live.Set("BANKNIFTY", true, null, null, "admin", At10);
+        // A LONG on NIFTY (index stop 24980) and a SHORT on BANKNIFTY (index stop 51200).
+        await live.PlaceAsync("NIFTY", new ServerLiveOrderRequest("long-1-sell", null, Expiry, 25000, "PE", "SELL", IndexStop: 24980, IndexSide: "LONG"), At10, default);
+        await live.PlaceAsync("BANKNIFTY", new ServerLiveOrderRequest("short-1-sell", null, Expiry, 51000, "CE", "SELL", IndexStop: 51200, IndexSide: "SHORT"), At10, default);
+        decimal? nifty = 24995, bank = 51150;
+        decimal? PriceOf(string u) => u == "NIFTY" ? nifty : u == "BANKNIFTY" ? bank : null;
+
+        Assert.Equal(0, await live.CheckIndexStopsAsync(PriceOf, At10.AddMinutes(1), default)); // both on the right side
+        Assert.Empty(orders.Exits);
+        // The trail tightens NIFTY's stop to 24990; a late report of the old one does not loosen it.
+        Assert.True(live.MoveIndexStop("NIFTY", "long-1-sell", 24990));
+        Assert.True(live.MoveIndexStop("NIFTY", "long-1-sell", 24970));
+        nifty = 24989;
+        Assert.Equal(1, await live.CheckIndexStopsAsync(PriceOf, At10.AddMinutes(2), default));
+        Assert.Equal(new[] { "o1" }, orders.Exits.Single().Ids);
+        var n = live.Status(At10).Single(x => x.Underlying == "NIFTY").Trades.Single();
+        Assert.NotNull(n.ExitedUtc);
+        Assert.Contains("index SL 24990", n.ExitReason);
+        // Closed: never exited again.
+        Assert.Equal(0, await live.CheckIndexStopsAsync(PriceOf, At10.AddMinutes(3), default));
+        // The SHORT: a price at its stop exits it; no fresh price (null) - nothing done.
+        bank = null;
+        Assert.Equal(0, await live.CheckIndexStopsAsync(PriceOf, At10.AddMinutes(3), default));
+        bank = 51200;
+        Assert.Equal(1, await live.CheckIndexStopsAsync(PriceOf, At10.AddMinutes(4), default));
+        Assert.Equal(2, orders.Exits.Count);
+        Assert.False(live.MoveIndexStop("BANKNIFTY", "short-1-sell", 51100)); // no longer open
+    }
+
+    [Fact]
     public async Task OnPaper_NothingIsEverSent()
     {
         var orders = new FakeOrders();

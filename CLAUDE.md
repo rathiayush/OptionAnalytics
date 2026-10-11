@@ -25,7 +25,9 @@ then it asks `/api/scanner-runner/live/{index}/order`, where the server checks e
 one open trade per index, the index's max trades / max loss, the strategy on the index's live list - `LiveListService`:
 proven after costs on the tuning and live records, or added by hand -, the account kill switch) and places it with the index's
 Trade settings. Its "Runner" role still cannot reach the manual live-trading API; `ServerLiveServiceTests.cs` guards
-the limits.
+the limits. Every live order is a Dhan super order WITH its SL and target legs (refused at 0), the server moves its
+trailing SL and closes it at its time stop, and the server ALSO watches each live trade's INDEX stop-loss on the futures
+price (`ServerLiveStopWatcher`, trailed only tighter) - the stop holds even when the scanner is down.
 
 When adding or changing a strategy:
 

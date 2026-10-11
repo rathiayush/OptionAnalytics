@@ -125,6 +125,14 @@ public sealed class ScannerRunnerController : ControllerBase
         return Ok(await _live.PlaceAsync(underlying, request, DateTimeOffset.UtcNow, cancellationToken));
     }
 
+    /// <summary>POST /api/scanner-runner/live/{underlying}/index-stop - the trade's trailing stop moved its index stop-loss
+    /// (only ever tighter); the server's own check exits on it.</summary>
+    [HttpPost("live/{underlying}/index-stop")]
+    [Authorize(Roles = ScannerRunnerKey.Role)]
+    public IActionResult LiveIndexStop(string underlying, [FromBody] ServerLiveStopRequest request) =>
+        request is null || string.IsNullOrWhiteSpace(request.Key) ? BadRequest(new { error = "No trade." })
+            : _live.MoveIndexStop(underlying, request.Key, request.Stop) ? Ok() : NotFound(new { error = "No such open live trade." });
+
     /// <summary>POST /api/scanner-runner/live/{underlying}/exit - the scanner closed a live trade.</summary>
     [HttpPost("live/{underlying}/exit")]
     [Authorize(Roles = ScannerRunnerKey.Role)]

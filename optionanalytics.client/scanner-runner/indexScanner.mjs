@@ -347,6 +347,9 @@ export class IndexScanner {
         body: {
           key: position.key, strategyId: s.id, strategy: `#${meta?.no} ${meta?.name ?? s.id}`, expiry, strike: trade.strike, side: trade.side, action: trade.action,
           stopLossPoints: levels.slPts, targetPoints: levels.targetPts,
+          // The signal's stop on the INDEX: the server exits the trade itself when the futures go through it - so the
+          // index stop holds even if this scanner stops (the option's own SL / target legs are on Dhan already).
+          indexStop: s.stop, indexSide: s.side,
           // The server closes it itself at the setup's time stop (15:10 at the latest) - even if this scanner stops.
           exitAtMs: Math.min(s.timeStopMs ?? squareOffMs(s.t), squareOffMs(s.t)), exitReason: `time stop of #${meta?.no} ${meta?.short ?? s.id}`,
         },
@@ -357,7 +360,7 @@ export class IndexScanner {
     if (res?.placed) {
       const o = res.order ?? {}
       Object.assign(position, {
-        live: true, orderIds: o.orderIds ?? [], liveNote: o.success === false ? `PARTLY placed - ${res.message}` : res.message,
+        live: true, orderIds: o.orderIds ?? [], indexStopSent: s.stop, liveNote: o.success === false ? `PARTLY placed - ${res.message}` : res.message,
         lotSize: o.lotSize ?? position.lotSize, premium: o.prices?.limit ?? position.premium, lots: cfg.paperLots ?? position.lots,
       })
       this.dirty = true
@@ -383,6 +386,23 @@ export class IndexScanner {
     // The first look after a restart: trades already closed by then are not news.
     const opening = !this.primedExits
     this.primedExits = true
+    // A live trade whose trailing stop moved its index stop tighter: the server is told, so its own index stop check
+    // (which holds even when this scanner is down) follows the trail.
+    for (const p of this.positions) {
+      if (!p.live || p.liveExitSent) continue
+      const sig = withOutcome.find((x) => `${x.id}-${x.t}` === p.setupKey)
+      const stop = sig?.outcome?.stop
+      if (!Number.isFinite(stop) || sig.outcome.status !== 'open') continue
+      const dir = p.setupSide === 'LONG' ? 1 : -1
+      if (p.indexStopSent != null && !(dir * (stop - p.indexStopSent) > 0)) continue
+      try {
+        await this.io.api(`/api/scanner-runner/live/${this.underlying}/index-stop`, { method: 'POST', body: { key: p.key, stop } })
+        p.indexStopSent = stop
+        this.dirty = true
+      } catch (err) {
+        this.io.log(`${this.underlying}: the trailed index stop of ${p.key} was not sent - ${err.message}`)
+      }
+    }
     // A live trade the scanner closed (its stop, target, trailing SL, time stop or the option's own levels): closed on
     // Dhan too (if its legs are still working there), once - after a restart as well - with its P&L for the day's limit.
     for (const r of rows) {
