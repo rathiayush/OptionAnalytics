@@ -125,6 +125,72 @@ function StrategyTrades({ target, data, onClose, narrow }) {
   )
 }
 
+// ---- The days the tuning looked at: used (train / test) or left out, and why ---------------------------------------
+const roleText = (d) => (d.status !== 'used' ? 'left out' : d.testRuns && d.trainRuns ? `test in ${d.testRuns}, train in ${d.trainRuns} run(s)` : d.testRuns ? 'test (held back)' : 'train (chosen on)')
+
+function TuningDays({ open, data, onClose, narrow, coverage }) {
+  const [body, setBody] = useState(null)
+  const [error, setError] = useState(null)
+  const [index, setIndex] = useState('all')
+  const [show, setShow] = useState('left out')
+  useEffect(() => {
+    if (!open) return
+    fetch(`/api/strategy-tuning/performance/days?data=${data}`).then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((b) => { setBody({ ...b, data }); setError(null) }).catch((e) => setError(e.message))
+  }, [open, data])
+  const current = body?.data === data ? body : null
+  const cov = current?.coverage ?? coverage ?? []
+  const shown = (current?.days ?? []).filter((d) => (index === 'all' || d.index === index)
+    && (show === 'all' || (show === 'left out' ? d.status === 'left out' : show === 'test' ? d.status === 'used' && d.testRuns > 0 : d.status === 'used')))
+  return (
+    <Drawer open={open} onClose={onClose} width={narrow ? '100%' : 900} title="Days the tuning looked at" destroyOnHidden>
+      <Space direction="vertical" size={10} style={{ width: '100%' }}>
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          Each job replays every trading day in its range. A day is <b>used</b> when its data could be read, else <b>left out</b> (with why - a holiday, no data for it, a part day, or the data service busy; a rerun picks up the busy ones).
+          Of the used days, each run chose its setting on the older 70% (<i>train</i>) and checked it on the newest 30% it never saw (<i>test</i>, held back) - so a held-back day is still scanned, it is just not used to choose.
+          A strategy&apos;s <i>days traded</i> are the days it fired at least once - most strategies do not fire every day.
+        </Text>
+        {cov.map((c) => (
+          <div key={c.index} style={{ fontSize: 12 }}>
+            <b>{c.index}</b>: {c.atLeast ? 'at least ' : ''}{c.scanned} day(s) scanned{c.firstDay ? ` (${c.firstDay} to ${c.lastDay})` : ''} · {c.leftOut} left out · {c.testDays} held back as test in some run · {c.runs} run(s)
+            {c.olderRuns > 0 && <Text type="secondary" style={{ fontSize: 11 }}> - {c.olderRuns} older run(s) were made before the day list was kept: their days are counted but not listed (run them again to list them)</Text>}
+          </div>
+        ))}
+        <Space wrap size={8}>
+          <Segmented value={show} onChange={setShow} options={[{ value: 'left out', label: 'Left out' }, { value: 'test', label: 'Held back (test)' }, { value: 'used', label: 'Used' }, { value: 'all', label: 'All' }]} />
+          <Select value={index} onChange={setIndex} style={{ width: 130 }} options={[{ value: 'all', label: 'All indices' }, ...cov.map((c) => ({ value: c.index, label: c.index }))]} aria-label="Index of the days" />
+          <Button size="small" disabled={!shown.length} onClick={() => downloadCsv('tuning-days.csv', [
+            { title: 'index', value: (d) => d.index }, { title: 'date', value: (d) => d.date }, { title: 'status', value: (d) => d.status },
+            { title: 'train_runs', value: (d) => d.trainRuns }, { title: 'test_runs', value: (d) => d.testRuns }, { title: 'runs', value: (d) => d.runs },
+            { title: 'estimated', value: (d) => (d.estimated ? 'yes' : '') }, { title: 'reason', value: (d) => d.reason ?? '' }], shown)}>Download CSV</Button>
+        </Space>
+        {error && <Alert type="error" showIcon message={error} />}
+        {current && !shown.length && <Text type="secondary">{show === 'left out' ? 'No day was left out in the runs that kept a day list.' : 'No day to show.'}</Text>}
+        {narrow ? (
+          <Space direction="vertical" size={6} style={{ width: '100%' }}>
+            {!current && !error && <Text type="secondary">loading…</Text>}
+            {shown.map((d) => (
+              <div key={`${d.index}-${d.date}`} style={{ borderTop: '1px solid #ffffff14', paddingTop: 6, fontSize: 12 }}>
+                <div><b>{d.date}</b> · {d.index} · {d.status === 'used' ? <Tag color={d.testRuns ? 'purple' : 'green'}>{roleText(d)}</Tag> : <Tag color="red">left out</Tag>}{d.estimated && <Tag>estimated</Tag>}</div>
+                {d.reason && <Text type="secondary" style={{ fontSize: 11 }}>{d.reason}</Text>}
+              </div>
+            ))}
+          </Space>
+        ) : (
+          <Table size="small" loading={!current && !error} rowKey={(d) => `${d.index}-${d.date}`} dataSource={shown} pagination={{ pageSize: 100, size: 'small', hideOnSinglePage: true }}
+            columns={[
+              { title: 'Date', dataIndex: 'date', width: 110 },
+              { title: 'Index', dataIndex: 'index', width: 110 },
+              { title: 'Day', key: 's', width: 220, render: (_, d) => (d.status === 'used' ? <Tag color={d.testRuns ? 'purple' : 'green'}>{roleText(d)}</Tag> : <Tag color="red">left out</Tag>) },
+              { title: 'Runs', dataIndex: 'runs', width: 70 },
+              { title: 'Why left out / note', key: 'r', render: (_, d) => <span style={{ fontSize: 12 }}>{d.reason ?? (d.estimated ? 'used - order flow estimated from 1-minute candles' : '')}</span> },
+            ]} />
+        )}
+      </Space>
+    </Drawer>
+  )
+}
+
 // ---- Strategy performance: every tuning run added up per strategy, all indices -----------------------------------
 const pctOf = (v) => (v == null ? '-' : `${Math.round(v * 100)}%`)
 /** Points are only comparable within one index (BANKNIFTY moves ~2.5x NIFTY): shown per index; R compares across. */
@@ -139,6 +205,7 @@ function StrategyPerformance({ reloadKey }) {
   const narrow = useNarrow()
   const [openRows, setOpenRows] = useState({}) // phone: which strategy cards show their tuned settings
   const [tradesOf, setTradesOf] = useState(null) // the strategy whose every trade is open in the drawer
+  const [daysOpen, setDaysOpen] = useState(false)
   // The scanner's filters now - to mark which tuned setting is live (and so whether a better one has been found since).
   const [liveFilters, setLiveFilters] = useState(null)
   const loadLive = () => fetch('/api/scanner-runner/config').then((r) => (r.ok ? r.json() : null)).then((c) => setLiveFilters(c?.settings?.filters ?? {})).catch(() => {})
@@ -160,6 +227,15 @@ function StrategyPerformance({ reloadKey }) {
     .filter((r) => r.s && r.s.trades >= minTrades)
     .sort((a, b) => (b.s.avgR ?? -1e9) - (a.s.avgR ?? -1e9) || b.s.points - a.s.points), [current, setting, index, minTrades]) // eslint-disable-line react-hooks/exhaustive-deps
   const indices = useMemo(() => [...new Set((current?.rows ?? []).flatMap((r) => Object.keys(r.byIndex ?? {})))].sort(), [current])
+  // The days scanned per index (every run added up) - what a strategy's "days traded" is out of.
+  const coverage = current?.coverage ?? []
+  const scannedOf = (u) => (u === 'all' ? coverage.reduce((a, c) => a + c.scanned, 0) : coverage.find((c) => c.index === u)?.scanned) || null
+  const daysTraded = (x, u) => {
+    const n = scannedOf(u)
+    return <Tooltip title={`The days this strategy fired at least once${n ? `, out of the ${n} day(s) the tuning scanned${u === 'all' ? ' (all indices added up)' : ` for ${u}`}` : ''}. First trade ${x.firstDay ?? '-'}, last ${x.lastDay ?? '-'} - not the scan range.`}>
+      <span>{x.dayCount}{n ? ` of ${n}` : ''} days</span>
+    </Tooltip>
+  }
   const apply = async (r, tuned) => {
     try {
       const params = paramsFromSettingsRow(tuned)
@@ -241,6 +317,14 @@ function StrategyPerformance({ reloadKey }) {
         <Col><Segmented value={view} onChange={setView} options={[{ value: 'ranking', label: 'Ranking' }, { value: 'grid', label: <Tooltip title="Every strategy against every index - which strategy works on which index">By index</Tooltip> }]} /></Col>
         {current && <Col><Text type="secondary" style={{ fontSize: 12 }}>{current.runs} tuning run(s), {current.trades.toLocaleString('en-IN')} trades - a trade two runs both scanned is counted once</Text></Col>}
       </Row>
+      {coverage.length > 0 && (
+        <Space wrap size={[12, 4]} style={{ fontSize: 12 }}>
+          <Text type="secondary" style={{ fontSize: 12 }}>Days scanned:</Text>
+          {coverage.map((c) => <span key={c.index}><b>{c.index}</b> {c.atLeast ? '≥' : ''}{c.scanned}{c.firstDay ? ` (${c.firstDay} to ${c.lastDay})` : ''}{c.leftOut ? `, ${c.leftOut} left out` : ''}</span>)}
+          <Button size="small" onClick={() => setDaysOpen(true)}>Which days - left out / held back</Button>
+        </Space>
+      )}
+      <TuningDays open={daysOpen} data={data} narrow={narrow} coverage={coverage} onClose={() => setDaysOpen(false)} />
       {indices.length > 0 && (
         <Row gutter={[12, 12]}>
           {indices.map((u) => {
@@ -281,6 +365,7 @@ function StrategyPerformance({ reloadKey }) {
           <div><b>3. No fitting the past.</b> A setting is chosen on the older 70% of the job&apos;s days and then checked on the newest 30% it never saw. It is <i>recommended</i> only when it also wins there and beats the strategy as written.</div>
           <div><b>4. Many jobs, one answer.</b> Schedule a long range as short pieces (Strategy tuning → Schedule → Split into) for every index. This page adds every run together: a trade two runs both scanned counts once; <i>As written</i> is each strategy untouched, <i>Fine-tuned</i> is with the setting each run chose. R compares across indices; points only within one index.</div>
           <div><b>5. The best setting.</b> Open a strategy: every setting the runs chose for it, per index, scored on the days each run held back (fewer unseen trades count for less). When a new run finds a different setting it joins the list, and the one marked <Tag color="gold">best</Tag> is always the strongest any run recommended so far. <Tag color="green">live now</Tag> is the one the scanner uses. Apply any setting (recommended or not), or Apply best to every strategy at once.</div>
+          <div><b>Days.</b> &quot;Days scanned&quot; are the days a job could read (Which days lists those left out, and why, and the newest 30% each run held back as its test). A strategy&apos;s &quot;16 of 120 days&quot; means it fired on 16 of the 120 days scanned - its first and last trade dates are not the scan range.</div>
           <div><b>6. Improve round by round.</b> Schedule more days → the runs add up → apply what is best now → the next runs check it on new days. A setting only stays best while it keeps winning on days it was not chosen on.</div>
         </div>
       </details>
@@ -296,7 +381,7 @@ function StrategyPerformance({ reloadKey }) {
               <Card key={r.key} size="small" styles={{ body: { padding: 10 } }}>
                 <Space direction="vertical" size={4} style={{ width: '100%', fontSize: 12 }}>
                   <div>{view === 'ranking' && (i < 3 ? <Tag color="gold">{i + 1}</Tag> : <Tag>{i + 1}</Tag>)}<b>#{r.strategyNo} {r.strategy}</b> {r.setting === 'fine-tuned' ? <Tag color="blue">fine-tuned</Tag> : <Tag>as written</Tag>}</div>
-                  <div><b style={{ color: col(x?.avgR) }}>{fmtR(x?.avgR)}</b>/trade · {x?.trades ?? 0} trades · win {pctOf(x?.winRate)} · total <span style={{ color: col(x?.totalR) }}>{fmtR(x?.totalR)}</span>{one && x ? <> · <span style={{ color: col(x.points) }}>{pts(x.points)} pts</span></> : null}</div>
+                  <div><b style={{ color: col(x?.avgR) }}>{fmtR(x?.avgR)}</b>/trade · {x?.trades ?? 0} trades · win {pctOf(x?.winRate)} · total <span style={{ color: col(x?.totalR) }}>{fmtR(x?.totalR)}</span>{one && x ? <> · <span style={{ color: col(x.points) }}>{pts(x.points)} pts</span></> : null}{x ? <> · traded {daysTraded(x, view === 'grid' ? 'all' : index)}</> : null}</div>
                   <div>{Object.entries(r.byIndex ?? {}).map(([u, y]) => (
                     <span key={u} style={{ marginRight: 10, opacity: y.trades < minTrades ? 0.5 : 1 }}>{view === 'grid' && bestInColumn[u] === r.strategyId && <Tag color="gold">best</Tag>}{u} <b style={{ color: col(y.avgR) }}>{fmtR(y.avgR)}</b> ({y.trades})</span>
                   ))}</div>
@@ -339,7 +424,7 @@ function StrategyPerformance({ reloadKey }) {
               { title: 'Net points', dataIndex: 'points', width: 95, render: (v) => <b style={{ color: col(v) }}>{pts(v)}</b> },
               { title: 'SL hits', dataIndex: 'slHits', width: 70 },
               { title: 'Option sold / bought (premium pts)', key: 'o', render: (_, x) => <span style={{ fontSize: 12 }}>sold <span style={{ color: col(x.soldPoints) }}>{pts(x.soldPoints)}</span> · bought <span style={{ color: col(x.boughtPoints) }}>{pts(x.boughtPoints)}</span>{x.optionTrades ? <> · tuned option <span style={{ color: col(x.optionPoints) }}>{pts(x.optionPoints)}</span></> : null}</span> },
-              { title: 'Days', key: 'd', width: 170, render: (_, x) => <Text type="secondary" style={{ fontSize: 12 }}>{x.dayCount} day(s) · {x.firstDay} to {x.lastDay}</Text> },
+              { title: 'Days traded', key: 'd', width: 210, render: (_, x) => <Text type="secondary" style={{ fontSize: 12 }}>{daysTraded(x, x.index)}<br />first {x.firstDay} · last {x.lastDay}</Text> },
             ]} />
             <Button size="small" style={{ alignSelf: 'flex-start' }} onClick={() => setTradesOf({ ...r, index, setting: r.setting })}>All {r.all.trades} trades of this strategy</Button>
             {tunedTable(r)}
@@ -356,7 +441,7 @@ function StrategyPerformance({ reloadKey }) {
             { title: 'Captured / lost', key: 'cl', width: 130, render: (_, r) => <span style={{ fontSize: 12 }}><span style={{ color: UP_COLOR }}>{pts(r.s.captured)}</span> / <span style={{ color: DOWN_COLOR }}>{pts(r.s.lost)}</span></span> }] : []),
           { title: 'W / L · SL', key: 'wl', width: 110, render: (_, r) => <span style={{ fontSize: 12 }}>{r.s.wins}W {r.s.losses}L · {r.s.slHits} SL</span> },
           { title: 'Indices', key: 'i', width: 170, render: (_, r) => <span style={{ fontSize: 12 }}>{Object.entries(r.byIndex ?? {}).map(([u, x]) => `${u} ${fmtR(x.avgR)}`).join(' · ')}</span> },
-          { title: 'Days · runs', key: 'd', width: 110, render: (_, r) => <Text type="secondary" style={{ fontSize: 12 }}>{r.s.dayCount} · {r.s.runCount}</Text> },
+          { title: <Tooltip title="The days the strategy fired at least once, out of the days scanned; and how many tuning runs it traded in">Days traded · runs</Tooltip>, key: 'd', width: 150, render: (_, r) => <Text type="secondary" style={{ fontSize: 12 }}>{daysTraded(r.s, index)} · {r.s.runCount}</Text> },
         ]} />
       )}
     </Space>

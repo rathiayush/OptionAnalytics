@@ -270,6 +270,17 @@ test('a long job rides out a busy Dhan, leaves out a partial day, re-uses the di
     assert.equal(Number(runs[0].days_used), result.days.length)
     assert.equal(Number(runs[0].days_skipped), 1)
     assert.equal(Number(runs[0].trades), t.length)
+    // {run}-days.csv: every day looked at - the used ones with their train / test role (the newest 30% are the test, as
+    // tuneStrategy splits them) and the left-out one with why.
+    const dl = rows(join(history, `${runId}-days.csv`))
+    const used = dl.filter((x) => x.status === 'used')
+    assert.deepEqual(used.map((x) => x.date).sort(), result.days.map((d) => d.date).sort())
+    const test = used.filter((x) => x.role === 'test').map((x) => x.date)
+    assert.ok(test.length > 0 && used.every((x) => x.role === 'train' || x.role === 'test'))
+    assert.ok(test.every((d) => used.filter((x) => x.role === 'train').every((x) => x.date < d)), 'the test days are the newest')
+    const left = dl.filter((x) => x.status === 'left out')
+    assert.equal(left.length, 1)
+    assert.ok(left[0].reason.length > 0, 'why it was left out')
 
     // A second run (a rerun, or a job resumed after a restart): every full day comes from the disk cache.
     const before = seen.length

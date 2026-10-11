@@ -187,6 +187,74 @@ public static class TuningPerformance
         return list.OrderBy(t => t.GetValueOrDefault("entry_time_ist", ""), StringComparer.Ordinal).ToList();
     }
 
+    /// <summary>One day of one index across every run that looked at it: Status "used" when any run scanned it (else
+    /// "left out", with the newest run's Reason); TrainRuns / TestRuns = in how many runs it was a day the settings were
+    /// chosen on / a held-back day they were checked on.</summary>
+    public sealed record DayRow(string Index, string Date, string Status, string? Reason, int Runs, int TrainRuns, int TestRuns, bool Estimated);
+
+    /// <summary>The days scanned per index: Scanned = distinct days used, LeftOut = days no run could use, First / Last =
+    /// the first and last day scanned. Runs written before the day list existed (OlderRuns) only give a count: AtLeast is
+    /// then the most days one of them used, and Scanned is never below it.</summary>
+    public sealed record DayCoverage(string Index, int Scanned, int LeftOut, int TestDays, string? FirstDay, string? LastDay, int Runs, int OlderRuns, bool AtLeast);
+
+    public static (List<DayCoverage> Coverage, List<DayRow> Days) Days(IReadOnlyList<Dictionary<string, string>> runs,
+        Func<string, string, List<Dictionary<string, string>>?> readRows, string? data = null)
+    {
+        var acc = new Dictionary<(string Index, string Date), (string? Status, string? Reason, int Runs, int Train, int Test, bool Est)>();
+        var withList = new Dictionary<string, int>(StringComparer.Ordinal);
+        var older = new Dictionary<string, (int Runs, int MaxUsed, string? First, string? Last)>(StringComparer.Ordinal);
+        foreach (var run in runs) // newest first
+        {
+            var runData = run.GetValueOrDefault("data", "futures");
+            if (data is not null && runData != data) continue;
+            var runIndex = run.GetValueOrDefault("index", "");
+            var rows = readRows(run.GetValueOrDefault("run_id", ""), "days");
+            if (rows is null)
+            {
+                var o = older.GetValueOrDefault(runIndex);
+                var used = (int)(Num(run, "days_used") ?? 0);
+                string? first = run.GetValueOrDefault("first_day"), last = run.GetValueOrDefault("last_day");
+                if (string.CompareOrdinal(first, last) > 0) (first, last) = (last, first);
+                older[runIndex] = (o.Runs + 1, Math.Max(o.MaxUsed, used),
+                    MinDay(o.First, first), MaxDay(o.Last, last));
+                continue;
+            }
+            withList[runIndex] = withList.GetValueOrDefault(runIndex) + 1;
+            foreach (var r in rows)
+            {
+                var key = (r.GetValueOrDefault("index", runIndex), r.GetValueOrDefault("date", ""));
+                if (key.Item2.Length == 0) continue;
+                var a = acc.GetValueOrDefault(key);
+                var isUsed = r.GetValueOrDefault("status") == "used";
+                var role = r.GetValueOrDefault("role");
+                acc[key] = (
+                    a.Status == "used" || isUsed ? "used" : "left out",
+                    a.Reason ?? (isUsed ? null : r.GetValueOrDefault("reason")), // newest run's reason first
+                    a.Runs + 1, a.Train + (isUsed && role == "train" ? 1 : 0), a.Test + (isUsed && role == "test" ? 1 : 0),
+                    a.Est || (isUsed && r.GetValueOrDefault("estimated") == "yes"));
+            }
+        }
+        var days = acc.Select(kv => new DayRow(kv.Key.Index, kv.Key.Date, kv.Value.Status!, kv.Value.Status == "used" ? null : kv.Value.Reason,
+                kv.Value.Runs, kv.Value.Train, kv.Value.Test, kv.Value.Est))
+            .OrderBy(d => d.Index, StringComparer.Ordinal).ThenBy(d => d.Date, StringComparer.Ordinal).ToList();
+        var coverage = withList.Keys.Union(older.Keys).OrderBy(i => i, StringComparer.Ordinal).Select(index =>
+        {
+            var mine = days.Where(d => d.Index == index).ToList();
+            var used = mine.Where(d => d.Status == "used").ToList();
+            var o = older.GetValueOrDefault(index);
+            var atLeast = o.Runs > 0 && o.MaxUsed > used.Count;
+            return new DayCoverage(index, Math.Max(used.Count, o.MaxUsed), mine.Count - used.Count, used.Count(d => d.TestRuns > 0),
+                MinDay(used.FirstOrDefault()?.Date, o.First), MaxDay(used.LastOrDefault()?.Date, o.Last),
+                withList.GetValueOrDefault(index) + o.Runs, o.Runs, atLeast);
+        }).ToList();
+        return (coverage, days);
+    }
+
+    private static string? MinDay(string? a, string? b) =>
+        string.IsNullOrEmpty(a) ? (string.IsNullOrEmpty(b) ? null : b) : string.IsNullOrEmpty(b) || string.CompareOrdinal(a, b) <= 0 ? a : b;
+    private static string? MaxDay(string? a, string? b) =>
+        string.IsNullOrEmpty(a) ? (string.IsNullOrEmpty(b) ? null : b) : string.IsNullOrEmpty(b) || string.CompareOrdinal(a, b) >= 0 ? a : b;
+
     /// <summary>The settings best first by Score; Best marks the top one any run recommended (else none).</summary>
     private static List<TunedSetting> Rank(IEnumerable<TunedAcc> accs)
     {

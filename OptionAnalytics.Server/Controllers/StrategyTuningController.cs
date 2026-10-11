@@ -135,8 +135,21 @@ public sealed class StrategyTuningController : ControllerBase
     public IActionResult Performance([FromQuery] string? data = null)
     {
         var d = string.Equals(data, "spot", StringComparison.OrdinalIgnoreCase) ? "spot" : string.Equals(data, "futures", StringComparison.OrdinalIgnoreCase) ? "futures" : null;
-        var (rows, runs, trades) = TuningPerformance.Build(_tuning.HistoryRuns(), _tuning.HistoryRows, d);
-        return Ok(new { runs, trades, rows });
+        var history = _tuning.HistoryRuns();
+        var (rows, runs, trades) = TuningPerformance.Build(history, _tuning.HistoryRows, d);
+        // How many days were scanned per index - so "traded on 16 days" can be read against the days looked at.
+        var coverage = TuningPerformance.Days(history, _tuning.HistoryRows, d).Coverage;
+        return Ok(new { runs, trades, rows, coverage });
+    }
+
+    /// <summary>GET /api/strategy-tuning/performance/days?data= - every day the runs looked at, per index: used (and in
+    /// how many runs it was a train / test day) or left out and why, plus the days scanned per index.</summary>
+    [HttpGet("performance/days")]
+    public IActionResult PerformanceDays([FromQuery] string? data = null)
+    {
+        var d = string.Equals(data, "spot", StringComparison.OrdinalIgnoreCase) ? "spot" : string.Equals(data, "futures", StringComparison.OrdinalIgnoreCase) ? "futures" : null;
+        var (coverage, days) = TuningPerformance.Days(_tuning.HistoryRuns(), _tuning.HistoryRows, d);
+        return Ok(new { coverage, days });
     }
 
     /// <summary>GET /api/strategy-tuning/performance/trades?strategy=&amp;setting=&amp;index=&amp;data= - every trade of one strategy
@@ -200,7 +213,7 @@ public sealed class StrategyTuningController : ControllerBase
     [HttpGet("history")]
     public IActionResult History() => Ok(_tuning.HistoryRuns());
 
-    /// <summary>GET /api/strategy-tuning/history/{runId}/{kind} - one run's trades or settings (kind: trades, settings)
+    /// <summary>GET /api/strategy-tuning/history/{runId}/{kind} - one run's trades, settings or days (kind: trades, settings, days)
     /// as rows; `?format=csv` downloads the CSV file itself.</summary>
     [HttpGet("history/{runId}/{kind}")]
     public IActionResult HistoryFile(string runId, string kind, [FromQuery] string? format = null)

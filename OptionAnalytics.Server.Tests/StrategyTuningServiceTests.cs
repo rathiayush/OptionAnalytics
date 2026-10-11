@@ -352,6 +352,41 @@ public sealed class StrategyTuningServiceTests : IDisposable
     // ---- Strategy performance across every run -------------------------------------------------------------------
 
     [Fact]
+    public void PerformanceDays_ListsUsedAndLeftOutDaysPerIndex_AndTheDaysScanned()
+    {
+        static Dictionary<string, string> D(string date, string status, string role = "", string reason = "") =>
+            new() { ["index"] = "NIFTY", ["date"] = date, ["status"] = status, ["role"] = role, ["reason"] = reason };
+        var runs = new List<Dictionary<string, string>>
+        {
+            new() { ["run_id"] = "NIFTY-futures-20261010-100000", ["index"] = "NIFTY", ["data"] = "futures" },        // newest first
+            new() { ["run_id"] = "NIFTY-futures-20261008-100000", ["index"] = "NIFTY", ["data"] = "futures" },
+            // Written before the day list existed: only its count and range are known.
+            new() { ["run_id"] = "BANKNIFTY-futures-20261001-100000", ["index"] = "BANKNIFTY", ["data"] = "futures", ["days_used"] = "40", ["first_day"] = "2026-09-30", ["last_day"] = "2026-08-01" },
+        };
+        var files = new Dictionary<string, List<Dictionary<string, string>>>
+        {
+            ["NIFTY-futures-20261010-100000:days"] = new() { D("2026-10-05", "used", "train"), D("2026-10-06", "used", "test"), D("2026-10-07", "left out", reason: "no data") },
+            // The older run could not use 05 Oct (the newer one did) and also left out 07 Oct for another reason.
+            ["NIFTY-futures-20261008-100000:days"] = new() { D("2026-10-05", "left out", reason: "busy"), D("2026-10-07", "left out", reason: "holiday") },
+        };
+        var (coverage, days) = TuningPerformance.Days(runs, (id, kind) => files.GetValueOrDefault($"{id}:{kind}"), "futures");
+
+        Assert.Equal(3, days.Count);
+        var d5 = days.Single(d => d.Date == "2026-10-05");
+        Assert.Equal(("used", (string?)null, 2, 1, 0), (d5.Status, d5.Reason, d5.Runs, d5.TrainRuns, d5.TestRuns));
+        Assert.Equal(1, days.Single(d => d.Date == "2026-10-06").TestRuns);
+        var d7 = days.Single(d => d.Date == "2026-10-07");
+        Assert.Equal(("left out", "no data"), (d7.Status, d7.Reason)); // the newest run's reason
+
+        var nifty = coverage.Single(c => c.Index == "NIFTY");
+        Assert.Equal((2, 1, 1, "2026-10-05", "2026-10-06", 2, false), (nifty.Scanned, nifty.LeftOut, nifty.TestDays, nifty.FirstDay, nifty.LastDay, nifty.Runs, nifty.AtLeast));
+        var bank = coverage.Single(c => c.Index == "BANKNIFTY");
+        Assert.Equal((40, 1, true, "2026-08-01", "2026-09-30"), (bank.Scanned, bank.OlderRuns, bank.AtLeast, bank.FirstDay, bank.LastDay));
+
+        Assert.Empty(TuningPerformance.Days(runs, (id, kind) => files.GetValueOrDefault($"{id}:{kind}"), "spot").Coverage);
+    }
+
+    [Fact]
     public void Performance_AddsUpEveryRunPerStrategy_CountingAnOverlappingTradeOnce()
     {
         static Dictionary<string, string> T(string run, string index, string id, string setting, string date, string time, string points, string r, string closedBy = "Target hit") => new()
