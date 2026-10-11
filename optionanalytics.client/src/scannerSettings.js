@@ -27,3 +27,21 @@ export async function applyTunedFilters(id, params, { option = false } = {}) {
   }
   return filters
 }
+
+/** Sets ONE filter of one strategy (e.g. a learning suggestion: tradeTape 'with') on this browser's scanner and the
+ *  server scanner, keeping every other filter it has. */
+export async function applyFilterValue(id, key, value) {
+  let local = {}
+  try { local = JSON.parse(localStorage.getItem(SCANNER_SETTINGS_KEY) ?? '{}') ?? {} } catch { /* none yet */ }
+  const merged = (cur) => ({ ...(cur ?? {}), [key]: value })
+  localStorage.setItem(SCANNER_SETTINGS_KEY, JSON.stringify({ ...local, filters: { ...(local.filters ?? {}), [id]: merged(local.filters?.[id]) } }))
+  const config = await fetch('/api/scanner-runner/config').then((r) => (r.ok ? r.json() : null)).catch(() => null)
+  const serverSettings = config?.settings ?? local
+  const saved = merged(serverSettings.filters?.[id])
+  const res = await fetch('/api/scanner-runner/config', {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ settings: { ...serverSettings, filters: { ...(serverSettings.filters ?? {}), [id]: saved } } }),
+  })
+  if (!res.ok) throw new Error(`saved in this browser, but the server scanner was not updated (HTTP ${res.status})`)
+  return saved
+}

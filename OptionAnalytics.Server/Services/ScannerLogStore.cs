@@ -36,6 +36,18 @@ public sealed class ScannerLogStore
         "key", "date", "underlying", "time_ist", "strategy_no", "strategy_id", "strategy", "side", "entry", "stop", "target",
         "confidence", "estimated", "day_type", "day_type_price", "vote_oi", "vote_cvd", "adaptive_take", "adaptive_price_only",
         "adaptive_reason", "status", "r", "points", "exit_time_ist", "exit_price", "exit_reason", "source", "user", "updated_utc",
+        // The market at the signal (scannerCore.marketAt) - what the learning reads: tape aggression, big orders, delta,
+        // volume, futures price / OI, option writers, PCR, the order book near the price, VWAP distance.
+        "mkt_tape30", "mkt_tape60", "mkt_tape300", "mkt_big_net", "mkt_big_count", "mkt_cvd15", "mkt_vol_x", "mkt_fut_px15", "mkt_fut_oi15",
+        "mkt_fut_oi5", "mkt_writers15", "mkt_writers_open", "mkt_pcr", "mkt_book_imb", "mkt_vwap_dist",
+    };
+
+    /// <summary>marketAt's keys -> their columns.</summary>
+    public static readonly IReadOnlyDictionary<string, string> MarketColumns = new Dictionary<string, string>
+    {
+        ["tape30"] = "mkt_tape30", ["tape60"] = "mkt_tape60", ["tape300"] = "mkt_tape300", ["bigNet"] = "mkt_big_net", ["bigCount"] = "mkt_big_count",
+        ["cvd15"] = "mkt_cvd15", ["volX"] = "mkt_vol_x", ["futPx15"] = "mkt_fut_px15", ["futOi15"] = "mkt_fut_oi15", ["futOi5"] = "mkt_fut_oi5",
+        ["writers15"] = "mkt_writers15", ["writersOpen"] = "mkt_writers_open", ["pcr"] = "mkt_pcr", ["bookImb"] = "mkt_book_imb", ["vwapDist"] = "mkt_vwap_dist",
     };
 
     public static readonly string[] TradeColumns =
@@ -86,7 +98,7 @@ public sealed class ScannerLogStore
         var now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
         var day = date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
 
-        var signalRows = signals.Where((s) => s.Time > 0 && !string.IsNullOrWhiteSpace(s.StrategyId)).Select((s) => new Dictionary<string, string>
+        var signalRows = signals.Where((s) => s.Time > 0 && !string.IsNullOrWhiteSpace(s.StrategyId)).Select((s) => WithMarket(new Dictionary<string, string>
         {
             ["key"] = $"{underlying}|{day}|{Text(s.StrategyId)}|{Text(s.Side)}|{s.Time}",
             ["date"] = day, ["underlying"] = underlying, ["time_ist"] = IstTime(s.Time),
@@ -97,7 +109,7 @@ public sealed class ScannerLogStore
             ["adaptive_price_only"] = Bool(s.AdaptivePriceOnly), ["adaptive_reason"] = Text(s.AdaptiveReason),
             ["status"] = Text(s.Status), ["r"] = Num(s.R), ["points"] = Num(FuturesPoints(s.Side, s.Entry, s.ExitPrice, s.Status)), ["exit_time_ist"] = s.ExitTime is > 0 ? IstTime(s.ExitTime.Value) : "",
             ["exit_price"] = Num(s.ExitPrice), ["exit_reason"] = Text(s.ExitReason), ["source"] = source, ["user"] = who, ["updated_utc"] = now,
-        }).ToList();
+        }, s.Market)).ToList();
         var tradeRows = trades.Where((t) => !string.IsNullOrWhiteSpace(t.Key) && t.EntryTime > 0).Select((t) => new Dictionary<string, string>
         {
             ["key"] = $"{underlying}|{day}|{Text(t.Key)}", ["date"] = day, ["underlying"] = underlying, ["entry_time_ist"] = IstTime(t.EntryTime),
@@ -123,6 +135,15 @@ public sealed class ScannerLogStore
             _lock.Release();
         }
         return (signalRows.Count, tradeRows.Count, null);
+    }
+
+    private static Dictionary<string, string> WithMarket(Dictionary<string, string> row, IReadOnlyDictionary<string, double?>? market)
+    {
+        foreach (var column in MarketColumns.Values) row[column] = "";
+        if (market is null) return row;
+        foreach (var (key, value) in market)
+            if (MarketColumns.TryGetValue(key, out var column)) row[column] = Num(value);
+        return row;
     }
 
     // The futures points a closed signal captured: exit - entry for a LONG, entry - exit for a SHORT.
@@ -382,7 +403,7 @@ public sealed record ScannerSignalRow(
     long Time, int? StrategyNo, string? StrategyId, string? Strategy, string? Side, double? Entry, double? Stop, double? Target,
     double? Confidence, bool? Estimated, string? DayType, string? DayTypePrice, string? VoteOi, string? VoteCvd,
     bool? AdaptiveTake, bool? AdaptivePriceOnly, string? AdaptiveReason, string? Status, double? R, long? ExitTime,
-    double? ExitPrice, string? ExitReason);
+    double? ExitPrice, string? ExitReason, IReadOnlyDictionary<string, double?>? Market = null);
 
 /// <summary>An option trade punched for a signal (paper or live) - SignalTime / StrategyId / SignalSide name
 /// the signal it came from. Stt / Brokerage / OtherCharges / NetRupees / NetPerLot: its costs and net P&amp;L

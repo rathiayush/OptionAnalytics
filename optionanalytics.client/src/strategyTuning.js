@@ -43,6 +43,13 @@ export const OI_GRID = {
   tradeMoveSize: ['any', 'small', 'large'],
   tradeDayType: ['any', 'trend', 'withTrend', 'notAgainstTrend', 'range'],
   tradeWallRoom: ['any', 'oneR', 'target'],
+  // Order flow at the signal (tape, big orders, book, delta, volume) - judged only where the day has them (a live or
+  // recorded day); on an estimated day they let every trade through, so they can only be learned from real days.
+  tradeTape: ['any', 'notAgainst', 'with', 'strong'],
+  tradeBig: ['any', 'notAgainst', 'with'],
+  tradeBook: ['any', 'notAgainst', 'with'],
+  tradeCvd: ['any', 'with'],
+  tradeVolume: ['any', 'above', 'below'],
 }
 /** A combination whose timeframe changes nothing: the options OI timeframe with neither an options OI change nor
  *  a wall OI filter on, the futures OI timeframe with no futures OI filter on - tried once, at 15. */
@@ -63,12 +70,17 @@ export const OI_FACTORS = [
   { key: 'tradeMoveSize', label: 'Futures move size: small move or real move', futures: true },
   { key: 'tradeDayType', label: 'Day type: trending (my way), range, not against a trend' },
   { key: 'tradeWallRoom', label: 'Room to the next OI wall (support / resistance)' },
+  { key: 'tradeTape', label: 'Tape aggression with the trade (live / recorded days only)', flow: true },
+  { key: 'tradeBig', label: 'Big orders with the trade, last 5 min (live / recorded days only)', flow: true },
+  { key: 'tradeBook', label: 'Order book near the price (heatmap) with the trade (live / recorded days only)', flow: true },
+  { key: 'tradeCvd', label: 'Delta of the last 15 minutes with the trade', flow: true },
+  { key: 'tradeVolume', label: 'Volume of the last 15 minutes vs the day', flow: true },
 ]
 
 /** The OI inputs worth tuning for a data mode. Spot + options has no futures at all - its setups carry no futures OI
  *  and no futures move (spotEngine leaves both null), so a futures filter there could only ever block a trade, never
  *  confirm one. Those inputs are left out rather than offered and silently wasted. */
-export const oiFactorsFor = (data) => (data === 'spot' ? OI_FACTORS.filter((f) => !f.futures) : OI_FACTORS)
+export const oiFactorsFor = (data) => (data === 'spot' ? OI_FACTORS.filter((f) => !f.futures && !f.flow) : OI_FACTORS)
 
 // ---- the option trade ------------------------------------------------------------------------------------
 /**

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Alert, Button, Card, InputNumber, Popconfirm, Segmented, Space, Switch, Table, Tag, Tooltip, Typography, message } from 'antd'
 import { NavBar, useAuth } from './shared.jsx'
 import { loadTradeDefaults, refreshTradeSettings, subscribeTradeLevels } from './tradeDefaults.js'
-import { ServerLiveSwitch, ServerLiveTrades, useServerLive } from './ServerLive.jsx'
+import { LiveListCard, ServerLiveSwitch, ServerLiveTrades, useServerLive } from './ServerLive.jsx'
 
 const { Title, Text } = Typography
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX']
@@ -108,8 +108,8 @@ function ServerLiveCard({ isAdmin }) {
     <Card size="small" title={<Space size={8}><span>Server scanner · paper or live</span>{anyLive ? <Tag color="error">LIVE today: {list.filter((x) => x.live).map((x) => x.underlying).join(', ')}</Tag> : list ? <Tag>all on paper</Tag> : null}</Space>}>
       <Space direction="vertical" size={10} style={{ width: '100%' }}>
         <Text type="secondary" style={{ fontSize: 12 }}>
-          Paper: the server scanner alerts and paper-trades (Telegram, tagged [Server]). <b>Live today</b>: on every alert it ALSO places a real Dhan super
-          order by itself - no page needs to be open - with the index&apos;s lots, slippage and trailing below and the option SL / target its paper trade
+          Paper: the server scanner alerts and paper-trades (Telegram, tagged [Server]). <b>Live today</b>: on every alert of a strategy on the index&apos;s live list (below)
+          it ALSO places a real Dhan super order by itself - no page needs to be open - with the index&apos;s lots, slippage and trailing below and the option SL / target its paper trade
           uses, and closes it when the trade ends (its stop, target, trailing SL, time stop, 15:10). Only one open live trade per index at a time, at most
           the max trades a day, no new order after the max loss or after 14:45, and the account&apos;s daily loss limit above always applies.
           Live lasts until the end of today - every morning each index starts on paper again. Also switchable on the Order Flow page.
@@ -198,6 +198,9 @@ export default function TradeSettingsPage() {
         </Space>
         <KillSwitchCard isAdmin={isAdmin} />
         <ServerLiveCard isAdmin={isAdmin} />
+        <Card size="small" title="Live list · which strategies trade live">
+          <LiveListCard isAdmin={isAdmin} />
+        </Card>
         <Card size="small" title="Trade settings · per index">
           <Space direction="vertical" size={12} style={{ width: '100%' }}>
             <Text type="secondary" style={{ fontSize: 12 }}>

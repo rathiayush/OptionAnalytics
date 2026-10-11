@@ -40,6 +40,14 @@ const istClock = (ms) => {
 const LOG_EVERY_MS = 3_000
 export const TAG = '[Server]'
 
+/** Signals in the order to take them: the ones on the live list first, best first (the list's order); the rest after,
+ *  as they came. No list (paper): unchanged. */
+export function byLiveList(fresh, list) {
+  if (!Array.isArray(list) || !list.length) return fresh
+  const rank = (s) => { const i = list.indexOf(s.id); return i < 0 ? Infinity : i }
+  return [...fresh].map((s, i) => ({ s, i })).sort((a, b) => rank(a.s) - rank(b.s) || a.i - b.i).map((x) => x.s)
+}
+
 const IST_DATE = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' })
 export const istDate = (ms) => IST_DATE.format(new Date(ms))
 
@@ -286,7 +294,9 @@ export class IndexScanner {
       if (tick.fresh.length) {
         this.memory.fired = tick.fired
         this.dirty = true
-        for (const s of tick.fresh) await this.onFired(s, cfg)
+        // Live: two signals in the same moment - the better-proven one (higher on the index's live list) goes first,
+        // so it gets the one open live slot.
+        for (const s of byLiveList(tick.fresh, this.live ? this.config.liveList?.[this.underlying] : null)) await this.onFired(s, cfg)
       }
     }
     await this.follow(nowMs, cfg)
@@ -335,7 +345,7 @@ export class IndexScanner {
       res = await this.io.api(`/api/scanner-runner/live/${this.underlying}/order`, {
         method: 'POST',
         body: {
-          key: position.key, strategy: `#${meta?.no} ${meta?.name ?? s.id}`, expiry, strike: trade.strike, side: trade.side, action: trade.action,
+          key: position.key, strategyId: s.id, strategy: `#${meta?.no} ${meta?.name ?? s.id}`, expiry, strike: trade.strike, side: trade.side, action: trade.action,
           stopLossPoints: levels.slPts, targetPoints: levels.targetPts,
           // The server closes it itself at the setup's time stop (15:10 at the latest) - even if this scanner stops.
           exitAtMs: Math.min(s.timeStopMs ?? squareOffMs(s.t), squareOffMs(s.t)), exitReason: `time stop of #${meta?.no} ${meta?.short ?? s.id}`,

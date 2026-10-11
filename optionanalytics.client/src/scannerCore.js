@@ -4,8 +4,10 @@
 
 import {
   ACTIVE_STRATEGIES, STRATEGY_BY_ID, evaluateStrategies, simulateOutcome, DEFAULT_TRAIL, RANGE_IDS,
-  exitLabel, premiumAt, optionStopTargetHit, squareOffMs,
+  exitLabel, premiumAt, optionStopTargetHit, squareOffMs, marketAt,
 } from './strategyEngine.js'
+// The market at a signal now lives with the strategies (the order-flow trade filters read it) - re-exported here.
+export { marketAt, MARKET_KEYS } from './strategyEngine.js'
 import { aggregateBars, analyzeBars, findWalls } from './orderFlowMath.js'
 import { chargeRates, tradeCharges } from './tradeCharges.js'
 import { sessionVolumeProfile, tpoProfile, tpoRowFor } from './profiles.js'
@@ -113,7 +115,11 @@ export function scanTick(input, memory) {
   })
   const watching = watchNow.filter((w) => w.missing.length)
   const recentlyFired = (s) => memory.fired.some((f) => f.id === s.id && f.side === s.side && s.t - f.t < COOLDOWN_MS)
-  const fresh = setups.filter((s) => !recentlyFired(s)).map((s) => ({ ...s, trail: trailOf(s, trail) }))
+  const fresh0 = setups.filter((s) => !recentlyFired(s))
+  // What the market looked like at the signal (evaluateStrategies puts it on every setup) - kept with it in the scanner
+  // record, so which conditions win can be learned from the live signals (only what was known at the clock).
+  const market = fresh0.length && fresh0.some((s) => !s.market) ? marketAt({ nowMs, price, bars, tapePrints: estimated ? null : tapePrints, oi, heatmap: view.heatmap, lotSize, largeLots }) : null
+  const fresh = fresh0.map((s) => ({ ...s, trail: trailOf(s, trail), market: s.market ?? market }))
   return { price, watching, fresh, fired: fresh.length ? [...memory.fired, ...fresh] : memory.fired }
 }
 
@@ -292,6 +298,7 @@ export function scannerLogBody({ underlying, date, source, dayResults, rows, cha
       voteOi: x.regime?.votes?.oi ?? null, voteCvd: x.regime?.votes?.cvd ?? null, adaptiveTake: x.adaptive?.take ?? null,
       adaptivePriceOnly: x.adaptive?.priceOnly ?? null, adaptiveReason: x.adaptive?.reason ?? null, status: o.status ?? null, r: o.r ?? null,
       exitTime: closed ? o.exitAt ?? null : null, exitPrice: closed ? o.exitPrice ?? null : null, exitReason: closed ? exitLabel(o) : null,
+      market: x.market ?? null,
     }
   })
   // Each trade names its signal: the exact one, else the same strategy and side within two minutes.

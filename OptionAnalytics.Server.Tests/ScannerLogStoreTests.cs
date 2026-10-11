@@ -191,6 +191,23 @@ public sealed class ScannerLogStoreTests : IDisposable
             11.25, 40, 7, net, net);
 
     [Fact]
+    public async Task ASignalsMarketAtTheTime_IsKeptInItsMktColumns()
+    {
+        var store = Store();
+        var market = new Dictionary<string, double?> { ["tape60"] = 68, ["bigNet"] = -12, ["futOi15"] = 0.42, ["bookImb"] = 0.31, ["writers15"] = null, ["unknown"] = 5 };
+        await store.UpsertDayAsync(new ScannerLogDayRequest("NIFTY", "2026-10-05", "server", new()
+        {
+            new ScannerSignalRow(T1040, 34, "pocReject", "POC rejection", "LONG", 22710, 22690, 22750, 60, false, "range", "range", "x", "x", false, true, "x", "open", 0, null, null, null, market),
+            new ScannerSignalRow(T1040 + 60_000, 15, "ibBreakout", "IB", "LONG", 22710, 22690, 22750, 60, false, "range", "range", "x", "x", false, true, "x", "open", 0, null, null, null),
+        }, null), null, CancellationToken.None);
+        var rows = ScannerLogStore.Read(store.PathOf("server-signals")!).ToList();
+        var a = rows.Single(r => r["strategy_id"] == "pocReject");
+        Assert.Equal(("68", "-12", "0.42", "0.31", ""), (a["mkt_tape60"], a["mkt_big_net"], a["mkt_fut_oi15"], a["mkt_book_imb"], a["mkt_writers15"]));
+        Assert.DoesNotContain(a.Keys, k => k.Contains("unknown"));
+        Assert.Equal("", rows.Single(r => r["strategy_id"] == "ibBreakout")["mkt_tape60"]); // none sent: blank
+    }
+
+    [Fact]
     public async Task TheSummary_TotalsEachUnderlyingSeparately_PointsTradesAndNet()
     {
         var store = Store();

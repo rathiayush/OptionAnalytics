@@ -15,12 +15,14 @@ public sealed class ScannerRunnerController : ControllerBase
     private readonly ScannerRunnerStore _store;
     private readonly TradeSettingsStore _trade;
     private readonly ServerLiveService _live;
+    private readonly LiveListService _list;
 
-    public ScannerRunnerController(ScannerRunnerStore store, TradeSettingsStore trade, ServerLiveService live)
+    public ScannerRunnerController(ScannerRunnerStore store, TradeSettingsStore trade, ServerLiveService live, LiveListService list)
     {
         _store = store;
         _trade = trade;
         _live = live;
+        _list = list;
     }
 
     /// <summary>GET /api/scanner-runner/config - the runner reads it every minute; the page shows it. The
@@ -46,6 +48,12 @@ public sealed class ScannerRunnerController : ControllerBase
             live[s.Underlying] = _live.IsLive(s.Underlying, now);
         }
         config["live"] = live;
+        // Each index's live list, best first (LiveListService) - the scanner takes the better-proven of two
+        // signals in the same moment first; the server checks the list itself on every order.
+        var lists = new JsonObject();
+        foreach (var (u, entries) in _list.Lists())
+            lists[u] = new JsonArray(entries.Where(e => e.OnList).Select(e => (JsonNode)JsonValue.Create(e.StrategyId)!).ToArray());
+        config["liveList"] = lists;
         config["enabled"] = enabled;
         config["levels"] = levels;
         config["trade"] = trade;
@@ -125,6 +133,34 @@ public sealed class ScannerRunnerController : ControllerBase
         if (request is null || string.IsNullOrWhiteSpace(request.Key)) return BadRequest(new { error = "No trade." });
         var result = await _live.ExitAsync(underlying, request.Key, request.Reason, request.Pnl, DateTimeOffset.UtcNow, cancellationToken);
         return result.Success ? Ok(result) : UnprocessableEntity(result);
+    }
+
+    /// <summary>GET /api/scanner-runner/live-list - per index: every strategy with its tuning record (after costs) and live
+    /// record, whether it is on the live list and why; plus the rules.</summary>
+    [HttpGet("live-list")]
+    [Authorize(Roles = AuthRoles.Admin)]
+    public IActionResult GetLiveList() => Ok(new { rules = _list.Rules(), lists = _list.Lists() });
+
+    /// <summary>PUT /api/scanner-runner/live-list - change the rules, or put a strategy on / off an index's list by hand
+    /// (mode include / exclude / auto).</summary>
+    [HttpPut("live-list")]
+    [Authorize(Roles = AuthRoles.Admin)]
+    public IActionResult SetLiveList([FromBody] LiveListSetRequest request)
+    {
+        if (request is null) return BadRequest(new { error = "No body." });
+        var error = _list.Set(request.Rules, request.Underlying, request.StrategyId, request.Mode);
+        return error is null ? Ok(new { rules = _list.Rules(), lists = _list.Lists() }) : BadRequest(new { error });
+    }
+
+    /// <summary>GET /api/scanner-runner/learning - what the live signals teach (LearningReport): per index and strategy,
+    /// which order-flow conditions at the signal went with winning trades, from both scanner records.</summary>
+    [HttpGet("learning")]
+    [Authorize(Roles = AuthRoles.Admin)]
+    public IActionResult Learning([FromServices] ScannerLogStore log)
+    {
+        var rows = new[] { "server-signals", "signals" }.Select(k => log.PathOf(k)).Where(p => p is not null)
+            .SelectMany(p => ScannerLogStore.Read(p!)).ToList();
+        return Ok(new { minSignals = LearningReport.MinSignals, minLiftR = LearningReport.MinLiftR, strategies = LearningReport.Build(rows) });
     }
 
     /// <summary>GET /api/scanner-runner/status - whether it is running and what it last reported.</summary>
