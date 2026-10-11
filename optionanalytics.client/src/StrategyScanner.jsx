@@ -13,7 +13,7 @@ import { adaptiveStats } from './dayRegime.js'
 import { chargeRates, tradeCharges } from './tradeCharges.js'
 import {
   ACTIVE_STRATEGIES, STRATEGY_BY_ID, strategyStats, topFifteen, MIN_TRADES_TO_RANK, oiSummary, optionOiText,
-  filtersForIndex, DEFAULT_TRAIL, LAST_ENTRY, SQUARE_OFF, fmtHm, exitLabel, premiumAt, optionPnlPoints, optionTradeText, squareOffMs, RANGE_IDS, asReplayContext,
+  filtersForIndex, lotsFor, DEFAULT_TRAIL, LAST_ENTRY, SQUARE_OFF, fmtHm, exitLabel, premiumAt, optionPnlPoints, optionTradeText, squareOffMs, RANGE_IDS, asReplayContext,
   optionTradeAt, dayTypeAt, trailPoints, STRATEGY_FILTERS, strategyFilters, changedFilters, optionPlanFor } from './strategyEngine.js'
 import { replayRange } from './orderFlowMath.js'
 import { scanDaySetups, withDayOutcomes } from './scanDay.js'
@@ -209,7 +209,8 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     if (liveCount >= (cfg.maxLiveTrades ?? 5)) return fail(`The day's limit of ${cfg.maxLiveTrades} live trades is reached.`)
     if (liveLossRef.current <= -(cfg.maxLiveLoss ?? 10000)) return fail(`The day's live loss limit (₹${(cfg.maxLiveLoss ?? 10000).toLocaleString('en-IN')}) is reached.`)
     placingRef.current.add(key)
-    const lots = Math.max(1, cfg.paperLots ?? 1)
+    // This strategy's own lot size on this index when one was applied with it (Trades page), else the index's lots.
+    const lots = lotsFor(setup.id, filtersOf(cfg), cfg.paperLots)
     // A trade Dhan took (all of it, or the slices before a rejection) is recorded, so the setup's exit
     // closes it - an untracked live position would never be exited by the scanner.
     const record = (result, note) => {
@@ -271,7 +272,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
       if (opts.auto) { placeLive(setup, which); return }
       Modal.confirm({
         title: `Place a REAL order on Dhan?`,
-        content: trade ? `${trade.action} ${underlying} ${trade.strike} ${trade.side} x${settingsRef.current.paperLots ?? 1} lot(s) - a super order with SL ${settingsRef.current.paperSl} / target ${settingsRef.current.paperTarget} premium points.` : 'No option for this setup.',
+        content: trade ? `${trade.action} ${underlying} ${trade.strike} ${trade.side} x${lotsFor(setup.id, filtersOf(settingsRef.current), settingsRef.current.paperLots)} lot(s) - a super order with SL ${settingsRef.current.paperSl} / target ${settingsRef.current.paperTarget} premium points.` : 'No option for this setup.',
         okText: 'Place order', okButtonProps: { danger: true }, cancelText: 'Cancel',
         onOk: () => placeLive(setup, which),
       })
@@ -281,7 +282,7 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
     if (!trade || !oi) return
     const at = atMs ?? setup.t
     const premium = premiumAt(oi, trade.side, trade.strike, at) ?? trade.premium
-    const lots = Math.max(1, settingsRef.current.paperLots ?? 1)
+    const lots = lotsFor(setup.id, filtersOf(settingsRef.current), settingsRef.current.paperLots)
     const already = (paperBookRef.current[dayKey]?.positions ?? []).some((p) => sameSignal(p, setup, trade))
     if (!already) {
       const meta = STRATEGY_BY_ID[setup.id]
@@ -603,9 +604,10 @@ export function StrategyScanner({ underlying, isReplay, date, view, replayDay, r
 
   // The day's paper option positions, each closed by its setup's exit (or by hand), with P&L.
   const paperRows = useMemo(
-    () => positionRows({ positions: paperBook[dayKey]?.positions, dayResults, withOutcome, oi, nowMs, settings }),
+    // This index's filters - a strategy's own lot size applied for it sizes its paper trades.
+    () => positionRows({ positions: paperBook[dayKey]?.positions, dayResults, withOutcome, oi, nowMs, settings: { ...settings, filters: filtersForIndex({ filters: settings.filters, filtersByIndex }, underlying) } }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [paperBook, dayKey, dayResults, withOutcome, oi, nowMs, settings.paperSl, settings.paperTarget, settings.paperTrailStart, settings.paperTrailGap, settings.paperLots],
+    [paperBook, dayKey, dayResults, withOutcome, oi, nowMs, settings.paperSl, settings.paperTarget, settings.paperTrailStart, settings.paperTrailGap, settings.paperLots, settings.filters, filtersByIndex, underlying],
   )
   const paperRowsRef = useRef(paperRows)
   useEffect(() => { paperRowsRef.current = paperRows }, [paperRows])

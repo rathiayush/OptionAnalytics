@@ -125,6 +125,32 @@ test('an applied setting carries its identity - the same the server makes from t
   assert.deepEqual(fromFilters.filter((p) => p.key.startsWith('opt')).map((p) => [p.key, p.value]), [['optLeg', 'BUY'], ['optMoneyness', '1 OTM'], ['optSl', '30%']])
 })
 
+test('a strategy applied to an index with its own lot size: set, kept by a later apply, changed in place, back to the index\'s', async () => {
+  const { saveIndexLots } = await import('../src/scannerSettings.js')
+  const { lotsFor, strategyFilters } = await import('../src/strategyEngine.js')
+  store.clear()
+  const srv = fakeServer()
+  await applyTunedFilters('absorption', niftyBest, { option: true, index: 'NIFTY', lots: 4 })
+  assert.equal(srv.config.filtersByIndex.NIFTY.absorption._lots, 4)
+  assert.equal(lotsFor('absorption', srv.config.filtersByIndex.NIFTY, 2), 4, 'its own lots')
+  assert.equal(lotsFor('other', srv.config.filtersByIndex.NIFTY, 2), 2, 'any other strategy: the index\'s')
+  assert.equal(strategyFilters('absorption', srv.config.filtersByIndex.NIFTY.absorption)._lots, undefined, 'never a filter the scanner reads')
+  // Another setting applied without saying: the lot size stays.
+  await applyTunedFilters('absorption', bankBest, { option: true, index: 'NIFTY' })
+  assert.equal(srv.config.filtersByIndex.NIFTY.absorption._lots, 4)
+  assert.equal(srv.config.filtersByIndex.NIFTY.absorption.tradeSide, 'short')
+  // Changed in place (Applied now), keeping the setting; then back to the index's lots.
+  await saveIndexLots('NIFTY', 'absorption', 7)
+  assert.equal(srv.config.filtersByIndex.NIFTY.absorption._lots, 7)
+  assert.equal(srv.config.filtersByIndex.NIFTY.absorption.tradeSide, 'short')
+  await saveIndexLots('NIFTY', 'absorption', null)
+  assert.equal(srv.config.filtersByIndex.NIFTY.absorption._lots, undefined)
+  // Out of range is not stored (Trade settings' own 1 - 500).
+  await applyTunedFilters('absorption', niftyBest, { option: true, index: 'NIFTY', lots: 900 })
+  assert.equal(srv.config.filtersByIndex.NIFTY.absorption._lots, undefined)
+  assert.equal(lotsFor('x', { x: { _lots: 2.5 } }, 3), 3, 'whole lots only')
+})
+
 test('without an index (older callers): the all-index filters, as before', async () => {
   store.clear()
   const srv = fakeServer()

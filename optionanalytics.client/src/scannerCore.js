@@ -4,7 +4,7 @@
 
 import {
   ACTIVE_STRATEGIES, STRATEGY_BY_ID, evaluateStrategies, simulateOutcome, DEFAULT_TRAIL, RANGE_IDS,
-  exitLabel, premiumAt, optionStopTargetHit, squareOffMs, marketAt,
+  exitLabel, premiumAt, optionStopTargetHit, squareOffMs, marketAt, lotsFor,
 } from './strategyEngine.js'
 // The market at a signal now lives with the strategies (the order-flow trade filters read it) - re-exported here.
 export { marketAt, MARKET_KEYS } from './strategyEngine.js'
@@ -215,12 +215,14 @@ export function positionRows({ positions, dayResults, withOutcome, oi, nowMs, se
     .filter((s) => s.id === p.strategy && s.side === p.setupSide && Math.abs(s.t - setupTimeOf(p)) < 2 * MIN)
     .sort((a, b) => Math.abs(a.t - p.entryTime) - Math.abs(b.t - p.entryTime))[0]
   const outcomeOf = (p) => setupOf(p)?.outcome
-  const paperLots = Math.max(1, settings.paperLots ?? 1)
+  // Paper trades are sized by the lots set NOW - the strategy's own lot size on this index when one was applied with it
+  // (`settings.filters` = that index's filters), else the index's lots.
+  const paperLotsOf = (id) => lotsFor(id, settings.filters, settings.paperLots ?? 1)
   return (positions ?? []).filter((p) => !nowMs || p.entryTime <= nowMs).map((stored) => {
     // The adaptive call of the trade's signal (stored when punched; older trades look it up).
     const sig = stored.adaptive ? null : setupOf(stored)
     const tagged = { ...stored, adaptive: stored.adaptive ?? sig?.adaptive ?? null, regime: stored.regime ?? sig?.regime ?? null }
-    const p = tagged.live ? tagged : { ...tagged, lots: paperLots }
+    const p = tagged.live ? tagged : { ...tagged, lots: paperLotsOf(tagged.strategy) }
     let exitTime = p.exitTime && p.exitTime <= (nowMs ?? Infinity) ? p.exitTime : null
     let exitPremium = exitTime ? p.exitPremium : null
     let exitReason = exitTime ? p.exitReason : null

@@ -143,6 +143,24 @@ public sealed class ServerLiveServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task AStrategysOwnLotSize_GoesOnItsLiveOrder_ElseTheIndexsLots()
+    {
+        var orders = new FakeOrders();
+        var trade = Trade();
+        var live = Live(orders, trade);
+        live.Set("NIFTY", true, 20, null, "admin", At10);
+        // Its own 4 lots (applied with it on the Trades page).
+        await live.PlaceAsync("NIFTY", new ServerLiveOrderRequest("a-1-sell", null, Expiry, 25000, "PE", "SELL", Lots: 4), At10, default);
+        live.ExitAsync("NIFTY", "a-1-sell", "done", 0, At10.AddMinutes(1), default).Wait();
+        // None of its own: the index's (Trade settings).
+        await live.PlaceAsync("NIFTY", new ServerLiveOrderRequest("b-2-sell", null, Expiry, 25000, "PE", "SELL"), At10.AddMinutes(2), default);
+        live.ExitAsync("NIFTY", "b-2-sell", "done", 0, At10.AddMinutes(3), default).Wait();
+        // Out of Trade settings' own range: the index's.
+        await live.PlaceAsync("NIFTY", new ServerLiveOrderRequest("c-3-sell", null, Expiry, 25000, "PE", "SELL", Lots: 9000), At10.AddMinutes(4), default);
+        Assert.Equal(new[] { 4, trade.Get("NIFTY").Lots, trade.Get("NIFTY").Lots }, orders.Placed.Select(o => o.Lots));
+    }
+
+    [Fact]
     public async Task APageTradeExitedFromThePage_IsNoLongerWatched()
     {
         var orders = new FakeOrders();

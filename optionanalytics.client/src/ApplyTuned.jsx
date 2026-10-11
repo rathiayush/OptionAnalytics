@@ -2,10 +2,10 @@
 // strategy on that index's live list, so the server scanner places real orders for it once the index is switched to
 // Live today (the server still checks every other limit - ServerLiveService).
 import { useEffect, useState } from 'react'
-import { Button, Card, Checkbox, Col, Popconfirm, Popover, Row, Space, Table, Tag, Tooltip, Typography, message } from 'antd'
+import { Button, Card, Checkbox, Col, InputNumber, Popconfirm, Popover, Row, Space, Table, Tag, Tooltip, Typography, message } from 'antd'
 import { STRATEGY_BY_ID } from './strategyEngine.js'
 import { DEFAULT_VARIANT, settingParams, variantText } from './strategyTuning.js'
-import { saveIndexFilters } from './scannerSettings.js'
+import { saveIndexFilters, saveIndexLots } from './scannerSettings.js'
 
 const { Text } = Typography
 
@@ -74,7 +74,7 @@ export function LiveSetup({ cfg }) {
                 {ok(live, live ? 'switched to Live today' : 'on paper - switch to Live today to trade for real')}
                 <div style={{ fontSize: 12, marginTop: 6 }}>
                   <Text type="secondary" style={{ fontSize: 12 }}>Trades live{live ? '' : ' once Live'}:</Text>{' '}
-                  {tradesLive.length ? tradesLive.map((x) => <Tag key={x.id} color={x.tuned ? 'blue' : 'default'} style={{ marginBottom: 2 }}>{name(x.id)}{x.tuned ? ' · fine-tuned' : ' · as written'}</Tag>) : <Text type="secondary" style={{ fontSize: 12 }}>none</Text>}
+                  {tradesLive.length ? tradesLive.map((x) => <Tag key={x.id} color={x.tuned ? 'blue' : 'default'} style={{ marginBottom: 2 }}>{name(x.id)}{x.tuned ? ' · fine-tuned' : ' · as written'} · {cfg.filtersByIndex?.[u]?.[x.id]?._lots ?? trade.lots ?? '-'} lot(s)</Tag>) : <Text type="secondary" style={{ fontSize: 12 }}>none</Text>}
                 </div>
                 {paperOnly.length > 0 && (
                   <div style={{ fontSize: 12, marginTop: 4 }}>
@@ -133,6 +133,7 @@ export function AppliedSettings({ cfg, isAdmin, onChanged, extra = null }) {
             {rows.map((r) => (
               <div key={`${r.u}-${r.id}`} style={{ fontSize: 12 }}>
                 <Tag color="green">{r.u}</Tag><b>#{STRATEGY_BY_ID[r.id]?.no} {STRATEGY_BY_ID[r.id]?.name ?? r.id}</b>: {appliedText(r.f)}
+                {' · '}<LotsCell u={r.u} id={r.id} lots={r.f?._lots ?? null} indexLots={cfg?.trade?.[r.u]?.lots ?? null} isAdmin={isAdmin} onChanged={onChanged} />
                 <ParamsPopover source={r.f} from="filters" />
                 {isAdmin && (
                   <Popconfirm title={`Take this setting off ${r.u}?`} description="The strategy goes back to its all-index filters on this index." okText="Take off" onConfirm={() => remove(r)}>
@@ -145,6 +146,33 @@ export function AppliedSettings({ cfg, isAdmin, onChanged, extra = null }) {
           </Space>
         )}
     </Card>
+  )
+}
+
+/** A strategy's lot size on one index - its own (bold) or the index's (Trade settings) - changeable in place (admins):
+ *  every paper and live trade of it there takes that many lots. Empty = back to the index's lots. */
+function LotsCell({ u, id, lots, indexLots, isAdmin, onChanged }) {
+  const [value, setValue] = useState(lots)
+  const [saving, setSaving] = useState(false)
+  useEffect(() => { setValue(lots) }, [lots])
+  const text = lots ? <b>{lots} lot(s)</b> : <span>{indexLots ?? '-'} lot(s) <Text type="secondary" style={{ fontSize: 11 }}>(index)</Text></span>
+  if (!isAdmin) return text
+  const changed = (value ?? null) !== (lots ?? null)
+  const save = async () => {
+    setSaving(true)
+    try {
+      await saveIndexLots(u, id, value ?? null)
+      message.success(`#${STRATEGY_BY_ID[id]?.no ?? ''} ${STRATEGY_BY_ID[id]?.name ?? id} on ${u}: ${value ? `${value} lot(s)` : `the index's lots (${indexLots ?? '-'})`}`)
+      onChanged?.()
+    } catch (err) { message.error(err.message) } finally { setSaving(false) }
+  }
+  return (
+    <Space size={4} style={{ display: 'inline-flex' }}>
+      <InputNumber size="small" min={1} max={500} precision={0} value={value} onChange={(v) => setValue(v ?? null)} style={{ width: 80 }}
+        placeholder={`${indexLots ?? ''} (index)`} aria-label={`Lots of ${id} on ${u}`} />
+      <Text style={{ fontSize: 12 }}>lot(s)</Text>
+      {changed && <Button size="small" type="link" loading={saving} onClick={save} style={{ padding: 0, height: 'auto' }}>Save</Button>}
+    </Space>
   )
 }
 
@@ -165,13 +193,28 @@ export function AppliedSettingsCard({ isAdmin, reloadKey = 0, withSetup = false 
   )
 }
 
-export function ApplyTunedButton({ index, title, description, label, primary = false, disabled = false, size = 'small', onApply }) {
+/**
+ * Apply with a LOT SIZE: this strategy's own lots on this index (`lots` = the current one, if any; empty = the index's
+ * lots from Trade settings, `indexLots`) - its paper and live trades there take that many lots. onApply(live, lots|null).
+ */
+export function ApplyTunedButton({ index, title, description, label, primary = false, disabled = false, size = 'small', onApply, lots = null, indexLots = null }) {
   const [live, setLive] = useState(false)
+  const [ownLots, setOwnLots] = useState(lots)
   return (
-    <Popconfirm title={title} okText="Apply" disabled={disabled} onConfirm={() => onApply(live)}
+    <Popconfirm title={title} okText="Apply" disabled={disabled} onConfirm={() => onApply(live, ownLots)} onOpenChange={(open) => { if (open) setOwnLots(lots) }}
       description={(
         <div style={{ maxWidth: 380 }}>
           {description}
+          {index && (
+            <div style={{ marginTop: 8 }}>
+              <Space size={6} wrap>
+                <Text style={{ fontSize: 12 }}>Lots on {index}</Text>
+                <InputNumber size="small" min={1} max={500} precision={0} value={ownLots} onChange={(v) => setOwnLots(v ?? null)} style={{ width: 90 }}
+                  placeholder={indexLots ? `${indexLots} (index)` : 'index lots'} aria-label={`Lots on ${index}`} />
+                <Text type="secondary" style={{ fontSize: 11 }}>empty = the index&apos;s lots (Trade settings)</Text>
+              </Space>
+            </div>
+          )}
           {index && (
             <div style={{ marginTop: 8 }}>
               <Checkbox checked={live} onChange={(e) => setLive(e.target.checked)}>

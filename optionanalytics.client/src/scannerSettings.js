@@ -42,7 +42,7 @@ export async function saveIndexFilters(index, id, filters) {
  *  from the tuning pages) it is stored for THAT index only (saveIndexFilters; the scanner reads it through
  *  filtersForIndex), so NIFTY's best never overwrites BANKNIFTY's and a page saving its settings never wipes it.
  *  Without, for every index, in the scanner settings (this browser's and the server scanner's). Returns the filters. */
-export async function applyTunedFilters(id, params, { option = false, index = null, tuned = null } = {}) {
+export async function applyTunedFilters(id, params, { option = false, index = null, tuned = null, lots } = {}) {
   if (index) {
     const config = await getConfig()
     const base = filtersForIndex({ filters: config?.settings?.filters ?? readSettings().filters, filtersByIndex: config?.filtersByIndex ?? readFiltersByIndex() }, index)[id]
@@ -51,6 +51,9 @@ export async function applyTunedFilters(id, params, { option = false, index = nu
     // on unseen days. The scanner ignores the key (strategyFilters keeps only real filters).
     delete next._tuned
     if (tuned) next._tuned = tuned
+    // The strategy's own lot size on this index (lotsFor): a number sets it, null goes back to the index's lots, left out
+    // keeps what it had.
+    if (lots !== undefined) setLots(next, lots)
     return saveIndexFilters(index, id, next)
   }
   const local = readSettings()
@@ -70,6 +73,21 @@ export async function applyTunedFilters(id, params, { option = false, index = nu
     throw new Error('the server scanner saved something different - check the Strategy scanner\'s Filters for this strategy')
   }
   return filters
+}
+
+/** A strategy's own lot size in its per-index filters: 1 - 500 whole lots, else none (the index's lots). */
+function setLots(filters, lots) {
+  const n = Number(lots)
+  if (Number.isInteger(n) && n >= 1 && n <= 500) filters._lots = n
+  else delete filters._lots
+  return filters
+}
+
+/** Changes ONE strategy's own lot size on one index (null = back to the index's lots), keeping its applied setting. */
+export async function saveIndexLots(index, id, lots) {
+  const config = await getConfig()
+  const current = config?.filtersByIndex?.[index]?.[id] ?? filtersForIndex({ filters: config?.settings?.filters ?? readSettings().filters, filtersByIndex: config?.filtersByIndex ?? readFiltersByIndex() }, index)[id] ?? {}
+  return saveIndexFilters(index, id, setLots({ ...current }, lots))
 }
 
 /** Puts strategy `id` on `index`'s live list by hand (LiveListService "include"), so the server scanner places real

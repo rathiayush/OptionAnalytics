@@ -9,7 +9,7 @@
 // Everything outside (HTTP, Telegram, the state file, the clock) comes in through `io`, so the tests can
 // drive a whole day through it.
 
-import { buildOiContext, optionTradeAt, premiumAt, strategyStats, topFifteen, STRATEGY_BY_ID, DEFAULT_TRAIL, optionPlanFor, squareOffMs, filtersForIndex } from '../src/strategyEngine.js'
+import { buildOiContext, optionTradeAt, premiumAt, strategyStats, topFifteen, STRATEGY_BY_ID, DEFAULT_TRAIL, optionPlanFor, squareOffMs, filtersForIndex, lotsFor } from '../src/strategyEngine.js'
 import { liquiditySignals, pullStackSignals, autoBigLots } from '../src/orderFlowMath.js'
 import {
   MIN, msOf, scanTick, trailFor, alertIdsFor, followSetups, setupEvents, newSetupEventMemory, newPosition, positionRows, sameSignal,
@@ -318,7 +318,8 @@ export class IndexScanner {
     if (trade) {
       const premium = premiumAt(this.data.oi, trade.side, trade.strike, s.t) ?? trade.premium
       const levels = optionPlanFor(s.id, cfg.filters, cfg, premium) // a % SL / target needs the premium
-      const lots = Math.max(1, cfg.paperLots ?? 1)
+      // This strategy's own lot size on this index when one was applied with it, else the index's lots (Trade settings).
+      const lots = lotsFor(s.id, cfg.filters, cfg.paperLots)
       if (!this.positions.some((p) => sameSignal(p, s, trade))) {
         const position = newPosition({ setup: s, trade, which: side, lots, lotSize: PAPER_TRADE_LOT_SIZE[this.underlying] ?? 1, premium, cfg: { ...cfg, paperSl: levels.slPts, paperTarget: levels.targetPts }, at: s.t })
         this.positions.push(position)
@@ -335,8 +336,9 @@ export class IndexScanner {
   }
 
   // Live today: the server places the order for this alert - if every limit allows it (one open trade at a time, the
-  // day's max trades / loss, 09:15 - 14:45, the account kill switch). The lots and slippage are the index's Trade
-  // settings; the SL / target the same as the paper trade's. Not placed: the paper trade stays, and says why.
+  // day's max trades / loss, 09:15 - 14:45, the account kill switch). The lots are the paper trade's (the strategy's own
+  // on this index, else the index's), the slippage the index's Trade settings, the SL / target the same as the paper
+  // trade's. Not placed: the paper trade stays, and says why.
   async placeLive(position, s, trade, levels, cfg) {
     const meta = STRATEGY_BY_ID[s.id]
     const expiry = this.data?.oi?.expiry
@@ -347,7 +349,7 @@ export class IndexScanner {
         method: 'POST',
         body: {
           key: position.key, strategyId: s.id, strategy: `#${meta?.no} ${meta?.name ?? s.id}`, expiry, strike: trade.strike, side: trade.side, action: trade.action,
-          stopLossPoints: levels.slPts, targetPoints: levels.targetPts,
+          stopLossPoints: levels.slPts, targetPoints: levels.targetPts, lots: position.lots,
           // The signal's stop on the INDEX: the server exits the trade itself when the futures go through it - so the
           // index stop holds even if this scanner stops (the option's own SL / target legs are on Dhan already).
           indexStop: s.stop, indexSide: s.side, indexTarget: s.target,
@@ -362,7 +364,7 @@ export class IndexScanner {
       const o = res.order ?? {}
       Object.assign(position, {
         live: true, orderIds: o.orderIds ?? [], indexStopSent: s.stop, liveNote: o.success === false ? `PARTLY placed - ${res.message}` : res.message,
-        lotSize: o.lotSize ?? position.lotSize, premium: o.prices?.limit ?? position.premium, lots: cfg.paperLots ?? position.lots,
+        lotSize: o.lotSize ?? position.lotSize, premium: o.prices?.limit ?? position.premium,
       })
       this.dirty = true
       this.io.log(`${this.underlying}: LIVE ${trade.action} ${trade.strike} ${trade.side} placed - ${res.message}`)
