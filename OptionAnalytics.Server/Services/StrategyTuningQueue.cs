@@ -36,6 +36,15 @@ public sealed class StrategyTuningQueue
         return item;
     }
 
+    /// <summary>A job started by hand (the page's Run): kept on the schedule too, already running, so every run is on it -
+    /// how it ended and its run are recorded (Tick), and it can be deleted with its data like any other.</summary>
+    public TuningQueueItem AddStarted(TuningJob job, DateTimeOffset now)
+    {
+        var item = new TuningQueueItem(Guid.NewGuid().ToString("n")[..12], job, null, false, "running", now, now, null, null, null, "manual");
+        lock (_lock) { _items.Add(item); Save(); }
+        return item;
+    }
+
     /// <summary>Removes a queued item (a running one is stopped from the page's Stop button, not here); false if none.</summary>
     public bool Remove(string id)
     {
@@ -177,4 +186,4 @@ public sealed class StrategyTuningQueueHostedService(StrategyTuningQueue queue, 
 
 /// <summary>One scheduled job: State queued / running / done / failed / cancelled.</summary>
 public sealed record TuningQueueItem(string Id, TuningJob Job, DateTimeOffset? RunAtUtc, bool RepeatDaily, string State,
-    DateTimeOffset AddedUtc, DateTimeOffset? StartedUtc, DateTimeOffset? FinishedUtc, string? Error, string? RunId = null);
+    DateTimeOffset AddedUtc, DateTimeOffset? StartedUtc, DateTimeOffset? FinishedUtc, string? Error, string? RunId = null, string? Source = null);

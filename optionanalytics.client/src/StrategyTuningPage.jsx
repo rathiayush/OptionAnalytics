@@ -428,6 +428,7 @@ export default function StrategyTuningPage() {
     const json = await res.json().catch(() => null)
     if (!res.ok) { message.error(json?.error ?? `HTTP ${res.status}`); return }
     setStatus(json)
+    loadQueue() // a run by hand is on the schedule too
     message.success(`Tuning ${underlying} started`)
   }
   const cancel = () => fetch('/api/strategy-tuning/cancel', { method: 'POST' }).then(loadStatus)
@@ -561,14 +562,14 @@ export default function StrategyTuningPage() {
             {queue.length > 0 && (
               <div>
                 <Space size={8} style={{ marginBottom: 4 }}>
-                  <Text strong style={{ fontSize: 13 }}>Scheduled jobs</Text>
-                  <Text type="secondary" style={{ fontSize: 12 }}>run one after another; each one's result is added to the Trades page's Strategy performance</Text>
+                  <Text strong style={{ fontSize: 13 }}>Jobs - scheduled and run by hand</Text>
+                  <Text type="secondary" style={{ fontSize: 12 }}>run one after another - runs started by hand are listed too; each one's result is added to the Trades page's Strategy performance</Text>
                   {isAdmin && queue.some((q) => !['queued', 'running'].includes(q.state)) && <Button size="small" type="link" onClick={clearFinished}>Clear finished</Button>}
                 </Space>
                 <Table size="small" rowKey="id" dataSource={queue} pagination={{ pageSize: 10, size: 'small', hideOnSinglePage: true }} scroll={{ x: 900 }} columns={[
                   { title: 'Index', key: 'u', width: 100, render: (_, q) => q.job?.underlying },
                   { title: 'Job', key: 'j', render: (_, q) => <span style={{ fontSize: 12 }}>{q.job?.data === 'spot' ? 'spot + options · ' : ''}{Array.isArray(q.job?.strategies) ? `${q.job.strategies.length} strategies` : q.job?.strategies} · {{ both: 'OI, then trade', oi: 'OI', trade: 'trade settings', option: 'option trade', all: 'everything' }[q.job?.what] ?? q.job?.what} · {q.job?.from || q.job?.to ? `${q.job.from ?? 'start'} to ${q.job.to ?? 'yesterday'}` : `${q.job?.days} day(s)`}</span> },
-                  { title: 'Start', key: 'at', width: 150, render: (_, q) => <span style={{ fontSize: 12 }}>{q.runAtUtc ? when(q.runAtUtc) : 'as soon as free'}{q.repeatDaily ? <Tag style={{ marginLeft: 4 }}>daily</Tag> : null}</span> },
+                  { title: 'Start', key: 'at', width: 150, render: (_, q) => <span style={{ fontSize: 12 }}>{q.source === 'manual' ? <><Tag color="purple" style={{ marginRight: 4 }}>run by hand</Tag>{when(q.startedUtc)}</> : q.runAtUtc ? when(q.runAtUtc) : 'as soon as free'}{q.repeatDaily ? <Tag style={{ marginLeft: 4 }}>daily</Tag> : null}</span> },
                   { title: 'State', key: 's', width: 220, render: (_, q) => <span style={{ fontSize: 12 }}><Tag color={{ queued: 'default', running: 'processing', done: 'success', failed: 'error', cancelled: 'warning' }[q.state]}>{q.state}</Tag>{q.finishedUtc ? when(q.finishedUtc) : q.startedUtc ? `since ${when(q.startedUtc)}` : ''}{q.error ? <><br /><Text type="danger" style={{ fontSize: 11 }}>{q.error}</Text></> : null}</span> },
                   { title: '', key: 'x', width: 90, render: (_, q) => (!isAdmin ? null : q.state === 'queued' ? <Button size="small" type="link" danger onClick={() => unschedule(q.id)}>Remove</Button>
                     : q.state === 'running' ? null : (

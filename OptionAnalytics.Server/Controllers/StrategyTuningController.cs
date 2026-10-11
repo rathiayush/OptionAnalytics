@@ -39,7 +39,10 @@ public sealed class StrategyTuningController : ControllerBase
         var (job, invalid) = BuildJob(request, request?.Underlying);
         if (job is null) return BadRequest(new { error = invalid });
         var error = _tuning.Start(job);
-        return error is null ? Ok(_tuning.Status()) : Conflict(new { error });
+        if (error is not null) return Conflict(new { error });
+        // On the schedule too (marked manual), so every run is there to keep track of - and to delete with its data.
+        _queue.AddStarted(job, DateTimeOffset.UtcNow);
+        return Ok(_tuning.Status());
     }
 
     /// <summary>A job from a request (the same checks for Run and the schedule), or why it is not valid.</summary>

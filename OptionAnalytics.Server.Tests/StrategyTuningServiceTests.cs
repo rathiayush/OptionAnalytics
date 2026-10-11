@@ -111,6 +111,23 @@ public sealed class StrategyTuningServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task ARunByHand_IsOnTheScheduleToo_AndItsEndAndRunAreRecorded()
+    {
+        var s = Service(Script("import { writeFileSync } from 'node:fs'\nconsole.log('HISTORY NIFTY-futures-20261010-120000 (0 trades, 0 settings)')\nwriteFileSync(process.env.TUNE_OUT, JSON.stringify({ ok: true, underlying: 'NIFTY' }))"));
+        var queue = new StrategyTuningQueue(s, NullLogger<StrategyTuningQueue>.Instance);
+        Assert.Null(s.Start(Job()));
+        var item = queue.AddStarted(Job(), DateTimeOffset.UtcNow);
+        Assert.Equal(("running", "manual"), (item.State, item.Source));
+        queue.Tick(DateTimeOffset.UtcNow); // still running: nothing else is started beside it
+        await UntilDone(s);
+        queue.Tick(DateTimeOffset.UtcNow);
+        var done = queue.Items().Single(i => i.Id == item.Id);
+        Assert.Equal(("done", "NIFTY-futures-20261010-120000", "manual"), (done.State, done.RunId, done.Source));
+        // Kept across a restart of the server (queue.json).
+        Assert.Contains(new StrategyTuningQueue(s, NullLogger<StrategyTuningQueue>.Instance).Items(), i => i.Id == item.Id && i.Source == "manual");
+    }
+
+    [Fact]
     public async Task DeletingAFinishedJob_RemovesItsRunResultAndCachedDays_AndNothingElse()
     {
         // A fake tuning job: writes its history run, a result naming it, its cached days (NIFTY's folder + an older file
