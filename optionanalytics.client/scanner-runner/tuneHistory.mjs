@@ -91,6 +91,8 @@ export const TRADE_COLUMNS = [
   { key: 'closed_by', value: (t) => t.exitReason ?? '' },
   { key: 'points', value: (t) => n(t.points) },
   { key: 'r', value: (t) => n(t.r, 3) },
+  // Risk : reward as planned (1 : target / SL), on the index trade and on each option leg.
+  { key: 'rr', value: (t) => (t.slPts > 0 && t.targetPts > 0 ? n(t.targetPts / t.slPts, 2) : '') },
   { key: 'option_bought', value: (t) => t.buy?.label ?? '' },
   { key: 'bought_in', value: (t) => n(t.buy?.entry) },
   { key: 'bought_out', value: (t) => n(t.buy?.exit) },
@@ -98,6 +100,8 @@ export const TRADE_COLUMNS = [
   { key: 'bought_sl', value: (t) => n(t.buy?.sl, 1) },
   { key: 'bought_target', value: (t) => n(t.buy?.target, 1) },
   { key: 'bought_closed_by', value: (t) => t.buy?.closedBy ?? '' },
+  { key: 'bought_r', value: (t) => n(t.buy?.r, 3) },
+  { key: 'bought_rr', value: (t) => n(t.buy?.rr, 2) },
   { key: 'option_sold', value: (t) => t.sell?.label ?? '' },
   { key: 'sold_in', value: (t) => n(t.sell?.entry) },
   { key: 'sold_out', value: (t) => n(t.sell?.exit) },
@@ -105,6 +109,8 @@ export const TRADE_COLUMNS = [
   { key: 'sold_sl', value: (t) => n(t.sell?.sl, 1) },
   { key: 'sold_target', value: (t) => n(t.sell?.target, 1) },
   { key: 'sold_closed_by', value: (t) => t.sell?.closedBy ?? '' },
+  { key: 'sold_r', value: (t) => n(t.sell?.r, 3) },
+  { key: 'sold_rr', value: (t) => n(t.sell?.rr, 2) },
   // The option trade when the OPTION was tuned (what: option / all): its own SL / target on the premium.
   { key: 'option_traded', value: (t) => t.opt?.label ?? '' },
   { key: 'option_in', value: (t) => n(t.opt?.entry) },
@@ -113,6 +119,9 @@ export const TRADE_COLUMNS = [
   { key: 'option_sl', value: (t) => n(t.opt?.sl) },
   { key: 'option_target', value: (t) => n(t.opt?.target) },
   { key: 'option_closed_by', value: (t) => t.opt?.reason ?? '' },
+  { key: 'option_sl_points', value: (t) => n(t.opt?.slPts, 1) },
+  { key: 'option_r', value: (t) => n(t.opt?.r, 3) },
+  { key: 'option_rr', value: (t) => n(t.opt?.rr, 2) },
   { key: 'estimated_day', value: (t) => (t.estimated ? 'yes' : '') },
   { key: 'why', value: (t) => why(t.checks) },
 ]

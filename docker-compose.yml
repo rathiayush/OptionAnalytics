@@ -39,6 +39,8 @@ services:
       # Lots, SL / target / trail, slippage and server scanner on/off per index - the Trade settings page.
       Storage__TradeSettingsPath: /app/data/trade-settings.csv
       Storage__RiskSettingsPath: /app/data/risk-settings.csv
+      # Which index the server scanner trades LIVE today, its limits and its live trades.
+      Storage__ServerLivePath: /app/data/server-live.json
       # SCANNER_RUNNER_ENABLED=false keeps it from starting (no server-side signals / paper trades).
       ScannerRunner__Enabled: ${SCANNER_RUNNER_ENABLED:-true}
 

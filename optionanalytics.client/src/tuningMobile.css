@@ -39,3 +39,13 @@
     max-width: 100%;
   }
 }
+
+/* The picked option of every switch (data, strategies, tune, ...) in blue, so what is selected is plain to see. */
+.tuning-page .ant-segmented .ant-segmented-item-selected,
+.tuning-page .ant-segmented .ant-segmented-thumb {
+  background: #1677ff;
+  color: #fff;
+}
+.tuning-page .ant-segmented .ant-segmented-item-selected .ant-segmented-item-label {
+  color: #fff;
+}

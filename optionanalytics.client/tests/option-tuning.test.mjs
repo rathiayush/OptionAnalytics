@@ -144,6 +144,27 @@ test('both options of a trade: the net on each, and whether its own SL or target
   // And the same trade held to the index exit made less often than not - the point of showing both.
   const held = tradeDetails([d], id, v({}), null, 'NIFTY')
   assert.equal(held.length, tight.length)
+  // R on each option leg = its premium points over its SL; risk : reward = 1 : target / SL. Its SL is exactly -1R,
+  // its target exactly +target/SL R. With no SL set there is no risk to measure R against.
+  for (const t of withLevels) for (const o of [t.buy, t.sell]) {
+    if (!o) continue
+    assert.equal(o.rr, 1.5)
+    if (o.points != null) assert.ok(Math.abs(o.r - o.points / 20) < 1e-9)
+    if (o.closedBy === 'its SL') assert.ok(Math.abs(o.r + 1) < 1e-9, `its SL is -1R: ${o.r}`)
+  }
+  for (const o of hits) assert.ok(Math.abs(o.r - 8 / 40) < 1e-9 && Math.abs(o.rr - 0.2) < 1e-9)
+  for (const t of plain) for (const o of [t.buy, t.sell]) if (o) assert.equal(o.r, undefined)
+})
+
+test('an option leg trails its stop as the Trade settings say', () => {
+  // A trailing stop from Trade settings (trailStart / trailGap, premium points) is applied to each leg the same way a
+  // paper option trade applies it; it only ever tightens, so a trailed exit never loses more than its fixed SL.
+  const fixed = tradeDetails([d], id, v({}), null, 'NIFTY', { optionLevels: { sl: 40, target: 400 } })
+  const trailed = tradeDetails([d], id, v({}), null, 'NIFTY', { optionLevels: { sl: 40, target: 400, trailStart: 0, trailGap: 3 } })
+  assert.equal(fixed.length, trailed.length)
+  const legs = trailed.flatMap((t) => [t.buy, t.sell]).filter(Boolean)
+  assert.ok(legs.some((o) => o.closedBy === 'its trailing SL'), 'a 3-point trail is hit on this day')
+  for (const o of legs) if (o.closedBy === 'its trailing SL') assert.ok(o.r >= -1 - 1e-9, `never worse than its SL: ${o.r}`)
 })
 
 test('a premium is the last traded one: a quiet minute no longer leaves an option blank', () => {

@@ -146,6 +146,8 @@ export function optionDetails(days, id, v, trail, underlying) {
           label: `${o.trade.action} ${o.trade.strike} ${o.trade.side}`, moneyness: v.optMoneyness ?? 0, entry: o.trade.premium, exit: o.exitPremium, points: o.points, reason: o.reason,
           sl: own ? o.trade.premium + (buy ? -slPrem : slPrem) : null, target: own ? o.trade.premium + (buy ? tgPrem : -tgPrem) : null,
           slPts: own ? slPrem : null, targetPts: own ? tgPrem : null,
+          // R: premium points made over the premium points risked (its own SL); none when it only exits with the index.
+          r: own && slPrem > 0 ? o.points / slPrem : null, rr: own && slPrem > 0 ? tgPrem / slPrem : null,
         },
       })
     }
@@ -269,10 +271,16 @@ export function tradeDetails(days, id, variant, trail, underlying, { checks = fa
         const base = { label: `${o.action} ${o.strike} ${o.side}`, entry: o.premium, exit: held, points: net(held), closedBy: held == null ? null : 'index exit' }
         const sl = optionLevels?.sl > 0 ? optionLevels.sl : null
         const target = optionLevels?.target > 0 ? optionLevels.target : null
-        if (!day.oi || (!sl && !target)) return base
-        const hit = optionStopTargetHit(day.oi, o, s.t, exitMs, sl, target)
-        if (!hit) return { ...base, sl, target, closedBy: held == null ? null : 'index exit (neither its SL nor its target)' }
-        return { ...base, sl, target, exit: hit.premium, points: net(hit.premium), at: hit.at, closedBy: /SL/i.test(hit.reason) ? 'its SL' : 'its target' }
+        // The option's own trailing stop too (Trade settings), as a paper / live option trade trails it.
+        const optTrail = optionLevels?.trailGap > 0 ? { start: optionLevels.trailStart ?? 0, gap: optionLevels.trailGap } : null
+        if (!day.oi || (!sl && !target && !optTrail)) return base
+        // R on the option: the premium points made over the premium points risked (its SL); risk : reward = 1 : target / SL.
+        const rOf = (pts) => (sl && Number.isFinite(pts) ? pts / sl : null)
+        const rr = sl && target ? target / sl : null
+        const hit = optionStopTargetHit(day.oi, o, s.t, exitMs, sl, target, optTrail)
+        if (!hit) return { ...base, sl, target, r: rOf(base.points), rr, closedBy: held == null ? null : 'index exit (neither its SL nor its target)' }
+        const closedBy = /Trailing/i.test(hit.reason) ? 'its trailing SL' : /SL/i.test(hit.reason) ? 'its SL' : 'its target'
+        return { ...base, sl, target, exit: hit.premium, points: net(hit.premium), r: rOf(net(hit.premium)), rr, at: hit.at, closedBy }
       }
       out.push({
         date: day.date, t: s.t, exitT: outcome.exitAt ?? null, index: underlying ?? null, side: s.side,

@@ -65,7 +65,7 @@ function scenario(d, o = {}) {
 }
 const show = ({ s, all }) => JSON.stringify(s ? { side: s.side, entry: s.entry, stop: +s.stop.toFixed(1), target: +s.target.toFixed(1), checks: s.checks } : all.map((x) => `${x.id}:${x.side}`))
 
-check('33 strategies, #27 is the VWAP pullback (back in the line-up)', STRATEGIES.length === 33 && STRATEGIES.find((x) => x.no === 27)?.id === 'vwapPullback' && !STRATEGIES.find((x) => x.no === 27).retired)
+check('37 strategies, #27 is the VWAP pullback (back in the line-up)', STRATEGIES.length === 37 && STRATEGIES.find((x) => x.no === 27)?.id === 'vwapPullback' && !STRATEGIES.find((x) => x.no === 27).retired)
 const L = scenario(1)
 check('LONG: trend above a rising VWAP, the pullback tags it and turns, writers + futures back it, a bid wall at VWAP', L.s?.side === 'LONG' && L.s.stop < L.s.entry && L.s.target > L.s.entry && /bid wall/.test(L.s.checks['Liquidity map']) && /writers back it/.test(L.s.checks.OI), show(L))
 console.log('   ', L.s?.checks.VWAP, '|', L.s?.checks['Liquidity map'], '|', L.s?.checks.Plan)

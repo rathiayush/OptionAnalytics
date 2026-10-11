@@ -352,6 +352,30 @@ public sealed class StrategyTuningServiceTests : IDisposable
     // ---- Strategy performance across every run -------------------------------------------------------------------
 
     [Fact]
+    public void Performance_GivesRAndRiskRewardForTheIndexAndBothOptions_EvenFromRowsWithoutTheRColumns()
+    {
+        var runs = new List<Dictionary<string, string>> { new() { ["run_id"] = "NIFTY-futures-20261010-100000", ["index"] = "NIFTY", ["data"] = "futures" } };
+        var rows = new List<Dictionary<string, string>>
+        {
+            // An older row: no bought_r / sold_r columns - R comes from the points over the SL.
+            new() { ["index"] = "NIFTY", ["strategy_id"] = "x", ["setting"] = "as written", ["date"] = "2026-10-07", ["entry_time_ist"] = "2026-10-07 10:00:00",
+                ["points"] = "40", ["r"] = "2", ["sl_points"] = "20", ["target_points"] = "40",
+                ["bought_points"] = "30", ["bought_sl"] = "20", ["bought_target"] = "30", ["sold_points"] = "-20", ["sold_sl"] = "20", ["sold_target"] = "30" },
+            // A newer row with the columns.
+            new() { ["index"] = "NIFTY", ["strategy_id"] = "x", ["setting"] = "as written", ["date"] = "2026-10-08", ["entry_time_ist"] = "2026-10-08 10:00:00",
+                ["points"] = "-20", ["r"] = "-1", ["sl_points"] = "20", ["target_points"] = "40",
+                ["bought_points"] = "-20", ["bought_sl"] = "20", ["bought_target"] = "30", ["bought_r"] = "-1", ["sold_points"] = "10", ["sold_sl"] = "20", ["sold_target"] = "30", ["sold_r"] = "0.5" },
+        };
+        var s = TuningPerformance.Build(runs, (id, kind) => kind == "trades" ? rows : null).Rows.Single().All;
+
+        Assert.Equal((2, 1.0, 40.0, 2.0), (s.Futures.Trades, s.Futures.TotalR, s.Futures.Risked, s.Futures.AvgRiskReward!.Value));
+        Assert.Equal((1.5 - 1, 10.0, 40.0, 1.5), (s.Bought.TotalR, s.Bought.Points, s.Bought.Risked, s.Bought.AvgRiskReward!.Value));
+        Assert.Equal(-1 + 0.5, s.Sold.TotalR, 6);
+        Assert.Equal(-0.25, s.Sold.AvgR!.Value, 6);
+        Assert.Equal(0, s.Option.Trades); // no tuned option trade in these rows
+    }
+
+    [Fact]
     public void PerformanceDays_ListsUsedAndLeftOutDaysPerIndex_AndTheDaysScanned()
     {
         static Dictionary<string, string> D(string date, string status, string role = "", string reason = "") =>

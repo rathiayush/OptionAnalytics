@@ -14,11 +14,13 @@ public sealed class ScannerRunnerController : ControllerBase
 {
     private readonly ScannerRunnerStore _store;
     private readonly TradeSettingsStore _trade;
+    private readonly ServerLiveService _live;
 
-    public ScannerRunnerController(ScannerRunnerStore store, TradeSettingsStore trade)
+    public ScannerRunnerController(ScannerRunnerStore store, TradeSettingsStore trade, ServerLiveService live)
     {
         _store = store;
         _trade = trade;
+        _live = live;
     }
 
     /// <summary>GET /api/scanner-runner/config - the runner reads it every minute; the page shows it. The
@@ -33,12 +35,17 @@ public sealed class ScannerRunnerController : ControllerBase
         var enabled = new JsonObject();
         var levels = new JsonObject();
         var trade = new JsonObject();
+        var live = new JsonObject();
+        var now = DateTimeOffset.UtcNow;
         foreach (var s in _trade.All())
         {
             enabled[s.Underlying] = s.ScannerEnabled;
             levels[s.Underlying] = new JsonObject { ["sl"] = s.SlPoints, ["target"] = s.TargetPoints, ["trailStart"] = s.TrailStart, ["trailGap"] = s.TrailGap };
             trade[s.Underlying] = new JsonObject { ["lots"] = s.Lots, ["autoTrade"] = s.AutoTrade, ["slippage"] = s.SlippagePoints };
+            // Switched to Live today (ServerLiveService): the scanner asks the server to place each alert's order.
+            live[s.Underlying] = _live.IsLive(s.Underlying, now);
         }
+        config["live"] = live;
         config["enabled"] = enabled;
         config["levels"] = levels;
         config["trade"] = trade;
@@ -80,6 +87,44 @@ public sealed class ScannerRunnerController : ControllerBase
         if (status is null) return BadRequest();
         _store.SetStatus(status);
         return Ok();
+    }
+
+    // ---- Live trading by the server scanner (ServerLiveService) ------------------------------------------
+
+    /// <summary>GET /api/scanner-runner/live - per index: Live today or paper, its limits, today's live trades.</summary>
+    [HttpGet("live")]
+    [Authorize(Roles = $"{AuthRoles.Admin},{ScannerRunnerKey.Role}")]
+    public IActionResult GetLive() => Ok(_live.Status(DateTimeOffset.UtcNow));
+
+    /// <summary>PUT /api/scanner-runner/live/{underlying} - an admin switches an index to Live for today, or back to paper,
+    /// and sets its max live trades / max loss.</summary>
+    [HttpPut("live/{underlying}")]
+    [Authorize(Roles = AuthRoles.Admin)]
+    public IActionResult SetLive(string underlying, [FromBody] ServerLiveSetRequest request)
+    {
+        if (request is null) return BadRequest(new { error = "No body." });
+        var error = _live.Set(underlying, request.Live, request.MaxTrades, request.MaxLoss, User.Identity?.Name, DateTimeOffset.UtcNow);
+        return error is null ? Ok(_live.Status(DateTimeOffset.UtcNow)) : BadRequest(new { error });
+    }
+
+    /// <summary>POST /api/scanner-runner/live/{underlying}/order - the scanner's alert, as a live order. Only the
+    /// scanner calls it; every limit is checked here (ServerLiveService), not trusted to the scanner.</summary>
+    [HttpPost("live/{underlying}/order")]
+    [Authorize(Roles = ScannerRunnerKey.Role)]
+    public async Task<IActionResult> LiveOrder(string underlying, [FromBody] ServerLiveOrderRequest request, CancellationToken cancellationToken)
+    {
+        if (request is null || string.IsNullOrWhiteSpace(request.Key)) return BadRequest(new { error = "No order." });
+        return Ok(await _live.PlaceAsync(underlying, request, DateTimeOffset.UtcNow, cancellationToken));
+    }
+
+    /// <summary>POST /api/scanner-runner/live/{underlying}/exit - the scanner closed a live trade.</summary>
+    [HttpPost("live/{underlying}/exit")]
+    [Authorize(Roles = ScannerRunnerKey.Role)]
+    public async Task<IActionResult> LiveExit(string underlying, [FromBody] ServerLiveExitRequest request, CancellationToken cancellationToken)
+    {
+        if (request is null || string.IsNullOrWhiteSpace(request.Key)) return BadRequest(new { error = "No trade." });
+        var result = await _live.ExitAsync(underlying, request.Key, request.Reason, request.Pnl, DateTimeOffset.UtcNow, cancellationToken);
+        return result.Success ? Ok(result) : UnprocessableEntity(result);
     }
 
     /// <summary>GET /api/scanner-runner/status - whether it is running and what it last reported.</summary>

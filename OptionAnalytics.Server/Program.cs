@@ -320,6 +320,8 @@ builder.Services.AddHostedService<OiReplayLiveFeedService>();
 builder.Services.AddSingleton<ScannerRunnerStore>();
 // Lots, SL / target / trail, slippage, server scanner on/off per index - trade-settings.csv (TradeSettingsStore).
 builder.Services.AddSingleton<TradeSettingsStore>();
+// Live trading by the server scanner, per index and for today only, within its limits (server-live.json).
+builder.Services.AddSingleton<ServerLiveService>();
 // The daily loss limit (default ₹20,000) - Dhan's P&L based exit set every day, plus a watch here that exits
 // everything and turns Dhan's kill switch on at the limit (KillSwitchService; risk-settings.csv).
 builder.Services.AddSingleton<RiskSettingsStore>();

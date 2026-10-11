@@ -189,6 +189,7 @@ export const STRATEGY_STYLE = {
   wallDefence: 'fade', wallBreak: 'trend', migration: 'trend', squeeze: 'trend', flush: 'trend', buildUp: 'trend',
   range: 'fade', openingBias: 'trend', iceberg: 'fade', maxPain: 'any',
   vaRejection: 'fade', tpo80: 'fade', pocReaction: 'fade', lvnRun: 'trend', ibBreakout: 'trend',
+  pocReject: 'fade', vaEdgeReject: 'fade', hvnReject: 'fade', lvnReject: 'fade',
   weakWall: 'trend', trap: 'fade', cvdDivergence: 'fade', blockTrade: 'trend', imbalanceRetest: 'trend', atmFlip: 'trend',
   vwapFade: 'fade', ibFade: 'fade', oiSqueeze: 'trend', suddenWall: 'any', heatmapOi: 'any', vwapPullback: 'trend',
   oiStructure: 'any', vwapOi: 'trend', ibFailed: 'fade',

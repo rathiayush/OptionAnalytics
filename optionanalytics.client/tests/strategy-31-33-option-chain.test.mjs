@@ -74,7 +74,7 @@ const sideOk = (r, dir) => r.s?.side === (dir > 0 ? 'LONG' : 'SHORT') && dir * (
 const SIDES = [[1, 'LONG'], [-1, 'SHORT']]
 
 // ---- the line-up -------------------------------------------------------------------------------------------------
-check('33 strategies, #31-33 are the option-chain ones, on trial and active', STRATEGIES.length === 33
+check('37 strategies, #31-33 are the option-chain ones, on trial and active', STRATEGIES.length === 37
   && ['straddleFade', 'wallShift', 'cumFlip'].every((id, i) => STRATEGIES.find((x) => x.no === 31 + i)?.id === id && STRATEGIES.find((x) => x.id === id).trial && ACTIVE_STRATEGIES.some((x) => x.id === id)))
 {
   const top = topFifteen(strategyStats([]))

@@ -20,7 +20,11 @@ All must pass before committing. The SAME scanner also runs on the server for NI
 (`optionanalytics.client/scanner-runner/`, bundled by `npm run build:runner`, started by the server's
 `ScannerRunnerHostedService`): the page and the runner share `scannerCore.js` / `liveFeeds.js`, so a change
 there changes both - `tests/scanner-core.test.mjs` and `tests/scanner-runner.test.mjs` cover them. The runner is
-paper only: its "Runner" role cannot reach the live-trading API.
+paper unless an admin switches an index to Live for TODAY (Trade settings / Order Flow page - `ServerLiveService`):
+then it asks `/api/scanner-runner/live/{index}/order`, where the server checks every limit (Live today, 09:15 - 14:45,
+one open trade per index, the index's max trades / max loss, the account kill switch) and places it with the index's
+Trade settings. Its "Runner" role still cannot reach the manual live-trading API; `ServerLiveServiceTests.cs` guards
+the limits.
 
 When adding or changing a strategy:
 
@@ -63,5 +67,6 @@ When adding or changing a strategy:
 - Never commit local-only auth bypasses, credentials or `appsettings.Local.json`; never change Dhan
   credentials. Don't run the real server against Dhan just to test - use the tests, `vite preview` with
   a mocked `/api`, or a local feeder.
-- Live order placement only ever happens behind the explicit, confirmed "Auto-place on alert" switch in
-  Live (Dhan) mode; alerts and the default auto trade are paper.
+- Live order placement only ever happens behind an explicit, confirmed switch: the page's "Auto-place on alert" in
+  Live (Dhan) mode, or an index switched to "Live today" for the server scanner (back to paper every morning). Alerts
+  and the default auto trade are paper.
