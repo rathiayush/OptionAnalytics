@@ -312,7 +312,7 @@ public sealed class StrategyTuningServiceTests : IDisposable
         var s = Service(OkScript());
         var queue = new StrategyTuningQueue(s, NullLogger<StrategyTuningQueue>.Instance);
         var at = DateTimeOffset.UtcNow.AddMinutes(-1);
-        queue.Add(Job("NIFTY"), at, repeatDaily: true);
+        queue.Add(Job("NIFTY") with { From = "2026-09-01", To = "2026-09-30" }, at, repeatDaily: true);
         var other = queue.Add(Job("SENSEX"), at.AddDays(5), false);
         queue.Tick(DateTimeOffset.UtcNow);
         await UntilDone(s);
@@ -320,6 +320,7 @@ public sealed class StrategyTuningServiceTests : IDisposable
         var next = queue.Items().Single(i => i.State == "queued" && i.Job.Underlying == "NIFTY");
         Assert.True(next.RepeatDaily);
         Assert.Equal(at.AddDays(1), next.RunAtUtc);
+        Assert.Equal(("2026-09-02", "2026-10-01"), (next.Job.From, next.Job.To)); // the range moves with it
         Assert.True(queue.Remove(other.Id));
         Assert.DoesNotContain(queue.Items(), i => i.Id == other.Id);
     }

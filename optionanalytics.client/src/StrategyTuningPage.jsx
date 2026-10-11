@@ -227,6 +227,9 @@ function DaysTable({ days, skipped }) {
 /** A tuned setting in words: the trade / OI filters, and the option when it was tuned. */
 const settingText = (params, unit) => (params ? `${variantText(params)}${unit === 'pts' ? ` · ${optionText(params)}` : ''}` : '-')
 
+/** [from, to] covering the last n calendar days up to yesterday (weekends are never fetched anyway). */
+const lastDays = (n) => [dayjs().subtract(n, 'day').startOf('day'), dayjs().subtract(1, 'day').startOf('day')]
+
 const when = (iso) => (iso ? new Date(iso).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '-')
 
 /** n · avg · total · win% of one side of a result. */
@@ -252,12 +255,11 @@ export default function StrategyTuningPage() {
   const [underlying, setUnderlying] = useState('NIFTY')
   const [pick, setPick] = useState('top3')
   const [custom, setCustom] = useState([])
-  const [days, setDays] = useState(30)
   const [includeEstimated, setIncludeEstimated] = useState(false)
   const [minTrades, setMinTrades] = useState(8)
   const [what, setWhat] = useState('both')
-  const [dayMode, setDayMode] = useState('last') // 'last' N days, or a date 'range'
-  const [range, setRange] = useState(null) // [dayjs, dayjs] from / to
+  // Always a date range (from / to): the last 30 days to yesterday until another is picked.
+  const [range, setRange] = useState(() => lastDays(30))
   const [data, setData] = useState('futures')
   const spot = data === 'spot'
   const [oiFactors, setOiFactors] = useState(OI_FACTORS.map((f) => f.key))
@@ -297,8 +299,9 @@ export default function StrategyTuningPage() {
   }, [status?.state]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const running = status?.state === 'running'
-  const jobBody = () => ({ underlying, strategies: pick === 'custom' ? custom : pick, days, includeEstimated, minTrades, what, oiFactors, search, data,
-    ...(dayMode === 'range' && range ? { from: range[0]?.format('YYYY-MM-DD') ?? null, to: range[1]?.format('YYYY-MM-DD') ?? null } : {}) })
+  const rangeOk = !!(range?.[0] && range?.[1])
+  const jobBody = () => ({ underlying, strategies: pick === 'custom' ? custom : pick, days: 250, includeEstimated, minTrades, what, oiFactors, search, data,
+    from: range?.[0]?.format('YYYY-MM-DD') ?? null, to: range?.[1]?.format('YYYY-MM-DD') ?? null })
   // The schedule: jobs run one after another on the server - for one index or several, now or at a set time, once or daily.
   const [queue, setQueue] = useState([])
   const [schedIndices, setSchedIndices] = useState(null) // null: the index picked above
@@ -436,11 +439,9 @@ export default function StrategyTuningPage() {
               <Col>
                 <Space size={6} wrap>
                   <Text>Days</Text>
-                  <Segmented size="small" value={dayMode} onChange={setDayMode} disabled={running} options={[{ value: 'last', label: 'Last N' }, { value: 'range', label: 'Date range' }]} />
-                  {dayMode === 'last'
-                    ? <Tooltip title="The most recent past days the server can replay"><InputNumber min={1} max={250} value={days} onChange={(v) => v && setDays(v)} style={{ width: 80 }} disabled={running} aria-label="Number of days" /></Tooltip>
-                    : <Tooltip title="Every past trading day in this range is used (up to 250; Saturdays and Sundays are never fetched); the older 70% choose, the newest 30% check"><DatePicker.RangePicker value={range} onChange={setRange} format="DD MMM YYYY" disabled={running} allowEmpty={[true, true]}
-                        disabledDate={(d) => d && (!d.isBefore(dayjs().startOf('day')) || d.day() === 0 || d.day() === 6)} aria-label="Tuning date range" /></Tooltip>}
+                  <Tooltip title="Every past trading day in this range is used (up to 250; Saturdays and Sundays are never fetched); the older 70% choose, the newest 30% check"><DatePicker.RangePicker value={range} onChange={setRange} onCalendarChange={(v) => { if (v?.[0] && v?.[1]) setRange(v) }} format="DD MMM YYYY" disabled={running} allowClear={false}
+                    presets={[30, 60, 90, 120, 250].map((n) => ({ label: `Last ${n} days`, value: lastDays(n) }))}
+                    disabledDate={(d) => d && (!d.isBefore(dayjs().startOf('day')) || d.day() === 0 || d.day() === 6)} aria-label="Tuning date range" /></Tooltip>
                 </Space>
               </Col>
               <Col><Space size={6}><Tooltip title="A setting needs at least this many trades on the train days to be recommended. When none reach it, the best found with fewer is still shown, marked 'below the minimum trades' and never recommended."><Text>Min trades</Text></Tooltip><InputNumber min={2} max={100} value={minTrades} onChange={(v) => v && setMinTrades(v)} style={{ width: 70 }} disabled={running} /></Space></Col>
@@ -448,7 +449,7 @@ export default function StrategyTuningPage() {
               <Col>
                 {running
                   ? <Popconfirm title="Stop the tuning job?" onConfirm={cancel} disabled={!isAdmin}><Button danger disabled={!isAdmin}>Stop</Button></Popconfirm>
-                  : <Button type="primary" onClick={start} disabled={!isAdmin || (pick === 'custom' && !custom.length) || (tunesOi && !oiFactors.length) || tooMany || (dayMode === 'range' && !range?.[0] && !range?.[1])}>Run tuning</Button>}
+                  : <Button type="primary" onClick={start} disabled={!isAdmin || (pick === 'custom' && !custom.length) || (tunesOi && !oiFactors.length) || tooMany || !rangeOk}>Run tuning</Button>}
               </Col>
             </Row>
             {isAdmin && (
@@ -457,7 +458,7 @@ export default function StrategyTuningPage() {
                 <Col><Space size={6}><Text>Indices</Text><Checkbox.Group value={schedIndices ?? [underlying]} onChange={(v) => setSchedIndices(v)} options={UNDERLYINGS.map((u) => ({ value: u, label: u }))} /></Space></Col>
                 <Col><Space size={6}><Text>Start</Text><DatePicker showTime={{ format: 'HH:mm' }} format="DD MMM YYYY HH:mm" value={schedAt} onChange={setSchedAt} placeholder="As soon as free" aria-label="Scheduled start" /></Space></Col>
                 <Col><Space size={6}><Switch size="small" checked={schedRepeat} onChange={setSchedRepeat} aria-label="Repeat daily" /><Text>Every day</Text></Space></Col>
-                <Col><Button onClick={schedule} disabled={(pick === 'custom' && !custom.length) || (tunesOi && !oiFactors.length) || tooMany || (dayMode === 'range' && !range?.[0] && !range?.[1]) || (schedIndices != null && !schedIndices.length)}>Add to schedule</Button></Col>
+                <Col><Button onClick={schedule} disabled={(pick === 'custom' && !custom.length) || (tunesOi && !oiFactors.length) || tooMany || !rangeOk || (schedIndices != null && !schedIndices.length)}>Add to schedule</Button></Col>
                 <Col><ClearData onCleared={() => { setResult(null); loadResult(underlying) }} /></Col>
               </Row>
             )}
@@ -478,7 +479,7 @@ export default function StrategyTuningPage() {
               </div>
             )}
             {!isAdmin && <Alert type="info" showIcon message="Only an admin can run a tuning job or apply a result." />}
-            {!spot && !includeEstimated && (dayMode === 'range' || days > 3) && (
+            {!spot && !includeEstimated && (
               <Alert type="warning" showIcon message="Only the recorded days will be used - the server keeps just the last few (in memory)."
                 description="For a long run (30, 120, 250 days) switch on Include estimated days: the other days are rebuilt from 1-minute futures candles (no tape or market depth - the order-flow checks are estimated, and each is marked 'est.'). Or use Spot + options only, which needs no futures order flow." />
             )}

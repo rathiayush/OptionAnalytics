@@ -75,8 +75,11 @@ public sealed class StrategyTuningQueue
                 {
                     // Again tomorrow at the same time (or a day after it started, when it had no fixed time).
                     var next = (item.RunAtUtc ?? item.StartedUtc ?? now).AddDays(1);
-                    while (next <= now) next = next.AddDays(1);
-                    _items.Add(new TuningQueueItem(Guid.NewGuid().ToString("n")[..12], item.Job, next, true, "queued", now, null, null, null));
+                    var shift = 1;
+                    while (next <= now) { next = next.AddDays(1); shift++; }
+                    // A date range moves forward with it (the same length, ending that many days later), so a daily job
+                    // takes in each new day instead of scanning the same dates again.
+                    _items.Add(new TuningQueueItem(Guid.NewGuid().ToString("n")[..12], ShiftRange(item.Job, shift), next, true, "queued", now, null, null, null));
                 }
             }
             if (status.State != "running" && !_items.Any(x => x.State == "running"))
@@ -99,6 +102,13 @@ public sealed class StrategyTuningQueue
             foreach (var old in finished.Take(Math.Max(0, finished.Count - KeepFinished))) { _items.Remove(old); changed = true; }
             if (changed) Save();
         }
+    }
+
+    /// <summary>The job with its From / To (yyyy-MM-dd) moved <paramref name="days"/> days later; unchanged without a range.</summary>
+    internal static TuningJob ShiftRange(TuningJob job, int days)
+    {
+        static string? Move(string? d, int n) => DateOnly.TryParseExact(d, "yyyy-MM-dd", out var x) ? x.AddDays(n).ToString("yyyy-MM-dd") : d;
+        return job with { From = Move(job.From, days), To = Move(job.To, days) };
     }
 
     private List<TuningQueueItem> Load()
