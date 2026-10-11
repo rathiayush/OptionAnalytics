@@ -264,4 +264,134 @@ public sealed class StrategyTuningServiceTests : IDisposable
     {
         try { Directory.Delete(_dir, true); } catch { /* temp */ }
     }
+
+    // ---- The schedule: jobs run one at a time --------------------------------------------------------------------
+
+    private string OkScript() => Script("import { writeFileSync } from 'node:fs'\nconst job = JSON.parse(process.env.TUNE_JOB)\nsetTimeout(() => writeFileSync(process.env.TUNE_OUT, JSON.stringify({ ok: true, underlying: job.underlying })), 200)");
+
+    [Fact]
+    public async Task TheSchedule_RunsItsJobsOneAtATime_InOrder_AndRecordsHowEachEnded()
+    {
+        var s = Service(OkScript());
+        var queue = new StrategyTuningQueue(s, NullLogger<StrategyTuningQueue>.Instance);
+        var now = DateTimeOffset.UtcNow;
+        queue.Add(Job("NIFTY"), null, false);
+        queue.Add(Job("BANKNIFTY"), null, false);
+        queue.Add(Job("SENSEX"), now.AddHours(2), false); // not due yet
+
+        queue.Tick(now);
+        Assert.Equal(new[] { "running", "queued", "queued" }, queue.Items().Select(i => i.State));
+        Assert.Equal("NIFTY", s.Status().Job?.Underlying);
+        queue.Tick(now); // still running: nothing else starts
+        Assert.Single(queue.Items(), i => i.State == "running");
+
+        await UntilDone(s);
+        queue.Tick(now);
+        Assert.Equal(new[] { "done", "running", "queued" }, queue.Items().Select(i => i.State));
+        Assert.Equal("BANKNIFTY", s.Status().Job?.Underlying);
+
+        await UntilDone(s);
+        queue.Tick(now);
+        Assert.Equal(new[] { "done", "done", "queued" }, queue.Items().Select(i => i.State));
+        queue.Tick(now.AddHours(3)); // now due
+        Assert.Equal("running", queue.Items()[2].State);
+        await UntilDone(s);
+
+        // A restart keeps the schedule.
+        var reloaded = new StrategyTuningQueue(s, NullLogger<StrategyTuningQueue>.Instance);
+        Assert.Equal(3, reloaded.Items().Count);
+        reloaded.Tick(now.AddHours(3));
+        Assert.Equal("done", reloaded.Items()[2].State);
+        reloaded.ClearFinished();
+        Assert.Empty(reloaded.Items());
+    }
+
+    [Fact]
+    public async Task ARepeatingJob_IsScheduledAgainForTheNextDay_AndAQueuedOneCanBeRemoved()
+    {
+        var s = Service(OkScript());
+        var queue = new StrategyTuningQueue(s, NullLogger<StrategyTuningQueue>.Instance);
+        var at = DateTimeOffset.UtcNow.AddMinutes(-1);
+        queue.Add(Job("NIFTY"), at, repeatDaily: true);
+        var other = queue.Add(Job("SENSEX"), at.AddDays(5), false);
+        queue.Tick(DateTimeOffset.UtcNow);
+        await UntilDone(s);
+        queue.Tick(DateTimeOffset.UtcNow);
+        var next = queue.Items().Single(i => i.State == "queued" && i.Job.Underlying == "NIFTY");
+        Assert.True(next.RepeatDaily);
+        Assert.Equal(at.AddDays(1), next.RunAtUtc);
+        Assert.True(queue.Remove(other.Id));
+        Assert.DoesNotContain(queue.Items(), i => i.Id == other.Id);
+    }
+
+    [Fact]
+    public async Task ClearingTheHistory_RemovesResultsAndRuns_ButKeepsTheSchedule_AndIsRefusedWhileRunning()
+    {
+        var s = Service(OkScript());
+        var queue = new StrategyTuningQueue(s, NullLogger<StrategyTuningQueue>.Instance);
+        queue.Add(Job("NIFTY"), DateTimeOffset.UtcNow.AddDays(1), false);
+        Assert.Null(s.Start(Job("NIFTY")));
+        Assert.NotNull(s.ClearHistory(alsoCache: false)); // running
+        await UntilDone(s);
+        Directory.CreateDirectory(s.HistoryDirectory);
+        File.WriteAllText(Path.Combine(s.HistoryDirectory, "runs.csv"), "run_id\n");
+        Directory.CreateDirectory(s.CacheDirectory);
+        File.WriteAllText(Path.Combine(s.CacheDirectory, "day.json"), "{}");
+
+        Assert.Null(s.ClearHistory(alsoCache: false));
+        Assert.Null(s.Result("NIFTY"));
+        Assert.False(Directory.Exists(s.HistoryDirectory));
+        Assert.True(File.Exists(Path.Combine(s.CacheDirectory, "day.json")), "the cache stays unless asked");
+        Assert.Single(new StrategyTuningQueue(s, NullLogger<StrategyTuningQueue>.Instance).Items());
+
+        Assert.Null(s.ClearHistory(alsoCache: true));
+        Assert.False(Directory.Exists(s.CacheDirectory));
+    }
+
+    // ---- Strategy performance across every run -------------------------------------------------------------------
+
+    [Fact]
+    public void Performance_AddsUpEveryRunPerStrategy_CountingAnOverlappingTradeOnce()
+    {
+        static Dictionary<string, string> T(string run, string index, string id, string setting, string date, string time, string points, string r, string closedBy = "Target hit") => new()
+        {
+            ["run_id"] = run, ["index"] = index, ["strategy_id"] = id, ["strategy_no"] = "15", ["strategy"] = "IB breakout", ["setting"] = setting,
+            ["date"] = date, ["entry_time_ist"] = $"{date} {time}", ["points"] = points, ["r"] = r, ["closed_by"] = closedBy, ["sold_points"] = "4",
+        };
+        var runs = new List<Dictionary<string, string>>
+        {
+            new() { ["run_id"] = "NIFTY-futures-20261010-100000", ["index"] = "NIFTY", ["data"] = "futures" },        // newest first
+            new() { ["run_id"] = "BANKNIFTY-futures-20261009-100000", ["index"] = "BANKNIFTY", ["data"] = "futures" },
+            new() { ["run_id"] = "NIFTY-futures-20261008-100000", ["index"] = "NIFTY", ["data"] = "futures" },
+        };
+        var files = new Dictionary<string, List<Dictionary<string, string>>>
+        {
+            ["NIFTY-futures-20261010-100000:trades"] = new() { T("NIFTY-futures-20261010-100000", "NIFTY", "ibBreakout", "as written", "2026-10-07", "10:20:00", "40", "2"),
+                                                           T("NIFTY-futures-20261010-100000", "NIFTY", "ibBreakout", "fine-tuned", "2026-10-07", "10:20:00", "30", "1.5") },
+            ["BANKNIFTY-futures-20261009-100000:trades"] = new() { T("BANKNIFTY-futures-20261009-100000", "BANKNIFTY", "ibBreakout", "as written", "2026-10-06", "11:00:00", "-90", "-1", "Stop loss hit") },
+            // The older NIFTY run scanned the same 07 Oct trade again (counted once) and an older day.
+            ["NIFTY-futures-20261008-100000:trades"] = new() { T("NIFTY-futures-20261008-100000", "NIFTY", "ibBreakout", "as written", "2026-10-07", "10:20:00", "40", "2"),
+                                                           T("NIFTY-futures-20261008-100000", "NIFTY", "ibBreakout", "as written", "2026-10-05", "10:30:00", "20", "1") },
+            ["NIFTY-futures-20261010-100000:settings"] = new() { new() { ["which"] = "fine-tuned", ["strategy_id"] = "ibBreakout", ["index"] = "NIFTY", ["tradeSide"] = "long", ["run_id"] = "NIFTY-futures-20261010-100000" } },
+            ["NIFTY-futures-20261008-100000:settings"] = new() { new() { ["which"] = "fine-tuned", ["strategy_id"] = "ibBreakout", ["index"] = "NIFTY", ["tradeSide"] = "short", ["run_id"] = "NIFTY-futures-20261008-100000" } },
+        };
+        var (rows, usedRuns, trades) = TuningPerformance.Build(runs, (id, kind) => files.GetValueOrDefault($"{id}:{kind}"));
+
+        Assert.Equal(3, usedRuns);
+        Assert.Equal(4, trades); // 5 rows, one of them the same trade twice
+        var asWritten = rows.Single(r => r.Setting == "as written");
+        Assert.Equal((3, 2, 1, 1), (asWritten.All.Trades, asWritten.All.Wins, asWritten.All.Losses, asWritten.All.SlHits));
+        Assert.Equal(-30, asWritten.All.Points, 6);
+        Assert.Equal(2.0 / 3, asWritten.All.AvgR!.Value, 6);
+        Assert.Equal(12, asWritten.All.SoldPoints, 6);
+        Assert.Equal((2, 1), (asWritten.ByIndex["NIFTY"].Trades, asWritten.ByIndex["BANKNIFTY"].Trades));
+        Assert.Equal(("2026-10-05", "2026-10-07"), (asWritten.All.FirstDay, asWritten.All.LastDay));
+        var tuned = rows.Single(r => r.Setting == "fine-tuned");
+        Assert.Equal(1, tuned.All.Trades);
+        // The newest run's fine-tuned setting per index.
+        Assert.Equal("long", asWritten.LatestTuned["NIFTY"]["tradeSide"]);
+        Assert.False(asWritten.LatestTuned.ContainsKey("BANKNIFTY"));
+
+        Assert.Empty(TuningPerformance.Build(runs, (id, kind) => files.GetValueOrDefault($"{id}:{kind}"), "spot").Rows);
+    }
 }

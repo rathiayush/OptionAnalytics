@@ -579,3 +579,21 @@ export function variantText(v) {
   if (oi) parts.push(oi)
   return parts.join(' · ')
 }
+
+/** A tuned setting read back from the tuning history (a row of {run}-settings.csv: every value a string) as the params
+ *  `filtersFromTuning` / `applyTunedFilters` take: a value that is one of the filter's options becomes that option's
+ *  own value (930 the number, 'long' the text), a number becomes a number, an empty field is left out. */
+export function paramsFromSettingsRow(row) {
+  const keys = [...TRADE_FILTERS.map((f) => f.key), ...Object.keys(OPTION_DEFAULT)]
+  const out = {}
+  for (const key of keys) {
+    const raw = row?.[key]
+    if (raw == null || raw === '') continue
+    const f = TRADE_FILTERS.find((x) => x.key === key)
+    const option = f?.options?.find((o) => String(o.value) === String(raw))
+    if (option) out[key] = option.value
+    else if (/^-?\d+(\.\d+)?$/.test(String(raw))) out[key] = Number(raw)
+    else out[key] = raw
+  }
+  return out
+}

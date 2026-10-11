@@ -41,6 +41,50 @@ public sealed class StrategyTuningService
         lifetime.ApplicationStopping.Register(() => Cancel(userRequested: false));
     }
 
+    /// <summary>{Storage:ScannerRunnerPath}/tuning - the results, the history, the schedule (StrategyTuningQueue).</summary>
+    public string TuningDirectory => _dir;
+
+    /// <summary>Removes the tuning results and history (runs.csv, every run's trades / settings, the latest and dated
+    /// result files) - and, with <paramref name="alsoCache"/>, the days the jobs fetched (each costs Dhan calls to fetch
+    /// again). Refused while a job runs. Returns null, or why not.</summary>
+    public string? ClearHistory(bool alsoCache)
+    {
+        lock (_lock)
+        {
+            if (_status.State == "running") return "a tuning job is running - stop it first";
+            try
+            {
+                if (Directory.Exists(HistoryDirectory)) Directory.Delete(HistoryDirectory, recursive: true);
+                foreach (var file in Directory.GetFiles(_dir, "*.json"))
+                {
+                    var name = Path.GetFileName(file);
+                    // The results only: the schedule and an interrupted job's record stay.
+                    if (name is "queue.json" or "current-job.json") continue;
+                    File.Delete(file);
+                }
+                if (alsoCache && Directory.Exists(CacheDirectory)) Directory.Delete(CacheDirectory, recursive: true);
+                _logger.LogInformation("Strategy tuning history cleared{Cache}.", alsoCache ? " (and the fetched-days cache)" : "");
+                return null;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "The tuning history could not be cleared.");
+                return $"could not clear everything: {ex.Message}";
+            }
+        }
+    }
+
+    /// <summary>Removes only the fetched-days cache. Refused while a job runs.</summary>
+    public string? ClearCache()
+    {
+        lock (_lock)
+        {
+            if (_status.State == "running") return "a tuning job is running - stop it first";
+            try { if (Directory.Exists(CacheDirectory)) Directory.Delete(CacheDirectory, recursive: true); return null; }
+            catch (Exception ex) { return $"could not clear the cache: {ex.Message}"; }
+        }
+    }
+
     /// <summary>Each past day's fetched data (tune.mjs / tuneFetch.mjs): a rerun, a resumed job or a longer range reads
     /// it from here instead of Dhan.</summary>
     public string CacheDirectory => Path.Combine(_dir, "cache");

@@ -14,11 +14,15 @@ public sealed class StrategyTuningController : ControllerBase
     private static readonly string[] Underlyings = { "NIFTY", "BANKNIFTY", "SENSEX" };
     private readonly StrategyTuningService _tuning;
     private readonly OptionAnalytics.Server.Dhan.DhanDataApiRateLimiter _dhanLimiter;
+    private readonly StrategyTuningQueue _queue;
+    private readonly ScannerLogStore _scannerLog;
 
-    public StrategyTuningController(StrategyTuningService tuning, OptionAnalytics.Server.Dhan.DhanDataApiRateLimiter dhanLimiter)
+    public StrategyTuningController(StrategyTuningService tuning, OptionAnalytics.Server.Dhan.DhanDataApiRateLimiter dhanLimiter, StrategyTuningQueue queue, ScannerLogStore scannerLog)
     {
         _tuning = tuning;
         _dhanLimiter = dhanLimiter;
+        _queue = queue;
+        _scannerLog = scannerLog;
     }
 
     /// <summary>`What`: what is tuned - "trade" (the trade settings), "oi" (the OI confirmation) or "both"
@@ -32,8 +36,17 @@ public sealed class StrategyTuningController : ControllerBase
     [Authorize(Roles = AuthRoles.Admin)]
     public IActionResult Run([FromBody] RunRequest request)
     {
-        var u = (request?.Underlying ?? "").Trim().ToUpperInvariant();
-        if (!Underlyings.Contains(u)) return BadRequest(new { error = "Underlying must be NIFTY, BANKNIFTY or SENSEX." });
+        var (job, invalid) = BuildJob(request, request?.Underlying);
+        if (job is null) return BadRequest(new { error = invalid });
+        var error = _tuning.Start(job);
+        return error is null ? Ok(_tuning.Status()) : Conflict(new { error });
+    }
+
+    /// <summary>A job from a request (the same checks for Run and the schedule), or why it is not valid.</summary>
+    private static (TuningJob? Job, string? Error) BuildJob(RunRequest? request, string? underlying)
+    {
+        var u = (underlying ?? "").Trim().ToUpperInvariant();
+        if (!Underlyings.Contains(u)) return (null, "Underlying must be NIFTY, BANKNIFTY or SENSEX.");
         JsonNode? strategies = request!.Strategies switch
         {
             JsonValue v when v.TryGetValue<string>(out var s) && s is "top3" or "top5" or "all" => (JsonNode)v,
@@ -41,21 +54,84 @@ public sealed class StrategyTuningController : ControllerBase
             null => JsonValue.Create("top3"),
             _ => null,
         };
-        if (strategies is null) return BadRequest(new { error = "Strategies must be top3, top5, all or a list of strategy ids." });
+        if (strategies is null) return (null, "Strategies must be top3, top5, all or a list of strategy ids.");
         var what = string.IsNullOrWhiteSpace(request.What) ? "trade" : request.What.Trim().ToLowerInvariant();
-        if (!TuneWhat.Contains(what)) return BadRequest(new { error = "What must be trade, oi, both, option or all." });
+        if (!TuneWhat.Contains(what)) return (null, "What must be trade, oi, both, option or all.");
         var search = string.IsNullOrWhiteSpace(request.Search) ? "step" : request.Search.Trim().ToLowerInvariant();
-        if (search is not ("step" or "full")) return BadRequest(new { error = "Search must be step or full." });
+        if (search is not ("step" or "full")) return (null, "Search must be step or full.");
         var data = string.IsNullOrWhiteSpace(request.Data) ? "futures" : request.Data.Trim().ToLowerInvariant();
-        if (data is not ("futures" or "spot")) return BadRequest(new { error = "Data must be futures or spot." });
+        if (data is not ("futures" or "spot")) return (null, "Data must be futures or spot.");
         // An optional date range (yyyy-MM-dd, either end may be open) instead of "the last N days".
         static bool Day(string? s, out DateOnly d) { d = default; return string.IsNullOrWhiteSpace(s) || DateOnly.TryParseExact(s.Trim(), "yyyy-MM-dd", out d); }
-        if (!Day(request.From, out var from) || !Day(request.To, out var to)) return BadRequest(new { error = "From / To must be dates (yyyy-MM-dd)." });
-        if (!string.IsNullOrWhiteSpace(request.From) && !string.IsNullOrWhiteSpace(request.To) && from > to) return BadRequest(new { error = "From must be on or before To." });
+        if (!Day(request.From, out var from) || !Day(request.To, out var to)) return (null, "From / To must be dates (yyyy-MM-dd).");
+        if (!string.IsNullOrWhiteSpace(request.From) && !string.IsNullOrWhiteSpace(request.To) && from > to) return (null, "From must be on or before To.");
         var factors = (request.OiFactors ?? Array.Empty<string>()).Distinct().ToList();
-        if (factors.Any(f => !OiFactorKeys.Contains(f))) return BadRequest(new { error = "OiFactors must be one of tradeOiWindow, tradeFutWindow, tradeOiFlow, tradeOiCum, tradeSideOi, tradeSideCum, tradeFutOi, tradeMoveSize, tradeDayType, tradeWallRoom, tradeWallOi." });
-        var error = _tuning.Start(new TuningJob(u, strategies.DeepClone(), Math.Clamp(request.Days, 1, 250), request.IncludeEstimated, Math.Clamp(request.MinTrades, 2, 100), what, factors, search, data, string.IsNullOrWhiteSpace(request.From) ? null : request.From.Trim(), string.IsNullOrWhiteSpace(request.To) ? null : request.To.Trim()));
-        return error is null ? Ok(_tuning.Status()) : Conflict(new { error });
+        if (factors.Any(f => !OiFactorKeys.Contains(f))) return (null, "OiFactors must be one of tradeOiWindow, tradeFutWindow, tradeOiFlow, tradeOiCum, tradeSideOi, tradeSideCum, tradeFutOi, tradeMoveSize, tradeDayType, tradeWallRoom, tradeWallOi.");
+        return (new TuningJob(u, strategies.DeepClone(), Math.Clamp(request.Days, 1, 250), request.IncludeEstimated, Math.Clamp(request.MinTrades, 2, 100), what, factors, search, data, string.IsNullOrWhiteSpace(request.From) ? null : request.From.Trim(), string.IsNullOrWhiteSpace(request.To) ? null : request.To.Trim()), null);
+    }
+
+    /// <summary>A job to schedule: the Run request, for one index or several (Underlyings), not before RunAtUtc (null:
+    /// as soon as nothing else is running), and optionally again every day.</summary>
+    public sealed record QueueRequest(RunRequest Job, string[]? Underlyings, DateTimeOffset? RunAtUtc, bool RepeatDaily = false);
+
+    /// <summary>GET /api/strategy-tuning/queue - the scheduled jobs, run one at a time.</summary>
+    [HttpGet("queue")]
+    public IReadOnlyList<TuningQueueItem> Queue() => _queue.Items();
+
+    /// <summary>POST /api/strategy-tuning/queue - schedules a job for each index asked for.</summary>
+    [HttpPost("queue")]
+    [Authorize(Roles = AuthRoles.Admin)]
+    public IActionResult AddToQueue([FromBody] QueueRequest request)
+    {
+        if (request?.Job is null) return BadRequest(new { error = "A job is required." });
+        var indices = (request.Underlyings is { Length: > 0 } list ? list : new[] { request.Job.Underlying }).Select(x => (x ?? "").Trim().ToUpperInvariant()).Distinct().ToList();
+        var jobs = new List<TuningJob>();
+        foreach (var index in indices)
+        {
+            var (job, error) = BuildJob(request.Job, index);
+            if (job is null) return BadRequest(new { error });
+            jobs.Add(job);
+        }
+        var added = jobs.Select(j => _queue.Add(j, request.RunAtUtc, request.RepeatDaily)).ToList();
+        return Ok(added);
+    }
+
+    /// <summary>DELETE /api/strategy-tuning/queue/{id} - removes a scheduled job that has not started.</summary>
+    [HttpDelete("queue/{id}")]
+    [Authorize(Roles = AuthRoles.Admin)]
+    public IActionResult RemoveFromQueue(string id) => _queue.Remove(id) ? Ok(_queue.Items()) : NotFound(new { error = "No such scheduled job (or it is running - stop it instead)." });
+
+    /// <summary>POST /api/strategy-tuning/queue/clear-finished - drops the finished jobs from the list.</summary>
+    [HttpPost("queue/clear-finished")]
+    [Authorize(Roles = AuthRoles.Admin)]
+    public IActionResult ClearFinished() { _queue.ClearFinished(); return Ok(_queue.Items()); }
+
+    /// <summary>GET /api/strategy-tuning/performance - every run's trades added up per strategy, across all indices
+    /// (TuningPerformance); `data` = futures / spot.</summary>
+    [HttpGet("performance")]
+    public IActionResult Performance([FromQuery] string? data = null)
+    {
+        var d = string.Equals(data, "spot", StringComparison.OrdinalIgnoreCase) ? "spot" : string.Equals(data, "futures", StringComparison.OrdinalIgnoreCase) ? "futures" : null;
+        var (rows, runs, trades) = TuningPerformance.Build(_tuning.HistoryRuns(), _tuning.HistoryRows, d);
+        return Ok(new { runs, trades, rows });
+    }
+
+    /// <summary>What to clear: the tuning results and history, the fetched-days cache, the scanner's record.</summary>
+    public sealed record ClearRequest(bool Tuning, bool Cache, bool ScannerRecord);
+
+    /// <summary>POST /api/strategy-tuning/clear - removes the data asked for (admin).</summary>
+    [HttpPost("clear")]
+    [Authorize(Roles = AuthRoles.Admin)]
+    public async Task<IActionResult> Clear([FromBody] ClearRequest request, CancellationToken cancellationToken)
+    {
+        if (request is null || (!request.Tuning && !request.Cache && !request.ScannerRecord)) return BadRequest(new { error = "Nothing chosen to clear." });
+        if (request.Tuning || request.Cache)
+        {
+            var error = request.Tuning ? _tuning.ClearHistory(request.Cache) : _tuning.ClearCache();
+            if (error is not null) return Conflict(new { error });
+        }
+        if (request.ScannerRecord) await _scannerLog.ClearAsync(cancellationToken);
+        return Ok(new { cleared = request });
     }
 
     [HttpPost("cancel")]
