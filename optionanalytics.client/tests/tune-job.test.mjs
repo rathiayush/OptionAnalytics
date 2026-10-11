@@ -50,7 +50,7 @@ function fakeServer(recordedDays, faults = {}) {
   const nth = (key) => { const n = (count.get(key) ?? 0) + 1; count.set(key, n); return n }
   const server = createServer((req, res) => {
     const url = new URL(req.url, 'http://x')
-    seen.push({ path: url.pathname, key: req.headers['x-runner-key'], priority: req.headers['x-request-priority'] ?? null, date: url.searchParams.get('date') })
+    seen.push({ path: url.pathname, key: req.headers['x-runner-key'], priority: req.headers['x-request-priority'] ?? null, date: url.searchParams.get('date'), query: Object.fromEntries(url.searchParams) })
     const json = (body, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body)) }
     let m
     if (url.pathname === '/api/scanner-runner/config') return json({ settings: {} })
@@ -75,6 +75,13 @@ function fakeServer(recordedDays, faults = {}) {
     // faults.rangeError: the range fetch itself fails part way).
     if (url.pathname === '/api/oi-replay/NIFTY/range-check') {
       return json({ match: !faults.rangeMismatch, windowDays: 4, comparison: faults.rangeMismatch ? { match: false, differences: ['2026-09-29 22600 CE 10:15: openInterest 120 vs 121'] } : { match: true }, error: null })
+    }
+    // The 30-day span proof (faults.span: 'pass' | 'expiryDiff' | 'fail'; unset = the route is not there).
+    if (url.pathname === '/api/oi-replay/NIFTY/range-span-check' && faults.span) {
+      const across = faults.span !== 'fail'
+      return json({ acrossMatch: across, expiryDayMatch: faults.span === 'pass', expiry: '2026-09-29', error: null,
+        days: [{ date: '2026-09-28', role: 'before', match: true, differences: [] }, { date: '2026-09-29', role: 'expiry', match: faults.span === 'pass', differences: faults.span === 'pass' ? [] : ['22600 CE 09:15: openInterest 1 vs 2'] },
+          { date: '2026-09-30', role: 'after', match: across, differences: across ? [] : ['22600 CE 09:15: openInterest 1 vs 2'] }] })
     }
     if (url.pathname === '/api/oi-replay/NIFTY/range') {
       if (faults.rangeError) return json({ error: 'the window failed' }, 500)
@@ -598,4 +605,47 @@ test('an older runs.csv with fewer columns is brought up to date, keeping every 
   } finally {
     server.close()
   }
+})
+
+test('the option chain 30 days per Dhan call: only once a window across an expiry is proved, expiry days only when they match too', { timeout: 300_000 }, async () => {
+  const days = ['2026-09-28', '2026-09-29', '2026-09-30', '2026-10-01', '2026-10-02', '2026-10-05']
+  const job = { underlying: 'NIFTY', strategies: ['weakWall'], days: 30, minTrades: 2, what: 'trade' }
+  const run = async (faults, env = {}) => {
+    const { server, seen, base: url } = await fakeServer(days, faults)
+    const dir = mkdtempSync(join(tmpdir(), 'oa-span-'))
+    try {
+      const out = await runJob(url, job, { TUNE_RETRY_SCALE: '0.001', TUNE_BUSY_PAUSE_MS: '5', TUNE_CACHE_DIR: join(dir, 'cache'), TUNE_SLICE_DAYS: '3', ...env })
+      const ranges = seen.filter((x) => x.path === '/api/oi-replay/NIFTY/range')
+      return { ...out, ranges, perDayRuns: seen.filter((x) => x.path === '/api/oi-replay/NIFTY/run').length, spanChecks: seen.filter((x) => x.path === '/api/oi-replay/NIFTY/range-span-check').length }
+    } finally { server.close() }
+  }
+
+  const span = await run({ span: 'pass' })
+  assert.equal(span.code, 0, JSON.stringify(span.result))
+  assert.equal(span.result.fastOi.span.used, true, JSON.stringify(span.result.fastOi.span))
+  assert.equal(span.result.fastOi.span.includeExpiryDays, true)
+  assert.ok(span.ranges.length >= 2, 'read in slices')
+  assert.ok(span.ranges.every((r) => r.query.spanExpiries === 'true' && r.query.includeExpiryDays === 'true' && r.query.spanFrom === days[0] && r.query.spanTo === days.at(-1)), JSON.stringify(span.ranges.map((r) => r.query)))
+  assert.equal(span.perDayRuns, 0)
+  assert.equal(span.spanChecks, 1)
+
+  // The expiry day differs: still one span, but expiry days are left to the per-day path.
+  const noExpiry = await run({ span: 'expiryDiff' })
+  assert.equal(noExpiry.result.fastOi.span.used, true)
+  assert.ok(noExpiry.ranges.every((r) => r.query.includeExpiryDays === 'false'))
+
+  // Not proved (or no such check on the server): one window per expiry cycle, exactly as before.
+  for (const faults of [{ span: 'fail' }, {}]) {
+    const old = await run(faults)
+    assert.equal(old.code, 0)
+    assert.equal(old.result.fastOi.span.used, false)
+    assert.equal(old.result.fastOi.used, true)
+    assert.ok(old.ranges.every((r) => r.query.spanExpiries === undefined), 'per-cycle range requests')
+    assert.deepEqual(old.result.ranked.map((r) => [r.id, r.n, r.total]), span.result.ranked.map((r) => [r.id, r.n, r.total]), 'the same result either way')
+  }
+
+  // Switched off.
+  const off = await run({ span: 'pass' }, { TUNE_SPAN_OI: 'off' })
+  assert.equal(off.result.fastOi.span.used, false)
+  assert.equal(off.spanChecks, 0)
 })

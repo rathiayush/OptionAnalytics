@@ -453,6 +453,112 @@ public sealed class OiReplayRangeFetchTests
 
     private sealed record OptionCall(DateOnly From, DateOnly ToExclusive, string Strike, string Side, int ExpiryCode, string ExpiryFlag);
 
+    // ---- One window straight across the expiries (spanExpiries) --------------------------------
+
+    [Fact]
+    public void ASpanningWindow_CoversTheWholeSpan_AndLeavesOutOnlyTheExpiryDaysUnlessAskedFor()
+    {
+        var today = D(30);
+        var (window, skip, error) = OiReplayRangeWindows.BuildSpanning("WEEK", D(2), D(25), today, includeExpiryDays: false);
+        Assert.Null(error);
+        Assert.Equal((D(2), D(25), D(8), 1), (window!.Value.From, window.Value.To, window.Value.Expiry, window.Value.ExpiryCode));
+        Assert.Equal(new[] { D(8), D(15), D(22) }, skip.OrderBy(d => d));
+
+        var (_, none, _) = OiReplayRangeWindows.BuildSpanning("WEEK", D(2), D(25), today, includeExpiryDays: true);
+        Assert.Empty(none);
+        Assert.NotNull(OiReplayRangeWindows.BuildSpanning("WEEK", new DateOnly(2026, 8, 20), D(25), today, false).Error);
+    }
+
+    [Fact]
+    public async Task SpanExpiries_ThreeWeeksCostOneCallPerStrike_AndEveryDayMatchesThePerDayFetch()
+    {
+        var (service, dhan) = Service();
+        dhan.ContractInData = true;
+
+        var result = await service.RunRangeAsync("NIFTY", D(2), D(21), 1, "WEEK", CancellationToken.None, perDayFallback: false, spanExpiries: true);
+
+        Assert.True(result.Success, result.Error);
+        Assert.True(result.SpanExpiries);
+        // 42 calls for three weeks - each per-cycle window used to be 42 of its own.
+        Assert.Equal(BandSeries, OptionCalls(dhan).Count);
+        Assert.All(OptionCalls(dhan), call => Assert.Equal((D(2), D(22)), (call.From, call.ToExclusive)));
+        // The expiry days were not asked for: left to the per-day path, named.
+        Assert.Equal(new[] { D(8), D(15) }, result.ExpiryDaysLeftOut);
+        Assert.Equal(new[] { D(8), D(15) }, result.UnservedDays);
+
+        var calls = OptionCalls(dhan).Count;
+        foreach (var date in new[] { D(7), D(9), D(14), D(16) })
+        {
+            var perDay = await service.RunAsync("NIFTY", date, 1, "WEEK", CancellationToken.None);
+            var comparison = OiReplayDayComparer.Compare(date, result.Days.Single(d => d.Date == date), perDay);
+            Assert.True(comparison.Match, $"{date}: {string.Join(" | ", comparison.Differences)}");
+        }
+        Assert.Equal(calls + 4 * BandSeries, OptionCalls(dhan).Count);
+    }
+
+    [Fact]
+    public async Task SpanExpiries_ReadInSlices_AsksDhanForTheSpanOnlyOnce()
+    {
+        var (service, dhan) = Service();
+        dhan.ContractInData = true;
+
+        var first = await service.RunRangeAsync("NIFTY", D(2), D(11), 1, "WEEK", CancellationToken.None, false, spanExpiries: true, includeExpiryDays: true, spanFrom: D(2), spanTo: D(25));
+        var second = await service.RunRangeAsync("NIFTY", D(14), D(25), 1, "WEEK", CancellationToken.None, false, spanExpiries: true, includeExpiryDays: true, spanFrom: D(2), spanTo: D(25));
+
+        Assert.Equal(BandSeries, OptionCalls(dhan).Count);
+        Assert.Equal((BandSeries, 0), (first.WindowOptionSeriesCalls, second.WindowOptionSeriesCalls));
+        Assert.All(first.Days.Concat(second.Days), day => Assert.Equal("range", day.FetchSource));
+        Assert.Equal(new[] { D(14), D(15), D(16), D(17), D(18), D(21), D(22), D(23), D(24), D(25) }, second.Days.Select(d => d.Date));
+        Assert.Empty(first.ExpiryDaysLeftOut);
+
+        // A slice outside the span it names is refused, not quietly widened.
+        Assert.False((await service.RunRangeAsync("NIFTY", D(1), D(11), 1, "WEEK", CancellationToken.None, false, spanExpiries: true, spanFrom: D(2), spanTo: D(25))).Success);
+    }
+
+    [Fact]
+    public async Task SpanCheck_PassesWhenDhanRolls_AndSaysWhetherTheExpiryDayMatchesToo()
+    {
+        var (service, dhan) = Service();
+        dhan.ContractInData = true;
+
+        var check = await service.CheckSpanAsync("NIFTY", D(16), 1, "WEEK", CancellationToken.None);
+        Assert.Null(check.Error);
+        Assert.Equal(D(15), check.Expiry);
+        Assert.True(check.AcrossMatch, string.Join(" | ", check.Days.SelectMany(d => d.Differences)));
+        Assert.True(check.ExpiryDayMatch);
+        Assert.Equal(new[] { (D(14), "before"), (D(15), "expiry"), (D(16), "after") }, check.Days.Select(d => (d.Date, d.Role)));
+
+        var (service2, dhan2) = Service();
+        dhan2.ContractInData = true;
+        dhan2.WindowExpiryDayOnNext = true;
+        var onNext = await service2.CheckSpanAsync("NIFTY", D(16), 1, "WEEK", CancellationToken.None);
+        Assert.True(onNext.AcrossMatch);
+        Assert.False(onNext.ExpiryDayMatch);
+    }
+
+    [Fact]
+    public async Task SpanCheck_FailsWhenDhanDoesNotRollOntoTheNextContract()
+    {
+        var (service, dhan) = Service();
+        dhan.ContractInData = true;
+        dhan.WindowRollsAtExpiry = false;
+
+        var check = await service.CheckSpanAsync("NIFTY", D(16), 1, "WEEK", CancellationToken.None);
+
+        Assert.False(check.AcrossMatch);
+        Assert.False(check.ExpiryDayMatch);
+        Assert.False(check.Days.Single(d => d.Role == "after").Match);
+    }
+
+    [Fact]
+    public async Task SpanExpiries_IsIgnoredWhenTheFastPathIsOff()
+    {
+        var (service, dhan) = Service(fastOiRange: false);
+        var result = await service.RunRangeAsync("NIFTY", D(2), D(11), 1, "WEEK", CancellationToken.None, false, spanExpiries: true);
+        Assert.False(result.SpanExpiries);
+        Assert.Empty(OptionCalls(dhan));
+    }
+
     private static List<OptionCall> OptionCalls(FakeDhan dhan) =>
         dhan.Snapshot()
             .Where(r => r.Path.EndsWith("/charts/rollingoption", StringComparison.Ordinal) && r.Body is not null)
@@ -544,6 +650,23 @@ public sealed class OiReplayRangeFetchTests
         /// call for the same minute - the disagreement the runtime self-check has to catch.</summary>
         public long ShiftWindowOiBy { get; set; }
 
+        /// <summary>Each bar's open interest also carries WHICH contract (weekly expiry) it came from, and a
+        /// multi-day window resolves that contract the way the switches below say - so "one window straight
+        /// across an expiry" is a real question. Off: the old contract-blind formula (every other test).</summary>
+        public bool ContractInData { get; set; }
+
+        /// <summary>With ContractInData: a multi-day window rolls onto the next contract after each expiry, as the
+        /// per-day path (fromDate = that day) would resolve it. False: the window stays on the 1st expiry from
+        /// its fromDate and has nothing after that expiry.</summary>
+        public bool WindowRollsAtExpiry { get; set; } = true;
+
+        /// <summary>With ContractInData: a multi-day window prices the EXPIRY DAY off the next contract, while
+        /// the per-day path prices it off the expiring one.</summary>
+        public bool WindowExpiryDayOnNext { get; set; }
+
+        internal static DateOnly NearestExpiry(DateOnly day) => OiReplayRangeWindows.NextExpiryOnOrAfter("WEEK", day);
+        internal static long ContractTerm(DateOnly expiry) => (expiry.DayNumber % 97) * 10_000_000L;
+
         public List<(string Path, JsonObject? Body)> Snapshot()
         {
             lock (_requests) return _requests.ToList();
@@ -610,6 +733,12 @@ public sealed class OiReplayRangeFetchTests
                 if (day.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday || Holidays.Contains(day)) continue;
                 if (isWindow && NoOptionWindowDays.Contains(day)) continue;
                 if (isWindow && SkipSeriesOnDay.ContainsKey((day, strikeToken, side))) continue;
+                var contract = NearestExpiry(day);
+                if (ContractInData && isWindow)
+                {
+                    if (!WindowRollsAtExpiry) { contract = NearestExpiry(from); if (day > contract) continue; }
+                    else if (WindowExpiryDayOnNext && day == contract) contract = NearestExpiry(day.AddDays(1));
+                }
                 var minutes = isWindow && ShortOiWindowDays.Contains(day) ? 1 : MinutesPerDay;
                 for (var minute = 0; minute < minutes; minute++)
                 {
@@ -622,7 +751,7 @@ public sealed class OiReplayRangeFetchTests
                     volume.Add(500 + minute);
                     strike.Add(StrikeOf(steps));
                     spot.Add(25_000m);
-                    oi.Add(OiOf(day, steps, side, minute) + (isWindow ? ShiftWindowOiBy : 0));
+                    oi.Add(OiOf(day, steps, side, minute) + (isWindow ? ShiftWindowOiBy : 0) + (ContractInData ? ContractTerm(contract) : 0));
                     iv.Add(11m + steps);
                 }
             }

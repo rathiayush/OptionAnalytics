@@ -383,7 +383,7 @@ public sealed class OiReplayService
     /// </summary>
     public async Task<OiReplayRangeResult> RunRangeAsync(
         string underlying, DateOnly from, DateOnly to, int timeframeMinutes, string expiryFlag, CancellationToken cancellationToken,
-        bool perDayFallback = true)
+        bool perDayFallback = true, bool spanExpiries = false, bool includeExpiryDays = false, DateOnly? spanFrom = null, DateOnly? spanTo = null)
     {
         var timeframe = Math.Max(1, timeframeMinutes);
 
@@ -425,6 +425,25 @@ public sealed class OiReplayService
                         : null;
         if (fastPathDisabled is not null) windows = new List<OiReplayRangeWindows.Window>();
 
+        // spanExpiries: ONE window straight across the expiries of [spanFrom, spanTo] (default: the request
+        // itself) instead of one per cycle - see OiReplayRangeWindows.BuildSpanning, and CheckSpanAsync for the
+        // proof a caller must have before asking for it. The span's band is fetched once and kept a few
+        // minutes (SpanBandAsync), so a caller can read a 30-day span in slices that each come back a
+        // manageable size while Dhan is still asked for it only once.
+        var skipDays = new HashSet<DateOnly>();
+        var spanning = spanExpiries && fastPathDisabled is null;
+        if (spanning)
+        {
+            var sf = spanFrom ?? from;
+            var st = spanTo ?? to;
+            if (sf > from || st < to)
+                return OiReplayRangeResult.Failed(underlying, from, to, timeframe, expiryFlag, $"The span {sf:dd MMM yyyy}..{st:dd MMM yyyy} must contain the requested days {from:dd MMM yyyy}..{to:dd MMM yyyy}.");
+            var (spanWindow, skip, spanError) = OiReplayRangeWindows.BuildSpanning(expiryFlag, sf, st, today, includeExpiryDays);
+            if (spanError is not null) return OiReplayRangeResult.Failed(underlying, from, to, timeframe, expiryFlag, spanError);
+            windows = spanWindow is { } one ? new List<OiReplayRangeWindows.Window> { one } : new List<OiReplayRangeWindows.Window>();
+            skipDays = skip;
+        }
+
         var isAlwaysLive = AlwaysLiveUnderlyings.Contains(underlying);
         var fromWindow = new Dictionary<DateOnly, DayFromWindow>();
         var windowReports = new List<OiReplayRangeWindow>();
@@ -446,10 +465,11 @@ public sealed class OiReplayService
             // The whole span's spot in ONE call (Dhan's /charts/intraday takes a date range and
             // documents 90 days per call; the stored source is a plain BETWEEN), then cut per day -
             // instead of one spot call per day.
-            var spanFrom = windows[0].From;
-            var spanTo = windows[^1].To;
-            var (spotBars, spotError) = await FetchSpotBarsWithVolumeAsync(underlying, spanFrom, spanTo, isAlwaysLive, ResolveInstrumentAsync, cancellationToken);
-            var spanDays = OiReplayRangeWindows.TradingDayCandidates(spanFrom, spanTo, today);
+            // (Only the requested days: a spanning window can reach past them.)
+            var spotFrom = windows[0].From < from ? from : windows[0].From;
+            var spotTo = windows[^1].To > to ? to : windows[^1].To;
+            var (spotBars, spotError) = await FetchSpotBarsWithVolumeAsync(underlying, spotFrom, spotTo, isAlwaysLive, ResolveInstrumentAsync, cancellationToken);
+            var spanDays = OiReplayRangeWindows.TradingDayCandidates(spotFrom, spotTo, today);
             var spotByDay = OiReplayRangeWindows.ByDay(spotBars, b => b.Time, spanDays);
             // One call covered every day of the span, so "nothing at all" is the CALL having failed,
             // not the market having been closed for the whole span - in that case nothing here is
@@ -457,12 +477,15 @@ public sealed class OiReplayService
             var spotUsable = spotBars.Count > 0;
             if (!spotUsable)
                 _logger?.LogWarning("OI range fetch for {Underlying} {From}..{To} got no spot bars at all ({Error}) - falling back to the per-day path for every day.",
-                    underlying, spanFrom, spanTo, spotError ?? "no error reported");
+                    underlying, spotFrom, spotTo, spotError ?? "no error reported");
 
             foreach (var window in windows)
             {
-                var windowDays = OiReplayRangeWindows.TradingDayCandidates(window.From, window.To, today);
-                var (series, calls) = await FetchWindowBandAsync(underlying, expiryFlag, window, ResolveInstrumentAsync, cancellationToken);
+                var windowDays = OiReplayRangeWindows.TradingDayCandidates(window.From, window.To, today)
+                    .Where(d => d >= from && d <= to && !skipDays.Contains(d)).ToList();
+                var (series, calls) = spanning
+                    ? await SpanBandAsync(underlying, expiryFlag, window, ResolveInstrumentAsync, cancellationToken)
+                    : await FetchWindowBandAsync(underlying, expiryFlag, window, ResolveInstrumentAsync, cancellationToken);
                 windowCalls += calls;
 
                 var windowErrors = series.Where(s => s.Error is not null).Select(s => $"{s.Token} {s.Side}: {s.Error}").ToList();
@@ -566,8 +589,47 @@ public sealed class OiReplayService
             WindowOptionSeriesCalls = windowCalls,
             FallbackOptionSeriesCalls = fallbackCalls,
             FastPathDisabled = fastPathDisabled,
+            SpanExpiries = spanning,
+            ExpiryDaysLeftOut = skipDays.Where(d => d >= from && d <= to).OrderBy(d => d).ToList(),
         };
     }
+
+    /// <summary>A spanning window's band, fetched once and kept SpanBandTtl: the strategy tuning job reads a
+    /// 30-day span in slices (a whole 30 days of minute OI is too big to send back in one response), and every
+    /// slice must not cost another 42 Dhan calls. A band with any failed series is not kept - the next slice
+    /// asks again - and at most MaxSpanBands are held. Calls = 0 for a band served from here.</summary>
+    private async Task<(List<(string Token, string Side, List<OiReplayPoint> Points, string? Error)> Series, int Calls)> SpanBandAsync(
+        string underlying, string expiryFlag, OiReplayRangeWindows.Window window,
+        Func<Task<DhanSpotInstrument?>> resolveInstrument, CancellationToken cancellationToken)
+    {
+        var key = $"{underlying}|{expiryFlag}|{window.From:yyyy-MM-dd}|{window.To:yyyy-MM-dd}".ToUpperInvariant();
+        var now = DateTimeOffset.UtcNow;
+        Task<(List<(string Token, string Side, List<OiReplayPoint> Points, string? Error)> Series, int Calls)> band;
+        bool fresh;
+        lock (_spanBands)
+        {
+            foreach (var stale in _spanBands.Where(kv => now - kv.Value.At > SpanBandTtl || kv.Value.Band.IsFaulted || kv.Value.Band.IsCanceled).Select(kv => kv.Key).ToList())
+                _spanBands.Remove(stale);
+            fresh = !_spanBands.TryGetValue(key, out var held);
+            if (fresh)
+            {
+                while (_spanBands.Count >= MaxSpanBands) _spanBands.Remove(_spanBands.OrderBy(kv => kv.Value.At).First().Key);
+                // Not tied to this request's token: a slice request cancelled mid-fetch must not spoil the band
+                // for the slices after it.
+                band = FetchWindowBandAsync(underlying, expiryFlag, window, resolveInstrument, CancellationToken.None);
+                _spanBands[key] = (now, band);
+            }
+            else band = held.Band;
+        }
+        var result = await band.WaitAsync(cancellationToken);
+        if (result.Series.Any(s => s.Error is not null))
+            lock (_spanBands) { if (_spanBands.TryGetValue(key, out var held) && held.Band == band) _spanBands.Remove(key); }
+        return (result.Series, fresh ? result.Calls : 0);
+    }
+
+    private static readonly TimeSpan SpanBandTtl = TimeSpan.FromMinutes(10);
+    private const int MaxSpanBands = 3;
+    private readonly Dictionary<string, (DateTimeOffset At, Task<(List<(string Token, string Side, List<OiReplayPoint> Points, string? Error)> Series, int Calls)> Band)> _spanBands = new();
 
     /// <summary>One day's worth of a window fetch, before it becomes an OiReplayResult. Closed marks
     /// a day the window's own spot call covered and found nothing for (a holiday) - reported as an
@@ -765,6 +827,76 @@ public sealed class OiReplayService
                 underlying, date, window.From, window.To, comparison.RangeCePoints, comparison.RangePePoints);
 
         return (comparison, window.From, window.To, null);
+    }
+
+    /// <summary>
+    /// The proof behind spanExpiries (OiReplayRangeWindows.BuildSpanning): ONE window straight across a real
+    /// expiry near <paramref name="date"/>, and three days out of it - the last trading day before the expiry,
+    /// the expiry day itself and the first trading day after it - each compared point for point with the same
+    /// day fetched the per-day way (OiReplayDayComparer). AcrossMatch (before AND after identical) says Dhan
+    /// rolls its "nearest expiry" series onto the next contract at the expiry exactly as the per-day path
+    /// resolves each day - a caller may then read 30 days per call. ExpiryDayMatch says the expiry day lands
+    /// on the same contract both ways too - only then may expiry days come out of a spanning window. A day
+    /// with no data (a holiday) is never a match.
+    /// </summary>
+    public async Task<OiReplaySpanCheck> CheckSpanAsync(string underlying, DateOnly date, int timeframeMinutes, string expiryFlag, CancellationToken cancellationToken)
+    {
+        var timeframe = Math.Max(1, timeframeMinutes);
+        var today = IstClock.Today();
+        OiReplaySpanCheck Fail(string error, DateOnly? expiry = null, DateOnly? wf = null, DateOnly? wt = null) =>
+            new(false, false, expiry, wf ?? date, wt ?? date, Array.Empty<OiReplaySpanCheckDay>(), error, 0);
+
+        static DateOnly Weekday(DateOnly d, int step)
+        {
+            do d = d.AddDays(step); while (d.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday);
+            return d;
+        }
+
+        // The real expiry closest to `date` that has a finished trading day after it.
+        DateOnly? expiry = null;
+        for (var e = OiReplayRangeWindows.NextExpiryOnOrAfter(expiryFlag, date.AddDays(-45)); e <= date.AddDays(10); e = OiReplayRangeWindows.NextExpiryOnOrAfter(expiryFlag, e.AddDays(1)))
+            if (Weekday(e, 1) < today && (expiry is null || Math.Abs(e.DayNumber - date.DayNumber) <= Math.Abs(expiry.Value.DayNumber - date.DayNumber)))
+                expiry = e;
+        if (expiry is not { } exp) return Fail($"No finished expiry near {date:dd MMM yyyy} to check across.");
+
+        var before = Weekday(exp, -1);
+        var after = Weekday(exp, 1);
+        var windowFrom = before.AddDays(-3);
+        var windowTo = after.AddDays(3) < today ? after.AddDays(3) : today.AddDays(-1);
+
+        var range = await RunRangeAsync(underlying, windowFrom, windowTo, timeframe, expiryFlag, cancellationToken,
+            perDayFallback: false, spanExpiries: true, includeExpiryDays: true);
+        if (!range.Success) return Fail(range.Error ?? "The spanning fetch failed.", exp, windowFrom, windowTo);
+        if (!range.SpanExpiries) return Fail(range.FastPathDisabled ?? "The fetch did not use a spanning window.", exp, windowFrom, windowTo);
+
+        var checkedDays = new List<OiReplaySpanCheckDay>();
+        var calls = range.OptionSeriesCalls;
+        foreach (var (day, role) in new[] { (before, "before"), (exp, "expiry"), (after, "after") })
+        {
+            var rangeDay = range.Days.FirstOrDefault(d => d.Date == day);
+            if (rangeDay is null || !rangeDay.Success || rangeDay.FetchSource != "range")
+            {
+                checkedDays.Add(new OiReplaySpanCheckDay(day, role, false, new[] { $"the spanning window did not answer for {day:dd MMM yyyy}: {rangeDay?.Error ?? "no day returned"}" }));
+                continue;
+            }
+            var perDay = await RunAsync(underlying, day, timeframe, expiryFlag, cancellationToken);
+            calls += (StrikeBandSteps * 2 + 1) * 2;
+            if (!perDay.Success)
+            {
+                checkedDays.Add(new OiReplaySpanCheckDay(day, role, false, new[] { $"the per-day fetch of {day:dd MMM yyyy} failed: {perDay.Error}" }));
+                continue;
+            }
+            var comparison = OiReplayDayComparer.Compare(day, rangeDay, perDay);
+            checkedDays.Add(new OiReplaySpanCheckDay(day, role, comparison.Match, comparison.Differences.Take(5).ToList()));
+        }
+
+        var across = checkedDays.Where(d => d.Role != "expiry").All(d => d.Match);
+        var onExpiry = across && checkedDays.Single(d => d.Role == "expiry").Match;
+        if (across) _logger?.LogInformation("OI span self-check passed for {Underlying} across {Expiry} (window {From}..{To}); expiry day {ExpiryDay}.",
+            underlying, exp, windowFrom, windowTo, onExpiry ? "matches too" : "differs - left to the per-day path");
+        else _logger?.LogWarning("OI span self-check FAILED for {Underlying} across {Expiry} (window {From}..{To}): {Differences}",
+            underlying, exp, windowFrom, windowTo, string.Join(" | ", checkedDays.Where(d => !d.Match).SelectMany(d => d.Differences).Take(5)));
+        return new OiReplaySpanCheck(across, onExpiry, exp, windowFrom, windowTo, checkedDays, null, calls);
     }
 
     /// <summary>One CE or PE series for one relative strike: stored first (when configured), then a
