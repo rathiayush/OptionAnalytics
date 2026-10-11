@@ -114,6 +114,26 @@ public sealed class ScannerRunnerTests : IDisposable
     }
 
     [Fact]
+    public void ASettingAppliedForOneIndex_SurvivesThePageSavingItsSettings_AndARestart_AndCanBeRemoved()
+    {
+        var store = Store();
+        store.Update(new JsonObject { ["settings"] = new JsonObject { ["filters"] = new JsonObject { ["absorption"] = new JsonObject { ["tradeSide"] = "both" } } } });
+        store.SetIndexFilters("NIFTY", "absorption", new JsonObject { ["tradeSide"] = "long", ["tradeOptLeg"] = "buy" });
+        store.SetIndexFilters("BANKNIFTY", "absorption", new JsonObject { ["tradeSide"] = "short" });
+        // A page (even one holding an older copy of the settings) saves its settings: the applied ones are untouched.
+        store.Update(new JsonObject { ["settings"] = new JsonObject { ["pick"] = "all" } });
+        var config = Store().Config();
+        Assert.Equal("long", config["filtersByIndex"]!["NIFTY"]!["absorption"]!["tradeSide"]!.GetValue<string>());
+        Assert.Equal("buy", config["filtersByIndex"]!["NIFTY"]!["absorption"]!["tradeOptLeg"]!.GetValue<string>());
+        Assert.Equal("short", config["filtersByIndex"]!["BANKNIFTY"]!["absorption"]!["tradeSide"]!.GetValue<string>());
+        // Removed: back to the all-index filters on that index only.
+        store.SetIndexFilters("NIFTY", "absorption", null);
+        config = Store().Config();
+        Assert.Null(config["filtersByIndex"]!["NIFTY"]);
+        Assert.Equal("short", config["filtersByIndex"]!["BANKNIFTY"]!["absorption"]!["tradeSide"]!.GetValue<string>());
+    }
+
+    [Fact]
     public void Status_IsStaleUntilTheRunnerReports()
     {
         var store = Store();

@@ -223,6 +223,28 @@ public sealed class ScannerRunnerStore
         return Config();
     }
 
+    /// <summary>A setting fine-tuned for ONE index and applied to one strategy (the tuning pages' Apply): kept under
+    /// config.filtersByIndex[index][strategyId], apart from the page's synced scanner settings - so a page that saves
+    /// its settings (even with an older copy) never wipes it. The scanner on that index runs the strategy with these
+    /// filters instead of its all-index ones (filtersForIndex in strategyEngine.js). Null removes it.</summary>
+    public JsonObject SetIndexFilters(string underlying, string strategyId, JsonObject? filters)
+    {
+        lock (_lock)
+        {
+            var all = _config["filtersByIndex"] as JsonObject ?? new JsonObject();
+            var index = all[underlying] as JsonObject ?? new JsonObject();
+            if (filters is null) index.Remove(strategyId);
+            else index[strategyId] = filters.DeepClone();
+            if (index.Count == 0) all.Remove(underlying); else all[underlying] = index;
+            _config["filtersByIndex"] = all;
+            _config["updatedUtc"] = DateTimeOffset.UtcNow;
+            var temp = _configPath + ".tmp";
+            File.WriteAllText(temp, _config.ToJsonString(Json));
+            File.Move(temp, _configPath, overwrite: true);
+        }
+        return Config();
+    }
+
     public void SetStatus(JsonNode status)
     {
         lock (_lock) { _status = status.DeepClone(); _statusAt = DateTimeOffset.UtcNow; }

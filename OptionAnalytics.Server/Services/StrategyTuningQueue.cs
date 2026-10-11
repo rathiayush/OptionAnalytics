@@ -36,6 +36,15 @@ public sealed class StrategyTuningQueue
         return item;
     }
 
+    /// <summary>A job started by hand (the page's Run): kept on the schedule too, already running, so every run is on it -
+    /// how it ended and its run are recorded (Tick), and it can be deleted with its data like any other.</summary>
+    public TuningQueueItem AddStarted(TuningJob job, DateTimeOffset now)
+    {
+        var item = new TuningQueueItem(Guid.NewGuid().ToString("n")[..12], job, null, false, "running", now, now, null, null, null, "manual");
+        lock (_lock) { _items.Add(item); Save(); }
+        return item;
+    }
+
     /// <summary>Removes a queued item (a running one is stopped from the page's Stop button, not here); false if none.</summary>
     public bool Remove(string id)
     {
@@ -45,6 +54,30 @@ public sealed class StrategyTuningQueue
             if (removed) Save();
             return removed;
         }
+    }
+
+    /// <summary>Deletes a job and EVERYTHING it produced: a queued one is just taken off; a finished one also loses its
+    /// history run (trades, settings, days), its result and the days it fetched into the cache (DeleteRun). A running
+    /// one is refused - stop it first. Returns what was removed, or why not.</summary>
+    public (TuningRunDeleted? Deleted, string? Error) Delete(string id)
+    {
+        TuningQueueItem? item;
+        lock (_lock) item = _items.FirstOrDefault(i => i.Id == id);
+        if (item is null) return (null, "no such job");
+        if (item.State == "running") return (null, "that job is running - stop it first");
+        TuningRunDeleted? deleted = null;
+        if (item.State != "queued")
+        {
+            var runId = item.RunId ?? _tuning.FindRun(item.Job, item.StartedUtc, item.FinishedUtc);
+            if (runId is not null)
+            {
+                var (d, error) = _tuning.DeleteRun(runId);
+                if (error is not null) return (null, error);
+                deleted = d;
+            }
+        }
+        lock (_lock) { _items.RemoveAll(i => i.Id == id); Save(); }
+        return (deleted ?? new TuningRunDeleted(null, 0, 0, 0, false), null);
     }
 
     /// <summary>Drops every finished item (done / failed / cancelled) from the list.</summary>
@@ -69,7 +102,8 @@ public sealed class StrategyTuningQueue
                 if (startupGrace) continue;
                 var state = status.State switch { "done" => "done", "cancelled" => "cancelled", "failed" => "failed", _ => "failed" };
                 var error = state == "done" ? null : status.Error ?? (status.State == "idle" ? "the server restarted while it ran" : null);
-                _items[i] = item with { State = state, FinishedUtc = now, Error = error };
+                // The run it wrote - deleting the job later removes that run, its result and its cached days too.
+                _items[i] = item with { State = state, FinishedUtc = now, Error = error, RunId = status.RunId ?? item.RunId };
                 changed = true;
                 if (item.RepeatDaily)
                 {
@@ -152,4 +186,4 @@ public sealed class StrategyTuningQueueHostedService(StrategyTuningQueue queue, 
 
 /// <summary>One scheduled job: State queued / running / done / failed / cancelled.</summary>
 public sealed record TuningQueueItem(string Id, TuningJob Job, DateTimeOffset? RunAtUtc, bool RepeatDaily, string State,
-    DateTimeOffset AddedUtc, DateTimeOffset? StartedUtc, DateTimeOffset? FinishedUtc, string? Error);
+    DateTimeOffset AddedUtc, DateTimeOffset? StartedUtc, DateTimeOffset? FinishedUtc, string? Error, string? RunId = null, string? Source = null);

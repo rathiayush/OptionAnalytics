@@ -39,7 +39,10 @@ public sealed class StrategyTuningController : ControllerBase
         var (job, invalid) = BuildJob(request, request?.Underlying);
         if (job is null) return BadRequest(new { error = invalid });
         var error = _tuning.Start(job);
-        return error is null ? Ok(_tuning.Status()) : Conflict(new { error });
+        if (error is not null) return Conflict(new { error });
+        // On the schedule too (marked manual), so every run is there to keep track of - and to delete with its data.
+        _queue.AddStarted(job, DateTimeOffset.UtcNow);
+        return Ok(_tuning.Status());
     }
 
     /// <summary>A job from a request (the same checks for Run and the schedule), or why it is not valid.</summary>
@@ -128,6 +131,25 @@ public sealed class StrategyTuningController : ControllerBase
     [HttpPost("queue/clear-finished")]
     [Authorize(Roles = AuthRoles.Admin)]
     public IActionResult ClearFinished() { _queue.ClearFinished(); return Ok(_queue.Items()); }
+
+    /// <summary>POST /api/strategy-tuning/queue/{id}/delete-all - a job and everything it produced: its tuning run
+    /// (trades, settings, days), its result and the days it fetched into the cache. Not while it runs.</summary>
+    [HttpPost("queue/{id}/delete-all")]
+    [Authorize(Roles = AuthRoles.Admin)]
+    public IActionResult DeleteJobAndData(string id)
+    {
+        var (deleted, error) = _queue.Delete(id);
+        return error is null ? Ok(new { deleted, queue = _queue.Items() }) : BadRequest(new { error });
+    }
+
+    /// <summary>DELETE /api/strategy-tuning/history/{runId} - one tuning run and everything it produced (as above).</summary>
+    [HttpDelete("history/{runId}")]
+    [Authorize(Roles = AuthRoles.Admin)]
+    public IActionResult DeleteRun(string runId)
+    {
+        var (deleted, error) = _tuning.DeleteRun(runId);
+        return error is null ? Ok(deleted) : BadRequest(new { error });
+    }
 
     /// <summary>GET /api/strategy-tuning/performance - every run's trades added up per strategy, across all indices
     /// (TuningPerformance); `data` = futures / spot.</summary>

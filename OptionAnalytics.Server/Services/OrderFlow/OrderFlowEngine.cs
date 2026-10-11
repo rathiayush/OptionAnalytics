@@ -364,6 +364,10 @@ public sealed class OrderFlowEngine
     /// <summary>The IST day this engine holds, or null before its first event.</summary>
     public DateOnly? ExportDayDate() { lock (_lock) return _day == default ? null : _day; }
 
+    /// <summary>The last traded price and when it traded (null until a trade) - the server's own index stop-loss check on
+    /// live trades (ServerLiveService.CheckIndexStopsAsync) reads it.</summary>
+    public (decimal Price, DateTimeOffset? At) LastTrade() { lock (_lock) return (_prevLtp, _lastTradeAt); }
+
 
     /// <summary>Everything the Order Flow page loads: the day's minute footprints bucketed into
     /// <paramref name="rowSize"/>-point rows, prints of at least <paramref name="minTradeQty"/>, icebergs,

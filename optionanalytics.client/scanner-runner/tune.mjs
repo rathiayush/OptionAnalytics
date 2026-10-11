@@ -40,7 +40,7 @@
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
-import { buildOiContext, ACTIVE_STRATEGIES, SPOT_STRATEGIES, STRATEGY_BY_ID, TRADE_FILTERS } from '../src/strategyEngine.js'
+import { buildOiContext, ACTIVE_STRATEGIES, SPOT_STRATEGIES, STRATEGY_BY_ID, TRADE_FILTERS, filtersForIndex } from '../src/strategyEngine.js'
 import { scanSpotDay, spotBarsOf } from '../src/spotEngine.js'
 import { autoBigLots } from '../src/orderFlowMath.js'
 import { scannerProfileOf, trailFor } from '../src/scannerCore.js'
@@ -99,7 +99,7 @@ const istToday = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).
 let lastScan = null
 const CACHE_DIR = process.env.TUNE_CACHE_DIR || null
 const fetcher = createFetcher({
-  base: BASE, key: KEY, today: istToday, cacheDir: CACHE_DIR,
+  base: BASE, key: KEY, today: istToday, cacheDir: CACHE_DIR, scope: U,
   paceMs: Math.max(0, Number(process.env.TUNE_PACE_MS) || 0),
   retryScale: Math.max(0.0001, Number(process.env.TUNE_RETRY_SCALE) || 1),
   // One day's data of one kind, at most this many fetches in a whole job - the hard stop on the retry rounds
@@ -226,9 +226,9 @@ async function main() {
   // The option SL / target this index is actually traded with (Trade settings), so each trade can say what the option
   // bought and the option sold would have done - its own stop, its own target, or out with the index trade.
   const optionLevels = { ...defaultTradeLevels(U), ...(cfg.levels?.[U] ?? {}) }
-  // The strategies' own entry filters as the trader set them; the trade filters are what is tuned (from their defaults).
+  // The strategies' own entry filters as the trader set them (for this index); the trade filters are what is tuned (from their defaults).
   const tradeKeys = new Set(TRADE_FILTERS.map((f) => f.key))
-  const entryFilters = Object.fromEntries(Object.entries(cfg.filters ?? {}).map(([id, f]) => [id, Object.fromEntries(Object.entries(f ?? {}).filter(([k]) => !tradeKeys.has(k)))]))
+  const entryFilters = Object.fromEntries(Object.entries(filtersForIndex({ filters: cfg.filters, filtersByIndex: config?.filtersByIndex }, U)).map(([id, f]) => [id, Object.fromEntries(Object.entries(f ?? {}).filter(([k]) => !tradeKeys.has(k)))]))
 
   // The days: the recorded (exact) ones, newest first; with includeEstimated, other weekdays too (rebuilt from 1-minute candles).
   // Spot + options needs no order flow: the past weekdays that have OI data are the days (holidays fail and are skipped).
@@ -687,6 +687,7 @@ async function main() {
     daysPlanned: plan.length, daysScanned: days.length, daysLeftOut: skipped.length,
     strategiesTuned: results.length, strategiesAsked: ids.length, tuningStopped: tuneStop,
   }
+  let runId = null
   if (HISTORY_DIR) {
     // The same split tuneStrategy makes: the newest days are the test (held back), the rest the train.
     const testDays = new Set(splitDays(days).test.map((d) => d.date))
@@ -706,10 +707,12 @@ async function main() {
     const next = runsCsvWith(existsSync(runsPath) ? readFileSync(runsPath, 'utf8') : null, RUN_COLUMNS, h.run)
     if (next.append) appendFileSync(runsPath, next.append)
     else writeJson(runsPath, null, next.text)
+    runId = h.run_id
     console.log(`HISTORY ${h.run_id} (${h.trades.length} trades, ${h.settings.length} settings)`)
   }
   write({
-    ok: true, underlying: U, job, startedUtc, finishedUtc: new Date().toISOString(), rowSize, trail, minTrades: MIN_TRADES, what: WHAT, search: SEARCH, data: DATA, from: FROM, to: TO, oiFactors: OI_KEYS ?? OI_FACTORS.map((f) => f.key),
+    // runId: the history run this result belongs to - so deleting the run (Strategy tuning page) removes this too.
+    ok: true, runId, underlying: U, job, startedUtc, finishedUtc: new Date().toISOString(), rowSize, trail, minTrades: MIN_TRADES, what: WHAT, search: SEARCH, data: DATA, from: FROM, to: TO, oiFactors: OI_KEYS ?? OI_FACTORS.map((f) => f.key),
     grid: WHAT === 'trade' ? TUNING_GRID : WHAT === 'oi' ? oiGridOf(OI_KEYS) : WHAT === 'option' ? OPTION_GRID : WHAT === 'all' ? { ...oiGridOf(OI_KEYS), ...TUNING_GRID, ...OPTION_GRID } : { ...oiGridOf(OI_KEYS), ...TUNING_GRID },
     days: days.map((d) => ({ date: d.date, estimated: d.estimated, setups: d.setups.length, ...d.quality })), skipped, ranked, results, fetched: fetcher.stats, fastOi,
     strategies: ACTIVE_STRATEGIES.length, calls, budget,

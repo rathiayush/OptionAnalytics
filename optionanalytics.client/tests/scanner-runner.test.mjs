@@ -89,6 +89,7 @@ test('an index switched to Live: each alert asks the server for a real order onc
   const io = fakeIo()
   const orders = []
   const exits = []
+  const stops = []
   let refuseAfter = 1 // the server places the first and refuses the rest (one open at a time, its limits...)
   io.api = async (path, opts) => {
     if (path === '/api/scanner-log/day') { io.posted.push(opts.body); return {} }
@@ -98,6 +99,7 @@ test('an index switched to Live: each alert asks the server for a real order onc
       return { placed: true, message: 'placed', order: { success: true, orderIds: [`o${orders.length}`], lotSize: 65, prices: { limit: opts.body.strike > 0 ? 101.5 : 0 } } }
     }
     if (path === '/api/scanner-runner/live/NIFTY/exit') { exits.push(opts.body); return { success: true } }
+    if (path === '/api/scanner-runner/live/NIFTY/index-stop') { stops.push(opts.body); return {} }
     throw new Error(`unexpected ${path}`)
   }
   const scanner = new IndexScanner('NIFTY', io)
@@ -110,6 +112,12 @@ test('an index switched to Live: each alert asks the server for a real order onc
   assert.equal(new Set(orders.map((o) => o.key)).size, orders.length, 'never the same signal twice')
   const first = orders[0]
   assert.ok(first.strategyId && first.key.startsWith(first.strategyId), 'the strategy is named, for the live-list check')
+  // The index stop goes with the order (the server's own index SL check), and on the right side of the entry.
+  const fired = scanner.memory.fired.find((x) => first.key.startsWith(`${x.id}-${x.t}`))
+  assert.equal(first.indexStop, fired.stop)
+  assert.equal(first.indexSide, fired.side)
+  // A trailed stop is only ever sent tighter than the last one sent.
+  for (let i = 1; i < stops.length; i++) if (stops[i].key === stops[i - 1].key) assert.ok(fired.side === 'LONG' ? stops[i].stop > stops[i - 1].stop : stops[i].stop < stops[i - 1].stop)
   assert.ok(first.expiry && first.strike > 0 && ['CE', 'PE'].includes(first.side) && first.action === 'SELL' && first.stopLossPoints > 0 && first.targetPoints > 0 && first.exitAtMs > 0, JSON.stringify(first))
   const live = scanner.positions.filter((p) => p.live)
   assert.equal(live.length, 1)
@@ -298,6 +306,40 @@ test('a strategy tuned to BUY its option: the server scanner trades that - unles
   // A side chosen where the trading happens is the last word - the tuned BUY does not override it.
   const chosen = (await run('sell')).filter((p) => p.strategy === id)
   assert.ok(chosen.length && chosen.every((p) => p.action === 'SELL'), 'the chosen side wins over the strategy')
+})
+
+test('a setting applied for ONE index (the tuning pages\' Apply): that index trades with it, the others keep theirs', async () => {
+  // What a NIFTY-tuned "buy 1 OTM, SL 25% / target 50%" applied from the Trades page writes: config.filtersByIndex.NIFTY.
+  const probe = new IndexScanner('NIFTY', fakeIo())
+  probe.reset(DATE)
+  probe.setConfig({ alertIds: ALL_IDS, settings: { autoPaper: 'strategy', paperSl: 20, paperTarget: 30, paperLots: 1 } })
+  await runDay(probe, fakeIo(), at(15), at(300))
+  const id = probe.positions[0]?.strategy
+  assert.ok(id, 'the scanner traded')
+  const config = {
+    alertIds: ALL_IDS,
+    // The all-index filters still say "sell" for it; the NIFTY one replaces them on NIFTY only.
+    settings: { autoPaper: 'strategy', paperSl: 20, paperTarget: 30, paperLots: 1, filters: { [id]: { tradeOptLeg: 'sell' } } },
+    filtersByIndex: { NIFTY: { [id]: { tradeOptLeg: 'buy', tradeOptMoneyness: -1, tradeOptSlPct: 25, tradeOptTargetPct: 50 } } },
+  }
+  const run = async (u) => {
+    const s = new IndexScanner(u, fakeIo())
+    s.reset(DATE)
+    s.setConfig(config)
+    assert.deepEqual(s.settings().filters[id], u === 'NIFTY' ? config.filtersByIndex.NIFTY[id] : config.settings.filters[id])
+    await runDay(s, fakeIo(), at(15), at(300))
+    return s.positions.filter((p) => p.strategy === id)
+  }
+  const nifty = await run('NIFTY')
+  assert.ok(nifty.length && nifty.every((p) => p.action === 'BUY' && Math.abs(p.slPts - p.premium * 0.25) < 1e-6 && Math.abs(p.targetPts - p.premium * 0.5) < 1e-6),
+    'NIFTY buys with the SL / target it was tuned to')
+  // The same strategy on another index: its all-index filters (the scanner settings), not NIFTY's.
+  const other = new IndexScanner('BANKNIFTY', fakeIo())
+  other.setConfig(config)
+  assert.deepEqual(other.settings().filters[id], { tradeOptLeg: 'sell' })
+  // Nothing applied per index: exactly the all-index filters, as before.
+  other.setConfig({ ...config, filtersByIndex: undefined })
+  assert.deepEqual(other.settings().filters, config.settings.filters)
 })
 
 test('today is not loaded at weekends or before the open, and a failing load backs off (each try costs Dhan calls)', async () => {

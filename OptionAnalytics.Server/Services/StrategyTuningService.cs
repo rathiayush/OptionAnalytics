@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -72,6 +73,125 @@ public sealed class StrategyTuningService
                 return $"could not clear everything: {ex.Message}";
             }
         }
+    }
+
+    /// <summary>
+    /// Removes ONE run and everything it produced: its history files ({run_id}-trades / -settings / -days.csv), its row
+    /// in runs.csv, its result (the latest and the dated copy - those naming this run, or for an older result the same
+    /// index finished within two minutes of it), and the days it fetched into the cache - that index's files for the
+    /// run's dates (its day list; else its first..last day). An older cache file with no index folder for one of those
+    /// dates goes too (it cannot be told apart). Refused for the run of a job still running.
+    /// </summary>
+    public (TuningRunDeleted? Deleted, string? Error) DeleteRun(string runId)
+    {
+        if (!RunIdPattern.IsMatch(runId ?? "")) return (null, "not a tuning run id");
+        lock (_lock)
+        {
+            if (_status.State == "running" && _status.RunId == runId) return (null, "that job is still running - stop it first");
+        }
+        var run = HistoryRuns().FirstOrDefault(r => r.GetValueOrDefault("run_id") == runId);
+        var index = run?.GetValueOrDefault("index") ?? runId.Split('-')[0];
+        var data = run?.GetValueOrDefault("data") ?? runId.Split('-')[1];
+        // The dates it fetched: its day list, else first..last day.
+        var dates = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var d in HistoryRows(runId, "days") ?? new()) if (d.GetValueOrDefault("date") is { Length: 10 } date) dates.Add(date);
+        if (dates.Count == 0 && run is not null && DateOnly.TryParse(run.GetValueOrDefault("first_day"), out var a) && DateOnly.TryParse(run.GetValueOrDefault("last_day"), out var b))
+        {
+            if (a > b) (a, b) = (b, a);
+            for (var d = a; d <= b && dates.Count < 400; d = d.AddDays(1)) dates.Add(d.ToString("yyyy-MM-dd"));
+        }
+        try
+        {
+            var historyFiles = 0;
+            foreach (var kind in new[] { "trades", "settings", "days" })
+            {
+                var path = Path.Combine(HistoryDirectory, $"{runId}-{kind}.csv");
+                if (File.Exists(path)) { File.Delete(path); historyFiles++; }
+            }
+            var row = RemoveRunRow(runId);
+            var results = 0;
+            var finishedIst = run?.GetValueOrDefault("finished_ist");
+            var prefix = $"{index}{(data == "spot" ? "-spot" : "")}-";
+            foreach (var file in Directory.GetFiles(_dir, $"{prefix}*.json"))
+            {
+                if (ResultBelongsTo(file, runId, finishedIst, data)) { File.Delete(file); results++; }
+            }
+            var cache = 0;
+            var versions = Directory.Exists(CacheDirectory) ? Directory.GetDirectories(CacheDirectory) : Array.Empty<string>();
+            foreach (var version in versions)
+            {
+                foreach (var folder in new[] { Path.Combine(version, index.ToUpperInvariant()), version })
+                {
+                    if (!Directory.Exists(folder)) continue;
+                    foreach (var month in Directory.GetDirectories(folder))
+                    {
+                        if (!System.Text.RegularExpressions.Regex.IsMatch(Path.GetFileName(month), "^[0-9]{4}-[0-9]{2}$")) continue;
+                        foreach (var file in Directory.GetFiles(month, "*.json.gz"))
+                        {
+                            var name = Path.GetFileName(file);
+                            if (name.Length >= 10 && dates.Contains(name[..10])) { File.Delete(file); cache++; }
+                        }
+                    }
+                }
+            }
+            _logger.LogInformation("Tuning run {RunId} deleted: {History} history file(s), {Results} result(s), {Cache} cached day file(s).", runId, historyFiles, results, cache);
+            return (new TuningRunDeleted(runId, historyFiles, results, cache, row), null);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Tuning run {RunId} could not be deleted completely.", runId);
+            return (null, $"could not delete everything: {ex.Message}");
+        }
+    }
+
+    /// <summary>The run a finished queue job wrote, for a job from before the run id was kept: the same index, data and
+    /// range, finished between its start and two minutes after its end.</summary>
+    public string? FindRun(TuningJob job, DateTimeOffset? startedUtc, DateTimeOffset? finishedUtc)
+    {
+        if (startedUtc is null) return null;
+        var until = (finishedUtc ?? DateTimeOffset.UtcNow).AddMinutes(2);
+        foreach (var r in HistoryRuns())
+        {
+            if (r.GetValueOrDefault("index") != job.Underlying.ToUpperInvariant() || r.GetValueOrDefault("data", "futures") != job.Data) continue;
+            if ((job.From ?? "") != r.GetValueOrDefault("from", "") || (job.To ?? "") != r.GetValueOrDefault("to", "")) continue;
+            if (!DateTime.TryParse(r.GetValueOrDefault("finished_ist"), CultureInfo.InvariantCulture, DateTimeStyles.None, out var ist)) continue;
+            var at = new DateTimeOffset(ist, IstClock.Offset);
+            if (at >= startedUtc.Value.AddMinutes(-1) && at <= until) return r.GetValueOrDefault("run_id");
+        }
+        return null;
+    }
+
+    private bool RemoveRunRow(string runId)
+    {
+        var runsPath = Path.Combine(HistoryDirectory, "runs.csv");
+        if (!File.Exists(runsPath)) return false;
+        var parsed = ScannerLogStore.Parse(File.ReadAllText(runsPath));
+        if (parsed.Count == 0) return false;
+        var columns = parsed[0].ToArray();
+        var rows = ScannerLogStore.Read(runsPath).ToList();
+        var kept = rows.Where(r => r.GetValueOrDefault("run_id") != runId).ToList();
+        if (kept.Count == rows.Count) return false;
+        var sb = new StringBuilder(string.Join(',', columns)).Append('\n');
+        foreach (var row in kept) sb.Append(ScannerLogStore.Line(columns, row)).Append('\n');
+        var temp = runsPath + ".tmp";
+        File.WriteAllText(temp, sb.ToString());
+        File.Move(temp, runsPath, overwrite: true);
+        return true;
+    }
+
+    private static bool ResultBelongsTo(string file, string runId, string? finishedIst, string data)
+    {
+        try
+        {
+            var node = JsonNode.Parse(File.ReadAllText(file));
+            if (node?["runId"]?.GetValue<string>() is { } id) return id == runId;
+            if ((node?["data"]?.GetValue<string>() ?? "futures") != data) return false;
+            // An older result (no runId): the one that finished with this run.
+            if (finishedIst is null || node?["finishedUtc"]?.GetValue<string>() is not { } f || !DateTimeOffset.TryParse(f, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var finished)) return false;
+            if (!DateTime.TryParse(finishedIst, CultureInfo.InvariantCulture, DateTimeStyles.None, out var ist)) return false;
+            return Math.Abs((finished - new DateTimeOffset(ist, IstClock.Offset)).TotalMinutes) <= 2;
+        }
+        catch { return false; }
     }
 
     /// <summary>Removes only the fetched-days cache. Refused while a job runs.</summary>
@@ -282,6 +402,11 @@ public sealed class StrategyTuningService
     private void OnOutput(string? line)
     {
         if (string.IsNullOrEmpty(line)) return;
+        if (line.StartsWith("HISTORY ", StringComparison.Ordinal))
+        {
+            var id = line["HISTORY ".Length..].Split(' ')[0];
+            if (RunIdPattern.IsMatch(id)) lock (_lock) _status = _status with { RunId = id };
+        }
         if (line.StartsWith("PROGRESS ", StringComparison.Ordinal))
         {
             try
@@ -361,4 +486,12 @@ public sealed class StrategyTuningResumeHostedService(StrategyTuningService tuni
 /// rather than restarting for ever.</summary>
 public sealed record TuningJob(string Underlying, JsonNode? Strategies, int Days, bool IncludeEstimated, int MinTrades, string What = "trade", IReadOnlyList<string>? OiFactors = null, string Search = "step", string Data = "futures", string? From = null, string? To = null, bool Resumed = false, int Attempt = 0);
 
-public sealed record TuningStatus(string State, TuningJob? Job, DateTimeOffset? StartedUtc, DateTimeOffset? FinishedUtc, string? Error, JsonNode? Progress, int? Pid);
+public sealed record TuningStatus(string State, TuningJob? Job, DateTimeOffset? StartedUtc, DateTimeOffset? FinishedUtc, string? Error, JsonNode? Progress, int? Pid)
+{
+    /// <summary>The history run the job wrote (tune.mjs prints "HISTORY {run_id}") - the queue keeps it, so deleting the
+    /// job can remove its run, result and cache.</summary>
+    public string? RunId { get; init; }
+}
+
+/// <summary>What deleting a run removed.</summary>
+public sealed record TuningRunDeleted(string? RunId, int HistoryFiles, int ResultFiles, int CacheFiles, bool RunRow);

@@ -134,7 +134,7 @@ public sealed class ServerLiveService
                 {
                     _state.Trades.Add(new ServerLiveTrade(u, today, request.Key, request.Strategy ?? "", $"{order.Direction} {order.Strike} {order.Side}",
                         result.OrderIds.ToList(), order.Lots, result.LotSize, result.Prices?.Limit, now, null, null, null, result.Success ? null : $"partly placed - {result.Message}")
-                    { ExitAtMs = request.ExitAtMs });
+                    { ExitAtMs = request.ExitAtMs, IndexStop = request.IndexStop, IndexSide = NormaliseSide(request.IndexSide) });
                     Save();
                 }
             }
@@ -198,6 +198,57 @@ public sealed class ServerLiveService
         return result;
     }
 
+    private static string? NormaliseSide(string? side) => side?.Trim().ToUpperInvariant() is "LONG" or "SHORT" ? side.Trim().ToUpperInvariant() : null;
+
+    /// <summary>The scanner's trailing stop moved the trade's INDEX stop-loss: kept - only ever tighter (a LONG's stop
+    /// only up, a SHORT's only down), so a late or repeated report can never loosen it. False when there is no such
+    /// open trade.</summary>
+    public bool MoveIndexStop(string underlying, string key, decimal stop)
+    {
+        var u = underlying.Trim().ToUpperInvariant();
+        lock (_lock)
+        {
+            var i = _state.Trades.FindLastIndex(t => t.Underlying == u && t.Key == key && t.ExitedUtc is null);
+            if (i < 0 || stop <= 0) return false;
+            var t = _state.Trades[i];
+            var tighter = t.IndexStop is not { } cur || (t.IndexSide == "SHORT" ? stop < cur : stop > cur);
+            if (!tighter) return true;
+            _state.Trades[i] = t with { IndexStop = stop };
+            Save();
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// The server's OWN index stop-loss check on every open live trade - so the stop holds even when the scanner is
+    /// down: a LONG whose futures price is at or below its index stop (a SHORT at or above) is exited on Dhan now, like
+    /// the scanner's own exit would. `priceOf` gives an index's current futures price (null when not fresh). The
+    /// option's own SL leg is on Dhan already; this is the index stop on top of it. Returns the trades exited.
+    /// </summary>
+    public async Task<int> CheckIndexStopsAsync(Func<string, decimal?> priceOf, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        List<ServerLiveTrade> hit;
+        var today = Day(now);
+        lock (_lock)
+        {
+            hit = _state.Trades.Where(t => t.Day == today && t.ExitedUtc is null && t.IndexStop is > 0 && t.IndexSide is not null
+                    && (t.ExitAtMs <= 0 || now.ToUnixTimeMilliseconds() < t.ExitAtMs)
+                    && priceOf(t.Underlying) is { } p && p > 0 && (t.IndexSide == "LONG" ? p <= t.IndexStop : p >= t.IndexStop))
+                .ToList();
+        }
+        foreach (var t in hit)
+        {
+            var price = priceOf(t.Underlying);
+            _logger.LogWarning("Server index SL: {Underlying} {Contract} ({Key}) - futures {Price} through the stop {Stop}; exiting.", t.Underlying, t.Contract, t.Key, price, t.IndexStop);
+            var result = await ExitAsync(t.Underlying, t.Key, $"index SL {t.IndexStop:0.##} (server check, futures {price:0.##})", null, now, cancellationToken);
+            if (_telegram is not null)
+                await _telegram.SendAsync(result.Success
+                    ? $"[Server] LIVE exit - index SL {t.IndexStop:0.##} hit (futures {price:0.##}): {t.Underlying} {t.Contract} closed on Dhan"
+                    : $"[Server] LIVE index SL hit for {t.Underlying} {t.Contract} but the exit FAILED: {result.Message} - check the Dhan panel", CancellationToken.None);
+        }
+        return hit.Count;
+    }
+
     private static string Day(DateTimeOffset now) => IstClock.IstDate(now).ToString("yyyy-MM-dd");
 
     private State Load()
@@ -254,7 +305,8 @@ public sealed class ServerLiveService
 
 /// <summary>What the scanner sends for one alert: the option and the signal's key (strategy-time-side).</summary>
 public sealed record ServerLiveOrderRequest(string Key, string? Strategy, DateOnly Expiry, decimal Strike, string Side, string Action,
-    decimal? StopLossPoints = null, decimal? TargetPoints = null, long ExitAtMs = 0, string? ExitReason = null, string? StrategyId = null)
+    decimal? StopLossPoints = null, decimal? TargetPoints = null, long ExitAtMs = 0, string? ExitReason = null, string? StrategyId = null,
+    decimal? IndexStop = null, string? IndexSide = null)
 {
     /// <summary>The strategy's id - sent, else the key's first part ({id}-{time}-{side}).</summary>
     public string StrategyIdOrFromKey => !string.IsNullOrWhiteSpace(StrategyId) ? StrategyId! : Key.Split('-')[0];
@@ -264,6 +316,36 @@ public sealed record ServerLiveOrderResult(bool Placed, string Message, ManualOr
 
 public sealed record ServerLiveExitRequest(string Key, string? Reason, decimal? Pnl);
 
+public sealed record ServerLiveStopRequest(string Key, decimal Stop);
+
+/// <summary>Every 2 seconds in market hours: the server's own index stop-loss check on the open live trades
+/// (ServerLiveService.CheckIndexStopsAsync), on the live futures price of each index (a price older than a minute is
+/// not used).</summary>
+public sealed class ServerLiveStopWatcher(ServerLiveService live, OptionAnalytics.Server.Services.OrderFlow.OrderFlowService orderFlow, ILogger<ServerLiveStopWatcher> logger) : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(2));
+        while (await timer.WaitForNextTickAsync(stoppingToken))
+        {
+            try
+            {
+                var now = DateTimeOffset.UtcNow;
+                var minute = (int)now.ToOffset(IstClock.Offset).TimeOfDay.TotalMinutes;
+                if (minute < 9 * 60 + 15 || minute > 15 * 60 + 30) continue;
+                decimal? PriceOf(string u)
+                {
+                    var (price, at) = orderFlow.EngineFor(u)?.LastTrade() ?? (0, null);
+                    return price > 0 && at is { } t && now - t < TimeSpan.FromMinutes(1) ? price : null;
+                }
+                await live.CheckIndexStopsAsync(PriceOf, now, stoppingToken);
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) { logger.LogWarning(ex, "The server's index stop-loss check failed this time."); }
+        }
+    }
+}
+
 public sealed record ServerLiveSetRequest(bool Live, int? MaxTrades, decimal? MaxLoss);
 
 public sealed record ServerLiveTrade(string Underlying, string Day, string Key, string Strategy, string Contract, List<string> OrderIds,
@@ -271,6 +353,10 @@ public sealed record ServerLiveTrade(string Underlying, string Day, string Key, 
 {
     /// <summary>When the server's own time exit closes it (ms), 0 = none.</summary>
     public long ExitAtMs { get; init; }
+    /// <summary>The signal's stop-loss on the INDEX (futures price) and its side (LONG / SHORT) - the server exits the
+    /// trade itself when the futures price goes through it (CheckIndexStopsAsync); moved only tighter by the trail.</summary>
+    public decimal? IndexStop { get; init; }
+    public string? IndexSide { get; init; }
 }
 
 public sealed record ServerLiveIndexStatus(string Underlying, bool Live, string? LiveDay, int MaxTrades, decimal MaxLoss, int TradesToday,
