@@ -674,6 +674,13 @@ public sealed class StrategyTuningServiceTests : IDisposable
             C("R2", "short", "2026-10-20", 2, -0.4, 2, 0.2),
         });
         Assert.DoesNotContain(notBetter, t => t.Best);
+        // ...and it says which rule it misses, in plain words.
+        Assert.Contains(notBetter.Single(t => t.Row["tradeSide"] == "long").NotBestBecause, w => w.StartsWith("no better than the strategy as written"));
+        Assert.Contains(notBetter.Single(t => t.Row["tradeSide"] == "short").NotBestBecause, w => w.StartsWith("loses on its unseen days"));
+        Assert.Empty(keeps.Single(t => t.Row["tradeSide"] == "long").NotBestBecause);
+        Assert.Contains("Re-check", TuningPerformance.WhyNotBest(lng with { TestTrades = 0, TestAvg = null, Score = null }).Single());
+        Assert.Contains(TuningPerformance.WhyNotBest(lng with { Periods = 1, PeriodsWon = 1, Recommended = 0 }), w => w.StartsWith("checked in only one month"));
+        Assert.Contains(TuningPerformance.WhyNotBest(lng with { Periods = 3, PeriodsWon = 1 }), w => w == "won in only 1 of 3 months");
 
         // 4. Two months, won in only one of them and down overall: never best.
         Assert.False(TuningPerformance.CanBeBest(lng with { Score = -0.1, PeriodsWon = 1 }));

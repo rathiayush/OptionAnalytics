@@ -242,6 +242,11 @@ const crossText = (t) => {
   return parts.join(' · ')
 }
 
+/** Why a tuned setting is not best yet (TuningPerformance.WhyNotBest) - each rule it misses, and what to do. */
+const notBestText = (t) => (t.best || !t.notBestBecause?.length ? null : (
+  <div style={{ marginTop: 4 }}><b>Not proven yet:</b><ul style={{ margin: '2px 0 0', paddingLeft: 18 }}>{t.notBestBecause.map((w) => <li key={w}>{w}</li>)}</ul></div>
+))
+
 /** Points are only comparable within one index (BANKNIFTY moves ~2.5x NIFTY): shown per index; R compares across. */
 function StrategyPerformance({ reloadKey }) {
   const auth = useAuth()
@@ -346,7 +351,7 @@ function StrategyPerformance({ reloadKey }) {
           return (
             <span key={u} style={{ fontSize: 12 }}>
               <b>{u}</b>{' '}
-              <Tooltip title={`${t.row.setting_text || '-'} · unseen ${t.testTrades} trades ${t.testAvg == null ? '' : `${pts(t.testAvg)}${t.unit === 'pts' ? ' pts' : 'R'}/trade`} · ${crossText(t)}`}>
+              <Tooltip title={<>{t.row.setting_text || '-'} · unseen {t.testTrades} trades {t.testAvg == null ? '' : `${pts(t.testAvg)}${t.unit === 'pts' ? ' pts' : 'R'}/trade`} · {crossText(t)}{notBestText(t)}</>}>
                 {t.best ? <Tag color="gold">best</Tag> : <Tag>top - not proven yet</Tag>}
               </Tooltip>
               {live ? <Tag color="green">live now</Tag> : applyButton(r, t)}
@@ -399,6 +404,7 @@ function StrategyPerformance({ reloadKey }) {
           <div key={`${t.row.index}-${t.row.run_id}-${t.row.setting_text}`} style={{ borderTop: '1px solid #ffffff14', paddingTop: 6, fontSize: 12 }}>
             <div><b>{t.row.index}</b>{t.best && <Tag color="gold" style={{ marginLeft: 6 }}>best</Tag>}{isLive(liveOf(r.strategyId, t.row.index), t.row) && <Tag color="green" style={{ marginLeft: 4 }}>live now</Tag>} {t.row.setting_text || '-'} <ParamsPopover source={t.row} from="row" /></div>
             <Text type="secondary" style={{ fontSize: 12 }}>{t.runs} run(s) · {t.recommended} recommended · unseen {t.testTrades} trades <b style={{ color: col(t.testAvg) }}>{t.testAvg == null ? '-' : `${pts(t.testAvg)}${t.unit === 'pts' ? ' pts' : 'R'}`}</b>/trade · {crossText(t)}</Text>
+            {!t.best && t.notBestBecause?.length > 0 && <Text type="warning" style={{ fontSize: 11, display: 'block' }}>not best: {t.notBestBecause.join('; ')}</Text>}
             <div style={{ marginTop: 4 }}>{applyButton(r, t)}</div>
           </div>
         ))}
@@ -414,7 +420,7 @@ function StrategyPerformance({ reloadKey }) {
           { title: 'Fine-tuned setting', key: 's', render: (_, t) => <span style={{ fontSize: 12 }}>{t.row.setting_text || '-'} <ParamsPopover source={t.row} from="row" /></span> },
           { title: <Tooltip title="How many tuning runs chose this setting, and how many of them recommended it (it also won on the days that run held back)">Chosen / recommended</Tooltip>, key: 'r', width: 150, render: (_, t) => <span style={{ fontSize: 12 }}>{t.runs} run(s) · {t.recommended} recommended</span> },
           { title: <Tooltip title="Days this setting was never chosen on - its own run's held-back days AND every day of every other run for this index (each run re-checks every setting found so far). The honest number: a setting tuned on one month is judged on the other months too.">Unseen days</Tooltip>, key: 'te', width: 170, render: (_, t) => <span style={{ fontSize: 12 }}>{t.testTrades} trades · <b style={{ color: col(t.testAvg) }}>{t.testAvg == null ? '-' : `${pts(t.testAvg)}${t.unit === 'pts' ? ' pts' : 'R'}`}</b>/trade</span> },
-          { title: <Tooltip title="On its unseen days: in how many months it traded it made money, the strategy as written on the same days, and how many runs other than the ones that chose it checked it. Best needs: above 0 on unseen days, better than as written there, and - over 2+ months - winning in at least half of them.">Across months</Tooltip>, key: 'pm', width: 190, render: (_, t) => <span style={{ fontSize: 12 }}>{crossText(t)}</span> },
+          { title: <Tooltip title="On its unseen days: in how many months it traded it made money, the strategy as written on the same days, and how many runs other than the ones that chose it checked it. Best needs: above 0 on unseen days, better than as written there, and - over 2+ months - winning in at least half of them.">Across months</Tooltip>, key: 'pm', width: 230, render: (_, t) => <span style={{ fontSize: 12 }}>{crossText(t)}{!t.best && t.notBestBecause?.length > 0 && <Text type="warning" style={{ fontSize: 11, display: 'block' }}>not best: {t.notBestBecause.join('; ')}</Text>}</span> },
           { title: 'Chosen on', key: 'tr', width: 150, render: (_, t) => <Text type="secondary" style={{ fontSize: 12 }}>{t.trainTrades} trades · {t.trainAvg == null ? '-' : `${pts(t.trainAvg)}${t.unit === 'pts' ? ' pts' : 'R'}`}</Text> },
           { title: <Tooltip title="Unseen-days average shrunk for few trades (avg x n / (n + 10)) - a setting proven over many unseen trades ranks above a lucky one">Score</Tooltip>, key: 'sc', width: 80, render: (_, t) => <span style={{ color: col(t.score) }}>{t.score == null ? '-' : `${pts(t.score)}${t.unit === 'pts' ? '' : 'R'}`}</span> },
           { title: '', key: 'a', width: 170, render: (_, t) => applyButton(r, t) },
