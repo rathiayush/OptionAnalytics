@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import dayjs from 'dayjs'
 import { Alert, Button, Card, Checkbox, Col, DatePicker, InputNumber, Popconfirm, Progress, Row, Segmented, Select, Space, Switch, Table, Tag, Tooltip, Typography, message } from 'antd'
 import { NavBar, useAuth, UP_COLOR, DOWN_COLOR } from './shared.jsx'
@@ -250,6 +250,90 @@ function Score({ s, unit = 'R' }) {
  * server holds (scanner-runner/tune.mjs). Chosen on the older 70% of the days, checked on the newest 30%;
  * applied to the scanner's filters with one click.
  */
+/** A <details> whose content is only built once it is first opened - a result's trade lists are thousands of rows. */
+function LazyDetails({ summary, open = false, style, children }) {
+  const [shown, setShown] = useState(open)
+  return (
+    <details open={open} style={style} onToggle={(e) => { if (e.currentTarget.open) setShown(true) }}>
+      <summary style={{ cursor: 'pointer', fontSize: 12 }}>{summary}</summary>
+      {shown ? children : null}
+    </details>
+  )
+}
+
+/** The finished job's result. Its own component (memo): the page's controls - index, data, strategies, dates - change
+ *  the page's state on every click, and redrawing every table of a big result each time froze the page. */
+const TuningResult = memo(function TuningResult({ result, isAdmin, spot, applyRef }) {
+  const tuned = new Set((result?.results ?? []).map((r) => r.id))
+  const rankedColumns = [
+    { title: '#', dataIndex: 'no', width: 40 },
+    { title: 'Strategy (as written)', dataIndex: 'name', render: (v, r) => <span>{v}{tuned.has(r.id) && <Tag color="blue" style={{ marginLeft: 6 }}>tuned below</Tag>}</span> },
+    { title: 'Trades', dataIndex: 'n', width: 70 },
+    { title: 'Avg R', dataIndex: 'avg', width: 80, render: (v) => <span style={{ color: colR(v) }}>{fmtR(v)}</span> },
+    { title: 'Total R', dataIndex: 'total', width: 84, render: (v, r) => (r.n ? <span style={{ color: colR(v) }}>{fmtR(v)}</span> : '-') },
+    { title: 'Win %', dataIndex: 'winRate', width: 66, render: pct },
+    { title: <Tooltip title="Average R minus one standard error - rewards strategies that win consistently, not on one lucky day">Score</Tooltip>, dataIndex: 'score', width: 80, render: (v) => fmtR(v) },
+  ]
+  const topColumns = (unit) => [
+    { title: 'Setting', key: 'p', render: (_, row) => <span style={{ fontSize: 12 }}>{settingText(row.params, unit)}</span> },
+    { title: 'Train (older days)', key: 'tr', render: (_, row) => <Score s={row.train} unit={unit} /> },
+    { title: 'Test (newest days)', key: 'te', render: (_, row) => <Score s={row.test} unit={unit} /> },
+  ]
+
+  return (
+    <>
+            <Card size="small" title={`${result.underlying} · ${result.days?.length ?? 0} day(s) · finished ${when(result.finishedUtc)}`}
+              extra={<Text type="secondary" style={{ fontSize: 11 }}>{result.what ? `tuned: ${{ both: 'OI, then trade', oi: 'OI confirmation', trade: 'trade settings', option: 'option trade', all: 'everything' }[result.what] ?? result.what}${['both', 'oi', 'all'].includes(result.what) && result.oiFactors ? ` (${result.oiFactors.length} OI input(s), ${result.search === 'full' ? 'every combination' : 'step by step'})` : ''} · ` : ''}{result.days?.filter((d) => d.estimated).length ? `${result.days.filter((d) => d.estimated).length} estimated day(s) · ` : ''}min {result.minTrades} trades · {result.days?.[result.days.length - 1]?.date} to {result.days?.[0]?.date}{result.from || result.to ? ` (range asked: ${result.from ?? 'start'} to ${result.to ?? 'yesterday'})` : ''}</Text>}>
+              {result.data === 'spot' && <Alert type="info" showIcon style={{ marginBottom: 8 }} message="Spot + options only: the index candles and the option chain's OI, no futures and no order flow. Points are index points; the option bought and sold are priced beside them. The live scanner does not run these strategies yet, so there is nothing to apply - this measures what they would have done." />}
+              {result.skipped?.length > 0 && <SkippedDays skipped={result.skipped} />}
+              <Table size="small" rowKey="id" columns={rankedColumns} dataSource={result.ranked ?? []} pagination={false} scroll={{ y: 320 }} />
+              <LazyDetails style={{ marginTop: 8 }} summary={<>The {result.days?.length ?? 0} day(s) used{result.skipped?.length ? ` and ${result.skipped.length} left out` : ''}: where each came from and how complete it was{result.fetched ? ` · ${result.fetched.cacheHits} read from the disk cache, ${result.fetched.requests} fetched${result.fetched.retries ? `, ${result.fetched.retries} retried` : ''}` : ''}{result.fastOi?.used ? ` · option chain fetched a cycle at a time (${result.fastOi.seeded} day(s), checked against a day fetched on its own)` : result.fastOi?.reason ? ` · option chain fetched a day at a time: ${result.fastOi.reason}` : ''}</>}>
+                <div style={{ marginTop: 6 }}><DaysTable days={result.days} skipped={result.skipped} /></div>
+              </LazyDetails>
+              <Text type="secondary" style={{ fontSize: 12 }}>Every trade of this run, with its date and time: <a href="/trades">Trades page</a>.</Text>
+            </Card>
+            {(result.results ?? []).map((r) => (
+              <Card key={r.id} size="small"
+                title={<Space size={8} wrap><span>#{r.no} {r.name}</span>{r.belowMin ? <Tag color="default">below the minimum trades</Tag> : r.recommend ? <Tag color="success">recommended</Tag> : <Tag color="warning">keep as written</Tag>}</Space>}
+                extra={isAdmin && r.best && !spot && (
+                  <Popconfirm title={`Apply to #${r.no} ${r.name}?`} description={`${r.recommend ? variantText(r.best.params) : `Not recommended: ${r.reason}. Apply anyway?`}${r.unit === 'pts' ? ' The option part - buy or sell, the strike and its SL / target - is applied to this strategy as well.' : ''} Whatever was applied to this strategy before is replaced.`} okText="Apply" onConfirm={() => applyRef.current(r)}>
+                    <Button size="small" type={r.recommend ? 'primary' : 'default'}>Apply to the scanner</Button>
+                  </Popconfirm>
+                )}>
+                <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                  <Text style={{ fontSize: 12 }}>{r.reason}. Chosen on {r.trainDays?.length} day(s) ({r.trainDays?.[0]} to {r.trainDays?.at(-1)}), checked on {r.testDays?.length} ({r.testDays?.[0] ?? '-'} to {r.testDays?.at(-1) ?? '-'}). {r.belowMin ? `${r.qualified} of ${r.tried} settings had 2+ trades; none had ${r.minTradesWanted ?? result.minTrades}+.` : `${r.qualified} of ${r.tried} settings had ${result.minTrades}+ trades.`}</Text>
+                  <Table size="small" pagination={false} rowKey="k" columns={[
+                    { title: '', dataIndex: 'k', width: 120, render: (k) => <b>{k}</b> },
+                    { title: 'Setting', key: 'p', render: (_, row) => <span style={{ fontSize: 12 }}>{settingText(row.params, r.unit)}</span> },
+                    { title: 'Train (older days)', key: 'tr', render: (_, row) => <Score s={row.train} unit={r.unit} /> },
+                    { title: 'Test (newest days)', key: 'te', render: (_, row) => <Score s={row.test} unit={r.unit} /> },
+                  ]} dataSource={[{ k: 'As written', ...r.baseline }, ...(r.best ? [{ k: 'Best setting', ...r.best }] : [])]} />
+                  <PointsSummary index={result.underlying} option={r.unit === 'pts'} rows={[{ k: r.unit === 'pts' ? 'As before' : 'As written', points: r.baseline?.points }, ...(r.best ? [{ k: 'Best setting', points: r.best.points }] : [])]} />
+                  {r.best && (
+                    <LazyDetails summary="Every parameter: as written, the best setting, and what each value of the tuned inputs did (blue = chosen; avg per trade on the train days)">
+                      <div style={{ marginTop: 6 }}><ParamsTable r={r} minTrades={result.minTrades} /></div>
+                    </LazyDetails>
+                  )}
+                  {r.best?.suggest && (
+                    <Alert type="info" showIcon message={`To trade it like this: ${r.best.suggest.leg.toUpperCase()} ${r.best.suggest.moneyness === 0 ? 'ATM' : `${Math.abs(r.best.suggest.moneyness)} strike(s) ${r.best.suggest.moneyness > 0 ? 'ITM' : 'OTM'}`}, option SL about ${r.best.suggest.slPoints.toFixed(1)} and target about ${r.best.suggest.targetPoints.toFixed(1)} premium points (on a typical entry premium of ${r.best.suggest.premium.toFixed(1)}). Apply to the scanner sets all of this for this strategy - no need to change Trade settings by hand.`} />
+                  )}
+                  {r.best?.trades?.length > 0 && (
+                    <LazyDetails summary={`The ${r.best.trades.length} trades of the best setting: index, SL and target, futures and option prices in and out, points`}>
+                      <div style={{ marginTop: 6 }}>{r.unit === 'pts' ? <OptionTradesTable trades={r.best.trades} /> : <TradesTable trades={r.best.trades} />}</div>
+                    </LazyDetails>
+                  )}
+                  {r.top?.length > 1 && (
+                    <LazyDetails summary={`The ${r.top.length} best settings on the train days`}>
+                      <Table size="small" pagination={false} rowKey={(row) => settingText(row.params, r.unit)} columns={topColumns(r.unit)} dataSource={r.top} style={{ marginTop: 6 }} />
+                    </LazyDetails>
+                  )}
+                </Space>
+              </Card>
+            ))}
+          </>
+  )
+})
+
 export default function StrategyTuningPage() {
   const auth = useAuth()
   const isAdmin = auth?.user?.role === 'Admin'
@@ -275,6 +359,8 @@ export default function StrategyTuningPage() {
   const [status, setStatus] = useState(null)
   const [result, setResult] = useState(null)
   const [resultError, setResultError] = useState(null)
+  // Drawn in the background: a big result takes a moment to lay out, and the page's buttons stay usable meanwhile.
+  const shownResult = useDeferredValue(result)
 
   const loadResult = (u = underlying) => fetch(`/api/strategy-tuning/result/${u}${spot ? '?data=spot' : ''}`)
     .then(async (r) => (r.ok ? r.json() : Promise.reject(new Error((await r.json().catch(() => null))?.error ?? `HTTP ${r.status}`))))
@@ -333,6 +419,8 @@ export default function StrategyTuningPage() {
     message.success(`Tuning ${underlying} started`)
   }
   const cancel = () => fetch('/api/strategy-tuning/cancel', { method: 'POST' }).then(loadStatus)
+  // Apply, for the result's buttons - through a ref so the (memoised) result is not redrawn on every page change.
+  const applyRef = useRef(null)
   const apply = async (r) => {
     try {
       // `pts` means the option itself was tuned, so the buy / sell, the strike and its SL / target go across too.
@@ -346,6 +434,7 @@ export default function StrategyTuningPage() {
       message.error(err.message)
     }
   }
+  useEffect(() => { applyRef.current = apply })
 
   const p = status?.progress
   // Each stage says where it is; a missing number never prints as "undefined" or "NaN".
@@ -367,22 +456,6 @@ export default function StrategyTuningPage() {
     : p.stage === 'rank' ? 80
     : p.stage === 'tune' ? 80 + Math.round((((nOf(p.done) ?? 0) + (p.of ? Math.min(1, p.tried / p.of) : 0)) / Math.max(1, nOf(p.total) ?? 1)) * 20)
     : 100
-
-  const tuned = new Set((result?.results ?? []).map((r) => r.id))
-  const rankedColumns = [
-    { title: '#', dataIndex: 'no', width: 40 },
-    { title: 'Strategy (as written)', dataIndex: 'name', render: (v, r) => <span>{v}{tuned.has(r.id) && <Tag color="blue" style={{ marginLeft: 6 }}>tuned below</Tag>}</span> },
-    { title: 'Trades', dataIndex: 'n', width: 70 },
-    { title: 'Avg R', dataIndex: 'avg', width: 80, render: (v) => <span style={{ color: colR(v) }}>{fmtR(v)}</span> },
-    { title: 'Total R', dataIndex: 'total', width: 84, render: (v, r) => (r.n ? <span style={{ color: colR(v) }}>{fmtR(v)}</span> : '-') },
-    { title: 'Win %', dataIndex: 'winRate', width: 66, render: pct },
-    { title: <Tooltip title="Average R minus one standard error - rewards strategies that win consistently, not on one lucky day">Score</Tooltip>, dataIndex: 'score', width: 80, render: (v) => fmtR(v) },
-  ]
-  const topColumns = (unit) => [
-    { title: 'Setting', key: 'p', render: (_, row) => <span style={{ fontSize: 12 }}>{settingText(row.params, unit)}</span> },
-    { title: 'Train (older days)', key: 'tr', render: (_, row) => <Score s={row.train} unit={unit} /> },
-    { title: 'Test (newest days)', key: 'te', render: (_, row) => <Score s={row.test} unit={unit} /> },
-  ]
 
   return (
     <div className="tuning-page" style={{ maxWidth: 1400, margin: '0 auto', padding: '24px 16px' }}>
@@ -508,62 +581,7 @@ export default function StrategyTuningPage() {
           </Space>
         </Card>
 
-        {result && (
-          <>
-            <Card size="small" title={`${result.underlying} · ${result.days?.length ?? 0} day(s) · finished ${when(result.finishedUtc)}`}
-              extra={<Text type="secondary" style={{ fontSize: 11 }}>{result.what ? `tuned: ${{ both: 'OI, then trade', oi: 'OI confirmation', trade: 'trade settings', option: 'option trade', all: 'everything' }[result.what] ?? result.what}${['both', 'oi', 'all'].includes(result.what) && result.oiFactors ? ` (${result.oiFactors.length} OI input(s), ${result.search === 'full' ? 'every combination' : 'step by step'})` : ''} · ` : ''}{result.days?.filter((d) => d.estimated).length ? `${result.days.filter((d) => d.estimated).length} estimated day(s) · ` : ''}min {result.minTrades} trades · {result.days?.[result.days.length - 1]?.date} to {result.days?.[0]?.date}{result.from || result.to ? ` (range asked: ${result.from ?? 'start'} to ${result.to ?? 'yesterday'})` : ''}</Text>}>
-              {result.data === 'spot' && <Alert type="info" showIcon style={{ marginBottom: 8 }} message="Spot + options only: the index candles and the option chain's OI, no futures and no order flow. Points are index points; the option bought and sold are priced beside them. The live scanner does not run these strategies yet, so there is nothing to apply - this measures what they would have done." />}
-              {result.skipped?.length > 0 && <SkippedDays skipped={result.skipped} />}
-              <Table size="small" rowKey="id" columns={rankedColumns} dataSource={result.ranked ?? []} pagination={false} scroll={{ y: 320 }} />
-              <details style={{ marginTop: 8 }}>
-                <summary style={{ cursor: 'pointer', fontSize: 12 }}>The {result.days?.length ?? 0} day(s) used{result.skipped?.length ? ` and ${result.skipped.length} left out` : ''}: where each came from and how complete it was{result.fetched ? ` · ${result.fetched.cacheHits} read from the disk cache, ${result.fetched.requests} fetched${result.fetched.retries ? `, ${result.fetched.retries} retried` : ''}` : ''}{result.fastOi?.used ? ` · option chain fetched a cycle at a time (${result.fastOi.seeded} day(s), checked against a day fetched on its own)` : result.fastOi?.reason ? ` · option chain fetched a day at a time: ${result.fastOi.reason}` : ''}</summary>
-                <div style={{ marginTop: 6 }}><DaysTable days={result.days} skipped={result.skipped} /></div>
-              </details>
-              <Text type="secondary" style={{ fontSize: 12 }}>Every trade of this run, with its date and time: <a href="/trades">Trades page</a>.</Text>
-            </Card>
-            {(result.results ?? []).map((r) => (
-              <Card key={r.id} size="small"
-                title={<Space size={8} wrap><span>#{r.no} {r.name}</span>{r.belowMin ? <Tag color="default">below the minimum trades</Tag> : r.recommend ? <Tag color="success">recommended</Tag> : <Tag color="warning">keep as written</Tag>}</Space>}
-                extra={isAdmin && r.best && !spot && (
-                  <Popconfirm title={`Apply to #${r.no} ${r.name}?`} description={`${r.recommend ? variantText(r.best.params) : `Not recommended: ${r.reason}. Apply anyway?`}${r.unit === 'pts' ? ' The option part - buy or sell, the strike and its SL / target - is applied to this strategy as well.' : ''} Whatever was applied to this strategy before is replaced.`} okText="Apply" onConfirm={() => apply(r)}>
-                    <Button size="small" type={r.recommend ? 'primary' : 'default'}>Apply to the scanner</Button>
-                  </Popconfirm>
-                )}>
-                <Space direction="vertical" size={8} style={{ width: '100%' }}>
-                  <Text style={{ fontSize: 12 }}>{r.reason}. Chosen on {r.trainDays?.length} day(s) ({r.trainDays?.[0]} to {r.trainDays?.at(-1)}), checked on {r.testDays?.length} ({r.testDays?.[0] ?? '-'} to {r.testDays?.at(-1) ?? '-'}). {r.belowMin ? `${r.qualified} of ${r.tried} settings had 2+ trades; none had ${r.minTradesWanted ?? result.minTrades}+.` : `${r.qualified} of ${r.tried} settings had ${result.minTrades}+ trades.`}</Text>
-                  <Table size="small" pagination={false} rowKey="k" columns={[
-                    { title: '', dataIndex: 'k', width: 120, render: (k) => <b>{k}</b> },
-                    { title: 'Setting', key: 'p', render: (_, row) => <span style={{ fontSize: 12 }}>{settingText(row.params, r.unit)}</span> },
-                    { title: 'Train (older days)', key: 'tr', render: (_, row) => <Score s={row.train} unit={r.unit} /> },
-                    { title: 'Test (newest days)', key: 'te', render: (_, row) => <Score s={row.test} unit={r.unit} /> },
-                  ]} dataSource={[{ k: 'As written', ...r.baseline }, ...(r.best ? [{ k: 'Best setting', ...r.best }] : [])]} />
-                  <PointsSummary index={result.underlying} option={r.unit === 'pts'} rows={[{ k: r.unit === 'pts' ? 'As before' : 'As written', points: r.baseline?.points }, ...(r.best ? [{ k: 'Best setting', points: r.best.points }] : [])]} />
-                  {r.best && (
-                    <details open>
-                      <summary style={{ cursor: 'pointer', fontSize: 12 }}>Every parameter: as written, the best setting, and what each value of the tuned inputs did (blue = chosen; avg per trade on the train days)</summary>
-                      <div style={{ marginTop: 6 }}><ParamsTable r={r} minTrades={result.minTrades} /></div>
-                    </details>
-                  )}
-                  {r.best?.suggest && (
-                    <Alert type="info" showIcon message={`To trade it like this: ${r.best.suggest.leg.toUpperCase()} ${r.best.suggest.moneyness === 0 ? 'ATM' : `${Math.abs(r.best.suggest.moneyness)} strike(s) ${r.best.suggest.moneyness > 0 ? 'ITM' : 'OTM'}`}, option SL about ${r.best.suggest.slPoints.toFixed(1)} and target about ${r.best.suggest.targetPoints.toFixed(1)} premium points (on a typical entry premium of ${r.best.suggest.premium.toFixed(1)}). Apply to the scanner sets all of this for this strategy - no need to change Trade settings by hand.`} />
-                  )}
-                  {r.best?.trades?.length > 0 && (
-                    <details>
-                      <summary style={{ cursor: 'pointer', fontSize: 12 }}>The {r.best.trades.length} trades of the best setting: index, SL and target, futures and option prices in and out, points</summary>
-                      <div style={{ marginTop: 6 }}>{r.unit === 'pts' ? <OptionTradesTable trades={r.best.trades} /> : <TradesTable trades={r.best.trades} />}</div>
-                    </details>
-                  )}
-                  {r.top?.length > 1 && (
-                    <details>
-                      <summary style={{ cursor: 'pointer', fontSize: 12 }}>The {r.top.length} best settings on the train days</summary>
-                      <Table size="small" pagination={false} rowKey={(row) => settingText(row.params, r.unit)} columns={topColumns(r.unit)} dataSource={r.top} style={{ marginTop: 6 }} />
-                    </details>
-                  )}
-                </Space>
-              </Card>
-            ))}
-          </>
-        )}
+        {shownResult && <TuningResult result={shownResult} isAdmin={isAdmin} spot={shownResult.data === 'spot'} applyRef={applyRef} />}
         {!result && resultError && !running && <Alert type="info" showIcon message={resultError} description="Run a tuning job to see which settings each strategy does best with." />}
       </Space>
     </div>
