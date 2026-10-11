@@ -686,8 +686,9 @@ async function main() {
   // Past the time budget it stops and keeps what it checked.
   state.stage = 'check'
   progress({ stage: 'check', done: 0, total: 1 })
-  const candidates = mergeCandidates(DATA === 'spot' ? [] : candidatesFrom(HISTORY_DIR, { underlying: U, data: DATA }), candidatesOfResults(results))
-  const checks = DATA === 'spot' ? [] : crossCheck(days, candidates, trail, { stop: overBudget })
+  // (Spot + options too: its settings now trade live on the server scanner, so they need the same record on unseen days.)
+  const candidates = mergeCandidates(candidatesFrom(HISTORY_DIR, { underlying: U, data: DATA }), candidatesOfResults(results))
+  const checks = crossCheck(days, candidates, trail, { stop: overBudget })
   const checkSummary = { settings: candidates.length, rows: checks.length, fromEarlierRuns: candidates.filter((c) => c.runs.some((r) => r !== 'this run')).length }
   // The last reading of the server's Dhan counter, so the report's own before/after covers the whole job.
   await dhanBudgetLeft().catch(() => null)

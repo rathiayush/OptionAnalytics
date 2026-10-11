@@ -80,13 +80,17 @@ public sealed class SpotController : ControllerBase
     public IActionResult GetUnderlyings() =>
         Ok(_feed.States.Values.Select(s => new { underlying = s.Underlying, step = s.Step }));
 
+    /// <summary>The 1-minute spot candles in memory (the backfill, then the live feed's own - the still-forming minute
+    /// last). `from`: only the candles starting at or after it - the server scanner reads today's every minute for the
+    /// spot + options strategies.</summary>
     [HttpGet("{underlying}/candles")]
-    public IActionResult GetCandles(string underlying)
+    public IActionResult GetCandles(string underlying, [FromQuery] DateTimeOffset? from = null)
     {
         if (!_feed.States.TryGetValue(underlying.ToUpperInvariant(), out var state))
             return NotFound(new { error = $"Unknown underlying '{underlying}'." });
 
-        return Ok(state.GetCandles());
+        var candles = state.GetCandles();
+        return Ok(from is { } f ? candles.Where(c => c.Time >= f).ToList() : candles);
     }
 
     /// <summary>The same spot history as GetCandles, but carrying each bar's own real index volume

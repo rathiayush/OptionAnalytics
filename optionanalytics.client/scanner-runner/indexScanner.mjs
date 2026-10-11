@@ -6,13 +6,21 @@
 // ServerLiveService checks every limit and places it; the scanner never reaches the manual live-trading API), and
 // its exit closes it there. The paper trade beside it keeps the record either way.
 //
+// The SPOT + OPTIONS strategies (spotEngine.js) run here too, once each finished minute, on today's 1-minute spot
+// candles (the server's own, /api/spot/{index}/candles) against the same OI context - exactly as the Strategy tuning
+// measures them. Their stop / target / trail are in SPOT points, so their outcomes follow the spot candles and a live
+// order tells the server to watch its index stop on the spot price. Every spot signal is recorded; a spot strategy
+// is paper-traded (and, live today, ordered) where it was applied (a setting applied for this index or for all) or put
+// on this index's live list - or picked in the page's alert list.
+//
 // Everything outside (HTTP, Telegram, the state file, the clock) comes in through `io`, so the tests can
 // drive a whole day through it.
 
 import { buildOiContext, optionTradeAt, premiumAt, strategyStats, topFifteen, STRATEGY_BY_ID, DEFAULT_TRAIL, optionPlanFor, squareOffMs, filtersForIndex, lotsFor } from '../src/strategyEngine.js'
+import { evaluateSpotStrategies, spotBarsOf } from '../src/spotEngine.js'
 import { liquiditySignals, pullStackSignals, autoBigLots } from '../src/orderFlowMath.js'
 import {
-  MIN, msOf, scanTick, trailFor, alertIdsFor, followSetups, setupEvents, newSetupEventMemory, newPosition, positionRows, sameSignal,
+  MIN, COOLDOWN_MS, msOf, scanTick, trailFor, trailOf, alertIdsFor, followSetups, setupEvents, newSetupEventMemory, newPosition, positionRows, sameSignal,
   withLevelChange, setupWasTraded, paperEntryText, setupExitText, paperExitText, scannerLogBody, scannerLogSig, scannerProfileOf, PAPER_TRADE_LOT_SIZE,
 } from '../src/scannerCore.js'
 import { orderFlowFromSnapshot, applyOrderFlowPush, mergePrints, applyOiTicks, applyFuturesTicks, applySpotUpdate, expiryFlagOf, TAPE_PRINTS } from '../src/liveFeeds.js'
@@ -38,6 +46,8 @@ const istClock = (ms) => {
   return { minute: d.getUTCHours() * 60 + d.getUTCMinutes(), weekday: d.getUTCDay() }
 }
 const LOG_EVERY_MS = 3_000
+// A finished spot minute not in the server's candles yet: looked for again on the next look, for up to this long.
+const SPOT_WAIT_MS = 30_000
 export const TAG = '[Server]'
 
 /** Signals in the order to take them: the ones on the live list first, best first (the list's order); the rest after,
@@ -74,6 +84,9 @@ export class IndexScanner {
     this.events = newSetupEventMemory()
     this.positions = []
     this.trailLog = []
+    this.spotBars = [] // today's FINISHED 1-minute spot candles (spotBarsOf), up to the last spot look
+    this.spotMinute = 0 // the last minute the spot strategies were judged at
+    this.spotError = null
     this.notified = new Set()
     this.primedExits = false
     this.watching = []
@@ -113,6 +126,15 @@ export class IndexScanner {
   alertIds() {
     if (Array.isArray(this.config.alertIds)) return this.config.alertIds
     return alertIdsFor(this.settings(), this.config.top ?? topFifteen(strategyStats([])))
+  }
+
+  // Whether a strategy is alerted (paper-traded, and ordered when live today). The futures ones: the alert list. A spot
+  // one also where it was APPLIED - a setting applied for this index or for all (its filters) - or is on this index's
+  // live list: the Top 15 is the futures strategies' and knows nothing of them.
+  isAlerted(id, cfg = this.settings()) {
+    if (this.alertIds().includes(id)) return true
+    if (!STRATEGY_BY_ID[id]?.spot) return false
+    return (this.config.liveList?.[this.underlying] ?? []).includes(id) || Object.keys(cfg.filters?.[id] ?? {}).length > 0
   }
 
   setConfig(config) {
@@ -192,6 +214,8 @@ export class IndexScanner {
         oi: buildOiContext(run, expiryDate, { live: true }),
         profile: scannerProfileOf(prev?.bars, u, rowSize),
         spotVp: spotVp?.success ? spotVp : null,
+        // Today's spot minutes so far (the spot strategies' bars until the first spot look brings the server's own).
+        spotBars: spotBarsOf(run.spotCandlesOneMinute ?? run.spotCandles),
       })
       this.error = null
       this.failedLoads = 0
@@ -206,6 +230,9 @@ export class IndexScanner {
   setData(data) {
     this.data = data
     this.oiVersion = 0
+    // The seed's last candle can be the minute still running when it was read - only finished ones are kept.
+    const clock = this.clock() ?? this.io.now()
+    if (data.spotBars?.length) this.spotBars = data.spotBars.filter((b) => b.t + MIN <= clock)
     // Profile-level alerts: the previous session's futures volume / market profile levels, and the previous
     // day's spot volume profile; nothing is armed until price is away from a level.
     const tpoRow = tpoRowFor(this.underlying, this.rowSize())
@@ -239,8 +266,18 @@ export class IndexScanner {
     return v.heatmap?.at(-1)?.t ?? (v.meta?.lastTradeAt ? msOf(v.meta.lastTradeAt) : null)
   }
 
+  // Every fired setup with its outcome so far: the futures ones on the futures minutes, the spot ones on the spot
+  // minutes (their stop / target are spot prices).
+  followAll(nowMs) {
+    const fired = this.memory.fired
+    const futures = followSetups(fired.filter((s) => !s.spot), this.trailLog, this.data?.view?.minuteBars, nowMs)
+    const spot = fired.filter((s) => s.spot)
+    if (!spot.length) return futures
+    return [...futures, ...followSetups(spot, this.trailLog, this.spotBars, nowMs)].sort((a, b) => a.t - b.t)
+  }
+
   rows(nowMs) {
-    const withOutcome = followSetups(this.memory.fired, this.trailLog, this.data?.view?.minuteBars, nowMs)
+    const withOutcome = this.followAll(nowMs)
     return positionRows({ positions: this.positions, dayResults: withOutcome, withOutcome, oi: this.data?.oi, nowMs, settings: this.settings() })
   }
 
@@ -290,25 +327,73 @@ export class IndexScanner {
       nowMs, view: d.view, tapePrints: d.prints, liquidity, pullStack, oi: d.oi, estimated, lotSize, largeLots: bigLots, profile: d.profile, rowSize,
       filters: cfg.filters, trail: trailFor(cfg, this.underlying),
     }, this.memory)
+    const fresh = []
     if (tick) {
       this.watching = tick.watching
       if (tick.fresh.length) {
         this.memory.fired = tick.fired
-        this.dirty = true
-        // Live: two signals in the same moment - the better-proven one (higher on the index's live list) goes first,
-        // so it gets the one open live slot.
-        for (const s of byLiveList(tick.fresh, this.live ? this.config.liveList?.[this.underlying] : null)) await this.onFired(s, cfg)
+        fresh.push(...tick.fresh)
       }
+    }
+    // The spot + options strategies, once each finished minute.
+    const spotFresh = await this.scanSpot(nowMs, cfg)
+    if (spotFresh.length) {
+      this.memory.fired = [...this.memory.fired, ...spotFresh]
+      fresh.push(...spotFresh)
+    }
+    if (fresh.length) {
+      this.dirty = true
+      // Live: two signals in the same moment - the better-proven one (higher on the index's live list) goes first,
+      // so it gets the one open live slot.
+      for (const s of byLiveList(fresh, this.live ? this.config.liveList?.[this.underlying] : null)) await this.onFired(s, cfg)
     }
     await this.follow(nowMs, cfg)
     if (this.dirty) { await this.io.saveState(this.underlying, this.date, this.snapshotState()); this.dirty = false }
     await this.postLog(nowMs, cfg)
   }
 
+  // The spot strategies at the minute the clock is in: judged once per minute, at its start, on the spot minutes that had
+  // FINISHED by then and the OI known then (no look-ahead) - the setups evaluateSpotStrategies gives the Strategy
+  // tuning for the same minute. Each strategy and side at most once per COOLDOWN_MS, as the futures ones (and as the
+  // tuning's firstPerCooldown). Returns the fresh setups.
+  async scanSpot(nowMs, cfg) {
+    const minute = Math.floor(nowMs / MIN) * MIN
+    if (minute <= this.spotMinute) return []
+    const bars = await this.spotBarsUpTo(minute)
+    // The minute that just ended must be in - its close is the entry. Not yet: looked for again on the next look.
+    if (bars.at(-1)?.t !== minute - MIN) {
+      if (nowMs - minute >= SPOT_WAIT_MS) this.spotMinute = minute
+      return []
+    }
+    this.spotMinute = minute
+    const trail = trailFor(cfg, this.underlying)
+    const setups = evaluateSpotStrategies({ nowMs: minute, bars, oi: this.data.oi, filters: cfg.filters })
+    const recentlyFired = (s) => this.memory.fired.some((f) => f.id === s.id && f.side === s.side && s.t - f.t < COOLDOWN_MS)
+    return setups.filter((s) => !recentlyFired(s)).map((s) => ({ ...s, trail: trailOf(s, trail), market: null }))
+  }
+
+  // Today's finished spot minutes by `minute`: the server's own 1-minute spot candles (its live feed, every tick), over
+  // the day's seed from the OI replay; a failed read keeps what is already known.
+  async spotBarsUpTo(minute) {
+    const from = Date.parse(`${this.date}T09:15:00+05:30`)
+    try {
+      const candles = await this.io.api(`/api/spot/${this.underlying}/candles?${new URLSearchParams({ from: new Date(from).toISOString() })}`)
+      const byMinute = new Map(this.spotBars.map((b) => [b.t, b]))
+      // Only finished minutes are kept: a running one read now would later pass for the whole minute.
+      for (const b of spotBarsOf(Array.isArray(candles) ? candles : [])) if (b.t >= from && b.t + MIN <= minute) byMinute.set(b.t, b)
+      this.spotBars = [...byMinute.values()].sort((a, b) => a.t - b.t)
+      this.spotError = null
+    } catch (err) {
+      if (this.spotError == null) this.io.log(`${this.underlying}: spot candles not read - ${err.message}`)
+      this.spotError = err.message
+    }
+    return this.spotBars.filter((b) => b.t + MIN <= minute)
+  }
+
   async onFired(s, cfg) {
     const meta = STRATEGY_BY_ID[s.id]
     this.io.log(`${this.underlying}: #${meta?.no} ${meta?.name} ${s.side} @ ${s.entry.toFixed(1)} (SL ${s.stop.toFixed(1)}, target ${s.target.toFixed(1)})`)
-    if (!cfg.alerts || !this.alertIds().includes(s.id)) return
+    if (!cfg.alerts || !this.isAlerted(s.id, cfg)) return
     // The moment it alerts, the option is paper-traded (the sell side by default) - as on the page.
     // Buy or sell, which strike, and the SL / target - this strategy's own if it was tuned and applied, else the
     // scanner's own setting (optionPlanFor).
@@ -331,7 +416,7 @@ export class IndexScanner {
     }
     // Not traded: the signal itself goes out.
     if (cfg.telegram !== false) {
-      await this.io.telegram(`${TAG} ${this.underlying} #${meta?.no} ${meta?.name} ${s.side} - futures ${s.entry.toFixed(1)} (SL ${s.stop.toFixed(1)}, target ${s.target.toFixed(1)})`)
+      await this.io.telegram(`${TAG} ${this.underlying} #${meta?.no} ${meta?.name} ${s.side} - ${s.spot ? 'spot' : 'futures'} ${s.entry.toFixed(1)} (SL ${s.stop.toFixed(1)}, target ${s.target.toFixed(1)})`)
     }
   }
 
@@ -351,8 +436,9 @@ export class IndexScanner {
           key: position.key, strategyId: s.id, strategy: `#${meta?.no} ${meta?.name ?? s.id}`, expiry, strike: trade.strike, side: trade.side, action: trade.action,
           stopLossPoints: levels.slPts, targetPoints: levels.targetPts, lots: position.lots,
           // The signal's stop on the INDEX: the server exits the trade itself when the futures go through it - so the
-          // index stop holds even if this scanner stops (the option's own SL / target legs are on Dhan already).
-          indexStop: s.stop, indexSide: s.side, indexTarget: s.target,
+          // index stop holds even if this scanner stops (the option's own SL / target legs are on Dhan already). A spot
+          // strategy's levels are SPOT prices: the server watches those on the spot.
+          indexStop: s.stop, indexSide: s.side, indexTarget: s.target, priceBasis: s.spot ? 'spot' : 'futures',
           // The server closes it itself at the setup's time stop (15:10 at the latest) - even if this scanner stops.
           exitAtMs: Math.min(s.timeStopMs ?? squareOffMs(s.t), squareOffMs(s.t)), exitReason: `time stop of #${meta?.no} ${meta?.short ?? s.id}`,
         },
@@ -368,7 +454,7 @@ export class IndexScanner {
       })
       this.dirty = true
       this.io.log(`${this.underlying}: LIVE ${trade.action} ${trade.strike} ${trade.side} placed - ${res.message}`)
-      if (cfg.telegram !== false) await this.io.telegram(`${TAG} LIVE order placed: ${trade.action} ${this.underlying} ${trade.strike} ${trade.side} x${position.lots} lot(s) @ ~${position.premium.toFixed(1)} - #${meta?.no} ${meta?.name} ${s.side}, futures ${s.entry.toFixed(1)}; option SL ${levels.slPts.toFixed(1)} / target ${levels.targetPts.toFixed(1)} pts${o.success === false ? ` - PARTLY placed: ${res.message}` : ''}`)
+      if (cfg.telegram !== false) await this.io.telegram(`${TAG} LIVE order placed: ${trade.action} ${this.underlying} ${trade.strike} ${trade.side} x${position.lots} lot(s) @ ~${position.premium.toFixed(1)} - #${meta?.no} ${meta?.name} ${s.side}, ${s.spot ? 'spot' : 'futures'} ${s.entry.toFixed(1)}; option SL ${levels.slPts.toFixed(1)} / target ${levels.targetPts.toFixed(1)} pts${o.success === false ? ` - PARTLY placed: ${res.message}` : ''}`)
       return
     }
     position.liveNote = `not placed - ${res?.message ?? 'no answer'}`
@@ -379,10 +465,12 @@ export class IndexScanner {
   // Signals' exits and the paper trades' exits, each announced once.
   async follow(nowMs, cfg) {
     const d = this.data
-    const withOutcome = followSetups(this.memory.fired, this.trailLog, d.view.minuteBars, nowMs)
-    for (const event of setupEvents(withOutcome, this.events, !!d.view.minuteBars?.length)) {
+    const withOutcome = this.followAll(nowMs)
+    // Restored setups are judged once their bars are in - the spot ones' too.
+    const barsReady = !!d.view.minuteBars?.length && (this.spotBars.length > 0 || !this.memory.fired.some((s) => s.spot))
+    for (const event of setupEvents(withOutcome, this.events, barsReady)) {
       if (event.type !== 'exit') continue
-      if (!cfg.alerts || !this.alertIds().includes(event.s.id)) continue
+      if (!cfg.alerts || !this.isAlerted(event.s.id, cfg)) continue
       if (cfg.telegram !== false && !setupWasTraded(this.positions, event.s)) await this.io.telegram(`${TAG} ${this.underlying} ${setupExitText(event.s)}`)
     }
     const rows = positionRows({ positions: this.positions, dayResults: withOutcome, withOutcome, oi: d.oi, nowMs, settings: cfg })
@@ -472,6 +560,7 @@ export class IndexScanner {
       underlying: this.underlying, enabled: this.enabled, date: this.date, ready: !!this.data, error: this.error,
       clockUtc: nowMs ? new Date(nowMs).toISOString() : null, contract: this.data?.view?.meta?.contractSymbol ?? null,
       watching: this.watching.length,
+      spot: { minutes: this.spotBars.length, lastMinuteUtc: this.spotBars.length ? new Date(this.spotBars.at(-1).t).toISOString() : null, error: this.spotError },
       profileAlerts: {
         futures: this.profileAlertsOn().futures && this.profileLevelsOf.futures.length > 0,
         spot: this.profileAlertsOn().spot && (this.profileLevelsOf.futures.length > 0 || this.profileLevelsOf.spotOwn.length > 0),
@@ -479,7 +568,7 @@ export class IndexScanner {
       },
       signals: outcomes.map((s) => ({
         id: s.id, no: meta(s.id)?.no, name: meta(s.id)?.name, side: s.side, t: s.t, entry: s.entry, stop: s.stop, target: s.target,
-        alerted: this.alertIds().includes(s.id), status: s.outcome?.status, r: s.outcome?.r ?? null, exitAt: s.outcome?.exitAt ?? null,
+        spot: !!s.spot, alerted: this.isAlerted(s.id), status: s.outcome?.status, r: s.outcome?.r ?? null, exitAt: s.outcome?.exitAt ?? null,
       })),
       trades: rows.map((r) => ({
         key: r.key, strategy: r.strategy, no: meta(r.strategy)?.no, action: r.action, side: r.side, strike: r.strike, lots: r.lots, lotSize: r.lotSize,

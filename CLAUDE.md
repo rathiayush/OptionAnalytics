@@ -19,7 +19,10 @@ npx vite build
 All must pass before committing. The SAME scanner also runs on the server for NIFTY, BANKNIFTY and SENSEX
 (`optionanalytics.client/scanner-runner/`, bundled by `npm run build:runner`, started by the server's
 `ScannerRunnerHostedService`): the page and the runner share `scannerCore.js` / `liveFeeds.js`, so a change
-there changes both - `tests/scanner-core.test.mjs` and `tests/scanner-runner.test.mjs` cover them. The runner is
+there changes both - `tests/scanner-core.test.mjs` and `tests/scanner-runner.test.mjs` cover them. The runner ALSO runs
+the spot + options strategies (`spotEngine.js`, server only): once each finished minute on the server's own spot candles
+(`/api/spot/{index}/candles?from=`), traded where applied or on the live list, their live orders watched on the SPOT price
+(`priceBasis: 'spot'`) - `tests/scanner-runner-spot.test.mjs` keeps live == the tuning's day scan. The runner is
 paper unless an admin switches an index to Live for TODAY (Trade settings / Order Flow page - `ServerLiveService`):
 then it asks `/api/scanner-runner/live/{index}/order`, where the server checks every limit (Live today, 09:15 - 14:45,
 one open trade per index, the index's max trades / max loss, the strategy on the index's live list - `LiveListService`:

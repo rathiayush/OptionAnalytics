@@ -49,6 +49,23 @@ public sealed class LiveListServiceTests
     }
 
     [Fact]
+    public void ASpotStrategy_IsJudgedOnItsOwnSpotTuningRuns_BesideTheFuturesOnes()
+    {
+        var runs = new List<Dictionary<string, string>>
+        {
+            new() { ["run_id"] = "NIFTY-futures-20261010-100000", ["index"] = "NIFTY", ["data"] = "futures" },
+            new() { ["run_id"] = "NIFTY-spot-20261010-110000", ["index"] = "NIFTY", ["data"] = "spot" },
+        };
+        var futures = Trades("good", 30, i => i % 10 < 6 ? 30 : -20).ToList();
+        var spot = Trades("spotWallBreak", 30, i => i % 10 < 6 ? 30 : -20).ToList();
+        var perf = LiveListService.PerfOf(runs, (id, kind) => kind != "trades" ? null : id.Contains("-spot-") ? spot : futures);
+        var list = LiveListService.Compute("NIFTY", perf, new List<Dictionary<string, string>>(), Nifty, new LiveListService.State());
+        Assert.True(E(list, "good").OnList);
+        Assert.True(E(list, "spotWallBreak").OnList); // proven on its spot + options tuning - the server scanner trades it now
+        Assert.Equal(30, E(list, "spotWallBreak").Trades);
+    }
+
+    [Fact]
     public void TheLiveRecord_TakesALosingStrategyOff_OnceItIsLongEnough()
     {
         var perf = Perf(Trades("good", 30, i => i % 10 < 6 ? 30 : -20));

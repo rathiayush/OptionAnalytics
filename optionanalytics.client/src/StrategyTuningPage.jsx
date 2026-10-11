@@ -285,7 +285,7 @@ const TuningResult = memo(function TuningResult({ result, isAdmin, spot, applyRe
     <>
             <Card size="small" title={`${result.underlying} · ${result.days?.length ?? 0} day(s) · finished ${when(result.finishedUtc)}`}
               extra={<Text type="secondary" style={{ fontSize: 11 }}>{result.what ? `tuned: ${{ both: 'OI, then trade', oi: 'OI confirmation', trade: 'trade settings', option: 'option trade', all: 'everything', check: 'nothing - re-check of the settings found so far' }[result.what] ?? result.what}${['both', 'oi', 'all'].includes(result.what) && result.oiFactors ? ` (${result.oiFactors.length} OI input(s), ${result.search === 'full' ? 'every combination' : 'step by step'})` : ''} · ` : ''}{result.days?.filter((d) => d.estimated).length ? `${result.days.filter((d) => d.estimated).length} estimated day(s) · ` : ''}min {result.minTrades} trades · {result.days?.[result.days.length - 1]?.date} to {result.days?.[0]?.date}{result.from || result.to ? ` (range asked: ${result.from ?? 'start'} to ${result.to ?? 'yesterday'})` : ''}</Text>}>
-              {result.data === 'spot' && <Alert type="info" showIcon style={{ marginBottom: 8 }} message="Spot + options only: the index candles and the option chain's OI, no futures and no order flow. Points are index points; the option bought and sold are priced beside them. The live scanner does not run these strategies yet, so there is nothing to apply - this measures what they would have done." />}
+              {result.data === 'spot' && <Alert type="info" showIcon style={{ marginBottom: 8 }} message="Spot + options only: the index candles and the option chain's OI, no futures and no order flow. Points are index points; the option bought and sold are priced beside them. The server scanner runs these strategies live (each finished minute, on the spot candles): apply a setting and it trades it on that index - paper, and live when the index is Live today and the strategy is on its live list." />}
               {result.skipped?.length > 0 && <SkippedDays skipped={result.skipped} />}
               <Table size="small" rowKey="id" columns={rankedColumns} dataSource={result.ranked ?? []} pagination={false} scroll={{ y: 320 }} />
               <LazyDetails style={{ marginTop: 8 }} summary={<>The {result.days?.length ?? 0} day(s) used{result.skipped?.length ? ` and ${result.skipped.length} left out` : ''}: where each came from and how complete it was{result.fetched ? ` · ${result.fetched.cacheHits} read from the disk cache, ${result.fetched.requests} fetched${result.fetched.retries ? `, ${result.fetched.retries} retried` : ''}` : ''}{result.fastOi?.used ? ` · option chain fetched a cycle at a time (${result.fastOi.seeded} day(s), checked against a day fetched on its own)` : result.fastOi?.reason ? ` · option chain fetched a day at a time: ${result.fastOi.reason}` : ''}</>}>
@@ -302,15 +302,15 @@ const TuningResult = memo(function TuningResult({ result, isAdmin, spot, applyRe
             {(result.results ?? []).map((r) => (
               <Card key={r.id} size="small"
                 title={<Space size={8} wrap><span>#{r.no} {r.name}</span>{r.belowMin ? <Tag color="default">below the minimum trades</Tag> : r.recommend ? <Tag color="success">recommended</Tag> : <Tag color="warning">keep as written</Tag>}</Space>}
-                extra={r.best && (!isAdmin || spot ? (
+                extra={r.best && (!isAdmin ? (
                   // Always shown - greyed out with the reason when it cannot be used.
-                  <Tooltip title={!isAdmin ? 'Only an Admin can apply - sign in with the admin login' : 'Spot + options strategies are not run by the live scanner - nothing to apply them to'}>
+                  <Tooltip title="Only an Admin can apply - sign in with the admin login">
                     <Button size="small" disabled>Apply to the scanner</Button>
                   </Tooltip>
                 ) : (
                   <ApplyTunedButton index={result.underlying} primary={r.recommend} label="Apply to the scanner" onApply={(live, lots) => applyRef.current(r, result.underlying, live, lots)}
                     title={`Apply to #${r.no} ${r.name}${result.underlying ? ` on ${result.underlying}` : ''}?`}
-                    description={`${r.recommend ? variantText(r.best.params) : `Not recommended: ${r.reason}. Apply anyway - your call.`}${r.unit === 'pts' ? ' The option part - buy or sell, the strike and its SL / target - is applied to this strategy as well.' : ''} ${result.underlying ? `It runs with it on ${result.underlying} (paper, and live when ${result.underlying} is Live today and the strategy is on its live list); other indices keep theirs.` : ''} Whatever was applied to this strategy${result.underlying ? ` on ${result.underlying}` : ''} before is replaced.`} />
+                    description={`${r.recommend ? variantText(r.best.params) : `Not recommended: ${r.reason}. Apply anyway - your call.`}${r.unit === 'pts' ? ' The option part - buy or sell, the strike and its SL / target - is applied to this strategy as well.' : ''} ${result.underlying ? `It runs with it on ${result.underlying}${spot ? ' on the server scanner' : ''} (paper, and live when ${result.underlying} is Live today and the strategy is on its live list); other indices keep theirs.` : ''} Whatever was applied to this strategy${result.underlying ? ` on ${result.underlying}` : ''} before is replaced.`} />
                 ))}>
                 <Space direction="vertical" size={8} style={{ width: '100%' }}>
                   <Text style={{ fontSize: 12 }}>{r.reason}. Chosen on {r.trainDays?.length} day(s) ({r.trainDays?.[0]} to {r.trainDays?.at(-1)}), checked on {r.testDays?.length} ({r.testDays?.[0] ?? '-'} to {r.testDays?.at(-1) ?? '-'}). {r.belowMin ? `${r.qualified} of ${r.tried} settings had 2+ trades; none had ${r.minTradesWanted ?? result.minTrades}+.` : `${r.qualified} of ${r.tried} settings had ${result.minTrades}+ trades.`}</Text>
@@ -456,7 +456,7 @@ export default function StrategyTuningPage() {
       if (addToLive && index) await putOnLiveList(index, r.id)
       setAppliedKey((k) => k + 1)
       message.success({
-        content: `#${r.no} ${r.name}: ${Object.keys(filters ?? {}).length ? `${variantText(r.best.params)}${option ? ` · ${optionText(r.best.params)}` : ''}` : 'back to its defaults'} - in force now${index ? ` on ${index}` : ''} for this browser's scanner and the server scanner, replacing whatever was applied before${addToLive && index ? `; on ${index}'s live list` : ''}`,
+        content: `#${r.no} ${r.name}: ${Object.keys(filters ?? {}).length ? `${variantText(r.best.params)}${option ? ` · ${optionText(r.best.params)}` : ''}` : 'back to its defaults'} - in force now${index ? ` on ${index}` : ''} for ${SPOT_STRATEGIES.some((x) => x.id === r.id) ? 'the server scanner' : "this browser's scanner and the server scanner"}, replacing whatever was applied before${addToLive && index ? `; on ${index}'s live list` : ''}`,
         duration: 8,
       })
     } catch (err) {

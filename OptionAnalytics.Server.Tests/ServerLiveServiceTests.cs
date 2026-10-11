@@ -185,6 +185,33 @@ public sealed class ServerLiveServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task ASpotStrategysTrade_IsWatchedOnTheSpotPrice_NeverOnTheFutures()
+    {
+        var orders = new FakeOrders();
+        var live = Live(orders);
+        live.Set("NIFTY", true, null, null, "admin", At10);
+        // A spot + options strategy's levels are SPOT prices: stop 24980 / target 25040 on the spot (futures ~60 above).
+        await live.PlaceAsync("NIFTY", new ServerLiveOrderRequest("spotWallBreak-1-sell", "#101 Spot", Expiry, 25000, "PE", "SELL", IndexStop: 24980, IndexSide: "LONG", IndexTarget: 25040, PriceBasis: "spot"), At10, default);
+        var trade = live.Status(At10).Single(x => x.Underlying == "NIFTY").Trades.Single();
+        Assert.Equal("spot", trade.PriceBasis);
+        // The futures are through its target (25060) - not its basis: nothing happens; the futures-only check never touches it.
+        decimal? Prices(string u, string basis) => basis == "spot" ? 25010 : 25060;
+        Assert.Equal(0, await live.CheckIndexStopsAsync(Prices, At10.AddMinutes(1), default));
+        Assert.Equal(0, await live.CheckIndexStopsAsync(_ => 24900, At10.AddMinutes(1), default));
+        // The trail moves its spot stop up; the SPOT going through it exits it.
+        Assert.True(live.MoveIndexStop("NIFTY", "spotWallBreak-1-sell", 25000));
+        Assert.Equal(1, await live.CheckIndexStopsAsync((u, basis) => basis == "spot" ? 24999 : 25060, At10.AddMinutes(2), default));
+        var closed = live.Status(At10).Single(x => x.Underlying == "NIFTY").Trades.Single();
+        Assert.Contains("index SL 25000", closed.ExitReason);
+        Assert.Contains("spot 24999", closed.ExitReason);
+        Assert.Single(orders.Exits);
+        // A futures strategy's trade (no basis sent) keeps the futures price.
+        Assert.Null(ServerLiveService.NormaliseBasis(null));
+        Assert.Null(ServerLiveService.NormaliseBasis("futures"));
+        Assert.Equal("spot", ServerLiveService.NormaliseBasis(" SPOT "));
+    }
+
+    [Fact]
     public async Task OnPaper_NothingIsEverSent()
     {
         var orders = new FakeOrders();

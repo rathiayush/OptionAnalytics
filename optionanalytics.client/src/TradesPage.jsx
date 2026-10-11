@@ -301,6 +301,9 @@ function StrategyPerformance({ reloadKey }) {
       .then((b) => { setBody({ ...b, data }); setError(null) }).catch((e) => setError(e.message))
   }, [data, reloadKey])
   const current = body?.data === data ? body : null
+  // Who runs it: the spot + options strategies run on the server scanner only (each finished minute, on the spot candles);
+  // the futures ones on the Order Flow page's scanner too.
+  const scannerWho = data === 'spot' ? 'the server scanner' : 'this browser and the server scanner'
   const statsOf = (r) => (index === 'all' ? r.all : r.byIndex?.[index])
   const rows = useMemo(() => (current?.rows ?? [])
     .filter((r) => (setting === 'both' || r.setting === setting))
@@ -325,7 +328,7 @@ function StrategyPerformance({ reloadKey }) {
       await applyTunedFilters(r.strategyId, params, { option: tuned.unit === 'pts', index: tuned.index, tuned: settingSignature(tuned), lots })
       if (addToLive) await putOnLiveList(tuned.index, r.strategyId)
       if (goLive) goLiveToday(tuned.index)
-      message.success({ content: `#${r.strategyNo} ${r.strategy}: ${tuned.index}'s tuned setting is in force now on ${tuned.index}, ${lots ? `${lots} lot(s)` : `the index's lots`}, for the live scanner (this browser and the server scanner)${tuned.setting_text ? ` - ${tuned.setting_text}` : ''}${addToLive ? `; on ${tuned.index}'s live list - it trades live when ${tuned.index} is Live today` : ''}`, duration: 10 })
+      message.success({ content: `#${r.strategyNo} ${r.strategy}: ${tuned.index}'s tuned setting is in force now on ${tuned.index}, ${lots ? `${lots} lot(s)` : `the index's lots`}, for the live scanner (${scannerWho})${tuned.setting_text ? ` - ${tuned.setting_text}` : ''}${addToLive ? `; on ${tuned.index}'s live list - it trades live when ${tuned.index} is Live today` : ''}`, duration: 10 })
     } catch (err) {
       message.error(err.message)
     } finally {
@@ -353,15 +356,14 @@ function StrategyPerformance({ reloadKey }) {
   }, [current, setting])
   const bestInColumn = Object.fromEntries(indices.map((u) => [u, gridRows.filter((r) => (legOf(r.byIndex?.[u])?.trades ?? 0) >= minTrades).sort((a, b) => (legOf(b.byIndex[u]).avgR ?? -1e9) - (legOf(a.byIndex[u]).avgR ?? -1e9))[0]?.strategyId]))
   // Always shown - greyed out, with the reason, when it cannot be used (never just missing).
-  const applyBlock = !isAdmin ? `Only an Admin can apply - you are signed in as ${auth?.user?.email ?? '?'} (${auth?.user?.role ?? 'no role'})`
-    : data !== 'futures' ? 'Spot + options strategies are not run by the live scanner - nothing to apply them to' : null
+  const applyBlock = !isAdmin ? `Only an Admin can apply - you are signed in as ${auth?.user?.email ?? '?'} (${auth?.user?.role ?? 'no role'})` : null
   const applyButton = (r, t, label = 'Apply to live scanner') => (applyBlock ? (
     <Tooltip title={applyBlock}><Button size="small" disabled>{label}</Button></Tooltip>
   ) : (
     <ApplyTunedButton index={t.row.index} primary={t.best} label={label} onApply={(live, lots, goLive) => apply(r, t.row, live, lots, goLive)} canGoLive isLiveToday={liveToday(t.row.index)}
       lots={liveCfg?.filtersByIndex?.[t.row.index]?.[r.strategyId]?._lots ?? null} indexLots={liveCfg?.trade?.[t.row.index]?.lots ?? null}
       title={`Apply this ${t.row.index} setting to #${r.strategyNo} ${r.strategy}?`}
-      description={`${t.recommended ? '' : 'No run recommended it - applied anyway, your call. '}The live scanner (this browser and the server scanner) runs this strategy with it on ${t.row.index} from now - paper, and live when ${t.row.index} is Live today and the strategy is on its live list. What was applied to it on ${t.row.index} before is replaced; other indices keep theirs.`} />
+      description={`${t.recommended ? '' : 'No run recommended it - applied anyway, your call. '}The live scanner (${scannerWho}) runs this strategy with it on ${t.row.index} from now - paper, and live when ${t.row.index} is Live today and the strategy is on its live list. What was applied to it on ${t.row.index} before is replaced; other indices keep theirs.`} />
   ))
   // A fine-tuned strategy's best setting per index, right in its row: the one marked best (else the top-scored, said so),
   // whether it is live now, and Apply.
@@ -497,9 +499,9 @@ function StrategyPerformance({ reloadKey }) {
           })}
         </Row>
       )}
-      {isAdmin && data === 'futures' && <LiveSetup cfg={liveCfg} serverLive={serverLive} isAdmin={isAdmin} onChanged={loadLive} />}
-      {isAdmin && data === 'futures' && <AppliedSettings cfg={liveCfg} isAdmin={isAdmin} onChanged={loadLive} />}
-      {isAdmin && data === 'futures' && indices.length > 0 && (
+      {isAdmin && <LiveSetup cfg={liveCfg} serverLive={serverLive} isAdmin={isAdmin} onChanged={loadLive} />}
+      {isAdmin && <AppliedSettings cfg={liveCfg} isAdmin={isAdmin} onChanged={loadLive} />}
+      {isAdmin && indices.length > 0 && (
         (() => {
           const u = indices.includes(bestFor) ? bestFor : indices[0]
           const candidates = bestCandidates(u)
@@ -520,7 +522,7 @@ function StrategyPerformance({ reloadKey }) {
                 <Space size={4}><Text>lots</Text><Tooltip title={`Each strategy picked takes this many lots on ${u}. Empty: each keeps its own lot size, else the index's (Trade settings: ${liveCfg?.trade?.[u]?.lots ?? '-'}).`}><InputNumber size="small" min={1} max={500} precision={0} value={bestLots} onChange={(v) => setBestLots(v ?? null)} style={{ width: 80 }} placeholder={`${liveCfg?.trade?.[u]?.lots ?? ''} (index)`} aria-label="Lots for the picked strategies" /></Tooltip></Space>
                 <Checkbox checked={bestLive} onChange={(e) => setBestLive(e.target.checked)}>and put them on the live list</Checkbox>
                 <Popconfirm title={`Apply ${picks.length} setting(s) on ${u}?`} okText="Apply" onConfirm={applyAllBest} disabled={!picks.length}
-                  description={<div style={{ maxWidth: 380 }}>Each strategy picked runs with its best fine-tuned setting on {u} (this browser and the server scanner) from now - paper, and live when {u} is Live today and the strategy is on its live list; what was applied to them on {u} before is replaced, other indices keep theirs.{unproven ? ` ${unproven} of them are not proven yet - their top-scored setting is applied.` : ''}{bestLive ? ` All ${picks.length} go on ${u}'s live list.` : ''}</div>}>
+                  description={<div style={{ maxWidth: 380 }}>Each strategy picked runs with its best fine-tuned setting on {u} ({scannerWho}) from now - paper, and live when {u} is Live today and the strategy is on its live list; what was applied to them on {u} before is replaced, other indices keep theirs.{unproven ? ` ${unproven} of them are not proven yet - their top-scored setting is applied.` : ''}{bestLive ? ` All ${picks.length} go on ${u}'s live list.` : ''}</div>}>
                   <Button type="primary" loading={applying} disabled={!picks.length}>Apply to {picks.length} strateg{picks.length === 1 ? 'y' : 'ies'}</Button>
                 </Popconfirm>
               </Space>

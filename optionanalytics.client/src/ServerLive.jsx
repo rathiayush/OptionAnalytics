@@ -84,6 +84,10 @@ export function ServerLiveTrades({ st }) {
           <span>{new Date(t.placedUtc).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' })}</span>
           <b>{t.contract}</b><span>x{t.lots}</span>
           <Text type="secondary" style={{ fontSize: 12 }}>{t.strategy}</Text>
+          {/* The server's own index stop / target on this trade - on the futures, or the spot for a spot + options strategy. */}
+          {!t.exitedUtc && t.indexStop > 0 && (
+            <Text type="secondary" style={{ fontSize: 11 }}>{t.priceBasis === 'spot' ? 'spot' : 'futures'} SL {t.indexStop}{t.indexTarget > 0 ? ` / target ${t.indexTarget}` : ''}</Text>
+          )}
           {t.exitedUtc ? <span>{t.exitReason ?? 'closed'} · <b style={{ color: (t.pnl ?? 0) >= 0 ? UP_COLOR : DOWN_COLOR }}>{rupees(t.pnl)}</b></span> : <Tag color="processing" style={{ margin: 0 }}>open</Tag>}
           {t.note && <Text type="warning" style={{ fontSize: 11 }}>{t.note}</Text>}
         </div>

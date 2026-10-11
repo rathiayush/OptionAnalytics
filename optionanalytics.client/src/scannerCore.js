@@ -263,7 +263,7 @@ export function positionRows({ positions, dayResults, withOutcome, oi, nowMs, se
 
 export function paperEntryText({ underlying, trade, lots, premium, setup, cfg }) {
   const meta = STRATEGY_BY_ID[setup.id]
-  return `Paper ${trade.action} ${underlying} ${trade.strike} ${trade.side} x${lots} lot(s) @ ${premium.toFixed(1)} - #${meta?.no} ${meta?.name} ${setup.side}, futures ${setup.entry.toFixed(1)} (SL ${setup.stop.toFixed(1)}, target ${setup.target.toFixed(1)}); option SL ${cfg.paperSl ?? 20} / target ${cfg.paperTarget ?? 30} pts`
+  return `Paper ${trade.action} ${underlying} ${trade.strike} ${trade.side} x${lots} lot(s) @ ${premium.toFixed(1)} - #${meta?.no} ${meta?.name} ${setup.side}, ${setup.spot ? 'spot' : 'futures'} ${setup.entry.toFixed(1)} (SL ${setup.stop.toFixed(1)}, target ${setup.target.toFixed(1)}); option SL ${cfg.paperSl ?? 20} / target ${cfg.paperTarget ?? 30} pts`
 }
 
 export function setupExitText(s) {

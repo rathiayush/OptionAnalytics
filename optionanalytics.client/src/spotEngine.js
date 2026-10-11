@@ -6,8 +6,11 @@
 // OI replay like the futures strategies'. No look-ahead: a setup at clock T uses only spot minutes and OI points
 // that had FINISHED by T (the replay context is built with live: false).
 //
-// Measured by the Strategy tuning ("Spot + options only", scanSpotDay -> strategyTuning.js). The live scanner
-// does not run them yet, so applying a tuned spot setting only records it.
+// Measured by the Strategy tuning ("Spot + options only", scanSpotDay -> strategyTuning.js) and run live by the server
+// scanner (scanner-runner/indexScanner.mjs scanSpot): once each finished minute, on the server's own spot candles, with
+// the same evaluateSpotStrategies - a tuned spot setting applied to an index trades there (paper, or live when the index
+// is Live today and the strategy is on its live list; the server watches its index stop on the spot price). The Order
+// Flow page's scanner does not run them.
 
 import {
   SPOT_STRATEGIES, SQUARE_OFF, applyTradeFilter, dayTypeAt, oiChange, oiOf, optionOiRead, optionTradesFor, oiRows, premiumAt, sideOiChanges, strategyFilters,
