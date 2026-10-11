@@ -265,6 +265,19 @@ public sealed class ScannerLogStore
     }
 
     /// <summary>One file's rows (column -> value), or null for an unknown kind; an empty list when nothing is stored yet.</summary>
+    /// <summary>Deletes the scanner's record - the page's and the server scanner's signals and option trades.</summary>
+    public async Task ClearAsync(CancellationToken cancellationToken)
+    {
+        await _lock.WaitAsync(cancellationToken);
+        try
+        {
+            foreach (var kind in new[] { "signals", "trades", "server-signals", "server-trades" })
+                if (PathOf(kind) is { } path && File.Exists(path)) File.Delete(path);
+            _logger.LogInformation("Scanner record cleared.");
+        }
+        finally { _lock.Release(); }
+    }
+
     public List<Dictionary<string, string>>? ReadRows(string kind) => PathOf(kind) is { } path ? Read(path).ToList() : null;
 
     private void Upsert(string path, string[] columns, List<Dictionary<string, string>> rows, string timeColumn)

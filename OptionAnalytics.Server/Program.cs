@@ -329,6 +329,9 @@ builder.Services.AddSingleton<RiskSettingsStore>();
 builder.Services.Configure<StrategyTuningOptions>(builder.Configuration.GetSection(StrategyTuningOptions.SectionName));
 builder.Services.AddSingleton<StrategyTuningService>();
 builder.Services.AddHostedService<StrategyTuningResumeHostedService>();
+// Scheduled tuning jobs, run one after another (StrategyTuningQueue).
+builder.Services.AddSingleton<StrategyTuningQueue>();
+builder.Services.AddHostedService<StrategyTuningQueueHostedService>();
 builder.Services.AddSingleton<DhanTradersControlClient>();
 builder.Services.AddSingleton<KillSwitchService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<KillSwitchService>());

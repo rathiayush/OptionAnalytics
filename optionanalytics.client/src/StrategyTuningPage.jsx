@@ -5,6 +5,7 @@ import { NavBar, useAuth, UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import { ACTIVE_STRATEGIES, SPOT_STRATEGIES, STRATEGY_BY_ID, TRADE_FILTERS } from './strategyEngine.js'
 import { OI_COMBO_CAP, OI_FACTORS, OPTION_DEFAULT, countOiCombinations, oiFactorsFor, optionText, variantText } from './strategyTuning.js'
 import { applyTunedFilters } from './scannerSettings.js'
+import ClearData from './ClearData.jsx'
 
 const { Title, Text } = Typography
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX']
@@ -296,9 +297,27 @@ export default function StrategyTuningPage() {
   }, [status?.state]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const running = status?.state === 'running'
+  const jobBody = () => ({ underlying, strategies: pick === 'custom' ? custom : pick, days, includeEstimated, minTrades, what, oiFactors, search, data,
+    ...(dayMode === 'range' && range ? { from: range[0]?.format('YYYY-MM-DD') ?? null, to: range[1]?.format('YYYY-MM-DD') ?? null } : {}) })
+  // The schedule: jobs run one after another on the server - for one index or several, now or at a set time, once or daily.
+  const [queue, setQueue] = useState([])
+  const [schedIndices, setSchedIndices] = useState(null) // null: the index picked above
+  const [schedAt, setSchedAt] = useState(null)
+  const [schedRepeat, setSchedRepeat] = useState(false)
+  const loadQueue = () => fetch('/api/strategy-tuning/queue').then((r) => (r.ok ? r.json() : null)).then((q) => { if (q) setQueue(q) }).catch(() => {})
+  useEffect(() => { loadQueue(); const id = setInterval(loadQueue, 10_000); return () => clearInterval(id) }, [])
+  const schedule = async () => {
+    const body = { job: jobBody(), underlyings: schedIndices?.length ? schedIndices : [underlying], runAtUtc: schedAt ? schedAt.toISOString() : null, repeatDaily: schedRepeat }
+    const res = await fetch('/api/strategy-tuning/queue', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    const json = await res.json().catch(() => null)
+    if (!res.ok) { message.error(json?.error ?? `HTTP ${res.status}`); return }
+    message.success(`${json.length} job(s) scheduled - they run one after another`)
+    loadQueue()
+  }
+  const unschedule = (id) => fetch(`/api/strategy-tuning/queue/${id}`, { method: 'DELETE' }).then(loadQueue)
+  const clearFinished = () => fetch('/api/strategy-tuning/queue/clear-finished', { method: 'POST' }).then(loadQueue)
   const start = async () => {
-    const body = { underlying, strategies: pick === 'custom' ? custom : pick, days, includeEstimated, minTrades, what, oiFactors, search, data,
-      ...(dayMode === 'range' && range ? { from: range[0]?.format('YYYY-MM-DD') ?? null, to: range[1]?.format('YYYY-MM-DD') ?? null } : {}) }
+    const body = jobBody()
     const res = await fetch('/api/strategy-tuning/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     const json = await res.json().catch(() => null)
     if (!res.ok) { message.error(json?.error ?? `HTTP ${res.status}`); return }
@@ -432,6 +451,32 @@ export default function StrategyTuningPage() {
                   : <Button type="primary" onClick={start} disabled={!isAdmin || (pick === 'custom' && !custom.length) || (tunesOi && !oiFactors.length) || tooMany || (dayMode === 'range' && !range?.[0] && !range?.[1])}>Run tuning</Button>}
               </Col>
             </Row>
+            {isAdmin && (
+              <Row gutter={[12, 8]} align="middle" style={{ borderTop: '1px solid #ffffff14', paddingTop: 10 }}>
+                <Col><Tooltip title="Add these settings to the schedule instead of running now: the server runs scheduled jobs one after another, so you can line up every index (or several kinds of tuning) and leave them."><Text strong>Schedule</Text></Tooltip></Col>
+                <Col><Space size={6}><Text>Indices</Text><Checkbox.Group value={schedIndices ?? [underlying]} onChange={(v) => setSchedIndices(v)} options={UNDERLYINGS.map((u) => ({ value: u, label: u }))} /></Space></Col>
+                <Col><Space size={6}><Text>Start</Text><DatePicker showTime={{ format: 'HH:mm' }} format="DD MMM YYYY HH:mm" value={schedAt} onChange={setSchedAt} placeholder="As soon as free" aria-label="Scheduled start" /></Space></Col>
+                <Col><Space size={6}><Switch size="small" checked={schedRepeat} onChange={setSchedRepeat} aria-label="Repeat daily" /><Text>Every day</Text></Space></Col>
+                <Col><Button onClick={schedule} disabled={(pick === 'custom' && !custom.length) || (tunesOi && !oiFactors.length) || tooMany || (dayMode === 'range' && !range?.[0] && !range?.[1]) || (schedIndices != null && !schedIndices.length)}>Add to schedule</Button></Col>
+                <Col><ClearData onCleared={() => { setResult(null); loadResult(underlying) }} /></Col>
+              </Row>
+            )}
+            {queue.length > 0 && (
+              <div>
+                <Space size={8} style={{ marginBottom: 4 }}>
+                  <Text strong style={{ fontSize: 13 }}>Scheduled jobs</Text>
+                  <Text type="secondary" style={{ fontSize: 12 }}>run one after another; each one's result is added to the Trades page's Strategy performance</Text>
+                  {isAdmin && queue.some((q) => !['queued', 'running'].includes(q.state)) && <Button size="small" type="link" onClick={clearFinished}>Clear finished</Button>}
+                </Space>
+                <Table size="small" rowKey="id" dataSource={queue} pagination={{ pageSize: 10, size: 'small', hideOnSinglePage: true }} scroll={{ x: 900 }} columns={[
+                  { title: 'Index', key: 'u', width: 100, render: (_, q) => q.job?.underlying },
+                  { title: 'Job', key: 'j', render: (_, q) => <span style={{ fontSize: 12 }}>{q.job?.data === 'spot' ? 'spot + options · ' : ''}{Array.isArray(q.job?.strategies) ? `${q.job.strategies.length} strategies` : q.job?.strategies} · {{ both: 'OI, then trade', oi: 'OI', trade: 'trade settings', option: 'option trade', all: 'everything' }[q.job?.what] ?? q.job?.what} · {q.job?.from || q.job?.to ? `${q.job.from ?? 'start'} to ${q.job.to ?? 'yesterday'}` : `${q.job?.days} day(s)`}</span> },
+                  { title: 'Start', key: 'at', width: 150, render: (_, q) => <span style={{ fontSize: 12 }}>{q.runAtUtc ? when(q.runAtUtc) : 'as soon as free'}{q.repeatDaily ? <Tag style={{ marginLeft: 4 }}>daily</Tag> : null}</span> },
+                  { title: 'State', key: 's', width: 220, render: (_, q) => <span style={{ fontSize: 12 }}><Tag color={{ queued: 'default', running: 'processing', done: 'success', failed: 'error', cancelled: 'warning' }[q.state]}>{q.state}</Tag>{q.finishedUtc ? when(q.finishedUtc) : q.startedUtc ? `since ${when(q.startedUtc)}` : ''}{q.error ? <><br /><Text type="danger" style={{ fontSize: 11 }}>{q.error}</Text></> : null}</span> },
+                  { title: '', key: 'x', width: 80, render: (_, q) => (isAdmin && q.state === 'queued' ? <Button size="small" type="link" danger onClick={() => unschedule(q.id)}>Remove</Button> : null) },
+                ]} />
+              </div>
+            )}
             {!isAdmin && <Alert type="info" showIcon message="Only an admin can run a tuning job or apply a result." />}
             {!spot && !includeEstimated && (dayMode === 'range' || days > 3) && (
               <Alert type="warning" showIcon message="Only the recorded days will be used - the server keeps just the last few (in memory)."
