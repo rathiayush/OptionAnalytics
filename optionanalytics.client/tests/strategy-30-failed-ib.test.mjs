@@ -64,7 +64,7 @@ function scenario(d, o = {}) {
 }
 const show = ({ s, all }) => JSON.stringify(s ? { side: s.side, entry: s.entry, stop: +s.stop.toFixed(1), target: +s.target.toFixed(1), checks: s.checks } : all.map((x) => `${x.id}:${x.side}`))
 
-check('33 strategies, #30 is the failed IB breakout, a profile strategy - retired (the rules stay tested)', STRATEGIES.length === 33 && STRATEGIES.find((x) => x.no === 30)?.id === 'ibFailed'
+check('37 strategies, #30 is the failed IB breakout, a profile strategy - retired (the rules stay tested)', STRATEGIES.length === 37 && STRATEGIES.find((x) => x.no === 30)?.id === 'ibFailed'
   && STRATEGIES.find((x) => x.no === 30).group === 'profile' && STRATEGIES.find((x) => x.no === 30).retired && !ACTIVE_STRATEGIES.some((x) => x.id === 'ibFailed'))
 const L = scenario(1)
 check('LONG: broke under the IB low, a tail, back inside, put writers defend - target the IB high', L.s?.side === 'LONG' && L.s.stop < 22630 && Math.abs(L.s.target - 22750) < 0.01

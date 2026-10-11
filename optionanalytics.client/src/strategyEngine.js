@@ -107,6 +107,12 @@ export const STRATEGIES = [
   { id: 'straddleFade', no: 31, name: 'ATM straddle decay - fade the OI wall back to the middle', short: 'Straddle decay fade', trial: true },
   { id: 'wallShift', no: 32, name: 'S/R OI wall shift - writers rolling with the price', short: 'Wall shift', trial: true },
   { id: 'cumFlip', no: 33, name: 'Since-open CE / PE flip + futures build-up on the VWAP side', short: 'Since-open OI flip', trial: true },
+  // 34-37: rejections at the previous session's volume-profile levels, led by the option writers (OI) - lighter on
+  // order flow than #11 / #13 (no absorption, DOM or heatmap needed), so they trade estimated days too.
+  { id: 'pocReject', no: 34, name: 'Previous POC rejection + option writing', short: 'POC rejection + OI', group: 'profile', trial: true },
+  { id: 'vaEdgeReject', no: 35, name: 'Previous VAH / VAL rejection + option writing', short: 'VAH/VAL rejection + OI', group: 'profile', trial: true },
+  { id: 'hvnReject', no: 36, name: 'Previous HVN rejection + option writing', short: 'HVN rejection + OI', group: 'profile', trial: true },
+  { id: 'lvnReject', no: 37, name: 'LVN rejection - the thin area refused + option writing', short: 'LVN rejection + OI', group: 'profile', trial: true },
 ]
 /** The SPOT + OPTIONS strategies (spotEngine.js): they trade the index price itself - spot candles and the option
  *  chain's OI, no futures and no order flow. Measured by the Strategy tuning ("Spot + options only"); the live
@@ -138,7 +144,24 @@ export const RANGE_IDS = ACTIVE_STRATEGIES.filter((s) => s.group === 'range').ma
  * exactly as before - and for numbers min / max / step. More strategies get here by listing their
  * filters and reading them through strategyFilters() in their block.
  */
+// The previous-session level rejections (34-37) share one rule and so one set of filters.
+const PROFILE_REJECT_FILTERS = [
+  { key: 'bandPct', label: 'Touch band around the level (% of price)', type: 'number', default: 0.06, min: 0.02, max: 0.3, step: 0.01 },
+  { key: 'awayPct', label: 'Came from at least this far away in the last 30 min (% of price)', type: 'number', default: 0.2, min: 0.05, max: 1, step: 0.05 },
+  { key: 'touchBars', label: 'Touched the level within the last (bars)', type: 'number', default: 3, min: 1, max: 10, step: 1 },
+  { key: 'minWriting', label: 'Option writers\' lean near the money (15 min) at least', type: 'number', default: 0.1, min: 0, max: 1, step: 0.05 },
+  { key: 'futuresNotAgainst', label: 'No fresh futures build-up against the trade (15 min)', type: 'switch', default: true },
+  { key: 'needDelta', label: 'Rejection bar\'s delta with the trade', type: 'switch', default: true },
+  { key: 'minRoomR', label: 'Room to the next profile level at least (x the stop)', type: 'number', default: 1.2, min: 0.5, max: 4, step: 0.1 },
+  { key: 'maxTargetR', label: 'Target at most (x the stop)', type: 'number', default: 3, min: 1, max: 6, step: 0.25 },
+  { key: 'timeStopMin', label: 'Time stop (minutes)', type: 'number', default: 60, min: 10, max: 240, step: 5 },
+]
+
 export const STRATEGY_FILTERS = {
+  pocReject: PROFILE_REJECT_FILTERS,
+  vaEdgeReject: PROFILE_REJECT_FILTERS,
+  hvnReject: PROFILE_REJECT_FILTERS,
+  lvnReject: PROFILE_REJECT_FILTERS,
   ibBreakout: [
     { key: 'closesBeyond', label: 'Closes in a row beyond the IB to accept the break', type: 'number', default: 2, min: 1, max: 5, step: 1 },
     { key: 'firstBreakOnly', label: 'First accepted break of each side per day only', type: 'switch', default: true },
@@ -1513,6 +1536,65 @@ export function evaluateStrategies(input) {
             OI: wallAhead != null ? `no growing ${dir > 0 ? 'CALL' : 'PUT'} wall before the HVN` : 'no wall ahead',
             Profile: `crossed ${dir > 0 ? 'UP' : 'DOWN'} through the LVN ${lvn} - the next HVN ${dir > 0 ? 'above' : 'below'} is ${hvn} (target)`,
             Footprint: stackWith(dir, 2) ? 'stacked imbalance through it' : 'ΣΔ new extreme', Tape: `${sweepWith(dir) ? 'sweep · ' : ''}${tapeText}`, DOM: c.dom, Heatmap: c.heat,
+          })
+        }
+      }
+    }
+  }
+
+  // ---- 34-37: rejection at a previous-session profile level, with the option writers behind it ----------
+  //   Price came to the level from at least `awayPct` away in the last 30 minutes, touched it within the last
+  //   `touchBars` bars without a close through it, and the last (completed) bar turns away from it - a close back
+  //   beyond the band, in the trade's direction, off the touch extreme. The option writers near the money lean the
+  //   trade's way over 15 minutes (puts written under a support, calls over a resistance), and the futures show no
+  //   fresh build-up against it. Stop beyond the touch extreme; target the next profile level in the trade's
+  //   direction (room at least `minRoomR` x the stop, capped at `maxTargetR`).
+  //    34 previous POC · 35 previous VAH / VAL · 36 previous HVNs · 37 LVNs (approached from an HVN and refused -
+  //    back toward where it came from). Each level is a support from above (LONG) or a resistance from below (SHORT).
+  if (prof?.vp?.poc != null && minute >= hm(9, 30) && minute <= hm(14, 30) && bars.length >= 31) {
+    const vp = prof.vp
+    const allLevels = [vp.poc, vp.vah, vp.val, ...(vp.hvn ?? [])].filter((x) => x != null)
+    const f15 = futuresChange(oi, nowMs, 15)
+    const read15 = optionOiRead(oi, spotNow, nowMs, 15, 3)
+    const kinds = [
+      ['pocReject', [['POC', vp.poc]]],
+      ['vaEdgeReject', [['VAH', vp.vah], ['VAL', vp.val]]],
+      ['hvnReject', (vp.hvn ?? []).filter((h) => h !== vp.poc).map((h) => ['HVN', h])],
+      ['lvnReject', (vp.lvn ?? []).map((l) => ['LVN', l])],
+    ]
+    for (const [id, levels] of kinds) {
+      const f = strategyFilters(id, input.filters?.[id])
+      const band = pct(f.bandPct / 100)
+      const awayDist = pct(f.awayPct / 100)
+      const n = Math.max(1, Math.round(f.touchBars))
+      const recent = bars.slice(-n)
+      const earlier = bars.slice(-30, -n)
+      for (const [label, L] of levels) {
+        if (L == null) continue
+        for (const dir of [1, -1]) {
+          // Came from the trade's side (above a support / below a resistance), at least awayDist from it.
+          if (!earlier.some((b) => dir * (b.close - L) >= awayDist)) continue
+          const extreme = dir > 0 ? Math.min(...recent.map((b) => b.low)) : Math.max(...recent.map((b) => b.high))
+          const touched = dir * (extreme - L) <= band
+          const held = recent.every((b) => dir * (b.close - L) >= -band)
+          const turned = dir * (last.close - L) >= band && dir * (last.close - last.open) > 0 && dir * (last.close - extreme) >= band
+          if (!touched || !held || !turned) continue
+          const writing = read15 ? read15.lean : null
+          if (writing == null || dir * writing < f.minWriting) continue
+          const against = f15 && f15.oiPct != null && dir * f15.pricePct < -0.002 && f15.oiPct > 0.002
+          if (f.futuresNotAgainst && against) continue
+          if (f.needDelta && !(dir * last.delta > 0)) continue
+          const stopPts = Math.max(pct(0.001), dir * (price - extreme) + pct(0.0005))
+          // The next profile level ahead (an LVN's target: the HVN / POC on the side it was refused back to).
+          const ahead = allLevels.filter((x) => dir * (x - price) > 0.25 * stopPts).sort((a, b) => dir * (a - b))[0]
+          const room = ahead != null ? dir * (ahead - price) : null
+          if (room != null && room < f.minRoomR * stopPts) continue
+          const targetPts = Math.min(room ?? f.maxTargetR * stopPts, f.maxTargetR * stopPts)
+          push(id, dir, stopPts, targetPts, f.timeStopMin, 58 + Math.round(10 * Math.min(1, dir * writing)) + (sweepWith(dir) ? 4 : 0), {
+            OI: `writers near the money lean ${dir > 0 ? 'PUT (support under the price)' : 'CALL (resistance over the price)'}: ${(writing * 100).toFixed(0)}% in 15m (PE ${lakh(read15.peChg)}, CE ${lakh(read15.ceChg)})`
+              + (f15?.oiPct != null ? ` · futures price ${(f15.pricePct * 100).toFixed(2)}%, OI ${f15.oiPct >= 0 ? '+' : ''}${(f15.oiPct * 100).toFixed(2)}% in 15m` : ''),
+            Profile: `rejected at the previous ${label} ${+L.toFixed(1)} (touch ${extreme.toFixed(1)}), came from ${dir > 0 ? 'above' : 'below'}; ${ahead != null ? `next level ${+ahead.toFixed(1)} (target)` : `no level ahead - ${f.maxTargetR}x the stop`}`,
+            Footprint: `rejection bar ${last.open.toFixed(1)} -> ${last.close.toFixed(1)}, Δ ${last.delta > 0 ? '+' : ''}${last.delta}`, Tape: tapeText,
           })
         }
       }
