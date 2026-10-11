@@ -6,6 +6,7 @@ import { useNarrow } from './DomDrawer.jsx'
 import { filtersFromTuning, paramsFromSettingsRow, settingSignature } from './strategyTuning.js'
 import { applyFilterValue, applyTunedFilters, putOnLiveList, saveIndexFilters } from './scannerSettings.js'
 import { AppliedSettings, ApplyTunedButton, LiveSetup, ParamsPopover } from './ApplyTuned.jsx'
+import { confirmServerLive, useServerLive } from './ServerLive.jsx'
 import ClearData from './ClearData.jsx'
 import './tuningMobile.css'
 
@@ -282,6 +283,15 @@ function StrategyPerformance({ reloadKey }) {
   const [bestLots, setBestLots] = useState(null) // ... with this lot size each (empty = each keeps its own, else the index's)
   useEffect(() => { loadLive() }, [])
   const [bestFor, setBestFor] = useState('NIFTY')
+  // Every index's Paper / Live today (ServerLiveService) - switchable here too, always with its confirm.
+  const serverLive = useServerLive()
+  const liveToday = (u) => !!serverLive.list?.find((x) => x.underlying === u)?.live
+  /** After an apply that asked for it: the index to Live today - with the same confirm as everywhere else. */
+  const goLiveToday = (u) => {
+    if (liveToday(u)) { message.warning(`${u} is already LIVE today`); return }
+    const st = serverLive.list?.find((x) => x.underlying === u)
+    confirmServerLive(u, st, () => serverLive.set(u, { live: true }).then((ok) => { if (ok) { message.warning(`${u}: the server scanner trades LIVE today`); loadLive() } }))
+  }
   const [applying, setApplying] = useState(false)
   const [body, setBody] = useState(null)
   const [error, setError] = useState(null)
@@ -309,11 +319,12 @@ function StrategyPerformance({ reloadKey }) {
     </Tooltip>
   }
   // Applied for the index it was tuned on (that index only - another index's setting for the same strategy stays).
-  const apply = async (r, tuned, addToLive = false, lots = null) => {
+  const apply = async (r, tuned, addToLive = false, lots = null, goLive = false) => {
     try {
       const params = paramsFromSettingsRow(tuned)
       await applyTunedFilters(r.strategyId, params, { option: tuned.unit === 'pts', index: tuned.index, tuned: settingSignature(tuned), lots })
       if (addToLive) await putOnLiveList(tuned.index, r.strategyId)
+      if (goLive) goLiveToday(tuned.index)
       message.success({ content: `#${r.strategyNo} ${r.strategy}: ${tuned.index}'s tuned setting is in force now on ${tuned.index}, ${lots ? `${lots} lot(s)` : `the index's lots`}, for the live scanner (this browser and the server scanner)${tuned.setting_text ? ` - ${tuned.setting_text}` : ''}${addToLive ? `; on ${tuned.index}'s live list - it trades live when ${tuned.index} is Live today` : ''}`, duration: 10 })
     } catch (err) {
       message.error(err.message)
@@ -347,7 +358,7 @@ function StrategyPerformance({ reloadKey }) {
   const applyButton = (r, t, label = 'Apply to live scanner') => (applyBlock ? (
     <Tooltip title={applyBlock}><Button size="small" disabled>{label}</Button></Tooltip>
   ) : (
-    <ApplyTunedButton index={t.row.index} primary={t.best} label={label} onApply={(live, lots) => apply(r, t.row, live, lots)}
+    <ApplyTunedButton index={t.row.index} primary={t.best} label={label} onApply={(live, lots, goLive) => apply(r, t.row, live, lots, goLive)} canGoLive isLiveToday={liveToday(t.row.index)}
       lots={liveCfg?.filtersByIndex?.[t.row.index]?.[r.strategyId]?._lots ?? null} indexLots={liveCfg?.trade?.[t.row.index]?.lots ?? null}
       title={`Apply this ${t.row.index} setting to #${r.strategyNo} ${r.strategy}?`}
       description={`${t.recommended ? '' : 'No run recommended it - applied anyway, your call. '}The live scanner (this browser and the server scanner) runs this strategy with it on ${t.row.index} from now - paper, and live when ${t.row.index} is Live today and the strategy is on its live list. What was applied to it on ${t.row.index} before is replaced; other indices keep theirs.`} />
@@ -486,7 +497,7 @@ function StrategyPerformance({ reloadKey }) {
           })}
         </Row>
       )}
-      {isAdmin && data === 'futures' && <LiveSetup cfg={liveCfg} />}
+      {isAdmin && data === 'futures' && <LiveSetup cfg={liveCfg} serverLive={serverLive} isAdmin={isAdmin} onChanged={loadLive} />}
       {isAdmin && data === 'futures' && <AppliedSettings cfg={liveCfg} isAdmin={isAdmin} onChanged={loadLive} />}
       {isAdmin && data === 'futures' && indices.length > 0 && (
         (() => {
