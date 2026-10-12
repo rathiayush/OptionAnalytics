@@ -4,7 +4,7 @@
 
 import {
   ACTIVE_STRATEGIES, STRATEGY_BY_ID, evaluateStrategies, simulateOutcome, DEFAULT_TRAIL, RANGE_IDS,
-  exitLabel, premiumAt, optionStopTargetHit, squareOffMs, marketAt, lotsFor,
+  exitLabel, premiumAt, optionStopTargetHit, squareOffMs, marketAt, lotsFor, pinnedTrailOf, optionExitText,
 } from './strategyEngine.js'
 // The market at a signal now lives with the strategies (the order-flow trade filters read it) - re-exported here.
 export { marketAt, MARKET_KEYS } from './strategyEngine.js'
@@ -120,7 +120,7 @@ export function scanTick(input, memory) {
   // What the market looked like at the signal (evaluateStrategies puts it on every setup) - kept with it in the scanner
   // record, so which conditions win can be learned from the live signals (only what was known at the clock).
   const market = fresh0.length && fresh0.some((s) => !s.market) ? marketAt({ nowMs, price, bars, tapePrints: estimated ? null : tapePrints, oi, heatmap: view.heatmap, lotSize, largeLots }) : null
-  const fresh = fresh0.map((s) => ({ ...s, trail: trailOf(s, trail), market: s.market ?? market }))
+  const fresh = fresh0.map((s) => ({ ...withOwnTrail(s, filters?.[s.id], trail), market: s.market ?? market }))
   return { price, watching, fresh, fired: fresh.length ? [...memory.fired, ...fresh] : memory.fired }
 }
 
@@ -128,10 +128,20 @@ export function scanTick(input, memory) {
 // none), else the scanner's.
 export const trailOf = (s, trail) => (s.trailOverride !== undefined ? s.trailOverride : trail)
 
-// Each fired setup with its outcome so far (its trailing stop following any change logged after it fired).
+/** A fresh setup with the trailing stop it trades with: its strategy's own (the tradeTrail filter), else the one its
+ *  applied setting was applied with (`_trail` - pinnedTrailOf), else the scanner's. Either of the first two is the
+ *  strategy's OWN (`trailOverride`), which a later change of the scanner's trailing stop does not touch. */
+export function withOwnTrail(s, raw, trail) {
+  const pinned = s.trailOverride === undefined ? pinnedTrailOf(raw) : undefined
+  const own = pinned !== undefined ? { ...s, trailOverride: pinned } : s
+  return { ...own, trail: trailOf(own, trail) }
+}
+
+// Each fired setup with its outcome so far (its trailing stop following any change of the SCANNER's trailing stop
+// logged after it fired - a setup trailing its strategy's own keeps it).
 export function followSetups(fired, trailLog, minuteBars, nowMs) {
   return fired.map((s) => {
-    const withLog = trailLog.some((c) => c.t > s.t) ? { ...s, trailLog: trailLog.filter((c) => c.t > s.t) } : s
+    const withLog = s.trailOverride === undefined && trailLog.some((c) => c.t > s.t) ? { ...s, trailLog: trailLog.filter((c) => c.t > s.t) } : s
     return { ...withLog, outcome: simulateOutcome(withLog, minuteBars ?? [], nowMs ?? 0) }
   })
 }
@@ -148,7 +158,7 @@ export function spotScanTick({ minute, bars, oi, filters, trail }, memory) {
   const done = bars.at(-1).t + MIN <= minute ? bars : bars.filter((b) => b.t + MIN <= minute)
   const setups = evaluateSpotStrategies({ nowMs: minute, bars: done, oi, filters })
   const recentlyFired = (s) => memory.fired.some((f) => f.id === s.id && f.side === s.side && s.t - f.t < COOLDOWN_MS)
-  const fresh = setups.filter((s) => !recentlyFired(s)).map((s) => ({ ...s, trail: trailOf(s, trail), market: null }))
+  const fresh = setups.filter((s) => !recentlyFired(s)).map((s) => ({ ...withOwnTrail(s, filters?.[s.id], trail), market: null }))
   return { fresh, fired: fresh.length ? [...memory.fired, ...fresh] : memory.fired }
 }
 
@@ -217,12 +227,29 @@ export function setupEvents(withOutcome, memory, barsReady) {
 }
 
 // A paper (or live) option position opened from a setup.
-export function newPosition({ setup, trade, which, lots, lotSize, premium, cfg, at }) {
+/** A new option position for an alert. `plan` (optionPlanFor with the premium): a strategy with an option exit of its
+ *  own keeps EXACTLY it (`optExit`; its SL / target, null = none, and no option trailing stop) - the index's levels, and
+ *  a later change of them, never touch it. Without one, the index's levels (`cfg`). */
+export function newPosition({ setup, trade, which, lots, lotSize, premium, cfg, at, plan = null }) {
+  const own = plan?.own ? { slPts: plan.slPts ?? null, targetPts: plan.targetPts ?? null, trailStart: 0, trailGap: 0, optExit: plan.exit } : null
   return {
     key: `${setup.id}-${setup.t}-${which}`, setupKey: `${setup.id}-${setup.t}`, setupT: setup.t, strategy: setup.id, setupSide: setup.side,
     adaptive: setup.adaptive ?? null, regime: setup.regime ?? null, action: trade.action, side: trade.side, strike: trade.strike,
     lots, lotSize, premium, slPts: cfg.paperSl ?? 20, targetPts: cfg.paperTarget ?? 30,
-    trailStart: cfg.paperTrailStart ?? 0, trailGap: cfg.paperTrailGap ?? 0, entryTime: at, exitTime: null, exitPremium: null, exitReason: null,
+    trailStart: cfg.paperTrailStart ?? 0, trailGap: cfg.paperTrailGap ?? 0, ...own, entryTime: at, exitTime: null, exitPremium: null, exitReason: null,
+  }
+}
+
+/** The Dhan super order's SL / target legs (premium points) for an alert taken with `plan`: its own where it has them.
+ *  Where its own exit has none ('index': out with the index trade; 'indexSl': no target) a super order still needs the
+ *  leg, so it is a SAFETY leg at the signal's own stop / target distance on the index - an option's premium moves no
+ *  more than the index (delta at most 1), so it does not close the trade before the strategy's own index exit would
+ *  (only an IV spike could reach it first). Without an exit of its own: the plan's (the index's) levels. */
+export function liveLegsFor(plan, setup) {
+  if (!plan?.own) return { slPts: plan?.slPts, targetPts: plan?.targetPts }
+  return {
+    slPts: plan.slPts > 0 ? plan.slPts : Math.abs(setup.entry - setup.stop),
+    targetPts: plan.targetPts > 0 ? plan.targetPts : Math.abs(setup.target - setup.entry),
   }
 }
 
@@ -230,10 +257,12 @@ export function newPosition({ setup, trade, which, lots, lotSize, premium, cfg, 
  * A new Max SL / Target / trail applied to the positions still OPEN (keys in `openKeys`) from the minute
  * `changeAt`: each keeps a levelLog - the levels it had until now, then the new ones - which
  * optionStopTargetHit follows, so what already happened is never rewritten. `cur` is the settings before
- * the change; `patch` holds paperSl / paperTarget / paperTrailStart / paperTrailGap (any of them).
+ * the change; `patch` holds paperSl / paperTarget / paperTrailStart / paperTrailGap (any of them). A position with
+ * its strategy's own option exit (`optExit`) is left as it is.
  */
 export function withLevelChange(positions, openKeys, patch, changeAt, cur) {
-  return positions.map((p) => (openKeys.has(p.key) ? {
+  // A trade with its strategy's own option exit keeps it - the index's levels were never its levels.
+  return positions.map((p) => (openKeys.has(p.key) && !p.optExit ? {
     ...p,
     levelLog: [
       ...(p.levelLog?.length ? p.levelLog.filter((c) => c.t < changeAt) : [{ t: p.entryTime, sl: p.slPts ?? cur.paperSl ?? 20, target: p.targetPts ?? cur.paperTarget ?? 30, trailStart: p.trailStart ?? cur.paperTrailStart ?? 0, trailGap: p.trailGap ?? cur.paperTrailGap ?? 0 }]),
@@ -271,18 +300,23 @@ export function positionRows({ positions, dayResults, withOutcome, oi, nowMs, se
     let exitTime = p.exitTime && p.exitTime <= (nowMs ?? Infinity) ? p.exitTime : null
     let exitPremium = exitTime ? p.exitPremium : null
     let exitReason = exitTime ? p.exitReason : null
-    const o = outcomeOf(p)
+    // Its strategy's own option exit 'option': only its own SL / target, else the 15:10 square-off - the signal's exit does
+    // not close it (the tuning's optionOutcome).
+    const o = p.optExit === 'option' ? { status: 'square-off', exitAt: squareOffMs(p.entryTime) - MIN, timeStop: true, squareOff: true } : outcomeOf(p)
     if (p.live && p.exitSent) {
       // A live trade whose exit has gone to Dhan keeps the exit it was sent with.
       const points = p.exitPremium == null ? null : p.action === 'BUY' ? p.exitPremium - p.premium : p.premium - p.exitPremium
       return { ...p, exitTime: p.exitTime, exitReason: p.exitReason, current: p.exitPremium, points, rupees: points == null ? null : points * p.lots * p.lotSize }
     }
     // The trade's own premium stop / target (positions from before they existed use today's setting),
-    // checked up to the setup's exit - whichever comes first closes it.
+    // checked up to the setup's exit - whichever comes first closes it. One with its strategy's own option exit has
+    // exactly its own (null = none, no trailing stop) - never today's setting.
     const setupExitAt = o && o.status !== 'open' ? (o.exitAt != null ? o.exitAt + MIN : squareOffMs(p.entryTime)) : Infinity
+    const ownExit = !!p.optExit
     const own = oi && setupExitAt > p.entryTime
-      ? optionStopTargetHit(oi, p, p.entryTime, Math.min(setupExitAt, exitTime ?? Infinity, nowMs ?? Infinity), p.slPts ?? settings.paperSl ?? 20, p.targetPts ?? settings.paperTarget ?? 30,
-        { start: p.trailStart ?? settings.paperTrailStart ?? 0, gap: p.trailGap ?? settings.paperTrailGap ?? 0 }, p.levelLog)
+      ? optionStopTargetHit(oi, p, p.entryTime, Math.min(setupExitAt, exitTime ?? Infinity, nowMs ?? Infinity),
+        ownExit ? p.slPts : p.slPts ?? settings.paperSl ?? 20, ownExit ? p.targetPts : p.targetPts ?? settings.paperTarget ?? 30,
+        ownExit ? null : { start: p.trailStart ?? settings.paperTrailStart ?? 0, gap: p.trailGap ?? settings.paperTrailGap ?? 0 }, ownExit ? null : p.levelLog)
       : null
     if (own) { exitTime = own.at; exitPremium = own.premium; exitReason = own.reason }
     if (!exitTime && o && o.status !== 'open') {
@@ -309,9 +343,20 @@ export function positionRows({ positions, dayResults, withOutcome, oi, nowMs, se
 
 // ---- Message texts (the page and the server runner say the same thing) ----------------------------
 
-export function paperEntryText({ underlying, trade, lots, premium, setup, cfg }) {
+/** The paper trade's entry message. `plan` (optionPlanFor with the premium) says how its option leaves the trade -
+ *  without one, the index's levels in `cfg`. */
+export function paperEntryText({ underlying, trade, lots, premium, setup, cfg, plan = null }) {
   const meta = STRATEGY_BY_ID[setup.id]
-  return `Paper ${trade.action} ${underlying} ${trade.strike} ${trade.side} x${lots} lot(s) @ ${premium.toFixed(1)} - #${meta?.no} ${meta?.name} ${setup.side}, ${setup.spot ? 'spot' : 'futures'} ${setup.entry.toFixed(1)} (SL ${setup.stop.toFixed(1)}, target ${setup.target.toFixed(1)}); option SL ${cfg.paperSl ?? 20} / target ${cfg.paperTarget ?? 30} pts`
+  const exit = plan ? optionExitText(plan) : `option SL ${cfg.paperSl ?? 20} / target ${cfg.paperTarget ?? 30} pts`
+  return `Paper ${trade.action} ${underlying} ${trade.strike} ${trade.side} x${lots} lot(s) @ ${premium.toFixed(1)} - #${meta?.no} ${meta?.name} ${setup.side}, ${setup.spot ? 'spot' : 'futures'} ${setup.entry.toFixed(1)} (SL ${setup.stop.toFixed(1)}, target ${setup.target.toFixed(1)}${trailText(setup)}); ${exit}`
+}
+
+/** The signal's trailing stop, for messages: whose it is and how far. */
+export function trailText(setup) {
+  const t = setup.trail
+  const whose = setup.trailOverride !== undefined ? 'its own' : 'the scanner\'s'
+  if (!t) return setup.trailOverride !== undefined ? ', no trailing stop (its own)' : ''
+  return t.unit === 'pts' ? `, trailing after +${t.startPts} pts, ${t.gapPts} behind (${whose})` : `, trailing after ${t.startR}R, ${t.gapR}R behind (${whose})`
 }
 
 export function setupExitText(s) {

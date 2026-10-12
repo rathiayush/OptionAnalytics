@@ -16,12 +16,12 @@
 // Everything outside (HTTP, Telegram, the state file, the clock) comes in through `io`, so the tests can
 // drive a whole day through it.
 
-import { buildOiContext, optionTradeAt, premiumAt, strategyStats, topFifteen, STRATEGY_BY_ID, DEFAULT_TRAIL, optionPlanFor, squareOffMs, filtersForIndex, lotsFor } from '../src/strategyEngine.js'
+import { buildOiContext, optionTradeAt, premiumAt, strategyStats, topFifteen, STRATEGY_BY_ID, DEFAULT_TRAIL, optionPlanFor, optionExitText, squareOffMs, filtersForIndex, lotsFor } from '../src/strategyEngine.js'
 import { spotBarsOf } from '../src/spotEngine.js'
 import { liquiditySignals, pullStackSignals, autoBigLots } from '../src/orderFlowMath.js'
 import {
   MIN, msOf, scanTick, spotScanTick, followAllSetups, trailFor, alertIdsFor, setupEvents, newSetupEventMemory, newPosition, positionRows, sameSignal,
-  withLevelChange, setupWasTraded, paperEntryText, setupExitText, paperExitText, scannerLogBody, scannerLogSig, scannerProfileOf, PAPER_TRADE_LOT_SIZE,
+  withLevelChange, setupWasTraded, paperEntryText, liveLegsFor, setupExitText, paperExitText, scannerLogBody, scannerLogSig, scannerProfileOf, PAPER_TRADE_LOT_SIZE,
 } from '../src/scannerCore.js'
 import { orderFlowFromSnapshot, applyOrderFlowPush, mergePrints, applyOiTicks, applyFuturesTicks, applySpotUpdate, expiryFlagOf, TAPE_PRINTS } from '../src/liveFeeds.js'
 import { defaultTradeLevels } from '../src/tradeDefaults.js'
@@ -389,8 +389,8 @@ export class IndexScanner {
     this.io.log(`${this.underlying}: #${meta?.no} ${meta?.name} ${s.side} @ ${s.entry.toFixed(1)} (SL ${s.stop.toFixed(1)}, target ${s.target.toFixed(1)})`)
     if (!cfg.alerts || !this.isAlerted(s.id, cfg)) return
     // The moment it alerts, the option is paper-traded (the sell side by default) - as on the page.
-    // Buy or sell, which strike, and the SL / target - this strategy's own if it was tuned and applied, else the
-    // scanner's own setting (optionPlanFor).
+    // Buy or sell, which strike, and how the option leaves the trade - this strategy's own if it was tuned and applied
+    // (its exit EXACTLY: no index option points or option trailing stop on top), else the scanner's (optionPlanFor).
     const plan = optionPlanFor(s.id, cfg.filters, cfg)
     const side = plan.leg
     const trade = side ? optionTradeAt(this.data.oi, s, side, plan.moneyness) : null
@@ -400,11 +400,11 @@ export class IndexScanner {
       // This strategy's own lot size on this index when one was applied with it, else the index's lots (Trade settings).
       const lots = lotsFor(s.id, cfg.filters, cfg.paperLots)
       if (!this.positions.some((p) => sameSignal(p, s, trade))) {
-        const position = newPosition({ setup: s, trade, which: side, lots, lotSize: PAPER_TRADE_LOT_SIZE[this.underlying] ?? 1, premium, cfg: { ...cfg, paperSl: levels.slPts, paperTarget: levels.targetPts }, at: s.t })
+        const position = newPosition({ setup: s, trade, which: side, lots, lotSize: PAPER_TRADE_LOT_SIZE[this.underlying] ?? 1, premium, cfg: { ...cfg, paperSl: levels.slPts, paperTarget: levels.targetPts }, at: s.t, plan: levels })
         this.positions.push(position)
         this.dirty = true
         if (this.live) await this.placeLive(position, s, trade, levels, cfg)
-        else if (cfg.telegram !== false) await this.io.telegram(`${TAG} ${paperEntryText({ underlying: this.underlying, trade, lots, premium, setup: s, cfg })}`)
+        else if (cfg.telegram !== false) await this.io.telegram(`${TAG} ${paperEntryText({ underlying: this.underlying, trade, lots, premium, setup: s, cfg, plan: levels })}`)
       }
       return
     }
@@ -417,10 +417,16 @@ export class IndexScanner {
   // Live today: the server places the order for this alert - if every limit allows it (one open trade at a time, the
   // day's max trades / loss, 09:15 - 14:45, the account kill switch). The lots are the paper trade's (the strategy's own
   // on this index, else the index's), the slippage the index's Trade settings, the SL / target the same as the paper
-  // trade's. Not placed: the paper trade stays, and says why.
+  // trade's - a strategy with its own option exit: its own legs (a safety leg at the signal's own index distance where
+  // its exit has none - liveLegsFor) and NO option trailing stop (the index's Trade settings trail is not its own).
+  // Not placed: the paper trade stays, and says why.
   async placeLive(position, s, trade, levels, cfg) {
     const meta = STRATEGY_BY_ID[s.id]
     const expiry = this.data?.oi?.expiry
+    const legs = liveLegsFor(levels, s)
+    // Its own exit 'option': only the option's own SL / target (the super order's legs) and the 15:10 square-off - not
+    // the signal's index stop / target / time stop (the tuning's optionOutcome).
+    const optionOnly = levels.own && levels.exit === 'option'
     let res
     try {
       if (!expiry) throw new Error('the option expiry is not known yet')
@@ -428,13 +434,15 @@ export class IndexScanner {
         method: 'POST',
         body: {
           key: position.key, strategyId: s.id, strategy: `#${meta?.no} ${meta?.name ?? s.id}`, expiry, strike: trade.strike, side: trade.side, action: trade.action,
-          stopLossPoints: levels.slPts, targetPoints: levels.targetPts, lots: position.lots,
+          stopLossPoints: legs.slPts, targetPoints: legs.targetPts, lots: position.lots,
+          ...(levels.own ? { trailStartPoints: 0, trailGapPoints: 0 } : {}),
           // The signal's stop on the INDEX: the server exits the trade itself when the futures go through it - so the
           // index stop holds even if this scanner stops (the option's own SL / target legs are on Dhan already). A spot
           // strategy's levels are SPOT prices: the server watches those on the spot.
-          indexStop: s.stop, indexSide: s.side, indexTarget: s.target, priceBasis: s.spot ? 'spot' : 'futures',
+          ...(optionOnly ? {} : { indexStop: s.stop, indexSide: s.side, indexTarget: s.target }), priceBasis: s.spot ? 'spot' : 'futures',
           // The server closes it itself at the setup's time stop (15:10 at the latest) - even if this scanner stops.
-          exitAtMs: Math.min(s.timeStopMs ?? squareOffMs(s.t), squareOffMs(s.t)), exitReason: `time stop of #${meta?.no} ${meta?.short ?? s.id}`,
+          exitAtMs: optionOnly ? squareOffMs(s.t) : Math.min(s.timeStopMs ?? squareOffMs(s.t), squareOffMs(s.t)),
+          exitReason: optionOnly ? `15:10 square-off of #${meta?.no} ${meta?.short ?? s.id} (its own option exit)` : `time stop of #${meta?.no} ${meta?.short ?? s.id}`,
         },
       })
     } catch (err) {
@@ -443,12 +451,12 @@ export class IndexScanner {
     if (res?.placed) {
       const o = res.order ?? {}
       Object.assign(position, {
-        live: true, orderIds: o.orderIds ?? [], indexStopSent: s.stop, liveNote: o.success === false ? `PARTLY placed - ${res.message}` : res.message,
+        live: true, orderIds: o.orderIds ?? [], indexStopSent: optionOnly ? null : s.stop, liveNote: o.success === false ? `PARTLY placed - ${res.message}` : res.message,
         lotSize: o.lotSize ?? position.lotSize, premium: o.prices?.limit ?? position.premium,
       })
       this.dirty = true
       this.io.log(`${this.underlying}: LIVE ${trade.action} ${trade.strike} ${trade.side} placed - ${res.message}`)
-      if (cfg.telegram !== false) await this.io.telegram(`${TAG} LIVE order placed: ${trade.action} ${this.underlying} ${trade.strike} ${trade.side} x${position.lots} lot(s) @ ~${position.premium.toFixed(1)} - #${meta?.no} ${meta?.name} ${s.side}, ${s.spot ? 'spot' : 'futures'} ${s.entry.toFixed(1)}; option SL ${levels.slPts.toFixed(1)} / target ${levels.targetPts.toFixed(1)} pts${o.success === false ? ` - PARTLY placed: ${res.message}` : ''}`)
+      if (cfg.telegram !== false) await this.io.telegram(`${TAG} LIVE order placed: ${trade.action} ${this.underlying} ${trade.strike} ${trade.side} x${position.lots} lot(s) @ ~${position.premium.toFixed(1)} - #${meta?.no} ${meta?.name} ${s.side}, ${s.spot ? 'spot' : 'futures'} ${s.entry.toFixed(1)}; ${optionExitText(levels)}${levels.own && !(levels.slPts > 0 && levels.targetPts > 0) ? ` - Dhan safety legs SL ${legs.slPts.toFixed(1)} / target ${legs.targetPts.toFixed(1)} pts` : ''}${o.success === false ? ` - PARTLY placed: ${res.message}` : ''}`)
       return
     }
     position.liveNote = `not placed - ${res?.message ?? 'no answer'}`
@@ -474,7 +482,8 @@ export class IndexScanner {
     // A live trade whose trailing stop moved its index stop tighter: the server is told, so its own index stop check
     // (which holds even when this scanner is down) follows the trail.
     for (const p of this.positions) {
-      if (!p.live || p.liveExitSent) continue
+      // Its own exit 'option' does not follow the signal's index stop at all.
+      if (!p.live || p.liveExitSent || p.optExit === 'option') continue
       const sig = withOutcome.find((x) => `${x.id}-${x.t}` === p.setupKey)
       const stop = sig?.outcome?.stop
       if (!Number.isFinite(stop) || sig.outcome.status !== 'open') continue

@@ -377,12 +377,45 @@ export const TRADE_FILTERS = [
   // paper trade - and a live order, when Auto-place is on - actually uses (optionPlanFor).
   { key: 'tradeOptLeg', label: 'Option: buy or sell when this strategy fires', type: 'select', default: 'default', options: [{ value: 'default', label: 'The scanner\'s setting' }, { value: 'buy', label: 'BUY the option that gains with the move' }, { value: 'sell', label: 'SELL (write) the one that loses value' }] },
   { key: 'tradeOptMoneyness', label: 'Option: which strike', type: 'select', default: 'default', options: [{ value: 'default', label: 'The scanner\'s setting' }, { value: 0, label: 'ATM' }, { value: 1, label: '1 in the money' }, { value: 2, label: '2 in the money' }, { value: -1, label: '1 out of the money' }, { value: -2, label: '2 out of the money' }] },
-  { key: 'tradeOptSlPct', label: 'Option: SL as a % of the premium paid / received (0 = the index\'s own points)', type: 'number', default: 0, min: 0, max: 90, step: 5 },
-  { key: 'tradeOptTargetPct', label: 'Option: target as a % of the premium (0 = the index\'s own points)', type: 'number', default: 0, min: 0, max: 300, step: 5 },
+  // How the option leaves the trade - the tuning's optExit. 'default': the index's option SL / target / trailing stop
+  // (Trade settings, or this strategy's % below) and out with the index trade, as before. Any other: EXACTLY that exit,
+  // as the tuning measured it - none of the index's option points or its option trailing stop are added to it.
+  { key: 'tradeOptExit', label: 'Option: exit', type: 'select', default: 'default', options: [{ value: 'default', label: 'The index\'s option SL / target / trail' }, { value: 'index', label: 'With the index trade only' }, { value: 'indexSl', label: 'With the index trade, capped at its SL %' }, { value: 'first', label: 'Its SL % / target %, or the index exit, first' }, { value: 'option', label: 'Its SL % / target % only (else 15:10)' }] },
+  { key: 'tradeOptSlPct', label: 'Option: SL as a % of the premium paid / received (0 = the index\'s own points; with an exit of its own, 20%)', type: 'number', default: 0, min: 0, max: 90, step: 5 },
+  { key: 'tradeOptTargetPct', label: 'Option: target as a % of the premium (0 = the index\'s own points; with an exit of its own, 30%)', type: 'number', default: 0, min: 0, max: 300, step: 5 },
 ]
 
 /** The keys above that decide how a strategy is taken in OPTIONS (not which setups it takes). */
-export const OPTION_TRADE_FILTERS = ['tradeOptLeg', 'tradeOptMoneyness', 'tradeOptSlPct', 'tradeOptTargetPct']
+export const OPTION_TRADE_FILTERS = ['tradeOptLeg', 'tradeOptMoneyness', 'tradeOptExit', 'tradeOptSlPct', 'tradeOptTargetPct']
+/** An option exit of the strategy's own with no % set uses the tuning's own defaults (OPTION_DEFAULT). */
+export const OWN_EXIT_SL_PCT = 20
+export const OWN_EXIT_TARGET_PCT = 30
+export const OPTION_EXITS = ['index', 'indexSl', 'first', 'option']
+
+/**
+ * The option exit a strategy has OF ITS OWN (one of OPTION_EXITS), else null (the index's option levels and trail apply).
+ * Set by the Option: exit filter; a tuned setting applied before that filter existed (`_tuned` / `_appliedAt` on it, an
+ * option leg of its own) is read the way the Strategy lab reads it back (paramsFromFilters): its target % = 'first',
+ * its SL % only = 'indexSl', neither = 'index'. `f` = strategyFilters(...), `raw` = the stored filters.
+ */
+export function ownOptionExit(f, raw) {
+  if (OPTION_EXITS.includes(f?.tradeOptExit)) return f.tradeOptExit
+  const tuned = !!(raw?._tuned || raw?._appliedAt)
+  if (!tuned || (f?.tradeOptLeg !== 'buy' && f?.tradeOptLeg !== 'sell')) return null
+  return f.tradeOptTargetPct > 0 ? 'first' : f.tradeOptSlPct > 0 ? 'indexSl' : 'index'
+}
+
+/**
+ * The trailing stop a strategy's applied setting carries (`_trail`, stored when it was applied with "the scanner's
+ * setting": the scanner's trail then, null = none) - so a later change of the scanner's trailing stop does not change a
+ * tuned strategy. undefined = none stored (the scanner's own, as before).
+ */
+export function pinnedTrailOf(raw) {
+  if (!raw || !Object.prototype.hasOwnProperty.call(raw, '_trail')) return undefined
+  const t = raw._trail
+  if (t === null) return null
+  return t && typeof t === 'object' && (Number(t.gapR) > 0 || Number(t.gapPts) > 0) ? t : undefined
+}
 
 /**
  * The per-strategy filters the scanner runs with on ONE index. A fine-tuned setting is found per index (what wins on
@@ -414,6 +447,7 @@ export function filtersForIndex(settings, underlying) {
  */
 export function optionPlanFor(id, filters, cfg = {}, premium = null) {
   const f = strategyFilters(id, filters?.[id])
+  const exit = ownOptionExit(f, filters?.[id])
   // WHO DECIDES. A buy / sell chosen where the trading happens WINS - on the Order Flow page the trader is sitting
   // there and their choice is the last word, whatever a strategy was tuned to. Choosing "per strategy" (what the
   // server scanner runs on, since nobody is there to choose) hands the decision to the strategy's own tuned setting,
@@ -428,17 +462,45 @@ export function optionPlanFor(id, filters, cfg = {}, premium = null) {
   // A percentage is of the premium actually paid / received, so it only becomes points once that is known; until then
   // (and whenever it is 0) the index's own points setting stands.
   const pct = (p, fallback) => (p > 0 && premium > 0 ? (premium * p) / 100 : fallback)
+  // An exit of its own: EXACTLY that one (optionOutcome in the tuning) - its SL only where it has one ('indexSl', 'first',
+  // 'option'), its target only with 'first' / 'option', never the index's option points or the index's option trailing
+  // stop; out with the index trade unless 'option'. null = none (`own` levels are null until the premium is known).
+  if (exit) {
+    const ownPct = (p, d) => (premium > 0 ? (premium * (p > 0 ? p : d)) / 100 : null)
+    return {
+      leg, moneyness, exit, own: true,
+      slPts: exit === 'index' ? null : ownPct(f.tradeOptSlPct, OWN_EXIT_SL_PCT),
+      targetPts: exit === 'first' || exit === 'option' ? ownPct(f.tradeOptTargetPct, OWN_EXIT_TARGET_PCT) : null,
+      trailStart: 0, trailGap: 0,
+      fromStrategy: true, tunedLeg, overrode,
+    }
+  }
   return {
     leg,
     moneyness,
+    exit: null,
+    own: false,
     slPts: pct(f.tradeOptSlPct, cfg.paperSl ?? 20),
     targetPts: pct(f.tradeOptTargetPct, cfg.paperTarget ?? 30),
+    // The index's option trailing stop (Trade settings) - only for a strategy with no exit of its own.
+    trailStart: cfg.paperTrailStart ?? 0,
+    trailGap: cfg.paperTrailGap ?? 0,
     // Whether this strategy has a tuned option setting at all, and whether the trader's own choice has just overruled
     // it (so the page can say so rather than quietly doing something else than the strategy was tuned for).
     fromStrategy: f.tradeOptLeg !== 'default' || f.tradeOptMoneyness !== 'default' || f.tradeOptSlPct > 0 || f.tradeOptTargetPct > 0,
     tunedLeg,
     overrode,
   }
+}
+
+/** One line for how a plan's option leaves the trade. */
+export function optionExitText(plan) {
+  if (!plan) return ''
+  const pts = (v) => (v > 0 ? v.toFixed(1) : '-')
+  if (!plan.own) return `option SL ${pts(plan.slPts)} / target ${pts(plan.targetPts)} pts${plan.trailGap > 0 ? `, trailing ${plan.trailGap} pts after +${plan.trailStart ?? 0}` : ''}`
+  if (plan.exit === 'index') return 'option out with the index trade (its own exit)'
+  if (plan.exit === 'indexSl') return `option out with the index trade, Max SL ${pts(plan.slPts)} pts (its own exit)`
+  return `option SL ${pts(plan.slPts)} / target ${pts(plan.targetPts)} pts${plan.exit === 'option' ? ' only, else 15:10' : ', or the index exit'} (its own exit)`
 }
 for (const st of [...STRATEGIES, ...SPOT_STRATEGIES]) STRATEGY_FILTERS[st.id] = [...(STRATEGY_FILTERS[st.id] ?? []), ...TRADE_FILTERS]
 

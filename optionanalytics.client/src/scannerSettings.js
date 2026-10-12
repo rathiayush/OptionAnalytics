@@ -2,6 +2,7 @@
 // trade filters are applied to them - in this browser and in the server scanner's config.
 import { filtersFromTuning } from './strategyTuning.js'
 import { filtersForIndex } from './strategyEngine.js'
+import { trailFor } from './scannerCore.js'
 
 export const SCANNER_SETTINGS_KEY = 'optionanalytics.strategyScanner.settings'
 
@@ -53,6 +54,11 @@ export async function applyTunedFilters(id, params, { option = false, index = nu
     if (tuned) next._tuned = tuned
     // When it was applied - its run (the server scanner's record) is shown from then on.
     next._appliedAt = Date.now()
+    // Its trailing stop: one of its own (tradeTrail) is in the setting; "the scanner's setting" is pinned to the scanner's
+    // trailing stop now (what the lab / tuning measured it with - pinnedTrailOf), so changing the scanner's later does
+    // not change how a tuned strategy trades. null = the scanner had none.
+    if ((next.tradeTrail ?? 'scanner') === 'scanner') next._trail = trailFor(config?.settings ?? readSettings(), index)
+    else delete next._trail
     // The strategy's own lot size on this index (lotsFor): a number sets it, null goes back to the index's lots, left out
     // keeps what it had.
     if (lots !== undefined) setLots(next, lots)

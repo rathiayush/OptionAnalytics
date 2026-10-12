@@ -77,6 +77,13 @@ When adding or changing a strategy:
   open trades only, FROM the minute it is made (`levelLog` on the position, `trailLog` for the futures
   signals' trailing SL; `optionStopTargetHit` / `simulateOutcome` follow them - what already passed is
   never rewritten and a trailing stop is never loosened by a change); paper trades are all sized by the current lots setting (live trades keep their quantity).
+- **A strategy follows its own exits.** A setup trailing its strategy's own stop (`tradeTrail`, or the scanner's trail pinned
+  as `_trail` when a tuned setting was applied - `withOwnTrail`) is not moved by a later change of the scanner's trailing
+  stop. A strategy with an option exit of its own (`tradeOptExit`, carried from the tuning by `filtersFromTuning`) trades
+  EXACTLY it (`optionPlanFor` / `newPosition` / `positionRows`): none of the index's option SL / target points or its option
+  trailing stop, and a change of the index's levels never touches its open trades; its live super order carries its own
+  legs (a safety leg at the signal's own index distance where its exit has none - `liveLegsFor`) and no option trail.
+  `tests/strategy-own-exits.test.mjs` keeps the paper trade == the tuning's `optionOutcome` for every exit.
 
 ## Other rules
 

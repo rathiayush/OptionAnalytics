@@ -40,7 +40,7 @@
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
-import { buildOiContext, ACTIVE_STRATEGIES, SPOT_STRATEGIES, STRATEGY_BY_ID, TRADE_FILTERS, filtersForIndex } from '../src/strategyEngine.js'
+import { buildOiContext, ACTIVE_STRATEGIES, SPOT_STRATEGIES, STRATEGY_BY_ID, TRADE_FILTERS, filtersForIndex, pinnedTrailOf } from '../src/strategyEngine.js'
 import { scanSpotDay, spotBarsOf } from '../src/spotEngine.js'
 import { autoBigLots } from '../src/orderFlowMath.js'
 import { scannerProfileOf, trailFor } from '../src/scannerCore.js'
@@ -644,7 +644,8 @@ async function main() {
       strategy: { id, no: meta.no, name: meta.name },
       days: days.map((d) => ({ date: d.date, estimated: d.estimated, setups: d.setups.length, ...d.quality })), skipped,
       asWritten: evaluateSetting(days, id, {}, opts),
-      applied: applied ? { ...evaluateSetting(days, id, paramsFromFilters(applied), opts), filters: applied } : null,
+      // As applied: with the trailing stop it was applied with (pinnedTrailOf), when one was stored.
+      applied: applied ? { ...evaluateSetting(days, id, paramsFromFilters(applied), pinnedTrailOf(applied) !== undefined ? { ...opts, trail: pinnedTrailOf(applied) } : opts), filters: applied } : null,
       yours: evaluateSetting(days, id, job.params ?? {}, opts),
       calls: callReport(fetcher.stats, fetcher.perKind(), fastOi, dhan),
       budget: { minutes: budgetMinutes, elapsedMinutes: Math.round((Date.now() - START_MS) / 60_000), stoppedBy: budgetStop ? 'budget' : stopped ? 'dhan-limit' : null, reason: budgetStop ?? stopped ?? null, daysPlanned: plan.length, daysScanned: days.length, daysLeftOut: skipped.length },

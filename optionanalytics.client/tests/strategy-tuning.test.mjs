@@ -203,9 +203,10 @@ test('Apply to the scanner: the whole setting goes across, options included, and
   // defaults ("sell ATM") the trader never chose.
   assert.equal(filtersFromTuning({}, v({ optLeg: 'buy' })).tradeOptLeg, undefined)
   const opt = filtersFromTuning({}, v({ optLeg: 'buy', optMoneyness: -1, optExit: 'first', optSlPct: 25, optTargetPct: 50 }), { option: true })
-  assert.deepEqual(opt, { tradeOptLeg: 'buy', tradeOptMoneyness: -1, tradeOptSlPct: 25, tradeOptTargetPct: 50 })
-  // Out with the index trade: the option's own SL / target are not used, so they are not applied either.
-  assert.deepEqual(filtersFromTuning({}, v({ optLeg: 'sell', optExit: 'index', optSlPct: 25 }), { option: true }), { tradeOptLeg: 'sell', tradeOptMoneyness: 0 })
+  assert.deepEqual(opt, { tradeOptLeg: 'buy', tradeOptMoneyness: -1, tradeOptExit: 'first', tradeOptSlPct: 25, tradeOptTargetPct: 50 })
+  // Out with the index trade: the option's own SL / target are not used, so they are not applied either - and its exit
+  // says so, so the index's option points are not added to it.
+  assert.deepEqual(filtersFromTuning({}, v({ optLeg: 'sell', optExit: 'index', optSlPct: 25 }), { option: true }), { tradeOptLeg: 'sell', tradeOptMoneyness: 0, tradeOptExit: 'index' })
 
   // And what the scanner then does with it. WHO DECIDES: a side chosen where the trading happens (the Order Flow
   // page's Buy / Sell) is the last word; 'strategy' - what the server scanner runs on, with nobody there to choose -

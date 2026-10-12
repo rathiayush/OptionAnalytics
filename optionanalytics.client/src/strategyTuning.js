@@ -621,8 +621,10 @@ export function filtersFromTuning(current, params, { option = false } = {}) {
   if (!option) return out
   if (params.optLeg === 'buy' || params.optLeg === 'sell') out.tradeOptLeg = params.optLeg
   if (Number.isFinite(params.optMoneyness)) out.tradeOptMoneyness = params.optMoneyness
-  // The option's own SL / target only apply when the tuning chose to use them ('first' or 'option'; 'indexSl' - the
-  // Max SL only); with 'index' the option simply goes out with the index trade, which is the scanner's own behaviour.
+  // The exit EXACTLY as measured (tradeOptExit - optionPlanFor then adds none of the index's option points or its option
+  // trailing stop): its own SL / target only where the tuning used them ('first' or 'option'; 'indexSl' - the Max SL
+  // only); with 'index' the option goes out with the index trade and nothing else.
+  out.tradeOptExit = OPTION_GRID.optExit.includes(params.optExit) ? params.optExit : 'index'
   if (ownTarget(params.optExit) || params.optExit === 'indexSl') {
     if (params.optSlPct > 0) out.tradeOptSlPct = params.optSlPct
     if (ownTarget(params.optExit) && params.optTargetPct > 0) out.tradeOptTargetPct = params.optTargetPct
@@ -712,8 +714,9 @@ export function paramsFromFilters(filters) {
   if (f.tradeOptLeg === 'buy' || f.tradeOptLeg === 'sell') {
     out.optLeg = f.tradeOptLeg
     out.optMoneyness = Number.isFinite(Number(f.tradeOptMoneyness)) ? Number(f.tradeOptMoneyness) : 0
-    // Its own target too: out at whichever of its SL / target comes first; its SL only: the Max SL, out with the index.
-    out.optExit = f.tradeOptTargetPct > 0 ? 'first' : f.tradeOptSlPct > 0 ? 'indexSl' : 'index'
+    // Its exit as stored (tradeOptExit); from before that was stored: its own target too = out at whichever of its SL /
+    // target comes first; its SL only = the Max SL, out with the index.
+    out.optExit = OPTION_GRID.optExit.includes(f.tradeOptExit) ? f.tradeOptExit : f.tradeOptTargetPct > 0 ? 'first' : f.tradeOptSlPct > 0 ? 'indexSl' : 'index'
     if (f.tradeOptSlPct > 0) out.optSlPct = f.tradeOptSlPct
     if (f.tradeOptTargetPct > 0) out.optTargetPct = f.tradeOptTargetPct
   }

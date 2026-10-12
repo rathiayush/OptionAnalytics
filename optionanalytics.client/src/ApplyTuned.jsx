@@ -5,7 +5,7 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { runLink, runOf } from './appliedRun.js'
 import { Button, Card, Checkbox, Col, InputNumber, Popconfirm, Popover, Row, Space, Table, Tag, Tooltip, Typography, message } from 'antd'
-import { STRATEGY_BY_ID } from './strategyEngine.js'
+import { STRATEGY_BY_ID, OWN_EXIT_SL_PCT, OWN_EXIT_TARGET_PCT, ownOptionExit, pinnedTrailOf } from './strategyEngine.js'
 import { DEFAULT_VARIANT, settingParams, variantText } from './strategyTuning.js'
 import { saveIndexFilters, saveIndexLots } from './scannerSettings.js'
 import { ServerLiveSwitch, ServerLiveTrades, useServerLive } from './ServerLive.jsx'
@@ -128,8 +128,21 @@ export function appliedText(f) {
     const m = Number(f.tradeOptMoneyness) || 0
     parts.push(`${f.tradeOptLeg.toUpperCase()} ${m === 0 ? 'ATM' : `${Math.abs(m)} ${m > 0 ? 'ITM' : 'OTM'}`}`)
   }
-  if (f?.tradeOptSlPct > 0) parts.push(`option SL ${f.tradeOptSlPct}% of the premium`)
-  if (f?.tradeOptTargetPct > 0) parts.push(`option target ${f.tradeOptTargetPct}%`)
+  // How its option leaves the trade: its own exit exactly (no index option points or trailing stop), else the index's.
+  const exit = ownOptionExit(f ?? {}, f)
+  const sl = f?.tradeOptSlPct > 0 ? f.tradeOptSlPct : OWN_EXIT_SL_PCT
+  const tg = f?.tradeOptTargetPct > 0 ? f.tradeOptTargetPct : OWN_EXIT_TARGET_PCT
+  if (exit === 'index') parts.push('option out with the index trade only (its own exit)')
+  else if (exit === 'indexSl') parts.push(`option out with the index trade, Max SL ${sl}% (its own exit)`)
+  else if (exit) parts.push(`option SL ${sl}% / target ${tg}% of the premium${exit === 'option' ? ' only, else 15:10' : ', or the index exit'} (its own exit)`)
+  else {
+    if (f?.tradeOptSlPct > 0) parts.push(`option SL ${f.tradeOptSlPct}% of the premium`)
+    if (f?.tradeOptTargetPct > 0) parts.push(`option target ${f.tradeOptTargetPct}%`)
+  }
+  // The trailing stop it was applied with (the scanner's then) - kept whatever the scanner's is changed to.
+  const pinned = pinnedTrailOf(f)
+  if (pinned === null) parts.push('no trailing stop (the scanner\'s when applied)')
+  else if (pinned) parts.push(pinned.unit === 'pts' ? `trailing after +${pinned.startPts} pts, ${pinned.gapPts} behind (the scanner's when applied)` : `trailing after ${pinned.startR}R, ${pinned.gapR}R behind (the scanner's when applied)`)
   return parts.join(' · ')
 }
 

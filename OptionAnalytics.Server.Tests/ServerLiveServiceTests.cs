@@ -273,6 +273,30 @@ public sealed class ServerLiveServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task AStrategyWithItsOwnOptionExit_TradesItsOwnTrailingStop_NotTheIndexs()
+    {
+        var trade = Trade();
+        trade.Save("NIFTY", trade.Get("NIFTY") with { TrailStart = 5, TrailGap = 4 });
+        var orders = new FakeOrders();
+        var live = Live(orders, trade);
+        live.Set("NIFTY", true, 5, null, "admin", At10);
+
+        // Its own exit has no trailing stop: none, though the index trails at 4 pts.
+        await live.PlaceAsync("NIFTY", Order("own-1-sell", 18, 27) with { TrailStartPoints = 0, TrailGapPoints = 0 }, At10, default);
+        Assert.Equal((0m, 0m), (orders.Placed[0].TrailStartPoints, orders.Placed[0].TrailGapPoints));
+        await live.ExitAsync("NIFTY", "own-1-sell", "target", 500, At10, default);
+
+        // A trail of its own is used as sent.
+        await live.PlaceAsync("NIFTY", Order("own-2-sell", 18, 27) with { TrailStartPoints = 6, TrailGapPoints = 3 }, At10.AddMinutes(2), default);
+        Assert.Equal((6m, 3m), (orders.Placed[1].TrailStartPoints, orders.Placed[1].TrailGapPoints));
+        await live.ExitAsync("NIFTY", "own-2-sell", "target", 500, At10, default);
+
+        // Nothing sent: the index's (Trade settings).
+        await live.PlaceAsync("NIFTY", Order("plain-3-sell", 18, 27), At10.AddMinutes(4), default);
+        Assert.Equal((5m, 4m), (orders.Placed[2].TrailStartPoints, orders.Placed[2].TrailGapPoints));
+    }
+
+    [Fact]
     public async Task OneOpenTradeAtATime_AndTheSameSignalNeverTwice()
     {
         var orders = new FakeOrders();

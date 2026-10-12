@@ -110,8 +110,8 @@ test('out with the index trade, capped at a Max SL: the option\'s stop only - ne
   assert.ok(checked > 5, `${checked}`)
   assert.ok(stopped > 0, 'the cap was hit at least once on the synthetic days')
   assert.match(optionText(v({ optLeg: 'buy', optExit: 'indexSl', optSlPct: 30 })), /^BUY ATM · out with the index trade, Max SL 30% of the premium$/)
-  // Applied to the scanner as the option's SL only - its target stays the Trade settings one.
-  assert.deepEqual(filtersFromTuning({}, v({ optLeg: 'buy', optExit: 'indexSl', optSlPct: 30, optTargetPct: 50 }), { option: true }), { tradeOptLeg: 'buy', tradeOptMoneyness: 0, tradeOptSlPct: 30 })
+  // Applied to the scanner with its exit as measured: the option's SL only - no target, not the Trade settings one either.
+  assert.deepEqual(filtersFromTuning({}, v({ optLeg: 'buy', optExit: 'indexSl', optSlPct: 30, optTargetPct: 50 }), { option: true }), { tradeOptLeg: 'buy', tradeOptMoneyness: 0, tradeOptExit: 'indexSl', tradeOptSlPct: 30 })
   const det = optionDetails(days, id, v({ optLeg: 'buy', optExit: 'indexSl', optSlPct: 15 }), null, 'NIFTY')
   assert.ok(det.length > 0 && det.every((t) => t.opt.slPts > 0 && t.opt.target == null && t.opt.rr == null && Number.isFinite(t.opt.r)))
 })

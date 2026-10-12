@@ -173,6 +173,8 @@ export default function StrategiesPage() {
               <b> paper</b>: alerted, paper-traded. <b>signals only</b>: recorded, not traded. <b>tuned</b>: a fine-tuned setting applied there (hover it; the link under it is its run).
               <b> BUY / SELL</b>: what its alert trades there - the index&apos;s &quot;On an alert&quot; (Trade settings) Buy / Sell wins for every strategy;
               set it to <b>Per strategy</b> and each strategy&apos;s own buy / sell (Filters, or the Strategy lab) decides (<b>*</b> = its own was overruled).
+              Every strategy trades by its <b>own exits</b>: its trailing stop (a tuned one keeps the trailing stop it was applied with) and,
+              when it has one, its own option exit - the index&apos;s option points and trail are not added to it (hover <b>tuned</b>).
               A new strategy appears here by itself.
             </Text>
             {cfg === null && <Alert type="warning" showIcon message="Sign in with the admin login to see what is live and to change the scanner's settings." />}

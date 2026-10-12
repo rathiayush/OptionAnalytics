@@ -6,7 +6,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { IndexScanner, topFromSignalsCsv, TAG, byLiveList } from '../scanner-runner/indexScanner.mjs'
 import { ALL_IDS, MIN } from '../src/scannerCore.js'
-import { strategyFilters } from '../src/strategyEngine.js'
+import { squareOffMs, strategyFilters } from '../src/strategyEngine.js'
 import { day } from './synthetic-day.mjs'
 
 const { minuteBars, prints, oi, path, T915, at } = day()
@@ -399,6 +399,54 @@ test('a strategy applied to an index WITH a lot size: its paper and live trades 
   assert.ok(orders.filter((o) => o.strategyId === id).every((o) => o.lots === 5) && orders.filter((o) => o.strategyId !== id).every((o) => o.lots === 2), JSON.stringify(orders.map((o) => [o.strategyId, o.lots])))
   // The lot size never reaches the strategy's filters (the scanner reads only real ones).
   assert.equal(strategyFilters(id, s.settings().filters[id])._lots, undefined)
+})
+
+test('a strategy applied with its own option exit: its paper and live trades take exactly it - no index option points or trail', async () => {
+  const probe = new IndexScanner('NIFTY', fakeIo())
+  probe.reset(DATE)
+  probe.setConfig({ alertIds: ALL_IDS, settings: { autoPaper: 'sell' } })
+  await runDay(probe, fakeIo(), at(15), at(300))
+  const ids = [...new Set(probe.positions.map((p) => p.strategy))]
+  assert.ok(ids.length >= 2, ids.join(', '))
+  const [withIndex, optionOnly] = ids
+  const orders = []
+  const io = fakeIo()
+  io.api = async (path, opts) => {
+    if (path === '/api/scanner-runner/live/NIFTY/order') { orders.push(opts.body); return { placed: true, message: 'placed', order: { success: true, orderIds: [`o${orders.length}`], lotSize: 65 } } }
+    return {}
+  }
+  const s = new IndexScanner('NIFTY', io)
+  s.reset(DATE)
+  // The index: SL 20 / target 30 premium points, an option trail of 3 behind after +5. Two strategies tuned with their own
+  // option exits: out with the index trade only; and only their own SL / target (else 15:10).
+  const config = { alertIds: ALL_IDS, settings: { autoPaper: 'strategy' }, live: { NIFTY: true }, levels: { NIFTY: { sl: 20, target: 30, trailStart: 5, trailGap: 3 } },
+    filtersByIndex: { NIFTY: { [withIndex]: { tradeOptLeg: 'sell', tradeOptExit: 'index', _tuned: 'a' }, [optionOnly]: { tradeOptLeg: 'sell', tradeOptExit: 'option', tradeOptSlPct: 20, tradeOptTargetPct: 30, _tuned: 'b' } } } }
+  s.setConfig(config)
+  await runDay(s, io, at(15), at(150))
+  const a = s.positions.filter((p) => p.strategy === withIndex)
+  const b = s.positions.filter((p) => p.strategy === optionOnly)
+  const plain = s.positions.filter((p) => p.strategy !== withIndex && p.strategy !== optionOnly)
+  assert.ok(a.length && a.every((p) => p.optExit === 'index' && p.slPts === null && p.targetPts === null && p.trailGap === 0), JSON.stringify(a))
+  assert.ok(b.length && b.every((p) => p.optExit === 'option' && Math.abs(p.slPts - p.premium * 0.2) < 1e-9 && Math.abs(p.targetPts - p.premium * 0.3) < 1e-9 && p.trailGap === 0))
+  assert.ok(plain.every((p) => !p.optExit && p.slPts === 20 && p.targetPts === 30 && p.trailGap === 3), 'the rest: the index\'s levels and trail')
+  // Live: no option trailing stop; out with the index trade = safety legs at the signal's own index distance.
+  const fired = (key) => s.memory.fired.find((f) => key.startsWith(`${f.id}-${f.t}-`))
+  for (const o of orders.filter((x) => x.strategyId === withIndex)) {
+    const sig = fired(o.key)
+    assert.deepEqual([o.trailStartPoints, o.trailGapPoints], [0, 0])
+    assert.ok(Math.abs(o.stopLossPoints - Math.abs(sig.entry - sig.stop)) < 1e-9 && Math.abs(o.targetPoints - Math.abs(sig.target - sig.entry)) < 1e-9, JSON.stringify(o))
+    assert.equal(o.indexStop, sig.stop, 'the server still watches its index stop')
+  }
+  for (const o of orders.filter((x) => x.strategyId === optionOnly)) {
+    assert.equal(o.indexStop, undefined, 'its own option exit only: no index stop to watch')
+    assert.equal(o.exitAtMs, squareOffMs(fired(o.key).t), 'closed at 15:10, not at the signal\'s time stop')
+    assert.deepEqual([o.trailStartPoints, o.trailGapPoints], [0, 0])
+  }
+  for (const o of orders.filter((x) => x.strategyId !== withIndex && x.strategyId !== optionOnly)) assert.equal(o.trailGapPoints, undefined, 'the rest: the index\'s trail (the server\'s Trade settings)')
+  assert.ok(orders.some((x) => x.strategyId === withIndex) || orders.some((x) => x.strategyId === optionOnly), 'an own-exit order was placed')
+  // The index's levels change: only the trades without an exit of their own take it.
+  s.setConfig({ ...config, levels: { NIFTY: { sl: 40, target: 60, trailStart: 5, trailGap: 3 } } })
+  assert.ok(s.positions.filter((p) => p.optExit).every((p) => !p.levelLog), 'its own exit: untouched')
 })
 
 test('today is not loaded at weekends or before the open, and a failing load backs off (each try costs Dhan calls)', async () => {
