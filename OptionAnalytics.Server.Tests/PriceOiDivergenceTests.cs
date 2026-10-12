@@ -137,6 +137,170 @@ public sealed class PriceOiDivergenceTests
         Assert.Null(PriceOiDivergenceDetector.Evaluate("NIFTY", bars, 50, LiveBook().Strikes, Missing, Options));
     }
 
+    // ---- Confirmation: a zone is only sent once the 5 minutes after it confirm it ----
+
+    // The discount zone found at 11:30 (spot 24,520 -> 24,500, PE 24,500 holding), and the minutes after it.
+    private static readonly List<Candle> Fall = Bars(11, 30, 24520, 24514, 24507, 24500);
+    private static PriceOiDivergence Zone(List<Candle>? bars = null) => Run(bars ?? Fall, LiveBook())!;
+
+    // The minutes after 11:30, one close each (11:31, 11:32, ...); low / high = the close unless given.
+    private static List<Candle> After(List<Candle> move, params decimal[] closes) =>
+        move.Concat(closes.Select((c, i) => new Candle(move[^1].Time.AddMinutes(i + 1), c, c, c, c))).ToList();
+
+    // PE / CE OI at 24,500: the start value before the move ends, `later` from the minute after it.
+    private static Func<string, decimal, long, long?> OiLater(long later)
+    {
+        var end = Minute(Fall[^1].Time);
+        var reader = LiveBook().Reader(Fall[^1].Time);
+        return (side, strike, minute) => strike == 24500 && minute > end ? later : reader(side, strike, minute);
+    }
+
+    private static DivergenceConfirmation Confirm(PriceOiDivergence zone, List<Candle> bars, long oiLater = 4_080_000, DivergenceOptions? o = null) =>
+        PriceOiDivergenceDetector.Confirm(zone, bars, OiLater(oiLater), o ?? Options);
+
+    [Fact]
+    public void ADiscountZone_IsConfirmed_WhenTheNextFiveMinutesHoldTheLowAndTurnUp()
+    {
+        var zone = Zone();
+        Assert.Equal(24500m, zone.Extreme);
+        var result = Confirm(zone, After(Fall, 24503, 24501, 24506, 24510, 24512));
+
+        Assert.Equal(DivergenceConfirmState.Confirmed, result.State);
+        var alert = result.Alert!;
+        Assert.Equal(5, alert.ConfirmMinutes);
+        Assert.Equal(Fall[^1].Time.AddMinutes(5), alert.ConfirmedBarTime);
+        Assert.Equal(24512m, alert.ConfirmPrice);
+        Assert.Equal(4_080_000, alert.OiConfirm);
+        Assert.InRange(alert.OiConfirmChangePct!.Value, 1.99m, 2.01m);
+        Assert.Equal(zone.BarTime, alert.BarTime);
+        Assert.Contains("CONFIRMED after 5 min", alert.Message);
+        Assert.Contains("no close below the low of 24500", alert.Message);
+    }
+
+    [Fact]
+    public void BeforeTheFiveMinutesHavePassed_ItWaits()
+    {
+        Assert.Equal(DivergenceConfirmState.Waiting, Confirm(Zone(), Fall).State);
+        Assert.Equal(DivergenceConfirmState.Waiting, Confirm(Zone(), After(Fall, 24503, 24501, 24506, 24510)).State);
+    }
+
+    [Fact]
+    public void ACloseBelowTheLow_FailsItAtOnce()
+    {
+        var result = Confirm(Zone(), After(Fall, 24503, 24495));
+        Assert.Equal(DivergenceConfirmState.Failed, result.State);
+        Assert.Contains("below the low", result.Reason);
+    }
+
+    [Fact]
+    public void AWickBelowTheLow_ThatClosesBackAbove_StillHolds()
+    {
+        var bars = After(Fall, 24503, 24501, 24506, 24510, 24512);
+        bars[^4] = new Candle(bars[^4].Time, 24503, 24504, 24490, 24501); // 11:32 dipped to 24,490, closed 24,501
+        Assert.Equal(DivergenceConfirmState.Confirmed, Confirm(Zone(), bars).State);
+    }
+
+    [Fact]
+    public void PriceThatDidNotTurnBack_IsNotConfirmed()
+    {
+        var result = Confirm(Zone(), After(Fall, 24503, 24501, 24502, 24501, 24500)); // still at the 24,500 it fell to
+        Assert.Equal(DivergenceConfirmState.Failed, result.State);
+        Assert.Contains("not back above", result.Reason);
+    }
+
+    [Fact]
+    public void OiThatUnwoundWhileWaiting_IsNotConfirmed()
+    {
+        var result = Confirm(Zone(), After(Fall, 24503, 24501, 24506, 24510, 24512), oiLater: 3_900_000); // -2.5% vs the start
+        Assert.Equal(DivergenceConfirmState.Failed, result.State);
+        Assert.Contains("unwound", result.Reason);
+    }
+
+    [Fact]
+    public void AMissingMinuteWhileWaiting_IsNotConfirmed()
+    {
+        var bars = After(Fall, 24503, 24501, 24506, 24510, 24512, 24513);
+        bars.RemoveAt(Fall.Count + 1); // 11:32 never arrived
+        var result = Confirm(Zone(), bars);
+        Assert.Equal(DivergenceConfirmState.Failed, result.State);
+        Assert.Contains("missing", result.Reason);
+    }
+
+    [Fact]
+    public void APremiumZone_IsConfirmed_WhenTheHighHoldsAndPriceTurnsDown()
+    {
+        var rise = Bars(11, 30, 24480, 24486, 24493, 24500);
+        var zone = Run(rise, LiveBook())!;
+        Assert.Equal("Premium", zone.Zone);
+        Assert.Equal(24500m, zone.Extreme);
+        var ce = LiveBook().Reader(rise[^1].Time);
+        var ok = PriceOiDivergenceDetector.Confirm(zone, After(rise, 24497, 24499, 24494, 24490, 24488), ce, Options);
+        Assert.Equal(DivergenceConfirmState.Confirmed, ok.State);
+        Assert.Contains("no close above the high of 24500", ok.Alert!.Message);
+
+        var broke = PriceOiDivergenceDetector.Confirm(zone, After(rise, 24497, 24505), ce, Options);
+        Assert.Equal(DivergenceConfirmState.Failed, broke.State);
+        Assert.Contains("above the high", broke.Reason);
+    }
+
+    [Fact]
+    public void TheGate_SendsAZoneOnlyAfterItsFiveMinutes_ThenCoolsDown()
+    {
+        var gate = new DivergenceGate(Options);
+        var oi = OiLater(4_080_000);
+        var zone = Zone();
+        var bars = After(Fall, 24503, 24501, 24506, 24510, 24512);
+
+        // 11:30 closes: found, not sent.
+        var (alerts, dropped) = gate.OnBar("NIFTY", Fall, oi, zone);
+        Assert.Empty(alerts);
+        Assert.Empty(dropped);
+        Assert.Single(gate.Pending);
+
+        // 11:31 - 11:34: still waiting; the same zone found again meanwhile is not started twice.
+        for (var k = 1; k <= 4; k++)
+        {
+            (alerts, _) = gate.OnBar("NIFTY", bars.Take(Fall.Count + k).ToList(), oi, k == 2 ? zone with { BarTime = zone.BarTime.AddMinutes(2) } : null);
+            Assert.Empty(alerts);
+        }
+        Assert.Single(gate.Pending);
+
+        // 11:35 closes: confirmed and sent.
+        (alerts, _) = gate.OnBar("NIFTY", bars, oi, null);
+        Assert.Single(alerts);
+        Assert.Equal(5, alerts[0].ConfirmMinutes);
+        Assert.Empty(gate.Pending);
+
+        // The same zone found again inside the cool-down is not even started.
+        (alerts, _) = gate.OnBar("NIFTY", bars, oi, zone with { BarTime = zone.BarTime.AddMinutes(6) });
+        Assert.Empty(alerts);
+        Assert.Empty(gate.Pending);
+    }
+
+    [Fact]
+    public void TheGate_DropsAZoneThatFails_AndLetsTheNextOneStart()
+    {
+        var gate = new DivergenceGate(Options);
+        var oi = OiLater(4_080_000);
+        gate.OnBar("NIFTY", Fall, oi, Zone());
+        var broken = After(Fall, 24495);
+        var next = Zone() with { BarTime = broken[^1].Time, Extreme = 24495 };
+        var (alerts, dropped) = gate.OnBar("NIFTY", broken, oi, next);
+        Assert.Empty(alerts);
+        Assert.Single(dropped);
+        Assert.Contains("below the low", dropped[0].Reason);
+        Assert.Equal(next.BarTime, Assert.Single(gate.Pending).BarTime); // the new one waits now
+    }
+
+    [Fact]
+    public void WithConfirmMinutesZero_AZoneIsSentTheMomentItIsFound()
+    {
+        var gate = new DivergenceGate(new DivergenceOptions { ConfirmMinutes = 0 });
+        var (alerts, _) = gate.OnBar("NIFTY", Fall, OiLater(4_080_000), Zone());
+        Assert.Single(alerts);
+        Assert.Equal(0, alerts[0].ConfirmMinutes);
+    }
+
     private static readonly DateTimeOffset Base = new(2026, 10, 7, 11, 30, 0, TimeSpan.FromHours(5.5));
 
     [Fact]

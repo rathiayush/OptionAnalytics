@@ -925,6 +925,22 @@ function ScannerRecord({ initial = {} }) {
   useEffect(() => {
     fetch(`/api/scanner-log/rows/${file}`).then(async (r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))).then(setRows).catch((e) => setError(e.message))
   }, [file])
+  // The option trades also read their signals: each trade's index points, and what the option bought / sold would have
+  // made held to the signal's exit (a trade from before those were kept with it takes them from its signal).
+  const [sigRows, setSigRows] = useState(null)
+  useEffect(() => {
+    if (kind !== 'trades') return
+    fetch(`/api/scanner-log/rows/${source === 'server' ? 'server-' : ''}signals`).then((r) => (r.ok ? r.json() : [])).then(setSigRows).catch(() => setSigRows([]))
+  }, [kind, source])
+  const signalOf = useMemo(() => {
+    const m = new Map()
+    for (const x of sigRows ?? []) m.set(`${x.underlying}|${x.strategy_id}|${x.side}|${x.time_ist}`, x)
+    return (r) => m.get(`${r.underlying}|${r.strategy_id}|${r.signal_side}|${r.signal_time_ist}`) ?? null
+  }, [sigRows])
+  const legOf = (r, key, sigKey) => num(r[key]) ?? (kind === 'trades' ? num(signalOf(r)?.[sigKey]) : null)
+  const indexPts = (r) => (kind === 'trades' ? legOf(r, 'index_points', 'points') : num(r.points))
+  const boughtPts = (r) => legOf(r, 'buy_points', 'buy_points')
+  const soldPts = (r) => legOf(r, 'sell_points', 'sell_points')
   const signals = kind === 'signals'
   const shown = useMemo(() => (rows ?? []).filter((r) => (underlying === 'all' || r.underlying === underlying) && (!ids.length || ids.includes(r.strategy_id))
     && (signals || mode === 'all' || (mode === 'live') === (r.live === 'true')) && inDates(r.date, range)
@@ -945,6 +961,14 @@ function ScannerRecord({ initial = {} }) {
     { title: 'Closed by', dataIndex: 'exit_reason', width: 120, render: (v, r) => v || r.status || '-' },
     { title: 'Points', dataIndex: 'points', width: 80, render: (v) => <b style={{ color: col(num(v)) }}>{pts(num(v))}</b> },
     { title: 'R', dataIndex: 'r', width: 75, render: (v) => <span style={{ color: col(num(v)) }}>{fmtR(num(v))}</span> },
+    {
+      title: <Tooltip title="The ATM option BOUGHT at the signal, held until its index trade exited - premium points (to compare)">If bought</Tooltip>, key: 'bp', width: 95,
+      render: (_, r) => { const v = boughtPts(r); const sig = signals ? r : signalOf(r); return <Tooltip title={sig?.buy_option ? `${sig.buy_option}: ${f1(num(sig.buy_entry))} → ${f1(num(sig.buy_exit))}` : 'not kept for this one'}><span style={{ color: col(v) }}>{pts(v)}</span></Tooltip> },
+    },
+    {
+      title: <Tooltip title="The ATM option SOLD at the signal, held until its index trade exited - premium points (to compare)">If sold</Tooltip>, key: 'sp', width: 90,
+      render: (_, r) => { const v = soldPts(r); const sig = signals ? r : signalOf(r); return <Tooltip title={sig?.sell_option ? `${sig.sell_option}: ${f1(num(sig.sell_entry))} → ${f1(num(sig.sell_exit))}` : 'not kept for this one'}><span style={{ color: col(v) }}>{pts(v)}</span></Tooltip> },
+    },
     { title: 'Day type', dataIndex: 'day_type', width: 110 },
     { title: 'Adaptive', dataIndex: 'adaptive_take', width: 90, render: (v, r) => (v ? <Tooltip title={r.adaptive_reason}>{v === 'true' ? 'take' : v === 'false' ? 'skip' : v}</Tooltip> : '-') },
   ]
@@ -959,13 +983,26 @@ function ScannerRecord({ initial = {} }) {
     { title: 'Premium in → out', key: 'p', width: 140, render: (_, r) => `${f1(num(r.entry_premium))} → ${r.exit_premium ? f1(num(r.exit_premium)) : '-'}` },
     { title: 'Points', dataIndex: 'points', width: 80, render: (v) => <b style={{ color: col(num(v)) }}>{pts(num(v))}</b> },
     { title: 'Net ₹', dataIndex: 'net_rupees', width: 100, render: (v) => <b style={{ color: col(num(v)) }}>{num(v) == null ? '-' : Math.round(num(v)).toLocaleString('en-IN')}</b> },
+    { title: <Tooltip title="Its signal's points on the index (futures, or spot for a spot strategy)">Index pts</Tooltip>, key: 'ip', width: 90, render: (_, r) => { const v = indexPts(r); return <b style={{ color: col(v) }}>{pts(v)}</b> } },
+    {
+      title: <Tooltip title="The ATM option BOUGHT at the signal, held until its index trade exited - premium points (to compare)">If bought</Tooltip>, key: 'bp', width: 95,
+      render: (_, r) => { const v = boughtPts(r); const sig = signals ? r : signalOf(r); return <Tooltip title={sig?.buy_option ? `${sig.buy_option}: ${f1(num(sig.buy_entry))} → ${f1(num(sig.buy_exit))}` : 'not kept for this one'}><span style={{ color: col(v) }}>{pts(v)}</span></Tooltip> },
+    },
+    {
+      title: <Tooltip title="The ATM option SOLD at the signal, held until its index trade exited - premium points (to compare)">If sold</Tooltip>, key: 'sp', width: 90,
+      render: (_, r) => { const v = soldPts(r); const sig = signals ? r : signalOf(r); return <Tooltip title={sig?.sell_option ? `${sig.sell_option}: ${f1(num(sig.sell_entry))} → ${f1(num(sig.sell_exit))}` : 'not kept for this one'}><span style={{ color: col(v) }}>{pts(v)}</span></Tooltip> },
+    },
     { title: 'Closed by', dataIndex: 'exit_reason', width: 130 },
   ]
   const columns = signals ? signalColumns : tradeColumns
-  const csvColumns = columns.map((c) => ({ title: typeof c.title === 'string' ? c.title : c.key, value: (r) => (c.dataIndex ? r[c.dataIndex] : c.key === 't' ? `${(signals ? r.time_ist : r.entry_time_ist) ?? ''} -> ${r.exit_time_ist ?? ''}` : c.key === 's' ? nameOf(r) : c.key === 'o' ? `${r.action} ${r.strike} ${r.option}` : c.key === 'l' ? `${r.lots}x${r.lot_size}` : c.key === 'p' ? `${r.entry_premium}->${r.exit_premium}` : '') }))
+  const csvTitle = { ip: 'index_points', bp: 'if_bought_points', sp: 'if_sold_points' }
+  const csvColumns = columns.map((c) => ({ title: typeof c.title === 'string' ? c.title : csvTitle[c.key] ?? c.key, value: (r) => (c.dataIndex ? r[c.dataIndex] : c.key === 't' ? `${(signals ? r.time_ist : r.entry_time_ist) ?? ''} -> ${r.exit_time_ist ?? ''}` : c.key === 's' ? nameOf(r) : c.key === 'o' ? `${r.action} ${r.strike} ${r.option}` : c.key === 'l' ? `${r.lots}x${r.lot_size}` : c.key === 'p' ? `${r.entry_premium}->${r.exit_premium}` : c.key === 'ip' ? indexPts(r) ?? '' : c.key === 'bp' ? boughtPts(r) ?? '' : c.key === 'sp' ? soldPts(r) ?? '' : '') }))
   // Signals: the market at each one too (tape, big orders, futures OI, book... - the mkt_* columns).
   if (signals) for (const k of MARKET_CSV) csvColumns.push({ title: k, value: (r) => r[k] ?? '' })
   const rupees = shown.map((r) => num(r.net_rupees)).filter(Number.isFinite).reduce((a, b) => a + b, 0)
+  // To compare: the index points, and what buying / selling the ATM option every time would have made (held to the exit).
+  const sum = (f) => { const v = shown.map(f).filter(Number.isFinite); return { n: v.length, total: v.reduce((a, b) => a + b, 0) } }
+  const compare = { index: sum(indexPts), bought: sum(boughtPts), sold: sum(soldPts) }
   return (
     <Space direction="vertical" size={10} style={{ width: '100%' }}>
       <Row gutter={[12, 8]} align="middle">
@@ -991,6 +1028,12 @@ function ScannerRecord({ initial = {} }) {
       {rows && (
         <>
           <Totals rows={shown} points={(r) => num(r.points)} r={signals ? (r) => num(r.r) : null} extra={!signals && <span>net <b style={{ color: col(rupees) }}>₹{Math.round(rupees).toLocaleString('en-IN')}</b> after charges</span>} />
+          <Space size={16} wrap style={{ fontSize: 13 }} aria-label="Compare">
+            <Text type="secondary" style={{ fontSize: 12 }}>To compare{signals ? '' : ' (the same signals)'}:</Text>
+            {!signals && <span>index <b style={{ color: col(compare.index.total) }}>{pts(compare.index.total)}</b> pts{compare.index.n < shown.length ? ` (${compare.index.n})` : ''}</span>}
+            <span>if bought every time <b style={{ color: col(compare.bought.total) }}>{pts(compare.bought.total)}</b> pts{compare.bought.n < shown.length ? ` (${compare.bought.n} kept)` : ''}</span>
+            <span>if sold every time <b style={{ color: col(compare.sold.total) }}>{pts(compare.sold.total)}</b> pts{compare.sold.n < shown.length ? ` (${compare.sold.n} kept)` : ''}</span>
+          </Space>
           <Table size="small" rowKey="key" dataSource={shown} columns={columns} pagination={{ pageSize: 50, size: 'small', showSizeChanger: true, pageSizeOptions: [50, 100, 500] }} scroll={{ x: 1400 }} />
           <Text type="secondary" style={{ fontSize: 12 }}>The whole file: <a href={`/api/scanner-log/${file}`} download>{file}.csv</a>{signals ? ' - every signal with the market at its time (tape, big orders, futures OI, option writers, the order book: the mkt_ columns)' : ''}.</Text>
         </>

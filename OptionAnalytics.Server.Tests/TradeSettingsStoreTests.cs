@@ -68,6 +68,28 @@ public sealed class TradeSettingsStoreTests : IDisposable
         Assert.NotNull(store.Save("NIFTY", store.Get("NIFTY") with { AutoTrade = "short" }).Error);
     }
 
+    [Fact]
+    public void TheMaxRules_ForTheStrategies_AreKept_AndAFileFromBeforeThemStartsWithItsSlAndTarget()
+    {
+        // A file from before the max rules: each index's max = its SL / target.
+        Directory.CreateDirectory(_dir);
+        File.WriteAllText(FilePath, "underlying,lots,sl_points,target_points,trail_start,trail_gap,slippage_points,scanner_enabled,auto_trade,updated_utc\n" +
+            "NIFTY,2,25,40,0,0,2,true,sell,\nBANKNIFTY,1,50,75,0,0,2,true,sell,\nSENSEX,1,60,90,0,0,2,true,sell,\n");
+        var store = Store();
+        var nifty = store.Get("NIFTY");
+        Assert.Equal((25m, 40m), (nifty.MaxSl, nifty.MaxTarget));
+
+        // Saved: kept apart from the manual SL / target; 0 = no max.
+        Assert.Null(store.Save("NIFTY", nifty with { MaxSlPoints = 60, MaxTargetPoints = 0 }).Error);
+        var again = Store().Get("NIFTY");
+        Assert.Equal((60m, 0m, 25m, 40m), (again.MaxSl, again.MaxTarget, again.SlPoints, again.TargetPoints));
+        Assert.Contains("max_sl_points,max_target_points", File.ReadAllText(FilePath));
+        // A request without them (an older page) keeps them.
+        Assert.Null(store.Save("NIFTY", again with { MaxSlPoints = null, MaxTargetPoints = null, Lots = 3 }).Error);
+        Assert.Equal((60m, 0m), (Store().Get("NIFTY").MaxSl, Store().Get("NIFTY").MaxTarget));
+        Assert.NotNull(store.Save("NIFTY", again with { MaxSlPoints = -5 }).Error);
+    }
+
     public void Dispose()
     {
         try { Directory.Delete(_dir, true); } catch { /* best effort */ }

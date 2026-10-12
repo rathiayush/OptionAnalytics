@@ -15,7 +15,7 @@ namespace OptionAnalytics.Server.Services;
 public sealed class TradeSettingsStore
 {
     public static readonly string[] Underlyings = { "NIFTY", "BANKNIFTY", "SENSEX" };
-    public static readonly string[] Columns = { "underlying", "lots", "sl_points", "target_points", "trail_start", "trail_gap", "slippage_points", "scanner_enabled", "auto_trade", "updated_utc" };
+    public static readonly string[] Columns = { "underlying", "lots", "sl_points", "target_points", "trail_start", "trail_gap", "slippage_points", "scanner_enabled", "auto_trade", "max_sl_points", "max_target_points", "updated_utc" };
     // "strategy": each strategy buys or sells what its own tuned setting says (Strategy tuning - Apply to the
     // scanner), selling where it has none. "sell" / "buy" are a choice for the whole index and override that.
     public static readonly string[] AutoTrades = { "sell", "buy", "off", "strategy" };
@@ -23,9 +23,9 @@ public sealed class TradeSettingsStore
     // The premiums of BANKNIFTY / SENSEX move ~2.5x / ~3x NIFTY's - their stops and targets are wider.
     public static TradeSettings Default(string underlying) => underlying switch
     {
-        "BANKNIFTY" => new TradeSettings("BANKNIFTY", 1, 50, 75, 0, 0, 2, true, "sell", null),
-        "SENSEX" => new TradeSettings("SENSEX", 1, 60, 90, 0, 0, 2, true, "sell", null),
-        _ => new TradeSettings(underlying, 1, 20, 30, 0, 0, 2, true, "sell", null),
+        "BANKNIFTY" => new TradeSettings("BANKNIFTY", 1, 50, 75, 0, 0, 2, true, "sell", null, 50, 75),
+        "SENSEX" => new TradeSettings("SENSEX", 1, 60, 90, 0, 0, 2, true, "sell", null, 60, 90),
+        _ => new TradeSettings(underlying, 1, 20, 30, 0, 0, 2, true, "sell", null, 20, 30),
     };
 
     private readonly string _path;
@@ -70,9 +70,16 @@ public sealed class TradeSettingsStore
         if (request.SlPoints is < 0 or > 5000 || request.TargetPoints is < 0 or > 5000) return (null, "SL and target must be 0 to 5000 points.");
         if (request.TrailStart is < 0 or > 5000 || request.TrailGap is < 0 or > 5000) return (null, "Trailing must be 0 to 5000 points.");
         if (request.SlippagePoints is < 0 or > 100) return (null, "Slippage must be 0 to 100 points.");
+        if (request.MaxSlPoints is < 0 or > 5000 || request.MaxTargetPoints is < 0 or > 5000) return (null, "Max SL and max target must be 0 to 5000 points.");
         var auto = (request.AutoTrade ?? "sell").Trim().ToLowerInvariant();
         if (!AutoTrades.Contains(auto)) return (null, "Auto trade must be sell, buy, off or strategy.");
-        var saved = request with { Underlying = u, AutoTrade = auto, UpdatedUtc = DateTimeOffset.UtcNow };
+        // Not sent (an older page): the max rules stay what they were.
+        var before = Get(u);
+        var saved = request with
+        {
+            Underlying = u, AutoTrade = auto, UpdatedUtc = DateTimeOffset.UtcNow,
+            MaxSlPoints = request.MaxSlPoints ?? before.MaxSl, MaxTargetPoints = request.MaxTargetPoints ?? before.MaxTarget,
+        };
         lock (_lock)
         {
             var rows = Read() ?? new Dictionary<string, TradeSettings>();
@@ -106,6 +113,9 @@ public sealed class TradeSettingsStore
                     bool.TryParse(Cell("scanner_enabled"), out var on) ? on : d.ScannerEnabled,
                     AutoTrades.Contains(Cell("auto_trade").ToLowerInvariant()) ? Cell("auto_trade").ToLowerInvariant() : d.AutoTrade,
                     DateTimeOffset.TryParse(Cell("updated_utc"), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var at) ? at : null);
+                // The max rules for the strategies' trades - a file from before them starts with its SL / target as the max.
+                var row = rows[u];
+                rows[u] = row with { MaxSlPoints = Dec(Cell("max_sl_points"), row.SlPoints), MaxTargetPoints = Dec(Cell("max_target_points"), row.TargetPoints) };
             }
             return rows;
         }
@@ -124,7 +134,8 @@ public sealed class TradeSettingsStore
         {
             var s = rows[u];
             csv.AppendLine(string.Join(',', s.Underlying, s.Lots.ToString(CultureInfo.InvariantCulture), Num(s.SlPoints), Num(s.TargetPoints), Num(s.TrailStart),
-                Num(s.TrailGap), Num(s.SlippagePoints), s.ScannerEnabled ? "true" : "false", s.AutoTrade, s.UpdatedUtc?.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture) ?? ""));
+                Num(s.TrailGap), Num(s.SlippagePoints), s.ScannerEnabled ? "true" : "false", s.AutoTrade, Num(s.MaxSl), Num(s.MaxTarget),
+                s.UpdatedUtc?.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture) ?? ""));
         }
         var temp = _path + ".tmp";
         File.WriteAllText(temp, csv.ToString());
@@ -138,7 +149,13 @@ public sealed class TradeSettingsStore
 
 /// <summary>One index's trade settings - see TradeSettingsStore. Points are option premium points;
 /// AutoTrade is what the server scanner does on an alert: "sell" or "buy" the option (paper), "strategy" (each
-/// strategy's own tuned setting), or "off".</summary>
+/// strategy's own tuned setting), or "off". SlPoints / TargetPoints / TrailStart / TrailGap are what a MANUAL trade
+/// starts with; a strategy's trade follows its own exits, never more than MaxSlPoints / MaxTargetPoints (its max
+/// rules - 0 = none; null = as SlPoints / TargetPoints, a file or a request from before them).</summary>
 public sealed record TradeSettings(
     string Underlying, int Lots, decimal SlPoints, decimal TargetPoints, decimal TrailStart, decimal TrailGap, decimal SlippagePoints,
-    bool ScannerEnabled, string AutoTrade, DateTimeOffset? UpdatedUtc);
+    bool ScannerEnabled, string AutoTrade, DateTimeOffset? UpdatedUtc, decimal? MaxSlPoints = null, decimal? MaxTargetPoints = null)
+{
+    public decimal MaxSl => MaxSlPoints ?? SlPoints;
+    public decimal MaxTarget => MaxTargetPoints ?? TargetPoints;
+}

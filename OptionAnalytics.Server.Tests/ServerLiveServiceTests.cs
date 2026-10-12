@@ -273,6 +273,50 @@ public sealed class ServerLiveServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task AStrategyWithItsOwnOptionExit_TradesItsOwnTrailingStop_NotTheIndexs()
+    {
+        var trade = Trade();
+        trade.Save("NIFTY", trade.Get("NIFTY") with { TrailStart = 5, TrailGap = 4 });
+        var orders = new FakeOrders();
+        var live = Live(orders, trade);
+        live.Set("NIFTY", true, 5, null, "admin", At10);
+
+        // Its own exit has no trailing stop: none, though the index trails at 4 pts.
+        await live.PlaceAsync("NIFTY", Order("own-1-sell", 18, 27) with { TrailStartPoints = 0, TrailGapPoints = 0 }, At10, default);
+        Assert.Equal((0m, 0m), (orders.Placed[0].TrailStartPoints, orders.Placed[0].TrailGapPoints));
+        await live.ExitAsync("NIFTY", "own-1-sell", "target", 500, At10, default);
+
+        // A trail of its own is used as sent.
+        await live.PlaceAsync("NIFTY", Order("own-2-sell", 18, 27) with { TrailStartPoints = 6, TrailGapPoints = 3 }, At10.AddMinutes(2), default);
+        Assert.Equal((6m, 3m), (orders.Placed[1].TrailStartPoints, orders.Placed[1].TrailGapPoints));
+        await live.ExitAsync("NIFTY", "own-2-sell", "target", 500, At10, default);
+
+        // Nothing sent: the index's (Trade settings).
+        await live.PlaceAsync("NIFTY", Order("plain-3-sell", 18, 27), At10.AddMinutes(4), default);
+        Assert.Equal((5m, 4m), (orders.Placed[2].TrailStartPoints, orders.Placed[2].TrailGapPoints));
+    }
+
+    [Fact]
+    public async Task ALiveOrder_IsHeldToTheIndexsMaxRules()
+    {
+        var trade = Trade();
+        trade.Save("NIFTY", trade.Get("NIFTY") with { SlPoints = 5, TargetPoints = 5, MaxSlPoints = 30, MaxTargetPoints = 45 });
+        var orders = new FakeOrders();
+        var live = Live(orders, trade);
+        live.Set("NIFTY", true, 5, null, "admin", At10);
+        // The strategy's own legs, wider than the max: held to it.
+        await live.PlaceAsync("NIFTY", Order("a-1-sell", 50, 90), At10, default);
+        Assert.Equal((30m, 45m), (orders.Placed[0].StopLossPoints, orders.Placed[0].TargetPoints));
+        await live.ExitAsync("NIFTY", "a-1-sell", "target", 500, At10, default);
+        // Tighter than the max: its own - never the manual SL / target (5 / 5).
+        await live.PlaceAsync("NIFTY", Order("b-2-sell", 12, 20), At10.AddMinutes(2), default);
+        Assert.Equal((12m, 20m), (orders.Placed[1].StopLossPoints, orders.Placed[1].TargetPoints));
+        Assert.Equal(12m, ServerLiveService.Capped(12, 0));
+        Assert.Equal(30m, ServerLiveService.Capped(null, 30));
+        Assert.Equal(0m, ServerLiveService.Capped(null, 0));
+    }
+
+    [Fact]
     public async Task OneOpenTradeAtATime_AndTheSameSignalNeverTwice()
     {
         var orders = new FakeOrders();

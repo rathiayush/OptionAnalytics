@@ -99,10 +99,20 @@ export default function StrategiesPage() {
       paper: <Tooltip title="Alerted: each signal is paper-traded (not on the live list)"><Tag color="blue">paper</Tag></Tooltip>,
       signals: <Tooltip title={s.spot ? 'Recorded only - a spot strategy trades where it is applied or on the live list' : 'Recorded only - not in the alert list (Scanner settings below), not applied or on the live list here'}><Tag>signals only</Tag></Tooltip>,
     }[st.mode]
+    const o = st.option
+    const legTip = o.autoTrade === 'off' ? `${u} is set to Alert only (Trade settings): nothing is traded`
+      : o.autoTrade === 'strategy' ? (o.tunedLeg ? `Its own setting on ${u} says ${o.tunedLeg.toUpperCase()} (${u} is Per strategy)` : `No buy / sell of its own, so it sells (${u} is Per strategy) - set it with Filters or the Strategy lab`)
+        : `${u}'s Trade settings say ${o.autoTrade === 'buy' ? 'Buy' : 'Sell'} option for every strategy${o.overrode ? ` - this strategy is set to ${o.tunedLeg.toUpperCase()}, but ${u}'s choice wins. Set ${u} to Per strategy (Trade settings) to let it ${o.tunedLeg}` : ''}`
+    const legTag = ['live', 'list', 'paper'].includes(st.mode) && (
+      <Tooltip title={legTip}>
+        {o.leg ? <Tag color={o.leg === 'buy' ? 'green' : 'volcano'}>{o.leg === 'buy' ? 'BUY' : 'SELL'}{o.overrode ? ' *' : ''}</Tag> : <Tag>alert only</Tag>}
+      </Tooltip>
+    )
     return (
       <Space direction="vertical" size={0}>
         <span>
           {modeTag}
+          {legTag}
           {st.applied && <Tooltip title={<>Fine-tuned setting applied on {u}: {appliedText(st.applied)}{st.applied._lots ? ` · ${st.applied._lots} lot(s)` : ''}</>}><Tag color="gold">tuned</Tag></Tooltip>}
         </span>
         {run && (run.trades > 0 || run.signals > 0) && (
@@ -161,6 +171,12 @@ export default function StrategiesPage() {
               Every strategy and what the <b>server scanner</b> does with it on each index - it runs them all day for NIFTY, BANKNIFTY and SENSEX, with no page open.
               <b> LIVE</b>: on the index&apos;s live list and the index switched to Live today (each alert places a real Dhan order). <b>live list</b>: paper until the index is Live today.
               <b> paper</b>: alerted, paper-traded. <b>signals only</b>: recorded, not traded. <b>tuned</b>: a fine-tuned setting applied there (hover it; the link under it is its run).
+              <b> BUY / SELL</b>: what its alert trades there - the index&apos;s &quot;On an alert&quot; (Trade settings) Buy / Sell wins for every strategy;
+              set it to <b>Per strategy</b> and each strategy&apos;s own buy / sell (Filters, or the Strategy lab) decides (<b>*</b> = its own was overruled).
+              Every strategy trades by its <b>own exits</b>: its stop-loss, target, trailing stop (a tuned one keeps the trailing stop it was applied
+              with) and time stop on the index, and its own option SL / target where it has them - never the Trade settings&apos; SL / target / trail
+              (those are a manual trade&apos;s). Only the index&apos;s <b>max rules</b> hold it: never a wider option SL than Max SL, never a farther target
+              than Max target (Trade settings) - and the tuning measures every strategy with them too (hover <b>tuned</b>).
               A new strategy appears here by itself.
             </Text>
             {cfg === null && <Alert type="warning" showIcon message="Sign in with the admin login to see what is live and to change the scanner's settings." />}
@@ -184,7 +200,7 @@ export default function StrategiesPage() {
                             <Tag color="gold" style={{ margin: 0 }}>{tuned} tuned</Tag>
                           </Text>
                           <Text type="secondary" style={{ fontSize: 12 }}>
-                            An alert trades: {t.autoTrade === 'strategy' ? 'per strategy (its tuned buy / sell)' : t.autoTrade === 'buy' ? 'buy the option' : t.autoTrade === 'off' ? 'nothing (off)' : 'sell the option'} · {t.lots ?? 1} lot(s) · option SL {lv.sl ?? '-'} / target {lv.target ?? '-'} pts · <Link to="/trade-settings">Trade settings</Link>
+                            An alert trades: {t.autoTrade === 'strategy' ? 'per strategy (its own buy / sell, sell where it has none)' : t.autoTrade === 'buy' ? 'buy the option, for every strategy' : t.autoTrade === 'off' ? 'nothing (off)' : 'sell the option, for every strategy'} · {t.lots ?? 1} lot(s) · each strategy&apos;s own option SL / target, at most Max SL {lv.maxSl ?? lv.sl ?? '-'} / Max target {lv.maxTarget ?? lv.target ?? '-'} pts · <Link to="/trade-settings">Trade settings</Link>
                           </Text>
                         </Space>
                       </Card>

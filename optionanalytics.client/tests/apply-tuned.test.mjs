@@ -11,6 +11,7 @@ globalThis.localStorage = { getItem: (k) => (store.has(k) ? store.get(k) : null)
 const { applyFilterValue, applyTunedFilters, putOnLiveList, readFiltersByIndex, saveIndexFilters, SCANNER_SETTINGS_KEY } = await import('../src/scannerSettings.js')
 const { filtersFromTuning, DEFAULT_VARIANT, OPTION_DEFAULT } = await import('../src/strategyTuning.js')
 const { filtersForIndex, strategyFilters } = await import('../src/strategyEngine.js')
+const { trailFor } = await import('../src/scannerCore.js')
 
 /** The server's /api/scanner-runner endpoints, as ScannerRunnerController / ScannerRunnerStore answer them. */
 function fakeServer({ tamper = false } = {}) {
@@ -49,9 +50,17 @@ test('applied for its index: that index runs the strategy with it, the others ke
   const got = await applyTunedFilters('absorption', niftyBest, { option: true, index: 'NIFTY' })
   // When it was applied is kept with it - its run (the server scanner's record) is shown from then on.
   assert.ok(got._appliedAt >= before && got._appliedAt <= Date.now(), 'stamped with the time it was applied')
-  const want = { ...filtersFromTuning({ tradeSide: 'both', minRatio: 3 }, niftyBest, { option: true }), _appliedAt: got._appliedAt }
+  // Its trailing stop is "the scanner's setting": pinned to the scanner's trailing stop now (NIFTY's 30 / 30 points).
+  const want = { ...filtersFromTuning({ tradeSide: 'both', minRatio: 3 }, niftyBest, { option: true }), _appliedAt: got._appliedAt, _trail: trailFor(srv.config.settings ?? {}, 'NIFTY') }
   assert.deepEqual(got, want)
-  assert.deepEqual(strategyFilters('absorption', got), strategyFilters('absorption', { ...got, _appliedAt: undefined }), 'the scanner ignores it')
+  assert.deepEqual(got._trail, { startR: 1, gapR: 1, unit: 'pts', startPts: 30, gapPts: 30 })
+  assert.equal(got.tradeOptExit, 'indexSl', 'its option exit exactly as measured')
+  assert.deepEqual(strategyFilters('absorption', got), strategyFilters('absorption', { ...got, _appliedAt: undefined, _trail: undefined }), 'the filters ignore them')
+  // A tuned trailing stop of its own: nothing pinned.
+  const own = await applyTunedFilters('absorption', { ...niftyBest, tradeTrail: '1/1' }, { option: true, index: 'SENSEX' })
+  assert.equal(own.tradeTrail, '1/1')
+  assert.equal('_trail' in own, false)
+  await saveIndexFilters('SENSEX', 'absorption', null)
   assert.equal(want.minRatio, 3, 'the strategy\'s own entry filters are kept')
   assert.equal(want.tradeOptLeg, 'buy')
   assert.equal(want.tradeOptSlPct, 30, 'the option\'s Max SL goes across')

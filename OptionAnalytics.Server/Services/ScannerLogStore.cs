@@ -40,6 +40,9 @@ public sealed class ScannerLogStore
         // volume, futures price / OI, option writers, PCR, the order book near the price, VWAP distance.
         "mkt_tape30", "mkt_tape60", "mkt_tape300", "mkt_big_net", "mkt_big_count", "mkt_cvd15", "mkt_vol_x", "mkt_fut_px15", "mkt_fut_oi15",
         "mkt_fut_oi5", "mkt_writers15", "mkt_writers_open", "mkt_pcr", "mkt_book_imb", "mkt_vwap_dist",
+        // What each option would have done, held to the signal's exit (scannerCore.signalLegs): the ATM option bought and
+        // the ATM option sold - premium in / out and points.
+        "buy_option", "buy_entry", "buy_exit", "buy_points", "sell_option", "sell_entry", "sell_exit", "sell_points",
     };
 
     /// <summary>marketAt's keys -> their columns.</summary>
@@ -56,6 +59,8 @@ public sealed class ScannerLogStore
         "entry_premium", "exit_premium", "points", "rupees", "stt", "brokerage", "other_charges", "net_rupees", "net_per_lot",
         "exit_reason", "signal_time_ist", "strategy_no", "strategy_id",
         "signal_side", "day_type", "adaptive_take", "adaptive_reason", "source", "user", "updated_utc",
+        // Its signal's points on the index, and what the option bought / sold would have made held to the signal's exit.
+        "index_points", "buy_points", "sell_points",
     };
 
     private readonly string _directory;
@@ -109,6 +114,8 @@ public sealed class ScannerLogStore
             ["adaptive_price_only"] = Bool(s.AdaptivePriceOnly), ["adaptive_reason"] = Text(s.AdaptiveReason),
             ["status"] = Text(s.Status), ["r"] = Num(s.R), ["points"] = Num(FuturesPoints(s.Side, s.Entry, s.ExitPrice, s.Status)), ["exit_time_ist"] = s.ExitTime is > 0 ? IstTime(s.ExitTime.Value) : "",
             ["exit_price"] = Num(s.ExitPrice), ["exit_reason"] = Text(s.ExitReason), ["source"] = source, ["user"] = who, ["updated_utc"] = now,
+            ["buy_option"] = Text(s.BuyOption), ["buy_entry"] = Num(s.BuyEntry), ["buy_exit"] = Num(s.BuyExit), ["buy_points"] = Num(s.BuyPoints),
+            ["sell_option"] = Text(s.SellOption), ["sell_entry"] = Num(s.SellEntry), ["sell_exit"] = Num(s.SellExit), ["sell_points"] = Num(s.SellPoints),
         }, s.Market)).ToList();
         var tradeRows = trades.Where((t) => !string.IsNullOrWhiteSpace(t.Key) && t.EntryTime > 0).Select((t) => new Dictionary<string, string>
         {
@@ -121,6 +128,7 @@ public sealed class ScannerLogStore
             ["strategy_no"] = Num(t.StrategyNo), ["strategy_id"] = Text(t.StrategyId), ["signal_side"] = Text(t.SignalSide),
             ["day_type"] = Text(t.DayType), ["adaptive_take"] = Bool(t.AdaptiveTake), ["adaptive_reason"] = Text(t.AdaptiveReason),
             ["source"] = source, ["user"] = who, ["updated_utc"] = now,
+            ["index_points"] = Num(t.IndexPoints), ["buy_points"] = Num(t.BuyPoints), ["sell_points"] = Num(t.SellPoints),
         }).ToList();
 
         await _lock.WaitAsync(cancellationToken);
@@ -403,7 +411,9 @@ public sealed record ScannerSignalRow(
     long Time, int? StrategyNo, string? StrategyId, string? Strategy, string? Side, double? Entry, double? Stop, double? Target,
     double? Confidence, bool? Estimated, string? DayType, string? DayTypePrice, string? VoteOi, string? VoteCvd,
     bool? AdaptiveTake, bool? AdaptivePriceOnly, string? AdaptiveReason, string? Status, double? R, long? ExitTime,
-    double? ExitPrice, string? ExitReason, IReadOnlyDictionary<string, double?>? Market = null);
+    double? ExitPrice, string? ExitReason, IReadOnlyDictionary<string, double?>? Market = null,
+    string? BuyOption = null, double? BuyEntry = null, double? BuyExit = null, double? BuyPoints = null,
+    string? SellOption = null, double? SellEntry = null, double? SellExit = null, double? SellPoints = null);
 
 /// <summary>An option trade punched for a signal (paper or live) - SignalTime / StrategyId / SignalSide name
 /// the signal it came from. Stt / Brokerage / OtherCharges / NetRupees / NetPerLot: its costs and net P&amp;L
@@ -412,4 +422,5 @@ public sealed record ScannerTradeRow(
     string? Key, long EntryTime, long? ExitTime, bool? Live, string? Action, string? Option, double? Strike, int? Lots,
     int? LotSize, double? EntryPremium, double? ExitPremium, double? Points, double? Rupees, string? ExitReason,
     long? SignalTime, int? StrategyNo, string? StrategyId, string? SignalSide, string? DayType, bool? AdaptiveTake, string? AdaptiveReason,
-    double? Stt = null, double? Brokerage = null, double? OtherCharges = null, double? NetRupees = null, double? NetPerLot = null);
+    double? Stt = null, double? Brokerage = null, double? OtherCharges = null, double? NetRupees = null, double? NetPerLot = null,
+    double? IndexPoints = null, double? BuyPoints = null, double? SellPoints = null);

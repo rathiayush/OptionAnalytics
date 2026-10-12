@@ -19,8 +19,9 @@ public interface IServerLiveOrders
 ///  - the index's live trades today are under its max count and its live loss today is under its max loss;
 ///  - the strategy is on the index's LIVE LIST (LiveListService: proven on that index after costs, or added by hand);
 ///  - the account's own daily loss limit / kill switch does not block it (LiveTradingService checks that itself).
-/// The lots, slippage and trailing stop are the index's Trade settings - the scanner only names the option; its
-/// SL / target are the ones the paper trade uses (the strategy's tuned plan or Trade settings), checked here.
+/// The lots and slippage are the index's Trade settings - the scanner only names the option; its SL / target legs are the
+/// strategy's own (the ones its paper trade uses), never past the index's Max SL / Max target; the option's trailing stop
+/// is the one the scanner sends (a strategy has none of the index's: TrailGapPoints 0), else the index's.
 /// Every trade is kept in {data}/server-live.json with what the scanner reported when it closed, so the limits hold
 /// across restarts. The scanner's "Runner" role reaches only this, never the manual live-trading API.
 /// </summary>
@@ -121,14 +122,20 @@ public sealed class ServerLiveService
             var why = BlockReason(u, request, now);
             if (why is not null) return new ServerLiveOrderResult(false, why, null);
             var t = _trade.Get(u);
-            var sl = request.StopLossPoints is > 0 and <= 5000 ? request.StopLossPoints.Value : t.SlPoints;
-            var target = request.TargetPoints is > 0 and <= 5000 ? request.TargetPoints.Value : t.TargetPoints;
-            if (sl <= 0 || target <= 0) return new ServerLiveOrderResult(false, "a live trade is a Dhan super order - the index's SL and target must both be above 0", null);
+            // The strategy's own legs (the scanner sends them), held to the index's max rules (Trade settings) - never a
+            // wider SL or a farther target than those; none sent: the max itself.
+            var sl = Capped(request.StopLossPoints, t.MaxSl);
+            var target = Capped(request.TargetPoints, t.MaxTarget);
+            if (sl <= 0 || target <= 0) return new ServerLiveOrderResult(false, "a live trade is a Dhan super order - it needs both an SL and a target leg (the strategy's own, or the index's Max SL / Max target)", null);
             // The strategy's own lot size on this index when one was applied with it (the scanner sends it), else the
             // index's lots - within Trade settings' own range.
             var lots = request.Lots is >= 1 and <= 500 ? request.Lots.Value : t.Lots;
+            // The option's trailing stop: the strategy's own when the scanner sends one (0 = none), else the index's.
+            var (trailStart, trailGap) = request.TrailGapPoints is >= 0 and <= 5000
+                ? (request.TrailGapPoints.Value > 0 ? Math.Clamp(request.TrailStartPoints ?? 0, 0, 5000) : 0, request.TrailGapPoints.Value)
+                : (t.TrailGap > 0 ? t.TrailStart : 0, t.TrailGap);
             var order = new ManualOrderRequest(u, request.Expiry, request.Strike, request.Side.ToUpperInvariant(), request.Action.ToUpperInvariant(), lots,
-                t.SlippagePoints, sl, target, t.TrailGap > 0 ? t.TrailStart : 0, t.TrailGap,
+                t.SlippagePoints, sl, target, trailStart, trailGap,
                 request.ExitAtMs, request.ExitReason ?? "server scanner time stop");
             _logger.LogWarning("Server scanner LIVE {Action} {Underlying} {Strike}{Side} x{Lots} for {Key}.", order.Direction, u, order.Strike, order.Side, order.Lots, request.Key);
             var result = await _orders.PlaceAsync(order, CancellationToken.None);
@@ -146,6 +153,14 @@ public sealed class ServerLiveService
             return new ServerLiveOrderResult(result.OrderIds.Count > 0, result.Message, result);
         }
         finally { _placing.Release(); }
+    }
+
+    /// <summary>A leg (premium points) held to its max rule: the sent one, but never past the max; none sent = the max (0 = none).</summary>
+    internal static decimal Capped(decimal? sent, decimal max)
+    {
+        var own = sent is > 0 and <= 5000 ? sent.Value : 0;
+        if (max <= 0) return own;
+        return own > 0 ? Math.Min(own, max) : max;
     }
 
     /// <summary>Why a new live order must not go out for this index now, else null.</summary>
@@ -388,7 +403,8 @@ public sealed class ServerLiveService
 /// <summary>What the scanner sends for one alert: the option and the signal's key (strategy-time-side).</summary>
 public sealed record ServerLiveOrderRequest(string Key, string? Strategy, DateOnly Expiry, decimal Strike, string Side, string Action,
     decimal? StopLossPoints = null, decimal? TargetPoints = null, long ExitAtMs = 0, string? ExitReason = null, string? StrategyId = null,
-    decimal? IndexStop = null, string? IndexSide = null, decimal? IndexTarget = null, int? Lots = null, string? PriceBasis = null)
+    decimal? IndexStop = null, string? IndexSide = null, decimal? IndexTarget = null, int? Lots = null, string? PriceBasis = null,
+    decimal? TrailStartPoints = null, decimal? TrailGapPoints = null)
 {
     /// <summary>The strategy's id - sent, else the key's first part ({id}-{time}-{side}).</summary>
     public string StrategyIdOrFromKey => !string.IsNullOrWhiteSpace(StrategyId) ? StrategyId! : Key.Split('-')[0];

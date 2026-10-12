@@ -40,6 +40,9 @@ export function StrategyFiltersModal({ id, values, onClose, onSave }) {
         <Text type="secondary" style={{ fontSize: 11 }}>
           The defaults are the strategy&apos;s tested rules. A change applies to the signals the scanner finds from now on (the server
           scanner, every index where no fine-tuned setting is applied); measure it first in the Strategy lab or with a tuning run.
+          The option&apos;s buy / sell and strike here are used where the index&apos;s &quot;On an alert&quot; (Trade settings) is Per strategy -
+          its Sell option / Buy option wins for every strategy; an option SL / target % here always applies. An Option: exit of its
+          own is taken exactly - none of the index&apos;s option SL / target points or its option trailing stop are added to it.
         </Text>
       </Space>
     </Modal>

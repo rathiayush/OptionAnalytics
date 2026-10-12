@@ -43,6 +43,28 @@ public sealed class ScannerLogStoreTests : IDisposable
     private static ScannerLogDayRequest Day(string date, ScannerSignalRow[] signals, ScannerTradeRow[]? trades = null) => new("NIFTY", date, "live", signals.ToList(), trades?.ToList());
 
     [Fact]
+    public async Task ASignal_KeepsWhatTheOptionBoughtAndSoldWouldHaveMade_AndItsTradeTheIndexPoints()
+    {
+        var store = Store();
+        var signal = Signal(T1040, status: "win", r: 1.5) with
+        {
+            BuyOption = "BUY 22700 CE", BuyEntry = 110, BuyExit = 131.5, BuyPoints = 21.5,
+            SellOption = "SELL 22700 PE", SellEntry = 95, SellExit = 80.25, SellPoints = 14.75,
+        };
+        var trade = Trade("p1", T1040 + 5000) with { IndexPoints = 37.5, BuyPoints = 21.5, SellPoints = 14.75 };
+        await store.UpsertDayAsync(Day("2026-10-05", new[] { signal }, new[] { trade }), null, CancellationToken.None);
+
+        var s = ScannerLogStore.Read(SignalsPath).Single();
+        Assert.Equal(("BUY 22700 CE", "110", "131.5", "21.5", "SELL 22700 PE", "80.25", "14.75"),
+            (s["buy_option"], s["buy_entry"], s["buy_exit"], s["buy_points"], s["sell_option"], s["sell_exit"], s["sell_points"]));
+        var t = ScannerLogStore.Read(TradesPath).Single();
+        Assert.Equal(("37.5", "21.5", "14.75"), (t["index_points"], t["buy_points"], t["sell_points"]));
+        // A row from before them: blank, and the file keeps its other columns.
+        await store.UpsertDayAsync(Day("2026-10-06", new[] { Signal(T1040 + 86_400_000L) }), null, CancellationToken.None);
+        Assert.Equal("", ScannerLogStore.Read(SignalsPath).Last()["buy_points"]);
+    }
+
+    [Fact]
     public async Task TwoFiles_SignalsAndTrades_HoldEveryDay_NoFilePerDay()
     {
         var store = Store();

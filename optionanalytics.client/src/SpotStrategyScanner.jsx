@@ -14,15 +14,15 @@ import { UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import { liveTradingApi } from './LiveTrading.jsx'
 import { chime, speak, telegram, unlockAudio } from './alerts.js'
 import { notifyLiveTradeEvents, notifyTrade } from './tradeNotify.js'
-import { loadTradeLevels, saveTradeLevels, subscribeTradeLevels, loadTradeDefaults, saveTradeDefaults } from './tradeDefaults.js'
+import { subscribeTradeLevels, loadTradeDefaults, saveTradeDefaults } from './tradeDefaults.js'
 import {
   SPOT_STRATEGIES, STRATEGY_BY_ID, DEFAULT_TRAIL, LAST_ENTRY, SQUARE_OFF, fmtHm, exitLabel, premiumAt, optionTradeText, squareOffMs,
-  asReplayContext, optionTradeAt, optionPlanFor, filtersForIndex, lotsFor, trailPoints,
+  asReplayContext, optionTradeAt, optionPlanFor, optionExitText, capPoints, filtersForIndex, lotsFor, trailPoints,
 } from './strategyEngine.js'
 import { spotBarsOf } from './spotEngine.js'
 import { SCANNER_SETTINGS_KEY, BY_INDEX_KEY, readFiltersByIndex } from './scannerSettings.js'
 import {
-  MIN, sameSignal, trailFor, followSetups, setupEvents, newPosition, positionRows, withLevelChange, PAPER_TRADE_LOT_SIZE,
+  MIN, sameSignal, trailFor, followSetups, setupEvents, newPosition, positionRows, withCapChange, liveLegsFor, PAPER_TRADE_LOT_SIZE,
   setupExitText, paperExitResult, setupWasTraded, spotScanTick, spotScanMinutes,
 } from './scannerCore.js'
 import { ServerLiveSwitch, ServerLiveTrades, useServerLive } from './ServerLive.jsx'
@@ -54,19 +54,19 @@ const fmtR = (r) => (r == null ? '-' : `${r >= 0 ? '+' : ''}${r.toFixed(2)}R`)
 const trailText = (trail) => (trail
   ? `trailing SL: after +${trail.unit === 'pts' ? `${trail.startPts} pts` : `${trail.startR}R`} the stop follows ${trail.unit === 'pts' ? `${trail.gapPts} pts` : `${trail.gapR}R`} behind the best spot price${trail.runner ? ' - letting it run' : ''}`
   : 'fixed SL')
-// The index's option SL / target / trail (Trade settings - shared with the Order Flow scanner and the server), its
-// lots and live slippage.
+// The index's max rules for the strategies' option trades (Trade settings - Max SL / Max target, shared with the server
+// scanner), its lots and live slippage. (Its SL / target / trail are a MANUAL trade's - a strategy follows its own.)
 const levelsOf = (u) => {
-  const l = loadTradeLevels('scanner', u)
   const d = loadTradeDefaults(u)
-  return { paperSl: l.sl, paperTarget: l.target, paperTrailStart: l.trailStart, paperTrailGap: l.trailGap, paperLots: d.lots, liveSlippage: d.slippage }
+  return { paperMaxSl: d.maxSl, paperMaxTarget: d.maxTarget, paperLots: d.lots, liveSlippage: d.slippage }
 }
 const levelsText = (r) => {
   const sell = r.action === 'SELL'
   const parts = [r.slPts > 0 && `SL ${(sell ? r.premium + r.slPts : r.premium - r.slPts).toFixed(1)}`, r.targetPts > 0 && `T ${(sell ? r.premium - r.targetPts : r.premium + r.targetPts).toFixed(1)}`,
-    r.trailGap > 0 && `trail ${r.trailGap} pts after +${r.trailStart ?? 0}`].filter(Boolean)
+    r.trailGap > 0 && `trail ${r.trailGap} pts after +${r.trailStart ?? 0}`, r.optExit && OWN_EXIT_TEXT[r.optExit]].filter(Boolean)
   return parts.length ? ` · ${parts.join(' / ')}` : ''
 }
+const OWN_EXIT_TEXT = { index: 'its own exit: with the spot trade', indexSl: 'its own exit: with the spot trade, capped at its SL', first: 'its own exit: SL / target or the spot exit', option: 'its own exit: SL / target only' }
 const trimBook = (book) => {
   const keys = Object.keys(book).sort((a, b) => (book[a].date < book[b].date ? 1 : -1))
   return Object.fromEntries(keys.slice(0, 20).map((k) => [k, book[k]]))
@@ -208,8 +208,9 @@ export function SpotStrategyScanner({ underlying, date, isReplay, bars, clockMs,
   const oiRef = useRef(oi)
   useEffect(() => { oiRef.current = oi }, [oi])
 
-  // The option a setup is traded with, and its SL / target in premium points: the strategy's own when it was tuned and
-  // applied, else this card's choice and the index's levels (optionPlanFor - the server scanner's rule too).
+  // The option a setup is traded with, and how it leaves the trade: the strategy's own when it was tuned and applied (its
+  // exit exactly - none of the index's points or trailing stop on top), else this card's choice and the index's levels
+  // (optionPlanFor - the server scanner's rule too).
   const planOf = (setup, premium = null) => optionPlanFor(setup.id, filtersOf(cfgRef.current), cfgRef.current, premium)
   const tradeOf = (setup, which) => optionTradeAt(oiRef.current, setup, which, planOf(setup).moneyness)
   const markPosition = (key, patch) => setPaperBook((prev) => {
@@ -226,7 +227,11 @@ export function SpotStrategyScanner({ underlying, date, isReplay, bars, clockMs,
     if (!trade) return fail('No option premium for this setup yet.')
     if (!expiry) return fail('The option expiry is not known yet (the listed expiries are still loading).')
     const levelsNow = planOf(setup, trade.premium)
-    if (!(levelsNow.slPts > 0) || !(levelsNow.targetPts > 0)) return fail('A live trade is a Dhan super order - set both Max SL and Target above 0.')
+    // Dhan's legs: its own; where its own exit has none, a safety leg at the signal's own spot distance (liveLegsFor).
+    const legs = liveLegsFor(levelsNow, setup)
+    if (!(legs.slPts > 0) || !(legs.targetPts > 0)) return fail('A live trade is a Dhan super order - set both Max SL and Target above 0.')
+    // Its own exit 'option': only the option's own SL / target and the 15:10 square-off - not the signal's spot exits.
+    const optionOnly = levelsNow.own && levelsNow.exit === 'option'
     const list = paperBookRef.current[dayKey]?.positions ?? []
     const key = `${setup.id}-${setup.t}-${which}`
     if (list.some((p) => sameSignal(p, setup, trade)) || placingRef.current.has(key) || placedRef.current.has(key)) return
@@ -236,11 +241,11 @@ export function SpotStrategyScanner({ underlying, date, isReplay, bars, clockMs,
     if (liveLossRef.current <= -(c.maxLiveLoss ?? 10000)) return fail(`The day's live loss limit (₹${(c.maxLiveLoss ?? 10000).toLocaleString('en-IN')}) is reached.`)
     placingRef.current.add(key)
     const lots = lotsFor(setup.id, filtersOf(c), c.paperLots)
-    const exitAtMs = Math.min(setup.timeStopMs ?? squareOffMs(setup.t), squareOffMs(setup.t))
+    const exitAtMs = optionOnly ? squareOffMs(setup.t) : Math.min(setup.timeStopMs ?? squareOffMs(setup.t), squareOffMs(setup.t))
     // The server watches the signal's index stop / target on the SPOT from now on (and exits on Dhan, with Telegram) -
     // they hold with this page closed, like the super order's own legs, trailing SL and time exit.
     const watchOnServer = (position, result) => {
-      if (!result.orderIds?.length) return
+      if (!result.orderIds?.length || optionOnly) return
       liveTradingApi.watchIndex({
         underlying, key: position.key, orderIds: result.orderIds, indexStop: setup.stop, indexTarget: setup.target, indexSide: setup.side, priceBasis: 'spot',
         strategy: strategyText(setup), contract: `${trade.action} ${trade.strike} ${trade.side}`, lots, lotSize: result.lotSize ?? null, entryPrice: result.prices?.limit ?? null, exitAtMs,
@@ -254,7 +259,7 @@ export function SpotStrategyScanner({ underlying, date, isReplay, bars, clockMs,
     const record = (result, note) => {
       placedRef.current.add(key)
       const position = {
-        ...newPosition({ setup, trade, which, lots, lotSize: result.lotSize ?? PAPER_TRADE_LOT_SIZE[underlying] ?? 1, premium: result.prices?.limit ?? trade.premium, cfg: { ...c, paperSl: levelsNow.slPts, paperTarget: levelsNow.targetPts }, at: clockRef.current ?? Date.now() }),
+        ...newPosition({ setup, trade, which, lots, lotSize: result.lotSize ?? PAPER_TRADE_LOT_SIZE[underlying] ?? 1, premium: result.prices?.limit ?? trade.premium, cfg: { ...c, paperSl: levelsNow.slPts, paperTarget: levelsNow.targetPts }, at: clockRef.current ?? Date.now(), plan: levelsNow }),
         live: true, orderIds: result.orderIds ?? [], liveNote: note ?? result.message,
       }
       setPaperBook((prev) => ({ ...prev, [dayKey]: { date, positions: [...(prev[dayKey]?.positions ?? []), position] } }))
@@ -264,13 +269,14 @@ export function SpotStrategyScanner({ underlying, date, isReplay, bars, clockMs,
     try {
       const result = await liveTradingApi.place({
         underlying, expiry, strike: trade.strike, side: trade.side, direction: trade.action, lots,
-        slippagePoints: c.liveSlippage ?? 2, stopLossPoints: levelsNow.slPts, targetPoints: levelsNow.targetPts,
-        trailStartPoints: c.paperTrailGap > 0 ? c.paperTrailStart ?? 0 : 0, trailGapPoints: c.paperTrailGap ?? 0,
-        exitAtMs, exitReason: `time stop of #${STRATEGY_BY_ID[setup.id]?.no} ${STRATEGY_BY_ID[setup.id]?.short ?? setup.id}`,
+        slippagePoints: c.liveSlippage ?? 2, stopLossPoints: legs.slPts, targetPoints: legs.targetPts,
+        // A strategy's trade has no option trailing stop - it trails on the spot (its own trailing stop).
+        trailStartPoints: 0, trailGapPoints: 0,
+        exitAtMs, exitReason: optionOnly ? `15:10 square-off of #${STRATEGY_BY_ID[setup.id]?.no} ${STRATEGY_BY_ID[setup.id]?.short ?? setup.id} (its own option exit)` : `time stop of #${STRATEGY_BY_ID[setup.id]?.no} ${STRATEGY_BY_ID[setup.id]?.short ?? setup.id}`,
       })
       const position = record(result)
       notifyTrade({ kind: 'entry', title: `LIVE ${trade.action} ${trade.strike} ${trade.side} x${lots} placed on Dhan`, text: result.message, sound: c.sound !== false })
-      if (c.telegram !== false) telegram(`LIVE order placed: ${trade.action} ${underlying} ${trade.strike} ${trade.side} x${lots} lot(s) @ ~${position.premium.toFixed(1)} - ${strategyText(setup)} ${setup.side}, spot ${setup.entry.toFixed(1)} (SL ${setup.stop.toFixed(1)}, target ${setup.target.toFixed(1)} on the spot - the server exits it there too, even with this page closed); option SL ${levelsNow.slPts.toFixed(1)} / target ${levelsNow.targetPts.toFixed(1)} pts`)
+      if (c.telegram !== false) telegram(`LIVE order placed: ${trade.action} ${underlying} ${trade.strike} ${trade.side} x${lots} lot(s) @ ~${position.premium.toFixed(1)} - ${strategyText(setup)} ${setup.side}, spot ${setup.entry.toFixed(1)} (SL ${setup.stop.toFixed(1)}, target ${setup.target.toFixed(1)} on the spot${optionOnly ? ' - not used: its own option exit' : ' - the server exits it there too, even with this page closed'}); ${optionExitText(levelsNow)}${levelsNow.own && !(levelsNow.slPts > 0 && levelsNow.targetPts > 0) ? ` - Dhan safety legs SL ${legs.slPts.toFixed(1)} / target ${legs.targetPts.toFixed(1)} pts` : ''}`)
     } catch (err) {
       if (err.result?.orderIds?.length) {
         record(err.result, `PARTLY placed - ${err.message}`)
@@ -288,9 +294,10 @@ export function SpotStrategyScanner({ underlying, date, isReplay, bars, clockMs,
       if (opts.auto) { placeLive(setup, which); return }
       const trade = tradeOf(setup, which)
       const lv = trade ? planOf(setup, trade.premium) : null
+      const legs = lv ? liveLegsFor(lv, setup) : null
       Modal.confirm({
         title: 'Place a REAL order on Dhan?',
-        content: trade ? `${trade.action} ${underlying} ${trade.strike} ${trade.side} x${lotsFor(setup.id, filtersOf(cfgRef.current), cfgRef.current.paperLots)} lot(s) - a super order with SL ${lv.slPts.toFixed(1)} / target ${lv.targetPts.toFixed(1)} premium points; the server also exits it at the signal's spot SL / target.` : 'No option for this setup.',
+        content: trade ? `${trade.action} ${underlying} ${trade.strike} ${trade.side} x${lotsFor(setup.id, filtersOf(cfgRef.current), cfgRef.current.paperLots)} lot(s) - a super order with SL ${legs.slPts?.toFixed(1) ?? '-'} / target ${legs.targetPts?.toFixed(1) ?? '-'} premium points (${optionExitText(lv)})${lv.own && lv.exit === 'option' ? '.' : '; the server also exits it at the signal\'s spot SL / target.'}` : 'No option for this setup.',
         okText: 'Place order', okButtonProps: { danger: true }, cancelText: 'Cancel',
         onOk: () => placeLive(setup, which),
       })
@@ -304,18 +311,18 @@ export function SpotStrategyScanner({ underlying, date, isReplay, bars, clockMs,
     const lots = lotsFor(setup.id, filtersOf(cfgRef.current), cfgRef.current.paperLots)
     const already = (paperBookRef.current[dayKey]?.positions ?? []).some((p) => sameSignal(p, setup, trade))
     const lv = planOf(setup, premium)
-    if (!already) {
+    if (!already && !opts.quiet) {
       notifyTrade({ kind: 'entry', key: `spot-paper-${setup.id}-${setup.t}-${which}`, sound: false,
         title: `Paper ${trade.action} ${trade.strike} ${trade.side} x${lots} @ ${premium.toFixed(1)}`,
-        text: `${strategyText(setup)} ${setup.side} · option SL ${lv.slPts.toFixed(1)} / target ${lv.targetPts.toFixed(1)} pts` })
+        text: `${strategyText(setup)} ${setup.side} · ${optionExitText(lv)}` })
       if (!isReplay && cfgRef.current.telegram !== false) {
-        telegram(`Paper ${trade.action} ${underlying} ${trade.strike} ${trade.side} x${lots} lot(s) @ ${premium.toFixed(1)} - ${strategyText(setup)} ${setup.side}, spot ${setup.entry.toFixed(1)} (SL ${setup.stop.toFixed(1)}, target ${setup.target.toFixed(1)}); option SL ${lv.slPts.toFixed(1)} / target ${lv.targetPts.toFixed(1)} pts`)
+        telegram(`Paper ${trade.action} ${underlying} ${trade.strike} ${trade.side} x${lots} lot(s) @ ${premium.toFixed(1)} - ${strategyText(setup)} ${setup.side}, spot ${setup.entry.toFixed(1)} (SL ${setup.stop.toFixed(1)}, target ${setup.target.toFixed(1)}); ${optionExitText(lv)}`)
       }
     }
     setPaperBook((prev) => {
       const list = prev[dayKey]?.positions ?? []
       if (list.some((p) => sameSignal(p, setup, trade))) return prev // one paper trade per signal
-      const position = newPosition({ setup, trade, which, lots, lotSize: PAPER_TRADE_LOT_SIZE[underlying] ?? 1, premium, cfg: { ...cfgRef.current, paperSl: lv.slPts, paperTarget: lv.targetPts }, at })
+      const position = newPosition({ setup, trade, which, lots, lotSize: PAPER_TRADE_LOT_SIZE[underlying] ?? 1, premium, cfg: { ...cfgRef.current, paperSl: lv.slPts, paperTarget: lv.targetPts }, at, plan: lv })
       return { ...prev, [dayKey]: { date, positions: [...list, position] } }
     })
   }
@@ -383,6 +390,15 @@ export function SpotStrategyScanner({ underlying, date, isReplay, bars, clockMs,
       ),
     })
   }
+  // A replay that moved over a signal (a jump, a fast replay): it is still paper-traded - quietly, at its own minute and
+  // premium (nothing after it is read) - so a replayed day trades every signal of the strategies picked, as the server
+  // scanner would have. Never a live order: a replay is always on paper.
+  const paperTradeQuietly = (s) => {
+    const c = cfgRef.current
+    if (!isReplay || liveModeRef.current.mode === 'live' || !c.alerts || !alertIdsRef.current.includes(s.id)) return
+    const side = optionPlanFor(s.id, filtersOf(c), c).leg
+    if (side && tradeOf(s, side)) punchRef.current?.(s, side, s.t, { auto: true, quiet: true })
+  }
   // Today's finished spot minutes by `minute`: the server's own candles (every tick - what the server scanner judges),
   // over this page's; a failed read keeps this page's.
   const finishedBars = async (minute) => {
@@ -449,10 +465,11 @@ export function SpotStrategyScanner({ underlying, date, isReplay, bars, clockMs,
         if (found.length) {
           firedRef.current = memory.fired
           setFired(firedRef.current)
-          // Alerted (and traded) only while it is news: today, this minute's; a replay, the last minutes it moved over.
+          // Alerted (and traded) while it is news: today, this minute's; a replay, the last minutes it moved over - the
+          // older ones a replay moved over are still paper-traded, quietly (paperTradeQuietly).
           const alertFrom = isReplay ? clockMinute - ALERT_WINDOW_MS + MIN : clockMinute
           for (const s of found) {
-            if (s.t < alertFrom) restoredRef.current.add(`${s.id}-${s.t}`)
+            if (s.t < alertFrom) { restoredRef.current.add(`${s.id}-${s.t}`); paperTradeQuietly(s) }
             else alertSetup(s)
           }
         }
@@ -529,7 +546,7 @@ export function SpotStrategyScanner({ underlying, date, isReplay, bars, clockMs,
   useEffect(() => {
     if (isReplay) return
     for (const r of paperRows) {
-      if (!r.live || r.exitTime || r.exitSent || !r.serverWatch || stopSendingRef.current.has(r.key)) continue
+      if (!r.live || r.exitTime || r.exitSent || !r.serverWatch || r.optExit === 'option' || stopSendingRef.current.has(r.key)) continue
       const sig = withOutcome.find((x) => `${x.id}-${x.t}` === r.setupKey)
       const stop = sig?.outcome?.stop
       if (!Number.isFinite(stop) || sig.outcome.status !== 'open') continue
@@ -599,20 +616,16 @@ export function SpotStrategyScanner({ underlying, date, isReplay, bars, clockMs,
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isReplay, canTradeLive, dayKey])
 
-  // A new Max SL / Target / trail (the index's - Trade settings) applies to the trades still OPEN, from this minute;
-  // open LIVE trades get their Dhan legs moved too.
+  // New max rules (the index's - Trade settings: Max SL / Max target) apply to the strategy trades still OPEN, from this
+  // minute - each one's own SL / target held to the new max (withCapChange); open LIVE trades get their Dhan legs moved too.
   const levelsTimerRef = useRef(null)
   const changeLimitsRef = useRef(null)
-  const changeLimits = (patch) => {
+  const changeLimits = (patch, { save = true } = {}) => {
     const cur = cfgRef.current
+    const caps = { maxSl: patch.paperMaxSl ?? cur.paperMaxSl ?? 0, maxTarget: patch.paperMaxTarget ?? cur.paperMaxTarget ?? 0 }
     setLevels((l) => ({ ...l, ...patch }))
-    if (patch.paperSl != null || patch.paperTarget != null || patch.paperTrailStart != null || patch.paperTrailGap != null) {
-      saveTradeLevels('scanner', underlying, {
-        sl: patch.paperSl ?? cur.paperSl, target: patch.paperTarget ?? cur.paperTarget,
-        trailStart: patch.paperTrailStart ?? cur.paperTrailStart ?? 0, trailGap: patch.paperTrailGap ?? cur.paperTrailGap ?? 0,
-      })
-    }
-    const openRows = paperRowsRef.current.filter((r) => !r.exitTime)
+    if (save) saveTradeDefaults(underlying, caps)
+    const openRows = paperRowsRef.current.filter((r) => !r.exitTime && r.optExit)
     const open = new Set(openRows.map((r) => r.key))
     if (!open.size) return
     const changeAt = Math.floor((clockRef.current ?? Date.now()) / MIN) * MIN
@@ -620,9 +633,12 @@ export function SpotStrategyScanner({ underlying, date, isReplay, bars, clockMs,
     if (liveOpen.length) {
       clearTimeout(levelsTimerRef.current)
       levelsTimerRef.current = setTimeout(() => {
-        const c = cfgRef.current
         for (const r of liveOpen) {
-          liveTradingApi.tradeLevels(r.orderIds, c.paperSl ?? 0, c.paperTarget ?? 0, { start: c.paperTrailStart ?? 0, gap: c.paperTrailGap ?? 0 })
+          // Its own SL / target held to the new max; a leg with none stays where it is on Dhan (0 = not moved).
+          const sl = capPoints(r.ownSlPts, caps.maxSl) ?? 0
+          const target = capPoints(r.ownTargetPts, caps.maxTarget) ?? 0
+          if (!(sl > 0) && !(target > 0)) continue
+          liveTradingApi.tradeLevels(r.orderIds, sl, target, { start: 0, gap: 0 })
             .then((result) => markPosition(r.key, { liveNote: result.message }))
             .catch((err) => notification.error({ message: `Could not move the SL / target on Dhan: ${r.strike} ${r.side}`, description: err.message, placement: 'topRight', duration: 10 }))
         }
@@ -630,7 +646,7 @@ export function SpotStrategyScanner({ underlying, date, isReplay, bars, clockMs,
     }
     setPaperBook((prev) => {
       const day = prev[dayKey]
-      return day ? { ...prev, [dayKey]: { ...day, positions: withLevelChange(day.positions, open, patch, changeAt, cur) } } : prev
+      return day ? { ...prev, [dayKey]: { ...day, positions: withCapChange(day.positions, open, caps, changeAt) } } : prev
     })
   }
   changeLimitsRef.current = changeLimits
@@ -638,8 +654,9 @@ export function SpotStrategyScanner({ underlying, date, isReplay, bars, clockMs,
     const next = levelsOf(underlying)
     const cur = cfgRef.current
     if (cur.paperLots !== next.paperLots || cur.liveSlippage !== next.liveSlippage) setLevels((l) => ({ ...l, paperLots: next.paperLots, liveSlippage: next.liveSlippage }))
-    if (cur.paperSl === next.paperSl && cur.paperTarget === next.paperTarget && (cur.paperTrailStart ?? 0) === next.paperTrailStart && (cur.paperTrailGap ?? 0) === next.paperTrailGap) return
-    changeLimitsRef.current?.({ paperSl: next.paperSl, paperTarget: next.paperTarget, paperTrailStart: next.paperTrailStart, paperTrailGap: next.paperTrailGap })
+    // The max rules changed elsewhere (Trade settings, another tab): taken here too - not saved again.
+    if (cur.paperMaxSl === next.paperMaxSl && cur.paperMaxTarget === next.paperMaxTarget) return
+    changeLimitsRef.current?.({ paperMaxSl: next.paperMaxSl, paperMaxTarget: next.paperMaxTarget }, { save: false })
   }), [underlying])
 
   const toggleCustom = (id, on) => setSettings((x) => ({ ...x, custom: on ? [...new Set([...(x.custom ?? []), id])] : (x.custom ?? []).filter((y) => y !== id) }))
@@ -671,7 +688,7 @@ export function SpotStrategyScanner({ underlying, date, isReplay, bars, clockMs,
               { value: 'all', label: `All ${SPOT_IDS.length}` },
               { value: 'custom', label: 'My choice' },
             ]} />
-          <Text type="secondary" style={{ fontSize: 12 }}>Every signal is listed below; only these alert and trade.</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>Every signal is listed below; only these alert and trade.{isReplay ? ` Replay: every signal of these is paper-traded as the replay runs - also the ones a jump moves over.${alertIds.length === 0 ? ' None picked - pick All to trade them all.' : ''}` : ''}</Text>
         </div>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '2px 10px' }}>
           {SPOT_STRATEGIES.filter((s) => !s.retired).map((s) => (
@@ -752,19 +769,15 @@ export function SpotStrategyScanner({ underlying, date, isReplay, bars, clockMs,
             <InputNumber size="small" min={1} max={100} style={{ width: 64 }} value={cfg.paperLots ?? 1} aria-label="Spot lots"
               onChange={(v) => { if (v != null) { setLevels((l) => ({ ...l, paperLots: v })); saveTradeDefaults(underlying, { lots: v }) } }} />
             <Text style={{ fontSize: 12 }}>lot(s) × {PAPER_TRADE_LOT_SIZE[underlying] ?? 1}</Text>
-            <Text style={{ fontSize: 12 }}>Max SL</Text>
-            <InputNumber size="small" min={0} max={500} step={5} style={{ width: 64 }} value={cfg.paperSl ?? 20} aria-label="Spot max SL" onChange={(v) => v != null && changeLimits({ paperSl: v })} />
-            <Text style={{ fontSize: 12 }}>Target</Text>
-            <InputNumber size="small" min={0} max={1000} step={5} style={{ width: 64 }} value={cfg.paperTarget ?? 30} aria-label="Spot target" onChange={(v) => v != null && changeLimits({ paperTarget: v })} />
-            <Tooltip title="Trailing stop on the option premium: once a trade is 'Trail after' points up, its stop follows the best premium 'follow' points behind (0 = off). Live: the server moves the super order's SL leg.">
+            <Tooltip title="Each strategy's option trade follows its OWN exit - its spot stop / target / trailing stop, and its own option SL / target where it was tuned with one. These are the max rules it is held to: never a wider option SL than Max SL, never a farther target than Max target (premium points; 0 = no max).">
               <Space size={4}>
-                <Text style={{ fontSize: 12 }}>Trail after</Text>
-                <InputNumber size="small" min={0} max={1000} step={5} style={{ width: 64 }} value={cfg.paperTrailStart ?? 0} aria-label="Spot trail after" onChange={(v) => v != null && changeLimits({ paperTrailStart: v })} />
-                <Text style={{ fontSize: 12 }}>follow</Text>
-                <InputNumber size="small" min={0} max={500} step={1} style={{ width: 64 }} value={cfg.paperTrailGap ?? 0} aria-label="Spot trail follow" onChange={(v) => v != null && changeLimits({ paperTrailGap: v })} />
+                <Text style={{ fontSize: 12 }}>Max SL</Text>
+                <InputNumber size="small" min={0} max={5000} step={5} style={{ width: 64 }} value={cfg.paperMaxSl ?? 0} aria-label="Spot max SL" onChange={(v) => v != null && changeLimits({ paperMaxSl: v })} />
+                <Text style={{ fontSize: 12 }}>Max target</Text>
+                <InputNumber size="small" min={0} max={5000} step={5} style={{ width: 64 }} value={cfg.paperMaxTarget ?? 0} aria-label="Spot max target" onChange={(v) => v != null && changeLimits({ paperMaxTarget: v })} />
               </Space>
             </Tooltip>
-            <Text type="secondary" style={{ fontSize: 11 }}>premium pts (0 = off) - {underlying}&apos;s Trade settings, shared with the Order Flow scanner; a change applies to open trades from now</Text>
+            <Text type="secondary" style={{ fontSize: 11 }}>premium pts (0 = no max) - {underlying}&apos;s max rules (Trade settings, shared with the server scanner); a strategy&apos;s own SL / target is used within them; a change applies to open trades from now</Text>
             {paperRows.length > 0 && <Text strong style={{ fontSize: 12, color: paperTotal >= 0 ? UP_COLOR : DOWN_COLOR }}>P&amp;L ₹{Math.round(paperTotal).toLocaleString('en-IN')}</Text>}
             {paperRows.some((r) => !r.live) && (
               <Popconfirm title="Clear this day's spot paper trades? (Live trades stay.)" onConfirm={() => setPaperBook((prev) => {
