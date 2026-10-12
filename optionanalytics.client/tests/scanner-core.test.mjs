@@ -118,6 +118,21 @@ test('option positions: one per signal, closed by their own premium stop, P&L in
   assert.equal(row.rupees, -10 * 2 * 65)
 })
 
+test('a LIVE trade whose signal ended is closed even with no fresh premium then (a paper one waits for a price)', () => {
+  const trade = { action: 'SELL', side: 'PE', strike: 22600, premium: 50 }
+  const cfg = { paperSl: 0, paperTarget: 0, paperLots: 1 }
+  const paper = newPosition({ setup, trade, which: 'sell', lots: 1, lotSize: 65, premium: 50, cfg, at: at(61) })
+  const live = { ...paper, key: 'live-1', live: true }
+  // The strike's last price is from 10:16 - stale (over 5 minutes) when the signal ends at 10:30.
+  const book = { pe: new Map([[22600, [{ t: at(61), oi: 1e6, price: 50, high: 50, low: 50 }]]]), ce: new Map(), spot: [], futures: [], step: 50 }
+  const ended = [{ ...setup, outcome: { status: 'win', r: 2, exitAt: at(74), exitPrice: 120 } }]
+  const [p, l] = positionRows({ positions: [paper, live], dayResults: ended, withOutcome: ended, oi: book, nowMs: at(80), settings: cfg })
+  assert.equal(p.exitTime, null, 'paper: no price to close at yet')
+  assert.equal(l.exitTime, at(75), 'live: closed at its signal\'s exit - sent to Dhan at the market')
+  assert.match(l.exitReason, /Target/)
+  assert.equal(l.points, null)
+})
+
 test('alert lists and the day\'s log', () => {
   const top = { ids: ['a', 'b'], trial: ['c'], oi: { ids: ['a'] }, profile: { ids: ['b'] } }
   assert.deepEqual(alertIdsFor({ pick: 'top15' }, top), ['a', 'b', 'c'])

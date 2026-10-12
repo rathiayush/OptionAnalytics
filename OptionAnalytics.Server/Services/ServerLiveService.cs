@@ -139,7 +139,7 @@ public sealed class ServerLiveService
                 {
                     _state.Trades.Add(new ServerLiveTrade(u, today, request.Key, request.Strategy ?? "", $"{order.Direction} {order.Strike} {order.Side}",
                         result.OrderIds.ToList(), order.Lots, result.LotSize, result.Prices?.Limit, now, null, null, null, result.Success ? null : $"partly placed - {result.Message}")
-                    { ExitAtMs = request.ExitAtMs, IndexStop = request.IndexStop, IndexTarget = request.IndexTarget is > 0 ? request.IndexTarget : null, IndexSide = NormaliseSide(request.IndexSide) });
+                    { ExitAtMs = request.ExitAtMs, IndexStop = request.IndexStop, IndexTarget = request.IndexTarget is > 0 ? request.IndexTarget : null, IndexSide = NormaliseSide(request.IndexSide), PriceBasis = NormaliseBasis(request.PriceBasis) });
                     Save();
                 }
             }
@@ -204,10 +204,16 @@ public sealed class ServerLiveService
         return result;
     }
 
+    public const string FuturesBasis = "futures";
+    public const string SpotBasis = "spot";
+    /// <summary>"spot" for a trade whose index levels are spot prices (the spot + options strategies), else null (futures).</summary>
+    internal static string? NormaliseBasis(string? basis) => string.Equals(basis?.Trim(), SpotBasis, StringComparison.OrdinalIgnoreCase) ? SpotBasis : null;
+
     private static string? NormaliseSide(string? side) => side?.Trim().ToUpperInvariant() is "LONG" or "SHORT" ? side.Trim().ToUpperInvariant() : null;
 
     /// <summary>
-    /// A live trade the ORDER FLOW PAGE placed ("Auto-place on alert" in Live mode, or a confirmed punch): kept here so
+    /// A live trade a PAGE placed - the Order Flow page's strategy scanner, or the OI Replay page's spot + options one
+    /// ("Auto-place on alert" in Live mode, or a confirmed punch): kept here so
     /// the server watches its INDEX stop-loss and target too (CheckIndexStopsAsync) - the page's own exits only run while
     /// the page is open; its option SL / target legs (Dhan), trailing SL and time exit are the server's already. Not
     /// counted in the server scanner's limits (the page keeps its own). The same key again replaces it. Null, or why not.
@@ -230,10 +236,10 @@ public sealed class ServerLiveService
             _state.Trades.RemoveAll(t => t.Underlying == u && t.Key == key && t.ExitedUtc is null);
             _state.Trades.Add(new ServerLiveTrade(u, Day(now), key, request.Strategy ?? "", request.Contract ?? "", ids, Math.Max(1, request.Lots), request.LotSize,
                 request.EntryPrice, now, null, null, null, null)
-            { ExitAtMs = request.ExitAtMs, IndexStop = request.IndexStop, IndexTarget = request.IndexTarget is > 0 ? request.IndexTarget : null, IndexSide = side, Source = "page" });
+            { ExitAtMs = request.ExitAtMs, IndexStop = request.IndexStop, IndexTarget = request.IndexTarget is > 0 ? request.IndexTarget : null, IndexSide = side, Source = "page", PriceBasis = NormaliseBasis(request.PriceBasis) });
             Save();
         }
-        _logger.LogInformation("Watching the page's live {Underlying} {Contract} ({Key}): index SL {Stop}, target {Target}.", u, request.Contract, request.Key, request.IndexStop, request.IndexTarget);
+        _logger.LogInformation("Watching the page's live {Underlying} {Contract} ({Key}): index SL {Stop}, target {Target} on the {Basis}.", u, request.Contract, request.Key, request.IndexStop, request.IndexTarget, NormaliseBasis(request.PriceBasis) ?? FuturesBasis);
         return null;
     }
 
@@ -282,15 +288,21 @@ public sealed class ServerLiveService
         }
     }
 
+    /// <summary>The futures-only form of <see cref="CheckIndexStopsAsync(Func{string, string, decimal?}, DateTimeOffset, CancellationToken)"/>:
+    /// a trade whose levels are spot prices is not checked (never against the futures price).</summary>
+    public Task<int> CheckIndexStopsAsync(Func<string, decimal?> priceOf, DateTimeOffset now, CancellationToken cancellationToken) =>
+        CheckIndexStopsAsync((u, basis) => basis == FuturesBasis ? priceOf(u) : null, now, cancellationToken);
+
     /// <summary>
     /// The server's OWN index stop-loss and target check on every open live trade - the server scanner's and the Order
-    /// Flow page's - so they hold even when the scanner is down or the page is closed: a LONG whose futures price is at or
+    /// Flow page's - so they hold even when the scanner is down or the page is closed: a LONG whose price is at or
     /// below its index stop (a SHORT at or above) - or at / beyond its index target - is exited on Dhan now, like the
-    /// scanner's own exit would, and Telegram says so. The stop is checked first. `priceOf` gives an index's current
-    /// futures price (null when not fresh). The option's own SL / target legs are on Dhan already; this is the index
-    /// level on top of them. Returns the trades exited.
+    /// scanner's own exit would, and Telegram says so. The stop is checked first. `priceOf(index, basis)` gives an
+    /// index's current price on the trade's own basis - "futures" (the futures strategies' levels) or "spot" (the spot +
+    /// options strategies') - null when not fresh. The option's own SL / target legs are on Dhan already; this is the
+    /// index level on top of them. Returns the trades exited.
     /// </summary>
-    public async Task<int> CheckIndexStopsAsync(Func<string, decimal?> priceOf, DateTimeOffset now, CancellationToken cancellationToken)
+    public async Task<int> CheckIndexStopsAsync(Func<string, string, decimal?> priceOf, DateTimeOffset now, CancellationToken cancellationToken)
     {
         List<(ServerLiveTrade Trade, decimal Price, bool Stop)> hit = new();
         var today = Day(now);
@@ -299,7 +311,7 @@ public sealed class ServerLiveService
             foreach (var t in _state.Trades)
             {
                 if (t.Day != today || t.ExitedUtc is not null || t.IndexSide is null || (t.ExitAtMs > 0 && now.ToUnixTimeMilliseconds() >= t.ExitAtMs)) continue;
-                if (priceOf(t.Underlying) is not { } p || p <= 0) continue;
+                if (priceOf(t.Underlying, t.Basis) is not { } p || p <= 0) continue;
                 var stopHit = t.IndexStop is > 0 && (t.IndexSide == "LONG" ? p <= t.IndexStop : p >= t.IndexStop);
                 var targetHit = t.IndexTarget is > 0 && (t.IndexSide == "LONG" ? p >= t.IndexTarget : p <= t.IndexTarget);
                 if (stopHit || targetHit) hit.Add((t, p, stopHit));
@@ -309,11 +321,11 @@ public sealed class ServerLiveService
         {
             var level = stop ? $"index SL {t.IndexStop:0.##}" : $"index target {t.IndexTarget:0.##}";
             var who = t.IsPageTrade ? "Order Flow page trade" : "server scanner trade";
-            _logger.LogWarning("Server {Level}: {Underlying} {Contract} ({Key}, {Who}) - futures {Price}; exiting.", level, t.Underlying, t.Contract, t.Key, who, price);
-            var result = await ExitAsync(t.Underlying, t.Key, $"{level} (server check, futures {price:0.##})", null, now, cancellationToken);
+            _logger.LogWarning("Server {Level}: {Underlying} {Contract} ({Key}, {Who}) - {Basis} {Price}; exiting.", level, t.Underlying, t.Contract, t.Key, who, t.Basis, price);
+            var result = await ExitAsync(t.Underlying, t.Key, $"{level} (server check, {t.Basis} {price:0.##})", null, now, cancellationToken);
             if (_telegram is not null)
                 await _telegram.SendAsync(result.Success
-                    ? $"[Server] LIVE exit - {level} hit (futures {price:0.##}): {t.Underlying} {t.Contract} ({who}) - {result.Message}"
+                    ? $"[Server] LIVE exit - {level} hit ({t.Basis} {price:0.##}): {t.Underlying} {t.Contract} ({who}) - {result.Message}"
                     : $"[Server] LIVE {level} hit for {t.Underlying} {t.Contract} ({who}) but the exit FAILED: {result.Message} - check the Dhan panel", CancellationToken.None);
         }
         return hit.Count;
@@ -376,7 +388,7 @@ public sealed class ServerLiveService
 /// <summary>What the scanner sends for one alert: the option and the signal's key (strategy-time-side).</summary>
 public sealed record ServerLiveOrderRequest(string Key, string? Strategy, DateOnly Expiry, decimal Strike, string Side, string Action,
     decimal? StopLossPoints = null, decimal? TargetPoints = null, long ExitAtMs = 0, string? ExitReason = null, string? StrategyId = null,
-    decimal? IndexStop = null, string? IndexSide = null, decimal? IndexTarget = null, int? Lots = null)
+    decimal? IndexStop = null, string? IndexSide = null, decimal? IndexTarget = null, int? Lots = null, string? PriceBasis = null)
 {
     /// <summary>The strategy's id - sent, else the key's first part ({id}-{time}-{side}).</summary>
     public string StrategyIdOrFromKey => !string.IsNullOrWhiteSpace(StrategyId) ? StrategyId! : Key.Split('-')[0];
@@ -389,9 +401,9 @@ public sealed record ServerLiveExitRequest(string Key, string? Reason, decimal? 
 public sealed record ServerLiveStopRequest(string Key, decimal Stop);
 
 /// <summary>Every 2 seconds in market hours: the server's own index stop-loss check on the open live trades
-/// (ServerLiveService.CheckIndexStopsAsync), on the live futures price of each index (a price older than a minute is
-/// not used).</summary>
-public sealed class ServerLiveStopWatcher(ServerLiveService live, OptionAnalytics.Server.Services.OrderFlow.OrderFlowService orderFlow, ILogger<ServerLiveStopWatcher> logger) : BackgroundService
+/// (ServerLiveService.CheckIndexStopsAsync), on the live price of each index - the futures, or the spot for a spot +
+/// options strategy's trade (a price older than a minute is not used).</summary>
+public sealed class ServerLiveStopWatcher(ServerLiveService live, OptionAnalytics.Server.Services.OrderFlow.OrderFlowService orderFlow, SpotFeedHostedService spotFeed, ILogger<ServerLiveStopWatcher> logger) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -403,8 +415,10 @@ public sealed class ServerLiveStopWatcher(ServerLiveService live, OptionAnalytic
                 var now = DateTimeOffset.UtcNow;
                 var minute = (int)now.ToOffset(IstClock.Offset).TimeOfDay.TotalMinutes;
                 if (minute < 9 * 60 + 15 || minute > 15 * 60 + 30) continue;
-                decimal? PriceOf(string u)
+                decimal? PriceOf(string u, string basis)
                 {
+                    if (basis == ServerLiveService.SpotBasis)
+                        return spotFeed.States.TryGetValue(u, out var spot) && spot.LastPrice > 0 && now - spot.LastUpdateUtc < TimeSpan.FromMinutes(1) ? spot.LastPrice : null;
                     var (price, at) = orderFlow.EngineFor(u)?.LastTrade() ?? (0, null);
                     return price > 0 && at is { } t && now - t < TimeSpan.FromMinutes(1) ? price : null;
                 }
@@ -431,13 +445,18 @@ public sealed record ServerLiveTrade(string Underlying, string Day, string Key, 
     public decimal? IndexTarget { get; init; }
     /// <summary>"page" - placed by the Order Flow page and only watched here (not in the server scanner's limits); null - the server scanner's.</summary>
     public string? Source { get; init; }
+    /// <summary>"spot" - the index stop / target are SPOT prices (a spot + options strategy) and are checked on the spot;
+    /// null - futures prices.</summary>
+    public string? PriceBasis { get; init; }
+    [System.Text.Json.Serialization.JsonIgnore] public string Basis => PriceBasis == ServerLiveService.SpotBasis ? ServerLiveService.SpotBasis : ServerLiveService.FuturesBasis;
     [System.Text.Json.Serialization.JsonIgnore] public bool IsPageTrade => Source == "page";
 }
 
 /// <summary>What the Order Flow page sends after it placed a live order: the trade, its Dhan super order ids, and the
 /// signal's index stop / target / side - so the server watches them (ServerLiveService.WatchPageTrade).</summary>
 public sealed record PageLiveWatchRequest(string Underlying, string Key, IReadOnlyList<string>? OrderIds, decimal? IndexStop, string? IndexSide,
-    decimal? IndexTarget = null, string? Strategy = null, string? Contract = null, int Lots = 1, int? LotSize = null, decimal? EntryPrice = null, long ExitAtMs = 0);
+    decimal? IndexTarget = null, string? Strategy = null, string? Contract = null, int Lots = 1, int? LotSize = null, decimal? EntryPrice = null, long ExitAtMs = 0,
+    string? PriceBasis = null);
 
 public sealed record PageLiveStopRequest(string Underlying, string Key, decimal Stop);
 

@@ -59,7 +59,7 @@ public sealed class LiveListService
     {
         lock (_lock) if (_cache is { } c && DateTimeOffset.UtcNow - c.At < TimeSpan.FromMinutes(1)) return c.Lists;
         var runs = _tuning?.HistoryRuns() ?? new List<Dictionary<string, string>>();
-        var perf = _tuning is null ? new List<TuningPerformance.Row>() : TuningPerformance.Build(runs, _tuning.HistoryRows, "futures").Rows;
+        var perf = _tuning is null ? new List<TuningPerformance.Row>() : PerfOf(runs, _tuning.HistoryRows);
         var live = _log?.PathOf("server-trades") is { } p ? ScannerLogStore.Read(p).ToList() : new List<Dictionary<string, string>>();
         State state;
         lock (_lock) state = _state;
@@ -70,6 +70,15 @@ public sealed class LiveListService
         var lists = TradeSettingsStore.Underlyings.ToDictionary(u => u, u => Compute(u, perf, live, _trade.Get(u), state, id => AppliedOf(u, id)));
         lock (_lock) _cache = (DateTimeOffset.UtcNow, lists);
         return lists;
+    }
+
+    /// <summary>The tuning record the list is judged on: the futures strategies' runs, and the spot + options strategies'
+    /// own runs ("Spot + options only") - each strategy is tuned in one of the two, and the server scanner trades both.</summary>
+    internal static List<TuningPerformance.Row> PerfOf(IReadOnlyList<Dictionary<string, string>> runs, Func<string, string, List<Dictionary<string, string>>?> readRows)
+    {
+        var futures = TuningPerformance.Build(runs, readRows, "futures").Rows;
+        var seen = futures.Select(r => (r.StrategyId, r.Setting)).ToHashSet();
+        return futures.Concat(TuningPerformance.Build(runs, readRows, "spot").Rows.Where(r => !seen.Contains((r.StrategyId, r.Setting)))).ToList();
     }
 
     /// <summary>Why a live order for this strategy on this index must not go out (not on its list), else null.</summary>
