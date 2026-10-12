@@ -2,10 +2,17 @@
 
 ## The strategy scanner is the most important part of the app
 
-The Order Flow page's strategy scanner (`optionanalytics.client/src/strategyEngine.js`,
-`StrategyScanner.jsx`, `scannerCore.js`, fed by `useDayOi.js`, `liveFeeds.js`, `orderFlowMath.js`, `profiles.js`, `suddenOi.js` and `dayRegime.js`) decides when a trade
+The strategy scanner (`optionanalytics.client/src/strategyEngine.js`, `spotEngine.js`, `scannerCore.js`, fed by
+`liveFeeds.js`, `orderFlowMath.js`, `profiles.js`, `suddenOi.js` and `dayRegime.js`) decides when a trade
 is signalled, at what entry, stop-loss and target, how a trailing stop moves, when a trade exits and
-what the paper / live option trade does. A mistake there costs real money.
+what the paper / live option trade does. A mistake there costs real money. It runs on the SERVER (`scanner-runner/`,
+below); the Order Flow page no longer runs strategies. The **Strategies page** (`StrategiesPage.jsx`) is where they are
+seen and set: every strategy (a new one appears by itself) and what the server does with it per index (LIVE / live list /
+paper / signals only, tuned), each index's Live today, today's signals and trades, the applied settings, the live list and
+the scanner settings (alert list, trailing stop, per-strategy filters, Telegram - saved to the server's config). A
+strategy is traded where it is in the alert list, on the index's live list, or has a fine-tuned setting applied there.
+The **Strategy lab** (`StrategyLabPage.jsx`, tuning job `what: 'lab'`, `evaluateSetting` in `strategyTuning.js`) measures
+one edited setting over past days with the tuning's own functions; it writes no tuning history.
 
 After ANY change to those files (or to anything they read):
 

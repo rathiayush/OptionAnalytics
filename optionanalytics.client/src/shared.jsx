@@ -1083,6 +1083,8 @@ const NAV_ITEMS = [
   { key: '/triggers', label: 'Triggers' },
   { key: '/contracts', label: 'Contracts' },
   { key: '/trade-settings', label: 'Trade settings' },
+  { key: '/strategies', label: 'Strategies' },
+  { key: '/strategy-lab', label: 'Strategy lab' },
   { key: '/strategy-tuning', label: 'Strategy tuning' },
   { key: '/trades', label: 'Trades' },
 ]

@@ -1,3 +1,5 @@
+import { filtersForIndex } from './strategyEngine.js'
+
 // How a strategy applied to an index has run: its signals and option trades in the server scanner's own record
 // (server-signals.csv / server-trades.csv rows, as GET /api/scanner-log/rows/{file} gives them), from when it was applied.
 
@@ -21,3 +23,18 @@ export function runOf(rec, u, id, sinceMs = null) {
 
 /** Where its whole run is listed: Trades → Scanner record, filtered to it (from when it was applied). */
 export const runLink = (u, id, sinceMs = null) => `/trades?${new URLSearchParams({ tab: 'record', index: u, strategy: id, kind: 'trades', ...(sinceMs ? { since: String(sinceMs) } : {}) })}`
+
+/** What the server scanner does with strategy `id` on index `u` - the runner's own rules (indexScanner.isAlerted). */
+export function strategyState({ id, spot, u, cfg, settings, alertIds }) {
+  const applied = cfg?.filtersByIndex?.[u]?.[id] ?? null
+  const onList = (cfg?.liveList?.[u] ?? []).includes(id)
+  const indexLive = cfg?.live?.[u] === true
+  const enabled = cfg?.enabled?.[u] !== false
+  const filters = filtersForIndex({ filters: settings?.filters, filtersByIndex: cfg?.filtersByIndex }, u)[id]
+  // The alert list - and, whatever it says, on the index's live list or applied there; a spot one also with its all-index
+  // filters set (the Top 15 knows nothing of the spot strategies).
+  const alerted = alertIds.includes(id) || onList || !!applied || (!!spot && Object.keys(filters ?? {}).length > 0)
+  const mode = !enabled ? 'off' : alerted && onList && indexLive ? 'live' : alerted && onList ? 'list' : alerted ? 'paper' : 'signals'
+  return { applied, onList, indexLive, enabled, alerted, mode }
+}
+

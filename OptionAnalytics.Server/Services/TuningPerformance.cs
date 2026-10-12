@@ -304,14 +304,40 @@ public static class TuningPerformance
 
     /// <summary>Totals over a list of trades: how many, wins / losses (by points), the R added up and the points of the
     /// index trade, the option bought and the option sold (points only add up within one index).</summary>
-    public sealed record TradeTotals(int Trades, int Wins, int Losses, double TotalR, double Points, double BoughtPoints, double SoldPoints, int Days, string? FirstDay, string? LastDay);
+    public sealed record TradeTotals(int Trades, int Wins, int Losses, double TotalR, double Points, double BoughtPoints, double SoldPoints, int Days, string? FirstDay, string? LastDay)
+    {
+        /// <summary>Per index (points only add up within one): the index trade, the option bought and the option sold - the
+        /// points captured (winners), lost (losers), net, and the options' net after costs.</summary>
+        public IReadOnlyList<IndexTotals> ByIndex { get; init; } = Array.Empty<IndexTotals>();
+    }
 
-    public static TradeTotals Totals(IReadOnlyList<Dictionary<string, string>> trades)
+    /// <summary>One leg's points over trades: how many have them, won / lost, captured (winners), lost (losers) and net; for
+    /// an option leg also net after `CostPoints` a trade (slippage both ways + charges, in premium points).</summary>
+    public sealed record LegTotals(int Trades, int Wins, int Losses, double Captured, double Lost, double Net, double? NetAfterCosts);
+
+    public sealed record IndexTotals(string Index, int Trades, LegTotals Points, LegTotals Bought, LegTotals Sold, double CostPoints);
+
+    public static TradeTotals Totals(IReadOnlyList<Dictionary<string, string>> trades, Func<string, double>? costPointsOf = null)
     {
         var p = trades.Select(t => Num(t, "points")).Where(v => v is not null).Select(v => v!.Value).ToList();
         var days = trades.Select(t => t.GetValueOrDefault("date", "")).Where(d => d.Length > 0).Distinct().OrderBy(d => d, StringComparer.Ordinal).ToList();
+        static LegTotals Leg(IEnumerable<double?> values, double? cost)
+        {
+            var v = values.Where(x => x is not null).Select(x => x!.Value).ToList();
+            var captured = v.Where(x => x > 0).Sum();
+            var lost = v.Where(x => x < 0).Sum();
+            return new LegTotals(v.Count, v.Count(x => x > 0), v.Count(x => x < 0), Math.Round(captured, 1), Math.Round(lost, 1), Math.Round(captured + lost, 1),
+                cost is { } c ? Math.Round(captured + lost - c * v.Count, 1) : null);
+        }
+        var byIndex = trades.GroupBy(t => t.GetValueOrDefault("index", "")).Where(g => g.Key.Length > 0).OrderBy(g => g.Key, StringComparer.Ordinal)
+            .Select(g =>
+            {
+                var cost = Math.Round(costPointsOf?.Invoke(g.Key) ?? 0, 2);
+                return new IndexTotals(g.Key, g.Count(), Leg(g.Select(t => Num(t, "points")), null), Leg(g.Select(t => Num(t, "bought_points")), cost), Leg(g.Select(t => Num(t, "sold_points")), cost), cost);
+            }).ToList();
         return new TradeTotals(trades.Count, p.Count(x => x > 0), p.Count(x => x < 0), Math.Round(trades.Sum(t => Num(t, "r") ?? 0), 3), Math.Round(p.Sum(), 1),
-            Math.Round(trades.Sum(t => Num(t, "bought_points") ?? 0), 1), Math.Round(trades.Sum(t => Num(t, "sold_points") ?? 0), 1), days.Count, days.FirstOrDefault(), days.LastOrDefault());
+            Math.Round(trades.Sum(t => Num(t, "bought_points") ?? 0), 1), Math.Round(trades.Sum(t => Num(t, "sold_points") ?? 0), 1), days.Count, days.FirstOrDefault(), days.LastOrDefault())
+        { ByIndex = byIndex };
     }
 
     /// <summary>One day of one index across every run that looked at it: Status "used" when any run scanned it (else

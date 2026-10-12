@@ -702,3 +702,88 @@ export function paramsFromSettingsRow(row) {
   }
   return out
 }
+
+/** The parameters a tuned setting is made of, as the lab and the tuning speak them (opt* for the option), read back from
+ *  a strategy's APPLIED filters (tradeOpt* - filtersFromTuning's way round): what is applied, to start the lab from. */
+export function paramsFromFilters(filters) {
+  const f = filters ?? {}
+  const out = {}
+  for (const tf of TRADE_FILTERS) if (TUNED_SETTING_KEYS.includes(tf.key) && f[tf.key] !== undefined && f[tf.key] !== tf.default) out[tf.key] = f[tf.key]
+  if (f.tradeOptLeg === 'buy' || f.tradeOptLeg === 'sell') {
+    out.optLeg = f.tradeOptLeg
+    out.optMoneyness = Number.isFinite(Number(f.tradeOptMoneyness)) ? Number(f.tradeOptMoneyness) : 0
+    // Its own target too: out at whichever of its SL / target comes first; its SL only: the Max SL, out with the index.
+    out.optExit = f.tradeOptTargetPct > 0 ? 'first' : f.tradeOptSlPct > 0 ? 'indexSl' : 'index'
+    if (f.tradeOptSlPct > 0) out.optSlPct = f.tradeOptSlPct
+    if (f.tradeOptTargetPct > 0) out.optTargetPct = f.tradeOptTargetPct
+  }
+  return out
+}
+
+const optionStats = (trades) => {
+  const pts = trades.map((t) => t.opt.points).filter(Number.isFinite)
+  const rs = trades.map((t) => t.opt.r).filter(Number.isFinite)
+  const captured = pts.filter((p) => p > 0).reduce((a, b) => a + b, 0)
+  const lost = pts.filter((p) => p < 0).reduce((a, b) => a + b, 0)
+  return { n: pts.length, wins: pts.filter((p) => p > 0).length, losses: pts.filter((p) => p < 0).length, winRate: pts.length ? pts.filter((p) => p > 0).length / pts.length : null,
+    captured, lost, total: captured + lost, avg: pts.length ? (captured + lost) / pts.length : null, totalR: rs.length ? rs.reduce((a, b) => a + b, 0) : null }
+}
+
+/**
+ * THE STRATEGY LAB: strategy `id` with ONE setting (`params` - the tuned-setting keys, TUNED_SETTING_KEYS; {} = as
+ * written) measured over the scanned `days` - with the same functions the tuning measures by (takenTrades: the same
+ * filters, the same outcome rules), so a setting shows here exactly what the tuning would have counted for it. The index
+ * trades (R, points captured / lost, both options the setup carries - with the index's own option SL / target when
+ * `optionLevels` is given) and, when the setting takes the option its own way (optLeg buy / sell), those option trades.
+ */
+export function evaluateSetting(days, id, params = {}, { trail = null, underlying = null, optionLevels = null } = {}) {
+  const variant = { ...DEFAULT_VARIANT }
+  for (const f of TRADE_FILTERS) if (params[f.key] !== undefined && params[f.key] !== null && params[f.key] !== '') variant[f.key] = params[f.key]
+  const trades = tradeDetails(days, id, variant, trail, underlying, { optionLevels })
+  const leg = params.optLeg === 'buy' || params.optLeg === 'sell' ? params.optLeg : null
+  const opt = leg
+    ? { ...OPTION_DEFAULT, ...variant, optLeg: leg, optMoneyness: Number(params.optMoneyness) || 0, optExit: params.optExit ?? 'index', optSlPct: Number(params.optSlPct) || OPTION_DEFAULT.optSlPct, optTargetPct: Number(params.optTargetPct) || OPTION_DEFAULT.optTargetPct }
+    : null
+  const optionTrades = opt ? optionDetails(days, id, opt, trail, underlying) : null
+  return {
+    params: { ...Object.fromEntries(Object.entries(variant).filter(([k, v]) => v !== DEFAULT_VARIANT[k])), ...(opt ? { optLeg: opt.optLeg, optMoneyness: opt.optMoneyness, optExit: opt.optExit, optSlPct: opt.optSlPct, optTargetPct: opt.optTargetPct } : {}) },
+    text: `${variantText(variant)}${opt ? ` · ${optionText(opt)}` : ''}`,
+    r: scoreR(trades.map((t) => t.r)),
+    points: pointsSummary(trades),
+    trades,
+    option: opt ? { text: optionText(opt), ...optionStats(optionTrades), trades: optionTrades } : null,
+  }
+}
+
+// ---- The Strategy lab's setting ---------------------------------------------------------------------------------------
+// The order-flow confirmation the learning found (not tuned by a run, but a setting all the same - futures only).
+const LAB_FLOW_KEYS = ['tradeTape', 'tradeBig', 'tradeBook', 'tradeCvd', 'tradeVolume']
+const LAB_OPT_KEYS = ['optLeg', 'optMoneyness', 'optExit', 'optSlPct', 'optTargetPct']
+
+/** The keys a lab setting is edited with, for a data mode: the trade settings and OI confirmation the tuning tunes (no
+ *  futures / order-flow input for spot + options - it has no futures), and the order-flow ones (futures only). */
+export function labEditableKeys(data) {
+  const usable = new Set(oiFactorsFor(data).map((f) => f.key))
+  const allOi = new Set(OI_FACTORS.map((f) => f.key))
+  const tuned = TUNED_SETTING_KEYS.filter((k) => !LAB_OPT_KEYS.includes(k) && (!allOi.has(k) || usable.has(k)))
+  return data === 'spot' ? tuned : [...tuned, ...LAB_FLOW_KEYS]
+}
+
+/** A lab setting as sent to the job (and applied): only what differs from the strategy as written, the option part only
+ *  when an option leg is chosen, and of it only what that exit uses. */
+export function labParams(params, data) {
+  const out = {}
+  for (const k of labEditableKeys(data)) {
+    const f = TRADE_FILTERS.find((x) => x.key === k)
+    if (params?.[k] !== undefined && params[k] !== null && params[k] !== '' && params[k] !== f?.default) out[k] = params[k]
+  }
+  if (params?.optLeg === 'buy' || params?.optLeg === 'sell') {
+    const n = (v) => (v == null || v === '' || !Number.isFinite(Number(v)) ? null : Number(v))
+    out.optLeg = params.optLeg
+    out.optMoneyness = n(params.optMoneyness) ?? 0
+    out.optExit = OPTION_GRID.optExit.includes(params.optExit) ? params.optExit : 'index'
+    if (out.optExit !== 'index') out.optSlPct = n(params.optSlPct) ?? OPTION_DEFAULT.optSlPct
+    if (ownTarget(out.optExit)) out.optTargetPct = n(params.optTargetPct) ?? OPTION_DEFAULT.optTargetPct
+  }
+  return out
+}

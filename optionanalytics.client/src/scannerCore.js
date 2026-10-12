@@ -1,5 +1,5 @@
-// The strategy scanner's logic without React - shared by the Order Flow page's StrategyScanner and the
-// server-side scanner runner (scanner-runner/), so both fire, trade and close exactly the same way.
+// The strategy scanner's logic without React - the server-side scanner runner (scanner-runner/) and the OI Replay page's
+// spot + options card (SpotStrategyScanner) run it, so they fire, trade and close exactly the same way.
 // Everything here is pure: no storage, no timers, no network; the caller owns state and side effects.
 
 import {

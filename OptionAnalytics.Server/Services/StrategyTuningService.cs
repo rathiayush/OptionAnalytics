@@ -246,6 +246,15 @@ public sealed class StrategyTuningService
 
     /// <summary>The latest result file; the spot + options mode ("spot") keeps its own, so it never overwrites the futures one.</summary>
     public string ResultPath(string underlying, string data = "futures") => Path.Combine(_dir, $"{underlying.ToUpperInvariant()}{(data == "spot" ? "-spot" : "")}-latest.json");
+    /// <summary>The Strategy lab's last run for an index - apart from the tuning result, so a lab run never replaces it.</summary>
+    public string LabResultPath(string underlying, string data = "futures") => Path.Combine(_dir, $"{underlying.ToUpperInvariant()}{(data == "spot" ? "-spot" : "")}-lab.json");
+
+    public JsonNode? LabResult(string underlying, string data = "futures")
+    {
+        var path = LabResultPath(underlying, data);
+        try { return File.Exists(path) ? JsonNode.Parse(File.ReadAllText(path)) : null; }
+        catch (Exception ex) { _logger.LogWarning(ex, "Lab result {Path} could not be read.", path); return null; }
+    }
 
     /// <summary>The tuning HISTORY, as CSV (no database - scanner-runner/tuneHistory.mjs): runs.csv, and per run
     /// {run_id}-trades.csv, {run_id}-settings.csv, {run_id}-days.csv (every day it looked at: used - train / test - or
@@ -330,7 +339,7 @@ public sealed class StrategyTuningService
         {
             if (_status.State == "running") return $"a tuning job for {_status.Job?.Underlying} is already running";
             _stopping = false;
-            var output = ResultPath(job.Underlying, job.Data);
+            var output = job.What == "lab" ? LabResultPath(job.Underlying, job.Data) : ResultPath(job.Underlying, job.Data);
             var node = _configuration["ScannerRunner:NodePath"] is { Length: > 0 } n ? n : "node";
             var info = new ProcessStartInfo(node)
             {
@@ -433,7 +442,9 @@ public sealed class StrategyTuningService
                 var body = JsonNode.Parse(File.ReadAllText(running));
                 if (body?["ok"]?.GetValue<bool>() == true)
                 {
-                    File.Copy(running, Path.Combine(_dir, $"{job.Underlying}{(job.Data == "spot" ? "-spot" : "")}-{DateTimeOffset.UtcNow:yyyyMMdd-HHmmss}.json"), overwrite: true);
+                    // A lab run is kept as the index's last lab result only (no dated copy - it is not a tuning run).
+                    if (job.What != "lab")
+                        File.Copy(running, Path.Combine(_dir, $"{job.Underlying}{(job.Data == "spot" ? "-spot" : "")}-{DateTimeOffset.UtcNow:yyyyMMdd-HHmmss}.json"), overwrite: true);
                     File.Move(running, output, overwrite: true);
                 }
                 else
@@ -485,7 +496,11 @@ public sealed class StrategyTuningResumeHostedService(StrategyTuningService tuni
 /// Attempt is how many times a server restart has already started this same job again - carried in current-job.json
 /// and checked by ResumeInterrupted, so an interrupted job resumes a couple of times and then gives up with a reason
 /// rather than restarting for ever.</summary>
-public sealed record TuningJob(string Underlying, JsonNode? Strategies, int Days, bool IncludeEstimated, int MinTrades, string What = "trade", IReadOnlyList<string>? OiFactors = null, string Search = "step", string Data = "futures", string? From = null, string? To = null, bool Resumed = false, int Attempt = 0);
+public sealed record TuningJob(string Underlying, JsonNode? Strategies, int Days, bool IncludeEstimated, int MinTrades, string What = "trade", IReadOnlyList<string>? OiFactors = null, string Search = "step", string Data = "futures", string? From = null, string? To = null, bool Resumed = false, int Attempt = 0)
+{
+    /// <summary>A lab run (What = "lab"): the setting measured - the tuned-setting keys only (strategyTuning.js TUNED_SETTING_KEYS).</summary>
+    public JsonObject? Params { get; init; }
+}
 
 public sealed record TuningStatus(string State, TuningJob? Job, DateTimeOffset? StartedUtc, DateTimeOffset? FinishedUtc, string? Error, JsonNode? Progress, int? Pid)
 {

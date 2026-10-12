@@ -66,6 +66,33 @@ function Totals({ rows, points, r, extra }) {
   )
 }
 
+/** The points the trades captured, per index (points only add up within one): the index trade, the option bought and the
+ *  option sold - captured (the winners), lost (the losers), net, and the options' net after costs (slippage both ways +
+ *  charges a trade, in premium points). */
+function PointsTotals({ byIndex, spot }) {
+  const leg = (name, l, cost, tip) => ({ key: name, name, tip, ...l, cost })
+  const rows = byIndex.flatMap((x) => [
+    { ...leg(spot ? 'Spot (index)' : 'Futures (index)', x.points, null, 'The index trade in index points, in the direction of the signal'), index: x.index, first: true },
+    { ...leg('Option bought', x.bought, x.costPoints, 'The option the setup buys (CE for a long, PE for a short) - premium points'), index: x.index },
+    { ...leg('Option sold', x.sold, x.costPoints, 'The option the setup writes (PE for a long, CE for a short) - premium points'), index: x.index },
+  ]).map((r) => ({ ...r, key: `${r.index}-${r.key}` }))
+  const cell = (v, bold = false) => (v == null ? '-' : bold ? <b style={{ color: col(v) }}>{pts(v)}</b> : <span style={{ color: col(v) }}>{pts(v)}</span>)
+  return (
+    <Table size="small" pagination={false} rowKey="key" dataSource={rows} scroll={{ x: 760 }} aria-label="Points totals"
+      columns={[
+        { title: 'Index', dataIndex: 'index', width: 100, render: (v, r) => (r.first ? <b>{v}</b> : '') },
+        { title: 'Points', dataIndex: 'name', width: 150, render: (v, r) => <Tooltip title={r.tip}><span>{v}</span></Tooltip> },
+        { title: 'Trades', dataIndex: 'trades', width: 70 },
+        { title: 'Won / lost', key: 'wl', width: 110, render: (_, r) => (r.trades ? `${r.wins} / ${r.losses}${r.trades ? ` · ${Math.round((r.wins / r.trades) * 100)}%` : ''}` : '-') },
+        { title: <Tooltip title="Points of the winning trades">Captured</Tooltip>, dataIndex: 'captured', width: 110, render: (v, r) => (r.trades ? cell(v) : '-') },
+        { title: <Tooltip title="Points of the losing trades">Lost</Tooltip>, dataIndex: 'lost', width: 100, render: (v, r) => (r.trades ? cell(v) : '-') },
+        { title: 'Net points', dataIndex: 'net', width: 110, render: (v, r) => (r.trades ? cell(v, true) : '-') },
+        { title: <Tooltip title="The option's net after costs: slippage both ways (the index's Trade settings) + charges (the live list's rules), a trade - in premium points">Net after costs</Tooltip>, key: 'nac', width: 160,
+          render: (_, r) => (r.netAfterCosts == null || !r.trades ? <Text type="secondary" style={{ fontSize: 12 }}>-</Text> : <span>{cell(r.netAfterCosts, true)} <Text type="secondary" style={{ fontSize: 11 }}>({r.cost} pts a trade)</Text></span>) },
+      ]} />
+  )
+}
+
 /** One trade sequence for every strategy: by entry date, then time (then index, strategy number). */
 const byTime = (order, timeOf) => (a, b) => (order === 'desc' ? -1 : 1) * (String(a.date ?? '').localeCompare(String(b.date ?? '')) || (timeOf(a) ?? 0) - (timeOf(b) ?? 0)
   || String(a.index ?? a.underlying ?? '').localeCompare(String(b.index ?? b.underlying ?? '')) || (Number(a.no ?? a.strategy_no) || 0) - (Number(b.no ?? b.strategy_no) || 0))
@@ -1062,13 +1089,10 @@ function AllTrades() {
           <span><b>{tot.trades.toLocaleString('en-IN')}</b> trades</span>
           <span>{tot.wins}W / {tot.losses}L{tot.wins + tot.losses ? ` · win ${Math.round((tot.wins / (tot.wins + tot.losses)) * 100)}%` : ''}</span>
           <span>total <b style={{ color: col(tot.totalR) }}>{fmtR(tot.totalR)}</b></span>
-          {one ? <>
-            <span>net <b style={{ color: col(tot.points) }}>{pts(tot.points)}</b> index pts</span>
-            <span>option bought <b style={{ color: col(tot.boughtPoints) }}>{pts(tot.boughtPoints)}</b> · sold <b style={{ color: col(tot.soldPoints) }}>{pts(tot.soldPoints)}</b> premium pts</span>
-          </> : <Text type="secondary" style={{ fontSize: 12 }}>(points add up within one index - pick one to see them)</Text>}
           <span>{tot.days} day(s){tot.firstDay ? ` · ${tot.firstDay} to ${tot.lastDay}` : ''}</span>
         </Space>
       )}
+      {tot?.byIndex?.length > 0 && <PointsTotals byIndex={tot.byIndex} spot={data === 'spot'} />}
       {narrow ? (
         <Space direction="vertical" size={6} style={{ width: '100%' }}>
           {!current && !error && <Text type="secondary">loading…</Text>}

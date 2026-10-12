@@ -47,7 +47,7 @@ import { scannerProfileOf, trailFor } from '../src/scannerCore.js'
 import { defaultTradeLevels } from '../src/tradeDefaults.js'
 import { expiryFlagOf } from '../src/liveFeeds.js'
 import { dayFromOrderFlow, scanDaySetups } from '../src/scanDay.js'
-import { DEFAULT_VARIANT, splitDays, OI_COMBO_CAP, OI_FACTORS, OPTION_GRID, countOiCombinations, oiFactorsFor, oiGridOf, optionText, rankStrategies, tradeDetails, tuneStrategy, tuningDay, TUNING_GRID, variantText } from '../src/strategyTuning.js'
+import { evaluateSetting, paramsFromFilters, DEFAULT_VARIANT, splitDays, OI_COMBO_CAP, OI_FACTORS, OPTION_GRID, countOiCombinations, oiFactorsFor, oiGridOf, optionText, rankStrategies, tradeDetails, tuneStrategy, tuningDay, TUNING_GRID, variantText } from '../src/strategyTuning.js'
 import { DEFAULT_ROW_SIZES } from './indexScanner.mjs'
 import { createFetcher, isTransientText, pruneCache } from './tuneFetch.mjs'
 import { CHECK_COLUMNS, DAY_COLUMNS, RUN_COLUMNS, SETTING_COLUMNS, TRADE_COLUMNS, historyOf, runsCsvWith, toCsv } from './tuneHistory.mjs'
@@ -71,7 +71,9 @@ const isWeekend = (date) => [0, 6].includes(new Date(`${date}T00:00:00Z`).getUTC
 const MAX_DAYS = RANGED ? 250 : Math.max(1, Math.min(250, Number(job.days) || 30))
 const MIN_TRADES = Math.max(2, Math.min(100, Number(job.minTrades) || 8))
 // 'check': no new tuning - only the cross-check of every setting found so far on these days (tuneChecks.mjs).
-const WHAT = ['trade', 'oi', 'both', 'option', 'all', 'check'].includes(job.what) ? job.what : 'trade'
+// 'lab': no tuning either - ONE strategy measured with the setting the Strategy lab page sent (job.params), beside it as
+// written and as applied on this index; nothing is written to the tuning history.
+const WHAT = ['trade', 'oi', 'both', 'option', 'all', 'check', 'lab'].includes(job.what) ? job.what : 'trade'
 const DATA = job.data === 'spot' ? 'spot' : 'futures' // spot: the index candles + the option chain's OI only - no futures, no order flow
 const SEARCH = job.search === 'full' ? 'full' : 'step'
 // Spot + options has no futures, so a futures OI input is dropped here too - whatever the page sent.
@@ -625,6 +627,33 @@ async function main() {
   if (DATA === 'spot' && days.length > MAX_DAYS) days.length = MAX_DAYS
   skipped.sort((a, b) => (a.date < b.date ? 1 : -1))
   if (!days.length) throw new Error(budgetStop ? `no day was scanned before ${budgetStop}` : `none of the ${plan.length} day(s) could be scanned (${skipped[0]?.reason ?? 'unknown'})`)
+
+  if (WHAT === 'lab') {
+    // THE STRATEGY LAB: the days scanned exactly as for tuning, then one strategy measured three ways with the tuning's
+    // own functions (evaluateSetting) - as written, as applied on this index now, and with the setting being tried.
+    const id = Array.isArray(job.strategies) ? job.strategies[0] : null
+    const meta = STRATEGY_BY_ID[id]
+    if (!meta || meta.retired || (DATA === 'spot') !== !!meta.spot) throw new Error(`${id ?? 'no strategy'} is not an active ${DATA === 'spot' ? 'spot + options' : 'futures'} strategy`)
+    state.stage = 'lab'
+    progress({ stage: 'lab', done: 0, total: 1 })
+    const opts = { trail, underlying: U, optionLevels }
+    const applied = config?.filtersByIndex?.[U]?.[id] ?? null
+    await dhanBudgetLeft().catch(() => null)
+    write({
+      ok: true, lab: true, underlying: U, job, startedUtc, finishedUtc: new Date().toISOString(), data: DATA, from: FROM, to: TO, rowSize, trail, optionLevels,
+      strategy: { id, no: meta.no, name: meta.name },
+      days: days.map((d) => ({ date: d.date, estimated: d.estimated, setups: d.setups.length, ...d.quality })), skipped,
+      asWritten: evaluateSetting(days, id, {}, opts),
+      applied: applied ? { ...evaluateSetting(days, id, paramsFromFilters(applied), opts), filters: applied } : null,
+      yours: evaluateSetting(days, id, job.params ?? {}, opts),
+      calls: callReport(fetcher.stats, fetcher.perKind(), fastOi, dhan),
+      budget: { minutes: budgetMinutes, elapsedMinutes: Math.round((Date.now() - START_MS) / 60_000), stoppedBy: budgetStop ? 'budget' : stopped ? 'dhan-limit' : null, reason: budgetStop ?? stopped ?? null, daysPlanned: plan.length, daysScanned: days.length, daysLeftOut: skipped.length },
+    })
+    clearTimeout(watchdog)
+    state.stage = 'done'
+    progress({ stage: 'done', done: 1, total: 1 })
+    return
+  }
 
   progress({ stage: 'rank', done: days.length, total: days.length })
   const spotIds = SPOT_STRATEGIES.map((s) => s.id)

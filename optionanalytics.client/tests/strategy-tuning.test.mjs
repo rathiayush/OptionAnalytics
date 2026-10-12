@@ -227,3 +227,45 @@ test('Apply to the scanner: the whole setting goes across, options included, and
   // Nonsense saved by hand is ignored rather than traded on.
   assert.equal(optionPlanFor('wallBreak', { wallBreak: { tradeOptLeg: 'nonsense', tradeOptMoneyness: 99 } }, chose('strategy'), 100).leg, 'sell')
 })
+
+test('the Strategy lab measures a setting exactly as the tuning counts it (index R, points, the option its own way)', async () => {
+  const { evaluateSetting, paramsFromFilters, optionRun } = await import('../src/strategyTuning.js')
+  const all = await scanDaySetups({ ...base, filters: {}, keepAll: true })
+  const days = [tuningDay('2026-10-09', all, replayDay, syn.oi)]
+  const ids = [...new Set(all.map((s) => s.id))]
+  assert.ok(ids.length > 0)
+  for (const id of ids) {
+    for (const params of [{}, { tradeSide: 'long' }, { tradeStopX: 1.5, tradeTargetX: 2 }, { tradeTrail: 'off', tradeTimeStop: 30 }]) {
+      const variant = { ...DEFAULT_VARIANT, ...params }
+      const lab = evaluateSetting(days, id, params)
+      const rs = days.flatMap((d) => dayTrades(d, id, variant, null))
+      assert.deepEqual(lab.r, scoreR(rs), `${id} ${JSON.stringify(params)}: the tuning's own R`)
+      assert.equal(lab.trades.length, rs.length)
+      assert.deepEqual(lab.params, params, 'only what differs from as written')
+    }
+    const opt = { optLeg: 'sell', optMoneyness: 0, optExit: 'first', optSlPct: 30, optTargetPct: 40 }
+    const lab = evaluateSetting(days, id, opt)
+    assert.deepEqual(lab.option.trades.map((t) => t.opt.points), optionRun(days, id, { ...DEFAULT_VARIANT, ...OPTION_DEFAULT, ...opt }, null), `${id}: the tuning's own option points`)
+    assert.equal(evaluateSetting(days, id, {}).option, null, 'no option leg chosen: none measured')
+  }
+  // An applied setting read back to the lab's parameters (and through filtersFromTuning again: the same filters).
+  const params = { tradeSide: 'short', tradeStopX: 1.5, optLeg: 'buy', optMoneyness: -1, optExit: 'indexSl', optSlPct: 30 }
+  const filters = filtersFromTuning({}, { ...DEFAULT_VARIANT, ...OPTION_DEFAULT, ...params }, { option: true })
+  assert.deepEqual(paramsFromFilters(filters), params)
+  assert.deepEqual(filtersFromTuning({}, { ...DEFAULT_VARIANT, ...OPTION_DEFAULT, ...paramsFromFilters(filters) }, { option: true }), filters)
+  assert.deepEqual(paramsFromFilters({ tradeOptLeg: 'sell', tradeOptSlPct: 20, tradeOptTargetPct: 35 }), { optLeg: 'sell', optMoneyness: 0, optExit: 'first', optSlPct: 20, optTargetPct: 35 })
+  assert.deepEqual(paramsFromFilters({ minRatio: 3, _tuned: 'x', _lots: 2 }), {}, 'entry filters and our own keys are not tuned settings')
+})
+
+test('a lab setting: only what differs from as written, no futures / order-flow input for spot, the option part as its exit uses it', async () => {
+  const { labParams, labEditableKeys } = await import('../src/strategyTuning.js')
+  assert.ok(labEditableKeys('futures').includes('tradeFutOi') && labEditableKeys('futures').includes('tradeTape'))
+  assert.ok(!labEditableKeys('spot').includes('tradeFutOi') && !labEditableKeys('spot').includes('tradeTape') && labEditableKeys('spot').includes('tradeSideOi'))
+  assert.ok(!labEditableKeys('futures').some((k) => k.startsWith('opt')))
+  assert.deepEqual(labParams({ tradeSide: 'both', tradeStopX: 1.5, tradeFrom: 930 }, 'futures'), { tradeStopX: 1.5 }, 'defaults left out')
+  assert.deepEqual(labParams({ tradeFutOi: 'buildUp', tradeTape: 'with', tradeSideOi: 'withBoth' }, 'spot'), { tradeSideOi: 'withBoth' }, 'spot has no futures / order flow')
+  assert.deepEqual(labParams({ optLeg: 'buy', optMoneyness: -1, optExit: 'index', optSlPct: 30, optTargetPct: 50 }, 'futures'), { optLeg: 'buy', optMoneyness: -1, optExit: 'index' })
+  assert.deepEqual(labParams({ optLeg: 'sell', optExit: 'indexSl', optSlPct: 25, optTargetPct: 50 }, 'futures'), { optLeg: 'sell', optMoneyness: 0, optExit: 'indexSl', optSlPct: 25 })
+  assert.deepEqual(labParams({ optLeg: 'sell', optExit: 'first' }, 'futures'), { optLeg: 'sell', optMoneyness: 0, optExit: 'first', optSlPct: 20, optTargetPct: 30 })
+  assert.deepEqual(labParams({ optMoneyness: 2, optExit: 'first' }, 'futures'), {}, 'no option leg: no option part')
+})

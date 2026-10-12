@@ -6,7 +6,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { spawn } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -315,6 +315,39 @@ test('a long job rides out a busy Dhan, leaves out a partial day, re-uses the di
     const checkRun = rows(join(history, 'runs.csv')).at(-1).run_id
     assert.equal(rows(join(history, `${checkRun}-settings.csv`)).length, 0)
     assert.ok(rows(join(history, `${checkRun}-checks.csv`)).length > 0)
+  } finally {
+    server.close()
+  }
+})
+
+test('the Strategy lab job: one strategy measured with the setting sent, beside it as written - and no tuning history', { timeout: 300_000 }, async () => {
+  const days = ['2026-09-28', '2026-09-29', '2026-09-30', '2026-10-01', '2026-10-02', '2026-10-05']
+  const { server, base } = await fakeServer(days)
+  const dir = mkdtempSync(join(tmpdir(), 'oa-lab-'))
+  const history = join(dir, 'history')
+  try {
+    const params = { tradeSide: 'long', tradeStopX: 1.5, optLeg: 'buy', optMoneyness: 0, optExit: 'indexSl', optSlPct: 30 }
+    const { code, result } = await runJob(base, { underlying: 'NIFTY', strategies: ['weakWall'], days: 30, minTrades: 2, what: 'lab', params },
+      { TUNE_CACHE_DIR: join(dir, 'cache'), TUNE_HISTORY_DIR: history, TUNE_RETRY_SCALE: '0.001', TUNE_BUSY_PAUSE_MS: '5' })
+    assert.equal(code, 0, JSON.stringify(result))
+    assert.equal(result.ok, true)
+    assert.equal(result.lab, true)
+    assert.equal(result.strategy.id, 'weakWall')
+    assert.equal(result.days.length, 6)
+    assert.equal(result.applied, null, 'nothing applied on NIFTY')
+    const { asWritten, yours } = result
+    assert.ok(asWritten.r.n > 0, 'as written traded')
+    assert.deepEqual(asWritten.params, {})
+    assert.equal(yours.params.tradeSide, 'long')
+    assert.equal(yours.params.optLeg, 'buy')
+    assert.ok(yours.trades.every((t) => t.side === 'LONG'), 'only longs with tradeSide long')
+    assert.ok(yours.r.n <= asWritten.r.n)
+    assert.equal(yours.r.n, yours.trades.length)
+    assert.ok(yours.trades.every((t) => Math.abs(Math.abs(t.entry - t.stop) / (Math.abs(asWritten.trades.find((a) => a.t === t.t && a.date === t.date)?.slPts ?? NaN)) - 1.5) < 1e-6 || !asWritten.trades.some((a) => a.t === t.t && a.date === t.date)), 'its stop 1.5x as wide')
+    assert.ok(yours.option && yours.option.text && yours.option.n === yours.option.trades.length, 'the option trades it takes its own way (buy)')
+    assert.ok(yours.option.trades.every((t) => t.opt.label.startsWith('BUY ')))
+    assert.ok(Number.isFinite(yours.points.total) && Number.isFinite(yours.points.buy.total))
+    assert.ok(!existsSync(join(history, 'runs.csv')), 'a lab run writes nothing to the tuning history')
   } finally {
     server.close()
   }

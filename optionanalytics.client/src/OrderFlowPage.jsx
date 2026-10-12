@@ -8,7 +8,6 @@ import {
   checkForNewDeploy, UP_COLOR, DOWN_COLOR, AXIS_COLOR, useAuth } from './shared.jsx'
 import { aggregateBars, analyzeBars, findWalls, replayView, replayRange, liquiditySignals, orderFlowBias, aggression, sweepSignals, pullStackSignals, autoBigLots, liquidityMap } from './orderFlowMath.js'
 import { TapeCard } from './OrderFlowTape.jsx'
-import { StrategyScanner } from './StrategyScanner.jsx'
 import { useDayOi } from './useDayOi.js'
 import { oiBiasParts, oiSummary, suddenOiWalls, vwapOf } from './strategyEngine.js'
 import { suddenWallText } from './suddenOi.js'
@@ -18,7 +17,8 @@ import { alignToBars, sessionVwapFromBars } from './chartVwap.js'
 import { ProfilesCard } from './ProfilesCard.jsx'
 import { PriceAlertsBar, usePriceAlerts } from './PriceAlerts.jsx'
 import { ProfileAlertsBar, usePreviousSpotProfile, useProfileAlerts } from './ProfileAlerts.jsx'
-import { ServerScannerCard } from './ServerScanner.jsx'
+import { syncOrderFlowSettings } from './ServerScanner.jsx'
+import { Link } from 'react-router-dom'
 import { fetchPreviousSession, sessionVolumeProfile, tpoProfile, tpoRowFor } from './profiles.js'
 import { withBackfill } from './cvdBackfill.js'
 import { TAPE_PRINTS, applyOrderFlowPush, mergePrints, orderFlowFromSnapshot, toColumn } from './liveFeeds.js'
@@ -162,7 +162,10 @@ export default function OrderFlowPage() {
   // Big order: 'auto' (default) - the top 2.5% of the day's prints (autoBigLots) - or the fixed lots above.
   const [bigMode, setBigMode] = usePersistedState('optionanalytics.orderFlow.bigMode', 'auto')
   // What the server scanner needs from this page's own settings to read the order flow the same way.
+  // The server scanner reads this page's row sizes and big-order setting (its footprint and big prints are this page's):
+  // an admin's are saved to it as they change.
   const orderFlowSettings = useMemo(() => ({ rowSizes, bigMode, largeLots }), [rowSizes, bigMode, largeLots])
+
   // What the server is asked for: in auto mode every print of 5+ lots (the page picks the big ones).
   const fetchLots = bigMode === 'auto' ? 5 : largeLots
   const [showLots, setShowLots] = usePersistedState('optionanalytics.orderFlow.showLots', true)
@@ -188,7 +191,8 @@ export default function OrderFlowPage() {
   const isReplay = mode === 'replay'
   // Live (Dhan) trading from the strategy scanner: admins, today's live view only.
   const auth = useAuth()
-  const canTradeLive = auth?.user?.role === 'Admin' && !isReplay
+  const isAdminUser = auth?.user?.role === 'Admin'
+  useEffect(() => { if (isAdminUser) syncOrderFlowSettings(orderFlowSettings) }, [isAdminUser, orderFlowSettings])
 
   const changeUnderlying = (value) => { setUnderlying(value); setExpiry(null) }
 
@@ -462,7 +466,6 @@ export default function OrderFlowPage() {
     const bars = (prevSession.data?.bars ?? []).filter((b) => b.high > 0 && b.low > 0)
     return bars.length ? { prevHigh: Math.max(...bars.map((b) => b.high)), prevLow: Math.min(...bars.map((b) => b.low)) } : null
   }, [prevSession.data])
-  const scannerProfile = useMemo(() => (prevVp?.poc != null ? { vp: prevVp, tpoPrev: prevTpo, ...prevRange } : null), [prevVp, prevTpo, prevRange])
   const profile = showProfile ? prevVp : null
   const walls = useMemo(() => findWalls(view?.book), [view?.book])
   const activeIcebergs = useMemo(() => new Set((view?.icebergs ?? []).filter((i) => !i.endedAt).map((i) => i.price)), [view?.icebergs])
@@ -519,7 +522,7 @@ export default function OrderFlowPage() {
   )
   const heatSignals = useMemo(() => [...liquidity, ...pullStack.signals, ...sweeps], [liquidity, pullStack.signals, sweeps])
   // The day's options + futures OI: part of the order flow read, and what the strategy scanner reads.
-  const { oi: dayOi, error: dayOiError } = useDayOi(underlying, isReplay ? replayDate : todayKey(), isReplay)
+  const { oi: dayOi } = useDayOi(underlying, isReplay ? replayDate : todayKey(), isReplay)
   const oiMinute = Math.floor((nowMs ?? 0) / 60_000)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const oiParts = useMemo(() => (dayOi && nowMs ? oiBiasParts(dayOi, nowMs) : []), [dayOi, oiMinute])
@@ -910,14 +913,9 @@ export default function OrderFlowPage() {
           </Col>
         </Row>
 
-        <StrategyScanner
-          underlying={underlying} isReplay={isReplay} date={isReplay ? replayDate : todayKey()} view={view} replayDay={replayDay} replayMs={replayMs} range={range}
-          tapePrints={tapePrints} liquidity={liquidity} pullStack={pullStack.signals} rowSize={rowSize} lotSize={lotSize} largeLots={bigLots} estimated={noDepth}
-          profile={scannerProfile} oi={dayOi} oiError={dayOiError} canTradeLive={canTradeLive}
-          isAdmin={auth?.user?.role === 'Admin'} orderFlowSettings={orderFlowSettings}
-        />
-
-        <ServerScannerCard isAdmin={auth?.user?.role === 'Admin'} focus={underlying} />
+        {/* The strategies live on their own page now: the server scanner runs them (page open or not) - which is live on
+            which index, their signals and trades, settings and the lab. */}
+        <Alert type="info" showIcon message={<span>The strategies (signals, alerts, paper / live trades, their settings) are on the <Link to="/strategies">Strategies</Link> page - the server scanner runs them for NIFTY, BANKNIFTY and SENSEX with this page closed too.</span>} />
 
         <Text type="secondary" style={{ fontSize: 11, color: AXIS_COLOR }}>
           Trades are inferred from Dhan's tick feed: the rise in the day's volume between two ticks is the volume traded, at the tick's price, and

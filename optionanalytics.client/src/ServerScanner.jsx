@@ -47,7 +47,7 @@ export function ServerScannerCard({ isAdmin, focus }) {
   ]
   const tradeColumns = [
     { title: 'Time', dataIndex: 'entryTime', width: 56, render: hhmm },
-    { title: 'Paper trade', key: 't', render: (_, r) => <span>{r.action} {r.strike} {r.side} ×{r.lots} <Text type="secondary" style={{ fontSize: 11 }}>#{r.no}</Text></span> },
+    { title: 'Option trade', key: 't', render: (_, r) => <span>{r.live && <Tag color="volcano" style={{ marginRight: 4, fontSize: 10 }}>LIVE</Tag>}{r.action} {r.strike} {r.side} ×{r.lots} <Text type="secondary" style={{ fontSize: 11 }}>#{r.no}</Text></span> },
     { title: 'Premium', key: 'p', width: 110, render: (_, r) => `${r.premium?.toFixed(1)} → ${r.current != null ? r.current.toFixed(1) : '-'}` },
     { title: 'P&L', dataIndex: 'rupees', width: 84, render: (v) => <Text strong style={{ color: (v ?? 0) >= 0 ? UP_COLOR : DOWN_COLOR, fontSize: 12 }}>{rupee(v)}</Text> },
     { title: 'Exit', dataIndex: 'exitReason', width: 120, render: (v, r) => (r.exitTime ? <Text type="secondary" style={{ fontSize: 11 }}>{hhmm(r.exitTime)} {v}</Text> : <Tag color="processing">open</Tag>) },
@@ -56,17 +56,16 @@ export function ServerScannerCard({ isAdmin, focus }) {
   return (
     <Card
       size="small"
-      title={<Space size={8}><span>Server scanner · NIFTY, BANKNIFTY, SENSEX</span><Tag color={running ? 'success' : 'default'}>{running ? '● running' : '○ off'}</Tag><Tag>paper only</Tag></Space>}
+      title={<Space size={8}><span>Server scanner today · NIFTY, BANKNIFTY, SENSEX</span><Tag color={running ? 'success' : 'default'}>{running ? '● running' : '○ off'}</Tag></Space>}
       extra={<Text type="secondary" style={{ fontSize: 11 }}>{headline}</Text>}
     >
       <Space direction="vertical" size={10} style={{ width: '100%' }}>
         <Text type="secondary" style={{ fontSize: 12 }}>
-          The same scanner as above, run by the server for all three indices - with no browser open. Which indices it scans, their lots,
-          SL / target / trail and what it does on an alert are on the <a href="/trade-settings">Trade settings</a> page; the strategies, their
-          filters and the futures trailing stop follow this page&apos;s scanner settings{isAdmin ? ', synced from here as you change them' : ''}. Its alerts and paper
-          trades go to Telegram tagged [Server]; its record is kept apart from this page&apos;s (
-          <a href="/api/scanner-log/server-signals">server-signals.csv</a>, <a href="/api/scanner-log/server-trades">server-trades.csv</a>) so the two can be compared.
-          It places no real orders.
+          Every strategy, run by the server for all three indices - with no browser open: today&apos;s signals and the option trades it took (paper;
+          live on an index switched to Live today, for the strategies on its live list). Which indices it scans, their lots, SL / target / trail and
+          what an alert trades are on the <a href="/trade-settings">Trade settings</a> page; the strategies alerted, their filters and the trailing stop
+          are the scanner settings on this page. Alerts and trades go to Telegram tagged [Server]; the record:
+          {' '}<a href="/api/scanner-log/server-signals">server-signals.csv</a>, <a href="/api/scanner-log/server-trades">server-trades.csv</a> (Trades → Scanner record).
         </Text>
         {error && <Alert type="warning" showIcon message={`Server scanner status not available: ${error}`} />}
         {indices.map((ix) => (
@@ -78,7 +77,7 @@ export function ServerScannerCard({ isAdmin, focus }) {
                 : <Tag>{ix.enabled ? 'on' : 'off'}</Tag>}
               {ix.enabled && (ix.ready ? <Tag color="success">data live{ix.clockUtc ? ` · ${hhmm(Date.parse(ix.clockUtc))}` : ''}</Tag> : <Tag color="warning">waiting for data</Tag>)}
               {ix.contract && <Text type="secondary" style={{ fontSize: 11 }}>{ix.contract}</Text>}
-              <Text style={{ fontSize: 12 }}>{ix.signals?.length ?? 0} signal(s) · {ix.trades?.length ?? 0} paper trade(s) · <Text strong style={{ color: (ix.pnl ?? 0) >= 0 ? UP_COLOR : DOWN_COLOR }}>{rupee(ix.pnl)}</Text></Text>
+              <Text style={{ fontSize: 12 }}>{ix.signals?.length ?? 0} signal(s) · {ix.trades?.length ?? 0} option trade(s) · <Text strong style={{ color: (ix.pnl ?? 0) >= 0 ? UP_COLOR : DOWN_COLOR }}>{rupee(ix.pnl)}</Text></Text>
             </Space>
             {ix.error && <Text type="warning" style={{ fontSize: 11, display: 'block' }}>{ix.error}</Text>}
             {ix.signals?.length > 0 && <Table size="small" pagination={false} rowKey={(s) => `${s.id}-${s.t}`} columns={signalColumns} dataSource={[...ix.signals].reverse()} scroll={{ y: 180 }} />}
@@ -94,6 +93,20 @@ export function ServerScannerCard({ isAdmin, focus }) {
 // and the strategies alerted - saved to the server (admins) whenever they change.
 let lastSent = ''
 let timer = null
+/** The Order Flow page's row sizes and big-order setting into the server scanner's settings (the rest kept as they are),
+ *  a couple of seconds after they last changed, only when they differ from what the server has. */
+let orderFlowTimer = null
+export function syncOrderFlowSettings(orderFlow) {
+  clearTimeout(orderFlowTimer)
+  orderFlowTimer = setTimeout(async () => {
+    try {
+      const cfg = await fetch('/api/scanner-runner/config').then((r) => (r.ok ? r.json() : null))
+      if (!cfg || JSON.stringify(cfg.settings?.orderFlow ?? null) === JSON.stringify(orderFlow)) return
+      await fetch('/api/scanner-runner/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ settings: { ...(cfg.settings ?? {}), orderFlow } }) })
+    } catch { /* sent again on the next change */ }
+  }, 2000)
+}
+
 export function syncServerScanner(payload) {
   const json = JSON.stringify(payload)
   if (json === lastSent) return

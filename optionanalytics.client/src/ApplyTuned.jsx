@@ -197,7 +197,7 @@ const loadServerRecord = () => {
     .finally(() => { recordLoading = null })
   return recordLoading
 }
-function useServerRecord(reloadKey = 0) {
+export function useServerRecord(reloadKey = 0) {
   const [rec, setRec] = useState(recordCache?.data ?? null)
   useEffect(() => {
     let stop = false

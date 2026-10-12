@@ -1,4 +1,4 @@
-// Where the Order Flow scanner keeps its settings in the browser (StrategyScanner), and how a strategy's tuned
+// Where the scanner settings are kept in the browser (a copy of the server scanner's), and how a strategy's tuned
 // trade filters are applied to them - in this browser and in the server scanner's config.
 import { filtersFromTuning } from './strategyTuning.js'
 import { filtersForIndex } from './strategyEngine.js'

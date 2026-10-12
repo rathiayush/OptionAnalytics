@@ -70,8 +70,8 @@ async function refreshConfig() {
   try {
     const config = await api('/api/scanner-runner/config')
     if (!Array.isArray(config?.alertIds) && Date.now() - topAt > TOP_MS) {
-      const csv = await api('/api/scanner-log/signals').catch(() => null)
-      if (csv != null) { top = topFromSignalsCsv(csv); topAt = Date.now() }
+      const [page, own] = await Promise.all(['/api/scanner-log/signals', '/api/scanner-log/server-signals'].map((p) => api(p).catch(() => null)))
+      if (page != null || own != null) { top = topFromSignalsCsv([page, own]); topAt = Date.now() }
     }
     for (const s of scanners) s.setConfig({ ...config, top })
   } catch (err) {
