@@ -8,6 +8,8 @@ public interface IServerLiveOrders
 {
     Task<ManualOrderResult> PlaceAsync(ManualOrderRequest request, CancellationToken cancellationToken);
     Task<ManualOrderResult> ExitTradeAsync(IReadOnlyList<string> orderIds, decimal slippagePoints, CancellationToken cancellationToken, bool onlyWithWorkingLegs);
+    /// <summary>Where these super orders stand on Dhan, from the order book in memory (no Dhan call); unlisted ones left out.</summary>
+    IReadOnlyList<LiveOrderState> OrderStates(IReadOnlyCollection<string> orderIds);
 }
 
 /// <summary>
@@ -29,6 +31,8 @@ public sealed class ServerLiveService
 {
     public const int EntryFromMinute = 9 * 60 + 15;
     public const int LastEntryMinute = 14 * 60 + 45;
+    /// <summary>A server scanner entry with nothing traded this long after it was placed is cancelled (ReconcileAsync).</summary>
+    public const int EntryFillSeconds = 60;
     private readonly TradeSettingsStore _trade;
     private readonly IServerLiveOrders _orders;
     private readonly ILogger<ServerLiveService> _logger;
@@ -77,7 +81,7 @@ public sealed class ServerLiveService
                 var trades = _state.Trades.Where(t => t.Underlying == u && t.Day == today).ToList();
                 // The counts are the server scanner's own (its limits); the page's watched trades are listed too.
                 var own = trades.Where(t => !t.IsPageTrade).ToList();
-                return new ServerLiveIndexStatus(u, s.LiveDay == today, s.LiveDay, s.MaxTrades, s.MaxLoss, own.Count,
+                return new ServerLiveIndexStatus(u, s.LiveDay == today, s.LiveDay, s.MaxTrades, s.MaxLoss, own.Count(t => !t.NotFilled),
                     own.Count(t => t.ExitedUtc is null && (t.ExitAtMs <= 0 || now.ToUnixTimeMilliseconds() < t.ExitAtMs)), own.Sum(t => t.Pnl ?? 0), s.ArmedBy, s.ArmedUtc, trades);
             }).ToList();
         }
@@ -179,7 +183,8 @@ public sealed class ServerLiveService
             if (trades.Any(t => t.Key == request.Key)) return "this signal was already placed";
             // Open = no exit reported yet and its time stop (the server's own time exit closes it) not passed.
             if (trades.Any(t => t.ExitedUtc is null && (t.ExitAtMs <= 0 || now.ToUnixTimeMilliseconds() < t.ExitAtMs))) return $"a live {u} trade is still open - one at a time";
-            if (trades.Count >= s.MaxTrades) return $"the day's limit of {s.MaxTrades} live {u} trade(s) is reached";
+            // An entry that never traded (rejected, cancelled, not filled in time) was no trade.
+            if (trades.Count(t => !t.NotFilled) >= s.MaxTrades) return $"the day's limit of {s.MaxTrades} live {u} trade(s) is reached";
             var pnl = trades.Sum(t => t.Pnl ?? 0);
             if (pnl <= -s.MaxLoss) return $"{u}'s live loss today (₹{-pnl:N0}) reached its limit of ₹{s.MaxLoss:N0}";
         }
@@ -209,8 +214,11 @@ public sealed class ServerLiveService
             if (i >= 0)
             {
                 var t = _state.Trades[i];
-                _state.Trades[i] = t with { ExitedUtc = t.ExitedUtc ?? (result.Success ? now : null), ExitReason = reason ?? t.ExitReason, Pnl = pnl ?? t.Pnl,
-                    Note = result.Success ? t.Note : $"exit failed - {result.Message}" };
+                // Closed by Dhan already (ReconcileAsync): what really happened stays - its leg's fill P&L, or none for
+                // an entry that never traded - not the scanner's own reckoning.
+                var settled = t.NotFilled || t.PnlFromFills;
+                _state.Trades[i] = t with { ExitedUtc = t.ExitedUtc ?? (result.Success ? now : null), ExitReason = settled ? t.ExitReason : reason ?? t.ExitReason,
+                    Pnl = settled ? t.Pnl : pnl ?? t.Pnl, Note = result.Success ? t.Note : $"exit failed - {result.Message}" };
                 Save();
             }
         }
@@ -346,6 +354,100 @@ public sealed class ServerLiveService
         return hit.Count;
     }
 
+    /// <summary>
+    /// What Dhan did to the open live trades by itself - every 2 s with the index stop check (ServerLiveStopWatcher), from
+    /// the order book in memory: a trade whose every order has ended - its stop-loss or target leg filled, its entry
+    /// rejected or cancelled before anything traded, or its legs gone - is closed here at once, with its P&amp;L from the
+    /// fills, so it no longer holds the index's one-at-a-time slot until its time stop, even with the scanner down (an
+    /// entry that never traded is no trade: not counted in the max trades, P&amp;L 0). And a server scanner entry still
+    /// not traded at all <see cref="EntryFillSeconds"/> after it was placed is cancelled - a late fill would no longer be
+    /// the signal's trade - through the trade's own exit (cancel the entry; anything that traded meanwhile is exited, so
+    /// nothing is left without its legs). Returns the trades closed.
+    /// </summary>
+    public async Task<int> ReconcileAsync(DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        List<ServerLiveTrade> open;
+        var today = Day(now);
+        lock (_lock) open = _state.Trades.Where(t => t.Day == today && t.ExitedUtc is null && t.OrderIds.Count > 0).ToList();
+        var closed = 0;
+        foreach (var t in open)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var states = _orders.OrderStates(t.OrderIds).GroupBy(x => x.OrderId).ToDictionary(g => g.Key, g => g.First());
+            // An order the book does not list yet: nothing is known about it - left alone.
+            if (!t.OrderIds.All(states.ContainsKey)) continue;
+            var all = t.OrderIds.Select(id => states[id]).ToList();
+            if (all.All(x => !x.Open))
+            {
+                if (Settle(t, all, now)) closed++;
+                continue;
+            }
+            if (!t.IsPageTrade && all.All(x => x.Filled == 0) && now - t.PlacedUtc >= TimeSpan.FromSeconds(EntryFillSeconds)
+                && await CancelUnfilledAsync(t, now)) closed++;
+        }
+        return closed;
+    }
+
+    /// <summary>Closes a trade Dhan ended by itself (ReconcileAsync).</summary>
+    private bool Settle(ServerLiveTrade trade, List<LiveOrderState> orders, DateTimeOffset now)
+    {
+        var notFilled = orders.All(x => x.Filled == 0);
+        var pnls = orders.Where(x => x.Filled > 0).Select(x => x.Pnl).ToList();
+        decimal? pnl = notFilled ? 0 : pnls.All(x => x is not null) ? pnls.Sum(x => x!.Value) : null;
+        var ended = orders.FirstOrDefault(x => x.EndedBy is "stop-loss" or "target") ?? orders.FirstOrDefault(x => x.Filled > 0) ?? orders[0];
+        var reason = ended.EndedBy switch
+        {
+            "stop-loss" or "target" => $"{ended.EndedBy} leg filled on Dhan{(ended.ExitPrice is { } px ? $" @ {px:0.##}" : "")}",
+            "rejected" => $"entry rejected by Dhan{(ended.Reason is { } r ? $" - {r}" : "")}",
+            "cancelled" => "entry cancelled on Dhan before it traded",
+            _ => "closed on Dhan (its stop-loss / target legs are gone)",
+        };
+        lock (_lock)
+        {
+            var i = _state.Trades.FindLastIndex(x => x.Underlying == trade.Underlying && x.Key == trade.Key && x.ExitedUtc is null);
+            if (i < 0) return false;
+            _state.Trades[i] = _state.Trades[i] with { ExitedUtc = now, ExitReason = reason, Pnl = pnl ?? _state.Trades[i].Pnl, NotFilled = notFilled, PnlFromFills = !notFilled && pnl is not null };
+            Save();
+        }
+        _logger.LogWarning("Live {Underlying} {Contract} ({Key}) closed by Dhan: {Reason}, P&L {Pnl}.", trade.Underlying, trade.Contract, trade.Key, reason, pnl?.ToString("0.##") ?? "?");
+        return true;
+    }
+
+    private readonly Dictionary<string, DateTimeOffset> _cancelTried = new();
+
+    /// <summary>Cancels a server scanner entry that never traded (ReconcileAsync) - retried every 30 s if Dhan refuses.</summary>
+    private async Task<bool> CancelUnfilledAsync(ServerLiveTrade trade, DateTimeOffset now)
+    {
+        var id = $"{trade.Underlying}|{trade.Key}";
+        bool first;
+        lock (_lock)
+        {
+            if (_cancelTried.TryGetValue(id, out var last) && now - last < TimeSpan.FromSeconds(30)) return false;
+            first = !_cancelTried.ContainsKey(id);
+            _cancelTried[id] = now;
+        }
+        var result = await _orders.ExitTradeAsync(trade.OrderIds, _trade.Get(trade.Underlying).SlippagePoints, CancellationToken.None, onlyWithWorkingLegs: true);
+        // Something traded as the cancel went out: that part was exited (its exit order ids) - a trade after all.
+        var tradedMeanwhile = result.OrderIds.Count > 0;
+        lock (_lock)
+        {
+            var i = _state.Trades.FindLastIndex(x => x.Underlying == trade.Underlying && x.Key == trade.Key && x.ExitedUtc is null);
+            if (i < 0) return false;
+            var t = _state.Trades[i];
+            _state.Trades[i] = result.Success
+                ? t with { ExitedUtc = now, ExitReason = $"entry not filled within {EntryFillSeconds} s - cancelled", NotFilled = !tradedMeanwhile, Pnl = tradedMeanwhile ? t.Pnl : 0,
+                    Note = tradedMeanwhile ? $"it traded as it was cancelled - exited: {result.Message}" : t.Note }
+                : t with { Note = $"unfilled entry not cancelled yet - {result.Message}" };
+            Save();
+        }
+        _logger.LogWarning("Live {Underlying} {Contract} ({Key}): entry not filled in {Seconds} s - cancel: {Message}", trade.Underlying, trade.Contract, trade.Key, EntryFillSeconds, result.Message);
+        if (_telegram is not null && (result.Success || first))
+            await _telegram.SendAsync(result.Success
+                ? $"[Server] LIVE entry not filled in {EntryFillSeconds} s - cancelled: {trade.Underlying} {trade.Contract} ({trade.Strategy}){(tradedMeanwhile ? $" - part traded as it was cancelled and was exited: {result.Message}" : "")}"
+                : $"[Server] LIVE entry of {trade.Underlying} {trade.Contract} not filled in {EntryFillSeconds} s and the cancel FAILED: {result.Message} - check the Dhan panel", CancellationToken.None);
+        return result.Success;
+    }
+
     private static string Day(DateTimeOffset now) => IstClock.IstDate(now).ToString("yyyy-MM-dd");
 
     private State Load()
@@ -400,6 +502,7 @@ public sealed class ServerLiveService
         public Task<ManualOrderResult> PlaceAsync(ManualOrderRequest request, CancellationToken cancellationToken) => trading.PlaceAsync(request, cancellationToken);
         public Task<ManualOrderResult> ExitTradeAsync(IReadOnlyList<string> orderIds, decimal slippagePoints, CancellationToken cancellationToken, bool onlyWithWorkingLegs) =>
             trading.ExitTradeAsync(orderIds, slippagePoints, cancellationToken, onlyWithWorkingLegs);
+        public IReadOnlyList<LiveOrderState> OrderStates(IReadOnlyCollection<string> orderIds) => trading.OrderStates(orderIds);
     }
 }
 
@@ -419,7 +522,8 @@ public sealed record ServerLiveExitRequest(string Key, string? Reason, decimal? 
 
 public sealed record ServerLiveStopRequest(string Key, decimal Stop);
 
-/// <summary>Every 2 seconds in market hours: the server's own index stop-loss check on the open live trades
+/// <summary>Every 2 seconds in market hours: what Dhan did to the open live trades by itself (ServerLiveService.ReconcileAsync
+/// - a leg filled, an entry rejected or not filled in time), then the server's own index stop-loss check on them
 /// (ServerLiveService.CheckIndexStopsAsync), on the live price of each index - the futures, or the spot for a spot +
 /// options strategy's trade (a price older than a minute is not used).</summary>
 public sealed class ServerLiveStopWatcher(ServerLiveService live, OptionAnalytics.Server.Services.OrderFlow.OrderFlowService orderFlow, SpotFeedHostedService spotFeed, ILogger<ServerLiveStopWatcher> logger) : BackgroundService
@@ -441,6 +545,8 @@ public sealed class ServerLiveStopWatcher(ServerLiveService live, OptionAnalytic
                     var (price, at) = orderFlow.EngineFor(u)?.LastTrade() ?? (0, null);
                     return price > 0 && at is { } t && now - t < TimeSpan.FromMinutes(1) ? price : null;
                 }
+                // First what Dhan did by itself (a leg filled, an entry rejected or never filled), then the index levels.
+                await live.ReconcileAsync(now, stoppingToken);
                 await live.CheckIndexStopsAsync(PriceOf, now, stoppingToken);
             }
             catch (OperationCanceledException) { throw; }
@@ -467,6 +573,11 @@ public sealed record ServerLiveTrade(string Underlying, string Day, string Key, 
     /// <summary>"spot" - the index stop / target are SPOT prices (a spot + options strategy) and are checked on the spot;
     /// null - futures prices.</summary>
     public string? PriceBasis { get; init; }
+    /// <summary>Its entry never traded (rejected, cancelled, not filled in time): no trade - not counted in the max
+    /// trades, P&amp;L 0.</summary>
+    public bool NotFilled { get; init; }
+    /// <summary>Closed by its own stop-loss / target leg on Dhan, Pnl from those fills - kept over the scanner's report.</summary>
+    public bool PnlFromFills { get; init; }
     [System.Text.Json.Serialization.JsonIgnore] public string Basis => PriceBasis == ServerLiveService.SpotBasis ? ServerLiveService.SpotBasis : ServerLiveService.FuturesBasis;
     [System.Text.Json.Serialization.JsonIgnore] public bool IsPageTrade => Source == "page";
 }

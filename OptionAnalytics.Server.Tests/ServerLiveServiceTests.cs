@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Hosting;
@@ -36,12 +37,23 @@ public sealed class ServerLiveServiceTests : IDisposable
             Placed.Add(request);
             return Task.FromResult(new ManualOrderResult(true, "placed", new[] { $"o{Placed.Count}" }, new ManualOrderPrices(100, 101, 131, 81)) { LotSize = 75 });
         }
+        /// <summary>What an exit returns (the exit orders it placed) - default: it placed some.</summary>
+        public Func<IReadOnlyList<string>, ManualOrderResult>? ExitResult { get; set; }
         public Task<ManualOrderResult> ExitTradeAsync(IReadOnlyList<string> orderIds, decimal slippagePoints, CancellationToken cancellationToken, bool onlyWithWorkingLegs)
         {
             Exits.Add((orderIds, onlyWithWorkingLegs));
-            return Task.FromResult(new ManualOrderResult(true, "exited", orderIds, null));
+            return Task.FromResult(ExitResult?.Invoke(orderIds) ?? new ManualOrderResult(true, "exited", orderIds, null));
         }
+        /// <summary>Dhan's order book in memory: what each order id is doing (unlisted = not read yet).</summary>
+        public Dictionary<string, LiveOrderState> Book { get; } = new();
+        public IReadOnlyList<LiveOrderState> OrderStates(IReadOnlyCollection<string> orderIds) => Book.Values.Where(x => orderIds.Contains(x.OrderId)).ToList();
     }
+
+    /// <summary>An order still working: nothing traded, or its entry filled (a SELL at 101) with its legs working.</summary>
+    private static LiveOrderState Working(string id, int filled = 0) => new(id, true, filled, null, true, filled > 0 ? 101 : null, null, 0, null);
+    private static readonly ManualOrderResult CancelledOnly = new(true, "ENTRY_LEG cancelled", Array.Empty<string>(), null);
+    private static ServerLiveTrade TradeOf(ServerLiveService live, string u, string key) =>
+        live.Status(At10).Single(x => x.Underlying == u).Trades.Last(x => x.Key == key);
 
     /// <summary>The trade settings these tests are written against - set here, not the app's defaults (those are the
     /// trader's and can change): 1 lot, SL 20 / target 30 on NIFTY (50 / 75, 60 / 90) for a manual trade and as the max.
@@ -426,5 +438,171 @@ public sealed class ServerLiveServiceTests : IDisposable
         Assert.False((await live.PlaceAsync("NIFTY", new ServerLiveOrderRequest("x", null, Expiry, 25000, "XX", "SELL"), At10, default)).Placed);
         Assert.Empty(orders.Placed);
         Assert.NotNull(live.Set("NIFTY", true, 0, null, "admin", At10)); // limits validated
+    }
+
+    [Fact]
+    public async Task ATradeClosedByItsOwnLegOnDhan_IsClosedAtOnce_WithItsFillPnl_AndTheIndexIsFreeForTheNext()
+    {
+        var orders = new FakeOrders();
+        var live = Live(orders);
+        live.Set("NIFTY", true, null, null, "admin", At10);
+        Assert.True((await live.PlaceAsync("NIFTY", Order("a"), At10, default)).Placed); // SELL PE - order o1
+        orders.Book["o1"] = Working("o1", filled: 75);
+        Assert.Equal(0, await live.ReconcileAsync(At10.AddMinutes(1), default));
+        Assert.False((await live.PlaceAsync("NIFTY", Order("b"), At10.AddMinutes(1), default)).Placed); // still open
+        // Its stop-loss leg fills on Dhan at 121 (sold at 101.5) - the scanner is down, nobody reports it.
+        orders.Book["o1"] = new LiveOrderState("o1", false, 75, "stop-loss", true, 101.5m, 121, 75, null);
+        Assert.Equal(1, await live.ReconcileAsync(At10.AddMinutes(2), default));
+        var t = TradeOf(live, "NIFTY", "a");
+        Assert.Equal(At10.AddMinutes(2), t.ExitedUtc);
+        Assert.Equal("stop-loss leg filled on Dhan @ 121", t.ExitReason);
+        Assert.Equal(-1462.5m, t.Pnl); // (101.5 - 121) x 75
+        Assert.Empty(orders.Exits); // Dhan closed it - nothing sent
+        // The index is free at once, not only at the trade's time stop; the loss counts toward the day's max loss.
+        Assert.Equal(-1462.5m, live.Status(At10).Single(x => x.Underlying == "NIFTY").PnlToday);
+        Assert.True((await live.PlaceAsync("NIFTY", Order("b"), At10.AddMinutes(3), default)).Placed);
+        // The scanner's report later (its own reckoning) never overwrites what really happened, and sends nothing.
+        await live.ExitAsync("NIFTY", "a", "option SL", -1000, At10.AddMinutes(4), default);
+        t = TradeOf(live, "NIFTY", "a");
+        Assert.Equal((-1462.5m, "stop-loss leg filled on Dhan @ 121"), (t.Pnl!.Value, t.ExitReason));
+        Assert.Empty(orders.Exits);
+        // A target leg: its P&L the same way; a trade of two slices closes when both have.
+        orders.Book["o2"] = new LiveOrderState("o2", false, 75, "target", true, 100, 70, 75, null);
+        Assert.Equal(1, await live.ReconcileAsync(At10.AddMinutes(5), default));
+        Assert.Equal((2250m, "target leg filled on Dhan @ 70"), (TradeOf(live, "NIFTY", "b").Pnl!.Value, TradeOf(live, "NIFTY", "b").ExitReason));
+    }
+
+    [Fact]
+    public async Task ATradeIsClosedOnlyWhenEveryOrderOfItHasEnded_AndNeverWhenTheBookDoesNotListIt()
+    {
+        var orders = new FakeOrders();
+        var live = Live(orders);
+        live.Set("NIFTY", true, null, null, "admin", At10);
+        await live.PlaceAsync("NIFTY", Order("a"), At10, default);
+        // Not in the book yet: nothing known - left alone (never cancelled as unfilled either).
+        Assert.Equal(0, await live.ReconcileAsync(At10.AddMinutes(5), default));
+        Assert.Empty(orders.Exits);
+        Assert.Null(TradeOf(live, "NIFTY", "a").ExitedUtc);
+        // Filled, its legs not listed / still working: open.
+        orders.Book["o1"] = Working("o1", filled: 75);
+        Assert.Equal(0, await live.ReconcileAsync(At10.AddMinutes(6), default));
+        // Its legs gone without filling (exited by another order): closed, P&L not known - the scanner's report fills it.
+        orders.Book["o1"] = new LiveOrderState("o1", false, 75, "closed", true, 101, null, 0, null);
+        Assert.Equal(1, await live.ReconcileAsync(At10.AddMinutes(7), default));
+        Assert.Null(TradeOf(live, "NIFTY", "a").Pnl);
+        await live.ExitAsync("NIFTY", "a", "option SL", -600, At10.AddMinutes(8), default);
+        Assert.Equal(-600m, TradeOf(live, "NIFTY", "a").Pnl);
+        Assert.Empty(orders.Exits);
+    }
+
+    [Fact]
+    public async Task AnEntryDhanRejected_IsNoTrade_ItFreesTheIndex_AndDoesNotCountTowardTheMaxTrades()
+    {
+        var orders = new FakeOrders();
+        var live = Live(orders);
+        live.Set("NIFTY", true, 1, null, "admin", At10);
+        await live.PlaceAsync("NIFTY", Order("a"), At10, default);
+        orders.Book["o1"] = new LiveOrderState("o1", false, 0, "rejected", true, null, null, 0, "insufficient margin");
+        Assert.Equal(1, await live.ReconcileAsync(At10.AddSeconds(5), default));
+        var t = TradeOf(live, "NIFTY", "a");
+        Assert.True(t.NotFilled);
+        Assert.Equal(0m, t.Pnl);
+        Assert.Equal("entry rejected by Dhan - insufficient margin", t.ExitReason);
+        // The scanner's own later "loss" on it changes nothing - no trade happened.
+        await live.ExitAsync("NIFTY", "a", "stop", -800, At10.AddMinutes(1), default);
+        Assert.Equal(0m, TradeOf(live, "NIFTY", "a").Pnl);
+        var s = live.Status(At10).Single(x => x.Underlying == "NIFTY");
+        Assert.Equal((0, 0, 0m), (s.TradesToday, s.OpenToday, s.PnlToday));
+        // Max 1 trade a day: the rejected one was none - the next signal still goes; the same signal never twice.
+        Assert.True((await live.PlaceAsync("NIFTY", Order("b"), At10.AddMinutes(2), default)).Placed);
+        Assert.Contains("already placed", (await live.PlaceAsync("NIFTY", Order("a"), At10.AddMinutes(3), default)).Message);
+    }
+
+    [Fact]
+    public async Task AnEntryNotFilledWithin60s_IsCancelled_AndIsNoTrade_ButAPartFilledOrPageEntryIsLeftAlone()
+    {
+        var orders = new FakeOrders { ExitResult = _ => CancelledOnly };
+        var live = Live(orders);
+        live.Set("NIFTY", true, null, null, "admin", At10);
+        live.Set("BANKNIFTY", true, null, null, "admin", At10);
+        await live.PlaceAsync("NIFTY", Order("a"), At10, default);     // o1
+        await live.PlaceAsync("BANKNIFTY", Order("b"), At10, default); // o2
+        Assert.Null(live.WatchPageTrade(new PageLiveWatchRequest("SENSEX", "p", new[] { "p1" }, 82000, "LONG"), At10));
+        orders.Book["o1"] = Working("o1");             // nothing traded
+        orders.Book["o2"] = Working("o2", filled: 30); // part filled - its legs protect what traded
+        orders.Book["p1"] = Working("p1");             // the page's own trade - its own rules
+        Assert.Equal(0, await live.ReconcileAsync(At10.AddSeconds(59), default));
+        Assert.Empty(orders.Exits);
+        Assert.Equal(1, await live.ReconcileAsync(At10.AddSeconds(60), default));
+        var (ids, onlyWorking) = orders.Exits.Single();
+        Assert.Equal(new[] { "o1" }, ids);
+        Assert.True(onlyWorking, "the trade's own exit: cancel the entry, exit anything that traded meanwhile");
+        var t = TradeOf(live, "NIFTY", "a");
+        Assert.True(t.NotFilled);
+        Assert.Equal((0m, "entry not filled within 60 s - cancelled"), (t.Pnl!.Value, t.ExitReason));
+        Assert.Equal(0, live.Status(At10).Single(x => x.Underlying == "NIFTY").TradesToday);
+        Assert.True((await live.PlaceAsync("NIFTY", Order("c"), At10.AddMinutes(2), default)).Placed);
+        // Later checks: the part-filled one and the page's are still never touched.
+        await live.ReconcileAsync(At10.AddMinutes(5), default);
+        Assert.Single(orders.Exits);
+        Assert.Null(TradeOf(live, "BANKNIFTY", "b").ExitedUtc);
+    }
+
+    [Fact]
+    public async Task AnUnfilledEntry_ThatTradedAsItWasCancelled_IsExitedAndCounts_AndAFailedCancelIsRetried()
+    {
+        var orders = new FakeOrders { ExitResult = _ => ManualOrderResult.Fail("Dhan did not cancel it") };
+        var live = Live(orders);
+        live.Set("NIFTY", true, null, null, "admin", At10);
+        await live.PlaceAsync("NIFTY", Order("a"), At10, default);
+        orders.Book["o1"] = Working("o1");
+        Assert.Equal(0, await live.ReconcileAsync(At10.AddSeconds(60), default));
+        var t = TradeOf(live, "NIFTY", "a");
+        Assert.Null(t.ExitedUtc); // still open - and still blocks the index
+        Assert.Contains("not cancelled yet", t.Note);
+        Assert.Equal(0, await live.ReconcileAsync(At10.AddSeconds(70), default)); // not again within 30 s
+        Assert.Single(orders.Exits);
+        // Retried: this time part of it had traded as the cancel went out - that part was exited.
+        orders.ExitResult = _ => new ManualOrderResult(true, "ENTRY_LEG cancelled · BUY x25 at LIMIT 102 to close this trade", new[] { "x1" }, null);
+        Assert.Equal(1, await live.ReconcileAsync(At10.AddSeconds(90), default));
+        t = TradeOf(live, "NIFTY", "a");
+        Assert.False(t.NotFilled); // a trade after all - its P&L is the scanner's to report
+        Assert.Contains("traded as it was cancelled", t.Note);
+        Assert.Equal(1, live.Status(At10).Single(x => x.Underlying == "NIFTY").TradesToday);
+    }
+
+    [Fact]
+    public async Task ATunedStrategysOrder_AsTheRunnerSendsIt_GoesOutWithItsOwnLegsLotsAndTimeStop_UnderTheDefaultTradeSettings()
+    {
+        // The app's own default Trade settings - no test pins: NIFTY 4 lots, slippage 2, Max SL 50, no max target.
+        var defaults = new TradeSettingsStore(new FakeHostEnvironment { ContentRootPath = _dir },
+            new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["Storage:TradeSettingsPath"] = Path.Combine(_dir, "defaults.csv") }).Build(),
+            NullLogger<TradeSettingsStore>.Instance);
+        var orders = new FakeOrders();
+        var live = Live(orders, defaults);
+        live.Set("NIFTY", true, null, null, "admin", At10);
+        // The JSON scanner-runner/indexScanner.mjs placeLive posts for a strategy applied with its tuned setting: its own
+        // option SL / target (20% / 30% of a 62 premium), its own 2 lots, no option trail, its index levels and time stop.
+        var exitAt = At10.AddMinutes(45).ToUnixTimeMilliseconds();
+        var body = $$"""
+            {"key":"vwapPullback-1760245200000-LONG","strategyId":"vwapPullback","strategy":"#7 VWAP pullback","expiry":"2026-10-13","strike":25000,
+             "side":"PE","action":"SELL","stopLossPoints":12.4,"targetPoints":18.6,"lots":2,"trailStartPoints":0,"trailGapPoints":0,
+             "indexStop":24980,"indexSide":"LONG","indexTarget":25060,"priceBasis":"futures","exitAtMs":{{exitAt}},"exitReason":"time stop of #7 VWAP pullback"}
+            """;
+        var request = JsonSerializer.Deserialize<ServerLiveOrderRequest>(body, new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+        var r = await live.PlaceAsync("NIFTY", request, At10, default);
+        Assert.True(r.Placed, r.Message);
+        var o = Assert.Single(orders.Placed);
+        Assert.Equal((2, 2m, 12.4m, 18.6m, 0m, 0m, exitAt, "SELL", "PE", 25000m),
+            (o.Lots, o.SlippagePoints, o.StopLossPoints, o.TargetPoints, o.TrailStartPoints, o.TrailGapPoints, o.ExitAtMs, o.Direction, o.Side, o.Strike));
+        var t = TradeOf(live, "NIFTY", request.Key);
+        Assert.Equal((24980m, "LONG", 25060m, "futures", "vwapPullback"), (t.IndexStop!.Value, t.IndexSide, t.IndexTarget!.Value, t.Basis, request.StrategyIdOrFromKey));
+        // Closed by its own target leg on Dhan; then one with no lots of its own and an SL wider than the max: the index's 4
+        // lots, the SL held to the max 50, its own target (no max target).
+        orders.Book["o1"] = new LiveOrderState("o1", false, 130, "target", true, 62, 43.4m, 130, null);
+        Assert.Equal(1, await live.ReconcileAsync(At10.AddMinutes(9), default));
+        Assert.Equal(2418m, TradeOf(live, "NIFTY", request.Key).Pnl); // (62 - 43.4) x 130
+        await live.PlaceAsync("NIFTY", request with { Key = "vwapPullback-2-LONG", Lots = null, StopLossPoints = 70, TargetPoints = 140 }, At10.AddMinutes(10), default);
+        Assert.Equal((4, 50m, 140m), (orders.Placed[1].Lots, orders.Placed[1].StopLossPoints, orders.Placed[1].TargetPoints));
     }
 }

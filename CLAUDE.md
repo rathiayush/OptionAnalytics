@@ -43,7 +43,12 @@ proven after costs on the tuning and live records, or added by hand -, the accou
 Trade settings. Its "Runner" role still cannot reach the manual live-trading API; `ServerLiveServiceTests.cs` guards
 the limits. Every live order is a Dhan super order WITH its SL and target legs (refused at 0), the server moves its
 trailing SL and closes it at its time stop, and the server ALSO watches each live trade's INDEX stop-loss on the futures
-price (`ServerLiveStopWatcher`, trailed only tighter) - the stop holds even when the scanner is down.
+price (`ServerLiveStopWatcher`, trailed only tighter) - the stop holds even when the scanner is down. Every 2 s it also
+reads what Dhan did by itself (`ReconcileAsync`, from the order book in memory - `LiveTradingService.StateOf`): a trade whose
+SL / target leg filled is closed at once with its P&L from the fills (kept over the scanner's later report), an entry
+rejected / cancelled before it traded is no trade (not counted, P&L 0), and a server scanner entry with nothing traded
+`EntryFillSeconds` (60) after it was placed is cancelled through the trade's own exit; an order the book does not list,
+or a filled one whose legs are not listed, is never guessed closed.
 
 When adding or changing a strategy:
 

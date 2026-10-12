@@ -474,6 +474,43 @@ public sealed class LiveTradingService : BackgroundService
         return new LiveTradeEvent($"{u.OrderNo}-{leg}-{(full ? "T" : "P")}", at, kind, symbol, full ? title : $"{title} (partly)", text);
     }
 
+    /// <summary>Where each of these super orders stands, from the order book in memory (the order-update socket keeps it
+    /// current, a REST read fills any gap) - no Dhan call. An order the book does not list is left out.</summary>
+    public IReadOnlyList<LiveOrderState> OrderStates(IReadOnlyCollection<string> orderIds)
+    {
+        lock (_lock) return _currentOrders.Where(o => orderIds.Contains(o.OrderId)).Select(o => StateOf(o, _fills)).ToList();
+    }
+
+    /// <summary>One super order's state: open while its entry is still working or, once filled, while a stop-loss /
+    /// target leg still works (or its legs are not listed yet - never guessed closed); else how it ended - its stop-loss
+    /// or target leg filled (the fill's average price from the socket, else the leg's price), its entry rejected or
+    /// cancelled before anything traded, or its legs gone without filling (closed by another order).</summary>
+    internal static LiveOrderState StateOf(SuperOrderSummary o, IReadOnlyDictionary<(string OrderId, int Leg), (int Qty, decimal? Avg)> fills)
+    {
+        var status = (o.OrderStatus ?? "").Trim().ToUpperInvariant();
+        var sell = string.Equals(o.TransactionType, "SELL", StringComparison.OrdinalIgnoreCase);
+        var entryFill = fills.TryGetValue((o.OrderId, 1), out var e) ? e : (Qty: 0, Avg: (decimal?)null);
+        var filled = Math.Max(o.FilledQty ?? (status == "TRADED" ? o.Quantity : 0), entryFill.Qty);
+        // Part-traded with the quantity not known yet: traded all the same - never taken for an entry that never filled.
+        if (filled <= 0 && status == "PART_TRADED") filled = 1;
+        if (filled <= 0)
+            return IsOpenStatus(status)
+                ? new LiveOrderState(o.OrderId, true, 0, null, sell, null, null, 0, null)
+                : new LiveOrderState(o.OrderId, false, 0, status == "REJECTED" ? "rejected" : "cancelled", sell, null, null, 0,
+                    string.IsNullOrWhiteSpace(o.OmsErrorDescription) ? null : o.OmsErrorDescription);
+        // The entry's average fill, else its limit (the most it could have cost).
+        var entry = entryFill.Avg is > 0 ? entryFill.Avg : o.Price > 0 ? o.Price : (decimal?)null;
+        var exits = o.LegDetails.Where(l => l.LegName is "STOP_LOSS_LEG" or "TARGET_LEG").ToList();
+        if (exits.FirstOrDefault(l => string.Equals(l.OrderStatus, "TRADED", StringComparison.OrdinalIgnoreCase)) is { } hit)
+        {
+            var leg = hit.LegName == "STOP_LOSS_LEG" ? 2 : 3;
+            var exit = fills.TryGetValue((o.OrderId, leg), out var x) && x.Avg is > 0 ? x.Avg : hit.Price;
+            return new LiveOrderState(o.OrderId, false, filled, leg == 2 ? "stop-loss" : "target", sell, entry, exit, hit.TriggeredQuantity is > 0 and var q ? q : filled, null);
+        }
+        var open = IsOpenStatus(status) || exits.Count == 0 || exits.Any(l => IsOpenStatus(l.OrderStatus));
+        return new LiveOrderState(o.OrderId, open, filled, open ? null : "closed", sell, entry, null, 0, null);
+    }
+
     private static SuperOrderSummary ApplyToSuperOrder(SuperOrderSummary order, DhanOrderUpdate u)
     {
         if (u.LegNo is 2 or 3)
@@ -1846,6 +1883,18 @@ public sealed record LivePositionsSnapshot(
     public DateTimeOffset? LastOrderEventUtc { get; init; }
     /// <summary>Today's trade events (see LiveTradingService.TradeEventOf), oldest first.</summary>
     public IReadOnlyList<LiveTradeEvent> Events { get; init; } = Array.Empty<LiveTradeEvent>();
+}
+
+/// <summary>One super order of a live trade (LiveTradingService.OrderStates): Open, or how it ended (EndedBy "stop-loss" /
+/// "target" - that leg filled at ExitPrice for ExitQty; "rejected" / "cancelled" - the entry never traded, Reason Dhan's
+/// own; "closed" - filled, its legs gone without filling). Filled: the entry's traded quantity; EntryPrice its average
+/// fill (else its limit).</summary>
+public sealed record LiveOrderState(string OrderId, bool Open, int Filled, string? EndedBy, bool EntrySell, decimal? EntryPrice,
+    decimal? ExitPrice, int ExitQty, string? Reason)
+{
+    /// <summary>Rupees made by the leg that closed it (a buy: exit - entry; a sell: entry - exit), when both prices are known.</summary>
+    public decimal? Pnl => EndedBy is "stop-loss" or "target" && EntryPrice is { } entry && ExitPrice is { } exit && ExitQty > 0
+        ? Math.Round((EntrySell ? entry - exit : exit - entry) * ExitQty, 2) : null;
 }
 
 /// <summary>Something that happened to an order this app placed: Kind entry / stopLoss / target / exit /

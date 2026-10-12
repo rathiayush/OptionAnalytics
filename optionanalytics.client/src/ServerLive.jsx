@@ -88,7 +88,10 @@ export function ServerLiveTrades({ st }) {
           {!t.exitedUtc && t.indexStop > 0 && (
             <Text type="secondary" style={{ fontSize: 11 }}>{t.priceBasis === 'spot' ? 'spot' : 'futures'} SL {t.indexStop}{t.indexTarget > 0 ? ` / target ${t.indexTarget}` : ''}</Text>
           )}
-          {t.exitedUtc ? <span>{t.exitReason ?? 'closed'} · <b style={{ color: (t.pnl ?? 0) >= 0 ? UP_COLOR : DOWN_COLOR }}>{rupees(t.pnl)}</b></span> : <Tag color="processing" style={{ margin: 0 }}>open</Tag>}
+          {/* An entry that never traded (rejected, cancelled, not filled in time) was no trade - not counted, no P&L. */}
+          {t.exitedUtc && t.notFilled ? <span><Tag style={{ margin: 0, fontSize: 10 }}>not filled</Tag> <Text type="secondary" style={{ fontSize: 11 }}>{t.exitReason}</Text></span>
+            : t.exitedUtc ? <span>{t.exitReason ?? 'closed'} · <b style={{ color: (t.pnl ?? 0) >= 0 ? UP_COLOR : DOWN_COLOR }}>{rupees(t.pnl)}</b>{t.pnlFromFills && <Text type="secondary" style={{ fontSize: 10 }}> (Dhan fills)</Text>}</span>
+              : <Tag color="processing" style={{ margin: 0 }}>open</Tag>}
           {t.note && <Text type="warning" style={{ fontSize: 11 }}>{t.note}</Text>}
         </div>
       ))}

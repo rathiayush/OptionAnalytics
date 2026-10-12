@@ -13,7 +13,7 @@ namespace OptionAnalytics.Server.Services;
 ///  - the server scanner's own trades on that index (server-trades.csv: paper and live, with the settings in force,
 ///    net of charges) - the live record. Once it has MinLiveTrades closed trades it decides: losing there takes a
 ///    strategy off however good its history looked.
-/// On the list = at least MinTrades tuning trades, average R after costs above 0 and a win rate of at least MinWinPct
+/// On the list = at least MinTrades tuning trades, average R after costs above 0 and a win rate of at least MinWinPct (43% by default)
 /// (and the live record, once long enough, not losing); or added by hand. Taken off by hand wins over everything.
 /// Score (best first) orders the list: when two strategies fire together, the better one gets the one open slot.
 /// Rules and the by-hand changes are kept in {data}/live-list.json.
@@ -206,9 +206,18 @@ public sealed class LiveListService
     private static double? Num(Dictionary<string, string> row, string key) =>
         row.TryGetValue(key, out var s) && double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var v) ? v : null;
 
+    /// <summary>The rules that were the defaults before the minimum win rate went to 43% - kept in a file only because it
+    /// was saved with them (any change by hand on the list writes the whole state), so read as today's defaults.</summary>
+    internal static readonly LiveListRules OldDefaultRules = new(20, 45, 1, 10);
+
     private State Load()
     {
-        try { return File.Exists(_path) ? JsonSerializer.Deserialize<State>(File.ReadAllText(_path), Json) ?? new State() : new State(); }
+        try
+        {
+            var state = File.Exists(_path) ? JsonSerializer.Deserialize<State>(File.ReadAllText(_path), Json) ?? new State() : new State();
+            if (state.Rules == OldDefaultRules) state.Rules = new LiveListRules();
+            return state;
+        }
         catch (Exception ex) { _logger.LogWarning(ex, "{Path} could not be read - the live list starts from its default rules.", _path); return new State(); }
     }
 
@@ -233,7 +242,7 @@ public sealed class LiveListService
 }
 
 /// <summary>What puts a strategy on an index's live list.</summary>
-public sealed record LiveListRules(int MinTrades = 20, double MinWinPct = 45, double ChargesPoints = 1, int MinLiveTrades = 10);
+public sealed record LiveListRules(int MinTrades = 20, double MinWinPct = 43, double ChargesPoints = 1, int MinLiveTrades = 10);
 
 /// <summary>One strategy on one index: the tuning record (on the option the index trades, after costs), the live
 /// record, whether it is on the list and why.</summary>
