@@ -65,6 +65,27 @@ public sealed class ScannerLogStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task OlderSignals_GetTheirLegsFilledIn_ByKey_AndNothingElseChanges()
+    {
+        var store = Store();
+        await store.UpsertDayAsync(Day("2026-10-05", new[] { Signal(T1040, status: "win", r: 1.5), Signal(T1040 + 60_000, id: "trap", status: "loss", r: -1) }), null, CancellationToken.None);
+        var before = ScannerLogStore.Read(SignalsPath).ToList();
+        var key = before[0]["key"];
+        var (updated, error) = await store.SetLegsAsync("signals", new[]
+        {
+            new ScannerLegsRow(key, "BUY 22700 CE", 110, 131.5, 21.5, "SELL 22700 PE", 95, 80.25, 14.75),
+            new ScannerLegsRow("NIFTY|nope", "BUY 1 CE", 1, 2, 1, null, null, null, null),
+        }, CancellationToken.None);
+        Assert.Null(error);
+        Assert.Equal(1, updated);
+        var after = ScannerLogStore.Read(SignalsPath).ToList();
+        Assert.Equal(("21.5", "14.75", "SELL 22700 PE"), (after[0]["buy_points"], after[0]["sell_points"], after[0]["sell_option"]));
+        Assert.Equal("", after[1]["buy_points"]);
+        foreach (var col in new[] { "entry", "status", "r", "exit_price", "strategy_id" }) Assert.Equal(before[0][col], after[0][col]);
+        Assert.NotNull((await store.SetLegsAsync("trades", Array.Empty<ScannerLegsRow>(), CancellationToken.None)).Error);
+    }
+
+    [Fact]
     public async Task TwoFiles_SignalsAndTrades_HoldEveryDay_NoFilePerDay()
     {
         var store = Store();

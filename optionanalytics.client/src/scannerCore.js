@@ -4,7 +4,7 @@
 
 import {
   ACTIVE_STRATEGIES, STRATEGY_BY_ID, evaluateStrategies, simulateOutcome, DEFAULT_TRAIL, RANGE_IDS,
-  exitLabel, premiumAt, optionStopTargetHit, squareOffMs, marketAt, lotsFor, pinnedTrailOf, optionExitText, capPoints, optionTradeAt,
+  exitLabel, premiumAt, optionStopTargetHit, squareOffMs, marketAt, lotsFor, pinnedTrailOf, optionExitText, capPoints, optionTradesFor, valueAt,
 } from './strategyEngine.js'
 // The market at a signal now lives with the strategies (the order-flow trade filters read it) - re-exported here.
 export { marketAt, MARKET_KEYS } from './strategyEngine.js'
@@ -407,6 +407,8 @@ export function setupWasTraded(positions, s) {
  * SELL the signal carries, each from the signal's minute (its premium then) held until the signal's index trade exited
  * (its stop / target / trailing stop / time stop - the premium once that bar is over), in premium points; and the signal's
  * own points on the index. Only for a signal that has closed, and only with the day's OI (`oi`) - nothing past the exit.
+ * A signal without its options (one read back from the log - fillRecordLegs) takes the ATM pair at its minute's spot,
+ * the way every strategy picks them (optionTradesFor).
  */
 export function signalLegs(x, oi) {
   const o = x.outcome ?? {}
@@ -416,8 +418,9 @@ export function signalLegs(x, oi) {
   const out = { indexPoints: Number.isFinite(o.exitPrice) ? dir * (o.exitPrice - x.entry) : null }
   if (!oi) return out
   const exitAt = o.exitAt != null ? o.exitAt + MIN : squareOffMs(x.t)
+  const options = x.options ?? optionTradesFor(oi, dir, valueAt(oi.spot, x.t)?.close, x.t)
   for (const which of ['buy', 'sell']) {
-    const trade = optionTradeAt(oi, x, which, 0, x.t)
+    const trade = options?.[which]
     if (!trade?.strike) continue
     const entry = premiumAt(oi, trade.side, trade.strike, x.t) ?? trade.premium ?? null
     const exit = premiumAt(oi, trade.side, trade.strike, exitAt)

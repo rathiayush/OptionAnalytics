@@ -10,6 +10,7 @@ import { applyFilterValue, applyTunedFilters, putOnLiveList, saveIndexFilters } 
 import { AppliedSettings, ApplyTunedButton, LiveSetup, ParamsPopover } from './ApplyTuned.jsx'
 import { confirmServerLive, useServerLive } from './ServerLive.jsx'
 import ClearData from './ClearData.jsx'
+import { fillRecordLegs, needsLegs, recordRunUrl } from './recordLegs.js'
 import './tuningMobile.css'
 
 const { Title, Text } = Typography
@@ -922,16 +923,17 @@ function ScannerRecord({ initial = {} }) {
   }
   const file = `${source === 'server' ? 'server-' : ''}${kind}`
   const reset = (fn) => (v) => { setRows(null); setError(null); setIds([]); fn(v) }
+  const [reloadTick, setReloadTick] = useState(0)
   useEffect(() => {
     fetch(`/api/scanner-log/rows/${file}`).then(async (r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))).then(setRows).catch((e) => setError(e.message))
-  }, [file])
+  }, [file, reloadTick])
   // The option trades also read their signals: each trade's index points, and what the option bought / sold would have
   // made held to the signal's exit (a trade from before those were kept with it takes them from its signal).
   const [sigRows, setSigRows] = useState(null)
   useEffect(() => {
     if (kind !== 'trades') return
     fetch(`/api/scanner-log/rows/${source === 'server' ? 'server-' : ''}signals`).then((r) => (r.ok ? r.json() : [])).then(setSigRows).catch(() => setSigRows([]))
-  }, [kind, source])
+  }, [kind, source, reloadTick])
   const signalOf = useMemo(() => {
     const m = new Map()
     for (const x of sigRows ?? []) m.set(`${x.underlying}|${x.strategy_id}|${x.side}|${x.time_ist}`, x)
@@ -1003,6 +1005,33 @@ function ScannerRecord({ initial = {} }) {
   // To compare: the index points, and what buying / selling the ATM option every time would have made (held to the exit).
   const sum = (f) => { const v = shown.map(f).filter(Number.isFinite); return { n: v.length, total: v.reduce((a, b) => a + b, 0) } }
   const compare = { index: sum(indexPts), bought: sum(boughtPts), sold: sum(soldPts) }
+  // Signals kept before "If bought / If sold" were recorded with them (closed, none yet): rebuilt from that day's OI and
+  // saved into the log (recordLegs.js) - each index and day once. Admins.
+  const isAdmin = useAuth()?.user?.role === 'Admin'
+  const toFill = (() => {
+    const seen = new Set()
+    return (signals ? shown : shown.map(signalOf).filter(Boolean)).filter((r) => needsLegs(r) && !seen.has(r.key) && seen.add(r.key))
+  })()
+  const [filling, setFilling] = useState(null)
+  const fillLegs = async () => {
+    setFilling({ done: 0, total: 1 })
+    try {
+      const { legs, failed } = await fillRecordLegs(toFill, { fetchRun: (u, d) => fetch(recordRunUrl(u, d)).then((r) => r.json()), onProgress: setFilling })
+      if (legs.length) {
+        const res = await fetch(`/api/scanner-log/legs/${source === 'server' ? 'server-' : ''}signals`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(legs) })
+        const body = await res.json().catch(() => null)
+        if (!res.ok) throw new Error(body?.error ?? `HTTP ${res.status}`)
+      }
+      const days = failed.map((f) => `${f.underlying} ${f.date} (${f.reason})`).slice(0, 4).join(', ')
+      if (failed.length) message.warning(`${legs.length} filled in · ${failed.length} day(s) could not be: ${days}${failed.length > 4 ? '…' : ''}`, 8)
+      else message.success(`${legs.length} filled in`)
+      setReloadTick((x) => x + 1)
+    } catch (err) {
+      message.error(`Not filled in: ${err.message}`)
+    } finally {
+      setFilling(null)
+    }
+  }
   return (
     <Space direction="vertical" size={10} style={{ width: '100%' }}>
       <Row gutter={[12, 8]} align="middle">
@@ -1033,6 +1062,13 @@ function ScannerRecord({ initial = {} }) {
             {!signals && <span>index <b style={{ color: col(compare.index.total) }}>{pts(compare.index.total)}</b> pts{compare.index.n < shown.length ? ` (${compare.index.n})` : ''}</span>}
             <span>if bought every time <b style={{ color: col(compare.bought.total) }}>{pts(compare.bought.total)}</b> pts{compare.bought.n < shown.length ? ` (${compare.bought.n} kept)` : ''}</span>
             <span>if sold every time <b style={{ color: col(compare.sold.total) }}>{pts(compare.sold.total)}</b> pts{compare.sold.n < shown.length ? ` (${compare.sold.n} kept)` : ''}</span>
+            {isAdmin && toFill.length > 0 && (
+              <Tooltip title="Older signals were kept without what the option bought / sold would have made: worked out now from that day's option data (the ATM option at the signal's minute, held until its index trade exited) and saved, so it is done once.">
+                <Button size="small" loading={!!filling} onClick={fillLegs}>
+                  {filling ? `Filling in… ${filling.done} / ${filling.total} day(s)${filling.underlying ? ` · ${filling.underlying} ${filling.date}` : ''}` : `Fill in the older ones (${toFill.length})`}
+                </Button>
+              </Tooltip>
+            )}
           </Space>
           <Table size="small" rowKey="key" dataSource={shown} columns={columns} pagination={{ pageSize: 50, size: 'small', showSizeChanger: true, pageSizeOptions: [50, 100, 500] }} scroll={{ x: 1400 }} />
           <Text type="secondary" style={{ fontSize: 12 }}>The whole file: <a href={`/api/scanner-log/${file}`} download>{file}.csv</a>{signals ? ' - every signal with the market at its time (tape, big orders, futures OI, option writers, the order book: the mkt_ columns)' : ''}.</Text>
