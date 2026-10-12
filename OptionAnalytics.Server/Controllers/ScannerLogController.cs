@@ -27,6 +27,17 @@ public sealed class ScannerLogController : ControllerBase
         return error is null ? Ok(new { signals, trades }) : BadRequest(new { error });
     }
 
+    /// <summary>POST /api/scanner-log/legs/{kind} - fills in what the option bought / sold would have made on signals
+    /// kept before those were recorded (the Trades page rebuilds them from that day's OI). Admin.</summary>
+    [HttpPost("legs/{kind}")]
+    [Authorize(Roles = OptionAnalytics.Server.Auth.AuthRoles.Admin)]
+    [RequestSizeLimit(2_000_000)]
+    public async Task<IActionResult> SetLegs(string kind, [FromBody] List<ScannerLegsRow>? rows, CancellationToken cancellationToken)
+    {
+        var (updated, error) = await _store.SetLegsAsync(kind, rows ?? new List<ScannerLegsRow>(), cancellationToken);
+        return error is null ? Ok(new { updated }) : BadRequest(new { error });
+    }
+
     /// <summary>GET /api/scanner-log/summary - the totals per underlying (NIFTY, BANKNIFTY ...): how many
     /// signals and trades, the futures points and option premium points captured, the P&amp;L net of
     /// charges - for each stored day and in total - as JSON (totals / days).</summary>

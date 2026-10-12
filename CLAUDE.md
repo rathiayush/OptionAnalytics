@@ -29,7 +29,10 @@ All must pass before committing. The SAME scanner also runs on the server for NI
 there changes both - `tests/scanner-core.test.mjs` and `tests/scanner-runner.test.mjs` cover them. The runner ALSO runs
 the spot + options strategies (`spotEngine.js`, server only): once each finished minute on the server's own spot candles
 (`/api/spot/{index}/candles?from=`), traded where applied or on the live list, their live orders watched on the SPOT price
-(`priceBasis: 'spot'`) - `tests/scanner-runner-spot.test.mjs` keeps live == the tuning's day scan. On the page they live on
+(`priceBasis: 'spot'`) - `tests/scanner-runner-spot.test.mjs` keeps live == the tuning's day scan. Spot #111 - #113 read the
+day's OWN spot profile, built inside the engine from the same spot bars (`spotProfile`: time at price - spot has no volume -
+over the minutes finished `PROFILE_LAG` (15)+ minutes before the clock; its nodes, POC and the thin areas between two nodes),
+never the server's previous-day profile or the futures' - so every caller gets the same one with nothing to pass. On the page they live on
 the OI Replay page (`SpotStrategyScanner.jsx`, its data), judged by the same `spotScanTick` / `spotScanMinutes`
 (`scannerCore.js`) and traded in options like the Order Flow scanner: paper on each alert, Live (Dhan) + confirmed
 "Auto-place on alert" for real super orders, exits on the signal's spot SL / target / trail / time stop. The runner is

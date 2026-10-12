@@ -19,7 +19,7 @@ import {
   SPOT_STRATEGIES, STRATEGY_BY_ID, DEFAULT_TRAIL, LAST_ENTRY, SQUARE_OFF, fmtHm, exitLabel, premiumAt, optionTradeText, squareOffMs,
   asReplayContext, optionTradeAt, optionPlanFor, optionExitText, capPoints, filtersForIndex, lotsFor, trailPoints,
 } from './strategyEngine.js'
-import { spotBarsOf } from './spotEngine.js'
+import { spotBarsOf, spotProfile, PROFILE_LAG, PROFILE_MIN_BARS } from './spotEngine.js'
 import { SCANNER_SETTINGS_KEY, BY_INDEX_KEY, readFiltersByIndex } from './scannerSettings.js'
 import {
   MIN, sameSignal, trailFor, followSetups, setupEvents, newPosition, positionRows, withCapChange, liveLegsFor, PAPER_TRADE_LOT_SIZE,
@@ -488,6 +488,8 @@ export function SpotStrategyScanner({ underlying, date, isReplay, bars, clockMs,
     return [...serverBars, ...(bars ?? []).filter((b) => b.t > last)]
   }, [bars, serverBars])
   const withOutcome = useMemo(() => followSetups(fired, trailLog, outcomeBars, clockMs ?? 0), [fired, trailLog, outcomeBars, clockMs])
+  // The day's own spot profile #111 - #113 read now (spotProfile: time at price over the minutes finished 15+ minutes ago).
+  const profile = useMemo(() => spotProfile(outcomeBars.filter((b) => b.t + MIN <= clockMinute), oi?.step), [outcomeBars, clockMinute, oi?.step])
   const signalsSig = withOutcome.map((s) => `${s.id}${s.t}${s.outcome.status}`).join()
   useEffect(() => { onSignals?.(withOutcome) }, [signalsSig]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -730,6 +732,14 @@ export function SpotStrategyScanner({ underlying, date, isReplay, bars, clockMs,
               )
             })}
         </div>
+        <Text type="secondary" style={{ fontSize: 12 }} aria-label="Own spot profile">
+          <Tooltip title={`Built by the strategies themselves from today's spot candles (no server or futures profile): spot has no volume, so each minute counts once over its high - low (time at price). The minutes that finished ${PROFILE_LAG}+ minutes ago are in it; #111 - #113 trade its thin areas (LVNs between two nodes) and its POC.`}>
+            <b>Own spot profile</b>
+          </Tooltip>{' '}
+          {profile
+            ? <>(to {IST_HHMM.format(new Date(profile.upTo))}, {profile.minutes} min): POC <b>{profile.poc}</b> · nodes {profile.nodes.join(' / ')} · LVN {profile.lvns.length ? profile.lvns.map((z) => `${z.low}-${z.high}`).join(', ') : 'none yet'}</>
+            : `not yet - it needs ${PROFILE_LAG + PROFILE_MIN_BARS} finished minutes`}
+        </Text>
         {withOutcome.length > 0 && <Text type="secondary" style={{ fontSize: 12 }}>{withOutcome.length} signal(s){closed.length ? ` · ${closed.length} closed ${fmtR(totalR)} on the spot` : ''}</Text>}
 
         <div aria-label="Spot option trades">

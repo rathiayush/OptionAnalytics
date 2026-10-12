@@ -309,6 +309,35 @@ public sealed class ScannerLogStore
 
     public List<Dictionary<string, string>>? ReadRows(string kind) => PathOf(kind) is { } path ? Read(path).ToList() : null;
 
+    /// <summary>Fills in what the option bought / sold would have made on signals already in a file ('signals' or
+    /// 'server-signals') - rebuilt by the Trades page from that day's OI for the ones kept before the columns existed. Only
+    /// the buy_* / sell_* columns of the rows named by key change. Returns how many rows were updated.</summary>
+    public async Task<(int Updated, string? Error)> SetLegsAsync(string kind, IReadOnlyList<ScannerLegsRow> rows, CancellationToken cancellationToken)
+    {
+        if (kind is not ("signals" or "server-signals")) return (0, "kind must be signals or server-signals.");
+        if (rows.Count > MaxSignals) return (0, "Too many rows.");
+        var byKey = rows.Where((r) => !string.IsNullOrWhiteSpace(r.Key)).GroupBy((r) => r.Key!).ToDictionary((g) => g.Key, (g) => g.Last(), StringComparer.Ordinal);
+        if (byKey.Count == 0) return (0, null);
+        var path = PathOf(kind)!;
+        await _lock.WaitAsync(cancellationToken);
+        try
+        {
+            if (!File.Exists(path)) return (0, null);
+            var all = Read(path).ToList();
+            var updated = 0;
+            foreach (var row in all)
+            {
+                if (!row.TryGetValue("key", out var key) || !byKey.TryGetValue(key, out var legs)) continue;
+                row["buy_option"] = Text(legs.BuyOption); row["buy_entry"] = Num(legs.BuyEntry); row["buy_exit"] = Num(legs.BuyExit); row["buy_points"] = Num(legs.BuyPoints);
+                row["sell_option"] = Text(legs.SellOption); row["sell_entry"] = Num(legs.SellEntry); row["sell_exit"] = Num(legs.SellExit); row["sell_points"] = Num(legs.SellPoints);
+                updated++;
+            }
+            if (updated > 0) Upsert(path, SignalColumns, all, "time_ist");
+            return (updated, null);
+        }
+        finally { _lock.Release(); }
+    }
+
     private void Upsert(string path, string[] columns, List<Dictionary<string, string>> rows, string timeColumn)
     {
         var byKey = new Dictionary<string, Dictionary<string, string>>(StringComparer.Ordinal);
@@ -424,3 +453,7 @@ public sealed record ScannerTradeRow(
     long? SignalTime, int? StrategyNo, string? StrategyId, string? SignalSide, string? DayType, bool? AdaptiveTake, string? AdaptiveReason,
     double? Stt = null, double? Brokerage = null, double? OtherCharges = null, double? NetRupees = null, double? NetPerLot = null,
     double? IndexPoints = null, double? BuyPoints = null, double? SellPoints = null);
+
+/// <summary>What the option bought / sold would have made for one signal (by its key) - see ScannerLogStore.SetLegsAsync.</summary>
+public sealed record ScannerLegsRow(string? Key, string? BuyOption, double? BuyEntry, double? BuyExit, double? BuyPoints,
+    string? SellOption, double? SellEntry, double? SellExit, double? SellPoints);

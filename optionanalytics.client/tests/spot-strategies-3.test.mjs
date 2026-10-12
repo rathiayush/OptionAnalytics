@@ -7,6 +7,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { SPOT_STRATEGIES, buildOiContext } from '../src/strategyEngine.js'
 import { evaluateSpotStrategies, scanSpotDay, spotBarsOf } from '../src/spotEngine.js'
+import { lvnRefusedLong, lvnRefusedShort, lvnFillLong, lvnFillShort, pocRejectShort, pocRejectLong } from './spot-profile-world.mjs'
 
 const MIN = 60_000
 const T = Date.parse('2026-10-09T03:45:00Z') // 09:15 IST
@@ -42,10 +43,10 @@ const fires = (w, id, side, minute = 90) => at(w, minute).some((s) => s.id === i
 const c = (open, close, pad = 3) => ({ open, close, high: Math.max(open, close) + pad, low: Math.min(open, close) - pad })
 const around = (level, last) => (m) => (m < 89 ? c(level + ((m % 4) - 1.5), level + (((m + 1) % 4) - 1.5)) : last)
 
-test('ten spot strategies, numbered 101-110, ids unique', () => {
-  assert.equal(SPOT_STRATEGIES.length, 10)
-  assert.deepEqual(SPOT_STRATEGIES.map((s) => s.no), [101, 102, 103, 104, 105, 106, 107, 108, 109, 110])
-  assert.equal(new Set(SPOT_STRATEGIES.map((s) => s.id)).size, 10)
+test('thirteen spot strategies, numbered 101-113, ids unique', () => {
+  assert.equal(SPOT_STRATEGIES.length, 13)
+  assert.deepEqual(SPOT_STRATEGIES.map((s) => s.no), [101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113])
+  assert.equal(new Set(SPOT_STRATEGIES.map((s) => s.id)).size, 13)
 })
 
 // ---- #108 ATM straddle decay: fade the wall back to the middle ----
@@ -216,6 +217,10 @@ const NEW = [
   ['spotStraddleFade', 'SHORT', straddleShort], ['spotStraddleFade', 'LONG', straddleLong],
   ['spotWallShift', 'LONG', shiftLong], ['spotWallShift', 'SHORT', shiftShort],
   ['spotPremDiverge', 'SHORT', divShort], ['spotPremDiverge', 'LONG', divLong],
+  // #111 - #113 on the day's own spot profile (their own rules: spot-strategies-4).
+  ['spotLvnReject', 'LONG', lvnRefusedLong], ['spotLvnReject', 'SHORT', lvnRefusedShort],
+  ['spotLvnFill', 'LONG', lvnFillLong], ['spotLvnFill', 'SHORT', lvnFillShort],
+  ['spotPocReject', 'SHORT', pocRejectShort], ['spotPocReject', 'LONG', pocRejectLong],
 ]
 
 test('every spot strategy fires LONG and SHORT at NIFTY, BANKNIFTY and SENSEX scale', () => {

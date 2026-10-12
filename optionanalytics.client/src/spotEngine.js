@@ -12,6 +12,7 @@
 // is Live today and the strategy is on its live list; the server watches its index stop on the spot price). The Order
 // Flow page's scanner does not run them.
 
+import { pocIndexOf, valueAreaOf } from './orderFlowMath.js'
 import {
   SPOT_STRATEGIES, SQUARE_OFF, applyTradeFilter, dayTypeAt, oiChange, oiOf, optionOiRead, optionTradesFor, oiRows, premiumAt, sideOiChanges, strategyFilters,
   valueAt, wallOiChanges, wallsAhead, wallsAt,
@@ -49,9 +50,86 @@ const avgRange = (bars, n = 14) => {
   return last.length ? last.reduce((s, b) => s + (b.high - b.low), 0) / last.length : 0
 }
 
+// Our OWN spot profile (#111 - #113 read it): built here from the day's spot candles - no server profile, no futures. Spot
+// has no traded volume, so each finished minute counts once - time at price, a TPO profile - spread evenly over the rows
+// (a tenth of the strike step) its high - low covers. Only minutes that finished PROFILE_LAG or more before the clock are
+// in it (the area price is in now is not a node or a thin area yet), and it needs PROFILE_MIN_BARS of them.
+export const PROFILE_LAG = 15
+export const PROFILE_MIN_BARS = 45
+const NODE_SHARE = 0.3 // a volume node: a peak of the smoothed profile with 30% of the POC's time or more
+const NODE_MERGE = 0.5 // two peaks with no dip under half the smaller between them are one node
+const LVN_DEPTH = 0.2 // a thin area: a dip to 20% of the smaller node beside it or less ...
+const LVN_EDGE = 0.25 // ... widened over the rows under a quarter of it
+
+/**
+ * The day's own spot profile from `bars` (spotBarsOf - the FINISHED minutes up to the clock; the last PROFILE_LAG are
+ * left out) and the strike `step`: { row, minutes, upTo, poc, vah, val, nodes (the high-time peaks, low to high - the POC
+ * among them), lvns: [{ low, high, mid, lvn }] (the thin areas BETWEEN two nodes, low to high) }, else null.
+ */
+export function spotProfile(bars, step) {
+  const used = (bars ?? []).slice(0, Math.max(0, (bars?.length ?? 0) - PROFILE_LAG))
+  if (used.length < PROFILE_MIN_BARS || !(step > 0)) return null
+  const row = step / 10
+  const at = (p) => Math.round(p / row)
+  let lo = Infinity
+  let hi = -Infinity
+  for (const b of used) { lo = Math.min(lo, at(b.low)); hi = Math.max(hi, at(b.high)) }
+  if (!(hi >= lo) || hi - lo > 4000) return null
+  const counts = new Array(hi - lo + 1).fill(0)
+  for (const b of used) {
+    const a = at(b.low) - lo
+    const z = at(b.high) - lo
+    for (let i = a; i <= z; i++) counts[i] += 1 / (z - a + 1)
+  }
+  const price = (i) => +((lo + i) * row).toFixed(2)
+  // Smoothed over two rows each side (1-2-3-2-1), so a node is an area, not one row.
+  const s = counts.map((_, i) => [1, 2, 3, 2, 1].reduce((sum, w, k) => sum + w * (counts[i + k - 2] ?? 0), 0) / 9)
+  const pocI = pocIndexOf(s)
+  const { lo: vaLo, hi: vaHi } = valueAreaOf(counts, pocI)
+  // The nodes: the peaks (the middle of a flat top) with 30%+ of the POC's time; two with no real dip between them are one
+  // (the higher kept).
+  let peaks = []
+  for (let i = 0; i < s.length;) {
+    let j = i
+    while (j + 1 < s.length && Math.abs(s[j + 1] - s[i]) < 1e-9) j++
+    if ((i === 0 || s[i - 1] < s[i]) && (j === s.length - 1 || s[j + 1] < s[i]) && s[i] >= NODE_SHARE * s[pocI]) peaks.push(Math.floor((i + j) / 2))
+    i = j + 1
+  }
+  if (!peaks.includes(pocI)) peaks = [...peaks, pocI].sort((a, b) => a - b)
+  const dipBetween = (a, b) => { let m = a + 1; for (let i = a + 1; i < b; i++) if (s[i] < s[m]) m = i; return m }
+  for (let merged = true; merged && peaks.length > 1;) {
+    merged = false
+    for (let j = 1; j < peaks.length; j++) {
+      const [a, b] = [peaks[j - 1], peaks[j]]
+      if (b - a < 2 || s[dipBetween(a, b)] > NODE_MERGE * Math.min(s[a], s[b])) {
+        const drop = a === pocI ? b : b === pocI ? a : s[a] >= s[b] ? b : a
+        peaks = peaks.filter((x) => x !== drop)
+        merged = true
+        break
+      }
+    }
+  }
+  const lvns = []
+  for (let j = 1; j < peaks.length; j++) {
+    const [a, b] = [peaks[j - 1], peaks[j]]
+    const ref = Math.min(s[a], s[b])
+    const m = dipBetween(a, b)
+    if (s[m] > LVN_DEPTH * ref) continue
+    let l = m
+    let r = m
+    while (l - 1 > a && s[l - 1] <= LVN_EDGE * ref) l--
+    while (r + 1 < b && s[r + 1] <= LVN_EDGE * ref) r++
+    const low = +(price(l) - row / 2).toFixed(2)
+    const high = +(price(r) + row / 2).toFixed(2)
+    lvns.push({ low, high, mid: +((low + high) / 2).toFixed(2), lvn: price(m) })
+  }
+  return { row, minutes: used.length, upTo: used.at(-1).t + MIN, poc: price(pocI), vah: price(vaHi), val: price(vaLo), nodes: peaks.map(price), lvns }
+}
+
 /**
  * Every spot setup whose rules pass at `nowMs` (a whole minute). `bars` - the FINISHED spot minutes up to it (spotBarsOf,
- * start + 1 minute <= nowMs), `oi` - buildOiContext(run, expiry, { live: false }), `filters` - { [id]: overrides }.
+ * start + 1 minute <= nowMs), `oi` - buildOiContext(run, expiry, { live: false }), `filters` - { [id]: overrides }. #111 -
+ * #113 also read the day's own spot profile, built from those bars (spotProfile).
  * Setups have the futures setups' shape (id, name, side, t, entry, stop, target, timeStopMs, options, oiCtx, checks).
  */
 export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {} }) {
@@ -303,6 +381,106 @@ export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {} }) {
         push('spotPremDiverge', dir, stopPts, 2 * stopPts, 45, {
           OI: `new session ${dir > 0 ? 'low' : 'high'} ${newExt.toFixed(1)} past ${priorExt.toFixed(1)}, but the ATM ${atmK} ${side} premium ${premNow.toFixed(1)} is not above its ${premThen.toFixed(1)} then; ${side} OI at ${writersKs.join(' / ')} not falling`,
         })
+      }
+    }
+  }
+
+  // ---- the day's own spot profile (#111 - #113) ----
+  // Built here from the spot minutes that finished 15+ minutes ago (spotProfile - time at price; no server profile, no
+  // futures): its thin areas between two nodes (LVNs: price passed there fast, it was not accepted) and its volume nodes -
+  // the POC and the other high-time peaks - which price runs to across a thin area and where it can be refused.
+  const profile = spotProfile(bars, step)
+  const poc = profile?.poc ?? null
+  const zones = profile?.lvns ?? []
+  const nodes = profile?.nodes ?? []
+  // The nearest node in the trade's direction at least `minAway` beyond `from`.
+  const nodeAhead = (dir, from, minAway = 0) => nodes.filter((x) => dir * (x - from) > minAway).sort((a, b) => dir * (a - b))[0] ?? null
+  const recent3 = bars.slice(-3)
+  const lean = read.lean // > 0: puts written over calls near the money (support) - < 0: calls (resistance)
+  const fmt = (v) => (+v.toFixed(1)).toString()
+  // Where a trade is headed: the node, or 3x the stop when the node is farther (then it is only the direction).
+  const aim = (node, room, stopPts) => (node == null ? 'no node ahead - 2x the stop' : room > 3 * stopPts ? `toward ${fmt(node)} (target 3x the stop)` : `${fmt(node)} (target)`)
+
+  for (const dir of poc != null ? [1, -1] : []) {
+    const score = sideScore(dir, sides.ceD, sides.peD)
+    const notAgainst = score != null && score >= 0 && Number.isFinite(lean) && dir * lean >= 0
+    const rejection = dir > 0 ? last.close > last.open : last.close < last.open
+    const extreme = dir > 0 ? Math.min(...recent3.map((b) => b.low)) : Math.max(...recent3.map((b) => b.high))
+
+    for (const z of zones) {
+      // 11. LVN refused: price came to a thin area from at least 2 ATR away on the trade's side (from above for a long)
+      //     in the last 30 minutes, reached into it in the last 3 minutes, never CLOSED past its middle (not accepted),
+      //     and the last candle turns back out of it - a close beyond its near edge, 0.3 ATR off the touch. The option
+      //     writers lean the trade's way (puts written under a long) and the two sides are not against it. Stop beyond
+      //     the touch; target the volume node it came from (room 1.2R+, at most 3R).
+      const near = dir > 0 ? z.high : z.low
+      const came = bars.slice(-30, -3).some((b) => dir * (b.close - near) >= 2 * atr)
+      const reached = dir * (extreme - near) <= 0
+      const notAccepted = recent3.every((b) => dir * (b.close - z.mid) > 0)
+      const turned = rejection && dir * (spotNow - near) > 0 && dir * (spotNow - extreme) >= 0.3 * atr
+      if (came && reached && notAccepted && turned && notAgainst) {
+        const stopPts = Math.max(1.2 * atr, dir * (spotNow - extreme) + 0.5 * atr)
+        const node = nodeAhead(dir, spotNow, 0.25 * stopPts)
+        const room = node != null ? dir * (node - spotNow) : null
+        if (room == null || room >= 1.2 * stopPts) {
+          push('spotLvnReject', dir, stopPts, Math.min(room ?? 2 * stopPts, 3 * stopPts), 45, {
+            Profile: `refused at the LVN ${fmt(z.lvn)} of today's spot profile (thin ${fmt(z.low)} - ${fmt(z.high)}; touched ${fmt(extreme)}, came from ${dir > 0 ? 'above' : 'below'}); back to the volume node it came from: ${aim(node, room, stopPts)}`,
+            OI: `writers lean ${dir > 0 ? 'PUT' : 'CALL'} ${pct(Math.abs(lean))} near the money; CE ${pct(sides.ceD)} / PE ${pct(sides.peD)} in 15m`,
+          })
+        }
+      }
+
+      // 12. LVN filled fast: price was outside a thin area in the last 5 minutes (below it for a long) and runs into it
+      //     fast - the last candle with the trade, a body of 1 ATR+, 1.5 ATR+ covered in those minutes, closing inside the
+      //     area 0.5 ATR+ past its near edge. Thin areas are crossed quickly: target the next node beyond it (the POC where
+      //     it is the next - it can be refused there, so the trade is banked at it), room 1.2R+, at most 3R. The two sides
+      //     not against it, and no GROWING OI wall in the way before the node. Stop back outside the area's near edge.
+      const edgeIn = dir > 0 ? z.low : z.high
+      const before = bars.slice(-6, -1)
+      const wasOutside = before.some((b) => dir * (b.close - edgeIn) < 0)
+      const startPx = dir > 0 ? Math.min(...before.map((b) => b.low)) : Math.max(...before.map((b) => b.high))
+      const inside = dir * (spotNow - edgeIn) >= 0.5 * atr && dir * (spotNow - (dir > 0 ? z.high : z.low)) <= 0
+      const fast = dir * (spotNow - startPx) >= 1.5 * atr && dir * (last.close - last.open) >= atr && inside
+      if (wasOutside && fast && score != null && score >= 0) {
+        const stopPts = Math.max(1.2 * atr, dir * (spotNow - edgeIn) + 0.5 * atr)
+        const node = nodeAhead(dir, dir > 0 ? z.high : z.low)
+        const room = node != null ? dir * (node - spotNow) : null
+        const wall = dir > 0 ? resistance : support
+        const wallChg = wall == null ? null : wallOiChanges(oi, dir > 0 ? { resistanceAhead: wall, supportAhead: null } : { resistanceAhead: null, supportAhead: wall }, nowMs, 15)[dir > 0 ? 'resChg' : 'supChg']
+        const wallInWay = wall != null && room != null && dir * (wall - spotNow) > 0 && dir * (wall - node) < 0 && wallChg != null && wallChg >= WALL_BAR
+        if (room != null && room >= 1.2 * stopPts && !wallInWay) {
+          push('spotLvnFill', dir, stopPts, Math.min(room, 3 * stopPts), 30, {
+            Profile: `filling the LVN ${fmt(z.lvn)} of today's spot profile (thin ${fmt(z.low)} - ${fmt(z.high)}) fast: ${fmt(dir * (spotNow - startPx))} pts in 5 min, ${fmt(dir * (spotNow - edgeIn))} into it; across to the next node ${aim(node, room, stopPts)}${node === poc ? ' - the POC: it can be refused there' : ''}`,
+            OI: `CE ${pct(sides.ceD)} / PE ${pct(sides.peD)} in 15m${wall != null ? `; the ${dir > 0 ? 'call' : 'put'} wall ${wall} OI ${pct(wallChg)}` : ''}`,
+          })
+        }
+      }
+    }
+
+    // 13. POC rejection after a fast run: price ran at the day's own POC from 2 ATR+ away in the last 15 minutes (up
+    //     into it for a short), reached it in the last 3 minutes without a close past it (not accepted), and the last
+    //     candle turns back, 0.3 ATR off the touch. The writers at the POC strike are holding there (calls at the strike
+    //     over the POC for a short: OI not falling in 15m) and the two sides are not against it. Stop beyond the touch;
+    //     target back toward where it came from - the next volume node, room 1.2R+, at most 3R (2R with none).
+    if (poc != null) {
+      const band = Math.max(0.15 * atr, spotNow * 0.0001)
+      // Came from the trade's side, 2 ATR+ away (from below for a short - it ran UP into the POC), in the last 15 minutes.
+      const ranIn = bars.slice(-15, -3).some((b) => dir * (b.close - poc) >= 2 * atr)
+      const touched = dir > 0 ? extreme <= poc + band : extreme >= poc - band
+      const heldOff = recent3.every((b) => dir * (b.close - poc) >= -band)
+      const writerK = dir > 0 ? Math.floor(poc / step) * step : Math.ceil(poc / step) * step
+      const writersChg = chgPct(dir > 0 ? oi.pe : oi.ce, writerK)
+      const turned = rejection && dir * (spotNow - extreme) >= 0.3 * atr && dir * (spotNow - poc) > -band
+      if (ranIn && touched && heldOff && turned && writersChg != null && writersChg >= 0 && score != null && score >= 0) {
+        const stopPts = Math.max(1.2 * atr, dir * (spotNow - extreme) + 0.5 * atr)
+        const node = nodeAhead(dir, spotNow, 0.25 * stopPts)
+        const room = node != null ? dir * (node - spotNow) : null
+        if (room == null || room >= 1.2 * stopPts) {
+          push('spotPocReject', dir, stopPts, Math.min(room ?? 2 * stopPts, 3 * stopPts), 45, {
+            Profile: `refused at today's spot POC ${fmt(poc)} after a fast run ${dir < 0 ? 'up' : 'down'} into it (touched ${fmt(extreme)}); back the way it came: ${aim(node, room, stopPts)}`,
+            OI: `${dir > 0 ? 'puts' : 'calls'} at ${writerK} ${pct(writersChg)} in 15m (holding); CE ${pct(sides.ceD)} / PE ${pct(sides.peD)}`,
+          })
+        }
       }
     }
   }
