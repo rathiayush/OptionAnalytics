@@ -131,4 +131,26 @@ public sealed class LiveTradingPricingTests
     [InlineData(150, 300, 0)]     // never negative
     public void ExitNeverOverClosesAPositionAlreadyBeingExited(int netQty, long working, int expected) =>
         Assert.Equal(expected, LiveTradingService.ExitQuantity(netQty, working));
+
+    [Fact]
+    public void AChasedEntry_GoesToTheLatestPricePlusSlippage_ItsLegsMovedAlong_OnlyWhenTheMarketLeftIt()
+    {
+        // A SELL at 99 (bid 100 - 1), target 60, SL 120: the bid falls to 95 in a sudden fall - to 94, legs -5.
+        var (next, why) = LiveTradingService.RepriceEntry(true, 95m, 95.5m, 99m, 60m, 120m, firstLimit: 99m, slippage: 1m, maxChase: 20m, tick: 0.05m);
+        Assert.Equal(("re-priced", 94m, 55m, 115m), (why, next!.Limit, next.Target!.Value, next.StopLoss!.Value));
+        // Still at the market (the bid at or above its limit): it fills there - nothing moved.
+        Assert.Null(LiveTradingService.RepriceEntry(true, 99.5m, 100m, 99m, 60m, 120m, 99m, 1m, 20m, 0.05m).Next);
+        // Ran past its SL distance from the first price, or no live price: not chased.
+        Assert.StartsWith("the option ran", LiveTradingService.RepriceEntry(true, 70m, 70.5m, 99m, 60m, 120m, 99m, 1m, 20m, 0.05m).Why);
+        Assert.Null(LiveTradingService.RepriceEntry(true, 0m, 0m, 99m, 60m, 120m, 99m, 1m, 20m, 0.05m).Next);
+        // To the tick, and a leg never at or below zero.
+        Assert.Equal(94.35m, LiveTradingService.RepriceEntry(true, 95.37m, 95.5m, 99m, 60m, 120m, 99m, 1m, 20m, 0.05m).Next!.Limit);
+        Assert.Null(LiveTradingService.RepriceEntry(true, 95m, 95.5m, 99m, 4m, 120m, 99m, 1m, 20m, 0.05m).Next);
+    }
+
+    [Fact]
+    public void AnExitsSlippage_WidensEachTry_UpToSixTimes()
+    {
+        Assert.Equal(new[] { 2m, 3m, 4m, 5m, 6m, 6m, 6m }, Enumerable.Range(1, 7).Select(a => LiveTradingService.ExitSlippage(1m, a)));
+    }
 }

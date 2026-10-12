@@ -578,6 +578,122 @@ public sealed class LiveTradingPartialExitTests
         return JsonNode.Parse(await response.Content.ReadAsStringAsync())!["orderId"]!.GetValue<string>();
     }
 
+    private static async Task WaitFor(Func<bool> done, int ms = 5000)
+    {
+        for (var waited = 0; waited < ms && !done(); waited += 20) await Task.Delay(20);
+        Assert.True(done(), "timed out");
+    }
+
+    private static DateOnly Expiry => DateOnly.FromDateTime(DateTime.Today.AddDays(20));
+
+    private static JsonObject EntryMove(FakeDhan dhan, int i) { lock (dhan.SuperModifies) return dhan.SuperModifies[i]; }
+
+    [Fact]
+    public async Task AServerScannerEntry_TheMarketRanAwayFrom_IsRePricedToTheLatestAsk_WithItsLegs_UntilItFills()
+    {
+        var (service, dhan, feed) = await CreateAsync();
+        service.EntryChaseInterval = TimeSpan.FromMilliseconds(30);
+        service.EntryChaseFor = TimeSpan.FromSeconds(3); // not left polling after the test
+        var r = await service.PlaceAsync(new ManualOrderRequest("NIFTY", Expiry, 26000, "CE", "BUY", 1, 1m, 20m, 40m, ChaseEntry: true), CancellationToken.None);
+        Assert.True(r.Success, r.Message);
+        var id = Assert.Single(r.OrderIds);
+        var order = dhan.SuperOrders.Single(o => o["orderId"]!.GetValue<string>() == id);
+        // At the ask 120.50 + 1: limit 121.50, target 160.50, SL 100.50.
+        Assert.Equal((121.50m, 160.50m, 100.50m), (order["price"]!.GetValue<decimal>(), order["targetPrice"]!.GetValue<decimal>(), order["stopLossPrice"]!.GetValue<decimal>()));
+        // Still at the market: nothing moves.
+        await Task.Delay(200);
+        Assert.Empty(dhan.SuperModifies);
+
+        // A sudden move: the ask jumps to 125 - re-priced to the latest ask + the slippage, its legs moved along (+4.50).
+        feed.SetLastTickForTesting(Tick(bid: 124.50m, ask: 125m, last: 125m));
+        await WaitFor(() => dhan.SuperModifies.Count >= 1);
+        var first = EntryMove(dhan, 0);
+        Assert.Equal(("ENTRY_LEG", "LIMIT", 126m, 165m, 105m), (first["legName"]!.GetValue<string>(), first["orderType"]!.GetValue<string>(),
+            first["price"]!.GetValue<decimal>(), first["targetPrice"]!.GetValue<decimal>(), first["stopLossPrice"]!.GetValue<decimal>()));
+        // Again, faster than the order: the slippage widens (2x) - 128 + 2 = 130, legs +4.
+        feed.SetLastTickForTesting(Tick(bid: 127.50m, ask: 128m, last: 128m));
+        await WaitFor(() => dhan.SuperModifies.Count >= 2);
+        var second = EntryMove(dhan, 1);
+        Assert.Equal((130m, 169m, 109m), (second["price"]!.GetValue<decimal>(), second["targetPrice"]!.GetValue<decimal>(), second["stopLossPrice"]!.GetValue<decimal>()));
+
+        // Filled: never moved again.
+        order["orderStatus"] = "TRADED";
+        feed.SetLastTickForTesting(Tick(bid: 131.50m, ask: 132m, last: 132m));
+        await Task.Delay(300);
+        Assert.Equal(2, dhan.SuperModifies.Count);
+    }
+
+    [Fact]
+    public async Task AnEntry_IsNeverChasedPastItsSlDistance_AndOnlyWhenAskedTo()
+    {
+        var (service, dhan, feed) = await CreateAsync();
+        service.EntryChaseInterval = TimeSpan.FromMilliseconds(30);
+        service.EntryChaseFor = TimeSpan.FromSeconds(3); // not left polling after the test
+        // A manual order (no ChaseEntry): it rests at its price whatever the market does.
+        await service.PlaceAsync(new ManualOrderRequest("NIFTY", Expiry, 26000, "CE", "BUY", 1, 1m, 20m, 40m), CancellationToken.None);
+        feed.SetLastTickForTesting(Tick(bid: 124.50m, ask: 125m, last: 125m));
+        await Task.Delay(200);
+        Assert.Empty(dhan.SuperModifies);
+
+        // A chased one at 126 (ask 125 + 1), SL 20: the option runs to 150 - 25 pts, past its SL distance: not chased.
+        var r = await service.PlaceAsync(new ManualOrderRequest("NIFTY", Expiry, 26000, "CE", "BUY", 1, 1m, 20m, 40m, ChaseEntry: true), CancellationToken.None);
+        Assert.True(r.Success, r.Message);
+        feed.SetLastTickForTesting(Tick(bid: 149.50m, ask: 150m, last: 150m));
+        await Task.Delay(300);
+        Assert.Empty(dhan.SuperModifies);
+        // Back within it (140 + 1 = 15 pts from 126): chased.
+        feed.SetLastTickForTesting(Tick(bid: 139.50m, ask: 140m, last: 140m));
+        await WaitFor(() => dhan.SuperModifies.Count >= 1);
+        Assert.Equal((r.OrderIds.Single(), 141m), (EntryMove(dhan, 0)["orderId"]!.GetValue<string>(), EntryMove(dhan, 0)["price"]!.GetValue<decimal>()));
+    }
+
+    [Fact]
+    public async Task AnExit_KeepsFollowingTheLatestBid_PastItsFirstTries_UntilItFills()
+    {
+        var (service, dhan, feed) = await CreateAsync();
+        service.ExitCheckInterval = TimeSpan.FromMilliseconds(20);
+        await service.PartialExitAsync(SecurityId.ToString(), lots: 1, slippagePoints: 1m, CancellationToken.None);
+        var exit = dhan.Orders.Values.Single(o => o.Tag.StartsWith("OIRX-"));
+        Assert.Equal(119m, exit.Price); // bid 120 - 1
+        // Unfilled: re-priced each try, the slippage widened up to 6x - 120 - 6 = 114.
+        await WaitFor(() => exit.Price == 114m);
+        // Well past the first six tries, a sudden fall: still followed, to the latest bid.
+        await Task.Delay(400);
+        feed.SetLastTickForTesting(Tick(bid: 100m, ask: 100.50m, last: 100.25m));
+        await WaitFor(() => exit.Price == 94m);
+        // Filled: left alone (a try already under way when it filled is let finish first).
+        dhan.Fill(exit.Id);
+        await Task.Delay(100);
+        int Puts() { lock (dhan.Requests) return dhan.Requests.Count(x => x == $"PUT /orders/{exit.Id}"); }
+        var puts = Puts();
+        feed.SetLastTickForTesting(Tick(bid: 90m, ask: 90.50m, last: 90.25m));
+        await Task.Delay(200);
+        Assert.Equal(puts, Puts());
+    }
+
+    [Fact]
+    public async Task ARejectedExit_IsPlacedAgainAtTheLatestPrice_ForWhatIsStillOpen_AFewTimes()
+    {
+        var (service, dhan, feed) = await CreateAsync();
+        service.ExitCheckInterval = TimeSpan.FromMilliseconds(20);
+        await service.PartialExitAsync(SecurityId.ToString(), lots: 1, slippagePoints: 1m, CancellationToken.None);
+        var first = dhan.Orders.Values.Single(o => o.Tag.StartsWith("OIRX-"));
+        feed.SetLastTickForTesting(Tick(bid: 110m, ask: 110.50m, last: 110.25m));
+        first.Status = "REJECTED";
+        // Placed again: the same lot, at the latest bid - 1 (then chased like the first).
+        await WaitFor(() => dhan.Orders.Values.Any(o => o.Tag.StartsWith("OIRX-R1-")));
+        var again = dhan.Orders.Values.Single(o => o.Tag.StartsWith("OIRX-R1-"));
+        Assert.Equal(("SELL", Lot, 109m), (again.Side, again.Quantity, again.PlacedPrice));
+        // Rejected every time: placed again up to three times, then left to the trader (never endlessly).
+        again.Status = "REJECTED";
+        await WaitFor(() => dhan.Orders.Values.Any(o => o.Tag.StartsWith("OIRX-R2-")));
+        dhan.Orders.Values.Single(o => o.Tag.StartsWith("OIRX-R2-")).Status = "REJECTED";
+        await WaitFor(() => dhan.Orders.Values.Any(o => o.Tag.StartsWith("OIRX-R3-")));
+        dhan.Orders.Values.Single(o => o.Tag.StartsWith("OIRX-R3-")).Status = "REJECTED";
+        await Task.Delay(300);
+        Assert.Equal(4, dhan.Orders.Count);
+    }
+
     private static SpotTick Tick(decimal bid, decimal ask, decimal last) =>
         new(SecurityId, last, 0, 0, 0, 0, 1000, bid, ask, 0, DateTimeOffset.UtcNow);
 
@@ -639,6 +755,8 @@ public sealed class LiveTradingPartialExitTests
             public string Type = "LIMIT", Status = "PENDING";
             public int Quantity, Filled;
             public decimal Price;
+            /// <summary>The price it was placed at (Price moves as it is chased).</summary>
+            public decimal PlacedPrice;
             public decimal? Trigger;
         }
 
@@ -680,7 +798,28 @@ public sealed class LiveTradingPartialExitTests
             if (request.Method == HttpMethod.Put && path.StartsWith("/super/orders/"))
             {
                 lock (SuperModifies) SuperModifies.Add(body!);
+                // A pending entry's price and legs move with it.
+                var modified = SuperOrders.FirstOrDefault(o => o["orderId"]!.GetValue<string>() == path.Split('/')[3]);
+                if (modified is not null && body!["legName"]?.GetValue<string>() == "ENTRY_LEG")
+                    foreach (var field in new[] { "price", "targetPrice", "stopLossPrice" })
+                        if (body[field] is { } value) modified[field] = value.GetValue<decimal>();
                 return Json(new JsonObject { ["orderId"] = path.Split('/')[3], ["orderStatus"] = "PENDING" });
+            }
+            if (request.Method == HttpMethod.Post && path == "/super/orders")
+            {
+                var id = $"N{Interlocked.Increment(ref _next)}";
+                SuperOrders.Add(new JsonObject
+                {
+                    ["orderId"] = id, ["orderStatus"] = "PENDING", ["transactionType"] = body!["transactionType"]!.GetValue<string>(),
+                    ["exchangeSegment"] = body["exchangeSegment"]!.GetValue<string>(), ["securityId"] = body["securityId"]!.GetValue<string>(),
+                    ["quantity"] = body["quantity"]!.GetValue<int>(), ["price"] = body["price"]!.GetValue<decimal>(),
+                    ["targetPrice"] = body["targetPrice"]!.GetValue<decimal>(), ["stopLossPrice"] = body["stopLossPrice"]!.GetValue<decimal>(),
+                    ["correlationId"] = body["correlationId"]!.GetValue<string>(),
+                    ["legDetails"] = new JsonArray(
+                        new JsonObject { ["legName"] = "TARGET_LEG", ["orderStatus"] = "PENDING", ["transactionType"] = "SELL", ["price"] = body["targetPrice"]!.GetValue<decimal>() },
+                        new JsonObject { ["legName"] = "STOP_LOSS_LEG", ["orderStatus"] = "PENDING", ["transactionType"] = "SELL", ["price"] = body["stopLossPrice"]!.GetValue<decimal>() }),
+                });
+                return Json(new JsonObject { ["orderId"] = id, ["orderStatus"] = "PENDING" });
             }
             if (request.Method == HttpMethod.Get && path == "/orders")
                 return Json(new JsonArray(Orders.Values.Select(o => (JsonNode)new JsonObject
@@ -697,6 +836,7 @@ public sealed class LiveTradingPartialExitTests
                     Id = id, Side = body!["transactionType"]!.GetValue<string>(), Tag = body["correlationId"]!.GetValue<string>(),
                     Segment = body["exchangeSegment"]!.GetValue<string>(), Product = body["productType"]!.GetValue<string>(),
                     Type = body["orderType"]!.GetValue<string>(), Quantity = body["quantity"]!.GetValue<int>(), Price = body["price"]!.GetValue<decimal>(),
+                    PlacedPrice = body["price"]!.GetValue<decimal>(),
                     Trigger = body["triggerPrice"]?.GetValue<decimal>(),
                 };
                 return Json(new JsonObject { ["orderId"] = id, ["orderStatus"] = "PENDING" });

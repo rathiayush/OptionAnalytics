@@ -142,7 +142,7 @@ public sealed class ServerLiveService
                 : (t.TrailGap > 0 ? t.TrailStart : 0, t.TrailGap);
             var order = new ManualOrderRequest(u, request.Expiry, request.Strike, request.Side.ToUpperInvariant(), request.Action.ToUpperInvariant(), lots,
                 t.SlippagePoints, sl, target, trailStart, trailGap,
-                request.ExitAtMs, request.ExitReason ?? "server scanner time stop");
+                request.ExitAtMs, request.ExitReason ?? "server scanner time stop", ChaseEntry: true);
             _logger.LogWarning("Server scanner LIVE {Action} {Underlying} {Strike}{Side} x{Lots} for {Key}.", order.Direction, u, order.Strike, order.Side, order.Lots, request.Key);
             var result = await _orders.PlaceAsync(order, CancellationToken.None);
             // Taken (all of it, or the slices before a rejection): recorded, so its exit closes it and it counts.
