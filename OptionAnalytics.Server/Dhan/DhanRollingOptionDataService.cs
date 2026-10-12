@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Net;
 using System.Text.Json;
 using OptionAnalytics.Server.Models;
 using OptionAnalytics.Server.Services;
@@ -111,12 +112,17 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
     private readonly DhanApiClient _api;
     private readonly DhanDataApiRateLimiter _rateLimiter;
     private readonly ILogger<DhanRollingOptionDataService> _logger;
+    private readonly DhanDataCache? _cache;
+    private const string RollingPath = "/charts/rollingoption";
 
-    public DhanRollingOptionDataService(DhanApiClient api, DhanDataApiRateLimiter rateLimiter, ILogger<DhanRollingOptionDataService> logger)
+    /// <summary><paramref name="cache"/>: each chunk of a closed window is kept on disk and answered from there next
+    /// time (DhanDataCache) - null = every call goes to Dhan.</summary>
+    public DhanRollingOptionDataService(DhanApiClient api, DhanDataApiRateLimiter rateLimiter, ILogger<DhanRollingOptionDataService> logger, DhanDataCache? cache = null)
     {
         _api = api;
         _rateLimiter = rateLimiter;
         _logger = logger;
+        _cache = cache;
     }
 
     /// <summary>Every bar for [fromDay,toDay] inclusive, one relative contract
@@ -139,9 +145,6 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
         // `underlying` used to be unused here (this implementation identifies the CONTRACT by
         // underlyingSecurityId, not by name) - now also read once, just to pick the right exchange
         // segment below (see ResolveFnoSegment), since Dhan itself needs that distinguished by name.
-        if (!_api.HasSession)
-            return (Array.Empty<(CandleWithVolume, decimal?, decimal?, long?, decimal?)>(), "Dhan is not authenticated (check Dhan:ClientId/Dhan:AccessToken).");
-
         if (toDay < fromDay)
             return (Array.Empty<(CandleWithVolume, decimal?, decimal?, long?, decimal?)>(), "'to' date must not be before 'from' date.");
 
@@ -153,11 +156,6 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
         {
             var chunkEnd = chunkStart.AddDays(MaxChunkDays - 1);
             if (chunkEnd > toDay) chunkEnd = toDay;
-
-            // Paced, not back to back - see ChunkDelay's own doc comment. Skipped before the very
-            // first chunk only; every chunk after that (including a retry below) waits first.
-            if (!isFirstChunk) await Task.Delay(ChunkDelay, cancellationToken);
-            isFirstChunk = false;
 
             var payload = new
             {
@@ -181,7 +179,22 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
             };
             var context = $"rolling option candles ({underlyingSecurityId}, {expiryFlag}+{expiryCode}, {strike} {drvOptionType}, {chunkStart:yyyy-MM-dd}..{chunkEnd:yyyy-MM-dd})";
 
-            var (response, error) = await SendWithRateLimitRetryAsync(payload, context, cancellationToken, interactive);
+            // A closed chunk fetched before comes from disk - no Dhan call, no pacing, and no session needed.
+            var cached = _cache?.TryGet(RollingPath, payload, chunkEnd);
+            if (cached is null && !_api.HasSession)
+                return (all, "Dhan is not authenticated (check Dhan:ClientId/Dhan:AccessToken).");
+
+            // Paced, not back to back - see ChunkDelay's own doc comment. Skipped before the very
+            // first call only; every call after that (including a retry below) waits first.
+            if (cached is null)
+            {
+                if (!isFirstChunk) await Task.Delay(ChunkDelay, cancellationToken);
+                isFirstChunk = false;
+            }
+
+            var (response, error) = cached is not null
+                ? (new DhanApiResponse(true, HttpStatusCode.OK, cached, null), null)
+                : await SendWithRateLimitRetryAsync(payload, context, cancellationToken, interactive);
             if (response is null)
             {
                 _logger.LogWarning("Rolling option candle request failed for {Id} ({ExpiryFlag}+{ExpiryCode}, {Strike} {Side}, {From}..{To}) - {Error}",
@@ -193,7 +206,14 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
             // while the JsonDocument backing it is alive, so it cannot be read AFTER disposing (as
             // the response's own successful branch below does) or handed back across this method's
             // own return.
-            using (response) { all.AddRange(ParseSide(response.Root, drvOptionType)); }
+            using (response)
+            {
+                var bars = ParseSide(response.Root, drvOptionType);
+                // Kept once every day in it has a full session's bars (a strike with none, or a day Dhan sent half of, is
+                // asked again next time).
+                if (cached is null) _cache?.Put(RollingPath, payload, chunkEnd, response.Root, DhanHistoricalDataService.CompleteDays(bars.Select(b => b.Bar.Time), intervalMinutes));
+                all.AddRange(bars);
+            }
 
             chunkStart = chunkEnd.AddDays(1);
         }
@@ -256,7 +276,7 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
             DhanApiResponse response;
             try
             {
-                response = await _api.SendAsync(HttpMethod.Post, "/charts/rollingoption", payload, context, timeoutCts.Token);
+                response = await _api.SendAsync(HttpMethod.Post, RollingPath, payload, context, timeoutCts.Token);
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {

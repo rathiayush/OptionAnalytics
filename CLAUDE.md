@@ -68,6 +68,11 @@ When adding or changing a strategy:
   `TodayWarmupService` keeps every index ready before anyone switches: in market hours, every 5 minutes, it asks each
   index's live run and Order Flow backfill (Dhan once a day, memory after; a restart is ready again within one pass).
   The Order Flow page's live engines already run all three indices' near futures all day (`OrderFlowService`).
+- Every PAST-day Dhan Data API response (intraday spot / futures / option candles, the rolling / expired-option chain) is
+  kept on disk by `DhanDataCache` (`Storage:DhanCachePath`, the persistent volume in docker-compose) and answered from
+  there - only closed windows with full sessions; today, empty or half days go to Dhan again. A new Dhan data call for
+  past days goes through `DhanHistoricalDataService` / `DhanRollingOptionDataService` so it is cached too
+  (`DhanDataCacheTests.cs`).
 
 - Never commit local-only auth bypasses, credentials or `appsettings.Local.json`; never change Dhan
   credentials. Don't run the real server against Dhan just to test - use the tests, `vite preview` with

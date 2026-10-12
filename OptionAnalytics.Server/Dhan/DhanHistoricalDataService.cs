@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Net;
 using System.Text.Json;
 using OptionAnalytics.Server.Models;
 
@@ -53,12 +54,30 @@ public sealed class DhanHistoricalDataService
     private readonly DhanApiClient _api;
     private readonly DhanDataApiRateLimiter _rateLimiter;
     private readonly ILogger<DhanHistoricalDataService> _logger;
+    private readonly DhanDataCache? _cache;
 
-    public DhanHistoricalDataService(DhanApiClient api, DhanDataApiRateLimiter rateLimiter, ILogger<DhanHistoricalDataService> logger)
+    /// <summary><paramref name="cache"/>: a past window's response is kept on disk and answered from there next time
+    /// (DhanDataCache) - null = every call goes to Dhan.</summary>
+    public DhanHistoricalDataService(DhanApiClient api, DhanDataApiRateLimiter rateLimiter, ILogger<DhanHistoricalDataService> logger, DhanDataCache? cache = null)
     {
         _api = api;
         _rateLimiter = rateLimiter;
         _logger = logger;
+        _cache = cache;
+    }
+
+    private const string IntradayPath = "/charts/intraday";
+
+    /// <summary>A cached response read back as Dhan's own (the parsing below cannot tell them apart).</summary>
+    private static DhanApiResponse FromCache(JsonDocument doc) => new(true, HttpStatusCode.OK, doc, null);
+
+    /// <summary>Whether a past window's candles are whole enough to keep for good: every IST day in it has a full
+    /// session's bars (300+ one-minute ones - a holiday with none is not kept; a day Dhan sent half of is asked again).</summary>
+    internal static bool CompleteDays(IEnumerable<DateTimeOffset> times, int intervalMinutes)
+    {
+        var perDay = times.GroupBy(IstClock.IstDate).Select(g => g.Count()).ToList();
+        var minimum = Math.Max(1, 300 / Math.Max(1, intervalMinutes));
+        return perDay.Count > 0 && perDay.All(n => n >= minimum);
     }
 
     /// <summary>Waits for a rate-limit permit, then sends the call under its own CallTimeout -
@@ -106,12 +125,6 @@ public sealed class DhanHistoricalDataService
     public async Task<(IReadOnlyList<CandleWithVolume> Candles, string? Error)> GetIntradayCandlesAsync(
         uint securityId, string dhanSegment, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken, bool interactive = true)
     {
-        if (!_api.HasSession)
-        {
-            _logger.LogWarning("Cannot fetch intraday candles for {Segment}:{Id} - Dhan is not authenticated (check Dhan:ClientId/Dhan:AccessToken).", dhanSegment, securityId);
-            return (Array.Empty<CandleWithVolume>(), "Dhan is not authenticated");
-        }
-
         var payload = new
         {
             securityId = securityId.ToString(CultureInfo.InvariantCulture),
@@ -122,7 +135,15 @@ public sealed class DhanHistoricalDataService
             toDate = $"{toDay:yyyy-MM-dd} 15:30:00",
         };
 
-        var (response, timeoutError) = await SendDataApiCallAsync("/charts/intraday", payload,
+        // A past window fetched before comes from disk - no Dhan call, and no session needed.
+        var cached = _cache?.TryGet(IntradayPath, payload, toDay);
+        if (cached is null && !_api.HasSession)
+        {
+            _logger.LogWarning("Cannot fetch intraday candles for {Segment}:{Id} - Dhan is not authenticated (check Dhan:ClientId/Dhan:AccessToken).", dhanSegment, securityId);
+            return (Array.Empty<CandleWithVolume>(), "Dhan is not authenticated");
+        }
+
+        var (response, timeoutError) = cached is not null ? (FromCache(cached), null) : await SendDataApiCallAsync(IntradayPath, payload,
             $"intraday candles ({dhanSegment}:{securityId}, {fromDay:yyyy-MM-dd}..{toDay:yyyy-MM-dd})", interactive, cancellationToken);
         if (response is null) return (Array.Empty<CandleWithVolume>(), timeoutError);
         using (response)
@@ -133,7 +154,9 @@ public sealed class DhanHistoricalDataService
                 return (Array.Empty<CandleWithVolume>(), string.IsNullOrWhiteSpace(response.ErrorMessage) ? $"HTTP {(int)response.StatusCode}" : response.ErrorMessage);
             }
 
-            return (ParseCandlesWithVolume(response.Root), null);
+            var candles = ParseCandlesWithVolume(response.Root);
+            if (cached is null) _cache?.Put(IntradayPath, payload, toDay, response.Root, CompleteDays(candles.Select(c => c.Time), intervalMinutes));
+            return (candles, null);
         }
     }
 
@@ -162,12 +185,6 @@ public sealed class DhanHistoricalDataService
     public async Task<(IReadOnlyList<(CandleWithVolume Bar, long? OpenInterest)> Bars, bool OiFieldPresent, string? Error)> GetIntradayFuturesCandlesAsync(
         uint securityId, string dhanSegment, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken, bool interactive = true)
     {
-        if (!_api.HasSession)
-        {
-            _logger.LogWarning("Cannot fetch intraday futures candles for {Segment}:{Id} - Dhan is not authenticated.", dhanSegment, securityId);
-            return (Array.Empty<(CandleWithVolume, long?)>(), false, "Dhan is not authenticated");
-        }
-
         var payload = new
         {
             securityId = securityId.ToString(CultureInfo.InvariantCulture),
@@ -179,7 +196,14 @@ public sealed class DhanHistoricalDataService
             oi = true,
         };
 
-        var (response, timeoutError) = await SendDataApiCallAsync("/charts/intraday", payload,
+        var cached = _cache?.TryGet(IntradayPath, payload, toDay);
+        if (cached is null && !_api.HasSession)
+        {
+            _logger.LogWarning("Cannot fetch intraday futures candles for {Segment}:{Id} - Dhan is not authenticated.", dhanSegment, securityId);
+            return (Array.Empty<(CandleWithVolume, long?)>(), false, "Dhan is not authenticated");
+        }
+
+        var (response, timeoutError) = cached is not null ? (FromCache(cached), null) : await SendDataApiCallAsync(IntradayPath, payload,
             $"futures intraday candles ({dhanSegment}:{securityId}, {fromDay:yyyy-MM-dd}..{toDay:yyyy-MM-dd})", interactive, cancellationToken);
         if (response is null) return (Array.Empty<(CandleWithVolume, long?)>(), false, timeoutError);
         using (response)
@@ -191,7 +215,9 @@ public sealed class DhanHistoricalDataService
             }
 
             var oiFieldPresent = response.Root.TryGetProperty("open_interest", out _);
-            return (ParseCandlesWithOpenInterest(response.Root), oiFieldPresent, null);
+            var bars = ParseCandlesWithOpenInterest(response.Root);
+            if (cached is null) _cache?.Put(IntradayPath, payload, toDay, response.Root, CompleteDays(bars.Select(b => b.Bar.Time), intervalMinutes));
+            return (bars, oiFieldPresent, null);
         }
     }
 
@@ -243,12 +269,6 @@ public sealed class DhanHistoricalDataService
     private async Task<(IReadOnlyList<CandleWithVolume> Candles, string? Error)> GetIntradayDerivativeCandlesAsync(
         uint securityId, string dhanSegment, string instrumentType, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken, bool interactive)
     {
-        if (!_api.HasSession)
-        {
-            _logger.LogWarning("Cannot fetch intraday {Instrument} candles for {Segment}:{Id} - Dhan is not authenticated.", instrumentType, dhanSegment, securityId);
-            return (Array.Empty<CandleWithVolume>(), "Dhan is not authenticated");
-        }
-
         var payload = new
         {
             securityId = securityId.ToString(CultureInfo.InvariantCulture),
@@ -259,7 +279,14 @@ public sealed class DhanHistoricalDataService
             toDate = $"{toDay:yyyy-MM-dd} 15:30:00",
         };
 
-        var (response, timeoutError) = await SendDataApiCallAsync("/charts/intraday", payload,
+        var cached = _cache?.TryGet(IntradayPath, payload, toDay);
+        if (cached is null && !_api.HasSession)
+        {
+            _logger.LogWarning("Cannot fetch intraday {Instrument} candles for {Segment}:{Id} - Dhan is not authenticated.", instrumentType, dhanSegment, securityId);
+            return (Array.Empty<CandleWithVolume>(), "Dhan is not authenticated");
+        }
+
+        var (response, timeoutError) = cached is not null ? (FromCache(cached), null) : await SendDataApiCallAsync(IntradayPath, payload,
             $"{instrumentType} intraday candles ({dhanSegment}:{securityId}, {fromDay:yyyy-MM-dd}..{toDay:yyyy-MM-dd})", interactive, cancellationToken);
         if (response is null) return (Array.Empty<CandleWithVolume>(), timeoutError);
         using (response)
@@ -273,7 +300,9 @@ public sealed class DhanHistoricalDataService
                 return (Array.Empty<CandleWithVolume>(), string.IsNullOrWhiteSpace(response.ErrorMessage) ? $"HTTP {(int)response.StatusCode}" : response.ErrorMessage);
             }
 
-            return (ParseCandlesWithVolume(response.Root), null);
+            var candles = ParseCandlesWithVolume(response.Root);
+            if (cached is null) _cache?.Put(IntradayPath, payload, toDay, response.Root, CompleteDays(candles.Select(c => c.Time), intervalMinutes));
+            return (candles, null);
         }
     }
 
