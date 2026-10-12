@@ -16,23 +16,20 @@
 // Everything outside (HTTP, Telegram, the state file, the clock) comes in through `io`, so the tests can
 // drive a whole day through it.
 
-import { buildOiContext, optionTradeAt, premiumAt, strategyStats, topFifteen, STRATEGY_BY_ID, DEFAULT_TRAIL, optionPlanFor, optionExitText, squareOffMs, filtersForIndex, lotsFor } from '../src/strategyEngine.js'
+import { buildOiContext, optionTradeAt, premiumAt, strategyStats, topFifteen, STRATEGY_BY_ID, optionPlanFor, optionExitText, squareOffMs, lotsFor } from '../src/strategyEngine.js'
 import { spotBarsOf } from '../src/spotEngine.js'
 import { liquiditySignals, pullStackSignals, autoBigLots } from '../src/orderFlowMath.js'
 import {
   MIN, msOf, scanTick, spotScanTick, followAllSetups, trailFor, alertIdsFor, setupEvents, newSetupEventMemory, newPosition, positionRows, sameSignal,
   withLevelChange, withCapChange, setupWasTraded, paperEntryText, liveLegsFor, setupExitText, paperExitText, scannerLogBody, scannerLogSig, scannerProfileOf, PAPER_TRADE_LOT_SIZE,
+  RUNNER_DEFAULT_SETTINGS, runnerSettingsOf,
 } from '../src/scannerCore.js'
 import { orderFlowFromSnapshot, applyOrderFlowPush, mergePrints, applyOiTicks, applyFuturesTicks, applySpotUpdate, expiryFlagOf, TAPE_PRINTS } from '../src/liveFeeds.js'
-import { defaultTradeLevels } from '../src/tradeDefaults.js'
 import { newProfileWatch, profileAlertText, profileLevels, spotLevelsOf, spotProfileLevels, watchProfiles } from '../src/profileAlerts.js'
 import { tpoRowFor } from '../src/profiles.js'
 
-// The page's own defaults (StrategyScanner / OrderFlowPage) for anything the config does not say.
-// autoPaper 'strategy': each strategy buys or sells what its own tuned setting says (Apply to the scanner), falling
-// back to selling where there is none - nobody is sitting here to choose, unlike the Order Flow page, where the
-// trader's own Buy / Sell always wins.
-export const DEFAULT_SETTINGS = { alerts: true, telegram: true, pick: 'top15', custom: [], filters: {}, trail: { on: true, ...DEFAULT_TRAIL }, autoPaper: 'strategy', paperLots: 1, moneyness: 0 }
+// The page's own defaults (StrategyScanner / OrderFlowPage) for anything the config does not say (scannerCore).
+export const DEFAULT_SETTINGS = RUNNER_DEFAULT_SETTINGS
 export const DEFAULT_ROW_SIZES = { NIFTY: 1, BANKNIFTY: 5, SENSEX: 5 }
 const RETRY_MS = 30_000
 // A failed load waits longer each time (30 s, 1 min, 2 min, then every 5 min): each try costs Dhan calls, and a
@@ -106,19 +103,9 @@ export class IndexScanner {
   get live() { return this.config.live?.[this.underlying] === true }
 
   // The scanner settings as the page would have them for this index: its saved settings, this index's SL /
-  // target / trail levels.
+  // target / trail levels and max rules, its lots and what an alert trades (scannerCore.runnerSettingsOf).
   settings() {
-    const s = { ...DEFAULT_SETTINGS, ...(this.config.settings ?? {}) }
-    const levels = { ...defaultTradeLevels(this.underlying), trailStart: 0, trailGap: 0, ...(this.config.levels?.[this.underlying] ?? {}) }
-    // The index's own trade settings (trade-settings.csv): its lots and what an alert trades.
-    const trade = this.config.trade?.[this.underlying] ?? {}
-    return {
-      // Each strategy's filters on THIS index: a setting fine-tuned and applied for it, else the all-index ones.
-      ...s, filters: filtersForIndex({ filters: s.filters, filtersByIndex: this.config.filtersByIndex }, this.underlying), paperSl: levels.sl, paperTarget: levels.target, paperTrailStart: levels.trailStart ?? 0, paperTrailGap: levels.trailGap ?? 0,
-      // The max rules every strategy's option trade is held to (Trade settings - Max SL / Max target; 0 = none).
-      paperMaxSl: Number(levels.maxSl ?? levels.sl) || 0, paperMaxTarget: Number(levels.maxTarget ?? levels.target) || 0,
-      ...(trade.lots > 0 ? { paperLots: trade.lots } : {}), ...(trade.autoTrade ? { autoPaper: trade.autoTrade } : {}),
-    }
+    return runnerSettingsOf(this.config, this.underlying)
   }
 
   rowSize() { return this.config.settings?.orderFlow?.rowSizes?.[this.underlying] ?? DEFAULT_ROW_SIZES[this.underlying] ?? 1 }
@@ -541,7 +528,8 @@ export class IndexScanner {
   async postLog(nowMs, cfg) {
     if (!this.lastOutcomes?.length && !this.lastRows?.length) return
     // With the day's OI: each closed signal also says what its bought and sold option would have made (signalLegs).
-    const body = scannerLogBody({ underlying: this.underlying, date: this.date, source: 'server', dayResults: this.lastOutcomes ?? [], rows: this.lastRows ?? [], charges: cfg.charges, oi: this.data?.oi ?? null })
+    // Each leg out at the strategy's own option exit with this index's settings - as its trade is.
+    const body = scannerLogBody({ underlying: this.underlying, date: this.date, source: 'server', dayResults: this.lastOutcomes ?? [], rows: this.lastRows ?? [], charges: cfg.charges, oi: this.data?.oi ?? null, cfg })
     const sig = scannerLogSig(`${this.underlying}:${this.date}`, body)
     if (sig === this.lastLogSig || this.io.now() - this.lastLogAt < LOG_EVERY_MS) return
     this.lastLogAt = this.io.now()

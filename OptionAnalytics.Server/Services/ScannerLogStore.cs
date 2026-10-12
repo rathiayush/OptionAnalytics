@@ -40,9 +40,11 @@ public sealed class ScannerLogStore
         // volume, futures price / OI, option writers, PCR, the order book near the price, VWAP distance.
         "mkt_tape30", "mkt_tape60", "mkt_tape300", "mkt_big_net", "mkt_big_count", "mkt_cvd15", "mkt_vol_x", "mkt_fut_px15", "mkt_fut_oi15",
         "mkt_fut_oi5", "mkt_writers15", "mkt_writers_open", "mkt_pcr", "mkt_book_imb", "mkt_vwap_dist",
-        // What each option would have done, held to the signal's exit (scannerCore.signalLegs): the ATM option bought and
-        // the ATM option sold - premium in / out and points.
+        // What each option would have done (scannerCore.signalLegs): the option bought and the option sold at the strategy's
+        // strike, each out at the strategy's own option exit (its SL / target held to the index's max rules, else with the
+        // index trade) - as its trade is - premium in / out, points, and when and why it left.
         "buy_option", "buy_entry", "buy_exit", "buy_points", "sell_option", "sell_entry", "sell_exit", "sell_points",
+        "buy_exit_time_ist", "buy_exit_reason", "sell_exit_time_ist", "sell_exit_reason",
     };
 
     /// <summary>marketAt's keys -> their columns.</summary>
@@ -59,7 +61,8 @@ public sealed class ScannerLogStore
         "entry_premium", "exit_premium", "points", "rupees", "stt", "brokerage", "other_charges", "net_rupees", "net_per_lot",
         "exit_reason", "signal_time_ist", "strategy_no", "strategy_id",
         "signal_side", "day_type", "adaptive_take", "adaptive_reason", "source", "user", "updated_utc",
-        // Its signal's points on the index, and what the option bought / sold would have made held to the signal's exit.
+        // Its signal's points on the index, and what the option bought / sold would have made, each out at the strategy's own
+        // option exit (its signal's buy_* / sell_*).
         "index_points", "buy_points", "sell_points",
     };
 
@@ -116,6 +119,8 @@ public sealed class ScannerLogStore
             ["exit_price"] = Num(s.ExitPrice), ["exit_reason"] = Text(s.ExitReason), ["source"] = source, ["user"] = who, ["updated_utc"] = now,
             ["buy_option"] = Text(s.BuyOption), ["buy_entry"] = Num(s.BuyEntry), ["buy_exit"] = Num(s.BuyExit), ["buy_points"] = Num(s.BuyPoints),
             ["sell_option"] = Text(s.SellOption), ["sell_entry"] = Num(s.SellEntry), ["sell_exit"] = Num(s.SellExit), ["sell_points"] = Num(s.SellPoints),
+            ["buy_exit_time_ist"] = s.BuyExitTime is > 0 ? IstTime(s.BuyExitTime.Value) : "", ["buy_exit_reason"] = Text(s.BuyExitReason),
+            ["sell_exit_time_ist"] = s.SellExitTime is > 0 ? IstTime(s.SellExitTime.Value) : "", ["sell_exit_reason"] = Text(s.SellExitReason),
         }, s.Market)).ToList();
         var tradeRows = trades.Where((t) => !string.IsNullOrWhiteSpace(t.Key) && t.EntryTime > 0).Select((t) => new Dictionary<string, string>
         {
@@ -310,8 +315,9 @@ public sealed class ScannerLogStore
     public List<Dictionary<string, string>>? ReadRows(string kind) => PathOf(kind) is { } path ? Read(path).ToList() : null;
 
     /// <summary>Fills in what the option bought / sold would have made on signals already in a file ('signals' or
-    /// 'server-signals') - rebuilt by the Trades page from that day's OI for the ones kept before the columns existed. Only
-    /// the buy_* / sell_* columns of the rows named by key change. Returns how many rows were updated.</summary>
+    /// 'server-signals') - worked out by the Trades page from that day's OI for the ones kept before the columns existed, or
+    /// under the older rule (held to the index exit, no exit reason). Only the buy_* / sell_* columns of the rows named by
+    /// key change. Returns how many rows were updated.</summary>
     public async Task<(int Updated, string? Error)> SetLegsAsync(string kind, IReadOnlyList<ScannerLegsRow> rows, CancellationToken cancellationToken)
     {
         if (kind is not ("signals" or "server-signals")) return (0, "kind must be signals or server-signals.");
@@ -330,6 +336,8 @@ public sealed class ScannerLogStore
                 if (!row.TryGetValue("key", out var key) || !byKey.TryGetValue(key, out var legs)) continue;
                 row["buy_option"] = Text(legs.BuyOption); row["buy_entry"] = Num(legs.BuyEntry); row["buy_exit"] = Num(legs.BuyExit); row["buy_points"] = Num(legs.BuyPoints);
                 row["sell_option"] = Text(legs.SellOption); row["sell_entry"] = Num(legs.SellEntry); row["sell_exit"] = Num(legs.SellExit); row["sell_points"] = Num(legs.SellPoints);
+                row["buy_exit_time_ist"] = legs.BuyExitTime is > 0 ? IstTime(legs.BuyExitTime.Value) : ""; row["buy_exit_reason"] = Text(legs.BuyExitReason);
+                row["sell_exit_time_ist"] = legs.SellExitTime is > 0 ? IstTime(legs.SellExitTime.Value) : ""; row["sell_exit_reason"] = Text(legs.SellExitReason);
                 updated++;
             }
             if (updated > 0) Upsert(path, SignalColumns, all, "time_ist");
@@ -442,7 +450,8 @@ public sealed record ScannerSignalRow(
     bool? AdaptiveTake, bool? AdaptivePriceOnly, string? AdaptiveReason, string? Status, double? R, long? ExitTime,
     double? ExitPrice, string? ExitReason, IReadOnlyDictionary<string, double?>? Market = null,
     string? BuyOption = null, double? BuyEntry = null, double? BuyExit = null, double? BuyPoints = null,
-    string? SellOption = null, double? SellEntry = null, double? SellExit = null, double? SellPoints = null);
+    string? SellOption = null, double? SellEntry = null, double? SellExit = null, double? SellPoints = null,
+    long? BuyExitTime = null, string? BuyExitReason = null, long? SellExitTime = null, string? SellExitReason = null);
 
 /// <summary>An option trade punched for a signal (paper or live) - SignalTime / StrategyId / SignalSide name
 /// the signal it came from. Stt / Brokerage / OtherCharges / NetRupees / NetPerLot: its costs and net P&amp;L
@@ -454,6 +463,8 @@ public sealed record ScannerTradeRow(
     double? Stt = null, double? Brokerage = null, double? OtherCharges = null, double? NetRupees = null, double? NetPerLot = null,
     double? IndexPoints = null, double? BuyPoints = null, double? SellPoints = null);
 
-/// <summary>What the option bought / sold would have made for one signal (by its key) - see ScannerLogStore.SetLegsAsync.</summary>
+/// <summary>What the option bought / sold would have made for one signal (by its key), and when (ms) and why each left -
+/// see ScannerLogStore.SetLegsAsync.</summary>
 public sealed record ScannerLegsRow(string? Key, string? BuyOption, double? BuyEntry, double? BuyExit, double? BuyPoints,
-    string? SellOption, double? SellEntry, double? SellExit, double? SellPoints);
+    string? SellOption, double? SellEntry, double? SellExit, double? SellPoints,
+    long? BuyExitTime = null, string? BuyExitReason = null, long? SellExitTime = null, string? SellExitReason = null);

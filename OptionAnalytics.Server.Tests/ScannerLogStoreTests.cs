@@ -50,6 +50,8 @@ public sealed class ScannerLogStoreTests : IDisposable
         {
             BuyOption = "BUY 22700 CE", BuyEntry = 110, BuyExit = 131.5, BuyPoints = 21.5,
             SellOption = "SELL 22700 PE", SellEntry = 95, SellExit = 80.25, SellPoints = 14.75,
+            BuyExitTime = T1040 + 12 * 60_000, BuyExitReason = "with the index trade - Target hit",
+            SellExitTime = T1040 + 7 * 60_000, SellExitReason = "Target 14.25 pts hit",
         };
         var trade = Trade("p1", T1040 + 5000) with { IndexPoints = 37.5, BuyPoints = 21.5, SellPoints = 14.75 };
         await store.UpsertDayAsync(Day("2026-10-05", new[] { signal }, new[] { trade }), null, CancellationToken.None);
@@ -57,6 +59,9 @@ public sealed class ScannerLogStoreTests : IDisposable
         var s = ScannerLogStore.Read(SignalsPath).Single();
         Assert.Equal(("BUY 22700 CE", "110", "131.5", "21.5", "SELL 22700 PE", "80.25", "14.75"),
             (s["buy_option"], s["buy_entry"], s["buy_exit"], s["buy_points"], s["sell_option"], s["sell_exit"], s["sell_points"]));
+        // When and why each option left - its own exit, as the trade's.
+        Assert.Equal(("2026-10-05 10:52:00", "with the index trade - Target hit", "2026-10-05 10:47:00", "Target 14.25 pts hit"),
+            (s["buy_exit_time_ist"], s["buy_exit_reason"], s["sell_exit_time_ist"], s["sell_exit_reason"]));
         var t = ScannerLogStore.Read(TradesPath).Single();
         Assert.Equal(("37.5", "21.5", "14.75"), (t["index_points"], t["buy_points"], t["sell_points"]));
         // A row from before them: blank, and the file keeps its other columns.
@@ -73,13 +78,18 @@ public sealed class ScannerLogStoreTests : IDisposable
         var key = before[0]["key"];
         var (updated, error) = await store.SetLegsAsync("signals", new[]
         {
-            new ScannerLegsRow(key, "BUY 22700 CE", 110, 131.5, 21.5, "SELL 22700 PE", 95, 80.25, 14.75),
+            new ScannerLegsRow(key, "BUY 22700 CE", 110, 131.5, 21.5, "SELL 22700 PE", 95, 80.25, 14.75,
+                T1040 + 12 * 60_000, "with the index trade - Target hit", T1040 + 3 * 60_000, "Max SL 19 pts hit"),
             new ScannerLegsRow("NIFTY|nope", "BUY 1 CE", 1, 2, 1, null, null, null, null),
         }, CancellationToken.None);
         Assert.Null(error);
         Assert.Equal(1, updated);
         var after = ScannerLogStore.Read(SignalsPath).ToList();
         Assert.Equal(("21.5", "14.75", "SELL 22700 PE"), (after[0]["buy_points"], after[0]["sell_points"], after[0]["sell_option"]));
+        Assert.Equal(("2026-10-05 10:52:00", "2026-10-05 10:43:00", "Max SL 19 pts hit"), (after[0]["buy_exit_time_ist"], after[0]["sell_exit_time_ist"], after[0]["sell_exit_reason"]));
+        // Done again (the older rule's legs worked out with the strategy's own exit): replaced.
+        await store.SetLegsAsync("signals", new[] { new ScannerLegsRow(key, "BUY 22700 CE", 110, 100, -10, "SELL 22700 PE", 95, 114, -19, T1040 + 60_000, "Max SL 10 pts hit", T1040 + 60_000, "Max SL 19 pts hit") }, CancellationToken.None);
+        Assert.Equal(("-10", "-19", "Max SL 10 pts hit"), (ScannerLogStore.Read(SignalsPath).First()["buy_points"], ScannerLogStore.Read(SignalsPath).First()["sell_points"], ScannerLogStore.Read(SignalsPath).First()["buy_exit_reason"]));
         Assert.Equal("", after[1]["buy_points"]);
         foreach (var col in new[] { "entry", "status", "r", "exit_price", "strategy_id" }) Assert.Equal(before[0][col], after[0][col]);
         Assert.NotNull((await store.SetLegsAsync("trades", Array.Empty<ScannerLegsRow>(), CancellationToken.None)).Error);

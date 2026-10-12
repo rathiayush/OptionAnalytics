@@ -90,7 +90,8 @@ When adding or changing a strategy:
   (`withCapChange`). Its live super order carries those legs (a safety leg at the signal's own index distance where there
   is none - `liveLegsFor`; the server clamps to the max too) and no option trail. The tuning measures every option with the
   same max rules (each day's `optionCaps`, `optionLevelsOf`); `tests/strategy-own-exits.test.mjs` keeps the paper trade ==
-  the tuning's `optionOutcome` for every exit.
+  the tuning's `optionOutcome` for every exit. The scanner record's If bought / If sold (`signalLegs`, with the index's
+  `runnerSettingsOf`) take each option the SAME way - the leg of the side traded IS the trade (same exit, time, reason).
 
 ## Other rules
 

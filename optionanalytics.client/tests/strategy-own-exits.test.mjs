@@ -133,6 +133,20 @@ test('tuning == scanner: each option exit as applied, held to the max rules, is 
       assert.ok(Math.abs(row.current - tuned.exitPremium) < 1e-9, `${leg} ${exit} @${s.t}: exit premium ${row.current} vs the tuning's ${tuned.exitPremium} (${tuned.reason} / ${row.exitReason})`)
       assert.ok(Math.abs(row.points - tuned.points) < 1e-9)
       if (tuned.exitMs < Math.min(dc.endMs, squareOffMs(s.t))) assert.equal(row.exitTime, tuned.exitMs)
+      // The record's If bought / If sold: the leg of the side traded IS this trade (same exit, premium, points, time), and
+      // the other leg is the tuning's trade of that side - each out at the strategy's own exit, held to the max rules.
+      const legs = signalLegs({ ...s, outcome }, syn.oi, { filters, cfg: index })
+      assert.ok(Math.abs(legs[`${leg}Exit`] - row.current) < 1e-9, `If ${leg === 'buy' ? 'bought' : 'sold'} ${exit}: ${legs[`${leg}Exit`]} vs the trade's ${row.current} (${legs[`${leg}ExitReason`]} / ${row.exitReason})`)
+      assert.ok(Math.abs(legs[`${leg}Points`] - row.points) < 1e-9)
+      assert.equal(legs[`${leg}ExitTime`], row.exitTime)
+      assert.equal(legs[`${leg}Option`], `${trade.action} ${trade.strike} ${trade.side}`)
+      if (/pts hit/.test(row.exitReason)) assert.equal(legs[`${leg}ExitReason`], row.exitReason, 'left at its own level, and says so')
+      const other = leg === 'buy' ? 'sell' : 'buy'
+      const tunedOther = optionOutcome(dc, s, outcome, { ...v, optLeg: other })
+      if (tunedOther) {
+        assert.ok(Math.abs(legs[`${other}Points`] - tunedOther.points) < 1e-9, `the other leg (${other} ${exit}): ${legs[`${other}Points`]} vs ${tunedOther.points}`)
+        assert.ok(Math.abs(legs[`${other}Exit`] - tunedOther.exitPremium) < 1e-9)
+      }
       reasons.add(`${exit}:${/SL|Target/.test(tuned.reason) ? 'own level' : 'other'}`)
       compared++
     }
@@ -141,7 +155,7 @@ test('tuning == scanner: each option exit as applied, held to the max rules, is 
   assert.ok(reasons.has('first:own level') || reasons.has('option:own level') || reasons.has('indexSl:own level'), [...reasons].join(', '))
 })
 
-test('the day\'s log: what the option bought and the option sold would have made (held to the signal\'s exit), and the index points', () => {
+test('the day\'s log: what the option bought and the option sold would have made (no settings: out with the index trade), and the index points', () => {
   const s = all.find((x) => x.options?.buy && x.options?.sell)
   assert.ok(s)
   const dir = s.side === 'LONG' ? 1 : -1
@@ -155,6 +169,17 @@ test('the day\'s log: what the option bought and the option sold would have made
     assert.equal(legs[`${which}Option`], `${o.action} ${o.strike} ${o.side}`)
     assert.deepEqual([legs[`${which}Entry`], legs[`${which}Exit`]], [entry, exit])
     assert.ok(Math.abs(legs[`${which}Points`] - (which === 'buy' ? exit - entry : entry - exit)) < 1e-9)
+    assert.equal(legs[`${which}ExitTime`], s.t + 21 * MIN)
+    assert.match(legs[`${which}ExitReason`], /^with the index trade - /)
+  }
+  // With the index's max rules (Trade settings) and no exit of its own: an option that moves past its Max SL / Max target
+  // leaves there - when and why kept.
+  const capped = signalLegs({ ...s, outcome }, syn.oi, { cfg: { paperMaxSl: 0.5, paperMaxTarget: 0.5 } })
+  const out = ['buy', 'sell'].filter((w) => /^(Max SL|Target) 0.5 pts hit$/.test(capped[`${w}ExitReason`] ?? ''))
+  assert.ok(out.length > 0, `${capped.buyExitReason} / ${capped.sellExitReason}`)
+  for (const w of out) {
+    assert.ok(Math.abs(Math.abs(capped[`${w}Points`]) - 0.5) < 1e-9, 'out at the max: 0.5 either way')
+    assert.ok(capped[`${w}ExitTime`] <= s.t + 21 * MIN)
   }
   assert.deepEqual(signalLegs({ ...s, outcome: { status: 'open' } }, syn.oi), {}, 'still open: nothing yet')
   assert.deepEqual(signalLegs({ ...s, outcome }, null), { indexPoints: legs.indexPoints }, 'no OI: the index points only')

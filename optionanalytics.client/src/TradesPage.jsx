@@ -10,7 +10,8 @@ import { applyFilterValue, applyTunedFilters, putOnLiveList, saveIndexFilters } 
 import { AppliedSettings, ApplyTunedButton, LiveSetup, ParamsPopover } from './ApplyTuned.jsx'
 import { confirmServerLive, useServerLive } from './ServerLive.jsx'
 import ClearData from './ClearData.jsx'
-import { fillRecordLegs, needsLegs, recordRunUrl } from './recordLegs.js'
+import { fillRecordLegs, needsLegs, oldRuleLegs, recordRunUrl } from './recordLegs.js'
+import { runnerSettingsOf } from './scannerCore.js'
 import './tuningMobile.css'
 
 const { Title, Text } = Typography
@@ -914,8 +915,10 @@ function ScannerRecord({ initial = {} }) {
   // just their run - each on its own index, from the moment it was applied (when that was kept).
   const [appliedOnly, setAppliedOnly] = useState(initial.applied === '1')
   const [applied, setApplied] = useState(null)
+  // The server scanner's config: what is applied where, and each index's settings (redoing If bought / If sold).
+  const [runnerConfig, setRunnerConfig] = useState(null)
   useEffect(() => {
-    fetch('/api/scanner-runner/config').then((r) => (r.ok ? r.json() : null)).then((c) => setApplied(c?.filtersByIndex ?? {})).catch(() => setApplied({}))
+    fetch('/api/scanner-runner/config').then((r) => (r.ok ? r.json() : null)).then((c) => { setRunnerConfig(c ?? {}); setApplied(c?.filtersByIndex ?? {}) }).catch(() => { setRunnerConfig({}); setApplied({}) })
   }, [])
   const appliedAt = (u, id) => {
     const f = applied?.[u]?.[id]
@@ -928,7 +931,8 @@ function ScannerRecord({ initial = {} }) {
     fetch(`/api/scanner-log/rows/${file}`).then(async (r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))).then(setRows).catch((e) => setError(e.message))
   }, [file, reloadTick])
   // The option trades also read their signals: each trade's index points, and what the option bought / sold would have
-  // made held to the signal's exit (a trade from before those were kept with it takes them from its signal).
+  // made - each out at the strategy's own option exit, as the trade is (a trade from before those were kept with it takes
+  // them from its signal).
   const [sigRows, setSigRows] = useState(null)
   useEffect(() => {
     if (kind !== 'trades') return
@@ -941,8 +945,22 @@ function ScannerRecord({ initial = {} }) {
   }, [sigRows])
   const legOf = (r, key, sigKey) => num(r[key]) ?? (kind === 'trades' ? num(signalOf(r)?.[sigKey]) : null)
   const indexPts = (r) => (kind === 'trades' ? legOf(r, 'index_points', 'points') : num(r.points))
-  const boughtPts = (r) => legOf(r, 'buy_points', 'buy_points')
-  const soldPts = (r) => legOf(r, 'sell_points', 'sell_points')
+  // If bought / If sold: the signal's (worked out again there when an older rule's were redone), else the trade's own copy.
+  const legSig = (r) => (kind === 'trades' ? signalOf(r) : r)
+  const legPts = (r, which) => { const sig = legSig(r); return sig && (sig[`${which}_exit_reason`] || kind !== 'trades') ? num(sig[`${which}_points`]) : legOf(r, `${which}_points`, `${which}_points`) }
+  const boughtPts = (r) => legPts(r, 'buy')
+  const soldPts = (r) => legPts(r, 'sell')
+  // A leg's cell: its points, and on hover the option, its premium in -> out, when and why it left.
+  const LEG_TIP = { buy: 'The option BOUGHT at the signal (the strategy\'s strike), out at the strategy\'s own option exit as its trade is - its SL / target held to the index\'s Max SL / Max target, else with the index trade - premium points (to compare)', sell: 'The option SOLD at the signal (the strategy\'s strike), out at the strategy\'s own option exit as its trade is - its SL / target held to the index\'s Max SL / Max target, else with the index trade - premium points (to compare)' }
+  const legCell = (which) => (_, r) => {
+    const v = which === 'buy' ? boughtPts(r) : soldPts(r)
+    const sig = legSig(r)
+    const why = sig?.[`${which}_exit_reason`]
+    const tip = sig?.[`${which}_option`]
+      ? `${sig[`${which}_option`]}: ${f1(num(sig[`${which}_entry`]))} → ${f1(num(sig[`${which}_exit`]))}${why ? ` · out ${hhmm(sig[`${which}_exit_time_ist`])} - ${why}` : ' · held to the index exit (older rule - redo it above)'}`
+      : 'not kept for this one'
+    return <Tooltip title={tip}><span style={{ color: col(v) }}>{pts(v)}</span>{why && /SL|Target|square-off/i.test(why) && !/^with the index/.test(why) ? <Text type="secondary" style={{ fontSize: 10, marginLeft: 3 }}>{/SL/.test(why) ? 'SL' : /Target/.test(why) ? 'T' : '15:10'}</Text> : null}</Tooltip>
+  }
   const signals = kind === 'signals'
   const shown = useMemo(() => (rows ?? []).filter((r) => (underlying === 'all' || r.underlying === underlying) && (!ids.length || ids.includes(r.strategy_id))
     && (signals || mode === 'all' || (mode === 'live') === (r.live === 'true')) && inDates(r.date, range)
@@ -963,14 +981,8 @@ function ScannerRecord({ initial = {} }) {
     { title: 'Closed by', dataIndex: 'exit_reason', width: 120, render: (v, r) => v || r.status || '-' },
     { title: 'Points', dataIndex: 'points', width: 80, render: (v) => <b style={{ color: col(num(v)) }}>{pts(num(v))}</b> },
     { title: 'R', dataIndex: 'r', width: 75, render: (v) => <span style={{ color: col(num(v)) }}>{fmtR(num(v))}</span> },
-    {
-      title: <Tooltip title="The ATM option BOUGHT at the signal, held until its index trade exited - premium points (to compare)">If bought</Tooltip>, key: 'bp', width: 95,
-      render: (_, r) => { const v = boughtPts(r); const sig = signals ? r : signalOf(r); return <Tooltip title={sig?.buy_option ? `${sig.buy_option}: ${f1(num(sig.buy_entry))} → ${f1(num(sig.buy_exit))}` : 'not kept for this one'}><span style={{ color: col(v) }}>{pts(v)}</span></Tooltip> },
-    },
-    {
-      title: <Tooltip title="The ATM option SOLD at the signal, held until its index trade exited - premium points (to compare)">If sold</Tooltip>, key: 'sp', width: 90,
-      render: (_, r) => { const v = soldPts(r); const sig = signals ? r : signalOf(r); return <Tooltip title={sig?.sell_option ? `${sig.sell_option}: ${f1(num(sig.sell_entry))} → ${f1(num(sig.sell_exit))}` : 'not kept for this one'}><span style={{ color: col(v) }}>{pts(v)}</span></Tooltip> },
-    },
+    { title: <Tooltip title={LEG_TIP.buy}>If bought</Tooltip>, key: 'bp', width: 100, render: legCell('buy') },
+    { title: <Tooltip title={LEG_TIP.sell}>If sold</Tooltip>, key: 'sp', width: 95, render: legCell('sell') },
     { title: 'Day type', dataIndex: 'day_type', width: 110 },
     { title: 'Adaptive', dataIndex: 'adaptive_take', width: 90, render: (v, r) => (v ? <Tooltip title={r.adaptive_reason}>{v === 'true' ? 'take' : v === 'false' ? 'skip' : v}</Tooltip> : '-') },
   ]
@@ -986,14 +998,8 @@ function ScannerRecord({ initial = {} }) {
     { title: 'Points', dataIndex: 'points', width: 80, render: (v) => <b style={{ color: col(num(v)) }}>{pts(num(v))}</b> },
     { title: 'Net ₹', dataIndex: 'net_rupees', width: 100, render: (v) => <b style={{ color: col(num(v)) }}>{num(v) == null ? '-' : Math.round(num(v)).toLocaleString('en-IN')}</b> },
     { title: <Tooltip title="Its signal's points on the index (futures, or spot for a spot strategy)">Index pts</Tooltip>, key: 'ip', width: 90, render: (_, r) => { const v = indexPts(r); return <b style={{ color: col(v) }}>{pts(v)}</b> } },
-    {
-      title: <Tooltip title="The ATM option BOUGHT at the signal, held until its index trade exited - premium points (to compare)">If bought</Tooltip>, key: 'bp', width: 95,
-      render: (_, r) => { const v = boughtPts(r); const sig = signals ? r : signalOf(r); return <Tooltip title={sig?.buy_option ? `${sig.buy_option}: ${f1(num(sig.buy_entry))} → ${f1(num(sig.buy_exit))}` : 'not kept for this one'}><span style={{ color: col(v) }}>{pts(v)}</span></Tooltip> },
-    },
-    {
-      title: <Tooltip title="The ATM option SOLD at the signal, held until its index trade exited - premium points (to compare)">If sold</Tooltip>, key: 'sp', width: 90,
-      render: (_, r) => { const v = soldPts(r); const sig = signals ? r : signalOf(r); return <Tooltip title={sig?.sell_option ? `${sig.sell_option}: ${f1(num(sig.sell_entry))} → ${f1(num(sig.sell_exit))}` : 'not kept for this one'}><span style={{ color: col(v) }}>{pts(v)}</span></Tooltip> },
-    },
+    { title: <Tooltip title={LEG_TIP.buy}>If bought</Tooltip>, key: 'bp', width: 100, render: legCell('buy') },
+    { title: <Tooltip title={LEG_TIP.sell}>If sold</Tooltip>, key: 'sp', width: 95, render: legCell('sell') },
     { title: 'Closed by', dataIndex: 'exit_reason', width: 130 },
   ]
   const columns = signals ? signalColumns : tradeColumns
@@ -1002,21 +1008,24 @@ function ScannerRecord({ initial = {} }) {
   // Signals: the market at each one too (tape, big orders, futures OI, book... - the mkt_* columns).
   if (signals) for (const k of MARKET_CSV) csvColumns.push({ title: k, value: (r) => r[k] ?? '' })
   const rupees = shown.map((r) => num(r.net_rupees)).filter(Number.isFinite).reduce((a, b) => a + b, 0)
-  // To compare: the index points, and what buying / selling the ATM option every time would have made (held to the exit).
+  // To compare: the index points, and what buying / selling the option every time would have made (each out at the
+  // strategy's own option exit, as its trade is).
   const sum = (f) => { const v = shown.map(f).filter(Number.isFinite); return { n: v.length, total: v.reduce((a, b) => a + b, 0) } }
   const compare = { index: sum(indexPts), bought: sum(boughtPts), sold: sum(soldPts) }
-  // Signals kept before "If bought / If sold" were recorded with them (closed, none yet): rebuilt from that day's OI and
-  // saved into the log (recordLegs.js) - each index and day once. Admins.
+  // Signals kept before "If bought / If sold" were recorded with them (closed, none yet), or under the older rule (held to
+  // the index exit): worked out from that day's OI with each index's settings now and saved into the log (recordLegs.js) -
+  // each index and day once. Admins.
   const isAdmin = useAuth()?.user?.role === 'Admin'
   const toFill = (() => {
     const seen = new Set()
     return (signals ? shown : shown.map(signalOf).filter(Boolean)).filter((r) => needsLegs(r) && !seen.has(r.key) && seen.add(r.key))
   })()
+  const toRedo = toFill.filter(oldRuleLegs).length
   const [filling, setFilling] = useState(null)
   const fillLegs = async () => {
     setFilling({ done: 0, total: 1 })
     try {
-      const { legs, failed } = await fillRecordLegs(toFill, { fetchRun: (u, d) => fetch(recordRunUrl(u, d)).then((r) => r.json()), onProgress: setFilling })
+      const { legs, failed } = await fillRecordLegs(toFill, { fetchRun: (u, d) => fetch(recordRunUrl(u, d)).then((r) => r.json()), settingsOf: (u) => runnerSettingsOf(runnerConfig, u), onProgress: setFilling })
       if (legs.length) {
         const res = await fetch(`/api/scanner-log/legs/${source === 'server' ? 'server-' : ''}signals`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(legs) })
         const body = await res.json().catch(() => null)
@@ -1063,9 +1072,9 @@ function ScannerRecord({ initial = {} }) {
             <span>if bought every time <b style={{ color: col(compare.bought.total) }}>{pts(compare.bought.total)}</b> pts{compare.bought.n < shown.length ? ` (${compare.bought.n} kept)` : ''}</span>
             <span>if sold every time <b style={{ color: col(compare.sold.total) }}>{pts(compare.sold.total)}</b> pts{compare.sold.n < shown.length ? ` (${compare.sold.n} kept)` : ''}</span>
             {isAdmin && toFill.length > 0 && (
-              <Tooltip title="Older signals were kept without what the option bought / sold would have made: worked out now from that day's option data (the ATM option at the signal's minute, held until its index trade exited) and saved, so it is done once.">
-                <Button size="small" loading={!!filling} onClick={fillLegs}>
-                  {filling ? `Filling in… ${filling.done} / ${filling.total} day(s)${filling.underlying ? ` · ${filling.underlying} ${filling.date}` : ''}` : `Fill in the older ones (${toFill.length})`}
+              <Tooltip title="Older signals were kept without what the option bought / sold would have made, or with it held until the index trade exited (the older rule - not how the trade leaves): worked out now from that day's option data the way the trade is taken - the strategy's strike, out at its own option exit (its SL / target held to the index's Max SL / Max target, else with the index trade), with each index's settings now - and saved, so it is done once.">
+                <Button size="small" loading={!!filling} onClick={fillLegs} disabled={runnerConfig == null}>
+                  {filling ? `Working out… ${filling.done} / ${filling.total} day(s)${filling.underlying ? ` · ${filling.underlying} ${filling.date}` : ''}` : toRedo ? `Redo with each option's own exit (${toFill.length})` : `Fill in the older ones (${toFill.length})`}
                 </Button>
               </Tooltip>
             )}
