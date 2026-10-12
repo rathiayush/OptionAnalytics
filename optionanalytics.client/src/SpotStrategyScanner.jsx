@@ -311,7 +311,7 @@ export function SpotStrategyScanner({ underlying, date, isReplay, bars, clockMs,
     const lots = lotsFor(setup.id, filtersOf(cfgRef.current), cfgRef.current.paperLots)
     const already = (paperBookRef.current[dayKey]?.positions ?? []).some((p) => sameSignal(p, setup, trade))
     const lv = planOf(setup, premium)
-    if (!already) {
+    if (!already && !opts.quiet) {
       notifyTrade({ kind: 'entry', key: `spot-paper-${setup.id}-${setup.t}-${which}`, sound: false,
         title: `Paper ${trade.action} ${trade.strike} ${trade.side} x${lots} @ ${premium.toFixed(1)}`,
         text: `${strategyText(setup)} ${setup.side} · ${optionExitText(lv)}` })
@@ -390,6 +390,15 @@ export function SpotStrategyScanner({ underlying, date, isReplay, bars, clockMs,
       ),
     })
   }
+  // A replay that moved over a signal (a jump, a fast replay): it is still paper-traded - quietly, at its own minute and
+  // premium (nothing after it is read) - so a replayed day trades every signal of the strategies picked, as the server
+  // scanner would have. Never a live order: a replay is always on paper.
+  const paperTradeQuietly = (s) => {
+    const c = cfgRef.current
+    if (!isReplay || liveModeRef.current.mode === 'live' || !c.alerts || !alertIdsRef.current.includes(s.id)) return
+    const side = optionPlanFor(s.id, filtersOf(c), c).leg
+    if (side && tradeOf(s, side)) punchRef.current?.(s, side, s.t, { auto: true, quiet: true })
+  }
   // Today's finished spot minutes by `minute`: the server's own candles (every tick - what the server scanner judges),
   // over this page's; a failed read keeps this page's.
   const finishedBars = async (minute) => {
@@ -456,10 +465,11 @@ export function SpotStrategyScanner({ underlying, date, isReplay, bars, clockMs,
         if (found.length) {
           firedRef.current = memory.fired
           setFired(firedRef.current)
-          // Alerted (and traded) only while it is news: today, this minute's; a replay, the last minutes it moved over.
+          // Alerted (and traded) while it is news: today, this minute's; a replay, the last minutes it moved over - the
+          // older ones a replay moved over are still paper-traded, quietly (paperTradeQuietly).
           const alertFrom = isReplay ? clockMinute - ALERT_WINDOW_MS + MIN : clockMinute
           for (const s of found) {
-            if (s.t < alertFrom) restoredRef.current.add(`${s.id}-${s.t}`)
+            if (s.t < alertFrom) { restoredRef.current.add(`${s.id}-${s.t}`); paperTradeQuietly(s) }
             else alertSetup(s)
           }
         }
@@ -678,7 +688,7 @@ export function SpotStrategyScanner({ underlying, date, isReplay, bars, clockMs,
               { value: 'all', label: `All ${SPOT_IDS.length}` },
               { value: 'custom', label: 'My choice' },
             ]} />
-          <Text type="secondary" style={{ fontSize: 12 }}>Every signal is listed below; only these alert and trade.</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>Every signal is listed below; only these alert and trade.{isReplay ? ` Replay: every signal of these is paper-traded as the replay runs - also the ones a jump moves over.${alertIds.length === 0 ? ' None picked - pick All to trade them all.' : ''}` : ''}</Text>
         </div>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '2px 10px' }}>
           {SPOT_STRATEGIES.filter((s) => !s.retired).map((s) => (

@@ -320,6 +320,8 @@ builder.Services.AddHostedService<OiReplayLiveFeedService>();
 builder.Services.AddSingleton<ScannerRunnerStore>();
 // Lots, SL / target / trail, slippage, server scanner on/off per index - trade-settings.csv (TradeSettingsStore).
 builder.Services.AddSingleton<TradeSettingsStore>();
+// The admin's Data files page: the server's files (scanner log, cached API data, tuning, settings) - read-only.
+builder.Services.AddSingleton<DataFilesService>();
 // Live trading by the server scanner, per index and for today only, within its limits (server-live.json).
 // Which strategies may trade live per index - proven after costs on the tuning and live records (live-list.json).
 builder.Services.AddSingleton<LiveListService>();

@@ -19,6 +19,7 @@ import StrategyTuningPage from './StrategyTuningPage.jsx'
 import TradesPage from './TradesPage.jsx'
 import StrategiesPage from './StrategiesPage.jsx'
 import StrategyLabPage from './StrategyLabPage.jsx'
+import DataFilesPage from './DataFilesPage.jsx'
 import { refreshTradeSettings } from './tradeDefaults.js'
 import { chartVwap } from './chartVwap.js'
 import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, RECONNECT_RETRY_POLICY, computeEma, fmtPrice, fmtIstTime, fmtIstDateTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry, AuthContext, useAuth, syncSignalRGroups, joinAllSignalRGroups, useCardOrder, CardDragHandle, onLiveBatch, useFeedLag, FeedLagTag, FeedLagAlert, LiveSection, captureChartView, restoreChartView, useReloadOnNewDeploy, checkForNewDeploy } from './shared.jsx'
@@ -1801,6 +1802,7 @@ export default function App() {
         <Route path="/trades" element={<TradesPage />} />
         <Route path="/strategies" element={<StrategiesPage />} />
         <Route path="/strategy-lab" element={<StrategyLabPage />} />
+        <Route path="/data-files" element={<RequireAdmin><DataFilesPage /></RequireAdmin>} />
       </Routes>
     </AuthContext.Provider>
   )
