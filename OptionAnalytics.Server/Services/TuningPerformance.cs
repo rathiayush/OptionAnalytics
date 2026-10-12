@@ -169,11 +169,21 @@ public static class TuningPerformance
     private static double? Num(Dictionary<string, string> row, string key) =>
         row.TryGetValue(key, out var s) && double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var v) ? v : null;
 
+    /// <summary>Whether a day (yyyy-MM-dd) is within the optional [from, to] (either end may be null / empty = open).</summary>
+    public static bool InRange(string? date, string? from, string? to) =>
+        (string.IsNullOrEmpty(from) || string.CompareOrdinal(date ?? "", from) >= 0) && (string.IsNullOrEmpty(to) || string.CompareOrdinal(date ?? "", to) <= 0);
+
+    /// <summary>Whether a date filter is set at all.</summary>
+    private static bool Dated(string? from, string? to) => !string.IsNullOrEmpty(from) || !string.IsNullOrEmpty(to);
+
     /// <summary>The cumulative rows. <paramref name="runs"/>: runs.csv rows, newest first; <paramref name="readRows"/>:
-    /// a run's trades / settings rows (null when missing).</summary>
+    /// a run's trades / settings rows (null when missing). <paramref name="from"/> / <paramref name="to"/> (yyyy-MM-dd,
+    /// optional): only the trades and cross-checked days in that range - an older run's held-back record that has no
+    /// days is left out then (it cannot be dated).</summary>
     public static (List<Row> Rows, int Runs, int Trades) Build(IReadOnlyList<Dictionary<string, string>> runs,
-        Func<string, string, List<Dictionary<string, string>>?> readRows, string? data = null)
+        Func<string, string, List<Dictionary<string, string>>?> readRows, string? data = null, string? from = null, string? to = null)
     {
+        var dated = Dated(from, to);
         var seen = new HashSet<string>(StringComparer.Ordinal);
         var groups = new Dictionary<(string Data, string Id, string Setting), (Dictionary<string, string> First, Stats All, Dictionary<string, Stats> ByIndex)>();
         var latestTuned = new Dictionary<(string Data, string Id), Dictionary<string, Dictionary<string, string>>>();
@@ -195,7 +205,7 @@ public static class TuningPerformance
                 var index = t.GetValueOrDefault("index", run.GetValueOrDefault("index", ""));
                 var id = t.GetValueOrDefault("strategy_id", "");
                 var setting = t.GetValueOrDefault("setting", "as written");
-                if (id.Length == 0) continue;
+                if (id.Length == 0 || !InRange(t.GetValueOrDefault("date", ""), from, to)) continue;
                 if (!seen.Add($"{runData}|{index}|{id}|{setting}|{t.GetValueOrDefault("date", "")}|{t.GetValueOrDefault("entry_time_ist", "")}")) continue;
                 var key = (runData, id, setting);
                 if (!groups.TryGetValue(key, out var g)) groups[key] = g = (t, new Stats(), new Dictionary<string, Stats>());
@@ -212,7 +222,7 @@ public static class TuningPerformance
                 var id = c.GetValueOrDefault("strategy_id", "");
                 var index = c.GetValueOrDefault("index", run.GetValueOrDefault("index", ""));
                 var date = c.GetValueOrDefault("date", "");
-                if (id.Length == 0 || date.Length < 7) continue;
+                if (id.Length == 0 || date.Length < 7 || !InRange(date, from, to)) continue;
                 var sig = SignatureOf(c);
                 if (!checkSeen.Add($"{runData}|{index}|{id}|{sig}|{date}")) continue;
                 var key = (runData, id, index, sig);
@@ -246,7 +256,7 @@ public static class TuningPerformance
                 var testN = (int)(Num(st, "test_trades") ?? 0);
                 var trainN = (int)(Num(st, "train_trades") ?? 0);
                 // A run with a cross-check file has its own held-back days in it; an older run's count as they were.
-                if (checkRows is null && testN > 0)
+                if (checkRows is null && testN > 0 && !dated)
                 {
                     var avg = Num(st, "test_avg") ?? 0;
                     acc.LegacyTrades += testN; acc.LegacySum += avg * testN; acc.LegacyPeriods.Add(avg);
@@ -276,7 +286,8 @@ public static class TuningPerformance
     /// run's copy of a trade two runs both scanned) - optionally only one setting ("as written" / "fine-tuned") and one
     /// index; oldest first by date and time (then index, then strategy number).</summary>
     public static List<Dictionary<string, string>> Trades(IReadOnlyList<Dictionary<string, string>> runs,
-        Func<string, string, List<Dictionary<string, string>>?> readRows, string? data, string? strategyId, string? setting = null, string? index = null)
+        Func<string, string, List<Dictionary<string, string>>?> readRows, string? data, string? strategyId, string? setting = null, string? index = null,
+        string? from = null, string? to = null)
     {
         var seen = new HashSet<string>(StringComparer.Ordinal);
         var list = new List<Dictionary<string, string>>();
@@ -292,6 +303,7 @@ public static class TuningPerformance
                 var i = t.GetValueOrDefault("index", run.GetValueOrDefault("index", ""));
                 if (setting is not null && s != setting) continue;
                 if (index is not null && i != index) continue;
+                if (!InRange(t.GetValueOrDefault("date", ""), from, to)) continue;
                 if (!seen.Add($"{runData}|{i}|{id}|{s}|{t.GetValueOrDefault("date", "")}|{t.GetValueOrDefault("entry_time_ist", "")}")) continue;
                 list.Add(t);
             }
@@ -351,8 +363,9 @@ public static class TuningPerformance
     public sealed record DayCoverage(string Index, int Scanned, int LeftOut, int TestDays, string? FirstDay, string? LastDay, int Runs, int OlderRuns, bool AtLeast);
 
     public static (List<DayCoverage> Coverage, List<DayRow> Days) Days(IReadOnlyList<Dictionary<string, string>> runs,
-        Func<string, string, List<Dictionary<string, string>>?> readRows, string? data = null)
+        Func<string, string, List<Dictionary<string, string>>?> readRows, string? data = null, string? from = null, string? to = null)
     {
+        var dated = Dated(from, to);
         var acc = new Dictionary<(string Index, string Date), (string? Status, string? Reason, int Runs, int Train, int Test, bool Est)>();
         var withList = new Dictionary<string, int>(StringComparer.Ordinal);
         var older = new Dictionary<string, (int Runs, int MaxUsed, string? First, string? Last)>(StringComparer.Ordinal);
@@ -364,6 +377,7 @@ public static class TuningPerformance
             var rows = readRows(run.GetValueOrDefault("run_id", ""), "days");
             if (rows is null)
             {
+                if (dated) continue; // an older run without its day list cannot be put in a date range
                 var o = older.GetValueOrDefault(runIndex);
                 var used = (int)(Num(run, "days_used") ?? 0);
                 string? first = run.GetValueOrDefault("first_day"), last = run.GetValueOrDefault("last_day");
@@ -376,7 +390,7 @@ public static class TuningPerformance
             foreach (var r in rows)
             {
                 var key = (r.GetValueOrDefault("index", runIndex), r.GetValueOrDefault("date", ""));
-                if (key.Item2.Length == 0) continue;
+                if (key.Item2.Length == 0 || !InRange(key.Item2, from, to)) continue;
                 var a = acc.GetValueOrDefault(key);
                 var isUsed = r.GetValueOrDefault("status") == "used";
                 var role = r.GetValueOrDefault("role");
