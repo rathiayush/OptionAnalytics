@@ -540,7 +540,8 @@ export class IndexScanner {
   // The day's record in the server's scanner log (server-signals.csv / server-trades.csv).
   async postLog(nowMs, cfg) {
     if (!this.lastOutcomes?.length && !this.lastRows?.length) return
-    const body = scannerLogBody({ underlying: this.underlying, date: this.date, source: 'server', dayResults: this.lastOutcomes ?? [], rows: this.lastRows ?? [], charges: cfg.charges })
+    // With the day's OI: each closed signal also says what its bought and sold option would have made (signalLegs).
+    const body = scannerLogBody({ underlying: this.underlying, date: this.date, source: 'server', dayResults: this.lastOutcomes ?? [], rows: this.lastRows ?? [], charges: cfg.charges, oi: this.data?.oi ?? null })
     const sig = scannerLogSig(`${this.underlying}:${this.date}`, body)
     if (sig === this.lastLogSig || this.io.now() - this.lastLogAt < LOG_EVERY_MS) return
     this.lastLogAt = this.io.now()

@@ -4,7 +4,7 @@
 
 import {
   ACTIVE_STRATEGIES, STRATEGY_BY_ID, evaluateStrategies, simulateOutcome, DEFAULT_TRAIL, RANGE_IDS,
-  exitLabel, premiumAt, optionStopTargetHit, squareOffMs, marketAt, lotsFor, pinnedTrailOf, optionExitText, capPoints,
+  exitLabel, premiumAt, optionStopTargetHit, squareOffMs, marketAt, lotsFor, pinnedTrailOf, optionExitText, capPoints, optionTradeAt,
 } from './strategyEngine.js'
 // The market at a signal now lives with the strategies (the order-flow trade filters read it) - re-exported here.
 export { marketAt, MARKET_KEYS } from './strategyEngine.js'
@@ -402,11 +402,39 @@ export function setupWasTraded(positions, s) {
 
 // ---- The day's record for the server's scanner log (POST /api/scanner-log/day) ----------------------
 
-export function scannerLogBody({ underlying, date, source, dayResults, rows, charges }) {
+/**
+ * What each option of a signal would have done, to compare with the one traded: the ATM option to BUY and the ATM option to
+ * SELL the signal carries, each from the signal's minute (its premium then) held until the signal's index trade exited
+ * (its stop / target / trailing stop / time stop - the premium once that bar is over), in premium points; and the signal's
+ * own points on the index. Only for a signal that has closed, and only with the day's OI (`oi`) - nothing past the exit.
+ */
+export function signalLegs(x, oi) {
+  const o = x.outcome ?? {}
+  const closed = o.status && o.status !== 'open'
+  if (!closed) return {}
+  const dir = x.side === 'LONG' ? 1 : -1
+  const out = { indexPoints: Number.isFinite(o.exitPrice) ? dir * (o.exitPrice - x.entry) : null }
+  if (!oi) return out
+  const exitAt = o.exitAt != null ? o.exitAt + MIN : squareOffMs(x.t)
+  for (const which of ['buy', 'sell']) {
+    const trade = optionTradeAt(oi, x, which, 0, x.t)
+    if (!trade?.strike) continue
+    const entry = premiumAt(oi, trade.side, trade.strike, x.t) ?? trade.premium ?? null
+    const exit = premiumAt(oi, trade.side, trade.strike, exitAt)
+    out[`${which}Option`] = `${trade.action ?? which.toUpperCase()} ${trade.strike} ${trade.side}`
+    out[`${which}Entry`] = entry
+    out[`${which}Exit`] = exit ?? null
+    out[`${which}Points`] = entry != null && exit != null ? (which === 'buy' ? exit - entry : entry - exit) : null
+  }
+  return out
+}
+
+export function scannerLogBody({ underlying, date, source, dayResults, rows, charges, oi = null }) {
   const signals = dayResults.map((x) => {
     const o = x.outcome ?? {}
     const meta = STRATEGY_BY_ID[x.id]
     const closed = o.status && o.status !== 'open'
+    const legs = signalLegs(x, oi)
     return {
       time: x.t, strategyNo: meta?.no ?? null, strategyId: x.id, strategy: meta?.name ?? x.id, side: x.side, entry: x.entry, stop: x.stop, target: x.target,
       estimated: !!x.estimated, dayType: x.regime?.type ?? null, dayTypePrice: x.regime?.priceType ?? null,
@@ -414,6 +442,10 @@ export function scannerLogBody({ underlying, date, source, dayResults, rows, cha
       adaptivePriceOnly: x.adaptive?.priceOnly ?? null, adaptiveReason: x.adaptive?.reason ?? null, status: o.status ?? null, r: o.r ?? null,
       exitTime: closed ? o.exitAt ?? null : null, exitPrice: closed ? o.exitPrice ?? null : null, exitReason: closed ? exitLabel(o) : null,
       market: x.market ?? null,
+      // Both options, held to the signal's exit, and its index points - to compare with the option actually traded.
+      buyOption: legs.buyOption ?? null, buyEntry: legs.buyEntry ?? null, buyExit: legs.buyExit ?? null, buyPoints: legs.buyPoints ?? null,
+      sellOption: legs.sellOption ?? null, sellEntry: legs.sellEntry ?? null, sellExit: legs.sellExit ?? null, sellPoints: legs.sellPoints ?? null,
+      indexPoints: legs.indexPoints ?? null,
     }
   })
   // Each trade names its signal: the exact one, else the same strategy and side within two minutes.
@@ -427,6 +459,8 @@ export function scannerLogBody({ underlying, date, source, dayResults, rows, cha
       lotSize: r.lotSize ?? null, entryPremium: r.premium, exitPremium: r.exitTime ? r.current ?? null : null, points: r.points ?? null, rupees: r.rupees ?? null,
       exitReason: r.exitReason ?? null, signalTime: sig?.time ?? at, strategyNo: STRATEGY_BY_ID[r.strategy]?.no ?? null, strategyId: r.strategy,
       signalSide: r.setupSide, dayType: r.regime?.type ?? null, adaptiveTake: r.adaptive?.take ?? null, adaptiveReason: r.adaptive?.reason ?? null,
+      // Its signal's index points and what each option would have made held to the signal's exit (signalLegs).
+      indexPoints: sig?.indexPoints ?? null, buyPoints: sig?.buyPoints ?? null, sellPoints: sig?.sellPoints ?? null,
       ...(c ? { stt: c.stt, brokerage: c.brokerage, otherCharges: c.other, netRupees: c.net, netPerLot: c.netPerLot } : {}),
     }
   })
@@ -434,4 +468,4 @@ export function scannerLogBody({ underlying, date, source, dayResults, rows, cha
 }
 
 // A fingerprint of a day's record - post it again only when this changes.
-export const scannerLogSig = (dayKey, body) => JSON.stringify([dayKey, body.signals.map((x) => [x.strategyId, x.side, x.time, x.status, x.r]), body.trades.map((t) => [t.key, t.exitTime, t.exitTime ? t.points : null])])
+export const scannerLogSig = (dayKey, body) => JSON.stringify([dayKey, body.signals.map((x) => [x.strategyId, x.side, x.time, x.status, x.r, x.buyPoints, x.sellPoints]), body.trades.map((t) => [t.key, t.exitTime, t.exitTime ? t.points : null])])

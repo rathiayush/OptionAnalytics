@@ -5,8 +5,8 @@
 // tuning's own trade. Run: npm test (node --test) - see CLAUDE.md.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { capPoints, optionPlanFor, optionTradeAt, ownOptionExit, pinnedTrailOf, simulateOutcome, squareOffMs } from '../src/strategyEngine.js'
-import { followSetups, liveLegsFor, newPosition, positionRows, withCapChange, withLevelChange, withOwnTrail, MIN } from '../src/scannerCore.js'
+import { capPoints, optionPlanFor, optionTradeAt, ownOptionExit, pinnedTrailOf, premiumAt, simulateOutcome, squareOffMs } from '../src/strategyEngine.js'
+import { followSetups, liveLegsFor, newPosition, positionRows, scannerLogBody, signalLegs, withCapChange, withLevelChange, withOwnTrail, MIN } from '../src/scannerCore.js'
 import { scanDaySetups } from '../src/scanDay.js'
 import { DEFAULT_VARIANT, OPTION_DEFAULT, filtersFromTuning, optionOutcome, paramsFromFilters, tuningDay } from '../src/strategyTuning.js'
 import { day } from './synthetic-day.mjs'
@@ -139,4 +139,28 @@ test('tuning == scanner: each option exit as applied, held to the max rules, is 
   }
   assert.ok(compared >= 20, `${compared}`)
   assert.ok(reasons.has('first:own level') || reasons.has('option:own level') || reasons.has('indexSl:own level'), [...reasons].join(', '))
+})
+
+test('the day\'s log: what the option bought and the option sold would have made (held to the signal\'s exit), and the index points', () => {
+  const s = all.find((x) => x.options?.buy && x.options?.sell)
+  assert.ok(s)
+  const dir = s.side === 'LONG' ? 1 : -1
+  const outcome = { status: 'win', r: 1, exitAt: s.t + 20 * MIN, exitPrice: s.entry + dir * 10 }
+  const legs = signalLegs({ ...s, outcome }, syn.oi)
+  assert.ok(Math.abs(legs.indexPoints - 10) < 1e-9)
+  for (const which of ['buy', 'sell']) {
+    const o = s.options[which]
+    const entry = premiumAt(syn.oi, o.side, o.strike, s.t) ?? o.premium
+    const exit = premiumAt(syn.oi, o.side, o.strike, s.t + 21 * MIN) // the exit bar is over
+    assert.equal(legs[`${which}Option`], `${o.action} ${o.strike} ${o.side}`)
+    assert.deepEqual([legs[`${which}Entry`], legs[`${which}Exit`]], [entry, exit])
+    assert.ok(Math.abs(legs[`${which}Points`] - (which === 'buy' ? exit - entry : entry - exit)) < 1e-9)
+  }
+  assert.deepEqual(signalLegs({ ...s, outcome: { status: 'open' } }, syn.oi), {}, 'still open: nothing yet')
+  assert.deepEqual(signalLegs({ ...s, outcome }, null), { indexPoints: legs.indexPoints }, 'no OI: the index points only')
+  // In the log: on the signal, and on the option trade of that signal.
+  const trade = { key: 'k1', setupKey: `${s.id}-${s.t}`, strategy: s.id, setupSide: s.side, entryTime: s.t, premium: 50, action: 'SELL', side: 'PE', strike: 22500, lots: 1, lotSize: 65 }
+  const body = scannerLogBody({ underlying: 'NIFTY', date: '2026-10-05', source: 'server', dayResults: [{ ...s, outcome }], rows: [trade], oi: syn.oi })
+  assert.deepEqual([body.signals[0].buyPoints, body.signals[0].sellPoints, body.signals[0].indexPoints], [legs.buyPoints, legs.sellPoints, legs.indexPoints])
+  assert.deepEqual([body.trades[0].indexPoints, body.trades[0].buyPoints, body.trades[0].sellPoints], [legs.indexPoints, legs.buyPoints, legs.sellPoints])
 })
