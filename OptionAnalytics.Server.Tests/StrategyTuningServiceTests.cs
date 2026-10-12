@@ -562,6 +562,18 @@ public sealed class StrategyTuningServiceTests : IDisposable
         var totals = TuningPerformance.Totals(all);
         Assert.Equal((4, 3, 1, 2.25, 65.0, 8.0, 2, "2026-10-05", "2026-10-06"),
             (totals.Trades, totals.Wins, totals.Losses, totals.TotalR, totals.Points, totals.SoldPoints, totals.Days, totals.FirstDay, totals.LastDay));
+
+        // Per index (points only add up within one): captured / lost / net for the index trade and each option leg, and the
+        // options' net after the costs a trade (3 premium points on NIFTY, 5 on BANKNIFTY here).
+        var withCosts = TuningPerformance.Totals(all, u => u == "NIFTY" ? 3 : 5);
+        Assert.Equal(new[] { "BANKNIFTY", "NIFTY" }, withCosts.ByIndex.Select(x => x.Index));
+        var nifty = withCosts.ByIndex.Single(x => x.Index == "NIFTY");
+        Assert.Equal(3, nifty.Trades);
+        Assert.Equal((3, 2, 1, 35.0, -10.0, 25.0), (nifty.Points.Trades, nifty.Points.Wins, nifty.Points.Losses, nifty.Points.Captured, nifty.Points.Lost, nifty.Points.Net));
+        Assert.Null(nifty.Points.NetAfterCosts); // the index trade's points are not premium points
+        Assert.Equal((3, 6.0, 6.0 - 3 * 3), (nifty.Sold.Trades, nifty.Sold.Net, nifty.Sold.NetAfterCosts!.Value));
+        Assert.Equal(0, nifty.Bought.Trades); // no bought premiums in these rows
+        Assert.Equal((40.0, 2.0 - 5), (withCosts.ByIndex[0].Points.Net, withCosts.ByIndex[0].Sold.NetAfterCosts!.Value));
     }
 
     [Fact]

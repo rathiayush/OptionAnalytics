@@ -128,13 +128,14 @@ export class IndexScanner {
     return alertIdsFor(this.settings(), this.config.top ?? topFifteen(strategyStats([])))
   }
 
-  // Whether a strategy is alerted (paper-traded, and ordered when live today). The futures ones: the alert list. A spot
-  // one also where it was APPLIED - a setting applied for this index or for all (its filters) - or is on this index's
-  // live list: the Top 15 is the futures strategies' and knows nothing of them.
+  // Whether a strategy is alerted (paper-traded, and ordered when live today): the alert list (the Top 15 by default) -
+  // and, whatever that list says, a strategy on this index's live list or with a fine-tuned setting applied on this index
+  // (applying / listing it is the choice to trade it). A spot one also where its all-index filters were set (the Top 15
+  // is the futures strategies' and knows nothing of them).
   isAlerted(id, cfg = this.settings()) {
     if (this.alertIds().includes(id)) return true
-    if (!STRATEGY_BY_ID[id]?.spot) return false
-    return (this.config.liveList?.[this.underlying] ?? []).includes(id) || Object.keys(cfg.filters?.[id] ?? {}).length > 0
+    if ((this.config.liveList?.[this.underlying] ?? []).includes(id) || this.config.filtersByIndex?.[this.underlying]?.[id]) return true
+    return !!STRATEGY_BY_ID[id]?.spot && Object.keys(cfg.filters?.[id] ?? {}).length > 0
   }
 
   setConfig(config) {
@@ -566,27 +567,35 @@ export class IndexScanner {
       trades: rows.map((r) => ({
         key: r.key, strategy: r.strategy, no: meta(r.strategy)?.no, action: r.action, side: r.side, strike: r.strike, lots: r.lots, lotSize: r.lotSize,
         premium: r.premium, current: r.current, points: r.points, rupees: r.rupees, entryTime: r.entryTime, exitTime: r.exitTime, exitReason: r.exitReason,
+        live: !!r.live,
       })),
       pnl: rows.reduce((sum, r) => sum + (r.rupees ?? 0), 0),
     }
   }
 }
 
-// The Top 15 from the scanner log's signals (signals.csv - the pages' record, every day and device): each
-// row's strategy and outcome, as strategyStats reads them.
-export function topFromSignalsCsv(csv) {
-  const lines = String(csv ?? '').split(/\r?\n/).filter(Boolean)
-  if (lines.length < 2) return topFifteen(strategyStats([]))
-  const head = parseCsvLine(lines[0])
-  const col = (name) => head.indexOf(name)
-  const [idCol, statusCol, rCol] = [col('strategy_id'), col('status'), col('r')]
+// The Top 15 from the scanner log's signals - signals.csv (the pages' record) and server-signals.csv (this scanner's own;
+// the strategies run here now) - every day and device: each row's strategy and outcome, as strategyStats reads them. A
+// signal both recorded (the same index, strategy and minute) counts once.
+export function topFromSignalsCsv(csvs) {
   const trades = []
-  for (const line of lines.slice(1)) {
-    const cells = parseCsvLine(line)
-    const status = cells[statusCol]
-    const r = Number(cells[rCol])
-    if (!cells[idCol] || !status || status === 'open' || !Number.isFinite(r)) continue
-    trades.push({ id: cells[idCol], outcome: { status, r } })
+  const seen = new Set()
+  for (const csv of Array.isArray(csvs) ? csvs : [csvs]) {
+    const lines = String(csv ?? '').split(/\r?\n/).filter(Boolean)
+    if (lines.length < 2) continue
+    const head = parseCsvLine(lines[0])
+    const col = (name) => head.indexOf(name)
+    const [idCol, statusCol, rCol, uCol, tCol] = [col('strategy_id'), col('status'), col('r'), col('underlying'), col('time_ist')]
+    for (const line of lines.slice(1)) {
+      const cells = parseCsvLine(line)
+      const status = cells[statusCol]
+      const r = Number(cells[rCol])
+      if (!cells[idCol] || !status || status === 'open' || !Number.isFinite(r)) continue
+      const key = uCol >= 0 && tCol >= 0 ? `${cells[uCol]}|${cells[idCol]}|${String(cells[tCol]).slice(0, 16)}` : null
+      if (key && seen.has(key)) continue
+      if (key) seen.add(key)
+      trades.push({ id: cells[idCol], outcome: { status, r } })
+    }
   }
   return topFifteen(strategyStats(trades))
 }

@@ -16,21 +16,40 @@ public sealed class StrategyTuningController : ControllerBase
     private readonly OptionAnalytics.Server.Dhan.DhanDataApiRateLimiter _dhanLimiter;
     private readonly StrategyTuningQueue _queue;
     private readonly ScannerLogStore _scannerLog;
+    private readonly TradeSettingsStore? _trade;
+    private readonly LiveListService? _liveList;
 
-    public StrategyTuningController(StrategyTuningService tuning, OptionAnalytics.Server.Dhan.DhanDataApiRateLimiter dhanLimiter, StrategyTuningQueue queue, ScannerLogStore scannerLog)
+    public StrategyTuningController(StrategyTuningService tuning, OptionAnalytics.Server.Dhan.DhanDataApiRateLimiter dhanLimiter, StrategyTuningQueue queue, ScannerLogStore scannerLog,
+        TradeSettingsStore? trade = null, LiveListService? liveList = null)
     {
         _tuning = tuning;
         _dhanLimiter = dhanLimiter;
         _queue = queue;
         _scannerLog = scannerLog;
+        _trade = trade;
+        _liveList = liveList;
     }
 
     /// <summary>`What`: what is tuned - "trade" (the trade settings), "oi" (the OI confirmation) or "both"
     /// (the OI confirmation first, then the trade settings on top of it), "option", "all" - or "check": no new tuning,
-    /// only every setting found so far re-checked on the job's days it was not chosen on (the cross-check).</summary>
-    public sealed record RunRequest(string Underlying, JsonNode? Strategies, int Days = 30, bool IncludeEstimated = false, int MinTrades = 8, string? What = null, string[]? OiFactors = null, string? Search = null, string? Data = null, string? From = null, string? To = null);
+    /// only every setting found so far re-checked on the job's days it was not chosen on (the cross-check) - or "lab": ONE
+    /// strategy measured with the setting in `Params` (the Strategy lab page) beside it as written and as applied; no
+    /// tuning, nothing written to the tuning history.</summary>
+    public sealed record RunRequest(string Underlying, JsonNode? Strategies, int Days = 30, bool IncludeEstimated = false, int MinTrades = 8, string? What = null, string[]? OiFactors = null, string? Search = null, string? Data = null, string? From = null, string? To = null,
+        JsonObject? Params = null);
     private static readonly HashSet<string> OiFactorKeys = new() { "tradeOiWindow", "tradeFutWindow", "tradeOiFlow", "tradeOiCum", "tradeSideOi", "tradeSideCum", "tradeFutOi", "tradeMoveSize", "tradeDayType", "tradeWallRoom", "tradeWallOi" };
-    private static readonly HashSet<string> TuneWhat = new() { "trade", "oi", "both", "option", "all", "check" };
+    private static readonly HashSet<string> TuneWhat = new() { "trade", "oi", "both", "option", "all", "check", "lab" };
+    // The parameters a lab setting may set (strategyTuning.js labEditableKeys: TUNED_SETTING_KEYS and the order-flow
+    // filters) - anything else is refused.
+    private static readonly HashSet<string> LabParamKeys = new()
+    {
+        "tradeSide", "tradeFrom", "tradeTo", "tradeStopX", "tradeTargetX", "tradeTimeStop", "tradeTrail",
+        "tradeOiWindow", "tradeFutWindow", "tradeOiFlow", "tradeOiCum", "tradeWallOi", "tradeSideOi", "tradeSideCum",
+        "tradeFutOi", "tradeMoveSize", "tradeDayType", "tradeWallRoom",
+        "optLeg", "optMoneyness", "optExit", "optSlPct", "optTargetPct",
+        // The order-flow confirmation (the learning's filters - futures only).
+        "tradeTape", "tradeBig", "tradeBook", "tradeCvd", "tradeVolume",
+    };
 
     /// <summary>POST /api/strategy-tuning/run - starts a job (one at a time).</summary>
     [HttpPost("run")]
@@ -41,8 +60,9 @@ public sealed class StrategyTuningController : ControllerBase
         if (job is null) return BadRequest(new { error = invalid });
         var error = _tuning.Start(job);
         if (error is not null) return Conflict(new { error });
-        // On the schedule too (marked manual), so every run is there to keep track of - and to delete with its data.
-        _queue.AddStarted(job, DateTimeOffset.UtcNow);
+        // On the schedule too (marked manual), so every run is there to keep track of - and to delete with its data. A lab
+        // run keeps no data (its result is the lab page's own).
+        if (job.What != "lab") _queue.AddStarted(job, DateTimeOffset.UtcNow);
         return Ok(_tuning.Status());
     }
 
@@ -60,7 +80,16 @@ public sealed class StrategyTuningController : ControllerBase
         };
         if (strategies is null) return (null, "Strategies must be top3, top5, all or a list of strategy ids.");
         var what = string.IsNullOrWhiteSpace(request.What) ? "trade" : request.What.Trim().ToLowerInvariant();
-        if (!TuneWhat.Contains(what)) return (null, "What must be trade, oi, both, option, all or check.");
+        if (!TuneWhat.Contains(what)) return (null, "What must be trade, oi, both, option, all, check or lab.");
+        JsonObject? labParams = null;
+        if (what == "lab")
+        {
+            if (strategies is not JsonArray { Count: 1 }) return (null, "A lab run is for one strategy (Strategies: [its id]).");
+            labParams = request.Params ?? new JsonObject();
+            var unknownKeys = labParams.Select(kv => kv.Key).Where(k => !LabParamKeys.Contains(k)).ToList();
+            if (unknownKeys.Count > 0) return (null, $"Params may only set the tuned settings - not {string.Join(", ", unknownKeys)}.");
+            if (labParams.Any(kv => kv.Value is not JsonValue)) return (null, "Each of Params must be a single value.");
+        }
         var search = string.IsNullOrWhiteSpace(request.Search) ? "step" : request.Search.Trim().ToLowerInvariant();
         if (search is not ("step" or "full")) return (null, "Search must be step or full.");
         var data = string.IsNullOrWhiteSpace(request.Data) ? "futures" : request.Data.Trim().ToLowerInvariant();
@@ -71,7 +100,8 @@ public sealed class StrategyTuningController : ControllerBase
         if (!string.IsNullOrWhiteSpace(request.From) && !string.IsNullOrWhiteSpace(request.To) && from > to) return (null, "From must be on or before To.");
         var factors = (request.OiFactors ?? Array.Empty<string>()).Distinct().ToList();
         if (factors.Any(f => !OiFactorKeys.Contains(f))) return (null, "OiFactors must be one of tradeOiWindow, tradeFutWindow, tradeOiFlow, tradeOiCum, tradeSideOi, tradeSideCum, tradeFutOi, tradeMoveSize, tradeDayType, tradeWallRoom, tradeWallOi.");
-        return (new TuningJob(u, strategies.DeepClone(), Math.Clamp(request.Days, 1, 250), request.IncludeEstimated, Math.Clamp(request.MinTrades, 2, 100), what, factors, search, data, string.IsNullOrWhiteSpace(request.From) ? null : request.From.Trim(), string.IsNullOrWhiteSpace(request.To) ? null : request.To.Trim()), null);
+        return (new TuningJob(u, strategies.DeepClone(), Math.Clamp(request.Days, 1, 250), request.IncludeEstimated, Math.Clamp(request.MinTrades, 2, 100), what, factors, search, data, string.IsNullOrWhiteSpace(request.From) ? null : request.From.Trim(), string.IsNullOrWhiteSpace(request.To) ? null : request.To.Trim())
+        { Params = (JsonObject?)labParams?.DeepClone() }, null);
     }
 
     /// <summary>A job to schedule: the Run request, for one index or several (Underlyings), not before RunAtUtc (null:
@@ -210,7 +240,11 @@ public sealed class StrategyTuningController : ControllerBase
             .ToList();
         if (!string.Equals(order, "asc", StringComparison.OrdinalIgnoreCase)) all.Reverse();
         var page = all.Skip(Math.Max(0, skip)).Take(Math.Clamp(take, 1, 5000)).ToList();
-        return Ok(new { total = all.Count, totals = TuningPerformance.Totals(all), trades = page });
+        // The options' costs a trade on each index, in premium points: the slippage both ways (its Trade settings) and the
+        // charges (the live list's rules) - the same costs the live list judges by.
+        var charges = (double)(_liveList?.Rules().ChargesPoints ?? 0);
+        double CostOf(string u) => _trade is null || !TradeSettingsStore.Underlyings.Contains(u) ? charges : 2 * (double)_trade.Get(u).SlippagePoints + charges;
+        return Ok(new { total = all.Count, totals = TuningPerformance.Totals(all, CostOf), trades = page });
     }
 
     /// <summary>What to clear: the tuning results and history, the fetched-days cache, the scanner's record.</summary>
@@ -272,6 +306,14 @@ public sealed class StrategyTuningController : ControllerBase
                 ? File(System.IO.File.ReadAllBytes(path), "text/csv", $"{runId}-{kind}.csv")
                 : NotFound(new { error = $"No {kind} for run {runId}." });
         return _tuning.HistoryRows(runId, kind) is { } rows ? Ok(rows) : NotFound(new { error = $"No {kind} for run {runId}." });
+    }
+
+    /// <summary>GET /api/strategy-tuning/lab/{underlying} - the last Strategy lab run for that index (data = futures / spot).</summary>
+    [HttpGet("lab/{underlying}")]
+    public IActionResult LabResult(string underlying, [FromQuery] string? data = null)
+    {
+        var d = string.Equals(data, "spot", StringComparison.OrdinalIgnoreCase) ? "spot" : "futures";
+        return _tuning.LabResult(underlying, d) is { } r ? Ok(r) : NotFound(new { error = $"No lab run for {underlying.ToUpperInvariant()} yet." });
     }
 
     /// <summary>GET /api/strategy-tuning/result/{underlying} - the last finished job for that index.</summary>

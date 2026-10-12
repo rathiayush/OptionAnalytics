@@ -272,6 +272,12 @@ test('the Top 15 from the scanner log\'s signals', () => {
   const top = topFromSignalsCsv(csv)
   assert.ok(top.ids.length > 0)
   assert.deepEqual(topFromSignalsCsv('').ids, topFromSignalsCsv(null).ids)
+  // The pages' record and the server scanner's own together; a signal in both (same index, strategy, minute) counts once.
+  const head = 'key,date,underlying,time_ist,strategy_id,status,r'
+  const page = [head, 'p1,d,NIFTY,2026-10-12 10:15:00,wallBreak,win,2'].join('\n')
+  const own = [head, 's1,d,NIFTY,2026-10-12 10:15:20,wallBreak,win,2', 's2,d,NIFTY,2026-10-12 11:00:00,wallBreak,loss,-1'].join('\n')
+  assert.deepEqual(topFromSignalsCsv([page, own]), topFromSignalsCsv([[head, 'p1,d,NIFTY,2026-10-12 10:15:00,wallBreak,win,2', 's2,d,NIFTY,2026-10-12 11:00:00,wallBreak,loss,-1'].join('\n')]))
+  assert.deepEqual(topFromSignalsCsv([null, own]).ids, topFromSignalsCsv(own).ids)
 })
 
 test('a strategy tuned to BUY its option: the server scanner trades that - unless a side was chosen, which wins', async () => {
@@ -309,6 +315,28 @@ test('a strategy tuned to BUY its option: the server scanner trades that - unles
   // A side chosen where the trading happens is the last word - the tuned BUY does not override it.
   const chosen = (await run('sell')).filter((p) => p.strategy === id)
   assert.ok(chosen.length && chosen.every((p) => p.action === 'SELL'), 'the chosen side wins over the strategy')
+})
+
+test('a strategy applied on an index, or on its live list, is traded there even when it is not in the alert list', async () => {
+  const probe = new IndexScanner('NIFTY', fakeIo())
+  probe.reset(DATE)
+  probe.setConfig({ alertIds: ALL_IDS, settings: { autoPaper: 'sell' } })
+  await runDay(probe, fakeIo(), at(15), at(300))
+  const id = probe.positions[0]?.strategy
+  assert.ok(id, 'the scanner traded')
+  const traded = async (config) => {
+    const io = fakeIo()
+    const scanner = new IndexScanner('NIFTY', io)
+    scanner.reset(DATE)
+    scanner.setConfig({ alertIds: [], settings: { autoPaper: 'sell' }, ...config })
+    await runDay(scanner, io, at(15), at(300))
+    return scanner.positions.filter((p) => p.strategy === id).length
+  }
+  assert.equal(await traded({}), 0, 'not alerted, not applied: signals only')
+  assert.ok(await traded({ filtersByIndex: { NIFTY: { [id]: { tradeSide: 'both' } } } }) > 0, 'applied on NIFTY: traded')
+  assert.equal(await traded({ filtersByIndex: { BANKNIFTY: { [id]: { tradeSide: 'both' } } } }), 0, 'applied on another index only: not here')
+  assert.ok(await traded({ liveList: { NIFTY: [id] } }) > 0, 'on NIFTY\'s live list: traded (paper until Live today)')
+  assert.equal(await traded({ settings: { autoPaper: 'sell', filters: { [id]: { tradeSide: 'both' } } } }), 0, 'a futures strategy\'s all-index filters alone do not make it traded')
 })
 
 test('a setting applied for ONE index (the tuning pages\' Apply): that index trades with it, the others keep theirs', async () => {

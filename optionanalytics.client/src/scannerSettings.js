@@ -1,4 +1,4 @@
-// Where the Order Flow scanner keeps its settings in the browser (StrategyScanner), and how a strategy's tuned
+// Where the scanner settings are kept in the browser (a copy of the server scanner's), and how a strategy's tuned
 // trade filters are applied to them - in this browser and in the server scanner's config.
 import { filtersFromTuning } from './strategyTuning.js'
 import { filtersForIndex } from './strategyEngine.js'
@@ -51,6 +51,8 @@ export async function applyTunedFilters(id, params, { option = false, index = nu
     // on unseen days. The scanner ignores the key (strategyFilters keeps only real filters).
     delete next._tuned
     if (tuned) next._tuned = tuned
+    // When it was applied - its run (the server scanner's record) is shown from then on.
+    next._appliedAt = Date.now()
     // The strategy's own lot size on this index (lotsFor): a number sets it, null goes back to the index's lots, left out
     // keeps what it had.
     if (lots !== undefined) setLots(next, lots)
