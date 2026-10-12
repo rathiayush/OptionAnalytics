@@ -95,6 +95,12 @@ When adding or changing a strategy:
 
 ## Other rules
 
+- Every PAST-day Dhan Data API response (intraday spot / futures / option candles, the rolling / expired-option chain) is
+  kept on disk by `DhanDataCache` (`Storage:DhanCachePath`, the persistent volume in docker-compose) and answered from
+  there - only closed windows with full sessions; today, empty or half days go to Dhan again. A new Dhan data call for
+  past days goes through `DhanHistoricalDataService` / `DhanRollingOptionDataService` so it is cached too
+  (`DhanDataCacheTests.cs`).
+
 - Never commit local-only auth bypasses, credentials or `appsettings.Local.json`; never change Dhan
   credentials. Don't run the real server against Dhan just to test - use the tests, `vite preview` with
   a mocked `/api`, or a local feeder.

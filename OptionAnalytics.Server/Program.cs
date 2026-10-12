@@ -131,6 +131,8 @@ builder.Services.AddHttpClient<DhanTotpAuthService>();
 // doc comment for why this must be one singleton rather than one per service (Dhan's Data API
 // limit is account-wide, not per-endpoint).
 builder.Services.AddSingleton<DhanDataApiRateLimiter>();
+// Every past-day Dhan Data API response kept on disk (Storage:DhanCachePath) and answered from there next time.
+builder.Services.AddSingleton<DhanDataCache>();
 builder.Services.AddSingleton<DhanHistoricalDataService>();
 builder.Services.AddSingleton<DhanRollingOptionDataService>();
 // Reads NiftyDataCollector's own TimescaleDB instead of calling Dhan live - inert (never even

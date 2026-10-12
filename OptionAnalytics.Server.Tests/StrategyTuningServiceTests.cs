@@ -128,11 +128,11 @@ public sealed class StrategyTuningServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task DeletingAFinishedJob_RemovesItsRunResultAndCachedDays_AndNothingElse()
+    public async Task DeletingAFinishedJob_RemovesItsRunAndResult_AndKeepsEveryCachedDay()
     {
         // A fake tuning job: writes its history run, a result naming it, its cached days (NIFTY's folder + an older file
-        // with no index folder for one of its dates), and prints the run id as tune.mjs does. Another run and another
-        // index's cache are there beside it and must stay.
+        // with no index folder for one of its dates), and prints the run id as tune.mjs does. Another run and every cached
+        // day stay - past days are kept for good (other runs read them; fetching them again costs Dhan calls).
         const string runId = "NIFTY-futures-20261010-153000";
         var script = Script($$"""
             import { writeFileSync, mkdirSync, appendFileSync } from 'node:fs'
@@ -165,16 +165,17 @@ public sealed class StrategyTuningServiceTests : IDisposable
         var (deleted, error) = queue.Delete(item.Id);
 
         Assert.Null(error);
-        Assert.Equal((3, 2, 3, true), (deleted!.HistoryFiles, deleted.ResultFiles, deleted.CacheFiles, deleted.RunRow)); // latest + dated copy; 2 NIFTY days + the older file of 06 Oct
+        Assert.Equal((3, 2, 0, true), (deleted!.HistoryFiles, deleted.ResultFiles, deleted.CacheFiles, deleted.RunRow)); // latest + dated copy; no cached day
         Assert.Empty(Directory.GetFiles(Path.Combine(tuning, "history"), runId + "*"));
         Assert.DoesNotContain(runId, File.ReadAllText(Path.Combine(tuning, "history", "runs.csv")));
         Assert.Contains("NIFTY-futures-20261001-100000", File.ReadAllText(Path.Combine(tuning, "history", "runs.csv")));
         Assert.True(File.Exists(Path.Combine(tuning, "history", "NIFTY-futures-20261001-100000-trades.csv")));
         Assert.True(File.Exists(Path.Combine(tuning, "NIFTY-20261001-100000.json")));
         Assert.Null(s.Result("NIFTY"));
-        Assert.Equal(new[] { "2026-10-01-oi-c.json.gz" }, Directory.GetFiles(Path.Combine(cache, "NIFTY", "2026-10")).Select(Path.GetFileName));
-        Assert.True(File.Exists(Path.Combine(cache, "BANKNIFTY", "2026-10", "2026-10-06-oi-d.json.gz"))); // another index's day stays
-        Assert.Equal(new[] { "2026-10-02-oi-f.json.gz" }, Directory.GetFiles(Path.Combine(cache, "2026-10")).Select(Path.GetFileName));
+        // Every cached day stays - its own dates too.
+        Assert.Equal(new[] { "2026-10-01-oi-c.json.gz", "2026-10-06-oi-a.json.gz", "2026-10-07-flow-b.json.gz" }, Directory.GetFiles(Path.Combine(cache, "NIFTY", "2026-10")).Select(Path.GetFileName).Order());
+        Assert.True(File.Exists(Path.Combine(cache, "BANKNIFTY", "2026-10", "2026-10-06-oi-d.json.gz")));
+        Assert.Equal(new[] { "2026-10-02-oi-f.json.gz", "2026-10-06-oi-e.json.gz" }, Directory.GetFiles(Path.Combine(cache, "2026-10")).Select(Path.GetFileName).Order());
         Assert.DoesNotContain(queue.Items(), i => i.Id == item.Id);
         // A queued job: just taken off; an unknown one: said so.
         var queued = queue.Add(Job(), DateTimeOffset.UtcNow.AddDays(1), false);

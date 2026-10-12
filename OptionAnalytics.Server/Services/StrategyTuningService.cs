@@ -76,11 +76,11 @@ public sealed class StrategyTuningService
     }
 
     /// <summary>
-    /// Removes ONE run and everything it produced: its history files ({run_id}-trades / -settings / -days.csv), its row
-    /// in runs.csv, its result (the latest and the dated copy - those naming this run, or for an older result the same
-    /// index finished within two minutes of it), and the days it fetched into the cache - that index's files for the
-    /// run's dates (its day list; else its first..last day). An older cache file with no index folder for one of those
-    /// dates goes too (it cannot be told apart). Refused for the run of a job still running.
+    /// Removes ONE run: its history files ({run_id}-trades / -settings / -days.csv), its row in runs.csv and its result
+    /// (the latest and the dated copy - those naming this run, or for an older result the same index finished within two
+    /// minutes of it). The days it fetched stay in the cache, kept for good like the server's Dhan cache: they are past
+    /// days that never change, other runs over the same dates read them too, and fetching them again costs Dhan calls
+    /// (ClearCache / ClearHistory(alsoCache) remove them when asked for). Refused for the run of a job still running.
     /// </summary>
     public (TuningRunDeleted? Deleted, string? Error) DeleteRun(string runId)
     {
@@ -92,14 +92,6 @@ public sealed class StrategyTuningService
         var run = HistoryRuns().FirstOrDefault(r => r.GetValueOrDefault("run_id") == runId);
         var index = run?.GetValueOrDefault("index") ?? runId.Split('-')[0];
         var data = run?.GetValueOrDefault("data") ?? runId.Split('-')[1];
-        // The dates it fetched: its day list, else first..last day.
-        var dates = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var d in HistoryRows(runId, "days") ?? new()) if (d.GetValueOrDefault("date") is { Length: 10 } date) dates.Add(date);
-        if (dates.Count == 0 && run is not null && DateOnly.TryParse(run.GetValueOrDefault("first_day"), out var a) && DateOnly.TryParse(run.GetValueOrDefault("last_day"), out var b))
-        {
-            if (a > b) (a, b) = (b, a);
-            for (var d = a; d <= b && dates.Count < 400; d = d.AddDays(1)) dates.Add(d.ToString("yyyy-MM-dd"));
-        }
         try
         {
             var historyFiles = 0;
@@ -116,25 +108,8 @@ public sealed class StrategyTuningService
             {
                 if (ResultBelongsTo(file, runId, finishedIst, data)) { File.Delete(file); results++; }
             }
-            var cache = 0;
-            var versions = Directory.Exists(CacheDirectory) ? Directory.GetDirectories(CacheDirectory) : Array.Empty<string>();
-            foreach (var version in versions)
-            {
-                foreach (var folder in new[] { Path.Combine(version, index.ToUpperInvariant()), version })
-                {
-                    if (!Directory.Exists(folder)) continue;
-                    foreach (var month in Directory.GetDirectories(folder))
-                    {
-                        if (!System.Text.RegularExpressions.Regex.IsMatch(Path.GetFileName(month), "^[0-9]{4}-[0-9]{2}$")) continue;
-                        foreach (var file in Directory.GetFiles(month, "*.json.gz"))
-                        {
-                            var name = Path.GetFileName(file);
-                            if (name.Length >= 10 && dates.Contains(name[..10])) { File.Delete(file); cache++; }
-                        }
-                    }
-                }
-            }
-            _logger.LogInformation("Tuning run {RunId} deleted: {History} history file(s), {Results} result(s), {Cache} cached day file(s).", runId, historyFiles, results, cache);
+            const int cache = 0; // the fetched days stay (see above)
+            _logger.LogInformation("Tuning run {RunId} deleted: {History} history file(s), {Results} result(s); its fetched days stay cached.", runId, historyFiles, results);
             return (new TuningRunDeleted(runId, historyFiles, results, cache, row), null);
         }
         catch (Exception ex)

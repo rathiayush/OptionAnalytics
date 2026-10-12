@@ -56,9 +56,9 @@ public sealed class StrategyTuningQueue
         }
     }
 
-    /// <summary>Deletes a job and EVERYTHING it produced: a queued one is just taken off; a finished one also loses its
-    /// history run (trades, settings, days), its result and the days it fetched into the cache (DeleteRun). A running
-    /// one is refused - stop it first. Returns what was removed, or why not.</summary>
+    /// <summary>Deletes a job and what it produced: a queued one is just taken off; a finished one also loses its history
+    /// run (trades, settings, days) and its result (DeleteRun) - the days it fetched stay cached for good. A running one
+    /// is refused - stop it first. Returns what was removed, or why not.</summary>
     public (TuningRunDeleted? Deleted, string? Error) Delete(string id)
     {
         TuningQueueItem? item;
@@ -102,7 +102,7 @@ public sealed class StrategyTuningQueue
                 if (startupGrace) continue;
                 var state = status.State switch { "done" => "done", "cancelled" => "cancelled", "failed" => "failed", _ => "failed" };
                 var error = state == "done" ? null : status.Error ?? (status.State == "idle" ? "the server restarted while it ran" : null);
-                // The run it wrote - deleting the job later removes that run, its result and its cached days too.
+                // The run it wrote - deleting the job later removes that run and its result (its fetched days stay cached).
                 _items[i] = item with { State = state, FinishedUtc = now, Error = error, RunId = status.RunId ?? item.RunId };
                 changed = true;
                 if (item.RepeatDaily)
