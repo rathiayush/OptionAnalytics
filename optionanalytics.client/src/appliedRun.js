@@ -1,4 +1,4 @@
-import { filtersForIndex } from './strategyEngine.js'
+import { filtersForIndex, optionPlanFor } from './strategyEngine.js'
 
 // How a strategy applied to an index has run: its signals and option trades in the server scanner's own record
 // (server-signals.csv / server-trades.csv rows, as GET /api/scanner-log/rows/{file} gives them), from when it was applied.
@@ -35,6 +35,12 @@ export function strategyState({ id, spot, u, cfg, settings, alertIds }) {
   // filters set (the Top 15 knows nothing of the spot strategies).
   const alerted = alertIds.includes(id) || onList || !!applied || (!!spot && Object.keys(filters ?? {}).length > 0)
   const mode = !enabled ? 'off' : alerted && onList && indexLive ? 'live' : alerted && onList ? 'list' : alerted ? 'paper' : 'signals'
-  return { applied, onList, indexLive, enabled, alerted, mode }
+  // What an alert of it trades there - the runner's own rule (indexScanner.settings + optionPlanFor): the index's "On an
+  // alert" (Trade settings) Sell / Buy wins for every strategy; Per strategy hands it to the strategy's own setting on
+  // this index (sell where it has none); Alert only trades nothing.
+  const autoTrade = cfg?.trade?.[u]?.autoTrade ?? settings?.autoPaper ?? 'strategy'
+  const plan = optionPlanFor(id, filtersForIndex({ filters: settings?.filters, filtersByIndex: cfg?.filtersByIndex }, u), { autoPaper: autoTrade, moneyness: settings?.moneyness ?? 0 })
+  const option = { leg: plan.leg, autoTrade, tunedLeg: plan.tunedLeg, overrode: plan.overrode }
+  return { applied, onList, indexLive, enabled, alerted, mode, option }
 }
 

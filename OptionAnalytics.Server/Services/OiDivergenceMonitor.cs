@@ -11,8 +11,10 @@ namespace OptionAnalytics.Server.Services;
 /// bar re-checks the underlying. Only completed minutes are read, and only OI seen up to the end of the
 /// last of them - nothing later than the moment the alert is about.
 ///
-/// The alert goes to Telegram and to every open page as "oiDivergenceAlert" (SpotHub); the OI Replay page
-/// shows it as a notification. Once per zone per underlying inside the cool-down.
+/// A zone found is not sent at once: it waits until the ConfirmMinutes (5) completed minutes after it confirm it
+/// (DivergenceGate / PriceOiDivergenceDetector.Confirm) and is dropped, unsent, when they do not. The confirmed alert
+/// goes to Telegram and to every open page as "oiDivergenceAlert" (SpotHub); the OI Replay page shows it as a
+/// notification. Once per zone per underlying inside the cool-down.
 /// </summary>
 public sealed class OiDivergenceMonitor : BackgroundService
 {
@@ -23,7 +25,7 @@ public sealed class OiDivergenceMonitor : BackgroundService
     private readonly DivergenceOptions _options;
     private readonly object _lock = new();
     private readonly OiMinuteBook _book = new();
-    private readonly Dictionary<(string Underlying, string Zone), DateTimeOffset> _lastAlert = new();
+    private readonly DivergenceGate _gate;
     private readonly LinkedList<PriceOiDivergence> _history = new();
 
     public OiDivergenceMonitor(SpotFeedHostedService spotFeed, TelegramAlertService telegram, IHubContext<SpotHub> hub,
@@ -34,6 +36,7 @@ public sealed class OiDivergenceMonitor : BackgroundService
         _hub = hub;
         _logger = logger;
         _options = configuration?.GetSection("OiDivergence").Get<DivergenceOptions>() ?? new DivergenceOptions();
+        _gate = new DivergenceGate(_options);
     }
 
     public IReadOnlyList<PriceOiDivergence> Recent()
@@ -68,20 +71,32 @@ public sealed class OiDivergenceMonitor : BackgroundService
     {
         try
         {
-            var found = PriceOiDivergenceDetector.Evaluate(underlying, state.GetClosedCandles(), state.Step, _book.Strikes(underlying),
-                (side, strike, minute) => _book.At(underlying, side, strike, minute, _options.MaxCarryMinutes), _options);
-            if (found is null) return;
+            var closed = state.GetClosedCandles();
+            long? OiAt(string side, decimal strike, long minute) => _book.At(underlying, side, strike, minute, _options.MaxCarryMinutes);
+            var found = PriceOiDivergenceDetector.Evaluate(underlying, closed, state.Step, _book.Strikes(underlying), OiAt, _options);
 
+            IReadOnlyList<PriceOiDivergence> alerts;
             lock (_lock)
             {
-                if (_lastAlert.TryGetValue((underlying, found.Zone), out var at) && found.BarTime - at < TimeSpan.FromMinutes(_options.CooldownMinutes)) return;
-                _lastAlert[(underlying, found.Zone)] = found.BarTime;
-                _history.AddFirst(found);
-                while (_history.Count > 50) _history.RemoveLast();
+                var (sent, dropped) = _gate.OnBar(underlying, closed, OiAt, found);
+                alerts = sent;
+                foreach (var (zone, reason) in dropped)
+                    _logger.LogInformation("OI divergence not confirmed, not sent: {Underlying} {Zone} zone at {Side} {Strike} - {Reason}", zone.Underlying, zone.Zone, zone.Side, zone.Strike, reason);
+                foreach (var alert in alerts)
+                {
+                    _history.AddFirst(alert);
+                    while (_history.Count > 50) _history.RemoveLast();
+                }
             }
-            _logger.LogInformation("OI divergence: {Message}", found.Message);
-            if (_options.Telegram) _ = _telegram.SendAsync($"[OI divergence] <b>{found.Underlying}</b> {found.Zone.ToUpperInvariant()} zone\n{found.Message}", cancellationToken);
-            _ = BroadcastAsync(found);
+            if (found is not null && _options.ConfirmMinutes > 0)
+                _logger.LogInformation("OI divergence found, confirming over {Minutes} min: {Message}", _options.ConfirmMinutes, found.Message);
+            foreach (var alert in alerts)
+            {
+                _logger.LogInformation("OI divergence: {Message}", alert.Message);
+                var confirmed = alert.ConfirmMinutes > 0 ? $" - confirmed after {alert.ConfirmMinutes} min" : "";
+                if (_options.Telegram) _ = _telegram.SendAsync($"[OI divergence] <b>{alert.Underlying}</b> {alert.Zone.ToUpperInvariant()} zone{confirmed}\n{alert.Message}", cancellationToken);
+                _ = BroadcastAsync(alert);
+            }
         }
         catch (Exception ex)
         {

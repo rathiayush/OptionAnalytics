@@ -3577,8 +3577,9 @@ export default function OiReplayPage() {
     return () => clearInterval(id)
   }, [isLive])
 
-  // Price moved for 3 minutes but the nearest strike's OI did not give way (the server's OiDivergenceMonitor,
-  // which also sends it to Telegram): a notification, a chime and the words - the scanner's switches apply.
+  // Price moved for 3 minutes but the nearest strike's OI did not give way, and the 5 minutes after it confirmed it (the
+  // level held, price turned away, the OI still holding) - the server's OiDivergenceMonitor, which also sends it to
+  // Telegram: a notification, a chime and the words - the scanner's switches apply.
   const handleDivergenceAlert = (alert) => {
     if (!alert?.zone) return
     let cfg = {}
@@ -3586,10 +3587,11 @@ export default function OiReplayPage() {
     if (cfg.alerts === false) return
     const discount = alert.zone === 'Discount'
     if (cfg.sound !== false) chime(discount)
-    if (cfg.voice !== false) speak(`${alert.underlying} ${discount ? 'discount' : 'premium'} zone. ${alert.side === 'PE' ? 'Put' : 'Call'} OI holding at ${alert.strike}.`)
+    const confirmed = alert.confirmMinutes > 0
+    if (cfg.voice !== false) speak(`${alert.underlying} ${discount ? 'discount' : 'premium'} zone${confirmed ? ' confirmed' : ''}. ${alert.side === 'PE' ? 'Put' : 'Call'} OI holding at ${alert.strike}.`)
     notification.open({
       key: `divergence-${alert.underlying}-${alert.zone}-${alert.barTime}`, placement: 'topRight', duration: 25,
-      message: <span style={{ color: discount ? UP_COLOR : DOWN_COLOR, fontWeight: 700 }}>⚖ {alert.underlying} · {discount ? 'discount zone' : 'premium zone'} · {alert.side} {alert.strike}</span>,
+      message: <span style={{ color: discount ? UP_COLOR : DOWN_COLOR, fontWeight: 700 }}>⚖ {alert.underlying} · {discount ? 'discount zone' : 'premium zone'}{confirmed ? ` confirmed (${alert.confirmMinutes} min)` : ''} · {alert.side} {alert.strike}</span>,
       description: <span style={{ fontSize: 12 }}>{alert.message}</span>,
     })
   }
