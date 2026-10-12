@@ -26,6 +26,9 @@ services:
       # Same idea for the rolling-option (CE/PE premium) prefetch's own per-expiry CSVs - see
       # ExpiredOptionDataPrefetchHostedService.
       Storage__ExpiredOptionDataPath: /app/data/expired-option-data
+      # Every past-day Dhan Data API response (spot / futures / option candles, the expired-option chain) - DhanDataCache.
+      # On the persistent volume, so a closed day is asked of Dhan once, not again after every redeploy.
+      Storage__DhanCachePath: /app/data/dhan-cache
       # The strategy scanner's record - signals.csv and trades.csv (ScannerLogStore).
       Storage__ScannerLogPath: /app/data/scanner-log
       # Live trades the server closes itself at the scanner's time stop / 15:10 (LiveTimeExitStore).
