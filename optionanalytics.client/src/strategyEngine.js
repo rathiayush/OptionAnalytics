@@ -128,6 +128,12 @@ export const SPOT_STRATEGIES = [
   { id: 'spotStraddleFade', no: 108, name: 'Spot: ATM straddle decaying, both sides written - fade the wall back to the middle', short: 'Spot straddle fade', spot: true },
   { id: 'spotWallShift', no: 109, name: 'Spot: writers migrating - the OI wall steps one strike with the price', short: 'Spot wall shift', spot: true },
   { id: 'spotPremDiverge', no: 110, name: 'Spot: new high / low the ATM premium does not confirm', short: 'Spot premium divergence', spot: true },
+  // 111-113: the previous day's SPOT volume profile (its LVNs, POC, HVNs, value area - known before the session) with
+  // the option chain behind the trade. Low-volume areas are where price was not accepted: it is either refused there
+  // or crosses them fast to the next high-volume node, where it can be refused again (the POC most of all).
+  { id: 'spotLvnReject', no: 111, name: 'Spot: LVN refused - back to the volume it came from (spot volume profile + OI)', short: 'Spot LVN refused', spot: true, group: 'profile' },
+  { id: 'spotLvnFill', no: 112, name: 'Spot: LVN filled fast - run to the POC / next volume node (spot volume profile + OI)', short: 'Spot LVN fill', spot: true, group: 'profile' },
+  { id: 'spotPocReject', no: 113, name: 'Spot: POC rejection after a fast run into it (spot volume profile + OI)', short: 'Spot POC rejection', spot: true, group: 'profile' },
 ]
 export const STRATEGY_BY_ID = Object.fromEntries([...STRATEGIES, ...SPOT_STRATEGIES].map((s) => [s.id, s]))
 /** The strategies in use - what the scanner runs, lists, alerts on and scores. */

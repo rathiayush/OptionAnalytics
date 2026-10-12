@@ -49,12 +49,47 @@ const avgRange = (bars, n = 14) => {
   return last.length ? last.reduce((s, b) => s + (b.high - b.low), 0) / last.length : 0
 }
 
+/** The previous day's spot volume profile as the strategies read it, from GET /api/oi-replay/{index}/previous-day-volume-
+ *  profile (its levels and bins - not its bars), else null (failed / none). */
+export function spotVpOf(body) {
+  if (!body?.success || !(Number(body.poc) > 0)) return null
+  return { poc: Number(body.poc), vah: Number(body.vah), val: Number(body.val), hvn: (body.hvn ?? []).map(Number), lvn: (body.lvn ?? []).map(Number), bins: body.bins ?? [], date: body.profileDate ?? null }
+}
+
+/**
+ * The low-volume zones of a volume profile (`vp` - the previous day's spot profile: lvn[], and its bins[{ price, volume }]
+ * when it has them): each LVN widened over the neighbouring bins that are thin too (under 60% of the average bin, at most
+ * 3 bins each way) - { low, high, mid, lvn }. Without bins, `halfWidth` either side of the LVN. Sorted by price.
+ */
+export function lvnZones(vp, halfWidth) {
+  const lvns = (vp?.lvn ?? []).map(Number).filter((x) => Number.isFinite(x) && x > 0)
+  if (!lvns.length) return []
+  const bins = (vp.bins ?? []).map((b) => ({ price: Number(b.price), volume: Number(b.volume) })).filter((b) => Number.isFinite(b.price) && Number.isFinite(b.volume)).sort((a, b) => a.price - b.price)
+  const zones = []
+  if (bins.length >= 3) {
+    const width = (bins.at(-1).price - bins[0].price) / (bins.length - 1)
+    const avg = bins.reduce((s, b) => s + b.volume, 0) / bins.length
+    const thin = (b) => b.volume < 0.6 * avg
+    for (const lvn of lvns) {
+      const i = bins.reduce((best, b, j) => (Math.abs(b.price - lvn) < Math.abs(bins[best].price - lvn) ? j : best), 0)
+      let lo = i
+      let hi = i
+      while (lo > 0 && i - lo < 3 && thin(bins[lo - 1])) lo--
+      while (hi < bins.length - 1 && hi - i < 3 && thin(bins[hi + 1])) hi++
+      zones.push({ low: bins[lo].price - width / 2, high: bins[hi].price + width / 2, lvn })
+    }
+  } else for (const lvn of lvns) zones.push({ low: lvn - halfWidth, high: lvn + halfWidth, lvn })
+  return zones.map((z) => ({ ...z, mid: (z.low + z.high) / 2 })).sort((a, b) => a.low - b.low)
+}
+
 /**
  * Every spot setup whose rules pass at `nowMs` (a whole minute). `bars` - the FINISHED spot minutes up to it (spotBarsOf,
- * start + 1 minute <= nowMs), `oi` - buildOiContext(run, expiry, { live: false }), `filters` - { [id]: overrides }.
+ * start + 1 minute <= nowMs), `oi` - buildOiContext(run, expiry, { live: false }), `filters` - { [id]: overrides }, `vp` -
+ * the previous day's spot volume profile (GET /api/oi-replay/{index}/previous-day-volume-profile: poc / vah / val / hvn[] /
+ * lvn[] / bins[]; known before the session - #111-#113 need it, the rest do not).
  * Setups have the futures setups' shape (id, name, side, t, entry, stop, target, timeStopMs, options, oiCtx, checks).
  */
-export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {} }) {
+export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {}, vp = null }) {
   if (!oi || bars.length < 15) return []
   const minute = istMinute(nowMs)
   if (minute < FIRST_ENTRY || minute > LAST_ENTRY) return []
@@ -307,6 +342,103 @@ export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {} }) {
     }
   }
 
+  // ---- the previous day's spot volume profile (#111 - #113) ----
+  // Its LVN zones (thin areas: price was not accepted there) and its volume nodes - the POC, the HVNs and the value-area
+  // edges - which price runs to across a thin area and where it can be refused. All known before the session.
+  const poc = Number(vp?.poc) > 0 ? Number(vp.poc) : null
+  const zones = poc != null ? lvnZones(vp, Math.max(0.5 * atr, spotNow * 0.0002)) : []
+  const nodes = poc != null ? [poc, Number(vp.vah), Number(vp.val), ...(vp.hvn ?? []).map(Number)].filter((x) => Number.isFinite(x) && x > 0) : []
+  // The nearest node in the trade's direction at least `minAway` beyond `from`.
+  const nodeAhead = (dir, from, minAway = 0) => nodes.filter((x) => dir * (x - from) > minAway).sort((a, b) => dir * (a - b))[0] ?? null
+  const recent3 = bars.slice(-3)
+  const lean = read.lean // > 0: puts written over calls near the money (support) - < 0: calls (resistance)
+  const fmt = (v) => (+v.toFixed(1)).toString()
+  // Where a trade is headed: the node, or 3x the stop when the node is farther (then it is only the direction).
+  const aim = (node, room, stopPts) => (node == null ? 'no node ahead - 2x the stop' : room > 3 * stopPts ? `toward ${fmt(node)} (target 3x the stop)` : `${fmt(node)} (target)`)
+
+  for (const dir of poc != null ? [1, -1] : []) {
+    const score = sideScore(dir, sides.ceD, sides.peD)
+    const notAgainst = score != null && score >= 0 && Number.isFinite(lean) && dir * lean >= 0
+    const rejection = dir > 0 ? last.close > last.open : last.close < last.open
+    const extreme = dir > 0 ? Math.min(...recent3.map((b) => b.low)) : Math.max(...recent3.map((b) => b.high))
+
+    for (const z of zones) {
+      // 11. LVN refused: price came to a thin area from at least 2 ATR away on the trade's side (from above for a long)
+      //     in the last 30 minutes, reached into it in the last 3 minutes, never CLOSED past its middle (not accepted),
+      //     and the last candle turns back out of it - a close beyond its near edge, 0.3 ATR off the touch. The option
+      //     writers lean the trade's way (puts written under a long) and the two sides are not against it. Stop beyond
+      //     the touch; target the volume node it came from (room 1.2R+, at most 3R).
+      const near = dir > 0 ? z.high : z.low
+      const came = bars.slice(-30, -3).some((b) => dir * (b.close - near) >= 2 * atr)
+      const reached = dir * (extreme - near) <= 0
+      const notAccepted = recent3.every((b) => dir * (b.close - z.mid) > 0)
+      const turned = rejection && dir * (spotNow - near) > 0 && dir * (spotNow - extreme) >= 0.3 * atr
+      if (came && reached && notAccepted && turned && notAgainst) {
+        const stopPts = Math.max(1.2 * atr, dir * (spotNow - extreme) + 0.5 * atr)
+        const node = nodeAhead(dir, spotNow, 0.25 * stopPts)
+        const room = node != null ? dir * (node - spotNow) : null
+        if (room == null || room >= 1.2 * stopPts) {
+          push('spotLvnReject', dir, stopPts, Math.min(room ?? 2 * stopPts, 3 * stopPts), 45, {
+            Profile: `refused at the previous day's LVN ${fmt(z.lvn)} (thin ${fmt(z.low)} - ${fmt(z.high)}; touched ${fmt(extreme)}, came from ${dir > 0 ? 'above' : 'below'}); back to the volume node it came from: ${aim(node, room, stopPts)}`,
+            OI: `writers lean ${dir > 0 ? 'PUT' : 'CALL'} ${pct(Math.abs(lean))} near the money; CE ${pct(sides.ceD)} / PE ${pct(sides.peD)} in 15m`,
+          })
+        }
+      }
+
+      // 12. LVN filled fast: price was outside a thin area in the last 5 minutes (below it for a long) and runs into it
+      //     fast - the last candle with the trade, a body of 1 ATR+, closing past the area's middle, 1.5 ATR+ covered in
+      //     those minutes. Thin areas are crossed quickly: target the next volume node beyond it (the POC where it is the
+      //     next - it can be refused there, so the trade is banked at it), room 1.2R+, at most 3R. The two sides not
+      //     against it, and no GROWING OI wall in the way before the target. Stop back outside the area's near edge.
+      const edgeIn = dir > 0 ? z.low : z.high
+      const before = bars.slice(-6, -1)
+      const wasOutside = before.some((b) => dir * (b.close - edgeIn) < 0)
+      const startPx = dir > 0 ? Math.min(...before.map((b) => b.low)) : Math.max(...before.map((b) => b.high))
+      const fast = dir * (spotNow - startPx) >= 1.5 * atr && dir * (last.close - last.open) >= atr && dir * (spotNow - z.mid) > 0
+      if (wasOutside && fast && score != null && score >= 0) {
+        const stopPts = Math.max(1.2 * atr, dir * (spotNow - edgeIn) + 0.5 * atr)
+        const node = nodeAhead(dir, dir > 0 ? Math.max(z.high, spotNow) : Math.min(z.low, spotNow))
+        const room = node != null ? dir * (node - spotNow) : null
+        const wall = dir > 0 ? resistance : support
+        const wallChg = wall == null ? null : wallOiChanges(oi, dir > 0 ? { resistanceAhead: wall, supportAhead: null } : { resistanceAhead: null, supportAhead: wall }, nowMs, 15)[dir > 0 ? 'resChg' : 'supChg']
+        const wallInWay = wall != null && room != null && dir * (wall - spotNow) > 0 && dir * (wall - node) < 0 && wallChg != null && wallChg >= WALL_BAR
+        if (room != null && room >= 1.2 * stopPts && !wallInWay) {
+          push('spotLvnFill', dir, stopPts, Math.min(room, 3 * stopPts), 30, {
+            Profile: `filling the previous day's LVN ${fmt(z.lvn)} (thin ${fmt(z.low)} - ${fmt(z.high)}) fast: ${fmt(dir * (spotNow - startPx))} pts in 5 min; the next volume node ${aim(node, room, stopPts)}${node === poc ? ' - the POC: it can be refused there' : ''}`,
+            OI: `CE ${pct(sides.ceD)} / PE ${pct(sides.peD)} in 15m${wall != null ? `; the ${dir > 0 ? 'call' : 'put'} wall ${wall} OI ${pct(wallChg)}` : ''}`,
+          })
+        }
+      }
+    }
+
+    // 13. POC rejection after a fast run: price ran at the previous day's POC from 2 ATR+ away in the last 15 minutes (up
+    //     into it for a short), reached it in the last 3 minutes without a close past it (not accepted), and the last
+    //     candle turns back, 0.3 ATR off the touch. The writers at the POC strike are holding there (calls at the strike
+    //     over the POC for a short: OI not falling in 15m) and the two sides are not against it. Stop beyond the touch;
+    //     target back toward where it came from - the next volume node, room 1.2R+, at most 3R (2R with none).
+    if (poc != null) {
+      const band = Math.max(0.15 * atr, spotNow * 0.0001)
+      // Came from the trade's side, 2 ATR+ away (from below for a short - it ran UP into the POC), in the last 15 minutes.
+      const ranIn = bars.slice(-15, -3).some((b) => dir * (b.close - poc) >= 2 * atr)
+      const touched = dir > 0 ? extreme <= poc + band : extreme >= poc - band
+      const heldOff = recent3.every((b) => dir * (b.close - poc) >= -band)
+      const writerK = dir > 0 ? Math.floor(poc / step) * step : Math.ceil(poc / step) * step
+      const writersChg = chgPct(dir > 0 ? oi.pe : oi.ce, writerK)
+      const turned = rejection && dir * (spotNow - extreme) >= 0.3 * atr && dir * (spotNow - poc) > -band
+      if (ranIn && touched && heldOff && turned && writersChg != null && writersChg >= 0 && score != null && score >= 0) {
+        const stopPts = Math.max(1.2 * atr, dir * (spotNow - extreme) + 0.5 * atr)
+        const node = nodeAhead(dir, spotNow, 0.25 * stopPts)
+        const room = node != null ? dir * (node - spotNow) : null
+        if (room == null || room >= 1.2 * stopPts) {
+          push('spotPocReject', dir, stopPts, Math.min(room ?? 2 * stopPts, 3 * stopPts), 45, {
+            Profile: `refused at the previous day's POC ${fmt(poc)} after a fast run ${dir < 0 ? 'up' : 'down'} into it (touched ${fmt(extreme)}); back the way it came: ${aim(node, room, stopPts)}`,
+            OI: `${dir > 0 ? 'puts' : 'calls'} at ${writerK} ${pct(writersChg)} in 15m (holding); CE ${pct(sides.ceD)} / PE ${pct(sides.peD)}`,
+          })
+        }
+      }
+    }
+  }
+
   // The trade filters (sides, entry window, stop / target size, time stop, trailing, OI filters) - defaults change nothing.
   return out.map((s) => applyTradeFilter(s, strategyFilters(s.id, filters?.[s.id]))).filter(Boolean)
 }
@@ -315,7 +447,7 @@ export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {} }) {
  * Every spot setup of every minute of a day (from 15 minutes after the first candle): `bars` - spotBarsOf the day's
  * 1-minute candles, `oi` - the replay context (live: false). The tuning dedupes after its own filters, like the futures'.
  */
-export function scanSpotDay({ bars, oi, filters = {}, until = null }) {
+export function scanSpotDay({ bars, oi, filters = {}, until = null, vp = null }) {
   if (!bars?.length || !oi) return []
   const found = []
   const first = bars[0].t + 15 * MIN
@@ -323,7 +455,7 @@ export function scanSpotDay({ bars, oi, filters = {}, until = null }) {
   let done = 0 // bars finished by the clock
   for (let clock = first; clock <= end; clock += MIN) {
     while (done < bars.length && bars[done].t + MIN <= clock) done++
-    found.push(...evaluateSpotStrategies({ nowMs: clock, bars: bars.slice(0, done), oi, filters }))
+    found.push(...evaluateSpotStrategies({ nowMs: clock, bars: bars.slice(0, done), oi, filters, vp }))
   }
   return found
 }

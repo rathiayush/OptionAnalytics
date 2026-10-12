@@ -17,7 +17,7 @@
 // drive a whole day through it.
 
 import { buildOiContext, optionTradeAt, premiumAt, strategyStats, topFifteen, STRATEGY_BY_ID, DEFAULT_TRAIL, optionPlanFor, optionExitText, squareOffMs, filtersForIndex, lotsFor } from '../src/strategyEngine.js'
-import { spotBarsOf } from '../src/spotEngine.js'
+import { spotBarsOf, spotVpOf } from '../src/spotEngine.js'
 import { liquiditySignals, pullStackSignals, autoBigLots } from '../src/orderFlowMath.js'
 import {
   MIN, msOf, scanTick, spotScanTick, followAllSetups, trailFor, alertIdsFor, setupEvents, newSetupEventMemory, newPosition, positionRows, sameSignal,
@@ -378,7 +378,8 @@ export class IndexScanner {
       return []
     }
     this.spotMinute = minute
-    return spotScanTick({ minute, bars, oi: this.data.oi, filters: cfg.filters, trail: trailFor(cfg, this.underlying) }, this.memory)?.fresh ?? []
+    // With the previous day's spot volume profile (#111 - #113), loaded with the day.
+    return spotScanTick({ minute, bars, oi: this.data.oi, filters: cfg.filters, trail: trailFor(cfg, this.underlying), vp: spotVpOf(this.data.spotVp) }, this.memory)?.fresh ?? []
   }
 
   // Today's finished spot minutes by `minute`: the server's own 1-minute spot candles (its live feed, every tick), over
