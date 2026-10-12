@@ -421,14 +421,14 @@ export default function StrategyTuningPage() {
     loadQueue()
   }
   const unschedule = (id) => fetch(`/api/strategy-tuning/queue/${id}`, { method: 'DELETE' }).then(loadQueue)
-  // A finished job and everything it produced: its run (trades, settings, days), its result and its cached days.
+  // A finished job and what it produced: its run (trades, settings, days) and its result. The days it fetched stay cached.
   const deleteJob = async (q) => {
     const res = await fetch(`/api/strategy-tuning/queue/${q.id}/delete-all`, { method: 'POST' })
     const json = await res.json().catch(() => null)
     if (!res.ok) { message.error(json?.error ?? `HTTP ${res.status}`); return }
     const d = json?.deleted
     message.success(d?.runId
-      ? `Deleted ${q.job?.underlying}'s job: its run (${d.historyFiles} file(s)${d.runRow ? ', its row in the history' : ''}), ${d.resultFiles} result file(s), ${d.cacheFiles} cached day file(s)`
+      ? `Deleted ${q.job?.underlying}'s job: its run (${d.historyFiles} file(s)${d.runRow ? ', its row in the history' : ''}) and ${d.resultFiles} result file(s) - the days it fetched stay cached`
       : 'Deleted - it had no run of its own (nothing else to remove)')
     if (json?.queue) setQueue(json.queue); else loadQueue()
     loadResult(underlying)
@@ -592,8 +592,8 @@ export default function StrategyTuningPage() {
                   { title: 'State', key: 's', width: 220, render: (_, q) => <span style={{ fontSize: 12 }}><Tag color={{ queued: 'default', running: 'processing', done: 'success', failed: 'error', cancelled: 'warning' }[q.state]}>{q.state}</Tag>{q.finishedUtc ? when(q.finishedUtc) : q.startedUtc ? `since ${when(q.startedUtc)}` : ''}{q.error ? <><br /><Text type="danger" style={{ fontSize: 11 }}>{q.error}</Text></> : null}</span> },
                   { title: '', key: 'x', width: 90, render: (_, q) => (!isAdmin ? null : q.state === 'queued' ? <Button size="small" type="link" danger onClick={() => unschedule(q.id)}>Remove</Button>
                     : q.state === 'running' ? null : (
-                      <Popconfirm title={`Delete this ${q.job?.underlying} job and all its data?`}
-                        description="Its tuning run (trades, settings, the days list), its result and the days it fetched into the cache are removed - Strategy performance, the live list and What wins stop counting it. Those days cost Dhan calls to fetch again."
+                      <Popconfirm title={`Delete this ${q.job?.underlying} job and its run?`}
+                        description="Its tuning run (trades, settings, the days list) and its result are removed - Strategy performance, the live list and What wins stop counting it. The days it fetched stay cached on the server, so a later job reads them without Dhan calls."
                         okText="Delete" okButtonProps={{ danger: true }} onConfirm={() => deleteJob(q)}>
                         <Button size="small" type="link" danger>Delete</Button>
                       </Popconfirm>
