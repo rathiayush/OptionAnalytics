@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Alert, Button, Card, Checkbox, Col, DatePicker, Drawer, InputNumber, Popconfirm, Row, Segmented, Select, Space, Table, Tag, Tooltip, Typography, message } from 'antd'
+import { useLocation } from 'react-router-dom'
+import dayjs from 'dayjs'
+import { Alert, Button, Card, Checkbox, Col, DatePicker, Drawer, InputNumber, Popconfirm, Row, Segmented, Select, Space, Switch, Table, Tag, Tooltip, Typography, message } from 'antd'
 import { NavBar, useAuth, UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import { OPTION_TRADE_FILTERS, STRATEGY_BY_ID, TRADE_FILTERS, filtersForIndex } from './strategyEngine.js'
 import { useNarrow } from './DomDrawer.jsx'
@@ -867,16 +869,30 @@ function BacktestTrades() {
 
 
 // ---- The scanner's record: its signals (futures trades) and option trades, live and paper -----------------------
-function ScannerRecord() {
+/** The scanner's own record. `initial` (from the address - an applied strategy's "See the run"): index, strategy, kind,
+ *  since (ms - when its setting was applied), applied=1 (the applied strategies only). */
+function ScannerRecord({ initial = {} }) {
   const [source, setSource] = useState('server')
-  const [kind, setKind] = useState('signals')
+  const [kind, setKind] = useState(initial.kind === 'trades' ? 'trades' : 'signals')
   const [rows, setRows] = useState(null)
   const [error, setError] = useState(null)
-  const [underlying, setUnderlying] = useState('all')
-  const [ids, setIds] = useState([])
+  const [underlying, setUnderlying] = useState(UNDERLYINGS.includes(initial.index) ? initial.index : 'all')
+  const [ids, setIds] = useState(initial.strategy ? [initial.strategy] : [])
   const [mode, setMode] = useState('all')
-  const [range, setRange] = useState(null)
-  const [order, setOrder] = useState('asc')
+  const sinceMs = Number(initial.since) || null
+  const [range, setRange] = useState(sinceMs ? [dayjs(sinceMs), null] : null)
+  const [order, setOrder] = useState(initial.strategy || initial.applied ? 'desc' : 'asc')
+  // The strategies applied per index (a fine-tuned setting, Trades / Strategy tuning page) and when: "Applied only" shows
+  // just their run - each on its own index, from the moment it was applied (when that was kept).
+  const [appliedOnly, setAppliedOnly] = useState(initial.applied === '1')
+  const [applied, setApplied] = useState(null)
+  useEffect(() => {
+    fetch('/api/scanner-runner/config').then((r) => (r.ok ? r.json() : null)).then((c) => setApplied(c?.filtersByIndex ?? {})).catch(() => setApplied({}))
+  }, [])
+  const appliedAt = (u, id) => {
+    const f = applied?.[u]?.[id]
+    return f == null ? undefined : Number.isFinite(f._appliedAt) ? f._appliedAt : 0
+  }
   const file = `${source === 'server' ? 'server-' : ''}${kind}`
   const reset = (fn) => (v) => { setRows(null); setError(null); setIds([]); fn(v) }
   useEffect(() => {
@@ -884,8 +900,10 @@ function ScannerRecord() {
   }, [file])
   const signals = kind === 'signals'
   const shown = useMemo(() => (rows ?? []).filter((r) => (underlying === 'all' || r.underlying === underlying) && (!ids.length || ids.includes(r.strategy_id))
-    && (signals || mode === 'all' || (mode === 'live') === (r.live === 'true')) && inDates(r.date, range))
-    .sort(byTime(order, (r) => istMs(signals ? r.time_ist : r.entry_time_ist))), [rows, underlying, ids, mode, range, signals, order])
+    && (signals || mode === 'all' || (mode === 'live') === (r.live === 'true')) && inDates(r.date, range)
+    && (!appliedOnly || source !== 'server' || ((at) => at !== undefined && (istMs(signals ? r.time_ist : r.entry_time_ist) ?? 0) >= at)(appliedAt(r.underlying, r.strategy_id)))
+    && (!sinceMs || (istMs(signals ? r.time_ist : r.entry_time_ist) ?? 0) >= sinceMs))
+    .sort(byTime(order, (r) => istMs(signals ? r.time_ist : r.entry_time_ist))), [rows, underlying, ids, mode, range, signals, order, appliedOnly, applied, source, sinceMs]) // eslint-disable-line react-hooks/exhaustive-deps
   const nameOf = (r) => r.strategy || STRATEGY_BY_ID[r.strategy_id]?.name || r.strategy_id
   const signalColumns = [
     { title: 'Date', dataIndex: 'date', width: 105, fixed: 'left' },
@@ -925,7 +943,14 @@ function ScannerRecord() {
     <Space direction="vertical" size={10} style={{ width: '100%' }}>
       <Row gutter={[12, 8]} align="middle">
         <Col><Segmented value={source} onChange={reset(setSource)} options={[{ value: 'server', label: <Tooltip title="The server's scanner (runs without the page open)">Server scanner</Tooltip> }, { value: 'page', label: <Tooltip title="The Order Flow page's scanner (what the browser saved)">Order Flow page</Tooltip> }]} /></Col>
-        <Col><Segmented value={kind} onChange={reset(setKind)} options={[{ value: 'signals', label: 'Signals (futures)' }, { value: 'trades', label: 'Option trades' }]} /></Col>
+        <Col><Segmented value={kind} onChange={reset(setKind)} options={[{ value: 'signals', label: 'Signals' }, { value: 'trades', label: 'Option trades' }]} /></Col>
+        {source === 'server' && (
+          <Col>
+            <Tooltip title="Only the strategies applied with a fine-tuned setting (Trades / Strategy tuning page), each on the index it was applied to, from when it was applied - their run on the server scanner">
+              <Space size={4}><Switch size="small" checked={appliedOnly} onChange={setAppliedOnly} disabled={applied == null} aria-label="Applied strategies only" /><Text style={{ fontSize: 12 }}>Applied only</Text></Space>
+            </Tooltip>
+          </Col>
+        )}
         <Col><Select value={underlying} onChange={setUnderlying} options={[{ value: 'all', label: 'All indices' }, ...UNDERLYINGS.map((u) => ({ value: u, label: u }))]} style={{ width: 130 }} /></Col>
         <Col flex="1 1 260px"><Select mode="multiple" allowClear value={ids} onChange={setIds} placeholder="All strategies" style={{ width: '100%' }} maxTagCount="responsive" options={strategyOptions(rows ?? [], (r) => r.strategy_id, (r) => `#${r.strategy_no} ${nameOf(r)}`)} /></Col>
         <Col><OrderToggle value={order} onChange={setOrder} /></Col>
@@ -934,6 +959,8 @@ function ScannerRecord() {
         <Col><Button onClick={() => downloadCsv(`${file}-filtered.csv`, csvColumns, shown)} disabled={!shown.length}>Download CSV</Button></Col>
       </Row>
       {error && <Alert type="error" showIcon message={`The record could not be loaded: ${error}`} />}
+      {sinceMs && <Text type="secondary" style={{ fontSize: 12 }}>From {new Date(sinceMs).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false })} IST - when its setting was applied.</Text>}
+      {appliedOnly && source === 'server' && applied && !Object.keys(applied).length && <Alert type="info" showIcon message="Nothing is applied yet - apply a fine-tuned setting on Strategy performance (Best setting · apply) and its run shows here." />}
       {rows && (
         <>
           <Totals rows={shown} points={(r) => num(r.points)} r={signals ? (r) => num(r.r) : null} extra={!signals && <span>net <b style={{ color: col(rupees) }}>₹{Math.round(rupees).toLocaleString('en-IN')}</b> after charges</span>} />
@@ -1087,9 +1114,14 @@ function AllTrades() {
 
 /** Trades: every trade with its date and time in one place - the backtest (each strategy on every day of the latest
  *  tuning run) and the scanner's own record (its signals and the live / paper option trades it took). */
+const TAB_VALUES = ['performance', 'all', 'backtest', 'record', 'learning']
 export default function TradesPage() {
   const auth = useAuth()
-  const [tab, setTab] = useState('performance')
+  // ?tab=record&index=..&strategy=.. (an applied strategy's "See the run") opens that tab, filtered.
+  const location = useLocation()
+  const query = useMemo(() => Object.fromEntries(new URLSearchParams(location.search)), [location.search])
+  const [tab, setTab] = useState(() => (TAB_VALUES.includes(query.tab) ? query.tab : 'performance'))
+  useEffect(() => { if (TAB_VALUES.includes(query.tab)) setTab(query.tab) }, [query.tab, location.key])
   const [reloadKey, setReloadKey] = useState(0)
   return (
     <div className="tuning-page" style={{ maxWidth: 1600, margin: '0 auto', padding: '24px 16px' }}>
@@ -1108,7 +1140,7 @@ export default function TradesPage() {
             {auth?.user?.role === 'Admin' && <ClearData onCleared={() => setReloadKey((k) => k + 1)} />}
           </Space>
         )}>
-          {tab === 'performance' ? <StrategyPerformance key={reloadKey} reloadKey={reloadKey} /> : tab === 'all' ? <AllTrades key={reloadKey} /> : tab === 'backtest' ? <BacktestTrades key={reloadKey} /> : tab === 'learning' ? <Learning key={reloadKey} /> : <ScannerRecord key={reloadKey} />}
+          {tab === 'performance' ? <StrategyPerformance key={reloadKey} reloadKey={reloadKey} /> : tab === 'all' ? <AllTrades key={reloadKey} /> : tab === 'backtest' ? <BacktestTrades key={reloadKey} /> : tab === 'learning' ? <Learning key={reloadKey} /> : <ScannerRecord key={`${reloadKey}-${location.key}`} initial={query.tab === 'record' ? query : {}} />}
         </Card>
       </Space>
     </div>

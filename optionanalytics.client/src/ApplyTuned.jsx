@@ -2,6 +2,8 @@
 // strategy on that index's live list, so the server scanner places real orders for it once the index is switched to
 // Live today (the server still checks every other limit - ServerLiveService).
 import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
+import { runLink, runOf } from './appliedRun.js'
 import { Button, Card, Checkbox, Col, InputNumber, Popconfirm, Popover, Row, Space, Table, Tag, Tooltip, Typography, message } from 'antd'
 import { STRATEGY_BY_ID } from './strategyEngine.js'
 import { DEFAULT_VARIANT, settingParams, variantText } from './strategyTuning.js'
@@ -137,6 +139,7 @@ export function appliedText(f) {
  * all-index filters on that index). `cfg` = GET /api/scanner-runner/config.
  */
 export function AppliedSettings({ cfg, isAdmin, onChanged, extra = null }) {
+  const rec = useServerRecord(cfg)
   const by = cfg?.filtersByIndex ?? {}
   const rows = Object.entries(by).flatMap(([u, m]) => Object.entries(m ?? {}).map(([id, f]) => ({ u, id, f })))
     .sort((a, b) => a.u.localeCompare(b.u) || (Number(STRATEGY_BY_ID[a.id]?.no) || 0) - (Number(STRATEGY_BY_ID[b.id]?.no) || 0))
@@ -168,12 +171,60 @@ export function AppliedSettings({ cfg, isAdmin, onChanged, extra = null }) {
                     <Tooltip title="Take it off (back to the all-index filters on this index)"><Button size="small" type="link" danger style={{ padding: '0 4px', height: 'auto' }}>✕</Button></Tooltip>
                   </Popconfirm>
                 )}
+                <div style={{ marginLeft: 8 }}><RunLine rec={rec} u={r.u} id={r.id} appliedAt={r.f?._appliedAt} /></div>
               </div>
             ))}
-            <Text type="secondary" style={{ fontSize: 11 }}>Paper at once; live only when that index is switched to Live today and the strategy is on its live list.</Text>
+            <Text type="secondary" style={{ fontSize: 11 }}>Paper at once; live only when that index is switched to Live today and the strategy is on its live list. Each one&apos;s run is the server scanner&apos;s record (it runs them all day, page open or not) - every signal and trade: <Link to="/trades?tab=record&applied=1&kind=trades">Trades → Scanner record → applied only</Link>.</Text>
           </Space>
         )}
     </Card>
+  )
+}
+
+// ---- How an applied strategy has run: the server scanner's own record ------------------------------------------------
+// The server scanner runs every applied strategy on its index all day (paper, and live when the index is Live today) and
+// keeps each signal and option trade (server-signals.csv / server-trades.csv) - read here once a minute at most, shared
+// by every card on the page.
+let recordCache = null
+let recordLoading = null
+const loadServerRecord = () => {
+  if (recordCache && Date.now() - recordCache.at < 60_000) return Promise.resolve(recordCache.data)
+  recordLoading ??= Promise.all(['server-signals', 'server-trades'].map((f) => fetch(`/api/scanner-log/rows/${f}`).then((r) => (r.ok ? r.json() : []))))
+    .then(([signals, trades]) => {
+      recordCache = { at: Date.now(), data: { signals: Array.isArray(signals) ? signals : [], trades: Array.isArray(trades) ? trades : [] } }
+      return recordCache.data
+    })
+    .finally(() => { recordLoading = null })
+  return recordLoading
+}
+function useServerRecord(reloadKey = 0) {
+  const [rec, setRec] = useState(recordCache?.data ?? null)
+  useEffect(() => {
+    let stop = false
+    loadServerRecord().then((d) => { if (!stop) setRec(d) }).catch(() => {})
+    return () => { stop = true }
+  }, [reloadKey])
+  return rec
+}
+const fmtWhen = (ms) => new Date(ms).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false })
+
+function RunLine({ rec, u, id, appliedAt }) {
+  const since = Number.isFinite(appliedAt) ? appliedAt : null
+  if (!rec) return <Text type="secondary" style={{ fontSize: 11 }}>run: loading…</Text>
+  const r = runOf(rec, u, id, since)
+  const rupee = (v) => `${v < 0 ? '-' : ''}₹${Math.abs(Math.round(v)).toLocaleString('en-IN')}`
+  return (
+    <span style={{ fontSize: 11 }}>
+      <Tooltip title={since ? `What the server scanner did with it on ${u} since it was applied (${fmtWhen(since)}): every signal, and every paper / live option trade it took` : `Applied before the time of applying was kept: every day of the server scanner's record for it on ${u}`}>
+        <Text type="secondary" style={{ fontSize: 11 }}>Run {since ? `since ${fmtWhen(since)}` : '(all days)'}:</Text>
+      </Tooltip>{' '}
+      {r.signals || r.trades
+        ? <>{r.signals} signal(s) · {r.trades} trade(s){r.live ? <> (<b style={{ color: '#ff7875' }}>{r.live} live</b>)</> : ''}{r.open ? ` · ${r.open} open` : ''}
+          {r.closed ? <> · {r.wins}/{r.closed} won · net <b style={{ color: r.net >= 0 ? '#52c41a' : '#ff4d4f' }}>{rupee(r.net)}</b></> : ''}
+          {r.lastMs ? <Text type="secondary" style={{ fontSize: 11 }}> · last {fmtWhen(r.lastMs)}</Text> : null}</>
+        : <Text type="secondary" style={{ fontSize: 11 }}>nothing yet - it trades when its rules fire on {u}</Text>}
+      {' · '}<Link to={runLink(u, id, since)}>See the run →</Link>
+    </span>
   )
 }
 

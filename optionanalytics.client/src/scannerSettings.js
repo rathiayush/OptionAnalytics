@@ -51,6 +51,8 @@ export async function applyTunedFilters(id, params, { option = false, index = nu
     // on unseen days. The scanner ignores the key (strategyFilters keeps only real filters).
     delete next._tuned
     if (tuned) next._tuned = tuned
+    // When it was applied - its run (the server scanner's record) is shown from then on.
+    next._appliedAt = Date.now()
     // The strategy's own lot size on this index (lotsFor): a number sets it, null goes back to the index's lots, left out
     // keeps what it had.
     if (lots !== undefined) setLots(next, lots)

@@ -10,7 +10,7 @@ globalThis.localStorage = { getItem: (k) => (store.has(k) ? store.get(k) : null)
 
 const { applyFilterValue, applyTunedFilters, putOnLiveList, readFiltersByIndex, saveIndexFilters, SCANNER_SETTINGS_KEY } = await import('../src/scannerSettings.js')
 const { filtersFromTuning, DEFAULT_VARIANT, OPTION_DEFAULT } = await import('../src/strategyTuning.js')
-const { filtersForIndex } = await import('../src/strategyEngine.js')
+const { filtersForIndex, strategyFilters } = await import('../src/strategyEngine.js')
 
 /** The server's /api/scanner-runner endpoints, as ScannerRunnerController / ScannerRunnerStore answer them. */
 function fakeServer({ tamper = false } = {}) {
@@ -45,9 +45,13 @@ const bankBest = { ...DEFAULT_VARIANT, ...OPTION_DEFAULT, tradeSide: 'short', op
 test('applied for its index: that index runs the strategy with it, the others keep theirs, nothing else changes', async () => {
   store.clear()
   const srv = fakeServer()
+  const before = Date.now()
   const got = await applyTunedFilters('absorption', niftyBest, { option: true, index: 'NIFTY' })
-  const want = filtersFromTuning({ tradeSide: 'both', minRatio: 3 }, niftyBest, { option: true })
+  // When it was applied is kept with it - its run (the server scanner's record) is shown from then on.
+  assert.ok(got._appliedAt >= before && got._appliedAt <= Date.now(), 'stamped with the time it was applied')
+  const want = { ...filtersFromTuning({ tradeSide: 'both', minRatio: 3 }, niftyBest, { option: true }), _appliedAt: got._appliedAt }
   assert.deepEqual(got, want)
+  assert.deepEqual(strategyFilters('absorption', got), strategyFilters('absorption', { ...got, _appliedAt: undefined }), 'the scanner ignores it')
   assert.equal(want.minRatio, 3, 'the strategy\'s own entry filters are kept')
   assert.equal(want.tradeOptLeg, 'buy')
   assert.equal(want.tradeOptSlPct, 30, 'the option\'s Max SL goes across')
