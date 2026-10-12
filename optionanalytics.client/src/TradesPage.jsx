@@ -123,7 +123,11 @@ const legR = (t, k) => num(t[`${k}_r`]) ?? (num(t[`${k}_points`]) != null && num
 const legRR = (t, k) => num(t[`${k}_rr`]) ?? (num(t[`${k}_sl`]) > 0 && num(t[`${k}_target`]) > 0 ? num(t[`${k}_target`]) / num(t[`${k}_sl`]) : null)
 const sumOf = (xs) => { const v = xs.filter(Number.isFinite); return v.length ? v.reduce((a, b) => a + b, 0) : null }
 
-function StrategyTrades({ target, data, onClose, narrow }) {
+/** The Strategy performance date range as query params (yyyy-MM-dd; either end optional). */
+const rangeParams = (range) => ({ ...(range?.[0] ? { from: range[0].format('YYYY-MM-DD') } : {}), ...(range?.[1] ? { to: range[1].format('YYYY-MM-DD') } : {}) })
+const rangeKey = (range) => `${range?.[0]?.format('YYYY-MM-DD') ?? ''}..${range?.[1]?.format('YYYY-MM-DD') ?? ''}`
+
+function StrategyTrades({ target, data, onClose, narrow, range = null }) {
   const [setting, setSetting] = useState(target?.setting ?? 'both')
   const [index, setIndex] = useState(target?.index ?? 'all')
   const [rows, setRows] = useState(null)
@@ -131,11 +135,11 @@ function StrategyTrades({ target, data, onClose, narrow }) {
   const id = target?.strategyId
   useEffect(() => {
     if (!id) return
-    const q = new URLSearchParams({ strategy: id, data, ...(setting === 'both' ? {} : { setting }), ...(index === 'all' ? {} : { index }) })
+    const q = new URLSearchParams({ strategy: id, data, ...(setting === 'both' ? {} : { setting }), ...(index === 'all' ? {} : { index }), ...rangeParams(range) })
     fetch(`/api/strategy-tuning/performance/trades?${q}`).then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-      .then((list) => { setRows({ key: `${id}|${setting}|${index}`, list }); setError(null) }).catch((e) => setError(e.message))
-  }, [id, data, setting, index])
-  const list = rows?.key === `${id}|${setting}|${index}` ? rows.list : null
+      .then((list) => { setRows({ key: `${id}|${setting}|${index}|${rangeKey(range)}`, list }); setError(null) }).catch((e) => setError(e.message))
+  }, [id, data, setting, index, range]) // eslint-disable-line react-hooks/exhaustive-deps
+  const list = rows?.key === `${id}|${setting}|${index}|${rangeKey(range)}` ? rows.list : null
   const shown = (list ?? []).map((t) => ({
     ...t, _p: num(t.points), _r: num(t.r), _rr: num(t.rr) ?? (num(t.sl_points) > 0 && num(t.target_points) > 0 ? num(t.target_points) / num(t.sl_points) : null),
     _br: legR(t, 'bought'), _brr: legRR(t, 'bought'), _sr: legR(t, 'sold'), _srr: legRR(t, 'sold'),
@@ -196,17 +200,17 @@ function StrategyTrades({ target, data, onClose, narrow }) {
 // ---- The days the tuning looked at: used (train / test) or left out, and why ---------------------------------------
 const roleText = (d) => (d.status !== 'used' ? 'left out' : d.testRuns && d.trainRuns ? `test in ${d.testRuns}, train in ${d.trainRuns} run(s)` : d.testRuns ? 'test (held back)' : 'train (chosen on)')
 
-function TuningDays({ open, data, onClose, narrow, coverage }) {
+function TuningDays({ open, data, onClose, narrow, coverage, range = null }) {
   const [body, setBody] = useState(null)
   const [error, setError] = useState(null)
   const [index, setIndex] = useState('all')
   const [show, setShow] = useState('left out')
   useEffect(() => {
     if (!open) return
-    fetch(`/api/strategy-tuning/performance/days?data=${data}`).then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-      .then((b) => { setBody({ ...b, data }); setError(null) }).catch((e) => setError(e.message))
-  }, [open, data])
-  const current = body?.data === data ? body : null
+    fetch(`/api/strategy-tuning/performance/days?${new URLSearchParams({ data, ...rangeParams(range) })}`).then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((b) => { setBody({ ...b, data, range: rangeKey(range) }); setError(null) }).catch((e) => setError(e.message))
+  }, [open, data, range]) // eslint-disable-line react-hooks/exhaustive-deps
+  const current = body?.data === data && body?.range === rangeKey(range) ? body : null
   const cov = current?.coverage ?? coverage ?? []
   const shown = (current?.days ?? []).filter((d) => (index === 'all' || d.index === index)
     && (show === 'all' || (show === 'left out' ? d.status === 'left out' : show === 'test' ? d.status === 'used' && d.testRuns > 0 : d.status === 'used')))
@@ -295,6 +299,8 @@ function StrategyPerformance({ reloadKey }) {
   const [setting, setSetting] = useState('fine-tuned')
   const [index, setIndex] = useState('all')
   const [minTrades, setMinTrades] = useState(5)
+  // Optional dates: only the tuning trades (and cross-checked days) on those days - empty = every day.
+  const [range, setRange] = useState(null)
   const [view, setView] = useState('ranking')
   // Which way the trades are taken - R, points, win % and risk : reward are those of that instrument.
   const [measure, setMeasure] = useState('futures')
@@ -328,10 +334,10 @@ function StrategyPerformance({ reloadKey }) {
   const [error, setError] = useState(null)
   useEffect(() => {
     // Kept with the data mode it is for, so a switch shows loading rather than the other mode's numbers.
-    fetch(`/api/strategy-tuning/performance?data=${data}`).then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-      .then((b) => { setBody({ ...b, data }); setError(null) }).catch((e) => setError(e.message))
-  }, [data, reloadKey])
-  const current = body?.data === data ? body : null
+    fetch(`/api/strategy-tuning/performance?${new URLSearchParams({ data, ...rangeParams(range) })}`).then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((b) => { setBody({ ...b, data, range: rangeKey(range) }); setError(null) }).catch((e) => setError(e.message))
+  }, [data, reloadKey, range]) // eslint-disable-line react-hooks/exhaustive-deps
+  const current = body?.data === data && body?.range === rangeKey(range) ? body : null
   // Who runs it: the spot + options strategies run on the server scanner only (each finished minute, on the spot candles);
   // the futures ones on the Order Flow page's scanner too.
   const scannerWho = data === 'spot' ? 'the server scanner' : 'this browser and the server scanner'
@@ -499,8 +505,13 @@ function StrategyPerformance({ reloadKey }) {
         <Col><Tooltip title="How the trades are taken: R = the points made over the points risked (that instrument's own SL), risk : reward = 1 : target / SL"><Segmented value={measure} onChange={setMeasure} options={[{ value: 'futures', label: data === 'spot' ? 'Spot' : 'Futures' }, { value: 'bought', label: 'Option bought' }, { value: 'sold', label: 'Option sold' }]} aria-label="Measure by" /></Tooltip></Col>
         <Col><Select value={index} onChange={setIndex} style={{ width: 140 }} options={[{ value: 'all', label: 'All indices' }, ...indices.map((u) => ({ value: u, label: u }))]} /></Col>
         <Col><Space size={6}><Tooltip title="A strategy needs at least this many trades to be ranked or called best - fewer is luck"><Text>Min trades</Text></Tooltip><InputNumber min={1} max={1000} value={minTrades} onChange={(v) => v && setMinTrades(v)} style={{ width: 80 }} /></Space></Col>
+        <Col>
+          <Tooltip title="Optional: only the tuning trades on these days (and the tuned settings' cross-checked days in them) - e.g. how a strategy did in one month. Either end can be left open; empty = every day.">
+            <DatePicker.RangePicker value={range} onChange={setRange} format="DD MMM YYYY" allowEmpty={[true, true]} placeholder={['From (any)', 'To (any)']} aria-label="Performance dates" />
+          </Tooltip>
+        </Col>
         <Col><Segmented value={view} onChange={setView} options={[{ value: 'ranking', label: 'Ranking' }, { value: 'grid', label: <Tooltip title="Every strategy against every index - which strategy works on which index">By index</Tooltip> }]} /></Col>
-        {current && <Col><Text type="secondary" style={{ fontSize: 12 }}>{current.runs} tuning run(s), {current.trades.toLocaleString('en-IN')} trades - a trade two runs both scanned is counted once</Text></Col>}
+        {current && <Col><Text type="secondary" style={{ fontSize: 12 }}>{current.runs} tuning run(s), {current.trades.toLocaleString('en-IN')} trades{current.from || current.to ? ` from ${current.from ?? 'the start'} to ${current.to ?? 'the latest'}` : ''} - a trade two runs both scanned is counted once</Text></Col>}
       </Row>
       {coverage.length > 0 && (
         <Space wrap size={[12, 4]} style={{ fontSize: 12 }}>
@@ -509,7 +520,7 @@ function StrategyPerformance({ reloadKey }) {
           <Button size="small" onClick={() => setDaysOpen(true)}>Which days - left out / held back</Button>
         </Space>
       )}
-      <TuningDays open={daysOpen} data={data} narrow={narrow} coverage={coverage} onClose={() => setDaysOpen(false)} />
+      <TuningDays open={daysOpen} data={data} range={range} narrow={narrow} coverage={coverage} onClose={() => setDaysOpen(false)} />
       {indices.length > 0 && (
         <Row gutter={[12, 12]}>
           {indices.map((u) => {
@@ -566,7 +577,7 @@ function StrategyPerformance({ reloadKey }) {
           )
         })()
       )}
-      <StrategyTrades key={tradesOf ? `${tradesOf.strategyId}-${tradesOf.index}-${tradesOf.setting}` : 'none'} target={tradesOf} data={data} narrow={narrow} onClose={() => setTradesOf(null)} />
+      <StrategyTrades key={tradesOf ? `${tradesOf.strategyId}-${tradesOf.index}-${tradesOf.setting}` : 'none'} target={tradesOf} data={data} range={range} narrow={narrow} onClose={() => setTradesOf(null)} />
       <details>
         <summary style={{ cursor: 'pointer', fontSize: 12 }}>How the fine-tuning works, and how to read this page</summary>
         <div style={{ fontSize: 12, marginTop: 6, lineHeight: 1.6 }}>

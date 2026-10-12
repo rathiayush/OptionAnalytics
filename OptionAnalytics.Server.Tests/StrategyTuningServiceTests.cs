@@ -533,6 +533,64 @@ public sealed class StrategyTuningServiceTests : IDisposable
         Assert.Equal(new[] { "2026-10-05", "2026-10-06", "2026-10-07", "2026-10-07" }, all.Select(t => t["date"]));
         Assert.Equal(3, TuningPerformance.Trades(runs, (id, kind) => files.GetValueOrDefault($"{id}:{kind}"), "futures", "ibBreakout", "as written").Count);
         Assert.Single(TuningPerformance.Trades(runs, (id, kind) => files.GetValueOrDefault($"{id}:{kind}"), "futures", "ibBreakout", "as written", "BANKNIFTY"));
+
+        // A date range (optional, either end open): only the trades on those days count - the totals, the per-index split
+        // and the drawer's trades alike.
+        var (inRange, _, inRangeTrades) = TuningPerformance.Build(runs, (id, kind) => files.GetValueOrDefault($"{id}:{kind}"), "futures", "2026-10-06", "2026-10-07");
+        Assert.Equal(3, inRangeTrades);
+        var w = inRange.Single(r => r.Setting == "as written");
+        Assert.Equal((2, -50.0), (w.All.Trades, w.All.Points));
+        Assert.Equal(("2026-10-06", "2026-10-07"), (w.All.FirstDay, w.All.LastDay));
+        var (fromOnly, _, _) = TuningPerformance.Build(runs, (id, kind) => files.GetValueOrDefault($"{id}:{kind}"), null, "2026-10-07", null);
+        Assert.Equal(1, fromOnly.Single(r => r.Setting == "as written").All.Trades);
+        var (toOnly, _, _) = TuningPerformance.Build(runs, (id, kind) => files.GetValueOrDefault($"{id}:{kind}"), null, null, "2026-10-05");
+        Assert.Equal(("2026-10-05", 1), (toOnly.Single().All.FirstDay, toOnly.Single().All.Trades));
+        Assert.Empty(TuningPerformance.Build(runs, (id, kind) => files.GetValueOrDefault($"{id}:{kind}"), null, "2026-11-01", null).Rows);
+        Assert.Equal(new[] { "2026-10-06", "2026-10-07", "2026-10-07" },
+            TuningPerformance.Trades(runs, (id, kind) => files.GetValueOrDefault($"{id}:{kind}"), "futures", "ibBreakout", null, null, "2026-10-06", null).Select(t => t["date"]));
+    }
+
+    [Fact]
+    public void ADateRange_LimitsTheCrossCheckedDaysAndTheDaysScanned_TooAndLeavesOutUndatedOlderRecords()
+    {
+        var runs = new List<Dictionary<string, string>>
+        {
+            new() { ["run_id"] = "R2", ["index"] = "NIFTY", ["data"] = "spot" },
+            // An older run with no days list / checks file: only counted with no date range.
+            new() { ["run_id"] = "R1", ["index"] = "NIFTY", ["data"] = "spot", ["days_used"] = "9", ["first_day"] = "2026-08-01", ["last_day"] = "2026-08-12" },
+        };
+        var setting = new Dictionary<string, string> { ["which"] = "fine-tuned", ["strategy_id"] = "spotLvnReject", ["index"] = "NIFTY", ["tradeSide"] = "long", ["test_trades"] = "4", ["test_avg"] = "1" };
+        var files = new Dictionary<string, List<Dictionary<string, string>>>
+        {
+            ["R2:trades"] = new() { new() { ["index"] = "NIFTY", ["strategy_id"] = "spotLvnReject", ["setting"] = "as written", ["date"] = "2026-10-06", ["entry_time_ist"] = "2026-10-06 10:50:00", ["points"] = "12", ["r"] = "1" } },
+            ["R2:settings"] = new() { setting },
+            ["R2:checks"] = new()
+            {
+                new() { ["index"] = "NIFTY", ["strategy_id"] = "spotLvnReject", ["tradeSide"] = "long", ["date"] = "2026-09-15", ["n"] = "2", ["total"] = "3", ["wins"] = "2" },
+                new() { ["index"] = "NIFTY", ["strategy_id"] = "spotLvnReject", ["tradeSide"] = "long", ["date"] = "2026-10-06", ["n"] = "1", ["total"] = "-1", ["wins"] = "0" },
+            },
+            ["R2:days"] = new()
+            {
+                new() { ["index"] = "NIFTY", ["date"] = "2026-09-15", ["status"] = "used", ["role"] = "train" },
+                new() { ["index"] = "NIFTY", ["date"] = "2026-10-06", ["status"] = "used", ["role"] = "test" },
+            },
+            ["R1:trades"] = new(),
+            ["R1:settings"] = new() { setting },
+        };
+        List<Dictionary<string, string>>? Read(string id, string kind) => files.GetValueOrDefault($"{id}:{kind}");
+
+        var all = TuningPerformance.Build(runs, Read, "spot").Rows.Single().TunedSettings["NIFTY"].Single();
+        Assert.Equal(3 + 4, all.TestTrades); // both cross-checked days + the older run's held-back record
+        var october = TuningPerformance.Build(runs, Read, "spot", "2026-10-01", null).Rows.Single().TunedSettings["NIFTY"].Single();
+        Assert.Equal(1, october.TestTrades); // only 06 Oct's cross-check - the undated older record is left out
+        Assert.Equal(-1, october.TestAvg!.Value, 6);
+
+        var (cov, days) = TuningPerformance.Days(runs, Read, "spot");
+        Assert.Equal(9, cov.Single().Scanned); // the older run's 9 days count with no range
+        var (cov10, days10) = TuningPerformance.Days(runs, Read, "spot", "2026-10-01", "2026-10-31");
+        Assert.Equal(new[] { "2026-10-06" }, days10.Select(d => d.Date));
+        Assert.Equal((1, "2026-10-06", "2026-10-06"), (cov10.Single().Scanned, cov10.Single().FirstDay, cov10.Single().LastDay));
+        Assert.Equal(2, days.Count);
     }
 
     [Fact]

@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -182,39 +183,45 @@ public sealed class StrategyTuningController : ControllerBase
         return error is null ? Ok(deleted) : BadRequest(new { error });
     }
 
-    /// <summary>GET /api/strategy-tuning/performance - every run's trades added up per strategy, across all indices
-    /// (TuningPerformance); `data` = futures / spot.</summary>
+    /// <summary>An optional yyyy-MM-dd query date - anything else is no limit.</summary>
+    private static string? Day(string? v) => DateOnly.TryParseExact(v?.Trim(), "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var d) ? d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) : null;
+
+    /// <summary>GET /api/strategy-tuning/performance?data=&amp;from=&amp;to= - every run's trades added up per strategy, across all
+    /// indices (TuningPerformance); `data` = futures / spot; `from` / `to` (yyyy-MM-dd, optional) = only the trades and
+    /// cross-checked days in that range.</summary>
     [HttpGet("performance")]
-    public IActionResult Performance([FromQuery] string? data = null)
+    public IActionResult Performance([FromQuery] string? data = null, [FromQuery] string? from = null, [FromQuery] string? to = null)
     {
         var d = string.Equals(data, "spot", StringComparison.OrdinalIgnoreCase) ? "spot" : string.Equals(data, "futures", StringComparison.OrdinalIgnoreCase) ? "futures" : null;
         var history = _tuning.HistoryRuns();
-        var (rows, runs, trades) = TuningPerformance.Build(history, _tuning.HistoryRows, d);
+        var (f, t) = (Day(from), Day(to));
+        var (rows, runs, trades) = TuningPerformance.Build(history, _tuning.HistoryRows, d, f, t);
         // How many days were scanned per index - so "traded on 16 days" can be read against the days looked at.
-        var coverage = TuningPerformance.Days(history, _tuning.HistoryRows, d).Coverage;
-        return Ok(new { runs, trades, rows, coverage });
+        var coverage = TuningPerformance.Days(history, _tuning.HistoryRows, d, f, t).Coverage;
+        return Ok(new { runs, trades, rows, coverage, from = f, to = t });
     }
 
-    /// <summary>GET /api/strategy-tuning/performance/days?data= - every day the runs looked at, per index: used (and in
-    /// how many runs it was a train / test day) or left out and why, plus the days scanned per index.</summary>
+    /// <summary>GET /api/strategy-tuning/performance/days?data=&amp;from=&amp;to= - every day the runs looked at, per index: used
+    /// (and in how many runs it was a train / test day) or left out and why, plus the days scanned per index.</summary>
     [HttpGet("performance/days")]
-    public IActionResult PerformanceDays([FromQuery] string? data = null)
+    public IActionResult PerformanceDays([FromQuery] string? data = null, [FromQuery] string? from = null, [FromQuery] string? to = null)
     {
         var d = string.Equals(data, "spot", StringComparison.OrdinalIgnoreCase) ? "spot" : string.Equals(data, "futures", StringComparison.OrdinalIgnoreCase) ? "futures" : null;
-        var (coverage, days) = TuningPerformance.Days(_tuning.HistoryRuns(), _tuning.HistoryRows, d);
+        var (coverage, days) = TuningPerformance.Days(_tuning.HistoryRuns(), _tuning.HistoryRows, d, Day(from), Day(to));
         return Ok(new { coverage, days });
     }
 
-    /// <summary>GET /api/strategy-tuning/performance/trades?strategy=&amp;setting=&amp;index=&amp;data= - every trade of one strategy
-    /// across all runs (each counted once), oldest first.</summary>
+    /// <summary>GET /api/strategy-tuning/performance/trades?strategy=&amp;setting=&amp;index=&amp;data=&amp;from=&amp;to= - every trade of
+    /// one strategy across all runs (each counted once), oldest first.</summary>
     [HttpGet("performance/trades")]
-    public IActionResult PerformanceTrades([FromQuery] string strategy, [FromQuery] string? setting = null, [FromQuery] string? index = null, [FromQuery] string? data = null)
+    public IActionResult PerformanceTrades([FromQuery] string strategy, [FromQuery] string? setting = null, [FromQuery] string? index = null, [FromQuery] string? data = null,
+        [FromQuery] string? from = null, [FromQuery] string? to = null)
     {
         if (string.IsNullOrWhiteSpace(strategy)) return BadRequest(new { error = "strategy is required." });
         var d = string.Equals(data, "spot", StringComparison.OrdinalIgnoreCase) ? "spot" : string.Equals(data, "futures", StringComparison.OrdinalIgnoreCase) ? "futures" : null;
         var s = setting is "as written" or "fine-tuned" ? setting : null;
         var i = string.IsNullOrWhiteSpace(index) || index == "all" ? null : index.Trim().ToUpperInvariant();
-        return Ok(TuningPerformance.Trades(_tuning.HistoryRuns(), _tuning.HistoryRows, d, strategy.Trim(), s, i));
+        return Ok(TuningPerformance.Trades(_tuning.HistoryRuns(), _tuning.HistoryRows, d, strategy.Trim(), s, i, Day(from), Day(to)));
     }
 
     /// <summary>GET /api/strategy-tuning/performance/all-trades - EVERY strategy's trades across all runs (each counted
