@@ -7,7 +7,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { SPOT_STRATEGIES, buildOiContext } from '../src/strategyEngine.js'
 import { evaluateSpotStrategies, scanSpotDay, spotBarsOf } from '../src/spotEngine.js'
-import { lvnRefusedLong, lvnRefusedShort, lvnFillLong, lvnFillShort, pocRejectShort, pocRejectLong } from './spot-vp-world.mjs'
+import { lvnRefusedLong, lvnRefusedShort, lvnFillLong, lvnFillShort, pocRejectShort, pocRejectLong } from './spot-profile-world.mjs'
 
 const MIN = 60_000
 const T = Date.parse('2026-10-09T03:45:00Z') // 09:15 IST
@@ -37,8 +37,7 @@ function world({ candle, ce, pe, ceP = () => 60, peP = () => 60, minutes = 91, s
 }
 const at = (w, minute = 90) => {
   const nowMs = T + minute * MIN
-  // The previous day's spot volume profile where the day has one (#111 - #113, spot-vp-world.mjs).
-  return evaluateSpotStrategies({ nowMs, bars: w.bars.filter((b) => b.t + MIN <= nowMs), oi: w.oi, vp: w.vp ?? null })
+  return evaluateSpotStrategies({ nowMs, bars: w.bars.filter((b) => b.t + MIN <= nowMs), oi: w.oi })
 }
 const fires = (w, id, side, minute = 90) => at(w, minute).some((s) => s.id === id && s.side === side)
 const c = (open, close, pad = 3) => ({ open, close, high: Math.max(open, close) + pad, low: Math.min(open, close) - pad })
@@ -218,7 +217,7 @@ const NEW = [
   ['spotStraddleFade', 'SHORT', straddleShort], ['spotStraddleFade', 'LONG', straddleLong],
   ['spotWallShift', 'LONG', shiftLong], ['spotWallShift', 'SHORT', shiftShort],
   ['spotPremDiverge', 'SHORT', divShort], ['spotPremDiverge', 'LONG', divLong],
-  // #111 - #113 on the previous day's spot volume profile (their own rules: spot-strategies-4).
+  // #111 - #113 on the day's own spot profile (their own rules: spot-strategies-4).
   ['spotLvnReject', 'LONG', lvnRefusedLong], ['spotLvnReject', 'SHORT', lvnRefusedShort],
   ['spotLvnFill', 'LONG', lvnFillLong], ['spotLvnFill', 'SHORT', lvnFillShort],
   ['spotPocReject', 'SHORT', pocRejectShort], ['spotPocReject', 'LONG', pocRejectLong],

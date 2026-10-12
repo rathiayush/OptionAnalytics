@@ -5284,7 +5284,7 @@ export default function OiReplayPage() {
                   <SpotStrategyScanner
                     underlying={underlying} date={result?.date ?? (date ? date.format('YYYY-MM-DD') : null)} isReplay={!isLive}
                     bars={spotScanBars} clockMs={spotScanClock} oi={spotOi} expiry={liveExpiryDate}
-                    canTradeLive={isAdmin && isLive} isAdmin={isAdmin} onSignals={setSpotSignals} spotVp={volumeProfile}
+                    canTradeLive={isAdmin && isLive} isAdmin={isAdmin} onSignals={setSpotSignals}
                     dragHandle={<CardDragHandle {...dragHandleProps('spotStrategies')} />}
                   />
                 </div>

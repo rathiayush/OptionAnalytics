@@ -41,7 +41,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
 import { buildOiContext, ACTIVE_STRATEGIES, SPOT_STRATEGIES, STRATEGY_BY_ID, TRADE_FILTERS, filtersForIndex, pinnedTrailOf } from '../src/strategyEngine.js'
-import { scanSpotDay, spotBarsOf, spotVpOf } from '../src/spotEngine.js'
+import { scanSpotDay, spotBarsOf } from '../src/spotEngine.js'
 import { autoBigLots } from '../src/orderFlowMath.js'
 import { scannerProfileOf, trailFor } from '../src/scannerCore.js'
 import { defaultTradeLevels } from '../src/tradeDefaults.js'
@@ -304,11 +304,7 @@ async function main() {
       const oiMinutes = minutesOf(run.cePoints)
       if (oiMinutes < MIN_SESSION_MINUTES) throw new Error(`option OI for only ${oiMinutes} of 375 minutes - a partial day`)
       const oi = buildOiContext(run, expiryDate, { live: false })
-      // The previous day's spot volume profile (#111 - #113 read it; known before the session) - kept with the day's cache.
-      // A day without one is scanned by the other spot strategies all the same.
-      const vpBody = await fetcher.dayApi('spotvp', p.date, `/api/oi-replay/${U}/previous-day-volume-profile?date=${p.date}`, (b) => b?.success === true, { source: 'spot-volume-profile' }).catch(() => null)
-      const vp = spotVpOf(vpBody)
-      return { ...tuningDay(p.date, scanSpotDay({ bars, oi, filters: entryFilters, vp }), { minuteBars: bars, heatmap: [] }, oi), estimated: false, quality: { minutes: bars.length, oiMinutes, source: 'spot', spotVp: !!vp, ...(optionErrors ? { optionErrors } : {}) } }
+      return { ...tuningDay(p.date, scanSpotDay({ bars, oi, filters: entryFilters }), { minuteBars: bars, heatmap: [] }, oi), estimated: false, quality: { minutes: bars.length, oiMinutes, source: 'spot', ...(optionErrors ? { optionErrors } : {}) } }
     }
     const expiryQuery = p.expiry ? `&expiry=${p.expiry}` : ''
     const body = await fetcher.dayApi('flow', p.date, dayPath(p.date, rowSize, expiryQuery), (b) => b?.bars?.length >= MIN_SESSION_MINUTES, { source: 'futures-day' })
