@@ -21,7 +21,7 @@ import { spotBarsOf } from '../src/spotEngine.js'
 import { liquiditySignals, pullStackSignals, autoBigLots } from '../src/orderFlowMath.js'
 import {
   MIN, msOf, scanTick, spotScanTick, followAllSetups, trailFor, alertIdsFor, setupEvents, newSetupEventMemory, newPosition, positionRows, sameSignal,
-  withLevelChange, withCapChange, setupWasTraded, paperEntryText, liveLegsFor, setupExitText, paperExitText, scannerLogBody, scannerLogSig, scannerProfileOf, PAPER_TRADE_LOT_SIZE,
+  withLevelChange, withCapChange, setupWasTraded, paperEntryText, liveLegsFor, liveLegsNow, sameLegs, setupExitText, paperExitText, scannerLogBody, scannerLogSig, scannerProfileOf, PAPER_TRADE_LOT_SIZE,
   RUNNER_DEFAULT_SETTINGS, runnerSettingsOf,
 } from '../src/scannerCore.js'
 import { orderFlowFromSnapshot, applyOrderFlowPush, mergePrints, applyOiTicks, applyFuturesTicks, applySpotUpdate, expiryFlagOf, TAPE_PRINTS } from '../src/liveFeeds.js'
@@ -454,6 +454,10 @@ export class IndexScanner {
       const o = res.order ?? {}
       Object.assign(position, {
         live: true, orderIds: o.orderIds ?? [], indexStopSent: optionOnly ? null : s.stop, liveNote: o.success === false ? `PARTLY placed - ${res.message}` : res.message,
+        // The legs Dhan got with the entry, and the safety legs (the signal's own index distance) a leg with none falls
+        // back to - so a later change of its SL / target moves them (follow).
+        liveLegs: { slPts: legs.slPts ?? null, targetPts: legs.targetPts ?? null },
+        liveSafety: { slPts: Math.abs(s.entry - s.stop), targetPts: Math.abs(s.target - s.entry) },
         lotSize: o.lotSize ?? position.lotSize, premium: o.prices?.limit ?? position.premium,
       })
       this.dirty = true
@@ -497,6 +501,34 @@ export class IndexScanner {
         this.dirty = true
       } catch (err) {
         this.io.log(`${this.underlying}: the trailed index stop of ${p.key} was not sent - ${err.message}`)
+      }
+    }
+    // A live trade's option SL / target moved by the strategy (a new Max SL / Max target reaching its open trades from
+    // that minute - withCapChange): its Dhan legs are moved to the same points at once, so the real order leaves where
+    // the paper trade does. A failure is tried again a minute later (and said once on Telegram).
+    for (const p of this.positions) {
+      if (!p.live || p.liveExitSent || !p.orderIds?.length) continue
+      const row = rows.find((r) => r.key === p.key)
+      if (!row || row.exitTime) continue
+      const want = liveLegsNow(p)
+      if (!(want.slPts > 0) && !(want.targetPts > 0)) continue
+      // Placed before its legs were kept: what it has now is what it was placed with.
+      if (!p.liveLegs) { p.liveLegs = want; this.dirty = true; continue }
+      if (sameLegs(want, p.liveLegs) || (p.liveLegsRetryAt ?? 0) > nowMs) continue
+      const was = p.liveLegs
+      const pts = (x) => (x > 0 ? x.toFixed(1) : '-')
+      try {
+        const res = await this.io.api(`/api/scanner-runner/live/${this.underlying}/levels`, { method: 'POST', body: { key: p.key, stopLossPoints: want.slPts ?? 0, targetPoints: want.targetPts ?? 0 } })
+        Object.assign(p, { liveLegs: want, liveLegsRetryAt: null, liveNote: res?.message ?? p.liveNote })
+        this.dirty = true
+        this.io.log(`${this.underlying}: LIVE ${p.key} legs moved on Dhan - SL ${pts(want.slPts)} / target ${pts(want.targetPts)} pts`)
+        if (cfg.telegram !== false) await this.io.telegram(`${TAG} LIVE SL / target moved on Dhan: ${p.action} ${this.underlying} ${p.strike} ${p.side} - SL ${pts(was.slPts)} -> ${pts(want.slPts)}, target ${pts(was.targetPts)} -> ${pts(want.targetPts)} pts`)
+      } catch (err) {
+        const first = !p.liveLegsRetryAt
+        Object.assign(p, { liveLegsRetryAt: nowMs + MIN, liveNote: `SL / target not moved on Dhan - ${err.message}` })
+        this.dirty = true
+        this.io.log(`${this.underlying}: LIVE ${p.key} legs NOT moved - ${err.message}`)
+        if (first && cfg.telegram !== false) await this.io.telegram(`${TAG} LIVE SL / target NOT moved on Dhan for ${this.underlying} ${p.action} ${p.strike} ${p.side} (SL ${pts(want.slPts)} / target ${pts(want.targetPts)} pts): ${err.message} - check the Dhan panel; trying again each minute`)
       }
     }
     // A live trade the scanner closed (its stop, target, trailing SL, time stop or the option's own levels): closed on

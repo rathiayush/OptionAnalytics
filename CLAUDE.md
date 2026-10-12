@@ -48,7 +48,10 @@ reads what Dhan did by itself (`ReconcileAsync`, from the order book in memory -
 SL / target leg filled is closed at once with its P&L from the fills (kept over the scanner's later report), an entry
 rejected / cancelled before it traded is no trade (not counted, P&L 0), and a server scanner entry with nothing traded
 `EntryFillSeconds` (60) after it was placed is cancelled through the trade's own exit; an order the book does not list,
-or a filled one whose legs are not listed, is never guessed closed.
+or a filled one whose legs are not listed, is never guessed closed. A change of an open live trade's option SL / target
+(a new Max SL / Max target reaching it from that minute - `withCapChange`) moves its Dhan legs at once: the runner compares
+`liveLegsNow(p)` with the legs Dhan has (`p.liveLegs`) each tick and posts `/api/scanner-runner/live/{index}/levels`
+(`ServerLiveService.MoveLegsAsync`, held to the max, `UpdateTradeLevelsAsync`), a failure retried each minute.
 
 When adding or changing a strategy:
 

@@ -85,6 +85,10 @@ export function ServerLiveTrades({ st }) {
           <b>{t.contract}</b><span>x{t.lots}</span>
           <Text type="secondary" style={{ fontSize: 12 }}>{t.strategy}</Text>
           {/* The server's own index stop / target on this trade - on the futures, or the spot for a spot + options strategy. */}
+          {/* The option SL / target legs on its Dhan super order - as placed, then as the strategy moved them. */}
+          {!t.exitedUtc && (t.slPoints > 0 || t.targetPoints > 0) && (
+            <Text type="secondary" style={{ fontSize: 11 }}>Dhan legs SL {t.slPoints > 0 ? `${+t.slPoints.toFixed(2)}` : '-'} / target {t.targetPoints > 0 ? `${+t.targetPoints.toFixed(2)}` : '-'} pts</Text>
+          )}
           {!t.exitedUtc && t.indexStop > 0 && (
             <Text type="secondary" style={{ fontSize: 11 }}>{t.priceBasis === 'spot' ? 'spot' : 'futures'} SL {t.indexStop}{t.indexTarget > 0 ? ` / target ${t.indexTarget}` : ''}</Text>
           )}

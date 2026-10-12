@@ -259,6 +259,22 @@ export function liveLegsFor(plan, setup) {
   }
 }
 
+/** The SL / target legs an open LIVE trade must have on Dhan now (premium points from its entry): its SL / target in
+ *  force - after any change, from the minute it was made (withCapChange / withLevelChange) - else the safety legs it was
+ *  placed with (`liveSafety`, liveLegsFor). The scanner moves the legs whenever these differ from what Dhan has. */
+export function liveLegsNow(p) {
+  return {
+    slPts: p?.slPts > 0 ? p.slPts : p?.liveSafety?.slPts > 0 ? p.liveSafety.slPts : null,
+    targetPts: p?.targetPts > 0 ? p.targetPts : p?.liveSafety?.targetPts > 0 ? p.liveSafety.targetPts : null,
+  }
+}
+
+/** Whether two sets of legs are the same (to a hundredth of a point; none = none). */
+export function sameLegs(a, b) {
+  const same = (x, y) => (x > 0 ? y > 0 && Math.abs(x - y) < 0.01 : !(y > 0))
+  return same(a?.slPts, b?.slPts) && same(a?.targetPts, b?.targetPts)
+}
+
 /**
  * A change of the index's max rules (`caps` { maxSl, maxTarget }, premium points, 0 = none) for the strategy trades still
  * OPEN (keys in `openKeys`), from the minute `changeAt`: each one's SL / target in force becomes its own held to the new

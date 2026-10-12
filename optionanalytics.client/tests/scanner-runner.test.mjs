@@ -470,6 +470,83 @@ test('every strategy trades its own exit - never the manual SL / target / trail 
   }
 })
 
+test('an open LIVE trade: a change of its SL / target moves its Dhan legs at once - a failure is tried again a minute later', async () => {
+  const probe = new IndexScanner('NIFTY', fakeIo())
+  probe.reset(DATE)
+  probe.setConfig({ alertIds: ALL_IDS, settings: { autoPaper: 'sell' } })
+  await runDay(probe, fakeIo(), at(15), at(300))
+  const [withIndex, optionOnly] = [...new Set(probe.positions.map((p) => p.strategy))]
+  const orders = []
+  const moves = []
+  let failMoves = false
+  const io = fakeIo()
+  io.api = async (path, opts) => {
+    if (path === '/api/scanner-runner/live/NIFTY/order') { orders.push(opts.body); return { placed: true, message: 'placed', order: { success: true, orderIds: [`o${orders.length}`], lotSize: 65 } } }
+    if (path === '/api/scanner-runner/live/NIFTY/levels') {
+      moves.push({ ...opts.body, at: io.clock })
+      if (failMoves) throw new Error('/api/scanner-runner/live/NIFTY/levels: Dhan did not modify it')
+      return { success: true, message: 'legs moved' }
+    }
+    return {}
+  }
+  const s = new IndexScanner('NIFTY', io)
+  s.reset(DATE)
+  const levels = (maxSl) => ({ NIFTY: { sl: 20, target: 30, trailStart: 0, trailGap: 0, maxSl, maxTarget: 0 } })
+  const config = { alertIds: ALL_IDS, settings: { autoPaper: 'strategy', telegram: true }, live: { NIFTY: true }, levels: levels(0),
+    filtersByIndex: { NIFTY: { [withIndex]: { tradeOptLeg: 'sell', tradeOptExit: 'index', _tuned: 'a' }, [optionOnly]: { tradeOptLeg: 'sell', tradeOptExit: 'option', tradeOptSlPct: 20, tradeOptTargetPct: 30, _tuned: 'b' } } } }
+  s.setConfig(config)
+  await runDay(s, io, at(15), at(150))
+  // The SL / target went WITH the entry (a super order) - each live trade's legs are what its order carried.
+  const liveOpen = () => s.positions.filter((p) => p.live && !s.status().trades.find((r) => r.key === p.key)?.exitTime)
+  assert.ok(liveOpen().length, 'a live trade is open')
+  for (const p of s.positions.filter((x) => x.live)) {
+    const o = orders.find((x) => x.key === p.key)
+    assert.deepEqual(p.liveLegs, { slPts: o.stopLossPoints, targetPts: o.targetPoints }, p.key)
+  }
+  assert.equal(moves.length, 0, 'nothing changed - nothing moved')
+
+  // A tighter Max SL now (Trade settings): every open live trade's SL leg moves to its SL held to it, in the same tick.
+  const open = liveOpen().map((p) => ({ key: p.key, own: p.ownSlPts, target: p.liveLegs.targetPts }))
+  s.setConfig({ ...config, levels: levels(8) })
+  await runDay(s, io, at(150) + 30_000, at(150) + 30_000)
+  for (const o of open) {
+    const p = s.positions.find((x) => x.key === o.key)
+    if (s.status().trades.find((r) => r.key === o.key)?.exitTime) continue // closed by it at once
+    const m = moves.find((x) => x.key === o.key)
+    assert.ok(m, `legs moved for ${o.key}`)
+    assert.equal(m.stopLossPoints, o.own > 0 ? Math.min(o.own, 8) : 8, 'its own SL held to the new max, else the max')
+    assert.equal(m.targetPoints, o.target, 'the target as it was (no max target)')
+    assert.deepEqual(p.liveLegs, { slPts: m.stopLossPoints, targetPts: m.targetPoints })
+  }
+  assert.ok(moves.length, 'a leg was moved')
+  assert.ok(io.telegrams.some((t) => t.startsWith(`${TAG} LIVE SL / target moved on Dhan`)))
+  // The same again: nothing to move.
+  const n = moves.length
+  await runDay(s, io, at(151), at(151))
+  assert.equal(moves.length, n)
+
+  // Dhan refuses the next move: tried once, said once, tried again a minute later - never every tick.
+  const stillOpen = liveOpen().map((p) => p.key)
+  assert.ok(stillOpen.length, 'live trades still open')
+  failMoves = true
+  s.setConfig({ ...config, levels: levels(6) })
+  await runDay(s, io, at(152), at(152) + 30_000)
+  const tries = (key) => moves.slice(n).filter((m) => m.key === key).length
+  // The trades open before the change and still open (a trade opened since went out with the new SL already).
+  const before = () => liveOpen().filter((p) => stillOpen.includes(p.key))
+  assert.ok(before().length, 'the trades open before the change are still open')
+  for (const p of before()) assert.equal(tries(p.key), 1, p.key)
+  assert.equal(io.telegrams.filter((t) => t.includes('LIVE SL / target NOT moved on Dhan')).length, before().length)
+  assert.ok(before().every((p) => /not moved on Dhan/.test(p.liveNote)))
+  assert.ok(liveOpen().filter((p) => !stillOpen.includes(p.key)).every((p) => tries(p.key) === 0), 'a trade opened since needs no move')
+  failMoves = false
+  await runDay(s, io, at(153), at(153))
+  for (const p of before()) {
+    assert.equal(tries(p.key), 2, `tried again a minute later: ${p.key}`)
+    assert.equal(p.liveLegs.slPts, p.ownSlPts > 0 ? Math.min(p.ownSlPts, 6) : 6)
+  }
+})
+
 test('today is not loaded at weekends or before the open, and a failing load backs off (each try costs Dhan calls)', async () => {
   const io = fakeIo()
   const tries = []

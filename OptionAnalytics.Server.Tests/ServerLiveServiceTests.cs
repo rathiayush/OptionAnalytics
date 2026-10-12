@@ -47,6 +47,13 @@ public sealed class ServerLiveServiceTests : IDisposable
         /// <summary>Dhan's order book in memory: what each order id is doing (unlisted = not read yet).</summary>
         public Dictionary<string, LiveOrderState> Book { get; } = new();
         public IReadOnlyList<LiveOrderState> OrderStates(IReadOnlyCollection<string> orderIds) => Book.Values.Where(x => orderIds.Contains(x.OrderId)).ToList();
+        public List<(IReadOnlyList<string> Ids, decimal Sl, decimal Target)> LegMoves { get; } = new();
+        public bool FailLegs { get; set; }
+        public Task<ManualOrderResult> UpdateLegsAsync(IReadOnlyList<string> orderIds, decimal stopLossPoints, decimal targetPoints, CancellationToken cancellationToken)
+        {
+            LegMoves.Add((orderIds, stopLossPoints, targetPoints));
+            return Task.FromResult(FailLegs ? ManualOrderResult.Fail("Dhan did not modify it") : new ManualOrderResult(true, "legs moved", Array.Empty<string>(), null));
+        }
     }
 
     /// <summary>An order still working: nothing traded, or its entry filled (a SELL at 101) with its legs working.</summary>
@@ -604,5 +611,40 @@ public sealed class ServerLiveServiceTests : IDisposable
         Assert.Equal(2418m, TradeOf(live, "NIFTY", request.Key).Pnl); // (62 - 43.4) x 130
         await live.PlaceAsync("NIFTY", request with { Key = "vwapPullback-2-LONG", Lots = null, StopLossPoints = 70, TargetPoints = 140 }, At10.AddMinutes(10), default);
         Assert.Equal((4, 50m, 140m), (orders.Placed[1].Lots, orders.Placed[1].StopLossPoints, orders.Placed[1].TargetPoints));
+    }
+
+    [Fact]
+    public async Task TheStrategyMovingAnOpenTradesSlOrTarget_MovesItsDhanLegs_HeldToTheMax_OnlyWhileOpen()
+    {
+        var orders = new FakeOrders();
+        var live = Live(orders); // NIFTY max SL 20 / max target 30
+        live.Set("NIFTY", true, 5, null, "admin", At10);
+        await live.PlaceAsync("NIFTY", Order("a", 18, 27), At10, default);
+        Assert.Equal((18m, 27m), (TradeOf(live, "NIFTY", "a").SlPoints!.Value, TradeOf(live, "NIFTY", "a").TargetPoints!.Value)); // what went with the entry
+        // Tighter: moved on Dhan, at once.
+        Assert.True((await live.MoveLegsAsync("NIFTY", "a", 12, 27, At10.AddMinutes(1), default)).Success);
+        var move = Assert.Single(orders.LegMoves);
+        Assert.Equal(new[] { "o1" }, move.Ids);
+        Assert.Equal((12m, 27m), (move.Sl, move.Target));
+        Assert.Equal((12m, 27m), (TradeOf(live, "NIFTY", "a").SlPoints!.Value, TradeOf(live, "NIFTY", "a").TargetPoints!.Value));
+        // Past the index's max: held to it, like the order was.
+        await live.MoveLegsAsync("NIFTY", "a", 40, 50, At10.AddMinutes(2), default);
+        Assert.Equal((20m, 30m), (orders.LegMoves[1].Sl, orders.LegMoves[1].Target));
+        // Already there: nothing sent.
+        Assert.True((await live.MoveLegsAsync("NIFTY", "a", 25, 35, At10.AddMinutes(3), default)).Success);
+        Assert.Equal(2, orders.LegMoves.Count);
+        // Dhan refuses: said on the trade, the legs it had are kept.
+        orders.FailLegs = true;
+        Assert.False((await live.MoveLegsAsync("NIFTY", "a", 10, 30, At10.AddMinutes(4), default)).Success);
+        Assert.Equal(20m, TradeOf(live, "NIFTY", "a").SlPoints);
+        Assert.Contains("not moved on Dhan", TradeOf(live, "NIFTY", "a").Note);
+        // Closed, unknown, or the page's own trade: nothing sent.
+        orders.FailLegs = false;
+        await live.ExitAsync("NIFTY", "a", "target", 300, At10.AddMinutes(5), default);
+        Assert.Null(live.WatchPageTrade(new PageLiveWatchRequest("NIFTY", "p", new[] { "p1" }, 24900, "LONG"), At10));
+        Assert.False((await live.MoveLegsAsync("NIFTY", "a", 10, 30, At10.AddMinutes(6), default)).Success);
+        Assert.False((await live.MoveLegsAsync("NIFTY", "nope", 10, 30, At10.AddMinutes(6), default)).Success);
+        Assert.False((await live.MoveLegsAsync("NIFTY", ServerLiveService.PageKey("p"), 10, 30, At10.AddMinutes(6), default)).Success);
+        Assert.Equal(3, orders.LegMoves.Count);
     }
 }

@@ -10,6 +10,8 @@ public interface IServerLiveOrders
     Task<ManualOrderResult> ExitTradeAsync(IReadOnlyList<string> orderIds, decimal slippagePoints, CancellationToken cancellationToken, bool onlyWithWorkingLegs);
     /// <summary>Where these super orders stand on Dhan, from the order book in memory (no Dhan call); unlisted ones left out.</summary>
     IReadOnlyList<LiveOrderState> OrderStates(IReadOnlyCollection<string> orderIds);
+    /// <summary>Moves a trade's stop-loss / target legs to these premium points from its entry (0 = leave that leg).</summary>
+    Task<ManualOrderResult> UpdateLegsAsync(IReadOnlyList<string> orderIds, decimal stopLossPoints, decimal targetPoints, CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -150,7 +152,8 @@ public sealed class ServerLiveService
                 {
                     _state.Trades.Add(new ServerLiveTrade(u, today, request.Key, request.Strategy ?? "", $"{order.Direction} {order.Strike} {order.Side}",
                         result.OrderIds.ToList(), order.Lots, result.LotSize, result.Prices?.Limit, now, null, null, null, result.Success ? null : $"partly placed - {result.Message}")
-                    { ExitAtMs = request.ExitAtMs, IndexStop = request.IndexStop, IndexTarget = request.IndexTarget is > 0 ? request.IndexTarget : null, IndexSide = NormaliseSide(request.IndexSide), PriceBasis = NormaliseBasis(request.PriceBasis) });
+                    { ExitAtMs = request.ExitAtMs, IndexStop = request.IndexStop, IndexTarget = request.IndexTarget is > 0 ? request.IndexTarget : null, IndexSide = NormaliseSide(request.IndexSide), PriceBasis = NormaliseBasis(request.PriceBasis),
+                      SlPoints = sl, TargetPoints = target });
                     Save();
                 }
             }
@@ -224,6 +227,41 @@ public sealed class ServerLiveService
         }
         if (!result.Success && _telegram is not null)
             await _telegram.SendAsync($"[Server] LIVE exit FAILED for {u} {trade.Contract}: {result.Message} - check the Dhan panel.", CancellationToken.None);
+        return result;
+    }
+
+    /// <summary>
+    /// The strategy moved an open live trade's option SL / target (a new Max SL / Max target in Trade settings reaching
+    /// its open trades from that minute - the paper trade's levelLog): its Dhan super order's legs are moved to the same
+    /// premium points from its entry (its fill once known) - held to the index's max rules like the order was, a trailed
+    /// stop never loosened (LiveTradingService.UpdateTradeLevelsAsync). The server scanner's own open trades only.
+    /// </summary>
+    public async Task<ManualOrderResult> MoveLegsAsync(string underlying, string key, decimal? stopLossPoints, decimal? targetPoints, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        var u = underlying.Trim().ToUpperInvariant();
+        ServerLiveTrade? trade;
+        lock (_lock) trade = _state.Trades.LastOrDefault(t => t.Underlying == u && t.Key == key && !t.IsPageTrade);
+        if (trade is null) return ManualOrderResult.Fail($"no live {u} trade {key}");
+        if (trade.ExitedUtc is not null) return ManualOrderResult.Fail($"the live {u} trade {key} is closed already");
+        var t = _trade.Get(u);
+        var sl = Capped(stopLossPoints, t.MaxSl);
+        var target = Capped(targetPoints, t.MaxTarget);
+        if (sl <= 0 && target <= 0) return ManualOrderResult.Fail("no stop-loss or target to set");
+        if (sl == trade.SlPoints && target == trade.TargetPoints) return new ManualOrderResult(true, "its legs are there already", Array.Empty<string>(), null);
+        var result = await _orders.UpdateLegsAsync(trade.OrderIds, sl, target, CancellationToken.None);
+        lock (_lock)
+        {
+            var i = _state.Trades.FindLastIndex(x => x.Underlying == u && x.Key == key && !x.IsPageTrade);
+            if (i >= 0)
+            {
+                var cur = _state.Trades[i];
+                _state.Trades[i] = result.Success
+                    ? cur with { SlPoints = sl > 0 ? sl : cur.SlPoints, TargetPoints = target > 0 ? target : cur.TargetPoints }
+                    : cur with { Note = $"SL / target not moved on Dhan - {result.Message}" };
+                Save();
+            }
+        }
+        _logger.LogWarning("Live {Underlying} {Contract} ({Key}): legs to SL {Sl} / target {Target} pts - {Message}", u, trade.Contract, key, sl, target, result.Message);
         return result;
     }
 
@@ -503,6 +541,8 @@ public sealed class ServerLiveService
         public Task<ManualOrderResult> ExitTradeAsync(IReadOnlyList<string> orderIds, decimal slippagePoints, CancellationToken cancellationToken, bool onlyWithWorkingLegs) =>
             trading.ExitTradeAsync(orderIds, slippagePoints, cancellationToken, onlyWithWorkingLegs);
         public IReadOnlyList<LiveOrderState> OrderStates(IReadOnlyCollection<string> orderIds) => trading.OrderStates(orderIds);
+        public Task<ManualOrderResult> UpdateLegsAsync(IReadOnlyList<string> orderIds, decimal stopLossPoints, decimal targetPoints, CancellationToken cancellationToken) =>
+            trading.UpdateTradeLevelsAsync(orderIds, stopLossPoints, targetPoints, cancellationToken);
     }
 }
 
@@ -521,6 +561,9 @@ public sealed record ServerLiveOrderResult(bool Placed, string Message, ManualOr
 public sealed record ServerLiveExitRequest(string Key, string? Reason, decimal? Pnl);
 
 public sealed record ServerLiveStopRequest(string Key, decimal Stop);
+
+/// <summary>The strategy's option SL / target (premium points from the entry) for an open live trade's Dhan legs.</summary>
+public sealed record ServerLiveLegsRequest(string Key, decimal? StopLossPoints, decimal? TargetPoints);
 
 /// <summary>Every 2 seconds in market hours: what Dhan did to the open live trades by itself (ServerLiveService.ReconcileAsync
 /// - a leg filled, an entry rejected or not filled in time), then the server's own index stop-loss check on them
@@ -573,6 +616,9 @@ public sealed record ServerLiveTrade(string Underlying, string Day, string Key, 
     /// <summary>"spot" - the index stop / target are SPOT prices (a spot + options strategy) and are checked on the spot;
     /// null - futures prices.</summary>
     public string? PriceBasis { get; init; }
+    /// <summary>The option SL / target legs on Dhan (premium points from the entry) - as placed, then as the strategy moved them.</summary>
+    public decimal? SlPoints { get; init; }
+    public decimal? TargetPoints { get; init; }
     /// <summary>Its entry never traded (rejected, cancelled, not filled in time): no trade - not counted in the max
     /// trades, P&amp;L 0.</summary>
     public bool NotFilled { get; init; }

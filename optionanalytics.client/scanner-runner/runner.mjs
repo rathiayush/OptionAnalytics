@@ -38,7 +38,7 @@ async function api(path, { method = 'GET', body } = {}) {
   const text = await res.text()
   if (!res.ok) {
     let reason = text.slice(0, 200)
-    try { reason = JSON.parse(text)?.error ?? reason } catch { /* not JSON */ }
+    try { const j = JSON.parse(text); reason = j?.error ?? j?.message ?? reason } catch { /* not JSON */ }
     throw new Error(`${path.split('?')[0]}: ${reason || `HTTP ${res.status}`}`)
   }
   try { return text ? JSON.parse(text) : null } catch { return text }
