@@ -5,6 +5,7 @@
 import {
   ACTIVE_STRATEGIES, STRATEGY_BY_ID, evaluateStrategies, simulateOutcome, DEFAULT_TRAIL, RANGE_IDS,
   exitLabel, premiumAt, optionStopTargetHit, squareOffMs, marketAt, lotsFor, pinnedTrailOf, optionExitText, capPoints, optionTradesFor, valueAt,
+  optionPlanFor, optionTradeAt, filtersForIndex,
 } from './strategyEngine.js'
 // The market at a signal now lives with the strategies (the order-flow trade filters read it) - re-exported here.
 export { marketAt, MARKET_KEYS } from './strategyEngine.js'
@@ -12,6 +13,7 @@ import { aggregateBars, analyzeBars, findWalls } from './orderFlowMath.js'
 import { chargeRates, tradeCharges } from './tradeCharges.js'
 import { sessionVolumeProfile, tpoProfile, tpoRowFor } from './profiles.js'
 import { evaluateSpotStrategies } from './spotEngine.js'
+import { defaultTradeLevels } from './tradeDefaults.js'
 
 export const MIN = 60_000
 // One alert per strategy and direction at most every 20 minutes - a setup that stays true is one trade.
@@ -402,42 +404,79 @@ export function setupWasTraded(positions, s) {
 
 // ---- The day's record for the server's scanner log (POST /api/scanner-log/day) ----------------------
 
+// The server scanner's own defaults for anything its config does not say (the page's StrategyScanner / OrderFlowPage).
+// autoPaper 'strategy': each strategy buys or sells what its own tuned setting says (Apply to the scanner), falling back
+// to selling where there is none - nobody is sitting there to choose, unlike the Order Flow page, where the trader's own
+// Buy / Sell always wins.
+export const RUNNER_DEFAULT_SETTINGS = { alerts: true, telegram: true, pick: 'top15', custom: [], filters: {}, trail: { on: true, ...DEFAULT_TRAIL }, autoPaper: 'strategy', paperLots: 1, moneyness: 0 }
+
 /**
- * What each option of a signal would have done, to compare with the one traded: the ATM option to BUY and the ATM option to
- * SELL the signal carries, each from the signal's minute (its premium then) held until the signal's index trade exited
- * (its stop / target / trailing stop / time stop - the premium once that bar is over), in premium points; and the signal's
- * own points on the index. Only for a signal that has closed, and only with the day's OI (`oi`) - nothing past the exit.
- * A signal without its options (one read back from the log - fillRecordLegs) takes the ATM pair at its minute's spot,
- * the way every strategy picks them (optionTradesFor).
+ * The scanner settings the server scanner trades ONE index with, from its config (GET /api/scanner-runner/config):
+ * its saved settings, each strategy's filters on this index (a setting applied there, else the all-index ones), the
+ * index's SL / target / trail and max rules, its lots and what an alert trades (trade-settings.csv). The runner and the
+ * Trades page (redoing the record's If bought / If sold) read the same.
  */
-export function signalLegs(x, oi) {
+export function runnerSettingsOf(config, underlying) {
+  const s = { ...RUNNER_DEFAULT_SETTINGS, ...(config?.settings ?? {}) }
+  const levels = { ...defaultTradeLevels(underlying), trailStart: 0, trailGap: 0, ...(config?.levels?.[underlying] ?? {}) }
+  const trade = config?.trade?.[underlying] ?? {}
+  return {
+    ...s, filters: filtersForIndex({ filters: s.filters, filtersByIndex: config?.filtersByIndex }, underlying), paperSl: levels.sl, paperTarget: levels.target, paperTrailStart: levels.trailStart ?? 0, paperTrailGap: levels.trailGap ?? 0,
+    // The max rules every strategy's option trade is held to (Trade settings - Max SL / Max target; 0 = none).
+    paperMaxSl: Number(levels.maxSl ?? levels.sl) || 0, paperMaxTarget: Number(levels.maxTarget ?? levels.target) || 0,
+    ...(trade.lots > 0 ? { paperLots: trade.lots } : {}), ...(trade.autoTrade ? { autoPaper: trade.autoTrade } : {}),
+  }
+}
+
+/**
+ * What each option of a signal would have done, to compare with the one traded: the option to BUY and the option to SELL,
+ * each taken EXACTLY the way the scanner trades a strategy's signal (newPosition / positionRows, the tuning's
+ * optionOutcome) - at the strategy's own strike (`optionPlanFor`'s moneyness), from the signal's minute (its premium
+ * then), out at ITS OWN option exit: its SL / target (its own %, held to the index's Max SL / Max target) checked from
+ * the first full minute, else with the index trade (its stop / target / trailing stop / time stop - the premium once that
+ * bar is over), or at 15:10 for an 'option' exit. So the leg of the side that was traded is the trade itself. In premium
+ * points, with when and why each left; and the signal's own points on the index. Only for a signal that has closed, and
+ * only with the day's OI (`oi`) - nothing past the exit. `filters` (the index's - filtersForIndex) / `cfg` (the scanner
+ * settings: autoPaper, moneyness, paperMaxSl, paperMaxTarget) as the trade read them; none = ATM, out with the index trade.
+ */
+export function signalLegs(x, oi, { filters = {}, cfg = {} } = {}) {
   const o = x.outcome ?? {}
   const closed = o.status && o.status !== 'open'
   if (!closed) return {}
   const dir = x.side === 'LONG' ? 1 : -1
   const out = { indexPoints: Number.isFinite(o.exitPrice) ? dir * (o.exitPrice - x.entry) : null }
   if (!oi) return out
-  const exitAt = o.exitAt != null ? o.exitAt + MIN : squareOffMs(x.t)
+  const indexExitAt = o.exitAt != null ? o.exitAt + MIN : squareOffMs(x.t)
+  // A signal read back from the log has no options of its own (fillRecordLegs): the ATM pair at its minute's spot.
   const options = x.options ?? optionTradesFor(oi, dir, valueAt(oi.spot, x.t)?.close, x.t)
+  const setup = { ...x, options }
+  const plan = optionPlanFor(x.id, filters, cfg)
   for (const which of ['buy', 'sell']) {
-    const trade = options?.[which]
+    const trade = optionTradeAt(oi, setup, which, plan.moneyness, x.t)
     if (!trade?.strike) continue
     const entry = premiumAt(oi, trade.side, trade.strike, x.t) ?? trade.premium ?? null
-    const exit = premiumAt(oi, trade.side, trade.strike, exitAt)
     out[`${which}Option`] = `${trade.action ?? which.toUpperCase()} ${trade.strike} ${trade.side}`
     out[`${which}Entry`] = entry
+    if (entry == null) continue
+    const levels = optionPlanFor(x.id, filters, cfg, entry)
+    const untilMs = levels.exit === 'option' ? squareOffMs(x.t) : indexExitAt
+    const hit = untilMs > x.t ? optionStopTargetHit(oi, { ...trade, premium: entry }, x.t, untilMs, levels.slPts, levels.targetPts) : null
+    const exitAt = hit ? hit.at : untilMs
+    const exit = hit ? hit.premium : premiumAt(oi, trade.side, trade.strike, untilMs)
     out[`${which}Exit`] = exit ?? null
-    out[`${which}Points`] = entry != null && exit != null ? (which === 'buy' ? exit - entry : entry - exit) : null
+    out[`${which}ExitTime`] = exit != null ? exitAt : null
+    out[`${which}ExitReason`] = exit == null ? null : hit ? hit.reason : levels.exit === 'option' ? 'square-off 15:10' : `with the index trade - ${exitLabel(o)}`
+    out[`${which}Points`] = exit != null ? (which === 'buy' ? exit - entry : entry - exit) : null
   }
   return out
 }
 
-export function scannerLogBody({ underlying, date, source, dayResults, rows, charges, oi = null }) {
+export function scannerLogBody({ underlying, date, source, dayResults, rows, charges, oi = null, cfg = null }) {
   const signals = dayResults.map((x) => {
     const o = x.outcome ?? {}
     const meta = STRATEGY_BY_ID[x.id]
     const closed = o.status && o.status !== 'open'
-    const legs = signalLegs(x, oi)
+    const legs = signalLegs(x, oi, { filters: cfg?.filters ?? {}, cfg: cfg ?? {} })
     return {
       time: x.t, strategyNo: meta?.no ?? null, strategyId: x.id, strategy: meta?.name ?? x.id, side: x.side, entry: x.entry, stop: x.stop, target: x.target,
       estimated: !!x.estimated, dayType: x.regime?.type ?? null, dayTypePrice: x.regime?.priceType ?? null,
@@ -445,9 +484,12 @@ export function scannerLogBody({ underlying, date, source, dayResults, rows, cha
       adaptivePriceOnly: x.adaptive?.priceOnly ?? null, adaptiveReason: x.adaptive?.reason ?? null, status: o.status ?? null, r: o.r ?? null,
       exitTime: closed ? o.exitAt ?? null : null, exitPrice: closed ? o.exitPrice ?? null : null, exitReason: closed ? exitLabel(o) : null,
       market: x.market ?? null,
-      // Both options, held to the signal's exit, and its index points - to compare with the option actually traded.
+      // Both options, each out at the strategy's own option exit as the trade is (signalLegs), and its index points - to
+      // compare with the option actually traded.
       buyOption: legs.buyOption ?? null, buyEntry: legs.buyEntry ?? null, buyExit: legs.buyExit ?? null, buyPoints: legs.buyPoints ?? null,
+      buyExitTime: legs.buyExitTime ?? null, buyExitReason: legs.buyExitReason ?? null,
       sellOption: legs.sellOption ?? null, sellEntry: legs.sellEntry ?? null, sellExit: legs.sellExit ?? null, sellPoints: legs.sellPoints ?? null,
+      sellExitTime: legs.sellExitTime ?? null, sellExitReason: legs.sellExitReason ?? null,
       indexPoints: legs.indexPoints ?? null,
     }
   })
@@ -462,7 +504,7 @@ export function scannerLogBody({ underlying, date, source, dayResults, rows, cha
       lotSize: r.lotSize ?? null, entryPremium: r.premium, exitPremium: r.exitTime ? r.current ?? null : null, points: r.points ?? null, rupees: r.rupees ?? null,
       exitReason: r.exitReason ?? null, signalTime: sig?.time ?? at, strategyNo: STRATEGY_BY_ID[r.strategy]?.no ?? null, strategyId: r.strategy,
       signalSide: r.setupSide, dayType: r.regime?.type ?? null, adaptiveTake: r.adaptive?.take ?? null, adaptiveReason: r.adaptive?.reason ?? null,
-      // Its signal's index points and what each option would have made held to the signal's exit (signalLegs).
+      // Its signal's index points and what each option would have made, out at the strategy's own option exit (signalLegs).
       indexPoints: sig?.indexPoints ?? null, buyPoints: sig?.buyPoints ?? null, sellPoints: sig?.sellPoints ?? null,
       ...(c ? { stt: c.stt, brokerage: c.brokerage, otherCharges: c.other, netRupees: c.net, netPerLot: c.netPerLot } : {}),
     }
