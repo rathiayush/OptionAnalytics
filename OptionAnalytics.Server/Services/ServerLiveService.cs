@@ -73,7 +73,7 @@ public sealed class ServerLiveService
         {
             return TradeSettingsStore.Underlyings.Select(u =>
             {
-                var s = _state.Indices.GetValueOrDefault(u) ?? new IndexSettings();
+                var s = _state.Indices.GetValueOrDefault(u) ?? IndexSettings.Default(u);
                 var trades = _state.Trades.Where(t => t.Underlying == u && t.Day == today).ToList();
                 // The counts are the server scanner's own (its limits); the page's watched trades are listed too.
                 var own = trades.Where(t => !t.IsPageTrade).ToList();
@@ -97,7 +97,7 @@ public sealed class ServerLiveService
         if (maxLoss is < 500 or > 10_000_000) return "Max loss must be ₹500 to ₹1,00,00,000.";
         lock (_lock)
         {
-            var s = _state.Indices.GetValueOrDefault(u) ?? new IndexSettings();
+            var s = _state.Indices.GetValueOrDefault(u) ?? IndexSettings.Default(u);
             var wasLive = s.LiveDay == Day(now);
             s.MaxTrades = maxTrades ?? s.MaxTrades;
             s.MaxLoss = maxLoss ?? s.MaxLoss;
@@ -385,6 +385,9 @@ public sealed class ServerLiveService
 
     internal sealed class IndexSettings
     {
+        /// <summary>An index's limits before any are set: 5 live trades a day, a ₹15,000 max loss (₹10,000 on SENSEX).</summary>
+        public static IndexSettings Default(string underlying) => new() { MaxTrades = 5, MaxLoss = underlying == "SENSEX" ? 10_000 : 15_000 };
+
         public string? LiveDay { get; set; }
         public int MaxTrades { get; set; } = 5;
         public decimal MaxLoss { get; set; } = 10_000;

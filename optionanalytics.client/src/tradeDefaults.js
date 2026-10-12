@@ -6,8 +6,10 @@
 // which needs both legs). The master copy is the server's trade-settings.csv (TradeSettingsStore); this
 // browser keeps a copy, so a page reads it at once and works offline.
 
+// The defaults are the trader's own Trade settings (the server's TradeSettingsStore.Default has the same): a manual
+// trade's SL / target per index ...
 export const DEFAULT_TRADE_LEVELS = {
-  NIFTY: { sl: 20, target: 30 },
+  NIFTY: { sl: 30, target: 40 },
   BANKNIFTY: { sl: 50, target: 75 },
   SENSEX: { sl: 60, target: 90 },
 }
@@ -16,6 +18,18 @@ export const FALLBACK_TRADE_LEVELS = { sl: 20, target: 30 }
 /** The default levels for an underlying (any not listed gets the fallback). */
 export function defaultTradeLevels(underlying) {
   return DEFAULT_TRADE_LEVELS[String(underlying ?? '').toUpperCase()] ?? FALLBACK_TRADE_LEVELS
+}
+
+// ... and the max rules every strategy's option trade is held to (premium points; 0 = none - no max target) and the lots.
+export const DEFAULT_INDEX_TRADE = {
+  NIFTY: { maxSl: 50, maxTarget: 0, lots: 4 },
+  BANKNIFTY: { maxSl: 80, maxTarget: 0, lots: 3 },
+  SENSEX: { maxSl: 120, maxTarget: 0, lots: 3 },
+}
+
+/** An index's default max rules and lots, else null (an index not listed: its SL / target as the max, 1 lot). */
+export function defaultIndexTrade(underlying) {
+  return DEFAULT_INDEX_TRADE[String(underlying ?? '').toUpperCase()] ?? null
 }
 
 // ONE set of levels per underlying for the whole app: set from the OI Replay trade panel, the strategy
@@ -54,16 +68,20 @@ export const DEFAULT_LOTS = 1
 export const DEFAULT_SLIPPAGE = 2
 
 /** One index's full trade settings: its levels (a manual trade's) plus lots, slippage, scanner on/off, auto trade and the
- *  max rules every strategy's option trade is held to (maxSl / maxTarget, premium points, 0 = none - until set, the SL /
- *  target). */
+ *  max rules every strategy's option trade is held to (maxSl / maxTarget, premium points, 0 = none - until set, the
+ *  index's defaults, DEFAULT_INDEX_TRADE). */
 export function loadTradeDefaults(underlying) {
   const saved = readAll()[String(underlying ?? '').toUpperCase()] ?? {}
   const num = (v, fallback) => (Number.isFinite(v) ? v : fallback)
   const levels = loadTradeLevels('settings', underlying)
+  // A row saved before the max rules (its own SL / target, no max): those are its max, as on the server; nothing saved:
+  // the index's default max rules.
+  const d = Number.isFinite(saved.sl) || Number.isFinite(saved.target) ? null : defaultIndexTrade(underlying)
+  const lotsDefault = defaultIndexTrade(underlying)?.lots ?? DEFAULT_LOTS
   return {
     ...levels,
-    maxSl: num(saved.maxSl, levels.sl), maxTarget: num(saved.maxTarget, levels.target),
-    lots: Math.max(1, num(saved.lots, DEFAULT_LOTS)), slippage: num(saved.slippage, DEFAULT_SLIPPAGE),
+    maxSl: num(saved.maxSl, d?.maxSl ?? levels.sl), maxTarget: num(saved.maxTarget, d?.maxTarget ?? levels.target),
+    lots: Math.max(1, num(saved.lots, lotsDefault)), slippage: num(saved.slippage, DEFAULT_SLIPPAGE),
     scannerEnabled: saved.scannerEnabled !== false, autoTrade: ['sell', 'buy', 'off', 'strategy'].includes(saved.autoTrade) ? saved.autoTrade : 'sell',
   }
 }

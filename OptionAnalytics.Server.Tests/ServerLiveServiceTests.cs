@@ -43,9 +43,21 @@ public sealed class ServerLiveServiceTests : IDisposable
         }
     }
 
-    private TradeSettingsStore Trade() => new(new FakeHostEnvironment { ContentRootPath = _dir },
-        new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["Storage:TradeSettingsPath"] = Path.Combine(_dir, "trade-settings.csv") }).Build(),
-        NullLogger<TradeSettingsStore>.Instance);
+    /// <summary>The trade settings these tests are written against - set here, not the app's defaults (those are the
+    /// trader's and can change): 1 lot, SL 20 / target 30 on NIFTY (50 / 75, 60 / 90) for a manual trade and as the max.
+    /// Set once per test folder, so a test's own change made through another store instance is kept.</summary>
+    private TradeSettingsStore Trade()
+    {
+        var path = Path.Combine(_dir, "trade-settings.csv");
+        var fresh = !File.Exists(path);
+        var store = new TradeSettingsStore(new FakeHostEnvironment { ContentRootPath = _dir },
+            new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["Storage:TradeSettingsPath"] = path }).Build(),
+            NullLogger<TradeSettingsStore>.Instance);
+        if (fresh)
+            foreach (var (u, sl, target) in new[] { ("NIFTY", 20m, 30m), ("BANKNIFTY", 50m, 75m), ("SENSEX", 60m, 90m) })
+                store.Save(u, store.Get(u) with { Lots = 1, SlPoints = sl, TargetPoints = target, MaxSlPoints = sl, MaxTargetPoints = target });
+        return store;
+    }
 
     private ServerLiveService Live(FakeOrders orders, TradeSettingsStore? trade = null) =>
         new(trade ?? Trade(), orders, Path.Combine(_dir, "server-live.json"), NullLogger<ServerLiveService>.Instance);
@@ -334,6 +346,21 @@ public sealed class ServerLiveServiceTests : IDisposable
         // Another index is not held up by NIFTY's open trade - but it must be Live itself.
         live.Set("BANKNIFTY", true, null, null, "admin", At10);
         Assert.True((await live.PlaceAsync("BANKNIFTY", Order("c"), At10.AddMinutes(3), default)).Placed);
+    }
+
+    [Fact]
+    public void EachIndex_StartsOnPaper_WithTheDefaultLimits_AndKeepsWhatIsSet()
+    {
+        var live = Live(new FakeOrders());
+        // Before anything is set: paper, 5 live trades a day, a max loss of 15,000 (10,000 on SENSEX).
+        Assert.Equal(new[] { ("NIFTY", false, 5, 15_000m), ("BANKNIFTY", false, 5, 15_000m), ("SENSEX", false, 5, 10_000m) },
+            live.Status(At10).Select(x => (x.Underlying, x.Live, x.MaxTrades, x.MaxLoss)));
+        // Switching an index to Live without new limits keeps its defaults; set limits are kept.
+        live.Set("BANKNIFTY", true, null, null, "admin", At10);
+        live.Set("SENSEX", false, 3, 8_000, "admin", At10);
+        var after = live.Status(At10).ToDictionary(x => x.Underlying);
+        Assert.Equal((true, 5, 15_000m), (after["BANKNIFTY"].Live, after["BANKNIFTY"].MaxTrades, after["BANKNIFTY"].MaxLoss));
+        Assert.Equal((3, 8_000m), (after["SENSEX"].MaxTrades, after["SENSEX"].MaxLoss));
     }
 
     [Fact]

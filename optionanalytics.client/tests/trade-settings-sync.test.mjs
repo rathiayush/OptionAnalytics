@@ -18,7 +18,10 @@ globalThis.fetch = async (url, opts = {}) => {
 const { refreshTradeSettings, loadTradeDefaults, loadTradeLevels, saveTradeDefaults, defaultTradeLevels } = await import('../src/tradeDefaults.js')
 
 test('the server\'s settings become every page\'s defaults', async () => {
-  assert.equal(loadTradeDefaults('NIFTY').lots, 1, 'before: the built-in default')
+  // Before: the built-in defaults - the trader's own Trade settings (4 lots, SL 30 / target 40, Max SL 50, no max target).
+  const before = loadTradeDefaults('NIFTY')
+  assert.deepEqual([before.lots, before.sl, before.target, before.maxSl, before.maxTarget, before.slippage, before.autoTrade], [4, 30, 40, 50, 0, 2, 'sell'])
+  assert.deepEqual(['BANKNIFTY', 'SENSEX'].map((u) => { const x = loadTradeDefaults(u); return [x.lots, x.sl, x.target, x.maxSl, x.maxTarget] }), [[3, 50, 75, 80, 0], [3, 60, 90, 120, 0]])
   await refreshTradeSettings()
   const n = loadTradeDefaults('NIFTY')
   assert.deepEqual({ lots: n.lots, sl: n.sl, target: n.target, trailStart: n.trailStart, trailGap: n.trailGap, slippage: n.slippage, scannerEnabled: n.scannerEnabled, autoTrade: n.autoTrade },

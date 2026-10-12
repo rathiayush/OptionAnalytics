@@ -280,13 +280,28 @@ test('the Top 15 from the scanner log\'s signals', () => {
   assert.deepEqual(topFromSignalsCsv([null, own]).ids, topFromSignalsCsv(own).ids)
 })
 
+test('no Trade settings from the server yet: each index runs with its defaults - the trader\'s own', async () => {
+  const { runnerSettingsOf } = await import('../src/scannerCore.js')
+  const of = (u, config = {}) => { const s = runnerSettingsOf(config, u); return [s.paperSl, s.paperTarget, s.paperMaxSl, s.paperMaxTarget] }
+  assert.deepEqual(of('NIFTY'), [30, 40, 50, 0], 'manual SL 30 / target 40; the strategies held to Max SL 50, no max target')
+  assert.deepEqual(of('BANKNIFTY'), [50, 75, 80, 0])
+  assert.deepEqual(of('SENSEX'), [60, 90, 120, 0])
+  // Levels sent without max rules (a server from before them): their SL / target are the max, as the server reads them.
+  assert.deepEqual(of('NIFTY', { levels: { NIFTY: { sl: 25, target: 35 } } }), [25, 35, 25, 35])
+  // What the server sends wins.
+  assert.deepEqual(of('NIFTY', { levels: { NIFTY: { sl: 30, target: 40, maxSl: 45, maxTarget: 60 } } }), [30, 40, 45, 60])
+})
+
+// NIFTY's Trade settings these tests hold the strategies to (set here, not the app's defaults): SL 20 / target 30, as the max.
+const MAX_20_30 = { sl: 20, target: 30, maxSl: 20, maxTarget: 30 }
+
 test('a strategy tuned to BUY its option: the server scanner trades that - unless a side was chosen, which wins', async () => {
   // What "Apply to the scanner" writes for one strategy, and who decides when it fires. The server scanner runs on
   // 'strategy' (nobody is there to choose); the Order Flow page sends its own 'buy' / 'sell', which always wins.
   const io = fakeIo()
   const scanner = new IndexScanner('NIFTY', io)
   scanner.reset(DATE)
-  scanner.setConfig({ alertIds: ALL_IDS, settings: { autoPaper: 'sell', paperSl: 20, paperTarget: 30, paperLots: 1 } })
+  scanner.setConfig({ alertIds: ALL_IDS, settings: { autoPaper: 'sell', paperSl: 20, paperTarget: 30, paperLots: 1 }, levels: { NIFTY: MAX_20_30 } })
   await runDay(scanner, io, at(15), at(300))
   const sold = scanner.positions
   assert.ok(sold.length, 'the scanner traded')
@@ -297,13 +312,13 @@ test('a strategy tuned to BUY its option: the server scanner trades that - unles
   const run = async (autoPaper) => {
     const s = new IndexScanner('NIFTY', fakeIo())
     s.reset(DATE)
-    s.setConfig({ alertIds: ALL_IDS, settings: { autoPaper, paperSl: 20, paperTarget: 30, paperLots: 1, filters: tunedToBuy } })
+    s.setConfig({ alertIds: ALL_IDS, settings: { autoPaper, paperSl: 20, paperTarget: 30, paperLots: 1, filters: tunedToBuy }, levels: { NIFTY: MAX_20_30 } })
     await runDay(s, fakeIo(), at(15), at(300))
     return s.positions
   }
 
   // Left to the strategies: this one buys, 1 out of the money, with its own SL / target off the premium paid - held to
-  // NIFTY's max rules (Max SL 20 / Max target 30 - the defaults).
+  // NIFTY's max rules (Max SL 20 / Max target 30, set here).
   const mine = (await run('strategy')).filter((p) => p.strategy === id)
   const others = (await run('strategy')).filter((p) => p.strategy !== id)
   assert.ok(mine.length && mine.every((p) => p.action === 'BUY'), 'the tuned strategy buys')
@@ -353,6 +368,7 @@ test('a setting applied for ONE index (the tuning pages\' Apply): that index tra
     // The all-index filters still say "sell" for it; the NIFTY one replaces them on NIFTY only.
     settings: { autoPaper: 'strategy', paperSl: 20, paperTarget: 30, paperLots: 1, filters: { [id]: { tradeOptLeg: 'sell' } } },
     filtersByIndex: { NIFTY: { [id]: { tradeOptLeg: 'buy', tradeOptMoneyness: -1, tradeOptSlPct: 25, tradeOptTargetPct: 50 } } },
+    levels: { NIFTY: MAX_20_30 },
   }
   const run = async (u) => {
     const s = new IndexScanner(u, fakeIo())

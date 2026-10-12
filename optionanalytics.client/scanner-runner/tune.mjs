@@ -44,7 +44,7 @@ import { buildOiContext, ACTIVE_STRATEGIES, SPOT_STRATEGIES, STRATEGY_BY_ID, TRA
 import { scanSpotDay, spotBarsOf } from '../src/spotEngine.js'
 import { autoBigLots } from '../src/orderFlowMath.js'
 import { scannerProfileOf, trailFor } from '../src/scannerCore.js'
-import { defaultTradeLevels } from '../src/tradeDefaults.js'
+import { defaultIndexTrade, defaultTradeLevels } from '../src/tradeDefaults.js'
 import { expiryFlagOf } from '../src/liveFeeds.js'
 import { dayFromOrderFlow, scanDaySetups } from '../src/scanDay.js'
 import { evaluateSetting, paramsFromFilters, DEFAULT_VARIANT, splitDays, OI_COMBO_CAP, OI_FACTORS, OPTION_GRID, countOiCombinations, oiFactorsFor, oiGridOf, optionText, rankStrategies, tradeDetails, tuneStrategy, tuningDay, TUNING_GRID, variantText } from '../src/strategyTuning.js'
@@ -230,7 +230,10 @@ async function main() {
   // The index's max rules (Trade settings: Max SL / Max target - the server's config.levels), which the scanner holds every
   // strategy's option trade to: every option measured here is held to them too (each day's optionCaps) - the bought and
   // the sold option of each trade, and the option trades a setting takes its own way.
-  const levelsNow = { ...defaultTradeLevels(U), ...(config?.levels?.[U] ?? {}) }
+  // (Levels sent without max rules - from before them - take their SL / target as the max; none at all: the index's defaults.)
+  const ownLevels = config?.levels?.[U]
+  const defaultMax = ownLevels ? null : defaultIndexTrade(U)
+  const levelsNow = { ...defaultTradeLevels(U), ...(defaultMax ? { maxSl: defaultMax.maxSl, maxTarget: defaultMax.maxTarget } : {}), ...(ownLevels ?? {}) }
   const optionLevels = { maxSl: Number(levelsNow.maxSl ?? levelsNow.sl) || 0, maxTarget: Number(levelsNow.maxTarget ?? levelsNow.target) || 0 }
   // The strategies' own entry filters as the trader set them (for this index); the trade filters are what is tuned (from their defaults).
   const tradeKeys = new Set(TRADE_FILTERS.map((f) => f.key))

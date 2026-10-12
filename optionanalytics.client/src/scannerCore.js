@@ -13,7 +13,7 @@ import { aggregateBars, analyzeBars, findWalls } from './orderFlowMath.js'
 import { chargeRates, tradeCharges } from './tradeCharges.js'
 import { sessionVolumeProfile, tpoProfile, tpoRowFor } from './profiles.js'
 import { evaluateSpotStrategies } from './spotEngine.js'
-import { defaultTradeLevels } from './tradeDefaults.js'
+import { defaultIndexTrade, defaultTradeLevels } from './tradeDefaults.js'
 
 export const MIN = 60_000
 // One alert per strategy and direction at most every 20 minutes - a setup that stays true is one trade.
@@ -418,7 +418,11 @@ export const RUNNER_DEFAULT_SETTINGS = { alerts: true, telegram: true, pick: 'to
  */
 export function runnerSettingsOf(config, underlying) {
   const s = { ...RUNNER_DEFAULT_SETTINGS, ...(config?.settings ?? {}) }
-  const levels = { ...defaultTradeLevels(underlying), trailStart: 0, trailGap: 0, ...(config?.levels?.[underlying] ?? {}) }
+  // The index's levels from the server (its max rules with them); none sent at all: its defaults, max rules included. Levels
+  // sent without max rules (from before them) take their SL / target as the max, as the server does.
+  const own = config?.levels?.[underlying]
+  const d = own ? null : defaultIndexTrade(underlying)
+  const levels = { ...defaultTradeLevels(underlying), ...(d ? { maxSl: d.maxSl, maxTarget: d.maxTarget } : {}), trailStart: 0, trailGap: 0, ...(own ?? {}) }
   const trade = config?.trade?.[underlying] ?? {}
   return {
     ...s, filters: filtersForIndex({ filters: s.filters, filtersByIndex: config?.filtersByIndex }, underlying), paperSl: levels.sl, paperTarget: levels.target, paperTrailStart: levels.trailStart ?? 0, paperTrailGap: levels.trailGap ?? 0,
