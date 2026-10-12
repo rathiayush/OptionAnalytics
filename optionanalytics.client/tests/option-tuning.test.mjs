@@ -146,9 +146,9 @@ test('tuning the option trade: premium points, the option as before as the basel
   if (e.best && e.tradeStage.best) for (const k of ['tradeSide', 'tradeStopX', 'tradeTargetX', 'tradeTrail']) assert.equal(e.best.params[k], e.tradeStage.best.params[k], 'the option tuned on top of the chosen trade settings')
 })
 
-test('both options of a trade: the net on each, and whether its own SL or target came first', () => {
-  // Each setup carries the option to BUY and the option to SELL. With the index's option SL / target set (Trade
-  // settings), each leg says what it would have done: out at its own stop, at its own target, or with the index trade.
+test('both options of a trade: the net on each, and whether the index\'s Max SL or Max target came first', () => {
+  // Each setup carries the option to BUY and the option to SELL. With the index's max rules set (Trade settings: Max SL /
+  // Max target), each leg says what it would have done: out at the Max SL, at the Max target, or with the index trade.
   const plain = tradeDetails([d], id, v({}), null, 'NIFTY')
   const withLevels = tradeDetails([d], id, v({}), null, 'NIFTY', { optionLevels: { sl: 20, target: 30 } })
   assert.equal(plain.length, withLevels.length)
@@ -166,16 +166,16 @@ test('both options of a trade: the net on each, and whether its own SL or target
       if (!o) continue
       assert.equal(o.sl, 20)
       assert.equal(o.target, 30)
-      assert.ok(['its SL', 'its target', 'index exit (neither its SL nor its target)', null].includes(o.closedBy), String(o.closedBy))
+      assert.ok(['the Max SL', 'the Max target', 'index exit (neither the Max SL nor the Max target)', null].includes(o.closedBy), String(o.closedBy))
       // The net always follows the premium it actually came out at.
       if (o.exit != null) assert.ok(Math.abs(o.points - (o.label.startsWith('BUY') ? o.exit - o.entry : o.entry - o.exit)) < 1e-9)
-      if (o.closedBy === 'its SL') assert.ok(o.points <= 1e-6, `an SL is not a profit: ${o.points}`)
-      if (o.closedBy === 'its target') assert.ok(o.points > 0, `a target is a profit: ${o.points}`)
+      if (o.closedBy === 'the Max SL') assert.ok(o.points <= 1e-6, `an SL is not a profit: ${o.points}`)
+      if (o.closedBy === 'the Max target') assert.ok(o.points > 0, `a target is a profit: ${o.points}`)
     }
   }
   // Levels the day actually reaches: now each leg comes out at its own target, earlier and for exactly that much.
   const tight = tradeDetails([d], id, v({}), null, 'NIFTY', { optionLevels: { sl: 40, target: 8 } })
-  const hits = tight.flatMap((t) => [t.buy, t.sell]).filter((o) => o?.closedBy === 'its target')
+  const hits = tight.flatMap((t) => [t.buy, t.sell]).filter((o) => o?.closedBy === 'the Max target')
   assert.ok(hits.length, 'a target of 8 premium points is hit on this day')
   for (const o of hits) assert.ok(o.points >= 8 - 1e-6, `out at its target: ${o.points}`)
   // And the same trade held to the index exit made less often than not - the point of showing both.
@@ -187,21 +187,39 @@ test('both options of a trade: the net on each, and whether its own SL or target
     if (!o) continue
     assert.equal(o.rr, 1.5)
     if (o.points != null) assert.ok(Math.abs(o.r - o.points / 20) < 1e-9)
-    if (o.closedBy === 'its SL') assert.ok(Math.abs(o.r + 1) < 1e-9, `its SL is -1R: ${o.r}`)
+    if (o.closedBy === 'the Max SL') assert.ok(Math.abs(o.r + 1) < 1e-9, `its SL is -1R: ${o.r}`)
   }
   for (const o of hits) assert.ok(Math.abs(o.r - 8 / 40) < 1e-9 && Math.abs(o.rr - 0.2) < 1e-9)
   for (const t of plain) for (const o of [t.buy, t.sell]) if (o) assert.equal(o.r, undefined)
 })
 
-test('an option leg trails its stop as the Trade settings say', () => {
-  // A trailing stop from Trade settings (trailStart / trailGap, premium points) is applied to each leg the same way a
-  // paper option trade applies it; it only ever tightens, so a trailed exit never loses more than its fixed SL.
-  const fixed = tradeDetails([d], id, v({}), null, 'NIFTY', { optionLevels: { sl: 40, target: 400 } })
-  const trailed = tradeDetails([d], id, v({}), null, 'NIFTY', { optionLevels: { sl: 40, target: 400, trailStart: 0, trailGap: 3 } })
-  assert.equal(fixed.length, trailed.length)
-  const legs = trailed.flatMap((t) => [t.buy, t.sell]).filter(Boolean)
-  assert.ok(legs.some((o) => o.closedBy === 'its trailing SL'), 'a 3-point trail is hit on this day')
-  for (const o of legs) if (o.closedBy === 'its trailing SL') assert.ok(o.r >= -1 - 1e-9, `never worse than its SL: ${o.r}`)
+test('a strategy\'s option is held to the index\'s max rules everywhere the tuning measures it - and never trails the Trade settings\' trail', () => {
+  // The legs: the day's max rules (optionCaps - what tune.mjs puts on every day) are what each leg is held to; a manual
+  // trade's trailing stop (Trade settings trailStart / trailGap) is not a strategy's and is not applied.
+  const capped = { ...d, optionCaps: { maxSl: 40, maxTarget: 8 } }
+  const viaDay = tradeDetails([capped], id, v({}), null, 'NIFTY')
+  const viaLevels = tradeDetails([d], id, v({}), null, 'NIFTY', { optionLevels: { maxSl: 40, maxTarget: 8, trailStart: 0, trailGap: 3 } })
+  assert.deepEqual(viaDay, viaLevels)
+  assert.ok(viaDay.flatMap((t) => [t.buy, t.sell]).every((o) => !o || o.closedBy !== 'its trailing SL'))
+  // A tuned option trade: its own SL / target, never past the max - out at whichever is tighter.
+  let compared = 0
+  for (const s of all.filter((x) => x.id === id).slice(0, 15)) {
+    const outcome = { exitAt: s.t + 20 * MIN, r: 0 }
+    const own = v({ optExit: 'first', optSlPct: 50, optTargetPct: 80 })
+    const free = optionOutcome(d, s, outcome, own)
+    const held = optionOutcome({ ...d, optionCaps: { maxSl: 3, maxTarget: 4 } }, s, outcome, own)
+    if (!free || !held) continue
+    const sl = Math.min(free.trade.premium * 0.5, 3)
+    const tg = Math.min(free.trade.premium * 0.8, 4)
+    const hit = optionStopTargetHit(syn.oi, held.trade, s.t, s.t + 21 * MIN, sl, tg)
+    if (hit) assert.equal(held.exitPremium, hit.premium, 'out at the max rule when it is the tighter')
+    assert.ok(held.points >= -sl - 1e-9, `never loses more than the Max SL: ${held.points}`)
+    // Out with the index trade: the max rules alone.
+    const indexOnly = optionOutcome({ ...d, optionCaps: { maxSl: 3, maxTarget: 4 } }, s, outcome, v({ optExit: 'index' }))
+    if (indexOnly) assert.ok(indexOnly.points >= -3 - 1e-9 && indexOnly.points <= 4 + 1e-9, `${indexOnly.points}`)
+    compared++
+  }
+  assert.ok(compared > 5)
 })
 
 test('a premium is the last traded one: a quiet minute no longer leaves an option blank', () => {

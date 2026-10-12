@@ -11,7 +11,7 @@
 // score (average R minus one standard error), and is only recommended when it also beats the strategy as
 // written on the test days.
 
-import { ACTIVE_STRATEGIES, OPTION_TRADE_FILTERS, STRATEGY_BY_ID, TRADE_FILTERS, applyTradeFilter, oiGateText, optionStopTargetHit, optionTradeAt, premiumAt, simulateOutcome } from './strategyEngine.js'
+import { ACTIVE_STRATEGIES, OPTION_TRADE_FILTERS, STRATEGY_BY_ID, TRADE_FILTERS, applyTradeFilter, capPoints, oiGateText, optionStopTargetHit, optionTradeAt, premiumAt, simulateOutcome } from './strategyEngine.js'
 import { replayRange } from './orderFlowMath.js'
 import { MIN } from './scannerCore.js'
 import { firstPerCooldown } from './scanDay.js'
@@ -117,8 +117,21 @@ const ownTarget = (exit) => exit === 'first' || exit === 'option'
 const SQUARE_OFF_MIN = 15 * 60 + 10
 const istMinuteOf = (ms) => Math.floor((ms / MIN + 330) % 1440)
 
+/**
+ * The option's SL / target in force (premium points, null = none) for a trade taken as `v` at `premium`: its own exit's
+ * (its SL where the exit has one, its target with 'first' / 'option'), held to the index's max rules `caps` ({ maxSl,
+ * maxTarget } - Trade settings; a tuning day carries them as `day.optionCaps`) - the scanner's own rule (optionPlanFor).
+ */
+export function optionLevelsOf(v, premium, caps = null) {
+  const exit = v.optExit ?? 'index'
+  const ownSl = exit === 'index' ? null : (premium * (v.optSlPct ?? 20)) / 100
+  const ownTg = ownTarget(exit) ? (premium * (v.optTargetPct ?? 30)) / 100 : null
+  return { sl: capPoints(ownSl, Number(caps?.maxSl) || 0), target: capPoints(ownTg, Number(caps?.maxTarget) || 0) }
+}
+
 /** One setup traded in options as `v` says: the option, its entry and exit premium, the points and why it closed - or
- *  null when the option has no premium (that strike was not traded / not loaded). */
+ *  null when the option has no premium (that strike was not traded / not loaded). Held to the day's max rules
+ *  (`day.optionCaps`), as the scanner holds it. */
 export function optionOutcome(day, s, outcome, v) {
   if (!day.oi) return null
   const trade = optionTradeAt(day.oi, s, v.optLeg ?? 'sell', v.optMoneyness ?? 0, s.t)
@@ -129,8 +142,9 @@ export function optionOutcome(day, s, outcome, v) {
   let exitMs = exitMode === 'option' ? squareOff : indexExit
   let exitPremium = null
   let reason = exitMode === 'option' ? 'square-off 15:10' : 'the index trade exited'
-  if (exitMode !== 'index') {
-    const hit = optionStopTargetHit(day.oi, trade, s.t, exitMs, trade.premium * (v.optSlPct ?? 20) / 100, ownTarget(exitMode) ? trade.premium * (v.optTargetPct ?? 30) / 100 : null)
+  const levels = optionLevelsOf(v, trade.premium, day.optionCaps)
+  if (levels.sl != null || levels.target != null) {
+    const hit = optionStopTargetHit(day.oi, trade, s.t, exitMs, levels.sl, levels.target)
     if (hit) { exitMs = hit.at; exitPremium = hit.premium; reason = hit.reason }
   }
   if (exitPremium == null) exitPremium = premiumAt(day.oi, trade.side, trade.strike, exitMs)
@@ -153,10 +167,11 @@ export function optionDetails(days, id, v, trail, underlying) {
       if (!o || !Number.isFinite(outcome.r)) continue
       const dir = s.side === 'LONG' ? 1 : -1
       const exitPrice = Number.isFinite(outcome.exitPrice) ? outcome.exitPrice : s.entry + dir * outcome.r * Math.abs(s.entry - s.stop)
-      // The option's own SL / target premiums (used unless it goes out with the index trade).
-      const own = (v.optExit ?? 'index') !== 'index'
-      const slPrem = o.trade.premium * (v.optSlPct ?? 20) / 100
-      const tgPrem = ownTarget(v.optExit) ? o.trade.premium * (v.optTargetPct ?? 30) / 100 : null
+      // The option's SL / target in force (its own, held to the day's max rules) - none when it only goes out with the index.
+      const lv = optionLevelsOf(v, o.trade.premium, day.optionCaps)
+      const own = lv.sl != null || lv.target != null
+      const slPrem = lv.sl
+      const tgPrem = lv.target
       const buy = o.trade.action === 'BUY'
       out.push({
         date: day.date, t: s.t, exitT: o.exitMs - MIN, index: underlying ?? null, side: s.side, entry: s.entry, exit: exitPrice,
@@ -164,10 +179,10 @@ export function optionDetails(days, id, v, trail, underlying) {
         ...levelsOf(s, outcome),
         opt: {
           label: `${o.trade.action} ${o.trade.strike} ${o.trade.side}`, moneyness: v.optMoneyness ?? 0, entry: o.trade.premium, exit: o.exitPremium, points: o.points, reason: o.reason,
-          sl: own ? o.trade.premium + (buy ? -slPrem : slPrem) : null, target: own && tgPrem != null ? o.trade.premium + (buy ? tgPrem : -tgPrem) : null,
+          sl: slPrem != null ? o.trade.premium + (buy ? -slPrem : slPrem) : null, target: tgPrem != null ? o.trade.premium + (buy ? tgPrem : -tgPrem) : null,
           slPts: own ? slPrem : null, targetPts: own ? tgPrem : null,
-          // R: premium points made over the premium points risked (its own SL); none when it only exits with the index.
-          r: own && slPrem > 0 ? o.points / slPrem : null, rr: own && slPrem > 0 && tgPrem != null ? tgPrem / slPrem : null,
+          // R: premium points made over the premium points risked (its SL); none when it only exits with the index.
+          r: slPrem > 0 ? o.points / slPrem : null, rr: slPrem > 0 && tgPrem != null ? tgPrem / slPrem : null,
         },
       })
     }
@@ -282,25 +297,24 @@ export function tradeDetails(days, id, variant, trail, underlying, { checks = fa
       const risk = Math.abs(s.entry - s.stop)
       const exitPrice = Number.isFinite(outcome.exitPrice) ? outcome.exitPrice : s.entry + dir * outcome.r * risk
       const exitMs = (outcome.exitAt ?? (day.endMs - MIN)) + MIN // the exit bar has finished
-      // Each option the setup carries, as the trade would have gone in it: held until the index trade exited, and -
-      // when an option SL / target is set (Trade settings) - whether its OWN stop or target came first, which is what
-      // a trade taken in options actually does. `points` is the net on that leg either way.
+      // Each option the setup carries, as the trade would have gone in it: held until the index trade exited (a strategy's
+      // own exit) and - when the index has max rules (Trade settings: Max SL / Max target, the day's `optionCaps`) -
+      // whether one of those came first, which is what the scanner's trade does. `points` is the net on that leg either way.
+      const caps = day.optionCaps ?? (optionLevels ? { maxSl: optionLevels.maxSl ?? optionLevels.sl, maxTarget: optionLevels.maxTarget ?? optionLevels.target } : null)
       const leg = (o) => {
         if (!o) return null
         const held = day.oi ? premiumAt(day.oi, o.side, o.strike, exitMs) : null
         const net = (px) => (px == null ? null : o.action === 'BUY' ? px - o.premium : o.premium - px)
         const base = { label: `${o.action} ${o.strike} ${o.side}`, entry: o.premium, exit: held, points: net(held), closedBy: held == null ? null : 'index exit' }
-        const sl = optionLevels?.sl > 0 ? optionLevels.sl : null
-        const target = optionLevels?.target > 0 ? optionLevels.target : null
-        // The option's own trailing stop too (Trade settings), as a paper / live option trade trails it.
-        const optTrail = optionLevels?.trailGap > 0 ? { start: optionLevels.trailStart ?? 0, gap: optionLevels.trailGap } : null
-        if (!day.oi || (!sl && !target && !optTrail)) return base
+        const sl = caps?.maxSl > 0 ? caps.maxSl : null
+        const target = caps?.maxTarget > 0 ? caps.maxTarget : null
+        if (!day.oi || (!sl && !target)) return base
         // R on the option: the premium points made over the premium points risked (its SL); risk : reward = 1 : target / SL.
         const rOf = (pts) => (sl && Number.isFinite(pts) ? pts / sl : null)
         const rr = sl && target ? target / sl : null
-        const hit = optionStopTargetHit(day.oi, o, s.t, exitMs, sl, target, optTrail)
-        if (!hit) return { ...base, sl, target, r: rOf(base.points), rr, closedBy: held == null ? null : 'index exit (neither its SL nor its target)' }
-        const closedBy = /Trailing/i.test(hit.reason) ? 'its trailing SL' : /SL/i.test(hit.reason) ? 'its SL' : 'its target'
+        const hit = optionStopTargetHit(day.oi, o, s.t, exitMs, sl, target)
+        if (!hit) return { ...base, sl, target, r: rOf(base.points), rr, closedBy: held == null ? null : 'index exit (neither the Max SL nor the Max target)' }
+        const closedBy = /SL/i.test(hit.reason) ? 'the Max SL' : 'the Max target'
         return { ...base, sl, target, exit: hit.premium, points: net(hit.premium), r: rOf(net(hit.premium)), rr, at: hit.at, closedBy }
       }
       out.push({
@@ -736,10 +750,12 @@ const optionStats = (trades) => {
  * THE STRATEGY LAB: strategy `id` with ONE setting (`params` - the tuned-setting keys, TUNED_SETTING_KEYS; {} = as
  * written) measured over the scanned `days` - with the same functions the tuning measures by (takenTrades: the same
  * filters, the same outcome rules), so a setting shows here exactly what the tuning would have counted for it. The index
- * trades (R, points captured / lost, both options the setup carries - with the index's own option SL / target when
+ * trades (R, points captured / lost, both options the setup carries - held to the index's Max SL / Max target when
  * `optionLevels` is given) and, when the setting takes the option its own way (optLeg buy / sell), those option trades.
  */
-export function evaluateSetting(days, id, params = {}, { trail = null, underlying = null, optionLevels = null } = {}) {
+export function evaluateSetting(days0, id, params = {}, { trail = null, underlying = null, optionLevels = null } = {}) {
+  // The index's max rules on every day (Max SL / Max target - optionLevels), as the scanner holds every option trade to them.
+  const days = optionLevels ? days0.map((d) => (d.optionCaps ? d : { ...d, optionCaps: { maxSl: optionLevels.maxSl ?? optionLevels.sl, maxTarget: optionLevels.maxTarget ?? optionLevels.target } })) : days0
   const variant = { ...DEFAULT_VARIANT }
   for (const f of TRADE_FILTERS) if (params[f.key] !== undefined && params[f.key] !== null && params[f.key] !== '') variant[f.key] = params[f.key]
   const trades = tradeDetails(days, id, variant, trail, underlying, { optionLevels })

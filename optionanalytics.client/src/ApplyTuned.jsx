@@ -5,7 +5,7 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { runLink, runOf } from './appliedRun.js'
 import { Button, Card, Checkbox, Col, InputNumber, Popconfirm, Popover, Row, Space, Table, Tag, Tooltip, Typography, message } from 'antd'
-import { STRATEGY_BY_ID, OWN_EXIT_SL_PCT, OWN_EXIT_TARGET_PCT, ownOptionExit, pinnedTrailOf } from './strategyEngine.js'
+import { STRATEGY_BY_ID, OPTION_EXITS, OWN_EXIT_SL_PCT, OWN_EXIT_TARGET_PCT, ownOptionExit, pinnedTrailOf } from './strategyEngine.js'
 import { DEFAULT_VARIANT, settingParams, variantText } from './strategyTuning.js'
 import { saveIndexFilters, saveIndexLots } from './scannerSettings.js'
 import { ServerLiveSwitch, ServerLiveTrades, useServerLive } from './ServerLive.jsx'
@@ -128,16 +128,14 @@ export function appliedText(f) {
     const m = Number(f.tradeOptMoneyness) || 0
     parts.push(`${f.tradeOptLeg.toUpperCase()} ${m === 0 ? 'ATM' : `${Math.abs(m)} ${m > 0 ? 'ITM' : 'OTM'}`}`)
   }
-  // How its option leaves the trade: its own exit exactly (no index option points or trailing stop), else the index's.
-  const exit = ownOptionExit(f ?? {}, f)
-  const sl = f?.tradeOptSlPct > 0 ? f.tradeOptSlPct : OWN_EXIT_SL_PCT
-  const tg = f?.tradeOptTargetPct > 0 ? f.tradeOptTargetPct : OWN_EXIT_TARGET_PCT
-  if (exit === 'index') parts.push('option out with the index trade only (its own exit)')
-  else if (exit === 'indexSl') parts.push(`option out with the index trade, Max SL ${sl}% (its own exit)`)
-  else if (exit) parts.push(`option SL ${sl}% / target ${tg}% of the premium${exit === 'option' ? ' only, else 15:10' : ', or the index exit'} (its own exit)`)
-  else {
-    if (f?.tradeOptSlPct > 0) parts.push(`option SL ${f.tradeOptSlPct}% of the premium`)
-    if (f?.tradeOptTargetPct > 0) parts.push(`option target ${f.tradeOptTargetPct}%`)
+  // How its option leaves the trade (its own exit - always held to the index's Max SL / Max target), when it was set.
+  if (OPTION_EXITS.includes(f?.tradeOptExit) || f?.tradeOptSlPct > 0 || f?.tradeOptTargetPct > 0 || f?.tradeOptLeg === 'buy' || f?.tradeOptLeg === 'sell') {
+    const exit = ownOptionExit(f ?? {})
+    const sl = f?.tradeOptSlPct > 0 ? f.tradeOptSlPct : OWN_EXIT_SL_PCT
+    const tg = f?.tradeOptTargetPct > 0 ? f.tradeOptTargetPct : OWN_EXIT_TARGET_PCT
+    if (exit === 'index') parts.push('option out with the index trade')
+    else if (exit === 'indexSl') parts.push(`option out with the index trade, its SL ${sl}% of the premium`)
+    else parts.push(`option SL ${sl}% / target ${tg}% of the premium${exit === 'option' ? ' only, else 15:10' : ', or the index exit'}`)
   }
   // The trailing stop it was applied with (the scanner's then) - kept whatever the scanner's is changed to.
   const pinned = pinnedTrailOf(f)

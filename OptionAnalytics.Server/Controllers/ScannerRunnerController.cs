@@ -42,7 +42,8 @@ public sealed class ScannerRunnerController : ControllerBase
         foreach (var s in _trade.All())
         {
             enabled[s.Underlying] = s.ScannerEnabled;
-            levels[s.Underlying] = new JsonObject { ["sl"] = s.SlPoints, ["target"] = s.TargetPoints, ["trailStart"] = s.TrailStart, ["trailGap"] = s.TrailGap };
+            // sl / target / trail: a manual trade's; maxSl / maxTarget: the max rules every strategy's trade is held to.
+            levels[s.Underlying] = new JsonObject { ["sl"] = s.SlPoints, ["target"] = s.TargetPoints, ["trailStart"] = s.TrailStart, ["trailGap"] = s.TrailGap, ["maxSl"] = s.MaxSl, ["maxTarget"] = s.MaxTarget };
             trade[s.Underlying] = new JsonObject { ["lots"] = s.Lots, ["autoTrade"] = s.AutoTrade, ["slippage"] = s.SlippagePoints };
             // Switched to Live today (ServerLiveService): the scanner asks the server to place each alert's order.
             live[s.Underlying] = _live.IsLive(s.Underlying, now);

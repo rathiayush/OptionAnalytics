@@ -21,7 +21,7 @@ import { spotBarsOf } from '../src/spotEngine.js'
 import { liquiditySignals, pullStackSignals, autoBigLots } from '../src/orderFlowMath.js'
 import {
   MIN, msOf, scanTick, spotScanTick, followAllSetups, trailFor, alertIdsFor, setupEvents, newSetupEventMemory, newPosition, positionRows, sameSignal,
-  withLevelChange, setupWasTraded, paperEntryText, liveLegsFor, setupExitText, paperExitText, scannerLogBody, scannerLogSig, scannerProfileOf, PAPER_TRADE_LOT_SIZE,
+  withLevelChange, withCapChange, setupWasTraded, paperEntryText, liveLegsFor, setupExitText, paperExitText, scannerLogBody, scannerLogSig, scannerProfileOf, PAPER_TRADE_LOT_SIZE,
 } from '../src/scannerCore.js'
 import { orderFlowFromSnapshot, applyOrderFlowPush, mergePrints, applyOiTicks, applyFuturesTicks, applySpotUpdate, expiryFlagOf, TAPE_PRINTS } from '../src/liveFeeds.js'
 import { defaultTradeLevels } from '../src/tradeDefaults.js'
@@ -94,6 +94,7 @@ export class IndexScanner {
     this.profileLevelsOf = { futures: [], spotOwn: [] }
     this.appliedLevels = null
     this.appliedTrail = null
+    this.appliedCaps = null
     this.dirty = false
     this.lastLogSig = ''
   }
@@ -114,6 +115,8 @@ export class IndexScanner {
     return {
       // Each strategy's filters on THIS index: a setting fine-tuned and applied for it, else the all-index ones.
       ...s, filters: filtersForIndex({ filters: s.filters, filtersByIndex: this.config.filtersByIndex }, this.underlying), paperSl: levels.sl, paperTarget: levels.target, paperTrailStart: levels.trailStart ?? 0, paperTrailGap: levels.trailGap ?? 0,
+      // The max rules every strategy's option trade is held to (Trade settings - Max SL / Max target; 0 = none).
+      paperMaxSl: Number(levels.maxSl ?? levels.sl) || 0, paperMaxTarget: Number(levels.maxTarget ?? levels.target) || 0,
       ...(trade.lots > 0 ? { paperLots: trade.lots } : {}), ...(trade.autoTrade ? { autoPaper: trade.autoTrade } : {}),
     }
   }
@@ -146,10 +149,22 @@ export class IndexScanner {
     this.applySettingChanges()
   }
 
-  // A new SL / target / trail applies to the open paper trades from this minute; a new trailing-stop
-  // setting to the open signals - exactly as changing it on the page does.
+  // New max rules apply to the open strategy trades from this minute (withCapChange); a new trailing-stop setting to the
+  // open signals that trail the scanner's - exactly as changing it on the page does. (A new SL / target / trail - a
+  // manual trade's - only reaches trades opened before the max rules existed.)
   applySettingChanges() {
     const cfg = this.settings()
+    const caps = JSON.stringify([cfg.paperMaxSl, cfg.paperMaxTarget])
+    if (this.appliedCaps != null && this.appliedCaps !== caps && this.data?.oi) {
+      const [maxSl, maxTarget] = JSON.parse(caps)
+      const nowMs = this.clock() ?? this.io.now()
+      const open = new Set(this.rows(nowMs).filter((r) => !r.exitTime).map((r) => r.key))
+      if (open.size) {
+        this.positions = withCapChange(this.positions, open, { maxSl, maxTarget }, Math.floor(nowMs / MIN) * MIN)
+        this.dirty = true
+      }
+    }
+    this.appliedCaps = caps
     const levels = JSON.stringify([cfg.paperSl, cfg.paperTarget, cfg.paperTrailStart, cfg.paperTrailGap])
     const trail = JSON.stringify(trailFor(cfg, this.underlying))
     const nowMs = this.clock() ?? this.io.now()
@@ -389,8 +404,8 @@ export class IndexScanner {
     this.io.log(`${this.underlying}: #${meta?.no} ${meta?.name} ${s.side} @ ${s.entry.toFixed(1)} (SL ${s.stop.toFixed(1)}, target ${s.target.toFixed(1)})`)
     if (!cfg.alerts || !this.isAlerted(s.id, cfg)) return
     // The moment it alerts, the option is paper-traded (the sell side by default) - as on the page.
-    // Buy or sell, which strike, and how the option leaves the trade - this strategy's own if it was tuned and applied
-    // (its exit EXACTLY: no index option points or option trailing stop on top), else the scanner's (optionPlanFor).
+    // Buy or sell, which strike (this strategy's own if it was tuned and applied, else the scanner's), and how the option
+    // leaves the trade - always the strategy's own exit, held to the index's Max SL / Max target (optionPlanFor).
     const plan = optionPlanFor(s.id, cfg.filters, cfg)
     const side = plan.leg
     const trade = side ? optionTradeAt(this.data.oi, s, side, plan.moneyness) : null
@@ -540,7 +555,7 @@ export class IndexScanner {
   // ---- State across restarts -----------------------------------------------------------------------
 
   snapshotState() {
-    return { date: this.date, fired: this.memory.fired, positions: this.positions, trailLog: this.trailLog, notified: [...this.notified], appliedLevels: this.appliedLevels, appliedTrail: this.appliedTrail }
+    return { date: this.date, fired: this.memory.fired, positions: this.positions, trailLog: this.trailLog, notified: [...this.notified], appliedLevels: this.appliedLevels, appliedTrail: this.appliedTrail, appliedCaps: this.appliedCaps }
   }
 
   restore(saved) {
@@ -552,6 +567,7 @@ export class IndexScanner {
     this.notified = new Set(saved.notified ?? [])
     this.appliedLevels = saved.appliedLevels ?? null
     this.appliedTrail = saved.appliedTrail ?? null
+    this.appliedCaps = saved.appliedCaps ?? null
   }
 
   status() {

@@ -79,11 +79,15 @@ When adding or changing a strategy:
   never rewritten and a trailing stop is never loosened by a change); paper trades are all sized by the current lots setting (live trades keep their quantity).
 - **A strategy follows its own exits.** A setup trailing its strategy's own stop (`tradeTrail`, or the scanner's trail pinned
   as `_trail` when a tuned setting was applied - `withOwnTrail`) is not moved by a later change of the scanner's trailing
-  stop. A strategy with an option exit of its own (`tradeOptExit`, carried from the tuning by `filtersFromTuning`) trades
-  EXACTLY it (`optionPlanFor` / `newPosition` / `positionRows`): none of the index's option SL / target points or its option
-  trailing stop, and a change of the index's levels never touches its open trades; its live super order carries its own
-  legs (a safety leg at the signal's own index distance where its exit has none - `liveLegsFor`) and no option trail.
-  `tests/strategy-own-exits.test.mjs` keeps the paper trade == the tuning's `optionOutcome` for every exit.
+  stop. Every strategy's option leaves the trade by ITS OWN exit (`tradeOptExit`, carried from the tuning by
+  `filtersFromTuning`; none set = read from its % - neither: out with the index trade) with its own SL / target %
+  (`optionPlanFor` / `newPosition` / `positionRows`) - NEVER the Trade settings' SL / target / trail (those are a manual
+  trade's). The only index rule on it is the MAX (Trade settings Max SL / Max target, `capPoints`): never a wider SL or a
+  farther target, the max alone where it has none; a change of the max reaches open strategy trades from that minute
+  (`withCapChange`). Its live super order carries those legs (a safety leg at the signal's own index distance where there
+  is none - `liveLegsFor`; the server clamps to the max too) and no option trail. The tuning measures every option with the
+  same max rules (each day's `optionCaps`, `optionLevelsOf`); `tests/strategy-own-exits.test.mjs` keeps the paper trade ==
+  the tuning's `optionOutcome` for every exit.
 
 ## Other rules
 

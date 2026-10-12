@@ -4,7 +4,7 @@
 
 import {
   ACTIVE_STRATEGIES, STRATEGY_BY_ID, evaluateStrategies, simulateOutcome, DEFAULT_TRAIL, RANGE_IDS,
-  exitLabel, premiumAt, optionStopTargetHit, squareOffMs, marketAt, lotsFor, pinnedTrailOf, optionExitText,
+  exitLabel, premiumAt, optionStopTargetHit, squareOffMs, marketAt, lotsFor, pinnedTrailOf, optionExitText, capPoints,
 } from './strategyEngine.js'
 // The market at a signal now lives with the strategies (the order-flow trade filters read it) - re-exported here.
 export { marketAt, MARKET_KEYS } from './strategyEngine.js'
@@ -227,11 +227,15 @@ export function setupEvents(withOutcome, memory, barsReady) {
 }
 
 // A paper (or live) option position opened from a setup.
-/** A new option position for an alert. `plan` (optionPlanFor with the premium): a strategy with an option exit of its
- *  own keeps EXACTLY it (`optExit`; its SL / target, null = none, and no option trailing stop) - the index's levels, and
- *  a later change of them, never touch it. Without one, the index's levels (`cfg`). */
+/** A new option position for an alert. `plan` (optionPlanFor with the premium): the strategy's own exit (`optExit`), its
+ *  own SL / target (`ownSlPts` / `ownTargetPts`, null = none) and the SL / target in force - those held to the index's max
+ *  rules (null = none) - and no option trailing stop; the Trade settings' SL / target / trail (a manual trade's) never
+ *  reach it. A later change of the max rules reaches it from that minute (withCapChange). No plan: `cfg`'s levels. */
 export function newPosition({ setup, trade, which, lots, lotSize, premium, cfg, at, plan = null }) {
-  const own = plan?.own ? { slPts: plan.slPts ?? null, targetPts: plan.targetPts ?? null, trailStart: 0, trailGap: 0, optExit: plan.exit } : null
+  const own = plan?.own ? {
+    slPts: plan.slPts ?? null, targetPts: plan.targetPts ?? null, ownSlPts: plan.ownSlPts ?? null, ownTargetPts: plan.ownTargetPts ?? null,
+    trailStart: 0, trailGap: 0, optExit: plan.exit,
+  } : null
   return {
     key: `${setup.id}-${setup.t}-${which}`, setupKey: `${setup.id}-${setup.t}`, setupT: setup.t, strategy: setup.id, setupSide: setup.side,
     adaptive: setup.adaptive ?? null, regime: setup.regime ?? null, action: trade.action, side: trade.side, strike: trade.strike,
@@ -240,17 +244,33 @@ export function newPosition({ setup, trade, which, lots, lotSize, premium, cfg, 
   }
 }
 
-/** The Dhan super order's SL / target legs (premium points) for an alert taken with `plan`: its own where it has them.
- *  Where its own exit has none ('index': out with the index trade; 'indexSl': no target) a super order still needs the
- *  leg, so it is a SAFETY leg at the signal's own stop / target distance on the index - an option's premium moves no
+/** The Dhan super order's SL / target legs (premium points) for an alert taken with `plan`: the ones in force (its own,
+ *  held to the index's max rules). Where there is none (out with the index trade and no max) a super order still needs
+ *  the leg, so it is a SAFETY leg at the signal's own stop / target distance on the index - an option's premium moves no
  *  more than the index (delta at most 1), so it does not close the trade before the strategy's own index exit would
- *  (only an IV spike could reach it first). Without an exit of its own: the plan's (the index's) levels. */
+ *  (only an IV spike could reach it first). */
 export function liveLegsFor(plan, setup) {
   if (!plan?.own) return { slPts: plan?.slPts, targetPts: plan?.targetPts }
   return {
     slPts: plan.slPts > 0 ? plan.slPts : Math.abs(setup.entry - setup.stop),
     targetPts: plan.targetPts > 0 ? plan.targetPts : Math.abs(setup.target - setup.entry),
   }
+}
+
+/**
+ * A change of the index's max rules (`caps` { maxSl, maxTarget }, premium points, 0 = none) for the strategy trades still
+ * OPEN (keys in `openKeys`), from the minute `changeAt`: each one's SL / target in force becomes its own held to the new
+ * max (capPoints), kept in its levelLog - what already happened is never rewritten.
+ */
+export function withCapChange(positions, openKeys, caps, changeAt) {
+  return positions.map((p) => {
+    if (!openKeys.has(p.key) || !p.optExit) return p
+    const sl = capPoints(p.ownSlPts, Number(caps?.maxSl) || 0)
+    const target = capPoints(p.ownTargetPts, Number(caps?.maxTarget) || 0)
+    if (sl === p.slPts && target === p.targetPts) return p
+    const before = p.levelLog?.length ? p.levelLog.filter((c) => c.t < changeAt) : [{ t: p.entryTime, sl: p.slPts, target: p.targetPts, trailStart: 0, trailGap: 0 }]
+    return { ...p, slPts: sl, targetPts: target, levelLog: [...before, { t: changeAt, sl, target, trailStart: 0, trailGap: 0 }] }
+  })
 }
 
 /**
@@ -309,14 +329,14 @@ export function positionRows({ positions, dayResults, withOutcome, oi, nowMs, se
       return { ...p, exitTime: p.exitTime, exitReason: p.exitReason, current: p.exitPremium, points, rupees: points == null ? null : points * p.lots * p.lotSize }
     }
     // The trade's own premium stop / target (positions from before they existed use today's setting),
-    // checked up to the setup's exit - whichever comes first closes it. One with its strategy's own option exit has
-    // exactly its own (null = none, no trailing stop) - never today's setting.
+    // checked up to the setup's exit - whichever comes first closes it. A strategy's trade has exactly its own (held to
+    // the max rules; null = none, no trailing stop; a change of the max rules in its levelLog) - never today's setting.
     const setupExitAt = o && o.status !== 'open' ? (o.exitAt != null ? o.exitAt + MIN : squareOffMs(p.entryTime)) : Infinity
     const ownExit = !!p.optExit
     const own = oi && setupExitAt > p.entryTime
       ? optionStopTargetHit(oi, p, p.entryTime, Math.min(setupExitAt, exitTime ?? Infinity, nowMs ?? Infinity),
         ownExit ? p.slPts : p.slPts ?? settings.paperSl ?? 20, ownExit ? p.targetPts : p.targetPts ?? settings.paperTarget ?? 30,
-        ownExit ? null : { start: p.trailStart ?? settings.paperTrailStart ?? 0, gap: p.trailGap ?? settings.paperTrailGap ?? 0 }, ownExit ? null : p.levelLog)
+        ownExit ? null : { start: p.trailStart ?? settings.paperTrailStart ?? 0, gap: p.trailGap ?? settings.paperTrailGap ?? 0 }, p.levelLog)
       : null
     if (own) { exitTime = own.at; exitPremium = own.premium; exitReason = own.reason }
     if (!exitTime && o && o.status !== 'open') {

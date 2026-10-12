@@ -8,7 +8,7 @@ const { Title, Text } = Typography
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX']
 const fromDefaults = (u) => {
   const d = loadTradeDefaults(u)
-  return { underlying: u, lots: d.lots, slPoints: d.sl, targetPoints: d.target, trailStart: d.trailStart, trailGap: d.trailGap, slippagePoints: d.slippage, scannerEnabled: d.scannerEnabled, autoTrade: d.autoTrade }
+  return { underlying: u, lots: d.lots, slPoints: d.sl, targetPoints: d.target, trailStart: d.trailStart, trailGap: d.trailGap, slippagePoints: d.slippage, scannerEnabled: d.scannerEnabled, autoTrade: d.autoTrade, maxSlPoints: d.maxSl, maxTargetPoints: d.maxTarget }
 }
 
 /**
@@ -172,10 +172,12 @@ export default function TradeSettingsPage() {
   const columns = [
     { title: 'Index', dataIndex: 'underlying', width: 110, render: (u, r) => <Space size={4}><Text strong>{u}</Text>{changed(r) && <Tag color="gold">unsaved</Tag>}</Space> },
     { title: 'Lots', dataIndex: 'lots', width: 100, render: num('lots', { min: 1, max: 500, step: 1 }) },
-    { title: <Tooltip title="Option premium points from the entry">Stop-loss pts</Tooltip>, dataIndex: 'slPoints', width: 110, render: num('slPoints', { step: 5 }) },
-    { title: <Tooltip title="Option premium points from the entry">Target pts</Tooltip>, dataIndex: 'targetPoints', width: 110, render: num('targetPoints', { step: 5 }) },
-    { title: <Tooltip title="Trailing stop: once this many points in profit... (0 with Follow 0 = off)">Trail after</Tooltip>, dataIndex: 'trailStart', width: 110, render: num('trailStart', { step: 5 }) },
-    { title: <Tooltip title="...the stop follows the best premium this many points behind, only tightening. 0 = no trailing.">Trail follow</Tooltip>, dataIndex: 'trailGap', width: 110, render: num('trailGap', { step: 1 }) },
+    { title: <Tooltip title="A MANUAL trade's option stop-loss (the OI Replay trade panel, its B / S ticket) - premium points from the entry. Strategies follow their own.">Manual SL pts</Tooltip>, dataIndex: 'slPoints', width: 110, render: num('slPoints', { step: 5 }) },
+    { title: <Tooltip title="A MANUAL trade's option target - premium points from the entry. Strategies follow their own.">Manual target pts</Tooltip>, dataIndex: 'targetPoints', width: 120, render: num('targetPoints', { step: 5 }) },
+    { title: <Tooltip title="A manual trade's trailing stop: once this many points in profit... (0 with Follow 0 = off)">Manual trail after</Tooltip>, dataIndex: 'trailStart', width: 120, render: num('trailStart', { step: 5 }) },
+    { title: <Tooltip title="...the stop follows the best premium this many points behind, only tightening. 0 = no trailing.">Trail follow</Tooltip>, dataIndex: 'trailGap', width: 100, render: num('trailGap', { step: 1 }) },
+    { title: <Tooltip title="MAX RULE for every strategy's option trade (server scanner, OI Replay strategies, and the tuning measures with it): its own option SL is used, but never wider than this many premium points - a strategy with no option SL of its own is stopped here. 0 = no max.">Max SL (strategies)</Tooltip>, dataIndex: 'maxSlPoints', width: 130, render: num('maxSlPoints', { step: 5 }) },
+    { title: <Tooltip title="MAX RULE for every strategy's option trade: its own option target is used, but never farther than this many premium points - one with no option target of its own takes profit here. 0 = no max.">Max target (strategies)</Tooltip>, dataIndex: 'maxTargetPoints', width: 140, render: num('maxTargetPoints', { step: 5 }) },
     { title: <Tooltip title="A live order's limit price is the bid / ask plus this many points">Slippage pts</Tooltip>, dataIndex: 'slippagePoints', width: 110, render: num('slippagePoints', { step: 0.5, max: 100 }) },
     {
       title: <Tooltip title="The server scans this index with the strategy scanner - with no page open">Server scanner</Tooltip>, dataIndex: 'scannerEnabled', width: 120,
@@ -204,14 +206,16 @@ export default function TradeSettingsPage() {
         <Card size="small" title="Trade settings · per index">
           <Space direction="vertical" size={12} style={{ width: '100%' }}>
             <Text type="secondary" style={{ fontSize: 12 }}>
-              The defaults every trade starts from - the OI Replay trade panel and its keyboard ticket (B / S), the Order Flow scanner&apos;s paper and
-              live trades - and what the server scanner runs with: it scans each index switched on here and trades it this way on every alert, whether
-              or not any page is open. Changing a stop-loss / target here, or in any of those boxes on a page, changes it everywhere; open trades take a
-              new stop-loss / target from the minute it changes. Saved on the server in {file ?? 'trade-settings.csv'} (written again with the defaults
-              if it is missing).
+              <b>Manual</b> SL / target / trail: what a manual trade starts with (the OI Replay trade panel and its keyboard ticket B / S).
+              <b> Strategies</b> never use those - each follows its own exits (its stop-loss, target, trailing stop and time stop, and its own option
+              SL / target where it was tuned with them); the only rule here for them is the <b>max</b>: never a wider option SL than Max SL and never a
+              farther target than Max target - one with none of its own is stopped / takes profit there. The strategy tuning and the Strategy lab
+              measure every strategy with these max rules too, so a tuned result is what the scanner will do. The server scanner scans each index
+              switched on here, with no page open. Open trades take a new max from the minute it changes. Saved on the server in{' '}
+              {file ?? 'trade-settings.csv'} (written again with the defaults if it is missing).
             </Text>
             {!isAdmin && <Alert type="info" showIcon message="Only an admin can change these." />}
-            <Table size="small" rowKey="underlying" columns={columns} dataSource={rows} pagination={false} scroll={{ x: 1150 }} />
+            <Table size="small" rowKey="underlying" columns={columns} dataSource={rows} pagination={false} scroll={{ x: 1450 }} />
             <Text type="secondary" style={{ fontSize: 12 }}>
               The server scanner paper-trades unless an index is switched to Live today (above). Which strategies it alerts on, their filters and
               the trailing stop on the futures signal follow the Order Flow scanner&apos;s settings.

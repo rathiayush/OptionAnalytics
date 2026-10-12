@@ -211,13 +211,16 @@ test('Apply to the scanner: the whole setting goes across, options included, and
   // And what the scanner then does with it. WHO DECIDES: a side chosen where the trading happens (the Order Flow
   // page's Buy / Sell) is the last word; 'strategy' - what the server scanner runs on, with nobody there to choose -
   // hands it to the strategy's own tuned setting.
-  const chose = (autoPaper) => ({ autoPaper, moneyness: 0, paperSl: 20, paperTarget: 30 })
+  // The option leaves the trade by the STRATEGY's own exit, held to the index's max rules (paperMaxSl / paperMaxTarget) -
+  // never the manual SL / target (paperSl / paperTarget).
+  const chose = (autoPaper) => ({ autoPaper, moneyness: 0, paperSl: 20, paperTarget: 30, paperMaxSl: 80, paperMaxTarget: 120 })
   const plain = optionPlanFor('wallBreak', {}, chose('sell'), 100)
-  assert.deepEqual([plain.leg, plain.moneyness, plain.slPts, plain.targetPts, plain.fromStrategy], ['sell', 0, 20, 30, false])
+  assert.deepEqual([plain.leg, plain.moneyness, plain.exit, plain.slPts, plain.targetPts, plain.fromStrategy], ['sell', 0, 'index', 80, 120, false])
   const mine = optionPlanFor('wallBreak', { wallBreak: opt }, chose('strategy'), 100)
   assert.deepEqual([mine.leg, mine.moneyness, mine.slPts, mine.targetPts, mine.fromStrategy], ['buy', -1, 25, 50, true])
-  // A % SL / target is of the premium actually paid, so a bigger premium means more points.
+  // A % SL / target is of the premium actually paid, so a bigger premium means more points - up to the max.
   assert.equal(optionPlanFor('wallBreak', { wallBreak: opt }, chose('strategy'), 200).slPts, 50)
+  assert.equal(optionPlanFor('wallBreak', { wallBreak: opt }, chose('strategy'), 400).slPts, 80, 'held to the Max SL')
   // The trader's own choice overrides the tuned side, and says that it did.
   const overridden = optionPlanFor('wallBreak', { wallBreak: opt }, chose('sell'), 100)
   assert.equal(overridden.leg, 'sell')

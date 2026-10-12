@@ -227,9 +227,11 @@ async function main() {
   const cfg = { ...(config?.settings ?? {}) }
   const rowSize = cfg.orderFlow?.rowSizes?.[U] ?? DEFAULT_ROW_SIZES[U] ?? 1
   const trail = trailFor(cfg, U)
-  // The option SL / target this index is actually traded with (Trade settings), so each trade can say what the option
-  // bought and the option sold would have done - its own stop, its own target, or out with the index trade.
-  const optionLevels = { ...defaultTradeLevels(U), ...(cfg.levels?.[U] ?? {}) }
+  // The index's max rules (Trade settings: Max SL / Max target - the server's config.levels), which the scanner holds every
+  // strategy's option trade to: every option measured here is held to them too (each day's optionCaps) - the bought and
+  // the sold option of each trade, and the option trades a setting takes its own way.
+  const levelsNow = { ...defaultTradeLevels(U), ...(config?.levels?.[U] ?? {}) }
+  const optionLevels = { maxSl: Number(levelsNow.maxSl ?? levelsNow.sl) || 0, maxTarget: Number(levelsNow.maxTarget ?? levelsNow.target) || 0 }
   // The strategies' own entry filters as the trader set them (for this index); the trade filters are what is tuned (from their defaults).
   const tradeKeys = new Set(TRADE_FILTERS.map((f) => f.key))
   const entryFilters = Object.fromEntries(Object.entries(filtersForIndex({ filters: cfg.filters, filtersByIndex: config?.filtersByIndex }, U)).map(([id, f]) => [id, Object.fromEntries(Object.entries(f ?? {}).filter(([k]) => !tradeKeys.has(k)))]))
@@ -332,6 +334,7 @@ async function main() {
     }
     day.setups = day.setups.map((s) => (s.checks ? { ...s, checks: null } : s))
     delete day.byId
+    day.optionCaps = optionLevels
     days.push(day)
     state.scanned = days.length
   }

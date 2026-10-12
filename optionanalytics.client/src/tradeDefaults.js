@@ -53,14 +53,18 @@ export function loadTradeLevels(_page, underlying) {
 export const DEFAULT_LOTS = 1
 export const DEFAULT_SLIPPAGE = 2
 
-/** One index's full trade settings: its levels plus lots, slippage, scanner on/off and auto trade. */
+/** One index's full trade settings: its levels (a manual trade's) plus lots, slippage, scanner on/off, auto trade and the
+ *  max rules every strategy's option trade is held to (maxSl / maxTarget, premium points, 0 = none - until set, the SL /
+ *  target). */
 export function loadTradeDefaults(underlying) {
   const saved = readAll()[String(underlying ?? '').toUpperCase()] ?? {}
   const num = (v, fallback) => (Number.isFinite(v) ? v : fallback)
+  const levels = loadTradeLevels('settings', underlying)
   return {
-    ...loadTradeLevels('settings', underlying),
+    ...levels,
+    maxSl: num(saved.maxSl, levels.sl), maxTarget: num(saved.maxTarget, levels.target),
     lots: Math.max(1, num(saved.lots, DEFAULT_LOTS)), slippage: num(saved.slippage, DEFAULT_SLIPPAGE),
-    scannerEnabled: saved.scannerEnabled !== false, autoTrade: ['sell', 'buy', 'off'].includes(saved.autoTrade) ? saved.autoTrade : 'sell',
+    scannerEnabled: saved.scannerEnabled !== false, autoTrade: ['sell', 'buy', 'off', 'strategy'].includes(saved.autoTrade) ? saved.autoTrade : 'sell',
   }
 }
 
@@ -85,11 +89,12 @@ export const saveTradeDefaults = (underlying, patch) => saveTradeLevels('setting
 
 const toServer = (underlying, d) => ({
   underlying, lots: d.lots, slPoints: d.sl, targetPoints: d.target, trailStart: d.trailStart, trailGap: d.trailGap,
-  slippagePoints: d.slippage, scannerEnabled: d.scannerEnabled, autoTrade: d.autoTrade,
+  slippagePoints: d.slippage, scannerEnabled: d.scannerEnabled, autoTrade: d.autoTrade, maxSlPoints: d.maxSl, maxTargetPoints: d.maxTarget,
 })
 const fromServer = (row) => ({
   sl: row.slPoints, target: row.targetPoints, trailStart: row.trailStart, trailGap: row.trailGap, lots: row.lots,
   slippage: row.slippagePoints, scannerEnabled: row.scannerEnabled, autoTrade: row.autoTrade,
+  ...(Number.isFinite(row.maxSlPoints) ? { maxSl: row.maxSlPoints } : {}), ...(Number.isFinite(row.maxTargetPoints) ? { maxTarget: row.maxTargetPoints } : {}),
 })
 
 const pending = new Map()

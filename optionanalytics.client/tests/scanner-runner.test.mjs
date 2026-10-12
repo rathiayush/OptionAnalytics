@@ -178,7 +178,7 @@ test('nothing is scanned before the engine has today\'s data, or for a switched-
   assert.equal(off.memory.fired.length, 0)
 })
 
-test('a new SL / target reaches the open paper trades from that minute', async () => {
+test('a new Max SL reaches the open strategy trades from that minute', async () => {
   const io = fakeIo()
   const scanner = new IndexScanner('NIFTY', io)
   scanner.reset(DATE)
@@ -302,13 +302,14 @@ test('a strategy tuned to BUY its option: the server scanner trades that - unles
     return s.positions
   }
 
-  // Left to the strategies: this one buys, 1 out of the money, with its own SL / target off the premium paid.
+  // Left to the strategies: this one buys, 1 out of the money, with its own SL / target off the premium paid - held to
+  // NIFTY's max rules (Max SL 20 / Max target 30 - the defaults).
   const mine = (await run('strategy')).filter((p) => p.strategy === id)
   const others = (await run('strategy')).filter((p) => p.strategy !== id)
   assert.ok(mine.length && mine.every((p) => p.action === 'BUY'), 'the tuned strategy buys')
   for (const p of mine) {
-    assert.ok(Math.abs(p.slPts - p.premium * 0.25) < 1e-6, `SL is 25% of the ${p.premium} premium, not ${p.slPts}`)
-    assert.ok(Math.abs(p.targetPts - p.premium * 0.5) < 1e-6)
+    assert.ok(Math.abs(p.slPts - Math.min(p.premium * 0.25, 20)) < 1e-6, `SL is 25% of the ${p.premium} premium, at most 20 - not ${p.slPts}`)
+    assert.ok(Math.abs(p.targetPts - Math.min(p.premium * 0.5, 30)) < 1e-6)
   }
   assert.ok(others.every((p) => p.action === 'SELL' && p.slPts === 20), 'a strategy with no setting of its own still sells')
 
@@ -362,8 +363,8 @@ test('a setting applied for ONE index (the tuning pages\' Apply): that index tra
     return s.positions.filter((p) => p.strategy === id)
   }
   const nifty = await run('NIFTY')
-  assert.ok(nifty.length && nifty.every((p) => p.action === 'BUY' && Math.abs(p.slPts - p.premium * 0.25) < 1e-6 && Math.abs(p.targetPts - p.premium * 0.5) < 1e-6),
-    'NIFTY buys with the SL / target it was tuned to')
+  assert.ok(nifty.length && nifty.every((p) => p.action === 'BUY' && Math.abs(p.slPts - Math.min(p.premium * 0.25, 20)) < 1e-6 && Math.abs(p.targetPts - Math.min(p.premium * 0.5, 30)) < 1e-6),
+    'NIFTY buys with the SL / target it was tuned to (within its max rules)')
   // The same strategy on another index: its all-index filters (the scanner settings), not NIFTY's.
   const other = new IndexScanner('BANKNIFTY', fakeIo())
   other.setConfig(config)
@@ -401,7 +402,7 @@ test('a strategy applied to an index WITH a lot size: its paper and live trades 
   assert.equal(strategyFilters(id, s.settings().filters[id])._lots, undefined)
 })
 
-test('a strategy applied with its own option exit: its paper and live trades take exactly it - no index option points or trail', async () => {
+test('every strategy trades its own exit - never the manual SL / target / trail - held to the max rules, paper and live', async () => {
   const probe = new IndexScanner('NIFTY', fakeIo())
   probe.reset(DATE)
   probe.setConfig({ alertIds: ALL_IDS, settings: { autoPaper: 'sell' } })
@@ -417,9 +418,9 @@ test('a strategy applied with its own option exit: its paper and live trades tak
   }
   const s = new IndexScanner('NIFTY', io)
   s.reset(DATE)
-  // The index: SL 20 / target 30 premium points, an option trail of 3 behind after +5. Two strategies tuned with their own
-  // option exits: out with the index trade only; and only their own SL / target (else 15:10).
-  const config = { alertIds: ALL_IDS, settings: { autoPaper: 'strategy' }, live: { NIFTY: true }, levels: { NIFTY: { sl: 20, target: 30, trailStart: 5, trailGap: 3 } },
+  // A manual trade's SL 20 / target 30 / trail 3 after +5 - and no max rules: nothing of the index holds the strategies.
+  // One tuned out with the index trade; one with only its own SL / target (else 15:10); the rest untouched.
+  const config = { alertIds: ALL_IDS, settings: { autoPaper: 'strategy' }, live: { NIFTY: true }, levels: { NIFTY: { sl: 20, target: 30, trailStart: 5, trailGap: 3, maxSl: 0, maxTarget: 0 } },
     filtersByIndex: { NIFTY: { [withIndex]: { tradeOptLeg: 'sell', tradeOptExit: 'index', _tuned: 'a' }, [optionOnly]: { tradeOptLeg: 'sell', tradeOptExit: 'option', tradeOptSlPct: 20, tradeOptTargetPct: 30, _tuned: 'b' } } } }
   s.setConfig(config)
   await runDay(s, io, at(15), at(150))
@@ -428,25 +429,29 @@ test('a strategy applied with its own option exit: its paper and live trades tak
   const plain = s.positions.filter((p) => p.strategy !== withIndex && p.strategy !== optionOnly)
   assert.ok(a.length && a.every((p) => p.optExit === 'index' && p.slPts === null && p.targetPts === null && p.trailGap === 0), JSON.stringify(a))
   assert.ok(b.length && b.every((p) => p.optExit === 'option' && Math.abs(p.slPts - p.premium * 0.2) < 1e-9 && Math.abs(p.targetPts - p.premium * 0.3) < 1e-9 && p.trailGap === 0))
-  assert.ok(plain.every((p) => !p.optExit && p.slPts === 20 && p.targetPts === 30 && p.trailGap === 3), 'the rest: the index\'s levels and trail')
-  // Live: no option trailing stop; out with the index trade = safety legs at the signal's own index distance.
+  assert.ok(plain.every((p) => p.optExit === 'index' && p.slPts === null && p.targetPts === null && p.trailGap === 0), 'the rest: out with the index trade too - not the manual 20 / 30 / trail')
+  // Live: no option trailing stop; no level at all = safety legs at the signal's own index distance.
   const fired = (key) => s.memory.fired.find((f) => key.startsWith(`${f.id}-${f.t}-`))
-  for (const o of orders.filter((x) => x.strategyId === withIndex)) {
+  assert.ok(orders.length && orders.every((o) => o.trailStartPoints === 0 && o.trailGapPoints === 0), JSON.stringify(orders.map((o) => o.trailGapPoints)))
+  for (const o of orders.filter((x) => x.strategyId !== optionOnly)) {
     const sig = fired(o.key)
-    assert.deepEqual([o.trailStartPoints, o.trailGapPoints], [0, 0])
     assert.ok(Math.abs(o.stopLossPoints - Math.abs(sig.entry - sig.stop)) < 1e-9 && Math.abs(o.targetPoints - Math.abs(sig.target - sig.entry)) < 1e-9, JSON.stringify(o))
     assert.equal(o.indexStop, sig.stop, 'the server still watches its index stop')
   }
   for (const o of orders.filter((x) => x.strategyId === optionOnly)) {
     assert.equal(o.indexStop, undefined, 'its own option exit only: no index stop to watch')
     assert.equal(o.exitAtMs, squareOffMs(fired(o.key).t), 'closed at 15:10, not at the signal\'s time stop')
-    assert.deepEqual([o.trailStartPoints, o.trailGapPoints], [0, 0])
   }
-  for (const o of orders.filter((x) => x.strategyId !== withIndex && x.strategyId !== optionOnly)) assert.equal(o.trailGapPoints, undefined, 'the rest: the index\'s trail (the server\'s Trade settings)')
-  assert.ok(orders.some((x) => x.strategyId === withIndex) || orders.some((x) => x.strategyId === optionOnly), 'an own-exit order was placed')
-  // The index's levels change: only the trades without an exit of their own take it.
-  s.setConfig({ ...config, levels: { NIFTY: { sl: 40, target: 60, trailStart: 5, trailGap: 3 } } })
-  assert.ok(s.positions.filter((p) => p.optExit).every((p) => !p.levelLog), 'its own exit: untouched')
+  // Max rules set now: the open strategy trades are held to them from this minute; a manual SL change touches nothing.
+  const openBefore = s.status().trades.filter((r) => !r.exitTime).map((r) => r.key)
+  s.setConfig({ ...config, levels: { NIFTY: { sl: 5, target: 30, trailStart: 5, trailGap: 3, maxSl: 40, maxTarget: 0 } } })
+  assert.ok(openBefore.length, 'a strategy trade was open')
+  for (const key of openBefore) {
+    const p = s.positions.find((x) => x.key === key)
+    assert.equal(p.slPts, p.ownSlPts > 0 ? Math.min(p.ownSlPts, 40) : 40, key)
+    // Changed (it had no SL of its own, or a wider one): from this minute, in its levelLog; else left as it was.
+    assert.equal(p.levelLog?.length ?? 0, p.ownSlPts > 0 && p.ownSlPts <= 40 ? 0 : 2)
+  }
 })
 
 test('today is not loaded at weekends or before the open, and a failing load backs off (each try costs Dhan calls)', async () => {

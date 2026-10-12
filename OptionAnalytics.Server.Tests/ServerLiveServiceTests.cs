@@ -297,6 +297,26 @@ public sealed class ServerLiveServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task ALiveOrder_IsHeldToTheIndexsMaxRules()
+    {
+        var trade = Trade();
+        trade.Save("NIFTY", trade.Get("NIFTY") with { SlPoints = 5, TargetPoints = 5, MaxSlPoints = 30, MaxTargetPoints = 45 });
+        var orders = new FakeOrders();
+        var live = Live(orders, trade);
+        live.Set("NIFTY", true, 5, null, "admin", At10);
+        // The strategy's own legs, wider than the max: held to it.
+        await live.PlaceAsync("NIFTY", Order("a-1-sell", 50, 90), At10, default);
+        Assert.Equal((30m, 45m), (orders.Placed[0].StopLossPoints, orders.Placed[0].TargetPoints));
+        await live.ExitAsync("NIFTY", "a-1-sell", "target", 500, At10, default);
+        // Tighter than the max: its own - never the manual SL / target (5 / 5).
+        await live.PlaceAsync("NIFTY", Order("b-2-sell", 12, 20), At10.AddMinutes(2), default);
+        Assert.Equal((12m, 20m), (orders.Placed[1].StopLossPoints, orders.Placed[1].TargetPoints));
+        Assert.Equal(12m, ServerLiveService.Capped(12, 0));
+        Assert.Equal(30m, ServerLiveService.Capped(null, 30));
+        Assert.Equal(0m, ServerLiveService.Capped(null, 0));
+    }
+
+    [Fact]
     public async Task OneOpenTradeAtATime_AndTheSameSignalNeverTwice()
     {
         var orders = new FakeOrders();

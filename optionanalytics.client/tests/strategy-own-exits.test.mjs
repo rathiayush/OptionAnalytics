@@ -1,12 +1,12 @@
 // Every strategy trades by its OWN exits: its trailing stop (its own, or the one its tuned setting was applied with) is
-// not changed by a later change of the scanner's trailing stop; an option exit of its own (tradeOptExit, carried from the
-// tuning) is taken EXACTLY - none of the index's option SL / target points or its option trailing stop on top, and a
-// change of the index's levels leaves its open trades alone - so a tuned strategy trades as the tuning measured it.
-// Run: npm test (node --test) - see CLAUDE.md.
+// not changed by a later change of the scanner's trailing stop; its option leaves the trade by its own exit (tradeOptExit,
+// carried from the tuning) with its own SL / target - never the Trade settings' SL / target / trail (a manual trade's) -
+// held only to the index's max rules (Max SL / Max target), which the tuning measures with too: the paper trade is the
+// tuning's own trade. Run: npm test (node --test) - see CLAUDE.md.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { optionPlanFor, optionTradeAt, ownOptionExit, pinnedTrailOf, simulateOutcome, squareOffMs } from '../src/strategyEngine.js'
-import { followSetups, liveLegsFor, newPosition, positionRows, withLevelChange, withOwnTrail, MIN } from '../src/scannerCore.js'
+import { capPoints, optionPlanFor, optionTradeAt, ownOptionExit, pinnedTrailOf, simulateOutcome, squareOffMs } from '../src/strategyEngine.js'
+import { followSetups, liveLegsFor, newPosition, positionRows, withCapChange, withLevelChange, withOwnTrail, MIN } from '../src/scannerCore.js'
 import { scanDaySetups } from '../src/scanDay.js'
 import { DEFAULT_VARIANT, OPTION_DEFAULT, filtersFromTuning, optionOutcome, paramsFromFilters, tuningDay } from '../src/strategyTuning.js'
 import { day } from './synthetic-day.mjs'
@@ -50,47 +50,54 @@ test('a tuned setting keeps the trailing stop it was applied with; a trailing st
   assert.equal(pinnedTrailOf({ _trail: { gapR: 0 } }), undefined, 'a broken one is not used')
 })
 
-const cfg = { autoPaper: 'strategy', paperSl: 20, paperTarget: 30, paperTrailStart: 5, paperTrailGap: 3 }
-const plan = (f, premium = 100) => optionPlanFor('wallBreak', { wallBreak: f }, cfg, premium)
+// The index: a manual trade's SL 20 / target 30 / trail (never a strategy's), and max rules for the strategies.
+const cfg = { autoPaper: 'strategy', paperSl: 20, paperTarget: 30, paperTrailStart: 5, paperTrailGap: 3, paperMaxSl: 40, paperMaxTarget: 60 }
+const plan = (f, premium = 100, c = cfg) => optionPlanFor('wallBreak', { wallBreak: f }, c, premium)
+const levels = (p) => [p.exit, p.slPts, p.targetPts, p.trailStart, p.trailGap]
 
-test('an option exit of its own is taken exactly - no index option points, no index option trailing stop', () => {
-  assert.deepEqual(
-    (({ exit, own, slPts, targetPts, trailStart, trailGap }) => ({ exit, own, slPts, targetPts, trailStart, trailGap }))(plan({ tradeOptLeg: 'buy', tradeOptExit: 'index' })),
-    { exit: 'index', own: true, slPts: null, targetPts: null, trailStart: 0, trailGap: 0 })
-  const capped = plan({ tradeOptLeg: 'sell', tradeOptExit: 'indexSl', tradeOptSlPct: 25 })
-  assert.deepEqual([capped.slPts, capped.targetPts, capped.trailGap], [25, null, 0], 'its Max SL only - no index target')
-  const first = plan({ tradeOptLeg: 'sell', tradeOptExit: 'first' })
-  assert.deepEqual([first.slPts, first.targetPts], [20, 30], 'no % set: the tuning\'s own 20% / 30%')
-  const option = plan({ tradeOptLeg: 'buy', tradeOptExit: 'option', tradeOptSlPct: 10, tradeOptTargetPct: 40 }, 50)
-  assert.deepEqual([option.exit, option.slPts, option.targetPts], ['option', 5, 20])
-  // None of its own: the index's levels and its option trailing stop, as before (a % of its own still applies).
-  const plain = plan({ tradeOptLeg: 'buy', tradeOptSlPct: 30 })
-  assert.deepEqual([plain.own, plain.slPts, plain.targetPts, plain.trailStart, plain.trailGap], [false, 30, 30, 5, 3])
-  // Before its exit was stored: a TUNED option setting is read the way the lab reads it back; one set by hand is not.
-  assert.equal(ownOptionExit({ tradeOptLeg: 'sell', tradeOptSlPct: 30, tradeOptTargetPct: 0 }, { _tuned: 'sig' }), 'indexSl')
-  assert.equal(ownOptionExit({ tradeOptLeg: 'sell', tradeOptSlPct: 0, tradeOptTargetPct: 0 }, { _appliedAt: 1 }), 'index')
-  assert.equal(ownOptionExit({ tradeOptLeg: 'buy', tradeOptSlPct: 0, tradeOptTargetPct: 0 }, {}), null, 'BUY chosen by hand keeps the index\'s levels')
-  // The lab reads the stored exit back as it is.
+test('a strategy\'s option follows ITS OWN exit, held to the index\'s max rules - never the Trade settings\' SL / target / trail', () => {
+  // Out with the index trade (nothing of its own): the max rules alone - not the manual SL 20 / target 30, no trail.
+  assert.deepEqual(levels(plan({})), ['index', 40, 60, 0, 0])
+  assert.deepEqual(levels(plan({}, 100, { ...cfg, paperMaxSl: 0, paperMaxTarget: 0 })), ['index', null, null, 0, 0], 'no max: only its index exit')
+  // Its own SL / target used where tighter than the max; the max where its own is wider.
+  assert.deepEqual(levels(plan({ tradeOptExit: 'first', tradeOptSlPct: 25, tradeOptTargetPct: 50 })), ['first', 25, 50, 0, 0])
+  assert.deepEqual(levels(plan({ tradeOptExit: 'first', tradeOptSlPct: 25, tradeOptTargetPct: 50 }, 200)), ['first', 40, 60, 0, 0], '50 / 100 pts on a 200 premium: held to 40 / 60')
+  assert.deepEqual(levels(plan({ tradeOptExit: 'indexSl', tradeOptSlPct: 25 })), ['indexSl', 25, 60, 0, 0], 'its SL only - the Max target still holds')
+  assert.deepEqual(levels(plan({ tradeOptExit: 'option', tradeOptSlPct: 10, tradeOptTargetPct: 40 }, 50)), ['option', 5, 20, 0, 0])
+  // No exit set: read from its % (the lab's way) - a target %: first; an SL % only: indexSl.
+  assert.equal(ownOptionExit({ tradeOptSlPct: 30, tradeOptTargetPct: 0 }), 'indexSl')
+  assert.equal(ownOptionExit({ tradeOptSlPct: 30, tradeOptTargetPct: 40 }), 'first')
+  assert.equal(ownOptionExit({ tradeOptLeg: 'buy' }), 'index')
+  assert.equal(plan({ tradeOptLeg: 'buy', tradeOptSlPct: 30 }).slPts, 30, 'its % on the premium - not the manual 20')
   assert.equal(paramsFromFilters({ tradeOptLeg: 'buy', tradeOptExit: 'option', tradeOptSlPct: 10, tradeOptTargetPct: 40 }).optExit, 'option')
+  assert.equal(capPoints(null, 0), null)
+  assert.equal(capPoints(25, 0), 25)
+  assert.equal(capPoints(null, 40), 40)
+  assert.equal(capPoints(50, 40), 40)
 })
 
-test('its live order: its own legs; where its exit has none, a safety leg at the signal\'s own index distance', () => {
+test('its live order: the legs in force; where there are none (no max, out with the index), a safety leg at the signal\'s own index distance', () => {
   const s = { entry: 25000, stop: 24970, target: 25060 }
-  assert.deepEqual(liveLegsFor(plan({ tradeOptLeg: 'sell', tradeOptExit: 'index' }), s), { slPts: 30, targetPts: 60 })
-  assert.deepEqual(liveLegsFor(plan({ tradeOptLeg: 'sell', tradeOptExit: 'indexSl', tradeOptSlPct: 25 }), s), { slPts: 25, targetPts: 60 })
-  assert.deepEqual(liveLegsFor(plan({ tradeOptLeg: 'sell', tradeOptExit: 'first', tradeOptSlPct: 10, tradeOptTargetPct: 15 }), s), { slPts: 10, targetPts: 15 })
-  assert.deepEqual(liveLegsFor(plan({}), s), { slPts: 20, targetPts: 30 }, 'none of its own: the index\'s')
+  const free = { ...cfg, paperMaxSl: 0, paperMaxTarget: 0 }
+  assert.deepEqual(liveLegsFor(plan({}, 100, free), s), { slPts: 30, targetPts: 60 })
+  assert.deepEqual(liveLegsFor(plan({ tradeOptExit: 'indexSl', tradeOptSlPct: 25 }, 100, free), s), { slPts: 25, targetPts: 60 })
+  assert.deepEqual(liveLegsFor(plan({ tradeOptExit: 'first', tradeOptSlPct: 10, tradeOptTargetPct: 15 }), s), { slPts: 10, targetPts: 15 })
+  assert.deepEqual(liveLegsFor(plan({}), s), { slPts: 40, targetPts: 60 }, 'the max rules')
 })
 
-test('a change of the index\'s option levels reaches only the trades with no exit of their own', () => {
+test('a change of the max rules reaches the open strategy trades from that minute - their own SL / target held to the new max', () => {
   const trade = { action: 'SELL', side: 'PE', strike: 25000 }
-  const own = newPosition({ setup: long, trade, which: 'sell', lots: 1, lotSize: 65, premium: 100, cfg, at: T0, plan: plan({ tradeOptLeg: 'sell', tradeOptExit: 'indexSl', tradeOptSlPct: 25 }) })
+  const own = newPosition({ setup: long, trade, which: 'sell', lots: 1, lotSize: 65, premium: 100, cfg, at: T0, plan: plan({ tradeOptExit: 'indexSl', tradeOptSlPct: 25 }) })
   const plain = newPosition({ setup: { ...long, id: 'buildUp' }, trade, which: 'sell', lots: 1, lotSize: 65, premium: 100, cfg, at: T0, plan: plan({}) })
-  assert.deepEqual([own.optExit, own.slPts, own.targetPts, own.trailGap], ['indexSl', 25, null, 0])
-  assert.deepEqual([plain.optExit, plain.slPts, plain.targetPts, plain.trailGap], [undefined, 20, 30, 3])
-  const after = withLevelChange([own, plain], new Set([own.key, plain.key]), { paperSl: 40, paperTarget: 60 }, T0 + 5 * MIN, cfg)
-  assert.deepEqual(after[0], own, 'its own exit: untouched')
-  assert.deepEqual([after[1].slPts, after[1].targetPts, after[1].levelLog.length], [40, 60, 2])
+  assert.deepEqual([own.optExit, own.ownSlPts, own.slPts, own.ownTargetPts, own.targetPts, own.trailGap], ['indexSl', 25, 25, null, 60, 0])
+  assert.deepEqual([plain.optExit, plain.ownSlPts, plain.slPts, plain.targetPts, plain.trailGap], ['index', null, 40, 60, 0])
+  const at = T0 + 5 * MIN
+  const after = withCapChange([own, plain], new Set([own.key, plain.key]), { maxSl: 20, maxTarget: 0 }, at)
+  assert.deepEqual([after[0].slPts, after[0].targetPts], [20, null], 'its 25 held to the new 20; no max target: none')
+  assert.deepEqual(after[0].levelLog, [{ t: T0, sl: 25, target: 60, trailStart: 0, trailGap: 0 }, { t: at, sl: 20, target: null, trailStart: 0, trailGap: 0 }])
+  assert.deepEqual([after[1].slPts, after[1].targetPts], [20, null])
+  // A manual trade's level change (withLevelChange) does not touch a strategy's trade.
+  assert.deepEqual(withLevelChange([own], new Set([own.key]), { paperSl: 5 }, at, cfg)[0], own)
 })
 
 // ---- tuning == scanner: the paper trade of a strategy applied with its option exit is the tuning's own trade ----
@@ -100,10 +107,13 @@ const replayDay = { meta: { lotSize: 75, lastPrice: syn.path.at(-1) }, minuteBar
 const all = await scanDaySetups({ day: replayDay, prints: syn.prints, oi: syn.oi, profile: null, rowSize: 1, lotSize: 75, largeLots: 10, estimated: false, filters: {}, keepAll: true })
 const d = tuningDay('2026-10-05', all, replayDay, syn.oi)
 
-test('tuning == scanner: each option exit as applied is the same trade the tuning measured (same exit, premium, points)', () => {
+test('tuning == scanner: each option exit as applied, held to the max rules, is the same trade the tuning measured (same exit, premium, points)', () => {
   const id = all[0].id
-  // The index's levels are set (and tight) - none of them may reach a strategy with an exit of its own.
-  const index = { autoPaper: 'strategy', paperSl: 2, paperTarget: 3, paperTrailStart: 0, paperTrailGap: 1, paperLots: 1, filters: {} }
+  // A manual trade's levels are set (and tight) - none of them may reach a strategy; the max rules hold both the tuning and
+  // the scanner the same way (wide enough that its own levels still decide some trades, tight enough to decide others).
+  const caps = { maxSl: 6, maxTarget: 9 }
+  const index = { autoPaper: 'strategy', paperSl: 2, paperTarget: 3, paperTrailStart: 0, paperTrailGap: 1, paperLots: 1, filters: {}, paperMaxSl: caps.maxSl, paperMaxTarget: caps.maxTarget }
+  const dc = { ...d, optionCaps: caps }
   let compared = 0
   const reasons = new Set()
   for (const [leg, exit, sl, tg] of [['sell', 'index'], ['buy', 'index'], ['sell', 'indexSl', 15], ['buy', 'indexSl', 3], ['sell', 'first', 15, 20], ['buy', 'first', 5, 10], ['sell', 'option', 20, 30], ['buy', 'option', 10, 15]]) {
@@ -111,7 +121,7 @@ test('tuning == scanner: each option exit as applied is the same trade the tunin
     const filters = { [id]: { ...filtersFromTuning({}, v, { option: true }), _tuned: 'sig' } }
     for (const s of all.filter((x) => x.id === id).slice(0, 12)) {
       const outcome = { status: 'win', exitAt: s.t + 20 * MIN, r: 1 }
-      const tuned = optionOutcome(d, s, outcome, v)
+      const tuned = optionOutcome(dc, s, outcome, v)
       if (!tuned) continue
       const first = optionPlanFor(id, filters, index)
       const trade = optionTradeAt(syn.oi, s, first.leg, first.moneyness, s.t)
@@ -122,7 +132,7 @@ test('tuning == scanner: each option exit as applied is the same trade the tunin
       assert.ok(row.exitTime, `${leg} ${exit}: closed`)
       assert.ok(Math.abs(row.current - tuned.exitPremium) < 1e-9, `${leg} ${exit} @${s.t}: exit premium ${row.current} vs the tuning's ${tuned.exitPremium} (${tuned.reason} / ${row.exitReason})`)
       assert.ok(Math.abs(row.points - tuned.points) < 1e-9)
-      if (tuned.exitMs < Math.min(d.endMs, squareOffMs(s.t))) assert.equal(row.exitTime, tuned.exitMs)
+      if (tuned.exitMs < Math.min(dc.endMs, squareOffMs(s.t))) assert.equal(row.exitTime, tuned.exitMs)
       reasons.add(`${exit}:${/SL|Target/.test(tuned.reason) ? 'own level' : 'other'}`)
       compared++
     }
