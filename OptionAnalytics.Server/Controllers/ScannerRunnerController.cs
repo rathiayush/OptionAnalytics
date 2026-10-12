@@ -134,6 +134,17 @@ public sealed class ScannerRunnerController : ControllerBase
         request is null || string.IsNullOrWhiteSpace(request.Key) ? BadRequest(new { error = "No trade." })
             : _live.MoveIndexStop(underlying, request.Key, request.Stop) ? Ok() : NotFound(new { error = "No such open live trade." });
 
+    /// <summary>POST /api/scanner-runner/live/{underlying}/levels - the strategy moved an open live trade's option SL /
+    /// target: its Dhan legs follow (held to the index's max rules).</summary>
+    [HttpPost("live/{underlying}/levels")]
+    [Authorize(Roles = ScannerRunnerKey.Role)]
+    public async Task<IActionResult> LiveLevels(string underlying, [FromBody] ServerLiveLegsRequest request, CancellationToken cancellationToken)
+    {
+        if (request is null || string.IsNullOrWhiteSpace(request.Key)) return BadRequest(new { error = "No trade." });
+        var result = await _live.MoveLegsAsync(underlying, request.Key, request.StopLossPoints, request.TargetPoints, DateTimeOffset.UtcNow, cancellationToken);
+        return result.Success ? Ok(result) : UnprocessableEntity(result);
+    }
+
     /// <summary>POST /api/scanner-runner/live/{underlying}/exit - the scanner closed a live trade.</summary>
     [HttpPost("live/{underlying}/exit")]
     [Authorize(Roles = ScannerRunnerKey.Role)]

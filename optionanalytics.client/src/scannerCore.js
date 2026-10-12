@@ -13,7 +13,7 @@ import { aggregateBars, analyzeBars, findWalls } from './orderFlowMath.js'
 import { chargeRates, tradeCharges } from './tradeCharges.js'
 import { sessionVolumeProfile, tpoProfile, tpoRowFor } from './profiles.js'
 import { evaluateSpotStrategies } from './spotEngine.js'
-import { defaultTradeLevels } from './tradeDefaults.js'
+import { defaultIndexTrade, defaultTradeLevels } from './tradeDefaults.js'
 
 export const MIN = 60_000
 // One alert per strategy and direction at most every 20 minutes - a setup that stays true is one trade.
@@ -259,6 +259,22 @@ export function liveLegsFor(plan, setup) {
   }
 }
 
+/** The SL / target legs an open LIVE trade must have on Dhan now (premium points from its entry): its SL / target in
+ *  force - after any change, from the minute it was made (withCapChange / withLevelChange) - else the safety legs it was
+ *  placed with (`liveSafety`, liveLegsFor). The scanner moves the legs whenever these differ from what Dhan has. */
+export function liveLegsNow(p) {
+  return {
+    slPts: p?.slPts > 0 ? p.slPts : p?.liveSafety?.slPts > 0 ? p.liveSafety.slPts : null,
+    targetPts: p?.targetPts > 0 ? p.targetPts : p?.liveSafety?.targetPts > 0 ? p.liveSafety.targetPts : null,
+  }
+}
+
+/** Whether two sets of legs are the same (to a hundredth of a point; none = none). */
+export function sameLegs(a, b) {
+  const same = (x, y) => (x > 0 ? y > 0 && Math.abs(x - y) < 0.01 : !(y > 0))
+  return same(a?.slPts, b?.slPts) && same(a?.targetPts, b?.targetPts)
+}
+
 /**
  * A change of the index's max rules (`caps` { maxSl, maxTarget }, premium points, 0 = none) for the strategy trades still
  * OPEN (keys in `openKeys`), from the minute `changeAt`: each one's SL / target in force becomes its own held to the new
@@ -418,7 +434,11 @@ export const RUNNER_DEFAULT_SETTINGS = { alerts: true, telegram: true, pick: 'to
  */
 export function runnerSettingsOf(config, underlying) {
   const s = { ...RUNNER_DEFAULT_SETTINGS, ...(config?.settings ?? {}) }
-  const levels = { ...defaultTradeLevels(underlying), trailStart: 0, trailGap: 0, ...(config?.levels?.[underlying] ?? {}) }
+  // The index's levels from the server (its max rules with them); none sent at all: its defaults, max rules included. Levels
+  // sent without max rules (from before them) take their SL / target as the max, as the server does.
+  const own = config?.levels?.[underlying]
+  const d = own ? null : defaultIndexTrade(underlying)
+  const levels = { ...defaultTradeLevels(underlying), ...(d ? { maxSl: d.maxSl, maxTarget: d.maxTarget } : {}), trailStart: 0, trailGap: 0, ...(own ?? {}) }
   const trade = config?.trade?.[underlying] ?? {}
   return {
     ...s, filters: filtersForIndex({ filters: s.filters, filtersByIndex: config?.filtersByIndex }, underlying), paperSl: levels.sl, paperTarget: levels.target, paperTrailStart: levels.trailStart ?? 0, paperTrailGap: levels.trailGap ?? 0,

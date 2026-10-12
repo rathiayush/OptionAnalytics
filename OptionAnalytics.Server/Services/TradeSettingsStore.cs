@@ -20,12 +20,14 @@ public sealed class TradeSettingsStore
     // scanner), selling where it has none. "sell" / "buy" are a choice for the whole index and override that.
     public static readonly string[] AutoTrades = { "sell", "buy", "off", "strategy" };
 
+    // The trader's own settings as the defaults (a missing file or index starts with them): lots; a manual trade's SL /
+    // target (no trail); the strategies' Max SL (no max target - 0 = none); 2 pts slippage; scanner on; sell on an alert.
     // The premiums of BANKNIFTY / SENSEX move ~2.5x / ~3x NIFTY's - their stops and targets are wider.
     public static TradeSettings Default(string underlying) => underlying switch
     {
-        "BANKNIFTY" => new TradeSettings("BANKNIFTY", 1, 50, 75, 0, 0, 2, true, "sell", null, 50, 75),
-        "SENSEX" => new TradeSettings("SENSEX", 1, 60, 90, 0, 0, 2, true, "sell", null, 60, 90),
-        _ => new TradeSettings(underlying, 1, 20, 30, 0, 0, 2, true, "sell", null, 20, 30),
+        "BANKNIFTY" => new TradeSettings("BANKNIFTY", 3, 50, 75, 0, 0, 2, true, "sell", null, 80, 0),
+        "SENSEX" => new TradeSettings("SENSEX", 3, 60, 90, 0, 0, 2, true, "sell", null, 120, 0),
+        _ => new TradeSettings(underlying, 4, 30, 40, 0, 0, 2, true, "sell", null, 50, 0),
     };
 
     private readonly string _path;

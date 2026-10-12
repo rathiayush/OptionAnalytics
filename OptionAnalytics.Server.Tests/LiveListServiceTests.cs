@@ -167,6 +167,26 @@ public sealed class LiveListServiceTests
         finally { try { File.Delete(path); } catch { /* temp */ } }
     }
 
+    [Fact]
+    public void TheDefaultMinimumWinRate_Is43_AndAFileStillOnTheOldDefaultsMovesToIt_ButOwnRulesStay()
+    {
+        Assert.Equal((20, 43.0, 1.0, 10), (new LiveListRules().MinTrades, new LiveListRules().MinWinPct, new LiveListRules().ChargesPoints, new LiveListRules().MinLiveTrades));
+        var path = Path.Combine(Path.GetTempPath(), "oa-live-list-" + Guid.NewGuid().ToString("n") + ".json");
+        try
+        {
+            var dir = Path.GetDirectoryName(path)!;
+            var trade = new TradeSettingsStore(new FakeEnv(dir), new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build(), NullLogger<TradeSettingsStore>.Instance);
+            // Saved with the old defaults (20 / 45% / 1 / 10) - written with a by-hand change: read as the new defaults.
+            File.WriteAllText(path, "{\"rules\":{\"minTrades\":20,\"minWinPct\":45,\"chargesPoints\":1,\"minLiveTrades\":10},\"include\":[\"NIFTY|trap\"],\"exclude\":[]}");
+            var svc = new LiveListService(null, null, trade, path, NullLogger<LiveListService>.Instance);
+            Assert.Equal(43, svc.Rules().MinWinPct);
+            // Rules set by hand are never touched.
+            File.WriteAllText(path, "{\"rules\":{\"minTrades\":20,\"minWinPct\":48,\"chargesPoints\":1,\"minLiveTrades\":10},\"include\":[],\"exclude\":[]}");
+            Assert.Equal(48, new LiveListService(null, null, trade, path, NullLogger<LiveListService>.Instance).Rules().MinWinPct);
+        }
+        finally { try { File.Delete(path); } catch { /* temp */ } }
+    }
+
     private sealed class FakeEnv(string root) : Microsoft.Extensions.Hosting.IHostEnvironment
     {
         public string EnvironmentName { get; set; } = "Test";

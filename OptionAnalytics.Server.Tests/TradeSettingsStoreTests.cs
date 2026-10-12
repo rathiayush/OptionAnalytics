@@ -30,9 +30,10 @@ public sealed class TradeSettingsStoreTests : IDisposable
     {
         var all = Store().All();
         Assert.Equal(new[] { "NIFTY", "BANKNIFTY", "SENSEX" }, all.Select(s => s.Underlying));
-        Assert.Equal(20, all[0].SlPoints);
-        Assert.Equal(75, all[1].TargetPoints);
-        Assert.True(all.All(s => s.ScannerEnabled && s.AutoTrade == "sell" && s.Lots == 1));
+        // The trader's own settings: lots, manual SL / target, no trail, the strategies' Max SL and no max target, 2 pts slippage.
+        Assert.Equal(new[] { (4, 30m, 40m, 50m, 0m), (3, 50m, 75m, 80m, 0m), (3, 60m, 90m, 120m, 0m) },
+            all.Select(s => (s.Lots, s.SlPoints, s.TargetPoints, s.MaxSl, s.MaxTarget)));
+        Assert.True(all.All(s => s.ScannerEnabled && s.AutoTrade == "sell" && s.TrailStart == 0 && s.TrailGap == 0 && s.SlippagePoints == 2));
         Assert.True(File.Exists(FilePath));
         Assert.StartsWith("underlying,lots,sl_points", File.ReadAllText(FilePath));
     }
@@ -49,10 +50,10 @@ public sealed class TradeSettingsStoreTests : IDisposable
         Assert.Equal(40, again.SlPoints);
         Assert.Equal(1.5m, again.SlippagePoints);
         Assert.False(again.ScannerEnabled);
-        Assert.Equal(20, Store().Get("NIFTY").SlPoints);
+        Assert.Equal(30, Store().Get("NIFTY").SlPoints);
 
         File.Delete(FilePath);
-        Assert.Equal(1, Store().Get("BANKNIFTY").Lots);
+        Assert.Equal(3, Store().Get("BANKNIFTY").Lots); // the default again
         Assert.True(File.Exists(FilePath));
         File.WriteAllText(FilePath, "garbage\nnot,a,row\n");
         Assert.Equal(3, Store().All().Count);

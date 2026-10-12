@@ -887,8 +887,9 @@ export default function OrderFlowPage() {
               <Card size="small" title={`Signals${shownSignals.length !== signals.length ? ` · ${shownSignals.length}/${signals.length}` : ''}`} styles={{ body: { maxHeight: 360, overflowY: 'auto' } }}
                 extra={(
                   <Space size={6} wrap style={{ justifyContent: 'flex-end' }}>
+                    {/* A fixed width: a content-sized one and the responsive tag count fed each other (flicker). */}
                     <Select
-                      mode="multiple" size="small" allowClear maxTagCount="responsive" placeholder="All types" style={{ minWidth: 150, maxWidth: 240 }}
+                      mode="multiple" size="small" allowClear maxTagCount="responsive" placeholder="All types" style={{ width: 200 }}
                       value={signalTypes} onChange={setSignalTypes} options={signalTypeOptions} aria-label="Signal types"
                     />
                     <Select

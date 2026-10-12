@@ -558,7 +558,9 @@ function StrategyPerformance({ reloadKey }) {
                 </Tooltip>
                 <Select value={u} onChange={(v) => { setBestFor(v); setBestSel(null) }} style={{ width: 130 }} options={indices.map((x) => ({ value: x, label: x }))} aria-label="Best settings of index" />
                 <Text>for</Text>
-                <Select mode="multiple" allowClear value={pickedIds(u)} onChange={(ids) => setBestSel({ index: u, ids })} style={{ minWidth: 280, maxWidth: 640 }} maxTagCount="responsive"
+                {/* A FIXED width: sized by its own tags (min / max width), the responsive tag count and the wrapping row fed
+                    each other - more tags made it wider, the row wrapped, fewer fit, it shrank, the row unwrapped... a flicker. */}
+                <Select mode="multiple" allowClear value={pickedIds(u)} onChange={(ids) => setBestSel({ index: u, ids })} style={{ width: narrow ? 260 : 460 }} maxTagCount="responsive"
                   placeholder={candidates.length ? 'pick strategies' : 'no tuned setting for this index yet'} aria-label="Strategies to apply"
                   options={candidates.map(({ r, t }) => ({ value: r.strategyId, label: `#${r.strategyNo} ${r.strategy} · ${t.best ? 'best' : 'not proven yet'}` }))} />
                 <Space size={4}><Text>lots</Text><Tooltip title={`Each strategy picked takes this many lots on ${u}. Empty: each keeps its own lot size, else the index's (Trade settings: ${liveCfg?.trade?.[u]?.lots ?? '-'}).`}><InputNumber size="small" min={1} max={500} precision={0} value={bestLots} onChange={(v) => setBestLots(v ?? null)} style={{ width: 80 }} placeholder={`${liveCfg?.trade?.[u]?.lots ?? ''} (index)`} aria-label="Lots for the picked strategies" /></Tooltip></Space>
