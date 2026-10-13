@@ -34,7 +34,10 @@ the spot + options strategies (`spotEngine.js`, server only): once each finished
 (`priceBasis: 'spot'`) - `tests/scanner-runner-spot.test.mjs` keeps live == the tuning's day scan. Spot #111 - #113 read the
 day's OWN spot profile, built inside the engine from the same spot bars (`spotProfile`: time at price - spot has no volume -
 over the minutes finished `PROFILE_LAG` (15)+ minutes before the clock; its nodes, POC and the thin areas between two nodes),
-never the server's previous-day profile or the futures' - so every caller gets the same one with nothing to pass. On the page they live on
+never the server's previous-day profile or the futures' - so every caller gets the same one with nothing to pass. Spot #114
+(OI confluence) has the Strategy lab's OI filters as its own rules - the whole chain's net CE - PE since the open with the
+trade, CE / PE with it (15 min) and not against it (since the open), the wall in the way not growing and at least the target
+away, the day not trending against it - and buys the dip / sells the pop (`tests/spot-strategies-5.test.mjs`). On the page they live on
 the OI Replay page (`SpotStrategyScanner.jsx`, its data), judged by the same `spotScanTick` / `spotScanMinutes`
 (`scannerCore.js`) and traded in options like the Order Flow scanner: paper on each alert, Live (Dhan) + confirmed
 "Auto-place on alert" for real super orders, exits on the signal's spot SL / target / trail / time stop. The runner is
@@ -95,6 +98,11 @@ When adding or changing a strategy:
   open trades only, FROM the minute it is made (`levelLog` on the position, `trailLog` for the futures
   signals' trailing SL; `optionStopTargetHit` / `simulateOutcome` follow them - what already passed is
   never rewritten and a trailing stop is never loosened by a change); paper trades are all sized by the current lots setting (live trades keep their quantity).
+  An option out with its signal is priced at the close of the minute the signal ended in (`closePremiumAt` - live data is
+  stamped at the minute's START and still moving, so a plain read at the exit time was the NEXT minute's running price),
+  the same live as replayed; once the server scanner has announced an exit it keeps it on the position (`exitFinal`) -
+  the record is what Telegram said, never re-priced by a later read or a reload. The option side a signal was traded on
+  IS that trade in the record's If bought / If sold (`scannerLogBody`). `tests/exit-price.test.mjs` guards it.
 - **A strategy follows its own exits.** A setup trailing its strategy's own stop (`tradeTrail`, or the scanner's trail pinned
   as `_trail` when a tuned setting was applied - `withOwnTrail`) is not moved by a later change of the scanner's trailing
   stop. Every strategy's option leaves the trade by ITS OWN exit (`tradeOptExit`, carried from the tuning by

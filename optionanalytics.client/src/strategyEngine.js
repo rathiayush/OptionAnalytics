@@ -134,6 +134,8 @@ export const SPOT_STRATEGIES = [
   { id: 'spotLvnReject', no: 111, name: 'Spot: LVN refused - back to the node it came from (own spot profile + OI)', short: 'Spot LVN refused', spot: true, group: 'profile' },
   { id: 'spotLvnFill', no: 112, name: 'Spot: LVN filled fast - across to the next node (own spot profile + OI)', short: 'Spot LVN fill', spot: true, group: 'profile' },
   { id: 'spotPocReject', no: 113, name: 'Spot: POC rejection after a fast run into it (own spot profile + OI)', short: 'Spot POC rejection', spot: true, group: 'profile' },
+  // 114: the option chain's OI reads - the ones the Strategy lab tunes as filters - all on the trade's side, as its rules.
+  { id: 'spotOiConfluence', no: 114, name: 'Spot: OI confluence - writers on the trade\'s side since the open, CE / PE with it, room to the wall - buy the dip', short: 'Spot OI confluence', spot: true },
 ]
 export const STRATEGY_BY_ID = Object.fromEntries([...STRATEGIES, ...SPOT_STRATEGIES].map((s) => [s.id, s]))
 /** The strategies in use - what the scanner runs, lists, alerts on and scores. */
@@ -803,6 +805,15 @@ export function premiumAt(oi, side, strike, ms, maxStaleMs = 5 * MIN) {
   return null
 }
 
+/** The premium a minute that ENDS at `ms` closed at - final once that minute is over, the same in a replayed day and
+ *  live. A replayed day's points are stamped at their minute's end (lag), today's live ones at its START and still moving
+ *  while it runs: a live read at `ms` would be the NEXT minute's running price, so it steps back to the minute that ended
+ *  at `ms`. What an option is priced at when it leaves a trade at a minute's end (its signal's exit) - never a price from
+ *  after it, which kept changing for a minute after the exit was announced. */
+export function closePremiumAt(oi, side, strike, ms) {
+  return premiumAt(oi, side, strike, (oi?.lag ?? 0) === MIN ? ms : ms - MIN)
+}
+
 /** The two ways to trade a setup with options, at the ATM strike: BUY the option that gains with the
  *  move (LONG: the call, SHORT: the put) or SELL (write) the one that loses value with it (LONG: the put,
  *  SHORT: the call) - the writer's side, which also earns the time decay. Null when there is no premium. */
@@ -839,6 +850,10 @@ export function optionPnlPoints(trade, oi, ms) {
   if (now == null) return null
   return { premium: now, points: trade.action === 'BUY' ? now - trade.premium : trade.premium - now }
 }
+
+/** Premium points as a trade's exit reason says them: to two decimals at most (a % of the premium is 7.76, not
+ *  7.763999999999942; 0.25 stays 0.25). */
+const ptsText = (v) => String(+Number(v).toFixed(2))
 
 /** A paper option trade's own premium stop-loss / target, in premium points (0 = none): the first
  *  minute after `entryMs` (and before `untilMs`) whose range reaches either level. A SELL loses when the
@@ -878,9 +893,9 @@ export function optionStopTargetHit(oi, trade, entryMs, untilMs, slPoints, targe
     const trailed = tr?.gap > 0 ? optionTrailLevel(trade.action, trade.premium, best, tr.start, tr.gap) : null
     const inForce = tighterStop(trade.action, stop, trailed)
     if (inForce != null && (sell ? high >= inForce : low <= inForce)) {
-      return { at: start + MIN, premium: inForce, reason: inForce === trailed && trailed !== stop ? `Trailing SL hit (${tr.gap} pts behind the best ${best.toFixed(1)})` : `Max SL ${sl} pts hit` }
+      return { at: start + MIN, premium: inForce, reason: inForce === trailed && trailed !== stop ? `Trailing SL hit (${ptsText(tr.gap)} pts behind the best ${best.toFixed(1)})` : `Max SL ${ptsText(sl)} pts hit` }
     }
-    if (target != null && (sell ? low <= target : high >= target)) return { at: start + MIN, premium: target, reason: `Target ${tgt} pts hit` }
+    if (target != null && (sell ? low <= target : high >= target)) return { at: start + MIN, premium: target, reason: `Target ${ptsText(tgt)} pts hit` }
     best = sell ? Math.min(best, low) : Math.max(best, high)
   }
   return null

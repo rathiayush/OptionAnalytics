@@ -1,6 +1,7 @@
 // The SPOT + OPTIONS strategies: they trade the index price itself - the 1-minute spot candles - read against the
 // option chain's OI (the S/R OI walls, CE and PE rising or falling, delta and since the open, the day type) and its
-// premiums (the ATM straddle, the ATM call / put against the spot's new high / low). No
+// premiums (the ATM straddle, the ATM call / put against the spot's new high / low) - #114 has them all at once, the
+// Strategy lab's OI filters as its own rules. No
 // futures, no footprint, tape or order book: spot has none. Entry = the last finished spot minute's close,
 // stop / target in spot points; the options each setup carries (BUY / SELL at the ATM strike) are priced from the
 // OI replay like the futures strategies'. No look-ahead: a setup at clock T uses only spot minutes and OI points
@@ -31,6 +32,8 @@ const FLIP_BAR = 0.002 // a since-open lead worth reading: 0.2% of the chain's O
 const LADDER_RATIO = 1.3 // support (or resistance) this much bigger than the other side, in the 3 strikes each side
 const LADDER_RISE = 0.1 // ... and that lead grown 10% in 15 minutes
 const STRADDLE_FALL = 0.005 // the ATM straddle decaying: down 0.5% in 10 minutes (same strike)
+const OI_LEAN = 0.2 // the whole chain's OI lean (since the open / on the window) counts as with / against at this (as the filters)
+const CUM_SIDE_BAR = 0.01 // a side's OI really added / shed since the open: 1% of it (as the filters)
 const BY_ID = Object.fromEntries(SPOT_STRATEGIES.map((s) => [s.id, s]))
 
 /** Spot candles as the engine reads them: { t (start, ms), time, open, high, low, close }. */
@@ -223,6 +226,47 @@ export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {} }) {
       })
     }
   }
+  // 14. OI confluence - the option chain's reads all on the trade's side (the Strategy lab's OI filters, as rules), and a
+  //     dip bought / a pop sold with it. For a long: since the open puts were written more than calls (the whole chain's
+  //     net CE - PE, 0.2+ lean), on the last 15 minutes the chain is not against it; CE and PE each - at least one with it
+  //     on the 15 minutes (PE rising or CE falling), neither against it since the open; the call wall in the way is not
+  //     growing (no fresh writing above), it is at least the target away (room), and the day is not trending down. The
+  //     price pulled back 1 ATR+ off its last 20 minutes' high in the last 6, and the last candle resumes up - closing
+  //     above the one before's high. Stop past the pullback's low; target 2x the stop.
+  for (const dir of [1, -1]) {
+    const flowWith = Number.isFinite(read.leanOpen) && dir * read.leanOpen >= OI_LEAN
+    const flowNotAgainst = Number.isFinite(read.lean) && dir * read.lean > -OI_LEAN
+    const sidesNow = sideScore(dir, sides.ceD, sides.peD)
+    const sidesOpen = sideScore(dir, cum.ceC, cum.peC, CUM_SIDE_BAR)
+    if (!flowWith || !flowNotAgainst || !(sidesNow >= 1) || !(sidesOpen >= 0)) continue
+    const day = regime()?.type ?? null
+    if (day === (dir > 0 ? 'trend-down' : 'trend-up')) continue
+    // The dip: the lowest low of the 6 minutes before the last (the highest high for a short), 1 ATR+ under the highest
+    // high of the last 20 minutes BEFORE it - a real pullback, not the start of a steady climb.
+    const swing = bars.slice(-21, -1)
+    if (swing.length < 20 || !prev) continue
+    const ext = (b) => (dir > 0 ? b.low : b.high)
+    let j = swing.length - 6
+    for (let i = j; i < swing.length; i++) if (dir * (ext(swing[i]) - ext(swing[j])) < 0) j = i
+    const dipExt = ext(swing[j])
+    const before = swing.slice(0, j)
+    const peak = dir > 0 ? Math.max(...before.map((b) => b.high)) : Math.min(...before.map((b) => b.low))
+    const pulled = before.length > 0 && dir * (peak - dipExt) >= atr
+    const resumed = dir * (last.close - last.open) > 0 && dir * (last.close - (dir > 0 ? prev.high : prev.low)) > 0
+    if (!pulled || !resumed) continue
+    const stopPts = Math.max(1.2 * atr, dir * (spotNow - dipExt) + 0.3 * atr)
+    const targetPts = 2 * stopPts
+    // The wall in the way: the biggest call strike above a long (put strike below a short) - not growing, and far enough.
+    const wallAhead = dir > 0 ? ahead.resistanceAhead : ahead.supportAhead
+    const wallChg = wallAhead == null ? null : wallOiChanges(oi, ahead, nowMs, 15)[dir > 0 ? 'resChg' : 'supChg']
+    if (wallChg != null && wallChg >= WALL_BAR) continue
+    if (wallAhead != null && dir * (wallAhead - spotNow) < targetPts) continue
+    push('spotOiConfluence', dir, stopPts, targetPts, 60, {
+      OI: `since the open ${dir > 0 ? 'puts' : 'calls'} written over ${dir > 0 ? 'calls' : 'puts'} (lean ${pct(Math.abs(read.leanOpen))}), 15m lean ${pct(read.lean)}; CE ${pct(sides.ceD)} / PE ${pct(sides.peD)} in 15m, CE ${pct(cum.ceC)} / PE ${pct(cum.peC)} since the open; ${wallAhead == null ? 'no wall in the way' : `the ${dir > 0 ? 'call' : 'put'} wall ${wallAhead} ${pct(wallChg)} in 15m, ${Math.abs(wallAhead - spotNow).toFixed(1)} pts away`}; day ${day ?? 'not typed yet'}`,
+      Price: `${dir > 0 ? 'dipped' : 'popped'} ${Math.abs(peak - dipExt).toFixed(1)} pts off the last 20 minutes' ${dir > 0 ? 'high' : 'low'} and resumed - closed ${dir > 0 ? 'above' : 'below'} the last candle's ${dir > 0 ? 'high' : 'low'}`,
+    })
+  }
+
   // ---- the option chain, strike by strike (the OI heatmap and the S/R ladder) ----
   const step = oi.step
   const atmK = Math.round(spotNow / step) * step
