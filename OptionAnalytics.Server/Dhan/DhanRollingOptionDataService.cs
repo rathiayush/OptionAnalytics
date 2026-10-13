@@ -207,9 +207,9 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
             using (response)
             {
                 var bars = ParseSide(response.Root, drvOptionType);
-                // Kept once every day in it has a full session's bars (a strike with none, or a day Dhan sent half of, is
-                // asked again next time).
-                if (cached is null) _cache?.Put(RollingPath, payload, chunkEnd, response.Root, DhanHistoricalDataService.CompleteDays(bars.Select(b => b.Bar.Time), intervalMinutes));
+                // Kept once Dhan sent a full session for every day in it - its own minutes, a thin strike's untraded ones
+                // (0 prices the parser drops) included (a strike with none, or a day Dhan sent half of, is asked again).
+                if (cached is null) _cache?.Put(RollingPath, payload, chunkEnd, response.Root, DhanHistoricalDataService.CompleteDays(SentTimesOf(response.Root, drvOptionType), intervalMinutes));
                 all.AddRange(bars);
             }
 
@@ -295,6 +295,15 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
                 context, attempt + 1, DhanDataApiRateLimiter.RateLimitRetries, delay);
             await Task.Delay(delay, cancellationToken);
         }
+    }
+
+    /// <summary>The minutes Dhan sent for the requested side (data.ce / data.pe), before any bar is dropped as implausible.</summary>
+    internal static List<DateTimeOffset> SentTimesOf(JsonElement root, string drvOptionType)
+    {
+        var sideKey = string.Equals(drvOptionType, "PUT", StringComparison.OrdinalIgnoreCase) ? "pe" : "ce";
+        return root.ValueKind == JsonValueKind.Object && root.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Object && data.TryGetProperty(sideKey, out var side)
+            ? DhanHistoricalDataService.SentTimes(side)
+            : new List<DateTimeOffset>();
     }
 
     private List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)> ParseSide(JsonElement root, string drvOptionType)

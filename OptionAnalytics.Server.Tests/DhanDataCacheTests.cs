@@ -150,6 +150,49 @@ public sealed class DhanDataCacheTests : IDisposable
     }
 
     [Fact]
+    public async Task AThinOptionStrike_WhoseUntradedMinutesComeAtZero_IsKeptLikeAnyOther()
+    {
+        // BANKNIFTY's monthly options away from the money: Dhan sends every minute of the session, the ones the strike did
+        // not trade at a 0 price - which the parser drops as implausible. The session is whole all the same: kept, and
+        // the next load is answered from disk (it used to go to Dhan again on every load, forever).
+        var requests = new List<string>();
+        var (bars, error) = await Rolling(requests, Cache(), session: true, thin: true).GetRollingOptionCandlesAsync("BANKNIFTY", 25, "MONTH", 1, "ATM+8", "CALL", PastDay, PastDay, 1, CancellationToken.None);
+        Assert.Null(error);
+        Assert.True(bars.Count < 300, $"the parser keeps only the traded minutes ({bars.Count})");
+        var (again, _) = await Rolling(requests, Cache(), session: false, thin: true).GetRollingOptionCandlesAsync("BANKNIFTY", 25, "MONTH", 1, "ATM+8", "CALL", PastDay, PastDay, 1, CancellationToken.None);
+        Assert.Single(requests);
+        Assert.Equal(bars.Select(b => b.Bar.Close), again.Select(b => b.Bar.Close));
+
+        // An option contract's own intraday candles the same.
+        requests.Clear();
+        var (candles, _) = await Historical(requests, Cache(), session: true, thin: true).GetIntradayOptionCandlesAsync(51234, "NSE_FNO", PastDay, PastDay, 1, CancellationToken.None);
+        Assert.True(candles.Count is > 0 and < 300);
+        var (fromDisk, _) = await Historical(requests, Cache(), session: false, thin: true).GetIntradayOptionCandlesAsync(51234, "NSE_FNO", PastDay, PastDay, 1, CancellationToken.None);
+        Assert.Single(requests);
+        Assert.Equal(candles.Count, fromDisk.Count);
+
+        // A day Dhan sent only part of is still asked again - thin or not.
+        requests.Clear();
+        var (api, limiter) = Api(requests, session: true, bars: 90, thin: true);
+        var half = new DhanRollingOptionDataService(api, limiter, NullLogger<DhanRollingOptionDataService>.Instance, Cache());
+        await half.GetRollingOptionCandlesAsync("BANKNIFTY", 25, "MONTH", 1, "ATM+9", "CALL", PastDay, PastDay, 1, CancellationToken.None);
+        await half.GetRollingOptionCandlesAsync("BANKNIFTY", 25, "MONTH", 1, "ATM+9", "CALL", PastDay, PastDay, 1, CancellationToken.None);
+        Assert.Equal(2, requests.Count);
+    }
+
+    [Fact]
+    public void SentTimes_AreEveryMinuteDhanSent_ZeroPricedOnesIncluded()
+    {
+        using var doc = JsonDocument.Parse("{\"open\":[0,10,0],\"close\":[0,10.5,0],\"timestamp\":[1757908500,1757908560,1757908620]}");
+        Assert.Equal(3, DhanHistoricalDataService.SentTimes(doc.RootElement).Count);
+        using var rolling = JsonDocument.Parse("{\"data\":{\"pe\":{\"timestamp\":[1757908500,1757908560]}}}");
+        Assert.Equal(2, DhanRollingOptionDataService.SentTimesOf(rolling.RootElement, "PUT").Count);
+        Assert.Empty(DhanRollingOptionDataService.SentTimesOf(rolling.RootElement, "CALL"));
+        using var none = JsonDocument.Parse("{\"data\":{}}");
+        Assert.Empty(DhanHistoricalDataService.SentTimes(none.RootElement));
+    }
+
+    [Fact]
     public void CompleteDays_NeedsAFullSessionOnEveryDay()
     {
         var start = new DateTimeOffset(2025, 9, 15, 9, 15, 0, TimeSpan.FromMinutes(330));
@@ -161,28 +204,29 @@ public sealed class DhanDataCacheTests : IDisposable
         Assert.False(DhanHistoricalDataService.CompleteDays(Array.Empty<DateTimeOffset>(), 1));
     }
 
-    private static (DhanApiClient Api, DhanDataApiRateLimiter Limiter) Api(List<string> requests, bool session, int bars)
+    private static (DhanApiClient Api, DhanDataApiRateLimiter Limiter) Api(List<string> requests, bool session, int bars, bool thin = false)
     {
         var options = Options.Create(new DhanOptions { RestBaseUrl = "https://dhan.test", AccessToken = session ? "t" : "", ClientId = "c", DataApiRequestsPerSecond = 200 });
-        var api = new DhanApiClient(new HttpClient(new FakeDhan(requests, bars)), options, new DhanSession(options), NullLogger<DhanApiClient>.Instance);
+        var api = new DhanApiClient(new HttpClient(new FakeDhan(requests, bars, thin)), options, new DhanSession(options), NullLogger<DhanApiClient>.Instance);
         return (api, new DhanDataApiRateLimiter(options, NullLogger<DhanDataApiRateLimiter>.Instance));
     }
 
-    private static DhanHistoricalDataService Historical(List<string> requests, DhanDataCache cache, bool session, int bars = 375)
+    private static DhanHistoricalDataService Historical(List<string> requests, DhanDataCache cache, bool session, int bars = 375, bool thin = false)
     {
-        var (api, limiter) = Api(requests, session, bars);
+        var (api, limiter) = Api(requests, session, bars, thin);
         return new DhanHistoricalDataService(api, limiter, NullLogger<DhanHistoricalDataService>.Instance, cache);
     }
 
-    private static DhanRollingOptionDataService Rolling(List<string> requests, DhanDataCache cache, bool session)
+    private static DhanRollingOptionDataService Rolling(List<string> requests, DhanDataCache cache, bool session, bool thin = false)
     {
-        var (api, limiter) = Api(requests, session, 375);
+        var (api, limiter) = Api(requests, session, 375, thin);
         return new DhanRollingOptionDataService(api, limiter, NullLogger<DhanRollingOptionDataService>.Instance, cache);
     }
 
     /// <summary>A day of 1-minute bars from 09:15 IST of the request's first date (`bars` of them), as Dhan sends them:
-    /// intraday as parallel arrays (with open_interest), the rolling option chain under data.ce / data.pe.</summary>
-    private sealed class FakeDhan(List<string> requests, int bars) : HttpMessageHandler
+    /// intraday as parallel arrays (with open_interest), the rolling option chain under data.ce / data.pe. `thin`: a strike
+    /// that did not trade every other minute - those minutes sent at a 0 price, as Dhan does.</summary>
+    private sealed class FakeDhan(List<string> requests, int bars, bool thin = false) : HttpMessageHandler
     {
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
@@ -191,9 +235,11 @@ public sealed class DhanDataCacheTests : IDisposable
             var date = DateOnly.Parse(body["fromDate"]!.ToString()[..10]);
             var open = new DateTimeOffset(date.Year, date.Month, date.Day, 9, 15, 0, TimeSpan.FromMinutes(330)).ToUnixTimeSeconds();
             JsonArray Arr(Func<int, double> f) => new(Enumerable.Range(0, bars).Select(i => (JsonNode)JsonValue.Create(f(i))!).ToArray());
+            // A price array of a thin strike: 0 in the minutes it did not trade.
+            JsonArray Px(Func<int, double> f) => Arr(i => thin && i % 2 == 0 ? 0 : f(i));
             var series = new JsonObject
             {
-                ["open"] = Arr(i => 100 + i), ["high"] = Arr(i => 101 + i), ["low"] = Arr(i => 99 + i), ["close"] = Arr(i => 100.5 + i),
+                ["open"] = Px(i => 100 + i), ["high"] = Px(i => 101 + i), ["low"] = Px(i => 99 + i), ["close"] = Px(i => 100.5 + i),
                 ["volume"] = Arr(_ => 10), ["timestamp"] = Arr(i => open + 60 * i), ["open_interest"] = Arr(i => 1000 + i),
             };
             JsonNode json = request.RequestUri.AbsolutePath.EndsWith("rollingoption")
@@ -203,7 +249,7 @@ public sealed class DhanDataCacheTests : IDisposable
                     {
                         [body["drvOptionType"]!.ToString() == "PUT" ? "pe" : "ce"] = new JsonObject
                         {
-                            ["open"] = Arr(i => 50 + i * 0.1), ["high"] = Arr(i => 51 + i * 0.1), ["low"] = Arr(i => 49 + i * 0.1), ["close"] = Arr(i => 50.5 + i * 0.1),
+                            ["open"] = Px(i => 50 + i * 0.1), ["high"] = Px(i => 51 + i * 0.1), ["low"] = Px(i => 49 + i * 0.1), ["close"] = Px(i => 50.5 + i * 0.1),
                             ["volume"] = Arr(_ => 5), ["timestamp"] = Arr(i => open + 60 * i), ["oi"] = Arr(i => 2000 + i), ["iv"] = Arr(_ => 12),
                             ["strike"] = Arr(_ => 25000), ["spot"] = Arr(_ => 25010),
                         },
