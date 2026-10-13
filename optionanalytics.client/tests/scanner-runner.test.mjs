@@ -574,3 +574,49 @@ test('today is not loaded at weekends or before the open, and a failing load bac
   }
   assert.deepEqual(attemptsAt.slice(0, 3), [30, 90, 210], attemptsAt.join())
 })
+
+test('a trade punched or exited reaches the record (and the status) at once - other changes at most every 3 s', async () => {
+  const io = fakeIo()
+  const scanner = new IndexScanner('NIFTY', io)
+  scanner.reset(DATE)
+  scanner.setConfig({ alertIds: ALL_IDS, settings: { telegram: false, autoPaper: 'sell', paperLots: 1 } })
+  await runDay(scanner, io, at(15), at(300))
+  const rows = scanner.lastRows
+  const outcomes = scanner.lastOutcomes
+  assert.ok(rows.length >= 2, `${rows.length} trades`)
+  const closed = rows.find((r) => r.exitTime)
+  assert.ok(closed, 'a trade that exited')
+
+  // The same day in a second scanner, its record posted a second apart.
+  const io2 = fakeIo()
+  const s2 = new IndexScanner('NIFTY', io2)
+  s2.reset(DATE)
+  s2.setConfig({ alertIds: ALL_IDS, settings: { telegram: false, autoPaper: 'sell', paperLots: 1 } })
+  const cfg = s2.settings()
+  const T = at(301)
+  const post = async (ms, r, o = outcomes) => { io2.clock = ms; s2.lastRows = r; s2.lastOutcomes = o; await s2.postLog(ms, cfg) }
+  const sig = () => s2.changeSig()
+
+  await post(T, rows.slice(0, -1))
+  assert.equal(io2.posted.length, 1)
+  const before = sig()
+  await post(T + 1_000, rows) // a trade punched a second later: saved at once
+  assert.equal(io2.posted.length, 2)
+  assert.equal(io2.posted.at(-1).trades.length, rows.length)
+  assert.notEqual(sig(), before, 'the status goes at once too')
+
+  const open = rows.map((r) => (r.key === closed.key ? { ...r, exitTime: null, exitReason: null } : r))
+  await post(T + 1_500, open)
+  assert.equal(io2.posted.length, 3, 'an exit undone is a trade change too')
+  const openSig = sig()
+  await post(T + 2_000, rows) // the trade exited: saved at once
+  assert.equal(io2.posted.length, 4)
+  assert.notEqual(sig(), openSig)
+
+  // A signal's outcome alone (no trade punched or exited) waits for the 3 s.
+  const changed = outcomes.map((s, i) => (i === 0 ? { ...s, outcome: { ...(s.outcome ?? {}), status: s.outcome?.status === 'target' ? 'stop' : 'target', r: 9 } } : s))
+  await post(T + 2_500, rows, changed)
+  assert.equal(io2.posted.length, 4)
+  await post(T + 5_500, rows, changed)
+  assert.equal(io2.posted.length, 5)
+})

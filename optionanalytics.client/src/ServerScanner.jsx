@@ -1,10 +1,9 @@
-import { useEffect, useState } from 'react'
 import { Alert, Card, Space, Switch, Table, Tag, Tooltip, Typography } from 'antd'
 import { UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import { refreshTradeSettings } from './tradeDefaults.js'
+import { useScannerStatus } from './scannerEvents.js'
 
 const { Text } = Typography
-const POLL_MS = 10_000
 const IST_HHMM = new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' })
 const hhmm = (ms) => (ms ? IST_HHMM.format(new Date(ms)) : '-')
 const rupee = (v) => `${v < 0 ? '-' : ''}₹${Math.abs(Math.round(v ?? 0)).toLocaleString('en-IN')}`
@@ -15,17 +14,8 @@ const rupee = (v) => `${v < 0 ? '-' : ''}₹${Math.abs(Math.round(v ?? 0)).toLoc
  * trades. Paper only. It uses this page's scanner settings (an admin's are synced to it as they change).
  */
 export function ServerScannerCard({ isAdmin, focus }) {
-  const [state, setState] = useState(null)
-  const [error, setError] = useState(null)
-  const load = () => fetch('/api/scanner-runner/status')
-    .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-    .then((s) => { setState(s); setError(null) })
-    .catch((err) => setError(err.message))
-  useEffect(() => {
-    load()
-    const id = setInterval(load, POLL_MS)
-    return () => clearInterval(id)
-  }, [])
+  // Pushed by the server the moment a signal fires or a trade opens / exits, and with the P&L every 5 s (scannerEvents.js).
+  const { status: state, error, reload: load } = useScannerStatus()
 
   const setEnabled = (underlying, on) => fetch('/api/scanner-runner/config', {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: { [underlying]: on } }),

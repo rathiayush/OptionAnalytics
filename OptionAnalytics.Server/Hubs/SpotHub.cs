@@ -41,8 +41,8 @@ public sealed class SpotHub : Hub
 
     public Task JoinGroup(string groupName)
     {
-        // Live positions and P&L are the account's real money - admins only.
-        if (groupName == LiveTradingService.PositionsGroup && Context.User?.IsInRole(AuthRoles.Admin) != true)
+        // Live positions and P&L are the account's real money - admins only (the server scanner's live trades too).
+        if ((groupName == LiveTradingService.PositionsGroup || groupName == ScannerEvents.LiveGroup) && Context.User?.IsInRole(AuthRoles.Admin) != true)
             return Task.CompletedTask;
         _batcher.Join(Context.ConnectionId, groupName);
         return Groups.AddToGroupAsync(Context.ConnectionId, groupName);

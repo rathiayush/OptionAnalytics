@@ -114,6 +114,7 @@ async function connect() {
 
 // ---- The loop ------------------------------------------------------------------------------------------
 let lastStatus = 0
+let lastStatusSig = ''
 let lastConfig = 0
 // Started by the server: if the server goes away (this process re-parented), stop - the next server starts
 // its own runner, with a new key this one could not use anyway.
@@ -133,8 +134,12 @@ async function loop() {
       log(`${s.underlying}: ${err.stack ?? err.message}`)
     }
   }
-  if (now - lastStatus > STATUS_MS) {
+  // Every STATUS_MS with the P&L - and at once when a signal fired or a trade opened / exited, so the pages show it as it
+  // happens (the server passes it on to them - ScannerEvents).
+  const statusSig = scanners.map((s) => s.changeSig()).join('\n')
+  if (now - lastStatus > STATUS_MS || statusSig !== lastStatusSig) {
     lastStatus = now
+    lastStatusSig = statusSig
     api('/api/scanner-runner/status', { method: 'POST', body: { startedUtc, reportedUtc: new Date().toISOString(), connection: connection.state, indices: scanners.map((s) => s.status()) } })
       .catch((err) => log(`status not posted: ${err.message}`))
   }

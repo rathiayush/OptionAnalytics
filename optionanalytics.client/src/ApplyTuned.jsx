@@ -9,6 +9,7 @@ import { STRATEGY_BY_ID, OPTION_EXITS, OWN_EXIT_SL_PCT, OWN_EXIT_TARGET_PCT, own
 import { DEFAULT_VARIANT, settingParams, variantText } from './strategyTuning.js'
 import { saveIndexFilters, saveIndexLots } from './scannerSettings.js'
 import { ServerLiveSwitch, ServerLiveTrades, useServerLive } from './ServerLive.jsx'
+import { useScannerEvent } from './scannerEvents.js'
 
 const { Text } = Typography
 
@@ -194,8 +195,9 @@ export function AppliedSettings({ cfg, isAdmin, onChanged, extra = null }) {
 
 // ---- How an applied strategy has run: the server scanner's own record ------------------------------------------------
 // The server scanner runs every applied strategy on its index all day (paper, and live when the index is Live today) and
-// keeps each signal and option trade (server-signals.csv / server-trades.csv) - read here once a minute at most, shared
-// by every card on the page.
+// keeps each signal and option trade (server-signals.csv / server-trades.csv) - read again the moment the server scanner
+// saves a day of it (a signal, a trade opened or exited - pushed, scannerEvents.js), else once a minute at most, shared by
+// every card on the page.
 let recordCache = null
 let recordLoading = null
 const loadServerRecord = () => {
@@ -210,11 +212,16 @@ const loadServerRecord = () => {
 }
 export function useServerRecord(reloadKey = 0) {
   const [rec, setRec] = useState(recordCache?.data ?? null)
+  const [saved, setSaved] = useState(0)
+  useScannerEvent('scannerRecord', () => {
+    recordCache = null
+    setSaved((n) => n + 1)
+  }, 300, (e) => e?.source === 'server' || e?.resync)
   useEffect(() => {
     let stop = false
     loadServerRecord().then((d) => { if (!stop) setRec(d) }).catch(() => {})
     return () => { stop = true }
-  }, [reloadKey])
+  }, [reloadKey, saved])
   return rec
 }
 const fmtWhen = (ms) => new Date(ms).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false })

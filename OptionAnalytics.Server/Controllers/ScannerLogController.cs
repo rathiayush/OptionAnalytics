@@ -14,17 +14,24 @@ namespace OptionAnalytics.Server.Controllers;
 public sealed class ScannerLogController : ControllerBase
 {
     private readonly ScannerLogStore _store;
+    private readonly ScannerEvents? _events;
 
-    public ScannerLogController(ScannerLogStore store) => _store = store;
+    public ScannerLogController(ScannerLogStore store, ScannerEvents? events = null)
+    {
+        _store = store;
+        _events = events;
+    }
 
-    /// <summary>POST /api/scanner-log/day - upsert one day's signals and trades.</summary>
+    /// <summary>POST /api/scanner-log/day - upsert one day's signals and trades (the open record views are told - ScannerEvents).</summary>
     [HttpPost("day")]
     [RequestSizeLimit(4_000_000)]
     public async Task<IActionResult> PostDay([FromBody] ScannerLogDayRequest request, CancellationToken cancellationToken)
     {
         if (request is null) return BadRequest(new { error = "No body." });
         var (signals, trades, error) = await _store.UpsertDayAsync(request, User.Identity?.Name, cancellationToken);
-        return error is null ? Ok(new { signals, trades }) : BadRequest(new { error });
+        if (error is not null) return BadRequest(new { error });
+        _events?.Record(request.Source, request.Underlying, request.Date);
+        return Ok(new { signals, trades });
     }
 
     /// <summary>POST /api/scanner-log/legs/{kind} - fills in what the option bought / sold would have made on signals
@@ -35,7 +42,9 @@ public sealed class ScannerLogController : ControllerBase
     public async Task<IActionResult> SetLegs(string kind, [FromBody] List<ScannerLegsRow>? rows, CancellationToken cancellationToken)
     {
         var (updated, error) = await _store.SetLegsAsync(kind, rows ?? new List<ScannerLegsRow>(), cancellationToken);
-        return error is null ? Ok(new { updated }) : BadRequest(new { error });
+        if (error is not null) return BadRequest(new { error });
+        if (updated > 0) _events?.Record(kind.StartsWith("server", StringComparison.OrdinalIgnoreCase) ? "server" : "page", null, null);
+        return Ok(new { updated });
     }
 
     /// <summary>GET /api/scanner-log/summary - the totals per underlying (NIFTY, BANKNIFTY ...): how many

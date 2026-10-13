@@ -14,18 +14,28 @@ public sealed class TickConsumerQueueTests
     public async Task ASlowConsumerNeverHoldsUpAFastOne()
     {
         var fastSeen = 0;
-        using var slow = new TickConsumerQueue("slow", _ => Thread.Sleep(50), NullLogger.Instance);
+        // The slow consumer is stuck on its first tick until the test ends - so whatever the machine's load, the fast one
+        // must still get every one of its own. (A slow consumer timed in wall-clock ms - 50 ms a tick, "still more than
+        // half queued" - made the test depend on how soon the thread pool ran the fast worker, and fail on a busy run.)
+        using var release = new ManualResetEventSlim(false);
+        using var slow = new TickConsumerQueue("slow", _ => release.Wait(TimeSpan.FromSeconds(30)), NullLogger.Instance);
         using var fast = new TickConsumerQueue("fast", _ => Interlocked.Increment(ref fastSeen), NullLogger.Instance);
+        try
+        {
+            var enqueue = System.Diagnostics.Stopwatch.StartNew();
+            for (uint i = 0; i < 40; i++) { slow.Enqueue(Tick(i)); fast.Enqueue(Tick(i)); }
+            enqueue.Stop();
 
-        var enqueue = System.Diagnostics.Stopwatch.StartNew();
-        for (uint i = 0; i < 40; i++) { slow.Enqueue(Tick(i)); fast.Enqueue(Tick(i)); }
-        enqueue.Stop();
-
-        // Enqueue never waits for a handler - 40 ticks into a 50ms-per-tick consumer would otherwise take 2s.
-        Assert.True(enqueue.ElapsedMilliseconds < 200, $"enqueue took {enqueue.ElapsedMilliseconds}ms");
-        for (var waited = 0; Volatile.Read(ref fastSeen) < 40 && waited < 2000; waited += 10) await Task.Delay(10);
-        Assert.Equal(40, Volatile.Read(ref fastSeen));
-        Assert.True(slow.GetStats().Queued > 20, "the slow consumer is still working through its own queue");
+            // Enqueue never waits for a handler - a stuck consumer would otherwise stop the feed outright.
+            Assert.True(enqueue.ElapsedMilliseconds < 200, $"enqueue took {enqueue.ElapsedMilliseconds}ms");
+            for (var waited = 0; Volatile.Read(ref fastSeen) < 40 && waited < 10_000; waited += 10) await Task.Delay(10);
+            Assert.Equal(40, Volatile.Read(ref fastSeen));
+            Assert.True(slow.GetStats().Queued >= 39, "the slow consumer is still on its first tick, the rest queued behind it");
+        }
+        finally
+        {
+            release.Set();
+        }
     }
 
     [Fact]

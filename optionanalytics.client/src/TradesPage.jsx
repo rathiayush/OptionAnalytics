@@ -12,6 +12,7 @@ import { confirmServerLive, useServerLive } from './ServerLive.jsx'
 import ClearData from './ClearData.jsx'
 import { fillRecordLegs, needsLegs, oldRuleLegs, recordRunUrl } from './recordLegs.js'
 import { runnerSettingsOf } from './scannerCore.js'
+import { runnerTrade, useScannerEvent, useScannerStatus } from './scannerEvents.js'
 import './tuningMobile.css'
 
 const { Title, Text } = Typography
@@ -940,6 +941,11 @@ function ScannerRecord({ initial = {} }) {
   const file = `${source === 'server' ? 'server-' : ''}${kind}`
   const reset = (fn) => (v) => { setRows(null); setError(null); setIds([]); fn(v) }
   const [reloadTick, setReloadTick] = useState(0)
+  // A day of this record saved on the server - a signal, a trade punched or exited - is read again at once (pushed,
+  // scannerEvents.js); the server scanner's record is 'server', the pages' any other source.
+  useScannerEvent('scannerRecord', () => setReloadTick((n) => n + 1), 300, (e) => e?.resync || (e?.source === 'server') === (source === 'server'))
+  // The server scanner's open trades as they run: the option's premium now and the P&L (pushed with each change, every 5 s).
+  const { status: runner } = useScannerStatus()
   useEffect(() => {
     fetch(`/api/scanner-log/rows/${file}`).then(async (r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))).then(setRows).catch((e) => setError(e.message))
   }, [file, reloadTick])
@@ -975,6 +981,11 @@ function ScannerRecord({ initial = {} }) {
     return <Tooltip title={tip}><span style={{ color: col(v) }}>{pts(v)}</span>{why && /SL|Target|square-off/i.test(why) && !/^with the index/.test(why) ? <Text type="secondary" style={{ fontSize: 10, marginLeft: 3 }}>{/SL/.test(why) ? 'SL' : /Target/.test(why) ? 'T' : '15:10'}</Text> : null}</Tooltip>
   }
   const signals = kind === 'signals'
+  // An open server trade of today, as the runner reads it now (null otherwise): the record keeps its P&L as of when it
+  // was punched; this is it as it runs.
+  const runningOf = (r) => (source === 'server' && !signals && !r.exit_time_ist ? runnerTrade(runner, r.underlying, String(r.key ?? '').split('|').slice(2).join('|'), r.date) : null)
+  const pointsOf = (r) => runningOf(r)?.points ?? num(r.points)
+  const netOf = (r) => runningOf(r)?.rupees ?? num(r.net_rupees)
   const shown = useMemo(() => (rows ?? []).filter((r) => (underlying === 'all' || r.underlying === underlying) && (!ids.length || ids.includes(r.strategy_id))
     && (signals || mode === 'all' || (mode === 'live') === (r.live === 'true')) && inDates(r.date, range)
     && (!appliedOnly || source !== 'server' || ((at) => at !== undefined && (istMs(signals ? r.time_ist : r.entry_time_ist) ?? 0) >= at)(appliedAt(r.underlying, r.strategy_id)))
@@ -1007,9 +1018,9 @@ function ScannerRecord({ initial = {} }) {
     { title: 'Strategy', key: 's', width: 210, render: (_, r) => <span style={{ fontSize: 12 }}>#{r.strategy_no} {nameOf(r)}{r.signal_side ? ` · ${r.signal_side}` : ''}</span> },
     { title: 'Option', key: 'o', width: 170, render: (_, r) => `${r.action} ${r.strike} ${r.option}` },
     { title: 'Lots', key: 'l', width: 80, render: (_, r) => `${r.lots} × ${r.lot_size}` },
-    { title: 'Premium in → out', key: 'p', width: 140, render: (_, r) => `${f1(num(r.entry_premium))} → ${r.exit_premium ? f1(num(r.exit_premium)) : '-'}` },
-    { title: 'Points', dataIndex: 'points', width: 80, render: (v) => <b style={{ color: col(num(v)) }}>{pts(num(v))}</b> },
-    { title: 'Net ₹', dataIndex: 'net_rupees', width: 100, render: (v) => <b style={{ color: col(num(v)) }}>{num(v) == null ? '-' : Math.round(num(v)).toLocaleString('en-IN')}</b> },
+    { title: 'Premium in → out', key: 'p', width: 140, render: (_, r) => { const run = runningOf(r); return <span>{f1(num(r.entry_premium))} → {r.exit_premium ? f1(num(r.exit_premium)) : run?.current != null ? <Tooltip title="Open - the option's premium now, as the server scanner reads it (updated as it moves)">{f1(run.current)} <Tag color="processing" style={{ fontSize: 10, marginInlineEnd: 0 }}>now</Tag></Tooltip> : '-'}</span> } },
+    { title: 'Points', dataIndex: 'points', width: 80, render: (_, r) => { const v = pointsOf(r); return <b style={{ color: col(v) }}>{pts(v)}</b> } },
+    { title: <Tooltip title="After charges; an open trade's is its P&L now (before charges), as it runs">Net ₹</Tooltip>, dataIndex: 'net_rupees', width: 100, render: (_, r) => { const v = netOf(r); return <b style={{ color: col(v) }}>{v == null ? '-' : Math.round(v).toLocaleString('en-IN')}{runningOf(r) ? <Text type="secondary" style={{ fontSize: 10, fontWeight: 400 }}> now</Text> : null}</b> } },
     { title: <Tooltip title="Its signal's points on the index (futures, or spot for a spot strategy)">Index pts</Tooltip>, key: 'ip', width: 90, render: (_, r) => { const v = indexPts(r); return <b style={{ color: col(v) }}>{pts(v)}</b> } },
     { title: <Tooltip title={LEG_TIP.buy}>If bought</Tooltip>, key: 'bp', width: 100, render: legCell('buy') },
     { title: <Tooltip title={LEG_TIP.sell}>If sold</Tooltip>, key: 'sp', width: 95, render: legCell('sell') },
@@ -1020,7 +1031,7 @@ function ScannerRecord({ initial = {} }) {
   const csvColumns = columns.map((c) => ({ title: typeof c.title === 'string' ? c.title : csvTitle[c.key] ?? c.key, value: (r) => (c.dataIndex ? r[c.dataIndex] : c.key === 't' ? `${(signals ? r.time_ist : r.entry_time_ist) ?? ''} -> ${r.exit_time_ist ?? ''}` : c.key === 's' ? nameOf(r) : c.key === 'o' ? `${r.action} ${r.strike} ${r.option}` : c.key === 'l' ? `${r.lots}x${r.lot_size}` : c.key === 'p' ? `${r.entry_premium}->${r.exit_premium}` : c.key === 'ip' ? indexPts(r) ?? '' : c.key === 'bp' ? boughtPts(r) ?? '' : c.key === 'sp' ? soldPts(r) ?? '' : '') }))
   // Signals: the market at each one too (tape, big orders, futures OI, book... - the mkt_* columns).
   if (signals) for (const k of MARKET_CSV) csvColumns.push({ title: k, value: (r) => r[k] ?? '' })
-  const rupees = shown.map((r) => num(r.net_rupees)).filter(Number.isFinite).reduce((a, b) => a + b, 0)
+  const rupees = shown.map(netOf).filter(Number.isFinite).reduce((a, b) => a + b, 0)
   // To compare: the index points, and what buying / selling the option every time would have made (each out at the
   // strategy's own option exit, as its trade is).
   const sum = (f) => { const v = shown.map(f).filter(Number.isFinite); return { n: v.length, total: v.reduce((a, b) => a + b, 0) } }
@@ -1078,7 +1089,7 @@ function ScannerRecord({ initial = {} }) {
       {appliedOnly && source === 'server' && applied && !Object.keys(applied).length && <Alert type="info" showIcon message="Nothing is applied yet - apply a fine-tuned setting on Strategy performance (Best setting · apply) and its run shows here." />}
       {rows && (
         <>
-          <Totals rows={shown} points={(r) => num(r.points)} r={signals ? (r) => num(r.r) : null} extra={!signals && <span>net <b style={{ color: col(rupees) }}>₹{Math.round(rupees).toLocaleString('en-IN')}</b> after charges</span>} />
+          <Totals rows={shown} points={signals ? (r) => num(r.points) : pointsOf} r={signals ? (r) => num(r.r) : null} extra={!signals && <span>net <b style={{ color: col(rupees) }}>₹{Math.round(rupees).toLocaleString('en-IN')}</b> after charges</span>} />
           <Space size={16} wrap style={{ fontSize: 13 }} aria-label="Compare">
             <Text type="secondary" style={{ fontSize: 12 }}>To compare{signals ? '' : ' (the same signals)'}:</Text>
             {!signals && <span>index <b style={{ color: col(compare.index.total) }}>{pts(compare.index.total)}</b> pts{compare.index.n < shown.length ? ` (${compare.index.n})` : ''}</span>}

@@ -576,11 +576,15 @@ export class IndexScanner {
     // Each leg out at the strategy's own option exit with this index's settings - as its trade is.
     const body = scannerLogBody({ underlying: this.underlying, date: this.date, source: 'server', dayResults: this.lastOutcomes ?? [], rows: this.lastRows ?? [], charges: cfg.charges, oi: this.data?.oi ?? null, cfg })
     const sig = scannerLogSig(`${this.underlying}:${this.date}`, body)
-    if (sig === this.lastLogSig || this.io.now() - this.lastLogAt < LOG_EVERY_MS) return
+    // A trade opened or exited is saved at once (the record pages show it as it happens); anything else at most every
+    // LOG_EVERY_MS.
+    const tradesSig = JSON.stringify(body.trades.map((t) => [t.key, t.exitTime]))
+    if (sig === this.lastLogSig || (tradesSig === this.lastLogTradesSig && this.io.now() - this.lastLogAt < LOG_EVERY_MS)) return
     this.lastLogAt = this.io.now()
     try {
       await this.io.api('/api/scanner-log/day', { method: 'POST', body })
       this.lastLogSig = sig
+      this.lastLogTradesSig = tradesSig
     } catch (err) {
       this.io.log(`${this.underlying}: scanner log not saved - ${err.message}`)
     }
@@ -602,6 +606,11 @@ export class IndexScanner {
     this.appliedLevels = saved.appliedLevels ?? null
     this.appliedTrail = saved.appliedTrail ?? null
     this.appliedCaps = saved.appliedCaps ?? null
+  }
+
+  /** What changes the pages' picture of this index at once: a signal fired or closed, a trade opened or exited. */
+  changeSig() {
+    return JSON.stringify([this.enabled, (this.lastOutcomes ?? []).map((s) => [s.id, s.t, s.outcome?.status]), (this.lastRows ?? []).map((r) => [r.key, r.exitTime ?? null, !!r.live])])
   }
 
   status() {
