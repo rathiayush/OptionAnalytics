@@ -511,6 +511,8 @@ public sealed record TuningJob(string Underlying, JsonNode? Strategies, int Days
     public string? LabBase { get; init; }
     /// <summary>The fewest trades a month a setting must take on the train days to be chosen (0: no such rule).</summary>
     public int MinPerMonth { get; init; } = 4;
+    /// <summary>Walk-forward folds (0 = off): the way of choosing is tested on later blocks of days it never saw.</summary>
+    public int WalkForward { get; init; }
 }
 
 public sealed record TuningStatus(string State, TuningJob? Job, DateTimeOffset? StartedUtc, DateTimeOffset? FinishedUtc, string? Error, JsonNode? Progress, int? Pid)

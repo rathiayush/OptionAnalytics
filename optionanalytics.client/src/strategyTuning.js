@@ -674,6 +674,64 @@ export function tuneStrategy(days, id, { trail = null, minTrades = 8, minPerMont
   }
 }
 
+/**
+ * WALK-FORWARD: the whole way of choosing a setting, tested the way it will be used. The days in date order: the first
+ * half is the first training window; the rest is cut into `folds` blocks. For each block the setting is CHOSEN again on
+ * every day before it (tuneStrategy on those days only) and then traded on the block, which it has never seen; the next
+ * block adds the last one to its training days. { folds: [...], n, avg, total, baseAvg, foldsWon, passed, reason } - null
+ * when there are too few days (about 30, a block of 5+).
+ *  passed = out of sample over all the blocks it took 3+ trades, made money, beat the strategy as written on the same
+ *  blocks, and made money in at least half the blocks.
+ */
+export function walkForward(days, id, tuneOpts = {}, { folds = 3, firstFraction = 0.5 } = {}) {
+  const sorted = [...days].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
+  const first = Math.max(15, Math.floor(sorted.length * firstFraction))
+  const rest = sorted.length - first
+  const k = Math.min(folds, Math.floor(rest / 5))
+  if (k < 2) return null
+  const size = Math.floor(rest / k)
+  const { trail = null } = tuneOpts
+  const out = []
+  for (let i = 0; i < k; i++) {
+    const from = first + i * size
+    const to = i === k - 1 ? sorted.length : from + size
+    const trainDays = sorted.slice(0, from)
+    const block = sorted.slice(from, to)
+    const r = tuneStrategy(trainDays, id, { ...tuneOpts, keep: 1 })
+    const isOpt = r.unit === 'pts'
+    const asWritten = r.baseline.params
+    const measure = (v) => scoreR(isOpt ? optionRun(block, id, v, trail) : run(block, id, v, trail))
+    const written = measure(asWritten)
+    // A fold that finds nothing it would apply trades as written - the setting it would really have run.
+    const chosen = r.best && r.recommend ? r.best.params : asWritten
+    const m = chosen === asWritten ? written : measure(chosen)
+    out.push({ trainDays: trainDays.length, days: block.map((d) => d.date), params: chosen, changed: chosen !== asWritten, n: m.n, avg: m.avg, total: m.total, baseN: written.n, baseAvg: written.avg, baseTotal: written.total })
+  }
+  const n = out.reduce((a, f) => a + f.n, 0)
+  const total = out.reduce((a, f) => a + f.total, 0)
+  const baseN = out.reduce((a, f) => a + f.baseN, 0)
+  const baseTotal = out.reduce((a, f) => a + f.baseTotal, 0)
+  const avg = n ? total / n : null
+  const baseAvg = baseN ? baseTotal / baseN : null
+  const foldsWon = out.filter((f) => f.total > 0).length
+  let reason
+  if (n < 3) reason = `chosen again before each of ${k} blocks, it took only ${n} trade(s) on them - not enough to trust`
+  else if (!(total > 0)) reason = `chosen again before each of ${k} blocks, it lost on the blocks it had not seen (${total.toFixed(2)})`
+  else if (baseAvg != null && !(avg > baseAvg)) reason = `on the ${k} unseen blocks it did not beat the strategy as written (${avg.toFixed(2)} vs ${baseAvg.toFixed(2)} a trade)`
+  else if (foldsWon * 2 < k) reason = `it made money in only ${foldsWon} of the ${k} unseen blocks`
+  else reason = `chosen again before each of ${k} blocks it had not seen, it made money in ${foldsWon} of ${k} (${avg.toFixed(2)} a trade over ${n} trades)`
+  return { folds: out, count: k, n, avg, total, baseN, baseAvg, foldsWon, passed: n >= 3 && total > 0 && !(baseAvg != null && !(avg > baseAvg)) && foldsWon * 2 >= k, reason }
+}
+
+/** `result` (a tuneStrategy result) with its walk-forward added; one that fails it is no longer recommended. */
+export function withWalkForward(result, days, id, tuneOpts, folds) {
+  if (!folds || !result.best || result.belowMin) return result
+  const wf = walkForward(days, id, tuneOpts, { folds })
+  if (!wf) return { ...result, walkForward: null }
+  const recommend = result.recommend && wf.passed
+  return { ...result, walkForward: wf, recommend, reason: result.recommend && !wf.passed ? `walk-forward: ${wf.reason} - not recommended (${result.reason})` : `${result.reason}; walk-forward: ${wf.reason}` }
+}
+
 /** The best train score each value of each tuned input reached (over the combinations tried with that value), so the
  *  result can show that every ticked input was tried - and what it did - even when it stays at Any. 'window' is the
  *  entry window (tradeFrom / tradeTo). */

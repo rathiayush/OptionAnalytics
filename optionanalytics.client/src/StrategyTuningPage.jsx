@@ -316,6 +316,14 @@ const TuningResult = memo(function TuningResult({ result, isAdmin, spot, applyRe
                 ))}>
                 <Space direction="vertical" size={8} style={{ width: '100%' }}>
                   <Text style={{ fontSize: 12 }}>{r.reason}. Chosen on {r.trainDays?.length} day(s) ({r.trainDays?.[0]} to {r.trainDays?.at(-1)}), checked on {r.testDays?.length} ({r.testDays?.[0] ?? '-'} to {r.testDays?.at(-1) ?? '-'}). {r.belowMin ? `${r.qualified} of ${r.tried} settings had 2+ trades; none had ${r.minTradesWanted ?? result.minTrades}+${result.minPerMonth ? ` and ${result.minPerMonth}+ a month` : ''} and held up month by month.` : `${r.qualified} of ${r.tried} settings had ${result.minTrades}+ trades${result.minPerMonth ? `, ${result.minPerMonth}+ a month,` : ''} and held up month by month.`}{r.selection?.periods >= 2 ? ` Chosen on ${r.selection.periods} stretches of the train days at once, not the days added up${r.selection.simplest ? ` - and the simplest of the ${r.selection.nearBest} within ${Math.round(NEAR_BEST * 100)}% of the top score (${r.selection.changes} change(s) from as written)` : ''}.` : ''}</Text>
+                  {r.walkForward && (
+                    <Text style={{ fontSize: 12 }}>
+                      <Tag color={r.walkForward.passed ? 'success' : 'error'}>walk-forward {r.walkForward.passed ? 'passed' : 'failed'}</Tag>
+                      <Tooltip title={r.walkForward.folds.map((f, i) => `Block ${i + 1} (${f.days[0]} to ${f.days.at(-1)}, chosen on ${f.trainDays} earlier days): ${f.changed ? 'its setting' : 'as written'} ${f.n} trades ${f.avg == null ? '-' : f.avg.toFixed(2)}/trade; as written ${f.baseN} trades ${f.baseAvg == null ? '-' : f.baseAvg.toFixed(2)}/trade`).join('\n')}>
+                        <span style={{ cursor: 'help', textDecoration: 'underline dotted' }}>{r.walkForward.foldsWon} of {r.walkForward.count} unseen blocks won · {r.walkForward.n} trades · {r.walkForward.avg == null ? '-' : r.walkForward.avg.toFixed(2)}/trade vs {r.walkForward.baseAvg == null ? '-' : r.walkForward.baseAvg.toFixed(2)} as written</span>
+                      </Tooltip>
+                    </Text>
+                  )}
                   <Table size="small" pagination={false} rowKey="k" columns={[
                     { title: '', dataIndex: 'k', width: 120, render: (k) => <b>{k}</b> },
                     { title: 'Setting', key: 'p', render: (_, row) => <span style={{ fontSize: 12 }}>{settingText(row.params, r.unit)}</span> },
@@ -357,6 +365,7 @@ export default function StrategyTuningPage() {
   const [includeEstimated, setIncludeEstimated] = useState(false)
   const [minTrades, setMinTrades] = useState(8)
   const [minPerMonth, setMinPerMonth] = useState(4)
+  const [walkForward, setWalkForward] = useState(3)
   const [what, setWhat] = useState('both')
   // Always a date range (from / to): the last 30 days to yesterday until another is picked.
   const [range, setRange] = useState(() => lastDays(30))
@@ -402,7 +411,7 @@ export default function StrategyTuningPage() {
 
   const running = status?.state === 'running'
   const rangeOk = !!(range?.[0] && range?.[1])
-  const jobBody = () => ({ underlying, strategies: pick === 'custom' ? custom : pick, days: 250, includeEstimated, minTrades, minPerMonth, what, oiFactors, search, data,
+  const jobBody = () => ({ underlying, strategies: pick === 'custom' ? custom : pick, days: 250, includeEstimated, minTrades, minPerMonth, walkForward, what, oiFactors, search, data,
     from: range?.[0]?.format('YYYY-MM-DD') ?? null, to: range?.[1]?.format('YYYY-MM-DD') ?? null })
   // The schedule: jobs run one after another on the server - for one index or several, now or at a set time, once or daily.
   const [queue, setQueue] = useState([])
@@ -559,6 +568,7 @@ export default function StrategyTuningPage() {
               </Col>
               <Col><Space size={6}><Tooltip title="A setting needs at least this many trades on the train days to be recommended. When none reach it, the best found with fewer is still shown, marked 'below the minimum trades' and never recommended."><Text>Min trades</Text></Tooltip><InputNumber min={2} max={100} value={minTrades} onChange={(v) => v && setMinTrades(v)} style={{ width: 70 }} /></Space></Col>
               <Col><Space size={6}><Tooltip title="A setting must also trade at least this often - trades a month on the train days - to be chosen: a setting that trades a handful of times in total fits those few days, not the market. 0 = no such rule."><Text>Min a month</Text></Tooltip><InputNumber min={0} max={30} value={minPerMonth} onChange={(v) => v != null && setMinPerMonth(v)} style={{ width: 64 }} aria-label="Min trades a month" /></Space></Col>
+              <Col><Space size={6}><Tooltip title="Walk-forward: after choosing, the whole way of choosing is tested again - the setting is chosen on the earlier days only, traded on the next block of days it never saw, and so on, block after block. A setting that does not make money on those blocks is not recommended. Needs about 30+ days; takes this many extra tunings a strategy. 0 = off."><Text>Walk-forward</Text></Tooltip><InputNumber min={0} max={5} value={walkForward} onChange={(v) => v != null && setWalkForward(v)} style={{ width: 60 }} aria-label="Walk-forward blocks" /></Space></Col>
               {!spot && <Col><Tooltip title="Also use days the server did not record live, rebuilt from 1-minute candles (no tape or market depth - the order-flow checks are estimated). More days, less exact."><Space size={6}><Switch size="small" checked={includeEstimated} onChange={setIncludeEstimated} /><Text>Include estimated days</Text></Space></Tooltip></Col>}
               <Col>
                 {running
