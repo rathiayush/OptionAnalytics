@@ -3,7 +3,7 @@ import dayjs from 'dayjs'
 import { Alert, Button, Card, Checkbox, Col, DatePicker, InputNumber, Popconfirm, Progress, Row, Segmented, Select, Space, Switch, Table, Tag, Tooltip, Typography, message } from 'antd'
 import { NavBar, useAuth, UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import { ACTIVE_STRATEGIES, SPOT_STRATEGIES, STRATEGY_BY_ID, TRADE_FILTERS } from './strategyEngine.js'
-import { OI_COMBO_CAP, OI_FACTORS, OPTION_DEFAULT, countOiCombinations, oiFactorsFor, optionText, settingSignature, variantText } from './strategyTuning.js'
+import { NEAR_BEST, OI_COMBO_CAP, OI_FACTORS, OPTION_DEFAULT, countOiCombinations, oiFactorsFor, optionText, settingSignature, variantText } from './strategyTuning.js'
 import { applyTunedFilters, putOnLiveList } from './scannerSettings.js'
 import { AppliedSettingsCard, ApplyTunedButton } from './ApplyTuned.jsx'
 import ClearData from './ClearData.jsx'
@@ -241,6 +241,8 @@ function Score({ s, unit = 'R' }) {
   return (
     <span style={{ whiteSpace: 'nowrap' }}>
       {s.n} trades · <b style={{ color: colR(s.avg) }}>{f(s.avg)}</b>/trade · <span style={{ color: colR(s.total) }}>{f(s.total)}</span> · win {pct(s.winRate)}
+      {s.periods >= 2 && <Tooltip title="How it was chosen: on each month of the train days (2-week stretches under two months) - made money in this many of them. A setting that made its money in one month only is not chosen."> · <span style={{ color: s.periodsWon * 2 >= s.periods ? undefined : '#cf1322' }}>won {s.periodsWon}/{s.periods} {s.periods === 1 ? 'month' : 'months'}</span></Tooltip>}
+      {s.perMonth != null && <> · {s.perMonth.toFixed(1)}/month</>}
     </span>
   )
 }
@@ -313,7 +315,7 @@ const TuningResult = memo(function TuningResult({ result, isAdmin, spot, applyRe
                     description={`${r.recommend ? variantText(r.best.params) : `Not recommended: ${r.reason}. Apply anyway - your call.`}${r.unit === 'pts' ? ' The option part - buy or sell, the strike and its SL / target - is applied to this strategy as well.' : ''} ${result.underlying ? `It runs with it on ${result.underlying}${spot ? ' on the server scanner' : ''} (paper, and live when ${result.underlying} is Live today and the strategy is on its live list); other indices keep theirs.` : ''} Whatever was applied to this strategy${result.underlying ? ` on ${result.underlying}` : ''} before is replaced.`} />
                 ))}>
                 <Space direction="vertical" size={8} style={{ width: '100%' }}>
-                  <Text style={{ fontSize: 12 }}>{r.reason}. Chosen on {r.trainDays?.length} day(s) ({r.trainDays?.[0]} to {r.trainDays?.at(-1)}), checked on {r.testDays?.length} ({r.testDays?.[0] ?? '-'} to {r.testDays?.at(-1) ?? '-'}). {r.belowMin ? `${r.qualified} of ${r.tried} settings had 2+ trades; none had ${r.minTradesWanted ?? result.minTrades}+.` : `${r.qualified} of ${r.tried} settings had ${result.minTrades}+ trades.`}</Text>
+                  <Text style={{ fontSize: 12 }}>{r.reason}. Chosen on {r.trainDays?.length} day(s) ({r.trainDays?.[0]} to {r.trainDays?.at(-1)}), checked on {r.testDays?.length} ({r.testDays?.[0] ?? '-'} to {r.testDays?.at(-1) ?? '-'}). {r.belowMin ? `${r.qualified} of ${r.tried} settings had 2+ trades; none had ${r.minTradesWanted ?? result.minTrades}+${result.minPerMonth ? ` and ${result.minPerMonth}+ a month` : ''} and held up month by month.` : `${r.qualified} of ${r.tried} settings had ${result.minTrades}+ trades${result.minPerMonth ? `, ${result.minPerMonth}+ a month,` : ''} and held up month by month.`}{r.selection?.periods >= 2 ? ` Chosen on ${r.selection.periods} stretches of the train days at once, not the days added up${r.selection.simplest ? ` - and the simplest of the ${r.selection.nearBest} within ${Math.round(NEAR_BEST * 100)}% of the top score (${r.selection.changes} change(s) from as written)` : ''}.` : ''}</Text>
                   <Table size="small" pagination={false} rowKey="k" columns={[
                     { title: '', dataIndex: 'k', width: 120, render: (k) => <b>{k}</b> },
                     { title: 'Setting', key: 'p', render: (_, row) => <span style={{ fontSize: 12 }}>{settingText(row.params, r.unit)}</span> },
@@ -354,6 +356,7 @@ export default function StrategyTuningPage() {
   const [custom, setCustom] = useState([])
   const [includeEstimated, setIncludeEstimated] = useState(false)
   const [minTrades, setMinTrades] = useState(8)
+  const [minPerMonth, setMinPerMonth] = useState(4)
   const [what, setWhat] = useState('both')
   // Always a date range (from / to): the last 30 days to yesterday until another is picked.
   const [range, setRange] = useState(() => lastDays(30))
@@ -399,7 +402,7 @@ export default function StrategyTuningPage() {
 
   const running = status?.state === 'running'
   const rangeOk = !!(range?.[0] && range?.[1])
-  const jobBody = () => ({ underlying, strategies: pick === 'custom' ? custom : pick, days: 250, includeEstimated, minTrades, what, oiFactors, search, data,
+  const jobBody = () => ({ underlying, strategies: pick === 'custom' ? custom : pick, days: 250, includeEstimated, minTrades, minPerMonth, what, oiFactors, search, data,
     from: range?.[0]?.format('YYYY-MM-DD') ?? null, to: range?.[1]?.format('YYYY-MM-DD') ?? null })
   // The schedule: jobs run one after another on the server - for one index or several, now or at a set time, once or daily.
   const [queue, setQueue] = useState([])
@@ -555,6 +558,7 @@ export default function StrategyTuningPage() {
                 </Space>
               </Col>
               <Col><Space size={6}><Tooltip title="A setting needs at least this many trades on the train days to be recommended. When none reach it, the best found with fewer is still shown, marked 'below the minimum trades' and never recommended."><Text>Min trades</Text></Tooltip><InputNumber min={2} max={100} value={minTrades} onChange={(v) => v && setMinTrades(v)} style={{ width: 70 }} /></Space></Col>
+              <Col><Space size={6}><Tooltip title="A setting must also trade at least this often - trades a month on the train days - to be chosen: a setting that trades a handful of times in total fits those few days, not the market. 0 = no such rule."><Text>Min a month</Text></Tooltip><InputNumber min={0} max={30} value={minPerMonth} onChange={(v) => v != null && setMinPerMonth(v)} style={{ width: 64 }} aria-label="Min trades a month" /></Space></Col>
               {!spot && <Col><Tooltip title="Also use days the server did not record live, rebuilt from 1-minute candles (no tape or market depth - the order-flow checks are estimated). More days, less exact."><Space size={6}><Switch size="small" checked={includeEstimated} onChange={setIncludeEstimated} /><Text>Include estimated days</Text></Space></Tooltip></Col>}
               <Col>
                 {running
@@ -568,7 +572,7 @@ export default function StrategyTuningPage() {
                   {running && <Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>a job is running - change the settings above and add more; they wait their turn</Text>}</Col>
                 <Col><Space size={6}><Text>Indices</Text><Checkbox.Group value={schedIndices ?? [underlying]} onChange={(v) => setSchedIndices(v)} options={UNDERLYINGS.map((u) => ({ value: u, label: u }))} /></Space></Col>
                 <Col><Space size={6}><Text>Start</Text><DatePicker showTime={{ format: 'HH:mm' }} format="DD MMM YYYY HH:mm" value={schedAt} onChange={setSchedAt} placeholder="As soon as free" aria-label="Scheduled start" /></Space></Col>
-                <Col><Tooltip title="Split the date range above into pieces of this many days: each piece (for each index ticked) is its own job, run one after another - several short jobs instead of one long one. The Trades page's Strategy performance adds them all up.">
+                <Col><Tooltip title="Split the date range above into pieces of this many days: each piece (for each index ticked) is its own job, run one after another - several short jobs instead of one long one. The Trades page's Strategy performance adds them all up. Careful: each piece chooses its setting on its own few weeks only - short pieces find settings that fit those weeks. One job over the whole range chooses on every month at once.">
                   <Space size={6}><Text>Split into</Text><Select value={schedChunk} onChange={setSchedChunk} style={{ width: 130 }} aria-label="Split the range"
                     options={[{ value: 0, label: 'one job' }, { value: 7, label: '7-day pieces' }, { value: 10, label: '10-day pieces' }, { value: 15, label: '15-day pieces' }, { value: 30, label: '30-day pieces' }]} />
                     {schedChunk > 0 && <Text type="secondary" style={{ fontSize: 12 }}>= {pieceCount * (schedIndices?.length || 1)} job(s)</Text>}</Space>

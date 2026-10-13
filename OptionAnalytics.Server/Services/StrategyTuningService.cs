@@ -509,6 +509,8 @@ public sealed record TuningJob(string Underlying, JsonNode? Strategies, int Days
     public JsonObject? Params { get; init; }
     /// <summary>A lab run: what Params go on top of - "written" (the strategy as written) or "applied" (its setting applied on the index).</summary>
     public string? LabBase { get; init; }
+    /// <summary>The fewest trades a month a setting must take on the train days to be chosen (0: no such rule).</summary>
+    public int MinPerMonth { get; init; } = 4;
 }
 
 public sealed record TuningStatus(string State, TuningJob? Job, DateTimeOffset? StartedUtc, DateTimeOffset? FinishedUtc, string? Error, JsonNode? Progress, int? Pid)

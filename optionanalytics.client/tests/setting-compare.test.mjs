@@ -2,7 +2,7 @@
 // what evidence, and every parameter that would change (src/settingCompare.js). Run: npm test (node --test).
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { compareVerdict, nowOf, paramDiff } from '../src/settingCompare.js'
+import { byProof, compareVerdict, nowOf, paramDiff, proofOf } from '../src/settingCompare.js'
 import { settingSignature } from '../src/strategyTuning.js'
 
 // A tuned setting as GET /api/strategy-tuning/performance gives it (TuningPerformance.TunedSetting).
@@ -81,4 +81,28 @@ test('every parameter, now against new - the ones that move are flagged', () => 
   const leg = fromApplied.find((p) => p.key === 'optLeg')
   assert.deepEqual([leg.now, leg.next, leg.changed], ['BUY', 'off / default', true])
   assert.equal(fromApplied.find((p) => p.key === 'tradeSide').changed, false)
+})
+
+test('the fine-tuned ranking: by proof on unseen days, not by the flattering tuned-day numbers', () => {
+  // A: proven on both indices, months won; B: a huge tuned-day average (not here) but not proven anywhere.
+  const A = { NIFTY: [tuned({ tradeSide: 'long' }, { testTrades: 30, testAvg: 0.2, periods: 3, periodsWon: 3 })],
+    SENSEX: [tuned({ tradeSide: 'long' }, { index: 'SENSEX', testTrades: 10, testAvg: 0.1, periods: 2, periodsWon: 1 })] }
+  const B = { NIFTY: [tuned({ tradeStopX: '3' }, { best: false, testTrades: 80, testAvg: 0.5, score: 0.4, periods: 3, periodsWon: 1 }), tuned({ tradeStopX: '2' }, { best: false, score: 0.1 })] }
+  const a = proofOf(A)
+  assert.deepEqual([a.indices, a.proven, a.unseenTrades, a.monthsWon, a.months], [2, 2, 40, 4, 5])
+  assert.ok(Math.abs(a.avg - 0.175) < 1e-9)
+  const b = proofOf(B)
+  assert.equal(b.proven, 0)
+  assert.equal(b.unseenTrades, 80, 'not proven: its highest-scoring setting')
+  assert.ok(byProof(a, b) < 0, 'A ranks above B')
+  // One index: only that index's settings.
+  assert.equal(proofOf(A, 'SENSEX').unseenTrades, 10)
+  assert.equal(proofOf(A, 'BANKNIFTY'), null)
+  // No proof sorts last; equal proven share, more months won first.
+  assert.ok(byProof(null, b) > 0)
+  const c = proofOf({ NIFTY: [tuned({ tradeSide: 'short' }, { periods: 3, periodsWon: 2 })] })
+  const d = proofOf({ NIFTY: [tuned({ tradeSide: 'short' }, { periods: 3, periodsWon: 3, testTrades: 5 })] })
+  assert.ok(byProof(c, d) > 0)
+  // Units mixed (an option-tuned index in premium points): no single average.
+  assert.equal(proofOf({ NIFTY: [tuned({ tradeSide: 'long' })], SENSEX: [tuned({ tradeSide: 'long' }, { unit: 'pts' })] }).avg, null)
 })

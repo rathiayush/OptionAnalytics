@@ -78,3 +78,34 @@ export function paramDiff(now, next) {
     return { key, label: b?.label ?? a?.label ?? key, now: nowV, next: nextV, changed: nowV !== nextV }
   })
 }
+
+/**
+ * How well a fine-tuned strategy is PROVEN, from its tuned settings on each index (`tunedSettings`, all of them when
+ * `index` is 'all'): on each index its best setting (or, none proven, its highest score) - its trades on days it was never
+ * tuned on, their average, the months it won. What the ranking of fine-tuned strategies sorts by: the numbers on the
+ * days a setting was tuned on are always flattering (it was picked for them), these are not.
+ * { indices, proven, unseenTrades, avg (per unseen trade - null across units), unit, monthsWon, months, key: [proven share,
+ *   months-won share, unseen trades, score] } - null when it has no tuned setting there.
+ */
+export function proofOf(tunedSettings, index = 'all') {
+  const picks = Object.entries(tunedSettings ?? {})
+    .filter(([u, list]) => list?.length && (index === 'all' || u === index))
+    .map(([u, list]) => ({ u, t: list.find((x) => x.best) ?? [...list].sort((a, b) => (b.score ?? -1e9) - (a.score ?? -1e9))[0] }))
+  if (!picks.length) return null
+  const proven = picks.filter((p) => p.t.best).length
+  const unseenTrades = picks.reduce((a, p) => a + (p.t.testTrades ?? 0), 0)
+  const units = new Set(picks.map((p) => p.t.unit ?? 'R'))
+  const avg = units.size === 1 && unseenTrades ? picks.reduce((a, p) => a + (p.t.testAvg ?? 0) * (p.t.testTrades ?? 0), 0) / unseenTrades : null
+  const months = picks.reduce((a, p) => a + (p.t.periods ?? 0), 0)
+  const monthsWon = picks.reduce((a, p) => a + (p.t.periodsWon ?? 0), 0)
+  const score = picks.reduce((a, p) => a + (p.t.score ?? 0), 0) / picks.length
+  return { indices: picks.length, proven, unseenTrades, avg, unit: units.size === 1 ? [...units][0] : null, monthsWon, months, key: [proven / picks.length, months ? monthsWon / months : 0, unseenTrades, score] }
+}
+
+/** Sorts two proofs (proofOf) best first: more of its indices proven, then more of its months won, then more unseen
+ *  trades, then the higher score. */
+export function byProof(a, b) {
+  if (!a || !b) return (b ? 1 : 0) - (a ? 1 : 0)
+  for (let i = 0; i < a.key.length; i++) if (a.key[i] !== b.key[i]) return b.key[i] - a.key[i]
+  return 0
+}

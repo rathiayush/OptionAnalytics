@@ -32,4 +32,21 @@ public sealed class StrategyLabJobTests
         var (tune, _) = StrategyTuningController.BuildJob(new StrategyTuningController.RunRequest("NIFTY", new JsonArray("weakWall")), "NIFTY");
         Assert.Null(tune!.LabBase);
     }
+
+    [Fact]
+    public void A_tuning_job_carries_the_fewest_trades_a_month_held_to_0_30_4_when_not_sent()
+    {
+        StrategyTuningController.RunRequest Tune(int? perMonth) => perMonth is int n
+            ? new("NIFTY", new JsonArray("weakWall"), MinPerMonth: n)
+            : new("NIFTY", new JsonArray("weakWall"));
+        Assert.Equal(4, StrategyTuningController.BuildJob(Tune(null), "NIFTY").Job!.MinPerMonth);
+        Assert.Equal(0, StrategyTuningController.BuildJob(Tune(0), "NIFTY").Job!.MinPerMonth);
+        Assert.Equal(30, StrategyTuningController.BuildJob(Tune(99), "NIFTY").Job!.MinPerMonth);
+        Assert.Equal(0, StrategyTuningController.BuildJob(Tune(-3), "NIFTY").Job!.MinPerMonth);
+        // The runner reads it as minPerMonth; a job saved before it existed reads as 4.
+        var json = System.Text.Json.JsonSerializer.Serialize(StrategyTuningController.BuildJob(Tune(6), "NIFTY").Job, new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web));
+        Assert.Contains("\"minPerMonth\":6", json);
+        var old = System.Text.Json.JsonSerializer.Deserialize<OptionAnalytics.Server.Services.TuningJob>("{\"underlying\":\"NIFTY\",\"days\":30,\"minTrades\":8}", new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web));
+        Assert.Equal(4, old!.MinPerMonth);
+    }
 }
