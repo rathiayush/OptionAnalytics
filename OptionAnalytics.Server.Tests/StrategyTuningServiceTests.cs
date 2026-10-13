@@ -581,6 +581,9 @@ public sealed class StrategyTuningServiceTests : IDisposable
 
         var all = TuningPerformance.Build(runs, Read, "spot").Rows.Single().TunedSettings["NIFTY"].Single();
         Assert.Equal(3 + 4, all.TestTrades); // both cross-checked days + the older run's held-back record
+        // The cross-checked days alone (what "now vs new" compares like for like): 3 trades, 2 of them won.
+        Assert.Equal(3, all.CheckTrades);
+        Assert.Equal(2.0 / 3, all.CheckWinRate!.Value, 6);
         var october = TuningPerformance.Build(runs, Read, "spot", "2026-10-01", null).Rows.Single().TunedSettings["NIFTY"].Single();
         Assert.Equal(1, october.TestTrades); // only 06 Oct's cross-check - the undated older record is left out
         Assert.Equal(-1, october.TestAvg!.Value, 6);
@@ -723,6 +726,7 @@ public sealed class StrategyTuningServiceTests : IDisposable
         Assert.Equal((10, 2, 2, 1), (lng.TestTrades, lng.Periods, lng.PeriodsWon, lng.CheckedRuns));
         Assert.Equal((2.0 + 1.0 + 9.9) / 10, lng.TestAvg!.Value, 6);
         Assert.Equal((-0.4 + 0.3 + 9.9) / 10, lng.BaseAvg!.Value, 6);
+        Assert.Equal((10, 10), (lng.CheckTrades, lng.BaseTrades)); // the same days, both ways - a like-for-like pair
         Assert.True(lng.Best, "proven over two months on days it was not chosen on");
         Assert.False(sht.Best, "one month's held-back days - higher average, far less proof");
         Assert.Equal((2, 1, 0), (sht.TestTrades, sht.Periods, sht.CheckedRuns));
