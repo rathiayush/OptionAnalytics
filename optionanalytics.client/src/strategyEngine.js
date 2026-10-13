@@ -851,6 +851,10 @@ export function optionPnlPoints(trade, oi, ms) {
   return { premium: now, points: trade.action === 'BUY' ? now - trade.premium : trade.premium - now }
 }
 
+/** Premium points as a trade's exit reason says them: to two decimals at most (a % of the premium is 7.76, not
+ *  7.763999999999942; 0.25 stays 0.25). */
+const ptsText = (v) => String(+Number(v).toFixed(2))
+
 /** A paper option trade's own premium stop-loss / target, in premium points (0 = none): the first
  *  minute after `entryMs` (and before `untilMs`) whose range reaches either level. A SELL loses when the
  *  premium rises, a BUY when it falls; the stop counts first when one minute touches both. Filled at
@@ -889,9 +893,9 @@ export function optionStopTargetHit(oi, trade, entryMs, untilMs, slPoints, targe
     const trailed = tr?.gap > 0 ? optionTrailLevel(trade.action, trade.premium, best, tr.start, tr.gap) : null
     const inForce = tighterStop(trade.action, stop, trailed)
     if (inForce != null && (sell ? high >= inForce : low <= inForce)) {
-      return { at: start + MIN, premium: inForce, reason: inForce === trailed && trailed !== stop ? `Trailing SL hit (${tr.gap} pts behind the best ${best.toFixed(1)})` : `Max SL ${sl} pts hit` }
+      return { at: start + MIN, premium: inForce, reason: inForce === trailed && trailed !== stop ? `Trailing SL hit (${ptsText(tr.gap)} pts behind the best ${best.toFixed(1)})` : `Max SL ${ptsText(sl)} pts hit` }
     }
-    if (target != null && (sell ? low <= target : high >= target)) return { at: start + MIN, premium: target, reason: `Target ${tgt} pts hit` }
+    if (target != null && (sell ? low <= target : high >= target)) return { at: start + MIN, premium: target, reason: `Target ${ptsText(tgt)} pts hit` }
     best = sell ? Math.min(best, low) : Math.max(best, high)
   }
   return null
