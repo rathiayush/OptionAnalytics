@@ -6,11 +6,13 @@
 import { useEffect, useState } from 'react'
 import { InputNumber, Modal, Segmented, Space, Tag, Tooltip, Typography, message } from 'antd'
 import { UP_COLOR, DOWN_COLOR } from './shared.jsx'
+import { runnerTrade, useScannerEvent, useScannerStatus } from './scannerEvents.js'
 
 const { Text } = Typography
 const rupees = (v) => (v == null ? '-' : `${v < 0 ? '-' : ''}₹${Math.abs(Math.round(v)).toLocaleString('en-IN')}`)
 
-/** Every index's server Live state, refreshed every 10 s; `set` switches one (after the caller confirmed). */
+/** Every index's server Live state - read again the moment a live trade or an index's Live today changes on the server
+ *  (pushed - scannerEvents.js), and every 10 s besides; `set` switches one (after the caller confirmed). */
 export function useServerLive() {
   const [list, setList] = useState(null)
   const load = () => fetch('/api/scanner-runner/live').then((r) => (r.ok ? r.json() : null)).then((x) => { if (Array.isArray(x)) setList(x) }).catch(() => {})
@@ -19,6 +21,7 @@ export function useServerLive() {
     const id = setInterval(load, 10_000)
     return () => clearInterval(id)
   }, [])
+  useScannerEvent('scannerLive', load, 250)
   const set = async (underlying, patch) => {
     const cur = list?.find((x) => x.underlying === underlying)
     const body = { live: patch.live ?? cur?.live ?? false, maxTrades: patch.maxTrades ?? cur?.maxTrades, maxLoss: patch.maxLoss ?? cur?.maxLoss }
@@ -74,6 +77,19 @@ export function ServerLiveSwitch({ underlying, st, isAdmin, set, compact = false
 }
 
 /** Today's live trades of the server scanner on one index. */
+/** An open live trade's P&L as it runs: the server scanner's own read of it (its option's premium now - pushed with each
+ *  change, every 5 s). Listens only while such a trade is on screen. */
+function RunningPnl({ underlying, tradeKey }) {
+  const { status } = useScannerStatus()
+  const now = runnerTrade(status, underlying, tradeKey)
+  if (now?.rupees == null) return null
+  return (
+    <Tooltip title={`Now: the option at ${now.current?.toFixed(1) ?? '-'} (in at ${now.premium?.toFixed(1) ?? '-'}) - the scanner's own read of its premium, updated as it moves; the closed P&L is Dhan's fills`}>
+      {' '}<b style={{ color: now.rupees >= 0 ? UP_COLOR : DOWN_COLOR }}>{rupees(now.rupees)}</b><Text type="secondary" style={{ fontSize: 10 }}> now</Text>
+    </Tooltip>
+  )
+}
+
 export function ServerLiveTrades({ st }) {
   if (!st?.trades?.length) return null
   return (
@@ -95,7 +111,7 @@ export function ServerLiveTrades({ st }) {
           {/* An entry that never traded (rejected, cancelled, not filled in time) was no trade - not counted, no P&L. */}
           {t.exitedUtc && t.notFilled ? <span><Tag style={{ margin: 0, fontSize: 10 }}>not filled</Tag> <Text type="secondary" style={{ fontSize: 11 }}>{t.exitReason}</Text></span>
             : t.exitedUtc ? <span>{t.exitReason ?? 'closed'} · <b style={{ color: (t.pnl ?? 0) >= 0 ? UP_COLOR : DOWN_COLOR }}>{rupees(t.pnl)}</b>{t.pnlFromFills && <Text type="secondary" style={{ fontSize: 10 }}> (Dhan fills)</Text>}</span>
-              : <Tag color="processing" style={{ margin: 0 }}>open</Tag>}
+              : <span><Tag color="processing" style={{ margin: 0 }}>open</Tag><RunningPnl underlying={st.underlying ?? t.underlying} tradeKey={t.key} /></span>}
           {t.note && <Text type="warning" style={{ fontSize: 11 }}>{t.note}</Text>}
         </div>
       ))}

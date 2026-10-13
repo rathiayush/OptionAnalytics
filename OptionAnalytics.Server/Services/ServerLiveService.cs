@@ -40,6 +40,7 @@ public sealed class ServerLiveService
     private readonly ILogger<ServerLiveService> _logger;
     private readonly TelegramAlertService? _telegram;
     private readonly Func<string, string, string?>? _listBlock;
+    private readonly ScannerEvents? _events;
     private readonly string _path;
     private readonly object _lock = new();
     private readonly SemaphoreSlim _placing = new(1, 1);
@@ -47,13 +48,15 @@ public sealed class ServerLiveService
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { WriteIndented = true };
 
     public ServerLiveService(TradeSettingsStore trade, LiveTradingService trading, IHostEnvironment environment, IConfiguration configuration,
-        ILogger<ServerLiveService> logger, TelegramAlertService telegram, LiveListService list)
-        : this(trade, new Live(trading), PathOf(environment, configuration), logger, telegram, list.BlockReason) { }
+        ILogger<ServerLiveService> logger, TelegramAlertService telegram, LiveListService list, ScannerEvents events)
+        : this(trade, new Live(trading), PathOf(environment, configuration), logger, telegram, list.BlockReason, events) { }
 
     /// <param name="listBlock">(index, strategy id) -> why it is not on the live list, else null; null = no list check (tests).</param>
+    /// <param name="events">told of every change, for the open pages (ScannerEvents); null = nobody (tests).</param>
     internal ServerLiveService(TradeSettingsStore trade, IServerLiveOrders orders, string path, ILogger<ServerLiveService> logger, TelegramAlertService? telegram = null,
-        Func<string, string, string?>? listBlock = null)
+        Func<string, string, string?>? listBlock = null, ScannerEvents? events = null)
     {
+        _events = events;
         _listBlock = listBlock;
         _trade = trade;
         _orders = orders;
@@ -515,6 +518,8 @@ public sealed class ServerLiveService
             File.Move(temp, _path, overwrite: true);
         }
         catch (Exception ex) { _logger.LogWarning(ex, "{Path} could not be saved.", _path); }
+        // Every change of a live trade or an index's Live today is saved here - the open pages hear of it at once.
+        _events?.Live();
     }
 
     internal sealed class State

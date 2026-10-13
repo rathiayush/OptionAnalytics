@@ -320,6 +320,8 @@ builder.Services.AddHostedService<OiReplayLiveFeedService>();
 // The strategy scanner run on the server for NIFTY, BANKNIFTY and SENSEX (alerts + paper trades), with or
 // without a browser open - a Node process started and watched here. See ScannerRunnerHostedService.
 builder.Services.AddSingleton<ScannerRunnerStore>();
+// The scanner's trades / P&L / record / live changes pushed to open pages the moment they happen (SpotHub groups).
+builder.Services.AddSingleton<ScannerEvents>();
 // Lots, SL / target / trail, slippage, server scanner on/off per index - trade-settings.csv (TradeSettingsStore).
 builder.Services.AddSingleton<TradeSettingsStore>();
 // The admin's Data files page: the server's files (scanner log, cached API data, tuning, settings) - read-only.

@@ -16,13 +16,15 @@ public sealed class ScannerRunnerController : ControllerBase
     private readonly TradeSettingsStore _trade;
     private readonly ServerLiveService _live;
     private readonly LiveListService _list;
+    private readonly ScannerEvents? _events;
 
-    public ScannerRunnerController(ScannerRunnerStore store, TradeSettingsStore trade, ServerLiveService live, LiveListService list)
+    public ScannerRunnerController(ScannerRunnerStore store, TradeSettingsStore trade, ServerLiveService live, LiveListService list, ScannerEvents? events = null)
     {
         _store = store;
         _trade = trade;
         _live = live;
         _list = list;
+        _events = events;
     }
 
     /// <summary>GET /api/scanner-runner/config - the runner reads it every minute; the page shows it. The
@@ -87,7 +89,8 @@ public sealed class ScannerRunnerController : ControllerBase
         return Ok(WithTradeSettings(_store.Update(patch)));
     }
 
-    /// <summary>POST /api/scanner-runner/status - the runner's heartbeat (per index: last look, signals, paper trades).</summary>
+    /// <summary>POST /api/scanner-runner/status - the runner's heartbeat (per index: last look, signals, paper trades) - on to
+    /// the open pages at once when its trades or P&amp;L changed (ScannerEvents).</summary>
     [HttpPost("status")]
     [Authorize(Roles = ScannerRunnerKey.Role)]
     [RequestSizeLimit(2_000_000)]
@@ -95,6 +98,7 @@ public sealed class ScannerRunnerController : ControllerBase
     {
         if (status is null) return BadRequest();
         _store.SetStatus(status);
+        _events?.Status(status, _store.Status());
         return Ok();
     }
 

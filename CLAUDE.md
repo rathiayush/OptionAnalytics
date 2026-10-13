@@ -62,6 +62,11 @@ scanner entry (`ChaseEntry`) the market ran away from goes to the LATEST ask / b
 to 4x, its legs moved along, never further than its SL distance from its first price (`ChaseEntryAsync` /
 `RepriceEntry`); every exit follows the latest bid / ask until it fills (`ChaseExitAsync`, up to 6x slippage, ~5 min), and
 one Dhan rejects is placed again at the latest price for what is still open (`ReplaceRejectedExitAsync`, 3 times).
+The pages hear the server scanner's changes the moment they happen, not at their next poll (`ScannerEvents` on SpotHub groups
+"scanner" / admin-only "scanner-live", `scannerEvents.js`): the runner reports at once on a signal or a trade punched / exited
+(`changeSig`, else every 5 s with the P&L) and saves the record at once on a trade change; the Server scanner card, Trades →
+Scanner record (an open trade's premium and P&L now), the applied runs and the Live today views refresh from the push - their
+polls stay as the fallback.
 
 When adding or changing a strategy:
 

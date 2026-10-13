@@ -85,6 +85,21 @@ public sealed class ServerLiveServiceTests : IDisposable
         new(key, "#1 test", Expiry, 25000, "PE", "SELL", sl, target, 0, null);
 
     [Fact]
+    public async Task EveryChangeOfALiveTrade_IsToldToTheOpenPages()
+    {
+        var sent = new List<string>();
+        var events = new ScannerEvents((g, n, _) => { lock (sent) sent.Add($"{g}:{n}"); return Task.CompletedTask; }, NullLogger<ScannerEvents>.Instance);
+        var orders = new FakeOrders();
+        var live = new ServerLiveService(Trade(), orders, Path.Combine(_dir, "server-live.json"), NullLogger<ServerLiveService>.Instance, events: events);
+        live.Set("NIFTY", true, null, null, "admin", At10);
+        Assert.Equal(new[] { "scanner-live:scannerLive" }, sent);
+        Assert.True((await live.PlaceAsync("NIFTY", Order(), At10, default)).Placed);
+        Assert.Equal(2, sent.Count);
+        await live.ExitAsync("NIFTY", "s1-1-sell", "target", 1500, At10.AddMinutes(5), default);
+        Assert.Equal(3, sent.Count);
+    }
+
+    [Fact]
     public async Task AStrategyNotOnTheIndexsLiveList_StaysOnPaper()
     {
         var orders = new FakeOrders();
