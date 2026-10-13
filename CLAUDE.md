@@ -70,7 +70,9 @@ When adding or changing a strategy:
   The Order Flow page's live engines already run all three indices' near futures all day (`OrderFlowService`).
 - Every PAST-day Dhan Data API response (intraday spot / futures / option candles, the rolling / expired-option chain) is
   kept on disk by `DhanDataCache` (`Storage:DhanCachePath`, the persistent volume in docker-compose) and answered from
-  there - only closed windows with full sessions; today, empty or half days go to Dhan again. A new Dhan data call for
+  there - only closed windows with full sessions (judged on the minutes Dhan SENT - `SentTimes`: a thin option strike's
+  untraded minutes come at a 0 price the parser drops, and still count, or BANKNIFTY's monthly strikes were never kept);
+  today, empty or half days go to Dhan again. A new Dhan data call for
   past days goes through `DhanHistoricalDataService` / `DhanRollingOptionDataService` so it is cached too
   (`DhanDataCacheTests.cs`).
 

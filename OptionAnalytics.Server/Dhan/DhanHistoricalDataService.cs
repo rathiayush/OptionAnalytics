@@ -73,11 +73,28 @@ public sealed class DhanHistoricalDataService
 
     /// <summary>Whether a past window's candles are whole enough to keep for good: every IST day in it has a full
     /// session's bars (300+ one-minute ones - a holiday with none is not kept; a day Dhan sent half of is asked again).</summary>
+    /// <remarks>Judged on the minutes Dhan SENT (<see cref="SentTimes"/>), not on the bars the parser keeps: a minute an
+    /// option strike did not trade comes as a 0 price and is dropped as implausible, so a thin strike (BANKNIFTY's monthly
+    /// options away from the money) parsed under 300 bars a day and was asked of Dhan again on every load, forever.</remarks>
     internal static bool CompleteDays(IEnumerable<DateTimeOffset> times, int intervalMinutes)
     {
         var perDay = times.GroupBy(IstClock.IstDate).Select(g => g.Count()).ToList();
         var minimum = Math.Max(1, 300 / Math.Max(1, intervalMinutes));
         return perDay.Count > 0 && perDay.All(n => n >= minimum);
+    }
+
+    /// <summary>The minutes a Dhan candle answer covers - its own `timestamp` array (`series`: the response root for
+    /// /charts/intraday, data.ce / data.pe for /charts/rollingoption), every one of them, before any bar is dropped as
+    /// implausible. What the cache's CompleteDays judges.</summary>
+    internal static List<DateTimeOffset> SentTimes(JsonElement series)
+    {
+        var times = new List<DateTimeOffset>();
+        if (series.ValueKind != JsonValueKind.Object || !series.TryGetProperty("timestamp", out var stamps) || stamps.ValueKind != JsonValueKind.Array) return times;
+        foreach (var t in stamps.EnumerateArray())
+        {
+            if (t.ValueKind == JsonValueKind.Number && t.TryGetDouble(out var seconds) && seconds > 0) times.Add(DateTimeOffset.FromUnixTimeSeconds((long)seconds));
+        }
+        return times;
     }
 
     /// <summary>Waits for a rate-limit permit, then sends the call under its own CallTimeout -
@@ -155,7 +172,7 @@ public sealed class DhanHistoricalDataService
             }
 
             var candles = ParseCandlesWithVolume(response.Root);
-            if (cached is null) _cache?.Put(IntradayPath, payload, toDay, response.Root, CompleteDays(candles.Select(c => c.Time), intervalMinutes));
+            if (cached is null) _cache?.Put(IntradayPath, payload, toDay, response.Root, CompleteDays(SentTimes(response.Root), intervalMinutes));
             return (candles, null);
         }
     }
@@ -216,7 +233,7 @@ public sealed class DhanHistoricalDataService
 
             var oiFieldPresent = response.Root.TryGetProperty("open_interest", out _);
             var bars = ParseCandlesWithOpenInterest(response.Root);
-            if (cached is null) _cache?.Put(IntradayPath, payload, toDay, response.Root, CompleteDays(bars.Select(b => b.Bar.Time), intervalMinutes));
+            if (cached is null) _cache?.Put(IntradayPath, payload, toDay, response.Root, CompleteDays(SentTimes(response.Root), intervalMinutes));
             return (bars, oiFieldPresent, null);
         }
     }
@@ -301,7 +318,7 @@ public sealed class DhanHistoricalDataService
             }
 
             var candles = ParseCandlesWithVolume(response.Root);
-            if (cached is null) _cache?.Put(IntradayPath, payload, toDay, response.Root, CompleteDays(candles.Select(c => c.Time), intervalMinutes));
+            if (cached is null) _cache?.Put(IntradayPath, payload, toDay, response.Root, CompleteDays(SentTimes(response.Root), intervalMinutes));
             return (candles, null);
         }
     }
