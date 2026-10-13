@@ -3,7 +3,7 @@
 // confirmation, how it is taken in options) and see what that setting would have done on past days - beside the strategy
 // as written and as applied now. A server job (the tuning's own day scan and measure - tune.mjs "lab": past days come
 // from the cache, so a run normally costs no Dhan calls); nothing is written to the tuning history. Apply it from here.
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation } from 'react-router-dom'
 import { Alert, Button, Card, Col, DatePicker, InputNumber, Progress, Row, Segmented, Select, Space, Table, Tag, Tooltip, Typography, message } from 'antd'
 import { NavBar, useAuth, UP_COLOR, DOWN_COLOR } from './shared.jsx'
@@ -47,6 +47,7 @@ export default function StrategyLabPage() {
   const fresh = (toSingle) => { setStartFrom(!toSingle && startFrom === 'applied' ? 'applied' : 'written'); setParams({}) }
   const changeData = (d) => {
     setData(d)
+    setLaunched({}) // the other mode's results are its own
     const kept = ids.filter((x) => !!STRATEGY_BY_ID[x]?.spot === (d === 'spot'))
     setIds(kept.length ? kept : [listOf(d)[0]?.value])
     setStartFrom('written'); setParams({})
@@ -95,23 +96,37 @@ export default function StrategyLabPage() {
   const [results, setResults] = useState({})
   const [busy, setBusy] = useState(null)
   const [picked, setPicked] = useState(null)
-  const loadResults = () => Promise.all(UNDERLYINGS.map((u) => fetch(`/api/strategy-tuning/lab/${u}?data=${data}`).then((r) => (r.ok ? r.json() : null)).catch(() => null)))
+  // The indices this page has started (or queued) a run for: { [index]: the finishedUtc of its result when it was started }
+  // - until its result is a newer one, what is shown for it is the PREVIOUS run's: marked "updating", out of the totals.
+  const [launched, setLaunched] = useState({})
+  const launch = (list) => setLaunched((l) => ({ ...l, ...Object.fromEntries(list.map((u) => [u, results[u]?.finishedUtc ?? null])) }))
+  const loadResults = () => Promise.all(UNDERLYINGS.map((u) => fetch(`/api/strategy-tuning/lab/${u}?data=${data}`, { cache: 'no-store' }).then((r) => (r.ok ? r.json() : null)).catch(() => null)))
     .then((list) => setResults(Object.fromEntries(UNDERLYINGS.map((u, i) => [u, list[i]]))))
   useEffect(() => { loadResults() }, [data]) // eslint-disable-line react-hooks/exhaustive-deps
+  // The job as last seen: any change of it - a lab run done, failed or stopped, the next index's starting - reads the
+  // results again (a run that ended between two looks, or one index's following another, is never missed).
+  const lastJob = useRef(null)
   useEffect(() => {
     let stop = false
-    const poll = () => fetch('/api/strategy-tuning/status').then((r) => (r.ok ? r.json() : null)).then((s) => {
+    const poll = () => fetch('/api/strategy-tuning/status', { cache: 'no-store' }).then((r) => (r.ok ? r.json() : null)).then((s) => {
       if (stop || !s) return
-      setStatus((prev) => {
-        // A lab run just finished: the results again (the next index's may start right after it).
-        if (prev?.state === 'running' && prev?.job?.what === 'lab' && (s.state !== 'running' || s.job?.underlying !== prev.job?.underlying)) loadResults()
-        return s
-      })
+      const key = `${s.state}|${s.job?.what}|${s.job?.underlying}|${s.startedUtc ?? ''}|${s.finishedUtc ?? ''}`
+      const was = lastJob.current
+      lastJob.current = key
+      if (was != null && was !== key && (s.job?.what === 'lab' || was.split('|')[1] === 'lab')) loadResults()
+      setStatus(s)
     }).catch(() => {})
     poll()
     const t = setInterval(poll, 2500)
     return () => { stop = true; clearInterval(t) }
   }, [data]) // eslint-disable-line react-hooks/exhaustive-deps
+  // While an index started from here has no new result yet, the results are read again now and then too.
+  const waiting = Object.entries(launched).some(([u, before]) => (results[u]?.finishedUtc ?? null) === before)
+  useEffect(() => {
+    if (!waiting) return undefined
+    const t = setInterval(loadResults, 20_000)
+    return () => clearInterval(t)
+  }, [waiting, data]) // eslint-disable-line react-hooks/exhaustive-deps
   const running = status?.state === 'running'
   const labRunning = running && status?.job?.what === 'lab'
   const sent = () => (single ? { params: labParams(params, data) } : { params: labOverrides(params, data), labBase: startFrom === 'applied' ? 'applied' : 'written' })
@@ -133,14 +148,17 @@ export default function StrategyLabPage() {
     if (res.status === 409) { setBusy(body?.error ?? 'another job is running'); return }
     if (!res.ok) { message.error(body?.error ?? `HTTP ${res.status}`); return }
     setStatus(body)
+    launch(indices.slice(0, 1))
     const rest = indices.slice(1)
     if (rest.length && !(await queueOf(rest))) return
+    launch(rest)
     message.info(rest.length
       ? `Lab run started on ${indices[0]} (${what}); ${rest.join(', ')} queued right after it - past days come from the cache`
       : `Lab run started (${what}) - past days come from the cache, so it normally takes a minute or two`)
   }
   const queue = async () => {
     if (!(await queueOf(indices))) return
+    launch(indices)
     setBusy(null)
     message.success(`Queued for ${indices.join(', ')} - it runs when the current job is done (Strategy tuning → schedule)`)
   }
@@ -151,12 +169,22 @@ export default function StrategyLabPage() {
 
   // Every index × strategy picked, with its last lab result (or none yet).
   const entriesOf = (r) => (r?.ok && r?.lab ? (r.results ?? (r.strategy ? [{ strategy: r.strategy, base: 'written', asWritten: r.asWritten, applied: r.applied, yours: r.yours }] : [])) : [])
-  const nowSent = JSON.stringify(sent())
-  const sentOf = (r) => JSON.stringify(single ? { params: r?.job?.params ?? {} } : { params: r?.job?.params ?? {}, labBase: r?.job?.labBase ?? 'written' })
+  // What a run measured: the setting (and its start, with several), and its days - the last N, or the dates. A result of
+  // another setting or other days is an OLDER run's, never this one's.
+  const runKey = (j) => JSON.stringify({ ...(single ? { params: j?.params ?? {} } : { params: j?.params ?? {}, labBase: j?.labBase ?? 'written' }),
+    ...(j?.from || j?.to ? { from: j?.from || null, to: j?.to || null } : { days: Number(j?.days) || 30 }) })
+  const nowSent = runKey({ ...sent(), ...job(index) })
+  const sentOf = (r) => runKey(r?.job)
+  /** Where an index's result stands: 'updating' (a run started from here has not written its result yet - this is the
+   *  previous one), 'failed' (its last run did not finish), 'done', or null (none yet). */
+  const stateOf = (u) => (launched[u] !== undefined && (results[u]?.finishedUtc ?? null) === launched[u] ? 'updating'
+    : results[u]?.lab && results[u]?.ok === false ? 'failed' : results[u]?.ok ? 'done' : null)
   const rows = indices.flatMap((u) => ids.map((x) => {
     const file = results[u]
     const entry = entriesOf(file).find((e) => e.strategy?.id === x) ?? null
-    return { key: `${u}-${x}`, index: u, id: x, file, entry, stale: !!entry && sentOf(file) !== nowSent }
+    const updating = stateOf(u) === 'updating'
+    const stale = !!entry && sentOf(file) !== nowSent
+    return { key: `${u}-${x}`, index: u, id: x, file, entry, stale, updating, current: !!entry && !stale && !updating }
   }))
   const done = rows.filter((r) => r.entry)
   const missing = rows.filter((r) => !r.entry)
@@ -289,12 +317,33 @@ export default function StrategyLabPage() {
           </Space>
         </Card>
 
+        {/* Each index: when its numbers were run, or that they are being updated, or why its last run did not finish. */}
+        <Space wrap size={[16, 4]} aria-label="Lab result per index">
+          {indices.map((u) => {
+            const st = stateOf(u)
+            const file = results[u]
+            const when = file?.finishedUtc ? new Date(file.finishedUtc).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false }) : null
+            const runningHere = labRunning && status?.job?.underlying === u
+            return (
+              <span key={u} style={{ fontSize: 12 }}>
+                <b>{u}</b>{' '}
+                {st === 'updating' ? <Tag color="processing">{runningHere ? 'running now' : 'queued'}{file?.ok ? ` - showing its previous run${when ? ` (${when})` : ''} until it is done` : ' - no result yet'}</Tag>
+                  : st === 'failed' ? <Tooltip title={file.error}><Tag color="error">last run failed{when ? ` ${when}` : ''}: {String(file.error).slice(0, 80)}</Tag></Tooltip>
+                    : st === 'done' ? <Tag color={sentOf(file) === nowSent ? 'success' : 'warning'}>run {when}{sentOf(file) === nowSent ? '' : ' - an older setting / other days'}</Tag>
+                      : <Tag>no run yet</Tag>}
+              </span>
+            )
+          })}
+        </Space>
         {done.length > 0 && (rows.length > 1 || done.length < rows.length) && (
-          <LabSummary rows={done} picked={current?.key} onPick={setPicked} missing={missing} data={data} />
+          <LabSummary rows={done} picked={current?.key} onPick={setPicked} missing={missing} data={data} failedOf={(u) => (stateOf(u) === 'failed' ? results[u]?.error : null)} />
+        )}
+        {done.length === 0 && missing.some((m) => stateOf(m.index) === 'failed') && (
+          <Alert type="error" showIcon message={`The last lab run failed on ${[...new Set(missing.filter((m) => stateOf(m.index) === 'failed').map((m) => m.index))].join(', ')} - its numbers are not shown; press Run again`} />
         )}
         {current
-          ? <LabResult result={{ ...current.file, ...current.entry }} stale={current.stale} index={current.index} applied={appliedOf(current.index, current.id)}
-              onApply={(live, lots) => apply(current, live, lots)} canApply={isAdmin && !current.stale} indexLots={cfg?.trade?.[current.index]?.lots ?? null} />
+          ? <LabResult result={{ ...current.file, ...current.entry }} stale={current.stale} updating={current.updating} index={current.index} applied={appliedOf(current.index, current.id)}
+              onApply={(live, lots) => apply(current, live, lots)} canApply={isAdmin && current.current} indexLots={cfg?.trade?.[current.index]?.lots ?? null} />
           : <Alert type="info" showIcon message={`No lab run yet for ${rows.length > 1 ? 'these strategies / indices' : `#${STRATEGY_BY_ID[id]?.no} ${STRATEGY_BY_ID[id]?.name} on ${index}`} - set the parameters and press Run.`} />}
       </Space>
     </div>
@@ -304,7 +353,11 @@ export default function StrategyLabPage() {
 /** Every index × strategy picked that has a lab result: as written, as applied, the setting tried, and what it captured
  *  in index points and in the option bought / sold - one row each, a row opening its full result below - with every
  *  strategy added up (and each index when there are several). */
-function LabSummary({ rows, picked, onPick, missing, data }) {
+function LabSummary({ rows: allRows, picked, onPick, missing, data, failedOf = () => null }) {
+  // The totals add up this run only - a row still showing an index's previous run (updating), or an older setting / other
+  // days, is listed (greyed) but never counted.
+  const rows = allRows.filter((r) => r.current)
+  const left = allRows.length - rows.length
   const [of, setOf] = useState('yours')
   const cell = (m) => (m?.r?.n ? <span style={{ fontSize: 12 }}>{m.r.n} · win {pct(m.r.winRate)} · <b style={{ color: col(m.r.avg) }}>{fmtR(m.r.avg)}</b> avg · <span style={{ color: col(m.r.total) }}>{fmtR(m.r.total)}</span></span> : <Text type="secondary" style={{ fontSize: 12 }}>no trades</Text>)
   const legCell = (l) => (l?.n ? <span style={{ fontSize: 12 }}><b style={{ color: col(l.total) }}>{pts(l.total)}</b> <Text type="secondary" style={{ fontSize: 11 }}>({l.n} · {l.wins}/{l.losses} · +{Number(l.captured).toFixed(1)} / {Number(l.lost).toFixed(1)})</Text></span> : <Text type="secondary" style={{ fontSize: 12 }}>-</Text>)
@@ -322,20 +375,20 @@ function LabSummary({ rows, picked, onPick, missing, data }) {
   const all = sumPoints(rows.map(pointsOf))
   const ofText = of === 'yours' ? 'your setting' : of === 'applied' ? 'as applied - as written where nothing is applied' : 'as written'
   return (
-    <Card size="small" title={`The lab runs - ${rows.length} strategy / index pair(s)`}
+    <Card size="small" title={`The lab runs - ${allRows.length} strategy / index pair(s)`}
       extra={<Space size={8} wrap><Text type="secondary" style={{ fontSize: 12 }}>points of</Text><Segmented size="small" value={of} onChange={setOf} options={[{ value: 'yours', label: 'Your setting' }, { value: 'applied', label: 'As applied' }, { value: 'asWritten', label: 'As written' }]} aria-label="Points of" /></Space>}>
       <Space direction="vertical" size={8} style={{ width: '100%' }}>
         {/* The answer in one line: what every strategy picked captured together. */}
         <Text style={{ fontSize: 13 }} aria-label="All strategies points">
-          All {rows.length} together ({ofText}{indices.length > 1 ? ', the indices\' points added' : ''}): option bought <b style={{ color: col(all.buy.total) }}>{pts(all.buy.total)}</b> pts ({all.buy.n} trades)
+          All {rows.length} together ({ofText}{indices.length > 1 ? ', the indices\' points added' : ''}){left ? <Text type="warning" style={{ fontSize: 12 }}> - {left} not counted: still updating or from an older run</Text> : null}: option bought <b style={{ color: col(all.buy.total) }}>{pts(all.buy.total)}</b> pts ({all.buy.n} trades)
           {' · '}option sold <b style={{ color: col(all.sell.total) }}>{pts(all.sell.total)}</b> pts ({all.sell.n})
           {' · '}{idx.toLowerCase()} <b style={{ color: col(all.total) }}>{pts(all.total)}</b> pts ({all.n})
         </Text>
-        <Table size="small" pagination={false} rowKey="key" dataSource={rows} scroll={{ x: 1500 }} aria-label="Lab runs"
-          onRow={(r) => ({ onClick: () => onPick(r.key), style: { cursor: 'pointer', background: r.key === picked ? 'rgba(22,119,255,0.12)' : undefined } })}
+        <Table size="small" pagination={false} rowKey="key" dataSource={allRows} scroll={{ x: 1500 }} aria-label="Lab runs"
+          onRow={(r) => ({ onClick: () => onPick(r.key), style: { cursor: 'pointer', background: r.key === picked ? 'rgba(22,119,255,0.12)' : undefined, opacity: r.current ? 1 : 0.5 } })}
           columns={[
             { title: 'Index', dataIndex: 'index', width: 100 },
-            { title: 'Strategy', key: 's', width: 220, render: (_, r) => <span>#{r.entry.strategy.no} {r.entry.strategy.name}{r.stale && <Tag color="warning" style={{ marginLeft: 6 }}>older setting</Tag>}</span> },
+            { title: 'Strategy', key: 's', width: 220, render: (_, r) => <span>#{r.entry.strategy.no} {r.entry.strategy.name}{r.updating ? <Tag color="processing" style={{ marginLeft: 6 }}>previous run - updating</Tag> : r.stale ? <Tag color="warning" style={{ marginLeft: 6 }}>older run - other setting / days</Tag> : null}</span> },
             { title: 'As written', key: 'w', width: 230, render: (_, r) => cell(r.entry.asWritten) },
             { title: 'As applied', key: 'a', width: 230, render: (_, r) => (r.entry.applied ? cell(r.entry.applied) : <Text type="secondary" style={{ fontSize: 12 }}>not applied</Text>) },
             { title: 'Your setting', key: 'y', width: 250, render: (_, r) => <span>{cell(r.entry.yours)}{r.entry.base === 'applied' && <Tag style={{ marginLeft: 6 }}>from applied</Tag>}</span> },
@@ -366,13 +419,16 @@ function LabSummary({ rows, picked, onPick, missing, data }) {
               })}
             </>
           )} />
-        {missing.length > 0 && <Text type="secondary" style={{ fontSize: 12 }}>No lab run yet for {missing.map((m) => `#${STRATEGY_BY_ID[m.id]?.no} on ${m.index}`).join(', ')} - press Run to measure them.</Text>}
+        {[...new Set(missing.map((m) => m.index))].filter((u) => failedOf(u)).map((u) => (
+          <Text key={u} type="danger" style={{ fontSize: 12 }}>The last lab run on {u} failed - {failedOf(u)}. Its numbers are not shown; press Run again.</Text>
+        ))}
+        {missing.filter((m) => !failedOf(m.index)).length > 0 && <Text type="secondary" style={{ fontSize: 12 }}>No lab run yet for {missing.filter((m) => !failedOf(m.index)).map((m) => `#${STRATEGY_BY_ID[m.id]?.no} on ${m.index}`).join(', ')} - press Run to measure them.</Text>}
       </Space>
     </Card>
   )
 }
 
-function LabResult({ result, stale, index, applied, onApply, canApply, indexLots }) {
+function LabResult({ result, stale, updating = false, index, applied, onApply, canApply, indexLots }) {
   const cols = [
     { key: 'asWritten', title: 'As written', m: result.asWritten },
     ...(result.applied ? [{ key: 'applied', title: `As applied on ${index}`, m: result.applied }] : []),
@@ -403,7 +459,8 @@ function LabResult({ result, stale, index, applied, onApply, canApply, indexLots
           onApply={(live, lots) => onApply(live, lots)} />
       )}>
       <Space direction="vertical" size={10} style={{ width: '100%' }}>
-        {stale && <Alert type="warning" showIcon message="The parameters were changed since this run - run the lab again to see the new setting (and to apply it)." />}
+        {updating && <Alert type="info" showIcon message={`This is ${index}'s previous lab run - the new one is running or queued; it shows here when it is done (and can be applied then).`} />}
+        {!updating && stale && <Alert type="warning" showIcon message="This run measured another setting or other days than the ones set now - run the lab again to see them (and to apply it)." />}
         <Table size="small" pagination={false} rowKey="key" dataSource={metrics} scroll={{ x: 900 }} aria-label="Lab comparison"
           columns={[{ title: '', dataIndex: 'label', width: 200, render: (v) => <Text strong style={{ fontSize: 12 }}>{v}</Text> },
             ...cols.map((c) => ({ title: c.title, key: c.key, render: (_, r) => r.render(c.m) }))]} />

@@ -412,6 +412,7 @@ public sealed class StrategyTuningService
             await process.WaitForExitAsync();
             var running = output + ".running";
             string? error = null;
+            var kept = false;
             if (File.Exists(running))
             {
                 var body = JsonNode.Parse(File.ReadAllText(running));
@@ -421,6 +422,7 @@ public sealed class StrategyTuningService
                     if (job.What != "lab")
                         File.Copy(running, Path.Combine(_dir, $"{job.Underlying}{(job.Data == "spot" ? "-spot" : "")}-{DateTimeOffset.UtcNow:yyyyMMdd-HHmmss}.json"), overwrite: true);
                     File.Move(running, output, overwrite: true);
+                    kept = true;
                 }
                 else
                 {
@@ -429,6 +431,15 @@ public sealed class StrategyTuningService
                 }
             }
             else if (process.ExitCode != 0) error = $"the job exited with code {process.ExitCode}";
+            // A lab run that did not finish: the index's lab result says so - its previous run's numbers are never left
+            // there to pass for this run's (the lab page shows them as the index's current result).
+            if (job.What == "lab" && !kept)
+            {
+                string? why;
+                lock (_lock) why = _stopping ? "interrupted by a server restart - it starts again by itself"
+                    : _status.State == "cancelled" ? "stopped from the page before it finished" : error ?? "it ended without a result";
+                WriteLabFailure(job, why);
+            }
             PruneHistory(_configuration.GetValue("StrategyTuning:HistoryRuns", 100));
             lock (_lock)
             {
@@ -443,11 +454,32 @@ public sealed class StrategyTuningService
         catch (Exception ex)
         {
             lock (_lock) { _status = _status with { State = "failed", FinishedUtc = DateTimeOffset.UtcNow, Error = ex.Message }; _process = null; }
+            if (job.What == "lab") WriteLabFailure(job, ex.Message);
         }
         finally
         {
             process.Dispose();
         }
+    }
+
+    /// <summary>A lab run that failed or was stopped, as the index's lab result: { ok: false, lab: true, error, job,
+    /// finishedUtc } in place of the previous run's (whose numbers would otherwise be read as this run's).</summary>
+    internal void WriteLabFailure(TuningJob job, string error)
+    {
+        var path = LabResultPath(job.Underlying, job.Data);
+        try
+        {
+            var body = new JsonObject
+            {
+                ["ok"] = false, ["lab"] = true, ["underlying"] = job.Underlying.ToUpperInvariant(), ["data"] = job.Data, ["error"] = error,
+                ["finishedUtc"] = DateTimeOffset.UtcNow.ToString("O"),
+                ["job"] = JsonSerializer.SerializeToNode(job, new JsonSerializerOptions(JsonSerializerDefaults.Web)),
+            };
+            var tmp = path + ".tmp";
+            File.WriteAllText(tmp, body.ToJsonString());
+            File.Move(tmp, path, overwrite: true);
+        }
+        catch (Exception ex) { _logger.LogWarning(ex, "Lab failure for {Underlying} could not be recorded.", job.Underlying); }
     }
 }
 

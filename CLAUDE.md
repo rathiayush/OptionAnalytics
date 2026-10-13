@@ -14,7 +14,11 @@ strategy is traded where it is in the alert list, on the index's live list, or h
 The **Strategy lab** (`StrategyLabPage.jsx`, tuning job `what: 'lab'`, `evaluateSetting` in `strategyTuning.js`) measures
 an edited setting over past days with the tuning's own functions - one strategy on one index (the whole setting), or several
 of each (the changes - `labOverrides` - on top of each one's start, `labBase` written / applied; one job per index, the
-first run now and the rest queued, every strategy measured on one day scan); it writes no tuning history.
+first run now and the rest queued, every strategy measured on one day scan); it writes no tuning history. Each index keeps its
+last lab result; a lab run that fails, crashes or is stopped REPLACES it with why (`WriteLabFailure`) - an older run's numbers
+never pass for a new run's. The page counts only results of the setting and days set now: an index it started that has not
+written its new result yet ("running / queued - showing its previous run") or an older setting / other days is greyed and
+left out of the totals; results are read again on every job start / end.
 
 After ANY change to those files (or to anything they read):
 

@@ -111,6 +111,49 @@ public sealed class StrategyTuningServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task ALabRunThatDoesNotFinish_ReplacesTheIndexsLastLabResult_WithWhy()
+    {
+        // The lab page shows each index's last lab result as its current one: a run that failed, crashed or was stopped
+        // must not leave the previous run's numbers there to pass for its own.
+        var lab = Job() with { What = "lab", Data = "spot" };
+        var good = Service(Script("import { writeFileSync } from 'node:fs'\nwriteFileSync(process.env.TUNE_OUT, JSON.stringify({ ok: true, lab: true, underlying: 'NIFTY', marker: 'old' }))"));
+        Assert.Null(good.Start(lab));
+        await UntilDone(good);
+        Assert.Equal("old", good.LabResult("NIFTY", "spot")!["marker"]!.GetValue<string>());
+
+        var failed = Service(Script("import { writeFileSync } from 'node:fs'\nwriteFileSync(process.env.TUNE_OUT, JSON.stringify({ ok: false, error: 'no spot candles for 12 days' }))"));
+        Assert.Null(failed.Start(lab));
+        Assert.Equal("failed", (await UntilDone(failed)).State);
+        var r = failed.LabResult("NIFTY", "spot")!;
+        Assert.False(r["ok"]!.GetValue<bool>());
+        Assert.True(r["lab"]!.GetValue<bool>());
+        Assert.Equal("no spot candles for 12 days", r["error"]!.GetValue<string>());
+        Assert.Null(r["marker"]);
+        Assert.Equal("lab", r["job"]!["what"]!.GetValue<string>());
+        Assert.NotNull(r["finishedUtc"]);
+
+        var crashed = Service(Script("process.exit(3)"));
+        Assert.Null(crashed.Start(lab));
+        await UntilDone(crashed);
+        Assert.Equal("the job exited with code 3", crashed.LabResult("NIFTY", "spot")!["error"]!.GetValue<string>());
+
+        var slow = Service(Script("setTimeout(() => {}, 20000)"));
+        Assert.Null(slow.Start(lab));
+        await Task.Delay(300);
+        slow.Cancel();
+        for (var i = 0; i < 100 && !(slow.LabResult("NIFTY", "spot")?["error"]?.GetValue<string>() ?? "").Contains("stopped"); i++) await Task.Delay(50);
+        Assert.Equal("stopped from the page before it finished", slow.LabResult("NIFTY", "spot")!["error"]!.GetValue<string>());
+
+        // A good run puts its numbers back; another index, the futures lab and the tuning result are never touched.
+        Assert.Null(good.Start(lab));
+        await UntilDone(good);
+        Assert.True(good.LabResult("NIFTY", "spot")!["ok"]!.GetValue<bool>());
+        Assert.Null(good.LabResult("BANKNIFTY", "spot"));
+        Assert.Null(good.LabResult("NIFTY"));
+        Assert.Null(good.Result("NIFTY", "spot"));
+    }
+
+    [Fact]
     public async Task ARunByHand_IsOnTheScheduleToo_AndItsEndAndRunAreRecorded()
     {
         var s = Service(Script("import { writeFileSync } from 'node:fs'\nconsole.log('HISTORY NIFTY-futures-20261010-120000 (0 trades, 0 settings)')\nwriteFileSync(process.env.TUNE_OUT, JSON.stringify({ ok: true, underlying: 'NIFTY' }))"));
