@@ -12,7 +12,9 @@ paper / signals only, tuned), each index's Live today, today's signals and trade
 the scanner settings (alert list, trailing stop, per-strategy filters, Telegram - saved to the server's config). A
 strategy is traded where it is in the alert list, on the index's live list, or has a fine-tuned setting applied there.
 The **Strategy lab** (`StrategyLabPage.jsx`, tuning job `what: 'lab'`, `evaluateSetting` in `strategyTuning.js`) measures
-one edited setting over past days with the tuning's own functions; it writes no tuning history.
+an edited setting over past days with the tuning's own functions - one strategy on one index (the whole setting), or several
+of each (the changes - `labOverrides` - on top of each one's start, `labBase` written / applied; one job per index, the
+first run now and the rest queued, every strategy measured on one day scan); it writes no tuning history.
 
 After ANY change to those files (or to anything they read):
 

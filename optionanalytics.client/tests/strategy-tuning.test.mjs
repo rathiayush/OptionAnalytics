@@ -273,3 +273,13 @@ test('a lab setting: only what differs from as written, no futures / order-flow 
   assert.deepEqual(labParams({ optLeg: 'sell', optExit: 'first' }, 'futures'), { optLeg: 'sell', optMoneyness: 0, optExit: 'first', optSlPct: 20, optTargetPct: 30 })
   assert.deepEqual(labParams({ optMoneyness: 2, optExit: 'first' }, 'futures'), {}, 'no option leg: no option part')
 })
+
+test('the lab changes for several strategies at once: every key set (a default too), the option part, or the option taken off', async () => {
+  const { labOverrides } = await import('../src/strategyTuning.js')
+  // A key set back to its default is still a change - a strategy's starting point may have another.
+  assert.deepEqual(labOverrides({ tradeSide: 'both', tradeStopX: 1.5 }, 'futures'), { tradeSide: 'both', tradeStopX: 1.5 })
+  assert.deepEqual(labOverrides({}, 'futures'), {}, 'nothing set: each as its starting point')
+  assert.deepEqual(labOverrides({ tradeTape: 'with', tradeSideOi: 'withBoth' }, 'spot'), { tradeSideOi: 'withBoth' }, 'spot has no order flow')
+  assert.deepEqual(labOverrides({ optLeg: 'sell', optExit: 'indexSl', optSlPct: 25, optTargetPct: 50 }, 'futures'), { optLeg: 'sell', optMoneyness: 0, optExit: 'indexSl', optSlPct: 25 })
+  assert.deepEqual(labOverrides({ optLeg: 'none', optSlPct: 25 }, 'futures'), { optLeg: 'none' }, 'the option taken off')
+})
