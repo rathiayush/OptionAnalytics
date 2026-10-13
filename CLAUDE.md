@@ -34,7 +34,10 @@ the spot + options strategies (`spotEngine.js`, server only): once each finished
 (`priceBasis: 'spot'`) - `tests/scanner-runner-spot.test.mjs` keeps live == the tuning's day scan. Spot #111 - #113 read the
 day's OWN spot profile, built inside the engine from the same spot bars (`spotProfile`: time at price - spot has no volume -
 over the minutes finished `PROFILE_LAG` (15)+ minutes before the clock; its nodes, POC and the thin areas between two nodes),
-never the server's previous-day profile or the futures' - so every caller gets the same one with nothing to pass. On the page they live on
+never the server's previous-day profile or the futures' - so every caller gets the same one with nothing to pass. Spot #114
+(OI confluence) has the Strategy lab's OI filters as its own rules - the whole chain's net CE - PE since the open with the
+trade, CE / PE with it (15 min) and not against it (since the open), the wall in the way not growing and at least the target
+away, the day not trending against it - and buys the dip / sells the pop (`tests/spot-strategies-5.test.mjs`). On the page they live on
 the OI Replay page (`SpotStrategyScanner.jsx`, its data), judged by the same `spotScanTick` / `spotScanMinutes`
 (`scannerCore.js`) and traded in options like the Order Flow scanner: paper on each alert, Live (Dhan) + confirmed
 "Auto-place on alert" for real super orders, exits on the signal's spot SL / target / trail / time stop. The runner is

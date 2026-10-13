@@ -21,7 +21,7 @@ const fires = (w, id, side) => !!find(w, id, side)
 const moving = (rate, only = null) => (k, m) => 2e6 * (only == null || only === k ? 1 + rate * ramp(m) : 1)
 
 test('three own-profile spot strategies, #111 - #113, in the profile group', () => {
-  assert.deepEqual(SPOT_STRATEGIES.slice(-3).map((s) => [s.no, s.id, s.group]), [[111, 'spotLvnReject', 'profile'], [112, 'spotLvnFill', 'profile'], [113, 'spotPocReject', 'profile']])
+  assert.deepEqual(SPOT_STRATEGIES.filter((s) => s.group === 'profile').map((s) => [s.no, s.id, s.group]), [[111, 'spotLvnReject', 'profile'], [112, 'spotLvnFill', 'profile'], [113, 'spotPocReject', 'profile']])
   assert.ok(['spotLvnReject', 'spotLvnFill', 'spotPocReject'].every((id) => STRATEGY_BY_ID[id]?.spot && /own spot profile/.test(STRATEGY_BY_ID[id].name)))
 })
 

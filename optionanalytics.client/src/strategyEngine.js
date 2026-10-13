@@ -134,6 +134,8 @@ export const SPOT_STRATEGIES = [
   { id: 'spotLvnReject', no: 111, name: 'Spot: LVN refused - back to the node it came from (own spot profile + OI)', short: 'Spot LVN refused', spot: true, group: 'profile' },
   { id: 'spotLvnFill', no: 112, name: 'Spot: LVN filled fast - across to the next node (own spot profile + OI)', short: 'Spot LVN fill', spot: true, group: 'profile' },
   { id: 'spotPocReject', no: 113, name: 'Spot: POC rejection after a fast run into it (own spot profile + OI)', short: 'Spot POC rejection', spot: true, group: 'profile' },
+  // 114: the option chain's OI reads - the ones the Strategy lab tunes as filters - all on the trade's side, as its rules.
+  { id: 'spotOiConfluence', no: 114, name: 'Spot: OI confluence - writers on the trade\'s side since the open, CE / PE with it, room to the wall - buy the dip', short: 'Spot OI confluence', spot: true },
 ]
 export const STRATEGY_BY_ID = Object.fromEntries([...STRATEGIES, ...SPOT_STRATEGIES].map((s) => [s.id, s]))
 /** The strategies in use - what the scanner runs, lists, alerts on and scores. */
