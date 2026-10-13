@@ -46,7 +46,7 @@ public sealed class DataFilesService
 
         Add("scanner-log", "Scanner log", "Every signal and trade the scanners recorded, per index (CSV) - what the Trades page and the live list read.", true, "Storage:ScannerLogPath", "scanner-log");
         Add("scanner-runner", "Scanner runner & tuning", "The server scanner's config and day state; the tuning's results, history and its cache of the days it fetched (cached Dhan API data).", true, "Storage:ScannerRunnerPath", "scanner-runner-data");
-        Add("dhan-cache", "Dhan API cache", "Every past-day Dhan Data API response (spot / futures / option candles, the expired-option chain), kept so a closed day is asked of Dhan once (DhanDataCache).", true, "Storage:DhanCachePath", "dhan-cache");
+        Add("dhan-cache", "Dhan API cache", "Every past day of Dhan's Data API (spot / futures / option candles, the expired-option chain), one file per instrument and day, kept so a closed day is asked of Dhan once - held to Storage:DhanCacheMaxGb (10 GB), the files read least recently going first (DhanDataCache).", true, "Storage:DhanCachePath", "dhan-cache");
         Add("historical", "Historical spot data", "Cached spot candles (Dhan API).", true, "Storage:HistoricalDataPath", "historical-data");
         Add("expired-options", "Expired option data", "Cached expired-option data (Dhan API).", true, "Storage:ExpiredOptionDataPath", "expired-option-data");
         Add("trade-settings", "Trade settings", "Lots, manual SL / target / trail, the strategies' max rules, slippage and the scanner per index.", false, "Storage:TradeSettingsPath", "trade-settings.csv");

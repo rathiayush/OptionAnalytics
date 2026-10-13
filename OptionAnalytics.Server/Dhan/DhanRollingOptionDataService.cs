@@ -155,7 +155,9 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
             var chunkEnd = chunkStart.AddDays(MaxChunkDays - 1);
             if (chunkEnd > toDay) chunkEnd = toDay;
 
-            var payload = new
+            // The request without its dates names the series on disk (one file per day); the payload is Dhan's request
+            // (and the key of an older whole-chunk file).
+            var key = new
             {
                 exchangeSegment = ResolveFnoSegment(underlying),
                 interval = intervalMinutes.ToString(CultureInfo.InvariantCulture),
@@ -166,60 +168,99 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
                 strike,
                 drvOptionType,
                 requiredData = RequiredData,
-                fromDate = chunkStart.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+            };
+            object PayloadFor(DateOnly from, DateOnly to) => new
+            {
+                exchangeSegment = ResolveFnoSegment(underlying),
+                interval = intervalMinutes.ToString(CultureInfo.InvariantCulture),
+                securityId = underlyingSecurityId,
+                instrument = OptionInstrument,
+                expiryFlag,
+                expiryCode,
+                strike,
+                drvOptionType,
+                requiredData = RequiredData,
+                fromDate = from.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
                 // +1 day - Dhan's own docs state toDate is NON-INCLUSIVE ("End date of the desired
                 // range (non-inclusive)"), unlike every other date range in this app (GetIntradayCa
                 // ndlesAsync's toDay, this method's own toDay parameter, both inclusive). Sending
                 // chunkEnd as-is would silently drop chunkEnd's own trading day entirely - most
                 // often the exact day that matters, since a caller's toDay is typically the target
                 // expiry date itself.
-                toDate = chunkEnd.AddDays(1).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                toDate = to.AddDays(1).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
             };
-            var context = $"rolling option candles ({underlyingSecurityId}, {expiryFlag}+{expiryCode}, {strike} {drvOptionType}, {chunkStart:yyyy-MM-dd}..{chunkEnd:yyyy-MM-dd})";
 
-            // A closed chunk fetched before comes from disk - no Dhan call, no pacing, and no session needed.
-            var cached = _cache?.TryGet(RollingPath, payload, chunkEnd);
-            if (cached is null && !_api.HasSession)
-                return (all, "Dhan is not authenticated (check Dhan:ClientId/Dhan:AccessToken).");
-
-            // Paced, not back to back - see ChunkDelay's own doc comment. Skipped before the very
-            // first call only; every call after that (including a retry below) waits first.
-            if (cached is null)
+            // Each closed day kept before comes from disk - no Dhan call, no pacing, and no session needed; the rest of
+            // the chunk is one call, and each final day of it is kept. A day not kept yet may be in an older whole-chunk
+            // file of this very request: then that is read instead (and its days kept).
+            var (parts, ask) = DhanDayWindow.Plan(_cache, RollingPath, key, chunkStart, chunkEnd);
+            var whole = ask is null ? null : _cache?.TryGet(RollingPath, PayloadFor(chunkStart, chunkEnd), chunkEnd);
+            if (whole is not null)
             {
+                foreach (var part in parts) part.Dispose();
+                using var kept = new DhanApiResponse(true, HttpStatusCode.OK, whole, null);
+                DhanDayWindow.Keep(_cache, RollingPath, key, chunkStart, chunkEnd, SideOf(kept.Root, drvOptionType), Wrap, intervalMinutes);
+                all.AddRange(ParseSide(kept.Root, drvOptionType));
+                chunkStart = chunkEnd.AddDays(1);
+                continue;
+            }
+            foreach (var part in parts) using (part) all.AddRange(ParseSide(part.Root, drvOptionType));
+            if (ask is { } span)
+            {
+                if (!_api.HasSession)
+                    return (Ordered(all, fromDay, toDay), "Dhan is not authenticated (check Dhan:ClientId/Dhan:AccessToken).");
+
+                // Paced, not back to back - see ChunkDelay's own doc comment. Skipped before the very
+                // first call only; every call after that (including a retry below) waits first.
                 if (!isFirstChunk) await Task.Delay(ChunkDelay, cancellationToken);
                 isFirstChunk = false;
+
+                var context = $"rolling option candles ({underlyingSecurityId}, {expiryFlag}+{expiryCode}, {strike} {drvOptionType}, {span.From:yyyy-MM-dd}..{span.To:yyyy-MM-dd})";
+                var (response, error) = await SendWithRateLimitRetryAsync(PayloadFor(span.From, span.To), context, cancellationToken, interactive);
+                if (response is null)
+                {
+                    _logger.LogWarning("Rolling option candle request failed for {Id} ({ExpiryFlag}+{ExpiryCode}, {Strike} {Side}, {From}..{To}) - {Error}",
+                        underlyingSecurityId, expiryFlag, expiryCode, strike, drvOptionType, span.From, span.To, error);
+                    return (Ordered(all, fromDay, toDay), error);
+                }
+
+                // Disposed here, right after ParseSide is done reading it - a JsonElement is only valid
+                // while the JsonDocument backing it is alive, so it cannot be read AFTER disposing (as
+                // the response's own successful branch below does) or handed back across this method's
+                // own return.
+                using (response)
+                {
+                    // A day is kept once Dhan sent a full session of it - its own minutes, a thin strike's untraded ones
+                    // (0 prices the parser drops) included - or a later past day (DhanDayWindow.Keep).
+                    DhanDayWindow.Keep(_cache, RollingPath, key, span.From, span.To, SideOf(response.Root, drvOptionType), Wrap, intervalMinutes);
+                    all.AddRange(ParseSide(response.Root, drvOptionType));
+                }
             }
 
-            var (response, error) = cached is not null
-                ? (new DhanApiResponse(true, HttpStatusCode.OK, cached, null), null)
-                : await SendWithRateLimitRetryAsync(payload, context, cancellationToken, interactive);
-            if (response is null)
+            // A day's part back in Dhan's own shape: {"data":{"ce"|"pe":{...}}}.
+            Action<Utf8JsonWriter> Wrap(Action<Utf8JsonWriter> day) => w =>
             {
-                _logger.LogWarning("Rolling option candle request failed for {Id} ({ExpiryFlag}+{ExpiryCode}, {Strike} {Side}, {From}..{To}) - {Error}",
-                    underlyingSecurityId, expiryFlag, expiryCode, strike, drvOptionType, chunkStart, chunkEnd, error);
-                return (all, error);
-            }
-
-            // Disposed here, right after ParseSide is done reading it - a JsonElement is only valid
-            // while the JsonDocument backing it is alive, so it cannot be read AFTER disposing (as
-            // the response's own successful branch below does) or handed back across this method's
-            // own return.
-            using (response)
-            {
-                var bars = ParseSide(response.Root, drvOptionType);
-                // Kept once every day in it has a full session's bars (a strike with none, or a day Dhan sent half of, is
-                // asked again next time).
-                if (cached is null) _cache?.Put(RollingPath, payload, chunkEnd, response.Root, DhanHistoricalDataService.CompleteDays(bars.Select(b => b.Bar.Time), intervalMinutes));
-                all.AddRange(bars);
-            }
+                w.WriteStartObject();
+                w.WritePropertyName("data");
+                w.WriteStartObject();
+                w.WritePropertyName(SideKey(drvOptionType));
+                day(w);
+                w.WriteEndObject();
+                w.WriteEndObject();
+            };
 
             chunkStart = chunkEnd.AddDays(1);
         }
 
-        // Clip to exactly [fromDay,toDay] in OUR OWN code rather than trusting either
-        // interpretation of Dhan's toDate boundary - see ClipToRange's own doc comment for why.
-        return (ClipToRange(all, fromDay, toDay), null);
+        return (Ordered(all, fromDay, toDay), null);
     }
+
+    /// <summary>The bars in time order (days read from disk and the call's come in their own order), clipped to exactly
+    /// [fromDay,toDay] in OUR OWN code rather than trusting either interpretation of Dhan's toDate boundary - see
+    /// ClipToRange's own doc comment for why.</summary>
+    private static List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)> Ordered(
+        List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)> bars, DateOnly fromDay, DateOnly toDay) =>
+        ClipToRange(bars.OrderBy(b => b.Bar.Time).ToList(), fromDay, toDay);
 
     /// <summary>Keeps only bars whose own IST calendar date falls within [fromDay,toDay] - a
     /// belt-and-suspenders guarantee of this method's own contract regardless of whatever Dhan's
@@ -296,6 +337,13 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
             await Task.Delay(delay, cancellationToken);
         }
     }
+
+    private static string SideKey(string drvOptionType) => string.Equals(drvOptionType, "PUT", StringComparison.OrdinalIgnoreCase) ? "pe" : "ce";
+
+    /// <summary>The requested side's arrays (data.ce / data.pe) - default (Undefined) when the answer has none.</summary>
+    internal static JsonElement SideOf(JsonElement root, string drvOptionType) =>
+        root.ValueKind == JsonValueKind.Object && root.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Object
+            && data.TryGetProperty(SideKey(drvOptionType), out var side) ? side : default;
 
     private List<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)> ParseSide(JsonElement root, string drvOptionType)
     {
