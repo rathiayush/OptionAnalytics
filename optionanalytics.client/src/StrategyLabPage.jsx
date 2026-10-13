@@ -309,19 +309,21 @@ function LabSummary({ rows, picked, onPick, missing, data }) {
   const cell = (m) => (m?.r?.n ? <span style={{ fontSize: 12 }}>{m.r.n} · win {pct(m.r.winRate)} · <b style={{ color: col(m.r.avg) }}>{fmtR(m.r.avg)}</b> avg · <span style={{ color: col(m.r.total) }}>{fmtR(m.r.total)}</span></span> : <Text type="secondary" style={{ fontSize: 12 }}>no trades</Text>)
   const legCell = (l) => (l?.n ? <span style={{ fontSize: 12 }}><b style={{ color: col(l.total) }}>{pts(l.total)}</b> <Text type="secondary" style={{ fontSize: 11 }}>({l.n} · {l.wins}/{l.losses} · +{Number(l.captured).toFixed(1)} / {Number(l.lost).toFixed(1)})</Text></span> : <Text type="secondary" style={{ fontSize: 12 }}>-</Text>)
   const idx = data === 'spot' ? 'Spot' : 'Futures'
-  const pointsOf = (r) => r.entry[of]?.points ?? null
+  // As applied: what the scanner trades on that index now - its applied setting, as written where none is applied.
+  const measureOf = (entry, k) => (k === 'applied' ? entry.applied ?? entry.asWritten : entry[k])
+  const pointsOf = (r) => measureOf(r.entry, of)?.points ?? null
   const rTotal = (list, k) => {
-    const ms = list.map((r) => r.entry[k]).filter((m) => m?.r?.n)
+    const ms = list.map((r) => measureOf(r.entry, k)).filter((m) => m?.r?.n)
     return { n: ms.reduce((a, m) => a + m.r.n, 0), total: ms.reduce((a, m) => a + (m.r.total ?? 0), 0) }
   }
   const indices = [...new Set(rows.map((r) => r.index))]
   const groups = [...(indices.length > 1 ? indices.map((u) => ({ label: `${u} - all its strategies`, rows: rows.filter((r) => r.index === u) })) : []),
     { label: indices.length > 1 ? 'Every index - all strategies' : `All strategies on ${indices[0]}`, rows, all: true }]
   const all = sumPoints(rows.map(pointsOf))
-  const ofText = of === 'yours' ? 'your setting' : 'as written'
+  const ofText = of === 'yours' ? 'your setting' : of === 'applied' ? 'as applied - as written where nothing is applied' : 'as written'
   return (
     <Card size="small" title={`The lab runs - ${rows.length} strategy / index pair(s)`}
-      extra={<Space size={8} wrap><Text type="secondary" style={{ fontSize: 12 }}>points of</Text><Segmented size="small" value={of} onChange={setOf} options={[{ value: 'yours', label: 'Your setting' }, { value: 'asWritten', label: 'As written' }]} aria-label="Points of" /></Space>}>
+      extra={<Space size={8} wrap><Text type="secondary" style={{ fontSize: 12 }}>points of</Text><Segmented size="small" value={of} onChange={setOf} options={[{ value: 'yours', label: 'Your setting' }, { value: 'applied', label: 'As applied' }, { value: 'asWritten', label: 'As written' }]} aria-label="Points of" /></Space>}>
       <Space direction="vertical" size={8} style={{ width: '100%' }}>
         {/* The answer in one line: what every strategy picked captured together. */}
         <Text style={{ fontSize: 13 }} aria-label="All strategies points">
@@ -347,12 +349,13 @@ function LabSummary({ rows, picked, onPick, missing, data }) {
               {groups.map((g) => {
                 const p = sumPoints(g.rows.map(pointsOf))
                 const w = rTotal(g.rows, 'asWritten')
+                const a = rTotal(g.rows, 'applied')
                 const y = rTotal(g.rows, 'yours')
                 return (
                   <Table.Summary.Row key={g.label} style={{ fontWeight: g.all ? 600 : 400 }}>
                     <Table.Summary.Cell index={0} colSpan={2}><Text strong={g.all} style={{ fontSize: 12 }}>{g.label}</Text></Table.Summary.Cell>
                     <Table.Summary.Cell index={2}><span style={{ fontSize: 12 }}>{w.n} trades · <span style={{ color: col(w.total) }}>{fmtR(w.total)}</span></span></Table.Summary.Cell>
-                    <Table.Summary.Cell index={3} />
+                    <Table.Summary.Cell index={3}><Tooltip title="As applied on each index - as written where nothing is applied"><span style={{ fontSize: 12 }}>{a.n} trades · <span style={{ color: col(a.total) }}>{fmtR(a.total)}</span></span></Tooltip></Table.Summary.Cell>
                     <Table.Summary.Cell index={4}><span style={{ fontSize: 12 }}>{y.n} trades · <span style={{ color: col(y.total) }}>{fmtR(y.total)}</span></span></Table.Summary.Cell>
                     <Table.Summary.Cell index={5}><b style={{ color: col(y.total - w.total) }}>{fmtR(y.total - w.total)}</b></Table.Summary.Cell>
                     <Table.Summary.Cell index={6}>{legCell(p.buy)}</Table.Summary.Cell>
