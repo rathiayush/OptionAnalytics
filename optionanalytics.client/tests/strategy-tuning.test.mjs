@@ -274,6 +274,18 @@ test('a lab setting: only what differs from as written, no futures / order-flow 
   assert.deepEqual(labParams({ optMoneyness: 2, optExit: 'first' }, 'futures'), {}, 'no option leg: no option part')
 })
 
+test('points summaries added up: the index points and each option leg, captured / lost / net / trades - every strategy together', async () => {
+  const { sumPoints, pointsSummary } = await import('../src/strategyTuning.js')
+  const a = pointsSummary([{ points: 10, buy: { points: 6 }, sell: { points: -6 } }, { points: -4, buy: { points: -3 }, sell: { points: 3 } }])
+  const b = pointsSummary([{ points: 8, buy: { points: 5 }, sell: { points: -5 } }, { points: 2 }])
+  const all = sumPoints([a, b, null])
+  assert.deepEqual({ n: all.n, total: all.total, captured: all.captured, lost: all.lost, wins: all.wins, losses: all.losses }, { n: 4, total: 16, captured: 20, lost: -4, wins: 3, losses: 1 })
+  assert.equal(all.avg, 4)
+  assert.deepEqual({ n: all.buy.n, total: all.buy.total, captured: all.buy.captured, lost: all.buy.lost }, { n: 3, total: 8, captured: 11, lost: -3 }, 'a trade without the option\'s premiums is not counted for it')
+  assert.deepEqual({ n: all.sell.n, total: all.sell.total, wins: all.sell.wins, losses: all.sell.losses }, { n: 3, total: -8, wins: 1, losses: 2 })
+  assert.deepEqual(sumPoints([]).buy, { n: 0, total: 0, avg: null, captured: 0, lost: 0, wins: 0, losses: 0 })
+})
+
 test('the lab changes for several strategies at once: every key set (a default too), the option part, or the option taken off', async () => {
   const { labOverrides } = await import('../src/strategyTuning.js')
   // A key set back to its default is still a change - a strategy's starting point may have another.
