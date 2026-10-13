@@ -1,4 +1,4 @@
-// THE STRATEGY LAB: pick a strategy and an index, start from it as written, as applied, or any setting a tuning run found,
+// THE STRATEGY LAB: pick a strategy and an index - or several of each - start from it as written, as applied, or any setting a tuning run found,
 // change its tuned parameters (sides, entry window, stop / target size, time stop, trailing stop, the OI and order-flow
 // confirmation, how it is taken in options) and see what that setting would have done on past days - beside the strategy
 // as written and as applied now. A server job (the tuning's own day scan and measure - tune.mjs "lab": past days come
@@ -8,7 +8,7 @@ import { useLocation } from 'react-router-dom'
 import { Alert, Button, Card, Col, DatePicker, InputNumber, Progress, Row, Segmented, Select, Space, Table, Tag, Tooltip, Typography, message } from 'antd'
 import { NavBar, useAuth, UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import { ACTIVE_STRATEGIES, SPOT_STRATEGIES, STRATEGY_BY_ID, TRADE_FILTERS } from './strategyEngine.js'
-import { OPTION_DEFAULT, labEditableKeys, labParams, optionText, paramsFromFilters, paramsFromSettingsRow, settingSignature, variantText, DEFAULT_VARIANT } from './strategyTuning.js'
+import { OPTION_DEFAULT, labEditableKeys, labOverrides, labParams, optionText, paramsFromFilters, paramsFromSettingsRow, settingSignature, variantText, DEFAULT_VARIANT } from './strategyTuning.js'
 import { applyTunedFilters, putOnLiveList } from './scannerSettings.js'
 import { ApplyTunedButton } from './ApplyTuned.jsx'
 
@@ -29,96 +29,146 @@ export default function StrategyLabPage() {
   const query = useMemo(() => Object.fromEntries(new URLSearchParams(location.search)), [location.search])
   const initialId = STRATEGY_BY_ID[query.strategy] && !STRATEGY_BY_ID[query.strategy].retired ? query.strategy : 'wallBreak'
   const [data, setData] = useState(STRATEGY_BY_ID[initialId]?.spot ? 'spot' : 'futures')
-  const [index, setIndex] = useState(UNDERLYINGS.includes(query.index) ? query.index : 'NIFTY')
-  const [id, setId] = useState(initialId)
+  // One index and one strategy, or several of each: one job per index, every strategy measured in it.
+  const [indices, setIndices] = useState([UNDERLYINGS.includes(query.index) ? query.index : 'NIFTY'])
+  const [ids, setIds] = useState([initialId])
   const [days, setDays] = useState(30)
   const [range, setRange] = useState(null)
   const [params, setParams] = useState({})
   const [startFrom, setStartFrom] = useState('written')
+  const single = indices.length === 1 && ids.length === 1
+  const index = indices[0]
+  const id = ids[0]
   const listOf = (d) => (d === 'spot' ? SPOT_STRATEGIES.filter((s) => !s.retired) : ACTIVE_STRATEGIES).map((s) => ({ value: s.id, label: `#${s.no} ${s.name}` }))
   const strategies = listOf(data)
-  // Another data mode, index or strategy: the setting starts again from the strategy as written.
-  const fresh = () => { setStartFrom('written'); setParams({}) }
-  const changeData = (d) => { setData(d); if (!!STRATEGY_BY_ID[id]?.spot !== (d === 'spot')) setId(listOf(d)[0]?.value); fresh() }
-  const changeIndex = (u) => { setIndex(u); fresh() }
-  const changeId = (x) => { setId(x); fresh() }
+  // One strategy on one index: the setting is the WHOLE setting, started from as written / as applied / a tuning run's.
+  // Several: the setting is the CHANGES put on top of each one's own start (as written, or as applied on each index).
+  // Going from one to the other starts the setting again; within several the changes are kept.
+  const fresh = (toSingle) => { setStartFrom(!toSingle && startFrom === 'applied' ? 'applied' : 'written'); setParams({}) }
+  const changeData = (d) => {
+    setData(d)
+    const kept = ids.filter((x) => !!STRATEGY_BY_ID[x]?.spot === (d === 'spot'))
+    setIds(kept.length ? kept : [listOf(d)[0]?.value])
+    setStartFrom('written'); setParams({})
+  }
+  const changeSelection = (nextIndices, nextIds) => {
+    const nowSingle = nextIndices.length === 1 && nextIds.length === 1
+    if (nowSingle || nowSingle !== single) fresh(nowSingle)
+    setIndices(nextIndices); setIds(nextIds)
+  }
+  const changeIndices = (v) => { if (v.length) changeSelection(UNDERLYINGS.filter((u) => v.includes(u)), ids) }
+  const changeIds = (v) => { if (v.length) changeSelection(indices, v.slice(0, 40)) }
 
   // What it can start from: as written, as applied on this index now, or a setting a tuning run found for this index.
   const [cfg, setCfg] = useState(null)
-  const [tuned, setTuned] = useState([])
+  const [tunedRuns, setTuned] = useState([])
   useEffect(() => { fetch('/api/scanner-runner/config').then((r) => (r.ok ? r.json() : null)).then(setCfg).catch(() => setCfg(null)) }, [])
   useEffect(() => {
+    if (!single) return
     fetch(`/api/strategy-tuning/performance?data=${data}`).then((r) => (r.ok ? r.json() : null))
       .then((b) => setTuned(b?.rows?.find((r) => r.strategyId === id && r.setting === 'fine-tuned')?.tunedSettings?.[index] ?? []))
       .catch(() => setTuned([]))
-  }, [data, id, index])
-  const applied = cfg?.filtersByIndex?.[index]?.[id] ?? null
-  const starts = [
-    { value: 'written', label: 'As written' },
-    ...(applied ? [{ value: 'applied', label: `As applied on ${index} now` }] : []),
-    ...tuned.map((t, i) => ({ value: `t${i}`, label: `${t.best ? 'Best · ' : ''}${t.row.setting_text || settingSignature(t.row)} (${t.testTrades} unseen trades${t.testAvg == null ? '' : `, ${pts(t.testAvg)}${t.unit === 'pts' ? ' pts' : 'R'}`})` })),
-  ]
+  }, [data, id, index, single])
+  // A tuning run's settings to start from - one strategy on one index only.
+  const tuned = single ? tunedRuns : []
+  const appliedOf = (u, x) => cfg?.filtersByIndex?.[u]?.[x] ?? null
+  const applied = appliedOf(index, id)
+  const starts = single
+    ? [
+        { value: 'written', label: 'As written' },
+        ...(applied ? [{ value: 'applied', label: `As applied on ${index} now` }] : []),
+        ...tuned.map((t, i) => ({ value: `t${i}`, label: `${t.best ? 'Best · ' : ''}${t.row.setting_text || settingSignature(t.row)} (${t.testTrades} unseen trades${t.testAvg == null ? '' : `, ${pts(t.testAvg)}${t.unit === 'pts' ? ' pts' : 'R'}`})` })),
+      ]
+    : [
+        { value: 'written', label: 'As written - each strategy' },
+        { value: 'applied', label: 'As applied - each strategy its own setting on each index (as written where none)' },
+      ]
   const startWith = (v) => {
     setStartFrom(v)
-    if (v === 'written') setParams({})
+    if (!single || v === 'written') setParams({})
     else if (v === 'applied') setParams(paramsFromFilters(applied))
     else setParams(paramsFromSettingsRow(tuned[Number(v.slice(1))]?.row))
   }
 
-  // The job: started here, watched until it is done, then its result read.
+  // The jobs: started here (the first index now, the others queued behind it), watched until done, then their results read.
   const [status, setStatus] = useState(null)
-  const [result, setResult] = useState(null)
+  const [results, setResults] = useState({})
   const [busy, setBusy] = useState(null)
-  const loadResult = () => fetch(`/api/strategy-tuning/lab/${index}?data=${data}`).then((r) => (r.ok ? r.json() : null)).then((r) => setResult(r)).catch(() => setResult(null))
-  useEffect(() => { loadResult() }, [index, data]) // eslint-disable-line react-hooks/exhaustive-deps
+  const [picked, setPicked] = useState(null)
+  const loadResults = () => Promise.all(UNDERLYINGS.map((u) => fetch(`/api/strategy-tuning/lab/${u}?data=${data}`).then((r) => (r.ok ? r.json() : null)).catch(() => null)))
+    .then((list) => setResults(Object.fromEntries(UNDERLYINGS.map((u, i) => [u, list[i]]))))
+  useEffect(() => { loadResults() }, [data]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     let stop = false
     const poll = () => fetch('/api/strategy-tuning/status').then((r) => (r.ok ? r.json() : null)).then((s) => {
       if (stop || !s) return
       setStatus((prev) => {
-        // A lab run for this index just finished: its result.
-        if (prev?.state === 'running' && prev?.job?.what === 'lab' && s.state !== 'running') loadResult()
+        // A lab run just finished: the results again (the next index's may start right after it).
+        if (prev?.state === 'running' && prev?.job?.what === 'lab' && (s.state !== 'running' || s.job?.underlying !== prev.job?.underlying)) loadResults()
         return s
       })
     }).catch(() => {})
     poll()
     const t = setInterval(poll, 2500)
     return () => { stop = true; clearInterval(t) }
-  }, [index, data]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [data]) // eslint-disable-line react-hooks/exhaustive-deps
   const running = status?.state === 'running'
   const labRunning = running && status?.job?.what === 'lab'
-  const job = () => ({
-    underlying: index, data, strategies: [id], what: 'lab', params: labParams(params, data), minTrades: 2,
+  const sent = () => (single ? { params: labParams(params, data) } : { params: labOverrides(params, data), labBase: startFrom === 'applied' ? 'applied' : 'written' })
+  const job = (u) => ({
+    underlying: u, data, strategies: ids, what: 'lab', ...sent(), minTrades: 2,
     ...(range?.[0] || range?.[1] ? { from: range?.[0]?.format('YYYY-MM-DD') ?? null, to: range?.[1]?.format('YYYY-MM-DD') ?? null, days: 250 } : { days }),
   })
+  const post = (path, body) => fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    .then(async (res) => ({ res, body: await res.json().catch(() => null) }))
+  const queueOf = async (list) => {
+    const { res, body } = await post('/api/strategy-tuning/queue', { job: job(list[0]), underlyings: list })
+    if (!res.ok) { message.error(body?.error ?? `HTTP ${res.status}`); return false }
+    return true
+  }
+  const what = `${ids.length > 1 ? `${ids.length} strategies` : `#${STRATEGY_BY_ID[id]?.no} ${STRATEGY_BY_ID[id]?.short ?? STRATEGY_BY_ID[id]?.name}`}`
   const run = async () => {
     setBusy(null)
-    const res = await fetch('/api/strategy-tuning/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(job()) })
-    const body = await res.json().catch(() => null)
+    const { res, body } = await post('/api/strategy-tuning/run', job(indices[0]))
     if (res.status === 409) { setBusy(body?.error ?? 'another job is running'); return }
     if (!res.ok) { message.error(body?.error ?? `HTTP ${res.status}`); return }
     setStatus(body)
-    message.info('Lab run started - past days come from the cache, so it normally takes a minute or two')
+    const rest = indices.slice(1)
+    if (rest.length && !(await queueOf(rest))) return
+    message.info(rest.length
+      ? `Lab run started on ${indices[0]} (${what}); ${rest.join(', ')} queued right after it - past days come from the cache`
+      : `Lab run started (${what}) - past days come from the cache, so it normally takes a minute or two`)
   }
   const queue = async () => {
-    const res = await fetch('/api/strategy-tuning/queue', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ job: job() }) })
-    const body = await res.json().catch(() => null)
-    if (!res.ok) { message.error(body?.error ?? `HTTP ${res.status}`); return }
+    if (!(await queueOf(indices))) return
     setBusy(null)
-    message.success('Queued - it runs when the current job is done (Strategy tuning → schedule)')
+    message.success(`Queued for ${indices.join(', ')} - it runs when the current job is done (Strategy tuning → schedule)`)
   }
   const set = (k, v) => setParams((p) => ({ ...p, [k]: v }))
   const keys = labEditableKeys(data)
   const opt = params.optLeg === 'buy' || params.optLeg === 'sell'
-  const mine = result?.ok && result?.lab && result.strategy?.id === id ? result : null
-  const stale = mine && JSON.stringify(labParams(params, data)) !== JSON.stringify(labParams(mine.job?.params ?? {}, data))
+  const shown = labParams(params, data)
 
-  const apply = async (addToLive, lots) => {
+  // Every index × strategy picked, with its last lab result (or none yet).
+  const entriesOf = (r) => (r?.ok && r?.lab ? (r.results ?? (r.strategy ? [{ strategy: r.strategy, base: 'written', asWritten: r.asWritten, applied: r.applied, yours: r.yours }] : [])) : [])
+  const nowSent = JSON.stringify(sent())
+  const sentOf = (r) => JSON.stringify(single ? { params: r?.job?.params ?? {} } : { params: r?.job?.params ?? {}, labBase: r?.job?.labBase ?? 'written' })
+  const rows = indices.flatMap((u) => ids.map((x) => {
+    const file = results[u]
+    const entry = entriesOf(file).find((e) => e.strategy?.id === x) ?? null
+    return { key: `${u}-${x}`, index: u, id: x, file, entry, stale: !!entry && sentOf(file) !== nowSent }
+  }))
+  const done = rows.filter((r) => r.entry)
+  const missing = rows.filter((r) => !r.entry)
+  const current = done.find((r) => r.key === picked) ?? done[0] ?? null
+
+  const apply = async (row, addToLive, lots) => {
     try {
-      const p = labParams(params, data)
-      await applyTunedFilters(id, { ...DEFAULT_VARIANT, ...OPTION_DEFAULT, ...p }, { option: opt, index, tuned: settingSignature(p) || null, lots })
-      if (addToLive) await putOnLiveList(index, id)
-      message.success(`#${STRATEGY_BY_ID[id]?.no} ${STRATEGY_BY_ID[id]?.name}: this setting is applied on ${index} - the server scanner runs with it from its next look${addToLive ? `, and it is on ${index}'s live list` : ''}`)
+      const p = labParams(row.entry.yours.params ?? {}, data)
+      const leg = p.optLeg === 'buy' || p.optLeg === 'sell'
+      await applyTunedFilters(row.id, { ...DEFAULT_VARIANT, ...OPTION_DEFAULT, ...p }, { option: leg, index: row.index, tuned: settingSignature(p) || null, lots })
+      if (addToLive) await putOnLiveList(row.index, row.id)
+      message.success(`#${STRATEGY_BY_ID[row.id]?.no} ${STRATEGY_BY_ID[row.id]?.name}: this setting is applied on ${row.index} - the server scanner runs with it from its next look${addToLive ? `, and it is on ${row.index}'s live list` : ''}`)
       fetch('/api/scanner-runner/config').then((r) => (r.ok ? r.json() : null)).then(setCfg).catch(() => {})
     } catch (err) { message.error(err.message) }
   }
@@ -130,32 +180,39 @@ export default function StrategyLabPage() {
           <Title level={3} style={{ margin: 0 }}>Option Analytics</Title>
           <NavBar />
         </Space>
-        <Card size="small" title="Strategy lab · change a strategy's tuned settings and see what they would have done">
+        <Card size="small" title="Strategy lab · change strategies' tuned settings and see what they would have done">
           <Space direction="vertical" size={12} style={{ width: '100%' }}>
             <Text type="secondary" style={{ fontSize: 12 }}>
               The days are scanned exactly as the tuning scans them and the setting is measured with the tuning&apos;s own rules (the same filters, stop / target / trail and
-              option exits) - beside the strategy as written and as applied on that index now. Past days come from the cache, so a run normally costs no Dhan calls. Nothing
-              is written to the tuning history; apply the setting from here when it is worth it.
+              option exits) - beside the strategy as written and as applied on that index now. Pick one strategy on one index, or several of each: every strategy is
+              measured in one run per index (the first index starts now, the others are queued right after it). Past days come from the cache, so a run normally costs no
+              Dhan calls. Nothing is written to the tuning history; apply a setting from here when it is worth it.
             </Text>
             {!isAdmin && <Alert type="warning" showIcon message="Only an Admin can run the lab - sign in with the admin login." />}
             <Row gutter={[10, 8]} align="middle">
               <Col><Segmented value={data} onChange={changeData} options={[{ value: 'futures', label: 'Futures + OI' }, { value: 'spot', label: 'Spot + options' }]} aria-label="Data" /></Col>
-              <Col><Select value={index} onChange={changeIndex} options={UNDERLYINGS.map((u) => ({ value: u, label: u }))} style={{ width: 130 }} aria-label="Index" /></Col>
-              <Col flex="1 1 300px"><Select showSearch optionFilterProp="label" value={id} onChange={changeId} options={strategies} style={{ width: '100%' }} aria-label="Strategy" /></Col>
+              <Col><Select mode="multiple" value={indices} onChange={changeIndices} options={UNDERLYINGS.map((u) => ({ value: u, label: u }))} style={{ minWidth: 200 }} aria-label="Index" /></Col>
+              <Col flex="1 1 320px">
+                <Select mode="multiple" showSearch optionFilterProp="label" value={ids} onChange={changeIds} options={strategies} style={{ width: '100%' }} maxTagCount="responsive" aria-label="Strategy"
+                  placeholder="Strategies" />
+              </Col>
               <Col><Space size={4}><Text style={{ fontSize: 12 }}>last</Text><InputNumber min={1} max={250} value={days} onChange={(v) => setDays(v ?? 30)} disabled={!!(range?.[0] || range?.[1])} style={{ width: 80 }} aria-label="Days" /><Text style={{ fontSize: 12 }}>days, or</Text></Space></Col>
               <Col><DatePicker.RangePicker value={range} onChange={setRange} format="DD MMM YYYY" allowEmpty={[true, true]} aria-label="Dates" /></Col>
             </Row>
             <Row gutter={[10, 8]} align="middle">
               <Col><Text style={{ fontSize: 12 }}>Start from</Text></Col>
               <Col flex="1 1 400px"><Select value={startFrom} onChange={startWith} options={starts} style={{ width: '100%' }} aria-label="Start from" /></Col>
-              <Col><Button onClick={() => startWith(startFrom)}>Reset to it</Button></Col>
+              <Col><Button onClick={() => startWith(startFrom)}>{single ? 'Reset to it' : 'Clear the changes'}</Button></Col>
             </Row>
-            <Card size="small" type="inner" title="The setting" extra={<Text type="secondary" style={{ fontSize: 12 }}>{variantText({ ...DEFAULT_VARIANT, ...labParams(params, data) })}{opt ? ` · ${optionText({ ...OPTION_DEFAULT, ...labParams(params, data) })}` : ''}</Text>}>
+            <Card size="small" type="inner" title={single ? 'The setting' : 'The changes - put on top of each strategy\'s start; only what you change here is changed'}
+              extra={<Text type="secondary" style={{ fontSize: 12 }}>{single
+                ? `${variantText({ ...DEFAULT_VARIANT, ...shown })}${opt ? ` · ${optionText({ ...OPTION_DEFAULT, ...shown })}` : ''}`
+                : Object.keys(labOverrides(params, data)).length ? `${Object.keys(labOverrides(params, data)).length} change(s)` : 'no changes - each as it starts'}</Text>}>
               <Row gutter={[16, 8]}>
                 {keys.map((k) => {
                   const f = TRADE_FILTERS.find((x) => x.key === k)
                   const v = params[k] ?? f.default
-                  const changed = String(v) !== String(f.default)
+                  const changed = single ? String(v) !== String(f.default) : params[k] !== undefined
                   return (
                     <Col xs={24} md={12} xl={8} key={k}>
                       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
@@ -171,9 +228,10 @@ export default function StrategyLabPage() {
               <Row gutter={[16, 8]} style={{ marginTop: 12 }}>
                 <Col xs={24} md={12} xl={8}>
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-                    <Text style={{ fontSize: 12, fontWeight: opt ? 600 : 400 }}>Option: taken its own way</Text>
-                    <Select size="small" value={opt ? params.optLeg : 'none'} onChange={(x) => set('optLeg', x === 'none' ? undefined : x)} style={{ width: 200 }} aria-label="optLeg"
-                      options={[{ value: 'none', label: 'No - as the index trade says' }, { value: 'buy', label: 'BUY the option' }, { value: 'sell', label: 'SELL (write) the option' }]} />
+                    <Text style={{ fontSize: 12, fontWeight: opt || (!single && params.optLeg === 'none') ? 600 : 400 }}>Option: taken its own way</Text>
+                    {/* Several strategies: "No" is a change too - it takes off an option leg a strategy starts with. */}
+                    <Select size="small" value={opt ? params.optLeg : !single && params.optLeg === undefined ? 'keep' : 'none'} onChange={(x) => set('optLeg', x === 'keep' ? undefined : x === 'none' ? (single ? undefined : 'none') : x)} style={{ width: 200 }} aria-label="optLeg"
+                      options={[...(single ? [] : [{ value: 'keep', label: 'As each starts' }]), { value: 'none', label: 'No - as the index trade says' }, { value: 'buy', label: 'BUY the option' }, { value: 'sell', label: 'SELL (write) the option' }]} />
                   </div>
                 </Col>
                 {opt && (
@@ -213,11 +271,13 @@ export default function StrategyLabPage() {
               </Row>
             </Card>
             <Space wrap size={10}>
-              <Button type="primary" onClick={run} disabled={!isAdmin || running}>Run the lab on {index}</Button>
+              <Button type="primary" onClick={run} disabled={!isAdmin || running}>Run the lab on {indices.join(', ')}{ids.length > 1 ? ` (${ids.length} strategies)` : ''}</Button>
               {labRunning && (
                 <Space size={6}>
                   <Progress type="circle" size={22} percent={status?.progress?.total ? Math.round(((status.progress.done ?? 0) / status.progress.total) * 100) : 0} />
-                  <Text style={{ fontSize: 12 }}>{status?.job?.underlying}: {status?.progress?.stage === 'scan' ? `scanning day ${(status.progress.done ?? 0) + 1} of ${status.progress.total}` : status?.progress?.stage ?? 'starting'}…</Text>
+                  <Text style={{ fontSize: 12 }}>{status?.job?.underlying}: {status?.progress?.stage === 'scan' ? `scanning day ${(status.progress.done ?? 0) + 1} of ${status.progress.total}`
+                    : status?.progress?.stage === 'lab' && status.progress.strategy ? `measuring #${STRATEGY_BY_ID[status.progress.strategy]?.no} ${STRATEGY_BY_ID[status.progress.strategy]?.short ?? status.progress.strategy} (${(status.progress.done ?? 0) + 1} of ${status.progress.total})`
+                      : status?.progress?.stage ?? 'starting'}…</Text>
                 </Space>
               )}
               {running && !labRunning && <Text type="warning" style={{ fontSize: 12 }}>A tuning job for {status?.job?.underlying} is running - the lab can be queued after it.</Text>}
@@ -228,14 +288,38 @@ export default function StrategyLabPage() {
           </Space>
         </Card>
 
-        {mine
-          ? <LabResult result={mine} stale={stale} index={index} isAdmin={isAdmin} applied={applied} onApply={apply} canApply={isAdmin && !stale}
-              liveIndex={cfg?.live?.[index]} indexLots={cfg?.trade?.[index]?.lots ?? null} />
-          : result?.ok && result?.lab
-            ? <Alert type="info" showIcon message={`The last lab run on ${index} was for #${result.strategy?.no} ${result.strategy?.name} - run it for this strategy to see it here.`} />
-            : <Alert type="info" showIcon message={`No lab run for ${index} yet - set the parameters and press Run.`} />}
+        {done.length > 0 && (rows.length > 1 || done.length < rows.length) && (
+          <LabSummary rows={done} picked={current?.key} onPick={setPicked} missing={missing} />
+        )}
+        {current
+          ? <LabResult result={{ ...current.file, ...current.entry }} stale={current.stale} index={current.index} applied={appliedOf(current.index, current.id)}
+              onApply={(live, lots) => apply(current, live, lots)} canApply={isAdmin && !current.stale} indexLots={cfg?.trade?.[current.index]?.lots ?? null} />
+          : <Alert type="info" showIcon message={`No lab run yet for ${rows.length > 1 ? 'these strategies / indices' : `#${STRATEGY_BY_ID[id]?.no} ${STRATEGY_BY_ID[id]?.name} on ${index}`} - set the parameters and press Run.`} />}
       </Space>
     </div>
+  )
+}
+
+/** Every index × strategy picked that has a lab result: as written, as applied, the setting tried - one row each; a row
+ *  opens its full result below. */
+function LabSummary({ rows, picked, onPick, missing }) {
+  const cell = (m) => (m?.r?.n ? <span style={{ fontSize: 12 }}>{m.r.n} · win {pct(m.r.winRate)} · <b style={{ color: col(m.r.avg) }}>{fmtR(m.r.avg)}</b> avg · <span style={{ color: col(m.r.total) }}>{fmtR(m.r.total)}</span></span> : <Text type="secondary" style={{ fontSize: 12 }}>no trades</Text>)
+  return (
+    <Card size="small" title={`The lab runs - ${rows.length} strategy / index pair(s)`} extra={<Text type="secondary" style={{ fontSize: 12 }}>trades · win rate · avg R · total R - click a row for its trades and to apply it</Text>}>
+      <Space direction="vertical" size={8} style={{ width: '100%' }}>
+        <Table size="small" pagination={false} rowKey="key" dataSource={rows} scroll={{ x: 1000 }} aria-label="Lab runs"
+          onRow={(r) => ({ onClick: () => onPick(r.key), style: { cursor: 'pointer', background: r.key === picked ? 'rgba(22,119,255,0.12)' : undefined } })}
+          columns={[
+            { title: 'Index', dataIndex: 'index', width: 100 },
+            { title: 'Strategy', key: 's', width: 220, render: (_, r) => <span>#{r.entry.strategy.no} {r.entry.strategy.name}{r.stale && <Tag color="warning" style={{ marginLeft: 6 }}>older setting</Tag>}</span> },
+            { title: 'As written', key: 'w', render: (_, r) => cell(r.entry.asWritten) },
+            { title: 'As applied', key: 'a', render: (_, r) => (r.entry.applied ? cell(r.entry.applied) : <Text type="secondary" style={{ fontSize: 12 }}>not applied</Text>) },
+            { title: 'Your setting', key: 'y', render: (_, r) => <span>{cell(r.entry.yours)}{r.entry.base === 'applied' && <Tag style={{ marginLeft: 6 }}>from applied</Tag>}</span> },
+            { title: 'vs as written', key: 'd', width: 110, render: (_, r) => { const d = (r.entry.yours?.r?.total ?? 0) - (r.entry.asWritten?.r?.total ?? 0); return <b style={{ color: col(d) }}>{fmtR(d)}</b> } },
+          ]} />
+        {missing.length > 0 && <Text type="secondary" style={{ fontSize: 12 }}>No lab run yet for {missing.map((m) => `#${STRATEGY_BY_ID[m.id]?.no} on ${m.index}`).join(', ')} - press Run to measure them.</Text>}
+      </Space>
+    </Card>
   )
 }
 

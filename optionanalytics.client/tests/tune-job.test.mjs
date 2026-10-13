@@ -53,7 +53,7 @@ function fakeServer(recordedDays, faults = {}) {
     seen.push({ path: url.pathname, key: req.headers['x-runner-key'], priority: req.headers['x-request-priority'] ?? null, date: url.searchParams.get('date'), query: Object.fromEntries(url.searchParams) })
     const json = (body, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body)) }
     let m
-    if (url.pathname === '/api/scanner-runner/config') return json({ settings: {} })
+    if (url.pathname === '/api/scanner-runner/config') return json(faults.config ?? { settings: {} })
     if (url.pathname === '/api/strategy-tuning/dhan-usage') {
       const fetchedDays = new Set(seen.filter((x) => /\/run$/.test(x.path)).map((x) => x.date)).size
       return json({ day: '2026-10-10', calls: faults.usageAfter != null && fetchedDays >= faults.usageAfter ? 95_000 : 1_200, dailyLimit: 100_000 })
@@ -348,6 +348,45 @@ test('the Strategy lab job: one strategy measured with the setting sent, beside 
     assert.ok(yours.option.trades.every((t) => t.opt.label.startsWith('BUY ')))
     assert.ok(Number.isFinite(yours.points.total) && Number.isFinite(yours.points.buy.total))
     assert.ok(!existsSync(join(history, 'runs.csv')), 'a lab run writes nothing to the tuning history')
+  } finally {
+    server.close()
+  }
+})
+
+test('the Strategy lab job: several strategies measured at once - each as written, as applied and with the changes on top of its start', { timeout: 300_000 }, async () => {
+  const days = ['2026-09-28', '2026-09-29', '2026-09-30', '2026-10-01', '2026-10-02', '2026-10-05']
+  // weakWall is applied on NIFTY (longs only, a 1.5x stop, bought); squeeze is not applied anywhere.
+  const applied = { tradeSide: 'long', tradeStopX: 1.5, tradeOptLeg: 'buy', tradeOptExit: 'indexSl', tradeOptSlPct: 30 }
+  const { server, base } = await fakeServer(days, { config: { settings: {}, filtersByIndex: { NIFTY: { weakWall: applied } } } })
+  const dir = mkdtempSync(join(tmpdir(), 'oa-lab-multi-'))
+  try {
+    const env = { TUNE_CACHE_DIR: join(dir, 'cache'), TUNE_HISTORY_DIR: join(dir, 'history'), TUNE_RETRY_SCALE: '0.001', TUNE_BUSY_PAUSE_MS: '5' }
+    // From as applied, with a 2x target on top: weakWall keeps its own longs / 1.5x stop / bought option; squeeze (none
+    // applied) starts as written. An option leg of 'none' would take the applied one off.
+    const { code, result } = await runJob(base, { underlying: 'NIFTY', strategies: ['weakWall', 'squeeze'], days: 30, minTrades: 2, what: 'lab', labBase: 'applied', params: { tradeTargetX: 2 } }, env)
+    assert.equal(code, 0, JSON.stringify(result))
+    assert.equal(result.ok, true)
+    assert.deepEqual(result.results.map((r) => r.strategy.id), ['weakWall', 'squeeze'])
+    assert.equal(result.strategy.id, 'weakWall', 'the first one at the top level too')
+    const [ww, sq] = result.results
+    assert.equal(ww.base, 'applied')
+    assert.equal(sq.base, 'written', 'nothing applied: from as written')
+    assert.ok(ww.applied && sq.applied === null)
+    assert.deepEqual({ side: ww.yours.params.tradeSide, stop: ww.yours.params.tradeStopX, target: ww.yours.params.tradeTargetX, leg: ww.yours.params.optLeg }, { side: 'long', stop: 1.5, target: 2, leg: 'buy' })
+    assert.deepEqual(sq.yours.params, { tradeTargetX: 2 })
+    assert.deepEqual(sq.asWritten.params, {})
+    assert.equal(result.days.length, 6, 'the days scanned once for both')
+    // The option taken off on top of what is applied.
+    const off = await runJob(base, { underlying: 'NIFTY', strategies: ['weakWall'], days: 30, minTrades: 2, what: 'lab', labBase: 'applied', params: { optLeg: 'none' } }, env)
+    assert.equal(off.code, 0, JSON.stringify(off.result))
+    const offYours = off.result.results[0].yours
+    assert.equal(offYours.params.tradeSide, 'long')
+    assert.equal(offYours.params.optLeg, undefined)
+    assert.equal(offYours.option, null)
+    // A strategy of the other kind, or an unknown one, fails the run.
+    const wrong = await runJob(base, { underlying: 'NIFTY', strategies: ['weakWall', 'nope'], days: 30, minTrades: 2, what: 'lab' }, env)
+    assert.notEqual(wrong.code, 0)
+    assert.match(wrong.result.error, /nope is not an active futures strategy/)
   } finally {
     server.close()
   }

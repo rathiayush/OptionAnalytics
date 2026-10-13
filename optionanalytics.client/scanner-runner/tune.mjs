@@ -71,8 +71,8 @@ const isWeekend = (date) => [0, 6].includes(new Date(`${date}T00:00:00Z`).getUTC
 const MAX_DAYS = RANGED ? 250 : Math.max(1, Math.min(250, Number(job.days) || 30))
 const MIN_TRADES = Math.max(2, Math.min(100, Number(job.minTrades) || 8))
 // 'check': no new tuning - only the cross-check of every setting found so far on these days (tuneChecks.mjs).
-// 'lab': no tuning either - ONE strategy measured with the setting the Strategy lab page sent (job.params), beside it as
-// written and as applied on this index; nothing is written to the tuning history.
+// 'lab': no tuning either - the strategies the Strategy lab page picked, each measured with the setting it sent (job.params,
+// on top of job.labBase), beside it as written and as applied on this index; nothing is written to the tuning history.
 const WHAT = ['trade', 'oi', 'both', 'option', 'all', 'check', 'lab'].includes(job.what) ? job.what : 'trade'
 const DATA = job.data === 'spot' ? 'spot' : 'futures' // spot: the index candles + the option chain's OI only - no futures, no order flow
 const SEARCH = job.search === 'full' ? 'full' : 'step'
@@ -635,30 +635,49 @@ async function main() {
   if (!days.length) throw new Error(budgetStop ? `no day was scanned before ${budgetStop}` : `none of the ${plan.length} day(s) could be scanned (${skipped[0]?.reason ?? 'unknown'})`)
 
   if (WHAT === 'lab') {
-    // THE STRATEGY LAB: the days scanned exactly as for tuning, then one strategy measured three ways with the tuning's
-    // own functions (evaluateSetting) - as written, as applied on this index now, and with the setting being tried.
-    const id = Array.isArray(job.strategies) ? job.strategies[0] : null
-    const meta = STRATEGY_BY_ID[id]
-    if (!meta || meta.retired || (DATA === 'spot') !== !!meta.spot) throw new Error(`${id ?? 'no strategy'} is not an active ${DATA === 'spot' ? 'spot + options' : 'futures'} strategy`)
+    // THE STRATEGY LAB: the days scanned exactly as for tuning - once - then each strategy asked for measured three ways
+    // with the tuning's own functions (evaluateSetting): as written, as applied on this index now, and with the setting
+    // being tried. That setting is job.params on top of its starting point (job.labBase): 'written' - the strategy as
+    // written (params is then the whole setting); 'applied' - its setting applied on this index (as written where none),
+    // the changes sent on top of it (an option leg of 'none' takes the applied one off).
+    const ids = [...new Set(Array.isArray(job.strategies) ? job.strategies : [])]
+    const bad = ids.find((id) => !STRATEGY_BY_ID[id] || STRATEGY_BY_ID[id].retired || (DATA === 'spot') !== !!STRATEGY_BY_ID[id].spot)
+    if (!ids.length || bad) throw new Error(`${bad ?? 'no strategy'} is not an active ${DATA === 'spot' ? 'spot + options' : 'futures'} strategy`)
     state.stage = 'lab'
-    progress({ stage: 'lab', done: 0, total: 1 })
     const opts = { trail, underlying: U, optionLevels }
-    const applied = config?.filtersByIndex?.[U]?.[id] ?? null
+    const OPTION_KEYS = ['optLeg', 'optMoneyness', 'optExit', 'optSlPct', 'optTargetPct']
+    const results = []
+    for (let i = 0; i < ids.length; i++) {
+      const id = ids[i]
+      const meta = STRATEGY_BY_ID[id]
+      progress({ stage: 'lab', strategy: id, done: i, total: ids.length })
+      const applied = config?.filtersByIndex?.[U]?.[id] ?? null
+      // As applied: with the trailing stop it was applied with (pinnedTrailOf), when one was stored.
+      const appliedOpts = applied && pinnedTrailOf(applied) !== undefined ? { ...opts, trail: pinnedTrailOf(applied) } : opts
+      const fromApplied = job.labBase === 'applied' && !!applied
+      let tried = { ...(fromApplied ? paramsFromFilters(applied) : {}), ...(job.params ?? {}) }
+      if (tried.optLeg !== 'buy' && tried.optLeg !== 'sell') tried = Object.fromEntries(Object.entries(tried).filter(([k]) => !OPTION_KEYS.includes(k)))
+      results.push({
+        strategy: { id, no: meta.no, name: meta.name },
+        base: fromApplied ? 'applied' : 'written',
+        asWritten: evaluateSetting(days, id, {}, opts),
+        applied: applied ? { ...evaluateSetting(days, id, paramsFromFilters(applied), appliedOpts), filters: applied } : null,
+        yours: evaluateSetting(days, id, tried, fromApplied ? appliedOpts : opts),
+      })
+    }
     await dhanBudgetLeft().catch(() => null)
+    const first = results[0]
     write({
       ok: true, lab: true, underlying: U, job, startedUtc, finishedUtc: new Date().toISOString(), data: DATA, from: FROM, to: TO, rowSize, trail, optionLevels,
-      strategy: { id, no: meta.no, name: meta.name },
       days: days.map((d) => ({ date: d.date, estimated: d.estimated, setups: d.setups.length, ...d.quality })), skipped,
-      asWritten: evaluateSetting(days, id, {}, opts),
-      // As applied: with the trailing stop it was applied with (pinnedTrailOf), when one was stored.
-      applied: applied ? { ...evaluateSetting(days, id, paramsFromFilters(applied), pinnedTrailOf(applied) !== undefined ? { ...opts, trail: pinnedTrailOf(applied) } : opts), filters: applied } : null,
-      yours: evaluateSetting(days, id, job.params ?? {}, opts),
+      // Every strategy measured; the first one also at the top level, as a lab result always had it.
+      results, strategy: first.strategy, asWritten: first.asWritten, applied: first.applied, yours: first.yours,
       calls: callReport(fetcher.stats, fetcher.perKind(), fastOi, dhan),
       budget: { minutes: budgetMinutes, elapsedMinutes: Math.round((Date.now() - START_MS) / 60_000), stoppedBy: budgetStop ? 'budget' : stopped ? 'dhan-limit' : null, reason: budgetStop ?? stopped ?? null, daysPlanned: plan.length, daysScanned: days.length, daysLeftOut: skipped.length },
     })
     clearTimeout(watchdog)
     state.stage = 'done'
-    progress({ stage: 'done', done: 1, total: 1 })
+    progress({ stage: 'done', done: ids.length, total: ids.length })
     return
   }
 

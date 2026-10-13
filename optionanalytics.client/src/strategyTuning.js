@@ -788,6 +788,19 @@ export function labEditableKeys(data) {
   return data === 'spot' ? tuned : [...tuned, ...LAB_FLOW_KEYS]
 }
 
+/** The Strategy lab's CHANGES for several strategies at once, put on top of each one's own starting point (the job's
+ *  labBase): every key set - one set back to its default too, since a starting point may have another - the option part
+ *  as labParams has it, or optLeg 'none' to take an option leg off. Nothing set = each as its starting point. */
+export function labOverrides(params, data) {
+  const out = {}
+  for (const k of labEditableKeys(data)) if (params?.[k] !== undefined && params[k] !== null && params[k] !== '') out[k] = params[k]
+  if (params?.optLeg === 'buy' || params?.optLeg === 'sell') {
+    const full = labParams(params, data)
+    for (const k of ['optLeg', 'optMoneyness', 'optExit', 'optSlPct', 'optTargetPct']) if (full[k] !== undefined) out[k] = full[k]
+  } else if (params?.optLeg === 'none') out.optLeg = 'none'
+  return out
+}
+
 /** A lab setting as sent to the job (and applied): only what differs from the strategy as written, the option part only
  *  when an option leg is chosen, and of it only what that exit uses. */
 export function labParams(params, data) {

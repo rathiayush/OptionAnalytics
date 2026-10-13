@@ -33,11 +33,12 @@ public sealed class StrategyTuningController : ControllerBase
 
     /// <summary>`What`: what is tuned - "trade" (the trade settings), "oi" (the OI confirmation) or "both"
     /// (the OI confirmation first, then the trade settings on top of it), "option", "all" - or "check": no new tuning,
-    /// only every setting found so far re-checked on the job's days it was not chosen on (the cross-check) - or "lab": ONE
-    /// strategy measured with the setting in `Params` (the Strategy lab page) beside it as written and as applied; no
-    /// tuning, nothing written to the tuning history.</summary>
+    /// only every setting found so far re-checked on the job's days it was not chosen on (the cross-check) - or "lab": the
+    /// strategies listed, each measured with the setting in `Params` (the Strategy lab page) on top of `LabBase` ("written":
+    /// the strategy as written, the default - "applied": its setting applied on the index) beside it as written and as
+    /// applied; no tuning, nothing written to the tuning history.</summary>
     public sealed record RunRequest(string Underlying, JsonNode? Strategies, int Days = 30, bool IncludeEstimated = false, int MinTrades = 8, string? What = null, string[]? OiFactors = null, string? Search = null, string? Data = null, string? From = null, string? To = null,
-        JsonObject? Params = null);
+        JsonObject? Params = null, string? LabBase = null);
     private static readonly HashSet<string> OiFactorKeys = new() { "tradeOiWindow", "tradeFutWindow", "tradeOiFlow", "tradeOiCum", "tradeSideOi", "tradeSideCum", "tradeFutOi", "tradeMoveSize", "tradeDayType", "tradeWallRoom", "tradeWallOi" };
     private static readonly HashSet<string> TuneWhat = new() { "trade", "oi", "both", "option", "all", "check", "lab" };
     // The parameters a lab setting may set (strategyTuning.js labEditableKeys: TUNED_SETTING_KEYS and the order-flow
@@ -68,7 +69,7 @@ public sealed class StrategyTuningController : ControllerBase
     }
 
     /// <summary>A job from a request (the same checks for Run and the schedule), or why it is not valid.</summary>
-    private static (TuningJob? Job, string? Error) BuildJob(RunRequest? request, string? underlying)
+    internal static (TuningJob? Job, string? Error) BuildJob(RunRequest? request, string? underlying)
     {
         var u = (underlying ?? "").Trim().ToUpperInvariant();
         if (!Underlyings.Contains(u)) return (null, "Underlying must be NIFTY, BANKNIFTY or SENSEX.");
@@ -83,9 +84,12 @@ public sealed class StrategyTuningController : ControllerBase
         var what = string.IsNullOrWhiteSpace(request.What) ? "trade" : request.What.Trim().ToLowerInvariant();
         if (!TuneWhat.Contains(what)) return (null, "What must be trade, oi, both, option, all, check or lab.");
         JsonObject? labParams = null;
+        string? labBase = null;
         if (what == "lab")
         {
-            if (strategies is not JsonArray { Count: 1 }) return (null, "A lab run is for one strategy (Strategies: [its id]).");
+            if (strategies is not JsonArray { Count: > 0 }) return (null, "A lab run is for the strategies listed (Strategies: [their ids]).");
+            labBase = string.IsNullOrWhiteSpace(request.LabBase) ? "written" : request.LabBase.Trim().ToLowerInvariant();
+            if (labBase is not ("written" or "applied")) return (null, "LabBase must be written or applied.");
             labParams = request.Params ?? new JsonObject();
             var unknownKeys = labParams.Select(kv => kv.Key).Where(k => !LabParamKeys.Contains(k)).ToList();
             if (unknownKeys.Count > 0) return (null, $"Params may only set the tuned settings - not {string.Join(", ", unknownKeys)}.");
@@ -102,7 +106,7 @@ public sealed class StrategyTuningController : ControllerBase
         var factors = (request.OiFactors ?? Array.Empty<string>()).Distinct().ToList();
         if (factors.Any(f => !OiFactorKeys.Contains(f))) return (null, "OiFactors must be one of tradeOiWindow, tradeFutWindow, tradeOiFlow, tradeOiCum, tradeSideOi, tradeSideCum, tradeFutOi, tradeMoveSize, tradeDayType, tradeWallRoom, tradeWallOi.");
         return (new TuningJob(u, strategies.DeepClone(), Math.Clamp(request.Days, 1, 250), request.IncludeEstimated, Math.Clamp(request.MinTrades, 2, 100), what, factors, search, data, string.IsNullOrWhiteSpace(request.From) ? null : request.From.Trim(), string.IsNullOrWhiteSpace(request.To) ? null : request.To.Trim())
-        { Params = (JsonObject?)labParams?.DeepClone() }, null);
+        { Params = (JsonObject?)labParams?.DeepClone(), LabBase = labBase }, null);
     }
 
     /// <summary>A job to schedule: the Run request, for one index or several (Underlyings), not before RunAtUtc (null:
