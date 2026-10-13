@@ -481,7 +481,20 @@ export class IndexScanner {
       if (!cfg.alerts || !this.isAlerted(event.s.id, cfg)) continue
       if (cfg.telegram !== false && !setupWasTraded(this.positions, event.s)) await this.io.telegram(`${TAG} ${this.underlying} ${setupExitText(event.s)}`)
     }
-    const rows = positionRows({ positions: this.positions, dayResults: withOutcome, withOutcome, oi: d.oi, nowMs, settings: cfg })
+    let rows = positionRows({ positions: this.positions, dayResults: withOutcome, withOutcome, oi: d.oi, nowMs, settings: cfg })
+    // A trade's exit is kept on it the moment it is first seen (exitFinal) - what Telegram says is what the record keeps,
+    // never re-priced by a later read of the same minutes (a reload of the day, a late tick).
+    let froze = false
+    for (const r of rows) {
+      const p = this.positions.find((x) => x.key === r.key)
+      if (!p || p.exitFinal || !r.exitTime || r.current == null) continue
+      Object.assign(p, { exitTime: r.exitTime, exitPremium: r.current, exitReason: r.exitReason ?? null, exitFinal: true })
+      froze = true
+    }
+    if (froze) {
+      this.dirty = true
+      rows = positionRows({ positions: this.positions, dayResults: withOutcome, withOutcome, oi: d.oi, nowMs, settings: cfg })
+    }
     // The first look after a restart: trades already closed by then are not news.
     const opening = !this.primedExits
     this.primedExits = true

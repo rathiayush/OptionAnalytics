@@ -805,6 +805,15 @@ export function premiumAt(oi, side, strike, ms, maxStaleMs = 5 * MIN) {
   return null
 }
 
+/** The premium a minute that ENDS at `ms` closed at - final once that minute is over, the same in a replayed day and
+ *  live. A replayed day's points are stamped at their minute's end (lag), today's live ones at its START and still moving
+ *  while it runs: a live read at `ms` would be the NEXT minute's running price, so it steps back to the minute that ended
+ *  at `ms`. What an option is priced at when it leaves a trade at a minute's end (its signal's exit) - never a price from
+ *  after it, which kept changing for a minute after the exit was announced. */
+export function closePremiumAt(oi, side, strike, ms) {
+  return premiumAt(oi, side, strike, (oi?.lag ?? 0) === MIN ? ms : ms - MIN)
+}
+
 /** The two ways to trade a setup with options, at the ATM strike: BUY the option that gains with the
  *  move (LONG: the call, SHORT: the put) or SELL (write) the one that loses value with it (LONG: the put,
  *  SHORT: the call) - the writer's side, which also earns the time decay. Null when there is no premium. */

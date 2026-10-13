@@ -98,6 +98,11 @@ When adding or changing a strategy:
   open trades only, FROM the minute it is made (`levelLog` on the position, `trailLog` for the futures
   signals' trailing SL; `optionStopTargetHit` / `simulateOutcome` follow them - what already passed is
   never rewritten and a trailing stop is never loosened by a change); paper trades are all sized by the current lots setting (live trades keep their quantity).
+  An option out with its signal is priced at the close of the minute the signal ended in (`closePremiumAt` - live data is
+  stamped at the minute's START and still moving, so a plain read at the exit time was the NEXT minute's running price),
+  the same live as replayed; once the server scanner has announced an exit it keeps it on the position (`exitFinal`) -
+  the record is what Telegram said, never re-priced by a later read or a reload. The option side a signal was traded on
+  IS that trade in the record's If bought / If sold (`scannerLogBody`). `tests/exit-price.test.mjs` guards it.
 - **A strategy follows its own exits.** A setup trailing its strategy's own stop (`tradeTrail`, or the scanner's trail pinned
   as `_trail` when a tuned setting was applied - `withOwnTrail`) is not moved by a later change of the scanner's trailing
   stop. Every strategy's option leaves the trade by ITS OWN exit (`tradeOptExit`, carried from the tuning by

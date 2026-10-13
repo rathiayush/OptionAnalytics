@@ -4,7 +4,7 @@
 
 import {
   ACTIVE_STRATEGIES, STRATEGY_BY_ID, evaluateStrategies, simulateOutcome, DEFAULT_TRAIL, RANGE_IDS,
-  exitLabel, premiumAt, optionStopTargetHit, squareOffMs, marketAt, lotsFor, pinnedTrailOf, optionExitText, capPoints, optionTradesFor, valueAt,
+  exitLabel, premiumAt, closePremiumAt, optionStopTargetHit, squareOffMs, marketAt, lotsFor, pinnedTrailOf, optionExitText, capPoints, optionTradesFor, valueAt,
   optionPlanFor, optionTradeAt, filtersForIndex,
 } from './strategyEngine.js'
 // The market at a signal now lives with the strategies (the order-flow trade filters read it) - re-exported here.
@@ -341,8 +341,9 @@ export function positionRows({ positions, dayResults, withOutcome, oi, nowMs, se
     // Its strategy's own option exit 'option': only its own SL / target, else the 15:10 square-off - the signal's exit does
     // not close it (the tuning's optionOutcome).
     const o = p.optExit === 'option' ? { status: 'square-off', exitAt: squareOffMs(p.entryTime) - MIN, timeStop: true, squareOff: true } : outcomeOf(p)
-    if (p.live && p.exitSent) {
-      // A live trade whose exit has gone to Dhan keeps the exit it was sent with.
+    if ((p.live && p.exitSent) || (p.exitFinal && p.exitTime != null && p.exitPremium != null && p.exitTime <= (nowMs ?? Infinity))) {
+      // A live trade whose exit has gone to Dhan keeps the exit it was sent with; a paper trade whose exit was announced
+      // (exitFinal - the scanner keeps it on the position) keeps that one - never re-priced afterwards.
       const points = p.exitPremium == null ? null : p.action === 'BUY' ? p.exitPremium - p.premium : p.premium - p.exitPremium
       return { ...p, exitTime: p.exitTime, exitReason: p.exitReason, current: p.exitPremium, points, rupees: points == null ? null : points * p.lots * p.lotSize }
     }
@@ -366,7 +367,8 @@ export function positionRows({ positions, dayResults, withOutcome, oi, nowMs, se
         exitTime = p.entryTime; exitPremium = p.premium; exitReason = 'Setup had already ended'
       } else {
         const at = nowMs == null || exitAt <= nowMs ? exitAt : null
-        const premium = oi && at ? premiumAt(oi, p.side, p.strike, at) : null
+        // At the close of the minute it ended in - the same live as replayed (closePremiumAt), and final then.
+        const premium = oi && at ? closePremiumAt(oi, p.side, p.strike, at) : null
         if (premium != null) { exitTime = at; exitPremium = premium; exitReason = exitLabel(o) }
         // A LIVE trade whose signal has ended is closed even when its option's premium is not known then (a strike with no
         // fresh tick) - it is closed on Dhan at the market; only its P&L here waits for a price.
@@ -474,7 +476,8 @@ export function signalLegs(x, oi, { filters = {}, cfg = {} } = {}) {
   for (const which of ['buy', 'sell']) {
     const trade = optionTradeAt(oi, setup, which, plan.moneyness, x.t)
     if (!trade?.strike) continue
-    const entry = premiumAt(oi, trade.side, trade.strike, x.t) ?? trade.premium ?? null
+    // The last finished minute's premium at the signal (closePremiumAt: the same live as replayed).
+    const entry = closePremiumAt(oi, trade.side, trade.strike, x.t) ?? trade.premium ?? null
     out[`${which}Option`] = `${trade.action ?? which.toUpperCase()} ${trade.strike} ${trade.side}`
     out[`${which}Entry`] = entry
     if (entry == null) continue
@@ -482,7 +485,7 @@ export function signalLegs(x, oi, { filters = {}, cfg = {} } = {}) {
     const untilMs = levels.exit === 'option' ? squareOffMs(x.t) : indexExitAt
     const hit = untilMs > x.t ? optionStopTargetHit(oi, { ...trade, premium: entry }, x.t, untilMs, levels.slPts, levels.targetPts) : null
     const exitAt = hit ? hit.at : untilMs
-    const exit = hit ? hit.premium : premiumAt(oi, trade.side, trade.strike, untilMs)
+    const exit = hit ? hit.premium : closePremiumAt(oi, trade.side, trade.strike, untilMs)
     out[`${which}Exit`] = exit ?? null
     out[`${which}ExitTime`] = exit != null ? exitAt : null
     out[`${which}ExitReason`] = exit == null ? null : hit ? hit.reason : levels.exit === 'option' ? 'square-off 15:10' : `with the index trade - ${exitLabel(o)}`
@@ -514,10 +517,25 @@ export function scannerLogBody({ underlying, date, source, dayResults, rows, cha
     }
   })
   // Each trade names its signal: the exact one, else the same strategy and side within two minutes.
+  const signalOf = (r) => {
+    const at = r.setupT ?? r.entryTime
+    return signals.find((x) => `${x.strategyId}-${x.time}` === r.setupKey)
+      ?? signals.filter((x) => x.strategyId === r.strategy && x.side === r.setupSide && Math.abs(x.time - at) < 2 * MIN).sort((a, b) => Math.abs(a.time - at) - Math.abs(b.time - at))[0]
+  }
+  // The option side a signal was TRADED on is that trade - its own entry, exit, time and reason (the If bought / If sold
+  // of that side can never differ from the trade beside it); the other side stays what signalLegs measured.
+  for (const r of rows ?? []) {
+    const sig = signalOf(r)
+    if (!sig || !r.exitTime || r.current == null || r.premium == null) continue
+    const which = r.action === 'BUY' ? 'buy' : 'sell'
+    Object.assign(sig, {
+      [`${which}Option`]: `${r.action} ${r.strike} ${r.side}`, [`${which}Entry`]: r.premium, [`${which}Exit`]: r.current,
+      [`${which}Points`]: r.action === 'BUY' ? r.current - r.premium : r.premium - r.current, [`${which}ExitTime`]: r.exitTime, [`${which}ExitReason`]: r.exitReason ?? null,
+    })
+  }
   const trades = (rows ?? []).map((r) => {
     const at = r.setupT ?? r.entryTime
-    const sig = signals.find((x) => `${x.strategyId}-${x.time}` === r.setupKey)
-      ?? signals.filter((x) => x.strategyId === r.strategy && x.side === r.setupSide && Math.abs(x.time - at) < 2 * MIN).sort((a, b) => Math.abs(a.time - at) - Math.abs(b.time - at))[0]
+    const sig = signalOf(r)
     const c = tradeCharges(r, chargeRates(charges))
     return {
       key: r.key, entryTime: r.entryTime, exitTime: r.exitTime ?? null, live: !!r.live, action: r.action, option: r.side, strike: r.strike, lots: r.lots,
