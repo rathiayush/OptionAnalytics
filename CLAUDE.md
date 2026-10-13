@@ -86,6 +86,13 @@ When adding or changing a strategy:
   trailing stop), applied by `applyTradeFilter` - defaults change nothing. The strategy tuning (`strategyTuning.js`,
   `scanDay.js`, `scanner-runner/tune.mjs`, the Strategy tuning page) measures settings through the same function and
   the same day scan as the scanner; keep `tests/strategy-tuning.test.mjs` (tuning == scanner) passing;
+- the tuning CHOOSES a setting month by month (`periodsOf` / `robustScore` / `pickSimplest` in `strategyTuning.js`): each
+  setting is scored on every month of the train days (2-week stretches under two months; one stretch under 15 days - the
+  old score), as the mean of its shrunk monthly averages less their spread; one that made money in under half of 3+ months,
+  or trades under `minPerMonth` (the job's "Min a month", 4 by default, 0 = off) a month, is not chosen; of the settings
+  within `NEAR_BEST` (15%) of the top score the one changing the fewest parameters from as written wins. Strategy
+  performance ranks fine-tuned strategies by their proof on days they were NOT tuned on (`proofOf` / `byProof` in
+  `settingCompare.js`) - their tuned-day numbers are labelled as such. `tests/robust-tuning.test.mjs` guards it;
 - a strategy that measures as losing is RETIRED (`retired: true` in `STRATEGIES`), not deleted: it is
   not run, listed, alerted or scored (`ACTIVE_STRATEGIES`); tests can still run it with `includeRetired`.
 

@@ -128,6 +128,25 @@ test('tuning picks what wins on the train days and recommends it only when it al
   assert.equal(tuneStrategy(days.slice(0, 4), 'wallBreak', { grid, minTrades: 2 }).recommend, false)
 })
 
+test('tuning chooses month by month: the months it won are reported, and too few trades a month is not chosen', () => {
+  const dates = []
+  for (const [m, n] of [['06', 8], ['07', 8], ['08', 8], ['09', 10]]) for (let i = 0; i < n; i++) dates.push(`2026-${m}-${String(3 + i).padStart(2, '0')}`)
+  const days = dates.map((d) => fakeDay(d))
+  const grid = { tradeSide: ['both', 'long', 'short'], window: [[930, 1445]], tradeStopX: [1], tradeTargetX: [1], tradeTimeStop: [0], tradeTrail: ['scanner'] }
+  const r = tuneStrategy(days, 'wallBreak', { grid, minTrades: 4, minPerMonth: 4 })
+  assert.equal(r.best.params.tradeSide, 'long')
+  assert.equal(r.best.train.periods, 3, 'June, July, August (+ September\'s first days)')
+  assert.equal(r.best.train.periodsWon, 3)
+  assert.equal(r.selection.periods, 3)
+  assert.equal(r.recommend, true, r.reason)
+  assert.match(r.reason, /made money in 3 of the 3 months/)
+  // 45 trades a month asked (both sides take 2 a day, 42 a month): none qualifies - the best with fewer is shown, never recommended.
+  const rare = tuneStrategy(days, 'wallBreak', { grid, minTrades: 4, minPerMonth: 45 })
+  assert.equal(rare.belowMin, true)
+  assert.equal(rare.recommend, false)
+  assert.match(rare.reason, /45\+ times a month/)
+})
+
 test('ranking, the grid size, and the filters to save', () => {
   const days = Array.from({ length: 6 }, (_, i) => fakeDay(`2026-09-1${i}`))
   const ranked = rankStrategies(days, { minTrades: 4, ids: ['wallBreak', 'trap'] })

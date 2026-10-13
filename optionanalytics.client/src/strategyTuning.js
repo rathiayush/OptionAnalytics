@@ -445,6 +445,74 @@ export function splitDays(days, trainFraction = 0.7) {
   return { train: sorted.slice(0, cut), test: sorted.slice(cut) }
 }
 
+/**
+ * The train days in the stretches a setting is CHOSEN on, so one lucky stretch cannot pick it: calendar months (a month
+ * of under 5 days joins the one before it - the first one the next); with under two such months, blocks of about 10
+ * days (two at least, from 15 days); fewer days - one stretch (scored as one, as before).
+ */
+export function periodsOf(days) {
+  const sorted = [...days].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
+  const months = []
+  for (const d of sorted) {
+    const key = String(d.date).slice(0, 7)
+    if (months.at(-1)?.key === key) months.at(-1).days.push(d)
+    else months.push({ key, days: [d] })
+  }
+  const merged = []
+  for (const m of months) {
+    if (m.days.length < 5 && merged.length) merged.at(-1).days.push(...m.days)
+    else merged.push({ key: m.key, days: [...m.days] })
+  }
+  if (merged.length > 1 && merged[0].days.length < 5) { merged[1].days.unshift(...merged[0].days); merged.shift() }
+  if (merged.length >= 2) return merged.map((m) => m.days)
+  if (sorted.length < 15) return [sorted]
+  const blocks = Math.max(2, Math.floor(sorted.length / 10))
+  const size = Math.ceil(sorted.length / blocks)
+  return Array.from({ length: blocks }, (_, i) => sorted.slice(i * size, (i + 1) * size)).filter((b) => b.length)
+}
+
+/** How a setting is CHOSEN (`score`): stretch by stretch (periodsOf), not on the days added up - a setting that made all
+ *  its money in one month loses to one that made a little in every month. Each stretch's average a trade (shrunk for few
+ *  trades: x n / (n + 3); a stretch it did not trade in counts 0), then their mean less their spread (sd / sqrt(stretches)).
+ *  Not chosen at all (score null) when it trades less than `minPerMonth` times a month (on the `tradingDays`), or - over 3+
+ *  stretches - made money in fewer than half of them. One stretch: the cautious score of scoreR, as before. The rest of
+ *  scoreR (n, total, avg, win rate ...) is the days added up; `cautious` that score, `periods` / `periodsWon` /
+ *  `perMonth` / `why` (rare / inconsistent) beside it. */
+export function robustScore(perPeriod, { tradingDays = null, minPerMonth = 0 } = {}) {
+  const all = perPeriod.flat()
+  const s = scoreR(all)
+  const P = perPeriod.length
+  const sums = perPeriod.map((rs) => rs.reduce((a, r) => a + r, 0))
+  const periodsWon = sums.filter((x) => x > 0).length
+  const perMonth = tradingDays ? (s.n / tradingDays) * 21 : null
+  const out = { ...s, cautious: s.score, periods: P, periodsWon, perMonth }
+  if (s.score == null) return out
+  if (minPerMonth > 0 && perMonth != null && perMonth < minPerMonth) return { ...out, score: null, why: 'rare' }
+  if (P < 2) return out
+  if (P >= 3 && periodsWon * 2 < P) return { ...out, score: null, why: 'inconsistent' }
+  const avgs = perPeriod.map((rs, i) => (rs.length ? (sums[i] / rs.length) * (rs.length / (rs.length + 3)) : 0))
+  const mean = avgs.reduce((a, x) => a + x, 0) / P
+  const sd = Math.sqrt(avgs.reduce((a, x) => a + (x - mean) ** 2, 0) / (P - 1))
+  return { ...out, score: mean - sd / Math.sqrt(P) }
+}
+
+/** Among the settings scoring within this share of the top one, the one changing the fewest parameters from as written
+ *  is chosen - each change has to earn its place, or it is fitting the days. */
+export const NEAR_BEST = 0.15
+/** How many parameters a setting changes from `from` (as written). */
+export const changesFrom = (v, from) => Object.keys(v).filter((k) => String(v[k]) !== String(from[k] ?? '')).length
+
+/** From rows sorted best score first: the one changing the fewest parameters from `asWritten` among those within
+ *  NEAR_BEST of the top score (ties: the higher score). { chosen, nearBest (how many were that close) }. */
+export function pickSimplest(rows, asWritten) {
+  const top = rows[0] ?? null
+  if (!top || !(top.train.score > 0)) return { chosen: top, nearBest: 0 }
+  const floor = top.train.score * (1 - NEAR_BEST)
+  const near = rows.filter((r) => r.train.score >= floor)
+  near.sort((a, b) => changesFrom(a.params, asWritten) - changesFrom(b.params, asWritten) || b.train.score - a.train.score || (a.at ?? 0) - (b.at ?? 0))
+  return { chosen: near[0], nearBest: near.length }
+}
+
 const run = (days, id, variant, trail) => days.flatMap((d) => dayTrades(d, id, variant, trail))
 
 /** Strategy `id`'s trades with `variant` on each day: date -> { n, total, wins } in R (unit 'R', the index trade) or in
@@ -493,18 +561,19 @@ export function rankStrategies(days, { trail = null, minTrades = 8, ids = ACTIVE
  * (baseline) and the best combination - chosen on the train days, checked on the test days - with the top
  * `keep` combinations, and whether the best one is worth applying.
  */
-export function tuneStrategy(days, id, { trail = null, minTrades = 8, trainFraction = 0.7, grid = null, keep = 10, what = 'trade', base = DEFAULT_VARIANT, oiKeys = null, search = 'step', onProgress = null, underlying = null } = {}) {
+export function tuneStrategy(days, id, { trail = null, minTrades = 8, minPerMonth = 0, simplest = true, trainFraction = 0.7, grid = null, keep = 10, what = 'trade', base = DEFAULT_VARIANT, oiKeys = null, search = 'step', onProgress = null, underlying = null } = {}) {
+  const rules = { minPerMonth, simplest }
   if (what === 'all') {
     // Everything in turn: the OI confirmation, the trade settings on top, then how it is taken in options.
-    const oi = tuneStrategy(days, id, { trail, minTrades, trainFraction, keep, what: 'oi', base, oiKeys, search, onProgress, underlying })
-    const tr = tuneStrategy(days, id, { trail, minTrades, trainFraction, keep, what: 'trade', base: oi.best?.params ?? base, underlying })
-    const op = tuneStrategy(days, id, { trail, minTrades, trainFraction, keep, what: 'option', base: tr.best?.params ?? oi.best?.params ?? base, underlying })
+    const oi = tuneStrategy(days, id, { trail, minTrades, ...rules, trainFraction, keep, what: 'oi', base, oiKeys, search, onProgress, underlying })
+    const tr = tuneStrategy(days, id, { trail, minTrades, ...rules, trainFraction, keep, what: 'trade', base: oi.best?.params ?? base, underlying })
+    const op = tuneStrategy(days, id, { trail, minTrades, ...rules, trainFraction, keep, what: 'option', base: tr.best?.params ?? oi.best?.params ?? base, underlying })
     return { ...op, what, tried: oi.tried + tr.tried + op.tried, factors: [...(oi.factors ?? []), ...(tr.factors ?? []), ...(op.factors ?? [])], oiStage: { best: oi.best, reason: oi.reason }, tradeStage: { best: tr.best, reason: tr.reason } }
   }
   if (what === 'both') {
     // The OI confirmation first (chosen on the train days only), then the trade settings on top of it.
-    const oi = tuneStrategy(days, id, { trail, minTrades, trainFraction, keep, what: 'oi', base, oiKeys, search, onProgress, underlying })
-    const onTop = tuneStrategy(days, id, { trail, minTrades, trainFraction, keep, what: 'trade', base: oi.best?.params ?? base, underlying })
+    const oi = tuneStrategy(days, id, { trail, minTrades, ...rules, trainFraction, keep, what: 'oi', base, oiKeys, search, onProgress, underlying })
+    const onTop = tuneStrategy(days, id, { trail, minTrades, ...rules, trainFraction, keep, what: 'trade', base: oi.best?.params ?? base, underlying })
     return { ...onTop, what, tried: oi.tried + onTop.tried, qualified: oi.qualified + onTop.qualified, factors: [...(oi.factors ?? []), ...(onTop.factors ?? [])], oiStage: { best: oi.best, reason: oi.reason } }
   }
   const explicitGrid = grid != null
@@ -515,14 +584,17 @@ export function tuneStrategy(days, id, { trail = null, minTrades = 8, trainFract
   const score = (ds, v) => (isOpt ? optionRun(ds, id, v, trail) : run(ds, id, v, trail))
   const asWritten = isOpt ? { ...DEFAULT_VARIANT, ...OPTION_DEFAULT } : DEFAULT_VARIANT
   const { train, test } = splitDays(days, trainFraction)
-  const baseline = { params: asWritten, train: scoreR(score(train, asWritten)), test: scoreR(score(test, asWritten)) }
+  // Chosen month by month (robustScore): each setting is scored on every stretch of the train days, not on them added up.
+  const periods = periodsOf(train)
+  const trainScore = (v) => robustScore(periods.map((p) => score(p, v)), { tradingDays: train.length, minPerMonth })
+  const baseline = { params: asWritten, train: robustScore(periods.map((p) => score(p, asWritten)), { tradingDays: train.length }), test: scoreR(score(test, asWritten)) }
   // What each tuned input did: for every value it was tried at, the best train score of a combination with it.
   const tally = new FactorTally(grid, base, minTrades)
   let rows = []
   let tried = 0
   if (what === 'oi' && !explicitGrid && search !== 'full') {
     // Step by step (stepSearch): each OI filter takes its best value given the others, then a second pass.
-    const found = stepSearch(grid, base, (v) => tally.add(v, scoreR(score(train, v))), { minTrades })
+    const found = stepSearch(grid, base, (v) => tally.add(v, trainScore(v)), { minTrades })
     rows = found.rows
     tried = found.tried
   } else {
@@ -548,18 +620,26 @@ export function tuneStrategy(days, id, { trail = null, minTrades = 8, trainFract
     for (const { v, at: i } of list) {
       tried++
       if (onProgress && tried % 250 === 0) onProgress({ tried, of })
-      const tr = tally.add(v, scoreR(score(train, v)))
+      const tr = tally.add(v, trainScore(v))
       if (tr.n < minTrades || tr.score == null) continue
       rows.push({ params: v, train: tr, at: i })
     }
   }
   rows.sort((a, b) => b.train.score - a.train.score || b.train.total - a.train.total || (a.at ?? 0) - (b.at ?? 0))
-  const top = rows.slice(0, keep).map((r) => ({ ...r, test: scoreR(score(test, r.params)) }))
-  // Nothing reached the minimum trades: show what there is anyway - the best setting with even a couple of trades -
+  // Of the settings within NEAR_BEST of the top score, the one closest to as written: a change has to earn its place.
+  const { chosen, nearBest } = simplest ? pickSimplest(rows, asWritten) : { chosen: rows[0] ?? null, nearBest: 0 }
+  const ordered = chosen ? [chosen, ...rows.filter((r) => r !== chosen)] : rows
+  const top = ordered.slice(0, keep).map((r) => ({ ...r, test: scoreR(score(test, r.params)) }))
+  // Nothing reached the minimum trades (in all, or a month): show what there is anyway - the best setting with even a couple of trades -
   // marked "below the minimum", never recommended. (Under 2 trades there is no score to rank by.)
-  if (!top.length && minTrades > 2) {
-    const loose = tuneStrategy(days, id, { trail, minTrades: 2, trainFraction, grid: explicitGrid ? grid : null, keep, what, base, oiKeys, search, onProgress, underlying })
-    if (loose.best) return { ...loose, belowMin: true, minTradesWanted: minTrades, recommend: false, reason: `only ${loose.best.train.n} trade(s) on the ${train.length} train day(s), below the minimum of ${minTrades} - shown for information, not enough to trust` }
+  if (!top.length && (minTrades > 2 || minPerMonth > 0)) {
+    const loose = tuneStrategy(days, id, { trail, minTrades: 2, minPerMonth: 0, simplest, trainFraction, grid: explicitGrid ? grid : null, keep, what, base, oiKeys, search, onProgress, underlying })
+    if (loose.best) {
+      const few = loose.best.train.n < minTrades
+      return { ...loose, belowMin: true, minTradesWanted: minTrades, recommend: false,
+        reason: few ? `only ${loose.best.train.n} trade(s) on the ${train.length} train day(s), below the minimum of ${minTrades} - shown for information, not enough to trust`
+          : `no setting traded ${minPerMonth}+ times a month on the train days and held up month by month - the one shown trades ${loose.best.train.perMonth?.toFixed(1) ?? '?'} a month; for information, not enough to trust` }
+    }
   }
   let best = top[0] ?? null
   // What the best setting and the strategy as written captured, in points, on all the days.
@@ -576,16 +656,21 @@ export function tuneStrategy(days, id, { trail = null, minTrades = 8, trainFract
   const unit = isOpt ? ' pts' : 'R'
   let recommend = false
   let reason
-  if (!best) reason = `no combination had ${minTrades}+ trades on the ${train.length} train day(s)`
+  const monthsText = best?.train.periods >= 2 ? ` - made money in ${best.train.periodsWon} of the ${best.train.periods} ${periods.length && String(periods[0][0]?.date).slice(0, 7) !== String(periods[1]?.[0]?.date).slice(0, 7) ? 'months' : 'stretches'} it was chosen on` : ''
+  const simplerText = nearBest > 1 && chosen !== rows[0] ? `; the simplest of ${nearBest} settings within ${Math.round(NEAR_BEST * 100)}% of the top score` : ''
+  if (!best) reason = `no combination had ${minTrades}+ trades${minPerMonth ? ` (and ${minPerMonth}+ a month)` : ''} and held up month by month on the ${train.length} train day(s)`
   else if (!test.length) reason = `only ${days.length} day(s) - too few to check on unseen days (need 5+); not recommended yet`
   else if (best.test.n < 3) reason = `the best combination took only ${best.test.n} trade(s) on the ${test.length} test day(s) - not enough to trust`
   else if (!(best.test.total > 0)) reason = `the best combination lost on the test days (${best.test.total.toFixed(2)}${unit}) - it fitted the past`
   else if (baseline.test.n && !(best.test.avg > (baseline.test.avg ?? -Infinity))) reason = `on the test days it did not beat the ${isOpt ? 'option taken as before (ATM sell, out with the index trade)' : 'strategy as written'} (${best.test.avg.toFixed(2)}${unit} vs ${baseline.test.avg.toFixed(2)}${unit} a trade)`
-  else { recommend = true; reason = `better on the train days and on the ${test.length} unseen test day(s)` }
+  else if (best.train.periods >= 2 && best.train.periodsWon * 2 < best.train.periods) reason = `it made money in only ${best.train.periodsWon} of the ${best.train.periods} stretches it was chosen on - one stretch carried it`
+  else { recommend = true; reason = `better on the train days${monthsText} and on the ${test.length} unseen test day(s)${simplerText}` }
+  if (best && !recommend) reason += simplerText
   return {
     id, name: STRATEGY_BY_ID[id]?.name ?? id, no: STRATEGY_BY_ID[id]?.no ?? null, what, unit: isOpt ? 'pts' : 'R',
     days: days.length, trainDays: train.map((d) => d.date), testDays: test.map((d) => d.date),
     tried, qualified: rows.length, baseline, best, top, recommend, reason, factors: tally.report(best?.params),
+    selection: { periods: periods.length, minPerMonth, nearBest, simplest: !!chosen && chosen !== rows[0], changes: best ? changesFrom(best.params, asWritten) : 0 },
   }
 }
 

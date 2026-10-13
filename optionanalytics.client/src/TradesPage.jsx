@@ -9,7 +9,7 @@ import { filtersFromTuning, paramsFromSettingsRow, settingSignature } from './st
 import { applyFilterValue, applyTunedFilters, putOnLiveList, saveIndexFilters } from './scannerSettings.js'
 import { AppliedSettings, ApplyTunedButton, LiveSetup, ParamsPopover, useServerRecord } from './ApplyTuned.jsx'
 import { runOf } from './appliedRun.js'
-import { compareVerdict, nowOf, paramDiff } from './settingCompare.js'
+import { byProof, compareVerdict, nowOf, paramDiff, proofOf } from './settingCompare.js'
 import { confirmServerLive, useServerLive } from './ServerLive.jsx'
 import ClearData from './ClearData.jsx'
 import { fillRecordLegs, needsLegs, oldRuleLegs, recordRunUrl } from './recordLegs.js'
@@ -23,6 +23,7 @@ const num = (v) => (v == null || v === '' ? null : Number(v))
 const f1 = (v) => (v == null || !Number.isFinite(v) ? '-' : v.toFixed(1))
 const pts = (v) => (v == null || !Number.isFinite(v) ? '-' : `${v >= 0 ? '+' : ''}${v.toFixed(1)}`)
 const fmtR = (v) => (v == null || !Number.isFinite(v) ? '-' : `${v >= 0 ? '+' : ''}${v.toFixed(2)}R`)
+const fmtProof = (v, unit) => (unit === 'pts' ? `${v >= 0 ? '+' : ''}${v.toFixed(2)} pts` : fmtR(v))
 const col = (v) => (v == null || !Number.isFinite(v) ? undefined : v > 0 ? UP_COLOR : v < 0 ? DOWN_COLOR : undefined)
 const hhmm = (s) => (s ? String(s).slice(11, 16) : '-') // "yyyy-MM-dd HH:mm:ss" (IST) -> HH:mm
 const sideTag = (s) => <span style={{ color: s === 'LONG' ? UP_COLOR : DOWN_COLOR }}>{s}</span>
@@ -439,12 +440,24 @@ function StrategyPerformance({ reloadKey }) {
   // the futures ones on the Order Flow page's scanner too.
   const scannerWho = data === 'spot' ? 'the server scanner' : 'this browser and the server scanner'
   const statsOf = (r) => (index === 'all' ? r.all : r.byIndex?.[index])
+  const tunedDays = setting === 'fine-tuned' ? ' - on the days it was tuned on (flattering: the setting was picked for them; Proof is the honest test)' : ''
+  // A fine-tuned strategy's proof on days it was never tuned on (proofOf): its indices proven best, unseen trades, months won.
+  const proofCell = (p) => (!p ? <Text type="secondary" style={{ fontSize: 12 }}>-</Text> : (
+    <Tooltip title={`On days the settings were never tuned on: ${p.unseenTrades} trade(s)${p.avg != null ? `, ${fmtProof(p.avg, p.unit)} a trade` : ''}; ${p.proven} of ${p.indices} ${p.indices === 1 ? 'index' : 'indices'} with a proven best setting${p.months ? `; made money in ${p.monthsWon} of ${p.months} months` : ''}. Ranked by this.`}>
+      <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
+        {p.proven ? <Tag color="gold">{p.proven}/{p.indices} proven</Tag> : <Tag>not proven</Tag>}
+        {p.unseenTrades} unseen{p.avg != null && <> · <b style={{ color: col(p.avg) }}>{fmtProof(p.avg, p.unit)}</b></>}{p.months ? ` · won ${p.monthsWon}/${p.months} mo` : ''}
+      </span>
+    </Tooltip>
+  ))
   const rows = useMemo(() => (current?.rows ?? [])
     .filter((r) => (setting === 'both' || r.setting === setting))
     .map((r) => ({ ...r, s: statsOf(r), key: `${r.strategyId}-${r.setting}` }))
-    .map((r) => ({ ...r, l: legOf(r.s) }))
+    .map((r) => ({ ...r, l: legOf(r.s), proof: r.setting === 'fine-tuned' ? proofOf(r.tunedSettings, index) : null }))
     .filter((r) => r.l && r.l.trades >= minTrades)
-    .sort((a, b) => (b.l.avgR ?? -1e9) - (a.l.avgR ?? -1e9) || b.l.points - a.l.points), [current, setting, index, minTrades, measure]) // eslint-disable-line react-hooks/exhaustive-deps
+    // Fine-tuned: by its proof on days it was NOT tuned on (its numbers on the tuned days are flattering - it was picked
+    // for them); as written (and both together): by average R, every day of which is honest for it.
+    .sort((a, b) => (setting === 'fine-tuned' && byProof(a.proof, b.proof)) || (b.l.avgR ?? -1e9) - (a.l.avgR ?? -1e9) || b.l.points - a.l.points), [current, setting, index, minTrades, measure]) // eslint-disable-line react-hooks/exhaustive-deps
   const indices = useMemo(() => [...new Set((current?.rows ?? []).flatMap((r) => Object.keys(r.byIndex ?? {})))].sort(), [current])
   // The days scanned per index (every run added up) - what a strategy's "days traded" is out of.
   const coverage = current?.coverage ?? []
@@ -495,7 +508,8 @@ function StrategyPerformance({ reloadKey }) {
   )
   // The best strategy of each index, fine-tuned and as written (at least `minTrades` trades, best average R).
   const bestOf = (u, which) => (current?.rows ?? []).filter((r) => r.setting === which && (legOf(r.byIndex?.[u])?.trades ?? 0) >= minTrades)
-    .sort((a, b) => (legOf(b.byIndex[u]).avgR ?? -1e9) - (legOf(a.byIndex[u]).avgR ?? -1e9))[0]
+    // Fine-tuned: the best proven on days it was not tuned on (proofOf) first - its tuned-day average flatters it.
+    .sort((a, b) => (which === 'fine-tuned' && byProof(proofOf(a.tunedSettings, u), proofOf(b.tunedSettings, u))) || (legOf(b.byIndex[u]).avgR ?? -1e9) - (legOf(a.byIndex[u]).avgR ?? -1e9))[0]
   // The grid: one row per strategy (the setting picked), one column per index, the best cell of each index marked.
   const gridRows = useMemo(() => {
     const which = setting === 'both' ? 'fine-tuned' : setting
@@ -642,7 +656,7 @@ function StrategyPerformance({ reloadKey }) {
               <Col key={u} xs={24} md={8}>
                 <Card size="small" title={`Best on ${u}`} styles={{ body: { padding: 10 } }}>
                   <Space direction="vertical" size={4} style={{ width: '100%', fontSize: 12 }}>
-                    <span>Fine-tuned: {tuned ? <><b>#{tuned.strategyNo} {tuned.strategy}</b> · <b style={{ color: col(legOf(tuned.byIndex[u]).avgR) }}>{fmtR(legOf(tuned.byIndex[u]).avgR)}</b>/trade over {legOf(tuned.byIndex[u]).trades} · total {fmtR(legOf(tuned.byIndex[u]).totalR)} · win {pctOf(legOf(tuned.byIndex[u]).winRate)}</> : <Text type="secondary">not enough trades yet</Text>}</span>
+                    <span>Fine-tuned: {tuned ? <><b>#{tuned.strategyNo} {tuned.strategy}</b> · {proofCell(proofOf(tuned.tunedSettings, u))} · <Text type="secondary" style={{ fontSize: 11 }}>on its tuned days</Text> <b style={{ color: col(legOf(tuned.byIndex[u]).avgR) }}>{fmtR(legOf(tuned.byIndex[u]).avgR)}</b>/trade over {legOf(tuned.byIndex[u]).trades} · total {fmtR(legOf(tuned.byIndex[u]).totalR)} · win {pctOf(legOf(tuned.byIndex[u]).winRate)}</> : <Text type="secondary">not enough trades yet</Text>}</span>
                     {bestSetting && <Text type="secondary" style={{ fontSize: 11 }}>its best setting: {bestSetting.row.setting_text} ({bestSetting.runs} run(s), {bestSetting.testTrades} unseen trades {fmtR(bestSetting.testAvg)})</Text>}
                     <span>As written: {written ? <><b>#{written.strategyNo} {written.strategy}</b> · <b style={{ color: col(legOf(written.byIndex[u]).avgR) }}>{fmtR(legOf(written.byIndex[u]).avgR)}</b>/trade over {legOf(written.byIndex[u]).trades} · total {fmtR(legOf(written.byIndex[u]).totalR)}</> : <Text type="secondary">not enough trades yet</Text>}</span>
                   </Space>
@@ -751,10 +765,11 @@ function StrategyPerformance({ reloadKey }) {
               <Card key={r.key} size="small" styles={{ body: { padding: 10 } }}>
                 <Space direction="vertical" size={4} style={{ width: '100%', fontSize: 12 }}>
                   <div>{view === 'ranking' && (i < 3 ? <Tag color="gold">{i + 1}</Tag> : <Tag>{i + 1}</Tag>)}<b>#{r.strategyNo} {r.strategy}</b> {r.setting === 'fine-tuned' ? <Tag color="blue">fine-tuned</Tag> : <Tag>as written</Tag>}</div>
-                  <div><b style={{ color: col(x?.avgR) }}>{fmtR(x?.avgR)}</b>/trade · {x?.trades ?? 0} trades · win {pctOf(x?.winRate)} · total <span style={{ color: col(x?.totalR) }}>{fmtR(x?.totalR)}</span>{one && x ? <> · <span style={{ color: col(x.points) }}>{pts(x.points)} pts</span> on {f1(x.risked)} risked</> : null} · {rrText(x?.avgRiskReward)}{days ? <> · traded {daysTraded(days, view === 'grid' ? 'all' : index)}</> : null}</div>
+                  <div>{view === 'ranking' && setting === 'fine-tuned' && <Text type="secondary" style={{ fontSize: 11 }}>on the tuned days: </Text>}<b style={{ color: col(x?.avgR) }}>{fmtR(x?.avgR)}</b>/trade · {x?.trades ?? 0} trades · win {pctOf(x?.winRate)} · total <span style={{ color: col(x?.totalR) }}>{fmtR(x?.totalR)}</span>{one && x ? <> · <span style={{ color: col(x.points) }}>{pts(x.points)} pts</span> on {f1(x.risked)} risked</> : null} · {rrText(x?.avgRiskReward)}{days ? <> · traded {daysTraded(days, view === 'grid' ? 'all' : index)}</> : null}</div>
                   <div>{Object.entries(r.byIndex ?? {}).map(([u, z]) => { const y = legOf(z); return y ? (
                     <span key={u} style={{ marginRight: 10, opacity: y.trades < minTrades ? 0.5 : 1 }}>{view === 'grid' && bestInColumn[u] === r.strategyId && <Tag color="gold">best</Tag>}{u} <b style={{ color: col(y.avgR) }}>{fmtR(y.avgR)}</b> ({y.trades})</span>
                   ) : null })}</div>
+                  {view === 'ranking' && setting === 'fine-tuned' && <div>Proof: {proofCell(r.proof)}</div>}
                   {r.setting === 'fine-tuned' && <div>{quickApply(r)}</div>}
                   <Space size={12}>
                     <Button size="small" type="link" style={{ padding: 0, height: 'auto' }} onClick={() => setOpenRows((m) => ({ ...m, [r.key]: !open }))}>{open ? 'Hide' : 'Show'} tuned settings</Button>
@@ -802,9 +817,10 @@ function StrategyPerformance({ reloadKey }) {
           { title: 'Rank', key: 'rank', width: 55, render: (_, __, i) => (i < 3 ? <Tag color="gold">{i + 1}</Tag> : i + 1) },
           { title: 'Strategy', key: 's', render: (_, r) => <span style={{ fontSize: 12 }}>#{r.strategyNo} {r.strategy} {r.setting === 'fine-tuned' ? <Tag color="blue" style={{ marginLeft: 4 }}>fine-tuned</Tag> : <Tag style={{ marginLeft: 4 }}>as written</Tag>}</span> },
           { title: <Tooltip title="Each index's best setting for this strategy (hover it for the setting and how it did on unseen days) - Apply puts it on the live scanner for that index. Open the row for every setting the runs found.">Best setting · apply</Tooltip>, key: 'best', width: 260, render: (_, r) => quickApply(r) },
-          { title: 'Trades', key: 'n', width: 70, sorter: (a, b) => a.l.trades - b.l.trades, render: (_, r) => r.l.trades },
-          { title: 'Win %', key: 'w', width: 70, sorter: (a, b) => (a.l.winRate ?? 0) - (b.l.winRate ?? 0), render: (_, r) => pctOf(r.l.winRate) },
-          { title: 'Avg R', key: 'ar', width: 80, sorter: (a, b) => (a.l.avgR ?? -1e9) - (b.l.avgR ?? -1e9), render: (_, r) => <b style={{ color: col(r.l.avgR) }}>{fmtR(r.l.avgR)}</b> },
+          ...(setting === 'fine-tuned' ? [{ title: <Tooltip title="How it did on days its settings were NEVER tuned on - the honest test, and what the ranking sorts by: indices with a proven best setting, months won, unseen trades.">Proof (unseen days)</Tooltip>, key: 'proof', width: 230, render: (_, r) => proofCell(r.proof) }] : []),
+          { title: <Tooltip title={`Trades${tunedDays}`}>Trades</Tooltip>, key: 'n', width: 70, sorter: (a, b) => a.l.trades - b.l.trades, render: (_, r) => r.l.trades },
+          { title: <Tooltip title={`Win rate${tunedDays}`}>Win %</Tooltip>, key: 'w', width: 70, sorter: (a, b) => (a.l.winRate ?? 0) - (b.l.winRate ?? 0), render: (_, r) => pctOf(r.l.winRate) },
+          { title: <Tooltip title={`Average R a trade${tunedDays}`}>Avg R</Tooltip>, key: 'ar', width: 80, sorter: (a, b) => (a.l.avgR ?? -1e9) - (b.l.avgR ?? -1e9), render: (_, r) => <b style={{ color: col(r.l.avgR) }}>{fmtR(r.l.avgR)}</b> },
           { title: <Tooltip title="Every trade's R added up: the points it made over the points it risked (its SL)">Total R</Tooltip>, key: 'tr', width: 85, sorter: (a, b) => a.l.totalR - b.l.totalR, render: (_, r) => <span style={{ color: col(r.l.totalR) }}>{fmtR(r.l.totalR)}</span> },
           ...(one ? [{ title: <Tooltip title={measure === 'futures' ? 'Index points' : 'Premium points'}>Net points / risked</Tooltip>, key: 'p', width: 140, sorter: (a, b) => a.l.points - b.l.points, render: (_, r) => <span style={{ fontSize: 12 }}><b style={{ color: col(r.l.points) }}>{pts(r.l.points)}</b> / {f1(r.l.risked)}</span> }] : []),
           { title: <Tooltip title="Planned risk : reward, averaged over the trades: 1 : target / SL">Risk : reward</Tooltip>, key: 'rr', width: 100, render: (_, r) => <span style={{ fontSize: 12 }}>{rrText(r.l.avgRiskReward)}</span> },

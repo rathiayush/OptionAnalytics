@@ -6,7 +6,7 @@
 //
 // Environment (from the server):
 //   RUNNER_BASE_URL, RUNNER_KEY   this server and the key it accepts from local processes
-//   TUNE_JOB                      { underlying, strategies: 'top3' | 'top5' | 'all' | [ids], days, includeEstimated, minTrades,
+//   TUNE_JOB                      { underlying, strategies: 'top3' | 'top5' | 'all' | [ids], days, includeEstimated, minTrades, minPerMonth,
 //                                   what: 'trade' | 'oi' | 'both' (the trade settings, the OI confirmation, or the OI first then the trade) }
 //   TUNE_OUT                      the result file
 //   TUNE_HISTORY_DIR              the history kept as CSV (tuneHistory.mjs): runs.csv, {run}-trades.csv, {run}-settings.csv, {run}-days.csv -
@@ -70,6 +70,8 @@ const inRange = (date) => (!FROM || date >= FROM) && (!TO || date <= TO)
 const isWeekend = (date) => [0, 6].includes(new Date(`${date}T00:00:00Z`).getUTCDay())
 const MAX_DAYS = RANGED ? 250 : Math.max(1, Math.min(250, Number(job.days) || 30))
 const MIN_TRADES = Math.max(2, Math.min(100, Number(job.minTrades) || 8))
+// The fewest trades a month a setting must take on the train days to be chosen (0: no such rule) - 4 when not sent.
+const MIN_PER_MONTH = Math.max(0, Math.min(30, Number.isFinite(Number(job.minPerMonth ?? NaN)) ? Number(job.minPerMonth) : 4))
 // 'check': no new tuning - only the cross-check of every setting found so far on these days (tuneChecks.mjs).
 // 'lab': no tuning either - the strategies the Strategy lab page picked, each measured with the setting it sent (job.params,
 // on top of job.labBase), beside it as written and as applied on this index; nothing is written to the tuning history.
@@ -709,7 +711,7 @@ async function main() {
     progress({ stage: 'tune', strategy: ids[i], done: i, total: ids.length })
     try {
       results.push(tuneStrategy(days, ids[i], {
-        trail, minTrades: MIN_TRADES, what: WHAT, oiKeys: OI_KEYS, search: SEARCH, underlying: U,
+        trail, minTrades: MIN_TRADES, minPerMonth: MIN_PER_MONTH, what: WHAT, oiKeys: OI_KEYS, search: SEARCH, underlying: U,
         // One strategy's own fine-tuning is this process's own CPU - tens of thousands of combinations, which no
         // timer can interrupt. It reports every 250 of them, so that is where the budget is checked: past it this
         // strategy is given up on from inside, and the strategies already measured are still written.
@@ -759,7 +761,7 @@ async function main() {
     // The same split tuneStrategy makes: the newest days are the test (held back), the rest the train.
     const testDays = new Set(splitDays(days).test.map((d) => d.date))
     const h = historyOf({
-      underlying: U, data: DATA, finishedMs: Date.now(), what: WHAT, search: SEARCH, minTrades: MIN_TRADES, from: FROM, to: TO,
+      underlying: U, data: DATA, finishedMs: Date.now(), what: WHAT, search: SEARCH, minTrades: MIN_TRADES, minPerMonth: MIN_PER_MONTH, from: FROM, to: TO,
       days: days.map((d) => ({ date: d.date, estimated: d.estimated, role: testDays.has(d.date) ? 'test' : 'train' })), skipped, results, trades, fetched: fetcher.stats,
       calls, budget, checks,
     })
@@ -780,7 +782,7 @@ async function main() {
   }
   write({
     // runId: the history run this result belongs to - so deleting the run (Strategy tuning page) removes this too.
-    ok: true, runId, underlying: U, job, startedUtc, finishedUtc: new Date().toISOString(), rowSize, trail, minTrades: MIN_TRADES, what: WHAT, search: SEARCH, data: DATA, from: FROM, to: TO, oiFactors: OI_KEYS ?? OI_FACTORS.map((f) => f.key),
+    ok: true, runId, underlying: U, job, startedUtc, finishedUtc: new Date().toISOString(), rowSize, trail, minTrades: MIN_TRADES, minPerMonth: MIN_PER_MONTH, what: WHAT, search: SEARCH, data: DATA, from: FROM, to: TO, oiFactors: OI_KEYS ?? OI_FACTORS.map((f) => f.key),
     grid: WHAT === 'check' ? null : WHAT === 'trade' ? TUNING_GRID : WHAT === 'oi' ? oiGridOf(OI_KEYS) : WHAT === 'option' ? OPTION_GRID : WHAT === 'all' ? { ...oiGridOf(OI_KEYS), ...TUNING_GRID, ...OPTION_GRID } : { ...oiGridOf(OI_KEYS), ...TUNING_GRID },
     days: days.map((d) => ({ date: d.date, estimated: d.estimated, setups: d.setups.length, ...d.quality })), skipped, ranked, results, checks: checkSummary, fetched: fetcher.stats, fastOi,
     strategies: ACTIVE_STRATEGIES.length, calls, budget,
