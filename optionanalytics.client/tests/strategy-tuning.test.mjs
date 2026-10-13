@@ -6,7 +6,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { applyTradeFilter, optionPlanFor, strategyFilters, simulateOutcome } from '../src/strategyEngine.js'
 import { scanDaySetups, firstPerCooldown, withDayOutcomes } from '../src/scanDay.js'
-import { DEFAULT_VARIANT, OI_GRID, OPTION_DEFAULT, dayTrades, outcomeKey, tradeDetails, scoreR, splitDays, tuneStrategy, rankStrategies, filtersFromTuning, variants, tuningDay, variantText } from '../src/strategyTuning.js'
+import { DEFAULT_VARIANT, OI_GRID, OPTION_DEFAULT, dayTrades, outcomeKey, tradeDetails, scoreR, splitDays, tuneStrategy, walkForward, withWalkForward, rankStrategies, filtersFromTuning, variants, tuningDay, variantText } from '../src/strategyTuning.js'
 import { day } from './synthetic-day.mjs'
 
 const MIN = 60_000
@@ -145,6 +145,37 @@ test('tuning chooses month by month: the months it won are reported, and too few
   assert.equal(rare.belowMin, true)
   assert.equal(rare.recommend, false)
   assert.match(rare.reason, /45\+ times a month/)
+})
+
+test('walk-forward: chosen again before each later block and traded on it - a setting that holds passes, one that fitted the past does not', () => {
+  const dates = []
+  for (const [m, n] of [['06', 15], ['07', 15], ['08', 15]]) for (let i = 0; i < n; i++) dates.push(`2026-${m}-${String(1 + i).padStart(2, '0')}`)
+  const grid = { tradeSide: ['both', 'long', 'short'], window: [[930, 1445]], tradeStopX: [1], tradeTargetX: [1], tradeTimeStop: [0], tradeTrail: ['scanner'] }
+  const opts = { grid, minTrades: 4, minPerMonth: 0 }
+  const steady = dates.map((d) => fakeDay(d))
+  const wf = walkForward(steady, 'wallBreak', opts, { folds: 3 })
+  assert.equal(wf.count, 3)
+  assert.equal(wf.folds.reduce((a, f) => a + f.days.length, 0), 45 - Math.floor(45 * 0.5))
+  assert.equal(wf.foldsWon, 3)
+  assert.equal(wf.passed, true, wf.reason)
+  assert.ok(wf.avg > wf.baseAvg, `${wf.avg} > ${wf.baseAvg}`)
+  assert.ok(wf.folds.every((f) => f.params.tradeSide === 'long' && f.changed))
+  // The longs win for the first 22 days (the first training window), then lose (the shorts win): the setting chosen on the past fails on the blocks.
+  const flipped = dates.map((d, i) => (i < 22 ? fakeDay(d) : fakeDay(d, { longWins: false, shortWins: true })))
+  const bad = walkForward(flipped, 'wallBreak', opts, { folds: 3 })
+  assert.equal(bad.passed, false)
+  assert.ok(bad.foldsWon < 3)
+  // withWalkForward: the failing one is no longer recommended, the reason says why; with 0 folds nothing changes.
+  const tuned = { best: { params: {} }, recommend: true, reason: 'looked good' }
+  assert.equal(withWalkForward(tuned, flipped, 'wallBreak', opts, 0), tuned)
+  const gated = withWalkForward(tuneStrategy(flipped, 'wallBreak', opts), flipped, 'wallBreak', opts, 3)
+  assert.equal(gated.recommend, false)
+  assert.ok(gated.walkForward)
+  const kept = withWalkForward(tuneStrategy(steady, 'wallBreak', opts), steady, 'wallBreak', opts, 3)
+  assert.equal(kept.recommend, true, kept.reason)
+  assert.match(kept.reason, /walk-forward/)
+  // Too few days: no walk-forward (and the result is left as it was).
+  assert.equal(walkForward(steady.slice(0, 20), 'wallBreak', opts), null)
 })
 
 test('ranking, the grid size, and the filters to save', () => {

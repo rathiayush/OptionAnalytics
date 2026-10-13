@@ -38,7 +38,7 @@ public sealed class StrategyTuningController : ControllerBase
     /// the strategy as written, the default - "applied": its setting applied on the index) beside it as written and as
     /// applied; no tuning, nothing written to the tuning history.</summary>
     public sealed record RunRequest(string Underlying, JsonNode? Strategies, int Days = 30, bool IncludeEstimated = false, int MinTrades = 8, string? What = null, string[]? OiFactors = null, string? Search = null, string? Data = null, string? From = null, string? To = null,
-        JsonObject? Params = null, string? LabBase = null, int MinPerMonth = 4);
+        JsonObject? Params = null, string? LabBase = null, int MinPerMonth = 4, int WalkForward = 0);
     private static readonly HashSet<string> OiFactorKeys = new() { "tradeOiWindow", "tradeFutWindow", "tradeOiFlow", "tradeOiCum", "tradeSideOi", "tradeSideCum", "tradeFutOi", "tradeMoveSize", "tradeDayType", "tradeWallRoom", "tradeWallOi" };
     private static readonly HashSet<string> TuneWhat = new() { "trade", "oi", "both", "option", "all", "check", "lab" };
     // The parameters a lab setting may set (strategyTuning.js labEditableKeys: TUNED_SETTING_KEYS and the order-flow
@@ -106,7 +106,7 @@ public sealed class StrategyTuningController : ControllerBase
         var factors = (request.OiFactors ?? Array.Empty<string>()).Distinct().ToList();
         if (factors.Any(f => !OiFactorKeys.Contains(f))) return (null, "OiFactors must be one of tradeOiWindow, tradeFutWindow, tradeOiFlow, tradeOiCum, tradeSideOi, tradeSideCum, tradeFutOi, tradeMoveSize, tradeDayType, tradeWallRoom, tradeWallOi.");
         return (new TuningJob(u, strategies.DeepClone(), Math.Clamp(request.Days, 1, 250), request.IncludeEstimated, Math.Clamp(request.MinTrades, 2, 100), what, factors, search, data, string.IsNullOrWhiteSpace(request.From) ? null : request.From.Trim(), string.IsNullOrWhiteSpace(request.To) ? null : request.To.Trim())
-        { Params = (JsonObject?)labParams?.DeepClone(), LabBase = labBase, MinPerMonth = Math.Clamp(request.MinPerMonth, 0, 30) }, null);
+        { Params = (JsonObject?)labParams?.DeepClone(), LabBase = labBase, MinPerMonth = Math.Clamp(request.MinPerMonth, 0, 30), WalkForward = Math.Clamp(request.WalkForward, 0, 5) }, null);
     }
 
     /// <summary>A job to schedule: the Run request, for one index or several (Underlyings), not before RunAtUtc (null:

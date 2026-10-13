@@ -92,7 +92,11 @@ When adding or changing a strategy:
   or trades under `minPerMonth` (the job's "Min a month", 4 by default, 0 = off) a month, is not chosen; of the settings
   within `NEAR_BEST` (15%) of the top score the one changing the fewest parameters from as written wins. Strategy
   performance ranks fine-tuned strategies by their proof on days they were NOT tuned on (`proofOf` / `byProof` in
-  `settingCompare.js`) - their tuned-day numbers are labelled as such. `tests/robust-tuning.test.mjs` guards it;
+  `settingCompare.js`) - their tuned-day numbers are labelled as such. `tests/robust-tuning.test.mjs` guards it and the
+  walk-forward (`walkForward` / `withWalkForward`, the job's "Walk-forward" blocks, 0 = off): the way of choosing is run again
+  before each of N later blocks of days (training = every day before the block) and traded on the block it never saw; a
+  setting that does not make money on them, beat as written and win half the blocks is not recommended
+  (`tests/strategy-tuning.test.mjs`);
 - a strategy that measures as losing is RETIRED (`retired: true` in `STRATEGIES`), not deleted: it is
   not run, listed, alerted or scored (`ACTIVE_STRATEGIES`); tests can still run it with `includeRetired`.
 

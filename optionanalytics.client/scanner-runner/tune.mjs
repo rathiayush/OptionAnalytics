@@ -6,7 +6,7 @@
 //
 // Environment (from the server):
 //   RUNNER_BASE_URL, RUNNER_KEY   this server and the key it accepts from local processes
-//   TUNE_JOB                      { underlying, strategies: 'top3' | 'top5' | 'all' | [ids], days, includeEstimated, minTrades, minPerMonth,
+//   TUNE_JOB                      { underlying, strategies: 'top3' | 'top5' | 'all' | [ids], days, includeEstimated, minTrades, minPerMonth, walkForward (folds, 0 = off),
 //                                   what: 'trade' | 'oi' | 'both' (the trade settings, the OI confirmation, or the OI first then the trade) }
 //   TUNE_OUT                      the result file
 //   TUNE_HISTORY_DIR              the history kept as CSV (tuneHistory.mjs): runs.csv, {run}-trades.csv, {run}-settings.csv, {run}-days.csv -
@@ -47,7 +47,7 @@ import { scannerProfileOf, trailFor } from '../src/scannerCore.js'
 import { defaultIndexTrade, defaultTradeLevels } from '../src/tradeDefaults.js'
 import { expiryFlagOf } from '../src/liveFeeds.js'
 import { dayFromOrderFlow, scanDaySetups } from '../src/scanDay.js'
-import { evaluateSetting, paramsFromFilters, DEFAULT_VARIANT, splitDays, OI_COMBO_CAP, OI_FACTORS, OPTION_GRID, countOiCombinations, oiFactorsFor, oiGridOf, optionText, rankStrategies, tradeDetails, tuneStrategy, tuningDay, TUNING_GRID, variantText } from '../src/strategyTuning.js'
+import { evaluateSetting, paramsFromFilters, DEFAULT_VARIANT, splitDays, OI_COMBO_CAP, OI_FACTORS, OPTION_GRID, countOiCombinations, oiFactorsFor, oiGridOf, optionText, rankStrategies, tradeDetails, tuneStrategy, tuningDay, TUNING_GRID, variantText, withWalkForward } from '../src/strategyTuning.js'
 import { DEFAULT_ROW_SIZES } from './indexScanner.mjs'
 import { createFetcher, isTransientText, pruneCache } from './tuneFetch.mjs'
 import { CHECK_COLUMNS, DAY_COLUMNS, RUN_COLUMNS, SETTING_COLUMNS, TRADE_COLUMNS, historyOf, runsCsvWith, toCsv } from './tuneHistory.mjs'
@@ -71,6 +71,8 @@ const isWeekend = (date) => [0, 6].includes(new Date(`${date}T00:00:00Z`).getUTC
 const MAX_DAYS = RANGED ? 250 : Math.max(1, Math.min(250, Number(job.days) || 30))
 const MIN_TRADES = Math.max(2, Math.min(100, Number(job.minTrades) || 8))
 // The fewest trades a month a setting must take on the train days to be chosen (0: no such rule) - 4 when not sent.
+// Walk-forward folds (0 = off): the way of choosing is tested on blocks of later days it never saw (strategyTuning.walkForward).
+const WALK_FORWARD = Math.max(0, Math.min(5, Math.floor(Number(job.walkForward) || 0)))
 const MIN_PER_MONTH = Math.max(0, Math.min(30, Number.isFinite(Number(job.minPerMonth ?? NaN)) ? Number(job.minPerMonth) : 4))
 // 'check': no new tuning - only the cross-check of every setting found so far on these days (tuneChecks.mjs).
 // 'lab': no tuning either - the strategies the Strategy lab page picked, each measured with the setting it sent (job.params,
@@ -710,7 +712,7 @@ async function main() {
     }
     progress({ stage: 'tune', strategy: ids[i], done: i, total: ids.length })
     try {
-      results.push(tuneStrategy(days, ids[i], {
+      const tuneOpts = {
         trail, minTrades: MIN_TRADES, minPerMonth: MIN_PER_MONTH, what: WHAT, oiKeys: OI_KEYS, search: SEARCH, underlying: U,
         // One strategy's own fine-tuning is this process's own CPU - tens of thousands of combinations, which no
         // timer can interrupt. It reports every 250 of them, so that is where the budget is checked: past it this
@@ -719,7 +721,8 @@ async function main() {
           if (overBudget()) throw Object.assign(new Error('over the job budget'), { overBudget: true })
           progress({ stage: 'tune', strategy: ids[i], done: i, total: ids.length, ...p })
         },
-      }))
+      }
+      results.push(withWalkForward(tuneStrategy(days, ids[i], tuneOpts), days, ids[i], tuneOpts, WALK_FORWARD))
     } catch (err) {
       if (!err.overBudget) throw err
       tuneStop = `the job's own time budget of ${budgetText} ran out while fine-tuning ${STRATEGY_BY_ID[ids[i]]?.name ?? ids[i]} (${i} of ${ids.length} strategy(s) finished) - that one and the rest were left`
@@ -782,7 +785,7 @@ async function main() {
   }
   write({
     // runId: the history run this result belongs to - so deleting the run (Strategy tuning page) removes this too.
-    ok: true, runId, underlying: U, job, startedUtc, finishedUtc: new Date().toISOString(), rowSize, trail, minTrades: MIN_TRADES, minPerMonth: MIN_PER_MONTH, what: WHAT, search: SEARCH, data: DATA, from: FROM, to: TO, oiFactors: OI_KEYS ?? OI_FACTORS.map((f) => f.key),
+    ok: true, runId, underlying: U, job, startedUtc, finishedUtc: new Date().toISOString(), rowSize, trail, minTrades: MIN_TRADES, minPerMonth: MIN_PER_MONTH, walkForward: WALK_FORWARD, what: WHAT, search: SEARCH, data: DATA, from: FROM, to: TO, oiFactors: OI_KEYS ?? OI_FACTORS.map((f) => f.key),
     grid: WHAT === 'check' ? null : WHAT === 'trade' ? TUNING_GRID : WHAT === 'oi' ? oiGridOf(OI_KEYS) : WHAT === 'option' ? OPTION_GRID : WHAT === 'all' ? { ...oiGridOf(OI_KEYS), ...TUNING_GRID, ...OPTION_GRID } : { ...oiGridOf(OI_KEYS), ...TUNING_GRID },
     days: days.map((d) => ({ date: d.date, estimated: d.estimated, setups: d.setups.length, ...d.quality })), skipped, ranked, results, checks: checkSummary, fetched: fetcher.stats, fastOi,
     strategies: ACTIVE_STRATEGIES.length, calls, budget,

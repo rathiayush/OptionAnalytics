@@ -48,5 +48,12 @@ public sealed class StrategyLabJobTests
         Assert.Contains("\"minPerMonth\":6", json);
         var old = System.Text.Json.JsonSerializer.Deserialize<OptionAnalytics.Server.Services.TuningJob>("{\"underlying\":\"NIFTY\",\"days\":30,\"minTrades\":8}", new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web));
         Assert.Equal(4, old!.MinPerMonth);
+        // Walk-forward folds: off when not sent, held to 0-5.
+        StrategyTuningController.RunRequest Wf(int n) => new("NIFTY", new JsonArray("weakWall"), WalkForward: n);
+        Assert.Equal(0, StrategyTuningController.BuildJob(Tune(null), "NIFTY").Job!.WalkForward);
+        Assert.Equal(3, StrategyTuningController.BuildJob(Wf(3), "NIFTY").Job!.WalkForward);
+        Assert.Equal(5, StrategyTuningController.BuildJob(Wf(50), "NIFTY").Job!.WalkForward);
+        Assert.Equal(0, StrategyTuningController.BuildJob(Wf(-1), "NIFTY").Job!.WalkForward);
+        Assert.Equal(0, old.WalkForward);
     }
 }
