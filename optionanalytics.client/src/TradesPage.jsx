@@ -7,7 +7,9 @@ import { OPTION_TRADE_FILTERS, STRATEGY_BY_ID, TRADE_FILTERS, filtersForIndex } 
 import { useNarrow } from './DomDrawer.jsx'
 import { filtersFromTuning, paramsFromSettingsRow, settingSignature } from './strategyTuning.js'
 import { applyFilterValue, applyTunedFilters, putOnLiveList, saveIndexFilters } from './scannerSettings.js'
-import { AppliedSettings, ApplyTunedButton, LiveSetup, ParamsPopover } from './ApplyTuned.jsx'
+import { AppliedSettings, ApplyTunedButton, LiveSetup, ParamsPopover, useServerRecord } from './ApplyTuned.jsx'
+import { runOf } from './appliedRun.js'
+import { compareVerdict, nowOf, paramDiff } from './settingCompare.js'
 import { confirmServerLive, useServerLive } from './ServerLive.jsx'
 import ClearData from './ClearData.jsx'
 import { fillRecordLegs, needsLegs, oldRuleLegs, recordRunUrl } from './recordLegs.js'
@@ -292,6 +294,97 @@ const notBestText = (t) => (t.best || !t.notBestBecause?.length ? null : (
   <div style={{ marginTop: 4 }}><b>Not proven yet:</b><ul style={{ margin: '2px 0 0', paddingLeft: 18 }}>{t.notBestBecause.map((w) => <li key={w}>{w}</li>)}</ul></div>
 ))
 
+/** One strategy on one index: what the scanner runs now against a new tuned setting - side by side, with the verdict and
+ *  every parameter that would change - so the call is made before applying (settingCompare.js). `cmp`: { r, u, t (the new
+ *  setting), now (nowOf), verdict, params, written (the as-written leg on this index), applied (its applied filters),
+ *  onList, liveToday, measureLabel }; `action`: the Apply button. */
+function SettingCompare({ cmp, action, onClose, narrow }) {
+  const rec = useServerRecord()
+  const open = !!cmp
+  const unit = cmp?.t?.unit === 'pts' ? ' pts' : 'R'
+  const v = (x) => (x == null || !Number.isFinite(x) ? '-' : `${x >= 0 ? '+' : ''}${x.toFixed(2)}${unit}`)
+  const unseen = (t) => (t?.testTrades ? <>{t.testTrades} trades · <b style={{ color: col(t.testAvg) }}>{v(t.testAvg)}</b>/trade{t.checkWinRate != null ? ` · win ${pctOf(t.checkWinRate)}` : ''}</> : <Text type="secondary">no trade yet</Text>)
+  const lift = (t) => (t?.checkTrades > 0 && t.checkAvg != null && t.baseAvg != null
+    ? <><b style={{ color: col(t.checkAvg - t.baseAvg) }}>{v(t.checkAvg - t.baseAvg)}</b>/trade <Text type="secondary" style={{ fontSize: 11 }}>({v(t.checkAvg)} vs as written {v(t.baseAvg)}, {t.checkTrades} vs {t.baseTrades} trades)</Text></>
+    : <Text type="secondary">not checked against as written yet</Text>)
+  const verdictOf = (t) => (t.best ? <Tag color="gold">best</Tag> : <Tooltip title={t.notBestBecause?.join('; ')}><Tag>not proven yet</Tag></Tooltip>)
+  const rows = []
+  if (cmp) {
+    const { now, t, written, applied, u } = cmp
+    const t0 = now.kind === 'tuned' ? now.t : null
+    const at = Number.isFinite(applied?._appliedAt) ? applied._appliedAt : null
+    const run = rec ? runOf(rec, u, cmp.r.strategyId, now.kind === 'written' ? null : at) : null
+    const runText = !rec ? 'loading…' : run.trades || run.signals
+      ? <>{run.signals} signal(s) · {run.trades} trade(s){run.live ? <> (<b style={{ color: DOWN_COLOR }}>{run.live} live</b>)</> : ''}{run.closed ? <> · {run.wins}/{run.closed} won · net <b style={{ color: col(run.net) }}>₹{Math.round(run.net).toLocaleString('en-IN')}</b></> : ''}</>
+      : <Text type="secondary">nothing yet</Text>
+    rows.push(
+      { key: 'set', what: 'Setting', now: now.kind === 'written' ? <><Tag>as written</Tag> nothing applied</> : t0 ? <>{t0.row.setting_text || '-'}{at ? <Text type="secondary" style={{ fontSize: 11 }}> · applied {new Date(at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}</Text> : null}</> : <Text type="warning">filters applied that no run kept (an older setting, or set by hand)</Text>,
+        next: t.row.setting_text || '-' },
+      { key: 'status', what: 'Tuning verdict', now: t0 ? verdictOf(t0) : <Text type="secondary">-</Text>, next: verdictOf(t) },
+      { key: 'unseen', what: <Tooltip title="Every day of every run this setting was NOT tuned on - the honest record (a setting tuned on one month is judged on the others)">Days it was never tuned on</Tooltip>, now: t0 ? unseen(t0) : <Text type="secondary">-</Text>, next: unseen(t) },
+      { key: 'lift', what: <Tooltip title="On those same days, against the strategy as written - like for like">Better than as written (same days)</Tooltip>, now: t0 ? lift(t0) : now.kind === 'written' ? <Text type="secondary">it is as written</Text> : <Text type="secondary">-</Text>, next: lift(t) },
+      { key: 'months', what: 'Months won (unseen days)', now: t0 ? (t0.periods ? `${t0.periodsWon} of ${t0.periods}` : '-') : <Text type="secondary">-</Text>, next: t.periods ? `${t.periodsWon} of ${t.periods}` : '-' },
+      { key: 'score', what: <Tooltip title="The unseen-days average shrunk for few trades (avg x n / (n + 10)) - what ranks the settings">Score</Tooltip>, now: t0 ? <b style={{ color: col(t0.score) }}>{v(t0.score)}</b> : <Text type="secondary">-</Text>, next: <b style={{ color: col(t.score) }}>{v(t.score)}</b> },
+      { key: 'train', what: <Tooltip title="The days it was tuned (chosen) on - far above its unseen days means it fitted those days">Days it was tuned on</Tooltip>, now: t0 ? `${t0.trainTrades} trades · ${v(t0.trainAvg)}/trade` : <Text type="secondary">-</Text>, next: `${t.trainTrades} trades · ${v(t.trainAvg)}/trade` },
+      { key: 'runs', what: 'Runs', now: t0 ? `${t0.runs} chose it · ${t0.recommended} recommended · ${t0.checkedRuns} other checked` : <Text type="secondary">-</Text>, next: `${t.runs} chose it · ${t.recommended} recommended · ${t.checkedRuns} other checked` },
+    )
+    if (now.kind === 'written' && written) rows.push({ key: 'written', what: `As written on ${u}, every tuning day (${cmp.measureLabel})`, now: <>{written.trades} trades · <b style={{ color: col(written.avgR) }}>{fmtR(written.avgR)}</b>/trade · win {pctOf(written.winRate)}</>, next: <Text type="secondary">-</Text> })
+    rows.push({ key: 'live', what: <Tooltip title="The server scanner's own record (paper, and live where it traded live)">On the live scanner{now.kind === 'written' ? '' : ' since applied'}</Tooltip>, now: runText, next: <Text type="secondary">not run yet - starts when applied</Text> })
+  }
+  const kind = cmp?.verdict.better === 'new' ? 'success' : cmp?.verdict.better === 'now' ? 'warning' : 'info'
+  const buttons = cmp && <Space size={8} wrap><Button onClick={onClose}>Keep what runs now</Button>{action}</Space>
+  const changed = cmp?.params.filter((p) => p.changed) ?? []
+  return (
+    <Drawer open={open} onClose={onClose} width={narrow ? '100%' : 860} destroyOnHidden
+      title={cmp ? <span>#{cmp.r.strategyNo} {narrow ? '' : `${cmp.r.strategy} `}on {cmp.u}: {narrow ? 'now vs new' : 'what runs now vs the new setting'}</span> : ''}
+      extra={narrow ? null : buttons}>
+      {cmp && (
+        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          <Alert type={kind} showIcon message={<b>{cmp.verdict.better === 'new' ? 'The new setting is better' : cmp.verdict.better === 'now' ? 'What runs now is better' : cmp.verdict.better === 'same' ? 'The same setting' : 'Cannot tell yet'}</b>} description={cmp.verdict.text} />
+          {narrow && buttons /* a phone: right under the verdict, always within reach */}
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            {cmp.u}: {cmp.onList ? 'on the live list' : 'not on the live list'} · {cmp.liveToday ? <b style={{ color: DOWN_COLOR }}>LIVE today</b> : 'paper today'} · per trade in {cmp.t.unit === 'pts' ? 'option premium points' : 'R (points over the SL)'}
+          </Text>
+          {narrow ? (
+            // A phone: each measure on its own, now above new.
+            <div aria-label="Now vs new" style={{ fontSize: 12 }}>
+              {rows.map((x) => (
+                <div key={x.key} style={{ borderTop: '1px solid #ffffff14', padding: '6px 0' }}>
+                  <Text strong style={{ fontSize: 12 }}>{x.what}</Text>
+                  <div><Text type="secondary" style={{ fontSize: 11 }}>Now </Text>{x.now}</div>
+                  <div><Text type="secondary" style={{ fontSize: 11 }}>New </Text>{x.next}</div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <Table size="small" pagination={false} rowKey="key" dataSource={rows} aria-label="Now vs new"
+              columns={[
+                { title: '', dataIndex: 'what', width: 190, render: (x) => <span style={{ fontSize: 12 }}>{x}</span> },
+                { title: 'Now', dataIndex: 'now', render: (x) => <span style={{ fontSize: 12 }}>{x}</span> },
+                { title: 'New', dataIndex: 'next', render: (x) => <span style={{ fontSize: 12 }}>{x}</span> },
+              ]} />
+          )}
+          <Text strong>What would change ({changed.length} of {cmp.params.length} parameters)</Text>
+          {narrow ? (
+            <div aria-label="Parameters now vs new" style={{ fontSize: 12 }}>
+              {changed.length ? changed.map((p) => (
+                <div key={p.key} style={{ padding: '3px 0' }}>{p.label}: <span style={{ textDecoration: 'line-through', opacity: 0.7 }}>{p.now}</span> → <b style={{ color: '#4096ff' }}>{p.next}</b></div>
+              )) : <Text type="secondary">nothing - the same parameters</Text>}
+              <Text type="secondary" style={{ fontSize: 11 }}>The other {cmp.params.length - changed.length} stay as they are.</Text>
+            </div>
+          ) : <Table size="small" pagination={false} rowKey="key" dataSource={cmp.params} aria-label="Parameters now vs new"
+            rowClassName={(p) => (p.changed ? 'param-changed' : '')}
+            columns={[
+              { title: 'Parameter', dataIndex: 'label', render: (x) => <span style={{ fontSize: 12 }}>{x}</span> },
+              { title: 'Now', dataIndex: 'now', width: 190, render: (x, p) => <span style={{ fontSize: 12, textDecoration: p.changed ? 'line-through' : undefined, opacity: p.changed ? 0.7 : 1 }}>{x}</span> },
+              { title: 'New', dataIndex: 'next', width: 190, render: (x, p) => <span style={{ fontSize: 12, color: p.changed ? '#4096ff' : undefined, fontWeight: p.changed ? 600 : 400 }}>{x}</span> },
+            ]} />}
+        </Space>
+      )}
+    </Drawer>
+  )
+}
+
 /** Points are only comparable within one index (BANKNIFTY moves ~2.5x NIFTY): shown per index; R compares across. */
 function StrategyPerformance({ reloadKey }) {
   const auth = useAuth()
@@ -331,6 +424,9 @@ function StrategyPerformance({ reloadKey }) {
     confirmServerLive(u, st, () => serverLive.set(u, { live: true }).then((ok) => { if (ok) { message.warning(`${u}: the server scanner trades LIVE today`); loadLive() } }))
   }
   const [applying, setApplying] = useState(false)
+  // Now vs new for one strategy on one index (the Compare drawer): { r, u, t } - t the new tuned setting.
+  const [compareOf, setCompareOf] = useState(null)
+  const [compareAll, setCompareAll] = useState(false) // the Apply best panel: now vs new for every strategy of the index
   const [body, setBody] = useState(null)
   const [error, setError] = useState(null)
   useEffect(() => {
@@ -384,6 +480,19 @@ function StrategyPerformance({ reloadKey }) {
     }
   }
   const one = index !== 'all'
+  const measureLabel = measure === 'futures' ? (data === 'spot' ? 'Spot' : 'Futures') : measure === 'bought' ? 'Option bought' : 'Option sold'
+  /** What runs now against tuned setting `t` of strategy `r` on `u`: the verdict, the parameters, the as-written record. */
+  const compareFor = (r, u, t) => {
+    const now = nowOf(liveOf(r.strategyId, u), r.tunedSettings?.[u], isLive, tunedPart)
+    const writtenRow = (current?.rows ?? []).find((x) => x.strategyId === r.strategyId && x.setting === 'as written')
+    return { r, u, t, now, verdict: compareVerdict(now, t), params: paramDiff(now, t), written: legOf(writtenRow?.byIndex?.[u]), applied: liveCfg?.filtersByIndex?.[u]?.[r.strategyId] ?? null,
+      onList: (liveCfg?.liveList?.[u] ?? []).includes(r.strategyId), liveToday: liveToday(u), measureLabel }
+  }
+  const compareLink = (r, u, t, label = 'compare') => (
+    <Tooltip title={`What runs now on ${u} against this setting - side by side, with every parameter that would change`}>
+      <Button size="small" type="link" style={{ padding: '0 4px', height: 'auto' }} onClick={() => setCompareOf({ r, u, t })}>{label}</Button>
+    </Tooltip>
+  )
   // The best strategy of each index, fine-tuned and as written (at least `minTrades` trades, best average R).
   const bestOf = (u, which) => (current?.rows ?? []).filter((r) => r.setting === which && (legOf(r.byIndex?.[u])?.trades ?? 0) >= minTrades)
     .sort((a, b) => (legOf(b.byIndex[u]).avgR ?? -1e9) - (legOf(a.byIndex[u]).avgR ?? -1e9))[0]
@@ -421,6 +530,7 @@ function StrategyPerformance({ reloadKey }) {
                 {t.best ? <Tag color="gold">best</Tag> : <Tag>top - not proven yet</Tag>}
               </Tooltip>
               {live ? <Tag color="green">live now</Tag> : applyButton(r, t)}
+              {!live && compareLink(r, u, t)}
               <ParamsPopover source={t.row} from="row" label="params" action={applyButton(r, t, live ? 'Apply again' : 'Apply these parameters')} />
             </span>
           )
@@ -475,7 +585,7 @@ function StrategyPerformance({ reloadKey }) {
             <div><b>{t.row.index}</b>{t.best && <Tag color="gold" style={{ marginLeft: 6 }}>best</Tag>}{isLive(liveOf(r.strategyId, t.row.index), t.row) && <Tag color="green" style={{ marginLeft: 4 }}>live now</Tag>} {t.row.setting_text || '-'} <ParamsPopover source={t.row} from="row" action={applyButton(r, t, 'Apply these parameters')} /></div>
             <Text type="secondary" style={{ fontSize: 12 }}>{t.runs} run(s) · {t.recommended} recommended · unseen {t.testTrades} trades <b style={{ color: col(t.testAvg) }}>{t.testAvg == null ? '-' : `${pts(t.testAvg)}${t.unit === 'pts' ? ' pts' : 'R'}`}</b>/trade · {crossText(t)}</Text>
             {!t.best && t.notBestBecause?.length > 0 && <Text type="warning" style={{ fontSize: 11, display: 'block' }}>not best: {t.notBestBecause.join('; ')}</Text>}
-            <div style={{ marginTop: 4 }}>{applyButton(r, t)}</div>
+            <div style={{ marginTop: 4 }}>{applyButton(r, t)}{!isLive(liveOf(r.strategyId, t.row.index), t.row) && compareLink(r, t.row.index, t, 'compare with now')}</div>
           </div>
         ))}
       </Space>
@@ -493,7 +603,7 @@ function StrategyPerformance({ reloadKey }) {
           { title: <Tooltip title="On its unseen days: in how many months it traded it made money, the strategy as written on the same days, and how many runs other than the ones that chose it checked it. Best needs: above 0 on unseen days, better than as written there, and - over 2+ months - winning in at least half of them.">Across months</Tooltip>, key: 'pm', width: 230, render: (_, t) => <span style={{ fontSize: 12 }}>{crossText(t)}{!t.best && t.notBestBecause?.length > 0 && <Text type="warning" style={{ fontSize: 11, display: 'block' }}>not best: {t.notBestBecause.join('; ')}</Text>}</span> },
           { title: 'Chosen on', key: 'tr', width: 150, render: (_, t) => <Text type="secondary" style={{ fontSize: 12 }}>{t.trainTrades} trades · {t.trainAvg == null ? '-' : `${pts(t.trainAvg)}${t.unit === 'pts' ? ' pts' : 'R'}`}</Text> },
           { title: <Tooltip title="Unseen-days average shrunk for few trades (avg x n / (n + 10)) - a setting proven over many unseen trades ranks above a lucky one">Score</Tooltip>, key: 'sc', width: 80, render: (_, t) => <span style={{ color: col(t.score) }}>{t.score == null ? '-' : `${pts(t.score)}${t.unit === 'pts' ? '' : 'R'}`}</span> },
-          { title: '', key: 'a', width: 170, render: (_, t) => applyButton(r, t) },
+          { title: '', key: 'a', width: 190, render: (_, t) => <Space direction="vertical" size={0}>{applyButton(r, t)}{!isLive(liveOf(r.strategyId, t.row.index), t.row) && compareLink(r, t.row.index, t, 'compare with now')}</Space> },
         ]} />
       </>
     )
@@ -576,11 +686,44 @@ function StrategyPerformance({ reloadKey }) {
                   None of {u}&apos;s tuned settings is proven yet, so nothing is picked - pick the strategies to apply their top-scored setting anyway, or run a Re-check (Strategy tuning → Tune: Re-check settings) over the months you have tuned so they are measured on their unseen days.
                 </Text>
               )}
+              {candidates.length > 0 && (() => {
+                // Now vs new for every strategy with a tuned setting on the index - to decide which to apply.
+                const list = candidates.map(({ r, t }) => ({ key: r.strategyId, r, t, c: compareFor(r, u, t) }))
+                const better = list.filter((x) => x.c.verdict.better === 'new')
+                const unitOf = (t) => (t.unit === 'pts' ? ' pts' : 'R')
+                const by = (x) => (x.c.verdict.by == null ? '' : ` ${x.c.verdict.by >= 0 ? '+' : ''}${x.c.verdict.by.toFixed(2)}${unitOf(x.t)}`)
+                return (
+                  <>
+                    <Space size={8} wrap>
+                      <Button size="small" onClick={() => setCompareAll((x) => !x)} aria-expanded={compareAll}>{compareAll ? 'Hide' : 'Compare'} what runs now vs new - every strategy on {u}</Button>
+                      {compareAll && (
+                        <Tooltip title={`Picks only the ${better.length} strateg${better.length === 1 ? 'y' : 'ies'} whose new setting beats what runs now (the verdict column); nothing is applied until you press Apply`}>
+                          <Button size="small" disabled={!better.length} onClick={() => setBestSel({ index: u, ids: better.map((x) => x.r.strategyId) })}>Pick the {better.length} where new is better</Button>
+                        </Tooltip>
+                      )}
+                    </Space>
+                    {compareAll && (
+                      <Table size="small" pagination={false} rowKey="key" dataSource={list} aria-label={`Now vs new on ${u}`} scroll={{ x: 760 }}
+                        columns={[
+                          { title: 'Strategy', key: 's', width: 220, render: (_, x) => <span style={{ fontSize: 12 }}>#{x.r.strategyNo} {x.r.strategy}</span> },
+                          { title: 'Now', key: 'now', width: 220, render: (_, x) => <span style={{ fontSize: 12 }}>{x.c.now.kind === 'written' ? <Tag>as written</Tag> : x.c.now.kind === 'tuned' ? <>{x.c.now.t.row.setting_text || 'tuned'} <Text type="secondary" style={{ fontSize: 11 }}>score {pts(x.c.now.t.score)}</Text></> : <Text type="warning" style={{ fontSize: 12 }}>set by hand / an older setting</Text>}</span> },
+                          { title: 'New', key: 'new', width: 240, render: (_, x) => <span style={{ fontSize: 12 }}>{x.t.best ? <Tag color="gold">best</Tag> : <Tag>not proven yet</Tag>}{x.t.row.setting_text || '-'} <Text type="secondary" style={{ fontSize: 11 }}>· unseen {x.t.testTrades} · {pts(x.t.testAvg)}{unitOf(x.t)}/trade</Text></span> },
+                          { title: 'Verdict', key: 'v', width: 170, render: (_, x) => <Tooltip title={x.c.verdict.text}>{x.c.verdict.better === 'new' ? <Tag color="green">new better{by(x)}</Tag> : x.c.verdict.better === 'now' ? <Tag color="orange">keep now{by(x)}</Tag> : x.c.verdict.better === 'same' ? <Tag color="blue">runs now</Tag> : <Tag>can&apos;t tell yet</Tag>}</Tooltip> },
+                          { title: '', key: 'c', width: 90, render: (_, x) => compareLink(x.r, u, x.t, 'details') },
+                        ]} />
+                    )}
+                  </>
+                )
+              })()}
             </Space>
           )
         })()
       )}
       <StrategyTrades key={tradesOf ? `${tradesOf.strategyId}-${tradesOf.index}-${tradesOf.setting}` : 'none'} target={tradesOf} data={data} range={range} narrow={narrow} onClose={() => setTradesOf(null)} />
+      {(() => {
+        const cmp = compareOf ? compareFor(compareOf.r, compareOf.u, compareOf.t) : null
+        return <SettingCompare cmp={cmp} narrow={narrow} onClose={() => setCompareOf(null)} action={cmp && cmp.verdict.better !== 'same' ? applyButton(cmp.r, cmp.t, 'Apply the new setting') : null} />
+      })()}
       <details>
         <summary style={{ cursor: 'pointer', fontSize: 12 }}>How the fine-tuning works, and how to read this page</summary>
         <div style={{ fontSize: 12, marginTop: 6, lineHeight: 1.6 }}>

@@ -129,10 +129,13 @@ public static class TuningPerformance
     /// 0 for few trades (avg x n / (n + 10)), so a setting proven over many unseen trades beats a lucky one.
     /// Best (see Rank) = the highest score that is above 0, beats the strategy as written on the same days, and - once
     /// it has been checked over two or more months - won in at least half of them (with one month: recommended by its
-    /// run). Row = the newest run's row, which is what Apply sends to the scanner.</summary>
+    /// run). Row = the newest run's row, which is what Apply sends to the scanner. CheckTrades / CheckAvg / CheckWinRate =
+    /// its trades on the cross-checked days alone, BaseTrades / BaseAvg the strategy as written on those same days - the
+    /// like-for-like pair the Trades page's "now vs new" compares.</summary>
     public sealed record TunedSetting(Dictionary<string, string> Row, int Runs, int Recommended, int TestTrades, double? TestAvg,
         int TrainTrades, double? TrainAvg, double PointsNet, string Unit, double? Score, bool Best,
-        int Periods = 0, int PeriodsWon = 0, double? BaseAvg = null, int CheckedRuns = 0, double? CheckAvg = null)
+        int Periods = 0, int PeriodsWon = 0, double? BaseAvg = null, int CheckedRuns = 0, double? CheckAvg = null,
+        int CheckTrades = 0, double? CheckWinRate = null, int BaseTrades = 0)
     {
         /// <summary>Why it cannot be called best yet (WhyNotBest) - empty when it can.</summary>
         public List<string> NotBestBecause => WhyNotBest(this);
@@ -441,7 +444,8 @@ public static class TuningPerformance
             var checkedRuns = c?.Runs.Count(r => !a.ChosenBy.Contains(r)) ?? 0;
             return new TunedSetting(a.Row, a.Runs, a.Recommended, n, unseenAvg, a.TrainTrades,
                 a.TrainTrades > 0 ? a.TrainSum / a.TrainTrades : null, a.PointsNet, a.Row.GetValueOrDefault("unit", "R"), score, false,
-                periods, won, baseAvg, checkedRuns, checkAvg);
+                periods, won, baseAvg, checkedRuns, checkAvg,
+                c?.N ?? 0, c is { N: > 0 } ? (double)c.Wins / c.N : null, c?.BaseN ?? 0);
         }).OrderByDescending(x => x.Score ?? double.MinValue).ThenByDescending(x => x.Runs).ToList();
         var best = list.FindIndex(CanBeBest);
         if (best >= 0) list[best] = list[best] with { Best = true };
