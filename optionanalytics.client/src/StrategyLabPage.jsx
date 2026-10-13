@@ -8,7 +8,7 @@ import { useLocation } from 'react-router-dom'
 import { Alert, Button, Card, Col, DatePicker, InputNumber, Progress, Row, Segmented, Select, Space, Table, Tag, Tooltip, Typography, message } from 'antd'
 import { NavBar, useAuth, UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import { ACTIVE_STRATEGIES, SPOT_STRATEGIES, STRATEGY_BY_ID, TRADE_FILTERS } from './strategyEngine.js'
-import { OPTION_DEFAULT, labEditableKeys, labOverrides, labParams, optionText, paramsFromFilters, paramsFromSettingsRow, settingSignature, variantText, DEFAULT_VARIANT } from './strategyTuning.js'
+import { OPTION_DEFAULT, labEditableKeys, labOverrides, labParams, optionText, paramsFromFilters, paramsFromSettingsRow, settingSignature, sumPoints, variantText, DEFAULT_VARIANT } from './strategyTuning.js'
 import { applyTunedFilters, putOnLiveList } from './scannerSettings.js'
 import { ApplyTunedButton } from './ApplyTuned.jsx'
 
@@ -196,6 +196,7 @@ export default function StrategyLabPage() {
                 <Select mode="multiple" showSearch optionFilterProp="label" value={ids} onChange={changeIds} options={strategies} style={{ width: '100%' }} maxTagCount="responsive" aria-label="Strategy"
                   placeholder="Strategies" />
               </Col>
+              <Col><Button size="small" onClick={() => changeIds(strategies.map((x) => x.value))} disabled={ids.length === strategies.length}>All {strategies.length} strategies</Button></Col>
               <Col><Space size={4}><Text style={{ fontSize: 12 }}>last</Text><InputNumber min={1} max={250} value={days} onChange={(v) => setDays(v ?? 30)} disabled={!!(range?.[0] || range?.[1])} style={{ width: 80 }} aria-label="Days" /><Text style={{ fontSize: 12 }}>days, or</Text></Space></Col>
               <Col><DatePicker.RangePicker value={range} onChange={setRange} format="DD MMM YYYY" allowEmpty={[true, true]} aria-label="Dates" /></Col>
             </Row>
@@ -289,7 +290,7 @@ export default function StrategyLabPage() {
         </Card>
 
         {done.length > 0 && (rows.length > 1 || done.length < rows.length) && (
-          <LabSummary rows={done} picked={current?.key} onPick={setPicked} missing={missing} />
+          <LabSummary rows={done} picked={current?.key} onPick={setPicked} missing={missing} data={data} />
         )}
         {current
           ? <LabResult result={{ ...current.file, ...current.entry }} stale={current.stale} index={current.index} applied={appliedOf(current.index, current.id)}
@@ -300,23 +301,68 @@ export default function StrategyLabPage() {
   )
 }
 
-/** Every index × strategy picked that has a lab result: as written, as applied, the setting tried - one row each; a row
- *  opens its full result below. */
-function LabSummary({ rows, picked, onPick, missing }) {
+/** Every index × strategy picked that has a lab result: as written, as applied, the setting tried, and what it captured
+ *  in index points and in the option bought / sold - one row each, a row opening its full result below - with every
+ *  strategy added up (and each index when there are several). */
+function LabSummary({ rows, picked, onPick, missing, data }) {
+  const [of, setOf] = useState('yours')
   const cell = (m) => (m?.r?.n ? <span style={{ fontSize: 12 }}>{m.r.n} · win {pct(m.r.winRate)} · <b style={{ color: col(m.r.avg) }}>{fmtR(m.r.avg)}</b> avg · <span style={{ color: col(m.r.total) }}>{fmtR(m.r.total)}</span></span> : <Text type="secondary" style={{ fontSize: 12 }}>no trades</Text>)
+  const legCell = (l) => (l?.n ? <span style={{ fontSize: 12 }}><b style={{ color: col(l.total) }}>{pts(l.total)}</b> <Text type="secondary" style={{ fontSize: 11 }}>({l.n} · {l.wins}/{l.losses} · +{Number(l.captured).toFixed(1)} / {Number(l.lost).toFixed(1)})</Text></span> : <Text type="secondary" style={{ fontSize: 12 }}>-</Text>)
+  const idx = data === 'spot' ? 'Spot' : 'Futures'
+  const pointsOf = (r) => r.entry[of]?.points ?? null
+  const rTotal = (list, k) => {
+    const ms = list.map((r) => r.entry[k]).filter((m) => m?.r?.n)
+    return { n: ms.reduce((a, m) => a + m.r.n, 0), total: ms.reduce((a, m) => a + (m.r.total ?? 0), 0) }
+  }
+  const indices = [...new Set(rows.map((r) => r.index))]
+  const groups = [...(indices.length > 1 ? indices.map((u) => ({ label: `${u} - all its strategies`, rows: rows.filter((r) => r.index === u) })) : []),
+    { label: indices.length > 1 ? 'Every index - all strategies' : `All strategies on ${indices[0]}`, rows, all: true }]
+  const all = sumPoints(rows.map(pointsOf))
+  const ofText = of === 'yours' ? 'your setting' : 'as written'
   return (
-    <Card size="small" title={`The lab runs - ${rows.length} strategy / index pair(s)`} extra={<Text type="secondary" style={{ fontSize: 12 }}>trades · win rate · avg R · total R - click a row for its trades and to apply it</Text>}>
+    <Card size="small" title={`The lab runs - ${rows.length} strategy / index pair(s)`}
+      extra={<Space size={8} wrap><Text type="secondary" style={{ fontSize: 12 }}>points of</Text><Segmented size="small" value={of} onChange={setOf} options={[{ value: 'yours', label: 'Your setting' }, { value: 'asWritten', label: 'As written' }]} aria-label="Points of" /></Space>}>
       <Space direction="vertical" size={8} style={{ width: '100%' }}>
-        <Table size="small" pagination={false} rowKey="key" dataSource={rows} scroll={{ x: 1000 }} aria-label="Lab runs"
+        {/* The answer in one line: what every strategy picked captured together. */}
+        <Text style={{ fontSize: 13 }} aria-label="All strategies points">
+          All {rows.length} together ({ofText}{indices.length > 1 ? ', the indices\' points added' : ''}): option bought <b style={{ color: col(all.buy.total) }}>{pts(all.buy.total)}</b> pts ({all.buy.n} trades)
+          {' · '}option sold <b style={{ color: col(all.sell.total) }}>{pts(all.sell.total)}</b> pts ({all.sell.n})
+          {' · '}{idx.toLowerCase()} <b style={{ color: col(all.total) }}>{pts(all.total)}</b> pts ({all.n})
+        </Text>
+        <Table size="small" pagination={false} rowKey="key" dataSource={rows} scroll={{ x: 1500 }} aria-label="Lab runs"
           onRow={(r) => ({ onClick: () => onPick(r.key), style: { cursor: 'pointer', background: r.key === picked ? 'rgba(22,119,255,0.12)' : undefined } })}
           columns={[
             { title: 'Index', dataIndex: 'index', width: 100 },
             { title: 'Strategy', key: 's', width: 220, render: (_, r) => <span>#{r.entry.strategy.no} {r.entry.strategy.name}{r.stale && <Tag color="warning" style={{ marginLeft: 6 }}>older setting</Tag>}</span> },
-            { title: 'As written', key: 'w', render: (_, r) => cell(r.entry.asWritten) },
-            { title: 'As applied', key: 'a', render: (_, r) => (r.entry.applied ? cell(r.entry.applied) : <Text type="secondary" style={{ fontSize: 12 }}>not applied</Text>) },
-            { title: 'Your setting', key: 'y', render: (_, r) => <span>{cell(r.entry.yours)}{r.entry.base === 'applied' && <Tag style={{ marginLeft: 6 }}>from applied</Tag>}</span> },
-            { title: 'vs as written', key: 'd', width: 110, render: (_, r) => { const d = (r.entry.yours?.r?.total ?? 0) - (r.entry.asWritten?.r?.total ?? 0); return <b style={{ color: col(d) }}>{fmtR(d)}</b> } },
-          ]} />
+            { title: 'As written', key: 'w', width: 230, render: (_, r) => cell(r.entry.asWritten) },
+            { title: 'As applied', key: 'a', width: 230, render: (_, r) => (r.entry.applied ? cell(r.entry.applied) : <Text type="secondary" style={{ fontSize: 12 }}>not applied</Text>) },
+            { title: 'Your setting', key: 'y', width: 250, render: (_, r) => <span>{cell(r.entry.yours)}{r.entry.base === 'applied' && <Tag style={{ marginLeft: 6 }}>from applied</Tag>}</span> },
+            { title: 'vs as written', key: 'd', width: 100, render: (_, r) => { const d = (r.entry.yours?.r?.total ?? 0) - (r.entry.asWritten?.r?.total ?? 0); return <b style={{ color: col(d) }}>{fmtR(d)}</b> } },
+            { title: <Tooltip title={`What ${ofText} captured in the option BOUGHT (premium points): net (trades · wins/losses · captured / lost)`}>Option bought (pts)</Tooltip>, key: 'buy', width: 190, render: (_, r) => legCell(pointsOf(r)?.buy) },
+            { title: <Tooltip title={`What ${ofText} captured in the option SOLD (premium points)`}>Option sold (pts)</Tooltip>, key: 'sell', width: 190, render: (_, r) => legCell(pointsOf(r)?.sell) },
+            { title: `${idx} pts`, key: 'idx', width: 190, render: (_, r) => legCell(pointsOf(r)) },
+          ]}
+          summary={() => (
+            <>
+              {groups.map((g) => {
+                const p = sumPoints(g.rows.map(pointsOf))
+                const w = rTotal(g.rows, 'asWritten')
+                const y = rTotal(g.rows, 'yours')
+                return (
+                  <Table.Summary.Row key={g.label} style={{ fontWeight: g.all ? 600 : 400 }}>
+                    <Table.Summary.Cell index={0} colSpan={2}><Text strong={g.all} style={{ fontSize: 12 }}>{g.label}</Text></Table.Summary.Cell>
+                    <Table.Summary.Cell index={2}><span style={{ fontSize: 12 }}>{w.n} trades · <span style={{ color: col(w.total) }}>{fmtR(w.total)}</span></span></Table.Summary.Cell>
+                    <Table.Summary.Cell index={3} />
+                    <Table.Summary.Cell index={4}><span style={{ fontSize: 12 }}>{y.n} trades · <span style={{ color: col(y.total) }}>{fmtR(y.total)}</span></span></Table.Summary.Cell>
+                    <Table.Summary.Cell index={5}><b style={{ color: col(y.total - w.total) }}>{fmtR(y.total - w.total)}</b></Table.Summary.Cell>
+                    <Table.Summary.Cell index={6}>{legCell(p.buy)}</Table.Summary.Cell>
+                    <Table.Summary.Cell index={7}>{legCell(p.sell)}</Table.Summary.Cell>
+                    <Table.Summary.Cell index={8}>{legCell(p)}</Table.Summary.Cell>
+                  </Table.Summary.Row>
+                )
+              })}
+            </>
+          )} />
         {missing.length > 0 && <Text type="secondary" style={{ fontSize: 12 }}>No lab run yet for {missing.map((m) => `#${STRATEGY_BY_ID[m.id]?.no} on ${m.index}`).join(', ')} - press Run to measure them.</Text>}
       </Space>
     </Card>

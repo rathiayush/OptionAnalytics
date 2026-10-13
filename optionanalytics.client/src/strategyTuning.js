@@ -358,6 +358,21 @@ export function pointsSummary(trades) {
   return { ...stats(trades), slN: sl.length, slPoints: sum(sl.map((t) => t.points)), buy: leg('buy'), sell: leg('sell') }
 }
 
+/** Several points summaries (pointsSummary) added up - the index points and each option leg's (BUY / SELL): captured,
+ *  lost, net, trades, wins / losses - e.g. every strategy of a Strategy lab run together. Missing ones are left out. */
+export function sumPoints(list) {
+  const add = (legs) => {
+    const xs = legs.filter((l) => l?.n > 0)
+    const sum = (k) => xs.reduce((a, l) => a + (Number(l[k]) || 0), 0)
+    const n = sum('n')
+    const captured = sum('captured')
+    const lost = sum('lost')
+    return { n, total: captured + lost, avg: n ? (captured + lost) / n : null, captured, lost, wins: sum('wins'), losses: sum('losses') }
+  }
+  const ps = (list ?? []).filter(Boolean)
+  return { ...add(ps), buy: add(ps.map((p) => p.buy)), sell: add(ps.map((p) => p.sell)) }
+}
+
 /** Trades in R -> n, total, average, win rate, profit factor, worst run (max drawdown), and the cautious score
  *  (average minus one standard error; null under 2 trades). */
 export function scoreR(rs) {
