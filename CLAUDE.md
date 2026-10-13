@@ -118,11 +118,15 @@ When adding or changing a strategy:
 
 ## Other rules
 
-- Every PAST-day Dhan Data API response (intraday spot / futures / option candles, the rolling / expired-option chain) is
-  kept on disk by `DhanDataCache` (`Storage:DhanCachePath`, the persistent volume in docker-compose) and answered from
-  there - only closed windows with full sessions (judged on the minutes Dhan SENT - `SentTimes`: a thin option strike's
-  untraded minutes come at a 0 price the parser drops, and still count, or BANKNIFTY's monthly strikes were never kept);
-  today, empty or half days go to Dhan again. A new Dhan data call for
+- Every PAST day of the Dhan Data API (intraday spot / futures / option candles, the rolling / expired-option chain - NIFTY,
+  BANKNIFTY, SENSEX alike) is kept on disk by `DhanDataCache` (`Storage:DhanCachePath`, the persistent volume in
+  docker-compose), ONE FILE PER INSTRUMENT AND DAY (`DhanDayWindow`): any window reads the days kept from disk and asks Dhan
+  for the rest in one call - so a window running into today (the chart backfills) still keeps its past days. A day is kept
+  when it is before today and Dhan sent a full session of it (its own timestamps - a thin option strike's untraded minutes
+  come at a 0 price the parser drops, and still count, or BANKNIFTY's monthly strikes were never kept) or a later past day
+  in the same answer (a holiday is then kept empty, a short session short); today, empty answers and a half LAST day go to
+  Dhan again. Older whole-window files are still read for their exact request and split into days. The folder is held to
+  `Storage:DhanCacheMaxGb` (10 GB): over it, the files read least recently go first (`TrimNow`). A new Dhan data call for
   past days goes through `DhanHistoricalDataService` / `DhanRollingOptionDataService` so it is cached too
   (`DhanDataCacheTests.cs`).
 
