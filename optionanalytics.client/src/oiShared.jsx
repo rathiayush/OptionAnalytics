@@ -1,71 +1,266 @@
-import { Component, useEffect, useMemo, useRef, useState } from 'react'
+import { Component, useEffect, useMemo, useRef, useState, useId, useSyncExternalStore } from 'react'
+import { alignToBars, chartVwap } from './chartVwap.js'
 import { createPortal } from 'react-dom'
 import { Select, Space, Typography, Button, Row, Col, Tooltip, Tag, InputNumber, Table, Segmented, Empty, Alert } from 'antd'
-import { createChart, CandlestickSeries, LineSeries, CrosshairMode } from 'lightweight-charts'
+import { CandlestickSeries, LineSeries, CrosshairMode } from 'lightweight-charts'
+import { createZoomableChart } from './chartZoom.js'
 import * as signalR from '@microsoft/signalr'
 import {
   UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR, RECONNECT_RETRY_POLICY,
   istTimeFormatter, istTickMarkFormatter, toChartTime, TIMEFRAME_OPTIONS,
+  syncSignalRGroups, joinAllSignalRGroups, onLiveBatch, checkForNewDeploy,
 } from './shared.jsx'
 
 const { Text } = Typography
 
-// Pure helpers and chart/table components shared between OiReplayPage.jsx (historical replay) and
-// OiLiveDashboardPage.jsx (always-live) - originally all lived inside OiReplayPage.jsx, extracted
-// here UNCHANGED so both pages get one tested implementation. OiReplayPage.jsx keeps its own
-// separate replay-clock machinery (visibleCount/asOfMs) entirely to itself; nothing in this file
-// depends on that, which is exactly why it was safe to lift out - every function/component below
-// takes its data via plain arguments/props.
+// Pure helpers and chart/table components originally lived inside OiReplayPage.jsx, extracted here
+// UNCHANGED so a second live consumer (LiveStrikeDataPage.jsx) could reuse the identical
+// implementation rather than a bespoke copy. OiReplayPage.jsx keeps its own separate replay-clock
+// machinery (visibleCount/asOfMs) entirely to itself; nothing in this file depends on that, which is
+// exactly why it was safe to lift out - every function/component below takes its data via plain
+// arguments/props.
 //
 // RECONNECT_RETRY_POLICY itself now lives in shared.jsx (not here) so App.jsx's own useHub can use
 // the identical policy instead of a third copy - see its doc comment there for why the bare
 // withAutomaticReconnect() default is unsafe for a live-market page.
 
+// A stable default for an optional array prop (ReplayChart/EmaChart's own vwapSeries) - a plain `[]`
+// literal default is a NEW array every render, which would re-trigger any effect keyed on it
+// (re-feeding the chart, losing its own pan/zoom) even when the caller never actually passes one.
+const EMPTY_ARRAY = []
+
+// Keeps a chart's own visible time range showing "the whole day so far", growing as more bars
+// accumulate live, instead of staying frozen at whatever few bars existed the moment fitContent()
+// happened to run once. Every chart on this page/OiReplayPage.jsx used to call fitContent() only
+// on [dayKey] (a fresh day loading) - correct for that one moment, but a real report ("charts are
+// too zoomed, I have to squeeze/zoom out myself") traced back to exactly this: fitContent() fits to
+// however many bars exist RIGHT THEN, and nothing ever widened that window again as a live session
+// went on to accumulate far more bars over the rest of the day. The vertical (price) axis needed no
+// separate fix - lightweight-charts' own default autoScale already re-fits to whatever's in the
+// CURRENT visible window, so it was only ever following the same too-narrow horizontal window.
+//
+// Only re-fits while the viewer is already at the live edge (the previous last bar was already
+// visible) - re-fitting on every single new tick regardless would otherwise yank someone back to
+// the day's full span the moment they scroll/zoom back to inspect an earlier stretch, fighting the
+// very thing they just did. Same reasoning ReplayChart's own allowShiftVisibleRangeOnWhitespaceReplacement
+// doc comment already gives for shiftVisibleRangeOnNewBar.
+// Auto-fit never zooms in further than this many pixels per candle: with only a few bars (early in
+// the day, or a coarse timeframe) fitting them all made every candle huge and the viewer had to
+// squeeze the chart by hand. Past that, the newest candles are shown at this width instead.
+const MAX_AUTO_BAR_SPACING = 8
+
+// Candle charts leave this much room above and below the candles by default, so a quiet stretch
+// doesn't stretch a few points of range across the whole height.
+export const CANDLE_SCALE_MARGINS = { top: 0.2, bottom: 0.2 }
+
+// Fits the whole series, capped at MAX_AUTO_BAR_SPACING per candle (see its comment).
+export function fitWholeDay(chart) {
+  if (!chart) return
+  const timeScale = chart.timeScale()
+  timeScale.fitContent()
+  const range = timeScale.getVisibleLogicalRange()
+  const width = timeScale.width()
+  if (!range || width <= 0) return
+  if (width / Math.max(1, range.to - range.from) > MAX_AUTO_BAR_SPACING) {
+    timeScale.applyOptions({ barSpacing: MAX_AUTO_BAR_SPACING })
+    timeScale.scrollToRealTime()
+  }
+}
+
+export function useFitContentAsDataGrows(chartRef, dataLength, dayKey) {
+  const prevLengthRef = useRef(0)
+  const userControlRef = useChartUserControl(chartRef, dayKey)
+
+  // A fresh day (or combo switch) always gets an unconditional fit, regardless of where the OLD
+  // day's chart happened to be scrolled to - there is no "previous" position to preserve.
+  useEffect(() => {
+    if (dataLength > 0) fitWholeDay(chartRef.current)
+    prevLengthRef.current = dataLength
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dayKey])
+
+  useEffect(() => {
+    const chart = chartRef.current
+    const previousLength = prevLengthRef.current
+    prevLengthRef.current = dataLength
+    if (!chart || dataLength === 0 || dataLength <= previousLength) return
+    // Once the viewer has dragged or zoomed, the view is exactly where they put it - no following
+    // the newest bar either, even if it is still on screen (that used to scroll a chart the viewer
+    // had nudged left back to the right on every new candle). Double-click hands it back.
+    if (userControlRef.current) return
+    const range = chart.timeScale().getVisibleLogicalRange()
+    const wasAtLiveEdge = !range || range.to >= previousLength - 1
+    if (!wasAtLiveEdge) return
+    fitWholeDay(chart)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dataLength])
+}
+
+// Whether the viewer has taken manual control of a chart's view - dragged, zoomed (wheel) or
+// pinched it. Live charts auto-fit to the whole day only until then; after that the view is theirs
+// (see useFitContentAsDataGrows / StrikeOiDrilldownChart), because re-fitting on every live update
+// snapped a zoom or scroll-back straight back before anything could be read. Double-click the chart
+// to hand the view back to auto-fit. Reset whenever `resetKey` changes (a new day/strike/mode).
+//
+// Control is taken only when a gesture actually MOVED the view. It used to be taken on any press -
+// a plain click to read the crosshair, or a finger resting on the chart while scrolling the page on
+// a phone - after which every new minute scrolled the chart one bar right at a fixed zoom, sliding
+// the morning off the left edge: "the chart keeps going right after some time".
+export function useChartUserControl(chartRef, resetKey) {
+  const controlledRef = useRef(false)
+  const attachedRef = useRef(null)
+
+  // While the viewer controls the view the chart library must not shift it either: by default it
+  // scrolls one bar right whenever a bar is added while the last one is visible.
+  const setFollowsNewBars = (follows) => chartRef.current?.timeScale().applyOptions({
+    shiftVisibleRangeOnNewBar: follows, allowShiftVisibleRangeOnWhitespaceReplacement: follows,
+  })
+  const takeControl = () => {
+    if (controlledRef.current) return
+    controlledRef.current = true
+    setFollowsNewBars(false)
+  }
+
+  useEffect(() => {
+    controlledRef.current = false
+    setFollowsNewBars(true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resetKey])
+
+  // No dependency array on purpose: the chart instance can be recreated (e.g. a height change), so
+  // this re-checks each render and re-attaches only when the underlying element actually changed.
+  useEffect(() => {
+    const element = chartRef.current?.chartElement?.() ?? null
+    if (element === (attachedRef.current?.element ?? null)) return
+    attachedRef.current?.detach()
+    attachedRef.current = null
+    if (!element) return
+    const visibleRange = () => chartRef.current?.timeScale().getVisibleLogicalRange() ?? null
+    const moved = (before) => {
+      const after = visibleRange()
+      if (!before || !after) return false
+      return Math.abs(after.from - before.from) > 0.5 || Math.abs(after.to - before.to) > 0.5
+    }
+    // Compared once the gesture ends - a live update can't land in between, since the chart is only
+    // ever re-fitted from React effects, which run after this event's own handlers.
+    let pressedRange = null
+    const press = () => { pressedRange = visibleRange() }
+    const releasePress = () => {
+      if (pressedRange && moved(pressedRange)) takeControl()
+      pressedRange = null
+    }
+    const wheel = () => {
+      const before = visibleRange()
+      requestAnimationFrame(() => { if (moved(before)) takeControl() })
+    }
+    const release = () => {
+      controlledRef.current = false
+      setFollowsNewBars(true)
+      fitWholeDay(chartRef.current)
+    }
+    // Capture phase: the chart library handles these events on its own canvases and can stop them
+    // before they would bubble up to here (the spot chart's click-a-wall handler did exactly that
+    // to the double-click reset).
+    element.addEventListener('wheel', wheel, { passive: true, capture: true })
+    element.addEventListener('pointerdown', press, true)
+    window.addEventListener('pointerup', releasePress, true)
+    window.addEventListener('pointercancel', releasePress, true)
+    element.addEventListener('dblclick', release, true)
+    attachedRef.current = {
+      element,
+      detach: () => {
+        element.removeEventListener('wheel', wheel, { capture: true })
+        element.removeEventListener('pointerdown', press, true)
+        window.removeEventListener('pointerup', releasePress, true)
+        window.removeEventListener('pointercancel', releasePress, true)
+        element.removeEventListener('dblclick', release, true)
+      },
+    }
+  })
+
+  useEffect(() => () => attachedRef.current?.detach(), [])
+
+  return controlledRef
+}
+
 // Modeled directly on App.jsx's own useHub: ONE connection, opened on mount and never torn down or
-// rebuilt - no `enabled` gate, no dependency on underlying/expiryFlag (the SAME hub broadcasts ticks
-// for every underlying; each caller just filters client-side in its own handlers, same as every
-// consumer of oiReplayTick/futuresTick already does). This is the exact fix for the "reconnect churn"
-// OiReplayPage's own useOiReplayLiveFeed was exposed to (its effect depends on `[enabled]`, which can
-// flip during a fetch and tear the socket down at the worst moment) - this hook has no such flag.
-// Originally local to OiLiveDashboardPage.jsx, moved here so a second live page (LiveStrikeDataPage)
-// can share the identical connection logic rather than a third bespoke copy - OiReplayPage.jsx does
-// not use this and is unaffected either way.
-export function useOiLiveHub(onSpotUpdate, onOiReplayTick, onReconnected, onCdvUpdate, onCdvBarClosed) {
+// rebuilt - no `enabled` gate, no dependency on underlying/expiryFlag (a fresh connection would mean
+// a fresh reconnect-and-rejoin cycle on every selection change, exactly the "reconnect churn"
+// OiReplayPage's own useOiReplayLiveFeed used to be exposed to before its own [enabled] dependency
+// was removed - see its doc comment). Instead the connection stays open across a selection change
+// and just SWITCHES GROUPS (see syncSignalRGroups) - underlying/expiryFlag are passed in purely to
+// drive that, never to gate the connection's own lifecycle. Currently only used by
+// LiveStrikeDataPage.jsx - OiReplayPage.jsx keeps its own separate hook (it also needs a
+// futures-only underlying-group case oiRestSnapshot never does) but follows the exact same
+// group-membership shape.
+export function useOiLiveHub(onSpotUpdate, onOiReplayTick, onReconnected, onCdvUpdate, onCdvBarClosed, onOiRestSnapshot, underlying, expiryFlag) {
   const spotRef = useRef(onSpotUpdate)
   const tickRef = useRef(onOiReplayTick)
   const reconnectedRef = useRef(onReconnected)
   const cdvRef = useRef(onCdvUpdate)
   const cdvBarClosedRef = useRef(onCdvBarClosed)
+  const restSnapshotRef = useRef(onOiRestSnapshot)
   spotRef.current = onSpotUpdate
   tickRef.current = onOiReplayTick
   reconnectedRef.current = onReconnected
   cdvRef.current = onCdvUpdate
   cdvBarClosedRef.current = onCdvBarClosed
+  restSnapshotRef.current = onOiRestSnapshot
 
   const [connectionState, setConnectionState] = useState('connecting')
+  const connectionRef = useRef(null)
+  // Groups the SERVER currently thinks this connection is in - empty until the first successful
+  // connect/reconnect actually joins something. Read by the groups-sync effect below to compute a
+  // diff against a later selection change, and by the connection effect's own reconnect handler to
+  // know what to rejoin from scratch.
+  const groupsRef = useRef([])
 
   useEffect(() => {
+    // Belt-and-suspenders, not a fix for an observed leak - see OiReplayPage.jsx's own
+    // useOiReplayLiveFeed for the identical guard and its full reasoning: with today's `[]` deps this
+    // is already unreachable in every normal case (React's own cleanup-before-next-effect ordering
+    // already stops the previous connection), but costs nothing and closes off a future edit
+    // reintroducing a dependency here leaving an old connection open and unreferenced.
+    if (connectionRef.current) connectionRef.current.stop()
     const connection = new signalR.HubConnectionBuilder()
       .withUrl('/hubs/spot')
       .withAutomaticReconnect(RECONNECT_RETRY_POLICY)
       .build()
+    connectionRef.current = connection
 
-    // Optional chaining on every one of these - unlike OiLiveDashboardPage (the original, only
-    // caller until now), a caller like LiveStrikeDataPage genuinely has no use for some of these
-    // events and passes null for them; calling a null ref directly would throw the moment that
-    // event arrives, which for spotUpdate/oiReplayTick is roughly every second.
-    connection.on('spotUpdate', (snapshot) => spotRef.current?.(snapshot))
+    // Optional chaining on every one of these - a caller like LiveStrikeDataPage genuinely has no
+    // use for some of these events and passes null for them; calling a null ref directly would throw
+    // the moment that event arrives, which for spotUpdate/oiReplayTick is roughly every second.
+    // spotUpdate/cdvUpdate arrive inside the conflated "liveBatch" (see onLiveBatch); the raw
+    // oiReplayTick tape and the rarer cdvBarClosed/oiRestSnapshot events come directly.
+    onLiveBatch(connection, {
+      spotUpdate: (snapshot) => spotRef.current?.(snapshot),
+      cdvUpdate: (snapshot) => cdvRef.current?.(snapshot),
+    })
     connection.on('oiReplayTick', (tick) => tickRef.current?.(tick))
-    // Same CDV/OBV events App.jsx's own useHub already listens for, off the SAME shared hub -
-    // CdvHostedService broadcasts these regardless of which page is open, so nothing extra needs
-    // subscribing server-side for this page to receive them too.
-    connection.on('cdvUpdate', (snapshot) => cdvRef.current?.(snapshot))
     connection.on('cdvBarClosed', (point) => cdvBarClosedRef.current?.(point))
+    // OPTIONAL REST-quote fallback (OiReplayLiveFeedService.RunRestQuoteLoopAsync) - every strike's
+    // OI/price from Dhan's Option Chain snapshot endpoint, re-broadcast every ~30s regardless of
+    // whether any client wants it (see that method's own doc comment for why that's safe/cheap).
+    // No current caller passes a handler for this (null, like LiveStrikeDataPage's other unused
+    // events above) - kept wired up since a future caller may want it.
+    connection.on('oiRestSnapshot', (snapshot) => restSnapshotRef.current?.(snapshot))
     connection.onreconnecting(() => setConnectionState('reconnecting'))
-    connection.onreconnected(() => { setConnectionState('connected'); reconnectedRef.current?.() })
+    // A reconnect gets a brand-new server-side connection with NO group membership at all - rejoin
+    // whatever the current selection is (groupsRef.current), not what it was when this specific
+    // connection object was first created.
+    connection.onreconnected(() => {
+      setConnectionState('connected')
+      joinAllSignalRGroups(connection, groupsRef.current)
+      checkForNewDeploy()
+      reconnectedRef.current?.()
+    })
     connection.onclose(() => setConnectionState('disconnected'))
     connection.start()
-      .then(() => setConnectionState('connected'))
+      .then(() => {
+        setConnectionState('connected')
+        joinAllSignalRGroups(connection, groupsRef.current)
+      })
       .catch((err) => {
         // React StrictMode double-mounts every effect once in development - the first connection's
         // start() gets aborted by this effect's own cleanup before negotiation finishes on the
@@ -75,8 +270,26 @@ export function useOiLiveHub(onSpotUpdate, onOiReplayTick, onReconnected, onCdvU
         setConnectionState('disconnected')
       })
 
-    return () => { connection.stop() }
+    return () => { connectionRef.current = null; connection.stop() }
   }, [])
+
+  // Keeps server-side group membership in sync with the caller's own CURRENT selection, without
+  // touching the connection itself - runs on every underlying/expiryFlag change (including the
+  // first render, where groupsRef.current is still empty so every group here counts as "new" and
+  // gets joined once the connect effect above actually reaches Connected; syncSignalRGroups itself
+  // is a no-op before that, and groupsRef.current is still updated below so the connect effect's own
+  // joinAllSignalRGroups call picks it up the moment it does connect).
+  useEffect(() => {
+    const newGroups = [
+      underlying ? `u:${underlying}` : null,
+      underlying && expiryFlag ? `c:${underlying}:${expiryFlag}` : null,
+      // The raw, one-message-per-Dhan-tick "oiReplayTick" tape lives on its own group - charts get
+      // the coalesced "oiReplayTicks" on c: instead (see LiveBroadcastBatcher).
+      underlying && expiryFlag ? `t:${underlying}:${expiryFlag}` : null,
+    ].filter(Boolean)
+    syncSignalRGroups(connectionRef.current, groupsRef.current, newGroups)
+    groupsRef.current = newGroups
+  }, [underlying, expiryFlag])
 
   return connectionState
 }
@@ -229,11 +442,19 @@ const OI_STALE_MS = 5 * 60_000
 
 // Candlestick chart that draws the strongest OI levels on each side as horizontal price lines
 // directly on the chart (darker = heavier OI = a "harder" level).
-export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = true, height = 440 }) {
+export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = true, vwapSeries = EMPTY_ARRAY, showVwap = false, onStrikeClick, height = 440 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
+  const vwapSeriesRef = useRef(null)
   const priceLinesRef = useRef([])
+  // Refs, not effect dependencies - clicking is wired up once in the chart-creation effect below
+  // ([height] only), so a new onStrikeClick/step on every render must not tear down and recreate
+  // the whole chart.
+  const onStrikeClickRef = useRef(onStrikeClick)
+  onStrikeClickRef.current = onStrikeClick
+  const stepRef = useRef(step)
+  stepRef.current = step
 
   const { ceTop, peTop, topRows } = useMemo(() => {
     if (!ladderRows || ladderRows.length === 0 || atmStrike == null || !step) return { ceTop: [], peTop: [], topRows: [] }
@@ -261,13 +482,32 @@ export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Onl
 
   useEffect(() => {
     if (!containerRef.current) return
-    const chart = createChart(containerRef.current, {
+    const chart = createZoomableChart(containerRef.current, {
       width: containerRef.current.clientWidth,
       height,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 13 },
       grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
-      rightPriceScale: { borderColor: BORDER_COLOR },
-      timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter },
+      rightPriceScale: { borderColor: BORDER_COLOR, scaleMargins: CANDLE_SCALE_MARGINS },
+      // allowShiftVisibleRangeOnWhitespaceReplacement: lightweight-charts' own default
+      // (shiftVisibleRangeOnNewBar, true) auto-scrolls to keep a freshly-appended bar in view, but
+      // ONLY for a bar strictly past the chart's existing range - not one filling in a WHITESPACE
+      // time point the chart had already pre-rendered further right (e.g. the next minute's empty
+      // slot within today's still-ahead market hours). Every chart here re-supplies its FULL series
+      // via setData() on every new tick (not series.update() for just the one changed bar), which is
+      // exactly the shape that tends to land as "replacing whitespace" rather than "a genuinely new
+      // bar" from the library's own perspective - without this flag, a live page's chart can silently
+      // stop auto-scrolling forward as the day progresses, leaving the visible candles/EMAs looking
+      // "stuck" in the past while a price label (which always reflects the true latest point
+      // regardless of what's currently scrolled into view) correctly shows a real, much newer price -
+      // a real report ("price incorrect") was exactly this: EMAs and candles frozen well behind the
+      // shown current price. Harmless for OI Replay's own manual-scrub use of these same charts too -
+      // both this and shiftVisibleRangeOnNewBar only ever act "when the last bar is visible", i.e.
+      // only once a viewer is already AT the live/current edge, never while deliberately scrolled
+      // back to inspect an earlier moment.
+      timeScale: {
+        borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter,
+        allowShiftVisibleRangeOnWhitespaceReplacement: true,
+      },
       crosshair: { mode: CrosshairMode.Normal },
       localization: { timeFormatter: istTimeFormatter },
     })
@@ -275,14 +515,38 @@ export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Onl
     seriesRef.current = chart.addSeries(CandlestickSeries, {
       upColor: UP_COLOR, downColor: DOWN_COLOR, borderVisible: false, wickUpColor: UP_COLOR, wickDownColor: DOWN_COLOR,
     })
+    vwapSeriesRef.current = chart.addSeries(LineSeries, { color: VWAP_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: 'VWAP' })
+
+    // Click-to-drill-down: rounds whatever price was clicked to the nearest tracked strike, same as
+    // OiReplayPage's own identical chart. Guards non-finite price/strike explicitly (a click landing
+    // on the price axis/label margin - exactly where the R/S wall labels render - can hand back a
+    // non-finite value from coordinateToPrice) after a real report of that crashing the whole app.
+    chart.subscribeClick((param) => {
+      if (!param.point || !seriesRef.current || !stepRef.current) return
+      const price = seriesRef.current.coordinateToPrice(param.point.y)
+      if (price == null || !Number.isFinite(price)) return
+      const strike = Math.round(price / stepRef.current) * stepRef.current
+      if (!Number.isFinite(strike)) return
+      onStrikeClickRef.current?.(strike)
+    })
 
     const onResize = () => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }) }
-    window.addEventListener('resize', onResize)
+    // ResizeObserver, not a plain window 'resize' listener: on mobile, a chart's own container
+    // can still read a stale/zero clientWidth at the moment this effect runs (layout not yet
+    // settled - address bar show/hide, a not-yet-laid-out flex/card ancestor, fonts still
+    // loading), and nothing but an actual BROWSER WINDOW resize ever fired the old listener - a
+    // real report ("looks to be mobile only... when squeezing resolution it started working")
+    // was exactly this: resizing the window was the only thing that ever re-measured the chart.
+    // ResizeObserver fires once immediately on observe() with the container's ACTUAL current
+    // size, then again on every later layout change, not just a window-level resize.
+    const resizeObserver = new ResizeObserver(onResize)
+    resizeObserver.observe(containerRef.current)
     return () => {
-      window.removeEventListener('resize', onResize)
+      resizeObserver.disconnect()
       chart.remove()
       chartRef.current = null
       seriesRef.current = null
+      vwapSeriesRef.current = null
       priceLinesRef.current = []
     }
   }, [height])
@@ -292,10 +556,14 @@ export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Onl
     seriesRef.current.setData(bars)
   }, [bars])
 
+  // Fed only while checked, empty otherwise - simpler and just as instant as toggling a `visible`
+  // option, and it means an unchecked chart never even pays for lightweight-charts re-rendering data
+  // nobody asked to see.
   useEffect(() => {
-    if (bars.length > 0) chartRef.current?.timeScale().fitContent()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dayKey])
+    vwapSeriesRef.current?.setData(showVwap ? chartVwap(bars, vwapSeries) : EMPTY_ARRAY)
+  }, [vwapSeries, showVwap, bars])
+
+  useFitContentAsDataGrows(chartRef, bars.length, dayKey)
 
   useEffect(() => {
     if (!seriesRef.current) return
@@ -306,12 +574,18 @@ export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Onl
     const allOi = [...topRows.map((r) => r.ceOi ?? 0), ...topRows.map((r) => r.peOi ?? 0)]
     const maxOi = allOi.length > 0 ? Math.max(...allOi) : 0
 
-    const drawSide = (rows, key, ivKey, staleKey, sinceOpenKey, lightColor, darkColor, labelPrefix) => {
+    const drawSide = (rows, key, ivKey, staleKey, sinceOpenKey, suspectKey, lightColor, darkColor, labelPrefix) => {
       for (const row of rows) {
         if ((row[key] ?? 0) <= 0) continue
         const t = maxOi > 0 ? row[key] / maxOi : 1
         const stale = row[staleKey]
         const sinceOpen = row[sinceOpenKey]
+        // suspectKey (Live OI Dashboard only - OI Replay rows never set it) means a Δ WAS computed
+        // but looks implausible against current OI - see SinceOpenChange's own doc comment. Still
+        // shown, just flagged with "(mismatch?)" appended - never hidden. A real report ("this
+        // calculation is incorrect") once traced back to this exact figure being suppressed instead
+        // of flagged, which read as "no data" rather than "here's a number, treat it with caution".
+        const suspect = suspectKey && row[suspectKey]
         const srDiff = (row.peOi ?? 0) - (row.ceOi ?? 0)
         const line = seriesRef.current.createPriceLine({
           price: row.strike,
@@ -319,14 +593,14 @@ export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Onl
           lineWidth: 1 + Math.round(t * 2),
           lineStyle: stale ? 1 : 2,
           axisLabelVisible: true,
-          title: `${labelPrefix} ${oiBarText(t)} ${row.strike} (${formatOiMillions(row[key])} OI${row[ivKey] != null ? `, IV ${row[ivKey].toFixed(1)}` : ''}${sinceOpen != null ? `, Δ ${formatOiMillions(sinceOpen, { signed: true })}` : ''}, S-R ${formatOiMillions(srDiff, { signed: true })})${stale ? ' [STALE]' : ''}`,
+          title: `${labelPrefix} ${oiBarText(t)} ${row.strike} (${formatOiMillions(row[key])} OI${row[ivKey] != null ? `, IV ${row[ivKey].toFixed(1)}` : ''}${sinceOpen != null ? `, Δ ${formatOiMillions(sinceOpen, { signed: true })}${suspect ? ' (mismatch?)' : ''}` : ''}, S-R ${formatOiMillions(srDiff, { signed: true })})${stale ? ' [STALE]' : ''}`,
         })
         priceLinesRef.current.push(line)
       }
     }
 
-    drawSide(topRows, 'ceOi', 'ceIv', 'ceStale', 'ceOiSinceOpen', RESISTANCE_LIGHT, RESISTANCE_DARK, 'R')
-    drawSide(topRows, 'peOi', 'peIv', 'peStale', 'peOiSinceOpen', SUPPORT_LIGHT, SUPPORT_DARK, 'S')
+    drawSide(topRows, 'ceOi', 'ceIv', 'ceStale', 'ceOiSinceOpen', 'ceOiSinceOpenSuspect', RESISTANCE_LIGHT, RESISTANCE_DARK, 'R')
+    drawSide(topRows, 'peOi', 'peIv', 'peStale', 'peOiSinceOpen', 'peOiSinceOpenSuspect', SUPPORT_LIGHT, SUPPORT_DARK, 'S')
   }, [topRows])
 
   const ceLead = ceTop[0] ?? null
@@ -361,18 +635,20 @@ export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Onl
 
 const EMA1_COLOR = '#f0b429'
 const EMA2_COLOR = '#38bdf8'
+const VWAP_COLOR = '#e072e8'
 // A subset of the shared TIMEFRAME_OPTIONS (1/3/5 min only) - the whole point of the fast entry
 // charts is a faster read than the main chart's own coarser timeframe.
 export const FAST_TIMEFRAME_OPTIONS = TIMEFRAME_OPTIONS.filter((o) => o.value <= 5)
 
 // A second, independently-timeframed candlestick chart with two EMA overlays, driven by the SAME
 // oneMinBars/visibleCount the caller owns - never fetches or replays anything on its own.
-export function EmaChart({ oneMinBars, visibleCount, timeframe, onTimeframeChange, ema1Period, onEma1PeriodChange, ema2Period, onEma2PeriodChange, dayKey, height = 320 }) {
+export function EmaChart({ oneMinBars, visibleCount, timeframe, onTimeframeChange, ema1Period, onEma1PeriodChange, ema2Period, onEma2PeriodChange, dayKey, vwapSeries = EMPTY_ARRAY, showVwap = false, height = 320 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
   const ema1SeriesRef = useRef(null)
   const ema2SeriesRef = useRef(null)
+  const vwapSeriesRef = useRef(null)
 
   const displayBars = useMemo(
     () => aggregateBars(oneMinBars.slice(0, visibleCount), timeframe),
@@ -383,13 +659,32 @@ export function EmaChart({ oneMinBars, visibleCount, timeframe, onTimeframeChang
 
   useEffect(() => {
     if (!containerRef.current) return
-    const chart = createChart(containerRef.current, {
+    const chart = createZoomableChart(containerRef.current, {
       width: containerRef.current.clientWidth,
       height,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
       grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
-      rightPriceScale: { borderColor: BORDER_COLOR },
-      timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter },
+      rightPriceScale: { borderColor: BORDER_COLOR, scaleMargins: CANDLE_SCALE_MARGINS },
+      // allowShiftVisibleRangeOnWhitespaceReplacement: lightweight-charts' own default
+      // (shiftVisibleRangeOnNewBar, true) auto-scrolls to keep a freshly-appended bar in view, but
+      // ONLY for a bar strictly past the chart's existing range - not one filling in a WHITESPACE
+      // time point the chart had already pre-rendered further right (e.g. the next minute's empty
+      // slot within today's still-ahead market hours). Every chart here re-supplies its FULL series
+      // via setData() on every new tick (not series.update() for just the one changed bar), which is
+      // exactly the shape that tends to land as "replacing whitespace" rather than "a genuinely new
+      // bar" from the library's own perspective - without this flag, a live page's chart can silently
+      // stop auto-scrolling forward as the day progresses, leaving the visible candles/EMAs looking
+      // "stuck" in the past while a price label (which always reflects the true latest point
+      // regardless of what's currently scrolled into view) correctly shows a real, much newer price -
+      // a real report ("price incorrect") was exactly this: EMAs and candles frozen well behind the
+      // shown current price. Harmless for OI Replay's own manual-scrub use of these same charts too -
+      // both this and shiftVisibleRangeOnNewBar only ever act "when the last bar is visible", i.e.
+      // only once a viewer is already AT the live/current edge, never while deliberately scrolled
+      // back to inspect an earlier moment.
+      timeScale: {
+        borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter,
+        allowShiftVisibleRangeOnWhitespaceReplacement: true,
+      },
       crosshair: { mode: CrosshairMode.Normal },
       localization: { timeFormatter: istTimeFormatter },
     })
@@ -399,16 +694,27 @@ export function EmaChart({ oneMinBars, visibleCount, timeframe, onTimeframeChang
     })
     ema1SeriesRef.current = chart.addSeries(LineSeries, { color: EMA1_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true })
     ema2SeriesRef.current = chart.addSeries(LineSeries, { color: EMA2_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true })
+    vwapSeriesRef.current = chart.addSeries(LineSeries, { color: VWAP_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: 'VWAP' })
 
     const onResize = () => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }) }
-    window.addEventListener('resize', onResize)
+    // ResizeObserver, not a plain window 'resize' listener: on mobile, a chart's own container
+    // can still read a stale/zero clientWidth at the moment this effect runs (layout not yet
+    // settled - address bar show/hide, a not-yet-laid-out flex/card ancestor, fonts still
+    // loading), and nothing but an actual BROWSER WINDOW resize ever fired the old listener - a
+    // real report ("looks to be mobile only... when squeezing resolution it started working")
+    // was exactly this: resizing the window was the only thing that ever re-measured the chart.
+    // ResizeObserver fires once immediately on observe() with the container's ACTUAL current
+    // size, then again on every later layout change, not just a window-level resize.
+    const resizeObserver = new ResizeObserver(onResize)
+    resizeObserver.observe(containerRef.current)
     return () => {
-      window.removeEventListener('resize', onResize)
+      resizeObserver.disconnect()
       chart.remove()
       chartRef.current = null
       seriesRef.current = null
       ema1SeriesRef.current = null
       ema2SeriesRef.current = null
+      vwapSeriesRef.current = null
     }
   }, [height])
 
@@ -418,11 +724,15 @@ export function EmaChart({ oneMinBars, visibleCount, timeframe, onTimeframeChang
   useEffect(() => { if (seriesRef.current) seriesRef.current.setData(displayBars) }, [displayBars])
   useEffect(() => { if (ema1SeriesRef.current) ema1SeriesRef.current.setData(ema1Points) }, [ema1Points])
   useEffect(() => { if (ema2SeriesRef.current) ema2SeriesRef.current.setData(ema2Points) }, [ema2Points])
-
+  // Same "own timeframe, not the candles' own" reasoning as ReplayChart's identical effect - VWAP is
+  // a session-cumulative value, not a moving average of the visible candles, so it is shown at its
+  // own native 1-minute cadence regardless of what timeframe this chart's OWN candles are aggregated
+  // to (exactly how TradingView shows it too).
   useEffect(() => {
-    if (displayBars.length > 0) chartRef.current?.timeScale().fitContent()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dayKey, timeframe])
+    vwapSeriesRef.current?.setData(showVwap ? chartVwap(displayBars, vwapSeries) : EMPTY_ARRAY)
+  }, [vwapSeries, showVwap, displayBars])
+
+  useFitContentAsDataGrows(chartRef, displayBars.length, `${dayKey}-${timeframe}`)
 
   return (
     <div style={{ width: '100%' }}>
@@ -450,13 +760,32 @@ export function PremiumLineChart({ points, dayKey, color, height = 320 }) {
 
   useEffect(() => {
     if (!containerRef.current) return
-    const chart = createChart(containerRef.current, {
+    const chart = createZoomableChart(containerRef.current, {
       width: containerRef.current.clientWidth,
       height,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
       grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
       rightPriceScale: { borderColor: BORDER_COLOR },
-      timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter },
+      // allowShiftVisibleRangeOnWhitespaceReplacement: lightweight-charts' own default
+      // (shiftVisibleRangeOnNewBar, true) auto-scrolls to keep a freshly-appended bar in view, but
+      // ONLY for a bar strictly past the chart's existing range - not one filling in a WHITESPACE
+      // time point the chart had already pre-rendered further right (e.g. the next minute's empty
+      // slot within today's still-ahead market hours). Every chart here re-supplies its FULL series
+      // via setData() on every new tick (not series.update() for just the one changed bar), which is
+      // exactly the shape that tends to land as "replacing whitespace" rather than "a genuinely new
+      // bar" from the library's own perspective - without this flag, a live page's chart can silently
+      // stop auto-scrolling forward as the day progresses, leaving the visible candles/EMAs looking
+      // "stuck" in the past while a price label (which always reflects the true latest point
+      // regardless of what's currently scrolled into view) correctly shows a real, much newer price -
+      // a real report ("price incorrect") was exactly this: EMAs and candles frozen well behind the
+      // shown current price. Harmless for OI Replay's own manual-scrub use of these same charts too -
+      // both this and shiftVisibleRangeOnNewBar only ever act "when the last bar is visible", i.e.
+      // only once a viewer is already AT the live/current edge, never while deliberately scrolled
+      // back to inspect an earlier moment.
+      timeScale: {
+        borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter,
+        allowShiftVisibleRangeOnWhitespaceReplacement: true,
+      },
       crosshair: { mode: CrosshairMode.Normal },
       localization: { timeFormatter: istTimeFormatter },
     })
@@ -464,9 +793,18 @@ export function PremiumLineChart({ points, dayKey, color, height = 320 }) {
     seriesRef.current = chart.addSeries(LineSeries, { color, lineWidth: 2, priceLineVisible: false, lastValueVisible: true })
 
     const onResize = () => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }) }
-    window.addEventListener('resize', onResize)
+    // ResizeObserver, not a plain window 'resize' listener: on mobile, a chart's own container
+    // can still read a stale/zero clientWidth at the moment this effect runs (layout not yet
+    // settled - address bar show/hide, a not-yet-laid-out flex/card ancestor, fonts still
+    // loading), and nothing but an actual BROWSER WINDOW resize ever fired the old listener - a
+    // real report ("looks to be mobile only... when squeezing resolution it started working")
+    // was exactly this: resizing the window was the only thing that ever re-measured the chart.
+    // ResizeObserver fires once immediately on observe() with the container's ACTUAL current
+    // size, then again on every later layout change, not just a window-level resize.
+    const resizeObserver = new ResizeObserver(onResize)
+    resizeObserver.observe(containerRef.current)
     return () => {
-      window.removeEventListener('resize', onResize)
+      resizeObserver.disconnect()
       chart.remove()
       chartRef.current = null
       seriesRef.current = null
@@ -475,10 +813,7 @@ export function PremiumLineChart({ points, dayKey, color, height = 320 }) {
 
   useEffect(() => { if (seriesRef.current) seriesRef.current.setData(sanitizedPoints) }, [sanitizedPoints])
 
-  useEffect(() => {
-    if (sanitizedPoints.length > 0) chartRef.current?.timeScale().fitContent()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dayKey])
+  useFitContentAsDataGrows(chartRef, sanitizedPoints.length, dayKey)
 
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }
@@ -511,24 +846,53 @@ export function buildPremiumCandles(points) {
     // bar) still falls back to price-only bucketing below, correctly widening high/low as multiple
     // ticks land in the same still-forming minute.
     const hasOwnRange = Number.isFinite(p.open) && Number.isFinite(p.high) && Number.isFinite(p.low)
+    // volume: last-value-wins, same as close - a real historical minute already carries its own
+    // true per-minute volume (see OiReplayPoint's own doc comment on the backend), a live tick
+    // defaults to 0 there (no per-tick volume of its own), so this correctly stays 0 through a
+    // still-forming minute rather than fabricating one. Feeds computePremiumVwap below.
+    const volume = Number.isFinite(p.volume) ? p.volume : 0
     const existing = buckets.get(minute)
     if (hasOwnRange) {
       if (existing) {
         existing.high = Math.max(existing.high, p.high)
         existing.low = Math.min(existing.low, p.low)
         existing.close = p.price
+        existing.volume = volume
       } else {
-        buckets.set(minute, { time: minute, open: p.open, high: p.high, low: p.low, close: p.price })
+        buckets.set(minute, { time: minute, open: p.open, high: p.high, low: p.low, close: p.price, volume })
       }
     } else if (existing) {
       existing.high = Math.max(existing.high, p.price)
       existing.low = Math.min(existing.low, p.price)
       existing.close = p.price
+      existing.volume = volume
     } else {
-      buckets.set(minute, { time: minute, open: p.price, high: p.price, low: p.price, close: p.price })
+      buckets.set(minute, { time: minute, open: p.price, high: p.price, low: p.price, close: p.price, volume })
     }
   }
   return [...buckets.values()].sort((a, b) => a.time - b.time)
+}
+
+// Session VWAP for one leg's own premium candles - cumulative typicalPrice*volume / cumulative
+// volume, mirroring VwapCalculator.cs's own backend convention exactly (typical price =
+// (H+L+C)/3, a zero-volume bar contributes nothing to the running total rather than being treated
+// as a real reading, and no point at all is emitted before the day's first traded volume - not a
+// zero, which would silently read as "below VWAP" against any real price). OI Replay is always one
+// day at a time already, so there is no cross-day reset to handle here the way the backend's own
+// multi-day version needs.
+export function computePremiumVwap(oneMinCandles) {
+  const points = []
+  let cumulativePriceVolume = 0
+  let cumulativeVolume = 0
+  for (const c of oneMinCandles) {
+    if (c.volume > 0) {
+      const typicalPrice = (c.high + c.low + c.close) / 3
+      cumulativePriceVolume += typicalPrice * c.volume
+      cumulativeVolume += c.volume
+    }
+    if (cumulativeVolume > 0) points.push({ time: c.time, value: cumulativePriceVolume / cumulativeVolume })
+  }
+  return points
 }
 
 // Last line of defense before handing candles to lightweight-charts, which throws an UNCAUGHT error
@@ -576,13 +940,32 @@ export function PremiumCandleChart({ bars, dayKey, height = 320 }) {
 
   useEffect(() => {
     if (!containerRef.current) return
-    const chart = createChart(containerRef.current, {
+    const chart = createZoomableChart(containerRef.current, {
       width: containerRef.current.clientWidth,
       height,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
       grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
-      rightPriceScale: { borderColor: BORDER_COLOR },
-      timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter },
+      rightPriceScale: { borderColor: BORDER_COLOR, scaleMargins: CANDLE_SCALE_MARGINS },
+      // allowShiftVisibleRangeOnWhitespaceReplacement: lightweight-charts' own default
+      // (shiftVisibleRangeOnNewBar, true) auto-scrolls to keep a freshly-appended bar in view, but
+      // ONLY for a bar strictly past the chart's existing range - not one filling in a WHITESPACE
+      // time point the chart had already pre-rendered further right (e.g. the next minute's empty
+      // slot within today's still-ahead market hours). Every chart here re-supplies its FULL series
+      // via setData() on every new tick (not series.update() for just the one changed bar), which is
+      // exactly the shape that tends to land as "replacing whitespace" rather than "a genuinely new
+      // bar" from the library's own perspective - without this flag, a live page's chart can silently
+      // stop auto-scrolling forward as the day progresses, leaving the visible candles/EMAs looking
+      // "stuck" in the past while a price label (which always reflects the true latest point
+      // regardless of what's currently scrolled into view) correctly shows a real, much newer price -
+      // a real report ("price incorrect") was exactly this: EMAs and candles frozen well behind the
+      // shown current price. Harmless for OI Replay's own manual-scrub use of these same charts too -
+      // both this and shiftVisibleRangeOnNewBar only ever act "when the last bar is visible", i.e.
+      // only once a viewer is already AT the live/current edge, never while deliberately scrolled
+      // back to inspect an earlier moment.
+      timeScale: {
+        borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter,
+        allowShiftVisibleRangeOnWhitespaceReplacement: true,
+      },
       crosshair: { mode: CrosshairMode.Normal },
       localization: { timeFormatter: istTimeFormatter },
     })
@@ -592,9 +975,18 @@ export function PremiumCandleChart({ bars, dayKey, height = 320 }) {
     })
 
     const onResize = () => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }) }
-    window.addEventListener('resize', onResize)
+    // ResizeObserver, not a plain window 'resize' listener: on mobile, a chart's own container
+    // can still read a stale/zero clientWidth at the moment this effect runs (layout not yet
+    // settled - address bar show/hide, a not-yet-laid-out flex/card ancestor, fonts still
+    // loading), and nothing but an actual BROWSER WINDOW resize ever fired the old listener - a
+    // real report ("looks to be mobile only... when squeezing resolution it started working")
+    // was exactly this: resizing the window was the only thing that ever re-measured the chart.
+    // ResizeObserver fires once immediately on observe() with the container's ACTUAL current
+    // size, then again on every later layout change, not just a window-level resize.
+    const resizeObserver = new ResizeObserver(onResize)
+    resizeObserver.observe(containerRef.current)
     return () => {
-      window.removeEventListener('resize', onResize)
+      resizeObserver.disconnect()
       chart.remove()
       chartRef.current = null
       seriesRef.current = null
@@ -603,30 +995,29 @@ export function PremiumCandleChart({ bars, dayKey, height = 320 }) {
 
   useEffect(() => { if (seriesRef.current) seriesRef.current.setData(sanitizedBars) }, [sanitizedBars])
 
-  useEffect(() => {
-    if (sanitizedBars.length > 0) chartRef.current?.timeScale().fitContent()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dayKey])
+  useFitContentAsDataGrows(chartRef, sanitizedBars.length, dayKey)
 
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }
 
 // A leg's own premium as candles (via buildPremiumCandles above) PLUS two configurable EMA overlays
 // on top - CE/PE's own counterpart to EmaChart above (which does the same for the underlying spot),
-// used by BOTH Live OI Dashboard and OI Replay so their own CE/PE charts stop being a bare candle
-// chart (PremiumCandleChart, no EMA) or a plain line (OI Replay's own now-removed PremiumLineChart)
-// and instead match the same "candles + two EMAs, own timeframe" pattern the Entry charts already
-// use. `asOfMs` is optional: Live OI Dashboard omits it ("live" already means "everything captured
-// so far" needs no cutoff); OI Replay passes its own replay clock's asOfMs so this chart only ever
-// reveals what the rest of that page's replay has "played" up to, same as every other chart there.
+// so OI Replay's own CE/PE charts aren't a bare candle chart (PremiumCandleChart, no EMA) or a plain
+// line (its own now-removed PremiumLineChart), instead matching the same "candles + two EMAs, own
+// timeframe" pattern the Entry charts already use. `asOfMs` is optional: while isToday, OI Replay
+// omits it ("live" already means "everything captured so far" needs no cutoff); for a historical day
+// it passes its own replay clock's asOfMs so this chart only ever reveals what the rest of that
+// page's replay has "played" up to, same as every other chart there.
 export function PremiumEmaChart({
-  points, asOfMs, timeframe, onTimeframeChange, ema1Period, onEma1PeriodChange, ema2Period, onEma2PeriodChange, dayKey, height = 320,
+  points, asOfMs, timeframe, onTimeframeChange, ema1Period, onEma1PeriodChange, ema2Period, onEma2PeriodChange, dayKey,
+  showVwap = false, height = 320,
 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
   const ema1SeriesRef = useRef(null)
   const ema2SeriesRef = useRef(null)
+  const vwapSeriesRef = useRef(null)
 
   const filteredPoints = useMemo(
     () => (asOfMs == null ? points : (points ?? []).filter((p) => new Date(p.time).getTime() <= asOfMs)),
@@ -636,16 +1027,41 @@ export function PremiumEmaChart({
   const displayBars = useMemo(() => sanitizeCandles(aggregateBars(oneMinCandles, timeframe)), [oneMinCandles, timeframe])
   const ema1Points = useMemo(() => computeEma(displayBars, ema1Period), [displayBars, ema1Period])
   const ema2Points = useMemo(() => computeEma(displayBars, ema2Period), [displayBars, ema2Period])
+  // This LEG's own genuine VWAP - its own volume, not the underlying spot's (see
+  // computePremiumVwap's own doc comment) - computed at native 1-minute resolution like the EMAs
+  // above, not re-bucketed to the chart's own coarser timeframe (a session VWAP is a running total
+  // across the whole day regardless of display timeframe, the same way the spot VWAP elsewhere on
+  // this page is never re-aggregated either).
+  const vwapPoints = useMemo(() => computePremiumVwap(oneMinCandles), [oneMinCandles])
 
   useEffect(() => {
     if (!containerRef.current) return
-    const chart = createChart(containerRef.current, {
+    const chart = createZoomableChart(containerRef.current, {
       width: containerRef.current.clientWidth,
       height,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
       grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
-      rightPriceScale: { borderColor: BORDER_COLOR },
-      timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter },
+      rightPriceScale: { borderColor: BORDER_COLOR, scaleMargins: CANDLE_SCALE_MARGINS },
+      // allowShiftVisibleRangeOnWhitespaceReplacement: lightweight-charts' own default
+      // (shiftVisibleRangeOnNewBar, true) auto-scrolls to keep a freshly-appended bar in view, but
+      // ONLY for a bar strictly past the chart's existing range - not one filling in a WHITESPACE
+      // time point the chart had already pre-rendered further right (e.g. the next minute's empty
+      // slot within today's still-ahead market hours). Every chart here re-supplies its FULL series
+      // via setData() on every new tick (not series.update() for just the one changed bar), which is
+      // exactly the shape that tends to land as "replacing whitespace" rather than "a genuinely new
+      // bar" from the library's own perspective - without this flag, a live page's chart can silently
+      // stop auto-scrolling forward as the day progresses, leaving the visible candles/EMAs looking
+      // "stuck" in the past while a price label (which always reflects the true latest point
+      // regardless of what's currently scrolled into view) correctly shows a real, much newer price -
+      // a real report ("price incorrect") was exactly this: EMAs and candles frozen well behind the
+      // shown current price. Harmless for OI Replay's own manual-scrub use of these same charts too -
+      // both this and shiftVisibleRangeOnNewBar only ever act "when the last bar is visible", i.e.
+      // only once a viewer is already AT the live/current edge, never while deliberately scrolled
+      // back to inspect an earlier moment.
+      timeScale: {
+        borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter,
+        allowShiftVisibleRangeOnWhitespaceReplacement: true,
+      },
       crosshair: { mode: CrosshairMode.Normal },
       localization: { timeFormatter: istTimeFormatter },
     })
@@ -655,16 +1071,27 @@ export function PremiumEmaChart({
     })
     ema1SeriesRef.current = chart.addSeries(LineSeries, { color: EMA1_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true })
     ema2SeriesRef.current = chart.addSeries(LineSeries, { color: EMA2_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true })
+    vwapSeriesRef.current = chart.addSeries(LineSeries, { color: VWAP_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: 'VWAP' })
 
     const onResize = () => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }) }
-    window.addEventListener('resize', onResize)
+    // ResizeObserver, not a plain window 'resize' listener: on mobile, a chart's own container
+    // can still read a stale/zero clientWidth at the moment this effect runs (layout not yet
+    // settled - address bar show/hide, a not-yet-laid-out flex/card ancestor, fonts still
+    // loading), and nothing but an actual BROWSER WINDOW resize ever fired the old listener - a
+    // real report ("looks to be mobile only... when squeezing resolution it started working")
+    // was exactly this: resizing the window was the only thing that ever re-measured the chart.
+    // ResizeObserver fires once immediately on observe() with the container's ACTUAL current
+    // size, then again on every later layout change, not just a window-level resize.
+    const resizeObserver = new ResizeObserver(onResize)
+    resizeObserver.observe(containerRef.current)
     return () => {
-      window.removeEventListener('resize', onResize)
+      resizeObserver.disconnect()
       chart.remove()
       chartRef.current = null
       seriesRef.current = null
       ema1SeriesRef.current = null
       ema2SeriesRef.current = null
+      vwapSeriesRef.current = null
     }
   }, [height])
 
@@ -674,11 +1101,11 @@ export function PremiumEmaChart({
   useEffect(() => { if (seriesRef.current) seriesRef.current.setData(displayBars) }, [displayBars])
   useEffect(() => { if (ema1SeriesRef.current) ema1SeriesRef.current.setData(ema1Points) }, [ema1Points])
   useEffect(() => { if (ema2SeriesRef.current) ema2SeriesRef.current.setData(ema2Points) }, [ema2Points])
+  // The 1-minute VWAP read at each displayed candle, on its time (alignToBars) - 1-minute points on a
+  // 5-minute chart would add empty slots between the candles.
+  useEffect(() => { vwapSeriesRef.current?.setData(showVwap ? alignToBars(vwapPoints, displayBars) : EMPTY_ARRAY) }, [vwapPoints, showVwap, displayBars])
 
-  useEffect(() => {
-    if (displayBars.length > 0) chartRef.current?.timeScale().fitContent()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dayKey, timeframe])
+  useFitContentAsDataGrows(chartRef, displayBars.length, `${dayKey}-${timeframe}`)
 
   return (
     <div style={{ width: '100%' }}>
@@ -732,7 +1159,8 @@ export function computeStopTargetHit(series, entryTimeMs, asOfMs, entryPrice, di
 // SEBI periodically revises each index's own lot size - update this if it changes. This feature is
 // paper trading only (no real order is ever placed), so a stale value here only skews the SIMULATED
 // PnL's scale, not anything real.
-export const PAPER_TRADE_LOT_SIZE = { NIFTY: 75, BANKNIFTY: 35, SENSEX: 20 }
+// One table for every page and the server scanner (scannerCore.js).
+export { PAPER_TRADE_LOT_SIZE } from './scannerCore.js'
 
 // One simulated position: Buy (long) or Sell (short/write) CE/PE at whatever the live premium series
 // shows right now, then Exit later - entirely client-side, no backend call, no real order.
@@ -818,12 +1246,76 @@ export function PaperTradePanel({
   )
 }
 
-// A genuinely draggable floating panel, rendered into a portal on document.body so it sits above
-// every other element regardless of where its trigger lives in the tree. Position is tracked as a
-// plain {x,y} in the PARENT's own state so it survives closing and reopening the panel.
-export function DraggableFloatingPanel({ title, pos, onPosChange, onClose, children }) {
+// Every DraggableFloatingPanel shares this one floor - small enough to still show a title/close
+// button and at least a little content, never so small a caller's own inner layout (e.g. Paper
+// Trade's own Buy/Sell row) breaks down.
+const FLOATING_PANEL_MIN_WIDTH = 280
+const FLOATING_PANEL_MIN_HEIGHT = 160
+
+// A genuinely draggable AND resizable floating panel, rendered into a portal on document.body so it
+// sits above every other element regardless of where its trigger lives in the tree. Position and
+// size are both tracked as plain objects in the PARENT's own state ({x,y} and {width,height}) so
+// both survive closing and reopening the panel - the same "caller owns the state, this component
+// only ever reports a change" shape already established for `pos` before size was added, so a
+// caller that doesn't care about resizing yet can simply not pass `size`/`onSizeChange` and get the
+// same fixed-440px behavior as before.
+// Floating panels stack in the order they were last used: pressing anywhere on one brings it to the
+// front, so with several open (spot chart, replay controls, paper trade) the one being worked with is
+// never hidden under another. z-indexes stay at 900-940: above the page, but BELOW every antd
+// overlay - Modal / Drawer / Modal.confirm (1000), message (1010), Popover (1030), Select and
+// TimePicker dropdowns (1050), Tooltip (1070). At 1000+ a panel covered the popup its own content
+// opened (the floating spot chart hid the strike OI-history modal clicking an S/R level opens).
+const FLOATING_PANEL_BASE_Z = 900
+const floatingPanelStack = []
+const floatingPanelListeners = new Set()
+function notifyFloatingPanels() { for (const listener of floatingPanelListeners) listener() }
+function subscribeFloatingPanels(listener) {
+  floatingPanelListeners.add(listener)
+  return () => floatingPanelListeners.delete(listener)
+}
+function raiseFloatingPanel(id) {
+  const index = floatingPanelStack.indexOf(id)
+  if (index >= 0 && index === floatingPanelStack.length - 1) return
+  if (index >= 0) floatingPanelStack.splice(index, 1)
+  floatingPanelStack.push(id)
+  notifyFloatingPanels()
+}
+function useFloatingPanelZIndex() {
+  const id = useId()
+  useEffect(() => {
+    raiseFloatingPanel(id)
+    return () => {
+      const index = floatingPanelStack.indexOf(id)
+      if (index >= 0) floatingPanelStack.splice(index, 1)
+      notifyFloatingPanels()
+    }
+  }, [id])
+  const position = useSyncExternalStore(subscribeFloatingPanels, () => floatingPanelStack.indexOf(id))
+  return { zIndex: FLOATING_PANEL_BASE_Z + Math.min(Math.max(position, 0), 40), raise: () => raiseFloatingPanel(id) }
+}
+
+export function DraggableFloatingPanel({ title, pos, onPosChange, size, onSizeChange, onClose, children }) {
+  const { zIndex, raise } = useFloatingPanelZIndex()
   const dragRef = useRef(null)
+  const resizeRef = useRef(null)
   const panelRef = useRef(null)
+  // Whichever gesture's own window-level listener teardown is CURRENTLY registered (drag OR
+  // resize, mouse OR touch - never more than one at once, since starting either kind of drag stops
+  // propagation/is otherwise mutually exclusive) - so the unmount effect further below can force
+  // that same teardown to run even if the gesture never got a natural mouseup/touchend first (the
+  // panel closed mid-drag, or the whole page navigated away). Without this, closing the panel while
+  // still holding a drag left its window 'mousemove'/'touchmove' listener attached indefinitely,
+  // silently firing (and calling onPosChange/onSizeChange on an unmounted panel) on every mouse
+  // movement anywhere on the page until whatever NEXT mouseup happened to occur, anywhere - a real,
+  // if usually short-lived, leak.
+  const activeGestureCleanupRef = useRef(null)
+
+  useEffect(() => () => activeGestureCleanupRef.current?.(), [])
+  // Undefined size (a caller that hasn't opted in) keeps the ORIGINAL fixed-and-viewport-clamped
+  // width with no explicit height (grows to fit content) - resizing is opt-in, not a forced change
+  // in behavior for an existing caller.
+  const width = size?.width ?? null
+  const height = size?.height ?? null
 
   // A fixed 440px panel is wider than most phone screens, and the caller's own initial `pos` is
   // computed once against whatever window.innerWidth happened to be at that moment - stale the
@@ -845,7 +1337,7 @@ export function DraggableFloatingPanel({ title, pos, onPosChange, onClose, child
     window.addEventListener('resize', clamp)
     return () => window.removeEventListener('resize', clamp)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pos.x, pos.y])
+  }, [pos.x, pos.y, width, height])
 
   const beginDrag = (clientX, clientY) => {
     dragRef.current = { startX: clientX, startY: clientY, origX: pos.x, origY: pos.y }
@@ -873,9 +1365,11 @@ export function DraggableFloatingPanel({ title, pos, onPosChange, onClose, child
       endDrag()
       window.removeEventListener('mousemove', onMouseMove)
       window.removeEventListener('mouseup', onMouseUp)
+      activeGestureCleanupRef.current = null
     }
     window.addEventListener('mousemove', onMouseMove)
     window.addEventListener('mouseup', onMouseUp)
+    activeGestureCleanupRef.current = onMouseUp
   }
 
   // Touch's own counterpart to onHeaderMouseDown above - a phone/tablet never fires mouse events for
@@ -894,16 +1388,90 @@ export function DraggableFloatingPanel({ title, pos, onPosChange, onClose, child
       endDrag()
       window.removeEventListener('touchmove', onTouchMove)
       window.removeEventListener('touchend', onTouchEnd)
+      activeGestureCleanupRef.current = null
     }
     window.addEventListener('touchmove', onTouchMove, { passive: false })
     window.addEventListener('touchend', onTouchEnd)
+    activeGestureCleanupRef.current = onTouchEnd
+  }
+
+  // Resize is opt-in (onSizeChange provided) - a caller still on the old fixed-width API simply
+  // never renders the handle at all, rather than resizing into a `size` no one is listening for.
+  const beginResize = (clientX, clientY) => {
+    if (!panelRef.current) return
+    const rect = panelRef.current.getBoundingClientRect()
+    resizeRef.current = { startX: clientX, startY: clientY, origWidth: rect.width, origHeight: rect.height }
+  }
+  const resizeTo = (clientX, clientY) => {
+    if (!resizeRef.current || !panelRef.current) return
+    const dx = clientX - resizeRef.current.startX
+    const dy = clientY - resizeRef.current.startY
+    // Capped against the panel's own CURRENT position (pos.x/pos.y), not the full viewport width -
+    // growing further than the remaining room to the right/bottom edge would just push the panel's
+    // own far edge off-screen instead of actually growing it any further, the same clipping mount/
+    // resize clamp above already prevents for POSITION.
+    const maxWidth = Math.max(FLOATING_PANEL_MIN_WIDTH, window.innerWidth - pos.x - 8)
+    const maxHeight = Math.max(FLOATING_PANEL_MIN_HEIGHT, window.innerHeight - pos.y - 8)
+    onSizeChange({
+      width: Math.min(Math.max(FLOATING_PANEL_MIN_WIDTH, resizeRef.current.origWidth + dx), maxWidth),
+      height: Math.min(Math.max(FLOATING_PANEL_MIN_HEIGHT, resizeRef.current.origHeight + dy), maxHeight),
+    })
+  }
+  const endResize = () => { resizeRef.current = null }
+
+  const onResizeHandleMouseDown = (e) => {
+    e.stopPropagation() // Never also start a HEADER drag - the two gestures share no pixels, but bubbling would otherwise reach the same window-level listeners twice.
+    beginResize(e.clientX, e.clientY)
+    // A fast/sloppy mouse move during the drag otherwise selects whatever text (the panel's own
+    // instructions, a page label underneath) the cursor happens to pass over mid-drag - the header
+    // drag already prevents this on itself via userSelect: 'none', but that only covers the header;
+    // a resize drag's cursor travels over the panel's own BODY content instead.
+    const prevUserSelect = document.body.style.userSelect
+    document.body.style.userSelect = 'none'
+    const onMouseMove = (moveEvent) => resizeTo(moveEvent.clientX, moveEvent.clientY)
+    const onMouseUp = () => {
+      endResize()
+      document.body.style.userSelect = prevUserSelect
+      window.removeEventListener('mousemove', onMouseMove)
+      window.removeEventListener('mouseup', onMouseUp)
+      activeGestureCleanupRef.current = null
+    }
+    window.addEventListener('mousemove', onMouseMove)
+    window.addEventListener('mouseup', onMouseUp)
+    activeGestureCleanupRef.current = onMouseUp
+  }
+  const onResizeHandleTouchStart = (e) => {
+    e.stopPropagation()
+    const touch = e.touches[0]
+    if (!touch) return
+    beginResize(touch.clientX, touch.clientY)
+    const onTouchMove = (moveEvent) => {
+      if (!resizeRef.current) return
+      moveEvent.preventDefault()
+      const moveTouch = moveEvent.touches[0]
+      if (moveTouch) resizeTo(moveTouch.clientX, moveTouch.clientY)
+    }
+    const onTouchEnd = () => {
+      endResize()
+      window.removeEventListener('touchmove', onTouchMove)
+      window.removeEventListener('touchend', onTouchEnd)
+      activeGestureCleanupRef.current = null
+    }
+    window.addEventListener('touchmove', onTouchMove, { passive: false })
+    window.addEventListener('touchend', onTouchEnd)
+    activeGestureCleanupRef.current = onTouchEnd
   }
 
   return createPortal(
     <div
       ref={panelRef}
+      onPointerDownCapture={raise}
       style={{
-        position: 'fixed', left: pos.x, top: pos.y, zIndex: 1000, width: 'min(440px, calc(100vw - 24px))',
+        position: 'fixed', left: pos.x, top: pos.y, zIndex,
+        width: width != null ? `${width}px` : 'min(440px, calc(100vw - 24px))',
+        height: height != null ? `${height}px` : undefined,
+        maxWidth: 'calc(100vw - 24px)', maxHeight: 'calc(100vh - 24px)',
+        display: 'flex', flexDirection: 'column',
         background: '#1f1f1f', border: `1px solid ${BORDER_COLOR}`, borderRadius: 8,
         boxShadow: '0 8px 28px rgba(0, 0, 0, 0.55)',
       }}
@@ -912,15 +1480,29 @@ export function DraggableFloatingPanel({ title, pos, onPosChange, onClose, child
         onMouseDown={onHeaderMouseDown}
         onTouchStart={onHeaderTouchStart}
         style={{
-          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center', flex: '0 0 auto',
           padding: '8px 12px', cursor: 'move', touchAction: 'none', userSelect: 'none',
           borderBottom: `1px solid ${BORDER_COLOR}`,
         }}
       >
-        <Text strong style={{ fontSize: 13 }}>{title}</Text>
+        <Text strong style={{ fontSize: 'clamp(12px, 3.2vw, 13px)' }}>{title}</Text>
         <Button type="text" size="small" onClick={onClose} style={{ padding: '0 4px' }}>✕</Button>
       </div>
-      <div style={{ padding: 12 }}>{children}</div>
+      <div style={{ padding: 12, overflow: 'auto', flex: '1 1 auto', minHeight: 0 }}>{children}</div>
+      {onSizeChange && (
+        <div
+          onMouseDown={onResizeHandleMouseDown}
+          onTouchStart={onResizeHandleTouchStart}
+          title="Drag to resize"
+          style={{
+            position: 'absolute', right: 0, bottom: 0, width: 22, height: 22,
+            cursor: 'nwse-resize', touchAction: 'none',
+            // A plain corner-notch look via a diagonal gradient rather than an icon font/SVG asset -
+            // three faint parallel lines, the universal "drag to resize" affordance.
+            background: `linear-gradient(135deg, transparent 0 40%, ${BORDER_COLOR} 40% 46%, transparent 46% 60%, ${BORDER_COLOR} 60% 66%, transparent 66% 80%, ${BORDER_COLOR} 80% 86%, transparent 86%)`,
+          }}
+        />
+      )}
     </div>,
     document.body,
   )
@@ -937,25 +1519,29 @@ function OiChange({ value }) {
   )
 }
 
-// Cumulative OI change since the day's very first revealed point.
-function SinceOpenChange({ value }) {
+// Cumulative OI change since the day's very first revealed point. `suspect` means the raw delta
+// looks implausible against current OI - but it is ALWAYS shown, never hidden, just marked with a
+// "?" so a reading worth double-checking is never confused with "no data at all" (a real report,
+// "this calculation is incorrect", once traced back to this exact figure being suppressed instead of
+// flagged).
+function SinceOpenChange({ value, suspect = false }) {
   if (value == null) return null
   if (value === 0) return <Text style={{ fontSize: 'clamp(6px, 1.8vw, 8px)', color: AXIS_COLOR }}>open ·</Text>
   const up = value > 0
   return (
-    <Tooltip title={`${up ? '+' : ''}${value.toLocaleString()} since today's open`}>
+    <Tooltip title={`${up ? '+' : ''}${value.toLocaleString()} since today's open${suspect ? ' - flagged: the live tick feed and today\'s opening (REST) reading disagree by more than looks plausible for this strike. Logged to the browser console with the actual numbers.' : ''}`}>
       <Text style={{ fontSize: 'clamp(6px, 1.8vw, 8px)', color: up ? UP_COLOR : DOWN_COLOR, whiteSpace: 'nowrap' }}>
-        open {formatOiMillions(value, { signed: true })}
+        open {formatOiMillions(value, { signed: true })}{suspect ? ' ⚠' : ''}
       </Text>
     </Tooltip>
   )
 }
 
-function OiChangeStack({ changeValue, sinceOpenValue }) {
+function OiChangeStack({ changeValue, sinceOpenValue, sinceOpenSuspect = false }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', lineHeight: 1.15 }}>
       <OiChange value={changeValue} />
-      <SinceOpenChange value={sinceOpenValue} />
+      <SinceOpenChange value={sinceOpenValue} suspect={sinceOpenSuspect} />
     </div>
   )
 }
@@ -1000,7 +1586,7 @@ export function OiLadder({ rows, atmStrike }) {
             }}
           >
             <Col span={10} style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 4, opacity: row.peStale ? 0.45 : 1 }}>
-              <OiChangeStack changeValue={row.peOiChange} sinceOpenValue={row.peOiSinceOpen} />
+              <OiChangeStack changeValue={row.peOiChange} sinceOpenValue={row.peOiSinceOpen} sinceOpenSuspect={row.peOiSinceOpenSuspect} />
               <Text style={{ fontSize: 'clamp(8px, 2.2vw, 10px)', color: AXIS_COLOR, whiteSpace: 'nowrap' }}>
                 {row.pePrice != null ? `${row.pePrice.toFixed(2)}` : ''}
                 {row.peIv != null ? ` · IV ${row.peIv.toFixed(1)}` : ''}
@@ -1033,7 +1619,7 @@ export function OiLadder({ rows, atmStrike }) {
               <Text style={{ fontSize: 'clamp(7px, 2vw, 9px)', color: AXIS_COLOR, width: 'clamp(24px, 7vw, 34px)', whiteSpace: 'nowrap' }}>
                 {row.ceOi != null ? formatOiMillions(row.ceOi) : ''}
               </Text>
-              <OiChangeStack changeValue={row.ceOiChange} sinceOpenValue={row.ceOiSinceOpen} />
+              <OiChangeStack changeValue={row.ceOiChange} sinceOpenValue={row.ceOiSinceOpen} sinceOpenSuspect={row.ceOiSinceOpenSuspect} />
               <Text style={{ fontSize: 'clamp(8px, 2.2vw, 10px)', color: AXIS_COLOR, whiteSpace: 'nowrap' }}>
                 {row.cePrice != null ? `${row.cePrice.toFixed(2)}` : ''}
                 {row.ceIv != null ? ` · IV ${row.ceIv.toFixed(1)}` : ''}
@@ -1061,7 +1647,7 @@ export class ChartErrorBoundary extends Component {
   }
 
   componentDidCatch(error) {
-    console.error('Live OI Dashboard chart crashed:', error)
+    console.error('OI Replay chart crashed:', error)
   }
 
   render() {

@@ -2,7 +2,9 @@ import { Component, useEffect, useMemo, useRef, useState } from 'react'
 import { Select, Space, Typography, Spin, Card, Button, Table, Tag, InputNumber, Statistic, Row, Col, DatePicker, TimePicker, Alert, Empty, Checkbox } from 'antd'
 import dayjs from 'dayjs'
 import { ReloadOutlined, PlayCircleOutlined } from '@ant-design/icons'
-import { createChart, createSeriesMarkers, CandlestickSeries, LineSeries, CrosshairMode } from 'lightweight-charts'
+import { createSeriesMarkers, CandlestickSeries, LineSeries, CrosshairMode } from 'lightweight-charts'
+import { alignToBars } from './chartVwap.js'
+import { createZoomableChart } from './chartZoom.js'
 import {
   UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, EMA_COLOR, emaLine, srLevelLine, NavBar, DirectionTag, ALERT_KIND_LABEL, fmtIstDateTime, fmtIstTime, fmtPrice, istDateKey,
   TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry,
@@ -124,7 +126,7 @@ function SpotCandleChart({ bars, trades, indicatorLines, height = 420, focusTime
   useEffect(() => {
     if (!containerRef.current) return
 
-    const chart = createChart(containerRef.current, {
+    const chart = createZoomableChart(containerRef.current, {
       width: containerRef.current.clientWidth,
       height,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
@@ -572,12 +574,18 @@ export default function BacktestPage() {
 
   // The actual plotted line data - only for whichever of the above are ticked on in
   // visibleIndicators, and only once there is something to plot them against.
+  // Every strategy's chart also offers the session VWAP (the spot's, off its real index volume),
+  // aligned to the candles - one point per candle, so it never adds time points to the axis.
+  const chartIndicatorDefs = useMemo(() => [
+    ...indicatorDefs,
+    { key: 'sessionVwap', label: 'VWAP', color: '#e072e8', compute: (bars) => alignToBars((spotVwapSeries ?? []).map((p) => ({ time: toChartTime(p.time), value: p.obv })), bars) },
+  ], [indicatorDefs, spotVwapSeries])
   const indicatorLines = useMemo(() => {
     if (chartBars.length === 0) return []
-    return indicatorDefs
+    return chartIndicatorDefs
       .filter((def) => visibleIndicators[def.key])
       .map((def) => ({ key: def.key, label: def.label, color: def.color, points: def.compute(chartBars) }))
-  }, [indicatorDefs, visibleIndicators, chartBars])
+  }, [chartIndicatorDefs, visibleIndicators, chartBars])
 
   const summary = useMemo(() => {
     // Open positions are excluded from every stat below - they haven't actually closed, so folding
@@ -810,7 +818,7 @@ export default function BacktestPage() {
           <Space direction="vertical" size={16} style={{ width: '100%' }}>
             {chartBars.length > 0 ? (
               <div>
-                {indicatorDefs.map((def) => (
+                {chartIndicatorDefs.map((def) => (
                   <Checkbox
                     key={def.key}
                     checked={!!visibleIndicators[def.key]}
@@ -859,6 +867,7 @@ export default function BacktestPage() {
               dataSource={visibleTrades}
               columns={tradeColumns}
               pagination={{ pageSize: 25, showSizeChanger: false }}
+              scroll={{ x: 'max-content' }}
               onRow={(row) => ({ onClick: () => setFocusTime(row.entryTimeUtc ?? row.signalTimeUtc), style: { cursor: 'pointer' } })}
               locale={{ emptyText: (fromDay || toDay)
                 ? 'No trades on the selected dates - widen or clear the date filter.'
@@ -899,6 +908,7 @@ export default function BacktestPage() {
             dataSource={visibleSignals}
             columns={signalColumns}
             pagination={{ pageSize: 25, showSizeChanger: false }}
+            scroll={{ x: 'max-content' }}
             onRow={(row) => ({ onClick: () => setFocusTime(row.timeUtc), style: { cursor: 'pointer' } })}
             locale={{ emptyText: (fromDay || toDay)
               ? 'No signals on the selected dates - widen or clear the date filter.'

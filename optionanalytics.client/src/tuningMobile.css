@@ -1,0 +1,51 @@
+/* Phone width for the Strategy tuning and Trades pages - scoped under .tuning-page (only these two pages carry it), so
+   no other page changes. Nothing may run past the screen: the long button bars (Tune, Strategies, the Trades tabs)
+   wrap onto more lines, the card header wraps under its title, and pickers / selects never exceed the width. Tables
+   keep their own horizontal scroll inside the card. */
+@media (max-width: 640px) {
+  .tuning-page .ant-segmented {
+    max-width: 100%;
+  }
+  .tuning-page .ant-segmented-group {
+    flex-wrap: wrap;
+  }
+  .tuning-page .ant-card-head-wrapper {
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 6px 0;
+  }
+  .tuning-page .ant-card-extra {
+    margin-inline-start: 0;
+    max-width: 100%;
+  }
+  .tuning-page .ant-card-head-title {
+    white-space: normal;
+  }
+  .tuning-page .ant-card-body {
+    padding: 10px;
+  }
+  .tuning-page .ant-picker,
+  .tuning-page .ant-select {
+    max-width: 100%;
+  }
+  .tuning-page .ant-picker-range {
+    width: 100%;
+  }
+  .tuning-page .ant-space {
+    max-width: 100%;
+    flex-wrap: wrap;
+  }
+  .tuning-page .ant-space-item {
+    max-width: 100%;
+  }
+}
+
+/* The picked option of every switch (data, strategies, tune, ...) in blue, so what is selected is plain to see. */
+.tuning-page .ant-segmented .ant-segmented-item-selected,
+.tuning-page .ant-segmented .ant-segmented-thumb {
+  background: #1677ff;
+  color: #fff;
+}
+.tuning-page .ant-segmented .ant-segmented-item-selected .ant-segmented-item-label {
+  color: #fff;
+}

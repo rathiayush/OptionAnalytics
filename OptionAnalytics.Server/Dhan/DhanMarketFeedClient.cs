@@ -7,7 +7,8 @@ namespace OptionAnalytics.Server.Dhan;
 
 /// <summary>
 /// Owns the single live connection to Dhan's market feed (wss://api-feed.dhan.co), decodes the
-/// binary packets, and raises TickReceived for each update. Reconnects with exponential backoff
+/// binary packets, and hands each update to every tick consumer (AddTickConsumer) - each on its own
+/// queue and worker, never on this receive loop (see TickConsumerQueue). Reconnects with exponential backoff
 /// and re-subscribes everything on every reconnect. Run as its own hosted service
 /// (DhanMarketFeedHostedService owns the RunAsync loop); SpotFeedHostedService and
 /// CdvHostedService both subscribe/unsubscribe tokens on this same shared instance rather than
@@ -68,7 +69,37 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
     // answered together.
     private readonly ConcurrentDictionary<uint, byte> _loggedFirstTick = new();
 
-    public event Action<SpotTick>? TickReceived;
+    // Copy-on-write so the receive loop reads it without a lock.
+    private volatile TickConsumerQueue[] _consumers = Array.Empty<TickConsumerQueue>();
+    private readonly object _consumersLock = new();
+
+    /// <summary>Delivers every tick to <paramref name="handler"/> on its own worker, in order - see
+    /// TickConsumerQueue for why consumers no longer run on the receive loop. Dispose the result to
+    /// stop.</summary>
+    public IDisposable AddTickConsumer(string name, Action<SpotTick> handler)
+    {
+        var consumer = new TickConsumerQueue(name, handler, _logger);
+        lock (_consumersLock) _consumers = _consumers.Append(consumer).ToArray();
+        return new ConsumerRegistration(this, consumer);
+    }
+
+    /// <summary>How each tick consumer is keeping up - see TickConsumerStats.</summary>
+    public IReadOnlyList<TickConsumerStats> GetConsumerStats() => _consumers.Select(c => c.GetStats()).ToList();
+
+    private void RemoveConsumer(TickConsumerQueue consumer)
+    {
+        lock (_consumersLock) _consumers = _consumers.Where(c => c != consumer).ToArray();
+        consumer.Dispose();
+    }
+
+    private sealed class ConsumerRegistration(DhanMarketFeedClient client, TickConsumerQueue consumer) : IDisposable
+    {
+        private int _disposed;
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) == 0) client.RemoveConsumer(consumer);
+        }
+    }
 
     public DhanMarketFeedClient(IOptions<DhanOptions> options, DhanSession session, ILogger<DhanMarketFeedClient> logger)
     {
@@ -83,8 +114,32 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
     /// master problem.</summary>
     public SpotTick? LastTickFor(uint securityId) => _lastTick.TryGetValue(securityId, out var tick) ? tick : null;
 
+    /// <summary>Tests only: makes <paramref name="tick"/> the latest one for its instrument.</summary>
+    internal void SetLastTickForTesting(SpotTick tick) => _lastTick[tick.SecurityId] = tick;
+
     /// <summary>Whether this token is in the subscribed set right now.</summary>
     public bool IsSubscribed(uint securityId) => _tokenSegments.ContainsKey(securityId);
+
+    /// <summary>Re-sends a subscribe message for exactly the given, already-tracked tokens -
+    /// unlike SubscribeAsync (a no-op for a token already in the set, by design - see its own doc
+    /// comment), this bypasses that check and asks Dhan again regardless. For a caller
+    /// (SpotFeedHostedService) that suspects Dhan silently dropped just ITS OWN handful of tokens
+    /// while the connection as a whole keeps delivering other instruments perfectly normally: the
+    /// shared stall watchdog (FeedStallDetector) only judges the connection as a whole - ANY
+    /// message, from ANY instrument, counts as "alive" (see its own doc comment) - so it never
+    /// notices one specific instrument having gone silent on its own. Silently does nothing for a
+    /// token this client isn't actually tracking (never subscribed, or already unsubscribed).</summary>
+    public async Task ResendSubscriptionsForAsync(IEnumerable<uint> securityIds, CancellationToken cancellationToken)
+    {
+        if (_socket is not { State: WebSocketState.Open }) return;
+
+        var tokens = new List<KeyValuePair<uint, (string Segment, int SubscribeCode)>>();
+        foreach (var id in securityIds)
+            if (_tokenSegments.TryGetValue(id, out var entry))
+                tokens.Add(new(id, entry));
+
+        if (tokens.Count > 0) await ResendSubscriptionsAsync(tokens, cancellationToken);
+    }
 
     /// <summary>How many instruments are subscribed in total, across every underlying and
     /// expiry.</summary>
@@ -411,10 +466,18 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
             // Also only ever populated by a Full-mode packet - see BestBidPrice/BestAskPrice's own
             // comment just above, same reasoning.
             OpenInterest: packet.OpenInterest > 0 ? packet.OpenInterest : previous?.OpenInterest ?? 0,
-            ExchangeTimestamp: packet.ExchangeTimestamp);
+            ExchangeTimestamp: packet.ExchangeTimestamp)
+        {
+            LastTradedQty = packet.LastTradedQty,
+            TotalBuyQty = packet.TotalBuyQty > 0 ? packet.TotalBuyQty : previous?.TotalBuyQty ?? 0,
+            TotalSellQty = packet.TotalSellQty > 0 ? packet.TotalSellQty : previous?.TotalSellQty ?? 0,
+            Bids = packet.Bids ?? previous?.Bids,
+            Asks = packet.Asks ?? previous?.Asks,
+        };
 
         _lastTick[packet.SecurityId] = tick;
-        if (tick.LastPrice > 0) TickReceived?.Invoke(tick);
+        if (tick.LastPrice <= 0) return;
+        foreach (var consumer in _consumers) consumer.Enqueue(tick);
     }
 
     private async Task SendAsync(object message, CancellationToken cancellationToken)
@@ -458,5 +521,6 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
             catch { /* best-effort close */ }
         }
         _socket?.Dispose();
+        foreach (var consumer in _consumers) consumer.Dispose();
     }
 }

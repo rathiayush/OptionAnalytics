@@ -1,7 +1,9 @@
-import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react'
-import { Button, Menu, Select, Space, Tag, Typography } from 'antd'
+import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
+import { Alert, Button, Drawer, Menu, Select, Space, Tag, Tooltip, Typography } from 'antd'
 import { useLocation, useNavigate } from 'react-router-dom'
-import { createChart, createSeriesMarkers, HistogramSeries, LineSeries, CrosshairMode, LineStyle, TickMarkType } from 'lightweight-charts'
+import { createSeriesMarkers, HistogramSeries, LineSeries, CrosshairMode, LineStyle, TickMarkType } from 'lightweight-charts'
+import { createZoomableChart } from './chartZoom.js'
+import * as signalR from '@microsoft/signalr'
 
 // Provided once, at the app root (App.jsx), after GET /api/auth/me resolves - {email, role} or
 // null. NavBar (rendered independently from four different pages) reads this via useAuth() rather
@@ -14,7 +16,7 @@ export function useAuth() {
 // Path keys from NAV_ITEMS below that only an Admin account may see or use - Triggers arms real
 // money, Contracts exposes the raw scrip-master/subscription diagnostic. Kept as one list so
 // NavBar's own filtering and App.jsx's route guards can never drift apart on which paths these are.
-export const ADMIN_ONLY_PATHS = ['/triggers', '/contracts']
+export const ADMIN_ONLY_PATHS = ['/triggers', '/contracts', '/data-files']
 
 // SignalR's own withAutomaticReconnect(), with no argument, only retries at [0, 2, 10, 30] seconds
 // (~42s total) before giving up PERMANENTLY - the connection then sits closed until the page is
@@ -28,6 +30,288 @@ export const RECONNECT_RETRY_POLICY = {
     const delays = [0, 2000, 5000, 10000, 15000, 30000]
     return delays[Math.min(retryContext.previousRetryCount, delays.length - 1)]
   },
+}
+
+// SpotHub used to broadcast every event to Clients.All - a client viewing just NIFTY Weekly still
+// received (and had to filter out, client-side) every tick for every OTHER underlying/expiry/
+// futures contract too, on top of CDV/confluence events for underlyings nobody had open. SpotHub.cs
+// now scopes each broadcast to a SignalR Group instead (see its own doc comment for the two naming
+// conventions - "u:{underlying}" and "c:{underlying}:{expiryFlag}"), so a client only ever receives
+// what it explicitly joins. These two helpers are what every hub hook in this app (App.jsx's
+// useHub, oiShared.jsx's useOiLiveHub, OiReplayPage.jsx's useOiReplayLiveFeed) calls to stay in
+// sync with its own caller's current selection, so the join/leave/rejoin logic only has to be
+// gotten right once rather than three times with three chances to drift apart.
+//
+// Silently no-ops if the connection isn't currently Connected - each hook's own onreconnected
+// handler is what re-establishes group membership from scratch afterward (a dropped connection
+// loses ALL of its own group membership server-side the instant it drops; there is nothing to
+// "diff" against a stale prior list once that happens, only a fresh join of whatever groups are
+// current right now).
+export function syncSignalRGroups(connection, oldGroups, newGroups) {
+  if (!connection || connection.state !== signalR.HubConnectionState.Connected) return
+  for (const g of oldGroups) if (!newGroups.includes(g)) connection.invoke('LeaveGroup', g).catch(() => {})
+  for (const g of newGroups) if (!oldGroups.includes(g)) connection.invoke('JoinGroup', g).catch((err) => console.error('Failed to join SignalR group', g, err))
+}
+
+// Every group in `groups`, unconditionally - used right after a fresh connect/reconnect, when the
+// server-side connection is known to hold NO group membership at all yet, so there is nothing to
+// diff against (unlike syncSignalRGroups, for a later selection change on an already-connected
+// socket).
+export function joinAllSignalRGroups(connection, groups) {
+  for (const g of groups) connection.invoke('JoinGroup', g).catch((err) => console.error('Failed to join SignalR group', g, err))
+}
+
+// An open tab keeps running the JavaScript it was loaded with, while a deploy replaces the server
+// underneath it - and live events are a contract between the two (an event renamed or reshaped on
+// the server is simply never heard by an older page). The page then looks live but quietly stops
+// updating whatever changed, e.g. the OI heatmap frozen at the minute of the deploy while spot still
+// ticked. So: remember the server build this page started against (GET /api/version's
+// buildTimeUtc), and the moment the server reports a different one, reload once to pick up the
+// matching code. Checked every minute, when the tab becomes visible again, and on every live
+// reconnect (a deploy restarts the server, so that's when a new build shows up first). Today's
+// paper positions and the live-day cache survive a reload on their own.
+const DEPLOY_CHECK_INTERVAL_MS = 60_000
+const RELOADED_FOR_BUILD_KEY = 'optionanalytics.reloadedForBuild'
+let pageBuild = null
+
+export async function checkForNewDeploy() {
+  try {
+    const response = await fetch('/api/version', { cache: 'no-store' })
+    const build = (await response.json())?.buildTimeUtc
+    if (!build) return
+    if (pageBuild == null) { pageBuild = build; return }
+    if (build === pageBuild) return
+    // At most one reload per new build, so an odd server can never put the page in a reload loop.
+    try {
+      if (sessionStorage.getItem(RELOADED_FOR_BUILD_KEY) === build) return
+      sessionStorage.setItem(RELOADED_FOR_BUILD_KEY, build)
+    } catch { /* storage unavailable - still reload once, this page instance won't try again */ }
+    pageBuild = build
+    window.location.reload()
+  } catch {
+    // Server restarting or unreachable - the next check will catch up.
+  }
+}
+
+export function useReloadOnNewDeploy() {
+  useEffect(() => {
+    checkForNewDeploy()
+    const id = setInterval(checkForNewDeploy, DEPLOY_CHECK_INTERVAL_MS)
+    const onVisible = () => { if (!document.hidden) checkForNewDeploy() }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => { clearInterval(id); document.removeEventListener('visibilitychange', onVisible) }
+  }, [])
+}
+
+// Live state (spot, option legs, futures, CDV) arrives as one "liveBatch" per ~300ms, CONFLATED per
+// browser on the server (see LiveBroadcastBatcher): each batch holds only the newest data, and the
+// next one is sent only after this page acknowledges the previous. So a slow phone or a busy page
+// skips straight to the latest picture instead of building up a queue of stale updates - the screen
+// can't drift 10s/20s/a minute behind. The ack goes after the browser has painted, so the server is
+// paced to what this device can actually show (a hidden tab stops acking and the server backs off
+// to its ack timeout until the tab is visible again).
+//
+// onPainted(sentAtMs) runs at that same post-paint moment with the server's send time, which is
+// what an honest "how far behind is the SCREEN" measure needs (receipt time alone misses slow
+// rendering).
+export function onLiveBatch(connection, handlers, onPainted) {
+  const clock = createServerClock(connection)
+  connection.on('liveBatch', (batch) => {
+    clock.syncIfDue()
+    for (const item of batch?.items ?? []) {
+      try { handlers[item.e]?.(item.d) } catch (err) { console.error(`Live update "${item.e}" failed:`, err) }
+    }
+    if (batch?.sequence == null) return
+    const afterPaint = () => {
+      onPainted?.(new Date(batch.sentAtUtc).getTime(), clock.offsetMs())
+      if (connection.state === signalR.HubConnectionState.Connected) connection.send('AckLive', batch.sequence).catch(() => {})
+    }
+    requestAnimationFrame(() => setTimeout(afterPaint, 0))
+  })
+}
+
+// This device's clock minus the server's, estimated NTP-style from a ServerTime round trip: assume the
+// reply was stamped halfway through, and trust the sample with the shortest round trip seen recently
+// (a busy page or slow link only ever makes a round trip LONGER, never shorter). Null until the first
+// sync lands. Re-synced every CLOCK_SYNC_INTERVAL_MS.
+const CLOCK_SYNC_INTERVAL_MS = 30_000
+const CLOCK_SAMPLE_MAX_AGE_MS = 5 * 60_000
+
+function createServerClock(connection) {
+  let best = null
+  let lastAttempt = 0
+  const sync = async () => {
+    const t0 = Date.now()
+    try {
+      const serverTime = await connection.invoke('ServerTime')
+      const t1 = Date.now()
+      const sample = { rtt: t1 - t0, offset: t0 + (t1 - t0) / 2 - new Date(serverTime).getTime(), at: t1 }
+      if (!best || sample.rtt <= best.rtt || t1 - best.at > CLOCK_SAMPLE_MAX_AGE_MS) best = sample
+    } catch {
+      // A server without ServerTime, or a dropped connection - the baseline measure still works.
+    }
+  }
+  return {
+    syncIfDue() {
+      const now = Date.now()
+      if (now - lastAttempt < CLOCK_SYNC_INTERVAL_MS) return
+      lastAttempt = now
+      if (connection.state === signalR.HubConnectionState.Connected) sync()
+    },
+    offsetMs: () => best?.offset ?? null,
+  }
+}
+
+// How far behind the market this page is running, split into the two legs that can lag:
+//  - delayMs: server -> this screen (network + rendering on this device), measured when a batch is
+//    PAINTED. With the server clock offset known (createServerClock) it's the true delay; before the
+//    first clock sync it falls back to the excess over the lowest lag seen recently (which cancels
+//    clock skew but can't see a constant delay).
+//  - sourceDelayMs: Dhan -> server (Dhan's own tick timestamp vs when the server received it), same
+//    excess-over-baseline measure - tells "our side is slow" apart from "Dhan's feed is slow".
+const FEED_LAG_WINDOW_MS = 5 * 60_000
+export const FEED_LAG_WARN_MS = 2_000
+export const FEED_LAG_BAD_MS = 5_000
+
+// A reading older than this is dropped rather than shown - otherwise the last value before a feed
+// went quiet (e.g. "Dhan's feed is 27.4s behind") stayed on screen indefinitely as if still current.
+const FEED_LAG_SAMPLE_MAX_AGE_MS = 15_000
+
+export function createFeedLagTracker() {
+  return { windowStart: 0, windowMin: Infinity, prevWindowMin: Infinity, latest: null, peak: -Infinity, lastSampleAt: 0 }
+}
+
+export function recordFeedLag(tracker, receivedAt, sentMs) {
+  if (!Number.isFinite(sentMs) || !Number.isFinite(receivedAt)) return
+  const lag = receivedAt - sentMs
+  if (receivedAt - tracker.windowStart > FEED_LAG_WINDOW_MS) {
+    tracker.prevWindowMin = tracker.windowMin
+    tracker.windowMin = Infinity
+    tracker.windowStart = receivedAt
+  }
+  tracker.windowMin = Math.min(tracker.windowMin, lag)
+  tracker.latest = lag
+  tracker.peak = Math.max(tracker.peak, lag)
+  tracker.lastSampleAt = Date.now()
+}
+
+// Worst excess lag since the previous summary, rounded to 0.1s so an unchanged reading doesn't
+// re-render the page.
+export function summarizeFeedLag(tracker) {
+  if (tracker.latest == null || Date.now() - tracker.lastSampleAt > FEED_LAG_SAMPLE_MAX_AGE_MS) return null
+  const baseline = Math.min(tracker.windowMin, tracker.prevWindowMin)
+  const worst = Number.isFinite(tracker.peak) ? tracker.peak : tracker.latest
+  tracker.peak = -Infinity
+  return Math.round(Math.max(0, worst - baseline) / 100) * 100
+}
+
+export function useFeedLag(active) {
+  const trackersRef = useRef({ link: createFeedLagTracker(), source: createFeedLagTracker(), absolute: { peak: -Infinity, latest: null, lastSampleAt: 0 } })
+  const [lag, setLag] = useState({ delayMs: null, sourceDelayMs: null })
+  useEffect(() => {
+    if (!active) return
+    const id = setInterval(() => {
+      const trackers = trackersRef.current
+      const relative = summarizeFeedLag(trackers.link)
+      const absolute = trackers.absolute
+      const fresh = Date.now() - absolute.lastSampleAt <= FEED_LAG_SAMPLE_MAX_AGE_MS
+      const worst = !fresh ? null : Number.isFinite(absolute.peak) ? absolute.peak : absolute.latest
+      absolute.peak = -Infinity
+      const delayMs = worst != null ? Math.round(Math.max(0, worst) / 100) * 100 : relative
+      const next = { delayMs, sourceDelayMs: summarizeFeedLag(trackers.source) }
+      setLag((prev) => (prev.delayMs === next.delayMs && prev.sourceDelayMs === next.sourceDelayMs ? prev : next))
+    }, 500)
+    return () => clearInterval(id)
+  }, [active])
+  // A batch the server sent at sentAtMs has just been painted. clockOffsetMs: this device's clock
+  // minus the server's, when known.
+  const recordPainted = useCallback((sentAtMs, clockOffsetMs) => {
+    const now = Date.now()
+    const trackers = trackersRef.current
+    recordFeedLag(trackers.link, now, sentAtMs)
+    if (clockOffsetMs != null && Number.isFinite(sentAtMs)) {
+      const lag = now - clockOffsetMs - sentAtMs
+      trackers.absolute.latest = lag
+      trackers.absolute.peak = Math.max(trackers.absolute.peak, lag)
+      trackers.absolute.lastSampleAt = now
+    }
+  }, [])
+  // Dhan stamped a tick at exchangeMs; the server received it at serverReceivedMs.
+  const recordSource = useCallback((serverReceivedMs, exchangeMs) => {
+    if (exchangeMs != null) recordFeedLag(trackersRef.current.source, serverReceivedMs, exchangeMs)
+  }, [])
+  return { ...lag, recordPainted, recordSource }
+}
+
+// Skips re-rendering a page section while it's scrolled off-screen, so a live update only pays for
+// what's actually visible - on a phone that's one or two cards, not the whole page. The moment the
+// section comes back into view (with a small margin, so it's already current by the time it's seen)
+// it renders once with the newest data. `version` forces a re-render even while hidden, for changes
+// that affect layout rather than data (card order, which sections are shown).
+//
+// display: contents keeps this wrapper out of the layout entirely, so the section's own root stays
+// the flex item its `order` style (card drag-reordering) applies to; the observer watches that root.
+const FrozenWhenHidden = memo(({ children }) => children, (prev, next) => next.frozen && prev.version === next.version)
+
+// What a live chart's view is doing right before its data is replaced: FOLLOWING the newest data
+// (then it should keep following it - the standard live-chart behaviour) or parked on a range the user
+// scrolled/zoomed back to (then that exact range is restored). Needed because setData() resets the
+// view: restoring the old time range unconditionally (what these charts used to do) pinned a live
+// chart to the window it opened with, so new points kept landing off its right edge unseen.
+export function captureChartView(chart, series) {
+  if (!chart || !series) return null
+  const timeScale = chart.timeScale()
+  const lastIndex = series.data().length - 1
+  const logical = timeScale.getVisibleLogicalRange()
+  return { followsLive: !logical || lastIndex < 0 || logical.to >= lastIndex - 0.5, range: timeScale.getVisibleRange() }
+}
+
+export function restoreChartView(chart, view) {
+  if (!chart || !view) return
+  const timeScale = chart.timeScale()
+  if (view.followsLive) timeScale.scrollToRealTime()
+  else if (view.range) {
+    try { timeScale.setVisibleRange(view.range) } catch { /* the range may no longer be covered - nothing to fight over */ }
+  }
+}
+
+export function LiveSection({ version, children }) {
+  const wrapperRef = useRef(null)
+  const [onScreen, setOnScreen] = useState(true)
+  useEffect(() => {
+    const target = wrapperRef.current?.firstElementChild
+    if (!target || typeof IntersectionObserver === 'undefined') return
+    const observer = new IntersectionObserver(([entry]) => setOnScreen(entry.isIntersecting), { rootMargin: '300px 0px' })
+    observer.observe(target)
+    return () => observer.disconnect()
+  }, [])
+  return (
+    <div ref={wrapperRef} style={{ display: 'contents' }}>
+      <FrozenWhenHidden frozen={!onScreen} version={version}>{children}</FrozenWhenHidden>
+    </div>
+  )
+}
+
+export function FeedLagTag({ delayMs }) {
+  if (delayMs == null) return null
+  return (
+    <Tooltip title="How far behind the server's live data this screen is, measured when it's painted. Stays well under a second normally - the server only ever sends the newest data, never a backlog, so a slow moment can't pile up.">
+      <Tag color={delayMs >= FEED_LAG_BAD_MS ? 'error' : delayMs >= FEED_LAG_WARN_MS ? 'warning' : 'default'}>
+        Delay {(delayMs / 1000).toFixed(1)}s
+      </Tag>
+    </Tooltip>
+  )
+}
+
+// Shown only when one leg is genuinely behind - says WHICH, since the fix is different for each.
+export function FeedLagAlert({ delayMs, sourceDelayMs }) {
+  if (sourceDelayMs != null && sourceDelayMs >= FEED_LAG_BAD_MS) {
+    return <Alert type="warning" showIcon message={`Dhan's own feed is running ${(sourceDelayMs / 1000).toFixed(1)}s behind right now - the delay is upstream of this app (Dhan -> server), not this screen.`} />
+  }
+  if (delayMs != null && delayMs >= FEED_LAG_BAD_MS) {
+    return <Alert type="warning" showIcon message={`This screen is ${(delayMs / 1000).toFixed(1)}s behind - the connection to the server is slow right now. It catches up to the latest data on its own as soon as the link recovers.`} />
+  }
+  return null
 }
 
 // Constants/components shared between App.jsx's DashboardPage and BacktestPage.jsx - kept in
@@ -133,7 +417,13 @@ export const TIMEFRAME_OPTIONS = [
 // Both live under these keys, and every page reads and writes the same two.
 export const STORED_UNDERLYING = 'optionanalytics.underlying'
 export const STORED_TIMEFRAME = 'optionanalytics.timeframe'
-
+// One shared toggle for every page's VWAP checkbox, same as underlying/timeframe above - checking
+// it on one page and finding it already checked on another is the expected behavior, not a bug.
+export const STORED_SHOW_VWAP = 'optionanalytics.showVwap'
+// Same shape, for OI Replay's own previous-day volume profile (POC/VAH/VAL/HVN/LVN) overlay -
+// shown on by default (the user's own original ask), with this the one way to hide it once it's
+// in the way of something else on the chart.
+export const STORED_SHOW_VOLUME_PROFILE = 'optionanalytics.showVolumeProfile'
 function readStored(key, fallback) {
   try {
     const raw = window.localStorage.getItem(key)
@@ -157,6 +447,75 @@ export function usePersistedState(key, fallback) {
   }, [key, value])
 
   return [value, setValue]
+}
+
+// Drag-to-reorder a fixed set of named cards, persisted per page (own storageKey) so a rearrangement
+// survives a reload - no drag library needed for something this small, same reasoning
+// DraggableFloatingPanel's own doc comment already gives for using plain native events instead of a
+// dependency. `cardIds` is the CURRENT full set a page renders (order is unaware of each card's own
+// layout/span - callers still own that, this only reorders which one comes first).
+//
+// Deliberately reconciles against a stale persisted order rather than trusting it outright: a page
+// that later adds or removes a card must not end up silently dropping the new one (it would never
+// render at all) or keeping a ghost id around forever from before a card was removed. A newly added
+// card is appended at the end - the least surprising place for something that wasn't part of
+// whatever arrangement was saved.
+export function useCardOrder(storageKey, cardIds) {
+  const [storedOrder, setStoredOrder] = usePersistedState(storageKey, cardIds)
+  const dragIdRef = useRef(null)
+  const [dragOverId, setDragOverId] = useState(null)
+
+  const order = useMemo(() => {
+    const known = new Set(cardIds)
+    const kept = storedOrder.filter((id) => known.has(id))
+    const missing = cardIds.filter((id) => !kept.includes(id))
+    return [...kept, ...missing]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storedOrder, cardIds.join(',')])
+
+  const dragHandleProps = (id) => ({
+    draggable: true,
+    onDragStart: (e) => { dragIdRef.current = id; e.dataTransfer.effectAllowed = 'move' },
+    onDragEnd: () => { dragIdRef.current = null; setDragOverId(null) },
+  })
+
+  // Placed on the whole CARD (not just its handle) - a drop can land anywhere over the card, not
+  // only precisely on the small handle, which is both more forgiving and how every real drag-reorder
+  // UI (a file manager, a kanban board) already behaves.
+  const dropTargetProps = (id) => ({
+    onDragOver: (e) => { if (dragIdRef.current && dragIdRef.current !== id) { e.preventDefault(); setDragOverId(id) } },
+    onDragLeave: () => setDragOverId((prev) => (prev === id ? null : prev)),
+    onDrop: (e) => {
+      e.preventDefault()
+      const sourceId = dragIdRef.current
+      setDragOverId(null)
+      if (!sourceId || sourceId === id) return
+      const next = order.filter((x) => x !== sourceId)
+      next.splice(next.indexOf(id), 0, sourceId)
+      setStoredOrder(next)
+    },
+    // A light highlight on whichever card is currently the drop target - the only visual feedback
+    // native HTML5 drag-and-drop doesn't already give you for free (the dragged element itself gets
+    // the browser's own default drag ghost/cursor).
+    style: dragOverId === id ? { outline: '2px dashed #4c9ffe', outlineOffset: 2, borderRadius: 8 } : undefined,
+  })
+
+  return { order, dragHandleProps, dropTargetProps }
+}
+
+// A small "⠿" grip, draggable to reorder its own card (see useCardOrder) - a dedicated handle
+// rather than making the whole card/title draggable, so it never fights a title's own clickable
+// controls (a Select, a Segmented toggle) for the same mousedown.
+export function CardDragHandle(props) {
+  return (
+    <span
+      {...props}
+      title="Drag to reorder"
+      style={{ cursor: 'grab', padding: '0 6px', color: '#9aa4b2', fontSize: 14, lineHeight: 1, userSelect: 'none' }}
+    >
+      ⠿
+    </span>
+  )
 }
 
 // Keeps a stored underlying only if the backend still offers it, otherwise falls back to the
@@ -269,6 +628,17 @@ export function fmtIstTime(isoOrDate) {
   return new Date(isoOrDate).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true })
 }
 
+// A plain calendar date (a backend DateOnly, e.g. "2026-09-29") as "29 Sep 2026" - null passes
+// through as null so a caller can fall back to its own placeholder rather than rendering "Invalid
+// Date". Used to show the REAL resolved expiry date next to an otherwise-ambiguous "Weekly"/
+// "Monthly" label (see OiReplayController.GetExpiries) - a date-only string has no time-of-day
+// component to shift, so formatting it in IST is safe (never crosses a calendar boundary the way an
+// actual UTC instant near midnight could).
+export function fmtDateOnly(isoDate) {
+  if (!isoDate) return null
+  return new Date(isoDate).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', year: 'numeric' })
+}
+
 // lightweight-charts styling/time-axis helpers, duplicated (not imported) from App.jsx's own
 // private copies rather than having App.jsx import them from here - App.jsx's charting code is
 // heavily tuned (cross-chart pan/zoom sync, EMA overlays, live-tick preservation of the visible
@@ -299,10 +669,19 @@ export function fromChartTime(chartTimeSeconds) {
 }
 
 const IST_TIME_FORMAT = new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'UTC' })
+const IST_TIME_WITH_SECONDS_FORMAT = new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true, timeZone: 'UTC' })
 const IST_TICK_DATE_FORMAT = new Intl.DateTimeFormat('en-IN', { day: 'numeric', month: 'short', timeZone: 'UTC' })
 
 export function istTimeFormatter(time) {
   return IST_TIME_FORMAT.format(new Date(time * 1000))
+}
+
+// Only ever needed where a bucket size finer than a minute is possible (the OI change heatmap's own
+// 30-second option) - istTimeFormatter alone would show the same hour:minute label for every such
+// bucket, which is exactly the "same time repeated across many columns" bug that option was added to
+// fix.
+export function istTimeWithSecondsFormatter(time) {
+  return IST_TIME_WITH_SECONDS_FORMAT.format(new Date(time * 1000))
 }
 
 export function istTickMarkFormatter(time, tickMarkType) {
@@ -520,7 +899,7 @@ export function CeVsPeChart({ ceSeries, peSeries, prevCeSeries = [], prevPeSerie
   useEffect(() => {
     if (!containerRef.current) return
 
-    const chart = createChart(containerRef.current, {
+    const chart = createZoomableChart(containerRef.current, {
       width: containerRef.current.clientWidth,
       height,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
@@ -559,7 +938,7 @@ export function CeVsPeChart({ ceSeries, peSeries, prevCeSeries = [], prevPeSerie
 
   useEffect(() => {
     if (!ceRef.current || !peRef.current || !prevCeRef.current || !prevPeRef.current) return
-    const preservedRange = hasFitRef.current ? chartRef.current?.timeScale().getVisibleRange() : null
+    const view = hasFitRef.current ? captureChartView(chartRef.current, ceRef.current) : null
     prevCeRef.current.setData(sanitizedPrevCe)
     prevPeRef.current.setData(sanitizedPrevPe)
     ceRef.current.setData(sanitizedCe)
@@ -570,8 +949,8 @@ export function CeVsPeChart({ ceSeries, peSeries, prevCeSeries = [], prevPeSerie
       hasFitRef.current = true
       const chartAtFit = chartRef.current
       registerChartForSyncAfterSettling(syncGroup, chartAtFit, () => chartRef.current !== chartAtFit, (cleanup) => { syncCleanupRef.current = cleanup })
-    } else if (preservedRange) {
-      try { chartRef.current?.timeScale().setVisibleRange(preservedRange) } catch { /* empty */ }
+    } else {
+      restoreChartView(chartRef.current, view)
     }
   }, [sanitizedCe, sanitizedPe, sanitizedPrevCe, sanitizedPrevPe])
 
@@ -623,7 +1002,7 @@ export function VolumeVwapChart({ volumeBars, vwapSeries, height = 180, focusTim
   useEffect(() => {
     if (!containerRef.current) return
 
-    const chart = createChart(containerRef.current, {
+    const chart = createZoomableChart(containerRef.current, {
       width: containerRef.current.clientWidth,
       height,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
@@ -657,7 +1036,7 @@ export function VolumeVwapChart({ volumeBars, vwapSeries, height = 180, focusTim
 
   useEffect(() => {
     if (!volumeRef.current || !vwapRef.current) return
-    const preservedRange = hasFitRef.current ? chartRef.current?.timeScale().getVisibleRange() : null
+    const view = hasFitRef.current ? captureChartView(chartRef.current, volumeRef.current) : null
     volumeRef.current.setData(sanitizedVolume)
     vwapRef.current.setData(sanitizedVwap)
     const hasAnyData = sanitizedVolume.length > 0 || sanitizedVwap.length > 0
@@ -666,8 +1045,8 @@ export function VolumeVwapChart({ volumeBars, vwapSeries, height = 180, focusTim
       hasFitRef.current = true
       const chartAtFit = chartRef.current
       registerChartForSyncAfterSettling(syncGroup, chartAtFit, () => chartRef.current !== chartAtFit, (cleanup) => { syncCleanupRef.current = cleanup })
-    } else if (preservedRange) {
-      try { chartRef.current?.timeScale().setVisibleRange(preservedRange) } catch { /* empty */ }
+    } else {
+      restoreChartView(chartRef.current, view)
     }
   }, [sanitizedVolume, sanitizedVwap])
 
@@ -699,42 +1078,131 @@ const NAV_ITEMS = [
   },
   { key: '/expired-backtest', label: 'Expired Backtest' },
   { key: '/oi-replay', label: 'OI Replay' },
-  { key: '/oi-live', label: 'Live OI' },
+  { key: '/order-flow', label: 'Order Flow' },
   { key: '/live-strike-data', label: 'Live Strike Data' },
   { key: '/triggers', label: 'Triggers' },
   { key: '/contracts', label: 'Contracts' },
+  { key: '/trade-settings', label: 'Trade settings' },
+  { key: '/strategies', label: 'Strategies' },
+  { key: '/strategy-lab', label: 'Strategy lab' },
+  { key: '/strategy-tuning', label: 'Strategy tuning' },
+  { key: '/trades', label: 'Trades' },
+  { key: '/data-files', label: 'Data files' },
 ]
 
-// Shared between DashboardPage/BacktestPage/TriggersPage/ContractsPage - a proper horizontal menu
-// (not just plain text links) so it reads as real site navigation, sitting inline in each page's
-// own header row with a transparent background so it blends into the page rather than looking
-// like a separate bar. Also carries the signed-in email and a log-out button - the one place
-// that's shown regardless of which page rendered this.
+// Shared between EVERY page (all nine currently render it) - a proper horizontal menu (not just
+// plain text links) so it reads as real site navigation, sitting inline in each page's own header
+// row with a transparent background so it blends into the page rather than looking like a separate
+// bar. Also carries the signed-in email and a log-out button - the one place that's shown
+// regardless of which page rendered this.
+//
+// Below NAV_COLLAPSE_BREAKPOINT, the horizontal Menu (9 top-level items, one with children - it has
+// no room to fit a phone-width screen at all, let alone stay legible) is replaced by a small "☰"
+// trigger opening the SAME items as a full-height Drawer with a vertical Menu instead - the same
+// "collapse to a drawer below a breakpoint" shape any responsive site nav uses. Both renderings
+// exist in the DOM at once and CSS (.navbar-desktop-menu/.navbar-mobile-trigger in index.css) picks
+// exactly one via the same breakpoint, rather than a JS resize listener - simpler, and immune to a
+// stale measurement on first paint before any resize event has fired.
 //
 // Triggers/Contracts are hidden here for a non-Admin account, but that is a convenience, not the
 // actual security boundary - App.jsx's own route guard covers someone typing the URL directly, and
 // the real enforcement is server-side (TriggersController/CdvController's [Authorize(Roles =
 // "Admin")]), since hiding a link never stops a direct API call.
+// When the running build was deployed, and whether logins survived the last restart - see
+// SystemController. Fetched once per page load and shared by every NavBar instance.
+// pollMs refreshes it (admins watch the live feed's health through it); otherwise it's fetched once.
+let systemInfoPromise = null
+const fetchSystemInfo = () => fetch('/api/system/info').then((r) => (r.ok ? r.json() : null)).catch(() => null)
+function useSystemInfo(pollMs = null) {
+  const [info, setInfo] = useState(null)
+  useEffect(() => {
+    let cancelled = false
+    systemInfoPromise ??= fetchSystemInfo()
+    systemInfoPromise.then((value) => { if (!cancelled) setInfo(value) })
+    const id = pollMs ? setInterval(() => {
+      systemInfoPromise = fetchSystemInfo()
+      systemInfoPromise.then((value) => { if (!cancelled && value) setInfo(value) })
+    }, pollMs) : null
+    return () => { cancelled = true; clearInterval(id) }
+  }, [pollMs])
+  return info
+}
+
+const FEED_HEALTH_POLL_MS = 15_000
+const FEED_BEHIND_MS = 2_000
+
+// The server's live-tick consumers (Spot, CDV, OI Replay - see TickConsumerQueue) as one tag: how far
+// behind live the slowest one has been over the last minute, and whether any had to drop ticks.
+function FeedHealthTag({ feed }) {
+  if (!Array.isArray(feed) || feed.length === 0) return null
+  const worst = feed.reduce((a, b) => (b.queueWaitMaxMs > a.queueWaitMaxMs ? b : a))
+  const dropping = feed.filter((c) => c.dropped > 0)
+  const behind = worst.queueWaitMaxMs >= FEED_BEHIND_MS
+  const color = dropping.length > 0 ? 'error' : behind ? 'warning' : 'success'
+  const label = dropping.length > 0 ? `Feed: ${dropping.map((c) => c.name).join(', ')} dropping ticks`
+    : behind ? `Feed: ${worst.name} ${(worst.queueWaitMaxMs / 1000).toFixed(1)}s behind` : 'Feed OK'
+  return (
+    <Tooltip title={(
+      <div>
+        <div>Server-side live tick processing, worst over the last minute:</div>
+        {feed.map((c) => (
+          <div key={c.name}>
+            {c.name}: up to {(c.queueWaitMaxMs / 1000).toFixed(1)}s behind, slowest tick {c.handlerMaxMs}ms, {c.queued} queued, {c.processed.toLocaleString('en-IN')} processed{c.dropped > 0 ? `, ${c.dropped.toLocaleString('en-IN')} dropped` : ''}
+          </div>
+        ))}
+      </div>
+    )}>
+      <Tag color={color}>{label}</Tag>
+    </Tooltip>
+  )
+}
+
 export function NavBar() {
   const location = useLocation()
   const navigate = useNavigate()
   const auth = useAuth()
+  const [drawerOpen, setDrawerOpen] = useState(false)
   const isAdmin = auth?.user?.role === 'Admin'
+  const systemInfo = useSystemInfo(isAdmin ? FEED_HEALTH_POLL_MS : null)
   const items = isAdmin ? NAV_ITEMS : NAV_ITEMS.filter((item) => !ADMIN_ONLY_PATHS.includes(item.key))
+
+  const go = (key) => { navigate(key); setDrawerOpen(false) }
 
   return (
     <Space align="center" size={16} wrap>
-      <Menu
-        mode="horizontal"
-        theme="dark"
-        selectedKeys={[location.pathname]}
-        items={items}
-        onClick={({ key }) => navigate(key)}
-        style={{ minWidth: 340, background: 'transparent', borderBottom: 'none', lineHeight: '32px' }}
-      />
+      <div className="navbar-desktop-menu">
+        <Menu
+          mode="horizontal"
+          theme="dark"
+          selectedKeys={[location.pathname]}
+          items={items}
+          onClick={({ key }) => go(key)}
+          style={{ minWidth: 340, background: 'transparent', borderBottom: 'none', lineHeight: '32px' }}
+        />
+      </div>
+      <Button
+        className="navbar-mobile-trigger" size="large" onClick={() => setDrawerOpen(true)}
+        aria-label="Open navigation menu" style={{ fontSize: 18, lineHeight: 1 }}
+      >
+        ☰
+      </Button>
+      <Drawer title="Menu" placement="left" onClose={() => setDrawerOpen(false)} open={drawerOpen} width={260}>
+        <Menu mode="inline" selectedKeys={[location.pathname]} items={items} onClick={({ key }) => go(key)} />
+      </Drawer>
       {auth?.user && (
         <Space size={8}>
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>{auth.user.email}</Typography.Text>
+          {systemInfo?.buildTimeUtc && (
+            <Tooltip title={`Server running since ${fmtIstDateTime(systemInfo.startedUtc)} IST`}>
+              <Typography.Text type="secondary" style={{ fontSize: 11 }}>Deployed {fmtIstDateTime(systemInfo.buildTimeUtc)}</Typography.Text>
+            </Tooltip>
+          )}
+          {isAdmin && <FeedHealthTag feed={systemInfo?.feed} />}
+          {isAdmin && systemInfo?.loginsSurviveRestart === false && (
+            <Tooltip title="The login key ring was regenerated when the server last started, so every earlier login stopped working. /app/data is not on a persistent volume - mount a named volume there (Dokploy: Advanced > Volumes) so logins survive deploys.">
+              <Tag color="warning">Logins reset at last deploy</Tag>
+            </Tooltip>
+          )}
+          <Typography.Text type="secondary" style={{ fontSize: 12 }} className="navbar-email">{auth.user.email}</Typography.Text>
           <Button size="small" onClick={auth.logout}>Log out</Button>
         </Space>
       )}

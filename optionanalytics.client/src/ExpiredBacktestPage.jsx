@@ -2,7 +2,9 @@ import { Component, useEffect, useMemo, useRef, useState } from 'react'
 import { Select, Space, Typography, Card, Button, Table, Tag, InputNumber, Statistic, Row, Col, DatePicker, TimePicker, Segmented, Alert, Empty, Tooltip, Checkbox } from 'antd'
 import dayjs from 'dayjs'
 import { PlayCircleOutlined, InfoCircleOutlined } from '@ant-design/icons'
-import { createChart, createSeriesMarkers, CandlestickSeries, LineSeries, CrosshairMode } from 'lightweight-charts'
+import { createSeriesMarkers, CandlestickSeries, LineSeries, CrosshairMode } from 'lightweight-charts'
+import { alignToBars } from './chartVwap.js'
+import { createZoomableChart } from './chartZoom.js'
 import {
   UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, EMA_COLOR, emaLine, srLevelLine, NavBar, DirectionTag, fmtIstDateTime, fmtIstTime, fmtPrice, istDateKey,
   TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState,
@@ -125,7 +127,7 @@ function ExpiredSpotChart({ bars, trades, indicatorLines, height = 420, focusTim
   useEffect(() => {
     if (!containerRef.current) return
 
-    const chart = createChart(containerRef.current, {
+    const chart = createZoomableChart(containerRef.current, {
       width: containerRef.current.clientWidth,
       height,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
@@ -549,12 +551,18 @@ export default function ExpiredBacktestPage() {
 
   // The actual plotted line data - only for whichever of the above are ticked on in
   // visibleIndicators, and only once there is something to plot them against.
+  // Every strategy's chart also offers the session VWAP (the spot's, off its real index volume),
+  // aligned to the candles - one point per candle, so it never adds time points to the axis.
+  const chartIndicatorDefs = useMemo(() => [
+    ...indicatorDefs,
+    { key: 'sessionVwap', label: 'VWAP', color: '#e072e8', compute: (bars) => alignToBars((result?.spotVwapSeries ?? []).map((p) => ({ time: toChartTime(p.time), value: p.obv })), bars) },
+  ], [indicatorDefs, result?.spotVwapSeries])
   const indicatorLines = useMemo(() => {
     if (chartBars.length === 0) return []
-    return indicatorDefs
+    return chartIndicatorDefs
       .filter((def) => visibleIndicators[def.key])
       .map((def) => ({ key: def.key, label: def.label, color: def.color, points: def.compute(chartBars) }))
-  }, [indicatorDefs, visibleIndicators, chartBars])
+  }, [chartIndicatorDefs, visibleIndicators, chartBars])
 
   const summary = useMemo(() => {
     // Computed off visibleTrades (the date-filtered set), not the raw run - narrowing the date
@@ -836,7 +844,7 @@ export default function ExpiredBacktestPage() {
               <Space direction="vertical" size={16} style={{ width: '100%' }}>
                 {chartBars.length > 0 ? (
                   <div>
-                    {indicatorDefs.map((def) => (
+                    {chartIndicatorDefs.map((def) => (
                       <Checkbox
                         key={def.key}
                         checked={!!visibleIndicators[def.key]}

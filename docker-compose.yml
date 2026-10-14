@@ -26,10 +26,30 @@ services:
       # Same idea for the rolling-option (CE/PE premium) prefetch's own per-expiry CSVs - see
       # ExpiredOptionDataPrefetchHostedService.
       Storage__ExpiredOptionDataPath: /app/data/expired-option-data
+      # Every past-day Dhan Data API response (spot / futures / option candles, the expired-option chain) - DhanDataCache.
+      # On the persistent volume, so a closed day is asked of Dhan once, not again after every redeploy.
+      Storage__DhanCachePath: /app/data/dhan-cache
+      # Held to 10 GB - one file per instrument and day; over it, the files read least recently go first.
+      Storage__DhanCacheMaxGb: 10
+      # The strategy scanner's record - signals.csv and trades.csv (ScannerLogStore).
+      Storage__ScannerLogPath: /app/data/scanner-log
+      # Live trades the server closes itself at the scanner's time stop / 15:10 (LiveTimeExitStore).
+      Storage__LiveTimeExitsPath: /app/data/live-time-exits.json
       # Keeps the login cookie's signing/encryption key ring on the same persistent volume, so
       # everyone stays logged in across a redeploy instead of the whole key ring (and every
       # outstanding session) resetting every time the container restarts.
       Storage__DataProtectionKeysPath: /app/data/dataprotection-keys
+      # The server-side strategy scanner's config (the page's synced settings) and each day's state.
+      Storage__ScannerRunnerPath: /app/data/scanner-runner
+      # Lots, SL / target / trail, slippage and server scanner on/off per index - the Trade settings page.
+      Storage__TradeSettingsPath: /app/data/trade-settings.csv
+      Storage__RiskSettingsPath: /app/data/risk-settings.csv
+      # Which index the server scanner trades LIVE today, its limits and its live trades.
+      Storage__ServerLivePath: /app/data/server-live.json
+      # Which strategies may trade live per index: the rules and the by-hand changes.
+      Storage__LiveListPath: /app/data/live-list.json
+      # SCANNER_RUNNER_ENABLED=false keeps it from starting (no server-side signals / paper trades).
+      ScannerRunner__Enabled: ${SCANNER_RUNNER_ENABLED:-true}
 
       # Dhan. Either supply a long-lived AccessToken, or leave it empty and set Pin + TotpSecret so
       # DhanTotpAutoRenewalHostedService logs in on its own and keeps the token fresh.
@@ -37,6 +57,11 @@ services:
       Dhan__AccessToken: ${DHAN_ACCESS_TOKEN:-}
       Dhan__Pin: ${DHAN_PIN:-}
       Dhan__TotpSecret: ${DHAN_TOTP_SECRET:-}
+
+      # CDV/OBV (the Dashboard's cumulative-delta/OBV cards). Set CDV_ENABLED=false to switch it off
+      # entirely - no strikes subscribed or processed for it - should it ever hold the live feed
+      # back. The header's admin-only "Feed" tag shows how each live consumer is keeping up.
+      Cdv__Enabled: ${CDV_ENABLED:-true}
 
       # Telegram alerting for armed strategy triggers - leave Enabled false to run without it.
       Telegram__Enabled: ${TELEGRAM_ENABLED:-false}

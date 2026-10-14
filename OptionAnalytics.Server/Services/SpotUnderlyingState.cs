@@ -1,5 +1,6 @@
 using OptionAnalytics.Server.Dhan;
 using OptionAnalytics.Server.Models;
+using OptionAnalytics.Server.Services.Backtesting;
 
 namespace OptionAnalytics.Server.Services;
 
@@ -31,8 +32,16 @@ public sealed class SpotUnderlyingState
     public string Underlying { get; }
     public int Step { get; }
     public DhanSpotInstrument? Instrument { get; set; }
-    public decimal LastPrice { get; private set; }
+    // Read from other consumers' threads (CDV reads spot on its own tick worker - see
+    // TickConsumerQueue), and a decimal is too wide to read atomically - so behind the lock.
+    private decimal _lastPrice;
+    public decimal LastPrice
+    {
+        get { lock (_lock) return _lastPrice; }
+        private set { lock (_lock) _lastPrice = value; }
+    }
     public DateTimeOffset LastUpdateUtc { get; private set; }
+    public DateTimeOffset? LastExchangeTimeUtc { get; private set; }
 
     /// <summary>Fired once a 1-minute bar finishes (the moment the NEXT bar starts, not on every
     /// tick) - EmaCrossoverAlertService is the consumer, computing EMA9/21 only against stable,
@@ -93,6 +102,7 @@ public sealed class SpotUnderlyingState
         {
             LastPrice = tick.LastPrice;
             LastUpdateUtc = DateTimeOffset.UtcNow;
+            LastExchangeTimeUtc = tick.ExchangeTimestamp;
 
             var minute = FloorToMinute(tick.ExchangeTimestamp);
 
@@ -221,7 +231,37 @@ public sealed class SpotUnderlyingState
 
     public decimal RoundedPrice => Step > 0 && LastPrice > 0 ? Math.Round(LastPrice / Step) * Step : LastPrice;
 
-    public SpotSnapshot ToSnapshot() => new(Underlying, Step, LastPrice, RoundedPrice, LastUpdateUtc, GetCurrentBar());
+    // Same "cheap, one pass over what GetVolumeBars already holds in memory, no Dhan call at all"
+    // cost SpotController's own GET .../vwap-series endpoint already accepts (see its doc comment) -
+    // at most a few hundred bars for a full trading day, trivial next to a live tick's own JSON
+    // serialize-and-broadcast. Riding the existing per-tick spotUpdate push with this is what lets
+    // the chart's VWAP line grow live instead of needing its own separate poll - see SpotSnapshot's
+    // own doc comment on Vwap.
+    // Runs on EVERY spot tick, on the Dhan receive thread every other live consumer shares - so only
+    // the current session's bars are fed to VwapCalculator (session VWAP resets each IST day, so the
+    // result is identical) instead of the full HistoryWindow (~45 days, ~17k bars) re-sorted per tick.
+    public SpotSnapshot ToSnapshot() => new(Underlying, Step, LastPrice, RoundedPrice, LastUpdateUtc, GetCurrentBar(),
+        VwapCalculator.ComputeSeries(GetCurrentSessionVolumeBars()) is { Count: > 0 } series ? series[^1].Obv : null,
+        LastExchangeTimeUtc);
+
+    /// <summary>The volume bars of the latest bar's own IST day only, oldest first - a backward scan
+    /// from the end, so the cost is one session's worth of bars regardless of how much history is held.</summary>
+    internal IReadOnlyList<CandleWithVolume> GetCurrentSessionVolumeBars()
+    {
+        lock (_lock)
+        {
+            var latest = _currentVolumeBar ?? (_closedVolumeBars.Count > 0 ? _closedVolumeBars[^1] : (CandleWithVolume?)null);
+            if (latest is not { } last) return Array.Empty<CandleWithVolume>();
+
+            var day = IstClock.IstDate(last.Time);
+            var start = _closedVolumeBars.Count;
+            while (start > 0 && IstClock.IstDate(_closedVolumeBars[start - 1].Time) == day) start--;
+
+            var list = _closedVolumeBars.GetRange(start, _closedVolumeBars.Count - start);
+            if (_currentVolumeBar is { } bar) list.Add(bar);
+            return list;
+        }
+    }
 
     // IST is UTC+5:30, a whole number of minutes offset from UTC, so flooring a UTC instant to the
     // minute lands on exactly the same boundary as flooring its IST wall-clock time would - no

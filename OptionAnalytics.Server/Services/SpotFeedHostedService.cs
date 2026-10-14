@@ -1,7 +1,5 @@
-using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Options;
 using OptionAnalytics.Server.Dhan;
-using OptionAnalytics.Server.Hubs;
 using OptionAnalytics.Server.Models;
 
 namespace OptionAnalytics.Server.Services;
@@ -36,7 +34,8 @@ public sealed class SpotFeedHostedService : BackgroundService
     private readonly DhanSpotInstrumentMaster _instrumentMaster;
     private readonly DhanHistoricalDataService _historicalData;
     private readonly DhanMarketFeedClient _feedClient;
-    private readonly IHubContext<SpotHub> _hub;
+    private IDisposable? _tickSubscription;
+    private readonly LiveBroadcastBatcher _batcher;
     private readonly ILogger<SpotFeedHostedService> _logger;
 
     private readonly Dictionary<uint, SpotUnderlyingState> _bySecurityId = new();
@@ -51,15 +50,15 @@ public sealed class SpotFeedHostedService : BackgroundService
         DhanSpotInstrumentMaster instrumentMaster,
         DhanHistoricalDataService historicalData,
         DhanMarketFeedClient feedClient,
-        IHubContext<SpotHub> hub,
+        LiveBroadcastBatcher batcher,
         ILogger<SpotFeedHostedService> logger)
     {
+        _batcher = batcher;
         _options = options.Value;
         _session = session;
         _instrumentMaster = instrumentMaster;
         _historicalData = historicalData;
         _feedClient = feedClient;
-        _hub = hub;
         _logger = logger;
 
         States = Underlyings.ToDictionary(u => u.Underlying, u => new SpotUnderlyingState(u.Underlying, u.Step));
@@ -121,7 +120,7 @@ public sealed class SpotFeedHostedService : BackgroundService
 
         await BackfillAsync(stoppingToken);
 
-        _feedClient.TickReceived += OnTick;
+        _tickSubscription ??= _feedClient.AddTickConsumer("Spot", OnTick);
 
         var tokenSegments = _bySecurityId.ToDictionary(kv => kv.Key, kv => kv.Value.Instrument!.DhanSegment);
         try
@@ -143,6 +142,104 @@ public sealed class SpotFeedHostedService : BackgroundService
         // backfill attempt (auth still not ready, a transient Dhan hiccup) still ends up with real
         // history instead of being stuck at zero for the rest of the run.
         _ = RetryBackfillIfNeededAsync(stoppingToken);
+
+        // See WatchForStaleTicksAsync's own doc comment for why this exists alongside
+        // DhanMarketFeedClient's own connection-wide stall watchdog, not instead of it.
+        _ = WatchForStaleTicksAsync(stoppingToken);
+    }
+
+    /// <summary>How long a spot instrument may go without a live tick, during market hours, before
+    /// this service suspects Dhan silently dropped just ITS OWN subscription. DhanMarketFeedClient's
+    /// shared FeedStallDetector judges the WHOLE connection - any message, from ANY instrument (an
+    /// option strike, a futures contract), counts as proof the feed is alive (see its own doc
+    /// comment: "liveness being tracked, not usefulness") - so as long as CdvHostedService/
+    /// OiReplayLiveFeedService keep seeing their own ticks, that watchdog never fires, even if
+    /// Dhan silently stopped sending just the spot/index token specifically. This is the narrower,
+    /// per-instrument check that catches exactly that case.
+    ///
+    /// 10 seconds, checked every 5: an index ticks about once a second through market hours (unlike a
+    /// deep OTM strike), so 10s of silence while the connection is clearly alive is already a real
+    /// signal - and a re-subscribe is cheap and harmless when it wasn't needed. This used to be 90s,
+    /// checked every 30s, which left the spot chart dead for up to two minutes while options kept
+    /// ticking (seen live: "NIFTY spot hasn't ticked for 123s").</summary>
+    private static readonly TimeSpan SpotStaleThreshold = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan StaleCheckInterval = TimeSpan.FromSeconds(5);
+
+    /// <summary>Still silent this long after re-subscribes began: unsubscribe and subscribe the index
+    /// afresh instead - a plain re-send can be ignored for a token Dhan already considers subscribed,
+    /// while a genuine unsubscribe/subscribe makes it start that instrument's stream over. At most once
+    /// per SpotHardResubscribeCooldown per index. Only the spot/index token is touched - nothing else in
+    /// this app subscribes to it (see DhanMarketFeedClient's shared, non-reference-counted registry).</summary>
+    private static readonly TimeSpan SpotHardResubscribeAfter = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan SpotHardResubscribeCooldown = TimeSpan.FromSeconds(60);
+
+    /// <summary>A warning per stale episode (and then at most once a minute), not one every 5s check.</summary>
+    private static readonly TimeSpan StaleWarningInterval = TimeSpan.FromSeconds(60);
+
+    // NSE/BSE's regular equity/derivatives session - re-subscribing outside these hours would just
+    // manufacture warnings every day for a feed that is silent for the entirely ordinary reason that
+    // the market itself is closed.
+    private static readonly TimeOnly MarketOpen = new(9, 15);
+    private static readonly TimeOnly MarketClose = new(15, 30);
+
+    private async Task WatchForStaleTicksAsync(CancellationToken stoppingToken)
+    {
+        var lastWarnedAt = new Dictionary<uint, DateTimeOffset>();
+        var lastHardResubscribeAt = new Dictionary<uint, DateTimeOffset>();
+
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            if (!await DelayAsync(StaleCheckInterval, stoppingToken)) return;
+
+            var now = DateTimeOffset.UtcNow;
+            var timeOfDayIst = TimeOnly.FromDateTime(now.ToOffset(IstClock.Offset).DateTime);
+            if (timeOfDayIst < MarketOpen || timeOfDayIst > MarketClose) continue;
+
+            var stale = _bySecurityId
+                .Where(kv => now - kv.Value.LastUpdateUtc > SpotStaleThreshold)
+                .ToArray();
+            if (stale.Length == 0) continue;
+
+            foreach (var (securityId, state) in stale)
+            {
+                var silentFor = now - state.LastUpdateUtc;
+                var hard = silentFor >= SpotHardResubscribeAfter
+                    && (!lastHardResubscribeAt.TryGetValue(securityId, out var lastHard) || now - lastHard >= SpotHardResubscribeCooldown);
+
+                if (!lastWarnedAt.TryGetValue(securityId, out var warned) || now - warned >= StaleWarningInterval || hard)
+                {
+                    lastWarnedAt[securityId] = now;
+                    _logger.LogWarning(
+                        "Spot feed: {Underlying} has had no live tick for {Seconds:F0}s during market hours while the shared feed connection is otherwise alive - {Action}.",
+                        state.Underlying, silentFor.TotalSeconds,
+                        hard ? "unsubscribing and subscribing it afresh" : "re-sending its subscription in case Dhan silently dropped it");
+                }
+
+                try
+                {
+                    if (hard && state.Instrument is { } instrument)
+                    {
+                        lastHardResubscribeAt[securityId] = now;
+                        await _feedClient.UnsubscribeAsync(new[] { securityId }, stoppingToken);
+                        await _feedClient.SubscribeAsync(new Dictionary<uint, string> { [securityId] = instrument.DhanSegment }, stoppingToken);
+                    }
+                    else
+                    {
+                        await _feedClient.ResendSubscriptionsForAsync(new[] { securityId }, stoppingToken);
+                    }
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogWarning(ex, "Spot feed: re-subscribing {Underlying} failed - the connection-wide watchdog will still catch a genuinely dead connection.", state.Underlying);
+                }
+            }
+        }
+    }
+
+    private static async Task<bool> DelayAsync(TimeSpan delay, CancellationToken cancellationToken)
+    {
+        try { await Task.Delay(delay, cancellationToken); return true; }
+        catch (OperationCanceledException) { return false; }
     }
 
     /// <summary>Keeps retrying BackfillAsync for as long as ANY underlying still has zero candles -
@@ -279,7 +376,7 @@ public sealed class SpotFeedHostedService : BackgroundService
             // wired up, it would take the entire spot feed - live ticks included - down with it.
             try
             {
-                var (candles, error) = await _historicalData.GetIntradayCandlesAsync(instrument.SecurityId, instrument.DhanSegment, fromDay, today, 1, cancellationToken);
+                var (candles, error) = await _historicalData.GetIntradayCandlesAsync(instrument.SecurityId, instrument.DhanSegment, fromDay, today, 1, cancellationToken, interactive: false);
 
                 var trimmed = TrimToRecentTradingDays(candles, HistoryTradingDays, c => c.Time);
                 state.SeedHistory(trimmed.Select(c => c.ToCandle()));
@@ -339,7 +436,9 @@ public sealed class SpotFeedHostedService : BackgroundService
 
         state.ApplyTick(tick);
         TrimHistoryOnceDaily();
-        _ = BroadcastAsync(state);
+        // Conflated like every other live push (see LiveBroadcastBatcher) - the snapshot is built at
+        // flush time, and a browser that can't keep up gets the newest one rather than a queue.
+        _batcher.SetLatest($"u:{state.Underlying}", "spotUpdate", state.Underlying, state.ToSnapshot);
     }
 
     /// <summary>SpotUnderlyingState.ApplyTick only ever APPENDS a closed candle - BackfillAsync's
@@ -365,18 +464,6 @@ public sealed class SpotFeedHostedService : BackgroundService
         }
     }
 
-    private async Task BroadcastAsync(SpotUnderlyingState state)
-    {
-        try
-        {
-            await _hub.Clients.All.SendAsync("spotUpdate", state.ToSnapshot());
-        }
-        catch (Exception ex)
-        {
-            _logger.LogDebug(ex, "Failed to broadcast a spot update for {Underlying}.", state.Underlying);
-        }
-    }
-
     /// <summary>Today's date in IST (UTC+5:30, a fixed offset - no DST, no tzdata lookup needed).</summary>
     private static DateOnly IstToday() => IstClock.Today();
 
@@ -384,7 +471,8 @@ public sealed class SpotFeedHostedService : BackgroundService
     {
         // DhanMarketFeedClient's connection lifecycle (including disposal) is owned by
         // DhanMarketFeedHostedService, which this service shares the client singleton with.
-        _feedClient.TickReceived -= OnTick;
+        _tickSubscription?.Dispose();
+        _tickSubscription = null;
         return base.StopAsync(cancellationToken);
     }
 }

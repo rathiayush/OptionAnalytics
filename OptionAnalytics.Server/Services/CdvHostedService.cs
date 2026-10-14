@@ -103,9 +103,11 @@ public sealed class CdvHostedService : BackgroundService
     private readonly DhanOptionChainMaster _optionChainMaster;
     private readonly DhanOptionChainQuotes _chainQuotes;
     private readonly DhanMarketFeedClient _feedClient;
+    private IDisposable? _tickSubscription;
     private readonly SpotFeedHostedService _spotFeed;
     private readonly DhanHistoricalDataService _historicalData;
     private readonly IHubContext<SpotHub> _hub;
+    private readonly LiveBroadcastBatcher _batcher;
     private readonly ILogger<CdvHostedService> _logger;
 
     /// <summary>Which state a live tick belongs to. Already state-valued rather than
@@ -185,8 +187,12 @@ public sealed class CdvHostedService : BackgroundService
         SpotFeedHostedService spotFeed,
         DhanHistoricalDataService historicalData,
         IHubContext<SpotHub> hub,
-        ILogger<CdvHostedService> logger)
+        LiveBroadcastBatcher batcher,
+        ILogger<CdvHostedService> logger,
+        IConfiguration? configuration = null)
     {
+        _enabled = configuration?.GetValue("Cdv:Enabled", true) ?? true;
+        _batcher = batcher;
         _optionChainMaster = optionChainMaster;
         _chainQuotes = chainQuotes;
         _feedClient = feedClient;
@@ -650,8 +656,19 @@ public sealed class CdvHostedService : BackgroundService
         return candles;
     }
 
+    /// <summary>Cdv:Enabled (env Cdv__Enabled) - false turns CDV/OBV off entirely: no option strikes
+    /// subscribed for it, no tick processing, no pushes. An emergency switch, should it ever be the
+    /// thing holding the live feed back; the Dashboard's CDV/OBV cards then simply stay empty.</summary>
+    private readonly bool _enabled;
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        if (!_enabled)
+        {
+            _logger.LogWarning("CDV/OBV is turned off (Cdv:Enabled = false) - not tracking or processing any CDV strikes.");
+            return;
+        }
+
         try
         {
             await _optionChainMaster.EnsureLoadedAsync(stoppingToken);
@@ -661,7 +678,7 @@ public sealed class CdvHostedService : BackgroundService
             _logger.LogError(ex, "Could not load the Dhan option chain - CDV cannot resolve strikes yet. Will retry on the next re-center.");
         }
 
-        _feedClient.TickReceived += OnTick;
+        _tickSubscription ??= _feedClient.AddTickConsumer("CDV", OnTick);
 
         // One loop rather than a startup phase and then a steady phase, because they want the same
         // thing: recenter, and come back SOON if anything is still missing.
@@ -940,6 +957,29 @@ public sealed class CdvHostedService : BackgroundService
 
         _subscribedTokens[key] = desiredTokens;
 
+        // Unconditionally re-affirm EVERY currently-desired token's subscription, not just the ones
+        // newly added above (toSubscribe) - SubscribeAsync is a deliberate no-op for a token already
+        // in DhanMarketFeedClient's own tracked set (see its own doc comment), so a strike Dhan
+        // silently stopped ticking - its subscription quietly dropped server-side, while every other
+        // strike (and spot, options elsewhere) keeps ticking completely normally - would otherwise
+        // never be repaired: the shared connection-wide stall watchdog only notices when NOTHING at
+        // all has arrived recently (see SpotFeedHostedService's own identical fix and
+        // FeedStallDetector's doc comment). A per-strike staleness threshold isn't safe here the way
+        // it is for spot - a deep OTM strike can legitimately go many minutes between real trades, so
+        // "no tick recently" proves nothing on its own for an option. Re-sending the whole desired
+        // set every recenter instead sidesteps that entirely: cheap and harmless for a token Dhan
+        // already has right (StrategyTriggerHostedService's own live trading depends on this exact
+        // set staying genuinely live), silently repairs one it doesn't - no threshold to get wrong
+        // either way.
+        try
+        {
+            await _feedClient.ResendSubscriptionsForAsync(desiredTokens, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "CDV: {Underlying} {Expiry} periodic re-subscribe of tracked strikes failed.", underlying, expiry);
+        }
+
         _logger.LogInformation(
             "CDV: {Underlying} {Expiry} spot={Spot} -> ATM={Atm}. Tracking CE strikes [{Ce}] and PE strikes [{Pe}].",
             underlying, expiry, spot, atm, string.Join(", ", ceList.OrderBy(v => v)), string.Join(", ", peList.OrderBy(v => v)));
@@ -1055,7 +1095,7 @@ public sealed class CdvHostedService : BackgroundService
             IReadOnlyList<CandleWithVolume> bars;
             try
             {
-                var (fetched, error) = await _historicalData.GetIntradayOptionCandlesAsync(securityId, dhanSegment, fromDay, today, 1, cancellationToken);
+                var (fetched, error) = await _historicalData.GetIntradayOptionCandlesAsync(securityId, dhanSegment, fromDay, today, 1, cancellationToken, interactive: false);
                 bars = fetched;
                 if (error is not null)
                 {
@@ -1168,23 +1208,21 @@ public sealed class CdvHostedService : BackgroundService
         var spot = _spotFeed.States.TryGetValue(state.Underlying, out var spotState) ? spotState.LastPrice : 0;
         state.ApplyTick(tick, spot);
 
-        // Every tracked expiry updates its own state, but only the SELECTED one is broadcast: the
-        // snapshot names its underlying and not its expiry, so pushing all of them would interleave
-        // three different chains into one chart. The others are read on demand instead, by a caller
-        // that names the expiry it wants.
+        // Coalesced to one push per LiveBroadcastBatcher flush (the snapshot is cumulative state, so
+        // the newest one loses nothing) and built at flush time rather than per tick. The SELECTED
+        // expiry keeps its "cdvUpdate" event exactly as before; every other tracked expiry goes out
+        // as "cdvExpiryUpdate" instead, which names its Expiry - so a page pinned to a non-default
+        // expiry stays live too, and nothing listening to cdvUpdate can mix two chains together.
+        //
+        // Own "cdv:" groups rather than "u:" - only the Dashboard wants CDV, so OI Replay (which joins
+        // u: for spot/futures) never receives it, and a non-default expiry's snapshot only reaches a
+        // Dashboard actually pinned to that expiry.
         if (_selected.TryGetValue(state.Underlying, out var selected) && ReferenceEquals(selected, state))
-            _ = BroadcastAsync(state);
-    }
-
-    private async Task BroadcastAsync(CdvUnderlyingState state)
-    {
-        try
+            _batcher.SetLatest($"cdv:{state.Underlying}", "cdvUpdate", "selected", state.ToSnapshot);
+        else if (state.Expiry is { } expiry)
         {
-            await _hub.Clients.All.SendAsync("cdvUpdate", state.ToSnapshot());
-        }
-        catch (Exception ex)
-        {
-            _logger.LogDebug(ex, "Failed to broadcast a CDV update for {Underlying}.", state.Underlying);
+            var expiryKey = expiry.ToString("yyyy-MM-dd");
+            _batcher.SetLatest($"cdv:{state.Underlying}:{expiryKey}", "cdvExpiryUpdate", expiryKey, state.ToSnapshot);
         }
     }
 
@@ -1199,6 +1237,22 @@ public sealed class CdvHostedService : BackgroundService
     {
         if (!_selected.TryGetValue(underlying, out var selected) || !ReferenceEquals(selected, state)) return;
 
+        // This fires from inside a tick, on the Dhan receive thread every live consumer shares, and
+        // the OBV series is recomputed from the full multi-day history - off-thread, so it can never
+        // hold up the next tick. At most one recompute per underlying at a time: it reads the state
+        // under the lock every tick needs, so a burst of closes must not queue up a pile of them.
+        if (!_barClosedPushInFlight.TryAdd(underlying, 0)) return;
+        _ = Task.Run(() =>
+        {
+            try { PushAggregateBarClosed(underlying, state); }
+            finally { _barClosedPushInFlight.TryRemove(underlying, out _); }
+        });
+    }
+
+    private readonly ConcurrentDictionary<string, byte> _barClosedPushInFlight = new(StringComparer.OrdinalIgnoreCase);
+
+    private void PushAggregateBarClosed(string underlying, CdvUnderlyingState state)
+    {
         var ce = state.GetSmoothedCdvSeries(true);
         var pe = state.GetSmoothedCdvSeries(false);
         if (ce.Count == 0 || pe.Count == 0) return;
@@ -1216,7 +1270,7 @@ public sealed class CdvHostedService : BackgroundService
     {
         try
         {
-            await _hub.Clients.All.SendAsync("cdvBarClosed", push);
+            await _hub.Clients.Group($"u:{push.Underlying}").SendAsync("cdvBarClosed", push);
         }
         catch (Exception ex)
         {
@@ -1226,7 +1280,8 @@ public sealed class CdvHostedService : BackgroundService
 
     public override Task StopAsync(CancellationToken cancellationToken)
     {
-        _feedClient.TickReceived -= OnTick;
+        _tickSubscription?.Dispose();
+        _tickSubscription = null;
         return base.StopAsync(cancellationToken);
     }
 }

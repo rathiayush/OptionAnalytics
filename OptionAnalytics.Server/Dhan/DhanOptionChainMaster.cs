@@ -32,6 +32,9 @@ public sealed class DhanOptionChainMaster
     private readonly SemaphoreSlim _loadLock = new(1, 1);
 
     private Dictionary<string, DhanOptionInstrument> _byKey = new(StringComparer.OrdinalIgnoreCase);
+    // The same contracts by security id - FindBySecurityId runs on every live P&L push, so it must not
+    // scan the whole chain each time.
+    private Dictionary<uint, DhanOptionInstrument> _bySecurityId = new();
     private Dictionary<string, List<DateOnly>> _expiriesByUnderlying = new(StringComparer.OrdinalIgnoreCase);
     private DateTimeOffset _loadedAt = DateTimeOffset.MinValue;
     private DateTimeOffset _lastAttemptAt = DateTimeOffset.MinValue;
@@ -181,6 +184,9 @@ public sealed class DhanOptionChainMaster
         }
 
         // Swapped in only once both are fully built, so a reader never sees a half-filled master.
+        var bySecurityId = new Dictionary<uint, DhanOptionInstrument>(byKey.Count);
+        foreach (var instrument in byKey.Values) bySecurityId.TryAdd(instrument.SecurityId, instrument);
+        _bySecurityId = bySecurityId;
         _byKey = byKey;
         _expiriesByUnderlying = expiries.ToDictionary(kv => kv.Key, kv => kv.Value.ToList(), StringComparer.OrdinalIgnoreCase);
         _loadedAt = DateTimeOffset.UtcNow;
@@ -223,7 +229,7 @@ public sealed class DhanOptionChainMaster
     /// id the earlier order was placed against. A linear scan over ~68 contracts, not a hot path -
     /// nothing here runs more than once a minute.</summary>
     public DhanOptionInstrument? FindBySecurityId(uint securityId) =>
-        _byKey.Values.FirstOrDefault(o => o.SecurityId == securityId);
+        _bySecurityId.TryGetValue(securityId, out var instrument) ? instrument : null;
 
     /// <summary>What IS listed near a strike that Find could not resolve, as one log-ready line.
     /// A "not listed" answer is otherwise unfalsifiable from the outside: it cannot distinguish a
@@ -408,7 +414,11 @@ public sealed class DhanOptionChainMaster
             // Dhan then rejects it outright for not being a multiple of the contract's real tick size,
             // with nothing in this app's own logs to say why. Drop the row instead of building an
             // order plan around a tick size that was never real.
-            var tickSize = ParseDecimal(Get(fields, tickSizeIndex));
+            // Dhan's scrip master gives the tick in PAISE (5.0000 = Rs 0.05 for an index option,
+            // 10.0000 = Rs 0.10 for NIFTY futures, 10.0000 for RELIANCE whose tick is Rs 0.10) -
+            // used as rupees it rounded every order price to a multiple of Rs 5 and snapped futures
+            // prices to Rs 10. See TickSizeFromScripMaster.
+            var tickSize = DhanSymbology.TickSizeFromScripMaster(ParseDecimal(Get(fields, tickSizeIndex)));
             if (tickSize <= 0)
             {
                 stats.DroppedTickSize++;

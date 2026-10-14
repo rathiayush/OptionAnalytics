@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Net;
 using System.Text.Json;
 using OptionAnalytics.Server.Models;
 
@@ -35,14 +36,83 @@ public sealed class DhanHistoricalDataService
     private const string OptionInstrument = "OPTIDX";
     private const string FuturesInstrument = "FUTIDX";
 
-    private readonly DhanApiClient _api;
-    private readonly ILogger<DhanHistoricalDataService> _logger;
+    /// <summary>Bounds how long ANY single call to this endpoint may hang waiting for Dhan before
+    /// giving up - deliberately much shorter than HttpClient's own default ~100s request timeout,
+    /// which DhanApiClient's shared HttpClient does NOT override (that HttpClient is also used by
+    /// live order placement - DhanOrderClient/DhanSuperOrderClient/DhanPositionsClient - so this
+    /// stays scoped to a per-call CancellationTokenSource here instead of touching that shared
+    /// Timeout, which would affect those too).
+    ///
+    /// Added after a real deployment showed a page that "never loads": a genuinely slow/unresponsive
+    /// Dhan connection (network issue, or Dhan itself briefly unresponsive) let a single call hang
+    /// the full ~100s default before failing - and OiReplayService's own bounded concurrency (10 in
+    /// flight at once, across up to 44 calls for one day) meant a run of bad luck could stretch a
+    /// single page load past EIGHT MINUTES before ever producing an error. A much shorter, explicit
+    /// timeout per call turns that into "fails within about a minute with a clear message" instead.</summary>
+    private static readonly TimeSpan CallTimeout = TimeSpan.FromSeconds(20);
 
-    public DhanHistoricalDataService(DhanApiClient api, ILogger<DhanHistoricalDataService> logger)
+    private readonly DhanApiClient _api;
+    private readonly DhanDataApiRateLimiter _rateLimiter;
+    private readonly ILogger<DhanHistoricalDataService> _logger;
+    private readonly DhanDataCache? _cache;
+
+    /// <summary><paramref name="cache"/>: a past window's response is kept on disk and answered from there next time
+    /// (DhanDataCache) - null = every call goes to Dhan.</summary>
+    public DhanHistoricalDataService(DhanApiClient api, DhanDataApiRateLimiter rateLimiter, ILogger<DhanHistoricalDataService> logger, DhanDataCache? cache = null)
     {
         _api = api;
+        _rateLimiter = rateLimiter;
         _logger = logger;
+        _cache = cache;
     }
+
+    private const string IntradayPath = "/charts/intraday";
+
+    /// <summary>A cached response read back as Dhan's own (the parsing below cannot tell them apart).</summary>
+    private static DhanApiResponse FromCache(JsonDocument doc) => new(true, HttpStatusCode.OK, doc, null);
+
+    /// <summary>Waits for a rate-limit permit, then sends the call under its own CallTimeout -
+    /// returning a (null Response, timeout Error) pair rather than letting the timeout escape as an
+    /// exception. This matters: DhanApiClient.SendOnceAsync's own catch clause deliberately excludes
+    /// OperationCanceledException (so a CALLER's real cancellation propagates rather than being
+    /// swallowed as a graceful "failed" result) - but HttpClient's OWN internal timeout ALSO throws
+    /// a TaskCanceledException (a kind of OperationCanceledException), which is indistinguishable at
+    /// that layer from a genuine cancellation. Left uncaught, that used to propagate all the way up
+    /// through OiReplayService's Task.WhenAll and out of the ASP.NET Core action with no exception
+    /// handler configured to catch it - exactly the silent, no-error hang this class exists to
+    /// prevent now. Checking cancellationToken.IsCancellationRequested (the CALLER's own token, not
+    /// the linked one this method creates) is what tells a genuine cancellation apart from this
+    /// method's own timeout firing.</summary>
+    private async Task<(DhanApiResponse? Response, string? Error)> SendDataApiCallAsync(
+        string path, object payload, string context, bool interactive, CancellationToken cancellationToken)
+    {
+        // Dhan's rate limit (429 / DH-904) is waited out and tried again (2 s, 4 s, 8 s) - one busy moment used to fail
+        // the whole call (a past day's spot / futures, so the day). Anything else returns at once.
+        for (var attempt = 0; ; attempt++)
+        {
+            await _rateLimiter.WaitForPermitAsync(interactive, cancellationToken, "intraday");
+
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeoutCts.CancelAfter(CallTimeout);
+            DhanApiResponse response;
+            try
+            {
+                response = await _api.SendAsync(HttpMethod.Post, path, payload, context, timeoutCts.Token);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                _logger.LogWarning("Dhan call timed out after {Seconds}s with no response ({Context}).", CallTimeout.TotalSeconds, context);
+                return (null, $"Dhan did not respond within {CallTimeout.TotalSeconds:0}s - it may be slow or unreachable right now.");
+            }
+            if (response.Success || attempt >= DhanDataApiRateLimiter.RateLimitRetries || !DhanDataApiRateLimiter.IsRateLimited((int)response.StatusCode, response.ErrorMessage))
+                return (response, null);
+            var delay = DhanDataApiRateLimiter.RateLimitBackoff(attempt);
+            _logger.LogInformation("Rate-limited on {Context} (attempt {Attempt}/{Max}) - waiting {Delay} before retrying.", context, attempt + 1, DhanDataApiRateLimiter.RateLimitRetries, delay);
+            response.Dispose();
+            await Task.Delay(delay, cancellationToken);
+        }
+    }
+
 
     /// <summary>Every candle Dhan has for [fromDay, toDay] inclusive (both IST calendar dates) -
     /// spans weekends/holidays fine, since Dhan simply has no data for those and they contribute
@@ -57,34 +127,27 @@ public sealed class DhanHistoricalDataService
     /// still get that via CandleWithVolume.ToCandle(); one computing VWAP (VwapCalculator) needs the
     /// Volume this shape carries.</summary>
     public async Task<(IReadOnlyList<CandleWithVolume> Candles, string? Error)> GetIntradayCandlesAsync(
-        uint securityId, string dhanSegment, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken)
+        uint securityId, string dhanSegment, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken, bool interactive = true)
     {
-        if (!_api.HasSession)
+        var id = securityId.ToString(CultureInfo.InvariantCulture);
+        var interval = intervalMinutes.ToString(CultureInfo.InvariantCulture);
+        // The request without its dates names the series on disk (one file per day); the payload is Dhan's request (and
+        // the key of an older whole-window file).
+        var key = new { securityId = id, exchangeSegment = dhanSegment, instrument = Instrument, interval };
+        object PayloadFor(DateOnly from, DateOnly to) => new
         {
-            _logger.LogWarning("Cannot fetch intraday candles for {Segment}:{Id} - Dhan is not authenticated (check Dhan:ClientId/Dhan:AccessToken).", dhanSegment, securityId);
-            return (Array.Empty<CandleWithVolume>(), "Dhan is not authenticated");
-        }
-
-        var payload = new
-        {
-            securityId = securityId.ToString(CultureInfo.InvariantCulture),
+            securityId = id,
             exchangeSegment = dhanSegment,
             instrument = Instrument,
-            interval = intervalMinutes.ToString(CultureInfo.InvariantCulture),
-            fromDate = $"{fromDay:yyyy-MM-dd} 09:15:00",
-            toDate = $"{toDay:yyyy-MM-dd} 15:30:00",
+            interval,
+            fromDate = $"{from:yyyy-MM-dd} 09:15:00",
+            toDate = $"{to:yyyy-MM-dd} 15:30:00",
         };
 
-        using var response = await _api.SendAsync(HttpMethod.Post, "/charts/intraday", payload,
-            $"intraday candles ({dhanSegment}:{securityId}, {fromDay:yyyy-MM-dd}..{toDay:yyyy-MM-dd})", cancellationToken);
-
-        if (!response.Success)
-        {
-            _logger.LogWarning("Intraday candle request failed for {Segment}:{Id} ({From}..{To}) - {Error}", dhanSegment, securityId, fromDay, toDay, response.ErrorMessage);
-            return (Array.Empty<CandleWithVolume>(), string.IsNullOrWhiteSpace(response.ErrorMessage) ? $"HTTP {(int)response.StatusCode}" : response.ErrorMessage);
-        }
-
-        return (ParseCandlesWithVolume(response.Root), null);
+        var (parts, error) = await IntradayPartsAsync(key, PayloadFor, fromDay, toDay, intervalMinutes, $"intraday candles ({dhanSegment}:{securityId})", LogLevel.Warning, interactive, cancellationToken);
+        var candles = new List<CandleWithVolume>();
+        foreach (var part in parts) using (part) candles.AddRange(ParseCandlesWithVolume(part.Root));
+        return (candles.OrderBy(c => c.Time).ToList(), error);
     }
 
     /// <summary>Same range-call shape as GetIntradayCandlesAsync, but for an option contract
@@ -96,8 +159,8 @@ public sealed class DhanHistoricalDataService
     /// strikes simply didn't trade", with no way to tell which without turning on Debug logging in
     /// production. The caller aggregates these into one line per backfill batch.</summary>
     public Task<(IReadOnlyList<CandleWithVolume> Candles, string? Error)> GetIntradayOptionCandlesAsync(
-        uint securityId, string dhanSegment, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken) =>
-        GetIntradayDerivativeCandlesAsync(securityId, dhanSegment, OptionInstrument, fromDay, toDay, intervalMinutes, cancellationToken);
+        uint securityId, string dhanSegment, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken, bool interactive = true) =>
+        GetIntradayDerivativeCandlesAsync(securityId, dhanSegment, OptionInstrument, fromDay, toDay, intervalMinutes, cancellationToken, interactive);
 
     /// <summary>OHLC + volume + (best-effort) open interest for one futures contract - the OI
     /// Replay page's own "show me the futures too" chart. UNLIKE GetIntradayOptionCandlesAsync,
@@ -110,36 +173,34 @@ public sealed class DhanHistoricalDataService
     /// missing for these particular bars" - the first is a page-level "OI not available" message,
     /// the second is normal, unremarkable missing data.</summary>
     public async Task<(IReadOnlyList<(CandleWithVolume Bar, long? OpenInterest)> Bars, bool OiFieldPresent, string? Error)> GetIntradayFuturesCandlesAsync(
-        uint securityId, string dhanSegment, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken)
+        uint securityId, string dhanSegment, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken, bool interactive = true)
     {
-        if (!_api.HasSession)
+        var id = securityId.ToString(CultureInfo.InvariantCulture);
+        var interval = intervalMinutes.ToString(CultureInfo.InvariantCulture);
+        var key = new { securityId = id, exchangeSegment = dhanSegment, instrument = FuturesInstrument, interval, oi = true };
+        object PayloadFor(DateOnly from, DateOnly to) => new
         {
-            _logger.LogWarning("Cannot fetch intraday futures candles for {Segment}:{Id} - Dhan is not authenticated.", dhanSegment, securityId);
-            return (Array.Empty<(CandleWithVolume, long?)>(), false, "Dhan is not authenticated");
-        }
-
-        var payload = new
-        {
-            securityId = securityId.ToString(CultureInfo.InvariantCulture),
+            securityId = id,
             exchangeSegment = dhanSegment,
             instrument = FuturesInstrument,
-            interval = intervalMinutes.ToString(CultureInfo.InvariantCulture),
-            fromDate = $"{fromDay:yyyy-MM-dd} 09:15:00",
-            toDate = $"{toDay:yyyy-MM-dd} 15:30:00",
+            interval,
+            fromDate = $"{from:yyyy-MM-dd} 09:15:00",
+            toDate = $"{to:yyyy-MM-dd} 15:30:00",
             oi = true,
         };
 
-        using var response = await _api.SendAsync(HttpMethod.Post, "/charts/intraday", payload,
-            $"futures intraday candles ({dhanSegment}:{securityId}, {fromDay:yyyy-MM-dd}..{toDay:yyyy-MM-dd})", cancellationToken);
-
-        if (!response.Success)
+        var (parts, error) = await IntradayPartsAsync(key, PayloadFor, fromDay, toDay, intervalMinutes, $"futures intraday candles ({dhanSegment}:{securityId})", LogLevel.Warning, interactive, cancellationToken);
+        var bars = new List<(CandleWithVolume Bar, long? OpenInterest)>();
+        var oiFieldPresent = false;
+        foreach (var part in parts)
         {
-            _logger.LogWarning("Futures intraday candle request failed for {Segment}:{Id} ({From}..{To}) - {Error}", dhanSegment, securityId, fromDay, toDay, response.ErrorMessage);
-            return (Array.Empty<(CandleWithVolume, long?)>(), false, string.IsNullOrWhiteSpace(response.ErrorMessage) ? $"HTTP {(int)response.StatusCode}" : response.ErrorMessage);
+            using (part)
+            {
+                oiFieldPresent |= part.Root.TryGetProperty("open_interest", out _);
+                bars.AddRange(ParseCandlesWithOpenInterest(part.Root));
+            }
         }
-
-        var oiFieldPresent = response.Root.TryGetProperty("open_interest", out _);
-        return (ParseCandlesWithOpenInterest(response.Root), oiFieldPresent, null);
+        return (bars.OrderBy(b => b.Bar.Time).ToList(), oiFieldPresent, error);
     }
 
     private List<(CandleWithVolume Bar, long? OpenInterest)> ParseCandlesWithOpenInterest(JsonElement root)
@@ -188,37 +249,73 @@ public sealed class DhanHistoricalDataService
     }
 
     private async Task<(IReadOnlyList<CandleWithVolume> Candles, string? Error)> GetIntradayDerivativeCandlesAsync(
-        uint securityId, string dhanSegment, string instrumentType, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken)
+        uint securityId, string dhanSegment, string instrumentType, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken, bool interactive)
     {
-        if (!_api.HasSession)
+        var id = securityId.ToString(CultureInfo.InvariantCulture);
+        var interval = intervalMinutes.ToString(CultureInfo.InvariantCulture);
+        var key = new { securityId = id, exchangeSegment = dhanSegment, instrument = instrumentType, interval };
+        object PayloadFor(DateOnly from, DateOnly to) => new
         {
-            _logger.LogWarning("Cannot fetch intraday {Instrument} candles for {Segment}:{Id} - Dhan is not authenticated.", instrumentType, dhanSegment, securityId);
-            return (Array.Empty<CandleWithVolume>(), "Dhan is not authenticated");
-        }
-
-        var payload = new
-        {
-            securityId = securityId.ToString(CultureInfo.InvariantCulture),
+            securityId = id,
             exchangeSegment = dhanSegment,
             instrument = instrumentType,
-            interval = intervalMinutes.ToString(CultureInfo.InvariantCulture),
-            fromDate = $"{fromDay:yyyy-MM-dd} 09:15:00",
-            toDate = $"{toDay:yyyy-MM-dd} 15:30:00",
+            interval,
+            fromDate = $"{from:yyyy-MM-dd} 09:15:00",
+            toDate = $"{to:yyyy-MM-dd} 15:30:00",
         };
 
-        using var response = await _api.SendAsync(HttpMethod.Post, "/charts/intraday", payload,
-            $"{instrumentType} intraday candles ({dhanSegment}:{securityId}, {fromDay:yyyy-MM-dd}..{toDay:yyyy-MM-dd})", cancellationToken);
+        // A failure at Debug, not Warning - routine for a strike that simply didn't trade/exist for part of the lookback
+        // window (added to the chain partway through, or never traded some days), which CdvHostedService.RecenterAsync
+        // would otherwise log once per strike as noise.
+        var (parts, error) = await IntradayPartsAsync(key, PayloadFor, fromDay, toDay, intervalMinutes, $"{instrumentType} intraday candles ({dhanSegment}:{securityId})", LogLevel.Debug, interactive, cancellationToken);
+        var candles = new List<CandleWithVolume>();
+        foreach (var part in parts) using (part) candles.AddRange(ParseCandlesWithVolume(part.Root));
+        return (candles.OrderBy(c => c.Time).ToList(), error);
+    }
 
-        if (!response.Success)
+    /// <summary>The answer as it is - /charts/intraday's arrays are its root.</summary>
+    private static Action<Utf8JsonWriter> AsIs(Action<Utf8JsonWriter> day) => day;
+
+    /// <summary>Dhan's candles for [fromDay, toDay] as parts of its answer: each closed day kept on disk read from there
+    /// (one file per day - DhanDayWindow), the rest asked of Dhan in ONE call and each final day of it kept - so a window
+    /// running into today (a chart backfill) still keeps its past days and any other window holding one of them reads it
+    /// from disk. A day not kept yet is read from an older whole-window file of this very request where there is one (and
+    /// kept). On a failed call: the
+    /// days read from disk and Dhan's reason (the caller disposes the parts).</summary>
+    private async Task<(List<DhanApiResponse> Parts, string? Error)> IntradayPartsAsync(
+        object key, Func<DateOnly, DateOnly, object> payloadFor, DateOnly fromDay, DateOnly toDay, int intervalMinutes, string what,
+        LogLevel failureLevel, bool interactive, CancellationToken cancellationToken)
+    {
+        var (parts, ask) = DhanDayWindow.Plan(_cache, IntradayPath, key, fromDay, toDay);
+        if (ask is not { } span) return (parts, null);
+
+        // A day not kept yet may be in an older whole-window file of this very request: read, and its days kept.
+        var whole = _cache?.TryGet(IntradayPath, payloadFor(fromDay, toDay), toDay);
+        if (whole is not null)
         {
-            // Debug, not Warning - routine for a strike that simply didn't trade/exist for part of
-            // the lookback window (added to the chain partway through, or never traded some days),
-            // which CdvHostedService.RecenterAsync would otherwise log once per strike as noise.
-            _logger.LogDebug("{Instrument} intraday candle request failed for {Segment}:{Id} ({From}..{To}) - {Error}", instrumentType, dhanSegment, securityId, fromDay, toDay, response.ErrorMessage);
-            return (Array.Empty<CandleWithVolume>(), string.IsNullOrWhiteSpace(response.ErrorMessage) ? $"HTTP {(int)response.StatusCode}" : response.ErrorMessage);
+            foreach (var part in parts) part.Dispose();
+            var kept = FromCache(whole);
+            DhanDayWindow.Keep(_cache, IntradayPath, key, fromDay, toDay, kept.Root, AsIs, intervalMinutes);
+            return (new List<DhanApiResponse> { kept }, null);
+        }
+        if (!_api.HasSession)
+        {
+            _logger.LogWarning("Cannot fetch {What} - Dhan is not authenticated (check Dhan:ClientId/Dhan:AccessToken).", what);
+            return (parts, "Dhan is not authenticated");
         }
 
-        return (ParseCandlesWithVolume(response.Root), null);
+        var (response, timeoutError) = await SendDataApiCallAsync(IntradayPath, payloadFor(span.From, span.To), $"{what}, {span.From:yyyy-MM-dd}..{span.To:yyyy-MM-dd}", interactive, cancellationToken);
+        if (response is null) return (parts, timeoutError);
+        if (!response.Success)
+        {
+            _logger.Log(failureLevel, "Request for {What} ({From}..{To}) failed - {Error}", what, span.From, span.To, response.ErrorMessage);
+            var error = string.IsNullOrWhiteSpace(response.ErrorMessage) ? $"HTTP {(int)response.StatusCode}" : response.ErrorMessage;
+            response.Dispose();
+            return (parts, error);
+        }
+        DhanDayWindow.Keep(_cache, IntradayPath, key, span.From, span.To, response.Root, AsIs, intervalMinutes);
+        parts.Add(response);
+        return (parts, null);
     }
 
     private List<CandleWithVolume> ParseCandlesWithVolume(JsonElement root)

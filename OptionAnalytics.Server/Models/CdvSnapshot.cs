@@ -17,4 +17,9 @@ public sealed record CdvSnapshot(
     DateTimeOffset TimestampUtc,
     CdvBarPoint? CurrentBar,
     Candle? AtmCeCurrentBar,
-    Candle? AtmPeCurrentBar);
+    Candle? AtmPeCurrentBar,
+    IReadOnlyList<CdvStrikeBar>? StrikeBars = null);
+
+/// <summary>One tracked strike's live-forming premium bar - lets a page charting a PINNED (non-ATM)
+/// strike keep its current candle moving too, not just the ATM pair above.</summary>
+public sealed record CdvStrikeBar(decimal Strike, bool IsCall, Candle Bar);

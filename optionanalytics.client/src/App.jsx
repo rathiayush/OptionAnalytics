@@ -1,6 +1,7 @@
 import { Component, useEffect, useMemo, useRef, useState } from 'react'
-import { Select, Space, Typography, Spin, Card, Button, Modal, Table, Tag } from 'antd'
-import { createChart, createSeriesMarkers, CandlestickSeries, LineSeries, CrosshairMode, LineStyle, TickMarkType } from 'lightweight-charts'
+import { Select, Space, Typography, Spin, Card, Button, Modal, Table, Tag, Checkbox } from 'antd'
+import { createSeriesMarkers, CandlestickSeries, LineSeries, CrosshairMode, LineStyle, TickMarkType } from 'lightweight-charts'
+import { createZoomableChart } from './chartZoom.js'
 import * as signalR from '@microsoft/signalr'
 import { Routes, Route, Navigate } from 'react-router-dom'
 import BacktestPage from './BacktestPage.jsx'
@@ -8,18 +9,31 @@ import StrikeDataPage from './StrikeDataPage.jsx'
 import ExpiredBacktestPage from './ExpiredBacktestPage.jsx'
 import RollingStrikeDataPage from './RollingStrikeDataPage.jsx'
 import OiReplayPage from './OiReplayPage.jsx'
-import OiLiveDashboardPage from './OiLiveDashboardPage.jsx'
+import OrderFlowPage from './OrderFlowPage.jsx'
 import LiveStrikeDataPage from './LiveStrikeDataPage.jsx'
 import TriggersPage from './TriggersPage.jsx'
 import ContractsPage from './ContractsPage.jsx'
 import LoginPage from './LoginPage.jsx'
-import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, RECONNECT_RETRY_POLICY, computeEma, fmtPrice, fmtIstTime, fmtIstDateTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry, AuthContext, useAuth } from './shared.jsx'
+import TradeSettingsPage from './TradeSettingsPage.jsx'
+import StrategyTuningPage from './StrategyTuningPage.jsx'
+import TradesPage from './TradesPage.jsx'
+import StrategiesPage from './StrategiesPage.jsx'
+import StrategyLabPage from './StrategyLabPage.jsx'
+import DataFilesPage from './DataFilesPage.jsx'
+import { refreshTradeSettings } from './tradeDefaults.js'
+import { chartVwap } from './chartVwap.js'
+import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, RECONNECT_RETRY_POLICY, computeEma, fmtPrice, fmtIstTime, fmtIstDateTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry, AuthContext, useAuth, syncSignalRGroups, joinAllSignalRGroups, useCardOrder, CardDragHandle, onLiveBatch, useFeedLag, FeedLagTag, FeedLagAlert, LiveSection, captureChartView, restoreChartView, useReloadOnNewDeploy, checkForNewDeploy } from './shared.jsx'
 import './App.css'
 
 const { Title, Text } = Typography
 
 const EMA_FAST_COLOR = '#ffb100'
 const EMA_SLOW_COLOR = '#4dabf7'
+const VWAP_COLOR = '#e072e8'
+// A stable default for an optional array prop (PriceChart's own vwapSeries) - a plain `[]` literal
+// default is a NEW array every render, which would re-trigger any effect keyed on it even when the
+// caller never actually passes one.
+const EMPTY_ARRAY = []
 const AXIS_COLOR = '#9aa4b2'
 const GRID_COLOR = '#ffffff14'
 const BORDER_COLOR = '#ffffff22'
@@ -69,6 +83,8 @@ const DAYS_OPTIONS = [
 // arbitrary narrower slice, while still landing on one of the picker's own labeled values instead
 // of silently behaving like "All" for a reason nobody chose.
 const DEFAULT_DAYS_TO_SHOW = 45
+
+const DASHBOARD_CARD_IDS = ['alerts', 'spot', 'strikes', 'cdv', 'obv']
 
 function useScaledLine(points, unitKey) {
   const { divisor } = VALUE_UNITS[unitKey]
@@ -193,6 +209,47 @@ function appendOrReplaceLast(points, point) {
     return [...points.slice(0, -1), point]
   }
   return [...points, point]
+}
+
+// The strike picker's premium/OI come from Dhan's option-chain snapshot, which the server itself only
+// refreshes this often - polling it faster would gain nothing.
+const CHAIN_REFRESH_MS = 30_000
+
+// Folds a FINISHED live bar into a REST-loaded series: replaces the series' own last bar when it's
+// the same minute (REST includes the then-forming bar), appends when newer, ignores anything older.
+// Without this the Dashboard's series only ever held what REST returned at page load, with just the
+// single currently-forming bar spliced on top - every minute that closed after load vanished, so a
+// chart open since 9:30 jumped straight from 9:30 to "now", and the EMA badges (which read the
+// closed-bar series) never saw a new bar at all.
+function appendClosedBar(series, bar) {
+  if (!bar) return series
+  const t = Date.parse(bar.time)
+  const last = series[series.length - 1]
+  const lastT = last ? Date.parse(last.time) : -Infinity
+  if (t === lastT) return [...series.slice(0, -1), bar]
+  if (t > lastT) return [...series, bar]
+  return series
+}
+
+// Tracks one live stream's forming bar and returns the PREVIOUS one the moment a new minute starts
+// (i.e. the bar that just closed), or null. `key` identifies what the bars belong to (a strike) - a
+// change of key drops the tracked bar instead of handing a different contract's bar back as "closed".
+function takeClosedBar(tracker, key, bar) {
+  const previous = tracker.key === key ? tracker.bar : null
+  tracker.key = key
+  tracker.bar = bar ?? null
+  return previous && bar && previous.time !== bar.time ? previous : null
+}
+
+// One strike's live-forming premium bar out of a CDV snapshot - any tracked strike (strikeBars),
+// falling back to the ATM pair for a server that predates strikeBars. Null when that strike isn't
+// tracked live (a pinned strike far from ATM), in which case its chart refreshes per bar instead.
+function strikeLiveBar(snapshot, strike, isCall) {
+  if (!snapshot || strike == null) return null
+  const tracked = snapshot.strikeBars?.find((b) => b.isCall === isCall && b.strike === strike)
+  if (tracked) return tracked.bar
+  if (strike !== snapshot.atmStrike) return null
+  return (isCall ? snapshot.atmCeCurrentBar : snapshot.atmPeCurrentBar) ?? null
 }
 
 function mergeLiveBar(bars, liveBar) {
@@ -362,26 +419,49 @@ function fmtNum(v) {
 // to a fresh candle showing the opposite is a correctness bug, not a cosmetic one - onReconnected
 // is the hook a caller uses to fully re-fetch from REST (the source of truth) rather than trust
 // whatever incremental state survived the gap.
-function useHub(onSpotUpdate, onCdvUpdate, onConfluenceAlert, onReconnected, onCdvBarClosed) {
+function useHub(onSpotUpdate, onCdvUpdate, onConfluenceAlert, onReconnected, onCdvBarClosed, onPainted, underlying, pinnedExpiry) {
   const spotHandlerRef = useRef(onSpotUpdate)
   const cdvHandlerRef = useRef(onCdvUpdate)
   const alertHandlerRef = useRef(onConfluenceAlert)
   const reconnectedHandlerRef = useRef(onReconnected)
   const cdvBarClosedHandlerRef = useRef(onCdvBarClosed)
+  const paintedHandlerRef = useRef(onPainted)
+  paintedHandlerRef.current = onPainted
   spotHandlerRef.current = onSpotUpdate
   cdvHandlerRef.current = onCdvUpdate
   alertHandlerRef.current = onConfluenceAlert
   reconnectedHandlerRef.current = onReconnected
   cdvBarClosedHandlerRef.current = onCdvBarClosed
 
+  const connectionRef = useRef(null)
+  // The single underlying-scoped group this page ever needs - spotUpdate/cdvUpdate/cdvBarClosed/
+  // confluenceAlert are all broadcast per-underlying (SpotHub's own "u:{underlying}" convention -
+  // see its doc comment), never per-expiry, so unlike oiShared.jsx's useOiLiveHub there is only ever
+  // one group in play here.
+  const groupsRef = useRef([])
+
   useEffect(() => {
+    // Belt-and-suspenders, not a fix for an observed leak - see OiReplayPage.jsx's own
+    // useOiReplayLiveFeed for the identical guard and its full reasoning: with today's `[]` deps this
+    // is already unreachable in every normal case (React's own cleanup-before-next-effect ordering
+    // already stops the previous connection), but costs nothing and closes off a future edit
+    // reintroducing a dependency here leaving an old connection open and unreferenced.
+    if (connectionRef.current) connectionRef.current.stop()
     const connection = new signalR.HubConnectionBuilder()
       .withUrl('/hubs/spot')
       .withAutomaticReconnect(RECONNECT_RETRY_POLICY)
       .build()
+    connectionRef.current = connection
 
-    connection.on('spotUpdate', (snapshot) => spotHandlerRef.current(snapshot))
-    connection.on('cdvUpdate', (snapshot) => cdvHandlerRef.current(snapshot))
+    // Spot and CDV state arrive inside the conflated "liveBatch" (see onLiveBatch) - newest state
+    // only, acknowledged after paint, so the Dashboard can't fall behind the market.
+    // cdvExpiryUpdate is a NON-selected tracked expiry's snapshot, naming its own expiry - what
+    // keeps a pinned expiry live instead of polled (see CdvHostedService.OnTick).
+    onLiveBatch(connection, {
+      spotUpdate: (snapshot) => spotHandlerRef.current(snapshot),
+      cdvUpdate: (snapshot) => cdvHandlerRef.current(snapshot, false),
+      cdvExpiryUpdate: (snapshot) => cdvHandlerRef.current(snapshot, true),
+    }, (sentAtMs, clockOffsetMs) => paintedHandlerRef.current?.(sentAtMs, clockOffsetMs))
     connection.on('confluenceAlert', (alert) => alertHandlerRef.current(alert))
     // Pushed the instant the aggregate CDV bar closes - see CdvHostedService.OnAggregateBarClosed.
     // Lets the CDV lookback table append this point instead of re-fetching GET .../lookback.
@@ -389,29 +469,48 @@ function useHub(onSpotUpdate, onCdvUpdate, onConfluenceAlert, onReconnected, onC
     // Fires after automatic reconnect actually succeeds (not on the initial connect, which the
     // page's own mount-time fetches already cover) - see this function's own doc comment for why
     // a resync here, not just letting new events trickle in, is what a correctness-sensitive page
-    // needs.
-    connection.onreconnected(() => reconnectedHandlerRef.current?.())
-    connection.start().catch((err) => {
-      // React StrictMode mounts this effect, runs its cleanup, then mounts it again - the first
-      // connection's start() gets aborted by that cleanup's stop() before negotiation finishes,
-      // which is expected and harmless (the second mount's connection succeeds normally), not a
-      // real connection failure worth alarming about.
-      if (err?.name === 'AbortError') return
-      console.error('SignalR connection failed:', err)
+    // needs. A reconnect also gets a brand-new server-side connection with no group membership at
+    // all, so the CURRENT selection (groupsRef.current) is rejoined here too, not just resynced.
+    connection.onreconnected(() => {
+      joinAllSignalRGroups(connection, groupsRef.current)
+      checkForNewDeploy()
+      reconnectedHandlerRef.current?.()
     })
+    connection.start()
+      .then(() => joinAllSignalRGroups(connection, groupsRef.current))
+      .catch((err) => {
+        // React StrictMode mounts this effect, runs its cleanup, then mounts it again - the first
+        // connection's start() gets aborted by that cleanup's stop() before negotiation finishes,
+        // which is expected and harmless (the second mount's connection succeeds normally), not a
+        // real connection failure worth alarming about.
+        if (err?.name === 'AbortError') return
+        console.error('SignalR connection failed:', err)
+      })
 
-    return () => { connection.stop() }
+    return () => { connectionRef.current = null; connection.stop() }
   }, [])
+
+  // Keeps server-side group membership in sync with the currently selected underlying, without
+  // touching the connection itself - see oiShared.jsx's useOiLiveHub for the identical shape/reasoning.
+  // "cdv:{u}" carries the server's selected-expiry CDV; "cdv:{u}:{expiry}" a pinned one's.
+  useEffect(() => {
+    const newGroups = underlying
+      ? [`u:${underlying}`, `cdv:${underlying}`, ...(pinnedExpiry ? [`cdv:${underlying}:${pinnedExpiry}`] : [])]
+      : []
+    syncSignalRGroups(connectionRef.current, groupsRef.current, newGroups)
+    groupsRef.current = newGroups
+  }, [underlying, pinnedExpiry])
 }
 
 // Candlestick + EMA9/EMA21 overlay + crossover markers - the one chart shape reused for the spot
 // price and both ATM option premium charts.
-function PriceChart({ bars, height = 360 }) {
+function PriceChart({ bars, vwapSeries = EMPTY_ARRAY, showVwap = false, height = 360 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
   const ema9Ref = useRef(null)
   const ema21Ref = useRef(null)
+  const vwapRef = useRef(null)
   const markersRef = useRef(null)
   // Only auto-fit the visible range once, the first time this chart instance gets data - a live
   // tick updates `bars` (a new array reference) many times a minute, and calling fitContent() on
@@ -433,7 +532,7 @@ function PriceChart({ bars, height = 360 }) {
   useEffect(() => {
     if (!containerRef.current) return
 
-    const chart = createChart(containerRef.current, {
+    const chart = createZoomableChart(containerRef.current, {
       width: containerRef.current.clientWidth,
       height,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
@@ -456,6 +555,7 @@ function PriceChart({ bars, height = 360 }) {
     })
     ema9Ref.current = chart.addSeries(LineSeries, { color: EMA_FAST_COLOR, lineWidth: 1, title: 'EMA 9', priceLineVisible: false, crosshairMarkerVisible: false })
     ema21Ref.current = chart.addSeries(LineSeries, { color: EMA_SLOW_COLOR, lineWidth: 1, title: 'EMA 21', priceLineVisible: false, crosshairMarkerVisible: false })
+    vwapRef.current = chart.addSeries(LineSeries, { color: VWAP_COLOR, lineWidth: 2, title: 'VWAP', priceLineVisible: false, crosshairMarkerVisible: false })
     markersRef.current = createSeriesMarkers(seriesRef.current, [])
     hasFitRef.current = false
 
@@ -471,6 +571,7 @@ function PriceChart({ bars, height = 360 }) {
       seriesRef.current = null
       ema9Ref.current = null
       ema21Ref.current = null
+      vwapRef.current = null
       markersRef.current = null
     }
     // One chart instance per mount - series data is (re)populated by the effects below, not by
@@ -487,16 +588,15 @@ function PriceChart({ bars, height = 360 }) {
     // Capturing the visible range immediately before setData and restoring it immediately after
     // neutralizes that reset while keeping the data current. Skipped before the first real fit -
     // there's nothing of the user's to preserve yet, and fitContent below handles that one instead.
-    const preservedRange = hasFitRef.current ? chartRef.current?.timeScale().getVisibleRange() : null
+    // Follows the newest bar while the view is at the live edge; otherwise keeps the range the user
+    // scrolled to - see captureChartView.
+    const view = hasFitRef.current ? captureChartView(chartRef.current, seriesRef.current) : null
     seriesRef.current.setData(sanitizedBars)
     if (!hasFitRef.current && sanitizedBars.length > 0) {
       chartRef.current?.timeScale().fitContent()
       hasFitRef.current = true
-    } else if (preservedRange) {
-      // The new data may no longer cover exactly this range (e.g. the oldest bar rolled off) -
-      // that's a "nothing to show past this edge" case for the time scale, not an error worth
-      // fighting the tick over.
-      try { chartRef.current?.timeScale().setVisibleRange(preservedRange) } catch { /* empty */ }
+    } else {
+      restoreChartView(chartRef.current, view)
     }
   }, [sanitizedBars])
 
@@ -510,6 +610,19 @@ function PriceChart({ bars, height = 360 }) {
       try { chartRef.current?.timeScale().setVisibleRange(preservedRange) } catch { /* empty */ }
     }
   }, [ema9Points, ema21Points])
+
+  useEffect(() => {
+    if (!vwapRef.current) return
+    // Same setData-resets-the-visible-range reasoning as the candlestick series above. Fed only
+    // while checked, empty otherwise - simpler and just as instant as toggling a `visible` option.
+    const preservedRange = hasFitRef.current ? chartRef.current?.timeScale().getVisibleRange() : null
+    // On the candles' own times only (chartVwap) - a 1-minute / multi-day VWAP series would add time
+    // points the candles do not have and squeeze them into a corner.
+    vwapRef.current.setData(showVwap ? chartVwap(sanitizedBars, vwapSeries) : EMPTY_ARRAY)
+    if (preservedRange) {
+      try { chartRef.current?.timeScale().setVisibleRange(preservedRange) } catch { /* empty */ }
+    }
+  }, [vwapSeries, showVwap, sanitizedBars])
 
   useEffect(() => {
     markersRef.current?.setMarkers(allMarkers)
@@ -542,7 +655,7 @@ function CeVsPeChart({ ceSeries, peSeries, prevCeSeries = [], prevPeSeries = [],
   useEffect(() => {
     if (!containerRef.current) return
 
-    const chart = createChart(containerRef.current, {
+    const chart = createZoomableChart(containerRef.current, {
       width: containerRef.current.clientWidth,
       height,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
@@ -584,7 +697,7 @@ function CeVsPeChart({ ceSeries, peSeries, prevCeSeries = [], prevPeSeries = [],
     // See PriceChart's identical preservedRange for why - a live tick recomputes these series (new
     // array references) roughly once a second, and setData() resets the visible range as a side
     // effect, snapping a user's drag/pinch back on the very next tick unless it's restored.
-    const preservedRange = hasFitRef.current ? chartRef.current?.timeScale().getVisibleRange() : null
+    const view = hasFitRef.current ? captureChartView(chartRef.current, ceRef.current) : null
     prevCeRef.current.setData(sanitizedPrevCe)
     prevPeRef.current.setData(sanitizedPrevPe)
     ceRef.current.setData(sanitizedCe)
@@ -593,8 +706,8 @@ function CeVsPeChart({ ceSeries, peSeries, prevCeSeries = [], prevPeSeries = [],
     if (!hasFitRef.current && hasAnyData) {
       chartRef.current?.timeScale().fitContent()
       hasFitRef.current = true
-    } else if (preservedRange) {
-      try { chartRef.current?.timeScale().setVisibleRange(preservedRange) } catch { /* empty */ }
+    } else {
+      restoreChartView(chartRef.current, view)
     }
   }, [sanitizedCe, sanitizedPe, sanitizedPrevCe, sanitizedPrevPe])
 
@@ -802,9 +915,9 @@ const ALERT_DISPLAY_LIMIT = 20
 // one the moment any single leg's bias flips, plus a stronger CONFLUENCE alert when all three
 // confirm the same move at once. Kept visible on the page at all times (not a toast that
 // disappears) since the whole point is catching a signal even if nobody was looking when it fired.
-function AlertsPanel({ alerts, states }) {
+function AlertsPanel({ alerts, states, dragHandle }) {
   return (
-    <Card size="small" title="Confluence Alerts" extra={<Text type="secondary" style={{ fontSize: 12 }}>Spot + ATM CE/PE EMA 9/21</Text>}>
+    <Card size="small" title={<Space size={4}>{dragHandle}Confluence Alerts</Space>} extra={<Text type="secondary" style={{ fontSize: 12 }}>Spot + ATM CE/PE EMA 9/21</Text>}>
       <Space direction="vertical" size={12} style={{ width: '100%' }}>
         {states.length > 0 && (
           <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap' }}>
@@ -991,6 +1104,13 @@ function DashboardPage() {
 
   const [candles, setCandles] = useState([])
   const [snapshot, setSnapshot] = useState(null)
+  // Session VWAP, one point per minute (ObvPoint shape - {time, value}) - seeded once via
+  // GET .../vwap-series in fetchAllData below, grown live by the spotUpdate handler exactly like
+  // spotBars itself. Computed server-side (VwapCalculator) off real traded volume; see
+  // SpotSnapshot's own doc comment on why riding the existing per-tick spotUpdate push, rather than
+  // a separate poll, is what lets this line grow live instead of only catching up periodically.
+  const [vwapSeries, setVwapSeries] = useState([])
+  const [showVwap, setShowVwap] = usePersistedState(STORED_SHOW_VWAP, false)
 
   // Confluence alerts are a combined feed across every underlying, not scoped to `selected` -
   // fetched once on load (so alerts that fired before this tab connected still show up) and then
@@ -1090,6 +1210,7 @@ function DashboardPage() {
   // a pinned strike goes to the per-strike endpoint instead, which also covers strikes this app
   // never subscribed to (it fetches their history from Dhan on demand).
   const fetchAtmAndObv = (underlying, cancelledRef, strike = selectedStrike) => {
+    optionCandlesStrikeRef.current = strike === ATM_STRIKE ? (cdvSnapshot?.atmStrike ?? null) : strike
     const url = (type) => (strike === ATM_STRIKE
       ? withExpiry(`/api/cdv/${underlying}/atm-${type.toLowerCase()}/candles`, expiryParam)
       : withExpiry(`/api/cdv/${underlying}/option/candles?strike=${strike}&type=${type}`, expiryParam))
@@ -1132,6 +1253,11 @@ function DashboardPage() {
       .then((data) => { if (!cancelledRef.cancelled) setSnapshot(data) })
       .catch((err) => console.error('Failed to load snapshot:', err))
 
+    const vwapSeriesP = fetch(`/api/spot/${underlying}/vwap-series`)
+      .then((r) => r.json())
+      .then((data) => { if (!cancelledRef.cancelled) setVwapSeries((data ?? []).map((p) => ({ time: toChartTime(p.time), value: p.obv }))) })
+      .catch((err) => console.error('Failed to load VWAP series:', err))
+
     const cdvSeriesP = fetch(withExpiry(`/api/cdv/${underlying}/series`, expiryParam))
       .then((r) => r.json())
       .then((data) => { if (!cancelledRef.cancelled) setCdvSeries(data) })
@@ -1152,7 +1278,7 @@ function DashboardPage() {
       .then((data) => { if (!cancelledRef.cancelled) setCdvHistorySeries(data ?? []) })
       .catch((err) => console.error('Failed to load CDV history series:', err))
 
-    return Promise.allSettled([candlesP, snapshotP, cdvSeriesP, cdvSnapshotP, cdvPrevDayP, cdvHistoryP, fetchAtmAndObv(underlying, cancelledRef)])
+    return Promise.allSettled([candlesP, snapshotP, vwapSeriesP, cdvSeriesP, cdvSnapshotP, cdvPrevDayP, cdvHistoryP, fetchAtmAndObv(underlying, cancelledRef)])
   }
 
   useEffect(() => {
@@ -1167,14 +1293,18 @@ function DashboardPage() {
 
   // The strike picker's own list. Refreshed when the ATM rolls too, since it is centred on ATM and
   // carries live premium/OI that goes stale.
+  // Also refreshed every CHAIN_REFRESH_MS so its premium/OI don't sit at whatever they were when the
+  // ATM last rolled.
   useEffect(() => {
     if (!selected) return
     const cancelledRef = { cancelled: false }
-    fetch(withExpiry(`/api/cdv/${selected}/chain`, expiryParam))
+    const load = () => fetch(withExpiry(`/api/cdv/${selected}/chain`, expiryParam))
       .then((r) => r.json())
       .then((data) => { if (!cancelledRef.cancelled) setStrikeChain(data) })
       .catch((err) => console.error('Failed to load the option chain:', err))
-    return () => { cancelledRef.cancelled = true }
+    load()
+    const id = setInterval(load, CHAIN_REFRESH_MS)
+    return () => { cancelledRef.cancelled = true; clearInterval(id) }
   }, [selected, expiryParam, cdvSnapshot?.atmStrike])
 
   // A strike number means nothing across underlyings (a NIFTY strike is not a BANKNIFTY one), so
@@ -1200,22 +1330,56 @@ function DashboardPage() {
     fetchAllData(selected, { cancelled: false }).finally(() => setRefreshing(false))
   }
 
+  // The forming bar each live stream last sent - see takeClosedBar. Kept across renders in a ref since
+  // it's bookkeeping for the handlers below, not something any render reads.
+  const liveTrackersRef = useRef({ spot: {}, cdv: {}, ce: {}, pe: {} })
+  // Which strike atmCeCandles/atmPeCandles were last fetched for - live closed bars are only folded
+  // in while they belong to that same contract (an ATM roll refetches, and until it lands the old
+  // contract's candles must not get the new one's bars appended).
+  const optionCandlesStrikeRef = useRef(null)
+
+  const feedLag = useFeedLag(Boolean(selected))
+
   useHub(
-    (incoming) => { if (incoming.underlying === selected) setSnapshot(incoming) },
     (incoming) => {
       if (incoming.underlying !== selected) return
-      // Only the server's SELECTED expiry is broadcast, and the snapshot does not name which expiry
-      // it is. While this page is pinned to a different one, that push describes a different option
-      // chain entirely - taking it would paint next month's CDV onto this month's chart. The polling
-      // effects below keep a pinned view current instead.
-      if (expiryParam) return
+      feedLag.recordSource(new Date(incoming.timestampUtc).getTime(), incoming.exchangeTimeUtc ? new Date(incoming.exchangeTimeUtc).getTime() : null)
+      setSnapshot(incoming)
+      const closedSpot = takeClosedBar(liveTrackersRef.current.spot, incoming.underlying, incoming.currentBar)
+      if (closedSpot) setCandles((prev) => appendClosedBar(prev, closedSpot))
+      // null before the day's first traded volume (see SpotSnapshot's own doc comment) - nothing to
+      // plot yet, not a zero.
+      if (incoming.vwap != null && incoming.currentBar)
+        setVwapSeries((prev) => appendOrReplaceLast(prev, { time: toChartTime(incoming.currentBar.time), value: incoming.vwap }))
+    },
+    (incoming, isExpiryUpdate) => {
+      if (incoming.underlying !== selected) return
+      // cdvUpdate is always the server's own selected expiry; cdvExpiryUpdate carries every other
+      // tracked one. Following the server: take cdvUpdate only. Pinned: take whichever push names
+      // the pinned expiry (that can be cdvUpdate too, when the pin happens to be the default).
+      const wanted = expiryParam ? incoming.expiry === expiryParam : !isExpiryUpdate
+      if (!wanted) return
       setCdvSnapshot(incoming)
+
+      const trackers = liveTrackersRef.current
+      const chainKey = `${incoming.underlying}:${incoming.expiry}`
+      const closedCdv = takeClosedBar(trackers.cdv, chainKey, incoming.currentBar)
+      if (closedCdv) setCdvSeries((prev) => appendClosedBar(prev, closedCdv))
+
+      const charted = selectedStrike === ATM_STRIKE ? incoming.atmStrike : selectedStrike
+      const key = `${chainKey}:${charted}`
+      const closedCe = takeClosedBar(trackers.ce, key, strikeLiveBar(incoming, charted, true))
+      const closedPe = takeClosedBar(trackers.pe, key, strikeLiveBar(incoming, charted, false))
+      if (charted != null && optionCandlesStrikeRef.current === charted) {
+        if (closedCe) setAtmCeCandles((prev) => appendClosedBar(prev, closedCe))
+        if (closedPe) setAtmPeCandles((prev) => appendClosedBar(prev, closedPe))
+      }
     },
     (alert) => {
       setAlerts((prev) => [alert, ...prev].slice(0, 50))
 
       const legKey = alert.kind === 'Spot' ? 'spot' : alert.kind === 'AtmCe' ? 'atmCe' : alert.kind === 'AtmPe' ? 'atmPe' : null
-      if (!legKey) return // Confluence alerts don't change any leg's own state, just confirm it
+      if (!legKey) { refetchCrossoverStates(); return } // single-leg flips are no longer alerts, so the leg tags are re-read when a confluence fires
       setCrossoverStates((prev) => {
         const existing = prev.find((s) => s.underlying === alert.underlying)
         if (existing) return prev.map((s) => (s.underlying === alert.underlying ? { ...s, [legKey]: alert.direction, updatedUtc: alert.timeUtc } : s))
@@ -1245,6 +1409,9 @@ function DashboardPage() {
       if (point.obvCe != null) setObvCe((prev) => appendOrReplaceLast(prev, { time, obv: point.obvCe }))
       if (point.obvPe != null) setObvPe((prev) => appendOrReplaceLast(prev, { time, obv: point.obvPe }))
     },
+    feedLag.recordPainted,
+    selected,
+    expiryParam,
   )
 
   // A PINNED strike (selectedStrike !== ATM_STRIKE) has no live current bar of its own coming down
@@ -1277,9 +1444,9 @@ function DashboardPage() {
   const step = snapshot?.step
   const rounded = snapshot?.roundedPrice ?? null
 
-  // The live current bar in the CDV snapshot belongs to the ATM contract specifically, so it may
-  // only be spliced onto these charts while they ARE the ATM contract - splicing it onto a pinned
-  // strike would graft one contract's forming bar onto another contract's series.
+  // The forming bar spliced onto the two premium charts is always the CHARTED strike's own (see
+  // strikeLiveBar) - so a pinned strike ticks live too, and one contract's bar is never grafted onto
+  // another contract's series.
   const chartedStrike = selectedStrike === ATM_STRIKE ? (cdvSnapshot?.atmStrike ?? null) : selectedStrike
   const showsAtmContract = chartedStrike != null && chartedStrike === cdvSnapshot?.atmStrike
 
@@ -1292,8 +1459,8 @@ function DashboardPage() {
   const trimmedAtmPeCandles = useMemo(() => trimToRecentDays(atmPeCandles, daysToShow), [atmPeCandles, daysToShow])
 
   const spotBars = useAggregatedCandles(trimmedCandles, snapshot?.currentBar, timeframe)
-  const atmCeBars = useAggregatedCandles(trimmedAtmCeCandles, showsAtmContract ? cdvSnapshot?.atmCeCurrentBar : null, timeframe)
-  const atmPeBars = useAggregatedCandles(trimmedAtmPeCandles, showsAtmContract ? cdvSnapshot?.atmPeCurrentBar : null, timeframe)
+  const atmCeBars = useAggregatedCandles(trimmedAtmCeCandles, strikeLiveBar(cdvSnapshot, chartedStrike, true), timeframe)
+  const atmPeBars = useAggregatedCandles(trimmedAtmPeCandles, strikeLiveBar(cdvSnapshot, chartedStrike, false), timeframe)
 
   // Same three series with no live bar merged in - the badge (unlike the chart itself, which
   // still renders spotBars/atmCeBars/atmPeBars with the live candle) only ever reads a closed,
@@ -1339,6 +1506,8 @@ function DashboardPage() {
   const obvCeSplit = useTodayAndPreviousDay(obvCeScaled)
   const obvPeSplit = useTodayAndPreviousDay(obvPeScaled)
 
+  const { order: cardOrder, dragHandleProps, dropTargetProps } = useCardOrder('optionanalytics.dashboardCardOrder', DASHBOARD_CARD_IDS)
+
   if (loading) {
     return (
       <div style={{ display: 'flex', justifyContent: 'center', padding: 80 }}>
@@ -1373,7 +1542,9 @@ function DashboardPage() {
             options={DAYS_OPTIONS}
           />
           <Button onClick={handleRefresh} loading={refreshing} disabled={!selected}>Refresh</Button>
+          <FeedLagTag delayMs={feedLag.delayMs} />
         </Space>
+        <FeedLagAlert delayMs={feedLag.delayMs} sourceDelayMs={feedLag.sourceDelayMs} />
 
         <Space direction="vertical" size={2} align="center" style={{ width: '100%' }}>
           <Text type="secondary">{selected} spot (rounded to nearest {step ?? '—'})</Text>
@@ -1381,104 +1552,137 @@ function DashboardPage() {
           <Text type="secondary">Last traded: {fmtPrice(snapshot?.lastPrice)}</Text>
         </Space>
 
-        <AlertsPanel alerts={alerts} states={crossoverStates} />
+        {(() => {
+          const cardsById = {
+            alerts: <AlertsPanel alerts={alerts} states={crossoverStates} dragHandle={<CardDragHandle {...dragHandleProps('alerts')} />} />,
 
-        <ChartCard
-          title={`${selected} spot`}
-          extra={<EmaLegend state={spotCrossState} />}
-          empty="Waiting for chart data - the Dhan feed may still be connecting."
-        >
-          {spotBars.length > 0 && (
-            <ChartErrorBoundary key={`${selected}-${timeframe}-${daysToShow}`} height={420}>
-              <PriceChart bars={spotBars} height={420} />
-            </ChartErrorBoundary>
-          )}
-        </ChartCard>
+            spot: (
+              <ChartCard
+                title={<Space size={4}><CardDragHandle {...dragHandleProps('spot')} />{`${selected} spot`}</Space>}
+                extra={
+                  <Space size={12}>
+                    <Checkbox checked={showVwap} onChange={(e) => setShowVwap(e.target.checked)}>VWAP</Checkbox>
+                    <EmaLegend state={spotCrossState} />
+                  </Space>
+                }
+                empty="Waiting for chart data - the Dhan feed may still be connecting."
+              >
+                {spotBars.length > 0 && (
+                  <ChartErrorBoundary key={`${selected}-${timeframe}-${daysToShow}`} height={420}>
+                    <PriceChart bars={spotBars} vwapSeries={vwapSeries} showVwap={showVwap} height={420} />
+                  </ChartErrorBoundary>
+                )}
+              </ChartCard>
+            ),
 
-        <StrikePicker chain={strikeChain} value={selectedStrike} onChange={setSelectedStrike} live={showsAtmContract} />
+            strikes: (
+              <div>
+                <Space size={4} style={{ marginBottom: 8 }}>
+                  <CardDragHandle {...dragHandleProps('strikes')} />
+                  <Text type="secondary" style={{ fontSize: 12 }}>Strikes</Text>
+                </Space>
+                <StrikePicker chain={strikeChain} value={selectedStrike} onChange={setSelectedStrike} live={showsAtmContract} />
+                <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginTop: 16 }}>
+                  <div style={{ flex: '1 1 400px', minWidth: 0 }}>
+                    <ChartCard
+                      title={`${showsAtmContract ? 'ATM ' : ''}CE ${chartedStrike ?? ''}`}
+                      extra={<EmaLegend state={atmCeCrossState} />}
+                      empty="Waiting for the CE contract to resolve and tick."
+                    >
+                      {atmCeBars.length > 0 && (
+                        <ChartErrorBoundary key={`${selected}-${timeframe}-${daysToShow}-${chartedStrike}`} height={320}>
+                          <PriceChart bars={atmCeBars} height={320} />
+                        </ChartErrorBoundary>
+                      )}
+                    </ChartCard>
+                  </div>
+                  <div style={{ flex: '1 1 400px', minWidth: 0 }}>
+                    <ChartCard
+                      title={`${showsAtmContract ? 'ATM ' : ''}PE ${chartedStrike ?? ''}`}
+                      extra={<EmaLegend state={atmPeCrossState} />}
+                      empty="Waiting for the PE contract to resolve and tick."
+                    >
+                      {atmPeBars.length > 0 && (
+                        <ChartErrorBoundary key={`${selected}-${timeframe}-${daysToShow}-${chartedStrike}`} height={320}>
+                          <PriceChart bars={atmPeBars} height={320} />
+                        </ChartErrorBoundary>
+                      )}
+                    </ChartCard>
+                  </div>
+                </div>
+              </div>
+            ),
 
-        <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
-          <div style={{ flex: '1 1 400px', minWidth: 0 }}>
-            <ChartCard
-              title={`${showsAtmContract ? 'ATM ' : ''}CE ${chartedStrike ?? ''}`}
-              extra={<EmaLegend state={atmCeCrossState} />}
-              empty="Waiting for the CE contract to resolve and tick."
-            >
-              {atmCeBars.length > 0 && (
-                <ChartErrorBoundary key={`${selected}-${timeframe}-${daysToShow}-${chartedStrike}`} height={320}>
-                  <PriceChart bars={atmCeBars} height={320} />
-                </ChartErrorBoundary>
-              )}
-            </ChartCard>
-          </div>
-          <div style={{ flex: '1 1 400px', minWidth: 0 }}>
-            <ChartCard
-              title={`${showsAtmContract ? 'ATM ' : ''}PE ${chartedStrike ?? ''}`}
-              extra={<EmaLegend state={atmPeCrossState} />}
-              empty="Waiting for the PE contract to resolve and tick."
-            >
-              {atmPeBars.length > 0 && (
-                <ChartErrorBoundary key={`${selected}-${timeframe}-${daysToShow}-${chartedStrike}`} height={320}>
-                  <PriceChart bars={atmPeBars} height={320} />
-                </ChartErrorBoundary>
-              )}
-            </ChartCard>
-          </div>
-        </div>
+            cdv: (
+              <div>
+                <ChartCard
+                  title={<Space size={4}><CardDragHandle {...dragHandleProps('cdv')} />CE / PE Cumulative Delta Volume</Space>}
+                  extra={
+                    <Space size={12}>
+                      <Text type="secondary" style={{ fontSize: 12 }}>ATM {cdvSnapshot?.atmStrike ?? '—'} · Expiry {cdvSnapshot?.expiry ?? '—'}</Text>
+                      <Select value={cdvUnit} onChange={setCdvUnit} size="small" style={{ width: 140 }} options={VALUE_UNIT_OPTIONS} />
+                      <StrikesButton underlying={selected} expiry={expiryParam} />
+                    </Space>
+                  }
+                  empty="Waiting for option-chain data - strikes resolve once the spot price is known."
+                >
+                  {cdvCe.length > 0 && (
+                    <>
+                      <ChartErrorBoundary key={`${selected}-${timeframe}-${daysToShow}`} height={280}>
+                        <CeVsPeChart ceSeries={cdvCeScaled} peSeries={cdvPeScaled} prevCeSeries={cdvPrevCeScaled} prevPeSeries={cdvPrevPeScaled} height={280} />
+                      </ChartErrorBoundary>
+                      <Space size={24} style={{ marginTop: 8 }}>
+                        <Text style={{ color: CE_COLOR }}>CE {fmtScaled(cdvSnapshot?.ceCdv, cdvUnit)}</Text>
+                        <Text style={{ color: PE_COLOR }}>PE {fmtScaled(cdvSnapshot?.peCdv, cdvUnit)}</Text>
+                      </Space>
+                    </>
+                  )}
+                </ChartCard>
 
-        <ChartCard
-          title="CE / PE Cumulative Delta Volume"
-          extra={
-            <Space size={12}>
-              <Text type="secondary" style={{ fontSize: 12 }}>ATM {cdvSnapshot?.atmStrike ?? '—'} · Expiry {cdvSnapshot?.expiry ?? '—'}</Text>
-              <Select value={cdvUnit} onChange={setCdvUnit} size="small" style={{ width: 140 }} options={VALUE_UNIT_OPTIONS} />
-              <StrikesButton underlying={selected} expiry={expiryParam} />
-            </Space>
+                {selected && <LookbackTable smoothedCe={cdvSmoothedCe} smoothedPe={cdvSmoothedPe} timeframe={timeframe} storageKey={STORED_CDV_LOOKBACK_BARS} />}
+              </div>
+            ),
+
+            obv: (
+              <div>
+                <ChartCard
+                  title={<Space size={4}><CardDragHandle {...dragHandleProps('obv')} />CE / PE On-Balance Volume (delta-weighted, all tracked strikes)</Space>}
+                  extra={
+                    <Space size={12}>
+                      <Text type="secondary" style={{ fontSize: 12 }}>Skender.Stock.Indicators</Text>
+                      <Select value={obvUnit} onChange={setObvUnit} size="small" style={{ width: 140 }} options={VALUE_UNIT_OPTIONS} />
+                    </Space>
+                  }
+                  empty="Waiting for enough CE/PE bars to compute OBV."
+                >
+                  {(obvCePoints.length > 0 || obvPePoints.length > 0) && (
+                    <ChartErrorBoundary key={`${selected}-${timeframe}-${daysToShow}-${cdvSnapshot?.atmStrike}`} height={280}>
+                      <CeVsPeChart ceSeries={obvCeSplit.today} peSeries={obvPeSplit.today} prevCeSeries={obvCeSplit.previous} prevPeSeries={obvPeSplit.previous} height={280} />
+                    </ChartErrorBoundary>
+                  )}
+                </ChartCard>
+
+                {selected && (
+                  <LookbackTable
+                    smoothedCe={obvCe}
+                    smoothedPe={obvPe}
+                    timeframe={timeframe}
+                    title="OBV Multi-Lookback % Change"
+                    defaultBars={DEFAULT_LOOKBACK_BARS}
+                    storageKey={STORED_OBV_LOOKBACK_BARS}
+                  />
+                )}
+              </div>
+            ),
           }
-          empty="Waiting for option-chain data - strikes resolve once the spot price is known."
-        >
-          {cdvCe.length > 0 && (
-            <>
-              <ChartErrorBoundary key={`${selected}-${timeframe}-${daysToShow}`} height={280}>
-                <CeVsPeChart ceSeries={cdvCeScaled} peSeries={cdvPeScaled} prevCeSeries={cdvPrevCeScaled} prevPeSeries={cdvPrevPeScaled} height={280} />
-              </ChartErrorBoundary>
-              <Space size={24} style={{ marginTop: 8 }}>
-                <Text style={{ color: CE_COLOR }}>CE {fmtScaled(cdvSnapshot?.ceCdv, cdvUnit)}</Text>
-                <Text style={{ color: PE_COLOR }}>PE {fmtScaled(cdvSnapshot?.peCdv, cdvUnit)}</Text>
-              </Space>
-            </>
-          )}
-        </ChartCard>
 
-        {selected && <LookbackTable smoothedCe={cdvSmoothedCe} smoothedPe={cdvSmoothedPe} timeframe={timeframe} storageKey={STORED_CDV_LOOKBACK_BARS} />}
-
-        <ChartCard
-          title="CE / PE On-Balance Volume (delta-weighted, all tracked strikes)"
-          extra={
-            <Space size={12}>
-              <Text type="secondary" style={{ fontSize: 12 }}>Skender.Stock.Indicators</Text>
-              <Select value={obvUnit} onChange={setObvUnit} size="small" style={{ width: 140 }} options={VALUE_UNIT_OPTIONS} />
-            </Space>
-          }
-          empty="Waiting for enough CE/PE bars to compute OBV."
-        >
-          {(obvCePoints.length > 0 || obvPePoints.length > 0) && (
-            <ChartErrorBoundary key={`${selected}-${timeframe}-${daysToShow}-${cdvSnapshot?.atmStrike}`} height={280}>
-              <CeVsPeChart ceSeries={obvCeSplit.today} peSeries={obvPeSplit.today} prevCeSeries={obvCeSplit.previous} prevPeSeries={obvPeSplit.previous} height={280} />
-            </ChartErrorBoundary>
-          )}
-        </ChartCard>
-
-        {selected && (
-          <LookbackTable
-            smoothedCe={obvCe}
-            smoothedPe={obvPe}
-            timeframe={timeframe}
-            title="OBV Multi-Lookback % Change"
-            defaultBars={DEFAULT_LOOKBACK_BARS}
-            storageKey={STORED_OBV_LOOKBACK_BARS}
-          />
-        )}
+          // LiveSection: a card scrolled off-screen skips live re-renders until it's back in view.
+          return cardOrder.map((id) => (
+            <div key={id} {...dropTargetProps(id)}>
+              <LiveSection version={cardOrder.join(',')}>{cardsById[id]}</LiveSection>
+            </div>
+          ))
+        })()}
 
         <BuildInfoFooter />
       </Space>
@@ -1503,11 +1707,45 @@ export default function App() {
   // there is no window where both "loading" and "no user yet" could disagree with each other.
   const [user, setUser] = useState(undefined)
 
+  // Every page, every tab: pick up a new deploy instead of running stale code against it.
+  useReloadOnNewDeploy()
+
+  // The trade settings per index (lots, SL / target / trail, slippage - trade-settings.csv on the server)
+  // into this browser once signed in, and again whenever the tab comes back.
   useEffect(() => {
-    fetch('/api/auth/me')
-      .then((r) => (r.ok ? r.json() : null))
-      .then(setUser)
-      .catch(() => setUser(null))
+    if (!user) return undefined
+    refreshTradeSettings()
+    const onVisible = () => { if (document.visibilityState === 'visible') refreshTradeSettings() }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => document.removeEventListener('visibilitychange', onVisible)
+  }, [user])
+
+  // Only a 401/403 means "not signed in". Anything else - the server restarting for a deploy (a
+  // proxy 502/503/504) or the network dropping - used to be treated the same way and showed the
+  // login screen, so a page opened mid-deploy looked like the deploy had logged you out. Those
+  // are retried instead until the server answers.
+  const [serverUnreachable, setServerUnreachable] = useState(false)
+  useEffect(() => {
+    let cancelled = false
+    let timer = null
+    let delayMs = 1000
+    const check = () => {
+      fetch('/api/auth/me')
+        .then(async (r) => {
+          if (r.ok) return r.json()
+          if (r.status === 401 || r.status === 403) return null
+          throw new Error(`HTTP ${r.status}`)
+        })
+        .then((me) => { if (!cancelled) { setServerUnreachable(false); setUser(me) } })
+        .catch(() => {
+          if (cancelled) return
+          setServerUnreachable(true)
+          timer = setTimeout(check, delayMs)
+          delayMs = Math.min(delayMs * 2, 10_000)
+        })
+    }
+    check()
+    return () => { cancelled = true; clearTimeout(timer) }
   }, [])
 
   const login = (email, password) =>
@@ -1517,6 +1755,7 @@ export default function App() {
       body: JSON.stringify({ email, password }),
     }).then(async (r) => {
       const body = await r.json().catch(() => null)
+      if (r.status === 429) throw new Error('Too many login attempts - wait a few minutes and try again.')
       if (!r.ok) throw new Error(body?.error || 'Login failed')
       setUser(body)
       return body
@@ -1532,8 +1771,11 @@ export default function App() {
 
   if (user === undefined) {
     return (
-      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 16, justifyContent: 'center', alignItems: 'center', minHeight: '100vh' }}>
         <Spin size="large" />
+        {serverUnreachable && (
+          <Typography.Text type="secondary">Can't reach the server - it is probably restarting for a new deploy. Reconnecting…</Typography.Text>
+        )}
       </div>
     )
   }
@@ -1550,11 +1792,17 @@ export default function App() {
         <Route path="/strike-data" element={<StrikeDataPage />} />
         <Route path="/expired-backtest" element={<ExpiredBacktestPage />} />
         <Route path="/oi-replay" element={<OiReplayPage />} />
-        <Route path="/oi-live" element={<OiLiveDashboardPage />} />
+        <Route path="/order-flow" element={<OrderFlowPage />} />
         <Route path="/live-strike-data" element={<LiveStrikeDataPage />} />
         <Route path="/rolling-strike-data" element={<RollingStrikeDataPage />} />
         <Route path="/triggers" element={<RequireAdmin><TriggersPage /></RequireAdmin>} />
         <Route path="/contracts" element={<RequireAdmin><ContractsPage /></RequireAdmin>} />
+        <Route path="/trade-settings" element={<TradeSettingsPage />} />
+        <Route path="/strategy-tuning" element={<StrategyTuningPage />} />
+        <Route path="/trades" element={<TradesPage />} />
+        <Route path="/strategies" element={<StrategiesPage />} />
+        <Route path="/strategy-lab" element={<StrategyLabPage />} />
+        <Route path="/data-files" element={<RequireAdmin><DataFilesPage /></RequireAdmin>} />
       </Routes>
     </AuthContext.Provider>
   )

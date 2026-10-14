@@ -16,6 +16,14 @@ public sealed record DhanPosition(
     string PositionType,
     int NetQty)
 {
+    /// <summary>Average prices and today's booked P&L as Dhan reports them - what live P&L is
+    /// computed from (see LiveTradingService). Optional so existing callers need not set them.</summary>
+    public decimal BuyAvg { get; init; }
+    public decimal SellAvg { get; init; }
+    public int BuyQty { get; init; }
+    public int SellQty { get; init; }
+    public decimal RealizedProfit { get; init; }
+
     public bool IsOpen => PositionType != "CLOSED" && NetQty != 0;
 
     /// <summary>Which side closes this position - a LONG position was bought, so it closes by
@@ -46,6 +54,18 @@ public sealed class DhanPositionsClient
     /// failure, same as DhanSuperOrderClient.ListAsync - already logged here, and a caller using
     /// this as a safety gate would rather fail open (place the order, same as before this check
     /// existed) than fail the whole evaluation over a transient read error.</summary>
+    /// <summary>Dhan's own DELETE /positions: "Exit all active positions and cancel all open orders for
+    /// the current trading day" - EVERYTHING on the account, every product, including positions and
+    /// orders this app's strategy triggers own. The emergency switch only; returns Dhan's error text on
+    /// failure, null on success.</summary>
+    public async Task<string?> ExitAllAccountAsync(CancellationToken cancellationToken)
+    {
+        using var response = await _api.SendAsync(HttpMethod.Delete, "/positions", null, "exiting all positions (account-wide)", cancellationToken);
+        if (response.Success) return null;
+        _logger.LogWarning("Exit-all-positions failed: {Error}", response.ErrorMessage);
+        return response.ErrorMessage ?? "Dhan did not confirm the exit";
+    }
+
     public async Task<IReadOnlyList<DhanPosition>> ListAsync(CancellationToken cancellationToken)
     {
         using var response = await _api.SendAsync(HttpMethod.Get, "/positions", null, "listing positions", cancellationToken);
@@ -67,7 +87,14 @@ public sealed class DhanPositionsClient
                 GetString(element, "exchangeSegment") ?? "",
                 GetString(element, "productType") ?? "",
                 GetString(element, "positionType") ?? "",
-                GetInt(element, "netQty") ?? 0));
+                GetInt(element, "netQty") ?? 0)
+            {
+                BuyAvg = GetDecimal(element, "buyAvg") ?? 0,
+                SellAvg = GetDecimal(element, "sellAvg") ?? 0,
+                BuyQty = GetInt(element, "buyQty") ?? 0,
+                SellQty = GetInt(element, "sellQty") ?? 0,
+                RealizedProfit = GetDecimal(element, "realizedProfit") ?? 0,
+            });
         }
 
         return result;
@@ -75,6 +102,9 @@ public sealed class DhanPositionsClient
 
     private static string? GetString(JsonElement element, string property) =>
         element.TryGetProperty(property, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+
+    private static decimal? GetDecimal(JsonElement element, string property) =>
+        element.TryGetProperty(property, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetDecimal() : null;
 
     private static int? GetInt(JsonElement element, string property) =>
         element.TryGetProperty(property, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetInt32() : null;

@@ -41,8 +41,11 @@ public sealed class StoredRollingOptionDataService : IRollingOptionDataSource
 
     public async Task<(IReadOnlyList<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)> Bars, string? Error)> GetRollingOptionCandlesAsync(
         string underlying, uint underlyingSecurityId, string expiryFlag, int expiryCode, string strike, string drvOptionType,
-        DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken)
+        DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken, bool interactive = true)
     {
+        // interactive is part of IRollingOptionDataSource purely to lane DhanRollingOptionDataService's
+        // own rate limiter - this implementation never calls Dhan, so it is unused here by design.
+        _ = interactive;
         if (_connectionString is null)
             return (Array.Empty<(CandleWithVolume, decimal?, decimal?, long?, decimal?)>(),
                 "Stored data source is not configured on this server (no NiftyDataCollector database connection) - turn off 'Use stored data' to fetch live from Dhan instead.");

@@ -9,7 +9,9 @@ public sealed record DhanOptionChainQuote(
     decimal? CeLastPrice,
     long? CeOpenInterest,
     decimal? PeLastPrice,
-    long? PeOpenInterest);
+    long? PeOpenInterest,
+    decimal? CeImpliedVolatility = null,
+    decimal? PeImpliedVolatility = null);
 
 /// <summary>
 /// Dhan's Option Chain API (POST /v2/optionchain), used purely to DECORATE the dashboard's strike
@@ -109,7 +111,15 @@ public sealed class DhanOptionChainQuotes
             }
 
             var quotes = Parse(response.Root);
-            lock (_cache) { _cache[key] = (DateTimeOffset.UtcNow, quotes); }
+            lock (_cache)
+            {
+                _cache[key] = (DateTimeOffset.UtcNow, quotes);
+                // One entry per underlying/expiry ever asked for - drop expiries that have passed so
+                // a server that stays up for weeks doesn't keep every old chain.
+                var today = IstClock.Today();
+                foreach (var stale in _cache.Keys.Where(k => DateOnly.TryParseExact(k[(k.LastIndexOf(':') + 1)..], "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var e) && e < today).ToList())
+                    _cache.Remove(stale);
+            }
             return quotes;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -126,7 +136,7 @@ public sealed class DhanOptionChainQuotes
     /// <summary>Dhan's shape: {"data":{"last_price":…,"oc":{"25650.000000":{"ce":{…},"pe":{…}},…}}} -
     /// strikes are OBJECT KEYS formatted as decimals, so each one is parsed back to a number rather
     /// than string-matched against a strike computed elsewhere.</summary>
-    private static List<DhanOptionChainQuote> Parse(JsonElement root)
+    internal static List<DhanOptionChainQuote> Parse(JsonElement root)
     {
         var quotes = new List<DhanOptionChainQuote>();
 
@@ -138,17 +148,17 @@ public sealed class DhanOptionChainQuotes
             if (!decimal.TryParse(strikeEntry.Name, NumberStyles.Float, CultureInfo.InvariantCulture, out var strike)) continue;
             if (strikeEntry.Value.ValueKind != JsonValueKind.Object) continue;
 
-            var (ceLtp, ceOi) = ReadLeg(strikeEntry.Value, "ce");
-            var (peLtp, peOi) = ReadLeg(strikeEntry.Value, "pe");
-            quotes.Add(new DhanOptionChainQuote(strike, ceLtp, ceOi, peLtp, peOi));
+            var (ceLtp, ceOi, ceIv) = ReadLeg(strikeEntry.Value, "ce");
+            var (peLtp, peOi, peIv) = ReadLeg(strikeEntry.Value, "pe");
+            quotes.Add(new DhanOptionChainQuote(strike, ceLtp, ceOi, peLtp, peOi, ceIv, peIv));
         }
 
         return quotes;
     }
 
-    private static (decimal? LastPrice, long? OpenInterest) ReadLeg(JsonElement strike, string legName)
+    private static (decimal? LastPrice, long? OpenInterest, decimal? ImpliedVolatility) ReadLeg(JsonElement strike, string legName)
     {
-        if (!strike.TryGetProperty(legName, out var leg) || leg.ValueKind != JsonValueKind.Object) return (null, null);
+        if (!strike.TryGetProperty(legName, out var leg) || leg.ValueKind != JsonValueKind.Object) return (null, null, null);
 
         decimal? lastPrice = leg.TryGetProperty("last_price", out var lp) && lp.ValueKind == JsonValueKind.Number
             ? lp.GetDecimal()
@@ -161,6 +171,12 @@ public sealed class DhanOptionChainQuotes
             ? (long)oi.GetDouble()
             : null;
 
-        return (lastPrice, openInterest);
+        // Percent, the same scale the rolling-option IV this app already shows uses. 0 means Dhan
+        // couldn't solve it (no trade yet, deep OTM) - treated as missing, never a real zero IV.
+        decimal? impliedVolatility = leg.TryGetProperty("implied_volatility", out var iv) && iv.ValueKind == JsonValueKind.Number && iv.GetDouble() > 0
+            ? (decimal)iv.GetDouble()
+            : null;
+
+        return (lastPrice, openInterest, impliedVolatility);
     }
 }

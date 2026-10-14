@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.RateLimiting;
 using System.Security.Claims;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
@@ -29,6 +30,7 @@ public sealed class AuthController : ControllerBase
     public sealed record LoginRequest(string? Email, string? Password);
 
     [HttpPost("login")]
+    [EnableRateLimiting("login")]
     public async Task<IActionResult> Login([FromBody] LoginRequest request)
     {
         var role = _auth.TryAuthenticate(request.Email, request.Password);

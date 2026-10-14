@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.RateLimiting;
 using System.Reflection;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.DataProtection;
@@ -47,7 +48,20 @@ builder.Services.AddDataProtection()
 // overridden to plain 401/403 status codes: the framework's own default behaviour for both is a
 // 302 redirect to a login PAGE, which is wrong for a pure API + SPA - a fetch() would just follow
 // the redirect and read back index.html as if the call had succeeded.
-builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
+// The server-side scanner (ScannerRunnerHostedService) signs in with its own per-start key instead of a
+// cookie: a request carrying the X-Runner-Key header goes to that scheme, everything else to the cookie.
+builder.Services.AddSingleton<OptionAnalytics.Server.Auth.ScannerRunnerKey>();
+builder.Services.AddAuthentication(options =>
+    {
+        options.DefaultScheme = "AppAuth";
+        options.DefaultChallengeScheme = CookieAuthenticationDefaults.AuthenticationScheme;
+    })
+    .AddPolicyScheme("AppAuth", "Cookie or the scanner runner's key", options => options.ForwardDefaultSelector = context =>
+        context.Request.Headers.ContainsKey(OptionAnalytics.Server.Auth.ScannerRunnerKey.Header)
+            ? OptionAnalytics.Server.Auth.ScannerRunnerKey.Scheme
+            : CookieAuthenticationDefaults.AuthenticationScheme)
+    .AddScheme<Microsoft.AspNetCore.Authentication.AuthenticationSchemeOptions, OptionAnalytics.Server.Auth.ScannerRunnerAuthenticationHandler>(
+        OptionAnalytics.Server.Auth.ScannerRunnerKey.Scheme, _ => { })
     .AddCookie(options =>
     {
         options.Cookie.Name = "oa_session";
@@ -73,6 +87,16 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
             return Task.CompletedTask;
         };
     });
+
+// Login attempts per client IP: 10 per 5 minutes - the admin account places real orders, so its
+// password must not be guessable by brute force. A rejected attempt gets 429 (LoginPage shows it).
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.AddPolicy("login", context => System.Threading.RateLimiting.RateLimitPartition.GetFixedWindowLimiter(
+        context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        _ => new System.Threading.RateLimiting.FixedWindowRateLimiterOptions { PermitLimit = 10, Window = TimeSpan.FromMinutes(5), QueueLimit = 0 }));
+});
 
 // Fallback policy: every endpoint requires SOME signed-in account by default, unless it opts out
 // with [AllowAnonymous] (AuthController's own login/logout/me, plus /health and /api/version below
@@ -103,6 +127,12 @@ builder.Services.AddSingleton<DhanSpotInstrumentMaster>(sp => new DhanSpotInstru
     sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<DhanOptions>>(),
     sp.GetRequiredService<ILogger<DhanSpotInstrumentMaster>>()));
 builder.Services.AddHttpClient<DhanTotpAuthService>();
+// Shared across DhanHistoricalDataService and DhanRollingOptionDataService below - see its own
+// doc comment for why this must be one singleton rather than one per service (Dhan's Data API
+// limit is account-wide, not per-endpoint).
+builder.Services.AddSingleton<DhanDataApiRateLimiter>();
+// Every past-day Dhan Data API response kept on disk (Storage:DhanCachePath) and answered from there next time.
+builder.Services.AddSingleton<DhanDataCache>();
 builder.Services.AddSingleton<DhanHistoricalDataService>();
 builder.Services.AddSingleton<DhanRollingOptionDataService>();
 // Reads NiftyDataCollector's own TimescaleDB instead of calling Dhan live - inert (never even
@@ -116,6 +146,9 @@ builder.Services.AddSingleton<StoredRollingOptionDataService>();
 builder.Services.AddSingleton<StoredSpotDataService>();
 // Backs the OI Replay page - stored-data-first for spot/options, with a live Dhan fallback outside
 // local development, and futures ALWAYS a live Dhan call (see its own doc comment for all three).
+// One past day's futures candles, fetched once however many endpoints want them: OI Replay's own futures fetch and
+// the Order Flow page's Load day both ask for the same contract-day (see PastFuturesCandleCache).
+builder.Services.AddSingleton<OptionAnalytics.Server.Dhan.PastFuturesCandleCache>();
 builder.Services.AddSingleton<OiReplayService>();
 // Backs the Strike Data page's own OI/IV columns - stored-only (NiftyDataCollectorTimescale), no
 // live Dhan fallback, and unavailable for SENSEX - see its own doc comment for why.
@@ -128,6 +161,23 @@ builder.Services.AddSingleton<DhanFuturesInstrumentMaster>(sp => new DhanFutures
     sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(DhanFuturesInstrumentMaster)),
     sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<DhanOptions>>(),
     sp.GetRequiredService<ILogger<DhanFuturesInstrumentMaster>>()));
+// The futures listed on PAST dates, expired ones included (Dhan's scrip master has live contracts only)
+// - see NseFuturesContractArchive. A singleton: it caches the parsed NSE files.
+builder.Services.AddSingleton(sp => new NseFuturesContractArchive(
+    sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(NseFuturesContractArchive)),
+    sp.GetRequiredService<ILogger<NseFuturesContractArchive>>()));
+// An expired futures contract's past day from NSE's chart data (Dhan has no intraday history for
+// expired contracts) - see NseChartHistory. Keeps NSE's cookies, like the chart page does.
+builder.Services.AddHttpClient(nameof(NseChartHistory))
+    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+    {
+        UseCookies = true,
+        CookieContainer = new System.Net.CookieContainer(),
+        AutomaticDecompression = System.Net.DecompressionMethods.All,
+    });
+builder.Services.AddSingleton(sp => new NseChartHistory(
+    sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(NseChartHistory)),
+    sp.GetRequiredService<ILogger<NseChartHistory>>()));
 builder.Services.AddSingleton<DhanMarketFeedClient>();
 // AddHttpClient<DhanOptionChainMaster>() (the pattern every other typed client here uses) registers
 // it TRANSIENT - a brand new instance, with its own empty in-memory dictionary, for every distinct
@@ -169,6 +219,11 @@ builder.Services.AddHostedService<DhanTotpAutoRenewalHostedService>();
 // opening their own connection.
 builder.Services.AddHostedService<DhanMarketFeedHostedService>();
 
+// Coalesces per-tick CDV/option/futures pushes into one SignalR send per 300ms - see its doc
+// comment. Singleton + hosted, same shared-instance pattern as the services below.
+builder.Services.AddSingleton<LiveBroadcastBatcher>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<LiveBroadcastBatcher>());
+
 // SpotFeedHostedService is both the hosted background loop AND the read model the REST
 // controller queries (its per-underlying candle/price state) - registered as a singleton and
 // then handed to AddHostedService so both consumers share the exact same instance.
@@ -179,10 +234,6 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<SpotFeedHostedServ
 // state directly.
 builder.Services.AddSingleton<CdvHostedService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<CdvHostedService>());
-
-// No-op (logs at Debug and returns) when Telegram:Enabled/BotToken/ChatId aren't set - see
-// TelegramAlertService.
-builder.Services.AddHostedService<EmaCrossoverAlertService>();
 
 // Same singleton+hosted pattern as SpotFeedHostedService/CdvHostedService - AlertsController reads
 // its recent-alert history directly.
@@ -199,6 +250,9 @@ builder.Services.AddHostedService<HistoricalSpotDataPrefetchHostedService>();
 // FetchAcrossSegmentsAsync reads from - see ExpiredOptionDataStore/
 // ExpiredOptionDataPrefetchHostedService's own doc comments.
 builder.Services.AddSingleton<ExpiredOptionDataStore>();
+// The strategy scanner's record as two CSV files - signals.csv and trades.csv, every day in each -
+// Storage:ScannerLogPath; see ScannerLogStore.
+builder.Services.AddSingleton<ScannerLogStore>();
 builder.Services.AddHostedService<ExpiredOptionDataPrefetchHostedService>();
 
 // Every registered IBacktestStrategy is picked up automatically by BacktestService's
@@ -228,9 +282,72 @@ builder.Services.AddSingleton<StrategyTriggerStore>();
 builder.Services.AddSingleton<TriggerOrderHistoryStore>();
 builder.Services.AddHostedService<StrategyTriggerHostedService>();
 
+// Real-money manual trading from the OI Replay trade panel's Live mode, and the account's live
+// positions with event-driven P&L - see LiveTradingService. The order-update socket is what tells it
+// a position changed (fill, target/stop-loss hit) without polling Dhan's REST API.
+builder.Services.AddSingleton<DhanOrderUpdateFeed>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<DhanOrderUpdateFeed>());
+// The live trades the server closes itself at a set time (the scanner's time stop / 15:10), kept on disk.
+builder.Services.AddSingleton<LiveTimeExitStore>();
+builder.Services.AddSingleton<LiveTradingService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<LiveTradingService>());
+
+// Order flow (footprint, delta, depth heatmap, icebergs) for each underlying's nearest futures - see
+// OrderFlowService. DhanDepthFeedClient is Dhan's separate 20-level depth socket.
+builder.Services.AddSingleton<DhanDepthFeedClient>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<DhanDepthFeedClient>());
+// Dhan's 200-level depth (one socket per instrument) for NIFTY/BANKNIFTY futures, and the last few
+// order flow days kept in memory (never on disk) for replay.
+builder.Services.AddSingleton<DhanTwoHundredDepthClient>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<DhanTwoHundredDepthClient>());
+builder.Services.AddSingleton<OptionAnalytics.Server.Services.OrderFlow.OrderFlowDayStore>();
+// TrueData (OFF by default): with TrueData:Enabled true an Order Flow day the server did not record is
+// rebuilt from TrueData's tick history; with it false nothing TrueData is registered or called and
+// OrderFlowHistory runs exactly as before (its TrueData step is null). See TrueDataOptions.
+OptionAnalytics.Server.TrueData.TrueDataRegistration.AddTrueDataIfEnabled(builder.Services, builder.Configuration);
+builder.Services.AddSingleton<OptionAnalytics.Server.Services.OrderFlow.OrderFlowHistory>();
+builder.Services.AddSingleton<OptionAnalytics.Server.Services.OrderFlow.OrderFlowService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<OptionAnalytics.Server.Services.OrderFlow.OrderFlowService>());
+
 // Keeps OI Replay's own "today, live" mode genuinely live over the same shared Dhan WS feed -
 // see OiReplayLiveFeedService's own doc comment.
+// Price falls / rises for 3 minutes while the nearest strike's OI does not give way -> Telegram + a
+// notification on the OI Replay page, with or without a browser open. See OiDivergenceMonitor.
+builder.Services.AddSingleton<OiDivergenceMonitor>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<OiDivergenceMonitor>());
 builder.Services.AddHostedService<OiReplayLiveFeedService>();
+
+// The strategy scanner run on the server for NIFTY, BANKNIFTY and SENSEX (alerts + paper trades), with or
+// without a browser open - a Node process started and watched here. See ScannerRunnerHostedService.
+builder.Services.AddSingleton<ScannerRunnerStore>();
+// The scanner's trades / P&L / record / live changes pushed to open pages the moment they happen (SpotHub groups).
+builder.Services.AddSingleton<ScannerEvents>();
+// Lots, SL / target / trail, slippage, server scanner on/off per index - trade-settings.csv (TradeSettingsStore).
+builder.Services.AddSingleton<TradeSettingsStore>();
+// The admin's Data files page: the server's files (scanner log, cached API data, tuning, settings) - read-only.
+builder.Services.AddSingleton<DataFilesService>();
+// Live trading by the server scanner, per index and for today only, within its limits (server-live.json).
+// Which strategies may trade live per index - proven after costs on the tuning and live records (live-list.json).
+builder.Services.AddSingleton<LiveListService>();
+builder.Services.AddSingleton<ServerLiveService>();
+// The server's own index stop-loss check on live trades - holds even when the scanner is down.
+builder.Services.AddHostedService<ServerLiveStopWatcher>();
+// The daily loss limit (default ₹20,000) - Dhan's P&L based exit set every day, plus a watch here that exits
+// everything and turns Dhan's kill switch on at the limit (KillSwitchService; risk-settings.csv).
+builder.Services.AddSingleton<RiskSettingsStore>();
+// The strategy tuning job (scanner-runner/tune.mjs) - StrategyTuningService / StrategyTuningController.
+// FastOiRange (default true) is the one switch that turns the OI range endpoint's many-days-per-Dhan-call
+// path off and puts every day back on the proven per-day fetch - see StrategyTuningOptions.
+builder.Services.Configure<StrategyTuningOptions>(builder.Configuration.GetSection(StrategyTuningOptions.SectionName));
+builder.Services.AddSingleton<StrategyTuningService>();
+builder.Services.AddHostedService<StrategyTuningResumeHostedService>();
+// Scheduled tuning jobs, run one after another (StrategyTuningQueue).
+builder.Services.AddSingleton<StrategyTuningQueue>();
+builder.Services.AddHostedService<StrategyTuningQueueHostedService>();
+builder.Services.AddSingleton<DhanTradersControlClient>();
+builder.Services.AddSingleton<KillSwitchService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<KillSwitchService>());
+builder.Services.AddHostedService<ScannerRunnerHostedService>();
 
 builder.Services.AddSignalR();
 builder.Services.AddControllers();
@@ -268,6 +385,31 @@ app.UseStaticFiles();
 
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseRateLimiter();
+
+// A request may ask to be served at background priority ("X-Request-Priority: background" - the strategy tuning job
+// sends it during market hours): its Dhan Data-API calls then wait in the rate limiter's background lane, never taking
+// the interactive lane from the live pages and the server scanner. Lowering one's own priority needs no permission.
+app.Use(async (context, next) =>
+{
+    if (string.Equals(context.Request.Headers["X-Request-Priority"], "background", StringComparison.OrdinalIgnoreCase))
+    {
+        using (OptionAnalytics.Server.Dhan.DhanDataApiRateLimiter.BackgroundScope()) await next();
+        return;
+    }
+    await next();
+});
+
+// Who each request's Dhan Data-API calls are for, counted per Dhan endpoint (GET /api/strategy-tuning/dhan-usage ->
+// bySource): the route, and whether it came from a browser page, the server's scanner runner or a tuning job.
+app.Use(async (context, next) =>
+{
+    if (!context.Request.Path.StartsWithSegments("/api")) { await next(); return; }
+    var route = (context.GetEndpoint() as Microsoft.AspNetCore.Routing.RouteEndpoint)?.RoutePattern.RawText ?? context.Request.Path.Value ?? "";
+    var who = !context.Request.Headers.ContainsKey(OptionAnalytics.Server.Auth.ScannerRunnerKey.Header) ? "page"
+        : OptionAnalytics.Server.Dhan.DhanDataApiRateLimiter.IsBackgroundRequest || context.Request.Headers.ContainsKey("X-Tune-Job") ? "tuning job" : "scanner runner";
+    using (OptionAnalytics.Server.Dhan.DhanDataApiRateLimiter.SourceScope($"{who}: {context.Request.Method} /{route.TrimStart('/')}")) await next();
+});
 
 // Container liveness, for Docker's HEALTHCHECK and Dokploy/Traefik. Deliberately says nothing
 // about Dhan: the feed is legitimately unauthenticated outside market hours or while a token

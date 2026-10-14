@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node --test \"tests/*.test.mjs\"",
+    "build:runner": "vite build --config vite.runner.config.js && vite build --config vite.tune.config.js"
   },
   "dependencies": {
     "@microsoft/signalr": "^10.0.11",

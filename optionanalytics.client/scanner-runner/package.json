@@ -1,0 +1,9 @@
+{
+  "name": "optionanalytics-scanner-runner",
+  "private": true,
+  "description": "The server-side strategy scanner, published next to the server (see ScannerRunnerHostedService). Only its runtime dependency is here - the scanner code itself is bundled into runner.mjs by `npm run build:runner` in optionanalytics.client.",
+  "type": "module",
+  "dependencies": {
+    "@microsoft/signalr": "10.0.11"
+  }
+}

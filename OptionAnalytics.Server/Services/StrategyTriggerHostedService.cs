@@ -132,13 +132,16 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     /// handler left attached would keep firing into a stopped service.</summary>
     private readonly List<(SpotUnderlyingState State, Action<Candle> Handler)> _barClosedHandlers = new();
 
+    private readonly RiskSettingsStore? _risk;
+
     public StrategyTriggerHostedService(
         StrategyTriggerStore store, BacktestService backtest, TelegramAlertService telegram,
         SpotFeedHostedService spotFeed, CdvHostedService cdv, DhanOptionChainMaster optionChainMaster,
         DhanSuperOrderClient superOrders, DhanPositionsClient positions, DhanOrderClient orders,
         DhanMarketFeedClient feedClient, TriggerOrderHistoryStore orderHistory,
-        IHubContext<SpotHub> hub, ILogger<StrategyTriggerHostedService> logger)
+        IHubContext<SpotHub> hub, ILogger<StrategyTriggerHostedService> logger, RiskSettingsStore? risk = null)
     {
+        _risk = risk;
         _store = store;
         _backtest = backtest;
         _telegram = telegram;
@@ -978,6 +981,9 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         try
         {
             var alert = new ConfluenceAlert(trade.Underlying, DateTimeOffset.UtcNow, "Confluence", trade.Direction, 0, null, message);
+            // Deliberately Clients.All - see ConfluenceAlertService's own identical broadcast for why
+            // this event specifically stays unscoped (the Dashboard's Alerts panel shows every
+            // underlying at once, not just whichever one is currently charted).
             await _hub.Clients.All.SendAsync("confluenceAlert", alert, cancellationToken);
         }
         catch (Exception ex)
@@ -1460,6 +1466,9 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     /// naked sell otherwise" - the one substitution real money can never make silently.</summary>
     private async Task<string> PlaceOrderAsync(StrategyTrigger trigger, BacktestTrade trade, SuperOrderPlan plan, HedgePlan? hedge, CancellationToken cancellationToken)
     {
+        // The daily loss limit's kill switch tripped today (KillSwitchService): no new entry.
+        if (_risk?.Get() is { Enabled: true } risk && risk.TrippedOn == IstClock.Today())
+            return $"\n\n[NOT PLACED] the daily loss limit (₹{risk.DailyLossLimit:N0}) was reached today - the kill switch is on.";
         var freezeLimit = FreezeQuantityFor(trigger.Underlying);
         string? hedgeNote = null;
 
@@ -1877,7 +1886,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         }
     }
 
-    private static decimal RoundToTick(decimal price, decimal tick) =>
+    internal static decimal RoundToTick(decimal price, decimal tick) =>
         tick > 0 ? Math.Round(price / tick, MidpointRounding.AwayFromZero) * tick : price;
 
     /// <summary>ReferencePrice is the entry price every other number here was derived from - the
@@ -1923,7 +1932,7 @@ public sealed class StrategyTriggerHostedService : BackgroundService
     /// underlying missing from the table fails exactly the way it always would have: at the
     /// exchange, with Dhan's own rejection message, rather than this app silently mis-slicing it
     /// against a made-up number.</summary>
-    private static int FreezeQuantityFor(string underlying) =>
+    internal static int FreezeQuantityFor(string underlying) =>
         FreezeQuantityByUnderlying.TryGetValue(underlying, out var limit) ? limit : int.MaxValue;
 
     /// <summary>Splits <paramref name="totalQuantity"/> into the fewest slices that each stay at or
