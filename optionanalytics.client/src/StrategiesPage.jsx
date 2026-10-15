@@ -10,7 +10,7 @@ import { Alert, Button, Card, Checkbox, Col, Input, InputNumber, Row, Segmented,
 import { SettingOutlined } from '@ant-design/icons'
 import { NavBar, useAuth, UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import { ACTIVE_STRATEGIES, SPOT_STRATEGIES, STRATEGY_FILTERS, DEFAULT_TRAIL, RANGE_IDS, changedFilters, strategyStats, topFifteen } from './strategyEngine.js'
-import { alertIdsFor, trailFor, trailUnit, trailPtsFor } from './scannerCore.js'
+import { alertIdsFor, EVERY_ID, trailFor, trailUnit, trailPtsFor } from './scannerCore.js'
 import { SCANNER_SETTINGS_KEY } from './scannerSettings.js'
 import { ServerScannerCard } from './ServerScanner.jsx'
 import { LiveListCard, ServerLiveSwitch, useServerLive } from './ServerLive.jsx'
@@ -21,7 +21,7 @@ import { StrategyFiltersModal } from './StrategyFiltersModal.jsx'
 const { Title, Text } = Typography
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX']
 // The server scanner's own defaults for anything its settings do not say (scanner-runner/indexScanner.mjs DEFAULT_SETTINGS).
-const DEFAULTS = { alerts: true, telegram: true, pick: 'top15', custom: [], filters: {}, trail: { on: true, ...DEFAULT_TRAIL } }
+const DEFAULTS = { alerts: true, telegram: true, pick: 'every', custom: [], filters: {}, trail: { on: true, ...DEFAULT_TRAIL } }
 const ALL = [...ACTIVE_STRATEGIES, ...SPOT_STRATEGIES.filter((s) => !s.retired)]
 const rupee = (v) => `${v < 0 ? '-' : ''}₹${Math.abs(Math.round(v ?? 0)).toLocaleString('en-IN')}`
 const readLocal = () => { try { return JSON.parse(localStorage.getItem(SCANNER_SETTINGS_KEY)) ?? {} } catch { return {} } }
@@ -259,16 +259,17 @@ function ScannerSettings({ settings, top, onSave }) {
           <Space size={4}><Switch size="small" checked={draft.telegram !== false} onChange={(v) => set({ telegram: v })} aria-label="Telegram" /><Text style={{ fontSize: 12 }}>Telegram</Text></Space>
         </Space>
         <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 }}>
-          <Text style={{ fontSize: 12 }}>Futures strategies alerted</Text>
+          <Text style={{ fontSize: 12 }}>Alert on</Text>
           <div style={{ maxWidth: '100%', overflowX: 'auto' }}>
             <Segmented size="small" value={draft.pick} onChange={(v) => set({ pick: v })} aria-label="Alert on"
               options={[
+                { value: 'every', label: `Every strategy (${EVERY_ID.length})` },
                 { value: 'top15', label: `Top 15${top.measured ? ' (measured)' : ''}${top.trial.length ? ` + ${top.trial.length} on trial` : ''}` },
                 { value: 'oi5', label: 'Top 5 OI + flow' }, { value: 'profile5', label: 'Top 5 profile' },
-                { value: 'range', label: `Range-bound (${RANGE_IDS.length})` }, { value: 'all', label: `All ${ACTIVE_STRATEGIES.length}` }, { value: 'custom', label: 'My choice' },
+                { value: 'range', label: `Range-bound (${RANGE_IDS.length})` }, { value: 'all', label: `All ${ACTIVE_STRATEGIES.length} futures` }, { value: 'custom', label: 'My choice' },
               ]} />
           </div>
-          <Text type="secondary" style={{ fontSize: 12 }}>{ids.length} alerted on every index · any strategy applied on an index or on its live list is traded there too (spot + options ones only that way)</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>{ids.length} alerted on every index (paper; real orders only on an index that is Live today and the strategy's live list) · a strategy applied on an index or on its live list is traded there too</Text>
         </div>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '2px 10px' }}>
           {ACTIVE_STRATEGIES.map((s) => (

@@ -4,11 +4,11 @@
 // Run: npm test (node --test) - see CLAUDE.md.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { evaluateStrategies, simulateOutcome } from '../src/strategyEngine.js'
+import { evaluateStrategies, simulateOutcome, STRATEGY_BY_ID } from '../src/strategyEngine.js'
 import { findWalls } from '../src/orderFlowMath.js'
 import {
   scanTick, completedBars, priceAt, trailFor, followSetups, setupEvents, newSetupEventMemory, newPosition, positionRows, COOLDOWN_MS, MIN,
-  alertIdsFor, sameSignal, scannerLogBody, paperEntryText,
+  alertIdsFor, EVERY_ID, ALL_IDS, ALL_SPOT_IDS, sameSignal, scannerLogBody, paperEntryText,
 } from '../src/scannerCore.js'
 import { applyOrderFlowPush, applyOiTicks, upsertSeries, mergePrints, orderFlowFromSnapshot } from '../src/liveFeeds.js'
 import { day } from './synthetic-day.mjs'
@@ -138,6 +138,12 @@ test('alert lists and the day\'s log', () => {
   assert.deepEqual(alertIdsFor({ pick: 'top15' }, top), ['a', 'b', 'c'])
   assert.deepEqual(alertIdsFor({ pick: 'oi5' }, top), ['a'])
   assert.deepEqual(alertIdsFor({ pick: 'custom', custom: ['x'] }, top), ['x'])
+  // Every strategy: both sets, nothing retired - and all the futures ones stay what "all" means.
+  assert.deepEqual(alertIdsFor({ pick: 'every' }, top), EVERY_ID)
+  assert.equal(EVERY_ID.length, ALL_IDS.length + ALL_SPOT_IDS.length)
+  assert.ok(ALL_SPOT_IDS.length > 0 && ALL_IDS.length > 0)
+  assert.ok(EVERY_ID.every((id) => !STRATEGY_BY_ID[id].retired))
+  assert.deepEqual(alertIdsFor({ pick: 'all' }, top), ALL_IDS)
   const body = scannerLogBody({ underlying: 'NIFTY', date: '2026-10-05', source: 'server', dayResults: [{ ...setup, outcome: { status: 'win', r: 2, exitAt: at(65), exitPrice: 120 } }], rows: [], charges: undefined })
   assert.equal(body.source, 'server')
   assert.equal(body.signals[0].strategyId, 'wallDefence')

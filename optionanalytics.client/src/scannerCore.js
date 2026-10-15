@@ -5,7 +5,7 @@
 import {
   ACTIVE_STRATEGIES, STRATEGY_BY_ID, evaluateStrategies, simulateOutcome, DEFAULT_TRAIL, RANGE_IDS,
   exitLabel, premiumAt, closePremiumAt, optionStopTargetHit, squareOffMs, marketAt, lotsFor, pinnedTrailOf, optionExitText, capPoints, optionTradesFor, valueAt,
-  optionPlanFor, optionTradeAt, filtersForIndex,
+  optionPlanFor, optionTradeAt, filtersForIndex, SPOT_STRATEGIES,
 } from './strategyEngine.js'
 // The market at a signal now lives with the strategies (the order-flow trade filters read it) - re-exported here.
 export { marketAt, MARKET_KEYS } from './strategyEngine.js'
@@ -19,6 +19,9 @@ export const MIN = 60_000
 // One alert per strategy and direction at most every 20 minutes - a setup that stays true is one trade.
 export const COOLDOWN_MS = 20 * MIN
 export const ALL_IDS = ACTIVE_STRATEGIES.map((s) => s.id)
+// The spot + options family (Set 1) and every active strategy of both sets - what "Every strategy" alerts on.
+export const ALL_SPOT_IDS = SPOT_STRATEGIES.filter((s) => !s.retired).map((s) => s.id)
+export const EVERY_ID = [...ALL_IDS, ...ALL_SPOT_IDS]
 export const msOf = (t) => (typeof t === 'number' ? t : new Date(t).getTime())
 
 // 1-minute analyzed bars that had COMPLETED by `nowMs`.
@@ -64,12 +67,12 @@ export const trailFor = (cfg, underlying) => {
   }
 }
 
-// The strategies alerted on: the Top 15 (by default), the OI / profile five, the range-bound ones, all,
-// or a custom list. `top` is topFifteen(strategyStats(...)).
+// The strategies alerted on: every active strategy of both sets (by default), the Top 15, the OI / profile five,
+// the range-bound ones, all the futures ones, or a custom list. `top` is topFifteen(strategyStats(...)).
 export function alertIdsFor(settings, top) {
   const top15Ids = [...top.ids, ...top.trial]
   return settings.pick === 'top15' ? top15Ids : settings.pick === 'oi5' ? top.oi.ids : settings.pick === 'profile5' ? top.profile.ids
-    : settings.pick === 'range' ? RANGE_IDS : settings.pick === 'all' ? ALL_IDS : settings.custom ?? []
+    : settings.pick === 'range' ? RANGE_IDS : settings.pick === 'all' ? ALL_IDS : settings.pick === 'every' ? EVERY_ID : settings.custom ?? []
 }
 
 // Paper trades' lot size per index - the multiplier that turns premium POINTS into rupees (points x lots x lot size).
@@ -449,7 +452,7 @@ export function setupWasTraded(positions, s) {
 // autoPaper 'strategy': each strategy buys or sells what its own tuned setting says (Apply to the scanner), falling back
 // to selling where there is none - nobody is sitting there to choose, unlike the Order Flow page, where the trader's own
 // Buy / Sell always wins.
-export const RUNNER_DEFAULT_SETTINGS = { alerts: true, telegram: true, pick: 'top15', custom: [], filters: {}, trail: { on: true, ...DEFAULT_TRAIL }, autoPaper: 'strategy', paperLots: 1, moneyness: 0 }
+export const RUNNER_DEFAULT_SETTINGS = { alerts: true, telegram: true, pick: 'every', custom: [], filters: {}, trail: { on: true, ...DEFAULT_TRAIL }, autoPaper: 'strategy', paperLots: 1, moneyness: 0 }
 
 /**
  * The scanner settings the server scanner trades ONE index with, from its config (GET /api/scanner-runner/config):

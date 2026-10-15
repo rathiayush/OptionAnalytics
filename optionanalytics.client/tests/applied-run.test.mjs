@@ -4,7 +4,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { runOf, runLink, strategyState } from '../src/appliedRun.js'
-import { optionPlanFor } from '../src/strategyEngine.js'
+import { optionPlanFor, ACTIVE_STRATEGIES, SPOT_STRATEGIES } from '../src/strategyEngine.js'
 import { IndexScanner } from '../scanner-runner/indexScanner.mjs'
 
 const appliedAt = Date.parse('2026-10-12T10:00:00+05:30')
@@ -79,6 +79,15 @@ test('BUY / SELL on the Strategies page is what the server scanner trades: the i
     for (const id of ['buildUp', 'wallBreak']) {
       const s = scanner.settings()
       assert.equal(opt(id, u).leg, optionPlanFor(id, s.filters, s).leg, `${id} on ${u}`)
+    }
+  }
+})
+
+test('an untouched server alerts every active strategy of both sets, on every index', () => {
+  for (const u of ['NIFTY', 'BANKNIFTY', 'SENSEX']) {
+    const scanner = new IndexScanner(u, {})
+    for (const s of [...ACTIVE_STRATEGIES, ...SPOT_STRATEGIES.filter((x) => !x.retired)]) {
+      assert.ok(scanner.isAlerted(s.id), `#${s.no} ${s.name} is alerted on ${u} with no settings saved`)
     }
   }
 })
