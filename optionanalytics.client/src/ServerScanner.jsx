@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Alert, Card, Segmented, Space, Switch, Table, Tag, Tooltip, Typography } from 'antd'
+import { Alert, Button, Card, Popconfirm, Segmented, Space, Switch, Table, Tag, Tooltip, Typography, message } from 'antd'
 import { STRATEGY_BY_ID } from './strategyEngine.js'
 import { UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import { refreshTradeSettings } from './tradeDefaults.js'
@@ -22,6 +22,24 @@ export function ServerScannerCard({ isAdmin, focus }) {
   // Which kind of strategy to watch: the order-flow ones (futures + OI, the Order Flow page's) or the option ones
   // (spot + options). It filters the signals AND the trades of every index at once.
   const [kind, setKind] = useState('all')
+  // Reconcile: the scanner judges again every past day it left open - the signals still showing "open" with no exit
+  // and the trades still running - on those days' own minutes, and posts each record again. It reads the ask with its
+  // config, so it starts within a minute and reports back in its status.
+  const [asking, setAsking] = useState(false)
+  const reconcile = state?.status?.reconcile ?? null
+  const askReconcile = async (days) => {
+    setAsking(true)
+    try {
+      const res = await fetch('/api/scanner-runner/reconcile', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ days }) })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      message.success(`Reconcile asked for the last ${days} days - the scanner starts within a minute and says here what it did`)
+      load()
+    } catch (err) {
+      message.error(`Not asked: ${err.message}`)
+    } finally {
+      setAsking(false)
+    }
+  }
 
   const setEnabled = (underlying, on) => fetch('/api/scanner-runner/config', {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: { [underlying]: on } }),
@@ -98,6 +116,15 @@ export function ServerScannerCard({ isAdmin, focus }) {
               options={[{ value: 'all', label: 'All' }, { value: 'orderflow', label: 'Order flow' }, { value: 'option', label: 'Options' }]}
             />
           </Tooltip>
+          {isAdmin && (
+            <Popconfirm
+              title="Reconcile the days left open"
+              description="Every past day the scanner never finished is judged again on its own minutes: each signal gets its outcome, each paper trade its exit, and the day's record is posted again. It does not place or change any order."
+              okText="Reconcile the last 7 days" cancelText="Cancel" onConfirm={() => askReconcile(7)}
+            >
+              <Button size="small" loading={asking}>Reconcile open entries</Button>
+            </Popconfirm>
+          )}
           <Text type="secondary" style={{ fontSize: 11 }}>{headline}</Text>
         </Space>
       )}
@@ -111,6 +138,14 @@ export function ServerScannerCard({ isAdmin, focus }) {
           {' '}<a href="/api/scanner-log/server-signals">server-signals.csv</a>, <a href="/api/scanner-log/server-trades">server-trades.csv</a> (Trades → Scanner record).
         </Text>
         {error && <Alert type="warning" showIcon message={`Server scanner status not available: ${error}`} />}
+        {reconcile && (
+          <Alert
+            type={reconcile.state === 'failed' ? 'warning' : reconcile.state === 'running' ? 'info' : 'success'}
+            showIcon
+            message={reconcile.state === 'running' ? 'Reconciling the days left open…' : `Reconcile ${reconcile.state === 'failed' ? 'failed' : 'done'}: ${reconcile.message}`}
+            description={reconcile.days?.length ? <Text type="secondary" style={{ fontSize: 11 }}>{reconcile.days.join(' · ')}</Text> : null}
+          />
+        )}
         {indices.map((ix) => {
           // The kind chosen, newest first - and the index's P&L for what is shown.
           const signals = newestFirst((ix.signals ?? []).filter((x) => ofKind(x.spot)), (x) => x.t)

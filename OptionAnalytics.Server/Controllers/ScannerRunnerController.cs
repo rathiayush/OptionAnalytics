@@ -89,6 +89,15 @@ public sealed class ScannerRunnerController : ControllerBase
         return Ok(WithTradeSettings(_store.Update(patch)));
     }
 
+    /// <summary>POST /api/scanner-runner/reconcile - an admin asks the scanner to close out the past days it left open:
+    /// the signals still showing "open" with no exit, and the paper trades still running. The scanner reads the ask with
+    /// its config (so within a minute), re-reads each of those days' own minutes, judges every signal and closes every
+    /// trade on them, and posts the day's record again. It reports what it did in its status (reconcile).</summary>
+    [HttpPost("reconcile")]
+    [Authorize(Roles = AuthRoles.Admin)]
+    public IActionResult Reconcile([FromBody] ReconcileRequest? request) =>
+        Ok(WithTradeSettings(_store.AskReconcile(request?.Days ?? 7, User.Identity?.Name)));
+
     /// <summary>POST /api/scanner-runner/status - the runner's heartbeat (per index: last look, signals, paper trades) - on to
     /// the open pages at once when its trades or P&amp;L changed (ScannerEvents).</summary>
     [HttpPost("status")]
@@ -208,3 +217,6 @@ public sealed class ScannerRunnerController : ControllerBase
     [HttpGet("status")]
     public IActionResult GetStatus() => Ok(_store.Status());
 }
+
+/// <summary>How many days back to look for a day the scanner never finished (1 - 60; 7 by default).</summary>
+public sealed record ReconcileRequest(int? Days);

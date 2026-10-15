@@ -263,11 +263,13 @@ export class IndexScanner {
 
   // ---- Finishing a day -----------------------------------------------------------------------------
 
-  /** Once the session is over, today is finished - once. Called every loop; does nothing until then. */
-  async finishIfDue() {
-    if (!this.date || this.finished === this.date) return false
+  /** Once the session is over, today is finished - once. Called every loop; does nothing until then. `force` (a
+   *  reconcile): today is judged again even if it was finished already - but still only once its session is over, since
+   *  a signal still running during the day is open for a good reason. */
+  async finishIfDue({ force = false } = {}) {
+    if (!this.date || (this.finished === this.date && !force)) return false
     if (istClock(this.io.now()).minute < SESSION_OVER_MINUTE || istDate(this.io.now()) !== this.date) return false
-    return this.finishDay(this.date)
+    return this.finishDay(this.date, { force })
   }
 
   /** The day's minutes read back whole, for a date whose session is over: the futures 1-minute bars (the day the
@@ -298,21 +300,26 @@ export class IndexScanner {
    * day the runner was down for at the close is still finished, on the backend, with no page open.
    * Returns true when a record was posted.
    */
-  async finishDay(date) {
-    if (!date || this.finished === date) return false
+  async finishDay(date, { force = false } = {}) {
+    if (!date || (this.finished === date && !force)) return false
     const today = date === this.date
     const state = today
       ? { date, fired: this.memory.fired, positions: this.positions, trailLog: this.trailLog, notified: [...this.notified] }
       : await this.io.loadState(this.underlying, date)
-    if (!state || state.finished) { if (today && state?.finished) this.finished = date; return false }
+    // `force` (the trader pressed Reconcile): a day already marked finished is judged again, so a day whose minutes were
+    // missing the first time - and whose signals are still showing "open" - gets another go.
+    if (!state || (state.finished && !force)) { if (today && state?.finished) this.finished = date; return false }
     const fired = state.fired ?? []
     const positions = state.positions ?? []
-    const tries = (state.finishTries ?? 0) + 1
+    const tries = force ? 1 : (state.finishTries ?? 0) + 1
     const done = async (finished = true) => {
       await this.io.saveState(this.underlying, date, { ...state, date, positions, finishTries: tries, finished })
       if (today && finished) this.finished = date
     }
     if (!fired.length && !positions.length) { await done(); return false }
+    // Forced: the exits already frozen onto the trades are kept (the record is what Telegram said), but a day left
+    // half-judged is read again from scratch.
+    if (force) this.io.log(`${this.underlying}: ${date} reconciling - judging it again on its own minutes`)
 
     const cfg = this.settings()
     const data = today && this.data?.oi ? { view: this.data.view, oi: this.data.oi, spotBars: this.spotBars } : await this.pastDay(date)
