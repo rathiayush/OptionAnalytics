@@ -19,11 +19,14 @@ export function signalFromRow(r) {
   return { id: r.strategy_id || null, side: r.side, t, entry: n(r.entry), outcome: { status: r.status, exitAt: Number.isFinite(exitAt) ? exitAt : null, exitPrice: n(r.exit_price) } }
 }
 
-/** A closed signal row with no If bought / If sold yet, or one worked out under the older rule (held to the index exit:
- *  no exit reason kept with it). */
-export const needsLegs = (r) => !!signalFromRow(r) && !r.buy_exit_reason && !r.sell_exit_reason
+/** A closed signal row missing EITHER option: no If bought / If sold at all, just one of the two, or a pair worked out
+ *  under the older rule (held to the index exit - no exit reason kept with it).
+ *  Half a pair was the common case and used to be invisible here: a futures setup is built part-way through a minute,
+ *  so a strike with no tick yet left that side null on the setup for the rest of the day, and a row carrying the other
+ *  side's exit reason read as "already done". */
+export const needsLegs = (r) => !!signalFromRow(r) && !(r.buy_exit_reason && r.sell_exit_reason)
 /** One worked out under the older rule (it has points, but no exit reason). */
-export const oldRuleLegs = (r) => needsLegs(r) && (n(r.buy_points) != null || n(r.sell_points) != null)
+export const oldRuleLegs = (r) => needsLegs(r) && !r.buy_exit_reason && !r.sell_exit_reason && (n(r.buy_points) != null || n(r.sell_points) != null)
 
 /** The legs of `rows` (signal rows of ONE index and day) from that day's OI context `ctx`, as the log keeps them, with
  *  `cfg` - the scanner settings of that index (runnerSettingsOf: its strategies' filters, max rules, what it trades). */
@@ -34,10 +37,14 @@ export function legsFromContext(rows, ctx, cfg = {}) {
     if (!x || !ctx) continue
     const legs = signalLegs(x, ctx, { filters: cfg.filters ?? {}, cfg })
     if (legs.buyPoints == null && legs.sellPoints == null) continue
+    // A side the day's own option data cannot price (that strike never traded) is written as that, not left empty: it
+    // reads "-" with the reason on hover, and the row is not offered to be worked out again for ever.
+    const NO_PRICE = 'no option price on the day'
     out.push({
       key: r.key, buyOption: legs.buyOption ?? null, buyEntry: legs.buyEntry ?? null, buyExit: legs.buyExit ?? null, buyPoints: legs.buyPoints ?? null,
       sellOption: legs.sellOption ?? null, sellEntry: legs.sellEntry ?? null, sellExit: legs.sellExit ?? null, sellPoints: legs.sellPoints ?? null,
-      buyExitTime: legs.buyExitTime ?? null, buyExitReason: legs.buyExitReason ?? null, sellExitTime: legs.sellExitTime ?? null, sellExitReason: legs.sellExitReason ?? null,
+      buyExitTime: legs.buyExitTime ?? null, buyExitReason: legs.buyExitReason ?? (legs.buyPoints == null ? NO_PRICE : null),
+      sellExitTime: legs.sellExitTime ?? null, sellExitReason: legs.sellExitReason ?? (legs.sellPoints == null ? NO_PRICE : null),
     })
   }
   return out

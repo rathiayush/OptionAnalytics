@@ -1330,9 +1330,9 @@ function ScannerRecord({ initial = {}, kind = 'signals' }) {
             <span>if bought every time <b style={{ color: col(compare.bought.total) }}>{pts(compare.bought.total)}</b> pts{compare.bought.n < shown.length ? ` (${compare.bought.n} kept)` : ''}</span>
             <span>if sold every time <b style={{ color: col(compare.sold.total) }}>{pts(compare.sold.total)}</b> pts{compare.sold.n < shown.length ? ` (${compare.sold.n} kept)` : ''}</span>
             {isAdmin && toFill.length > 0 && (
-              <Tooltip title="Older signals were kept without what the option bought / sold would have made, or with it held until the index trade exited (the older rule - not how the trade leaves): worked out now from that day's option data the way the trade is taken - the strategy's strike, out at its own option exit (its SL / target held to the index's Max SL / Max target, else with the index trade), with each index's settings now - and saved, so it is done once.">
+              <Tooltip title="Signals kept without what the option bought / sold would have made - neither side, or just ONE of the two (a strike with no tick at the moment the signal fired left that side blank) - or with it held until the index trade exited (the older rule - not how the trade leaves): worked out now from that day's option data the way the trade is taken - the strategy's strike, out at its own option exit (its SL / target held to the index's Max SL / Max target, else with the index trade), with each index's settings now - and saved, so it is done once.">
                 <Button size="small" loading={!!filling} onClick={fillLegs} disabled={runnerConfig == null}>
-                  {filling ? `Working out… ${filling.done} / ${filling.total} day(s)${filling.underlying ? ` · ${filling.underlying} ${filling.date}` : ''}` : toRedo ? `Redo with each option's own exit (${toFill.length})` : `Fill in the older ones (${toFill.length})`}
+                  {filling ? `Working out… ${filling.done} / ${filling.total} day(s)${filling.underlying ? ` · ${filling.underlying} ${filling.date}` : ''}` : toRedo ? `Redo with each option's own exit (${toFill.length})` : `Fill in the missing option legs (${toFill.length})`}
                 </Button>
               </Tooltip>
             )}

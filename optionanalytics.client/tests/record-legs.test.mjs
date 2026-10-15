@@ -22,7 +22,13 @@ test('a closed signal row without them needs them, and one under the older rule 
   assert.equal(needsLegs(row(40, { status: 'open', exit_time_ist: '' })), false)
   assert.equal(needsLegs(row(40, { buy_points: '12.5' })), true, 'held to the index exit: done again')
   assert.equal(oldRuleLegs(row(40, { buy_points: '12.5' })), true)
-  assert.equal(needsLegs(row(40, { buy_points: '12.5', buy_exit_reason: 'Max SL 20 pts hit' })), false)
+  // HALF a pair is not done: this one has the option bought but nothing for the option sold, which is what left "-"
+  // down the If sold column. Both sides worked out is done.
+  assert.equal(needsLegs(row(40, { buy_points: '12.5', buy_exit_reason: 'Max SL 20 pts hit' })), true, 'the sell side is still missing')
+  assert.equal(oldRuleLegs(row(40, { buy_points: '12.5', buy_exit_reason: 'Max SL 20 pts hit' })), false, 'not the older rule - one side simply never had a price')
+  assert.equal(needsLegs(row(40, { buy_points: '12.5', buy_exit_reason: 'Max SL 20 pts hit', sell_points: '-4', sell_exit_reason: 'with the index trade - Target hit' })), false, 'both sides done')
+  // A side the day's data could not price is written as that, so it is not offered again.
+  assert.equal(needsLegs(row(40, { buy_points: '12.5', buy_exit_reason: 'Max SL 20 pts hit', sell_exit_reason: 'no option price on the day' })), false)
   assert.deepEqual(signalFromRow(row(40)), { id: 'wallBreak', side: 'LONG', t: at(40), entry: 22500, outcome: { status: 'win', exitAt: at(60), exitPrice: 22530 } })
 })
 
@@ -77,7 +83,8 @@ test('every index and day fetched once; a day without data is reported, not gues
   })
   assert.deepEqual(fetched, ['NIFTY 2026-10-05', 'BANKNIFTY 2026-10-05'])
   assert.deepEqual(asked, ['NIFTY'], 'each index\'s settings, for the days it has')
-  assert.deepEqual(legs.map((l) => l.key), [row(40).key, row(70).key, row(50).key], 'the older rule\'s done again; one done under this rule left')
+  assert.deepEqual(legs.map((l) => l.key), [row(40).key, row(70).key, row(50).key, row(55).key],
+    'the older rule\'s done again, and so is the one with only ONE of its two options worked out')
   assert.deepEqual(failed, [{ underlying: 'BANKNIFTY', date: '2026-10-05', reason: 'no data' }])
   assert.match(recordRunUrl('BANKNIFTY', '2026-10-05'), /^\/api\/oi-replay\/BANKNIFTY\/run\?date=2026-10-05&timeframeMinutes=1&expiryFlag=MONTH$/)
 })
