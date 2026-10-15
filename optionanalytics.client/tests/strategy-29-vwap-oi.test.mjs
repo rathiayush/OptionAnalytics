@@ -88,8 +88,9 @@ check('filter: VWAP slope 0.2% -> this trend (0.06%) is too flat', !scenario(1, 
 {
   const mk = (id, rs) => rs.map((r, i) => ({ id, t: i, outcome: { status: r > 0 ? 'win' : 'loss', r } }))
   const unmeasured = topFifteen(strategyStats([]))
-  // On trial (#29 / #30 retired): #27, the never-alerted 5, 7, 10, 16, 22, 23 and the new #31-33 - beside the Top 15, pushing nothing out.
-  check('on trial: #27, 5 / 7 / 10 / 16 / 22 / 23, #31-33 and #34-37, beside the Top 15, pushing nothing out', unmeasured.trial.join() === 'flush,range,maxPain,weakWall,vwapFade,ibFade,vwapPullback,straddleFade,wallShift,cumFlip,pocReject,vaEdgeReject,hvnReject,lvnReject'
+  // On trial (#29 / #30 and the volume-profile ones retired): #16, 22, 23, #27 and the new #31-33 - beside the Top 15,
+  // pushing nothing out. With 22 running, the Top 15 now takes in #5, #7 and #10 as well.
+  check('on trial: #16 / 22 / 23, #27 and #31-33, beside the Top 15, pushing nothing out', unmeasured.trial.join() === 'weakWall,vwapFade,ibFade,vwapPullback,straddleFade,wallShift,cumFlip'
     && unmeasured.trial.every((id) => !unmeasured.ids.includes(id))
     && unmeasured.ids.length === 15 && unmeasured.ids.includes('blockTrade') && unmeasured.ids.includes('imbalanceRetest'), JSON.stringify({ ids: unmeasured.ids, trial: unmeasured.trial }))
   const measured = topFifteen(strategyStats([...mk('vwapOi', [2, 2, -1, 2, 2, 2]), ...mk('ibFailed', [2, 2, -1, 2, 2, 2])]))

@@ -99,6 +99,15 @@ When adding or changing a strategy:
   (`tests/strategy-tuning.test.mjs`);
 - a strategy that measures as losing is RETIRED (`retired: true` in `STRATEGIES`), not deleted: it is
   not run, listed, alerted or scored (`ACTIVE_STRATEGIES`); tests can still run it with `includeRetired`.
+- **NO strategy may trade the previous session's VOLUME profile** (`sessionVolumeProfile` - `profile.vp`: POC, value
+  area, HVN / LVN). The server keeps only the last few days of real order flow; every older day comes back
+  "estimated", rebuilt from Dhan's 1-minute candles, where the volume at each price INSIDE a bar is made up - so those
+  levels were often never there. #11, #13, #14 and #34 - #37 are retired for that reason (not for losing) and
+  `tests/no-volume-profile.test.mjs` is the guard: taking `profile.vp` away changes nothing an active strategy does.
+  The MARKET (TPO) profile (`profile.tpoPrev`, time at price) and the spot strategies' own `spotProfile` are fine -
+  they need only each bar's high and low, which are real on an estimated day too - so #12 and spot #111 - #113 keep
+  running. A new strategy must not read `profile.vp`; if a real volume profile ever reaches the scanner, the retired
+  rules are still there to bring back.
 
 ### Rules the scanner must keep (checked by `tests/audit.test.mjs`)
 

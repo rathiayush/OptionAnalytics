@@ -58,11 +58,18 @@ export const STRATEGIES = [
   // retired: heavy icebergs are sent to Telegram instead (Order Flow page, "Iceberg Telegram"); the rules stay tested.
   { id: 'iceberg', no: 9, name: 'Iceberg on an OI strike', short: 'Iceberg at OI wall', retired: true },
   { id: 'maxPain', no: 10, name: 'Expiry-day max-pain pull', short: 'Max-pain pull', trial: true },
-  // Volume profile (previous session) and market profile, each confirmed by OI and order flow.
-  { id: 'vaRejection', no: 11, name: 'Previous value-area edge rejection', short: 'Value area rejection', group: 'profile' },
+  // The previous session's VOLUME profile (POC, value area, HVN / LVN) is NOT trusted and no strategy trades it any
+  // more: it is built from the previous day's per-price-level volume (sessionVolumeProfile), and the server only keeps
+  // the last few days of real order flow - every older day comes back "estimated", rebuilt from Dhan's 1-minute
+  // candles, where the volume at each price inside a bar is made up. So its POC / VAH / VAL / HVN / LVN were
+  // frequently levels that never existed. #11, #13, #14 and #34 - #37 are retired for that reason, not for losing;
+  // their rules stay (the tests still run them) so they can come back if a real volume profile ever reaches the
+  // scanner. #12 reads the previous session's MARKET (TPO) profile instead - time at price, which needs only each
+  // bar's high and low, and those are real on an estimated day too - so it keeps running.
+  { id: 'vaRejection', no: 11, name: 'Previous value-area edge rejection', short: 'Value area rejection', group: 'profile', retired: true },
   { id: 'tpo80', no: 12, name: 'Market profile 80% rule', short: 'Eighty percent rule', group: 'profile' },
-  { id: 'pocReaction', no: 13, name: 'Previous POC reaction', short: 'POC reaction', group: 'profile' },
-  { id: 'lvnRun', no: 14, name: 'LVN run to the next HVN', short: 'LVN run', group: 'profile' },
+  { id: 'pocReaction', no: 13, name: 'Previous POC reaction', short: 'POC reaction', group: 'profile', retired: true },
+  { id: 'lvnRun', no: 14, name: 'LVN run to the next HVN', short: 'LVN run', group: 'profile', retired: true },
   { id: 'ibBreakout', no: 15, name: 'Initial balance breakout', short: 'IB breakout', group: 'profile' },
   // OI + order flow again: a weak secondary wall giving way on its second test.
   { id: 'weakWall', no: 16, name: 'Weak OI wall - second retest break', short: 'Weak wall retest', trial: true },
@@ -108,11 +115,12 @@ export const STRATEGIES = [
   { id: 'wallShift', no: 32, name: 'S/R OI wall shift - writers rolling with the price', short: 'Wall shift', trial: true },
   { id: 'cumFlip', no: 33, name: 'Since-open CE / PE flip + futures build-up on the VWAP side', short: 'Since-open OI flip', trial: true },
   // 34-37: rejections at the previous session's volume-profile levels, led by the option writers (OI) - lighter on
-  // order flow than #11 / #13 (no absorption, DOM or heatmap needed), so they trade estimated days too.
-  { id: 'pocReject', no: 34, name: 'Previous POC rejection + option writing', short: 'POC rejection + OI', group: 'profile', trial: true },
-  { id: 'vaEdgeReject', no: 35, name: 'Previous VAH / VAL rejection + option writing', short: 'VAH/VAL rejection + OI', group: 'profile', trial: true },
-  { id: 'hvnReject', no: 36, name: 'Previous HVN rejection + option writing', short: 'HVN rejection + OI', group: 'profile', trial: true },
-  { id: 'lvnReject', no: 37, name: 'LVN rejection - the thin area refused + option writing', short: 'LVN rejection + OI', group: 'profile', trial: true },
+  // order flow than #11 / #13 (no absorption, DOM or heatmap needed), so they trade estimated days too. RETIRED with
+  // #11 / #13 / #14: the levels they reject at come from that same untrusted volume profile (see above).
+  { id: 'pocReject', no: 34, name: 'Previous POC rejection + option writing', short: 'POC rejection + OI', group: 'profile', trial: true, retired: true },
+  { id: 'vaEdgeReject', no: 35, name: 'Previous VAH / VAL rejection + option writing', short: 'VAH/VAL rejection + OI', group: 'profile', trial: true, retired: true },
+  { id: 'hvnReject', no: 36, name: 'Previous HVN rejection + option writing', short: 'HVN rejection + OI', group: 'profile', trial: true, retired: true },
+  { id: 'lvnReject', no: 37, name: 'LVN rejection - the thin area refused + option writing', short: 'LVN rejection + OI', group: 'profile', trial: true, retired: true },
 ]
 /** The SPOT + OPTIONS strategies (spotEngine.js): they trade the index price itself - spot candles and the option
  *  chain's OI, no futures and no order flow. Measured by the Strategy tuning ("Spot + options only"); the live
@@ -810,8 +818,9 @@ export function premiumAt(oi, side, strike, ms, maxStaleMs = 5 * MIN) {
  *  while it runs: a live read at `ms` would be the NEXT minute's running price, so it steps back to the minute that ended
  *  at `ms`. What an option is priced at when it leaves a trade at a minute's end (its signal's exit) - never a price from
  *  after it, which kept changing for a minute after the exit was announced. */
-export function closePremiumAt(oi, side, strike, ms) {
-  return premiumAt(oi, side, strike, (oi?.lag ?? 0) === MIN ? ms : ms - MIN)
+export function closePremiumAt(oi, side, strike, ms, maxStaleMs) {
+  const at = (oi?.lag ?? 0) === MIN ? ms : ms - MIN
+  return maxStaleMs === undefined ? premiumAt(oi, side, strike, at) : premiumAt(oi, side, strike, at, maxStaleMs)
 }
 
 /** The two ways to trade a setup with options, at the ATM strike: BUY the option that gains with the
@@ -1605,8 +1614,46 @@ export function evaluateStrategies(input) {
     }
   }
 
-  // ---- 11-15: volume profile (previous session) + market profile, with OI and order flow ----------
+  // ---- 12: the previous session's MARKET (TPO) profile - time at price, with OI and order flow ----------
+  // The TPO profile is minutes spent at each price, so it needs only each bar's high and low - real even on a day
+  // rebuilt from Dhan's candles. It is NOT the volume profile below, and #12 keeps running on it.
   const prof = input.profile
+  if (prof?.tpoPrev) {
+    const oiRising = (side, wall, mins = 15) => wall != null && grew(side === 'put' ? oi.pe : oi.ce, wall, mins)
+    // 12. Market profile 80% rule - 10:00-14:00: opened outside the previous TPO value area, back inside it
+    //     for two 30-minute periods (here: the last 30 completed minutes all inside) -> the other edge.
+    const tpo = prof.tpoPrev
+    if (tpo && minute >= hm(10, 0) && minute <= hm(14, 0)) {
+      const dayOpenMs = sessionStartMs
+      const openBar = minuteBars.find((b) => msOf(b.time) >= dayOpenMs)
+      const last30 = bars.slice(-30)
+      if (openBar && last30.length >= 30) {
+        for (const dir of [1, -1]) {
+          const openedOutside = dir > 0 ? openBar.open < tpo.val : openBar.open > tpo.vah
+          const held = last30.every((b) => b.close >= tpo.val && b.close <= tpo.vah)
+          if (!openedOutside || !held) continue
+          const target = dir > 0 ? tpo.vah : tpo.val
+          const blocking = dir > 0 ? resistance : support
+          if (blocking != null && dir * (blocking + basis - price) > 0 && dir * (blocking + basis - target) < 0 && oiRising(dir > 0 ? 'call' : 'put', blocking, 30)) continue
+          const footprint = dir * (last.cvd - last30[0].cvd) > 0 && !stackAgainst(dir, 3)
+          const tapeOk = aggWith(dir, 55)
+          const c = confirm(dir)
+          if (!footprint || !tapeOk || !c.ok) continue
+          const stopPts = Math.max(pct(0.0012), Math.abs(price - (dir > 0 ? tpo.val : tpo.vah)) + pct(0.0005))
+          if (Math.abs(target - price) < 1.2 * stopPts) continue
+          push('tpo80', dir, stopPts, Math.abs(target - price), 90, 63, {
+            OI: blocking != null ? `no growing ${dir > 0 ? 'CALL' : 'PUT'} wall before the target` : 'no wall in the way',
+            Profile: `opened ${dir > 0 ? 'below' : 'above'} the previous TPO value area ${tpo.val}-${tpo.vah}, 30 min accepted inside`,
+            Footprint: 'ΣΔ toward the far edge', Tape: tapeText, DOM: c.dom, Heatmap: c.heat,
+          })
+        }
+      }
+    }
+  }
+
+  // ---- 11, 13, 14: the previous session's VOLUME profile, with OI and order flow ----------
+  // RETIRED (see STRATEGIES): the volume at each price inside a bar is made up on an estimated day, so these levels
+  // were often never there. The rules stay and the tests still run them (includeRetired).
   if (prof?.vp?.poc != null) {
     const vp = prof.vp
     const near = (level, pctBand) => level != null && Math.abs(price - level) <= pct(pctBand)
@@ -1640,36 +1687,6 @@ export function evaluateStrategies(input) {
           Profile: `previous session VA ${vp.val}-${vp.vah}, POC ${vp.poc} (target)`,
           Footprint: `${absorbed(dir) ? 'absorption' : 'exhaustion'} outside the value area, back inside`, Tape: tapeText, DOM: c.dom, Heatmap: c.heat,
         })
-      }
-    }
-
-    // 12. Market profile 80% rule - 10:00-14:00: opened outside the previous TPO value area, back inside it
-    //     for two 30-minute periods (here: the last 30 completed minutes all inside) -> the other edge.
-    const tpo = prof.tpoPrev
-    if (tpo && minute >= hm(10, 0) && minute <= hm(14, 0)) {
-      const dayOpenMs = sessionStartMs
-      const openBar = minuteBars.find((b) => msOf(b.time) >= dayOpenMs)
-      const last30 = bars.slice(-30)
-      if (openBar && last30.length >= 30) {
-        for (const dir of [1, -1]) {
-          const openedOutside = dir > 0 ? openBar.open < tpo.val : openBar.open > tpo.vah
-          const held = last30.every((b) => b.close >= tpo.val && b.close <= tpo.vah)
-          if (!openedOutside || !held) continue
-          const target = dir > 0 ? tpo.vah : tpo.val
-          const blocking = dir > 0 ? resistance : support
-          if (blocking != null && dir * (blocking + basis - price) > 0 && dir * (blocking + basis - target) < 0 && oiRising(dir > 0 ? 'call' : 'put', blocking, 30)) continue
-          const footprint = dir * (last.cvd - last30[0].cvd) > 0 && !stackAgainst(dir, 3)
-          const tapeOk = aggWith(dir, 55)
-          const c = confirm(dir)
-          if (!footprint || !tapeOk || !c.ok) continue
-          const stopPts = Math.max(pct(0.0012), Math.abs(price - (dir > 0 ? tpo.val : tpo.vah)) + pct(0.0005))
-          if (Math.abs(target - price) < 1.2 * stopPts) continue
-          push('tpo80', dir, stopPts, Math.abs(target - price), 90, 63, {
-            OI: blocking != null ? `no growing ${dir > 0 ? 'CALL' : 'PUT'} wall before the target` : 'no wall in the way',
-            Profile: `opened ${dir > 0 ? 'below' : 'above'} the previous TPO value area ${tpo.val}-${tpo.vah}, 30 min accepted inside`,
-            Footprint: 'ΣΔ toward the far edge', Tape: tapeText, DOM: c.dom, Heatmap: c.heat,
-          })
-        }
       }
     }
 
@@ -2480,7 +2497,6 @@ export function evaluateStrategies(input) {
       const ibEndMs = sessionOpen + 60 * MIN
       const windowBars = bars.filter((b) => msOf(b.time) >= Math.max(ibEndMs, nowMs - f.lookbackMin * MIN))
       const sweepsIn = recent(input.sweeps ?? [], nowMs, f.lookbackMin * MIN, (w) => msOf(w.endedAt))
-      const vp = input.profile?.vp
       for (const dir of [1, -1]) {
         // dir = the trade: LONG after a failed break DOWN through the IB low, SHORT after one UP.
         const edge = dir > 0 ? ibLow : ibHigh
@@ -2514,11 +2530,10 @@ export function evaluateStrategies(input) {
         const targetPrice = edge + f.targetFrac * (other - edge)
         const toTarget = dir * (targetPrice - price)
         if (toTarget < f.minRR * stopPts) continue
-        const backInVa = vp?.val != null && vp?.vah != null && last.close >= vp.val && last.close <= vp.vah
         push('ibFailed', dir, stopPts, toTarget, f.timeStopMin,
-          62 + (tail ? 3 : 0) + (sweep ? 4 : 0) + (writersDefend ? 4 : 0) + (backInVa ? 3 : 0), {
+          62 + (tail ? 3 : 0) + (sweep ? 4 : 0) + (writersDefend ? 4 : 0), {
             OI: writersDefend ? `${dir > 0 ? 'put' : 'call'} writers defend the IB ${dir > 0 ? 'low' : 'high'}: ${strike} ${dir > 0 ? 'PE' : 'CE'} OI added in 15 min` : `writers at ${strike} not adding (filter off)`,
-            Profile: `broke the IB ${dir > 0 ? 'low' : 'high'} ${edge} by ${(dir * (edge - extreme)).toFixed(1)} (${closesBeyond} close${closesBeyond === 1 ? '' : 's'} out there) and is back inside the IB ${ibLow}-${ibHigh}${backInVa ? ' and the previous value area' : ''}`,
+            Profile: `broke the IB ${dir > 0 ? 'low' : 'high'} ${edge} by ${(dir * (edge - extreme)).toFixed(1)} (${closesBeyond} close${closesBeyond === 1 ? '' : 's'} out there) and is back inside the IB ${ibLow}-${ibHigh}`,
             Trapped: trapped ? [tail && `tail - the extreme bar closed back ${Math.round((dir * (extremeBar.close - extreme) / barRange) * 100)}% of its range`, sweep && 'a sweep into the break', blocks.count >= 2 && `${blocks.count} big prints beyond the edge`].filter(Boolean).join(' · ') : 'no tail / sweep (filter off)',
             Footprint: `Δ ${last.delta > 0 ? '+' : ''}${last.delta}`, Tape: tapeText, DOM: c.dom, Heatmap: c.heat,
             Plan: `target ${f.targetFrac === 1 ? 'the other IB edge' : f.targetFrac === 0.5 ? 'the IB middle' : `${f.targetFrac}x back across the IB`} ${targetPrice.toFixed(1)}`,
@@ -2902,6 +2917,7 @@ export function simulateOutcome(setup, minuteBars, untilMs, dayOver = false) {
   const statusOf = (r) => (r > 0.005 ? 'win' : r < -0.005 ? 'loss' : 'flat')
   let mfe = 0
   let lastClose = setup.entry
+  let lastAt = null // the last bar the trade actually saw - where a dayOver close happens
   let best = setup.entry
   let stop = setup.stop
   const state = () => ({ stop, trailed: stop !== setup.stop })
@@ -2919,6 +2935,7 @@ export function simulateOutcome(setup, minuteBars, untilMs, dayOver = false) {
     }
     if (favourable) return { status: 'win', r: rTarget, mfe, exitAt: t, exitPrice: setup.target, ...state() }
     lastClose = b.close
+    lastAt = t
     best = dir > 0 ? Math.max(best, b.high) : Math.min(best, b.low)
     // The trail in force once this bar is done: the one the setup fired with, or the latest change (setup.trailLog,
     // [{ t, trail }]) up to then - a mid-trade change of the trailing SL applies from its time on, the stop only
@@ -2935,7 +2952,9 @@ export function simulateOutcome(setup, minuteBars, untilMs, dayOver = false) {
     }
   }
   const r = (dir * (lastClose - setup.entry)) / risk
-  return dayOver ? { status: statusOf(r), r, mfe, exitPrice: lastClose, timeStop: true, ...state() } : { status: 'open', r, mfe, ...state() }
+  // The day's data ends before the trade did: it leaves at the last minute it saw, at that minute's close - so it has a
+  // real exit time, and its option is priced where the day's data actually reaches.
+  return dayOver ? { status: statusOf(r), r, mfe, exitAt: lastAt ?? undefined, exitPrice: lastClose, timeStop: true, ...state() } : { status: 'open', r, mfe, ...state() }
 }
 
 /** How an outcome ended, for alerts and the list. */

@@ -40,7 +40,9 @@ const around = (level, last) => (m) => (m < 89 ? c(level + ((m % 4) - 1.5), leve
 
 test('the spot strategies are not in the futures scanner\'s list, and every one has the trade filters', () => {
   assert.equal(STRATEGIES.length, 37)
-  assert.equal(ACTIVE_STRATEGIES.length, 29)
+  // 22 running: #11, #13, #14 and #34 - #37 are retired with the previous session's volume profile
+  // (tests/no-volume-profile.test.mjs), along with the earlier retirements.
+  assert.equal(ACTIVE_STRATEGIES.length, 22)
   for (const s of SPOT_STRATEGIES) {
     assert.ok(!ACTIVE_STRATEGIES.some((a) => a.id === s.id))
     assert.equal(strategyFilters(s.id, {}).tradeSide, 'both')
