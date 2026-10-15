@@ -396,11 +396,32 @@ test('the job stops before Dhan\'s daily limit: the days it reached are tuned, t
   const days = ['2026-09-28', '2026-09-29', '2026-09-30', '2026-10-01', '2026-10-02', '2026-10-05']
   const { server, base } = await fakeServer(days, { usageAfter: 3 })
   try {
-    const { code, result } = await runJob(base, { underlying: 'NIFTY', strategies: ['weakWall'], days: 30, minTrades: 2, what: 'trade' })
+    // One day at a time, so the stop lands on an exact day: the allowance is read before each day is started, and the
+    // fake server reports it used up once three days have been fetched.
+    const { code, result } = await runJob(base, { underlying: 'NIFTY', strategies: ['weakWall'], days: 30, minTrades: 2, what: 'trade' }, { TUNE_DAYS_AT_ONCE: '1' })
     assert.equal(code, 0, JSON.stringify(result))
     assert.deepEqual(result.days.map((d) => d.date), ['2026-10-05', '2026-10-02', '2026-10-01'])
     assert.deepEqual(result.skipped.map((x) => x.date), ['2026-09-30', '2026-09-29', '2026-09-28'])
     assert.ok(result.skipped.every((x) => /Dhan's daily Data-API limit nearly used \(95,000 of 1,00,000 calls today\)/.test(x.reason)), result.skipped[0].reason)
+  } finally {
+    server.close()
+  }
+})
+
+test('days are read several at a time, and the job still stops on Dhan\'s daily limit', { timeout: 300_000 }, async () => {
+  const days = ['2026-09-25', '2026-09-28', '2026-09-29', '2026-09-30', '2026-10-01', '2026-10-02', '2026-10-05']
+  const { server, base } = await fakeServer(days, { usageAfter: 3 })
+  try {
+    const { code, result } = await runJob(base, { underlying: 'NIFTY', strategies: ['weakWall'], days: 30, minTrades: 2, what: 'trade' }, { TUNE_DAYS_AT_ONCE: '3' })
+    assert.equal(code, 0, JSON.stringify(result))
+    // Several days are in flight when the allowance tips, so the stop is not on an exact day any more - but it still
+    // stops well short of the plan, keeps the NEWEST days in order, and says why it left the rest.
+    assert.ok(result.days.length >= 3 && result.days.length <= 5, `${result.days.length} day(s) kept`)
+    const kept = result.days.map((d) => d.date)
+    assert.deepEqual(kept, [...kept].sort().reverse(), 'newest first, in order - never the order the reads finished in')
+    assert.deepEqual(kept, days.slice(-kept.length).reverse(), 'and they are the newest days of the plan')
+    assert.equal(kept.length + result.skipped.length, days.length, 'every day is either measured or listed')
+    assert.ok(result.skipped.some((x) => /Dhan's daily Data-API limit nearly used/.test(x.reason)), JSON.stringify(result.skipped))
   } finally {
     server.close()
   }

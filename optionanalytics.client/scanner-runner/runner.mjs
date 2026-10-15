@@ -185,8 +185,10 @@ async function loop() {
     await runReconcile(ask)
   }
   const today = istDate(now)
-  for (const s of scanners) {
-    if (!s.enabled) continue
+  // The three indices side by side: each look reads this server (the day's data, the spot candles) and waits on
+  // nothing of the others', so one index's slow read no longer holds up the other two's signals.
+  await Promise.all(scanners.map(async (s) => {
+    if (!s.enabled) return
     try {
       await s.ensureDay(today)
       await s.evaluate()
@@ -196,7 +198,7 @@ async function loop() {
       s.error = err.message
       log(`${s.underlying}: ${err.stack ?? err.message}`)
     }
-  }
+  }))
   // Every STATUS_MS with the P&L - and at once when a signal fired or a trade opened / exited, so the pages show it as it
   // happens (the server passes it on to them - ScannerEvents).
   const statusSig = scanners.map((s) => s.changeSig()).join('\n')

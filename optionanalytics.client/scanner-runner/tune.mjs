@@ -574,27 +574,67 @@ async function main() {
   progress({ stage: 'scan', day: plan[0]?.date, done: 0, total: plan.length, fastOi })
 
   const busy = []
-  for (let i = 0; i < plan.length; i += AT_ONCE) {
-    if (DATA === 'spot' && days.length >= MAX_DAYS) break
-    lastScan = { stage: 'scan', day: plan[i].date, done: i, total: plan.length, scanned: days.length, skipped: skipped.length }
-    progress(lastScan)
-    // Two hard stops before each batch, both of which END the job with a result rather than going quiet: Dhan's
-    // daily allowance running low, and the job's own time budget running out.
-    if (overBudget()) stopped = budgetStop = budgetReason()
-    if (stopped || (stopped = await dhanBudgetLeft())) {
-      // (Spot + options lists spare weekdays for holidays: only as many as the days still wanted.)
-      for (const rest of plan.slice(i, DATA === 'spot' ? i + Math.max(0, MAX_DAYS - days.length) : undefined)) skipped.push({ date: rest.date, reason: stopped, busy: true })
-      state.skipped = skipped.length
-      break
+  // A ROLLING POOL of AT_ONCE day reads: the moment one finishes the next day starts, instead of a batch of three
+  // standing idle until its slowest day comes back. Days differ a lot (a cached day is instant, an uncached one is
+  // several Dhan calls), so lock-step batches spent most of their time waiting on one day.
+  // What it does NOT change: the results are TAKEN in plan order (`drain`), so which days the job measures, and how
+  // they split into train / test and into months, never depend on which read happened to finish first. The server's
+  // own Dhan rate limiter is still the throttle - this only keeps the pipe full.
+  const read = new Array(plan.length) // per plan index: { p, day } | { p, err }
+  let next = 0 // the next plan index to start
+  let applied = 0 // how many have been taken, in plan order
+  const spotFull = () => DATA === 'spot' && days.length >= MAX_DAYS
+  const drain = () => {
+    while (applied < plan.length && read[applied]) {
+      const { p, day, err } = read[applied]
+      // (Spot + options lists spare weekdays for holidays: once it has the days it wanted, the rest are not kept.)
+      if (day && !spotFull()) keepDay(day)
+      else if (day) skipped.push({ date: p.date, reason: 'enough days already' })
+      else if (err?.transient) busy.push({ p, err })
+      else skipped.push({ date: p.date, reason: err?.message ?? 'not read' })
+      applied++
     }
-    const batch = plan.slice(i, i + AT_ONCE)
-    const done = await Promise.all(batch.map(async (p) => {
-      try { return { p, day: await scanOne(p) } } catch (err) { return { p, err } }
-    }))
-    for (const { p, day, err } of done) {
-      if (day) keepDay(day)
-      else if (err.transient) busy.push({ p, err })
-      else skipped.push({ date: p.date, reason: err.message })
+    state.skipped = skipped.length
+  }
+  // Dhan's daily allowance, asked before every day a worker starts. The batches asked once per batch, which only
+  // worked because a batch waited for all of its days; with a rolling pool a worker can start a day long before the
+  // others' calls are counted, so the allowance is read each time - it is a counter on THIS server, not a Dhan call.
+  // Workers that arrive while a read is in flight share it, so there is still one read at a time.
+  let checking = null
+  const allowanceLeft = async () => {
+    const mine = !checking
+    checking ??= dhanBudgetLeft()
+    const why = await checking
+    if (mine) checking = null
+    if (why) stopped = why
+    return !why
+  }
+  const worker = async () => {
+    for (;;) {
+      if (stopped || spotFull()) return
+      // Two hard stops before a day is started, both of which END the job with a result rather than going quiet:
+      // the job's own time budget running out, and Dhan's daily allowance running low.
+      if (overBudget()) { stopped = budgetStop = budgetReason(); return }
+      if (!await allowanceLeft()) return
+      if (stopped || spotFull()) return
+      const i = next++
+      if (i >= plan.length) return
+      const p = plan[i]
+      lastScan = { stage: 'scan', day: p.date, done: applied, total: plan.length, scanned: days.length, skipped: skipped.length }
+      progress(lastScan)
+      try { read[i] = { p, day: await scanOne(p) } } catch (err) { read[i] = { p, err } }
+      drain()
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(AT_ONCE, plan.length) }, worker))
+  drain()
+  // Stopped part-way: every day neither read nor already accounted for says why.
+  if (stopped) {
+    const left = DATA === 'spot' ? Math.max(0, MAX_DAYS - days.length) : plan.length
+    for (let i = applied, n = 0; i < plan.length && n < left; i++) {
+      if (read[i]) continue
+      skipped.push({ date: plan[i].date, reason: stopped, busy: true })
+      n++
     }
     state.skipped = skipped.length
   }
