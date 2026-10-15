@@ -21,7 +21,7 @@ import { spotBarsOf } from '../src/spotEngine.js'
 import { liquiditySignals, pullStackSignals, autoBigLots } from '../src/orderFlowMath.js'
 import {
   MIN, msOf, scanTick, spotScanTick, followAllSetups, trailFor, alertIdsFor, setupEvents, newSetupEventMemory, newPosition, positionRows, sameSignal,
-  withLevelChange, withCapChange, setupWasTraded, paperEntryText, liveLegsFor, liveLegsNow, sameLegs, setupExitText, paperExitText, scannerLogBody, scannerLogSig, scannerProfileOf, PAPER_TRADE_LOT_SIZE,
+  withLevelChange, withCapChange, setupWasTraded, paperEntryText, signalLegs, liveLegsFor, liveLegsNow, sameLegs, setupExitText, paperExitText, scannerLogBody, scannerLogSig, scannerProfileOf, PAPER_TRADE_LOT_SIZE,
   RUNNER_DEFAULT_SETTINGS, runnerSettingsOf,
 } from '../src/scannerCore.js'
 import { orderFlowFromSnapshot, applyOrderFlowPush, mergePrints, applyOiTicks, applyFuturesTicks, applySpotUpdate, expiryFlagOf, TAPE_PRINTS } from '../src/liveFeeds.js'
@@ -719,6 +719,7 @@ export class IndexScanner {
     const rows = this.lastRows ?? []
     const outcomes = this.lastOutcomes ?? []
     const meta = (id) => STRATEGY_BY_ID[id]
+    const cfg = this.settings()
     return {
       underlying: this.underlying, enabled: this.enabled, date: this.date, ready: !!this.data, error: this.error,
       clockUtc: nowMs ? new Date(nowMs).toISOString() : null, contract: this.data?.view?.meta?.contractSymbol ?? null,
@@ -729,10 +730,22 @@ export class IndexScanner {
         spot: this.profileAlertsOn().spot && (this.profileLevelsOf.futures.length > 0 || this.profileLevelsOf.spotOwn.length > 0),
         levels: this.profileLevelsOf.futures.length + this.profileLevelsOf.spotOwn.length,
       },
-      signals: outcomes.map((s) => ({
-        id: s.id, no: meta(s.id)?.no, name: meta(s.id)?.name, side: s.side, t: s.t, entry: s.entry, stop: s.stop, target: s.target,
-        spot: !!s.spot, alerted: this.isAlerted(s.id), status: s.outcome?.status, r: s.outcome?.r ?? null, exitAt: s.outcome?.exitAt ?? null,
-      })),
+      // Each signal with BOTH its options as they stand now: what the option bought and the option sold went in at, what
+      // they are worth at this minute and the points so far (signalLegs with the clock - a closed signal's are final,
+      // a running one's keep moving). So every signal, traded or not, shows its option flow live.
+      signals: outcomes.map((s) => {
+        const legs = this.data?.oi ? signalLegs(s, this.data.oi, { filters: cfg.filters ?? {}, cfg, nowMs }) : {}
+        return {
+          id: s.id, no: meta(s.id)?.no, name: meta(s.id)?.name, side: s.side, t: s.t, entry: s.entry, stop: s.stop, target: s.target,
+          spot: !!s.spot, alerted: this.isAlerted(s.id, cfg), status: s.outcome?.status, r: s.outcome?.r ?? null, exitAt: s.outcome?.exitAt ?? null,
+          stopNow: s.outcome?.stop ?? null, trailed: !!s.outcome?.trailed,
+          points: legs.indexPoints ?? null, running: !!legs.running,
+          buyOption: legs.buyOption ?? null, buyEntry: legs.buyEntry ?? null, buyNow: legs.buyExit ?? null, buyPoints: legs.buyPoints ?? null,
+          buyExitReason: legs.buyExitReason ?? null,
+          sellOption: legs.sellOption ?? null, sellEntry: legs.sellEntry ?? null, sellNow: legs.sellExit ?? null, sellPoints: legs.sellPoints ?? null,
+          sellExitReason: legs.sellExitReason ?? null,
+        }
+      }),
       trades: rows.map((r) => ({
         key: r.key, strategy: r.strategy, no: meta(r.strategy)?.no, action: r.action, side: r.side, strike: r.strike, lots: r.lots, lotSize: r.lotSize,
         premium: r.premium, current: r.current, points: r.points, rupees: r.rupees, entryTime: r.entryTime, exitTime: r.exitTime, exitReason: r.exitReason,
