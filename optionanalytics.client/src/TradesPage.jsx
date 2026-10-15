@@ -14,7 +14,7 @@ import { confirmServerLive, useServerLive } from './ServerLive.jsx'
 import ClearData from './ClearData.jsx'
 import { fillRecordLegs, needsLegs, oldRuleLegs, recordRunUrl } from './recordLegs.js'
 import { runnerSettingsOf } from './scannerCore.js'
-import { runnerTrade, useScannerEvent, useScannerStatus } from './scannerEvents.js'
+import { runnerSignal, runnerTrade, useScannerEvent, useScannerStatus } from './scannerEvents.js'
 import './tuningMobile.css'
 
 const { Title, Text } = Typography
@@ -1073,9 +1073,68 @@ function BacktestTrades() {
 // ---- The scanner's record: its signals (futures trades) and option trades, live and paper -----------------------
 /** The scanner's own record. `initial` (from the address - an applied strategy's "See the run"): index, strategy, kind,
  *  since (ms - when its setting was applied), applied=1 (the applied strategies only). */
-function ScannerRecord({ initial = {} }) {
-  const [source, setSource] = useState('server')
-  const [kind, setKind] = useState(initial.kind === 'trades' ? 'trades' : 'signals')
+/**
+ * The server scanner's record: the SIGNALS every strategy fired, the OPTION TRADES punched from them, or both at once.
+ * Both shows the two one under the other, each with its own filters - the same table twice, nothing shared to go wrong.
+ */
+function ScannerRecordPanel({ initial = {} }) {
+  const [show, setShow] = useState(initial.kind === 'trades' ? 'trades' : initial.kind === 'both' ? 'both' : 'signals')
+  return (
+    <Space direction="vertical" size={14} style={{ width: '100%' }}>
+      <Row gutter={[12, 8]} align="middle">
+        <Col>
+          <Segmented
+            value={show} onChange={setShow} aria-label="What to show"
+            options={[
+              { value: 'signals', label: <Tooltip title="Every signal the server scanner fired - the order-flow (futures + OI) strategies and the spot + options ones">Order flow signals</Tooltip> },
+              { value: 'trades', label: <Tooltip title="The option trade punched from each alerted signal (paper, and live where the index was Live today)">Option trades</Tooltip> },
+              { value: 'both', label: 'Both' },
+            ]}
+          />
+        </Col>
+        <Col flex="auto" />
+        <Col><ReconcileButton /></Col>
+      </Row>
+      {show !== 'trades' && <ScannerRecord initial={initial} kind="signals" />}
+      {show !== 'signals' && <ScannerRecord initial={initial} kind="trades" />}
+    </Space>
+  )
+}
+
+/** Reconcile: the scanner judges again every past day it left open - the signals still showing "open" with no exit, the
+ *  trades still running, and the option bought / sold each one never got - and posts those days' records again. */
+function ReconcileButton() {
+  const isAdmin = useAuth()?.user?.role === 'Admin'
+  const [asking, setAsking] = useState(false)
+  if (!isAdmin) return null
+  const ask = async () => {
+    setAsking(true)
+    try {
+      const res = await fetch('/api/scanner-runner/reconcile', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ days: 7 }) })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      message.success('Reconcile asked for the last 7 days - the scanner starts within a minute; this record updates itself as each day is posted again')
+    } catch (err) {
+      message.error(`Not asked: ${err.message}`)
+    } finally {
+      setAsking(false)
+    }
+  }
+  return (
+    <Popconfirm
+      title="Reconcile the days left open"
+      description="Every past day the scanner never finished is judged again on its own minutes: each signal gets its outcome and its option bought / sold, each paper trade its exit, and the day's record is posted again. It places and changes no order."
+      okText="Reconcile the last 7 days" cancelText="Cancel" onConfirm={ask}
+    >
+      <Button size="small" loading={asking}>Reconcile open entries</Button>
+    </Popconfirm>
+  )
+}
+
+function ScannerRecord({ initial = {}, kind = 'signals' }) {
+  // The SERVER scanner is the only scanner: every strategy runs there, so the record has one source. (The Order Flow
+  // page's old rows are still in signals.csv / trades.csv and still served - nothing is deleted - they just have no
+  // switch here any more.)
+  const source = 'server'
   const [rows, setRows] = useState(null)
   const [error, setError] = useState(null)
   const [underlying, setUnderlying] = useState(UNDERLYINGS.includes(initial.index) ? initial.index : 'all')
@@ -1098,7 +1157,6 @@ function ScannerRecord({ initial = {} }) {
     return f == null ? undefined : Number.isFinite(f._appliedAt) ? f._appliedAt : 0
   }
   const file = `${source === 'server' ? 'server-' : ''}${kind}`
-  const reset = (fn) => (v) => { setRows(null); setError(null); setIds([]); fn(v) }
   const [reloadTick, setReloadTick] = useState(0)
   // A day of this record saved on the server - a signal, a trade punched or exited - is read again at once (pushed,
   // scannerEvents.js); the server scanner's record is 'server', the pages' any other source.
@@ -1122,10 +1180,18 @@ function ScannerRecord({ initial = {} }) {
     return (r) => m.get(`${r.underlying}|${r.strategy_id}|${r.signal_side}|${r.signal_time_ist}`) ?? null
   }, [sigRows])
   const legOf = (r, key, sigKey) => num(r[key]) ?? (kind === 'trades' ? num(signalOf(r)?.[sigKey]) : null)
-  const indexPts = (r) => (kind === 'trades' ? legOf(r, 'index_points', 'points') : num(r.points))
+  // A signal still RUNNING has no legs in the record - they are only kept once it has left - so it used to read "-"
+  // all the way down the If bought / If sold columns. The server scanner reports both options as they stand now
+  // (signalLegs with the clock), so a running signal shows what each is worth at this minute instead.
+  const runningSig = (r) => (kind === 'signals' && !r.exit_time_ist ? runnerSignal(runner, r.underlying, r.strategy_id, r.time_ist, r.date) : null)
+  const indexPts = (r) => (kind === 'trades' ? legOf(r, 'index_points', 'points') : num(r.points) ?? runningSig(r)?.points ?? null)
   // If bought / If sold: the signal's (worked out again there when an older rule's were redone), else the trade's own copy.
   const legSig = (r) => (kind === 'trades' ? signalOf(r) : r)
-  const legPts = (r, which) => { const sig = legSig(r); return sig && (sig[`${which}_exit_reason`] || kind !== 'trades') ? num(sig[`${which}_points`]) : legOf(r, `${which}_points`, `${which}_points`) }
+  const legPts = (r, which) => {
+    const sig = legSig(r)
+    const kept = sig && (sig[`${which}_exit_reason`] || kind !== 'trades') ? num(sig[`${which}_points`]) : legOf(r, `${which}_points`, `${which}_points`)
+    return kept ?? runningSig(r)?.[`${which}Points`] ?? null
+  }
   const boughtPts = (r) => legPts(r, 'buy')
   const soldPts = (r) => legPts(r, 'sell')
   // A leg's cell: its points, and on hover the option, its premium in -> out, when and why it left.
@@ -1133,11 +1199,21 @@ function ScannerRecord({ initial = {} }) {
   const legCell = (which) => (_, r) => {
     const v = which === 'buy' ? boughtPts(r) : soldPts(r)
     const sig = legSig(r)
+    const live = runningSig(r)
     const why = sig?.[`${which}_exit_reason`]
-    const tip = sig?.[`${which}_option`]
-      ? `${sig[`${which}_option`]}: ${f1(num(sig[`${which}_entry`]))} → ${f1(num(sig[`${which}_exit`]))}${why ? ` · out ${hhmm(sig[`${which}_exit_time_ist`])} - ${why}` : ' · held to the index exit (older rule - redo it above)'}`
-      : 'not kept for this one'
-    return <Tooltip title={tip}><span style={{ color: col(v) }}>{pts(v)}</span>{why && /SL|Target|square-off/i.test(why) && !/^with the index/.test(why) ? <Text type="secondary" style={{ fontSize: 10, marginLeft: 3 }}>{/SL/.test(why) ? 'SL' : /Target/.test(why) ? 'T' : '15:10'}</Text> : null}</Tooltip>
+    const running = live?.[`${which}Option`] && num(sig?.[`${which}_points`]) == null
+    const tip = running
+      ? `${live[`${which}Option`]}: ${f1(live[`${which}Entry`])} → ${f1(live[`${which}Now`])} · still running, as the server scanner reads it now`
+      : sig?.[`${which}_option`]
+        ? `${sig[`${which}_option`]}: ${f1(num(sig[`${which}_entry`]))} → ${f1(num(sig[`${which}_exit`]))}${why ? ` · out ${hhmm(sig[`${which}_exit_time_ist`])} - ${why}` : ' · held to the index exit (older rule - redo it above)'}`
+        : 'not kept for this one - Reconcile open entries works it out from that day\'s option data'
+    return (
+      <Tooltip title={tip}>
+        <span style={{ color: col(v) }}>{pts(v)}</span>
+        {running && <Text type="secondary" style={{ fontSize: 10, marginLeft: 3 }}>now</Text>}
+        {!running && why && /SL|Target|square-off/i.test(why) && !/^with the index/.test(why) ? <Text type="secondary" style={{ fontSize: 10, marginLeft: 3 }}>{/SL/.test(why) ? 'SL' : /Target/.test(why) ? 'T' : '15:10'}</Text> : null}
+      </Tooltip>
+    )
   }
   const signals = kind === 'signals'
   // An open server trade of today, as the runner reads it now (null otherwise): the record keeps its P&L as of when it
@@ -1227,8 +1303,7 @@ function ScannerRecord({ initial = {} }) {
   return (
     <Space direction="vertical" size={10} style={{ width: '100%' }}>
       <Row gutter={[12, 8]} align="middle">
-        <Col><Segmented value={source} onChange={reset(setSource)} options={[{ value: 'server', label: <Tooltip title="The server's scanner (runs without the page open)">Server scanner</Tooltip> }, { value: 'page', label: <Tooltip title="The Order Flow page's scanner (what the browser saved)">Order Flow page</Tooltip> }]} /></Col>
-        <Col><Segmented value={kind} onChange={reset(setKind)} options={[{ value: 'signals', label: 'Signals' }, { value: 'trades', label: 'Option trades' }]} /></Col>
+        <Col><Text strong style={{ fontSize: 13 }}>{signals ? 'Order flow signals' : 'Option trades'}</Text></Col>
         {source === 'server' && (
           <Col>
             <Tooltip title="Only the strategies applied with a fine-tuned setting (Trades / Strategy tuning page), each on the index it was applied to, from when it was applied - their run on the server scanner">
@@ -1435,7 +1510,7 @@ export default function TradesPage() {
             {auth?.user?.role === 'Admin' && <ClearData onCleared={() => setReloadKey((k) => k + 1)} />}
           </Space>
         )}>
-          {tab === 'performance' ? <StrategyPerformance key={reloadKey} reloadKey={reloadKey} /> : tab === 'all' ? <AllTrades key={reloadKey} /> : tab === 'backtest' ? <BacktestTrades key={reloadKey} /> : tab === 'learning' ? <Learning key={reloadKey} /> : <ScannerRecord key={`${reloadKey}-${location.key}`} initial={query.tab === 'record' ? query : {}} />}
+          {tab === 'performance' ? <StrategyPerformance key={reloadKey} reloadKey={reloadKey} /> : tab === 'all' ? <AllTrades key={reloadKey} /> : tab === 'backtest' ? <BacktestTrades key={reloadKey} /> : tab === 'learning' ? <Learning key={reloadKey} /> : <ScannerRecordPanel key={`${reloadKey}-${location.key}`} initial={query.tab === 'record' ? query : {}} />}
         </Card>
       </Space>
     </div>

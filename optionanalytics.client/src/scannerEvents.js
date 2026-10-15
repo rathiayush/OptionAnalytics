@@ -107,6 +107,16 @@ export function useScannerStatus() {
   return { status: s.data, error: s.error, reload: loadStatus }
 }
 
+/** Today's SIGNAL as the runner last reported it - its points and R so far, and both options as they stand now
+ *  (entry, premium now, points): what the record cannot hold while a signal is still running. Matched on the
+ *  strategy and the minute it fired. Null when it is not one of today's. */
+export function runnerSignal(statusBody, underlying, strategyId, timeIst, date = null) {
+  const ix = statusBody?.status?.indices?.find((x) => x.underlying === underlying)
+  if (!ix || (date && ix.date !== date) || !strategyId || !timeIst) return null
+  const hhmm = String(timeIst).slice(11, 16)
+  return ix.signals?.find((s) => s.id === strategyId && new Date(s.t).toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' }) === hhmm) ?? null
+}
+
 /** Today's trade `key` on `underlying` as the runner last reported it (premium now, points, rupees, exit) - null when it
  *  is not one of today's. `date` (yyyy-mm-dd), when given, must be the runner's day. */
 export function runnerTrade(statusBody, underlying, key, date = null) {
