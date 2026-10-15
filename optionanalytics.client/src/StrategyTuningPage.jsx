@@ -489,7 +489,7 @@ export default function StrategyTuningPage() {
     : p.stage === 'scan' ? (p.retrying ? `trying again ${p.day ?? ''} (${p.retrying} day(s) the server was busy for)` : `scanning ${p.day ?? ''}${ofDays(p.done, p.total)}`)
     : p.stage === 'rank' ? 'ranking the strategies'
     : p.stage === 'check' ? 'cross-checking every setting found so far on the days it was not chosen on'
-    : p.stage === 'tune' ? `tuning #${STRATEGY_BY_ID[p.strategy]?.no} ${STRATEGY_BY_ID[p.strategy]?.name ?? p.strategy}${nOf(p.total) ? ` (${(nOf(p.done) ?? 0) + 1} of ${p.total})` : ''}${p.of ? `, ${p.tried.toLocaleString('en-IN')} of ${p.of.toLocaleString('en-IN')} OI combinations` : ''}`
+    : p.stage === 'tune' ? `tuning #${STRATEGY_BY_ID[p.strategy]?.no} ${STRATEGY_BY_ID[p.strategy]?.name ?? p.strategy}${nOf(p.total) ? ` (${(nOf(p.done) ?? 0) + 1} of ${p.total})` : ''}${p.of ? `, ${p.fold ? `walk-forward check ${p.fold} of ${p.folds}: ` : ''}${p.again ? 'again with 2+ trades: ' : ''}${p.tried.toLocaleString('en-IN')} of ${p.of.toLocaleString('en-IN')} ${{ oi: 'OI', trade: 'trade-setting', option: 'option-trade' }[p.part] ?? ''} combinations` : ''}`
     : p.stage
   const percent = !p ? 0
     : p.stage === 'prefetch' ? Math.round((nOf(p.done) ?? 0) / Math.max(1, nOf(p.total) ?? 1) * 10)

@@ -357,6 +357,39 @@ test('every combination: counts, the cap, and it finds at least what step by ste
   void seen
 })
 
+test('every stage reports where it is, so a long run never looks stopped - and the job budget can stop any of them', async () => {
+  const { countOiCombinations, withWalkForward } = await import('../src/strategyTuning.js')
+  const days0 = await scanDaySetups({ ...base, filters: {}, keepAll: true })
+  const days = Array.from({ length: 40 }, (_, i) => tuningDay(`2026-0${1 + Math.floor(i / 28)}-${String(1 + (i % 28)).padStart(2, '0')}`, days0, replayDay))
+  const id = days0[0].id
+  const keys = ['tradeOiFlow', 'tradeFutOi']
+  const seen = []
+  const opts = { what: 'all', minTrades: 2, oiKeys: keys, search: 'full', onProgress: (p) => seen.push(p) }
+  const r = tuneStrategy(days, id, opts)
+  // The OI search, then the trade settings, then the option trade - each says it starts (0 of N) and what N is.
+  for (const part of ['oi', 'trade', 'option']) {
+    const mine = seen.filter((p) => p.part === part)
+    assert.ok(mine.length > 0, `the ${part} stage reported`)
+    assert.equal(mine[0].tried, 0, `${part}: reported when it started`)
+    assert.ok(mine.every((p) => p.of === mine[0].of && p.of > 0), `${part}: knows its own total`)
+  }
+  assert.equal(seen.find((p) => p.part === 'oi').of, countOiCombinations(keys).count)
+  assert.equal(seen.filter((p) => p.part === 'trade').at(-1).tried % 250, 0)
+  // The walk-forward's own re-searches say which check they are.
+  seen.length = 0
+  const wf = withWalkForward(r, days, id, opts, 3)
+  if (wf.walkForward) {
+    const folds = [...new Set(seen.filter((p) => p.fold).map((p) => p.fold))]
+    assert.deepEqual(folds, [1, 2, 3].slice(0, folds.length))
+    assert.ok(folds.length > 0 && seen.filter((p) => p.fold).every((p) => p.folds === wf.walkForward.folds.length))
+  }
+  // The budget check lives in the progress callback: it must be able to stop the trade stage, not only the OI one.
+  let stoppedIn = null
+  const stop = Object.assign(new Error('over the job budget'), { overBudget: true })
+  assert.throws(() => tuneStrategy(days, id, { ...opts, onProgress: (p) => { if (p.part === 'trade') { stoppedIn = p; throw stop } } }), (e) => e === stop)
+  assert.equal(stoppedIn.part, 'trade')
+})
+
 test('points captured: the index, futures in and out, and the option prices in and out', async () => {
   const { tradeDetails, pointsSummary } = await import('../src/strategyTuning.js')
   const { premiumAt, simulateOutcome } = await import('../src/strategyEngine.js')

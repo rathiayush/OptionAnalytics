@@ -566,14 +566,14 @@ export function tuneStrategy(days, id, { trail = null, minTrades = 8, minPerMont
   if (what === 'all') {
     // Everything in turn: the OI confirmation, the trade settings on top, then how it is taken in options.
     const oi = tuneStrategy(days, id, { trail, minTrades, ...rules, trainFraction, keep, what: 'oi', base, oiKeys, search, onProgress, underlying })
-    const tr = tuneStrategy(days, id, { trail, minTrades, ...rules, trainFraction, keep, what: 'trade', base: oi.best?.params ?? base, underlying })
-    const op = tuneStrategy(days, id, { trail, minTrades, ...rules, trainFraction, keep, what: 'option', base: tr.best?.params ?? oi.best?.params ?? base, underlying })
+    const tr = tuneStrategy(days, id, { trail, minTrades, ...rules, trainFraction, keep, what: 'trade', base: oi.best?.params ?? base, onProgress, underlying })
+    const op = tuneStrategy(days, id, { trail, minTrades, ...rules, trainFraction, keep, what: 'option', base: tr.best?.params ?? oi.best?.params ?? base, onProgress, underlying })
     return { ...op, what, tried: oi.tried + tr.tried + op.tried, factors: [...(oi.factors ?? []), ...(tr.factors ?? []), ...(op.factors ?? [])], oiStage: { best: oi.best, reason: oi.reason }, tradeStage: { best: tr.best, reason: tr.reason } }
   }
   if (what === 'both') {
     // The OI confirmation first (chosen on the train days only), then the trade settings on top of it.
     const oi = tuneStrategy(days, id, { trail, minTrades, ...rules, trainFraction, keep, what: 'oi', base, oiKeys, search, onProgress, underlying })
-    const onTop = tuneStrategy(days, id, { trail, minTrades, ...rules, trainFraction, keep, what: 'trade', base: oi.best?.params ?? base, underlying })
+    const onTop = tuneStrategy(days, id, { trail, minTrades, ...rules, trainFraction, keep, what: 'trade', base: oi.best?.params ?? base, onProgress, underlying })
     return { ...onTop, what, tried: oi.tried + onTop.tried, qualified: oi.qualified + onTop.qualified, factors: [...(oi.factors ?? []), ...(onTop.factors ?? [])], oiStage: { best: oi.best, reason: oi.reason } }
   }
   const explicitGrid = grid != null
@@ -603,7 +603,6 @@ export function tuneStrategy(days, id, { trail = null, minTrades = 8, minPerMont
     if (what === 'oi' && !explicitGrid) {
       const n = countOiCombinations(oiKeys)
       if (n.over) throw new Error(`more than ${OI_COMBO_CAP.toLocaleString('en-IN')} OI combinations - untick some OI inputs, or search step by step`)
-      of = n.count
     }
     // Walked in the order the outcome cache wants - every combination that ends its trades the same way together (see
     // outcomeKey), so each day works a setup's outcome out once instead of once per combination. `at` keeps each
@@ -617,9 +616,14 @@ export function tuneStrategy(days, id, { trail = null, minTrades = 8, minPerMont
       list.push({ v, at: at++, key: isOpt ? '' : outcomeKey(v, trail) })
     }
     list.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0) || a.at - b.at)
+    // Every stage says where it is - the trade settings and the option trade too, not only the OI search: a stage that
+    // reports nothing looks like a job that stopped, and cannot be stopped by the job's time budget either.
+    of = list.length
+    const part = what
+    if (onProgress) onProgress({ tried: 0, of, part })
     for (const { v, at: i } of list) {
       tried++
-      if (onProgress && tried % 250 === 0) onProgress({ tried, of })
+      if (onProgress && tried % 250 === 0) onProgress({ tried, of, part })
       const tr = tally.add(v, trainScore(v))
       if (tr.n < minTrades || tr.score == null) continue
       rows.push({ params: v, train: tr, at: i })
@@ -633,7 +637,7 @@ export function tuneStrategy(days, id, { trail = null, minTrades = 8, minPerMont
   // Nothing reached the minimum trades (in all, or a month): show what there is anyway - the best setting with even a couple of trades -
   // marked "below the minimum", never recommended. (Under 2 trades there is no score to rank by.)
   if (!top.length && (minTrades > 2 || minPerMonth > 0)) {
-    const loose = tuneStrategy(days, id, { trail, minTrades: 2, minPerMonth: 0, simplest, trainFraction, grid: explicitGrid ? grid : null, keep, what, base, oiKeys, search, onProgress, underlying })
+    const loose = tuneStrategy(days, id, { trail, minTrades: 2, minPerMonth: 0, simplest, trainFraction, grid: explicitGrid ? grid : null, keep, what, base, oiKeys, search, onProgress: onProgress && ((p) => onProgress({ ...p, again: true })), underlying })
     if (loose.best) {
       const few = loose.best.train.n < minTrades
       return { ...loose, belowMin: true, minTradesWanted: minTrades, recommend: false,
@@ -697,7 +701,7 @@ export function walkForward(days, id, tuneOpts = {}, { folds = 3, firstFraction 
     const to = i === k - 1 ? sorted.length : from + size
     const trainDays = sorted.slice(0, from)
     const block = sorted.slice(from, to)
-    const r = tuneStrategy(trainDays, id, { ...tuneOpts, keep: 1 })
+    const r = tuneStrategy(trainDays, id, { ...tuneOpts, keep: 1, onProgress: tuneOpts.onProgress && ((p) => tuneOpts.onProgress({ ...p, fold: i + 1, folds: k })) })
     const isOpt = r.unit === 'pts'
     const asWritten = r.baseline.params
     const measure = (v) => scoreR(isOpt ? optionRun(block, id, v, trail) : run(block, id, v, trail))
