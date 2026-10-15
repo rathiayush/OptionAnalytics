@@ -184,3 +184,31 @@ test('a signal still running reports both its options as they stand now, and a c
   const withLegs = done.signals.filter((s) => s.buyOption || s.sellOption)
   assert.ok(withLegs.length > 0 && withLegs.every((s) => s.buyExitReason || s.sellExitReason), 'each leg says why it left')
 })
+
+test('reconcile: a day already marked finished is judged again, and its record posted again', async () => {
+  const io = fakeIo()
+  const scanner = new IndexScanner('NIFTY', io)
+  scanner.reset(DATE)
+  scanner.setConfig(SETTINGS)
+  await runDay(scanner, io, at(15), at(300))
+  await scanner.finishDay(DATE)
+  const posts = io.posted.length
+  assert.equal((await io.loadState('NIFTY', DATE)).finished, true)
+
+  // Without force a finished day is left alone...
+  assert.equal(await scanner.finishDay(DATE), false)
+  assert.equal(io.posted.length, posts)
+  // ...with it, the day is judged again on its own minutes and the record goes out again, still with nothing open.
+  assert.equal(await scanner.finishDay(DATE, { force: true }), true)
+  assert.equal(io.posted.length, posts + 1)
+  const again = io.posted.at(-1)
+  assert.ok(again.signals.length > 0 && again.signals.every((x) => x.status !== 'open'))
+  assert.ok(again.trades.every((t) => t.exitTime))
+  // The exits already announced are kept, never re-priced by the second look.
+  const before = io.posted[posts - 1]
+  const exitOf = (body, key) => body.trades.find((t) => t.key === key)
+  assert.ok(before.trades.every((t) => {
+    const now = exitOf(again, t.key)
+    return now && now.exitTime === t.exitTime && now.exitPremium === t.exitPremium
+  }), 'a reconcile never changes an exit that was already announced')
+})

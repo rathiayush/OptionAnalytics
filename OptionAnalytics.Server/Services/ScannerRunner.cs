@@ -223,6 +223,30 @@ public sealed class ScannerRunnerStore
         return Config();
     }
 
+    /// <summary>An admin asked the scanner to RECONCILE: go back over the past days it never finished - the ones whose
+    /// signals still show "open" with no exit - and close them out on their own minutes, posting the record again.
+    /// The runner reads this with the config (so within a minute), does the work and reports it in its next status.
+    /// Each ask carries a new nonce, so the runner can tell a fresh one from the one it has already done.</summary>
+    public JsonObject AskReconcile(int days, string? by)
+    {
+        lock (_lock)
+        {
+            var at = DateTimeOffset.UtcNow;
+            _config["reconcile"] = new JsonObject
+            {
+                ["nonce"] = at.ToUnixTimeMilliseconds(),
+                ["days"] = Math.Clamp(days, 1, 60),
+                ["askedUtc"] = at,
+                ["by"] = by,
+            };
+            _config["updatedUtc"] = at;
+            var temp = _configPath + ".tmp";
+            File.WriteAllText(temp, _config.ToJsonString(Json));
+            File.Move(temp, _configPath, overwrite: true);
+        }
+        return Config();
+    }
+
     /// <summary>A setting fine-tuned for ONE index and applied to one strategy (the tuning pages' Apply): kept under
     /// config.filtersByIndex[index][strategyId], apart from the page's synced scanner settings - so a page that saves
     /// its settings (even with an older copy) never wipes it. The scanner on that index runs the strategy with these

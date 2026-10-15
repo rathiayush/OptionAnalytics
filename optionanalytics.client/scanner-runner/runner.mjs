@@ -65,22 +65,56 @@ const scanners = UNDERLYINGS.map((u) => new IndexScanner(u, io))
 
 // Days the runner never finished - it was restarted overnight, or down at the close. Each one is finished now, on the
 // backend: its signals judged and its trades closed on the day's minutes read back, and its final record posted. So a
-// past day is never left showing "open".
-async function finishPastDays() {
+// past day is never left showing "open". `force` (the trader pressed Reconcile) judges a day again even when it was
+// marked finished - its signals may still be showing "open" because its minutes were missing at the time.
+async function finishPastDays({ days = FINISH_BACK_DAYS, force = false } = {}) {
   const today = istDate(Date.now())
   const dates = new Map()
+  const report = []
   let names = []
-  try { names = readdirSync(DATA) } catch { return }
+  try { names = readdirSync(DATA) } catch { return report }
   for (const name of names) {
     const m = /^state-([A-Z]+)-(\d{4}-\d{2}-\d{2})\.json$/.exec(name)
     if (!m || m[2] >= today) continue
     dates.set(m[1], [...(dates.get(m[1]) ?? []), m[2]])
   }
   for (const s of scanners) {
-    for (const date of (dates.get(s.underlying) ?? []).sort().slice(-FINISH_BACK_DAYS)) {
-      try { await s.finishDay(date) } catch (err) { log(`${s.underlying}: ${date} not finished - ${err.message}`) }
+    for (const date of (dates.get(s.underlying) ?? []).sort().slice(-days)) {
+      try {
+        if (await s.finishDay(date, { force })) report.push(`${s.underlying} ${date}`)
+      } catch (err) {
+        log(`${s.underlying}: ${date} not finished - ${err.message}`)
+        report.push(`${s.underlying} ${date}: ${err.message}`)
+      }
     }
   }
+  return report
+}
+
+// ---- Reconcile (the trader's button) -------------------------------------------------------------------
+// POST /api/scanner-runner/reconcile puts an ask in the config; this process sees it on its next config read (within a
+// minute). It judges every past day it left open again - and today too once its session is over - and posts each
+// day's record again, then says in its status what it did. The ask standing when this process started needs nothing:
+// finishPastDays already runs at startup.
+let reconcileAsk = null
+let reconcileDone = null
+let reconcileReport = null
+async function runReconcile(ask) {
+  const startedUtc = new Date().toISOString()
+  log(`reconcile asked (${ask.days ?? FINISH_BACK_DAYS} day(s) back) - judging the days left open again`)
+  reconcileReport = { nonce: ask.nonce, askedUtc: ask.askedUtc ?? null, startedUtc, state: 'running', days: [] }
+  const days = []
+  try {
+    days.push(...await finishPastDays({ days: Math.max(1, Math.min(60, Number(ask.days) || FINISH_BACK_DAYS)), force: true }))
+    // Today as well, but only once its session is over - a signal still running today is open for a good reason.
+    for (const s of scanners) {
+      try { if (await s.finishIfDue({ force: true })) days.push(`${s.underlying} ${s.date} (today)`) } catch (err) { days.push(`${s.underlying} today: ${err.message}`) }
+    }
+    reconcileReport = { ...reconcileReport, state: 'done', doneUtc: new Date().toISOString(), days, message: days.length ? `${days.length} day(s) judged again` : 'nothing was left open' }
+  } catch (err) {
+    reconcileReport = { ...reconcileReport, state: 'failed', doneUtc: new Date().toISOString(), days, message: err.message }
+  }
+  log(`reconcile ${reconcileReport.state}: ${reconcileReport.message}`)
 }
 
 // ---- Config: the page's scanner settings (synced by an admin's Order Flow page) ---------------------
@@ -94,6 +128,7 @@ async function refreshConfig() {
       if (page != null || own != null) { top = topFromSignalsCsv([page, own]); topAt = Date.now() }
     }
     for (const s of scanners) s.setConfig({ ...config, top })
+    reconcileAsk = config?.reconcile ?? null
   } catch (err) {
     log(`config not read: ${err.message}`)
   }
@@ -143,6 +178,12 @@ async function loop() {
   if (process.ppid !== parentPid) { log('the server has gone - stopping'); process.exit(0) }
   const now = Date.now()
   if (now - lastConfig > CONFIG_MS) { lastConfig = now; await refreshConfig() }
+  // A reconcile the trader asked for: done once, before the day's work, whatever happens.
+  if (reconcileAsk?.nonce != null && reconcileAsk.nonce !== reconcileDone) {
+    const ask = reconcileAsk
+    reconcileDone = ask.nonce
+    await runReconcile(ask)
+  }
   const today = istDate(now)
   for (const s of scanners) {
     if (!s.enabled) continue
@@ -162,7 +203,7 @@ async function loop() {
   if (now - lastStatus > STATUS_MS || statusSig !== lastStatusSig) {
     lastStatus = now
     lastStatusSig = statusSig
-    api('/api/scanner-runner/status', { method: 'POST', body: { startedUtc, reportedUtc: new Date().toISOString(), connection: connection.state, indices: scanners.map((s) => s.status()) } })
+    api('/api/scanner-runner/status', { method: 'POST', body: { startedUtc, reportedUtc: new Date().toISOString(), connection: connection.state, reconcile: reconcileReport, indices: scanners.map((s) => s.status()) } })
       .catch((err) => log(`status not posted: ${err.message}`))
   }
 }
@@ -174,6 +215,8 @@ log(`scanner runner starting - ${UNDERLYINGS.join(', ')}, paper only, server ${B
 await refreshConfig()
 lastConfig = Date.now()
 await finishPastDays()
+// The ask already standing is covered by the sweep above - only a NEW one makes this process reconcile again.
+reconcileDone = reconcileAsk?.nonce ?? null
 connect()
 for (;;) {
   await loop()
