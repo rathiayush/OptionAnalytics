@@ -56,6 +56,16 @@ const LOG_EVERY_MS = 3_000
 const SPOT_WAIT_MS = 30_000
 export const TAG = '[Server]'
 
+/** The futures' own 1-minute bars from an OI-replay run (run.futuresBars: the contract's real open / high / low /
+ *  close from Dhan), in the shape simulateOutcome reads. The fallback for a day whose order flow could not be rebuilt:
+ *  a signal's outcome needs each minute's range, and these carry it. Empty when the run has no futures. */
+export function futuresMinuteBars(run) {
+  return (run?.futuresBars ?? [])
+    .filter((b) => b?.time && b.close > 0 && b.high >= b.low)
+    .map((b) => ({ time: b.time, open: b.open ?? b.close, high: b.high, low: b.low, close: b.close }))
+    .sort((a, b) => Date.parse(a.time) - Date.parse(b.time))
+}
+
 /** Signals in the order to take them: the ones on the live list first, best first (the list's order); the rest after,
  *  as they came. No list (paper): unchanged. */
 export function byLiveList(fresh, list) {
@@ -284,8 +294,12 @@ export class IndexScanner {
       this.io.api(`/api/oi-replay/${u}/expiries`).catch(() => null),
     ])
     const expiryDate = u === 'BANKNIFTY' ? expiries?.month ?? null : expiries?.week ?? null
+    const view = snapshot ? orderFlowFromSnapshot(snapshot) : null
     return {
-      view: snapshot ? orderFlowFromSnapshot(snapshot) : null,
+      // The recorded (or estimated) order flow, else the futures' OWN 1-minute candles from the OI run - Dhan's real
+      // high / low / close for that contract, which is all a signal's outcome needs. Without this a day whose order
+      // flow could not be rebuilt had no minutes at all, and its futures signals stayed "open" for ever.
+      view: view?.minuteBars?.length ? view : { minuteBars: futuresMinuteBars(run) },
       oi: run?.success ? buildOiContext(run, expiryDate, { live: false }) : null,
       spotBars: spotBarsOf(run?.spotCandlesOneMinute ?? run?.spotCandles ?? []),
     }
@@ -322,8 +336,22 @@ export class IndexScanner {
     if (force) this.io.log(`${this.underlying}: ${date} reconciling - judging it again on its own minutes`)
 
     const cfg = this.settings()
-    const data = today && this.data?.oi ? { view: this.data.view, oi: this.data.oi, spotBars: this.spotBars } : await this.pastDay(date)
-    // Nothing came back: left unfinished rather than closed on no data - the next start tries again.
+    let data = today && this.data?.oi ? { view: this.data.view, oi: this.data.oi, spotBars: this.spotBars } : await this.pastDay(date)
+    // A side with no minutes cannot be judged at all, and its signals would be left "open" for ever (the day is closed
+    // at the last price, and with no bars there is no last price). So where this day HAS setups on a side whose minutes
+    // are missing, they are read back before giving up - the futures ones from the day's order flow or the futures'
+    // own candles, the spot ones from the day's spot candles.
+    const needs = (spot) => fired.some((x) => !!x.spot === spot)
+    const missing = (d) => (needs(false) && !d.view?.minuteBars?.length) || (needs(true) && !d.spotBars?.length)
+    if (missing(data)) {
+      const back = await this.pastDay(date)
+      data = {
+        oi: data.oi ?? back.oi,
+        view: data.view?.minuteBars?.length ? data.view : back.view,
+        spotBars: data.spotBars?.length ? data.spotBars : back.spotBars,
+      }
+    }
+    // Nothing came back at all: left unfinished rather than closed on no data - the next start tries again.
     if (!data.oi && !data.view?.minuteBars?.length) { this.io.log(`${this.underlying}: ${date} not finished yet - its minutes did not come back`); return false }
 
     // Past the last minute of the day, so every bar counts and the 15:10 square-off always lands.
@@ -340,14 +368,20 @@ export class IndexScanner {
     rows = rowsNow()
     const body = scannerLogBody({ underlying: this.underlying, date, source: 'server', dayResults: withOutcome, rows, charges: cfg.charges, oi: data.oi, cfg })
     await this.io.api('/api/scanner-log/day', { method: 'POST', body })
-    const stillOpen = withOutcome.filter((x) => (x.outcome?.status ?? 'open') === 'open').length
+    const open = withOutcome.filter((x) => (x.outcome?.status ?? 'open') === 'open')
+    const stillOpen = open.length
     const openRows = rows.filter((r) => !r.exitTime).length
+    // Why, so a row still showing "open" is never a mystery: with no minutes on its side there is nothing to judge it on.
+    const why = stillOpen
+      ? ` - ${[open.some((x) => x.spot) && !data.spotBars?.length ? 'no spot minutes' : null,
+        open.some((x) => !x.spot) && !data.view?.minuteBars?.length ? 'no futures minutes' : null].filter(Boolean).join(', ') || 'their minutes do not reach them'}`
+      : ''
     // Something was still open: part of the day's minutes did not come back. What was judged is posted anyway, and the
     // day is tried again at the next start - but only so many times, so a day whose data is simply gone is let go
     // rather than re-read for ever.
     await done(!(stillOpen || openRows) || tries >= FINISH_TRIES)
     if (today) { this.lastOutcomes = withOutcome; this.lastRows = rows; this.lastLogSig = scannerLogSig(`${this.underlying}:${date}`, body) }
-    this.io.log(`${this.underlying}: ${date} finished - ${withOutcome.length} signal(s)${stillOpen ? `, ${stillOpen} with no minutes to judge them on (try ${tries})` : ''}, ${rows.length - openRows}/${rows.length} trade(s) closed`)
+    this.io.log(`${this.underlying}: ${date} finished - ${withOutcome.length} signal(s)${stillOpen ? `, ${stillOpen} still open${why} (try ${tries})` : ''}, ${rows.length - openRows}/${rows.length} trade(s) closed`)
     return true
   }
 

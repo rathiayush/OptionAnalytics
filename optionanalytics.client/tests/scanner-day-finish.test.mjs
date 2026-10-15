@@ -5,7 +5,7 @@
 // Run: npm test (node --test) - see CLAUDE.md.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { IndexScanner } from '../scanner-runner/indexScanner.mjs'
+import { IndexScanner, futuresMinuteBars } from '../scanner-runner/indexScanner.mjs'
 import { ALL_IDS, MIN } from '../src/scannerCore.js'
 import { day } from './synthetic-day.mjs'
 
@@ -211,4 +211,32 @@ test('reconcile: a day already marked finished is judged again, and its record p
     const now = exitOf(again, t.key)
     return now && now.exitTime === t.exitTime && now.exitPremium === t.exitPremium
   }), 'a reconcile never changes an exit that was already announced')
+})
+
+test('a side with no minutes in memory is read back rather than left open', async () => {
+  const io = fakeIo()
+  const scanner = new IndexScanner('NIFTY', io)
+  scanner.reset(DATE)
+  scanner.setConfig(SETTINGS)
+  await runDay(scanner, io, at(15), at(300))
+  assert.ok(scanner.memory.fired.length > 0)
+
+  // The futures minutes are gone from memory (a day whose order flow never loaded back after a restart).
+  scanner.data = { ...scanner.data, view: { ...scanner.data.view, minuteBars: [] } }
+  let readBack = 0
+  scanner.pastDay = async () => { readBack++; return { view: { minuteBars }, oi, spotBars: [] } }
+
+  assert.equal(await scanner.finishDay(DATE), true)
+  assert.equal(readBack, 1, 'the day was read back instead of giving up')
+  const final = io.posted.at(-1)
+  assert.ok(final.signals.length > 0 && final.signals.every((x) => x.status !== 'open'), 'nothing left open')
+})
+
+test('futuresMinuteBars: the futures own candles stand in for a day with no order flow', () => {
+  const bars = futuresMinuteBars(run)
+  assert.ok(bars.length > 100, 'a day of minutes')
+  assert.ok(bars.every((b) => b.high >= b.low && b.close > 0 && b.time), 'each with its own range')
+  assert.ok(Date.parse(bars[0].time) < Date.parse(bars.at(-1).time), 'oldest first')
+  assert.deepEqual(futuresMinuteBars(null), [])
+  assert.deepEqual(futuresMinuteBars({ futuresBars: [] }), [])
 })
