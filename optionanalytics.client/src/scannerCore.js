@@ -475,14 +475,22 @@ export function runnerSettingsOf(config, underlying) {
  * only with the day's OI (`oi`) - nothing past the exit. `filters` (the index's - filtersForIndex) / `cfg` (the scanner
  * settings: autoPaper, moneyness, paperMaxSl, paperMaxTarget) as the trade read them; none = ATM, out with the index trade.
  */
-export function signalLegs(x, oi, { filters = {}, cfg = {} } = {}) {
+export function signalLegs(x, oi, { filters = {}, cfg = {} , nowMs = null } = {}) {
   const o = x.outcome ?? {}
   const closed = o.status && o.status !== 'open'
-  if (!closed) return {}
+  // Still running: with a clock (`nowMs` - the live screener, never the record) each leg is priced AS IT STANDS NOW -
+  // what it went in at, what it is worth at this minute and the points so far, marked `running`. Without one, nothing:
+  // the record only ever keeps a leg that has left.
+  const live = !closed && nowMs != null
+  if (!closed && !live) return {}
   const dir = x.side === 'LONG' ? 1 : -1
-  const out = { indexPoints: Number.isFinite(o.exitPrice) ? dir * (o.exitPrice - x.entry) : null }
+  // Running: the points so far come from the outcome's R (it is (dir x (last close - entry)) / risk), so the index
+  // and the spot signals each use the bars they are actually followed on.
+  const out = live
+    ? { running: true, indexPoints: Number.isFinite(o.r) ? o.r * Math.abs(x.entry - x.stop) : null }
+    : { indexPoints: Number.isFinite(o.exitPrice) ? dir * (o.exitPrice - x.entry) : null }
   if (!oi) return out
-  const indexExitAt = o.exitAt != null ? o.exitAt + MIN : squareOffMs(x.t)
+  const indexExitAt = live ? nowMs : o.exitAt != null ? o.exitAt + MIN : squareOffMs(x.t)
   // A signal read back from the log has no options of its own (fillRecordLegs): the ATM pair at its minute's spot.
   const options = x.options ?? optionTradesFor(oi, dir, valueAt(oi.spot, x.t)?.close, x.t)
   const setup = { ...x, options }
@@ -496,14 +504,21 @@ export function signalLegs(x, oi, { filters = {}, cfg = {} } = {}) {
     out[`${which}Entry`] = entry
     if (entry == null) continue
     const levels = optionPlanFor(x.id, filters, cfg, entry)
-    const untilMs = levels.exit === 'option' ? squareOffMs(x.t) : indexExitAt
+    const untilMs = live ? indexExitAt : levels.exit === 'option' ? squareOffMs(x.t) : indexExitAt
     const hit = untilMs > x.t ? optionStopTargetHit(oi, { ...trade, premium: entry }, x.t, untilMs, levels.slPts, levels.targetPts) : null
     const exitAt = hit ? hit.at : untilMs
-    const exit = hit ? hit.premium : closePremiumAt(oi, trade.side, trade.strike, untilMs)
+    // Running and still open: the premium NOW (the running minute's live tick, premiumAt - not the finished minute's).
+    const exit = hit ? hit.premium : live ? premiumAt(oi, trade.side, trade.strike, untilMs) : closePremiumAt(oi, trade.side, trade.strike, untilMs)
     out[`${which}Exit`] = exit ?? null
-    out[`${which}ExitTime`] = exit != null ? exitAt : null
-    out[`${which}ExitReason`] = exit == null ? null : hit ? hit.reason : levels.exit === 'option' ? 'square-off 15:10' : `with the index trade - ${exitLabel(o)}`
+    out[`${which}ExitTime`] = exit != null && (!live || hit) ? exitAt : null
+    out[`${which}ExitReason`] = exit == null ? null
+      : hit ? hit.reason
+        : live ? null
+          : levels.exit === 'option' ? 'square-off 15:10' : `with the index trade - ${exitLabel(o)}`
     out[`${which}Points`] = exit != null ? (which === 'buy' ? exit - entry : entry - exit) : null
+    // Its own SL / target, so the screener can say how far each leg is from leaving.
+    out[`${which}Sl`] = levels.slPts ?? null
+    out[`${which}Target`] = levels.targetPts ?? null
   }
   return out
 }

@@ -152,3 +152,35 @@ test('pastDay reads the day back: the futures minutes, and that date\'s OI and s
   assert.equal(data.oi.lag, MIN, 'read as a replay reads it - each point at its minute\'s end, no look-ahead')
   assert.ok(data.spotBars.length > 100, 'the day\'s spot minutes')
 })
+
+test('a signal still running reports both its options as they stand now, and a closed one its exits', async () => {
+  const io = fakeIo()
+  const scanner = new IndexScanner('NIFTY', io)
+  scanner.reset(DATE)
+  scanner.setConfig(SETTINGS)
+  await runDay(scanner, io, at(15), at(300))
+
+  const status = scanner.status()
+  assert.ok(status.signals.length > 0)
+  const open = status.signals.filter((s) => s.status === 'open')
+  assert.ok(open.length > 0, 'the day ends with signals still running')
+  for (const s of open) {
+    assert.equal(s.running, true, 'marked as still running')
+    assert.ok(Number.isFinite(s.points), 'its points so far on the index')
+    // Both options: in at the signal, worth this much now, points so far - and no exit reason yet.
+    for (const which of ['buy', 'sell']) {
+      if (!s[`${which}Option`]) continue
+      assert.ok(Number.isFinite(s[`${which}Entry`]), `${which} entry premium`)
+      assert.ok(Number.isFinite(s[`${which}Now`]), `${which} premium now`)
+      assert.ok(Number.isFinite(s[`${which}Points`]), `${which} points now`)
+      assert.equal(s[`${which}ExitReason`], null, `${which} has not left yet`)
+    }
+  }
+  // Once the day is finished, the same signals report their exits instead - final, not "now".
+  await scanner.finishDay(DATE)
+  const done = scanner.status()
+  assert.ok(done.signals.every((s) => s.status !== 'open'))
+  assert.ok(done.signals.every((s) => !s.running), 'nothing still running')
+  const withLegs = done.signals.filter((s) => s.buyOption || s.sellOption)
+  assert.ok(withLegs.length > 0 && withLegs.every((s) => s.buyExitReason || s.sellExitReason), 'each leg says why it left')
+})

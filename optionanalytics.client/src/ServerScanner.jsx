@@ -9,6 +9,7 @@ const { Text } = Typography
 const IST_HHMM = new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' })
 const hhmm = (ms) => (ms ? IST_HHMM.format(new Date(ms)) : '-')
 const rupee = (v) => `${v < 0 ? '-' : ''}₹${Math.abs(Math.round(v ?? 0)).toLocaleString('en-IN')}`
+const pts = (v) => (v == null ? '-' : `${v >= 0 ? '+' : ''}${v.toFixed(1)}`)
 
 /**
  * The strategy scanner the SERVER runs for NIFTY, BANKNIFTY and SENSEX at once (scanner-runner, started by
@@ -44,7 +45,38 @@ export function ServerScannerCard({ isAdmin, focus }) {
     { title: 'Strategy', key: 's', render: (_, s) => <span><Tag color={s.spot ? 'purple' : 'cyan'} style={{ fontSize: 9, marginRight: 4 }}>{s.spot ? 'option' : 'order flow'}</Tag>#{s.no} {s.name}{!s.alerted && <Tag style={{ marginLeft: 4, fontSize: 10 }}>not alerted</Tag>}</span> },
     { title: 'Side', dataIndex: 'side', width: 62, render: (v) => <Text style={{ color: v === 'LONG' ? UP_COLOR : DOWN_COLOR, fontSize: 12 }}>{v}</Text> },
     { title: 'Entry', dataIndex: 'entry', width: 72, render: (v) => v?.toFixed(1) },
-    { title: 'Result', key: 'r', width: 92, render: (_, s) => (s.status === 'open' ? <Tag color="processing">open</Tag> : <Text style={{ color: (s.r ?? 0) >= 0 ? UP_COLOR : DOWN_COLOR, fontSize: 12 }}>{s.status} {s.r != null ? `${s.r >= 0 ? '+' : ''}${s.r.toFixed(2)}R` : ''}</Text>) },
+    // An open signal says where it is NOW, not just "open": its points and R so far, and its stop if the trail has moved it.
+    { title: 'Result', key: 'r', width: 128, render: (_, s) => (
+      <Space direction="vertical" size={0}>
+        <span>
+          {s.status === 'open' ? <Tag color="processing" style={{ marginRight: 4 }}>open</Tag> : <Text style={{ fontSize: 12 }}>{s.status} </Text>}
+          <Text style={{ color: (s.r ?? 0) >= 0 ? UP_COLOR : DOWN_COLOR, fontSize: 12 }}>{pts(s.points)}{s.r != null ? ` (${s.r >= 0 ? '+' : ''}${s.r.toFixed(2)}R)` : ''}</Text>
+        </span>
+        {s.status === 'open' && s.trailed && s.stopNow != null && <Text type="secondary" style={{ fontSize: 10 }}>trailing SL {s.stopNow.toFixed(1)}</Text>}
+      </Space>
+    ) },
+    // Both options of EVERY signal, traded or not: what each went in at, what it is worth now (or left at) and its points.
+    ...['buy', 'sell'].map((which) => ({
+      title: <Tooltip title={`What the option ${which === 'buy' ? 'BOUGHT' : 'SOLD'} at this strategy's own strike did - in at the signal, at the premium now while it runs, at its exit once it has left. The side the signal was traded on IS that trade.`}>If {which === 'buy' ? 'bought' : 'sold'}</Tooltip>,
+      key: which,
+      width: 150,
+      render: (_, s) => {
+        const name = s[`${which}Option`]
+        if (!name) return <Text type="secondary" style={{ fontSize: 11 }}>-</Text>
+        const p = s[`${which}Points`]
+        return (
+          <Space direction="vertical" size={0}>
+            <Text style={{ fontSize: 11 }}>{name}</Text>
+            <span>
+              <Text type="secondary" style={{ fontSize: 11 }}>{s[`${which}Entry`]?.toFixed(1) ?? '-'} → {s[`${which}Now`]?.toFixed(1) ?? '-'} </Text>
+              <Text strong style={{ fontSize: 11, color: (p ?? 0) >= 0 ? UP_COLOR : DOWN_COLOR }}>{pts(p)}</Text>
+              {s.running && p != null && <Text type="secondary" style={{ fontSize: 10 }}> now</Text>}
+            </span>
+            {s[`${which}ExitReason`] && <Text type="secondary" style={{ fontSize: 10 }}>{s[`${which}ExitReason`]}</Text>}
+          </Space>
+        )
+      },
+    })),
   ]
   const tradeColumns = [
     { title: 'Time', dataIndex: 'entryTime', width: 76, render: (v, _r, i) => <span>{hhmm(v)}{i === 0 && <Tag color="blue" style={{ marginLeft: 4, fontSize: 9, lineHeight: '14px', padding: '0 3px' }}>new</Tag>}</span> },
