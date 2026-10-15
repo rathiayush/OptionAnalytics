@@ -342,11 +342,14 @@ export class IndexScanner {
     // are missing, they are read back before giving up - the futures ones from the day's order flow or the futures'
     // own candles, the spot ones from the day's spot candles.
     const needs = (spot) => fired.some((x) => !!x.spot === spot)
-    const missing = (d) => (needs(false) && !d.view?.minuteBars?.length) || (needs(true) && !d.spotBars?.length)
+    // The option chain counts as missing too: without it a signal closes but says nothing about what its option bought
+    // or sold would have made (signalLegs needs the chain), and the row keeps empty If bought / If sold for ever.
+    const missing = (d) => (needs(false) && !d.view?.minuteBars?.length) || (needs(true) && !d.spotBars?.length) || (fired.length > 0 && !d.oi)
     if (missing(data)) {
       const back = await this.pastDay(date)
       data = {
         oi: data.oi ?? back.oi,
+        // (a side read back keeps whatever was already there - only what is missing is replaced)
         view: data.view?.minuteBars?.length ? data.view : back.view,
         spotBars: data.spotBars?.length ? data.spotBars : back.spotBars,
       }

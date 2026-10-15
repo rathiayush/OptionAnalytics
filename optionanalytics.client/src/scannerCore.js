@@ -491,8 +491,15 @@ export function signalLegs(x, oi, { filters = {}, cfg = {} , nowMs = null } = {}
     : { indexPoints: Number.isFinite(o.exitPrice) ? dir * (o.exitPrice - x.entry) : null }
   if (!oi) return out
   const indexExitAt = live ? nowMs : o.exitAt != null ? o.exitAt + MIN : squareOffMs(x.t)
-  // A signal read back from the log has no options of its own (fillRecordLegs): the ATM pair at its minute's spot.
-  const options = x.options ?? optionTradesFor(oi, dir, valueAt(oi.spot, x.t)?.close, x.t)
+  // The options the signal carries, with ANY SIDE IT IS MISSING filled from the chain at its own minute.
+  // A setup is built at the clock, which for the futures strategies is part-way through a minute: a strike with no
+  // tick yet made optionTradesFor return that side as null, and the setup kept the null for the rest of the day - so
+  // the order-flow signals showed only one option, or none, in If bought / If sold. Taking the stored pair wholesale
+  // (`x.options ?? ...`) never recovered it, because a half-filled pair is not nullish. The chain is read at the
+  // signal's own minute, so nothing from after it is used. A signal read back from the log carries no options at all
+  // (fillRecordLegs) and gets the ATM pair the same way.
+  const atm = optionTradesFor(oi, dir, valueAt(oi.spot, x.t)?.close, x.t)
+  const options = x.options?.buy && x.options?.sell ? x.options : { ...(atm ?? {}), ...(x.options?.buy ? { buy: x.options.buy } : {}), ...(x.options?.sell ? { sell: x.options.sell } : {}) }
   const setup = { ...x, options }
   const plan = optionPlanFor(x.id, filters, cfg)
   for (const which of ['buy', 'sell']) {

@@ -912,7 +912,7 @@ function BacktestTrades() {
   const [error, setError] = useState(null)
   const [view, setView] = useState('trades')
   const [setting, setSetting] = useState('all')
-  const [order, setOrder] = useState('asc')
+  const [order, setOrder] = useState('desc') // newest first, as everywhere else
   const [ids, setIds] = useState([])
   const [side, setSide] = useState('all')
   const [outcome, setOutcome] = useState('all')
@@ -1083,7 +1083,7 @@ function ScannerRecord({ initial = {} }) {
   const [mode, setMode] = useState('all')
   const sinceMs = Number(initial.since) || null
   const [range, setRange] = useState(sinceMs ? [dayjs(sinceMs), null] : null)
-  const [order, setOrder] = useState(initial.strategy || initial.applied ? 'desc' : 'asc')
+  const [order, setOrder] = useState('desc') // newest first - the trade that just happened is the one being looked at
   // The strategies applied per index (a fine-tuned setting, Trades / Strategy tuning page) and when: "Applied only" shows
   // just their run - each on its own index, from the moment it was applied (when that was kept).
   const [appliedOnly, setAppliedOnly] = useState(initial.applied === '1')

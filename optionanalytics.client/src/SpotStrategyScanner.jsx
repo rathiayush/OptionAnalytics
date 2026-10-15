@@ -2,11 +2,12 @@
 // against the option chain's OI and premiums - the data this page shows - so they live here, not on the Order Flow
 // page. Judged at the start of each minute on the minutes that had FINISHED (scannerCore.spotScanTick - the same
 // function the server scanner runs, and what the Strategy tuning measured), followed on the spot candles, and traded
-// in OPTIONS exactly as the Order Flow page's scanner trades its alerts: a paper option trade on every alert by
-// default; in Live (Dhan) mode with "Auto-place on alert" on (its own confirmed switch) a real Dhan super order with
-// its SL / target legs, closed when its signal ends (index stop / target / trailing SL / time stop / 15:10) or its own
-// SL / target fills - and the server watches its index stop / target on the SPOT price too, so they hold with this
-// page closed. A replayed day is paper only.
+// in OPTIONS. TODAY THIS CARD TRADES NOTHING BY ITSELF: the SERVER scanner runs every strategy, the spot ones
+// included, and punches the paper trade (and places the live order where the index is Live today and the strategy is
+// on its live list) with no page open - so this card is the window on them, not a second scanner. It still shows each
+// signal the moment it fires (chime, voice, notification) and B / S still trade one BY HAND, in paper or, in Live
+// (Dhan) mode, as a real super order. A REPLAYED day has no server behind it, so it trades every signal itself, on
+// paper, exactly as before.
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, Button, Card, Checkbox, InputNumber, Modal, Popconfirm, Segmented, Select, Space, Switch, Tag, Tooltip, Typography, notification } from 'antd'
 import { SoundOutlined } from '@ant-design/icons'
@@ -23,7 +24,7 @@ import { spotBarsOf, spotProfile, PROFILE_LAG, PROFILE_MIN_BARS } from './spotEn
 import { SCANNER_SETTINGS_KEY, BY_INDEX_KEY, readFiltersByIndex } from './scannerSettings.js'
 import {
   MIN, sameSignal, trailFor, followSetups, setupEvents, newPosition, positionRows, withCapChange, liveLegsFor, PAPER_TRADE_LOT_SIZE,
-  setupExitText, paperExitResult, setupWasTraded, spotScanTick, spotScanMinutes,
+  paperExitResult, spotScanTick, spotScanMinutes,
 } from './scannerCore.js'
 import { ServerLiveSwitch, ServerLiveTrades, useServerLive } from './ServerLive.jsx'
 
@@ -191,16 +192,13 @@ export function SpotStrategyScanner({ underlying, date, isReplay, bars, clockMs,
   useEffect(() => { paperBookRef.current = paperBook }, [paperBook])
   const [tradeMode, setTradeModeState] = useState(() => { try { return localStorage.getItem(TRADE_MODE_KEY) === 'live' ? 'live' : 'paper' } catch { return 'paper' } })
   const setTradeMode = (mode) => { try { localStorage.setItem(TRADE_MODE_KEY, mode) } catch { /* convenience only */ } setTradeModeState(mode) }
-  const [autoLive, setAutoLive] = useState(false)
-  // The server scanner Live for this index: the SERVER places each alert's order, so this page's own Auto-place stays
-  // off (never two orders for one alert).
+  // The server scanner for this index: it runs every spot strategy and places each alert's order itself (Live today),
+  // which is why this card no longer trades an alert of its own - never two trades for one signal.
   const serverLive = useServerLive()
   const serverSt = serverLive.list?.find((x) => x.underlying === underlying) ?? null
-  const serverIsLive = !!serverSt?.live
-  useEffect(() => { if (serverIsLive) setAutoLive(false) }, [serverIsLive])
-  useEffect(() => { if (!canTradeLive) setAutoLive(false) }, [canTradeLive])
   const liveModeRef = useRef({ mode: 'paper', auto: false })
-  useEffect(() => { liveModeRef.current = { mode: canTradeLive ? tradeMode : 'paper', auto: canTradeLive && tradeMode === 'live' && autoLive && !serverIsLive } }, [canTradeLive, tradeMode, autoLive, serverIsLive])
+  // `auto` is always false: nothing on this card places an order by itself any more - the server scanner does that.
+  useEffect(() => { liveModeRef.current = { mode: canTradeLive ? tradeMode : 'paper', auto: false } }, [canTradeLive, tradeMode])
   const liveLossRef = useRef(0)
   const placingRef = useRef(new Set())
   const placedRef = useRef(new Set())
@@ -368,7 +366,11 @@ export function SpotStrategyScanner({ underlying, date, isReplay, bars, clockMs,
     const meta = STRATEGY_BY_ID[s.id]
     const live = liveModeRef.current
     const side = optionPlanFor(s.id, filtersOf(c), c).leg
-    const autoTrade = side && (live.mode !== 'live' || live.auto) ? tradeOf(s, side) : null
+    // TODAY THIS CARD TRADES NOTHING BY ITSELF: the SERVER scanner runs every strategy, spot ones included, and punches
+    // the paper trade (and the live order where the index is Live today). This card would otherwise punch a second one
+    // for the same signal, and send a second Telegram. It still shows the signal the moment it fires - chime, voice and
+    // the notification - and B / S still trade it by hand. A REPLAY has no server behind it, so it trades as before.
+    const autoTrade = isReplay && side && (live.mode !== 'live' || live.auto) ? tradeOf(s, side) : null
     if (autoTrade) punchRef.current?.(s, side, s.t, { auto: true })
     if (c.sound) chime(s.side === 'LONG')
     if (c.voice) speak(`${meta.short}. ${s.side === 'LONG' ? 'Long' : 'Short'}.${autoTrade ? ` ${autoTrade.action === 'SELL' ? 'Sold' : 'Bought'} ${autoTrade.strike} ${autoTrade.side === 'CE' ? 'call' : 'put'}.` : ''}`)
@@ -383,6 +385,7 @@ export function SpotStrategyScanner({ underlying, date, isReplay, bars, clockMs,
             <div style={{ margin: '4px 0' }}>
               <b>Option:</b> {[optionTradeText(tradeOf(s, 'buy')), optionTradeText(tradeOf(s, 'sell'))].filter(Boolean).join(' · or ')}
               {autoTrade && <Text strong style={{ fontSize: 11, color: autoTrade.action === 'SELL' ? DOWN_COLOR : UP_COLOR }}> · {live.mode === 'live' ? 'LIVE order sent:' : 'paper'} {autoTrade.action === 'SELL' ? 'SOLD' : 'BOUGHT'} {autoTrade.strike} {autoTrade.side}</Text>}
+              {!isReplay && <Text type="secondary" style={{ fontSize: 11 }}> · the server scanner trades it</Text>}
             </div>
           )}
           {Object.entries(s.checks ?? {}).map(([k, v]) => <div key={k}><b>{k}:</b> {v}</div>)}
@@ -515,7 +518,7 @@ export function SpotStrategyScanner({ underlying, date, isReplay, bars, clockMs,
       }
       const hit = exitLabel(s.outcome)
       const good = s.outcome.r > 0
-      if (!isReplay && c.telegram !== false && !setupWasTraded(paperBookRef.current[dayKey]?.positions, s)) telegram(`${setupExitText(s)} (spot)`)
+      // (not today: the server scanner announces every spot signal's exit - this card would send it twice)
       if (c.sound) chime(good)
       if (c.voice) speak(`${hit}. ${meta.short}. ${good ? 'Plus' : 'Minus'} ${Math.abs(s.outcome.r).toFixed(1)} R.`)
       notification.open({ key: `${key}-exit`, placement: 'topRight', duration: 15,
@@ -690,7 +693,12 @@ export function SpotStrategyScanner({ underlying, date, isReplay, bars, clockMs,
               { value: 'all', label: `All ${SPOT_IDS.length}` },
               { value: 'custom', label: 'My choice' },
             ]} />
-          <Text type="secondary" style={{ fontSize: 12 }}>Every signal is listed below; only these alert and trade.{isReplay ? ` Replay: every signal of these is paper-traded as the replay runs - also the ones a jump moves over.${alertIds.length === 0 ? ' None picked - pick All to trade them all.' : ''}` : ''}</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            Every signal is listed below; only these alert.
+            {isReplay
+              ? ` Replay: every signal of these is paper-traded as the replay runs - also the ones a jump moves over.${alertIds.length === 0 ? ' None picked - pick All to trade them all.' : ''}`
+              : ' Today the SERVER scanner trades them (paper, and live where this index is Live today) - this card does not punch a trade of its own. B / S below still trade one by hand.'}
+          </Text>
         </div>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '2px 10px' }}>
           {SPOT_STRATEGIES.filter((s) => !s.retired).map((s) => (
@@ -759,7 +767,7 @@ export function SpotStrategyScanner({ underlying, date, isReplay, bars, clockMs,
             {canTradeLive && (
               <Segmented size="small" value={tradeMode} aria-label="Spot trade mode"
                 onChange={(v) => {
-                  if (v !== 'live') { setTradeMode('paper'); setAutoLive(false); return }
+                  if (v !== 'live') { setTradeMode('paper'); return }
                   Modal.confirm({
                     title: 'Switch the spot strategies to LIVE trading on Dhan?',
                     content: 'B / S on a signal will place REAL super orders (with the option SL and target as its stop-loss and target legs). Each live trade is closed on Dhan when its signal ends or you press Exit, and the server exits it at the signal\'s spot SL / target too.',
@@ -804,19 +812,12 @@ export function SpotStrategyScanner({ underlying, date, isReplay, bars, clockMs,
             <Alert type="error" showIcon style={{ margin: '4px 0 6px', padding: '4px 10px' }} message={(
               <Space wrap size={8} style={{ fontSize: 12 }}>
                 <b>LIVE - real orders on Dhan</b>
-                <Space size={4}>
-                  <Switch size="small" checked={autoLive && !serverIsLive} disabled={serverIsLive} aria-label="Spot auto-place on alert"
-                    onChange={(v) => {
-                      if (!v) { setAutoLive(false); return }
-                      Modal.confirm({
-                        title: 'Auto-place a REAL order on every spot alert?',
-                        content: `Every alert of the spot strategies selected (${alertIds.length}) will place a live super order on Dhan by itself - ${settings.autoPaper === 'buy' ? 'BUY' : settings.autoPaper === 'sell' ? 'SELL' : 'buy or sell as each strategy was tuned (sell where it was not)'} - up to ${settings.maxLiveTrades ?? 5} trades today, and stops after a ₹${(settings.maxLiveLoss ?? 10000).toLocaleString('en-IN')} loss. Turns off when you leave this page.`,
-                        okText: 'Turn on', okButtonProps: { danger: true }, cancelText: 'Keep off',
-                        onOk: () => setAutoLive(true),
-                      })
-                    }} />
-                  <Text style={{ fontSize: 12 }}>Auto-place on alert{serverIsLive ? ' (off - the server places them)' : ''}</Text>
-                </Space>
+                {/* Auto-place on alert is gone from this card: the SERVER scanner is what runs every strategy and places
+                    the order, on its own Live today switch and its own limits - with no page open. B / S here still
+                    place a real order by hand. */}
+                <Tooltip title={`Nothing here places an order by itself. The server scanner runs every spot strategy and places the order where ${underlying} is Live today and the strategy is on its live list - with no page open. B / S below still place one by hand.`}>
+                  <Text style={{ fontSize: 12 }}>by hand only · <a href="/strategies">the server places the automatic ones</a></Text>
+                </Tooltip>
                 <Text style={{ fontSize: 12 }}>slippage</Text>
                 <InputNumber size="small" min={0} max={20} step={0.5} style={{ width: 60 }} value={cfg.liveSlippage ?? 2} aria-label="Spot live slippage"
                   onChange={(v) => { if (v != null) { setLevels((l) => ({ ...l, liveSlippage: v })); saveTradeDefaults(underlying, { slippage: v }) } }} />

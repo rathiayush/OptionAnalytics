@@ -6,7 +6,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { IndexScanner, futuresMinuteBars } from '../scanner-runner/indexScanner.mjs'
-import { ALL_IDS, MIN } from '../src/scannerCore.js'
+import { ALL_IDS, MIN, signalLegs } from '../src/scannerCore.js'
+import { optionTradesFor } from '../src/strategyEngine.js'
 import { day } from './synthetic-day.mjs'
 
 const { minuteBars, prints, oi, path, T915, at, run } = day()
@@ -239,4 +240,24 @@ test('futuresMinuteBars: the futures own candles stand in for a day with no orde
   assert.ok(Date.parse(bars[0].time) < Date.parse(bars.at(-1).time), 'oldest first')
   assert.deepEqual(futuresMinuteBars(null), [])
   assert.deepEqual(futuresMinuteBars({ futuresBars: [] }), [])
+})
+
+test('an option side the setup never captured is filled from the chain, not left blank for ever', async () => {
+  // A futures (order-flow) setup is built AT THE CLOCK, part-way through a minute: a strike with no tick yet made
+  // optionTradesFor return that side as null, and the setup kept the null all day - so its If bought / If sold stayed
+  // empty. The stored pair is no longer taken wholesale; a missing side is read from the chain at the signal's minute.
+  const t = at(100)
+  const dir = 1
+  const full = optionTradesFor(oi, dir, 22700, t)
+  assert.ok(full?.buy && full?.sell, 'the chain has both sides at that minute')
+  const halfCaptured = { buy: full.buy, sell: null } // what a mid-minute read left behind
+  const base = { id: 'weakWall', side: 'LONG', t, entry: 22760, stop: 22740, target: 22800, outcome: { status: 'win', r: 1, exitAt: at(120), exitPrice: 22800 } }
+
+  const filled = signalLegs({ ...base, options: halfCaptured }, oi, {})
+  assert.ok(filled.sellOption, 'the side the setup missed is filled in')
+  assert.ok(Number.isFinite(filled.sellPoints), 'and it has its points')
+  // What the setup DID capture is still used as it stood - never replaced by a later read.
+  const both = signalLegs({ ...base, options: full }, oi, {})
+  assert.equal(filled.buyOption, both.buyOption)
+  assert.equal(filled.buyEntry, both.buyEntry)
 })
