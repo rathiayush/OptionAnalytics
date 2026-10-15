@@ -10,8 +10,10 @@ const iso = (ms) => new Date(ms).toISOString()
 let fails = 0
 const check = (n, c, x = '') => { console.log(`${c ? 'PASS' : 'FAIL'} ${n} ${c ? '' : x}`); if (!c) fails++ }
 
-check('37 strategies (29 running), 34-37 in the profile group and on trial', STRATEGIES.length === 37 && ACTIVE_STRATEGIES.length === 29
-  && ['pocReject', 'vaEdgeReject', 'hvnReject', 'lvnReject'].every((id, i) => { const s = STRATEGIES.find((x) => x.id === id); return s?.no === 34 + i && s.group === 'profile' && s.trial && !s.retired }))
+// RETIRED: they reject at the previous session's VOLUME-profile levels, which are made up on an estimated day
+// (see STRATEGIES / tests/no-volume-profile.test.mjs). Their rules stay and are still run here, with includeRetired.
+check('37 strategies (22 running), 34-37 in the profile group, on trial and retired', STRATEGIES.length === 37 && ACTIVE_STRATEGIES.length === 22
+  && ['pocReject', 'vaEdgeReject', 'hvnReject', 'lvnReject'].every((id, i) => { const s = STRATEGIES.find((x) => x.id === id); return s?.no === 34 + i && s.group === 'profile' && s.trial && s.retired }))
 check('their filters default to the rule as written', ['pocReject', 'vaEdgeReject', 'hvnReject', 'lvnReject'].every((id) => ['bandPct', 'awayPct', 'touchBars', 'minWriting', 'futuresNotAgainst', 'needDelta', 'minRoomR', 'maxTargetR', 'timeStopMin'].every((k) => STRATEGY_FILTERS[id].some((f) => f.key === k)) && strategyFilters(id, undefined).minWriting === 0.1 && strategyFilters(id, undefined).touchBars === 3))
 
 const L0 = 22700 // the level, in futures terms (spot = futures - 60)
@@ -74,7 +76,7 @@ function rejectCase(dir, o = {}) {
   const vp = { poc: m2(base.poc), vah: dir > 0 ? base.vah : m2(base.val), val: dir > 0 ? base.val : m2(base.vah), hvn: sortA(base.hvn), lvn: sortA(base.lvn) }
   const price = bs.at(-1).close
   const tape = Array.from({ length: 50 }, (_, i) => ({ seq: i, time: now - 50000 + i * 1000, price: 1, quantity: 75, buy: ((i * 37) % 100) < (dir > 0 ? 60 : 40) }))
-  const setups = evaluateStrategies({ nowMs: now, price, bars: bs, minuteBars: bs, prints: tape, book: { bids: [{ quantity: 500 }], asks: [{ quantity: 500 }] }, liquidity: [], pullStack: [], sweeps: [], icebergs: [], oi, estimated: false, lotSize: 75, bigLots: 10, profile: { vp, tpoPrev: null }, filters: o.filters })
+  const setups = evaluateStrategies({ nowMs: now, price, bars: bs, minuteBars: bs, prints: tape, book: { bids: [{ quantity: 500 }], asks: [{ quantity: 500 }] }, liquidity: [], pullStack: [], sweeps: [], icebergs: [], oi, estimated: false, lotSize: 75, bigLots: 10, profile: { vp, tpoPrev: null }, filters: o.filters, includeRetired: true })
   const id = { poc: 'pocReject', va: 'vaEdgeReject', hvn: 'hvnReject', lvn: 'lvnReject' }[kind]
   return { s: setups.find((x) => x.id === id), setups, price }
 }

@@ -52,7 +52,7 @@ function evalAt({ oi, bars }, nowM, dir, o = {}) {
   const buyPct = o.tapeAgainst ? 50 : dir > 0 ? 70 : 30
   const tape = Array.from({ length: 60 }, (_, i) => ({ seq: i, time: nowMs - 59_000 + i * 1000, price: 1, quantity: 75, buy: ((i * 37) % 100) < buyPct }))
   const book = dir > 0 ? { bids: [{ quantity: 600 }], asks: [{ quantity: 400 }] } : { bids: [{ quantity: 400 }], asks: [{ quantity: 600 }] }
-  return evaluateStrategies({ nowMs, price: bars.at(-1).close, bars, minuteBars: bars, prints: tape, book, liquidity: [], pullStack: [], sweeps: [], icebergs: [], oi, estimated: false, lotSize: 75, bigLots: 10, profile: o.profile ?? null })
+  return evaluateStrategies({ nowMs, price: bars.at(-1).close, bars, minuteBars: bars, prints: tape, book, liquidity: [], pullStack: [], sweeps: [], icebergs: [], oi, estimated: false, lotSize: 75, bigLots: 10, profile: o.profile ?? null, includeRetired: true })
 }
 const brief = (s, all) => JSON.stringify(s ? { side: s.side, entry: s.entry, stop: s.stop, target: s.target } : all.map((x) => x.id))
 

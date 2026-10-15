@@ -115,15 +115,16 @@ function runShort(spot) {
   const bs = bars(0, 99, (m) => { const p = m < 95 ? 22760 - m : (m === 97 ? 22660 : 22668); return { open: p, high: p + 2, low: m === 97 ? 22645 : p - 2, close: p, buy: m === 99 ? 900 : 500, sell: 600 } })
   bs[99].absorption = [{ side: 'buy', price: 22650 }]
   const profile = { vp: { poc: 22720, vah: 22760, val: 22655, hvn: [22720], lvn: [] }, tpoPrev: null }
-  const setups = evaluateStrategies({ nowMs: now, price: 22668, bars: bs, minuteBars: bs, prints: tape(now, 70), book: { bids: [{ quantity: 600 }], asks: [{ quantity: 400 }] }, liquidity: [], pullStack: [], sweeps: [], icebergs: [], oi, estimated: false, lotSize: 75, bigLots: 10, profile })
+  const setups = evaluateStrategies({ nowMs: now, price: 22668, bars: bs, minuteBars: bs, prints: tape(now, 70), book: { bids: [{ quantity: 600 }], asks: [{ quantity: 400 }] }, liquidity: [], pullStack: [], sweeps: [], icebergs: [], oi, estimated: false, lotSize: 75, bigLots: 10, profile, includeRetired: true })
   const va = setups.find((s) => s.id === 'vaRejection')
   check('value-area rejection long at the previous VAL + put wall, target the POC', va?.side === 'LONG' && Math.abs(va.target - 22720) < 1, JSON.stringify(va?.checks ?? setups.map((s) => s.id)))
 }
 // Top 15 selection.
 {
   const mk = (id, rs) => rs.map((r, i) => ({ id, t: i, outcome: { status: r > 0 ? 'win' : 'loss', r } }))
-  const t = topFifteen(strategyStats([...mk('range', [-1, -1, -1, -1, -1]), ...mk('lvnRun', [2, 2, 2, -1, 2])]))
-  check('top 15 (the measured loser left out), profile group led by its best', t.ids.length === 15 && !t.ids.includes('range') && t.profile.ids[0] === 'lvnRun', t.ids.join())
+  // (#14 lvnRun and the other volume-profile strategies are retired, so the profile group is led by #12 now.)
+  const t = topFifteen(strategyStats([...mk('range', [-1, -1, -1, -1, -1]), ...mk('tpo80', [2, 2, 2, -1, 2])]))
+  check('top 15 (the measured loser left out), profile group led by its best', t.ids.length === 15 && !t.ids.includes('range') && t.profile.ids[0] === 'tpo80', t.ids.join())
   const inst = ['oiSqueeze', 'trap', 'cvdDivergence', 'blockTrade', 'imbalanceRetest']
   const active = new Set(STRATEGIES.filter((x) => !x.retired).map((x) => x.id))
   check('unmeasured: top 15 = the 3 OI picks left (the iceberg is retired) + profile top 5 + the OI squeeze + the institutional setups, topped up from the rest - nothing retired', inst.every((id) => t.ids.includes(id))
