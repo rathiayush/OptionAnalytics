@@ -38,6 +38,15 @@ const MAX_RETRY_MS = 5 * 60_000
 // Before the open and at weekends there is no day to load yet: not even tried. 09:14 IST so the seed is ready as the
 // first minute closes.
 const LOAD_FROM_MINUTE = 9 * 60 + 14
+// The session is over (15:30) and the last minute's candles have landed: from this IST minute the day is FINISHED -
+// every signal gets its outcome and every paper trade its exit on the day's complete minutes, and the final record
+// goes out. Nothing of a day that has closed is ever left "open".
+const SESSION_OVER_MINUTE = 15 * 60 + 40
+// How many past days a restart looks back over for a day it never finished (an overnight restart, the server down at
+// the close). Each one costs a day of order flow and OI to read back.
+export const FINISH_BACK_DAYS = 7
+// How many times a day whose minutes came back incomplete is tried again before it is let go.
+const FINISH_TRIES = 3
 const istClock = (ms) => {
   const d = new Date(ms + 330 * 60_000)
   return { minute: d.getUTCHours() * 60 + d.getUTCMinutes(), weekday: d.getUTCDay() }
@@ -86,6 +95,7 @@ export class IndexScanner {
     this.spotError = null
     this.notified = new Set()
     this.primedExits = false
+    this.finished = null // the date whose record is final - that day is never scanned or posted again
     this.watching = []
     this.profileWatch = newProfileWatch()
     this.profileLevelsOf = { futures: [], spotOwn: [] }
@@ -183,6 +193,10 @@ export class IndexScanner {
   // Today's data, loaded once per day (again after a failure, a reconnect or a new row size).
   async ensureDay(today) {
     if (this.date !== today) {
+      // The day that just ended is finished before it is let go: its outcomes and exits on its complete minutes, and
+      // its final record. (A day the runner was not up for at the close is finished at the next start - finishPastDays.)
+      const was = this.date
+      if (was && was < today) await this.finishDay(was).catch((err) => this.io.log(`${this.underlying}: ${was} not finished - ${err.message}`))
       this.reset(today)
       const saved = await this.io.loadState(this.underlying, today)
       if (saved) this.restore(saved)
@@ -247,6 +261,89 @@ export class IndexScanner {
   // Missed pushes (a reconnect): reload the day so far.
   invalidate() { this.data = null; this.nextLoadAt = 0 }
 
+  // ---- Finishing a day -----------------------------------------------------------------------------
+
+  /** Once the session is over, today is finished - once. Called every loop; does nothing until then. */
+  async finishIfDue() {
+    if (!this.date || this.finished === this.date) return false
+    if (istClock(this.io.now()).minute < SESSION_OVER_MINUTE || istDate(this.io.now()) !== this.date) return false
+    return this.finishDay(this.date)
+  }
+
+  /** The day's minutes read back whole, for a date whose session is over: the futures 1-minute bars (the day the
+   *  server recorded, else estimated from Dhan's 1-minute candles) and that date's OI and spot - read as a replay
+   *  reads them (each point at its minute's END, so nothing is seen before it was known). */
+  async pastDay(date) {
+    const u = this.underlying
+    const flag = expiryFlagOf(u)
+    const [snapshot, run, expiries] = await Promise.all([
+      this.io.api(`/api/order-flow/${u}/day/${date}?rowSize=${this.rowSize()}&minTradeLots=5&heatmapColumns=900`).catch(() => null),
+      this.io.api(`/api/oi-replay/${u}/run?${new URLSearchParams({ date, timeframeMinutes: '1', expiryFlag: flag })}`).catch(() => null),
+      this.io.api(`/api/oi-replay/${u}/expiries`).catch(() => null),
+    ])
+    const expiryDate = u === 'BANKNIFTY' ? expiries?.month ?? null : expiries?.week ?? null
+    return {
+      view: snapshot ? orderFlowFromSnapshot(snapshot) : null,
+      oi: run?.success ? buildOiContext(run, expiryDate, { live: false }) : null,
+      spotBars: spotBarsOf(run?.spotCandlesOneMinute ?? run?.spotCandles ?? []),
+    }
+  }
+
+  /**
+   * THE DAY IS OVER: every signal of `date` gets its outcome and every paper trade its exit, on that day's COMPLETE
+   * minutes (a setup that never reached its stop or target is closed at the last price, not left "open"), each closed
+   * signal gets what its bought and its sold option would have made (signalLegs), and the final record is posted.
+   * Then the day is marked finished and never scanned, re-priced or posted again.
+   * Today: on the minutes in memory. A past day (one a restart left open): on its minutes read back (pastDay) - so a
+   * day the runner was down for at the close is still finished, on the backend, with no page open.
+   * Returns true when a record was posted.
+   */
+  async finishDay(date) {
+    if (!date || this.finished === date) return false
+    const today = date === this.date
+    const state = today
+      ? { date, fired: this.memory.fired, positions: this.positions, trailLog: this.trailLog, notified: [...this.notified] }
+      : await this.io.loadState(this.underlying, date)
+    if (!state || state.finished) { if (today && state?.finished) this.finished = date; return false }
+    const fired = state.fired ?? []
+    const positions = state.positions ?? []
+    const tries = (state.finishTries ?? 0) + 1
+    const done = async (finished = true) => {
+      await this.io.saveState(this.underlying, date, { ...state, date, positions, finishTries: tries, finished })
+      if (today && finished) this.finished = date
+    }
+    if (!fired.length && !positions.length) { await done(); return false }
+
+    const cfg = this.settings()
+    const data = today && this.data?.oi ? { view: this.data.view, oi: this.data.oi, spotBars: this.spotBars } : await this.pastDay(date)
+    // Nothing came back: left unfinished rather than closed on no data - the next start tries again.
+    if (!data.oi && !data.view?.minuteBars?.length) { this.io.log(`${this.underlying}: ${date} not finished yet - its minutes did not come back`); return false }
+
+    // Past the last minute of the day, so every bar counts and the 15:10 square-off always lands.
+    const endMs = Date.parse(`${date}T23:59:00+05:30`)
+    const withOutcome = followAllSetups(fired, state.trailLog ?? [], data.view?.minuteBars, data.spotBars, endMs, true)
+    const rowsNow = () => positionRows({ positions, dayResults: withOutcome, withOutcome, oi: data.oi, nowMs: endMs, settings: cfg, dayOver: true })
+    let rows = rowsNow()
+    // The exit each trade ends with is kept on it, as during the day (exitFinal) - the record never re-prices it later.
+    for (const r of rows) {
+      const p = positions.find((x) => x.key === r.key)
+      if (!p || p.exitFinal || !r.exitTime || r.current == null) continue
+      Object.assign(p, { exitTime: r.exitTime, exitPremium: r.current, exitReason: r.exitReason ?? null, exitFinal: true })
+    }
+    rows = rowsNow()
+    const body = scannerLogBody({ underlying: this.underlying, date, source: 'server', dayResults: withOutcome, rows, charges: cfg.charges, oi: data.oi, cfg })
+    await this.io.api('/api/scanner-log/day', { method: 'POST', body })
+    const stillOpen = withOutcome.filter((x) => (x.outcome?.status ?? 'open') === 'open').length
+    const openRows = rows.filter((r) => !r.exitTime).length
+    // Something was still open: part of the day's minutes did not come back. What was judged is posted anyway, and the
+    // day is tried again at the next start - but only so many times, so a day whose data is simply gone is let go
+    // rather than re-read for ever.
+    await done(!(stillOpen || openRows) || tries >= FINISH_TRIES)
+    if (today) { this.lastOutcomes = withOutcome; this.lastRows = rows; this.lastLogSig = scannerLogSig(`${this.underlying}:${date}`, body) }
+    this.io.log(`${this.underlying}: ${date} finished - ${withOutcome.length} signal(s)${stillOpen ? `, ${stillOpen} with no minutes to judge them on (try ${tries})` : ''}, ${rows.length - openRows}/${rows.length} trade(s) closed`)
+    return true
+  }
+
   onOrderFlowLive(payload) {
     const d = this.data
     if (!d?.view || payload?.meta?.securityId !== d.view.meta?.securityId) return
@@ -302,6 +399,8 @@ export class IndexScanner {
 
   async evaluate() {
     const d = this.data
+    // The day's record is final (finishDay): never scanned, re-priced or posted again.
+    if (this.finished === this.date) return
     if (!this.enabled || !d?.view || !d.oi) return
     // Before the engine has today's first tick its snapshot is yesterday's - nothing to scan.
     if (d.view.meta?.day && d.view.meta.day !== this.date) return
@@ -593,7 +692,7 @@ export class IndexScanner {
   // ---- State across restarts -----------------------------------------------------------------------
 
   snapshotState() {
-    return { date: this.date, fired: this.memory.fired, positions: this.positions, trailLog: this.trailLog, notified: [...this.notified], appliedLevels: this.appliedLevels, appliedTrail: this.appliedTrail, appliedCaps: this.appliedCaps }
+    return { date: this.date, fired: this.memory.fired, positions: this.positions, trailLog: this.trailLog, notified: [...this.notified], appliedLevels: this.appliedLevels, appliedTrail: this.appliedTrail, appliedCaps: this.appliedCaps, finished: this.finished === this.date }
   }
 
   restore(saved) {
@@ -606,6 +705,8 @@ export class IndexScanner {
     this.appliedLevels = saved.appliedLevels ?? null
     this.appliedTrail = saved.appliedTrail ?? null
     this.appliedCaps = saved.appliedCaps ?? null
+    // A day already finished stays finished across a restart.
+    this.finished = saved.finished ? this.date : null
   }
 
   /** What changes the pages' picture of this index at once: a signal fired or closed, a trade opened or exited. */

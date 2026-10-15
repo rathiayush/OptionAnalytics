@@ -186,7 +186,9 @@ function reference(setup, bars, untilMs, dayOver) {
   check('entry on the minute: the bar starting at the entry counts (target hit in it)', o1.status === 'win' && o1.exitAt === at(10) && o1.exitPrice === 120)
   // A live alert mid-minute: that minute's bar is not counted (part of it came before the trade).
   const o2 = simulateOutcome({ ...s1, t: at(10) + 20_000 }, [bar(10, 100, 121, 99, 118), bar(11, 118, 119, 117, 118)], Infinity, true)
-  check('entry mid-minute: the running bar is not counted', o2.exitAt == null && o2.status === 'win' && Math.abs(o2.r - 1.8) < 1e-9)
+  // (The day's data ends with the trade still running, so it leaves at the last bar it saw - at that bar's start,
+  // at its close: 118, +1.8R - never at the bar that was already running when it went in.)
+  check('entry mid-minute: the running bar is not counted', o2.exitAt === at(11) && o2.exitPrice === 118 && o2.status === 'win' && Math.abs(o2.r - 1.8) < 1e-9)
   // Both levels touched in one bar: the stop.
   const o3 = simulateOutcome(s1, [bar(10, 100, 125, 85, 110)], Infinity, true)
   check('stop and target in the same bar: the stop counts', o3.status === 'loss' && o3.r === -1 && o3.exitPrice === 90)

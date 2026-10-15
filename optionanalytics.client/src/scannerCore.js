@@ -140,11 +140,13 @@ export function withOwnTrail(s, raw, trail) {
 }
 
 // Each fired setup with its outcome so far (its trailing stop following any change of the SCANNER's trailing stop
-// logged after it fired - a setup trailing its strategy's own keeps it).
-export function followSetups(fired, trailLog, minuteBars, nowMs) {
+// logged after it fired - a setup trailing its strategy's own keeps it). `dayOver`: the day's minutes are complete
+// (its session has closed and the bars were read back whole), so a setup that never reached its stop or target is
+// closed at the last price instead of staying "open" for ever (simulateOutcome's dayOver).
+export function followSetups(fired, trailLog, minuteBars, nowMs, dayOver = false) {
   return fired.map((s) => {
     const withLog = s.trailOverride === undefined && trailLog.some((c) => c.t > s.t) ? { ...s, trailLog: trailLog.filter((c) => c.t > s.t) } : s
-    return { ...withLog, outcome: simulateOutcome(withLog, minuteBars ?? [], nowMs ?? 0) }
+    return { ...withLog, outcome: simulateOutcome(withLog, minuteBars ?? [], nowMs ?? 0, dayOver) }
   })
 }
 
@@ -185,11 +187,14 @@ export function spotScanMinutes({ from, to, bars, oi, filters, trail }, memory) 
 
 /** Every fired setup with its outcome so far: the futures ones on the futures minutes, the spot ones on the spot
  *  minutes (their stop / target are spot prices) - in time order when both are there. */
-export function followAllSetups(fired, trailLog, futuresBars, spotBars, nowMs) {
+export function followAllSetups(fired, trailLog, futuresBars, spotBars, nowMs, dayOver = false) {
   const spot = fired.filter((s) => s.spot)
-  if (!spot.length) return followSetups(fired, trailLog, futuresBars, nowMs)
+  // The day is only over for the side whose minutes actually came back: with no spot candles for the day, a spot
+  // setup closed "at the last price" would be closed at its own entry, which is not what happened.
+  const over = (bars) => dayOver && (bars?.length ?? 0) > 0
+  if (!spot.length) return followSetups(fired, trailLog, futuresBars, nowMs, over(futuresBars))
   const futures = fired.filter((s) => !s.spot)
-  return [...followSetups(futures, trailLog, futuresBars, nowMs), ...followSetups(spot, trailLog, spotBars, nowMs)].sort((a, b) => a.t - b.t)
+  return [...followSetups(futures, trailLog, futuresBars, nowMs, over(futuresBars)), ...followSetups(spot, trailLog, spotBars, nowMs, over(spotBars))].sort((a, b) => a.t - b.t)
 }
 
 export const newSetupEventMemory = () => ({ closed: new Set(), trail: new Map(), primed: new Set(), restored: new Set() })
@@ -318,7 +323,7 @@ export function withLevelChange(positions, openKeys, patch, changeAt, cur) {
  * exit (or by hand), with P&L at the clock. `dayResults` and `withOutcome` are the day's setups with
  * their outcomes. Paper trades are all sized by the lots set now; a live trade keeps its quantity.
  */
-export function positionRows({ positions, dayResults, withOutcome, oi, nowMs, settings }) {
+export function positionRows({ positions, dayResults, withOutcome, oi, nowMs, settings, dayOver = false }) {
   // A position's setup: the alerted one (live / replay outcomes, followed up to the clock), else the
   // same strategy and side within two minutes in the day's list (a scanned day's setups are timed to
   // the minute, an alert to 10 s).
@@ -373,6 +378,15 @@ export function positionRows({ positions, dayResults, withOutcome, oi, nowMs, se
         // A LIVE trade whose signal has ended is closed even when its option's premium is not known then (a strike with no
         // fresh tick) - it is closed on Dhan at the market; only its P&L here waits for a price.
         else if (at && p.live) { exitTime = at; exitPremium = null; exitReason = exitLabel(o) }
+        // The day is over: a paper trade is NEVER left running. Its strike had no tick in the last five minutes before the
+        // exit (a far strike, a thin minute), so it leaves at the last premium the day ever had for it; with no premium at
+        // all after the entry, at the premium it went in at (flat) - said so in the reason, not quietly priced.
+        else if (at && dayOver) {
+          const last = oi ? closePremiumAt(oi, p.side, p.strike, at, Infinity) : null
+          exitTime = at
+          exitPremium = last ?? p.premium
+          exitReason = `${exitLabel(o)}${last == null ? ' (no option price after the entry - flat)' : ' (at the last premium of the day)'}`
+        }
       }
     }
     const now = exitTime ? { premium: exitPremium } : oi && nowMs ? { premium: premiumAt(oi, p.side, p.strike, nowMs) } : { premium: null }

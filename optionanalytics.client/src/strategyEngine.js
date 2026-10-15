@@ -810,8 +810,9 @@ export function premiumAt(oi, side, strike, ms, maxStaleMs = 5 * MIN) {
  *  while it runs: a live read at `ms` would be the NEXT minute's running price, so it steps back to the minute that ended
  *  at `ms`. What an option is priced at when it leaves a trade at a minute's end (its signal's exit) - never a price from
  *  after it, which kept changing for a minute after the exit was announced. */
-export function closePremiumAt(oi, side, strike, ms) {
-  return premiumAt(oi, side, strike, (oi?.lag ?? 0) === MIN ? ms : ms - MIN)
+export function closePremiumAt(oi, side, strike, ms, maxStaleMs) {
+  const at = (oi?.lag ?? 0) === MIN ? ms : ms - MIN
+  return maxStaleMs === undefined ? premiumAt(oi, side, strike, at) : premiumAt(oi, side, strike, at, maxStaleMs)
 }
 
 /** The two ways to trade a setup with options, at the ATM strike: BUY the option that gains with the
@@ -2902,6 +2903,7 @@ export function simulateOutcome(setup, minuteBars, untilMs, dayOver = false) {
   const statusOf = (r) => (r > 0.005 ? 'win' : r < -0.005 ? 'loss' : 'flat')
   let mfe = 0
   let lastClose = setup.entry
+  let lastAt = null // the last bar the trade actually saw - where a dayOver close happens
   let best = setup.entry
   let stop = setup.stop
   const state = () => ({ stop, trailed: stop !== setup.stop })
@@ -2919,6 +2921,7 @@ export function simulateOutcome(setup, minuteBars, untilMs, dayOver = false) {
     }
     if (favourable) return { status: 'win', r: rTarget, mfe, exitAt: t, exitPrice: setup.target, ...state() }
     lastClose = b.close
+    lastAt = t
     best = dir > 0 ? Math.max(best, b.high) : Math.min(best, b.low)
     // The trail in force once this bar is done: the one the setup fired with, or the latest change (setup.trailLog,
     // [{ t, trail }]) up to then - a mid-trade change of the trailing SL applies from its time on, the stop only
@@ -2935,7 +2938,9 @@ export function simulateOutcome(setup, minuteBars, untilMs, dayOver = false) {
     }
   }
   const r = (dir * (lastClose - setup.entry)) / risk
-  return dayOver ? { status: statusOf(r), r, mfe, exitPrice: lastClose, timeStop: true, ...state() } : { status: 'open', r, mfe, ...state() }
+  // The day's data ends before the trade did: it leaves at the last minute it saw, at that minute's close - so it has a
+  // real exit time, and its option is priced where the day's data actually reaches.
+  return dayOver ? { status: statusOf(r), r, mfe, exitAt: lastAt ?? undefined, exitPrice: lastClose, timeStop: true, ...state() } : { status: 'open', r, mfe, ...state() }
 }
 
 /** How an outcome ended, for alerts and the list. */

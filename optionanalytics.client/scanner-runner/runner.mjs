@@ -7,10 +7,10 @@
 // scanner log's server-signals.csv / server-trades.csv. Its role cannot reach the live-trading API.
 
 import { createRequire } from 'node:module'
-import { mkdirSync, readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync, renameSync, existsSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { fetchPreviousSession } from '../src/profiles.js'
-import { IndexScanner, istDate, topFromSignalsCsv } from './indexScanner.mjs'
+import { IndexScanner, istDate, topFromSignalsCsv, FINISH_BACK_DAYS } from './indexScanner.mjs'
 
 const require = createRequire(import.meta.url)
 const signalR = require('@microsoft/signalr')
@@ -62,6 +62,26 @@ const io = {
 }
 
 const scanners = UNDERLYINGS.map((u) => new IndexScanner(u, io))
+
+// Days the runner never finished - it was restarted overnight, or down at the close. Each one is finished now, on the
+// backend: its signals judged and its trades closed on the day's minutes read back, and its final record posted. So a
+// past day is never left showing "open".
+async function finishPastDays() {
+  const today = istDate(Date.now())
+  const dates = new Map()
+  let names = []
+  try { names = readdirSync(DATA) } catch { return }
+  for (const name of names) {
+    const m = /^state-([A-Z]+)-(\d{4}-\d{2}-\d{2})\.json$/.exec(name)
+    if (!m || m[2] >= today) continue
+    dates.set(m[1], [...(dates.get(m[1]) ?? []), m[2]])
+  }
+  for (const s of scanners) {
+    for (const date of (dates.get(s.underlying) ?? []).sort().slice(-FINISH_BACK_DAYS)) {
+      try { await s.finishDay(date) } catch (err) { log(`${s.underlying}: ${date} not finished - ${err.message}`) }
+    }
+  }
+}
 
 // ---- Config: the page's scanner settings (synced by an admin's Order Flow page) ---------------------
 let top = null
@@ -129,6 +149,8 @@ async function loop() {
     try {
       await s.ensureDay(today)
       await s.evaluate()
+      // Once the session is over, the day is finished (once): nothing is left open overnight.
+      await s.finishIfDue()
     } catch (err) {
       s.error = err.message
       log(`${s.underlying}: ${err.stack ?? err.message}`)
@@ -151,6 +173,7 @@ for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, () => { connection.stop
 log(`scanner runner starting - ${UNDERLYINGS.join(', ')}, paper only, server ${BASE}`)
 await refreshConfig()
 lastConfig = Date.now()
+await finishPastDays()
 connect()
 for (;;) {
   await loop()
