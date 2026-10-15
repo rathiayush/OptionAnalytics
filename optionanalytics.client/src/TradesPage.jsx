@@ -13,7 +13,7 @@ import { byProof, compareVerdict, nowOf, paramDiff, proofOf } from './settingCom
 import { confirmServerLive, useServerLive } from './ServerLive.jsx'
 import ClearData from './ClearData.jsx'
 import { fillRecordLegs, needsLegs, oldRuleLegs, recordRunUrl } from './recordLegs.js'
-import { runnerSettingsOf } from './scannerCore.js'
+import { lotSizeOf, runnerSettingsOf } from './scannerCore.js'
 import { runnerSignal, runnerTrade, useScannerEvent, useScannerStatus } from './scannerEvents.js'
 import './tuningMobile.css'
 
@@ -22,6 +22,7 @@ const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX']
 const num = (v) => (v == null || v === '' ? null : Number(v))
 const f1 = (v) => (v == null || !Number.isFinite(v) ? '-' : v.toFixed(1))
 const pts = (v) => (v == null || !Number.isFinite(v) ? '-' : `${v >= 0 ? '+' : ''}${v.toFixed(1)}`)
+const rupees1 = (v) => (v == null || !Number.isFinite(v) ? '-' : `${v < 0 ? '-' : '+'}₹${Math.abs(Math.round(v)).toLocaleString('en-IN')}`)
 const fmtR = (v) => (v == null || !Number.isFinite(v) ? '-' : `${v >= 0 ? '+' : ''}${v.toFixed(2)}R`)
 const fmtProof = (v, unit) => (unit === 'pts' ? `${v >= 0 ? '+' : ''}${v.toFixed(2)} pts` : fmtR(v))
 const col = (v) => (v == null || !Number.isFinite(v) ? undefined : v > 0 ? UP_COLOR : v < 0 ? DOWN_COLOR : undefined)
@@ -1194,6 +1195,12 @@ function ScannerRecord({ initial = {}, kind = 'signals' }) {
   }
   const boughtPts = (r) => legPts(r, 'buy')
   const soldPts = (r) => legPts(r, 'sell')
+  // Points into rupees: the index's own lots x its lot size (Trade settings - lot_size, the exchange's default until it
+  // is set). What one option bought / sold at this index's size would have made, so the legs can be compared in money
+  // and not only in premium points.
+  const lotsOf = (u) => Math.max(1, Number(runnerConfig?.trade?.[u]?.lots) || 1)
+  const moneyMult = (u) => lotsOf(u) * lotSizeOf(runnerConfig, u)
+  const legRupees = (r, which) => { const v = legPts(r, which); return v == null ? null : v * moneyMult(r.underlying) }
   // A leg's cell: its points, and on hover the option, its premium in -> out, when and why it left.
   const LEG_TIP = { buy: 'The option BOUGHT at the signal (the strategy\'s strike), out at the strategy\'s own option exit as its trade is - its SL / target held to the index\'s Max SL / Max target, else with the index trade - premium points (to compare)', sell: 'The option SOLD at the signal (the strategy\'s strike), out at the strategy\'s own option exit as its trade is - its SL / target held to the index\'s Max SL / Max target, else with the index trade - premium points (to compare)' }
   const legCell = (which) => (_, r) => {
@@ -1208,10 +1215,13 @@ function ScannerRecord({ initial = {}, kind = 'signals' }) {
         ? `${sig[`${which}_option`]}: ${f1(num(sig[`${which}_entry`]))} → ${f1(num(sig[`${which}_exit`]))}${why ? ` · out ${hhmm(sig[`${which}_exit_time_ist`])} - ${why}` : ' · held to the index exit (older rule - redo it above)'}`
         : 'not kept for this one - Reconcile open entries works it out from that day\'s option data'
     return (
-      <Tooltip title={tip}>
-        <span style={{ color: col(v) }}>{pts(v)}</span>
-        {running && <Text type="secondary" style={{ fontSize: 10, marginLeft: 3 }}>now</Text>}
-        {!running && why && /SL|Target|square-off/i.test(why) && !/^with the index/.test(why) ? <Text type="secondary" style={{ fontSize: 10, marginLeft: 3 }}>{/SL/.test(why) ? 'SL' : /Target/.test(why) ? 'T' : '15:10'}</Text> : null}
+      <Tooltip title={`${tip} · ${lotsOf(r.underlying)} lot(s) x ${lotSizeOf(runnerConfig, r.underlying)}`}>
+        <div>
+          <span style={{ color: col(v) }}>{pts(v)}</span>
+          {running && <Text type="secondary" style={{ fontSize: 10, marginLeft: 3 }}>now</Text>}
+          {!running && why && /SL|Target|square-off/i.test(why) && !/^with the index/.test(why) ? <Text type="secondary" style={{ fontSize: 10, marginLeft: 3 }}>{/SL/.test(why) ? 'SL' : /Target/.test(why) ? 'T' : '15:10'}</Text> : null}
+        </div>
+        {v != null && <div><Text style={{ fontSize: 11, color: col(v) }}>{rupees1(legRupees(r, which))}</Text></div>}
       </Tooltip>
     )
   }
@@ -1264,13 +1274,17 @@ function ScannerRecord({ initial = {}, kind = 'signals' }) {
   const columns = signals ? signalColumns : tradeColumns
   const csvTitle = { ip: 'index_points', bp: 'if_bought_points', sp: 'if_sold_points' }
   const csvColumns = columns.map((c) => ({ title: typeof c.title === 'string' ? c.title : csvTitle[c.key] ?? c.key, value: (r) => (c.dataIndex ? r[c.dataIndex] : c.key === 't' ? `${(signals ? r.time_ist : r.entry_time_ist) ?? ''} -> ${r.exit_time_ist ?? ''}` : c.key === 's' ? nameOf(r) : c.key === 'o' ? `${r.action} ${r.strike} ${r.option}` : c.key === 'l' ? `${r.lots}x${r.lot_size}` : c.key === 'p' ? `${r.entry_premium}->${r.exit_premium}` : c.key === 'ip' ? indexPts(r) ?? '' : c.key === 'bp' ? boughtPts(r) ?? '' : c.key === 'sp' ? soldPts(r) ?? '' : '') }))
+  for (const [key, which] of [['if_bought_rupees', 'buy'], ['if_sold_rupees', 'sell']]) csvColumns.push({ title: key, value: (r) => legRupees(r, which) ?? '' })
   // Signals: the market at each one too (tape, big orders, futures OI, book... - the mkt_* columns).
   if (signals) for (const k of MARKET_CSV) csvColumns.push({ title: k, value: (r) => r[k] ?? '' })
   const rupees = shown.map(netOf).filter(Number.isFinite).reduce((a, b) => a + b, 0)
   // To compare: the index points, and what buying / selling the option every time would have made (each out at the
   // strategy's own option exit, as its trade is).
   const sum = (f) => { const v = shown.map(f).filter(Number.isFinite); return { n: v.length, total: v.reduce((a, b) => a + b, 0) } }
-  const compare = { index: sum(indexPts), bought: sum(boughtPts), sold: sum(soldPts) }
+  const compare = {
+    index: sum(indexPts), bought: sum(boughtPts), sold: sum(soldPts),
+    boughtRs: sum((r) => legRupees(r, 'buy')), soldRs: sum((r) => legRupees(r, 'sell')),
+  }
   // Signals kept before "If bought / If sold" were recorded with them (closed, none yet), or under the older rule (held to
   // the index exit): worked out from that day's OI with each index's settings now and saved into the log (recordLegs.js) -
   // each index and day once. Admins.
@@ -1327,8 +1341,8 @@ function ScannerRecord({ initial = {}, kind = 'signals' }) {
           <Space size={16} wrap style={{ fontSize: 13 }} aria-label="Compare">
             <Text type="secondary" style={{ fontSize: 12 }}>To compare{signals ? '' : ' (the same signals)'}:</Text>
             {!signals && <span>index <b style={{ color: col(compare.index.total) }}>{pts(compare.index.total)}</b> pts{compare.index.n < shown.length ? ` (${compare.index.n})` : ''}</span>}
-            <span>if bought every time <b style={{ color: col(compare.bought.total) }}>{pts(compare.bought.total)}</b> pts{compare.bought.n < shown.length ? ` (${compare.bought.n} kept)` : ''}</span>
-            <span>if sold every time <b style={{ color: col(compare.sold.total) }}>{pts(compare.sold.total)}</b> pts{compare.sold.n < shown.length ? ` (${compare.sold.n} kept)` : ''}</span>
+            <span>if bought every time <b style={{ color: col(compare.bought.total) }}>{pts(compare.bought.total)}</b> pts · <b style={{ color: col(compare.boughtRs.total) }}>{rupees1(compare.boughtRs.total)}</b>{compare.bought.n < shown.length ? ` (${compare.bought.n} kept)` : ''}</span>
+            <span>if sold every time <b style={{ color: col(compare.sold.total) }}>{pts(compare.sold.total)}</b> pts · <b style={{ color: col(compare.soldRs.total) }}>{rupees1(compare.soldRs.total)}</b>{compare.sold.n < shown.length ? ` (${compare.sold.n} kept)` : ''}</span>
             {isAdmin && toFill.length > 0 && (
               <Tooltip title="Signals kept without what the option bought / sold would have made - neither side, or just ONE of the two (a strike with no tick at the moment the signal fired left that side blank) - or with it held until the index trade exited (the older rule - not how the trade leaves): worked out now from that day's option data the way the trade is taken - the strategy's strike, out at its own option exit (its SL / target held to the index's Max SL / Max target, else with the index trade), with each index's settings now - and saved, so it is done once.">
                 <Button size="small" loading={!!filling} onClick={fillLegs} disabled={runnerConfig == null}>

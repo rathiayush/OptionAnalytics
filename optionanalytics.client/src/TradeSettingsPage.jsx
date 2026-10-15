@@ -8,7 +8,7 @@ const { Title, Text } = Typography
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX']
 const fromDefaults = (u) => {
   const d = loadTradeDefaults(u)
-  return { underlying: u, lots: d.lots, slPoints: d.sl, targetPoints: d.target, trailStart: d.trailStart, trailGap: d.trailGap, slippagePoints: d.slippage, scannerEnabled: d.scannerEnabled, autoTrade: d.autoTrade, maxSlPoints: d.maxSl, maxTargetPoints: d.maxTarget }
+  return { underlying: u, lots: d.lots, lotSizeValue: d.lotSize, slPoints: d.sl, targetPoints: d.target, trailStart: d.trailStart, trailGap: d.trailGap, slippagePoints: d.slippage, scannerEnabled: d.scannerEnabled, autoTrade: d.autoTrade, maxSlPoints: d.maxSl, maxTargetPoints: d.maxTarget }
 }
 
 /**
@@ -172,6 +172,7 @@ export default function TradeSettingsPage() {
   const columns = [
     { title: 'Index', dataIndex: 'underlying', width: 110, render: (u, r) => <Space size={4}><Text strong>{u}</Text>{changed(r) && <Tag color="gold">unsaved</Tag>}</Space> },
     { title: 'Lots', dataIndex: 'lots', width: 100, render: num('lots', { min: 1, max: 500, step: 1 }) },
+    { title: <Tooltip title="The contract's lot size - the multiplier that turns premium POINTS into rupees (points x lots x lot size). Set it when the exchange changes it: every paper trade and every 'what it would have made' number on the pages is sized by it. A real live trade still takes its quantity from Dhan.">Lot size</Tooltip>, dataIndex: 'lotSizeValue', width: 110, render: num('lotSizeValue', { min: 1, max: 10000, step: 5 }) },
     { title: <Tooltip title="A MANUAL trade's option stop-loss (the OI Replay trade panel, its B / S ticket) - premium points from the entry. Strategies follow their own.">Manual SL pts</Tooltip>, dataIndex: 'slPoints', width: 110, render: num('slPoints', { step: 5 }) },
     { title: <Tooltip title="A MANUAL trade's option target - premium points from the entry. Strategies follow their own.">Manual target pts</Tooltip>, dataIndex: 'targetPoints', width: 120, render: num('targetPoints', { step: 5 }) },
     { title: <Tooltip title="A manual trade's trailing stop: once this many points in profit... (0 with Follow 0 = off)">Manual trail after</Tooltip>, dataIndex: 'trailStart', width: 120, render: num('trailStart', { step: 5 }) },

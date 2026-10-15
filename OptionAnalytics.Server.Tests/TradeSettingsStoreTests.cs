@@ -34,8 +34,33 @@ public sealed class TradeSettingsStoreTests : IDisposable
         Assert.Equal(new[] { (4, 30m, 40m, 50m, 0m), (3, 50m, 75m, 80m, 0m), (3, 60m, 90m, 120m, 0m) },
             all.Select(s => (s.Lots, s.SlPoints, s.TargetPoints, s.MaxSl, s.MaxTarget)));
         Assert.True(all.All(s => s.ScannerEnabled && s.AutoTrade == "sell" && s.TrailStart == 0 && s.TrailGap == 0 && s.SlippagePoints == 2));
+        // Each contract's lot size - the multiplier that turns premium points into rupees.
+        Assert.Equal(new[] { 65, 30, 20 }, all.Select(s => s.LotSize));
         Assert.True(File.Exists(FilePath));
-        Assert.StartsWith("underlying,lots,sl_points", File.ReadAllText(FilePath));
+        Assert.StartsWith("underlying,lots,lot_size,sl_points", File.ReadAllText(FilePath));
+    }
+
+    [Fact]
+    public void TheLotSize_IsSavedAndReadBack_AndAFileFromBeforeItKeepsTheIndexsDefault()
+    {
+        var store = Store();
+        // The exchange changed NIFTY's lot size: set it, and it is what every paper trade and every
+        // "what it would have made" number is sized by from then on.
+        var (saved, error) = store.Save("NIFTY", store.Get("NIFTY") with { LotSizeValue = 75 });
+        Assert.Null(error);
+        Assert.Equal(75, saved!.LotSize);
+        Assert.Equal(75, Store().Get("NIFTY").LotSize);
+        Assert.Equal(30, Store().Get("BANKNIFTY").LotSize);
+
+        // Out of range is refused, and nothing is changed.
+        Assert.NotNull(store.Save("NIFTY", store.Get("NIFTY") with { LotSizeValue = 0 }).Error);
+        Assert.NotNull(store.Save("NIFTY", store.Get("NIFTY") with { LotSizeValue = 20_000 }).Error);
+        Assert.Equal(75, Store().Get("NIFTY").LotSize);
+
+        // A file written before the column: each index keeps its own default rather than 0 or 1.
+        File.WriteAllText(FilePath, "underlying,lots,sl_points,target_points,trail_start,trail_gap,slippage_points,scanner_enabled,auto_trade,max_sl_points,max_target_points,updated_utc\n"
+            + "NIFTY,4,30,40,0,0,2,true,sell,50,0,\nBANKNIFTY,3,50,75,0,0,2,true,sell,80,0,\nSENSEX,3,60,90,0,0,2,true,sell,120,0,\n");
+        Assert.Equal(new[] { 65, 30, 20 }, Store().All().Select(s => s.LotSize));
     }
 
     [Fact]

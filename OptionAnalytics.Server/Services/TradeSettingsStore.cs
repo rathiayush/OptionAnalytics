@@ -15,7 +15,12 @@ namespace OptionAnalytics.Server.Services;
 public sealed class TradeSettingsStore
 {
     public static readonly string[] Underlyings = { "NIFTY", "BANKNIFTY", "SENSEX" };
-    public static readonly string[] Columns = { "underlying", "lots", "sl_points", "target_points", "trail_start", "trail_gap", "slippage_points", "scanner_enabled", "auto_trade", "max_sl_points", "max_target_points", "updated_utc" };
+    public static readonly string[] Columns = { "underlying", "lots", "lot_size", "sl_points", "target_points", "trail_start", "trail_gap", "slippage_points", "scanner_enabled", "auto_trade", "max_sl_points", "max_target_points", "updated_utc" };
+    /// <summary>The contract's lot size per index as the exchange has it now - the multiplier that turns premium
+    /// POINTS into rupees (points x lots x lot size). It is settable because the exchanges change it; a real live
+    /// trade still takes its quantity from Dhan, so this is what paper trades and every "what it would have made"
+    /// number on the pages are sized by.</summary>
+    public static int DefaultLotSize(string underlying) => underlying switch { "BANKNIFTY" => 30, "SENSEX" => 20, _ => 65 };
     // "strategy": each strategy buys or sells what its own tuned setting says (Strategy tuning - Apply to the
     // scanner), selling where it has none. "sell" / "buy" are a choice for the whole index and override that.
     public static readonly string[] AutoTrades = { "sell", "buy", "off", "strategy" };
@@ -25,9 +30,9 @@ public sealed class TradeSettingsStore
     // The premiums of BANKNIFTY / SENSEX move ~2.5x / ~3x NIFTY's - their stops and targets are wider.
     public static TradeSettings Default(string underlying) => underlying switch
     {
-        "BANKNIFTY" => new TradeSettings("BANKNIFTY", 3, 50, 75, 0, 0, 2, true, "sell", null, 80, 0),
-        "SENSEX" => new TradeSettings("SENSEX", 3, 60, 90, 0, 0, 2, true, "sell", null, 120, 0),
-        _ => new TradeSettings(underlying, 4, 30, 40, 0, 0, 2, true, "sell", null, 50, 0),
+        "BANKNIFTY" => new TradeSettings("BANKNIFTY", 3, 50, 75, 0, 0, 2, true, "sell", null, 80, 0, 30),
+        "SENSEX" => new TradeSettings("SENSEX", 3, 60, 90, 0, 0, 2, true, "sell", null, 120, 0, 20),
+        _ => new TradeSettings(underlying, 4, 30, 40, 0, 0, 2, true, "sell", null, 50, 0, 65),
     };
 
     private readonly string _path;
@@ -69,6 +74,7 @@ public sealed class TradeSettingsStore
         var u = underlying.Trim().ToUpperInvariant();
         if (!Underlyings.Contains(u)) return (null, $"Unknown index {underlying}.");
         if (request.Lots is < 1 or > 500) return (null, "Lots must be 1 to 500.");
+        if (request.LotSizeValue is < 1 or > 10_000) return (null, "Lot size must be 1 to 10000.");
         if (request.SlPoints is < 0 or > 5000 || request.TargetPoints is < 0 or > 5000) return (null, "SL and target must be 0 to 5000 points.");
         if (request.TrailStart is < 0 or > 5000 || request.TrailGap is < 0 or > 5000) return (null, "Trailing must be 0 to 5000 points.");
         if (request.SlippagePoints is < 0 or > 100) return (null, "Slippage must be 0 to 100 points.");
@@ -81,6 +87,7 @@ public sealed class TradeSettingsStore
         {
             Underlying = u, AutoTrade = auto, UpdatedUtc = DateTimeOffset.UtcNow,
             MaxSlPoints = request.MaxSlPoints ?? before.MaxSl, MaxTargetPoints = request.MaxTargetPoints ?? before.MaxTarget,
+            LotSizeValue = request.LotSizeValue ?? before.LotSize,
         };
         lock (_lock)
         {
@@ -117,7 +124,12 @@ public sealed class TradeSettingsStore
                     DateTimeOffset.TryParse(Cell("updated_utc"), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var at) ? at : null);
                 // The max rules for the strategies' trades - a file from before them starts with its SL / target as the max.
                 var row = rows[u];
-                rows[u] = row with { MaxSlPoints = Dec(Cell("max_sl_points"), row.SlPoints), MaxTargetPoints = Dec(Cell("max_target_points"), row.TargetPoints) };
+                rows[u] = row with
+                {
+                    MaxSlPoints = Dec(Cell("max_sl_points"), row.SlPoints), MaxTargetPoints = Dec(Cell("max_target_points"), row.TargetPoints),
+                    // A file from before the lot size: the index's default.
+                    LotSizeValue = Int(Cell("lot_size"), DefaultLotSize(u)),
+                };
             }
             return rows;
         }
@@ -135,7 +147,7 @@ public sealed class TradeSettingsStore
         foreach (var u in Underlyings)
         {
             var s = rows[u];
-            csv.AppendLine(string.Join(',', s.Underlying, s.Lots.ToString(CultureInfo.InvariantCulture), Num(s.SlPoints), Num(s.TargetPoints), Num(s.TrailStart),
+            csv.AppendLine(string.Join(',', s.Underlying, s.Lots.ToString(CultureInfo.InvariantCulture), s.LotSize.ToString(CultureInfo.InvariantCulture), Num(s.SlPoints), Num(s.TargetPoints), Num(s.TrailStart),
                 Num(s.TrailGap), Num(s.SlippagePoints), s.ScannerEnabled ? "true" : "false", s.AutoTrade, Num(s.MaxSl), Num(s.MaxTarget),
                 s.UpdatedUtc?.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture) ?? ""));
         }
@@ -156,8 +168,11 @@ public sealed class TradeSettingsStore
 /// rules - 0 = none; null = as SlPoints / TargetPoints, a file or a request from before them).</summary>
 public sealed record TradeSettings(
     string Underlying, int Lots, decimal SlPoints, decimal TargetPoints, decimal TrailStart, decimal TrailGap, decimal SlippagePoints,
-    bool ScannerEnabled, string AutoTrade, DateTimeOffset? UpdatedUtc, decimal? MaxSlPoints = null, decimal? MaxTargetPoints = null)
+    bool ScannerEnabled, string AutoTrade, DateTimeOffset? UpdatedUtc, decimal? MaxSlPoints = null, decimal? MaxTargetPoints = null,
+    int? LotSizeValue = null)
 {
     public decimal MaxSl => MaxSlPoints ?? SlPoints;
     public decimal MaxTarget => MaxTargetPoints ?? TargetPoints;
+    /// <summary>The contract's lot size (a file or a request from before it: the index's default).</summary>
+    public int LotSize => LotSizeValue is > 0 ? LotSizeValue.Value : TradeSettingsStore.DefaultLotSize(Underlying);
 }

@@ -545,7 +545,7 @@ export class IndexScanner {
       // This strategy's own lot size on this index when one was applied with it, else the index's lots (Trade settings).
       const lots = lotsFor(s.id, cfg.filters, cfg.paperLots)
       if (!this.positions.some((p) => sameSignal(p, s, trade))) {
-        const position = newPosition({ setup: s, trade, which: side, lots, lotSize: PAPER_TRADE_LOT_SIZE[this.underlying] ?? 1, premium, cfg: { ...cfg, paperSl: levels.slPts, paperTarget: levels.targetPts }, at: s.t, plan: levels })
+        const position = newPosition({ setup: s, trade, which: side, lots, lotSize: cfg.paperLotSize ?? PAPER_TRADE_LOT_SIZE[this.underlying] ?? 1, premium, cfg: { ...cfg, paperSl: levels.slPts, paperTarget: levels.targetPts }, at: s.t, plan: levels })
         this.positions.push(position)
         this.dirty = true
         if (this.live) await this.placeLive(position, s, trade, levels, cfg)

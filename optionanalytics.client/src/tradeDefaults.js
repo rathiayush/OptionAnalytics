@@ -21,10 +21,12 @@ export function defaultTradeLevels(underlying) {
 }
 
 // ... and the max rules every strategy's option trade is held to (premium points; 0 = none - no max target) and the lots.
+// `lotSize` is the CONTRACT's lot size - the multiplier that turns premium points into rupees (points x lots x lot
+// size). The exchanges change it, so it is a setting; a real live trade still takes its quantity from Dhan.
 export const DEFAULT_INDEX_TRADE = {
-  NIFTY: { maxSl: 50, maxTarget: 0, lots: 4 },
-  BANKNIFTY: { maxSl: 80, maxTarget: 0, lots: 3 },
-  SENSEX: { maxSl: 120, maxTarget: 0, lots: 3 },
+  NIFTY: { maxSl: 50, maxTarget: 0, lots: 4, lotSize: 65 },
+  BANKNIFTY: { maxSl: 80, maxTarget: 0, lots: 3, lotSize: 30 },
+  SENSEX: { maxSl: 120, maxTarget: 0, lots: 3, lotSize: 20 },
 }
 
 /** An index's default max rules and lots, else null (an index not listed: its SL / target as the max, 1 lot). */
@@ -82,6 +84,7 @@ export function loadTradeDefaults(underlying) {
     ...levels,
     maxSl: num(saved.maxSl, d?.maxSl ?? levels.sl), maxTarget: num(saved.maxTarget, d?.maxTarget ?? levels.target),
     lots: Math.max(1, num(saved.lots, lotsDefault)), slippage: num(saved.slippage, DEFAULT_SLIPPAGE),
+    lotSize: Math.max(1, num(saved.lotSize, defaultIndexTrade(underlying)?.lotSize ?? 1)),
     scannerEnabled: saved.scannerEnabled !== false, autoTrade: ['sell', 'buy', 'off', 'strategy'].includes(saved.autoTrade) ? saved.autoTrade : 'sell',
   }
 }
@@ -106,11 +109,12 @@ export const saveTradeDefaults = (underlying, patch) => saveTradeLevels('setting
 // ---- The server copy (GET / PUT /api/trade-settings) ------------------------------------------------
 
 const toServer = (underlying, d) => ({
-  underlying, lots: d.lots, slPoints: d.sl, targetPoints: d.target, trailStart: d.trailStart, trailGap: d.trailGap,
+  underlying, lots: d.lots, lotSizeValue: d.lotSize, slPoints: d.sl, targetPoints: d.target, trailStart: d.trailStart, trailGap: d.trailGap,
   slippagePoints: d.slippage, scannerEnabled: d.scannerEnabled, autoTrade: d.autoTrade, maxSlPoints: d.maxSl, maxTargetPoints: d.maxTarget,
 })
 const fromServer = (row) => ({
   sl: row.slPoints, target: row.targetPoints, trailStart: row.trailStart, trailGap: row.trailGap, lots: row.lots,
+  ...(Number(row.lotSize) > 0 ? { lotSize: Number(row.lotSize) } : {}),
   slippage: row.slippagePoints, scannerEnabled: row.scannerEnabled, autoTrade: row.autoTrade,
   ...(Number.isFinite(row.maxSlPoints) ? { maxSl: row.maxSlPoints } : {}), ...(Number.isFinite(row.maxTargetPoints) ? { maxTarget: row.maxTargetPoints } : {}),
 })

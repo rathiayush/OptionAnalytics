@@ -72,8 +72,17 @@ export function alertIdsFor(settings, top) {
     : settings.pick === 'range' ? RANGE_IDS : settings.pick === 'all' ? ALL_IDS : settings.custom ?? []
 }
 
-// Paper trades' lot size per index (a live trade takes the contract's real lot size from Dhan).
+// Paper trades' lot size per index - the multiplier that turns premium POINTS into rupees (points x lots x lot size).
+// The exchange's own default; the index's Trade settings can set it (trade-settings.csv lot_size), which is what
+// `lotSizeOf` reads. A live trade still takes the contract's real lot size from Dhan.
 export const PAPER_TRADE_LOT_SIZE = { NIFTY: 65, BANKNIFTY: 30, SENSEX: 20 }
+
+/** The lot size to size an index's paper trade (and every "what it would have made" number) by: its Trade settings'
+ *  own, else the exchange's default. `config` is the runner config (GET /api/scanner-runner/config). */
+export const lotSizeOf = (config, underlying) => {
+  const own = Number(config?.trade?.[underlying]?.lotSize)
+  return own > 0 ? own : PAPER_TRADE_LOT_SIZE[underlying] ?? 1
+}
 
 // The scanner's profile input from the previous session's bars: its volume profile (POC, value area,
 // HVN / LVN), its TPO profile and its high / low - null without a volume profile.
@@ -461,6 +470,7 @@ export function runnerSettingsOf(config, underlying) {
     // The max rules every strategy's option trade is held to (Trade settings - Max SL / Max target; 0 = none).
     paperMaxSl: Number(levels.maxSl ?? levels.sl) || 0, paperMaxTarget: Number(levels.maxTarget ?? levels.target) || 0,
     ...(trade.lots > 0 ? { paperLots: trade.lots } : {}), ...(trade.autoTrade ? { autoPaper: trade.autoTrade } : {}),
+    paperLotSize: Number(trade.lotSize) > 0 ? Number(trade.lotSize) : PAPER_TRADE_LOT_SIZE[underlying] ?? 1,
   }
 }
 
