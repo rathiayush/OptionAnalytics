@@ -5,7 +5,7 @@
 // to pick: what is applied is what is run. A run is one server job per index and kind (futures + OI / spot + options are
 // different day scans): the first starts now, the others are queued right behind it. Past days come from the cache.
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Alert, Button, Card, DatePicker, InputNumber, Progress, Space, Table, Tag, Tooltip, Typography, message } from 'antd'
+import { Alert, Button, Card, DatePicker, InputNumber, Progress, Segmented, Select, Space, Table, Tag, Tooltip, Typography, message } from 'antd'
 import { UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import { STRATEGY_BY_ID } from './strategyEngine.js'
 import { UNDERLYINGS, appliedPlan } from './appliedPlan.js'
@@ -27,7 +27,24 @@ const entriesOf = (r) => (r?.ok && r?.lab ? (r.results ?? (r.strategy ? [{ strat
 export default function AppliedLab({ cfg, isAdmin, onTry }) {
   const [days, setDays] = useState(30)
   const [range, setRange] = useState(null)
-  const { pairs, leftOut } = useMemo(() => appliedPlan(cfg), [cfg])
+  const { pairs: allPairs, leftOut } = useMemo(() => appliedPlan(cfg), [cfg])
+  // What to run: every applied strategy by default; or only futures / only spot + options, only some indices, only the
+  // strategies picked (empty = all of them).
+  const [kind, setKind] = useState('both')
+  const [pickIdx, setPickIdx] = useState([])
+  const [pickIds, setPickIds] = useState([])
+  const pairs = useMemo(() => allPairs
+    .filter((p) => (kind === 'both' || p.kind === kind) && (!pickIdx.length || pickIdx.includes(p.u)))
+    .map((p) => ({ ...p, ids: pickIds.length ? p.ids.filter((id) => pickIds.includes(id)) : p.ids }))
+    .filter((p) => p.ids.length), [allPairs, kind, pickIdx, pickIds])
+  const idOptions = useMemo(() => {
+    const seen = new Map()
+    for (const p of allPairs) {
+      if (kind !== 'both' && p.kind !== kind) continue
+      for (const id of p.ids) if (!seen.has(id)) seen.set(id, { value: id, label: `#${STRATEGY_BY_ID[id].no} ${STRATEGY_BY_ID[id].name}`, no: STRATEGY_BY_ID[id].no })
+    }
+    return [...seen.values()].sort((a, b) => a.no - b.no)
+  }, [allPairs, kind])
   const [results, setResults] = useState({})
   // The pairs this page has started (or queued): { [key]: the finishedUtc of the result it started from } - until the result
   // is a newer one, what is shown for it is the PREVIOUS run's: greyed, out of the totals.
@@ -46,12 +63,12 @@ export default function AppliedLab({ cfg, isAdmin, onTry }) {
     const mine = jobFor(p)
     const days = j.from || j.to ? `${j.from ?? ''}~${j.to ?? ''}` : `last ${Number(j.days) || 30}`
     const want = mine.from || mine.to ? `${mine.from ?? ''}~${mine.to ?? ''}` : `last ${mine.days}`
-    return days === want && [...(j.strategies ?? [])].sort().join() === [...p.ids].sort().join()
+    return days === want && p.ids.every((id) => (j.strategies ?? []).includes(id))
   }
 
-  const pairKeys = pairs.map((p) => p.key).join()
-  const loadResults = () => Promise.all(pairs.map((p) => fetch(`/api/strategy-tuning/lab/${p.u}?data=${p.kind}`, { cache: 'no-store' }).then((r) => (r.ok ? r.json() : null)).catch(() => null)))
-    .then((list) => setResults(Object.fromEntries(pairs.map((p, i) => [p.key, list[i]]))))
+  const pairKeys = allPairs.map((p) => p.key).join()
+  const loadResults = () => Promise.all(allPairs.map((p) => fetch(`/api/strategy-tuning/lab/${p.u}?data=${p.kind}`, { cache: 'no-store' }).then((r) => (r.ok ? r.json() : null)).catch(() => null)))
+    .then((list) => setResults(Object.fromEntries(allPairs.map((p, i) => [p.key, list[i]]))))
   useEffect(() => { loadResults() }, [pairKeys]) // eslint-disable-line react-hooks/exhaustive-deps
   // Any change of the job as last seen - a lab run done, failed or stopped, the next one starting - reads the results again.
   const lastJob = useRef(null)
@@ -130,8 +147,22 @@ export default function AppliedLab({ cfg, isAdmin, onTry }) {
     const ms = list.map((r) => pick(r.entry)).filter((m) => m?.r?.n)
     return { n: ms.reduce((a, m) => a + m.r.n, 0), total: ms.reduce((a, m) => a + (m.r.total ?? 0), 0) }
   }
-  const groups = [...UNDERLYINGS.filter((u) => counted.some((r) => r.index === u)).map((u) => ({ label: `${u} - everything applied on it`, rows: counted.filter((r) => r.index === u) })),
-    { label: 'Every index', rows: counted, all: true }]
+  // Overall, per index (and per kind where an index has both): trades, R, and what was captured in the index points, the
+  // option bought and the option sold - as applied, beside as written.
+  const capture = [
+    ...UNDERLYINGS.flatMap((u) => {
+      const mine = counted.filter((r) => r.index === u)
+      if (!mine.length) return []
+      const kinds = [...new Set(mine.map((r) => r.kind))]
+      return [{ key: u, label: u, rows: mine, top: true }, ...(kinds.length > 1 ? kinds.map((k) => ({ key: `${u}|${k}`, label: k === 'spot' ? 'spot + options' : 'futures + OI', rows: mine.filter((r) => r.kind === k), sub: true })) : [])]
+    }),
+    ...(counted.length ? [{ key: 'all', label: 'Every index', rows: counted, top: true, all: true }] : []),
+  ].map((g) => ({
+    ...g,
+    n: g.rows.length,
+    ar: rTotal(g.rows, appliedOf), wr: rTotal(g.rows, (e) => e.asWritten),
+    ap: sumPoints(g.rows.map((r) => appliedOf(r.entry)?.points)), wp: sumPoints(g.rows.map((r) => r.entry.asWritten?.points)),
+  }))
 
   const runText = (p) => {
     const st = stateOf(p)
@@ -180,13 +211,20 @@ export default function AppliedLab({ cfg, isAdmin, onTry }) {
           </Text>
           {!isAdmin && <Alert type="warning" showIcon message="Only an Admin can run the lab - sign in with the admin login." />}
           {cfg === null && <Alert type="warning" showIcon message="The applied settings could not be read (sign in with the admin login)." />}
-          {cfg && pairs.length === 0 && <Alert type="info" showIcon message="Nothing is applied on any index yet - choose strategies on the Strategies page (or apply a tuned setting) and they appear here." />}
+          {cfg && allPairs.length === 0 && <Alert type="info" showIcon message="Nothing is applied on any index yet - choose strategies on the Strategies page (or apply a tuned setting) and they appear here." />}
+          {allPairs.length > 0 && pairs.length === 0 && <Alert type="info" showIcon message="Nothing applied matches that choice - clear the kind / index / strategy picks." />}
           {leftOut.length > 0 && <Alert type="warning" showIcon message={`Applied but not run: ${leftOut.map((x) => `#${STRATEGY_BY_ID[x.id]?.no ?? '?'} ${STRATEGY_BY_ID[x.id]?.name ?? x.id} on ${x.u} (${x.reason})`).join(' · ')}`} />}
+          <Space wrap size={10} align="center">
+            <Segmented value={kind} onChange={(v) => { setKind(v); setPickIds([]) }} aria-label="Kind"
+              options={[{ value: 'both', label: 'Both' }, { value: 'futures', label: 'Futures + OI' }, { value: 'spot', label: 'Spot + options' }]} />
+            <Select mode="multiple" allowClear value={pickIdx} onChange={setPickIdx} placeholder="All indices" options={UNDERLYINGS.map((u) => ({ value: u, label: u }))} style={{ minWidth: 190 }} maxTagCount="responsive" aria-label="Index" />
+            <Select mode="multiple" allowClear showSearch optionFilterProp="label" value={pickIds} onChange={setPickIds} placeholder="All applied strategies" options={idOptions} style={{ minWidth: 300, maxWidth: 520 }} maxTagCount="responsive" aria-label="Strategy" />
+          </Space>
           <Space wrap size={12} align="center">
             <Space size={4}><Text style={{ fontSize: 12 }}>last</Text><InputNumber min={1} max={250} value={days} onChange={(v) => setDays(v ?? 30)} disabled={!!(range?.[0] || range?.[1])} style={{ width: 80 }} aria-label="Days" /><Text style={{ fontSize: 12 }}>days, or</Text></Space>
             <DatePicker.RangePicker value={range} onChange={setRange} format="DD MMM YYYY" allowEmpty={[true, true]} aria-label="Dates" />
             <Button type="primary" onClick={run} disabled={!isAdmin || running || pairs.length === 0}>
-              Run what is applied{pairs.length ? ` on ${[...new Set(pairs.map((p) => p.u))].join(', ')}` : ''} ({pairs.reduce((a, p) => a + p.ids.length, 0)} strategies)
+              Run what is applied{pairs.length ? ` on ${[...new Set(pairs.map((p) => p.u))].join(', ')}` : ''} ({pairs.reduce((a, p) => a + p.ids.length, 0)} strateg{pairs.reduce((a, p) => a + p.ids.length, 0) === 1 ? 'y' : 'ies'})
             </Button>
             {(busy || (running && !labRunning)) && isAdmin && <Button onClick={queueAll}>Queue it after the running job</Button>}
           </Space>
@@ -205,6 +243,22 @@ export default function AppliedLab({ cfg, isAdmin, onTry }) {
 
       {pairs.some((p) => results[p.key]?.strategiesLeftOut?.length) && (
         <Alert type="warning" showIcon message={`Left out of a run: ${pairs.flatMap((p) => (results[p.key]?.strategiesLeftOut ?? []).map((x) => `${x.id} on ${p.u} (${x.reason})`)).join(' · ')}`} />
+      )}
+      {capture.length > 0 && (
+        <Card size="small" title="What it captured - overall and per index" aria-label="Capture per index">
+          <Table size="small" pagination={false} rowKey="key" dataSource={capture} scroll={{ x: 1100 }} aria-label="Capture"
+            columns={[
+              { title: 'Index', key: 'l', width: 190, render: (_, g) => <Text strong={!!g.top} type={g.sub ? 'secondary' : undefined} style={{ fontSize: 12, paddingLeft: g.sub ? 14 : 0 }}>{g.label}{g.top ? <Text type="secondary" style={{ fontSize: 11 }}> · {g.n} strateg{g.n === 1 ? 'y' : 'ies'}</Text> : null}</Text> },
+              { title: 'Trades · total R (applied)', key: 'r', width: 180, render: (_, g) => <span style={{ fontSize: 12 }}>{g.ar.n} · <b style={{ color: col(g.ar.total) }}>{fmtR(g.ar.total)}</b></span> },
+              { title: <Tooltip title="What the applied settings captured in the index (futures / spot) points: net (trades · wins/losses)">Index points</Tooltip>, key: 'i', width: 170, render: (_, g) => legCell(g.ap) },
+              { title: <Tooltip title="What the applied settings captured in the option BOUGHT (premium points)">Option bought</Tooltip>, key: 'b', width: 170, render: (_, g) => legCell(g.ap.buy) },
+              { title: <Tooltip title="What the applied settings captured in the option SOLD (premium points)">Option sold</Tooltip>, key: 's', width: 170, render: (_, g) => legCell(g.ap.sell) },
+              { title: 'As written: trades · total R', key: 'wr', width: 190, render: (_, g) => <span style={{ fontSize: 12 }}>{g.wr.n} · <span style={{ color: col(g.wr.total) }}>{fmtR(g.wr.total)}</span></span> },
+              { title: 'As written: index pts', key: 'wi', width: 160, render: (_, g) => legCell(g.wp) },
+              { title: 'As written: bought', key: 'wb', width: 150, render: (_, g) => legCell(g.wp.buy) },
+              { title: 'As written: sold', key: 'ws', width: 150, render: (_, g) => legCell(g.wp.sell) },
+            ]} />
+        </Card>
       )}
       {shown.length > 0 && (
         <Card size="small" title={`Applied vs as written - ${shown.length} strategy / index pair(s)`}>
@@ -238,28 +292,7 @@ export default function AppliedLab({ cfg, isAdmin, onTry }) {
                 { title: <Tooltip title="What the applied setting captured in the index (futures / spot) points: net (trades · wins/losses)">Index pts</Tooltip>, key: 'idx', width: 150, render: (_, r) => legCell(appliedOf(r.entry)?.points) },
                 { title: <Tooltip title="What the applied setting captured in the option BOUGHT (premium points)">Option bought</Tooltip>, key: 'buy', width: 150, render: (_, r) => legCell(appliedOf(r.entry)?.points?.buy) },
                 { title: <Tooltip title="What the applied setting captured in the option SOLD (premium points)">Option sold</Tooltip>, key: 'sell', width: 150, render: (_, r) => legCell(appliedOf(r.entry)?.points?.sell) },
-              ]}
-              summary={() => (
-                <>
-                  {groups.map((g) => {
-                    const a = rTotal(g.rows, appliedOf)
-                    const w = rTotal(g.rows, (e) => e.asWritten)
-                    const p = sumPoints(g.rows.map((r) => appliedOf(r.entry)?.points))
-                    return (
-                      <Table.Summary.Row key={g.label} style={{ fontWeight: g.all ? 600 : 400 }}>
-                        <Table.Summary.Cell index={0} />
-                        <Table.Summary.Cell index={1} colSpan={2}><Text strong={!!g.all} style={{ fontSize: 12 }}>{g.label}</Text></Table.Summary.Cell>
-                        <Table.Summary.Cell index={3}><span style={{ fontSize: 12 }}>{a.n} trades · <span style={{ color: col(a.total) }}>{fmtR(a.total)}</span></span></Table.Summary.Cell>
-                        <Table.Summary.Cell index={4}><span style={{ fontSize: 12 }}>{w.n} trades · <span style={{ color: col(w.total) }}>{fmtR(w.total)}</span></span></Table.Summary.Cell>
-                        <Table.Summary.Cell index={5}><b style={{ color: col(a.total - w.total) }}>{fmtR(a.total - w.total)}</b></Table.Summary.Cell>
-                        <Table.Summary.Cell index={6}>{legCell(p)}</Table.Summary.Cell>
-                        <Table.Summary.Cell index={7}>{legCell(p.buy)}</Table.Summary.Cell>
-                        <Table.Summary.Cell index={8}>{legCell(p.sell)}</Table.Summary.Cell>
-                      </Table.Summary.Row>
-                    )
-                  })}
-                </>
-              )} />
+              ]} />
             {pending.length > 0 && !labRunning && <Text type="secondary" style={{ fontSize: 12 }}>No result yet for {pending.slice(0, 12).map((m) => `#${STRATEGY_BY_ID[m.id]?.no} on ${m.index}`).join(', ')}{pending.length > 12 ? '…' : ''} - press Run.</Text>}
           </Space>
         </Card>
