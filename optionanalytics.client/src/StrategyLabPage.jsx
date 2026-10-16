@@ -11,6 +11,7 @@ import { ACTIVE_STRATEGIES, SPOT_STRATEGIES, STRATEGY_BY_ID, TRADE_FILTERS } fro
 import { OPTION_DEFAULT, labEditableKeys, labOverrides, labParams, optionText, paramsFromFilters, paramsFromSettingsRow, settingSignature, sumPoints, variantText, DEFAULT_VARIANT } from './strategyTuning.js'
 import { applyTunedFilters, putOnLiveList } from './scannerSettings.js'
 import { ApplyTunedButton } from './ApplyTuned.jsx'
+import AppliedLab from './AppliedLab.jsx'
 
 const { Title, Text } = Typography
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX']
@@ -36,6 +37,9 @@ export default function StrategyLabPage() {
   const [range, setRange] = useState(null)
   const [params, setParams] = useState({})
   const [startFrom, setStartFrom] = useState('written')
+  // What opens: the one-click "what is applied, on older days". The setting editor is for trying a different setting - and for a
+  // link that names a strategy (Strategies / Trades pages).
+  const [mode, setMode] = useState(query.strategy || query.mode === 'try' ? 'try' : 'applied')
   const single = indices.length === 1 && ids.length === 1
   const index = indices[0]
   const id = ids[0]
@@ -208,6 +212,10 @@ export default function StrategyLabPage() {
           <Title level={3} style={{ margin: 0 }}>Option Analytics</Title>
           <NavBar />
         </Space>
+        <Segmented value={mode} onChange={setMode} aria-label="Lab mode"
+          options={[{ value: 'applied', label: 'What is applied, on older days' }, { value: 'try', label: 'Try a different setting' }]} />
+        {mode === 'applied' && <AppliedLab cfg={cfg} isAdmin={isAdmin} onTry={() => setMode('try')} />}
+        {mode === 'try' && (<>
         <Card size="small" title="Strategy lab · change strategies' tuned settings and see what they would have done">
           <Space direction="vertical" size={12} style={{ width: '100%' }}>
             <Text type="secondary" style={{ fontSize: 12 }}>
@@ -345,6 +353,7 @@ export default function StrategyLabPage() {
           ? <LabResult result={{ ...current.file, ...current.entry }} stale={current.stale} updating={current.updating} index={current.index} applied={appliedOf(current.index, current.id)}
               onApply={(live, lots) => apply(current, live, lots)} canApply={isAdmin && current.current} indexLots={cfg?.trade?.[current.index]?.lots ?? null} />
           : <Alert type="info" showIcon message={`No lab run yet for ${rows.length > 1 ? 'these strategies / indices' : `#${STRATEGY_BY_ID[id]?.no} ${STRATEGY_BY_ID[id]?.name} on ${index}`} - set the parameters and press Run.`} />}
+        </>)}
       </Space>
     </div>
   )
@@ -459,6 +468,9 @@ function LabResult({ result, stale, updating = false, index, applied, onApply, c
           onApply={(live, lots) => onApply(live, lots)} />
       )}>
       <Space direction="vertical" size={10} style={{ width: '100%' }}>
+        {result.strategiesLeftOut?.length > 0 && (
+          <Alert type="warning" showIcon message={`Left out of this run: ${result.strategiesLeftOut.map((x) => `#${STRATEGY_BY_ID[x.id]?.no ?? '?'} ${STRATEGY_BY_ID[x.id]?.name ?? x.id} (${x.reason})`).join(' · ')}`} />
+        )}
         {updating && <Alert type="info" showIcon message={`This is ${index}'s previous lab run - the new one is running or queued; it shows here when it is done (and can be applied then).`} />}
         {!updating && stale && <Alert type="warning" showIcon message="This run measured another setting or other days than the ones set now - run the lab again to see them (and to apply it)." />}
         <Table size="small" pagination={false} rowKey="key" dataSource={metrics} scroll={{ x: 900 }} aria-label="Lab comparison"

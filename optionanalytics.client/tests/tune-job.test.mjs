@@ -383,10 +383,46 @@ test('the Strategy lab job: several strategies measured at once - each as writte
     assert.equal(offYours.params.tradeSide, 'long')
     assert.equal(offYours.params.optLeg, undefined)
     assert.equal(offYours.option, null)
-    // A strategy of the other kind, or an unknown one, fails the run.
-    const wrong = await runJob(base, { underlying: 'NIFTY', strategies: ['weakWall', 'nope'], days: 30, minTrades: 2, what: 'lab' }, env)
-    assert.notEqual(wrong.code, 0)
-    assert.match(wrong.result.error, /nope is not an active futures strategy/)
+    // WHAT IS APPLIED, nothing on top (the lab's "run what is applied"): the setting tried IS the applied one - measured
+    // once, with the same numbers and the trades listed - and a strategy with nothing applied is just as written.
+    const plain = await runJob(base, { underlying: 'NIFTY', strategies: ['weakWall', 'squeeze'], days: 30, minTrades: 2, what: 'lab', labBase: 'applied', params: {} }, env)
+    assert.equal(plain.code, 0, JSON.stringify(plain.result))
+    const [pw, ps] = plain.result.results
+    assert.deepEqual(pw.yours.r, pw.applied.r, 'the applied setting is what was measured')
+    assert.equal(pw.yours.trades.length, pw.yours.r.n, 'its trades are listed')
+    assert.deepEqual(pw.applied.trades, [], 'the summary copy carries no second list')
+    assert.deepEqual(ps.yours.r, ps.asWritten.r, 'nothing applied: as written')
+    // A strategy of the other kind, an unknown one or a RETIRED one no longer takes the whole run down with it: it is
+    // left out and said, so asking for every strategy still measures the ones that work.
+    const wrong = await runJob(base, { underlying: 'NIFTY', strategies: ['weakWall', 'nope', 'lvnRun', 'spotWallBreak'], days: 30, minTrades: 2, what: 'lab' }, env)
+    assert.equal(wrong.code, 0, JSON.stringify(wrong.result))
+    assert.deepEqual(wrong.result.results.map((r) => r.strategy.id), ['weakWall'], 'the one that can run was measured')
+    assert.deepEqual(wrong.result.strategiesLeftOut, [
+      { id: 'nope', reason: 'no such strategy' },
+      { id: 'lvnRun', reason: 'retired' },
+      { id: 'spotWallBreak', reason: 'a spot + options strategy, not futures' },
+    ])
+    // Nothing left to measure is still a failure, and says why for each.
+    const none = await runJob(base, { underlying: 'NIFTY', strategies: ['nope', 'lvnRun'], days: 30, minTrades: 2, what: 'lab' }, env)
+    assert.notEqual(none.code, 0)
+    assert.match(none.result.error, /nothing to measure.*nope \(no such strategy\).*lvnRun \(retired\)/)
+
+    // SEVERAL strategies: only the setting being tried carries its trades. As written / as applied are read as a
+    // summary and nothing else, so their trade lists are not shipped - with every strategy picked that was most of the
+    // file. Their numbers are untouched.
+    const many = await runJob(base, { underlying: 'NIFTY', strategies: ['weakWall', 'cumFlip'], days: 30, minTrades: 2, what: 'lab', params: { tradeSide: 'long' } }, env)
+    assert.equal(many.code, 0, JSON.stringify(many.result))
+    assert.equal(many.result.results.length, 2)
+    for (const r of many.result.results) {
+      assert.deepEqual(r.asWritten.trades, [], `${r.strategy.id}: as written ships no trade list`)
+      assert.ok(Number.isFinite(r.asWritten.r.n) && Number.isFinite(r.asWritten.points.total), 'but keeps every number the comparison reads')
+      assert.equal(r.yours.r.n, r.yours.trades.length, 'the setting tried keeps its trades')
+    }
+    // One strategy is the deep dive and keeps everything, as it always did.
+    const one = many.result.results[0].strategy.id
+    const single = await runJob(base, { underlying: 'NIFTY', strategies: [one], days: 30, minTrades: 2, what: 'lab', params: { tradeSide: 'long' } }, env)
+    assert.equal(single.code, 0, JSON.stringify(single.result))
+    assert.equal(single.result.asWritten.r.n, single.result.asWritten.trades.length, 'as written keeps its trades for one strategy')
   } finally {
     server.close()
   }

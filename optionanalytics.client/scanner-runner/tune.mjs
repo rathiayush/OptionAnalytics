@@ -131,6 +131,10 @@ const write = (body) => writeJson(OUT, body)
  *  where they went" is countable afterwards instead of argued about. The per-endpoint and per-source counts are the
  *  job's OWN requests to this server (exact); `dhan` is the server's account-wide Dhan counter read before and after
  *  (so the live app's own calls during the job are in that delta too, which is why both are here). */
+/** A measured setting with its trade LISTS dropped - everything the comparison reads (its text, R, points, the option's
+ *  own stats) and nothing it does not. Only the setting being tried keeps its trades, which are the ones listed. */
+const summaryOnly = (m) => ({ ...m, trades: [], option: m.option ? { ...m.option, trades: [] } : null })
+
 const callReport = (stats, perKind, fast, dhan) => {
   const oiFetches = perKind.oi?.fetches ?? 0
   return {
@@ -684,9 +688,18 @@ async function main() {
     // being tried. That setting is job.params on top of its starting point (job.labBase): 'written' - the strategy as
     // written (params is then the whole setting); 'applied' - its setting applied on this index (as written where none),
     // the changes sent on top of it (an option leg of 'none' takes the applied one off).
-    const ids = [...new Set(Array.isArray(job.strategies) ? job.strategies : [])]
-    const bad = ids.find((id) => !STRATEGY_BY_ID[id] || STRATEGY_BY_ID[id].retired || (DATA === 'spot') !== !!STRATEGY_BY_ID[id].spot)
-    if (!ids.length || bad) throw new Error(`${bad ?? 'no strategy'} is not an active ${DATA === 'spot' ? 'spot + options' : 'futures'} strategy`)
+    const asked = [...new Set(Array.isArray(job.strategies) ? job.strategies : [])]
+    const runnable = (id) => STRATEGY_BY_ID[id] && !STRATEGY_BY_ID[id].retired && (DATA === 'spot') === !!STRATEGY_BY_ID[id].spot
+    // One strategy that cannot be run no longer takes the whole run down with it - it is left out and SAID, so asking
+    // for every strategy still measures the 21 that work when one of them has since been retired.
+    const ids = asked.filter(runnable)
+    const leftOut = asked.filter((id) => !runnable(id)).map((id) => ({
+      id,
+      reason: !STRATEGY_BY_ID[id] ? 'no such strategy'
+        : STRATEGY_BY_ID[id].retired ? 'retired'
+          : `a ${STRATEGY_BY_ID[id].spot ? 'spot + options' : 'futures'} strategy, not ${DATA === 'spot' ? 'spot + options' : 'futures'}`,
+    }))
+    if (!ids.length) throw new Error(`nothing to measure - ${leftOut.length ? leftOut.map((x) => `${x.id} (${x.reason})`).join(', ') : 'no strategy was asked for'}`)
     state.stage = 'lab'
     const opts = { trail, underlying: U, optionLevels }
     const OPTION_KEYS = ['optLeg', 'optMoneyness', 'optExit', 'optSlPct', 'optTargetPct']
@@ -701,12 +714,21 @@ async function main() {
       const fromApplied = job.labBase === 'applied' && !!applied
       let tried = { ...(fromApplied ? paramsFromFilters(applied) : {}), ...(job.params ?? {}) }
       if (tried.optLeg !== 'buy' && tried.optLeg !== 'sell') tried = Object.fromEntries(Object.entries(tried).filter(([k]) => !OPTION_KEYS.includes(k)))
+      // SEVERAL strategies: as written and as applied are read only as their summary (the comparison table), yet every
+      // trade of them was carried in the result and shown nowhere - with all 22 picked that is two thirds of a file the
+      // page then re-reads on every look. They keep only their summary. ONE strategy is the deep dive, so it keeps
+      // everything, as it always did.
+      const lean = ids.length > 1 ? summaryOnly : (m) => m
+      // Nothing changed on top of the applied setting (the lab's "what is applied" run): the setting tried IS the applied
+      // one, so it is measured once - the applied numbers are not worked out a second time under another name.
+      const appliedM = applied ? evaluateSetting(days, id, paramsFromFilters(applied), appliedOpts) : null
+      const sameAsApplied = fromApplied && !!appliedM && Object.keys(job.params ?? {}).length === 0
       results.push({
         strategy: { id, no: meta.no, name: meta.name },
         base: fromApplied ? 'applied' : 'written',
-        asWritten: evaluateSetting(days, id, {}, opts),
-        applied: applied ? { ...evaluateSetting(days, id, paramsFromFilters(applied), appliedOpts), filters: applied } : null,
-        yours: evaluateSetting(days, id, tried, fromApplied ? appliedOpts : opts),
+        asWritten: lean(evaluateSetting(days, id, {}, opts)),
+        applied: appliedM ? { ...lean(appliedM), filters: applied } : null,
+        yours: sameAsApplied ? appliedM : evaluateSetting(days, id, tried, fromApplied ? appliedOpts : opts),
       })
     }
     await dhanBudgetLeft().catch(() => null)
@@ -714,6 +736,7 @@ async function main() {
     write({
       ok: true, lab: true, underlying: U, job, startedUtc, finishedUtc: new Date().toISOString(), data: DATA, from: FROM, to: TO, rowSize, trail, optionLevels,
       days: days.map((d) => ({ date: d.date, estimated: d.estimated, setups: d.setups.length, ...d.quality })), skipped,
+      ...(leftOut.length ? { strategiesLeftOut: leftOut } : {}),
       // Every strategy measured; the first one also at the top level, as a lab result always had it.
       results, strategy: first.strategy, asWritten: first.asWritten, applied: first.applied, yours: first.yours,
       calls: callReport(fetcher.stats, fetcher.perKind(), fastOi, dhan),
