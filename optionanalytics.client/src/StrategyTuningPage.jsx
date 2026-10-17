@@ -188,6 +188,11 @@ function JobDetail({ p, startedUtc }) {
       </Text>
       {pre && <Text type="secondary" style={{ fontSize: 12 }}>fetching the option chain a cycle at a time: {pre.from} to {pre.to} ({pre.seeded} of {pre.of} day(s) so far)</Text>}
       {p.fastOi && !p.fastOi.used && p.fastOi.reason && <Text type="secondary" style={{ fontSize: 12 }}>Fetching a day at a time: {p.fastOi.reason}{p.fastOi.detail ? <Tooltip title={p.fastOi.detail}> <u>why</u></Tooltip> : null}</Text>}
+      {p.stage === 'scan' && p.waitingOn?.some((w) => w.secs >= 15) && (
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          still fetching {p.waitingOn.filter((w) => w.secs >= 15).map((w) => `${w.date} (${secs(w.secs * 1000)})`).join(', ')} from Dhan - the live app and the scanner get Dhan first during market hours, so an uncached day can take a while; the job is not stuck
+        </Text>
+      )}
       {wait && <Text type="secondary" style={{ fontSize: 12 }}>the data service is busy - trying again in {secs(Date.parse(wait.until) - now)} (this is handled; the job carries on by itself)</Text>}
     </Space>
   )

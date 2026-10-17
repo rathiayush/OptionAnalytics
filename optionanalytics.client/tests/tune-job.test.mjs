@@ -67,6 +67,7 @@ function fakeServer(recordedDays, faults = {}) {
       if (faults.rateLimit && nth(`day-${m[1]}`) <= faults.rateLimit) return json({ error: 'Too many requests' }, 429)
       const body = orderFlowDay(m[1])
       const send = () => json(m[1] === faults.partial ? { ...body, bars: body.bars.slice(0, 200) } : body)
+      if (faults.slowDay === m[1]) return void setTimeout(send, faults.slowDayMs ?? 3_000)
       if (faults.dayDelayMs) return void setTimeout(send, faults.dayDelayMs)
       return send()
     }
@@ -432,6 +433,29 @@ test('the Strategy lab job: several strategies measured at once - each as writte
     const single = await runJob(base, { underlying: 'NIFTY', strategies: [one], days: 30, minTrades: 2, what: 'lab', params: { tradeSide: 'long' } }, env)
     assert.equal(single.code, 0, JSON.stringify(single.result))
     assert.equal(single.result.asWritten.r.n, single.result.asWritten.trades.length, 'as written keeps its trades for one strategy')
+  } finally {
+    server.close()
+  }
+})
+
+test('one slow day does not freeze the counter: the days read are counted, and the slow one is named while it is in flight', { timeout: 300_000 }, async () => {
+  const days = ['2026-09-28', '2026-09-29', '2026-09-30', '2026-10-01', '2026-10-02', '2026-10-05']
+  // The newest day - the first one the job takes, in plan order - is the slow one (an uncached day fetched from Dhan).
+  const { server, base } = await fakeServer(days, { slowDay: '2026-10-05', slowDayMs: 4_000 })
+  const dir = mkdtempSync(join(tmpdir(), 'oa-slow-'))
+  try {
+    const env = { TUNE_CACHE_DIR: join(dir, 'cache'), TUNE_DAYS_AT_ONCE: '3', TUNE_HEARTBEAT_MS: '1000', TUNE_FAST_OI: 'off' }
+    const { code, result, lines } = await runJob(base, { underlying: 'NIFTY', strategies: ['weakWall'], days: 30, minTrades: 2, what: 'trade' }, env)
+    assert.equal(code, 0, JSON.stringify(result))
+    assert.equal(result.days.length, 6, 'every day still measured, in the same order')
+    const scans = lines.filter((l) => l.startsWith('PROGRESS ') && /"stage":"scan"/.test(l)).map((l) => JSON.parse(l.slice(9)))
+    // While the slow day was still in flight, the other days that finished were counted (not "0 of 6" throughout)...
+    const whileSlow = scans.filter((x) => x.waitingOn?.some((w) => w.date === '2026-10-05'))
+    assert.ok(whileSlow.length > 0, 'the slow day is named while it is in flight')
+    assert.ok(whileSlow.some((x) => x.done >= 3 && x.scanned >= 3), `days read behind it are counted: ${JSON.stringify(whileSlow.map((x) => x.done))}`)
+    // ...and the heartbeat says how long it has taken.
+    assert.ok(whileSlow.some((x) => x.waitingOn.find((w) => w.date === '2026-10-05').secs >= 2), 'with the seconds it has been in flight')
+    assert.equal(scans.at(-1).done, 6)
   } finally {
     server.close()
   }

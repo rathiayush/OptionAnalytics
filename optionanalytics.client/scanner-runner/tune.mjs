@@ -631,6 +631,19 @@ async function main() {
     if (why) stopped = why
     return !why
   }
+  // What the page sees: days READ (in any order), not days taken in plan order - one slow day (an uncached one fetched
+  // from Dhan while the live app has first call on it) used to hold the counter at "1 of N" and "0 scanned" while the
+  // other workers raced through every cached day behind it, which looked like a job that had stopped. The days still in
+  // flight are listed with how long each has taken, and a heartbeat repeats it every few seconds while nothing finishes.
+  const inFlight = new Map() // date -> started (ms)
+  let finished = 0
+  let readOk = 0
+  const report = (startedDay = null) => {
+    const waitingOn = [...inFlight].map(([date, t]) => ({ date, secs: Math.round((Date.now() - t) / 1000) })).sort((a, b) => b.secs - a.secs).slice(0, 3)
+    lastScan = { stage: 'scan', day: waitingOn[0]?.date ?? startedDay, done: finished, total: plan.length, scanned: readOk, skipped: skipped.length, waitingOn }
+    progress(lastScan)
+  }
+  const heartbeat = setInterval(() => { if (inFlight.size) report() }, Math.max(1_000, Number(process.env.TUNE_HEARTBEAT_MS) || 10_000))
   const worker = async () => {
     for (;;) {
       if (stopped || spotFull()) return
@@ -642,13 +655,17 @@ async function main() {
       const i = next++
       if (i >= plan.length) return
       const p = plan[i]
-      lastScan = { stage: 'scan', day: p.date, done: applied, total: plan.length, scanned: days.length, skipped: skipped.length }
-      progress(lastScan)
+      inFlight.set(p.date, Date.now())
+      report(p.date)
       try { read[i] = { p, day: await scanOne(p) } } catch (err) { read[i] = { p, err } }
+      inFlight.delete(p.date)
+      finished++
+      if (read[i].day) readOk++
       drain()
+      report()
     }
   }
-  await Promise.all(Array.from({ length: Math.min(AT_ONCE, plan.length) }, worker))
+  try { await Promise.all(Array.from({ length: Math.min(AT_ONCE, plan.length) }, worker)) } finally { clearInterval(heartbeat) }
   drain()
   // Stopped part-way: every day neither read nor already accounted for says why.
   if (stopped) {
