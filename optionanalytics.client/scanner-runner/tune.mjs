@@ -337,7 +337,7 @@ async function main() {
       // day; the server walks back over holidays. Without it the day is still scanned, the sweep simply cannot fire.
       const prevDay = await fetcher.dayApi('prevday', p.date, `/api/oi-replay/${U}/previous-day-volume-profile?date=${p.date}`, (b) => !!b?.success && b?.bars?.length > 0, { source: 'previous-day' })
         .then(prevDayOf).catch(() => null)
-      return { ...tuningDay(p.date, scanSpotDay({ bars, oi, filters: entryFilters, prevDay }), { minuteBars: bars, heatmap: [] }, oi), estimated: false, quality: { minutes: bars.length, oiMinutes, source: 'spot', previousDay: prevDay?.date ?? null, ...(optionErrors ? { optionErrors } : {}) } }
+      return { ...tuningDay(p.date, scanSpotDay({ bars, oi, filters: entryFilters, prevDay, underlying: U }), { minuteBars: bars, heatmap: [] }, oi), estimated: false, quality: { minutes: bars.length, oiMinutes, source: 'spot', previousDay: prevDay?.date ?? null, ...(optionErrors ? { optionErrors } : {}) } }
     }
     const expiryQuery = p.expiry ? `&expiry=${p.expiry}` : ''
     const body = await fetcher.dayApi('flow', p.date, dayPath(p.date, rowSize, expiryQuery), (b) => b?.bars?.length >= MIN_SESSION_MINUTES, { source: 'futures-day' })

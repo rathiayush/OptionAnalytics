@@ -188,10 +188,10 @@ export function followSetups(fired, trailLog, minuteBars, nowMs, dayOver = false
  * side at most once per COOLDOWN_MS (the tuning's firstPerCooldown). The server scanner and the OI Replay page both
  * judge them with this. Null when the minute's candle is not in yet (look again).
  */
-export function spotScanTick({ minute, bars, oi, filters, trail, prevDay = null }, memory) {
+export function spotScanTick({ minute, bars, oi, filters, trail, prevDay = null, underlying = null }, memory) {
   if (!oi || !bars?.length || bars.at(-1).t !== minute - MIN) return null
   const done = bars.at(-1).t + MIN <= minute ? bars : bars.filter((b) => b.t + MIN <= minute)
-  const setups = evaluateSpotStrategies({ nowMs: minute, bars: done, oi, filters, prevDay })
+  const setups = evaluateSpotStrategies({ nowMs: minute, bars: done, oi, filters, prevDay, underlying })
   const fresh = firable(memory.fired, setups).map((s) => ({ ...withOwnTrail(s, filters?.[s.id], trail), market: null }))
   return { fresh, fired: fresh.length ? [...memory.fired, ...fresh] : memory.fired }
 }
@@ -201,13 +201,13 @@ export function spotScanTick({ minute, bars, oi, filters, trail, prevDay = null 
  * day's, oldest first) and `oi` (a context, or (minute) => context). What a replay that moved several minutes, or a
  * page opened part-way through today, has not judged yet. Returns { fresh, fired } like spotScanTick.
  */
-export function spotScanMinutes({ from, to, bars, oi, filters, trail, prevDay = null }, memory) {
+export function spotScanMinutes({ from, to, bars, oi, filters, trail, prevDay = null, underlying = null }, memory) {
   let fired = memory.fired
   const fresh = []
   let done = 0
   for (let minute = Math.floor(from / MIN) * MIN + MIN; minute <= to; minute += MIN) {
     while (done < bars.length && bars[done].t + MIN <= minute) done++
-    const tick = spotScanTick({ minute, bars: bars.slice(0, done), oi: typeof oi === 'function' ? oi(minute) : oi, filters, trail, prevDay }, { fired })
+    const tick = spotScanTick({ minute, bars: bars.slice(0, done), oi: typeof oi === 'function' ? oi(minute) : oi, filters, trail, prevDay, underlying }, { fired })
     if (!tick?.fresh.length) continue
     fired = tick.fired
     fresh.push(...tick.fresh)

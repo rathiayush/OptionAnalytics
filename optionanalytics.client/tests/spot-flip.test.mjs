@@ -6,7 +6,7 @@
 // too. Run: npm test (node --test) - see CLAUDE.md.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { SPOT_STRATEGIES, STRATEGY_BY_ID, STRATEGY_FILTERS, strategyFilters } from '../src/strategyEngine.js'
+import { SPOT_STRATEGIES, STRATEGY_BY_ID, STRATEGY_FILTERS, strategyFilters, trailedStop, applyTradeFilter } from '../src/strategyEngine.js'
 import { evaluateSpotStrategies, scanSpotDay } from '../src/spotEngine.js'
 import { firstPerCooldown } from '../src/scanDay.js'
 import { MIN, T, flipLong, flipShort } from './spot-flip-world.mjs'
@@ -77,4 +77,47 @@ test('no look-ahead: what happens after the clock changes nothing, and the tunin
   assert.equal(at(full).length, 1)
   assert.deepEqual(at(full), at(cut))
   assert.deepEqual(firstPerCooldown(mine(full)).map((s) => s.t), mine(full).map((s) => s.t))
+})
+
+test('a trailing stop of its own: per index (NIFTY 10 / BANKNIFTY 20 / SENSEX 30 points), dynamic (x ATR) or none', () => {
+  // (A setup trades with `trail` - the live scan puts its own trailOverride there (withOwnTrail), the tuning the same.)
+  const withTrail = (x) => ({ ...x, trail: x.trailOverride })
+  const day = (filters, underlying = 'NIFTY', make = flipLong) => scanSpotDay({ bars: make().bars, oi: make().oi, filters: { spotFlip: filters }, underlying }).filter((x) => x.id === 'spotFlip')[0]
+  const s = withTrail(day({}))
+  assert.deepEqual(s.trailOverride, { unit: 'pts', startPts: 10, gapPts: 10 })
+  assert.match(s.checks.Trail, /NIFTY trailing stop after 10 pts, 10 pts behind/)
+  // The stop stays where it was until the trade is 10 points up, then follows 10 behind the best price - never loosened.
+  assert.equal(trailedStop(s, s.entry + 9), s.stop)
+  assert.ok(Math.abs(trailedStop(s, s.entry + 10) - s.entry) < 1e-9, 'at +10 the stop reaches the entry')
+  assert.ok(Math.abs(trailedStop(s, s.entry + 25) - (s.entry + 15)) < 1e-9)
+  const short = withTrail(day({}, 'NIFTY', flipShort))
+  assert.ok(Math.abs(trailedStop(short, short.entry - 25) - (short.entry - 15)) < 1e-9, 'the short trails the other way')
+  // Each index has its own, each configurable.
+  assert.deepEqual(day({}, 'BANKNIFTY').trailOverride, { unit: 'pts', startPts: 20, gapPts: 20 })
+  assert.deepEqual(day({}, 'SENSEX').trailOverride, { unit: 'pts', startPts: 30, gapPts: 30 })
+  assert.deepEqual(day({ trailStartBANKNIFTY: 40, trailGapBANKNIFTY: 15 }, 'BANKNIFTY').trailOverride, { unit: 'pts', startPts: 40, gapPts: 15 })
+  assert.deepEqual(day({ trailStartBANKNIFTY: 40 }, 'NIFTY').trailOverride, { unit: 'pts', startPts: 10, gapPts: 10 }, 'another index\'s setting does not touch this one')
+  assert.deepEqual(day({}, null).trailOverride, { unit: 'pts', startPts: 10, gapPts: 10 }, 'no index named: NIFTY\'s')
+  // Dynamic: a multiple of the ATR at the signal.
+  const dyn = day({ trailMode: 'atr', trailStartAtr: 2, trailGapAtr: 1 })
+  const atr = (dyn.entry - dyn.stop) / 1.5
+  assert.ok(Math.abs(dyn.trailOverride.startPts - 2 * atr) < 0.01 && Math.abs(dyn.trailOverride.gapPts - atr) < 0.01)
+  assert.match(dyn.checks.Trail, /\(2 ATR\).*\(1 ATR\)/)
+  assert.equal(day({ trailMode: 'off' }).trailOverride, null, 'none')
+  // A tuned trailing stop (the tradeTrail filter) overrides it, as for every strategy.
+  assert.equal(applyTradeFilter(s, { tradeTrail: 'off' }).trailOverride, null)
+})
+
+test('configurable timeframes: the EMA candle (1 - 15 min), the EMA lengths, and how far back the flip may be', () => {
+  const f = (o) => strategyFilters('spotFlip', o)
+  assert.deepEqual([f({}).emaTf, f({}).emaFast, f({}).emaSlow, f({}).flipTf], [3, 7, 21, 1], 'the defaults are the rule as written')
+  assert.equal(f({ emaTf: 4 }).emaTf, 3, 'only the listed candle sizes')
+  // A different candle size and length still read the same climb (5-minute candles need shorter EMAs to be ready by the flip); a flip allowed a few minutes back fires earlier minutes' flips on later minutes too.
+  for (const o of [{ emaTf: 1 }, { emaTf: 5, emaFast: 3, emaSlow: 7 }, { emaFast: 5, emaSlow: 15 }]) assert.equal(mine(flipLong(), { spotFlip: o }).length, 1, JSON.stringify(o))
+  assert.equal(mine(flipLong(), { spotFlip: { emaFast: 30, emaSlow: 20 } }).length, 0, 'a slow EMA that is not slower than the fast one reads nothing')
+  assert.equal(mine(flipLong(), { spotFlip: { emaTf: 15 } }).length, 0, 'on 15-minute candles there are not enough candles for a 21 EMA by then')
+  const early = mine(flipLong())[0]
+  const wider = mine(flipLong(), { spotFlip: { flipTf: 5 } })
+  assert.ok(wider.length >= 1 && wider[0].t === early.t, 'a wider window still fires at the flip')
+  assert.ok(wider.every((s) => s.t >= early.t && s.t < early.t + 5 * MIN), 'and for the minutes just after it')
 })

@@ -88,6 +88,20 @@ export const STRATEGY_FILTERS = {
   spotFlip: [
     { key: 'deltaMin', label: 'CE / PE change with the trade over the last (minutes)', type: 'number', default: 10, min: 3, max: 15, step: 1 },
     { key: 'nearStrikes', label: 'Support / resistance OI counted over ATM +/- (strikes)', type: 'number', default: 2, min: 1, max: 5, step: 1 },
+    { key: 'flipTf', label: 'The since-open CE - PE flip: it changed sign within the last (minutes)', type: 'number', default: 1, min: 1, max: 15, step: 1 },
+    { key: 'emaTf', label: 'EMA timeframe (minutes per candle)', type: 'select', default: 3, options: [1, 3, 5, 10, 15].map((m) => ({ value: m, label: `${m} min` })) },
+    { key: 'emaFast', label: 'EMA fast (candles)', type: 'number', default: 7, min: 2, max: 50, step: 1 },
+    { key: 'emaSlow', label: 'EMA slow (candles)', type: 'number', default: 21, min: 3, max: 100, step: 1 },
+    // Its own trailing stop - per index, and either fixed points or dynamic (a multiple of the day's ATR, so it breathes with the market).
+    { key: 'trailMode', label: 'Trailing stop: fixed index points, or dynamic (x ATR)', type: 'select', default: 'points', options: [{ value: 'points', label: 'Fixed points (per index, below)' }, { value: 'atr', label: 'Dynamic: x the current ATR' }, { value: 'off', label: 'No trailing stop' }] },
+    { key: 'trailStartNIFTY', label: 'NIFTY: trailing starts after (points in profit)', type: 'number', default: 10, min: 1, max: 500, step: 1 },
+    { key: 'trailGapNIFTY', label: 'NIFTY: stays this far behind the best price (points)', type: 'number', default: 10, min: 1, max: 500, step: 1 },
+    { key: 'trailStartBANKNIFTY', label: 'BANKNIFTY: trailing starts after (points in profit)', type: 'number', default: 20, min: 1, max: 1000, step: 1 },
+    { key: 'trailGapBANKNIFTY', label: 'BANKNIFTY: stays this far behind the best price (points)', type: 'number', default: 20, min: 1, max: 1000, step: 1 },
+    { key: 'trailStartSENSEX', label: 'SENSEX: trailing starts after (points in profit)', type: 'number', default: 30, min: 1, max: 1500, step: 1 },
+    { key: 'trailGapSENSEX', label: 'SENSEX: stays this far behind the best price (points)', type: 'number', default: 30, min: 1, max: 1500, step: 1 },
+    { key: 'trailStartAtr', label: 'Dynamic: trailing starts after (x ATR in profit)', type: 'number', default: 1, min: 0.2, max: 10, step: 0.1 },
+    { key: 'trailGapAtr', label: 'Dynamic: stays this far behind the best price (x ATR)', type: 'number', default: 1, min: 0.2, max: 10, step: 0.1 },
   ],
 }
 // How any strategy's trades are taken (every strategy has these, after its own): long / short only, the

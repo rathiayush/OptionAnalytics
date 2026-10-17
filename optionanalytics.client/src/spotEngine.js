@@ -182,7 +182,7 @@ export function spotProfile(bars, step) {
  * #113 also read the day's own spot profile, built from those bars (spotProfile).
  * Setups have the futures setups' shape (id, name, side, t, entry, stop, target, timeStopMs, options, oiCtx, checks).
  */
-export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {} }) {
+export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {}, underlying = null }) {
   if (!oi || bars.length < 15) return []
   const minute = istMinute(nowMs)
   if (minute < FIRST_ENTRY || minute > LAST_ENTRY) return []
@@ -207,9 +207,10 @@ export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {} }) {
     })),
     support, resistance, spot: spotNow, ...ahead,
   })
-  const push = (id, dir, stopPts, targetPts, timeStopMin, checks) => {
+  const push = (id, dir, stopPts, targetPts, timeStopMin, checks, extra = null) => {
     if (!(stopPts > 0) || !(targetPts > 0)) return
     out.push({
+      ...extra,
       id, name: BY_ID[id].name, side: dir > 0 ? 'LONG' : 'SHORT', t: nowMs, entry: spotNow,
       stop: spotNow - dir * stopPts, target: spotNow + dir * targetPts,
       timeStopMs: Math.min(nowMs + timeStopMin * MIN, nowMs + (SQUARE_OFF - minute) * MIN),
@@ -227,24 +228,30 @@ export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {} }) {
     return r && r.ceNow + r.peNow > 0 ? (r.ceOpen - r.peOpen) / (r.ceNow + r.peNow) : null
   }
   const leadNow = leadAt(nowMs)
-  const leadPrev = leadAt(nowMs - MIN)
-  // The spot in 3-minute candles from 09:15 (a candle counts once its three minutes are in): EMA 7 / 21 of their closes.
+  const leadPrev = leadAt(nowMs - f.flipTf * MIN)
+  // The spot in `emaTf`-minute candles from 09:15 (a candle counts once all its minutes are in): the EMAs of their closes.
   const sessionStart = Math.floor(nowMs / MIN) * MIN - (minute - (9 * 60 + 15)) * MIN
   const buckets = new Map()
   for (const b of bars) {
     if (b.t < sessionStart) continue
-    const k = Math.floor((b.t - sessionStart) / (3 * MIN))
+    const k = Math.floor((b.t - sessionStart) / (f.emaTf * MIN))
     buckets.set(k, [...(buckets.get(k) ?? []), b])
   }
-  const closes3 = [...buckets.entries()].sort((a, b) => a[0] - b[0]).filter(([, xs]) => xs.length === 3).map(([, xs]) => xs.at(-1).close)
-  const ema7 = emaSeries(closes3, 7).at(-1)
-  const ema21 = emaSeries(closes3, 21).at(-1)
+  const closesTf = [...buckets.entries()].sort((a, b) => a[0] - b[0]).filter(([, xs]) => xs.length === f.emaTf).map(([, xs]) => xs.at(-1).close)
+  const ema7 = f.emaSlow > f.emaFast ? emaSeries(closesTf, f.emaFast).at(-1) : null
+  const ema21 = f.emaSlow > f.emaFast ? emaSeries(closesTf, f.emaSlow).at(-1) : null
   // ATM +/- n strikes: the OI that holds the price up (puts) against the OI that caps it (calls).
   const atmK = Math.round(spotNow / oi.step) * oi.step
   const near = rows.filter((r) => Math.abs(r.strike - atmK) <= f.nearStrikes * oi.step)
   const peNear = near.reduce((s, r) => s + (r.peOi ?? 0), 0)
   const ceNear = near.reduce((s, r) => s + (r.ceOi ?? 0), 0)
   const delta = sideOiChanges(optionOiRead(oi, spotNow, nowMs, f.deltaMin), false)
+  // The trailing stop's points: fixed for this index (NIFTY when the index is not named), or the ATR's multiples.
+  const index = ['NIFTY', 'BANKNIFTY', 'SENSEX'].includes(underlying) ? underlying : 'NIFTY'
+  const trail = f.trailMode === 'off' ? null
+    : f.trailMode === 'atr' ? { start: +(f.trailStartAtr * atr).toFixed(2), gap: +(f.trailGapAtr * atr).toFixed(2), atr: true }
+      : { start: f[`trailStart${index}`], gap: f[`trailGap${index}`] }
+  const trailText = (t) => (t ? `${index} trailing stop after ${t.start} pts${t.atr ? ` (${f.trailStartAtr} ATR)` : ''}, ${t.gap} pts behind${t.atr ? ` (${f.trailGapAtr} ATR)` : ''}` : 'no trailing stop')
   if (leadNow != null && leadPrev != null && ema7 != null && ema21 != null) {
     for (const dir of [1, -1]) {
       const flipped = dir > 0 ? leadPrev >= 0 && leadNow < 0 : leadPrev <= 0 && leadNow > 0
@@ -252,11 +259,14 @@ export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {} }) {
       const deltaWith = sideScore(dir, delta.ceD, delta.peD, 0.0005)
       const wallsWith = dir > 0 ? peNear > ceNear : ceNear > peNear
       if (flipped && emaWith && deltaWith != null && deltaWith >= 1 && wallsWith && ceNear > 0 && peNear > 0) {
+        // Its own trailing stop: this index's fixed points (after `start` in profit it stays `gap` behind the best price), or
+        // dynamic - the same in multiples of the ATR -, or none. A tuned trailing stop (the tradeTrail filter) overrides it.
         push('spotFlip', dir, 1.5 * atr, 3 * atr, 330, {
           OI: `since the open CE - PE flipped ${pct(leadPrev)} -> ${pct(leadNow)} of the chain (${dir > 0 ? 'puts added now lead' : 'calls added now lead'}); last ${f.deltaMin} min CE ${pct(delta.ceD)} / PE ${pct(delta.peD)}`,
           Walls: `ATM +/- ${f.nearStrikes} strikes: PE ${(peNear / 1e5).toFixed(1)}L vs CE ${(ceNear / 1e5).toFixed(1)}L - ${dir > 0 ? 'support' : 'resistance'} heavier`,
-          Trend: `3-min EMA 7 ${ema7.toFixed(1)} ${dir > 0 ? 'over' : 'under'} EMA 21 ${ema21.toFixed(1)}`,
-        })
+          Trend: `${f.emaTf}-min EMA ${f.emaFast} ${ema7.toFixed(1)} ${dir > 0 ? 'over' : 'under'} EMA ${f.emaSlow} ${ema21.toFixed(1)}`,
+          Trail: trailText(trail),
+        }, { trailOverride: trail ? { unit: 'pts', startPts: trail.start, gapPts: trail.gap } : null })
       }
     }
   }
@@ -269,7 +279,7 @@ export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {} }) {
  * Every spot setup of every minute of a day (from 15 minutes after the first candle): `bars` - spotBarsOf the day's
  * 1-minute candles, `oi` - the replay context (live: false). The tuning dedupes after its own filters, like the futures'.
  */
-export function scanSpotDay({ bars, oi, filters = {}, until = null, prevDay = null }) {
+export function scanSpotDay({ bars, oi, filters = {}, until = null, prevDay = null, underlying = null }) {
   if (!bars?.length || !oi) return []
   const found = []
   const first = bars[0].t + 15 * MIN
@@ -277,7 +287,7 @@ export function scanSpotDay({ bars, oi, filters = {}, until = null, prevDay = nu
   let done = 0 // bars finished by the clock
   for (let clock = first; clock <= end; clock += MIN) {
     while (done < bars.length && bars[done].t + MIN <= clock) done++
-    found.push(...evaluateSpotStrategies({ nowMs: clock, bars: bars.slice(0, done), oi, filters, prevDay }))
+    found.push(...evaluateSpotStrategies({ nowMs: clock, bars: bars.slice(0, done), oi, filters, prevDay, underlying }))
   }
   return found
 }

@@ -510,7 +510,7 @@ export class IndexScanner {
     this.spotMinute = minute
     // The previous trading day's high / low / close (#115's sweep) - from the previous day's spot bars loaded with the day.
     const prevDay = this.data.prevDay !== undefined ? this.data.prevDay : (this.data.prevDay = prevDayOf(this.data.spotVp))
-    return spotScanTick({ minute, bars, oi: this.data.oi, filters: cfg.filters, trail: trailFor(cfg, this.underlying), prevDay }, this.memory)?.fresh ?? []
+    return spotScanTick({ minute, bars, oi: this.data.oi, filters: cfg.filters, trail: trailFor(cfg, this.underlying), prevDay, underlying: this.underlying }, this.memory)?.fresh ?? []
   }
 
   // Today's finished spot minutes by `minute`: the server's own 1-minute spot candles (its live feed, every tick), over
