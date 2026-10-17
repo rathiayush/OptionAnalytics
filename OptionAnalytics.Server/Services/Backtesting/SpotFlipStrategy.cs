@@ -52,6 +52,7 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
             new BacktestParameterOption(1, "With the trade"),
             new BacktestParameterOption(2, "Not asked"),
         }),
+        new BacktestParameterSpec("deltaMin", "Whole chain, over the last (minutes): the writers on the trade's side are adding and the other side is leaving (0 = not asked)", Default: 10, Min: 0, Max: 30, Step: 1),
         new BacktestParameterSpec("wallMin", "S / R OI near the ATM: over the last (minutes) the writers go the trade's way (puts added and calls leaving for a long)", Default: 10, Min: 3, Max: 30, Step: 1),
         new BacktestParameterSpec("nearStrikes", "S / R OI counted over ATM +/- (strikes)", Default: 2, Min: 1, Max: 5, Step: 1),
         new BacktestParameterSpec("atmStrikes", "The strikes right round the ATM (+/-) also go the trade's way", Default: 1, Min: 0, Max: 3, Step: 1),
@@ -168,6 +169,7 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
         var exits = new Dictionary<DateTimeOffset, (DateTimeOffset Time, string Reason)>();
         var armMin = Math.Max(1, (int)p["armMin"]);
         var cumMode = (int)p.GetValueOrDefault("cumDelta", 0);
+        var deltaMin = (int)p.GetValueOrDefault("deltaMin", 10);
         var emaTf = Math.Max(1, (int)p["emaTf"]);
         var emaFast = Math.Max(2, (int)p["emaFast"]);
         var emaSlow = Math.Max(emaFast + 1, (int)p["emaSlow"]);
@@ -236,6 +238,17 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
             return (ok, peChg, ceChg, now.Pe, now.Ce);
         }
 
+        // The whole band's CE / PE OI over the last deltaMin minutes: the trade's side adds, the other leaves.
+        bool ChainGoes(DateTimeOffset clock, int dir)
+        {
+            decimal Total(Dictionary<decimal, StrikeSeries> m, DateTimeOffset at) { decimal t = 0; foreach (var (_, s) in m) if (s.At(at - one) is { } v) t += v; return t; }
+            var then = clock - TimeSpan.FromMinutes(deltaMin);
+            var ceNow = Total(ce, clock); var peNow = Total(pe, clock); var ceThen = Total(ce, then); var peThen = Total(pe, then);
+            if (ceThen <= 0 || peThen <= 0) return false;
+            var ceD = (ceNow - ceThen) / ceThen; var peD = (peNow - peThen) / peThen;
+            return dir > 0 ? peD > 0 && ceD < 0 : ceD > 0 && peD < 0;
+        }
+
         var lastFire = new Dictionary<int, DateTimeOffset>();
         var dayCloses = new List<decimal>();
         var inBucket = 0;
@@ -276,6 +289,7 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
                 // (3) the cumulative CE / PE change since the open with the trade
                 var cumWith = ceC is { } cc && peC is { } pp ? dir * (St(pp, 0.003m) - St(cc, 0.003m)) : (int?)null;
                 string? why = cumMode != 2 && (cumWith is null || cumWith < (cumMode == 1 ? 1 : 0)) ? (cumMode == 1 ? "cumulative CE/PE change not with the trade" : "cumulative CE/PE change against the trade")
+                    : deltaMin > 0 && !ChainGoes(clock, dir) ? "the chain's writers are not adding on the trade's side and leaving on the other"
                     : !wide.Ok || !(dir * net > 0) || dir * net < netMin ? "S/R OI near the ATM not going the trade's way, or the net difference too small"
                     : atmStrikes > 0 && !Goes(clock, atm, atmStrikes, dir).Ok ? "the strikes round the ATM not going the trade's way"
                     : null;

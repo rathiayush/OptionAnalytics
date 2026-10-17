@@ -309,6 +309,12 @@ export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {} }) {
       const cumWith = sideScore(dir, cum.ceC, cum.peC)
       // Not against it (the default): the sides are not both moving the other way - or, asked so, with it; or not asked.
       if (f.cumDelta !== 'off' && (cumWith == null || cumWith < (f.cumDelta === 'with' ? 1 : 0))) continue
+      // (3b) over the last `deltaMin` minutes, the whole chain's writers on the trade's side add and the other side leaves
+      if (f.deltaMin > 0) {
+        const d = sideOiChanges(optionOiRead(oi, spotNow, nowMs, f.deltaMin), false)
+        const going = d.ceD != null && d.peD != null && (dir > 0 ? d.peD > 0 && d.ceD < 0 : d.ceD > 0 && d.peD < 0)
+        if (!going) continue
+      }
       // (4) the S / R OI near the ATM +/- nearStrikes going the trade's way, with a big net difference between the sides
       const wide = goes(f.nearStrikes, dir)
       const net = wide.now.pe + wide.now.ce > 0 ? (wide.now.pe - wide.now.ce) / (wide.now.pe + wide.now.ce) : 0

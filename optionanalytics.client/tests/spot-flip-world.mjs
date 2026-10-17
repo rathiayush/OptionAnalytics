@@ -27,6 +27,7 @@ function build(spotAt, ceAt, peAt, minutes) {
 // round the ATM outweigh the puts (no net difference for a long); `smallNet` - the puts are only a little heavier (a small net
 // difference); `atmCalls` - the strikes right round the ATM keep ADDING calls while the wider strikes still shed them (the S / R OI over ATM +/- 2 goes the way, the strikes round the ATM do not);
 // `bothUp` - the calls were added much more before 10:15 (both sides up since the open: the cumulative change is neither with nor against a long);
+// `farCalls` - the strikes away from the ATM keep ADDING calls (the whole chain's calls are not leaving) while the ones near the ATM leave;
 // `noFlip` - puts are not added, so the CE - PE lines never cross; `lateTurn` - the spot turns up 40 minutes after the lines cross
 // (too late to wait for); `minutes` - the length of the day.
 export const TURN = 60
@@ -37,7 +38,7 @@ const longDay = (o = {}) => {
   const pe = (k) => (near(k) ? (o.ceHeavy ? 2e6 : o.smallNet ? 2.4e6 : 3.5e6) : 2e6)
   const ce = (k) => (near(k) ? (o.ceHeavy ? 4e6 : 2e6) : 2e6)
   const leave = o.callsStay ? 0 : 0.003
-  const ceRate = (k) => (o.atmCalls ? (Math.abs(k - AXIS) <= 50 ? -0.002 : near(k) ? 0.012 : leave) : leave)
+  const ceRate = (k) => (o.farCalls && !near(k) ? -0.004 : o.atmCalls ? (Math.abs(k - AXIS) <= 50 ? -0.002 : near(k) ? 0.012 : leave) : leave)
   const ceAt = (k, m) => ce(k) * (1 + (o.bothUp ? 0.0016 : 0.0006) * Math.min(m, TURN) - ceRate(k) * Math.max(0, m - TURN))
   const peAt = (k, m) => pe(k) * (1 + (o.bothUp ? 0.0008 : 0.0002) * Math.min(m, TURN) + (o.noFlip ? 0 : 0.0016) * Math.max(0, m - TURN))
   return { spotAt, ceAt, peAt }

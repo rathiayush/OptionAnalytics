@@ -11,7 +11,7 @@ One strategy is back: spot #101 `spotFlip` (spotEngine.js), rebuilt on request w
 (1) the ALERT - the whole chain's since-open CE - PE lines cross on the 1-minute clock (puts take the lead = long, calls = short); (2) within
 `armMin` (30) minutes the spot's `emaTf` (3) minute EMA `emaFast` / `emaSlow` (7 / 21) cross the trade's way - the entry is taken when THAT
 candle closes (`emaMode` cross; `state` also lets an EMA already in direction enter at a candle close); with (3) the cumulative CE / PE change
-since the open (the OI heatmap) NOT AGAINST the trade (`cumDelta`: `notAgainst` default / `with` / `off`), (4) the S / R OI near the ATM +/- `nearStrikes` (2) going the trade's way over the last `wallMin` (10) minutes -
+since the open (the OI heatmap) NOT AGAINST the trade (`cumDelta`: `notAgainst` default / `with` / `off`) and, over the last `deltaMin` (10) minutes, the whole chain's writers on the trade's side adding and the other side leaving (0 = off), (4) the S / R OI near the ATM +/- `nearStrikes` (2) going the trade's way over the last `wallMin` (10) minutes -
 puts added and calls leaving for a long - with a net PE - CE difference of at least `netMinPct` (25 %), and (5) the strikes right round the ATM
 (+/- `atmStrikes`, 1) doing the same; index stop / target `stopAtr` / `targetAtr` (1.5 / 3 x ATR, the `exits` block). 20-minute cooldown per side.
 The same rule runs in the Expired Backtest (`SpotFlipStrategy.cs`, key `spot-flip`, every setting a parameter, leaves on the index stop / target),
