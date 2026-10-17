@@ -1,5 +1,15 @@
 # OptionAnalytics - notes for every session
 
+## NO STRATEGIES (branch claude/remove-all-strategies)
+
+Every strategy - the futures #1 - #37 and the spot + options #101 - #115 - and its rule code was removed on request:
+`STRATEGIES` and `SPOT_STRATEGIES` are empty, `evaluateStrategies` / `evaluateSpotStrategies` return nothing, and the tests
+that exercised a strategy's rules (and the runner / tuning tests that needed a signal to fire) were deleted. What stays:
+the scanner plumbing (the runner, the OI reads and walls, the outcome simulation, the paper / live order path, Trade
+settings, the Strategies / Tuning / Lab / Trades pages - which list nothing until a strategy is added) and the Dhan cache.
+The history before it is in git (`main`, and `git stash list` holds the #115 work in progress). The rules below describe
+how a strategy WOULD be added back; read them as the contract for any new one.
+
 ## The strategy scanner is the most important part of the app
 
 The strategy scanner (`optionanalytics.client/src/strategyEngine.js`, `spotEngine.js`, `scannerCore.js`, fed by

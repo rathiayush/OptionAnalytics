@@ -54,35 +54,6 @@ test('"See the run" opens the Scanner record filtered to it, from when it was ap
   assert.equal(new URLSearchParams(runLink('NIFTY', 'x').split('?')[1]).get('since'), null)
 })
 
-test('BUY / SELL on the Strategies page is what the server scanner trades: the index\'s Sell / Buy wins, Per strategy hands it over', () => {
-  const settings = { filters: { buildUp: { tradeOptLeg: 'buy' } }, moneyness: 0 }
-  const cfg = {
-    settings,
-    filtersByIndex: { SENSEX: { buildUp: { tradeOptLeg: 'sell' } } },
-    trade: { NIFTY: { autoTrade: 'sell' }, BANKNIFTY: { autoTrade: 'strategy' }, SENSEX: { autoTrade: 'buy' } },
-  }
-  const opt = (id, u, c = cfg) => strategyState({ id, spot: false, u, cfg: c, settings, alertIds: [id] }).option
-  // NIFTY is "Sell option": it sells, though the strategy says buy - and says that its own choice was overruled.
-  assert.deepEqual(opt('buildUp', 'NIFTY'), { leg: 'sell', autoTrade: 'sell', tunedLeg: 'buy', overrode: true })
-  // BANKNIFTY is "Per strategy": its own buy; one with no setting of its own sells.
-  assert.equal(opt('buildUp', 'BANKNIFTY').leg, 'buy')
-  assert.equal(opt('wallBreak', 'BANKNIFTY').leg, 'sell')
-  // SENSEX is "Buy option"; the setting applied on SENSEX (sell) is overruled.
-  assert.deepEqual(opt('buildUp', 'SENSEX'), { leg: 'buy', autoTrade: 'buy', tunedLeg: 'sell', overrode: true })
-  // Alert only: nothing traded.
-  assert.equal(opt('buildUp', 'NIFTY', { ...cfg, trade: { NIFTY: { autoTrade: 'off' } } }).leg, null)
-
-  // The same as the runner: its settings for the index -> optionPlanFor.
-  for (const u of ['NIFTY', 'BANKNIFTY', 'SENSEX']) {
-    const scanner = new IndexScanner(u, {})
-    scanner.config = cfg
-    for (const id of ['buildUp', 'wallBreak']) {
-      const s = scanner.settings()
-      assert.equal(opt(id, u).leg, optionPlanFor(id, s.filters, s).leg, `${id} on ${u}`)
-    }
-  }
-})
-
 test('an untouched server alerts every active strategy of both sets, on every index', () => {
   for (const u of ['NIFTY', 'BANKNIFTY', 'SENSEX']) {
     const scanner = new IndexScanner(u, {})

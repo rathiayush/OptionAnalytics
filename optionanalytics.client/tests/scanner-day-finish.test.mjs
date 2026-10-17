@@ -52,39 +52,6 @@ async function runDay(scanner, io, from, to) {
   }
 }
 
-test('the day is over: no signal and no paper trade is left open, and both options are captured', async () => {
-  const io = fakeIo()
-  const scanner = new IndexScanner('NIFTY', io)
-  scanner.reset(DATE)
-  scanner.setConfig(SETTINGS)
-  // The synthetic day's minutes end at 14:15 - so signals that never reached their stop or target are still running.
-  await runDay(scanner, io, at(15), at(300))
-  const before = io.posted.at(-1)
-  assert.ok(before.signals.some((x) => x.status === 'open'), 'the day ended with signals still running')
-  assert.ok(before.trades.some((t) => !t.exitTime), 'and with paper trades still open')
-
-  assert.equal(await scanner.finishDay(DATE), true)
-  const final = io.posted.at(-1)
-  assert.equal(final.date, DATE)
-  assert.equal(final.signals.length, before.signals.length, 'the same signals - none added, none lost')
-  assert.ok(final.signals.every((x) => x.status && x.status !== 'open'), 'none left open')
-  assert.ok(final.signals.every((x) => x.exitReason && Number.isFinite(x.r)), 'each says why it left, with its R')
-  assert.ok(final.trades.length > 0 && final.trades.every((t) => t.exitTime && t.exitPremium != null && t.points != null),
-    'every paper trade closed, with its exit premium and points')
-  // What the option bought and the option sold would have made - on every signal that had a strike to trade.
-  const withLegs = final.signals.filter((x) => x.buyOption || x.sellOption)
-  assert.ok(withLegs.length >= 1, 'signals with an option')
-  assert.ok(withLegs.every((x) => x.buyPoints != null && x.sellPoints != null && x.indexPoints != null),
-    'both legs and the index points are captured on every one of them')
-
-  // Final: the day is never scanned, re-priced or posted again.
-  const posts = io.posted.length
-  await runDay(scanner, io, at(300), at(302))
-  assert.equal(io.posted.length, posts, 'a finished day is never posted again')
-  assert.equal(await scanner.finishDay(DATE), false, 'and never finished twice')
-  assert.equal((await io.loadState('NIFTY', DATE)).finished, true, 'the state says so across a restart')
-})
-
 test('a finished day stays finished after a restart', async () => {
   const io = fakeIo()
   const scanner = new IndexScanner('NIFTY', io)
@@ -103,34 +70,6 @@ test('a finished day stays finished after a restart', async () => {
   assert.equal(io.posted.length, posts, 'nothing re-posted')
   assert.equal(io.telegrams.filter((m) => m.includes('Paper exit')).length,
     new Set(io.telegrams.filter((m) => m.includes('Paper exit'))).size, 'and no exit announced twice')
-})
-
-test('a past day the runner never finished is finished from its minutes read back', async () => {
-  // A day left open by a restart: only its state file is there - no data in memory, and the scanner is on another day.
-  const io = fakeIo()
-  const first = new IndexScanner('NIFTY', io)
-  first.reset(DATE)
-  first.setConfig(SETTINGS)
-  await runDay(first, io, at(15), at(300))
-  const open = io.posted.at(-1).signals.filter((x) => x.status === 'open').length
-  assert.ok(open > 0)
-
-  const next = new IndexScanner('NIFTY', io)
-  next.reset('2026-10-06') // the next day - DATE is not its own
-  next.setConfig(SETTINGS)
-  next.pastDay = async (date) => {
-    assert.equal(date, DATE)
-    return { view: { minuteBars }, oi, spotBars: [] }
-  }
-  const posts = io.posted.length
-  assert.equal(await next.finishDay(DATE), true)
-  assert.equal(io.posted.length, posts + 1)
-  const final = io.posted.at(-1)
-  assert.equal(final.date, DATE)
-  assert.ok(final.signals.length > 0 && final.signals.every((x) => x.status !== 'open'), 'the past day has no open signal left')
-  assert.equal(next.date, '2026-10-06', 'and the scanner is still on its own day')
-  assert.equal(next.finished, null)
-  assert.equal((await io.loadState('NIFTY', DATE)).finished, true)
 })
 
 test('pastDay reads the day back: the futures minutes, and that date\'s OI and spot as a replay sees them', async () => {
@@ -152,85 +91,6 @@ test('pastDay reads the day back: the futures minutes, and that date\'s OI and s
   assert.equal(data.oi?.date, DATE)
   assert.equal(data.oi.lag, MIN, 'read as a replay reads it - each point at its minute\'s end, no look-ahead')
   assert.ok(data.spotBars.length > 100, 'the day\'s spot minutes')
-})
-
-test('a signal still running reports both its options as they stand now, and a closed one its exits', async () => {
-  const io = fakeIo()
-  const scanner = new IndexScanner('NIFTY', io)
-  scanner.reset(DATE)
-  scanner.setConfig(SETTINGS)
-  await runDay(scanner, io, at(15), at(300))
-
-  const status = scanner.status()
-  assert.ok(status.signals.length > 0)
-  const open = status.signals.filter((s) => s.status === 'open')
-  assert.ok(open.length > 0, 'the day ends with signals still running')
-  for (const s of open) {
-    assert.equal(s.running, true, 'marked as still running')
-    assert.ok(Number.isFinite(s.points), 'its points so far on the index')
-    // Both options: in at the signal, worth this much now, points so far - and no exit reason yet.
-    for (const which of ['buy', 'sell']) {
-      if (!s[`${which}Option`]) continue
-      assert.ok(Number.isFinite(s[`${which}Entry`]), `${which} entry premium`)
-      assert.ok(Number.isFinite(s[`${which}Now`]), `${which} premium now`)
-      assert.ok(Number.isFinite(s[`${which}Points`]), `${which} points now`)
-      assert.equal(s[`${which}ExitReason`], null, `${which} has not left yet`)
-    }
-  }
-  // Once the day is finished, the same signals report their exits instead - final, not "now".
-  await scanner.finishDay(DATE)
-  const done = scanner.status()
-  assert.ok(done.signals.every((s) => s.status !== 'open'))
-  assert.ok(done.signals.every((s) => !s.running), 'nothing still running')
-  const withLegs = done.signals.filter((s) => s.buyOption || s.sellOption)
-  assert.ok(withLegs.length > 0 && withLegs.every((s) => s.buyExitReason || s.sellExitReason), 'each leg says why it left')
-})
-
-test('reconcile: a day already marked finished is judged again, and its record posted again', async () => {
-  const io = fakeIo()
-  const scanner = new IndexScanner('NIFTY', io)
-  scanner.reset(DATE)
-  scanner.setConfig(SETTINGS)
-  await runDay(scanner, io, at(15), at(300))
-  await scanner.finishDay(DATE)
-  const posts = io.posted.length
-  assert.equal((await io.loadState('NIFTY', DATE)).finished, true)
-
-  // Without force a finished day is left alone...
-  assert.equal(await scanner.finishDay(DATE), false)
-  assert.equal(io.posted.length, posts)
-  // ...with it, the day is judged again on its own minutes and the record goes out again, still with nothing open.
-  assert.equal(await scanner.finishDay(DATE, { force: true }), true)
-  assert.equal(io.posted.length, posts + 1)
-  const again = io.posted.at(-1)
-  assert.ok(again.signals.length > 0 && again.signals.every((x) => x.status !== 'open'))
-  assert.ok(again.trades.every((t) => t.exitTime))
-  // The exits already announced are kept, never re-priced by the second look.
-  const before = io.posted[posts - 1]
-  const exitOf = (body, key) => body.trades.find((t) => t.key === key)
-  assert.ok(before.trades.every((t) => {
-    const now = exitOf(again, t.key)
-    return now && now.exitTime === t.exitTime && now.exitPremium === t.exitPremium
-  }), 'a reconcile never changes an exit that was already announced')
-})
-
-test('a side with no minutes in memory is read back rather than left open', async () => {
-  const io = fakeIo()
-  const scanner = new IndexScanner('NIFTY', io)
-  scanner.reset(DATE)
-  scanner.setConfig(SETTINGS)
-  await runDay(scanner, io, at(15), at(300))
-  assert.ok(scanner.memory.fired.length > 0)
-
-  // The futures minutes are gone from memory (a day whose order flow never loaded back after a restart).
-  scanner.data = { ...scanner.data, view: { ...scanner.data.view, minuteBars: [] } }
-  let readBack = 0
-  scanner.pastDay = async () => { readBack++; return { view: { minuteBars }, oi, spotBars: [] } }
-
-  assert.equal(await scanner.finishDay(DATE), true)
-  assert.equal(readBack, 1, 'the day was read back instead of giving up')
-  const final = io.posted.at(-1)
-  assert.ok(final.signals.length > 0 && final.signals.every((x) => x.status !== 'open'), 'nothing left open')
 })
 
 test('futuresMinuteBars: the futures own candles stand in for a day with no order flow', () => {
