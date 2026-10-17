@@ -1,8 +1,6 @@
-// #101 (spotEngine.js): the since-open CE - PE lines cross on the 1-minute clock (the alert) -> within `armMin` minutes the spot's
-// 3-minute EMA 7 / 21 crosses the trade's way and the entry is taken when THAT candle closes -> with the cumulative CE / PE change,
-// the S / R OI near the ATM going the trade's way (writers adding on the holding side, leaving on the other) with a big net
-// difference, and the strikes right round the ATM doing the same. It fires on its rules - LONG and SHORT - and not when each key
-// condition is missing; nothing after the clock is read. Run: npm test (node --test) - see CLAUDE.md.
+// #101 (spotEngine.js): TWO things only - the since-open CE - PE lines cross on the 1-minute clock (the alert), then within `armMin`
+// minutes the spot's 3-minute EMA 7 / 21 crosses the SAME way and the entry is taken when that candle closes. It fires on both -
+// LONG and SHORT - and not when either is missing; nothing after the clock is read. Run: npm test (node --test) - see CLAUDE.md.
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -32,9 +30,7 @@ test('LONG and SHORT: the lines cross, the spot\'s 3-minute EMA crosses on the c
     assert.ok(((s.t - T) / MIN) % 3 === 0, 'the entry is at the close of a 3-minute candle')
     assert.match(s.checks.Alert, /since the open the CE - PE lines crossed at \d\d:\d\d .* (puts|calls) added lead/)
     assert.match(s.checks.Trend, /3-min EMA 7 .* (over|under) EMA 21 .* crossed on the candle that just closed/)
-    assert.match(s.checks.Cumulative, /since the open CE .* \/ PE /)
-    assert.match(s.checks.Walls, /ATM \+\/- 2: over 10 min PE .* \/ CE .* - (support|resistance) heavier by \d+%/)
-    assert.match(s.checks['Round the ATM'], /ATM \+\/- 1: PE .* \/ CE /)
+    assert.deepEqual(Object.keys(s.checks), ['Alert', 'Trend'], 'nothing else is asked')
     assert.ok(s.options?.buy && s.options?.sell, 'both options priced for the trade')
   }
   const long = mine(crossLong())[0]
@@ -43,27 +39,19 @@ test('LONG and SHORT: the lines cross, the spot\'s 3-minute EMA crosses on the c
   assert.equal(long.trailOverride, undefined, 'no trailing stop of its own')
 })
 
-test('not without each key condition', () => {
+test('not without either: the lines crossing, the spot EMA crossing the same way', () => {
   assert.equal(mine(crossLong({ noCross: true })).length, 0, 'the spot\'s EMA never crosses up')
-  assert.equal(mine(crossLong({ noFlip: true })).length, 0, 'the CE - PE lines never cross')
-  assert.equal(mine(crossLong({ callsStay: true })).length, 0, 'the calls are not leaving (and the cumulative change is not with a long)')
-  assert.equal(mine(crossLong({ ceHeavy: true })).length, 0, 'resistance heavier round the ATM')
-  assert.equal(mine(crossLong({ smallNet: true })).length, 0, 'the puts are only a little heavier - not a big net difference')
-  assert.equal(mine(crossLong({ atmCalls: true })).length, 0, 'the strikes right round the ATM are not going the trade\'s way')
+  assert.equal(mine(crossLong({ noFlip: true, callsStay: true })).length, 0, 'the CE - PE lines never cross (puts not added, calls only stop being added)')
   assert.equal(mine(crossLong({ lateTurn: true })).length, 0, 'the spot turns up too long after the lines crossed (armMin 30)')
+  // The OI behind a trade is not asked any more: calls staying, heavy calls, a small net difference, calls round the ATM do not stop it.
+  for (const o of [{ callsStay: true }, { ceHeavy: true }, { smallNet: true }, { atmCalls: true }, { bothUp: true }, { farCalls: true }]) assert.equal(mine(crossLong(o)).length, 1, JSON.stringify(o))
 })
 
-test('configurable: how long to wait, the strikes, the net difference, the EMA candle and lengths, "already in direction"', () => {
+test('configurable: how long to wait, the EMA candle and lengths, "already in direction"', () => {
   const f = strategyFilters('spotFlip', {})
-  assert.deepEqual([f.armMin, f.emaTf, f.emaFast, f.emaSlow, f.emaMode, f.cumDelta, f.deltaMin, f.wallMin, f.nearStrikes, f.atmStrikes, f.netMinPct, f.stopAtr, f.targetAtr], [30, 3, 7, 21, 'cross', 'notAgainst', 10, 10, 2, 1, 25, 1.5, 3], 'the defaults')
+  assert.deepEqual([f.armMin, f.emaTf, f.emaFast, f.emaSlow, f.emaMode, f.stopAtr, f.targetAtr], [30, 3, 7, 21, 'cross', 1.5, 3], 'the defaults')
   assert.equal(mine(crossLong({ lateTurn: true }), withF({ armMin: 120 })).length, 1, 'waiting longer lets the late EMA crossover through')
-  assert.equal(mine(crossLong({ smallNet: true }), withF({ netMinPct: 10 })).length, 1, 'a smaller net difference asked')
-  assert.equal(mine(crossLong(), withF({ netMinPct: 40 })).length, 0, 'a bigger one')
-  assert.equal(mine(crossLong({ atmCalls: true }), withF({ atmStrikes: 0 })).length, 1, 'the strikes round the ATM not asked')
-  assert.equal(mine(crossLong({ ceHeavy: true }), withF({ netMinPct: 0 })).length, 0, 'the net difference off still needs the puts to lead the calls')
-  // Other EMA lengths read the same day: 9 / 21 crosses a candle later (the entry moves with it); a EMA that crosses before the cumulative change is with the trade does not enter.
-  assert.deepEqual(mine(crossLong(), withF({ emaFast: 9 })).map((s) => (s.t - T) / MIN), [75])
-  assert.equal(mine(crossLong(), withF({ emaTf: 1 })).length, 0, 'the 1-minute EMA crosses before the cumulative CE / PE change is with a long')
+  assert.deepEqual(mine(crossLong(), withF({ emaFast: 9 })).map((s) => (s.t - T) / MIN), [75], 'a 9 / 21 EMA crosses a candle later - the entry moves with it')
   // "Already in direction" counts too: a trend under way (no fresh cross on this candle) can enter on any candle close while armed.
   const fresh = all(crossLong())
   const state = all(crossLong(), withF({ emaMode: 'state' }))
@@ -105,12 +93,12 @@ test('parameters: own rules + the exits block + the trade filters; the lab can c
   assert.deepEqual(Object.keys(PARAM_BLOCKS), ['exits'])
   const defs = STRATEGY_FILTERS.spotFlip
   assert.deepEqual([...new Set(defs.map(filterGroup))], ['Its own rules', 'Index stop-loss and target', 'How the trade is taken (every strategy)'])
-  assert.deepEqual(entryDefsFor(['spotFlip']).map((d) => d.key), ['armMin', 'emaTf', 'emaFast', 'emaSlow', 'emaMode', 'cumDelta', 'deltaMin', 'wallMin', 'nearStrikes', 'atmStrikes', 'netMinPct', 'stopAtr', 'targetAtr'])
-  assert.deepEqual(labParams({ emaTf: 5, emaFast: 7, netMinPct: 40 }, 'spot', ['spotFlip']), { emaTf: 5, netMinPct: 40 })
+  assert.deepEqual(entryDefsFor(['spotFlip']).map((d) => d.key), ['armMin', 'emaTf', 'emaFast', 'emaSlow', 'emaMode', 'stopAtr', 'targetAtr'])
+  assert.deepEqual(labParams({ emaTf: 5, emaFast: 7, armMin: 45 }, 'spot', ['spotFlip']), { emaTf: 5, armMin: 45 })
   assert.deepEqual(labOverrides({ emaFast: 7 }, 'spot', ['spotFlip']), { emaFast: 7 })
-  assert.deepEqual(paramsFromFilters({ emaTf: 5, wallMin: 10 }, 'spotFlip'), { emaTf: 5 })
-  const next = filtersFromTuning({ emaTf: 5, nearStrikes: 3 }, { ...DEFAULT_VARIANT, emaTf: 3, netMinPct: 40 }, { id: 'spotFlip' })
-  assert.deepEqual([next.netMinPct, next.emaTf, next.nearStrikes], [40, undefined, 3])
+  assert.deepEqual(paramsFromFilters({ emaTf: 5, armMin: 30 }, 'spotFlip'), { emaTf: 5 })
+  const next = filtersFromTuning({ emaTf: 5, nearStrikes: 3 }, { ...DEFAULT_VARIANT, emaTf: 3, armMin: 45 }, { id: 'spotFlip' })
+  assert.deepEqual([next.armMin, next.emaTf, next.nearStrikes], [45, undefined, 3])
   assert.deepEqual(entryPartOf('spotFlip', { emaTf: 5, tradeSide: 'long' }), { emaTf: 5 })
   // A block not listed is not given settings; the exits default to 1.5 / 3 ATR.
   assert.deepEqual(Object.values(spotBlocks({ blocks: [], f: { stopAtr: 9, targetAtr: 9 }, atr: 2 }).exits), [3, 6])
@@ -139,24 +127,8 @@ test('the server accepts every rule setting in a lab job, and the Expired Backte
     shared++
     assert.deepEqual([specs[f.key].def, specs[f.key].min, specs[f.key].max], [f.default, f.min, f.max], `${f.key}: the Expired Backtest and the scanner agree`)
   }
-  assert.ok(shared >= 8, `${shared} shared numbers checked`)
+  assert.ok(shared >= 5, `${shared} shared numbers checked`)
   assert.match(cs, /SignalStartTimeParameter\(\) with \{ Default = 570 \}/)
   assert.match(cs, /MaxHoldingTimeParameter\(\) with \{ Default = 330 \}/)
 })
 
-test('the cumulative CE / PE change since the open (the OI heatmap) only has to be NOT AGAINST the trade - or with it, or not asked', () => {
-  // Both sides up since the open: neither with nor against a long.
-  const day = () => crossLong({ bothUp: true })
-  const cum = mine(day())[0]?.checks.Cumulative
-  assert.match(cum, /since the open CE \+[\d.]+% \/ PE \+[\d.]+%/, 'fires by default: not against')
-  assert.equal(mine(day(), withF({ cumDelta: 'with' })).length, 0, 'asked to be WITH the trade it is not')
-  assert.equal(mine(day(), withF({ cumDelta: 'off' })).length, 1, 'not asked')
-  assert.equal(mine(crossLong(), withF({ cumDelta: 'with' })).length, 1, 'a day with the puts clearly leading is with it too')
-})
-
-test('the whole chain over the last 10 minutes: the writers on the trade\'s side adding and the other side leaving', () => {
-  assert.equal(strategyFilters('spotFlip', {}).deltaMin, 10)
-  assert.equal(mine(crossLong({ farCalls: true })).length, 0, 'calls away from the ATM keep being added - the chain\'s calls are not leaving')
-  assert.equal(mine(crossLong({ farCalls: true }), withF({ deltaMin: 0 })).length, 1, 'not asked: the rest of the rule still holds')
-  for (const make of [crossLong, crossShort]) assert.equal(mine(make()).length, 1)
-})

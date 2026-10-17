@@ -7,18 +7,16 @@ Every strategy - the futures #1 - #37 and the spot + options #101 - #115 - and i
 that exercised a strategy's rules (and the runner / tuning tests that needed a signal to fire) were deleted. What stays:
 the scanner plumbing (the runner, the OI reads and walls, the outcome simulation, the paper / live order path, Trade
 settings, the Strategies / Tuning / Lab / Trades pages - which list nothing until a strategy is added) and the Dhan cache.
-One strategy is back: spot #101 `spotFlip` (spotEngine.js), rebuilt on request with everything else taken off (no trailing stop, no VWAP, no ATM option EMAs):
-(1) the ALERT - the whole chain's since-open CE - PE lines cross on the 1-minute clock (puts take the lead = long, calls = short); (2) within
-`armMin` (30) minutes the spot's `emaTf` (3) minute EMA `emaFast` / `emaSlow` (7 / 21) cross the trade's way - the entry is taken when THAT
-candle closes (`emaMode` cross; `state` also lets an EMA already in direction enter at a candle close); with (3) the cumulative CE / PE change
-since the open (the OI heatmap) NOT AGAINST the trade (`cumDelta`: `notAgainst` default / `with` / `off`) and, over the last `deltaMin` (10) minutes, the whole chain's writers on the trade's side adding and the other side leaving (0 = off), (4) the S / R OI near the ATM +/- `nearStrikes` (2) going the trade's way over the last `wallMin` (10) minutes -
-puts added and calls leaving for a long - with a net PE - CE difference of at least `netMinPct` (25 %), and (5) the strikes right round the ATM
-(+/- `atmStrikes`, 1) doing the same; index stop / target `stopAtr` / `targetAtr` (1.5 / 3 x ATR, the `exits` block). 20-minute cooldown per side.
-The same rule runs in the Expired Backtest (`SpotFlipStrategy.cs`, key `spot-flip`, every setting a parameter, leaves on the index stop / target),
-and the Strategy lab changes these own rules (`entryDefsOf` / `entryDefsFor` / `entryPartOf` in strategyTuning.js; `labParams` / `labOverrides` take
-the picked ids; the lab job scans the days again for a changed rule - `rescan` in tune.mjs - and applying a lab setting writes them,
-`filtersFromTuning(..., { id })`); `StrategyTuningController.LabParamKeys` lists every setting (a test checks it). The alert itself is shown in
-the entry's `checks.Alert` (when the lines crossed), not as a separate message. `tests/spot-flip.test.mjs`, `SpotFlipStrategyTests.cs`.
+One strategy is back: spot #101 `spotFlip` (spotEngine.js), cut down on request to TWO conditions (nothing else is asked - an earlier version with the walls, the
+cumulative / 10-minute CE / PE change, the ATM strikes and a net difference never fired, it is in git): (1) the ALERT - the whole chain's since-open CE - PE lines
+cross on the 1-minute clock (puts take the lead = long, calls = short) and (2) within `armMin` (30) minutes the spot's `emaTf` (3) minute EMA `emaFast` / `emaSlow`
+(7 / 21) cross the SAME way - the entry is taken when THAT candle closes (`emaMode` cross; `state` also lets an EMA already in direction enter at a candle close).
+Index stop / target `stopAtr` / `targetAtr` (1.5 / 3 x ATR, the `exits` block); no trailing stop of its own (the trade filters - base params - apply as to every
+strategy). 20-minute cooldown per side. The same rule runs in the Expired Backtest (`SpotFlipStrategy.cs`, key `spot-flip`, every setting a parameter, leaves on the
+index stop / target), and the Strategy lab changes these own rules (`entryDefsOf` / `entryDefsFor` / `entryPartOf` in strategyTuning.js; `labParams` / `labOverrides`
+take the picked ids; the lab job scans the days again for a changed rule - `rescan` in tune.mjs - and applying a lab setting writes them,
+`filtersFromTuning(..., { id })`); `StrategyTuningController.LabParamKeys` lists every setting (a test checks it). The alert itself is shown in the entry's
+`checks.Alert` (when the lines crossed), not as a separate message. `tests/spot-flip.test.mjs`, `SpotFlipStrategyTests.cs`.
 The history before it is in git (`main`, and `git stash list` holds the #115 work in progress). The rules below describe
 how a strategy WOULD be added back; read them as the contract for any new one.
 

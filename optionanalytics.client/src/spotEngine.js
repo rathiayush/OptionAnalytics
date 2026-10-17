@@ -248,11 +248,9 @@ export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {} }) {
   const pct = (v) => (v == null ? 'no read' : `${v >= 0 ? '+' : ''}${(v * 100).toFixed(2)}%`)
 
   // 101. THE CE / PE CROSSOVER, THEN THE SPOT'S EMA ---------------------------------------------------------------------
-  // (1) The ALERT: the since-open CE - PE lines cross on the 1-minute clock - the chain's CE - PE added since the open, as a share
-  // of the chain: > 0 calls written more (bearish), < 0 puts - and (2) within `armMin` minutes the spot's `emaTf`-minute EMA fast / slow
-  // cross the trade's way: the entry is taken when THAT candle closes. Along with it (3) the cumulative CE / PE change with the trade,
-  // (4) the S / R OI near the ATM going the trade's way over the last `wallMin` minutes (puts added and calls leaving for a long) with a
-  // big net difference between the sides, and (5) the strikes right round the ATM doing the same.
+  // Two things only. (1) The ALERT: the since-open CE - PE lines cross on the 1-minute clock - the chain's CE - PE added since the open,
+  // as a share of the chain: > 0 calls written more (bearish), < 0 puts (bullish). (2) Within `armMin` minutes the spot's `emaTf`-minute
+  // EMA fast / slow cross the SAME way: the entry is taken when THAT candle closes.
   const f = strategyFilters('spotFlip', filters?.spotFlip)
   const B = spotBlocks({ blocks: BY_ID.spotFlip.blocks, f, atr })
   const leadAt = (ms) => {
@@ -273,28 +271,12 @@ export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {} }) {
   // Entries are taken only at the close of a candle: this minute is the one that just finished it.
   const candleJustClosed = candles.length > 0 && candles.at(-1).at(-1).t + MIN === nowMs
   if (candleJustClosed) {
-    const read = optionOiRead(oi, spotNow, nowMs, 15)
-    const cum = sideOiChanges(read, true)
-    const atmK = Math.round(spotNow / oi.step) * oi.step
-    const sums = (ms, n) => {
-      const rs = oiRows(oi, ms).filter((r) => Math.abs(r.strike - atmK) <= n * oi.step)
-      return { pe: rs.reduce((s, r) => s + (r.peOi ?? 0), 0), ce: rs.reduce((s, r) => s + (r.ceOi ?? 0), 0) }
-    }
-    const thenMs = nowMs - f.wallMin * MIN
-    const goes = (n, dir) => {
-      const now = sums(nowMs, n)
-      const then = sums(thenMs, n)
-      const peChg = then.pe > 0 ? (now.pe - then.pe) / then.pe : null
-      const ceChg = then.ce > 0 ? (now.ce - then.ce) / then.ce : null
-      // The writers of the side that holds the trade add (puts for a long), the writers against it leave (calls for a long).
-      return { now, peChg, ceChg, ok: peChg != null && ceChg != null && (dir > 0 ? peChg > 0 && ceChg < 0 : ceChg > 0 && peChg < 0) }
-    }
+    const leadNow = leadAt(nowMs)
     for (const dir of [1, -1]) {
       // (2) the spot's EMA crossing the trade's way on the candle that just closed (or - emaMode state - already that way)
       const e = emaAgrees(closes, f.emaFast, f.emaSlow, f.emaMode === 'state' ? 'state' : 'cross', 1, dir)
       if (!e.ok) continue
       // (1) the since-open CE - PE lines crossed to this side on the 1-minute clock within the last armMin minutes, and still are
-      const leadNow = leadAt(nowMs)
       if (leadNow == null || !(dir * leadNow < 0)) continue
       let crossedAt = null
       let after = leadNow
@@ -305,29 +287,9 @@ export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {} }) {
         after = before
       }
       if (crossedAt == null) continue
-      // (3) the cumulative CE / PE change since the open (the OI heatmap) not against the trade (puts rising and / or calls falling are with it)
-      const cumWith = sideScore(dir, cum.ceC, cum.peC)
-      // Not against it (the default): the sides are not both moving the other way - or, asked so, with it; or not asked.
-      if (f.cumDelta !== 'off' && (cumWith == null || cumWith < (f.cumDelta === 'with' ? 1 : 0))) continue
-      // (3b) over the last `deltaMin` minutes, the whole chain's writers on the trade's side add and the other side leaves
-      if (f.deltaMin > 0) {
-        const d = sideOiChanges(optionOiRead(oi, spotNow, nowMs, f.deltaMin), false)
-        const going = d.ceD != null && d.peD != null && (dir > 0 ? d.peD > 0 && d.ceD < 0 : d.ceD > 0 && d.peD < 0)
-        if (!going) continue
-      }
-      // (4) the S / R OI near the ATM +/- nearStrikes going the trade's way, with a big net difference between the sides
-      const wide = goes(f.nearStrikes, dir)
-      const net = wide.now.pe + wide.now.ce > 0 ? (wide.now.pe - wide.now.ce) / (wide.now.pe + wide.now.ce) : 0
-      if (!wide.ok || !(dir * net > 0) || dir * net < f.netMinPct / 100) continue
-      // (5) the strikes right round the ATM too
-      const tight = f.atmStrikes > 0 ? goes(f.atmStrikes, dir) : null
-      if (tight && !tight.ok) continue
       push('spotFlip', dir, B.exits.stopPts, B.exits.targetPts, 330, {
         Alert: `since the open the CE - PE lines crossed at ${new Date(crossedAt - MIN + 330 * MIN).toISOString().slice(11, 16)} (${pct(after)} -> ${pct(leadNow)} of the chain: ${dir > 0 ? 'puts' : 'calls'} added lead)`,
         Trend: `${f.emaTf}-min EMA ${f.emaFast} ${e.fast.toFixed(1)} ${dir > 0 ? 'over' : 'under'} EMA ${f.emaSlow} ${e.slow.toFixed(1)}${f.emaMode === 'state' ? '' : ' - crossed on the candle that just closed'}`,
-        Cumulative: `since the open CE ${pct(cum.ceC)} / PE ${pct(cum.peC)}`,
-        Walls: `ATM +/- ${f.nearStrikes}: over ${f.wallMin} min PE ${pct(wide.peChg)} / CE ${pct(wide.ceChg)}; PE ${(wide.now.pe / 1e5).toFixed(1)}L vs CE ${(wide.now.ce / 1e5).toFixed(1)}L - ${dir > 0 ? 'support' : 'resistance'} heavier by ${(Math.abs(net) * 100).toFixed(0)}%`,
-        ...(tight ? { 'Round the ATM': `ATM +/- ${f.atmStrikes}: PE ${pct(tight.peChg)} / CE ${pct(tight.ceChg)} over ${f.wallMin} min` } : {}),
       })
     }
   }

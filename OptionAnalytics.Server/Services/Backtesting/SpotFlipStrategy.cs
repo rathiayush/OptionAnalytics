@@ -7,10 +7,7 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 ///  1. the ALERT: the chain's since-open CE - PE OI lines cross (CE - PE going negative = puts added lead = Bullish; positive = Bearish);
 ///  2. within <c>armMin</c> minutes the spot's <c>emaFast</c> / <c>emaSlow</c> on <c>emaTf</c>-minute candles cross the trade's way - the
 ///     entry is taken when THAT candle closes (emaMode: crossed on the candle that just closed, or already in direction too);
-///  3. the cumulative CE / PE change since the open (the OI heatmap) is not against the trade (or with it, or not asked);
-///  4. the S / R OI near the ATM +/- <c>nearStrikes</c> goes the trade's way over the last <c>wallMin</c> minutes (puts added and calls
-///     leaving for a Bullish one) with a net difference of at least <c>netMinPct</c> between the sides;
-///  5. the strikes right round the ATM (+/- <c>atmStrikes</c>) do the same.
+/// Nothing else is asked.
 /// The chain is the expired-option strike band the run fetched (ATM +/- 10 strikes), each ABSOLUTE strike read from its first bar of the
 /// day, so the lines are an approximation of the scanner's whole-chain read. OI is read from the minute before the clock (finished
 /// minutes only). A 20-minute cooldown per side. The option leaves by the simulator's premium rules and the index stop-loss / target
@@ -19,8 +16,8 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 public sealed class SpotFlipStrategy : IBacktestStrategy
 {
     public string Key => "spot-flip";
-    public string Name => "Spot #101: CE / PE since-open crossover -> spot EMA crossover, with the CE/PE change and S/R walls";
-    public string Description => "Alert: the since-open CE - PE lines cross. Then the spot's 3-minute EMA crossover (entry when that candle closes), with the cumulative CE/PE change, the S/R OI near the ATM (writers adding on one side, leaving on the other, a big net difference) and the strikes round the ATM all in the trade's direction; leaves on the index stop / target.";
+    public string Name => "Spot #101: CE / PE since-open crossover -> spot EMA crossover";
+    public string Description => "Alert: the since-open CE - PE lines cross. Then the spot's 3-minute EMA crosses the same way; the entry is taken when that candle closes. Nothing else is asked; leaves on the index stop / target.";
 
     private const int CooldownMinutes = 20;
     private const decimal EmaCross = 0, EmaState = 1;
@@ -46,17 +43,6 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
             new BacktestParameterOption(EmaCross, "Crossed on the candle that just closed"),
             new BacktestParameterOption(EmaState, "Already in direction counts too"),
         }),
-        new BacktestParameterSpec("cumDelta", "Cumulative CE / PE change since the open (the OI heatmap)", Default: 0, Min: 0, Max: 2, Step: 1, Options: new[]
-        {
-            new BacktestParameterOption(0, "Not against the trade"),
-            new BacktestParameterOption(1, "With the trade"),
-            new BacktestParameterOption(2, "Not asked"),
-        }),
-        new BacktestParameterSpec("deltaMin", "Whole chain, over the last (minutes): the writers on the trade's side are adding and the other side is leaving (0 = not asked)", Default: 10, Min: 0, Max: 30, Step: 1),
-        new BacktestParameterSpec("wallMin", "S / R OI near the ATM: over the last (minutes) the writers go the trade's way (puts added and calls leaving for a long)", Default: 10, Min: 3, Max: 30, Step: 1),
-        new BacktestParameterSpec("nearStrikes", "S / R OI counted over ATM +/- (strikes)", Default: 2, Min: 1, Max: 5, Step: 1),
-        new BacktestParameterSpec("atmStrikes", "The strikes right round the ATM (+/-) also go the trade's way", Default: 1, Min: 0, Max: 3, Step: 1),
-        new BacktestParameterSpec("netMinPct", "S / R OI net difference (PE - CE as a % of both) at least, in the trade's direction - a big gap, not a small one", Default: 25, Min: 0, Max: 90, Step: 1),
         new BacktestParameterSpec("lastEntryMinutes", "No entries after (IST time)", Default: 885, Min: 0, Max: 1439, Step: 1),
         new BacktestParameterSpec("indexExit", "Leave on the index stop / target (spot) too (1 = yes)", Default: 1, Min: 0, Max: 1, Step: 1),
         new BacktestParameterSpec("stopAtr", "Index stop-loss (x ATR)", Default: 1.5m, Min: 0.5m, Max: 5, Step: 0.25m),
@@ -168,16 +154,10 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
         var signals = new List<BacktestSignal>();
         var exits = new Dictionary<DateTimeOffset, (DateTimeOffset Time, string Reason)>();
         var armMin = Math.Max(1, (int)p["armMin"]);
-        var cumMode = (int)p.GetValueOrDefault("cumDelta", 0);
-        var deltaMin = (int)p.GetValueOrDefault("deltaMin", 10);
         var emaTf = Math.Max(1, (int)p["emaTf"]);
         var emaFast = Math.Max(2, (int)p["emaFast"]);
         var emaSlow = Math.Max(emaFast + 1, (int)p["emaSlow"]);
         var emaMode = p.GetValueOrDefault("emaMode", EmaCross) >= 0.5m ? 1m : 2m; // EmaAgrees: 1 = state, 2 = cross
-        var wallMin = Math.Max(1, (int)p["wallMin"]);
-        var nearStrikes = Math.Max(1, (int)p["nearStrikes"]);
-        var atmStrikes = Math.Max(0, (int)p.GetValueOrDefault("atmStrikes", 1));
-        var netMin = p.GetValueOrDefault("netMinPct", 25m) / 100m;
         var signalStart = (int)p.GetValueOrDefault("signalStartMinutes", 570);
         var lastEntry = (int)p.GetValueOrDefault("lastEntryMinutes", 885);
         var indexExit = p.GetValueOrDefault("indexExit", 1m) >= 0.5m;
@@ -207,48 +187,6 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
             foreach (var (k, s) in pe) { if (s.At(t) is { } n && OpenAt(day, false, k, s) is { } o) { chgPe += n - o; now += n; } }
             return now > 0 ? (chgCe - chgPe) / now : null;
         }
-        // Each side's cumulative change since the open, as a share of its OI now.
-        (decimal? Ce, decimal? Pe) CumulativeAt(DateTimeOffset clock)
-        {
-            var t = clock - one; var day = IstClock.IstDate(t);
-            decimal? Side(Dictionary<decimal, StrikeSeries> m, bool call)
-            {
-                decimal chg = 0, now = 0;
-                foreach (var (k, s) in m) if (s.At(t) is { } n && OpenAt(day, call, k, s) is { } o) { chg += n - o; now += n; }
-                return now > 0 ? chg / now : null;
-            }
-            return (Side(ce, true), Side(pe, false));
-        }
-        int St(decimal x, decimal bar) => x >= bar ? 1 : x <= -bar ? -1 : 0;
-        // The CE / PE OI summed over ATM +/- n strikes at the finished minute before `at`.
-        (decimal Pe, decimal Ce) Sums(DateTimeOffset at, decimal atm, int n)
-        {
-            decimal c = 0, q = 0;
-            foreach (var (k, s) in ce) if (Math.Abs(k - atm) <= n * step && s.At(at - one) is { } v) c += v;
-            foreach (var (k, s) in pe) if (Math.Abs(k - atm) <= n * step && s.At(at - one) is { } v) q += v;
-            return (q, c);
-        }
-        // The writers go the trade's way over wallMin: the side that holds it adds (puts for a long), the other leaves (calls for a long).
-        (bool Ok, decimal? PeChg, decimal? CeChg, decimal Pe, decimal Ce) Goes(DateTimeOffset clock, decimal atm, int n, int dir)
-        {
-            var now = Sums(clock, atm, n); var then = Sums(clock - TimeSpan.FromMinutes(wallMin), atm, n);
-            decimal? peChg = then.Pe > 0 ? (now.Pe - then.Pe) / then.Pe : null;
-            decimal? ceChg = then.Ce > 0 ? (now.Ce - then.Ce) / then.Ce : null;
-            var ok = peChg is { } a && ceChg is { } b && (dir > 0 ? a > 0 && b < 0 : b > 0 && a < 0);
-            return (ok, peChg, ceChg, now.Pe, now.Ce);
-        }
-
-        // The whole band's CE / PE OI over the last deltaMin minutes: the trade's side adds, the other leaves.
-        bool ChainGoes(DateTimeOffset clock, int dir)
-        {
-            decimal Total(Dictionary<decimal, StrikeSeries> m, DateTimeOffset at) { decimal t = 0; foreach (var (_, s) in m) if (s.At(at - one) is { } v) t += v; return t; }
-            var then = clock - TimeSpan.FromMinutes(deltaMin);
-            var ceNow = Total(ce, clock); var peNow = Total(pe, clock); var ceThen = Total(ce, then); var peThen = Total(pe, then);
-            if (ceThen <= 0 || peThen <= 0) return false;
-            var ceD = (ceNow - ceThen) / ceThen; var peD = (peNow - peThen) / peThen;
-            return dir > 0 ? peD > 0 && ceD < 0 : ceD > 0 && peD < 0;
-        }
-
         var lastFire = new Dictionary<int, DateTimeOffset>();
         var dayCloses = new List<decimal>();
         var inBucket = 0;
@@ -265,7 +203,6 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
             var minute = IstClock.MinutesOfDay(clock);
             if (minute < signalStart || minute > lastEntry) continue;
             if (LeadAt(clock) is not { } now) continue;
-            var atm = Math.Round(bar.Close / step) * step;
 
             foreach (var dir in new[] { 1, -1 })
             {
@@ -282,22 +219,7 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
                 }
                 if (crossedAt is null) continue;
                 var fast = Ema(dayCloses, emaFast)!.Value; var slow = Ema(dayCloses, emaSlow)!.Value;
-                var (ceC, peC) = CumulativeAt(clock);
-                var wide = Goes(clock, atm, nearStrikes, dir);
-                var net = wide.Pe + wide.Ce > 0 ? (wide.Pe - wide.Ce) / (wide.Pe + wide.Ce) : 0m;
-                var detail = $"CE-PE since open crossed at {IstClock.FormatMinutesOfDay(IstClock.MinutesOfDay(crossedAt.Value))} ({now:P2} of the chain); EMA {emaFast}/{emaSlow} {fast:0.0}/{slow:0.0}; since open CE {ceC:P2} / PE {peC:P2}; ATM+-{nearStrikes} over {wallMin} min PE {wide.PeChg:P2} / CE {wide.CeChg:P2}, net {net:P0}";
-                // (3) the cumulative CE / PE change since the open with the trade
-                var cumWith = ceC is { } cc && peC is { } pp ? dir * (St(pp, 0.003m) - St(cc, 0.003m)) : (int?)null;
-                string? why = cumMode != 2 && (cumWith is null || cumWith < (cumMode == 1 ? 1 : 0)) ? (cumMode == 1 ? "cumulative CE/PE change not with the trade" : "cumulative CE/PE change against the trade")
-                    : deltaMin > 0 && !ChainGoes(clock, dir) ? "the chain's writers are not adding on the trade's side and leaving on the other"
-                    : !wide.Ok || !(dir * net > 0) || dir * net < netMin ? "S/R OI near the ATM not going the trade's way, or the net difference too small"
-                    : atmStrikes > 0 && !Goes(clock, atm, atmStrikes, dir).Ok ? "the strikes round the ATM not going the trade's way"
-                    : null;
-                if (why is not null)
-                {
-                    signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", name, $"Crossover candle closed, but {why} - {detail}"));
-                    continue;
-                }
+                var detail = $"CE-PE since open crossed at {IstClock.FormatMinutesOfDay(IstClock.MinutesOfDay(crossedAt.Value))} ({now:P2} of the chain); EMA {emaFast}/{emaSlow} {fast:0.0}/{slow:0.0}";
                 if (lastFire.TryGetValue(dir, out var last) && clock - last < TimeSpan.FromMinutes(CooldownMinutes))
                 {
                     signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", name, $"Crossover candle closed, but in the {CooldownMinutes}-minute cooldown - {detail}"));

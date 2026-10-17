@@ -91,37 +91,21 @@ public sealed class SpotFlipStrategyTests
     }
 
     [Fact]
-    public void Not_without_each_key_condition()
+    public void Not_without_either_the_lines_crossing_or_the_spot_EMA_crossing_the_same_way()
     {
-        foreach (var d in new[] { new Day(NoCross: true), new Day(NoFlip: true), new Day(CallsStay: true), new Day(CeHeavy: true), new Day(SmallNet: true), new Day(AtmCalls: true), new Day(LateTurn: true) })
-            Assert.Empty(Entries(d));
+        Assert.Empty(Entries(new Day(NoCross: true)));
+        Assert.Empty(Entries(new Day(NoFlip: true, CallsStay: true)));
+        Assert.Empty(Entries(new Day(LateTurn: true)));
+        // The OI behind a trade is not asked any more.
+        foreach (var d in new[] { new Day(CallsStay: true), new Day(CeHeavy: true), new Day(SmallNet: true), new Day(AtmCalls: true), new Day(BothUp: true), new Day(FarCalls: true) })
+            Assert.Single(Entries(d));
     }
 
     [Fact]
     public void Each_setting_changes_the_rule()
     {
         Assert.Single(Entries(new Day(LateTurn: true), tweak: p => p["armMin"] = 120));
-        Assert.Single(Entries(new Day(SmallNet: true), tweak: p => p["netMinPct"] = 10));
-        Assert.Empty(Entries(new Day(), tweak: p => p["netMinPct"] = 40));
-        Assert.Single(Entries(new Day(AtmCalls: true), tweak: p => p["atmStrikes"] = 0));
         Assert.Single(Entries(new Day(), tweak: p => p["emaFast"] = 9));
-    }
-
-    [Fact]
-    public void The_whole_chain_over_the_last_minutes_must_add_on_the_trades_side_and_leave_on_the_other()
-    {
-        Assert.Empty(Entries(new Day(FarCalls: true)));
-        Assert.Single(Entries(new Day(FarCalls: true), tweak: p => p["deltaMin"] = 0));
-    }
-
-    [Fact]
-    public void The_cumulative_change_only_has_to_be_not_against_the_trade()
-    {
-        // Both sides up since the open: neither with nor against a long.
-        Assert.Single(Entries(new Day(BothUp: true)));
-        Assert.Empty(Entries(new Day(BothUp: true), tweak: p => p["cumDelta"] = 1));
-        Assert.Single(Entries(new Day(BothUp: true), tweak: p => p["cumDelta"] = 2));
-        Assert.Single(Entries(new Day(), tweak: p => p["cumDelta"] = 1));
     }
 
     [Fact]
@@ -177,11 +161,10 @@ public sealed class SpotFlipStrategyTests
         Assert.Equal(885, d["lastEntryMinutes"].Default);     // none after 14:45
         Assert.Equal(330, d["maxHoldingBars"].Default);       // its 330-minute time stop
         Assert.Equal(110, strategy.DefaultsForTimeframe(3)["maxHoldingBars"]);
-        Assert.Equal(25, d["netMinPct"].Default);
-        Assert.Equal(1, d["atmStrikes"].Default);
         Assert.Equal(1.5m, d["stopAtr"].Default);
         Assert.Equal(3m, d["targetAtr"].Default);
         Assert.False(d.ContainsKey("trailMode"), "no trailing stop");
+        foreach (var gone in new[] { "cumDelta", "deltaMin", "wallMin", "nearStrikes", "atmStrikes", "netMinPct" }) Assert.False(d.ContainsKey(gone), gone);
         Assert.Equal(strategy.Parameters.Count, strategy.Parameters.Select(x => x.Key).Distinct().Count());
     }
 }

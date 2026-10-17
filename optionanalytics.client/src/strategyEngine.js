@@ -83,20 +83,14 @@ const PROFILE_REJECT_FILTERS = [
 // Per-strategy entry filters: none - every strategy was removed (the trade filters below stay available to any new one).
 // A strategy's OWN rules - what makes it that strategy. Everything else it can be given from PARAM_BLOCKS below.
 const STRATEGY_OWN_FILTERS = {
-  // #101: the since-open CE - PE lines cross on the 1-minute clock (the alert) -> wait for the spot's 3-minute EMA crossover, entry
-  // when that candle closes -> with the cumulative CE / PE change, the S / R OI walls and the ATM +/- strikes all in the trade's direction.
+  // #101: the since-open CE - PE lines cross on the 1-minute clock (the alert) -> wait for the spot's 3-minute EMA crossover the same way, entry
+  // when that candle closes. Nothing else.
   spotFlip: [
     { key: 'armMin', label: 'After the CE - PE crossover (the alert) wait for the spot EMA crossover for at most (minutes)', type: 'number', default: 30, min: 1, max: 120, step: 1 },
     { key: 'emaTf', label: 'Spot EMA candle (minutes) - the entry is taken when the crossover candle closes', type: 'select', default: 3, options: [1, 3, 5, 10, 15].map((m) => ({ value: m, label: `${m} min` })) },
     { key: 'emaFast', label: 'EMA fast (candles)', type: 'number', default: 7, min: 2, max: 50, step: 1 },
     { key: 'emaSlow', label: 'EMA slow (candles)', type: 'number', default: 21, min: 3, max: 100, step: 1 },
     { key: 'emaMode', label: 'Spot EMA: crossed on the candle that just closed, or (a trend under way) already in the trade\'s direction', type: 'select', default: 'cross', options: [{ value: 'cross', label: 'Crossed on the candle that just closed' }, { value: 'state', label: 'Already in direction counts too' }] },
-    { key: 'cumDelta', label: 'Cumulative CE / PE change since the open (the OI heatmap): not against the trade, or with it (puts rising / calls falling for a long), or not asked', type: 'select', default: 'notAgainst', options: [{ value: 'notAgainst', label: 'Not against the trade' }, { value: 'with', label: 'With the trade' }, { value: 'off', label: 'Not asked' }] },
-    { key: 'deltaMin', label: 'Whole chain, over the last (minutes): the writers on the trade\'s side are adding and the other side is leaving (0 = not asked)', type: 'number', default: 10, min: 0, max: 30, step: 1 },
-    { key: 'wallMin', label: 'S / R OI near the ATM: over the last (minutes) the writers go the trade\'s way (puts added and calls leaving for a long)', type: 'number', default: 10, min: 3, max: 30, step: 1 },
-    { key: 'nearStrikes', label: 'S / R OI counted over ATM +/- (strikes)', type: 'number', default: 2, min: 1, max: 5, step: 1 },
-    { key: 'atmStrikes', label: 'The strikes right round the ATM (+/-) also go the trade\'s way', type: 'number', default: 1, min: 0, max: 3, step: 1 },
-    { key: 'netMinPct', label: 'S / R OI net difference (PE - CE as a % of both) at least, in the trade\'s direction - a big gap, not a small one', type: 'number', default: 25, min: 0, max: 90, step: 1 },
   ],
 }
 
