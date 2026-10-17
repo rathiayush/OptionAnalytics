@@ -474,3 +474,17 @@ test('min trades: when no setting reaches it, the best found with fewer is shown
   assert.equal(oi.belowMin, true)
   assert.equal(oi.recommend, false)
 })
+
+test('step by step reports as it goes - and the job budget can stop it, like every other search', () => {
+  const grid = { tradeOiFlow: ['any', 'notAgainst', 'with'], tradeSideOi: ['any', 'notAgainst', 'lean', 'both'], tradeFutOi: ['any', 'notAgainst', 'withMove', 'buildUp', 'squeeze'], tradeOiWindow: [15, 1, 3, 5], tradeFutWindow: [15, 1, 3, 5] }
+  const scoreOf = (v) => ({ n: 10, total: v.tradeFutOi === 'squeeze' ? 2 : 1, avg: 0.1, score: (v.tradeFutOi === 'squeeze' ? 2 : 1) + (v.tradeOiWindow === 3 ? 0.5 : 0) })
+  const seen = []
+  const { tried } = stepSearch(grid, { ...DEFAULT_VARIANT }, scoreOf, { minTrades: 5, onProgress: (p) => seen.push(p) })
+  assert.equal(seen[0].tried, 0, 'it says it started')
+  assert.ok(seen.every((p) => p.part === 'oi' && p.step && p.of === seen[0].of), 'with its own most-it-can-try')
+  assert.ok(seen[0].of >= tried, `the most it can try (${seen[0].of}) covers what it tried (${tried})`)
+  assert.ok(seen.length > 1 && seen.slice(1).every((p) => p.tried % 10 === 0), 'and every 10 tries')
+  // The budget check lives in this callback: it stops the step search too.
+  const stop = new Error('over the job budget')
+  assert.throws(() => stepSearch(grid, { ...DEFAULT_VARIANT }, scoreOf, { minTrades: 5, onProgress: (p) => { if (p.tried >= 10) throw stop } }), (e) => e === stop)
+})

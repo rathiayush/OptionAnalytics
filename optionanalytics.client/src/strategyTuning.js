@@ -407,13 +407,22 @@ export function scoreR(rs) {
  * for a lucky one to win. Returns every combination it scored, best first, and how many it tried.
  */
 const WINDOW_OF = { tradeOiFlow: 'tradeOiWindow', tradeSideOi: 'tradeOiWindow', tradeWallOi: 'tradeOiWindow', tradeFutOi: 'tradeFutWindow', tradeMoveSize: 'tradeFutWindow' }
-export function stepSearch(grid, base, scoreOf, { passes = 2, minTrades = 0 } = {}) {
+export function stepSearch(grid, base, scoreOf, { passes = 2, minTrades = 0, onProgress = null } = {}) {
   const keys = Object.keys(grid)
   const order = [...keys.filter((k) => !/Window$/.test(k)), ...keys.filter((k) => /Window$/.test(k))]
   const seen = new Map()
+  // It reports as it goes, like every other search: on months of days each try is a pass over all of them, and a search
+  // that said nothing until it was done looked stuck - and could not be stopped by the job's time budget (which is
+  // checked in this callback). `of` is the most it can try: every value of every filter (with its timeframes), each pass.
+  const perPass = order.reduce((n, k) => n + grid[k].reduce((m, value) => m + (WINDOW_OF[k] && grid[WINDOW_OF[k]] && value !== 'any' ? grid[WINDOW_OF[k]].length : 1), 0), 0)
+  const of = 1 + perPass * passes
+  if (onProgress) onProgress({ tried: 0, of, part: 'oi', step: true })
   const evaluate = (v) => {
     const id = JSON.stringify(order.map((k) => v[k]))
-    if (!seen.has(id)) seen.set(id, { params: v, train: scoreOf(v) })
+    if (!seen.has(id)) {
+      seen.set(id, { params: v, train: scoreOf(v) })
+      if (onProgress && seen.size % 10 === 0) onProgress({ tried: seen.size, of, part: 'oi', step: true })
+    }
     return seen.get(id)
   }
   const qualifies = (r) => r.train.score != null && r.train.n >= minTrades
@@ -604,7 +613,7 @@ export function tuneStrategy(days, id, { trail = null, minTrades = 8, minPerMont
   let tried = 0
   if (what === 'oi' && !explicitGrid && search !== 'full') {
     // Step by step (stepSearch): each OI filter takes its best value given the others, then a second pass.
-    const found = stepSearch(grid, base, (v) => tally.add(v, trainScore(v)), { minTrades })
+    const found = stepSearch(grid, base, (v) => tally.add(v, trainScore(v)), { minTrades, onProgress })
     rows = found.rows
     tried = found.tried
   } else {
