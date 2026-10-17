@@ -259,6 +259,7 @@ builder.Services.AddHostedService<ExpiredOptionDataPrefetchHostedService>();
 // IEnumerable<IBacktestStrategy> constructor param - add a strategy by implementing the
 // interface and adding one AddSingleton line here, nothing else needs to change.
 builder.Services.AddSingleton<IBacktestStrategy, SrFlowSellStrategy>();
+builder.Services.AddSingleton<IBacktestStrategy, SpotFlipStrategy>();
 builder.Services.AddSingleton<IBacktestStrategy, EmaCrossoverRetestStrategy>();
 builder.Services.AddSingleton<IBacktestStrategy, FiveEmaStrategy>();
 builder.Services.AddSingleton<IBacktestStrategy, KathyLienEma20Ema200Strategy>();

@@ -100,7 +100,7 @@ public sealed class ExpiredOptionBacktestService
     /// provided its entire signal/pricing logic only reads spot bars plus GetOptionBars(strike,
     /// isCall) for one strike at a time - or, like sr-flow-sell, also needs order-flow across the
     /// whole surrounding strike chain, via includeObvCdv/needsFlowChain below.</summary>
-    private static readonly HashSet<string> SupportedStrategyKeys = new() { "sr-flow-sell", "ema-crossover-retest", "kathy-lien-ema20-ema200-pullback", "cdv-obv-flow", "five-ema", "orb-order-block-retrace", "daily-bias-sweep-fvg", "sweep-ifvg-trendline-break" };
+    private static readonly HashSet<string> SupportedStrategyKeys = new() { "sr-flow-sell", "spot-flip", "ema-crossover-retest", "kathy-lien-ema20-ema200-pullback", "cdv-obv-flow", "five-ema", "orb-order-block-retrace", "daily-bias-sweep-fvg", "sweep-ifvg-trendline-break" };
 
     /// <summary>Underlyings this feature supports at all - Dhan's rolling-option docs only ever show
     /// "NSE_FNO" as the exchange segment, never a BSE one, so SENSEX is left out rather than
@@ -462,7 +462,7 @@ public sealed class ExpiredOptionBacktestService
         // default otherwise: even though StrikeBandSteps==FlowChainRadius now (see StrikeBandSteps'
         // own doc comment), this path also pays for the OBV/CDV reconstruction itself, so a run that
         // does not need or ask for it still does not pay for that extra work.
-        var needsFlowChain = strategyKey == "sr-flow-sell" || strategyKey == "cdv-obv-flow"
+        var needsFlowChain = strategyKey == "sr-flow-sell" || strategyKey == "spot-flip" || strategyKey == "cdv-obv-flow"
             || ((strategyKey == "ema-crossover-retest" || strategyKey == "five-ema") && mergedParameters.GetValueOrDefault("requireFlowConfirmation", 0m) >= 0.5m)
             || includeObvCdv;
         var bandCenterSteps = needsFlowChain ? 0 : otmSteps;
