@@ -95,4 +95,35 @@ public sealed class SpotFlipStrategyTests
         };
         Assert.Empty(new SpotFlipStrategy().EntrySignals(empty, Small()));
     }
+
+    [Fact]
+    public void The_EMA_can_be_already_in_direction_a_fresh_crossover_or_not_asked()
+    {
+        var up = Enumerable.Range(0, 30).Select(i => 100m + i).ToList();
+        Assert.True(SpotFlipStrategy.EmaAgrees(up, 3, 7, 1, 3, 1));
+        Assert.False(SpotFlipStrategy.EmaAgrees(up, 3, 7, 1, 3, -1));
+        Assert.False(SpotFlipStrategy.EmaAgrees(up, 3, 7, 2, 3, 1), "a long-running climb is not a fresh cross");
+        var turn = Enumerable.Range(0, 20).Select(i => 120m - i).Concat(Enumerable.Range(0, 6).Select(i => 100m + 3 * i)).ToList();
+        Assert.True(SpotFlipStrategy.EmaAgrees(turn, 3, 7, 2, 6, 1));
+        Assert.True(SpotFlipStrategy.EmaAgrees(up, 3, 7, 0, 3, -1), "not asked");
+    }
+
+    [Fact]
+    public void EMA_not_asked_lets_a_flip_against_the_trend_through_and_VWAP_can_stop_it()
+    {
+        var p = Small(); p["emaMode"] = 0;
+        var falling = new SpotFlipStrategy().EntrySignals(Context(Spot(false), 60_000, 0), p);
+        Assert.Single(falling, s => s.Kind == "Entry");
+        p["vwapMode"] = 1; // a falling spot is under its VWAP - a long is stopped
+        Assert.DoesNotContain(new SpotFlipStrategy().EntrySignals(Context(Spot(false), 60_000, 0), p), s => s.Kind == "Entry");
+        Assert.Single(new SpotFlipStrategy().EntrySignals(Context(Spot(true), 60_000, 0), p), s => s.Kind == "Entry");
+    }
+
+    [Fact]
+    public void Every_setting_is_a_parameter()
+    {
+        var keys = new SpotFlipStrategy().Parameters.Select(x => x.Key).ToHashSet();
+        foreach (var k in new[] { "flipTf", "emaTf", "emaMode", "crossBars", "emaFast", "emaSlow", "vwapMode", "optEmaMode", "optEmaLegs", "optEmaFast", "optEmaSlow", "deltaMin", "nearStrikes", "lastEntryMinutes", "exitOnFlipBack", "slPoints", "tpPoints" })
+            Assert.Contains(k, keys);
+    }
 }

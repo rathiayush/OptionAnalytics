@@ -7,7 +7,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { SPOT_STRATEGIES, STRATEGY_BY_ID, STRATEGY_FILTERS, strategyFilters, trailedStop, applyTradeFilter } from '../src/strategyEngine.js'
-import { evaluateSpotStrategies, scanSpotDay } from '../src/spotEngine.js'
+import { emaAgrees, evaluateSpotStrategies, scanSpotDay } from '../src/spotEngine.js'
 import { firstPerCooldown } from '../src/scanDay.js'
 import { MIN, T, flipLong, flipShort } from './spot-flip-world.mjs'
 
@@ -120,4 +120,36 @@ test('configurable timeframes: the EMA candle (1 - 15 min), the EMA lengths, and
   const wider = mine(flipLong(), { spotFlip: { flipTf: 5 } })
   assert.ok(wider.length >= 1 && wider[0].t === early.t, 'a wider window still fires at the flip')
   assert.ok(wider.every((s) => s.t >= early.t && s.t < early.t + 5 * MIN), 'and for the minutes just after it')
+})
+
+test('the EMA can be already in direction, a fresh crossover, or not asked (emaAgrees)', () => {
+  const up = Array.from({ length: 30 }, (_, i) => 100 + i)
+  assert.equal(emaAgrees(up, 3, 7, 'state', 3, 1).ok, true, 'a steady climb is in direction')
+  assert.equal(emaAgrees(up, 3, 7, 'state', 3, -1).ok, false, 'and not for a fall')
+  assert.equal(emaAgrees(up, 3, 7, 'cross', 3, 1).ok, false, 'but it crossed long ago')
+  const turn = [...Array.from({ length: 20 }, (_, i) => 120 - i), ...Array.from({ length: 6 }, (_, i) => 100 + 3 * i)]
+  assert.equal(emaAgrees(turn, 3, 7, 'cross', 6, 1).ok, true, 'a turn up crosses within a few candles')
+  assert.equal(emaAgrees(up, 3, 7, 'off', 3, -1).ok, true, 'not asked: always fine')
+  assert.equal(emaAgrees(up, 7, 3, 'state', 3, 1).ok, false, 'a slow length that is not slower reads nothing')
+})
+
+test('the spot EMA is configurable: not asked lets a flat spot through; a fresh crossover is not a long-running trend', () => {
+  assert.equal(mine(flipLong({ noTrend: true })).length, 0)
+  assert.equal(mine(flipLong({ noTrend: true }), { spotFlip: { emaMode: 'off' } }).length, 1, 'EMA not asked')
+  assert.equal(mine(flipLong(), { spotFlip: { emaMode: 'cross', crossBars: 1 } }).length, 0, 'the climb crossed long before the flip')
+})
+
+test('VWAP: the spot on the trade\'s side of the day\'s VWAP (long above, short below), off by default', () => {
+  assert.equal(strategyFilters('spotFlip', {}).vwapMode, 'off')
+  assert.equal(mine(flipLong(), { spotFlip: { vwapMode: 'with' } }).length, 1, 'a climbing spot is over its VWAP')
+  assert.equal(mine(flipShort(), { spotFlip: { vwapMode: 'with' } }).length, 1, 'a falling spot is under it')
+})
+
+test('the ATM CE / PE EMAs are configurable and off by default', () => {
+  const f = strategyFilters('spotFlip', {})
+  assert.deepEqual([f.optEmaMode, f.optEmaLegs, f.optEmaFast, f.optEmaSlow, f.crossBars, f.emaMode], ['off', 'traded', 7, 21, 3, 'state'])
+  // Whatever the fixture's premiums say, asking for the ATM EMAs can only remove signals, never add them.
+  for (const o of [{ optEmaMode: 'state' }, { optEmaMode: 'cross' }, { optEmaMode: 'state', optEmaLegs: 'both' }]) {
+    assert.ok(mine(flipLong(), { spotFlip: o }).length <= mine(flipLong()).length, JSON.stringify(o))
+  }
 })

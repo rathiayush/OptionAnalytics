@@ -23,6 +23,39 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
     public string Description => "Enters when the chain's since-open CE - PE OI change flips sign, the spot's fast/slow EMA agree, the last few minutes' CE/PE OI change and the OI walls round the ATM are with the trade; leaves on the stop / target or when the flip comes back.";
 
     private const int CooldownMinutes = 20;
+    private const decimal ModeOff = 0, ModeState = 1, ModeCross = 2;
+
+    private static BacktestParameterOption[] ModeOptions(string state, string cross) => new[]
+    {
+        new BacktestParameterOption(ModeOff, "Not asked"),
+        new BacktestParameterOption(ModeState, state),
+        new BacktestParameterOption(ModeCross, cross),
+    };
+
+    /// <summary>Whether a fast / slow EMA pair of <paramref name="closes"/> is with a trade (sign +1: should rise with it, -1: fall):
+    /// state = the fast is on the trade's side of the slow; cross = it got there within the last crossBars candles; off = not asked.</summary>
+    internal static bool EmaAgrees(IReadOnlyList<decimal> closes, int fast, int slow, decimal mode, int crossBars, int sign)
+    {
+        if (mode == ModeOff) return true;
+        if (slow <= fast || closes.Count < slow) return false;
+        var f = EmaAll(closes, fast); var sl = EmaAll(closes, slow);
+        var n = closes.Count;
+        if (sign * (f[n - 1]!.Value - sl[n - 1]!.Value) <= 0) return false;
+        if (mode != ModeCross) return true;
+        for (var i = Math.Max(0, n - 1 - crossBars); i < n - 1; i++)
+            if (f[i] is { } a && sl[i] is { } b && sign * (a - b) <= 0) return true;
+        return false;
+    }
+
+    private static decimal?[] EmaAll(IReadOnlyList<decimal> v, int period)
+    {
+        var o = new decimal?[v.Count];
+        if (v.Count < period) return o;
+        var e = v.Take(period).Average(); o[period - 1] = e;
+        var k = 2m / (period + 1);
+        for (var i = period; i < v.Count; i++) { e = v[i] * k + e * (1 - k); o[i] = e; }
+        return o;
+    }
 
     public IReadOnlyList<BacktestParameterSpec> Parameters { get; } = new[]
     {
@@ -36,6 +69,21 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
         OptionTradeSimulator.MaxHoldingTimeParameter(),
         new BacktestParameterSpec("flipTf", "CE-PE flip window (minutes)", Default: 1, Min: 1, Max: 15, Step: 1),
         new BacktestParameterSpec("emaTf", "EMA candle size (minutes)", Default: 3, Min: 1, Max: 15, Step: 1),
+        new BacktestParameterSpec("emaMode", "Spot EMA", Default: ModeState, Min: ModeOff, Max: ModeCross, Step: 1, Options: ModeOptions("Already in direction (fast over/under slow)", "Fresh crossover within the candles below")),
+        new BacktestParameterSpec("crossBars", "A fresh crossover happened within the last (candles) - spot and ATM option EMAs", Default: 3, Min: 1, Max: 20, Step: 1),
+        new BacktestParameterSpec("vwapMode", "VWAP", Default: 0, Min: 0, Max: 1, Step: 1, Options: new[]
+        {
+            new BacktestParameterOption(0, "Not asked"),
+            new BacktestParameterOption(1, "Spot above VWAP for a long, below for a short"),
+        }),
+        new BacktestParameterSpec("optEmaMode", "ATM option EMAs (CE / PE premium)", Default: ModeOff, Min: ModeOff, Max: ModeCross, Step: 1, Options: ModeOptions("Already in direction", "Fresh crossover")),
+        new BacktestParameterSpec("optEmaLegs", "ATM option EMAs: legs", Default: 0, Min: 0, Max: 1, Step: 1, Options: new[]
+        {
+            new BacktestParameterOption(0, "The leg traded (CE for a long, PE for a short)"),
+            new BacktestParameterOption(1, "Both: traded leg rising, the other falling"),
+        }),
+        new BacktestParameterSpec("optEmaFast", "ATM option EMA fast (candles)", Default: 7, Min: 2, Max: 50, Step: 1),
+        new BacktestParameterSpec("optEmaSlow", "ATM option EMA slow (candles)", Default: 21, Min: 3, Max: 100, Step: 1),
         new BacktestParameterSpec("emaFast", "Fast EMA (candles)", Default: 7, Min: 2, Max: 50, Step: 1),
         new BacktestParameterSpec("emaSlow", "Slow EMA (candles)", Default: 21, Min: 3, Max: 100, Step: 1),
         new BacktestParameterSpec("deltaMin", "CE/PE OI change over the last (minutes)", Default: 10, Min: 3, Max: 15, Step: 1),
@@ -99,6 +147,13 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
         var exits = new Dictionary<DateTimeOffset, (DateTimeOffset Time, string Reason)>();
         var flipTf = Math.Max(1, (int)p["flipTf"]);
         var emaTf = Math.Max(1, (int)p["emaTf"]);
+        var emaMode = p.GetValueOrDefault("emaMode", ModeState);
+        var crossBars = Math.Max(1, (int)p.GetValueOrDefault("crossBars", 3));
+        var vwapOn = p.GetValueOrDefault("vwapMode", 0) >= 0.5m;
+        var optMode = p.GetValueOrDefault("optEmaMode", ModeOff);
+        var optBoth = p.GetValueOrDefault("optEmaLegs", 0) >= 0.5m;
+        var optFast = Math.Max(2, (int)p.GetValueOrDefault("optEmaFast", 7));
+        var optSlow = Math.Max(3, (int)p.GetValueOrDefault("optEmaSlow", 21));
         var emaFast = Math.Max(2, (int)p["emaFast"]);
         var emaSlow = Math.Max(emaFast + 1, (int)p["emaSlow"]);
         var deltaMin = Math.Max(1, (int)p["deltaMin"]);
@@ -147,20 +202,43 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
 
         var lastFire = new Dictionary<int, DateTimeOffset>();
         var dayCloses = new List<decimal>();
+        var candleEnds = new List<DateTimeOffset>();
         var inBucket = 0;
+        decimal vwapSum = 0; var vwapCount = 0;
+        var optBars = new Dictionary<(decimal, bool), IReadOnlyList<Candle>>();
+        IReadOnlyList<Candle> OptBars(decimal strike, bool call)
+        {
+            if (!optBars.TryGetValue((strike, call), out var b)) optBars[(strike, call)] = b = context.GetOptionBarsOneMinute(strike, call);
+            return b;
+        }
+        // The ATM option's closes at the end of each finished spot candle (the strike ATM now - a snapshot, like the scanner's).
+        List<decimal> OptCloses(decimal strike, bool call, DateTimeOffset clock)
+        {
+            var bs = OptBars(strike, call); var o = new List<decimal>();
+            foreach (var end in candleEnds)
+            {
+                if (end > clock) break;
+                Candle? last = null;
+                foreach (var c in bs) { if (c.Time + one > end) break; last = c; }
+                if (last is { } l && l.Close > 0) o.Add(l.Close);
+            }
+            return o;
+        }
         DateOnly curDay = default;
         foreach (var bar in bars)
         {
             var day = IstClock.IstDate(bar.Time);
-            if (day != curDay) { curDay = day; dayCloses.Clear(); inBucket = 0; }
+            if (day != curDay) { curDay = day; dayCloses.Clear(); candleEnds.Clear(); inBucket = 0; vwapSum = 0; vwapCount = 0; }
+            vwapSum += (bar.High + bar.Low + bar.Close) / 3; vwapCount++;
             // A candle counts once all its minutes are in.
-            if (++inBucket == emaTf) { dayCloses.Add(bar.Close); inBucket = 0; }
+            if (++inBucket == emaTf) { dayCloses.Add(bar.Close); candleEnds.Add(bar.Time + one); inBucket = 0; }
             var clock = bar.Time + one;
             var minute = IstClock.MinutesOfDay(clock);
             if (minute < signalStart || minute > lastEntry) continue;
             if (lead(clock) is not { } now || lead(clock - TimeSpan.FromMinutes(flipTf)) is not { } prev) continue;
             var fast = Ema(dayCloses, emaFast); var slow = Ema(dayCloses, emaSlow);
-            if (fast is null || slow is null) continue;
+            if (emaMode != ModeOff && (fast is null || slow is null)) continue;
+            var vwap = vwapSum / vwapCount;
             var atm = Math.Round(bar.Close / step) * step;
             decimal ceNear = 0, peNear = 0;
             foreach (var (k, s) in ce) if (Math.Abs(k - atm) <= nearStrikes * step && s.At(clock - one) is { } n) ceNear += n;
@@ -172,14 +250,18 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
                 var flipped = dir > 0 ? prev >= 0 && now < 0 : prev <= 0 && now > 0;
                 if (!flipped) continue;
                 var name = dir > 0 ? "Bullish" : "Bearish";
-                var emaWith = dir * (fast.Value - slow.Value) > 0;
+                var emaWith = EmaAgrees(dayCloses, emaFast, emaSlow, emaMode, crossBars, dir);
+                var vwapWith = !vwapOn || dir * (bar.Close - vwap) > 0;
+                var legWith = optMode == ModeOff || (
+                    EmaAgrees(OptCloses(atm, dir > 0, clock), optFast, optSlow, optMode, crossBars, 1)
+                    && (!optBoth || EmaAgrees(OptCloses(atm, dir < 0, clock), optFast, optSlow, optMode, crossBars, -1)));
                 var deltaWith = ceD is { } a && peD is { } b ? dir * (St(b) - St(a)) : (int?)null;
                 var wallsWith = dir > 0 ? peNear > ceNear : ceNear > peNear;
-                string detail = $"CE-PE since open {prev:P2} -> {now:P2}; EMA {emaFast}/{emaSlow} {fast:0.0}/{slow:0.0}; last {deltaMin} min CE {ceD:P2} / PE {peD:P2}; ATM+-{nearStrikes}: PE {peNear / 1e5m:0.0}L vs CE {ceNear / 1e5m:0.0}L";
-                if (!emaWith || deltaWith is null || deltaWith < 1 || !wallsWith || ceNear <= 0 || peNear <= 0)
+                string detail = $"CE-PE since open {prev:P2} -> {now:P2}; EMA {emaFast}/{emaSlow} {fast:0.0}/{slow:0.0}; VWAP {vwap:0.0}; last {deltaMin} min CE {ceD:P2} / PE {peD:P2}; ATM+-{nearStrikes}: PE {peNear / 1e5m:0.0}L vs CE {ceNear / 1e5m:0.0}L";
+                if (!emaWith || !vwapWith || !legWith || deltaWith is null || deltaWith < 1 || !wallsWith || ceNear <= 0 || peNear <= 0)
                 {
                     signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", name,
-                        $"Flip, but {(!emaWith ? "EMA against" : deltaWith is null or < 1 ? "CE/PE change not with the trade" : "OI walls not with the trade")} - {detail}"));
+                        $"Flip, but {(!emaWith ? "EMA not with the trade" : !vwapWith ? "VWAP against" : !legWith ? "ATM option EMAs not with the trade" : deltaWith is null or < 1 ? "CE/PE change not with the trade" : "OI walls not with the trade")} - {detail}"));
                     continue;
                 }
                 if (lastFire.TryGetValue(dir, out var last) && clock - last < TimeSpan.FromMinutes(CooldownMinutes))

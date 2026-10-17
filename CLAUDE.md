@@ -11,6 +11,7 @@ One strategy is back: spot #101 `spotFlip` (spotEngine.js) - the whole chain's s
 the spot's 3-minute EMA 7 / 21 agrees, the CE / PE change over the last `deltaMin` (10, 3 - 15) minutes is with the trade and the
 support / resistance OI round the ATM +/- `nearStrikes` (2, 1 - 5) sits with it; index stop 1.5 ATR / target 3 ATR, its own trailing stop per index (`trailStart/Gap` NIFTY 10 / BANKNIFTY 20 / SENSEX 30 points, or `trailMode` 'atr' = x the ATR, or off; a
 `trailOverride` - the index is passed as `underlying` to every spot scan); also configurable per index on the Strategies page: `emaTf` (3 min candles), `emaFast` / `emaSlow` (7 / 21), `flipTf` (1 min);
+also `emaMode` (state = already in direction / cross = a fresh crossover within `crossBars` candles / off), `vwapMode` (spot on the trade's side of the day's VWAP), `optEmaMode` / `optEmaLegs` / `optEmaFast` / `optEmaSlow` (the ATM CE / PE premium EMAs); the same strategy runs in the Expired Backtest (`SpotFlipStrategy.cs`, key `spot-flip`, every setting a parameter, exits when the flip comes back);
 `tests/spot-flip.test.mjs`.
 The history before it is in git (`main`, and `git stash list` holds the #115 work in progress). The rules below describe
 how a strategy WOULD be added back; read them as the contract for any new one.

@@ -15,7 +15,7 @@
 
 import { pocIndexOf, valueAreaOf } from './orderFlowMath.js'
 import {
-  SPOT_STRATEGIES, SQUARE_OFF, applyTradeFilter, dayTypeAt, optionOiRead, optionTradesFor, oiRows, sideOiChanges, strategyFilters,
+  SPOT_STRATEGIES, SQUARE_OFF, applyTradeFilter, closePremiumAt, dayTypeAt, optionOiRead, optionTradesFor, oiRows, sideOiChanges, strategyFilters,
   valueAt, wallOiChanges, wallsAhead, wallsAt,
 } from './strategyEngine.js'
 
@@ -37,6 +37,24 @@ export function sideScore(dir, ce, pe, bar = SIDE_BAR) {
   if (!Number.isFinite(ce) || !Number.isFinite(pe)) return null
   const st = (x) => (x >= bar ? 1 : x <= -bar ? -1 : 0)
   return dir * (st(pe) - st(ce))
+}
+
+/** Whether a fast / slow EMA pair is with a trade: 'state' - the fast is on the trade's side of the slow (a trend already
+ *  under way counts); 'cross' - it crossed to that side within the last `crossBars` candles; 'off' - not asked.
+ *  `sign` is +1 for a series that should rise with the trade, -1 for one that should fall. */
+export function emaAgrees(closes, fast, slow, mode, crossBars, sign) {
+  if (mode === 'off') return { ok: true, fast: null, slow: null }
+  const f = emaSeries(closes, fast)
+  const sl = emaSeries(closes, slow)
+  const n = closes.length
+  if (!(slow > fast) || n === 0 || f[n - 1] == null || sl[n - 1] == null) return { ok: false, fast: null, slow: null }
+  const diff = (i) => sign * (f[i] - sl[i])
+  let ok = diff(n - 1) > 0
+  if (ok && mode === 'cross') {
+    ok = false
+    for (let i = Math.max(0, n - 1 - crossBars); i < n - 1; i++) if (f[i] != null && sl[i] != null && diff(i) <= 0) { ok = true; break }
+  }
+  return { ok, fast: f[n - 1], slow: sl[n - 1] }
 }
 
 const avgRange = (bars, n = 14) => {
@@ -237,12 +255,14 @@ export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {}, underlyi
     const k = Math.floor((b.t - sessionStart) / (f.emaTf * MIN))
     buckets.set(k, [...(buckets.get(k) ?? []), b])
   }
-  const closesTf = [...buckets.entries()].sort((a, b) => a[0] - b[0]).filter(([, xs]) => xs.length === f.emaTf).map(([, xs]) => xs.at(-1).close)
-  const ema7 = f.emaSlow > f.emaFast ? emaSeries(closesTf, f.emaFast).at(-1) : null
-  const ema21 = f.emaSlow > f.emaFast ? emaSeries(closesTf, f.emaSlow).at(-1) : null
+  const candleOf = [...buckets.entries()].sort((a, b) => a[0] - b[0]).filter(([, xs]) => xs.length === f.emaTf).map(([, xs]) => xs)
+  const closesTf = candleOf.map((xs) => xs.at(-1).close)
+  const vwapNow = f.vwapMode === 'off' ? null : vwapSeries(bars.filter((b) => b.t >= sessionStart)).at(-1)
   // ATM +/- n strikes: the OI that holds the price up (puts) against the OI that caps it (calls).
   const atmK = Math.round(spotNow / oi.step) * oi.step
   const near = rows.filter((r) => Math.abs(r.strike - atmK) <= f.nearStrikes * oi.step)
+  // The ATM option's own premium in the same candles (the strike now ATM, its whole day - a snapshot, like the live scan).
+  const premiumCloses = (side) => candleOf.map((xs) => closePremiumAt(oi, side, atmK, xs.at(-1).t + MIN)).filter((v) => v != null)
   const peNear = near.reduce((s, r) => s + (r.peOi ?? 0), 0)
   const ceNear = near.reduce((s, r) => s + (r.ceOi ?? 0), 0)
   const delta = sideOiChanges(optionOiRead(oi, spotNow, nowMs, f.deltaMin), false)
@@ -252,19 +272,32 @@ export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {}, underlyi
     : f.trailMode === 'atr' ? { start: +(f.trailStartAtr * atr).toFixed(2), gap: +(f.trailGapAtr * atr).toFixed(2), atr: true }
       : { start: f[`trailStart${index}`], gap: f[`trailGap${index}`] }
   const trailText = (t) => (t ? `${index} trailing stop after ${t.start} pts${t.atr ? ` (${f.trailStartAtr} ATR)` : ''}, ${t.gap} pts behind${t.atr ? ` (${f.trailGapAtr} ATR)` : ''}` : 'no trailing stop')
-  if (leadNow != null && leadPrev != null && ema7 != null && ema21 != null) {
+  if (leadNow != null && leadPrev != null) {
     for (const dir of [1, -1]) {
       const flipped = dir > 0 ? leadPrev >= 0 && leadNow < 0 : leadPrev <= 0 && leadNow > 0
-      const emaWith = dir * (ema7 - ema21) > 0
+      if (!flipped) continue
+      const spotEma = emaAgrees(closesTf, f.emaFast, f.emaSlow, f.emaMode, f.crossBars, dir)
+      const emaWith = spotEma.ok
+      const vwapWith = f.vwapMode === 'off' || (vwapNow != null && dir * (spotNow - vwapNow) > 0)
+      // The ATM options' own EMAs: the leg bought for the trade rises (CE for a long); `both` also has the other leg falling.
+      const legWith = f.optEmaMode === 'off' || (() => {
+        const traded = emaAgrees(premiumCloses(dir > 0 ? 'CE' : 'PE'), f.optEmaFast, f.optEmaSlow, f.optEmaMode, f.crossBars, 1)
+        if (!traded.ok) return false
+        if (f.optEmaLegs !== 'both') return true
+        return emaAgrees(premiumCloses(dir > 0 ? 'PE' : 'CE'), f.optEmaFast, f.optEmaSlow, f.optEmaMode, f.crossBars, -1).ok
+      })()
+      const ema7 = spotEma.fast, ema21 = spotEma.slow
       const deltaWith = sideScore(dir, delta.ceD, delta.peD, 0.0005)
       const wallsWith = dir > 0 ? peNear > ceNear : ceNear > peNear
-      if (flipped && emaWith && deltaWith != null && deltaWith >= 1 && wallsWith && ceNear > 0 && peNear > 0) {
+      if (emaWith && vwapWith && legWith && deltaWith != null && deltaWith >= 1 && wallsWith && ceNear > 0 && peNear > 0) {
         // Its own trailing stop: this index's fixed points (after `start` in profit it stays `gap` behind the best price), or
         // dynamic - the same in multiples of the ATR -, or none. A tuned trailing stop (the tradeTrail filter) overrides it.
         push('spotFlip', dir, 1.5 * atr, 3 * atr, 330, {
           OI: `since the open CE - PE flipped ${pct(leadPrev)} -> ${pct(leadNow)} of the chain (${dir > 0 ? 'puts added now lead' : 'calls added now lead'}); last ${f.deltaMin} min CE ${pct(delta.ceD)} / PE ${pct(delta.peD)}`,
           Walls: `ATM +/- ${f.nearStrikes} strikes: PE ${(peNear / 1e5).toFixed(1)}L vs CE ${(ceNear / 1e5).toFixed(1)}L - ${dir > 0 ? 'support' : 'resistance'} heavier`,
-          Trend: `${f.emaTf}-min EMA ${f.emaFast} ${ema7.toFixed(1)} ${dir > 0 ? 'over' : 'under'} EMA ${f.emaSlow} ${ema21.toFixed(1)}`,
+          Trend: f.emaMode === 'off' ? 'EMA not asked' : `${f.emaTf}-min EMA ${f.emaFast} ${ema7.toFixed(1)} ${dir > 0 ? 'over' : 'under'} EMA ${f.emaSlow} ${ema21.toFixed(1)}${f.emaMode === 'cross' ? ` (crossed within ${f.crossBars} candles)` : ''}`,
+          ...(f.vwapMode !== 'off' ? { VWAP: `spot ${spotNow.toFixed(1)} ${dir > 0 ? 'over' : 'under'} VWAP ${vwapNow.toFixed(1)}` } : {}),
+          ...(f.optEmaMode !== 'off' ? { 'ATM option EMA': `ATM ${atmK} ${dir > 0 ? 'CE' : 'PE'} EMA ${f.optEmaFast} over ${f.optEmaSlow}${f.optEmaLegs === 'both' ? ` and the ${dir > 0 ? 'PE' : 'CE'} under` : ''}${f.optEmaMode === 'cross' ? ` (crossed within ${f.crossBars} candles)` : ''}` } : {}),
           Trail: trailText(trail),
         }, { trailOverride: trail ? { unit: 'pts', startPts: trail.start, gapPts: trail.gap } : null })
       }
