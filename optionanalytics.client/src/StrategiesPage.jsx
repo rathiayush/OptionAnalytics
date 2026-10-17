@@ -11,7 +11,7 @@ import { SettingOutlined } from '@ant-design/icons'
 import { NavBar, useAuth, UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import { ACTIVE_STRATEGIES, SPOT_STRATEGIES, STRATEGY_FILTERS, DEFAULT_TRAIL, RANGE_IDS, changedFilters, strategyStats, topFifteen } from './strategyEngine.js'
 import { alertIdsFor, EVERY_ID, trailFor, trailUnit, trailPtsFor } from './scannerCore.js'
-import { SCANNER_SETTINGS_KEY } from './scannerSettings.js'
+import { SCANNER_SETTINGS_KEY, saveIndexFilters } from './scannerSettings.js'
 import { ServerScannerCard } from './ServerScanner.jsx'
 import { LiveListCard, ServerLiveSwitch, useServerLive } from './ServerLive.jsx'
 import { AppliedSettings, appliedText, useServerRecord } from './ApplyTuned.jsx'
@@ -224,11 +224,19 @@ export default function StrategiesPage() {
         {isAdmin && <LiveListCard isAdmin={isAdmin} />}
       </Space>
       {filterFor && (
-        <StrategyFiltersModal id={filterFor} values={settings.filters?.[filterFor]} onClose={() => setFilterFor(null)}
-          onSave={async (v) => {
+        <StrategyFiltersModal id={filterFor} values={settings.filters?.[filterFor]} byIndex={cfg?.filtersByIndex} onClose={() => setFilterFor(null)}
+          onSave={async (scope, v, clear) => {
             const id = filterFor
             setFilterFor(null)
-            await saveSettings({ ...settings, filters: { ...(settings.filters ?? {}), [id]: v } }, `${ALL.find((s) => s.id === id)?.name}: filters saved`)
+            const name = ALL.find((s) => s.id === id)?.name
+            if (scope === 'all') { await saveSettings({ ...settings, filters: { ...(settings.filters ?? {}), [id]: v } }, `${name}: filters saved`); return }
+            // One index's own: kept beside what it already has (its tuned setting, its markers), saved for it alone.
+            try {
+              const had = cfg?.filtersByIndex?.[scope]?.[id] ?? null
+              await saveIndexFilters(scope, id, clear ? null : { ...(had ?? {}), ...v, _appliedAt: had?._appliedAt ?? Date.now() })
+              message.success(`${name}: ${clear ? `${scope} back to the all-index filters` : `filters saved for ${scope}`} - the server scanner runs with it from its next look`)
+              reload()
+            } catch (err) { message.error(`Not saved: ${err.message}`) }
           }} />
       )}
     </div>

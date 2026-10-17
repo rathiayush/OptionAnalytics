@@ -2,28 +2,42 @@
 // defaults marked. Used on the Strategies page; the scanner reads them through strategyFilters (a default is the rule as
 // written and tested, so an untouched strategy behaves exactly as before).
 import { useState } from 'react'
-import { Button, InputNumber, Modal, Select, Space, Switch, Typography } from 'antd'
+import { Button, InputNumber, Modal, Segmented, Select, Space, Switch, Typography } from 'antd'
 import { STRATEGY_BY_ID, STRATEGY_FILTERS, strategyFilters } from './strategyEngine.js'
 
 const { Text } = Typography
 
 /** The filters of one strategy (STRATEGY_FILTERS[id]): a number box, a switch or a choice each, defaults marked;
  *  saved on OK. They apply to the setups found from then on - live, the replay clock and Scan day. */
-export function StrategyFiltersModal({ id, values, onClose, onSave }) {
+const INDICES = ['NIFTY', 'BANKNIFTY', 'SENSEX']
+
+/** `values` - the all-index filters; `byIndex` - { NIFTY: {...}, ... } the filters set for one index only (they win there).
+ *  The dialog edits either: "All indices", or one index - saved for that index alone (onSave(scope, filters, clear)). */
+export function StrategyFiltersModal({ id, values, byIndex = {}, onClose, onSave }) {
   const meta = STRATEGY_BY_ID[id]
   const defs = STRATEGY_FILTERS[id] ?? []
-  const [draft, setDraft] = useState(() => strategyFilters(id, values))
+  const [scope, setScope] = useState('all')
+  const own = (u) => byIndex?.[u]?.[id] ?? null
+  const valuesOf = (sc) => strategyFilters(id, sc === 'all' ? values : { ...values, ...(own(sc) ?? {}) })
+  const [draft, setDraft] = useState(() => valuesOf('all'))
   const set = (key, v) => setDraft((d) => ({ ...d, [key]: v }))
+  const pick = (sc) => { setScope(sc); setDraft(valuesOf(sc)) }
   const defaults = strategyFilters(id, {})
   return (
-    <Modal open title={`Filters · #${meta.no} ${meta.name}`} onCancel={onClose} onOk={() => onSave(strategyFilters(id, draft))} okText="Save"
+    <Modal open title={`Filters · #${meta.no} ${meta.name}`} onCancel={onClose} onOk={() => onSave(scope, strategyFilters(id, draft), false)} okText={scope === 'all' ? 'Save for all indices' : `Save for ${scope}`}
       footer={(_, { OkBtn, CancelBtn }) => (
         <Space>
+          {scope !== 'all' && own(scope) && <Button size="small" danger onClick={() => onSave(scope, null, true)}>{`Back to the all-index filters`}</Button>}
           <Button size="small" onClick={() => setDraft(defaults)} disabled={JSON.stringify(draft) === JSON.stringify(defaults)}>Reset to defaults</Button>
           <CancelBtn /><OkBtn />
         </Space>
       )}>
       <Space direction="vertical" size={8} style={{ width: '100%' }}>
+        <Segmented value={scope} onChange={pick} aria-label="Filters for"
+          options={[{ value: 'all', label: 'All indices' }, ...INDICES.map((u) => ({ value: u, label: own(u) ? `${u} ●` : u }))]} />
+        <Text type="secondary" style={{ fontSize: 11 }}>
+          {scope === 'all' ? 'Used on every index that has none of its own.' : own(scope) ? `${scope} has its own filters (●) - they win over the all-index ones.` : `Save to give ${scope} its own: the all-index filters are the start.`}
+        </Text>
         {defs.map((f) => (
           <div key={f.key} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
             <Text style={{ fontSize: 12 }}>
