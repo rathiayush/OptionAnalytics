@@ -180,4 +180,25 @@ public sealed class SpotFlipStrategyTests
         p["optEmaMode"] = 1;
         Assert.DoesNotContain(new SpotFlipStrategy().EntrySignals(Context(turn, 60_000, 0, putRamp: 2_000), p), s => s.Kind == "Entry");
     }
+
+    [Fact]
+    public void The_defaults_are_the_scanners_and_every_default_is_inside_its_range_and_options()
+    {
+        var strategy = new SpotFlipStrategy();
+        var d = strategy.Parameters.ToDictionary(x => x.Key, x => x);
+        foreach (var x in strategy.Parameters)
+        {
+            Assert.InRange(x.Default, x.Min, x.Max);
+            if (x.Options is { Count: > 0 } o) Assert.Contains(o, option => option.Value == x.Default);
+        }
+        Assert.Equal(570, d["signalStartMinutes"].Default);   // no entry before 09:30
+        Assert.Equal(885, d["lastEntryMinutes"].Default);     // none after 14:45
+        Assert.Equal(330, d["maxHoldingBars"].Default);       // its 330-minute time stop
+        Assert.Equal(110, strategy.DefaultsForTimeframe(3)["maxHoldingBars"]);
+        Assert.Equal(1, d["trigger"].Default);                // the crossover trigger
+        Assert.Equal(2, d["emaMode"].Default);                // a fresh crossover
+        Assert.Equal(1.5m, d["stopAtr"].Default);
+        Assert.Equal(3m, d["targetAtr"].Default);
+        Assert.Equal(strategy.Parameters.Count, strategy.Parameters.Select(x => x.Key).Distinct().Count());
+    }
 }

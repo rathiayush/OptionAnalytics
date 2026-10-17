@@ -86,9 +86,10 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
         OptionTradeSimulator.StopLossParameter(),
         OptionTradeSimulator.TakeProfitParameter(),
         OptionTradeSimulator.SquareOffTimeParameter(),
-        OptionTradeSimulator.SignalStartTimeParameter(),
+        // As the scanner: no entry before 09:30 (570), and its time stop of 330 minutes (in bars of the page's timeframe, see DefaultsForTimeframe).
+        OptionTradeSimulator.SignalStartTimeParameter() with { Default = 570 },
         OptionTradeSimulator.ExcludeLastDaysParameter(),
-        OptionTradeSimulator.MaxHoldingTimeParameter(),
+        OptionTradeSimulator.MaxHoldingTimeParameter() with { Default = 330 },
         new BacktestParameterSpec("trigger", "Entry trigger", Default: 1, Min: 0, Max: 1, Step: 1, Options: new[]
         {
             new BacktestParameterOption(1, "Fresh spot EMA crossover, with the OI behind it"),
@@ -136,6 +137,19 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
         new BacktestParameterSpec("emaWarm", "EMAs: carry the previous day's candles over (1 = yes)", Default: 0, Min: 0, Max: 1, Step: 1),
         new BacktestParameterSpec("exitOnFlipBack", "Leave when the CE-PE flip comes back (1 = yes)", Default: 1, Min: 0, Max: 1, Step: 1),
     };
+
+    /// <summary>The scanner's 330-minute time stop is bars of the page's timeframe here (330 on 1-minute bars, 110 on 3-minute ...), and the
+    /// premium stop / target scale with the timeframe like every strategy's.</summary>
+    public IReadOnlyDictionary<string, decimal> DefaultsForTimeframe(int timeframeMinutes)
+    {
+        var scale = OptionTradeSimulator.TimeframeScale(timeframeMinutes);
+        return new Dictionary<string, decimal>
+        {
+            ["slPoints"] = 10m * scale,
+            ["tpPoints"] = 20m * scale,
+            ["maxHoldingBars"] = Math.Round(330m / Math.Max(1, timeframeMinutes)),
+        };
+    }
 
     public IReadOnlyList<BacktestTrade> Simulate(BacktestStrategyContext context, IReadOnlyDictionary<string, decimal> parameters)
     {

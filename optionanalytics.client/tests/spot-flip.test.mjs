@@ -252,3 +252,35 @@ test('the ATM CE / PE may already be aligned (state) - a fresh crossover there i
   const trend = byDefault(flipLong(), { spotFlip: { emaMode: 'state' } })
   assert.equal(trend.length, 0, 'a climb that began at the open never crosses afresh later')
 })
+
+test('every parameter is consistent: keys unique, defaults inside their range / options, the Expired Backtest\'s numbers the same as the scanner\'s', async () => {
+  const { readFileSync } = await import('node:fs')
+  for (const [id, defs] of Object.entries(STRATEGY_FILTERS)) {
+    assert.equal(new Set(defs.map((f) => f.key)).size, defs.length, `${id}: a key twice`)
+    for (const f of defs) {
+      assert.ok(f.label && f.type, `${id}.${f.key}: label and type`)
+      if (f.type === 'number') assert.ok(f.min <= f.default && f.default <= f.max && f.step > 0, `${id}.${f.key}: default ${f.default} in ${f.min}..${f.max}`)
+      if (f.type === 'select') assert.ok(f.options.some((o) => o.value === f.default), `${id}.${f.key}: the default is one of the options`)
+      if (f.type === 'switch') assert.equal(typeof f.default, 'boolean', `${id}.${f.key}`)
+      // A value the dialogs can set reads back unchanged (clamped numbers, listed choices).
+      const low = strategyFilters(id, { [f.key]: f.type === 'number' ? f.min : f.type === 'select' ? f.options.at(-1).value : !f.default })[f.key]
+      assert.equal(low, f.type === 'number' ? f.min : f.type === 'select' ? f.options.at(-1).value : !f.default, `${id}.${f.key}: round trip`)
+      if (f.type === 'number') assert.equal(strategyFilters(id, { [f.key]: f.max + 1000 })[f.key], f.max, `${id}.${f.key}: clamped to its max`)
+    }
+  }
+  // The Expired Backtest's SpotFlipStrategy.cs: every number it shares with the scanner has the same default and range.
+  const cs = readFileSync(new URL('../../OptionAnalytics.Server/Services/Backtesting/SpotFlipStrategy.cs', import.meta.url), 'utf8')
+  const num = (x) => Number(String(x).replace(/m$/, ''))
+  const specs = {}
+  for (const m of cs.matchAll(/new BacktestParameterSpec\("(\w+)", "[^"]*", Default: ([\w.]+), Min: ([\w.]+), Max: ([\w.]+), Step: [\w.]+/g)) specs[m[1]] = { def: num(m[2]), min: num(m[3]), max: num(m[4]) }
+  let shared = 0
+  for (const f of STRATEGY_FILTERS.spotFlip.filter((x) => x.type === 'number' && specs[x.key])) {
+    shared++
+    assert.deepEqual([specs[f.key].def, specs[f.key].min, specs[f.key].max], [f.default, f.min, f.max], `${f.key}: the Expired Backtest and the scanner agree`)
+  }
+  assert.ok(shared >= 14, `${shared} shared numbers checked`)
+  // Its entry window and time stop are the scanner's (09:30 - 14:45, 330 minutes).
+  assert.match(cs, /SignalStartTimeParameter\(\) with \{ Default = 570 \}/)
+  assert.match(cs, /Default: 885/)
+  assert.match(cs, /MaxHoldingTimeParameter\(\) with \{ Default = 330 \}/)
+})
